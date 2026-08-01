@@ -216,6 +216,7 @@
 /router/bgp/vrf/afi-safi/mup/route/mup-ext-comm
 /router/bgp/vrf/afi-safi/mup/route/network-instance
 /router/bgp/vrf/afi-safi/mup/segment
+/router/bgp/vrf/afi-safi/mup/segment/lookup-network-instance
 /router/bgp/vrf/afi-safi/mup/segment/mup-ext-comm
 /router/bgp/vrf/afi-safi/mup/segment/prefix
 /router/bgp/vrf/encapsulation

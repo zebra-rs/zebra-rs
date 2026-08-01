@@ -8677,7 +8677,7 @@ pub(super) fn build_mup_segment_attr(
 pub(super) type MupSegmentKey = (
     RouteDistinguisher,
     MupPrefix,
-    std::net::Ipv6Addr,
+    Option<std::net::Ipv6Addr>,
     std::collections::BTreeSet<RouteDistinguisher>,
     Option<RouteDistinguisher>,
 );
@@ -8688,7 +8688,10 @@ pub(super) type MupSegmentKey = (
 struct MupSegmentDesired {
     rd: RouteDistinguisher,
     prefix: MupPrefix,
-    sid: std::net::Ipv6Addr,
+    /// The VRF's End.DT46 SID (SRv6 PE), or `None` for the SID-less
+    /// GTP-only origination — the segment is advertised purely as the
+    /// correlation object (Direct-segment id / interwork prefix).
+    sid: Option<std::net::Ipv6Addr>,
     rts: std::collections::BTreeSet<RouteDistinguisher>,
     ext_comm: Option<RouteDistinguisher>,
     mode: super::vrf_config::MupSegmentMode,
@@ -14322,25 +14325,40 @@ impl Bgp {
                 }
             }
             MupPrefix::Dsd { .. } | MupPrefix::Isd { .. } => {
-                // The reconcile gated on these being ready before dispatching;
-                // re-check defensively (a locator/SID change could race the
-                // round-trip) and drop the export rather than advertise a
-                // SID-less segment.
-                let (Some(locator), Some((sid, _))) = (
-                    self.srv6_locator.as_ref(),
-                    self.vrf_registry.get(&vrf).and_then(|h| h.srv6_sid),
-                ) else {
-                    return false;
-                };
-                let Some(node) = locator.node_sid_addr() else {
-                    return false;
-                };
-                attr.nexthop = Some(BgpNexthop::Ipv6(node));
-                attr.prefix_sid = Some(super::inst::srv6_l3_service_prefix_sid(
-                    sid,
-                    locator.sid_structure(),
-                    bgp_packet::SRV6_BEHAVIOR_END_DT46,
-                ));
+                let srv6 = self
+                    .vrfs
+                    .get(&vrf)
+                    .map(|c| c.encapsulation == super::vrf_config::BgpVrfEncapsulation::Srv6)
+                    .unwrap_or(false);
+                if srv6 {
+                    // The reconcile gated on these being ready before
+                    // dispatching; re-check defensively (a locator/SID change
+                    // could race the round-trip) and drop the export rather
+                    // than advertise a segment missing its SID.
+                    let (Some(locator), Some((sid, _))) = (
+                        self.srv6_locator.as_ref(),
+                        self.vrf_registry.get(&vrf).and_then(|h| h.srv6_sid),
+                    ) else {
+                        return false;
+                    };
+                    let Some(node) = locator.node_sid_addr() else {
+                        return false;
+                    };
+                    attr.nexthop = Some(BgpNexthop::Ipv6(node));
+                    attr.prefix_sid = Some(super::inst::srv6_l3_service_prefix_sid(
+                        sid,
+                        locator.sid_structure(),
+                        bgp_packet::SRV6_BEHAVIOR_END_DT46,
+                    ));
+                } else {
+                    // GTP-only PE (dataplane gtp, no SRv6 encapsulation):
+                    // SID-less segment — no Prefix-SID TLV; the controller
+                    // address is the next-hop (the reconcile gated on it).
+                    let Some(addr) = self.mup_c_config.controller_address else {
+                        return false;
+                    };
+                    attr.nexthop = Some(BgpNexthop::Ipv6(addr));
+                }
             }
             MupPrefix::Unknown { .. } => return false,
         }
@@ -14665,18 +14683,29 @@ impl Bgp {
         use super::vrf_config::BgpVrfEncapsulation;
         let cfg = self.vrfs.get(name)?;
         let mode = cfg.mobile_uplane.segment?;
-        if cfg.encapsulation != BgpVrfEncapsulation::Srv6 {
-            return None;
-        }
         let rd = cfg.rd?;
-        // A known kernel VRF is the proxy for "End.DT46 decap installed".
+        // A known kernel VRF is the proxy for "the segment's table exists"
+        // (and, for SRv6, "End.DT46 decap installed").
         if !self.rib_known_vrfs.contains_key(name) {
             return None;
         }
-        let (sid, _function) = self.vrf_registry.get(name)?.srv6_sid?;
-        let locator = self.srv6_locator.as_ref()?;
-        // Locator node next-hop must be resolvable (applied at export).
-        locator.node_sid_addr()?;
+        let sid = if cfg.encapsulation == BgpVrfEncapsulation::Srv6 {
+            // SRv6 PE: the segment carries the VRF's End.DT46 SID, and the
+            // locator node next-hop must be resolvable (applied at export).
+            let (sid, _function) = self.vrf_registry.get(name)?.srv6_sid?;
+            let locator = self.srv6_locator.as_ref()?;
+            locator.node_sid_addr()?;
+            Some(sid)
+        } else if cfg.mobile_uplane.dataplane == super::vrf_config::MupDataplane::Gtp {
+            // GTP-only PE: SID-less origination. The segment is the
+            // correlation object a peer resolves by Direct-segment id /
+            // prefix containment; the export stamps the controller address
+            // as the next-hop, so one must be configured.
+            self.mup_c_config.controller_address?;
+            None
+        } else {
+            return None;
+        };
         let router_id = cfg.router_id.unwrap_or(self.router_id);
         // Confirm the NLRI key is available now (non-zero router-id for Direct
         // / set interwork prefix for Interwork) so we don't dispatch a segment

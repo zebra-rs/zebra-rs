@@ -6365,6 +6365,7 @@ mod detail_tests {
                 segment: None,
                 mup_ext_comm: None,
                 interwork_prefix: None,
+                interwork_lookup_ni: None,
                 dataplane: Default::default(),
             },
             ..Default::default()
@@ -6378,6 +6379,7 @@ mod detail_tests {
                 segment: None,
                 mup_ext_comm: None,
                 interwork_prefix: None,
+                interwork_lookup_ni: None,
                 dataplane: Default::default(),
             },
             ..Default::default()
@@ -6396,6 +6398,7 @@ mod detail_tests {
                 segment: None,
                 mup_ext_comm: None,
                 interwork_prefix: None,
+                interwork_lookup_ni: None,
                 dataplane: Default::default(),
             },
             ..Default::default()

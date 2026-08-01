@@ -2275,6 +2275,7 @@ mod yang_load_tests {
             "set router bgp vrf N3 afi-safi mup segment interwork",
             "set router bgp vrf N3 afi-safi mup segment direct mup-ext-comm 1:20",
             "set router bgp vrf N3 afi-safi mup segment interwork prefix 10.60.0.0/16",
+            "set router bgp vrf N3 afi-safi mup segment interwork lookup-network-instance N3",
         ] {
             let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
             assert_eq!(

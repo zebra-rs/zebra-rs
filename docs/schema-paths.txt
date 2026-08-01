@@ -300,6 +300,7 @@
 /router/bgp/vrf/afi-safi/mup/route/mup-ext-comm	leaf
 /router/bgp/vrf/afi-safi/mup/route/network-instance	leaf
 /router/bgp/vrf/afi-safi/mup/segment	list keys=type
+/router/bgp/vrf/afi-safi/mup/segment/lookup-network-instance	leaf
 /router/bgp/vrf/afi-safi/mup/segment/mup-ext-comm	leaf
 /router/bgp/vrf/afi-safi/mup/segment/prefix	leaf
 /router/bgp/vrf/encapsulation	leaf

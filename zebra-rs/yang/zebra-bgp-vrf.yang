@@ -785,6 +785,21 @@ module zebra-bgp-vrf {
                `interwork` segment; the ISD does not originate until it is
                set.";
           }
+          leaf lookup-network-instance {
+            ext:help "VRF the GTP-side (N3) lookup runs in for this interwork segment";
+            type string;
+            description
+              "Names the VRF that is the GTP-side routing context for this
+               interwork segment, when it is not the declaring VRF itself.
+               With `dataplane gtp` the declaring VRF's ST1 endpoints
+               (falling inside `prefix`) resolve their post-encap outer
+               (gw, oif) in the named VRF's table, and its ST2 decap PDRs
+               match G-PDUs arriving on the named VRF's ports — the
+               split/GTP-gateway shape where the service VRF advertises the
+               downlink entry point (its own DT SID) while GTP-U rides a
+               separate N3 VRF. Defaults to the declaring VRF. Meaningful
+               only under the `interwork` segment.";
+          }
         }
         list route {
           ext:help "Session-Transformed (ST) route to originate";

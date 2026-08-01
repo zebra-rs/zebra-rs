@@ -4873,6 +4873,10 @@ impl Bgp {
             super::vrf_config::config_vrf_mup_segment_prefix,
         );
         self.callback_add(
+            "/router/bgp/vrf/afi-safi/mup/segment/lookup-network-instance",
+            super::vrf_config::config_vrf_mup_segment_lookup_ni,
+        );
+        self.callback_add(
             "/router/bgp/vrf/afi-safi/mup/route",
             super::vrf_config::config_vrf_mup_route,
         );
