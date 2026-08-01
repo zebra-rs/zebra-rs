@@ -735,37 +735,33 @@ impl FibHandle {
     }
 
     /// Tee an EVPN VPWS cross-connect to cradle (RFC 8214 Type-1 with an
-    /// SRv6 End.DX2/DX2V SID): bind AC `port` to the remote service SID,
-    /// and — when `local_sid` is present — install the local decap on the
-    /// same AC. A non-zero `vid` scopes the binding to that 802.1Q VID
-    /// (End.DX2V over VLAN table `table`). No kernel counterpart — cradle
-    /// is the L2 data plane.
+    /// SRv6 End.DX2/DX2V SID or a VXLAN VTEP+VNI): bind AC `port` to the
+    /// remote service endpoint, and install the local decap for the return
+    /// direction — the `local_sid` LocalSid on the same AC (SRv6), or the
+    /// `local_vni` E-Line VNI binding (VXLAN). A non-zero `vid` scopes the
+    /// binding to that 802.1Q VID (demuxed over VLAN table `table`). No
+    /// kernel counterpart — cradle is the L2 data plane.
+    #[allow(clippy::too_many_arguments)]
     pub async fn cradle_xconnect_add(
         &self,
         port: &str,
         remote: crate::rib::XconnectRemote,
         local_sid: Option<std::net::Ipv6Addr>,
         local_vni: Option<u32>,
+        local_vtep: Option<std::net::Ipv4Addr>,
         vid: u16,
         table: u32,
     ) {
         if let Some(cradle) = &self.cradle {
-            match remote {
-                crate::rib::XconnectRemote::Srv6(remote_sid) => {
-                    cradle
-                        .xconnect_add(port, remote_sid, local_sid, vid, table)
-                        .await;
-                }
-                crate::rib::XconnectRemote::Vxlan { vtep, vni } => {
-                    // The cradle Xconnect RPC has no VXLAN flavor yet — the
-                    // control plane binds and shows `up`, the datapath tee
-                    // lands with the cradle-side E-Line/VXLAN support.
-                    tracing::info!(
-                        "fib: cradle xconnect {port} -> vtep {vtep} vni {vni} \
-                         (local vni {local_vni:?}): VXLAN tee not yet implemented"
-                    );
-                }
+            if let (crate::rib::XconnectRemote::Vxlan { .. }, Some(local)) = (&remote, local_vtep) {
+                // The fabric-wide VXLAN source — decap match and outer
+                // source — must be the address our Type-1 told the remote
+                // to send to. Idempotent; one VTEP per PE.
+                cradle.set_vtep_source(local).await;
             }
+            cradle
+                .xconnect_add(port, remote, local_sid, local_vni, vid, table)
+                .await;
         }
     }
 
@@ -778,12 +774,9 @@ impl FibHandle {
         table: u32,
     ) {
         if let Some(cradle) = &self.cradle {
-            if local_vni.is_some() {
-                // VXLAN-flavored binding: nothing was teed (see
-                // `cradle_xconnect_add`), so nothing to remove.
-                return;
-            }
-            cradle.xconnect_del(port, local_sid, vid, table).await;
+            cradle
+                .xconnect_del(port, local_sid, local_vni, vid, table)
+                .await;
         }
     }
 

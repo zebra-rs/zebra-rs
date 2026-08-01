@@ -88,6 +88,12 @@ pub struct VpwsService {
     /// `End.DX2` entry in `VpwsState::sids`. `None` when the service
     /// originated under SRv6 (or not at all).
     pub local_vni: Option<u32>,
+    /// The IPv4 VTEP our Type-1 went out with as its next hop — what the
+    /// remote encapsulates toward, so the tee programs it as cradle's
+    /// fabric-wide VXLAN source (`SetVtepSource`, the decap match). Set
+    /// alongside `local_vni`; `None` under SRv6 or when the advertised
+    /// next hop is not IPv4.
+    pub local_vtep: Option<Ipv4Addr>,
     /// The remote's L2 MTU when a matching Type-1 was **rejected** for an
     /// MTU mismatch — the service shows `mtu-mismatch` instead of `up`.
     pub remote_mtu_mismatch: Option<u16>,

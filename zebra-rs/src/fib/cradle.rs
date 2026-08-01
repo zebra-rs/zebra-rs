@@ -115,8 +115,10 @@ struct CradleMirror {
     /// L3VNI ↔ VRF bindings (symmetric IRB): vni → (vrf_table_id, rmac).
     vnis_l3: HashMap<u32, (u32, [u8; 6])>,
     vtep_source: Option<Ipv4Addr>,
-    /// (AC port, vid, dx2v table) → (remote SID, local decap SID).
-    xconnects: HashMap<(String, u16, u32), (Ipv6Addr, Option<Ipv6Addr>)>,
+    /// (AC port, vid, dx2v table) → (remote endpoint — SID or VTEP+VNI,
+    /// local decap SID, local decap VNI).
+    xconnects:
+        HashMap<(String, u16, u32), (crate::rib::XconnectRemote, Option<Ipv6Addr>, Option<u32>)>,
     /// (mirror context, protected prefix) → reproduction VRF table.
     mirror_routes: HashMap<(u32, Ipv6Net), u32>,
     /// (neighbor ip, oif) → mac. Grow-only, like the upstream tee (no
@@ -558,8 +560,9 @@ impl CradleFib {
         for (vni, vtep) in &m.repl_slots_vxlan {
             self.repl_slot_add_vxlan(*vni, *vtep).await;
         }
-        for ((port, vid, table), (remote, local)) in &m.xconnects {
-            self.xconnect_add(port, *remote, *local, *vid, *table).await;
+        for ((port, vid, table), (remote, local_sid, local_vni)) in &m.xconnects {
+            self.xconnect_add(port, *remote, *local_sid, *local_vni, *vid, *table)
+                .await;
         }
         for ((dst, teid), table) in &m.gtp_pdrs {
             self.gtp_pdr_add(*dst, *teid, *table).await;
@@ -1754,33 +1757,43 @@ impl CradleFib {
         }
     }
 
-    /// EVPN VPWS cross-connect (RFC 8214 / RFC 9252 §6.3): bind AC `port`
-    /// to the remote PE's End.DX2/DX2V service SID. `local_sid`, when
-    /// present, rides in the same RPC so cradle also installs the local
-    /// decap bound to the AC — one message programs the E-Line both ways.
-    /// A non-zero `vid` makes the binding VLAN-scoped (End.DX2V over VLAN
-    /// table `table`).
+    /// EVPN VPWS cross-connect (RFC 8214): bind AC `port` to the remote
+    /// PE's service endpoint — an End.DX2/DX2V SID (RFC 9252 §6.3) or a
+    /// VXLAN VTEP with the VNI the remote advertised (RFC 8365 §6). The
+    /// local decap identity (`local_sid` LocalSid, or `local_vni` E-Line
+    /// VNI — at most one) rides in the same RPC so cradle programs the
+    /// E-Line both ways in one message. A non-zero `vid` makes the binding
+    /// VLAN-scoped (demuxed over VLAN table `table`).
     pub async fn xconnect_add(
         &self,
         port: &str,
-        remote_sid: std::net::Ipv6Addr,
+        remote: crate::rib::XconnectRemote,
         local_sid: Option<std::net::Ipv6Addr>,
+        local_vni: Option<u32>,
         vid: u16,
         table: u32,
     ) {
-        self.mirror
-            .lock()
-            .await
-            .xconnects
-            .insert((port.to_string(), vid, table), (remote_sid, local_sid));
+        self.mirror.lock().await.xconnects.insert(
+            (port.to_string(), vid, table),
+            (remote, local_sid, local_vni),
+        );
+        let (remote_sid, remote_vtep, remote_vni) = match remote {
+            crate::rib::XconnectRemote::Srv6(sid) => (sid.to_string(), String::new(), 0),
+            crate::rib::XconnectRemote::Vxlan { vtep, vni } => {
+                (String::new(), vtep.to_string(), vni)
+            }
+        };
         let result = async {
             self.client()
                 .await?
                 .add_xconnect(pb::Xconnect {
                     port: port.to_string(),
                     port_index: 0,
-                    remote_sid: remote_sid.to_string(),
+                    remote_sid,
+                    remote_vtep,
+                    remote_vni,
                     local_sid: local_sid.map(|s| s.to_string()).unwrap_or_default(),
+                    local_vni: local_vni.unwrap_or(0),
                     vid: vid as u32,
                     dx2v_table: table,
                 })
@@ -1789,16 +1802,17 @@ impl CradleFib {
         }
         .await;
         if let Err(e) = result {
-            tracing::warn!("fib: cradle xconnect_add {port} -> {remote_sid} failed: {e}");
+            tracing::warn!("fib: cradle xconnect_add {port} -> {remote:?} failed: {e}");
         }
     }
 
-    /// Remove a VPWS cross-connect (and its local End.DX2/DX2V decap, when
-    /// `local_sid` is present).
+    /// Remove a VPWS cross-connect (and its local decap — the
+    /// End.DX2/DX2V LocalSid or the E-Line VNI binding — when present).
     pub async fn xconnect_del(
         &self,
         port: &str,
         local_sid: Option<std::net::Ipv6Addr>,
+        local_vni: Option<u32>,
         vid: u16,
         table: u32,
     ) {
@@ -1814,6 +1828,7 @@ impl CradleFib {
                     port: port.to_string(),
                     port_index: 0,
                     local_sid: local_sid.map(|s| s.to_string()).unwrap_or_default(),
+                    local_vni: local_vni.unwrap_or(0),
                     vid: vid as u32,
                     dx2v_table: table,
                 })
