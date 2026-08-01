@@ -108,6 +108,14 @@ endpoints, next hops, PMSI, and FDB `dst`, while the RD stays IPv4), and move
 down to add a **second isolated VNI** (three VTEPs, one serving both; per-VNI
 RD/RT — hosts in different VNIs share a subnet yet cannot reach each other).
 
+The IPv4 column also exists on the **eBPF engine** —
+[bgp-evpn-vxlan4-ebpf](bgp-evpn-vxlan4-ebpf/README.md) and
+[bgp-evpn-vxlan4-multi-ebpf](bgp-evpn-vxlan4-multi-ebpf/README.md): the same
+labs with the forwarding moved into XDP (`system ebpf enabled`), loopback
+VTEPs (the engine has one fabric-wide VTEP source), and kernel forwarding
+off. There is no eBPF IPv6 pair: the engine's VXLAN underlay is IPv4-only,
+so the IPv6-underlay story stays with the kernel labs.
+
 The four EVPN labs reuse the same namespace names (`vtep1`..`vtep3`,
 `h1`..`h4`), so bring up only one at a time — `up.sh` sweeps leftovers of
 the same names first.

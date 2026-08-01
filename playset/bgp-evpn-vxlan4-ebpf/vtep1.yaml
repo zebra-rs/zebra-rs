@@ -1,0 +1,57 @@
+# VTEP 1 — the same EVPN/VXLAN VTEP as bgp-evpn-vxlan4, moved onto the
+# eBPF data plane: `system ebpf enabled` spawns the cradle engine, the
+# host port becomes its L2 port in bridge domain 10, and every MAC,
+# flood copy, encap and decap runs in XDP — the kernel VXLAN device
+# stays configured but never sees a frame.
+#
+# One engine-side difference from the kernel twin: the engine has ONE
+# fabric-wide VTEP source, so the VTEP is a loopback (192.0.2.1), the
+# vxlan device's local-address and the BGP session both ride it, and a
+# static /32 toward the peer's loopback resolves the encapsulation via
+# the teed FIB.
+system:
+  hostname: vtep1
+  ebpf:
+    enabled: true
+interface:
+- if-name: lo
+  ipv4:
+    address: 192.0.2.1/32
+- if-name: vtep1-vtep2
+  ipv4:
+    address: 192.168.0.1/24
+  ebpf:
+    enabled: true
+- if-name: vtep1-h1
+  bridge: br10
+  ebpf:
+    enabled: true
+bridge:
+- name: br10
+vxlan:
+- name: vxlan10
+  vni: 10
+  local-address: 192.0.2.1
+  bridge: br10
+router:
+  static:
+    ipv4:
+      route:
+      - prefix: 192.0.2.2/32
+        nexthop:
+        - address: 192.168.0.2
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.0.2.1
+    afi-safi:
+    - name: evpn
+      advertise-all-vni: true
+    neighbor:
+    - remote-address: 192.0.2.2
+      remote-as: 65001
+      update-source: 192.0.2.1
+      enabled: true
+      afi-safi:
+      - name: evpn
+        enabled: true

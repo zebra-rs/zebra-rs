@@ -1,0 +1,48 @@
+# VTEP 3 — tenant VNI 20 only (h3). Loopback VTEP 192.0.2.3; it peers
+# with vtep1 alone: its tenant is stretched to vtep1, never to vtep3.
+system:
+  hostname: vtep3
+  ebpf:
+    enabled: true
+interface:
+- if-name: lo
+  ipv4:
+    address: 192.0.2.3/32
+- if-name: vtep3-vtep1
+  ipv4:
+    address: 192.168.1.2/24
+  ebpf:
+    enabled: true
+- if-name: vtep3-h3
+  bridge: br20
+  ebpf:
+    enabled: true
+bridge:
+- name: br20
+vxlan:
+- name: vxlan20
+  vni: 20
+  local-address: 192.0.2.3
+  bridge: br20
+router:
+  static:
+    ipv4:
+      route:
+      - prefix: 192.0.2.1/32
+        nexthop:
+        - address: 192.168.1.1
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.0.2.3
+    afi-safi:
+    - name: evpn
+      advertise-all-vni: true
+    neighbor:
+    - remote-address: 192.0.2.1
+      remote-as: 65001
+      update-source: 192.0.2.3
+      enabled: true
+      afi-safi:
+      - name: evpn
+        enabled: true
