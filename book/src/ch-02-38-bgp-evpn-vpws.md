@@ -28,6 +28,13 @@ The RD is auto-derived as `router-id:evi`, the route-target as
 `AS:evi`; the ESI is all-zero unless the AC sits on a multihomed
 Ethernet Segment (see below).
 
+Three playsets run one E-Line each, live —
+[`playset/bgp-evpn-vpws-srv6`](https://github.com/zebra-rs/zebra-rs/tree/main/playset/bgp-evpn-vpws-srv6),
+[`playset/bgp-evpn-vpws-vxlan`](https://github.com/zebra-rs/zebra-rs/tree/main/playset/bgp-evpn-vpws-vxlan)
+(with asymmetric per-direction VNIs) and
+[`playset/bgp-evpn-vpws-mpls`](https://github.com/zebra-rs/zebra-rs/tree/main/playset/bgp-evpn-vpws-mpls)
+(through a pure-transit P router).
+
 ## Configuration
 
 A VPWS service lives under the EVPN address family, and its wire format
