@@ -16,22 +16,27 @@
 //! deterministic chosen address (numerically smallest) per kind so
 //! peers see stable next-hops across daemon restarts and reorderings.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use ipnet::IpNet;
 
-use crate::rib::link::LinkAddr;
+use crate::rib::link::{AddrFlags, LinkAddr};
 
 /// Per-ifindex IPv6 address registry, split by kind, plus an
 /// IPv4-address → owning-ifindex map so a v4-addressed BGP session
 /// can be tied back to its interface (and from there to that
 /// interface's global v6 — the RFC 2545 next-hop source for v6 NLRI
 /// carried over v4 transport).
+///
+/// Each v6 entry carries the kernel's address state (`AddrFlags`) —
+/// the RIB re-broadcasts an address whenever its state moves (DAD
+/// completing, deprecation), and [`Self::record`] upserts the flags
+/// in place, so the next-hop choice tracks address usability live.
 #[derive(Debug, Default)]
 pub struct InterfaceAddrs {
-    link_local: BTreeMap<u32, BTreeSet<Ipv6Addr>>,
-    global: BTreeMap<u32, BTreeSet<Ipv6Addr>>,
+    link_local: BTreeMap<u32, BTreeMap<Ipv6Addr, AddrFlags>>,
+    global: BTreeMap<u32, BTreeMap<Ipv6Addr, AddrFlags>>,
     v4_owner: BTreeMap<Ipv4Addr, u32>,
 }
 
@@ -43,17 +48,21 @@ impl InterfaceAddrs {
     /// Register an address with the table. Loopback and the
     /// unspecified address are ignored; v6 link-locals and globals
     /// (including ULA) are routed to their respective bucket, and v4
-    /// addresses record which ifindex owns them.
+    /// addresses record which ifindex owns them. Re-recording a known
+    /// address updates its flags in place.
     pub fn record(&mut self, addr: &LinkAddr) {
         match classify(addr) {
             Some(V6Kind::LinkLocal(host)) => {
                 self.link_local
                     .entry(addr.ifindex)
                     .or_default()
-                    .insert(host);
+                    .insert(host, addr.flags);
             }
             Some(V6Kind::Global(host)) => {
-                self.global.entry(addr.ifindex).or_default().insert(host);
+                self.global
+                    .entry(addr.ifindex)
+                    .or_default()
+                    .insert(host, addr.flags);
             }
             None => {}
         }
@@ -103,24 +112,45 @@ impl InterfaceAddrs {
     }
 
     /// Return the chosen link-local for `ifindex`, or `None` if none
-    /// is registered. The choice is numerically smallest — stable
-    /// across runs so a peer's advertised next-hop doesn't shift
-    /// whenever a transient LL appears or disappears.
+    /// is registered. State-aware: see [`pick`].
     pub fn link_local_for(&self, ifindex: u32) -> Option<Ipv6Addr> {
-        self.link_local.get(&ifindex)?.first().copied()
+        pick(self.link_local.get(&ifindex)?)
     }
 
     /// Return the chosen global IPv6 for `ifindex`, or `None` if none
     /// is registered. Used by the RFC 8950 32-octet dual-nexthop
     /// emit path — pure-unnumbered links typically have no global v6,
     /// in which case this returns `None` and the encoder falls back
-    /// to the 16-octet link-local-only form.
+    /// to the 16-octet link-local-only form. State-aware: see
+    /// [`pick`].
     pub fn global_for(&self, ifindex: u32) -> Option<Ipv6Addr> {
-        self.global.get(&ifindex)?.first().copied()
+        pick(self.global.get(&ifindex)?)
     }
 }
 
-fn drop_from(map: &mut BTreeMap<u32, BTreeSet<Ipv6Addr>>, ifindex: u32, addr: Ipv6Addr) {
+/// The next-hop choice for one bucket, ranked by kernel address state:
+///
+/// - DAD-failed addresses are never used — the kernel won't source
+///   from one, so advertising it as a next-hop black-holes the peer.
+/// - Otherwise rank `(tentative, deprecated, temporary, address)`,
+///   lowest first: a preferred stable address wins; a deprecated one
+///   is used only when nothing preferred exists (RFC 6724 rule 3); a
+///   temporary (RFC 4941) address loses to a stable one because an
+///   advertised next-hop must outlive the privacy rotation; a
+///   tentative address (DAD still running) is the last resort — the
+///   fail-open keeps a freshly-configured single address usable, and
+///   the DAD-completion re-broadcast re-runs this choice moments
+///   later. Ties break on the numerically smallest address, so the
+///   pick is stable across list reorderings and restarts.
+fn pick(bucket: &BTreeMap<Ipv6Addr, AddrFlags>) -> Option<Ipv6Addr> {
+    bucket
+        .iter()
+        .filter(|(_, f)| !f.dadfailed)
+        .min_by_key(|(addr, f)| (f.tentative, f.deprecated, f.temporary, **addr))
+        .map(|(addr, _)| *addr)
+}
+
+fn drop_from(map: &mut BTreeMap<u32, BTreeMap<Ipv6Addr, AddrFlags>>, ifindex: u32, addr: Ipv6Addr) {
     if let Some(set) = map.get_mut(&ifindex) {
         set.remove(&addr);
         if set.is_empty() {
@@ -201,6 +231,72 @@ mod tests {
         assert_eq!(t.link_local_for(7), Some("fe80::1".parse().unwrap()));
         t.forget(&a);
         assert_eq!(t.link_local_for(7), None);
+    }
+
+    fn v6_flagged(
+        addr: &str,
+        prefix: u8,
+        ifindex: u32,
+        f: impl Fn(&mut crate::rib::link::AddrFlags),
+    ) -> LinkAddr {
+        let mut a = v6(addr, prefix, ifindex);
+        f(&mut a.flags);
+        a
+    }
+
+    #[test]
+    fn dad_lifecycle_moves_the_pick() {
+        let mut t = InterfaceAddrs::new();
+        let stable = v6("2001:db8::9", 64, 7);
+        t.record(&stable);
+
+        // A lower address arrives tentative (DAD running): the
+        // established stable address keeps winning.
+        let fresh = v6_flagged("2001:db8::1", 64, 7, |f| f.tentative = true);
+        t.record(&fresh);
+        assert_eq!(t.global_for(7), Some("2001:db8::9".parse().unwrap()));
+
+        // DAD completes — the RIB re-broadcasts with tentative
+        // cleared, record() upserts, and the lower address takes over.
+        let done = v6_flagged("2001:db8::1", 64, 7, |f| f.permanent = true);
+        t.record(&done);
+        assert_eq!(t.global_for(7), Some("2001:db8::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn dadfailed_is_never_used() {
+        let mut t = InterfaceAddrs::new();
+        t.record(&v6_flagged("2001:db8::1", 64, 7, |f| f.dadfailed = true));
+        assert_eq!(t.global_for(7), None, "a dead address black-holes peers");
+
+        t.record(&v6("2001:db8::9", 64, 7));
+        assert_eq!(t.global_for(7), Some("2001:db8::9".parse().unwrap()));
+    }
+
+    #[test]
+    fn deprecated_and_temporary_rank_below_stable() {
+        let mut t = InterfaceAddrs::new();
+        t.record(&v6_flagged("2001:db8::1", 64, 7, |f| f.deprecated = true));
+        t.record(&v6_flagged("2001:db8::2", 64, 7, |f| f.temporary = true));
+        t.record(&v6("2001:db8::9", 64, 7));
+        // The preferred stable address wins over both the lower
+        // deprecated and the lower temporary one.
+        assert_eq!(t.global_for(7), Some("2001:db8::9".parse().unwrap()));
+
+        // With the stable one gone, deprecated ranks below temporary
+        // (RFC 6724 rule 3: avoid deprecated first).
+        t.forget(&v6("2001:db8::9", 64, 7));
+        assert_eq!(t.global_for(7), Some("2001:db8::2".parse().unwrap()));
+    }
+
+    #[test]
+    fn tentative_is_the_fail_open_last_resort() {
+        let mut t = InterfaceAddrs::new();
+        // A freshly-configured lone address mid-DAD must still be
+        // usable — refusing it would break the single-address common
+        // case for the ~1s DAD window.
+        t.record(&v6_flagged("2001:db8::1", 64, 7, |f| f.tentative = true));
+        assert_eq!(t.global_for(7), Some("2001:db8::1".parse().unwrap()));
     }
 
     #[test]
