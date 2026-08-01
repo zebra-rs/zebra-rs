@@ -13,7 +13,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use ipnet::{Ipv4Net, Ipv6Net};
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use tokio::sync::Mutex;
 use tonic::transport::Channel;
 
@@ -86,9 +86,9 @@ struct CradleMirror {
     /// (SID address, prefix len) → (registry Sid, ifindex).
     local_sids: HashMap<(Ipv6Addr, u8), (crate::rib::Sid, u32)>,
     /// (outer dst, teid) → decap table (original kernel table id).
-    gtp_pdrs: HashMap<(Ipv4Addr, u32, u32), u32>,
+    gtp_pdrs: HashMap<(IpAddr, u32, u32), u32>,
     /// (UE prefix, kernel table) → (gtp_src, gtp_dst, teid, underlay gw, oif).
-    gtp_encaps: HashMap<(Ipv4Net, u32), (Ipv4Addr, Ipv4Addr, u32, Option<Ipv4Addr>, u32)>,
+    gtp_encaps: HashMap<(IpNet, u32), (IpAddr, IpAddr, u32, Option<IpAddr>, u32)>,
     /// (bridge domain, mac) → remote End.DT2U/DT2M service SID.
     fdb: HashMap<(u32, [u8; 6]), Ipv6Addr>,
     /// (bridge domain, remote End.DT2M SID) flood-set memberships.
@@ -210,7 +210,7 @@ pub struct CradleFib {
     nh_ids_srv6: Arc<Mutex<HashMap<([u8; 16], u32, Vec<[u8; 16]>), u32>>>,
     /// GTP-U encap nexthop dedup:
     /// `(gtp_src, gtp_dst, teid, underlay gateway, oif) -> id`.
-    nh_ids_gtp: Arc<Mutex<HashMap<([u8; 4], [u8; 4], u32, u32, u32), u32>>>,
+    nh_ids_gtp: Arc<Mutex<HashMap<(IpAddr, IpAddr, u32, Option<IpAddr>, u32), u32>>>,
     /// EVPN symmetric-IRB VXLAN L3 nexthop dedup:
     /// `(underlay gateway, oif, vtep, l3vni, rmac) -> id`.
     nh_ids_vxlan: Arc<Mutex<HashMap<([u8; 4], u32, [u8; 4], u32, [u8; 6]), u32>>>,
@@ -1318,7 +1318,7 @@ impl CradleFib {
     /// is stripped and its inner packet forwarded in the VRF table `table_id`
     /// (0 = global). Cradle-only — the mainline kernel has no GTP action, so
     /// this is never a kernel route.
-    pub async fn gtp_pdr_add(&self, dst: Ipv4Addr, teid: u32, table_id: u32, match_vrf: u32) {
+    pub async fn gtp_pdr_add(&self, dst: IpAddr, teid: u32, table_id: u32, match_vrf: u32) {
         self.mirror
             .lock()
             .await
@@ -1343,7 +1343,7 @@ impl CradleFib {
     }
 
     /// Remove a GTP-U decap PDR.
-    pub async fn gtp_pdr_del(&self, dst: Ipv4Addr, teid: u32, match_vrf: u32) {
+    pub async fn gtp_pdr_del(&self, dst: IpAddr, teid: u32, match_vrf: u32) {
         self.mirror
             .lock()
             .await
@@ -1371,19 +1371,13 @@ impl CradleFib {
     /// GTP-U toward `gtp_dst` (sourced from `gtp_src`, TEID `teid`).
     async fn gtp_nexthop_id(
         &self,
-        gtp_src: Ipv4Addr,
-        gtp_dst: Ipv4Addr,
+        gtp_src: IpAddr,
+        gtp_dst: IpAddr,
         teid: u32,
-        gw: Option<Ipv4Addr>,
+        gw: Option<IpAddr>,
         oif: u32,
     ) -> anyhow::Result<u32> {
-        let key = (
-            gtp_src.octets(),
-            gtp_dst.octets(),
-            teid,
-            gw.map(u32::from).unwrap_or(0),
-            oif,
-        );
+        let key = (gtp_src, gtp_dst, teid, gw, oif);
         {
             let ids = self.nh_ids_gtp.lock().await;
             if let Some(id) = ids.get(&key) {
@@ -1416,18 +1410,19 @@ impl CradleFib {
         Ok(id)
     }
 
-    /// Install a GTP-U encap route (`GTP4.E`): traffic to `prefix` in `table_id`
-    /// is wrapped in outer IPv4 + UDP(2152) + GTP-U(`teid`) toward `gtp_dst`
-    /// (sourced from `gtp_src`) over the resolved v4 underlay `gw`/`oif`.
+    /// Install a GTP-U encap route (`GTP4.E` / `GTP6.E`, by `gtp_dst`'s
+    /// family): traffic to `prefix` (v4 or v6) in `table_id` is wrapped in an
+    /// outer IPv4/IPv6 + UDP(2152) + GTP-U(`teid`) header toward `gtp_dst`
+    /// (sourced from `gtp_src`) over the resolved underlay `gw`/`oif`.
     #[allow(clippy::too_many_arguments)]
     pub async fn gtp_encap_install(
         &self,
-        prefix: Ipv4Net,
+        prefix: IpNet,
         table_id: u32,
-        gtp_src: Ipv4Addr,
-        gtp_dst: Ipv4Addr,
+        gtp_src: IpAddr,
+        gtp_dst: IpAddr,
         teid: u32,
-        gw: Option<Ipv4Addr>,
+        gw: Option<IpAddr>,
         oif: u32,
     ) {
         self.mirror
@@ -1437,15 +1432,29 @@ impl CradleFib {
             .insert((prefix, table_id), (gtp_src, gtp_dst, teid, gw, oif));
         if let Err(e) = async {
             let id = self.gtp_nexthop_id(gtp_src, gtp_dst, teid, gw, oif).await?;
-            self.client()
-                .await?
-                .add_route4(pb::Route4 {
-                    prefix: prefix.to_string(),
-                    nexthop_id: id,
-                    flags: 0,
-                    vrf_table_id: cradle_vrf(table_id),
-                })
-                .await?;
+            let mut client = self.client().await?;
+            match prefix {
+                IpNet::V4(p) => {
+                    client
+                        .add_route4(pb::Route4 {
+                            prefix: p.to_string(),
+                            nexthop_id: id,
+                            flags: 0,
+                            vrf_table_id: cradle_vrf(table_id),
+                        })
+                        .await?;
+                }
+                IpNet::V6(p) => {
+                    client
+                        .add_route6(pb::Route6 {
+                            prefix: p.to_string(),
+                            nexthop_id: id,
+                            flags: 0,
+                            vrf_table_id: cradle_vrf(table_id),
+                        })
+                        .await?;
+                }
+            }
             anyhow::Ok(())
         }
         .await
@@ -1457,20 +1466,32 @@ impl CradleFib {
     }
 
     /// Remove a GTP-U encap route (the nexthop is kept for dedup reuse).
-    pub async fn gtp_encap_del(&self, prefix: Ipv4Net, table_id: u32) {
+    pub async fn gtp_encap_del(&self, prefix: IpNet, table_id: u32) {
         self.mirror
             .lock()
             .await
             .gtp_encaps
             .remove(&(prefix, table_id));
         if let Err(e) = async {
-            self.client()
-                .await?
-                .del_route4(pb::Route4Del {
-                    prefix: prefix.to_string(),
-                    vrf_table_id: cradle_vrf(table_id),
-                })
-                .await?;
+            let mut client = self.client().await?;
+            match prefix {
+                IpNet::V4(p) => {
+                    client
+                        .del_route4(pb::Route4Del {
+                            prefix: p.to_string(),
+                            vrf_table_id: cradle_vrf(table_id),
+                        })
+                        .await?;
+                }
+                IpNet::V6(p) => {
+                    client
+                        .del_route6(pb::Route6Del {
+                            prefix: p.to_string(),
+                            vrf_table_id: cradle_vrf(table_id),
+                        })
+                        .await?;
+                }
+            }
             anyhow::Ok(())
         }
         .await

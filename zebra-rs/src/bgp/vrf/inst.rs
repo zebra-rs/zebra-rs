@@ -299,7 +299,7 @@ pub struct BgpVrf {
     /// inner-lookup table. Diff base for `reconcile_mup_gtp` — a vanished
     /// key withdraws; a changed inner table re-installs in place (the
     /// cradle map insert overwrites).
-    pub mup_gtp_pdr_installed: std::collections::BTreeMap<(u32, std::net::Ipv4Addr, u32), u32>,
+    pub mup_gtp_pdr_installed: std::collections::BTreeMap<(u32, std::net::IpAddr, u32), u32>,
     /// Config-derived MUP segment catalog (which VRFs are interwork /
     /// direct segments, with their kernel tables). Seeded by the global
     /// task right after spawn and refreshed via
@@ -322,17 +322,17 @@ pub struct BgpVrf {
     /// `GTP4.E`): UE prefix → the encap key `(gtp_src, endpoint, TEID, gw,
     /// oif)` teed to cradle. Diff base for the downlink reconcile — a changed
     /// key re-installs, a vanished UE prefix withdraws.
-    pub mup_gtp_encap_installed: std::collections::BTreeMap<ipnet::Ipv4Net, MupGtpEncapKey>,
+    pub mup_gtp_encap_installed: std::collections::BTreeMap<ipnet::IpNet, MupGtpEncapKey>,
 }
 
 /// The cradle GTP-U encap install key for one downlink (`GTP4.E`) UE prefix:
 /// outer source, gNB endpoint, TEID, and the resolved v4 underlay
 /// `(gateway, oif)`. Re-installed only when this tuple changes.
 pub type MupGtpEncapKey = (
-    std::net::Ipv4Addr,
-    std::net::Ipv4Addr,
+    std::net::IpAddr,
+    std::net::IpAddr,
     u32,
-    Option<std::net::Ipv4Addr>,
+    Option<std::net::IpAddr>,
     u32,
 );
 
@@ -1110,26 +1110,26 @@ impl BgpVrf {
     /// Cradle-only (the kernel has no GTP action), diff-gated against
     /// `mup_gtp_pdr_installed`.
     fn reconcile_mup_gtp_uplink(&mut self) {
-        use std::net::{IpAddr, Ipv4Addr};
+        use std::net::IpAddr;
         let own_table = self.ctx.vrf_id();
         let match_vrf = self
             .mup_segment_catalog
             .gtp_context_of(&self.name)
             .unwrap_or(0);
-        // Desired PDRs: each selected ST2 with a v4 endpoint + non-zero TEID,
-        // mapped to its resolved inner-lookup table.
-        let mut desired: std::collections::BTreeMap<(u32, Ipv4Addr, u32), u32> =
+        // Desired PDRs: each selected ST2 with a non-zero TEID, mapped to its
+        // resolved inner-lookup table. The endpoint's family picks the outer
+        // (v4 → `GTP_PDR`, v6 → `GTP_PDR6`) at the cradle seam.
+        let mut desired: std::collections::BTreeMap<(u32, IpAddr, u32), u32> =
             std::collections::BTreeMap::new();
         for table in self.local_rib.mup.values() {
             for (prefix, rib) in table.selected.iter() {
                 if let bgp_packet::MupPrefix::T2st { endpoint, teid } = prefix
-                    && let IpAddr::V4(v4) = endpoint
                     && *teid != 0
                 {
                     let inner = mup_direct_segment_id(&rib.attr)
                         .and_then(|seg| self.mup_segment_catalog.direct_table(&seg))
                         .unwrap_or(own_table);
-                    desired.insert((match_vrf, *v4, *teid), inner);
+                    desired.insert((match_vrf, *endpoint, *teid), inner);
                 }
             }
         }
@@ -1137,7 +1137,7 @@ impl BgpVrf {
         // re-keys the match context, so the old-context entry must go). An
         // inner-table change alone re-installs in place below — the cradle
         // map insert overwrites.
-        let stale: Vec<(u32, Ipv4Addr, u32)> = self
+        let stale: Vec<(u32, IpAddr, u32)> = self
             .mup_gtp_pdr_installed
             .keys()
             .filter(|k| !desired.contains_key(*k))
@@ -1168,43 +1168,47 @@ impl BgpVrf {
     }
 
     /// Install GTP-U encap routes for a `dataplane gtp` VRF — the ST1 downlink
-    /// (`GTP4.E`). Each selected Type-1 ST route with a v4 UE prefix, a v4 GTP
-    /// endpoint (gNB), a non-zero TEID and a v4 source becomes a cradle GTP
-    /// encap route: traffic to the UE prefix in this VRF's table is wrapped in
-    /// outer IPv4 + UDP(2152) + GTP-U(TEID) toward the endpoint (sourced from
-    /// the ST1 source), forwarded over the endpoint's resolved v4 underlay
+    /// (`GTP4.E` / `GTP6.E`, by the tunnel's family). Each selected Type-1 ST
+    /// route with a non-zero TEID, a GTP endpoint (gNB) and a same-family
+    /// source becomes a cradle GTP encap route: traffic to the UE prefix (v4
+    /// or v6) in this VRF's table is wrapped in an outer IPv4/IPv6 +
+    /// UDP(2152) + GTP-U(TEID) header toward the endpoint (sourced from the
+    /// ST1 source), forwarded over the endpoint's resolved underlay
     /// (`mup_endpoint_transport`, register-then-gate on the global NHT). An
-    /// unresolved endpoint or a missing source yields no install. Cradle-only,
-    /// diff-gated against `mup_gtp_encap_installed`. The ST1 endpoint is the
-    /// lookup key; the UE prefix is the FIB destination (draft §3.1.3 / §3.3.9)
-    /// — the same key/destination split as `reconcile_mup_st1_isd`, but a real
-    /// GTP tunnel instead of the End.DT46 stand-in.
+    /// unresolved endpoint, a missing source or a family-mismatched
+    /// endpoint/source pair yields no install. Cradle-only, diff-gated
+    /// against `mup_gtp_encap_installed`. The ST1 endpoint is the lookup key;
+    /// the UE prefix is the FIB destination (draft §3.1.3 / §3.3.9) — the
+    /// same key/destination split as `reconcile_mup_st1_isd`, but a real GTP
+    /// tunnel instead of the End.DT46 stand-in.
     fn reconcile_mup_gtp_downlink(&mut self) {
-        use std::net::IpAddr;
         let table_id = self.ctx.vrf_id();
-        // Desired encaps: each selected ST1 (v4 UE prefix) whose GTP endpoint
-        // has resolved to a v4 underlay next-hop → the cradle encap key.
-        let mut desired: std::collections::BTreeMap<ipnet::Ipv4Net, MupGtpEncapKey> =
+        // Desired encaps: each selected ST1 whose GTP endpoint has resolved
+        // to an underlay next-hop → the cradle encap key.
+        let mut desired: std::collections::BTreeMap<ipnet::IpNet, MupGtpEncapKey> =
             std::collections::BTreeMap::new();
         for (rd, table) in self.local_rib.mup.iter() {
             for (prefix, rib) in table.selected.iter() {
                 let bgp_packet::MupPrefix::T1st { prefix: ue } = prefix else {
                     continue;
                 };
-                let ipnet::IpNet::V4(ue4) = ue else {
-                    continue;
-                };
                 let Some(st1) = &rib.mup_st1 else {
                     continue;
                 };
-                let (IpAddr::V4(endpoint), Some(IpAddr::V4(src))) = (st1.endpoint, st1.source)
-                else {
+                let endpoint = st1.endpoint;
+                let Some(src) = st1.source else {
                     continue;
                 };
+                // The outer header has ONE family — both tunnel ends must
+                // share it (the codec permits mixed, e.g. a v6 UE behind a
+                // v4 tunnel, but not a mixed outer).
+                if endpoint.is_ipv4() != src.is_ipv4() {
+                    continue;
+                }
                 if st1.teid == 0 {
                     continue;
                 }
-                // The gNB endpoint must have resolved to a v4 underlay egress
+                // The gNB endpoint must have resolved to an underlay egress
                 // (register-then-gate); take the first (primary) next-hop.
                 let Some(nh) = self
                     .mup_endpoint_transport
@@ -1213,15 +1217,12 @@ impl BgpVrf {
                 else {
                     continue;
                 };
-                let gw = match nh.addr {
-                    IpAddr::V4(a) if !a.is_unspecified() => Some(a),
-                    _ => None,
-                };
-                desired.insert(*ue4, (src, endpoint, st1.teid, gw, nh.ifindex));
+                let gw = (!nh.addr.is_unspecified()).then_some(nh.addr);
+                desired.insert(*ue, (src, endpoint, st1.teid, gw, nh.ifindex));
             }
         }
         // Withdraw encaps no longer desired (or whose key changed).
-        let stale: Vec<ipnet::Ipv4Net> = self
+        let stale: Vec<ipnet::IpNet> = self
             .mup_gtp_encap_installed
             .iter()
             .filter(|(ue, key)| desired.get(*ue) != Some(*key))
@@ -4508,7 +4509,7 @@ mod tests {
                 },
                 mk(),
             );
-            // v6 endpoint → skipped (GTP4 only in this slice).
+            // v6 endpoint → a v6-outer (GTP6) PDR.
             table.selected.insert(
                 MupPrefix::T2st {
                     endpoint: "2001:db8::1".parse().unwrap(),
@@ -4521,14 +4522,20 @@ mod tests {
         vrf.reconcile_mup_gtp();
         assert_eq!(
             vrf.mup_gtp_pdr_installed
-                .get(&(0, Ipv4Addr::new(10, 9, 0, 1), 0x1234)),
+                .get(&(0, IpAddr::V4(Ipv4Addr::new(10, 9, 0, 1)), 0x1234)),
             Some(&42),
             "no segment catalog: global match context, own table as decap target"
         );
         assert_eq!(
+            vrf.mup_gtp_pdr_installed
+                .get(&(0, "2001:db8::1".parse().unwrap(), 0x5678)),
+            Some(&42),
+            "a v6 endpoint installs a v6-outer PDR the same way"
+        );
+        assert_eq!(
             vrf.mup_gtp_pdr_installed.len(),
-            1,
-            "only the v4, non-zero-TEID ST2 installs a decap PDR"
+            2,
+            "both non-zero-TEID ST2s install decap PDRs (one per outer family)"
         );
 
         // The ST2 goes away → its PDR is withdrawn from the tracker.
@@ -4635,19 +4642,19 @@ mod tests {
         // All three PDRs are scoped to the interwork VRF's own table.
         assert_eq!(
             vrf.mup_gtp_pdr_installed
-                .get(&(7, Ipv4Addr::new(10, 0, 12, 2), 0x100)),
+                .get(&(7, IpAddr::V4(Ipv4Addr::new(10, 0, 12, 2)), 0x100)),
             Some(&9),
             "matching Direct-segment id decaps into the direct segment's table"
         );
         assert_eq!(
             vrf.mup_gtp_pdr_installed
-                .get(&(7, Ipv4Addr::new(10, 0, 12, 3), 0x200)),
+                .get(&(7, IpAddr::V4(Ipv4Addr::new(10, 0, 12, 3)), 0x200)),
             Some(&7),
             "an uncataloged Direct-segment id falls back to the holding VRF"
         );
         assert_eq!(
             vrf.mup_gtp_pdr_installed
-                .get(&(7, Ipv4Addr::new(10, 0, 12, 4), 0x300)),
+                .get(&(7, IpAddr::V4(Ipv4Addr::new(10, 0, 12, 4)), 0x300)),
             Some(&7),
             "no MUP Extended Community falls back to the holding VRF"
         );
@@ -4697,10 +4704,11 @@ mod tests {
 
         // No catalog: global match context.
         vrf.reconcile_mup_gtp();
-        assert!(
-            vrf.mup_gtp_pdr_installed
-                .contains_key(&(0, Ipv4Addr::new(10, 0, 12, 2), 0x100))
-        );
+        assert!(vrf.mup_gtp_pdr_installed.contains_key(&(
+            0,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 12, 2)),
+            0x100
+        )));
 
         // The VRF becomes an interwork segment: the PDR re-keys onto its
         // own table — the old global-context entry is withdrawn, not
@@ -4716,13 +4724,16 @@ mod tests {
         };
         vrf.reconcile_mup_gtp();
         assert!(
-            !vrf.mup_gtp_pdr_installed
-                .contains_key(&(0, Ipv4Addr::new(10, 0, 12, 2), 0x100)),
+            !vrf.mup_gtp_pdr_installed.contains_key(&(
+                0,
+                IpAddr::V4(Ipv4Addr::new(10, 0, 12, 2)),
+                0x100
+            )),
             "the global-context PDR is withdrawn on re-scope"
         );
         assert_eq!(
             vrf.mup_gtp_pdr_installed
-                .get(&(7, Ipv4Addr::new(10, 0, 12, 2), 0x100)),
+                .get(&(7, IpAddr::V4(Ipv4Addr::new(10, 0, 12, 2)), 0x100)),
             Some(&7),
             "the PDR re-keys onto the interwork VRF's table"
         );
@@ -4787,7 +4798,7 @@ mod tests {
         // holding service VRF's own table (2) — no direct segment needed.
         assert_eq!(
             vrf.mup_gtp_pdr_installed
-                .get(&(1, Ipv4Addr::new(10, 0, 12, 1), 0x500)),
+                .get(&(1, IpAddr::V4(Ipv4Addr::new(10, 0, 12, 1)), 0x500)),
             Some(&2),
             "PDR matches in the named GTP context, decaps into the service VRF"
         );
@@ -4882,13 +4893,13 @@ mod tests {
 
         vrf.reconcile_mup_gtp();
         assert_eq!(
-            vrf.mup_gtp_encap_installed.get(&ue_ok),
+            vrf.mup_gtp_encap_installed.get(&ipnet::IpNet::V4(ue_ok)),
             Some(&(
-                Ipv4Addr::new(10, 0, 12, 2),       // gtp_src
-                Ipv4Addr::new(10, 0, 12, 1),       // gtp_dst (gNB endpoint)
-                0x2222,                            // teid
-                Some(Ipv4Addr::new(10, 0, 99, 1)), // resolved gateway
-                7,                                 // resolved oif
+                IpAddr::V4(Ipv4Addr::new(10, 0, 12, 2)),       // gtp_src
+                IpAddr::V4(Ipv4Addr::new(10, 0, 12, 1)),       // gtp_dst (gNB endpoint)
+                0x2222,                                        // teid
+                Some(IpAddr::V4(Ipv4Addr::new(10, 0, 99, 1))), // resolved gateway
+                7,                                             // resolved oif
             )),
             "the resolved ST1 with a source installs a GTP4.E encap"
         );

@@ -707,7 +707,7 @@ impl FibHandle {
     /// action, so cradle is the only forwarder for the MUP `dataplane gtp` mode.
     pub async fn cradle_gtp_pdr_add(
         &self,
-        dst: std::net::Ipv4Addr,
+        dst: std::net::IpAddr,
         teid: u32,
         table_id: u32,
         match_vrf: u32,
@@ -717,7 +717,7 @@ impl FibHandle {
         }
     }
 
-    pub async fn cradle_gtp_pdr_del(&self, dst: std::net::Ipv4Addr, teid: u32, match_vrf: u32) {
+    pub async fn cradle_gtp_pdr_del(&self, dst: std::net::IpAddr, teid: u32, match_vrf: u32) {
         if let Some(cradle) = &self.cradle {
             cradle.gtp_pdr_del(dst, teid, match_vrf).await;
         }
@@ -725,12 +725,12 @@ impl FibHandle {
     #[allow(clippy::too_many_arguments)]
     pub async fn cradle_gtp_encap_add(
         &self,
-        prefix: ipnet::Ipv4Net,
+        prefix: ipnet::IpNet,
         table_id: u32,
-        gtp_src: std::net::Ipv4Addr,
-        gtp_dst: std::net::Ipv4Addr,
+        gtp_src: std::net::IpAddr,
+        gtp_dst: std::net::IpAddr,
         teid: u32,
-        gw: Option<std::net::Ipv4Addr>,
+        gw: Option<std::net::IpAddr>,
         oif: u32,
     ) {
         if let Some(cradle) = &self.cradle {
@@ -739,7 +739,7 @@ impl FibHandle {
                 .await;
         }
     }
-    pub async fn cradle_gtp_encap_del(&self, prefix: ipnet::Ipv4Net, table_id: u32) {
+    pub async fn cradle_gtp_encap_del(&self, prefix: ipnet::IpNet, table_id: u32) {
         if let Some(cradle) = &self.cradle {
             cradle.gtp_encap_del(prefix, table_id).await;
         }
