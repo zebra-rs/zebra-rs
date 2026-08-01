@@ -431,6 +431,10 @@ pub enum Message {
         remote: XconnectRemote,
         local_sid: Option<std::net::Ipv6Addr>,
         local_vni: Option<u32>,
+        /// The IPv4 VTEP this PE advertised as the service's next hop —
+        /// teed as cradle's fabric-wide `SetVtepSource` (the VXLAN decap
+        /// match and outer source) before the VXLAN xconnect lands.
+        local_vtep: Option<Ipv4Addr>,
         vid: u16,
         table: u32,
     },
@@ -3770,11 +3774,14 @@ impl Rib {
                 remote,
                 local_sid,
                 local_vni,
+                local_vtep,
                 vid,
                 table,
             } => {
                 self.fib_handle
-                    .cradle_xconnect_add(&ifname, remote, local_sid, local_vni, vid, table)
+                    .cradle_xconnect_add(
+                        &ifname, remote, local_sid, local_vni, local_vtep, vid, table,
+                    )
                     .await;
             }
             Message::XconnectDel {

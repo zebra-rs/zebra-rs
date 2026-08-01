@@ -7337,6 +7337,7 @@ fn vpws_rebind(local_rib: &mut LocalRib, rib_client: &crate::rib::client::RibCli
     let (vid, table) = svc.vid_table();
     let local_mtu = svc.mtu;
     let local_vni = svc.local_vni;
+    let local_vtep = svc.local_vtep;
     let selection = match svc.params() {
         Some((evi, _, remote_id, _)) => {
             super::vpws::select_remote(vpws_gather_remotes(local_rib, evi, remote_id), local_mtu)
@@ -7365,6 +7366,7 @@ fn vpws_rebind(local_rib: &mut LocalRib, rib_client: &crate::rib::client::RibCli
                     remote,
                     local_sid,
                     local_vni,
+                    local_vtep,
                     vid,
                     table,
                 });
@@ -16563,10 +16565,11 @@ impl Bgp {
         }
         attr.ecom = Some(ecom);
         attr.prefix_sid = prefix_sid;
-        attr.nexthop = Some(BgpNexthop::Evpn(match local_vni {
+        let nexthop = match local_vni {
             Some(vni) => self.evpn_nexthop_for_vni(vni),
             None => IpAddr::V4(self.router_id),
-        }));
+        };
+        attr.nexthop = Some(BgpNexthop::Evpn(nexthop));
         let rib = BgpRib::new(
             ORIGINATED_PEER,
             Ipv4Addr::UNSPECIFIED,
@@ -16585,6 +16588,12 @@ impl Bgp {
         if let Some(svc) = self.local_rib.evpn_vpws.services.get_mut(name) {
             svc.originated = Some((evi, local_id, esi));
             svc.local_vni = local_vni;
+            // The advertised next hop is what the remote encapsulates
+            // toward — the tee programs it as the VXLAN decap source.
+            svc.local_vtep = match (local_vni, nexthop) {
+                (Some(_), IpAddr::V4(vtep)) => Some(vtep),
+                _ => None,
+            };
         }
         self.evpn_originate_synch(rd, prefix, rib);
     }
