@@ -281,6 +281,15 @@ pub enum BgpVrfMsg {
     /// task never runs a single event with a stale snapshot.
     Tracing(crate::bgp::tracing::BgpTracing),
 
+    /// Refresh the config-derived MUP segment catalog (which VRFs are
+    /// interwork / direct segments, with their kernel tables). The global
+    /// task seeds it right after spawn and re-broadcasts diff-gated
+    /// whenever segment config or table ids change (`Tracing`-style — the
+    /// per-VRF `ConfigChannel` never sees the *other* VRFs' segment
+    /// config). Consumed by the `dataplane gtp` reconcilers for the PDR
+    /// match context and the decap target.
+    MupSegmentCatalog(crate::bgp::vrf_config::MupSegmentCatalog),
+
     /// Tear the VRF task down cleanly. The event loop exits on the
     /// next select iteration after receiving this. Used by
     /// `despawn_bgp_vrf` and during daemon shutdown.

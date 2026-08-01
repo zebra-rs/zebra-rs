@@ -211,6 +211,64 @@ impl MupSegmentMode {
     }
 }
 
+/// Config-derived MUP segment catalog: which VRFs are interwork / direct
+/// segments, with their kernel tables — the local materialization of the
+/// ISD/DSD associations the `dataplane gtp` reconcilers resolve against
+/// (docs/design/bgp-mup-gtp-segment-resolution-plan.md §3.1). Built by the
+/// global task from every `BgpVrfConfig.mobile_uplane.segment` plus the
+/// kernel table ids in `rib_known_vrfs` (an entry appears only once its
+/// kernel table is known), pushed to the per-VRF tasks via
+/// `BgpVrfMsg::MupSegmentCatalog` (`tracing`-style: seeded at spawn,
+/// refreshed diff-gated on change). Deliberately config-scoped rather than
+/// RT-import-gated — see the design doc's "one deliberate divergence".
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct MupSegmentCatalog {
+    pub interwork: Vec<MupInterworkEntry>,
+    pub direct: Vec<MupDirectEntry>,
+}
+
+impl MupSegmentCatalog {
+    /// Whether `vrf` is declared an interwork segment — its ports terminate
+    /// GTP-U, so the uplink PDR match is scoped to its own table instead of
+    /// the global context.
+    pub fn is_interwork(&self, vrf: &str) -> bool {
+        self.interwork.iter().any(|e| e.vrf == vrf)
+    }
+
+    /// The kernel table of the direct segment carrying Direct-segment id
+    /// `seg` — the decap target for an ST2 stamped with the matching MUP
+    /// Extended Community (the DSD correlation, draft §3.3.12).
+    pub fn direct_table(&self, seg: &[u8; 6]) -> Option<u32> {
+        self.direct
+            .iter()
+            .find(|e| e.segment_id == *seg)
+            .map(|e| e.table_id)
+    }
+}
+
+/// One interwork segment (`segment interwork` on a VRF): a GTP/N3 routing
+/// context. `prefix` is the configured gNB network (`segment interwork
+/// prefix <p>`), absent when only the membership is declared — the ISD does
+/// not originate without it, but the match-context scoping already applies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MupInterworkEntry {
+    pub vrf: String,
+    pub table_id: u32,
+    pub prefix: Option<IpNet>,
+}
+
+/// One direct segment (`segment direct { mup-ext-comm <2:4> }` on a VRF): an
+/// N6 routing context, correlated by its Direct-segment id (the 6-byte MUP
+/// Extended Community value — `RouteDistinguisher::val` maps onto it
+/// directly). A `segment direct` without `mup-ext-comm` is not cataloged:
+/// nothing can correlate to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MupDirectEntry {
+    pub vrf: String,
+    pub table_id: u32,
+    pub segment_id: [u8; 6],
+}
+
 /// MUP forwarding-plane behaviour for a per-VRF service (`afi-safi mup
 /// dataplane {end-dt46|gtp}`). `EndDt46` (default) installs the SRv6 End.DT46
 /// stand-in into the mainline kernel; `Gtp` programs a real GTP-U tunnel from
