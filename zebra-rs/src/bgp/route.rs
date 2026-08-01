@@ -803,7 +803,7 @@ pub(super) fn fib_install_v4(bgp: &super::peer::BgpTop, prefix: Ipv4Net, selecte
     // SRv6-encapsulated route.
     let nht_transport = bgp.nexthop_cache.as_deref().and_then(|cache| {
         best.and_then(|b| super::nht::bgp_nexthop_ip(&b.attr))
-            .map(|nh| cache.transport_for(nh))
+            .map(|nh| cache.transport_for(0, nh))
     });
     let entry = best.and_then(|b| select_fib_entry_v4(b, transport, nht_transport));
     match entry {
@@ -1043,7 +1043,7 @@ pub(super) fn fib_install_v6(bgp: &super::peer::BgpTop, prefix: Ipv6Net, selecte
     // `fib_install_v4`.
     let nht_transport = bgp.nexthop_cache.as_deref().and_then(|cache| {
         best.and_then(|b| super::nht::bgp_nexthop_ip(&b.attr))
-            .map(|nh| cache.transport_for(nh))
+            .map(|nh| cache.transport_for(0, nh))
     });
     let entry = best.and_then(|b| select_fib_entry_v6(b, transport, nht_transport));
     match entry {
@@ -1127,7 +1127,7 @@ fn select_fib_entry_label(
     // not transport+3. 0 already means "no service label".
     let service_label = best.label.map(|l| l.label).filter(|&l| l != 3).unwrap_or(0);
     let transport = match (cache, super::nht::bgp_nexthop_ip(&best.attr)) {
-        (Some(c), Some(nh)) => c.transport_for(nh),
+        (Some(c), Some(nh)) => c.transport_for(0, nh),
         _ => &[][..],
     };
     build_vpn_fib_entry(service_label, transport)
@@ -1154,7 +1154,7 @@ pub(super) fn reconcile_swap_ilm(
         return;
     }
     let transport = match (cache, super::nht::bgp_nexthop_ip(&best.attr)) {
-        (Some(c), Some(nh)) => c.transport_for(nh),
+        (Some(c), Some(nh)) => c.transport_for(0, nh),
         _ => &[][..],
     };
     if transport.is_empty() {
@@ -3219,7 +3219,7 @@ fn nht_track_received(bgp: &mut BgpTop, rib: &mut BgpRib, dep: super::nht::NhtDe
     let Some(nh) = super::nht::nht_target(&rib.attr) else {
         return;
     };
-    let (needs_register, reachable) = cache.track(nh, dep);
+    let (needs_register, reachable) = cache.track(0, nh, dep);
     rib.nexthop_reachable = reachable;
     if needs_register {
         let _ = bgp.rib_client.send(rib::Message::NexthopRegister {
@@ -3244,7 +3244,7 @@ fn nht_track_received_attr(bgp: &mut BgpTop, attr: &BgpAttr, dep: super::nht::Nh
     let Some(nh) = super::nht::nht_target(attr) else {
         return true;
     };
-    let (needs_register, reachable) = cache.track(nh, dep);
+    let (needs_register, reachable) = cache.track(0, nh, dep);
     if needs_register {
         let _ = bgp.rib_client.send(rib::Message::NexthopRegister {
             proto: "bgp".to_string(),
@@ -3280,7 +3280,7 @@ fn mup_segment_track(
     let Some(cache) = bgp.nexthop_cache.as_deref_mut() else {
         return Vec::new();
     };
-    let (needs_register, _reachable) = cache.track(nh, dep);
+    let (needs_register, _reachable) = cache.track(0, nh, dep);
     if needs_register {
         let _ = bgp.rib_client.send(rib::Message::NexthopRegister {
             proto: "bgp".to_string(),
@@ -3288,7 +3288,7 @@ fn mup_segment_track(
             vrf_id: 0,
         });
     }
-    cache.transport_for(nh).to_vec()
+    cache.transport_for(0, nh).to_vec()
 }
 
 /// Symmetric to [`mup_segment_track`]: drop the segment dep from `nh` and,
@@ -3299,7 +3299,7 @@ fn mup_segment_untrack(bgp: &mut BgpTop, rd: RouteDistinguisher, prefix: &MupPre
     let Some(cache) = bgp.nexthop_cache.as_deref_mut() else {
         return;
     };
-    if cache.untrack(nh, &dep) {
+    if cache.untrack(0, nh, &dep) {
         let _ = bgp.rib_client.send(rib::Message::NexthopUnregister {
             proto: "bgp".to_string(),
             nh,
@@ -3344,16 +3344,22 @@ pub(super) fn mup_endpoint_track_cache(
     let Some(endpoint) = best.and_then(|b| b.mup_st1).map(|st1| st1.endpoint) else {
         return Vec::new();
     };
+    // The design's downlink rule: resolve the gNB endpoint in the table of
+    // the most-specific interwork segment covering it, else the global
+    // table (the cache mirrors the segment catalog's interwork view;
+    // `Bgp::push_mup_segment_catalog` migrates live registrations when it
+    // changes, so track and untrack always agree on the table).
+    let vrf_id = cache.mup_endpoint_table(&endpoint);
     let dep = super::nht::NhtDep::MupEndpoint(rd, prefix.clone());
-    let (needs_register, _reachable) = cache.track(endpoint, dep);
+    let (needs_register, _reachable) = cache.track(vrf_id, endpoint, dep);
     if needs_register {
         let _ = rib_client.send(rib::Message::NexthopRegister {
             proto: "bgp".to_string(),
             nh: endpoint,
-            vrf_id: 0,
+            vrf_id,
         });
     }
-    cache.transport_for(endpoint).to_vec()
+    cache.transport_for(vrf_id, endpoint).to_vec()
 }
 
 /// Symmetric to [`mup_endpoint_track`]: drop the endpoint dep from `endpoint`
@@ -3385,12 +3391,16 @@ pub(super) fn mup_endpoint_untrack_cache(
     prefix: &MupPrefix,
     endpoint: IpAddr,
 ) {
+    // Same table derivation as the track side — the catalog-change
+    // migration keeps live registrations aligned with the current view,
+    // so this always names the table the dep was registered under.
+    let vrf_id = cache.mup_endpoint_table(&endpoint);
     let dep = super::nht::NhtDep::MupEndpoint(rd, prefix.clone());
-    if cache.untrack(endpoint, &dep) {
+    if cache.untrack(vrf_id, endpoint, &dep) {
         let _ = rib_client.send(rib::Message::NexthopUnregister {
             proto: "bgp".to_string(),
             nh: endpoint,
-            vrf_id: 0,
+            vrf_id,
         });
     }
 }
@@ -3428,7 +3438,7 @@ fn nht_untrack_withdrawn(
             continue;
         }
         if let Some(cache) = bgp.nexthop_cache.as_deref_mut()
-            && cache.untrack(nh, &dep)
+            && cache.untrack(0, nh, &dep)
         {
             to_unregister.push(nh);
         }
@@ -3457,7 +3467,7 @@ fn vpn_import_transport<'a>(
         bgp.nexthop_cache.as_deref(),
         super::nht::nht_target(&winner.attr),
     ) {
-        (Some(cache), Some(nh)) => cache.transport_for(nh),
+        (Some(cache), Some(nh)) => cache.transport_for(0, nh),
         _ => &[][..],
     };
     (label, transport)
@@ -9681,7 +9691,7 @@ fn sr_policy_mpls_sync(bgp: &mut BgpTop, color: u32, endpoint: IpAddr) {
     let wants = bgp.local_rib.sr_policy.wants_mpls(color, endpoint);
 
     if wants && let Some(cache) = bgp.nexthop_cache.as_deref_mut() {
-        let (needs_register, _reachable) = cache.track(endpoint, dep.clone());
+        let (needs_register, _reachable) = cache.track(0, endpoint, dep.clone());
         if needs_register {
             let _ = bgp.rib_client.send(rib::Message::NexthopRegister {
                 proto: "bgp".to_string(),
@@ -9709,7 +9719,7 @@ fn sr_policy_mpls_sync(bgp: &mut BgpTop, color: u32, endpoint: IpAddr) {
 
     if !wants
         && let Some(cache) = bgp.nexthop_cache.as_deref_mut()
-        && cache.untrack(endpoint, &dep)
+        && cache.untrack(0, endpoint, &dep)
     {
         let _ = bgp.rib_client.send(rib::Message::NexthopUnregister {
             proto: "bgp".to_string(),
@@ -9736,7 +9746,7 @@ pub(super) fn sr_policy_reconcile_mpls(
     color: u32,
     endpoint: IpAddr,
 ) -> bool {
-    let reachable = !cache.transport_for(endpoint).is_empty();
+    let reachable = !cache.transport_for(0, endpoint).is_empty();
     let action = db.mpls_reconcile(color, endpoint, reachable);
     if let Some(label) = action.remove {
         srpolicy_ilm_remove(rib_client, label);
@@ -9746,7 +9756,7 @@ pub(super) fn sr_policy_reconcile_mpls(
             rib_client,
             install.bsid,
             &install.segments,
-            cache.transport_for(endpoint),
+            cache.transport_for(0, endpoint),
         );
     }
     action.activated

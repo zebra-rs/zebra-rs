@@ -1380,7 +1380,11 @@ impl Rib {
             entry.resolution = resolution.clone();
         }
         if let Some(sub) = self.client_registry.subscriber_for_proto(&proto) {
-            let _ = sub.rib_rx_tx.send(RibRx::NexthopUpdate { nh, resolution });
+            let _ = sub.rib_rx_tx.send(RibRx::NexthopUpdate {
+                vrf_id,
+                nh,
+                resolution,
+            });
         }
     }
 
@@ -1403,14 +1407,15 @@ impl Rib {
 
     /// Re-resolve every tracked nexthop; where the resolution changed,
     /// update the cache and notify all its watchers. Called after a
-    /// global-table route change. (Recompute-all for now; narrowing to
-    /// only the affected nexthops is a follow-up, as is firing on
-    /// link/addr changes.)
+    /// global-table or VRF-table route change. (Recompute-all for now;
+    /// narrowing to only the affected nexthops/tables is a follow-up, as
+    /// is firing on link/addr changes.)
     pub(crate) fn nht_recompute_and_notify(&mut self) {
         if self.nht.entries.is_empty() {
             return;
         }
-        let mut updates: Vec<(IpAddr, super::nht::NexthopResolution, Vec<String>)> = Vec::new();
+        let mut updates: Vec<(u32, IpAddr, super::nht::NexthopResolution, Vec<String>)> =
+            Vec::new();
         for (vrf_id, nh) in self.nht.tracked() {
             let resolution = self.nht_resolve(vrf_id, nh);
             if let Some(entry) = self.nht.entries.get_mut(&(vrf_id, nh))
@@ -1418,13 +1423,14 @@ impl Rib {
             {
                 entry.resolution = resolution.clone();
                 let watchers = entry.watchers.iter().cloned().collect();
-                updates.push((nh, resolution, watchers));
+                updates.push((vrf_id, nh, resolution, watchers));
             }
         }
-        for (nh, resolution, watchers) in updates {
+        for (vrf_id, nh, resolution, watchers) in updates {
             for proto in watchers {
                 if let Some(sub) = self.client_registry.subscriber_for_proto(&proto) {
                     let _ = sub.rib_rx_tx.send(RibRx::NexthopUpdate {
+                        vrf_id,
                         nh,
                         resolution: resolution.clone(),
                     });
@@ -3276,6 +3282,9 @@ impl Rib {
                 // populates these on install; a follow-up will add
                 // the matching withdraw walk.
                 self.vrf_tables.remove(&vrf.table_id);
+                // Nexthops tracked in the dropped table no longer
+                // resolve — push the unreachable flip to their watchers.
+                self.nht_recompute_and_notify();
                 self.fib_handle.vrf_del(&name).await;
                 self.vrf_id_alloc.release(vrf.table_id);
                 tracing::info!("vrf_del: {} (table_id={})", name, vrf.table_id);

@@ -283,6 +283,10 @@ pub enum RibRx {
     // the covering route changes. `reachable == false` means the
     // nexthop no longer resolves.
     NexthopUpdate {
+        /// The table the registration named (`Message::NexthopRegister`'s
+        /// `vrf_id`, 0 = global) — the same address may be tracked in
+        /// several tables with independent resolutions.
+        vrf_id: u32,
         nh: IpAddr,
         resolution: super::nht::NexthopResolution,
     },

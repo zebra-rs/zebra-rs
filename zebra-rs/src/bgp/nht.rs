@@ -88,21 +88,33 @@ pub struct NhtCacheEntry {
     pub deps: BTreeSet<NhtDep>,
 }
 
-/// Per-instance BGP next-hop cache.
+/// Per-instance BGP next-hop cache. Entries are keyed `(vrf_id, address)`
+/// — the table the RIB registration named (0 = global) — because the same
+/// address may be tracked in several tables with independent resolutions
+/// (a gNB inside an interwork VRF, overlapping slice address spaces).
+/// Every pre-existing user tracks in the global table and passes `0`; only
+/// the MUP ST1 endpoint path resolves a table (`mup_endpoint_table`).
 #[derive(Debug, Default)]
 pub struct NexthopCache {
-    pub entries: HashMap<IpAddr, NhtCacheEntry>,
+    pub entries: HashMap<(u32, IpAddr), NhtCacheEntry>,
+    /// Interwork-segment prefixes → kernel table, mirrored from the MUP
+    /// segment catalog by `Bgp::push_mup_segment_catalog`. Consulted by
+    /// [`Self::mup_endpoint_table`] to pick the registration table for
+    /// `NhtDep::MupEndpoint` deps — kept on the cache itself so the
+    /// track/untrack helpers resolve it without threading the catalog
+    /// through every `BgpTop`.
+    mup_interwork: Vec<(ipnet::IpNet, u32)>,
 }
 
 impl NexthopCache {
-    /// Record that `dep` uses `nh`. Returns `(needs_register,
-    /// reachable_now)`: `needs_register` is true on the first sighting
-    /// of `nh` (the caller registers it with the RIB), and
-    /// `reachable_now` is the current cached reachability (`false`
-    /// while a fresh registration is pending — register-then-gate).
-    pub fn track(&mut self, nh: IpAddr, dep: NhtDep) -> (bool, bool) {
+    /// Record that `dep` uses `nh` in table `vrf_id`. Returns
+    /// `(needs_register, reachable_now)`: `needs_register` is true on the
+    /// first sighting of `(vrf_id, nh)` (the caller registers it with the
+    /// RIB), and `reachable_now` is the current cached reachability
+    /// (`false` while a fresh registration is pending — register-then-gate).
+    pub fn track(&mut self, vrf_id: u32, nh: IpAddr, dep: NhtDep) -> (bool, bool) {
         use std::collections::hash_map::Entry;
-        match self.entries.entry(nh) {
+        match self.entries.entry((vrf_id, nh)) {
             Entry::Occupied(mut e) => {
                 e.get_mut().deps.insert(dep);
                 (false, e.get().reachable)
@@ -131,8 +143,13 @@ impl NexthopCache {
     ///   re-installing — no peer re-advertisement (which for VPNv4 isn't
     ///   deduped and would flood PEs).
     /// - [`CacheChange::Unchanged`] — nothing moved; a no-op.
-    pub fn update(&mut self, nh: IpAddr, resolution: &NexthopResolution) -> CacheChange {
-        match self.entries.get_mut(&nh) {
+    pub fn update(
+        &mut self,
+        vrf_id: u32,
+        nh: IpAddr,
+        resolution: &NexthopResolution,
+    ) -> CacheChange {
+        match self.entries.get_mut(&(vrf_id, nh)) {
             Some(e) => {
                 let reachability_flipped = e.reachable != resolution.reachable;
                 let transport_changed = e.nexthops != resolution.nexthops;
@@ -156,25 +173,70 @@ impl NexthopCache {
     /// its watcher. Callers must only untrack a next-hop no surviving
     /// route still uses (a `NhtDep` can be tracked under several
     /// next-hops via multiple paths). A no-op for an untracked `nh`.
-    pub fn untrack(&mut self, nh: IpAddr, dep: &NhtDep) -> bool {
-        if let Some(e) = self.entries.get_mut(&nh) {
+    pub fn untrack(&mut self, vrf_id: u32, nh: IpAddr, dep: &NhtDep) -> bool {
+        if let Some(e) = self.entries.get_mut(&(vrf_id, nh)) {
             e.deps.remove(dep);
             if e.deps.is_empty() {
-                self.entries.remove(&nh);
+                self.entries.remove(&(vrf_id, nh));
                 return true;
             }
         }
         false
     }
 
-    /// The resolved transport egress(es) for `nh` — what the VPN
-    /// dataplane install pushes the service label over. Empty slice
-    /// when `nh` isn't tracked or hasn't resolved yet.
-    pub fn transport_for(&self, nh: IpAddr) -> &[ResolvedNexthop] {
+    /// The resolved transport egress(es) for `nh` in table `vrf_id` — what
+    /// the VPN dataplane install pushes the service label over. Empty slice
+    /// when the entry isn't tracked or hasn't resolved yet.
+    pub fn transport_for(&self, vrf_id: u32, nh: IpAddr) -> &[ResolvedNexthop] {
         self.entries
-            .get(&nh)
+            .get(&(vrf_id, nh))
             .map(|e| e.nexthops.as_slice())
             .unwrap_or(&[])
+    }
+
+    /// Replace the interwork-prefix view ([`Self::mup_endpoint_table`]'s
+    /// input). Called by `Bgp::push_mup_segment_catalog` whenever the MUP
+    /// segment catalog changes.
+    pub fn set_mup_interwork(&mut self, interwork: Vec<(ipnet::IpNet, u32)>) {
+        self.mup_interwork = interwork;
+    }
+
+    /// The table a MUP ST1 GTP endpoint (gNB) resolves in: the most-specific
+    /// interwork-segment prefix containing it, else the global table — the
+    /// design's downlink rule (endpoint ∈ ISD prefix → that segment's VRF).
+    pub fn mup_endpoint_table(&self, endpoint: &IpAddr) -> u32 {
+        self.mup_interwork
+            .iter()
+            .filter(|(p, _)| p.contains(endpoint))
+            .max_by_key(|(p, _)| p.prefix_len())
+            .map(|(_, table)| *table)
+            .unwrap_or(0)
+    }
+
+    /// `MupEndpoint` registrations whose table no longer matches the
+    /// interwork view — computed after [`Self::set_mup_interwork`] so the
+    /// caller can migrate them (untrack the old key, retrack + register
+    /// under the new one). Each move is `(old_vrf, new_vrf, endpoint,
+    /// the MupEndpoint deps to carry over)`; non-endpoint deps sharing the
+    /// entry stay where they are.
+    pub fn mup_endpoint_moves(&self) -> Vec<(u32, u32, IpAddr, Vec<NhtDep>)> {
+        let mut moves = Vec::new();
+        for ((vrf_id, nh), entry) in &self.entries {
+            let deps: Vec<NhtDep> = entry
+                .deps
+                .iter()
+                .filter(|d| matches!(d, NhtDep::MupEndpoint(..)))
+                .cloned()
+                .collect();
+            if deps.is_empty() {
+                continue;
+            }
+            let want = self.mup_endpoint_table(nh);
+            if want != *vrf_id {
+                moves.push((*vrf_id, want, *nh, deps));
+            }
+        }
+        moves
     }
 }
 
@@ -226,9 +288,76 @@ mod tests {
         let p2: Ipv4Net = "2.0.0.0/24".parse().unwrap();
 
         // First sighting → register, pending-unreachable.
-        assert_eq!(c.track(nh, NhtDep::V4(p1)), (true, false));
+        assert_eq!(c.track(0, nh, NhtDep::V4(p1)), (true, false));
         // Second route, same nexthop → no re-register, still pending.
-        assert_eq!(c.track(nh, NhtDep::V4(p2)), (false, false));
+        assert_eq!(c.track(0, nh, NhtDep::V4(p2)), (false, false));
+    }
+
+    #[test]
+    fn same_address_in_two_tables_is_two_entries() {
+        // The faithful-MUP identity: a gNB address inside an interwork VRF
+        // and the same literal address in the global table are independent
+        // registrations with independent resolutions.
+        let mut c = NexthopCache::default();
+        let nh: IpAddr = "10.0.1.2".parse().unwrap();
+        let p1: Ipv4Net = "1.0.0.0/24".parse().unwrap();
+
+        assert_eq!(c.track(0, nh, NhtDep::V4(p1)), (true, false), "global");
+        assert_eq!(c.track(7, nh, NhtDep::V4(p1)), (true, false), "vrf 7");
+
+        // Resolving the VRF-7 entry leaves the global one untouched.
+        assert_eq!(
+            c.update(7, nh, &reachable(vec![])),
+            CacheChange::Reachability(vec![NhtDep::V4(p1)])
+        );
+        assert!(c.transport_for(0, nh).is_empty());
+        assert!(!c.transport_for(7, nh).is_empty());
+
+        // Untracking one table's last dep unregisters only that table.
+        assert!(c.untrack(0, nh, &NhtDep::V4(p1)));
+        assert!(c.entries.contains_key(&(7, nh)));
+    }
+
+    #[test]
+    fn mup_endpoint_table_picks_most_specific_interwork_prefix() {
+        let mut c = NexthopCache::default();
+        let ep: IpAddr = "10.0.1.2".parse().unwrap();
+        assert_eq!(c.mup_endpoint_table(&ep), 0, "no interwork view → global");
+        c.set_mup_interwork(vec![
+            ("10.0.0.0/8".parse().unwrap(), 5),
+            ("10.0.1.0/24".parse().unwrap(), 7),
+        ]);
+        assert_eq!(c.mup_endpoint_table(&ep), 7, "most-specific wins");
+        let outside: IpAddr = "192.0.2.1".parse().unwrap();
+        assert_eq!(c.mup_endpoint_table(&outside), 0, "uncovered → global");
+    }
+
+    #[test]
+    fn mup_endpoint_moves_reports_only_stale_endpoint_registrations() {
+        let mut c = NexthopCache::default();
+        let ep: IpAddr = "10.0.1.2".parse().unwrap();
+        let rd: RouteDistinguisher = "65000:6".parse().unwrap();
+        let ue: Ipv4Net = "10.60.1.0/24".parse().unwrap();
+        let dep = NhtDep::MupEndpoint(
+            rd,
+            bgp_packet::MupPrefix::T1st {
+                prefix: ipnet::IpNet::V4(ue),
+            },
+        );
+        // Registered under the global table before any interwork existed;
+        // a plain unicast dep shares the address and must NOT move.
+        c.track(0, ep, dep.clone());
+        c.track(0, ep, NhtDep::V4(ue));
+        assert!(c.mup_endpoint_moves().is_empty());
+
+        // The endpoint becomes covered by an interwork segment → exactly
+        // the MupEndpoint dep is reported as a (0 → 7) move.
+        c.set_mup_interwork(vec![("10.0.1.0/24".parse().unwrap(), 7)]);
+        let moves = c.mup_endpoint_moves();
+        assert_eq!(moves.len(), 1);
+        let (old_vrf, new_vrf, nh, deps) = &moves[0];
+        assert_eq!((*old_vrf, *new_vrf, *nh), (0, 7, ep));
+        assert_eq!(deps.as_slice(), &[dep]);
     }
 
     fn reachable(labels: Vec<u32>) -> NexthopResolution {
@@ -250,38 +379,38 @@ mod tests {
         let mut c = NexthopCache::default();
         let nh: IpAddr = "10.0.0.8".parse().unwrap();
         let p1: Ipv4Net = "1.0.0.0/24".parse().unwrap();
-        c.track(nh, NhtDep::V4(p1));
+        c.track(0, nh, NhtDep::V4(p1));
 
         // pending(false) -> reachable(true): reachability flip → full
         // re-eval, and the resolved transport is now retrievable.
         assert_eq!(
-            c.update(nh, &reachable(vec![16800])),
+            c.update(0, nh, &reachable(vec![16800])),
             CacheChange::Reachability(vec![NhtDep::V4(p1)])
         );
-        assert_eq!(c.transport_for(nh)[0].labels, vec![16800]);
-        assert_eq!(c.transport_for(nh)[0].ifindex, 3);
+        assert_eq!(c.transport_for(0, nh)[0].labels, vec![16800]);
+        assert_eq!(c.transport_for(0, nh)[0].ifindex, 3);
 
         // still reachable, transport label changed (IGP reroute of the
         // PE): transport-only → re-install, no advertise. Cache refreshed.
         assert_eq!(
-            c.update(nh, &reachable(vec![16801])),
+            c.update(0, nh, &reachable(vec![16801])),
             CacheChange::Transport(vec![NhtDep::V4(p1)])
         );
-        assert_eq!(c.transport_for(nh)[0].labels, vec![16801]);
+        assert_eq!(c.transport_for(0, nh)[0].labels, vec![16801]);
 
         // identical resolution again: nothing moved.
         assert_eq!(
-            c.update(nh, &reachable(vec![16801])),
+            c.update(0, nh, &reachable(vec![16801])),
             CacheChange::Unchanged
         );
 
         // unknown nexthop: unchanged, empty transport.
         let unknown: IpAddr = "9.9.9.9".parse().unwrap();
         assert_eq!(
-            c.update(unknown, &NexthopResolution::default()),
+            c.update(0, unknown, &NexthopResolution::default()),
             CacheChange::Unchanged
         );
-        assert!(c.transport_for(unknown).is_empty());
+        assert!(c.transport_for(0, unknown).is_empty());
     }
 
     #[test]
@@ -290,18 +419,18 @@ mod tests {
         let nh: IpAddr = "10.0.0.8".parse().unwrap();
         let p1: Ipv4Net = "1.0.0.0/24".parse().unwrap();
         let p2: Ipv4Net = "2.0.0.0/24".parse().unwrap();
-        c.track(nh, NhtDep::V4(p1));
-        c.track(nh, NhtDep::V4(p2));
+        c.track(0, nh, NhtDep::V4(p1));
+        c.track(0, nh, NhtDep::V4(p2));
 
         // First withdrawal: a dep remains, so the next-hop stays tracked.
-        assert!(!c.untrack(nh, &NhtDep::V4(p1)));
-        assert!(c.entries.contains_key(&nh));
+        assert!(!c.untrack(0, nh, &NhtDep::V4(p1)));
+        assert!(c.entries.contains_key(&(0, nh)));
 
         // Last dep gone: entry dropped, caller should unregister.
-        assert!(c.untrack(nh, &NhtDep::V4(p2)));
-        assert!(!c.entries.contains_key(&nh));
+        assert!(c.untrack(0, nh, &NhtDep::V4(p2)));
+        assert!(!c.entries.contains_key(&(0, nh)));
 
         // Untracking an already-gone next-hop is a no-op (not "last").
-        assert!(!c.untrack(nh, &NhtDep::V4(p1)));
+        assert!(!c.untrack(0, nh, &NhtDep::V4(p1)));
     }
 }

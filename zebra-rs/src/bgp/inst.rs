@@ -4180,6 +4180,51 @@ impl Bgp {
                 ));
         }
         self.mup_segment_catalog = catalog;
+        // Mirror the interwork view into the NHT cache — it picks the table
+        // a MUP ST1 endpoint (gNB) registers and resolves in — then migrate
+        // any live endpoint registration the change re-homed, so track and
+        // untrack always agree on the table.
+        let interwork: Vec<(ipnet::IpNet, u32)> = self
+            .mup_segment_catalog
+            .interwork
+            .iter()
+            .filter_map(|e| e.prefix.map(|p| (p, e.table_id)))
+            .collect();
+        self.nexthop_cache.set_mup_interwork(interwork);
+        self.remap_mup_endpoint_registrations();
+    }
+
+    /// Move every `MupEndpoint` registration whose table no longer matches
+    /// the interwork view onto the right one: untrack (and unregister when
+    /// last) under the old table, track (and register when first) under the
+    /// new. A fresh registration's sync-first `NexthopUpdate` reply drives
+    /// the downlink re-dispatch; when the new entry was already live no
+    /// update fires, so the ST1 is re-dispatched here with the entry's
+    /// current resolution.
+    fn remap_mup_endpoint_registrations(&mut self) {
+        for (old_vrf, new_vrf, nh, deps) in self.nexthop_cache.mup_endpoint_moves() {
+            for dep in deps {
+                if self.nexthop_cache.untrack(old_vrf, nh, &dep) {
+                    let _ = self.ctx.rib.send(crate::rib::Message::NexthopUnregister {
+                        proto: "bgp".to_string(),
+                        nh,
+                        vrf_id: old_vrf,
+                    });
+                }
+                let (needs_register, _reachable) =
+                    self.nexthop_cache.track(new_vrf, nh, dep.clone());
+                if needs_register {
+                    let _ = self.ctx.rib.send(crate::rib::Message::NexthopRegister {
+                        proto: "bgp".to_string(),
+                        nh,
+                        vrf_id: new_vrf,
+                    });
+                } else if let super::nht::NhtDep::MupEndpoint(rd, prefix) = dep {
+                    let reachable = !self.nexthop_cache.transport_for(new_vrf, nh).is_empty();
+                    self.mup_redispatch_endpoint(new_vrf, nh, rd, prefix, reachable);
+                }
+            }
+        }
     }
 
     /// Seed one freshly spawned per-VRF task with the current catalog. The
@@ -4563,8 +4608,12 @@ impl Bgp {
                 self.flex_algo_srv6_routes.remove(algo, prefix);
                 self.broadcast_colour_steering();
             }
-            RibRx::NexthopUpdate { nh, resolution } => {
-                self.nht_handle_update(nh, &resolution);
+            RibRx::NexthopUpdate {
+                vrf_id,
+                nh,
+                resolution,
+            } => {
+                self.nht_handle_update(vrf_id, nh, &resolution);
             }
             RibRx::LabelBlock { start, size } => {
                 self.label_block_arrived(start, size);
@@ -4878,15 +4927,17 @@ impl Bgp {
 
     /// Apply a NHT resolution change: refresh the cached resolution
     /// (reachability + resolved transport) and re-evaluate every
-    /// dependent prefix.
+    /// dependent prefix. `vrf_id` is the table the registration named
+    /// (0 = global — every dep type except the MUP ST1 endpoint).
     fn nht_handle_update(
         &mut self,
+        vrf_id: u32,
         nh: std::net::IpAddr,
         resolution: &crate::rib::nht::NexthopResolution,
     ) {
         use super::nht::CacheChange;
         let reachable = resolution.reachable;
-        match self.nexthop_cache.update(nh, resolution) {
+        match self.nexthop_cache.update(vrf_id, nh, resolution) {
             CacheChange::Unchanged => {}
             // Gate flipped → full re-eval: best-path, advertise, install.
             CacheChange::Reachability(deps) => {
@@ -4925,7 +4976,7 @@ impl Bgp {
                     inline.extend(deps);
                 }
                 for dep in inline {
-                    self.nht_reeval_dep(nh, reachable, dep);
+                    self.nht_reeval_dep(vrf_id, nh, reachable, dep);
                 }
             }
             // PE still reachable but its transport rerouted → only the
@@ -4933,7 +4984,7 @@ impl Bgp {
             // without re-advertising (best-path is unchanged).
             CacheChange::Transport(deps) => {
                 for dep in deps {
-                    self.nht_reinstall_transport(nh, dep);
+                    self.nht_reinstall_transport(vrf_id, nh, dep);
                 }
             }
         }
@@ -4949,7 +5000,12 @@ impl Bgp {
     /// be re-programmed — a plain entry (bare BGP next-hop, RIB
     /// re-resolves recursively) makes the re-install an idempotent
     /// re-send. No re-advertise anywhere here: best-path is unchanged.
-    fn nht_reinstall_transport(&mut self, nh: std::net::IpAddr, dep: super::nht::NhtDep) {
+    fn nht_reinstall_transport(
+        &mut self,
+        vrf_id: u32,
+        nh: std::net::IpAddr,
+        dep: super::nht::NhtDep,
+    ) {
         use super::nht::NhtDep;
         // Unicast arms first — they need a `BgpTop` carrying the NHT
         // cache, which conflicts with the shared `transport` borrow
@@ -4973,7 +5029,7 @@ impl Bgp {
             rib_known_vrfs: &self.rib_known_vrfs,
             vrf_registry: &self.vrf_registry,
         };
-        let transport = self.nexthop_cache.transport_for(nh);
+        let transport = self.nexthop_cache.transport_for(vrf_id, nh);
         match dep {
             NhtDep::V4vpn(rd, p) => {
                 let selected = self.shard.select_best_path_vpn(&rd, p);
@@ -5086,13 +5142,13 @@ impl Bgp {
             // each dependent encap (ST2→DSD / ST1→ISD) re-installs toward the
             // new egress.
             NhtDep::Mup(rd, prefix) => {
-                self.mup_redispatch_segment(nh, rd, prefix, true);
+                self.mup_redispatch_segment(vrf_id, nh, rd, prefix, true);
             }
             // MUP: a received/originated ST1's GTP endpoint (gNB) rerouted →
             // re-dispatch the ST1 with the fresh endpoint transport so the
             // `dataplane gtp` downlink encap re-installs toward the new egress.
             NhtDep::MupEndpoint(rd, prefix) => {
-                self.mup_redispatch_endpoint(nh, rd, prefix, true);
+                self.mup_redispatch_endpoint(vrf_id, nh, rd, prefix, true);
             }
             // Handled by the early match above.
             NhtDep::V4(_) | NhtDep::V6(_) => {}
@@ -5138,6 +5194,7 @@ impl Bgp {
     /// already borrows `local_rib` there.
     fn mup_redispatch_segment(
         &mut self,
+        vrf_id: u32,
         nh: std::net::IpAddr,
         rd: bgp_packet::RouteDistinguisher,
         prefix: bgp_packet::MupPrefix,
@@ -5148,7 +5205,7 @@ impl Bgp {
             return;
         };
         let transport = if reachable {
-            self.nexthop_cache.transport_for(nh).to_vec()
+            self.nexthop_cache.transport_for(vrf_id, nh).to_vec()
         } else {
             Vec::new()
         };
@@ -5177,6 +5234,7 @@ impl Bgp {
     /// stays empty for an ST1).
     fn mup_redispatch_endpoint(
         &mut self,
+        vrf_id: u32,
         nh: std::net::IpAddr,
         rd: bgp_packet::RouteDistinguisher,
         prefix: bgp_packet::MupPrefix,
@@ -5200,7 +5258,7 @@ impl Bgp {
             None
         };
         let endpoint_transport = if reachable {
-            self.nexthop_cache.transport_for(nh).to_vec()
+            self.nexthop_cache.transport_for(vrf_id, nh).to_vec()
         } else {
             Vec::new()
         };
@@ -5226,7 +5284,13 @@ impl Bgp {
     /// import with the resolved transport — register-then-gate means an
     /// imported route only becomes best-path here, so this is where the
     /// VRF dataplane install is triggered.
-    fn nht_reeval_dep(&mut self, nh: std::net::IpAddr, reachable: bool, dep: super::nht::NhtDep) {
+    fn nht_reeval_dep(
+        &mut self,
+        vrf_id: u32,
+        nh: std::net::IpAddr,
+        reachable: bool,
+        dep: super::nht::NhtDep,
+    ) {
         use super::nht::NhtDep;
         // Refresh gate flags + re-select (mutates `local_rib`). At N>1 the
         // v4-unicast deps are batched per shard by the caller
@@ -5372,7 +5436,7 @@ impl Bgp {
                     let transport = top
                         .nexthop_cache
                         .as_deref()
-                        .map_or(&[][..], |c| c.transport_for(nh));
+                        .map_or(&[][..], |c| c.transport_for(vrf_id, nh));
                     super::vrf::dispatch_import_v4(
                         &dispatcher,
                         *rd,
@@ -5416,7 +5480,7 @@ impl Bgp {
                     let transport = top
                         .nexthop_cache
                         .as_deref()
-                        .map_or(&[][..], |c| c.transport_for(nh));
+                        .map_or(&[][..], |c| c.transport_for(vrf_id, nh));
                     super::vrf::dispatch_import_v6(
                         &dispatcher,
                         *rd,
@@ -5456,7 +5520,7 @@ impl Bgp {
                     let transport = top
                         .nexthop_cache
                         .as_deref()
-                        .map_or(&[][..], |c| c.transport_for(nh));
+                        .map_or(&[][..], |c| c.transport_for(vrf_id, nh));
                     match net {
                         ipnet::IpNet::V4(p) => {
                             if reachable {
@@ -5532,7 +5596,7 @@ impl Bgp {
                     let transport = if reachable {
                         top.nexthop_cache
                             .as_deref()
-                            .map_or(Vec::new(), |c| c.transport_for(nh).to_vec())
+                            .map_or(Vec::new(), |c| c.transport_for(vrf_id, nh).to_vec())
                     } else {
                         Vec::new()
                     };
@@ -5573,7 +5637,7 @@ impl Bgp {
                     let endpoint_transport = if reachable {
                         top.nexthop_cache
                             .as_deref()
-                            .map_or(Vec::new(), |c| c.transport_for(nh).to_vec())
+                            .map_or(Vec::new(), |c| c.transport_for(vrf_id, nh).to_vec())
                     } else {
                         Vec::new()
                     };

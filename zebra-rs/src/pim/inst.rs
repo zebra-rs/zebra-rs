@@ -434,7 +434,10 @@ impl<A: PimAf> Pim<A> {
             RibRx::LinkDel(ifindex) => self.link_del(ifindex),
             RibRx::AddrAdd(addr) => self.addr_add(addr),
             RibRx::AddrDel(addr) => self.addr_del(addr),
-            RibRx::NexthopUpdate { nh, resolution } => {
+            // PIM registers RPF nexthops in the global table only, so an
+            // update can only carry `vrf_id == 0` here; the identity is
+            // dropped, not dispatched on.
+            RibRx::NexthopUpdate { nh, resolution, .. } => {
                 self.rpf_nexthop_update(nh, resolution);
                 return;
             }
