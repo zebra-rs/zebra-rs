@@ -46,6 +46,11 @@ module config-static {
             ext:help "Nexthop address, or blackhole to discard";
             type union {
               type inet:ipv4-address;
+              // An IPv6 nexthop makes this a static ILM over a
+              // v6-numbered core (RTA_VIA inet6 in the kernel, a v6
+              // adjacency in the eBPF tee) — the transit shape of
+              // MPLS-over-v6 PEs.
+              type inet:ipv6-address;
               // `blackhole` at the nexthop-key position turns the
               // route into a discard route (kernel RTN_BLACKHOLE),
               // satisfying the route's `ext:non-empty "nexthop"`.
@@ -58,6 +63,20 @@ module config-static {
           leaf "outgoing-label" {
             ext:help "Outgoing MPLS label";
             type uint32;
+          }
+          leaf interface {
+            ext:help "Egress interface (opts into the eBPF XDP fast-path pop)";
+            type string;
+            description
+              "Explicit egress interface for this label nexthop. Naming
+               it opts the pop onto the eBPF XDP fast path, whose
+               redirect delivers only toward XDP-attached ports — the
+               operator's assertion that this is a core-facing transit
+               hop (e.g. a pure-P router popping toward the egress PE,
+               which holds no route to the frame's inner destination).
+               Left unset, the pop stays on the FIB-assisted path, which
+               reaches any device but requires a route for the exposed
+               payload.";
           }
         }
       }
