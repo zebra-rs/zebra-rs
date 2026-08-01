@@ -1,0 +1,29 @@
+# z1 — EVPN VPWS PE over MPLS (RFC 8365 §5.1.3). One E-Line service
+# (eline1, EVI 100) under `encapsulation mpls`: the per-EVI Ethernet A-D
+# (Type-1, Ethernet Tag 101) carries a per-service MPLS label from the
+# dynamic block in its label field and NO Encapsulation extended
+# community, next hop = the router-id. No SRv6 locator, no VNI.
+# Control-plane only — no cradle dataplane; the AC name is not resolved here.
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.1
+    afi-safi:
+    - name: evpn
+      encapsulation: mpls
+      vpws:
+      - name: eline1
+        evi: 100
+        local-service-id: 101
+        remote-service-id: 102
+        interface: ce1
+    neighbor:
+    - remote-address: 192.168.0.2
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: evpn
+        enabled: true

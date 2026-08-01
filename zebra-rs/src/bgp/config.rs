@@ -2154,6 +2154,7 @@ fn config_vpws_leaf(
     let old_vt = svc.vid_table();
     let old_vlan_set = svc.vlan.is_some();
     let old_local_vni = svc.local_vni;
+    let old_local_label = svc.local_label;
     set(svc, value);
     let new_vt = svc.vid_table();
     let vlan_flipped = svc.vlan.is_some() != old_vlan_set;
@@ -2173,6 +2174,7 @@ fn config_vpws_leaf(
             ifname,
             local_sid,
             local_vni: old_local_vni,
+            local_label: old_local_label,
             vid: old_vt.0,
             table: old_vt.1,
         });
@@ -2274,6 +2276,7 @@ fn config_vpws_interface(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<
     let old = std::mem::replace(&mut svc.interface, interface);
     let (vid, table) = svc.vid_table();
     let local_vni = svc.local_vni;
+    let local_label = svc.local_label;
     if old != svc.interface
         && svc.remote.is_some()
         && let Some(old_ifname) = old
@@ -2283,6 +2286,7 @@ fn config_vpws_interface(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<
             ifname: old_ifname,
             local_sid,
             local_vni,
+            local_label,
             vid,
             table,
         });

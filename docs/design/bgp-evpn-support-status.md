@@ -19,7 +19,7 @@ datapath, driven from zebra-rs via the FibHandle tee.
 | **L3 / Type-5 IP Prefix (RFC 9136)** | ✅ Symmetric IRB, L3VNI + Router's-MAC EC (zebra #1913 + cradle #119) | ✅ End.DT46/DT4/DT6 per RFC 9252 (no RMAC by design) | ✅ Reuses VPNv4/v6 L3VPN data plane (#1035–#1039) |
 | **Multihoming ESI (Type-1/4, DF election)** | ✅ Control plane (shared) | ✅ Full signal set incl. Type-2 ESI (#2148/#2150/#2152) | ✅ Control plane (shared) |
 | **MAC aliasing / mass-withdraw consumers** | ❌ Open (receive side) | ❌ Open — exists for VPWS only | ❌ Open |
-| **E-Line / VPWS (RFC 8214)** | ✅ Type-1 VNI + Encapsulation EC + VTEP next hop; cradle eBPF xconnect (VTEP+VNI encap, E-Line-VNI decap) | ✅ End.DX2/DX2V, VLAN scoping, MTU check, P/B multihoming (#2116) | ❌ SRv6-only today |
+| **E-Line / VPWS (RFC 8214)** | ✅ Type-1 VNI + Encapsulation EC + VTEP next hop; cradle eBPF xconnect (VTEP+VNI encap, E-Line-VNI decap) | ✅ End.DX2/DX2V, VLAN scoping, MTU check, P/B multihoming (#2116) | 🟡 Signaling ✅ (per-service label from the dynamic block, no Encapsulation EC); cradle pop-to-AC datapath open |
 | **IPv6 underlay transport** | ✅ Zero code changes (#1850) | ✅ (native) | — (IS-IS SR-MPLS underlay) |
 | **IGMP/MLD proxy / SMET (RFC 9251)** | ✅ Incl. per-VTEP selective MDB | ✅ Control plane (shared) | ✅ Control plane (shared) |
 | **Assisted Replication (RFC 9574)** | ✅ Control plane; AR-LEAF/RNVE forward natively. ❌ AR-REPLICATOR data plane deferred | ✅ Control plane (shared) | ✅ Control plane (shared) |
@@ -50,7 +50,7 @@ datapath via SRv6 End.DX2 / End.DX2V cross-connects.
 | Remote Primary/Backup selection + per-ES A-D fast failover | ✅ | `select_remote` ranks P over B with the per-ES A-D mass-withdraw gate; failover scenarios in `bgp_evpn_vpws_multihoming.feature` |
 | All-active load balancing | ❌ Open | Needs a cradle xconnect holding more than one remote SID |
 | Control word | ❌ | C flag always 0 |
-| MPLS encapsulation | ❌ | `evpn_vpws_sid` reads only End.DX2/DX2V — SRv6-only |
+| MPLS encapsulation | 🟡 | Signaling complete: `encapsulation mpls` puts a per-service label (same dynamic block as VRF/EVI labels) in the Type-1 label field with no Encapsulation EC (RFC 8365 §5.1.3); import binds PE+label remotes. Cradle pop-to-AC xconnect datapath open |
 | VXLAN encapsulation | ✅ | `encapsulation vxlan` puts the service VNI (`vni` leaf, default the EVI) in the Type-1 label field with the VXLAN Encapsulation EC and VTEP next hop (RFC 8365 §6); import binds whatever encap the remote signalled; the tee drives the cradle VXLAN xconnect (VTEP+VNI encap, E-Line-VNI decap, `SetVtepSource` from the advertised next hop) |
 | Datapath BDD | ✅ | `cradle_vpws_zebra` (untagged + VLAN-30 E-Line, CE-to-CE), `cradle_evpn_vpws` (static) |
 
@@ -61,19 +61,21 @@ Type-1 carries the service VNI in its label field with the VXLAN
 Encapsulation EC and the VTEP next hop (RFC 8365 §6), and the import side
 classifies each remote by what *it* signalled (SRv6 L2 Service TLV first,
 else VXLAN EC + label), so a fabric can migrate one PE at a time. The
-cradle cross-connect data plane runs both flavors: the tee programs the
-remote VTEP+VNI encap, the E-Line-VNI-to-AC decap and the fabric VTEP
-source in one `AddXconnect`. MPLS VPWS originates/consumes nothing yet
-(under `encapsulation mpls` a VPWS still signals SRv6).
+cradle cross-connect data plane runs the SRv6 and VXLAN flavors: the
+tee programs the remote endpoint encap, the local decap identity and
+(for VXLAN) the fabric VTEP source in one `AddXconnect`. MPLS VPWS
+signaling is complete — a per-service label from the shared dynamic
+block, bound per RFC 8365 §5.1.3 — with the cradle pop-to-AC datapath
+as the open half.
 
 | E-Line capability | E-Line/VXLAN | E-Line/SRv6 | E-Line/MPLS |
 |---|---|---|---|
-| **Per-EVI Ethernet A-D signaling (Type-1)** | ✅ VNI in the label field + VXLAN Encapsulation EC + VTEP next hop | ✅ SRv6 L2 Service TLV → End.DX2 SID | ❌ Type-1 MPLS label field not originated/consumed |
+| **Per-EVI Ethernet A-D signaling (Type-1)** | ✅ VNI in the label field + VXLAN Encapsulation EC + VTEP next hop | ✅ SRv6 L2 Service TLV → End.DX2 SID | ✅ Per-service label in the label field, no Encapsulation EC (RFC 8365 §5.1.3) |
 | **P2P cross-connect data plane** | ✅ cradle eBPF xconnect (`ReplTarget`-shaped maps + `VNI_F_ELINE` decap, cradle #163) | ✅ cradle eBPF xconnect (cradle #45) | ❌ Not built (cradle MPLS L2 covers E-LAN, not xconnect) |
 | **VLAN-scoped E-Line** | ✅ Inner-VID demux from the DX2V table (`VNI_F_ELINE_VLAN`) | ✅ End.DX2V, VLAN table = EVI (zebra #1782, cradle #48) | ❌ |
-| **L2-Attributes EC (P/B/C flags + MTU)** | ✅ On every VPWS Type-1 | ✅ On every VPWS Type-1 (#1779) | ❌ No service to attach to |
-| **Multihoming origination (ESI, P/B roles)** | ✅ Encap-agnostic (#2116; `bgp_evpn_vpws_vxlan_multihoming` proves failover re-binds VTEP *and* per-PE VNI) | ✅ DF per `<ESI, service instance>` (#2116) | ❌ |
-| **Remote P/B selection + per-ES fast failover** | ✅ Encap-agnostic | ✅ | ❌ |
+| **L2-Attributes EC (P/B/C flags + MTU)** | ✅ On every VPWS Type-1 | ✅ On every VPWS Type-1 (#1779) | ✅ On every VPWS Type-1 |
+| **Multihoming origination (ESI, P/B roles)** | ✅ Encap-agnostic (#2116; `bgp_evpn_vpws_vxlan_multihoming` proves failover re-binds VTEP *and* per-PE VNI) | ✅ DF per `<ESI, service instance>` (#2116) | ✅ Encap-agnostic |
+| **Remote P/B selection + per-ES fast failover** | ✅ Encap-agnostic | ✅ | ✅ Encap-agnostic |
 | **All-active load balancing** | ❌ | ❌ Open (needs multi-SID xconnect) | ❌ |
 | **Control word** | — (no control word in VXLAN) | — (no control word in SRv6) | ❌ C flag always 0 |
 | **Datapath BDD** | ✅ `cradle_vpws_vxlan_zebra`, `cradle_evpn_vpws_vxlan` (+ signaling `bgp_evpn_vpws_vxlan`) | ✅ `cradle_vpws_zebra`, `cradle_evpn_vpws` | ❌ |

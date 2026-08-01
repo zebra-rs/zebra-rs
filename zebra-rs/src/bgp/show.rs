@@ -2676,9 +2676,15 @@ struct VpwsServiceJson {
     /// Who already claims this service's VNI as a decap identity, when
     /// someone does (the service is then parked, state `vni-conflict`).
     vni_conflict: Option<String>,
+    /// The MPLS service label the Type-1 went out with — set only under
+    /// `encapsulation mpls` once the dynamic block granted one.
+    local_label: Option<u32>,
     remote_sid: Option<String>,
     remote_vtep: Option<String>,
     remote_vni: Option<u32>,
+    /// The MPLS service label of the bound remote endpoint (its PE is the
+    /// route's next hop — `remote_pe`).
+    remote_label: Option<u32>,
     remote_pe: Option<String>,
     remote_is_backup: bool,
     remote_count: usize,
@@ -2734,6 +2740,7 @@ fn show_bgp_evpn_vpws(
                 local_sid: vpws.sids.get(name).map(|(addr, _)| addr.to_string()),
                 local_vni: svc.local_vni,
                 vni_conflict: svc.vni_conflict.clone(),
+                local_label: svc.local_label,
                 remote_sid: match svc.remote {
                     Some(super::vpws::VpwsEndpoint::Srv6(sid)) => Some(sid.to_string()),
                     _ => None,
@@ -2744,6 +2751,10 @@ fn show_bgp_evpn_vpws(
                 },
                 remote_vni: match svc.remote {
                     Some(super::vpws::VpwsEndpoint::Vxlan { vni, .. }) => Some(vni),
+                    _ => None,
+                },
+                remote_label: match svc.remote {
+                    Some(super::vpws::VpwsEndpoint::Mpls { label, .. }) => Some(label),
                     _ => None,
                 },
                 remote_pe: svc.remote_pe.map(|pe| pe.to_string()),
@@ -2870,6 +2881,9 @@ fn show_bgp_evpn_vpws(
         if let Some(vni) = svc.local_vni {
             writeln!(buf, "  Local VNI: {vni}")?;
         }
+        if let Some(label) = svc.local_label {
+            writeln!(buf, "  Local Label: {label}")?;
+        }
         if let Some(owner) = &svc.vni_conflict {
             writeln!(buf, "  VNI conflict: in use by {owner}")?;
         }
@@ -2889,6 +2903,9 @@ fn show_bgp_evpn_vpws(
                 }
                 super::vpws::VpwsEndpoint::Vxlan { vtep, vni } => {
                     writeln!(buf, "  Remote VTEP: {vtep} (VNI {vni}){via}")?;
+                }
+                super::vpws::VpwsEndpoint::Mpls { pe, label } => {
+                    writeln!(buf, "  Remote PE: {pe} (label {label}){via}")?;
                 }
             }
             if svc.remote_count > 1 {

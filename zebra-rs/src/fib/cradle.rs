@@ -115,10 +115,18 @@ struct CradleMirror {
     /// L3VNI ↔ VRF bindings (symmetric IRB): vni → (vrf_table_id, rmac).
     vnis_l3: HashMap<u32, (u32, [u8; 6])>,
     vtep_source: Option<Ipv4Addr>,
-    /// (AC port, vid, dx2v table) → (remote endpoint — SID or VTEP+VNI,
-    /// local decap SID, local decap VNI).
-    xconnects:
-        HashMap<(String, u16, u32), (crate::rib::XconnectRemote, Option<Ipv6Addr>, Option<u32>)>,
+    /// (AC port, vid, dx2v table) → (remote endpoint — SID, VTEP+VNI or
+    /// PE+label, local decap SID, local decap VNI, local decap label).
+    #[allow(clippy::type_complexity)]
+    xconnects: HashMap<
+        (String, u16, u32),
+        (
+            crate::rib::XconnectRemote,
+            Option<Ipv6Addr>,
+            Option<u32>,
+            Option<u32>,
+        ),
+    >,
     /// (mirror context, protected prefix) → reproduction VRF table.
     mirror_routes: HashMap<(u32, Ipv6Net), u32>,
     /// (neighbor ip, oif) → mac. Grow-only, like the upstream tee (no
@@ -560,9 +568,23 @@ impl CradleFib {
         for (vni, vtep) in &m.repl_slots_vxlan {
             self.repl_slot_add_vxlan(*vni, *vtep).await;
         }
-        for ((port, vid, table), (remote, local_sid, local_vni)) in &m.xconnects {
-            self.xconnect_add(port, *remote, *local_sid, *local_vni, *vid, *table)
-                .await;
+        for ((vni, mac), (pe, label)) in &m.fdb_mpls {
+            self.fdb_add_mpls(*vni, *mac, *pe, *label).await;
+        }
+        for (vni, pe, label) in &m.repl_slots_mpls {
+            self.repl_slot_add_mpls(*vni, *pe, *label).await;
+        }
+        for ((port, vid, table), (remote, local_sid, local_vni, local_label)) in &m.xconnects {
+            self.xconnect_add(
+                port,
+                *remote,
+                *local_sid,
+                *local_vni,
+                *local_label,
+                *vid,
+                *table,
+            )
+            .await;
         }
         for ((dst, teid), table) in &m.gtp_pdrs {
             self.gtp_pdr_add(*dst, *teid, *table).await;
@@ -1549,6 +1571,7 @@ impl CradleFib {
             let mut m = self.mirror.lock().await;
             m.fdb.remove(&(vni, mac));
             m.fdb_vxlan.remove(&(vni, mac));
+            m.fdb_mpls.remove(&(vni, mac));
         }
         let mac_str = format!(
             "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
@@ -1770,19 +1793,29 @@ impl CradleFib {
         remote: crate::rib::XconnectRemote,
         local_sid: Option<std::net::Ipv6Addr>,
         local_vni: Option<u32>,
+        local_label: Option<u32>,
         vid: u16,
         table: u32,
     ) {
-        self.mirror.lock().await.xconnects.insert(
-            (port.to_string(), vid, table),
-            (remote, local_sid, local_vni),
-        );
         let (remote_sid, remote_vtep, remote_vni) = match remote {
             crate::rib::XconnectRemote::Srv6(sid) => (sid.to_string(), String::new(), 0),
             crate::rib::XconnectRemote::Vxlan { vtep, vni } => {
                 (String::new(), vtep.to_string(), vni)
             }
+            crate::rib::XconnectRemote::Mpls { pe, label } => {
+                // Unreachable until the cradle proto grows its MPLS
+                // fields — `FibHandle::cradle_xconnect_add` filters the
+                // flavor out before this method.
+                tracing::warn!(
+                    "fib: cradle xconnect {port} -> pe {pe} label {label}: no MPLS RPC form"
+                );
+                return;
+            }
         };
+        self.mirror.lock().await.xconnects.insert(
+            (port.to_string(), vid, table),
+            (remote, local_sid, local_vni, local_label),
+        );
         let result = async {
             self.client()
                 .await?
