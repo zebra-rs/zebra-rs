@@ -134,6 +134,14 @@ bgp_mup_sidless_segment:
 	mkdir -p allure-results
 	$(CUCUMBER) -- --concurrency=1 --tags "@bgp_mup_sidless_segment"
 
+# MUP SRGW composite: a dataplane-gtp VRF whose segments are REMOTE steers
+# via SRv6 — the ST1 UE prefix H.Encaps toward a received ISD, and default
+# routes toward a received DSD for GTP-decapped uplink traffic. Needs
+# pfcp-inject on PATH + root netns (kernel VRF + seg6 + IS-IS SRv6).
+bgp_mup_srgw_gtp:
+	mkdir -p allure-results
+	$(CUCUMBER) -- --concurrency=1 --tags "@bgp_mup_srgw_gtp"
+
 # MUP ST1->ISD encap: one interwork node originates a local ISD (`segment
 # interwork prefix <p>`) and, via its MUP-C, an ST1 whose UE is inside <p>.
 # The ST1 resolves to the local End.DT46 segment and an oif-only recursive

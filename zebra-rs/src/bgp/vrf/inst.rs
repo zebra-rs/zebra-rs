@@ -323,6 +323,12 @@ pub struct BgpVrf {
     /// oif)` teed to cradle. Diff base for the downlink reconcile — a changed
     /// key re-installs, a vanished UE prefix withdraws.
     pub mup_gtp_encap_installed: std::collections::BTreeMap<ipnet::IpNet, MupGtpEncapKey>,
+    /// SRGW-composite default steering state for a `dataplane gtp` VRF whose
+    /// ST2s resolve to a REMOTE direct segment: the End.DT46-family SIDs the
+    /// installed v4/v6 default H.Encaps routes currently point at (`None` =
+    /// no default installed for that family). Diff base for
+    /// `reconcile_mup_gtp_srgw_uplink`.
+    pub mup_gtp_srgw_default: (Option<std::net::Ipv6Addr>, Option<std::net::Ipv6Addr>),
 }
 
 /// The cradle GTP-U encap install key for one downlink (`GTP4.E`) UE prefix:
@@ -857,6 +863,7 @@ impl BgpVrf {
             mup_segment_catalog: Default::default(),
             mup_endpoint_transport: std::collections::BTreeMap::new(),
             mup_gtp_encap_installed: std::collections::BTreeMap::new(),
+            mup_gtp_srgw_default: (None, None),
         };
         (vrf, inbox_tx)
     }
@@ -892,6 +899,15 @@ impl BgpVrf {
     /// resolution in `render_mup_table`; the ST2→DSD reconcile is the uplink
     /// twin (dst = the ST2 endpoint, matched by Direct-segment id).
     fn reconcile_mup_st1_isd(&mut self) {
+        self.reconcile_mup_st1_isd_filtered(&|_| true);
+    }
+
+    /// [`Self::reconcile_mup_st1_isd`] with an `allow` filter over UE
+    /// prefixes: the `dataplane gtp` SRGW composite passes exactly the
+    /// remote-steered set (local GTP handles the rest), the `end-dt46`
+    /// dataplane passes everything. A previously-installed entry the filter
+    /// no longer allows is withdrawn by the ordinary stale sweep.
+    fn reconcile_mup_st1_isd_filtered(&mut self, allow: &dyn Fn(&ipnet::IpNet) -> bool) {
         use std::net::Ipv6Addr;
         type Transport = Vec<crate::rib::nht::ResolvedNexthop>;
         // Index imported ISDs by their advertised prefix → (service SIDs,
@@ -949,6 +965,7 @@ impl BgpVrf {
                         })
                         .max_by_key(|(p, _, _)| p.prefix_len())
                         .map(|(_p, sid, transport)| (sid, transport))
+                    && allow(ue)
                 {
                     desired.insert(*ue, (sid, transport.clone()));
                 }
@@ -1089,7 +1106,165 @@ impl BgpVrf {
     /// `dataplane` is `gtp`.
     fn reconcile_mup_gtp(&mut self) {
         self.reconcile_mup_gtp_uplink();
-        self.reconcile_mup_gtp_downlink();
+        // The SRGW composite, downlink: an ST1 whose gNB endpoint is covered
+        // by a REMOTE interwork segment (a received ISD with a usable SID
+        // and resolved transport) — and not by this node's own catalog —
+        // steers via SRv6 H.Encaps toward that segment instead of local GTP
+        // encap; the segment owner performs the GTP conversion. Local
+        // segments win: this node IS the interwork there.
+        let remote = self.mup_remote_isd_st1_ues();
+        self.reconcile_mup_gtp_downlink_excluding(&remote);
+        self.reconcile_mup_st1_isd_filtered(&|ue| remote.contains(ue));
+        // The SRGW composite, uplink: ST2s resolving to a REMOTE direct
+        // segment get default H.Encaps routes in this table, so decapped
+        // traffic rides SRv6 to the anchor.
+        self.reconcile_mup_gtp_srgw_uplink();
+    }
+
+    /// UE prefixes of selected ST1s the SRGW composite steers via SRv6: the
+    /// gNB endpoint is covered by an ISD in this VRF's RIB carrying a SID
+    /// able to decap the UE's family plus a resolved underlay transport, and
+    /// NOT by this node's own interwork catalog (a locally-owned segment
+    /// performs the GTP conversion here — including the ISD this node
+    /// originates itself, whose prefix the catalog carries).
+    fn mup_remote_isd_st1_ues(&self) -> std::collections::BTreeSet<ipnet::IpNet> {
+        use std::net::Ipv6Addr;
+        let mut out = std::collections::BTreeSet::new();
+        let mut isds: Vec<(ipnet::IpNet, Vec<(Ipv6Addr, u16)>)> = Vec::new();
+        for (rd, table) in self.local_rib.mup.iter() {
+            for (prefix, rib) in table.selected.iter() {
+                if let bgp_packet::MupPrefix::Isd { prefix: p } = prefix {
+                    let sids: Vec<_> = rib.attr.srv6_l3_sids().collect();
+                    if sids.is_empty() {
+                        continue;
+                    }
+                    let Some(t) = self.mup_segment_transport.get(&(*rd, prefix.clone())) else {
+                        continue;
+                    };
+                    if t.is_empty() {
+                        continue;
+                    }
+                    isds.push((*p, sids));
+                }
+            }
+        }
+        if isds.is_empty() {
+            return out;
+        }
+        for table in self.local_rib.mup.values() {
+            for (prefix, rib) in table.selected.iter() {
+                if let bgp_packet::MupPrefix::T1st { prefix: ue } = prefix
+                    && let Some(st1) = &rib.mup_st1
+                {
+                    if self
+                        .mup_segment_catalog
+                        .interwork
+                        .iter()
+                        .any(|e| e.prefix.is_some_and(|p| p.contains(&st1.endpoint)))
+                    {
+                        continue;
+                    }
+                    if isds.iter().any(|(p, sids)| {
+                        p.contains(&st1.endpoint)
+                            && bgp_packet::srv6_l3_sid_for_dest(
+                                sids,
+                                matches!(ue, ipnet::IpNet::V4(_)),
+                            )
+                            .is_some()
+                    }) {
+                        out.insert(*ue);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// SRGW composite, uplink: this VRF's selected ST2s resolve (by
+    /// Direct-segment id) to a REMOTE direct segment — a DSD in this VRF's
+    /// RIB with usable SIDs and resolved transport, and no matching segment
+    /// in the local catalog. The decap PDR already lands the inner packet in
+    /// this VRF's table; install default v4+v6 H.Encaps routes toward the
+    /// DSD's SID so every decapped packet rides SRv6 to the anchor
+    /// (draft §3.3.12 on the SRGW). Diff-gated per family on the resolved
+    /// SID in `mup_gtp_srgw_default`.
+    fn reconcile_mup_gtp_srgw_uplink(&mut self) {
+        use std::net::Ipv6Addr;
+        type Transport = Vec<crate::rib::nht::ResolvedNexthop>;
+        let mut dsd_index: std::collections::BTreeMap<[u8; 6], (Vec<(Ipv6Addr, u16)>, Transport)> =
+            std::collections::BTreeMap::new();
+        for (rd, table) in self.local_rib.mup.iter() {
+            for (prefix, rib) in table.selected.iter() {
+                if !matches!(prefix, bgp_packet::MupPrefix::Dsd { .. }) {
+                    continue;
+                }
+                let Some(seg) = mup_direct_segment_id(&rib.attr) else {
+                    continue;
+                };
+                let sids: Vec<_> = rib.attr.srv6_l3_sids().collect();
+                if sids.is_empty() {
+                    continue;
+                }
+                let Some(t) = self.mup_segment_transport.get(&(*rd, prefix.clone())) else {
+                    continue;
+                };
+                if t.is_empty() {
+                    continue;
+                }
+                dsd_index.insert(seg, (sids, t.clone()));
+            }
+        }
+        // Desired: the first selected ST2 whose Direct-segment id matches a
+        // remote DSD and is NOT claimed by a local direct segment.
+        let mut want: Option<(Vec<(Ipv6Addr, u16)>, Transport)> = None;
+        'outer: for table in self.local_rib.mup.values() {
+            for (prefix, rib) in table.selected.iter() {
+                if !matches!(prefix, bgp_packet::MupPrefix::T2st { .. }) {
+                    continue;
+                }
+                let Some(seg) = mup_direct_segment_id(&rib.attr) else {
+                    continue;
+                };
+                if self.mup_segment_catalog.direct_table(&seg).is_some() {
+                    continue;
+                }
+                if let Some(entry) = dsd_index.get(&seg) {
+                    want = Some(entry.clone());
+                    break 'outer;
+                }
+            }
+        }
+        let v4_default: ipnet::IpNet = ipnet::IpNet::V4("0.0.0.0/0".parse().unwrap());
+        let v6_default: ipnet::IpNet = ipnet::IpNet::V6("::/0".parse().unwrap());
+        let desired = want
+            .map(|(sids, transport)| {
+                (
+                    bgp_packet::srv6_l3_sid_for_dest(&sids, true)
+                        .map(|(s, _)| (s, transport.clone())),
+                    bgp_packet::srv6_l3_sid_for_dest(&sids, false).map(|(s, _)| (s, transport)),
+                )
+            })
+            .unwrap_or((None, None));
+        let (want_v4, want_v6) = desired;
+        let (have_v4, have_v6) = self.mup_gtp_srgw_default;
+        if have_v4 != want_v4.as_ref().map(|(s, _)| *s) {
+            if have_v4.is_some() {
+                self.mup_encap_withdraw(v4_default);
+            }
+            if let Some((sid, transport)) = &want_v4 {
+                self.mup_encap_install(v4_default, *sid, transport);
+            }
+            self.mup_gtp_srgw_default.0 = want_v4.map(|(s, _)| s);
+        }
+        if have_v6 != want_v6.as_ref().map(|(s, _)| *s) {
+            if have_v6.is_some() {
+                self.mup_encap_withdraw(v6_default);
+            }
+            if let Some((sid, transport)) = &want_v6 {
+                self.mup_encap_install(v6_default, *sid, transport);
+            }
+            self.mup_gtp_srgw_default.1 = want_v6.map(|(s, _)| s);
+        }
     }
 
     /// Install GTP-U decap PDRs for a `dataplane gtp` VRF — the ST2 uplink
@@ -1181,10 +1356,16 @@ impl BgpVrf {
     /// the UE prefix is the FIB destination (draft §3.1.3 / §3.3.9) — the
     /// same key/destination split as `reconcile_mup_st1_isd`, but a real GTP
     /// tunnel instead of the End.DT46 stand-in.
-    fn reconcile_mup_gtp_downlink(&mut self) {
+    fn reconcile_mup_gtp_downlink_excluding(
+        &mut self,
+        skip: &std::collections::BTreeSet<ipnet::IpNet>,
+    ) {
         let table_id = self.ctx.vrf_id();
         // Desired encaps: each selected ST1 whose GTP endpoint has resolved
-        // to an underlay next-hop → the cradle encap key.
+        // to an underlay next-hop → the cradle encap key. `skip` holds the
+        // UE prefixes the SRGW composite steers via SRv6 instead — a
+        // previously GTP-installed entry that moves there is withdrawn by
+        // the stale sweep.
         let mut desired: std::collections::BTreeMap<ipnet::IpNet, MupGtpEncapKey> =
             std::collections::BTreeMap::new();
         for (rd, table) in self.local_rib.mup.iter() {
@@ -1192,6 +1373,9 @@ impl BgpVrf {
                 let bgp_packet::MupPrefix::T1st { prefix: ue } = prefix else {
                     continue;
                 };
+                if skip.contains(ue) {
+                    continue;
+                }
                 let Some(st1) = &rib.mup_st1 else {
                     continue;
                 };
@@ -4803,6 +4987,253 @@ mod tests {
             "PDR matches in the named GTP context, decaps into the service VRF"
         );
         assert_eq!(vrf.mup_gtp_pdr_installed.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn dataplane_gtp_downlink_steers_via_remote_isd_with_local_precedence() {
+        use crate::bgp::route::{BgpRib, BgpRibType};
+        use crate::bgp::vrf_config::{MupInterworkEntry, MupSegmentCatalog};
+        use crate::rib::nht::ResolvedNexthop;
+        use bgp_packet::{
+            BgpAttr, MupPrefix, MupSt1Fields, PrefixSid, PrefixSidTlv, SRV6_BEHAVIOR_END_DT46,
+            Srv6ServiceTlv, Srv6SidInfo,
+        };
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+        // A dataplane-gtp SRGW-ish node: the ST1's gNB endpoint is covered
+        // by a REMOTE ISD (received, with a usable SID and resolved
+        // transport) — the UE prefix must steer via SRv6, NOT local GTP,
+        // even though the endpoint's own transport resolved (a globally
+        // routable gNB). A local catalog entry then flips it back to GTP.
+        let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = test_ctx_for_vrf(5, "srgw");
+        let (_rib_tx, rib_rx) = mpsc::unbounded_channel();
+        let (mut vrf, _inbox) = BgpVrf::new(
+            "srgw".to_string(),
+            ctx,
+            Ipv4Addr::UNSPECIFIED,
+            65000,
+            /* label */ 16,
+            global_tx,
+            rib_rx,
+        );
+        vrf.dataplane = crate::bgp::vrf_config::MupDataplane::Gtp;
+
+        let dt46: Ipv6Addr = "fcbb:aaaa::46".parse().unwrap();
+        let rd: bgp_packet::RouteDistinguisher = "65000:1".parse().unwrap();
+        let isd_prefix = MupPrefix::Isd {
+            prefix: "10.0.12.0/24".parse().unwrap(),
+        };
+        let ue: ipnet::IpNet = "10.60.1.0/24".parse().unwrap();
+        let gnb = IpAddr::V4(Ipv4Addr::new(10, 0, 12, 1));
+        {
+            let table = vrf.local_rib.mup.entry(rd).or_default();
+            let mut attr = BgpAttr::new();
+            attr.prefix_sid = Some(PrefixSid {
+                tlvs: vec![PrefixSidTlv::Srv6L3Service(Srv6ServiceTlv {
+                    sids: vec![Srv6SidInfo::new(dt46, 0, SRV6_BEHAVIOR_END_DT46, None)],
+                    ..Default::default()
+                })],
+            });
+            table.selected.insert(
+                isd_prefix.clone(),
+                BgpRib::new(
+                    1,
+                    Ipv4Addr::UNSPECIFIED,
+                    BgpRibType::EBGP,
+                    0,
+                    0,
+                    &attr,
+                    None,
+                    None,
+                    false,
+                ),
+            );
+            let st1_attr = BgpAttr::new();
+            let mut rib = BgpRib::new(
+                1,
+                Ipv4Addr::UNSPECIFIED,
+                BgpRibType::EBGP,
+                0,
+                0,
+                &st1_attr,
+                None,
+                None,
+                false,
+            );
+            rib.mup_st1 = Some(MupSt1Fields {
+                teid: 0x100,
+                qfi: 5,
+                endpoint: gnb,
+                source: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 12, 2))),
+            });
+            table.selected.insert(MupPrefix::T1st { prefix: ue }, rib);
+        }
+        let transport = vec![ResolvedNexthop {
+            addr: IpAddr::V4(Ipv4Addr::new(10, 0, 99, 1)),
+            ifindex: 7,
+            labels: Vec::new(),
+            segs: vec![],
+            seg_encap: None,
+        }];
+        vrf.mup_segment_transport
+            .insert((rd, isd_prefix.clone()), transport.clone());
+        vrf.mup_endpoint_transport
+            .insert((rd, MupPrefix::T1st { prefix: ue }), transport);
+
+        vrf.reconcile_mup_gtp();
+        assert_eq!(
+            vrf.mup_st1_isd_installed.get(&ue),
+            Some(&dt46),
+            "the remote ISD steers the UE prefix via SRv6"
+        );
+        assert!(
+            !vrf.mup_gtp_encap_installed.contains_key(&ue),
+            "no local GTP encap for a remotely-steered UE"
+        );
+
+        // A local interwork segment covering the endpoint takes over: this
+        // node performs the GTP conversion itself.
+        vrf.mup_segment_catalog = MupSegmentCatalog {
+            interwork: vec![MupInterworkEntry {
+                vrf: "srgw".to_string(),
+                table_id: 5,
+                prefix: Some("10.0.12.0/24".parse().unwrap()),
+            }],
+            direct: Vec::new(),
+        };
+        vrf.reconcile_mup_gtp();
+        assert!(
+            !vrf.mup_st1_isd_installed.contains_key(&ue),
+            "the SRv6 steer is withdrawn once the segment is local"
+        );
+        assert!(
+            vrf.mup_gtp_encap_installed.contains_key(&ue),
+            "the local GTP encap takes over"
+        );
+    }
+
+    #[tokio::test]
+    async fn dataplane_gtp_uplink_default_steers_to_remote_dsd() {
+        use crate::bgp::route::{BgpRib, BgpRibType};
+        use crate::bgp::vrf_config::{MupDirectEntry, MupSegmentCatalog};
+        use crate::rib::nht::ResolvedNexthop;
+        use bgp_packet::{
+            MupPrefix, PrefixSid, PrefixSidTlv, SRV6_BEHAVIOR_END_DT46, Srv6ServiceTlv, Srv6SidInfo,
+        };
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+        // A dataplane-gtp SRGW: the ST2's Direct-segment id resolves to a
+        // REMOTE DSD → default v4+v6 H.Encaps routes steer decapped traffic
+        // to the anchor. A local direct segment with the same id wins.
+        let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let ctx = test_ctx_for_vrf(5, "srgw-ul");
+        let (_rib_tx, rib_rx) = mpsc::unbounded_channel();
+        let (mut vrf, _inbox) = BgpVrf::new(
+            "srgw-ul".to_string(),
+            ctx,
+            Ipv4Addr::UNSPECIFIED,
+            65000,
+            /* label */ 16,
+            global_tx,
+            rib_rx,
+        );
+        vrf.dataplane = crate::bgp::vrf_config::MupDataplane::Gtp;
+
+        let dt46: Ipv6Addr = "fcbb:bbbb::46".parse().unwrap();
+        let seg: bgp_packet::RouteDistinguisher = "1:2".parse().unwrap();
+        let rd: bgp_packet::RouteDistinguisher = "65000:1".parse().unwrap();
+        let dsd = MupPrefix::Dsd {
+            address: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)),
+        };
+        {
+            let table = vrf.local_rib.mup.entry(rd).or_default();
+            let mut attr = attr_with_segment_id(seg.val);
+            attr.prefix_sid = Some(PrefixSid {
+                tlvs: vec![PrefixSidTlv::Srv6L3Service(Srv6ServiceTlv {
+                    sids: vec![Srv6SidInfo::new(dt46, 0, SRV6_BEHAVIOR_END_DT46, None)],
+                    ..Default::default()
+                })],
+            });
+            table.selected.insert(
+                dsd.clone(),
+                BgpRib::new(
+                    1,
+                    Ipv4Addr::UNSPECIFIED,
+                    BgpRibType::EBGP,
+                    0,
+                    0,
+                    &attr,
+                    None,
+                    None,
+                    false,
+                ),
+            );
+            let st2_attr = attr_with_segment_id(seg.val);
+            table.selected.insert(
+                MupPrefix::T2st {
+                    endpoint: IpAddr::V4(Ipv4Addr::new(10, 0, 12, 2)),
+                    teid: 0x500,
+                },
+                BgpRib::new(
+                    1,
+                    Ipv4Addr::UNSPECIFIED,
+                    BgpRibType::EBGP,
+                    0,
+                    0,
+                    &st2_attr,
+                    None,
+                    None,
+                    false,
+                ),
+            );
+        }
+        vrf.mup_segment_transport.insert(
+            (rd, dsd.clone()),
+            vec![ResolvedNexthop {
+                addr: IpAddr::V4(Ipv4Addr::new(10, 0, 99, 1)),
+                ifindex: 7,
+                labels: Vec::new(),
+                segs: vec![],
+                seg_encap: None,
+            }],
+        );
+
+        vrf.reconcile_mup_gtp();
+        assert_eq!(
+            vrf.mup_gtp_srgw_default,
+            (Some(dt46), Some(dt46)),
+            "default v4+v6 H.Encaps steer decapped traffic to the remote anchor"
+        );
+        // The decap PDR itself still lands in this VRF's table.
+        assert!(vrf.mup_gtp_pdr_installed.contains_key(&(
+            0,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 12, 2)),
+            0x500
+        )));
+
+        // A LOCAL direct segment claims the id: the defaults are withdrawn
+        // and the decap target is its table instead.
+        vrf.mup_segment_catalog = MupSegmentCatalog {
+            interwork: Vec::new(),
+            direct: vec![MupDirectEntry {
+                vrf: "N6".to_string(),
+                table_id: 9,
+                segment_id: seg.val,
+            }],
+        };
+        vrf.reconcile_mup_gtp();
+        assert_eq!(
+            vrf.mup_gtp_srgw_default,
+            (None, None),
+            "a local direct segment withdraws the default steer"
+        );
+        assert_eq!(
+            vrf.mup_gtp_pdr_installed
+                .get(&(0, IpAddr::V4(Ipv4Addr::new(10, 0, 12, 2)), 0x500)),
+            Some(&9),
+            "the decap target becomes the local direct segment's table"
+        );
     }
 
     #[tokio::test]

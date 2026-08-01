@@ -564,6 +564,27 @@ The datapath is regression-tested by the cradle `@cradle_mup_gtp_n3_vrf`
 BDD (dual-segment origination, round-trip ICMP through both re-scoped
 lookups, tunnel counters on both ends).
 
+#### IPv6 N3 transport (GTP6) and composing with SRv6 segments
+
+The GTP datapath is **family-complete**: a session whose tunnel endpoints
+are IPv6 drives v6-outer GTP-U (`GTP6.E` / `H.M.GTP6.D`) through the same
+resolution rules, with any-family UE prefixes (the mixed v4-UE-behind-v6-N3
+case included). The v6 outer's UDP checksum is 0 — RFC 6935/6936
+zero-checksum tunnel mode, which cradle's own decap never validates;
+interop with a non-cradle GTP peer requires zero-checksum acceptance on
+their end. Regression: `@cradle_gtp6`, `@cradle_mup_gtp6_zebra`.
+
+A `dataplane gtp` VRF also **composes with remote SRv6 segments** (the
+N9/SRGW shape). An ST1 whose gNB endpoint is covered by a *received* ISD —
+with a usable End.DT46 SID and resolved transport, and not by this node's
+own catalog — steers the UE prefix via SRv6 H.Encaps toward that interwork
+segment, which performs the GTP conversion; an ST2 whose Direct-segment id
+resolves to a *received* DSD installs default v4+v6 H.Encaps routes in the
+VRF table, so GTP-decapped traffic rides SRv6 to the anchor. Local
+segments always win, and a SID-less remote segment produces no steer — the
+GTP outer then resolves by ordinary FIB toward the peer, which is the N9
+GTP-to-GTP case. Regression: `bgp_mup_srgw_gtp`.
+
 ## From PFCP session to ST route
 
 When an SMF establishes a session, the controller:

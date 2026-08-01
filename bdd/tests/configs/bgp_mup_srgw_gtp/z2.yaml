@@ -1,0 +1,78 @@
+# z2 — the dataplane-gtp SRGW: VRF mobile (rd 65501:20, NO srv6
+# encapsulation) imports z1's ISD (RT 65501:10) and DSD (RT 65501:30). Its
+# MUP-C originates — from one PFCP session on NI `access` — an ST1 whose
+# gNB endpoint falls inside the remote ISD prefix (→ the UE prefix steers
+# via SRv6 H.Encaps toward z1's interwork segment) and an ST2 stamped
+# `mup:1:2` (→ default v4+v6 H.Encaps routes toward z1's anchor segment
+# land in the VRF table, steering GTP-decapped traffic to it).
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::2/128
+- if-name: z2-z1
+  ipv6:
+    address: 2001:db8:0:12::2/64
+segment-routing:
+  locator:
+  - name: LOC2
+    prefix: fcbb:bbbb:2::/48
+    behavior: usid
+vrf:
+- name: mobile
+  mup:
+    route-target:
+      import:
+      - "65501:10"
+      - "65501:30"
+router:
+  isis:
+    net: 49.0000.0000.0000.0002.00
+    hostname: z2
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC2
+    interface:
+    - if-name: lo
+      ipv6:
+        enabled: true
+    - if-name: z2-z1
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enabled: true
+  bgp:
+    global:
+      as: 65501
+      router-id: 10.0.0.2
+    timer:
+      adv-interval:
+        ibgp: 1
+    segment-routing:
+      srv6:
+        locator: LOC2
+    neighbor:
+    - remote-address: 2001:db8::1
+      remote-as: 65501
+      update-source: 2001:db8::2
+      enabled: true
+      afi-safi:
+      - name: mup
+        enabled: true
+    vrf:
+    - name: mobile
+      rd: "65501:20"
+      afi-safi:
+        mup:
+          dataplane: gtp
+          route:
+          - type: st1
+            network-instance: access
+          - type: st2
+            network-instance: access
+            mup-ext-comm: "1:2"
+    mup-c:
+      enabled: true
+      controller-address: 2001:db8::2
+      pfcp:
+        listen-address: 127.0.0.1

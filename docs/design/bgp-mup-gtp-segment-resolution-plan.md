@@ -1,12 +1,21 @@
 # BGP MUP — explicit interwork/direct segment resolution for `dataplane gtp`
 
-> **Status:** COMPLETE (2026-08-01). Stages 1–5 merged (zebra
-> #2206/#2207/#2208/#2209/#2210, cradle #170/#171/#172); stage 6's two
-> knobs (`lookup-network-instance`, SID-less segment origination) are
-> implemented as well — only the N9/SRGW composite and GTP6 remain out of
-> scope by design. Every PR was independently shippable and the single-N6
-> lab stayed green at each stage. Implementation notes from verification
-> are folded into §3.4 and Stages 4–6 below.
+> **Status:** COMPLETE (2026-08-01), including the final extensions.
+> Stages 1–5 merged (zebra #2206/#2207/#2208/#2209/#2210, cradle
+> #170/#171/#172); stage 6's knobs (`lookup-network-instance` #2212 +
+> cradle #174, SID-less segment origination #2212) merged; and the two
+> items originally out of scope are now implemented too — **GTP6** (v6
+> outer: cradle `GTP_PDR6`/`GTP6_ENCAP`, zebra family-wide seam, UDP
+> zero-checksum tunnel mode per RFC 6935/6936) and the **N9/SRGW
+> composite** (a `dataplane gtp` VRF steers via REMOTE SRv6 segments:
+> ST1→received-ISD H.Encaps for the UE prefix with local-catalog
+> precedence, ST2→received-DSD default H.Encaps routes for decapped
+> uplink; N9 GTP-toward-a-GTP-peer is the emergent fallback — a SID-less
+> remote segment yields no SRv6 steer, so the outer resolves by ordinary
+> FIB). Proven by `@cradle_gtp6`, `@cradle_mup_gtp6_zebra` and
+> `bgp_mup_srgw_gtp`. Every PR was independently shippable and the
+> single-N6 lab stayed green at each stage. Implementation notes from
+> verification are folded into §3.4 and Stages 4–6 below.
 >
 > Origin: design review of the single-N6 configuration (`bdd/mup-lab`,
 > issue #1947 arc). The `dataplane gtp` datapath hard-codes three forwarding
@@ -386,9 +395,26 @@ preserving).*
   derive one from). `MupSegmentDesired.sid` became `Option`; the SRv6 path
   is untouched. Proven by the `bgp_mup_sidless_segment` BDD (originate +
   receive, `should not contain` SID assertions).
-* **GTP encap toward a remote interwork segment** (N9 / SRGW composite) and
-  **GTP6** (v6 outer): remain out of scope; the GTP datapath stays
-  v4-outer.
+* **N9 / SRGW composite** — *implemented, zebra-only*: `reconcile_mup_gtp`
+  composes with the existing SRv6 machinery. Downlink: an ST1 whose gNB
+  endpoint is covered by a received ISD (usable SID + resolved transport)
+  — and not by the local catalog — steers via `reconcile_mup_st1_isd`
+  (now filterable) instead of local GTP; precedence is local catalog →
+  remote ISD → fallback GTP. Uplink: an ST2 whose Direct-segment id
+  resolves to a received DSD (and no local direct segment) installs
+  default v4+v6 H.Encaps routes in the VRF table, steering GTP-decapped
+  traffic to the anchor (the PDR decap is unchanged). **N9 between GTP
+  peers is emergent**: a SID-less remote segment produces no SRv6 steer,
+  so the GTP outer resolves by ordinary FIB toward the peer — exactly the
+  fallback path. Proven by `bgp_mup_srgw_gtp`.
+* **GTP6** (v6 outer) — *implemented*: cradle gains `GTP_PDR6` /
+  `GTP6_ENCAP` (`H.M.GTP6.D` / `GTP6.E`, `NH_F_GTP6`, a bpf-to-bpf decap
+  frame to stay under the 512-byte combined-stack ceiling), the zebra
+  seam is family-wide (`IpAddr`/`IpNet` end to end), and the reconcilers
+  accept either same-family tunnel pair with any-family UE prefix. The
+  outer UDP checksum is 0 (RFC 6935/6936 zero-checksum tunnel mode —
+  cradle's decap never validates it; non-cradle peers need zero-checksum
+  acceptance). Proven by `@cradle_gtp6` and `@cradle_mup_gtp6_zebra`.
 
 ## 5. Compatibility summary
 
