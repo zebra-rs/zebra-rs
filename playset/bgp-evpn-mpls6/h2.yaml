@@ -1,0 +1,7 @@
+# Host 2 — a plain tenant host on the stretched segment.
+interface:
+- if-name: h2-pe2
+  ipv4:
+    address: 172.16.10.2/24
+system:
+  hostname: h2

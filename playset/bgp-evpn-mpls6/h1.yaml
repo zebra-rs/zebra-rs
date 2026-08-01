@@ -1,0 +1,7 @@
+# Host 1 — a plain tenant host on the stretched segment.
+interface:
+- if-name: h1-pe1
+  ipv4:
+    address: 172.16.10.1/24
+system:
+  hostname: h1

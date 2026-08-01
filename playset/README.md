@@ -108,13 +108,16 @@ endpoints, next hops, PMSI, and FDB `dst`, while the RD stays IPv4), and move
 down to add a **second isolated VNI** (three VTEPs, one serving both; per-VNI
 RD/RT — hosts in different VNIs share a subnet yet cannot reach each other).
 
-The IPv4 column also exists on the **eBPF engine** —
-[bgp-evpn-vxlan4-ebpf](bgp-evpn-vxlan4-ebpf/README.md) and
-[bgp-evpn-vxlan4-multi-ebpf](bgp-evpn-vxlan4-multi-ebpf/README.md): the same
+The whole matrix also exists on the **eBPF engine** —
+[bgp-evpn-vxlan4-ebpf](bgp-evpn-vxlan4-ebpf/README.md),
+[bgp-evpn-vxlan4-multi-ebpf](bgp-evpn-vxlan4-multi-ebpf/README.md),
+[bgp-evpn-vxlan6-ebpf](bgp-evpn-vxlan6-ebpf/README.md) and
+[bgp-evpn-vxlan6-multi-ebpf](bgp-evpn-vxlan6-multi-ebpf/README.md): the same
 labs with the forwarding moved into XDP (`system ebpf enabled`), loopback
-VTEPs (the engine has one fabric-wide VTEP source), and kernel forwarding
-off. There is no eBPF IPv6 pair: the engine's VXLAN underlay is IPv4-only,
-so the IPv6-underlay story stays with the kernel labs.
+VTEPs (the engine has one fabric-wide VTEP source per address family), and
+kernel forwarding off. In the IPv6 twins the outer header is
+Ethernet + IPv6 + UDP and the engine's tables carry the VTEPs native
+(not v4-mapped).
 
 The four EVPN labs reuse the same namespace names (`vtep1`..`vtep3`,
 `h1`..`h4`), so bring up only one at a time — `up.sh` sweeps leftovers of
@@ -132,6 +135,7 @@ runs in eBPF:
 |:--|:--|
 | [bgp-evpn-srv6](bgp-evpn-srv6/README.md) | MAC-in-SRv6 (RFC 9252): per-VNI End.DT2U on the Type-2, End.DT2M on the Type-3, SIDs carved from each PE's locator; IS-IS SRv6 underlay |
 | [bgp-evpn-mpls](bgp-evpn-mpls/README.md) | RFC 7432's original encapsulation: a dynamic per-EVI service label (no Encapsulation EC — absent means MPLS), IS-IS SR-MPLS transport through a pure-transit P router |
+| [bgp-evpn-mpls6](bgp-evpn-mpls6/README.md) | The same E-LAN between **IPv6 PEs** on an IPv6-only core with no IGP: `vtep-source` v6 next hops, labeled static v6 routes as the transport, and the P popping via static-ILM v6 bindings (`interface` leaf = XDP fast path) |
 
 Both share namespace names (`h1`, `h2`, `pe1`, `pe2`, plus `p` in the
 MPLS variant) — one at a time.
@@ -152,6 +156,7 @@ kernel has no E-Line disposition for any of them.
 | [bgp-evpn-vpws-srv6](bgp-evpn-vpws-srv6/README.md) | End.DX2 L2-Service SID carved from the SRv6 locator, IS-IS SRv6 underlay |
 | [bgp-evpn-vpws-vxlan](bgp-evpn-vpws-vxlan/README.md) | Service VNI in the Type-1 label field + VXLAN Encapsulation EC, loopback VTEPs — with deliberately asymmetric VNIs per direction |
 | [bgp-evpn-vpws-mpls](bgp-evpn-vpws-mpls/README.md) | Dynamic per-service MPLS label, no Encapsulation EC (RFC 8365 §5.1.3), IS-IS SR-MPLS transport through a pure-transit P router |
+| [bgp-evpn-vpws-mpls6](bgp-evpn-vpws-mpls6/README.md) | The MPLS E-Line between **IPv6 PEs**: static labeled v6 transport, `vtep-source` naming the Type-1's v6 next hop, the same pure-transit P |
 
 The labs share namespace names (`c1`, `c2`, `pe1`, `pe2`, plus `p` in the
 MPLS variant), so bring up only one at a time.

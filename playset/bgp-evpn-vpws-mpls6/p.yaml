@@ -1,0 +1,33 @@
+# P — the transit LSR, static-ILM v6 bindings, no IGP, no BGP, no EVPN
+# state. Label 100 pops toward pe2 and 101 toward pe1 (PHP), exposing
+# the service label to the egress PE. The explicit `interface` leaf
+# opts each pop onto the eBPF XDP fast path — the operator's assertion
+# of a core-facing hop, since the P holds no route for the exposed
+# payload and the XDP redirect delivers only between XDP-attached ports.
+system:
+  hostname: p
+  ebpf:
+    enabled: true
+interface:
+- if-name: p-pe1
+  ipv6:
+    address: 2001:db8:12::2/64
+  ebpf:
+    enabled: true
+- if-name: p-pe2
+  ipv6:
+    address: 2001:db8:23::1/64
+  ebpf:
+    enabled: true
+router:
+  static:
+    mpls:
+      label:
+      - value: 100
+        nexthop:
+        - address: 2001:db8:23::2
+          interface: p-pe2
+      - value: 101
+        nexthop:
+        - address: 2001:db8:12::1
+          interface: p-pe1

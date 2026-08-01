@@ -10,7 +10,34 @@ playset_zebra_rs_bin() {
         echo "$built"
         return
     fi
+    local staged="${PLAYSET_ROOT}/../bdd/.stage/bin/zebra-rs"
+    if [[ -x "$staged" ]]; then
+        echo "$staged"
+        return
+    fi
     echo "zebra-rs"
+}
+
+# The YANG schemas matching the binary playset_zebra_rs_bin picked — the
+# BDD `.stage` contract (see bdd/Makefile): a worktree binary must run
+# against this worktree's YANG, never /usr's, or a schema the binary
+# knows is rejected at apply (and vice versa). Emitted as `--yang-path`
+# args; empty for a PATH-resolved (installed) binary, whose schemas are
+# the installed ones.
+playset_zebra_rs_yang_args() {
+    local bin
+    bin="$(playset_zebra_rs_bin)"
+    case "$bin" in
+        "${PLAYSET_ROOT}/../target/debug/zebra-rs")
+            echo "--yang-path=${PLAYSET_ROOT}/../zebra-rs/yang"
+            ;;
+        "${PLAYSET_ROOT}/../bdd/.stage/bin/zebra-rs")
+            echo "--yang-path=${PLAYSET_ROOT}/../bdd/.stage/share/zebra-rs/yang"
+            ;;
+        *)
+            :
+            ;;
+    esac
 }
 
 playset_vtyctl_bin() {
@@ -57,7 +84,10 @@ playset_start_zebra() {
     local log_file pid_file
     log_file="${PLAYSET_RUN_DIR}/${netns}.log"
     pid_file="$(playset_pid_file "$netns")"
+    # shellcheck disable=SC2046 — the yang args are zero-or-one flag,
+    # deliberately word-split.
     run_in_netns "$netns" "$(playset_zebra_rs_bin)" \
+        $(playset_zebra_rs_yang_args) \
         --daemon \
         --log-output=file \
         --log-file="$log_file" \
