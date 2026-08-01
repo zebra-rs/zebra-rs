@@ -54,6 +54,7 @@
   - [EVPN BUM Tunnel Segmentation (RFC 9572)](ch-02-34-bgp-evpn-segmentation.md)
   - [EVPN VPWS (E-Line over SRv6, VXLAN or MPLS)](ch-02-38-bgp-evpn-vpws.md)
   - [EVPN over MPLS](ch-02-40-bgp-evpn-mpls.md)
+  - [EVPN over SRv6](ch-02-41-bgp-evpn-srv6.md)
   - [Mobile User Plane (MUP) & the MUP Controller](ch-02-35-bgp-mup.md)
   - [Route Target Constraint (RTC)](ch-02-07-bgp-rtc.md)
   - [Inter-AS L3VPN](ch-02-18-bgp-interas.md)

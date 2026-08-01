@@ -10,12 +10,17 @@ and bridges the frame into that EVI's bridge domain.
 > MPLS label and hands the exposed Ethernet frame to a bridge — that gap is
 > precisely why EVPN-over-MPLS L2 was unsupported for so long. The control
 > plane here programs [cradle](ch-16-00-ebpf.md) directly and
-> deliberately skips netlink for the decap. VXLAN and SRv6 have kernel data
-> paths; this one does not.
+> deliberately skips netlink for the decap. Of the three encapsulations only
+> VXLAN has a kernel L2 data path — [SRv6](ch-02-41-bgp-evpn-srv6.md) is
+> engine-only too.
 >
 > EVPN **Type-5** (IP Prefix) is a different story — it is an L3 service and
 > rides the ordinary VPNv4/VPNv6 MPLS data path, kernel included. See
 > [EVPN Type-5](ch-02-06-bgp-evpn-type5.md).
+
+The [`playset/bgp-evpn-mpls`](https://github.com/zebra-rs/zebra-rs/tree/main/playset/bgp-evpn-mpls)
+lab runs this chapter end to end — two PEs and a pure-transit P router over
+an IS-IS SR-MPLS underlay, one stretched segment, fully dynamic.
 
 ## Configuration
 
