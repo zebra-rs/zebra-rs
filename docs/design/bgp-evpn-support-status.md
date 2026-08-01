@@ -26,7 +26,7 @@ datapath, driven from zebra-rs via the FibHandle tee.
 | **BUM segmentation (RFC 9572, Types 9/10/11)** | ✅ Control plane complete (RBR/ASBR, DF, S-PMSI) | ✅ + SR-P2MP tree offload wiring | ✅ Control plane (shared) |
 | **P2MP replication tree** | — (head-end IR model) | ✅ RFC 9524 End.Replicate incl. Bud (zebra #1923 + cradle #131) | ❌ MPLS-P2MP forwarder not built |
 | **ARP suppression** | ❌ Open | ❌ Open | ❌ Open |
-| **Datapath BDD (CE-to-CE ping, zebra-driven)** | ✅ `cradle_evpn_vxlan_zebra*` + kernel playsets | ✅ `cradle_evpn_srv6_zebra*`, `cradle_vpws_zebra` — deepest coverage | ✅ `cradle_evpn_mpls_zebra` (IS-IS SR-MPLS transport + pure-P transit) |
+| **Datapath BDD (CE-to-CE ping, zebra-driven)** | ✅ `cradle_evpn_vxlan_zebra*`, `cradle_vpws_vxlan_zebra` + kernel playsets | ✅ `cradle_evpn_srv6_zebra*`, `cradle_vpws_zebra` — deepest coverage | ✅ `cradle_evpn_mpls_zebra`, `cradle_vpws_mpls_zebra` (IS-IS SR-MPLS transport + pure-P transit) |
 
 **Legend**: ✅ supported · ❌ not yet · — not applicable. "Control plane
 (shared)" = the feature is encapsulation-agnostic in zebra-rs; the per-encap
@@ -37,7 +37,8 @@ column difference is only the forwarding plane.
 E-Line service is implemented as EVPN VPWS: a `vpws` list under
 `router bgp afi-safi evpn` (RD `router-id:evi`, RT `AS:evi`), signaled with
 per-EVI Ethernet A-D (Type-1) routes and forwarded by the cradle eBPF
-datapath via SRv6 End.DX2 / End.DX2V cross-connects.
+cross-connect datapath under all three encapsulations — SRv6 End.DX2/DX2V,
+VXLAN VTEP+VNI, or an MPLS service label under the transport LSP.
 
 | E-Line capability | Status | Notes |
 |---|---|---|
@@ -48,19 +49,22 @@ datapath via SRv6 End.DX2 / End.DX2V cross-connects.
 | Multihoming origination (ESI, Primary/Backup roles) | ✅ | #2116 — `vpws` references an `ethernet-segment`; DF election per `<ESI, service instance>`; all-active ⇒ all Primary, single-active ⇒ DF Primary + Backup |
 | VNI-conflict guard (VXLAN) | ✅ | A VNI already claimed on the PE — another VPWS service, an L2VNI vxlan device, a VRF's L3VNI — parks the service in `vni-conflict` (owner named in show) instead of originating; retry hooks un-park it when the owner releases the VNI |
 | Remote Primary/Backup selection + per-ES A-D fast failover | ✅ | `select_remote` ranks P over B with the per-ES A-D mass-withdraw gate; failover scenarios in `bgp_evpn_vpws_multihoming.feature` |
-| All-active load balancing | ❌ Open | Needs a cradle xconnect holding more than one remote SID |
+| All-active load balancing | ❌ Open | Needs a cradle xconnect holding more than one remote endpoint |
 | Control word | ❌ | C flag always 0 |
 | MPLS encapsulation | ✅ | `encapsulation mpls` puts a per-service label (same dynamic block as VRF/EVI labels) in the Type-1 label field with no Encapsulation EC (RFC 8365 §5.1.3); import binds PE+label remotes; the tee drives the cradle MPLS xconnect (label imposed under the FIB-resolved transport LSP, `MPLS_OP_POP_XC` pop-to-AC decap) |
 | VXLAN encapsulation | ✅ | `encapsulation vxlan` puts the service VNI (`vni` leaf, default the EVI) in the Type-1 label field with the VXLAN Encapsulation EC and VTEP next hop (RFC 8365 §6); import binds whatever encap the remote signalled; the tee drives the cradle VXLAN xconnect (VTEP+VNI encap, E-Line-VNI decap, `SetVtepSource` from the advertised next hop) |
-| Datapath BDD | ✅ | `cradle_vpws_zebra` (untagged + VLAN-30 E-Line, CE-to-CE), `cradle_evpn_vpws` (static) |
+| Datapath BDD | ✅ | Zebra-driven CE-to-CE per encap: `cradle_vpws_zebra` (SRv6), `cradle_vpws_vxlan_zebra` (VXLAN), `cradle_vpws_mpls_zebra` (MPLS, IS-IS SR-MPLS + P transit) — each untagged + VLAN-30; static twins `cradle_evpn_vpws{,_vxlan,_mpls}` |
 
 ### E-Line by Encapsulation
 
-E-Line signaling honors the afi-safi `encapsulation`: under `vxlan` the
-Type-1 carries the service VNI in its label field with the VXLAN
-Encapsulation EC and the VTEP next hop (RFC 8365 §6), and the import side
-classifies each remote by what *it* signalled (SRv6 L2 Service TLV first,
-else VXLAN EC + label), so a fabric can migrate one PE at a time. The
+E-Line signaling honors the afi-safi `encapsulation`: the Type-1 carries
+an End.DX2/DX2V L2-Service Prefix-SID under `srv6`, the service VNI plus
+the VXLAN Encapsulation EC and VTEP next hop under `vxlan` (RFC 8365 §6),
+or a per-service MPLS label with no Encapsulation EC under `mpls` (RFC
+8365 §5.1.3's default). The import side classifies each remote by what
+*it* signalled (SRv6 L2 Service TLV first, else VXLAN EC + label, else
+no-EC label = MPLS PE+label), so a fabric can migrate between any pair of
+encapsulations one PE at a time. The
 cradle cross-connect data plane runs all three flavors: the tee
 programs the remote endpoint encap, the local decap identity (LocalSid,
 E-Line VNI, or pop-to-AC ILM) and, for VXLAN, the fabric VTEP source in
@@ -83,11 +87,20 @@ except all-active load balancing and the control word.
 
 - **VXLAN**: mature, with both kernel-native and eBPF data planes; the only
   encapsulation with kernel forwarding and the full multicast-optimization
-  stack (SMET per-VTEP delivery, AR leaf/RNVE).
+  stack (SMET per-VTEP delivery, AR leaf/RNVE). VPWS complete
+  (#2190/#2192/#2193 + cradle #163/#164) with the VNI-conflict guard and
+  multihoming failover proofs.
 - **SRv6**: complete L2 + L3 + VPWS + P2MP replication on the eBPF data
   plane, with the deepest BDD coverage (coverage plan phases 0–3 closed
   2026-07-28).
-- **MPLS**: L3 (Type-5) complete for a long time via L3VPN reuse; L2
-  recently made real by the cradle eBPF data plane (`cradle_evpn_mpls_zebra`
-  proves IS-IS SR-MPLS transport + BGP EVPN service labels end to end);
-  VPWS and P2MP replication remain the gaps.
+- **MPLS**: L3 (Type-5) complete for a long time via L3VPN reuse; L2 made
+  real by the cradle eBPF data plane (`cradle_evpn_mpls_zebra` proves
+  IS-IS SR-MPLS transport + BGP EVPN service labels end to end); VPWS
+  complete (#2196/#2198 + cradle #165/#166 — dynamic per-service labels,
+  pop-to-AC ILM, `cradle_vpws_mpls_zebra` e2e). P2MP replication remains
+  the gap.
+
+With the E-LINE arcs closed 2026-08-02, VPWS is the first EVPN service
+running end to end over all three encapsulations, mixed per direction; the
+per-service E-Line gaps left open everywhere are all-active load balancing
+and the (MPLS-only) control word.
