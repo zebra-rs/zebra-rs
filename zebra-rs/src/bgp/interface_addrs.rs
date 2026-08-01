@@ -83,6 +83,17 @@ impl InterfaceAddrs {
         }
     }
 
+    /// Drop everything recorded against `ifindex`. A deleted link's
+    /// addresses are not reliably withdrawn one by one — a veth moved
+    /// into another netns emits only RTM_DELLINK — so the LinkDel
+    /// handler sweeps them here wholesale. Without it, a dead
+    /// interface keeps serving next-hop sources forever.
+    pub fn purge_ifindex(&mut self, ifindex: u32) {
+        self.link_local.remove(&ifindex);
+        self.global.remove(&ifindex);
+        self.v4_owner.retain(|_, owner| *owner != ifindex);
+    }
+
     /// Which interface owns this local IPv4 address, if any. Used to
     /// map a v4-addressed BGP session's local end back to its
     /// interface so [`Self::global_for`] can supply the v6 next-hop
@@ -190,6 +201,22 @@ mod tests {
         assert_eq!(t.link_local_for(7), Some("fe80::1".parse().unwrap()));
         t.forget(&a);
         assert_eq!(t.link_local_for(7), None);
+    }
+
+    #[test]
+    fn purge_ifindex_drops_all_kinds() {
+        let mut t = InterfaceAddrs::new();
+        t.record(&v6("fe80::1", 64, 7));
+        t.record(&v6("2001:db8::1", 64, 7));
+        t.record(&v4("10.0.0.1", 24, 7));
+        t.record(&v6("fe80::2", 64, 9));
+
+        t.purge_ifindex(7);
+        assert_eq!(t.link_local_for(7), None);
+        assert_eq!(t.global_for(7), None);
+        assert_eq!(t.ifindex_for_v4("10.0.0.1".parse().unwrap()), None);
+        // The other interface is untouched.
+        assert_eq!(t.link_local_for(9), Some("fe80::2".parse().unwrap()));
     }
 
     #[test]

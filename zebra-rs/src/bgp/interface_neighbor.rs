@@ -119,13 +119,29 @@ fn materialize(
     let cfg = bgp.interface_neighbors.get(name)?.clone();
     let resolved = resolve_remote_as_with_source(bgp, &cfg)?;
 
-    // Already materialized? Refresh address (the peer's link-local
-    // can change if the kernel reassigns it) but otherwise leave the
-    // FSM alone — except a dormant peer (materialized at config time,
-    // address still unspecified), which gets its first kick here.
+    // Already materialized? Possibly refresh the address, but leave
+    // the FSM alone — except a dormant peer (materialized at config
+    // time, address still unspecified), which gets its first kick here.
     if let Some(existing) = bgp.peers.get_mut_by_key(&PeerKey::Interface(ifindex)) {
         if let Some(link_local) = link_local {
-            existing.address = link_local.into();
+            let incoming: std::net::IpAddr = link_local.into();
+            let unspecified =
+                matches!(existing.address, std::net::IpAddr::V6(a) if a.is_unspecified());
+            // RA stickiness: adopt the RA's source address only when
+            // the peer has no address yet (dormant) or no session is
+            // riding the current one. A peer holding several
+            // link-locals can alternate its RA source between them —
+            // rewriting a live session's identity on every RA
+            // desynchronizes it from the TCP session underneath and
+            // from show/clear lookups. If the peer genuinely
+            // renumbered, the dead session clears via hold-timer /
+            // TCP reset and the next RA re-points us then.
+            if unspecified
+                || (existing.address != incoming
+                    && existing.state != super::peer::State::Established)
+            {
+                existing.address = incoming;
+            }
             nd_mark_refreshed(existing, Instant::now());
             // No-op on a running peer (`start()` gates on `!active`);
             // a dormant one leaves Idle now that it can dial.
