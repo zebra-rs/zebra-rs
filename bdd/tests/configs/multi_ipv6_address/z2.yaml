@@ -1,0 +1,27 @@
+# z2: single-address neighbor on the shared 2001:db8:1::/64 subnet.
+# It learns z1's 2001:db8:2::/64 via OSPFv3 (through the DR's
+# aggregation) and IS-IS; DR priority 0 pins z2 as DROther so the
+# aggregated prefix always resolves via z1 — the DR's own aggregated
+# prefixes are not FIB-routable on itself.
+interface:
+- if-name: vz2ns
+  ipv6:
+    address:
+    - 2001:db8:1::9/64
+router:
+  ospfv3:
+    router-id: 2.2.2.2
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: vz2ns
+        enabled: true
+        priority: 0
+  isis:
+    net: 49.0000.0000.0000.0002.00
+    is-type: level-2-only
+    hostname: z2
+    interface:
+    - if-name: vz2ns
+      ipv6:
+        enabled: true

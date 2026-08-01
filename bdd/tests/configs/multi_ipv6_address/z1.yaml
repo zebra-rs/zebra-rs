@@ -1,0 +1,33 @@
+# z1: three IPv6 addresses on the LAN veth — 2001:db8:1::1/64 and
+# 2001:db8:1::11/64 share a subnet (IPv6 has no kernel-secondary
+# concept; both are equal citizens), 2001:db8:2::1/64 is a distinct
+# subnet on the same wire. The protocols must advertise SUBNETS, not
+# addresses: masked, deduped, and — for OSPFv3 — the extra subnet of a
+# transit interface travels via the DR's Intra-Area-Prefix aggregation
+# (RFC 5340 §4.4.3.9), not each router's own LSA.
+#
+# OSPFv3 and IS-IS both run on the veth so one topology proves both
+# advertisement disciplines.
+interface:
+- if-name: vz1ns
+  ipv6:
+    address:
+    - 2001:db8:1::1/64
+    - 2001:db8:1::11/64
+    - 2001:db8:2::1/64
+router:
+  ospfv3:
+    router-id: 1.1.1.1
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: vz1ns
+        enabled: true
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    is-type: level-2-only
+    hostname: z1
+    interface:
+    - if-name: vz1ns
+      ipv6:
+        enabled: true
