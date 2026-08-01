@@ -414,13 +414,13 @@ pub enum Message {
     /// table `match_vrf` (0 = global), is stripped and its inner packet
     /// forwarded in VRF `table_id`. Cradle-only (the kernel has no GTP action).
     CradleGtpPdrAdd {
-        dst: std::net::Ipv4Addr,
+        dst: IpAddr,
         teid: u32,
         table_id: u32,
         match_vrf: u32,
     },
     CradleGtpPdrDel {
-        dst: std::net::Ipv4Addr,
+        dst: IpAddr,
         teid: u32,
         match_vrf: u32,
     },
@@ -462,16 +462,16 @@ pub enum Message {
     /// IPv4 + UDP(2152) + GTP-U(`teid`) toward `gtp_dst` (sourced from
     /// `gtp_src`) over the resolved v4 underlay `gw`/`oif`. Cradle-only.
     CradleGtpEncapAdd {
-        prefix: ipnet::Ipv4Net,
+        prefix: ipnet::IpNet,
         table_id: u32,
-        gtp_src: std::net::Ipv4Addr,
-        gtp_dst: std::net::Ipv4Addr,
+        gtp_src: IpAddr,
+        gtp_dst: IpAddr,
         teid: u32,
-        gw: Option<std::net::Ipv4Addr>,
+        gw: Option<IpAddr>,
         oif: u32,
     },
     CradleGtpEncapDel {
-        prefix: ipnet::Ipv4Net,
+        prefix: ipnet::IpNet,
         table_id: u32,
     },
     /// A MAC the cradle eBPF datapath learned on a local L2 port (via the
