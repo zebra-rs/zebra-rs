@@ -30,7 +30,7 @@
 //! differs from our non-zero MTU is not bound (`mtu-mismatch`).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv6Addr};
 
 use super::ethernet_segment::{EthernetSegment, VpwsRole};
 
@@ -46,9 +46,9 @@ pub enum VpwsEndpoint {
     /// §6.3).
     Srv6(Ipv6Addr),
     /// The advertised VTEP and VNI (RFC 8365 §6): the VNI rides the
-    /// Type-1's label field, the VTEP is the route's next hop. IPv4 only —
-    /// the cradle VXLAN underlay is IPv4.
-    Vxlan { vtep: Ipv4Addr, vni: u32 },
+    /// Type-1's label field, the VTEP — IPv4 or IPv6 underlay — is the
+    /// route's next hop.
+    Vxlan { vtep: IpAddr, vni: u32 },
     /// The advertised MPLS service label (RFC 7432 base encapsulation,
     /// signalled by the *absence* of an Encapsulation EC per RFC 8365
     /// §5.1.3), imposed toward the advertising PE — the route's next hop —
@@ -95,12 +95,11 @@ pub struct VpwsService {
     /// `End.DX2` entry in `VpwsState::sids`. `None` when the service
     /// originated under SRv6 (or not at all).
     pub local_vni: Option<u32>,
-    /// The IPv4 VTEP our Type-1 went out with as its next hop — what the
-    /// remote encapsulates toward, so the tee programs it as cradle's
-    /// fabric-wide VXLAN source (`SetVtepSource`, the decap match). Set
-    /// alongside `local_vni`; `None` under SRv6 or when the advertised
-    /// next hop is not IPv4.
-    pub local_vtep: Option<Ipv4Addr>,
+    /// The VTEP our Type-1 went out with as its next hop (either address
+    /// family) — what the remote encapsulates toward, so the tee programs
+    /// it as cradle's VXLAN source for that family (`SetVtepSource`, the
+    /// decap match). Set alongside `local_vni`; `None` under SRv6.
+    pub local_vtep: Option<IpAddr>,
     /// Set when the service's VNI is already claimed as a decap identity
     /// by someone else on this PE (another VPWS service, an L2VNI vxlan
     /// device, a VRF's L3VNI): who owns it. The service is parked — no
@@ -510,7 +509,7 @@ mod tests {
         // role bits, so the VXLAN primary wins — and losing it fails over
         // to the SRv6 backup, endpoint flavor notwithstanding.
         let vxlan = VpwsEndpoint::Vxlan {
-            vtep: Ipv4Addr::new(192, 0, 2, 2),
+            vtep: IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 2)),
             vni: 100,
         };
         let mut primary = mh(2, true, false);

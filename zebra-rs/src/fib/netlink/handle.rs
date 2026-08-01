@@ -654,24 +654,28 @@ impl FibHandle {
 
     /// Declare an EVPN/VXLAN L2VNI to the cradle data plane when its VXLAN
     /// device appears: bind the VNI to its bridge domain (`bd == vni`) and
-    /// set the fabric-wide local VTEP source. Only an IPv4 VTEP is a cradle
-    /// datapath capability today; an IPv6-local (SRv6) device is a no-op
-    /// here (it needs neither map). No-op when cradle is disabled.
+    /// set the local VTEP source for the device-local's address family
+    /// (cradle keeps one slot per family — a v6-local device is a
+    /// v6-underlay VTEP). An EVPN-over-SRv6 deployment declares the same
+    /// device shape (its VNI declaration); registering it too is inert —
+    /// nothing sends VXLAN/UDP 4789 to an SRv6 PE, so the decap match
+    /// never claims a packet and the VNI binding is only consulted by
+    /// VXLAN decap. No-op when cradle is disabled.
     pub async fn cradle_vni_register(&self, vni: u32, local: IpAddr) {
-        if let Some(cradle) = &self.cradle
-            && let IpAddr::V4(v4) = local
-        {
+        if let Some(cradle) = &self.cradle {
             cradle.set_vni(vni, vni).await;
-            cradle.set_vtep_source(v4).await;
+            cradle.set_vtep_source(local).await;
         }
     }
 
     /// Declare an EVPN/VXLAN L3VNI (symmetric IRB, RFC 9135) to the cradle
     /// data plane: bind the VNI to a tenant `vrf_table_id` with this PE's
     /// router-MAC so a received VXLAN frame on `vni` routes its inner IP in
-    /// that VRF, and set the fabric-wide local VTEP source. Only an IPv4
-    /// VTEP is a cradle datapath capability today; an IPv6-local device is a
-    /// no-op here. No-op when cradle is disabled.
+    /// that VRF, and set the fabric-wide local VTEP source. The symmetric-IRB
+    /// VXLAN L3 encap is an IPv4-only cradle capability (`VxlanEncap` carries
+    /// a 4-byte VTEP), so an IPv6-local device is a no-op here — unlike the
+    /// L2VNI register, which serves either family. No-op when cradle is
+    /// disabled.
     pub async fn cradle_vni_register_l3(
         &self,
         vni: u32,
@@ -683,7 +687,7 @@ impl FibHandle {
             && let IpAddr::V4(v4) = local
         {
             cradle.set_vni_l3(vni, vrf_table_id, rmac).await;
-            cradle.set_vtep_source(v4).await;
+            cradle.set_vtep_source(IpAddr::V4(v4)).await;
         }
     }
 
@@ -749,7 +753,7 @@ impl FibHandle {
         remote: crate::rib::XconnectRemote,
         local_sid: Option<std::net::Ipv6Addr>,
         local_vni: Option<u32>,
-        local_vtep: Option<std::net::Ipv4Addr>,
+        local_vtep: Option<IpAddr>,
         local_label: Option<u32>,
         vid: u16,
         table: u32,
@@ -3597,14 +3601,13 @@ impl FibHandle {
             }
             return;
         }
-        // EVPN over VXLAN + cradle: the MAC sits behind a remote IPv4 VTEP,
-        // and the eBPF datapath is the forwarder — install the overlay FDB
-        // entry there and skip the kernel VXLAN FDB (cradle owns it). Fires
-        // whether or not a kernel VXLAN device exists. An IPv6 VTEP is not
-        // yet a cradle datapath capability, so it falls through to the
-        // kernel path below.
+        // EVPN over VXLAN + cradle: the MAC sits behind a remote VTEP of
+        // either address family, and the eBPF datapath is the forwarder —
+        // install the overlay FDB entry there and skip the kernel VXLAN FDB
+        // (cradle owns it). Fires whether or not a kernel VXLAN device
+        // exists.
         if let Some(cradle) = &self.cradle
-            && let Some(IpAddr::V4(vtep)) = tunnel_endpoint
+            && let Some(vtep) = tunnel_endpoint
         {
             cradle.fdb_add_vxlan(vni, mac.octets(), vtep).await;
             return;
@@ -3991,13 +3994,12 @@ impl FibHandle {
         _ifindex: u32,
         _seq: u32,
     ) {
-        // EVPN over VXLAN + cradle: the remote VTEP `group` joins the VNI's
-        // eBPF flood set (ingress replication); cradle owns the datapath, so
-        // skip the kernel zero-MAC FDB. An IPv6 VTEP falls through to kernel.
-        if let Some(cradle) = &self.cradle
-            && let IpAddr::V4(vtep) = group
-        {
-            cradle.repl_slot_add_vxlan(vni, vtep).await;
+        // EVPN over VXLAN + cradle: the remote VTEP `group` — either
+        // address family — joins the VNI's eBPF flood set (ingress
+        // replication); cradle owns the datapath, so skip the kernel
+        // zero-MAC FDB.
+        if let Some(cradle) = &self.cradle {
+            cradle.repl_slot_add_vxlan(vni, group).await;
             return;
         }
         let Some(&vxlan_ifindex) = self.vni_ifindex_map.get(&vni) else {
@@ -4047,10 +4049,8 @@ impl FibHandle {
     /// Remove a remote VTEP from VXLAN BUM ingress replication.
     /// Counterpart of `mdb_add`; same rationale on naming.
     pub async fn mdb_del(&self, vni: u32, group: IpAddr, _source: Option<IpAddr>, _ifindex: u32) {
-        if let Some(cradle) = &self.cradle
-            && let IpAddr::V4(vtep) = group
-        {
-            cradle.repl_slot_del_vxlan(vni, vtep).await;
+        if let Some(cradle) = &self.cradle {
+            cradle.repl_slot_del_vxlan(vni, group).await;
             return;
         }
         let Some(&vxlan_ifindex) = self.vni_ifindex_map.get(&vni) else {

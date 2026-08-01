@@ -37,9 +37,9 @@ pub enum XconnectRemote {
     /// The remote `End.DX2`/`End.DX2V` L2-Service SID (RFC 9252 §6.3).
     Srv6(Ipv6Addr),
     /// The remote VTEP and its advertised VNI (RFC 8365 §6: the VNI rides
-    /// the Type-1's label field, the VTEP is the route's next hop). IPv4
-    /// only — the cradle VXLAN underlay is IPv4.
-    Vxlan { vtep: Ipv4Addr, vni: u32 },
+    /// the Type-1's label field, the VTEP — IPv4 or IPv6 underlay — is
+    /// the route's next hop).
+    Vxlan { vtep: IpAddr, vni: u32 },
     /// The remote PE and the MPLS service label it advertised (RFC 7432
     /// base encapsulation — the Type-1's label field, imposed under
     /// whatever transport LSP reaches the PE).
@@ -438,7 +438,7 @@ pub enum Message {
         /// The IPv4 VTEP this PE advertised as the service's next hop —
         /// teed as cradle's fabric-wide `SetVtepSource` (the VXLAN decap
         /// match and outer source) before the VXLAN xconnect lands.
-        local_vtep: Option<Ipv4Addr>,
+        local_vtep: Option<IpAddr>,
         /// The MPLS service label this PE advertised — the E-Line's local
         /// decap identity under `encapsulation mpls` (pop-to-AC ILM), the
         /// `local_sid`/`local_vni` analog; at most one of the three.
