@@ -95,16 +95,13 @@ slot, and a flooded frame gets one copy per slot carrying that PE's BUM label.
 ### Enabling the data plane
 
 Because none of this forwarding exists in the kernel, the EVI's label, its
-decap and every remote MAC are programmed **only** into cradle. Three
+decap and every remote MAC are programmed **only** into cradle. Two
 separate things have to be true — the control plane will happily advertise
-and receive routes with any of them missing:
+and receive routes with either of them missing:
 
 ```
 system {
   ebpf {
-    enabled true;
-  }
-  cradle {
     enabled true;
   }
 }
@@ -120,13 +117,12 @@ interface enp0s7 {
 }
 ```
 
-- **`system ebpf enabled`** supervises the engine as a child process. On its
-  own it yields a plain eBPF L2 switch with nothing programmed into it.
-- **`system cradle enabled`** is the FIB tee — the switch that actually
-  carries the service label, the decap ILM and the EVPN FDB across. An
-  externally-run cradle is teed to with this leaf alone (point it with
-  `system cradle grpc-endpoint`; that leaf is an endpoint override and
-  enables nothing by itself).
+- **`system ebpf enabled`** supervises the engine as a child process and
+  **implies the FIB tee** — the service label, the decap ILM and the EVPN
+  FDB are carried across as soon as the managed engine is up. For an
+  **externally-run** cradle, `system cradle enabled` activates the tee
+  standalone instead (point it with `system cradle grpc-endpoint`; that
+  leaf is an endpoint override and enables nothing by itself).
 - **`interface <name> ebpf enabled`** attaches a port. Both the core-facing
   port (where labelled frames arrive) and the CE-facing port (where the
   bridge's access traffic arrives) must be attached.

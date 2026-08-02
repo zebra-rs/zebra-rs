@@ -49,16 +49,17 @@ interface enp0s6 {
 ```
 
 - **`system ebpf enabled true`** runs the data plane: zebra-rs launches the
-  engine as a managed child process and keeps it healthy. On its own it is a
-  pure eBPF L2 switch — no routing state is programmed into it.
-- **`system cradle enabled true`** is the **FIB tee**: every route zebra-rs
-  installs — plus ILMs, SRv6 SIDs and EVPN state — is programmed into the
-  engine in addition to the kernel, and the data plane's MAC learning is fed
-  back into EVPN Type-2 origination. This is the switch that turns the
-  switch into a forwarder for zebra-rs's routing state, and it is
-  independent of `system ebpf`: an externally-run cradle is teed to with
-  this leaf alone, and `system cradle grpc-endpoint` only overrides the
-  endpoint (default `unix:cradle/grpc`) — it enables nothing by itself.
+  engine as a managed child process, keeps it healthy, and **implies the
+  FIB tee** — a managed engine is always programmed with zebra-rs's routing
+  state.
+- **`system cradle enabled true`** is the **FIB tee** standalone: every
+  route zebra-rs installs — plus ILMs, SRv6 SIDs and EVPN state — is
+  programmed into the engine in addition to the kernel, and the data
+  plane's MAC learning is fed back into EVPN Type-2 origination. Set it
+  when the engine is run **externally** rather than managed by `system
+  ebpf` (with `system ebpf enabled` it is already implied). `system cradle
+  grpc-endpoint` only overrides the endpoint (default `unix:cradle/grpc`) —
+  it enables nothing by itself.
 - **`interface <name> ebpf enabled true`** makes that interface a data-plane
   port: the forwarding programs attach to it and it participates in eBPF
   forwarding. The port follows the interface's VRF binding
@@ -67,8 +68,8 @@ interface enp0s6 {
 
 | YANG leaf | Type | Default | Notes |
 |---|---|---|---|
-| `/system/ebpf/enabled` | `boolean` | `false` | Engine lifecycle: spawn and supervise the data plane. |
-| `/system/cradle/enabled` | `boolean` | `false` | The FIB tee: program routes / ILM / SRv6 / EVPN into the engine. |
+| `/system/ebpf/enabled` | `boolean` | `false` | Engine lifecycle: spawn and supervise the data plane. Implies the FIB tee. |
+| `/system/cradle/enabled` | `boolean` | `false` | The FIB tee standalone (for an externally-run engine): program routes / ILM / SRv6 / EVPN into the engine. |
 | `/system/cradle/grpc-endpoint` | `string` | `unix:cradle/grpc` | Endpoint override, shared by the tee and the managed engine. Does not enable the tee. |
 | `/interface/ebpf/enabled` | `boolean` | `false` | Per-interface port membership. |
 

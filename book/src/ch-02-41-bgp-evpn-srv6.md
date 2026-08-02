@@ -78,7 +78,11 @@ binding the routes carry: a per-VNI `End.DT2U` on every Type-2 and an
 
 A receiver classifies by the SID's presence — the SRv6 L2 Services
 attribute wins before any Encapsulation-EC reasoning — so SRv6, VXLAN and
-MPLS PEs can coexist under one route reflector.
+MPLS PEs can coexist under one route reflector. Flood state is partitioned
+the same way: an IMET carrying an `End.DT2M` SID populates only SRv6
+replication slots and never enters the VXLAN head-end flood set (an MPLS
+BUM-label IMET likewise stays out), so a mixed-encapsulation fabric cannot
+deliver a BUM frame twice.
 
 ## Forwarding
 
