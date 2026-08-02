@@ -28,12 +28,15 @@ The RD is auto-derived as `router-id:evi`, the route-target as
 `AS:evi`; the ESI is all-zero unless the AC sits on a multihomed
 Ethernet Segment (see below).
 
-Three playsets run one E-Line each, live —
+Four playsets run one E-Line each, live —
 [`playset/bgp-evpn-vpws-srv6`](https://github.com/zebra-rs/zebra-rs/tree/main/playset/bgp-evpn-vpws-srv6),
 [`playset/bgp-evpn-vpws-vxlan`](https://github.com/zebra-rs/zebra-rs/tree/main/playset/bgp-evpn-vpws-vxlan)
-(with asymmetric per-direction VNIs) and
+(with asymmetric per-direction VNIs),
 [`playset/bgp-evpn-vpws-mpls`](https://github.com/zebra-rs/zebra-rs/tree/main/playset/bgp-evpn-vpws-mpls)
-(through a pure-transit P router).
+(through a pure-transit P router) and
+[`playset/bgp-evpn-vpws-mpls6`](https://github.com/zebra-rs/zebra-rs/tree/main/playset/bgp-evpn-vpws-mpls6)
+(the same MPLS wire on an **IPv6-only core** — v6 loopbacks as
+`vtep-source`, labeled static v6 transport, no IPv4 anywhere).
 
 ## Configuration
 
@@ -123,9 +126,12 @@ set router bgp afi-safi evpn vpws eline1 vni 5001
   the two directions of one E-Line may carry different VNIs; each PE
   simply uses what its peer advertised.
 * The Type-1's next hop is the VTEP: a vxlan device's `local-address`
-  when one declares the VNI, else the router-id — so make the router-id
-  a routable loopback and peer BGP over it (`update-source`), the
-  standard EVPN shape. The tee programs that same address as the
+  when one declares the VNI, else the afi-safi `vtep-source` address,
+  else the router-id — so make it a routable loopback and peer BGP over
+  it (`update-source`), the standard EVPN shape. `vtep-source` may be
+  **IPv6**: it is what expresses a PE on an IPv6 underlay (the v4
+  router-id cannot), and the E-Line then runs over native v6 VTEPs on
+  the eBPF data plane. The tee programs that same address as the
   fabric-wide VXLAN source (the decap match), so the address the remote
   sends to and the address this PE accepts can never disagree.
 * A VNI is a **per-PE decap identity**: one already claimed — by another
@@ -165,11 +171,16 @@ set router bgp afi-safi evpn vpws eline1 interface ce1
   Encapsulation extended community** — its absence is what says MPLS. A
   service configured before the block grant advertises label 0 (which no
   remote binds) and is re-originated the moment the grant lands.
-* The next hop is the router-id — the address the transport LSP resolves
-  on. Make it a routable loopback carried by the IGP (IS-IS/OSPF
-  SR-MPLS) and peer BGP over it, the classic MPLS-VPN shape; the ingress
-  imposes `[transport…][service label]` with the transport stack coming
-  from the FIB toward the PE.
+* The next hop is the afi-safi `vtep-source` address when set, else the
+  router-id — the address the transport LSP resolves on. Make it a
+  routable loopback carried by the IGP (IS-IS/OSPF SR-MPLS) and peer BGP
+  over it, the classic MPLS-VPN shape; the ingress imposes
+  `[transport…][service label]` with the transport stack coming from the
+  FIB toward the PE — the v4 or v6 FIB by the next hop's family. A v6
+  `vtep-source` is how an E-Line runs over an **IPv6-only core**: the
+  Type-1 advertises the v6 loopback as next hop and the transport LSP
+  toward it comes from the IGP or a labeled static v6 route (`set
+  router static ipv6 route <pfx> nexthop <nh> label <l>`).
 * The egress pops its own service label and emits the frame **raw on the
   AC** (for a VLAN-scoped service, demuxed on the inner VID) — a
   disposition the kernel does not have, so MPLS E-Lines require the
