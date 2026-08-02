@@ -6,15 +6,27 @@ from eBPF maps that zebra-rs programs directly from its routing state. Every
 route zebra-rs computes — static, BGP, OSPF, IS-IS, plus the SR-MPLS / SRv6 /
 EVPN / MUP forwarding state — is installed into the eBPF FIB in addition to
 the kernel FIB, and the data plane's MAC learning feeds back into EVPN
-Type-2 origination.
+Type-2 origination. The tee is **dual-stack end to end**: VXLAN services run
+over native IPv6 VTEPs, an IPv6-only core resolves MPLS service labels
+through the v6 FIB (static v6 label routes included), and GTP-U tunnels take
+IPv4 or IPv6 outers.
 
 Some forwarding behaviours have **no mainline-kernel equivalent** and are
-only available on the eBPF data plane — notably real GTP-U for
-[MUP](ch-02-35-bgp-mup.md) (`dataplane gtp`),
-[EVPN VPWS](ch-02-38-bgp-evpn-vpws.md) E-Line egress, and the
-bridge-domain decap that [EVPN over MPLS](ch-02-40-bgp-evpn-mpls.md) needs —
-the kernel has no action that pops an MPLS label and hands the exposed frame
-to a bridge, so that service is cradle-only end to end.
+only available on the eBPF data plane:
+
+- real **GTP-U** for [MUP](ch-02-35-bgp-mup.md) (`dataplane gtp`) — the
+  kernel has no GTP action; encap and decap both run here, over v4 or v6
+  outers;
+- **EVPN over MPLS** ([E-LAN](ch-02-40-bgp-evpn-mpls.md) and
+  [E-Line](ch-02-38-bgp-evpn-vpws.md)) — the kernel has no action that pops
+  an MPLS label and hands the exposed frame to a bridge or a port, so these
+  services are cradle-only end to end;
+- **EVPN over SRv6** ([E-LAN](ch-02-41-bgp-evpn-srv6.md) and E-Line) — the
+  kernel has no `End.DT2U` / `End.DT2M` and no `End.DX2` / `End.DX2V`
+  seg6local actions;
+- **EVPN VPWS / E-Line** forwarding on *any* encapsulation — the attachment
+  circuit's cross-connect (the VXLAN E-Line VNI path included) is programmed
+  only into the engine, never via netlink.
 
 ## Configuration
 
@@ -185,10 +197,19 @@ zebra> show ebpf stats json
 ## Related
 
 - [Mobile User Plane (MUP)](ch-02-35-bgp-mup.md) — `dataplane gtp` programs
-  real GTP-U on the eBPF data plane.
-- [EVPN VPWS](ch-02-38-bgp-evpn-vpws.md) — E-Line egress runs on the eBPF
-  data plane.
+  real GTP-U (v4 and v6 outers) on the eBPF data plane.
+- [EVPN VPWS](ch-02-38-bgp-evpn-vpws.md) — E-Line forwarding runs on the
+  eBPF data plane on all three encapsulations (VXLAN, MPLS, SRv6).
 - [EVPN over MPLS](ch-02-40-bgp-evpn-mpls.md) — the per-EVI service label,
   its bridge-domain decap and every remote MAC exist only here;
   `show ebpf mpls` and `show ebpf l2` are the only place to confirm the
   service is actually programmed.
+- [EVPN over SRv6](ch-02-41-bgp-evpn-srv6.md) — the `End.DT2U` / `End.DT2M`
+  service SIDs and their FDB state exist only here (`show ebpf srv6`,
+  `show ebpf l2`).
+
+Hands-on labs live under `playset/`: every EVPN-over-MPLS and
+EVPN-over-SRv6 lab (`bgp-evpn-mpls`, `bgp-evpn-mpls6`, `bgp-evpn-srv6`, the
+`bgp-evpn-vpws-*` set) runs on the engine, and the EVPN/VXLAN labs have
+eBPF twins (`bgp-evpn-vxlan4-ebpf`, `bgp-evpn-vxlan6-ebpf`, and their
+`-multi` variants).
