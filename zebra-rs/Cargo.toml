@@ -137,9 +137,10 @@ tonic-prost.workspace = true
 tower = { version = "0.5", default-features = false, features = ["util"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 console-subscriber = "0.5"
-# 2.1 is the feature / if-feature release (`YangStore::enable_feature`).
-libyang = "2.1"
-#libyang = { git = "https://github.com/zebra-rs/libyang", rev = "bdb6cadf604a766e8051032ac77e03b0bb737f07" }
+# Pinned to the enum-arm if-feature evaluation (libyang PR #36); flip
+# back to the crates.io line once libyang 2.2 is published.
+libyang = { git = "https://github.com/zebra-rs/libyang", rev = "1dada0e" }
+#libyang = "2.1"
 #libyang = { path = "../../libyang" }
 regex = "1.10"
 similar = "3"
