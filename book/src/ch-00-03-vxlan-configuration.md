@@ -46,6 +46,14 @@ set vxlan vni550 dest-port 4789
 | `/vxlan/<name>/dest-port` | `uint16` | no | UDP destination port → `IFLA_VXLAN_PORT`. Defaults to `4789`. |
 | `/vxlan/<name>/address-gen-mode` | `enum {none, eui64, random, stable-secret}` | no | IPv6 link-local address generation mode. Defaults to `none`. |
 | `/vxlan/<name>/bridge` | leafref `/bridge/name` | no | Enslave the VXLAN to a bridge master → `IFLA_MASTER`. Triggers the bridge-slave defaults below. |
+| `/vxlan/<name>/vrf` | leafref `/vrf/name` | no | Bind the device to a tenant VRF as the EVPN symmetric-IRB **L3VNI** (see below). Control-plane binding — no kernel enslavement. |
+| `/vxlan/<name>/router-mac` | `yang:mac-address` | no | Router-MAC for the L3VNI's inner-Ethernet rewrite (RFC 9135). Defaults to the VRF master device's MAC. |
+
+The family of `local-address` selects the underlay: a v6 address makes
+the device a **native IPv6 VTEP**, supported end to end for the L2
+services on both the kernel path and the
+[eBPF data plane](ch-16-00-ebpf.md) (the symmetric-IRB L3VNI path below
+remains IPv4-VTEP-only).
 
 ## Defaults applied automatically
 
@@ -106,6 +114,34 @@ port:
 (If the master a VXLAN gains is not actually a bridge, the kernel
 rejects the bridge-port attributes and the attempt is logged at `info`;
 nothing else is affected.)
+
+## Binding to a VRF — the symmetric-IRB L3VNI
+
+A VXLAN device serves one of two roles. With `bridge` it is an
+**L2VNI** — a bridge port carrying an L2 domain. With `vrf` it is the
+tenant's **L3VNI** for EVPN symmetric IRB (RFC 8365 / RFC 9135): a
+frame received on this VNI routes its inner IP in the VRF's FIB instead
+of bridging into an L2 domain, and the VRF's
+[Type-5 routes](ch-02-06-bgp-evpn-type5.md) are VXLAN-encapsulated
+toward the remote VTEP with the inner Ethernet destination rewritten to
+that PE's router-MAC:
+
+```
+vrf blue { }
+vxlan vni4000 {
+  vni 4000;               # the tenant L3VNI the Type-5 NLRI carries
+  local-address 10.0.0.1; # IPv4 — the IRB path is v4-VTEP-only
+  vrf blue;
+}
+```
+
+`router-mac` overrides the MAC advertised in the Router's-MAC extended
+community and matched on egress; unset, it is the VRF master device's
+MAC. The binding is control-plane state — the device is not enslaved to
+the VRF in the kernel — and takes effect together with the BGP side:
+`router bgp vrf <name> evpn advertise-ipv4/ipv6` with
+`encapsulation vxlan` (the device's `vni` is what `evpn l3vni` must
+match).
 
 ## The full sequence
 
@@ -170,6 +206,8 @@ box. An explicit `dest-port` always takes precedence.
 | `vxlan <n> dest-port <p>` | `... type vxlan dstport <p>` |
 | `vxlan <n> address-gen-mode <m>` | `ip link set <n> addrgenmode <m>` |
 | `vxlan <n> bridge <name>` | `ip link set <n> master <name>` |
+| `vxlan <n> vrf <name>` | *(control-plane L3VNI binding — no iproute2 equivalent)* |
+| `vxlan <n> router-mac <mac>` | *(rides the EVPN Router's-MAC extended community)* |
 | *(automatic)* `nolearning` | `... type vxlan ... nolearning` |
 | *(automatic)* device up | `ip link set <n> up` |
 | *(automatic on bridge-join)* `neigh_suppress on` | `ip link set <n> type bridge_slave neigh_suppress on` |
