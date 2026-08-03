@@ -5859,4 +5859,120 @@ module test-iso-gated {
             assert!(script.contains(needle), "missing `{needle}` in:\n{script}");
         }
     }
+
+    /// VyOS-style whole-subtree delete (found by live namespace
+    /// testing of the firewall): a delete may stop at any node that
+    /// exists in the config — plain containers, bare lists, value
+    /// leaves without their value — not only presence containers,
+    /// list entries and full leaf+value spellings. Exercised on the
+    /// firewall tree because that's where VyOS operators expect it,
+    /// but the mechanics are generic to the whole config CLI.
+    #[test]
+    fn firewall_subtree_delete_matches_vyos() {
+        use crate::config::parse::{State, parse};
+        use crate::config::path_from_command;
+
+        let entry = shipped_tree(&["iso"]);
+        let store = ConfigStore::new();
+
+        let apply_set = |cmd: &str| {
+            let candidate = store.candidate.borrow().clone();
+            let (code, _, state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "parse `{cmd}`");
+            set(path_try_trim("set", state.paths), candidate);
+        };
+        // Parse + apply a delete against the candidate config; returns
+        // the ExecCode and (on success) the trimmed command path.
+        let apply_delete = |cmd: &str| -> (ExecCode, String) {
+            let candidate = store.candidate.borrow().clone();
+            let (code, _, state) = parse(cmd, entry.clone(), Some(candidate.clone()), State::new());
+            if code != ExecCode::Success {
+                return (code, String::new());
+            }
+            let paths = path_try_trim("delete", state.paths);
+            let (path_str, _) = path_from_command(&paths);
+            delete(paths, candidate);
+            (code, path_str)
+        };
+        let config_text = || {
+            let mut out = String::new();
+            store.candidate.borrow().list(&mut out);
+            out
+        };
+
+        for cmd in [
+            "set firewall group address-group SERVERS address 10.0.0.1",
+            "set firewall ipv4 forward filter default-action drop",
+            "set firewall ipv4 forward filter default-log",
+            "set firewall ipv4 forward filter rule 10 action accept",
+            "set firewall ipv4 forward filter rule 20 action drop",
+            "set firewall ipv4 prerouting raw rule 5 action notrack",
+            "set firewall ipv6 input filter rule 7 action accept",
+            "set firewall global-options state-policy established action accept",
+        ] {
+            apply_set(cmd);
+        }
+
+        // Plain container mid-tree.
+        let (code, path) = apply_delete("delete firewall ipv4 prerouting");
+        assert_eq!(code, ExecCode::Success, "container delete");
+        assert_eq!(path, "/firewall/ipv4/prerouting");
+        assert!(!config_text().contains("prerouting"));
+        assert!(config_text().contains("forward"), "siblings survive");
+
+        // Plain container holding only containers.
+        let (code, _) = apply_delete("delete firewall global-options");
+        assert_eq!(code, ExecCode::Success, "global-options delete");
+        assert!(!config_text().contains("state-policy"));
+
+        // Value leaf without its value.
+        let (code, _) = apply_delete("delete firewall ipv4 forward filter default-action");
+        assert_eq!(code, ExecCode::Success, "value-less leaf delete");
+        assert!(!config_text().contains("default-action"));
+        assert!(
+            config_text().contains("default-log"),
+            "sibling leaf survives"
+        );
+
+        // Bare list: removes every entry (the ipv6 rule list survives).
+        let (code, _) = apply_delete("delete firewall ipv4 forward filter rule");
+        assert_eq!(code, ExecCode::Success, "bare list delete");
+        assert!(!config_text().contains("ipv4 forward filter rule"));
+        assert!(config_text().contains("ipv6 input filter rule 7"));
+
+        // Whole subtree, abbreviated — the CommandPath canonicalizes.
+        let (code, path) = apply_delete("delete firew");
+        assert_eq!(code, ExecCode::Success, "abbreviated root delete");
+        assert_eq!(path, "/firewall", "abbreviation canonicalizes");
+        assert!(
+            store
+                .candidate
+                .borrow()
+                .lookup(&"firewall".to_string())
+                .is_none(),
+            "firewall subtree gone"
+        );
+
+        // Once gone, the same delete is Nomatch — existence is checked
+        // against config, not schema.
+        let (code, _) = apply_delete("delete firewall");
+        assert_eq!(code, ExecCode::Nomatch, "delete of absent subtree");
+
+        // The bare `delete` keyword stays Incomplete: no silent
+        // whole-config wipe.
+        let (code, _) = apply_delete("delete");
+        assert_eq!(code, ExecCode::Incomplete, "bare delete");
+
+        // Set mode is untouched: a bare container is still not a
+        // command there.
+        apply_set("set firewall ipv4 forward filter default-log");
+        let candidate = store.candidate.borrow().clone();
+        let (code, _, _) = parse(
+            "set firewall ipv4 forward",
+            entry.clone(),
+            Some(candidate),
+            State::new(),
+        );
+        assert_ne!(code, ExecCode::Success, "set at container stays incomplete");
+    }
 }

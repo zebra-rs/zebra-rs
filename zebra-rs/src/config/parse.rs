@@ -547,6 +547,23 @@ pub fn ymatch_complete(ymatch: YangMatch, list_presence: bool, is_delete: bool) 
         || (is_delete && ymatch == YangMatch::LeafList)
 }
 
+/// VyOS-style whole-subtree delete: in delete mode a command may stop
+/// at ANY node that exists in the config tree — a plain container
+/// (`delete firewall`), a bare list (`delete … filter rule`, removing
+/// every entry) or a value leaf without its value (`delete …
+/// default-action`) — not only the `ymatch_complete` terminals. This
+/// is sound because the per-token delete guard in [`parse`] has
+/// already returned Nomatch/Ambiguous unless every typed token matched
+/// the candidate config, so the target subtree is known to exist;
+/// `delete()` then removes the final node and prunes emptied
+/// ancestors. `paths.len() > 1` keeps the bare `delete` keyword
+/// Incomplete instead of turning it into a silent whole-config wipe.
+fn delete_subtree_terminal(s: &State) -> bool {
+    s.delete
+        && s.paths.len() > 1
+        && matches!(s.ymatch, YangMatch::Dir | YangMatch::Leaf | YangMatch::Key)
+}
+
 fn matched_enumeration(mx: &Match) -> Option<String> {
     let type_node = mx.matched_entry.type_node.as_ref()?;
     let last_match = mx.last_match.as_ref()?;
@@ -820,7 +837,8 @@ pub fn parse(
     }
     s.paths.push(path);
 
-    if ymatch_complete(s.ymatch, mx.matched_entry.presence, s.delete)
+    if (ymatch_complete(s.ymatch, mx.matched_entry.presence, s.delete)
+        || delete_subtree_terminal(&s))
         && mx.matched_type == MatchType::Exact
     {
         comps_add_cr(&mut mx.comps);
@@ -860,6 +878,9 @@ pub fn parse(
             return (ExecCode::Success, mx.comps, s);
         }
         if !ymatch_complete(s.ymatch, mx.matched_entry.presence, s.delete) {
+            if delete_subtree_terminal(&s) && mx.matched_type != MatchType::Incomplete {
+                return (ExecCode::Success, mx.comps, s);
+            }
             return (ExecCode::Incomplete, mx.comps, s);
         }
         if mx.matched_type == MatchType::Incomplete {
