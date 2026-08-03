@@ -44,6 +44,7 @@ mod script;
 mod spf;
 mod srv6;
 mod stamp;
+mod system;
 /// IOS-XR-style exponential-backoff throttle, shared by the IS-IS and
 /// OSPF SPF/LSA schedulers.
 mod throttle;
@@ -224,6 +225,12 @@ async fn run(arg: Arg) -> anyhow::Result<()> {
     config.subscribe_show("rib", rib.show.tx.clone());
     config.subscribe_show("policy", policy.show.tx.clone());
 
+    // The firewall backend consumes its subtree as a JSON batch: one
+    // whole-tree delivery per commit that touches /firewall (the
+    // subtree only exists with `--feature iso`).
+    let firewall = system::Firewall::new();
+    config.subscribe_json(&["firewall"], firewall.tx.clone());
+
     let cli = Cli::new(config.tx.clone());
 
     let vty_addr = config::VtyAddr::parse(&arg.vty_socket)?;
@@ -231,6 +238,8 @@ async fn run(arg: Arg) -> anyhow::Result<()> {
     config::serve(cli, vty_addr)?;
 
     policy::serve(policy);
+
+    system::serve(firewall);
 
     rib::serve(rib);
 

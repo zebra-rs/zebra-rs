@@ -1,6 +1,6 @@
 use crate::config::api::{ClearTxResponse, DeployResponse, DisplayTxRequest, DisplayTxResponse};
 
-use super::api::{CompletionResponse, ConfigOp, ExecuteResponse, Message};
+use super::api::{CompletionResponse, ConfigOp, ExecuteResponse, JsonConfigUpdate, Message};
 use super::bfd::{despawn_bfd, spawn_bfd};
 use super::bgp::{despawn_bgp, spawn_bgp};
 use super::commands::Mode;
@@ -219,6 +219,16 @@ pub struct ConfigManager {
     pub tx: Sender<Message>,
     pub rx: Receiver<Message>,
     pub cm_clients: RefCell<HashMap<String, UnboundedSender<ConfigRequest>>>,
+    /// JSON batch subscriptions (the openconfigd `SubscribeLocalAdd`
+    /// model, in-process): each entry is a path prefix and a channel.
+    /// When a commit touches any line under the prefix, the subscriber
+    /// receives ONE message carrying the whole post-commit subtree as
+    /// JSON (`"{}"` when the subtree was deleted) — no per-line
+    /// deliveries, no CommitStart/End framing. Fits whole-ruleset
+    /// consumers (firewall → nftables) where commit means "recompile
+    /// everything", unlike the per-line `cm_clients` broadcast that
+    /// suits live-object protocol tasks.
+    pub json_clients: RefCell<Vec<(Vec<String>, UnboundedSender<JsonConfigUpdate>)>>,
     pub show_clients: RefCell<HashMap<String, UnboundedSender<DisplayRequest>>>,
     /// Per-instance show channels keyed `"<proto>:vrf:<name>"`. Populated
     /// at runtime as protocols spawn VRF tasks (via
@@ -368,6 +378,7 @@ impl ConfigManager {
             tx,
             rx,
             cm_clients: RefCell::new(HashMap::new()),
+            json_clients: RefCell::new(Vec::new()),
             show_clients: RefCell::new(HashMap::new()),
             show_vrf_clients: RefCell::new(HashMap::new()),
             bgp_tx: RefCell::new(None),
@@ -533,6 +544,32 @@ impl ConfigManager {
         self.show_clients
             .borrow_mut()
             .insert(name.to_owned(), show_tx);
+    }
+
+    /// Register a JSON batch subscription for the subtree at `prefix`
+    /// (top-level segments of the config tree, e.g. `["firewall"]`).
+    /// See the `json_clients` field for the delivery contract. Must be
+    /// called before the event loop starts so the startup-config
+    /// commit replays through it.
+    pub fn subscribe_json(&self, prefix: &[&str], tx: UnboundedSender<JsonConfigUpdate>) {
+        let prefix: Vec<String> = prefix.iter().map(|s| s.to_string()).collect();
+        self.json_clients.borrow_mut().push((prefix, tx));
+    }
+
+    /// Serialize the running-config subtree at `prefix` to JSON —
+    /// `"{}"` when no such node exists (the subtree was deleted or was
+    /// never set).
+    fn subtree_json(&self, prefix: &[String]) -> String {
+        let mut node: Rc<Config> = self.store.running.borrow().clone();
+        for seg in prefix.iter() {
+            let Some(next) = node.lookup(seg) else {
+                return String::from("{}");
+            };
+            node = next;
+        }
+        let mut out = String::new();
+        node.json(&mut out);
+        out
     }
 
     fn paths(&self, input: String) -> Option<Vec<CommandPath>> {
@@ -770,6 +807,7 @@ impl ConfigManager {
                 super::tracing::config_dispatch(&line, op);
             }
         }
+        let mut json_touched = vec![false; self.json_clients.borrow().len()];
         for line in diff.lines() {
             if !line.is_empty() {
                 let first_char = line.chars().next().unwrap();
@@ -784,6 +822,17 @@ impl ConfigManager {
                     continue;
                 }
                 let paths = paths.unwrap();
+                // JSON batch subscribers: only note that the prefix was
+                // touched — the single subtree delivery happens after
+                // the store commits, so it carries the post-commit
+                // state.
+                for (i, (prefix, _)) in self.json_clients.borrow().iter().enumerate() {
+                    if paths.len() >= prefix.len()
+                        && prefix.iter().zip(paths.iter()).all(|(p, cp)| &cp.name == p)
+                    {
+                        json_touched[i] = true;
+                    }
+                }
                 for tx in self.cm_clients.borrow().values() {
                     tx.send(ConfigRequest::new(paths.clone(), op)).unwrap();
                 }
@@ -851,6 +900,18 @@ impl ConfigManager {
         }
 
         self.store.commit();
+
+        // Deliver JSON batch updates from the freshly-committed running
+        // tree — one message per touched subscription per commit.
+        for (i, (prefix, tx)) in self.json_clients.borrow().iter().enumerate() {
+            if json_touched[i] {
+                let update = JsonConfigUpdate {
+                    path: prefix.clone(),
+                    json: self.subtree_json(prefix),
+                };
+                let _ = tx.send(update);
+            }
+        }
         Ok(())
     }
 
@@ -5724,6 +5785,78 @@ module test-iso-gated {
                 ExecCode::Success,
                 "`{cmd}` must be rejected on a stock start"
             );
+        }
+    }
+
+    /// End-to-end: CLI commands through the real iso-enabled schema
+    /// into a config tree, the tree marshaled to JSON exactly as the
+    /// manager's JSON batch subscription does, and that JSON rendered
+    /// by the nftables backend. Pins the whole chain the firewall
+    /// daemon path relies on — in particular that the backend's serde
+    /// model matches `Config::json()` output (unquoted numerics, null
+    /// presence leaves, list shapes), which no fixture-based test can
+    /// guarantee against drift.
+    #[test]
+    fn firewall_json_roundtrip_renders_nftables() {
+        use crate::config::parse::{State, parse};
+
+        let entry = shipped_tree(&["iso"]);
+
+        let store = ConfigStore::new();
+        for cmd in [
+            "set firewall group address-group SERVERS address 10.0.0.1",
+            "set firewall group address-group SERVERS address 10.0.0.2-10.0.0.5",
+            "set firewall group port-group WEB port 80",
+            "set firewall group port-group WEB port https",
+            "set firewall ipv4 forward filter default-action drop",
+            "set firewall ipv4 forward filter default-log",
+            "set firewall ipv4 forward filter rule 10 action accept",
+            "set firewall ipv4 forward filter rule 10 state established",
+            "set firewall ipv4 forward filter rule 10 state related",
+            "set firewall ipv4 forward filter rule 20 action drop",
+            "set firewall ipv4 forward filter rule 20 protocol tcp",
+            "set firewall ipv4 forward filter rule 20 destination group address-group SERVERS",
+            "set firewall ipv4 forward filter rule 20 destination group port-group WEB",
+            "set firewall ipv4 forward filter rule 20 log",
+            "set firewall ipv4 prerouting raw rule 5 action notrack",
+            "set firewall ipv6 input filter rule 7 action accept",
+            "set firewall ipv6 input filter rule 7 icmpv6 type-name nd-router-advert",
+            "set firewall global-options state-policy established action accept",
+        ] {
+            let candidate = store.candidate.borrow().clone();
+            let (code, _, state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "parse `{cmd}`");
+            set(path_try_trim("set", state.paths), candidate);
+        }
+
+        // Marshal the /firewall subtree the way `subtree_json` does.
+        let firewall = store
+            .candidate
+            .borrow()
+            .lookup(&"firewall".to_string())
+            .expect("firewall subtree exists");
+        let mut json = String::new();
+        firewall.json(&mut json);
+
+        let (script, warnings) =
+            crate::system::firewall::render_str(&json).expect("backend parses manager JSON");
+        assert!(warnings.is_empty(), "warnings: {warnings:?}");
+        for needle in [
+            "table ip zebra_firewall {",
+            "set A_SERVERS {",
+            "elements = { 10.0.0.1,10.0.0.2-10.0.0.5 }",
+            "elements = { 80,https }",
+            "chain ZEBRA_FORWARD_filter {",
+            "type filter hook forward priority filter; policy accept;",
+            "jump ZEBRA_STATE_POLICY",
+            "ct state {established,related} counter accept comment \"ipv4-FWD-filter-10\"",
+            "meta l4proto tcp ip daddr @A_SERVERS tcp dport @P_WEB log prefix \"[ipv4-FWD-filter-20-D]\" counter drop comment \"ipv4-FWD-filter-20\"",
+            "counter log prefix \"[ipv4-FWD-filter-default-D]\" drop comment \"FWD-filter default-action drop\"",
+            "counter notrack comment \"ipv4-PRE-raw-5\"",
+            "icmpv6 type nd-router-advert counter accept comment \"ipv6-INP-filter-7\"",
+            "ct state established counter accept",
+        ] {
+            assert!(script.contains(needle), "missing `{needle}` in:\n{script}");
         }
     }
 }
