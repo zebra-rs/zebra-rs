@@ -74,7 +74,11 @@ That last row is the encapsulation signal itself: RFC 8365 §5.1.3 makes MPLS
 the default and marks it by *omitting* the Encapsulation extended community.
 zebra-rs reads a received route the same way (and also accepts an explicit
 tunnel type 10), so a route reflector — which has no `encapsulation` of its
-own — classifies traffic exactly as a PE does.
+own — classifies traffic exactly as a PE does. Flood state is partitioned by
+the same classification: an IMET carrying an MPLS BUM label populates only
+MPLS replication slots and never enters the VXLAN head-end flood set (an
+`End.DT2M`-bearing IMET likewise stays out), so a mixed-encapsulation fabric
+cannot deliver a BUM frame twice.
 
 ## Forwarding
 
@@ -244,7 +248,8 @@ iBGP session riding the LSP through the routeless P. Its E-Line sibling is
 
 ## Limitations
 
-- **Requires cradle** (`system cradle enabled` plus an engine — see
+- **Requires cradle** (`system ebpf enabled` for the managed engine, or
+  `system cradle enabled` teeing to an external one — see
   [Enabling the data plane](#enabling-the-data-plane)). Without it the routes
   are advertised and received but nothing forwards.
 - **Single-homed.** Multihoming (Type-1/Type-4 and the ESI label's
