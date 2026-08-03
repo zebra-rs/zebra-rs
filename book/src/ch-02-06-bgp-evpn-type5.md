@@ -13,17 +13,20 @@ Because Type-5 reuses the existing L3VPN control- and data-plane, the
 two ends of a VPN flow map exactly as they do for VPNv4 / VPNv6:
 
 * the **egress PE** binds a per-VRF forwarding identifier — an **MPLS
-  service label** (MPLS underlay) or an **SRv6 End.DT46 SID** (SRv6
-  underlay) — and programs a decap into the VRF table (an `RTA`
-  MPLS-`DecapVrf` ILM, or a `seg6local` End.DT46 entry);
+  service label** (MPLS underlay), an **SRv6 End.DT46 SID** (SRv6
+  underlay), or a **tenant L3VNI** (VXLAN symmetric IRB, RFC 8365) — and
+  programs a decap into the VRF table (an `RTA` MPLS-`DecapVrf` ILM, a
+  `seg6local` End.DT46 entry, or the L3VNI's vxlan device);
 * the **ingress PE** imports a received Type-5 route whose route-targets
   match a local VRF and installs it with a `{transport, service}` MPLS
-  label-push next-hop, or an SRv6 **H.Encap** next-hop toward the remote
-  SID.
+  label-push next-hop, an SRv6 **H.Encap** next-hop toward the remote
+  SID, or a VXLAN encap toward the remote VTEP with the inner Ethernet
+  destination rewritten to the egress PE's router-MAC (RFC 9135).
 
-The forwarding identifier rides in the Type-5 NLRI's label field (MPLS)
-or in the BGP **Prefix-SID** attribute's SRv6 L3 Service TLV (SRv6,
-label 0) — the same attributes the VPNv4 / VPNv6 paths use.
+The forwarding identifier rides in the Type-5 NLRI's label field (the
+MPLS service label, or the L3VNI under VXLAN) or in the BGP
+**Prefix-SID** attribute's SRv6 L3 Service TLV (SRv6, label 0) — the
+same attributes the VPNv4 / VPNv6 paths use.
 
 ## Configuration
 
@@ -43,9 +46,22 @@ set router bgp vrf red evpn advertise-ipv6 true
 * `advertise-ipv4` / `advertise-ipv6` advertise the VRF's IPv4 / IPv6
   unicast routes as EVPN Type-5 routes. Both default to `false`.
 * `rd` is required (Type-5 carries a Route Distinguisher).
-* `encapsulation {mpls|srv6}` selects the data plane, exactly as for
-  VPNv4 / VPNv6 — `mpls` uses the per-VRF service label, `srv6` uses the
-  VRF's End.DT46 SID carved from the global `segment-routing` locator.
+* `encapsulation {mpls|srv6|vxlan}` selects the data plane — `mpls` uses
+  the per-VRF service label and `srv6` the VRF's End.DT46 SID carved
+  from the global `segment-routing` locator, exactly as for VPNv4 /
+  VPNv6. `vxlan` is the **symmetric-IRB** mode (RFC 8365): set `evpn
+  l3vni <vni>` to the tenant L3VNI carried in the NLRI's label field —
+  it must match an `l3vni` on a local vxlan device bound to this VRF —
+  and the route carries this PE's router-MAC in the Router's-MAC
+  extended community (RFC 9135; `evpn router-mac` overrides it,
+  defaulting to the VRF master device's MAC):
+
+  ```
+  set router bgp vrf blue rd 65000:200
+  set router bgp vrf blue encapsulation vxlan
+  set router bgp vrf blue evpn advertise-ipv4 true
+  set router bgp vrf blue evpn l3vni 4000
+  ```
 
 A neighbor must negotiate the L2VPN/EVPN address family to exchange
 Type-5 routes:
@@ -68,14 +84,27 @@ a migration.
 
 | Underlay | NLRI label | BGP next-hop | Ingress install | Egress decap |
 |---|---|---|---|---|
-| **MPLS** | per-VRF service label | PE router-id | `{transport, service}` label push | MPLS `DecapVrf` ILM |
+| **MPLS** | per-VRF service label | `vtep-source`, else router-id | `{transport, service}` label push | MPLS `DecapVrf` ILM |
 | **SRv6** | 0 | PE locator | H.Encap to End.DT46 SID | `seg6local` End.DT46 |
+| **VXLAN (IRB)** | tenant L3VNI | local VTEP (IPv4) | VXLAN encap + inner DMAC ← egress router-MAC | L3VNI vxlan device into the VRF |
 
-Both are the *same* mechanisms VPNv4 / VPNv6 already use — Type-5 simply
-arrives in a different NLRI. Recursive next-hop resolution (NHT) gates
-the install: a Type-5 route only programs the VRF FIB once its PE
-next-hop resolves over the underlay, and re-installs if that underlay
-reroutes.
+The MPLS and SRv6 rows are the *same* mechanisms VPNv4 / VPNv6 already
+use — Type-5 simply arrives in a different NLRI. Recursive next-hop
+resolution (NHT) gates every install: a Type-5 route only programs the
+VRF FIB once its PE next-hop resolves over the underlay, and re-installs
+if that underlay reroutes.
+
+Two address-family notes:
+
+* Under **MPLS**, the afi-safi `vtep-source` names the address the
+  Type-5 advertises as next hop (the router-id fallback is IPv4-only),
+  and the transport stack resolves through the v4 or v6 FIB by that
+  address's family — so a v6 `vtep-source` runs Type-5 over an
+  **IPv6-only core**, the same three pieces as the L2 services (see
+  [IPv6 PEs](ch-02-40-bgp-evpn-mpls.md#ipv6-pes)).
+* The **symmetric-IRB VXLAN path is IPv4-VTEP-only** (the inner prefix
+  may be v4 or v6, the outer VTEP is always IPv4) — unlike the L2
+  services, which also run over native v6 VTEPs on the eBPF data plane.
 
 > **Note** — this is the **L3** EVPN service. EVPN's **L2** services
 > (Type-2 MAC/IP, Type-3 inclusive-multicast) are documented separately and
