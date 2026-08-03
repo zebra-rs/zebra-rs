@@ -5364,8 +5364,9 @@ mod feature_gate_tests {
     /// A scratch module that augments `set router` in the real
     /// configure tree with a container gated on `feat:iso` from the
     /// shipped zebra-features registry, exercising the augment path of
-    /// the gating (the shipped `interface ipv4 dhcp` leaf covers the
-    /// in-module path — see `shipped_interface_ipv4_dhcp_gated_on_iso`).
+    /// the gating (the shipped `interface ipv4 address dhcp` enum arm
+    /// covers the in-module path — see
+    /// `shipped_interface_ipv4_address_dhcp_gated_on_iso`).
     const FIXTURE: &str = r#"
 module test-iso-gated {
   yang-version "1";
@@ -5461,9 +5462,11 @@ module test-iso-gated {
         );
     }
 
-    /// Whether the shipped `interface <name> ipv4 dhcp` leaf (the
-    /// first real feature-gated node, `if-feature feat:iso` in
-    /// config.yang) exists in the configure tree.
+    /// Whether the shipped `interface <name> ipv4 address` union
+    /// accepts the `dhcp` value — the first real feature-gated schema
+    /// element (`if-feature feat:iso` on the enum arm in config.yang).
+    /// The gate is on the value, not the node: the address leaf-list
+    /// itself must exist either way.
     fn shipped_dhcp_present(features: &[&str]) -> bool {
         let mut yang = YangStore::new();
         yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
@@ -5481,18 +5484,69 @@ module test-iso-gated {
         let set = child(&entry, "set").expect("set subtree");
         let interface = child(&set, "interface").expect("interface list");
         let ipv4 = child(&interface, "ipv4").expect("ipv4 container");
-        child(&ipv4, "dhcp").is_some()
+        let address = child(&ipv4, "address").expect("address leaf-list");
+        address
+            .type_node
+            .as_ref()
+            .expect("address type resolved")
+            .union
+            .iter()
+            .any(|arm| arm.enum_stmt.iter().any(|e| e.name == "dhcp"))
     }
 
     #[test]
-    fn shipped_interface_ipv4_dhcp_gated_on_iso() {
+    fn shipped_interface_ipv4_address_dhcp_gated_on_iso() {
         assert!(
             !shipped_dhcp_present(&[]),
-            "interface ipv4 dhcp must be absent on a stock start"
+            "the dhcp address value must be absent on a stock start"
         );
         assert!(
             shipped_dhcp_present(&["iso"]),
-            "interface ipv4 dhcp must appear with --feature iso"
+            "interface ipv4 address dhcp must appear with --feature iso"
         );
+    }
+
+    /// End-to-end CLI grammar for the gated value: `set interface eth0
+    /// ipv4 address dhcp` parses only when iso is enabled, while the
+    /// plain prefix form always parses.
+    #[test]
+    fn address_dhcp_command_parses_only_with_iso() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+
+        let tree = |features: &[&str]| {
+            let mut yang = YangStore::new();
+            yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+            let specs: Vec<String> = features.iter().map(|s| s.to_string()).collect();
+            enable_features(&mut yang, &specs);
+            yang.read_with_resolve("configure")
+                .expect("configure loads");
+            yang.identity_resolve();
+            let module = yang.find_module("configure").expect("configure module");
+            to_entry(&yang, module)
+        };
+
+        let dhcp = "set interface eth0 ipv4 address dhcp";
+        let prefix = "set interface eth0 ipv4 address 10.0.0.1/24";
+
+        let entry = tree(&[]);
+        let (code, _, _) = parse(dhcp, entry.clone(), None, State::new());
+        assert_ne!(
+            code,
+            ExecCode::Success,
+            "dhcp value must be rejected on a stock start"
+        );
+        let (code, _, _) = parse(prefix, entry, None, State::new());
+        assert_eq!(code, ExecCode::Success, "prefix form must always parse");
+
+        let entry = tree(&["iso"]);
+        let (code, _, _) = parse(dhcp, entry.clone(), None, State::new());
+        assert_eq!(
+            code,
+            ExecCode::Success,
+            "dhcp value must parse with --feature iso"
+        );
+        let (code, _, _) = parse(prefix, entry, None, State::new());
+        assert_eq!(code, ExecCode::Success, "prefix form must always parse");
     }
 }

@@ -4948,27 +4948,29 @@ module config {
       container ipv4 {
         ext:help "IPv4 configuration";
         leaf-list address {
-          ext:help "IPv4 interface address";
-          type inet:ipv4-prefix;
+          ext:help "IPv4 interface address, or dhcp to acquire one";
+          type union {
+            type inet:ipv4-prefix;
+            type enumeration {
+              enum dhcp {
+                if-feature feat:iso;
+              }
+            }
+          }
           description
             "Interface IPv4 addresses. Multiple addresses may be
              configured; the kernel marks an address secondary when it
              shares its mask and subnet with an existing primary on the
              interface (shown by `show interface`). Within a subnet the
              first address installed becomes the primary, so on a full
-             config replay the leaf-list order decides.";
-        }
-        leaf dhcp {
-          if-feature feat:iso;
-          ext:help "Acquire the interface IPv4 address via DHCP";
-          type empty;
-          description
-            "Acquire the interface's IPv4 address dynamically instead
-             of static `address` entries. First consumer of conditional
-             schema: the node exists only when the daemon runs with
-             `--feature iso` (RFC 7950 if-feature); the daemon-side
-             DHCP client lands in a later change, so setting it today
-             stores config without acting on it.";
+             config replay the leaf-list order decides.
+
+             `dhcp` — acquire the address dynamically instead — is the
+             first consumer of conditional schema: the value exists
+             only when the daemon runs with `--feature iso` (RFC 7950
+             if-feature on the enum arm). The daemon-side DHCP client
+             lands in a later change, so setting it today stores
+             config without acting on it.";
         }
       }
       container ipv6 {

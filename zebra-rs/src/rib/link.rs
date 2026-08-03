@@ -1543,9 +1543,25 @@ pub async fn link_config_exec(
         // `address` is a leaf-list: each commit line carries one value,
         // but drain the deque so a bundled delivery would not silently
         // drop trailing values.
+        //
+        // `dhcp` is the feature-gated enum arm of the address union
+        // (present only under `--feature iso`). The daemon-side DHCP
+        // client is not implemented yet, so the value is accepted
+        // without kernel action — and it must be consumed here: an
+        // unparsed value left in the deque would read as the
+        // value-less delete form below, which removes every
+        // configured address on the interface.
+        let mut dhcp = false;
         let mut values: Vec<Ipv4Net> = Vec::new();
-        while let Some(v4addr) = args.v4net() {
-            values.push(v4addr);
+        while let Some(value) = args.string() {
+            if value == "dhcp" {
+                dhcp = true;
+            } else if let Ok(v4addr) = value.parse::<Ipv4Net>() {
+                values.push(v4addr);
+            }
+        }
+        if dhcp && values.is_empty() {
+            return Ok(());
         }
 
         if op.is_set() {
