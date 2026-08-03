@@ -5549,4 +5549,160 @@ module test-iso-gated {
         let (code, _, _) = parse(prefix, entry, None, State::new());
         assert_eq!(code, ExecCode::Success, "prefix form must always parse");
     }
+
+    /// Build the shipped configure tree with the given features — the
+    /// firewall tests' shared builder. Asserts a clean build: a
+    /// diagnostic here would also mean warn-spam at daemon startup.
+    fn shipped_tree(features: &[&str]) -> Rc<Entry> {
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        let specs: Vec<String> = features.iter().map(|s| s.to_string()).collect();
+        enable_features(&mut yang, &specs);
+        yang.read_with_resolve("configure")
+            .expect("configure loads");
+        yang.identity_resolve();
+        let module = yang.find_module("configure").expect("configure module");
+        let entry = to_entry(&yang, module);
+        let diagnostics = yang.take_diagnostics();
+        assert!(
+            diagnostics.is_empty(),
+            "unexpected yang diagnostics: {diagnostics:?}"
+        );
+        entry
+    }
+
+    /// The whole VyOS-style `firewall` subtree (firewall.yang, used
+    /// under an `if-feature feat:iso` container in config.yang) is
+    /// part of the ISO-only config surface: absent on a stock start,
+    /// present with `--feature iso`.
+    #[test]
+    fn shipped_firewall_gated_on_iso() {
+        let child = |e: &Rc<Entry>, name: &str| -> Option<Rc<Entry>> {
+            e.dir.borrow().iter().find(|c| c.name == name).cloned()
+        };
+
+        let set = child(&shipped_tree(&[]), "set").expect("set subtree");
+        assert!(
+            child(&set, "firewall").is_none(),
+            "firewall subtree must be absent on a stock start"
+        );
+
+        let set = child(&shipped_tree(&["iso"]), "set").expect("set subtree");
+        let firewall = child(&set, "firewall").expect("firewall subtree with --feature iso");
+        // The grouping expanded: all four top-level branches exist.
+        for name in ["group", "ipv4", "ipv6", "global-options"] {
+            assert!(
+                child(&firewall, name).is_some(),
+                "firewall {name} branch missing"
+            );
+        }
+    }
+
+    /// End-to-end CLI grammar for the firewall subtree: a battery of
+    /// representative `set firewall …` commands parses with iso and is
+    /// rejected on a stock start. Also pins hook fidelity: matchers
+    /// that VyOS scopes per hook (inbound on input, outbound on
+    /// output) and the restricted base-chain default-action enum must
+    /// NOT parse where VyOS forbids them.
+    #[test]
+    fn firewall_commands_parse_only_with_iso() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+
+        let ok = [
+            // groups — one per type, plus range/name string-arm values
+            "set firewall group address-group SERVERS address 10.0.0.1",
+            "set firewall group address-group SERVERS address 10.0.0.1-10.0.0.5",
+            "set firewall group ipv6-address-group V6HOSTS address 2001:db8::1",
+            "set firewall group network-group NETS network 192.168.0.0/24",
+            "set firewall group ipv6-network-group V6NETS network 2001:db8::/48",
+            "set firewall group port-group WEB port 80",
+            "set firewall group port-group WEB port https",
+            "set firewall group port-group WEB port 8000-8080",
+            "set firewall group interface-group WAN interface eth0",
+            "set firewall group mac-group MACS mac-address 00:11:22:33:44:55",
+            "set firewall group address-group SERVERS description web servers",
+            // ipv4 base chains
+            "set firewall ipv4 forward filter default-action drop",
+            "set firewall ipv4 forward filter default-log",
+            "set firewall ipv4 forward filter rule 10 action accept",
+            "set firewall ipv4 forward filter rule 10 state established",
+            "set firewall ipv4 forward filter rule 10 state related",
+            "set firewall ipv4 forward filter rule 10 protocol tcp_udp",
+            "set firewall ipv4 forward filter rule 10 source address 10.0.0.0/8",
+            "set firewall ipv4 forward filter rule 10 source address !10.0.0.0/8",
+            "set firewall ipv4 forward filter rule 10 source port 443",
+            "set firewall ipv4 forward filter rule 10 destination group address-group SERVERS",
+            "set firewall ipv4 forward filter rule 10 inbound-interface name eth0",
+            "set firewall ipv4 forward filter rule 10 outbound-interface group WAN",
+            "set firewall ipv4 forward filter rule 10 jump-target MY-CHAIN",
+            "set firewall ipv4 forward filter rule 10 limit rate 5/minute",
+            "set firewall ipv4 forward filter rule 10 dscp 46",
+            "set firewall ipv4 forward filter rule 10 dscp 40-47",
+            "set firewall ipv4 input filter rule 20 tcp flags syn",
+            "set firewall ipv4 input filter rule 20 tcp flags not ack",
+            "set firewall ipv4 input filter rule 20 icmp type-name echo-request",
+            "set firewall ipv4 input filter rule 20 icmp type 8",
+            "set firewall ipv4 output filter rule 5 ttl gt 64",
+            // ipv4 custom chains
+            "set firewall ipv4 name MY-CHAIN default-action drop",
+            "set firewall ipv4 name MY-CHAIN default-jump-target OTHER",
+            "set firewall ipv4 name MY-CHAIN rule 10 action jump",
+            "set firewall ipv4 name MY-CHAIN rule 10 inbound-interface name eth1",
+            // ipv6
+            "set firewall ipv6 forward filter rule 10 source address 2001:db8::/32",
+            "set firewall ipv6 forward filter rule 10 icmpv6 type-name nd-router-advert",
+            "set firewall ipv6 input filter rule 10 hop-limit lt 10",
+            "set firewall ipv6 name V6-CHAIN rule 1 action drop",
+            // global options
+            "set firewall global-options all-ping disable",
+            "set firewall global-options source-validation strict",
+            "set firewall global-options state-policy established action accept",
+            "set firewall global-options state-policy invalid log",
+            "set firewall global-options timeout tcp established 7200",
+        ];
+
+        // VyOS scopes these per hook / per chain kind; the schema must
+        // reject them even with iso enabled.
+        let bad_with_iso = [
+            // input has no outbound-interface, output no inbound-interface
+            "set firewall ipv4 input filter rule 20 outbound-interface name eth0",
+            "set firewall ipv4 output filter rule 5 inbound-interface name eth0",
+            // base chains only allow accept|drop as default-action
+            "set firewall ipv4 forward filter default-action reject",
+            // v6 rules take icmpv6/hop-limit, not icmp/ttl. (`icmp
+            // type 8` is NOT a valid negative here — the CLI prefix-
+            // matches `icmp` to `icmpv6`; pin a v4-only type-name
+            // instead.)
+            "set firewall ipv6 input filter rule 10 icmpv6 type-name source-quench",
+            "set firewall ipv6 output filter rule 5 ttl gt 64",
+        ];
+
+        let entry = shipped_tree(&["iso"]);
+        for cmd in ok {
+            let (code, _, _) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "`{cmd}` must parse with iso");
+        }
+        for cmd in bad_with_iso {
+            let (code, _, _) = parse(cmd, entry.clone(), None, State::new());
+            assert_ne!(
+                code,
+                ExecCode::Success,
+                "`{cmd}` must not parse (VyOS scoping)"
+            );
+        }
+
+        let entry = shipped_tree(&[]);
+        for cmd in [
+            "set firewall group address-group SERVERS address 10.0.0.1",
+            "set firewall ipv4 forward filter rule 10 action accept",
+        ] {
+            let (code, _, _) = parse(cmd, entry.clone(), None, State::new());
+            assert_ne!(
+                code,
+                ExecCode::Success,
+                "`{cmd}` must be rejected on a stock start"
+            );
+        }
+    }
 }
