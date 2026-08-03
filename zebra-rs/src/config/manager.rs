@@ -1426,6 +1426,8 @@ impl ConfigManager {
                                 "STAMP"
                             } else if is_nd(&paths) {
                                 "ND"
+                            } else if is_firewall(&paths) {
+                                "Firewall"
                             } else if is_policy(&paths) {
                                 "Policy"
                             } else {
@@ -1581,6 +1583,13 @@ fn is_ebpf(paths: &[CommandPath]) -> bool {
     paths.iter().any(|x| x.name == "ebpf")
 }
 
+/// `show firewall …` — served by the system/firewall task (iso-gated
+/// grammar; the task always runs, so no not-running fallback in
+/// practice).
+fn is_firewall(paths: &[CommandPath]) -> bool {
+    paths.iter().any(|x| x.name == "firewall")
+}
+
 /// `show pim ...`, `show igmp ...` and `show mroute` — all served by
 /// the PIM task (IGMP membership tracking and the multicast routing
 /// table live inside the PIM module).
@@ -1633,6 +1642,8 @@ fn show_proto(paths: &[CommandPath]) -> &'static str {
         "nd"
     } else if is_ebpf(paths) {
         "cradle"
+    } else if is_firewall(paths) {
+        "firewall"
     } else if is_policy(paths) {
         "policy"
     } else {
@@ -5611,18 +5622,18 @@ module test-iso-gated {
         assert_eq!(code, ExecCode::Success, "prefix form must always parse");
     }
 
-    /// Build the shipped configure tree with the given features — the
-    /// firewall tests' shared builder. Asserts a clean build: a
-    /// diagnostic here would also mean warn-spam at daemon startup.
-    fn shipped_tree(features: &[&str]) -> Rc<Entry> {
+    /// Build a shipped mode tree (`configure` or `exec`) with the
+    /// given features — the firewall tests' shared builder. Asserts a
+    /// clean build: a diagnostic here would also mean warn-spam at
+    /// daemon startup.
+    fn shipped_tree_mode(mode: &str, features: &[&str]) -> Rc<Entry> {
         let mut yang = YangStore::new();
         yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
         let specs: Vec<String> = features.iter().map(|s| s.to_string()).collect();
         enable_features(&mut yang, &specs);
-        yang.read_with_resolve("configure")
-            .expect("configure loads");
+        yang.read_with_resolve(mode).expect("mode loads");
         yang.identity_resolve();
-        let module = yang.find_module("configure").expect("configure module");
+        let module = yang.find_module(mode).expect("mode module");
         let entry = to_entry(&yang, module);
         let diagnostics = yang.take_diagnostics();
         assert!(
@@ -5630,6 +5641,10 @@ module test-iso-gated {
             "unexpected yang diagnostics: {diagnostics:?}"
         );
         entry
+    }
+
+    fn shipped_tree(features: &[&str]) -> Rc<Entry> {
+        shipped_tree_mode("configure", features)
     }
 
     /// The whole VyOS-style `firewall` subtree (firewall.yang, used
@@ -5974,5 +5989,78 @@ module test-iso-gated {
             State::new(),
         );
         assert_ne!(code, ExecCode::Success, "set at container stays incomplete");
+    }
+
+    /// The `show firewall` exec grammar: iso-gated like the config
+    /// subtree, every view parses to the path the firewall task
+    /// dispatches on, and the manager routes any firewall path to the
+    /// `"firewall"` show subscriber.
+    #[test]
+    fn show_firewall_grammar_gated_on_iso() {
+        use crate::config::parse::{State, parse};
+        use crate::config::path_from_command;
+
+        let entry = shipped_tree_mode("exec", &["iso"]);
+
+        let cases: Vec<(&str, &str, Vec<&str>)> = vec![
+            ("show firewall", "/show/firewall", vec![]),
+            ("show firewall group", "/show/firewall/group", vec![]),
+            ("show firewall ipv4", "/show/firewall/ipv4", vec![]),
+            (
+                "show firewall ipv4 forward filter",
+                "/show/firewall/ipv4/forward/filter",
+                vec![],
+            ),
+            (
+                "show firewall ipv4 output raw",
+                "/show/firewall/ipv4/output/raw",
+                vec![],
+            ),
+            (
+                "show firewall ipv6 prerouting raw",
+                "/show/firewall/ipv6/prerouting/raw",
+                vec![],
+            ),
+            (
+                "show firewall ipv4 name",
+                "/show/firewall/ipv4/name",
+                vec![],
+            ),
+            (
+                "show firewall ipv6 name WEB-IN",
+                "/show/firewall/ipv6/name",
+                vec!["WEB-IN"],
+            ),
+            // Abbreviations canonicalize into the dispatch path.
+            ("show fire", "/show/firewall", vec![]),
+            (
+                "show firewall ipv4 forw filt",
+                "/show/firewall/ipv4/forward/filter",
+                vec![],
+            ),
+        ];
+        for &(cmd, want_path, ref want_args) in &cases {
+            let (code, _, state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "parse `{cmd}`");
+            let (path, args) = path_from_command(&state.paths);
+            assert_eq!(path, want_path, "path for `{cmd}`");
+            let got: Vec<&str> = args.0.iter().map(|s| s.as_str()).collect();
+            assert_eq!(&got, want_args, "args for `{cmd}`");
+            assert_eq!(show_proto(&state.paths), "firewall", "routing for `{cmd}`");
+        }
+
+        // Bare hook containers are not commands (VyOS requires the
+        // filter/raw priority segment).
+        for cmd in ["show firewall ipv4 forward", "show firewall ipv6 output"] {
+            let (code, _, _) = parse(cmd, entry.clone(), None, State::new());
+            assert_ne!(code, ExecCode::Success, "`{cmd}` must not be a command");
+        }
+
+        // Stock start: the whole tree is absent.
+        let entry = shipped_tree_mode("exec", &[]);
+        let (code, _, _) = parse("show firewall", entry.clone(), None, State::new());
+        assert_ne!(code, ExecCode::Success, "gated off without --feature iso");
+        let (code, _, _) = parse("show interface", entry, None, State::new());
+        assert_eq!(code, ExecCode::Success, "the rest of show survives");
     }
 }

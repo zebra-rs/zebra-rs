@@ -230,6 +230,7 @@ async fn run(arg: Arg) -> anyhow::Result<()> {
     // subtree only exists with `--feature iso`).
     let firewall = system::Firewall::new();
     config.subscribe_json(&["firewall"], firewall.tx.clone());
+    config.subscribe_show("firewall", firewall.show.tx.clone());
 
     let cli = Cli::new(config.tx.clone());
 
