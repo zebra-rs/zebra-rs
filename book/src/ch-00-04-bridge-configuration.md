@@ -12,6 +12,10 @@ A bridge is the L2 forwarding domain an EVPN deployment carries. Over
 [VXLAN](ch-00-03-vxlan-configuration.md) that means binding a VXLAN device
 into it — the tunnel and the local access ports are enslaved to the same
 bridge, and the control plane drives the forwarding database. Over
+[SRv6](ch-02-41-bgp-evpn-srv6.md) the shape is the same — a vxlan slave
+declares the VNI that names the instance — but the kernel VXLAN path
+stays inert: the device is only the declaration, and forwarding runs
+MAC-in-SRv6 on the [eBPF data plane](ch-16-00-ebpf.md). Over
 [MPLS](ch-02-40-bgp-evpn-mpls.md) there is no tunnel device at all: the
 bridge is named directly by an `evi <id> { bridge <name> }` entry, and the
 transport is a service label rather than an enslaved netdevice.
