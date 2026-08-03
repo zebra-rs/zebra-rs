@@ -5654,6 +5654,19 @@ module test-iso-gated {
             "set firewall ipv6 forward filter rule 10 icmpv6 type-name nd-router-advert",
             "set firewall ipv6 input filter rule 10 hop-limit lt 10",
             "set firewall ipv6 name V6-CHAIN rule 1 action drop",
+            // raw hooks (prerouting raw / output raw)
+            "set firewall ipv4 prerouting raw rule 10 action notrack",
+            "set firewall ipv4 prerouting raw rule 10 inbound-interface name eth0",
+            "set firewall ipv4 prerouting raw rule 10 jump-target MY-CHAIN",
+            "set firewall ipv4 prerouting raw rule 10 ttl eq 1",
+            "set firewall ipv4 prerouting raw default-jump-target MY-CHAIN",
+            "set firewall ipv4 output raw default-log",
+            "set firewall ipv4 output raw rule 5 action drop",
+            "set firewall ipv4 output raw rule 5 outbound-interface name eth0",
+            "set firewall ipv4 output raw rule 5 tcp flags syn",
+            "set firewall ipv6 prerouting raw rule 10 action notrack",
+            "set firewall ipv6 prerouting raw rule 10 icmpv6 type-name echo-request",
+            "set firewall ipv6 output raw rule 5 hop-limit gt 1",
             // global options
             "set firewall global-options all-ping disable",
             "set firewall global-options source-validation strict",
@@ -5676,6 +5689,14 @@ module test-iso-gated {
             // instead.)
             "set firewall ipv6 input filter rule 10 icmpv6 type-name source-quench",
             "set firewall ipv6 output filter rule 5 ttl gt 64",
+            // raw chains run before conntrack: no state machinery, and
+            // notrack exists only there
+            "set firewall ipv4 prerouting raw rule 10 state established",
+            "set firewall ipv4 prerouting raw rule 10 mark 5",
+            "set firewall ipv4 forward filter rule 10 action notrack",
+            // prerouting raw has no default-log; output raw no jump-target
+            "set firewall ipv4 prerouting raw default-log",
+            "set firewall ipv4 output raw rule 5 jump-target FOO",
         ];
 
         let entry = shipped_tree(&["iso"]);
