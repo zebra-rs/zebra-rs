@@ -5363,9 +5363,9 @@ mod feature_gate_tests {
 
     /// A scratch module that augments `set router` in the real
     /// configure tree with a container gated on `feat:iso` from the
-    /// shipped zebra-features registry. No such node exists in the
-    /// shipped schema yet, so the fixture stands in for the first
-    /// real consumer.
+    /// shipped zebra-features registry, exercising the augment path of
+    /// the gating (the shipped `interface ipv4 dhcp` leaf covers the
+    /// in-module path — see `shipped_interface_ipv4_dhcp_gated_on_iso`).
     const FIXTURE: &str = r#"
 module test-iso-gated {
   yang-version "1";
@@ -5458,6 +5458,41 @@ module test-iso-gated {
         assert!(
             !gated_node_present(&["config:iso"]),
             "a feature enabled against the wrong module stays off"
+        );
+    }
+
+    /// Whether the shipped `interface <name> ipv4 dhcp` leaf (the
+    /// first real feature-gated node, `if-feature feat:iso` in
+    /// config.yang) exists in the configure tree.
+    fn shipped_dhcp_present(features: &[&str]) -> bool {
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        let specs: Vec<String> = features.iter().map(|s| s.to_string()).collect();
+        enable_features(&mut yang, &specs);
+        yang.read_with_resolve("configure")
+            .expect("configure loads");
+        yang.identity_resolve();
+        let module = yang.find_module("configure").expect("configure module");
+        let entry = to_entry(&yang, module);
+
+        let child = |e: &Rc<Entry>, name: &str| -> Option<Rc<Entry>> {
+            e.dir.borrow().iter().find(|c| c.name == name).cloned()
+        };
+        let set = child(&entry, "set").expect("set subtree");
+        let interface = child(&set, "interface").expect("interface list");
+        let ipv4 = child(&interface, "ipv4").expect("ipv4 container");
+        child(&ipv4, "dhcp").is_some()
+    }
+
+    #[test]
+    fn shipped_interface_ipv4_dhcp_gated_on_iso() {
+        assert!(
+            !shipped_dhcp_present(&[]),
+            "interface ipv4 dhcp must be absent on a stock start"
+        );
+        assert!(
+            shipped_dhcp_present(&["iso"]),
+            "interface ipv4 dhcp must appear with --feature iso"
         );
     }
 }
