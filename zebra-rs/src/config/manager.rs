@@ -210,6 +210,9 @@ impl RibSubscriber {
 
 pub struct ConfigManager {
     pub yang_path: String,
+    /// `--feature` specs (`feature` or `module:feature`) enabling RFC
+    /// 7950 YANG features on the schema store; see [`enable_features`].
+    pub features: Vec<String>,
     pub config_path: PathBuf,
     pub store: ConfigStore,
     pub modes: HashMap<String, Mode>,
@@ -289,9 +292,44 @@ pub struct ConfigManager {
     pub protocol_tasks: RefCell<HashMap<String, Task<()>>>,
 }
 
+/// Features enabled unconditionally. Before the schema became
+/// feature-aware libyang ignored `if-feature` entirely, so every
+/// guarded node in the shipped IETF modules was simply present; each
+/// such node that zebra-rs exposes needs its feature listed here or it
+/// silently drops out of the CLI grammar (the bgp_config_audit tests
+/// pin the tree). New zebra features must NOT be listed — they belong
+/// in zebra-features.yang and default off.
+const DEFAULT_FEATURES: &[(&str, &str)] = &[
+    // ietf-bgp-neighbor gates the per-AFI `graceful-restart` container
+    // on `if-feature "bt:graceful-restart"`; the per-VRF neighbor copy
+    // in zebra-bgp-vrf re-models the same knob ungated, and the
+    // vrf_afi_knob_parity audit requires the two to match.
+    ("iana-bgp-types", "graceful-restart"),
+];
+
+/// Enable RFC 7950 YANG features on the schema store before any mode
+/// is loaded: first the always-on compatibility set above, then the
+/// `--feature` specs. Each spec is `feature` or `module:feature`; a
+/// bare name refers to the central `zebra-features` registry module,
+/// so `--feature iso` enables `zebra-features:iso`. Schema nodes
+/// guarded by `if-feature` are pruned from the entry tree unless
+/// their expression holds for the enabled set.
+fn enable_features(yang: &mut YangStore, features: &[String]) {
+    for (module, feature) in DEFAULT_FEATURES {
+        yang.enable_feature(module, feature);
+    }
+    for spec in features {
+        let (module, feature) = spec
+            .split_once(':')
+            .unwrap_or(("zebra-features", spec.as_str()));
+        yang.enable_feature(module, feature);
+    }
+}
+
 impl ConfigManager {
     pub fn new(
         yang_path: String,
+        features: Vec<String>,
         config_file: Option<String>,
         rib_tx: UnboundedSender<crate::rib::Message>,
         rib_inbound_tx: UnboundedSender<crate::rib::client::RibInbound>,
@@ -323,6 +361,7 @@ impl ConfigManager {
         let (cradle_port_tx, cradle_port_rx) = mpsc::unbounded_channel();
         let mut cm = Self {
             yang_path,
+            features,
             config_path,
             modes: HashMap::new(),
             store: ConfigStore::new(),
@@ -457,6 +496,7 @@ impl ConfigManager {
     fn init(&mut self) -> anyhow::Result<()> {
         let mut yang = YangStore::new();
         yang.add_path(&self.yang_path);
+        enable_features(&mut yang, &self.features);
 
         let entry = self.load_mode(&mut yang, "exec")?;
         let exec = entry.clone();
@@ -473,6 +513,14 @@ impl ConfigManager {
         }
         let configure_mode = configure_mode_create(entry);
         self.modes.insert("configure".to_string(), configure_mode);
+
+        // Schema-build problems (skipped augments, dangling if-feature
+        // references from a typo'd --feature module, …) are warnings:
+        // the tree is still built, but silently dropping them would
+        // make a misspelled feature module look like a no-op.
+        for diag in yang.take_diagnostics() {
+            tracing::warn!("yang: {diag}");
+        }
 
         Ok(())
     }
@@ -1850,6 +1898,7 @@ mod startup_load_tests {
         let (policy_tx, _policy_rx) = mpsc::unbounded_channel();
         let cm = ConfigManager::new(
             concat!(env!("CARGO_MANIFEST_DIR"), "/yang").to_string(),
+            Vec::new(),
             Some(path.to_string_lossy().into_owned()),
             rib_tx,
             rib_inbound_tx,
@@ -4944,6 +4993,10 @@ mod bgp_config_audit_tests {
     fn configure_entry() -> Rc<Entry> {
         let mut yang = YangStore::new();
         yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        // The audits pin the tree exactly as the daemon builds it, so
+        // the always-on feature set must match `init()` (a stock start
+        // has no --feature specs).
+        super::enable_features(&mut yang, &[]);
         yang.read_with_resolve("configure")
             .expect("configure mode loads");
         yang.identity_resolve();
@@ -5299,5 +5352,112 @@ mod bgp_config_audit_tests {
         assert_eq!(doc_orphans, orphans, "ORPHAN entries drifted");
         assert_eq!(doc_bare, bare, "bare list/p-container section drifted");
         assert_eq!(doc_stale, stale, "stale-handler section drifted");
+    }
+}
+
+#[cfg(test)]
+mod feature_gate_tests {
+    use super::*;
+    use libyang::to_entry;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// A scratch module that augments `set router` in the real
+    /// configure tree with a container gated on `feat:iso` from the
+    /// shipped zebra-features registry. No such node exists in the
+    /// shipped schema yet, so the fixture stands in for the first
+    /// real consumer.
+    const FIXTURE: &str = r#"
+module test-iso-gated {
+  yang-version "1";
+  namespace "urn:test:test-iso-gated";
+  prefix "tig";
+
+  import configure {
+    prefix configure;
+  }
+
+  import config {
+    prefix config;
+  }
+
+  import zebra-features {
+    prefix feat;
+  }
+
+  augment "/configure:set/config:router" {
+    container iso-test {
+      if-feature feat:iso;
+      leaf tag {
+        type string;
+      }
+    }
+  }
+}
+"#;
+
+    /// Build the configure tree from the shipped `yang/` plus the
+    /// fixture module, with the given `--feature` specs applied, and
+    /// report whether the gated `set router iso-test` node exists.
+    fn gated_node_present(features: &[&str]) -> bool {
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "zebra-rs-iso-gate-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        std::fs::write(dir.join("test-iso-gated.yang"), FIXTURE).expect("fixture written");
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.add_path(dir.to_str().expect("utf-8 temp path"));
+        let specs: Vec<String> = features.iter().map(|s| s.to_string()).collect();
+        enable_features(&mut yang, &specs);
+        yang.read_with_resolve("configure")
+            .expect("configure loads");
+        yang.read_with_resolve("test-iso-gated")
+            .expect("fixture loads");
+        yang.identity_resolve();
+        let module = yang.find_module("configure").expect("configure module");
+        let entry = to_entry(&yang, module);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // The shipped schema plus the fixture must build clean — a
+        // diagnostic here would also mean warn-spam at every daemon
+        // startup (init() now logs them).
+        let diagnostics = yang.take_diagnostics();
+        assert!(
+            diagnostics.is_empty(),
+            "unexpected yang diagnostics: {diagnostics:?}"
+        );
+
+        let child = |e: &Rc<Entry>, name: &str| -> Option<Rc<Entry>> {
+            e.dir.borrow().iter().find(|c| c.name == name).cloned()
+        };
+        let set = child(&entry, "set").expect("set subtree");
+        let router = child(&set, "router").expect("router subtree");
+        child(&router, "iso-test").is_some()
+    }
+
+    #[test]
+    fn gated_node_absent_by_default() {
+        assert!(
+            !gated_node_present(&[]),
+            "feature-gated node must be pruned with no --feature"
+        );
+    }
+
+    #[test]
+    fn bare_feature_spec_resolves_to_zebra_features() {
+        assert!(gated_node_present(&["iso"]), "--feature iso enables it");
+    }
+
+    #[test]
+    fn module_qualified_spec_must_name_the_defining_module() {
+        assert!(gated_node_present(&["zebra-features:iso"]));
+        assert!(
+            !gated_node_present(&["config:iso"]),
+            "a feature enabled against the wrong module stays off"
+        );
     }
 }

@@ -63,6 +63,13 @@ struct Arg {
     )]
     config_file: Option<String>,
 
+    #[arg(
+        long = "feature",
+        value_name = "[MODULE:]FEATURE",
+        help = "Enable a YANG feature (RFC 7950); schema nodes guarded by if-feature exist only while their feature is enabled. A bare name refers to the zebra-features module. Repeatable."
+    )]
+    feature: Vec<String>,
+
     #[arg(short, long, help = "Run as daemon in background")]
     daemon: bool,
 
@@ -205,6 +212,7 @@ async fn run(arg: Arg) -> anyhow::Result<()> {
 
     let config = ConfigManager::new(
         yang_path,
+        arg.feature.clone(),
         arg.config_file.clone(),
         rib.tx.clone(),
         rib.inbound_tx.clone(),

@@ -1,0 +1,26 @@
+module zebra-features {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-features";
+  prefix "feat";
+
+  description
+    "Central registry of zebra-rs optional-feature switches (RFC 7950
+     feature statements). A module that wants conditional schema
+     imports this registry (conventionally with prefix `feat`) and
+     guards nodes with `if-feature feat:NAME`; the guarded nodes exist
+     only while the daemon is started with `--feature NAME` (a bare
+     name on the flag resolves to this module — `--feature iso` means
+     `zebra-features:iso`). Features default to off, so guarded nodes
+     are absent from the schema tree unless explicitly enabled.
+
+     Module-local features are also possible (`--feature MODULE:NAME`),
+     but prefer registering here so operators have one place to look.";
+
+  feature iso {
+    description
+      "ISO / OSI protocol-family support (NSAP addressing, CLNS).
+       Gates schema nodes that only make sense on an ISO-enabled
+       router.";
+  }
+}
