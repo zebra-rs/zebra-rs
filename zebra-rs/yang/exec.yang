@@ -1465,7 +1465,6 @@ module exec {
     }
     container segment-routing {
       ext:help "Show segment-routing";
-      presence "Segment Routing";
       container srv6 {
         ext:help "Show SRv6";
         presence "SRv6";

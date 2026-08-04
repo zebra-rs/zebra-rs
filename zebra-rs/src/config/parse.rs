@@ -1310,6 +1310,50 @@ mod tests {
         }
     }
 
+    /// Pin the `show segment-routing` grammar. `srv6` is a presence
+    /// container that doubles as a prefix alias for the SID table, so
+    /// both spellings must parse to a path a `ShowCallback` is
+    /// registered under — the bare `srv6` used to complete into the
+    /// unhandled `/show/segment-routing/srv6` and silently print
+    /// nothing. The outer `segment-routing` container is a pure
+    /// grouping node (no presence), so it must come back Incomplete
+    /// instead of completing into an unhandled path.
+    #[test]
+    fn show_segment_routing_grammar() {
+        use crate::config::path_from_command;
+        let entry = exec_entry();
+
+        let cases: Vec<(&str, &str, Vec<&str>)> = vec![
+            (
+                "show segment-routing srv6",
+                "/show/segment-routing/srv6",
+                vec![],
+            ),
+            (
+                "show segment-routing srv6 sid",
+                "/show/segment-routing/srv6/sid",
+                vec![],
+            ),
+        ];
+
+        for &(cmd, want_path, ref want_args) in &cases {
+            let (code, _comps, state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "parse `{cmd}`");
+            let (path, args) = path_from_command(&state.paths);
+            assert_eq!(path, want_path, "path for `{cmd}`");
+            let got: Vec<&str> = args.0.iter().map(|s| s.as_str()).collect();
+            assert_eq!(&got, want_args, "args for `{cmd}`");
+        }
+
+        let (code, _comps, _state) =
+            parse("show segment-routing", entry.clone(), None, State::new());
+        assert_eq!(
+            code,
+            ExecCode::Incomplete,
+            "`show segment-routing` must be incomplete, not a silent no-op"
+        );
+    }
+
     /// The BGP RIB views moved off the legacy `show ip bgp` tree onto
     /// `show bgp …`; the whole `show ip bgp` subtree is gone, so every
     /// old spelling must no longer parse and each `show bgp …` twin must.
