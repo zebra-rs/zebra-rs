@@ -402,11 +402,11 @@ fn cipher_strings(
                 named => Some(named.trim_start_matches("dh-group").to_string()),
             }
         };
-        if let Some(dh) = dh {
-            if let Some(name) = dh_group_name(&dh) {
-                s.push('-');
-                s.push_str(name);
-            }
+        if let Some(dh) = dh
+            && let Some(name) = dh_group_name(&dh)
+        {
+            s.push('-');
+            s.push_str(name);
         }
         out.push(s);
     }
