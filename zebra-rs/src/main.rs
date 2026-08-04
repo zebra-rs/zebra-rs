@@ -234,6 +234,7 @@ async fn run(arg: Arg) -> anyhow::Result<()> {
 
     let ipsec = system::Ipsec::new();
     config.subscribe_json(&["vpn", "ipsec"], ipsec.tx.clone());
+    config.subscribe_show("ipsec", ipsec.show.tx.clone());
 
     let cli = Cli::new(config.tx.clone());
 

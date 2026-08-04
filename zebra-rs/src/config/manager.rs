@@ -1428,6 +1428,8 @@ impl ConfigManager {
                                 "ND"
                             } else if is_firewall(&paths) {
                                 "Firewall"
+                            } else if is_vpn(&paths) {
+                                "IPsec"
                             } else if is_policy(&paths) {
                                 "Policy"
                             } else {
@@ -1590,6 +1592,13 @@ fn is_firewall(paths: &[CommandPath]) -> bool {
     paths.iter().any(|x| x.name == "firewall")
 }
 
+/// `show vpn ...` — the whole VPN show tree (only IPsec today) is
+/// served by the IPsec task (iso-gated exec grammar; the task always
+/// runs, so no not-running fallback in practice).
+fn is_vpn(paths: &[CommandPath]) -> bool {
+    paths.iter().any(|x| x.name == "vpn")
+}
+
 /// `show pim ...`, `show igmp ...` and `show mroute` — all served by
 /// the PIM task (IGMP membership tracking and the multicast routing
 /// table live inside the PIM module).
@@ -1644,6 +1653,8 @@ fn show_proto(paths: &[CommandPath]) -> &'static str {
         "cradle"
     } else if is_firewall(paths) {
         "firewall"
+    } else if is_vpn(paths) {
+        "ipsec"
     } else if is_policy(paths) {
         "policy"
     } else {
@@ -6062,6 +6073,47 @@ module test-iso-gated {
         assert_ne!(code, ExecCode::Success, "gated off without --feature iso");
         let (code, _, _) = parse("show interface", entry, None, State::new());
         assert_eq!(code, ExecCode::Success, "the rest of show survives");
+    }
+
+    /// The `show vpn ipsec` exec grammar: iso-gated like the config
+    /// subtree, every view parses to the path the ipsec task
+    /// dispatches on, and the manager routes any vpn path to the
+    /// `"ipsec"` show subscriber.
+    #[test]
+    fn show_vpn_ipsec_grammar_gated_on_iso() {
+        use crate::config::parse::{State, parse};
+        use crate::config::path_from_command;
+
+        let entry = shipped_tree_mode("exec", &["iso"]);
+
+        let cases: Vec<(&str, &str)> = vec![
+            ("show vpn ipsec sa", "/show/vpn/ipsec/sa"),
+            ("show vpn ipsec connections", "/show/vpn/ipsec/connections"),
+            ("show vpn ipsec policy", "/show/vpn/ipsec/policy"),
+            ("show vpn ipsec state", "/show/vpn/ipsec/state"),
+            // Abbreviations canonicalize into the dispatch path.
+            ("show vpn ips sa", "/show/vpn/ipsec/sa"),
+            ("show vpn ipsec conn", "/show/vpn/ipsec/connections"),
+        ];
+        for &(cmd, want_path) in &cases {
+            let (code, _, state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "parse `{cmd}`");
+            let (path, _args) = path_from_command(&state.paths);
+            assert_eq!(path, want_path, "path for `{cmd}`");
+            assert_eq!(show_proto(&state.paths), "ipsec", "routing for `{cmd}`");
+        }
+
+        // Bare `show vpn` / `show vpn ipsec` are not commands — a
+        // view must be named, like VyOS.
+        for cmd in ["show vpn", "show vpn ipsec"] {
+            let (code, _, _) = parse(cmd, entry.clone(), None, State::new());
+            assert_ne!(code, ExecCode::Success, "`{cmd}` must not be a command");
+        }
+
+        // Stock start: the whole tree is absent.
+        let entry = shipped_tree_mode("exec", &[]);
+        let (code, _, _) = parse("show vpn ipsec sa", entry, None, State::new());
+        assert_ne!(code, ExecCode::Success, "gated off without --feature iso");
     }
 
     /// The VyOS-style `vpn ipsec` subtree (ipsec.yang, used inside

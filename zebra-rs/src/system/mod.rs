@@ -7,6 +7,7 @@
 pub mod firewall;
 pub mod ipsec;
 mod json;
+pub mod vici;
 
 pub use firewall::Firewall;
 pub use ipsec::Ipsec;
