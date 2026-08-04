@@ -6063,4 +6063,176 @@ module test-iso-gated {
         let (code, _, _) = parse("show interface", entry, None, State::new());
         assert_eq!(code, ExecCode::Success, "the rest of show survives");
     }
+
+    /// The VyOS-style `vpn ipsec` subtree (ipsec.yang, used inside
+    /// the iso-gated `vpn` container in config.yang) is part of the
+    /// ISO-only config surface: absent on a stock start, present with
+    /// `--feature iso`.
+    #[test]
+    fn shipped_vpn_ipsec_gated_on_iso() {
+        let child = |e: &Rc<Entry>, name: &str| -> Option<Rc<Entry>> {
+            e.dir.borrow().iter().find(|c| c.name == name).cloned()
+        };
+
+        let set = child(&shipped_tree(&[]), "set").expect("set subtree");
+        assert!(
+            child(&set, "vpn").is_none(),
+            "vpn subtree must be absent on a stock start"
+        );
+
+        let set = child(&shipped_tree(&["iso"]), "set").expect("set subtree");
+        let vpn = child(&set, "vpn").expect("vpn subtree with --feature iso");
+        let ipsec = child(&vpn, "ipsec").expect("ipsec container");
+        // The grouping expanded: every ported top-level branch exists.
+        for name in [
+            "authentication",
+            "disable-uniqreqids",
+            "esp-group",
+            "ike-group",
+            "interface",
+            "log",
+            "options",
+            "site-to-site",
+        ] {
+            assert!(
+                child(&ipsec, name).is_some(),
+                "vpn ipsec {name} branch missing"
+            );
+        }
+    }
+
+    /// End-to-end CLI grammar for the `vpn ipsec` subtree: a battery
+    /// of representative `set vpn ipsec …` commands parses with iso
+    /// and is rejected on a stock start. The negatives pin VyOS
+    /// fidelity: deferred branches (profile, remote-access, rsa/x509
+    /// auth) must not exist, enum and range constraints must hold —
+    /// including the disjoint IKE dh-group range — and `ikev2-reauth`
+    /// must be valueless on the ike-group but valued on the peer.
+    #[test]
+    fn ipsec_commands_parse_only_with_iso() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+
+        let ok = [
+            // authentication + global toggles
+            "set vpn ipsec authentication psk GW id 192.0.2.1",
+            "set vpn ipsec authentication psk GW id @office",
+            "set vpn ipsec authentication psk GW secret Vyos-Secret123",
+            "set vpn ipsec authentication psk GW dhcp-interface eth0",
+            "set vpn ipsec disable-uniqreqids",
+            // esp-group
+            "set vpn ipsec esp-group ESP-1 lifetime 1800",
+            "set vpn ipsec esp-group ESP-1 life-bytes 1024000",
+            "set vpn ipsec esp-group ESP-1 life-packets 1000000",
+            "set vpn ipsec esp-group ESP-1 mode transport",
+            "set vpn ipsec esp-group ESP-1 pfs dh-group19",
+            "set vpn ipsec esp-group ESP-1 pfs enable",
+            "set vpn ipsec esp-group ESP-1 compression",
+            "set vpn ipsec esp-group ESP-1 disable-rekey",
+            "set vpn ipsec esp-group ESP-1 proposal 10 encryption aes256gcm128",
+            "set vpn ipsec esp-group ESP-1 proposal 10 hash sha256",
+            "set vpn ipsec esp-group ESP-1 proposal 20 encryption chacha20poly1305",
+            "set vpn ipsec esp-group ESP-1 proposal 30 encryption 3des",
+            "set vpn ipsec esp-group ESP-1 proposal 30 hash md5_128",
+            // ike-group
+            "set vpn ipsec ike-group IKE-1 key-exchange ikev2",
+            "set vpn ipsec ike-group IKE-1 lifetime 7200",
+            "set vpn ipsec ike-group IKE-1 mode aggressive",
+            "set vpn ipsec ike-group IKE-1 close-action trap",
+            "set vpn ipsec ike-group IKE-1 disable-mobike",
+            "set vpn ipsec ike-group IKE-1 ikev2-reauth",
+            "set vpn ipsec ike-group IKE-1 dead-peer-detection action restart",
+            "set vpn ipsec ike-group IKE-1 dead-peer-detection interval 15",
+            "set vpn ipsec ike-group IKE-1 dead-peer-detection timeout 60",
+            "set vpn ipsec ike-group IKE-1 proposal 10 dh-group 14",
+            "set vpn ipsec ike-group IKE-1 proposal 10 encryption aes256",
+            "set vpn ipsec ike-group IKE-1 proposal 10 hash sha512",
+            "set vpn ipsec ike-group IKE-1 proposal 10 prf prfsha384",
+            // top-level plumbing
+            "set vpn ipsec interface eth0",
+            "set vpn ipsec log level 2",
+            "set vpn ipsec log subsystem ike",
+            "set vpn ipsec log subsystem any",
+            "set vpn ipsec options disable-route-autoinstall",
+            "set vpn ipsec options flexvpn",
+            "set vpn ipsec options interface eth1",
+            "set vpn ipsec options virtual-ip",
+            // site-to-site
+            "set vpn ipsec site-to-site peer OFFICE-A authentication mode pre-shared-secret",
+            "set vpn ipsec site-to-site peer OFFICE-A authentication pre-shared-secret S3cret!",
+            "set vpn ipsec site-to-site peer OFFICE-A authentication local-id left",
+            "set vpn ipsec site-to-site peer OFFICE-A authentication remote-id right",
+            "set vpn ipsec site-to-site peer OFFICE-A connection-type respond",
+            "set vpn ipsec site-to-site peer OFFICE-A default-esp-group ESP-1",
+            "set vpn ipsec site-to-site peer OFFICE-A description main office tunnel",
+            "set vpn ipsec site-to-site peer OFFICE-A ike-group IKE-1",
+            "set vpn ipsec site-to-site peer OFFICE-A ikev2-reauth inherit",
+            "set vpn ipsec site-to-site peer OFFICE-A local-address 192.0.2.1",
+            "set vpn ipsec site-to-site peer OFFICE-A local-address any",
+            "set vpn ipsec site-to-site peer OFFICE-A remote-address 203.0.113.9",
+            "set vpn ipsec site-to-site peer OFFICE-A remote-address 2001:db8::9",
+            "set vpn ipsec site-to-site peer OFFICE-A remote-address vpn.example.com",
+            "set vpn ipsec site-to-site peer OFFICE-A replay-window 128",
+            "set vpn ipsec site-to-site peer OFFICE-A force-udp-encapsulation",
+            "set vpn ipsec site-to-site peer OFFICE-A dhcp-interface eth0",
+            "set vpn ipsec site-to-site peer OFFICE-A virtual-address 10.99.0.2",
+            "set vpn ipsec site-to-site peer OFFICE-A tunnel 1 esp-group ESP-1",
+            "set vpn ipsec site-to-site peer OFFICE-A tunnel 1 local prefix 192.168.1.0/24",
+            "set vpn ipsec site-to-site peer OFFICE-A tunnel 1 local port 443",
+            "set vpn ipsec site-to-site peer OFFICE-A tunnel 1 remote prefix 10.0.0.0/24",
+            "set vpn ipsec site-to-site peer OFFICE-A tunnel 1 remote prefix 2001:db8::/48",
+            "set vpn ipsec site-to-site peer OFFICE-A tunnel 1 protocol tcp",
+            "set vpn ipsec site-to-site peer OFFICE-A tunnel 1 priority 10",
+            "set vpn ipsec site-to-site peer OFFICE-A tunnel 2 disable",
+            "set vpn ipsec site-to-site peer OFFICE-A disable",
+            "set vpn ipsec site-to-site peer OFFICE-B vti bind vti0",
+            "set vpn ipsec site-to-site peer OFFICE-B vti esp-group ESP-1",
+        ];
+
+        let bad_with_iso = [
+            // deferred branches must not exist yet
+            "set vpn ipsec profile NHRP authentication mode pre-shared-secret",
+            "set vpn ipsec remote-access connection RA pool CLIENTS",
+            // deferred auth modes (need a pki tree)
+            "set vpn ipsec site-to-site peer OFFICE-A authentication mode x509",
+            "set vpn ipsec site-to-site peer OFFICE-A authentication mode rsa",
+            // enum / range fidelity
+            "set vpn ipsec esp-group ESP-1 mode beet",
+            "set vpn ipsec esp-group ESP-1 lifetime 20",
+            "set vpn ipsec ike-group IKE-1 proposal 10 dh-group 3",
+            "set vpn ipsec log level 3",
+            "set vpn ipsec site-to-site peer OFFICE-A replay-window 4096",
+            "set vpn ipsec site-to-site peer OFFICE-A tunnel 1 priority 200",
+            // ikev2-reauth: valueless on the group, valued on the peer
+            "set vpn ipsec ike-group IKE-1 ikev2-reauth yes",
+            "set vpn ipsec site-to-site peer OFFICE-A ikev2-reauth",
+        ];
+
+        let entry = shipped_tree(&["iso"]);
+        for cmd in ok {
+            let (code, _, _) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "`{cmd}` must parse with iso");
+        }
+        for cmd in bad_with_iso {
+            let (code, _, _) = parse(cmd, entry.clone(), None, State::new());
+            assert_ne!(
+                code,
+                ExecCode::Success,
+                "`{cmd}` must not parse (VyOS fidelity)"
+            );
+        }
+
+        let entry = shipped_tree(&[]);
+        for cmd in [
+            "set vpn ipsec ike-group IKE-1 key-exchange ikev2",
+            "set vpn ipsec site-to-site peer OFFICE-A ike-group IKE-1",
+        ] {
+            let (code, _, _) = parse(cmd, entry.clone(), None, State::new());
+            assert_ne!(
+                code,
+                ExecCode::Success,
+                "`{cmd}` must be rejected on a stock start"
+            );
+        }
+    }
 }
