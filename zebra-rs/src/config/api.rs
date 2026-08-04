@@ -9,6 +9,15 @@ pub struct ConfigChannel {
     pub rx: UnboundedReceiver<ConfigRequest>,
 }
 
+/// One JSON batch delivery (see `ConfigManager::subscribe_json`): the
+/// whole post-commit config subtree at `path`, marshaled as JSON.
+/// `"{}"` means the subtree no longer exists.
+#[derive(Debug)]
+pub struct JsonConfigUpdate {
+    pub path: Vec<String>,
+    pub json: String,
+}
+
 #[derive(Debug, PartialEq, Clone, Copy, Eq, PartialOrd, Ord)]
 pub enum ConfigOp {
     CommitStart,
