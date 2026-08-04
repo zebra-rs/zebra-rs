@@ -455,16 +455,15 @@ module ipsec {
             type string;
           }
           // VyOS also offers rsa and x509 here; both need a `pki`
-          // tree and are deferred with it.
+          // tree and are deferred with it. Note there is NO
+          // per-peer pre-shared-secret leaf: since VyOS 1.5 the
+          // secrets live solely in the `authentication psk` table,
+          // matched by id / remote address.
           leaf mode {
             ext:help "Authentication mode";
             type enumeration {
               enum pre-shared-secret;
             }
-          }
-          leaf pre-shared-secret {
-            ext:help "Pre-shared secret key";
-            type string;
           }
           leaf remote-id {
             ext:help "ID for remote authentication (VyOS default: %any)";

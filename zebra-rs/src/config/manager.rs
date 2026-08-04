@@ -6159,7 +6159,6 @@ module test-iso-gated {
             "set vpn ipsec options virtual-ip",
             // site-to-site
             "set vpn ipsec site-to-site peer OFFICE-A authentication mode pre-shared-secret",
-            "set vpn ipsec site-to-site peer OFFICE-A authentication pre-shared-secret S3cret!",
             "set vpn ipsec site-to-site peer OFFICE-A authentication local-id left",
             "set vpn ipsec site-to-site peer OFFICE-A authentication remote-id right",
             "set vpn ipsec site-to-site peer OFFICE-A connection-type respond",
@@ -6196,6 +6195,9 @@ module test-iso-gated {
             // deferred auth modes (need a pki tree)
             "set vpn ipsec site-to-site peer OFFICE-A authentication mode x509",
             "set vpn ipsec site-to-site peer OFFICE-A authentication mode rsa",
+            // since VyOS 1.5 the PSK lives only in the authentication
+            // psk table — there is no per-peer secret leaf
+            "set vpn ipsec site-to-site peer OFFICE-A authentication pre-shared-secret S3cret",
             // enum / range fidelity
             "set vpn ipsec esp-group ESP-1 mode beet",
             "set vpn ipsec esp-group ESP-1 lifetime 20",
@@ -6233,6 +6235,77 @@ module test-iso-gated {
                 ExecCode::Success,
                 "`{cmd}` must be rejected on a stock start"
             );
+        }
+    }
+
+    /// End-to-end: CLI commands through the real iso-enabled schema
+    /// into a config tree, the `/vpn/ipsec` subtree marshaled exactly
+    /// as the manager's JSON batch subscription does, and that JSON
+    /// rendered by the swanctl backend. Pins the backend's serde
+    /// model against `Config::json()` output the same way the
+    /// firewall roundtrip test does.
+    #[test]
+    fn ipsec_json_roundtrip_renders_swanctl() {
+        use crate::config::parse::{State, parse};
+
+        let entry = shipped_tree(&["iso"]);
+
+        let store = ConfigStore::new();
+        for cmd in [
+            "set vpn ipsec authentication psk MAIN id 192.0.2.9",
+            "set vpn ipsec authentication psk MAIN secret s3cret-key",
+            "set vpn ipsec esp-group ESP-A lifetime 1800",
+            "set vpn ipsec esp-group ESP-A proposal 10 encryption aes256gcm128",
+            "set vpn ipsec esp-group ESP-A proposal 10 hash sha256",
+            "set vpn ipsec ike-group IKE-A key-exchange ikev2",
+            "set vpn ipsec ike-group IKE-A proposal 10 dh-group 19",
+            "set vpn ipsec ike-group IKE-A proposal 10 encryption aes256gcm128",
+            "set vpn ipsec ike-group IKE-A proposal 10 hash sha256",
+            "set vpn ipsec site-to-site peer 192.0.2.9 authentication mode pre-shared-secret",
+            "set vpn ipsec site-to-site peer 192.0.2.9 connection-type respond",
+            "set vpn ipsec site-to-site peer 192.0.2.9 default-esp-group ESP-A",
+            "set vpn ipsec site-to-site peer 192.0.2.9 ike-group IKE-A",
+            "set vpn ipsec site-to-site peer 192.0.2.9 local-address 192.0.2.1",
+            "set vpn ipsec site-to-site peer 192.0.2.9 remote-address 192.0.2.9",
+            "set vpn ipsec site-to-site peer 192.0.2.9 tunnel 1 local prefix 10.0.1.0/24",
+            "set vpn ipsec site-to-site peer 192.0.2.9 tunnel 1 remote prefix 10.0.2.0/24",
+        ] {
+            let candidate = store.candidate.borrow().clone();
+            let (code, _, state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "parse `{cmd}`");
+            set(path_try_trim("set", state.paths), candidate);
+        }
+
+        // Marshal the /vpn/ipsec subtree the way `subtree_json` does.
+        let mut node = store.candidate.borrow().clone();
+        for seg in ["vpn", "ipsec"] {
+            node = node.lookup(&seg.to_string()).expect("subtree exists");
+        }
+        let mut json = String::new();
+        node.json(&mut json);
+
+        let (conf, warnings) =
+            crate::system::ipsec::render_str(&json).expect("backend parses manager JSON");
+        assert!(warnings.is_empty(), "warnings: {warnings:?}");
+        for needle in [
+            "    192-0-2-9 {",
+            "proposals = aes256gcm128-sha256-ecp256",
+            "version = 2",
+            "local_addrs = 192.0.2.1 # dhcp:no",
+            "remote_addrs = 192.0.2.9",
+            "keyingtries = 1",
+            "id = \"%any\"",
+            "192-0-2-9-tunnel-1 {",
+            "esp_proposals = aes256gcm128-sha256-ecp256",
+            "life_time = 1800s",
+            "local_ts = 10.0.1.0/24",
+            "remote_ts = 10.0.2.0/24",
+            "start_action = trap",
+            "ike-MAIN {",
+            "id-1 = \"192.0.2.9\"",
+            "secret = \"s3cret-key\"",
+        ] {
+            assert!(conf.contains(needle), "missing `{needle}` in:\n{conf}");
         }
     }
 }
