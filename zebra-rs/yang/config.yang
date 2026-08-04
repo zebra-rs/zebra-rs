@@ -24,6 +24,10 @@ module config {
     prefix dhcp;
   }
 
+  import firewall {
+    prefix fw;
+  }
+
   import ietf-bgp {
     prefix bgp;
   }
@@ -4869,6 +4873,15 @@ module config {
         }
       }
     }
+    // VyOS-compatible firewall (see firewall.yang). Part of the
+    // ISO-only config surface: the whole subtree is feature-gated, so
+    // it exists only when the daemon runs with `--feature iso`.
+    container firewall {
+      if-feature feat:iso;
+      ext:help "Firewall configuration";
+      uses "fw:firewall";
+    }
+
     list interface {
       ext:help "Interface configuration";
       ext:sort "20";

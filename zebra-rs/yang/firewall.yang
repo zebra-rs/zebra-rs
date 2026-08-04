@@ -1,0 +1,1219 @@
+module firewall {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-firewall";
+  prefix "fw";
+
+  import ietf-inet-types {
+    prefix inet;
+  }
+
+  import ietf-yang-types {
+    prefix yang;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  description
+    "VyOS-compatible firewall configuration, ported from the VyOS 1.5
+     (circinus) interface definitions (vyos-1x
+     interface-definitions/firewall.xml.in and its include fragments).
+
+     This module is a grouping library in the dhcp.yang style:
+     config.yang instantiates `grouping firewall` under an iso-gated
+     `container firewall`, so every node here exists only when the
+     daemon runs with `--feature iso`.
+
+     Scope of this first cut: `group` (static named groups), `ipv4`
+     and `ipv6` filter hooks (forward/input/output) plus custom named
+     chains, and `global-options`. Deliberately deferred to follow-ups:
+     raw hooks (prerouting/output raw with notrack), zone, bridge,
+     flowtable/offload, geoip, fqdn/domain-group, dynamic groups and
+     add-address-to-group, remote-group, conntrack-helper, ipsec and
+     synproxy matchers.
+
+     Value-shape conventions: VyOS spellings that a scalar type cannot
+     carry — ranges (`10.0.0.1-10.0.0.5`, `1001-1050`, `a-b`), comma
+     lists, and `!` negation — ride a `string` union arm with the
+     syntax documented in the node's help. No `pattern` statements are
+     used: in this CLI a patterned string leaf consumes the rest of
+     the line, which would swallow the trailing command tokens.
+     Group and chain references are held as plain `type string` (not
+     leafref) so the referent may be staged after the referrer,
+     mirroring the policy prefix-set convention.";
+
+  // ---------------------------------------------------------------
+  // Shared building blocks
+  // ---------------------------------------------------------------
+
+  // Members shared by every static group type.
+  grouping group-meta {
+    leaf-list include {
+      ext:help "Include members of another group of the same type";
+      type string;
+    }
+    leaf description {
+      ext:help "Description";
+      // Rest-of-line value: the pattern makes the leaf consume the
+      // remainder of the command, whitespace included (`match_regexp`
+      // in config/parse.rs).
+      type string {
+        pattern '.*';
+      }
+    }
+  }
+
+  // Chain heads. Base chains (forward/input/output filter) accept
+  // only accept|drop; custom chains take the full action set and may
+  // name a default jump target.
+  grouping chain-base-head {
+    leaf default-action {
+      ext:help "Default action when no rule matches (VyOS default: accept)";
+      type enumeration {
+        enum accept;
+        enum drop;
+      }
+    }
+    leaf default-log {
+      ext:help "Log packets hitting the default action";
+      type empty;
+    }
+    leaf description {
+      ext:help "Description";
+      // Rest-of-line value: the pattern makes the leaf consume the
+      // remainder of the command, whitespace included (`match_regexp`
+      // in config/parse.rs).
+      type string {
+        pattern '.*';
+      }
+    }
+  }
+
+  grouping chain-custom-head {
+    leaf default-action {
+      ext:help "Default action when no rule matches (VyOS default: drop)";
+      type enumeration {
+        enum accept;
+        enum continue;
+        enum drop;
+        enum jump;
+        enum reject;
+        enum return;
+      }
+    }
+    leaf default-jump-target {
+      ext:help "Custom chain to jump to for default-action jump";
+      type string;
+    }
+    leaf default-log {
+      ext:help "Log packets hitting the default action";
+      type empty;
+    }
+    leaf description {
+      ext:help "Description";
+      // Rest-of-line value: the pattern makes the leaf consume the
+      // remainder of the command, whitespace included (`match_regexp`
+      // in config/parse.rs).
+      type string {
+        pattern '.*';
+      }
+    }
+  }
+
+  // Interface matchers. Which of the two a rule carries depends on
+  // the hook: forward sees both, input only inbound, output only
+  // outbound; custom chains carry both (they can be jumped to from
+  // any hook).
+  grouping match-interface-in {
+    container inbound-interface {
+      ext:help "Match inbound interface";
+      leaf name {
+        ext:help "Interface name; wildcard eth1* and negation !eth0 allowed";
+        type string;
+      }
+      leaf group {
+        ext:help "Interface-group name; negation !GROUP allowed";
+        type string;
+      }
+    }
+  }
+
+  grouping match-interface-out {
+    container outbound-interface {
+      ext:help "Match outbound interface";
+      leaf name {
+        ext:help "Interface name; wildcard eth1* and negation !eth0 allowed";
+        type string;
+      }
+      leaf group {
+        ext:help "Interface-group name; negation !GROUP allowed";
+        type string;
+      }
+    }
+  }
+
+  // Family-neutral rule matchers and actions, shared verbatim by the
+  // IPv4 and IPv6 rule bodies (VyOS common-rule-inet).
+  grouping rule-common {
+    leaf action {
+      ext:help "Rule action";
+      type enumeration {
+        enum accept;
+        enum continue;
+        enum drop;
+        enum jump;
+        enum queue;
+        enum reject;
+        enum return;
+      }
+    }
+    leaf description {
+      ext:help "Description";
+      // Rest-of-line value: the pattern makes the leaf consume the
+      // remainder of the command, whitespace included (`match_regexp`
+      // in config/parse.rs).
+      type string {
+        pattern '.*';
+      }
+    }
+    leaf disable {
+      ext:help "Disable this rule without deleting it";
+      type empty;
+    }
+    leaf jump-target {
+      ext:help "Custom chain to jump to for action jump";
+      type string;
+    }
+    leaf-list connection-mark {
+      ext:help "Match connection mark";
+      type uint32 {
+        range "0..2147483647";
+      }
+    }
+    container connection-status {
+      ext:help "Match connection status";
+      leaf nat {
+        ext:help "Match NAT direction applied to the connection";
+        type enumeration {
+          enum destination;
+          enum source;
+        }
+      }
+    }
+    leaf-list dscp {
+      ext:help "Match DSCP value <0-63> or range <start-end>";
+      type union {
+        type uint8 {
+          range "0..63";
+        }
+        type string;
+      }
+    }
+    leaf-list dscp-exclude {
+      ext:help "Match DSCP values NOT in <0-63> or range <start-end>";
+      type union {
+        type uint8 {
+          range "0..63";
+        }
+        type string;
+      }
+    }
+    container fragment {
+      ext:help "Match fragmentation";
+      leaf match-frag {
+        ext:help "Match second and further fragments";
+        type empty;
+      }
+      leaf match-non-frag {
+        ext:help "Match head fragments or unfragmented packets";
+        type empty;
+      }
+    }
+    container limit {
+      ext:help "Rate-limit how often the rule can match";
+      leaf burst {
+        ext:help "Maximum number of packets allowed in excess of the rate";
+        type uint32;
+      }
+      leaf rate {
+        ext:help "Maximum average match rate, <integer>/<second|minute|hour|day>";
+        type string;
+      }
+    }
+    leaf log {
+      ext:help "Log matched packets";
+      type empty;
+    }
+    container log-options {
+      ext:help "Logging options";
+      leaf group {
+        ext:help "Netlink log group";
+        type uint16;
+      }
+      leaf level {
+        ext:help "Syslog level";
+        type enumeration {
+          enum emerg;
+          enum alert;
+          enum crit;
+          enum err;
+          enum warn;
+          enum notice;
+          enum info;
+          enum debug;
+        }
+      }
+      leaf snapshot-length {
+        ext:help "Bytes of the packet to copy to the log";
+        type uint32 {
+          range "0..9000";
+        }
+      }
+      leaf queue-threshold {
+        ext:help "Packets queued inside the kernel before sending to userspace";
+        type uint16;
+      }
+    }
+    leaf mark {
+      ext:help "Match packet mark <0-2147483647>, range <start-end>; negate with !";
+      type union {
+        type uint32 {
+          range "0..2147483647";
+        }
+        type string;
+      }
+    }
+    leaf-list packet-length {
+      ext:help "Match total packet length <1-65535> or range <start-end>";
+      type union {
+        type uint16 {
+          range "1..65535";
+        }
+        type string;
+      }
+    }
+    leaf-list packet-length-exclude {
+      ext:help "Match total packet length NOT in <1-65535> or range <start-end>";
+      type union {
+        type uint16 {
+          range "1..65535";
+        }
+        type string;
+      }
+    }
+    leaf packet-type {
+      ext:help "Match link-layer packet type";
+      type enumeration {
+        enum broadcast;
+        enum host;
+        enum multicast;
+        enum other;
+      }
+    }
+    leaf protocol {
+      ext:help "Match protocol: name, number <0-255>, all, tcp_udp; negate with !";
+      type union {
+        type uint8;
+        type string;
+      }
+    }
+    leaf queue {
+      ext:help "Userspace queue number for action queue";
+      type uint16;
+    }
+    leaf-list queue-options {
+      ext:help "Queue options";
+      type enumeration {
+        enum bypass;
+        enum fanout;
+      }
+    }
+    container recent {
+      ext:help "Match recently-seen sources";
+      leaf count {
+        ext:help "Source seen more than this many times";
+        type uint8 {
+          range "1..255";
+        }
+      }
+      leaf time {
+        ext:help "Within this time unit";
+        type enumeration {
+          enum second;
+          enum minute;
+          enum hour;
+        }
+      }
+    }
+    leaf-list state {
+      ext:help "Match connection-tracking state";
+      type enumeration {
+        enum established;
+        enum invalid;
+        enum new;
+        enum related;
+      }
+    }
+    container tcp {
+      ext:help "TCP options";
+      container flags {
+        ext:help "Match TCP flags (listed flags must be set)";
+        leaf syn {
+          ext:help "SYN flag set";
+          type empty;
+        }
+        leaf ack {
+          ext:help "ACK flag set";
+          type empty;
+        }
+        leaf fin {
+          ext:help "FIN flag set";
+          type empty;
+        }
+        leaf rst {
+          ext:help "RST flag set";
+          type empty;
+        }
+        leaf urg {
+          ext:help "URG flag set";
+          type empty;
+        }
+        leaf psh {
+          ext:help "PSH flag set";
+          type empty;
+        }
+        leaf ecn {
+          ext:help "ECN flag set";
+          type empty;
+        }
+        leaf cwr {
+          ext:help "CWR flag set";
+          type empty;
+        }
+        container not {
+          ext:help "Match TCP flags that must be unset";
+          leaf syn {
+            ext:help "SYN flag unset";
+            type empty;
+          }
+          leaf ack {
+            ext:help "ACK flag unset";
+            type empty;
+          }
+          leaf fin {
+            ext:help "FIN flag unset";
+            type empty;
+          }
+          leaf rst {
+            ext:help "RST flag unset";
+            type empty;
+          }
+          leaf urg {
+            ext:help "URG flag unset";
+            type empty;
+          }
+          leaf psh {
+            ext:help "PSH flag unset";
+            type empty;
+          }
+          leaf ecn {
+            ext:help "ECN flag unset";
+            type empty;
+          }
+          leaf cwr {
+            ext:help "CWR flag unset";
+            type empty;
+          }
+        }
+      }
+      leaf mss {
+        ext:help "Match TCP MSS <1-16384> or range <min-max>";
+        type union {
+          type uint16 {
+            range "1..16384";
+          }
+          type string;
+        }
+      }
+    }
+    container time {
+      ext:help "Time-window match";
+      leaf startdate {
+        ext:help "Match on or after this date (YYYY-MM-DD)";
+        type string;
+      }
+      leaf starttime {
+        ext:help "Match on or after this time of day (hh:mm[:ss])";
+        type string;
+      }
+      leaf stopdate {
+        ext:help "Match on or before this date (YYYY-MM-DD)";
+        type string;
+      }
+      leaf stoptime {
+        ext:help "Match on or before this time of day (hh:mm[:ss])";
+        type string;
+      }
+      leaf weekdays {
+        ext:help "Match these days of the week (comma-separated names or 0-6)";
+        type string;
+      }
+    }
+  }
+
+  // IPv4 endpoint match (the body of both `source` and `destination`).
+  grouping l3-match-v4 {
+    leaf address {
+      ext:help "IPv4 address, prefix or range <a.b.c.d-a.b.c.d>; negate with !";
+      type union {
+        type inet:ipv4-address;
+        type inet:ipv4-prefix;
+        type string;
+      }
+    }
+    leaf address-mask {
+      ext:help "Bitmask to apply to the address before comparing";
+      type inet:ipv4-address;
+    }
+    leaf mac-address {
+      ext:help "Match MAC address; negate with !";
+      type union {
+        type yang:mac-address;
+        type string;
+      }
+    }
+    leaf port {
+      ext:help "Port: number <1-65535>, service name, range <start-end>, comma list; negate with !";
+      type union {
+        type uint16 {
+          range "1..65535";
+        }
+        type string;
+      }
+    }
+    container group {
+      ext:help "Match a named firewall group";
+      leaf address-group {
+        ext:help "address-group name; negate with !";
+        type string;
+      }
+      leaf network-group {
+        ext:help "network-group name; negate with !";
+        type string;
+      }
+      leaf port-group {
+        ext:help "port-group name; negate with !";
+        type string;
+      }
+      leaf mac-group {
+        ext:help "mac-group name; negate with !";
+        type string;
+      }
+    }
+  }
+
+  // IPv6 endpoint match.
+  grouping l3-match-v6 {
+    leaf address {
+      ext:help "IPv6 address, prefix or range <h:h::h-h:h::h>; negate with !";
+      type union {
+        type inet:ipv6-address;
+        type inet:ipv6-prefix;
+        type string;
+      }
+    }
+    leaf address-mask {
+      ext:help "Bitmask to apply to the address before comparing";
+      type inet:ipv6-address;
+    }
+    leaf mac-address {
+      ext:help "Match MAC address; negate with !";
+      type union {
+        type yang:mac-address;
+        type string;
+      }
+    }
+    leaf port {
+      ext:help "Port: number <1-65535>, service name, range <start-end>, comma list; negate with !";
+      type union {
+        type uint16 {
+          range "1..65535";
+        }
+        type string;
+      }
+    }
+    container group {
+      ext:help "Match a named firewall group";
+      leaf address-group {
+        ext:help "ipv6-address-group name; negate with !";
+        type string;
+      }
+      leaf network-group {
+        ext:help "ipv6-network-group name; negate with !";
+        type string;
+      }
+      leaf port-group {
+        ext:help "port-group name; negate with !";
+        type string;
+      }
+      leaf mac-group {
+        ext:help "mac-group name; negate with !";
+        type string;
+      }
+    }
+  }
+
+  // Family-specific rule matchers.
+  grouping rule-match-v4 {
+    container icmp {
+      ext:help "Match ICMP";
+      leaf code {
+        ext:help "ICMP code";
+        type uint8;
+      }
+      leaf type {
+        ext:help "ICMP type";
+        type uint8;
+      }
+      leaf type-name {
+        ext:help "ICMP type by name";
+        type enumeration {
+          enum echo-reply;
+          enum destination-unreachable;
+          enum source-quench;
+          enum redirect;
+          enum echo-request;
+          enum router-advertisement;
+          enum router-solicitation;
+          enum time-exceeded;
+          enum parameter-problem;
+          enum timestamp-request;
+          enum timestamp-reply;
+          enum info-request;
+          enum info-reply;
+          enum address-mask-request;
+          enum address-mask-reply;
+        }
+      }
+    }
+    container ttl {
+      ext:help "Match time-to-live";
+      leaf eq {
+        ext:help "TTL equal to";
+        type uint8;
+      }
+      leaf gt {
+        ext:help "TTL greater than";
+        type uint8;
+      }
+      leaf lt {
+        ext:help "TTL less than";
+        type uint8;
+      }
+    }
+    container source {
+      ext:help "Match source";
+      uses l3-match-v4;
+    }
+    container destination {
+      ext:help "Match destination";
+      uses l3-match-v4;
+    }
+  }
+
+  grouping rule-match-v6 {
+    container icmpv6 {
+      ext:help "Match ICMPv6";
+      leaf code {
+        ext:help "ICMPv6 code";
+        type uint8;
+      }
+      leaf type {
+        ext:help "ICMPv6 type";
+        type uint8;
+      }
+      leaf type-name {
+        ext:help "ICMPv6 type by name";
+        type enumeration {
+          enum destination-unreachable;
+          enum packet-too-big;
+          enum time-exceeded;
+          enum echo-request;
+          enum echo-reply;
+          enum mld-listener-query;
+          enum mld-listener-report;
+          enum mld-listener-reduction;
+          enum nd-router-solicit;
+          enum nd-router-advert;
+          enum nd-neighbor-solicit;
+          enum nd-neighbor-advert;
+          enum nd-redirect;
+          enum parameter-problem;
+          enum router-renumbering;
+          enum ind-neighbor-solicit;
+          enum ind-neighbor-advert;
+          enum mld2-listener-report;
+        }
+      }
+    }
+    container hop-limit {
+      ext:help "Match hop limit";
+      leaf eq {
+        ext:help "Hop limit equal to";
+        type uint8;
+      }
+      leaf gt {
+        ext:help "Hop limit greater than";
+        type uint8;
+      }
+      leaf lt {
+        ext:help "Hop limit less than";
+        type uint8;
+      }
+    }
+    container source {
+      ext:help "Match source";
+      uses l3-match-v6;
+    }
+    container destination {
+      ext:help "Match destination";
+      uses l3-match-v6;
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Per-hook rule lists, IPv4
+  // ---------------------------------------------------------------
+
+  grouping rule-key {
+    leaf number {
+      ext:help "Rule number (evaluated in ascending order)";
+      type uint32 {
+        range "1..999999";
+      }
+    }
+  }
+
+  grouping ipv4-hooks {
+    container forward {
+      ext:help "Forwarded traffic (forward hook)";
+      container filter {
+        ext:help "Filtering rules for forwarded traffic";
+        uses chain-base-head;
+        list rule {
+          ext:help "Firewall rule";
+          key "number";
+          uses rule-key;
+          uses rule-common;
+          uses rule-match-v4;
+          uses match-interface-in;
+          uses match-interface-out;
+        }
+      }
+    }
+    container input {
+      ext:help "Traffic destined to this router (input hook)";
+      container filter {
+        ext:help "Filtering rules for local-destined traffic";
+        uses chain-base-head;
+        list rule {
+          ext:help "Firewall rule";
+          key "number";
+          uses rule-key;
+          uses rule-common;
+          uses rule-match-v4;
+          uses match-interface-in;
+        }
+      }
+    }
+    container output {
+      ext:help "Traffic originated by this router (output hook)";
+      container filter {
+        ext:help "Filtering rules for locally-originated traffic";
+        uses chain-base-head;
+        list rule {
+          ext:help "Firewall rule";
+          key "number";
+          uses rule-key;
+          uses rule-common;
+          uses rule-match-v4;
+          uses match-interface-out;
+        }
+      }
+    }
+    list name {
+      ext:help "Custom firewall chain";
+      key "name";
+      leaf name {
+        ext:help "Chain name";
+        type string;
+      }
+      uses chain-custom-head;
+      list rule {
+        ext:help "Firewall rule";
+        key "number";
+        uses rule-key;
+        uses rule-common;
+        uses rule-match-v4;
+        uses match-interface-in;
+        uses match-interface-out;
+      }
+    }
+  }
+
+  grouping ipv6-hooks {
+    container forward {
+      ext:help "Forwarded traffic (forward hook)";
+      container filter {
+        ext:help "Filtering rules for forwarded traffic";
+        uses chain-base-head;
+        list rule {
+          ext:help "Firewall rule";
+          key "number";
+          uses rule-key;
+          uses rule-common;
+          uses rule-match-v6;
+          uses match-interface-in;
+          uses match-interface-out;
+        }
+      }
+    }
+    container input {
+      ext:help "Traffic destined to this router (input hook)";
+      container filter {
+        ext:help "Filtering rules for local-destined traffic";
+        uses chain-base-head;
+        list rule {
+          ext:help "Firewall rule";
+          key "number";
+          uses rule-key;
+          uses rule-common;
+          uses rule-match-v6;
+          uses match-interface-in;
+        }
+      }
+    }
+    container output {
+      ext:help "Traffic originated by this router (output hook)";
+      container filter {
+        ext:help "Filtering rules for locally-originated traffic";
+        uses chain-base-head;
+        list rule {
+          ext:help "Firewall rule";
+          key "number";
+          uses rule-key;
+          uses rule-common;
+          uses rule-match-v6;
+          uses match-interface-out;
+        }
+      }
+    }
+    list name {
+      ext:help "Custom firewall chain";
+      key "name";
+      leaf name {
+        ext:help "Chain name";
+        type string;
+      }
+      uses chain-custom-head;
+      list rule {
+        ext:help "Firewall rule";
+        key "number";
+        uses rule-key;
+        uses rule-common;
+        uses rule-match-v6;
+        uses match-interface-in;
+        uses match-interface-out;
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // The assembled firewall tree
+  // ---------------------------------------------------------------
+
+  grouping firewall {
+    container group {
+      ext:help "Named groups of addresses, networks, ports, interfaces and MACs";
+      list address-group {
+        ext:help "IPv4 address group";
+        key "name";
+        leaf name {
+          ext:help "Group name";
+          type string;
+        }
+        leaf-list address {
+          ext:help "IPv4 address or range <a.b.c.d-a.b.c.d>";
+          type union {
+            type inet:ipv4-address;
+            type string;
+          }
+        }
+        uses group-meta;
+      }
+      list ipv6-address-group {
+        ext:help "IPv6 address group";
+        key "name";
+        leaf name {
+          ext:help "Group name";
+          type string;
+        }
+        leaf-list address {
+          ext:help "IPv6 address or range <h:h::h-h:h::h>";
+          type union {
+            type inet:ipv6-address;
+            type string;
+          }
+        }
+        uses group-meta;
+      }
+      list network-group {
+        ext:help "IPv4 network group";
+        key "name";
+        leaf name {
+          ext:help "Group name";
+          type string;
+        }
+        leaf-list network {
+          ext:help "IPv4 network (CIDR)";
+          type inet:ipv4-prefix;
+        }
+        uses group-meta;
+      }
+      list ipv6-network-group {
+        ext:help "IPv6 network group";
+        key "name";
+        leaf name {
+          ext:help "Group name";
+          type string;
+        }
+        leaf-list network {
+          ext:help "IPv6 network (CIDR)";
+          type inet:ipv6-prefix;
+        }
+        uses group-meta;
+      }
+      list port-group {
+        ext:help "Port group (protocol-agnostic)";
+        key "name";
+        leaf name {
+          ext:help "Group name";
+          type string;
+        }
+        leaf-list port {
+          ext:help "Port number <1-65535>, service name or range <start-end>";
+          type union {
+            type uint16 {
+              range "1..65535";
+            }
+            type string;
+          }
+        }
+        uses group-meta;
+      }
+      list interface-group {
+        ext:help "Interface group";
+        key "name";
+        leaf name {
+          ext:help "Group name";
+          type string;
+        }
+        leaf-list interface {
+          ext:help "Interface name; wildcard eth3* and negation !eth2 allowed";
+          type string;
+        }
+        uses group-meta;
+      }
+      list mac-group {
+        ext:help "MAC address group";
+        key "name";
+        leaf name {
+          ext:help "Group name";
+          type string;
+        }
+        leaf-list mac-address {
+          ext:help "MAC address";
+          type yang:mac-address;
+        }
+        uses group-meta;
+      }
+    }
+
+    container ipv4 {
+      ext:help "IPv4 firewall";
+      uses ipv4-hooks;
+    }
+
+    container ipv6 {
+      ext:help "IPv6 firewall";
+      uses ipv6-hooks;
+    }
+
+    container global-options {
+      ext:help "Global firewall behaviour";
+      leaf all-ping {
+        ext:help "Answer ICMP echo requests destined to the router (VyOS default: enable)";
+        type enumeration {
+          enum enable;
+          enum disable;
+        }
+      }
+      leaf broadcast-ping {
+        ext:help "Answer broadcast ICMP echo requests (VyOS default: disable)";
+        type enumeration {
+          enum enable;
+          enum disable;
+        }
+      }
+      leaf directed-broadcast {
+        ext:help "Forward IPv4 directed broadcasts (VyOS default: enable)";
+        type enumeration {
+          enum enable;
+          enum disable;
+        }
+      }
+      leaf ip-src-route {
+        ext:help "Accept IPv4 packets with source-route options (VyOS default: disable)";
+        type enumeration {
+          enum enable;
+          enum disable;
+        }
+      }
+      leaf ipv6-receive-redirects {
+        ext:help "Accept ICMPv6 redirects (VyOS default: disable)";
+        type enumeration {
+          enum enable;
+          enum disable;
+        }
+      }
+      leaf ipv6-source-validation {
+        ext:help "IPv6 reverse-path source validation (VyOS default: disable)";
+        type enumeration {
+          enum strict;
+          enum loose;
+          enum disable;
+        }
+      }
+      leaf ipv6-src-route {
+        ext:help "Accept IPv6 packets with routing headers (VyOS default: disable)";
+        type enumeration {
+          enum enable;
+          enum disable;
+        }
+      }
+      leaf log-martians {
+        ext:help "Log packets with impossible source addresses (VyOS default: enable)";
+        type enumeration {
+          enum enable;
+          enum disable;
+        }
+      }
+      leaf receive-redirects {
+        ext:help "Accept ICMP redirects (VyOS default: disable)";
+        type enumeration {
+          enum enable;
+          enum disable;
+        }
+      }
+      leaf send-redirects {
+        ext:help "Send ICMP redirects (VyOS default: enable)";
+        type enumeration {
+          enum enable;
+          enum disable;
+        }
+      }
+      leaf source-validation {
+        ext:help "IPv4 reverse-path source validation, rp_filter (VyOS default: disable)";
+        type enumeration {
+          enum strict;
+          enum loose;
+          enum disable;
+        }
+      }
+      leaf syn-cookies {
+        ext:help "Use TCP SYN cookies (VyOS default: enable)";
+        type enumeration {
+          enum enable;
+          enum disable;
+        }
+      }
+      leaf twa-hazards-protection {
+        ext:help "RFC 1337 TIME-WAIT assassination protection (VyOS default: disable)";
+        type enumeration {
+          enum enable;
+          enum disable;
+        }
+      }
+      container state-policy {
+        ext:help "Global policy for connection-tracking states";
+        container established {
+          ext:help "Policy for established connections";
+          leaf action {
+            ext:help "Action for this state";
+            type enumeration {
+              enum accept;
+              enum drop;
+              enum reject;
+            }
+          }
+          leaf log {
+            ext:help "Log packets matching this state policy";
+            type empty;
+          }
+          leaf log-level {
+            ext:help "Syslog level for state-policy logging";
+            type enumeration {
+              enum emerg;
+              enum alert;
+              enum crit;
+              enum err;
+              enum warn;
+              enum notice;
+              enum info;
+              enum debug;
+            }
+          }
+        }
+        container invalid {
+          ext:help "Policy for invalid packets";
+          leaf action {
+            ext:help "Action for this state";
+            type enumeration {
+              enum accept;
+              enum drop;
+              enum reject;
+            }
+          }
+          leaf log {
+            ext:help "Log packets matching this state policy";
+            type empty;
+          }
+          leaf log-level {
+            ext:help "Syslog level for state-policy logging";
+            type enumeration {
+              enum emerg;
+              enum alert;
+              enum crit;
+              enum err;
+              enum warn;
+              enum notice;
+              enum info;
+              enum debug;
+            }
+          }
+        }
+        container related {
+          ext:help "Policy for related connections";
+          leaf action {
+            ext:help "Action for this state";
+            type enumeration {
+              enum accept;
+              enum drop;
+              enum reject;
+            }
+          }
+          leaf log {
+            ext:help "Log packets matching this state policy";
+            type empty;
+          }
+          leaf log-level {
+            ext:help "Syslog level for state-policy logging";
+            type enumeration {
+              enum emerg;
+              enum alert;
+              enum crit;
+              enum err;
+              enum warn;
+              enum notice;
+              enum info;
+              enum debug;
+            }
+          }
+        }
+      }
+      container timeout {
+        ext:help "Connection-tracking timeouts (seconds)";
+        leaf icmp {
+          ext:help "ICMP timeout (VyOS default: 30)";
+          type uint32 {
+            range "1..21474836";
+          }
+        }
+        leaf other {
+          ext:help "Timeout for other protocols (VyOS default: 600)";
+          type uint32 {
+            range "1..21474836";
+          }
+        }
+        container tcp {
+          ext:help "TCP state timeouts";
+          leaf close {
+            ext:help "CLOSE timeout (VyOS default: 10)";
+            type uint32 {
+              range "1..21474836";
+            }
+          }
+          leaf close-wait {
+            ext:help "CLOSE-WAIT timeout (VyOS default: 60)";
+            type uint32 {
+              range "1..21474836";
+            }
+          }
+          leaf established {
+            ext:help "ESTABLISHED timeout (VyOS default: 432000)";
+            type uint32 {
+              range "1..21474836";
+            }
+          }
+          leaf fin-wait {
+            ext:help "FIN-WAIT timeout (VyOS default: 120)";
+            type uint32 {
+              range "1..21474836";
+            }
+          }
+          leaf last-ack {
+            ext:help "LAST-ACK timeout (VyOS default: 30)";
+            type uint32 {
+              range "1..21474836";
+            }
+          }
+          leaf syn-recv {
+            ext:help "SYN-RECV timeout (VyOS default: 60)";
+            type uint32 {
+              range "1..21474836";
+            }
+          }
+          leaf syn-sent {
+            ext:help "SYN-SENT timeout (VyOS default: 120)";
+            type uint32 {
+              range "1..21474836";
+            }
+          }
+          leaf time-wait {
+            ext:help "TIME-WAIT timeout (VyOS default: 120)";
+            type uint32 {
+              range "1..21474836";
+            }
+          }
+        }
+        container udp {
+          ext:help "UDP timeouts";
+          leaf other {
+            ext:help "Unreplied UDP timeout (VyOS default: 30)";
+            type uint32 {
+              range "1..21474836";
+            }
+          }
+          leaf stream {
+            ext:help "UDP stream timeout (VyOS default: 180)";
+            type uint32 {
+              range "1..21474836";
+            }
+          }
+        }
+      }
+    }
+  }
+}
