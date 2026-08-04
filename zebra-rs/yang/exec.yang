@@ -356,6 +356,29 @@ module exec {
         }
       }
     }
+    container vpn {
+      if-feature feat:iso;
+      ext:help "VPN information";
+      container ipsec {
+        ext:help "IPsec (Internet Protocol Security) information";
+        container sa {
+          ext:help "IPsec security associations";
+          presence "Active security associations from charon";
+        }
+        container connections {
+          ext:help "IPsec connections";
+          presence "Loaded connections with live SA state";
+        }
+        container policy {
+          ext:help "Kernel XFRM policies";
+          presence "Kernel XFRM policy list";
+        }
+        container state {
+          ext:help "Kernel XFRM states";
+          presence "Kernel XFRM state list";
+        }
+      }
+    }
     container evpn {
       ext:help "EVPN information";
       container vni {
