@@ -26,13 +26,13 @@ module firewall {
      `container firewall`, so every node here exists only when the
      daemon runs with `--feature iso`.
 
-     Scope of this first cut: `group` (static named groups), `ipv4`
-     and `ipv6` filter hooks (forward/input/output) plus custom named
+     Current scope: `group` (static named groups), `ipv4` and `ipv6`
+     filter hooks (forward/input/output) plus the raw hooks
+     (prerouting/output raw, with the notrack action) and custom named
      chains, and `global-options`. Deliberately deferred to follow-ups:
-     raw hooks (prerouting/output raw with notrack), zone, bridge,
-     flowtable/offload, geoip, fqdn/domain-group, dynamic groups and
-     add-address-to-group, remote-group, conntrack-helper, ipsec and
-     synproxy matchers.
+     zone, bridge, flowtable/offload, geoip, fqdn/domain-group,
+     dynamic groups and add-address-to-group, remote-group,
+     conntrack-helper, ipsec and synproxy matchers.
 
      Value-shape conventions: VyOS spellings that a scalar type cannot
      carry — ranges (`10.0.0.1-10.0.0.5`, `1001-1050`, `a-b`), comma
@@ -154,21 +154,13 @@ module firewall {
     }
   }
 
-  // Family-neutral rule matchers and actions, shared verbatim by the
-  // IPv4 and IPv6 rule bodies (VyOS common-rule-inet).
-  grouping rule-common {
-    leaf action {
-      ext:help "Rule action";
-      type enumeration {
-        enum accept;
-        enum continue;
-        enum drop;
-        enum jump;
-        enum queue;
-        enum reject;
-        enum return;
-      }
-    }
+  // Family-neutral rule pieces shared by BOTH the filter and raw rule
+  // bodies — the intersection of VyOS common-rule-inet and
+  // common-rule-ipv4-raw. The action set and the conntrack-dependent
+  // matchers (state, connection-*, mark, packet-*) live in the
+  // per-body groupings below: raw chains run before conntrack and
+  // VyOS gives them neither.
+  grouping rule-base {
     leaf description {
       ext:help "Description";
       // Rest-of-line value: the pattern makes the leaf consume the
@@ -181,26 +173,6 @@ module firewall {
     leaf disable {
       ext:help "Disable this rule without deleting it";
       type empty;
-    }
-    leaf jump-target {
-      ext:help "Custom chain to jump to for action jump";
-      type string;
-    }
-    leaf-list connection-mark {
-      ext:help "Match connection mark";
-      type uint32 {
-        range "0..2147483647";
-      }
-    }
-    container connection-status {
-      ext:help "Match connection status";
-      leaf nat {
-        ext:help "Match NAT direction applied to the connection";
-        type enumeration {
-          enum destination;
-          enum source;
-        }
-      }
     }
     leaf-list dscp {
       ext:help "Match DSCP value <0-63> or range <start-end>";
@@ -276,42 +248,6 @@ module firewall {
         type uint16;
       }
     }
-    leaf mark {
-      ext:help "Match packet mark <0-2147483647>, range <start-end>; negate with !";
-      type union {
-        type uint32 {
-          range "0..2147483647";
-        }
-        type string;
-      }
-    }
-    leaf-list packet-length {
-      ext:help "Match total packet length <1-65535> or range <start-end>";
-      type union {
-        type uint16 {
-          range "1..65535";
-        }
-        type string;
-      }
-    }
-    leaf-list packet-length-exclude {
-      ext:help "Match total packet length NOT in <1-65535> or range <start-end>";
-      type union {
-        type uint16 {
-          range "1..65535";
-        }
-        type string;
-      }
-    }
-    leaf packet-type {
-      ext:help "Match link-layer packet type";
-      type enumeration {
-        enum broadcast;
-        enum host;
-        enum multicast;
-        enum other;
-      }
-    }
     leaf protocol {
       ext:help "Match protocol: name, number <0-255>, all, tcp_udp; negate with !";
       type union {
@@ -345,15 +281,6 @@ module firewall {
           enum minute;
           enum hour;
         }
-      }
-    }
-    leaf-list state {
-      ext:help "Match connection-tracking state";
-      type enumeration {
-        enum established;
-        enum invalid;
-        enum new;
-        enum related;
       }
     }
     container tcp {
@@ -459,6 +386,110 @@ module firewall {
       leaf weekdays {
         ext:help "Match these days of the week (comma-separated names or 0-6)";
         type string;
+      }
+    }
+  }
+
+  // Filter rule body (VyOS common-rule-inet): rule-base plus the full
+  // filter action set and the conntrack-dependent matchers.
+  grouping rule-common {
+    uses rule-base;
+    leaf action {
+      ext:help "Rule action";
+      type enumeration {
+        enum accept;
+        enum continue;
+        enum drop;
+        enum jump;
+        enum queue;
+        enum reject;
+        enum return;
+      }
+    }
+    leaf jump-target {
+      ext:help "Custom chain to jump to for action jump";
+      type string;
+    }
+    leaf-list connection-mark {
+      ext:help "Match connection mark";
+      type uint32 {
+        range "0..2147483647";
+      }
+    }
+    container connection-status {
+      ext:help "Match connection status";
+      leaf nat {
+        ext:help "Match NAT direction applied to the connection";
+        type enumeration {
+          enum destination;
+          enum source;
+        }
+      }
+    }
+    leaf mark {
+      ext:help "Match packet mark <0-2147483647>, range <start-end>; negate with !";
+      type union {
+        type uint32 {
+          range "0..2147483647";
+        }
+        type string;
+      }
+    }
+    leaf-list packet-length {
+      ext:help "Match total packet length <1-65535> or range <start-end>";
+      type union {
+        type uint16 {
+          range "1..65535";
+        }
+        type string;
+      }
+    }
+    leaf-list packet-length-exclude {
+      ext:help "Match total packet length NOT in <1-65535> or range <start-end>";
+      type union {
+        type uint16 {
+          range "1..65535";
+        }
+        type string;
+      }
+    }
+    leaf packet-type {
+      ext:help "Match link-layer packet type";
+      type enumeration {
+        enum broadcast;
+        enum host;
+        enum multicast;
+        enum other;
+      }
+    }
+    leaf-list state {
+      ext:help "Match connection-tracking state";
+      type enumeration {
+        enum established;
+        enum invalid;
+        enum new;
+        enum related;
+      }
+    }
+  }
+
+  // Raw rule body (VyOS common-rule-ipv4-raw / -ipv6-raw): rule-base
+  // plus the raw action set, which adds `notrack` (skip connection
+  // tracking). Raw chains run before conntrack, so none of the
+  // conntrack-dependent matchers exist here.
+  grouping rule-raw-common {
+    uses rule-base;
+    leaf action {
+      ext:help "Rule action";
+      type enumeration {
+        enum accept;
+        enum continue;
+        enum drop;
+        enum jump;
+        enum notrack;
+        enum queue;
+        enum reject;
+        enum return;
       }
     }
   }
@@ -742,6 +773,57 @@ module firewall {
           uses match-interface-out;
         }
       }
+      container raw {
+        ext:help "Raw rules for locally-originated traffic (before conntrack)";
+        uses chain-base-head;
+        list rule {
+          ext:help "Firewall rule";
+          key "number";
+          uses rule-key;
+          uses rule-raw-common;
+          uses rule-match-v4;
+          uses match-interface-out;
+        }
+      }
+    }
+    container prerouting {
+      ext:help "All incoming traffic before routing (prerouting hook)";
+      container raw {
+        ext:help "Raw rules before connection tracking";
+        leaf default-action {
+          ext:help "Default action when no rule matches (VyOS default: accept)";
+          type enumeration {
+            enum accept;
+            enum drop;
+          }
+        }
+        // VyOS ships `default-jump-target` on prerouting raw even
+        // though its base default-action enum has no `jump` arm —
+        // ported as-is for config compatibility.
+        leaf default-jump-target {
+          ext:help "Custom chain to jump to for default-action jump";
+          type string;
+        }
+        leaf description {
+          ext:help "Description";
+          // Rest-of-line value, as on the other chain heads.
+          type string {
+            pattern '.*';
+          }
+        }
+        list rule {
+          ext:help "Firewall rule";
+          key "number";
+          uses rule-key;
+          uses rule-raw-common;
+          uses rule-match-v4;
+          uses match-interface-in;
+          leaf jump-target {
+            ext:help "Custom chain to jump to for action jump";
+            type string;
+          }
+        }
+      }
     }
     list name {
       ext:help "Custom firewall chain";
@@ -807,6 +889,57 @@ module firewall {
           uses rule-common;
           uses rule-match-v6;
           uses match-interface-out;
+        }
+      }
+      container raw {
+        ext:help "Raw rules for locally-originated traffic (before conntrack)";
+        uses chain-base-head;
+        list rule {
+          ext:help "Firewall rule";
+          key "number";
+          uses rule-key;
+          uses rule-raw-common;
+          uses rule-match-v6;
+          uses match-interface-out;
+        }
+      }
+    }
+    container prerouting {
+      ext:help "All incoming traffic before routing (prerouting hook)";
+      container raw {
+        ext:help "Raw rules before connection tracking";
+        leaf default-action {
+          ext:help "Default action when no rule matches (VyOS default: accept)";
+          type enumeration {
+            enum accept;
+            enum drop;
+          }
+        }
+        // VyOS ships `default-jump-target` on prerouting raw even
+        // though its base default-action enum has no `jump` arm —
+        // ported as-is for config compatibility.
+        leaf default-jump-target {
+          ext:help "Custom chain to jump to for default-action jump";
+          type string;
+        }
+        leaf description {
+          ext:help "Description";
+          // Rest-of-line value, as on the other chain heads.
+          type string {
+            pattern '.*';
+          }
+        }
+        list rule {
+          ext:help "Firewall rule";
+          key "number";
+          uses rule-key;
+          uses rule-raw-common;
+          uses rule-match-v6;
+          uses match-interface-in;
+          leaf jump-target {
+            ext:help "Custom chain to jump to for action jump";
+            type string;
+          }
         }
       }
     }
