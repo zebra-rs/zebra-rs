@@ -27,27 +27,47 @@
 //! warning naming the rule — a rendered script is always syntactically
 //! valid nft, so one bad rule cannot wedge the whole commit.
 
+use std::collections::HashMap;
 use std::fmt;
 
 use serde::{Deserialize, Deserializer};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-use crate::config::JsonConfigUpdate;
+use crate::config::{DisplayRequest, JsonConfigUpdate, ShowChannel, path_from_command};
 
 pub struct Firewall {
     pub tx: UnboundedSender<JsonConfigUpdate>,
     rx: UnboundedReceiver<JsonConfigUpdate>,
+    pub show: ShowChannel,
+}
+
+/// What the task retains between commits: the last committed model,
+/// so show handlers answer from the same tree the ruleset was
+/// rendered from (live counters are fetched from nftables per
+/// request).
+#[derive(Default)]
+struct ShowState {
+    model: Option<FirewallConfig>,
 }
 
 impl Firewall {
     pub fn new() -> Self {
         let (tx, rx) = unbounded_channel();
-        Self { tx, rx }
+        Self {
+            tx,
+            rx,
+            show: ShowChannel::new(),
+        }
     }
 
     pub async fn event_loop(mut self) {
-        while let Some(update) = self.rx.recv().await {
-            process(update).await;
+        let mut state = ShowState::default();
+        loop {
+            tokio::select! {
+                Some(update) = self.rx.recv() => process(update, &mut state).await,
+                Some(req) = self.show.rx.recv() => process_show(&state, req).await,
+                else => break,
+            }
         }
     }
 }
@@ -58,15 +78,17 @@ impl Default for Firewall {
     }
 }
 
-async fn process(update: JsonConfigUpdate) {
+async fn process(update: JsonConfigUpdate, state: &mut ShowState) {
     tracing::debug!("firewall: config update for /{}", update.path.join("/"));
-    let (script, warnings) = match render_str(&update.json) {
-        Ok(v) => v,
+    let cfg: FirewallConfig = match serde_json::from_str(&update.json) {
+        Ok(cfg) => cfg,
         Err(err) => {
             tracing::error!("firewall: config parse failed: {err}");
             return;
         }
     };
+    let (script, warnings) = render(&cfg);
+    state.model = if cfg.is_empty() { None } else { Some(cfg) };
     for warn in &warnings {
         tracing::warn!("firewall: {warn}");
     }
@@ -106,6 +128,620 @@ async fn nft_apply(script: &str) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------
+// Show
+// ---------------------------------------------------------------
+
+/// Per-rule live counters, keyed by the rule comment the renderer
+/// stamps on every rule (`ipv4-FWD-filter-10`, `FWD-filter
+/// default-action drop`, …). Fetched from `nft --json list table` at
+/// show time; an error (table absent, nft missing) degrades to an
+/// empty map so show still renders the configured view.
+type Counters = HashMap<String, (u64, u64)>;
+
+async fn nft_counters(fam: Fam) -> Counters {
+    let counters = Counters::new();
+    let output = tokio::process::Command::new("nft")
+        .args(["--json", "list", "table", fam.ip(), TABLE])
+        .output()
+        .await;
+    let Ok(output) = output else {
+        return counters;
+    };
+    if !output.status.success() {
+        return counters;
+    }
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
+        return counters;
+    };
+    parse_counters(&value)
+}
+
+/// Pull `comment → (packets, bytes)` out of `nft --json list table`
+/// output: every rule object carrying a comment and a counter
+/// expression contributes one entry.
+fn parse_counters(value: &serde_json::Value) -> Counters {
+    let mut counters = Counters::new();
+    let Some(items) = value.get("nftables").and_then(|v| v.as_array()) else {
+        return counters;
+    };
+    for item in items {
+        let Some(rule) = item.get("rule") else {
+            continue;
+        };
+        let Some(comment) = rule.get("comment").and_then(|c| c.as_str()) else {
+            continue;
+        };
+        let mut packets = 0u64;
+        let mut bytes = 0u64;
+        if let Some(exprs) = rule.get("expr").and_then(|e| e.as_array()) {
+            for expr in exprs {
+                if let Some(counter) = expr.get("counter") {
+                    packets = counter.get("packets").and_then(|v| v.as_u64()).unwrap_or(0);
+                    bytes = counter.get("bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+                }
+            }
+        }
+        counters.insert(comment.to_string(), (packets, bytes));
+    }
+    counters
+}
+
+async fn process_show(state: &ShowState, req: DisplayRequest) {
+    let (path, args) = path_from_command(&req.paths);
+    let Some(cfg) = &state.model else {
+        let _ = req
+            .resp
+            .send(String::from("% Firewall is not configured\n"))
+            .await;
+        return;
+    };
+
+    // Fetch live counters for the families the request can touch.
+    let want_v4 = !path.starts_with("/show/firewall/ipv6");
+    let want_v6 = !path.starts_with("/show/firewall/ipv4");
+    let counters4 = if want_v4 {
+        nft_counters(Fam::V4).await
+    } else {
+        Counters::new()
+    };
+    let counters6 = if want_v6 {
+        nft_counters(Fam::V6).await
+    } else {
+        Counters::new()
+    };
+
+    let out = match path.as_str() {
+        "/show/firewall" => {
+            if req.json {
+                show_json(cfg, &counters4, &counters6).to_string()
+            } else {
+                let mut out = show_groups_text(cfg);
+                out.push_str(&show_family_text(cfg, Fam::V4, &counters4, None));
+                out.push_str(&show_family_text(cfg, Fam::V6, &counters6, None));
+                out
+            }
+        }
+        "/show/firewall/group" => {
+            if req.json {
+                show_json_groups(cfg).to_string()
+            } else {
+                show_groups_text(cfg)
+            }
+        }
+        "/show/firewall/ipv4" => {
+            if req.json {
+                show_json_family(cfg, Fam::V4, &counters4).to_string()
+            } else {
+                show_family_text(cfg, Fam::V4, &counters4, None)
+            }
+        }
+        "/show/firewall/ipv6" => {
+            if req.json {
+                show_json_family(cfg, Fam::V6, &counters6).to_string()
+            } else {
+                show_family_text(cfg, Fam::V6, &counters6, None)
+            }
+        }
+        "/show/firewall/ipv4/forward/filter"
+        | "/show/firewall/ipv4/input/filter"
+        | "/show/firewall/ipv4/output/filter"
+        | "/show/firewall/ipv4/output/raw"
+        | "/show/firewall/ipv4/prerouting/raw" => {
+            show_hook(cfg, Fam::V4, &path, &counters4, req.json)
+        }
+        "/show/firewall/ipv6/forward/filter"
+        | "/show/firewall/ipv6/input/filter"
+        | "/show/firewall/ipv6/output/filter"
+        | "/show/firewall/ipv6/output/raw"
+        | "/show/firewall/ipv6/prerouting/raw" => {
+            show_hook(cfg, Fam::V6, &path, &counters6, req.json)
+        }
+        "/show/firewall/ipv4/name" => show_custom(
+            cfg,
+            Fam::V4,
+            args.0.front().map(|s| s.as_str()),
+            &counters4,
+            req.json,
+        ),
+        "/show/firewall/ipv6/name" => show_custom(
+            cfg,
+            Fam::V6,
+            args.0.front().map(|s| s.as_str()),
+            &counters6,
+            req.json,
+        ),
+        _ => String::from("% Unknown firewall show command\n"),
+    };
+    let _ = req.resp.send(out).await;
+}
+
+/// One chain rendered as a table. `hook` and `label` reproduce the
+/// comment keys the ruleset renderer stamps (`ipv4-FWD-filter-10`,
+/// `FWD-filter default-action drop`), which is how live counters are
+/// joined back onto config rules.
+#[allow(clippy::too_many_arguments)]
+fn chain_table_text(
+    out: &mut String,
+    fam: Fam,
+    title: &str,
+    hook: &str,
+    label: &str,
+    head: &Chain,
+    rules: &[Rule],
+    counters: &Counters,
+    base: bool,
+) {
+    out.push_str(&format!("{} Firewall \"{title}\"\n\n", fam.label()));
+    if let Some(desc) = &head.description {
+        out.push_str(&format!(" Description: {desc}\n\n"));
+    }
+    out.push_str(&format!(
+        " {:<8} {:<10} {:<10} {:>10} {:>12}  {}\n",
+        "Rule", "Action", "Protocol", "Packets", "Bytes", "Conditions"
+    ));
+    out.push_str(&format!(
+        " {:<8} {:<10} {:<10} {:>10} {:>12}  {}\n",
+        "----", "------", "--------", "-------", "-----", "----------"
+    ));
+
+    let mut sorted: Vec<&Rule> = rules.iter().filter(|r| !r.disable).collect();
+    sorted.sort_by_key(|r| {
+        r.number
+            .as_ref()
+            .and_then(|n| n.to_string().parse::<u64>().ok())
+            .unwrap_or(u64::MAX)
+    });
+    for rule in sorted {
+        let num = rule
+            .number
+            .as_ref()
+            .map(|n| n.to_string())
+            .unwrap_or_default();
+        let action = rule
+            .action
+            .as_ref()
+            .map(|a| a.to_string())
+            .unwrap_or_else(|| "-".into());
+        let protocol = rule
+            .protocol
+            .as_ref()
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "-".into());
+        let comment = format!("{}-{hook}-{label}-{num}", fam.label());
+        let (packets, bytes) = counters.get(&comment).copied().unwrap_or((0, 0));
+        let conditions = rule_conditions(rule, fam, hook, label);
+        out.push_str(&format!(
+            " {num:<8} {action:<10} {protocol:<10} {packets:>10} {bytes:>12}  {conditions}\n"
+        ));
+    }
+
+    let default_action = head
+        .default_action
+        .as_ref()
+        .map(|a| a.to_string())
+        .unwrap_or_else(|| if base { "accept" } else { "drop" }.to_string());
+    // The renderer labels base-chain default rules `{code}-{prior}`
+    // ("FWD-filter") and custom-chain ones with the chain name.
+    let default_label = if base {
+        format!("{hook}-{label}")
+    } else {
+        label.to_string()
+    };
+    let default_comment = format!("{default_label} default-action {default_action}");
+    let (packets, bytes) = counters.get(&default_comment).copied().unwrap_or((0, 0));
+    out.push_str(&format!(
+        " {:<8} {default_action:<10} {:<10} {packets:>10} {bytes:>12}  {}\n\n",
+        "default",
+        "-",
+        if head.default_log { "log" } else { "" }
+    ));
+}
+
+/// The matcher half of a rule, for the Conditions column: the
+/// rendered nft line with the trailing counter/action/comment and any
+/// log clause stripped. Reusing the ruleset renderer keeps the column
+/// honest — it shows exactly what was programmed.
+fn rule_conditions(rule: &Rule, fam: Fam, hook: &str, label: &str) -> String {
+    match render_rule(rule, fam, hook, label) {
+        Ok((line, _, _)) => {
+            let mut cond = match line.find(" counter") {
+                Some(pos) => line[..pos].to_string(),
+                None => line,
+            };
+            if let Some(pos) = cond.find(" log prefix") {
+                cond = cond[..pos].to_string();
+            }
+            if cond.is_empty() {
+                "-".to_string()
+            } else {
+                cond
+            }
+        }
+        Err(_) => "(not rendered)".to_string(),
+    }
+}
+
+fn family(cfg: &FirewallConfig, fam: Fam) -> Option<&Family> {
+    match fam {
+        Fam::V4 => cfg.ipv4.as_ref(),
+        Fam::V6 => cfg.ipv6.as_ref(),
+    }
+}
+
+/// The five fixed hooks of a family, as (config accessor, title,
+/// comment hook code, comment label) tuples.
+fn hooks(f: &Family) -> Vec<(&Chain, String, &'static str, &'static str)> {
+    let mut out = Vec::new();
+    let entries = [
+        (&f.forward, "forward", "filter", "FWD"),
+        (&f.input, "input", "filter", "INP"),
+        (&f.output, "output", "filter", "OUT"),
+        (&f.output, "output", "raw", "OUT"),
+        (&f.prerouting, "prerouting", "raw", "PRE"),
+    ];
+    for (hook, kw, prior, code) in entries {
+        let Some(hook) = hook else { continue };
+        let chain = match prior {
+            "filter" => hook.filter.as_ref(),
+            _ => hook.raw.as_ref(),
+        };
+        if let Some(chain) = chain {
+            out.push((chain, format!("{kw} {prior}"), code, prior));
+        }
+    }
+    out
+}
+
+fn show_family_text(
+    cfg: &FirewallConfig,
+    fam: Fam,
+    counters: &Counters,
+    only: Option<&str>,
+) -> String {
+    let mut out = String::new();
+    let Some(f) = family(cfg, fam) else {
+        return out;
+    };
+    for (chain, title, code, prior) in hooks(f) {
+        if let Some(only) = only
+            && only != title
+        {
+            continue;
+        }
+        chain_table_text(
+            &mut out,
+            fam,
+            &title,
+            code,
+            prior,
+            chain,
+            &chain.rule,
+            counters,
+            true,
+        );
+    }
+    if only.is_none() {
+        for custom in &f.name {
+            let Some(name) = &custom.name else { continue };
+            let name = name.to_string();
+            chain_table_text(
+                &mut out,
+                fam,
+                &format!("name {name}"),
+                "NAM",
+                &name,
+                &custom.as_chain(),
+                &custom.rule,
+                counters,
+                false,
+            );
+        }
+    }
+    out
+}
+
+fn show_hook(
+    cfg: &FirewallConfig,
+    fam: Fam,
+    path: &str,
+    counters: &Counters,
+    json: bool,
+) -> String {
+    // `/show/firewall/<fam>/<hook>/<prior>` → "<hook> <prior>".
+    let mut segs = path.rsplit('/');
+    let prior = segs.next().unwrap_or_default();
+    let hook = segs.next().unwrap_or_default();
+    let title = format!("{hook} {prior}");
+    if json {
+        return show_json_family(cfg, fam, counters).to_string();
+    }
+    let out = show_family_text(cfg, fam, counters, Some(title.as_str()));
+    if out.is_empty() {
+        format!("% Chain {} {title} is not configured\n", fam.label())
+    } else {
+        out
+    }
+}
+
+fn show_custom(
+    cfg: &FirewallConfig,
+    fam: Fam,
+    chain: Option<&str>,
+    counters: &Counters,
+    json: bool,
+) -> String {
+    if json {
+        return show_json_family(cfg, fam, counters).to_string();
+    }
+    let mut out = String::new();
+    let Some(f) = family(cfg, fam) else {
+        return format!("% No {} custom chains configured\n", fam.label());
+    };
+    for custom in &f.name {
+        let Some(name) = &custom.name else { continue };
+        let name = name.to_string();
+        if let Some(want) = chain
+            && want != name
+        {
+            continue;
+        }
+        chain_table_text(
+            &mut out,
+            fam,
+            &format!("name {name}"),
+            "NAM",
+            &name,
+            &custom.as_chain(),
+            &custom.rule,
+            counters,
+            false,
+        );
+    }
+    if out.is_empty() {
+        match chain {
+            Some(name) => format!("% Chain {} name {name} is not configured\n", fam.label()),
+            None => format!("% No {} custom chains configured\n", fam.label()),
+        }
+    } else {
+        out
+    }
+}
+
+/// How many rules reference a group of the given kind — the
+/// References column of the groups view.
+fn group_references(cfg: &FirewallConfig, kind: &str, name: &str) -> usize {
+    let matches = |group: &Option<GroupRef>| -> usize {
+        let Some(group) = group else { return 0 };
+        let field = match kind {
+            "address-group" | "ipv6-address-group" => &group.address_group,
+            "network-group" | "ipv6-network-group" => &group.network_group,
+            "port-group" => &group.port_group,
+            "mac-group" => &group.mac_group,
+            _ => &None,
+        };
+        field
+            .as_ref()
+            .is_some_and(|n| n.to_string().trim_start_matches('!') == name) as usize
+    };
+    let mut count = 0;
+    for fam in [Fam::V4, Fam::V6] {
+        let Some(f) = family(cfg, fam) else { continue };
+        let mut per_rule = |rules: &[Rule]| {
+            for rule in rules {
+                for side in [&rule.source, &rule.destination] {
+                    if let Some(side) = side {
+                        count += matches(&side.group);
+                    }
+                    // Interface groups ride the interface matchers.
+                    if kind == "interface-group" {
+                        for ifm in [&rule.inbound_interface, &rule.outbound_interface] {
+                            if let Some(ifm) = ifm
+                                && ifm
+                                    .group
+                                    .as_ref()
+                                    .is_some_and(|g| g.to_string().trim_start_matches('!') == name)
+                            {
+                                count += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        for (chain, _, _, _) in hooks(f) {
+            per_rule(&chain.rule);
+        }
+        for custom in &f.name {
+            per_rule(&custom.rule);
+        }
+    }
+    count
+}
+
+fn group_kinds(groups: &Groups) -> [(&'static str, &Vec<Group>, fn(&Group) -> &Vec<Flex>); 7] {
+    [
+        ("address-group", &groups.address_group, |g| &g.address),
+        ("ipv6-address-group", &groups.ipv6_address_group, |g| {
+            &g.address
+        }),
+        ("network-group", &groups.network_group, |g| &g.network),
+        ("ipv6-network-group", &groups.ipv6_network_group, |g| {
+            &g.network
+        }),
+        ("port-group", &groups.port_group, |g| &g.port),
+        ("interface-group", &groups.interface_group, |g| &g.interface),
+        ("mac-group", &groups.mac_group, |g| &g.mac_address),
+    ]
+}
+
+fn show_groups_text(cfg: &FirewallConfig) -> String {
+    let mut out = String::new();
+    let Some(groups) = &cfg.group else {
+        return out;
+    };
+    out.push_str("Firewall Groups\n\n");
+    out.push_str(&format!(
+        " {:<20} {:<20} {:>10}  {}\n",
+        "Name", "Type", "References", "Members"
+    ));
+    out.push_str(&format!(
+        " {:<20} {:<20} {:>10}  {}\n",
+        "----", "----", "----------", "-------"
+    ));
+    for (kind, list, members) in group_kinds(groups) {
+        for group in list {
+            let Some(name) = &group.name else { continue };
+            let name = name.to_string();
+            let refs = group_references(cfg, kind, &name);
+            let mut first = true;
+            let member_list = members(group);
+            if member_list.is_empty() {
+                out.push_str(&format!(" {name:<20} {kind:<20} {refs:>10}  -\n"));
+                continue;
+            }
+            for member in member_list {
+                if first {
+                    out.push_str(&format!(" {name:<20} {kind:<20} {refs:>10}  {member}\n"));
+                    first = false;
+                } else {
+                    out.push_str(&format!(" {:<20} {:<20} {:>10}  {member}\n", "", "", ""));
+                }
+            }
+        }
+    }
+    out.push('\n');
+    out
+}
+
+// JSON views: the same scopes as the text views, one structured value.
+
+fn show_json_groups(cfg: &FirewallConfig) -> serde_json::Value {
+    let mut out = Vec::new();
+    if let Some(groups) = &cfg.group {
+        for (kind, list, members) in group_kinds(groups) {
+            for group in list {
+                let Some(name) = &group.name else { continue };
+                let name = name.to_string();
+                out.push(serde_json::json!({
+                    "name": name,
+                    "type": kind,
+                    "references": group_references(cfg, kind, &name),
+                    "members": members(group).iter().map(|m| m.to_string()).collect::<Vec<_>>(),
+                }));
+            }
+        }
+    }
+    serde_json::json!({ "groups": out })
+}
+
+fn chain_json(
+    fam: Fam,
+    title: &str,
+    hook: &str,
+    label: &str,
+    head: &Chain,
+    rules: &[Rule],
+    counters: &Counters,
+) -> serde_json::Value {
+    let mut rule_values = Vec::new();
+    let mut sorted: Vec<&Rule> = rules.iter().filter(|r| !r.disable).collect();
+    sorted.sort_by_key(|r| {
+        r.number
+            .as_ref()
+            .and_then(|n| n.to_string().parse::<u64>().ok())
+            .unwrap_or(u64::MAX)
+    });
+    for rule in sorted {
+        let num = rule
+            .number
+            .as_ref()
+            .map(|n| n.to_string())
+            .unwrap_or_default();
+        let comment = format!("{}-{hook}-{label}-{num}", fam.label());
+        let (packets, bytes) = counters.get(&comment).copied().unwrap_or((0, 0));
+        rule_values.push(serde_json::json!({
+            "number": num,
+            "action": rule.action.as_ref().map(|a| a.to_string()),
+            "protocol": rule.protocol.as_ref().map(|p| p.to_string()),
+            "conditions": rule_conditions(rule, fam, hook, label),
+            "packets": packets,
+            "bytes": bytes,
+        }));
+    }
+    serde_json::json!({
+        "chain": title,
+        "family": fam.label(),
+        "defaultAction": head.default_action.as_ref().map(|a| a.to_string()),
+        "defaultLog": head.default_log,
+        "description": head.description.as_ref().map(|d| d.to_string()),
+        "rules": rule_values,
+    })
+}
+
+fn show_json_family(cfg: &FirewallConfig, fam: Fam, counters: &Counters) -> serde_json::Value {
+    let mut chains = Vec::new();
+    if let Some(f) = family(cfg, fam) {
+        for (chain, title, code, prior) in hooks(f) {
+            chains.push(chain_json(
+                fam,
+                &title,
+                code,
+                prior,
+                chain,
+                &chain.rule,
+                counters,
+            ));
+        }
+        for custom in &f.name {
+            let Some(name) = &custom.name else { continue };
+            let name = name.to_string();
+            chains.push(chain_json(
+                fam,
+                &format!("name {name}"),
+                "NAM",
+                &name,
+                &custom.as_chain(),
+                &custom.rule,
+                counters,
+            ));
+        }
+    }
+    serde_json::json!({ "family": fam.label(), "chains": chains })
+}
+
+fn show_json(
+    cfg: &FirewallConfig,
+    counters4: &Counters,
+    counters6: &Counters,
+) -> serde_json::Value {
+    serde_json::json!({
+        "groups": show_json_groups(cfg)["groups"],
+        "ipv4": show_json_family(cfg, Fam::V4, counters4),
+        "ipv6": show_json_family(cfg, Fam::V6, counters6),
+    })
 }
 
 // ---------------------------------------------------------------
@@ -566,7 +1202,11 @@ impl Render {
     }
 }
 
-/// Parse the subtree JSON and render the full nftables script.
+/// Parse the subtree JSON and render the full nftables script. The
+/// event loop parses and renders in separate steps (it retains the
+/// model for show); this combined form serves the test suites here
+/// and in config::manager.
+#[cfg(test)]
 pub fn render_str(json: &str) -> anyhow::Result<(String, Vec<String>)> {
     let cfg: FirewallConfig =
         serde_json::from_str(json).map_err(|e| anyhow::anyhow!("firewall config JSON: {e}"))?;
@@ -1654,5 +2294,122 @@ table ip6 zebra_firewall {
         assert!(warnings[0].contains("rule 10"), "warnings: {warnings:?}");
         assert!(!script.contains("ipv4-INP-filter-10"));
         assert!(script.contains("counter accept comment \"ipv4-INP-filter-20\""));
+    }
+
+    /// `nft --json list table` output → comment-keyed counters. Rules
+    /// without a comment are ignored; non-rule objects are skipped.
+    #[test]
+    fn parse_counters_from_nft_json() {
+        let value = serde_json::json!({
+            "nftables": [
+                {"metainfo": {"version": "1.0.9"}},
+                {"table": {"family": "ip", "name": "zebra_firewall"}},
+                {"rule": {"family": "ip", "comment": "ipv4-FWD-filter-10",
+                          "expr": [{"match": {}},
+                                   {"counter": {"packets": 42, "bytes": 4200}},
+                                   {"accept": null}]}},
+                {"rule": {"family": "ip", "comment": "FWD-filter default-action drop",
+                          "expr": [{"counter": {"packets": 7, "bytes": 700}},
+                                   {"drop": null}]}},
+                {"rule": {"family": "ip",
+                          "expr": [{"counter": {"packets": 1, "bytes": 1}}]}}
+            ]
+        });
+        let counters = parse_counters(&value);
+        assert_eq!(counters.get("ipv4-FWD-filter-10"), Some(&(42, 4200)));
+        assert_eq!(
+            counters.get("FWD-filter default-action drop"),
+            Some(&(7, 700))
+        );
+        assert_eq!(counters.len(), 2, "uncommented rule contributes nothing");
+    }
+
+    fn show_fixture() -> FirewallConfig {
+        let json = r#"{
+            "group": {"address-group": [
+                {"name": "SERVERS", "address": ["10.0.0.1", "10.0.0.2-10.0.0.5"]}
+            ]},
+            "ipv4": {
+                "forward": {"filter": {
+                    "default-action": "drop",
+                    "default-log": null,
+                    "rule": [
+                        {"number": 10, "action": "accept", "state": ["established", "related"]},
+                        {"number": 20, "action": "drop", "protocol": "tcp",
+                         "destination": {"group": {"address-group": "SERVERS"}}, "log": null}
+                    ]
+                }},
+                "name": [
+                    {"name": "WEB-IN", "default-action": "drop",
+                     "rule": [{"number": 10, "action": "accept", "tcp": {"flags": {"syn": null}}}]}
+                ]
+            }
+        }"#;
+        serde_json::from_str(json).expect("fixture deserializes")
+    }
+
+    /// The chain tables join live counters onto config rules via the
+    /// renderer's comment keys; the Conditions column reuses the real
+    /// rule renderer with counter/action/log stripped.
+    #[test]
+    fn show_family_tables_with_counters() {
+        let cfg = show_fixture();
+        let mut counters = Counters::new();
+        counters.insert("ipv4-FWD-filter-10".into(), (42, 4200));
+        counters.insert("ipv4-FWD-filter-20".into(), (5, 500));
+        counters.insert("FWD-filter default-action drop".into(), (7, 700));
+        counters.insert("ipv4-NAM-WEB-IN-10".into(), (3, 300));
+
+        let out = show_family_text(&cfg, Fam::V4, &counters, None);
+        assert!(out.contains("ipv4 Firewall \"forward filter\""), "{out}");
+        assert!(out.contains("ipv4 Firewall \"name WEB-IN\""), "{out}");
+        for needle in [
+            "ct state {established,related}",
+            "ip daddr @A_SERVERS",
+            "tcp flags & (syn) == syn",
+        ] {
+            assert!(out.contains(needle), "missing `{needle}` in:\n{out}");
+        }
+        // Counters landed on their rows.
+        assert!(out.contains("42"), "{out}");
+        assert!(out.contains("4200"), "{out}");
+        assert!(out.contains("700"), "{out}");
+
+        // Single-hook view filters to one chain.
+        let single = show_family_text(&cfg, Fam::V4, &counters, Some("forward filter"));
+        assert!(single.contains("forward filter"));
+        assert!(!single.contains("WEB-IN"));
+    }
+
+    /// Groups view: members listed, references counted across every
+    /// rule of every chain.
+    #[test]
+    fn show_groups_counts_references() {
+        let cfg = show_fixture();
+        let out = show_groups_text(&cfg);
+        assert!(out.contains("SERVERS"), "{out}");
+        assert!(out.contains("address-group"), "{out}");
+        assert!(out.contains("10.0.0.2-10.0.0.5"), "{out}");
+        // Rule 20 references SERVERS once.
+        let line = out.lines().find(|l| l.contains("SERVERS")).unwrap();
+        assert!(line.contains(" 1 "), "references column: {line}");
+    }
+
+    /// The JSON view carries the same joined data structurally.
+    #[test]
+    fn show_json_view() {
+        let cfg = show_fixture();
+        let mut counters = Counters::new();
+        counters.insert("ipv4-FWD-filter-10".into(), (42, 4200));
+
+        let v = show_json(&cfg, &counters, &Counters::new());
+        assert_eq!(v["groups"][0]["name"], "SERVERS");
+        assert_eq!(v["groups"][0]["references"], 1);
+        let chains = v["ipv4"]["chains"].as_array().unwrap();
+        assert_eq!(chains[0]["chain"], "forward filter");
+        assert_eq!(chains[0]["defaultAction"], "drop");
+        assert_eq!(chains[0]["rules"][0]["packets"], 42);
+        assert_eq!(chains[0]["rules"][0]["bytes"], 4200);
+        assert!(chains.iter().any(|c| c["chain"] == "name WEB-IN"));
     }
 }

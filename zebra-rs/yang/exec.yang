@@ -12,6 +12,10 @@ module exec {
     prefix ext;
   }
 
+  import zebra-features {
+    prefix feat;
+  }
+
   leaf help {
     ext:help "Show help";
     type empty;
@@ -248,6 +252,109 @@ module exec {
       description
         "The name of the host.  This name can be a single domain
         label or the fully qualified domain name of the host.";
+    }
+    // ISO-only surface (mirrors the iso-gated config subtree): the
+    // whole `show firewall` tree exists only with `--feature iso`.
+    // Served by the system/firewall task, which merges the configured
+    // ruleset with live counters from nftables.
+    container firewall {
+      if-feature feat:iso;
+      ext:help "Firewall information";
+      presence "Firewall ruleset overview";
+      container group {
+        ext:help "Firewall groups and their members";
+        presence "All firewall groups";
+      }
+      container ipv4 {
+        ext:help "IPv4 firewall";
+        presence "All IPv4 firewall chains";
+        container forward {
+          ext:help "Forwarded traffic (forward hook)";
+          container filter {
+            ext:help "Forward filter chain";
+            presence "Forward filter chain";
+          }
+        }
+        container input {
+          ext:help "Traffic destined to this router (input hook)";
+          container filter {
+            ext:help "Input filter chain";
+            presence "Input filter chain";
+          }
+        }
+        container output {
+          ext:help "Traffic originated by this router (output hook)";
+          container filter {
+            ext:help "Output filter chain";
+            presence "Output filter chain";
+          }
+          container raw {
+            ext:help "Output raw chain";
+            presence "Output raw chain";
+          }
+        }
+        container prerouting {
+          ext:help "All incoming traffic before routing (prerouting hook)";
+          container raw {
+            ext:help "Prerouting raw chain";
+            presence "Prerouting raw chain";
+          }
+        }
+        list name {
+          ext:help "Custom firewall chain";
+          ext:presence "All custom chains";
+          key "chain";
+          leaf chain {
+            ext:help "Chain name";
+            type string;
+          }
+        }
+      }
+      container ipv6 {
+        ext:help "IPv6 firewall";
+        presence "All IPv6 firewall chains";
+        container forward {
+          ext:help "Forwarded traffic (forward hook)";
+          container filter {
+            ext:help "Forward filter chain";
+            presence "Forward filter chain";
+          }
+        }
+        container input {
+          ext:help "Traffic destined to this router (input hook)";
+          container filter {
+            ext:help "Input filter chain";
+            presence "Input filter chain";
+          }
+        }
+        container output {
+          ext:help "Traffic originated by this router (output hook)";
+          container filter {
+            ext:help "Output filter chain";
+            presence "Output filter chain";
+          }
+          container raw {
+            ext:help "Output raw chain";
+            presence "Output raw chain";
+          }
+        }
+        container prerouting {
+          ext:help "All incoming traffic before routing (prerouting hook)";
+          container raw {
+            ext:help "Prerouting raw chain";
+            presence "Prerouting raw chain";
+          }
+        }
+        list name {
+          ext:help "Custom firewall chain";
+          ext:presence "All custom chains";
+          key "chain";
+          leaf chain {
+            ext:help "Chain name";
+            type string;
+          }
+        }
+      }
     }
     container evpn {
       ext:help "EVPN information";
