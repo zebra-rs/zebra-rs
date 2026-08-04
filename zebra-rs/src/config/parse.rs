@@ -764,10 +764,15 @@ pub fn parse(
         // for a presence container has no user-typed value — the
         // "name" must be the canonical entry name so path_from_command
         // builds e.g. `/show/ip/route` and not `/sh/ip/route` when
-        // the operator typed an abbreviation.
+        // the operator typed an abbreviation. Key is the presence-list
+        // twin of that case: the token just matched is the list's own
+        // keyword (`show interface` — ymatch_complete accepted it via
+        // `ext:presence`), never a key value, so it canonicalizes the
+        // same way (`show int` must not build `/show/int`). Key values
+        // always arrive later, as KeyMatched.
         let sub = if let Some(sub) = matched_enumeration(&mx) {
             sub
-        } else if s.ymatch == YangMatch::DirMatched {
+        } else if s.ymatch == YangMatch::DirMatched || s.ymatch == YangMatch::Key {
             mx.matched_entry.name.to_owned()
         } else {
             input[0..mx.pos].to_string()
@@ -1172,6 +1177,52 @@ mod tests {
                 "/show/bgp/evpn/route-type",
                 vec!["leaf"],
             ),
+        ];
+
+        for &(cmd, want_path, ref want_args) in &cases {
+            let (code, _comps, state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "parse `{cmd}`");
+            let (path, args) = path_from_command(&state.paths);
+            assert_eq!(path, want_path, "path for `{cmd}`");
+            let got: Vec<&str> = args.0.iter().map(|s| s.as_str()).collect();
+            assert_eq!(&got, want_args, "args for `{cmd}`");
+        }
+    }
+
+    /// An abbreviated presence-list keyword canonicalizes into the
+    /// CommandPath, exactly like a presence container's (the
+    /// DirMatched fix). `show interface` is a `list` with
+    /// `ext:presence`, so its name-match completes in the `Key` state
+    /// — `show int` used to build `/show/int`, which no ShowCallback
+    /// recognizes, and the command silently produced no output. Key
+    /// values are untouched: they complete as KeyMatched and keep the
+    /// typed text as args.
+    #[test]
+    fn show_presence_list_keyword_canonicalizes() {
+        use crate::config::path_from_command;
+        let entry = exec_entry();
+
+        let cases: Vec<(&str, &str, Vec<&str>)> = vec![
+            ("show interface", "/show/interface", vec![]),
+            ("show int", "/show/interface", vec![]),
+            ("show inte", "/show/interface", vec![]),
+            ("sh int", "/show/interface", vec![]),
+            // A key value after the abbreviated keyword still passes
+            // through as the arg.
+            ("show int eth0", "/show/interface", vec!["eth0"]),
+            // Deeper presence lists canonicalize the same way. (`show
+            // bgp neigh` stays out: `neighbor`/`neighbor-group` make
+            // that abbreviation genuinely ambiguous.)
+            ("show bfd peer", "/show/bfd/peers", vec![]),
+            (
+                "show bfd peer 10.0.0.1",
+                "/show/bfd/peers",
+                vec!["10.0.0.1"],
+            ),
+            // The `vrf` selector list: vrf_redirect_split matches the
+            // segment by its literal name, so the abbreviation must
+            // canonicalize for the per-VRF redirect to fire.
+            ("show ip route vr blue", "/show/ip/route/vrf", vec!["blue"]),
         ];
 
         for &(cmd, want_path, ref want_args) in &cases {
