@@ -1,0 +1,615 @@
+module ipsec {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-ipsec";
+  prefix "ipsec";
+
+  import ietf-inet-types {
+    prefix inet;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  description
+    "VyOS-compatible IPsec configuration, ported from the VyOS 1.5
+     (circinus) interface definitions (vyos-1x
+     interface-definitions/vpn_ipsec.xml.in and its include
+     fragments).
+
+     This module is a grouping library in the firewall.yang style:
+     config.yang instantiates `grouping vpn-ipsec` inside an
+     iso-gated `container vpn`, so every node here exists only when
+     the daemon runs with `--feature iso`.
+
+     Current scope: `authentication psk`, `esp-group` and `ike-group`
+     (with the full VyOS proposal cipher/hash/DH lists), `interface`,
+     `log`, `options`, and `site-to-site peer` with per-tunnel
+     traffic selectors and VTI binding — pre-shared-secret
+     authentication only. Deliberately deferred to follow-ups:
+     `profile` (DMVPN; needs the tunnel-interface and NHRP trees),
+     `remote-access` (IKEv2 RA; needs PKI, RADIUS and local-user
+     trees), and the rsa/x509 site-to-site authentication modes
+     (need a `pki` tree).
+
+     Value-shape conventions follow firewall.yang: no `pattern`
+     statements on value leaves (in this CLI a patterned string leaf
+     consumes the rest of the line); `description` leaves use exactly
+     that rest-of-line pattern on purpose; references to groups and
+     interfaces (ike-group, esp-group, VTI bind) are plain
+     `type string` — not leafref — so the referent may be staged
+     after the referrer.";
+
+  // ---------------------------------------------------------------
+  // Shared building blocks
+  // ---------------------------------------------------------------
+
+  // Cipher and hash lists shared by the ESP and IKE proposals — the
+  // VyOS vpn-ipsec-encryption / vpn-ipsec-hash include fragments,
+  // verbatim.
+  grouping proposal-ciphers {
+    leaf encryption {
+      ext:help "Encryption algorithm";
+      type enumeration {
+        enum null;
+        enum aes128;
+        enum aes192;
+        enum aes256;
+        enum aes128ctr;
+        enum aes192ctr;
+        enum aes256ctr;
+        enum aes128ccm64;
+        enum aes192ccm64;
+        enum aes256ccm64;
+        enum aes128ccm96;
+        enum aes192ccm96;
+        enum aes256ccm96;
+        enum aes128ccm128;
+        enum aes192ccm128;
+        enum aes256ccm128;
+        enum aes128gcm64;
+        enum aes192gcm64;
+        enum aes256gcm64;
+        enum aes128gcm96;
+        enum aes192gcm96;
+        enum aes256gcm96;
+        enum aes128gcm128;
+        enum aes192gcm128;
+        enum aes256gcm128;
+        enum aes128gmac;
+        enum aes192gmac;
+        enum aes256gmac;
+        enum "3des";
+        enum blowfish128;
+        enum blowfish192;
+        enum blowfish256;
+        enum camellia128;
+        enum camellia192;
+        enum camellia256;
+        enum camellia128ctr;
+        enum camellia192ctr;
+        enum camellia256ctr;
+        enum camellia128ccm64;
+        enum camellia192ccm64;
+        enum camellia256ccm64;
+        enum camellia128ccm96;
+        enum camellia192ccm96;
+        enum camellia256ccm96;
+        enum camellia128ccm128;
+        enum camellia192ccm128;
+        enum camellia256ccm128;
+        enum serpent128;
+        enum serpent192;
+        enum serpent256;
+        enum twofish128;
+        enum twofish192;
+        enum twofish256;
+        enum cast128;
+        enum chacha20poly1305;
+      }
+    }
+    leaf hash {
+      ext:help "Hash algorithm";
+      type enumeration {
+        enum md5;
+        enum md5_128;
+        enum sha1;
+        enum sha1_160;
+        enum sha256;
+        enum sha256_96;
+        enum sha384;
+        enum sha512;
+        enum aesxcbc;
+        enum aescmac;
+        enum aes128gmac;
+        enum aes192gmac;
+        enum aes256gmac;
+      }
+    }
+  }
+
+  // One side of a tunnel's interesting-traffic match (the VyOS
+  // local-traffic-selector fragment; the remote side has the same
+  // shape plus its inline prefix list).
+  grouping traffic-selector {
+    leaf port {
+      ext:help "Port number used by connection";
+      type uint16 {
+        range "1..65535";
+      }
+    }
+    leaf-list prefix {
+      ext:help "IPv4 or IPv6 prefix";
+      type union {
+        type inet:ipv4-prefix;
+        type inet:ipv6-prefix;
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // authentication
+  // ---------------------------------------------------------------
+
+  grouping authentication-psk {
+    container authentication {
+      ext:help "Authentication";
+      list psk {
+        ext:help "Pre-shared key";
+        key "name";
+        leaf name {
+          ext:help "Pre-shared key name";
+          type string;
+        }
+        leaf-list dhcp-interface {
+          ext:help "DHCP interface supplying next-hop IP address";
+          type string;
+        }
+        leaf-list id {
+          ext:help "ID used for authentication";
+          type string;
+        }
+        leaf secret {
+          ext:help "IKE pre-shared secret key";
+          type string;
+        }
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // esp-group
+  // ---------------------------------------------------------------
+
+  grouping esp-group-list {
+    list esp-group {
+      ext:help "Encapsulating Security Payload (ESP) group";
+      key "name";
+      leaf name {
+        ext:help "ESP group name";
+        type string;
+      }
+      leaf compression {
+        ext:help "Enable ESP compression";
+        type empty;
+      }
+      leaf lifetime {
+        ext:help "SA lifetime in seconds (VyOS default: 3600)";
+        type uint32 {
+          range "30..86400";
+        }
+      }
+      leaf life-bytes {
+        ext:help "SA byte count to expire";
+        type uint64 {
+          range "1024..26843545600000";
+        }
+      }
+      leaf life-packets {
+        ext:help "SA packet count to expire";
+        type uint64 {
+          range "1000..26843545600000";
+        }
+      }
+      leaf disable-rekey {
+        ext:help "Do not locally initiate a re-key of the SA; the remote peer must re-key before expiration";
+        type empty;
+      }
+      leaf mode {
+        ext:help "ESP mode (VyOS default: tunnel)";
+        type enumeration {
+          enum tunnel;
+          enum transport;
+        }
+      }
+      leaf pfs {
+        ext:help "ESP Perfect Forward Secrecy; enable inherits the DH group from the IKE group (VyOS default: enable)";
+        type enumeration {
+          enum enable;
+          enum dh-group1;
+          enum dh-group2;
+          enum dh-group5;
+          enum dh-group14;
+          enum dh-group15;
+          enum dh-group16;
+          enum dh-group17;
+          enum dh-group18;
+          enum dh-group19;
+          enum dh-group20;
+          enum dh-group21;
+          enum dh-group22;
+          enum dh-group23;
+          enum dh-group24;
+          enum dh-group25;
+          enum dh-group26;
+          enum dh-group27;
+          enum dh-group28;
+          enum dh-group29;
+          enum dh-group30;
+          enum dh-group31;
+          enum dh-group32;
+          enum disable;
+        }
+      }
+      list proposal {
+        ext:help "ESP group proposal";
+        key "number";
+        leaf number {
+          ext:help "ESP group proposal number";
+          type uint32 {
+            range "1..65535";
+          }
+        }
+        uses proposal-ciphers;
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // ike-group
+  // ---------------------------------------------------------------
+
+  grouping ike-group-list {
+    list ike-group {
+      ext:help "Internet Key Exchange (IKE) group";
+      key "name";
+      leaf name {
+        ext:help "IKE group name";
+        type string;
+      }
+      leaf close-action {
+        ext:help "Action to take if a child SA is unexpectedly closed (VyOS default: none)";
+        type enumeration {
+          enum none;
+          enum trap;
+          enum start;
+        }
+      }
+      container dead-peer-detection {
+        ext:help "Dead Peer Detection (DPD)";
+        leaf action {
+          ext:help "Keep-alive failure action (VyOS default: clear)";
+          type enumeration {
+            enum trap;
+            enum clear;
+            enum restart;
+          }
+        }
+        leaf interval {
+          ext:help "Keep-alive interval in seconds (VyOS default: 30)";
+          type uint32 {
+            range "2..86400";
+          }
+        }
+        leaf timeout {
+          ext:help "Keep-alive timeout in seconds, IKEv1 only (VyOS default: 120)";
+          type uint32 {
+            range "2..86400";
+          }
+        }
+      }
+      leaf ikev2-reauth {
+        ext:help "Re-authenticate the remote peer during an IKE re-key (IKEv2 only)";
+        type empty;
+      }
+      leaf key-exchange {
+        ext:help "IKE version";
+        type enumeration {
+          enum ikev1;
+          enum ikev2;
+        }
+      }
+      leaf lifetime {
+        ext:help "IKE lifetime in seconds (VyOS default: 28800)";
+        type uint32 {
+          range "0..86400";
+        }
+      }
+      leaf disable-mobike {
+        ext:help "Disable MOBIKE support (IKEv2 only)";
+        type empty;
+      }
+      leaf mode {
+        ext:help "IKEv1 phase 1 mode (VyOS default: main)";
+        type enumeration {
+          enum main;
+          enum aggressive;
+        }
+      }
+      list proposal {
+        ext:help "IKE proposal";
+        key "number";
+        leaf number {
+          ext:help "IKE group proposal number";
+          type uint32 {
+            range "1..65535";
+          }
+        }
+        leaf dh-group {
+          ext:help "Diffie-Hellman group: 1-2, 5 or 14-32 (VyOS default: 2)";
+          type uint8 {
+            range "1..2 | 5 | 14..32";
+          }
+        }
+        leaf prf {
+          ext:help "Pseudo-Random Function";
+          type enumeration {
+            enum prfmd5;
+            enum prfsha1;
+            enum prfaesxcbc;
+            enum prfaescmac;
+            enum prfsha256;
+            enum prfsha384;
+            enum prfsha512;
+          }
+        }
+        uses proposal-ciphers;
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // log / options
+  // ---------------------------------------------------------------
+
+  grouping log-config {
+    container log {
+      ext:help "IPsec logging";
+      leaf level {
+        ext:help "Global IPsec logging level (VyOS default: 0)";
+        type uint8 {
+          range "0..2";
+        }
+      }
+      leaf-list subsystem {
+        ext:help "Subsystem logging levels";
+        type enumeration {
+          enum dmn;
+          enum mgr;
+          enum ike;
+          enum chd;
+          enum job;
+          enum cfg;
+          enum knl;
+          enum net;
+          enum asn;
+          enum enc;
+          enum lib;
+          enum esp;
+          enum tls;
+          enum tnc;
+          enum imc;
+          enum imv;
+          enum pts;
+          enum any;
+        }
+      }
+    }
+  }
+
+  grouping options-config {
+    container options {
+      ext:help "Global IPsec settings";
+      leaf disable-route-autoinstall {
+        ext:help "Do not automatically install routes to remote networks";
+        type empty;
+      }
+      leaf flexvpn {
+        ext:help "Allow FlexVPN vendor ID payload (IKEv2 only)";
+        type empty;
+      }
+      leaf interface {
+        ext:help "Interface to use";
+        type string;
+      }
+      leaf virtual-ip {
+        ext:help "Allow install of virtual-ip addresses";
+        type empty;
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // site-to-site
+  // ---------------------------------------------------------------
+
+  grouping site-to-site-config {
+    container site-to-site {
+      ext:help "Site-to-site VPN";
+      list peer {
+        ext:help "Connection name of the peer";
+        key "name";
+        leaf name {
+          ext:help "Connection name of the peer";
+          type string;
+        }
+        leaf disable {
+          ext:help "Disable this peer";
+          type empty;
+        }
+        container authentication {
+          ext:help "Peer authentication";
+          leaf local-id {
+            ext:help "Local ID for peer authentication";
+            type string;
+          }
+          // VyOS also offers rsa and x509 here; both need a `pki`
+          // tree and are deferred with it.
+          leaf mode {
+            ext:help "Authentication mode";
+            type enumeration {
+              enum pre-shared-secret;
+            }
+          }
+          leaf pre-shared-secret {
+            ext:help "Pre-shared secret key";
+            type string;
+          }
+          leaf remote-id {
+            ext:help "ID for remote authentication (VyOS default: %any)";
+            type string;
+          }
+        }
+        leaf connection-type {
+          ext:help "Connection type";
+          type enumeration {
+            enum initiate;
+            enum respond;
+            enum none;
+          }
+        }
+        leaf default-esp-group {
+          ext:help "Default ESP group name";
+          type string;
+        }
+        leaf description {
+          ext:help "Description";
+          // Rest-of-line value: the pattern makes the leaf consume
+          // the remainder of the command, whitespace included
+          // (`match_regexp` in config/parse.rs).
+          type string {
+            pattern '.*';
+          }
+        }
+        leaf dhcp-interface {
+          ext:help "DHCP interface supplying next-hop IP address";
+          type string;
+        }
+        leaf force-udp-encapsulation {
+          ext:help "Force UDP encapsulation";
+          type empty;
+        }
+        leaf ike-group {
+          ext:help "Internet Key Exchange (IKE) group name";
+          type string;
+        }
+        // Valued here, valueless on the ike-group: the peer form
+        // overrides (yes/no) or inherits the group's setting.
+        leaf ikev2-reauth {
+          ext:help "Re-authenticate the remote peer during an IKE re-key (IKEv2 only): yes, no or inherit from the IKE group";
+          type enumeration {
+            enum yes;
+            enum no;
+            enum inherit;
+          }
+        }
+        leaf local-address {
+          ext:help "IPv4 or IPv6 address of a local interface to use for VPN, or any";
+          type union {
+            type inet:ipv4-address;
+            type inet:ipv6-address;
+            type string;
+          }
+        }
+        leaf-list remote-address {
+          ext:help "IPv4 or IPv6 address, hostname or any of the remote peer";
+          type union {
+            type inet:ipv4-address;
+            type inet:ipv6-address;
+            type string;
+          }
+        }
+        leaf replay-window {
+          ext:help "IPsec replay window for this CHILD_SA in packets; 0 disables replay protection (VyOS default: 32)";
+          type uint32 {
+            range "0..2040";
+          }
+        }
+        list tunnel {
+          ext:help "Peer tunnel";
+          key "number";
+          leaf number {
+            ext:help "Peer tunnel number";
+            type uint32;
+          }
+          leaf disable {
+            ext:help "Disable this tunnel";
+            type empty;
+          }
+          leaf esp-group {
+            ext:help "Encapsulating Security Payload (ESP) group name";
+            type string;
+          }
+          container local {
+            ext:help "Local parameters for interesting traffic";
+            uses traffic-selector;
+          }
+          leaf protocol {
+            ext:help "Protocol to match: name or number";
+            type string;
+          }
+          leaf priority {
+            ext:help "Priority for IPsec policy; the lowest value is the most preferable";
+            type uint8 {
+              range "1..100";
+            }
+          }
+          container remote {
+            ext:help "Match remote addresses";
+            uses traffic-selector;
+          }
+        }
+        leaf-list virtual-address {
+          ext:help "Initiator requests this virtual address from the peer";
+          type union {
+            type inet:ipv4-address;
+            type inet:ipv6-address;
+          }
+        }
+        container vti {
+          ext:help "Virtual tunnel interface";
+          leaf bind {
+            ext:help "VTI tunnel interface associated with this configuration";
+            type string;
+          }
+          leaf esp-group {
+            ext:help "Encapsulating Security Payload (ESP) group name";
+            type string;
+          }
+        }
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // The whole `vpn ipsec` subtree, in VyOS node order.
+  // ---------------------------------------------------------------
+
+  grouping vpn-ipsec {
+    uses authentication-psk;
+    leaf disable-uniqreqids {
+      ext:help "Disable requirement for unique IDs in the Security Database";
+      type empty;
+    }
+    uses esp-group-list;
+    uses ike-group-list;
+    leaf-list interface {
+      ext:help "Interface to use";
+      type string;
+    }
+    uses log-config;
+    uses options-config;
+    uses site-to-site-config;
+  }
+}

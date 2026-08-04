@@ -28,6 +28,10 @@ module config {
     prefix fw;
   }
 
+  import ipsec {
+    prefix ipsec;
+  }
+
   import ietf-bgp {
     prefix bgp;
   }
@@ -4880,6 +4884,17 @@ module config {
       if-feature feat:iso;
       ext:help "Firewall configuration";
       uses "fw:firewall";
+    }
+
+    // Also ISO-only: the whole VPN subtree (only IPsec today) exists
+    // solely with `--feature iso`.
+    container vpn {
+      if-feature feat:iso;
+      ext:help "Virtual Private Network (VPN)";
+      container ipsec {
+        ext:help "VPN IP security (IPsec) parameters";
+        uses "ipsec:vpn-ipsec";
+      }
     }
 
     list interface {
