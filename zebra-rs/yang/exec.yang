@@ -241,10 +241,6 @@ module exec {
         ext:dynamic "rib:interface";
         type string;
       }
-      leaf detail {
-        ext:help "Interface detail";
-        type empty;
-      }
     }
     leaf hostname {
       ext:help "System host name";
