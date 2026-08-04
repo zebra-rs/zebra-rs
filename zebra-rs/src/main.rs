@@ -225,12 +225,15 @@ async fn run(arg: Arg) -> anyhow::Result<()> {
     config.subscribe_show("rib", rib.show.tx.clone());
     config.subscribe_show("policy", policy.show.tx.clone());
 
-    // The firewall backend consumes its subtree as a JSON batch: one
-    // whole-tree delivery per commit that touches /firewall (the
-    // subtree only exists with `--feature iso`).
+    // The firewall and IPsec backends consume their subtrees as JSON
+    // batches: one whole-tree delivery per commit that touches the
+    // prefix (both subtrees only exist with `--feature iso`).
     let firewall = system::Firewall::new();
     config.subscribe_json(&["firewall"], firewall.tx.clone());
     config.subscribe_show("firewall", firewall.show.tx.clone());
+
+    let ipsec = system::Ipsec::new();
+    config.subscribe_json(&["vpn", "ipsec"], ipsec.tx.clone());
 
     let cli = Cli::new(config.tx.clone());
 
@@ -240,7 +243,7 @@ async fn run(arg: Arg) -> anyhow::Result<()> {
 
     policy::serve(policy);
 
-    system::serve(firewall);
+    system::serve(firewall, ipsec);
 
     rib::serve(rib);
 
