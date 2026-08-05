@@ -5638,21 +5638,21 @@ impl Ospf<Ospfv2> {
                     continue;
                 }
 
+                // RFC 2328 Section 13.3 Step 1(b): reconcile against
+                // the instance this neighbor advertised. A neighbor
+                // that already holds this LSA doesn't need our copy.
+                if super::flood::ospf_flood_reconcile_ls_req(nbr, lsa)
+                    == super::flood::FloodTarget::Skip
+                {
+                    continue;
+                }
+
                 // RFC 2328 Section 13.3 Step 1(c): Skip the source neighbor.
                 if let Some((src_ifindex, src_addr)) = source
                     && nbr.ifindex == src_ifindex
                     && nbr.ident.prefix.addr() == src_addr
                 {
                     continue;
-                }
-
-                // RFC 2328 Section 13.3 Step 1(b): For neighbors in
-                // Exchange or Loading state, remove from ls_req if present.
-                if nbr.state >= NfsmState::Exchange
-                    && nbr.state < NfsmState::Full
-                    && let Some(idx) = super::ospf_ls_request_lookup(nbr, &lsa.h)
-                {
-                    nbr.ls_req.remove(idx);
                 }
 
                 // RFC 2328 Section 13.3 Step 1(d): Add LSA to retransmit list.
@@ -9724,9 +9724,21 @@ impl Ospf<Ospfv3> {
                 link.resolve_active_send_key(&self.key_chains, chrono::Utc::now());
 
             for nbr in link.nbrs.values_mut() {
+                // RFC 2328 §13.3 step 1(a).
                 if nbr.state < NfsmState::Exchange {
                     continue;
                 }
+
+                // RFC 2328 §13.3 step 1(b): reconcile against the
+                // instance this neighbor advertised. A neighbor that
+                // already holds this LSA doesn't need our copy.
+                if super::flood::ospf_flood_reconcile_ls_req(nbr, lsa)
+                    == super::flood::FloodTarget::Skip
+                {
+                    continue;
+                }
+
+                // RFC 2328 §13.3 step 1(c): skip the source neighbor.
                 if let Some((src_if, src_v6)) = source
                     && ifindex == src_if
                     && nbr.ident.prefix.addr() == src_v6
@@ -9774,10 +9786,9 @@ impl Ospf<Ospfv3> {
 
     /// Flood a self-originated v3 LSA to every Exchange-or-later
     /// neighbor in the area. Minimal RFC 2328 §13.3 — no DR / BDR
-    /// ordering, no ls_req cleanup for Exchange / Loading neighbors.
-    /// Those land alongside the §13.1 hardening of
-    /// `ospfv3_ls_upd_recv`. Retransmit-list bookkeeping happens
-    /// in `flood_lsa_through_area`.
+    /// ordering. Request-list reconciliation (step 1(b)) and
+    /// retransmit-list bookkeeping (step 1(d)) happen in
+    /// `flood_lsa_through_area`.
     ///
     /// The LSU goes through the dedicated `Ospfv3Send` channel so
     /// `network_v6::write_packet_v6` stamps the IPv6 pseudo-header

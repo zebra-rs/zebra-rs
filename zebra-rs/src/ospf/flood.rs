@@ -50,6 +50,63 @@ pub fn ospf_ls_request_lookup<V: OspfVersion>(
     })
 }
 
+/// Whether a flooded LSA should still be sent to a given neighbor
+/// after the RFC 2328 §13.3 step 1(b) reconciliation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloodTarget {
+    /// The neighbor already holds an instance at least as recent as
+    /// the one being flooded — sending it would be redundant.
+    Skip,
+    Send,
+}
+
+/// RFC 2328 §13.3 step 1(b). Only adjacencies that are not yet Full
+/// carry a request list, and each entry records the instance the
+/// neighbor advertised in its Database Description. If the LSA being
+/// flooded names one of those entries, the advertised instance tells
+/// us what the neighbor already has:
+///
+/// * flooded LSA less recent — the neighbor's copy is newer, so it
+///   still owes us that copy. Keep the request and don't flood ours.
+/// * same instance — the neighbor already has exactly this LSA, so
+///   the request is satisfied. Drop it and don't flood.
+/// * flooded LSA more recent — ours beats what the neighbor
+///   advertised, so we no longer need to ask for theirs. Drop the
+///   request and flood.
+///
+/// Dropping a request can empty the list, so the Loading check runs
+/// here — without it a neighbor whose requests are all satisfied by
+/// parallel floods sits in Loading until its next LS Update.
+///
+/// The advertised header is compared using its own stored `ls_age`
+/// (the age at DD time). Age only participates via the MaxAge and
+/// MaxAgeDiff rules, and this is not a database copy, so there is no
+/// dynamic age to compute.
+pub fn ospf_flood_reconcile_ls_req<V: OspfVersion>(
+    nbr: &mut Neighbor<V>,
+    lsa: &V::Lsa,
+) -> FloodTarget {
+    if nbr.state >= NfsmState::Full {
+        return FloodTarget::Send;
+    }
+    let h = V::lsa_header(lsa);
+    let Some(idx) = ospf_ls_request_lookup(nbr, h) else {
+        return FloodTarget::Send;
+    };
+    let advertised = &nbr.ls_req[idx];
+    let cmp = V::lsa_more_recent(h, V::ls_age(h), advertised, V::ls_age(advertised));
+    if cmp < 0 {
+        return FloodTarget::Skip;
+    }
+    nbr.ls_req.remove(idx);
+    ospf_nfsm_check_nbr_loading(nbr);
+    if cmp == 0 {
+        FloodTarget::Skip
+    } else {
+        FloodTarget::Send
+    }
+}
+
 // OSPF LSA flooding -- RFC2328 Section 13.3.
 // Following the ref/ospfd/ospf_flood.c ospf_flood_through_interface() pattern.
 pub fn ospf_flood_through_interface(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) {
@@ -232,4 +289,217 @@ pub fn ospf_ls_retransmit_lookup<'a, V: OspfVersion>(
 ) -> Option<&'a V::Lsa> {
     let key: OspfLsaKey = lsa_to_key::<V>(lsa);
     nbr.ls_rxmt.get(&key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ospf::version::{Ospfv2, Ospfv3};
+    use ospf_packet::{
+        OSPFV3_ROUTER_LSA_TYPE, Ospfv3LsBody, Ospfv3LsaHeader, Ospfv3Options, Ospfv3RouterLsa,
+        RouterLsa,
+    };
+    use std::net::Ipv4Addr;
+    use tokio::sync::mpsc::unbounded_channel;
+
+    const ADV: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
+    const LS_ID: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
+
+    fn v2_nbr() -> Neighbor<Ospfv2> {
+        let (tx, _rx) = unbounded_channel();
+        let (ptx, _prx) = unbounded_channel();
+        // The Loading check emits on `tx`; keeping both receivers alive
+        // in the caller isn't needed since send errors are ignored.
+        let mut nbr = Neighbor::<Ospfv2>::new(
+            tx,
+            1,
+            Default::default(),
+            &Ipv4Addr::new(10, 0, 0, 2),
+            40,
+            ptx,
+        );
+        nbr.state = NfsmState::Loading;
+        nbr
+    }
+
+    fn v2_header(seq: u32, age: u16) -> OspfLsaHeader {
+        let mut h = OspfLsaHeader::new(OspfLsType::Router, LS_ID, ADV);
+        h.ls_seq_number = seq;
+        h.ls_age = age;
+        h
+    }
+
+    fn v2_lsa(seq: u32, age: u16) -> OspfLsa {
+        OspfLsa::from(
+            v2_header(seq, age),
+            OspfLsp::Router(RouterLsa {
+                flags: 0,
+                links: vec![],
+            }),
+        )
+    }
+
+    fn v3_nbr() -> Neighbor<Ospfv3> {
+        let (tx, _rx) = unbounded_channel();
+        let (ptx, _prx) = unbounded_channel();
+        let mut nbr = Neighbor::<Ospfv3>::new(
+            tx,
+            1,
+            Default::default(),
+            &Ipv4Addr::new(10, 0, 0, 2),
+            40,
+            ptx,
+        );
+        nbr.state = NfsmState::Loading;
+        nbr
+    }
+
+    fn v3_header(seq: u32, age: u16) -> Ospfv3LsaHeader {
+        Ospfv3LsaHeader {
+            ls_age: age,
+            ls_type: OSPFV3_ROUTER_LSA_TYPE,
+            link_state_id: 0,
+            advertising_router: ADV,
+            ls_seq_number: seq,
+            ls_checksum: 0,
+            length: 20,
+        }
+    }
+
+    fn v3_lsa(seq: u32, age: u16) -> ospf_packet::Ospfv3Lsa {
+        ospf_packet::Ospfv3Lsa {
+            h: v3_header(seq, age),
+            body: Ospfv3LsBody::Router(Ospfv3RouterLsa {
+                flags: 0,
+                options: Ospfv3Options::default(),
+                links: vec![],
+            }),
+            raw: None,
+        }
+    }
+
+    // Not on the request list at all: nothing to reconcile, flood it.
+    #[test]
+    fn reconcile_v2_not_requested() {
+        let mut nbr = v2_nbr();
+        assert_eq!(
+            ospf_flood_reconcile_ls_req(&mut nbr, &v2_lsa(5, 0)),
+            FloodTarget::Send
+        );
+        assert!(nbr.ls_req.is_empty());
+    }
+
+    // The neighbor advertised a NEWER instance than the one we are
+    // flooding: it still owes us that copy, so keep the request and
+    // don't push our stale one at it.
+    #[test]
+    fn reconcile_v2_advertised_is_newer_keeps_request() {
+        let mut nbr = v2_nbr();
+        nbr.ls_req.push(v2_header(9, 0));
+        assert_eq!(
+            ospf_flood_reconcile_ls_req(&mut nbr, &v2_lsa(5, 0)),
+            FloodTarget::Skip
+        );
+        assert_eq!(nbr.ls_req.len(), 1, "request must survive");
+    }
+
+    // Same instance — a parallel neighbor's serve already gave us what
+    // this one advertised. Request satisfied, and it needs no copy.
+    #[test]
+    fn reconcile_v2_same_instance_drops_request_and_skips() {
+        let mut nbr = v2_nbr();
+        nbr.ls_req.push(v2_header(5, 0));
+        assert_eq!(
+            ospf_flood_reconcile_ls_req(&mut nbr, &v2_lsa(5, 0)),
+            FloodTarget::Skip
+        );
+        assert!(nbr.ls_req.is_empty());
+    }
+
+    // Ours is newer than what the neighbor advertised: stop asking for
+    // theirs, and do flood ours.
+    #[test]
+    fn reconcile_v2_flooded_is_newer_drops_request_and_sends() {
+        let mut nbr = v2_nbr();
+        nbr.ls_req.push(v2_header(5, 0));
+        assert_eq!(
+            ospf_flood_reconcile_ls_req(&mut nbr, &v2_lsa(9, 0)),
+            FloodTarget::Send
+        );
+        assert!(nbr.ls_req.is_empty());
+    }
+
+    // A Full adjacency has no request list to reconcile.
+    #[test]
+    fn reconcile_v2_full_neighbor_is_untouched() {
+        let mut nbr = v2_nbr();
+        nbr.state = NfsmState::Full;
+        nbr.ls_req.push(v2_header(5, 0));
+        assert_eq!(
+            ospf_flood_reconcile_ls_req(&mut nbr, &v2_lsa(5, 0)),
+            FloodTarget::Send
+        );
+        assert_eq!(nbr.ls_req.len(), 1);
+    }
+
+    // Only the matching entry is reconciled; other requests stand.
+    #[test]
+    fn reconcile_v2_leaves_other_requests_alone() {
+        let mut nbr = v2_nbr();
+        let mut other = v2_header(5, 0);
+        other.ls_id = Ipv4Addr::new(10, 0, 0, 7);
+        nbr.ls_req.push(other);
+        nbr.ls_req.push(v2_header(5, 0));
+        assert_eq!(
+            ospf_flood_reconcile_ls_req(&mut nbr, &v2_lsa(5, 0)),
+            FloodTarget::Skip
+        );
+        assert_eq!(nbr.ls_req.len(), 1);
+        assert_eq!(nbr.ls_req[0].ls_id, Ipv4Addr::new(10, 0, 0, 7));
+    }
+
+    #[test]
+    fn reconcile_v3_not_requested() {
+        let mut nbr = v3_nbr();
+        assert_eq!(
+            ospf_flood_reconcile_ls_req(&mut nbr, &v3_lsa(5, 0)),
+            FloodTarget::Send
+        );
+    }
+
+    #[test]
+    fn reconcile_v3_advertised_is_newer_keeps_request() {
+        let mut nbr = v3_nbr();
+        nbr.ls_req.push(v3_header(9, 0));
+        assert_eq!(
+            ospf_flood_reconcile_ls_req(&mut nbr, &v3_lsa(5, 0)),
+            FloodTarget::Skip
+        );
+        assert_eq!(nbr.ls_req.len(), 1);
+    }
+
+    // The v3 case the tilfa topology actually hit: d requested s's
+    // Router-LSA from two neighbors at once and the second serve
+    // carried the instance the first had already installed.
+    #[test]
+    fn reconcile_v3_same_instance_drops_request_and_skips() {
+        let mut nbr = v3_nbr();
+        nbr.ls_req.push(v3_header(5, 0));
+        assert_eq!(
+            ospf_flood_reconcile_ls_req(&mut nbr, &v3_lsa(5, 0)),
+            FloodTarget::Skip
+        );
+        assert!(nbr.ls_req.is_empty());
+    }
+
+    #[test]
+    fn reconcile_v3_flooded_is_newer_drops_request_and_sends() {
+        let mut nbr = v3_nbr();
+        nbr.ls_req.push(v3_header(5, 0));
+        assert_eq!(
+            ospf_flood_reconcile_ls_req(&mut nbr, &v3_lsa(9, 0)),
+            FloodTarget::Send
+        );
+        assert!(nbr.ls_req.is_empty());
+    }
 }

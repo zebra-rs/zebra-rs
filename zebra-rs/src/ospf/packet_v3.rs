@@ -1181,7 +1181,12 @@ pub fn ospfv3_ls_ack_recv(
 /// Returns `1` if `h1` is more recent than `h2`, `-1` if `h2` is
 /// more recent, `0` if same instance. Caller passes the dynamic
 /// current ages (database copies should compute `current_age`).
-fn ospfv3_lsa_more_recent(h1: &Ospfv3LsaHeader, age1: u16, h2: &Ospfv3LsaHeader, age2: u16) -> i32 {
+pub(super) fn ospfv3_lsa_more_recent(
+    h1: &Ospfv3LsaHeader,
+    age1: u16,
+    h2: &Ospfv3LsaHeader,
+    age2: u16,
+) -> i32 {
     use super::lsdb::OSPF_MAX_AGE;
     const OSPF_MAX_AGE_DIFF: u16 = 900;
 

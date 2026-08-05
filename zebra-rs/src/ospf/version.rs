@@ -231,6 +231,14 @@ pub trait OspfVersion: 'static + Send + Sync + Copy + Clone + PartialEq + Eq {
     /// when a request packet is built.
     fn ls_request_entry(h: &Self::LsaHeader) -> Self::LsRequestEntry;
 
+    /// RFC 2328 §13.1 instance comparison: sequence number, then
+    /// checksum, then the MaxAge / MaxAgeDiff age rules. Positive
+    /// means `h1` is the more recent instance, negative means `h2`
+    /// is, zero means the two are the same instance. Ages are passed
+    /// separately so a caller can supply a database copy's
+    /// dynamically-computed age instead of the stored header field.
+    fn lsa_more_recent(h1: &Self::LsaHeader, age1: u16, h2: &Self::LsaHeader, age2: u16) -> i32;
+
     /// Address by which a neighbor is uniquely identified on the
     /// local router, projected to a 32-bit value for storage in
     /// the v2-shaped `Message::Retransmit` / `Nfsm` channel
@@ -447,6 +455,9 @@ impl OspfVersion for Ospfv2 {
     fn ls_request_entry(h: &OspfLsaHeader) -> OspfLsRequestEntry {
         OspfLsRequestEntry::new(h.ls_type, h.ls_id, h.adv_router)
     }
+    fn lsa_more_recent(h1: &OspfLsaHeader, age1: u16, h2: &OspfLsaHeader, age2: u16) -> i32 {
+        super::packet::ospf_lsa_more_recent(h1, age1, h2, age2)
+    }
     fn length(h: &OspfLsaHeader) -> u16 {
         h.length
     }
@@ -585,6 +596,9 @@ impl OspfVersion for Ospfv3 {
     }
     fn ls_request_entry(h: &Ospfv3LsaHeader) -> Ospfv3LsRequestEntry {
         Ospfv3LsRequestEntry::new(h.ls_type, h.link_state_id, h.advertising_router)
+    }
+    fn lsa_more_recent(h1: &Ospfv3LsaHeader, age1: u16, h2: &Ospfv3LsaHeader, age2: u16) -> i32 {
+        super::packet_v3::ospfv3_lsa_more_recent(h1, age1, h2, age2)
     }
     fn adv_router(h: &Ospfv3LsaHeader) -> Ipv4Addr {
         h.advertising_router

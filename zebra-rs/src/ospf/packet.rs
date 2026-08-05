@@ -980,7 +980,12 @@ pub fn ospf_ls_req_recv(
 // Returns true if lsa1 is more recent than lsa2 (RFC 2328 Section 13.1).
 // age1/age2 are the current ages of the respective LSAs (callers must pass
 // dynamic current_age for database copies).
-fn ospf_lsa_more_recent(lsa1: &OspfLsaHeader, age1: u16, lsa2: &OspfLsaHeader, age2: u16) -> i32 {
+pub(super) fn ospf_lsa_more_recent(
+    lsa1: &OspfLsaHeader,
+    age1: u16,
+    lsa2: &OspfLsaHeader,
+    age2: u16,
+) -> i32 {
     // RFC 2328 §A.4.1: `ls_seq_number` is a SIGNED 32-bit integer
     // wrapping from `InitialSequenceNumber` (0x80000001, most-negative)
     // up to `MaxSequenceNumber` (0x7FFFFFFF). Comparison must be
