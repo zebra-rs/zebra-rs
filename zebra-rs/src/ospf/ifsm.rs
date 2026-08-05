@@ -385,14 +385,30 @@ fn ospf_ifsm_timer_set<V: OspfVersion>(oi: &mut OspfLink<V>) {
             oi.timer.ls_upd_event = None;
         }
         Waiting => {
-            oi.timer.hello.get_or_insert(ospf_hello_timer(oi));
+            ifsm_hello_start(oi);
             oi.timer.wait.get_or_insert(ospf_wait_timer(oi));
             oi.timer.ls_ack = None;
         }
         DROther | Backup | DR | PointToPoint => {
-            oi.timer.hello.get_or_insert(ospf_hello_timer(oi));
+            ifsm_hello_start(oi);
             oi.timer.wait = None;
         }
+    }
+}
+
+/// Arm the periodic Hello timer if it isn't running yet, sending the
+/// FIRST Hello immediately instead of a full HelloInterval later (FRR
+/// arms `t_hello` at 1ms on interface-up). The peer learns us one
+/// hello cycle earlier, which shaves up to HelloInterval per direction
+/// off adjacency formation — and virtual links, whose bring-up chains
+/// several such cycles behind the transit area's convergence, gain the
+/// most. Runs after every IFSM event, so the `is_none` check keeps
+/// steady-state transitions (DR election, NeighborChange) from
+/// re-firing it.
+fn ifsm_hello_start<V: OspfVersion>(oi: &mut OspfLink<V>) {
+    if oi.timer.hello.is_none() {
+        let _ = oi.tx.send(Message::HelloTimer(oi.index));
+        oi.timer.hello = Some(ospf_hello_timer(oi));
     }
 }
 

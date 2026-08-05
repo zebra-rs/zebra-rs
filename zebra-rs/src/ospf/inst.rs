@@ -2083,6 +2083,16 @@ impl Ospf<Ospfv2> {
         if self.in_restart() {
             return;
         }
+        // No attached area means nothing to originate — return BEFORE
+        // the MinLSInterval gate. `lsa_gen_allow` records
+        // `last_originate` unconditionally, so charging it on a no-op
+        // call (the startup address replay fires `addr_add` before the
+        // area config attaches any link) defers the FIRST real
+        // Router-LSA by a full interval and shifts every downstream
+        // convergence step with it.
+        if self.areas.iter().all(|(_, area)| area.links.is_empty()) {
+            return;
+        }
         // MinLSInterval (RFC 2328 §12.4): if we originated a Router-LSA
         // less than `min_ls_interval` ago, defer — the throttle arms a
         // `LsaGenFire(Router)` timer and folds `min_seq` for the
@@ -4620,6 +4630,18 @@ impl Ospf<Ospfv2> {
     /// helper-mode neighbor remains.
     fn update_network_lsa_by_interface(&mut self, ifindex: u32) {
         if self.in_restart() {
+            return;
+        }
+        // Mirror `_now`'s no-op guards BEFORE the MinLSInterval gate —
+        // a missing / disabled / addressless interface originates
+        // nothing, and charging the gate for it would defer the next
+        // real regeneration on this ifindex by a full interval (see
+        // `router_lsa_originate_with_min_seq`).
+        let originable = self
+            .links
+            .get(&ifindex)
+            .is_some_and(|link| link.enabled && super::addr::primary_addr(&link.addr).is_some());
+        if !originable {
             return;
         }
         // MinLSInterval (RFC 2328 §12.4): coalesce rapid Network-LSA
@@ -7762,6 +7784,12 @@ impl Ospf<Ospfv3> {
     ///   neighbor in the area via `flood_self_originated_lsa`.
     pub fn router_lsa_originate(&mut self) {
         if self.in_restart() {
+            return;
+        }
+        // See the v2 twin (`router_lsa_originate_with_min_seq`): no
+        // enabled link → `_now` walks zero areas → nothing to
+        // originate, so don't charge the MinLSInterval gate.
+        if !self.links.values().any(|l| l.enabled) {
             return;
         }
         // MinLSInterval (RFC 2328 §12.4 / RFC 5340): coalesce rapid
@@ -11557,6 +11585,12 @@ impl Ospf<Ospfv3> {
     /// Exchange-or-later neighbor in the area.
     pub fn network_lsa_originate(&mut self, ifindex: u32) {
         if self.in_restart() {
+            return;
+        }
+        // See the v2 twin (`update_network_lsa_by_interface`): an
+        // unknown ifindex neither originates nor flushes anything —
+        // don't charge the MinLSInterval gate for it.
+        if !self.links.contains_key(&ifindex) {
             return;
         }
         // MinLSInterval (RFC 2328 §12.4): coalesce Network-LSA churn on
