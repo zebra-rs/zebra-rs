@@ -653,8 +653,24 @@ fn ospf_db_desc_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, dd: &OspfDbDesc
     nbr.dd.recv = dd.clone();
 
     for lsah in dd.lsa_headers.iter() {
-        let find = ospf_lsa_lookup(oi, lsah.ls_type, lsah.ls_id, lsah.adv_router);
-        if find.is_none() {
+        // RFC 2328 §10.6: request the LSA when we hold no copy, or
+        // when the instance the neighbor advertised is more recent
+        // than ours. Testing only for absence — as this did — leaves
+        // a stale copy in place until the originator's next refresh,
+        // up to LSRefreshTime later.
+        //
+        // Both sides are compared on their stored `ls_age`: the age
+        // tiebreak only runs when sequence number and checksum are
+        // identical, and identical instances need no request either
+        // way. The case that matters is a MaxAge advertisement over a
+        // live copy, which this still catches.
+        let need = match ospf_lsa_lookup(oi, lsah.ls_type, lsah.ls_id, lsah.adv_router) {
+            None => true,
+            Some(current) => {
+                ospf_lsa_more_recent(lsah, lsah.ls_age, &current.h, current.h.ls_age) > 0
+            }
+        };
+        if need {
             ospf_ls_request_add(nbr, lsah);
             ospf_nfsm_ls_req_timer_on(nbr, oi.retransmit_interval);
         }

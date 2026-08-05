@@ -753,12 +753,19 @@ fn ospfv3_db_desc_proc(
 ) {
     nbr.dd.recv = dd.clone();
 
-    // RFC 2328 §10.6 (reused by v3): for each header in the
-    // received DBD, if we don't already have the LSA, add it to
-    // the LS Request list and (re)arm the LS Request timer.
+    // RFC 2328 §10.6 (reused by v3): for each header in the received
+    // DBD, request the LSA when we hold no copy, or when the
+    // advertised instance is more recent than ours — testing only for
+    // absence leaves a stale copy in place until the originator's
+    // next refresh. See the v2 twin for why comparing the stored ages
+    // is sufficient here.
     let mut added = false;
     for h in dd.lsa_headers.iter() {
-        if ospfv3_lsa_lookup(oi, h).is_none() {
+        let need = match ospfv3_lsa_lookup(oi, h) {
+            None => true,
+            Some(current) => ospfv3_lsa_more_recent(h, h.ls_age, &current.h, current.h.ls_age) > 0,
+        };
+        if need {
             // Store the advertised header, not the wire request
             // record — §13.3 step 1(b) compares against this instance.
             nbr.ls_req.push(h.clone());
