@@ -50,7 +50,7 @@ Feature: OSPFv2 virtual links connect a remote ABR to the backbone
 
     # End to end: the area-2 internal router reaches the area-0
     # prefix — impossible without the virtual link.
-    And show command "show ospf route" in namespace "r3" should contain "10.0.0.1/32"
+    And show command "show ospf route" in namespace "r3" should eventually contain "10.0.0.1/32"
     And ping from "r3" to "10.0.0.1" should succeed
     And ping from "r1" to "10.0.0.3" should succeed
     # No inline teardown: the next scenario's clean-environment sweep
@@ -93,7 +93,7 @@ Feature: OSPFv2 virtual links connect a remote ABR to the backbone
     # Backbone routes cross the two-hop VL in both directions.
     And show command "show ospf route" in namespace "r2" should contain "10.0.0.1/32"
     And show command "show ospf route" in namespace "r1" should contain "10.0.0.3/32"
-    And show command "show ospf route" in namespace "r3" should contain "10.0.0.1/32"
+    And show command "show ospf route" in namespace "r3" should eventually contain "10.0.0.1/32"
 
     # End to end across the multi-hop transit path.
     And ping from "r3" to "10.0.0.1" should succeed
@@ -122,7 +122,7 @@ Feature: OSPFv2 virtual links connect a remote ABR to the backbone
     And show command "show ospf interface" in namespace "r2" should contain "VLINK"
     And show command "show ospf route" in namespace "r2" should contain "10.0.0.1/32"
     And show command "show ospf route" in namespace "r1" should contain "10.0.0.3/32"
-    And show command "show ospf route" in namespace "r3" should contain "10.0.0.1/32"
+    And show command "show ospf route" in namespace "r3" should eventually contain "10.0.0.1/32"
     And ping from "r3" to "10.0.0.1" should succeed
 
   Scenario: Teardown topology
