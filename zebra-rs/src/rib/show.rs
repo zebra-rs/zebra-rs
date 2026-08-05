@@ -2024,6 +2024,8 @@ impl Rib {
             .set(mac_show)
             .path("/show/l2/neighbor")
             .set(l2_neighbor_show)
+            .path("/show/segment-routing/srv6")
+            .set(sid_show)
             .path("/show/segment-routing/srv6/sid")
             .set(sid_show)
             .path("/show/vrf")
@@ -2248,10 +2250,11 @@ pub fn l2_neighbor_show(rib: &Rib, _args: Args, json: bool) -> String {
     buf
 }
 
-/// Render `show segment-routing srv6 sid`. Always emits the header row
-/// (matches FRR-style output where an empty body still tells the
-/// operator the command is wired and they're just not allocating any
-/// SIDs yet).
+/// Render `show segment-routing srv6 [sid]` — the bare `srv6` prefix is
+/// registered as an alias so it can't complete into an unhandled path
+/// and silently print nothing. Always emits the header row (matches
+/// FRR-style output where an empty body still tells the operator the
+/// command is wired and they're just not allocating any SIDs yet).
 pub fn sid_show(rib: &Rib, _args: Args, json: bool) -> String {
     // `redirected_sids` maps each SID currently in its egress-protection
     // redirect form to the protector's Mirror SID it H.Encaps to — a live,
