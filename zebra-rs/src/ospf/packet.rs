@@ -598,8 +598,10 @@ pub fn ospf_db_desc_send(link: &mut OspfInterface, nbr: &mut Neighbor, oident: &
 }
 
 pub fn ospf_packet_ls_req_set(nbr: &mut Neighbor, ls_req: &mut OspfLsRequest) {
-    for ls_req_entry in nbr.ls_req.iter() {
-        ls_req.reqs.push(ls_req_entry.clone());
+    // The request list stores the headers the neighbor advertised;
+    // the wire record carries only the identity triple.
+    for advertised in nbr.ls_req.iter() {
+        ls_req.reqs.push(ospf_ls_rquest_new(advertised));
     }
 }
 
@@ -641,8 +643,10 @@ fn ospf_lsa_lookup<'a>(
     }
 }
 
-fn ospf_ls_request_add(nbr: &mut Neighbor, ls_req: OspfLsRequestEntry) {
-    nbr.ls_req.push(ls_req);
+/// Record an LSA we need from this neighbor. Stores the header it
+/// advertised, so the instance stays available for §13.3 step 1(b).
+fn ospf_ls_request_add(nbr: &mut Neighbor, advertised: &OspfLsaHeader) {
+    nbr.ls_req.push(advertised.clone());
 }
 
 fn ospf_db_desc_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, dd: &OspfDbDesc) {
@@ -651,8 +655,7 @@ fn ospf_db_desc_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, dd: &OspfDbDesc
     for lsah in dd.lsa_headers.iter() {
         let find = ospf_lsa_lookup(oi, lsah.ls_type, lsah.ls_id, lsah.adv_router);
         if find.is_none() {
-            let lsr = ospf_ls_rquest_new(lsah);
-            ospf_ls_request_add(nbr, lsr);
+            ospf_ls_request_add(nbr, lsah);
             ospf_nfsm_ls_req_timer_on(nbr, oi.retransmit_interval);
         }
     }

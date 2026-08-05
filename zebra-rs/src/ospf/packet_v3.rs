@@ -10,8 +10,8 @@ use ipnet::Ipv6Net;
 use ospf_macros::ospf_packet_handler;
 use ospf_packet::{
     OSPFV3_NSSA_LSA_TYPE, Ospfv3AuthTrailer, Ospfv3DbDesc, Ospfv3Hello, Ospfv3LsAck,
-    Ospfv3LsRequest, Ospfv3LsRequestEntry, Ospfv3LsUpdate, Ospfv3Lsa, Ospfv3LsaHeader,
-    Ospfv3Options, Ospfv3Packet, Ospfv3Payload,
+    Ospfv3LsRequest, Ospfv3LsUpdate, Ospfv3Lsa, Ospfv3LsaHeader, Ospfv3Options, Ospfv3Packet,
+    Ospfv3Payload,
 };
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -759,11 +759,9 @@ fn ospfv3_db_desc_proc(
     let mut added = false;
     for h in dd.lsa_headers.iter() {
         if ospfv3_lsa_lookup(oi, h).is_none() {
-            nbr.ls_req.push(Ospfv3LsRequestEntry::new(
-                h.ls_type,
-                h.link_state_id,
-                h.advertising_router,
-            ));
+            // Store the advertised header, not the wire request
+            // record — §13.3 step 1(b) compares against this instance.
+            nbr.ls_req.push(h.clone());
             added = true;
         }
     }
@@ -929,8 +927,8 @@ pub fn ospfv3_db_desc_recv(
 /// Pack the pending LS Request entries on `nbr.ls_req` into the
 /// outgoing packet. Mirrors v2's `ospf_packet_ls_req_set`.
 fn ospfv3_packet_ls_req_set(nbr: &Neighbor<Ospfv3>, ls_req: &mut Ospfv3LsRequest) {
-    for entry in nbr.ls_req.iter() {
-        ls_req.reqs.push(entry.clone());
+    for advertised in nbr.ls_req.iter() {
+        ls_req.reqs.push(Ospfv3::ls_request_entry(advertised));
     }
 }
 
@@ -1221,17 +1219,6 @@ fn ospfv3_lsa_more_recent(h1: &Ospfv3LsaHeader, age1: u16, h2: &Ospfv3LsaHeader,
         }
     }
     0
-}
-
-/// Position of a matching `Ospfv3LsRequestEntry` in `nbr.ls_req`
-/// for the LSA identified by `h`, or `None` if not on the list.
-/// Mirrors v2's `ospf_ls_request_lookup`.
-fn ospfv3_ls_request_lookup(nbr: &Neighbor<Ospfv3>, h: &Ospfv3LsaHeader) -> Option<usize> {
-    nbr.ls_req.iter().position(|req| {
-        req.ls_type == h.ls_type
-            && req.link_state_id == h.link_state_id
-            && req.advertising_router == h.advertising_router
-    })
 }
 
 /// True if `lsa` was advertised by us. v3 doesn't need the v2
@@ -1562,7 +1549,7 @@ fn ospfv3_ls_upd_proc(
         }
 
         // Drop matching entry from nbr.ls_req — request satisfied.
-        if let Some(idx) = ospfv3_ls_request_lookup(nbr, h) {
+        if let Some(idx) = super::flood::ospf_ls_request_lookup(nbr, h) {
             nbr.ls_req.remove(idx);
         }
 
@@ -1590,7 +1577,7 @@ fn ospfv3_ls_upd_proc(
     // instance, step 8 unicasts our newer copy back for an older
     // one. Genuine exchange corruption is still caught by the DD
     // sequence/option checks (SeqNumberMismatch).
-    if let Some(idx) = ospfv3_ls_request_lookup(nbr, h) {
+    if let Some(idx) = super::flood::ospf_ls_request_lookup(nbr, h) {
         nbr.ls_req.remove(idx);
     }
 

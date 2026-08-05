@@ -34,12 +34,19 @@ pub fn ospf_ls_request_isempty<V: super::version::OspfVersion>(nbr: &Neighbor<V>
     nbr.ls_req.is_empty()
 }
 
-/// Look up an LSA in the neighbor's ls_req list and return its index if found.
-pub fn ospf_ls_request_lookup(nbr: &Neighbor, h: &OspfLsaHeader) -> Option<usize> {
-    nbr.ls_req.iter().position(|req| {
-        req.ls_type == u32::from(u8::from(h.ls_type))
-            && req.ls_id == h.ls_id
-            && req.adv_router == h.adv_router
+/// Index of the request-list entry naming the same LSA as `h`, if the
+/// neighbor has one outstanding. Matches on the identity triple only —
+/// the caller decides what to do with the advertised instance stored
+/// in the entry.
+pub fn ospf_ls_request_lookup<V: OspfVersion>(
+    nbr: &Neighbor<V>,
+    h: &V::LsaHeader,
+) -> Option<usize> {
+    let (ls_type, ls_id, adv_router) = (V::ls_type(h), V::ls_id(h), V::adv_router(h));
+    nbr.ls_req.iter().position(|advertised| {
+        V::ls_type(advertised) == ls_type
+            && V::ls_id(advertised) == ls_id
+            && V::adv_router(advertised) == adv_router
     })
 }
 

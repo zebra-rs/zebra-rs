@@ -165,7 +165,15 @@ pub struct Neighbor<V: OspfVersion = Ospfv2> {
     pub dd: NeighborDbDesc<V>,
     pub ptx: UnboundedSender<Message<V>>,
     pub db_sum: Vec<V::LsaHeader>,
-    pub ls_req: Vec<V::LsRequestEntry>,
+    /// Link State Request list (RFC 2328 §10). Holds the LSA
+    /// *headers* the neighbor advertised in its Database Description,
+    /// not the 12-octet wire request records — the advertised
+    /// instance (sequence number / checksum / age) is what §13.3
+    /// step 1(b) compares a flooded LSA against, and what §10.6 needs
+    /// to decide whether our database copy is already current. The
+    /// wire form is derived at send time via `V::ls_request_entry`.
+    /// Same shape as `db_sum` above.
+    pub ls_req: Vec<V::LsaHeader>,
     pub ls_req_last: Option<V::LsRequest>,
     pub ls_rxmt: BTreeMap<OspfLsaKey, V::Lsa>,
     pub uptime: Instant,
