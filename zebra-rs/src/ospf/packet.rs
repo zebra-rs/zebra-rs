@@ -1021,7 +1021,6 @@ enum LsaProcessResult {
     AckAndDiscard,       // Step 4 MaxAge / Step 7 same: ack, don't install
     DiscardNoAck,        // Step 3 / Step 7 implied ack / Step 8 MaxAge+MaxSeq: no ack
     DbCopyNewer,         // Step 8: DB copy sent back, no ack
-    BadLSReq,            // Step 6: stop processing entire packet
 }
 
 fn ospf_ls_upd_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) -> LsaProcessResult {
@@ -1172,19 +1171,17 @@ fn ospf_ls_upd_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) -
         return LsaProcessResult::InstalledDelayedAck;
     }
 
-    // Step 6: If LSA is on neighbor's request list, this is a BadLSReq event.
-    if ospf_ls_request_lookup(nbr, &lsa.h).is_some() {
-        ospf_packet_trace!(
-            oi.tracing,
-            LsUpdate,
-            Recv,
-            "[LS Update] BadLSReq: LSA on request list type={:?} id={} adv={}",
-            lsa.h.ls_type,
-            lsa.h.ls_id,
-            lsa.h.adv_router
-        );
-        nbr_sched_event(nbr, NfsmEvent::BadLSReq);
-        return LsaProcessResult::BadLSReq;
+    // Step 6: an instance still on this neighbor's request list, not
+    // newer than our database copy. With per-neighbor request lists
+    // and parallel exchanges this is routine (the other neighbor's
+    // serve landed first), not the exchange corruption the literal
+    // RFC text assumes — the database copy is at least as new, so
+    // the request is SATISFIED: remove it and fall through (step 7
+    // acks an equal instance, step 8 sends our newer copy back for
+    // an older one). See the v3 twin in `ospfv3_ls_upd_proc` for
+    // the livelock the literal BadLSReq caused.
+    if let Some(idx) = ospf_ls_request_lookup(nbr, &lsa.h) {
+        nbr.ls_req.remove(idx);
     }
 
     // Step 7: Same instance (duplicate).
@@ -1296,10 +1293,6 @@ pub fn ospf_ls_upd_validate_proc(
             LsaProcessResult::InstalledDelayedAck => {
                 delayed_ack_headers.push(lsa.h.clone());
             }
-            LsaProcessResult::BadLSReq => {
-                // Stop processing entire packet, no acks sent.
-                return;
-            }
             LsaProcessResult::DiscardNoAck | LsaProcessResult::DbCopyNewer => {
                 // No ack for these cases.
             }
@@ -1316,6 +1309,12 @@ pub fn ospf_ls_upd_validate_proc(
         let msg = Message::DelayedAckQueue(nbr.ifindex, delayed_ack_headers);
         let _ = oi.tx.send(msg);
     }
+
+    // A step-6 duplicate-satisfied removal drains `ls_req` without
+    // going through the install path (`ospf_flood`), so re-check for
+    // LoadingDone here — mirrors the v3 handler's end-of-packet
+    // check. No-op unless the neighbor is Loading with an empty list.
+    super::nfsm::ospf_nfsm_check_nbr_loading(nbr);
 }
 
 /// RFC 3623 §3.1 helper-entry gate. Called from `ospf_ls_upd_proc`
