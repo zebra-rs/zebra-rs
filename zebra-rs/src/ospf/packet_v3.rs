@@ -1370,8 +1370,6 @@ enum LsaProcessResult {
     /// Step 3 area-type filter / Step 7 implied-ack via retransmit
     /// list / Step 8 MaxAge+MaxSeq: drop without acking.
     DiscardNoAck,
-    /// Step 6: aborts the rest of the packet (NFSM `BadLSReq`).
-    BadLSReq,
     /// Step 8: our DB copy is newer; sent it back to the peer.
     /// No ack contributed.
     DbCopyNewer,
@@ -1571,11 +1569,29 @@ fn ospfv3_ls_upd_proc(
         return LsaProcessResult::Installed;
     }
 
-    // Step 6: same-or-older LSA but still on our request list →
-    // protocol violation. Fire BadLSReq, force renegotiation.
-    if ospfv3_ls_request_lookup(nbr, h).is_some() {
-        ospfv3_nbr_sched_event(nbr, NfsmEvent::BadLSReq);
-        return LsaProcessResult::BadLSReq;
+    // Step 6 (RFC 2328 §13): an instance still on this neighbor's
+    // request list, not newer than our database copy. The literal
+    // RFC text calls this a Database Exchange error (BadLSReq), but
+    // with per-neighbor request lists and PARALLEL exchanges the
+    // collision is routine, not corruption: both neighbors' DD
+    // summaries list the same LSAs, both request lists carry them,
+    // and whichever serve lands second delivers an instance the
+    // first already installed (equal — or older, when the
+    // originator re-originated in between and the parallel serve
+    // outran this one). Firing BadLSReq here aborted the serving
+    // LSU mid-packet and reset the adjacency; both lists were then
+    // rebuilt and re-collided every round, so the tail of a
+    // multi-LSA serve (deterministically the same LSAs) never
+    // installed — a permanent LSDB hole on any router with two
+    // exchange partners, and the mechanism behind the ospfv3_tilfa
+    // / srv6_tilfa_v3 reverse-ping intermittents. The database copy
+    // is at least as new as the serve either way, so the request is
+    // SATISFIED: remove it and fall through — step 7 acks an equal
+    // instance, step 8 unicasts our newer copy back for an older
+    // one. Genuine exchange corruption is still caught by the DD
+    // sequence/option checks (SeqNumberMismatch).
+    if let Some(idx) = ospfv3_ls_request_lookup(nbr, h) {
+        nbr.ls_req.remove(idx);
     }
 
     // Step 7: same instance. Treat retransmit-list match as
@@ -1645,10 +1661,6 @@ pub fn ospfv3_ls_upd_recv(
         match ospfv3_ls_upd_proc(oi, nbr, lsa, src) {
             LsaProcessResult::Installed | LsaProcessResult::AckAndDiscard => {
                 ack_headers.push(h_for_ack);
-            }
-            LsaProcessResult::BadLSReq => {
-                // Abort — don't process remaining LSAs, don't ack.
-                return;
             }
             LsaProcessResult::DiscardNoAck | LsaProcessResult::DbCopyNewer => {
                 // No ack contributed; continue with next LSA.
