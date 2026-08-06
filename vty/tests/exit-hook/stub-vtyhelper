@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Stub `vtyhelper` for the vty exit-hook tests.
+#
+# vty.sh calls the helper by bare name (`cli_command=vtyhelper`), so
+# putting this first on PATH lets the harness script every daemon answer
+# without a daemon — and without the patched bash, since the exit hook
+# depends only on stock `trap`/`read`/EOF behaviour.
+#
+# Behaviour is driven by the environment:
+#   STUB_LOG           file every invocation is appended to, one line of
+#                      arguments per call (the harness asserts on order)
+#   STUB_UNCOMMITTED   exit code for `-u`: 0 dirty, 1 clean, 2 unknown
+#   STUB_COMMIT_RC     exit code for `-m configure commit|discard`
+#   STUB_COMMIT_OUT    stdout for those, minus the `Show` marker line
+#                      the real helper always prints first
+#   STUB_FIRST         newline-separated first-level commands for `-f`
+set -u
+
+[[ -n ${STUB_LOG:-} ]] && printf '%s\n' "$*" >>"${STUB_LOG}"
+
+mode=""
+args=()
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -m) mode=$2; shift 2 ;;
+    -u|--uncommitted) exit "${STUB_UNCOMMITTED:-1}" ;;
+    -l|--logout) exit 0 ;;
+    -H|--hostname) echo "teststub"; exit 0 ;;
+    -f|--first)
+      # One command name per line — _cli_register_first_level_command
+      # reads whole lines and aliases every prefix of each.
+      printf '%b\n' "${STUB_FIRST:-configure}"
+      exit 0 ;;
+    -c|--completion|-t|--trailing) exit 0 ;;
+    -e|--enable|-d|--disable) exit 0 ;;
+    -j|--json) shift ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+
+case "${mode}:${args[0]:-}" in
+  configure:commit|configure:discard)
+    echo "Show"
+    [[ -n ${STUB_COMMIT_OUT:-} ]] && printf '%s\n' "${STUB_COMMIT_OUT}"
+    exit "${STUB_COMMIT_RC:-0}"
+    ;;
+  *:configure)
+    # Entering configure mode: the reply vty.sh evals to switch modes.
+    printf 'SuccessExec\nCLI_MODE=configure;CLI_MODE_PROMPT="(config)";CLI_PRIVILEGE=15;_cli_refresh\n'
+    exit 0
+    ;;
+  *)
+    echo "Show"
+    exit 0
+    ;;
+esac

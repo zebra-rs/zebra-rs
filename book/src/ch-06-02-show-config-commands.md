@@ -146,6 +146,39 @@ host(config)# save
 Configuration saved to /etc/zebra-rs/zebra-rs.conf (cli)
 ```
 
+### Leaving the shell with uncommitted changes
+
+Edits live in the candidate until you `commit`, and until this release
+nothing stopped a session from simply ending on top of them. Now, when
+you leave the vty shell — typed `exit` at the exec prompt, Ctrl-D, or a
+closing terminal — after having entered configure mode at some point,
+the shell checks whether the candidate still differs from running and
+asks:
+
+```
+host# exit
+You have uncommitted changes. Commit? [y=commit, n=discard, other=leave pending]
+```
+
+`y` commits, `n` discards, and anything else (including just pressing
+Enter, or waiting for the 30-second timeout) leaves the edits in the
+candidate for the next session. The shell exits in every case — the
+answer never cancels the exit.
+
+Three cases stay silent: a session that never entered configure mode, a
+session with no terminal to ask on (a script piping commands in), and a
+daemon that cannot answer the question. If the commit is refused because
+the session is no longer Admin, the reason is printed and the edits are
+left untouched:
+
+```
+% commit failed (admin role required — run 'enable'); changes left uncommitted.
+```
+
+Note that the candidate is shared daemon-wide: pending edits from
+another operator, or from a `vtyctl apply`, are part of what this prompt
+offers to commit or discard.
+
 ### The format `save` writes
 
 A bare `save` writes the file back in the format it was **loaded** in,

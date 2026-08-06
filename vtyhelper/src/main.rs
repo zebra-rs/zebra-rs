@@ -62,6 +62,13 @@ struct Cli {
     disable: bool,
 
     #[arg(
+        short = 'u',
+        long = "uncommitted",
+        help = "Answer \"does the candidate config differ from running?\" through the exit code: 0 differs, 1 identical, 2 unknown. Prints nothing; used by the vty EXIT hook."
+    )]
+    uncommitted: bool,
+
+    #[arg(
         short = 'H',
         long = "hostname",
         help = "Print the daemon's configured `system hostname` (empty when unset); \
@@ -309,6 +316,69 @@ async fn enable(cli: Cli) -> i32 {
     }
 }
 
+/// Exit codes for `--uncommitted`. The vty EXIT hook prompts on
+/// `DIRTY` and on nothing else, so neither a clean config nor an
+/// unreachable daemon can stand between the operator and their exit.
+/// `UNKNOWN` stays distinct from `CLEAN` deliberately: folding an error
+/// into "nothing to commit" would make a broken query indistinguishable
+/// from a real answer.
+const UNCOMMITTED_DIRTY: i32 = 0;
+const UNCOMMITTED_CLEAN: i32 = 1;
+const UNCOMMITTED_UNKNOWN: i32 = 2;
+
+/// Does the candidate config differ from running?
+///
+/// The predicate is a string comparison of `show running-config formal`
+/// against `show candidate-config formal`. Both render through
+/// `Config::list()` — the same rendering `commit_config` diffs — so this
+/// answers "would a commit do anything?" rather than the weaker "do the
+/// two trees look different"; the configure-mode `show` command
+/// compares the other (`format()`) rendering and the two can disagree.
+/// Both commands live in exec mode and are not admin-gated, so a View
+/// session can ask.
+///
+/// Two round trips of the whole config, but only ever on the way out of
+/// a shell, which is why this is a one-shot query and not a flag
+/// stamped on every reply.
+async fn uncommitted(cli: Cli) -> i32 {
+    let channel = match endpoint::connect(&endpoint_uri(&cli.base, cli.port)).await {
+        Ok(c) => c,
+        Err(_) => return UNCOMMITTED_UNKNOWN,
+    };
+    let mut client = ExecClient::new(channel);
+
+    let mut formal = Vec::new();
+    for target in ["running-config", "candidate-config"] {
+        let commands = vec![
+            String::from("show"),
+            String::from(target),
+            String::from("formal"),
+        ];
+        let request = tonic::Request::new(exec_request(
+            ExecType::Exec as i32,
+            &String::from("exec"),
+            &commands,
+        ));
+        let Ok(reply) = client.do_exec(request).await else {
+            return UNCOMMITTED_UNKNOWN;
+        };
+        let reply = reply.into_inner();
+        // Anything but Show means the command didn't run (schema
+        // changed under us, RBAC, a daemon mid-restart) — that is an
+        // unknown answer, not an empty config.
+        if reply.code != ExecCode::Show as i32 {
+            return UNCOMMITTED_UNKNOWN;
+        }
+        formal.push(reply.lines);
+    }
+
+    if formal[0] == formal[1] {
+        UNCOMMITTED_CLEAN
+    } else {
+        UNCOMMITTED_DIRTY
+    }
+}
+
 /// Drop the session back to View. Idempotent; the daemon doesn't error.
 async fn disable(cli: Cli) -> i32 {
     let channel = match endpoint::connect(&endpoint_uri(&cli.base, cli.port)).await {
@@ -360,6 +430,11 @@ async fn main() -> Result<()> {
     }
     if cli.disable {
         std::process::exit(disable(cli).await);
+    }
+    // Same reason as enable/disable: the exit code *is* the answer, so
+    // it must not go through `run`'s blanket "exit 1 on error".
+    if cli.uncommitted {
+        std::process::exit(uncommitted(cli).await);
     }
 
     let logout_mode = cli.logout;

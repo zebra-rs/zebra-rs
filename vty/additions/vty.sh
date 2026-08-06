@@ -61,6 +61,15 @@ declare -A _cli_array_pre
 # when vty started while the zebra-rs daemon was still down.
 declare -i _cli_first_level_registered=0
 
+# 1 once this shell has entered configure mode. Gates the exit-time
+# uncommitted-changes prompt in _cli_exit_hook: the candidate config is
+# global to the daemon, so without this gate an operator who only ran
+# `show` would be asked about — and could discard — someone else's
+# pending edits. Sticky for the shell's life, including across `disable`: a
+# session that dropped back to View should still be told, and get the
+# "admin role required" answer, rather than silently walking away.
+declare -i _cli_entered_configure=0
+
 COMP_WORDBREAKS=${COMP_WORDBREAKS//:/}
 
 _cli_prompt_setup ()
@@ -324,6 +333,12 @@ _cli_exec ()
         exit
       else
         eval "$line"
+        # Note the entry into configure mode here rather than in the
+        # `configure` shell function: _cli_refresh runs `unalias -a`
+        # and re-registers a `configure` alias that shadows that
+        # function, so a second entry never reaches it. Keying off the
+        # mode the daemon just handed us catches every path in.
+        [[ ${CLI_MODE} == "configure" ]] && _cli_entered_configure=1
       fi ;;
   esac
 
@@ -521,6 +536,77 @@ disable ()
   return ${rc}
 }
 
+# Run `commit` or `discard` on the way out and report what happened.
+#
+# Not routed through _cli_exec: that sends -m ${CLI_MODE}, which is
+# `exec` by the time we are exiting, where neither command exists. The
+# explicit -m configure is admin-gated, and vtyhelper answers a denial
+# by exiting 1 with no output at all — so without this wrapper a user
+# who answers `y` sees nothing and keeps their uncommitted changes.
+_cli_exit_config_cmd ()
+{
+  local out rc
+  out=$(${cli_command} -m configure "$1" 2>&1)
+  rc=$?
+  # vtyhelper prints a bare `Show` marker line ahead of the reply body;
+  # a successful commit/discard has nothing after it.
+  out=${out#Show}
+  if [[ ${rc} -ne 0 ]]; then
+    echo "% ${1} failed (admin role required — run 'enable'); changes left uncommitted." >&2
+  elif [[ -n ${out//[[:space:]]/} ]]; then
+    # Validation errors from commit land here; the candidate is intact.
+    printf '%s\n' "${out#$'\n'}" >&2
+  fi
+}
+
+# Bash EXIT trap. Two jobs, in this order: offer to commit pending
+# config changes, then drop the server-side session.
+#
+# The trap is the right seam because the answer never cancels the exit —
+# it catches a typed `exit`, Ctrl-D and a closing terminal alike, where
+# a shell function shadowing the `exit` builtin would miss the last two.
+#
+# Invariants: never call `exit` and never `set -e` in here, or the
+# shell's real exit status is lost.
+_cli_exit_hook ()
+{
+  # Gate before the RPC: nothing to ask a shell that never configured.
+  # -t 2 matters as much as -t 0 — `read -p` writes the prompt to
+  # stderr, so with stderr redirected the user would face an invisible
+  # question; and with no tty at all bash drops the prompt silently and
+  # blocks on a read that eats stdin.
+  if [[ ${_cli_entered_configure} -eq 1 && -t 0 && -t 2 ]]; then
+    # 0 = differs, 1 = identical, 2 = unknown. Ask only on a definite
+    # 0, so a daemon that is down or slow never delays an exit.
+    if ${cli_command} -u >/dev/null 2>&1; then
+      local ans
+      # The timeout is not optional. A tty reports EOF once, not
+      # stickily, so after a Ctrl-D exit this read blocks forever on a
+      # shell that has already decided to die — and further Ctrl-D
+      # cannot break it. CLI_EXIT_PROMPT_TIMEOUT exists so the tests
+      # don't have to wait out the default.
+      read -t "${CLI_EXIT_PROMPT_TIMEOUT:-30}" -r -p \
+        "You have uncommitted changes. Commit? [y=commit, n=discard, other=leave pending] " ans
+      if [[ $? -gt 128 ]]; then
+        # Timed out: leave the candidate alone and close the prompt line.
+        echo >&2
+      else
+        echo >&2
+        case ${ans} in
+          [Yy]*) _cli_exit_config_cmd commit ;;
+          [Nn]*) _cli_exit_config_cmd discard ;;
+        esac
+      fi
+    fi
+  fi
+
+  # Logout LAST. Dropping the session makes the next RPC re-resolve as
+  # a fresh View session, so a commit issued after this point would be
+  # refused. The kernel pidfd watcher also catches shell death; this
+  # explicit RPC just shaves a moment off the cleanup for clean exits.
+  ${cli_command} -l >/dev/null 2>&1 || true
+}
+
 if [[ $interactive ]]; then
   _cli_pager_setup
   _cli_bind_key
@@ -529,10 +615,7 @@ if [[ $interactive ]]; then
   # next successful exec self-heals it, like _cli_maybe_register).
   CLI_HOSTNAME=$(${cli_command} -H 2>/dev/null)
   _cli_prompt_setup
-  # Tell the daemon to drop our session as soon as the shell exits.
-  # The kernel pidfd watcher also catches this case; the explicit
-  # logout RPC just shaves a moment off the cleanup for clean exits.
-  trap '${cli_command} -l >/dev/null 2>&1 || true' EXIT
+  trap _cli_exit_hook EXIT
 else
   CLI_PAGER="cat"
 fi

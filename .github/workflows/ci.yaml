@@ -41,6 +41,21 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+  vty-exit-hook:
+    name: vty exit hook
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+      # The exit hook is bash-side logic in vty/additions/vty.sh, which
+      # CI otherwise never touches (only the packaging workflows build
+      # the patched bash). The hook depends on nothing that patch adds —
+      # `trap`, `read` and EOF handling are stock — so it runs against
+      # the system bash with a stubbed vtyhelper, no zebra-rs build
+      # needed.
+      - name: Exit-hook matrix
+        run: python3 vty/tests/exit-hook/run.py
+
   test:
     name: cargo test
     runs-on: ubuntu-22.04
