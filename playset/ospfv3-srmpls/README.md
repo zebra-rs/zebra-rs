@@ -11,7 +11,7 @@ label-switched paths. The edge story mirrors the
 *recursive IPv6 static route* whose nexthop is the remote loopback
 resolves through the SR-MPLS route and inherits its label stack. All core
 and edge nodes run in separate network namespaces; each node runs zebra-rs
-and its YAML configuration is injected with `vtyctl apply`.
+and loads its own `<node>.yaml` at startup via `--config-file`.
 
 ## Topology
 

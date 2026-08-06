@@ -12,7 +12,7 @@ SID per adjacency, and — on the edge routers — an **End.DT6** service SID.
 The edge LANs are carried by iBGP between `s` and `d` as an SRv6
 IPv6-unicast service (RFC 9252); the core carries no edge state. All core
 and edge nodes run in separate network namespaces; each node runs zebra-rs
-and its YAML configuration is injected with `vtyctl apply`.
+and loads its own `<node>.yaml` at startup via `--config-file`.
 
 ## Topology
 

@@ -15,7 +15,7 @@ There are no labels anywhere: steady-state core forwarding is plain IPv6,
 service traffic is IPv6-in-IPv6 (H.Encaps), and the TI-LFA repair is an SRH
 (Segment Routing Header) *inserted* into the packet in flight. All core and
 edge nodes run in separate network namespaces; each node runs zebra-rs and
-its YAML configuration is injected with `vtyctl apply`.
+loads its own `<node>.yaml` at startup via `--config-file`.
 
 ## Topology
 
@@ -118,7 +118,8 @@ Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down Sta
 
 ## Take a look at the YAML configuration
 
-Node `s`'s configuration (`s.yaml`), applied with `vtyctl apply -f s.yaml`:
+Node `s`'s configuration (`s.yaml`), loaded at startup with
+`zebra-rs --config-file s.yaml`:
 
 ``` yaml
 system:

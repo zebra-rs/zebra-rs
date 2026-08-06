@@ -88,8 +88,9 @@ full explanation of the recursive static.
 
 ## Take a look at the YAML configuration
 
-Node `s`'s configuration is in `s.yaml` and is applied with `vtyctl apply -f
-s.yaml`. The interface addressing, `system hostname`, and the recursive
+Node `s`'s configuration is in `s.yaml`, which its daemon loads at startup
+(`zebra-rs --config-file s.yaml`). The interface addressing, `system
+hostname`, and the recursive
 static route are identical to the IS-IS playset; only the `router` section
 differs — a single OSPF area 0, with every core link declared
 point-to-point and carrying an explicit `cost`:

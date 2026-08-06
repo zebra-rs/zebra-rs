@@ -8,8 +8,8 @@ link, so traffic between Tokyo and the United States is forced the long way
 round — through Asia and Europe — while algorithm 0 keeps using the direct
 Pacific crossing.
 
-Each node runs zebra-rs in its own network namespace, and its YAML
-configuration is injected with the `vtyctl apply` command.
+Each node runs zebra-rs in its own network namespace, and loads its own
+`<node>.yaml` at startup via the `--config-file` argument.
 
 ## Topology
 
