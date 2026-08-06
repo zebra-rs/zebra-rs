@@ -8,8 +8,8 @@ RFC 8665's Extended Prefix / Extended Link Opaque LSAs instead of IS-IS
 sub-TLVs). Every core node advertises a Prefix-SID for its loopback, so any
 node can reach every other node's loopback over an SR-MPLS label-switched
 path. All core and edge nodes run in separate network namespaces. Each node
-runs zebra-rs, and its YAML configuration is injected with the `vtyctl
-apply` command.
+runs zebra-rs, and loads its own `<node>.yaml` at startup via the
+`--config-file` argument.
 
 ## Topology
 
@@ -17,18 +17,19 @@ apply` command.
 
 ## Bring up all nodes
 
-`./up.sh` sets up all namespaces, starts the zebra-rs routing daemon in each
-of them, and injects the initial configuration. Note that this playset and
-the IS-IS one use the same namespace names — bring up one of them at a time.
+`./up.sh` sets up all namespaces, seeds each node's config file, and starts
+the zebra-rs routing daemon in each of them on its own `--config-file`. Note
+that this playset and the IS-IS one use the same namespace names — bring up
+one of them at a time.
 
 ``` shell
 $ ./up.sh
 bring up
 ...
-apply config: r3
-applied
-apply config: d
-applied
+seed config: d
+...
+start zebra-rs: d
+sleep 3sec
 ```
 
 ## Examine routes on node `s`
@@ -90,10 +91,9 @@ full explanation of the recursive static.
 
 Node `s`'s configuration is in `s.yaml`, which its daemon loads at startup
 (`zebra-rs --config-file s.yaml`). The interface addressing, `system
-hostname`, and the recursive
-static route are identical to the IS-IS playset; only the `router` section
-differs — a single OSPF area 0, with every core link declared
-point-to-point and carrying an explicit `cost`:
+hostname`, and the recursive static route are identical to the IS-IS
+playset; only the `router` section differs — a single OSPF area 0, with
+every core link declared point-to-point and carrying an explicit `cost`:
 
 ``` yaml
 system:

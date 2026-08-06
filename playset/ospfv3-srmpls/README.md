@@ -29,8 +29,10 @@ playsets — bring up one of them at a time.
 $ ./up.sh
 bring up
 ...
-apply config: d
-applied
+seed config: d
+...
+start zebra-rs: d
+sleep 3sec
 ```
 
 OSPFv3 full-mesh convergence takes a little longer than the v2/IS-IS labs;

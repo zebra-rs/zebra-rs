@@ -32,8 +32,10 @@ only where it exists, so neither VTEP ever learns the other's routes.
 ```shell
 $ ./up.sh
 ...
-apply config: h4
-applied
+seed config: h4
+...
+start zebra-rs: h4
+sleep 3sec
 ```
 
 ## Both tenants forward, and never into each other

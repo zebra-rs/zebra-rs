@@ -33,8 +33,10 @@ Same two deliberate differences from the kernel twin as
 ```shell
 $ ./up.sh
 ...
-apply config: h2
-applied
+seed config: h2
+...
+start zebra-rs: h2
+sleep 3sec
 ```
 
 ## Ping, then look at what the engine built

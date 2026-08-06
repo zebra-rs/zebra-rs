@@ -38,10 +38,10 @@ Deliberate choices carried over from A and B:
 $ ./up.sh
 bring up
 ...
-apply config: ce3
-applied
-apply config: ce4
-applied
+seed config: ce4
+...
+start zebra-rs: ce4
+sleep 3sec
 ```
 
 Same ten namespaces as Options A and B — bring up only one Inter-AS lab

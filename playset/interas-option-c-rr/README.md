@@ -43,10 +43,10 @@ walkthrough proves both halves.
 $ ./up.sh
 bring up
 ...
-apply config: ce5
-applied
-apply config: ce6
-applied
+seed config: ce6
+...
+start zebra-rs: ce6
+sleep 3sec
 ```
 
 Fifteen namespaces — the thirteen from the Option A/B labs plus `rr1` and

@@ -43,10 +43,10 @@ diff cleanly:
 $ ./up.sh
 bring up
 ...
-apply config: ce5
-applied
-apply config: ce6
-applied
+seed config: ce6
+...
+start zebra-rs: ce6
+sleep 3sec
 ```
 
 Same thirteen namespaces as Option A (`ce1 ce2 ce3 pe1 pe2 p1 asbr1` +

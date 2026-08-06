@@ -47,10 +47,10 @@ restored at both borders.
 $ ./up.sh
 bring up
 ...
-apply config: ce5
-applied
-apply config: ce6
-applied
+seed config: ce6
+...
+start zebra-rs: ce6
+sleep 3sec
 ```
 
 Same thirteen namespaces as the A/B labs — bring up only one Inter-AS

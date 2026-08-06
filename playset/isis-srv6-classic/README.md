@@ -32,10 +32,10 @@ playsets — bring up one of them at a time.
 $ ./up.sh
 bring up
 ...
-apply config: r3
-applied
-apply config: d
-applied
+seed config: d
+...
+start zebra-rs: d
+sleep 3sec
 ```
 
 ## Examine routes on node `s`

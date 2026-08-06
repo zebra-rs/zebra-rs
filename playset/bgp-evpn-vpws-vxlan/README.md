@@ -33,8 +33,10 @@ over the tee.
 ```shell
 $ ./up.sh
 ...
-apply config: c2
-applied
+seed config: c2
+...
+start zebra-rs: c2
+sleep 3sec
 ```
 
 ## Take a look at the YAML configuration

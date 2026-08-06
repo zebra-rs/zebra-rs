@@ -35,8 +35,10 @@ loopbacks, pops it, exposing the service label to the egress PE.
 ```shell
 $ ./up.sh
 ...
-apply config: h2
-applied
+seed config: h2
+...
+start zebra-rs: h2
+sleep 3sec
 ```
 
 (`up.sh` also turns kernel forwarding off on pe1/p/pe2 and computes TCP
