@@ -29,9 +29,15 @@ Feature: OSPFv2 adaptive SPF throttle (spf-interval)
     # by `show ospf`, proving the config reached the instance.
     Then show command "show ospf" in namespace "a" should contain "SPF timers: initial 100 ms, secondary 300 ms, maximum 4000 ms"
     # Adjacency forms and routes converge under the adaptive scheduler.
-    And show command "show ospf neighbor" in namespace "a" should contain "Full"
-    And show command "show ospf neighbor" in namespace "b" should contain "Full"
-    And show command "show ospf route" in namespace "a" should contain "10.0.0.2/32"
+    # These poll: the 20s wait above is a fixed budget, and under suite load
+    # the Hello/DD exchange has finished right at that boundary — leaving the
+    # route assert inside the configured 100 ms `initial-wait` SPF window,
+    # with the LSA installed and SPF dispatched but not yet complete. The
+    # `show ospf` assert above stays bare on purpose: it reads back config,
+    # which is present the moment the instance exists and never converges.
+    And show command "show ospf neighbor" in namespace "a" should eventually contain "Full"
+    And show command "show ospf neighbor" in namespace "b" should eventually contain "Full"
+    And show command "show ospf route" in namespace "a" should eventually contain "10.0.0.2/32"
     And ping from "a" to "10.0.0.2" should succeed
 
   Scenario: Teardown topology
