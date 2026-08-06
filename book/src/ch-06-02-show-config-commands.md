@@ -157,13 +157,13 @@ asks:
 
 ```
 host# exit
-You have uncommitted changes. Commit? [y=commit, n=discard, other=leave pending]
+You have uncommitted changes. Commit? [y=commit n=discard other=keep]
 ```
 
-`y` commits, `n` discards, and anything else (including just pressing
-Enter, or waiting for the 30-second timeout) leaves the edits in the
-candidate for the next session. The shell exits in every case — the
-answer never cancels the exit.
+`y` commits, `n` discards, and anything else — `keep`, including just
+pressing Enter or waiting out the 30-second timeout — leaves the edits
+in the candidate for the next session. The shell exits in every case;
+the answer never cancels the exit.
 
 Three cases stay silent: a session that never entered configure mode, a
 session with no terminal to ask on (a script piping commands in), and a

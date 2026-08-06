@@ -17,6 +17,7 @@ Usage: vty/tests/exit-hook/run.py [-v]
 import fcntl
 import os
 import pty
+import re
 import select
 import signal
 import subprocess
@@ -262,6 +263,17 @@ def case_no_tty():
     check("no tty skips the query", not r.called("-u"), str(r.calls))
 
 
+def case_prompt_width():
+    """80 columns is the floor to design for — the question is asked on
+    whatever terminal the operator happens to be leaving from, and a
+    prompt that wraps pushes the answer onto its own line."""
+    match = re.search(r'-r -p \\\n\s*"([^"]+)"', VTY_SH.read_text())
+    check("prompt string is findable", match is not None)
+    if match:
+        width = len(match.group(1))
+        check(f"prompt fits 80 columns (is {width})", width <= 80)
+
+
 def case_sighup():
     r = run(
         [ENTER_CONFIGURE],
@@ -287,6 +299,7 @@ def main():
         case_commit_denied,
         case_commit_validation_error,
         case_no_tty,
+        case_prompt_width,
         case_sighup,
     ):
         fn()

@@ -585,8 +585,10 @@ _cli_exit_hook ()
       # shell that has already decided to die — and further Ctrl-D
       # cannot break it. CLI_EXIT_PROMPT_TIMEOUT exists so the tests
       # don't have to wait out the default.
+      # Kept to 70 columns so an 80-column terminal has room for the
+      # answer instead of wrapping the question.
       read -t "${CLI_EXIT_PROMPT_TIMEOUT:-30}" -r -p \
-        "You have uncommitted changes. Commit? [y=commit, n=discard, other=leave pending] " ans
+        "You have uncommitted changes. Commit? [y=commit n=discard other=keep] " ans
       if [[ $? -gt 128 ]]; then
         # Timed out: leave the candidate alone and close the prompt line.
         echo >&2
