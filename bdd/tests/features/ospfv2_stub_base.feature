@@ -54,20 +54,29 @@ Feature: OSPFv2 stub area drops Type-5 AS-External while keeping inter-area rout
 
     # --- Adjacencies are Full (the stub link only comes up when the
     #     E-bit matches between a and c). ---
-    Then show command "show ospf neighbor" in namespace "a" should contain "Full"
+    # `Full` polls: the 60s wait above is a fixed budget, and under suite
+    # load the stub link has been caught still in Loading/DROther with one
+    # LSA outstanding. The neighbor-ID checks stay bare — an ID is listed
+    # from the moment the neighbor exists, so they assert membership, not
+    # convergence, and the polling `Full` above is what gates the state.
+    Then show command "show ospf neighbor" in namespace "a" should eventually contain "Full"
     And show command "show ospf neighbor" in namespace "a" should contain "10.0.0.2"
     And show command "show ospf neighbor" in namespace "a" should contain "10.0.0.3"
-    And show command "show ospf neighbor" in namespace "c" should contain "Full"
+    And show command "show ospf neighbor" in namespace "c" should eventually contain "Full"
     And show command "show ospf neighbor" in namespace "c" should contain "10.0.0.1"
 
     # --- The backbone router a installs the Type-5 external. ---
-    And show command "show ospf route" in namespace "a" should contain "192.168.1.0/24"
+    And show command "show ospf route" in namespace "a" should eventually contain "192.168.1.0/24"
 
     # --- The stub router c learns the backbone loopback as an inter-area
     #     Type-3 summary (stub still floods Type-3 inward). ---
-    And show command "show ospf route" in namespace "c" should contain "10.0.0.2/32"
+    And show command "show ospf route" in namespace "c" should eventually contain "10.0.0.2/32"
     # --- But c must NOT learn the Type-5 external: stub areas exclude
     #     AS-External, and externals are not re-advertised as Type-3. ---
+    # Deliberately a bare `should not contain`: this is a steady-state
+    # invariant, not a convergence event, and an `eventually not` would
+    # weaken it. It is meaningful here precisely because the polling
+    # assert above has already proven c converged.
     And show command "show ospf route" in namespace "c" should not contain "192.168.1.0/24"
 
     # --- Reachability across the area boundary works (Type-3); the ABR,
