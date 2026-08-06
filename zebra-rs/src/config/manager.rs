@@ -4,7 +4,7 @@ use super::api::{CompletionResponse, ConfigOp, ExecuteResponse, JsonConfigUpdate
 use super::bfd::{despawn_bfd, spawn_bfd};
 use super::bgp::{despawn_bgp, spawn_bgp};
 use super::commands::Mode;
-use super::commands::{configure_mode_create, exec_mode_create};
+use super::commands::{configure_mode_create, exec_mode_create, prettify_json};
 use super::configs::{carbon_copy, delete, set};
 use super::cradle::spawn_cradle;
 use super::files::load_config_file;
@@ -214,6 +214,21 @@ pub struct ConfigManager {
     /// 7950 YANG features on the schema store; see [`enable_features`].
     pub features: Vec<String>,
     pub config_path: PathBuf,
+    /// Serialization `save` writes back to [`Self::config_path`]: the
+    /// format the file was last *loaded* in, so a `--config-file` handed
+    /// to the daemon as YAML (or JSON, or `set`/`delete`) comes back out
+    /// as YAML rather than being silently rewritten in the CLI brace
+    /// format. Set by [`Self::load_config`] on every successful parse —
+    /// both the startup load and the configure-mode `load` command — and
+    /// left at `Cli` when there was nothing to load (missing or empty
+    /// file), which keeps a first save on a fresh box in the format the
+    /// shipped `zebra-rs.conf` uses.
+    ///
+    /// Deliberately *not* driven by `vtyctl apply`: a streamed-in
+    /// document is a config injection, not the on-disk file, so applying
+    /// YAML over a CLI-format config file must not flip what `save`
+    /// writes to that file.
+    pub config_format: RefCell<ConfigFormat>,
     pub store: ConfigStore,
     pub modes: HashMap<String, Mode>,
     pub tx: Sender<Message>,
@@ -373,6 +388,7 @@ impl ConfigManager {
             yang_path,
             features,
             config_path,
+            config_format: RefCell::new(ConfigFormat::Cli),
             modes: HashMap::new(),
             store: ConfigStore::new(),
             tx,
@@ -992,6 +1008,11 @@ impl ConfigManager {
             }
             Ok(output) => match self.config_to_commands(&output) {
                 Ok((format, cmds)) => {
+                    // Remember what we just parsed so `save` writes the
+                    // file back in its own format. Recorded before the
+                    // commands are replayed: a line the schema rejects
+                    // says nothing about the document's serialization.
+                    *self.config_format.borrow_mut() = format;
                     let mut rejected = Vec::new();
                     let Some(mode) = self.modes.get("configure") else {
                         tracing::error!(
@@ -1093,9 +1114,12 @@ impl ConfigManager {
     /// doesn't already own the file it saves. The file's mode is carried
     /// over explicitly (below) so that part of the in-place behavior is
     /// preserved.
+    ///
+    /// The serialization is [`Self::config_format`] — the format the
+    /// file was loaded in — so the round trip preserves the operator's
+    /// choice instead of rewriting every config file as CLI.
     pub fn save_config(&self) -> std::io::Result<&Path> {
-        let mut output = String::new();
-        self.store.running.borrow().format(&mut output);
+        let output = self.serialize_running(*self.config_format.borrow());
 
         let mut tmp = self.config_path.clone().into_os_string();
         tmp.push(".tmp");
@@ -1122,6 +1146,40 @@ impl ConfigManager {
                 Err(e)
             }
         }
+    }
+
+    /// Render the running config in `format`, as a document
+    /// [`Self::load_config`] can read back — the four serializations are
+    /// exactly the four `config_format_type` sniffs.
+    ///
+    /// `SetDelete` is the one that needs assembling: `Config::list`
+    /// renders the bare command bodies (`system hostname r1`), which is
+    /// what `show running-config formal` prints, but a *file* of those
+    /// lines sniffs as YAML — no `{`, no trailing `;`, no `set` — and
+    /// would be unreadable on the next boot. Prefix each line with `set`
+    /// so the document round-trips.
+    fn serialize_running(&self, format: ConfigFormat) -> String {
+        let running = self.store.running.borrow();
+        let mut output = String::new();
+        match format {
+            ConfigFormat::Cli => running.format(&mut output),
+            ConfigFormat::Yaml => running.yaml(&mut output),
+            ConfigFormat::Json => {
+                let mut compact = String::new();
+                running.json(&mut compact);
+                output = prettify_json(compact);
+            }
+            ConfigFormat::SetDelete => {
+                let mut list = String::new();
+                running.list(&mut list);
+                for line in list.lines() {
+                    output.push_str("set ");
+                    output.push_str(line);
+                    output.push('\n');
+                }
+            }
+        }
+        output
     }
 
     pub fn clear(&self, paths: &[CommandPath]) {
@@ -1791,7 +1849,7 @@ fn render_rejected_commands(config_path: &Path, cmds: &[String]) -> String {
     )
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ConfigFormat {
     Cli,
     Json,
@@ -2127,7 +2185,10 @@ mod save_config_tests {
     #[test]
     fn save_writes_to_the_config_file_path() {
         let path = temp_path("target");
-        std::fs::write(&path, "set system hostname r1\n").expect("seed config written");
+        // Seeded in CLI format, which is also what comes back out —
+        // `every_format_round_trips_through_save` is what covers the
+        // format matrix; this test is about the path.
+        std::fs::write(&path, "system {\n  hostname r1;\n}\n").expect("seed config written");
 
         let cm = manager_with_config(&path);
         cm.load_config();
@@ -2146,6 +2207,85 @@ mod save_config_tests {
         );
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// Each of the four formats `--config-file` accepts must survive a
+    /// load → save → load round trip: the file `save` writes sniffs back
+    /// as the format it came in as, and a second daemon reading it lands
+    /// on the same running config. Before this, every format was
+    /// rewritten as CLI on the first save.
+    #[test]
+    fn every_format_round_trips_through_save() {
+        let cases = [
+            (
+                "cli",
+                ConfigFormat::Cli,
+                "system {\n  hostname r1;\n  router-id 10.0.0.1;\n}\n",
+            ),
+            (
+                "yaml",
+                ConfigFormat::Yaml,
+                "system:\n  hostname: r1\n  router-id: 10.0.0.1\n",
+            ),
+            (
+                "json",
+                ConfigFormat::Json,
+                "{\"system\":{\"hostname\":\"r1\",\"router-id\":\"10.0.0.1\"}}\n",
+            ),
+            (
+                "setdelete",
+                ConfigFormat::SetDelete,
+                "set system hostname r1\nset system router-id 10.0.0.1\n",
+            ),
+        ];
+
+        for (name, format, seed) in cases {
+            let path = temp_path(name);
+            std::fs::write(&path, seed).expect("seed config written");
+
+            let cm = manager_with_config(&path);
+            cm.load_config();
+            let mut before = String::new();
+            cm.store.running.borrow().list(&mut before);
+            assert!(
+                before.lines().any(|l| l == "system hostname r1"),
+                "{name}: seed did not load: {before:?}"
+            );
+            cm.save_config().expect("save succeeds");
+
+            let saved = std::fs::read_to_string(&path).expect("saved config readable");
+            assert_eq!(
+                config_format_type(&saved),
+                format,
+                "{name}: saved in the wrong format: {saved:?}"
+            );
+
+            // The real contract: a fresh daemon booting on the file we
+            // just wrote comes up with the same running config.
+            let reloaded = manager_with_config(&path);
+            reloaded.load_config();
+            let mut after = String::new();
+            reloaded.store.running.borrow().list(&mut after);
+            assert_eq!(
+                before, after,
+                "{name}: round trip changed the running config; file: {saved:?}"
+            );
+
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    /// Nothing to load — a first boot on a box with no config file —
+    /// leaves the save format at CLI, the format the shipped
+    /// `zebra-rs.conf` uses.
+    #[test]
+    fn absent_config_file_keeps_the_cli_save_format() {
+        let path = temp_path("absent");
+        let _ = std::fs::remove_file(&path);
+
+        let cm = manager_with_config(&path);
+        cm.load_config();
+        assert_eq!(*cm.config_format.borrow(), ConfigFormat::Cli);
     }
 
     /// An unwritable target must come back as an `Err` the `save`
