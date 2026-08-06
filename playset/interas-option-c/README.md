@@ -38,8 +38,6 @@ Deliberate choices carried over from A and B:
 $ ./up.sh
 bring up
 ...
-seed config: ce4
-...
 start zebra-rs: ce4
 sleep 3sec
 ```

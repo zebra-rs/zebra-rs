@@ -47,8 +47,8 @@ after. Every link has metric 10, and the full link list is in the appendix.
 
 ## Bring up all nodes
 
-`./up.sh` sets up all namespaces, seeds each node's config file, and starts
-the zebra-rs routing daemon in each of them on its own `--config-file`.
+`./up.sh` sets up all namespaces and starts the zebra-rs routing daemon in
+each of them on that node's own `<node>.yaml` as `--config-file`.
 
 ``` shell
 $ ./up.sh
@@ -58,10 +58,7 @@ teardown: stop zebra-rs
 teardown: delete namespace se
 teardown: delete namespace sj
 ...
-cleanup run dir
-seed config: se
-seed config: sj
-...
+cleanup logs
 create namespace: sg
 create namespace: sy
 create namespace: tk

@@ -37,20 +37,20 @@ Linux tooling works inside the namespaces too — `ip route`, `tcpdump`,
 
 The daemon and CLI binaries are resolved from `target/debug/` when built,
 falling back to the installed ones on `PATH`. Each playset writes its
-runtime state (`*.log`, `*.pid`, and the config file each daemon actually
-loads) into `/tmp/zebra-rs-playset/<playset-name>/` (override with
-`PLAYSET_RUN_DIR`), so the labs also run from a read-only install location
-such as `/usr/share/zebra-rs/playset`.
+runtime state (`*.log`, `*.pid`) into `/tmp/zebra-rs-playset/<playset-name>/`
+(override with `PLAYSET_RUN_DIR`), so a run leaves nothing behind but the
+config each node was given.
 
 ## Changing a node's configuration
 
 The config is yours to edit — every node boots from a real startup config
-file rather than having one injected after the fact. There are two ways in,
-and they meet in the same place:
+file rather than having one injected after the fact, and that file is the
+lab's own `<playset>/<node>.yaml`. There are two ways in, and they meet in
+the same place:
 
-* **Before bring-up**, edit `<playset>/<node>.yaml`. `up.sh` copies each
-  one into the runtime directory and hands it to that node's daemon as
-  `--config-file`, so the next `./up.sh` comes up on your version.
+* **Before bring-up**, edit `<playset>/<node>.yaml`. `up.sh` hands it to
+  that node's daemon as `--config-file`, so the lab comes up on your
+  version.
 * **On a running lab**, configure it live and write it back:
 
   ``` shell
@@ -59,18 +59,23 @@ and they meet in the same place:
   s#set router isis interface s-n1 metric 50
   s#commit
   s#save
-  Configuration saved to /tmp/zebra-rs-playset/isis-srmpls/s.yaml (yaml)
+  Configuration saved to /usr/share/zebra-rs/playset/isis-srmpls/s.yaml (yaml)
   ```
 
-  `save` targets the same `--config-file` the node booted from and keeps it
-  in the format it was loaded in — YAML stays YAML. (`save cli`, `save json`
-  and `save formal` convert it if you would rather read one of the others.)
+  `save` targets the same `--config-file` the node booted from — the lab's
+  own YAML — and keeps it in the format it was loaded in, so YAML stays
+  YAML. (`save cli`, `save json` and `save formal` convert it if you would
+  rather read one of the others.)
 
-The runtime copy is re-seeded from `<playset>/<node>.yaml` on every
-`./up.sh`, so a lab always comes up as its README documents it. To keep a
-run's `save`d edits across a bring-up, set `PLAYSET_KEEP_CONFIG=1`. Note
-that the daemon runs as root, so a file it has saved over is root-owned —
-edit it through the vty, or with `sudo`.
+Either way the change is **persistent**: it is in the lab's file, so the
+next `./up.sh` comes up on it. Two things follow from the daemon being the
+one that writes it. It runs as root, so a node's YAML is root-owned once
+saved — edit it through the vty, or with `sudo`. And the running config is
+re-serialized rather than textually patched, so a saved file comes back
+normalized (leaf-lists as sequences, keys in schema order) even where
+nothing changed; in a git checkout that shows up as a modified file. To put
+a lab back the way it shipped, restore its YAML — `git checkout --
+<playset>/` in a checkout, or reinstall the package.
 
 > **One at a time**: the TI-LFA playsets share the same topology and
 > namespace names (`s`, `n1`..`n3`, `r1`..`r3`, `d`, `e1`, `e2`), so bring

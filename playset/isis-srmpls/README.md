@@ -13,8 +13,8 @@ its own `<node>.yaml` at startup via the `--config-file` argument.
 
 ## Bring up all nodes
 
-`./up.sh` sets up all namespaces, seeds each node's config file, and starts
-the zebra-rs routing daemon in each of them on its own `--config-file`.
+`./up.sh` sets up all namespaces and starts the zebra-rs routing daemon in
+each of them on that node's own `<node>.yaml` as `--config-file`.
 
 ``` shell
 $ ./up.sh
@@ -23,8 +23,6 @@ teardown: stop zebra-rs
 teardown: delete namespace e1
 teardown: delete namespace e2
 teardown: delete namespace s
-...
-seed config: d
 ...
 start zebra-rs: d
 sleep 3sec

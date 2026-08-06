@@ -35,8 +35,6 @@ Two deliberate differences from the kernel twin:
 ```shell
 $ ./up.sh
 ...
-seed config: h2
-...
 start zebra-rs: h2
 sleep 3sec
 ```

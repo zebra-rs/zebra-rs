@@ -32,8 +32,6 @@ playsets — bring up one of them at a time.
 $ ./up.sh
 bring up
 ...
-seed config: d
-...
 start zebra-rs: d
 sleep 3sec
 ```

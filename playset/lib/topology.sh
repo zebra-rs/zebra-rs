@@ -37,23 +37,12 @@ playset_start_daemons() {
     done
 }
 
-playset_seed_configs() {
-    local netns
-    for netns in "${PLAYSET_ROUTERS[@]}"; do
-        echo "seed config: ${netns}"
-        playset_seed_config "$netns"
-    done
-}
-
 playset_up() {
     echo "bring up"
     echo "runtime dir: ${PLAYSET_RUN_DIR}"
     playset_teardown
-    echo "cleanup run dir"
-    playset_cleanup_run_dir
-    # Seeded before the daemons start: each one loads its own config file
-    # at boot, so there is no injection step after they are up.
-    playset_seed_configs
+    echo "cleanup logs"
+    playset_cleanup_logs
     playset_create_namespaces
     playset_create_links
     playset_start_daemons

@@ -33,8 +33,6 @@ only where it exists, so neither VTEP ever learns the other's routes.
 ```shell
 $ ./up.sh
 ...
-seed config: h4
-...
 start zebra-rs: h4
 sleep 3sec
 ```

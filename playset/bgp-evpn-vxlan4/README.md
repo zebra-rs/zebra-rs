@@ -23,8 +23,6 @@ plumbing (VLAN-aware bridge, per-port tunnel mapping) plus every FDB entry
 $ ./up.sh
 bring up
 ...
-seed config: h2
-...
 start zebra-rs: h2
 sleep 3sec
 ```

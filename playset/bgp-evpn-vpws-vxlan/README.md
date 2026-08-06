@@ -33,8 +33,6 @@ over the tee.
 ```shell
 $ ./up.sh
 ...
-seed config: c2
-...
 start zebra-rs: c2
 sleep 3sec
 ```
