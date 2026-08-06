@@ -598,8 +598,10 @@ pub fn ospf_db_desc_send(link: &mut OspfInterface, nbr: &mut Neighbor, oident: &
 }
 
 pub fn ospf_packet_ls_req_set(nbr: &mut Neighbor, ls_req: &mut OspfLsRequest) {
-    for ls_req_entry in nbr.ls_req.iter() {
-        ls_req.reqs.push(ls_req_entry.clone());
+    // The request list stores the headers the neighbor advertised;
+    // the wire record carries only the identity triple.
+    for advertised in nbr.ls_req.iter() {
+        ls_req.reqs.push(ospf_ls_rquest_new(advertised));
     }
 }
 
@@ -641,18 +643,35 @@ fn ospf_lsa_lookup<'a>(
     }
 }
 
-fn ospf_ls_request_add(nbr: &mut Neighbor, ls_req: OspfLsRequestEntry) {
-    nbr.ls_req.push(ls_req);
+/// Record an LSA we need from this neighbor. Stores the header it
+/// advertised, so the instance stays available for §13.3 step 1(b).
+fn ospf_ls_request_add(nbr: &mut Neighbor, advertised: &OspfLsaHeader) {
+    nbr.ls_req.push(advertised.clone());
 }
 
 fn ospf_db_desc_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, dd: &OspfDbDesc) {
     nbr.dd.recv = dd.clone();
 
     for lsah in dd.lsa_headers.iter() {
-        let find = ospf_lsa_lookup(oi, lsah.ls_type, lsah.ls_id, lsah.adv_router);
-        if find.is_none() {
-            let lsr = ospf_ls_rquest_new(lsah);
-            ospf_ls_request_add(nbr, lsr);
+        // RFC 2328 §10.6: request the LSA when we hold no copy, or
+        // when the instance the neighbor advertised is more recent
+        // than ours. Testing only for absence — as this did — leaves
+        // a stale copy in place until the originator's next refresh,
+        // up to LSRefreshTime later.
+        //
+        // Both sides are compared on their stored `ls_age`: the age
+        // tiebreak only runs when sequence number and checksum are
+        // identical, and identical instances need no request either
+        // way. The case that matters is a MaxAge advertisement over a
+        // live copy, which this still catches.
+        let need = match ospf_lsa_lookup(oi, lsah.ls_type, lsah.ls_id, lsah.adv_router) {
+            None => true,
+            Some(current) => {
+                ospf_lsa_more_recent(lsah, lsah.ls_age, &current.h, current.h.ls_age) > 0
+            }
+        };
+        if need {
+            ospf_ls_request_add(nbr, lsah);
             ospf_nfsm_ls_req_timer_on(nbr, oi.retransmit_interval);
         }
     }
@@ -977,7 +996,12 @@ pub fn ospf_ls_req_recv(
 // Returns true if lsa1 is more recent than lsa2 (RFC 2328 Section 13.1).
 // age1/age2 are the current ages of the respective LSAs (callers must pass
 // dynamic current_age for database copies).
-fn ospf_lsa_more_recent(lsa1: &OspfLsaHeader, age1: u16, lsa2: &OspfLsaHeader, age2: u16) -> i32 {
+pub(super) fn ospf_lsa_more_recent(
+    lsa1: &OspfLsaHeader,
+    age1: u16,
+    lsa2: &OspfLsaHeader,
+    age2: u16,
+) -> i32 {
     // RFC 2328 §A.4.1: `ls_seq_number` is a SIGNED 32-bit integer
     // wrapping from `InitialSequenceNumber` (0x80000001, most-negative)
     // up to `MaxSequenceNumber` (0x7FFFFFFF). Comparison must be
