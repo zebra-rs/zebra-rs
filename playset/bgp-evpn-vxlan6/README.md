@@ -21,8 +21,6 @@ underlay's address family.
 $ ./up.sh
 bring up
 ...
-seed config: h2
-...
 start zebra-rs: h2
 sleep 3sec
 ```

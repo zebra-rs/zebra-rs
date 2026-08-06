@@ -17,16 +17,14 @@ runs zebra-rs, and loads its own `<node>.yaml` at startup via the
 
 ## Bring up all nodes
 
-`./up.sh` sets up all namespaces, seeds each node's config file, and starts
-the zebra-rs routing daemon in each of them on its own `--config-file`. Note
+`./up.sh` sets up all namespaces and starts the zebra-rs routing daemon in
+each of them on that node's own `<node>.yaml` as `--config-file`. Note
 that this playset and the IS-IS one use the same namespace names — bring up
 one of them at a time.
 
 ``` shell
 $ ./up.sh
 bring up
-...
-seed config: d
 ...
 start zebra-rs: d
 sleep 3sec

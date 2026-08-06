@@ -35,8 +35,6 @@ loopbacks, pops it, exposing the service label to the egress PE.
 ```shell
 $ ./up.sh
 ...
-seed config: h2
-...
 start zebra-rs: h2
 sleep 3sec
 ```

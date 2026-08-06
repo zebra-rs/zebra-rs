@@ -30,8 +30,6 @@ address and no bridge — they are pure attachment circuits.
 ```shell
 $ ./up.sh
 ...
-seed config: c2
-...
 start zebra-rs: c2
 sleep 3sec
 ```

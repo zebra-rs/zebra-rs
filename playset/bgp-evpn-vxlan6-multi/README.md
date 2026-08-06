@@ -23,8 +23,6 @@ from the VNI and its route-target, not from the underlay's address family
 $ ./up.sh
 bring up
 ...
-seed config: h4
-...
 start zebra-rs: h4
 sleep 3sec
 ```

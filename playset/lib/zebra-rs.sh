@@ -58,39 +58,25 @@ playset_pid_file() {
     echo "${PLAYSET_RUN_DIR}/${netns}.pid"
 }
 
-# The startup config the daemon in `netns` loads at boot — and the file
-# its `save` writes back to, since `--config-file` names both. It is a
-# copy under PLAYSET_RUN_DIR, never the demo directory's own <netns>.yaml:
-# the daemon runs as root and `save` replaces the file (create + rename),
-# and the demo directory may be the packaged, read-only
-# /usr/share/zebra-rs/playset tree. So the lab's YAML stays the pristine
-# source and this copy is what the running daemon owns.
+# The startup config the daemon in `netns` loads at boot — and the file its
+# `save` writes back to, since `--config-file` names both. It is the lab's
+# own <netns>.yaml, in place: a config saved from the vty has to still be
+# there on the next `./up.sh`, and only the original file survives that.
+#
+# The daemon runs as root and `save` replaces the file (write sibling temp,
+# then rename), so a node that has been saved leaves its YAML owned by root
+# — and, in a git checkout, showing as modified, since the serializer
+# normalizes leaf-lists and key order. That is the cost of persistence; see
+# the "Changing a node's configuration" section in ../README.md.
 playset_config_file() {
     local netns=$1
-    echo "${PLAYSET_RUN_DIR}/${netns}.yaml"
+    echo "${PLAYSET_DEMO_DIR}/${netns}.yaml"
 }
 
-# Seed that copy from the demo directory. Plain `cp`, not `run cp`: the
-# file starts out owned by the invoking user, so it can be hand-edited
-# before the daemon has ever saved over it. A node with no YAML in the
-# demo directory is left without a config file and boots unconfigured.
-playset_seed_config() {
-    local netns=$1
-    local src="${PLAYSET_DEMO_DIR}/${netns}.yaml"
-    local dst
-    dst="$(playset_config_file "$netns")"
-    if [[ "${PLAYSET_KEEP_CONFIG:-0}" == 1 && -f "$dst" ]]; then
-        return 0
-    fi
-    if [[ -f "$src" ]]; then
-        cp "$src" "$dst"
-    fi
-}
-
-# `--config-file` for the daemon in `netns`, or nothing when the node has
-# no seeded config — an unconfigured daemon, which is what every node got
-# before the config file was handed to the daemon directly. Emitted as an
-# arg so `playset_start_zebra` can splice it in like the yang path.
+# `--config-file` for the daemon in `netns`, or nothing when the node has no
+# YAML — an unconfigured daemon, which is what every node got before the
+# config file was handed to the daemon directly. Emitted as an arg so
+# `playset_start_zebra` can splice it in like the yang path.
 playset_zebra_rs_config_args() {
     local netns=$1
     local config

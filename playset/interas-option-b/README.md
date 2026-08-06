@@ -43,8 +43,6 @@ diff cleanly:
 $ ./up.sh
 bring up
 ...
-seed config: ce6
-...
 start zebra-rs: ce6
 sleep 3sec
 ```
