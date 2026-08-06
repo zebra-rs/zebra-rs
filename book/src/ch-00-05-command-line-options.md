@@ -40,7 +40,10 @@ configuration representations is accepted:
 - **JSON** — a JSON document of the configuration tree.
 - **YAML** — a YAML document of the configuration tree.
 - **set/delete** — a flat list of `set …` / `delete …` statements (the
-  `formal` format that `load` and `save` consume).
+  `formal` format `show running-config formal` prints).
+
+Reading accepts all four; `save` always writes back the **CLI** format,
+whatever format the file was loaded in.
 
 The four formats are interchangeable; see
 [Show Config Commands](ch-06-02-show-config-commands.md) for examples of

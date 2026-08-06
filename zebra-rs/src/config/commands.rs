@@ -257,9 +257,22 @@ fn load(config: &ConfigManager) -> (ExecCode, String) {
     (ExecCode::Show, String::from(""))
 }
 
+/// `save` used to answer with an empty string, so the operator had no
+/// way to tell which file was written — the target is the resolved
+/// `--config-file` (or the default `zebra-rs.conf`), and nothing on the
+/// prompt named it. Report the path on success and the io error on
+/// failure; a failed save is no longer fatal to the daemon (see
+/// `ConfigManager::save_config`).
 fn save(config: &ConfigManager) -> (ExecCode, String) {
-    config.save_config();
-    (ExecCode::Show, String::from(""))
+    let output = match config.save_config() {
+        Ok(path) => format!("Configuration saved to {}\n", path.display()),
+        Err(e) => format!(
+            "Failed to save configuration to {}: {}\n",
+            config.config_path.display(),
+            e
+        ),
+    };
+    (ExecCode::Show, output)
 }
 
 fn clear_isis_spf(_config: &ConfigManager) -> (ExecCode, String) {

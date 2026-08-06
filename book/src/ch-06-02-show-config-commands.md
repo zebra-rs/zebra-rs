@@ -27,8 +27,9 @@ All eight display commands work identically from both `exec` mode and
 
 The bare form (no trailing keyword) renders the **CLI** view — the
 indented block format familiar from Cisco IOS, suitable for reading
-on a terminal. The `formal` keyword names the canonical set/delete
-form, the same format `load` and `save` consume. The `json` and
+on a terminal — and the format `save` writes to disk. The `formal`
+keyword names the canonical set/delete form, one of the four formats
+`load` accepts (see below). The `json` and
 `yaml` keywords are the equivalent serializations of the same
 configuration tree.
 
@@ -126,7 +127,28 @@ under the top level of `configure` mode (not under `show`):
 | `commit` | Validate the candidate, apply diffs to subscribers, then promote candidate → running |
 | `discard` | Revert candidate back to running (drops uncommitted edits) |
 | `load` | Re-load the on-disk config file into the candidate, then commit |
-| `save` | Write the running config to the on-disk file |
+| `save` | Write the running config to the on-disk file, and print the path written |
+
+Both `load` and `save` operate on the file named by `--config-file`, or
+on the resolved default when the flag is absent (see
+[Command Line Options](ch-00-05-command-line-options.md)). `save` names
+that file in its reply:
+
+```
+host(config)# save
+Configuration saved to /etc/zebra-rs/zebra-rs.conf
+```
+
+The write is atomic — the config is serialized to a sibling temp file
+and renamed into place, so an interrupted save leaves the previous file
+intact. A save that fails (read-only filesystem, missing parent
+directory, a file the daemon's user cannot write) reports the error and
+leaves the daemon running:
+
+```
+host(config)# save
+Failed to save configuration to /etc/zebra-rs/zebra-rs.conf: Permission denied (os error 13)
+```
 
 ## Reorganization notes (history)
 
