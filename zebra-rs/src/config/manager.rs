@@ -1117,9 +1117,24 @@ impl ConfigManager {
     ///
     /// The serialization is [`Self::config_format`] — the format the
     /// file was loaded in — so the round trip preserves the operator's
-    /// choice instead of rewriting every config file as CLI.
+    /// choice instead of rewriting every config file as CLI. The bare
+    /// `save` command lands here; `save { cli | formal | json | yaml }`
+    /// goes through [`Self::save_config_as`] to convert the file.
     pub fn save_config(&self) -> std::io::Result<&Path> {
-        let output = self.serialize_running(*self.config_format.borrow());
+        // Copy the format out before the call: `save_config_as` takes
+        // `config_format` mutably on success, and a live `Ref` held
+        // across the call would make that a `BorrowMutError` panic.
+        let format = *self.config_format.borrow();
+        self.save_config_as(format)
+    }
+
+    /// Write the running config in `format`, and on success adopt it as
+    /// [`Self::config_format`] so later bare `save`s keep the operator's
+    /// new choice. Adopted only on success: while the write is failing
+    /// the file on disk is still in its old format, and the remembered
+    /// format is supposed to describe that file.
+    pub fn save_config_as(&self, format: ConfigFormat) -> std::io::Result<&Path> {
+        let output = self.serialize_running(format);
 
         let mut tmp = self.config_path.clone().into_os_string();
         tmp.push(".tmp");
@@ -1138,7 +1153,10 @@ impl ConfigManager {
         });
 
         match write {
-            Ok(()) => Ok(&self.config_path),
+            Ok(()) => {
+                *self.config_format.borrow_mut() = format;
+                Ok(&self.config_path)
+            }
             Err(e) => {
                 // Don't leave the half-written sibling behind for the
                 // operator to trip over on the next `ls`.
@@ -1857,6 +1875,21 @@ pub enum ConfigFormat {
     SetDelete,
 }
 
+impl ConfigFormat {
+    /// CLI spelling of the format: the keyword `save <format>` takes and
+    /// the name the `save` reply reports back. `SetDelete` is spelled
+    /// `formal`, matching `show running-config formal` — the operator
+    /// never sees the internal name.
+    pub fn keyword(self) -> &'static str {
+        match self {
+            ConfigFormat::Cli => "cli",
+            ConfigFormat::Json => "json",
+            ConfigFormat::Yaml => "yaml",
+            ConfigFormat::SetDelete => "formal",
+        }
+    }
+}
+
 pub fn config_format_type(config_str: &str) -> ConfigFormat {
     // Use the first *meaningful* line for format sniffing. Skip
     // blank lines and `#`-prefixed comments so leading whitespace
@@ -2273,6 +2306,55 @@ mod save_config_tests {
 
             let _ = std::fs::remove_file(&path);
         }
+    }
+
+    /// `save <format>` converts the file *and* sticks: the next bare
+    /// `save` must keep writing the format the operator picked, not
+    /// revert to the one the file was loaded in.
+    #[test]
+    fn save_as_converts_the_file_and_sticks() {
+        let path = temp_path("convert");
+        std::fs::write(&path, "system {\n  hostname r1;\n}\n").expect("seed config written");
+
+        let cm = manager_with_config(&path);
+        cm.load_config();
+        assert_eq!(*cm.config_format.borrow(), ConfigFormat::Cli);
+
+        cm.save_config_as(ConfigFormat::Yaml).expect("save yaml");
+        let saved = std::fs::read_to_string(&path).expect("config readable");
+        assert_eq!(config_format_type(&saved), ConfigFormat::Yaml, "{saved:?}");
+        assert_eq!(*cm.config_format.borrow(), ConfigFormat::Yaml);
+
+        // Bare `save` now keeps YAML.
+        cm.save_config().expect("bare save");
+        let saved = std::fs::read_to_string(&path).expect("config readable");
+        assert_eq!(config_format_type(&saved), ConfigFormat::Yaml, "{saved:?}");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A `save <format>` that never reached disk must not switch the
+    /// remembered format: the file is still in its old format, and the
+    /// next bare `save` has to match the file, not the failed attempt.
+    #[test]
+    fn failed_save_as_keeps_the_previous_format() {
+        let path = temp_path("noconvert").join("zebra-rs.conf");
+
+        let cm = manager_with_config(&path);
+        cm.save_config_as(ConfigFormat::Yaml)
+            .expect_err("save fails");
+        assert_eq!(*cm.config_format.borrow(), ConfigFormat::Cli);
+    }
+
+    /// The `save` keyword for `SetDelete` is `formal`, matching
+    /// `show running-config formal` — the internal name never leaks to
+    /// the operator.
+    #[test]
+    fn format_keywords_are_the_cli_spellings() {
+        assert_eq!(ConfigFormat::Cli.keyword(), "cli");
+        assert_eq!(ConfigFormat::Json.keyword(), "json");
+        assert_eq!(ConfigFormat::Yaml.keyword(), "yaml");
+        assert_eq!(ConfigFormat::SetDelete.keyword(), "formal");
     }
 
     /// Nothing to load — a first boot on a box with no config file —

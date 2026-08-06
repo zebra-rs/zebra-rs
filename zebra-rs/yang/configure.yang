@@ -87,9 +87,31 @@ module configure {
     type empty;
   }
 
-  leaf save {
-    ext:help "Save config from file";
-    type empty;
+  // `save` alone writes the running config in whatever format the
+  // config file is already in (see `ConfigManager::config_format`); a
+  // format keyword writes that format instead and makes it the file's
+  // format from then on. Modeled as a presence container — the same
+  // shape `show running-config { formal | json | yaml }` uses in
+  // exec.yang — so the bare command stays a valid terminal.
+  container save {
+    ext:help "Save config to file";
+    presence "Save in the config file's current format";
+    leaf cli {
+      ext:help "Cisco-style indented block format";
+      type empty;
+    }
+    leaf formal {
+      ext:help "Set-style flat statement listing";
+      type empty;
+    }
+    leaf json {
+      ext:help "Pretty-printed JSON";
+      type empty;
+    }
+    leaf yaml {
+      ext:help "YAML";
+      type empty;
+    }
   }
 
   container clear {

@@ -133,22 +133,23 @@ under the top level of `configure` mode (not under `show`):
 | `commit` | Validate the candidate, apply diffs to subscribers, then promote candidate → running |
 | `discard` | Revert candidate back to running (drops uncommitted edits) |
 | `load` | Re-load the on-disk config file into the candidate, then commit |
-| `save` | Write the running config to the on-disk file, and print the path written |
+| `save` | Write the running config to the on-disk file in its current format |
+| `save { cli \| formal \| json \| yaml }` | Write it in that format instead, and keep the file in that format from then on |
 
 Both `load` and `save` operate on the file named by `--config-file`, or
 on the resolved default when the flag is absent (see
 [Command Line Options](ch-00-05-command-line-options.md)). `save` names
-that file in its reply:
+that file, and the format it wrote, in its reply:
 
 ```
 host(config)# save
-Configuration saved to /etc/zebra-rs/zebra-rs.conf
+Configuration saved to /etc/zebra-rs/zebra-rs.conf (cli)
 ```
 
 ### The format `save` writes
 
-`save` writes the file back in the format it was **loaded** in, so a
-`--config-file` handed to the daemon as YAML stays YAML, JSON stays
+A bare `save` writes the file back in the format it was **loaded** in,
+so a `--config-file` handed to the daemon as YAML stays YAML, JSON stays
 JSON, and a `set`/`delete` document stays `set`/`delete`:
 
 ```
@@ -156,7 +157,7 @@ $ zebra-rs --config-file /etc/zebra-rs/config.yaml
 host(config)# set system hostname r2
 host(config)# commit
 host(config)# save
-Configuration saved to /etc/zebra-rs/config.yaml
+Configuration saved to /etc/zebra-rs/config.yaml (yaml)
 
 $ cat /etc/zebra-rs/config.yaml
 system:
@@ -171,6 +172,24 @@ started, and a daemon whose config only ever arrived over
 `vtyctl apply`. Applying a document with `vtyctl apply` deliberately
 does *not* change the format `save` writes — an applied document is a
 config injection, not the on-disk file.
+
+### Converting the config file
+
+Name a format to convert the file. The keywords are the ones
+`show running-config` uses — `cli`, `formal`, `json`, `yaml` — and the
+choice sticks, so every later bare `save` keeps writing it:
+
+```
+host(config)# save yaml
+Configuration saved to /etc/zebra-rs/zebra-rs.conf (yaml)
+host(config)# save
+Configuration saved to /etc/zebra-rs/zebra-rs.conf (yaml)
+```
+
+The file is a whole config document in the new format — the daemon
+reads any of the four at startup, so a converted file boots unchanged.
+A conversion that fails to write leaves both the file and the
+remembered format alone.
 
 The write is atomic — the config is serialized to a sibling temp file
 and renamed into place, so an interrupted save leaves the previous file
