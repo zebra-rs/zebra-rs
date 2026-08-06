@@ -2414,6 +2414,93 @@ mod save_config_tests {
     }
 }
 
+/// The vty shell's exit hook asks "are there uncommitted changes?" via
+/// `vtyhelper -u`, which compares the output of two **exec-mode**
+/// commands: `show running-config formal` and `show candidate-config
+/// formal`. These tests pin the two properties that answer depends on,
+/// neither of which is local to the helper:
+///
+/// * both commands render through `Config::list()` — the same rendering
+///   `commit_config` diffs to decide what to dispatch, so "they differ"
+///   means "a commit would do something";
+/// * they are reachable in exec mode at all, which is what lets a View
+///   session ask without being admin.
+///
+/// Note the configure-mode `show` handler compares the *other*
+/// rendering (`format()`), deliberately, for display. So the tree holds
+/// two dirty predicates and a refactor could silently drift them apart.
+#[cfg(test)]
+mod uncommitted_predicate_tests {
+    use super::*;
+
+    fn manager() -> ConfigManager {
+        let path =
+            std::env::temp_dir().join(format!("zebra-rs-uncommitted-{}", std::process::id()));
+        let (rib_tx, _rib_rx) = mpsc::unbounded_channel();
+        let (rib_inbound_tx, _rib_inbound_rx) = mpsc::unbounded_channel();
+        let (policy_tx, _policy_rx) = mpsc::unbounded_channel();
+        ConfigManager::new(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/yang").to_string(),
+            Vec::new(),
+            Some(path.to_string_lossy().into_owned()),
+            rib_tx,
+            rib_inbound_tx,
+            policy_tx,
+        )
+        .expect("manager builds")
+    }
+
+    /// Run a show command the way `vtyhelper -u` does — exec mode.
+    fn exec_show(cm: &ConfigManager, input: &str) -> String {
+        let mode = cm.modes.get("exec").expect("exec mode");
+        let (code, output, _paths) = cm.execute(mode, input);
+        assert_eq!(code, ExecCode::Show, "`{input}` did not answer Show");
+        output
+    }
+
+    fn edit(cm: &ConfigManager, input: &str) {
+        let mode = cm.modes.get("configure").expect("configure mode");
+        let (code, _output, _paths) = cm.execute(mode, input);
+        assert_eq!(code, ExecCode::Show, "`{input}` was rejected");
+    }
+
+    /// The helper's predicate, spelled exactly as it is over the wire.
+    fn uncommitted(cm: &ConfigManager) -> bool {
+        exec_show(cm, "show running-config formal") != exec_show(cm, "show candidate-config formal")
+    }
+
+    #[test]
+    fn formal_show_is_the_rendering_commit_diffs() {
+        let cm = manager();
+        edit(&cm, "set system hostname r1");
+
+        let mut running = String::new();
+        cm.store.running.borrow().list(&mut running);
+        let mut candidate = String::new();
+        cm.store.candidate.borrow().list(&mut candidate);
+
+        assert_eq!(exec_show(&cm, "show running-config formal"), running);
+        assert_eq!(exec_show(&cm, "show candidate-config formal"), candidate);
+    }
+
+    #[test]
+    fn predicate_tracks_commit_and_discard() {
+        let cm = manager();
+        assert!(!uncommitted(&cm), "a fresh manager must look clean");
+
+        edit(&cm, "set system hostname r1");
+        assert!(uncommitted(&cm), "an uncommitted set must show up");
+
+        cm.commit_config().expect("commit succeeds");
+        assert!(!uncommitted(&cm), "commit must settle the difference");
+
+        edit(&cm, "set system router-id 10.0.0.1");
+        assert!(uncommitted(&cm));
+        cm.store.discard();
+        assert!(!uncommitted(&cm), "discard must settle the difference");
+    }
+}
+
 #[cfg(test)]
 mod yang_load_tests {
     use libyang::YangStore;

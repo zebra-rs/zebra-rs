@@ -180,6 +180,9 @@ Bash-death detection uses a three-tier strategy:
    `kill -9`. (Linux 5.3+.)
 2. **`Logout` RPC** sent from the bash EXIT trap. Covers normal
    `exit` cleanly even if pidfd notification is briefly delayed.
+   The same trap first offers to commit uncommitted config changes
+   (D29); the logout is deliberately last, because the session must
+   still be Admin for that commit to be accepted.
 3. **Periodic `/proc/{bash_pid}` sweep** every 60s. Backstop for
    any case the above miss.
 
@@ -379,6 +382,7 @@ Each phase is intended to ship as an independent PR.
 | D26 | **Root peers bypass the parent-uid check.** `resolve_session_key` skips Guard 2 when `peer_uid == 0`. Rationale: the strict match rejected the common `sudo <cmd>` pattern, where the outer `sudo` process retains the invoking user's ruid while the client itself runs as uid 0. Risk surface: any uid-0 connector is trusted regardless of ancestry, but `SO_PEERCRED`'s effective-uid attestation already implies that — a process running as root can already do anything on the host. The remaining guards (D12 cross-PID-namespace, OrphanClient, ParentVanished) still fire for root peers. Non-root peers are unaffected — the parent-uid match is still enforced, so a setuid escalation to a non-zero uid is still refused. |
 | D27 | **`zebra-rs` Linux group for passwordless enable.** Package postinstall creates the group. Supplementary membership is checked on `enable` via `getgrouplist`; members are promoted without PAM. Group name overridable with `ZEBRA_VTY_CONFIG_GROUP`. Missing group → PAM-only fallback. |
 | D28 | **PAM authenticates root for non-group callers.** Non-members who type `enable`/`configure` are prompted for the root password immediately (no passwordless probe). Client `auth_user` is ignored. |
+| D29 | **Uncommitted changes are confirmed at shell exit, from the client.** The bash `EXIT` trap asks `vtyhelper -u` (a comparison of `show running-config formal` against `show candidate-config formal`, both exec-mode and un-gated) and, when they differ, prompts `y`=commit / `n`=discard / anything else=leave pending. It runs **before** the `Logout` RPC: dropping the session first would make the commit re-resolve as a fresh View session and be refused. The check is client-side because none of the daemon's session-teardown paths owns the candidate — `ExecService` has no handle to `ConfigStore` — and because only the client has a terminal to ask on. Since the candidate is global (D11), the prompt is gated on *this shell* having entered configure mode, so a read-only session is never offered the chance to discard someone else's edits. |
 
 ## Deferred work
 
