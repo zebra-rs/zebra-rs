@@ -82,11 +82,28 @@ pub(super) fn bfd_session_key(
 /// `nfsm::nbr_hold_timer_expire(release_bfd=true)`, which fires only
 /// when the hold timer expires for a neighbour that *was* Up, and by
 /// `bfd_reconcile_all` on a config-change disable.
+/// **Why a diff and not the Up edge?** `bfd_session_key` needs a usable
+/// address *pair* — our own interface address (learned from netlink
+/// `AddrAdd`) and the peer's (learned from its IIH) — and either can
+/// arrive after the adjacency is already Up. The edge-triggered version
+/// returned early in that case and never ran again, so the session was
+/// never created at all: `show bfd peers` stayed empty under a neighbour
+/// sitting Up, recovering only when a link bounce re-fired the edge. It
+/// reproduced deterministically by bringing the adjacency up with no
+/// address on the link and adding one afterwards, and intermittently in
+/// CI, where netlink can lag adjacency formation under load.
+///
+/// Comparing against the key we actually subscribed with fixes both that
+/// and renumbering: this runs per-Hello, both address sources are
+/// refreshed by the caller before we are called, and a no-change Hello
+/// (the overwhelmingly common case) costs one comparison and sends
+/// nothing.
 fn bfd_nfsm_dispatch(
-    link: &super::link::LinkTop<'_>,
+    link: &mut super::link::LinkTop<'_>,
+    level: Level,
+    sys_id: &IsisSysId,
     peer_v4: Option<Ipv4Addr>,
     peer_v6ll: Option<Ipv6Addr>,
-    was_up: bool,
     state: NfsmState,
 ) {
     // Effective enable = per-interface `bfd {}` merged over the instance-level
@@ -94,12 +111,30 @@ fn bfd_nfsm_dispatch(
     if !link.config.bfd.resolve(&link.up_config.bfd).enable {
         return;
     }
-    let Some(key) = bfd_session_key(link, peer_v4, peer_v6ll) else {
+    // Only an Up adjacency wants a session. Deliberately no teardown on the
+    // other states — see the doc comment above on why Up→Init must leave the
+    // session probing.
+    if state != NfsmState::Up {
+        return;
+    }
+    // Computed before the `nbrs` borrow: `bfd_session_key` reads
+    // `link.state.v4addr` / `v6laddr` through a shared borrow of `link`.
+    let Some(desired) = bfd_session_key(link, peer_v4, peer_v6ll) else {
         return;
     };
-    if !was_up && state == NfsmState::Up {
-        let _ = link.tx.send(Message::BfdSubscribe(key));
+    let Some(nbr) = link.state.nbrs.get_mut(&level).get_mut(sys_id) else {
+        return;
+    };
+    if nbr.bfd_key.as_ref() == Some(&desired) {
+        return;
     }
+    // Renumbering: release the session keyed on the old address pair before
+    // asking for the new one, or the stale session keeps probing forever.
+    let stale = nbr.bfd_key.replace(desired);
+    if let Some(stale) = stale {
+        let _ = link.tx.send(Message::BfdUnsubscribe(stale));
+    }
+    let _ = link.tx.send(Message::BfdSubscribe(desired));
 }
 
 /// Kick the STAMP measurement reconcile on any NFSM transition that
@@ -598,7 +633,14 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
 
     // RFC 5882 §5 BFD attachment, post-FSM. nbr has been dropped so
     // we can read link.state.v4addr / link.config.bfd freely.
-    bfd_nfsm_dispatch(link, bfd_peer_v4, bfd_peer_v6ll, was_up, state);
+    bfd_nfsm_dispatch(
+        link,
+        level,
+        &pdu.source_id,
+        bfd_peer_v4,
+        bfd_peer_v6ll,
+        state,
+    );
     stamp_nfsm_dispatch(link, was_up, state);
 
     // CSNP + SRM kick on first RR. Deferred to here so we can take
@@ -825,7 +867,14 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
         // the LAN handler — defer until after the `nbr` mutable
         // borrow is gone so we can read link.state / link.config
         // freely.
-        bfd_nfsm_dispatch(link, bfd_peer_v4, bfd_peer_v6ll, was_up, state);
+        bfd_nfsm_dispatch(
+            link,
+            level,
+            &pdu.source_id,
+            bfd_peer_v4,
+            bfd_peer_v6ll,
+            state,
+        );
         stamp_nfsm_dispatch(link, was_up, state);
 
         // CSNP+SRM kick on first RR. P2P always wins the
