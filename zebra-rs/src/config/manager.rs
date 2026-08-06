@@ -1066,10 +1066,62 @@ impl ConfigManager {
         }
     }
 
-    pub fn save_config(&self) {
+    /// Write the running config to [`Self::config_path`] — the file
+    /// named by `--config-file`, or the resolved default when the flag
+    /// is absent. Returns the path written on success.
+    ///
+    /// Two properties the previous one-liner lacked:
+    ///
+    /// * **No panic.** `save` is an operator command, and the write can
+    ///   fail for ordinary reasons — a read-only filesystem, a missing
+    ///   parent directory, a `--config-file` the daemon's uid can't
+    ///   write. The old `expect` took the whole daemon down (and the
+    ///   config-loop panic cascaded into the vty server's
+    ///   `rx.await.unwrap()`), so a mistyped path cost the operator the
+    ///   router. The error now travels back to the caller as command
+    ///   output instead.
+    /// * **Atomic replace.** Serialize into a sibling temp file and
+    ///   `rename` it into place, so a failure part-way through (ENOSPC,
+    ///   a crash) leaves the previous config intact rather than a
+    ///   truncated file the next boot would half-load. The temp file
+    ///   must be a sibling: `rename(2)` is only atomic within one
+    ///   filesystem.
+    ///
+    /// Replacing rather than rewriting in place means the save needs
+    /// write permission on the *directory*, and the config file comes
+    /// back owned by the daemon's uid — visible only when the daemon
+    /// doesn't already own the file it saves. The file's mode is carried
+    /// over explicitly (below) so that part of the in-place behavior is
+    /// preserved.
+    pub fn save_config(&self) -> std::io::Result<&Path> {
         let mut output = String::new();
         self.store.running.borrow().format(&mut output);
-        std::fs::write(&self.config_path, output).expect("Unable to write file");
+
+        let mut tmp = self.config_path.clone().into_os_string();
+        tmp.push(".tmp");
+        let tmp = PathBuf::from(tmp);
+
+        let write = std::fs::write(&tmp, output).and_then(|()| {
+            // `fs::write` on the existing file used to keep its mode;
+            // a fresh temp file gets 0666 & !umask instead, which would
+            // silently widen a config the operator had locked down. Carry
+            // the current mode over before the rename. A missing target
+            // (first save) just keeps the default.
+            if let Ok(meta) = std::fs::metadata(&self.config_path) {
+                std::fs::set_permissions(&tmp, meta.permissions())?;
+            }
+            std::fs::rename(&tmp, &self.config_path)
+        });
+
+        match write {
+            Ok(()) => Ok(&self.config_path),
+            Err(e) => {
+                // Don't leave the half-written sibling behind for the
+                // operator to trip over on the next `ls`.
+                let _ = std::fs::remove_file(&tmp);
+                Err(e)
+            }
+        }
     }
 
     pub fn clear(&self, paths: &[CommandPath]) {
@@ -2040,6 +2092,103 @@ mod startup_load_tests {
             message,
             "startup config /etc/zebra-rs/zebra-rs.conf: 1 command(s) rejected:\n  set no such command"
         );
+    }
+}
+
+#[cfg(test)]
+mod save_config_tests {
+    use super::*;
+
+    /// Build a `ConfigManager` on the shipped `yang/` tree whose
+    /// `--config-file` is `path`. Same constraints as the startup-load
+    /// helper: the configs used here stay inside `system`, so no
+    /// protocol task is ever spawned and this needs no tokio runtime.
+    fn manager_with_config(path: &Path) -> ConfigManager {
+        let (rib_tx, _rib_rx) = mpsc::unbounded_channel();
+        let (rib_inbound_tx, _rib_inbound_rx) = mpsc::unbounded_channel();
+        let (policy_tx, _policy_rx) = mpsc::unbounded_channel();
+        ConfigManager::new(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/yang").to_string(),
+            Vec::new(),
+            Some(path.to_string_lossy().into_owned()),
+            rib_tx,
+            rib_inbound_tx,
+            policy_tx,
+        )
+        .expect("manager builds")
+    }
+
+    fn temp_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("zebra-rs-save-{}-{}", name, std::process::id()))
+    }
+
+    /// The core contract: `save` writes the running config to the file
+    /// named by `--config-file`, not to the default `zebra-rs.conf`.
+    #[test]
+    fn save_writes_to_the_config_file_path() {
+        let path = temp_path("target");
+        std::fs::write(&path, "set system hostname r1\n").expect("seed config written");
+
+        let cm = manager_with_config(&path);
+        cm.load_config();
+        let saved = cm.save_config().expect("save succeeds");
+        assert_eq!(saved, path.as_path());
+
+        let on_disk = std::fs::read_to_string(&path).expect("config readable");
+        assert!(
+            on_disk.contains("hostname r1;"),
+            "saved config: {on_disk:?}"
+        );
+        // The atomic-replace temp sibling must not survive the save.
+        assert!(
+            !path.with_extension("tmp").exists(),
+            "temp sibling left behind"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// An unwritable target must come back as an `Err` the `save`
+    /// handler can print. Before this it was an `expect` that killed
+    /// the daemon.
+    #[test]
+    fn save_reports_write_failure_instead_of_panicking() {
+        // Parent directory does not exist, so both the temp write and
+        // the rename fail.
+        let dir = temp_path("nodir");
+        let path = dir.join("zebra-rs.conf");
+
+        let cm = manager_with_config(&path);
+        let err = cm.save_config().expect_err("save fails");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        assert!(!dir.exists(), "save must not create the parent directory");
+    }
+
+    /// The temp-file + rename dance must not widen the config's mode:
+    /// a fresh temp file is created 0666 & !umask, so the previous
+    /// file's permissions are carried over before the rename.
+    #[cfg(unix)]
+    #[test]
+    fn save_preserves_existing_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = temp_path("perms");
+        std::fs::write(&path, "set system hostname r1\n").expect("seed config written");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("mode 0600 set");
+
+        let cm = manager_with_config(&path);
+        cm.load_config();
+        cm.save_config().expect("save succeeds");
+
+        let mode = std::fs::metadata(&path)
+            .expect("config readable")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "save widened the config file mode");
+
+        let _ = std::fs::remove_file(&path);
     }
 }
 
