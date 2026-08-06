@@ -21,8 +21,10 @@ underlay's address family.
 $ ./up.sh
 bring up
 ...
-apply config: h2
-applied
+seed config: h2
+...
+start zebra-rs: h2
+sleep 3sec
 ```
 
 ## What makes this the IPv6 version

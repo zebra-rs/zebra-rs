@@ -21,10 +21,10 @@ flood domain.
 $ ./up.sh
 bring up
 ...
-apply config: h3
-applied
-apply config: h4
-applied
+seed config: h4
+...
+start zebra-rs: h4
+sleep 3sec
 ```
 
 ## The multi-tenant VTEP configuration

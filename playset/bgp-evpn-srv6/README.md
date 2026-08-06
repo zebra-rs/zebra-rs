@@ -29,8 +29,10 @@ kernel path stays inert.
 ```shell
 $ ./up.sh
 ...
-apply config: h2
-applied
+seed config: h2
+...
+start zebra-rs: h2
+sleep 3sec
 ```
 
 ## Take a look at the YAML configuration

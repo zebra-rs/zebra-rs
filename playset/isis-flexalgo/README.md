@@ -8,8 +8,8 @@ link, so traffic between Tokyo and the United States is forced the long way
 round — through Asia and Europe — while algorithm 0 keeps using the direct
 Pacific crossing.
 
-Each node runs zebra-rs in its own network namespace, and its YAML
-configuration is injected with the `vtyctl apply` command.
+Each node runs zebra-rs in its own network namespace, and loads its own
+`<node>.yaml` at startup via the `--config-file` argument.
 
 ## Topology
 
@@ -47,8 +47,8 @@ after. Every link has metric 10, and the full link list is in the appendix.
 
 ## Bring up all nodes
 
-`./up.sh` sets up all namespaces, starts the zebra-rs routing daemon in each
-of them, and injects the initial configuration.
+`./up.sh` sets up all namespaces, seeds each node's config file, and starts
+the zebra-rs routing daemon in each of them on its own `--config-file`.
 
 ``` shell
 $ ./up.sh
@@ -57,6 +57,10 @@ runtime dir: /tmp/zebra-rs-playset/isis-flexalgo
 teardown: stop zebra-rs
 teardown: delete namespace se
 teardown: delete namespace sj
+...
+cleanup run dir
+seed config: se
+seed config: sj
 ...
 create namespace: sg
 create namespace: sy
@@ -69,10 +73,8 @@ create link: sj-sy (sj) <-> sy-sj (sy)
 start zebra-rs: ch
 start zebra-rs: da
 ...
-apply config: sy
-applied
-apply config: tk
-applied
+start zebra-rs: tk
+sleep 3sec
 ```
 
 You can then list the namespaces:

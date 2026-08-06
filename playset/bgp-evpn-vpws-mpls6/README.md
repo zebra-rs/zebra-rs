@@ -35,8 +35,10 @@ straight through the wire.
 ```shell
 $ ./up.sh
 ...
-apply config: c2
-applied
+seed config: c2
+...
+start zebra-rs: c2
+sleep 3sec
 ```
 
 ## Ping through the wire, then read the service back

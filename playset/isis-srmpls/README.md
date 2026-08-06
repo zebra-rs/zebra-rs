@@ -4,8 +4,8 @@ This playset demonstrates IS-IS SR-MPLS with TI-LFA fast reroute. Every core
 node has a loopback address with a Prefix-SID index, so every node can reach
 every other node's loopback over an SR-MPLS label-switched path. The topology
 follows the example in the TI-LFA specification (RFC 9855). All core and edge
-nodes run in separate network namespaces. Each node runs zebra-rs, and its
-YAML configuration is injected with the `vtyctl apply` command.
+nodes run in separate network namespaces. Each node runs zebra-rs, and loads
+its own `<node>.yaml` at startup via the `--config-file` argument.
 
 ## Topology
 
@@ -13,8 +13,8 @@ YAML configuration is injected with the `vtyctl apply` command.
 
 ## Bring up all nodes
 
-`./up.sh` sets up all namespaces, starts the zebra-rs routing daemon in each
-of them, and injects the initial configuration.
+`./up.sh` sets up all namespaces, seeds each node's config file, and starts
+the zebra-rs routing daemon in each of them on its own `--config-file`.
 
 ``` shell
 $ ./up.sh
@@ -24,10 +24,10 @@ teardown: delete namespace e1
 teardown: delete namespace e2
 teardown: delete namespace s
 ...
-apply config: r3
-applied
-apply config: d
-applied
+seed config: d
+...
+start zebra-rs: d
+sleep 3sec
 ```
 
 You can then list the namespaces:
@@ -152,10 +152,17 @@ hop, so it pops the label and delivers a plain IP packet to `d`).
 
 ## Take a look at the YAML configuration
 
-Node `s`'s configuration is in `s.yaml`. After zebra-rs for namespace `s` has
-been launched, the YAML configuration below is applied to it with `vtyctl
-apply -f s.yaml`. If you are familiar with Kubernetes, this is exactly the
-same idea as `kubectl apply -f config.yaml`.
+Node `s`'s configuration is in `s.yaml`, and zebra-rs for namespace `s` is
+launched with it: `zebra-rs --config-file s.yaml`. It is an ordinary startup
+config — the daemon loads it at boot, and `save` in the vty writes the
+running config straight back to it, still as YAML. Edit it and re-run
+`./up.sh` to bring the lab up your way.
+
+(The same document can also be streamed into a *running* daemon with
+`vtyctl apply -f s.yaml` — if you are familiar with Kubernetes, that is
+exactly the same idea as `kubectl apply -f config.yaml`. That is config
+injection rather than the node's own config file, so it deliberately does
+not change what `save` writes.)
 
 ``` yaml
 interface:

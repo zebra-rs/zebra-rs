@@ -39,8 +39,10 @@ loopback, the P's eBPF stage pops it, pe2's stack receives it plain.
 ```shell
 $ ./up.sh
 ...
-apply config: h2
-applied
+seed config: h2
+...
+start zebra-rs: h2
+sleep 3sec
 ```
 
 (`up.sh` also turns kernel forwarding off — both families — on pe1/p/pe2,

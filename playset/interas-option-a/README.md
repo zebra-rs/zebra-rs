@@ -48,10 +48,10 @@ identical: a labeled path between the PE and ASBR loopbacks).
 $ ./up.sh
 bring up
 ...
-apply config: ce5
-applied
-apply config: ce6
-applied
+seed config: ce6
+...
+start zebra-rs: ce6
+sleep 3sec
 ```
 
 Thirteen namespaces: `ce1 ce2 ce3 pe1 pe2 p1 asbr1` + `asbr2 p2 pe3 ce4

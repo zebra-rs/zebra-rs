@@ -37,11 +37,11 @@ playset_start_daemons() {
     done
 }
 
-playset_apply_configs() {
+playset_seed_configs() {
     local netns
     for netns in "${PLAYSET_ROUTERS[@]}"; do
-        echo "apply config: ${netns}"
-        playset_apply_config "$netns" "${PLAYSET_DEMO_DIR}/${netns}.yaml"
+        echo "seed config: ${netns}"
+        playset_seed_config "$netns"
     done
 }
 
@@ -49,12 +49,18 @@ playset_up() {
     echo "bring up"
     echo "runtime dir: ${PLAYSET_RUN_DIR}"
     playset_teardown
-    echo "cleanup logs"
-    playset_cleanup_logs
+    echo "cleanup run dir"
+    playset_cleanup_run_dir
+    # Seeded before the daemons start: each one loads its own config file
+    # at boot, so there is no injection step after they are up.
+    playset_seed_configs
     playset_create_namespaces
     playset_create_links
     playset_start_daemons
+    # Nothing left in the bring-up waits on this, but the labs that add
+    # steps after `playset_up` (kernel forwarding off, ethtool, ND warm-up
+    # pings) used to run a full config-apply cycle after the daemons came
+    # up. Keep the settle so their timing is unchanged.
     echo "sleep 3sec"
     sleep 3
-    playset_apply_configs
 }
