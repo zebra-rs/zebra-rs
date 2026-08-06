@@ -27,11 +27,11 @@ All eight display commands work identically from both `exec` mode and
 
 The bare form (no trailing keyword) renders the **CLI** view — the
 indented block format familiar from Cisco IOS, suitable for reading
-on a terminal — and the format `save` writes to disk. The `formal`
-keyword names the canonical set/delete form, one of the four formats
-`load` accepts (see below). The `json` and
-`yaml` keywords are the equivalent serializations of the same
-configuration tree.
+on a terminal. The `formal` keyword names the flat statement form. The
+`json` and `yaml` keywords are the equivalent serializations of the
+same configuration tree. All four are formats `load` accepts and `save`
+can write; which one `save` uses is decided by the config file itself
+(see [Editing helpers](#editing-helpers) below).
 
 ## Output formats
 
@@ -60,16 +60,22 @@ router {
 
 ### `formal`
 
-A flat sequence of `set ...` statements, one configuration leaf per
-line, suitable for `load` to replay or for diffing in plain text.
+A flat listing, one configuration leaf per line, handy for diffing in
+plain text or grepping for a single leaf.
 
 ```
 host(config)# show candidate-config formal
-set system hostname r1
-set router bgp global as 65000
-set router bgp global router-id 10.0.0.1
-set router bgp neighbor 10.0.0.2 remote-as 65001
+system hostname r1
+router bgp global as 65000
+router bgp global router-id 10.0.0.1
+router bgp neighbor 10.0.0.2 remote-as 65001
 ```
+
+The display drops the leading `set` keyword. A *file* in this format
+keeps it — `set system hostname r1` — which is what `save` writes and
+what the set/delete loader reads; a file of bare lines is sniffed as
+YAML and won't load. So paste from `show … formal` into a config file
+only with the `set` prefix restored.
 
 ### `json`
 
@@ -138,6 +144,33 @@ that file in its reply:
 host(config)# save
 Configuration saved to /etc/zebra-rs/zebra-rs.conf
 ```
+
+### The format `save` writes
+
+`save` writes the file back in the format it was **loaded** in, so a
+`--config-file` handed to the daemon as YAML stays YAML, JSON stays
+JSON, and a `set`/`delete` document stays `set`/`delete`:
+
+```
+$ zebra-rs --config-file /etc/zebra-rs/config.yaml
+host(config)# set system hostname r2
+host(config)# commit
+host(config)# save
+Configuration saved to /etc/zebra-rs/config.yaml
+
+$ cat /etc/zebra-rs/config.yaml
+system:
+  hostname: r2
+```
+
+The format is re-detected on every load — the startup load and the
+`load` command both — from the file's first meaningful line, the same
+sniffing `vtyctl apply -f` uses. Two cases fall back to the **CLI**
+block format: a config file that was missing or empty when the daemon
+started, and a daemon whose config only ever arrived over
+`vtyctl apply`. Applying a document with `vtyctl apply` deliberately
+does *not* change the format `save` writes — an applied document is a
+config injection, not the on-disk file.
 
 The write is atomic — the config is serialized to a sibling temp file
 and renamed into place, so an interrupted save leaves the previous file
