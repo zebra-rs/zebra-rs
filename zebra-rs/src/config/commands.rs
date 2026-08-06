@@ -1,9 +1,10 @@
 use super::ExecCode;
-use super::manager::ConfigManager;
+use super::manager::{ConfigFormat, ConfigManager};
 use super::util::trim_first_line;
 use libyang::Entry;
 use similar::TextDiff;
 use std::collections::HashMap;
+use std::path::Path;
 use std::rc::Rc;
 
 type FuncMap = HashMap<String, fn(&ConfigManager) -> (ExecCode, String)>;
@@ -49,6 +50,10 @@ pub fn configure_mode_create(entry: Rc<Entry>) -> Mode {
     mode.install_func(String::from("/discard"), discard);
     mode.install_func(String::from("/load"), load);
     mode.install_func(String::from("/save"), save);
+    mode.install_func(String::from("/save/cli"), save_cli);
+    mode.install_func(String::from("/save/formal"), save_formal);
+    mode.install_func(String::from("/save/json"), save_json);
+    mode.install_func(String::from("/save/yaml"), save_yaml);
     mode.install_func(String::from("/clear/isis/spf"), clear_isis_spf);
     // Same operator command as exec mode, so the output format can be
     // switched without leaving the configure prompt.
@@ -257,15 +262,26 @@ fn load(config: &ConfigManager) -> (ExecCode, String) {
     (ExecCode::Show, String::from(""))
 }
 
+// === save [ cli | formal | json | yaml ] ===
+//
+// Bare `save` keeps the config file in whatever format it already is;
+// a format keyword writes that format and makes it the file's format
+// from then on (`ConfigManager::save_config_as`). One handler per
+// keyword because `FuncMap` holds plain fn pointers, not closures.
+
 /// `save` used to answer with an empty string, so the operator had no
 /// way to tell which file was written — the target is the resolved
 /// `--config-file` (or the default `zebra-rs.conf`), and nothing on the
-/// prompt named it. Report the path on success and the io error on
-/// failure; a failed save is no longer fatal to the daemon (see
-/// `ConfigManager::save_config`).
-fn save(config: &ConfigManager) -> (ExecCode, String) {
-    let output = match config.save_config() {
-        Ok(path) => format!("Configuration saved to {}\n", path.display()),
+/// prompt named it. Report the path and the format on success and the
+/// io error on failure; a failed save is no longer fatal to the daemon
+/// (see `ConfigManager::save_config`).
+fn save_reply(config: &ConfigManager, saved: std::io::Result<&Path>) -> (ExecCode, String) {
+    let output = match saved {
+        Ok(path) => format!(
+            "Configuration saved to {} ({})\n",
+            path.display(),
+            config.config_format.borrow().keyword()
+        ),
         Err(e) => format!(
             "Failed to save configuration to {}: {}\n",
             config.config_path.display(),
@@ -273,6 +289,26 @@ fn save(config: &ConfigManager) -> (ExecCode, String) {
         ),
     };
     (ExecCode::Show, output)
+}
+
+fn save(config: &ConfigManager) -> (ExecCode, String) {
+    save_reply(config, config.save_config())
+}
+
+fn save_cli(config: &ConfigManager) -> (ExecCode, String) {
+    save_reply(config, config.save_config_as(ConfigFormat::Cli))
+}
+
+fn save_formal(config: &ConfigManager) -> (ExecCode, String) {
+    save_reply(config, config.save_config_as(ConfigFormat::SetDelete))
+}
+
+fn save_json(config: &ConfigManager) -> (ExecCode, String) {
+    save_reply(config, config.save_config_as(ConfigFormat::Json))
+}
+
+fn save_yaml(config: &ConfigManager) -> (ExecCode, String) {
+    save_reply(config, config.save_config_as(ConfigFormat::Yaml))
 }
 
 fn clear_isis_spf(_config: &ConfigManager) -> (ExecCode, String) {
