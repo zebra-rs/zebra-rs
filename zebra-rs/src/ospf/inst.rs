@@ -10220,6 +10220,35 @@ impl Ospf<Ospfv3> {
                 // configured.
                 self.bfd_reconcile_nbr(ifindex, nbr_router_id);
                 self.reconcile_endx_sid(ifindex, nbr_router_id);
+                // The RIB is a consumer too, and was the one missing
+                // here. `collect_v3_nexthops` reads the next hop from
+                // `nbr.ident.prefix`, so every installed route through
+                // this neighbor is keyed on the address that just
+                // moved — but only an SPF re-derives them.
+                //
+                // Nothing else reliably schedules that. The peer's
+                // Link-LSA change floods immediately and does trigger
+                // an SPF, while `ident.prefix` is not corrected until a
+                // Hello arrives from the new source, up to a
+                // HelloInterval later. Win that race and the routes are
+                // right; lose it and the LSA-driven SPF bakes in the
+                // dead address and no further SPF ever runs — the RIB
+                // and the kernel FIB keep pointing at an address the
+                // peer has deleted, indefinitely. Blackhole, not a
+                // cosmetic stale entry.
+                //
+                // Scheduling here closes the race from the other end:
+                // the address is already updated above, so the SPF this
+                // arms cannot observe the old value. It is the throttled
+                // scheduler, so a burst of renumbers coalesces, and
+                // `apply_routing_updates_v3` diffs the result — an SPF
+                // that changes nothing costs one comparison and emits no
+                // RIB message.
+                if let Some(area_id) = self.links.get(&ifindex).map(|link| link.area)
+                    && let Some(area) = self.areas.get_mut(area_id)
+                {
+                    Self::ospf_spf_schedule_generic(&self.tx, area, self.spf_interval);
+                }
             }
             Message::DdRetransmit(ifindex, router_id) => {
                 self.process_dd_retransmit(ifindex, router_id);
