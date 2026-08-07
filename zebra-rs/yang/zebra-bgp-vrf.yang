@@ -238,8 +238,10 @@ module zebra-bgp-vrf {
           units "seconds";
           description
             "Time interval for the ConnectRetryTimer, pacing the
-             Connect/Active redial loop. Defaults to 120s (RFC 4271
-             §8.2.2) when unset.";
+             Connect/Active redial loop. Defaults to 30s when unset —
+             RFC 4271 §10 suggests 120s, but that is a suggestion and
+             two minutes is a long outage for a session that is only
+             waiting to redial; 30s matches FRR.";
           reference
             "RFC 4271: A Border Gateway Protocol 4 (BGP-4),
              Section 8.2.2.";
