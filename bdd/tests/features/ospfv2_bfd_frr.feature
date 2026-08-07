@@ -62,8 +62,17 @@ Feature: OSPFv2 TI-LFA kernel-side fast-reroute on BFD failure
     Then kernel route "10.0.0.8" in namespace "s" should eventually contain "proto ospf"
     And bfd session in namespace "s" on interface "s-n1" should be up
     And show command "show ospf ti-lfa" in namespace "s" should contain "Adj-SID"
-    And ping from "s" to "10.0.0.8" should succeed
-    And ping from "d" to "10.0.0.1" should succeed
+    # These two poll. The gate above proves only that *s* installed its
+    # route; nothing there covers the ILMs on n1/r1-r3/d that the packet
+    # actually traverses, so at 30s the far end of an 8-node SR-MPLS ring
+    # can still be finishing. The single-shot form fired one 3-packet probe
+    # and failed a c=16 run here while the identical ping in the very next
+    # scenario succeeded seconds later on the same lab — a datapath that
+    # heals itself in that window was never wrong, just late.
+    # The later pings (post-switchover, post-restore) stay single-shot:
+    # convergence is already established by then.
+    And ping from "s" to "10.0.0.8" should eventually succeed
+    And ping from "d" to "10.0.0.1" should eventually succeed
 
   Scenario: BFD-down with the link up triggers the kernel-side switchover
     Given the test topology exists
