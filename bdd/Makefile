@@ -187,6 +187,17 @@ bgp_mup_interwork:
 	mkdir -p allure-results
 	$(CUCUMBER) -- --concurrency=1 --tags "@bgp_mup_interwork"
 
+# MUP Direct segment in the N6 VRF (the book ch-02-35 two-VRF example): the
+# ST2 originates from the RAN-facing N3 VRF (rd 65000:100), the DSD from
+# the internet-facing N6 VRF (rd 65000:200), and the interwork node (z2)
+# resolves the ST2 to the N6 Direct segment purely by the shared
+# Direct-segment id 1:2 — across VRFs and RDs, keeping post-decap uplink
+# lookups out of the RAN table. Needs `pfcp-inject` on the host PATH and
+# root netns (kernel VRF + seg6local).
+bgp_mup_direct_segment_n6:
+	mkdir -p allure-results
+	$(CUCUMBER) -- --concurrency=1 --tags "@bgp_mup_direct_segment_n6"
+
 # MUP dual-ST: two VRFs (st1 downlink + st2 uplink) bind the same Network
 # Instance, so one PFCP session originates BOTH Session-Transformed routes
 # (Type-1 + Type-2), received by the peer. Needs `pfcp-inject` on the host
