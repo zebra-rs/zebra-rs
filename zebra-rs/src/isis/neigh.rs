@@ -7,6 +7,7 @@ use itertools::Itertools;
 use serde::Serialize;
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::bfd::session::SessionKey;
 use crate::config::Args;
 use crate::context::Timer;
 use crate::isis::srv6::{ElibPool, function_addr, lib_addr};
@@ -53,6 +54,25 @@ pub struct Neighbor {
     //
     pub hold_time: u16,
     pub hold_timer: Option<Timer>,
+
+    /// The BFD `SessionKey` this adjacency is currently subscribed with,
+    /// or `None` while no session has been asked for.
+    ///
+    /// The subscribe used to be a pure edge action on the NFSM Up
+    /// transition, which silently did nothing when the key could not be
+    /// built yet — `bfd_session_key` needs BOTH our own interface address
+    /// (netlink `AddrAdd`) and the peer's (its IIH), and either can land
+    /// after the adjacency is already Up. Nothing retried, so the session
+    /// stayed absent for the life of the adjacency: `show bfd peers` empty
+    /// while the neighbour sat Up, recovering only on a link bounce.
+    ///
+    /// Tracking the key here turns the subscribe into a diff: every Hello
+    /// recomputes the desired key and dispatches when it differs from what
+    /// we hold, so a late address is picked up on the next IIH. It also
+    /// covers renumbering (`Some(old)` → `Some(new)`), which the edge
+    /// version left pinned to the stale session. Dropped with the
+    /// neighbour row in `nbr_hold_timer_expire`, so it cannot go stale.
+    pub bfd_key: Option<SessionKey>,
 
     /// Allocated End.X (adjacency) SID. Pair carries the ELIB function
     /// bits (so we can release them on neighbor down) and the full SID
@@ -118,6 +138,7 @@ impl Neighbor {
             mac,
             proto: None,
             hold_timer: None,
+            bfd_key: None,
             is_dis: false,
             circuit_id: None,
             hold_time: 0,
