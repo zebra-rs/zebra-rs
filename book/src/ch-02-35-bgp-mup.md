@@ -190,8 +190,8 @@ whether the two directions live on two VRFs (one entry each) or on one
 dual-direction VRF (both entries), one session originates both the
 Type-1 and the Type-2 ST.
 
-For example, an uplink VRF that also originates the Direct segment it
-resolves to:
+For example, an uplink (N3) VRF whose ST2 routes resolve to the Direct
+segment originated by the internet-facing (N6) VRF:
 
 ```
 vrf N3 {
@@ -202,12 +202,27 @@ vrf N3 {
       network-instance core;   # originate an ST2 for PFCP sessions on NI "core"
       mup-ext-comm 1:2;        # the Direct segment id it resolves to
     }
+  }
+}
+vrf N6 {
+  rd 65000:200;
+  encapsulation srv6;
+  afi-safi mup {
     segment direct {
       mup-ext-comm 1:2;        # originate the End.DT46 DSD with the same id
     }
   }
 }
 ```
+
+The Direct segment deliberately lives in the **N6** VRF, not next to the
+ST2: the segment an ST2 resolves to selects the table its uplink traffic is
+looked up in after GTP decap, so declaring `segment direct` in the N3 VRF
+would send internet-bound subscriber packets through the RAN-facing routing
+table. Keeping the DSD in the internet-facing VRF keeps the two routing
+contexts apart — the mapping the
+[interwork/direct split](#the-faithful-interworkdirect-split--n3-in-a-vrf-dataplane-gtp)
+below formalizes.
 
 ### Selecting the forwarding plane (`dataplane`)
 
