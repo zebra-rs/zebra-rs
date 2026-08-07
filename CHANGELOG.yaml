@@ -11,6 +11,117 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit them,
 # changelog-gen.sh defaults to distribution "unstable" and urgency "medium".
 
+- semver: 26.8.2
+  date: 2026-08-07T18:00:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### VyOS-compatible firewall
+        * The VyOS 1.5 firewall configuration tree is ported into the
+          schema: `firewall group` (address, network, port, interface
+          and mac groups plus the IPv6 variants), `firewall ipv4|ipv6`
+          forward/input/output filter base chains and custom `name`
+          chains carrying the mainstream matcher set, the prerouting
+          and output raw hooks with notrack, and `global-options`
+        * An nftables backend renders the whole ruleset and applies it
+          atomically with `nft -f -`, following vyos-1x set naming,
+          chain layout, state-policy, recent sets and log formats; an
+          unrenderable rule is skipped with a warning naming it rather
+          than breaking the emitted script
+        * It runs on a new JSON batch config subscription: a commit
+          touching any line under a registered path delivers the whole
+          post-commit subtree as one JSON message, which suits
+          consumers that recompile everything
+        * `show firewall`, `... group`, `... ipv4|ipv6`, a single hook
+          chain and `... name <chain>` join the configured ruleset
+          with live kernel counters read from `nft --json list table`,
+          with `-j` JSON on every view
+        * `delete` may now complete at any config node, so
+          `delete firewall` and other whole-subtree deletions behave
+          as they do in VyOS; a bare `delete` is still rejected
+    - note: |
+        ### Site-to-site IPsec VPN
+        * The VyOS `vpn ipsec` tree is ported: `authentication psk`,
+          `esp-group` and `ike-group` with the full proposal cipher,
+          hash and DH-group lists, `interface`, `log`, `options`, and
+          `site-to-site peer` with per-tunnel traffic selectors and
+          VTI binding — pre-shared-secret authentication
+        * A strongSwan backend consumes the subtree over the same JSON
+          batch subscription and renders a complete swanctl.conf —
+          connections, pools and secrets — loaded declaratively with
+          `swanctl -q` so that replace and teardown are one shape; the
+          file is written 0600 and one unrepresentable peer is skipped
+          with a warning instead of wedging the commit
+        * `show vpn ipsec sa` and `... connections` read live data over
+          charon's VICI control socket through a new in-tree client,
+          while `state` and `policy` go through `ip xfrm`, mirroring
+          the VyOS op-mode tables row for row
+        * A BDD feature brings up two charon + zebra-rs nodes and
+          proves live ESP traffic end to end
+    - note: |
+        ### Conditional schema and libyang 2.2
+        * Schema nodes can be gated behind RFC 7950 features:
+          `--feature [MODULE:]NAME` enables them at startup against the
+          new zebra-features registry module, so `--feature iso` makes
+          the firewall and VPN subtrees appear while a stock start is
+          schema-identical to before
+        * Gating works at enum and union-arm granularity as well as on
+          containers — `set interface <name> ipv4 address dhcp` is an
+          iso-only arm of the address leaf-list
+        * libyang moved to 2.2 from crates.io, and schema-build
+          diagnostics (skipped augments, dangling if-feature
+          references) are logged as warnings instead of dropped
+    - note: |
+        ### Configuration file handling and vty
+        * A failed `save` no longer panics the config loop and takes
+          the daemon down with it; the write became an atomic rename
+          that carries the existing file's mode across, and the reply
+          names the path and format it wrote
+        * `save` writes the config file back in the format it was
+          loaded in — a YAML `--config-file` no longer silently comes
+          back as CLI braces — and `save { cli | formal | json | yaml }`
+          converts the file, adopting that format for later saves
+        * The vty shell offers to commit uncommitted candidate edits
+          when the session ends, whether by a typed `exit`, Ctrl-D or a
+          closed terminal, so edits can no longer sit invisibly in the
+          candidate after the operator walks away
+    - note: |
+        ### OSPF flooding and convergence
+        * The link-state request list holds the neighbor's advertised
+          LSA headers rather than our own copies, RFC 2328 §13.3 step
+          1(b) is implemented in both flood fan-outs, and an LSA whose
+          advertised instance beats our copy is now requested (§10.6)
+        * A request satisfied by a parallel serve is no longer treated
+          as BadLSReq, which could livelock a parallel exchange
+        * The first Hello goes out immediately on interface-up, and a
+          no-op origination no longer charges the MinLSInterval gate
+    - note: |
+        ### BGP and IS-IS
+        * BGP paces the OpenSent redial with the idle-hold timer rather
+          than ConnectRetry, so a session whose TCP dies after it has
+          sent its OPEN — the RFC 4271 §6.8 collision loser — redials
+          promptly; ConnectRetryTime now defaults to 30s, matching FRR
+        * IS-IS re-keys BFD from the adjacency instead of the NFSM Up
+          edge, so an address landing after the adjacency is already Up
+          no longer loses the BFD subscribe for the life of that
+          adjacency, and renumbering unsubscribes the stale session
+        * `show segment-routing srv6 prefix` printed nothing at all;
+          both spellings now resolve
+    - note: |
+        ### Labs, book and test infrastructure
+        * Playset nodes boot on their own `--config-file` instead of
+          having YAML pushed in with `vtyctl apply` after startup, so
+          `save` in the vty writes back to the lab's own file; the lab
+          READMEs were re-captured from live runs to match
+        * The MUP, eBPF, VPWS, EVPN-over-SRv6, EVPN-over-MPLS, Type-5,
+          VXLAN and bridge book chapters were brought current with the
+          delivered datapaths, and stale YANG tee descriptions fixed
+        * More BDD convergence asserts poll instead of sampling once,
+          and the legacy `show interface <name> detail` command was
+          removed
+
 - semver: 26.8.1
   date: 2026-08-01T18:00:00+09:00
   distribution: unstable
