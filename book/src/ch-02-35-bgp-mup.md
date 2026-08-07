@@ -222,7 +222,9 @@ would send internet-bound subscriber packets through the RAN-facing routing
 table. Keeping the DSD in the internet-facing VRF keeps the two routing
 contexts apart — the mapping the
 [interwork/direct split](#the-faithful-interworkdirect-split--n3-in-a-vrf-dataplane-gtp)
-below formalizes.
+below formalizes. This exact configuration — and an interwork peer
+resolving the N3 ST2 to the N6 Direct segment across the two RDs — is
+regression-tested by the `bgp_mup_direct_segment_n6` BDD.
 
 ### Selecting the forwarding plane (`dataplane`)
 

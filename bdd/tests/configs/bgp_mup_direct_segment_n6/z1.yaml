@@ -1,0 +1,97 @@
+# z1 — combined MUP UPF + Controller, the book ch-02-35 two-VRF example:
+#   * VRF N3 (rd 65000:100, `encapsulation srv6`) holds `route st2
+#     network-instance core mup-ext-comm 1:2` — a PFCP session on Network
+#     Instance `core` originates the ST2 under N3's RD, stamped with the
+#     Direct-segment id 1:2.
+#   * VRF N6 (rd 65000:200, `encapsulation srv6`) holds `segment direct
+#     mup-ext-comm 1:2` — originates the DSD (End.DT46 SID + id 1:2).
+# The Direct segment deliberately lives in the internet-facing N6 VRF, not
+# next to the ST2: the segment an ST2 resolves to selects the table its
+# uplink traffic is looked up in after decap, so keeping the DSD in N6
+# keeps internet-bound subscriber packets out of the RAN-facing N3 table.
+# IS-IS L2 SRv6 underlay + iBGP (mup afi-safi) to z2 (the interwork SRGW)
+# over loopbacks; z2 resolves the ST2 to the N6 Direct segment by the
+# shared id 1:2 — across VRFs and RDs.
+vrf:
+- name: N3
+  mup:
+    route-target:
+      export:
+      - "65000:100"
+- name: N6
+  mup:
+    route-target:
+      export:
+      - "65000:200"
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: z1-z2
+  ipv6:
+    address: 2001:db8:0:12::1/64
+segment-routing:
+  locator:
+  - name: S
+    prefix: fcbb:bbbb:1::/48
+    behavior: usid
+router:
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    hostname: z1
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: S
+    interface:
+    - if-name: lo
+      ipv6:
+        enabled: true
+    - if-name: z1-z2
+      network-type: point-to-point
+      metric: 1
+      ipv6:
+        enabled: true
+  bgp:
+    global:
+      as: 65000
+      router-id: 10.0.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+    segment-routing:
+      srv6:
+        locator: S
+    neighbor:
+    - remote-address: 2001:db8::2
+      remote-as: 65000
+      update-source: 2001:db8::1
+      enabled: true
+      afi-safi:
+      - name: mup
+        enabled: true
+    vrf:
+    - name: N3
+      rd: "65000:100"
+      encapsulation: srv6
+      afi-safi:
+        mup:
+          route:
+          - type: st2
+            network-instance: core
+            mup-ext-comm: "1:2"
+    - name: N6
+      rd: "65000:200"
+      encapsulation: srv6
+      afi-safi:
+        mup:
+          segment:
+          - type: direct
+            mup-ext-comm: "1:2"
+    mup-c:
+      enabled: true
+      controller-address: 2001:db8::1
+      pfcp:
+        listen-address: 127.0.0.1
+      srv6:
+        locator: S
