@@ -2574,12 +2574,25 @@ pub fn fsm_conn_fail(peer: &mut Peer, conn: ConnTag) -> State {
     // connection succeeds — what differs is the pacer and whether we
     // keep accepting inbound connects in the meantime.
     match peer.state {
-        // OpenSent: restart the ConnectRetryTimer, keep listening,
-        // go to Active; the timer's Event::Start redials. Passive
-        // peers don't redial — they park in Active listening.
+        // OpenSent: keep listening and go to Active, with the redial
+        // paced by the idle-hold timer rather than the full
+        // ConnectRetryTime. RFC 4271 §8.2.2 says "restart the
+        // ConnectRetryTimer" here, and taking that literally left this
+        // path on the 120s default while its sibling — a dial that
+        // fails in Connect (`fsm_dial_fail`) — was already moved onto
+        // the 5s pacer by the crossed-SYN fix. OpenSent is if anything
+        // the more common half: in a collision the loser's connection
+        // dies *after* it sent an OPEN, so the peer that backs off is
+        // usually this one, and it then sat out up to two minutes
+        // before redialling while the winner waited. Observed as a
+        // BDD failure with the session Active, `uptime: never` and
+        // `connect_retry_timer_rem: 99`.
+        //
+        // Passive peers still don't redial — they park in Active
+        // listening.
         State::OpenSent => {
             if !peer.is_passive() {
-                peer.timer.connect_retry = Some(timer::start_connect_retry_timer(peer));
+                peer.timer.connect_retry = Some(timer::start_dial_retry_timer(peer));
             }
             State::Active
         }
@@ -3785,19 +3798,37 @@ mod fsm_idle_hold_tests {
         assert!(peer.timer.idle_hold_timer.is_some());
     }
 
-    /// RFC 4271 OpenSent TcpConnectionFails: restart the
-    /// ConnectRetryTimer, keep listening, go to Active — the timer's
-    /// Event::Start paces the redial.
+    /// RFC 4271 OpenSent TcpConnectionFails: keep listening and go to
+    /// Active with a redial pacer armed. The pacer is the *idle-hold*
+    /// interval, not the full ConnectRetryTime — asserted on the
+    /// remaining seconds, because arming the wrong one still leaves
+    /// the timer `is_some()` and would slip through a presence-only
+    /// check (which is exactly how this path stayed on 120s while its
+    /// `fsm_dial_fail` sibling moved to the short pacer).
     #[tokio::test]
-    async fn opensent_tcp_failure_goes_active_with_connect_retry() {
+    async fn opensent_tcp_failure_goes_active_with_short_redial_pacer() {
         let mut peer = test_peer(false);
         peer.state = State::OpenSent;
+        let idle_hold = peer.config.timer.idle_hold_time();
+        let connect_retry = peer.config.timer.connect_retry_time();
+        assert!(
+            idle_hold < connect_retry,
+            "test is meaningless unless the two intervals differ"
+        );
 
         let next = fsm_conn_fail(&mut peer, ConnTag::Primary);
         assert_eq!(next, State::Active);
+        let rem = peer
+            .timer
+            .connect_retry
+            .as_ref()
+            .expect("a redial pacer must be armed")
+            .rem_sec();
         assert!(
-            peer.timer.connect_retry.is_some(),
-            "ConnectRetryTimer must be restarted to pace the redial"
+            rem <= idle_hold,
+            "redial must be paced by the idle-hold interval ({idle_hold}s), got {rem}s \
+             (ConnectRetryTime is {connect_retry}s — arming that strands a collision \
+             loser in Active for minutes)"
         );
 
         peer.state = next;

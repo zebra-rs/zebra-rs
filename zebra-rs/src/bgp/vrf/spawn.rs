@@ -1573,11 +1573,12 @@ mod tests {
         assert_eq!(peer.config.timer.idle_hold_time(), 1);
 
         // A neighbor with no `timers` block is untouched: all three fall
-        // through to the documented defaults (RFC 4271 §10 suggests 120s
-        // ConnectRetry; hold-time 180s; idle-hold 5s).
+        // through to the documented defaults (ConnectRetry 30s, matching
+        // FRR rather than the 120s RFC 4271 §10 suggests; hold-time 180s;
+        // idle-hold 5s).
         let peer = vrf.peers.get(&bare).expect("bare peer inserted");
         assert!(peer.config.timer.connect_retry_time.is_none());
-        assert_eq!(peer.config.timer.connect_retry_time(), 120);
+        assert_eq!(peer.config.timer.connect_retry_time(), 30);
         assert_eq!(peer.config.timer.hold_time(), 180);
         assert_eq!(peer.config.timer.idle_hold_time(), 5);
     }

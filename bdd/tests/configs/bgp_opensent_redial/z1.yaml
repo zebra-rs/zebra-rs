@@ -1,0 +1,25 @@
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.40.1
+    neighbor:
+    # The DUT dials the scripted listener on h1 (which DOES listen on
+    # 179, unlike bgp_mp_reach_send.py), so no passive-mode here — we
+    # want this peer to be the active side that ends up in OpenSent.
+    #
+    # connect-retry-time is pinned high ON PURPOSE. The whole point of
+    # this feature is which timer paces the redial after a connection
+    # dies in OpenSent: the short idle-hold pacer (5s by default) or the
+    # ConnectRetryTimer. Pinning the latter to 120s puts the two an order
+    # of magnitude apart, so the assertion cannot be satisfied by the
+    # wrong one — and it keeps the test independent of whatever the
+    # ConnectRetryTime *default* happens to be.
+    - remote-address: 192.168.40.2
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65002
+      timers:
+        connect-retry-time: 120
