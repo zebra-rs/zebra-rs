@@ -578,6 +578,31 @@ impl FibHandle {
         }
     }
 
+    /// Enable (`Some`) or disable (`None`) the SONiC FPM tee at runtime,
+    /// driven by the `system fpm` config leaves.
+    ///
+    /// Re-pointing builds a fresh tee with an empty mirror, so routes
+    /// installed before the change would never reach the new endpoint.
+    /// The caller re-tees them (see `Rib::fpm_apply`), mirroring how the
+    /// cradle tee handles enable-after-routes.
+    pub fn set_fpm(
+        &mut self,
+        endpoint: Option<std::net::SocketAddr>,
+        rib_tx: UnboundedSender<FibMessage>,
+    ) {
+        self.fpm = endpoint.map(|addr| FpmFib::new(addr, rib_tx));
+        match &self.fpm {
+            Some(fpm) => tracing::info!("fib: FPM tee enabled -> {}", fpm.endpoint()),
+            None => tracing::info!("fib: FPM tee disabled"),
+        }
+    }
+
+    /// Re-tee one already-installed route (the enable-after-routes walk).
+    /// A no-op when the tee is off.
+    pub async fn fpm_route_resync(&self, prefix: ipnet::IpNet, entry: &RibEntry, table_id: u32) {
+        self.fpm_tee(RouteOp::Add, prefix, entry, table_id).await;
+    }
+
     /// Tee one route to SONiC's FPM southbound.
     ///
     /// Connected routes ride along with protocol routes: the kernel

@@ -185,10 +185,13 @@ impl FpmFib {
             // Replay before accepting new traffic. FPM has replace
             // semantics, so re-sending every route is safe and is what
             // the protocol asks for after a reconnect.
-            let replay = self.mirror.lock().await.messages();
+            let (replay, mirrored) = {
+                let mirror = self.mirror.lock().await;
+                (mirror.messages(), mirror.len())
+            };
             let mut failed = false;
             if !replay.is_empty() {
-                tracing::info!("fib: FPM replaying {} routes", replay.len());
+                tracing::info!("fib: FPM replaying {mirrored} routes");
                 for msg in &replay {
                     if let Err(e) = wr.write_all(msg).await {
                         tracing::warn!("fib: FPM replay failed ({e})");
@@ -236,6 +239,10 @@ impl FpmFib {
             }
 
             self.connected.store(false, Ordering::Relaxed);
+            let (sent, dropped, acks, _) = self.counters();
+            tracing::info!(
+                "fib: FPM disconnected ({sent} sent, {acks} acked, {dropped} dropped while down)"
+            );
             tokio::time::sleep(backoff).await;
         }
     }

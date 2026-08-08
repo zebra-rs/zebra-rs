@@ -32,12 +32,6 @@
 //! FRR's bytes and this encoder's into a real `fpmsyncd` and diffing the
 //! APPL_DB each produces.
 
-// A few items are still without callers: the `FPM_DEFAULT_PORT`
-// constant and `FpmFib`'s `endpoint`/`counters` accessors are for the
-// config leaf and the `show fpm` command that follow. The build runs
-// with `--deny warnings`, so they need an allow until then.
-#![allow(dead_code)]
-
 pub mod client;
 pub mod decode;
 pub mod encode;

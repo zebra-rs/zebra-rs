@@ -114,8 +114,18 @@ any rig of your own:
   and inherits the same orphaned parent. Using a config file is also
   closer to the real deployment, where a container renders its config and
   starts the daemon on it.
-* The tee is enabled with `SONIC_FPM=host:port`, the env fallback that
-  stands in for the config leaf until that lands.
+* The tee is enabled with `set system fpm enabled true` in that config.
+  Address and port default to `127.0.0.1:2620`, where fpmsyncd listens in
+  SONiC's bgp container; `system fpm address` / `system fpm port` override
+  them. (`SONIC_FPM=host:port` still works as a startup env fallback,
+  mirroring `CRADLE_GRPC`.)
+
+The rig also restarts `fpmsyncd` mid-run and checks the routes come back
+into a wiped APPL_DB. That exercises FPM's reconnect contract — *"send
+the FPM a complete copy of the forwarding table(s) when it
+reconnects"* — which is the difference between a `fpmsyncd` restart being
+a blip and it silently freezing the ASIC's view of the routing table
+until something unrelated churns.
 
 ## What the golden traces show
 
