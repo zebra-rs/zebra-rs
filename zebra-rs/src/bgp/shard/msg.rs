@@ -458,6 +458,7 @@ mod tests {
             decision: Some(PolicyDecision {
                 attr: bgp_packet::BgpAttr::default(),
                 weight: 100,
+                tag: 0,
             }),
             compute_policy: false,
         });

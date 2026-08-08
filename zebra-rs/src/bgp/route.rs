@@ -766,8 +766,14 @@ fn table_map_apply<'a>(
     let best = best?;
     // Bound name doesn't resolve to a policy: deny-all.
     let policy = tm.policy.as_ref()?;
-    let decision =
-        policy_list_apply_net(policy, prefix, (*best.attr).clone(), best.weight, router_id)?;
+    let decision = policy_list_apply_net(
+        policy,
+        prefix,
+        (*best.attr).clone(),
+        best.weight,
+        best.tag,
+        router_id,
+    )?;
     let mut mapped = best.clone();
     // Transient install-time copy — never enters the attr store or
     // the Loc-RIB, so a free-floating Arc is fine.
@@ -1488,6 +1494,10 @@ pub struct BgpRib {
     pub router_id: Ipv4Addr,
     // Weight
     pub weight: u32,
+    /// Route tag stamped by `set tag`, kept here so an egress policy can
+    /// match what an ingress policy set. Not carried on the wire; 0 is
+    /// untagged.
+    pub tag: u32,
     // Route type.
     pub typ: BgpRibType,
     // Whether this cand is currently the best path.
@@ -1659,6 +1669,9 @@ impl BgpRib {
             router_id,
             attr,
             weight,
+            // A newly-received route starts untagged; ingress policy is
+            // what stamps it.
+            tag: 0,
             typ: rib_type,
             best_path: false,
             best_reason: Reason::NotSelected,
@@ -2971,6 +2984,9 @@ pub fn route_apply_policy_in(
         nlri,
         bgp_attr,
         weight,
+        // Ingress: the route arrives untagged and inbound policy is what
+        // may stamp it.
+        0,
     )
 }
 
@@ -2991,6 +3007,7 @@ pub fn apply_policy_net(
     prefix: IpNet,
     bgp_attr: BgpAttr,
     weight: u32,
+    tag: u32,
 ) -> Option<PolicyDecision> {
     if prefix_cfg.name.is_some() {
         let Some(prefix_set) = &prefix_cfg.prefix_set else {
@@ -3004,11 +3021,12 @@ pub fn apply_policy_net(
         let Some(policy_list) = &policy_cfg.policy_list else {
             return None;
         };
-        return policy_list_apply_net(policy_list, prefix, bgp_attr, weight, router_id);
+        return policy_list_apply_net(policy_list, prefix, bgp_attr, weight, tag, router_id);
     }
     Some(PolicyDecision {
         attr: bgp_attr,
         weight,
+        tag,
     })
 }
 
@@ -3021,6 +3039,7 @@ pub fn apply_policy_in_pure(
     nlri: &Ipv4Nlri,
     bgp_attr: BgpAttr,
     weight: u32,
+    tag: u32,
 ) -> Option<PolicyDecision> {
     apply_policy_net(
         prefix_cfg,
@@ -3029,6 +3048,7 @@ pub fn apply_policy_in_pure(
         IpNet::V4(nlri.prefix),
         bgp_attr,
         weight,
+        tag,
     )
 }
 
@@ -3054,6 +3074,9 @@ pub fn route_apply_policy_in_evpn(
     Some(PolicyDecision {
         attr: bgp_attr,
         weight,
+        // Route tags are a v4/v6-unicast concept here; the EVPN paths
+        // neither set nor match them.
+        tag: 0,
     })
 }
 
@@ -3082,6 +3105,7 @@ pub fn route_apply_policy_out_evpn(
             Some(PolicyDecision {
                 attr: bgp_attr,
                 weight,
+                tag: 0,
             })
         }
     };
@@ -3125,6 +3149,7 @@ pub fn route_apply_policy_out(
     nlri: &Ipv4Nlri,
     bgp_attr: BgpAttr,
     weight: u32,
+    tag: u32,
 ) -> Option<PolicyDecision> {
     let decision = apply_policy_net(
         &ctx.out_policy.prefix_set,
@@ -3133,6 +3158,7 @@ pub fn route_apply_policy_out(
         IpNet::V4(nlri.prefix),
         bgp_attr,
         weight,
+        tag,
     );
     // Egress (Adj-RIB-Out) Lua hook after native out-policy. Runs on the
     // canonical member's encode; under Model B a scripted peer is a
@@ -3155,6 +3181,7 @@ pub fn route_apply_policy_out_at(
     nlri: &Ipv4Nlri,
     bgp_attr: BgpAttr,
     weight: u32,
+    tag: u32,
 ) -> Option<PolicyDecision> {
     apply_policy_net(
         peer.prefix_set_at(afi_safi, InOut::Output),
@@ -3163,6 +3190,7 @@ pub fn route_apply_policy_out_at(
         IpNet::V4(nlri.prefix),
         bgp_attr,
         weight,
+        tag,
     )
 }
 
@@ -3176,6 +3204,7 @@ pub fn route_apply_policy_in_v6(
     nlri: &Ipv6Nlri,
     bgp_attr: BgpAttr,
     weight: u32,
+    tag: u32,
 ) -> Option<PolicyDecision> {
     apply_policy_net(
         peer.prefix_set_at(afi_safi, InOut::Input),
@@ -3184,6 +3213,7 @@ pub fn route_apply_policy_in_v6(
         IpNet::V6(nlri.prefix),
         bgp_attr,
         weight,
+        tag,
     )
 }
 
@@ -3195,6 +3225,7 @@ pub fn route_apply_policy_out_v6(
     nlri: &Ipv6Nlri,
     bgp_attr: BgpAttr,
     weight: u32,
+    tag: u32,
 ) -> Option<PolicyDecision> {
     apply_policy_net(
         peer.prefix_set_at(afi_safi, InOut::Output),
@@ -3203,6 +3234,7 @@ pub fn route_apply_policy_out_v6(
         IpNet::V6(nlri.prefix),
         bgp_attr,
         weight,
+        tag,
     )
 }
 
@@ -4322,9 +4354,9 @@ fn compute_advertise_outcome(
         // off-main in a shard worker); VPNv4 reads its own per-AFI Output
         // policy from the peer.
         let decision = if afi_safi == AfiSafi::new(Afi::Ip, Safi::Unicast) {
-            route_apply_policy_out(&ctx, &nlri, attr, best.weight)
+            route_apply_policy_out(&ctx, &nlri, attr, best.weight, best.tag)
         } else {
-            route_apply_policy_out_at(peer, afi_safi, &nlri, attr, best.weight)
+            route_apply_policy_out_at(peer, afi_safi, &nlri, attr, best.weight, best.tag)
         };
         if let Some(decision) = decision {
             bgp_adj_out_trace!(peer, prefix = %prefix, "advertise");
@@ -4809,9 +4841,9 @@ impl BatchAfi for V4Batch {
         let (afi, safi) = Self::afi_safi(rd);
         let afi_safi = AfiSafi::new(afi, safi);
         let decision = if afi_safi == AfiSafi::new(Afi::Ip, Safi::Unicast) {
-            route_apply_policy_out(&ctx, &nlri, attr, rib.weight)
+            route_apply_policy_out(&ctx, &nlri, attr, rib.weight, rib.tag)
         } else {
-            route_apply_policy_out_at(peer, afi_safi, &nlri, attr, rib.weight)
+            route_apply_policy_out_at(peer, afi_safi, &nlri, attr, rib.weight, rib.tag)
         };
         let Some(decision) = decision else {
             return;
@@ -4863,7 +4895,8 @@ fn compute_advertise_outcome_v6(
 ) -> AdvertiseOutcome<Ipv6Nlri> {
     if let Some((nlri, attr)) = route_update_ipv6(peer, prefix, best, bgp, add_path) {
         // Per-AFI Output policy: v6-unicast or VPNv6, picked by the caller.
-        if let Some(decision) = route_apply_policy_out_v6(peer, afi_safi, &nlri, attr, best.weight)
+        if let Some(decision) =
+            route_apply_policy_out_v6(peer, afi_safi, &nlri, attr, best.weight, best.tag)
         {
             AdvertiseOutcome::Advertise(nlri, decision.attr)
         } else {
@@ -5005,7 +5038,8 @@ impl BatchAfi for V6Batch {
         // the same way.
         let (afi, safi) = Self::afi_safi(rd);
         let afi_safi = AfiSafi::new(afi, safi);
-        let Some(decision) = route_apply_policy_out_v6(peer, afi_safi, &nlri, attr, rib.weight)
+        let Some(decision) =
+            route_apply_policy_out_v6(peer, afi_safi, &nlri, attr, rib.weight, rib.tag)
         else {
             return;
         };
@@ -5854,9 +5888,16 @@ fn route_soft_out_peer_table(
         // v4-unicast reads the cached snapshot; VPNv4 reads its own per-AFI
         // Output policy from the peer.
         let decision = if rd.is_some() {
-            route_apply_policy_out_at(peer, AfiSafi::new(afi, safi), &nlri, attr, rib.weight)
+            route_apply_policy_out_at(
+                peer,
+                AfiSafi::new(afi, safi),
+                &nlri,
+                attr,
+                rib.weight,
+                rib.tag,
+            )
         } else {
-            route_apply_policy_out(&ctx, &nlri, attr, rib.weight)
+            route_apply_policy_out(&ctx, &nlri, attr, rib.weight, rib.tag)
         };
         let Some(decision) = decision else {
             continue;
@@ -6159,6 +6200,7 @@ fn route_soft_in_peer_table(
                     let mut new_rib = stored.clone();
                     new_rib.attr = bgp.shard.intern(decision.attr);
                     new_rib.weight = decision.weight;
+                    new_rib.tag = decision.tag;
                     let (_, selected, next_id) = bgp.shard.update(rd, prefix, new_rib.clone());
 
                     // Policy-in change may have shifted the best path
@@ -6427,7 +6469,7 @@ pub fn route_ipv6_update(
     };
     let decision = {
         let peer = peers.get_by_idx(ident).expect("peer must exist");
-        route_apply_policy_in_v6(peer, afi_safi, nlri, attr.clone(), 0)
+        route_apply_policy_in_v6(peer, afi_safi, nlri, attr.clone(), 0, 0)
     };
 
     let dep = match rd {
@@ -6764,6 +6806,8 @@ pub fn route_labelv4_update(
         Some(decision) => {
             rib.attr = bgp.shard.intern(decision.attr);
             rib.weight = decision.weight;
+            rib.tag = decision.tag;
+            rib.tag = decision.tag;
             nht_track_received(bgp, &mut rib, dep.clone());
             // Allocate a per-prefix local label so re-advertising with
             // next-hop-self forwards via a swap ILM. `None`
@@ -6855,6 +6899,7 @@ pub fn route_labelv6_update(
             &lu.nlri,
             attr.clone(),
             0,
+            0,
         )
     };
 
@@ -6886,6 +6931,8 @@ pub fn route_labelv6_update(
         Some(decision) => {
             rib.attr = bgp.shard.intern(decision.attr);
             rib.weight = decision.weight;
+            rib.tag = decision.tag;
+            rib.tag = decision.tag;
             nht_track_received(bgp, &mut rib, dep.clone());
             rib.local_label = bgp
                 .shard
@@ -8273,6 +8320,7 @@ pub fn route_evpn_update(
     };
     rib.attr = bgp.attr_store.intern(decision.attr);
     rib.weight = decision.weight;
+    rib.tag = decision.tag;
 
     // Type-5: register the PE next-hop with NHT so the underlay
     // resolves (transport is empty at receive — resolution is async)
@@ -12426,6 +12474,7 @@ impl LabeledAfi for LabeledV4 {
             nlri,
             attr,
             weight,
+            0,
         )
     }
     fn reach(nhop: IpAddr, label: Label, nlri: Ipv4Nlri) -> MpReachAttr {
@@ -12490,6 +12539,7 @@ impl LabeledAfi for LabeledV6 {
             nlri,
             attr,
             weight,
+            0,
         )
     }
     fn reach(nhop: IpAddr, label: Label, nlri: Ipv6Nlri) -> MpReachAttr {
@@ -12900,6 +12950,22 @@ impl Peer {
 pub struct PolicyDecision {
     pub attr: BgpAttr,
     pub weight: u32,
+    /// Route tag. Non-wire, and threaded exactly like `weight`: set by
+    /// `set tag`, matched by `match tag`, and persisted on the RIB entry
+    /// so an egress policy can match what an ingress policy stamped.
+    /// 0 means untagged.
+    pub tag: u32,
+}
+
+impl PolicyDecision {
+    #[cfg(test)]
+    fn local_pref_or_zero(&self) -> u32 {
+        self.attr
+            .local_pref
+            .as_ref()
+            .map(|l| l.local_pref)
+            .unwrap_or(0)
+    }
 }
 
 /// IPv4-unicast convenience wrapper over [`policy_list_apply_net`].
@@ -12918,6 +12984,7 @@ pub fn policy_list_apply(
         IpNet::V4(nlri.prefix),
         bgp_attr,
         weight,
+        0,
         local_addr,
     )
 }
@@ -12931,15 +12998,17 @@ pub fn policy_list_apply_net(
     prefix: IpNet,
     bgp_attr: BgpAttr,
     weight: u32,
+    tag: u32,
     local_addr: Ipv4Addr,
 ) -> Option<PolicyDecision> {
     use crate::policy::{PolicyAction, SetNextHop};
     let mut decision = PolicyDecision {
         attr: bgp_attr,
         weight,
+        tag,
     };
     for entry in policy_list.entry.values() {
-        if !entry_matches(entry, prefix, &decision.attr, decision.weight) {
+        if !entry_matches(entry, prefix, &decision.attr, decision.weight, decision.tag) {
             continue;
         }
         // `call <policy>`: run the callee after this entry's match
@@ -12967,8 +13036,14 @@ pub fn policy_list_apply_net(
             // this thin. `deep_call_chain_has_no_depth_limit` exercises a
             // 256-deep chain; revisit if a real configuration ever
             // approaches a depth where the stack is a concern.
-            decision =
-                policy_list_apply_net(callee, prefix, decision.attr, decision.weight, local_addr)?;
+            decision = policy_list_apply_net(
+                callee,
+                prefix,
+                decision.attr,
+                decision.weight,
+                decision.tag,
+                local_addr,
+            )?;
         }
         match entry.action {
             PolicyAction::Deny => {
@@ -12979,6 +13054,9 @@ pub fn policy_list_apply_net(
                 // Apply the entry's set clauses to the working
                 // attribute, then either return (Permit) or fall
                 // through to the next entry (Next).
+                if let Some(tag) = entry.set_tag {
+                    decision.tag = tag;
+                }
                 if let Some(action) = &entry.local_pref {
                     let current = decision
                         .attr
@@ -13045,7 +13123,13 @@ fn entry_matches(
     prefix: IpNet,
     bgp_attr: &BgpAttr,
     weight: u32,
+    tag: u32,
 ) -> bool {
+    if let Some(want) = entry.match_tag
+        && want != tag
+    {
+        return false;
+    }
     if let Some(prefix_set) = &entry.prefix_set
         && !prefix_set.matches(prefix)
     {
@@ -13187,6 +13271,9 @@ pub fn policy_list_apply_evpn(
     let mut decision = PolicyDecision {
         attr: bgp_attr,
         weight,
+        // See the note in route_apply_policy_in_evpn: EVPN does not
+        // carry tags.
+        tag: 0,
     };
     for entry in policy_list.entry.values() {
         if !entry_matches_evpn(entry, route, &decision.attr, decision.weight) {
@@ -13195,6 +13282,9 @@ pub fn policy_list_apply_evpn(
         match entry.action {
             PolicyAction::Deny => return None,
             PolicyAction::Permit | PolicyAction::Next => {
+                if let Some(tag) = entry.set_tag {
+                    decision.tag = tag;
+                }
                 if let Some(action) = &entry.local_pref {
                     let current = decision
                         .attr
@@ -13601,7 +13691,8 @@ pub(super) fn route_sync_v4_chunk(peer: &mut Peer, bgp: &mut BgpTop, chunk: usiz
             let Some((nlri, attr)) = route_update_ipv4(&ctx, &prefix, &rib, add_path) else {
                 continue;
             };
-            let Some(decision) = route_apply_policy_out(&ctx, &nlri, attr, rib.weight) else {
+            let Some(decision) = route_apply_policy_out(&ctx, &nlri, attr, rib.weight, rib.tag)
+            else {
                 continue;
             };
             rib.attr = bgp.attr_store.intern(decision.attr);
@@ -13672,7 +13763,7 @@ pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut BgpTop) {
             continue;
         };
 
-        let Some(decision) = route_apply_policy_out(&ctx, &nlri, attr, rib.weight) else {
+        let Some(decision) = route_apply_policy_out(&ctx, &nlri, attr, rib.weight, rib.tag) else {
             continue;
         };
 
@@ -13766,6 +13857,7 @@ pub fn route_sync_ipv6(peer: &mut Peer, bgp: &mut BgpTop) {
             &nlri,
             attr,
             rib.weight,
+            rib.tag,
         ) else {
             continue;
         };
@@ -13832,6 +13924,7 @@ pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut BgpTop) {
                 &nlri,
                 attr,
                 rib.weight,
+                rib.tag,
             ) else {
                 continue;
             };
@@ -13912,6 +14005,7 @@ pub fn route_sync_vpnv6(peer: &mut Peer, bgp: &mut BgpTop) {
                 &nlri,
                 attr,
                 rib.weight,
+                rib.tag,
             ) else {
                 continue;
             };
@@ -14157,6 +14251,7 @@ pub fn route_sync_labelv4(peer: &mut Peer, bgp: &mut BgpTop) {
             &nlri,
             attr,
             best.weight,
+            best.tag,
         ) else {
             continue;
         };
@@ -14205,6 +14300,7 @@ pub fn route_sync_labelv6(peer: &mut Peer, bgp: &mut BgpTop) {
             &nlri,
             attr,
             best.weight,
+            best.tag,
         ) else {
             continue;
         };
@@ -18905,6 +19001,107 @@ mod policy_apply_tests {
     use super::*;
     use crate::policy::{AsPathMatcher, AsPathSet, NumericMatch, PolicyList};
 
+    /// `set tag` / `match tag`. The tag is a non-wire per-route marker:
+    /// SONiC stamps it on ingress (FROM_BGP_PEER) and matches it on
+    /// egress (the TSA route-map, and CHECK_IDF_ISOLATION which egress
+    /// calls), so the value has to survive on the route between the two.
+    mod tag_semantics {
+        use super::*;
+        use crate::policy::{NumericSet, PolicyAction, PolicyList};
+
+        fn policy(
+            set_tag: Option<u32>,
+            match_tag: Option<u32>,
+            action: PolicyAction,
+        ) -> PolicyList {
+            let mut list = PolicyList::default();
+            let entry = list.entry(10);
+            entry.action = action;
+            entry.set_tag = set_tag;
+            entry.match_tag = match_tag;
+            list
+        }
+
+        fn apply(list: &PolicyList, tag_in: u32) -> Option<super::super::PolicyDecision> {
+            super::super::policy_list_apply_net(
+                list,
+                IpNet::V4(Ipv4Net::from_str("10.0.0.0/24").unwrap()),
+                BgpAttr::new(),
+                0,
+                tag_in,
+                std::net::Ipv4Addr::UNSPECIFIED,
+            )
+        }
+
+        #[test]
+        fn set_tag_stamps_the_route() {
+            let out = apply(&policy(Some(202), None, PolicyAction::Permit), 0).expect("permit");
+            assert_eq!(out.tag, 202);
+        }
+
+        #[test]
+        fn match_tag_matches_what_was_set() {
+            let list = policy(None, Some(202), PolicyAction::Permit);
+            assert!(apply(&list, 202).is_some(), "matching tag must permit");
+        }
+
+        #[test]
+        fn match_tag_does_not_match_a_different_tag() {
+            // The entry does not match, so the walk falls off the end and
+            // the implicit default-deny applies.
+            let list = policy(None, Some(202), PolicyAction::Permit);
+            assert!(
+                apply(&list, 203).is_none(),
+                "a non-matching tag must not satisfy the entry"
+            );
+        }
+
+        #[test]
+        fn untagged_route_does_not_match_a_tag() {
+            let list = policy(None, Some(202), PolicyAction::Permit);
+            assert!(
+                apply(&list, 0).is_none(),
+                "0 is untagged and matches nothing"
+            );
+        }
+
+        /// The property the feature exists for: a tag stamped by one
+        /// policy is visible to a later one. In production the two are
+        /// the ingress and egress policies with the RIB in between; here
+        /// the RIB step is the `tag` that `apply` threads back in.
+        #[test]
+        fn tag_survives_from_one_policy_to_the_next() {
+            let ingress = policy(Some(202), None, PolicyAction::Permit);
+            let stamped = apply(&ingress, 0).expect("ingress permits").tag;
+            assert_eq!(stamped, 202);
+
+            let egress = policy(None, Some(202), PolicyAction::Permit);
+            assert!(
+                apply(&egress, stamped).is_some(),
+                "egress must see the tag ingress stamped — this is what \
+                 SONiC's TSA and IDF-isolation route-maps rely on"
+            );
+        }
+
+        /// `set tag` combined with `action next`, the shape the SONiC
+        /// allow-list template uses: the tag is stamped and evaluation
+        /// still falls through.
+        #[test]
+        fn set_tag_with_action_next_falls_through() {
+            let mut list = policy(Some(202), None, PolicyAction::Next);
+            let entry = list.entry(20);
+            entry.action = PolicyAction::Permit;
+            entry.local_pref = Some(NumericSet::Set(150));
+            let out = apply(&list, 0).expect("chain permits");
+            assert_eq!(out.tag, 202, "tag stamped by the first entry");
+            assert_eq!(
+                out.local_pref_or_zero(),
+                150,
+                "evaluation continued past the tagging entry"
+            );
+        }
+    }
+
     /// `call` semantics, which are asymmetric and easy to get subtly
     /// wrong: a callee deny denies the caller, but a callee permit does
     /// NOT terminate the caller — it only reports "not denied".
@@ -22152,13 +22349,14 @@ mod local_as_tests {
 
         // VPNv4: the bound deny policy filters the route out.
         assert!(
-            super::route_apply_policy_out_at(&peer, vpnv4, &nlri, BgpAttr::default(), 0).is_none(),
+            super::route_apply_policy_out_at(&peer, vpnv4, &nlri, BgpAttr::default(), 0, 0)
+                .is_none(),
             "VPNv4 Output policy (deny) must filter the route",
         );
         // v4-unicast: no binding for this family → default permit; the
         // VPNv4 deny must not leak across families.
         assert!(
-            super::route_apply_policy_out_at(&peer, v4u, &nlri, BgpAttr::default(), 0).is_some(),
+            super::route_apply_policy_out_at(&peer, v4u, &nlri, BgpAttr::default(), 0, 0).is_some(),
             "v4-unicast has no Output policy → permit (no cross-family leak)",
         );
     }

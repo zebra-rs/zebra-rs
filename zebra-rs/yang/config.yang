@@ -5344,6 +5344,16 @@ module config {
               enum incomplete;
             }
           }
+          leaf "tag" {
+            ext:help "Match the route tag";
+            type uint32;
+            description
+              "Match routes carrying this tag. The tag is a non-wire
+               per-route marker stamped by `set tag`, kept on the route
+               in the RIB so a policy in one direction can match what a
+               policy in the other direction set. 0 means untagged and
+               cannot be matched, matching FRR.";
+          }
           leaf "color" {
             ext:help "Match the BGP Color community";
             type uint32;
@@ -5517,6 +5527,15 @@ module config {
             description
               "Set the route's ORIGIN attribute. Mirrors the
                three values that `match origin` accepts.";
+          }
+          leaf "tag" {
+            ext:help "Set the route tag";
+            type uint32;
+            description
+              "Stamp the route with this tag. The tag is not carried on
+               the wire — it rides with the route in the RIB so a later
+               policy, including one in the other direction, can match
+               it. 0 means untagged.";
           }
           leaf "color" {
             ext:help "Set the BGP Color community";
