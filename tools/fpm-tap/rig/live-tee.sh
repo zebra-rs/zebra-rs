@@ -105,6 +105,16 @@ set router static ipv4 route 10.100.2.0/24 nexthop 10.0.0.2
 set router static ipv4 route 10.100.2.0/24 nexthop 10.0.1.2
 set router static ipv6 route 2001:db8:100::/64 nexthop 2001:db8::2
 EOF
+# A VRF too. zebra-rs creates the Vrf1 device and picks its kernel table
+# id itself; the tee resolves that table back to the device's ifindex,
+# which is what FPM's table field actually carries. The name must start
+# with "Vrf" — fpmsyncd rejects anything else (routesync.cpp:937-943).
+cat >> "$SOCKDIR/routes.conf" <<'EOF'
+set vrf Vrf1
+set interface dum2 vrf Vrf1
+set interface dum2 ipv4 address 10.0.2.1/24
+set router static vrf Vrf1 ipv4 route 10.200.0.0/24 nexthop 10.0.2.2
+EOF
 docker cp "$SOCKDIR/routes.conf" "$CONTAINER:/tmp/routes.conf" >/dev/null
 
 # The tee is turned on by `set system fpm enabled true` in the config
@@ -128,7 +138,11 @@ docker exec "$CONTAINER" ip route show 2>&1 | head -8 || true
 echo
 echo "live-tee: APPL_DB — what fpmsyncd received from zebra-rs"
 found=0
-for p in 10.100.0.0/24 10.100.2.0/24 2001:db8:100::/64; do
+# The VRF route is keyed by VRF name, not by table: fpmsyncd resolves the
+# ifindex we sent to an interface name and prefixes the row with it
+# (routesync.cpp:931-943). Seeing "Vrf1:" here is the end-to-end proof
+# that the table field carried an ifindex and not a table id.
+for p in 10.100.0.0/24 10.100.2.0/24 2001:db8:100::/64 Vrf1:10.200.0.0/24; do
     key="_ROUTE_TABLE:$p"
     if [ "$(docker exec "$CONTAINER" redis-cli -s /var/run/redis/redis.sock -n 0 EXISTS "$key")" = "1" ]; then
         echo "== $p"
@@ -178,7 +192,7 @@ docker exec -d "$CONTAINER" bash -c 'fpmsyncd > /tmp/fpmsyncd2.log 2>&1'
 sleep 6
 
 replayed=0
-for p in 10.100.0.0/24 10.100.2.0/24 2001:db8:100::/64; do
+for p in 10.100.0.0/24 10.100.2.0/24 2001:db8:100::/64 Vrf1:10.200.0.0/24; do
     if [ "$(docker exec "$CONTAINER" redis-cli -s /var/run/redis/redis.sock -n 0 EXISTS "_ROUTE_TABLE:$p")" = "1" ]; then
         replayed=$((replayed + 1))
     else
@@ -186,18 +200,18 @@ for p in 10.100.0.0/24 10.100.2.0/24 2001:db8:100::/64; do
     fi
 done
 docker exec "$CONTAINER" bash -c 'grep -E "FPM (replaying|disconnected|connected)" /tmp/zebra-rs.log | tail -4' || true
-echo "  ($replayed of 3 routes replayed into a wiped APPL_DB)"
+echo "  ($replayed of 4 routes replayed into a wiped APPL_DB)"
 
 echo
-if [[ "$found" -eq 3 && "$acks" -ge 3 && "$unknown" -eq 0 && "$replayed" -eq 3 ]]; then
-    echo "PASS — zebra-rs programmed all 3 routes into APPL_DB over FPM,"
-    echo "       processed $acks offload acknowledgements back, and"
-    echo "       replayed all 3 after a fpmsyncd restart"
+if [[ "$found" -eq 4 && "$acks" -ge 4 && "$unknown" -eq 0 && "$replayed" -eq 4 ]]; then
+    echo "PASS — zebra-rs programmed all 4 routes (incl. a VRF route) into"
+    echo "       APPL_DB over FPM, processed $acks offload acknowledgements"
+    echo "       back, and replayed all 4 after a fpmsyncd restart"
     exit 0
 fi
 if [[ "$found" -eq 3 ]]; then
     echo "FAIL — initial program worked, but a later stage did not"
-    echo "       ($acks acks, $unknown unmatched, $replayed/3 replayed)"
+    echo "       ($acks acks, $unknown unmatched, $replayed/4 replayed)"
     exit 1
 fi
 echo "FAIL — only $found of 3 routes reached APPL_DB"

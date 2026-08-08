@@ -3127,6 +3127,9 @@ impl Rib {
                     };
                     (ifindex, table_id, true)
                 };
+                // Mirror the table -> ifindex mapping into the FIB layer,
+                // which needs the ifindex to tee this VRF's routes to FPM.
+                self.fib_handle.register_vrf_ifindex(table_id, ifindex);
                 self.vrfs.insert(
                     name.clone(),
                     Vrf {
@@ -3305,6 +3308,7 @@ impl Rib {
                 // populates these on install; a follow-up will add
                 // the matching withdraw walk.
                 self.vrf_tables.remove(&vrf.table_id);
+                self.fib_handle.unregister_vrf_ifindex(vrf.table_id);
                 // Nexthops tracked in the dropped table no longer
                 // resolve — push the unreachable flip to their watchers.
                 self.nht_recompute_and_notify();
@@ -4116,22 +4120,43 @@ impl Rib {
     /// verdict is about.
     fn route_offload(&mut self, offload: crate::fib::message::RouteOffload) {
         use super::entry::mark_selected_offloaded;
-        // Only the default VRF is teed today (the FPM tee skips other
-        // tables until the table-id -> VRF-ifindex mapping exists), so an
-        // acknowledgement for anything else is unexpected rather than
-        // routine.
-        if offload.vrf_ifindex != 0 {
-            tracing::debug!(
-                "rib: offload ack for {} in VRF ifindex {} ignored (VRF tee not wired)",
-                offload.prefix,
-                offload.vrf_ifindex
-            );
-            return;
-        }
+        // The acknowledgement names the VRF by *device ifindex*, which is
+        // what went out on the wire; map it back to the table the route
+        // actually lives in. 0 is the default VRF. The VRF list is a
+        // handful of entries, so a scan beats maintaining a second map
+        // that could fall out of step with `vrfs`.
+        let table_id = if offload.vrf_ifindex == 0 {
+            None
+        } else {
+            match self
+                .vrfs
+                .values()
+                .find(|v| v.ifindex == offload.vrf_ifindex)
+                .map(|v| v.table_id)
+            {
+                Some(id) => Some(id),
+                None => {
+                    tracing::debug!(
+                        "rib: offload ack for {} names unknown VRF ifindex {}",
+                        offload.prefix,
+                        offload.vrf_ifindex
+                    );
+                    return;
+                }
+            }
+        };
 
-        let entries = match offload.prefix {
-            IpNet::V4(p) => self.table.get_mut(&p),
-            IpNet::V6(p) => self.table_v6.get_mut(&p),
+        let entries = match (table_id, offload.prefix) {
+            (None, IpNet::V4(p)) => self.table.get_mut(&p),
+            (None, IpNet::V6(p)) => self.table_v6.get_mut(&p),
+            (Some(id), IpNet::V4(p)) => self
+                .vrf_tables
+                .get_mut(&id)
+                .and_then(|t| t.table.get_mut(&p)),
+            (Some(id), IpNet::V6(p)) => self
+                .vrf_tables
+                .get_mut(&id)
+                .and_then(|t| t.table_v6.get_mut(&p)),
         };
         let Some(entries) = entries else {
             // Routine rather than alarming: fpmsyncd also acknowledges
@@ -4621,6 +4646,27 @@ impl Rib {
                     .fpm_route_resync(IpNet::V6(prefix), entry, RT_TABLE_MAIN)
                     .await;
                 count += 1;
+            }
+        }
+        // VRF tables as well: the tee resolves each table id to its VRF
+        // device ifindex, so these carry the same encoding they would
+        // have had if installed while the tee was already up.
+        for (table_id, tables) in self.vrf_tables.iter() {
+            for (prefix, entries) in tables.table.iter() {
+                for entry in entries.iter().filter(|e| e.is_selected() && e.is_fib()) {
+                    self.fib_handle
+                        .fpm_route_resync(IpNet::V4(prefix), entry, *table_id)
+                        .await;
+                    count += 1;
+                }
+            }
+            for (prefix, entries) in tables.table_v6.iter() {
+                for entry in entries.iter().filter(|e| e.is_selected() && e.is_fib()) {
+                    self.fib_handle
+                        .fpm_route_resync(IpNet::V6(prefix), entry, *table_id)
+                        .await;
+                    count += 1;
+                }
             }
         }
         if count > 0 {
