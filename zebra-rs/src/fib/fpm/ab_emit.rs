@@ -164,11 +164,13 @@ fn sequence() -> Vec<(RouteOp, IpNet, RibEntry)> {
 #[ignore = "fixture generator for rig/ab-diff.sh; run explicitly with --ignored"]
 fn emit_capture_for_ab_diff() {
     let out = std::env::var("FPM_AB_OUT").unwrap_or_else(|_| {
-        format!("{}/../target/zebra-rs-basic.fpm", env!("CARGO_MANIFEST_DIR"))
+        format!(
+            "{}/../target/zebra-rs-basic.fpm",
+            env!("CARGO_MANIFEST_DIR")
+        )
     });
 
-    let mut f = std::fs::File::create(&out)
-        .unwrap_or_else(|e| panic!("cannot create {out}: {e}"));
+    let mut f = std::fs::File::create(&out).unwrap_or_else(|e| panic!("cannot create {out}: {e}"));
     f.write_all(b"FPMTAP\x01\x00").unwrap();
 
     let mut count = 0usize;

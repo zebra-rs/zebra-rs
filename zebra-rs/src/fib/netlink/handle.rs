@@ -31,6 +31,7 @@ use rtnetlink::{
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::fib::cradle::CradleFib;
+use crate::fib::fpm::{FpmFib, RouteOp, encode_route};
 use crate::fib::{FibAddr, FibLink, FibMdbEntry, FibMessage, FibNeighbor, FibRoute};
 use crate::rib::entry::RibEntry;
 use crate::rib::inst::{IlmEntry, IlmType};
@@ -369,6 +370,10 @@ pub struct FibHandle {
     /// from `Rib::cradle_grpc_config_exec`), with `CRADLE_GRPC` as an env
     /// fallback.
     pub cradle: Option<CradleFib>,
+    /// Optional tee of route installs into SONiC's FPM southbound
+    /// (`fpmsyncd` -> APPL_DB -> orchagent -> SAI). Enabled by
+    /// `SONIC_FPM=host:port` for now; a config leaf follows.
+    pub fpm: Option<FpmFib>,
 }
 
 /// A cradle-tee route member — mirrors `crate::fib::cradle::Member`:
@@ -559,6 +564,7 @@ impl FibHandle {
             use_nhid,
             vni_ifindex_map: BTreeMap::new(),
             cradle: CradleFib::from_env(),
+            fpm: FpmFib::from_env(),
         })
     }
 
@@ -569,6 +575,48 @@ impl FibHandle {
         match &self.cradle {
             Some(cradle) => tracing::info!("fib: cradle eBPF tee enabled -> {}", cradle.endpoint()),
             None => tracing::info!("fib: cradle eBPF tee disabled"),
+        }
+    }
+
+    /// Tee one route to SONiC's FPM southbound.
+    ///
+    /// Connected routes ride along with protocol routes: the kernel
+    /// originates them, but the ASIC still needs them or the switch
+    /// cannot deliver to directly-attached hosts — the same reasoning as
+    /// the cradle tee. Kernel-learned routes stay out; they would echo
+    /// back what SONiC itself installed.
+    async fn fpm_tee(&self, op: RouteOp, prefix: ipnet::IpNet, entry: &RibEntry, table_id: u32) {
+        let Some(fpm) = &self.fpm else {
+            return;
+        };
+        if !entry.is_protocol() && !matches!(entry.rtype, RibType::Connected) {
+            return;
+        }
+
+        // FPM's table field is a VRF *device ifindex*, not a kernel
+        // routing-table id (dplane_fpm_sonic.c:1232 — "Put vrf if_index
+        // instead of table id"), and `fpmsyncd` resolves it with
+        // getIfName(). zebra-rs works in table ids, so only the default
+        // VRF can be translated today. Sending the table id for a real
+        // VRF would make fpmsyncd name the wrong interface, so those
+        // routes are skipped until the mapping exists — a missing route
+        // is recoverable, a misattributed one is not.
+        let vrf_ifindex = match table_id {
+            0 | crate::rib::inst::RT_TABLE_MAIN => 0,
+            other => {
+                tracing::debug!(
+                    "fib: FPM tee skipping {prefix} in table {other} (VRF ifindex mapping not wired yet)"
+                );
+                return;
+            }
+        };
+
+        let Some(msg) = encode_route(op, &prefix, entry, vrf_ifindex) else {
+            return;
+        };
+        match op {
+            RouteOp::Add => fpm.route_add(prefix, vrf_ifindex, msg).await,
+            RouteOp::Del => fpm.route_del(&prefix, vrf_ifindex, msg).await,
         }
     }
 
@@ -1046,6 +1094,8 @@ impl FibHandle {
                 cradle.route_install(*prefix, table_id, members).await;
             }
         }
+        self.fpm_tee(RouteOp::Add, (*prefix).into(), entry, table_id)
+            .await;
         if !entry.is_protocol() {
             return true;
         }
@@ -1274,6 +1324,8 @@ impl FibHandle {
         {
             cradle.route_del(*prefix, table_id).await;
         }
+        self.fpm_tee(RouteOp::Del, (*prefix).into(), entry, table_id)
+            .await;
         if !entry.is_protocol() {
             return;
         }
@@ -1588,6 +1640,8 @@ impl FibHandle {
                 cradle.route_install6(*prefix, table_id, members).await;
             }
         }
+        self.fpm_tee(RouteOp::Add, (*prefix).into(), entry, table_id)
+            .await;
         if !entry.is_protocol() {
             return true;
         }
@@ -1836,6 +1890,8 @@ impl FibHandle {
                 cradle.static_sid_uninstall(*prefix).await;
             }
         }
+        self.fpm_tee(RouteOp::Del, (*prefix).into(), entry, table_id)
+            .await;
         if !entry.is_protocol() {
             return;
         }
