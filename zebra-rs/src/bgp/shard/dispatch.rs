@@ -207,7 +207,8 @@ impl BgpShard {
             let Some((nlri, attr)) = route_update_ipv4(&ctx, &prefix, &rib, params.add_path) else {
                 continue;
             };
-            let Some(decision) = route_apply_policy_out(&ctx, &nlri, attr, rib.weight) else {
+            let Some(decision) = route_apply_policy_out(&ctx, &nlri, attr, rib.weight, rib.tag)
+            else {
                 continue;
             };
             let arc = self.intern(decision.attr);
@@ -384,6 +385,7 @@ impl BgpShard {
                     ipnet::IpNet::V4(nlri.prefix),
                     (*rib.attr).clone(),
                     0,
+                    rib.tag,
                 ),
                 None => crate::bgp::route::apply_policy_net(
                     &Default::default(),
@@ -392,6 +394,7 @@ impl BgpShard {
                     ipnet::IpNet::V4(nlri.prefix),
                     (*rib.attr).clone(),
                     0,
+                    rib.tag,
                 ),
             }
         } else {
@@ -948,6 +951,7 @@ impl BgpShard {
                         ipnet::IpNet::V4(prefix),
                         pre,
                         0,
+                        stored.tag,
                     ),
                     None => crate::bgp::route::apply_policy_net(
                         &Default::default(),
@@ -956,6 +960,7 @@ impl BgpShard {
                         ipnet::IpNet::V4(prefix),
                         pre,
                         0,
+                        stored.tag,
                     ),
                 };
                 match decision {
@@ -1028,7 +1033,11 @@ mod tests {
             stale: false,
             nexthop_reachable: true,
             vrf_transit_only: false,
-            decision: permit.then_some(PolicyDecision { attr, weight: 100 }),
+            decision: permit.then_some(PolicyDecision {
+                attr,
+                weight: 100,
+                tag: 0,
+            }),
             compute_policy: false,
         })
     }
@@ -1081,7 +1090,11 @@ mod tests {
             stale: false,
             nexthop_reachable: true,
             vrf_transit_only: false,
-            decision: Some(PolicyDecision { attr, weight: 100 }),
+            decision: Some(PolicyDecision {
+                attr,
+                weight: 100,
+                tag: 0,
+            }),
         })
     }
 

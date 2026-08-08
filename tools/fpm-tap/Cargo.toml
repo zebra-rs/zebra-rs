@@ -1,0 +1,15 @@
+[package]
+name = "fpm-tap"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "FPM wire recorder, replayer and decoder for the SONiC fpmsyncd dialect"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

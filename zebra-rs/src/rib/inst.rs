@@ -500,6 +500,11 @@ pub enum Message {
     /// state (`CradleFib::replay`); without this the datapath would stay
     /// empty until natural route churn.
     CradleEngineUp,
+    /// Re-tee every installed route to a freshly-(re)pointed FPM tee.
+    /// A new tee starts with an empty mirror, so routes installed before
+    /// `system fpm enabled` would otherwise never reach fpmsyncd until
+    /// they happened to churn.
+    FpmResync,
     MdbAdd {
         vni: u32,
         group: IpAddr,
@@ -993,6 +998,13 @@ pub struct Rib {
     /// `system cradle enabled` — the eBPF tee's standalone switch, for an
     /// externally-run engine.
     pub cradle_enabled: bool,
+    /// `system fpm enabled` — tee FIB installs to SONiC's fpmsyncd.
+    pub fpm_enabled: bool,
+    /// `system fpm address` / `system fpm port`. Both optional; the
+    /// defaults (127.0.0.1:2620) are where fpmsyncd runs in SONiC's bgp
+    /// container.
+    pub fpm_address: Option<std::net::IpAddr>,
+    pub fpm_port: Option<u16>,
     /// `system ebpf enabled` — the managed-engine switch. It **implies the
     /// tee**: the operator surface is this single knob, and a supervised
     /// engine without routes would be useless. The supervisor task owns
@@ -1258,6 +1270,9 @@ impl Rib {
         let mut rib = Rib {
             cradle_fdb_watch: None,
             cradle_enabled: false,
+            fpm_enabled: false,
+            fpm_address: None,
+            fpm_port: None,
             ebpf_enabled: false,
             cradle_grpc: None,
             mpls_ttl_propagate: TtlModel::default(),
@@ -3112,6 +3127,9 @@ impl Rib {
                     };
                     (ifindex, table_id, true)
                 };
+                // Mirror the table -> ifindex mapping into the FIB layer,
+                // which needs the ifindex to tee this VRF's routes to FPM.
+                self.fib_handle.register_vrf_ifindex(table_id, ifindex);
                 self.vrfs.insert(
                     name.clone(),
                     Vrf {
@@ -3290,6 +3308,7 @@ impl Rib {
                 // populates these on install; a follow-up will add
                 // the matching withdraw walk.
                 self.vrf_tables.remove(&vrf.table_id);
+                self.fib_handle.unregister_vrf_ifindex(vrf.table_id);
                 // Nexthops tracked in the dropped table no longer
                 // resolve — push the unreachable flip to their watchers.
                 self.nht_recompute_and_notify();
@@ -3774,6 +3793,9 @@ impl Rib {
                 self.fib_handle.cradle_replay().await;
                 self.cradle_rib_walk().await;
             }
+            Message::FpmResync => {
+                self.fpm_rib_walk().await;
+            }
             Message::CradleReplAdd { vni, sid } => {
                 self.fib_handle.cradle_repl_add(vni, sid).await;
             }
@@ -4089,6 +4111,64 @@ impl Rib {
         }
     }
 
+    /// Record the forwarding plane's verdict on a route.
+    ///
+    /// The acknowledgement carries no nexthop and no correlation id (see
+    /// `FibMessage::RouteOffload`), so the match is by prefix within the
+    /// route's table, and the flag lands on whichever entry is currently
+    /// selected — that is the one that was installed, and so the one the
+    /// verdict is about.
+    fn route_offload(&mut self, offload: crate::fib::message::RouteOffload) {
+        use super::entry::mark_selected_offloaded;
+        // The acknowledgement names the VRF by *device ifindex*, which is
+        // what went out on the wire; map it back to the table the route
+        // actually lives in. 0 is the default VRF. The VRF list is a
+        // handful of entries, so a scan beats maintaining a second map
+        // that could fall out of step with `vrfs`.
+        let table_id = if offload.vrf_ifindex == 0 {
+            None
+        } else {
+            match self
+                .vrfs
+                .values()
+                .find(|v| v.ifindex == offload.vrf_ifindex)
+                .map(|v| v.table_id)
+            {
+                Some(id) => Some(id),
+                None => {
+                    tracing::debug!(
+                        "rib: offload ack for {} names unknown VRF ifindex {}",
+                        offload.prefix,
+                        offload.vrf_ifindex
+                    );
+                    return;
+                }
+            }
+        };
+
+        let entries = match (table_id, offload.prefix) {
+            (None, IpNet::V4(p)) => self.table.get_mut(&p),
+            (None, IpNet::V6(p)) => self.table_v6.get_mut(&p),
+            (Some(id), IpNet::V4(p)) => self
+                .vrf_tables
+                .get_mut(&id)
+                .and_then(|t| t.table.get_mut(&p)),
+            (Some(id), IpNet::V6(p)) => self
+                .vrf_tables
+                .get_mut(&id)
+                .and_then(|t| t.table_v6.get_mut(&p)),
+        };
+        let Some(entries) = entries else {
+            // Routine rather than alarming: fpmsyncd also acknowledges
+            // routes it learned elsewhere, and a prefix can be withdrawn
+            // between the send and the reply.
+            tracing::debug!("rib: offload ack for unknown prefix {}", offload.prefix);
+            return;
+        };
+
+        mark_selected_offloaded(entries, offload.success);
+    }
+
     pub async fn process_fib_msg(&mut self, msg: FibMessage) {
         // println!("{:?}", msg);
         match msg {
@@ -4238,6 +4318,9 @@ impl Rib {
                 if let Some((vni, vtep_local)) = self.mdb_vni_vtep(entry.bridge_ifindex) {
                     self.api_snoop_join(vni, vtep_local, entry.group, entry.source);
                 }
+            }
+            FibMessage::RouteOffload(offload) => {
+                self.route_offload(offload);
             }
             FibMessage::DelMdb(entry) => {
                 if let Some((vni, vtep_local)) = self.mdb_vni_vtep(entry.bridge_ifindex) {
@@ -4469,6 +4552,128 @@ impl Rib {
     #[cfg(not(target_os = "linux"))]
     async fn cradle_rib_walk(&self) {}
 
+    /// `set system fpm enabled {true|false}`.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn fpm_enabled_config_exec(
+        &mut self,
+        mut args: crate::config::Args,
+        op: ConfigOp,
+    ) -> Option<()> {
+        self.fpm_enabled = op.is_set() && args.boolean()?;
+        self.fpm_apply();
+        Some(())
+    }
+
+    /// `set system fpm address <A.B.C.D|X:X::X:X>`.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn fpm_address_config_exec(
+        &mut self,
+        mut args: crate::config::Args,
+        op: ConfigOp,
+    ) -> Option<()> {
+        self.fpm_address = if op.is_set() {
+            Some(args.string()?.parse().ok()?)
+        } else {
+            None
+        };
+        self.fpm_apply();
+        Some(())
+    }
+
+    /// `set system fpm port <1-65535>`.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn fpm_port_config_exec(
+        &mut self,
+        mut args: crate::config::Args,
+        op: ConfigOp,
+    ) -> Option<()> {
+        self.fpm_port = if op.is_set() { Some(args.u16()?) } else { None };
+        self.fpm_apply();
+        Some(())
+    }
+
+    /// The configured endpoint, or `None` when the tee is off.
+    ///
+    /// Both leaves default rather than being required: fpmsyncd always
+    /// listens on 127.0.0.1:2620 in SONiC's bgp container, so `set system
+    /// fpm enabled true` alone is the whole configuration in practice.
+    #[cfg(target_os = "linux")]
+    fn fpm_endpoint(&self) -> Option<std::net::SocketAddr> {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        if !self.fpm_enabled {
+            return None;
+        }
+        let addr = self.fpm_address.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let port = self
+            .fpm_port
+            .unwrap_or(crate::fib::fpm::frame::FPM_DEFAULT_PORT);
+        Some(SocketAddr::new(addr, port))
+    }
+
+    /// (Re)point the FPM tee and reseed it with the routes already in the
+    /// RIB.
+    #[cfg(target_os = "linux")]
+    fn fpm_apply(&mut self) {
+        let endpoint = self.fpm_endpoint();
+        self.fib_handle.set_fpm(endpoint, self.fib.tx.clone());
+        if endpoint.is_some() {
+            // Enable-after-routes, the same problem the cradle tee has:
+            // a fresh tee's mirror is empty, so anything installed before
+            // this point would never be sent. Queued rather than done
+            // inline because the walk is async and this runs from the
+            // synchronous config path.
+            let _ = self.tx.send(Message::FpmResync);
+        }
+    }
+
+    /// Re-tee every selected, installed route to the FPM tee.
+    #[cfg(target_os = "linux")]
+    async fn fpm_rib_walk(&self) {
+        use ipnet::IpNet;
+
+        let mut count = 0usize;
+        for (prefix, entries) in self.table.iter() {
+            for entry in entries.iter().filter(|e| e.is_selected() && e.is_fib()) {
+                self.fib_handle
+                    .fpm_route_resync(IpNet::V4(prefix), entry, RT_TABLE_MAIN)
+                    .await;
+                count += 1;
+            }
+        }
+        for (prefix, entries) in self.table_v6.iter() {
+            for entry in entries.iter().filter(|e| e.is_selected() && e.is_fib()) {
+                self.fib_handle
+                    .fpm_route_resync(IpNet::V6(prefix), entry, RT_TABLE_MAIN)
+                    .await;
+                count += 1;
+            }
+        }
+        // VRF tables as well: the tee resolves each table id to its VRF
+        // device ifindex, so these carry the same encoding they would
+        // have had if installed while the tee was already up.
+        for (table_id, tables) in self.vrf_tables.iter() {
+            for (prefix, entries) in tables.table.iter() {
+                for entry in entries.iter().filter(|e| e.is_selected() && e.is_fib()) {
+                    self.fib_handle
+                        .fpm_route_resync(IpNet::V4(prefix), entry, *table_id)
+                        .await;
+                    count += 1;
+                }
+            }
+            for (prefix, entries) in tables.table_v6.iter() {
+                for entry in entries.iter().filter(|e| e.is_selected() && e.is_fib()) {
+                    self.fib_handle
+                        .fpm_route_resync(IpNet::V6(prefix), entry, *table_id)
+                        .await;
+                    count += 1;
+                }
+            }
+        }
+        if count > 0 {
+            tracing::info!("rib: reseeded {count} routes into the FPM tee");
+        }
+    }
+
     fn cradle_apply(&mut self) {
         // Tear down any previous watcher before re-pointing/disabling.
         if let Some(watch) = self.cradle_fdb_watch.take() {
@@ -4605,6 +4810,15 @@ impl Rib {
                 } else if path.as_str() == "/system/ebpf/enabled" {
                     #[cfg(target_os = "linux")]
                     let _ = self.ebpf_enabled_config_exec(args, msg.op);
+                } else if path.as_str() == "/system/fpm/enabled" {
+                    #[cfg(target_os = "linux")]
+                    let _ = self.fpm_enabled_config_exec(args, msg.op);
+                } else if path.as_str() == "/system/fpm/address" {
+                    #[cfg(target_os = "linux")]
+                    let _ = self.fpm_address_config_exec(args, msg.op);
+                } else if path.as_str() == "/system/fpm/port" {
+                    #[cfg(target_os = "linux")]
+                    let _ = self.fpm_port_config_exec(args, msg.op);
                 } else if path.as_str() == "/system/cradle/grpc-endpoint" {
                     #[cfg(target_os = "linux")]
                     let _ = self.cradle_grpc_config_exec(args, msg.op);

@@ -14,6 +14,16 @@ pub struct RibEntry {
     pub rsubtype: RibSubType,
     pub selected: bool,
     pub fib: bool,
+    /// The forwarding plane confirmed this route is programmed.
+    ///
+    /// Distinct from `fib`, which means "we installed it in the kernel".
+    /// On SONiC the kernel is not the forwarding plane — the ASIC is —
+    /// and the two can disagree: a route can be in the kernel while
+    /// orchagent has not yet programmed it, which is exactly the window
+    /// `bgp suppress-fib-pending` exists to cover. Set from
+    /// `FibMessage::RouteOffload`; always false where no forwarding
+    /// agent reports back.
+    pub offloaded: bool,
     pub valid: bool,
     pub distance: u8,
     pub metric: u32,
@@ -39,6 +49,7 @@ impl RibEntry {
             rsubtype: RibSubType::Default,
             selected: false,
             fib: false,
+            offloaded: false,
             valid: false,
             distance: 0,
             metric: 0,
@@ -274,5 +285,61 @@ impl PartialOrd for RibEntry {
                 Some(ord)
             }
         })
+    }
+}
+
+/// Apply a forwarding-plane verdict to a prefix's entries.
+///
+/// Only *selected* entries are marked. A prefix can hold several
+/// entries — one per protocol, at different administrative distances —
+/// but only the selected one was ever installed, so it is the only one
+/// the verdict describes. Marking the others would claim the ASIC
+/// programmed a route it never saw.
+pub fn mark_selected_offloaded(entries: &mut RibEntries, success: bool) {
+    for entry in entries.iter_mut().filter(|e| e.is_selected()) {
+        entry.offloaded = success;
+    }
+}
+
+#[cfg(test)]
+mod offload_tests {
+    use super::*;
+
+    fn entry(rtype: RibType, selected: bool) -> RibEntry {
+        let mut e = RibEntry::new(rtype);
+        e.selected = selected;
+        e
+    }
+
+    #[test]
+    fn marks_only_the_selected_entry() {
+        let mut entries: RibEntries = vec![
+            entry(RibType::Bgp, true),
+            entry(RibType::Static, false),
+            entry(RibType::Ospf, false),
+        ];
+        mark_selected_offloaded(&mut entries, true);
+        assert!(entries[0].offloaded, "selected entry should be marked");
+        assert!(!entries[1].offloaded, "unselected entry must not be marked");
+        assert!(!entries[2].offloaded, "unselected entry must not be marked");
+    }
+
+    /// A failure verdict clears the flag rather than leaving a stale
+    /// success behind — otherwise a prefix that stopped being programmed
+    /// would still look advertisable.
+    #[test]
+    fn failure_clears_a_previous_success() {
+        let mut entries: RibEntries = vec![entry(RibType::Bgp, true)];
+        mark_selected_offloaded(&mut entries, true);
+        assert!(entries[0].offloaded);
+        mark_selected_offloaded(&mut entries, false);
+        assert!(!entries[0].offloaded);
+    }
+
+    #[test]
+    fn no_selected_entry_is_a_no_op() {
+        let mut entries: RibEntries = vec![entry(RibType::Bgp, false)];
+        mark_selected_offloaded(&mut entries, true);
+        assert!(!entries[0].offloaded);
     }
 }

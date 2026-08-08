@@ -151,6 +151,29 @@ pub struct FibNeighbor {
     pub master: Option<u32>,
 }
 
+/// The forwarding plane's verdict on a route we installed.
+///
+/// SONiC's `fpmsyncd` reports this over FPM once a route is programmed
+/// (or, with `suppress-fib-pending` off, optimistically on receipt), and
+/// it is what `bgp suppress-fib-pending` waits on before advertising a
+/// prefix. Deliberately named for the concept rather than for FPM: any
+/// forwarding agent that can confirm programming reports the same thing.
+///
+/// The field set is dictated by what the wire actually carries. FPM's
+/// acknowledgement has no nexthop and no correlation id in either of its
+/// two shapes, so `(prefix, vrf_ifindex, protocol)` is the whole match
+/// key available.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteOffload {
+    pub prefix: IpNet,
+    /// VRF device ifindex; 0 for the default VRF.
+    pub vrf_ifindex: u32,
+    /// The route's protocol byte, echoed back.
+    pub protocol: u8,
+    /// `false` when the agent reported the programming *failed*.
+    pub success: bool,
+}
+
 #[derive(Debug)]
 pub enum FibMessage {
     NewLink(FibLink),
@@ -174,6 +197,9 @@ pub enum FibMessage {
     NewMdb(FibMdbEntry),
     /// Inverse of `NewMdb` (`RTM_DELMDB`).
     DelMdb(FibMdbEntry),
+    /// The forwarding plane confirmed (or rejected) a route install.
+    /// Raised by the FPM tee; see [`RouteOffload`].
+    RouteOffload(RouteOffload),
 }
 
 /// One kernel bridge MDB entry, reduced to the fields EVPN cares about.

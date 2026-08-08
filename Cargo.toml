@@ -19,6 +19,7 @@ members = [
   "crates/fixedbuf",
   "bdd",
   "tools/bgp-bench",
+  "tools/fpm-tap",
   "tools/pfcp-inject",
 ]
 
