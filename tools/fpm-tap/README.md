@@ -133,6 +133,25 @@ reconnects"* — which is the difference between a `fpmsyncd` restart being
 a blip and it silently freezing the ASIC's view of the routing table
 until something unrelated churns.
 
+`rig/bgp-tee.sh` is the same idea with a real protocol rather than static
+config: an FRR bgpd peer in its own netns advertises prefixes over eBGP,
+zebra-rs learns them and tees them.
+
+```shell
+./bgp-tee.sh
+```
+
+The peer is joined by a **veth in a separate namespace**, not a second
+container on the docker bridge, and that detail is load-bearing:
+`fpmsyncd` silently drops any route whose nexthop interface is `eth0`,
+`docker0` or `eth1-midplane` (`routesync.cpp:2718`, `2736`, `2878`),
+because SONiC treats those as management. Peering over the docker bridge
+produces exactly those routes — they reach fpmsyncd, get *acknowledged*,
+and never appear in APPL_DB. It looks like a routing bug and is not one.
+
+This rig also needs `--privileged` rather than the usual `NET_ADMIN`,
+because `ip netns add` has to make `/run/netns` a shared mount.
+
 ## What the golden traces show
 
 Captured from FRR 10.5.4-sonic-0 with `dplane_fpm_sonic`. These are the
