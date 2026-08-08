@@ -94,6 +94,29 @@ Interface indexes are load-bearing — `fpmsyncd` resolves a nexthop
 ifindex to APPL_DB's `ifname` in its own netns, so the replay side
 creates the same dummy links in the same order as the capture side.
 
+`rig/live-tee.sh` goes one step further and takes FRR out of the picture
+entirely: it runs **zebra-rs itself** with the FPM tee enabled against a
+real `fpmsyncd`, and checks the routes it computes land in APPL_DB.
+
+```shell
+cargo build -p zebra-rs -p vtyctl
+./live-tee.sh
+```
+
+Two things that cost time to work out, both worth knowing before writing
+any rig of your own:
+
+* Configuration goes in as a **startup config file** (`zebra-rs -c`), not
+  through `vtyctl`. zebra-rs ties a VTY session to the caller's parent
+  shell and rejects any client whose ppid is `<= 1`
+  (`SessionError::OrphanClient`) — which is every `docker exec`, and
+  `bash -c "vtyctl ..."` does not help because bash execs a lone command
+  and inherits the same orphaned parent. Using a config file is also
+  closer to the real deployment, where a container renders its config and
+  starts the daemon on it.
+* The tee is enabled with `SONIC_FPM=host:port`, the env fallback that
+  stands in for the config leaf until that lands.
+
 ## What the golden traces show
 
 Captured from FRR 10.5.4-sonic-0 with `dplane_fpm_sonic`. These are the
