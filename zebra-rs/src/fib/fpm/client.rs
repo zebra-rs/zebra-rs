@@ -48,6 +48,10 @@ struct Stats {
     dropped: AtomicU64,
     acks: AtomicU64,
     reconnects: AtomicU64,
+    /// Writes skipped because the peer already holds exactly this
+    /// message. Convergence re-installs plenty of unchanged routes, and
+    /// under FPM's replace semantics re-sending one is a no-op.
+    suppressed: AtomicU64,
 }
 
 /// Handle to the FPM tee. Cloning shares one connection.
@@ -117,10 +121,20 @@ impl FpmFib {
     /// Record and send a route add. `msg` is a complete framed FPM
     /// message from [`super::encode_route`].
     pub async fn route_add(&self, prefix: IpNet, vrf_ifindex: u32, msg: Vec<u8>) {
-        self.mirror
+        let changed = self
+            .mirror
             .lock()
             .await
             .insert(prefix, vrf_ifindex, msg.clone());
+        // Nothing to say if the peer already holds this exact message.
+        // Measured on a 50k-prefix convergence, the RIB offers each route
+        // roughly twice over; FPM's replace semantics make the repeat
+        // harmless but it is still a message fpmsyncd has to parse and a
+        // Redis write it has to make.
+        if !changed {
+            self.stats.suppressed.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
         self.offer(msg);
     }
 
@@ -145,13 +159,14 @@ impl FpmFib {
         }
     }
 
-    /// `(sent, dropped, acks, reconnects)`, for `show` output.
-    pub fn counters(&self) -> (u64, u64, u64, u64) {
+    /// `(sent, dropped, acks, reconnects, suppressed)`, for `show` output.
+    pub fn counters(&self) -> (u64, u64, u64, u64, u64) {
         (
             self.stats.sent.load(Ordering::Relaxed),
             self.stats.dropped.load(Ordering::Relaxed),
             self.stats.acks.load(Ordering::Relaxed),
             self.stats.reconnects.load(Ordering::Relaxed),
+            self.stats.suppressed.load(Ordering::Relaxed),
         )
     }
 
@@ -239,9 +254,10 @@ impl FpmFib {
             }
 
             self.connected.store(false, Ordering::Relaxed);
-            let (sent, dropped, acks, _) = self.counters();
+            let (sent, dropped, acks, _, suppressed) = self.counters();
             tracing::info!(
-                "fib: FPM disconnected ({sent} sent, {acks} acked, {dropped} dropped while down)"
+                "fib: FPM disconnected ({sent} sent, {acks} acked, \
+                 {dropped} dropped while down, {suppressed} unchanged-suppressed)"
             );
             tokio::time::sleep(backoff).await;
         }

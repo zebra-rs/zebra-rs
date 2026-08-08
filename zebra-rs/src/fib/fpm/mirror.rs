@@ -34,8 +34,19 @@ pub struct Mirror {
 
 impl Mirror {
     /// Record the encoded add for a prefix, replacing any previous one.
-    pub fn insert(&mut self, prefix: IpNet, vrf_ifindex: u32, msg: Vec<u8>) {
-        self.routes.insert((prefix, vrf_ifindex), msg);
+    ///
+    /// Returns `false` when the message is byte-identical to what is
+    /// already mirrored — the peer's state is already exactly this, and
+    /// re-sending it would be a no-op under FPM's replace semantics.
+    /// Callers use that to suppress redundant writes; the mirror itself
+    /// is unchanged either way.
+    pub fn insert(&mut self, prefix: IpNet, vrf_ifindex: u32, msg: Vec<u8>) -> bool {
+        let key = (prefix, vrf_ifindex);
+        if self.routes.get(&key).is_some_and(|prev| *prev == msg) {
+            return false;
+        }
+        self.routes.insert(key, msg);
+        true
     }
 
     /// Forget a prefix. The delete itself still has to be sent; this
@@ -63,6 +74,27 @@ mod tests {
 
     fn net(s: &str) -> IpNet {
         s.parse().unwrap()
+    }
+
+    /// An identical re-tee is reported as "no change", which is what
+    /// lets the client skip the write. Convergence produces plenty of
+    /// these: a prefix is commonly re-installed unchanged as the RIB
+    /// settles.
+    #[test]
+    fn identical_message_reports_no_change() {
+        let mut m = Mirror::default();
+        assert!(
+            m.insert(net("10.0.0.0/24"), 0, vec![1]),
+            "first insert is a change"
+        );
+        assert!(
+            !m.insert(net("10.0.0.0/24"), 0, vec![1]),
+            "identical message is not"
+        );
+        assert!(
+            m.insert(net("10.0.0.0/24"), 0, vec![2]),
+            "different message is"
+        );
     }
 
     #[test]

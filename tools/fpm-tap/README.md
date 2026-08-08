@@ -152,6 +152,25 @@ and never appear in APPL_DB. It looks like a routing bug and is not one.
 This rig also needs `--privileged` rather than the usual `NET_ADMIN`,
 because `ip netns add` has to make `/run/netns` a shared mount.
 
+`rig/scale-tee.sh` drives a real routing table at the tee, using the
+daemon's own load generator:
+
+```shell
+cargo build --release -p zebra-rs -p bgp-bench
+./scale-tee.sh --prefixes 50000
+```
+
+Measured on 50k prefixes: all reach APPL_DB in ~7s at ~111 MiB RSS, and a
+`fpmsyncd` restart replays all 50,000 in ~7s with nothing dropped.
+
+Read the numbers with one caveat: bgp-bench binds `127.0.0.x`, so every
+learned route has a **loopback nexthop**, which the kernel refuses to
+install. `ip route show proto bgp` stays empty here by design — this
+measures the tee, not the kernel path. That the routes reach APPL_DB
+anyway is itself a real property: the tee is independent of
+kernel-install success, matching FRR, whose dplane hands a route to each
+provider independently.
+
 ## What the golden traces show
 
 Captured from FRR 10.5.4-sonic-0 with `dplane_fpm_sonic`. These are the
