@@ -5709,6 +5709,25 @@ module config {
             }
           }
         }
+        leaf "call" {
+          ext:help "Run another policy from this entry";
+          ext:sort "2";
+          type string;
+          description
+            "Name of a policy to evaluate when this entry matches. The
+             callee runs after this entry's match clauses and before its
+             terminal action: if the callee denies, this policy denies;
+             if it permits, evaluation continues with this entry's own
+             set clauses and action. Set clauses applied inside the
+             callee are kept either way.
+
+             A plain string rather than a leafref, matching the
+             prefix-set and community-set references, so a policy may be
+             configured before the policy it calls. Chain length is not
+             limited; a call cycle is refused and the entries on it deny,
+             following the rule that a bound-but-unresolved reference is
+             deny-all.";
+        }
         leaf "action" {
           ext:help "Terminal action: permit, deny, or next";
           ext:sort "1";

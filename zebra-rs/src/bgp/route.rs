@@ -12942,6 +12942,34 @@ pub fn policy_list_apply_net(
         if !entry_matches(entry, prefix, &decision.attr, decision.weight) {
             continue;
         }
+        // `call <policy>`: run the callee after this entry's match
+        // clauses have matched and before its terminal action. A callee
+        // deny denies the caller outright; a callee permit continues
+        // here with the callee's set clauses already folded into
+        // `decision`.
+        if entry.call_name.is_some() {
+            let Some(callee) = &entry.call_policy else {
+                // Unresolved or cyclic. Deny, matching the engine's rule
+                // that a bound-but-unresolved reference is deny-all — a
+                // filter that cannot consult the filter it was told to
+                // consult must not conclude "permit".
+                return None;
+            };
+            //
+            // Recursive rather than an explicit resume stack. There is no
+            // depth *limit* — `resolve_calls` guarantees the resolved
+            // graph is acyclic, so depth cannot exceed the number of
+            // configured policies — but this does put that depth on the
+            // stack. The iterative form would have to turn this entry
+            // loop into a state machine, since the resume point sits in
+            // the middle of several hundred lines of set-clause
+            // application, and that refactor is not worth it on evidence
+            // this thin. `deep_call_chain_has_no_depth_limit` exercises a
+            // 256-deep chain; revisit if a real configuration ever
+            // approaches a depth where the stack is a concern.
+            decision =
+                policy_list_apply_net(callee, prefix, decision.attr, decision.weight, local_addr)?;
+        }
         match entry.action {
             PolicyAction::Deny => {
                 // Drop the route without applying any set clauses.
@@ -18876,6 +18904,92 @@ mod policy_apply_tests {
 
     use super::*;
     use crate::policy::{AsPathMatcher, AsPathSet, NumericMatch, PolicyList};
+
+    /// `call` semantics, which are asymmetric and easy to get subtly
+    /// wrong: a callee deny denies the caller, but a callee permit does
+    /// NOT terminate the caller — it only reports "not denied".
+    mod call_semantics {
+        use super::*;
+        use crate::policy::{NumericSet, PolicyAction, PolicyList};
+        use std::sync::Arc;
+
+        fn med_setter(med: u32) -> PolicyList {
+            let mut list = PolicyList::default();
+            let entry = list.entry(10);
+            entry.action = PolicyAction::Permit;
+            entry.med = Some(NumericSet::Set(med));
+            list
+        }
+
+        fn denier() -> PolicyList {
+            let mut list = PolicyList::default();
+            list.entry(10).action = PolicyAction::Deny;
+            list
+        }
+
+        fn caller(callee: PolicyList, action: PolicyAction) -> PolicyList {
+            let mut list = PolicyList::default();
+            let entry = list.entry(10);
+            entry.action = action;
+            entry.call_name = Some("CALLEE".to_string());
+            entry.call_policy = Some(Arc::new(callee));
+            list
+        }
+
+        #[test]
+        fn callee_deny_denies_the_caller() {
+            let list = caller(denier(), PolicyAction::Permit);
+            assert!(
+                super::policy_list_apply(&list, &super::nlri("10.0.0.0/24"), BgpAttr::new())
+                    .is_none(),
+                "a callee that denies must deny the calling policy"
+            );
+        }
+
+        #[test]
+        fn callee_permit_continues_the_caller() {
+            let list = caller(med_setter(100), PolicyAction::Permit);
+            let out = super::policy_list_apply(&list, &super::nlri("10.0.0.0/24"), BgpAttr::new())
+                .expect("callee permit must not deny the caller");
+            assert_eq!(
+                out.med.map(|m| m.med),
+                Some(100),
+                "set clauses applied inside the callee are kept"
+            );
+        }
+
+        #[test]
+        fn unresolved_call_denies() {
+            let mut list = PolicyList::default();
+            let entry = list.entry(10);
+            entry.action = PolicyAction::Permit;
+            entry.call_name = Some("MISSING".to_string());
+            entry.call_policy = None;
+            assert!(
+                super::policy_list_apply(&list, &super::nlri("10.0.0.0/24"), BgpAttr::new())
+                    .is_none(),
+                "an unresolved call must deny, not silently permit"
+            );
+        }
+
+        /// The SONiC shape: `call X` plus `on-match next`, so the callee
+        /// runs and evaluation still falls through to the next entry.
+        #[test]
+        fn call_with_action_next_falls_through() {
+            let mut list = caller(med_setter(100), PolicyAction::Next);
+            let entry = list.entry(20);
+            entry.action = PolicyAction::Permit;
+            entry.local_pref = Some(NumericSet::Set(200));
+            let out = super::policy_list_apply(&list, &super::nlri("10.0.0.0/24"), BgpAttr::new())
+                .expect("chain must permit");
+            assert_eq!(out.med.map(|m| m.med), Some(100), "callee ran");
+            assert_eq!(
+                out.local_pref.map(|l| l.local_pref),
+                Some(200),
+                "evaluation continued past the calling entry"
+            );
+        }
+    }
 
     /// Test wrapper that preserves the legacy `Option<BgpAttr>`
     /// shape — weight defaults to 0, local_addr defaults to
