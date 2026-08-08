@@ -4089,6 +4089,43 @@ impl Rib {
         }
     }
 
+    /// Record the forwarding plane's verdict on a route.
+    ///
+    /// The acknowledgement carries no nexthop and no correlation id (see
+    /// `FibMessage::RouteOffload`), so the match is by prefix within the
+    /// route's table, and the flag lands on whichever entry is currently
+    /// selected — that is the one that was installed, and so the one the
+    /// verdict is about.
+    fn route_offload(&mut self, offload: crate::fib::message::RouteOffload) {
+        use super::entry::mark_selected_offloaded;
+        // Only the default VRF is teed today (the FPM tee skips other
+        // tables until the table-id -> VRF-ifindex mapping exists), so an
+        // acknowledgement for anything else is unexpected rather than
+        // routine.
+        if offload.vrf_ifindex != 0 {
+            tracing::debug!(
+                "rib: offload ack for {} in VRF ifindex {} ignored (VRF tee not wired)",
+                offload.prefix,
+                offload.vrf_ifindex
+            );
+            return;
+        }
+
+        let entries = match offload.prefix {
+            IpNet::V4(p) => self.table.get_mut(&p),
+            IpNet::V6(p) => self.table_v6.get_mut(&p),
+        };
+        let Some(entries) = entries else {
+            // Routine rather than alarming: fpmsyncd also acknowledges
+            // routes it learned elsewhere, and a prefix can be withdrawn
+            // between the send and the reply.
+            tracing::debug!("rib: offload ack for unknown prefix {}", offload.prefix);
+            return;
+        };
+
+        mark_selected_offloaded(entries, offload.success);
+    }
+
     pub async fn process_fib_msg(&mut self, msg: FibMessage) {
         // println!("{:?}", msg);
         match msg {
@@ -4238,6 +4275,9 @@ impl Rib {
                 if let Some((vni, vtep_local)) = self.mdb_vni_vtep(entry.bridge_ifindex) {
                     self.api_snoop_join(vni, vtep_local, entry.group, entry.source);
                 }
+            }
+            FibMessage::RouteOffload(offload) => {
+                self.route_offload(offload);
             }
             FibMessage::DelMdb(entry) => {
                 if let Some((vni, vtep_local)) = self.mdb_vni_vtep(entry.bridge_ifindex) {

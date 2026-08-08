@@ -28,9 +28,10 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-use super::decode::{OffloadAck, parse_ack};
+use super::decode::parse_ack;
 use super::frame::{FPM_MAX_MSG_LEN, FPM_MSG_HDR_LEN};
 use super::mirror::Mirror;
+use crate::fib::message::{FibMessage, RouteOffload};
 
 /// Reconnect backoff. Short at first — a `fpmsyncd` restart is quick and
 /// the FIB is stale until we are back — then capped so a peer that is
@@ -53,6 +54,9 @@ struct Stats {
 #[derive(Clone)]
 pub struct FpmFib {
     endpoint: SocketAddr,
+    /// Where acknowledgements go. The RIB owns route state, so the tee
+    /// reports rather than mutates.
+    rib_tx: UnboundedSender<FibMessage>,
     tx: UnboundedSender<Vec<u8>>,
     mirror: Arc<Mutex<Mirror>>,
     connected: Arc<AtomicBool>,
@@ -64,10 +68,11 @@ impl FpmFib {
     /// Connecting happens in the background: this never blocks and never
     /// fails, because a `fpmsyncd` that is not up yet is normal at
     /// startup rather than an error.
-    pub fn new(endpoint: SocketAddr) -> Self {
+    pub fn new(endpoint: SocketAddr, rib_tx: UnboundedSender<FibMessage>) -> Self {
         let (tx, rx) = unbounded_channel();
         let fib = Self {
             endpoint,
+            rib_tx,
             tx,
             mirror: Arc::new(Mutex::new(Mirror::default())),
             connected: Arc::new(AtomicBool::new(false)),
@@ -85,12 +90,12 @@ impl FpmFib {
     /// can be exercised before the YANG config plumbing lands. A value
     /// that will not parse is a misconfiguration worth complaining about
     /// rather than silently ignoring.
-    pub fn from_env() -> Option<Self> {
+    pub fn from_env(rib_tx: UnboundedSender<FibMessage>) -> Option<Self> {
         let raw = std::env::var("SONIC_FPM").ok()?;
         match raw.parse::<SocketAddr>() {
             Ok(addr) => {
                 tracing::info!("fib: FPM tee enabled -> {addr}");
-                Some(Self::new(addr))
+                Some(Self::new(addr, rib_tx))
             }
             Err(e) => {
                 tracing::error!(
@@ -264,13 +269,10 @@ impl FpmFib {
         }
     }
 
-    /// Where `bgp suppress-fib-pending` will hook in: an acknowledged
-    /// prefix is one the FIB says is programmed, and BGP may advertise
-    /// it. Until the RIB carries an `offloaded` flag there is nothing to
-    /// update, so this only traces — but the acks are parsed and counted
-    /// now, which keeps the socket drained and makes the behaviour
-    /// visible.
-    fn on_ack(&self, ack: OffloadAck) {
+    /// Report an acknowledgement to the RIB, which marks the route
+    /// offloaded. That flag is what `bgp suppress-fib-pending` will gate
+    /// advertisement on.
+    fn on_ack(&self, ack: RouteOffload) {
         if ack.success {
             tracing::debug!(
                 "fib: FPM offload ack {} vrf {} proto {}",
@@ -285,5 +287,7 @@ impl FpmFib {
                 ack.vrf_ifindex
             );
         }
+        // The RIB owns route state; a send failure just means it is gone.
+        let _ = self.rib_tx.send(FibMessage::RouteOffload(ack));
     }
 }

@@ -29,6 +29,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 
 use super::frame::FPM_MSG_HDR_LEN;
+use crate::fib::message::RouteOffload;
 
 const NLMSG_HDRLEN: usize = 16;
 const RTMSG_LEN: usize = 12;
@@ -48,29 +49,13 @@ const RTM_F_OFFLOAD: u32 = 0x4000;
 /// kept distinct.
 const RTM_F_OFFLOAD_FAILED: u32 = 0x2000_0000;
 
-/// One parsed acknowledgement.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OffloadAck {
-    pub prefix: IpNet,
-    /// The VRF device ifindex the route belongs to; 0 for the default
-    /// VRF. Read from `RTA_TABLE` when present, else `rtm_table`.
-    pub vrf_ifindex: u32,
-    /// FRR's protocol byte, echoed back. Part of the match key because
-    /// nothing else distinguishes two routes to the same prefix from
-    /// different sources.
-    pub protocol: u8,
-    /// `false` when the FIB reported the programming *failed*
-    /// (`RTM_F_OFFLOAD_FAILED`).
-    pub success: bool,
-}
-
 /// Parse a complete FPM message as an offload acknowledgement.
 ///
 /// Returns `None` for anything that is not an `RTM_NEWROUTE` carrying an
 /// offload flag — including ordinary echoes and message types this
 /// module does not handle. Malformed input yields `None` rather than an
 /// error: a peer that sends nonsense should not take the tee down.
-pub fn parse_ack(msg: &[u8]) -> Option<OffloadAck> {
+pub fn parse_ack(msg: &[u8]) -> Option<RouteOffload> {
     let payload = msg.get(FPM_MSG_HDR_LEN..)?;
     if payload.len() < NLMSG_HDRLEN + RTMSG_LEN {
         return None;
@@ -136,7 +121,7 @@ pub fn parse_ack(msg: &[u8]) -> Option<OffloadAck> {
         _ => return None,
     };
 
-    Some(OffloadAck {
+    Some(RouteOffload {
         prefix,
         vrf_ifindex: table_attr.unwrap_or(table),
         protocol,
@@ -153,7 +138,7 @@ mod tests {
     /// trace must parse. These are the synthesized minimal acks.
     #[test]
     fn parses_orchagent_driven_acks() {
-        let acks: Vec<OffloadAck> = read_capture("offload.fpm")
+        let acks: Vec<RouteOffload> = read_capture("offload.fpm")
             .into_iter()
             .filter(|(dir, _)| *dir == 1)
             .filter_map(|(_, bytes)| parse_ack(&bytes))
@@ -179,7 +164,7 @@ mod tests {
     /// other shape lacks — which is exactly the property that matters.
     #[test]
     fn parses_optimistic_acks() {
-        let acks: Vec<OffloadAck> = read_capture("offload-optimistic.fpm")
+        let acks: Vec<RouteOffload> = read_capture("offload-optimistic.fpm")
             .into_iter()
             .filter(|(dir, _)| *dir == 1)
             .filter_map(|(_, bytes)| parse_ack(&bytes))
