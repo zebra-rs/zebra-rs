@@ -110,7 +110,8 @@ docker cp "$SOCKDIR/routes.conf" "$CONTAINER:/tmp/routes.conf" >/dev/null
 # standing in for the config leaf until that lands.
 echo "live-tee: starting zebra-rs with the FPM tee enabled"
 docker exec -d "$CONTAINER" bash -c \
-    'SONIC_FPM=127.0.0.1:2620 zebra-rs --yang-path /usr/share/zebra-rs/yang \
+    'SONIC_FPM=127.0.0.1:2620 RUST_LOG=info,zebra_rs::fib::fpm=debug,zebra_rs::rib::inst=debug \
+        zebra-rs --yang-path /usr/share/zebra-rs/yang \
         -c /tmp/routes.conf > /tmp/zebra-rs.log 2>&1'
 sleep 6
 
@@ -136,10 +137,35 @@ for p in 10.100.0.0/24 10.100.2.0/24 2001:db8:100::/64; do
     fi
 done
 
+# The reverse direction: fpmsyncd acknowledges every route it accepts,
+# and zebra-rs must parse those and mark the RIB entry offloaded. With
+# suppress-fib-pending off (the default here) the acknowledgement is the
+# optimistic one, sent on receipt.
 echo
-if [[ "$found" -eq 3 ]]; then
-    echo "PASS — zebra-rs programmed all 3 routes into APPL_DB over FPM"
+echo "live-tee: offload acknowledgements zebra-rs received back"
+acks=$(docker exec "$CONTAINER" bash -c 'grep -c "FPM offload ack" /tmp/zebra-rs.log || true')
+docker exec "$CONTAINER" bash -c 'grep "FPM offload ack" /tmp/zebra-rs.log | head -5' || true
+echo "  ($acks acknowledgements)"
+
+# An acknowledgement that does not resolve to a RIB entry is silently
+# useless — the flag never gets set — so make that failure loud. It is
+# the shape a prefix-key mismatch would take (a /32 host route, say).
+unknown=$(docker exec "$CONTAINER" bash -c 'grep -c "offload ack for unknown prefix" /tmp/zebra-rs.log || true')
+if [[ "$unknown" -gt 0 ]]; then
+    echo "  WARNING: $unknown acknowledgement(s) did not match a RIB entry:"
+    docker exec "$CONTAINER" bash -c 'grep "offload ack for unknown prefix" /tmp/zebra-rs.log | head -5' || true
+fi
+
+echo
+if [[ "$found" -eq 3 && "$acks" -ge 3 && "$unknown" -eq 0 ]]; then
+    echo "PASS — zebra-rs programmed all 3 routes into APPL_DB over FPM,"
+    echo "       and processed $acks offload acknowledgements back"
     exit 0
+fi
+if [[ "$found" -eq 3 ]]; then
+    echo "FAIL — routes reached APPL_DB but the acknowledgement path did not close"
+    echo "       ($acks acks, $unknown unmatched)"
+    exit 1
 fi
 echo "FAIL — only $found of 3 routes reached APPL_DB"
 docker exec "$CONTAINER" bash -c 'echo "--- zebra-rs log ---"; tail -30 /tmp/zebra-rs.log; echo "--- fpmsyncd log ---"; tail -10 /tmp/fpmsyncd.log' || true

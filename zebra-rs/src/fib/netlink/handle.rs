@@ -564,7 +564,7 @@ impl FibHandle {
             use_nhid,
             vni_ifindex_map: BTreeMap::new(),
             cradle: CradleFib::from_env(),
-            fpm: FpmFib::from_env(),
+            fpm: FpmFib::from_env(rib_tx),
         })
     }
 
