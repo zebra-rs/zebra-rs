@@ -287,6 +287,13 @@ pub struct PolicyEntry {
     /// 0x03 0x0b) with value `N`. CO bits are not compared in v1;
     /// the value field is the discriminator.
     pub match_color: Option<u32>,
+    /// `match tag N` — the route's tag equals `N`.
+    ///
+    /// The tag is a non-wire per-route marker: SONiC sets it on ingress
+    /// (`FROM_BGP_PEER`) and matches it on egress (the TSA route-map and
+    /// `CHECK_IDF_ISOLATION`), so it has to survive in the RIB between
+    /// the two — the same lifecycle as `weight`, and stored beside it.
+    pub match_tag: Option<u32>,
     // Set.
     pub local_pref: Option<NumericSet>,
     pub med: Option<NumericSet>,
@@ -310,6 +317,9 @@ pub struct PolicyEntry {
     /// route-map is authoritative when the operator chose to set
     /// the label-index explicitly.
     pub set_prefix_sid_label_index: Option<u32>,
+    /// `set tag N` — stamp the route with tag `N`. 0 means "no tag",
+    /// matching FRR, so a tag of 0 cannot be matched.
+    pub set_tag: Option<u32>,
     /// `call <policy>` — evaluate another policy from this entry, after
     /// this entry's `match` clauses have matched and before its terminal
     /// action. A callee `deny` denies the caller; a callee `permit`
@@ -724,6 +734,32 @@ impl ConfigBuilder {
             .del(|policy, cache, name, seq, _args| {
                 let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
                 list.entry.remove(&seq).context(ARG_ERR)?;
+                Ok(())
+            })
+            .path("/entry/match/tag")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                entry.match_tag = Some(args.u32().context(ARG_ERR)?);
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.match_tag = None;
+                Ok(())
+            })
+            .path("/entry/set/tag")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                entry.set_tag = Some(args.u32().context(ARG_ERR)?);
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.set_tag = None;
                 Ok(())
             })
             .path("/entry/call")
@@ -1674,6 +1710,12 @@ fn entry_to_json(seq: u32, entry: &PolicyEntry) -> serde_json::Value {
     let op_val = |op: &str, value: u32| json!({ "op": op, "value": value });
 
     let mut m = Map::new();
+    if let Some(x) = &entry.match_tag {
+        m.insert("tag".into(), json!(x));
+    }
+    if let Some(x) = &entry.set_tag {
+        m.insert("set_tag".into(), json!(x));
+    }
     if let Some(x) = &entry.call_name {
         m.insert("call".into(), json!(x));
         // An unresolved call denies. An operator debugging a policy that
@@ -1814,6 +1856,12 @@ pub fn show(policy: &Policy, _args: Args, json: bool) -> Result<String, Error> {
         let _ = writeln!(buf, "policy-list: {}", name);
         for (seq, entry) in policy.entry.iter() {
             let _ = writeln!(buf, " entry: {}", seq);
+            if let Some(tag) = &entry.match_tag {
+                let _ = writeln!(buf, "  match: tag {}", tag);
+            }
+            if let Some(tag) = &entry.set_tag {
+                let _ = writeln!(buf, "  set: tag {}", tag);
+            }
             if let Some(callee) = &entry.call_name {
                 if entry.call_policy.is_some() {
                     let _ = writeln!(buf, "  call: {}", callee);
