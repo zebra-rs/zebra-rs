@@ -13,11 +13,13 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::sync::Mutex;
 
 use crate::capture::{self, Dir};
 use crate::decode;
@@ -65,10 +67,20 @@ pub async fn run(opts: Opts) -> Result<()> {
     // Count what comes back. With `bgp suppress-fib-pending` this is the
     // signal the encoder work in Phase 2 has to consume, so it is worth
     // seeing even in a plain replay.
+    //
+    // Replies accumulate into shared state rather than being returned,
+    // because this task is never awaited to completion: `fpmsyncd` keeps
+    // the connection open indefinitely, so the read half only ends at
+    // EOF that never comes. Dropping the write half does not produce one
+    // either — a split TcpStream is not closed until *both* halves are
+    // gone, so with the reader still holding `rd` the peer sees no FIN.
+    // The send loop therefore aborts the reader after the linger window
+    // and collects whatever landed.
+    let replies: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+    let collected = Arc::clone(&replies);
     let reader = tokio::spawn(async move {
         let mut framer = Framer::new();
         let mut buf = vec![0u8; 64 * 1024];
-        let mut replies = Vec::new();
         loop {
             let n = match rd.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
@@ -76,10 +88,9 @@ pub async fn run(opts: Opts) -> Result<()> {
             };
             framer.extend(&buf[..n]);
             while let Ok(Some(msg)) = framer.next() {
-                replies.push(msg);
+                collected.lock().await.push(msg);
             }
         }
-        replies
     });
 
     let mut prev_usec = outbound.first().map(|r| r.usec).unwrap_or(0);
@@ -104,11 +115,15 @@ pub async fn run(opts: Opts) -> Result<()> {
     }
     wr.flush().await?;
 
-    // Give fpmsyncd time to answer before we tear the socket down.
+    // Give fpmsyncd time to answer before we tear the socket down. Any
+    // reply still in flight when the window closes is lost, which is the
+    // cost of not being able to wait for an EOF the peer never sends;
+    // raise --linger-ms if a slow responder is being clipped.
     tokio::time::sleep(Duration::from_millis(opts.linger_ms)).await;
+    reader.abort();
     drop(wr);
 
-    let replies = reader.await.context("reply reader panicked")?;
+    let replies = replies.lock().await;
     eprintln!(
         "fpm-tap: sent {} messages, received {} replies",
         outbound.len(),

@@ -73,6 +73,27 @@ Two rig details that cost time to rediscover:
   `ip route ...` from vtysh goes to mgmtd; `staticd` has no `-f` flag at
   all any more.
 
+## Verifying the zebra-rs encoder
+
+`rig/ab-diff.sh` answers the question byte-comparison cannot: does
+`fpmsyncd` derive the *same APPL_DB rows* from zebra-rs's messages as
+from FRR's? It replays both into the same real `fpmsyncd` — FRR's own
+recording, then a capture encoded by `zebra-rs/src/fib/fpm` — and diffs
+the resulting rows.
+
+```shell
+./ab-diff.sh
+```
+
+Neither routing daemon runs, so it takes seconds. The comparison is
+restricted to the scenario's static prefixes: FRR's capture also contains
+connected routes and the container's default route, but those come from
+zebra's kernel dump rather than from anything an encoder produces.
+
+Interface indexes are load-bearing — `fpmsyncd` resolves a nexthop
+ifindex to APPL_DB's `ifname` in its own netns, so the replay side
+creates the same dummy links in the same order as the capture side.
+
 ## What the golden traces show
 
 Captured from FRR 10.5.4-sonic-0 with `dplane_fpm_sonic`. These are the
@@ -100,23 +121,36 @@ FPM encoding is a separate choice and must not be tied to it.
 
 ## The acknowledgement direction
 
-What `bgp suppress-fib-pending` waits on. Two preconditions, both in
-`fpmsyncd.cpp:112-118`: CONFIG_DB `DEVICE_METADATA|localhost` must have
-`suppress-fib-pending` set to `enabled`, **and** something must publish a
-per-route response on the APPL_STATE_DB notification channel
-`APPL_DB_ROUTE_TABLE_RESPONSE_CHANNEL` (orchagent, once SAI has
-programmed the route).
+What `bgp suppress-fib-pending` waits on. **Every `RTM_NEWROUTE` is
+acknowledged** — but there are two different acknowledgements, and which
+one you get is decided by a single CONFIG_DB flag,
+`DEVICE_METADATA|localhost` `suppress-fib-pending`:
+
+| `suppress-fib-pending` | Acknowledgement | Meaning |
+|---|---|---|
+| **disabled** (default) | **Optimistic.** fpmsyncd replies the instant it parses the route, before APPL_DB is even written (`routesync.cpp:2631` — note the check is `if (!isSuppressionEnabled())`) | "Nothing else will ever tell you, so assume it worked." |
+| **enabled** | **Real.** The immediate reply is skipped; the acknowledgement comes later from `onRouteResponse` when orchagent publishes to the APPL_STATE_DB channel `APPL_DB_ROUTE_TABLE_RESPONSE_CHANNEL` | "SAI programmed it." |
+
+The two are not the same message. The optimistic one is the parsed route
+rebuilt in full (`rtnl_route_build_add_request`), so it carries
+`RTA_GATEWAY`/`RTA_OIF`/`RTA_MULTIPATH`; the real one is synthesized from
+scratch and carries no nexthop at all. A client must accept both and
+depend on neither:
 
 | Observation | Consequence for the client |
 |---|---|
-| The ack is **not an echo**. fpmsyncd synthesizes a fresh route from the response (`routesync.cpp:3700-3730`) | |
-| It carries only `RTA_DST` + `RTA_TABLE`, with family, `dst_len`, `protocol` and `RTM_F_OFFLOAD` in the header | The **only** key available to match an ack to a pending route is `(family, prefix, table, protocol)`. Matching on a nexthop is impossible — none is sent. |
-| `nlmsg_pid` is 0 and `nlmsg_seq` is 0 | Not a request/response correlation id. There is no sequence to track. |
+| The orchagent-driven ack is **not an echo** — fpmsyncd builds a fresh route from the response (`routesync.cpp:3700-3730`) carrying only `RTA_DST` + `RTA_TABLE` | The **only** key that works in both modes is `(family, prefix, table, protocol)`. Matching on a nexthop fails the moment suppression is on. |
+| The optimistic ack echoes the full route, including nexthops | Do not treat the presence of nexthop attributes as meaningful. |
+| `nlmsg_pid` and `nlmsg_seq` are both 0 in either mode | Not a correlation id. There is no sequence to track. |
 | `RTA_TABLE` **is** present and explicitly 0, unlike the outbound direction which omits it | Parse both forms. |
-| Flags are `REQUEST\|CREATE`; `rtm_scope` is `link` — an artifact of `rtnl_route_alloc()` defaults | Do not read meaning into scope here. |
-| **Deletes are never acknowledged.** fpmsyncd identifies a DEL response by the *absence* of a `protocol` field and returns early (`routesync.cpp:3678`) | A client that waits for a delete ack waits forever. |
+| Flags are `REQUEST\|CREATE`. `rtm_scope` is `link` on the synthesized ack and `universe` on the optimistic one — an artifact of libnl defaults | Do not read meaning into scope. |
+| **Deletes are never acknowledged**, in either mode. With suppression on, fpmsyncd identifies a DEL response by the *absence* of a `protocol` field and returns early (`routesync.cpp:3678`); with it off, the immediate reply is only sent on the `RTM_NEWROUTE` path | A client that waits for a delete ack waits forever. |
 | A response whose `protocol` is empty is dropped as "programmed without FRR knowledge" | |
 | APPL_DB's `protocol` value for FRR static routes is the string **`0xc4`** (196 in hex), because libnl's `rt_protos` table has no name for it; connected routes come out as `kernel` | It round-trips: fpmsyncd parses it back with `rtnl_route_str2proto()`, falling back to a numeric parse. |
+
+`golden/offload.fpm` is the suppression-enabled trace,
+`golden/offload-optimistic.fpm` the default one; `capture-offload.sh
+--no-suppression` records the latter.
 
 Route writes reach APPL_DB through a **ProducerStateTable**, so they are
 staged as `_ROUTE_TABLE:<key>` plus a `ROUTE_TABLE_KEY_SET` until a

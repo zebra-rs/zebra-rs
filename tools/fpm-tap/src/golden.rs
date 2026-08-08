@@ -26,7 +26,12 @@ fn load(name: &str) -> Vec<capture::Record> {
 /// regression test for that promise against real bytes.
 #[test]
 fn all_traces_decode() {
-    for name in ["basic.fpm", "basic-nhg.fpm", "offload.fpm"] {
+    for name in [
+        "basic.fpm",
+        "basic-nhg.fpm",
+        "offload.fpm",
+        "offload-optimistic.fpm",
+    ] {
         let records = load(name);
         assert!(!records.is_empty(), "{name} is empty");
         for (i, rec) in records.iter().enumerate() {
@@ -152,13 +157,10 @@ fn nhg_mode_publishes_nexthop_objects() {
     );
 }
 
-/// The acknowledgement direction, which drives `bgp suppress-fib-pending`.
-///
-/// fpmsyncd does **not** echo the original message back. It synthesizes a
-/// minimal route from the APPL_STATE_DB response (routesync.cpp:3700-3730):
-/// prefix, protocol, family and table, with RTM_F_OFFLOAD set and no
-/// nexthop information at all. So the only key zebra-rs can match an
-/// acknowledgement on is (family, prefix, table, protocol).
+/// With `suppress-fib-pending` **enabled**, fpmsyncd does not echo the
+/// original message back: it synthesizes a minimal route from the
+/// APPL_STATE_DB response (routesync.cpp:3700-3730) — prefix, protocol,
+/// family and table, with RTM_F_OFFLOAD set and no nexthop at all.
 #[test]
 fn offload_acks_are_minimal_synthesized_routes() {
     let records = load("offload.fpm");
@@ -188,6 +190,48 @@ fn offload_acks_are_minimal_synthesized_routes() {
             d.detail
         );
     }
+}
+
+/// With `suppress-fib-pending` **disabled** — the default — fpmsyncd
+/// acknowledges every route the instant it parses one, before APPL_DB is
+/// even written, by rebuilding the parsed route in full
+/// (`rtnl_route_build_add_request`). The check is inverted from the
+/// intuitive reading: `if (!isSuppressionEnabled()) sendOffloadReply(...)`
+/// at routesync.cpp:2631.
+///
+/// So a client sees acknowledgements in **both** modes, and the two
+/// carry different attributes. Anything that keys off nexthop presence
+/// works in one mode and silently fails in the other; the only field set
+/// common to both is (family, prefix, table, protocol).
+#[test]
+fn optimistic_acks_echo_the_full_route() {
+    let records = load("offload-optimistic.fpm");
+    let acks: Vec<_> = records.iter().filter(|r| r.dir == Dir::ToZebra).collect();
+    assert!(
+        !acks.is_empty(),
+        "offload-optimistic.fpm has no reverse-direction messages — \
+         suppression-disabled mode should acknowledge every route"
+    );
+
+    let mut with_nexthop = 0;
+    for rec in &acks {
+        let d = decode::decode(&rec.bytes);
+        assert_eq!(d.nl_type, 24, "ack is not RTM_NEWROUTE: {}", d.summary);
+        assert!(
+            d.summary.contains("OFFLOAD"),
+            "ack lacks RTM_F_OFFLOAD: {}",
+            d.summary
+        );
+        if d.detail.contains("RTA_GATEWAY") || d.detail.contains("RTA_MULTIPATH") {
+            with_nexthop += 1;
+        }
+    }
+    // The distinguishing property: unlike the synthesized ack, this one
+    // carries the forwarding information back.
+    assert!(
+        with_nexthop > 0,
+        "no optimistic ack echoed a nexthop; expected the full route back"
+    );
 }
 
 /// Deletes are never acknowledged: fpmsyncd distinguishes a DEL response

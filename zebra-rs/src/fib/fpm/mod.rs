@@ -38,6 +38,9 @@
 #![allow(dead_code, unused_imports)]
 
 pub mod encode;
+// Fixture generator for the A/B APPL_DB harness (rig/ab-diff.sh).
+#[cfg(test)]
+mod ab_emit;
 pub mod frame;
 
 pub use encode::{RouteOp, encode_route};
