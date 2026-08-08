@@ -31,6 +31,7 @@ CONTAINER=${CONTAINER:-fpm-tap-offload}
 DB_CONTAINER="${CONTAINER}-db"
 OUT=""
 KEEP="no"
+SUPPRESS="yes"
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SOCKDIR=$(mktemp -d /tmp/fpm-tap-redis.XXXXXX)
@@ -39,7 +40,11 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --out)  OUT="$2"; shift 2 ;;
         --keep) KEEP="yes"; shift ;;
-        *) echo "usage: $0 --out FILE [--keep]" >&2; exit 1 ;;
+        # Leave suppress-fib-pending off, which flips fpmsyncd from the
+        # orchagent-driven acknowledgement to the optimistic one it sends
+        # immediately on receipt. Both shapes exist on real systems.
+        --no-suppression) SUPPRESS="no"; shift ;;
+        *) echo "usage: $0 --out FILE [--keep] [--no-suppression]" >&2; exit 1 ;;
     esac
 done
 [[ -n "$OUT" ]] || { echo "--out is required" >&2; exit 1; }
@@ -122,10 +127,17 @@ fpm address 127.0.0.1 port 2621
 !
 EOF
 chown -R frr:frr /etc/frr
-
-# The single switch that makes fpmsyncd emit acknowledgements at all.
-sonic-db-cli CONFIG_DB HSET "DEVICE_METADATA|localhost" suppress-fib-pending enabled
 '
+
+# Kept in the outer shell rather than the block above: that block is
+# single-quoted, so an apostrophe inside it (in a comment, even) would
+# close the quote and truncate the script.
+if [[ "$SUPPRESS" == "yes" ]]; then
+    # Switches fpmsyncd from acknowledging immediately on receipt to
+    # waiting for the APPL_STATE_DB response orchagent publishes.
+    docker exec "$CONTAINER" \
+        sonic-db-cli CONFIG_DB HSET "DEVICE_METADATA|localhost" suppress-fib-pending enabled
+fi
 
 echo "rig: starting fpmsyncd"
 docker exec -d "$CONTAINER" bash -c 'fpmsyncd > /tmp/fpmsyncd.log 2>&1'
@@ -154,9 +166,13 @@ sleep 3
 echo "rig: routes now in APPL_DB"
 docker exec "$CONTAINER" bash -c 'sonic-db-cli APPL_DB KEYS "_ROUTE_TABLE:*" | sort | head -20'
 
-echo "rig: publishing route responses (orchagent stand-in)"
-docker exec "$CONTAINER" python3 /tmp/fake-orchagent.py || true
-sleep 3
+if [[ "$SUPPRESS" == "yes" ]]; then
+    echo "rig: publishing route responses (orchagent stand-in)"
+    docker exec "$CONTAINER" python3 /tmp/fake-orchagent.py || true
+    sleep 3
+else
+    echo "rig: suppression off — fpmsyncd acknowledged on receipt, no orchagent needed"
+fi
 
 docker exec "$CONTAINER" bash -c 'pkill -x zebra || true; sleep 1'
 sleep 1
