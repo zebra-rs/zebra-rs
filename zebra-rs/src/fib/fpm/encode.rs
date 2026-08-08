@@ -506,6 +506,64 @@ mod tests {
         assert_matches_frr(&msg, "basic.fpm");
     }
 
+    /// A VRF route. The scenario behind `vrf.fpm` puts Vrf1 on kernel
+    /// table 100 while its device lands on ifindex 6, so a capture that
+    /// matches proves the encoder sends the *ifindex* — the two numbers
+    /// cannot be confused for one another here.
+    #[test]
+    fn vrf_route_carries_the_device_ifindex() {
+        let e = entry(RibType::Static, Nexthop::Uni(uni("10.0.1.2", 4)));
+        let msg = encode_route(RouteOp::Add, &"10.200.0.0/24".parse().unwrap(), &e, 6).unwrap();
+        assert_matches_frr(&msg, "vrf.fpm");
+    }
+
+    #[test]
+    fn vrf_route_v6_carries_the_device_ifindex() {
+        let e = entry(RibType::Static, Nexthop::Uni(uni("2001:db8:1::2", 4)));
+        let msg = encode_route(RouteOp::Add, &"2001:db8:200::/64".parse().unwrap(), &e, 6).unwrap();
+        assert_matches_frr(&msg, "vrf.fpm");
+    }
+
+    /// Deleting a VRF route keeps the same table encoding.
+    #[test]
+    fn vrf_delete_matches_frr() {
+        let e = entry(RibType::Static, Nexthop::Uni(uni("10.0.1.2", 4)));
+        let msg = encode_route(RouteOp::Del, &"10.200.1.0/24".parse().unwrap(), &e, 6).unwrap();
+        assert_matches_frr(&msg, "vrf.fpm");
+    }
+
+    /// A default-VRF route recorded in the same trace still uses table 0,
+    /// so the VRF encoding did not leak into the global one.
+    #[test]
+    fn default_vrf_route_in_the_vrf_trace_uses_table_zero() {
+        let e = entry(RibType::Static, Nexthop::Uni(uni("10.0.0.2", 3)));
+        let msg = encode_route(RouteOp::Add, &"10.100.0.0/24".parse().unwrap(), &e, 0).unwrap();
+        assert_matches_frr(&msg, "vrf.fpm");
+    }
+
+    /// An ifindex of 256 or more does not fit the one-byte `rtm_table`,
+    /// so it moves to RTA_TABLE — mirroring dplane_fpm_sonic.c:1499-1505.
+    /// No capture exercises this (a test container will not reach ifindex
+    /// 256), so it is asserted structurally instead.
+    #[test]
+    fn large_vrf_ifindex_moves_to_rta_table() {
+        let e = entry(RibType::Static, Nexthop::Uni(uni("10.0.1.2", 4)));
+        let msg = encode_route(RouteOp::Add, &"10.200.0.0/24".parse().unwrap(), &e, 300).unwrap();
+        // rtm_table is the 5th byte of the rtmsg, which starts after the
+        // 4-byte FPM header and the 16-byte netlink header.
+        let rtm_table = msg[4 + 16 + 4];
+        assert_eq!(
+            rtm_table, 0,
+            "rtm_table must be RT_TABLE_UNSPEC when the ifindex overflows it"
+        );
+        // RTA_TABLE (15) carrying 300 must be present.
+        let needle = [8u8, 0, 15, 0, 44, 1, 0, 0];
+        assert!(
+            msg.windows(needle.len()).any(|w| w == needle),
+            "expected an RTA_TABLE attribute holding 300"
+        );
+    }
+
     /// Guards the mapping itself, independent of any capture.
     #[test]
     fn protocol_uses_frr_numbering() {

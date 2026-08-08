@@ -41,7 +41,13 @@ cargo build --release -p fpm-tap
 cd rig
 ./capture.sh --scenario scenarios/basic.sh --out ../golden/basic.fpm
 ./capture.sh --scenario scenarios/basic.sh --out ../golden/basic-nhg.fpm --nhg
+./capture.sh --scenario scenarios/vrf.sh   --out ../golden/vrf.fpm
 ```
+
+The `vrf` scenario deliberately puts the VRF on kernel table 100 while
+its device lands on a single-digit ifindex, so the two numbers cannot be
+confused — an encoder that sent the table id would still look correct if
+they happened to match.
 
 `rig/capture-offload.sh` additionally captures the **acknowledgement**
 direction. It needs `docker-database:latest` too, and stands up redis, a
@@ -146,6 +152,7 @@ obvious choice is the wrong one.
 | `nlmsg_seq` is 0; `nlmsg_pid` is a per-session random nonce | Neither is a sequence to be tracked. |
 | Blackhole/reject are `rtm_type` 6/7 with no nexthops | Note `fpmsyncd` logs an error and **drops** these (`routesync.cpp` `RTN_BLACKHOLE` case) — they never reach APPL_DB. |
 | Administrative distance never reaches the wire | It is a RIB-selection input only. |
+| A VRF route's table field is the VRF **device ifindex**, not the kernel table id | `golden/vrf.fpm` puts Vrf1 on table 100 with ifindex 6, and the wire says `table=6`. The plugin substitutes one for the other explicitly (`dplane_fpm_sonic.c:1232`, "Put vrf if_index instead of table id") and `fpmsyncd` resolves it with `getIfName()`, rejecting any name that does not start with `Vrf`. An ifindex of 256+ moves to `RTA_TABLE`. |
 | With `fpm use-next-hop-groups`: `RTM_NEWNEXTHOP` (`NHA_ID`/`NHA_GATEWAY`/`NHA_OIF`) precedes the route, which then carries only `RTA_NH_ID` | SONiC's `docker_init.sh` writes `no fpm use-next-hop-groups` by default, so the inline form is primary — but both must work, and both are captured. |
 
 Note the last row is independent of how zebra-rs programs the *kernel*.
