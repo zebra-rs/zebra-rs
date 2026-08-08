@@ -38,6 +38,8 @@ use clap::{Parser, Subcommand};
 mod capture;
 mod decode;
 mod frame;
+#[cfg(test)]
+mod golden;
 mod record;
 mod replay;
 

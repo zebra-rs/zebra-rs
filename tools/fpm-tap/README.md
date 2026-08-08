@@ -43,6 +43,26 @@ cd rig
 ./capture.sh --scenario scenarios/basic.sh --out ../golden/basic-nhg.fpm --nhg
 ```
 
+`rig/capture-offload.sh` additionally captures the **acknowledgement**
+direction. It needs `docker-database:latest` too, and stands up redis, a
+real `fpmsyncd`, and `fake-orchagent.py` in place of orchagent:
+
+```shell
+docker load < <sonic-buildimage>/target/docker-database.gz
+./capture-offload.sh --out ../golden/offload.fpm
+```
+
+```text
+zebra --(2621)--> fpm-tap --(2620)--> fpmsyncd --> APPL_DB
+      <----------         <----------          <-- offload ack
+                                                   ^
+                                fake-orchagent.py -+
+```
+
+`fpmsyncd`'s listen port is hardcoded, so the tap takes 2621 and zebra is
+pointed at it with `fpm address 127.0.0.1 port 2621`. Everything shares
+one network namespace so ifindexes agree between zebra and fpmsyncd.
+
 Two rig details that cost time to rediscover:
 
 * **`/etc/frr/frr.conf` must be removed.** If it exists, FRR loads that
@@ -78,10 +98,34 @@ Note the last row is independent of how zebra-rs programs the *kernel*.
 zebra-rs installs kernel routes with nexthop IDs unless `--no-nhid`; the
 FPM encoding is a separate choice and must not be tied to it.
 
+## The acknowledgement direction
+
+What `bgp suppress-fib-pending` waits on. Two preconditions, both in
+`fpmsyncd.cpp:112-118`: CONFIG_DB `DEVICE_METADATA|localhost` must have
+`suppress-fib-pending` set to `enabled`, **and** something must publish a
+per-route response on the APPL_STATE_DB notification channel
+`APPL_DB_ROUTE_TABLE_RESPONSE_CHANNEL` (orchagent, once SAI has
+programmed the route).
+
+| Observation | Consequence for the client |
+|---|---|
+| The ack is **not an echo**. fpmsyncd synthesizes a fresh route from the response (`routesync.cpp:3700-3730`) | |
+| It carries only `RTA_DST` + `RTA_TABLE`, with family, `dst_len`, `protocol` and `RTM_F_OFFLOAD` in the header | The **only** key available to match an ack to a pending route is `(family, prefix, table, protocol)`. Matching on a nexthop is impossible — none is sent. |
+| `nlmsg_pid` is 0 and `nlmsg_seq` is 0 | Not a request/response correlation id. There is no sequence to track. |
+| `RTA_TABLE` **is** present and explicitly 0, unlike the outbound direction which omits it | Parse both forms. |
+| Flags are `REQUEST\|CREATE`; `rtm_scope` is `link` — an artifact of `rtnl_route_alloc()` defaults | Do not read meaning into scope here. |
+| **Deletes are never acknowledged.** fpmsyncd identifies a DEL response by the *absence* of a `protocol` field and returns early (`routesync.cpp:3678`) | A client that waits for a delete ack waits forever. |
+| A response whose `protocol` is empty is dropped as "programmed without FRR knowledge" | |
+| APPL_DB's `protocol` value for FRR static routes is the string **`0xc4`** (196 in hex), because libnl's `rt_protos` table has no name for it; connected routes come out as `kernel` | It round-trips: fpmsyncd parses it back with `rtnl_route_str2proto()`, falling back to a numeric parse. |
+
+Route writes reach APPL_DB through a **ProducerStateTable**, so they are
+staged as `_ROUTE_TABLE:<key>` plus a `ROUTE_TABLE_KEY_SET` until a
+ConsumerStateTable drains them. With no orchagent, reading
+`ROUTE_TABLE` directly finds nothing — the routes are there, just still
+staged. `fake-orchagent.py` consumes them the same way orchagent does.
+
 ## Not yet captured
 
-* **Offload acknowledgements** — needs `--forward` into a real
-  `fpmsyncd` with Redis behind it.
 * **BGP** routes — needs a peer; a two-container topology.
 * **VRF** routes — the non-zero `RTA_TABLE` path.
 * **SONiC private types** — SRv6 local SID (1000/1001), PIC context
