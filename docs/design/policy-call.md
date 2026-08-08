@@ -61,7 +61,11 @@ silently passing traffic it was told to filter.
 
 * `call NAME` where `NAME` is not defined → the entry **denies**.
 * `call` participating in a cycle → the entry **denies**, and the cycle
-  is logged once at commit.
+  is logged once at commit, naming the policies on it.
+
+Chain *length* is not limited. A cycle is the only structural condition
+that is rejected, and it is detected exactly rather than approximated by
+a depth cap. Any acyclic chain, however long, resolves and evaluates.
 
 Fail-closed is the right default for a routing filter: a policy that was
 asked to consult a filter it cannot find should not conclude "permit".
@@ -83,15 +87,28 @@ pub prefix_set: Option<PrefixSet>,
 ```rust
 /// `call <policy>` — run another policy from this entry.
 pub call_name: Option<String>,
-/// Resolved callee. `Box` breaks the type cycle (a PolicyList
-/// contains PolicyEntry contains PolicyList). `None` while
-/// `call_name` is `Some` means unresolved or cyclic: the entry
-/// denies, per the engine's fail-closed convention for bound-but-
-/// unresolved references.
-pub call_policy: Option<Box<PolicyList>>,
+/// Resolved callee. `Arc` both breaks the type cycle (a PolicyList
+/// contains PolicyEntry contains PolicyList) and keeps the clone
+/// shallow. `None` while `call_name` is `Some` means unresolved or
+/// cyclic: the entry denies, per the engine's fail-closed convention
+/// for bound-but-unresolved references.
+pub call_policy: Option<Arc<PolicyList>>,
 ```
 
-Boxing is required: without it `PolicyEntry` becomes infinitely sized.
+An indirection is required — without one `PolicyEntry` is infinitely
+sized — and it must be `Arc`, not `Box`.
+
+`Box` would deep-clone the callee into every caller. That is fine for a
+chain but not for sharing: with A calling both B and C, and both calling
+D, D is duplicated twice; nest that and the expansion multiplies. Since
+chain length is not capped, the blow-up has no bound either. `Arc` makes
+each policy resolved once and referenced by pointer, so the resolved
+structure is a DAG whose size is linear in the configuration regardless
+of how the calls fan out.
+
+`Arc` also keeps `policy_list_update`'s by-value push cheap: cloning a
+`PolicyList` to send to a peer copies one refcount per call edge instead
+of a subtree.
 
 ### Why embed rather than look up at evaluation time
 
@@ -106,60 +123,88 @@ larger change than this feature warrants, and it would add a shared
 structure to the per-prefix hot path. Embedding keeps `call` inside the
 existing resolve-and-push model, and keeps evaluation allocation-free.
 
-The cost is clone depth on config commit, bounded by the depth cap below.
+With `Arc` the embedding cost is one clone per policy per commit, not
+per call edge, so it does not grow with chain length or fan-out.
 
 ## Resolution
 
-Extend `policy_entry_sync` (`policy/policy_list.rs`), which already
-resolves `prefix_set_name` → `prefix_set` and friends, to resolve
-`call_name` → `call_policy` from the policy config map.
+Resolution happens at commit, in `policy/inst.rs`, and is driven by the
+call graph rather than by recursive descent from each policy. That is
+what removes the need for a depth limit: the structure is analysed once,
+exactly, instead of being explored with a budget.
 
-Resolution is recursive and must be bounded:
+Three steps:
 
+**1. Build the call graph.** Nodes are policy names; there is an edge
+`A → B` for every entry of `A` carrying `call B`. Nodes for undefined
+callees are recorded but have no outgoing edges.
+
+**2. Find cycles.** A DFS with the usual three-colour marking (white /
+grey / black) reports every back edge, and each back edge names a cycle.
+Every policy on a cycle is marked unresolvable. Detection is exact and
+costs O(V+E) — it does not care how long the chains are.
+
+**3. Resolve in reverse topological order.** With cycles removed the
+graph is a DAG, so callees can always be resolved before their callers.
+Walk that order once, keeping a side map:
+
+```rust
+let mut resolved: BTreeMap<String, Arc<PolicyList>> = BTreeMap::new();
+for name in reverse_topological_order {
+    let mut list = policy_config[&name].clone();
+    policy_entry_sync(&mut list, /* prefix/community/... sets */);
+    for entry in list.entry.values_mut() {
+        if let Some(callee) = &entry.call_name {
+            entry.call_policy = resolved.get(callee).cloned(); // Arc clone
+        }
+    }
+    resolved.insert(name, Arc::new(list));
+}
 ```
-MAX_CALL_DEPTH = 8
-```
 
-Resolve with an explicit visited set along the current path:
+Because callees are always already in `resolved`, each policy is
+processed exactly once and each call edge costs one `Arc` clone. No
+recursion, no visited set threaded through, no depth budget — and the
+result is complete for chains of any length.
 
-* If the callee is not in the config map → leave `call_policy = None`
-  (entry denies), log at debug — the name may simply be defined later,
-  and the watch mechanism will re-resolve.
-* If the callee is already on the current path → cycle. Leave
-  `call_policy = None`, log a **warning** naming the cycle. A cycle is
-  operator error, not a staging artifact, and deserves to be visible.
-* If depth exceeds `MAX_CALL_DEPTH` → same as a cycle.
+Policies on a cycle, and callers of an undefined policy, simply find
+nothing in `resolved` and keep `call_policy = None`, which denies.
 
-Eight is chosen as a limit no legitimate configuration approaches (SONiC
-uses one level) while keeping worst-case commit-time clone depth
-trivial.
+A cycle is logged once at warning level naming the policies on it. It is
+operator error rather than a staging artifact, and the symptom
+(everything through that policy is denied) is otherwise hard to explain.
 
 ## Update propagation
 
 `cascade_indirect_policy_updates` already re-resolves and re-fires
 policies when a referenced *set* changes. `call` adds policy→policy
-edges, which makes propagation transitive: if C changes and B calls C
-and A calls B, then A's embedded copy is stale too.
+edges, so a change to a policy must reach its callers, their callers, and
+so on.
 
-Extend the cascade in two steps:
+The call graph from the resolution step answers this directly. Reverse
+its edges to get callers-of, and from the set of directly-changed
+policies take the transitive closure over that reverse graph — every
+policy whose resolved form could have changed, computed once:
 
-1. Add `call_name` to the `needs_resync` predicate, so a policy that
-   calls a changed policy re-resolves.
-2. Iterate the cascade to a fixpoint (bounded by `MAX_CALL_DEPTH`
-   passes), because step 1 makes *A* newly-changed only after *B* has
-   been re-resolved. A single pass would leave A holding a stale copy of
-   B — a silent correctness bug, and the most likely defect in this
-   feature.
+```
+dirty = changed_policies
+      ∪ { P : P reaches some changed policy via call edges }
+```
 
-An alternative worth considering if the fixpoint proves awkward:
-maintain a reverse index (callee → callers) built at commit, and walk it
-in dependency order. That is more code but makes the transitive step
-explicit rather than emergent.
+Then re-resolve the dirty set in the same reverse topological order and
+fire `policy_list_update` for each. Single pass, exact, and independent
+of chain length.
+
+This replaces iterating to a fixpoint, which would have needed a bound to
+terminate safely. The graph makes the bound unnecessary: a DAG traversal
+visits each node once by construction.
+
+`needs_resync` gains `call_name` alongside the existing set predicates,
+so a policy that calls a changed policy is pulled in.
 
 ## Evaluation
 
-In `policy_list_apply_net` (`bgp/route.rs`), after `entry_matches`
-succeeds and before the `match entry.action` block:
+The natural expression is recursive:
 
 ```rust
 if entry.call_name.is_some() {
@@ -173,10 +218,25 @@ if entry.call_name.is_some() {
 }
 ```
 
-The recursion is bounded at resolve time, so no runtime depth counter is
-needed — a resolved `call_policy` cannot be deeper than
-`MAX_CALL_DEPTH`. That invariant should be asserted in the resolver, not
-assumed here.
+placed in `policy_list_apply_net` (`bgp/route.rs`) after `entry_matches`
+succeeds and before the `match entry.action` block.
+
+With no depth limit, recursion depth is bounded only by the
+configuration: the resolved graph is acyclic, so depth cannot exceed the
+number of distinct policies. That is a real bound but an operator-chosen
+one, and this runs on the per-prefix hot path where the stack is shared
+with the rest of the update pipeline.
+
+**Prefer an explicit stack.** Keep a `Vec` of resume points — the policy
+being evaluated and the entry iterator position — push on `call`, pop
+when a callee finishes, and carry `decision` across. It is a modest
+amount of extra code and it makes evaluation depth a heap concern rather
+than a stack one, so an unusually deep configuration degrades in
+allocation rather than aborting the process.
+
+Recursion is acceptable for a first implementation if the iterative form
+proves awkward, but then the depth-vs-stack question should be measured
+rather than assumed, and the reasoning recorded next to the code.
 
 Cost is confined to entries that actually carry a `call`; every other
 policy evaluation is unchanged.
@@ -243,7 +303,10 @@ Unit, in `policy_list.rs` alongside the existing entry tests:
   the next entry
 * unresolved `call` → deny
 * direct cycle (A→A) and indirect cycle (A→B→A) → deny, resolver logs
-* depth > MAX_CALL_DEPTH → deny
+* a long acyclic chain (say 64 deep) resolves and evaluates correctly —
+  the guard against a depth limit creeping back in
+* a diamond (A calls B and C, both call D) resolves D once and shares it,
+  rather than duplicating it per caller
 
 Resolution, in `policy/inst.rs`:
 
@@ -274,8 +337,12 @@ filtering on an old version of a called map, with nothing in the log. The
 A→B→C test above is the guard, and is worth writing before the
 implementation rather than after.
 
-Commit-time cost grows with call depth because each level deep-clones
-the callee. At depth 1 (the SONiC case) this is one extra clone per
-caller per commit, which is not worth optimising for; if deeper chains
-ever appear in practice, `Arc<PolicyList>` instead of `Box` would make
-the clone shallow at the cost of making mutation-on-resolve explicit.
+Commit-time cost is one clone plus one `policy_entry_sync` per policy,
+independent of how the calls fan out, because resolution walks the DAG
+once and shares callees through `Arc`. The pathological case that would
+have mattered — a diamond or a deep chain multiplying deep clones — is
+what the `Arc` choice removes.
+
+Evaluation depth is bounded by the number of policies rather than by a
+constant. The explicit-stack form above is what keeps that from being a
+stack-safety question.
