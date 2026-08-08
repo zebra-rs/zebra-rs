@@ -99,6 +99,7 @@ sleep 2
 # inherits the same orphaned parent.
 echo "live-tee: writing startup config"
 cat > "$SOCKDIR/routes.conf" <<'EOF'
+set system fpm enabled true
 set router static ipv4 route 10.100.0.0/24 nexthop 10.0.0.2
 set router static ipv4 route 10.100.2.0/24 nexthop 10.0.0.2
 set router static ipv4 route 10.100.2.0/24 nexthop 10.0.1.2
@@ -106,11 +107,12 @@ set router static ipv6 route 2001:db8:100::/64 nexthop 2001:db8::2
 EOF
 docker cp "$SOCKDIR/routes.conf" "$CONTAINER:/tmp/routes.conf" >/dev/null
 
-# SONIC_FPM is the env fallback that enables the tee (FpmFib::from_env),
-# standing in for the config leaf until that lands.
+# The tee is turned on by `set system fpm enabled true` in the config
+# above — no env var. Address and port default to 127.0.0.1:2620, which
+# is where fpmsyncd listens in SONiC's bgp container.
 echo "live-tee: starting zebra-rs with the FPM tee enabled"
 docker exec -d "$CONTAINER" bash -c \
-    'SONIC_FPM=127.0.0.1:2620 RUST_LOG=info,zebra_rs::fib::fpm=debug,zebra_rs::rib::inst=debug \
+    'RUST_LOG=info,zebra_rs::fib::fpm=debug,zebra_rs::rib::inst=debug \
         zebra-rs --yang-path /usr/share/zebra-rs/yang \
         -c /tmp/routes.conf > /tmp/zebra-rs.log 2>&1'
 sleep 6
@@ -156,15 +158,46 @@ if [[ "$unknown" -gt 0 ]]; then
     docker exec "$CONTAINER" bash -c 'grep "offload ack for unknown prefix" /tmp/zebra-rs.log | head -5' || true
 fi
 
+# ── Reconnect and replay ────────────────────────────────────────────
+#
+# FPM's contract is explicit: "If the connection to the FPM goes down for
+# some reason, the client should send the FPM a complete copy of the
+# forwarding table(s) when it reconnects" (fpm.h). Without that, a
+# fpmsyncd restart leaves APPL_DB frozen at whatever it held when the
+# socket dropped, and nothing corrects it until unrelated route churn
+# happens to rewrite each prefix — for a stable table, never.
+#
+# So: wipe APPL_DB, restart fpmsyncd, and check the routes come back
+# without touching the configuration.
 echo
-if [[ "$found" -eq 3 && "$acks" -ge 3 && "$unknown" -eq 0 ]]; then
+echo "live-tee: restarting fpmsyncd to test reconnect + replay"
+docker exec "$CONTAINER" redis-cli -s /var/run/redis/redis.sock -n 0 FLUSHDB >/dev/null
+docker exec "$CONTAINER" bash -c 'pkill -x fpmsyncd || true'
+sleep 2
+docker exec -d "$CONTAINER" bash -c 'fpmsyncd > /tmp/fpmsyncd2.log 2>&1'
+sleep 6
+
+replayed=0
+for p in 10.100.0.0/24 10.100.2.0/24 2001:db8:100::/64; do
+    if [ "$(docker exec "$CONTAINER" redis-cli -s /var/run/redis/redis.sock -n 0 EXISTS "_ROUTE_TABLE:$p")" = "1" ]; then
+        replayed=$((replayed + 1))
+    else
+        echo "  $p did NOT come back after reconnect"
+    fi
+done
+docker exec "$CONTAINER" bash -c 'grep -E "FPM (replaying|disconnected|connected)" /tmp/zebra-rs.log | tail -4' || true
+echo "  ($replayed of 3 routes replayed into a wiped APPL_DB)"
+
+echo
+if [[ "$found" -eq 3 && "$acks" -ge 3 && "$unknown" -eq 0 && "$replayed" -eq 3 ]]; then
     echo "PASS — zebra-rs programmed all 3 routes into APPL_DB over FPM,"
-    echo "       and processed $acks offload acknowledgements back"
+    echo "       processed $acks offload acknowledgements back, and"
+    echo "       replayed all 3 after a fpmsyncd restart"
     exit 0
 fi
 if [[ "$found" -eq 3 ]]; then
-    echo "FAIL — routes reached APPL_DB but the acknowledgement path did not close"
-    echo "       ($acks acks, $unknown unmatched)"
+    echo "FAIL — initial program worked, but a later stage did not"
+    echo "       ($acks acks, $unknown unmatched, $replayed/3 replayed)"
     exit 1
 fi
 echo "FAIL — only $found of 3 routes reached APPL_DB"

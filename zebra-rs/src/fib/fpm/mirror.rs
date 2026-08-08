@@ -51,12 +51,9 @@ impl Mirror {
         self.routes.values().cloned().collect()
     }
 
+    /// How many routes a reconnect would replay.
     pub fn len(&self) -> usize {
         self.routes.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.routes.is_empty()
     }
 }
 
@@ -92,7 +89,7 @@ mod tests {
         let mut m = Mirror::default();
         m.insert(net("2001:db8::/64"), 0, vec![1]);
         m.remove(&net("2001:db8::/64"), 0);
-        assert!(m.is_empty());
+        assert_eq!(m.len(), 0);
         assert!(m.messages().is_empty());
     }
 }

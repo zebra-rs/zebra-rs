@@ -615,6 +615,44 @@ module config {
           type string;
         }
       }
+      // SONiC's Forwarding Plane Manager southbound. When enabled, FIB
+      // route installs are teed to `fpmsyncd` over TCP in addition to the
+      // kernel, which is how routes reach APPL_DB -> orchagent -> SAI on a
+      // SONiC switch. The kernel install is unaffected: SONiC expects both
+      // a kernel route and an ASIC route for every prefix.
+      //
+      // The leaf names mirror FRR's own `fpm address A.B.C.D [port N]`, so
+      // the shape is familiar to anyone who has configured the FRR side.
+      container fpm {
+        ext:help "SONiC FPM (fpmsyncd) southbound";
+        leaf enabled {
+          ext:help "Enable the SONiC FPM tee";
+          type boolean;
+          description
+            "Activate teeing of FIB route installs to fpmsyncd. The
+             endpoint is `system fpm address` (default 127.0.0.1) and
+             `system fpm port` (default 2620, fpmsyncd's well-known
+             port). fpmsyncd is the server side of FPM — zebra-rs dials
+             out to it.";
+        }
+        leaf address {
+          ext:help "fpmsyncd address to connect to";
+          type inet:ip-address;
+          description
+            "Address fpmsyncd listens on. Defaults to 127.0.0.1, which is
+             where it runs in SONiC's bgp container. Changing it while the
+             tee is enabled reconnects to the new endpoint and replays the
+             full table, as FPM requires after any reconnect.";
+        }
+        leaf port {
+          ext:help "fpmsyncd TCP port";
+          type uint16;
+          description
+            "Defaults to 2620 (FPM_DEFAULT_PORT). fpmsyncd's listen port
+             is not configurable on its side, so this exists mainly for
+             test rigs that interpose a proxy.";
+        }
+      }
       // The engine-lifecycle half of the eBPF data-plane integration:
       // when enabled, zebra-rs spawns the cradle daemon as a managed,
       // supervised child process (adopting an instance already listening

@@ -500,6 +500,11 @@ pub enum Message {
     /// state (`CradleFib::replay`); without this the datapath would stay
     /// empty until natural route churn.
     CradleEngineUp,
+    /// Re-tee every installed route to a freshly-(re)pointed FPM tee.
+    /// A new tee starts with an empty mirror, so routes installed before
+    /// `system fpm enabled` would otherwise never reach fpmsyncd until
+    /// they happened to churn.
+    FpmResync,
     MdbAdd {
         vni: u32,
         group: IpAddr,
@@ -993,6 +998,13 @@ pub struct Rib {
     /// `system cradle enabled` — the eBPF tee's standalone switch, for an
     /// externally-run engine.
     pub cradle_enabled: bool,
+    /// `system fpm enabled` — tee FIB installs to SONiC's fpmsyncd.
+    pub fpm_enabled: bool,
+    /// `system fpm address` / `system fpm port`. Both optional; the
+    /// defaults (127.0.0.1:2620) are where fpmsyncd runs in SONiC's bgp
+    /// container.
+    pub fpm_address: Option<std::net::IpAddr>,
+    pub fpm_port: Option<u16>,
     /// `system ebpf enabled` — the managed-engine switch. It **implies the
     /// tee**: the operator surface is this single knob, and a supervised
     /// engine without routes would be useless. The supervisor task owns
@@ -1258,6 +1270,9 @@ impl Rib {
         let mut rib = Rib {
             cradle_fdb_watch: None,
             cradle_enabled: false,
+            fpm_enabled: false,
+            fpm_address: None,
+            fpm_port: None,
             ebpf_enabled: false,
             cradle_grpc: None,
             mpls_ttl_propagate: TtlModel::default(),
@@ -3774,6 +3789,9 @@ impl Rib {
                 self.fib_handle.cradle_replay().await;
                 self.cradle_rib_walk().await;
             }
+            Message::FpmResync => {
+                self.fpm_rib_walk().await;
+            }
             Message::CradleReplAdd { vni, sid } => {
                 self.fib_handle.cradle_repl_add(vni, sid).await;
             }
@@ -4509,6 +4527,107 @@ impl Rib {
     #[cfg(not(target_os = "linux"))]
     async fn cradle_rib_walk(&self) {}
 
+    /// `set system fpm enabled {true|false}`.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn fpm_enabled_config_exec(
+        &mut self,
+        mut args: crate::config::Args,
+        op: ConfigOp,
+    ) -> Option<()> {
+        self.fpm_enabled = op.is_set() && args.boolean()?;
+        self.fpm_apply();
+        Some(())
+    }
+
+    /// `set system fpm address <A.B.C.D|X:X::X:X>`.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn fpm_address_config_exec(
+        &mut self,
+        mut args: crate::config::Args,
+        op: ConfigOp,
+    ) -> Option<()> {
+        self.fpm_address = if op.is_set() {
+            Some(args.string()?.parse().ok()?)
+        } else {
+            None
+        };
+        self.fpm_apply();
+        Some(())
+    }
+
+    /// `set system fpm port <1-65535>`.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn fpm_port_config_exec(
+        &mut self,
+        mut args: crate::config::Args,
+        op: ConfigOp,
+    ) -> Option<()> {
+        self.fpm_port = if op.is_set() { Some(args.u16()?) } else { None };
+        self.fpm_apply();
+        Some(())
+    }
+
+    /// The configured endpoint, or `None` when the tee is off.
+    ///
+    /// Both leaves default rather than being required: fpmsyncd always
+    /// listens on 127.0.0.1:2620 in SONiC's bgp container, so `set system
+    /// fpm enabled true` alone is the whole configuration in practice.
+    #[cfg(target_os = "linux")]
+    fn fpm_endpoint(&self) -> Option<std::net::SocketAddr> {
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+        if !self.fpm_enabled {
+            return None;
+        }
+        let addr = self.fpm_address.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let port = self
+            .fpm_port
+            .unwrap_or(crate::fib::fpm::frame::FPM_DEFAULT_PORT);
+        Some(SocketAddr::new(addr, port))
+    }
+
+    /// (Re)point the FPM tee and reseed it with the routes already in the
+    /// RIB.
+    #[cfg(target_os = "linux")]
+    fn fpm_apply(&mut self) {
+        let endpoint = self.fpm_endpoint();
+        self.fib_handle.set_fpm(endpoint, self.fib.tx.clone());
+        if endpoint.is_some() {
+            // Enable-after-routes, the same problem the cradle tee has:
+            // a fresh tee's mirror is empty, so anything installed before
+            // this point would never be sent. Queued rather than done
+            // inline because the walk is async and this runs from the
+            // synchronous config path.
+            let _ = self.tx.send(Message::FpmResync);
+        }
+    }
+
+    /// Re-tee every selected, installed route to the FPM tee.
+    #[cfg(target_os = "linux")]
+    async fn fpm_rib_walk(&self) {
+        use ipnet::IpNet;
+
+        let mut count = 0usize;
+        for (prefix, entries) in self.table.iter() {
+            for entry in entries.iter().filter(|e| e.is_selected() && e.is_fib()) {
+                self.fib_handle
+                    .fpm_route_resync(IpNet::V4(prefix), entry, RT_TABLE_MAIN)
+                    .await;
+                count += 1;
+            }
+        }
+        for (prefix, entries) in self.table_v6.iter() {
+            for entry in entries.iter().filter(|e| e.is_selected() && e.is_fib()) {
+                self.fib_handle
+                    .fpm_route_resync(IpNet::V6(prefix), entry, RT_TABLE_MAIN)
+                    .await;
+                count += 1;
+            }
+        }
+        if count > 0 {
+            tracing::info!("rib: reseeded {count} routes into the FPM tee");
+        }
+    }
+
     fn cradle_apply(&mut self) {
         // Tear down any previous watcher before re-pointing/disabling.
         if let Some(watch) = self.cradle_fdb_watch.take() {
@@ -4645,6 +4764,15 @@ impl Rib {
                 } else if path.as_str() == "/system/ebpf/enabled" {
                     #[cfg(target_os = "linux")]
                     let _ = self.ebpf_enabled_config_exec(args, msg.op);
+                } else if path.as_str() == "/system/fpm/enabled" {
+                    #[cfg(target_os = "linux")]
+                    let _ = self.fpm_enabled_config_exec(args, msg.op);
+                } else if path.as_str() == "/system/fpm/address" {
+                    #[cfg(target_os = "linux")]
+                    let _ = self.fpm_address_config_exec(args, msg.op);
+                } else if path.as_str() == "/system/fpm/port" {
+                    #[cfg(target_os = "linux")]
+                    let _ = self.fpm_port_config_exec(args, msg.op);
                 } else if path.as_str() == "/system/cradle/grpc-endpoint" {
                     #[cfg(target_os = "linux")]
                     let _ = self.cradle_grpc_config_exec(args, msg.op);
