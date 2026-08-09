@@ -541,6 +541,12 @@ pub struct PeerConfig {
     /// changes.
     pub knobs_explicit: super::neighbor_group::InheritableKnobs,
     pub llgr: AfiSafis<LlgrValue>,
+    /// Verbatim per-peer `afi-safi <name> add-path <mode>` statements —
+    /// same explicit-vs-effective split as [`Self::nhs_explicit`]; the
+    /// effective value lives in [`Self::addpath`], resolved against a
+    /// referenced neighbor-group's per-family opinion by
+    /// [`super::neighbor_group::resolve_add_path`].
+    pub addpath_explicit: BTreeMap<AfiSafi, AddPathSendReceive>,
     pub addpath: AfiSafis<AddPathValue>,
     pub route_refresh: bool,
     // When true, the peer's pre-policy Adj-RIB-In is replayed locally
@@ -616,6 +622,38 @@ pub struct PeerConfig {
     pub description: Option<String>,
 }
 
+impl PeerConfig {
+    /// Record a per-neighbor `afi-safi <name> add-path` statement.
+    ///
+    /// The verbatim map and the effective value must move together: a
+    /// neighbor-group's opinion is resolved by sweeping
+    /// [`Self::addpath_explicit`], and an effective entry with no
+    /// verbatim counterpart looks like an inherited value the sweep is
+    /// free to clear. Writing [`Self::addpath`] directly is therefore a
+    /// latent bug — this method is the only supported way to set the
+    /// pair, so the invariant is enforced by the type rather than by
+    /// remembering it.
+    pub fn stage_add_path(&mut self, afi_safi: AfiSafi, mode: Option<AddPathSendReceive>) {
+        match mode {
+            Some(send_receive) => {
+                self.addpath_explicit.insert(afi_safi, send_receive);
+                self.addpath.insert(
+                    afi_safi,
+                    AddPathValue {
+                        afi: afi_safi.afi,
+                        safi: afi_safi.safi,
+                        send_receive,
+                    },
+                );
+            }
+            None => {
+                self.addpath_explicit.remove(&afi_safi);
+                self.addpath.remove(&afi_safi);
+            }
+        }
+    }
+}
+
 impl Default for PeerConfig {
     fn default() -> Self {
         Self {
@@ -627,6 +665,7 @@ impl Default for PeerConfig {
             nhs_explicit: BTreeMap::new(),
             knobs_explicit: Default::default(),
             llgr: AfiSafis::new(),
+            addpath_explicit: BTreeMap::new(),
             addpath: AfiSafis::new(),
             route_refresh: Default::default(),
             soft_reconfig_in: Default::default(),

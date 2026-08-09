@@ -93,6 +93,7 @@
 /router/bgp/neighbor
 /router/bgp/neighbor-group
 /router/bgp/neighbor-group/afi-safi
+/router/bgp/neighbor-group/afi-safi/add-path
 /router/bgp/neighbor-group/afi-safi/enabled
 /router/bgp/neighbor-group/afi-safi/next-hop-self
 /router/bgp/neighbor-group/allowas-in

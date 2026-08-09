@@ -3264,11 +3264,24 @@ pub(super) fn config_table_map(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> O
     Some(())
 }
 
+/// `set/delete router bgp neighbor <addr> afi-safi <name> add-path
+/// <mode>`.
+///
+/// The pure setter records the verbatim statement and the effective
+/// value; re-resolving afterwards matters for the delete case, where the
+/// effective mode must fall back to a referenced neighbor-group's
+/// opinion instead of vanishing.
 fn config_add_path(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     let afi_safi: AfiSafi = args.afi_safi()?;
     let peer = bgp.peers.get_mut(&addr)?;
-    super::afi_knob::set_add_path(&mut peer.config, afi_safi, op, &mut args)
+    super::afi_knob::set_add_path(&mut peer.config, afi_safi, op, &mut args)?;
+    super::neighbor_group::apply_resolved_add_path(
+        &bgp.neighbor_groups,
+        &mut peer.config,
+        afi_safi,
+    );
+    Some(())
 }
 
 /// `set/delete router bgp neighbor <addr> afi-safi <name>
@@ -4470,6 +4483,10 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/neighbor-group/afi-safi/enabled",
             super::neighbor_group::config_neighbor_group_afi_safi_enabled,
+        );
+        self.callback_add(
+            "/router/bgp/neighbor-group/afi-safi/add-path",
+            super::neighbor_group::config_neighbor_group_afi_safi_add_path,
         );
         self.callback_add(
             "/router/bgp/neighbor-group/afi-safi/next-hop-self",
@@ -7887,6 +7904,134 @@ mod neighbor_group_wiring_tests {
         )
         .unwrap();
         assert!(!nhs(&bgp), "entry delete clears the inherited value");
+    }
+
+    /// Per-family `add-path` inherits through the group's afi-safi entry
+    /// with the same explicit-wins semantics as `next-hop-self`.
+    ///
+    /// The delete leg is the one that earns its keep: `add-path`'s pure
+    /// setter writes the effective value directly, so without the
+    /// re-resolve in `config_add_path` a deleted per-neighbor statement
+    /// would drop the capability entirely instead of falling back to the
+    /// group.
+    #[tokio::test]
+    async fn group_add_path_propagates_with_explicit_priority() {
+        use super::super::neighbor_group::config_neighbor_group_afi_safi_add_path;
+        use bgp_packet::AddPathSendReceive;
+
+        let mut bgp = fresh_bgp();
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["G", "65000"]), ConfigOp::Set)
+            .unwrap();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_peer_neighbor_group(&mut bgp, arg_words(&["10.0.0.1", "G"]), ConfigOp::Set).unwrap();
+
+        let mode = |bgp: &Bgp| {
+            bgp.peers
+                .get(&peer_addr())
+                .unwrap()
+                .config
+                .addpath
+                .get(&v4())
+                .map(|v| v.send_receive)
+        };
+
+        config_neighbor_group_afi_safi_enabled(
+            &mut bgp,
+            arg_words(&["G", "ipv4", "true"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert_eq!(mode(&bgp), None, "no opinion on either side requests none");
+
+        config_neighbor_group_afi_safi_add_path(
+            &mut bgp,
+            arg_words(&["G", "ipv4", "send"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert_eq!(
+            mode(&bgp),
+            Some(AddPathSendReceive::Send),
+            "group add-path must apply to the member"
+        );
+
+        // Explicit per-neighbor send-receive outranks the group's send.
+        config_add_path(
+            &mut bgp,
+            arg_words(&["10.0.0.1", "ipv4", "send-receive"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert_eq!(
+            mode(&bgp),
+            Some(AddPathSendReceive::SendReceive),
+            "explicit statement must win"
+        );
+
+        // Removing the explicit statement falls back to the group.
+        config_add_path(
+            &mut bgp,
+            arg_words(&["10.0.0.1", "ipv4", "send-receive"]),
+            ConfigOp::Delete,
+        )
+        .unwrap();
+        assert_eq!(
+            mode(&bgp),
+            Some(AddPathSendReceive::Send),
+            "delete of the explicit statement must fall back to the group opinion"
+        );
+
+        // Dropping the group's opinion clears it: the union sweep is what
+        // removes the entry rather than leaving the last value latched.
+        config_neighbor_group_afi_safi_add_path(
+            &mut bgp,
+            arg_words(&["G", "ipv4", "send"]),
+            ConfigOp::Delete,
+        )
+        .unwrap();
+        assert_eq!(mode(&bgp), None, "dropping the group opinion clears it");
+    }
+
+    /// A member that joins the group *after* the opinion was recorded
+    /// still gets it. This is the listen-range case the knob exists for:
+    /// a dynamic peer is materialized on accept, long after the group was
+    /// configured, so inheritance cannot depend on config ordering.
+    #[tokio::test]
+    async fn group_add_path_applies_to_a_later_joining_member() {
+        use super::super::neighbor_group::config_neighbor_group_afi_safi_add_path;
+        use bgp_packet::AddPathSendReceive;
+
+        let mut bgp = fresh_bgp();
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["G", "65000"]), ConfigOp::Set)
+            .unwrap();
+        config_neighbor_group_afi_safi_enabled(
+            &mut bgp,
+            arg_words(&["G", "ipv4", "true"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        config_neighbor_group_afi_safi_add_path(
+            &mut bgp,
+            arg_words(&["G", "ipv4", "send"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+
+        // Peer arrives only now, and binds to the group afterwards.
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_peer_neighbor_group(&mut bgp, arg_words(&["10.0.0.1", "G"]), ConfigOp::Set).unwrap();
+
+        assert_eq!(
+            bgp.peers
+                .get(&peer_addr())
+                .unwrap()
+                .config
+                .addpath
+                .get(&v4())
+                .map(|v| v.send_receive),
+            Some(AddPathSendReceive::Send),
+            "a peer binding to the group later must still inherit add-path"
+        );
     }
 
     // ---- the nine additional inheritable whole-session knobs --------

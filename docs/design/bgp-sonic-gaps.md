@@ -27,6 +27,19 @@ still might be something. Entries below are therefore split by confidence:
 means the daemon rejected what was tried but there is evidence the feature
 is reachable.
 
+**A batch probe attributes its rejection to the wrong line.** A commit is
+atomic, so one bad line discards the batch and every construct in it looks
+unsupported. This is how `add-path` came to be listed: the probe's *second*
+line said `peer-as` where zebra-rs spells it `remote-as`, and `add-path` on
+the third line took the blame. Probe one construct per commit, on top of a
+known-good preamble, and confirm the preamble alone is accepted first.
+
+**Group and neighbor are different surfaces.** A knob on
+`neighbor <addr>` need not exist on `neighbor-group <name>`; inheritance is
+implemented knob by knob. Probe at the level the template actually uses —
+for a listen-range group there is no per-neighbor fallback, so only the
+group form counts.
+
 ## Blocking a template family
 
 These stop a per-role family from being ported at all.
@@ -77,24 +90,23 @@ template cannot always resolve at render time.
 
 ## Reachable but not confirmed
 
-### `addpath-tx-all-paths` — syntax unknown
+### `addpath-tx-all-paths` — semantics unverified
 
-SONiC: `neighbor <sentinel> addpath-tx-all-paths`.
+The config surface is **closed** (see below); what remains is a
+behavioural question, and it is the one that decides whether the
+sentinel actually works.
 
-The feature is implemented (`bgp/cap.rs`, `bgp/adj_rib.rs`,
-`bgp/membership.rs`), a config callback is registered at
-`/afi-safi/add-path` (`bgp/config.rs:4977`), and
-`zebra-bgp-afi-knobs.yang` defines `add-path` as
-`send | receive | send-receive`. But
-`neighbor X afi-safi ipv4 add-path send` is rejected on both a neighbor
-and a neighbor-group.
+RFC 7911 `send` is not the same thing as FRR's `addpath-tx-all-paths`.
+FRR distinguishes tx-all-paths from tx-bestpath-per-AS; `send` only says
+the capability is advertised, not which paths are selected for
+advertisement. Which paths zebra-rs actually sends in `send` mode has
+**not** been checked against the sentinel use case, which wants *all*
+paths. If it advertises only the bestpath, the config is accepted, the
+capability is negotiated, and the sentinel quietly sees less than it
+asked for — a failure with no error anywhere.
 
-So this is probably a short investigation rather than a feature: find
-the accepted path, or find why the augment is not reachable from the CLI
-tree. Note also that RFC 7911 `send` is not exactly FRR's
-`addpath-tx-all-paths` — FRR distinguishes tx-all-paths from
-tx-bestpath-per-AS, and which paths zebra-rs actually advertises in
-`send` mode needs checking against the sentinel use case.
+Checking this needs a live session with two paths to one prefix and a
+count of what crosses the wire, not another config probe.
 
 ## Silently degraded
 
@@ -163,6 +175,17 @@ Recorded so the list reads as a state, not a history:
   walker has always implemented it. Recorded because it was wrongly
   listed as a gap first, and refusing it would have denied working policy
   to every upstream line card.
+* **`add-path` on a neighbor-group** — implemented. The per-neighbor knob
+  existed all along (the original probe was invalid, see above), but the
+  group's `afi-safi` list carried only `enabled` and `next-hop-self`, so
+  the mode could not be inherited. That is load-bearing rather than
+  cosmetic: the sentinels group is a **listen range**, whose members are
+  materialized on accept, so no per-neighbor statement exists to carry
+  the capability. The group opinion resolves with explicit-wins
+  precedence, is applied on peer materialization (so a dynamic member
+  gets it), bounces an Established member whose mode actually changed
+  (ADD-PATH is negotiated in the OPEN), and is resolved on the per-VRF
+  path too so the two neighbor surfaces do not drift.
 
 ## Not yet examined
 

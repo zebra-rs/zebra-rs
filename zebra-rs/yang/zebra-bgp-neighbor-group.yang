@@ -225,6 +225,33 @@ module zebra-bgp-neighbor-group {
             "Whether this AFI,SAFI is enabled for peers inheriting
              from the group.";
         }
+        leaf add-path {
+          ext:help "Inherited per-family ADD-PATH mode";
+          type enumeration {
+            enum receive;
+            enum send;
+            enum send-receive;
+          }
+          description
+            "Inherited RFC 7911 ADD-PATH mode, mirroring the
+             per-neighbor `afi-safi <name> add-path` leaf. An
+             `add-path` set explicitly on the neighbor itself wins.
+
+             Defined here rather than by `uses`-ing the shared
+             per-neighbor knob grouping because inheritance has to be
+             implemented knob by knob — a leaf that appears in the
+             schema but has no resolver would be accepted and silently
+             ignored, which is the failure mode the knob module's own
+             docs warn about. Same reason `next-hop-self` below is a
+             hand-written mirror.
+
+             Unlike `next-hop-self`, this is a capability carried in the
+             OPEN, so a change bounces an Established member whose
+             effective mode actually changed. It is the only way to give
+             a listen-range group's dynamic members an ADD-PATH mode:
+             they are materialized on accept, so no per-neighbor
+             statement exists to carry one.";
+        }
         leaf next-hop-self {
           ext:help "Inherited per-family next-hop-self";
           type boolean;

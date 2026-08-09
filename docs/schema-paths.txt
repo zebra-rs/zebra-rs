@@ -95,6 +95,7 @@
 /router/bgp/neighbor	list keys=remote-address
 /router/bgp/neighbor-group	list keys=name
 /router/bgp/neighbor-group/afi-safi	list keys=name
+/router/bgp/neighbor-group/afi-safi/add-path	leaf
 /router/bgp/neighbor-group/afi-safi/enabled	leaf
 /router/bgp/neighbor-group/afi-safi/next-hop-self	leaf
 /router/bgp/neighbor-group/allowas-in	p-container
