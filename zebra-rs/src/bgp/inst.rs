@@ -6070,16 +6070,29 @@ impl Bgp {
     /// time this runs the prefix is out of `fib_pending`, so the gate
     /// lets it through.
     pub(super) fn fib_pending_release(&mut self, prefix: ipnet::IpNet) {
+        // Re-run selection rather than reading `shard.vX.1`: that map
+        // holds the winner alone, while the advertisement this hold
+        // suppressed would have carried the full multipath set —
+        // releasing less than was held would strip ECMP alternatives
+        // from peers until unrelated churn re-ran selection. (At N>1
+        // the main-side table is the mirrored read replica, kept in
+        // step per delta, so re-selecting here is valid at every N.)
         let selected_v4 = match prefix {
-            ipnet::IpNet::V4(p) => self.shard.v4.1.get(&p).cloned(),
+            ipnet::IpNet::V4(p) => Some(self.shard.v4.select_best_path(p)),
             ipnet::IpNet::V6(_) => None,
         };
         let selected_v6 = match prefix {
-            ipnet::IpNet::V6(p) => self.shard.v6.1.get(&p).cloned(),
+            ipnet::IpNet::V6(p) => Some(self.shard.v6.select_best_path(p)),
             ipnet::IpNet::V4(_) => None,
         };
-        if selected_v4.is_none() && selected_v6.is_none() {
-            // Withdrawn between install and ack — nothing to advertise.
+        let empty = selected_v4.as_deref().is_none_or(|s| s.is_empty())
+            && selected_v6.as_deref().is_none_or(|s| s.is_empty());
+        if empty {
+            // Withdrawn between install and ack — nothing to advertise,
+            // and the entry must not linger: a later reinstall of the
+            // same prefix would consume the stale `Confirmed` and skip
+            // the hold its own install deserves.
+            self.local_rib.fib_pending.remove(&prefix);
             return;
         }
         let mut top = super::peer::BgpTop {
@@ -6104,23 +6117,11 @@ impl Bgp {
             as_sets_withdraw: self.as_sets_withdraw,
         };
         match (prefix, selected_v4, selected_v6) {
-            (ipnet::IpNet::V4(p), Some(best), _) => {
-                super::route::route_advertise_to_peers(
-                    None,
-                    p,
-                    std::slice::from_ref(&best),
-                    /* source peer */ 0,
-                    &mut top,
-                    &mut self.peers,
-                );
+            (ipnet::IpNet::V4(p), Some(set), _) => {
+                super::route::fib_pending_release_v4(&mut top, &mut self.peers, p, &set);
             }
-            (ipnet::IpNet::V6(p), _, Some(best)) => {
-                super::route::route_advertise_to_peers_v6(
-                    p,
-                    std::slice::from_ref(&best),
-                    &mut top,
-                    &mut self.peers,
-                );
+            (ipnet::IpNet::V6(p), _, Some(set)) => {
+                super::route::route_advertise_to_peers_v6(p, &set, &mut top, &mut self.peers);
             }
             _ => {}
         }

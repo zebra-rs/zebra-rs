@@ -133,6 +133,21 @@ impl FpmFib {
         // Redis write it has to make.
         if !changed {
             self.stats.suppressed.fetch_add(1, Ordering::Relaxed);
+            // The peer already holds exactly these bytes from an earlier
+            // send, so no fresh acknowledgement is coming for this
+            // re-install — synthesize one, or a `suppress-fib-pending`
+            // hold armed by an attribute-only re-install waits out its
+            // full timeout for the ack of a message that never needed to
+            // be sent. Connected only: while down, the reconnect replay
+            // re-sends the mirror and the real ack follows.
+            if self.is_connected()
+                && let Some((ack, _)) = super::decode::parse_route_key(&msg)
+            {
+                let _ = self.rib_tx.send(FibMessage::RouteOffload(RouteOffload {
+                    success: true,
+                    ..ack
+                }));
+            }
             return;
         }
         self.offer(msg);

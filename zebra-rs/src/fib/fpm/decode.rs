@@ -56,6 +56,21 @@ const RTM_F_OFFLOAD_FAILED: u32 = 0x2000_0000;
 /// module does not handle. Malformed input yields `None` rather than an
 /// error: a peer that sends nonsense should not take the tee down.
 pub fn parse_ack(msg: &[u8]) -> Option<RouteOffload> {
+    let (ack, flags) = parse_route_key(msg)?;
+    if flags & (RTM_F_OFFLOAD | RTM_F_OFFLOAD_FAILED) == 0 {
+        return None;
+    }
+    Some(ack)
+}
+
+/// Parse the route key (prefix, VRF table, protocol) and the `rtm_flags`
+/// word out of any FPM-framed `RTM_NEWROUTE`, offload-flagged or not.
+///
+/// [`parse_ack`] layers the offload-flag requirement on top; the tee
+/// calls this directly on its own outbound SET bytes to synthesize an
+/// acknowledgement for a dedup-suppressed re-send, where no flags are
+/// present because no ack conversation ever happens.
+pub fn parse_route_key(msg: &[u8]) -> Option<(RouteOffload, u32)> {
     let payload = msg.get(FPM_MSG_HDR_LEN..)?;
     if payload.len() < NLMSG_HDRLEN + RTMSG_LEN {
         return None;
@@ -80,10 +95,6 @@ pub fn parse_ack(msg: &[u8]) -> Option<RouteOffload> {
     let table = body[4] as u32;
     let protocol = body[5];
     let flags = u32::from_le_bytes(body[8..12].try_into().ok()?);
-
-    if flags & (RTM_F_OFFLOAD | RTM_F_OFFLOAD_FAILED) == 0 {
-        return None;
-    }
 
     let mut dst: Option<&[u8]> = None;
     let mut table_attr: Option<u32> = None;
@@ -121,12 +132,15 @@ pub fn parse_ack(msg: &[u8]) -> Option<RouteOffload> {
         _ => return None,
     };
 
-    Some(RouteOffload {
-        prefix,
-        vrf_ifindex: table_attr.unwrap_or(table),
-        protocol,
-        success: flags & RTM_F_OFFLOAD_FAILED == 0,
-    })
+    Some((
+        RouteOffload {
+            prefix,
+            vrf_ifindex: table_attr.unwrap_or(table),
+            protocol,
+            success: flags & RTM_F_OFFLOAD_FAILED == 0,
+        },
+        flags,
+    ))
 }
 
 #[cfg(test)]

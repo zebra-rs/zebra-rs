@@ -866,6 +866,10 @@ pub(super) fn fib_install_v4(bgp: &super::peer::BgpTop, prefix: Ipv4Net, selecte
             .map(|nh| cache.transport_for(0, nh))
     });
     let entry = best.and_then(|b| select_fib_entry_v4(b, transport, nht_transport));
+    // Pins the suppress-fib-pending gate's `fib_installable_v4` to this
+    // derivation: the two must agree, or the gate arms holds no
+    // forwarding-plane ack can ever release.
+    debug_assert_eq!(entry.is_some(), fib_installable_v4(bgp, prefix, selected));
     match entry {
         Some(mut rib_entry) => {
             // Colour-aware steering — plain-path only; a VPN tunnel
@@ -1085,6 +1089,65 @@ fn select_fib_entry_v6(
     }
 }
 
+/// Would [`fib_install_v4`] program a FIB entry for this selection?
+///
+/// The suppress-fib-pending gate must not arm a hold for a selection
+/// that installs nothing — a locally-originated `network` prefix with no
+/// usable next-hop, or a table-map deny, sends no FIB add, so no
+/// forwarding-plane ack will ever release the hold and every such prefix
+/// would stall the full [`FIB_PENDING_TIMEOUT`]. Mirrors the installer's
+/// entry derivation through the same primitives; `fib_install_v4`
+/// carries a `debug_assert` pinning the two together.
+pub(super) fn fib_installable_v4(
+    bgp: &super::peer::BgpTop,
+    prefix: Ipv4Net,
+    selected: &[BgpRib],
+) -> bool {
+    let transport = bgp
+        .vrf_transport_v4
+        .and_then(|m| m.get(&prefix))
+        .map(|v| v.as_slice());
+    let best = table_map_apply(
+        &bgp.local_rib.table_map,
+        *bgp.router_id,
+        IpNet::V4(prefix),
+        selected.first(),
+    );
+    let best = best.as_deref();
+    let nht_transport = bgp.nexthop_cache.as_deref().and_then(|cache| {
+        best.and_then(|b| super::nht::bgp_nexthop_ip(&b.attr))
+            .map(|nh| cache.transport_for(0, nh))
+    });
+    best.and_then(|b| select_fib_entry_v4(b, transport, nht_transport))
+        .is_some()
+}
+
+/// v6 twin of [`fib_installable_v4`], pinned by the `debug_assert` in
+/// [`fib_install_v6`].
+pub(super) fn fib_installable_v6(
+    bgp: &super::peer::BgpTop,
+    prefix: Ipv6Net,
+    selected: &[BgpRib],
+) -> bool {
+    let transport = bgp
+        .vrf_transport_v6
+        .and_then(|m| m.get(&prefix))
+        .map(|v| v.as_slice());
+    let best = table_map_apply(
+        &bgp.local_rib.table_map,
+        *bgp.router_id,
+        IpNet::V6(prefix),
+        selected.first(),
+    );
+    let best = best.as_deref();
+    let nht_transport = bgp.nexthop_cache.as_deref().and_then(|cache| {
+        best.and_then(|b| super::nht::bgp_nexthop_ip(&b.attr))
+            .map(|nh| cache.transport_for(0, nh))
+    });
+    best.and_then(|b| select_fib_entry_v6(b, transport, nht_transport))
+        .is_some()
+}
+
 /// IPv6 counterpart of [`fib_install_v4`]: the single install path for
 /// `rd == None` v6 winners in a VRF (imported VPNv6 labelled entry vs
 /// CE plain entry), and plain v6 unicast install on the global instance.
@@ -1107,6 +1170,8 @@ pub(super) fn fib_install_v6(bgp: &super::peer::BgpTop, prefix: Ipv6Net, selecte
             .map(|nh| cache.transport_for(0, nh))
     });
     let entry = best.and_then(|b| select_fib_entry_v6(b, transport, nht_transport));
+    // Same pinning as `fib_install_v4` — see the assert there.
+    debug_assert_eq!(entry.is_some(), fib_installable_v6(bgp, prefix, selected));
     match entry {
         Some(mut rib_entry) => {
             // Colour-aware SRv6 steering — plain-path only. A VPN tunnel
@@ -4304,6 +4369,19 @@ fn apply_ipv4_advertise_job(
         added,
         replaced,
     } = job;
+    // `suppress-fib-pending`: this is the ingest-reduce's advertise sink
+    // — the path every ordinary v4 UPDATE takes at N=1 and N>1 — and it
+    // must gate exactly as `route_advertise_to_peers` does, or the
+    // mainline escapes the feature entirely. Holding here holds the
+    // whole job: the plain fan, the PET/group fans, and the ADD-PATH
+    // deltas below all wait together, and `fib_pending_release`
+    // re-advertises the full set plus the ADD-PATH members.
+    if rd.is_none() {
+        let installable = fib_installable_v4(bgp, prefix, &selected);
+        if fib_pending_hold(bgp, IpNet::V4(prefix), &selected, installable) {
+            return;
+        }
+    }
     // Group-task migration (gate-on): the v4-unicast event-driven
     // advertise/withdraw runs in the per-update-group egress tasks — fan one
     // delta per group and bypass the update-group flush. Takes precedence over
@@ -4676,18 +4754,40 @@ pub enum FibPending {
 
 /// Should this advertisement wait for the forwarding plane?
 ///
-/// Returns true when the prefix must be held back. Called from the
-/// single per-prefix advertise entry point, so one check covers the
-/// serial reduce, the parallel batch, the peer-egress fan and the
-/// update-group fan alike.
+/// Returns true when the prefix must be held back. There are TWO
+/// per-prefix advertise entry points for v4 unicast — the event/withdraw
+/// path (`route_advertise_to_peers`) and the ingest-reduce sink
+/// (`apply_ipv4_advertise_job`, which also fans ADD-PATH and the
+/// PET/group egress) — and BOTH must call this before fanning anything;
+/// gating only one of them is how the mainline UPDATE path once escaped
+/// the feature entirely. The session-establishment sync walks don't
+/// arm holds; they skip held prefixes via [`fib_pending_blocks_sync`]
+/// and rely on the release fan to deliver them.
 ///
-/// A **withdraw is never suppressed** (`selected.is_empty()`).
-/// Withdrawing is how we stop attracting traffic; delaying it could only
-/// prolong the blackhole this feature exists to prevent. Getting this
-/// condition backwards would invert the whole feature, which is why it
-/// has its own test.
-fn fib_pending_hold(bgp: &mut BgpTop, prefix: IpNet, selected: &[BgpRib]) -> bool {
-    if !bgp.local_rib.suppress_fib_pending || selected.is_empty() {
+/// A **withdraw is never suppressed** (`selected.is_empty()`), and it
+/// clears any pending state: withdrawing is how we stop attracting
+/// traffic; delaying it could only prolong the blackhole this feature
+/// exists to prevent. Getting this condition backwards would invert the
+/// whole feature, which is why it has its own test.
+///
+/// `installable` is the caller's [`fib_installable_v4`]/`_v6` verdict: a
+/// selection that installs nothing (a locally-originated `network`
+/// prefix with no usable next-hop, a table-map deny) sends no FIB add,
+/// so no forwarding-plane ack will ever come — arming a hold for it
+/// could only wait out the full timeout. It also clears pending state,
+/// for the reconfiguration corner where a previously-installed prefix
+/// stops being installable while still selected.
+fn fib_pending_hold(
+    bgp: &mut BgpTop,
+    prefix: IpNet,
+    selected: &[BgpRib],
+    installable: bool,
+) -> bool {
+    if !bgp.local_rib.suppress_fib_pending {
+        return false;
+    }
+    if selected.is_empty() || !installable {
+        bgp.local_rib.fib_pending.remove(&prefix);
         return false;
     }
     use std::collections::btree_map::Entry;
@@ -4716,6 +4816,22 @@ fn fib_pending_hold(bgp: &mut BgpTop, prefix: IpNet, selected: &[BgpRib]) -> boo
     }
 }
 
+/// Should the session-establishment sync walk skip this prefix?
+///
+/// True while the prefix sits in a live (unexpired) hold: a new peer
+/// must not learn a prefix the forwarding plane has not confirmed. The
+/// walk never arms or clears holds — when the ack (or the deadline)
+/// releases the prefix, `fib_pending_release` fans it to every
+/// established peer, which by then includes the synced one. An expired
+/// hold is NOT skipped: the sweep will release it anyway, and the sync
+/// delivering it first is the same advertisement a tick earlier.
+pub(super) fn fib_pending_blocks_sync(local_rib: &LocalRib, prefix: IpNet) -> bool {
+    matches!(
+        local_rib.fib_pending.get(&prefix),
+        Some(FibPending::Waiting(since)) if since.elapsed() < FIB_PENDING_TIMEOUT
+    )
+}
+
 pub(super) fn route_advertise_to_peers(
     rd: Option<RouteDistinguisher>,
     prefix: Ipv4Net,
@@ -4729,9 +4845,13 @@ pub(super) fn route_advertise_to_peers(
     // upstream of here; this holds only the advertisement, and the
     // offload ack (or the deadline) re-enters through this same function
     // so a released prefix cannot take a different path from one that was
-    // never held.
-    if rd.is_none() && fib_pending_hold(bgp, IpNet::V4(prefix), selected) {
-        return;
+    // never held. The ingest-reduce sink (`apply_ipv4_advertise_job`)
+    // carries the same gate — see `fib_pending_hold` on why both must.
+    if rd.is_none() {
+        let installable = fib_installable_v4(bgp, prefix, selected);
+        if fib_pending_hold(bgp, IpNet::V4(prefix), selected, installable) {
+            return;
+        }
     }
     // Group-task migration (gate-on): the v4-unicast direct-withdraw / re-
     // advertise egress (route_ipv4_withdraw, peer-down route_clean) runs in
@@ -4760,6 +4880,25 @@ pub(super) fn route_advertise_to_peers(
         peers,
         BTreeMap::new(),
     );
+}
+
+/// Advertise a released (formerly FIB-pending) v4 prefix: the full
+/// selected set through the normal fan, plus each member to the
+/// ADD-PATH peers — the same pair of fans `apply_ipv4_advertise_job`
+/// would have run had the advertisement not been held. Releasing less
+/// than was held (the winner alone, or the plain fan without ADD-PATH)
+/// would leave peers missing ECMP alternatives until unrelated churn
+/// re-ran selection.
+pub(super) fn fib_pending_release_v4(
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+    prefix: Ipv4Net,
+    selected: &[BgpRib],
+) {
+    route_advertise_to_peers(None, prefix, selected, 0, bgp, peers);
+    for rib in selected {
+        route_advertise_to_addpath(None, prefix, rib, 0, bgp, peers);
+    }
 }
 
 /// A2 ⑥ — fan one prefix's best path to every established v4-unicast peer's
@@ -12371,7 +12510,8 @@ pub(super) fn route_advertise_to_peers_v6(
     peers: &mut PeerMap,
 ) {
     // Same gate as the v4 twin — see `fib_pending_hold`.
-    if fib_pending_hold(bgp, IpNet::V6(prefix), selected) {
+    let installable = fib_installable_v6(bgp, prefix, selected);
+    if fib_pending_hold(bgp, IpNet::V6(prefix), selected, installable) {
         return;
     }
     // Plain (non-AddPath) members go through the generic memo path shared
@@ -14013,6 +14153,12 @@ pub(super) fn route_sync_v4_chunk(peer: &mut Peer, bgp: &mut BgpTop, chunk: usiz
 
     let mut entries: Vec<(Arc<BgpAttr>, Ipv4Nlri)> = Vec::new();
     for prefix in keys {
+        // `suppress-fib-pending`: a new peer must not learn a prefix
+        // the forwarding plane has not confirmed; the release fan
+        // delivers it once the ack (or the deadline) arrives.
+        if fib_pending_blocks_sync(bgp.local_rib, IpNet::V4(prefix)) {
+            continue;
+        }
         // Read the LIVE Loc-RIB: a prefix withdrawn since the snapshot
         // is simply absent here (skipped), and a changed prefix sends
         // its current value — never a stale one.
@@ -14093,6 +14239,11 @@ pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut BgpTop) {
     // (one MP_REACH UPDATE per shared attr-set).
     let mut entries: Vec<(Arc<BgpAttr>, Ipv4Nlri)> = Vec::new();
     for (prefix, mut rib) in routes {
+        // `suppress-fib-pending`: a new peer must not learn a prefix the
+        // forwarding plane has not confirmed — the release fan covers it.
+        if fib_pending_blocks_sync(bgp.local_rib, IpNet::V4(prefix)) {
+            continue;
+        }
         // RFC 9494 §4.3: stale routes only go to LLGR peers.
         if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, Afi::Ip, Safi::Unicast) {
             continue;
@@ -14178,6 +14329,10 @@ pub fn route_sync_ipv6(peer: &mut Peer, bgp: &mut BgpTop) {
     // route stuck (caught by @bgp_shard_sync_v6's withdraw scenario).
     let mut entries: Vec<(Arc<BgpAttr>, Ipv6Nlri)> = Vec::new();
     for (prefix, mut rib) in routes {
+        // `suppress-fib-pending`: same skip as the v4 sync walk.
+        if fib_pending_blocks_sync(bgp.local_rib, IpNet::V6(prefix)) {
+            continue;
+        }
         // RFC 9494 §4.3: stale routes only go to LLGR peers.
         if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, Afi::Ip6, Safi::Unicast) {
             continue;
@@ -23601,9 +23756,14 @@ mod suppress_fib_pending_tests {
     /// `fib_pending_hold`'s decision, minus the `BgpTop` it would
     /// otherwise need (56 borrowed fields to check one branch). Kept
     /// byte-for-byte in step with the real one; the state machine is the
-    /// part under test.
-    fn hold(rib: &mut LocalRib, prefix: IpNet, is_withdraw: bool) -> bool {
-        if !rib.suppress_fib_pending || is_withdraw {
+    /// part under test. `is_withdraw` stands in for `selected.is_empty()`
+    /// and `installable` for the caller's `fib_installable_v4/6` verdict.
+    fn hold(rib: &mut LocalRib, prefix: IpNet, is_withdraw: bool, installable: bool) -> bool {
+        if !rib.suppress_fib_pending {
+            return false;
+        }
+        if is_withdraw || !installable {
+            rib.fib_pending.remove(&prefix);
             return false;
         }
         use std::collections::btree_map::Entry;
@@ -23635,7 +23795,7 @@ mod suppress_fib_pending_tests {
     #[test]
     fn disabled_never_holds() {
         let mut r = rib(false);
-        assert!(!hold(&mut r, v4("10.0.0.0/24"), false));
+        assert!(!hold(&mut r, v4("10.0.0.0/24"), false, true));
         assert!(r.fib_pending.is_empty(), "must not record when disabled");
     }
 
@@ -23645,8 +23805,8 @@ mod suppress_fib_pending_tests {
     fn enabled_holds_until_acked() {
         let mut r = rib(true);
         let p = v4("10.0.0.0/24");
-        assert!(hold(&mut r, p, false), "first advertise must be held");
-        assert!(hold(&mut r, p, false), "still held before the ack");
+        assert!(hold(&mut r, p, false, true), "first advertise must be held");
+        assert!(hold(&mut r, p, false, true), "still held before the ack");
     }
 
     /// The bug this state machine exists for, and the reason it is two
@@ -23661,11 +23821,14 @@ mod suppress_fib_pending_tests {
     fn ack_survives_one_trip_through_the_advertise_path() {
         let mut r = rib(true);
         let p = v4("10.0.0.0/24");
-        assert!(hold(&mut r, p, false));
+        assert!(hold(&mut r, p, false, true));
 
         // The ack marks rather than removes.
         r.fib_pending.insert(p, FibPending::Confirmed);
-        assert!(!hold(&mut r, p, false), "the release must pass the gate");
+        assert!(
+            !hold(&mut r, p, false, true),
+            "the release must pass the gate"
+        );
         assert!(
             !r.fib_pending.contains_key(&p),
             "and must consume the entry rather than re-arm it"
@@ -23673,7 +23836,10 @@ mod suppress_fib_pending_tests {
 
         // A later install of the same prefix is held again, as it should
         // be — it is a new thing to confirm.
-        assert!(hold(&mut r, p, false), "a fresh install is held again");
+        assert!(
+            hold(&mut r, p, false, true),
+            "a fresh install is held again"
+        );
     }
 
     /// The condition most dangerous to get backwards. Suppressing a
@@ -23683,11 +23849,40 @@ mod suppress_fib_pending_tests {
     fn withdraw_is_never_suppressed() {
         let mut r = rib(true);
         let p = v4("10.0.0.0/24");
-        assert!(hold(&mut r, p, false), "advertise is held");
+        assert!(hold(&mut r, p, false, true), "advertise is held");
         assert!(
-            !hold(&mut r, p, true),
+            !hold(&mut r, p, true, true),
             "a withdraw must pass even while the prefix is pending"
         );
+        assert!(
+            !r.fib_pending.contains_key(&p),
+            "and must clear the pending state: the install it was \
+             waiting on is gone, so a stale entry would make the NEXT \
+             install of this prefix skip its hold"
+        );
+        assert!(
+            hold(&mut r, p, false, true),
+            "a reinstall after the withdraw is a new thing to confirm"
+        );
+    }
+
+    /// A selection that installs nothing gets no forwarding-plane ack:
+    /// a locally-originated `network` prefix with no usable next-hop, or
+    /// a table-map deny. Arming a hold for it could only wait out the
+    /// full timeout, stalling every such prefix by 30 seconds.
+    #[test]
+    fn uninstallable_selection_is_never_held() {
+        let mut r = rib(true);
+        let p = v4("10.0.0.0/24");
+        assert!(!hold(&mut r, p, false, false), "must pass immediately");
+        assert!(r.fib_pending.is_empty(), "and must not arm a hold");
+
+        // The reconfiguration corner: a prefix already pending stops
+        // being installable (table-map applied mid-wait). The hold is
+        // for an install that no longer exists — clear it.
+        assert!(hold(&mut r, p, false, true), "installable: held");
+        assert!(!hold(&mut r, p, false, false), "now uninstallable: pass");
+        assert!(r.fib_pending.is_empty(), "and the stale hold is gone");
     }
 
     /// A lost ack costs latency, not permanent invisibility: once the
@@ -23700,7 +23895,10 @@ mod suppress_fib_pending_tests {
             p,
             FibPending::Waiting(std::time::Instant::now() - FIB_PENDING_TIMEOUT),
         );
-        assert!(!hold(&mut r, p, false), "expired prefix must advertise");
+        assert!(
+            !hold(&mut r, p, false, true),
+            "expired prefix must advertise"
+        );
         assert_eq!(r.fib_pending_timeouts, 1, "and must be counted");
         assert!(!r.fib_pending.contains_key(&p));
     }
