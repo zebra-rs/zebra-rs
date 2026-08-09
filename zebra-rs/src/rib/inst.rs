@@ -3309,6 +3309,11 @@ impl Rib {
                 // the matching withdraw walk.
                 self.vrf_tables.remove(&vrf.table_id);
                 self.fib_handle.unregister_vrf_ifindex(vrf.table_id);
+                // The kernel flushes the VRF's routes with the device,
+                // but the FPM mirror would keep them — and every later
+                // reconnect would replay the dead VRF's routes back
+                // into APPL_DB, possibly keyed to a recycled ifindex.
+                self.fib_handle.fpm_flush_vrf(vrf.ifindex).await;
                 // Nexthops tracked in the dropped table no longer
                 // resolve — push the unreachable flip to their watchers.
                 self.nht_recompute_and_notify();
@@ -4166,6 +4171,12 @@ impl Rib {
             return;
         };
 
+        // Whose install is this verdict about? The flag lands on the
+        // selected entry, so its type decides.
+        let selected_is_bgp = entries
+            .iter()
+            .any(|e| e.is_selected() && e.rtype == super::RibType::Bgp);
+
         mark_selected_offloaded(entries, offload.success);
 
         // Tell BGP, which is the only consumer: `suppress-fib-pending`
@@ -4173,7 +4184,21 @@ impl Rib {
         // Targeted rather than broadcast — there is one ack per
         // installed route, and waking every protocol for each of them on
         // a full-table load would be pure overhead.
-        if let Some(sub) = self.client_registry.subscriber_for_proto("bgp") {
+        //
+        // Forwarded only when the ack is actually about a BGP install in
+        // the DEFAULT VRF: the global instance's pending map is keyed by
+        // bare prefix in exactly that scope, so an ack for the same
+        // prefix in some VRF, or for a static/IGP route that won the RIB
+        // over BGP's candidate, must not release the hold — that would
+        // advertise a path whose own install was never confirmed. (A BGP
+        // candidate that LOSES the RIB to another protocol therefore
+        // rides out the hold to its timeout — rare, visible in the
+        // timeout counter, and safer than releasing on someone else's
+        // ack.)
+        if selected_is_bgp
+            && offload.vrf_ifindex == 0
+            && let Some(sub) = self.client_registry.subscriber_for_proto("bgp")
+        {
             let _ = sub.rib_rx_tx.send(super::api::RibRx::RouteOffload {
                 prefix: offload.prefix,
                 success: offload.success,

@@ -59,6 +59,13 @@ const RTA_OIF: u16 = 4;
 const RTA_GATEWAY: u16 = 5;
 const RTA_PRIORITY: u16 = 6;
 const RTA_MULTIPATH: u16 = 9;
+/// `RTA_VIA` — a gateway in a different address family than the route
+/// (RFC 5549: a v4 prefix reached over a v6 next-hop). `RTA_GATEWAY`'s
+/// payload is sized by the ROUTE family, so putting 16 bytes of v6
+/// address there makes the reader take the first 4 as an IPv4 gateway;
+/// `RTA_VIA` carries its own 2-byte family header instead, which is
+/// what FRR emits for the unnumbered case.
+const RTA_VIA: u16 = 18;
 /// FRR sets this on `RTA_MULTIPATH` (and `RTA_ENCAP`); `fpmsyncd` masks
 /// it back off in `netlink_parse_rtattr` (`fpmlink.cpp:24-31`). Emitting
 /// the bare attribute type would parse fine but not match the wire.
@@ -220,6 +227,26 @@ impl NlWriter {
         }
     }
 
+    /// A gateway attribute, family-aware: `RTA_GATEWAY` when the
+    /// gateway matches the route's family, `RTA_VIA` (`struct rtvia`:
+    /// 2-byte family + address bytes) when it does not — see the
+    /// `RTA_VIA` constant for why the mismatch cannot ride
+    /// `RTA_GATEWAY`.
+    fn attr_gateway(&mut self, route_family: u8, gw: IpAddr) {
+        let gw_family = if gw.is_ipv6() { AF_INET6 } else { AF_INET };
+        if gw_family == route_family {
+            self.attr_addr(RTA_GATEWAY, gw);
+            return;
+        }
+        let mut payload = Vec::with_capacity(18);
+        payload.extend_from_slice(&(gw_family as u16).to_le_bytes());
+        match gw {
+            IpAddr::V4(a) => payload.extend_from_slice(&a.octets()),
+            IpAddr::V6(a) => payload.extend_from_slice(&a.octets()),
+        }
+        self.attr(RTA_VIA, &payload);
+    }
+
     /// Open a nested attribute, returning the offset to back-patch.
     fn nest_start(&mut self, atype: u16) -> usize {
         let off = self.buf.len();
@@ -311,7 +338,7 @@ pub fn encode_route(
             // Single leg: flat attributes, no multipath wrapper.
             let leg = &legs[0];
             if let Some(gw) = leg.gateway {
-                w.attr_addr(RTA_GATEWAY, gw);
+                w.attr_gateway(family, gw);
             }
             w.attr_u32(RTA_OIF, leg.ifindex);
         } else {
@@ -326,7 +353,7 @@ pub fn encode_route(
                 w.u8(leg.weight.saturating_sub(1));
                 w.u32(leg.ifindex);
                 if let Some(gw) = leg.gateway {
-                    w.attr_addr(RTA_GATEWAY, gw);
+                    w.attr_gateway(family, gw);
                 }
                 let rtnh_len = (w.buf.len() - rtnh_off) as u16;
                 w.buf[rtnh_off..rtnh_off + 2].copy_from_slice(&rtnh_len.to_le_bytes());
@@ -341,6 +368,19 @@ pub fn encode_route(
     debug_assert!(w.buf.len() >= NLMSG_HDRLEN + RTMSG_LEN);
 
     frame::frame(&w.buf)
+}
+
+/// Turn a framed SET (`RTM_NEWROUTE`) into the DELROUTE for the same
+/// route, in place. Used by the VRF-delete flush, which holds only the
+/// mirrored SET bytes: a full-bodied DELROUTE is legal, and reusing the
+/// exact bytes guarantees the delete carries the same key
+/// (prefix/table) the SET established.
+pub fn set_msg_to_del(msg: &mut [u8]) {
+    // FPM frame header (4 bytes) + nlmsg_len (4) puts nlmsg_type at 8.
+    let off = frame::FPM_MSG_HDR_LEN + 4;
+    if msg.len() >= off + 2 && u16::from_le_bytes([msg[off], msg[off + 1]]) == RTM_NEWROUTE {
+        msg[off..off + 2].copy_from_slice(&RTM_DELROUTE.to_le_bytes());
+    }
 }
 
 const RTA_TABLE: u16 = 15;
@@ -428,6 +468,54 @@ mod tests {
         let mut e = RibEntry::new(rtype);
         e.nexthop = nexthop;
         e
+    }
+
+    /// RFC 5549: a v4 prefix reached over a v6 next-hop (BGP
+    /// unnumbered) must ride RTA_VIA, not RTA_GATEWAY — fpmsyncd sizes
+    /// RTA_GATEWAY by the ROUTE family and would read the first four
+    /// bytes of the v6 address as an IPv4 gateway.
+    #[test]
+    fn v4_over_v6_nexthop_uses_rta_via() {
+        let e = entry(RibType::Bgp, Nexthop::Uni(uni("fe80::1", 3)));
+        let msg = encode_route(RouteOp::Add, &"10.99.0.0/24".parse().unwrap(), &e, 0).unwrap();
+        // struct rtvia: u16 family + 16 address bytes = 18 payload, 22
+        // with the attribute header; family AF_INET6.
+        let via_hdr = [22u8, 0, 18, 0, 10, 0];
+        assert!(
+            msg.windows(via_hdr.len()).any(|w| w == via_hdr),
+            "no RTA_VIA attribute in the encoded message"
+        );
+        for gw_hdr in [[8u8, 0, 5, 0], [20u8, 0, 5, 0]] {
+            assert!(
+                !msg.windows(gw_hdr.len()).any(|w| w == gw_hdr),
+                "a cross-family gateway must not ride RTA_GATEWAY"
+            );
+        }
+        // Same-family single leg is untouched — the golden traces pin
+        // that shape byte-for-byte in the tests below.
+    }
+
+    /// The VRF flush turns mirrored SETs into DELs by flipping the
+    /// message type in place; everything else — the key fpmsyncd
+    /// matches on — must survive byte-identical, and the result must
+    /// still parse for the tombstone path.
+    #[test]
+    fn set_msg_to_del_flips_only_the_type() {
+        let e = entry(RibType::Bgp, Nexthop::Uni(uni("192.0.2.1", 3)));
+        let set = encode_route(RouteOp::Add, &"10.99.0.0/24".parse().unwrap(), &e, 7).unwrap();
+        let mut del = set.clone();
+        set_msg_to_del(&mut del);
+        assert_eq!(
+            u16::from_le_bytes([del[8], del[9]]),
+            RTM_DELROUTE,
+            "type must flip to RTM_DELROUTE"
+        );
+        assert_eq!(&del[..8], &set[..8], "frame + nlmsg_len untouched");
+        assert_eq!(&del[10..], &set[10..], "body untouched");
+        let (key, _) = super::super::decode::parse_route_key(&del)
+            .expect("a flipped DEL must still parse for the tombstone path");
+        assert_eq!(key.prefix, "10.99.0.0/24".parse::<IpNet>().unwrap());
+        assert_eq!(key.vrf_ifindex, 7);
     }
 
     /// `ip route 10.100.0.0/24 10.0.0.2` — the simplest shape there is.

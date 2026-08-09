@@ -34,6 +34,7 @@ use crate::fib::message::RouteOffload;
 const NLMSG_HDRLEN: usize = 16;
 const RTMSG_LEN: usize = 12;
 const RTM_NEWROUTE: u16 = 24;
+const RTM_DELROUTE: u16 = 25;
 const AF_INET: u8 = 2;
 const AF_INET6: u8 = 10;
 const RTA_DST: u16 = 1;
@@ -64,7 +65,8 @@ pub fn parse_ack(msg: &[u8]) -> Option<RouteOffload> {
 }
 
 /// Parse the route key (prefix, VRF table, protocol) and the `rtm_flags`
-/// word out of any FPM-framed `RTM_NEWROUTE`, offload-flagged or not.
+/// word out of any FPM-framed `RTM_NEWROUTE` or `RTM_DELROUTE`,
+/// offload-flagged or not.
 ///
 /// [`parse_ack`] layers the offload-flag requirement on top; the tee
 /// calls this directly on its own outbound SET bytes to synthesize an
@@ -78,7 +80,7 @@ pub fn parse_route_key(msg: &[u8]) -> Option<(RouteOffload, u32)> {
 
     let nl_len = u32::from_le_bytes(payload[0..4].try_into().ok()?) as usize;
     let nl_type = u16::from_le_bytes(payload[4..6].try_into().ok()?);
-    if nl_type != RTM_NEWROUTE {
+    if nl_type != RTM_NEWROUTE && nl_type != RTM_DELROUTE {
         return None;
     }
 

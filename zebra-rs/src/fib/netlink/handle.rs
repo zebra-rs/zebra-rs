@@ -600,10 +600,25 @@ impl FibHandle {
         endpoint: Option<std::net::SocketAddr>,
         rib_tx: UnboundedSender<FibMessage>,
     ) {
+        // Stop the old tee's connection task first. Dropping the handle
+        // is not enough — the task holds its own clone — and an
+        // orphaned task keeps reconnecting to the old endpoint and
+        // replaying its frozen mirror over that fpmsyncd forever.
+        if let Some(old) = self.fpm.take() {
+            old.shutdown();
+        }
         self.fpm = endpoint.map(|addr| FpmFib::new(addr, rib_tx));
         match &self.fpm {
             Some(fpm) => tracing::info!("fib: FPM tee enabled -> {}", fpm.endpoint()),
             None => tracing::info!("fib: FPM tee disabled"),
+        }
+    }
+
+    /// Flush every FPM-mirrored route of a deleted VRF — see
+    /// `FpmFib::flush_vrf`. A no-op when the tee is off.
+    pub async fn fpm_flush_vrf(&self, vrf_ifindex: u32) {
+        if let Some(fpm) = &self.fpm {
+            fpm.flush_vrf(vrf_ifindex).await;
         }
     }
 

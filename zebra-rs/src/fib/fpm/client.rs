@@ -65,6 +65,14 @@ pub struct FpmFib {
     mirror: Arc<Mutex<Mirror>>,
     connected: Arc<AtomicBool>,
     stats: Arc<Stats>,
+    /// Set by [`shutdown`](Self::shutdown). The connection task holds a
+    /// clone of this handle — including its own `tx` — so `rx.recv()`
+    /// alone can never observe the outside world dropping the tee;
+    /// without an explicit stop, every `system fpm` repoint or disable
+    /// leaked an immortal task that kept reconnecting to the old
+    /// endpoint and replaying its frozen mirror over fpmsyncd.
+    shutdown: Arc<AtomicBool>,
+    shutdown_notify: Arc<tokio::sync::Notify>,
 }
 
 impl FpmFib {
@@ -81,11 +89,24 @@ impl FpmFib {
             mirror: Arc::new(Mutex::new(Mirror::default())),
             connected: Arc::new(AtomicBool::new(false)),
             stats: Arc::new(Stats::default()),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            shutdown_notify: Arc::new(tokio::sync::Notify::new()),
         };
 
         let task = fib.clone();
         tokio::spawn(async move { task.run(rx).await });
         fib
+    }
+
+    /// Stop the connection task for good: close the socket, stop
+    /// reconnecting. Must be called when the tee is re-pointed or
+    /// disabled — dropping the handle is not enough (see `shutdown`
+    /// field) — or the orphaned task keeps replaying a frozen mirror
+    /// over whatever fpmsyncd it can still reach.
+    pub fn shutdown(&self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        self.connected.store(false, Ordering::Relaxed);
+        self.shutdown_notify.notify_waiters();
     }
 
     /// Enable the tee from the environment: `SONIC_FPM=127.0.0.1:2620`.
@@ -155,9 +176,70 @@ impl FpmFib {
 
     /// Send a route delete and drop it from the mirror, so a later
     /// replay does not resurrect it.
+    ///
+    /// A delete for a route the mirror never held is NOT sent: the peer
+    /// never received a SET for it (connected/kernel routes reach the
+    /// delete path but never the add path), so the DELROUTE would be an
+    /// orphan for a key fpmsyncd does not hold.
+    ///
+    /// While disconnected (or mid-replay) the delete is recorded as a
+    /// tombstone instead of dropped: an ADD dropped while down costs
+    /// nothing because the replay re-sends the mirror, but a delete has
+    /// no replay row to ride — without the tombstone the peer keeps the
+    /// withdrawn route in APPL_DB until the next reconnect, forwarding
+    /// into a void indefinitely. The connected check happens under the
+    /// mirror lock, which the settle step also holds when it flips
+    /// `connected` and drains the tombstones — so a delete either lands
+    /// in the drain or sends live, never neither.
     pub async fn route_del(&self, prefix: &IpNet, vrf_ifindex: u32, msg: Vec<u8>) {
-        self.mirror.lock().await.remove(prefix, vrf_ifindex);
-        self.offer(msg);
+        let mut mirror = self.mirror.lock().await;
+        if !mirror.remove(prefix, vrf_ifindex) {
+            return;
+        }
+        if self.is_connected() {
+            drop(mirror);
+            self.offer(msg);
+        } else {
+            mirror.tombstone(*prefix, vrf_ifindex, msg);
+        }
+    }
+
+    /// Drop every mirrored route in `vrf_ifindex` and tell the peer.
+    /// Called when the VRF is deleted: the kernel flushes its own
+    /// routes with the VRF device, but the mirror would otherwise keep
+    /// them and every later reconnect would replay the dead VRF's
+    /// routes back into APPL_DB — possibly keyed to a recycled ifindex
+    /// belonging to something else entirely. The deletes are the
+    /// mirrored SET bytes with the message type flipped, so they carry
+    /// exactly the key the SET established.
+    pub async fn flush_vrf(&self, vrf_ifindex: u32) {
+        let mut mirror = self.mirror.lock().await;
+        let mut dels = mirror.drain_vrf(vrf_ifindex);
+        if dels.is_empty() {
+            return;
+        }
+        for msg in dels.iter_mut() {
+            super::encode::set_msg_to_del(msg);
+        }
+        tracing::info!(
+            "fib: FPM flushing {} routes of deleted VRF ifindex {}",
+            dels.len(),
+            vrf_ifindex
+        );
+        if self.is_connected() {
+            drop(mirror);
+            for msg in dels {
+                self.offer(msg);
+            }
+        } else {
+            // Ride the tombstone drain on reconnect. Prefix/VRF key is
+            // parsed back out of the bytes we just wrote.
+            for msg in dels {
+                if let Some((key, _)) = super::decode::parse_route_key(&msg) {
+                    mirror.tombstone(key.prefix, key.vrf_ifindex, msg);
+                }
+            }
+        }
     }
 
     /// Queue a message if the peer is up. Dropping while disconnected is
@@ -185,18 +267,29 @@ impl FpmFib {
         )
     }
 
-    /// Connection lifecycle: connect, replay, pump, repeat.
+    /// Connection lifecycle: connect, replay, settle, pump, repeat —
+    /// until [`shutdown`](Self::shutdown).
     async fn run(self, mut rx: UnboundedReceiver<Vec<u8>>) {
         let mut backoff = BACKOFF_START;
         loop {
-            let stream = match TcpStream::connect(self.endpoint).await {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::debug!("fib: FPM connect to {} failed ({e})", self.endpoint);
-                    tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(BACKOFF_MAX);
-                    continue;
-                }
+            if self.shutdown.load(Ordering::Relaxed) {
+                tracing::info!("fib: FPM tee to {} shut down", self.endpoint);
+                return;
+            }
+            let stream = tokio::select! {
+                r = TcpStream::connect(self.endpoint) => match r {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::debug!("fib: FPM connect to {} failed ({e})", self.endpoint);
+                        tokio::select! {
+                            _ = tokio::time::sleep(backoff) => {}
+                            _ = self.shutdown_notify.notified() => {}
+                        }
+                        backoff = (backoff * 2).min(BACKOFF_MAX);
+                        continue;
+                    }
+                },
+                _ = self.shutdown_notify.notified() => continue,
             };
             // FPM messages are small and latency matters for
             // convergence; Nagle would batch them behind a 40ms timer.
@@ -214,15 +307,20 @@ impl FpmFib {
 
             // Replay before accepting new traffic. FPM has replace
             // semantics, so re-sending every route is safe and is what
-            // the protocol asks for after a reconnect.
-            let (replay, mirrored) = {
+            // the protocol asks for after a reconnect. The snapshot lets
+            // the mirror stay unlocked during the writes; whatever
+            // changes meanwhile is reconciled by the settle step below.
+            let (snapshot, mirrored) = {
                 let mirror = self.mirror.lock().await;
-                (mirror.messages(), mirror.len())
+                (mirror.snapshot(), mirror.len())
             };
             let mut failed = false;
-            if !replay.is_empty() {
+            if !snapshot.is_empty() {
                 tracing::info!("fib: FPM replaying {mirrored} routes");
-                for msg in &replay {
+                for msg in snapshot.values() {
+                    if self.shutdown.load(Ordering::Relaxed) {
+                        return;
+                    }
                     if let Err(e) = wr.write_all(msg).await {
                         tracing::warn!("fib: FPM replay failed ({e})");
                         failed = true;
@@ -234,9 +332,37 @@ impl FpmFib {
             if failed {
                 continue;
             }
-            self.connected.store(true, Ordering::Relaxed);
 
-            // Pump until either side gives up.
+            // Settle: everything that moved while the replay was in
+            // flight was recorded in the mirror but dropped by the
+            // not-yet-connected send gate — pending deletes (which have
+            // no replay row to ride) and adds/changes newer than the
+            // snapshot. Flipping `connected` under the same lock is what
+            // makes the handoff lossless: a concurrent route_add/del
+            // either lands before the drain (and is included here) or
+            // observes `connected` and sends through the live channel.
+            let settle: Vec<Vec<u8>> = {
+                let mut mirror = self.mirror.lock().await;
+                let mut msgs = mirror.take_dels();
+                msgs.extend(mirror.changed_since(&snapshot));
+                self.connected.store(true, Ordering::Relaxed);
+                msgs
+            };
+            let mut failed = false;
+            for msg in &settle {
+                if let Err(e) = wr.write_all(msg).await {
+                    tracing::warn!("fib: FPM settle write failed ({e})");
+                    failed = true;
+                    break;
+                }
+                self.stats.sent.fetch_add(1, Ordering::Relaxed);
+            }
+            if failed {
+                self.connected.store(false, Ordering::Relaxed);
+                continue;
+            }
+
+            // Pump until either side gives up, or the tee is shut down.
             let mut buf = vec![0u8; 64 * 1024];
             let mut pending = Vec::new();
             loop {
@@ -265,6 +391,11 @@ impl FpmFib {
                             }
                         }
                     }
+                    _ = self.shutdown_notify.notified() => {
+                        self.connected.store(false, Ordering::Relaxed);
+                        tracing::info!("fib: FPM tee to {} shut down", self.endpoint);
+                        return;
+                    }
                 }
             }
 
@@ -274,7 +405,10 @@ impl FpmFib {
                 "fib: FPM disconnected ({sent} sent, {acks} acked, \
                  {dropped} dropped while down, {suppressed} unchanged-suppressed)"
             );
-            tokio::time::sleep(backoff).await;
+            tokio::select! {
+                _ = tokio::time::sleep(backoff) => {}
+                _ = self.shutdown_notify.notified() => {}
+            }
         }
     }
 
