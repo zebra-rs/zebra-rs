@@ -466,18 +466,14 @@ pub fn resolve_add_path(
     config: &PeerConfig,
     family: AfiSafi,
 ) -> Option<AddPathSendReceive> {
-    config
-        .addpath_explicit
-        .get(&family)
-        .copied()
-        .or_else(|| {
-            config
-                .neighbor_group
-                .as_deref()
-                .and_then(|name| groups.get(name))
-                .and_then(|group| group.afi_safi.get(&family))
-                .and_then(|entry| entry.add_path)
-        })
+    config.addpath_explicit.get(&family).copied().or_else(|| {
+        config
+            .neighbor_group
+            .as_deref()
+            .and_then(|name| groups.get(name))
+            .and_then(|group| group.afi_safi.get(&family))
+            .and_then(|entry| entry.add_path)
+    })
 }
 
 /// Write the resolved per-family `add-path` into the peer's effective

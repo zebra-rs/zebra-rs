@@ -4654,8 +4654,7 @@ fn bump_group_counters_on_miss(
 /// anyway. Chosen to be comfortably longer than an orchagent round trip
 /// under load while still bounded — the point is that a lost ack costs
 /// latency, never permanent invisibility.
-pub(super) const FIB_PENDING_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(30);
+pub(super) const FIB_PENDING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// State of a prefix in the `suppress-fib-pending` map.
 ///
@@ -4667,7 +4666,7 @@ pub(super) const FIB_PENDING_TIMEOUT: std::time::Duration =
 /// pending, and hold it again. Forever. `Confirmed` is what the release
 /// consumes on its way through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum FibPending {
+pub enum FibPending {
     /// Installed, waiting for the forwarding plane. Advertise is held
     /// until the ack or this deadline.
     Waiting(std::time::Instant),
