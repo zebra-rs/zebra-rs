@@ -20,6 +20,7 @@
 //! differently.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use ipnet::IpNet;
 
@@ -29,7 +30,12 @@ type Key = (IpNet, u32);
 
 #[derive(Default)]
 pub struct Mirror {
-    routes: HashMap<Key, Vec<u8>>,
+    /// `Arc` around each message so a reconnect snapshot is a map of
+    /// pointer bumps, not a deep copy of the whole table's bytes taken
+    /// while holding the mirror lock — with a full table, that clone
+    /// stalled every route_add/del (and the RIB loop behind them) for
+    /// the duration.
+    routes: HashMap<Key, Arc<Vec<u8>>>,
     /// Deletes that could not be sent — the peer was down, or the
     /// reconnect replay was still in flight. An add's replay row covers
     /// a dropped ADD, but a delete has no replay row to ride: without
@@ -53,10 +59,10 @@ impl Mirror {
         // A re-add cancels any pending delete for the key: sending the
         // stale DEL after the ADD would remove the resurrected route.
         self.dels.remove(&key);
-        if self.routes.get(&key).is_some_and(|prev| *prev == msg) {
+        if self.routes.get(&key).is_some_and(|prev| **prev == msg) {
             return false;
         }
-        self.routes.insert(key, msg);
+        self.routes.insert(key, Arc::new(msg));
         true
     }
 
@@ -79,10 +85,10 @@ impl Mirror {
         self.dels.drain().map(|(_, msg)| msg).collect()
     }
 
-    /// The current desired state, cloned — the reconnect replay works
-    /// from this snapshot so the mirror stays unlocked during the
-    /// (potentially large) socket writes.
-    pub fn snapshot(&self) -> HashMap<Key, Vec<u8>> {
+    /// The current desired state — `Arc` bumps, not byte copies — so
+    /// the reconnect replay works from this snapshot with the mirror
+    /// unlocked during the (potentially large) socket writes.
+    pub fn snapshot(&self) -> HashMap<Key, Arc<Vec<u8>>> {
         self.routes.clone()
     }
 
@@ -91,10 +97,16 @@ impl Mirror {
     /// it was in flight was recorded here but dropped by the
     /// not-yet-connected send gate, so the settle step sends the
     /// difference or the peer diverges until the next reconnect.
-    pub fn changed_since(&self, snapshot: &HashMap<Key, Vec<u8>>) -> Vec<Vec<u8>> {
+    pub fn changed_since(&self, snapshot: &HashMap<Key, Arc<Vec<u8>>>) -> Vec<Arc<Vec<u8>>> {
         self.routes
             .iter()
-            .filter(|(key, msg)| snapshot.get(*key) != Some(*msg))
+            // `insert` replaces the Arc only when the bytes changed, so
+            // pointer identity IS "unchanged since the snapshot".
+            .filter(|(key, msg)| {
+                !snapshot
+                    .get(*key)
+                    .is_some_and(|prev| Arc::ptr_eq(prev, msg))
+            })
             .map(|(_, msg)| msg.clone())
             .collect()
     }
@@ -110,6 +122,9 @@ impl Mirror {
             .collect();
         keys.into_iter()
             .filter_map(|key| self.routes.remove(&key))
+            // The caller mutates these into DELROUTEs; unwrap the Arc
+            // (cloning only if a snapshot still shares it).
+            .map(|arc| Arc::try_unwrap(arc).unwrap_or_else(|a| (*a).clone()))
             .collect()
     }
 
@@ -149,7 +164,7 @@ mod tests {
     }
 
     fn replay(m: &Mirror) -> Vec<Vec<u8>> {
-        m.snapshot().into_values().collect()
+        m.snapshot().into_values().map(|a| (*a).clone()).collect()
     }
 
     #[test]
@@ -216,7 +231,11 @@ mod tests {
 
         m.insert(net("10.1.0.0/24"), 0, vec![3]); // changed
         m.insert(net("10.2.0.0/24"), 0, vec![4]); // new
-        let mut delta = m.changed_since(&snap);
+        let mut delta: Vec<Vec<u8>> = m
+            .changed_since(&snap)
+            .into_iter()
+            .map(|a| (*a).clone())
+            .collect();
         delta.sort();
         assert_eq!(delta, vec![vec![3], vec![4]]);
         assert!(

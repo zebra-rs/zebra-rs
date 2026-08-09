@@ -4664,25 +4664,36 @@ impl Rib {
     }
 
     /// Re-tee every selected, installed route to the FPM tee.
+    ///
+    /// The encoding runs inline (synchronous, no locks), but the sends
+    /// go to a spawned task: at a full table's scale, one mirror-lock
+    /// round trip per route on this event loop stalled every netlink
+    /// and route message behind the walk.
     #[cfg(target_os = "linux")]
     async fn fpm_rib_walk(&self) {
+        use crate::fib::fpm::RouteOp;
         use ipnet::IpNet;
 
-        let mut count = 0usize;
+        let Some(fpm) = self.fib_handle.fpm.clone() else {
+            return;
+        };
+        let mut batch: Vec<(IpNet, u32, Vec<u8>)> = Vec::new();
+        let mut prepare = |prefix: IpNet, entry: &crate::rib::entry::RibEntry, table_id: u32| {
+            if let Some((vrf_ifindex, msg)) =
+                self.fib_handle
+                    .fpm_prepare(RouteOp::Add, prefix, entry, table_id)
+            {
+                batch.push((prefix, vrf_ifindex, msg));
+            }
+        };
         for (prefix, entries) in self.table.iter() {
             for entry in entries.iter().filter(|e| e.is_selected() && e.is_fib()) {
-                self.fib_handle
-                    .fpm_route_resync(IpNet::V4(prefix), entry, RT_TABLE_MAIN)
-                    .await;
-                count += 1;
+                prepare(IpNet::V4(prefix), entry, RT_TABLE_MAIN);
             }
         }
         for (prefix, entries) in self.table_v6.iter() {
             for entry in entries.iter().filter(|e| e.is_selected() && e.is_fib()) {
-                self.fib_handle
-                    .fpm_route_resync(IpNet::V6(prefix), entry, RT_TABLE_MAIN)
-                    .await;
-                count += 1;
+                prepare(IpNet::V6(prefix), entry, RT_TABLE_MAIN);
             }
         }
         // VRF tables as well: the tee resolves each table id to its VRF
@@ -4691,24 +4702,25 @@ impl Rib {
         for (table_id, tables) in self.vrf_tables.iter() {
             for (prefix, entries) in tables.table.iter() {
                 for entry in entries.iter().filter(|e| e.is_selected() && e.is_fib()) {
-                    self.fib_handle
-                        .fpm_route_resync(IpNet::V4(prefix), entry, *table_id)
-                        .await;
-                    count += 1;
+                    prepare(IpNet::V4(prefix), entry, *table_id);
                 }
             }
             for (prefix, entries) in tables.table_v6.iter() {
                 for entry in entries.iter().filter(|e| e.is_selected() && e.is_fib()) {
-                    self.fib_handle
-                        .fpm_route_resync(IpNet::V6(prefix), entry, *table_id)
-                        .await;
-                    count += 1;
+                    prepare(IpNet::V6(prefix), entry, *table_id);
                 }
             }
         }
-        if count > 0 {
-            tracing::info!("rib: reseeded {count} routes into the FPM tee");
+        if batch.is_empty() {
+            return;
         }
+        tokio::spawn(async move {
+            let count = batch.len();
+            for (prefix, vrf_ifindex, msg) in batch {
+                fpm.route_add(prefix, vrf_ifindex, msg).await;
+            }
+            tracing::info!("rib: reseeded {count} routes into the FPM tee");
+        });
     }
 
     fn cradle_apply(&mut self) {

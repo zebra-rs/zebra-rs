@@ -321,7 +321,7 @@ impl FpmFib {
                     if self.shutdown.load(Ordering::Relaxed) {
                         return;
                     }
-                    if let Err(e) = wr.write_all(msg).await {
+                    if let Err(e) = wr.write_all(msg.as_slice()).await {
                         tracing::warn!("fib: FPM replay failed ({e})");
                         failed = true;
                         break;
@@ -341,16 +341,20 @@ impl FpmFib {
             // makes the handoff lossless: a concurrent route_add/del
             // either lands before the drain (and is included here) or
             // observes `connected` and sends through the live channel.
-            let settle: Vec<Vec<u8>> = {
+            let settle: Vec<std::sync::Arc<Vec<u8>>> = {
                 let mut mirror = self.mirror.lock().await;
-                let mut msgs = mirror.take_dels();
+                let mut msgs: Vec<std::sync::Arc<Vec<u8>>> = mirror
+                    .take_dels()
+                    .into_iter()
+                    .map(std::sync::Arc::new)
+                    .collect();
                 msgs.extend(mirror.changed_since(&snapshot));
                 self.connected.store(true, Ordering::Relaxed);
                 msgs
             };
             let mut failed = false;
             for msg in &settle {
-                if let Err(e) = wr.write_all(msg).await {
+                if let Err(e) = wr.write_all(msg.as_slice()).await {
                     tracing::warn!("fib: FPM settle write failed ({e})");
                     failed = true;
                     break;
