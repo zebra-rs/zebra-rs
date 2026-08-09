@@ -274,8 +274,21 @@ pub fn encode_route(
     entry: &RibEntry,
     vrf_ifindex: u32,
 ) -> Option<Vec<u8>> {
-    let legs = legs(&entry.nexthop);
+    let mut legs = legs(&entry.nexthop);
     let blackhole = matches!(entry.nexthop, Nexthop::Blackhole(_));
+
+    // A connected route carries no nexthop object — its "leg" is the
+    // interface itself, which FRR encodes as RTA_OIF with no gateway.
+    // Without this the encoder refused every connected route and the
+    // switch's APPL_DB never learned the subnet routes it needs to
+    // deliver to directly-attached hosts.
+    if legs.is_empty() && entry.rtype == RibType::Connected && entry.ifindex != 0 {
+        legs.push(Leg {
+            gateway: None,
+            ifindex: entry.ifindex,
+            weight: 1,
+        });
+    }
 
     // A delete carries no nexthops at all, so it is fine without legs.
     // An add without them is not: it would install an unusable route.
@@ -468,6 +481,32 @@ mod tests {
         let mut e = RibEntry::new(rtype);
         e.nexthop = nexthop;
         e
+    }
+
+    /// A connected route has no nexthop object — the encoder must
+    /// synthesize its interface leg (RTA_OIF, no gateway) rather than
+    /// refuse it, or APPL_DB never learns the subnet routes FRR sends.
+    #[test]
+    fn connected_route_encodes_as_interface_leg() {
+        let mut e = RibEntry::new(RibType::Connected);
+        e.ifindex = 4;
+        let msg = encode_route(RouteOp::Add, &"10.100.1.0/24".parse().unwrap(), &e, 0)
+            .expect("a connected route must encode");
+        // protocol byte: connected folds into RTPROT_KERNEL (2), at
+        // FPM hdr (4) + nlmsg hdr (16) + rtmsg offset 5.
+        assert_eq!(msg[4 + 16 + 5], RTPROT_KERNEL);
+        // RTA_OIF with ifindex 4, and no gateway attribute at all.
+        let oif = [8u8, 0, 4, 0, 4, 0, 0, 0];
+        assert!(
+            msg.windows(oif.len()).any(|w| w == oif),
+            "no RTA_OIF(4) in the encoded message"
+        );
+        for gw in [[8u8, 0, 5, 0], [20u8, 0, 5, 0]] {
+            assert!(
+                !msg.windows(gw.len()).any(|w| w == gw),
+                "a connected route must carry no RTA_GATEWAY"
+            );
+        }
     }
 
     /// RFC 5549: a v4 prefix reached over a v6 next-hop (BGP

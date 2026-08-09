@@ -622,6 +622,16 @@ impl FibHandle {
         }
     }
 
+    /// Tee-only add for a route the kernel owns: a connected route
+    /// needs no netlink install (the kernel creates the prefix route
+    /// with the address), but SONiC's APPL_DB still needs it — FRR
+    /// sends subnet routes over FPM, and without them the ASIC cannot
+    /// deliver to directly-attached hosts. A no-op when the tee is off
+    /// or the entry is not tee-able (`fpm_prepare` gates).
+    pub async fn fpm_tee_add(&self, prefix: ipnet::IpNet, entry: &RibEntry, table_id: u32) {
+        self.fpm_tee(RouteOp::Add, prefix, entry, table_id).await;
+    }
+
     /// Tee one route to SONiC's FPM southbound.
     ///
     /// Connected routes ride along with protocol routes: the kernel
