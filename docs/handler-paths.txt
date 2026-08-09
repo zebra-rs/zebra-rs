@@ -7,6 +7,7 @@
 /router/bgp/afi-safi/assisted-replication/replicator-ip
 /router/bgp/afi-safi/assisted-replication/role
 /router/bgp/afi-safi/assisted-replication/selective
+/router/bgp/afi-safi/bestpath/as-path/multipath-relax
 /router/bgp/afi-safi/bum-tunnel-type
 /router/bgp/afi-safi/encapsulation
 /router/bgp/afi-safi/ethernet-segment
@@ -19,6 +20,7 @@
 /router/bgp/afi-safi/evi
 /router/bgp/afi-safi/evi/bridge
 /router/bgp/afi-safi/igmp-mld-proxy
+/router/bgp/afi-safi/maximum-paths
 /router/bgp/afi-safi/network
 /router/bgp/afi-safi/pruned-flood-list/broadcast-multicast
 /router/bgp/afi-safi/pruned-flood-list/unknown-unicast

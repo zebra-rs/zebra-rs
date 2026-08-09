@@ -786,6 +786,60 @@ fn table_map_apply<'a>(
 /// plain next-hop entry, so whichever wins best-path is programmed
 /// correctly. On the global instance `vrf_transport_v4` is `None`, so
 /// this is plain IPv4 unicast install (VPNv4 / EVPN take other paths).
+/// Extend a single-next-hop FIB entry into an ECMP set from the rest of
+/// the multipath selection.
+///
+/// Only fires for a plain unicast winner — a `Nexthop::Uni` carrying no
+/// MPLS labels and no SRv6 segments. A VPN / SRv6 / colour-steered entry
+/// already owns its encapsulation, and a kernel next-hop carries at most
+/// one, so widening those would mix encapsulations across legs. Those
+/// families resolve their own transport ECMP separately.
+///
+/// Keeping the one-leg case as `Uni` is load-bearing rather than tidy:
+/// the FPM encoder emits a flat `RTA_GATEWAY`/`RTA_OIF` for `Uni` and a
+/// nested `RTA_MULTIPATH` for `Multi`, and the golden traces pin the
+/// flat form for single-next-hop routes.
+fn widen_to_multipath(entry: &mut rib::entry::RibEntry, rest: &[BgpRib], v6: bool) {
+    if rest.is_empty() {
+        return;
+    }
+    let rib::Nexthop::Uni(ref base) = entry.nexthop else {
+        return;
+    };
+    if !base.mpls.is_empty() || !base.segs.is_empty() {
+        return;
+    }
+    let mut multi = rib::NexthopMulti {
+        metric: entry.metric,
+        ..Default::default()
+    };
+    multi.nexthops.push(base.clone());
+    for path in rest {
+        let Some(nh) = super::nht::bgp_nexthop_ip(&path.attr) else {
+            continue;
+        };
+        // Family must match the prefix: a v4 prefix cannot be reached
+        // through a v6 next-hop leg here (the ENHE case has its own
+        // install path and is excluded by the `Uni`/no-encap guard).
+        if nh.is_ipv6() != v6 {
+            continue;
+        }
+        if nh.is_unspecified() {
+            continue;
+        }
+        multi.nexthops.push(rib::NexthopUni {
+            addr: nh,
+            metric: entry.metric,
+            weight: 1,
+            valid: true,
+            ..Default::default()
+        });
+    }
+    if multi.nexthops.len() > 1 {
+        entry.nexthop = rib::Nexthop::Multi(multi);
+    }
+}
+
 pub(super) fn fib_install_v4(bgp: &super::peer::BgpTop, prefix: Ipv4Net, selected: &[BgpRib]) {
     let transport = bgp
         .vrf_transport_v4
@@ -881,6 +935,7 @@ pub(super) fn fib_install_v4(bgp: &super::peer::BgpTop, prefix: Ipv4Net, selecte
             {
                 steer_srv6_vpn(bgp, &best.attr, &mut rib_entry);
             }
+            widen_to_multipath(&mut rib_entry, &selected[1..], false);
             let _ = bgp.rib_client.send(rib::Message::Ipv4Add {
                 prefix,
                 rib: rib_entry,
@@ -1087,6 +1142,7 @@ pub(super) fn fib_install_v6(bgp: &super::peer::BgpTop, prefix: Ipv6Net, selecte
             {
                 steer_srv6_vpn(bgp, &best.attr, &mut rib_entry);
             }
+            widen_to_multipath(&mut rib_entry, &selected[1..], true);
             let _ = bgp.rib_client.send(rib::Message::Ipv6Add {
                 prefix,
                 rib: rib_entry,
@@ -1492,6 +1548,12 @@ pub struct BgpRib {
     pub typ: BgpRibType,
     // Whether this cand is currently the best path.
     pub best_path: bool,
+    /// Installed alongside the bestpath as a member of an ECMP set.
+    /// The bestpath is a member of its own set but keeps `best_path`
+    /// alone, so `show` can render it `>` and the others `=`.
+    /// Recomputed from scratch on every `select_best_path`, like
+    /// `best_path` itself, so it cannot go stale.
+    pub multipath: bool,
     // Label.
     pub best_reason: Reason,
     // Label.
@@ -1661,6 +1723,7 @@ impl BgpRib {
             weight,
             typ: rib_type,
             best_path: false,
+            multipath: false,
             best_reason: Reason::NotSelected,
             label,
             local_label: None,
@@ -1697,11 +1760,48 @@ impl BgpRib {
 pub struct LocalRibTable<P>(
     pub PrefixMap<P, Vec<BgpRib>>, // Cands.
     pub PrefixMap<P, BgpRib>,      // Selected.
+    pub MultipathCfg,              // Per-family multipath policy.
 );
 
 impl<P> Default for LocalRibTable<P> {
     fn default() -> Self {
-        LocalRibTable(PrefixMap::default(), PrefixMap::default())
+        LocalRibTable(
+            PrefixMap::default(),
+            PrefixMap::default(),
+            MultipathCfg::default(),
+        )
+    }
+}
+
+/// Per-address-family multipath policy
+/// (`router bgp afi-safi <af> maximum-paths` and
+/// `... bestpath as-path multipath-relax`).
+///
+/// Lives on the table rather than on `Bgp` because `select_best_path`
+/// is reached from a dozen call sites that have no config in hand —
+/// the shard dispatcher, the NHT re-eval, the peer-down sweep. Config
+/// writes it once through `set_multipath`; selection only reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MultipathCfg {
+    /// Equal-cost paths to install, bestpath included. 1 disables
+    /// multipath and reproduces the single-path behaviour exactly.
+    pub max_paths: u32,
+    /// `bestpath as-path multipath-relax`: qualify eBGP paths on
+    /// AS-path LENGTH alone instead of also requiring the same
+    /// neighbouring AS.
+    pub relax: bool,
+}
+
+impl Default for MultipathCfg {
+    /// Single-path, strict. Strict is deliberate: the ladder compares
+    /// AS-path length but never AS-path content, so defaulting to
+    /// "whatever the ladder already does" would silently hand every
+    /// deployment FRR's `multipath-relax` semantics.
+    fn default() -> Self {
+        Self {
+            max_paths: 1,
+            relax: false,
+        }
     }
 }
 
@@ -1799,6 +1899,7 @@ impl<P: Prefix + Copy> LocalRibTable<P> {
 
             for rib in cands.iter_mut() {
                 rib.best_path = false;
+                rib.multipath = false;
                 rib.best_reason = Reason::NotSelected;
             }
             cands[best_index].best_path = true;
@@ -1815,7 +1916,36 @@ impl<P: Prefix + Copy> LocalRibTable<P> {
         }
 
         self.1.insert(prefix, best.clone());
-        selected.push(best);
+        selected.push(best.clone());
+
+        // Multipath: install the paths that tie with the winner through
+        // the eBGP/iBGP comparison. The bestpath already occupies a
+        // slot, so the cap bounds the whole set rather than the
+        // remainder.
+        let cfg = self.2;
+        if cfg.max_paths > 1 {
+            let cands = self.0.get_mut(&prefix).expect("prefix checked above");
+            // Deduplicate by BGP next-hop: two peers can advertise the
+            // same next-hop (routine behind a route reflector), and
+            // installing it twice would double its share of the ECMP
+            // hash.
+            let mut seen: Vec<Option<std::net::IpAddr>> = vec![super::nht::nht_target(&best.attr)];
+            for cand in cands.iter_mut() {
+                if selected.len() as u32 >= cfg.max_paths {
+                    break;
+                }
+                if cand.best_path || !Self::multipath_eligible(cand, &best, cfg.relax) {
+                    continue;
+                }
+                let nh = super::nht::nht_target(&cand.attr);
+                if seen.contains(&nh) {
+                    continue;
+                }
+                seen.push(nh);
+                cand.multipath = true;
+                selected.push(cand.clone());
+            }
+        }
 
         selected
     }
@@ -1973,6 +2103,70 @@ impl<P: Prefix + Copy> LocalRibTable<P> {
         }
 
         (false, Reason::NotSelected)
+    }
+
+    /// Is `cand` equal-cost to `best` for multipath purposes?
+    ///
+    /// Mirrors [`is_better`]'s ladder up to — and including — the
+    /// eBGP/iBGP comparison, and deliberately ignores everything after
+    /// it. Those trailing comparisons (BGP Identifier, peer slot,
+    /// AddPath path-id) exist only to pick one winner among equals;
+    /// disqualifying on them would mean no two paths ever qualify and
+    /// multipath would silently do nothing.
+    ///
+    /// Kept beside `is_better` because the two must stay in lockstep: a
+    /// new tie-break added to one and not the other either shrinks the
+    /// ECMP set or — worse — admits a path that is not actually
+    /// equal-cost. `multipath_eligible_agrees_with_is_better` pins the
+    /// relationship rather than trusting the comment.
+    fn multipath_eligible(cand: &BgpRib, best: &BgpRib, relax: bool) -> bool {
+        // 1-2: reachability and LLGR staleness.
+        if cand.nexthop_reachable != best.nexthop_reachable || cand.stale != best.stale {
+            return false;
+        }
+        // 3-4: weight, local-pref.
+        if cand.weight != best.weight
+            || Self::effective_local_pref(cand) != Self::effective_local_pref(best)
+        {
+            return false;
+        }
+        // 5: locally originated.
+        let cand_local = matches!(cand.typ, BgpRibType::Originated) && !cand.vrf_imported;
+        let best_local = matches!(best.typ, BgpRibType::Originated) && !best.vrf_imported;
+        if cand_local != best_local {
+            return false;
+        }
+        // 6: AS-path length.
+        if Self::as_path_len(cand) != Self::as_path_len(best) {
+            return false;
+        }
+        // 6b: AS-path CONTENT, unless relaxed. Not part of `is_better`
+        // — the ladder never compares content, so without this a
+        // strict-mode set would happily span two different upstream
+        // ASes. FRR gates the same thing behind
+        // `bgp bestpath as-path multipath-relax`.
+        if !relax && cand.attr.neighboring_as() != best.attr.neighboring_as() {
+            return false;
+        }
+        // 7: origin.
+        if Self::origin_rank(cand.attr.origin) != Self::origin_rank(best.attr.origin) {
+            return false;
+        }
+        // 8: MED, compared only within the same neighbouring AS, exactly
+        // as the ladder does.
+        if cand.attr.neighboring_as() == best.attr.neighboring_as() {
+            let cand_med = cand.attr.med.clone().unwrap_or_default();
+            let best_med = best.attr.med.clone().unwrap_or_default();
+            if cand_med != best_med {
+                return false;
+            }
+        }
+        // 9: eBGP vs iBGP. Mixing the two in one ECMP set is not
+        // equal-cost forwarding.
+        if Self::route_type_rank(cand) != Self::route_type_rank(best) {
+            return false;
+        }
+        true
     }
 
     /// The BGP Identifier a path is compared on for the RFC 4271
@@ -22927,6 +23121,257 @@ mod srv6_sid_family_tests {
         );
         let v6 = select_fib_entry_v6(&rib, Some(&t), None).expect("v6 entry");
         assert_eq!(entry_segs(&v6), vec![dt6]);
+    }
+}
+
+#[cfg(test)]
+mod multipath_tests {
+    use super::*;
+    use bgp_packet::{BgpNexthop, LocalPref, Med};
+    use ipnet::Ipv4Net;
+    use std::net::{Ipv4Addr, IpAddr};
+    use std::str::FromStr;
+
+    /// An eBGP path from `as_path`, next-hop `nh`, at peer slot `ident`.
+    fn ebgp_row(ident: usize, as_path: &str, nh: [u8; 4]) -> BgpRib {
+        let mut attr = BgpAttr {
+            aspath: Some(As4Path::from_str(as_path).unwrap()),
+            local_pref: Some(LocalPref::default()),
+            ..Default::default()
+        };
+        attr.origin = Some(bgp_packet::Origin::Igp);
+        attr.nexthop = Some(BgpNexthop::Ipv4(Ipv4Addr::from(nh)));
+        BgpRib::new(
+            ident,
+            Ipv4Addr::new(10, 0, 0, ident as u8),
+            BgpRibType::EBGP,
+            0,
+            0,
+            &attr,
+            None,
+            None,
+            false,
+        )
+    }
+
+    fn table(max_paths: u32, relax: bool) -> LocalRibTable<Ipv4Net> {
+        let mut t = LocalRibTable::<Ipv4Net>::default();
+        t.2 = MultipathCfg { max_paths, relax };
+        t
+    }
+
+    fn prefix() -> Ipv4Net {
+        Ipv4Net::from_str("10.9.0.0/24").unwrap()
+    }
+
+    fn select(t: &mut LocalRibTable<Ipv4Net>, rows: Vec<BgpRib>) -> Vec<BgpRib> {
+        for row in rows {
+            t.update(prefix(), row);
+        }
+        t.select_best_path(prefix())
+    }
+
+    /// The case the feature exists for: two eBGP paths that tie all the
+    /// way down to the router-id tie-break are BOTH installed.
+    #[test]
+    fn equal_cost_paths_are_both_installed() {
+        let mut t = table(64, false);
+        let set = select(
+            &mut t,
+            vec![
+                ebgp_row(1, "65001", [192, 0, 2, 1]),
+                ebgp_row(2, "65001", [192, 0, 2, 2]),
+            ],
+        );
+        assert_eq!(set.len(), 2, "two equal-cost paths must both install");
+        assert!(set[0].best_path, "the winner keeps best_path");
+        assert!(!set[0].multipath, "the winner is not also flagged multipath");
+        assert!(set[1].multipath, "the other member is flagged multipath");
+        assert!(!set[1].best_path);
+    }
+
+    /// The regression this feature is most likely to ship: cutting the
+    /// ladder too early. Paths differing ONLY in router-id must still be
+    /// multipath — that difference is what picks the winner, not what
+    /// disqualifies the loser.
+    #[test]
+    fn paths_differing_only_in_router_id_are_multipath() {
+        let mut a = ebgp_row(1, "65001", [192, 0, 2, 1]);
+        let mut b = ebgp_row(2, "65001", [192, 0, 2, 2]);
+        a.router_id = Ipv4Addr::new(1, 1, 1, 1);
+        b.router_id = Ipv4Addr::new(9, 9, 9, 9);
+        let mut t = table(64, false);
+        assert_eq!(select(&mut t, vec![a, b]).len(), 2);
+    }
+
+    /// Cutting the ladder too late is the worse failure: it forwards
+    /// over paths that are not equal-cost. Each of these must yield one
+    /// path only.
+    #[test]
+    fn unequal_paths_are_not_multipath() {
+        // Longer AS-path.
+        let mut t = table(64, false);
+        let set = select(
+            &mut t,
+            vec![
+                ebgp_row(1, "65001", [192, 0, 2, 1]),
+                ebgp_row(2, "65001 65002", [192, 0, 2, 2]),
+            ],
+        );
+        assert_eq!(set.len(), 1, "AS-path length must disqualify");
+
+        // Higher MED within the same neighbouring AS.
+        let mut t = table(64, false);
+        let mut worse = ebgp_row(2, "65001", [192, 0, 2, 2]);
+        worse.attr = {
+            let mut attr = (*worse.attr).clone();
+            attr.med = Some(Med { med: 100 });
+            std::sync::Arc::new(attr)
+        };
+        let set = select(&mut t, vec![ebgp_row(1, "65001", [192, 0, 2, 1]), worse]);
+        assert_eq!(set.len(), 1, "MED must disqualify");
+
+        // Different local-pref.
+        let mut t = table(64, false);
+        let mut worse = ebgp_row(2, "65001", [192, 0, 2, 2]);
+        worse.attr = {
+            let mut attr = (*worse.attr).clone();
+            attr.local_pref = Some(LocalPref { local_pref: 50 });
+            std::sync::Arc::new(attr)
+        };
+        let set = select(&mut t, vec![ebgp_row(1, "65001", [192, 0, 2, 1]), worse]);
+        assert_eq!(set.len(), 1, "local-pref must disqualify");
+    }
+
+    /// eBGP and iBGP are not mixed in one ECMP set.
+    #[test]
+    fn ebgp_and_ibgp_do_not_mix() {
+        let mut t = table(64, false);
+        let mut ibgp = ebgp_row(2, "65001", [192, 0, 2, 2]);
+        ibgp.typ = BgpRibType::IBGP;
+        let set = select(&mut t, vec![ebgp_row(1, "65001", [192, 0, 2, 1]), ibgp]);
+        assert_eq!(set.len(), 1, "peer type must disqualify");
+    }
+
+    /// Two peers advertising the SAME next-hop (routine behind a route
+    /// reflector) must not install it twice — that would double its
+    /// share of the ECMP hash.
+    #[test]
+    fn duplicate_next_hops_are_deduplicated() {
+        let mut t = table(64, false);
+        let set = select(
+            &mut t,
+            vec![
+                ebgp_row(1, "65001", [192, 0, 2, 1]),
+                ebgp_row(2, "65001", [192, 0, 2, 1]),
+            ],
+        );
+        assert_eq!(set.len(), 1, "same next-hop must be installed once");
+    }
+
+    /// `maximum-paths` bounds the whole set, bestpath included.
+    #[test]
+    fn maximum_paths_caps_the_set() {
+        let rows = vec![
+            ebgp_row(1, "65001", [192, 0, 2, 1]),
+            ebgp_row(2, "65001", [192, 0, 2, 2]),
+            ebgp_row(3, "65001", [192, 0, 2, 3]),
+        ];
+        let mut t = table(2, false);
+        let set = select(&mut t, rows.clone());
+        assert_eq!(set.len(), 2, "cap counts the bestpath");
+        assert!(set.iter().any(|r| r.best_path), "bestpath is always a member");
+
+        // The default reproduces today's single-path behaviour exactly.
+        let mut t = table(1, false);
+        assert_eq!(select(&mut t, rows).len(), 1);
+    }
+
+    /// Strict (the default) requires the same neighbouring AS; relax
+    /// requires only equal AS-path length. This is the knob that would
+    /// otherwise have been enabled by accident, since the best-path
+    /// ladder never compares AS-path content.
+    #[test]
+    fn multipath_relax_controls_as_path_content() {
+        let rows = || {
+            vec![
+                ebgp_row(1, "65001", [192, 0, 2, 1]),
+                ebgp_row(2, "65002", [192, 0, 2, 2]),
+            ]
+        };
+        let mut strict = table(64, false);
+        assert_eq!(
+            select(&mut strict, rows()).len(),
+            1,
+            "strict must not span two neighbouring ASes"
+        );
+        let mut relaxed = table(64, true);
+        assert_eq!(
+            select(&mut relaxed, rows()).len(),
+            2,
+            "relax qualifies on AS-path length alone"
+        );
+    }
+
+    /// Ties `multipath_eligible` to `is_better` so the two ladders
+    /// cannot drift apart. If two paths are equal-cost, then the only
+    /// reason either can beat the other is one of the trailing
+    /// tie-breaks — anything else means one ladder grew a comparison the
+    /// other did not.
+    #[test]
+    fn multipath_eligible_agrees_with_is_better() {
+        let cases = vec![
+            (ebgp_row(1, "65001", [192, 0, 2, 1]), ebgp_row(2, "65001", [192, 0, 2, 2])),
+            (ebgp_row(3, "65001 65009", [192, 0, 2, 3]), ebgp_row(4, "65001 65009", [192, 0, 2, 4])),
+        ];
+        for (a, b) in cases {
+            assert!(
+                LocalRibTable::<Ipv4Net>::multipath_eligible(&a, &b, false),
+                "fixture should be equal-cost"
+            );
+            for (x, y) in [(&a, &b), (&b, &a)] {
+                let (_, reason) = LocalRibTable::<Ipv4Net>::is_better(x, y);
+                assert!(
+                    matches!(
+                        reason,
+                        Reason::RouterId | Reason::PeerAddress | Reason::PathId | Reason::NotSelected
+                    ),
+                    "equal-cost paths may only be separated by a trailing \
+                     tie-break, got {reason:?}"
+                );
+            }
+        }
+    }
+
+    /// A widened entry must build `Nexthop::Multi`, and a single leg
+    /// must stay `Uni` — the FPM encoder emits a flat
+    /// RTA_GATEWAY/RTA_OIF for `Uni` and a nested RTA_MULTIPATH for
+    /// `Multi`, and the golden traces pin the flat form.
+    #[test]
+    fn widening_builds_multi_and_leaves_single_leg_uni() {
+        let base = rib::entry::RibEntry {
+            nexthop: rib::Nexthop::Uni(rib::NexthopUni {
+                addr: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+                weight: 1,
+                valid: true,
+                ..Default::default()
+            }),
+            ..rib::entry::RibEntry::new(rib::RibType::Bgp)
+        };
+
+        let mut single = base.clone();
+        widen_to_multipath(&mut single, &[], false);
+        assert!(
+            matches!(single.nexthop, rib::Nexthop::Uni(_)),
+            "one leg must stay Uni"
+        );
+
+        let mut multi = base;
+        widen_to_multipath(&mut multi, &[ebgp_row(2, "65001", [192, 0, 2, 2])], false);
+        match multi.nexthop {
+            rib::Nexthop::Multi(m) => assert_eq!(m.nexthops.len(), 2),
+            other => panic!("expected Multi, got {other:?}"),
+        }
     }
 }
 

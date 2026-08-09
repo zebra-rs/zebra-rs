@@ -1,0 +1,128 @@
+module zebra-bgp-multipath {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-bgp-multipath";
+  prefix "zbmp";
+
+  import ietf-bgp {
+    prefix bgp;
+  }
+
+  import config {
+    prefix config;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "BGP multipath: install several equal-cost paths for one prefix
+     instead of the single best path.
+
+     Config shape:
+
+       router bgp {
+         afi-safi ipv4 {
+           maximum-paths 64;
+           bestpath {
+             as-path {
+               multipath-relax true;
+             }
+           }
+         }
+       }
+
+     Per address family, matching where FRR places both statements
+     (inside `address-family`), and attached to the same global
+     `afi-safi` list that already carries `table-map`, `network` and
+     `redistribute`.
+
+     A path qualifies as equal-cost when it ties with the best path on
+     every best-path comparison down to and including eBGP-vs-iBGP.
+     The comparisons below that point — BGP Identifier / ORIGINATOR_ID,
+     peer slot, AddPath path-id — are deliberately ignored: they exist
+     only to pick one winner among otherwise-equal paths, so treating a
+     difference there as disqualifying would mean no two paths ever
+     qualify and multipath would silently do nothing.
+
+     See docs/design/bgp-multipath.md.";
+
+  reference
+    "FRR bgpd `maximum-paths` and
+     `bgp bestpath as-path multipath-relax` under `address-family`.";
+
+  grouping bgp-afi-safi-multipath {
+    description
+      "Attached to every global afi-safi list entry.";
+
+    leaf maximum-paths {
+      ext:help "Equal-cost paths to install for one prefix";
+      type uint32 {
+        range "1..max";
+      }
+      description
+        "Number of equal-cost BGP paths installed for a prefix, the
+         best path included in the count. 1 (the default) installs the
+         best path only, which is the behaviour when this leaf is
+         absent.
+
+         Lowering the value withdraws the paths that no longer fit at
+         the next best-path run for the family.";
+    }
+
+    container bestpath {
+      ext:help "Best-path selection tuning";
+      description
+        "Knobs that change how paths are compared. Grouped to mirror
+         FRR's `bgp bestpath ...` namespace.";
+
+      container as-path {
+        ext:help "AS_PATH comparison tuning";
+        description
+          "How the AS_PATH participates in comparison.";
+
+        leaf multipath-relax {
+          ext:help "Equal AS-path LENGTH is enough to be equal-cost";
+          type boolean;
+          description
+            "When true, eBGP paths qualify as equal-cost on AS-path
+             LENGTH alone. When false — the default, matching FRR —
+             they must also share the same neighbouring AS.
+
+             Strict is the default deliberately. The best-path ladder
+             compares AS-path length but never AS-path content, so a
+             multipath implementation that simply reused the ladder
+             would relax by accident and load-share across two
+             different upstream ASes without anyone asking for it.
+             SONiC likewise treats this as an explicit opt-in
+             (constants.bgp.multipath_relax.enabled).";
+        }
+      }
+    }
+  }
+
+  /* =========================================================
+   * Augments into the zebra-rs configure tree
+   * ========================================================= */
+
+  augment "/configure:set/config:router/bgp:bgp/bgp:afi-safi" {
+    description
+      "Attach the multipath knobs to the global afi-safi list in the
+       candidate-set subtree.";
+    uses bgp-afi-safi-multipath;
+  }
+
+  augment "/configure:delete/config:router/bgp:bgp/bgp:afi-safi" {
+    description
+      "Same attachment for the delete subtree so
+       `delete router bgp afi-safi ipv4 maximum-paths` is path-valid.";
+    uses bgp-afi-safi-multipath;
+  }
+}

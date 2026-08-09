@@ -68,6 +68,10 @@ module config {
     prefix zbtm;
   }
 
+  import zebra-bgp-multipath {
+    prefix zbmp;
+  }
+
   import zebra-bgp-transport {
     prefix zbt;
   }

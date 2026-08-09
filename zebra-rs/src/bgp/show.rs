@@ -604,6 +604,22 @@ fn show_unknown_attrs(attr: &BgpAttr) -> Vec<UnknownAttrJson> {
 
 /// Convert one Loc-RIB entry to its `BgpRouteJson` row. Shared by the
 /// `longer-prefix` filters; mirrors the inline construction in
+/// The per-path status marker in `show bgp` output: `>` for the best
+/// path, `=` for the other members of its ECMP set, blank otherwise.
+///
+/// The legend has always advertised `= multipath`; until BGP multipath
+/// existed nothing set the flag, so the code was documented but never
+/// emitted.
+fn path_marker(rib: &BgpRib) -> &'static str {
+    if rib.best_path {
+        ">"
+    } else if rib.multipath {
+        "="
+    } else {
+        " "
+    }
+}
+
 /// `render_unicast_table` but reports the entry's real `best_path`.
 fn bgp_route_json(prefix: String, rib: &BgpRib) -> BgpRouteJson {
     let aspath_str = show_aspath(&rib.attr);
@@ -884,7 +900,7 @@ fn write_bgp_route_line(
 ) -> std::result::Result<(), std::fmt::Error> {
     let stale = if rib.stale { "S" } else { " " };
     let valid = "*";
-    let best = if rib.best_path { ">" } else { " " };
+    let best = path_marker(rib);
     let internal = if rib.typ == BgpRibType::IBGP {
         "i"
     } else {
@@ -1031,7 +1047,7 @@ fn show_labeled_row(
 ) -> std::result::Result<(), std::fmt::Error> {
     let stale = if rib.stale { "S" } else { " " };
     let valid = "*";
-    let best = if rib.best_path { ">" } else { " " };
+    let best = path_marker(rib);
     let internal = if rib.typ == BgpRibType::IBGP {
         "i"
     } else {
@@ -1144,7 +1160,7 @@ fn show_bgp_vpnv4_table(bgp: &Bgp, json: bool) -> std::result::Result<String, st
             for rib in v.iter() {
                 let stale = if rib.stale { "S" } else { " " };
                 let valid = "*";
-                let best = if rib.best_path { ">" } else { " " };
+                let best = path_marker(rib);
                 let internal = if rib.typ == BgpRibType::IBGP {
                     "i"
                 } else {
@@ -1263,7 +1279,7 @@ fn show_bgp_vpnv6_table(bgp: &Bgp, json: bool) -> std::result::Result<String, st
             for rib in v.iter() {
                 let stale = if rib.stale { "S" } else { " " };
                 let valid = "*";
-                let best = if rib.best_path { ">" } else { " " };
+                let best = path_marker(rib);
                 let internal = if rib.typ == BgpRibType::IBGP {
                     "i"
                 } else {
@@ -1397,7 +1413,7 @@ fn show_adj_rib_routes_vpnv4<D: RibDirection>(
             for rib in v.iter() {
                 let stale = if rib.stale { "S" } else { " " };
                 let valid = "*";
-                let best = if rib.best_path { ">" } else { " " };
+                let best = path_marker(rib);
                 let internal = if rib.typ == BgpRibType::IBGP {
                     "i"
                 } else {
@@ -1496,7 +1512,7 @@ fn show_adj_rib_routes_evpn<D: RibDirection>(
         for (prefix, ribs) in table.0.iter() {
             for rib in ribs.iter() {
                 let valid = "*";
-                let best = if rib.best_path { ">" } else { " " };
+                let best = path_marker(rib);
                 writeln!(buf, " {valid}{best}  {prefix}")?;
 
                 let nexthop = show_nexthop(&rib.attr);
@@ -2153,7 +2169,7 @@ pub(super) fn show_adj_rib_routes<P: std::fmt::Display>(
         for rib in value.iter() {
             let stale = if rib.stale { "S" } else { " " };
             let valid = "*";
-            let best = if rib.best_path { ">" } else { " " };
+            let best = path_marker(rib);
             let internal = if rib.typ == BgpRibType::IBGP {
                 "i"
             } else {
@@ -4456,7 +4472,7 @@ fn show_bgp_evpn(
                 rd_header = true;
             }
             let valid = "*";
-            let best = if rib.best_path { ">" } else { " " };
+            let best = path_marker(rib);
             // Line 1: status flags + prefix on its own line (the EVPN
             // prefix string is variable-length and rarely fits a fixed
             // column).
@@ -4908,7 +4924,7 @@ fn render_mup_table(
     // DSD, ISD, ST1, ST2.
     for (rd, table) in tables.iter() {
         for (prefix, rib) in table.selected.iter() {
-            let best = if rib.best_path { ">" } else { " " };
+            let best = path_marker(rib);
             writeln!(
                 buf,
                 " *{best} {}",

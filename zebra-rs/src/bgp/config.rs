@@ -3164,6 +3164,54 @@ pub(super) fn peer_policy_ident_decode(ident: usize) -> (usize, Option<AfiSafi>)
 /// `PolicyType::TableMap`, even when the name doesn't resolve — so
 /// the FIB flips exactly once, on the definitive answer. Delete
 /// resyncs immediately (nothing will reply).
+/// The table for a unicast family's multipath policy, or `None` for a
+/// family that has no multipath (VPN / EVPN / flowspec resolve their own
+/// transport and install through other paths).
+fn multipath_cfg_mut(
+    bgp: &mut Bgp,
+    afi_safi: AfiSafi,
+) -> Option<&mut super::route::MultipathCfg> {
+    use bgp_packet::{Afi, Safi};
+    match (afi_safi.afi, afi_safi.safi) {
+        (Afi::Ip, Safi::Unicast) => Some(&mut bgp.shard.v4.2),
+        (Afi::Ip6, Safi::Unicast) => Some(&mut bgp.shard.v6.2),
+        _ => None,
+    }
+}
+
+/// `set/delete router bgp afi-safi <af> maximum-paths <n>`.
+///
+/// Delete restores 1 (best path only), which is exactly today's
+/// behaviour, so removing the statement cannot leave a stale ECMP set
+/// installed.
+fn config_maximum_paths(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    let value = if op.is_set() { args.u32()?.max(1) } else { 1 };
+    let cfg = multipath_cfg_mut(bgp, afi_safi)?;
+    if cfg.max_paths == value {
+        return Some(());
+    }
+    cfg.max_paths = value;
+    // Both directions need it: raising discovers legs never selected,
+    // lowering withdraws legs that no longer fit.
+    bgp.multipath_resync(afi_safi);
+    Some(())
+}
+
+/// `set/delete router bgp afi-safi <af> bestpath as-path
+/// multipath-relax <bool>`.
+fn config_multipath_relax(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    let value = op.is_set() && args.boolean()?;
+    let cfg = multipath_cfg_mut(bgp, afi_safi)?;
+    if cfg.relax == value {
+        return Some(());
+    }
+    cfg.relax = value;
+    bgp.multipath_resync(afi_safi);
+    Some(())
+}
+
 pub(super) fn config_table_map(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let afi_safi: AfiSafi = args.afi_safi()?;
     if !table_map_afi_valid(&afi_safi) {
@@ -5234,6 +5282,15 @@ impl Bgp {
         // Per-AFI table-map (zebra-bgp-table-map.yang): policy gate /
         // rewrite at BGP-to-RIB install time.
         self.callback_add("/router/bgp/afi-safi/table-map", config_table_map);
+
+        // Per-AFI multipath (zebra-bgp-multipath.yang): how many
+        // equal-cost paths to install, and how strictly "equal-cost" is
+        // judged.
+        self.callback_add("/router/bgp/afi-safi/maximum-paths", config_maximum_paths);
+        self.callback_add(
+            "/router/bgp/afi-safi/bestpath/as-path/multipath-relax",
+            config_multipath_relax,
+        );
 
         // Applying policy. Per-AFI policy / prefix-set is the only
         // per-neighbor binding location; the peer-wide `neighbor X
