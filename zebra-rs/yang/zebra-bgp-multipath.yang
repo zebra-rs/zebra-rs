@@ -77,6 +77,20 @@ module zebra-bgp-multipath {
          the next best-path run for the family.";
     }
 
+    leaf maximum-paths-ibgp {
+      ext:help "Equal-cost paths to install when the best path is iBGP";
+      type uint32 {
+        range "1..max";
+      }
+      description
+        "Distinct cap for a prefix whose best path is iBGP-learned —
+         FRR's `maximum-paths ibgp`. When absent, `maximum-paths`
+         governs iBGP sets too, so a deployment that sets only the
+         eBGP form (as SONiC's templates do) has one knob to think
+         about. An ECMP set never mixes eBGP and iBGP paths, so
+         exactly one of the two caps applies to any given prefix.";
+    }
+
     container bestpath {
       ext:help "Best-path selection tuning";
       description

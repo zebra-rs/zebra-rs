@@ -1786,6 +1786,12 @@ pub struct MultipathCfg {
     /// Equal-cost paths to install, bestpath included. 1 disables
     /// multipath and reproduces the single-path behaviour exactly.
     pub max_paths: u32,
+    /// Distinct cap for a prefix whose best path is iBGP-learned —
+    /// FRR's `maximum-paths ibgp`. `None` inherits `max_paths`, so a
+    /// deployment that sets only the eBGP form (SONiC's templates do)
+    /// has one knob. Eligibility never mixes eBGP and iBGP in one
+    /// set, so exactly one of the two caps applies to any prefix.
+    pub max_paths_ibgp: Option<u32>,
     /// `bestpath as-path multipath-relax`: qualify eBGP paths on
     /// AS-path LENGTH alone instead of also requiring the same
     /// neighbouring AS.
@@ -1800,6 +1806,7 @@ impl Default for MultipathCfg {
     fn default() -> Self {
         Self {
             max_paths: 1,
+            max_paths_ibgp: None,
             relax: false,
         }
     }
@@ -1923,7 +1930,18 @@ impl<P: Prefix + Copy> LocalRibTable<P> {
         // slot, so the cap bounds the whole set rather than the
         // remainder.
         let cfg = self.2;
-        if cfg.max_paths > 1 {
+        // The cap is picked by the winner's peer type, as FRR does:
+        // eligibility forces the whole set to share the winner's
+        // eBGP/iBGP rank, so exactly one cap governs any given prefix.
+        // A locally-originated winner takes the eBGP cap — that is not
+        // the set `maximum-paths ibgp` is scoped to.
+        let ibgp_set = matches!(best.typ, BgpRibType::IBGP) || best.vrf_imported;
+        let max_paths = if ibgp_set {
+            cfg.max_paths_ibgp.unwrap_or(cfg.max_paths)
+        } else {
+            cfg.max_paths
+        };
+        if max_paths > 1 {
             let cands = self.0.get_mut(&prefix).expect("prefix checked above");
             // Walk the eligible candidates in tie-break order (BGP
             // Identifier, then peer slot, then AddPath path-id) rather
@@ -1950,7 +1968,7 @@ impl<P: Prefix + Copy> LocalRibTable<P> {
             // hash.
             let mut seen: Vec<Option<std::net::IpAddr>> = vec![super::nht::nht_target(&best.attr)];
             for index in eligible {
-                if selected.len() as u32 >= cfg.max_paths {
+                if selected.len() as u32 >= max_paths {
                     break;
                 }
                 let nh = super::nht::nht_target(&cands[index].attr);
@@ -23172,8 +23190,19 @@ mod multipath_tests {
 
     fn table(max_paths: u32, relax: bool) -> LocalRibTable<Ipv4Net> {
         let mut t = LocalRibTable::<Ipv4Net>::default();
-        t.2 = MultipathCfg { max_paths, relax };
+        t.2 = MultipathCfg {
+            max_paths,
+            max_paths_ibgp: None,
+            relax,
+        };
         t
+    }
+
+    /// An iBGP path: `ebgp_row` with the peer type flipped.
+    fn ibgp_row(ident: usize, as_path: &str, nh: [u8; 4]) -> BgpRib {
+        let mut row = ebgp_row(ident, as_path, nh);
+        row.typ = BgpRibType::IBGP;
+        row
     }
 
     fn prefix() -> Ipv4Net {
@@ -23307,6 +23336,51 @@ mod multipath_tests {
         // The default reproduces today's single-path behaviour exactly.
         let mut t = table(1, false);
         assert_eq!(select(&mut t, rows).len(), 1);
+    }
+
+    /// `maximum-paths ibgp` caps an iBGP set independently. Unset, the
+    /// family's one `maximum-paths` value applies to both peer types;
+    /// set, it governs iBGP sets alone and eBGP sets never see it —
+    /// including opening the gate when `maximum-paths` itself is 1.
+    #[test]
+    fn ibgp_sets_use_their_own_cap() {
+        let ibgp_rows = || {
+            vec![
+                ibgp_row(1, "65001", [192, 0, 2, 1]),
+                ibgp_row(2, "65001", [192, 0, 2, 2]),
+                ibgp_row(3, "65001", [192, 0, 2, 3]),
+            ]
+        };
+        let ebgp_rows = || {
+            vec![
+                ebgp_row(1, "65001", [192, 0, 2, 1]),
+                ebgp_row(2, "65001", [192, 0, 2, 2]),
+                ebgp_row(3, "65001", [192, 0, 2, 3]),
+            ]
+        };
+
+        // Unset: iBGP inherits `maximum-paths`.
+        let mut t = table(2, false);
+        assert_eq!(select(&mut t, ibgp_rows()).len(), 2);
+
+        // Set: the iBGP cap governs an iBGP set…
+        let mut t = table(2, false);
+        t.2.max_paths_ibgp = Some(3);
+        assert_eq!(select(&mut t, ibgp_rows()).len(), 3);
+
+        // …an eBGP set never sees it…
+        let mut t = table(2, false);
+        t.2.max_paths_ibgp = Some(3);
+        assert_eq!(select(&mut t, ebgp_rows()).len(), 2);
+
+        // …and it opens the gate on its own: eBGP stays single-path
+        // while iBGP load-shares.
+        let mut t = table(1, false);
+        t.2.max_paths_ibgp = Some(2);
+        assert_eq!(select(&mut t, ibgp_rows()).len(), 2);
+        let mut t = table(1, false);
+        t.2.max_paths_ibgp = Some(2);
+        assert_eq!(select(&mut t, ebgp_rows()).len(), 1);
     }
 
     /// The installed set must not depend on the order updates arrived

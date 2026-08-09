@@ -21,6 +21,7 @@
 /router/bgp/afi-safi/evi/bridge	leaf
 /router/bgp/afi-safi/igmp-mld-proxy	leaf
 /router/bgp/afi-safi/maximum-paths	leaf
+/router/bgp/afi-safi/maximum-paths-ibgp	leaf
 /router/bgp/afi-safi/network	list keys=prefix
 /router/bgp/afi-safi/pruned-flood-list	container
 /router/bgp/afi-safi/pruned-flood-list/broadcast-multicast	leaf

@@ -3195,6 +3195,28 @@ fn config_maximum_paths(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<(
     Some(())
 }
 
+/// `set/delete router bgp afi-safi <af> maximum-paths-ibgp <n>` —
+/// FRR's `maximum-paths ibgp`, a distinct cap for iBGP-learned sets.
+///
+/// Delete restores inheritance from `maximum-paths` rather than 1:
+/// the leaf's absence means "one knob for both peer types", not "no
+/// iBGP multipath".
+fn config_maximum_paths_ibgp(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    let value = if op.is_set() {
+        Some(args.u32()?.max(1))
+    } else {
+        None
+    };
+    let cfg = multipath_cfg_mut(bgp, afi_safi)?;
+    if cfg.max_paths_ibgp == value {
+        return Some(());
+    }
+    cfg.max_paths_ibgp = value;
+    bgp.multipath_resync(afi_safi);
+    Some(())
+}
+
 /// `set/delete router bgp afi-safi <af> bestpath as-path
 /// multipath-relax <bool>`.
 fn config_multipath_relax(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
@@ -5284,6 +5306,10 @@ impl Bgp {
         // equal-cost paths to install, and how strictly "equal-cost" is
         // judged.
         self.callback_add("/router/bgp/afi-safi/maximum-paths", config_maximum_paths);
+        self.callback_add(
+            "/router/bgp/afi-safi/maximum-paths-ibgp",
+            config_maximum_paths_ibgp,
+        );
         self.callback_add(
             "/router/bgp/afi-safi/bestpath/as-path/multipath-relax",
             config_multipath_relax,
