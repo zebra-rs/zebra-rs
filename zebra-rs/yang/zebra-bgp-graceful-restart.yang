@@ -1,0 +1,166 @@
+module zebra-bgp-graceful-restart {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-bgp-graceful-restart";
+  prefix "zbgr";
+
+  import ietf-bgp {
+    prefix bgp;
+  }
+
+  import config {
+    prefix config;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "Instance-level BGP graceful restart (RFC 4724), applying to every
+     family a peer has enabled instead of being restated per neighbor
+     per address family.
+
+     Config shape:
+
+       router bgp {
+         graceful-restart {
+           enabled true;
+           restart-time 240;
+           preserve-fw-state true;
+         }
+         long-lived-graceful-restart {
+           stale-time 864000;
+         }
+       }
+
+     The per-neighbor, per-AF `graceful-restart` container remains and
+     layers on top: a family with its own statement keeps it, and the
+     advertised Restart Time is the larger of the two.
+
+     A change is advertised in the OPEN, so it reaches an Established
+     session only by reconnecting it. Setting these knobs bounces the
+     sessions whose resolved value actually changed.
+
+     SCOPE — `select-defer-time` is deliberately absent. FRR's
+     `bgp graceful-restart select-defer-time` bounds how long a
+     *restarting speaker* defers best-path selection so it does not
+     announce a partial table. zebra-rs implements the GR **helper**
+     role (a restarting peer's routes are retained and marked stale,
+     with LLGR) but has no such deferral of its own restart, so the leaf
+     would be accepted and do nothing — the failure mode this port has
+     repeatedly been bitten by. It is recorded as an open gap in
+     docs/design/bgp-sonic-gaps.md instead of being modelled here.";
+
+  reference
+    "RFC 4724 (Graceful Restart), RFC 8538 (Notification support),
+     FRR bgpd `bgp graceful-restart`, `... restart-time`,
+     `... preserve-fw-state`, `bgp graceful-restart-disable`,
+     `bgp long-lived-graceful-restart stale-time`.";
+
+  grouping bgp-graceful-restart-global {
+    description
+      "Attached to the global `router bgp` container.";
+
+    container graceful-restart {
+      ext:help "Instance-level graceful restart (RFC 4724)";
+      description
+        "Graceful restart applied to every enabled family of every
+         neighbor.";
+
+      leaf enabled {
+        ext:help "Advertise the graceful restart capability";
+        type boolean;
+        description
+          "Advertise RFC 4724 graceful restart to all neighbors, for
+           every address family they have enabled.
+
+           `disable` below outranks this, so the two may be configured
+           in either order without the result depending on which
+           arrived last.";
+      }
+
+      leaf restart-time {
+        ext:help "Restart Time advertised to peers, in seconds";
+        type uint32 {
+          range "1..4095";
+        }
+        description
+          "Seconds a peer should retain our routes while we restart.
+           Absent advertises the per-family default (120).
+
+           Range is the 12-bit wire field (RFC 4724 §3); a larger value
+           cannot be encoded. Deleting the leaf restores the default
+           rather than 0 — zero tells the peer to flush immediately,
+           which is the opposite of what removing a tuning knob should
+           mean.";
+      }
+
+      leaf preserve-fw-state {
+        ext:help "Advertise that forwarding survives our restart";
+        type boolean;
+        description
+          "Set the per-AF Forwarding State bit (RFC 4724 §3 'F' flag),
+           telling peers our forwarding plane keeps forwarding across
+           the restart so they need not withdraw through us.
+
+           This is the flag a SONiC warm reboot depends on. Only claim
+           it where it is true: asserting it when forwarding does NOT
+           survive blackholes traffic for the whole restart window,
+           which is strictly worse than not advertising graceful
+           restart at all.";
+      }
+
+      leaf disable {
+        ext:help "Force graceful restart off, overriding enabled";
+        type boolean;
+        description
+          "Hard off. Kept separate from `enabled` because the two are
+           set from different roles (SONiC turns GR on for a ToRRouter
+           and off for an UpperRegionalHub), and collapsing them into
+           one leaf would make the resulting state depend on config
+           order.";
+      }
+    }
+
+    container long-lived-graceful-restart {
+      ext:help "Long-lived graceful restart (draft-uttaro-idr-bgp-persistence)";
+      description
+        "Instance-level LLGR, layered the same way as graceful-restart:
+         applied to every enabled family that has no per-family
+         statement of its own.";
+
+      leaf stale-time {
+        ext:help "Seconds to retain stale routes after the GR timer";
+        type uint32;
+        description
+          "How long peers should keep our routes as long-lived stale
+           after the graceful restart timer expires.";
+      }
+    }
+  }
+
+  /* =========================================================
+   * Augments into the zebra-rs configure tree
+   * ========================================================= */
+
+  augment "/configure:set/config:router/bgp:bgp" {
+    description
+      "Attach the instance-level graceful-restart containers in the
+       candidate-set subtree.";
+    uses bgp-graceful-restart-global;
+  }
+
+  augment "/configure:delete/config:router/bgp:bgp" {
+    description
+      "Same attachment for the delete subtree so
+       `delete router bgp graceful-restart enabled` is path-valid.";
+    uses bgp-graceful-restart-global;
+  }
+}

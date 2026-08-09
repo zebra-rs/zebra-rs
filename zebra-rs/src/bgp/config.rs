@@ -3164,6 +3164,81 @@ pub(super) fn peer_policy_ident_decode(ident: usize) -> (usize, Option<AfiSafi>)
 /// `PolicyType::TableMap`, even when the name doesn't resolve — so
 /// the FIB flips exactly once, on the definitive answer. Delete
 /// resyncs immediately (nothing will reply).
+/// Push the instance-level graceful-restart state onto every peer and
+/// bounce the sessions that need to renegotiate.
+///
+/// GR is advertised in the OPEN (RFC 4724 §3), so a change only reaches
+/// an Established session by reconnecting it. That is disruptive, which
+/// is exactly why it is diff-gated: re-applying an unchanged value must
+/// not bounce anything.
+///
+/// `graceful-restart-disable` outranks `enabled`, so the two leaves can
+/// arrive in either order and the result is the same.
+fn graceful_restart_resync(bgp: &mut Bgp) {
+    let mut resolved = bgp.graceful_restart;
+    resolved.enabled = resolved.enabled && !bgp.graceful_restart_disable;
+
+    let mut stops: Vec<usize> = Vec::new();
+    for (_, peer) in bgp.peers.iter_mut_all() {
+        if peer.config.gr_global == resolved {
+            continue;
+        }
+        peer.config.gr_global = resolved;
+        // An Idle peer carries the new capability in its first OPEN, so
+        // only a session that has already negotiated needs restarting —
+        // the same rule `sweep_members` applies to the inheritable
+        // session knobs.
+        if !matches!(peer.state, super::peer::State::Idle) {
+            stops.push(peer.ident);
+        }
+    }
+    for ident in stops {
+        let _ = bgp
+            .tx
+            .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
+    }
+}
+
+/// `set/delete router bgp graceful-restart enabled <bool>`.
+fn config_gr_enabled(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    bgp.graceful_restart.enabled = op.is_set() && args.boolean()?;
+    graceful_restart_resync(bgp);
+    Some(())
+}
+
+/// `set/delete router bgp graceful-restart restart-time <secs>`.
+///
+/// Delete restores the default rather than 0: a Restart Time of zero
+/// tells the peer to flush our routes immediately, which is the opposite
+/// of what removing a tuning knob should mean.
+fn config_gr_restart_time(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    bgp.graceful_restart.restart_time = if op.is_set() { Some(args.u32()?) } else { None };
+    graceful_restart_resync(bgp);
+    Some(())
+}
+
+/// `set/delete router bgp graceful-restart preserve-fw-state <bool>`.
+fn config_gr_preserve_fw_state(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    bgp.graceful_restart.preserve_fw_state = op.is_set() && args.boolean()?;
+    graceful_restart_resync(bgp);
+    Some(())
+}
+
+/// `set/delete router bgp graceful-restart disable <bool>` — hard off,
+/// outranking `enabled`.
+fn config_gr_disable(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    bgp.graceful_restart_disable = op.is_set() && args.boolean()?;
+    graceful_restart_resync(bgp);
+    Some(())
+}
+
+/// `set/delete router bgp long-lived-graceful-restart stale-time <secs>`.
+fn config_gr_llgr_stale_time(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    bgp.graceful_restart.llgr_stale_time = if op.is_set() { Some(args.u32()?) } else { None };
+    graceful_restart_resync(bgp);
+    Some(())
+}
+
 /// The table for a unicast family's multipath policy, or `None` for a
 /// family that has no multipath (VPN / EVPN / flowspec resolve their own
 /// transport and install through other paths).
@@ -5322,6 +5397,22 @@ impl Bgp {
         // Per-AFI multipath (zebra-bgp-multipath.yang): how many
         // equal-cost paths to install, and how strictly "equal-cost" is
         // judged.
+        // Instance-level graceful restart (zebra-bgp-graceful-restart.yang).
+        self.callback_add("/router/bgp/graceful-restart/enabled", config_gr_enabled);
+        self.callback_add(
+            "/router/bgp/graceful-restart/restart-time",
+            config_gr_restart_time,
+        );
+        self.callback_add(
+            "/router/bgp/graceful-restart/preserve-fw-state",
+            config_gr_preserve_fw_state,
+        );
+        self.callback_add("/router/bgp/graceful-restart/disable", config_gr_disable);
+        self.callback_add(
+            "/router/bgp/long-lived-graceful-restart/stale-time",
+            config_gr_llgr_stale_time,
+        );
+
         self.callback_add("/router/bgp/afi-safi/maximum-paths", config_maximum_paths);
         self.callback_add(
             "/router/bgp/afi-safi/maximum-paths-ibgp",
@@ -7904,6 +7995,56 @@ mod neighbor_group_wiring_tests {
         )
         .unwrap();
         assert!(!nhs(&bgp), "entry delete clears the inherited value");
+    }
+
+    /// Instance-level GR resolves onto peers, and `disable` outranks
+    /// `enabled` regardless of which arrives last — the two are set from
+    /// different SONiC roles, so an order-dependent result would be a
+    /// real bug rather than a theoretical one.
+    #[tokio::test]
+    async fn graceful_restart_resolves_onto_peers_and_disable_wins() {
+        let mut bgp = fresh_bgp();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+
+        let gr = |bgp: &Bgp| bgp.peers.get(&peer_addr()).unwrap().config.gr_global;
+
+        config_gr_enabled(&mut bgp, arg_words(&["true"]), ConfigOp::Set).unwrap();
+        config_gr_restart_time(&mut bgp, arg_words(&["240"]), ConfigOp::Set).unwrap();
+        config_gr_preserve_fw_state(&mut bgp, arg_words(&["true"]), ConfigOp::Set).unwrap();
+        assert!(gr(&bgp).enabled, "global GR must reach the peer");
+        assert_eq!(gr(&bgp).restart_time, Some(240));
+        assert!(gr(&bgp).preserve_fw_state);
+
+        // disable arriving AFTER enabled.
+        config_gr_disable(&mut bgp, arg_words(&["true"]), ConfigOp::Set).unwrap();
+        assert!(!gr(&bgp).enabled, "disable must outrank enabled");
+
+        // …and enabled re-asserted AFTER disable must still lose.
+        config_gr_enabled(&mut bgp, arg_words(&["true"]), ConfigOp::Set).unwrap();
+        assert!(!gr(&bgp).enabled, "order must not decide the outcome");
+
+        config_gr_disable(&mut bgp, arg_words(&["true"]), ConfigOp::Delete).unwrap();
+        assert!(gr(&bgp).enabled, "clearing disable restores GR");
+    }
+
+    /// Deleting `restart-time` restores the default rather than 0. A
+    /// Restart Time of zero tells the peer to flush our routes at once,
+    /// which is the opposite of what removing a tuning knob should mean.
+    #[tokio::test]
+    async fn deleting_restart_time_restores_the_default_not_zero() {
+        let mut bgp = fresh_bgp();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_gr_enabled(&mut bgp, arg_words(&["true"]), ConfigOp::Set).unwrap();
+        config_gr_restart_time(&mut bgp, arg_words(&["240"]), ConfigOp::Set).unwrap();
+        config_gr_restart_time(&mut bgp, arg_words(&["240"]), ConfigOp::Delete).unwrap();
+
+        let gr = bgp.peers.get(&peer_addr()).unwrap().config.gr_global;
+        assert_eq!(gr.restart_time, None);
+        assert_eq!(
+            gr.restart_time_or_default(),
+            super::super::peer::GR_RESTART_TIME_DEFAULT,
+            "delete must not advertise a 0 Restart Time"
+        );
     }
 
     /// Per-family `add-path` inherits through the group's afi-safi entry

@@ -1040,6 +1040,18 @@ pub struct Bgp {
     /// is not wired in the runtime yet — that lands in a follow-up.
     pub neighbor_groups: BTreeMap<String, super::neighbor_group::NeighborGroup>,
 
+    /// Instance-level graceful restart (`router bgp graceful-restart …`).
+    /// Resolved onto every peer's `PeerConfig::gr_global` by
+    /// `graceful_restart_resync`, because `build_open_packet` sees only
+    /// the peer.
+    pub graceful_restart: super::peer::GracefulRestartGlobal,
+    /// `graceful-restart-disable`: hard off, outranking `enabled`.
+    /// Separate from `graceful_restart.enabled` because SONiC sets the
+    /// two from different roles — a ToRRouter turns GR on, an
+    /// UpperRegionalHub turns it off — and collapsing them would make
+    /// the resulting state depend on config order.
+    pub graceful_restart_disable: bool,
+
     /// Color → Flex-Algorithm binding table
     /// (zebra-bgp-color-policy.yang). The colour-aware nexthop
     /// resolver consults this to pick a per-algo entry from
@@ -1376,6 +1388,8 @@ impl Bgp {
             super::shard::pool::ShardPool::spawn(workers, shard_results_tx)
         });
         let mut bgp = Self {
+            graceful_restart: super::peer::GracefulRestartGlobal::default(),
+            graceful_restart_disable: false,
             asn: 0,
             router_id: Ipv4Addr::UNSPECIFIED,
             router_id_config: None,

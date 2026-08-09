@@ -546,6 +546,10 @@ pub struct PeerConfig {
     /// effective value lives in [`Self::addpath`], resolved against a
     /// referenced neighbor-group's per-family opinion by
     /// [`super::neighbor_group::resolve_add_path`].
+    /// Instance-level graceful restart, resolved from `Bgp` at config
+    /// time. Layered UNDER the per-family `sub[af].graceful_restart`
+    /// statements, which continue to win.
+    pub gr_global: GracefulRestartGlobal,
     pub addpath_explicit: BTreeMap<AfiSafi, AddPathSendReceive>,
     pub addpath: AfiSafis<AddPathValue>,
     pub route_refresh: bool,
@@ -665,6 +669,7 @@ impl Default for PeerConfig {
             nhs_explicit: BTreeMap::new(),
             knobs_explicit: Default::default(),
             llgr: AfiSafis::new(),
+            gr_global: GracefulRestartGlobal::default(),
             addpath_explicit: BTreeMap::new(),
             addpath: AfiSafis::new(),
             route_refresh: Default::default(),
@@ -735,6 +740,39 @@ impl AfiSafiEncapType {
 /// this is the effective value. Clamped to the 12-bit field (≤ 4095) at
 /// emit time.
 pub const GR_RESTART_TIME_DEFAULT: u32 = 120;
+
+/// Instance-level graceful restart (`router bgp graceful-restart …`),
+/// resolved onto each peer.
+///
+/// Copied here rather than read from `Bgp` because `build_open_packet`
+/// takes only a `&mut Peer` — the same resolve-and-store shape the
+/// neighbor-group knobs use. A config change sweeps every peer.
+///
+/// Deliberately NOT carrying `select-defer-time`: that governs how long
+/// a *restarting* speaker defers best-path selection, and zebra-rs has
+/// no such deferral. Storing the timer would advertise nothing and
+/// change nothing, which is worse than not accepting it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GracefulRestartGlobal {
+    /// `graceful-restart enabled true`, and not overridden by
+    /// `graceful-restart-disable`.
+    pub enabled: bool,
+    /// Advertised Restart Time. `None` uses [`GR_RESTART_TIME_DEFAULT`].
+    pub restart_time: Option<u32>,
+    /// `preserve-fw-state`: set the per-AF Forwarding State bit (RFC
+    /// 4724 §3 "F" flag), telling peers our forwarding plane survives
+    /// the restart. This is the flag SONiC's warm reboot depends on.
+    pub preserve_fw_state: bool,
+    /// Instance-level `long-lived-graceful-restart stale-time`.
+    pub llgr_stale_time: Option<u32>,
+}
+
+impl GracefulRestartGlobal {
+    /// Restart Time to advertise, clamped to the 12-bit wire field.
+    pub fn restart_time_or_default(&self) -> u32 {
+        self.restart_time.unwrap_or(GR_RESTART_TIME_DEFAULT)
+    }
+}
 
 #[derive(Debug, Default, Clone)]
 pub struct PeerSubConfig {
@@ -3126,6 +3164,45 @@ fn build_open_packet(peer: &mut Peer) -> BytesMut {
         };
         bgp_cap.addpath.insert(*key, value);
     }
+    // Instance-level graceful restart applies to every family the peer
+    // has enabled, so a device does not have to repeat the statement per
+    // neighbor per AF. Runs BEFORE the per-family loop below, which
+    // layers on top (its per-AF restart time still raises the advertised
+    // value through the same max()).
+    let gr = peer.config.gr_global;
+    if gr.enabled {
+        let time = gr.restart_time_or_default().min(0xfff) as u16;
+        let cap = bgp_cap.restart.get_or_insert_with(CapRestart::default);
+        if time > cap.flag_time.restart_time() {
+            cap.set_restart_time(time);
+        }
+        for (key, enabled) in peer.config.mp.iter() {
+            if !*enabled {
+                continue;
+            }
+            let mut entry = RestartEntry::new(key.afi, key.safi);
+            // RFC 4724 §3 "F" flag: our forwarding state survives the
+            // restart, so the peer may keep forwarding through us
+            // instead of withdrawing. Only claim it when configured —
+            // asserting it falsely blackholes traffic for the whole
+            // restart window.
+            if gr.preserve_fw_state {
+                entry.flags.set_f_flag(true);
+            }
+            cap.entries.push(entry);
+        }
+        if let Some(stale_time) = gr.llgr_stale_time {
+            for (key, enabled) in peer.config.mp.iter() {
+                if !*enabled {
+                    continue;
+                }
+                bgp_cap
+                    .llgr
+                    .entry(*key)
+                    .or_insert_with(|| LlgrValue::new(key.afi, key.safi, stale_time));
+            }
+        }
+    }
     for (key, sub) in peer.config.sub.iter() {
         if let Some(restart_time) = sub.graceful_restart {
             // RFC 4724 carries a single Restart Time for the whole
@@ -3137,7 +3214,13 @@ fn build_open_packet(peer: &mut Peer) -> BytesMut {
             if time > cap.flag_time.restart_time() {
                 cap.set_restart_time(time);
             }
-            cap.entries.push(RestartEntry::new(key.afi, key.safi));
+            if !cap
+                .entries
+                .iter()
+                .any(|e| e.afi == key.afi && e.safi == key.safi)
+            {
+                cap.entries.push(RestartEntry::new(key.afi, key.safi));
+            }
         }
         if let Some(llgr_time) = sub.llgr {
             let llgr = LlgrValue::new(key.afi, key.safi, llgr_time);

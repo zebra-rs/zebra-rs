@@ -8,6 +8,26 @@ express, found while translating them from FRR syntax. Each entry says
 what SONiC needs it for, what was tried, and what already exists — so the
 next person can tell "add a leaf" apart from "implement a feature".
 
+**Ranked, as of the instance-template port:**
+
+1. **`suppress-fib-pending`** — on every device, and currently *dropped*
+   rather than refused, so it degrades silently rather than loudly. The
+   offload ack already arrives; only the advertisement gate is missing.
+2. **`select-defer-time`** — the last refusal on a stock T0. Not a leaf:
+   it needs restarting-speaker deferral, which is Phase 6 work.
+3. **`maximum-prefix`** — blocks the `monitors` and `sentinels` families.
+4. Everything else is role- or feature-conditional.
+
+Closed so far: BGP multipath, global graceful restart (bar
+`select-defer-time`), `call`, `set tag` / `match tag`, `add-path` on a
+neighbor-group.
+
+Ranking by blast radius rather than by effort: an instance-level gap
+affects every deployment, a family gap affects the devices in that role.
+That ordering is why multipath (closed) came before `maximum-prefix`
+despite `maximum-prefix` having been called "the highest-value item" when
+this list only knew about per-neighbour gaps.
+
 ## How these were established
 
 By applying candidate config to a running daemon and checking whether it
@@ -54,8 +74,8 @@ does this, and it is why a T0 showed three gaps rather than one.
 ## Instance-level — affects every device
 
 Found porting `bgpd/bgpd.main.conf.j2`, the global BGP instance. These are
-not role-specific — a stock T0 hit three of them, of which multipath is
-now closed.
+not role-specific — a stock T0 hit three of them; multipath and global
+graceful restart are now closed, leaving `select-defer-time`.
 
 `/router/bgp/global` has exactly two leaves, `as` and `router-id`. That is
 the whole instance-level surface. Everything below was probed one
@@ -89,20 +109,42 @@ AS-path *content* must also match — strict by default, because the
 best-path ladder never compares content and inheriting it would have
 relaxed silently.
 
-### Global graceful restart — confirmed absent
+### Global graceful restart — CLOSED, except `select-defer-time`
 
 SONiC, on a ToRRouter: `bgp graceful-restart`, `restart-time 240`,
 `preserve-fw-state`, `select-defer-time 45`. On an UpperRegionalHub:
 `bgp graceful-restart-disable` and
 `bgp long-lived-graceful-restart stale-time 864000`.
 
-zebra-rs has graceful restart only **per-neighbor, per-AF**
-(`/router/bgp/neighbor/afi-safi/graceful-restart/enabled`, and the LLGR
-pair beside it). There is no instance-level GR, and none of the four
-tuning knobs exists in any form.
+Implemented: instance-level `graceful-restart enabled` / `restart-time` /
+`preserve-fw-state` / `disable`, and `long-lived-graceful-restart
+stale-time`. GR previously existed only per-neighbor per-AF; the global
+form now applies to every family a peer has enabled, layered *under* the
+per-family statements so those still win and the advertised Restart Time
+is the larger of the two.
 
-Phase 6 (warm reboot) depends on this, and `preserve-fw-state` is what
-makes a restart hitless.
+`preserve-fw-state` is the one that matters for warm reboot: it sets the
+RFC 4724 §3 per-AF "F" flag, telling peers our forwarding plane keeps
+forwarding across the restart. It is opt-in rather than implied by
+`enabled`, because claiming it when forwarding does *not* survive
+blackholes traffic for the whole restart window — strictly worse than not
+advertising GR at all.
+
+`disable` is a separate leaf rather than `enabled false` because SONiC
+sets the two from different roles, and collapsing them would make the
+result depend on which config line arrived last.
+
+**Still open: `select-defer-time`.** That knob bounds how long a
+*restarting speaker* defers best-path selection so it does not announce a
+partial table. zebra-rs implements the GR **helper** role — a restarting
+peer's routes are retained and marked stale, with LLGR — but has no
+deferral of its own restart, so there is nothing for the timer to govern.
+The template refuses it rather than accepting a timer that does nothing.
+
+Closing it means implementing restarting-speaker behaviour: defer
+best-path and FIB install until every GR-capable peer has sent
+End-of-RIB or the timer expires. That is real restart machinery, not a
+config leaf, and Phase 6 (warm reboot) is where it belongs.
 
 ### Others at this level — confirmed absent
 
@@ -146,7 +188,9 @@ defines a `prefix-limit-config-common` grouping with `max-prefixes`,
 `warning-threshold-pct`, `restart-timer` and friends — but nothing
 `uses` it, so it is schema that is not wired into the neighbor or the
 neighbor-group. Closing this unblocks **two** families, which makes it
-the highest-value item on the list.
+the highest-value item among the per-family gaps — though the
+instance-level ones above outrank it, since they affect every device
+rather than one role.
 
 Note the enforcement semantics matter as much as the leaf: FRR tears the
 session down when the limit is exceeded, and the monitors use of

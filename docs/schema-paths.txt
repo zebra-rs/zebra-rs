@@ -76,10 +76,17 @@
 /router/bgp/global	p-container
 /router/bgp/global/as	leaf
 /router/bgp/global/router-id	leaf
+/router/bgp/graceful-restart	container
+/router/bgp/graceful-restart/disable	leaf
+/router/bgp/graceful-restart/enabled	leaf
+/router/bgp/graceful-restart/preserve-fw-state	leaf
+/router/bgp/graceful-restart/restart-time	leaf
 /router/bgp/hostname	leaf
 /router/bgp/interface-neighbor	list keys=interface
 /router/bgp/interface-neighbor/neighbor-group	leaf
 /router/bgp/interface-neighbor/remote-as	leaf
+/router/bgp/long-lived-graceful-restart	container
+/router/bgp/long-lived-graceful-restart/stale-time	leaf
 /router/bgp/mup-c	container
 /router/bgp/mup-c/architecture	leaf
 /router/bgp/mup-c/controller-address	leaf

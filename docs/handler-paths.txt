@@ -69,6 +69,10 @@
 /router/bgp/fast-external-failover
 /router/bgp/global/as
 /router/bgp/global/router-id
+/router/bgp/graceful-restart/disable
+/router/bgp/graceful-restart/enabled
+/router/bgp/graceful-restart/preserve-fw-state
+/router/bgp/graceful-restart/restart-time
 /router/bgp/hostname
 /router/bgp/interface-neighbor
 /router/bgp/interface-neighbor/neighbor-group
@@ -77,6 +81,7 @@
 /router/bgp/loc-rib-hook/ipv4-unicast/withdraw
 /router/bgp/loc-rib-hook/l2vpn-evpn/import
 /router/bgp/loc-rib-hook/l2vpn-evpn/withdraw
+/router/bgp/long-lived-graceful-restart/stale-time
 /router/bgp/lua-map
 /router/bgp/lua-map/source-path
 /router/bgp/lua-script

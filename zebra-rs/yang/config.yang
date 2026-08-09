@@ -72,6 +72,10 @@ module config {
     prefix zbmp;
   }
 
+  import zebra-bgp-graceful-restart {
+    prefix zbgr;
+  }
+
   import zebra-bgp-transport {
     prefix zbt;
   }
