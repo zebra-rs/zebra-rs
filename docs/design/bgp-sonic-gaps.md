@@ -40,6 +40,93 @@ implemented knob by knob. Probe at the level the template actually uses —
 for a listen-range group there is no per-neighbor fallback, so only the
 group form counts.
 
+**One leaf per line.** Sibling leaves of the same list entry cannot be
+combined the way FRR combines them. `prefix-set X prefixes P ge 31 le 31`
+is rejected; the same thing as two lines (`… ge 31`, then `… le 31`) is
+accepted. `ge`/`le`/`eq` were briefly recorded as missing for exactly this
+reason.
+
+**A refusal reports only the first bad line.** Commits are atomic, so a
+file with three unsupported constructs reports one. Count refusals in the
+rendered text, not in the daemon's reply — `validate-instance-template.sh`
+does this, and it is why a T0 showed three gaps rather than one.
+
+## Instance-level — affects every device
+
+Found porting `bgpd/bgpd.main.conf.j2`, the global BGP instance. These are
+not role-specific — a stock T0 hit three of them, of which multipath is
+now closed.
+
+`/router/bgp/global` has exactly two leaves, `as` and `router-id`. That is
+the whole instance-level surface. Everything below was probed one
+construct per commit against a running daemon and then confirmed absent
+from the schema.
+
+### BGP multipath / `maximum-paths` — CLOSED
+
+Was the largest functional gap on this list. Implemented; see
+`bgp-multipath.md`. Kept here because the shape of the mistake is worth
+remembering.
+
+It was recorded in an earlier revision of the porting plan as *already
+present*, on the strength of `maximum-paths` appearing in vendored
+`ietf-bgp-common` YANG. Nothing `uses`d that grouping, and behind it
+there was no implementation at all: `make_bgp_rib_entry_v4` took the
+single bestpath and built one `rib::Nexthop::Uni`. A device with several
+equal-cost upstream peers — the normal T0/T1 topology — installed one and
+forwarded everything over a single link, with no error anywhere.
+
+Two things made it look present when it was not: `select_best_path`
+returns `Vec<BgpRib>` and `fib_install_v4` takes a slice (both
+multipath-shaped, both carrying exactly one entry), and the `show` legend
+advertises a `= multipath` status code that nothing computed.
+
+Now: ties are computed through the eBGP/iBGP comparison, capped by
+`maximum-paths`, deduplicated by next-hop, and installed as
+`Nexthop::Multi`, which the FPM encoder already carried as
+`RTA_MULTIPATH`. `bestpath as-path multipath-relax` gates whether
+AS-path *content* must also match — strict by default, because the
+best-path ladder never compares content and inheriting it would have
+relaxed silently.
+
+### Global graceful restart — confirmed absent
+
+SONiC, on a ToRRouter: `bgp graceful-restart`, `restart-time 240`,
+`preserve-fw-state`, `select-defer-time 45`. On an UpperRegionalHub:
+`bgp graceful-restart-disable` and
+`bgp long-lived-graceful-restart stale-time 864000`.
+
+zebra-rs has graceful restart only **per-neighbor, per-AF**
+(`/router/bgp/neighbor/afi-safi/graceful-restart/enabled`, and the LLGR
+pair beside it). There is no instance-level GR, and none of the four
+tuning knobs exists in any form.
+
+Phase 6 (warm reboot) depends on this, and `preserve-fw-state` is what
+makes a restart hitless.
+
+### Others at this level — confirmed absent
+
+* `bgp suppress-fib-pending` — the offload ack is ingested and the RIB
+  carries `offloaded`; what is missing is gating advertisement on it. On
+  **every** SONiC device, so the template drops it rather than refusing;
+  until it lands, a box advertises a prefix before the ASIC has programmed
+  it.
+* `bgp confederation identifier` / `peers` — disaggregated T2 and Regional
+  Hub roles.
+* `coalesce-time` — dualtor only, update-packing tuning.
+* `bgp log-neighbor-changes` — cosmetic.
+* `network <prefix> route-map <rm>` — `network` exists
+  (`/router/bgp/afi-safi/network`, keyed by prefix) but takes no policy.
+  SONiC uses the policy form to attach `no-export` to an internal loopback
+  before originating it, so originating without it would leak an internal
+  prefix outside the fabric. Refused rather than degraded.
+
+Two FRR lines are deliberately *not* treated as gaps: `no bgp default
+ipv4-unicast` and `no bgp ebgp-requires-policy` disable FRR behaviours
+zebra-rs does not have (it activates a family only when configured, and
+has no RFC 8212 enforcement). Porting them as no-ops would imply a knob
+exists.
+
 ## Blocking a template family
 
 These stop a per-role family from being ported at all.
