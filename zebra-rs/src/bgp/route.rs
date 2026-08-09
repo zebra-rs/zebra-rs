@@ -23189,13 +23189,15 @@ mod multipath_tests {
     }
 
     fn table(max_paths: u32, relax: bool) -> LocalRibTable<Ipv4Net> {
-        let mut t = LocalRibTable::<Ipv4Net>::default();
-        t.2 = MultipathCfg {
-            max_paths,
-            max_paths_ibgp: None,
-            relax,
-        };
-        t
+        LocalRibTable(
+            Default::default(),
+            Default::default(),
+            MultipathCfg {
+                max_paths,
+                max_paths_ibgp: None,
+                relax,
+            },
+        )
     }
 
     /// An iBGP path: `ebgp_row` with the peer type flipped.
@@ -23389,7 +23391,7 @@ mod multipath_tests {
     /// the tie-break order (BGP Identifier), not the arrival order.
     #[test]
     fn installed_set_is_independent_of_arrival_order() {
-        let rows = vec![
+        let rows = [
             ebgp_row(1, "65001", [192, 0, 2, 1]),
             ebgp_row(2, "65001", [192, 0, 2, 2]),
             ebgp_row(3, "65001", [192, 0, 2, 3]),
