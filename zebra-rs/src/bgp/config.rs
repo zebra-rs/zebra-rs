@@ -326,6 +326,12 @@ fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
         // `propagate_instance_tracing`.
         peer.tracing_instance = bgp.tracing.clone();
         peer.ptx = bgp.ptx.clone();
+        // Seed the instance GR state: a startup config applies
+        // `/router/bgp/graceful-restart` BEFORE this neighbor exists,
+        // so waiting for `graceful_restart_resync` (which only runs
+        // from the GR callbacks) would leave this peer advertising no
+        // GR capability — and warm reboot flushing its routes.
+        peer.config.gr_global = bgp.gr_global_resolved();
         bgp.peers.insert(addr, peer);
         // Seed `shared_network` from interface addresses learned so far so
         // the eBGP connected check is accurate on this peer's first dial
@@ -3197,8 +3203,7 @@ fn config_suppress_fib_pending(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> O
 /// `graceful-restart-disable` outranks `enabled`, so the two leaves can
 /// arrive in either order and the result is the same.
 fn graceful_restart_resync(bgp: &mut Bgp) {
-    let mut resolved = bgp.graceful_restart;
-    resolved.enabled = resolved.enabled && !bgp.graceful_restart_disable;
+    let resolved = bgp.gr_global_resolved();
 
     let mut stops: Vec<usize> = Vec::new();
     for (_, peer) in bgp.peers.iter_mut_all() {
@@ -8023,6 +8028,41 @@ mod neighbor_group_wiring_tests {
         )
         .unwrap();
         assert!(!nhs(&bgp), "entry delete clears the inherited value");
+    }
+
+    /// A peer created AFTER the GR statements must still get them: a
+    /// startup config applies `/router/bgp/graceful-restart` before
+    /// `/router/bgp/neighbor` in path order, so every real boot hits
+    /// this ordering — while the resync only runs from the GR
+    /// callbacks. Without creation-time seeding, every startup-config
+    /// peer advertised no GR capability and warm reboot flushed all of
+    /// its routes.
+    #[tokio::test]
+    async fn peer_created_after_gr_config_inherits_it() {
+        let mut bgp = fresh_bgp();
+        config_gr_enabled(&mut bgp, arg_words(&["true"]), ConfigOp::Set).unwrap();
+        config_gr_restart_time(&mut bgp, arg_words(&["240"]), ConfigOp::Set).unwrap();
+        config_gr_preserve_fw_state(&mut bgp, arg_words(&["true"]), ConfigOp::Set).unwrap();
+
+        // The neighbor arrives last, as it does in a startup config.
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+
+        let gr = bgp.peers.get(&peer_addr()).unwrap().config.gr_global;
+        assert!(gr.enabled, "a late-created peer must inherit global GR");
+        assert_eq!(gr.restart_time, Some(240));
+        assert!(gr.preserve_fw_state);
+
+        // And `disable` set before creation outranks `enabled` for the
+        // late peer exactly as the resync would resolve it.
+        config_gr_disable(&mut bgp, arg_words(&["true"]), ConfigOp::Set).unwrap();
+        config_peer(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
+        let gr2 = bgp
+            .peers
+            .get(&"10.0.0.2".parse().unwrap())
+            .unwrap()
+            .config
+            .gr_global;
+        assert!(!gr2.enabled, "disable must outrank enabled at seeding too");
     }
 
     /// Instance-level GR resolves onto peers, and `disable` outranks

@@ -3531,6 +3531,10 @@ fn try_dynamic_accept(bgp: &mut Bgp, peer_addr: IpAddr, stream: TcpStream) -> Op
     );
     peer.tracing_instance = bgp.tracing.clone();
     peer.ptx = bgp.ptx.clone();
+    // Instance GR state — a dynamic peer materializes long after the
+    // GR config callbacks ran, so it must be seeded here or its OPEN
+    // (exchanged moments from now) advertises no GR capability.
+    peer.config.gr_global = bgp.gr_global_resolved();
     peer.origin = super::peer_key::PeerOrigin::Dynamic { range_prefix };
     // Dynamic peers are passive-only — they never initiate a connect.
     peer.config.transport.passive = true;

@@ -1507,6 +1507,21 @@ impl Bgp {
         self.callbacks.insert(path.to_string(), cb);
     }
 
+    /// The instance-level graceful-restart state as it applies to a
+    /// peer: `graceful-restart-disable` outranks `enabled`. This is
+    /// what `graceful_restart_resync` pushes onto existing peers — and
+    /// what every peer-creation site must seed, because a peer created
+    /// AFTER the GR config callbacks ran (startup configs apply
+    /// `/router/bgp/graceful-restart` before `/router/bgp/neighbor`;
+    /// listen-range peers materialize on accept) would otherwise keep
+    /// the default and advertise no GR capability in its OPEN — turning
+    /// warm reboot into a full route flush.
+    pub(super) fn gr_global_resolved(&self) -> super::peer::GracefulRestartGlobal {
+        let mut resolved = self.graceful_restart;
+        resolved.enabled = resolved.enabled && !self.graceful_restart_disable;
+        resolved
+    }
+
     /// Resolve the hostname to advertise in the FQDN capability.
     /// Configured value wins; otherwise we fall back to the OS
     /// hostname. None means "skip the FQDN capability entirely".
