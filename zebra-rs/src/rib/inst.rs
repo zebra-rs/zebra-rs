@@ -4167,6 +4167,18 @@ impl Rib {
         };
 
         mark_selected_offloaded(entries, offload.success);
+
+        // Tell BGP, which is the only consumer: `suppress-fib-pending`
+        // holds a prefix out of the Adj-RIB-Out until this arrives.
+        // Targeted rather than broadcast — there is one ack per
+        // installed route, and waking every protocol for each of them on
+        // a full-table load would be pure overhead.
+        if let Some(sub) = self.client_registry.subscriber_for_proto("bgp") {
+            let _ = sub.rib_rx_tx.send(super::api::RibRx::RouteOffload {
+                prefix: offload.prefix,
+                success: offload.success,
+            });
+        }
     }
 
     pub async fn process_fib_msg(&mut self, msg: FibMessage) {

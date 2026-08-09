@@ -257,6 +257,7 @@
 /router/bgp/sr-policy/policy/segment/mpls-label	leaf
 /router/bgp/sr-policy/policy/segment/srv6-sid	leaf
 /router/bgp/sr-policy/steering-mode	leaf
+/router/bgp/suppress-fib-pending	leaf
 /router/bgp/timer	container
 /router/bgp/timer/adv-interval	container
 /router/bgp/timer/adv-interval/ebgp	leaf

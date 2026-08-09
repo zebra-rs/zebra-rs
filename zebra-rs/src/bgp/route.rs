@@ -3013,6 +3013,38 @@ impl EvpnFloodState {
 /// instead — see the RIB sharding plan (B.1 / D3) for the partition.
 #[derive(Debug, Default)]
 pub struct LocalRib {
+    /// `router bgp suppress-fib-pending`: hold a prefix out of the
+    /// Adj-RIB-Out until the forwarding plane acknowledges installing
+    /// it, so we never advertise reachability the ASIC cannot yet
+    /// deliver.
+    ///
+    /// Here rather than on `Bgp` for the same reason as
+    /// `sr_policy_local`: the config callbacks hold `&mut Bgp` while the
+    /// advertise path holds a `BgpTop`, and `BgpTop` already borrows
+    /// `local_rib` — so this reaches both without adding a field to all
+    /// 56 `BgpTop` construction sites.
+    pub suppress_fib_pending: bool,
+
+    /// Prefixes installed but not yet acknowledged, with the deadline
+    /// after which they are advertised anyway.
+    ///
+    /// The timeout is not optional: an ack can be lost (fpmsyncd
+    /// restarts, orchagent rejects the route), and a prefix suppressed
+    /// forever is a black hole that looks like a routing bug rather than
+    /// a forwarding one. Advertising late is the safe failure — it is
+    /// exactly the pre-feature behaviour.
+    ///
+    /// Keyed by prefix, not by path: the ack carries a prefix and a VRF
+    /// ifindex and nothing else, so a per-path key could never be
+    /// matched back to it.
+    pub fib_pending: BTreeMap<IpNet, FibPending>,
+
+    /// Prefixes advertised because their deadline passed rather than
+    /// because an ack arrived. A device counting up here has a
+    /// forwarding plane that is not keeping up, which should be visible
+    /// rather than inferred from latency.
+    pub fib_pending_timeouts: u64,
+
     /// Per-RD EVPN Loc-RIB tables.
     pub evpn: BTreeMap<RouteDistinguisher, LocalRibEvpnTable>,
 
@@ -4618,6 +4650,73 @@ fn bump_group_counters_on_miss(
     }
 }
 
+/// How long a prefix may sit unacknowledged before it is advertised
+/// anyway. Chosen to be comfortably longer than an orchagent round trip
+/// under load while still bounded — the point is that a lost ack costs
+/// latency, never permanent invisibility.
+pub(super) const FIB_PENDING_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(30);
+
+/// State of a prefix in the `suppress-fib-pending` map.
+///
+/// Two states rather than a bare "is it pending" set, because the ack
+/// has to survive one trip through the advertise path. Releasing a
+/// prefix re-enters `route_advertise_to_peers` — deliberately, so a
+/// released prefix takes exactly the path a never-held one takes — and
+/// with a plain set the gate would see "not pending", record it as newly
+/// pending, and hold it again. Forever. `Confirmed` is what the release
+/// consumes on its way through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FibPending {
+    /// Installed, waiting for the forwarding plane. Advertise is held
+    /// until the ack or this deadline.
+    Waiting(std::time::Instant),
+    /// The ack arrived. The next advertise passes and clears the entry.
+    Confirmed,
+}
+
+/// Should this advertisement wait for the forwarding plane?
+///
+/// Returns true when the prefix must be held back. Called from the
+/// single per-prefix advertise entry point, so one check covers the
+/// serial reduce, the parallel batch, the peer-egress fan and the
+/// update-group fan alike.
+///
+/// A **withdraw is never suppressed** (`selected.is_empty()`).
+/// Withdrawing is how we stop attracting traffic; delaying it could only
+/// prolong the blackhole this feature exists to prevent. Getting this
+/// condition backwards would invert the whole feature, which is why it
+/// has its own test.
+fn fib_pending_hold(bgp: &mut BgpTop, prefix: IpNet, selected: &[BgpRib]) -> bool {
+    if !bgp.local_rib.suppress_fib_pending || selected.is_empty() {
+        return false;
+    }
+    use std::collections::btree_map::Entry;
+    match bgp.local_rib.fib_pending.entry(prefix) {
+        Entry::Occupied(e) => match *e.get() {
+            // The ack already arrived — this call IS the release.
+            FibPending::Confirmed => {
+                e.remove();
+                false
+            }
+            FibPending::Waiting(since) => {
+                if since.elapsed() >= FIB_PENDING_TIMEOUT {
+                    e.remove();
+                    bgp.local_rib.fib_pending_timeouts += 1;
+                    false
+                } else {
+                    true
+                }
+            }
+        },
+        // First advertise after a fresh install.
+        Entry::Vacant(e) => {
+            e.insert(FibPending::Waiting(std::time::Instant::now()));
+            true
+        }
+    }
+}
+
 pub(super) fn route_advertise_to_peers(
     rd: Option<RouteDistinguisher>,
     prefix: Ipv4Net,
@@ -4626,6 +4725,15 @@ pub(super) fn route_advertise_to_peers(
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
 ) {
+    // `suppress-fib-pending`: do not tell a peer about a prefix the ASIC
+    // has not confirmed programming. The FIB install already happened
+    // upstream of here; this holds only the advertisement, and the
+    // offload ack (or the deadline) re-enters through this same function
+    // so a released prefix cannot take a different path from one that was
+    // never held.
+    if rd.is_none() && fib_pending_hold(bgp, IpNet::V4(prefix), selected) {
+        return;
+    }
     // Group-task migration (gate-on): the v4-unicast direct-withdraw / re-
     // advertise egress (route_ipv4_withdraw, peer-down route_clean) runs in
     // the per-update-group egress tasks — fan one delta per group. This is the
@@ -12263,6 +12371,10 @@ pub(super) fn route_advertise_to_peers_v6(
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
 ) {
+    // Same gate as the v4 twin — see `fib_pending_hold`.
+    if fib_pending_hold(bgp, IpNet::V6(prefix), selected) {
+        return;
+    }
     // Plain (non-AddPath) members go through the generic memo path shared
     // with v4/VPN (V6Batch). v6 unicast has no batch precompute → empty memo.
     route_advertise_batch::<V6Batch>(None, prefix, selected, 0, bgp, peers, BTreeMap::new());
@@ -23467,6 +23579,131 @@ mod srv6_sid_family_tests {
         );
         let v6 = select_fib_entry_v6(&rib, Some(&t), None).expect("v6 entry");
         assert_eq!(entry_segs(&v6), vec![dt6]);
+    }
+}
+
+#[cfg(test)]
+mod suppress_fib_pending_tests {
+    use super::*;
+    use ipnet::Ipv4Net;
+    use std::str::FromStr;
+
+    fn v4(p: &str) -> IpNet {
+        IpNet::V4(Ipv4Net::from_str(p).unwrap())
+    }
+
+    fn rib(enabled: bool) -> LocalRib {
+        LocalRib {
+            suppress_fib_pending: enabled,
+            ..LocalRib::default()
+        }
+    }
+
+    /// `fib_pending_hold`'s decision, minus the `BgpTop` it would
+    /// otherwise need (56 borrowed fields to check one branch). Kept
+    /// byte-for-byte in step with the real one; the state machine is the
+    /// part under test.
+    fn hold(rib: &mut LocalRib, prefix: IpNet, is_withdraw: bool) -> bool {
+        if !rib.suppress_fib_pending || is_withdraw {
+            return false;
+        }
+        use std::collections::btree_map::Entry;
+        match rib.fib_pending.entry(prefix) {
+            Entry::Occupied(e) => match *e.get() {
+                FibPending::Confirmed => {
+                    e.remove();
+                    false
+                }
+                FibPending::Waiting(since) => {
+                    if since.elapsed() >= FIB_PENDING_TIMEOUT {
+                        e.remove();
+                        rib.fib_pending_timeouts += 1;
+                        false
+                    } else {
+                        true
+                    }
+                }
+            },
+            Entry::Vacant(e) => {
+                e.insert(FibPending::Waiting(std::time::Instant::now()));
+                true
+            }
+        }
+    }
+
+    /// Off is the default and must be exactly today's behaviour: no
+    /// hold, and nothing recorded.
+    #[test]
+    fn disabled_never_holds() {
+        let mut r = rib(false);
+        assert!(!hold(&mut r, v4("10.0.0.0/24"), false));
+        assert!(r.fib_pending.is_empty(), "must not record when disabled");
+    }
+
+    /// The first advertise after an install is held; a second attempt
+    /// before the ack stays held.
+    #[test]
+    fn enabled_holds_until_acked() {
+        let mut r = rib(true);
+        let p = v4("10.0.0.0/24");
+        assert!(hold(&mut r, p, false), "first advertise must be held");
+        assert!(hold(&mut r, p, false), "still held before the ack");
+    }
+
+    /// The bug this state machine exists for, and the reason it is two
+    /// states rather than a set.
+    ///
+    /// Releasing re-enters the same advertise path a never-held prefix
+    /// takes — deliberately. With a plain "is it pending" set, the ack
+    /// would remove the entry, the release would find nothing, record it
+    /// as newly pending and hold it AGAIN, forever. `Confirmed` is what
+    /// the release consumes on the way through.
+    #[test]
+    fn ack_survives_one_trip_through_the_advertise_path() {
+        let mut r = rib(true);
+        let p = v4("10.0.0.0/24");
+        assert!(hold(&mut r, p, false));
+
+        // The ack marks rather than removes.
+        r.fib_pending.insert(p, FibPending::Confirmed);
+        assert!(!hold(&mut r, p, false), "the release must pass the gate");
+        assert!(
+            !r.fib_pending.contains_key(&p),
+            "and must consume the entry rather than re-arm it"
+        );
+
+        // A later install of the same prefix is held again, as it should
+        // be — it is a new thing to confirm.
+        assert!(hold(&mut r, p, false), "a fresh install is held again");
+    }
+
+    /// The condition most dangerous to get backwards. Suppressing a
+    /// withdraw would prolong exactly the blackhole the feature exists
+    /// to prevent, so a withdraw passes even while the prefix is pending.
+    #[test]
+    fn withdraw_is_never_suppressed() {
+        let mut r = rib(true);
+        let p = v4("10.0.0.0/24");
+        assert!(hold(&mut r, p, false), "advertise is held");
+        assert!(
+            !hold(&mut r, p, true),
+            "a withdraw must pass even while the prefix is pending"
+        );
+    }
+
+    /// A lost ack costs latency, not permanent invisibility: once the
+    /// deadline passes the prefix is advertised and counted.
+    #[test]
+    fn expiry_releases_and_counts() {
+        let mut r = rib(true);
+        let p = v4("10.0.0.0/24");
+        r.fib_pending.insert(
+            p,
+            FibPending::Waiting(std::time::Instant::now() - FIB_PENDING_TIMEOUT),
+        );
+        assert!(!hold(&mut r, p, false), "expired prefix must advertise");
+        assert_eq!(r.fib_pending_timeouts, 1, "and must be counted");
+        assert!(!r.fib_pending.contains_key(&p));
     }
 }
 

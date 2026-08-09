@@ -76,6 +76,10 @@ module config {
     prefix zbgr;
   }
 
+  import zebra-bgp-suppress-fib-pending {
+    prefix zbsfp;
+  }
+
   import zebra-bgp-transport {
     prefix zbt;
   }

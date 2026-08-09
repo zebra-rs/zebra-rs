@@ -10,17 +10,17 @@ next person can tell "add a leaf" apart from "implement a feature".
 
 **Ranked, as of the instance-template port:**
 
-1. **`suppress-fib-pending`** — on every device, and currently *dropped*
-   rather than refused, so it degrades silently rather than loudly. The
-   offload ack already arrives; only the advertisement gate is missing.
-2. **`select-defer-time`** — the last refusal on a stock T0. Not a leaf:
-   it needs restarting-speaker deferral, which is Phase 6 work.
-3. **`maximum-prefix`** — blocks the `monitors` and `sentinels` families.
-4. Everything else is role- or feature-conditional.
+1. **`select-defer-time`** — the last refusal on a stock T0, and the only
+   instance-level gap left. Not a leaf: it needs restarting-speaker
+   deferral, which is Phase 6 work and should be tested together with
+   `suppress-fib-pending` (during a restart every prefix is briefly
+   pending).
+2. **`maximum-prefix`** — blocks the `monitors` and `sentinels` families.
+3. Everything else is role- or feature-conditional.
 
-Closed so far: BGP multipath, global graceful restart (bar
-`select-defer-time`), `call`, `set tag` / `match tag`, `add-path` on a
-neighbor-group.
+Closed so far: `suppress-fib-pending` (which closes Phase 2), BGP
+multipath, global graceful restart bar `select-defer-time`, `call`,
+`set tag` / `match tag`, `add-path` on a neighbor-group.
 
 Ranking by blast radius rather than by effort: an instance-level gap
 affects every deployment, a family gap affects the devices in that role.
@@ -148,11 +148,12 @@ config leaf, and Phase 6 (warm reboot) is where it belongs.
 
 ### Others at this level — confirmed absent
 
-* `bgp suppress-fib-pending` — the offload ack is ingested and the RIB
-  carries `offloaded`; what is missing is gating advertisement on it. On
-  **every** SONiC device, so the template drops it rather than refusing;
-  until it lands, a box advertises a prefix before the ASIC has programmed
-  it.
+* `bgp suppress-fib-pending` — **CLOSED.** The offload ack now reaches
+  BGP (`RibRx::RouteOffload`, delivered to the BGP subscriber only — one
+  ack per installed route is too many to broadcast), and a prefix is held
+  out of the Adj-RIB-Out until it arrives. Withdrawals are never
+  suppressed, and a lost ack releases on a timeout rather than
+  suppressing forever. See `bgp-suppress-fib-pending.md`.
 * `bgp confederation identifier` / `peers` — disaggregated T2 and Regional
   Hub roles.
 * `coalesce-time` — dualtor only, update-packing tuning.

@@ -203,6 +203,7 @@
 /router/bgp/sr-policy/policy/segment/mpls-label
 /router/bgp/sr-policy/policy/segment/srv6-sid
 /router/bgp/sr-policy/steering-mode
+/router/bgp/suppress-fib-pending
 /router/bgp/timer/adv-interval/ebgp
 /router/bgp/timer/adv-interval/ibgp
 /router/bgp/vrf

@@ -1,0 +1,75 @@
+module zebra-bgp-suppress-fib-pending {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-bgp-suppress-fib-pending";
+  prefix "zbsfp";
+
+  import ietf-bgp {
+    prefix bgp;
+  }
+
+  import config {
+    prefix config;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "Hold a BGP prefix out of the Adj-RIB-Out until the forwarding plane
+     acknowledges programming it.
+
+     Without it, the window between choosing a best path and the ASIC
+     programming it is a window in which we have advertised reachability
+     we cannot deliver: traffic arrives and is dropped. SONiC enables
+     this on every device.
+
+     See docs/design/bgp-suppress-fib-pending.md.";
+
+  reference
+    "FRR bgpd `bgp suppress-fib-pending`.";
+
+  grouping bgp-suppress-fib-pending {
+    description
+      "Attached to the global `router bgp` container.";
+
+    leaf suppress-fib-pending {
+      ext:help "Advertise a prefix only after the FIB confirms it";
+      type boolean;
+      description
+        "Hold a prefix out of the Adj-RIB-Out until the forwarding plane
+         acknowledges installing it.
+
+         Withdrawals are NEVER suppressed: withdrawing is how a speaker
+         stops attracting traffic, so delaying it could only prolong the
+         blackhole this feature exists to prevent.
+
+         Requires a forwarding plane that acknowledges installs — the
+         FPM tee against SONiC's fpmsyncd does. With no acknowledger
+         every prefix would fall back on the timeout, so the knob would
+         add advertisement latency and nothing else.
+
+         A prefix held longer than the timeout is advertised anyway and
+         counted. Advertising late is the safe failure (it is the
+         behaviour without this knob); never advertising would be a
+         black hole that looks like a routing bug.";
+    }
+  }
+
+  augment "/configure:set/config:router/bgp:bgp" {
+    description "Candidate-set subtree.";
+    uses bgp-suppress-fib-pending;
+  }
+
+  augment "/configure:delete/config:router/bgp:bgp" {
+    description "Delete subtree, so the leaf is path-valid for delete.";
+    uses bgp-suppress-fib-pending;
+  }
+}

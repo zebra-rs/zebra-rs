@@ -3164,6 +3164,28 @@ pub(super) fn peer_policy_ident_decode(ident: usize) -> (usize, Option<AfiSafi>)
 /// `PolicyType::TableMap`, even when the name doesn't resolve — so
 /// the FIB flips exactly once, on the definitive answer. Delete
 /// resyncs immediately (nothing will reply).
+/// `set/delete router bgp suppress-fib-pending <bool>`.
+///
+/// Turning it OFF must flush the pending set and advertise everything in
+/// it. Otherwise those prefixes stay suppressed forever by a feature
+/// that is no longer enabled — invisible, because "not advertised" looks
+/// like nothing at all from the outside.
+fn config_suppress_fib_pending(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let value = op.is_set() && args.boolean()?;
+    if bgp.local_rib.suppress_fib_pending == value {
+        return Some(());
+    }
+    bgp.local_rib.suppress_fib_pending = value;
+    if !value {
+        let held: Vec<ipnet::IpNet> = bgp.local_rib.fib_pending.keys().copied().collect();
+        bgp.local_rib.fib_pending.clear();
+        for prefix in held {
+            bgp.fib_pending_release(prefix);
+        }
+    }
+    Some(())
+}
+
 /// Push the instance-level graceful-restart state onto every peer and
 /// bounce the sessions that need to renegotiate.
 ///
@@ -5397,6 +5419,12 @@ impl Bgp {
         // Per-AFI multipath (zebra-bgp-multipath.yang): how many
         // equal-cost paths to install, and how strictly "equal-cost" is
         // judged.
+        // `suppress-fib-pending` (zebra-bgp-suppress-fib-pending.yang).
+        self.callback_add(
+            "/router/bgp/suppress-fib-pending",
+            config_suppress_fib_pending,
+        );
+
         // Instance-level graceful restart (zebra-bgp-graceful-restart.yang).
         self.callback_add("/router/bgp/graceful-restart/enabled", config_gr_enabled);
         self.callback_add(
