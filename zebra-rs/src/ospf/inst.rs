@@ -321,6 +321,20 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// *state* is per-area (`OspfArea::spf_throttle`); this holds the
     /// configured bounds fed into it each time a run is scheduled.
     pub spf_interval: SpfIntervalConfig,
+    /// True between `CommitStart` and `CommitEnd`. Hello sends that
+    /// fire mid-commit are parked in `pending_hello` and released at
+    /// `CommitEnd` — the interface-enable callbacks sort before
+    /// `/router/ospf/router-id` in path order, so a hello sent the
+    /// instant an interface comes up carries a PROVISIONAL Router-ID
+    /// (derived from whatever addresses exist at that moment). Peers
+    /// key a neighbor under that identity, their hello neighbor-lists
+    /// advertise it, and the real-identity hellos that follow trip the
+    /// §10.5 rid-change teardown — turning the immediate-first-hello
+    /// optimization into a 2-full-hello-interval adjacency delay.
+    pub in_commit: bool,
+    /// Interfaces whose Hello send was deferred by `in_commit`;
+    /// flushed (via re-sent `HelloTimer` messages) at `CommitEnd`.
+    pub pending_hello: BTreeSet<u32>,
     /// RFC 2328 §12.4 MinLSInterval, ms (`timers throttle lsa all`):
     /// the minimum spacing between two originations of the same
     /// self-LSA. Default [`OSPF_MIN_LS_INTERVAL_MS`].
@@ -1596,6 +1610,8 @@ impl Ospf<Ospfv2> {
             sr_rx,
             gr_config: super::neigh::GracefulRestartConfig::default(),
             spf_interval: SpfIntervalConfig::default(),
+            in_commit: false,
+            pending_hello: BTreeSet::new(),
             min_ls_interval_ms: OSPF_MIN_LS_INTERVAL_MS,
             min_ls_arrival_ms: OSPF_MIN_LS_ARRIVAL_MS,
             vl_ifindex_next: super::link::VL_IFINDEX_BASE,
@@ -1676,9 +1692,23 @@ impl Ospf<Ospfv2> {
         // and prune any whose `router ospf vrf <name>` block was fully
         // deleted, then apply this instance's own flex-algo / affinity
         // / SRLG staging (mirrors IS-IS).
+        if msg.op == ConfigOp::CommitStart {
+            self.in_commit = true;
+            return;
+        }
         if msg.op == ConfigOp::CommitEnd {
             self.vrf_commit_end();
             self.commit_flex_algo_tables();
+            // Release the hellos parked during the commit, now that the
+            // Router-ID (and everything else in the transaction) is
+            // final. Re-sent as messages with `in_commit` already
+            // cleared, so they take the normal send path right after
+            // this — see the `in_commit` field doc for why the
+            // enable-instant send must not happen mid-commit.
+            self.in_commit = false;
+            for index in std::mem::take(&mut self.pending_hello) {
+                let _ = self.tx.send(Message::HelloTimer(index));
+            }
             return;
         }
 
@@ -5884,6 +5914,25 @@ impl Ospf<Ospfv2> {
         for link in self.links.values_mut() {
             link.ident.router_id = router_id;
         }
+        // Tell the neighbors NOW. Any hello already sent under the old
+        // identity planted neighbor entries peers key by the OLD
+        // Router-ID; until they hear the new one, their hello
+        // neighbor-lists advertise a router that no longer exists, so
+        // no 2-Way can form — and the periodic timer costs up to a
+        // full HelloInterval per direction. Sent as messages so a
+        // mid-commit change parks in `pending_hello` and flushes at
+        // CommitEnd with the final identity.
+        if old_router_id != router_id {
+            let up: Vec<u32> = self
+                .links
+                .iter()
+                .filter(|(_, link)| link.enabled && !matches!(link.state, IfsmState::Down))
+                .map(|(index, _)| *index)
+                .collect();
+            for index in up {
+                let _ = self.tx.send(Message::HelloTimer(index));
+            }
+        }
         self.router_lsa_originate();
         // Re-originate the config-driven LSAs under the new identity —
         // the flush above withdrew them under the old Router-ID, and
@@ -6386,6 +6435,14 @@ impl Ospf<Ospfv2> {
                 }
             }
             Message::HelloTimer(index) => {
+                // Mid-commit sends are parked until CommitEnd: the
+                // Router-ID may not be final yet, and a hello sent
+                // under a provisional identity poisons every peer's
+                // neighbor table for two full hello intervals.
+                if self.in_commit {
+                    self.pending_hello.insert(index);
+                    return;
+                }
                 let now = chrono::Utc::now();
                 let chains = &self.key_chains;
                 let tracing = &self.tracing;
@@ -6818,6 +6875,8 @@ impl Ospf<Ospfv3> {
             sr_rx,
             gr_config: super::neigh::GracefulRestartConfig::default(),
             spf_interval: SpfIntervalConfig::default(),
+            in_commit: false,
+            pending_hello: BTreeSet::new(),
             min_ls_interval_ms: OSPF_MIN_LS_INTERVAL_MS,
             min_ls_arrival_ms: OSPF_MIN_LS_ARRIVAL_MS,
             vl_ifindex_next: super::link::VL_IFINDEX_BASE,
@@ -6889,9 +6948,23 @@ impl Ospf<Ospfv3> {
         // CommitEnd: fan out to per-VRF children and prune deleted
         // ones, then apply this instance's own staging (mirrors the v2
         // sibling).
+        if msg.op == ConfigOp::CommitStart {
+            self.in_commit = true;
+            return;
+        }
         if msg.op == ConfigOp::CommitEnd {
             self.vrf_commit_end();
             self.commit_flex_algo_tables();
+            // Release the hellos parked during the commit, now that the
+            // Router-ID (and everything else in the transaction) is
+            // final. Re-sent as messages with `in_commit` already
+            // cleared, so they take the normal send path right after
+            // this — see the `in_commit` field doc for why the
+            // enable-instant send must not happen mid-commit.
+            self.in_commit = false;
+            for index in std::mem::take(&mut self.pending_hello) {
+                let _ = self.tx.send(Message::HelloTimer(index));
+            }
             return;
         }
 
@@ -7149,6 +7222,25 @@ impl Ospf<Ospfv3> {
         self.router_id = router_id;
         for link in self.links.values_mut() {
             link.ident.router_id = router_id;
+        }
+        // Tell the neighbors NOW. Any hello already sent under the old
+        // identity planted neighbor entries peers key by the OLD
+        // Router-ID; until they hear the new one, their hello
+        // neighbor-lists advertise a router that no longer exists, so
+        // no 2-Way can form — and the periodic timer costs up to a
+        // full HelloInterval per direction. Sent as messages so a
+        // mid-commit change parks in `pending_hello` and flushes at
+        // CommitEnd with the final identity.
+        if old_router_id != router_id {
+            let up: Vec<u32> = self
+                .links
+                .iter()
+                .filter(|(_, link)| link.enabled && !matches!(link.state, IfsmState::Down))
+                .map(|(index, _)| *index)
+                .collect();
+            for index in up {
+                let _ = self.tx.send(Message::HelloTimer(index));
+            }
         }
         self.router_lsa_originate();
         // See the v2 sibling: re-originate the config-driven LSAs
@@ -10054,6 +10146,14 @@ impl Ospf<Ospfv3> {
                 }
             }
             Message::HelloTimer(index) => {
+                // Mid-commit sends are parked until CommitEnd: the
+                // Router-ID may not be final yet, and a hello sent
+                // under a provisional identity poisons every peer's
+                // neighbor table for two full hello intervals.
+                if self.in_commit {
+                    self.pending_hello.insert(index);
+                    return;
+                }
                 let now = chrono::Utc::now();
                 let chains = &self.key_chains;
                 let tracing = &self.tracing;
