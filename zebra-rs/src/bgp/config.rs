@@ -7964,6 +7964,48 @@ mod neighbor_group_wiring_tests {
         assert!(!member_ttl_security(&bgp));
     }
 
+    /// A group `add-path` opinion for `mup` must land on BOTH MUP
+    /// families, exactly as the `enabled` knob fans out — storing under
+    /// the raw key alone left it on IPv4-MUP only, so the group's
+    /// opinion never reached the IPv6-MUP capability.
+    #[tokio::test]
+    async fn group_add_path_mup_fans_out_to_both_afis() {
+        use super::super::neighbor_group::config_neighbor_group_afi_safi_add_path;
+        use bgp_packet::{Afi, Safi};
+
+        let mut bgp = fresh_bgp();
+        config_neighbor_group_afi_safi_add_path(
+            &mut bgp,
+            arg_words(&["G", "mup", "send-receive"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+
+        let group = bgp.neighbor_groups.get("G").unwrap();
+        for afi in [Afi::Ip, Afi::Ip6] {
+            let entry = group.afi_safi.get(&AfiSafi::new(afi, Safi::Mup));
+            assert!(
+                entry.is_some_and(|e| e.add_path.is_some()),
+                "{afi:?}-MUP must carry the group's add-path opinion"
+            );
+        }
+
+        config_neighbor_group_afi_safi_add_path(
+            &mut bgp,
+            arg_words(&["G", "mup", "send-receive"]),
+            ConfigOp::Delete,
+        )
+        .unwrap();
+        let group = bgp.neighbor_groups.get("G").unwrap();
+        for afi in [Afi::Ip, Afi::Ip6] {
+            let entry = group.afi_safi.get(&AfiSafi::new(afi, Safi::Mup));
+            assert!(
+                entry.is_none_or(|e| e.add_path.is_none()),
+                "{afi:?}-MUP delete must clear both"
+            );
+        }
+    }
+
     /// Per-family next-hop-self inherits through the group's afi-safi
     /// entry with explicit-wins semantics.
     #[tokio::test]
