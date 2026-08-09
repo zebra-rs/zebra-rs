@@ -7281,7 +7281,6 @@ pub fn route_labelv4_update(
             rib.attr = bgp.shard.intern(decision.attr);
             rib.weight = decision.weight;
             rib.tag = decision.tag;
-            rib.tag = decision.tag;
             nht_track_received(bgp, &mut rib, dep.clone());
             // Allocate a per-prefix local label so re-advertising with
             // next-hop-self forwards via a swap ILM. `None`
@@ -7405,7 +7404,6 @@ pub fn route_labelv6_update(
         Some(decision) => {
             rib.attr = bgp.shard.intern(decision.attr);
             rib.weight = decision.weight;
-            rib.tag = decision.tag;
             rib.tag = decision.tag;
             nht_track_received(bgp, &mut rib, dep.clone());
             rib.local_label = bgp
@@ -13836,6 +13834,17 @@ fn entry_matches_evpn(
     bgp_attr: &BgpAttr,
     weight: u32,
 ) -> bool {
+    // EVPN routes carry no tag (see policy_list_apply_evpn), so a
+    // `match tag` clause compares against 0: `match tag 0` matches,
+    // anything else matches nothing. Silently skipping the clause —
+    // the previous behaviour — made a tag-guarded entry match EVERY
+    // EVPN route, turning e.g. `match tag 202 action deny` into a
+    // table-wide deny.
+    if let Some(want) = entry.match_tag
+        && want != 0
+    {
+        return false;
+    }
     if let Some(community_set) = &entry.community_set
         && !community_set.matches(bgp_attr)
     {
@@ -20360,6 +20369,27 @@ mod policy_apply_tests {
         assert!(
             evpn_apply(&list, &evpn_multicast(), attr_no_rt).is_none(),
             "absent RT-EC yields no VNI, so the match fails"
+        );
+    }
+
+    /// EVPN routes are untagged, so `match tag N` (N != 0) must match
+    /// NOTHING — not everything. Silently skipping the clause made a
+    /// reused tag-guarded entry (`match tag 202 action deny`) deny the
+    /// entire EVPN table.
+    #[test]
+    fn match_tag_on_evpn_matches_only_tag_zero() {
+        let mut tagged = PolicyList::default();
+        tagged.entry(10).match_tag = Some(202);
+        assert!(
+            evpn_apply(&tagged, &evpn_mac(100), attr_with("1", None, None)).is_none(),
+            "a nonzero tag guard must not match an untagged EVPN route"
+        );
+
+        let mut zero = PolicyList::default();
+        zero.entry(10).match_tag = Some(0);
+        assert!(
+            evpn_apply(&zero, &evpn_mac(100), attr_with("1", None, None)).is_some(),
+            "tag 0 is what an untagged route carries"
         );
     }
 
