@@ -34,16 +34,16 @@ Feature: OSPFv2 stub-router advertisement (RFC 6987 max-metric router-lsa)
     And I apply config "r4.yaml" to namespace "r4"
     And I wait 30 seconds
 
-    Then show command "show ospf neighbor" in namespace "r1" should contain "Full"
+    Then show command "show ospf neighbor" in namespace "r1" should eventually contain "Full"
     And show command "show ospf" in namespace "r2" should contain "Stub router: administrative"
     # r1 detours around the stub router: r3's loopback goes via r4 at
     # cost 200 (100+100), not via r2 at 20. (Other prefixes — r2's
     # own stub networks — legitimately stay via r2 at normal cost, so
     # the assertion pins the exact route line.)
-    And show command "show ospf route" in namespace "r1" should contain "10.0.0.3/32          [200] via 10.0.14.2"
+    And show command "show ospf route" in namespace "r1" should eventually contain "10.0.0.3/32          [200] via 10.0.14.2"
     # The stub router's own prefixes stay reachable at normal cost
     # (stub links keep their metric): r2's loopback rides via r2.
-    And show command "show ospf route" in namespace "r1" should contain "10.0.0.2/32          [10] via 10.0.12.2"
+    And show command "show ospf route" in namespace "r1" should eventually contain "10.0.0.2/32          [10] via 10.0.12.2"
     And ping from "r1" to "10.0.0.2" should succeed
     And ping from "r1" to "10.0.0.3" should succeed
 

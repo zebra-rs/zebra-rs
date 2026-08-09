@@ -416,6 +416,38 @@ pub fn ospf_hello_recv(
         return;
     }
 
+    // RFC 2328 §10.5 ("Receiving Hello Packets"): a Hello from a known
+    // source address but carrying a *different* Router-ID means the
+    // neighbour restarted under a new identity — an operator changed
+    // its `router-id`, or our first exchange caught the peer mid-commit
+    // under a provisional identity (interface-enable callbacks sort
+    // before `/router/ospf/router-id`). OSPFv2 keys neighbours by
+    // source address (unlike v3, which keys by Router-ID), so the stale
+    // entry must go — but HOW matters:
+    //
+    //  * Down/Init: the entry holds nothing but its own timers — drop
+    //    it inline and FALL THROUGH, so this very Hello re-learns the
+    //    neighbour under the new identity. The old teardown-and-drop
+    //    path spent a full HelloInterval waiting for the next periodic
+    //    Hello, which is exactly the delay the peer's post-rid-change
+    //    immediate hello exists to close.
+    //  * TwoWay and beyond: the neighbour is wired into DR election /
+    //    DD / LSA machinery, so route the teardown through the same
+    //    NFSM path the dead timer uses (full bookkeeping) and let the
+    //    next Hello re-learn it cleanly.
+    if let Some(existing) = oi.nbrs.get(src)
+        && existing.ident.router_id != packet.router_id
+    {
+        if matches!(existing.state, NfsmState::Down | NfsmState::Init) {
+            oi.nbrs.remove(src);
+        } else {
+            let _ = oi
+                .tx
+                .send(Message::Nfsm(oi.index, *src, NfsmEvent::InactivityTimer));
+            return;
+        }
+    }
+
     let mut init = false;
     let dead_interval = oi.dead_interval() as u64;
     let nbr = oi.nbrs.entry(*src).or_insert_with(|| {
@@ -429,25 +461,6 @@ pub fn ospf_hello_recv(
             oi.ptx.clone(),
         )
     });
-
-    // RFC 2328 §10.5 ("Receiving Hello Packets"): a Hello from a known
-    // source address but carrying a *different* Router-ID means the
-    // neighbour restarted under a new identity — typically an operator
-    // changed its `router-id`. OSPFv2 keys neighbours by source address
-    // (unlike v3, which keys by Router-ID), so without this the stale
-    // entry would keep the OLD Router-ID forever: our Router-LSA would
-    // point at a node that no longer originates one, the peer's new
-    // identity would never enter SPF, and `show ospf neighbor` would
-    // report a Router-ID that no longer exists. Tear the stale neighbour
-    // down through the same path as the dead-timer / `clear ospf
-    // neighbor`; the next Hello re-learns it cleanly under the new
-    // Router-ID.
-    if !init && nbr.ident.router_id != packet.router_id {
-        let _ = oi
-            .tx
-            .send(Message::Nfsm(oi.index, *src, NfsmEvent::InactivityTimer));
-        return;
-    }
 
     oi.tx
         .send(Message::Nfsm(oi.index, *src, NfsmEvent::HelloReceived))
