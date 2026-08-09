@@ -1925,25 +1925,41 @@ impl<P: Prefix + Copy> LocalRibTable<P> {
         let cfg = self.2;
         if cfg.max_paths > 1 {
             let cands = self.0.get_mut(&prefix).expect("prefix checked above");
+            // Walk the eligible candidates in tie-break order (BGP
+            // Identifier, then peer slot, then AddPath path-id) rather
+            // than arrival order. `update` re-pushes a re-advertised
+            // route at the tail of the candidate vec, so arrival order
+            // would let an unrelated refresh reshuffle the ECMP legs —
+            // and, when more paths qualify than `max_paths` admits,
+            // change which of them are installed at all.
+            let mut eligible: Vec<usize> = (0..cands.len())
+                .filter(|&i| {
+                    !cands[i].best_path && Self::multipath_eligible(&cands[i], &best, cfg.relax)
+                })
+                .collect();
+            eligible.sort_by_key(|&i| {
+                (
+                    Self::bgp_identifier(&cands[i]),
+                    cands[i].ident,
+                    cands[i].remote_id,
+                )
+            });
             // Deduplicate by BGP next-hop: two peers can advertise the
             // same next-hop (routine behind a route reflector), and
             // installing it twice would double its share of the ECMP
             // hash.
             let mut seen: Vec<Option<std::net::IpAddr>> = vec![super::nht::nht_target(&best.attr)];
-            for cand in cands.iter_mut() {
+            for index in eligible {
                 if selected.len() as u32 >= cfg.max_paths {
                     break;
                 }
-                if cand.best_path || !Self::multipath_eligible(cand, &best, cfg.relax) {
-                    continue;
-                }
-                let nh = super::nht::nht_target(&cand.attr);
+                let nh = super::nht::nht_target(&cands[index].attr);
                 if seen.contains(&nh) {
                     continue;
                 }
                 seen.push(nh);
-                cand.multipath = true;
-                selected.push(cand.clone());
+                cands[index].multipath = true;
+                selected.push(cands[index].clone());
             }
         }
 
@@ -23129,7 +23145,7 @@ mod multipath_tests {
     use super::*;
     use bgp_packet::{BgpNexthop, LocalPref, Med};
     use ipnet::Ipv4Net;
-    use std::net::{Ipv4Addr, IpAddr};
+    use std::net::{IpAddr, Ipv4Addr};
     use std::str::FromStr;
 
     /// An eBGP path from `as_path`, next-hop `nh`, at peer slot `ident`.
@@ -23185,7 +23201,10 @@ mod multipath_tests {
         );
         assert_eq!(set.len(), 2, "two equal-cost paths must both install");
         assert!(set[0].best_path, "the winner keeps best_path");
-        assert!(!set[0].multipath, "the winner is not also flagged multipath");
+        assert!(
+            !set[0].multipath,
+            "the winner is not also flagged multipath"
+        );
         assert!(set[1].multipath, "the other member is flagged multipath");
         assert!(!set[1].best_path);
     }
@@ -23280,11 +23299,73 @@ mod multipath_tests {
         let mut t = table(2, false);
         let set = select(&mut t, rows.clone());
         assert_eq!(set.len(), 2, "cap counts the bestpath");
-        assert!(set.iter().any(|r| r.best_path), "bestpath is always a member");
+        assert!(
+            set.iter().any(|r| r.best_path),
+            "bestpath is always a member"
+        );
 
         // The default reproduces today's single-path behaviour exactly.
         let mut t = table(1, false);
         assert_eq!(select(&mut t, rows).len(), 1);
+    }
+
+    /// The installed set must not depend on the order updates arrived
+    /// in. With three eligible paths and a cap of two, every arrival
+    /// order must install the same two members in the same order —
+    /// the tie-break order (BGP Identifier), not the arrival order.
+    #[test]
+    fn installed_set_is_independent_of_arrival_order() {
+        let rows = vec![
+            ebgp_row(1, "65001", [192, 0, 2, 1]),
+            ebgp_row(2, "65001", [192, 0, 2, 2]),
+            ebgp_row(3, "65001", [192, 0, 2, 3]),
+        ];
+        let orders: [[usize; 3]; 6] = [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ];
+        for order in orders {
+            let mut t = table(2, false);
+            let set = select(&mut t, order.iter().map(|&i| rows[i].clone()).collect());
+            let idents: Vec<usize> = set.iter().map(|r| r.ident).collect();
+            assert_eq!(
+                idents,
+                vec![1, 2],
+                "arrival order {order:?} changed the installed set"
+            );
+        }
+    }
+
+    /// A re-advertisement of a path already in the set must be a no-op
+    /// on the set. `update` re-pushes the refreshed route at the tail
+    /// of the candidate vec, so walking arrival order would swap the
+    /// refreshed leg out for the next candidate — moving live flows
+    /// between links on an update that changed nothing.
+    #[test]
+    fn readvertisement_does_not_reshuffle_the_set() {
+        let mut t = table(2, false);
+        let set = select(
+            &mut t,
+            vec![
+                ebgp_row(1, "65001", [192, 0, 2, 1]),
+                ebgp_row(2, "65001", [192, 0, 2, 2]),
+                ebgp_row(3, "65001", [192, 0, 2, 3]),
+            ],
+        );
+        let before: Vec<usize> = set.iter().map(|r| r.ident).collect();
+        assert_eq!(before, vec![1, 2]);
+
+        t.update(prefix(), ebgp_row(2, "65001", [192, 0, 2, 2]));
+        let after: Vec<usize> = t
+            .select_best_path(prefix())
+            .iter()
+            .map(|r| r.ident)
+            .collect();
+        assert_eq!(after, before, "a refresh of a member reshuffled the set");
     }
 
     /// Strict (the default) requires the same neighbouring AS; relax
@@ -23321,8 +23402,14 @@ mod multipath_tests {
     #[test]
     fn multipath_eligible_agrees_with_is_better() {
         let cases = vec![
-            (ebgp_row(1, "65001", [192, 0, 2, 1]), ebgp_row(2, "65001", [192, 0, 2, 2])),
-            (ebgp_row(3, "65001 65009", [192, 0, 2, 3]), ebgp_row(4, "65001 65009", [192, 0, 2, 4])),
+            (
+                ebgp_row(1, "65001", [192, 0, 2, 1]),
+                ebgp_row(2, "65001", [192, 0, 2, 2]),
+            ),
+            (
+                ebgp_row(3, "65001 65009", [192, 0, 2, 3]),
+                ebgp_row(4, "65001 65009", [192, 0, 2, 4]),
+            ),
         ];
         for (a, b) in cases {
             assert!(
@@ -23334,7 +23421,10 @@ mod multipath_tests {
                 assert!(
                     matches!(
                         reason,
-                        Reason::RouterId | Reason::PeerAddress | Reason::PathId | Reason::NotSelected
+                        Reason::RouterId
+                            | Reason::PeerAddress
+                            | Reason::PathId
+                            | Reason::NotSelected
                     ),
                     "equal-cost paths may only be separated by a trailing \
                      tie-break, got {reason:?}"

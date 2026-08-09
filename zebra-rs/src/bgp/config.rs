@@ -3167,10 +3167,7 @@ pub(super) fn peer_policy_ident_decode(ident: usize) -> (usize, Option<AfiSafi>)
 /// The table for a unicast family's multipath policy, or `None` for a
 /// family that has no multipath (VPN / EVPN / flowspec resolve their own
 /// transport and install through other paths).
-fn multipath_cfg_mut(
-    bgp: &mut Bgp,
-    afi_safi: AfiSafi,
-) -> Option<&mut super::route::MultipathCfg> {
+fn multipath_cfg_mut(bgp: &mut Bgp, afi_safi: AfiSafi) -> Option<&mut super::route::MultipathCfg> {
     use bgp_packet::{Afi, Safi};
     match (afi_safi.afi, afi_safi.safi) {
         (Afi::Ip, Safi::Unicast) => Some(&mut bgp.shard.v4.2),
