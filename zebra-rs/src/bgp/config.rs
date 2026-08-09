@@ -3162,14 +3162,6 @@ pub(super) fn peer_policy_ident_decode(ident: usize) -> (usize, Option<AfiSafi>)
     (peer_idx, afi_safi)
 }
 
-/// `router bgp afi-safi <af> table-map <policy>`
-/// (zebra-bgp-table-map.yang). Stores the binding on
-/// `local_rib.table_map`, (un)registers the policy watch via
-/// [`policy_attach_msgs`], and reconciles the FIB. Set defers the
-/// resync to the `PolicyRx` reply — always sent for
-/// `PolicyType::TableMap`, even when the name doesn't resolve — so
-/// the FIB flips exactly once, on the definitive answer. Delete
-/// resyncs immediately (nothing will reply).
 /// `set/delete router bgp suppress-fib-pending <bool>`.
 ///
 /// Turning it OFF must flush the pending set and advertise everything in
@@ -3333,6 +3325,14 @@ fn config_multipath_relax(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option
     Some(())
 }
 
+/// `router bgp afi-safi <af> table-map <policy>`
+/// (zebra-bgp-table-map.yang). Stores the binding on
+/// `local_rib.table_map`, (un)registers the policy watch via
+/// [`policy_attach_msgs`], and reconciles the FIB. Set defers the
+/// resync to the `PolicyRx` reply — always sent for
+/// `PolicyType::TableMap`, even when the name doesn't resolve — so
+/// the FIB flips exactly once, on the definitive answer. Delete
+/// resyncs immediately (nothing will reply).
 pub(super) fn config_table_map(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let afi_safi: AfiSafi = args.afi_safi()?;
     if !table_map_afi_valid(&afi_safi) {

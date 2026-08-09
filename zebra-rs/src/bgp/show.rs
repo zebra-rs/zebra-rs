@@ -351,6 +351,19 @@ fn write_summary_section<V: BgpShowView>(
     )?;
     writeln!(buf, "RIB entries {}", rib_entries)?;
     writeln!(buf, "Peers {}", peers.len())?;
+    // Instance-wide, but rendered per section like FRR renders its
+    // instance header lines. The timeout counter is the operator's
+    // signal that the forwarding plane is not acknowledging installs
+    // in time — a number climbing here means every affected prefix
+    // was advertised a full hold interval late.
+    if bgp.local_rib().suppress_fib_pending {
+        writeln!(
+            buf,
+            "FIB-pending suppression: enabled, {} held, {} released by timeout",
+            bgp.local_rib().fib_pending.len(),
+            bgp.local_rib().fib_pending_timeouts
+        )?;
+    }
     writeln!(buf)?;
 
     if peers.is_empty() {
@@ -495,7 +508,30 @@ fn srv6_behavior_name(behavior: u16) -> String {
 struct BgpSummaryJson {
     router_id: String,
     local_as: u32,
+    /// Present only while `suppress-fib-pending` is enabled: how many
+    /// prefixes are currently held awaiting a forwarding-plane ack,
+    /// and how many were ever released by the timeout instead of an
+    /// ack — the counter that makes a lagging ASIC visible.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    suppress_fib_pending: Option<BgpFibPendingJson>,
     afi_safis: Vec<BgpAfiSafiSummaryJson>,
+}
+
+#[derive(Serialize)]
+struct BgpFibPendingJson {
+    held: usize,
+    timeout_releases: u64,
+}
+
+/// The instance's `suppress-fib-pending` state for the summary JSON,
+/// `None` while the feature is off.
+fn summary_fib_pending<V: BgpShowView>(bgp: &V) -> Option<BgpFibPendingJson> {
+    bgp.local_rib()
+        .suppress_fib_pending
+        .then(|| BgpFibPendingJson {
+            held: bgp.local_rib().fib_pending.len(),
+            timeout_releases: bgp.local_rib().fib_pending_timeouts,
+        })
 }
 
 /// One AFI/SAFI section of `show bgp summary --json`, mirroring the
@@ -2401,6 +2437,7 @@ fn summary_all<V: BgpShowView>(
         let summary = BgpSummaryJson {
             router_id: summary_router_id(bgp),
             local_as: bgp.asn(),
+            suppress_fib_pending: summary_fib_pending(bgp),
             afi_safis: configured_afi_safis(bgp)
                 .into_iter()
                 .map(|afi_safi| summary_section_json(bgp, afi_safi, counts))
@@ -2464,6 +2501,7 @@ fn summary_one<V: BgpShowView>(
         let summary = BgpSummaryJson {
             router_id: summary_router_id(bgp),
             local_as: bgp.asn(),
+            suppress_fib_pending: summary_fib_pending(bgp),
             afi_safis: vec![summary_section_json(bgp, afi_safi, counts)],
         };
         return Ok(summary_json_render(&summary));
@@ -2959,6 +2997,7 @@ fn show_bgp_mup_summary(
         let summary = BgpSummaryJson {
             router_id: summary_router_id(bgp),
             local_as: bgp.asn(),
+            suppress_fib_pending: summary_fib_pending(bgp),
             afi_safis: families
                 .iter()
                 .map(|af| summary_section_json(bgp, *af, None))
