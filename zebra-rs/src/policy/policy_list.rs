@@ -414,12 +414,23 @@ pub fn resolve_calls(config: &mut BTreeMap<String, PolicyList>) -> Vec<String> {
                         stack.push((next.clone(), 0));
                     }
                     Colour::Grey => {
-                        // Back edge: everything currently grey on the
-                        // path from `next` onward is on a cycle. Marking
-                        // both endpoints is enough for the fail-closed
-                        // behaviour and keeps this linear.
+                        // Back edge: every node on the current path from
+                        // `next` through `node` is a member of the
+                        // cycle, and ALL of them must be marked. Marking
+                        // only the two endpoints — the previous
+                        // behaviour — left the intermediate members of a
+                        // 4+-policy cycle resolving their calls against
+                        // a chain that denies at runtime through the
+                        // broken link, while `show` reported
+                        // `call_resolved: true` for them. The stack IS
+                        // the grey path (a frame is pushed on entry and
+                        // popped only at finish), so the segment from
+                        // `next` onward is exactly the cycle.
+                        let from = stack.iter().position(|(n, _)| n == next).unwrap_or(0);
+                        for (member, _) in &stack[from..] {
+                            on_cycle.insert(member.clone());
+                        }
                         on_cycle.insert(next.clone());
-                        on_cycle.insert(node.clone());
                     }
                     Colour::Black => {}
                 }
@@ -2101,6 +2112,53 @@ mod call_tests {
         assert!(unresolved.contains(&"B".to_string()));
         assert!(call_policy_of(&cfg, "A").is_none());
         assert!(call_policy_of(&cfg, "B").is_none());
+    }
+
+    /// Every member of a longer cycle must be rejected, not just the
+    /// two endpoints of the back edge. With only {A, D} marked in
+    /// A→B→C→D→A, B and C resolved their calls against a chain that
+    /// denies at runtime through the broken D→A link while reporting
+    /// `call_resolved: true`.
+    #[test]
+    fn every_member_of_a_long_cycle_is_rejected() {
+        let mut cfg = config(&[
+            ("A", Some("B")),
+            ("B", Some("C")),
+            ("C", Some("D")),
+            ("D", Some("A")),
+        ]);
+        let unresolved = resolve_calls(&mut cfg);
+        for name in ["A", "B", "C", "D"] {
+            assert!(
+                unresolved.contains(&name.to_string()),
+                "{name} must report unresolved"
+            );
+            assert!(
+                call_policy_of(&cfg, name).is_none(),
+                "{name}'s call must stay None so the entry denies"
+            );
+        }
+    }
+
+    /// The wider marking must not swallow the rest of the graph: a
+    /// caller INTO the cycle is fail-closed too (its call can never
+    /// work), but an unrelated chain resolves untouched.
+    #[test]
+    fn cycle_marking_does_not_leak_to_unrelated_policies() {
+        let mut cfg = config(&[
+            ("X", Some("A")), // calls into the cycle: denied
+            ("A", Some("B")),
+            ("B", Some("A")), // the cycle {A, B}
+            ("Y", Some("Z")), // unrelated chain: resolves
+            ("Z", None),
+        ]);
+        let unresolved = resolve_calls(&mut cfg);
+        for name in ["A", "B", "X"] {
+            assert!(unresolved.contains(&name.to_string()), "{name}");
+            assert!(call_policy_of(&cfg, name).is_none(), "{name}");
+        }
+        assert!(!unresolved.contains(&"Y".to_string()));
+        assert!(call_policy_of(&cfg, "Y").is_some(), "Y→Z must resolve");
     }
 
     /// The property the design exists to guarantee: chain length is not
