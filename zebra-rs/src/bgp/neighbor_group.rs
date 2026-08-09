@@ -437,23 +437,36 @@ pub fn config_neighbor_group_afi_safi_add_path(
     let name = args.string()?;
     let family: AfiSafi = args.afi_safi()?;
     let group = bgp.neighbor_groups.entry(name.clone()).or_default();
+    // `mup` fans out to both MUP AFIs, exactly as the `enabled` knob
+    // above does — storing under the raw key alone left the opinion on
+    // IPv4-MUP only, so a group's `add-path` never reached the
+    // IPv6-MUP capability.
+    let families = mp_family_expand(family);
     match op {
         ConfigOp::Set => {
             let mode: AddPathSendReceive = args.string()?.parse().ok()?;
-            group.afi_safi.entry(family).or_default().add_path = Some(mode);
+            for fam in &families {
+                group.afi_safi.entry(*fam).or_default().add_path = Some(mode);
+            }
         }
         ConfigOp::Delete => {
-            if let Some(entry) = group.afi_safi.get_mut(&family) {
-                entry.add_path = None;
+            for fam in &families {
+                if let Some(entry) = group.afi_safi.get_mut(fam) {
+                    entry.add_path = None;
+                }
             }
         }
         _ => return Some(()),
     }
     sweep_members(bgp, &name, |groups, peer| {
-        let before = peer.config.addpath.get(&family).map(|v| v.send_receive);
-        apply_resolved_add_path(groups, &mut peer.config, family);
-        let after = peer.config.addpath.get(&family).map(|v| v.send_receive);
-        before != after && matches!(peer.state, State::Established)
+        let mut changed = false;
+        for fam in &families {
+            let before = peer.config.addpath.get(fam).map(|v| v.send_receive);
+            apply_resolved_add_path(groups, &mut peer.config, *fam);
+            let after = peer.config.addpath.get(fam).map(|v| v.send_receive);
+            changed |= before != after;
+        }
+        changed && matches!(peer.state, State::Established)
     });
     Some(())
 }

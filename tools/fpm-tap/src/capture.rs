@@ -142,8 +142,29 @@ pub fn read(path: &Path) -> Result<Vec<Record>> {
         let dir = Dir::from_u8(hdr[0])?;
         let usec = u64::from_le_bytes(hdr[4..12].try_into().unwrap());
         let len = u32::from_le_bytes(hdr[12..16].try_into().unwrap()) as usize;
-        let mut bytes = vec![0u8; len];
-        if r.read_exact(&mut bytes).is_err() {
+        // A record cannot legitimately exceed the FPM frame limit; a
+        // larger value is a corrupt or hostile length field, and
+        // allocating whatever a mangled u32 asks for (up to 4 GiB)
+        // turns one flipped bit into an OOM.
+        if len > crate::frame::FPM_MAX_MSG_LEN {
+            bail!(
+                "corrupt capture: record claims {len} bytes (FPM max is {}); \
+                 {} complete records read before it",
+                crate::frame::FPM_MAX_MSG_LEN,
+                records.len()
+            );
+        }
+        // `take + read_to_end` rather than `read_exact` into a
+        // pre-zeroed buffer: on a truncated tail this reports how many
+        // bytes actually arrived — read_exact left the buffer at its
+        // full pre-allocated size, so the diagnostic always claimed
+        // "len of len bytes".
+        let mut bytes = Vec::with_capacity(len);
+        (&mut r)
+            .take(len as u64)
+            .read_to_end(&mut bytes)
+            .context("reading capture record payload")?;
+        if bytes.len() < len {
             eprintln!(
                 "warning: capture ends with a truncated record ({} of {len} bytes); \
                  keeping the {} complete records before it",
@@ -160,6 +181,52 @@ pub fn read(path: &Path) -> Result<Vec<Record>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A corrupt length field must fail loudly, not allocate what a
+    /// mangled u32 asks for.
+    #[test]
+    fn oversized_length_field_bails_instead_of_allocating() {
+        let dir = std::env::temp_dir().join(format!("fpm-tap-test-len-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bad-len.fpm");
+
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&MAGIC);
+        let mut hdr = [0u8; REC_HDR_LEN];
+        hdr[0] = 0; // dir
+        hdr[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
+        raw.extend_from_slice(&hdr);
+        std::fs::write(&path, raw).unwrap();
+
+        let err = match read(&path) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a corrupt length field must not parse"),
+        };
+        assert!(err.contains("corrupt capture"), "got: {err}");
+    }
+
+    /// A rig killed mid-write leaves a truncated tail; the complete
+    /// records before it survive.
+    #[test]
+    fn truncated_tail_keeps_complete_records() {
+        let dir = std::env::temp_dir().join(format!("fpm-tap-test-trunc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("trunc.fpm");
+
+        let mut w = Writer::create(&path).unwrap();
+        w.write(Dir::ToFpm, 0, &[1, 2, 3, 4]).unwrap();
+        w.write(Dir::ToFpm, 1, &[5, 6, 7, 8]).unwrap();
+        w.flush().unwrap();
+        drop(w);
+
+        // Chop the last two payload bytes off the second record.
+        let full = std::fs::read(&path).unwrap();
+        std::fs::write(&path, &full[..full.len() - 2]).unwrap();
+
+        let recs = read(&path).unwrap();
+        assert_eq!(recs.len(), 1, "only the complete record survives");
+        assert_eq!(recs[0].bytes, vec![1, 2, 3, 4]);
+    }
 
     #[test]
     fn round_trips_through_a_file() {

@@ -622,9 +622,13 @@ impl FibHandle {
         }
     }
 
-    /// Re-tee one already-installed route (the enable-after-routes walk).
-    /// A no-op when the tee is off.
-    pub async fn fpm_route_resync(&self, prefix: ipnet::IpNet, entry: &RibEntry, table_id: u32) {
+    /// Tee-only add for a route the kernel owns: a connected route
+    /// needs no netlink install (the kernel creates the prefix route
+    /// with the address), but SONiC's APPL_DB still needs it — FRR
+    /// sends subnet routes over FPM, and without them the ASIC cannot
+    /// deliver to directly-attached hosts. A no-op when the tee is off
+    /// or the entry is not tee-able (`fpm_prepare` gates).
+    pub async fn fpm_tee_add(&self, prefix: ipnet::IpNet, entry: &RibEntry, table_id: u32) {
         self.fpm_tee(RouteOp::Add, prefix, entry, table_id).await;
     }
 
@@ -636,11 +640,33 @@ impl FibHandle {
     /// the cradle tee. Kernel-learned routes stay out; they would echo
     /// back what SONiC itself installed.
     async fn fpm_tee(&self, op: RouteOp, prefix: ipnet::IpNet, entry: &RibEntry, table_id: u32) {
-        let Some(fpm) = &self.fpm else {
+        if self.fpm.is_none() {
+            return;
+        }
+        let Some((vrf_ifindex, msg)) = self.fpm_prepare(op, prefix, entry, table_id) else {
             return;
         };
+        let fpm = self.fpm.as_ref().expect("checked above");
+        match op {
+            RouteOp::Add => fpm.route_add(prefix, vrf_ifindex, msg).await,
+            RouteOp::Del => fpm.route_del(&prefix, vrf_ifindex, msg).await,
+        }
+    }
+
+    /// The gating + encoding half of [`fpm_tee`](Self::fpm_tee),
+    /// synchronous and side-effect free, so the enable-time reseed walk
+    /// can prepare its whole batch inline and hand the sends to a
+    /// spawned task instead of stalling the RIB event loop on one
+    /// mirror-lock round trip per route.
+    pub fn fpm_prepare(
+        &self,
+        op: RouteOp,
+        prefix: ipnet::IpNet,
+        entry: &RibEntry,
+        table_id: u32,
+    ) -> Option<(u32, Vec<u8>)> {
         if !entry.is_protocol() && !matches!(entry.rtype, RibType::Connected) {
-            return;
+            return None;
         }
 
         // FPM's table field is a VRF *device ifindex*, not a kernel
@@ -662,18 +688,13 @@ impl FibHandle {
                     tracing::debug!(
                         "fib: FPM tee skipping {prefix} in table {other} (no VRF ifindex known)"
                     );
-                    return;
+                    return None;
                 }
             },
         };
 
-        let Some(msg) = encode_route(op, &prefix, entry, vrf_ifindex) else {
-            return;
-        };
-        match op {
-            RouteOp::Add => fpm.route_add(prefix, vrf_ifindex, msg).await,
-            RouteOp::Del => fpm.route_del(&prefix, vrf_ifindex, msg).await,
-        }
+        let msg = encode_route(op, &prefix, entry, vrf_ifindex)?;
+        Some((vrf_ifindex, msg))
     }
 
     /// Push the RFC 3443 MPLS TTL model (`set mpls ttl propagate`) into the

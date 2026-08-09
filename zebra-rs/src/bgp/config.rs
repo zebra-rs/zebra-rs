@@ -3162,14 +3162,6 @@ pub(super) fn peer_policy_ident_decode(ident: usize) -> (usize, Option<AfiSafi>)
     (peer_idx, afi_safi)
 }
 
-/// `router bgp afi-safi <af> table-map <policy>`
-/// (zebra-bgp-table-map.yang). Stores the binding on
-/// `local_rib.table_map`, (un)registers the policy watch via
-/// [`policy_attach_msgs`], and reconciles the FIB. Set defers the
-/// resync to the `PolicyRx` reply — always sent for
-/// `PolicyType::TableMap`, even when the name doesn't resolve — so
-/// the FIB flips exactly once, on the definitive answer. Delete
-/// resyncs immediately (nothing will reply).
 /// `set/delete router bgp suppress-fib-pending <bool>`.
 ///
 /// Turning it OFF must flush the pending set and advertise everything in
@@ -3333,6 +3325,14 @@ fn config_multipath_relax(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option
     Some(())
 }
 
+/// `router bgp afi-safi <af> table-map <policy>`
+/// (zebra-bgp-table-map.yang). Stores the binding on
+/// `local_rib.table_map`, (un)registers the policy watch via
+/// [`policy_attach_msgs`], and reconciles the FIB. Set defers the
+/// resync to the `PolicyRx` reply — always sent for
+/// `PolicyType::TableMap`, even when the name doesn't resolve — so
+/// the FIB flips exactly once, on the definitive answer. Delete
+/// resyncs immediately (nothing will reply).
 pub(super) fn config_table_map(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let afi_safi: AfiSafi = args.afi_safi()?;
     if !table_map_afi_valid(&afi_safi) {
@@ -7962,6 +7962,48 @@ mod neighbor_group_wiring_tests {
         // Dropping the group opinion finally clears it.
         config_neighbor_group_ttl_security(&mut bgp, arg_words(&["G"]), ConfigOp::Delete).unwrap();
         assert!(!member_ttl_security(&bgp));
+    }
+
+    /// A group `add-path` opinion for `mup` must land on BOTH MUP
+    /// families, exactly as the `enabled` knob fans out — storing under
+    /// the raw key alone left it on IPv4-MUP only, so the group's
+    /// opinion never reached the IPv6-MUP capability.
+    #[tokio::test]
+    async fn group_add_path_mup_fans_out_to_both_afis() {
+        use super::super::neighbor_group::config_neighbor_group_afi_safi_add_path;
+        use bgp_packet::{Afi, Safi};
+
+        let mut bgp = fresh_bgp();
+        config_neighbor_group_afi_safi_add_path(
+            &mut bgp,
+            arg_words(&["G", "mup", "send-receive"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+
+        let group = bgp.neighbor_groups.get("G").unwrap();
+        for afi in [Afi::Ip, Afi::Ip6] {
+            let entry = group.afi_safi.get(&AfiSafi::new(afi, Safi::Mup));
+            assert!(
+                entry.is_some_and(|e| e.add_path.is_some()),
+                "{afi:?}-MUP must carry the group's add-path opinion"
+            );
+        }
+
+        config_neighbor_group_afi_safi_add_path(
+            &mut bgp,
+            arg_words(&["G", "mup", "send-receive"]),
+            ConfigOp::Delete,
+        )
+        .unwrap();
+        let group = bgp.neighbor_groups.get("G").unwrap();
+        for afi in [Afi::Ip, Afi::Ip6] {
+            let entry = group.afi_safi.get(&AfiSafi::new(afi, Safi::Mup));
+            assert!(
+                entry.is_none_or(|e| e.add_path.is_none()),
+                "{afi:?}-MUP delete must clear both"
+            );
+        }
     }
 
     /// Per-family next-hop-self inherits through the group's afi-safi

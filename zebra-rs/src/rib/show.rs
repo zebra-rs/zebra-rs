@@ -471,6 +471,14 @@ pub fn rib_entry_show(
 
     let offset = buf.len();
     let uptime = format_uptime(e.time.elapsed());
+    // The forwarding plane's acknowledgement (the FPM offload ack that
+    // sets RibEntry.offloaded) rides the line's tail — without this the
+    // flag was recorded and never visible anywhere.
+    let uptime = if e.offloaded {
+        format!("{uptime}, offloaded")
+    } else {
+        uptime
+    };
 
     if e.is_connected() {
         writeln!(
@@ -568,6 +576,14 @@ pub fn rib_entry_show_v6(
 
     let offset = buf.len();
     let uptime = format_uptime(e.time.elapsed());
+    // The forwarding plane's acknowledgement (the FPM offload ack that
+    // sets RibEntry.offloaded) rides the line's tail — without this the
+    // flag was recorded and never visible anywhere.
+    let uptime = if e.offloaded {
+        format!("{uptime}, offloaded")
+    } else {
+        uptime
+    };
 
     if e.is_connected() {
         writeln!(
@@ -1067,6 +1083,12 @@ pub fn rib_entry_show_detail(rib: &Rib, prefix: &Ipv4Net, e: &RibEntry) -> Strin
         subtype_tag
     );
     let _ = writeln!(buf, "  Last update {} ago", format_uptime(e.time.elapsed()));
+    if e.offloaded {
+        let _ = writeln!(
+            buf,
+            "  Offloaded to the forwarding plane (FPM ack received)"
+        );
+    }
 
     if e.is_connected() {
         let _ = writeln!(buf, "  Directly connected via {}", rib.link_name(e.ifindex));
@@ -1104,6 +1126,12 @@ pub fn rib_entry_show_v6_detail(rib: &Rib, prefix: &Ipv6Net, e: &RibEntry) -> St
         subtype_tag
     );
     let _ = writeln!(buf, "  Last update {} ago", format_uptime(e.time.elapsed()));
+    if e.offloaded {
+        let _ = writeln!(
+            buf,
+            "  Offloaded to the forwarding plane (FPM ack received)"
+        );
+    }
 
     if e.is_connected() {
         let _ = writeln!(buf, "  Directly connected via {}", rib.link_name(e.ifindex));

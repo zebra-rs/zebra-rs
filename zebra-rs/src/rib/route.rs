@@ -1745,6 +1745,14 @@ async fn ipv4_entry_selection(
                 retry = true;
             }
         } else {
+            // Connected / kernel routes need no netlink install — the
+            // kernel owns their FIB entries — but the FPM tee still
+            // wants the connected ones: FRR sends subnet routes to
+            // APPL_DB, and without them the ASIC cannot deliver to
+            // directly-attached hosts (`fpm_prepare` keeps
+            // kernel-learned routes out).
+            fib.fpm_tee_add(ipnet::IpNet::V4(*prefix), next, table_id)
+                .await;
             next.set_fib(true);
         }
     }
@@ -2414,6 +2422,10 @@ async fn ipv6_entry_selection(
                 retry = true;
             }
         } else {
+            // Same as the v4 twin: no netlink install, but connected
+            // routes ride the FPM tee to APPL_DB.
+            fib.fpm_tee_add(ipnet::IpNet::V6(*prefix), next, table_id)
+                .await;
             next.set_fib(true);
         }
     }
