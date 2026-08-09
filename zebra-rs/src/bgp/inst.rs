@@ -1040,6 +1040,18 @@ pub struct Bgp {
     /// is not wired in the runtime yet — that lands in a follow-up.
     pub neighbor_groups: BTreeMap<String, super::neighbor_group::NeighborGroup>,
 
+    /// Instance-level graceful restart (`router bgp graceful-restart …`).
+    /// Resolved onto every peer's `PeerConfig::gr_global` by
+    /// `graceful_restart_resync`, because `build_open_packet` sees only
+    /// the peer.
+    pub graceful_restart: super::peer::GracefulRestartGlobal,
+    /// `graceful-restart-disable`: hard off, outranking `enabled`.
+    /// Separate from `graceful_restart.enabled` because SONiC sets the
+    /// two from different roles — a ToRRouter turns GR on, an
+    /// UpperRegionalHub turns it off — and collapsing them would make
+    /// the resulting state depend on config order.
+    pub graceful_restart_disable: bool,
+
     /// Color → Flex-Algorithm binding table
     /// (zebra-bgp-color-policy.yang). The colour-aware nexthop
     /// resolver consults this to pick a per-algo entry from
@@ -1376,6 +1388,8 @@ impl Bgp {
             super::shard::pool::ShardPool::spawn(workers, shard_results_tx)
         });
         let mut bgp = Self {
+            graceful_restart: super::peer::GracefulRestartGlobal::default(),
+            graceful_restart_disable: false,
             asn: 0,
             router_id: Ipv4Addr::UNSPECIFIED,
             router_id_config: None,
@@ -1491,6 +1505,21 @@ impl Bgp {
 
     pub fn callback_add(&mut self, path: &str, cb: Callback) {
         self.callbacks.insert(path.to_string(), cb);
+    }
+
+    /// The instance-level graceful-restart state as it applies to a
+    /// peer: `graceful-restart-disable` outranks `enabled`. This is
+    /// what `graceful_restart_resync` pushes onto existing peers — and
+    /// what every peer-creation site must seed, because a peer created
+    /// AFTER the GR config callbacks ran (startup configs apply
+    /// `/router/bgp/graceful-restart` before `/router/bgp/neighbor`;
+    /// listen-range peers materialize on accept) would otherwise keep
+    /// the default and advertise no GR capability in its OPEN — turning
+    /// warm reboot into a full route flush.
+    pub(super) fn gr_global_resolved(&self) -> super::peer::GracefulRestartGlobal {
+        let mut resolved = self.graceful_restart;
+        resolved.enabled = resolved.enabled && !self.graceful_restart_disable;
+        resolved
     }
 
     /// Resolve the hostname to advertise in the FQDN capability.
@@ -4583,6 +4612,26 @@ impl Bgp {
             // (single-entry `bulk: More`). Stored in `redist_v{4,6}`
             // keyed by `(rtype, prefix)`; consumed at Loc-RIB
             // injection time in a follow-up.
+            // `suppress-fib-pending`: the forwarding plane confirmed (or
+            // refused) a prefix we installed. A refusal keeps the prefix
+            // suppressed — advertising a route the ASIC rejected is the
+            // blackhole this feature exists to prevent — and the sweep's
+            // timeout is what stops that being permanent.
+            RibRx::RouteOffload { prefix, success } => {
+                if self.local_rib.suppress_fib_pending
+                    && success
+                    && self.local_rib.fib_pending.contains_key(&prefix)
+                {
+                    // Mark rather than remove: the release re-enters the
+                    // advertise path, which consumes `Confirmed`. With a
+                    // plain remove the gate would see a fresh prefix and
+                    // hold it again — indefinitely.
+                    self.local_rib
+                        .fib_pending
+                        .insert(prefix, super::route::FibPending::Confirmed);
+                    self.fib_pending_release(prefix);
+                }
+            }
             RibRx::RouteAdd { rtype, routes, .. } => {
                 self.route_redist_add(rtype, routes);
             }
@@ -6028,6 +6077,108 @@ impl Bgp {
         }
     }
 
+    /// Release a prefix held by `suppress-fib-pending` and advertise it.
+    ///
+    /// Re-enters through `route_advertise_to_peers`, the same function
+    /// the normal path uses, so a released prefix cannot take a
+    /// different route to the peer than one that was never held. By the
+    /// time this runs the prefix is out of `fib_pending`, so the gate
+    /// lets it through.
+    pub(super) fn fib_pending_release(&mut self, prefix: ipnet::IpNet) {
+        // Re-run selection rather than reading `shard.vX.1`: that map
+        // holds the winner alone, while the advertisement this hold
+        // suppressed would have carried the full multipath set —
+        // releasing less than was held would strip ECMP alternatives
+        // from peers until unrelated churn re-ran selection. (At N>1
+        // the main-side table is the mirrored read replica, kept in
+        // step per delta, so re-selecting here is valid at every N.)
+        let selected_v4 = match prefix {
+            ipnet::IpNet::V4(p) => Some(self.shard.v4.select_best_path(p)),
+            ipnet::IpNet::V6(_) => None,
+        };
+        let selected_v6 = match prefix {
+            ipnet::IpNet::V6(p) => Some(self.shard.v6.select_best_path(p)),
+            ipnet::IpNet::V4(_) => None,
+        };
+        let empty = selected_v4.as_deref().is_none_or(|s| s.is_empty())
+            && selected_v6.as_deref().is_none_or(|s| s.is_empty());
+        if empty {
+            // Withdrawn between install and ack — nothing to advertise,
+            // and the entry must not linger: a later reinstall of the
+            // same prefix would consume the stale `Confirmed` and skip
+            // the hold its own install deserves.
+            self.local_rib.fib_pending.remove(&prefix);
+            return;
+        }
+        let mut top = super::peer::BgpTop {
+            router_id: &self.router_id,
+            srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
+            local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
+            tx: &self.tx,
+            rib_client: &self.ctx.rib,
+            attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
+            color_policy: Some(&self.color_policy),
+            flex_algo_routes: Some(&self.flex_algo_routes),
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
+            vrf_export: None,
+            vrf_import: None,
+            nexthop_cache: Some(&mut self.nexthop_cache),
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+            central_label_alloc: None,
+            as_sets_withdraw: self.as_sets_withdraw,
+        };
+        match (prefix, selected_v4, selected_v6) {
+            (ipnet::IpNet::V4(p), Some(set), _) => {
+                super::route::fib_pending_release_v4(&mut top, &mut self.peers, p, &set);
+            }
+            (ipnet::IpNet::V6(p), _, Some(set)) => {
+                super::route::route_advertise_to_peers_v6(p, &set, &mut top, &mut self.peers);
+            }
+            _ => {}
+        }
+    }
+
+    /// Advertise everything whose deadline has passed, and count it.
+    ///
+    /// A lost ack must cost latency, not permanent invisibility, so this
+    /// runs off the instance tick rather than waiting for the next
+    /// best-path event on the prefix — which for a stable prefix may
+    /// never come.
+    pub(super) fn fib_pending_sweep(&mut self) {
+        if !self.local_rib.suppress_fib_pending || self.local_rib.fib_pending.is_empty() {
+            return;
+        }
+        let expired: Vec<ipnet::IpNet> = self
+            .local_rib
+            .fib_pending
+            .iter()
+            .filter(|(_, st)| match st {
+                super::route::FibPending::Waiting(at) => {
+                    at.elapsed() >= super::route::FIB_PENDING_TIMEOUT
+                }
+                super::route::FibPending::Confirmed => false,
+            })
+            .map(|(p, _)| *p)
+            .collect();
+        for prefix in expired {
+            // Same reason as the ack path: mark, so the release passes
+            // the gate instead of re-arming it.
+            self.local_rib
+                .fib_pending
+                .insert(prefix, super::route::FibPending::Confirmed);
+            self.local_rib.fib_pending_timeouts += 1;
+            tracing::warn!(
+                "bgp: suppress-fib-pending timed out for {} — advertising without a FIB ack",
+                prefix
+            );
+            self.fib_pending_release(prefix);
+        }
+    }
+
     /// Re-run best-path for a family after its multipath policy
     /// changed, and re-install the results.
     ///
@@ -6114,6 +6265,12 @@ impl Bgp {
         //     "BGP: Main event loop started with {} peers",
         //     self.peers.len()
         // );
+        // Expiry clock for `suppress-fib-pending`. Ticks regardless of
+        // traffic; the sweep returns immediately when the feature is off
+        // or nothing is pending, so an unused feature costs one wakeup a
+        // second and no allocation.
+        let mut fib_pending_tick = tokio::time::interval(std::time::Duration::from_secs(1));
+        fib_pending_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             // Priority lane first: keepalive / hold timer events must
             // not queue behind an ingest backlog on `rx` (see the
@@ -6124,6 +6281,14 @@ impl Bgp {
                 self.process_msg(msg);
             }
             tokio::select! {
+                // `suppress-fib-pending` expiry. A prefix whose ack was
+                // lost must be advertised eventually, and the next
+                // best-path event on a stable prefix may never come — so
+                // expiry needs its own clock rather than riding another
+                // event.
+                _ = fib_pending_tick.tick() => {
+                    self.fib_pending_sweep();
+                }
                 Some(msg) = self.prx.recv() => {
                     self.process_msg(msg);
                 }
@@ -6467,6 +6632,7 @@ impl Bgp {
                     ident: super::route::ORIGINATED_PEER,
                     router_id: self.router_id,
                     weight: 0,
+                    tag: 0,
                     typ: super::route::BgpRibType::Originated,
                     best_path: false,
                     multipath: false,
@@ -6672,6 +6838,7 @@ impl Bgp {
                     ident: super::route::ORIGINATED_PEER,
                     router_id: self.router_id,
                     weight: 0,
+                    tag: 0,
                     typ: super::route::BgpRibType::Originated,
                     best_path: false,
                     multipath: false,

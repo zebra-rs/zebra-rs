@@ -76,10 +76,17 @@
 /router/bgp/global	p-container
 /router/bgp/global/as	leaf
 /router/bgp/global/router-id	leaf
+/router/bgp/graceful-restart	container
+/router/bgp/graceful-restart/disable	leaf
+/router/bgp/graceful-restart/enabled	leaf
+/router/bgp/graceful-restart/preserve-fw-state	leaf
+/router/bgp/graceful-restart/restart-time	leaf
 /router/bgp/hostname	leaf
 /router/bgp/interface-neighbor	list keys=interface
 /router/bgp/interface-neighbor/neighbor-group	leaf
 /router/bgp/interface-neighbor/remote-as	leaf
+/router/bgp/long-lived-graceful-restart	container
+/router/bgp/long-lived-graceful-restart/stale-time	leaf
 /router/bgp/mup-c	container
 /router/bgp/mup-c/architecture	leaf
 /router/bgp/mup-c/controller-address	leaf
@@ -95,6 +102,7 @@
 /router/bgp/neighbor	list keys=remote-address
 /router/bgp/neighbor-group	list keys=name
 /router/bgp/neighbor-group/afi-safi	list keys=name
+/router/bgp/neighbor-group/afi-safi/add-path	leaf
 /router/bgp/neighbor-group/afi-safi/enabled	leaf
 /router/bgp/neighbor-group/afi-safi/next-hop-self	leaf
 /router/bgp/neighbor-group/allowas-in	p-container
@@ -249,6 +257,7 @@
 /router/bgp/sr-policy/policy/segment/mpls-label	leaf
 /router/bgp/sr-policy/policy/segment/srv6-sid	leaf
 /router/bgp/sr-policy/steering-mode	leaf
+/router/bgp/suppress-fib-pending	leaf
 /router/bgp/timer	container
 /router/bgp/timer/adv-interval	container
 /router/bgp/timer/adv-interval/ebgp	leaf

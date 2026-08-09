@@ -287,6 +287,13 @@ pub struct PolicyEntry {
     /// 0x03 0x0b) with value `N`. CO bits are not compared in v1;
     /// the value field is the discriminator.
     pub match_color: Option<u32>,
+    /// `match tag N` — the route's tag equals `N`.
+    ///
+    /// The tag is a non-wire per-route marker: SONiC sets it on ingress
+    /// (`FROM_BGP_PEER`) and matches it on egress (the TSA route-map and
+    /// `CHECK_IDF_ISOLATION`), so it has to survive in the RIB between
+    /// the two — the same lifecycle as `weight`, and stored beside it.
+    pub match_tag: Option<u32>,
     // Set.
     pub local_pref: Option<NumericSet>,
     pub med: Option<NumericSet>,
@@ -310,8 +317,193 @@ pub struct PolicyEntry {
     /// route-map is authoritative when the operator chose to set
     /// the label-index explicitly.
     pub set_prefix_sid_label_index: Option<u32>,
+    /// `set tag N` — stamp the route with tag `N`. 0 means "no tag",
+    /// matching FRR, so a tag of 0 cannot be matched.
+    pub set_tag: Option<u32>,
+    /// `call <policy>` — evaluate another policy from this entry, after
+    /// this entry's `match` clauses have matched and before its terminal
+    /// action. A callee `deny` denies the caller; a callee `permit`
+    /// continues with this entry's own `set` clauses and action. The
+    /// callee's `set` clauses are kept either way.
+    pub call_name: Option<String>,
+    /// Resolved callee, filled by [`resolve_calls`] at commit.
+    ///
+    /// `Arc` rather than `Box`: a box would deep-clone the callee into
+    /// every caller, so a shared callee (A calls B and C, both call D)
+    /// is duplicated per path and nesting multiplies it. Sharing by
+    /// pointer keeps the resolved structure a DAG whose size is linear
+    /// in the configuration however the calls fan out — which is what
+    /// lets chain length go unbounded.
+    ///
+    /// `None` while `call_name` is `Some` means unresolved or cyclic,
+    /// and the entry denies: the engine's convention is that a
+    /// bound-but-unresolved reference is deny-all.
+    pub call_policy: Option<std::sync::Arc<PolicyList>>,
     // Action.
     pub action: PolicyAction,
+}
+
+/// Resolve every `call` reference in `config` into an `Arc` of the
+/// callee's already-resolved form, and report the policies that could
+/// not be resolved.
+///
+/// There is deliberately **no depth limit**. A cap would only ever be an
+/// approximation of the one structural condition that is actually
+/// unresolvable — a cycle — which is detected here exactly, in O(V+E),
+/// by a three-colour DFS. Any acyclic chain resolves however long it is.
+///
+/// Resolution order is what makes that possible: with cycles removed the
+/// call graph is a DAG, so walking it in reverse topological order means
+/// a callee is always already resolved when its caller needs it. Each
+/// policy is processed once and each call edge costs one `Arc` clone,
+/// independent of chain length or fan-out.
+///
+/// Returns the names whose `call` could not be resolved, so the caller
+/// can log them once. Entries referencing them keep `call_policy = None`
+/// and therefore deny.
+pub fn resolve_calls(config: &mut BTreeMap<String, PolicyList>) -> Vec<String> {
+    use std::sync::Arc;
+
+    // Edges: caller -> callees. Only names that exist as policies can be
+    // resolved; a call to an undefined name simply has no edge and stays
+    // unresolved (deny), and re-resolves if the name is defined later.
+    let mut edges: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (name, list) in config.iter() {
+        let mut callees: Vec<String> = list
+            .entry
+            .values()
+            .filter_map(|e| e.call_name.clone())
+            .filter(|c| config.contains_key(c))
+            .collect();
+        callees.sort();
+        callees.dedup();
+        edges.insert(name.clone(), callees);
+    }
+
+    // Three-colour DFS, iterative so the traversal itself imposes no
+    // depth limit either. White = unvisited, Grey = on the current path,
+    // Black = finished. A grey target is a back edge, i.e. a cycle.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Colour {
+        White,
+        Grey,
+        Black,
+    }
+    let mut colour: BTreeMap<String, Colour> =
+        config.keys().map(|n| (n.clone(), Colour::White)).collect();
+    let mut on_cycle: std::collections::BTreeSet<String> = Default::default();
+    // Finish order; reversing it yields callees before callers.
+    let mut finished: Vec<String> = Vec::with_capacity(config.len());
+
+    for root in config.keys() {
+        if colour[root] != Colour::White {
+            continue;
+        }
+        // (node, index of the next callee to visit)
+        let mut stack: Vec<(String, usize)> = vec![(root.clone(), 0)];
+        colour.insert(root.clone(), Colour::Grey);
+        while let Some((node, idx)) = stack.pop() {
+            let callees = edges.get(&node).cloned().unwrap_or_default();
+            if idx < callees.len() {
+                // Re-push the parent to resume at the next callee.
+                stack.push((node.clone(), idx + 1));
+                let next = &callees[idx];
+                match colour.get(next).copied().unwrap_or(Colour::Black) {
+                    Colour::White => {
+                        colour.insert(next.clone(), Colour::Grey);
+                        stack.push((next.clone(), 0));
+                    }
+                    Colour::Grey => {
+                        // Back edge: everything currently grey on the
+                        // path from `next` onward is on a cycle. Marking
+                        // both endpoints is enough for the fail-closed
+                        // behaviour and keeps this linear.
+                        on_cycle.insert(next.clone());
+                        on_cycle.insert(node.clone());
+                    }
+                    Colour::Black => {}
+                }
+            } else {
+                colour.insert(node.clone(), Colour::Black);
+                finished.push(node);
+            }
+        }
+    }
+
+    // Reverse finish order = callees before callers.
+    let mut unresolved: Vec<String> = Vec::new();
+    let mut resolved: BTreeMap<String, Arc<PolicyList>> = BTreeMap::new();
+    for name in finished {
+        // Take the policy out, fill in its callees, put it back, and
+        // publish an Arc of the finished form for its callers.
+        let Some(mut list) = config.remove(&name) else {
+            continue;
+        };
+        let mut failed = false;
+        for entry in list.entry.values_mut() {
+            let Some(callee) = entry.call_name.clone() else {
+                entry.call_policy = None;
+                continue;
+            };
+            if on_cycle.contains(&name) || on_cycle.contains(&callee) {
+                entry.call_policy = None;
+                failed = true;
+                continue;
+            }
+            entry.call_policy = resolved.get(&callee).cloned();
+            if entry.call_policy.is_none() {
+                failed = true;
+            }
+        }
+        if failed {
+            unresolved.push(name.clone());
+        }
+        resolved.insert(name.clone(), Arc::new(list.clone()));
+        config.insert(name, list);
+    }
+    unresolved
+}
+
+/// Names that transitively call any policy in `changed`, i.e. every
+/// policy whose resolved form may have moved because something it calls
+/// (directly or indirectly) did.
+///
+/// Computed as a closure over the reversed call graph rather than by
+/// iterating a fixpoint: a fixpoint needs a bound to terminate safely,
+/// while a graph walk visits each node once by construction and so has
+/// no length limit to choose.
+pub fn callers_of(
+    config: &BTreeMap<String, PolicyList>,
+    changed: &std::collections::BTreeSet<String>,
+) -> std::collections::BTreeSet<String> {
+    // Reverse edges: callee -> callers.
+    let mut callers: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (name, list) in config.iter() {
+        for entry in list.entry.values() {
+            if let Some(callee) = &entry.call_name {
+                callers
+                    .entry(callee.clone())
+                    .or_default()
+                    .push(name.clone());
+            }
+        }
+    }
+
+    let mut out: std::collections::BTreeSet<String> = Default::default();
+    let mut queue: Vec<String> = changed.iter().cloned().collect();
+    while let Some(node) = queue.pop() {
+        for caller in callers.get(&node).cloned().unwrap_or_default() {
+            if out.insert(caller.clone()) {
+                queue.push(caller);
+            }
+        }
+    }
+    // The changed policies themselves are the caller's concern, not
+    // ours: this reports only what they drag along with them.
+    for name in changed {
+        out.remove(name);
+    }
+    out
 }
 
 pub fn policy_entry_sync(
@@ -408,9 +600,17 @@ impl PolicyConfig {
         as_path_config: &AsPathSetConfig,
         syncer: S,
     ) {
+        // Merge the batch into `config` first, then resolve calls across
+        // the whole map, then notify. Firing per policy inside the drain
+        // loop would publish a caller before a callee defined in the same
+        // batch had been resolved, so the caller would go out with
+        // `call_policy: None` — denying — until something unrelated
+        // touched it again.
+        let mut changed: std::collections::BTreeSet<String> = Default::default();
+        let mut removed: Vec<String> = Vec::new();
         while let Some((name, mut s)) = cache.pop_first() {
             if s.delete {
-                syncer.policy_list_remove(&name);
+                removed.push(name.clone());
                 config.remove(&name);
             } else {
                 policy_entry_sync(
@@ -421,8 +621,36 @@ impl PolicyConfig {
                     large_community_config,
                     as_path_config,
                 );
-                syncer.policy_list_update(&name, &s);
-                config.insert(name, s);
+                config.insert(name.clone(), s);
+                changed.insert(name);
+            }
+        }
+        if changed.is_empty() && removed.is_empty() {
+            return;
+        }
+
+        // Callers of anything touched — including deletions, which flip a
+        // resolved call back to deny — have to be recomputed and re-sent.
+        // Collected before `resolve_calls` so the edges still reflect the
+        // pre-resolution names.
+        let mut touched = changed.clone();
+        touched.extend(removed.iter().cloned());
+        let affected = callers_of(config, &touched);
+
+        let unresolved = resolve_calls(config);
+        for name in &unresolved {
+            tracing::warn!(
+                "policy {name}: `call` unresolved (undefined callee or call cycle); \
+                 entries with an unresolved call deny"
+            );
+        }
+
+        for name in removed {
+            syncer.policy_list_remove(&name);
+        }
+        for name in changed.iter().chain(affected.iter()) {
+            if let Some(list) = config.get(name) {
+                syncer.policy_list_update(name, list);
             }
         }
     }
@@ -506,6 +734,49 @@ impl ConfigBuilder {
             .del(|policy, cache, name, seq, _args| {
                 let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
                 list.entry.remove(&seq).context(ARG_ERR)?;
+                Ok(())
+            })
+            .path("/entry/match/tag")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                entry.match_tag = Some(args.u32().context(ARG_ERR)?);
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.match_tag = None;
+                Ok(())
+            })
+            .path("/entry/set/tag")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+                entry.set_tag = Some(args.u32().context(ARG_ERR)?);
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.set_tag = None;
+                Ok(())
+            })
+            .path("/entry/call")
+            .set(|policy, cache, name, seq, args| {
+                let list = cache_get(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.entry(seq);
+
+                let callee = args.string().context(ARG_ERR)?;
+                entry.call_name = Some(callee);
+
+                Ok(())
+            })
+            .del(|policy, cache, name, seq, _args| {
+                let list = cache_lookup(policy, cache, &name).context(ARG_ERR)?;
+                let entry = list.lookup(&seq).context(ARG_ERR)?;
+                entry.call_name = None;
+                entry.call_policy = None;
                 Ok(())
             })
             .path("/entry/match/prefix-set")
@@ -1439,6 +1710,18 @@ fn entry_to_json(seq: u32, entry: &PolicyEntry) -> serde_json::Value {
     let op_val = |op: &str, value: u32| json!({ "op": op, "value": value });
 
     let mut m = Map::new();
+    if let Some(x) = &entry.match_tag {
+        m.insert("tag".into(), json!(x));
+    }
+    if let Some(x) = &entry.set_tag {
+        m.insert("set_tag".into(), json!(x));
+    }
+    if let Some(x) = &entry.call_name {
+        m.insert("call".into(), json!(x));
+        // An unresolved call denies. An operator debugging a policy that
+        // drops everything should see why here rather than in the log.
+        m.insert("call_resolved".into(), json!(entry.call_policy.is_some()));
+    }
     if let Some(x) = &entry.prefix_set_name {
         m.insert("prefix_set".into(), json!(x));
     }
@@ -1573,6 +1856,19 @@ pub fn show(policy: &Policy, _args: Args, json: bool) -> Result<String, Error> {
         let _ = writeln!(buf, "policy-list: {}", name);
         for (seq, entry) in policy.entry.iter() {
             let _ = writeln!(buf, " entry: {}", seq);
+            if let Some(tag) = &entry.match_tag {
+                let _ = writeln!(buf, "  match: tag {}", tag);
+            }
+            if let Some(tag) = &entry.set_tag {
+                let _ = writeln!(buf, "  set: tag {}", tag);
+            }
+            if let Some(callee) = &entry.call_name {
+                if entry.call_policy.is_some() {
+                    let _ = writeln!(buf, "  call: {}", callee);
+                } else {
+                    let _ = writeln!(buf, "  call: {} [unresolved: denies]", callee);
+                }
+            }
             if let Some(prefix_set) = &entry.prefix_set_name {
                 let _ = writeln!(buf, "  match: prefix_set {}", prefix_set);
             }
@@ -1742,5 +2038,135 @@ mod tests {
     fn parse_evpn_route_type_rejects_unknown() {
         assert!(parse_evpn_route_type("type1").is_err());
         assert!(parse_evpn_route_type("").is_err());
+    }
+}
+
+#[cfg(test)]
+mod call_tests {
+    use super::*;
+
+    fn policy_calling(callee: Option<&str>) -> PolicyList {
+        let mut list = PolicyList::default();
+        let entry = list.entry(10);
+        entry.action = PolicyAction::Permit;
+        entry.call_name = callee.map(|c| c.to_string());
+        list
+    }
+
+    fn config(pairs: &[(&str, Option<&str>)]) -> BTreeMap<String, PolicyList> {
+        pairs
+            .iter()
+            .map(|(name, callee)| (name.to_string(), policy_calling(*callee)))
+            .collect()
+    }
+
+    fn call_policy_of(
+        config: &BTreeMap<String, PolicyList>,
+        name: &str,
+    ) -> Option<Arc<PolicyList>> {
+        config[name].entry[&10].call_policy.clone()
+    }
+
+    use std::sync::Arc;
+
+    #[test]
+    fn resolves_a_simple_call() {
+        let mut cfg = config(&[("A", Some("B")), ("B", None)]);
+        assert!(resolve_calls(&mut cfg).is_empty());
+        assert!(call_policy_of(&cfg, "A").is_some());
+    }
+
+    #[test]
+    fn undefined_callee_stays_unresolved() {
+        let mut cfg = config(&[("A", Some("NOPE"))]);
+        assert_eq!(resolve_calls(&mut cfg), vec!["A".to_string()]);
+        assert!(
+            call_policy_of(&cfg, "A").is_none(),
+            "an unresolved call must stay None so the entry denies"
+        );
+    }
+
+    #[test]
+    fn direct_cycle_is_rejected() {
+        let mut cfg = config(&[("A", Some("A"))]);
+        assert_eq!(resolve_calls(&mut cfg), vec!["A".to_string()]);
+        assert!(call_policy_of(&cfg, "A").is_none());
+    }
+
+    #[test]
+    fn indirect_cycle_is_rejected() {
+        let mut cfg = config(&[("A", Some("B")), ("B", Some("A"))]);
+        let unresolved = resolve_calls(&mut cfg);
+        assert!(unresolved.contains(&"A".to_string()));
+        assert!(unresolved.contains(&"B".to_string()));
+        assert!(call_policy_of(&cfg, "A").is_none());
+        assert!(call_policy_of(&cfg, "B").is_none());
+    }
+
+    /// The property the design exists to guarantee: chain length is not
+    /// capped. A depth limit creeping back in would fail here rather
+    /// than in production.
+    #[test]
+    fn deep_call_chain_has_no_depth_limit() {
+        const DEPTH: usize = 256;
+        let mut cfg: BTreeMap<String, PolicyList> = BTreeMap::new();
+        for i in 0..DEPTH {
+            let callee = (i + 1 < DEPTH).then(|| format!("P{}", i + 1));
+            cfg.insert(format!("P{i}"), policy_calling(callee.as_deref()));
+        }
+        assert!(
+            resolve_calls(&mut cfg).is_empty(),
+            "a {DEPTH}-deep acyclic chain must resolve"
+        );
+        assert!(call_policy_of(&cfg, "P0").is_some());
+        assert!(call_policy_of(&cfg, &format!("P{}", DEPTH - 2)).is_some());
+    }
+
+    /// A shared callee is resolved once and shared by pointer, not
+    /// duplicated per caller — the reason `call_policy` is an `Arc` and
+    /// not a `Box`, and what keeps a diamond from multiplying.
+    #[test]
+    fn diamond_shares_the_common_callee() {
+        let mut cfg = config(&[
+            ("A", Some("B")),
+            ("B", Some("D")),
+            ("C", Some("D")),
+            ("D", None),
+        ]);
+        assert!(resolve_calls(&mut cfg).is_empty());
+        let from_b = call_policy_of(&cfg, "B").unwrap();
+        let from_c = call_policy_of(&cfg, "C").unwrap();
+        assert!(
+            Arc::ptr_eq(&from_b, &from_c),
+            "both callers must share one resolved D, not hold copies"
+        );
+    }
+
+    #[test]
+    fn callers_of_is_transitive() {
+        // A -> B -> C. Changing C must drag in both B and A.
+        let cfg = config(&[("A", Some("B")), ("B", Some("C")), ("C", None)]);
+        let changed: std::collections::BTreeSet<String> = ["C".to_string()].into_iter().collect();
+        let affected = callers_of(&cfg, &changed);
+        assert!(affected.contains("B"), "direct caller must be affected");
+        assert!(
+            affected.contains("A"),
+            "transitive caller must be affected — a single-level cascade \
+             would leave A filtering on a stale copy of C"
+        );
+        assert!(
+            !affected.contains("C"),
+            "the changed policy itself is the caller's business"
+        );
+    }
+
+    #[test]
+    fn callers_of_terminates_on_a_cycle() {
+        // The reverse walk must not spin on a cyclic configuration, even
+        // though resolve_calls will refuse to resolve it.
+        let cfg = config(&[("A", Some("B")), ("B", Some("A"))]);
+        let changed: std::collections::BTreeSet<String> = ["A".to_string()].into_iter().collect();
+        let affected = callers_of(&cfg, &changed);
+        assert!(affected.contains("B"));
     }
 }

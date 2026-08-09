@@ -31,6 +31,7 @@ use rtnetlink::{
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::fib::cradle::CradleFib;
+use crate::fib::fpm::{FpmFib, RouteOp, encode_route};
 use crate::fib::{FibAddr, FibLink, FibMdbEntry, FibMessage, FibNeighbor, FibRoute};
 use crate::rib::entry::RibEntry;
 use crate::rib::inst::{IlmEntry, IlmType};
@@ -364,11 +365,24 @@ pub struct FibHandle {
     /// VNI to VXLAN interface index mapping
     /// Used to resolve VNI to the correct VXLAN device for FDB operations
     pub vni_ifindex_map: BTreeMap<u32, u32>,
+    /// Kernel routing-table id → VRF *device ifindex*.
+    ///
+    /// Needed because FPM's table field is not a table id: the SONiC
+    /// dplane plugin substitutes the VRF device's ifindex for it
+    /// ("Put vrf if_index instead of table id", dplane_fpm_sonic.c:1232),
+    /// and `fpmsyncd` resolves the value with getIfName(). The RIB owns
+    /// both numbers on its `Vrf` rows; this mirrors just the mapping the
+    /// FIB layer needs, the same way `vni_ifindex_map` does for VXLAN.
+    pub vrf_ifindex_map: BTreeMap<u32, u32>,
     /// Optional tee of route installs into the cradle eBPF data plane. Driven by
     /// the `system cradle grpc-endpoint <endpoint>` config leaf (`set_cradle`, dispatched
     /// from `Rib::cradle_grpc_config_exec`), with `CRADLE_GRPC` as an env
     /// fallback.
     pub cradle: Option<CradleFib>,
+    /// Optional tee of route installs into SONiC's FPM southbound
+    /// (`fpmsyncd` -> APPL_DB -> orchagent -> SAI). Enabled by
+    /// `SONIC_FPM=host:port` for now; a config leaf follows.
+    pub fpm: Option<FpmFib>,
 }
 
 /// A cradle-tee route member — mirrors `crate::fib::cradle::Member`:
@@ -558,7 +572,9 @@ impl FibHandle {
             handle,
             use_nhid,
             vni_ifindex_map: BTreeMap::new(),
+            vrf_ifindex_map: BTreeMap::new(),
             cradle: CradleFib::from_env(),
+            fpm: FpmFib::from_env(rib_tx),
         })
     }
 
@@ -569,6 +585,94 @@ impl FibHandle {
         match &self.cradle {
             Some(cradle) => tracing::info!("fib: cradle eBPF tee enabled -> {}", cradle.endpoint()),
             None => tracing::info!("fib: cradle eBPF tee disabled"),
+        }
+    }
+
+    /// Enable (`Some`) or disable (`None`) the SONiC FPM tee at runtime,
+    /// driven by the `system fpm` config leaves.
+    ///
+    /// Re-pointing builds a fresh tee with an empty mirror, so routes
+    /// installed before the change would never reach the new endpoint.
+    /// The caller re-tees them (see `Rib::fpm_apply`), mirroring how the
+    /// cradle tee handles enable-after-routes.
+    pub fn set_fpm(
+        &mut self,
+        endpoint: Option<std::net::SocketAddr>,
+        rib_tx: UnboundedSender<FibMessage>,
+    ) {
+        // Stop the old tee's connection task first. Dropping the handle
+        // is not enough — the task holds its own clone — and an
+        // orphaned task keeps reconnecting to the old endpoint and
+        // replaying its frozen mirror over that fpmsyncd forever.
+        if let Some(old) = self.fpm.take() {
+            old.shutdown();
+        }
+        self.fpm = endpoint.map(|addr| FpmFib::new(addr, rib_tx));
+        match &self.fpm {
+            Some(fpm) => tracing::info!("fib: FPM tee enabled -> {}", fpm.endpoint()),
+            None => tracing::info!("fib: FPM tee disabled"),
+        }
+    }
+
+    /// Flush every FPM-mirrored route of a deleted VRF — see
+    /// `FpmFib::flush_vrf`. A no-op when the tee is off.
+    pub async fn fpm_flush_vrf(&self, vrf_ifindex: u32) {
+        if let Some(fpm) = &self.fpm {
+            fpm.flush_vrf(vrf_ifindex).await;
+        }
+    }
+
+    /// Re-tee one already-installed route (the enable-after-routes walk).
+    /// A no-op when the tee is off.
+    pub async fn fpm_route_resync(&self, prefix: ipnet::IpNet, entry: &RibEntry, table_id: u32) {
+        self.fpm_tee(RouteOp::Add, prefix, entry, table_id).await;
+    }
+
+    /// Tee one route to SONiC's FPM southbound.
+    ///
+    /// Connected routes ride along with protocol routes: the kernel
+    /// originates them, but the ASIC still needs them or the switch
+    /// cannot deliver to directly-attached hosts — the same reasoning as
+    /// the cradle tee. Kernel-learned routes stay out; they would echo
+    /// back what SONiC itself installed.
+    async fn fpm_tee(&self, op: RouteOp, prefix: ipnet::IpNet, entry: &RibEntry, table_id: u32) {
+        let Some(fpm) = &self.fpm else {
+            return;
+        };
+        if !entry.is_protocol() && !matches!(entry.rtype, RibType::Connected) {
+            return;
+        }
+
+        // FPM's table field is a VRF *device ifindex*, not a kernel
+        // routing-table id (dplane_fpm_sonic.c:1232 — "Put vrf if_index
+        // instead of table id"), and `fpmsyncd` resolves it with
+        // getIfName(), rejecting anything whose name does not start with
+        // "Vrf". Confirmed on the wire: golden/vrf.fpm has table=6 for a
+        // VRF on kernel table 100.
+        //
+        // A table with no mapping is skipped rather than sent with the
+        // table id in place of the ifindex: fpmsyncd would resolve that
+        // to some unrelated interface, and a missing route is recoverable
+        // where a misattributed one is not.
+        let vrf_ifindex = match table_id {
+            0 | crate::rib::inst::RT_TABLE_MAIN => 0,
+            other => match self.vrf_ifindex_map.get(&other) {
+                Some(ifindex) => *ifindex,
+                None => {
+                    tracing::debug!(
+                        "fib: FPM tee skipping {prefix} in table {other} (no VRF ifindex known)"
+                    );
+                    return;
+                }
+            },
+        };
+
+        let Some(msg) = encode_route(op, &prefix, entry, vrf_ifindex) else {
+            return;
+        };
+        match op {
+            RouteOp::Add => fpm.route_add(prefix, vrf_ifindex, msg).await,
+            RouteOp::Del => fpm.route_del(&prefix, vrf_ifindex, msg).await,
         }
     }
 
@@ -1046,6 +1150,8 @@ impl FibHandle {
                 cradle.route_install(*prefix, table_id, members).await;
             }
         }
+        self.fpm_tee(RouteOp::Add, (*prefix).into(), entry, table_id)
+            .await;
         if !entry.is_protocol() {
             return true;
         }
@@ -1274,6 +1380,8 @@ impl FibHandle {
         {
             cradle.route_del(*prefix, table_id).await;
         }
+        self.fpm_tee(RouteOp::Del, (*prefix).into(), entry, table_id)
+            .await;
         if !entry.is_protocol() {
             return;
         }
@@ -1588,6 +1696,8 @@ impl FibHandle {
                 cradle.route_install6(*prefix, table_id, members).await;
             }
         }
+        self.fpm_tee(RouteOp::Add, (*prefix).into(), entry, table_id)
+            .await;
         if !entry.is_protocol() {
             return true;
         }
@@ -1836,6 +1946,8 @@ impl FibHandle {
                 cradle.static_sid_uninstall(*prefix).await;
             }
         }
+        self.fpm_tee(RouteOp::Del, (*prefix).into(), entry, table_id)
+            .await;
         if !entry.is_protocol() {
             return;
         }
@@ -3532,6 +3644,16 @@ impl FibHandle {
 
     /// Register VXLAN interface with its VNI for FDB operations
     /// Called when a VXLAN interface is created to establish VNI→ifindex mapping
+    /// Record a VRF's table-id → device-ifindex mapping, so routes in
+    /// that table can be teed to FPM with the ifindex it expects.
+    pub fn register_vrf_ifindex(&mut self, table_id: u32, ifindex: u32) {
+        self.vrf_ifindex_map.insert(table_id, ifindex);
+    }
+
+    pub fn unregister_vrf_ifindex(&mut self, table_id: u32) {
+        self.vrf_ifindex_map.remove(&table_id);
+    }
+
     pub fn register_vxlan_ifindex(&mut self, vni: u32, ifindex: u32) {
         if fib_l2_vxlan() {
             tracing::info!(

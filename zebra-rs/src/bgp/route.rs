@@ -766,8 +766,14 @@ fn table_map_apply<'a>(
     let best = best?;
     // Bound name doesn't resolve to a policy: deny-all.
     let policy = tm.policy.as_ref()?;
-    let decision =
-        policy_list_apply_net(policy, prefix, (*best.attr).clone(), best.weight, router_id)?;
+    let decision = policy_list_apply_net(
+        policy,
+        prefix,
+        (*best.attr).clone(),
+        best.weight,
+        best.tag,
+        router_id,
+    )?;
     let mut mapped = best.clone();
     // Transient install-time copy — never enters the attr store or
     // the Loc-RIB, so a free-floating Arc is fine.
@@ -860,6 +866,10 @@ pub(super) fn fib_install_v4(bgp: &super::peer::BgpTop, prefix: Ipv4Net, selecte
             .map(|nh| cache.transport_for(0, nh))
     });
     let entry = best.and_then(|b| select_fib_entry_v4(b, transport, nht_transport));
+    // Pins the suppress-fib-pending gate's `fib_installable_v4` to this
+    // derivation: the two must agree, or the gate arms holds no
+    // forwarding-plane ack can ever release.
+    debug_assert_eq!(entry.is_some(), fib_installable_v4(bgp, prefix, selected));
     match entry {
         Some(mut rib_entry) => {
             // Colour-aware steering — plain-path only; a VPN tunnel
@@ -1079,6 +1089,65 @@ fn select_fib_entry_v6(
     }
 }
 
+/// Would [`fib_install_v4`] program a FIB entry for this selection?
+///
+/// The suppress-fib-pending gate must not arm a hold for a selection
+/// that installs nothing — a locally-originated `network` prefix with no
+/// usable next-hop, or a table-map deny, sends no FIB add, so no
+/// forwarding-plane ack will ever release the hold and every such prefix
+/// would stall the full [`FIB_PENDING_TIMEOUT`]. Mirrors the installer's
+/// entry derivation through the same primitives; `fib_install_v4`
+/// carries a `debug_assert` pinning the two together.
+pub(super) fn fib_installable_v4(
+    bgp: &super::peer::BgpTop,
+    prefix: Ipv4Net,
+    selected: &[BgpRib],
+) -> bool {
+    let transport = bgp
+        .vrf_transport_v4
+        .and_then(|m| m.get(&prefix))
+        .map(|v| v.as_slice());
+    let best = table_map_apply(
+        &bgp.local_rib.table_map,
+        *bgp.router_id,
+        IpNet::V4(prefix),
+        selected.first(),
+    );
+    let best = best.as_deref();
+    let nht_transport = bgp.nexthop_cache.as_deref().and_then(|cache| {
+        best.and_then(|b| super::nht::bgp_nexthop_ip(&b.attr))
+            .map(|nh| cache.transport_for(0, nh))
+    });
+    best.and_then(|b| select_fib_entry_v4(b, transport, nht_transport))
+        .is_some()
+}
+
+/// v6 twin of [`fib_installable_v4`], pinned by the `debug_assert` in
+/// [`fib_install_v6`].
+pub(super) fn fib_installable_v6(
+    bgp: &super::peer::BgpTop,
+    prefix: Ipv6Net,
+    selected: &[BgpRib],
+) -> bool {
+    let transport = bgp
+        .vrf_transport_v6
+        .and_then(|m| m.get(&prefix))
+        .map(|v| v.as_slice());
+    let best = table_map_apply(
+        &bgp.local_rib.table_map,
+        *bgp.router_id,
+        IpNet::V6(prefix),
+        selected.first(),
+    );
+    let best = best.as_deref();
+    let nht_transport = bgp.nexthop_cache.as_deref().and_then(|cache| {
+        best.and_then(|b| super::nht::bgp_nexthop_ip(&b.attr))
+            .map(|nh| cache.transport_for(0, nh))
+    });
+    best.and_then(|b| select_fib_entry_v6(b, transport, nht_transport))
+        .is_some()
+}
+
 /// IPv6 counterpart of [`fib_install_v4`]: the single install path for
 /// `rd == None` v6 winners in a VRF (imported VPNv6 labelled entry vs
 /// CE plain entry), and plain v6 unicast install on the global instance.
@@ -1101,6 +1170,8 @@ pub(super) fn fib_install_v6(bgp: &super::peer::BgpTop, prefix: Ipv6Net, selecte
             .map(|nh| cache.transport_for(0, nh))
     });
     let entry = best.and_then(|b| select_fib_entry_v6(b, transport, nht_transport));
+    // Same pinning as `fib_install_v4` — see the assert there.
+    debug_assert_eq!(entry.is_some(), fib_installable_v6(bgp, prefix, selected));
     match entry {
         Some(mut rib_entry) => {
             // Colour-aware SRv6 steering — plain-path only. A VPN tunnel
@@ -1544,6 +1615,10 @@ pub struct BgpRib {
     pub router_id: Ipv4Addr,
     // Weight
     pub weight: u32,
+    /// Route tag stamped by `set tag`, kept here so an egress policy can
+    /// match what an ingress policy set. Not carried on the wire; 0 is
+    /// untagged.
+    pub tag: u32,
     // Route type.
     pub typ: BgpRibType,
     // Whether this cand is currently the best path.
@@ -1721,6 +1796,9 @@ impl BgpRib {
             router_id,
             attr,
             weight,
+            // A newly-received route starts untagged; ingress policy is
+            // what stamps it.
+            tag: 0,
             typ: rib_type,
             best_path: false,
             multipath: false,
@@ -3000,6 +3078,38 @@ impl EvpnFloodState {
 /// instead — see the RIB sharding plan (B.1 / D3) for the partition.
 #[derive(Debug, Default)]
 pub struct LocalRib {
+    /// `router bgp suppress-fib-pending`: hold a prefix out of the
+    /// Adj-RIB-Out until the forwarding plane acknowledges installing
+    /// it, so we never advertise reachability the ASIC cannot yet
+    /// deliver.
+    ///
+    /// Here rather than on `Bgp` for the same reason as
+    /// `sr_policy_local`: the config callbacks hold `&mut Bgp` while the
+    /// advertise path holds a `BgpTop`, and `BgpTop` already borrows
+    /// `local_rib` — so this reaches both without adding a field to all
+    /// 56 `BgpTop` construction sites.
+    pub suppress_fib_pending: bool,
+
+    /// Prefixes installed but not yet acknowledged, with the deadline
+    /// after which they are advertised anyway.
+    ///
+    /// The timeout is not optional: an ack can be lost (fpmsyncd
+    /// restarts, orchagent rejects the route), and a prefix suppressed
+    /// forever is a black hole that looks like a routing bug rather than
+    /// a forwarding one. Advertising late is the safe failure — it is
+    /// exactly the pre-feature behaviour.
+    ///
+    /// Keyed by prefix, not by path: the ack carries a prefix and a VRF
+    /// ifindex and nothing else, so a per-path key could never be
+    /// matched back to it.
+    pub fib_pending: BTreeMap<IpNet, FibPending>,
+
+    /// Prefixes advertised because their deadline passed rather than
+    /// because an ack arrived. A device counting up here has a
+    /// forwarding plane that is not keeping up, which should be visible
+    /// rather than inferred from latency.
+    pub fib_pending_timeouts: u64,
+
     /// Per-RD EVPN Loc-RIB tables.
     pub evpn: BTreeMap<RouteDistinguisher, LocalRibEvpnTable>,
 
@@ -3199,6 +3309,9 @@ pub fn route_apply_policy_in(
         nlri,
         bgp_attr,
         weight,
+        // Ingress: the route arrives untagged and inbound policy is what
+        // may stamp it.
+        0,
     )
 }
 
@@ -3219,6 +3332,7 @@ pub fn apply_policy_net(
     prefix: IpNet,
     bgp_attr: BgpAttr,
     weight: u32,
+    tag: u32,
 ) -> Option<PolicyDecision> {
     if prefix_cfg.name.is_some() {
         let Some(prefix_set) = &prefix_cfg.prefix_set else {
@@ -3232,11 +3346,12 @@ pub fn apply_policy_net(
         let Some(policy_list) = &policy_cfg.policy_list else {
             return None;
         };
-        return policy_list_apply_net(policy_list, prefix, bgp_attr, weight, router_id);
+        return policy_list_apply_net(policy_list, prefix, bgp_attr, weight, tag, router_id);
     }
     Some(PolicyDecision {
         attr: bgp_attr,
         weight,
+        tag,
     })
 }
 
@@ -3249,6 +3364,7 @@ pub fn apply_policy_in_pure(
     nlri: &Ipv4Nlri,
     bgp_attr: BgpAttr,
     weight: u32,
+    tag: u32,
 ) -> Option<PolicyDecision> {
     apply_policy_net(
         prefix_cfg,
@@ -3257,6 +3373,7 @@ pub fn apply_policy_in_pure(
         IpNet::V4(nlri.prefix),
         bgp_attr,
         weight,
+        tag,
     )
 }
 
@@ -3282,6 +3399,9 @@ pub fn route_apply_policy_in_evpn(
     Some(PolicyDecision {
         attr: bgp_attr,
         weight,
+        // Route tags are a v4/v6-unicast concept here; the EVPN paths
+        // neither set nor match them.
+        tag: 0,
     })
 }
 
@@ -3310,6 +3430,7 @@ pub fn route_apply_policy_out_evpn(
             Some(PolicyDecision {
                 attr: bgp_attr,
                 weight,
+                tag: 0,
             })
         }
     };
@@ -3353,6 +3474,7 @@ pub fn route_apply_policy_out(
     nlri: &Ipv4Nlri,
     bgp_attr: BgpAttr,
     weight: u32,
+    tag: u32,
 ) -> Option<PolicyDecision> {
     let decision = apply_policy_net(
         &ctx.out_policy.prefix_set,
@@ -3361,6 +3483,7 @@ pub fn route_apply_policy_out(
         IpNet::V4(nlri.prefix),
         bgp_attr,
         weight,
+        tag,
     );
     // Egress (Adj-RIB-Out) Lua hook after native out-policy. Runs on the
     // canonical member's encode; under Model B a scripted peer is a
@@ -3383,6 +3506,7 @@ pub fn route_apply_policy_out_at(
     nlri: &Ipv4Nlri,
     bgp_attr: BgpAttr,
     weight: u32,
+    tag: u32,
 ) -> Option<PolicyDecision> {
     apply_policy_net(
         peer.prefix_set_at(afi_safi, InOut::Output),
@@ -3391,6 +3515,7 @@ pub fn route_apply_policy_out_at(
         IpNet::V4(nlri.prefix),
         bgp_attr,
         weight,
+        tag,
     )
 }
 
@@ -3404,6 +3529,7 @@ pub fn route_apply_policy_in_v6(
     nlri: &Ipv6Nlri,
     bgp_attr: BgpAttr,
     weight: u32,
+    tag: u32,
 ) -> Option<PolicyDecision> {
     apply_policy_net(
         peer.prefix_set_at(afi_safi, InOut::Input),
@@ -3412,6 +3538,7 @@ pub fn route_apply_policy_in_v6(
         IpNet::V6(nlri.prefix),
         bgp_attr,
         weight,
+        tag,
     )
 }
 
@@ -3423,6 +3550,7 @@ pub fn route_apply_policy_out_v6(
     nlri: &Ipv6Nlri,
     bgp_attr: BgpAttr,
     weight: u32,
+    tag: u32,
 ) -> Option<PolicyDecision> {
     apply_policy_net(
         peer.prefix_set_at(afi_safi, InOut::Output),
@@ -3431,6 +3559,7 @@ pub fn route_apply_policy_out_v6(
         IpNet::V6(nlri.prefix),
         bgp_attr,
         weight,
+        tag,
     )
 }
 
@@ -4240,6 +4369,19 @@ fn apply_ipv4_advertise_job(
         added,
         replaced,
     } = job;
+    // `suppress-fib-pending`: this is the ingest-reduce's advertise sink
+    // — the path every ordinary v4 UPDATE takes at N=1 and N>1 — and it
+    // must gate exactly as `route_advertise_to_peers` does, or the
+    // mainline escapes the feature entirely. Holding here holds the
+    // whole job: the plain fan, the PET/group fans, and the ADD-PATH
+    // deltas below all wait together, and `fib_pending_release`
+    // re-advertises the full set plus the ADD-PATH members.
+    if rd.is_none() {
+        let installable = fib_installable_v4(bgp, prefix, &selected);
+        if fib_pending_hold(bgp, IpNet::V4(prefix), &selected, installable) {
+            return;
+        }
+    }
     // Group-task migration (gate-on): the v4-unicast event-driven
     // advertise/withdraw runs in the per-update-group egress tasks — fan one
     // delta per group and bypass the update-group flush. Takes precedence over
@@ -4550,9 +4692,9 @@ fn compute_advertise_outcome(
         // off-main in a shard worker); VPNv4 reads its own per-AFI Output
         // policy from the peer.
         let decision = if afi_safi == AfiSafi::new(Afi::Ip, Safi::Unicast) {
-            route_apply_policy_out(&ctx, &nlri, attr, best.weight)
+            route_apply_policy_out(&ctx, &nlri, attr, best.weight, best.tag)
         } else {
-            route_apply_policy_out_at(peer, afi_safi, &nlri, attr, best.weight)
+            route_apply_policy_out_at(peer, afi_safi, &nlri, attr, best.weight, best.tag)
         };
         if let Some(decision) = decision {
             bgp_adj_out_trace!(peer, prefix = %prefix, "advertise");
@@ -4586,6 +4728,110 @@ fn bump_group_counters_on_miss(
     }
 }
 
+/// How long a prefix may sit unacknowledged before it is advertised
+/// anyway. Chosen to be comfortably longer than an orchagent round trip
+/// under load while still bounded — the point is that a lost ack costs
+/// latency, never permanent invisibility.
+pub(super) const FIB_PENDING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// State of a prefix in the `suppress-fib-pending` map.
+///
+/// Two states rather than a bare "is it pending" set, because the ack
+/// has to survive one trip through the advertise path. Releasing a
+/// prefix re-enters `route_advertise_to_peers` — deliberately, so a
+/// released prefix takes exactly the path a never-held one takes — and
+/// with a plain set the gate would see "not pending", record it as newly
+/// pending, and hold it again. Forever. `Confirmed` is what the release
+/// consumes on its way through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FibPending {
+    /// Installed, waiting for the forwarding plane. Advertise is held
+    /// until the ack or this deadline.
+    Waiting(std::time::Instant),
+    /// The ack arrived. The next advertise passes and clears the entry.
+    Confirmed,
+}
+
+/// Should this advertisement wait for the forwarding plane?
+///
+/// Returns true when the prefix must be held back. There are TWO
+/// per-prefix advertise entry points for v4 unicast — the event/withdraw
+/// path (`route_advertise_to_peers`) and the ingest-reduce sink
+/// (`apply_ipv4_advertise_job`, which also fans ADD-PATH and the
+/// PET/group egress) — and BOTH must call this before fanning anything;
+/// gating only one of them is how the mainline UPDATE path once escaped
+/// the feature entirely. The session-establishment sync walks don't
+/// arm holds; they skip held prefixes via [`fib_pending_blocks_sync`]
+/// and rely on the release fan to deliver them.
+///
+/// A **withdraw is never suppressed** (`selected.is_empty()`), and it
+/// clears any pending state: withdrawing is how we stop attracting
+/// traffic; delaying it could only prolong the blackhole this feature
+/// exists to prevent. Getting this condition backwards would invert the
+/// whole feature, which is why it has its own test.
+///
+/// `installable` is the caller's [`fib_installable_v4`]/`_v6` verdict: a
+/// selection that installs nothing (a locally-originated `network`
+/// prefix with no usable next-hop, a table-map deny) sends no FIB add,
+/// so no forwarding-plane ack will ever come — arming a hold for it
+/// could only wait out the full timeout. It also clears pending state,
+/// for the reconfiguration corner where a previously-installed prefix
+/// stops being installable while still selected.
+fn fib_pending_hold(
+    bgp: &mut BgpTop,
+    prefix: IpNet,
+    selected: &[BgpRib],
+    installable: bool,
+) -> bool {
+    if !bgp.local_rib.suppress_fib_pending {
+        return false;
+    }
+    if selected.is_empty() || !installable {
+        bgp.local_rib.fib_pending.remove(&prefix);
+        return false;
+    }
+    use std::collections::btree_map::Entry;
+    match bgp.local_rib.fib_pending.entry(prefix) {
+        Entry::Occupied(e) => match *e.get() {
+            // The ack already arrived — this call IS the release.
+            FibPending::Confirmed => {
+                e.remove();
+                false
+            }
+            FibPending::Waiting(since) => {
+                if since.elapsed() >= FIB_PENDING_TIMEOUT {
+                    e.remove();
+                    bgp.local_rib.fib_pending_timeouts += 1;
+                    false
+                } else {
+                    true
+                }
+            }
+        },
+        // First advertise after a fresh install.
+        Entry::Vacant(e) => {
+            e.insert(FibPending::Waiting(std::time::Instant::now()));
+            true
+        }
+    }
+}
+
+/// Should the session-establishment sync walk skip this prefix?
+///
+/// True while the prefix sits in a live (unexpired) hold: a new peer
+/// must not learn a prefix the forwarding plane has not confirmed. The
+/// walk never arms or clears holds — when the ack (or the deadline)
+/// releases the prefix, `fib_pending_release` fans it to every
+/// established peer, which by then includes the synced one. An expired
+/// hold is NOT skipped: the sweep will release it anyway, and the sync
+/// delivering it first is the same advertisement a tick earlier.
+pub(super) fn fib_pending_blocks_sync(local_rib: &LocalRib, prefix: IpNet) -> bool {
+    matches!(
+        local_rib.fib_pending.get(&prefix),
+        Some(FibPending::Waiting(since)) if since.elapsed() < FIB_PENDING_TIMEOUT
+    )
+}
+
 pub(super) fn route_advertise_to_peers(
     rd: Option<RouteDistinguisher>,
     prefix: Ipv4Net,
@@ -4594,6 +4840,19 @@ pub(super) fn route_advertise_to_peers(
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
 ) {
+    // `suppress-fib-pending`: do not tell a peer about a prefix the ASIC
+    // has not confirmed programming. The FIB install already happened
+    // upstream of here; this holds only the advertisement, and the
+    // offload ack (or the deadline) re-enters through this same function
+    // so a released prefix cannot take a different path from one that was
+    // never held. The ingest-reduce sink (`apply_ipv4_advertise_job`)
+    // carries the same gate — see `fib_pending_hold` on why both must.
+    if rd.is_none() {
+        let installable = fib_installable_v4(bgp, prefix, selected);
+        if fib_pending_hold(bgp, IpNet::V4(prefix), selected, installable) {
+            return;
+        }
+    }
     // Group-task migration (gate-on): the v4-unicast direct-withdraw / re-
     // advertise egress (route_ipv4_withdraw, peer-down route_clean) runs in
     // the per-update-group egress tasks — fan one delta per group. This is the
@@ -4621,6 +4880,25 @@ pub(super) fn route_advertise_to_peers(
         peers,
         BTreeMap::new(),
     );
+}
+
+/// Advertise a released (formerly FIB-pending) v4 prefix: the full
+/// selected set through the normal fan, plus each member to the
+/// ADD-PATH peers — the same pair of fans `apply_ipv4_advertise_job`
+/// would have run had the advertisement not been held. Releasing less
+/// than was held (the winner alone, or the plain fan without ADD-PATH)
+/// would leave peers missing ECMP alternatives until unrelated churn
+/// re-ran selection.
+pub(super) fn fib_pending_release_v4(
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+    prefix: Ipv4Net,
+    selected: &[BgpRib],
+) {
+    route_advertise_to_peers(None, prefix, selected, 0, bgp, peers);
+    for rib in selected {
+        route_advertise_to_addpath(None, prefix, rib, 0, bgp, peers);
+    }
 }
 
 /// A2 ⑥ — fan one prefix's best path to every established v4-unicast peer's
@@ -5037,9 +5315,9 @@ impl BatchAfi for V4Batch {
         let (afi, safi) = Self::afi_safi(rd);
         let afi_safi = AfiSafi::new(afi, safi);
         let decision = if afi_safi == AfiSafi::new(Afi::Ip, Safi::Unicast) {
-            route_apply_policy_out(&ctx, &nlri, attr, rib.weight)
+            route_apply_policy_out(&ctx, &nlri, attr, rib.weight, rib.tag)
         } else {
-            route_apply_policy_out_at(peer, afi_safi, &nlri, attr, rib.weight)
+            route_apply_policy_out_at(peer, afi_safi, &nlri, attr, rib.weight, rib.tag)
         };
         let Some(decision) = decision else {
             return;
@@ -5091,7 +5369,8 @@ fn compute_advertise_outcome_v6(
 ) -> AdvertiseOutcome<Ipv6Nlri> {
     if let Some((nlri, attr)) = route_update_ipv6(peer, prefix, best, bgp, add_path) {
         // Per-AFI Output policy: v6-unicast or VPNv6, picked by the caller.
-        if let Some(decision) = route_apply_policy_out_v6(peer, afi_safi, &nlri, attr, best.weight)
+        if let Some(decision) =
+            route_apply_policy_out_v6(peer, afi_safi, &nlri, attr, best.weight, best.tag)
         {
             AdvertiseOutcome::Advertise(nlri, decision.attr)
         } else {
@@ -5233,7 +5512,8 @@ impl BatchAfi for V6Batch {
         // the same way.
         let (afi, safi) = Self::afi_safi(rd);
         let afi_safi = AfiSafi::new(afi, safi);
-        let Some(decision) = route_apply_policy_out_v6(peer, afi_safi, &nlri, attr, rib.weight)
+        let Some(decision) =
+            route_apply_policy_out_v6(peer, afi_safi, &nlri, attr, rib.weight, rib.tag)
         else {
             return;
         };
@@ -6082,9 +6362,16 @@ fn route_soft_out_peer_table(
         // v4-unicast reads the cached snapshot; VPNv4 reads its own per-AFI
         // Output policy from the peer.
         let decision = if rd.is_some() {
-            route_apply_policy_out_at(peer, AfiSafi::new(afi, safi), &nlri, attr, rib.weight)
+            route_apply_policy_out_at(
+                peer,
+                AfiSafi::new(afi, safi),
+                &nlri,
+                attr,
+                rib.weight,
+                rib.tag,
+            )
         } else {
-            route_apply_policy_out(&ctx, &nlri, attr, rib.weight)
+            route_apply_policy_out(&ctx, &nlri, attr, rib.weight, rib.tag)
         };
         let Some(decision) = decision else {
             continue;
@@ -6387,6 +6674,7 @@ fn route_soft_in_peer_table(
                     let mut new_rib = stored.clone();
                     new_rib.attr = bgp.shard.intern(decision.attr);
                     new_rib.weight = decision.weight;
+                    new_rib.tag = decision.tag;
                     let (_, selected, next_id) = bgp.shard.update(rd, prefix, new_rib.clone());
 
                     // Policy-in change may have shifted the best path
@@ -6655,7 +6943,7 @@ pub fn route_ipv6_update(
     };
     let decision = {
         let peer = peers.get_by_idx(ident).expect("peer must exist");
-        route_apply_policy_in_v6(peer, afi_safi, nlri, attr.clone(), 0)
+        route_apply_policy_in_v6(peer, afi_safi, nlri, attr.clone(), 0, 0)
     };
 
     let dep = match rd {
@@ -6992,6 +7280,7 @@ pub fn route_labelv4_update(
         Some(decision) => {
             rib.attr = bgp.shard.intern(decision.attr);
             rib.weight = decision.weight;
+            rib.tag = decision.tag;
             nht_track_received(bgp, &mut rib, dep.clone());
             // Allocate a per-prefix local label so re-advertising with
             // next-hop-self forwards via a swap ILM. `None`
@@ -7083,6 +7372,7 @@ pub fn route_labelv6_update(
             &lu.nlri,
             attr.clone(),
             0,
+            0,
         )
     };
 
@@ -7114,6 +7404,7 @@ pub fn route_labelv6_update(
         Some(decision) => {
             rib.attr = bgp.shard.intern(decision.attr);
             rib.weight = decision.weight;
+            rib.tag = decision.tag;
             nht_track_received(bgp, &mut rib, dep.clone());
             rib.local_label = bgp
                 .shard
@@ -8501,6 +8792,7 @@ pub fn route_evpn_update(
     };
     rib.attr = bgp.attr_store.intern(decision.attr);
     rib.weight = decision.weight;
+    rib.tag = decision.tag;
 
     // Type-5: register the PE next-hop with NHT so the underlay
     // resolves (transport is empty at receive — resolution is async)
@@ -12215,6 +12507,11 @@ pub(super) fn route_advertise_to_peers_v6(
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
 ) {
+    // Same gate as the v4 twin — see `fib_pending_hold`.
+    let installable = fib_installable_v6(bgp, prefix, selected);
+    if fib_pending_hold(bgp, IpNet::V6(prefix), selected, installable) {
+        return;
+    }
     // Plain (non-AddPath) members go through the generic memo path shared
     // with v4/VPN (V6Batch). v6 unicast has no batch precompute → empty memo.
     route_advertise_batch::<V6Batch>(None, prefix, selected, 0, bgp, peers, BTreeMap::new());
@@ -12654,6 +12951,7 @@ impl LabeledAfi for LabeledV4 {
             nlri,
             attr,
             weight,
+            0,
         )
     }
     fn reach(nhop: IpAddr, label: Label, nlri: Ipv4Nlri) -> MpReachAttr {
@@ -12718,6 +13016,7 @@ impl LabeledAfi for LabeledV6 {
             nlri,
             attr,
             weight,
+            0,
         )
     }
     fn reach(nhop: IpAddr, label: Label, nlri: Ipv6Nlri) -> MpReachAttr {
@@ -13128,6 +13427,22 @@ impl Peer {
 pub struct PolicyDecision {
     pub attr: BgpAttr,
     pub weight: u32,
+    /// Route tag. Non-wire, and threaded exactly like `weight`: set by
+    /// `set tag`, matched by `match tag`, and persisted on the RIB entry
+    /// so an egress policy can match what an ingress policy stamped.
+    /// 0 means untagged.
+    pub tag: u32,
+}
+
+impl PolicyDecision {
+    #[cfg(test)]
+    fn local_pref_or_zero(&self) -> u32 {
+        self.attr
+            .local_pref
+            .as_ref()
+            .map(|l| l.local_pref)
+            .unwrap_or(0)
+    }
 }
 
 /// IPv4-unicast convenience wrapper over [`policy_list_apply_net`].
@@ -13146,6 +13461,7 @@ pub fn policy_list_apply(
         IpNet::V4(nlri.prefix),
         bgp_attr,
         weight,
+        0,
         local_addr,
     )
 }
@@ -13159,16 +13475,52 @@ pub fn policy_list_apply_net(
     prefix: IpNet,
     bgp_attr: BgpAttr,
     weight: u32,
+    tag: u32,
     local_addr: Ipv4Addr,
 ) -> Option<PolicyDecision> {
     use crate::policy::{PolicyAction, SetNextHop};
     let mut decision = PolicyDecision {
         attr: bgp_attr,
         weight,
+        tag,
     };
     for entry in policy_list.entry.values() {
-        if !entry_matches(entry, prefix, &decision.attr, decision.weight) {
+        if !entry_matches(entry, prefix, &decision.attr, decision.weight, decision.tag) {
             continue;
+        }
+        // `call <policy>`: run the callee after this entry's match
+        // clauses have matched and before its terminal action. A callee
+        // deny denies the caller outright; a callee permit continues
+        // here with the callee's set clauses already folded into
+        // `decision`.
+        if entry.call_name.is_some() {
+            let Some(callee) = &entry.call_policy else {
+                // Unresolved or cyclic. Deny, matching the engine's rule
+                // that a bound-but-unresolved reference is deny-all — a
+                // filter that cannot consult the filter it was told to
+                // consult must not conclude "permit".
+                return None;
+            };
+            //
+            // Recursive rather than an explicit resume stack. There is no
+            // depth *limit* — `resolve_calls` guarantees the resolved
+            // graph is acyclic, so depth cannot exceed the number of
+            // configured policies — but this does put that depth on the
+            // stack. The iterative form would have to turn this entry
+            // loop into a state machine, since the resume point sits in
+            // the middle of several hundred lines of set-clause
+            // application, and that refactor is not worth it on evidence
+            // this thin. `deep_call_chain_has_no_depth_limit` exercises a
+            // 256-deep chain; revisit if a real configuration ever
+            // approaches a depth where the stack is a concern.
+            decision = policy_list_apply_net(
+                callee,
+                prefix,
+                decision.attr,
+                decision.weight,
+                decision.tag,
+                local_addr,
+            )?;
         }
         match entry.action {
             PolicyAction::Deny => {
@@ -13179,6 +13531,9 @@ pub fn policy_list_apply_net(
                 // Apply the entry's set clauses to the working
                 // attribute, then either return (Permit) or fall
                 // through to the next entry (Next).
+                if let Some(tag) = entry.set_tag {
+                    decision.tag = tag;
+                }
                 if let Some(action) = &entry.local_pref {
                     let current = decision
                         .attr
@@ -13245,7 +13600,13 @@ fn entry_matches(
     prefix: IpNet,
     bgp_attr: &BgpAttr,
     weight: u32,
+    tag: u32,
 ) -> bool {
+    if let Some(want) = entry.match_tag
+        && want != tag
+    {
+        return false;
+    }
     if let Some(prefix_set) = &entry.prefix_set
         && !prefix_set.matches(prefix)
     {
@@ -13387,6 +13748,9 @@ pub fn policy_list_apply_evpn(
     let mut decision = PolicyDecision {
         attr: bgp_attr,
         weight,
+        // See the note in route_apply_policy_in_evpn: EVPN does not
+        // carry tags.
+        tag: 0,
     };
     for entry in policy_list.entry.values() {
         if !entry_matches_evpn(entry, route, &decision.attr, decision.weight) {
@@ -13395,6 +13759,9 @@ pub fn policy_list_apply_evpn(
         match entry.action {
             PolicyAction::Deny => return None,
             PolicyAction::Permit | PolicyAction::Next => {
+                if let Some(tag) = entry.set_tag {
+                    decision.tag = tag;
+                }
                 if let Some(action) = &entry.local_pref {
                     let current = decision
                         .attr
@@ -13467,6 +13834,17 @@ fn entry_matches_evpn(
     bgp_attr: &BgpAttr,
     weight: u32,
 ) -> bool {
+    // EVPN routes carry no tag (see policy_list_apply_evpn), so a
+    // `match tag` clause compares against 0: `match tag 0` matches,
+    // anything else matches nothing. Silently skipping the clause —
+    // the previous behaviour — made a tag-guarded entry match EVERY
+    // EVPN route, turning e.g. `match tag 202 action deny` into a
+    // table-wide deny.
+    if let Some(want) = entry.match_tag
+        && want != 0
+    {
+        return false;
+    }
     if let Some(community_set) = &entry.community_set
         && !community_set.matches(bgp_attr)
     {
@@ -13784,6 +14162,12 @@ pub(super) fn route_sync_v4_chunk(peer: &mut Peer, bgp: &mut BgpTop, chunk: usiz
 
     let mut entries: Vec<(Arc<BgpAttr>, Ipv4Nlri)> = Vec::new();
     for prefix in keys {
+        // `suppress-fib-pending`: a new peer must not learn a prefix
+        // the forwarding plane has not confirmed; the release fan
+        // delivers it once the ack (or the deadline) arrives.
+        if fib_pending_blocks_sync(bgp.local_rib, IpNet::V4(prefix)) {
+            continue;
+        }
         // Read the LIVE Loc-RIB: a prefix withdrawn since the snapshot
         // is simply absent here (skipped), and a changed prefix sends
         // its current value — never a stale one.
@@ -13801,7 +14185,8 @@ pub(super) fn route_sync_v4_chunk(peer: &mut Peer, bgp: &mut BgpTop, chunk: usiz
             let Some((nlri, attr)) = route_update_ipv4(&ctx, &prefix, &rib, add_path) else {
                 continue;
             };
-            let Some(decision) = route_apply_policy_out(&ctx, &nlri, attr, rib.weight) else {
+            let Some(decision) = route_apply_policy_out(&ctx, &nlri, attr, rib.weight, rib.tag)
+            else {
                 continue;
             };
             rib.attr = bgp.attr_store.intern(decision.attr);
@@ -13863,6 +14248,11 @@ pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut BgpTop) {
     // (one MP_REACH UPDATE per shared attr-set).
     let mut entries: Vec<(Arc<BgpAttr>, Ipv4Nlri)> = Vec::new();
     for (prefix, mut rib) in routes {
+        // `suppress-fib-pending`: a new peer must not learn a prefix the
+        // forwarding plane has not confirmed — the release fan covers it.
+        if fib_pending_blocks_sync(bgp.local_rib, IpNet::V4(prefix)) {
+            continue;
+        }
         // RFC 9494 §4.3: stale routes only go to LLGR peers.
         if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, Afi::Ip, Safi::Unicast) {
             continue;
@@ -13872,7 +14262,7 @@ pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut BgpTop) {
             continue;
         };
 
-        let Some(decision) = route_apply_policy_out(&ctx, &nlri, attr, rib.weight) else {
+        let Some(decision) = route_apply_policy_out(&ctx, &nlri, attr, rib.weight, rib.tag) else {
             continue;
         };
 
@@ -13948,6 +14338,10 @@ pub fn route_sync_ipv6(peer: &mut Peer, bgp: &mut BgpTop) {
     // route stuck (caught by @bgp_shard_sync_v6's withdraw scenario).
     let mut entries: Vec<(Arc<BgpAttr>, Ipv6Nlri)> = Vec::new();
     for (prefix, mut rib) in routes {
+        // `suppress-fib-pending`: same skip as the v4 sync walk.
+        if fib_pending_blocks_sync(bgp.local_rib, IpNet::V6(prefix)) {
+            continue;
+        }
         // RFC 9494 §4.3: stale routes only go to LLGR peers.
         if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, Afi::Ip6, Safi::Unicast) {
             continue;
@@ -13966,6 +14360,7 @@ pub fn route_sync_ipv6(peer: &mut Peer, bgp: &mut BgpTop) {
             &nlri,
             attr,
             rib.weight,
+            rib.tag,
         ) else {
             continue;
         };
@@ -14032,6 +14427,7 @@ pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut BgpTop) {
                 &nlri,
                 attr,
                 rib.weight,
+                rib.tag,
             ) else {
                 continue;
             };
@@ -14112,6 +14508,7 @@ pub fn route_sync_vpnv6(peer: &mut Peer, bgp: &mut BgpTop) {
                 &nlri,
                 attr,
                 rib.weight,
+                rib.tag,
             ) else {
                 continue;
             };
@@ -14357,6 +14754,7 @@ pub fn route_sync_labelv4(peer: &mut Peer, bgp: &mut BgpTop) {
             &nlri,
             attr,
             best.weight,
+            best.tag,
         ) else {
             continue;
         };
@@ -14405,6 +14803,7 @@ pub fn route_sync_labelv6(peer: &mut Peer, bgp: &mut BgpTop) {
             &nlri,
             attr,
             best.weight,
+            best.tag,
         ) else {
             continue;
         };
@@ -19105,6 +19504,193 @@ mod policy_apply_tests {
     use super::*;
     use crate::policy::{AsPathMatcher, AsPathSet, NumericMatch, PolicyList};
 
+    /// `set tag` / `match tag`. The tag is a non-wire per-route marker:
+    /// SONiC stamps it on ingress (FROM_BGP_PEER) and matches it on
+    /// egress (the TSA route-map, and CHECK_IDF_ISOLATION which egress
+    /// calls), so the value has to survive on the route between the two.
+    mod tag_semantics {
+        use super::*;
+        use crate::policy::{NumericSet, PolicyAction, PolicyList};
+
+        fn policy(
+            set_tag: Option<u32>,
+            match_tag: Option<u32>,
+            action: PolicyAction,
+        ) -> PolicyList {
+            let mut list = PolicyList::default();
+            let entry = list.entry(10);
+            entry.action = action;
+            entry.set_tag = set_tag;
+            entry.match_tag = match_tag;
+            list
+        }
+
+        fn apply(list: &PolicyList, tag_in: u32) -> Option<super::super::PolicyDecision> {
+            super::super::policy_list_apply_net(
+                list,
+                IpNet::V4(Ipv4Net::from_str("10.0.0.0/24").unwrap()),
+                BgpAttr::new(),
+                0,
+                tag_in,
+                std::net::Ipv4Addr::UNSPECIFIED,
+            )
+        }
+
+        #[test]
+        fn set_tag_stamps_the_route() {
+            let out = apply(&policy(Some(202), None, PolicyAction::Permit), 0).expect("permit");
+            assert_eq!(out.tag, 202);
+        }
+
+        #[test]
+        fn match_tag_matches_what_was_set() {
+            let list = policy(None, Some(202), PolicyAction::Permit);
+            assert!(apply(&list, 202).is_some(), "matching tag must permit");
+        }
+
+        #[test]
+        fn match_tag_does_not_match_a_different_tag() {
+            // The entry does not match, so the walk falls off the end and
+            // the implicit default-deny applies.
+            let list = policy(None, Some(202), PolicyAction::Permit);
+            assert!(
+                apply(&list, 203).is_none(),
+                "a non-matching tag must not satisfy the entry"
+            );
+        }
+
+        #[test]
+        fn untagged_route_does_not_match_a_tag() {
+            let list = policy(None, Some(202), PolicyAction::Permit);
+            assert!(
+                apply(&list, 0).is_none(),
+                "0 is untagged and matches nothing"
+            );
+        }
+
+        /// The property the feature exists for: a tag stamped by one
+        /// policy is visible to a later one. In production the two are
+        /// the ingress and egress policies with the RIB in between; here
+        /// the RIB step is the `tag` that `apply` threads back in.
+        #[test]
+        fn tag_survives_from_one_policy_to_the_next() {
+            let ingress = policy(Some(202), None, PolicyAction::Permit);
+            let stamped = apply(&ingress, 0).expect("ingress permits").tag;
+            assert_eq!(stamped, 202);
+
+            let egress = policy(None, Some(202), PolicyAction::Permit);
+            assert!(
+                apply(&egress, stamped).is_some(),
+                "egress must see the tag ingress stamped — this is what \
+                 SONiC's TSA and IDF-isolation route-maps rely on"
+            );
+        }
+
+        /// `set tag` combined with `action next`, the shape the SONiC
+        /// allow-list template uses: the tag is stamped and evaluation
+        /// still falls through.
+        #[test]
+        fn set_tag_with_action_next_falls_through() {
+            let mut list = policy(Some(202), None, PolicyAction::Next);
+            let entry = list.entry(20);
+            entry.action = PolicyAction::Permit;
+            entry.local_pref = Some(NumericSet::Set(150));
+            let out = apply(&list, 0).expect("chain permits");
+            assert_eq!(out.tag, 202, "tag stamped by the first entry");
+            assert_eq!(
+                out.local_pref_or_zero(),
+                150,
+                "evaluation continued past the tagging entry"
+            );
+        }
+    }
+
+    /// `call` semantics, which are asymmetric and easy to get subtly
+    /// wrong: a callee deny denies the caller, but a callee permit does
+    /// NOT terminate the caller — it only reports "not denied".
+    mod call_semantics {
+        use super::*;
+        use crate::policy::{NumericSet, PolicyAction, PolicyList};
+        use std::sync::Arc;
+
+        fn med_setter(med: u32) -> PolicyList {
+            let mut list = PolicyList::default();
+            let entry = list.entry(10);
+            entry.action = PolicyAction::Permit;
+            entry.med = Some(NumericSet::Set(med));
+            list
+        }
+
+        fn denier() -> PolicyList {
+            let mut list = PolicyList::default();
+            list.entry(10).action = PolicyAction::Deny;
+            list
+        }
+
+        fn caller(callee: PolicyList, action: PolicyAction) -> PolicyList {
+            let mut list = PolicyList::default();
+            let entry = list.entry(10);
+            entry.action = action;
+            entry.call_name = Some("CALLEE".to_string());
+            entry.call_policy = Some(Arc::new(callee));
+            list
+        }
+
+        #[test]
+        fn callee_deny_denies_the_caller() {
+            let list = caller(denier(), PolicyAction::Permit);
+            assert!(
+                super::policy_list_apply(&list, &super::nlri("10.0.0.0/24"), BgpAttr::new())
+                    .is_none(),
+                "a callee that denies must deny the calling policy"
+            );
+        }
+
+        #[test]
+        fn callee_permit_continues_the_caller() {
+            let list = caller(med_setter(100), PolicyAction::Permit);
+            let out = super::policy_list_apply(&list, &super::nlri("10.0.0.0/24"), BgpAttr::new())
+                .expect("callee permit must not deny the caller");
+            assert_eq!(
+                out.med.map(|m| m.med),
+                Some(100),
+                "set clauses applied inside the callee are kept"
+            );
+        }
+
+        #[test]
+        fn unresolved_call_denies() {
+            let mut list = PolicyList::default();
+            let entry = list.entry(10);
+            entry.action = PolicyAction::Permit;
+            entry.call_name = Some("MISSING".to_string());
+            entry.call_policy = None;
+            assert!(
+                super::policy_list_apply(&list, &super::nlri("10.0.0.0/24"), BgpAttr::new())
+                    .is_none(),
+                "an unresolved call must deny, not silently permit"
+            );
+        }
+
+        /// The SONiC shape: `call X` plus `on-match next`, so the callee
+        /// runs and evaluation still falls through to the next entry.
+        #[test]
+        fn call_with_action_next_falls_through() {
+            let mut list = caller(med_setter(100), PolicyAction::Next);
+            let entry = list.entry(20);
+            entry.action = PolicyAction::Permit;
+            entry.local_pref = Some(NumericSet::Set(200));
+            let out = super::policy_list_apply(&list, &super::nlri("10.0.0.0/24"), BgpAttr::new())
+                .expect("chain must permit");
+            assert_eq!(out.med.map(|m| m.med), Some(100), "callee ran");
+            assert_eq!(
+                out.local_pref.map(|l| l.local_pref),
+                Some(200),
+                "evaluation continued past the calling entry"
+            );
+        }
+    }
+
     /// Test wrapper that preserves the legacy `Option<BgpAttr>`
     /// shape — weight defaults to 0, local_addr defaults to
     /// 0.0.0.0, and both are dropped from the result. Tests that
@@ -19783,6 +20369,27 @@ mod policy_apply_tests {
         assert!(
             evpn_apply(&list, &evpn_multicast(), attr_no_rt).is_none(),
             "absent RT-EC yields no VNI, so the match fails"
+        );
+    }
+
+    /// EVPN routes are untagged, so `match tag N` (N != 0) must match
+    /// NOTHING — not everything. Silently skipping the clause made a
+    /// reused tag-guarded entry (`match tag 202 action deny`) deny the
+    /// entire EVPN table.
+    #[test]
+    fn match_tag_on_evpn_matches_only_tag_zero() {
+        let mut tagged = PolicyList::default();
+        tagged.entry(10).match_tag = Some(202);
+        assert!(
+            evpn_apply(&tagged, &evpn_mac(100), attr_with("1", None, None)).is_none(),
+            "a nonzero tag guard must not match an untagged EVPN route"
+        );
+
+        let mut zero = PolicyList::default();
+        zero.entry(10).match_tag = Some(0);
+        assert!(
+            evpn_apply(&zero, &evpn_mac(100), attr_with("1", None, None)).is_some(),
+            "tag 0 is what an untagged route carries"
         );
     }
 
@@ -22266,13 +22873,14 @@ mod local_as_tests {
 
         // VPNv4: the bound deny policy filters the route out.
         assert!(
-            super::route_apply_policy_out_at(&peer, vpnv4, &nlri, BgpAttr::default(), 0).is_none(),
+            super::route_apply_policy_out_at(&peer, vpnv4, &nlri, BgpAttr::default(), 0, 0)
+                .is_none(),
             "VPNv4 Output policy (deny) must filter the route",
         );
         // v4-unicast: no binding for this family → default permit; the
         // VPNv4 deny must not leak across families.
         assert!(
-            super::route_apply_policy_out_at(&peer, v4u, &nlri, BgpAttr::default(), 0).is_some(),
+            super::route_apply_policy_out_at(&peer, v4u, &nlri, BgpAttr::default(), 0, 0).is_some(),
             "v4-unicast has no Output policy → permit (no cross-family leak)",
         );
     }
@@ -23155,6 +23763,174 @@ mod srv6_sid_family_tests {
         );
         let v6 = select_fib_entry_v6(&rib, Some(&t), None).expect("v6 entry");
         assert_eq!(entry_segs(&v6), vec![dt6]);
+    }
+}
+
+#[cfg(test)]
+mod suppress_fib_pending_tests {
+    use super::*;
+    use ipnet::Ipv4Net;
+    use std::str::FromStr;
+
+    fn v4(p: &str) -> IpNet {
+        IpNet::V4(Ipv4Net::from_str(p).unwrap())
+    }
+
+    fn rib(enabled: bool) -> LocalRib {
+        LocalRib {
+            suppress_fib_pending: enabled,
+            ..LocalRib::default()
+        }
+    }
+
+    /// `fib_pending_hold`'s decision, minus the `BgpTop` it would
+    /// otherwise need (56 borrowed fields to check one branch). Kept
+    /// byte-for-byte in step with the real one; the state machine is the
+    /// part under test. `is_withdraw` stands in for `selected.is_empty()`
+    /// and `installable` for the caller's `fib_installable_v4/6` verdict.
+    fn hold(rib: &mut LocalRib, prefix: IpNet, is_withdraw: bool, installable: bool) -> bool {
+        if !rib.suppress_fib_pending {
+            return false;
+        }
+        if is_withdraw || !installable {
+            rib.fib_pending.remove(&prefix);
+            return false;
+        }
+        use std::collections::btree_map::Entry;
+        match rib.fib_pending.entry(prefix) {
+            Entry::Occupied(e) => match *e.get() {
+                FibPending::Confirmed => {
+                    e.remove();
+                    false
+                }
+                FibPending::Waiting(since) => {
+                    if since.elapsed() >= FIB_PENDING_TIMEOUT {
+                        e.remove();
+                        rib.fib_pending_timeouts += 1;
+                        false
+                    } else {
+                        true
+                    }
+                }
+            },
+            Entry::Vacant(e) => {
+                e.insert(FibPending::Waiting(std::time::Instant::now()));
+                true
+            }
+        }
+    }
+
+    /// Off is the default and must be exactly today's behaviour: no
+    /// hold, and nothing recorded.
+    #[test]
+    fn disabled_never_holds() {
+        let mut r = rib(false);
+        assert!(!hold(&mut r, v4("10.0.0.0/24"), false, true));
+        assert!(r.fib_pending.is_empty(), "must not record when disabled");
+    }
+
+    /// The first advertise after an install is held; a second attempt
+    /// before the ack stays held.
+    #[test]
+    fn enabled_holds_until_acked() {
+        let mut r = rib(true);
+        let p = v4("10.0.0.0/24");
+        assert!(hold(&mut r, p, false, true), "first advertise must be held");
+        assert!(hold(&mut r, p, false, true), "still held before the ack");
+    }
+
+    /// The bug this state machine exists for, and the reason it is two
+    /// states rather than a set.
+    ///
+    /// Releasing re-enters the same advertise path a never-held prefix
+    /// takes — deliberately. With a plain "is it pending" set, the ack
+    /// would remove the entry, the release would find nothing, record it
+    /// as newly pending and hold it AGAIN, forever. `Confirmed` is what
+    /// the release consumes on the way through.
+    #[test]
+    fn ack_survives_one_trip_through_the_advertise_path() {
+        let mut r = rib(true);
+        let p = v4("10.0.0.0/24");
+        assert!(hold(&mut r, p, false, true));
+
+        // The ack marks rather than removes.
+        r.fib_pending.insert(p, FibPending::Confirmed);
+        assert!(
+            !hold(&mut r, p, false, true),
+            "the release must pass the gate"
+        );
+        assert!(
+            !r.fib_pending.contains_key(&p),
+            "and must consume the entry rather than re-arm it"
+        );
+
+        // A later install of the same prefix is held again, as it should
+        // be — it is a new thing to confirm.
+        assert!(
+            hold(&mut r, p, false, true),
+            "a fresh install is held again"
+        );
+    }
+
+    /// The condition most dangerous to get backwards. Suppressing a
+    /// withdraw would prolong exactly the blackhole the feature exists
+    /// to prevent, so a withdraw passes even while the prefix is pending.
+    #[test]
+    fn withdraw_is_never_suppressed() {
+        let mut r = rib(true);
+        let p = v4("10.0.0.0/24");
+        assert!(hold(&mut r, p, false, true), "advertise is held");
+        assert!(
+            !hold(&mut r, p, true, true),
+            "a withdraw must pass even while the prefix is pending"
+        );
+        assert!(
+            !r.fib_pending.contains_key(&p),
+            "and must clear the pending state: the install it was \
+             waiting on is gone, so a stale entry would make the NEXT \
+             install of this prefix skip its hold"
+        );
+        assert!(
+            hold(&mut r, p, false, true),
+            "a reinstall after the withdraw is a new thing to confirm"
+        );
+    }
+
+    /// A selection that installs nothing gets no forwarding-plane ack:
+    /// a locally-originated `network` prefix with no usable next-hop, or
+    /// a table-map deny. Arming a hold for it could only wait out the
+    /// full timeout, stalling every such prefix by 30 seconds.
+    #[test]
+    fn uninstallable_selection_is_never_held() {
+        let mut r = rib(true);
+        let p = v4("10.0.0.0/24");
+        assert!(!hold(&mut r, p, false, false), "must pass immediately");
+        assert!(r.fib_pending.is_empty(), "and must not arm a hold");
+
+        // The reconfiguration corner: a prefix already pending stops
+        // being installable (table-map applied mid-wait). The hold is
+        // for an install that no longer exists — clear it.
+        assert!(hold(&mut r, p, false, true), "installable: held");
+        assert!(!hold(&mut r, p, false, false), "now uninstallable: pass");
+        assert!(r.fib_pending.is_empty(), "and the stale hold is gone");
+    }
+
+    /// A lost ack costs latency, not permanent invisibility: once the
+    /// deadline passes the prefix is advertised and counted.
+    #[test]
+    fn expiry_releases_and_counts() {
+        let mut r = rib(true);
+        let p = v4("10.0.0.0/24");
+        r.fib_pending.insert(
+            p,
+            FibPending::Waiting(std::time::Instant::now() - FIB_PENDING_TIMEOUT),
+        );
+        assert!(
+            !hold(&mut r, p, false, true),
+            "expired prefix must advertise"
+        );
+        assert_eq!(r.fib_pending_timeouts, 1, "and must be counted");
+        assert!(!r.fib_pending.contains_key(&p));
     }
 }
 

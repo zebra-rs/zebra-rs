@@ -326,6 +326,12 @@ fn config_peer(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
         // `propagate_instance_tracing`.
         peer.tracing_instance = bgp.tracing.clone();
         peer.ptx = bgp.ptx.clone();
+        // Seed the instance GR state: a startup config applies
+        // `/router/bgp/graceful-restart` BEFORE this neighbor exists,
+        // so waiting for `graceful_restart_resync` (which only runs
+        // from the GR callbacks) would leave this peer advertising no
+        // GR capability — and warm reboot flushing its routes.
+        peer.config.gr_global = bgp.gr_global_resolved();
         bgp.peers.insert(addr, peer);
         // Seed `shared_network` from interface addresses learned so far so
         // the eBGP connected check is accurate on this peer's first dial
@@ -3164,6 +3170,102 @@ pub(super) fn peer_policy_ident_decode(ident: usize) -> (usize, Option<AfiSafi>)
 /// `PolicyType::TableMap`, even when the name doesn't resolve — so
 /// the FIB flips exactly once, on the definitive answer. Delete
 /// resyncs immediately (nothing will reply).
+/// `set/delete router bgp suppress-fib-pending <bool>`.
+///
+/// Turning it OFF must flush the pending set and advertise everything in
+/// it. Otherwise those prefixes stay suppressed forever by a feature
+/// that is no longer enabled — invisible, because "not advertised" looks
+/// like nothing at all from the outside.
+fn config_suppress_fib_pending(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let value = op.is_set() && args.boolean()?;
+    if bgp.local_rib.suppress_fib_pending == value {
+        return Some(());
+    }
+    bgp.local_rib.suppress_fib_pending = value;
+    if !value {
+        let held: Vec<ipnet::IpNet> = bgp.local_rib.fib_pending.keys().copied().collect();
+        bgp.local_rib.fib_pending.clear();
+        for prefix in held {
+            bgp.fib_pending_release(prefix);
+        }
+    }
+    Some(())
+}
+
+/// Push the instance-level graceful-restart state onto every peer and
+/// bounce the sessions that need to renegotiate.
+///
+/// GR is advertised in the OPEN (RFC 4724 §3), so a change only reaches
+/// an Established session by reconnecting it. That is disruptive, which
+/// is exactly why it is diff-gated: re-applying an unchanged value must
+/// not bounce anything.
+///
+/// `graceful-restart-disable` outranks `enabled`, so the two leaves can
+/// arrive in either order and the result is the same.
+fn graceful_restart_resync(bgp: &mut Bgp) {
+    let resolved = bgp.gr_global_resolved();
+
+    let mut stops: Vec<usize> = Vec::new();
+    for (_, peer) in bgp.peers.iter_mut_all() {
+        if peer.config.gr_global == resolved {
+            continue;
+        }
+        peer.config.gr_global = resolved;
+        // An Idle peer carries the new capability in its first OPEN, so
+        // only a session that has already negotiated needs restarting —
+        // the same rule `sweep_members` applies to the inheritable
+        // session knobs.
+        if !matches!(peer.state, super::peer::State::Idle) {
+            stops.push(peer.ident);
+        }
+    }
+    for ident in stops {
+        let _ = bgp
+            .tx
+            .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
+    }
+}
+
+/// `set/delete router bgp graceful-restart enabled <bool>`.
+fn config_gr_enabled(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    bgp.graceful_restart.enabled = op.is_set() && args.boolean()?;
+    graceful_restart_resync(bgp);
+    Some(())
+}
+
+/// `set/delete router bgp graceful-restart restart-time <secs>`.
+///
+/// Delete restores the default rather than 0: a Restart Time of zero
+/// tells the peer to flush our routes immediately, which is the opposite
+/// of what removing a tuning knob should mean.
+fn config_gr_restart_time(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    bgp.graceful_restart.restart_time = if op.is_set() { Some(args.u32()?) } else { None };
+    graceful_restart_resync(bgp);
+    Some(())
+}
+
+/// `set/delete router bgp graceful-restart preserve-fw-state <bool>`.
+fn config_gr_preserve_fw_state(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    bgp.graceful_restart.preserve_fw_state = op.is_set() && args.boolean()?;
+    graceful_restart_resync(bgp);
+    Some(())
+}
+
+/// `set/delete router bgp graceful-restart disable <bool>` — hard off,
+/// outranking `enabled`.
+fn config_gr_disable(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    bgp.graceful_restart_disable = op.is_set() && args.boolean()?;
+    graceful_restart_resync(bgp);
+    Some(())
+}
+
+/// `set/delete router bgp long-lived-graceful-restart stale-time <secs>`.
+fn config_gr_llgr_stale_time(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    bgp.graceful_restart.llgr_stale_time = if op.is_set() { Some(args.u32()?) } else { None };
+    graceful_restart_resync(bgp);
+    Some(())
+}
+
 /// The table for a unicast family's multipath policy, or `None` for a
 /// family that has no multipath (VPN / EVPN / flowspec resolve their own
 /// transport and install through other paths).
@@ -3264,11 +3366,24 @@ pub(super) fn config_table_map(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> O
     Some(())
 }
 
+/// `set/delete router bgp neighbor <addr> afi-safi <name> add-path
+/// <mode>`.
+///
+/// The pure setter records the verbatim statement and the effective
+/// value; re-resolving afterwards matters for the delete case, where the
+/// effective mode must fall back to a referenced neighbor-group's
+/// opinion instead of vanishing.
 fn config_add_path(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     let afi_safi: AfiSafi = args.afi_safi()?;
     let peer = bgp.peers.get_mut(&addr)?;
-    super::afi_knob::set_add_path(&mut peer.config, afi_safi, op, &mut args)
+    super::afi_knob::set_add_path(&mut peer.config, afi_safi, op, &mut args)?;
+    super::neighbor_group::apply_resolved_add_path(
+        &bgp.neighbor_groups,
+        &mut peer.config,
+        afi_safi,
+    );
+    Some(())
 }
 
 /// `set/delete router bgp neighbor <addr> afi-safi <name>
@@ -4472,6 +4587,10 @@ impl Bgp {
             super::neighbor_group::config_neighbor_group_afi_safi_enabled,
         );
         self.callback_add(
+            "/router/bgp/neighbor-group/afi-safi/add-path",
+            super::neighbor_group::config_neighbor_group_afi_safi_add_path,
+        );
+        self.callback_add(
             "/router/bgp/neighbor-group/afi-safi/next-hop-self",
             super::neighbor_group::config_neighbor_group_afi_safi_next_hop_self,
         );
@@ -5305,6 +5424,28 @@ impl Bgp {
         // Per-AFI multipath (zebra-bgp-multipath.yang): how many
         // equal-cost paths to install, and how strictly "equal-cost" is
         // judged.
+        // `suppress-fib-pending` (zebra-bgp-suppress-fib-pending.yang).
+        self.callback_add(
+            "/router/bgp/suppress-fib-pending",
+            config_suppress_fib_pending,
+        );
+
+        // Instance-level graceful restart (zebra-bgp-graceful-restart.yang).
+        self.callback_add("/router/bgp/graceful-restart/enabled", config_gr_enabled);
+        self.callback_add(
+            "/router/bgp/graceful-restart/restart-time",
+            config_gr_restart_time,
+        );
+        self.callback_add(
+            "/router/bgp/graceful-restart/preserve-fw-state",
+            config_gr_preserve_fw_state,
+        );
+        self.callback_add("/router/bgp/graceful-restart/disable", config_gr_disable);
+        self.callback_add(
+            "/router/bgp/long-lived-graceful-restart/stale-time",
+            config_gr_llgr_stale_time,
+        );
+
         self.callback_add("/router/bgp/afi-safi/maximum-paths", config_maximum_paths);
         self.callback_add(
             "/router/bgp/afi-safi/maximum-paths-ibgp",
@@ -7887,6 +8028,219 @@ mod neighbor_group_wiring_tests {
         )
         .unwrap();
         assert!(!nhs(&bgp), "entry delete clears the inherited value");
+    }
+
+    /// A peer created AFTER the GR statements must still get them: a
+    /// startup config applies `/router/bgp/graceful-restart` before
+    /// `/router/bgp/neighbor` in path order, so every real boot hits
+    /// this ordering — while the resync only runs from the GR
+    /// callbacks. Without creation-time seeding, every startup-config
+    /// peer advertised no GR capability and warm reboot flushed all of
+    /// its routes.
+    #[tokio::test]
+    async fn peer_created_after_gr_config_inherits_it() {
+        let mut bgp = fresh_bgp();
+        config_gr_enabled(&mut bgp, arg_words(&["true"]), ConfigOp::Set).unwrap();
+        config_gr_restart_time(&mut bgp, arg_words(&["240"]), ConfigOp::Set).unwrap();
+        config_gr_preserve_fw_state(&mut bgp, arg_words(&["true"]), ConfigOp::Set).unwrap();
+
+        // The neighbor arrives last, as it does in a startup config.
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+
+        let gr = bgp.peers.get(&peer_addr()).unwrap().config.gr_global;
+        assert!(gr.enabled, "a late-created peer must inherit global GR");
+        assert_eq!(gr.restart_time, Some(240));
+        assert!(gr.preserve_fw_state);
+
+        // And `disable` set before creation outranks `enabled` for the
+        // late peer exactly as the resync would resolve it.
+        config_gr_disable(&mut bgp, arg_words(&["true"]), ConfigOp::Set).unwrap();
+        config_peer(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
+        let gr2 = bgp
+            .peers
+            .get(&"10.0.0.2".parse().unwrap())
+            .unwrap()
+            .config
+            .gr_global;
+        assert!(!gr2.enabled, "disable must outrank enabled at seeding too");
+    }
+
+    /// Instance-level GR resolves onto peers, and `disable` outranks
+    /// `enabled` regardless of which arrives last — the two are set from
+    /// different SONiC roles, so an order-dependent result would be a
+    /// real bug rather than a theoretical one.
+    #[tokio::test]
+    async fn graceful_restart_resolves_onto_peers_and_disable_wins() {
+        let mut bgp = fresh_bgp();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+
+        let gr = |bgp: &Bgp| bgp.peers.get(&peer_addr()).unwrap().config.gr_global;
+
+        config_gr_enabled(&mut bgp, arg_words(&["true"]), ConfigOp::Set).unwrap();
+        config_gr_restart_time(&mut bgp, arg_words(&["240"]), ConfigOp::Set).unwrap();
+        config_gr_preserve_fw_state(&mut bgp, arg_words(&["true"]), ConfigOp::Set).unwrap();
+        assert!(gr(&bgp).enabled, "global GR must reach the peer");
+        assert_eq!(gr(&bgp).restart_time, Some(240));
+        assert!(gr(&bgp).preserve_fw_state);
+
+        // disable arriving AFTER enabled.
+        config_gr_disable(&mut bgp, arg_words(&["true"]), ConfigOp::Set).unwrap();
+        assert!(!gr(&bgp).enabled, "disable must outrank enabled");
+
+        // …and enabled re-asserted AFTER disable must still lose.
+        config_gr_enabled(&mut bgp, arg_words(&["true"]), ConfigOp::Set).unwrap();
+        assert!(!gr(&bgp).enabled, "order must not decide the outcome");
+
+        config_gr_disable(&mut bgp, arg_words(&["true"]), ConfigOp::Delete).unwrap();
+        assert!(gr(&bgp).enabled, "clearing disable restores GR");
+    }
+
+    /// Deleting `restart-time` restores the default rather than 0. A
+    /// Restart Time of zero tells the peer to flush our routes at once,
+    /// which is the opposite of what removing a tuning knob should mean.
+    #[tokio::test]
+    async fn deleting_restart_time_restores_the_default_not_zero() {
+        let mut bgp = fresh_bgp();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_gr_enabled(&mut bgp, arg_words(&["true"]), ConfigOp::Set).unwrap();
+        config_gr_restart_time(&mut bgp, arg_words(&["240"]), ConfigOp::Set).unwrap();
+        config_gr_restart_time(&mut bgp, arg_words(&["240"]), ConfigOp::Delete).unwrap();
+
+        let gr = bgp.peers.get(&peer_addr()).unwrap().config.gr_global;
+        assert_eq!(gr.restart_time, None);
+        assert_eq!(
+            gr.restart_time_or_default(),
+            super::super::peer::GR_RESTART_TIME_DEFAULT,
+            "delete must not advertise a 0 Restart Time"
+        );
+    }
+
+    /// Per-family `add-path` inherits through the group's afi-safi entry
+    /// with the same explicit-wins semantics as `next-hop-self`.
+    ///
+    /// The delete leg is the one that earns its keep: `add-path`'s pure
+    /// setter writes the effective value directly, so without the
+    /// re-resolve in `config_add_path` a deleted per-neighbor statement
+    /// would drop the capability entirely instead of falling back to the
+    /// group.
+    #[tokio::test]
+    async fn group_add_path_propagates_with_explicit_priority() {
+        use super::super::neighbor_group::config_neighbor_group_afi_safi_add_path;
+        use bgp_packet::AddPathSendReceive;
+
+        let mut bgp = fresh_bgp();
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["G", "65000"]), ConfigOp::Set)
+            .unwrap();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_peer_neighbor_group(&mut bgp, arg_words(&["10.0.0.1", "G"]), ConfigOp::Set).unwrap();
+
+        let mode = |bgp: &Bgp| {
+            bgp.peers
+                .get(&peer_addr())
+                .unwrap()
+                .config
+                .addpath
+                .get(&v4())
+                .map(|v| v.send_receive)
+        };
+
+        config_neighbor_group_afi_safi_enabled(
+            &mut bgp,
+            arg_words(&["G", "ipv4", "true"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert_eq!(mode(&bgp), None, "no opinion on either side requests none");
+
+        config_neighbor_group_afi_safi_add_path(
+            &mut bgp,
+            arg_words(&["G", "ipv4", "send"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert_eq!(
+            mode(&bgp),
+            Some(AddPathSendReceive::Send),
+            "group add-path must apply to the member"
+        );
+
+        // Explicit per-neighbor send-receive outranks the group's send.
+        config_add_path(
+            &mut bgp,
+            arg_words(&["10.0.0.1", "ipv4", "send-receive"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert_eq!(
+            mode(&bgp),
+            Some(AddPathSendReceive::SendReceive),
+            "explicit statement must win"
+        );
+
+        // Removing the explicit statement falls back to the group.
+        config_add_path(
+            &mut bgp,
+            arg_words(&["10.0.0.1", "ipv4", "send-receive"]),
+            ConfigOp::Delete,
+        )
+        .unwrap();
+        assert_eq!(
+            mode(&bgp),
+            Some(AddPathSendReceive::Send),
+            "delete of the explicit statement must fall back to the group opinion"
+        );
+
+        // Dropping the group's opinion clears it: the union sweep is what
+        // removes the entry rather than leaving the last value latched.
+        config_neighbor_group_afi_safi_add_path(
+            &mut bgp,
+            arg_words(&["G", "ipv4", "send"]),
+            ConfigOp::Delete,
+        )
+        .unwrap();
+        assert_eq!(mode(&bgp), None, "dropping the group opinion clears it");
+    }
+
+    /// A member that joins the group *after* the opinion was recorded
+    /// still gets it. This is the listen-range case the knob exists for:
+    /// a dynamic peer is materialized on accept, long after the group was
+    /// configured, so inheritance cannot depend on config ordering.
+    #[tokio::test]
+    async fn group_add_path_applies_to_a_later_joining_member() {
+        use super::super::neighbor_group::config_neighbor_group_afi_safi_add_path;
+        use bgp_packet::AddPathSendReceive;
+
+        let mut bgp = fresh_bgp();
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["G", "65000"]), ConfigOp::Set)
+            .unwrap();
+        config_neighbor_group_afi_safi_enabled(
+            &mut bgp,
+            arg_words(&["G", "ipv4", "true"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        config_neighbor_group_afi_safi_add_path(
+            &mut bgp,
+            arg_words(&["G", "ipv4", "send"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+
+        // Peer arrives only now, and binds to the group afterwards.
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_peer_neighbor_group(&mut bgp, arg_words(&["10.0.0.1", "G"]), ConfigOp::Set).unwrap();
+
+        assert_eq!(
+            bgp.peers
+                .get(&peer_addr())
+                .unwrap()
+                .config
+                .addpath
+                .get(&v4())
+                .map(|v| v.send_receive),
+            Some(AddPathSendReceive::Send),
+            "a peer binding to the group later must still inherit add-path"
+        );
     }
 
     // ---- the nine additional inheritable whole-session knobs --------

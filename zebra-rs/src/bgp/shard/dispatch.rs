@@ -207,7 +207,8 @@ impl BgpShard {
             let Some((nlri, attr)) = route_update_ipv4(&ctx, &prefix, &rib, params.add_path) else {
                 continue;
             };
-            let Some(decision) = route_apply_policy_out(&ctx, &nlri, attr, rib.weight) else {
+            let Some(decision) = route_apply_policy_out(&ctx, &nlri, attr, rib.weight, rib.tag)
+            else {
                 continue;
             };
             let arc = self.intern(decision.attr);
@@ -384,6 +385,7 @@ impl BgpShard {
                     ipnet::IpNet::V4(nlri.prefix),
                     (*rib.attr).clone(),
                     0,
+                    rib.tag,
                 ),
                 None => crate::bgp::route::apply_policy_net(
                     &Default::default(),
@@ -392,6 +394,7 @@ impl BgpShard {
                     ipnet::IpNet::V4(nlri.prefix),
                     (*rib.attr).clone(),
                     0,
+                    rib.tag,
                 ),
             }
         } else {
@@ -440,6 +443,11 @@ impl BgpShard {
 
         rib.attr = self.intern(decision.attr);
         rib.weight = decision.weight;
+        // The tag an ingress `set tag` stamped. Dropping this here was
+        // the bug that made tag-based egress policy (SONiC's TSA
+        // isolation: stamp on ingress, `match tag` on egress) a silent
+        // no-op for every route that came through the shard.
+        rib.tag = decision.tag;
         // Main resolved next-hop reachability via NHT; gate the row with
         // it before best-path (it's a tiebreaker / FIB-eligibility input).
         rib.nexthop_reachable = nexthop_reachable;
@@ -639,6 +647,8 @@ impl BgpShard {
 
         rib.attr = self.intern(decision.attr);
         rib.weight = decision.weight;
+        // Ingress `set tag` — same fix as the v4 twin above.
+        rib.tag = decision.tag;
         rib.nexthop_reachable = nexthop_reachable;
         rib.vrf_transit_only = vrf_transit_only;
         // VPNv6 AddPath: clone the candidate before it moves into the
@@ -948,6 +958,7 @@ impl BgpShard {
                         ipnet::IpNet::V4(prefix),
                         pre,
                         0,
+                        stored.tag,
                     ),
                     None => crate::bgp::route::apply_policy_net(
                         &Default::default(),
@@ -956,6 +967,7 @@ impl BgpShard {
                         ipnet::IpNet::V4(prefix),
                         pre,
                         0,
+                        stored.tag,
                     ),
                 };
                 match decision {
@@ -968,6 +980,10 @@ impl BgpShard {
                         let mut new_rib = stored.clone();
                         new_rib.attr = self.intern(d.attr);
                         new_rib.weight = d.weight;
+                        // The replayed policy may stamp a different tag
+                        // than the stored row carries — same fix as the
+                        // live-ingest path.
+                        new_rib.tag = d.tag;
                         let mut added = new_rib.clone();
                         let (replaced, selected, next_id) = self.update(None, prefix, new_rib);
                         added.local_id = next_id;
@@ -1028,7 +1044,11 @@ mod tests {
             stale: false,
             nexthop_reachable: true,
             vrf_transit_only: false,
-            decision: permit.then_some(PolicyDecision { attr, weight: 100 }),
+            decision: permit.then_some(PolicyDecision {
+                attr,
+                weight: 100,
+                tag: 0,
+            }),
             compute_policy: false,
         })
     }
@@ -1081,7 +1101,11 @@ mod tests {
             stale: false,
             nexthop_reachable: true,
             vrf_transit_only: false,
-            decision: Some(PolicyDecision { attr, weight: 100 }),
+            decision: Some(PolicyDecision {
+                attr,
+                weight: 100,
+                tag: 0,
+            }),
         })
     }
 
@@ -1096,6 +1120,80 @@ mod tests {
             stale: false,
             nexthop_reachable: true,
         })
+    }
+
+    /// The ingress `set tag` must survive the shard ingest. Copying
+    /// `decision.attr` and `decision.weight` but dropping
+    /// `decision.tag` silenced every tag-based egress policy — stamp on
+    /// ingress, `match tag` on egress, SONiC's TSA isolation pattern —
+    /// for every v4/v6-unicast route, while the policy unit tests (which
+    /// exercise `apply_policy_net` alone) kept passing.
+    #[test]
+    fn update_v4_persists_the_policy_tag() {
+        let mut shard = BgpShard::default();
+        let attr = attr_with_nh("192.0.2.1");
+        let out = shard.handle(
+            ShardMsg::UpdateV4(ShardUpdateV4 {
+                ident: 2,
+                rd: None,
+                nlri: v4("10.0.0.0/24"),
+                peer_router_id: std::net::Ipv4Addr::new(10, 0, 0, 1),
+                typ: BgpRibType::EBGP,
+                attr: attr.clone(),
+                label: None,
+                nexthop: None,
+                enhe_egress: None,
+                stale: false,
+                nexthop_reachable: true,
+                vrf_transit_only: false,
+                decision: Some(PolicyDecision {
+                    attr,
+                    weight: 100,
+                    tag: 202,
+                }),
+                compute_policy: false,
+            }),
+            None,
+        );
+        let [ShardOut::BestPathV4 { selected, .. }] = &out[..] else {
+            panic!("expected one BestPathV4");
+        };
+        assert_eq!(selected[0].tag, 202, "ingress tag must reach the Loc-RIB");
+    }
+
+    /// v6 twin of `update_v4_persists_the_policy_tag`.
+    #[test]
+    fn update_v6_persists_the_policy_tag() {
+        let mut shard = BgpShard::default();
+        let attr = BgpAttr {
+            nexthop: Some(BgpNexthop::Ipv6("2001:db8::1".parse().unwrap())),
+            ..Default::default()
+        };
+        let out = shard.handle(
+            ShardMsg::UpdateV6(ShardUpdateV6 {
+                ident: 2,
+                rd: None,
+                nlri: v6("2001:db8:1::/48"),
+                peer_router_id: std::net::Ipv4Addr::new(10, 0, 0, 1),
+                typ: BgpRibType::EBGP,
+                attr: attr.clone(),
+                label: None,
+                nexthop: None,
+                stale: false,
+                nexthop_reachable: true,
+                vrf_transit_only: false,
+                decision: Some(PolicyDecision {
+                    attr,
+                    weight: 100,
+                    tag: 202,
+                }),
+            }),
+            None,
+        );
+        let [ShardOut::BestPathV6 { selected, .. }] = &out[..] else {
+            panic!("expected one BestPathV6");
+        };
+        assert_eq!(selected[0].tag, 202, "ingress tag must reach the Loc-RIB");
     }
 
     #[test]

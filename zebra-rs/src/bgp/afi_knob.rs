@@ -30,31 +30,35 @@
 //! is deliberately absent — see the module docs on
 //! [`super::vrf_config`].
 
-use bgp_packet::{AddPathSendReceive, AddPathValue, AfiSafi};
+use bgp_packet::{AddPathSendReceive, AfiSafi};
 
 use super::peer::{AfiSafiEncapType, PeerConfig};
 use crate::config::{Args, ConfigOp};
 
 /// `afi-safi <name> add-path <send|receive|send-receive>`.
+///
+/// Records the verbatim statement *and* the effective value through
+/// [`PeerConfig::stage_add_path`], which keeps the two in step — an
+/// explicit statement always outranks a neighbor-group's opinion, so
+/// resolving here would return the same thing anyway.
+///
+/// The two diverge only on delete, where the effective value must fall
+/// back to the group instead of vanishing. Both callers re-resolve after
+/// this returns: the global callback against `Bgp::neighbor_groups`, and
+/// the per-VRF path in `materialize_peers` against the `groups` map it is
+/// already handed.
 pub(super) fn set_add_path(
     cfg: &mut PeerConfig,
     afi_safi: AfiSafi,
     op: ConfigOp,
     args: &mut Args,
 ) -> Option<()> {
-    if op.is_set() {
-        let send_receive: AddPathSendReceive = args.string()?.parse().ok()?;
-        cfg.addpath.insert(
-            afi_safi,
-            AddPathValue {
-                afi: afi_safi.afi,
-                safi: afi_safi.safi,
-                send_receive,
-            },
-        );
+    let mode = if op.is_set() {
+        Some(args.string()?.parse::<AddPathSendReceive>().ok()?)
     } else {
-        cfg.addpath.remove(&afi_safi);
-    }
+        None
+    };
+    cfg.stage_add_path(afi_safi, mode);
     Some(())
 }
 

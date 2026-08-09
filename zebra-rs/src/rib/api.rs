@@ -229,6 +229,19 @@ pub enum RibRx {
         bulk: BulkPhase,
     },
 
+    /// The forwarding plane's verdict on a prefix this speaker
+    /// installed, from an FPM offload acknowledgement.
+    ///
+    /// Delivered to the BGP subscriber only, not broadcast: there is one
+    /// of these per installed route, and no other protocol consumes
+    /// them. `success = false` is a programming *failure* reported by
+    /// the acknowledger — distinct from never hearing back at all, which
+    /// the consumer's own timeout covers.
+    RouteOffload {
+        prefix: IpNet,
+        success: bool,
+    },
+
     // ---- `redistribute table <id>` route push ---------------------
     //
     // Per-kernel-table delivery for `Message::RedistTableAdd`

@@ -7909,6 +7909,13 @@ fn show_bgp_neighbor_group_detail(
                 if v.next_hop_self == Some(true) {
                     s.push_str(" nhs");
                 }
+                // For a listen-range group this is the only place a
+                // dynamic member's ADD-PATH mode can come from, so an
+                // operator checking why a peer did (not) negotiate it
+                // has nowhere else to look.
+                if let Some(mode) = v.add_path {
+                    s.push_str(&format!(" add-path {mode}"));
+                }
                 s
             })
             .collect();

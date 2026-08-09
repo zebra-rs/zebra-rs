@@ -31,7 +31,7 @@
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 
-use bgp_packet::{Afi, AfiSafi, AfiSafis, Safi};
+use bgp_packet::{AddPathSendReceive, AddPathValue, Afi, AfiSafi, AfiSafis, Safi};
 
 use super::Bgp;
 use super::inst::Message;
@@ -177,6 +177,14 @@ impl InheritableKnobs {
 pub struct GroupAfiSafi {
     pub enabled: bool,
     pub next_hop_self: Option<bool>,
+    /// Per-family `add-path` opinion inherited by members. `None` means
+    /// no opinion — the member's own statement (or none at all) stands.
+    ///
+    /// Load-bearing for a listen-range group: its members are
+    /// materialized on accept, so there is no per-neighbor statement to
+    /// carry an ADD-PATH capability. Without the group opinion the
+    /// capability cannot be requested for dynamic peers at all.
+    pub add_path: Option<AddPathSendReceive>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -411,6 +419,107 @@ pub fn resolve_next_hop_self(
                 .and_then(|entry| entry.next_hop_self)
         })
         .unwrap_or(false)
+}
+
+/// `set router bgp neighbor-group <name> afi-safi <family> add-path
+/// <send|receive|send-receive>`.
+///
+/// Stores the per-family opinion and re-resolves every member. Unlike
+/// `next-hop-self`, ADD-PATH is a capability carried in the OPEN
+/// (RFC 7911 §4), so a member whose effective mode actually changed
+/// cannot adopt it without renegotiating — `sweep_members` is told to
+/// bounce those, and only those.
+pub fn config_neighbor_group_afi_safi_add_path(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    let family: AfiSafi = args.afi_safi()?;
+    let group = bgp.neighbor_groups.entry(name.clone()).or_default();
+    match op {
+        ConfigOp::Set => {
+            let mode: AddPathSendReceive = args.string()?.parse().ok()?;
+            group.afi_safi.entry(family).or_default().add_path = Some(mode);
+        }
+        ConfigOp::Delete => {
+            if let Some(entry) = group.afi_safi.get_mut(&family) {
+                entry.add_path = None;
+            }
+        }
+        _ => return Some(()),
+    }
+    sweep_members(bgp, &name, |groups, peer| {
+        let before = peer.config.addpath.get(&family).map(|v| v.send_receive);
+        apply_resolved_add_path(groups, &mut peer.config, family);
+        let after = peer.config.addpath.get(&family).map(|v| v.send_receive);
+        before != after && matches!(peer.state, State::Established)
+    });
+    Some(())
+}
+
+/// Resolve a member's effective per-family `add-path`: the explicit
+/// per-neighbor statement wins, else the group's opinion, else none
+/// (the capability is not requested).
+pub fn resolve_add_path(
+    groups: &BTreeMap<String, NeighborGroup>,
+    config: &PeerConfig,
+    family: AfiSafi,
+) -> Option<AddPathSendReceive> {
+    config.addpath_explicit.get(&family).copied().or_else(|| {
+        config
+            .neighbor_group
+            .as_deref()
+            .and_then(|name| groups.get(name))
+            .and_then(|group| group.afi_safi.get(&family))
+            .and_then(|entry| entry.add_path)
+    })
+}
+
+/// Write the resolved per-family `add-path` into the peer's effective
+/// [`PeerConfig::addpath`], removing the entry when neither side has an
+/// opinion — that removal is what makes a deleted group opinion stop
+/// requesting the capability.
+pub fn apply_resolved_add_path(
+    groups: &BTreeMap<String, NeighborGroup>,
+    config: &mut PeerConfig,
+    family: AfiSafi,
+) {
+    match resolve_add_path(groups, config, family) {
+        Some(send_receive) => {
+            config.addpath.insert(
+                family,
+                AddPathValue {
+                    afi: family.afi,
+                    safi: family.safi,
+                    send_receive,
+                },
+            );
+        }
+        None => {
+            config.addpath.remove(&family);
+        }
+    }
+}
+
+/// Re-resolve the effective per-family `add-path` of one peer for every
+/// family either side mentions. The union sweep is what clears a removed
+/// opinion, exactly as [`recompute_peer_nhs`] does for next-hop-self.
+fn recompute_peer_addpath(groups: &BTreeMap<String, NeighborGroup>, config: &mut PeerConfig) {
+    let mut families: Vec<AfiSafi> = config.addpath.keys().copied().collect();
+    families.extend(config.addpath_explicit.keys().copied());
+    if let Some(group) = config
+        .neighbor_group
+        .as_deref()
+        .and_then(|name| groups.get(name))
+    {
+        families.extend(group.afi_safi.keys().copied());
+    }
+    families.sort_unstable();
+    families.dedup();
+    for family in families {
+        apply_resolved_add_path(groups, config, family);
+    }
 }
 
 /// `set router bgp neighbor-group <name> ttl-security` (presence container).
@@ -1163,10 +1272,26 @@ fn sweep_group_afi_safi(bgp: &mut Bgp, name: &str) {
         // unchanged set never bounces.
         let before: std::collections::BTreeSet<AfiSafi> =
             peer.config.mp.0.keys().copied().collect();
+        // ADD-PATH is negotiated in the same OPEN, so fold it into the
+        // same bounce decision rather than adding a second one.
+        let addpath_before: BTreeMap<AfiSafi, AddPathSendReceive> = peer
+            .config
+            .addpath
+            .iter()
+            .map(|(k, v)| (*k, v.send_receive))
+            .collect();
         recompute_peer_mp(groups, &mut peer.config);
         recompute_peer_nhs(groups, peer);
+        recompute_peer_addpath(groups, &mut peer.config);
         let after: std::collections::BTreeSet<AfiSafi> = peer.config.mp.0.keys().copied().collect();
-        before != after && matches!(peer.state, State::Established)
+        let addpath_after: BTreeMap<AfiSafi, AddPathSendReceive> = peer
+            .config
+            .addpath
+            .iter()
+            .map(|(k, v)| (*k, v.send_receive))
+            .collect();
+        (before != after || addpath_before != addpath_after)
+            && matches!(peer.state, State::Established)
     });
 }
 
@@ -1330,6 +1455,11 @@ pub(super) fn apply_inherited(
 ) -> InheritOutcome {
     recompute_peer_mp(groups, &mut peer.config);
     recompute_peer_nhs(groups, peer);
+    // Covers the listen-range case this knob exists for: a dynamic peer
+    // is materialized on accept and has no per-neighbor statement, so
+    // this is the only place its ADD-PATH mode can come from. No bounce
+    // is needed here — the peer has not sent its OPEN yet.
+    recompute_peer_addpath(groups, &mut peer.config);
 
     // Resolve every knob up front by constructing the full record. Shared
     // with the per-VRF path via `resolve_inherited_knobs`; the destructure

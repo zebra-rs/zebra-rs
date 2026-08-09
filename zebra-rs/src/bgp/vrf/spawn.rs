@@ -625,6 +625,30 @@ pub(super) fn resolve_vrf_peer_config(
         config.sub.entry(fam).or_default().next_hop_self = value;
     }
 
+    // Same treatment for the per-family `add-path` opinion, and for the
+    // same reason: a CE peer's staging path writes the effective value
+    // directly, so without this a VRF neighbor would silently ignore a
+    // group opinion the global neighbor honours. The family set here is
+    // the union of what is already effective and what either side states
+    // explicitly, so a removed opinion is cleared rather than latched.
+    let addpath_families: std::collections::BTreeSet<AfiSafi> = config
+        .addpath
+        .keys()
+        .copied()
+        .chain(config.addpath_explicit.keys().copied())
+        .chain(
+            config
+                .neighbor_group
+                .as_deref()
+                .and_then(|name| groups.get(name))
+                .into_iter()
+                .flat_map(|group| group.afi_safi.keys().copied()),
+        )
+        .collect();
+    for fam in addpath_families {
+        super::super::neighbor_group::apply_resolved_add_path(groups, &mut config, fam);
+    }
+
     // Resolve the inheritable session knobs (passive, ebgp-multihop,
     // ttl-security, …) the same way the global neighbor does, layering
     // the referenced neighbor-group under the peer's own explicit
@@ -1593,7 +1617,7 @@ mod tests {
         use super::super::super::vrf_config::{BgpVrfConfig, BgpVrfNeighborConfig};
         use super::super::inst::BgpVrf;
         use crate::context::ProtoContext;
-        use bgp_packet::{AddPathSendReceive, AddPathValue, Afi, AfiSafi, Safi};
+        use bgp_packet::{AddPathSendReceive, Afi, AfiSafi, Safi};
 
         let (global_tx, _global_rx) = unbounded_channel::<BgpGlobalMsg>();
         let ctx = ProtoContext::default_table_no_rib();
@@ -1616,14 +1640,12 @@ mod tests {
             remote_as: Some(65001),
             ..Default::default()
         };
-        nbr.config.addpath.insert(
-            v4u,
-            AddPathValue {
-                afi: v4u.afi,
-                safi: v4u.safi,
-                send_receive: AddPathSendReceive::SendReceive,
-            },
-        );
+        // Through the staging helper, not by writing `addpath` directly:
+        // materialize_peers resolves neighbor-group precedence, and an
+        // effective entry with no verbatim counterpart reads as an
+        // inherited value that the resolve is entitled to clear.
+        nbr.config
+            .stage_add_path(v4u, Some(AddPathSendReceive::SendReceive));
         {
             let sub = nbr.config.sub.entry(v4u).or_default();
             sub.graceful_restart = Some(120);
@@ -1784,6 +1806,7 @@ mod tests {
             ipv4u,
             GroupAfiSafi {
                 enabled: true,
+                add_path: None,
                 next_hop_self: Some(true),
             },
         );
@@ -1888,6 +1911,7 @@ mod tests {
             ipv6u,
             GroupAfiSafi {
                 enabled: true,
+                add_path: None,
                 next_hop_self: None,
             },
         );

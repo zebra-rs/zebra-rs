@@ -280,7 +280,7 @@ impl Engine {
         };
         let built = super::route::route_update_ipv4(&ctx, &prefix, &rib, self.add_path).and_then(
             |(nlri, attr)| {
-                super::route::route_apply_policy_out(&ctx, &nlri, attr, rib.weight)
+                super::route::route_apply_policy_out(&ctx, &nlri, attr, rib.weight, rib.tag)
                     .map(|d| (nlri, d))
             },
         );

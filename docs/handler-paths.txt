@@ -69,6 +69,10 @@
 /router/bgp/fast-external-failover
 /router/bgp/global/as
 /router/bgp/global/router-id
+/router/bgp/graceful-restart/disable
+/router/bgp/graceful-restart/enabled
+/router/bgp/graceful-restart/preserve-fw-state
+/router/bgp/graceful-restart/restart-time
 /router/bgp/hostname
 /router/bgp/interface-neighbor
 /router/bgp/interface-neighbor/neighbor-group
@@ -77,6 +81,7 @@
 /router/bgp/loc-rib-hook/ipv4-unicast/withdraw
 /router/bgp/loc-rib-hook/l2vpn-evpn/import
 /router/bgp/loc-rib-hook/l2vpn-evpn/withdraw
+/router/bgp/long-lived-graceful-restart/stale-time
 /router/bgp/lua-map
 /router/bgp/lua-map/source-path
 /router/bgp/lua-script
@@ -93,6 +98,7 @@
 /router/bgp/neighbor
 /router/bgp/neighbor-group
 /router/bgp/neighbor-group/afi-safi
+/router/bgp/neighbor-group/afi-safi/add-path
 /router/bgp/neighbor-group/afi-safi/enabled
 /router/bgp/neighbor-group/afi-safi/next-hop-self
 /router/bgp/neighbor-group/allowas-in
@@ -197,6 +203,7 @@
 /router/bgp/sr-policy/policy/segment/mpls-label
 /router/bgp/sr-policy/policy/segment/srv6-sid
 /router/bgp/sr-policy/steering-mode
+/router/bgp/suppress-fib-pending
 /router/bgp/timer/adv-interval/ebgp
 /router/bgp/timer/adv-interval/ibgp
 /router/bgp/vrf

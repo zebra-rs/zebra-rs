@@ -7,6 +7,10 @@ pub use netlink::*;
 #[cfg(target_os = "linux")]
 pub mod cradle;
 
+// FPM southbound tee for SONiC (fpmsyncd -> APPL_DB -> orchagent -> SAI).
+#[cfg(target_os = "linux")]
+pub mod fpm;
+
 #[cfg(target_os = "macos")]
 pub mod macos;
 #[cfg(target_os = "macos")]
