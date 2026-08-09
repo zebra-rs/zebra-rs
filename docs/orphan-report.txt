@@ -23,8 +23,8 @@ in src/bgp/config.rs (an empty relative path, easy to miss when
 grepping for registrations), and it creates/tears down the peer when
 the list entry itself is set/deleted.
 
-Total settable schema nodes: 329
-Handled: 314
+Total settable schema nodes: 332
+Handled: 317
 Orphans: 3
 
 Note: these orphans have no config callback but are kept intentionally.

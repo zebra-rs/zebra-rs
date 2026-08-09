@@ -6028,6 +6028,68 @@ impl Bgp {
         }
     }
 
+    /// Re-run best-path for a family after its multipath policy
+    /// changed, and re-install the results.
+    ///
+    /// Unlike [`table_map_resync`](Self::table_map_resync) this cannot
+    /// re-install from `shard.vX.1`: that map holds the winner alone,
+    /// while the multipath set is computed *during* selection. Raising
+    /// `maximum-paths` has to discover legs that were never selected,
+    /// and lowering it has to withdraw legs that no longer fit, so both
+    /// directions need selection re-run rather than install repeated.
+    pub(super) fn multipath_resync(&mut self, afi_safi: bgp_packet::AfiSafi) {
+        use bgp_packet::{Afi, Safi};
+        // Unicast only — the multipath knobs augment the global
+        // afi-safi list, but VPN / EVPN / flowspec installs resolve
+        // their own transport and take other paths.
+        let afi = match (afi_safi.afi, afi_safi.safi) {
+            (afi @ (Afi::Ip | Afi::Ip6), Safi::Unicast) => afi,
+            _ => return,
+        };
+        let mut selected_v4: Vec<(ipnet::Ipv4Net, Vec<super::route::BgpRib>)> = Vec::new();
+        let mut selected_v6: Vec<(ipnet::Ipv6Net, Vec<super::route::BgpRib>)> = Vec::new();
+        if afi == Afi::Ip {
+            let prefixes: Vec<ipnet::Ipv4Net> = self.shard.v4.0.iter().map(|(p, _)| p).collect();
+            for prefix in prefixes {
+                let set = self.shard.v4.select_best_path(prefix);
+                selected_v4.push((prefix, set));
+            }
+        } else {
+            let prefixes: Vec<ipnet::Ipv6Net> = self.shard.v6.0.iter().map(|(p, _)| p).collect();
+            for prefix in prefixes {
+                let set = self.shard.v6.select_best_path(prefix);
+                selected_v6.push((prefix, set));
+            }
+        }
+        let top = super::peer::BgpTop {
+            router_id: &self.router_id,
+            srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
+            local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
+            tx: &self.tx,
+            rib_client: &self.ctx.rib,
+            attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
+            color_policy: Some(&self.color_policy),
+            flex_algo_routes: Some(&self.flex_algo_routes),
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
+            vrf_export: None,
+            vrf_import: None,
+            nexthop_cache: Some(&mut self.nexthop_cache),
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+            central_label_alloc: None,
+            as_sets_withdraw: self.as_sets_withdraw,
+        };
+        for (prefix, set) in &selected_v4 {
+            super::route::fib_install_v4(&top, *prefix, set);
+        }
+        for (prefix, set) in &selected_v6 {
+            super::route::fib_install_v6(&top, *prefix, set);
+        }
+    }
+
     pub async fn event_loop(&mut self) {
         // Request our dynamic MPLS label block from the RIB label
         // manager up front. The reply (`RibRx::LabelBlock`) binds
@@ -6407,6 +6469,7 @@ impl Bgp {
                     weight: 0,
                     typ: super::route::BgpRibType::Originated,
                     best_path: false,
+                    multipath: false,
                     best_reason: super::route::Reason::Default,
                     label: label_obj,
                     local_label: None,
@@ -6611,6 +6674,7 @@ impl Bgp {
                     weight: 0,
                     typ: super::route::BgpRibType::Originated,
                     best_path: false,
+                    multipath: false,
                     best_reason: super::route::Reason::Default,
                     label: label_obj,
                     local_label: None,
