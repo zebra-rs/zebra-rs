@@ -2672,6 +2672,46 @@ async fn kernel_route_eventually_contains(
     );
 }
 
+/// Negative sibling of `kernel_route_eventually_contains`: poll until the
+/// kernel's `ip route show <prefix>` rendering no longer contains
+/// `needle`, while the prefix itself may remain — e.g. a withdrawn ECMP
+/// leg (`nexthop via <addr>`) must leave the kernel FIB without the
+/// route's other legs going with it. The route disappearing entirely
+/// also satisfies this step; assert the surviving leg separately with
+/// the positive sibling.
+#[then(expr = "kernel route {string} in namespace {string} should eventually not contain {string}")]
+async fn kernel_route_eventually_not_contains(
+    world: &mut World,
+    prefix: String,
+    namespace: String,
+    needle: String,
+) {
+    let scoped = world.ns(&namespace);
+    let family = route_family_flag(&prefix);
+    const ATTEMPTS: u32 = 30;
+    let mut last_output = String::new();
+    for i in 0..ATTEMPTS {
+        last_output = netns::exec_in_netns(&scoped, "ip", &[family, "route", "show", &prefix])
+            .await
+            .expect("Failed to run ip route show");
+        if !last_output.contains(&needle) {
+            println!(
+                "✓ kernel route {} in namespace {} does not contain '{}'",
+                prefix, scoped, needle
+            );
+            return;
+        }
+        if i + 1 < ATTEMPTS {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    }
+    let diag = route_failure_diagnostics(&scoped).await;
+    panic!(
+        "kernel route {} in namespace {} still contained '{}' after {} attempts\nlast `ip route show {}` output:\n{}\n{}",
+        prefix, scoped, needle, ATTEMPTS, prefix, last_output, diag
+    );
+}
+
 /// Poll `bridge fdb show dev <dev>` inside a namespace until it contains
 /// `needle`. Used to observe the EVPN BUM flood list: the daemon programs
 /// zero-MAC (`00:00:00:00:00:00`) FDB rows on the VXLAN device, one `dst`

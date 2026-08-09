@@ -68,6 +68,10 @@ rr:
 	mkdir -p allure-results
 	$(CUCUMBER) -- --concurrency=1 --tags "@bgp_basic_rr"
 
+bgp_multipath:
+	mkdir -p allure-results
+	$(CUCUMBER) -- --concurrency=1 --tags "@bgp_multipath"
+
 bgp_adv_interval_zero:
 	mkdir -p allure-results
 	$(CUCUMBER) -- --concurrency=1 --tags "@bgp_adv_interval_zero"
