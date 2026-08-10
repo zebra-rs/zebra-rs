@@ -313,6 +313,24 @@ pub struct Isis {
     /// Accumulated seq-number floor across coalesced LspOriginate
     /// events. Reset to None after the throttled run consumes it.
     pub lsp_gen_pending_floor: Levels<Option<u32>>,
+    /// True between `CommitStart` and `CommitEnd`. LSP-generation
+    /// requests (and an already-armed `LspGenFire` landing mid-commit)
+    /// are parked in `pending_lsp_gen` and released at `CommitEnd`, so
+    /// a run never snapshots half-applied config: without the gate, the
+    /// first trigger's initial-wait timer races the rest of the commit
+    /// stream (the event loop select is unbiased between config lines
+    /// and protocol messages), and a mid-commit fire floods a
+    /// provisional LSP at a bumped sequence, with the corrected LSP
+    /// held behind the in-burst secondary wait. Seeded `true` at
+    /// construction: an instance only ever spawns inside a commit (the
+    /// manager's spawn loop or the per-VRF replay) whose `CommitStart`
+    /// predates its subscription, and both paths guarantee a closing
+    /// `CommitEnd` — the replay sends a synthetic one.
+    pub in_commit: bool,
+    /// Levels whose LSP generation was parked by `in_commit`; flushed
+    /// through `schedule_lsp_originate` at `CommitEnd`. Seq-number
+    /// floors keep folding into `lsp_gen_pending_floor` while parked.
+    pub pending_lsp_gen: Levels<bool>,
     pub local_pool: Option<LabelPool>,
     pub graph: Levels<Option<spf::Graph>>,
     pub spf_result: Levels<Option<BTreeMap<usize, spf::Path>>>,
@@ -816,6 +834,8 @@ impl Isis {
                 lsp_gen_timer: Levels::<Option<Timer>>::default(),
                 lsp_gen_throttle: Levels::<Throttle>::default(),
                 lsp_gen_pending_floor: Levels::<Option<u32>>::default(),
+                in_commit: true,
+                pending_lsp_gen: Levels::<bool>::default(),
                 // Adjacency-SID label pool is owned by the SR-MPLS feature.
                 // Stays None until `segment-routing mpls` is configured —
                 // otherwise we'd allocate labels for every hello and emit
@@ -898,6 +918,7 @@ impl Isis {
         // instance also fans CommitEnd out to its per-VRF children and
         // prunes any whose `router isis vrf <name>` block was deleted.
         if msg.op == ConfigOp::CommitEnd {
+            self.in_commit = false;
             self.vrf_commit_end();
             self.commit_srlg();
             // Reconcile STAMP measurement sessions against the
@@ -913,9 +934,31 @@ impl Isis {
             // reconcile alone would never see the change. Idempotent: a
             // no-op when nothing self-SID-relevant changed.
             update_self_sid_ilm(self);
+            // Release the LSP generations parked by the commit gate,
+            // through the normal throttle so commit-driven floods keep
+            // their pacing. Floors folded while parked are already
+            // sitting in `lsp_gen_pending_floor`. `commit_srlg`'s own
+            // LspOriginate sends above are messages — they arrive with
+            // the gate open and fold into the timer armed here.
+            for level in [Level::L1, Level::L2] {
+                if std::mem::take(self.pending_lsp_gen.get_mut(&level)) {
+                    self.schedule_lsp_originate(level, None);
+                }
+            }
             return;
         }
         if msg.op == ConfigOp::CommitStart {
+            self.in_commit = true;
+            // Forward to per-VRF children (mirroring `vrf_commit_end`):
+            // they receive rewritten config lines live and CommitEnd via
+            // the fan-out, but the manager only broadcasts CommitStart
+            // to its direct subscribers — without this their gates never
+            // engage for live commits.
+            for handle in self.vrf_registry.values() {
+                let _ = handle
+                    .cm_tx
+                    .send(ConfigRequest::new(Vec::new(), ConfigOp::CommitStart));
+            }
             return;
         }
 
@@ -1964,6 +2007,17 @@ impl Isis {
                 self.schedule_lsp_originate(level, floor);
             }
             Message::LspGenFire(level) => {
+                // Commit gate: a timer armed before `CommitStart` can
+                // fire mid-commit, and running now would snapshot
+                // half-applied config. Park the run — the accumulated
+                // floor stays in `lsp_gen_pending_floor` (no take, no
+                // mark_run) — and let the `CommitEnd` flush re-arm
+                // through the throttle.
+                if self.in_commit {
+                    *self.pending_lsp_gen.get_mut(&level) = true;
+                    *self.lsp_gen_timer.get_mut(&level) = None;
+                    return;
+                }
                 // Pull the accumulated floor for the burst, run the
                 // origination, then stamp throttle completion and clear
                 // the timer slot so the next event can re-arm.
@@ -2411,6 +2465,15 @@ impl Isis {
             (Some(a), None) => Some(a),
             (None, b) => b,
         };
+
+        // Commit gate: park instead of arming — a run scheduled now
+        // could fire before the commit finishes streaming and snapshot
+        // half-applied config. `CommitEnd` re-enters here with the gate
+        // open, one consolidated request per level per commit.
+        if self.in_commit {
+            *self.pending_lsp_gen.get_mut(&level) = true;
+            return;
+        }
 
         // Already armed — the in-flight run will consume the accumulator.
         if self.lsp_gen_timer.get(&level).is_some() {
@@ -3829,8 +3892,9 @@ mod bfd_wiring_tests {
     }
 
     /// Build a parked `ProtoContext` plus its `rib_rx` half for
-    /// tests. Mirrors `bgp::config::tests::test_ctx`.
-    fn test_ctx() -> (
+    /// tests. Mirrors `bgp::config::tests::test_ctx`. `pub(super)` so
+    /// the sibling `commit_gate_tests` module shares the harness.
+    pub(super) fn test_ctx() -> (
         ProtoContext,
         mpsc::UnboundedReceiver<crate::rib::api::RibRx>,
     ) {
@@ -3846,7 +3910,7 @@ mod bfd_wiring_tests {
 
     /// Parked `RibSubscriber` for `Isis::new` tests. Its receivers are
     /// leaked so sends never trip a `SendError`.
-    fn test_rib_subscriber() -> crate::config::RibSubscriber {
+    pub(super) fn test_rib_subscriber() -> crate::config::RibSubscriber {
         let (rib_tx, rib_rx) = mpsc::unbounded_channel();
         let (rib_inbound_tx, rib_inbound_rx) = mpsc::unbounded_channel();
         Box::leak(Box::new(rib_rx));
@@ -3859,7 +3923,7 @@ mod bfd_wiring_tests {
     }
 
     /// Parked config-manager sender for `Isis::new` tests.
-    fn test_config_tx() -> mpsc::Sender<crate::config::Message> {
+    pub(super) fn test_config_tx() -> mpsc::Sender<crate::config::Message> {
         let (tx, rx) = mpsc::channel(16);
         Box::leak(Box::new(rx));
         tx
@@ -4111,5 +4175,106 @@ mod purge_poi_tests {
             .expect("POI must survive emit→parse");
         assert_eq!(poi.originator, own);
         assert_eq!(poi.received_from, None);
+    }
+}
+
+#[cfg(test)]
+mod commit_gate_tests {
+    use tokio::sync::mpsc;
+
+    use super::bfd_wiring_tests::{test_config_tx, test_ctx, test_rib_subscriber};
+    use super::*;
+
+    fn fresh_isis() -> Isis {
+        let (ctx, rib_rx) = test_ctx();
+        let (policy_tx, policy_rx) = mpsc::unbounded_channel();
+        Box::leak(Box::new(policy_rx));
+        Isis::new(
+            ctx,
+            rib_rx,
+            /* bfd_client_tx */ None,
+            /* stamp_client_tx */ None,
+            /* bgp_tx */ None,
+            policy_tx,
+            "isis".to_string(),
+            test_rib_subscriber(),
+            test_config_tx(),
+        )
+    }
+
+    fn commit_start() -> ConfigRequest {
+        ConfigRequest::new(Vec::new(), ConfigOp::CommitStart)
+    }
+
+    fn commit_end() -> ConfigRequest {
+        ConfigRequest::new(Vec::new(), ConfigOp::CommitEnd)
+    }
+
+    /// The gate is seeded closed: the spawning commit's `CommitStart`
+    /// was broadcast before this instance subscribed, so requests
+    /// during the initial config (or the per-VRF replay) must park —
+    /// pending flag set, floors folding, no timer armed, no throttle
+    /// consumption.
+    #[tokio::test]
+    async fn spawn_parks_generation_until_first_commit_end() {
+        let mut isis = fresh_isis();
+        assert!(isis.in_commit);
+
+        isis.schedule_lsp_originate(Level::L1, Some(7));
+        isis.schedule_lsp_originate(Level::L1, Some(3));
+        isis.schedule_lsp_originate(Level::L2, None);
+
+        assert!(isis.pending_lsp_gen.l1);
+        assert!(isis.pending_lsp_gen.l2);
+        assert!(isis.lsp_gen_timer.l1.is_none());
+        assert!(isis.lsp_gen_timer.l2.is_none());
+        assert_eq!(*isis.lsp_gen_pending_floor.get(&Level::L1), Some(7));
+        assert!(isis.lsp_gen_throttle.l1.last_run_at.is_none());
+    }
+
+    /// `CommitEnd` opens the gate and releases exactly one throttled
+    /// run per parked level; the folded floor stays accumulated for
+    /// the fire to consume.
+    #[tokio::test]
+    async fn commit_end_releases_one_consolidated_run_per_level() {
+        let mut isis = fresh_isis();
+        isis.schedule_lsp_originate(Level::L1, Some(7));
+        isis.schedule_lsp_originate(Level::L2, None);
+
+        isis.process_cm_msg(commit_end());
+
+        assert!(!isis.in_commit);
+        assert!(!isis.pending_lsp_gen.l1);
+        assert!(!isis.pending_lsp_gen.l2);
+        assert!(isis.lsp_gen_timer.l1.is_some());
+        assert!(isis.lsp_gen_timer.l2.is_some());
+        assert_eq!(*isis.lsp_gen_pending_floor.get(&Level::L1), Some(7));
+    }
+
+    /// A timer armed before `CommitStart` whose fire lands mid-commit
+    /// must park — timer slot cleared, floor untouched, no throttle
+    /// run stamped — and the `CommitEnd` flush re-arms it.
+    #[tokio::test]
+    async fn mid_commit_fire_parks_instead_of_running() {
+        let mut isis = fresh_isis();
+        // Close out the spawning commit; nothing was parked, so the
+        // flush must not arm anything.
+        isis.process_cm_msg(commit_end());
+        assert!(isis.lsp_gen_timer.l1.is_none());
+
+        isis.schedule_lsp_originate(Level::L1, Some(9));
+        assert!(isis.lsp_gen_timer.l1.is_some());
+
+        isis.process_cm_msg(commit_start());
+        assert!(isis.in_commit);
+        isis.process_msg(Message::LspGenFire(Level::L1));
+
+        assert!(isis.pending_lsp_gen.l1);
+        assert!(isis.lsp_gen_timer.l1.is_none());
+        assert_eq!(*isis.lsp_gen_pending_floor.get(&Level::L1), Some(9));
+        assert!(isis.lsp_gen_throttle.l1.last_run_at.is_none());
+
+        isis.process_cm_msg(commit_end());
+        assert!(isis.lsp_gen_timer.l1.is_some());
     }
 }
