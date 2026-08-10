@@ -545,6 +545,8 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
 pub struct OspfInterface<'a, V: OspfVersion = Ospfv2> {
     pub tx: &'a UnboundedSender<Message<V>>,
     pub router_id: &'a Ipv4Addr,
+    /// Abandoned identities — see `OspfLink::former_router_ids`.
+    pub former_router_ids: &'a [Ipv4Addr],
     pub ident: &'a Identity<V>,
     pub addr: &'a Vec<OspfAddr<V>>,
     pub mtu: u32,
@@ -1170,6 +1172,7 @@ impl<V: OspfVersion> Ospf<V> {
                         OspfInterface {
                             tx: &self.tx,
                             router_id: &self.router_id,
+                            former_router_ids: &link.former_router_ids,
                             ident: &link.ident,
                             addr: &link.addr,
                             mtu: link.mtu,
@@ -4322,6 +4325,47 @@ impl Ospf<Ospfv2> {
             lsa.data.h.ls_seq_number
         };
 
+        // A FORMER identity of ours (see `OspfLink::former_router_ids`):
+        // nothing re-originates under it, so §13.4's rebuild arms below
+        // cannot apply — flush the received instance and flood the
+        // MaxAge copy, so the abandoned identity dies network-wide
+        // instead of lingering in peers' LSDBs (and SPF inputs) until
+        // it ages out an hour later. This is the receive-side half of
+        // the router-id-change story: the change-time flush can be
+        // discarded by a peer's §13 step-5(a) MinLSArrival gate or
+        // skipped while the adjacency re-forms, and the re-exchange
+        // then serves the ghost right back to us — this branch is what
+        // turns that echo into the flush it should have been.
+        if adv_router != self.router_id {
+            ospf_event_trace!(
+                self.tracing,
+                Lsdb,
+                "[Self-Originated] Flushing former-identity LSA type={} id={} adv={} seq={:#x}",
+                ls_type,
+                ls_id,
+                adv_router,
+                received_seq
+            );
+            let flushed = {
+                let lsdb = if let Some(area_id) = area_id {
+                    let Some(area) = self.areas.get_mut(area_id) else {
+                        return;
+                    };
+                    &mut area.lsdb
+                } else {
+                    &mut self.lsdb_as
+                };
+                lsdb.flush_lsa(ls_type, ls_id, adv_router, &self.tx, area_id)
+            };
+            if let Some(lsa) = flushed {
+                match area_id {
+                    Some(area_id) => self.flood_self_originated_lsa(area_id, &lsa),
+                    None => self.flood_lsa_through_as(&lsa, None),
+                }
+            }
+            return;
+        }
+
         match ls_type {
             OspfLsType::Router => {
                 ospf_event_trace!(
@@ -5912,6 +5956,22 @@ impl Ospf<Ospfv2> {
 
         self.router_id = router_id;
         for link in self.links.values_mut() {
+            // Remember the identity we are abandoning: a peer that
+            // still holds (or echoes back during the re-exchange) an
+            // LSA advertised under it must have that LSA flushed, not
+            // re-learned — see the former-identity branch of
+            // `process_self_originated_lsa`. Bounded ring; identities
+            // change on operator action, not in steady state.
+            if !old_router_id.is_unspecified() && old_router_id != router_id {
+                link.former_router_ids.retain(|id| *id != old_router_id);
+                link.former_router_ids.push(old_router_id);
+                if link.former_router_ids.len() > 8 {
+                    link.former_router_ids.remove(0);
+                }
+                // Re-adopting an identity un-formers it, or the
+                // §13.4 check would flush our own current LSAs.
+                link.former_router_ids.retain(|id| *id != router_id);
+            }
             link.ident.router_id = router_id;
         }
         // Tell the neighbors NOW. Any hello already sent under the old
@@ -7221,6 +7281,22 @@ impl Ospf<Ospfv3> {
 
         self.router_id = router_id;
         for link in self.links.values_mut() {
+            // Remember the identity we are abandoning: a peer that
+            // still holds (or echoes back during the re-exchange) an
+            // LSA advertised under it must have that LSA flushed, not
+            // re-learned — see the former-identity branch of
+            // `process_self_originated_lsa`. Bounded ring; identities
+            // change on operator action, not in steady state.
+            if !old_router_id.is_unspecified() && old_router_id != router_id {
+                link.former_router_ids.retain(|id| *id != old_router_id);
+                link.former_router_ids.push(old_router_id);
+                if link.former_router_ids.len() > 8 {
+                    link.former_router_ids.remove(0);
+                }
+                // Re-adopting an identity un-formers it, or the
+                // §13.4 check would flush our own current LSAs.
+                link.former_router_ids.retain(|id| *id != router_id);
+            }
             link.ident.router_id = router_id;
         }
         // Tell the neighbors NOW. Any hello already sent under the old
@@ -10380,8 +10456,40 @@ impl Ospf<Ospfv3> {
 
                 use super::srmpls::SR_INFO_LSID;
                 if ev == super::lsdb::LsdbEvent::SelfOriginatedReceived {
-                    let (ls_type, ls_id, _) = key;
+                    let (ls_type, ls_id, adv_router) = key;
                     let area = area_id.unwrap_or(AREA0);
+                    // A FORMER identity — see the v2 twin in
+                    // `process_self_originated_lsa`: nothing
+                    // re-originates under it, so flush the echoed
+                    // instance instead of rebuilding it.
+                    if adv_router != self.router_id {
+                        ospf_event_trace!(
+                            self.tracing,
+                            Lsdb,
+                            "[Self-Originated] Flushing former-identity v3 LSA type={:#06x} id={} adv={}",
+                            ls_type,
+                            ls_id,
+                            adv_router
+                        );
+                        let flushed = {
+                            let lsdb = if let Some(area_id) = area_id {
+                                match self.areas.get_mut(area_id) {
+                                    Some(area) => &mut area.lsdb,
+                                    None => return,
+                                }
+                            } else {
+                                &mut self.lsdb_as
+                            };
+                            lsdb.flush_lsa_by_raw_key(key, &self.tx, area_id)
+                        };
+                        if let Some(lsa) = flushed {
+                            match area_id {
+                                Some(area_id) => self.flood_self_originated_lsa(area_id, &lsa),
+                                None => self.flood_lsa_through_as_v3(&lsa, None),
+                            }
+                        }
+                        return;
+                    }
                     match ls_type {
                         t if t == OSPFV3_ROUTER_LSA_TYPE => self.router_lsa_originate(),
                         t if t == OSPFV3_NETWORK_LSA_TYPE => self.network_lsa_originate(ls_id),

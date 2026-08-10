@@ -71,7 +71,7 @@ Feature: OSPFv2 Router-ID set / change / delete on a live adjacency
     And show command "show ospf database" in namespace "r2" should eventually not contain "1.1.1.1"
     # Forwarding still works: r1's loopback is reachable under the new identity.
     And ping from "r2" to "192.168.11.1" should eventually succeed
-    And ping from "r1" to "192.168.22.1" should succeed
+    And ping from "r1" to "192.168.22.1" should eventually succeed
 
   Scenario: Deleting r1's Router-ID is handled gracefully and keeps forwarding
     Given the test topology exists

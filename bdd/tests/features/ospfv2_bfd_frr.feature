@@ -88,13 +88,20 @@ Feature: OSPFv2 TI-LFA kernel-side fast-reroute on BFD failure
     And daemon log in namespace "s" should eventually contain "protection group(s) onto repairs"
     # SPF reconvergence then re-routes around n1 entirely.
     And kernel route "10.0.0.8" in namespace "s" should eventually contain "dev s-n2"
-    And ping from "s" to "10.0.0.8" should succeed
+    # Polling, deliberately: the kernel-route gate above proves only
+    # that *s* re-routed. The REVERSE path (d's route back to s) heals
+    # by ring-wide SPF reconvergence — a remote failure is not covered
+    # by d's local TI-LFA repairs, so a transient reverse-path gap here
+    # is protocol-correct and a single-shot probe races it. Same lesson
+    # scenario 1 already recorded for this exact ping.
+    And ping from "s" to "10.0.0.8" should eventually succeed
     # Recovery: BFD re-establishes and the primary path returns.
     When I restore bfd control packets in namespace "s"
     And I wait 15 seconds
     Then bfd session in namespace "s" on interface "s-n1" should be up
     And kernel route "10.0.0.8" in namespace "s" should eventually contain "dev s-n1"
-    And ping from "s" to "10.0.0.8" should succeed
+    # Polling for the same reverse-path reason as the switchover ping.
+    And ping from "s" to "10.0.0.8" should eventually succeed
 
   Scenario: Teardown topology
     Given the test topology exists

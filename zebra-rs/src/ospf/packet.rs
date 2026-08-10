@@ -423,28 +423,32 @@ pub fn ospf_hello_recv(
     // under a provisional identity (interface-enable callbacks sort
     // before `/router/ospf/router-id`). OSPFv2 keys neighbours by
     // source address (unlike v3, which keys by Router-ID), so the stale
-    // entry must go — but HOW matters:
+    // entry must go.
     //
-    //  * Down/Init: the entry holds nothing but its own timers — drop
-    //    it inline and FALL THROUGH, so this very Hello re-learns the
-    //    neighbour under the new identity. The old teardown-and-drop
-    //    path spent a full HelloInterval waiting for the next periodic
-    //    Hello, which is exactly the delay the peer's post-rid-change
-    //    immediate hello exists to close.
-    //  * TwoWay and beyond: the neighbour is wired into DR election /
-    //    DD / LSA machinery, so route the teardown through the same
-    //    NFSM path the dead timer uses (full bookkeeping) and let the
-    //    next Hello re-learn it cleanly.
+    // Drop it INLINE and fall through, so this very Hello re-learns the
+    // neighbour under the new identity. Routing the teardown through a
+    // queued NFSM event and dropping the packet — the old behaviour —
+    // opened two races the traces caught red-handed: every hello the
+    // peer sent before the teardown message processed was ALSO eaten by
+    // this guard (so a post-rid-change immediate hello burst was
+    // consumed whole and re-learning waited a full HelloInterval), and
+    // the half-torn adjacency window let the peer's flush flood be
+    // skipped by the §13.3 step-1(a) state check. The entry's own
+    // machinery (timers, ls_req/ls_rxmt) dies with the struct; what
+    // outlives it is DR-election membership and our Router-LSA's view
+    // of the adjacency — NeighborChange recomputes the former, and the
+    // re-adjacency the fall-through starts (same packet, Init →
+    // typically Full within milliseconds) re-originates the latter
+    // through the normal FullTransition path.
     if let Some(existing) = oi.nbrs.get(src)
         && existing.ident.router_id != packet.router_id
     {
-        if matches!(existing.state, NfsmState::Down | NfsmState::Init) {
-            oi.nbrs.remove(src);
-        } else {
+        let was_adjacent = existing.state >= NfsmState::TwoWay;
+        oi.nbrs.remove(src);
+        if was_adjacent {
             let _ = oi
                 .tx
-                .send(Message::Nfsm(oi.index, *src, NfsmEvent::InactivityTimer));
-            return;
+                .send(Message::Ifsm(oi.index, IfsmEvent::NeighborChange));
         }
     }
 

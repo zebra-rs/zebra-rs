@@ -1238,7 +1238,10 @@ pub(super) fn ospfv3_lsa_more_recent(
 /// Network-LSAs are keyed by Interface ID, but their
 /// `advertising_router` is still our router-id when self-originated.
 fn ospfv3_is_self_originated(oi: &OspfInterface<Ospfv3>, lsa: &Ospfv3Lsa) -> bool {
+    // Former identities count too — see the v2 twin's comment in
+    // `ospf_is_self_originated`.
     lsa.h.advertising_router == *oi.router_id
+        || oi.former_router_ids.contains(&lsa.h.advertising_router)
 }
 
 /// RFC 5187 §3.1 helper-entry gate (v3 mirror of v2's
