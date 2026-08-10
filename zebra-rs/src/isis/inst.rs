@@ -331,6 +331,25 @@ pub struct Isis {
     /// through `schedule_lsp_originate` at `CommitEnd`. Seq-number
     /// floors keep folding into `lsp_gen_pending_floor` while parked.
     pub pending_lsp_gen: Levels<bool>,
+    /// Pseudonode (DIS) LSP-gen coalescing, keyed per pseudonode id —
+    /// separate LANs' pseudonode LSPs regenerate independently. Same
+    /// scheme as the self-LSP slots above: a present Timer means a
+    /// `DisGenFire` is armed and further `DisOriginate` events for
+    /// that pseudonode fold into the run. A fire for a pseudonode we
+    /// no longer own resolves to no DIS link inside
+    /// `process_dis_originate` and no-ops, so stale slots are safe.
+    pub dis_gen_timer: Levels<BTreeMap<IsisNeighborId, Timer>>,
+    /// Per-pseudonode backoff state. Entries persist across runs (the
+    /// backoff needs the last-run stamp); bounded by the pseudonode
+    /// ids this instance has ever owned — a handful.
+    pub dis_gen_throttle: Levels<BTreeMap<IsisNeighborId, Throttle>>,
+    /// Accumulated ISO 10589 §7.3.16.4 seq base across coalesced
+    /// `DisOriginate` events for a pseudonode (max of all `base`
+    /// values seen). Removed when the fire consumes it.
+    pub dis_gen_pending_base: Levels<BTreeMap<IsisNeighborId, Option<u32>>>,
+    /// Pseudonode generations parked by `in_commit`; flushed through
+    /// `schedule_dis_originate` at `CommitEnd`.
+    pub pending_dis_gen: Levels<BTreeSet<IsisNeighborId>>,
     pub local_pool: Option<LabelPool>,
     pub graph: Levels<Option<spf::Graph>>,
     pub spf_result: Levels<Option<BTreeMap<usize, spf::Path>>>,
@@ -836,6 +855,10 @@ impl Isis {
                 lsp_gen_pending_floor: Levels::<Option<u32>>::default(),
                 in_commit: true,
                 pending_lsp_gen: Levels::<bool>::default(),
+                dis_gen_timer: Levels::<BTreeMap<IsisNeighborId, Timer>>::default(),
+                dis_gen_throttle: Levels::<BTreeMap<IsisNeighborId, Throttle>>::default(),
+                dis_gen_pending_base: Levels::<BTreeMap<IsisNeighborId, Option<u32>>>::default(),
+                pending_dis_gen: Levels::<BTreeSet<IsisNeighborId>>::default(),
                 // Adjacency-SID label pool is owned by the SR-MPLS feature.
                 // Stays None until `segment-routing mpls` is configured —
                 // otherwise we'd allocate labels for every hello and emit
@@ -943,6 +966,9 @@ impl Isis {
             for level in [Level::L1, Level::L2] {
                 if std::mem::take(self.pending_lsp_gen.get_mut(&level)) {
                     self.schedule_lsp_originate(level, None);
+                }
+                for neighbor_id in std::mem::take(self.pending_dis_gen.get_mut(&level)) {
+                    self.schedule_dis_originate(level, neighbor_id, None);
                 }
             }
             return;
@@ -2029,8 +2055,29 @@ impl Isis {
             Message::LspPurge(level, lsp_id) => {
                 self.process_lsp_purge(level, lsp_id);
             }
-            Message::DisOriginate(level, ifindex, base) => {
-                self.process_dis_originate(level, ifindex, base);
+            Message::DisOriginate(level, neighbor_id, base) => {
+                self.schedule_dis_originate(level, neighbor_id, base);
+            }
+            Message::DisGenFire(level, neighbor_id) => {
+                // Commit gate: same contract as LspGenFire — park the
+                // run (base stays accumulated, no mark_run) and let the
+                // CommitEnd flush re-arm through the throttle.
+                if self.in_commit {
+                    self.pending_dis_gen.get_mut(&level).insert(neighbor_id);
+                    self.dis_gen_timer.get_mut(&level).remove(&neighbor_id);
+                    return;
+                }
+                let base = self
+                    .dis_gen_pending_base
+                    .get_mut(&level)
+                    .remove(&neighbor_id)
+                    .flatten();
+                self.process_dis_originate(level, neighbor_id, base);
+                if let Some(throttle) = self.dis_gen_throttle.get_mut(&level).get_mut(&neighbor_id)
+                {
+                    throttle.mark_run();
+                }
+                self.dis_gen_timer.get_mut(&level).remove(&neighbor_id);
             }
             Message::Ifsm(ev, ifindex, level) => {
                 self.process_ifsm(ev, ifindex, level);
@@ -2493,6 +2540,68 @@ impl Isis {
                 let _ = tx.send(Message::LspGenFire(level));
             }
         }));
+    }
+
+    /// Throttle-aware front door for pseudonode (DIS) LSP origination —
+    /// the per-pseudonode sibling of `schedule_lsp_originate`. A LAN
+    /// adjacency burst (several members joining within the window)
+    /// collapses into one regenerate+flood per pseudonode instead of
+    /// one per transition, sustained membership churn backs off through
+    /// the same lsp-gen-interval knobs, and the commit gate keeps a
+    /// mid-commit DIS change from originating half-applied config (the
+    /// pseudonode LSP carries the per-level auth TLV). The §7.3.16.4
+    /// seq base folds across the burst as `max(existing, new)`, exactly
+    /// like the self-LSP floor.
+    fn schedule_dis_originate(
+        &mut self,
+        level: Level,
+        neighbor_id: IsisNeighborId,
+        base: Option<u32>,
+    ) {
+        let pending = self
+            .dis_gen_pending_base
+            .get_mut(&level)
+            .entry(neighbor_id)
+            .or_insert(None);
+        *pending = match (*pending, base) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (Some(a), None) => Some(a),
+            (None, b) => b,
+        };
+
+        // Commit gate: park instead of arming (see
+        // `schedule_lsp_originate`).
+        if self.in_commit {
+            self.pending_dis_gen.get_mut(&level).insert(neighbor_id);
+            return;
+        }
+
+        // Already armed — the in-flight run will consume the base.
+        if self.dis_gen_timer.get(&level).contains_key(&neighbor_id) {
+            return;
+        }
+
+        let wait_ms = self
+            .dis_gen_throttle
+            .get_mut(&level)
+            .entry(neighbor_id)
+            .or_default()
+            .schedule(
+                self.config.lsp_gen_initial_wait(),
+                self.config.lsp_gen_secondary_wait(),
+                self.config.lsp_gen_maximum_wait(),
+            );
+
+        let tx = self.tx.clone();
+        self.dis_gen_timer.get_mut(&level).insert(
+            neighbor_id,
+            Timer::once_ms(wait_ms as u64, move || {
+                let tx = tx.clone();
+                async move {
+                    let _ = tx.send(Message::DisGenFire(level, neighbor_id));
+                }
+            }),
+        );
     }
 
     fn process_lsp_purge(&mut self, level: Level, lsp_id: IsisLspId) {
@@ -3779,6 +3888,11 @@ pub enum Message {
     /// re-origination is skipped (the pseudonode no longer belongs to
     /// us).
     DisOriginate(Level, IsisNeighborId, Option<u32>),
+    /// Coalesced pseudonode generation timer fired for
+    /// `(level, pseudonode)`. Handler consumes the accumulated
+    /// §7.3.16.4 seq base, runs `process_dis_originate`, stamps the
+    /// per-pseudonode throttle, and clears the timer slot.
+    DisGenFire(Level, IsisNeighborId),
     SpfCalc(Level),
     /// SPF run completed off the main task. Carries the owned
     /// `SpfOutput` produced by `compute_spf`; the handler applies it
@@ -3841,6 +3955,9 @@ impl Display for Message {
             }
             Message::DisOriginate(level, neighbor_id, _) => {
                 write!(f, "[Message::DisOriginate({}, {})]", level, neighbor_id)
+            }
+            Message::DisGenFire(level, neighbor_id) => {
+                write!(f, "[Message::DisGenFire({}, {})]", level, neighbor_id)
             }
             Message::SpfCalc(level) => write!(f, "[Message::SpfCalc({})]", level),
             Message::SpfDone(output) => write!(f, "[Message::SpfDone({})]", output.level),
@@ -4276,5 +4393,81 @@ mod commit_gate_tests {
 
         isis.process_cm_msg(commit_end());
         assert!(isis.lsp_gen_timer.l1.is_some());
+    }
+
+    fn nid(last: u8) -> IsisNeighborId {
+        IsisNeighborId {
+            id: [0, 0, 0, 0, 0, 1, last],
+        }
+    }
+
+    /// Pseudonode generation parks per-pseudonode during a commit —
+    /// bases fold, no timers arm — and `CommitEnd` releases one
+    /// throttled run per parked pseudonode.
+    #[tokio::test]
+    async fn dis_generation_parks_and_flushes_per_pseudonode() {
+        let mut isis = fresh_isis();
+        assert!(isis.in_commit);
+
+        isis.schedule_dis_originate(Level::L1, nid(1), Some(9));
+        isis.schedule_dis_originate(Level::L1, nid(1), Some(4));
+        isis.schedule_dis_originate(Level::L1, nid(2), None);
+
+        assert!(isis.pending_dis_gen.l1.contains(&nid(1)));
+        assert!(isis.pending_dis_gen.l1.contains(&nid(2)));
+        assert!(isis.dis_gen_timer.l1.is_empty());
+        assert_eq!(isis.dis_gen_pending_base.l1.get(&nid(1)), Some(&Some(9)));
+
+        isis.process_cm_msg(commit_end());
+
+        assert!(isis.pending_dis_gen.l1.is_empty());
+        assert!(isis.dis_gen_timer.l1.contains_key(&nid(1)));
+        assert!(isis.dis_gen_timer.l1.contains_key(&nid(2)));
+        assert_eq!(isis.dis_gen_pending_base.l1.get(&nid(1)), Some(&Some(9)));
+    }
+
+    /// A `DisGenFire` landing mid-commit parks without running: base
+    /// intact, no throttle run stamped, timer slot cleared, and the
+    /// `CommitEnd` flush re-arms it.
+    #[tokio::test]
+    async fn mid_commit_dis_fire_parks_without_running() {
+        let mut isis = fresh_isis();
+        isis.process_cm_msg(commit_end());
+
+        isis.schedule_dis_originate(Level::L2, nid(7), Some(11));
+        assert!(isis.dis_gen_timer.l2.contains_key(&nid(7)));
+
+        isis.process_cm_msg(commit_start());
+        isis.process_msg(Message::DisGenFire(Level::L2, nid(7)));
+
+        assert!(isis.pending_dis_gen.l2.contains(&nid(7)));
+        assert!(!isis.dis_gen_timer.l2.contains_key(&nid(7)));
+        assert_eq!(isis.dis_gen_pending_base.l2.get(&nid(7)), Some(&Some(11)));
+        assert!(
+            isis.dis_gen_throttle
+                .l2
+                .get(&nid(7))
+                .is_none_or(|t| t.last_run_at.is_none())
+        );
+
+        isis.process_cm_msg(commit_end());
+        assert!(isis.dis_gen_timer.l2.contains_key(&nid(7)));
+    }
+
+    /// Outside a commit, repeated triggers for the same pseudonode
+    /// coalesce into the one armed timer while distinct pseudonodes
+    /// arm independently.
+    #[tokio::test]
+    async fn dis_schedule_coalesces_per_pseudonode() {
+        let mut isis = fresh_isis();
+        isis.process_cm_msg(commit_end());
+
+        isis.schedule_dis_originate(Level::L1, nid(3), None);
+        isis.schedule_dis_originate(Level::L1, nid(3), Some(5));
+        isis.schedule_dis_originate(Level::L1, nid(4), None);
+
+        assert_eq!(isis.dis_gen_timer.l1.len(), 2);
+        assert_eq!(isis.dis_gen_pending_base.l1.get(&nid(3)), Some(&Some(5)));
+        assert_eq!(isis.dis_gen_pending_base.l1.get(&nid(4)), Some(&None));
     }
 }
