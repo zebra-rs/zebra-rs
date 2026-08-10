@@ -340,6 +340,14 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// advertise it, and the real-identity hellos that follow trip the
     /// §10.5 rid-change teardown — turning the immediate-first-hello
     /// optimization into a 2-full-hello-interval adjacency delay.
+    ///
+    /// Seeded `true` at construction: the manager broadcasts
+    /// `CommitStart` before its spawn loop, so the instance spawned by
+    /// the commit's own first `router ospf{,v3}` line — and a per-VRF
+    /// child mid-replay — never sees it, leaving the gate open for
+    /// exactly the biggest commits (initial config, VRF replay). Both
+    /// spawn paths guarantee a closing `CommitEnd` (the VRF replay
+    /// sends a synthetic one), so the seed always clears.
     pub in_commit: bool,
     /// Interfaces whose Hello send was deferred by `in_commit`;
     /// flushed (via re-sent `HelloTimer` messages) at `CommitEnd`.
@@ -1113,6 +1121,19 @@ impl<V: OspfVersion> Ospf<V> {
         }
     }
 
+    /// `CommitStart` fan-out for the default instance (mirroring
+    /// `vrf_commit_end`): children receive rewritten config lines live
+    /// and `CommitEnd` via the fan-out above, but the manager only
+    /// broadcasts `CommitStart` to its direct subscribers — without
+    /// this a child's commit gate never engages for live commits.
+    pub(crate) fn vrf_commit_start(&mut self) {
+        for handle in self.vrf_registry.values() {
+            let _ = handle
+                .cm_tx
+                .send(ConfigRequest::new(Vec::new(), ConfigOp::CommitStart));
+        }
+    }
+
     /// Kernel VRF master appeared (or was replayed at subscribe time).
     /// Record its `table_id`/`ifindex`, and spawn the per-VRF OSPF
     /// child of this version if config intent exists and it isn't
@@ -1622,7 +1643,7 @@ impl Ospf<Ospfv2> {
             sr_rx,
             gr_config: super::neigh::GracefulRestartConfig::default(),
             spf_interval: SpfIntervalConfig::default(),
-            in_commit: false,
+            in_commit: true,
             pending_hello: BTreeSet::new(),
             min_ls_interval_ms: OSPF_MIN_LS_INTERVAL_MS,
             min_ls_arrival_ms: OSPF_MIN_LS_ARRIVAL_MS,
@@ -1706,6 +1727,7 @@ impl Ospf<Ospfv2> {
         // / SRLG staging (mirrors IS-IS).
         if msg.op == ConfigOp::CommitStart {
             self.in_commit = true;
+            self.vrf_commit_start();
             return;
         }
         if msg.op == ConfigOp::CommitEnd {
@@ -6944,7 +6966,7 @@ impl Ospf<Ospfv3> {
             sr_rx,
             gr_config: super::neigh::GracefulRestartConfig::default(),
             spf_interval: SpfIntervalConfig::default(),
-            in_commit: false,
+            in_commit: true,
             pending_hello: BTreeSet::new(),
             min_ls_interval_ms: OSPF_MIN_LS_INTERVAL_MS,
             min_ls_arrival_ms: OSPF_MIN_LS_ARRIVAL_MS,
@@ -7019,6 +7041,7 @@ impl Ospf<Ospfv3> {
         // sibling).
         if msg.op == ConfigOp::CommitStart {
             self.in_commit = true;
+            self.vrf_commit_start();
             return;
         }
         if msg.op == ConfigOp::CommitEnd {
