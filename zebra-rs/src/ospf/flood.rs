@@ -140,6 +140,16 @@ pub fn ospf_is_self_originated(oi: &OspfInterface, lsa: &OspfLsa) -> bool {
     if lsa.h.adv_router == *oi.router_id {
         return true;
     }
+    // A FORMER identity of ours counts too: after a router-id change,
+    // peers still hold (and the re-exchange happily serves back) LSAs
+    // advertised under the old identity. Treating them as foreign
+    // re-learns our own ghost as a phantom node that lingers until
+    // MaxAge; treating them as self routes them to
+    // `process_self_originated_lsa`, whose former-identity branch
+    // flushes them network-wide.
+    if oi.former_router_ids.contains(&lsa.h.adv_router) {
+        return true;
+    }
     // For Network LSAs, ls_id is the interface IP of the DR that originated it.
     if lsa.h.ls_type == OspfLsType::Network {
         for addr in oi.addr.iter() {

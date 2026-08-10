@@ -438,6 +438,16 @@ pub struct OspfLink<V: OspfVersion = Ospfv2> {
     pub ostate: IfsmState,
     pub sock: Arc<AsyncFd<Socket>>,
     pub ident: Identity<V>,
+    /// Router-IDs this instance previously advertised under and has
+    /// since abandoned (config change, or the provisional→configured
+    /// transition at startup). Pushed by `router_id_update`, newest
+    /// last, capped. The §13.4 self-originated check consults this so
+    /// an LSA from a FORMER identity — echoed back by a peer during
+    /// the post-change re-exchange — is flushed network-wide instead
+    /// of being re-learned as a phantom node that lingers until
+    /// MaxAge. Bounded and rarely touched: identities change on
+    /// operator action, not in steady state.
+    pub former_router_ids: Vec<Ipv4Addr>,
     pub tx: UnboundedSender<Message<V>>,
     pub nbrs: BTreeMap<Ipv4Addr, Neighbor<V>>,
     pub flags: OspfLinkFlags,
@@ -565,6 +575,7 @@ where
             ostate: IfsmState::Down,
             sock,
             ident: Identity::<V>::new(router_id),
+            former_router_ids: Vec::new(),
             tx,
             nbrs: BTreeMap::new(),
             flags: 0.into(),
@@ -630,6 +641,7 @@ where
             ostate: IfsmState::Down,
             sock,
             ident: Identity::<V>::new(router_id),
+            former_router_ids: Vec::new(),
             tx,
             nbrs: BTreeMap::new(),
             flags: 0.into(),
