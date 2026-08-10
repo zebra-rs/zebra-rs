@@ -927,12 +927,35 @@ impl IsisConfig {
 fn config_net(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     let nsap = args.string()?.parse::<Nsap>().unwrap();
 
+    let prev = isis.config.net.sys_id();
     if op.is_set() {
         isis.lsp_map.get_mut(&Level::L1).get_sys(&nsap.sys_id());
         isis.lsp_map.get_mut(&Level::L2).get_sys(&nsap.sys_id());
         isis.config.net = nsap;
     } else {
         isis.config.net = Nsap::default();
+    }
+
+    // No identity, no wire: `hello_send` stays silent while the sys-id
+    // is empty (pre-NET), and an already-armed hello timer only fires
+    // into that gate. When the identity lands (or changes), kick an
+    // immediate Hello on every enabled circuit so peers learn the real
+    // system-id without waiting out a hello interval. Deliberately not
+    // `kick_hello_all_links`: that helper covers every kernel link, and
+    // `hello_originate` would arm periodic timers on circuits that are
+    // not IS-IS-enabled. A NET delete sends nothing — the gate goes
+    // silent and peers age the adjacency out via their hold timers.
+    let curr = isis.config.net.sys_id();
+    if curr != prev && !curr.is_empty() {
+        for (ifindex, link) in isis.links.iter() {
+            if link.config.enabled() {
+                let _ = isis.tx.send(Message::Ifsm(
+                    super::ifsm::IfsmEvent::HelloOriginate,
+                    *ifindex,
+                    None,
+                ));
+            }
+        }
     }
 
     Some(())
