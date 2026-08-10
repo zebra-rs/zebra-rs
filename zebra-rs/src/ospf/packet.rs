@@ -360,6 +360,19 @@ pub fn ospf_hello_recv(
         return;
     }
 
+    // A hello claiming OUR identity is either our own packet reflected
+    // back or a peer wearing a colliding (mis)configured Router-ID.
+    // Processing it would fabricate a self-neighbor and poison our own
+    // hello neighbor lists — drop it.
+    if packet.router_id == *router_id {
+        ospf_pdu_trace!(
+            tracing,
+            "[Hello:Recv] dropping hello claiming our own Router-ID {}",
+            router_id
+        );
+        return;
+    }
+
     ospf_pdu_trace!(tracing, "[Hello:Recv] on {}", oi.index);
 
     let Ospfv2Payload::Hello(ref hello) = packet.payload else {
@@ -519,6 +532,13 @@ pub fn ospf_hello_send(
     tracing: &OspfTracing,
 ) {
     if oi.is_passive() {
+        return;
+    }
+    // No identity yet (constructor default, before the Router-ID
+    // config or a RIB-derived value lands): stay off the wire. When
+    // the identity arrives, router_id_update fires immediate hellos
+    // on every up link, so nothing is lost by skipping here.
+    if oi.ident.router_id.is_unspecified() {
         return;
     }
     ospf_pdu_trace!(tracing, "[Hello:Send] on {}", oi.name);
