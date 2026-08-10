@@ -344,6 +344,20 @@ pub fn hello_send(link: &mut LinkTop, level: Level) -> Result<()> {
         return Ok(());
     }
 
+    // No identity, no wire (FRR parity, mirroring OSPF's unspecified
+    // Router-ID gate): until the NET is configured the instance has no
+    // system-id, and a Hello would go out as 0000.0000.0000 — peers
+    // key a neighbor under that impostor identity and carry it in
+    // their IIH neighbor lists, poisoning the 3-way handshake. Within
+    // one commit `net` applies first (`ext:sort "1"`), so the exposed
+    // window is a config sequence that enables circuits in an earlier
+    // commit than the NET — or deletes the NET while circuits are up.
+    // The armed timer only fires into this gate; `config_net` kicks an
+    // immediate Hello on every enabled circuit once the identity lands.
+    if link.up_config.net.sys_id().is_empty() {
+        return Ok(());
+    }
+
     let hello = if link.config.network_type() == NetworkType::P2p {
         IsisPdu::P2pHello(hello_p2p_generate(link, level))
     } else {

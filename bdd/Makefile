@@ -258,6 +258,13 @@ isis_lan_dis_reelection:
 	mkdir -p allure-results
 	$(CUCUMBER) -- --concurrency=1 --tags "@isis_lan_dis_reelection"
 
+# "No identity, no wire": an enabled circuit without a configured NET
+# must stay Hello-silent (no 0000.0000.0000 impostor neighbor on the
+# peer) and come up promptly once the NET lands.
+isis_no_net_gate:
+	mkdir -p allure-results
+	$(CUCUMBER) -- --concurrency=1 --tags "@isis_no_net_gate"
+
 # A DIS that loses its circuit must purge the pseudonode LSP it originated
 # rather than leave it to age out over MaxAge (~20 min). Slow by nature:
 # the purged copy has to outlive ZeroAgeLifetime (60s) before eviction.
