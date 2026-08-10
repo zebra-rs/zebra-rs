@@ -61,7 +61,16 @@ pub type ShowCallback<V = Ospfv2> = fn(&Ospf<V>, Args, bool) -> Result<String, s
 /// Constructor-default Router ID, used until a configured or
 /// RIB-derived value arrives (and as the fallback when a configured
 /// one is deleted on an instance that never received a RIB value).
-pub const DEFAULT_ROUTER_ID: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
+///
+/// UNSPECIFIED, deliberately: an instance with no identity yet must
+/// stay off the wire (the hello send paths gate on it), because any
+/// concrete placeholder is an identity collision waiting to happen —
+/// the previous value, 10.0.0.1, meant every not-yet-configured router
+/// in a v6-only topology (nothing to derive a Router-ID from)
+/// impersonated whichever real router legitimately owned 10.0.0.1,
+/// planting ghost neighbors keyed under a colliding identity. FRR
+/// behaves the same way: no Router-ID, no OSPF.
+pub const DEFAULT_ROUTER_ID: Ipv4Addr = Ipv4Addr::UNSPECIFIED;
 
 /// OSPF protocol instance.
 ///
@@ -7225,6 +7234,16 @@ impl Ospf<Ospfv3> {
             let _ = self
                 .tx
                 .send(Message::Ifsm(addr.ifindex, IfsmEvent::InterfaceUp));
+        } else if link.enabled && changed && prefix.addr().is_unicast_link_local() {
+            // The link came Up on a GLOBAL address alone (config commit)
+            // and the kernel's link-local landed afterwards. The hello
+            // timer is already armed, so `ifsm_hello_start`'s
+            // is-none guard won't re-fire — but every hello sent so far
+            // was silently skipped by `ospfv3_hello_send`'s no-LL bail,
+            // and the next periodic tick is up to a HelloInterval away.
+            // Send one now that a source exists; traced runs put the
+            // adjacency at enable+10s without this.
+            let _ = self.tx.send(Message::HelloTimer(addr.ifindex));
         }
 
         // A prefix the address list didn't hold yet must reach the

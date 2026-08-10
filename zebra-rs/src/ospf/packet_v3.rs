@@ -302,6 +302,10 @@ pub fn ospfv3_hello_send(
     if link.is_passive() {
         return;
     }
+    // No identity yet: stay off the wire — see the v2 twin's comment.
+    if link.ident.router_id.is_unspecified() {
+        return;
+    }
     ospf_pdu_trace!(tracing, "[Hello:Send] on {}", link.name);
     let Some(src) = link_local_src(link) else {
         tracing::debug!(
@@ -375,6 +379,19 @@ pub fn ospfv3_hello_recv(
     tracing: &OspfTracing,
 ) {
     if oi.is_passive() {
+        return;
+    }
+
+    // Same guard as the v2 twin: a hello claiming OUR identity is a
+    // reflection or a colliding Router-ID — processing it fabricates a
+    // self-neighbor (keyed by rid in v3) that poisons our own hello
+    // neighbor lists.
+    if packet.router_id == *our_router_id {
+        ospf_pdu_trace!(
+            tracing,
+            "[v3 Hello:Recv] dropping hello claiming our own Router-ID {}",
+            our_router_id
+        );
         return;
     }
 
