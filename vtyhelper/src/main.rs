@@ -330,10 +330,12 @@ const UNCOMMITTED_UNKNOWN: i32 = 2;
 ///
 /// The predicate is a string comparison of `show running-config formal`
 /// against `show candidate-config formal`. Both render through
-/// `Config::list()` — the same rendering `commit_config` diffs — so this
-/// answers "would a commit do anything?" rather than the weaker "do the
-/// two trees look different"; the configure-mode `show` command
-/// compares the other (`format()`) rendering and the two can disagree.
+/// `Config::formal()` — a `set `-prefixed spelling of the `list()`
+/// rendering `commit_config` diffs, with the prefix applied uniformly
+/// to both sides — so this answers "would a commit do anything?" rather
+/// than the weaker "do the two trees look different"; the
+/// configure-mode `show` command compares the other (`format()`)
+/// rendering and the two can disagree.
 /// Both commands live in exec mode and are not admin-gated, so a View
 /// session can ask.
 ///
