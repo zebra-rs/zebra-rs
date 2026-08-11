@@ -39,8 +39,8 @@ configuration representations is accepted:
 - **CLI** — the Cisco-style indented block format (`show running-config`).
 - **JSON** — a JSON document of the configuration tree.
 - **YAML** — a YAML document of the configuration tree.
-- **set/delete** — a flat list of `set …` / `delete …` statements (what
-  `show running-config formal` prints, with the `set` keyword restored).
+- **set/delete** — a flat list of `set …` / `delete …` statements
+  (exactly what `show running-config formal` prints).
 
 `save` writes the file back in the format it was loaded in, so the round
 trip preserves your choice. A file that carried no configuration at

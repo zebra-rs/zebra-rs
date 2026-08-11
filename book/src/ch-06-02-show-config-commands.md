@@ -60,22 +60,22 @@ router {
 
 ### `formal`
 
-A flat listing, one configuration leaf per line, handy for diffing in
-plain text or grepping for a single leaf.
+A flat listing, one `set` statement per configuration leaf, handy for
+diffing in plain text, grepping for a single leaf, or pasting straight
+into another router's configure mode.
 
 ```
 host(config)# show candidate-config formal
-system hostname r1
-router bgp global as 65000
-router bgp global router-id 10.0.0.1
-router bgp neighbor 10.0.0.2 remote-as 65001
+set system hostname r1
+set router bgp global as 65000
+set router bgp global router-id 10.0.0.1
+set router bgp neighbor 10.0.0.2 remote-as 65001
 ```
 
-The display drops the leading `set` keyword. A *file* in this format
-keeps it — `set system hostname r1` — which is what `save` writes and
-what the set/delete loader reads; a file of bare lines is sniffed as
-YAML and won't load. So paste from `show … formal` into a config file
-only with the `set` prefix restored.
+This is exactly the document `save formal` writes and the set/delete
+loader reads, so the output also works as a config file as-is — the
+`set` prefix is what makes it sniff as the set/delete format rather
+than falling through to YAML.
 
 ### `json`
 

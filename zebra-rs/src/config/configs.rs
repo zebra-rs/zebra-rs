@@ -510,6 +510,23 @@ impl Config {
         }
     }
 
+    /// The operator-facing spelling of [`Self::list`]: every line
+    /// carries the `set` keyword, so the output pastes straight into
+    /// another vty's configure mode and, written to a file, sniffs as
+    /// the set/delete format instead of falling through to YAML. This
+    /// is what `show {running,candidate}-config formal` prints and what
+    /// `save formal` writes; `list` stays bare because the commit
+    /// text-diff and the config-tree parsers work on command bodies.
+    pub fn formal(&self, output: &mut String) {
+        let mut list = String::new();
+        self.list(&mut list);
+        for line in list.lines() {
+            output.push_str("set ");
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+
     fn has_mandatory(&self, mandatory: &String) -> bool {
         for config in self.configs.borrow().iter() {
             if config.name == *mandatory {

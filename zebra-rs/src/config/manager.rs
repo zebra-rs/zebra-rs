@@ -1175,14 +1175,12 @@ impl ConfigManager {
 
     /// Render the running config in `format`, as a document
     /// [`Self::load_config`] can read back — the four serializations are
-    /// exactly the four `config_format_type` sniffs.
-    ///
-    /// `SetDelete` is the one that needs assembling: `Config::list`
-    /// renders the bare command bodies (`system hostname r1`), which is
-    /// what `show running-config formal` prints, but a *file* of those
-    /// lines sniffs as YAML — no `{`, no trailing `;`, no `set` — and
-    /// would be unreadable on the next boot. Prefix each line with `set`
-    /// so the document round-trips.
+    /// exactly the four `config_format_type` sniffs. `SetDelete` uses
+    /// `Config::formal` (the `set`-prefixed spelling `show
+    /// running-config formal` also prints), not the bare `Config::list`:
+    /// a file of bare command bodies sniffs as YAML — no `{`, no
+    /// trailing `;`, no `set` — and would be unreadable on the next
+    /// boot.
     fn serialize_running(&self, format: ConfigFormat) -> String {
         let running = self.store.running.borrow();
         let mut output = String::new();
@@ -1194,15 +1192,7 @@ impl ConfigManager {
                 running.json(&mut compact);
                 output = prettify_json(compact);
             }
-            ConfigFormat::SetDelete => {
-                let mut list = String::new();
-                running.list(&mut list);
-                for line in list.lines() {
-                    output.push_str("set ");
-                    output.push_str(line);
-                    output.push('\n');
-                }
-            }
+            ConfigFormat::SetDelete => running.formal(&mut output),
         }
         output
     }
@@ -1455,7 +1445,7 @@ impl ConfigManager {
                     };
                     let text = if req.paths.iter().any(|p| p.name == "formal") {
                         let mut out = String::new();
-                        running().list(&mut out);
+                        running().formal(&mut out);
                         out
                     } else if req.paths.iter().any(|p| p.name == "yaml") {
                         let mut out = String::new();
@@ -1485,7 +1475,7 @@ impl ConfigManager {
                     };
                     let text = if req.paths.iter().any(|p| p.name == "formal") {
                         let mut out = String::new();
-                        candidate().list(&mut out);
+                        candidate().formal(&mut out);
                         out
                     } else if req.paths.iter().any(|p| p.name == "yaml") {
                         let mut out = String::new();
@@ -2348,6 +2338,31 @@ mod save_config_tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// `show … formal` and `save formal` share one rendering
+    /// (`Config::formal`): every line carries the `set` keyword, so the
+    /// display pastes straight into another vty's configure mode and
+    /// doubles as a loadable set/delete document. It used to print the
+    /// bare `Config::list` bodies, which sniffed as YAML when saved.
+    #[test]
+    fn formal_lines_carry_the_set_keyword() {
+        let path = temp_path("formal");
+        std::fs::write(&path, "system {\n  hostname r1;\n}\n").expect("seed config written");
+
+        let cm = manager_with_config(&path);
+        cm.load_config();
+
+        let mut formal = String::new();
+        cm.store.running.borrow().formal(&mut formal);
+        assert!(
+            formal.lines().any(|l| l == "set system hostname r1"),
+            "{formal:?}"
+        );
+        assert!(formal.lines().all(|l| l.starts_with("set ")), "{formal:?}");
+        assert_eq!(config_format_type(&formal), ConfigFormat::SetDelete);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// The .deb ships `/etc/zebra-rs/zebra-rs.conf` comment-only, and
     /// that file must count as "nothing to load": it used to reach the
     /// format sniffer, whose no-content fallback is YAML, so the first
@@ -2517,15 +2532,19 @@ mod uncommitted_predicate_tests {
         exec_show(cm, "show running-config formal") != exec_show(cm, "show candidate-config formal")
     }
 
+    /// The formal show is `Config::formal()` — the `list()` rendering
+    /// `commit_config` diffs, with the `set` prefix applied uniformly to
+    /// both sides, so equality of the two shows still means equality of
+    /// the two diffed renderings.
     #[test]
     fn formal_show_is_the_rendering_commit_diffs() {
         let cm = manager();
         edit(&cm, "set system hostname r1");
 
         let mut running = String::new();
-        cm.store.running.borrow().list(&mut running);
+        cm.store.running.borrow().formal(&mut running);
         let mut candidate = String::new();
-        cm.store.candidate.borrow().list(&mut candidate);
+        cm.store.candidate.borrow().formal(&mut candidate);
 
         assert_eq!(exec_show(&cm, "show running-config formal"), running);
         assert_eq!(exec_show(&cm, "show candidate-config formal"), candidate);

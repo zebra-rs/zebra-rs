@@ -179,7 +179,7 @@ fn show(config: &ConfigManager) -> (ExecCode, String) {
 // === show {candidate,running}-config [ formal | json | yaml ] ===
 //
 // `Config::format()` renders the CLI / Cisco-style indented block view;
-// `Config::list()` renders the flat set-statement form ("formal");
+// `Config::formal()` renders the flat `set`-statement form ("formal");
 // `Config::json()` / `Config::yaml()` are the serialized equivalents.
 
 fn show_candidate_cli(config: &ConfigManager) -> (ExecCode, String) {
@@ -196,7 +196,7 @@ fn show_running_cli(config: &ConfigManager) -> (ExecCode, String) {
 
 fn show_candidate_formal(config: &ConfigManager) -> (ExecCode, String) {
     let mut output = String::new();
-    config.store.candidate.borrow().list(&mut output);
+    config.store.candidate.borrow().formal(&mut output);
     (ExecCode::Show, output)
 }
 
@@ -214,7 +214,7 @@ fn show_candidate_yaml(config: &ConfigManager) -> (ExecCode, String) {
 
 fn show_running_formal(config: &ConfigManager) -> (ExecCode, String) {
     let mut output = String::new();
-    config.store.running.borrow().list(&mut output);
+    config.store.running.borrow().formal(&mut output);
     (ExecCode::Show, output)
 }
 
