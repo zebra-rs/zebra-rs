@@ -11,6 +11,91 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit them,
 # changelog-gen.sh defaults to distribution "unstable" and urgency "medium".
 
+- semver: 26.8.3
+  date: 2026-08-11T18:00:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### BGP multipath
+        * `maximum-paths` brings ECMP to BGP: paths that tie through
+          the best-path comparison ladder install together as one
+          multipath route, the set is ordered deterministically by the
+          same ladder, and iBGP carries its own distinct limit
+          (`maximum-paths ibgp`), all proven end to end by BDD
+        * `suppress-fib-pending` withholds advertisement until the FIB
+          reports the route installed, with the pending counters and
+          the offloaded flag surfaced in the show views
+        * Instance-level graceful restart now seeds onto peers created
+          after the instance, and the ingress tag is carried through
+          the peer shard into the Loc-RIB
+    - note: |
+        ### FPM southbound for SONiC
+        * A new FPM tee, configured under `system fpm`, streams FIB
+          programming to an external forwarding stack — verified
+          against a live SONiC fpmsyncd programming APPL_DB — and
+          routes are marked offloaded from the forwarding plane's
+          acknowledgement
+        * The tee survives repoints, peer outages and VRF deletion,
+          reseeds on enable without stalling the RIB event loop, tees
+          connected routes as FRR does, addresses VRF routes by the
+          VRF device ifindex, and stops re-sending unchanged routes
+        * `fpm-tap`, a recorder for the FPM wire format, joins the
+          tools for capturing and replaying a programming session
+    - note: |
+        ### OSPF router identity discipline
+        * An instance no longer speaks with a provisional identity:
+          Hellos wait for the commit that configures the router-id to
+          complete, LSAs keyed to a former router-id are flushed when
+          the identity changes, and the hardcoded 10.0.0.1 fallback is
+          gone — no identity, no wire
+        * An OSPFv3 interface renumbering its link-local address now
+          reinstalls the routes that resolved through it, closing a
+          FIB blackhole that persisted until the next full SPF
+    - note: |
+        ### IS-IS and OSPF commit-boundary coalescing
+        * IS-IS self-LSP generation parks while a commit is applying
+          and flushes once at commit end through the normal throttle,
+          so a multi-line commit floods one settled LSP instead of a
+          half-applied one at a bumped sequence number
+        * Pseudonode (DIS) origination goes through the same front
+          door, keyed per pseudonode and sharing the lsp-gen-interval
+          backoff, so LAN membership churn no longer regenerates at
+          full rate while self-LSPs back off
+        * Instances spawned by the commit's own first `router` line
+          now start inside the gate in both protocols, and per-VRF
+          children receive the commit-start signal, closing mid-commit
+          races on fresh spawns
+    - note: |
+        ### IS-IS identity discipline
+        * A circuit sends no IS-IS Hellos until a NET is configured —
+          an enabled circuit used to speak with the all-zero system-id
+          and could complete a full adjacency under that impostor
+          identity; configuring the NET kicks Hellos on the enabled
+          circuits immediately, proven live by a new BDD feature
+    - note: |
+        ### Config save format and the formal view
+        * The default save format is CLI: the comment-only conffile
+          the .deb ships counts as "nothing to load" instead of
+          sniffing as YAML, so the first `save` on a default install
+          writes CLI braces rather than silently rewriting the file
+        * `show { running | candidate }-config formal` prints
+          `set`-prefixed statements — the exact document `save formal`
+          writes — so the output pastes into another vty's configure
+          mode and loads as a config file as-is
+    - note: |
+        ### Book and reviews
+        * The MUP book's two-VRF ST2 example moves its Direct segment
+          into the N6 VRF, and a BDD feature regression-tests the
+          chapter's configuration as written
+        * Deep code reviews of the bgp-packet, isis-packet and
+          ospf-packet crates record their findings in per-crate
+          MUSE.md reports
+        * A neighbor-group add-path opinion for MUP now fans to both
+          MUP families, and policy call-cycle detection marks every
+          member of the cycle rather than one edge's endpoints
+
 - semver: 26.8.2
   date: 2026-08-07T18:00:00+09:00
   distribution: unstable
