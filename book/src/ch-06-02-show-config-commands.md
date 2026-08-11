@@ -200,8 +200,10 @@ system:
 The format is re-detected on every load — the startup load and the
 `load` command both — from the file's first meaningful line, the same
 sniffing `vtyctl apply -f` uses. Two cases fall back to the **CLI**
-block format: a config file that was missing or empty when the daemon
-started, and a daemon whose config only ever arrived over
+block format: a config file that carried no configuration when the
+daemon started (missing, empty, or comment-only — the shipped
+`/etc/zebra-rs/zebra-rs.conf` is comment-only, so a default install
+saves CLI), and a daemon whose config only ever arrived over
 `vtyctl apply`. Applying a document with `vtyctl apply` deliberately
 does *not* change the format `save` writes — an applied document is a
 config injection, not the on-disk file.

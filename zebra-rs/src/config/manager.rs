@@ -220,9 +220,11 @@ pub struct ConfigManager {
     /// as YAML rather than being silently rewritten in the CLI brace
     /// format. Set by [`Self::load_config`] on every successful parse —
     /// both the startup load and the configure-mode `load` command — and
-    /// left at `Cli` when there was nothing to load (missing or empty
-    /// file), which keeps a first save on a fresh box in the format the
-    /// shipped `zebra-rs.conf` uses.
+    /// left at `Cli` when there was nothing to load: a missing file, an
+    /// empty one, or the comment-only conffile the .deb ships. (That
+    /// last case matters: comment-only used to reach the sniffer, whose
+    /// no-content fallback is YAML, so every default install saved its
+    /// first config as YAML instead of CLI.)
     ///
     /// Deliberately *not* driven by `vtyctl apply`: a streamed-in
     /// document is a config injection, not the on-disk file, so applying
@@ -992,17 +994,22 @@ impl ConfigManager {
         match std::fs::read_to_string(&self.config_path) {
             // An empty (or comment/whitespace-only) config file carries no
             // commands. Skip the format parsers entirely so the YAML
-            // default doesn't parse `""` into a spurious command. (Done
-            // here, not in `config_to_commands`, so the `vtyctl apply`
-            // path keeps its existing empty-document behavior — an empty
-            // apply must not clear+commit the running config.)
-            Ok(output) if output.trim().is_empty() => {
+            // default doesn't parse `""` into a spurious command — and,
+            // just as important, doesn't get *recorded*: the shipped
+            // `zebra-rs.conf` conffile is comment-only, and running it
+            // through the sniffer stamped `config_format` as YAML, so the
+            // first `save` on a default install came out YAML instead of
+            // the CLI default. (Done here, not in `config_to_commands`,
+            // so the `vtyctl apply` path keeps its existing
+            // empty-document behavior — an empty apply must not
+            // clear+commit the running config.)
+            Ok(output) if first_meaningful_line(&output).is_none() => {
                 // Unconditional, unlike the applied summary: the trace
                 // toggle rides in the config file, so a boot that lands
                 // here (or in the missing-file arm below) had nothing
                 // that could have enabled it.
                 tracing::info!(
-                    "startup config {} is empty; starting unconfigured",
+                    "startup config {} carries no commands; starting unconfigured",
                     self.config_path.display()
                 );
             }
@@ -1890,16 +1897,24 @@ impl ConfigFormat {
     }
 }
 
+/// First line of a config document that isn't blank or a `#` comment —
+/// `None` for a document that carries no configuration at all. This is
+/// both the line the format sniffer reads and [`ConfigManager::load_config`]'s
+/// "is there anything to load" test, so the two can't disagree on what
+/// counts as content.
+fn first_meaningful_line(config_str: &str) -> Option<&str> {
+    config_str
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('#'))
+}
+
 pub fn config_format_type(config_str: &str) -> ConfigFormat {
     // Use the first *meaningful* line for format sniffing. Skip
     // blank lines and `#`-prefixed comments so leading whitespace
     // or commentary in a file or `-c` payload doesn't fall through
     // to the YAML default.
-    let first_line = config_str
-        .lines()
-        .map(str::trim)
-        .find(|l| !l.is_empty() && !l.starts_with('#'))
-        .unwrap_or("");
+    let first_line = first_meaningful_line(config_str).unwrap_or("");
     if first_line.starts_with('{') {
         ConfigFormat::Json
     } else if first_line.ends_with('{') || first_line.ends_with(';') {
@@ -2329,6 +2344,39 @@ mod save_config_tests {
         cm.save_config().expect("bare save");
         let saved = std::fs::read_to_string(&path).expect("config readable");
         assert_eq!(config_format_type(&saved), ConfigFormat::Yaml, "{saved:?}");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The .deb ships `/etc/zebra-rs/zebra-rs.conf` comment-only, and
+    /// that file must count as "nothing to load": it used to reach the
+    /// format sniffer, whose no-content fallback is YAML, so the first
+    /// `save` on every default install silently rewrote the conffile as
+    /// YAML. The default save format is CLI.
+    #[test]
+    fn comment_only_conffile_saves_as_cli() {
+        let path = temp_path("comment-only");
+        std::fs::write(
+            &path,
+            "# zebra-rs configuration file.\n#\n# It ships comment-only.\n\n",
+        )
+        .expect("seed config written");
+
+        let cm = manager_with_config(&path);
+        cm.load_config();
+        assert_eq!(*cm.config_format.borrow(), ConfigFormat::Cli);
+
+        // Give the running config content so the saved document has a
+        // format to sniff.
+        let mode = cm.modes.get("configure").expect("configure mode");
+        let (code, output, _) = cm.execute(mode, "set system hostname r1");
+        assert_eq!(code, ExecCode::Show, "set rejected: {output:?}");
+        cm.commit_config().expect("commit succeeds");
+
+        cm.save_config().expect("save succeeds");
+        let saved = std::fs::read_to_string(&path).expect("config readable");
+        assert_eq!(config_format_type(&saved), ConfigFormat::Cli, "{saved:?}");
+        assert!(saved.contains("hostname r1;"), "{saved:?}");
 
         let _ = std::fs::remove_file(&path);
     }

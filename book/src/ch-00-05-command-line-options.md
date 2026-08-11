@@ -43,8 +43,10 @@ configuration representations is accepted:
   `show running-config formal` prints, with the `set` keyword restored).
 
 `save` writes the file back in the format it was loaded in, so the round
-trip preserves your choice. A file that was missing or empty at startup
-has no format to preserve, and saves in the **CLI** format. To convert a
+trip preserves your choice. A file that carried no configuration at
+startup — missing, empty, or comment-only like the shipped
+`zebra-rs.conf` — has no format to preserve, and saves in the **CLI**
+format. To convert a
 config file, name a format: `save { cli | formal | json | yaml }` writes
 that one and keeps the file in it from then on (see
 [Show Config Commands](ch-06-02-show-config-commands.md)).
