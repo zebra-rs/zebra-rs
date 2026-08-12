@@ -4,6 +4,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_prost_build::compile_protos("../proto/vty.proto")?;
     // Running-config subscription API (zebra.config.v1).
     tonic_prost_build::compile_protos("../proto/config.proto")?;
+    // External show-provider API (zebra.show.v1).
+    tonic_prost_build::compile_protos("../proto/show.proto")?;
     // cradle eBPF data-plane control API (FibHandle tee target).
     tonic_prost_build::compile_protos("../proto/cradle.proto")?;
 

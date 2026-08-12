@@ -188,6 +188,21 @@ pub enum Message {
     /// the snapshot event and keeps the sender until the client goes
     /// away.
     ConfigSubscribe(ConfigSubscribeRequest),
+    /// Register an external show provider (`zebra.show.v1`) under a
+    /// top-level show routing key ("firewall", "ipsec", …), replacing
+    /// any previous holder of that name.
+    SubscribeShow {
+        name: String,
+        tx: UnboundedSender<DisplayRequest>,
+    },
+    /// Withdraw an external show provider's name — but only while the
+    /// registry still points at that provider's channel
+    /// (`same_channel`), so a replaced provider's exit cannot remove
+    /// its successor.
+    UnsubscribeShow {
+        name: String,
+        tx: UnboundedSender<DisplayRequest>,
+    },
 }
 
 #[derive(Debug)]

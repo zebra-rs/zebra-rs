@@ -1689,6 +1689,17 @@ impl ConfigManager {
             Message::UnsubscribeShowVrf { key } => {
                 self.show_vrf_clients.borrow_mut().remove(&key);
             }
+            Message::SubscribeShow { name, tx } => {
+                self.show_clients.borrow_mut().insert(name, tx);
+            }
+            Message::UnsubscribeShow { name, tx } => {
+                let mut clients = self.show_clients.borrow_mut();
+                if let Some(current) = clients.get(&name)
+                    && current.same_channel(&tx)
+                {
+                    clients.remove(&name);
+                }
+            }
             Message::ConfigSubscribe(req) => {
                 let sub = ConfigSubscriber {
                     format: req.format,

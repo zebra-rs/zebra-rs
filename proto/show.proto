@@ -1,0 +1,61 @@
+// Copyright 2026 Zebra Project.
+
+syntax = "proto3";
+
+// External show-provider registration — the reverse of the vty `Show`
+// service. An out-of-process feature daemon (e.g. the insomnia
+// firewall/IPsec enforcement daemon) connects, names the show trees
+// it serves, and then answers the vty's show orders over the same
+// stream, so `show firewall …` typed at the CLI is rendered by the
+// external daemon exactly as an in-process handler would.
+//
+// Like zebra.config.v1 this is a machine-to-machine API, versioned
+// independently of the interactive `vty` package and served on the
+// same gRPC endpoint.
+package zebra.show.v1;
+
+// Client → server. The FIRST message on the stream must be
+// `register`; every later message is a `chunk` answering an order.
+message ProviderMessage {
+  oneof msg {
+    Register register = 1;
+    ShowChunk chunk = 2;
+  }
+}
+
+// The show trees this provider serves — the vty's routing keys, e.g.
+// "firewall" routes `show firewall …` and "ipsec" routes
+// `show vpn ipsec …`. Registration replaces any previous provider of
+// the same name; disconnecting withdraws it (the vty then falls back
+// to its "not configured or running" message).
+message Register {
+  repeated string name = 1;
+}
+
+// Server → client: one show command to answer. `path` is the
+// slash-joined command skeleton ("/show/firewall/ipv4/name") and
+// `args` the matched key/value tokens in command order — the same
+// (path, args) split the in-process handlers get from
+// `path_from_command`.
+message ShowOrder {
+  // Correlates the answer chunks; unique per stream.
+  uint64 id = 1;
+  string path = 2;
+  repeated string args = 3;
+  // Render JSON instead of the human table (`vtyctl show -j`).
+  bool json = 4;
+}
+
+// One piece of an order's output. Send any number of chunks followed
+// by one with `eof` set (its `text` may be empty or carry the final
+// piece). Always answer every order, even with a single empty eof
+// chunk — an unanswered order surfaces to the operator as an error.
+message ShowChunk {
+  uint64 id = 1;
+  string text = 2;
+  bool eof = 3;
+}
+
+service ShowProviderService {
+  rpc Provide(stream ProviderMessage) returns (stream ShowOrder) {}
+}
