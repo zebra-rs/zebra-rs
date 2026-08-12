@@ -44,7 +44,6 @@ mod script;
 mod spf;
 mod srv6;
 mod stamp;
-mod system;
 /// IOS-XR-style exponential-backoff throttle, shared by the IS-IS and
 /// OSPF SPF/LSA schedulers.
 mod throttle;
@@ -225,16 +224,11 @@ async fn run(arg: Arg) -> anyhow::Result<()> {
     config.subscribe_show("rib", rib.show.tx.clone());
     config.subscribe_show("policy", policy.show.tx.clone());
 
-    // The firewall and IPsec backends consume their subtrees as JSON
-    // batches: one whole-tree delivery per commit that touches the
-    // prefix (both subtrees only exist with `--feature iso`).
-    let firewall = system::Firewall::new();
-    config.subscribe_json(&["firewall"], firewall.tx.clone());
-    config.subscribe_show("firewall", firewall.show.tx.clone());
-
-    let ipsec = system::Ipsec::new();
-    config.subscribe_json(&["vpn", "ipsec"], ipsec.tx.clone());
-    config.subscribe_show("ipsec", ipsec.show.tx.clone());
+    // The firewall and IPsec backends live in the external insomnia
+    // daemon: it consumes both subtrees over the zebra.config.v1 JSON
+    // subscription and serves `show firewall` / `show vpn ipsec` back
+    // through the zebra.show.v1 provider registration (the subtrees
+    // only exist with `--feature iso`).
 
     let cli = Cli::new(config.tx.clone());
 
@@ -243,8 +237,6 @@ async fn run(arg: Arg) -> anyhow::Result<()> {
     config::serve(cli, vty_addr)?;
 
     policy::serve(policy);
-
-    system::serve(firewall, ipsec);
 
     rib::serve(rib);
 

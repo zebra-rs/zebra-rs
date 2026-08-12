@@ -1,6 +1,6 @@
 use crate::config::api::{ClearTxResponse, DeployResponse, DisplayTxRequest, DisplayTxResponse};
 
-use super::api::{CompletionResponse, ConfigOp, ExecuteResponse, JsonConfigUpdate, Message};
+use super::api::{CompletionResponse, ConfigOp, ExecuteResponse, Message};
 use super::bfd::{despawn_bfd, spawn_bfd};
 use super::bgp::{despawn_bgp, spawn_bgp};
 use super::commands::Mode;
@@ -237,24 +237,16 @@ pub struct ConfigManager {
     pub tx: Sender<Message>,
     pub rx: Receiver<Message>,
     pub cm_clients: RefCell<HashMap<String, UnboundedSender<ConfigRequest>>>,
-    /// JSON batch subscriptions (the openconfigd `SubscribeLocalAdd`
-    /// model, in-process): each entry is a path prefix and a channel.
-    /// When a commit touches any line under the prefix, the subscriber
-    /// receives ONE message carrying the whole post-commit subtree as
-    /// JSON (`"{}"` when the subtree was deleted) — no per-line
-    /// deliveries, no CommitStart/End framing. Fits whole-ruleset
-    /// consumers (firewall → nftables) where commit means "recompile
-    /// everything", unlike the per-line `cm_clients` broadcast that
-    /// suits live-object protocol tasks.
-    pub json_clients: RefCell<Vec<(Vec<String>, UnboundedSender<JsonConfigUpdate>)>>,
     /// External gRPC subscribers to running-config commits
-    /// (`zebra.config.v1.ConfigService/Subscribe`). Unlike
-    /// `cm_clients` / `json_clients` these register at runtime (the
-    /// snapshot event replaces the startup-commit replay) and are
-    /// pruned instead of trusted: delivery is a bounded `try_send`,
-    /// and a subscriber whose channel is closed (client gone) or full
-    /// (client not reading) is dropped — the client resyncs by
-    /// resubscribing.
+    /// (`zebra.config.v1.ConfigService/Subscribe`), in either PATH
+    /// (per-commit change batch) or JSON (whole post-commit subtree)
+    /// form — the JSON form is how the out-of-process firewall/IPsec
+    /// daemon consumes its subtrees. Unlike `cm_clients` these
+    /// register at runtime (the snapshot event replaces the
+    /// startup-commit replay) and are pruned instead of trusted:
+    /// delivery is a bounded `try_send`, and a subscriber whose
+    /// channel is closed (client gone) or full (client not reading)
+    /// is dropped — the client resyncs by resubscribing.
     pub config_subscribers: RefCell<Vec<ConfigSubscriber>>,
     pub show_clients: RefCell<HashMap<String, UnboundedSender<DisplayRequest>>>,
     /// Per-instance show channels keyed `"<proto>:vrf:<name>"`. Populated
@@ -406,7 +398,6 @@ impl ConfigManager {
             tx,
             rx,
             cm_clients: RefCell::new(HashMap::new()),
-            json_clients: RefCell::new(Vec::new()),
             config_subscribers: RefCell::new(Vec::new()),
             show_clients: RefCell::new(HashMap::new()),
             show_vrf_clients: RefCell::new(HashMap::new()),
@@ -573,16 +564,6 @@ impl ConfigManager {
         self.show_clients
             .borrow_mut()
             .insert(name.to_owned(), show_tx);
-    }
-
-    /// Register a JSON batch subscription for the subtree at `prefix`
-    /// (top-level segments of the config tree, e.g. `["firewall"]`).
-    /// See the `json_clients` field for the delivery contract. Must be
-    /// called before the event loop starts so the startup-config
-    /// commit replays through it.
-    pub fn subscribe_json(&self, prefix: &[&str], tx: UnboundedSender<JsonConfigUpdate>) {
-        let prefix: Vec<String> = prefix.iter().map(|s| s.to_string()).collect();
-        self.json_clients.borrow_mut().push((prefix, tx));
     }
 
     /// Serialize the running-config subtree at `prefix` to JSON —
@@ -916,7 +897,6 @@ impl ConfigManager {
                 super::tracing::config_dispatch(&line, op);
             }
         }
-        let mut json_touched = vec![false; self.json_clients.borrow().len()];
         // This commit's changes in gRPC-subscriber form, accumulated
         // here (pre-commit, in diff order) and delivered after
         // `store.commit()` by `dispatch_config_subscribers`.
@@ -942,17 +922,6 @@ impl ConfigManager {
                     },
                     path: paths.iter().map(|p| p.name.clone()).collect(),
                 });
-                // JSON batch subscribers: only note that the prefix was
-                // touched — the single subtree delivery happens after
-                // the store commits, so it carries the post-commit
-                // state.
-                for (i, (prefix, _)) in self.json_clients.borrow().iter().enumerate() {
-                    if paths.len() >= prefix.len()
-                        && prefix.iter().zip(paths.iter()).all(|(p, cp)| &cp.name == p)
-                    {
-                        json_touched[i] = true;
-                    }
-                }
                 for tx in self.cm_clients.borrow().values() {
                     tx.send(ConfigRequest::new(paths.clone(), op)).unwrap();
                 }
@@ -1021,21 +990,9 @@ impl ConfigManager {
 
         self.store.commit();
 
-        // Deliver JSON batch updates from the freshly-committed running
-        // tree — one message per touched subscription per commit.
-        for (i, (prefix, tx)) in self.json_clients.borrow().iter().enumerate() {
-            if json_touched[i] {
-                let update = JsonConfigUpdate {
-                    path: prefix.clone(),
-                    json: self.subtree_json(prefix),
-                };
-                let _ = tx.send(update);
-            }
-        }
-
-        // External gRPC subscribers — post-commit like the JSON
-        // batches, so a reader that fetches state on an event sees
-        // the committed tree.
+        // External gRPC subscribers — post-commit, so a reader that
+        // fetches state on an event sees the committed tree (the JSON
+        // form delivers the freshly-committed subtree itself).
         self.dispatch_config_subscribers(&subscriber_changes);
         Ok(())
     }
@@ -6471,16 +6428,17 @@ module test-iso-gated {
         }
     }
 
-    /// End-to-end: CLI commands through the real iso-enabled schema
-    /// into a config tree, the tree marshaled to JSON exactly as the
-    /// manager's JSON batch subscription does, and that JSON rendered
-    /// by the nftables backend. Pins the whole chain the firewall
-    /// daemon path relies on — in particular that the backend's serde
-    /// model matches `Config::json()` output (unquoted numerics, null
-    /// presence leaves, list shapes), which no fixture-based test can
-    /// guarantee against drift.
+    /// CLI commands through the real iso-enabled schema into a config
+    /// tree, marshaled to JSON exactly as the JSON subscriptions
+    /// (`subtree_json` / zebra.config.v1) deliver it. The nftables
+    /// backend lives in the insomnia daemon now, so this side pins the
+    /// MARSHAL half of that wire contract as a golden: the shapes the
+    /// backend's serde model depends on (unquoted numerics, null
+    /// presence leaves, keyed lists and leaf-lists as arrays).
+    /// insomnia's backend tests pin the parse half — change this
+    /// golden only together with them.
     #[test]
-    fn firewall_json_roundtrip_renders_nftables() {
+    fn firewall_json_marshal_contract() {
         use crate::config::parse::{State, parse};
 
         let entry = shipped_tree(&["iso"]);
@@ -6521,26 +6479,10 @@ module test-iso-gated {
         let mut json = String::new();
         firewall.json(&mut json);
 
-        let (script, warnings) =
-            crate::system::firewall::render_str(&json).expect("backend parses manager JSON");
-        assert!(warnings.is_empty(), "warnings: {warnings:?}");
-        for needle in [
-            "table ip zebra_firewall {",
-            "set A_SERVERS {",
-            "elements = { 10.0.0.1,10.0.0.2-10.0.0.5 }",
-            "elements = { 80,https }",
-            "chain ZEBRA_FORWARD_filter {",
-            "type filter hook forward priority filter; policy accept;",
-            "jump ZEBRA_STATE_POLICY",
-            "ct state {established,related} counter accept comment \"ipv4-FWD-filter-10\"",
-            "meta l4proto tcp ip daddr @A_SERVERS tcp dport @P_WEB log prefix \"[ipv4-FWD-filter-20-D]\" counter drop comment \"ipv4-FWD-filter-20\"",
-            "counter log prefix \"[ipv4-FWD-filter-default-D]\" drop comment \"FWD-filter default-action drop\"",
-            "counter notrack comment \"ipv4-PRE-raw-5\"",
-            "icmpv6 type nd-router-advert counter accept comment \"ipv6-INP-filter-7\"",
-            "ct state established counter accept",
-        ] {
-            assert!(script.contains(needle), "missing `{needle}` in:\n{script}");
-        }
+        assert_eq!(
+            json,
+            r#"{"global-options":{"state-policy":{"established":{"action":"accept"}}},"group":{"address-group": [{"name":"SERVERS","address": ["10.0.0.1","10.0.0.2-10.0.0.5"]}],"port-group": [{"name":"WEB","port": [80,"https"]}]},"ipv4":{"forward":{"filter":{"default-action":"drop","default-log":null,"rule": [{"number":10,"action":"accept","state": ["established","related"]},{"number":20,"action":"drop","destination":{"group":{"address-group":"SERVERS","port-group":"WEB"}},"log":null,"protocol":"tcp"}]}},"prerouting":{"raw":{"rule": [{"number":5,"action":"notrack"}]}}},"ipv6":{"input":{"filter":{"rule": [{"number":7,"action":"accept","icmpv6":{"type-name":"nd-router-advert"}}]}}}}"#
+        );
     }
 
     /// VyOS-style whole-subtree delete (found by live namespace
@@ -6947,14 +6889,13 @@ module test-iso-gated {
         }
     }
 
-    /// End-to-end: CLI commands through the real iso-enabled schema
-    /// into a config tree, the `/vpn/ipsec` subtree marshaled exactly
-    /// as the manager's JSON batch subscription does, and that JSON
-    /// rendered by the swanctl backend. Pins the backend's serde
-    /// model against `Config::json()` output the same way the
-    /// firewall roundtrip test does.
+    /// The `/vpn/ipsec` half of the marshal contract — same story as
+    /// [`firewall_json_marshal_contract`]: the swanctl backend lives
+    /// in the insomnia daemon, this golden pins what the JSON
+    /// subscription delivers, and insomnia's backend tests pin the
+    /// parse half.
     #[test]
-    fn ipsec_json_roundtrip_renders_swanctl() {
+    fn ipsec_json_marshal_contract() {
         use crate::config::parse::{State, parse};
 
         let entry = shipped_tree(&["iso"]);
@@ -6993,28 +6934,9 @@ module test-iso-gated {
         let mut json = String::new();
         node.json(&mut json);
 
-        let (conf, warnings) =
-            crate::system::ipsec::render_str(&json).expect("backend parses manager JSON");
-        assert!(warnings.is_empty(), "warnings: {warnings:?}");
-        for needle in [
-            "    192-0-2-9 {",
-            "proposals = aes256gcm128-sha256-ecp256",
-            "version = 2",
-            "local_addrs = 192.0.2.1 # dhcp:no",
-            "remote_addrs = 192.0.2.9",
-            "keyingtries = 1",
-            "id = \"%any\"",
-            "192-0-2-9-tunnel-1 {",
-            "esp_proposals = aes256gcm128-sha256-ecp256",
-            "life_time = 1800s",
-            "local_ts = 10.0.1.0/24",
-            "remote_ts = 10.0.2.0/24",
-            "start_action = trap",
-            "ike-MAIN {",
-            "id-1 = \"192.0.2.9\"",
-            "secret = \"s3cret-key\"",
-        ] {
-            assert!(conf.contains(needle), "missing `{needle}` in:\n{conf}");
-        }
+        assert_eq!(
+            json,
+            r#"{"authentication":{"psk": [{"name":"MAIN","id": ["192.0.2.9"],"secret":"s3cret-key"}]},"esp-group": [{"name":"ESP-A","lifetime":1800,"proposal": [{"number":10,"encryption":"aes256gcm128","hash":"sha256"}]}],"ike-group": [{"name":"IKE-A","key-exchange":"ikev2","proposal": [{"number":10,"dh-group":19,"encryption":"aes256gcm128","hash":"sha256"}]}],"site-to-site":{"peer": [{"name":"192.0.2.9","authentication":{"mode":"pre-shared-secret"},"connection-type":"respond","default-esp-group":"ESP-A","ike-group":"IKE-A","local-address":"192.0.2.1","remote-address": ["192.0.2.9"],"tunnel": [{"number":1,"local":{"prefix": ["10.0.1.0/24"]},"remote":{"prefix": ["10.0.2.0/24"]}}]}]}}"#
+        );
     }
 }

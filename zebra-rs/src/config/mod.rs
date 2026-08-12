@@ -34,9 +34,7 @@ mod show_builder;
 pub use show_builder::Builder;
 
 mod api;
-pub use api::{
-    ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, JsonConfigUpdate, Message, ShowChannel,
-};
+pub use api::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, Message, ShowChannel};
 
 mod bfd;
 mod bgp;

@@ -1,11 +1,10 @@
 //! Running-config subscription over gRPC (`zebra.config.v1`).
 //!
-//! The gRPC face of the config manager's in-process subscription
-//! mechanisms: `Subscribe` opens a snapshot-then-deltas stream in
-//! either PATH format (per-commit batch of set/delete path changes,
-//! the `ConfigManager::subscribe` model) or JSON format (whole
-//! post-commit subtree per touching commit, the
-//! `ConfigManager::subscribe_json` model).
+//! `Subscribe` opens a snapshot-then-deltas stream in either PATH
+//! format (per-commit batch of set/delete path changes, the
+//! `ConfigManager::subscribe` model) or JSON format (whole
+//! post-commit subtree per touching commit — how the out-of-process
+//! firewall/IPsec daemon consumes its subtrees).
 //!
 //! The service handler only mints a per-subscriber channel and hands
 //! its sender to the manager's event loop
