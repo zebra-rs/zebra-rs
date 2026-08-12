@@ -124,6 +124,34 @@ impl ZebraClient {
         self.show_command(&command, json).await
     }
 
+    /// Run a show command in JSON mode, validating that the output
+    /// parses. `empty` is returned for a daemon with no data (protocol
+    /// not configured yet), so callers always get valid JSON.
+    pub async fn show_json(&self, command: &str, empty: &str) -> Result<String> {
+        match self.show_command(command, true).await {
+            Ok(output) => {
+                debug!("Received data for '{}': {} bytes", command, output.len());
+                if output.trim().is_empty() {
+                    debug!("'{}' returned empty output", command);
+                    return Ok(empty.to_string());
+                }
+                match serde_json::from_str::<serde_json::Value>(&output) {
+                    Ok(parsed) => Ok(serde_json::to_string_pretty(&parsed)?),
+                    Err(e) => {
+                        error!("Failed to parse '{}' JSON: {}", command, e);
+                        // If parsing fails but we have data, it might be
+                        // text format — return it rather than losing it.
+                        Ok(output)
+                    }
+                }
+            }
+            Err(e) => {
+                error!("Failed to run '{}': {}", command, e);
+                Err(anyhow::anyhow!("Error retrieving data: {}", e))
+            }
+        }
+    }
+
     /// Return the completion candidates for the token *after* `line`, using
     /// the daemon's completion engine (the same one that backs CLI `?`/TAB).
     /// Completion is not admin-gated, so a View session can enumerate the
