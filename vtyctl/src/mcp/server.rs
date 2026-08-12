@@ -275,7 +275,7 @@ impl ZmcpServer {
                 },
                 {
                     "name": "get-isis-graph",
-                    "description": "Get IS-IS topology graph data for network visualization and analysis",
+                    "description": "Get IS-IS topology graph data for network visualization and analysis. Without 'algorithm' this is the unpruned LSDB graph; with a Flex-Algorithm number (128-255) it is that algorithm's constraint-pruned graph.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {
@@ -283,8 +283,39 @@ impl ZmcpServer {
                                 "type": "string",
                                 "enum": ["L1", "L2", "both"],
                                 "description": "IS-IS level to retrieve (L1, L2, or both)"
+                            },
+                            "algorithm": {
+                                "type": "integer",
+                                "minimum": 128,
+                                "maximum": 255,
+                                "description": "Flex-Algorithm number (128-255). Omit for the plain algorithm-0 graph."
                             }
                         },
+                        "additionalProperties": false
+                    }
+                },
+                {
+                    "name": "get-isis-spf",
+                    "description": "Get IS-IS SPF (shortest path first) results as JSON: per-destination cost, nexthops, and the full hop-by-hop paths from this router. Without 'algorithm' this is the plain algorithm-0 SPF; with a Flex-Algorithm number (128-255) it is that algorithm's constrained SPF.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "algorithm": {
+                                "type": "integer",
+                                "minimum": 128,
+                                "maximum": 255,
+                                "description": "Flex-Algorithm number (128-255). Omit for the plain algorithm-0 SPF."
+                            }
+                        },
+                        "additionalProperties": false
+                    }
+                },
+                {
+                    "name": "get-isis-flex-algo",
+                    "description": "Get IS-IS Flexible Algorithm (RFC 9350) state as JSON: locally configured algorithms with their constraints, and per-level peer FAD advertisements and algorithm participation.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {},
                         "additionalProperties": false
                     }
                 }
@@ -312,6 +343,8 @@ impl ZmcpServer {
             "list-show-commands" => self.commands_tool.list_show_commands().await,
             "show" => self.show_tool.run(arguments).await,
             "get-isis-graph" => self.isis_tools.get_isis_graph(arguments).await,
+            "get-isis-spf" => self.isis_tools.get_isis_spf(arguments).await,
+            "get-isis-flex-algo" => self.isis_tools.get_isis_flex_algo(arguments).await,
             _ => {
                 warn!("Unknown tool requested: {}", tool_name);
                 return tool_result(format!("Unknown tool: {}", tool_name), true);
@@ -396,7 +429,13 @@ mod tests {
             .iter()
             .filter_map(|t| t["name"].as_str())
             .collect();
-        for expected in ["list-show-commands", "show", "get-isis-graph"] {
+        for expected in [
+            "list-show-commands",
+            "show",
+            "get-isis-graph",
+            "get-isis-spf",
+            "get-isis-flex-algo",
+        ] {
             assert!(
                 names.contains(&expected),
                 "missing {expected}; tools: {names:?}"
@@ -465,7 +504,7 @@ mod tests {
             .await
             .expect("response");
         let result = &resp["result"];
-        assert!(result["tools"].as_array().is_some_and(|t| t.len() == 3));
+        assert!(result["tools"].as_array().is_some_and(|t| t.len() == 5));
         assert_eq!(result["resultType"], json!("complete"));
         assert_eq!(result["cacheScope"], json!("private"));
         assert!(result["ttlMs"].is_u64());

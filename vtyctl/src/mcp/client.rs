@@ -5,7 +5,7 @@ use tracing::{debug, error};
 
 use crate::vty::exec_client::ExecClient;
 use crate::vty::show_client::ShowClient;
-use crate::vty::{CommandPath, ExecRequest, ExecType, ShowRequest, YangMatch};
+use crate::vty::{ExecCode, ExecRequest, ExecType, ShowRequest};
 
 /// A single completion candidate for the token following a command line,
 /// parsed from the daemon's completion engine output.
@@ -51,52 +51,67 @@ impl ZebraClient {
         }
     }
 
-    /// Execute a show command and return the result as JSON
+    /// Execute a show command and return its output.
+    ///
+    /// Two-phase, like `vtyctl show`: the daemon's parser first resolves
+    /// the command line into `CommandPath`s (which is what handles value
+    /// arguments such as `flex-algo 128`), then the Show RPC runs those
+    /// resolved paths. Building paths client-side from whitespace tokens
+    /// only ever worked for pure-keyword commands.
     pub async fn show_command(&self, command: &str, json: bool) -> Result<String> {
         let endpoint = self.endpoint();
         debug!("Connecting to zebra-rs at {}", endpoint);
 
         let channel = crate::endpoint::connect(&endpoint).await?;
-        let mut client = ShowClient::new(channel);
 
-        let mut paths = Vec::new();
-        let cmds: Vec<&str> = command.split_whitespace().collect();
-        let len = cmds.len();
-        for (pos, cmd) in cmds.iter().enumerate() {
-            let ymatch = if pos != len - 1 {
-                YangMatch::Dir
-            } else {
-                YangMatch::Leaf
-            };
-            let path = CommandPath {
-                name: cmd.to_string(),
-                key: "".to_string(),
-                ymatch: ymatch.into(),
-                ..Default::default()
-            };
-            paths.push(path);
+        // Phase 1: parse the line through the daemon's command grammar.
+        let mut exec_client = ExecClient::new(channel.clone());
+        let exec_request = Request::new(ExecRequest {
+            r#type: ExecType::Exec as i32,
+            mode: String::from("exec"),
+            privilege: 15,
+            line: command.to_string(),
+            args: Vec::new(),
+            ..Default::default()
+        });
+        let reply = exec_client.do_exec(exec_request).await?.into_inner();
+        if let Some(msg) = exec_parse_error(reply.code, &reply.lines) {
+            return Err(anyhow::anyhow!("{msg}"));
         }
 
+        // Phase 2: run the resolved paths.
+        let mut client = ShowClient::new(channel);
         let request = Request::new(ShowRequest {
             json,
             line: command.to_string(),
-            paths,
+            paths: reply.paths,
         });
 
         debug!("Executing show command: {}", command);
         let mut stream = client.show(request).await?.into_inner();
 
         let mut result = String::new();
-        while let Some(reply) = stream.next().await {
-            match reply {
+        let mut got_any = false;
+        while let Some(item) = stream.next().await {
+            match item {
                 Ok(response) => {
+                    got_any = true;
                     result.push_str(&response.str);
                 }
                 Err(e) => {
+                    // Commands answered entirely in the exec phase (fmap
+                    // commands like `show help`) stream nothing; their
+                    // output already sits in the phase-1 `lines`.
+                    if !got_any && reply.code == ExecCode::Show as i32 && !reply.lines.is_empty() {
+                        return Ok(reply.lines);
+                    }
                     error!("Error receiving response: {}", e);
                     return Err(anyhow::anyhow!("gRPC error: {}", e));
                 }
             }
+        }
+        if !got_any && reply.code == ExecCode::Show as i32 && !reply.lines.is_empty() {
+            return Ok(reply.lines);
         }
 
         debug!("Show command completed, received {} bytes", result.len());
@@ -146,6 +161,31 @@ impl ZebraClient {
                 Err(e)
             }
         }
+    }
+}
+
+/// Inspect the phase-1 ExecReply of a show command. Parse failures (and
+/// codes we don't know) must stop here: running the Show RPC with
+/// unresolved paths ends in a NotFound from the daemon at best.
+fn exec_parse_error(code: i32, lines: &str) -> Option<String> {
+    match ExecCode::try_from(code) {
+        Ok(ExecCode::Success | ExecCode::Show | ExecCode::Redirect | ExecCode::RedirectShow) => {
+            None
+        }
+        Ok(ExecCode::Nomatch | ExecCode::Incomplete | ExecCode::Ambiguous) => {
+            let reason = lines.trim();
+            let reason = if reason.is_empty() {
+                match ExecCode::try_from(code) {
+                    Ok(ExecCode::Incomplete) => "Incomplete",
+                    Ok(ExecCode::Ambiguous) => "Ambiguous",
+                    _ => "NoMatch",
+                }
+            } else {
+                reason
+            };
+            Some(format!("command rejected: {reason}"))
+        }
+        Err(_) => Some(format!("unexpected exec code {code} from daemon")),
     }
 }
 
@@ -216,5 +256,26 @@ mod tests {
     fn nomatch_yields_no_candidates() {
         assert!(parse_completion_lines("NoMatch\n").is_empty());
         assert!(parse_completion_lines("").is_empty());
+    }
+
+    #[test]
+    fn exec_parse_error_stops_on_parse_failures() {
+        let msg = exec_parse_error(ExecCode::Nomatch as i32, "NoMatch\n").unwrap();
+        assert_eq!(msg, "command rejected: NoMatch");
+        let msg = exec_parse_error(ExecCode::Incomplete as i32, "").unwrap();
+        assert_eq!(msg, "command rejected: Incomplete");
+        assert!(exec_parse_error(99, "").unwrap().contains("99"));
+    }
+
+    #[test]
+    fn exec_parse_error_passes_showable_codes() {
+        for code in [
+            ExecCode::Success,
+            ExecCode::Show,
+            ExecCode::Redirect,
+            ExecCode::RedirectShow,
+        ] {
+            assert_eq!(exec_parse_error(code as i32, ""), None);
+        }
     }
 }
