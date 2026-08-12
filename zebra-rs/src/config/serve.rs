@@ -19,6 +19,7 @@ use super::api::{
     ClearTxRequest, CompletionRequest, CompletionResponse, DisplayRequest, DisplayTxRequest,
     ExecuteRequest, ExecuteResponse, Message,
 };
+use super::show_provider::{ShowProviderBridge, ShowProviderServiceServer};
 use super::subscribe::{ConfigServiceServer, ConfigSubscribeService};
 use super::vty::apply_server::{Apply, ApplyServer};
 use super::vty::clear_server::{Clear, ClearServer};
@@ -627,23 +628,72 @@ struct VtyPeerInterceptor {
     sessions: Arc<SessionTable>,
 }
 
+/// Parse the `ZEBRA_VTY_ALLOW_UIDS` env allow-list shared by both
+/// interceptors. `None` when unset or empty (allow-list disabled).
+fn allow_uids_from_env() -> Option<Arc<HashSet<u32>>> {
+    std::env::var("ZEBRA_VTY_ALLOW_UIDS").ok().and_then(|raw| {
+        let set: HashSet<u32> = raw
+            .split(',')
+            .filter_map(|s| s.trim().parse::<u32>().ok())
+            .collect();
+        if set.is_empty() {
+            None
+        } else {
+            Some(Arc::new(set))
+        }
+    })
+}
+
 impl VtyPeerInterceptor {
     fn from_env(sessions: Arc<SessionTable>) -> Self {
-        let allow_uids = std::env::var("ZEBRA_VTY_ALLOW_UIDS").ok().and_then(|raw| {
-            let set: HashSet<u32> = raw
-                .split(',')
-                .filter_map(|s| s.trim().parse::<u32>().ok())
-                .collect();
-            if set.is_empty() {
-                None
-            } else {
-                Some(Arc::new(set))
-            }
-        });
         Self {
-            allow_uids,
+            allow_uids: allow_uids_from_env(),
             sessions,
         }
+    }
+}
+
+/// Per-RPC interceptor for the machine-facing APIs (`zebra.config.v1`
+/// subscription, `zebra.show.v1` show provider).
+///
+/// Enforces the same `ZEBRA_VTY_ALLOW_UIDS` allow-list from
+/// SO_PEERCRED as [`VtyPeerInterceptor`], but does NOT resolve a vty
+/// session: machine peers are typically daemons whose parent is init,
+/// which the session model rejects as orphan clients, and these RPCs
+/// carry no role-gated operations — they are read/serve surfaces at
+/// the same trust level as the session-less `Show` phase. TCP peers
+/// pass through untouched, matching the vty interceptor's posture.
+#[derive(Clone)]
+struct MachinePeerInterceptor {
+    allow_uids: Option<Arc<HashSet<u32>>>,
+}
+
+impl MachinePeerInterceptor {
+    fn from_env() -> Self {
+        Self {
+            allow_uids: allow_uids_from_env(),
+        }
+    }
+}
+
+impl tonic::service::Interceptor for MachinePeerInterceptor {
+    fn call(&mut self, req: tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> {
+        if let Some(info) = req
+            .extensions()
+            .get::<tonic::transport::server::UdsConnectInfo>()
+            && let Some(cred) = &info.peer_cred
+        {
+            let uid = cred.uid();
+            if let Some(allowed) = &self.allow_uids
+                && !allowed.contains(&uid)
+            {
+                tracing::warn!(uid, "machine rpc denied: uid not in allow-list");
+                return Err(tonic::Status::permission_denied(format!(
+                    "uid {uid} is not permitted to use this API"
+                )));
+            }
+        }
+        Ok(req)
     }
 }
 
@@ -747,9 +797,14 @@ pub fn serve(cli: Cli, addr: VtyAddr) -> anyhow::Result<()> {
         tx: cli.tx.clone(),
         sessions: sessions.clone(),
     };
-    // Running-config subscription (zebra.config.v1). Read-only, so it
-    // rides at the same session level as Show — no admin gate.
+    // Machine-facing APIs: running-config subscription
+    // (zebra.config.v1) and the external show provider
+    // (zebra.show.v1). Both use the session-less machine interceptor
+    // so daemonized peers (init-parented) are not rejected as orphan
+    // clients.
     let config_service = ConfigSubscribeService { tx: cli.tx.clone() };
+    let show_provider = ShowProviderBridge { tx: cli.tx.clone() };
+    let machine_interceptor = MachinePeerInterceptor::from_env();
 
     let interceptor = VtyPeerInterceptor::from_env(sessions.clone());
     if let Some(set) = &interceptor.allow_uids {
@@ -789,7 +844,11 @@ pub fn serve(cli: Cli, addr: VtyAddr) -> anyhow::Result<()> {
         ))
         .add_service(ConfigServiceServer::with_interceptor(
             config_service,
-            interceptor.clone(),
+            machine_interceptor.clone(),
+        ))
+        .add_service(ShowProviderServiceServer::with_interceptor(
+            show_provider,
+            machine_interceptor,
         ))
         .add_service(ClearServer::with_interceptor(clear_service, interceptor));
 
