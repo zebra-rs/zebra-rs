@@ -41,6 +41,29 @@ to any MCP client and your assistant can reach the router straight away:
 }
 ```
 
+## The tools
+
+The server is read-only by contract: every tool answers from the daemon's
+live state, and none of them mutate it. Two tools cover the whole `show`
+surface, and a small typed family serves the data that topology-aware
+agents ask for most:
+
+| tool | arguments | returns |
+|:-----|:----------|:--------|
+| `list-show-commands` | — | every runnable `show` command with one-line help, generated live from the daemon's command grammar. Call it first to discover what `show` can do. |
+| `show` | `command`, `json` | the output of any operational `show` command — value arguments included (`show isis flex-algo 128 spf`, `show bgp summary`). `json: true` returns structured output where the command supports it. |
+| `get-isis-graph` | `level`, `algorithm` | the IS-IS topology graph: nodes with hostnames and system-ids, links with costs. With `algorithm` (128–255) it is that Flex-Algorithm's constraint-pruned graph. |
+| `get-isis-spf` | `algorithm` | the IS-IS SPF result: per-destination cost, nexthops, and the full hop-by-hop paths from this router — plain SPF, or a Flex-Algorithm's constrained SPF. |
+| `get-isis-flex-algo` | — | Flexible Algorithm (RFC 9350) state: local FADs with their constraints, peer FAD advertisements, and per-level algorithm participation. |
+| `get-ospf-graph` | `version` | the OSPF area graph with router names and link costs. `version` selects OSPFv2 (2, the default) or OSPFv3 (3). |
+| `get-ospf-spf` | `version` | the OSPF SPF tree: per-vertex cost and first hops. OSPF's SPF does not retain hop-by-hop vertex chains, so join vertex ids against `get-ospf-graph` for names and links. |
+| `get-ospf-flex-algo` | `version` | OSPF Flexible Algorithm state: each configured algorithm's definition and constraints, its per-algorithm SPF status, and per-algorithm routes. |
+
+The typed `get-*` tools return validated JSON, so an agent — or an ordinary
+program using MCP as its API — can consume them without scraping CLI text.
+The [3D Traffic Path Visualizer](ch-13-01-topology-viewer.md) is exactly
+that: a web application whose only data plane is these tools.
+
 ## Current protocol, older clients welcome
 
 The server speaks the stateless [MCP 2026-07-28

@@ -162,6 +162,7 @@
 ## AI Native
 
 - [Native MCP Server](ch-13-00-mcp-server.md)
+  - [3D Traffic Path Visualizer](ch-13-01-topology-viewer.md)
 
 ## Logging and Monitoring
 
