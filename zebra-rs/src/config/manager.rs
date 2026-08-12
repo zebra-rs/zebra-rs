@@ -17,6 +17,7 @@ use super::parse::parse;
 use super::paths::{path_try_trim, paths_str};
 use super::pim::{despawn_pim, spawn_pim};
 use super::stamp::{despawn_stamp, spawn_stamp};
+use super::subscribe::{ConfigSubscriber, path_has_prefix, pb as config_pb};
 use super::util::trim_first_line;
 use super::vrf_redirect_split;
 use super::vty::CommandPath;
@@ -246,6 +247,15 @@ pub struct ConfigManager {
     /// everything", unlike the per-line `cm_clients` broadcast that
     /// suits live-object protocol tasks.
     pub json_clients: RefCell<Vec<(Vec<String>, UnboundedSender<JsonConfigUpdate>)>>,
+    /// External gRPC subscribers to running-config commits
+    /// (`zebra.config.v1.ConfigService/Subscribe`). Unlike
+    /// `cm_clients` / `json_clients` these register at runtime (the
+    /// snapshot event replaces the startup-commit replay) and are
+    /// pruned instead of trusted: delivery is a bounded `try_send`,
+    /// and a subscriber whose channel is closed (client gone) or full
+    /// (client not reading) is dropped — the client resyncs by
+    /// resubscribing.
+    pub config_subscribers: RefCell<Vec<ConfigSubscriber>>,
     pub show_clients: RefCell<HashMap<String, UnboundedSender<DisplayRequest>>>,
     /// Per-instance show channels keyed `"<proto>:vrf:<name>"`. Populated
     /// at runtime as protocols spawn VRF tasks (via
@@ -397,6 +407,7 @@ impl ConfigManager {
             rx,
             cm_clients: RefCell::new(HashMap::new()),
             json_clients: RefCell::new(Vec::new()),
+            config_subscribers: RefCell::new(Vec::new()),
             show_clients: RefCell::new(HashMap::new()),
             show_vrf_clients: RefCell::new(HashMap::new()),
             bgp_tx: RefCell::new(None),
@@ -588,6 +599,86 @@ impl ConfigManager {
         let mut out = String::new();
         node.json(&mut out);
         out
+    }
+
+    /// The initial event of an external gRPC subscription: the
+    /// current running config under the subscriber's path, as SET
+    /// changes (PATH format) or one JSON document (JSON format).
+    /// Sent even when the subtree is empty so the client knows it is
+    /// in sync.
+    fn config_snapshot(&self, sub: &ConfigSubscriber) -> config_pb::ConfigEvent {
+        match sub.format {
+            config_pb::Format::Path => config_pb::ConfigEvent {
+                snapshot: true,
+                changes: self.running_changes(&sub.path),
+                json: String::new(),
+            },
+            config_pb::Format::Json => config_pb::ConfigEvent {
+                snapshot: true,
+                changes: Vec::new(),
+                json: self.subtree_json(&sub.path),
+            },
+        }
+    }
+
+    /// Render the running config under `prefix` as SET changes — the
+    /// PATH-format snapshot. Reuses the same `list()` rendering and
+    /// `paths()` parse that `commit_config`'s diff dispatch uses, so
+    /// snapshot and delta lines are segmented identically.
+    fn running_changes(&self, prefix: &[String]) -> Vec<config_pb::Change> {
+        let mut lines = String::new();
+        self.store.running.borrow().list(&mut lines);
+        let mut changes = Vec::new();
+        for line in lines.lines() {
+            let Some(paths) = self.paths(line.to_string()) else {
+                continue;
+            };
+            let path: Vec<String> = paths.iter().map(|p| p.name.clone()).collect();
+            if path_has_prefix(&path, prefix) {
+                changes.push(config_pb::Change {
+                    op: config_pb::Op::Set as i32,
+                    path,
+                });
+            }
+        }
+        changes
+    }
+
+    /// Deliver one commit's changes to the external gRPC subscribers:
+    /// post-commit (like the JSON batches), one event per touched
+    /// subscription — an untouched subscription gets nothing. A
+    /// subscriber whose channel is closed or full is dropped.
+    fn dispatch_config_subscribers(&self, changes: &[config_pb::Change]) {
+        self.config_subscribers.borrow_mut().retain(|sub| {
+            let event = match sub.format {
+                config_pb::Format::Path => {
+                    let matched: Vec<config_pb::Change> = changes
+                        .iter()
+                        .filter(|c| path_has_prefix(&c.path, &sub.path))
+                        .cloned()
+                        .collect();
+                    if matched.is_empty() {
+                        return true;
+                    }
+                    config_pb::ConfigEvent {
+                        snapshot: false,
+                        changes: matched,
+                        json: String::new(),
+                    }
+                }
+                config_pb::Format::Json => {
+                    if !changes.iter().any(|c| path_has_prefix(&c.path, &sub.path)) {
+                        return true;
+                    }
+                    config_pb::ConfigEvent {
+                        snapshot: false,
+                        changes: Vec::new(),
+                        json: self.subtree_json(&sub.path),
+                    }
+                }
+            };
+            sub.tx.try_send(event).is_ok()
+        });
     }
 
     fn paths(&self, input: String) -> Option<Vec<CommandPath>> {
@@ -826,6 +917,10 @@ impl ConfigManager {
             }
         }
         let mut json_touched = vec![false; self.json_clients.borrow().len()];
+        // This commit's changes in gRPC-subscriber form, accumulated
+        // here (pre-commit, in diff order) and delivered after
+        // `store.commit()` by `dispatch_config_subscribers`.
+        let mut subscriber_changes: Vec<config_pb::Change> = Vec::new();
         for line in diff.lines() {
             if !line.is_empty() {
                 let first_char = line.chars().next().unwrap();
@@ -840,6 +935,13 @@ impl ConfigManager {
                     continue;
                 }
                 let paths = paths.unwrap();
+                subscriber_changes.push(config_pb::Change {
+                    op: match op {
+                        ConfigOp::Set => config_pb::Op::Set as i32,
+                        _ => config_pb::Op::Delete as i32,
+                    },
+                    path: paths.iter().map(|p| p.name.clone()).collect(),
+                });
                 // JSON batch subscribers: only note that the prefix was
                 // touched — the single subtree delivery happens after
                 // the store commits, so it carries the post-commit
@@ -930,6 +1032,11 @@ impl ConfigManager {
                 let _ = tx.send(update);
             }
         }
+
+        // External gRPC subscribers — post-commit like the JSON
+        // batches, so a reader that fetches state on an event sees
+        // the committed tree.
+        self.dispatch_config_subscribers(&subscriber_changes);
         Ok(())
     }
 
@@ -1581,6 +1688,20 @@ impl ConfigManager {
             }
             Message::UnsubscribeShowVrf { key } => {
                 self.show_vrf_clients.borrow_mut().remove(&key);
+            }
+            Message::ConfigSubscribe(req) => {
+                let sub = ConfigSubscriber {
+                    format: req.format,
+                    path: req.path,
+                    tx: req.tx,
+                };
+                // The snapshot goes into a fresh bounded channel, so
+                // a failed send means the client is already gone —
+                // don't register it.
+                let snapshot = self.config_snapshot(&sub);
+                if sub.tx.try_send(snapshot).is_ok() {
+                    self.config_subscribers.borrow_mut().push(sub);
+                }
             }
         }
     }

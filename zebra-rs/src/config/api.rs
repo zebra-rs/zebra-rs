@@ -1,3 +1,4 @@
+use super::subscribe::ConfigSubscribeRequest;
 use super::vty::CommandPath;
 use super::{ApplyCode, Completion, ExecCode};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -182,6 +183,11 @@ pub enum Message {
     UnsubscribeShowVrf {
         key: String,
     },
+    /// Register an external gRPC subscriber to running-config commits
+    /// (`zebra.config.v1.ConfigService/Subscribe`). The manager sends
+    /// the snapshot event and keeps the sender until the client goes
+    /// away.
+    ConfigSubscribe(ConfigSubscribeRequest),
 }
 
 #[derive(Debug)]

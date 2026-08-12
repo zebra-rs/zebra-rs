@@ -9,6 +9,7 @@ pub mod clear;
 pub mod endpoint;
 pub mod mcp;
 pub mod show;
+pub mod watch;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -49,6 +50,21 @@ enum Commands {
         #[arg(help = "Show command to execute")]
         command: String,
     },
+    #[command(disable_help_flag = true)]
+    Watch {
+        #[arg(short, long, default_value = "unix:zebra-rs/vty")]
+        host: String,
+
+        #[arg(
+            short,
+            long,
+            help = "Whole-subtree JSON per commit instead of set/delete lines"
+        )]
+        json: bool,
+
+        #[arg(help = "Config path to watch, e.g. 'router bgp' (omit for the whole config)")]
+        path: Vec<String>,
+    },
     /// Start MCP (Model Context Protocol) server for AI assistant integration
     Mcp {
         #[arg(short = 'H', long, default_value = "unix:zebra-rs/vty")]
@@ -74,6 +90,7 @@ fn print_help() {
     eprintln!("  apply       Apply configuration.");
     eprintln!("  clear       Clear commands.");
     eprintln!("  show        Show commands.");
+    eprintln!("  watch       Watch running-config commits.");
     eprintln!("  mcp         Start MCP server for AI assistant integration.");
 }
 
@@ -98,6 +115,9 @@ async fn main() -> Result<()> {
             command,
         }) => {
             show::show(host, command, *json).await?;
+        }
+        Some(Commands::Watch { host, json, path }) => {
+            watch::watch(host, *json, path.clone()).await?;
         }
         Some(Commands::Mcp { host, port, debug }) => {
             mcp::run(host, *port, *debug).await?;

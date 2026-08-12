@@ -1,0 +1,81 @@
+// Copyright 2026 Zebra Project.
+
+syntax = "proto3";
+
+// Running-config change subscription — the gRPC face of the config
+// manager's in-process subscription mechanisms. External automation
+// (backup/audit tooling, out-of-process feature daemons, controllers)
+// subscribes to commits of the running configuration.
+//
+// This is deliberately a separate package from `vty`: vty.proto is the
+// interactive CLI session protocol (exec, completion, session RBAC),
+// while this is a machine-to-machine northbound API that a consumer
+// can vendor on its own and that versions independently (same model
+// as `cradle.v1`). It is served on the same gRPC endpoint as the vty
+// services.
+package zebra.config.v1;
+
+// Delivery format of a subscription, mirroring the two in-process
+// contracts: per-line command-path dispatch (`ConfigManager::
+// subscribe`, used by the protocol daemons) and whole-subtree JSON
+// batches (`ConfigManager::subscribe_json`, used by firewall/IPsec).
+enum Format {
+  // Every event carries the commit's changed lines as SET/DELETE
+  // path changes, in commit order.
+  PATH = 0;
+  // Every event carries the whole post-commit subtree at the
+  // subscribed path as one JSON document.
+  JSON = 1;
+}
+
+message SubscribeRequest {
+  Format format = 1;
+  // Config-tree prefix to watch, one segment per element — list keys
+  // count as segments (e.g. ["router", "bgp"] or
+  // ["interface", "eth0"]). Empty = the whole configuration.
+  repeated string path = 2;
+}
+
+enum Op {
+  SET = 0;
+  DELETE = 1;
+}
+
+// One changed config line (Format.PATH).
+message Change {
+  Op op = 1;
+  // Full path of the line, one segment per element, with list keys
+  // and leaf values inline: ["interface", "eth0", "mtu", "9000"].
+  // Joined with spaces it is exactly the `set`/`delete` command form
+  // accepted by the vty Apply service.
+  repeated string path = 2;
+}
+
+message ConfigEvent {
+  // True on the first event of every subscription: the current
+  // running config under the subscribed path, delivered as SET
+  // changes (PATH) or one JSON document (JSON). Later events are
+  // per-commit deltas. The snapshot is sent even when the subtree is
+  // empty (no changes / "{}") so the client knows it is in sync.
+  bool snapshot = 1;
+  // Format.PATH: this commit's changes under the subscribed prefix.
+  // Empty on JSON-format events.
+  repeated Change changes = 2;
+  // Format.JSON: the whole post-commit subtree at the subscribed
+  // path; "{}" when the subtree no longer exists. Empty on
+  // PATH-format events.
+  string json = 3;
+}
+
+// Running-config subscription service.
+//
+// Subscribe opens a snapshot-then-deltas stream: one snapshot event,
+// then one event per commit that changes config under the subscribed
+// path — commits that do not touch it produce no event. Delivery is
+// post-commit, so a reader that fetches state on an event sees the
+// committed tree. A subscriber that stops reading long enough to fill
+// its server-side buffer is disconnected; reconnect and resync from
+// the fresh snapshot.
+service ConfigService {
+  rpc Subscribe(SubscribeRequest) returns (stream ConfigEvent) {}
+}
