@@ -19,6 +19,7 @@ use super::api::{
     ClearTxRequest, CompletionRequest, CompletionResponse, DisplayRequest, DisplayTxRequest,
     ExecuteRequest, ExecuteResponse, Message,
 };
+use super::subscribe::{ConfigServiceServer, ConfigSubscribeService};
 use super::vty::apply_server::{Apply, ApplyServer};
 use super::vty::clear_server::{Clear, ClearServer};
 use super::vty::exec_server::{Exec, ExecServer};
@@ -746,6 +747,9 @@ pub fn serve(cli: Cli, addr: VtyAddr) -> anyhow::Result<()> {
         tx: cli.tx.clone(),
         sessions: sessions.clone(),
     };
+    // Running-config subscription (zebra.config.v1). Read-only, so it
+    // rides at the same session level as Show — no admin gate.
+    let config_service = ConfigSubscribeService { tx: cli.tx.clone() };
 
     let interceptor = VtyPeerInterceptor::from_env(sessions.clone());
     if let Some(set) = &interceptor.allow_uids {
@@ -781,6 +785,10 @@ pub fn serve(cli: Cli, addr: VtyAddr) -> anyhow::Result<()> {
         ))
         .add_service(ApplyServer::with_interceptor(
             apply_service,
+            interceptor.clone(),
+        ))
+        .add_service(ConfigServiceServer::with_interceptor(
+            config_service,
             interceptor.clone(),
         ))
         .add_service(ClearServer::with_interceptor(clear_service, interceptor));

@@ -53,6 +53,7 @@ mod ospf;
 mod parse;
 mod pim;
 mod stamp;
+mod subscribe;
 mod token;
 mod tracing;
 mod util;
