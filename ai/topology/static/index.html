@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>zebra-rs Traffic Path Visualizer</title>
+    <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+    <div class="header">zebra-rs Traffic Path Visualizer</div>
+
+    <div class="controls">
+        <label>
+            Source
+            <select id="source">
+                <option value="">Loading...</option>
+            </select>
+        </label>
+        <label>
+            Destination
+            <select id="destination" disabled>
+                <option value="__all__">All destinations</option>
+            </select>
+        </label>
+        <label>
+            Algorithm
+            <select id="algorithm" disabled>
+                <option value="0">0 — shortest path (unconstrained SPF)</option>
+            </select>
+        </label>
+        <label>
+            &nbsp;
+            <button id="refresh" class="refresh-btn" title="Re-query the routers">Refresh</button>
+        </label>
+        <div class="path-legend" id="legend"></div>
+    </div>
+
+    <div class="main-content">
+        <div class="map-area">
+            <div class="map-stage">
+                <div id="map"></div>
+                <div class="path-detail" id="pathDetail" style="display:none">
+                    <div class="path-detail-header">
+                        <span class="path-detail-title"></span>
+                        <button class="path-detail-close" title="Close">&times;</button>
+                    </div>
+                    <div class="path-detail-sub" id="pathDetailSub"></div>
+                    <div class="path-detail-body">
+                        <table class="path-detail-table">
+                            <thead>
+                                <tr>
+                                    <th>Hop</th>
+                                    <th>Node</th>
+                                    <th>Region</th>
+                                    <th>Link metric</th>
+                                    <th>Cumulative</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="status-bar" id="status">Initializing...</div>
+
+    <script src="https://unpkg.com/three@0.160.0/build/three.min.js"
+            integrity="sha384-qOkzR5Ke/XkQxuGVJ9hpFEpDlcoLtWwVYhnJf06cLIZa2vaIptSqaubivErzmD5O"
+            crossorigin="anonymous"></script>
+    <script src="https://unpkg.com/globe.gl@2.32.0/dist/globe.gl.min.js"
+            integrity="sha384-Plx/0mhoQXLzFNQEcp4kULf6wOFgVaNISmr+3cNLjGb4U8Nq7d7/96ydYtbT0Wb6"
+            crossorigin="anonymous"></script>
+    <script src="/static/app.js"></script>
+</body>
+</html>

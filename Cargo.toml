@@ -3,6 +3,7 @@ resolver = "2"
 members = [
   "zebra-rs",
   "vtyctl",
+  "ai/topology",
   "vtyhelper",
   "vtypam",
   "crates/bgp-packet",
