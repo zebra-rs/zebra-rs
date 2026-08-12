@@ -38,6 +38,27 @@ let algorithmsSeq = 0;
 // the user set up stays put while the arcs re-route under it.
 let lastFocusKey = null;
 
+// Selections are mirrored into the URL query, so Source, Destination and
+// Algorithm all survive a page reload (and a view can be shared as a
+// link). Consumed once at startup, written back on every load.
+const initialParams = new URLSearchParams(window.location.search);
+
+function selectValue(sel, value) {
+    if (value != null && [...sel.options].some(o => o.value === value)) {
+        sel.value = value;
+        return true;
+    }
+    return false;
+}
+
+function syncUrl() {
+    const params = new URLSearchParams();
+    params.set('source', document.getElementById('source').value);
+    params.set('destination', document.getElementById('destination').value);
+    params.set('algorithm', document.getElementById('algorithm').value || '0');
+    history.replaceState(null, '', '?' + params.toString());
+}
+
 function initMap() {
     const container = document.getElementById('map');
     map = Globe()(container)
@@ -134,6 +155,7 @@ async function loadRouters() {
         const routers = data.routers || [];
 
         const srcSel = document.getElementById('source');
+        const prevSrc = srcSel.value;
         srcSel.innerHTML = '';
         routers.forEach(r => {
             const opt = document.createElement('option');
@@ -143,6 +165,7 @@ async function loadRouters() {
         });
 
         const dstSel = document.getElementById('destination');
+        const prevDst = dstSel.value;
         dstSel.innerHTML = '<option value="__all__">All destinations</option>';
         routers.forEach(r => {
             const opt = document.createElement('option');
@@ -152,15 +175,21 @@ async function loadRouters() {
         });
         dstSel.disabled = false;
 
-        // Tokyo makes the flex-algo detour the most dramatic; default to
-        // it when present, otherwise the first router.
-        if (routers.some(r => r.name === 'tk')) {
-            srcSel.value = 'tk';
-        }
+        // Selection priority: the URL (a reloaded or shared view), then
+        // whatever was already selected, then the default — Tokyo makes
+        // the flex-algo detour the most dramatic.
+        selectValue(srcSel, initialParams.get('source'))
+            || selectValue(srcSel, prevSrc)
+            || selectValue(srcSel, 'tk');
+        selectValue(dstSel, initialParams.get('destination'))
+            || selectValue(dstSel, prevDst);
 
         setStatus(`${routers.length} routers loaded.`);
         if (routers.length > 0) {
-            await loadAlgorithms(srcSel.value);
+            await loadAlgorithms(srcSel.value, initialParams.get('algorithm'));
+            initialParams.delete('source');
+            initialParams.delete('destination');
+            initialParams.delete('algorithm');
             await loadTopology();
         }
     } catch (e) {
@@ -168,7 +197,7 @@ async function loadRouters() {
     }
 }
 
-async function loadAlgorithms(source) {
+async function loadAlgorithms(source, preferred) {
     const algoSel = document.getElementById('algorithm');
     const seq = ++algorithmsSeq;
     try {
@@ -186,10 +215,10 @@ async function loadAlgorithms(source) {
             opt.textContent = a.label;
             algoSel.appendChild(opt);
         });
-        // Keep the current selection when the new source also runs it.
-        if ([...algoSel.options].some(o => o.value === previous)) {
-            algoSel.value = previous;
-        }
+        // Selection priority: the caller's preference (the URL at page
+        // load), then the current selection when the new source also
+        // runs it.
+        selectValue(algoSel, preferred) || selectValue(algoSel, previous);
         algoSel.disabled = false;
         setStatus(`${algorithms.length} algorithm(s) available.`);
     } catch (e) {
@@ -206,6 +235,8 @@ async function loadTopology() {
     const algorithm = document.getElementById('algorithm').value || '0';
 
     if (!source) return;
+
+    syncUrl();
 
     const seq = ++topologySeq;
     // Keep the current view (and the user's camera) on screen while the
