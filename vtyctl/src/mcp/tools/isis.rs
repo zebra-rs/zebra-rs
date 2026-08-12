@@ -1,7 +1,7 @@
 use anyhow::Result;
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 use crate::mcp::client::ZebraClient;
 
@@ -39,36 +39,9 @@ impl IsisTools {
     /// output parses. `empty` is returned for a daemon with no data
     /// (protocol not configured yet), so callers always get valid JSON.
     async fn show_json(&self, subcommand: &str, empty: &str) -> Result<String> {
-        match self.client.show_isis_command(subcommand, true).await {
-            Ok(output) => {
-                debug!(
-                    "Received data for 'show isis {}': {} bytes",
-                    subcommand,
-                    output.len()
-                );
-                if output.trim().is_empty() {
-                    warn!("'show isis {}' returned empty output", subcommand);
-                    return Ok(empty.to_string());
-                }
-                match serde_json::from_str::<Value>(&output) {
-                    Ok(parsed) => Ok(serde_json::to_string_pretty(&parsed)?),
-                    Err(e) => {
-                        error!("Failed to parse 'show isis {}' JSON: {}", subcommand, e);
-                        // If parsing fails but we have data, it might be
-                        // text format — return it rather than losing it.
-                        warn!(
-                            "'show isis {}' data is not JSON, returning as-is",
-                            subcommand
-                        );
-                        Ok(output)
-                    }
-                }
-            }
-            Err(e) => {
-                error!("Failed to run 'show isis {}': {}", subcommand, e);
-                Err(anyhow::anyhow!("Error retrieving IS-IS data: {}", e))
-            }
-        }
+        self.client
+            .show_json(&format!("show isis {}", subcommand), empty)
+            .await
     }
 
     /// Get ISIS topology graph data. Without `algorithm` this is the

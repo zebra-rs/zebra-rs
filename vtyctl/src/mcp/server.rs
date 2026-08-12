@@ -7,6 +7,7 @@ use tracing::{debug, error, warn};
 use super::client::ZebraClient;
 use super::tools::commands::CommandsTool;
 use super::tools::isis::IsisTools;
+use super::tools::ospf::OspfTools;
 use super::tools::show::ShowTool;
 
 /// Handshake revisions the legacy `initialize` path can negotiate, newest
@@ -82,6 +83,7 @@ fn tool_result(text: String, is_error: bool) -> Value {
 pub struct ZmcpServer {
     zebra_client: ZebraClient,
     isis_tools: IsisTools,
+    ospf_tools: OspfTools,
     show_tool: ShowTool,
     commands_tool: CommandsTool,
 }
@@ -90,12 +92,14 @@ impl ZmcpServer {
     pub fn new(base_url: String, port: u32) -> Self {
         let zebra_client = ZebraClient::new(base_url, port);
         let isis_tools = IsisTools::new(zebra_client.clone());
+        let ospf_tools = OspfTools::new(zebra_client.clone());
         let show_tool = ShowTool::new(zebra_client.clone());
         let commands_tool = CommandsTool::new(zebra_client.clone());
 
         Self {
             zebra_client,
             isis_tools,
+            ospf_tools,
             show_tool,
             commands_tool,
         }
@@ -318,6 +322,51 @@ impl ZmcpServer {
                         "properties": {},
                         "additionalProperties": false
                     }
+                },
+                {
+                    "name": "get-ospf-graph",
+                    "description": "Get OSPF topology graph data for network visualization and analysis: the area's SPF graph with router names and per-link costs, built from the LSDB. 'version' selects OSPFv2 (2, the default) or OSPFv3 (3).",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "version": {
+                                "type": "integer",
+                                "enum": [2, 3],
+                                "description": "OSPF version: 2 (OSPFv2, default) or 3 (OSPFv3)."
+                            }
+                        },
+                        "additionalProperties": false
+                    }
+                },
+                {
+                    "name": "get-ospf-spf",
+                    "description": "Get OSPF SPF (shortest path first) results as JSON: per-vertex cost and first hops from this router. 'version' selects OSPFv2 (2, the default) or OSPFv3 (3). Unlike IS-IS, OSPF's SPF result carries no hop-by-hop path lists; join vertex ids against get-ospf-graph for names and links.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "version": {
+                                "type": "integer",
+                                "enum": [2, 3],
+                                "description": "OSPF version: 2 (OSPFv2, default) or 3 (OSPFv3)."
+                            }
+                        },
+                        "additionalProperties": false
+                    }
+                },
+                {
+                    "name": "get-ospf-flex-algo",
+                    "description": "Get OSPF Flexible Algorithm (RFC 9350) state as JSON: each configured algorithm's definition and constraints, its per-algorithm SPF status, and per-algorithm routes. 'version' selects OSPFv2 (2, the default) or OSPFv3 (3).",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "version": {
+                                "type": "integer",
+                                "enum": [2, 3],
+                                "description": "OSPF version: 2 (OSPFv2, default) or 3 (OSPFv3)."
+                            }
+                        },
+                        "additionalProperties": false
+                    }
                 }
             ],
             "ttlMs": CACHE_TTL_MS,
@@ -345,6 +394,9 @@ impl ZmcpServer {
             "get-isis-graph" => self.isis_tools.get_isis_graph(arguments).await,
             "get-isis-spf" => self.isis_tools.get_isis_spf(arguments).await,
             "get-isis-flex-algo" => self.isis_tools.get_isis_flex_algo(arguments).await,
+            "get-ospf-graph" => self.ospf_tools.get_ospf_graph(arguments).await,
+            "get-ospf-spf" => self.ospf_tools.get_ospf_spf(arguments).await,
+            "get-ospf-flex-algo" => self.ospf_tools.get_ospf_flex_algo(arguments).await,
             _ => {
                 warn!("Unknown tool requested: {}", tool_name);
                 return tool_result(format!("Unknown tool: {}", tool_name), true);
@@ -435,6 +487,9 @@ mod tests {
             "get-isis-graph",
             "get-isis-spf",
             "get-isis-flex-algo",
+            "get-ospf-graph",
+            "get-ospf-spf",
+            "get-ospf-flex-algo",
         ] {
             assert!(
                 names.contains(&expected),
@@ -504,7 +559,7 @@ mod tests {
             .await
             .expect("response");
         let result = &resp["result"];
-        assert!(result["tools"].as_array().is_some_and(|t| t.len() == 5));
+        assert!(result["tools"].as_array().is_some_and(|t| t.len() == 8));
         assert_eq!(result["resultType"], json!("complete"));
         assert_eq!(result["cacheScope"], json!("private"));
         assert!(result["ttlMs"].is_u64());
