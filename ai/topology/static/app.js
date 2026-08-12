@@ -27,6 +27,17 @@ let currentNodeMap = {};
 let currentEdgeCost = {};
 let currentAlgorithm = 0;
 
+// Stale-response guards: selects can be changed faster than the MCP
+// round-trips complete, and an older response must never overwrite the
+// state a newer selection produced.
+let topologySeq = 0;
+let algorithmsSeq = 0;
+
+// The camera auto-aims only when the vantage point changes (new source
+// or destination) — never on an algorithm flip or refresh, so the view
+// the user set up stays put while the arcs re-route under it.
+let lastFocusKey = null;
+
 function initMap() {
     const container = document.getElementById('map');
     map = Globe()(container)
@@ -159,11 +170,15 @@ async function loadRouters() {
 
 async function loadAlgorithms(source) {
     const algoSel = document.getElementById('algorithm');
-    const previous = algoSel.value;
+    const seq = ++algorithmsSeq;
     try {
         setStatus('Loading algorithms...');
         const data = await apiFetch('/api/algorithms?source=' + encodeURIComponent(source));
+        if (seq !== algorithmsSeq) return;
         const algorithms = data.algorithms || [];
+        // Capture the selection at rebuild time — not at call time — so a
+        // choice the user made while the fetch was in flight survives.
+        const previous = algoSel.value;
         algoSel.innerHTML = '';
         algorithms.forEach(a => {
             const opt = document.createElement('option');
@@ -171,13 +186,14 @@ async function loadAlgorithms(source) {
             opt.textContent = a.label;
             algoSel.appendChild(opt);
         });
-        // Keep the previous selection when the new source also runs it.
+        // Keep the current selection when the new source also runs it.
         if ([...algoSel.options].some(o => o.value === previous)) {
             algoSel.value = previous;
         }
         algoSel.disabled = false;
         setStatus(`${algorithms.length} algorithm(s) available.`);
     } catch (e) {
+        if (seq !== algorithmsSeq) return;
         algoSel.innerHTML = '<option value="0">0 — shortest path (unconstrained SPF)</option>';
         algoSel.disabled = false;
         setStatus('Failed to load algorithms (showing algorithm 0 only): ' + e.message, true);
@@ -191,7 +207,9 @@ async function loadTopology() {
 
     if (!source) return;
 
-    clearMap();
+    const seq = ++topologySeq;
+    // Keep the current view (and the user's camera) on screen while the
+    // routers are queried; the map is replaced only when new data lands.
     setStatus('Querying ' + source + ' over MCP...');
 
     try {
@@ -199,8 +217,10 @@ async function loadTopology() {
             '&algorithm=' + encodeURIComponent(algorithm) +
             '&destination=' + encodeURIComponent(destination);
         const data = await apiFetch(url);
-        renderTopology(data);
+        if (seq !== topologySeq) return;
+        renderTopology(data, `${source}|${destination}`);
     } catch (e) {
+        if (seq !== topologySeq) return;
         setStatus('Failed to load topology: ' + e.message, true);
     }
 }
@@ -214,7 +234,7 @@ function nodeLabel(n) {
         `IS-IS: ${n.active ? 'up' : 'not in topology'}`;
 }
 
-function renderTopology(data) {
+function renderTopology(data, focusKey) {
     clearMap();
 
     currentAlgorithm = data.algorithm || 0;
@@ -352,8 +372,12 @@ function renderTopology(data) {
     map.pointsData(allPoints);
     refreshArcs();
 
-    if (allPoints.length > 0) {
+    // Re-aim the camera only when the vantage point changed (new source
+    // or destination). An algorithm flip or a refresh keeps the user's
+    // camera where they put it, so the arcs visibly re-route in place.
+    if (allPoints.length > 0 && focusKey !== lastFocusKey) {
         focusCamera(allPoints);
+        lastFocusKey = focusKey;
     }
 
     const unplotted = data.nodes.filter(n => n.lat == null || n.lng == null).map(n => n.name);
