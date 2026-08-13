@@ -27,6 +27,38 @@ let currentNodeMap = {};
 let currentEdgeCost = {};
 let currentAlgorithm = 0;
 
+// Stale-response guards: selects can be changed faster than the MCP
+// round-trips complete, and an older response must never overwrite the
+// state a newer selection produced.
+let topologySeq = 0;
+let algorithmsSeq = 0;
+
+// The camera auto-aims only when the vantage point changes (new source
+// or destination) — never on an algorithm flip or refresh, so the view
+// the user set up stays put while the arcs re-route under it.
+let lastFocusKey = null;
+
+// Selections are mirrored into the URL query, so Source, Destination and
+// Algorithm all survive a page reload (and a view can be shared as a
+// link). Consumed once at startup, written back on every load.
+const initialParams = new URLSearchParams(window.location.search);
+
+function selectValue(sel, value) {
+    if (value != null && [...sel.options].some(o => o.value === value)) {
+        sel.value = value;
+        return true;
+    }
+    return false;
+}
+
+function syncUrl() {
+    const params = new URLSearchParams();
+    params.set('source', document.getElementById('source').value);
+    params.set('destination', document.getElementById('destination').value);
+    params.set('algorithm', document.getElementById('algorithm').value || '0');
+    history.replaceState(null, '', '?' + params.toString());
+}
+
 function initMap() {
     const container = document.getElementById('map');
     map = Globe()(container)
@@ -123,6 +155,7 @@ async function loadRouters() {
         const routers = data.routers || [];
 
         const srcSel = document.getElementById('source');
+        const prevSrc = srcSel.value;
         srcSel.innerHTML = '';
         routers.forEach(r => {
             const opt = document.createElement('option');
@@ -132,6 +165,7 @@ async function loadRouters() {
         });
 
         const dstSel = document.getElementById('destination');
+        const prevDst = dstSel.value;
         dstSel.innerHTML = '<option value="__all__">All destinations</option>';
         routers.forEach(r => {
             const opt = document.createElement('option');
@@ -141,15 +175,21 @@ async function loadRouters() {
         });
         dstSel.disabled = false;
 
-        // Tokyo makes the flex-algo detour the most dramatic; default to
-        // it when present, otherwise the first router.
-        if (routers.some(r => r.name === 'tk')) {
-            srcSel.value = 'tk';
-        }
+        // Selection priority: the URL (a reloaded or shared view), then
+        // whatever was already selected, then the default — Tokyo makes
+        // the flex-algo detour the most dramatic.
+        selectValue(srcSel, initialParams.get('source'))
+            || selectValue(srcSel, prevSrc)
+            || selectValue(srcSel, 'tk');
+        selectValue(dstSel, initialParams.get('destination'))
+            || selectValue(dstSel, prevDst);
 
         setStatus(`${routers.length} routers loaded.`);
         if (routers.length > 0) {
-            await loadAlgorithms(srcSel.value);
+            await loadAlgorithms(srcSel.value, initialParams.get('algorithm'));
+            initialParams.delete('source');
+            initialParams.delete('destination');
+            initialParams.delete('algorithm');
             await loadTopology();
         }
     } catch (e) {
@@ -157,13 +197,17 @@ async function loadRouters() {
     }
 }
 
-async function loadAlgorithms(source) {
+async function loadAlgorithms(source, preferred) {
     const algoSel = document.getElementById('algorithm');
-    const previous = algoSel.value;
+    const seq = ++algorithmsSeq;
     try {
         setStatus('Loading algorithms...');
         const data = await apiFetch('/api/algorithms?source=' + encodeURIComponent(source));
+        if (seq !== algorithmsSeq) return;
         const algorithms = data.algorithms || [];
+        // Capture the selection at rebuild time — not at call time — so a
+        // choice the user made while the fetch was in flight survives.
+        const previous = algoSel.value;
         algoSel.innerHTML = '';
         algorithms.forEach(a => {
             const opt = document.createElement('option');
@@ -171,13 +215,14 @@ async function loadAlgorithms(source) {
             opt.textContent = a.label;
             algoSel.appendChild(opt);
         });
-        // Keep the previous selection when the new source also runs it.
-        if ([...algoSel.options].some(o => o.value === previous)) {
-            algoSel.value = previous;
-        }
+        // Selection priority: the caller's preference (the URL at page
+        // load), then the current selection when the new source also
+        // runs it.
+        selectValue(algoSel, preferred) || selectValue(algoSel, previous);
         algoSel.disabled = false;
         setStatus(`${algorithms.length} algorithm(s) available.`);
     } catch (e) {
+        if (seq !== algorithmsSeq) return;
         algoSel.innerHTML = '<option value="0">0 — shortest path (unconstrained SPF)</option>';
         algoSel.disabled = false;
         setStatus('Failed to load algorithms (showing algorithm 0 only): ' + e.message, true);
@@ -191,7 +236,11 @@ async function loadTopology() {
 
     if (!source) return;
 
-    clearMap();
+    syncUrl();
+
+    const seq = ++topologySeq;
+    // Keep the current view (and the user's camera) on screen while the
+    // routers are queried; the map is replaced only when new data lands.
     setStatus('Querying ' + source + ' over MCP...');
 
     try {
@@ -199,8 +248,10 @@ async function loadTopology() {
             '&algorithm=' + encodeURIComponent(algorithm) +
             '&destination=' + encodeURIComponent(destination);
         const data = await apiFetch(url);
-        renderTopology(data);
+        if (seq !== topologySeq) return;
+        renderTopology(data, `${source}|${destination}`);
     } catch (e) {
+        if (seq !== topologySeq) return;
         setStatus('Failed to load topology: ' + e.message, true);
     }
 }
@@ -214,7 +265,7 @@ function nodeLabel(n) {
         `IS-IS: ${n.active ? 'up' : 'not in topology'}`;
 }
 
-function renderTopology(data) {
+function renderTopology(data, focusKey) {
     clearMap();
 
     currentAlgorithm = data.algorithm || 0;
@@ -352,8 +403,12 @@ function renderTopology(data) {
     map.pointsData(allPoints);
     refreshArcs();
 
-    if (allPoints.length > 0) {
+    // Re-aim the camera only when the vantage point changed (new source
+    // or destination). An algorithm flip or a refresh keeps the user's
+    // camera where they put it, so the arcs visibly re-route in place.
+    if (allPoints.length > 0 && focusKey !== lastFocusKey) {
         focusCamera(allPoints);
+        lastFocusKey = focusKey;
     }
 
     const unplotted = data.nodes.filter(n => n.lat == null || n.lng == null).map(n => n.name);
