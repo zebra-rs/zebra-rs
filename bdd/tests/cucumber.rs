@@ -341,6 +341,32 @@ async fn set_namespace_interface_state(
     );
 }
 
+/// Set the kernel MTU of an interface inside a namespace. zebra-rs has no
+/// interface `mtu` config leaf — it mirrors the kernel value via netlink
+/// (`Isis::link_mtu`) — so this is THE way a test controls the MTU that
+/// IS-IS hello padding and LSP sizing see.
+#[given(expr = "I set mtu {int} on interface {string} in namespace {string}")]
+#[when(expr = "I set mtu {int} on interface {string} in namespace {string}")]
+async fn set_namespace_interface_mtu(
+    world: &mut World,
+    mtu: u64,
+    interface: String,
+    namespace: String,
+) {
+    let scoped = world.ns(&namespace);
+    netns::exec_in_netns(
+        &scoped,
+        "ip",
+        &["link", "set", "dev", &interface, "mtu", &mtu.to_string()],
+    )
+    .await
+    .expect("Failed to set interface MTU");
+    println!(
+        "✓ Interface {} in namespace {} mtu {}",
+        interface, scoped, mtu
+    );
+}
+
 // Keyword-agnostic on purpose: cucumber-rs binds a step to its
 // attribute keyword, and an `And` inherits the preceding `Given`/
 // `When`/`Then` — a `when`-only utility step silently SKIPS (along
@@ -1995,6 +2021,185 @@ async fn isis_database_not_has_lsp_from(
     println!(
         "✓ IS-IS {} database in {} has no LSP from '{}'",
         level, scoped, ident
+    );
+}
+
+/// Extract the on-wire lengths (Ethernet header included, FCS not — i.e.
+/// what tcpdump records) of the IS-IS Hello frames in a classic-format
+/// pcap byte stream. IIH frames are picked out of the capture by hand:
+/// 14-byte Ethernet header, 3-byte LLC `FE FE 03`, ISO discriminator
+/// 0x83, then PDU type (low 5 bits of byte 21) in {15, 16, 17} for
+/// L1-LAN / L2-LAN / P2P IIH. Doing the discrimination here keeps the
+/// BPF filter side down to the coarse `isis` primitive, so LSP / CSNP /
+/// PSNP frames in the same capture are simply skipped, not miscounted.
+fn pcap_iih_frame_lens(bytes: &[u8]) -> Vec<usize> {
+    if bytes.len() < 24 {
+        return Vec::new();
+    }
+    // Classic pcap magic, microsecond or nanosecond, either endianness.
+    let le = match &bytes[0..4] {
+        [0xd4, 0xc3, 0xb2, 0xa1] | [0x4d, 0x3c, 0xb2, 0xa1] => true,
+        [0xa1, 0xb2, 0xc3, 0xd4] | [0xa1, 0xb2, 0x3c, 0x4d] => false,
+        magic => panic!("not a classic pcap capture (magic {:02x?})", magic),
+    };
+    let read_u32 = |b: &[u8]| -> usize {
+        let arr: [u8; 4] = b.try_into().unwrap();
+        (if le {
+            u32::from_le_bytes(arr)
+        } else {
+            u32::from_be_bytes(arr)
+        }) as usize
+    };
+    let mut lens = Vec::new();
+    let mut off = 24;
+    while off + 16 <= bytes.len() {
+        let incl = read_u32(&bytes[off + 8..off + 12]);
+        let orig = read_u32(&bytes[off + 12..off + 16]);
+        let frame_start = off + 16;
+        if frame_start + incl > bytes.len() {
+            break; // truncated final record from a killed tcpdump
+        }
+        let frame = &bytes[frame_start..frame_start + incl];
+        off = frame_start + incl;
+        if frame.len() < 22 || frame[14..17] != [0xFE, 0xFE, 0x03] || frame[17] != 0x83 {
+            continue;
+        }
+        if matches!(frame[21] & 0x1f, 15 | 16 | 17) {
+            lens.push(orig);
+        }
+    }
+    lens
+}
+
+/// Capture IS-IS frames *sent* on `interface` in `scoped` (`-Q out`, so
+/// inbound frames from the peer never pollute the sample) and return the
+/// wire lengths of the IIH frames among them. tcpdump runs under
+/// `timeout`, so it ends either by reaching the frame count (exit 0) or
+/// at the deadline (exit 124, which `exec_in_netns` reports as Err) —
+/// both leave a parseable `-U`-flushed pcap, so the Err is deliberately
+/// ignored and the assertion is made on whatever was captured. `-Z root`
+/// stops Ubuntu's tcpdump from dropping privileges before it opens the
+/// dump file.
+///
+/// The BPF filter matches the LLC + ISO discriminator bytes by offset
+/// rather than using libpcap's `isis` primitive: an IIH padded to a
+/// >1500-byte MTU carries the payload length in the 802.3 length field
+/// (zebra-rs and FRR both send it via sockaddr_ll that way), and a value
+/// above 1536 makes libpcap classify the frame as an unknown EtherType —
+/// so `isis` silently misses exactly the full-MTU frames this capture
+/// exists to measure.
+async fn capture_iih_frame_lens(scoped: &str, interface: &str) -> Vec<usize> {
+    let pcap = format!("/tmp/{}_{}_iih.pcap", scoped, interface);
+    let _ = netns::exec_in_netns(scoped, "rm", &["-f", &pcap]).await;
+    let _ = netns::exec_in_netns(
+        scoped,
+        "timeout",
+        &[
+            "15",
+            "tcpdump",
+            "-c",
+            "8",
+            "-i",
+            interface,
+            "-Q",
+            "out",
+            "-Z",
+            "root",
+            "-U",
+            "-w",
+            &pcap,
+            "ether[14:2] = 0xfefe and ether[16] = 3 and ether[17] = 0x83",
+        ],
+    )
+    .await;
+    // The dump file is root-owned; make it readable for the harness user.
+    let _ = netns::exec_in_netns(scoped, "chmod", &["644", &pcap]).await;
+    let bytes = fs::read(&pcap)
+        .unwrap_or_else(|e| panic!("no capture file {} ({}): did tcpdump start?", pcap, e));
+    pcap_iih_frame_lens(&bytes)
+}
+
+/// Assert the padded size of transmitted IS-IS Hellos: every captured IIH
+/// frame must be `expected` bytes on the wire, minus at most 2 bytes of
+/// tolerance. `expected` is interface MTU + 14: the padder fills the PDU
+/// to MTU − 3, the send path prepends the 3-byte LLC header (payload =
+/// exactly MTU), and the capture counts the 14-byte Ethernet header. The
+/// tolerance exists because a remainder of 1–2 bytes cannot form a
+/// padding TLV (2-byte header), so those land unused; the padder never
+/// overshoots.
+#[then(
+    expr = "IS-IS hellos sent on interface {string} in namespace {string} should be {int} bytes on the wire"
+)]
+async fn isis_hellos_should_be_size(
+    world: &mut World,
+    interface: String,
+    namespace: String,
+    expected: u64,
+) {
+    let scoped = world.ns(&namespace);
+    let lens = capture_iih_frame_lens(&scoped, &interface).await;
+    let expected = expected as usize;
+    assert!(
+        lens.len() >= 2,
+        "captured only {} IIH frame(s) on {} in {}; need at least 2 for a stable size assertion",
+        lens.len(),
+        interface,
+        scoped
+    );
+    assert!(
+        lens.iter()
+            .all(|&l| l <= expected && l >= expected.saturating_sub(2)),
+        "IIH frames on {} in {} measured {:?} bytes on the wire, expected {} (−2 tolerated)",
+        interface,
+        scoped,
+        lens,
+        expected
+    );
+    println!(
+        "✓ {} IIH frames on {} in {} all {} bytes on the wire (expected {})",
+        lens.len(),
+        interface,
+        scoped,
+        lens[0],
+        expected
+    );
+}
+
+/// Negative sibling for the padding-disabled case: every captured IIH must
+/// be strictly smaller than `bound` bytes on the wire.
+#[then(
+    expr = "IS-IS hellos sent on interface {string} in namespace {string} should be smaller than {int} bytes on the wire"
+)]
+async fn isis_hellos_should_be_smaller(
+    world: &mut World,
+    interface: String,
+    namespace: String,
+    bound: u64,
+) {
+    let scoped = world.ns(&namespace);
+    let lens = capture_iih_frame_lens(&scoped, &interface).await;
+    let bound = bound as usize;
+    assert!(
+        lens.len() >= 2,
+        "captured only {} IIH frame(s) on {} in {}; need at least 2 for a stable size assertion",
+        lens.len(),
+        interface,
+        scoped
+    );
+    assert!(
+        lens.iter().all(|&l| l < bound),
+        "IIH frames on {} in {} measured {:?} bytes on the wire, expected all under {}",
+        interface,
+        scoped,
+        lens,
+        bound
+    );
+    println!(
+        "✓ {} IIH frames on {} in {} all under {} bytes on the wire",
+        lens.len(),
+        interface,
+        scoped,
+        bound
     );
 }
 

@@ -1,0 +1,25 @@
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.2/32
+- if-name: i1
+  ipv4:
+    address: 10.0.12.2/30
+router:
+  isis:
+    net: 49.0000.0000.0000.0002.00
+    is-type: level-2-only
+    hostname: a2
+    interface:
+    - if-name: lo
+      circuit-type: level-2-only
+      ipv4:
+        enabled: true
+    - if-name: i1
+      circuit-type: level-2-only
+      metric: 10
+      hello:
+        interval: 1
+        multiplier: 5
+      ipv4:
+        enabled: true
