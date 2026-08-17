@@ -298,6 +298,10 @@ impl Isis {
             link::config_hello_padding,
         );
         self.callback_add(
+            "/router/isis/interface/hello/padding-size",
+            link::config_hello_padding_size,
+        );
+        self.callback_add(
             "/router/isis/interface/ipv4/enabled",
             link::config_ipv4_enable,
         );

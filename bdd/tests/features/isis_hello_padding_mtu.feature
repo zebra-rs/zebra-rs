@@ -1,11 +1,13 @@
 @isis_hello_padding_mtu
 @isis
-Feature: IS-IS Hello padding fills the interface MTU exactly, and hello-padding disable is the mismatch escape hatch
+Feature: IS-IS Hello padding fills the interface MTU exactly, with padding-size and padding disable as the mismatch escape hatches
   As a network operator
   I want IS-IS Hellos padded to exactly the interface MTU (and no further),
   so an adjacency only forms when the link really carries full-MTU PDUs in
-  both directions — and I want `hello padding disable` to bring a
-  mismatched-MTU adjacency up when I decide that check is not what I need.
+  both directions — and when the peer's MTU accounting disagrees with mine,
+  I want `hello padding-size <bytes>` to pad to the exact frame length the
+  peer accepts (the number read straight out of a capture), or
+  `hello padding disable` to skip the probe entirely.
 
   Wire arithmetic this feature pins down (the recurring interop question):
   the padder fills the IIH PDU to MTU - 3, the send path prepends the
@@ -63,6 +65,23 @@ Feature: IS-IS Hello padding fills the interface MTU exactly, and hello-padding 
     # Small frames still traverse the link: only the full-MTU Hellos die.
     And ping from "a2" to "10.0.12.1" should succeed
     And ping from "a2" to "10.0.0.1" should fail
+
+  Scenario: hello padding-size pads to an explicit wire length the smaller-MTU peer accepts
+    Given the test topology exists
+    # The surgical fix when the peer's MTU number cannot be changed: tell
+    # a1 to pad its Hellos to a 1514-byte frame — the size read from the
+    # peer-side capture — instead of its own 1600 MTU. The MTU probe
+    # still runs, just at the length both sides agree on. This is the
+    # miniature of `padding-size 4092` against a media-MTU-4096 vendor.
+    When I apply command "set router isis interface i2 hello padding-size 1514" in namespace "a1"
+    Then isis neighbor in namespace "a2" at level 2 on interface "i1" should be up
+    And isis neighbor in namespace "a1" at level 2 on interface "i2" should be up
+    And IS-IS hellos sent on interface "i2" in namespace "a1" should be 1514 bytes on the wire
+    And ping from "a2" to "10.0.0.1" should eventually succeed
+    # Deleting the override restores the default full-MTU probe (1600+14),
+    # which this link (still 1500 on the a2 side) again cannot carry.
+    When I apply command "delete router isis interface i2 hello padding-size" in namespace "a1"
+    Then IS-IS hellos sent on interface "i2" in namespace "a1" should be 1614 bytes on the wire
 
   Scenario: hello padding disable on the big-MTU side brings the adjacency back up
     Given the test topology exists

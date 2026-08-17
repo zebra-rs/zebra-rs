@@ -215,7 +215,7 @@ pub fn hello_generate(link: &LinkTop, level: Level) -> IsisHello {
     let resolved = auth::resolve_send(&link.config.hello_auth, link.key_chains, chrono::Utc::now());
     auth::append_auth_tlv(&mut hello.tlvs, resolved.as_ref());
     if link.config.hello_padding() == HelloPaddingPolicy::Always {
-        hello.padding(link.state.mtu as usize);
+        hello.padding(link.config.hello_pad_target(link.state.mtu as usize));
     }
     hello
 }
@@ -302,7 +302,7 @@ pub fn hello_p2p_generate(link: &LinkTop, level: Level) -> IsisP2pHello {
     let resolved = auth::resolve_send(&link.config.hello_auth, link.key_chains, chrono::Utc::now());
     auth::append_auth_tlv(&mut hello.tlvs, resolved.as_ref());
     if link.config.hello_padding() == HelloPaddingPolicy::Always {
-        hello.padding(link.state.mtu as usize);
+        hello.padding(link.config.hello_pad_target(link.state.mtu as usize));
     }
     hello
 }
