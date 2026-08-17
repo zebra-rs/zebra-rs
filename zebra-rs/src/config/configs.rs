@@ -281,7 +281,11 @@ impl Config {
                 if brace {
                     out.push_str(" {\n");
                 } else {
-                    out.push_str(";\n");
+                    // No trailing `;` after the closing brace: `};` made the
+                    // loader emit a phantom `set` for the bare parent path
+                    // (rejected at boot on every saved leaf-list). Close like
+                    // every other block.
+                    out.push('\n');
                 }
             } else if brace {
                 out.push_str(" {\n");
@@ -1095,6 +1099,25 @@ mod tests {
         assert!(output.contains("    10.0.0.1/32;"));
         assert!(output.contains("    10.0.0.2/32;"));
         assert!(output.contains("  }"));
+        // The leaf-list block must close with a bare `}` — the old `};`
+        // form made the loader emit a phantom `set prefix-test` that the
+        // schema rejected on every boot.
+        assert!(
+            !output.contains("};"),
+            "leaf-list close leaked a trailing semicolon:\n{}",
+            output
+        );
+
+        // True round-trip: the file we save must load back into exactly
+        // the commands that built it, phantom-free.
+        let cmds = crate::config::files::load_config_file(output);
+        assert_eq!(
+            cmds,
+            vec![
+                "set prefix-test member 10.0.0.1/32",
+                "set prefix-test member 10.0.0.2/32",
+            ]
+        );
     }
 
     /// Regression: `list()` (the flat "set command" form the commit

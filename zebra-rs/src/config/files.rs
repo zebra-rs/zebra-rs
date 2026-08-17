@@ -35,6 +35,15 @@ pub fn load_config_file(input: String) -> Vec<String> {
                 stack.pop();
             }
             Token::SemiColon => {
+                // An empty statement — a `;` directly after `{`, `}`, or
+                // another `;` — names nothing and must not become a command.
+                // Configs saved before the writer fix closed every leaf-list
+                // block with `};`, and that stray `;` flattened into a bare
+                // parent-path `set` (e.g. `set interface eth0 ipv4`) that the
+                // schema rejected on every boot.
+                if cmds.is_empty() {
+                    continue;
+                }
                 stack.push(cmds.clone());
                 cmds.clear();
                 let cmd = flatten(&stack);
@@ -144,6 +153,38 @@ static {
                 .any(|c| c
                     == "set static ipv6 route 2001:db8:ff00:5::/64 segments fcbb:bbbb:3:fe00::"),
             "specific-prefix segments set line missing; got:\n{dump}"
+        );
+    }
+
+    #[test]
+    fn test_stray_semicolon_after_leaf_list_brace() {
+        // The exact shape the pre-fix writer saved for every leaf-list —
+        // `};` closing the address block. The stray `;` used to flatten
+        // into a phantom bare-path command (`set interface enp0s6 ipv4`)
+        // that the schema rejected on every boot. Old configs on disk
+        // still carry it, so the loader must treat it as an empty
+        // statement and emit only the real address command.
+        let config = r#"
+interface enp0s6 {
+  ipv4 {
+    address {
+      192.168.10.1/24;
+    };
+  }
+  ipv6 {
+    address {
+      2001:db8:ff00:10::1/64;
+    };
+  }
+}
+"#;
+        let cmds = load_config_file(config.to_string());
+        assert_eq!(
+            cmds,
+            vec![
+                "set interface enp0s6 ipv4 address 192.168.10.1/24",
+                "set interface enp0s6 ipv6 address 2001:db8:ff00:10::1/64",
+            ]
         );
     }
 
