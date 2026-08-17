@@ -86,10 +86,18 @@ packets later is far worse).
 | YANG leaf | Default | Values |
 |---|---|---|
 | `/router/isis/interface/<n>/hello/padding` | `always` | `always`, `disable` |
+| `/router/isis/interface/<n>/hello/padding-size` | unset (interface MTU) | 64..16384 bytes |
 
 `disable` skips padding entirely. Operationally useful only when
 intentionally hiding an MTU mismatch (very rare) or to save a small
 amount of bandwidth on extremely high-fanout broadcast LANs.
+
+`padding-size` pads toward an explicit on-wire frame length instead of
+the interface MTU — the surgical fix for peers whose configured "MTU"
+counts L2 overhead inside the number and who therefore drop full-MTU
+padded Hellos as giants. See
+[Hello Padding and MTU](ch-07-10-isis-hello-padding.md) for the wire
+arithmetic and the interop story.
 
 ## Database synchronization — CSNP and PSNP intervals
 
@@ -314,6 +322,7 @@ qualifiers can be added later if a deployment needs them.
 | hello interval | 3 s | per-interface |
 | hello multiplier | 10 | per-interface |
 | hello padding | always | per-interface |
+| hello padding-size | unset (interface MTU) | per-interface |
 | csnp-interval | 10 s | per-interface |
 | psnp-interval | 2 s | per-interface |
 | lsp-refresh-interval | 900 s | instance |
@@ -384,6 +393,7 @@ prefer BFD over aggressive hellos.
 | `interface/<n>/hello/interval` | `isis hello-interval` (interface) |
 | `interface/<n>/hello/multiplier` | `isis hello-multiplier` (interface) |
 | `interface/<n>/hello/padding` | `isis hello-padding` (interface) |
+| `interface/<n>/hello/padding-size` | (no IOS-XR equivalent — explicit pad-to frame length) |
 | `interface/<n>/csnp-interval` | `isis csnp-interval` (interface) |
 | `interface/<n>/psnp-interval` | `isis retransmit-interval`-adjacent (no exact IOS-XR equivalent — PSNP ack pacing) |
 

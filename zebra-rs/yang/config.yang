@@ -3533,6 +3533,23 @@ module config {
                 enum disable;
               }
             }
+            leaf padding-size {
+              ext:help "Pad Hellos to this Ethernet frame length instead of the interface MTU";
+              type uint16 {
+                range "64..16384";
+              }
+              units "bytes";
+              description
+                "On-wire Ethernet frame length Hello padding fills toward,
+                 as read from a packet capture: 14-byte Ethernet header +
+                 3-byte LLC header + IIH PDU, FCS excluded. Overrides the
+                 default full-interface-MTU target, for peers whose
+                 configured MTU counts L2 overhead inside the number and
+                 who therefore drop full-MTU padded Hellos as giants.
+                 Clamped to the interface MTU; a value below the unpadded
+                 Hello size simply disables padding growth (the Hello is
+                 never truncated). Ignored when padding is disable.";
+            }
             leaf interval {
               ext:help "Hello PDU transmit interval (seconds)";
               type uint16 {
@@ -4100,6 +4117,23 @@ module config {
                   enum always;
                   enum disable;
                 }
+              }
+              leaf padding-size {
+                ext:help "Pad Hellos to this Ethernet frame length instead of the interface MTU";
+                type uint16 {
+                  range "64..16384";
+                }
+                units "bytes";
+                description
+                  "On-wire Ethernet frame length Hello padding fills toward,
+                   as read from a packet capture: 14-byte Ethernet header +
+                   3-byte LLC header + IIH PDU, FCS excluded. Overrides the
+                   default full-interface-MTU target, for peers whose
+                   configured MTU counts L2 overhead inside the number and
+                   who therefore drop full-MTU padded Hellos as giants.
+                   Clamped to the interface MTU; a value below the unpadded
+                   Hello size simply disables padding growth (the Hello is
+                   never truncated). Ignored when padding is disable.";
               }
               leaf interval {
                 ext:help "Hello PDU transmit interval (seconds)";

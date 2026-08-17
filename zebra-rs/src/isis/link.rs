@@ -341,6 +341,15 @@ pub struct LinkConfig {
     pub hello_interval: Option<u16>,
     pub hello_multiplier: Option<u16>,
     pub hello_padding: Option<HelloPaddingPolicy>,
+    /// `.../hello/padding-size`: pad Hellos toward this on-wire Ethernet
+    /// frame length instead of the interface MTU. Expressed as the frame
+    /// size an operator reads out of a capture (14-byte Ethernet header +
+    /// LLC + PDU, FCS excluded), because that is the number both ends of
+    /// an MTU-semantics dispute can see and agree on. Interop escape
+    /// hatch for peers whose configured "MTU" counts L2 overhead inside
+    /// the number and who therefore drop our full-MTU padded Hellos as
+    /// giants.
+    pub hello_padding_size: Option<u16>,
     pub holddown_count: Option<u32>,
 
     pub psnp_interval: Option<u32>,
@@ -627,6 +636,21 @@ impl LinkConfig {
 
     pub fn hello_padding(&self) -> HelloPaddingPolicy {
         self.hello_padding.unwrap_or(HelloPaddingPolicy::Always)
+    }
+
+    /// The payload budget `padding()` fills toward (LLC + PDU bytes).
+    /// Defaults to the interface MTU — payload becomes exactly MTU, the
+    /// ISO 10589 full-MTU probe. A configured `padding-size` states the
+    /// same target as the on-wire frame length, so the 14-byte Ethernet
+    /// header is subtracted here; the result is clamped to the MTU
+    /// because the kernel rejects sends whose payload exceeds the
+    /// device MTU. The padder never truncates a Hello, so a size below
+    /// the unpadded PDU just means no padding is added.
+    pub fn hello_pad_target(&self, mtu: usize) -> usize {
+        match self.hello_padding_size {
+            Some(size) => mtu.min((size as usize).saturating_sub(14)),
+            None => mtu,
+        }
     }
     pub fn holddown_count(&self) -> u32 {
         self.holddown_count.unwrap_or(Self::DEFAULT_HOLDDOWN_COUNT)
@@ -1949,6 +1973,21 @@ pub fn config_hello_padding(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Op
     Some(())
 }
 
+pub fn config_hello_padding_size(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let name = args.string()?;
+    let size = args.u16()?;
+    let link = isis.links.get_mut_by_name(&name)?;
+
+    if op.is_set() {
+        link.config.hello_padding_size = Some(size);
+    } else {
+        link.config.hello_padding_size = None;
+    }
+
+    hello_reoriginate(link, &isis.tx);
+    Some(())
+}
+
 pub fn config_hello_interval(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     let name = args.string()?;
     let interval = args.u16()?;
@@ -2235,6 +2274,18 @@ fn render_auth_block_from(info: &AuthInfo) -> String {
     buf
 }
 
+/// The `Padding:` column of `show isis interface detail`: yes/no as in
+/// FRR, plus the configured `padding-size` override when one is set —
+/// that value changes what lands on the wire, so the operator checking
+/// an interop dispute must be able to see it here.
+fn padding_column(config: &LinkConfig) -> String {
+    match (config.hello_padding(), config.hello_padding_size) {
+        (HelloPaddingPolicy::Disable, _) => "no".to_string(),
+        (_, Some(size)) => format!("yes (size {})", size),
+        _ => "yes".to_string(),
+    }
+}
+
 pub fn show_detail_entry(buf: &mut String, link: &IsisLink, level: Level) -> std::fmt::Result {
     writeln!(
         buf,
@@ -2242,11 +2293,7 @@ pub fn show_detail_entry(buf: &mut String, link: &IsisLink, level: Level) -> std
         link.config.metric(),
         link.state.nbrs_up.get(&level)
     )?;
-    let padding = if link.config.hello_padding() == HelloPaddingPolicy::Always {
-        "yes"
-    } else {
-        "no"
-    };
+    let padding = padding_column(&link.config);
     writeln!(
         buf,
         "    Hello interval: {}, Holddown count: {}, Padding: {}",
@@ -2278,11 +2325,7 @@ pub fn show_detail_entry(buf: &mut String, link: &IsisLink, level: Level) -> std
 }
 
 fn build_level_info(link: &IsisLink, level: Level) -> LevelInfo {
-    let padding = if link.config.hello_padding() == HelloPaddingPolicy::Always {
-        "yes".to_string()
-    } else {
-        "no".to_string()
-    };
+    let padding = padding_column(&link.config);
 
     LevelInfo {
         metric: link.config.metric(),
@@ -2707,6 +2750,56 @@ pub fn show_dis_history(
     }
 
     Ok(buf)
+}
+
+#[cfg(test)]
+mod hello_pad_target_tests {
+    use super::*;
+
+    /// Unset ⇒ the ISO 10589 full-MTU probe: payload budget == MTU,
+    /// so the wire frame is MTU + 14. The interop question this
+    /// arithmetic answers: MTU 4096 ⇒ 4110-byte frames in a capture.
+    #[test]
+    fn default_is_interface_mtu() {
+        let config = LinkConfig::default();
+        assert_eq!(config.hello_pad_target(4096), 4096);
+    }
+
+    /// `padding-size` speaks in capture frame bytes; the payload
+    /// budget drops the 14-byte Ethernet header. Size 4092 against a
+    /// 4096-MTU interface ⇒ budget 4078 ⇒ 4075-byte IIH PDU ⇒ a
+    /// 4092-byte frame the media-MTU peer accepts.
+    #[test]
+    fn size_subtracts_ethernet_header() {
+        let config = LinkConfig {
+            hello_padding_size: Some(4092),
+            ..Default::default()
+        };
+        assert_eq!(config.hello_pad_target(4096), 4078);
+    }
+
+    /// A size above MTU + 14 must clamp to the MTU — the kernel
+    /// rejects AF_PACKET sends whose payload exceeds the device MTU,
+    /// so honoring the raw value would kill every Hello.
+    #[test]
+    fn size_clamps_to_interface_mtu() {
+        let config = LinkConfig {
+            hello_padding_size: Some(9000),
+            ..Default::default()
+        };
+        assert_eq!(config.hello_pad_target(1500), 1500);
+    }
+
+    /// Degenerate size (below the Ethernet header) saturates to 0;
+    /// the padder then adds nothing rather than underflowing.
+    #[test]
+    fn tiny_size_saturates() {
+        let config = LinkConfig {
+            hello_padding_size: Some(10),
+            ..Default::default()
+        };
+        assert_eq!(config.hello_pad_target(1500), 0);
+    }
 }
 
 #[cfg(test)]
