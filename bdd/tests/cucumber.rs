@@ -2064,7 +2064,7 @@ fn pcap_iih_frame_lens(bytes: &[u8]) -> Vec<usize> {
         if frame.len() < 22 || frame[14..17] != [0xFE, 0xFE, 0x03] || frame[17] != 0x83 {
             continue;
         }
-        if matches!(frame[21] & 0x1f, 15 | 16 | 17) {
+        if matches!(frame[21] & 0x1f, 15..=17) {
             lens.push(orig);
         }
     }
@@ -2082,12 +2082,12 @@ fn pcap_iih_frame_lens(bytes: &[u8]) -> Vec<usize> {
 /// dump file.
 ///
 /// The BPF filter matches the LLC + ISO discriminator bytes by offset
-/// rather than using libpcap's `isis` primitive: an IIH padded to a
-/// >1500-byte MTU carries the payload length in the 802.3 length field
-/// (zebra-rs and FRR both send it via sockaddr_ll that way), and a value
-/// above 1536 makes libpcap classify the frame as an unknown EtherType —
-/// so `isis` silently misses exactly the full-MTU frames this capture
-/// exists to measure.
+/// rather than using libpcap's `isis` primitive: an IIH padded to an
+/// MTU above 1500 bytes carries the payload length in the 802.3 length
+/// field (zebra-rs and FRR both send it via sockaddr_ll that way), and
+/// a value above 1536 makes libpcap classify the frame as an unknown
+/// EtherType — so `isis` silently misses exactly the full-MTU frames
+/// this capture exists to measure.
 async fn capture_iih_frame_lens(scoped: &str, interface: &str) -> Vec<usize> {
     let pcap = format!("/tmp/{}_{}_iih.pcap", scoped, interface);
     let _ = netns::exec_in_netns(scoped, "rm", &["-f", &pcap]).await;
