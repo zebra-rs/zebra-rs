@@ -3534,7 +3534,7 @@ module config {
               }
             }
             leaf padding-size {
-              ext:help "Pad Hellos to this Ethernet frame length instead of the interface MTU";
+              ext:help "Pad Hellos to this on-wire frame length instead of MTU";
               type uint16 {
                 range "64..16384";
               }
@@ -4119,7 +4119,7 @@ module config {
                 }
               }
               leaf padding-size {
-                ext:help "Pad Hellos to this Ethernet frame length instead of the interface MTU";
+                ext:help "Pad Hellos to this on-wire frame length instead of MTU";
                 type uint16 {
                   range "64..16384";
                 }
