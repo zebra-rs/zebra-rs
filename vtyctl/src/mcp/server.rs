@@ -493,30 +493,30 @@ impl ZmcpServer {
         // Fleet mode: forward everything except get-ontology to the named
         // router's own one-shot server. The child validates the tool name
         // and arguments, so unknown tools still answer with a tool error.
-        if let Some(fleet) = &self.fleet {
-            if tool_name != "get-ontology" {
-                let mut arguments = arguments;
-                let router = match arguments.remove("router") {
-                    Some(Value::String(r)) => r,
-                    _ => {
-                        return tool_result(
-                            String::from(
-                                "Missing required 'router' argument: this server fronts a \
-                                 fleet, name the target router",
-                            ),
-                            true,
-                        );
-                    }
-                };
-                let forwarded = Value::Object(arguments.into_iter().collect());
-                return match fleet.call(&router, tool_name, forwarded).await {
-                    Ok(text) => tool_result(text, false),
-                    Err(e) => {
-                        error!("Fleet call failed: {}", e);
-                        tool_result(format!("Error: {}", e), true)
-                    }
-                };
-            }
+        if let Some(fleet) = &self.fleet
+            && tool_name != "get-ontology"
+        {
+            let mut arguments = arguments;
+            let router = match arguments.remove("router") {
+                Some(Value::String(r)) => r,
+                _ => {
+                    return tool_result(
+                        String::from(
+                            "Missing required 'router' argument: this server fronts a \
+                             fleet, name the target router",
+                        ),
+                        true,
+                    );
+                }
+            };
+            let forwarded = Value::Object(arguments.into_iter().collect());
+            return match fleet.call(&router, tool_name, forwarded).await {
+                Ok(text) => tool_result(text, false),
+                Err(e) => {
+                    error!("Fleet call failed: {}", e);
+                    tool_result(format!("Error: {}", e), true)
+                }
+            };
         }
 
         let result = match tool_name {

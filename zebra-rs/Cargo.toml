@@ -92,6 +92,7 @@ assets = [
   # again — that check is what caught it.
   ["../packaging/out/playset/**/[u]p.sh",        "usr/share/zebra-rs/playset/",     "755"],
   ["../packaging/out/playset/**/[d]own.sh",      "usr/share/zebra-rs/playset/",     "755"],
+  ["../packaging/out/playset/**/[m]cp.sh",       "usr/share/zebra-rs/playset/",     "755"],
   ["../packaging/out/playset/**/[t]opology.sh",  "usr/share/zebra-rs/playset/",     "644"],
   ["../packaging/out/playset/**/[c]ommon.sh",    "usr/share/zebra-rs/playset/",     "644"],
   ["../packaging/out/playset/**/[n]etns.sh",     "usr/share/zebra-rs/playset/",     "644"],

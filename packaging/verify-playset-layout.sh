@@ -36,14 +36,14 @@ if [ ! -d "$staged" ]; then
 fi
 
 # Expected: every staged regular file, at the mirrored path under $prefix.
-# up.sh/down.sh are the operator entry points and ship executable; every other
-# asset (the sourced lib/ helpers and the data files) ships 0644. This mirrors
-# the mode column of the asset table in ../zebra-rs/Cargo.toml.
+# up.sh/down.sh/mcp.sh are the operator entry points and ship executable;
+# every other asset (the sourced lib/ helpers and the data files) ships 0644.
+# This mirrors the mode column of the asset table in ../zebra-rs/Cargo.toml.
 expected="$(
 	cd "$staged"
 	find . -type f | sed 's|^\./||' | while IFS= read -r f; do
 		case "${f##*/}" in
-		up.sh | down.sh) mode=755 ;;
+		up.sh | down.sh | mcp.sh) mode=755 ;;
 		*) mode=644 ;;
 		esac
 		printf '%s %s/%s\n' "$mode" "$prefix" "$f"
