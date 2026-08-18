@@ -1,0 +1,51 @@
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.7/32
+- if-name: ln-ch
+  ipv4:
+    address: 192.168.9.2/24
+- if-name: ln-fr
+  ipv4:
+    address: 192.168.13.1/24
+system:
+  hostname: ln
+affinity-map:
+  affinity:
+  - name: trans-pacific
+    bit-position: 0
+router:
+  isis:
+    net: 49.0000.0000.0000.0007.00
+    hostname: ln
+    is-type: level-2-only
+    segment-routing:
+      mpls: {}
+    te-router-id: 10.0.0.7
+    flex-algo:
+    - algo: 128
+      metric-type: igp
+      dataplane:
+        sr-mpls: true
+      affinity:
+        exclude-any:
+        - trans-pacific
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+        prefix-sid:
+          index: 700
+        flex-algo-prefix-sid:
+        - algo: 128
+          index: 2700
+    - if-name: ln-ch
+      network-type: point-to-point
+      ipv4:
+        enabled: true
+      metric: 10
+    - if-name: ln-fr
+      network-type: point-to-point
+      ipv4:
+        enabled: true
+      metric: 10

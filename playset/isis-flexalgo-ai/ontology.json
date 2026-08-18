@@ -1,0 +1,57 @@
+[
+  {
+    "name": "se",
+    "full-name": "Seattle",
+    "region": "US"
+  },
+  {
+    "name": "sj",
+    "full-name": "San Jose",
+    "region": "US"
+  },
+  {
+    "name": "ch",
+    "full-name": "Chicago",
+    "region": "US"
+  },
+  {
+    "name": "da",
+    "full-name": "Dallas",
+    "region": "US"
+  },
+  {
+    "name": "va",
+    "full-name": "Virginia",
+    "region": "US"
+  },
+  {
+    "name": "at",
+    "full-name": "Atlanta",
+    "region": "US"
+  },
+  {
+    "name": "ln",
+    "full-name": "London",
+    "region": "EU"
+  },
+  {
+    "name": "fr",
+    "full-name": "Frankfurt",
+    "region": "EU"
+  },
+  {
+    "name": "sg",
+    "full-name": "Singapore",
+    "region": "AP"
+  },
+  {
+    "name": "sy",
+    "full-name": "Sydney",
+    "region": "AP"
+  },
+  {
+    "name": "tk",
+    "full-name": "Tokyo",
+    "region": "AP"
+  }
+]

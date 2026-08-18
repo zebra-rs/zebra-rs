@@ -1,0 +1,53 @@
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.10/32
+- if-name: sy-sj
+  ipv4:
+    address: 192.168.3.2/24
+- if-name: sy-sg
+  ipv4:
+    address: 192.168.16.2/24
+system:
+  hostname: sy
+affinity-map:
+  affinity:
+  - name: trans-pacific
+    bit-position: 0
+router:
+  isis:
+    net: 49.0000.0000.0000.0010.00
+    hostname: sy
+    is-type: level-2-only
+    segment-routing:
+      mpls: {}
+    te-router-id: 10.0.0.10
+    flex-algo:
+    - algo: 128
+      metric-type: igp
+      dataplane:
+        sr-mpls: true
+      affinity:
+        exclude-any:
+        - trans-pacific
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+        prefix-sid:
+          index: 1000
+        flex-algo-prefix-sid:
+        - algo: 128
+          index: 3000
+    - if-name: sy-sj
+      network-type: point-to-point
+      affinity:
+      - trans-pacific
+      ipv4:
+        enabled: true
+      metric: 10
+    - if-name: sy-sg
+      network-type: point-to-point
+      ipv4:
+        enabled: true
+      metric: 10
