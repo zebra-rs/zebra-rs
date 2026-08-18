@@ -21,6 +21,10 @@ Point Claude — or any MCP-aware agent — at zebra-rs and describe what you wa
 - **Draft policy.** "Write a route-map that prefers the SRv6 path and tags it
   with community 65000:100." The agent drafts the configuration for you to
   review and apply.
+- **Commit changes.** "Define a Flex-Algorithm that avoids the trans-Pacific
+  links." The agent reads the running configuration with `get-config`,
+  writes the change as `set` lines, and commits it atomically with
+  `apply-config`.
 
 The agent sees exactly what an operator sees at the CLI — one source of truth,
 no diverging copy of the network.
@@ -43,10 +47,9 @@ to any MCP client and your assistant can reach the router straight away:
 
 ## The tools
 
-The server is read-only by contract: every tool answers from the daemon's
-live state, and none of them mutate it. Two tools cover the whole `show`
-surface, and a small typed family serves the data that topology-aware
-agents ask for most:
+Two tools cover the whole `show` surface, a small typed family serves the
+data that topology-aware agents ask for most, and a configuration pair
+closes the loop from reading state to changing it:
 
 | tool | arguments | returns |
 |:-----|:----------|:--------|
@@ -58,11 +61,47 @@ agents ask for most:
 | `get-ospf-graph` | `version` | the OSPF area graph with router names and link costs. `version` selects OSPFv2 (2, the default) or OSPFv3 (3). |
 | `get-ospf-spf` | `version` | the OSPF SPF tree: per-vertex cost and first hops. OSPF's SPF does not retain hop-by-hop vertex chains, so join vertex ids against `get-ospf-graph` for names and links. |
 | `get-ospf-flex-algo` | `version` | OSPF Flexible Algorithm state: each configured algorithm's definition and constraints, its per-algorithm SPF status, and per-algorithm routes. |
+| `get-config` | `format` | the running configuration. `formal` (the default) is one `set ...` line per node — the same syntax `apply-config` consumes; `cli`, `json` and `yaml` select the other serializations. |
+| `apply-config` | `commands` | applies a list of `set ...` / `delete ...` lines as one atomic transaction: the daemon validates everything first, and on any error nothing is applied and the offending line comes back in the error. Lines that are not set/delete are refused. |
+| `get-ontology` | — | operator-provided semantic metadata about the routers (full names, regions, coordinates, ...) from the JSON file named by `vtyctl mcp --ontology <path>`. The tool is registered only when the flag is given. |
+
+Everything except `apply-config` answers from the daemon's live state
+without mutating it. `apply-config` is the single write surface, and it
+inherits the VTY session model: sessions from root hold the admin role
+automatically, so a server started inside the router's namespace via
+`sudo` can commit, while an unprivileged one is refused with
+"admin role required".
 
 The typed `get-*` tools return validated JSON, so an agent — or an ordinary
 program using MCP as its API — can consume them without scraping CLI text.
 The [3D Traffic Path Visualizer](ch-13-01-topology-viewer.md) is exactly
 that: a web application whose only data plane is these tools.
+
+## One server, a fleet of routers
+
+A lab or a deployment rarely has just one router. When each zebra-rs runs
+in its own network namespace (the playset convention), its VTY endpoint is
+an abstract Unix socket that only exists inside that namespace — so one
+MCP server per router would be the natural but painful shape: eleven
+connector entries for an eleven-node lab.
+
+Fleet mode collapses that to one entry:
+
+``` shell
+$ sudo vtyctl mcp --fleet ontology.json
+```
+
+The JSON file names the routers (each `name` is also its network
+namespace). Every tool then takes a required `router` argument — the
+schema enumerates the valid names — and the server forwards the call to a
+one-shot `vtyctl mcp` spawned inside that router's namespace. The fleet
+file doubles as the ontology, so `get-ontology` (served by the fleet
+server itself, no `router` argument) works out of the box.
+
+The server must run as root: entering namespaces requires it, and so does
+committing configuration through `apply-config` (root sessions hold the
+admin role automatically). Started unprivileged, it goes through
+`sudo -n` for each forwarded call.
 
 ## Current protocol, older clients welcome
 

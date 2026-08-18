@@ -61,7 +61,7 @@ playset:
 	@bad=`find out/playset -type f ! \( \
 		-name '*.yaml' -o -name '*.json' -o -name '*.md' -o -name '*.drawio' \
 		-o -name '*.png' -o -name '*.svg' \
-		-o -name 'up.sh' -o -name 'down.sh' -o -name 'topology.sh' \
+		-o -name 'up.sh' -o -name 'down.sh' -o -name 'mcp.sh' -o -name 'topology.sh' \
 		-o -name 'common.sh' -o -name 'netns.sh' -o -name 'playset.sh' -o -name 'zebra-rs.sh' \)`; \
 	if [ -n "$$bad" ]; then \
 		echo "playset: file(s) not covered by cargo-deb assets (add a glob in zebra-rs/Cargo.toml):"; \

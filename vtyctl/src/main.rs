@@ -80,6 +80,21 @@ enum Commands {
 
         #[arg(short, long, help = "Enable debug logging")]
         debug: bool,
+
+        #[arg(
+            short,
+            long,
+            help = "Ontology JSON file to serve via the get-ontology tool"
+        )]
+        ontology: Option<String>,
+
+        #[arg(
+            short,
+            long,
+            help = "Serve a whole fleet: ontology JSON file naming the routers \
+                    (name = netns); adds a 'router' argument to every tool"
+        )]
+        fleet: Option<String>,
     },
 }
 
@@ -119,8 +134,14 @@ async fn main() -> Result<()> {
         Some(Commands::Watch { host, json, path }) => {
             watch::watch(host, *json, path.clone()).await?;
         }
-        Some(Commands::Mcp { host, port, debug }) => {
-            mcp::run(host, *port, *debug).await?;
+        Some(Commands::Mcp {
+            host,
+            port,
+            debug,
+            ontology,
+            fleet,
+        }) => {
+            mcp::run(host, *port, *debug, ontology.as_deref(), fleet.as_deref()).await?;
         }
         None => {
             print_help();

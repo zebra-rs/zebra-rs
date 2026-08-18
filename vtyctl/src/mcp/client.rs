@@ -3,9 +3,10 @@ use tokio_stream::StreamExt;
 use tonic::Request;
 use tracing::{debug, error};
 
+use crate::vty::apply_client::ApplyClient;
 use crate::vty::exec_client::ExecClient;
 use crate::vty::show_client::ShowClient;
-use crate::vty::{ExecCode, ExecRequest, ExecType, ShowRequest};
+use crate::vty::{ApplyCode, ApplyRequest, ExecCode, ExecRequest, ExecType, ShowRequest};
 
 /// A single completion candidate for the token following a command line,
 /// parsed from the daemon's completion engine output.
@@ -152,6 +153,47 @@ impl ZebraClient {
         }
     }
 
+    /// Apply configuration lines and commit them atomically.
+    ///
+    /// The daemon's Apply service is transactional: a line that fails to
+    /// parse, or a failed schema validation at commit, discards the whole
+    /// candidate and nothing is applied. It is also admin-gated — sessions
+    /// from uid 0 hold the Admin role automatically; anything else is
+    /// refused with "admin role required".
+    pub async fn apply_config(&self, lines: &[String]) -> Result<String> {
+        let endpoint = self.endpoint();
+        debug!("Applying {} config line(s) via {}", lines.len(), endpoint);
+
+        let channel = crate::endpoint::connect(&endpoint).await?;
+        let mut client = ApplyClient::new(channel);
+
+        let requests: Vec<ApplyRequest> = lines
+            .iter()
+            .map(|line| ApplyRequest {
+                line: format!("{line}\n"),
+            })
+            .collect();
+        let count = requests.len();
+
+        let reply = client
+            .apply(Request::new(tokio_stream::iter(requests)))
+            .await?
+            .into_inner();
+
+        if reply.apply_code == ApplyCode::Applied as i32 {
+            Ok(format!("applied: {count} line(s) committed"))
+        } else {
+            // `description` is the daemon's own detail: the offending line
+            // for per-line failures, the validation message for commit
+            // failures. Pass it through so the caller can self-correct.
+            Err(anyhow::anyhow!(
+                "apply failed ({}): {}",
+                apply_code_name(reply.apply_code),
+                reply.description
+            ))
+        }
+    }
+
     /// Return the completion candidates for the token *after* `line`, using
     /// the daemon's completion engine (the same one that backs CLI `?`/TAB).
     /// Completion is not admin-gated, so a View session can enumerate the
@@ -189,6 +231,17 @@ impl ZebraClient {
                 Err(e)
             }
         }
+    }
+}
+
+/// Human-readable name for a daemon `ApplyCode`.
+fn apply_code_name(code: i32) -> &'static str {
+    match ApplyCode::try_from(code) {
+        Ok(ApplyCode::Applied) => "applied",
+        Ok(ApplyCode::FormatError) => "format error",
+        Ok(ApplyCode::ParseError) => "parse error",
+        Ok(ApplyCode::MissingMandatory) => "missing mandatory node",
+        Err(_) => "unknown error",
     }
 }
 

@@ -5,8 +5,11 @@ use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::{debug, error, warn};
 
 use super::client::ZebraClient;
+use super::fleet::Fleet;
 use super::tools::commands::CommandsTool;
+use super::tools::config::ConfigTools;
 use super::tools::isis::IsisTools;
+use super::tools::ontology::OntologyTool;
 use super::tools::ospf::OspfTools;
 use super::tools::show::ShowTool;
 
@@ -86,15 +89,30 @@ pub struct ZmcpServer {
     ospf_tools: OspfTools,
     show_tool: ShowTool,
     commands_tool: CommandsTool,
+    config_tools: ConfigTools,
+    /// Present only when the server was started with `--ontology <path>`
+    /// (or `--fleet`, whose file doubles as the ontology); the
+    /// `get-ontology` tool is registered iff this is set.
+    ontology_tool: Option<OntologyTool>,
+    /// Fleet mode (`--fleet <path>`): every tool except `get-ontology`
+    /// gains a required `router` argument and is forwarded to a one-shot
+    /// per-router server inside that router's network namespace.
+    fleet: Option<Fleet>,
 }
 
 impl ZmcpServer {
-    pub fn new(base_url: String, port: u32) -> Self {
+    pub fn new(
+        base_url: String,
+        port: u32,
+        ontology_tool: Option<OntologyTool>,
+        fleet: Option<Fleet>,
+    ) -> Self {
         let zebra_client = ZebraClient::new(base_url, port);
         let isis_tools = IsisTools::new(zebra_client.clone());
         let ospf_tools = OspfTools::new(zebra_client.clone());
         let show_tool = ShowTool::new(zebra_client.clone());
         let commands_tool = CommandsTool::new(zebra_client.clone());
+        let config_tools = ConfigTools::new(zebra_client.clone());
 
         Self {
             zebra_client,
@@ -102,11 +120,18 @@ impl ZmcpServer {
             ospf_tools,
             show_tool,
             commands_tool,
+            config_tools,
+            ontology_tool,
+            fleet,
         }
     }
 
     pub fn zebra_client(&self) -> &ZebraClient {
         &self.zebra_client
+    }
+
+    pub fn fleet(&self) -> Option<&Fleet> {
+        self.fleet.as_ref()
     }
 
     pub async fn handle_request(&self, request: Value) -> Option<Value> {
@@ -232,6 +257,11 @@ impl ZmcpServer {
     }
 
     fn discover_result(&self) -> Value {
+        let instructions = if self.fleet.is_some() {
+            "Interface to a fleet of zebra-rs routing daemons; every tool except get-ontology takes a 'router' argument naming which one to talk to. Call list-show-commands to discover the read-only show commands and run them with the show tool. Read a router's configuration with get-config (format 'formal' is set-line syntax) and change it with apply-config, which validates and commits set/delete lines as one atomic transaction. get-ontology returns the operator's semantic metadata about the routers."
+        } else {
+            "Interface to a zebra-rs routing daemon. Call list-show-commands to discover the read-only show commands and run them with the show tool. Read the configuration with get-config (format 'formal' is set-line syntax) and change it with apply-config, which validates and commits set/delete lines as one atomic transaction."
+        };
         json!({
             "supportedVersions": supported_versions(),
             "capabilities": {
@@ -239,7 +269,7 @@ impl ZmcpServer {
                     "listChanged": false
                 }
             },
-            "instructions": "Read-only view of a zebra-rs routing daemon. Call list-show-commands to discover the available show commands, then execute them with the show tool.",
+            "instructions": instructions,
             "ttlMs": CACHE_TTL_MS,
             "cacheScope": "private"
         })
@@ -247,7 +277,52 @@ impl ZmcpServer {
 
     fn tools_list(&self) -> Value {
         debug!("Listing available tools");
-        json!({
+        let mut extra_tools = vec![
+            json!({
+                "name": "get-config",
+                "description": "Get the daemon's running configuration. Format 'formal' (the default) returns one 'set ...' line per node — the same syntax apply-config consumes; 'cli' returns indented configuration blocks; 'json' and 'yaml' return the configuration tree in those serializations.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "format": {
+                            "type": "string",
+                            "enum": ["formal", "cli", "json", "yaml"],
+                            "description": "Serialization of the configuration (default 'formal')."
+                        }
+                    },
+                    "additionalProperties": false
+                }
+            }),
+            json!({
+                "name": "apply-config",
+                "description": "Apply configuration changes and commit them atomically. Each element of 'commands' must be a single 'set ...' or 'delete ...' line in the syntax shown by get-config format 'formal'. The daemon validates and commits all lines as one transaction: on any error nothing is applied and the error detail (including the offending line) is returned, so a failed call is safe to correct and retry.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "commands": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 1,
+                            "description": "Configuration lines, each beginning with 'set ' or 'delete '."
+                        }
+                    },
+                    "required": ["commands"],
+                    "additionalProperties": false
+                }
+            }),
+        ];
+        if self.ontology_tool.is_some() {
+            extra_tools.push(json!({
+                "name": "get-ontology",
+                "description": "Get the operator-provided network ontology as JSON: semantic metadata about the routers (short name, full name, region, ...) that the routing protocols do not carry. Use it to map intent expressed in business terms — regions, sites, jurisdictions — onto the topology.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }
+            }));
+        }
+        let mut result = json!({
             "tools": [
                 {
                     "name": "list-show-commands",
@@ -371,7 +446,34 @@ impl ZmcpServer {
             ],
             "ttlMs": CACHE_TTL_MS,
             "cacheScope": "private"
-        })
+        });
+        result["tools"]
+            .as_array_mut()
+            .expect("tools is an array")
+            .extend(extra_tools);
+
+        // Fleet mode: every tool that talks to a daemon needs to say which
+        // one, so inject a required `router` argument into each schema.
+        // get-ontology is served by the fleet server itself and stays as
+        // it is.
+        if let Some(fleet) = &self.fleet {
+            for tool in result["tools"].as_array_mut().expect("tools is an array") {
+                if tool["name"] == json!("get-ontology") {
+                    continue;
+                }
+                let schema = &mut tool["inputSchema"];
+                schema["properties"]["router"] = json!({
+                    "type": "string",
+                    "enum": fleet.routers(),
+                    "description": "Target router (also its network namespace name)."
+                });
+                match schema.get_mut("required") {
+                    Some(Value::Array(required)) => required.push(json!("router")),
+                    _ => schema["required"] = json!(["router"]),
+                }
+            }
+        }
+        result
     }
 
     pub async fn handle_tool_call(&self, params: Value) -> Value {
@@ -388,6 +490,35 @@ impl ZmcpServer {
 
         debug!("Calling tool: {}", tool_name);
 
+        // Fleet mode: forward everything except get-ontology to the named
+        // router's own one-shot server. The child validates the tool name
+        // and arguments, so unknown tools still answer with a tool error.
+        if let Some(fleet) = &self.fleet
+            && tool_name != "get-ontology"
+        {
+            let mut arguments = arguments;
+            let router = match arguments.remove("router") {
+                Some(Value::String(r)) => r,
+                _ => {
+                    return tool_result(
+                        String::from(
+                            "Missing required 'router' argument: this server fronts a \
+                             fleet, name the target router",
+                        ),
+                        true,
+                    );
+                }
+            };
+            let forwarded = Value::Object(arguments.into_iter().collect());
+            return match fleet.call(&router, tool_name, forwarded).await {
+                Ok(text) => tool_result(text, false),
+                Err(e) => {
+                    error!("Fleet call failed: {}", e);
+                    tool_result(format!("Error: {}", e), true)
+                }
+            };
+        }
+
         let result = match tool_name {
             "list-show-commands" => self.commands_tool.list_show_commands().await,
             "show" => self.show_tool.run(arguments).await,
@@ -397,6 +528,14 @@ impl ZmcpServer {
             "get-ospf-graph" => self.ospf_tools.get_ospf_graph(arguments).await,
             "get-ospf-spf" => self.ospf_tools.get_ospf_spf(arguments).await,
             "get-ospf-flex-algo" => self.ospf_tools.get_ospf_flex_algo(arguments).await,
+            "get-config" => self.config_tools.get_config(arguments).await,
+            "apply-config" => self.config_tools.apply_config(arguments).await,
+            "get-ontology" => match &self.ontology_tool {
+                Some(tool) => tool.read(),
+                None => Err(anyhow::anyhow!(
+                    "no ontology configured; start the server with 'vtyctl mcp --ontology <path>'"
+                )),
+            },
             _ => {
                 warn!("Unknown tool requested: {}", tool_name);
                 return tool_result(format!("Unknown tool: {}", tool_name), true);
@@ -468,7 +607,28 @@ mod tests {
     use super::*;
 
     fn server() -> ZmcpServer {
-        ZmcpServer::new("127.0.0.1".to_string(), 2650)
+        ZmcpServer::new("127.0.0.1".to_string(), 2650, None, None)
+    }
+
+    /// A fleet server with a fixed roster (no daemon, no netns needed —
+    /// the tests below only exercise listing and argument validation).
+    fn fleet_server() -> ZmcpServer {
+        let fleet = Fleet::from_roster(vec!["tk".into(), "se".into()], "unix:zebra-rs/vty");
+        ZmcpServer::new("127.0.0.1".to_string(), 2650, None, Some(fleet))
+    }
+
+    /// A server with the ontology tool wired to a real temp file.
+    fn server_with_ontology() -> (ZmcpServer, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!(
+            "vtyctl-server-ontology-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, r#"[{"name":"tk","region":"AP"}]"#).unwrap();
+        let tool = OntologyTool::new(&path).unwrap();
+        (
+            ZmcpServer::new("127.0.0.1".to_string(), 2650, Some(tool), None),
+            path,
+        )
     }
 
     #[tokio::test]
@@ -490,12 +650,118 @@ mod tests {
             "get-ospf-graph",
             "get-ospf-spf",
             "get-ospf-flex-algo",
+            "get-config",
+            "apply-config",
         ] {
             assert!(
                 names.contains(&expected),
                 "missing {expected}; tools: {names:?}"
             );
         }
+        // get-ontology is registered only when --ontology names a file.
+        assert!(!names.contains(&"get-ontology"), "tools: {names:?}");
+    }
+
+    #[tokio::test]
+    async fn ontology_tool_is_listed_and_served_when_configured() {
+        let (server, path) = server_with_ontology();
+        let req = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
+        let resp = server.handle_request(req).await.expect("response");
+        let names: Vec<&str> = resp["result"]["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        assert!(names.contains(&"get-ontology"), "tools: {names:?}");
+
+        let result = server
+            .handle_tool_call(json!({"name": "get-ontology", "arguments": {}}))
+            .await;
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(result["isError"], json!(false));
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("\"region\": \"AP\""), "{text}");
+    }
+
+    #[tokio::test]
+    async fn ontology_tool_errors_when_unconfigured() {
+        let result = server()
+            .handle_tool_call(json!({"name": "get-ontology", "arguments": {}}))
+            .await;
+        assert_eq!(result["isError"], json!(true));
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("--ontology"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn fleet_tools_require_a_router_argument() {
+        let req = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
+        let resp = fleet_server().handle_request(req).await.expect("response");
+        for tool in resp["result"]["tools"].as_array().expect("tools array") {
+            let name = tool["name"].as_str().unwrap();
+            let schema = &tool["inputSchema"];
+            if name == "get-ontology" {
+                assert!(
+                    schema["properties"].get("router").is_none(),
+                    "get-ontology must stay router-less"
+                );
+                continue;
+            }
+            assert_eq!(
+                schema["properties"]["router"]["enum"],
+                json!(["tk", "se"]),
+                "{name} router enum"
+            );
+            assert!(
+                schema["required"]
+                    .as_array()
+                    .is_some_and(|r| r.contains(&json!("router"))),
+                "{name} must require router; schema: {schema}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fleet_call_without_router_is_an_error() {
+        let result = fleet_server()
+            .handle_tool_call(json!({
+                "name": "show",
+                "arguments": {"command": "show version"}
+            }))
+            .await;
+        assert_eq!(result["isError"], json!(true));
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("'router'"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn fleet_call_rejects_unknown_router() {
+        let result = fleet_server()
+            .handle_tool_call(json!({
+                "name": "show",
+                "arguments": {"command": "show version", "router": "mars"}
+            }))
+            .await;
+        assert_eq!(result["isError"], json!(true));
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("unknown router 'mars'"), "{text}");
+        assert!(text.contains("tk, se"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn apply_config_rejects_bad_lines_before_dialing() {
+        // Client-side validation runs before any gRPC dial, so these fail
+        // fast even with no daemon listening.
+        let result = server()
+            .handle_tool_call(json!({
+                "name": "apply-config",
+                "arguments": {"commands": ["configure terminal"]}
+            }))
+            .await;
+        assert_eq!(result["isError"], json!(true));
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("'set ...' or 'delete ...'"), "{text}");
     }
 
     async fn negotiate(requested: Option<&str>) -> Value {
@@ -559,7 +825,7 @@ mod tests {
             .await
             .expect("response");
         let result = &resp["result"];
-        assert!(result["tools"].as_array().is_some_and(|t| t.len() == 8));
+        assert!(result["tools"].as_array().is_some_and(|t| t.len() == 10));
         assert_eq!(result["resultType"], json!("complete"));
         assert_eq!(result["cacheScope"], json!("private"));
         assert!(result["ttlMs"].is_u64());
