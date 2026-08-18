@@ -6,7 +6,9 @@ use tracing::{debug, error, warn};
 
 use super::client::ZebraClient;
 use super::tools::commands::CommandsTool;
+use super::tools::config::ConfigTools;
 use super::tools::isis::IsisTools;
+use super::tools::ontology::OntologyTool;
 use super::tools::ospf::OspfTools;
 use super::tools::show::ShowTool;
 
@@ -86,15 +88,20 @@ pub struct ZmcpServer {
     ospf_tools: OspfTools,
     show_tool: ShowTool,
     commands_tool: CommandsTool,
+    config_tools: ConfigTools,
+    /// Present only when the server was started with `--ontology <path>`;
+    /// the `get-ontology` tool is registered iff this is set.
+    ontology_tool: Option<OntologyTool>,
 }
 
 impl ZmcpServer {
-    pub fn new(base_url: String, port: u32) -> Self {
+    pub fn new(base_url: String, port: u32, ontology_tool: Option<OntologyTool>) -> Self {
         let zebra_client = ZebraClient::new(base_url, port);
         let isis_tools = IsisTools::new(zebra_client.clone());
         let ospf_tools = OspfTools::new(zebra_client.clone());
         let show_tool = ShowTool::new(zebra_client.clone());
         let commands_tool = CommandsTool::new(zebra_client.clone());
+        let config_tools = ConfigTools::new(zebra_client.clone());
 
         Self {
             zebra_client,
@@ -102,6 +109,8 @@ impl ZmcpServer {
             ospf_tools,
             show_tool,
             commands_tool,
+            config_tools,
+            ontology_tool,
         }
     }
 
@@ -239,7 +248,7 @@ impl ZmcpServer {
                     "listChanged": false
                 }
             },
-            "instructions": "Read-only view of a zebra-rs routing daemon. Call list-show-commands to discover the available show commands, then execute them with the show tool.",
+            "instructions": "Interface to a zebra-rs routing daemon. Call list-show-commands to discover the read-only show commands and run them with the show tool. Read the configuration with get-config (format 'formal' is set-line syntax) and change it with apply-config, which validates and commits set/delete lines as one atomic transaction.",
             "ttlMs": CACHE_TTL_MS,
             "cacheScope": "private"
         })
@@ -247,7 +256,52 @@ impl ZmcpServer {
 
     fn tools_list(&self) -> Value {
         debug!("Listing available tools");
-        json!({
+        let mut extra_tools = vec![
+            json!({
+                "name": "get-config",
+                "description": "Get the daemon's running configuration. Format 'formal' (the default) returns one 'set ...' line per node — the same syntax apply-config consumes; 'cli' returns indented configuration blocks; 'json' and 'yaml' return the configuration tree in those serializations.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "format": {
+                            "type": "string",
+                            "enum": ["formal", "cli", "json", "yaml"],
+                            "description": "Serialization of the configuration (default 'formal')."
+                        }
+                    },
+                    "additionalProperties": false
+                }
+            }),
+            json!({
+                "name": "apply-config",
+                "description": "Apply configuration changes and commit them atomically. Each element of 'commands' must be a single 'set ...' or 'delete ...' line in the syntax shown by get-config format 'formal'. The daemon validates and commits all lines as one transaction: on any error nothing is applied and the error detail (including the offending line) is returned, so a failed call is safe to correct and retry.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "commands": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 1,
+                            "description": "Configuration lines, each beginning with 'set ' or 'delete '."
+                        }
+                    },
+                    "required": ["commands"],
+                    "additionalProperties": false
+                }
+            }),
+        ];
+        if self.ontology_tool.is_some() {
+            extra_tools.push(json!({
+                "name": "get-ontology",
+                "description": "Get the operator-provided network ontology as JSON: semantic metadata about the routers (short name, full name, region, ...) that the routing protocols do not carry. Use it to map intent expressed in business terms — regions, sites, jurisdictions — onto the topology.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }
+            }));
+        }
+        let mut result = json!({
             "tools": [
                 {
                     "name": "list-show-commands",
@@ -371,7 +425,12 @@ impl ZmcpServer {
             ],
             "ttlMs": CACHE_TTL_MS,
             "cacheScope": "private"
-        })
+        });
+        result["tools"]
+            .as_array_mut()
+            .expect("tools is an array")
+            .extend(extra_tools);
+        result
     }
 
     pub async fn handle_tool_call(&self, params: Value) -> Value {
@@ -397,6 +456,14 @@ impl ZmcpServer {
             "get-ospf-graph" => self.ospf_tools.get_ospf_graph(arguments).await,
             "get-ospf-spf" => self.ospf_tools.get_ospf_spf(arguments).await,
             "get-ospf-flex-algo" => self.ospf_tools.get_ospf_flex_algo(arguments).await,
+            "get-config" => self.config_tools.get_config(arguments).await,
+            "apply-config" => self.config_tools.apply_config(arguments).await,
+            "get-ontology" => match &self.ontology_tool {
+                Some(tool) => tool.read(),
+                None => Err(anyhow::anyhow!(
+                    "no ontology configured; start the server with 'vtyctl mcp --ontology <path>'"
+                )),
+            },
             _ => {
                 warn!("Unknown tool requested: {}", tool_name);
                 return tool_result(format!("Unknown tool: {}", tool_name), true);
@@ -468,7 +535,21 @@ mod tests {
     use super::*;
 
     fn server() -> ZmcpServer {
-        ZmcpServer::new("127.0.0.1".to_string(), 2650)
+        ZmcpServer::new("127.0.0.1".to_string(), 2650, None)
+    }
+
+    /// A server with the ontology tool wired to a real temp file.
+    fn server_with_ontology() -> (ZmcpServer, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!(
+            "vtyctl-server-ontology-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, r#"[{"name":"tk","region":"AP"}]"#).unwrap();
+        let tool = OntologyTool::new(&path).unwrap();
+        (
+            ZmcpServer::new("127.0.0.1".to_string(), 2650, Some(tool)),
+            path,
+        )
     }
 
     #[tokio::test]
@@ -490,12 +571,63 @@ mod tests {
             "get-ospf-graph",
             "get-ospf-spf",
             "get-ospf-flex-algo",
+            "get-config",
+            "apply-config",
         ] {
             assert!(
                 names.contains(&expected),
                 "missing {expected}; tools: {names:?}"
             );
         }
+        // get-ontology is registered only when --ontology names a file.
+        assert!(!names.contains(&"get-ontology"), "tools: {names:?}");
+    }
+
+    #[tokio::test]
+    async fn ontology_tool_is_listed_and_served_when_configured() {
+        let (server, path) = server_with_ontology();
+        let req = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"});
+        let resp = server.handle_request(req).await.expect("response");
+        let names: Vec<&str> = resp["result"]["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        assert!(names.contains(&"get-ontology"), "tools: {names:?}");
+
+        let result = server
+            .handle_tool_call(json!({"name": "get-ontology", "arguments": {}}))
+            .await;
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(result["isError"], json!(false));
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("\"region\": \"AP\""), "{text}");
+    }
+
+    #[tokio::test]
+    async fn ontology_tool_errors_when_unconfigured() {
+        let result = server()
+            .handle_tool_call(json!({"name": "get-ontology", "arguments": {}}))
+            .await;
+        assert_eq!(result["isError"], json!(true));
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("--ontology"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn apply_config_rejects_bad_lines_before_dialing() {
+        // Client-side validation runs before any gRPC dial, so these fail
+        // fast even with no daemon listening.
+        let result = server()
+            .handle_tool_call(json!({
+                "name": "apply-config",
+                "arguments": {"commands": ["configure terminal"]}
+            }))
+            .await;
+        assert_eq!(result["isError"], json!(true));
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("'set ...' or 'delete ...'"), "{text}");
     }
 
     async fn negotiate(requested: Option<&str>) -> Value {
@@ -559,7 +691,7 @@ mod tests {
             .await
             .expect("response");
         let result = &resp["result"];
-        assert!(result["tools"].as_array().is_some_and(|t| t.len() == 8));
+        assert!(result["tools"].as_array().is_some_and(|t| t.len() == 10));
         assert_eq!(result["resultType"], json!("complete"));
         assert_eq!(result["cacheScope"], json!("private"));
         assert!(result["ttlMs"].is_u64());

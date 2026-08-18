@@ -3,13 +3,15 @@ pub mod server;
 pub mod tools;
 
 use anyhow::Result;
+use std::path::Path;
 use tracing::{debug, error};
 use tracing_subscriber::{self, Registry};
 
 use server::ZmcpServer;
+use tools::ontology::OntologyTool;
 
 /// Run the MCP server
-pub async fn run(host: &str, port: u32, debug_mode: bool) -> Result<()> {
+pub async fn run(host: &str, port: u32, debug_mode: bool, ontology: Option<&str>) -> Result<()> {
     // Initialize tracing - disable all terminal output for MCP compatibility
     // Only enable logging if explicitly requested via RUST_LOG environment variable
     if std::env::var("RUST_LOG").is_ok() || debug_mode {
@@ -35,7 +37,13 @@ pub async fn run(host: &str, port: u32, debug_mode: bool) -> Result<()> {
     // `http(s)://` / `tcp://` URIs are used as-is). Pre-prepending `http://`
     // here would corrupt `unix:` sockets — including the default
     // `unix:zebra-rs/vty` — into the unparseable `http://unix:...`.
-    let server = ZmcpServer::new(host.to_string(), port);
+    // Fail fast on an unreadable or non-JSON ontology file, before the
+    // client sees a server that would break on first get-ontology call.
+    let ontology_tool = ontology
+        .map(|path| OntologyTool::new(Path::new(path)))
+        .transpose()?;
+
+    let server = ZmcpServer::new(host.to_string(), port, ontology_tool);
 
     // Test connection to zebra-rs
     if let Err(e) = server.zebra_client().test_connection().await {
