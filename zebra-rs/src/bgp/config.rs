@@ -7774,6 +7774,67 @@ mod neighbor_group_wiring_tests {
         );
     }
 
+    /// The group-level `afi-safi <family> enabled` statement does the
+    /// same eager label-block warm-up as the per-neighbor one — a
+    /// transit ASBR whose vpnv4 comes entirely from a group opinion
+    /// used to never request a block at all — and with the same
+    /// at-most-one guard: once a block is bound, further statements
+    /// (group or per-peer) must not draw more.
+    #[tokio::test]
+    async fn group_vpnv4_afi_safi_requests_at_most_one_label_block() {
+        let (mut bgp, mut rib_rx) = fresh_bgp_with_rib_rx();
+
+        // First group vpnv4 opinion, no block bound yet: request.
+        config_neighbor_group_afi_safi_enabled(
+            &mut bgp,
+            arg_words(&["G", "vpnv4", "true"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert_eq!(
+            drain_label_block_requests(&mut rib_rx).len(),
+            1,
+            "first group vpnv4 statement must request a label block",
+        );
+
+        // Another group's opinion while the request is outstanding
+        // dedups on the pending flag.
+        config_neighbor_group_afi_safi_enabled(
+            &mut bgp,
+            arg_words(&["H", "vpnv4", "true"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert!(
+            drain_label_block_requests(&mut rib_rx).is_empty(),
+            "a group statement with a request outstanding must not re-request",
+        );
+
+        // After the grant lands, neither a group nor a per-peer vpnv4
+        // statement may draw another block.
+        bgp.process_rib_msg(crate::rib::api::RibRx::LabelBlock {
+            start: 16,
+            size: 1024,
+        });
+        config_neighbor_group_afi_safi_enabled(
+            &mut bgp,
+            arg_words(&["I", "vpnv4", "true"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_afi_safi(
+            &mut bgp,
+            arg_words(&["10.0.0.1", "vpnv4", "true"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert!(
+            drain_label_block_requests(&mut rib_rx).is_empty(),
+            "statements after the grant must not draw another block",
+        );
+    }
+
     /// Deleting one group afi-safi entry (or the whole group) drops
     /// its opinions and the member falls back to the built-in default
     /// plus its own statements.
