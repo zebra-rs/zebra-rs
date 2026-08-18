@@ -164,6 +164,7 @@
 
 - [Native MCP Server](ch-13-00-mcp-server.md)
   - [3D Traffic Path Visualizer](ch-13-01-topology-viewer.md)
+  - [AI-Designed Flex-Algorithm](ch-13-02-flexalgo-ai-demo.md)
 
 ## Logging and Monitoring
 
