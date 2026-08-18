@@ -143,14 +143,34 @@ visually: started against this playset, its Algorithm selector offers only
 
 ## Stage 2: let the AI build the FlexAlgo
 
-The assistant works through the zebra-rs MCP server (`vtyctl mcp`), which
-exposes the lab to Claude Desktop: reading the ontology, extracting each
-router's running configuration (`show running-config formal` — the same
-`set`-line syntax the configuration is applied with), inspecting the IS-IS
-graph, applying and committing configuration, and verifying the result.
-The MCP wiring for configuration apply and the Claude Desktop setup are
-being added to `vtyctl`; this section will grow the exact connector
-configuration and the demo prompt as they land.
+The assistant works through the zebra-rs MCP server. `./mcp.sh` starts it
+in **fleet mode** (`vtyctl mcp --fleet ontology.json`): one stdio server
+fronting all eleven routers, where every tool takes a `router` argument
+and the call is forwarded into that router's network namespace. The
+assistant can read the ontology (`get-ontology`), extract any router's
+running configuration (`get-config`, whose default `formal` format is the
+same `set`-line syntax configuration is applied with), inspect the IS-IS
+graph and SPF (`get-isis-graph`, `get-isis-spf`), and apply and commit
+configuration (`apply-config` — atomic per router: on any error nothing
+is applied and the offending line is returned).
+
+Connect Claude Desktop by adding to `claude_desktop_config.json`:
+
+``` json
+{
+  "mcpServers": {
+    "zebra-fleet": {
+      "command": "/path/to/zebra-rs/playset/isis-flexalgo-ai/mcp.sh"
+    }
+  }
+}
+```
+
+(or `"command": "ssh", "args": ["-T", "user@lab-host", ".../mcp.sh"]`
+when Claude Desktop runs on another machine). The server needs root to
+enter the namespaces and to commit configuration, so grant passwordless
+sudo for the vtyctl binary — the header of `mcp.sh` has the exact
+sudoers line.
 
 The end state to expect is the hand-written playset next door. When the AI
 has done its job:

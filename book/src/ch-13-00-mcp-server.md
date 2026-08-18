@@ -77,6 +77,32 @@ program using MCP as its API — can consume them without scraping CLI text.
 The [3D Traffic Path Visualizer](ch-13-01-topology-viewer.md) is exactly
 that: a web application whose only data plane is these tools.
 
+## One server, a fleet of routers
+
+A lab or a deployment rarely has just one router. When each zebra-rs runs
+in its own network namespace (the playset convention), its VTY endpoint is
+an abstract Unix socket that only exists inside that namespace — so one
+MCP server per router would be the natural but painful shape: eleven
+connector entries for an eleven-node lab.
+
+Fleet mode collapses that to one entry:
+
+``` shell
+$ sudo vtyctl mcp --fleet ontology.json
+```
+
+The JSON file names the routers (each `name` is also its network
+namespace). Every tool then takes a required `router` argument — the
+schema enumerates the valid names — and the server forwards the call to a
+one-shot `vtyctl mcp` spawned inside that router's namespace. The fleet
+file doubles as the ontology, so `get-ontology` (served by the fleet
+server itself, no `router` argument) works out of the box.
+
+The server must run as root: entering namespaces requires it, and so does
+committing configuration through `apply-config` (root sessions hold the
+admin role automatically). Started unprivileged, it goes through
+`sudo -n` for each forwarded call.
+
 ## Current protocol, older clients welcome
 
 The server speaks the stateless [MCP 2026-07-28
