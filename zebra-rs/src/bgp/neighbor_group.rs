@@ -341,6 +341,7 @@ pub fn config_neighbor_group_afi_safi_enabled(
     let name = args.string()?;
     let family: AfiSafi = args.afi_safi()?;
     let group = bgp.neighbor_groups.entry(name.clone()).or_default();
+    let mut label_block_needed = false;
     match op {
         ConfigOp::Set => {
             let enabled = args.boolean()?;
@@ -348,6 +349,7 @@ pub fn config_neighbor_group_afi_safi_enabled(
             for fam in mp_family_expand(family) {
                 group.afi_safi.entry(fam).or_default().enabled = enabled;
             }
+            label_block_needed = enabled && matches!(family.safi, Safi::MplsLabel | Safi::MplsVpn);
         }
         ConfigOp::Delete => {
             // `enabled` is the entry's mandatory core: dropping it
@@ -359,6 +361,14 @@ pub fn config_neighbor_group_afi_safi_enabled(
             }
         }
         _ => return Some(()),
+    }
+    // Enabling a Labeled-Unicast or VPN family on the group needs the
+    // same dynamic label-block warm-up as the per-neighbor statement
+    // (`config_afi_safi`): a transit ASBR whose vpnv4 comes entirely
+    // from a group opinion would otherwise never request a block. Same
+    // guard — ask only while no block is bound yet.
+    if label_block_needed && bgp.vrf_label_alloc.is_none() {
+        bgp.request_label_block();
     }
     sweep_group_afi_safi(bgp, &name);
     Some(())
