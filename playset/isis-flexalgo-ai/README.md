@@ -143,6 +143,8 @@ visually: started against this playset, its Algorithm selector offers only
 
 ## Stage 2: let the AI build the FlexAlgo
 
+### The wiring
+
 The assistant works through the zebra-rs MCP server. `./mcp.sh` starts it
 in **fleet mode** (`vtyctl mcp --fleet ontology.json`): one stdio server
 fronting all eleven routers, where every tool takes a `router` argument
@@ -172,8 +174,71 @@ enter the namespaces and to commit configuration, so grant passwordless
 sudo for the vtyctl binary — the header of `mcp.sh` has the exact
 sudoers line.
 
-The end state to expect is the hand-written playset next door. When the AI
-has done its job:
+### The prompt
+
+The point of the demo is that the operator supplies *intent*, not
+configuration — but a live demo also wants a predictable arc, so the
+recommended prompt states the goal, names the mechanism, and leaves every
+interesting decision (which links, which interfaces, which SID indexes,
+what to put on each of the eleven routers) to the assistant:
+
+> You are operating a network lab through the zebra-fleet MCP server: an
+> eleven-router IS-IS + SR-MPLS backbone. `get-ontology` tells you each
+> router's name, full name and region.
+>
+> New compliance requirement: a class of constrained traffic must never
+> cross a trans-Pacific link — between the US and AP regions this
+> traffic has to travel the other way around, via Europe.
+>
+> Implement this with an IS-IS Flexible Algorithm (algorithm 128, IGP
+> metric, SR-MPLS data plane):
+>
+> 1. Work out from the ontology and the live IS-IS topology which links
+>    cross the Pacific. Do not ask me — derive it.
+> 2. Extract the running configuration of the routers and generate the
+>    changes: a shared affinity-map, coloring on both ends of each
+>    trans-Pacific link, the algorithm definition with its constraint
+>    (advertised by at least two routers), and a second loopback
+>    prefix-SID per router for algorithm 128 that does not collide with
+>    the existing SID indexes.
+> 3. Apply and commit the changes on every router with `apply-config`.
+> 4. Verify your own work: all eleven routers must participate in
+>    algorithm 128, and Tokyo must reach Seattle without touching a
+>    trans-Pacific link. Show me Tokyo's algorithm-128 paths before you
+>    declare success.
+
+For a braver run, compress it to pure intent and watch the assistant
+work out the rest itself:
+
+> Constrained traffic may not cross trans-Pacific links. Design and
+> deploy an IS-IS Flex-Algorithm on every router of this lab that
+> enforces it, then prove it worked.
+
+### What to watch
+
+The tool-call stream in Claude Desktop *is* the demo. The expected arc:
+
+1. `get-ontology` — the assistant learns `se..at` are US, `ln`/`fr` are
+   EU, `sg`/`sy`/`tk` are AP.
+2. `get-isis-graph` on some router — seventeen links; exactly three
+   connect a US name to an AP name: `se–sg`, `sj–tk`, `sj–sy`.
+3. `get-config` per router — current interface names and the algorithm-0
+   SID indexes 100..1100 (so a disjoint block, e.g. +2000, is needed).
+4. `apply-config` — eleven calls, one atomic commit per router:
+   affinity-map, `affinity trans-pacific` on both ends of the three
+   links, the `flex-algo 128` definition with `exclude-any`, and a
+   `flex-algo-prefix-sid` per loopback. A wrong line costs nothing:
+   the whole batch is discarded and the error names the offending
+   line, so the assistant corrects itself and retries.
+5. `get-isis-flex-algo` / `get-isis-spf algorithm=128` — self-check:
+   participation `[0, 128]` on all eleven, and Tokyo's constrained
+   paths run through Singapore and Frankfurt.
+
+IS-IS floods and converges within a few seconds of the last commit.
+
+### Check the result yourself
+
+The end state to expect is the hand-written playset next door:
 
 ``` shell
 tk>show isis flex-algo
@@ -188,9 +253,30 @@ tk>show isis flex-algo 128 route
 must show **every** US destination leaving Tokyo via `tk-sg` (Singapore)
 — the long way round through Asia and Europe — while `show ip route`
 keeps using the direct Pacific crossing. The
-[isis-flexalgo README](../isis-flexalgo/README.md) walks through all of
-the verification detail, down to pushing the algorithm-128 label and
-proving the path with TTLs.
+[3D topology viewer](../../ai/topology/README.md) shows the same moment
+visually: refresh it and the Algorithm selector now offers
+`128 — exclude-any: trans-pacific`; select it and the Tokyo-to-Seattle
+path swings the long way around the globe. For the deepest proof — real
+packets steered by the algorithm-128 label, verified hop by hop with
+TTLs — follow the
+[isis-flexalgo README](../isis-flexalgo/README.md), whose walkthrough
+applies verbatim once the AI has built the same configuration.
+
+### Encore, and resetting
+
+Two follow-ups that make good encores, both pure prompt work:
+
+* *"Now remove everything you added and prove the network is back to
+  algorithm 0 only."* — configuration delete through the same
+  `apply-config`, and the cleanest way to reset between runs.
+* *"Add algorithm 129 that must **stay on** trans-Pacific links
+  (include-any) with its own SID block."* — a second constraint class
+  over the same links.
+
+For a guaranteed clean slate, `./down.sh && ./up.sh` rebuilds the
+baseline from the yaml files in a few seconds — nothing the assistant
+commits survives a restart, because the daemons load their startup
+configuration from `<node>.yaml`.
 
 ``` shell
 $ ./down.sh

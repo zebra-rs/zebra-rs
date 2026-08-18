@@ -103,6 +103,11 @@ committing configuration through `apply-config` (root sessions hold the
 admin role automatically). Started unprivileged, it goes through
 `sudo -n` for each forwarded call.
 
+Fleet mode plus the configuration tools is what powers the
+[AI-Designed Flex-Algorithm](ch-13-02-flexalgo-ai-demo.md) demonstration:
+one Claude Desktop connector, eleven routers, and a single sentence of
+intent turned into committed configuration.
+
 ## Current protocol, older clients welcome
 
 The server speaks the stateless [MCP 2026-07-28
