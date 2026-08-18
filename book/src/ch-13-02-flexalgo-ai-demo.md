@@ -55,6 +55,13 @@ One connector entry gives the assistant the whole lab. The playset's
 }
 ```
 
+When Claude Desktop runs on a different machine than the lab — a Mac in
+front of a Linux VM, say — the same connector rides over ssh, which
+carries the MCP stdio stream unchanged (`"command": "ssh"` with args
+`-T -o BatchMode=yes user@lab-host .../mcp.sh`); the
+[playset README](https://github.com/zebra-rs/zebra-rs/tree/main/playset/isis-flexalgo-ai#the-wiring)
+has the full recipe.
+
 Every tool takes a `router` argument; `apply-config` commits each
 router's changes as one atomic transaction, and a rejected line costs
 nothing — the daemon reports it, and the assistant corrects itself.

@@ -13,10 +13,13 @@
 #     }
 #   }
 #
-# If Claude Desktop runs on another machine, wrap it in ssh instead:
+# If Claude Desktop runs on another machine (e.g. a Mac), wrap it in
+# ssh instead — key-based auth required, BatchMode makes a missing key
+# fail fast instead of hanging on a password prompt:
 #
 #   "command": "ssh",
-#   "args": ["-T", "user@lab-host", "/path/to/.../mcp.sh"]
+#   "args": ["-T", "-o", "BatchMode=yes", "user@lab-host",
+#            "/path/to/.../mcp.sh"]
 #
 # The server runs as root (it must enter the routers' namespaces, and
 # committing configuration requires an admin session, which root holds

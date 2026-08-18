@@ -156,7 +156,8 @@ graph and SPF (`get-isis-graph`, `get-isis-spf`), and apply and commit
 configuration (`apply-config` — atomic per router: on any error nothing
 is applied and the offending line is returned).
 
-Connect Claude Desktop by adding to `claude_desktop_config.json`:
+When Claude Desktop runs **on the lab host itself**, connect it by
+adding to `claude_desktop_config.json`:
 
 ``` json
 {
@@ -168,11 +169,40 @@ Connect Claude Desktop by adding to `claude_desktop_config.json`:
 }
 ```
 
-(or `"command": "ssh", "args": ["-T", "user@lab-host", ".../mcp.sh"]`
-when Claude Desktop runs on another machine). The server needs root to
+When it runs **on another machine** — the typical case: Claude Desktop
+on a Mac, the lab in a Linux VM or server — bridge the connector over
+ssh, which carries the MCP stdio stream unchanged:
+
+``` json
+{
+  "mcpServers": {
+    "zebra-fleet": {
+      "command": "ssh",
+      "args": [
+        "-T",
+        "-o", "BatchMode=yes",
+        "user@lab-host",
+        "/path/to/zebra-rs/playset/isis-flexalgo-ai/mcp.sh"
+      ]
+    }
+  }
+}
+```
+
+On macOS the config file is
+`~/Library/Application Support/Claude/claude_desktop_config.json`;
+restart Claude Desktop after editing it, and the `zebra-fleet` server
+with its tools appears under the connectors. `-T` keeps the channel a
+plain pipe rather than a terminal, and `BatchMode=yes` makes ssh fail
+fast instead of hanging on a password prompt — so authentication must
+be by key (the usual `ssh-copy-id` setup).
+
+Two requirements on the lab host either way: the server needs root to
 enter the namespaces and to commit configuration, so grant passwordless
-sudo for the vtyctl binary — the header of `mcp.sh` has the exact
-sudoers line.
+sudo for the vtyctl binary (the header of `mcp.sh` has the exact
+sudoers line), and for the ssh variant its sshd must be reachable from
+the Desktop machine. The connector starts even while the lab is down —
+tool calls simply return errors until `./up.sh` has run.
 
 ### The prompt
 
