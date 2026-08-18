@@ -1,0 +1,36 @@
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.7/32
+- if-name: ln-ch
+  ipv4:
+    address: 192.168.9.2/24
+- if-name: ln-fr
+  ipv4:
+    address: 192.168.13.1/24
+system:
+  hostname: ln
+router:
+  isis:
+    net: 49.0000.0000.0000.0007.00
+    hostname: ln
+    is-type: level-2-only
+    segment-routing:
+      mpls: {}
+    te-router-id: 10.0.0.7
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+        prefix-sid:
+          index: 700
+    - if-name: ln-ch
+      network-type: point-to-point
+      ipv4:
+        enabled: true
+      metric: 10
+    - if-name: ln-fr
+      network-type: point-to-point
+      ipv4:
+        enabled: true
+      metric: 10

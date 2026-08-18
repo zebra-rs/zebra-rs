@@ -1,0 +1,36 @@
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.11/32
+- if-name: tk-sj
+  ipv4:
+    address: 192.168.6.2/24
+- if-name: tk-sg
+  ipv4:
+    address: 192.168.15.2/24
+system:
+  hostname: tk
+router:
+  isis:
+    net: 49.0000.0000.0000.0011.00
+    hostname: tk
+    is-type: level-2-only
+    segment-routing:
+      mpls: {}
+    te-router-id: 10.0.0.11
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+        prefix-sid:
+          index: 1100
+    - if-name: tk-sj
+      network-type: point-to-point
+      ipv4:
+        enabled: true
+      metric: 10
+    - if-name: tk-sg
+      network-type: point-to-point
+      ipv4:
+        enabled: true
+      metric: 10

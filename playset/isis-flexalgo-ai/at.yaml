@@ -1,0 +1,36 @@
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.6/32
+- if-name: at-da
+  ipv4:
+    address: 192.168.10.2/24
+- if-name: at-va
+  ipv4:
+    address: 192.168.11.2/24
+system:
+  hostname: at
+router:
+  isis:
+    net: 49.0000.0000.0000.0006.00
+    hostname: at
+    is-type: level-2-only
+    segment-routing:
+      mpls: {}
+    te-router-id: 10.0.0.6
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+        prefix-sid:
+          index: 600
+    - if-name: at-da
+      network-type: point-to-point
+      ipv4:
+        enabled: true
+      metric: 10
+    - if-name: at-va
+      network-type: point-to-point
+      ipv4:
+        enabled: true
+      metric: 10
