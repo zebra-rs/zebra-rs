@@ -1639,7 +1639,14 @@ fn config_afi_safi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
             .tx
             .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
     }
-    if label_block_needed {
+    // Only ask while no block is bound yet: `request_label_block`'s
+    // pending flag clears on each grant, so an unguarded per-statement
+    // request draws one unused 1024-label block per vpnv4/LU neighbor
+    // statement — a route reflector with a few thousand clients drains
+    // the RIB's entire dynamic pool during config load. Once a block is
+    // bound, the on-demand paths (`alloc_vrf_label`, `evi_reconcile`)
+    // grow it when the labels are actually spent.
+    if label_block_needed && bgp.vrf_label_alloc.is_none() {
         bgp.request_label_block();
     }
     Some(())
@@ -6366,6 +6373,45 @@ mod neighbor_group_wiring_tests {
         IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))
     }
 
+    /// Like [`fresh_bgp`], but keeps the receiving half of the RIB
+    /// message channel so the test can observe what the instance sends
+    /// to the RIB (e.g. `Message::LabelBlockRequest`).
+    fn fresh_bgp_with_rib_rx() -> (Bgp, mpsc::UnboundedReceiver<crate::rib::Message>) {
+        let (ctx, rib_rx) = test_ctx();
+        let (policy_tx, _policy_rx) = mpsc::unbounded_channel();
+        Box::leak(Box::new(_policy_rx));
+        let (rib_tx, rib_msg_rx) = mpsc::unbounded_channel();
+        let (rib_inbound_tx, _inbound_rx) = mpsc::unbounded_channel();
+        Box::leak(Box::new(_inbound_rx));
+        let next_proto_id = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(1));
+        let subscriber =
+            crate::config::RibSubscriber::for_test(rib_tx, rib_inbound_tx, next_proto_id);
+        let bgp = Bgp::new(
+            ctx,
+            rib_rx,
+            subscriber,
+            policy_tx,
+            None,
+            None,
+            tokio::sync::mpsc::channel(1).0,
+        );
+        (bgp, rib_msg_rx)
+    }
+
+    /// Drain the RIB message channel, returning the size of every
+    /// queued `Message::LabelBlockRequest`. Other messages are ignored.
+    fn drain_label_block_requests(
+        rx: &mut mpsc::UnboundedReceiver<crate::rib::Message>,
+    ) -> Vec<u32> {
+        let mut out = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let crate::rib::Message::LabelBlockRequest { size, .. } = msg {
+                out.push(size);
+            }
+        }
+        out
+    }
+
     /// Drain `bgp.rx`, returning the peer-ident of every queued
     /// `Event::Stop`. Other event variants are ignored.
     fn drain_stop_events(bgp: &mut Bgp) -> Vec<usize> {
@@ -7666,6 +7712,66 @@ mod neighbor_group_wiring_tests {
                 "{fam}: re-enabling on an Established peer must bounce",
             );
         }
+    }
+
+    /// Enabling a VPN / Labeled-Unicast family eagerly requests one
+    /// dynamic label block — and exactly one. Regression: a
+    /// route-reflector config with thousands of `afi-safi vpnv4
+    /// enabled` neighbor statements sent one request per statement
+    /// (the pending flag clears whenever a grant lands between
+    /// statements), draining the RIB's entire dynamic pool during
+    /// config load ("label block request: dynamic pool exhausted").
+    #[tokio::test]
+    async fn vpnv4_afi_safi_requests_at_most_one_label_block() {
+        let (mut bgp, mut rib_rx) = fresh_bgp_with_rib_rx();
+
+        // First vpnv4 statement, no block bound yet: the eager request
+        // (the transit-ASBR Option B/C warm-up) must go out.
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_afi_safi(
+            &mut bgp,
+            arg_words(&["10.0.0.1", "vpnv4", "true"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert_eq!(
+            drain_label_block_requests(&mut rib_rx).len(),
+            1,
+            "first vpnv4 statement must request a label block",
+        );
+
+        // Further statements while that request is outstanding dedup on
+        // the pending flag.
+        config_peer(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
+        config_afi_safi(
+            &mut bgp,
+            arg_words(&["10.0.0.2", "vpnv4", "true"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert!(
+            drain_label_block_requests(&mut rib_rx).is_empty(),
+            "a statement with a request outstanding must not re-request",
+        );
+
+        // The grant lands, clearing the pending flag. Statements after
+        // it see the bound allocator and must stay quiet — this is the
+        // request-per-statement loop that exhausted the pool.
+        bgp.process_rib_msg(crate::rib::api::RibRx::LabelBlock {
+            start: 16,
+            size: 1024,
+        });
+        config_peer(&mut bgp, arg_words(&["10.0.0.3"]), ConfigOp::Set).unwrap();
+        config_afi_safi(
+            &mut bgp,
+            arg_words(&["10.0.0.3", "vpnv4", "true"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert!(
+            drain_label_block_requests(&mut rib_rx).is_empty(),
+            "a statement after the grant must not draw another block",
+        );
     }
 
     /// Deleting one group afi-safi entry (or the whole group) drops
