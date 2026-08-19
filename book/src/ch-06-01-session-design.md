@@ -90,6 +90,12 @@ The daemon owns a `SessionTable` keyed by `(peer_uid, parent_pid)`.
 Both components are derived from the kernel (`SO_PEERCRED` plus
 `/proc/{peer_pid}/status`), never from client-supplied data.
 
+Sessions therefore exist only for Unix-socket peers — abstract and
+filesystem sockets deliver `SO_PEERCRED` identically. A TCP peer has
+no kernel credentials, gets no session, and every role-gated RPC
+(`enable`, `configure`, `apply`) is refused with `no session`, root
+included; TCP is effectively limited to `show` and completion.
+
 ## Session key derivation
 
 For every incoming gRPC request the daemon resolves a session key:
@@ -310,9 +316,13 @@ Container deployments require either:
 - daemon and client in the same container, or
 - `--pid host` to share the host's PID namespace.
 
-A daemon in container A cannot serve a client in container B: the
-abstract Unix socket is also netns-scoped, so the connection cannot
-even be established.
+A daemon in container A cannot serve a client in container B over the
+default transport: the abstract Unix socket is netns-scoped, so the
+connection cannot even be established. A filesystem socket
+(`--vty-socket unix:/PATH`) bind-mounted into both containers *does*
+connect — but the PID-namespace requirement still applies, so without
+a shared PID namespace the daemon sees `peer_pid == 0` and rejects the
+request.
 
 When `SO_PEERCRED` returns `peer_pid == 0`, the peer is not visible
 in the daemon's PID namespace; the connection is rejected with

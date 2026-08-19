@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::{mpsc, oneshot};
@@ -585,11 +586,13 @@ impl Apply for ApplyService {
 ///
 /// `AbstractUds` uses a Linux abstract Unix socket whose name is scoped by the
 /// process network namespace, which is the isolation primitive we rely on for
-/// per-netns zebra-rs deployments.
+/// per-netns zebra-rs deployments. `Uds` binds a filesystem socket at the
+/// given absolute path instead.
 #[derive(Debug, Clone)]
 pub enum VtyAddr {
     Tcp(SocketAddr),
     AbstractUds(String),
+    Uds(PathBuf),
 }
 
 impl VtyAddr {
@@ -601,11 +604,22 @@ impl VtyAddr {
             return Ok(Self::Tcp(addr));
         }
         if let Some(rest) = s.strip_prefix("unix:") {
-            let name = rest.trim_start_matches('@').to_string();
-            if name.is_empty() {
+            // `unix:@NAME` is explicitly abstract, `unix:/PATH` binds a
+            // filesystem socket, and bare `unix:NAME` stays an abstract
+            // name (the historical default).
+            if let Some(name) = rest.strip_prefix('@') {
+                if name.is_empty() {
+                    anyhow::bail!("unix name must be non-empty");
+                }
+                return Ok(Self::AbstractUds(name.to_string()));
+            }
+            if rest.starts_with('/') {
+                return Ok(Self::Uds(PathBuf::from(rest)));
+            }
+            if rest.is_empty() {
                 anyhow::bail!("unix name must be non-empty");
             }
-            return Ok(Self::AbstractUds(name));
+            return Ok(Self::AbstractUds(rest.to_string()));
         }
         anyhow::bail!("--vty-socket must start with 'tcp:' or 'unix:'");
     }
@@ -862,6 +876,11 @@ pub fn serve(cli: Cli, addr: VtyAddr) -> anyhow::Result<()> {
             tracing::debug!("VTY gRPC listening on abstract UDS @{name}");
             tokio::spawn(async move { builder.serve_with_incoming(incoming).await });
         }
+        VtyAddr::Uds(path) => {
+            let incoming = bind_path_uds(&path)?;
+            tracing::debug!("VTY gRPC listening on UDS {}", path.display());
+            tokio::spawn(async move { builder.serve_with_incoming(incoming).await });
+        }
     }
     Ok(())
 }
@@ -898,9 +917,86 @@ fn bind_abstract_uds(name: &str) -> anyhow::Result<tokio_stream::wrappers::UnixL
     Ok(UnixListenerStream::new(listener))
 }
 
+fn bind_path_uds(
+    path: &std::path::Path,
+) -> anyhow::Result<tokio_stream::wrappers::UnixListenerStream> {
+    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+    use std::os::unix::net::{UnixListener as StdUnixListener, UnixStream as StdUnixStream};
+    use tokio::net::UnixListener;
+    use tokio_stream::wrappers::UnixListenerStream;
+
+    let disp = path.display();
+
+    // A filesystem socket outlives its daemon, so distinguish a stale
+    // leftover (unlink and rebind) from a live one — abstract sockets get
+    // this for free as EADDRINUSE, and quietly stealing the path from a
+    // running daemon must stay just as impossible here.
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_socket() => {
+            if StdUnixStream::connect(path).is_ok() {
+                anyhow::bail!(
+                    "VTY socket {disp} is already in use.\n\
+                     Another zebra-rs daemon is likely listening on it.",
+                );
+            }
+            std::fs::remove_file(path)
+                .map_err(|e| anyhow::anyhow!("remove stale VTY socket {disp}: {e}"))?;
+        }
+        Ok(_) => anyhow::bail!("VTY socket path {disp} exists and is not a socket"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(anyhow::anyhow!("stat VTY socket path {disp}: {e}")),
+    }
+
+    let std_listener = StdUnixListener::bind(path)
+        .map_err(|e| anyhow::anyhow!("failed to bind VTY socket {disp}: {e}"))?;
+
+    // Authorization is per-RPC via SO_PEERCRED roles, matching the abstract
+    // socket, which has no filesystem permission check at all — so open the
+    // socket file to all local users; restrict via the parent directory
+    // where a tighter policy is wanted.
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666))
+        .map_err(|e| anyhow::anyhow!("set permissions on VTY socket {disp}: {e}"))?;
+
+    std_listener
+        .set_nonblocking(true)
+        .map_err(|e| anyhow::anyhow!("set_nonblocking on VTY socket {disp}: {e}"))?;
+    let listener = UnixListener::from_std(std_listener)
+        .map_err(|e| anyhow::anyhow!("register VTY socket {disp} with tokio: {e}"))?;
+    Ok(UnixListenerStream::new(listener))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vty_addr_parse_recognizes_all_forms() {
+        assert!(matches!(
+            VtyAddr::parse("tcp:127.0.0.1:2666"),
+            Ok(VtyAddr::Tcp(_))
+        ));
+        match VtyAddr::parse("unix:zebra-rs/vty").unwrap() {
+            VtyAddr::AbstractUds(name) => assert_eq!(name, "zebra-rs/vty"),
+            other => panic!("expected abstract, got {other:?}"),
+        }
+        match VtyAddr::parse("unix:@zebra-rs/vty").unwrap() {
+            VtyAddr::AbstractUds(name) => assert_eq!(name, "zebra-rs/vty"),
+            other => panic!("expected abstract, got {other:?}"),
+        }
+        match VtyAddr::parse("unix:/tmp/zebra-rs").unwrap() {
+            VtyAddr::Uds(path) => assert_eq!(path, PathBuf::from("/tmp/zebra-rs")),
+            other => panic!("expected filesystem UDS, got {other:?}"),
+        }
+        // An explicit `@` wins even when the name looks like a path.
+        match VtyAddr::parse("unix:@/tmp/zebra-rs").unwrap() {
+            VtyAddr::AbstractUds(name) => assert_eq!(name, "/tmp/zebra-rs"),
+            other => panic!("expected abstract, got {other:?}"),
+        }
+        assert!(VtyAddr::parse("unix:").is_err());
+        assert!(VtyAddr::parse("unix:@").is_err());
+        assert!(VtyAddr::parse("bogus").is_err());
+        assert!(VtyAddr::parse("tcp:nonsense").is_err());
+    }
 
     #[tokio::test]
     async fn forward_show_stream_passes_items_through() {

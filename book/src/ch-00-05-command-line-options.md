@@ -16,7 +16,7 @@ this chapter explains what each option does and how they interact.
 | `--log-format` | | `terminal \| json \| elasticsearch` | `terminal` | Log record serialization |
 | `--no-nhid` | | — | off | Embed nexthops in routes instead of using nexthop IDs (kernels < 5.3) |
 | `--pid-file` | | `PATH` | `/var/run/zebra-rs.pid` (daemon mode) | Write the process ID to this file |
-| `--vty-socket` | | `unix:NAME \| tcp:HOST:PORT` | `unix:zebra-rs/vty` | Management (VTY gRPC) listen address |
+| `--vty-socket` | | `unix:NAME \| unix:/PATH \| tcp:HOST:PORT` | `unix:zebra-rs/vty` | Management (VTY gRPC) listen address |
 
 ## `-c`, `--config-file FILENAME`
 
@@ -123,10 +123,15 @@ managers and for the test harness to locate and stop the daemon. In
 ## `--vty-socket ADDRESS`
 
 Sets the address the management interface (the VTY gRPC server that
-`vtyctl` connects to) listens on. Two forms are accepted:
+`vtyctl` connects to) listens on. Three forms are accepted:
 
 - `unix:NAME` — a Linux abstract unix-domain socket (the default,
   `unix:zebra-rs/vty`).
+- `unix:/PATH` — a filesystem unix-domain socket; a name starting with
+  `/` selects this form. A stale socket file left by a dead daemon is
+  removed and rebound; a live one refuses startup, matching the
+  abstract socket's `EADDRINUSE`. `unix:@NAME` forces the abstract
+  interpretation even when NAME starts with `/`.
 - `tcp:HOST:PORT` — a TCP endpoint.
 
 Running several daemons on one host — for example in test namespaces —

@@ -19,6 +19,7 @@ programmatic or remote access.
 | Transport | URI form | When to use |
 |---|---|---|
 | Abstract Unix socket (default) | `unix:NAME` | Local management; per-netns isolation |
+| Filesystem Unix socket | `unix:/PATH` | Local management; visible socket file, container bind-mounts |
 | TCP | `tcp:HOST:PORT` | Remote/programmatic access (opt-in) |
 
 ### Abstract Unix sockets
@@ -43,11 +44,33 @@ Two zebra-rs instances in the same netns trying to bind the same
 abstract name produces `EADDRINUSE` — this is a configuration error
 and the second daemon fails to start.
 
+### Filesystem Unix sockets
+
+A `unix:` name starting with `/` binds a socket file at that path
+instead (e.g. `unix:/tmp/zebra-rs`). Unlike abstract sockets the file
+outlives the daemon, so startup distinguishes leftovers from live
+listeners: a stale socket file is silently removed and rebound, a path
+with a live daemon behind it refuses startup (the `EADDRINUSE`
+equivalent), and a path occupied by a non-socket file is never touched.
+
+The socket file is created world-connectable (mode `0666`): the
+authorization model is per-RPC via `SO_PEERCRED` roles, exactly as on
+the abstract socket, which has no filesystem permission check at all.
+Place the socket in a restricted directory when connect-level
+gating is wanted. `unix:@NAME` forces the abstract interpretation even
+when the name starts with `/`.
+
 ### TCP
 
 TCP has no transport-level authentication: anyone who can reach the
 port can issue commands. Use it only on a trusted management network
 or behind a firewall.
+
+The role model depends on `SO_PEERCRED`, which only Unix sockets
+provide, so TCP peers get no session at all: `show` and completion
+work, but `enable`, `configure`, and `apply` are refused with
+`no session` — even for root. Configuration changes require one of
+the Unix socket transports.
 
 ## Server: `zebra-rs --vty-socket`
 
@@ -56,6 +79,8 @@ or behind a firewall.
     VTY gRPC listen address.
     Forms:
       unix:NAME           Linux abstract Unix socket (default)
+      unix:/PATH          filesystem Unix socket
+      unix:@NAME          explicitly abstract, even when NAME starts with /
       tcp:HOST:PORT       TCP listener
     Default: unix:zebra-rs/vty
 ```
@@ -70,6 +95,9 @@ zebra-rs
 ip netns exec vrf-red  zebra-rs &
 ip netns exec vrf-blue zebra-rs &
 
+# Filesystem socket
+zebra-rs --vty-socket unix:/tmp/zebra-rs
+
 # Legacy TCP behavior
 zebra-rs --vty-socket tcp:0.0.0.0:2666
 ```
@@ -78,9 +106,18 @@ zebra-rs --vty-socket tcp:0.0.0.0:2666
 
 ### `vty` (interactive shell)
 
-`vty` invokes `vtyhelper` with no explicit endpoint, so it inherits
-the default `unix:zebra-rs/vty`. To talk to a TCP-mode daemon, export
-`CLI_SERVER_URL` before launching the shell:
+`vty` accepts the daemon's `--vty-socket` syntax directly; the value is
+consumed before bash's own option parsing and exported as
+`CLI_SERVER_URL` for every `vtyhelper` invocation the shell makes:
+
+```bash
+vty --vty-socket unix:my-zebra/vty          # non-default abstract name
+vty --vty-socket unix:/tmp/zebra-rs         # filesystem socket
+vty --vty-socket tcp:router.example.com:2666
+```
+
+Exporting `CLI_SERVER_URL` before launching the shell still works, and
+an explicit `--vty-socket` wins over an inherited `CLI_SERVER_URL`:
 
 ```bash
 CLI_SERVER_URL=tcp://router.example.com:2666 vty
@@ -94,20 +131,23 @@ CLI_SERVER_URL=tcp://router.example.com:2666 vty
 | `--port <PORT>` | `2666` | Used only with bare-host `--base` for back-compat |
 | `CLI_SERVER_URL` | (unset) | Environment override for `--base` |
 
-`--base` accepts `unix:NAME`, `tcp://host:port`, `http://host:port`,
-or a bare `http://host` prefix that is combined with `--port` (the
-historical form).
+`--base` accepts `unix:NAME`, `unix:/PATH`, `tcp:host:port`,
+`tcp://host:port`, `http://host:port`, or a bare `http://host` prefix
+that is combined with `--port` (the historical form).
 
 ### `vtyctl`
 
 | Option | Default | Notes |
 |---|---|---|
-| `--host <URI>` | `unix:zebra-rs/vty` | Server endpoint URI |
+| `--vty-socket <URI>` | `unix:zebra-rs/vty` | Global; usable before or after the subcommand |
+| `--host <URI>` (per subcommand) | — | Back-compat override; wins over `--vty-socket` |
 
-`--host` accepts:
+Both accept:
 
 - `unix:NAME` — abstract Unix socket
-- `tcp://host:port`, `http://host:port` — TCP
+- `unix:/PATH` — filesystem Unix socket
+- `unix:@NAME` — explicitly abstract, even when NAME starts with `/`
+- `tcp:host:port`, `tcp://host:port`, `http://host:port` — TCP
 - bare hostname (e.g. `127.0.0.1`) — combined with `:2666` as TCP
 
 Examples:
@@ -118,6 +158,11 @@ vtyctl show 'show ip route'
 
 # Inside a netns
 ip netns exec vrf-red vtyctl show 'show ip route'
+
+# Filesystem socket, daemon syntax — flag valid on either side
+# of the subcommand
+vtyctl --vty-socket unix:/tmp/zebra-rs show 'show ip route'
+vtyctl show --vty-socket unix:/tmp/zebra-rs 'show ip route'
 
 # Remote TCP
 vtyctl show --host tcp://router.example.com:2666 'show bgp'
