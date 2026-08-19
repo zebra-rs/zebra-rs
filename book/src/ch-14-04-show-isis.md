@@ -194,28 +194,37 @@ JSON: `{ local, received_mirror_sids, received_context_labels }`.
 
 ## Segment Routing — Flexible Algorithm
 
-### `show isis flex-algo`
+### `show isis flex-algo [<128-255>]`
 
 The Flexible Algorithm state (RFC 9350): the locally-configured
 algorithms and their SRv6 locator bindings, plus the FADs, algorithms,
-and SRv6 locators received from peers, per level.
+and SRv6 locators received from peers, per level. Adding an algorithm
+id narrows the view to that algorithm — the FAD table keeps only its
+row and the participation list keeps only the peers that run it. See
+[Flexible Algorithm (Flex-Algo)](ch-07-11-isis-flexalgo.md) for the
+configuration side and the healthy-output signatures.
 
 JSON: `{ area, local_algorithms, local_srv6_locators, levels }`.
 
-### `show isis flex-algo route [algorithm <id>]`
+### `show isis flex-algo <128-255> { route | topology | spf | graph | repair-list }`
 
-The per-algorithm routing tables — IPv4 (SR-MPLS) and IPv6 (SRv6
-locator) — grouped by level and algorithm. Add `algorithm <id>` to
-filter to a single algorithm (0–255).
+The per-algorithm twins of `show isis route|topology|spf|graph|repair-list`
+(which remain algorithm-0 views): the algorithm's own routing table,
+SPF tree, FRR-style topology table, FAD-pruned link-state graph, and
+TI-LFA repair list.
 
 ```
-r1> show isis flex-algo route algorithm 128
+r1> show isis flex-algo 128 route
 Level-1 Algorithm 128:
   Prefix        Metric  Interface  Nexthop    Label
   192.0.2.0/24      10  eth0       192.0.2.1  16128
 ```
 
-JSON: `{ area, groups: [ { level, algorithm, family, routes } ] }`.
+`show isis flex-algo route` without an id dumps every algorithm's RIB
+at once. The older spelling `show isis flex-algo route algorithm <id>`
+still parses but is a deprecated alias kept for existing scripts.
+
+Route-view JSON: `{ area, groups: [ { level, algorithm, family, routes } ] }`.
 
 ## Graceful Restart
 

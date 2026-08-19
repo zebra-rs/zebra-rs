@@ -78,6 +78,7 @@
   - [Egress Protection (Mirror SID)](ch-07-08-isis-egress-protection.md)
   - [Conditional Tracing](ch-07-09-isis-tracing.md)
   - [Hello Padding and MTU](ch-07-10-isis-hello-padding.md)
+  - [Flexible Algorithm (Flex-Algo)](ch-07-11-isis-flexalgo.md)
 - [OSPFv2](ch-08-00-ospf.md)
   - [Minimum Working Example](ch-08-04-ospf-minimum-working-example.md)
   - [Area Configuration](ch-08-05-ospf-area-configuration.md)

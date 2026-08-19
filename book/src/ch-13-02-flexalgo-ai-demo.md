@@ -21,6 +21,9 @@ IS-IS graph, read each router's running configuration to find interface
 names and an unused SID index block, author the four configuration parts
 (affinity-map, link coloring, the algorithm definition, per-loopback
 algorithm SIDs), commit them router by router, and prove the result.
+The configuration it must produce — the four parts, their exact
+`set`-line syntax, and the consistency rules they have to satisfy — is
+documented in [Flexible Algorithm (Flex-Algo)](ch-07-11-isis-flexalgo.md).
 
 ## The lab
 
