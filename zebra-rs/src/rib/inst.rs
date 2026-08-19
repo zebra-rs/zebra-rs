@@ -13,9 +13,9 @@ use super::{
 use crate::config::{Args, path_from_command};
 use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel};
 use crate::context::Timer;
-use crate::fib::fib_dump;
 use crate::fib::sysctl::sysctl_enable;
 use crate::fib::{FibChannel, FibHandle, FibMessage, FibNeighbor};
+use crate::fib::{fib_dump, fib_resync};
 use crate::rib::route::{
     AddrRecoveryState, ipv4_nexthop_sync, ipv6_nexthop_sync, nexthop_orphan_gc,
 };
@@ -1244,6 +1244,13 @@ pub struct Rib {
     /// `crate::rib::route::RECOVERY_*` if an external actor keeps
     /// fighting us.
     pub addr_recovery: BTreeMap<(u32, IpNet), AddrRecoveryState>,
+
+    /// When the last netlink receive-queue overrun triggered a
+    /// `fib_resync` re-dump; `None` until the first overrun. Rate-limits
+    /// `netlink_overrun_resync` — the re-dump itself keeps the monitor
+    /// socket's receive queue busy, so reacting to every overrun of a
+    /// sustained storm would stack re-dumps back-to-back.
+    pub overrun_resync_last: Option<std::time::Instant>,
 }
 
 /// Name of the dummy interface that hosts End-style seg6local routes
@@ -1348,6 +1355,7 @@ impl Rib {
             rib_sync_interval: DEFAULT_RIB_SYNC_INTERVAL_SEC,
             sr0_owned: false,
             addr_recovery: BTreeMap::new(),
+            overrun_resync_last: None,
         };
         rib.show_build();
         Ok(rib)
@@ -4364,6 +4372,14 @@ impl Rib {
                     self.api_snoop_leave(vni, vtep_local, entry.group, entry.source);
                 }
             }
+            FibMessage::Overrun => {
+                // Never dispatched here: the event loop intercepts
+                // Overrun before calling this function, because the
+                // resync re-dump feeds its results back through this
+                // very function and reacting in place would be async
+                // recursion. Kept for match exhaustiveness.
+                tracing::debug!("fib: overrun message outside event loop; ignored");
+            }
         }
     }
 
@@ -5103,6 +5119,38 @@ impl Rib {
             .await;
     }
 
+    /// React to a kernel netlink receive-queue overrun
+    /// ([`FibMessage::Overrun`]): the kernel dropped an unknown number
+    /// of monitor notifications, so the local link / address / neighbor
+    /// mirrors may have silently diverged. Re-dump the replay-safe
+    /// kernel tables through `fib_resync` — see its doc for what is
+    /// replayed and why routes are excluded.
+    ///
+    /// Rate-limited: the kernel raises one ENOBUFS per congestion
+    /// episode, and a sustained storm produces episodes back-to-back —
+    /// while the re-dump itself keeps the receive queue busy. An
+    /// overrun inside the cool-down is only logged; the state it
+    /// signals is covered by the previous re-dump or by the next
+    /// overrun after the window.
+    async fn netlink_overrun_resync(&mut self) {
+        const COOLDOWN: std::time::Duration = std::time::Duration::from_secs(10);
+        if let Some(last) = self.overrun_resync_last
+            && last.elapsed() < COOLDOWN
+        {
+            tracing::warn!(
+                "netlink receive-queue overrun within resync cool-down; re-dump skipped"
+            );
+            return;
+        }
+        self.overrun_resync_last = Some(std::time::Instant::now());
+        tracing::warn!(
+            "netlink receive-queue overrun: kernel dropped notifications; re-dumping kernel state"
+        );
+        if let Err(err) = fib_resync(self).await {
+            tracing::warn!("netlink overrun resync failed: {err}");
+        }
+    }
+
     pub async fn event_loop(&mut self) {
         // Before FIB interaction, apply the baseline sysctls. A knob that
         // can't be set (its backing module isn't loaded, or this kernel
@@ -5156,7 +5204,15 @@ impl Rib {
                     self.process_msg(env.msg, table_id).await;
                 }
                 Some(msg) = self.fib.rx.recv() => {
-                    self.process_fib_msg(msg).await;
+                    // Overrun is intercepted here rather than inside
+                    // `process_fib_msg`: the resync re-dump feeds its
+                    // results back through `process_fib_msg`, so
+                    // handling it there would be async recursion.
+                    if matches!(msg, FibMessage::Overrun) {
+                        self.netlink_overrun_resync().await;
+                    } else {
+                        self.process_fib_msg(msg).await;
+                    }
                 }
                 Some(msg) = self.cm.rx.recv() => {
                     self.process_cm_msg(msg).await;

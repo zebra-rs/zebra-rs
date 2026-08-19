@@ -32,6 +32,32 @@ pub async fn fib_dump(rib: &mut Rib) -> Result<()> {
     Ok(())
 }
 
+/// Re-dump the kernel tables that are safe to replay mid-run after a
+/// netlink receive-queue overrun (`FibMessage::Overrun`): links,
+/// addresses, neighbors, and the bridge MDB. All of these flow through
+/// upsert-shaped `process_fib_msg` paths that already absorb duplicate
+/// delivery in normal operation, so replaying current kernel state is
+/// idempotent and recovers any additions/updates the overrun dropped.
+/// (A dropped *deletion* stays lost until the object is touched again —
+/// mark-and-sweep reconciliation is a separate project.)
+///
+/// Routes are deliberately NOT re-dumped. The monitor socket never
+/// sees self-originated events (the kernel excludes the sender from
+/// multicast), so `route_from_msg` doesn't map our own `rtm_protocol`
+/// values back to their owners — everything non-DHCP dumps as
+/// `RibType::Kernel`. Replaying a route dump mid-run would re-ingest
+/// every route this daemon installed as a phantom kernel route
+/// shadowing the real protocol entry.
+pub async fn fib_resync(rib: &mut Rib) -> Result<()> {
+    link_dump(rib, rib.fib_handle.handle.clone()).await?;
+    address_dump(rib, rib.fib_handle.handle.clone()).await?;
+    neighbor_dump(rib, rib.fib_handle.handle.clone(), AddressFamily::Inet).await?;
+    neighbor_dump(rib, rib.fib_handle.handle.clone(), AddressFamily::Inet6).await?;
+    neighbor_dump(rib, rib.fib_handle.handle.clone(), AddressFamily::Bridge).await?;
+    mdb_dump(rib, rib.fib_handle.handle.clone()).await;
+    Ok(())
+}
+
 /// Dump the kernel bridge MDB (`RTM_GETMDB`) so EVPN learns memberships
 /// that existed before start-up. rtnetlink has no MDB helper, so issue
 /// the dump request by hand and feed each `RTM_NEWMDB` reply through the

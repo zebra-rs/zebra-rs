@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::os::fd::AsRawFd;
 
 use futures::stream::StreamExt;
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
@@ -494,6 +495,71 @@ enum FdbOp {
     Delete,
 }
 
+/// Receive-buffer size (bytes) requested for the FIB monitor socket.
+///
+/// The socket subscribes to seven multicast groups below, and multicast
+/// netlink has no flow control: once the receive queue is full the
+/// kernel drops the notification and the next recv fails with ENOBUFS.
+/// The kernel default (`net.core.rmem_default`, 208 KiB ≈ a few hundred
+/// queued messages at skb-truesize accounting) is far too small for a
+/// busy segment — the cold-start ARP burst of a few thousand BGP peers
+/// overruns it in well under a second. 16 MiB rides out such bursts and
+/// costs memory only while messages are actually queued.
+const MONITOR_RCVBUF_BYTES: libc::c_int = 16 * 1024 * 1024;
+
+/// `setsockopt(SOL_SOCKET, opt)` with [`MONITOR_RCVBUF_BYTES`], where
+/// `opt` is `SO_RCVBUF` or `SO_RCVBUFFORCE` (netlink-sys only wraps the
+/// former).
+fn set_rcvbuf(fd: std::os::fd::RawFd, opt: libc::c_int) -> std::io::Result<()> {
+    let ret = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            opt,
+            &MONITOR_RCVBUF_BYTES as *const libc::c_int as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// Enlarge the monitor socket's kernel receive buffer. `SO_RCVBUFFORCE`
+/// first — it ignores the `net.core.rmem_max` cap but wants
+/// CAP_NET_ADMIN, which the daemon holds anyway for route installs.
+/// Falls back to plain `SO_RCVBUF` (silently clamped to `rmem_max`)
+/// when that is denied. Quiet on success, warns when the buffer ends up
+/// smaller than requested — the daemon keeps running either way, just
+/// with a higher overrun risk under event bursts.
+fn monitor_rcvbuf_enlarge(sock: &netlink_sys::Socket) {
+    let fd = sock.as_raw_fd();
+    if set_rcvbuf(fd, libc::SO_RCVBUFFORCE).is_ok() {
+        return;
+    }
+    if let Err(e) = set_rcvbuf(fd, libc::SO_RCVBUF) {
+        tracing::warn!(
+            "fib: could not enlarge monitor socket receive buffer to {MONITOR_RCVBUF_BYTES} \
+             bytes ({e}); netlink overruns are likely under event bursts"
+        );
+        return;
+    }
+    // getsockopt reports double the effective setting (socket(7));
+    // under the doubled request it means rmem_max clamped us.
+    if let Ok(effective) = sock.get_rx_buf_sz()
+        && (effective as i64) < 2 * MONITOR_RCVBUF_BYTES as i64
+    {
+        tracing::warn!(
+            "fib: monitor socket receive buffer clamped to {} bytes by net.core.rmem_max \
+             (wanted {}); raise rmem_max or grant CAP_NET_ADMIN to reduce netlink overrun risk",
+            effective,
+            2 * MONITOR_RCVBUF_BYTES as i64,
+        );
+    }
+}
+
 impl FibHandle {
     pub fn new(rib_tx: UnboundedSender<FibMessage>, no_nhid: bool) -> anyhow::Result<Self> {
         // Baseline sysctls are applied (and any per-knob failures warned
@@ -501,6 +567,11 @@ impl FibHandle {
         // constructs this handle and before any FIB interaction — so there
         // is no need to enable them here too.
         let (mut connection, handle, mut messages) = new_connection()?;
+
+        // Before subscribing to any multicast group, enlarge the
+        // receive buffer past the kernel default — see
+        // `monitor_rcvbuf_enlarge` for why the default overruns.
+        monitor_rcvbuf_enlarge(connection.socket_mut().socket_mut());
 
         let mgroup_flags = RTMGRP_LINK
             | RTMGRP_IPV4_ROUTE
@@ -4579,6 +4650,14 @@ pub fn neighbor_from_msg(msg: NeighbourMessage) -> FibNeighbor {
 }
 
 fn process_msg(msg: NetlinkMessage<RouteNetlinkMessage>, tx: UnboundedSender<FibMessage>) {
+    // netlink-proto synthesizes an `Overrun` payload when recv fails
+    // with ENOBUFS — the kernel dropped an unknown number of
+    // notifications because the receive queue was full. Surface it so
+    // the RIB can re-dump kernel state instead of silently drifting.
+    if matches!(msg.payload, NetlinkPayload::Overrun(_)) {
+        let _ = tx.send(FibMessage::Overrun);
+        return;
+    }
     // Every arm forwards a parsed event to the RIB inbox. If RIB has
     // already shut down (or panicked) the receiver is dropped and the
     // send returns `SendError`; that is benign here — we don't want a
