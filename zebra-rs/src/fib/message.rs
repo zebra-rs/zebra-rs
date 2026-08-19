@@ -200,6 +200,14 @@ pub enum FibMessage {
     /// The forwarding plane confirmed (or rejected) a route install.
     /// Raised by the FPM tee; see [`RouteOffload`].
     RouteOffload(RouteOffload),
+    /// The kernel netlink monitor socket overran (`ENOBUFS`): its
+    /// receive queue was full, so the kernel dropped an unknown number
+    /// of notifications before we could read them. Multicast netlink
+    /// has no flow control — this is the only signal that our mirrors
+    /// of kernel state may have silently diverged. Handled by
+    /// `Rib::netlink_overrun_resync`, which re-dumps the replay-safe
+    /// kernel tables.
+    Overrun,
 }
 
 /// One kernel bridge MDB entry, reduced to the fields EVPN cares about.
