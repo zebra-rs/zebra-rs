@@ -14,16 +14,34 @@ pub mod watch;
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
+    #[arg(
+        long,
+        global = true,
+        help = "Server endpoint URI (unix:NAME, unix:/PATH, tcp:HOST:PORT); \
+                usable before or after the subcommand [default: unix:zebra-rs/vty]"
+    )]
+    vty_socket: Option<String>,
+
     #[command(subcommand)]
     command: Option<Commands>,
+}
+
+const DEFAULT_ENDPOINT: &str = "unix:zebra-rs/vty";
+
+/// Effective endpoint: the per-subcommand `--host` wins over the global
+/// `--vty-socket`; both fall back to the default abstract socket.
+fn endpoint<'a>(host: &'a Option<String>, vty_socket: &'a Option<String>) -> &'a str {
+    host.as_deref()
+        .or(vty_socket.as_deref())
+        .unwrap_or(DEFAULT_ENDPOINT)
 }
 
 #[derive(Subcommand)]
 enum Commands {
     #[command(disable_help_flag = true)]
     Apply {
-        #[arg(short, long, default_value = "unix:zebra-rs/vty")]
-        host: String,
+        #[arg(short, long, help = "Server endpoint URI (overrides --vty-socket)")]
+        host: Option<String>,
 
         #[arg(short, long, help = "Config filename", default_value = "")]
         filename: String,
@@ -33,16 +51,16 @@ enum Commands {
     },
     #[command(disable_help_flag = true)]
     Clear {
-        #[arg(short, long, default_value = "unix:zebra-rs/vty")]
-        host: String,
+        #[arg(short, long, help = "Server endpoint URI (overrides --vty-socket)")]
+        host: Option<String>,
 
         #[arg(help = "Clear command to execute")]
         command: String,
     },
     #[command(disable_help_flag = true)]
     Show {
-        #[arg(short, long, default_value = "unix:zebra-rs/vty")]
-        host: String,
+        #[arg(short, long, help = "Server endpoint URI (overrides --vty-socket)")]
+        host: Option<String>,
 
         #[arg(short, long, help = "Output in JSON format")]
         json: bool,
@@ -52,8 +70,8 @@ enum Commands {
     },
     #[command(disable_help_flag = true)]
     Watch {
-        #[arg(short, long, default_value = "unix:zebra-rs/vty")]
-        host: String,
+        #[arg(short, long, help = "Server endpoint URI (overrides --vty-socket)")]
+        host: Option<String>,
 
         #[arg(
             short,
@@ -67,8 +85,12 @@ enum Commands {
     },
     /// Start MCP (Model Context Protocol) server for AI assistant integration
     Mcp {
-        #[arg(short = 'H', long, default_value = "unix:zebra-rs/vty")]
-        host: String,
+        #[arg(
+            short = 'H',
+            long,
+            help = "Server endpoint URI (overrides --vty-socket)"
+        )]
+        host: Option<String>,
 
         #[arg(
             short,
@@ -119,20 +141,20 @@ async fn main() -> Result<()> {
             filename,
             command,
         }) => {
-            apply::apply(host, filename, command.as_ref()).await?;
+            apply::apply(endpoint(host, &cli.vty_socket), filename, command.as_ref()).await?;
         }
         Some(Commands::Clear { host, command }) => {
-            clear::clear(host, command).await?;
+            clear::clear(endpoint(host, &cli.vty_socket), command).await?;
         }
         Some(Commands::Show {
             host,
             json,
             command,
         }) => {
-            show::show(host, command, *json).await?;
+            show::show(endpoint(host, &cli.vty_socket), command, *json).await?;
         }
         Some(Commands::Watch { host, json, path }) => {
-            watch::watch(host, *json, path.clone()).await?;
+            watch::watch(endpoint(host, &cli.vty_socket), *json, path.clone()).await?;
         }
         Some(Commands::Mcp {
             host,
@@ -141,7 +163,14 @@ async fn main() -> Result<()> {
             ontology,
             fleet,
         }) => {
-            mcp::run(host, *port, *debug, ontology.as_deref(), fleet.as_deref()).await?;
+            mcp::run(
+                endpoint(host, &cli.vty_socket),
+                *port,
+                *debug,
+                ontology.as_deref(),
+                fleet.as_deref(),
+            )
+            .await?;
         }
         None => {
             print_help();

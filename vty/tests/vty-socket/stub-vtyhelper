@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Stub `vtyhelper` for the vty --vty-socket tests.
+#
+# Every invocation appends the CLI_SERVER_URL it inherited to STUB_LOG —
+# that env var is the whole contract between the patched binary's option
+# handling and the helper, so recording it is the entire test surface.
+set -u
+
+[[ -n ${STUB_LOG:-} ]] && printf '%s\n' "${CLI_SERVER_URL:-<unset>}" >>"${STUB_LOG}"
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -u|--uncommitted) exit 1 ;;              # clean: no exit prompt
+    -l|--logout) exit 0 ;;
+    -H|--hostname) echo "sockstub"; exit 0 ;;
+    -f|--first) echo "configure"; exit 0 ;;
+    *) shift ;;
+  esac
+done
+exit 0

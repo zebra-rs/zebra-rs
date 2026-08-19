@@ -24,6 +24,7 @@
 #include "stdc.h"
 
 extern int cli_mode __P((void));
+extern int cli_option_parse __P((int, char **));
 extern void cli_execute_startup_string __P((void));
 
 #endif /* _VTYSH_H_ */

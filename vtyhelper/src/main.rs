@@ -85,7 +85,7 @@ struct Cli {
     #[arg(
         short,
         long,
-        help = "Server endpoint URI (unix:NAME, tcp://host:port, http://host:port). \
+        help = "Server endpoint URI (unix:NAME, unix:/PATH, tcp://host:port, http://host:port). \
                 Bare host like 'http://127.0.0.1' is combined with --port for backward compat.",
         default_value = "unix:zebra-rs/vty"
     )]
@@ -103,13 +103,13 @@ fn privilege_get() -> u32 {
 
 /// Build the endpoint URI from the parsed CLI.
 ///
-/// `--base` may already be a full URI (`unix:…`, `tcp://host:port`,
-/// `http://host:port`) — in which case `--port` is ignored. Otherwise the
-/// legacy `{base}:{port}` concatenation is used, matching the historical
-/// `http://127.0.0.1` + `2666` defaults.
+/// `--base` may already be a full URI (`unix:…`, `tcp:host:port`,
+/// `tcp://host:port`, `http://host:port`) — in which case `--port` is
+/// ignored. Otherwise the legacy `{base}:{port}` concatenation is used,
+/// matching the historical `http://127.0.0.1` + `2666` defaults.
 fn endpoint_uri(base: &str, port: u32) -> String {
     if base.starts_with("unix:")
-        || base.starts_with("tcp://")
+        || base.starts_with("tcp:")
         || base.starts_with("http://") && base.matches(':').count() >= 2
         || base.starts_with("https://") && base.matches(':').count() >= 2
     {
