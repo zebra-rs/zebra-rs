@@ -219,14 +219,6 @@ fn raise_fd_limit() -> std::io::Result<(libc::rlim_t, libc::rlim_t)> {
     Ok((rlim.rlim_cur, rlim.rlim_max))
 }
 
-fn rlim_display(v: libc::rlim_t) -> String {
-    if v == libc::RLIM_INFINITY {
-        "unlimited".to_string()
-    } else {
-        v.to_string()
-    }
-}
-
 fn main() {
     let arg = Arg::parse();
 
@@ -270,13 +262,8 @@ async fn run(arg: Arg) -> anyhow::Result<()> {
     let log_config = logging_config(&arg.log_output, &arg.log_file, &arg.log_format);
     tracing_set(arg.daemon, Some(log_config));
 
-    match raise_fd_limit() {
-        Ok((soft, hard)) => tracing::info!(
-            "file descriptor limit: {} (hard {})",
-            rlim_display(soft),
-            rlim_display(hard)
-        ),
-        Err(e) => tracing::warn!("failed to raise file descriptor limit: {}", e),
+    if let Err(e) = raise_fd_limit() {
+        tracing::warn!("failed to raise file descriptor limit: {}", e);
     }
 
     let rib = Rib::new(arg.no_nhid)?;
