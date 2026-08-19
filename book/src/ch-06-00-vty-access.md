@@ -139,9 +139,10 @@ that is combined with `--port` (the historical form).
 
 | Option | Default | Notes |
 |---|---|---|
-| `--host <URI>` (alias `--vty-socket`) | `unix:zebra-rs/vty` | Server endpoint URI |
+| `--vty-socket <URI>` | `unix:zebra-rs/vty` | Global; usable before or after the subcommand |
+| `--host <URI>` (per subcommand) | — | Back-compat override; wins over `--vty-socket` |
 
-`--host` / `--vty-socket` accepts:
+Both accept:
 
 - `unix:NAME` — abstract Unix socket
 - `unix:/PATH` — filesystem Unix socket
@@ -158,7 +159,9 @@ vtyctl show 'show ip route'
 # Inside a netns
 ip netns exec vrf-red vtyctl show 'show ip route'
 
-# Filesystem socket, daemon syntax
+# Filesystem socket, daemon syntax — flag valid on either side
+# of the subcommand
+vtyctl --vty-socket unix:/tmp/zebra-rs show 'show ip route'
 vtyctl show --vty-socket unix:/tmp/zebra-rs 'show ip route'
 
 # Remote TCP
