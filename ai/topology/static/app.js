@@ -16,6 +16,40 @@ const REGION_COLORS = {
 const BASE_ARC_COLOR = 'rgba(170, 180, 200, 0.35)';
 const INACTIVE_COLOR = '#95a5a6';
 
+// Globe designs: a few looks for the earth itself, selectable from the
+// Globe dropdown (and the `globe` URL parameter). Every texture comes
+// from the same integrity-known three-globe example set on unpkg.com
+// the viewer already loads its earth from; the bump map and star-field
+// background are shared, only the surface and atmosphere change.
+const TEXTURE_BASE = '//unpkg.com/three-globe/example/img/';
+const GLOBE_DESIGNS = {
+    'day': {
+        label: 'Day',
+        globe: TEXTURE_BASE + 'earth-day.jpg',
+        atmosphereColor: '#93c5fd',
+        atmosphereAltitude: 0.18,
+    },
+    'blue-marble': {
+        label: 'Blue Marble',
+        globe: TEXTURE_BASE + 'earth-blue-marble.jpg',
+        atmosphereColor: '#3b82f6',
+        atmosphereAltitude: 0.18,
+    },
+    'night': {
+        label: 'Night lights',
+        globe: TEXTURE_BASE + 'earth-night.jpg',
+        atmosphereColor: '#f59e0b',
+        atmosphereAltitude: 0.15,
+    },
+    'dark': {
+        label: 'Dark',
+        globe: TEXTURE_BASE + 'earth-dark.jpg',
+        atmosphereColor: '#64748b',
+        atmosphereAltitude: 0.12,
+    },
+};
+const DEFAULT_DESIGN = 'day';
+
 let map;
 
 // Rendered state
@@ -38,9 +72,10 @@ let algorithmsSeq = 0;
 // the user set up stays put while the arcs re-route under it.
 let lastFocusKey = null;
 
-// Selections are mirrored into the URL query, so Source, Destination and
-// Algorithm all survive a page reload (and a view can be shared as a
-// link). Consumed once at startup, written back on every load.
+// Selections are mirrored into the URL query, so Source, Destination,
+// Algorithm and Globe all survive a page reload (and a view can be
+// shared as a link). Consumed once at startup, written back on every
+// load and on a globe-design change.
 const initialParams = new URLSearchParams(window.location.search);
 
 function selectValue(sel, value) {
@@ -56,17 +91,34 @@ function syncUrl() {
     params.set('source', document.getElementById('source').value);
     params.set('destination', document.getElementById('destination').value);
     params.set('algorithm', document.getElementById('algorithm').value || '0');
+    const globe = document.getElementById('globe').value;
+    if (globe !== DEFAULT_DESIGN) params.set('globe', globe);
     history.replaceState(null, '', '?' + params.toString());
+}
+
+function applyGlobeDesign(name) {
+    const design = GLOBE_DESIGNS[name] || GLOBE_DESIGNS[DEFAULT_DESIGN];
+    map.globeImageUrl(design.globe)
+        .atmosphereColor(design.atmosphereColor)
+        .atmosphereAltitude(design.atmosphereAltitude);
+}
+
+function initGlobeSelect() {
+    const sel = document.getElementById('globe');
+    Object.entries(GLOBE_DESIGNS).forEach(([value, design]) => {
+        const opt = document.createElement('option');
+        opt.value = value;
+        opt.textContent = design.label;
+        sel.appendChild(opt);
+    });
+    selectValue(sel, initialParams.get('globe')) || selectValue(sel, DEFAULT_DESIGN);
 }
 
 function initMap() {
     const container = document.getElementById('map');
     map = Globe()(container)
-        .globeImageUrl('//unpkg.com/three-globe/example/img/earth-blue-marble.jpg')
-        .bumpImageUrl('//unpkg.com/three-globe/example/img/earth-topology.png')
-        .backgroundImageUrl('//unpkg.com/three-globe/example/img/night-sky.png')
-        .atmosphereColor('#3b82f6')
-        .atmosphereAltitude(0.18)
+        .bumpImageUrl(TEXTURE_BASE + 'earth-topology.png')
+        .backgroundImageUrl(TEXTURE_BASE + 'night-sky.png')
         .arcColor('color')
         .arcStroke(d => d.base ? 0.22 : 0.5)
         .arcAltitudeAutoScale(d => d.base ? 0.25 : 0.4)
@@ -82,6 +134,8 @@ function initMap() {
         .pointRadius(0.4)
         .pointLabel('label')
         .pointOfView({ lat: 30, lng: -30, altitude: 2.5 });
+
+    applyGlobeDesign(document.getElementById('globe').value);
 
     // Auto-rotate gently until the user interacts
     const controls = map.controls();
@@ -496,8 +550,15 @@ function populatePathDetail(idx) {
 // --- Event listeners ---
 
 document.addEventListener('DOMContentLoaded', () => {
+    initGlobeSelect();
     initMap();
     loadRouters();
+
+    // A globe-design flip only restyles the earth — no router re-query.
+    document.getElementById('globe').addEventListener('change', (e) => {
+        applyGlobeDesign(e.target.value);
+        syncUrl();
+    });
 
     document.getElementById('source').addEventListener('change', async (e) => {
         if (e.target.value) {

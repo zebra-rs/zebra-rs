@@ -70,6 +70,22 @@ earth textures load from unpkg.com, integrity-pinned).
 * Click a path arc (or its legend chip) for the hop-by-hop table with link
   and cumulative metrics.
 
+### Globe designs
+
+The Globe dropdown switches the earth's look between four designs:
+
+| design          | texture             | character                                |
+|-----------------|---------------------|------------------------------------------|
+| **Day**         | `earth-day`         | flat relief daylight map (default)       |
+| **Blue Marble** | `earth-blue-marble` | photographic satellite earth             |
+| **Night lights**| `earth-night`       | city lights on a dark earth              |
+| **Dark**        | `earth-dark`        | muted grey earth — the arcs pop the most |
+
+All textures come from the same three-globe example set on unpkg.com the
+default already loads from. The choice is mirrored into the `globe` URL
+parameter (like source, destination and algorithm), so it survives a
+reload and travels with a shared link.
+
 ### Flags
 
 | flag         | default                                | meaning                        |
