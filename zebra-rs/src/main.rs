@@ -163,6 +163,70 @@ fn write_pid_file(path: &str) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to write PID to {}: {}", path, e))
 }
 
+/// Hard RLIMIT_NOFILE requested at startup when the process is
+/// privileged enough to raise hard limits (root or CAP_SYS_RESOURCE).
+const NOFILE_TARGET: libc::rlim_t = 1_048_576;
+
+/// macOS `OPEN_MAX` (<sys/syslimits.h>): the kernel rejects a soft
+/// RLIMIT_NOFILE above this with EINVAL even when the hard limit is
+/// RLIM_INFINITY. Not exposed by the libc crate for apple targets.
+#[cfg(target_os = "macos")]
+const MACOS_OPEN_MAX: libc::rlim_t = 10_240;
+
+/// Raise the open-file limit as far as the environment allows. BGP
+/// holds one TCP socket per established peer — two while RFC 4271
+/// §6.8 collision resolution is pending — so the commonly inherited
+/// soft limit of 1024 exhausts fds well below ~1000 peers. Bump the
+/// hard limit to [`NOFILE_TARGET`] when privileged (failure means we
+/// lack CAP_SYS_RESOURCE and keep the inherited hard limit), then
+/// lift the soft limit to the hard limit, which never needs
+/// privilege. Returns the resulting (soft, hard) pair.
+fn raise_fd_limit() -> std::io::Result<(libc::rlim_t, libc::rlim_t)> {
+    let mut rlim = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: getrlimit/setrlimit only read or fill the rlimit struct
+    // passed by pointer.
+    unsafe {
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if rlim.rlim_max < NOFILE_TARGET {
+            let want = libc::rlimit {
+                rlim_cur: NOFILE_TARGET,
+                rlim_max: NOFILE_TARGET,
+            };
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &want) == 0 {
+                rlim = want;
+            }
+        }
+        #[cfg(target_os = "macos")]
+        let soft = rlim.rlim_max.min(MACOS_OPEN_MAX);
+        #[cfg(not(target_os = "macos"))]
+        let soft = rlim.rlim_max;
+        if soft > rlim.rlim_cur {
+            let want = libc::rlimit {
+                rlim_cur: soft,
+                rlim_max: rlim.rlim_max,
+            };
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &want) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            rlim.rlim_cur = soft;
+        }
+    }
+    Ok((rlim.rlim_cur, rlim.rlim_max))
+}
+
+fn rlim_display(v: libc::rlim_t) -> String {
+    if v == libc::RLIM_INFINITY {
+        "unlimited".to_string()
+    } else {
+        v.to_string()
+    }
+}
+
 fn main() {
     let arg = Arg::parse();
 
@@ -205,6 +269,15 @@ async fn run(arg: Arg) -> anyhow::Result<()> {
 
     let log_config = logging_config(&arg.log_output, &arg.log_file, &arg.log_format);
     tracing_set(arg.daemon, Some(log_config));
+
+    match raise_fd_limit() {
+        Ok((soft, hard)) => tracing::info!(
+            "file descriptor limit: {} (hard {})",
+            rlim_display(soft),
+            rlim_display(hard)
+        ),
+        Err(e) => tracing::warn!("failed to raise file descriptor limit: {}", e),
+    }
 
     let rib = Rib::new(arg.no_nhid)?;
 

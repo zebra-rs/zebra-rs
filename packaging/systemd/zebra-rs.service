@@ -11,6 +11,10 @@ StandardError=journal
 ExecStart=/usr/bin/zebra-rs
 ExecStop=/bin/kill -INT ${MAINPID}
 Restart=always
+# One fd per BGP peer (two while collision resolution is pending);
+# the systemd default of 1024 exhausts fds below ~1000 peers.
+# zebra-rs raises its soft limit to this hard ceiling at startup.
+LimitNOFILE=1048576
 
 [Install]
 WantedBy=multi-user.target
