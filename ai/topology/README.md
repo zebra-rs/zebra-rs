@@ -76,8 +76,8 @@ The Globe dropdown switches the earth's look between four designs:
 
 | design          | texture             | character                                |
 |-----------------|---------------------|------------------------------------------|
-| **Blue Marble** | `earth-blue-marble` | photographic satellite earth (default)   |
-| **Day**         | `earth-day`         | flat political-relief daylight map       |
+| **Day**         | `earth-day`         | flat relief daylight map (default)       |
+| **Blue Marble** | `earth-blue-marble` | photographic satellite earth             |
 | **Night lights**| `earth-night`       | city lights on a dark earth              |
 | **Dark**        | `earth-dark`        | muted grey earth — the arcs pop the most |
 

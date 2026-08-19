@@ -23,16 +23,16 @@ const INACTIVE_COLOR = '#95a5a6';
 // background are shared, only the surface and atmosphere change.
 const TEXTURE_BASE = '//unpkg.com/three-globe/example/img/';
 const GLOBE_DESIGNS = {
-    'blue-marble': {
-        label: 'Blue Marble',
-        globe: TEXTURE_BASE + 'earth-blue-marble.jpg',
-        atmosphereColor: '#3b82f6',
-        atmosphereAltitude: 0.18,
-    },
     'day': {
         label: 'Day',
         globe: TEXTURE_BASE + 'earth-day.jpg',
         atmosphereColor: '#93c5fd',
+        atmosphereAltitude: 0.18,
+    },
+    'blue-marble': {
+        label: 'Blue Marble',
+        globe: TEXTURE_BASE + 'earth-blue-marble.jpg',
+        atmosphereColor: '#3b82f6',
         atmosphereAltitude: 0.18,
     },
     'night': {
@@ -48,7 +48,7 @@ const GLOBE_DESIGNS = {
         atmosphereAltitude: 0.12,
     },
 };
-const DEFAULT_DESIGN = 'blue-marble';
+const DEFAULT_DESIGN = 'day';
 
 let map;
 
