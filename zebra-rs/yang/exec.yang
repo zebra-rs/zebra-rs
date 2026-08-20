@@ -903,6 +903,10 @@ module exec {
           }
         }
       }
+      leaf micro-loop-avoidance {
+        ext:help "IS-IS TI-LFA micro-loop avoidance state and counters";
+        type empty;
+      }
       leaf egress-protection {
         ext:help "Mirror SID egress-protection entries (SRv6/SR-MPLS)";
         type empty;

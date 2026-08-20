@@ -101,6 +101,41 @@ Notes:
   shadow — an operator knob for exercising the repair path without
   rewiring the topology.
 
+### IS-IS micro-loop avoidance
+
+TI-LFA protects the local repair path, but different routers can still
+publish their post-convergence routes at different times. IS-IS can keep
+the already-activated repair in use for a fixed interval while the rest of
+the network converges:
+
+```
+router isis {
+  segment-routing mpls;
+  fast-reroute {
+    ti-lfa;
+    micro-loop-avoidance {
+      rib-update-delay 5000;  // milliseconds, 1..60000
+    }
+  }
+}
+```
+
+The delay starts only after a local link/BFD/adjacency failure and a
+successful protection activation. A per-level self-LSP generation gate also
+requires SPF to have observed the post-failure local topology; this prevents a
+faster SPF timer from consuming the candidate against the old self LSP.
+Eligible algorithm-0 native IPv4/IPv6 routes retain their old, switched
+TI-LFA protection group. Before that topology commit, an affected protected
+route omitted by the transient SPF is retained too; authoritative
+post-commit withdrawals, new prefixes, unprotected routes, Flex-Algorithm
+routes, and MPLS ILM updates remain immediate. The deadline is fixed and is
+not extended by additional SPF results. Activation failure, overlapping
+failures, recovery, a topology-gate watchdog, or a relevant configuration
+change fails open to normal convergence.
+
+This knob is currently IS-IS-only. OSPFv2 and OSPFv3 continue to use their
+existing TI-LFA convergence behavior.
+
 ## Scaling the TI-LFA computation (compute modes)
 
 The repair pre-computation is per-destination work: every protected

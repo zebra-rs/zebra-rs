@@ -31,6 +31,8 @@ impl Isis {
             .set(show_isis_route_detail)
             .path("/show/isis/fast-reroute/summary")
             .set(show_isis_fast_reroute_summary)
+            .path("/show/isis/micro-loop-avoidance")
+            .set(show_isis_microloop_avoidance)
             .path("/show/isis/fast-reroute/prefix/detail")
             .set(show_isis_fast_reroute_prefix_detail)
             .path("/show/isis/egress-protection")
@@ -1033,6 +1035,199 @@ fn show_isis_fast_reroute_summary(
     }
     if !wrote_any {
         writeln!(buf, "  (no IS-IS RIB entries yet)")?;
+    }
+    Ok(buf)
+}
+
+#[derive(Serialize)]
+struct MicroloopLevelView {
+    level: &'static str,
+    state: &'static str,
+    failure_id: Option<u64>,
+    failure_revision: Option<u64>,
+    required_self_lsp_generation: Option<u64>,
+    self_lsp_generation: u64,
+    last_spf_generation: u64,
+    topology_ready: bool,
+    cause: Option<String>,
+    ifindex: Option<u32>,
+    activation_pending: usize,
+    activated: bool,
+    remaining_ms: Option<u128>,
+    candidate_timeout_remaining_ms: Option<u128>,
+    held_ipv4: usize,
+    held_ipv6: usize,
+    events: u64,
+    holds_started: u64,
+    prefixes_deferred: u64,
+    releases: u64,
+    aborts: u64,
+    activation_failures: u64,
+    topology_waits: u64,
+    topology_timeouts: u64,
+    no_eligible_routes: u64,
+    suppressed_events: u64,
+    last_hold_duration_ms: Option<u64>,
+    max_hold_duration_ms: u64,
+}
+
+#[derive(Serialize)]
+struct MicroloopView {
+    enabled: bool,
+    operational: bool,
+    inactive_reason: Option<&'static str>,
+    rib_update_delay_ms: u32,
+    levels: Vec<MicroloopLevelView>,
+}
+
+fn microloop_level_view(isis: &Isis, level: Level) -> MicroloopLevelView {
+    let state = isis.microloop.levels.get(&level);
+    let (name, failure, remaining_ms, held_ipv4, held_ipv6) = if let Some(hold) = &state.hold {
+        (
+            "holding",
+            Some(&hold.failure),
+            Some(hold.timer.remaining().as_millis()),
+            hold.held_v4.len(),
+            hold.held_v6.len(),
+        )
+    } else if let Some(candidate) = &state.candidate {
+        ("candidate", Some(candidate), None, 0, 0)
+    } else {
+        ("idle", None, None, 0, 0)
+    };
+    MicroloopLevelView {
+        level: match level {
+            Level::L1 => "Level-1",
+            Level::L2 => "Level-2",
+        },
+        state: name,
+        failure_id: failure.map(|f| f.id),
+        failure_revision: failure.map(|f| f.revision),
+        required_self_lsp_generation: failure.map(|f| f.required_self_lsp_generation),
+        self_lsp_generation: state.self_lsp_generation,
+        last_spf_generation: state.last_spf_generation,
+        topology_ready: failure
+            .is_none_or(|f| state.last_spf_generation >= f.required_self_lsp_generation),
+        cause: failure.map(|f| f.cause.to_string()),
+        ifindex: failure.map(|f| f.ifindex),
+        activation_pending: failure.map_or(0, |f| f.activation_pending),
+        activated: failure.is_some_and(|f| f.activated),
+        remaining_ms,
+        candidate_timeout_remaining_ms: state
+            .candidate_watchdog
+            .as_ref()
+            .map(|timer| timer.remaining().as_millis()),
+        held_ipv4,
+        held_ipv6,
+        events: state.events,
+        holds_started: state.holds_started,
+        prefixes_deferred: state.prefixes_deferred,
+        releases: state.releases,
+        aborts: state.aborts,
+        activation_failures: state.activation_failures,
+        topology_waits: state.topology_waits,
+        topology_timeouts: state.topology_timeouts,
+        no_eligible_routes: state.no_eligible_routes,
+        suppressed_events: state.suppressed_events,
+        last_hold_duration_ms: state.last_hold_duration_ms,
+        max_hold_duration_ms: state.max_hold_duration_ms,
+    }
+}
+
+/// `show isis micro-loop-avoidance` — current local
+/// convergence-delay phase and lifetime counters per level.
+fn show_isis_microloop_avoidance(
+    isis: &Isis,
+    _args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let inactive_reason = if !isis.config.microloop_avoidance_enabled {
+        Some("not configured")
+    } else if !isis.config.ti_lfa_enabled {
+        Some("ti-lfa disabled")
+    } else if isis.config.fast_reroute_backup_as_primary {
+        Some("backup-as-primary enabled")
+    } else if !isis.config.distribute.rib {
+        Some("RIB distribution disabled")
+    } else if isis.restarting.is_some() {
+        Some("graceful restart active")
+    } else {
+        None
+    };
+    let view = MicroloopView {
+        enabled: isis.config.microloop_avoidance_enabled,
+        operational: inactive_reason.is_none(),
+        inactive_reason,
+        rib_update_delay_ms: isis.config.microloop_rib_update_delay_ms,
+        levels: [Level::L1, Level::L2]
+            .into_iter()
+            .map(|level| microloop_level_view(isis, level))
+            .collect(),
+    };
+    if json {
+        return Ok(serde_json::to_string_pretty(&view)
+            .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")));
+    }
+
+    let mut buf = String::new();
+    writeln!(
+        buf,
+        "IS-IS micro-loop avoidance: {}",
+        if view.operational {
+            "operational"
+        } else {
+            view.inactive_reason.unwrap_or("inactive")
+        }
+    )?;
+    writeln!(buf, "  RIB update delay: {} ms", view.rib_update_delay_ms)?;
+    for level in view.levels {
+        writeln!(buf, "  {}: {}", level.level, level.state)?;
+        writeln!(
+            buf,
+            "    Self-LSP generation: committed {}, last SPF {}",
+            level.self_lsp_generation, level.last_spf_generation
+        )?;
+        if let Some(id) = level.failure_id {
+            writeln!(
+                buf,
+                "    Failure: id {} {}, ifindex {}, activated {}, pending acks {}",
+                id,
+                level.cause.as_deref().unwrap_or("unknown"),
+                level.ifindex.unwrap_or_default(),
+                level.activated,
+                level.activation_pending
+            )?;
+            writeln!(
+                buf,
+                "    Topology gate: required generation {}, ready {}, timeout remaining {:?} ms",
+                level.required_self_lsp_generation.unwrap_or_default(),
+                level.topology_ready,
+                level.candidate_timeout_remaining_ms
+            )?;
+        }
+        if let Some(remaining) = level.remaining_ms {
+            writeln!(
+                buf,
+                "    Remaining: {} ms, held prefixes: IPv4 {}, IPv6 {}",
+                remaining, level.held_ipv4, level.held_ipv6
+            )?;
+        }
+        writeln!(
+            buf,
+            "    Counters: events {}, holds {}, deferred {}, releases {}, aborts {}, activation-failures {}, topology-waits {}, topology-timeouts {}, no-eligible {}, suppressed {}, last/max hold {:?}/{} ms",
+            level.events,
+            level.holds_started,
+            level.prefixes_deferred,
+            level.releases,
+            level.aborts,
+            level.activation_failures,
+            level.topology_waits,
+            level.topology_timeouts,
+            level.no_eligible_routes,
+            level.suppressed_events,
+            level.last_hold_duration_ms,
+            level.max_hold_duration_ms
+        )?;
     }
     Ok(buf)
 }

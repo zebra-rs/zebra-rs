@@ -1063,6 +1063,9 @@ impl Isis {
     /// re-origination + SPF land naturally on each adjacency Up
     /// transition.
     pub fn link_state_up(&mut self, ifindex: u32) {
+        // Recovery before the fixed deadline invalidates the failed-resource
+        // predicate. Publish the latest desired snapshot immediately.
+        self.microloop_abort_ifindex(ifindex);
         let Some(link) = self.links.get_mut(&ifindex) else {
             return;
         };
@@ -1094,6 +1097,42 @@ impl Isis {
     /// schedule SPF for both levels so the route table reflects the
     /// new topology.
     pub fn link_state_down(&mut self, ifindex: u32) {
+        self.link_state_down_inner(ifindex, true);
+    }
+
+    /// Protocol-only bounce used by configuration changes (network type,
+    /// passive mode). The kernel link is still forwarding, so this must not
+    /// claim kernel-autonomous TI-LFA activation or arm MLA.
+    fn link_state_down_admin(&mut self, ifindex: u32) {
+        self.link_state_down_inner(ifindex, false);
+    }
+
+    fn link_state_down_inner(&mut self, ifindex: u32, local_failure: bool) {
+        // For a real netlink failure the kernel has already made the
+        // interface unusable and activated the shadow repair. Capture all
+        // peers and nexthop keys before teardown. An administrative protocol
+        // bounce still performs teardown, but skips this candidate block.
+        for level in [Level::L1, Level::L2] {
+            let mut peers = BTreeSet::new();
+            let mut nexthops = BTreeSet::new();
+            if let Some(link) = self.links.get(&ifindex) {
+                for (sys_id, nbr) in link.state.nbrs.get(&level) {
+                    peers.insert(*sys_id);
+                    nexthops.extend(nbr.addr4.keys().copied().map(std::net::IpAddr::V4));
+                    nexthops.extend(nbr.addr6l.iter().copied().map(std::net::IpAddr::V6));
+                }
+            }
+            if local_failure && !peers.is_empty() {
+                self.microloop_failure_begin(
+                    level,
+                    super::microloop::FailureCause::LinkDown,
+                    ifindex,
+                    peers,
+                    nexthops,
+                    true,
+                );
+            }
+        }
         let Some(link) = self.links.get_mut(&ifindex) else {
             return;
         };
@@ -1914,7 +1953,7 @@ pub fn config_network_type(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Opt
     // schedules SPF for both levels. Adjacencies rebuild through
     // the normal hello / NFSM path under the new type.
     if type_changed {
-        isis.link_state_down(ifindex);
+        isis.link_state_down_admin(ifindex);
         isis.link_state_up(ifindex);
         return Some(());
     }
@@ -1951,7 +1990,7 @@ pub fn config_passive(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<(
     };
 
     if changed {
-        isis.link_state_down(ifindex);
+        isis.link_state_down_admin(ifindex);
         isis.link_state_up(ifindex);
     }
 

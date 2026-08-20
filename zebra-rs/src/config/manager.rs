@@ -4948,6 +4948,57 @@ mod yang_load_tests {
         );
     }
 
+    /// Pin the IS-IS-only micro-loop avoidance configuration and show
+    /// grammar. In particular, keep the millisecond delay range at
+    /// 1..60000 so zero cannot accidentally turn a fixed hold into an
+    /// immediate/repeating timer edge case.
+    #[test]
+    fn isis_microloop_avoidance_commands_parse() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+        for cmd in [
+            "set router isis fast-reroute micro-loop-avoidance",
+            "set router isis fast-reroute micro-loop-avoidance rib-update-delay 5000",
+        ] {
+            let (code, _, _) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "`{cmd}` must parse");
+        }
+        for cmd in [
+            "set router isis fast-reroute micro-loop-avoidance rib-update-delay 0",
+            "set router isis fast-reroute micro-loop-avoidance rib-update-delay 60001",
+        ] {
+            let (code, _, _) = parse(cmd, entry.clone(), None, State::new());
+            assert_ne!(
+                code,
+                ExecCode::Success,
+                "`{cmd}` must fail range validation"
+            );
+        }
+
+        let mut exec_yang = YangStore::new();
+        exec_yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        exec_yang
+            .read_with_resolve("exec")
+            .expect("exec mode loads");
+        exec_yang.identity_resolve();
+        let module = exec_yang.find_module("exec").expect("exec module present");
+        let entry = to_entry(&exec_yang, module);
+        let cmd = "show isis micro-loop-avoidance";
+        let (code, _, _) = parse(cmd, entry, None, State::new());
+        assert_eq!(code, ExecCode::Success, "`{cmd}` must parse");
+    }
+
     /// The top-level `bfd { tracing }` flag (conditional-tracing toggle) must
     /// be a settable path. It's a hand-added top-level container in
     /// `config.yang`; the BFD task reads it off the config broadcast.

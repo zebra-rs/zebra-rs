@@ -255,6 +255,9 @@ pub struct Isis {
     pub peer_algo_srv6: Levels<BTreeMap<IsisSysId, BTreeMap<u8, super::srv6::Srv6AlgoLoc>>>,
     pub rib: Levels<PrefixMap<Ipv4Net, SpfRoute<V4>>>,
     pub rib_v6: Levels<PrefixMap<Ipv6Net, SpfRoute<V6>>>,
+    /// Runtime state for RFC 8333-style local convergence delay over
+    /// activated TI-LFA repairs. IS-IS-owned; OSPF remains untouched.
+    pub microloop: super::microloop::MicroloopState,
     /// Mirror SID node-protection stale-route retention: protected egress
     /// locators currently kept alive in the FIB (mapped to the Mirror SID
     /// they redirect to) after the protected egress's LSP aged out, so a
@@ -661,6 +664,7 @@ pub struct IsisTop<'a> {
     pub peer_algo_srv6: &'a mut Levels<BTreeMap<IsisSysId, BTreeMap<u8, super::srv6::Srv6AlgoLoc>>>,
     pub rib: &'a mut Levels<PrefixMap<Ipv4Net, SpfRoute<V4>>>,
     pub rib_v6: &'a mut Levels<PrefixMap<Ipv6Net, SpfRoute<V6>>>,
+    pub microloop: &'a mut super::microloop::MicroloopState,
     pub retained_locators: &'a mut Levels<BTreeMap<Ipv6Net, RetainEntry>>,
     pub egress_protect_registered: &'a mut BTreeMap<Ipv6Net, (std::net::Ipv6Addr, IsisSysId)>,
     pub ilm: &'a mut Levels<BTreeMap<u32, SpfIlm>>,
@@ -838,6 +842,7 @@ impl Isis {
                     Levels::<BTreeMap<IsisSysId, BTreeMap<u8, super::srv6::Srv6AlgoLoc>>>::default(),
                 rib: Levels::<PrefixMap<Ipv4Net, SpfRoute<V4>>>::default(),
                 rib_v6: Levels::<PrefixMap<Ipv6Net, SpfRoute<V6>>>::default(),
+                microloop: super::microloop::MicroloopState::default(),
                 retained_locators: Levels::<BTreeMap<Ipv6Net, RetainEntry>>::default(),
                 egress_protect_registered: BTreeMap::new(),
                 ilm: Levels::<BTreeMap<u32, SpfIlm>>::default(),
@@ -1452,6 +1457,10 @@ impl Isis {
             tracing::warn!("[GR Restart] begin ignored: already restarting");
             return;
         }
+        // Graceful restart owns the FIB hold-back policy. Flush any active
+        // micro-loop delay before entering GR so two independent retention
+        // controllers never overlap.
+        self.microloop_abort_all();
         let t1_timer = arm_t1_timer(&self.tx);
         self.restarting = Some(RestartingState {
             started_at: std::time::SystemTime::now(),
@@ -1952,6 +1961,24 @@ impl Isis {
                 if ev != NfsmEvent::HoldTimerExpire {
                     return;
                 }
+                // Snapshot failure identity before teardown removes the
+                // neighbor. The RIB acknowledgement is the activation
+                // commit point for micro-loop avoidance.
+                if let Some(link) = self.links.get(&ifindex)
+                    && let Some(nbr) = link.state.nbrs.get(&level).get(&sys_id)
+                {
+                    let mut nexthops = BTreeSet::new();
+                    nexthops.extend(nbr.addr4.keys().copied().map(std::net::IpAddr::V4));
+                    nexthops.extend(nbr.addr6l.iter().copied().map(std::net::IpAddr::V6));
+                    self.microloop_failure_begin(
+                        level,
+                        super::microloop::FailureCause::AdjacencyExpired,
+                        ifindex,
+                        BTreeSet::from([sys_id]),
+                        nexthops,
+                        false,
+                    );
+                }
                 let Some(mut link) = self.link_top(ifindex) else {
                     return;
                 };
@@ -2006,8 +2033,13 @@ impl Isis {
             }
             Message::SpfDone(output) => {
                 let level = output.level;
+                let stale = self
+                    .microloop
+                    .output_is_stale(level, output.microloop_revision);
                 let mut top = self.top();
-                apply_spf_result(&mut top, *output);
+                if !stale {
+                    apply_spf_result(&mut top, *output);
+                }
                 *top.spf_inflight.get_mut(&level) = false;
                 if std::mem::take(top.spf_pending.get_mut(&level)) {
                     let _ = self.tx.send(Message::SpfCalc(level));
@@ -2016,12 +2048,29 @@ impl Isis {
                 // Level-independent (config + global SR block, not SPF),
                 // so done once here after `top`'s borrow ends rather than
                 // in the per-level apply path; idempotent across L1/L2.
-                update_self_sid_ilm(self);
+                if !stale {
+                    update_self_sid_ilm(self);
+                }
                 // The LSDB is settled after SPF — push the BGP-LS producer's
                 // delta to BGP (RFC 9552). `top` is no longer used, so its
                 // mutable borrow of `self` has ended (NLL) and the disjoint
                 // field borrows inside `bgp_ls_produce` are free.
-                self.bgp_ls_produce();
+                if !stale {
+                    self.bgp_ls_produce();
+                }
+            }
+            Message::MicroloopActivation {
+                level,
+                failure_id,
+                activated,
+                rewired,
+                evicted,
+            } => self.microloop_activation_result(level, failure_id, activated, rewired, evicted),
+            Message::MicroloopExpire { level, token } => {
+                self.microloop_expire(level, token);
+            }
+            Message::MicroloopCandidateExpire { level, failure_id } => {
+                self.microloop_candidate_expire(level, failure_id);
             }
             Message::Recv(packet, ifindex, mac) => {
                 let Some(mut top) = self.link_top(ifindex) else {
@@ -2086,6 +2135,10 @@ impl Isis {
                 self.process_lsdb(ev, level, key);
             }
             Message::AdjacencyUp(level, ifindex) => {
+                // A neighbor returning before the fixed deadline invalidates
+                // the local-failure predicate even when no BFD session owns
+                // the recovery event.
+                self.microloop_abort_ifindex(ifindex);
                 self.schedule_lsp_originate(level, None);
 
                 let Some(mut link) = self.link_top(ifindex) else {
@@ -2480,8 +2533,8 @@ impl Isis {
         // total TLV footprint shrank). Send a Purge for each so the
         // network flushes them; the standard purge path emits a
         // RemainingLifetime=0 LSP at a bumped seq.
-        let self_sys = self.config.net.sys_id();
-        let orphans: Vec<IsisLspId> = self
+        let self_sys = top.config.net.sys_id();
+        let orphans: Vec<IsisLspId> = top
             .lsdb
             .get(&level)
             .iter()
@@ -2493,9 +2546,21 @@ impl Isis {
             })
             .map(|(id, _)| *id)
             .collect();
+        // Purge trailing fragments synchronously as part of this generation.
+        // Otherwise an SPF could snapshot the new fragment 0 together with
+        // an old higher fragment, yet carry the newly committed generation.
+        // `insert_self_originate` still floods and schedules SPF normally.
         for lsp_id in orphans {
-            let _ = self.tx.send(Message::LspPurge(level, lsp_id));
+            Self::process_lsp_purge_top(&mut top, level, lsp_id, self_sys);
         }
+
+        let generation = top.microloop.self_lsp_committed(level);
+        tracing::debug!(
+            level = %level,
+            self_lsp_generation = generation,
+            fragments = max_frag as usize + 1,
+            "isis: complete self router-LSP generation committed"
+        );
     }
 
     /// Throttle-aware front door for self-LSP origination. Multiple
@@ -2604,12 +2669,12 @@ impl Isis {
         );
     }
 
-    fn process_lsp_purge(&mut self, level: Level, lsp_id: IsisLspId) {
-        // Capture sys-id before `self.top()` takes the mutable borrow
-        // of `self.config`; needed for the RFC 6232 POI stamp below.
-        let own_sys_id = self.config.net.sys_id();
-        let mut top = self.top();
-
+    fn process_lsp_purge_top(
+        top: &mut IsisTop,
+        level: Level,
+        lsp_id: IsisLspId,
+        own_sys_id: IsisSysId,
+    ) {
         // Get current LSP if it exists. `saturating_add` so the
         // seq-number-wrap purge path (existing = u32::MAX - 1) emits
         // a final LSP at u32::MAX without panicking; the freeze
@@ -2618,7 +2683,7 @@ impl Isis {
             existing.lsp.seq_number.saturating_add(1)
         } else {
             isis_event_trace!(
-                self.tracing,
+                top.tracing,
                 LspPurge,
                 &level,
                 "Cannot purge LSP {} - not found in LSDB",
@@ -2644,9 +2709,17 @@ impl Isis {
         // was discarded, so the POI stamp landed in the LSDB but
         // never reached peers.
         let buf = lsp_emit(&mut purged_lsp, level, resolved.as_ref());
-        insert_self_originate(&mut top, level, purged_lsp, Some(buf.to_vec()));
+        insert_self_originate(top, level, purged_lsp, Some(buf.to_vec()));
 
         top.lsdb.get_mut(&level).srm_set_all(top.tx, level, &lsp_id);
+    }
+
+    fn process_lsp_purge(&mut self, level: Level, lsp_id: IsisLspId) {
+        // Capture sys-id before `self.top()` takes the mutable borrow
+        // of `self.config`; needed for the RFC 6232 POI stamp below.
+        let own_sys_id = self.config.net.sys_id();
+        let mut top = self.top();
+        Self::process_lsp_purge_top(&mut top, level, lsp_id, own_sys_id);
     }
 
     /// ISO 10589 §7.3.16.4 wait expired for one specific fragment:
@@ -3029,6 +3102,21 @@ impl Isis {
             return;
         };
         let ifindex = key.ifindex;
+        let mut failed_nhops = BTreeSet::from([key.remote]);
+        if let Some(link) = self.links.get(&ifindex)
+            && let Some(nbr) = link.state.nbrs.get(&level).get(&sys_id)
+        {
+            failed_nhops.extend(nbr.addr4.keys().copied().map(std::net::IpAddr::V4));
+            failed_nhops.extend(nbr.addr6l.iter().copied().map(std::net::IpAddr::V6));
+        }
+        self.microloop_failure_begin(
+            level,
+            super::microloop::FailureCause::BfdDown,
+            ifindex,
+            BTreeSet::from([sys_id]),
+            failed_nhops,
+            false,
+        );
         // Capture the toggle before borrowing the link — `link_top` takes
         // `&mut self`, so `self.tracing` is unreachable while `link` is held.
         let trace_bfd = self.tracing.should_trace_bfd();
@@ -3044,16 +3132,6 @@ impl Isis {
                 "isis: tearing down adjacency on bfd-down (RFC 5882 §5)",
             );
         }
-        // Capture the neighbour's nexthop addresses BEFORE the teardown
-        // removes the entry — these are the exact keys SPF used for this
-        // adjacency's routes (v4: interface addrs from TLV 132, v6: the
-        // link-locals from TLV 232), i.e. the addresses the RIB's
-        // protection groups key their primaries on.
-        let mut failed_nhops: Vec<std::net::IpAddr> = Vec::new();
-        if let Some(nbr) = link.state.nbrs.get(&level).get(&sys_id) {
-            failed_nhops.extend(nbr.addr4.keys().copied().map(std::net::IpAddr::V4));
-            failed_nhops.extend(nbr.addr6l.iter().copied().map(std::net::IpAddr::V6));
-        }
         // Tear the adjacency but keep the BFD session probing. This clears any
         // prior hold-down pin, so set the pin afterwards.
         nbr_hold_timer_expire(&mut link, level, sys_id, false);
@@ -3062,21 +3140,13 @@ impl Isis {
         // if the neighbour entry is absent from `nbrs` at that point (race:
         // BFD Up fires before the next IIH re-creates the entry).
         link.state.bfd_holddown_nbr.insert(*key, (level, sys_id));
-        // Fast-reroute switchover: rewire the
-        // pre-installed protection groups onto their TI-LFA repairs NOW,
-        // before the LSP regeneration / SPF / per-prefix reinstall pipeline
-        // even starts. One message per failed nexthop address; the RIB
-        // no-ops when nothing is protected. Channel ordering guarantees
-        // this lands before the post-convergence route updates.
-        for addr in failed_nhops {
-            let _ = self.ctx.rib.protect_switch(addr);
-        }
     }
 
     /// BFD session came Up: lift any hold-down pin for the neighbour so the
     /// next received IIH promotes its adjacency back to Up. A no-op when the
     /// neighbour was not held (e.g. the normal first-Up after adjacency form).
     fn process_bfd_up(&mut self, key: &crate::bfd::session::SessionKey) {
+        self.microloop_abort_ifindex(key.ifindex);
         // Undo the switchover's ECMP leg eviction FIRST, before any of the
         // early returns below. Each of those is a legitimate "no adjacency
         // bookkeeping to do" case — the neighbour re-formed from an IIH
@@ -3174,6 +3244,7 @@ impl Isis {
             peer_algo_srv6: &mut self.peer_algo_srv6,
             rib: &mut self.rib,
             rib_v6: &mut self.rib_v6,
+            microloop: &mut self.microloop,
             retained_locators: &mut self.retained_locators,
             egress_protect_registered: &mut self.egress_protect_registered,
             ilm: &mut self.ilm,
@@ -3902,6 +3973,27 @@ pub enum Message {
     /// one follow-up `SpfCalc` so coalesced LSDB changes still
     /// converge.
     SpfDone(Box<super::rib::SpfOutput>),
+    /// Completion of one RIB protection activation request. Multiple
+    /// address-scoped results aggregate into the candidate failure.
+    MicroloopActivation {
+        level: Level,
+        failure_id: u64,
+        activated: bool,
+        rewired: usize,
+        evicted: usize,
+    },
+    /// Fixed local-convergence delay expired. `token` makes callbacks
+    /// from cancelled/replaced holds harmless.
+    MicroloopExpire {
+        level: Level,
+        token: u64,
+    },
+    /// Safety watchdog for a failure candidate that never observes both a
+    /// completed protection activation and a post-failure self-LSP SPF.
+    MicroloopCandidateExpire {
+        level: Level,
+        failure_id: u64,
+    },
     AdjacencyUp(Level, u32),
     /// MaxAge wait expired after a seq-number-wrap purge (ISO 10589
     /// §7.3.16.4). Clears the per-fragment freeze entry for
@@ -3961,6 +4053,22 @@ impl Display for Message {
             }
             Message::SpfCalc(level) => write!(f, "[Message::SpfCalc({})]", level),
             Message::SpfDone(output) => write!(f, "[Message::SpfDone({})]", output.level),
+            Message::MicroloopActivation {
+                level,
+                failure_id,
+                activated,
+                ..
+            } => write!(
+                f,
+                "[Message::MicroloopActivation({level}, id={failure_id}, active={activated})]"
+            ),
+            Message::MicroloopExpire { level, token } => {
+                write!(f, "[Message::MicroloopExpire({level}, token={token})]")
+            }
+            Message::MicroloopCandidateExpire { level, failure_id } => write!(
+                f,
+                "[Message::MicroloopCandidateExpire({level}, id={failure_id})]"
+            ),
             Message::AdjacencyUp(level, ifindex) => {
                 write!(f, "[Message::AdjacencyUp({}:{})]", level, ifindex)
             }
@@ -4296,7 +4404,7 @@ mod purge_poi_tests {
 }
 
 #[cfg(test)]
-mod commit_gate_tests {
+mod commit_and_microloop_gate_tests {
     use tokio::sync::mpsc;
 
     use super::bfd_wiring_tests::{test_config_tx, test_ctx, test_rib_subscriber};
@@ -4317,6 +4425,54 @@ mod commit_gate_tests {
             test_rib_subscriber(),
             test_config_tx(),
         )
+    }
+
+    fn microloop_candidate(id: u64, ifindex: u32) -> super::super::microloop::Failure {
+        super::super::microloop::Failure {
+            id,
+            revision: id,
+            required_self_lsp_generation: id,
+            cause: super::super::microloop::FailureCause::BfdDown,
+            ifindex,
+            peers: BTreeSet::new(),
+            nexthops: BTreeSet::new(),
+            activation_pending: 0,
+            activated: true,
+            rewired: 1,
+            evicted: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_microloop_watchdog_cannot_clear_new_candidate() {
+        let mut isis = fresh_isis();
+        isis.microloop.levels.l2.candidate = Some(microloop_candidate(2, 7));
+
+        isis.microloop_candidate_expire(Level::L2, 1);
+        assert_eq!(
+            isis.microloop.levels.l2.candidate.as_ref().map(|c| c.id),
+            Some(2)
+        );
+        assert_eq!(isis.microloop.levels.l2.topology_timeouts, 0);
+
+        isis.microloop_candidate_expire(Level::L2, 2);
+        assert!(isis.microloop.levels.l2.candidate.is_none());
+        assert_eq!(isis.microloop.levels.l2.topology_timeouts, 1);
+        assert_eq!(isis.microloop.levels.l2.aborts, 1);
+        assert!(isis.spf_timer.l2.is_some());
+    }
+
+    #[tokio::test]
+    async fn recovery_cancels_only_the_matching_microloop_candidate() {
+        let mut isis = fresh_isis();
+        isis.microloop.levels.l1.candidate = Some(microloop_candidate(1, 7));
+        isis.microloop.levels.l2.candidate = Some(microloop_candidate(2, 8));
+
+        isis.microloop_abort_ifindex(7);
+        assert!(isis.microloop.levels.l1.candidate.is_none());
+        assert!(isis.microloop.levels.l2.candidate.is_some());
+        assert_eq!(isis.microloop.levels.l1.aborts, 1);
+        assert_eq!(isis.microloop.levels.l2.aborts, 0);
     }
 
     fn commit_start() -> ConfigRequest {

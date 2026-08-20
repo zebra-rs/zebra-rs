@@ -158,6 +158,17 @@ Level-1 IPv4:
 
 JSON: `{ area, levels: [ { level, ipv4, ipv6 } ] }`.
 
+### `show isis micro-loop-avoidance`
+
+The IS-IS local-convergence-delay phase (`idle`, `candidate`, or `holding`)
+for each level, including the failed interface/cause, protection activation
+status, committed and last-SPF self-LSP generations, topology-gate readiness
+and watchdog time, remaining hold time, held IPv4/IPv6 prefix counts, and
+lifetime release/abort/failure counters.
+
+JSON: `{ enabled, operational, inactive_reason, rib_update_delay_ms,
+levels: [ … ] }`.
+
 ### `show isis fast-reroute prefix <A.B.C.D/M> detail`
 
 The TI-LFA protection detail for one IPv4 prefix — per-nexthop backup

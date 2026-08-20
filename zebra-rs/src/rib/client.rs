@@ -20,9 +20,31 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::mpsc::error::SendError;
+use tokio::sync::oneshot;
 
 use super::api::RibRx;
 use super::inst::Message;
+
+/// Result of one adjacency-scoped protection switchover request.
+///
+/// Protocols that need to retain the activated repair during
+/// convergence (IS-IS micro-loop avoidance) use this acknowledgement
+/// as the commit point: a zero result is a fail-open signal and must
+/// not start a route-publication hold.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProtectSwitchResult {
+    pub rewired: usize,
+    pub evicted: usize,
+}
+
+impl ProtectSwitchResult {
+    pub fn activated(self) -> bool {
+        // ECMP-leg eviction preserves reachability but is not evidence that
+        // a TI-LFA protection group was switched onto a repair. MLA may hold
+        // the old protected route only after at least one actual rewire.
+        self.rewired > 0
+    }
+}
 
 /// Opaque per-subscriber identifier minted by
 /// [`crate::config::ConfigManager`] and recorded in
@@ -137,7 +159,22 @@ impl RibClient {
     /// SPF, so traffic moves to the pre-installed TI-LFA repairs in
     /// O(adjacencies) while reconvergence runs.
     pub fn protect_switch(&self, addr: std::net::IpAddr) -> Result<(), SendError<RibInbound>> {
-        self.send(Message::ProtectSwitch { addr })
+        self.send(Message::ProtectSwitch { addr, reply: None })
+    }
+
+    /// Trigger a protection switchover and return a completion receiver.
+    /// A dropped receiver (including a RIB channel failure) is treated by
+    /// callers as activation failure and therefore normal convergence.
+    pub fn protect_switch_report(
+        &self,
+        addr: std::net::IpAddr,
+    ) -> oneshot::Receiver<ProtectSwitchResult> {
+        let (reply, rx) = oneshot::channel();
+        let _ = self.send(Message::ProtectSwitch {
+            addr,
+            reply: Some(reply),
+        });
+        rx
     }
 
     /// Undo the switchover's ECMP leg eviction for the adjacency at
@@ -314,6 +351,24 @@ impl ClientRegistry {
 mod tests {
     use super::*;
     use tokio::sync::mpsc::unbounded_channel;
+
+    #[test]
+    fn protect_switch_activation_requires_a_rewired_repair() {
+        assert!(
+            ProtectSwitchResult {
+                rewired: 1,
+                evicted: 0,
+            }
+            .activated()
+        );
+        assert!(
+            !ProtectSwitchResult {
+                rewired: 0,
+                evicted: 2,
+            }
+            .activated()
+        );
+    }
 
     #[test]
     fn register_with_id_records_subscriber_and_advances_next_id() {
