@@ -39,11 +39,9 @@ impl FadSrlg {
     /// Parse 4-byte SRLG values; a trailing remainder shorter than 4 bytes is
     /// dropped (matches the OSPFv2 `many0` and OSPFv3 `while >= 4` originals).
     pub fn parse_value(value: &[u8]) -> Self {
+        let (srlgs, _) = value.as_chunks::<4>();
         Self {
-            srlgs: value
-                .chunks_exact(4)
-                .map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]]))
-                .collect(),
+            srlgs: srlgs.iter().copied().map(u32::from_be_bytes).collect(),
         }
     }
 

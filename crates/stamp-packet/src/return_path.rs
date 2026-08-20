@@ -184,8 +184,11 @@ impl ReturnPathSubTlvValue {
                     return Err(ParseError::BadLabelStackLength { len: val.len() });
                 }
                 let stack = val
-                    .chunks_exact(4)
-                    .map(|c| MplsLabelEntry::from_raw(u32::from_be_bytes(c.try_into().unwrap())))
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .copied()
+                    .map(|c| MplsLabelEntry::from_raw(u32::from_be_bytes(c)))
                     .collect();
                 Self::SrMplsLabelStack(stack)
             }
@@ -194,8 +197,11 @@ impl ReturnPathSubTlvValue {
                     return Err(ParseError::BadSegmentListLength { len: val.len() });
                 }
                 let sids = val
-                    .chunks_exact(16)
-                    .map(|c| Ipv6Addr::from(<[u8; 16]>::try_from(c).unwrap()))
+                    .as_chunks::<16>()
+                    .0
+                    .iter()
+                    .copied()
+                    .map(Ipv6Addr::from)
                     .collect();
                 Self::Srv6SegmentList(sids)
             }

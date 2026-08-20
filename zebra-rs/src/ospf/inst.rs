@@ -6059,7 +6059,7 @@ impl Ospf<Ospfv2> {
         if link.ls_ack_delayed.is_empty() {
             return;
         }
-        let ack_headers: Vec<OspfLsaHeader> = link.ls_ack_delayed.drain(..).collect();
+        let ack_headers = std::mem::take(&mut link.ls_ack_delayed);
         ospf_packet_trace!(
             self.tracing,
             LsAck,
