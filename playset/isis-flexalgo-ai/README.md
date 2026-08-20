@@ -221,7 +221,9 @@ what to put on each of the eleven routers) to the assistant:
 > traffic has to travel the other way around, via Europe.
 >
 > Implement this with an IS-IS Flexible Algorithm (algorithm 128, IGP
-> metric, SR-MPLS data plane):
+> metric, SR-MPLS data plane). The zebra-rs Flex-Algorithm configuration
+> manual is at <https://zebra.rs/docs.html#ch-07-11-isis-flexalgo> —
+> follow its syntax and consistency rules:
 >
 > 1. Work out from the ontology and the live IS-IS topology which links
 >    cross the Pacific. Do not ask me — derive it.
