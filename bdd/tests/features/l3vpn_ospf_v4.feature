@@ -67,6 +67,20 @@ Feature: MPLS/VPN L3VPN (IPv4) with OSPFv2 PE-CE both segments
     Then ping from "c1" to "10.0.2.1" should eventually succeed
     And ping from "c2" to "10.0.1.1" should eventually succeed
 
+  # Moving a live interface out of a VRF is delivered to its per-VRF OSPF
+  # child as LinkDel; moving it back is a fresh LinkAdd.  The OSPF interface
+  # intent (especially enabled + point-to-point) must outlive that runtime
+  # OspfLink object and rebuild the adjacency without reapplying router ospf.
+  Scenario: OSPFv2 interface intent survives a VRF detach and reattach
+    Given the test topology exists
+    When I apply command "delete interface ce2 vrf vrf-cust" in namespace "pe2"
+    Then command "ip -d link show ce2" in namespace "pe2" should eventually not contain "master vrf-cust"
+    When I apply command "set interface ce2 vrf vrf-cust" in namespace "pe2"
+    Then command "ip -d link show ce2" in namespace "pe2" should eventually contain "master vrf-cust"
+    And show command "show ospf vrf vrf-cust neighbor" in namespace "pe2" should eventually contain "Full"
+    And show command "show running-config formal" in namespace "pe2" should contain "set router ospf vrf vrf-cust area 0.0.0.0 interface ce2 network-type point-to-point"
+    And ping from "c1" to "10.0.2.1" should eventually succeed
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "c1"

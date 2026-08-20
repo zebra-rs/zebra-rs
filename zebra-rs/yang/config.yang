@@ -3069,6 +3069,23 @@ module config {
               }
             }
           }
+          container micro-loop-avoidance {
+            ext:help "Delay IS-IS convergence after local TI-LFA activation";
+            presence "Enable IS-IS micro-loop avoidance";
+            description
+              "Retain eligible native IPv4 and IPv6 routes on their
+               activated TI-LFA repair for a fixed interval after a local
+               failure. Withdrawals, new prefixes, unrelated routes,
+               Flex-Algorithm routes, and MPLS ILM updates are not delayed.";
+            leaf rib-update-delay {
+              ext:help "Post-failure native RIB update delay (milliseconds)";
+              type uint32 {
+                range "1..60000";
+              }
+              units milliseconds;
+              default "5000";
+            }
+          }
           container backup-as-primary {
             ext:help "Install TI-LFA backup as the primary nexthop";
             // Swap the metric-sort offset between the SPF primary

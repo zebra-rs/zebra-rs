@@ -367,6 +367,20 @@ pub struct SpfRoute<F: IsisRibFamily> {
     pub backup_as_primary: bool,
 }
 
+impl<F: IsisRibFamily> Clone for SpfRoute<F> {
+    fn clone(&self) -> Self {
+        Self {
+            metric: self.metric,
+            nhops: self.nhops.clone(),
+            sid: self.sid,
+            prefix_sid: self.prefix_sid.clone(),
+            no_php: self.no_php,
+            dest_vertex: self.dest_vertex,
+            backup_as_primary: self.backup_as_primary,
+        }
+    }
+}
+
 impl<F: IsisRibFamily> std::fmt::Debug for SpfRoute<F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SpfRoute")
@@ -1095,6 +1109,7 @@ pub(super) fn ipv6_capable_set(lsdb: &Lsdb) -> BTreeSet<IsisSysId> {
 fn apply_routing_updates(
     top: &mut IsisTop,
     level: Level,
+    spf_self_lsp_generation: u64,
     rib: PrefixMap<Ipv4Net, SpfRoute<V4>>,
     rib_v6: PrefixMap<Ipv6Net, SpfRoute<V6>>,
     ilm: BTreeMap<u32, SpfIlm>,
@@ -1109,6 +1124,21 @@ fn apply_routing_updates(
     }
     *top.ilm.get_mut(&level) = ilm;
 
+    let (rib, rib_v6) =
+        super::microloop::select_published_routes(top, level, spf_self_lsp_generation, rib, rib_v6);
+
+    publish_native_routes(top, level, rib, rib_v6);
+}
+
+/// Publish a complete native route snapshot. Kept separate from the SPF
+/// builder so the micro-loop hold timer can release its pending desired
+/// maps through exactly the same diff/cache/retention path.
+fn publish_native_routes(
+    top: &mut IsisTop,
+    level: Level,
+    rib: PrefixMap<Ipv4Net, SpfRoute<V4>>,
+    rib_v6: PrefixMap<Ipv6Net, SpfRoute<V6>>,
+) {
     // The `fast-reroute backup-as-primary` flag is stamped onto each
     // `SpfRoute` at build time and read back in `make_rib_entry`, so
     // the metric ordering is decided by the route, not a separate
@@ -1137,6 +1167,16 @@ fn apply_routing_updates(
     *top.rib_v6.get_mut(&level) = rib_v6;
 }
 
+pub(super) fn publish_microloop_routes(
+    isis: &mut Isis,
+    level: Level,
+    rib: PrefixMap<Ipv4Net, SpfRoute<V4>>,
+    rib_v6: PrefixMap<Ipv6Net, SpfRoute<V6>>,
+) {
+    let mut top = isis.top();
+    publish_native_routes(&mut top, level, rib, rib_v6);
+}
+
 /// Owned, `Send`-able inputs to a single IS-IS SPF run for one level.
 ///
 /// Built on the main task by [`build_spf_input`], which reads
@@ -1146,6 +1186,8 @@ fn apply_routing_updates(
 /// `tokio::task::spawn_blocking` without touching shared state.
 pub(super) struct SpfInput {
     level: Level,
+    microloop_revision: u64,
+    self_lsp_generation: u64,
     graph: spf::Graph,
     source: usize,
     adjacency_sids: BTreeMap<u32, IsisSysId>,
@@ -1186,6 +1228,8 @@ struct FlexAlgoInput {
 /// can ride on `Message::SpfDone` through the channel.
 pub struct SpfOutput {
     pub(super) level: Level,
+    pub(super) microloop_revision: u64,
+    pub(super) self_lsp_generation: u64,
     source: usize,
     adjacency_sids: BTreeMap<u32, IsisSysId>,
     spf_result: BTreeMap<usize, spf::Path>,
@@ -1310,6 +1354,8 @@ pub(super) fn build_spf_input(top: &mut IsisTop, level: Level) -> Option<SpfInpu
 
     Some(SpfInput {
         level,
+        microloop_revision: top.microloop.revision(level),
+        self_lsp_generation: top.microloop.self_lsp_generation(level),
         graph: legacy_graph,
         source,
         adjacency_sids,
@@ -1327,6 +1373,8 @@ pub(super) fn build_spf_input(top: &mut IsisTop, level: Level) -> Option<SpfInpu
 pub(super) fn compute_spf(input: SpfInput) -> SpfOutput {
     let SpfInput {
         level,
+        microloop_revision,
+        self_lsp_generation,
         graph: legacy_graph,
         source,
         adjacency_sids,
@@ -1416,6 +1464,8 @@ pub(super) fn compute_spf(input: SpfInput) -> SpfOutput {
 
     SpfOutput {
         level,
+        microloop_revision,
+        self_lsp_generation,
         source,
         adjacency_sids,
         spf_result,
@@ -1801,6 +1851,8 @@ fn register_mpls_protections(top: &IsisTop) {
 pub(super) fn apply_spf_result(top: &mut IsisTop, output: SpfOutput) {
     let SpfOutput {
         level,
+        microloop_revision: _,
+        self_lsp_generation,
         source,
         adjacency_sids,
         spf_result,
@@ -2015,7 +2067,7 @@ pub(super) fn apply_spf_result(top: &mut IsisTop, output: SpfOutput) {
     if !top.config.sr_mpls_enabled {
         ilm.clear();
     }
-    apply_routing_updates(top, level, rib, rib_v6, ilm);
+    apply_routing_updates(top, level, self_lsp_generation, rib, rib_v6, ilm);
 }
 
 /// Build the per-algorithm IPv4 RIB from a Flex-Algo SPF result.

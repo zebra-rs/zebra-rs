@@ -528,6 +528,18 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// config intent (`vrf_log`) and kernel info exist.
     pub rib_known_vrfs: BTreeMap<String, (u32, u32)>,
 
+    /// Durable per-interface configuration, keyed by interface name.
+    ///
+    /// `OspfLink` is operational state keyed by a kernel ifindex, so it is
+    /// deliberately destroyed on `LinkDel` and rebuilt on `LinkAdd`.  YANG
+    /// intent must outlive that object: an interface can be created after its
+    /// configuration is committed, receive a new ifindex after recreation, or
+    /// cross a VRF boundary as a `LinkDel` + `LinkAdd` pair.  Keep the original
+    /// Set/Delete stream here and replay it into each fresh `OspfLink`.  The
+    /// stream is in commit order, which also preserves replacement semantics
+    /// for keyed leaves (authentication keys, Prefix-SIDs, and so on).
+    pub interface_config_log: BTreeMap<String, Vec<(Vec<CommandPath>, ConfigOp)>>,
+
     /// BFD client handle, captured at spawn (BFD is eager-spawned
     /// before OSPF). `None` only if BFD failed to start. Used to
     /// Subscribe / Unsubscribe per-neighbor single-hop sessions; see
@@ -636,6 +648,72 @@ impl<'a, V: OspfVersion> OspfInterface<'a, V> {
             crypto_key: self.crypto_key.clone(),
             md5_seq: s,
         }
+    }
+}
+
+/// Return the interface-name key from an OSPF interface configuration
+/// request. The path parser places matched list keys in `Args` order, so the
+/// first two values are area-id and interface name for both schema versions.
+fn ospf_interface_config_name(proto: &str, paths: &[CommandPath]) -> Option<String> {
+    let (path, mut args) = path_from_command(paths);
+    let prefix = format!("/router/{proto}/area/interface");
+    if path != prefix && !path.starts_with(&format!("{prefix}/")) {
+        return None;
+    }
+    let _area_id = args.string()?;
+    args.string()
+}
+
+#[cfg(test)]
+mod interface_config_path_tests {
+    use super::*;
+
+    fn cp(name: &str, ymatch: i32) -> CommandPath {
+        CommandPath {
+            name: name.to_string(),
+            ymatch,
+            ..Default::default()
+        }
+    }
+
+    fn interface_leaf(proto: &str, name: &str) -> Vec<CommandPath> {
+        vec![
+            cp("router", 0),         // Dir
+            cp(proto, 0),            // Dir
+            cp("area", 2),           // Key
+            cp("0.0.0.0", 3),        // KeyMatched
+            cp("interface", 2),      // Key
+            cp(name, 3),             // KeyMatched
+            cp("network-type", 4),   // Leaf
+            cp("point-to-point", 5), // LeafMatched
+        ]
+    }
+
+    #[test]
+    fn extracts_v2_and_v3_interface_names() {
+        assert_eq!(
+            ospf_interface_config_name("ospf", &interface_leaf("ospf", "eth2")),
+            Some("eth2".to_string())
+        );
+        assert_eq!(
+            ospf_interface_config_name("ospfv3", &interface_leaf("ospfv3", "eth3")),
+            Some("eth3".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_other_protocol_and_non_interface_paths() {
+        assert_eq!(
+            ospf_interface_config_name("ospf", &interface_leaf("ospfv3", "eth3")),
+            None
+        );
+        assert_eq!(
+            ospf_interface_config_name(
+                "ospf",
+                &[cp("router", 0), cp("ospf", 0), cp("router-id", 4)]
+            ),
+            None
+        );
     }
 }
 
@@ -1243,6 +1321,7 @@ impl<V: OspfVersion> Ospf<V> {
         if self.links.contains_key(&link.index) {
             return;
         }
+        let name = link.name.clone();
         let link = OspfLink::from(
             self.tx.clone(),
             link,
@@ -1251,6 +1330,7 @@ impl<V: OspfVersion> Ospf<V> {
             self.ptx.clone(),
         );
         self.links.insert(link.index, link);
+        self.interface_config_replay(&name);
     }
 
     /// Mark a link operationally up and, if OSPF is enabled on it,
@@ -1273,8 +1353,14 @@ impl<V: OspfVersion> Ospf<V> {
         };
         link.link_flags |= LinkFlags::Up | LinkFlags::LowerUp;
 
-        if !link.enabled
-            && link.config.enable
+        // Drive the transition from desired state, not the possibly stale
+        // runtime `enabled` bit.  LinkDown and LinkUp arrive on the RIB
+        // channel while Disable/Enable are processed later on `self.tx`; a
+        // rapid Down -> Up can therefore reach here before the queued Disable
+        // clears `enabled`.  Always queue Enable for an administratively
+        // enabled link, giving the self-channel the correct Disable -> Enable
+        // ordering regardless of task scheduling.
+        if link.config.enable
             && let Some(area) = link.config.area
         {
             let _ = self.tx.send(Message::Enable(ifindex, area));
@@ -1295,8 +1381,13 @@ impl<V: OspfVersion> Ospf<V> {
         };
         link.link_flags &= !LinkFlags::LowerUp;
 
-        if link.enabled {
-            let area_id = link.area_id;
+        // As with link_up, queue from desired state.  RIB emits these only on
+        // real operational transitions, so a Down -> Up -> Down burst becomes
+        // Disable -> Enable -> Disable on the FIFO self-channel and converges
+        // to the final kernel state instead of consulting a lagging runtime
+        // bit at each step.
+        if link.config.enable || link.enabled {
+            let area_id = link.config.area.unwrap_or(link.area_id);
             let _ = self.tx.send(Message::Disable(ifindex, area_id));
         }
     }
@@ -1323,6 +1414,40 @@ impl<V: OspfVersion> Ospf<V> {
             let _ = self.tx.send(Message::Disable(ifindex, area_id));
         }
         self.links.remove(&ifindex);
+    }
+
+    /// Remember one interface-scoped Set/Delete independently of the runtime
+    /// link.  Both the default instance and per-VRF children receive paths in
+    /// the plain `/router/<proto>/area/<id>/interface/<name>/...` shape (the
+    /// parent strips the VRF selector before forwarding to a child), so the
+    /// same helper covers OSPFv2 and OSPFv3.
+    fn interface_config_record(&mut self, msg: &ConfigRequest) {
+        if !matches!(msg.op, ConfigOp::Set | ConfigOp::Delete) {
+            return;
+        }
+        let Some(name) = ospf_interface_config_name(V::PROTO, &msg.paths) else {
+            return;
+        };
+        self.interface_config_log
+            .entry(name)
+            .or_default()
+            .push((msg.paths.clone(), msg.op));
+    }
+
+    /// Apply the durable Set/Delete stream to a newly-created operational
+    /// link.  Invoke callbacks directly so replay does not append a second copy
+    /// to the log.  Callback function pointers are copied out of the table
+    /// before borrowing `self` mutably.
+    fn interface_config_replay(&mut self, name: &str) {
+        let Some(log) = self.interface_config_log.get(name).cloned() else {
+            return;
+        };
+        for (paths, op) in log {
+            let (path, args) = path_from_command(&paths);
+            if let Some(callback) = self.callbacks.get(&path).copied() {
+                callback(self, args, op);
+            }
+        }
     }
 
     /// Count Exchange/Loading neighbors across all links in the same area.
@@ -1686,6 +1811,7 @@ impl Ospf<Ospfv2> {
             vrf_log: BTreeMap::new(),
             vrf_registry: BTreeMap::new(),
             rib_known_vrfs: BTreeMap::new(),
+            interface_config_log: BTreeMap::new(),
             bfd_client_tx,
             bfd_event_tx,
             bfd_event_rx,
@@ -1721,6 +1847,8 @@ impl Ospf<Ospfv2> {
     }
 
     pub fn process_cm_msg(&mut self, msg: ConfigRequest) {
+        self.interface_config_record(&msg);
+
         // CommitEnd: fan out to per-VRF children (run their reconcile)
         // and prune any whose `router ospf vrf <name>` block was fully
         // deleted, then apply this instance's own flex-algo / affinity
@@ -5931,7 +6059,7 @@ impl Ospf<Ospfv2> {
         if link.ls_ack_delayed.is_empty() {
             return;
         }
-        let ack_headers: Vec<OspfLsaHeader> = link.ls_ack_delayed.drain(..).collect();
+        let ack_headers = std::mem::take(&mut link.ls_ack_delayed);
         ospf_packet_trace!(
             self.tracing,
             LsAck,
@@ -7009,6 +7137,7 @@ impl Ospf<Ospfv3> {
             vrf_log: BTreeMap::new(),
             vrf_registry: BTreeMap::new(),
             rib_known_vrfs: BTreeMap::new(),
+            interface_config_log: BTreeMap::new(),
             bfd_client_tx,
             bfd_event_tx,
             bfd_event_rx,
@@ -7036,6 +7165,8 @@ impl Ospf<Ospfv3> {
     /// `/router/ospfv3/area/interface/enable` is registered (stub
     /// path); more leaves land alongside the YANG schema expansion.
     pub fn process_cm_msg(&mut self, msg: ConfigRequest) {
+        self.interface_config_record(&msg);
+
         // CommitEnd: fan out to per-VRF children and prune deleted
         // ones, then apply this instance's own staging (mirrors the v2
         // sibling).

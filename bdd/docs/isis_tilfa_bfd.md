@@ -16,11 +16,17 @@ PDUs, not IP) keep flowing, so the teardown is provably BFD's doing
 — the exact failure class the kernel's autonomous link-down path
 cannot cover.
 
-The switchover itself is observable only in the daemon log (the
-"rewired N protection group(s) onto repairs" line is emitted ONLY
-when at least one group actually moved): its kernel state is
-superseded within milliseconds by the post-convergence SPF routes,
-which is by design — the switchover is a bridge, not a steady state.
+The switchover itself is observable in the daemon log (the "rewired N
+protection group(s) onto repairs" line is emitted ONLY when at least
+one group actually moved). The convergence scenario enables IS-IS
+micro-loop avoidance so SPF may complete while that activated repair is
+deliberately retained, then verifies fixed-delay release.
+
+The convergence scenario makes the ordering deterministic on the source:
+SPF uses a 1 ms throttle while self-LSP generation waits 1000 ms. It asserts
+that the first pre-commit SPF is rejected by the self-LSP generation gate,
+then that the post-commit SPF enters the normal hold. The timer leaves are
+deleted after recovery, restoring their built-in defaults.
 
 ## Test Topology
 

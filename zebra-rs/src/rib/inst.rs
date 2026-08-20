@@ -217,6 +217,9 @@ pub enum Message {
     // the construction inside keeps this variant live with it.
     ProtectSwitch {
         addr: IpAddr,
+        /// Optional activation acknowledgement used by IS-IS
+        /// micro-loop avoidance. Legacy callers deliberately omit it.
+        reply: Option<tokio::sync::oneshot::Sender<super::client::ProtectSwitchResult>>,
     },
     /// The inverse of [`Message::ProtectSwitch`]: the adjacency at
     /// `addr` is back (BFD Up while the link never went down). The
@@ -2226,8 +2229,17 @@ impl Rib {
             }
             return;
         }
-        // Link dump.
+        // Link dump. Match the steady-state dispatcher: an ordinary
+        // subscriber sees only links in its own VRF, while an explicit
+        // `global_links` subscriber sees every VRF. Sending every link here
+        // used to let a per-VRF OSPF instance configure an interface before
+        // the kernel had actually moved it into that VRF; the later VRF
+        // LinkAdd was then mistaken for a duplicate ifindex.
         for link in self.links.values() {
+            let link_vrf_id = self.master_vrf_id(link.master);
+            if !global_links && link_vrf_id != vrf_id {
+                continue;
+            }
             let msg = RibRx::LinkAdd(link.clone());
             if tx.send(msg).is_err() {
                 return;
@@ -2924,7 +2936,7 @@ impl Rib {
             Message::NexthopRegister { proto, nh, vrf_id } => {
                 self.nht_register(proto, vrf_id, nh);
             }
-            Message::ProtectSwitch { addr } => {
+            Message::ProtectSwitch { addr, reply } => {
                 let (rewired, evicted) =
                     super::route::protect_switch(&mut self.nmap, &self.fib_handle, table_id, addr)
                         .await;
@@ -2943,6 +2955,9 @@ impl Rib {
                 }
                 if rewired == 0 && evicted == 0 {
                     tracing::debug!("ProtectSwitch {addr} table {table_id}: no eligible groups");
+                }
+                if let Some(reply) = reply {
+                    let _ = reply.send(super::client::ProtectSwitchResult { rewired, evicted });
                 }
             }
             Message::ProtectRestore { addr } => {

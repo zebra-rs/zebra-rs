@@ -16,11 +16,11 @@ Feature: IS-IS TI-LFA kernel-side fast-reroute on BFD failure
   — the exact failure class the kernel's autonomous link-down path
   cannot cover.
 
-  The switchover itself is observable only in the daemon log (the
-  "rewired N protection group(s) onto repairs" line is emitted ONLY
-  when at least one group actually moved): its kernel state is
-  superseded within milliseconds by the post-convergence SPF routes,
-  which is by design — the switchover is a bridge, not a steady state.
+  The switchover itself is observable in the daemon log (the "rewired
+  N protection group(s) onto repairs" line is emitted ONLY when at
+  least one group actually moved). The convergence scenario enables
+  IS-IS micro-loop avoidance so SPF may complete while that activated
+  repair is deliberately retained, then verifies fixed-delay release.
 
   Test Topology (same wiring and metrics as isis_tilfa):
   ```
@@ -83,16 +83,37 @@ Feature: IS-IS TI-LFA kernel-side fast-reroute on BFD failure
 
   Scenario: BFD-down with the link up triggers the kernel-side switchover
     Given the test topology exists
+    When I apply command "set router isis fast-reroute micro-loop-avoidance rib-update-delay 10000" in namespace "s"
+    Then show command "show isis micro-loop-avoidance" in namespace "s" should contain "operational"
+    # Force the pre-fix race deterministically: the first SPF snapshots
+    # the failed live adjacency before our delayed self-LSP has removed
+    # the corresponding edge from the LSDB. The generation gate must keep
+    # that transient result from consuming the failure candidate.
+    When I apply command "set router isis spf-interval initial-wait 1" in namespace "s"
+    And I apply command "set router isis spf-interval secondary-wait 1" in namespace "s"
+    And I apply command "set router isis spf-interval maximum-wait 1" in namespace "s"
+    And I apply command "set router isis lsp-gen-interval initial-wait 1000" in namespace "s"
+    And I apply command "set router isis lsp-gen-interval secondary-wait 1000" in namespace "s"
+    And I apply command "set router isis lsp-gen-interval maximum-wait 1000" in namespace "s"
+    And I wait 3 seconds
     Then ping from "s" to "10.0.0.8" should succeed
     # Kill BFD only: the link stays up (no autonomous kernel flush) and
     # IIHs keep flowing (no IS-IS hold-timer expiry) — s must learn of
     # the failure from BFD and bridge traffic onto the repairs itself.
     When I drop bfd control packets in namespace "s"
     Then bfd session in namespace "s" on interface "s-n1" should be down
+    And daemon log in namespace "s" should eventually contain "awaiting self-LSP generation"
+    # SPF has completed, but the old protected route object remains in
+    # place so its already-switched TI-LFA group cannot be reasserted back
+    # to the failed primary before downstream convergence catches up.
+    And show command "show isis micro-loop-avoidance" in namespace "s" should eventually contain "Level-2: holding"
+    And ping from "s" to "10.0.0.8" should succeed
     # The switchover fired: at least one protection group was rewired
     # onto its repair (this exact line is only logged when N > 0).
     And daemon log in namespace "s" should eventually contain "rewired"
     And daemon log in namespace "s" should eventually contain "protection group(s) onto repairs"
+    # The fixed deadline publishes the latest post-convergence snapshot.
+    And show command "show isis micro-loop-avoidance" in namespace "s" should eventually contain "Level-2: idle"
     # SPF reconvergence then re-routes around n1 entirely: d is reached
     # out the s-n2 plane, and forwarding is healthy end to end.
     And kernel route "10.0.0.8" in namespace "s" should eventually contain "dev s-n2"
@@ -104,6 +125,16 @@ Feature: IS-IS TI-LFA kernel-side fast-reroute on BFD failure
     Then bfd session in namespace "s" on interface "s-n1" should be up
     And kernel route "10.0.0.8" in namespace "s" should eventually contain "dev s-n1"
     And ping from "s" to "10.0.0.8" should succeed
+    # Restore the built-in 50/200/5000 ms SPF and 50/5000/5000 ms
+    # LSP-generation profiles so this scenario leaves no timer overrides.
+    When I apply command "delete router isis spf-interval initial-wait" in namespace "s"
+    And I apply command "delete router isis spf-interval secondary-wait" in namespace "s"
+    And I apply command "delete router isis spf-interval maximum-wait" in namespace "s"
+    And I apply command "delete router isis lsp-gen-interval initial-wait" in namespace "s"
+    And I apply command "delete router isis lsp-gen-interval secondary-wait" in namespace "s"
+    And I apply command "delete router isis lsp-gen-interval maximum-wait" in namespace "s"
+    When I apply command "delete router isis fast-reroute micro-loop-avoidance" in namespace "s"
+    Then show command "show isis micro-loop-avoidance" in namespace "s" should contain "not configured"
 
   Scenario: Teardown topology
     Given the test topology exists

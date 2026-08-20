@@ -60,6 +60,19 @@ Feature: SRv6 L3VPN (IPv6) with OSPFv3 PE-CE both segments
     Then ping from "c1" to "2001:db8:c2::1" should eventually succeed
     And ping from "c2" to "2001:db8:c1::1" should eventually succeed
 
+  # Regression for the same shared OspfLink lifecycle as v2.  The running
+  # configuration is unchanged by the VRF move; only the transient kernel-link
+  # object is deleted and recreated inside the per-VRF OSPFv3 instance.
+  Scenario: OSPFv3 interface intent survives a VRF detach and reattach
+    Given the test topology exists
+    When I apply command "delete interface ce2 vrf vrf-cust" in namespace "pe2"
+    Then command "ip -d link show ce2" in namespace "pe2" should eventually not contain "master vrf-cust"
+    When I apply command "set interface ce2 vrf vrf-cust" in namespace "pe2"
+    Then command "ip -d link show ce2" in namespace "pe2" should eventually contain "master vrf-cust"
+    And show command "show ospfv3 vrf vrf-cust neighbor" in namespace "pe2" should eventually contain "Full"
+    And show command "show running-config formal" in namespace "pe2" should contain "set router ospfv3 vrf vrf-cust area 0.0.0.0 interface ce2 network-type point-to-point"
+    And ping from "c1" to "2001:db8:c2::1" should eventually succeed
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "c1"

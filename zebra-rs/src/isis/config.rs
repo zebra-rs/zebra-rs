@@ -141,6 +141,14 @@ impl Isis {
         );
         self.callback_add("/router/isis/fast-reroute/ti-lfa", config_ti_lfa);
         self.callback_add(
+            "/router/isis/fast-reroute/micro-loop-avoidance",
+            config_microloop_avoidance,
+        );
+        self.callback_add(
+            "/router/isis/fast-reroute/micro-loop-avoidance/rib-update-delay",
+            config_microloop_rib_update_delay,
+        );
+        self.callback_add(
             "/router/isis/fast-reroute/ti-lfa/compute-mode/serial",
             config_ti_lfa_compute_mode_serial,
         );
@@ -517,6 +525,16 @@ pub struct IsisConfig {
     /// Adj-SID B-flag (RFC 8667 §2.2.1) emitted in TLV 22 sub-TLVs.
     pub ti_lfa_enabled: bool,
 
+    /// RFC 8333-style local convergence delay. When enabled, a local
+    /// failure that successfully activates a pre-installed TI-LFA repair
+    /// retains eligible native routes until `microloop_rib_update_delay_ms`.
+    pub microloop_avoidance_enabled: bool,
+
+    /// Fixed native RIB publication hold, in milliseconds. The deadline is
+    /// snapshotted when a hold starts and is never extended by later SPF
+    /// results. Default 5000 ms.
+    pub microloop_rib_update_delay_ms: u32,
+
     /// Set when /router/isis/fast-reroute/backup-as-primary is
     /// committed. Inverts the primary/backup metric-sort offset used
     /// by `make_rib_entry`: the TI-LFA repair installs at
@@ -799,6 +817,8 @@ impl Default for IsisConfig {
             sr_srv6_locator: Default::default(),
             sr_srv6_flex_algo_locators: Default::default(),
             ti_lfa_enabled: Default::default(),
+            microloop_avoidance_enabled: false,
+            microloop_rib_update_delay_ms: 5000,
             fast_reroute_backup_as_primary: Default::default(),
             ti_lfa_compute_mode: Default::default(),
             // Matches the YANG `default 8` on the sharding `shards` leaf.
@@ -1448,6 +1468,9 @@ fn config_ti_lfa(isis: &mut Isis, _args: Args, op: ConfigOp) -> Option<()> {
     if isis.config.ti_lfa_enabled == prev {
         return Some(());
     }
+    if !isis.config.ti_lfa_enabled {
+        isis.microloop_abort_all();
+    }
     // Re-originate the self LSP so the Adj-SID B-flag (RFC 8667 §2.2.1)
     // reflects the new state at LSP-generation time. has_level() inside
     // process_lsp_originate filters out the wrong level for
@@ -1459,6 +1482,32 @@ fn config_ti_lfa(isis: &mut Isis, _args: Args, op: ConfigOp) -> Option<()> {
     // drops them (on disable) for every prefix in this instance.
     let _ = isis.tx.send(Message::SpfCalc(Level::L1));
     let _ = isis.tx.send(Message::SpfCalc(Level::L2));
+    Some(())
+}
+
+fn config_microloop_avoidance(isis: &mut Isis, _args: Args, op: ConfigOp) -> Option<()> {
+    let enabled = op.is_set();
+    if isis.config.microloop_avoidance_enabled == enabled {
+        return Some(());
+    }
+    if !enabled {
+        // Publish any pending desired snapshot before disabling the gate;
+        // dropping the Timer alone would strand the old route cache.
+        isis.microloop_abort_all();
+    }
+    isis.config.microloop_avoidance_enabled = enabled;
+    Some(())
+}
+
+fn config_microloop_rib_update_delay(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let delay = if op.is_set() { args.u32()? } else { 5000 };
+    if isis.config.microloop_rib_update_delay_ms == delay {
+        return Some(());
+    }
+    // An active hold owns a fixed deadline. Treat changing its policy as
+    // an operator abort, publish now, and apply the new delay next event.
+    isis.microloop_abort_all();
+    isis.config.microloop_rib_update_delay_ms = delay;
     Some(())
 }
 
@@ -1562,6 +1611,9 @@ fn config_fast_reroute_backup_as_primary(isis: &mut Isis, _args: Args, op: Confi
     isis.config.fast_reroute_backup_as_primary = op.is_set();
     if isis.config.fast_reroute_backup_as_primary == prev {
         return Some(());
+    }
+    if isis.config.fast_reroute_backup_as_primary {
+        isis.microloop_abort_all();
     }
     // Re-run SPF so the RIB rebuilds with the inverted primary/backup
     // metric ordering. No LSP re-origination needed — the swap is a
@@ -2038,6 +2090,10 @@ fn config_te_router_id(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<
 
 fn config_distribute_rib(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     let enable = args.boolean()?;
+
+    // A distribution-policy change invalidates the publication contract of
+    // an active hold. Release under the old policy before flipping it.
+    isis.microloop_abort_all();
 
     if op.is_set() {
         isis.config.distribute.rib = enable;
