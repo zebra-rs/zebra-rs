@@ -121,6 +121,12 @@ The export is convergence-guarded: it retries (up to
 every algorithm's graph and every source has a path to every other
 router, and refuses to write a partial topology.
 
+`--algorithms` restricts the export (comma-separated): `--algorithms 0`
+exports the plain-SPF view only — the Algorithm dropdown and the data
+files both omit everything else. That is how zebra.rs serves both
+`topology/` (full Flex-Algo snapshot) and `topology0/` (algorithm 0
+only, the pre-Flex-Algo view) from the same lab.
+
 Deploy by copying the output directory to any static host. For
 https://zebra.rs it goes into the `zebra-rs/zebra-rs.github.io` repo as
 `topology/`, serving at https://zebra.rs/topology/. Everything is

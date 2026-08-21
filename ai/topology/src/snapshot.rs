@@ -39,10 +39,10 @@ struct Snapshot {
     topologies: Vec<(String, u8, Value)>,
 }
 
-pub async fn run(app: &App, out: &Path, settle: Duration) -> Result<()> {
+pub async fn run(app: &App, out: &Path, settle: Duration, filter: Option<&[u8]>) -> Result<()> {
     let deadline = tokio::time::Instant::now() + settle;
     let snapshot = loop {
-        match collect(app).await {
+        match collect(app, filter).await {
             Ok(s) => break s,
             Err(e) if tokio::time::Instant::now() < deadline => {
                 eprintln!("lab not ready: {e:#}; retrying...");
@@ -57,7 +57,7 @@ pub async fn run(app: &App, out: &Path, settle: Duration) -> Result<()> {
         }
     };
 
-    write(app, out, &snapshot)?;
+    write(app, out, &snapshot, filter)?;
     println!(
         "snapshot: {} — {} routers, {} topology file(s)",
         out.display(),
@@ -70,7 +70,7 @@ pub async fn run(app: &App, out: &Path, settle: Duration) -> Result<()> {
 /// Query every router and validate completeness. Any hole (router not
 /// yet in a graph, destination not yet reachable, flex-algo not yet
 /// advertised) is an error, so the caller can retry until convergence.
-async fn collect(app: &App) -> Result<Snapshot> {
+async fn collect(app: &App, filter: Option<&[u8]>) -> Result<Snapshot> {
     let names: BTreeSet<&str> = app.routers.iter().map(|r| r.name.as_str()).collect();
     let mut snapshot = Snapshot {
         algorithms: Vec::new(),
@@ -80,8 +80,11 @@ async fn collect(app: &App) -> Result<Snapshot> {
 
     for router in &app.routers {
         let source = router.name.as_str();
-        let algorithms = app.api_algorithms(source).await?;
+        let algorithms = filter_algorithms(app.api_algorithms(source).await?, filter);
         let ids = algorithm_ids(&algorithms);
+        if ids.is_empty() {
+            bail!("{source}: no algorithms left after the --algorithms filter");
+        }
         flex_seen |= ids.iter().any(|a| *a != 0);
 
         for algo in &ids {
@@ -97,10 +100,34 @@ async fn collect(app: &App) -> Result<Snapshot> {
 
     // This playset exists to show Flex-Algorithm; a lab where no router
     // advertises one yet has not finished loading its configuration.
-    if !flex_seen {
+    // Exporting algorithm 0 alone is a deliberate choice, not a hole —
+    // the check only applies when a flex-algo is in scope.
+    if !flex_seen && filter.is_none_or(|f| f.iter().any(|a| *a != 0)) {
         bail!("no router advertises a Flex-Algorithm yet");
     }
     Ok(snapshot)
+}
+
+/// Restrict an `/api/algorithms` response to the algorithms in `filter`,
+/// so the exported dropdown never offers an algorithm whose topology
+/// files the export does not contain.
+fn filter_algorithms(mut algorithms: Value, filter: Option<&[u8]>) -> Value {
+    let Some(filter) = filter else {
+        return algorithms;
+    };
+    if let Some(list) = algorithms
+        .get_mut("algorithms")
+        .and_then(Value::as_array_mut)
+    {
+        list.retain(|choice| {
+            choice
+                .get("algo")
+                .and_then(Value::as_u64)
+                .and_then(|a| u8::try_from(a).ok())
+                .is_some_and(|a| filter.contains(&a))
+        });
+    }
+    algorithms
 }
 
 /// The algorithm numbers in an `/api/algorithms` response (0 always
@@ -151,7 +178,7 @@ fn validate_topology(
     Ok(())
 }
 
-fn write(app: &App, out: &Path, snapshot: &Snapshot) -> Result<()> {
+fn write(app: &App, out: &Path, snapshot: &Snapshot, filter: Option<&[u8]>) -> Result<()> {
     let data = out.join("data");
     let assets = out.join("static");
     std::fs::create_dir_all(&data)
@@ -180,12 +207,15 @@ fn write(app: &App, out: &Path, snapshot: &Snapshot) -> Result<()> {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock is past the epoch")
         .as_secs();
-    let manifest = json!({
+    let mut manifest = json!({
         "generatedAtEpoch": generated,
         "playset": "isis-flexalgo",
         "routers": snapshot.algorithms.len(),
         "topologies": snapshot.topologies.len(),
     });
+    if let Some(filter) = filter {
+        manifest["algorithms"] = json!(filter);
+    }
     write_file(
         &data.join("manifest.js"),
         &format!("window.ZEBRA_SNAPSHOT = {manifest};\n"),
@@ -250,6 +280,23 @@ mod tests {
         topology["paths"].as_array_mut().unwrap().pop();
         let err = validate_topology(&names(), "tk", 0, &topology).unwrap_err();
         assert!(err.to_string().contains("no path to se"), "{err}");
+    }
+
+    #[test]
+    fn filter_restricts_the_dropdown_choices() {
+        let algorithms = json!({
+            "algorithms": [
+                {"algo": 0, "label": "0 — shortest path"},
+                {"algo": 128, "label": "128 — exclude-any: trans-pacific"},
+            ],
+        });
+        let only_zero = filter_algorithms(algorithms.clone(), Some(&[0]));
+        assert_eq!(algorithm_ids(&only_zero), vec![0]);
+        // No filter passes the response through untouched.
+        assert_eq!(
+            algorithm_ids(&filter_algorithms(algorithms, None)),
+            vec![0, 128]
+        );
     }
 
     #[test]

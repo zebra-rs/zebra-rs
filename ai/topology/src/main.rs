@@ -93,6 +93,11 @@ enum Command {
         /// giving up rather than exporting a partial topology.
         #[arg(long, default_value_t = 120)]
         settle_timeout: u64,
+        /// Only export these algorithms (comma-separated, e.g. `0` or
+        /// `0,128`). The exported Algorithm dropdown is filtered to
+        /// match. Default: every algorithm the lab runs.
+        #[arg(long, value_delimiter = ',')]
+        algorithms: Option<Vec<u8>>,
     },
 }
 
@@ -150,7 +155,16 @@ async fn main() -> Result<()> {
         Some(Command::Snapshot {
             out,
             settle_timeout,
-        }) => snapshot::run(&app, &out, Duration::from_secs(settle_timeout)).await,
+            algorithms,
+        }) => {
+            snapshot::run(
+                &app,
+                &out,
+                Duration::from_secs(settle_timeout),
+                algorithms.as_deref(),
+            )
+            .await
+        }
         None | Some(Command::Serve) => serve(app, cli.port).await,
     }
 }
