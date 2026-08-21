@@ -90,11 +90,41 @@ reload and travels with a shared link.
 
 | flag         | default                                | meaning                        |
 |--------------|----------------------------------------|--------------------------------|
-| `--port`     | `8080`                                 | HTTP listen port               |
+| `--port`     | `8080`                                 | HTTP listen port (serve mode)  |
 | `--ontology` | `playset/isis-flexalgo/ontology.json`  | router ontology                |
 | `--vtyctl`   | auto (sibling → `target/debug` → PATH) | vtyctl binary for `vtyctl mcp` |
 | `--mcp-host` | `unix:zebra-rs/vty`                    | daemon endpoint inside each ns |
 | `--timeout`  | `15`                                   | per-MCP-call timeout (seconds) |
+
+## Static snapshot (GitHub Pages)
+
+The viewer also runs without any backend: `snapshot` pre-fetches every
+API response from the live lab and writes a self-contained static site.
+
+```shell
+# With the lab up (root required, same as serve mode)
+sudo ./target/debug/zebra-topology snapshot --out dist/topology
+```
+
+The export contains the frontend plus one JSON file per API response —
+`data/routers.json`, `data/algorithms-<src>.json` per router, and one
+all-destinations `data/topology-<src>-<algo>.json` per (source,
+algorithm). The destination filter is applied client-side (in live mode
+too), so those files cover every dropdown combination; only the Refresh
+button and live experiments (like downing a link) need the real
+backend. `data/manifest.js` sets `window.ZEBRA_SNAPSHOT`, which is how
+the frontend knows to read `data/` files instead of `/api/…`, hide
+Refresh, and show the snapshot timestamp in the status bar.
+
+The export is convergence-guarded: it retries (up to
+`--settle-timeout`, default 120 s) until every router is active in
+every algorithm's graph and every source has a path to every other
+router, and refuses to write a partial topology.
+
+Deploy by copying the output directory to any static host. For
+https://zebra.rs it goes into the `zebra-rs/zebra-rs.github.io` repo as
+`topology/`, serving at https://zebra.rs/topology/. Everything is
+relative-path, so any subdirectory works.
 
 ## HTTP API
 

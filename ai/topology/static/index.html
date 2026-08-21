@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>zebra-rs Traffic Path Visualizer</title>
-    <link rel="stylesheet" href="/static/style.css" />
+    <link rel="stylesheet" href="./static/style.css" />
 </head>
 <body>
     <div class="header">zebra-rs Traffic Path Visualizer</div>
@@ -70,12 +70,16 @@
 
     <div class="status-bar" id="status">Initializing...</div>
 
+    <!-- Live server: window.ZEBRA_SNAPSHOT = null. Snapshot export:
+         the same path carries the snapshot metadata instead, switching
+         app.js from the live API to the pre-fetched data/ files. -->
+    <script src="./data/manifest.js"></script>
     <script src="https://unpkg.com/three@0.160.0/build/three.min.js"
             integrity="sha384-qOkzR5Ke/XkQxuGVJ9hpFEpDlcoLtWwVYhnJf06cLIZa2vaIptSqaubivErzmD5O"
             crossorigin="anonymous"></script>
     <script src="https://unpkg.com/globe.gl@2.32.0/dist/globe.gl.min.js"
             integrity="sha384-Plx/0mhoQXLzFNQEcp4kULf6wOFgVaNISmr+3cNLjGb4U8Nq7d7/96ydYtbT0Wb6"
             crossorigin="anonymous"></script>
-    <script src="/static/app.js"></script>
+    <script src="./static/app.js"></script>
 </body>
 </html>
