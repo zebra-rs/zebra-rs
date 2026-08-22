@@ -488,6 +488,196 @@ pub fn dis_generate(
     fragments
 }
 
+/// Build the RFC 9666 Proxy LSP set: the single L2 LSP (fragmented as
+/// needed) the Area Leader originates under the Proxy System ID to
+/// represent the entire Inside Area as one node.
+///
+/// Phase-3 contents (§5.3): Area Addresses, Protocols Supported, and
+/// the proxy hostname from the Inside Area config; Extended IS
+/// Reachability copied from the Inside Edge Routers' L2 LSPs, keeping
+/// only entries whose neighbor is *Outside* (its sys-id has no live L1
+/// router LSP) and deduplicating to the lowest metric per neighbor;
+/// Extended IP / IPv6 Reachability merged from the inside routers' L1
+/// LSPs at the lowest metric per prefix. LSPs of L1-unreachable nodes
+/// MUST NOT contribute (§5.3.9). Deliberately absent: the Area Proxy
+/// TLV (the boundary filter drops any LSP carrying it — the Proxy LSP
+/// must cross), and the SR/TE merges (SRGB intersection, prefix-SID /
+/// Adj-SID copy, Area SID node-SID), which land with the Area SID
+/// phase.
+pub fn proxy_generate(
+    top: &mut IsisTop,
+    proxy_id: IsisSysId,
+    hostname: Option<String>,
+    base: Option<u32>,
+) -> Vec<IsisLsp> {
+    let level = Level::L2;
+    let neighbor_id = IsisNeighborId::from_sys_id(&proxy_id, 0);
+    let frag0_id = IsisLspId::from_neighbor_id(neighbor_id, 0);
+    // The Proxy LSP represents the area, not this router: no OL bit
+    // (per-topology O/A merging is MT scope, out of the phase-3 core).
+    let types = IsisLspTypes::from(level.digit());
+
+    let mut anchors: Vec<IsisTlv> = Vec::new();
+    let mut distributable: Vec<IsisTlv> = Vec::new();
+
+    anchors.push(
+        IsisTlvAreaAddr {
+            area_addrs: vec![top.config.net.area_id()],
+        }
+        .into(),
+    );
+    let mut nlpids = vec![];
+    if top.config.enable.v4 > 0 {
+        nlpids.push(IsisProto::Ipv4.into());
+    }
+    if top.config.enable.v6 > 0 {
+        nlpids.push(IsisProto::Ipv6.into());
+    }
+    if !nlpids.is_empty() {
+        anchors.push(IsisTlvProtoSupported { nlpids }.into());
+    }
+    if let Some(hostname) = hostname {
+        // Mirror the proxy identity into the local hostname map so
+        // show views resolve it; other routers learn it from the
+        // flooded TLV via the regular LSDB rebuild.
+        top.hostname
+            .get_mut(&level)
+            .insert(proxy_id, hostname.clone());
+        anchors.push(IsisTlvHostname { hostname }.into());
+    }
+
+    // The inside-router set is the L1 LSDB; the L1-unreachable are
+    // excluded from every walk below (self counts as reachable — the
+    // SPF result may omit its own source vertex).
+    let inside = super::area_proxy::inside_routers(top.lsdb.get(&Level::L1));
+    let mut reachable = super::area_proxy::l1_reachable(
+        top.spf_result.get(&Level::L1),
+        top.lsp_map.get(&Level::L1),
+    );
+    if let Some(r) = reachable.as_mut() {
+        r.insert(top.config.net.sys_id());
+    }
+    let usable = |sys: &IsisSysId| -> bool {
+        inside.contains(sys) && reachable.as_ref().is_none_or(|r| r.contains(sys))
+    };
+
+    // Outside adjacencies (§5.3.4): every Extended IS Reachability
+    // entry an inside router advertises at L2 toward a neighbor that
+    // is not itself inside. Lowest metric wins when several edge
+    // routers reach the same outside neighbor. Sub-TLVs (Adj-SID, TE)
+    // are not copied in the phase-3 core.
+    let mut outside: BTreeMap<IsisNeighborId, u32> = BTreeMap::new();
+    for (_, lsa) in top.lsdb.get(&Level::L2).iter() {
+        if lsa.lsp.hold_time == 0 || !usable(&lsa.lsp.lsp_id.sys_id()) {
+            continue;
+        }
+        for tlv in &lsa.lsp.tlvs {
+            let IsisTlv::ExtIsReach(reach) = tlv else {
+                continue;
+            };
+            for entry in &reach.entries {
+                let nsys = entry.neighbor_id.sys_id();
+                if inside.contains(&nsys) || nsys == proxy_id {
+                    continue;
+                }
+                let metric = outside.entry(entry.neighbor_id).or_insert(entry.metric);
+                *metric = (*metric).min(entry.metric);
+            }
+        }
+    }
+    if !outside.is_empty() {
+        let mut is_reach = IsisTlvExtIsReach::default();
+        for (neighbor_id, metric) in outside {
+            is_reach.entries.push(IsisTlvExtIsReachEntry {
+                neighbor_id,
+                metric,
+                subs: vec![],
+            });
+        }
+        distributable.extend(split_distributable_at_255(IsisTlv::ExtIsReach(is_reach)));
+    }
+
+    // Prefix reachability (§5.3.6): merge the inside routers' L1
+    // advertisements, lowest metric per prefix. Sub-TLVs (Prefix-SID)
+    // join with the SR merge phase.
+    let mut v4: BTreeMap<Ipv4Net, u32> = BTreeMap::new();
+    let mut v6: BTreeMap<Ipv6Net, u32> = BTreeMap::new();
+    for (_, lsa) in top.lsdb.get(&Level::L1).iter() {
+        if lsa.lsp.hold_time == 0 || !usable(&lsa.lsp.lsp_id.sys_id()) {
+            continue;
+        }
+        for tlv in &lsa.lsp.tlvs {
+            match tlv {
+                IsisTlv::ExtIpReach(reach) => {
+                    for entry in &reach.entries {
+                        let metric = v4.entry(entry.prefix).or_insert(entry.metric);
+                        *metric = (*metric).min(entry.metric);
+                    }
+                }
+                IsisTlv::Ipv6Reach(reach) => {
+                    for entry in &reach.entries {
+                        let metric = v6.entry(entry.prefix).or_insert(entry.metric);
+                        *metric = (*metric).min(entry.metric);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if !v4.is_empty() {
+        let mut reach = IsisTlvExtIpReach::default();
+        for (prefix, metric) in v4 {
+            reach.entries.push(ext_ip_reach_entry(prefix, metric));
+        }
+        distributable.extend(split_distributable_at_255(IsisTlv::ExtIpReach(reach)));
+    }
+    if !v6.is_empty() {
+        let mut reach = IsisTlvIpv6Reach::default();
+        for (prefix, metric) in v6 {
+            reach.entries.push(ipv6_reach_entry(prefix, metric, false));
+        }
+        distributable.extend(split_distributable_at_255(IsisTlv::Ipv6Reach(reach)));
+    }
+
+    let mut fragments = pack_into_fragments(
+        anchors,
+        distributable,
+        neighbor_id,
+        types,
+        top.config.hold_time(),
+        top.config.lsp_mtu_size(),
+        None,
+    );
+
+    // Per-fragment sequence resolution, mirroring `dis_generate`:
+    // fragment 0 honors `base` (a peer reflected our Proxy LSP at a
+    // higher seq, ISO 10589 §7.3.16.4) in addition to the LSDB seq.
+    for frag in fragments.iter_mut() {
+        if frag.lsp_id.fragment_id() == 0 {
+            let existing = top
+                .lsdb
+                .get(&level)
+                .get(&frag0_id)
+                .map(|x| x.lsp.seq_number);
+            frag.seq_number = match (existing, base) {
+                (Some(e), Some(b)) => e.max(b).saturating_add(1),
+                (Some(e), None) => e.saturating_add(1),
+                (None, Some(b)) => b.saturating_add(1),
+                (None, None) => 0x0001,
+            };
+        } else {
+            let existing = top
+                .lsdb
+                .get(&level)
+                .get(&frag.lsp_id)
+                .map(|x| x.lsp.seq_number);
+            frag.seq_number = existing.map(|e| e.saturating_add(1)).unwrap_or(0x0001);
+        }
+    }
+
+    fragments
+}
+
 /// SID Structure sub-sub-TLV (RFC 9352 §9) for one locator: the
 /// locator's behavior plus `[structure]` when it has a prefix, `None`
 /// when it doesn't (no structure to advertise). Geometry comes from

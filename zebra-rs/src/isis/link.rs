@@ -197,6 +197,11 @@ pub struct LinkTop<'a> {
     pub lsdb: &'a mut Levels<Lsdb>,
     pub flags: &'a LinkFlags,
     pub up_config: &'a IsisConfig,
+    /// The Proxy System ID this instance currently originates the
+    /// RFC 9666 Proxy LSP under — `Some` only while we are the
+    /// advertising Area Leader. Read by `lsp_recv` so the §7.3.16.4
+    /// self-reclaim applies to reflected Proxy LSP copies too.
+    pub area_proxy_owned: Option<isis_packet::IsisSysId>,
     /// Snapshot of the per-instance `Isis.restarting` state. `Some`
     /// only between `clear isis graceful-restart begin` and either
     /// `abort`, `restarter-enabled=false`, or successful exit.
