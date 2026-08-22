@@ -49,6 +49,15 @@ impl Isis {
         self.callback_add("/router/isis/net", config_net);
         self.callback_add("/router/isis/is-type", config_is_type);
         self.callback_add("/router/isis/hostname", config_hostname);
+        self.callback_add("/router/isis/area-proxy", config_area_proxy);
+        self.callback_add(
+            "/router/isis/area-proxy/proxy-system-id",
+            config_area_proxy_sys_id,
+        );
+        self.callback_add(
+            "/router/isis/area-proxy/priority",
+            config_area_proxy_priority,
+        );
         // Authentication storage. The runtime sign/verify paths
         // read these for Hello/SNP and LSP.
         self.callback_add("/router/isis/area-password", config_area_password);
@@ -458,6 +467,21 @@ pub struct IsisConfig {
     pub net: Nsap,
     pub hostname: Option<String>,
     pub is_type: Option<IsLevel>,
+
+    /// Set when /router/isis/area-proxy is committed (the presence
+    /// container): this router participates in RFC 9666 Area Proxy and
+    /// advertises the Area Proxy TLV in its L2 LSP fragment 0.
+    pub area_proxy: bool,
+
+    /// `/router/isis/area-proxy/proxy-system-id`. Configuring it makes
+    /// this router an Area Leader candidate; the winner originates the
+    /// Proxy LSP under this system ID. Every candidate in the area
+    /// SHOULD carry the same value (RFC 9666 §4.4.1).
+    pub area_proxy_sys_id: Option<isis_packet::IsisSysId>,
+
+    /// `/router/isis/area-proxy/priority` — RFC 9667 Area Leader
+    /// election priority; None ⇒ DEFAULT_AREA_PROXY_PRIORITY.
+    pub area_proxy_priority: Option<u8>,
     pub refresh_time: Option<u16>,
     pub hold_time: Option<u16>,
     pub min_lsp_arrival_time: Option<u32>,
@@ -796,6 +820,9 @@ impl Default for IsisConfig {
             net: Default::default(),
             hostname: Default::default(),
             is_type: Default::default(),
+            area_proxy: false,
+            area_proxy_sys_id: Default::default(),
+            area_proxy_priority: Default::default(),
             refresh_time: Default::default(),
             hold_time: Default::default(),
             min_lsp_arrival_time: Default::default(),
@@ -863,8 +890,24 @@ impl IsisConfig {
     /// links; operators raise it on jumbo-frame domains.
     pub const DEFAULT_LSP_MTU: u16 = 1497;
 
+    /// RFC 9667 leaves the Area Leader priority default unspecified;
+    /// 64 mirrors the IS-IS DIS priority default.
+    const DEFAULT_AREA_PROXY_PRIORITY: u8 = 64;
+
     pub fn is_type(&self) -> IsLevel {
         self.is_type.unwrap_or(IsLevel::L1L2)
+    }
+
+    pub fn area_proxy_priority(&self) -> u8 {
+        self.area_proxy_priority
+            .unwrap_or(Self::DEFAULT_AREA_PROXY_PRIORITY)
+    }
+
+    /// Area Leader candidacy (RFC 9667): participation plus a
+    /// configured proxy-system-id — a candidate must be able to
+    /// originate the Proxy LSP if it wins.
+    pub fn area_proxy_candidate(&self) -> bool {
+        self.area_proxy && self.area_proxy_sys_id.is_some()
     }
 
     /// Combine the selected `compute-mode` and the shard count into the
@@ -1094,6 +1137,48 @@ fn config_hostname(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> 
     }
 
     Some(())
+}
+
+/// Shared tail of the three area-proxy callbacks: recompute the
+/// election/readiness state from the new config, then re-originate the
+/// self LSP at any level that has one — the Area Leader sub-TLV (L1)
+/// and the Area Proxy TLV (L2) both live in fragment 0.
+fn area_proxy_config_changed(isis: &mut Isis) -> Option<()> {
+    super::area_proxy::refresh(isis);
+    let key = IsisLspId::new(isis.config.net.sys_id(), 0, 0);
+    for level in [Level::L1, Level::L2] {
+        if isis.lsdb.get(&level).get(&key).is_some() {
+            let _ = isis.tx.send(Message::LspOriginate(level, None));
+        }
+    }
+    Some(())
+}
+
+/// `/router/isis/area-proxy` — presence container enabling RFC 9666
+/// Area Proxy participation.
+fn config_area_proxy(isis: &mut Isis, _args: Args, op: ConfigOp) -> Option<()> {
+    isis.config.area_proxy = op.is_set();
+    area_proxy_config_changed(isis)
+}
+
+fn config_area_proxy_sys_id(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let sys_id = args.string()?;
+    isis.config.area_proxy_sys_id = if op == ConfigOp::Set {
+        Some(isis_packet::IsisSysId::from_str(&sys_id).ok()?)
+    } else {
+        None
+    };
+    area_proxy_config_changed(isis)
+}
+
+fn config_area_proxy_priority(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let priority = args.u8()?;
+    isis.config.area_proxy_priority = if op == ConfigOp::Set {
+        Some(priority)
+    } else {
+        None
+    };
+    area_proxy_config_changed(isis)
 }
 
 /// Reset an IsisAuthConfig to its YANG-default state. Used by the

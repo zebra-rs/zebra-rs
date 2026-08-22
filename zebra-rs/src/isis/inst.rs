@@ -176,6 +176,12 @@ pub struct Isis {
     /// numeric algorithm identifier (128..=255). Owns its own
     /// pending-cache → commit pipeline mirroring the static-route
     /// config builder in rib/static/config.rs.
+    /// RFC 9666 Area Proxy runtime state: Area Leader election result,
+    /// readiness census, and the Proxy System ID in force. Recomputed
+    /// by `area_proxy::refresh` after SPF completion, LSDB expiry, and
+    /// area-proxy config changes.
+    pub area_proxy: super::area_proxy::AreaProxy,
+
     pub flex_algo: super::flex_algo::FlexAlgoConfig,
     /// Affinity (admin-group) name table local to this IS-IS instance,
     /// from /affinity-map. Resolves the per-link `affinity`
@@ -618,6 +624,10 @@ pub struct IsisTop<'a> {
     pub tx: &'a UnboundedSender<Message>,
     pub links: &'a mut IsisLinks,
     pub config: &'a IsisConfig,
+    /// RFC 9666 Area Proxy state snapshot (see `Isis::area_proxy`).
+    /// Read by `lsp_generate` to decide whether the L2 Area Proxy TLV
+    /// carries the Proxy System Identifier sub-TLV.
+    pub area_proxy: &'a super::area_proxy::AreaProxy,
     /// Snapshot of `Isis.overloaded`. Consumed by `lsp.rs::lsp_generate`
     /// (and the pseudonode origination path) to set
     /// `IsisLspTypes.ol_bits` on the freshly-built self-LSPs.
@@ -814,6 +824,7 @@ impl Isis {
                 restarting: None,
                 overloaded: false,
                 overload_clear_timer: None,
+                area_proxy: Default::default(),
                 flex_algo: super::flex_algo::FlexAlgoConfig::new("/router/isis/flex-algo"),
                 affinity_map: super::affinity_map::AffinityMap::new(),
                 tracing: IsisTracing::default(),
@@ -2058,6 +2069,12 @@ impl Isis {
                 if !stale {
                     self.bgp_ls_produce();
                 }
+                // Recompute Area Proxy leader election + readiness from
+                // the settled LSDB. Every LSDB insert path schedules SPF,
+                // so this (with the expiry hook in `process_lsdb`) sees
+                // every mutation. Runs even on a stale microloop
+                // revision — the LSDB itself is current.
+                super::area_proxy::refresh(self);
             }
             Message::MicroloopActivation {
                 level,
@@ -2937,6 +2954,10 @@ impl Isis {
                 lsdb::remove_lsp(&mut top, level, key);
             }
         }
+        // LSP expiry is the one LSDB mutation that doesn't schedule SPF
+        // unconditionally — recompute the Area Proxy election here so a
+        // dead leader's aged-out LSP triggers re-election.
+        super::area_proxy::refresh(self);
     }
 
     pub async fn event_loop(&mut self) {
@@ -3227,6 +3248,7 @@ impl Isis {
             tx: &self.tx,
             links: &mut self.links,
             config: &self.config,
+            area_proxy: &self.area_proxy,
             overloaded: self.overloaded,
             tracing: &self.tracing,
             lsdb: &mut self.lsdb,
