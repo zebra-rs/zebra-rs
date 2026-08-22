@@ -1161,6 +1161,12 @@ pub fn lsp_recv(link: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) 
     // our authoritative copy, not adopt the peer's view of "ours".
     let is_self = link.up_config.net.sys_id() == lsp.lsp_id.sys_id();
 
+    // RFC 9666: while we are the advertising Area Leader, the Proxy
+    // LSP is ours the same way our self-LSPs are — the §7.3.16.4
+    // reclaim below must hold the network on our authoritative copy
+    // rather than adopt a peer's.
+    let is_proxy_own = level == Level::L2 && link.area_proxy_owned == Some(lsp.lsp_id.sys_id());
+
     // 7.3.15.1 Action on receipt of a link state PDU
     match link
         .lsdb
@@ -1194,6 +1200,11 @@ pub fn lsp_recv(link: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>) 
                     Message::LspOriginate(level, Some(lsp.seq_number))
                 };
                 let _ = link.tx.send(msg);
+            } else if is_proxy_own {
+                // §7.3.16.4 applied to the Proxy LSP: re-originate past
+                // the reflected sequence number instead of installing
+                // the peer's copy over our own.
+                let _ = link.tx.send(Message::ProxyOriginate(Some(lsp.seq_number)));
             } else {
                 // 7.3.15.1 e.1 — install + re-flood.
                 //

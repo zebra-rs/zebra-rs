@@ -2820,6 +2820,13 @@ module config {
             ext:help "Area Leader election priority (default 64)";
             type uint8;
           }
+          leaf hostname {
+            ext:help "Dynamic Hostname advertised in the Proxy LSP";
+            // Same RFC 1123-ish charset as the system hostname leaf.
+            type string {
+              pattern "[A-Za-z0-9][A-Za-z0-9.-]*";
+            }
+          }
         }
 
         container segment-routing {

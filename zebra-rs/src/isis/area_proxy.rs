@@ -14,14 +14,19 @@
 //! The election is recomputed from the LSDB after every SPF completion
 //! and LSDB expiry — both already funnel every LSDB mutation — so no
 //! dedicated debounce timer is needed. Candidates are gated on a live
-//! (non-purged) L1 LSP; the RFC 9667 reachability refinement (drop
-//! candidates the L1 SPF cannot reach, closing the silently-dead-leader
-//! window until its LSP ages out) lands with the Proxy LSP phase, where
-//! leadership starts to carry real responsibilities. RFC 9667 accepts
-//! transient disagreement: "subsequent flooding will cause the entire
-//! area to converge".
+//! (non-purged) L1 LSP *and* on RFC 9667 reachability: a candidate the
+//! last L1 SPF could not reach is ineligible, so a silently dead
+//! leader is displaced as soon as SPF sees the partition rather than
+//! when its LSP ages out. RFC 9667 accepts transient disagreement:
+//! "subsequent flooding will cause the entire area to converge".
+//!
+//! The advertising leader also originates the Proxy LSP
+//! (`lsp::proxy_generate`) under the Proxy System ID, refreshed
+//! through the same funnels with a content-compare so unchanged
+//! settles are free; leadership loss abdicates (the successor's
+//! higher-seq regeneration supersedes), local disablement withdraws.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
 use isis_packet::{IsisAreaProxySub, IsisLspId, IsisSubTlv, IsisSysId, IsisTlv};
@@ -29,8 +34,11 @@ use serde::Serialize;
 
 use crate::config::Args;
 use crate::isis::{Isis, Level, Message};
+use crate::spf;
 
-use super::lsdb::Lsdb;
+use super::graph::LspMap;
+use super::lsdb::{Lsdb, insert_self_originate};
+use super::lsp::{lsp_emit, proxy_generate};
 
 #[derive(Default)]
 pub struct AreaProxy {
@@ -51,8 +59,13 @@ pub struct AreaProxy {
     pub ready_count: usize,
     /// True while our own L2 LSP fragment 0 carries the Proxy System
     /// Identifier sub-TLV — we are the leader, the area is ready, and
-    /// a proxy-system-id is configured. Read by `lsp_generate`.
+    /// a proxy-system-id is configured. Read by `lsp_generate`. The
+    /// same condition makes us the Proxy LSP originator.
     pub advertise_proxy_id: bool,
+    /// The Proxy System ID our live Proxy LSP fragments were
+    /// originated under, kept so abdication / teardown can find them
+    /// after the config or election that named it has moved on.
+    pub owned_proxy_id: Option<IsisSysId>,
     /// Distinct Proxy System IDs seen in the L2 LSDB, kept to log each
     /// conflicting occurrence once (RFC 9666 §4.4.1: multiple unique
     /// Proxy System IDs are a misconfiguration) instead of on every
@@ -101,6 +114,34 @@ fn proxy_id_sub(tlvs: &[IsisTlv]) -> Option<IsisSysId> {
     })
 }
 
+/// The inside-router set: every system with a live router LSP in the
+/// L1 LSDB (RFC 9666 terminology — the L1 LSDB *is* the Inside Area).
+pub(super) fn inside_routers(lsdb: &Lsdb) -> BTreeSet<IsisSysId> {
+    lsdb.iter()
+        .filter_map(|(_, lsa)| {
+            let id = lsa.lsp.lsp_id;
+            live_frag0(&id, lsa.lsp.hold_time).then(|| id.sys_id())
+        })
+        .collect()
+}
+
+/// System IDs reached by the last L1 SPF run, or None when no run has
+/// completed yet (treat as "no filter" — better transiently permissive
+/// at startup than an area with no eligible leader). Callers should
+/// union in their own sys-id: the SPF result may omit its source
+/// vertex.
+pub(super) fn l1_reachable(
+    spf_result: &Option<BTreeMap<usize, spf::Path>>,
+    lsp_map: &LspMap,
+) -> Option<BTreeSet<IsisSysId>> {
+    spf_result.as_ref().map(|result| {
+        result
+            .keys()
+            .filter_map(|id| lsp_map.resolve(*id).copied())
+            .collect()
+    })
+}
+
 /// L2-LSDB scan for advertised Proxy System IDs: the leader's copy (if
 /// any) and the set of distinct values for misconfiguration detection.
 fn learned_proxy_ids(
@@ -135,16 +176,38 @@ fn learned_proxy_ids(
 /// advertise (the Proxy System Identifier sub-TLV appears or goes).
 pub fn refresh(isis: &mut Isis) {
     if !isis.config.area_proxy {
+        // Participation switched off while we were the Proxy LSP
+        // originator: purge our fragments — with area-proxy gone from
+        // this router nobody is guaranteed to supersede them, and a
+        // successor leader's regeneration reclaims past the purge
+        // anyway.
+        purge_owned(isis);
         isis.area_proxy = AreaProxy::default();
         return;
     }
     let self_sys_id = isis.config.net.sys_id();
+
+    // RFC 9667: unreachable nodes are not eligible. Gate candidacy on
+    // the last L1 SPF run so a silently dead leader is displaced as
+    // soon as SPF sees the partition, not when its LSP ages out.
+    let mut reachable = l1_reachable(
+        isis.spf_result.get(&Level::L1),
+        isis.lsp_map.get(&Level::L1),
+    );
+    if let Some(r) = reachable.as_mut() {
+        r.insert(self_sys_id);
+    }
 
     // Area Leader election over the L1 LSDB (our own LSP included —
     // it sits in the LSDB like any other).
     let leader = elect(isis.lsdb.get(&Level::L1).iter().filter_map(|(_, lsa)| {
         let id = lsa.lsp.lsp_id;
         if !live_frag0(&id, lsa.lsp.hold_time) {
+            return None;
+        }
+        if let Some(r) = reachable.as_ref()
+            && !r.contains(&id.sys_id())
+        {
             return None;
         }
         area_leader_priority(&lsa.lsp.tlvs).map(|priority| (priority, id.sys_id()))
@@ -215,6 +278,158 @@ pub fn refresh(isis: &mut Isis) {
     if prev_advertise != advertise_proxy_id {
         let _ = isis.tx.send(Message::LspOriginate(Level::L2, None));
     }
+
+    // Proxy LSP lifecycle. While we are the advertising leader, drive
+    // (re)origination — the handler is idempotent (content compare), so
+    // firing on every settle is churn-free. Origination is deferred
+    // out of commits: the commit's own LSP work schedules SPF, and the
+    // following SpfDone re-enters here.
+    if advertise_proxy_id {
+        if !isis.in_commit {
+            let _ = isis.tx.send(Message::ProxyOriginate(None));
+        }
+    } else if prev_advertise {
+        if leader.is_some() && !is_leader {
+            // Leadership moved: stop refreshing our fragments and let
+            // the successor's regeneration (RFC 9666 §5.1: the new
+            // leader MUST regenerate) supersede them at a higher seq.
+            abdicate(isis);
+        } else {
+            // No successor in sight (leadership retained but readiness
+            // or the configured identity is gone): tear the Proxy LSP
+            // down rather than leave it orphaned.
+            purge_owned(isis);
+        }
+    }
+}
+
+/// Stop being the Proxy LSP originator without withdrawing it: clear
+/// the `originated` mark (and the refresh timer it re-arms) on our
+/// fragments so the successor's higher-seq copies replace them via
+/// normal flooding.
+fn abdicate(isis: &mut Isis) {
+    let Some(proxy_id) = isis.area_proxy.owned_proxy_id.take() else {
+        return;
+    };
+    tracing::info!(
+        "isis: area-proxy: abdicating Proxy LSP origination for {}",
+        proxy_id
+    );
+    let lsdb = isis.lsdb.get_mut(&Level::L2);
+    for (_, lsa) in lsdb.map.iter_mut() {
+        if lsa.lsp.lsp_id.sys_id() == proxy_id && lsa.originated {
+            lsa.originated = false;
+            lsa.refresh_timer = None;
+        }
+    }
+}
+
+/// Withdraw the Proxy LSP: purge every fragment we originated.
+fn purge_owned(isis: &mut Isis) {
+    let Some(proxy_id) = isis.area_proxy.owned_proxy_id.take() else {
+        return;
+    };
+    tracing::info!("isis: area-proxy: withdrawing Proxy LSP for {}", proxy_id);
+    let keys: Vec<IsisLspId> = owned_fragments(isis.lsdb.get(&Level::L2), proxy_id);
+    for key in keys {
+        let _ = isis.tx.send(Message::LspPurge(Level::L2, key));
+    }
+}
+
+/// The Proxy LSP fragments this instance originated, ordered by
+/// fragment number.
+fn owned_fragments(lsdb: &Lsdb, proxy_id: IsisSysId) -> Vec<IsisLspId> {
+    lsdb.iter()
+        .filter(|(id, lsa)| id.sys_id() == proxy_id && lsa.originated)
+        .map(|(id, _)| *id)
+        .collect()
+}
+
+/// `Message::ProxyOriginate` handler: build the Proxy LSP set and
+/// flood any fragment whose content actually changed. `base` carries
+/// the ISO 10589 §7.3.16.4 reclaim floor when a peer reflected our
+/// Proxy LSP at a higher sequence number.
+pub fn process_originate(isis: &mut Isis, base: Option<u32>) {
+    // A commit is mid-flight: half-applied config must not reach the
+    // wire. The commit's own origination path schedules SPF, and the
+    // SpfDone that follows re-fires this through `refresh`.
+    if isis.in_commit {
+        return;
+    }
+    if !isis.area_proxy.advertise_proxy_id {
+        return;
+    }
+    let Some(proxy_id) = isis.config.area_proxy_sys_id else {
+        return;
+    };
+    let hostname = isis.config.area_proxy_hostname.clone();
+
+    let mut top = isis.top();
+    let fragments = proxy_generate(&mut top, proxy_id, hostname, base);
+    if fragments.is_empty() {
+        return;
+    }
+
+    // Idempotency: `refresh` fires on every LSDB settle, so only bump
+    // sequences when the content differs from what we already
+    // originated. The stored copies carry the Auth TLV appended by
+    // `lsp_emit`; strip it from the comparison. A reclaim (`base`)
+    // must originate regardless.
+    if base.is_none() {
+        let sans_auth = |tlvs: &[IsisTlv]| -> Vec<IsisTlv> {
+            tlvs.iter()
+                .filter(|t| !matches!(t, IsisTlv::Auth(_)))
+                .cloned()
+                .collect()
+        };
+        let current: BTreeMap<u8, Vec<IsisTlv>> = top
+            .lsdb
+            .get(&Level::L2)
+            .iter()
+            .filter(|(id, lsa)| id.sys_id() == proxy_id && lsa.originated && lsa.lsp.hold_time > 0)
+            .map(|(id, lsa)| (id.fragment_id(), sans_auth(&lsa.lsp.tlvs)))
+            .collect();
+        let new: BTreeMap<u8, Vec<IsisTlv>> = fragments
+            .iter()
+            .map(|f| (f.lsp_id.fragment_id(), f.tlvs.clone()))
+            .collect();
+        if !current.is_empty() && new == current {
+            return;
+        }
+    }
+
+    let max_frag = fragments
+        .iter()
+        .map(|l| l.lsp_id.fragment_id())
+        .max()
+        .unwrap_or(0);
+
+    let auth_cfg = super::lsp::level_auth_cfg(top.config, Level::L2).clone();
+    let resolved = super::auth::resolve_send(&auth_cfg, top.key_chains, chrono::Utc::now());
+    for mut frag in fragments {
+        let buf = lsp_emit(&mut frag, Level::L2, resolved.as_ref());
+        let lsp_id = frag.lsp_id;
+        insert_self_originate(&mut top, Level::L2, frag, Some(buf.to_vec()));
+        top.lsdb
+            .get_mut(&Level::L2)
+            .srm_set_all(top.tx, Level::L2, &lsp_id);
+    }
+
+    // Tail-purge fragments that fell out of this generation.
+    let orphans: Vec<IsisLspId> = top
+        .lsdb
+        .get(&Level::L2)
+        .iter()
+        .filter(|(id, lsa)| {
+            id.sys_id() == proxy_id && lsa.originated && id.fragment_id() > max_frag
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    for key in orphans {
+        let _ = top.tx.send(Message::LspPurge(Level::L2, key));
+    }
+
+    isis.area_proxy.owned_proxy_id = Some(proxy_id);
 }
 
 #[derive(Serialize)]
@@ -230,12 +445,32 @@ struct AreaProxyBrief {
     inside_routers: usize,
     ready_routers: usize,
     advertising_proxy_system_id: bool,
+    originating_proxy_lsp: bool,
+    proxy_lsp_fragments: usize,
+    proxy_lsp_seq_number: Option<u32>,
 }
 
 pub fn show(isis: &Isis, _args: Args, json: bool) -> std::result::Result<String, std::fmt::Error> {
     let cfg = &isis.config;
     let state = &isis.area_proxy;
     let self_sys_id = cfg.net.sys_id();
+
+    // Our live Proxy LSP fragments, when we are the originator.
+    let owned: Vec<(IsisLspId, u32)> = state
+        .owned_proxy_id
+        .map(|pid| {
+            isis.lsdb
+                .get(&Level::L2)
+                .iter()
+                .filter(|(id, lsa)| id.sys_id() == pid && lsa.originated && lsa.lsp.hold_time > 0)
+                .map(|(id, lsa)| (*id, lsa.lsp.seq_number))
+                .collect()
+        })
+        .unwrap_or_default();
+    let frag0_seq = owned
+        .iter()
+        .find(|(id, _)| id.fragment_id() == 0)
+        .map(|(_, seq)| *seq);
 
     let brief = AreaProxyBrief {
         enabled: cfg.area_proxy,
@@ -249,6 +484,9 @@ pub fn show(isis: &Isis, _args: Args, json: bool) -> std::result::Result<String,
         inside_routers: state.inside_count,
         ready_routers: state.ready_count,
         advertising_proxy_system_id: state.advertise_proxy_id,
+        originating_proxy_lsp: !owned.is_empty(),
+        proxy_lsp_fragments: owned.len(),
+        proxy_lsp_seq_number: frag0_seq,
     };
 
     if json {
@@ -314,6 +552,15 @@ pub fn show(isis: &Isis, _args: Args, json: bool) -> std::result::Result<String,
     )?;
     if state.advertise_proxy_id {
         writeln!(buf, "Advertising the Proxy System Identifier sub-TLV")?;
+    }
+    if !owned.is_empty() {
+        writeln!(
+            buf,
+            "Proxy LSP:       originating, {} fragment{}, seq 0x{:08x}",
+            owned.len(),
+            if owned.len() == 1 { "" } else { "s" },
+            frag0_seq.unwrap_or(0),
+        )?;
     }
     Ok(buf)
 }
@@ -382,6 +629,50 @@ mod tests {
         assert_eq!(area_leader_priority(&bare), None);
         assert!(has_area_proxy_tlv(&bare));
         assert_eq!(proxy_id_sub(&bare), None);
+    }
+
+    fn lsa(sys_b: u8, pseudo: u8, frag: u8, hold: u16) -> (IsisLspId, super::super::lsdb::Lsa) {
+        let lsp_id = IsisLspId::new(sys(sys_b), pseudo, frag);
+        let lsp = isis_packet::IsisLsp {
+            lsp_id,
+            hold_time: hold,
+            ..Default::default()
+        };
+        (lsp_id, super::super::lsdb::Lsa::new(lsp))
+    }
+
+    /// The inside-router census counts live router fragment-0 LSPs
+    /// only — purges, pseudonodes, and higher fragments don't define
+    /// area membership.
+    #[test]
+    fn inside_routers_counts_live_router_frag0_only() {
+        let mut lsdb = Lsdb::default();
+        for entry in [
+            lsa(1, 0, 0, 1200), // live router frag 0 — inside
+            lsa(2, 0, 0, 0),    // purged
+            lsa(3, 2, 0, 1200), // pseudonode
+            lsa(4, 0, 1, 1200), // higher fragment only
+        ] {
+            lsdb.map.insert(entry.0, entry.1);
+        }
+        assert_eq!(inside_routers(&lsdb), BTreeSet::from([sys(1)]));
+    }
+
+    /// The L1 reachability gate maps SPF vertex ids back to system
+    /// ids, and reports None (no filter) before the first SPF run.
+    #[test]
+    fn l1_reachable_maps_spf_vertices_to_sys_ids() {
+        let mut map = LspMap::default();
+        let a = map.get_sys(&sys(1));
+        let _b = map.get_sys(&sys(2));
+
+        assert_eq!(l1_reachable(&None, &map), None);
+
+        let mut result: BTreeMap<usize, spf::Path> = BTreeMap::new();
+        result.insert(a, spf::Path::new(a));
+        let reachable = l1_reachable(&Some(result), &map).expect("filter");
+        assert!(reachable.contains(&sys(1)));
+        assert!(!reachable.contains(&sys(2)));
     }
 
     /// Purged LSPs (hold_time 0), pseudonode LSPs, and higher

@@ -58,6 +58,10 @@ impl Isis {
             "/router/isis/area-proxy/priority",
             config_area_proxy_priority,
         );
+        self.callback_add(
+            "/router/isis/area-proxy/hostname",
+            config_area_proxy_hostname,
+        );
         // Authentication storage. The runtime sign/verify paths
         // read these for Hello/SNP and LSP.
         self.callback_add("/router/isis/area-password", config_area_password);
@@ -482,6 +486,12 @@ pub struct IsisConfig {
     /// `/router/isis/area-proxy/priority` — RFC 9667 Area Leader
     /// election priority; None ⇒ DEFAULT_AREA_PROXY_PRIORITY.
     pub area_proxy_priority: Option<u8>,
+
+    /// `/router/isis/area-proxy/hostname` — Dynamic Hostname (TLV 137)
+    /// the Area Leader advertises in the Proxy LSP (RFC 9666 §5.3.7
+    /// RECOMMENDED). Preconfigure the same value on every candidate so
+    /// a leadership change keeps the proxy's name stable.
+    pub area_proxy_hostname: Option<String>,
     pub refresh_time: Option<u16>,
     pub hold_time: Option<u16>,
     pub min_lsp_arrival_time: Option<u32>,
@@ -823,6 +833,7 @@ impl Default for IsisConfig {
             area_proxy: false,
             area_proxy_sys_id: Default::default(),
             area_proxy_priority: Default::default(),
+            area_proxy_hostname: Default::default(),
             refresh_time: Default::default(),
             hold_time: Default::default(),
             min_lsp_arrival_time: Default::default(),
@@ -1175,6 +1186,16 @@ fn config_area_proxy_priority(isis: &mut Isis, mut args: Args, op: ConfigOp) -> 
     let priority = args.u8()?;
     isis.config.area_proxy_priority = if op == ConfigOp::Set {
         Some(priority)
+    } else {
+        None
+    };
+    area_proxy_config_changed(isis)
+}
+
+fn config_area_proxy_hostname(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let hostname = args.string()?;
+    isis.config.area_proxy_hostname = if op == ConfigOp::Set {
+        Some(hostname)
     } else {
         None
     };
