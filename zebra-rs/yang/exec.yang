@@ -978,6 +978,10 @@ module exec {
         ext:help "IS-IS hostname";
         type empty;
       }
+      leaf area-proxy {
+        ext:help "IS-IS Area Proxy (RFC 9666) leader election and readiness";
+        type empty;
+      }
       container database {
         ext:help "IS-IS database";
         presence "IS-IS database";

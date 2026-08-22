@@ -2791,6 +2791,37 @@ module config {
           }
         }
 
+        container area-proxy {
+          ext:help "Area Proxy (RFC 9666) — present the L1 area as one L2 node";
+          presence "Enable Area Proxy participation";
+          description
+            "RFC 9666 Area Proxy participation. Configure on every Inside
+             Router: the router advertises the Area Proxy TLV in its L2
+             LSP fragment 0 as the readiness signal. A router additionally
+             configured with a proxy-system-id is an Area Leader candidate
+             (RFC 9667 election: highest priority wins, ties broken by
+             highest system-id); the elected leader distributes the Proxy
+             System ID to the area once every inside router is ready. All
+             candidates SHOULD be configured with the same proxy-system-id
+             so a leadership change keeps the proxy identity stable.";
+          leaf proxy-system-id {
+            ext:help "Proxy System ID representing the entire area";
+            // Not `isis:system-id`: imported typedefs resolve through
+            // the fixed table in config/parse.rs `ytype_from_typedef`,
+            // which doesn't carry it — an unresolved typedef leaf
+            // matches nothing (cf. the `clear isis neighbor` id leaf).
+            // The inline pattern gives the same anchored `xxxx.xxxx.xxxx`
+            // validation at set time.
+            type string {
+              pattern '[0-9A-Fa-f.]+';
+            }
+          }
+          leaf priority {
+            ext:help "Area Leader election priority (default 64)";
+            type uint8;
+          }
+        }
+
         container segment-routing {
           ext:help "Segment Routing (SR-MPLS / SRv6) configuration";
           // The two dataplanes are mutually exclusive: one IS-IS

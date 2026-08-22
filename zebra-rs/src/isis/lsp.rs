@@ -427,12 +427,22 @@ pub fn dis_generate(
         split_distributable_at_255(IsisTlv::ExtIsReach(is_reach))
     };
 
+    // RFC 9666 §4.2: pseudonodes within the Inside Area MUST also
+    // advertise the Area Proxy TLV in their L2 LSP — an Inside Edge
+    // Router recognizes inside L2 LSPs (router and pseudonode alike)
+    // by this TLV when filtering toward Outside Routers.
+    let anchors: Vec<IsisTlv> = if level == Level::L2 && top.config.area_proxy {
+        vec![IsisTlvAreaProxy::default().into()]
+    } else {
+        Vec::new()
+    };
+
     // Pseudonode LSPs don't use placement memory today — see
     // `Isis::lsp_placement_memory`. The LAN's neighbor list rarely
     // churns once DIS election settles, so the cost-benefit of a
     // per-pseudonode memory map isn't there yet.
     let mut fragments = pack_into_fragments(
-        Vec::new(),
+        anchors,
         distributable,
         neighbor_id,
         types,
@@ -817,23 +827,28 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
             .remove(&top.config.net.sys_id());
     }
 
+    // Router Capability (TLV 242). Built unconditionally — SR fills in
+    // its capability sub-TLVs below, and Area Proxy candidacy adds the
+    // RFC 9667 Area Leader sub-TLV even on a non-SR router — then
+    // pushed when SR is enabled (preserving the historic empty-cap
+    // advertisement while the SR block is unresolved) or when any
+    // sub-TLV landed.
+    //
+    // Effective router-id: configured te_router_id wins, else fall back
+    // to the RIB-derived id, else 0.0.0.0.
+    let router_id: Ipv4Addr = top
+        .config
+        .te_router_id
+        .or(top.config.rib_router_id)
+        .unwrap_or(Ipv4Addr::UNSPECIFIED);
+    let mut cap = IsisTlvRouterCap {
+        router_id,
+        flags: 0.into(),
+        subs: Vec::new(),
+    };
+
     // SR Capability.
     if top.config.sr_enabled() {
-        // Effective router-id: configured te_router_id wins, else fall back to the
-        // RIB-derived id, else 0.0.0.0.
-        let router_id: Ipv4Addr = top
-            .config
-            .te_router_id
-            .or(top.config.rib_router_id)
-            .unwrap_or(Ipv4Addr::UNSPECIFIED);
-
-        // Router Capability.
-        let mut cap = IsisTlvRouterCap {
-            router_id,
-            flags: 0.into(),
-            subs: Vec::new(),
-        };
-
         // SR-MPLS Capability sub-TLVs. Pulled from the RIB-side block
         // snapshot (kept fresh via SrSubscribe / SrBlockWatch). When the
         // configured block name doesn't resolve in the RIB the snapshot
@@ -909,8 +924,40 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
         {
             cap.subs.push(fad.into());
         }
+    }
 
+    // Area Leader candidacy (RFC 9667 §5.1.1, reused by RFC 9666 Area
+    // Proxy). Advertised in the L1 LSP only — the L1 LSDB is the
+    // Inside Area, so the election never leaks past the boundary.
+    // Algorithm 0: the leader computes centrally (it alone builds the
+    // Proxy LSP).
+    if level == Level::L1 && top.config.area_proxy_candidate() {
+        cap.subs.push(
+            IsisSubAreaLeader {
+                priority: top.config.area_proxy_priority(),
+                algorithm: 0,
+            }
+            .into(),
+        );
+    }
+
+    if top.config.sr_enabled() || !cap.subs.is_empty() {
         anchors.push(cap.into());
+    }
+
+    // Area Proxy TLV (RFC 9666 §4.3). L2 fragment 0 only — never in L1
+    // LSPs. An empty TLV is this router's readiness signal; when we are
+    // the Area Leader and the whole area is ready, it carries the Proxy
+    // System Identifier sub-TLV distributing the proxy identity
+    // (`area_proxy::refresh` computes `advertise_proxy_id`).
+    if level == Level::L2 && top.config.area_proxy {
+        let mut subs: Vec<IsisAreaProxySub> = Vec::new();
+        if top.area_proxy.advertise_proxy_id
+            && let Some(sys_id) = top.config.area_proxy_sys_id
+        {
+            subs.push(IsisSubProxySystemId { sys_id }.into());
+        }
+        anchors.push(IsisTlvAreaProxy { subs }.into());
     }
 
     // SRv6 endpoint behavior + SID Structure SubSub TLV (RFC 9352 §9,

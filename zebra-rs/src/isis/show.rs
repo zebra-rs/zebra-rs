@@ -59,6 +59,8 @@ impl Isis {
             .set(show_isis_database_detail)
             .path("/show/isis/hostname")
             .set(hostname::show)
+            .path("/show/isis/area-proxy")
+            .set(super::area_proxy::show)
             .path("/show/isis/graph")
             .set(show_isis_graph)
             .path("/show/isis/spf")
