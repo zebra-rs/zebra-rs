@@ -5,10 +5,14 @@
 //! state is obtained through the MCP framework (`vtyctl mcp`, one
 //! stateless session per call, per router namespace) — never by scraping
 //! vty/vtyctl CLI output.
+//!
+//! The `snapshot` subcommand exports the same frontend plus every API
+//! response as static files, for publishing on a static host.
 
 mod api;
 mod mcp;
 mod ontology;
+mod snapshot;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -17,7 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use http_body_util::Full;
 use hyper::body::{Bytes, Incoming};
 use hyper::server::conn::http1;
@@ -33,34 +37,68 @@ const INDEX_HTML: &str = include_str!("../static/index.html");
 const APP_JS: &str = include_str!("../static/app.js");
 const STYLE_CSS: &str = include_str!("../static/style.css");
 
+/// In live mode the manifest declares "no snapshot": the frontend probes
+/// `window.ZEBRA_SNAPSHOT` to decide between the live API and the static
+/// `data/` files a snapshot export writes in its place.
+const LIVE_MANIFEST_JS: &str = "window.ZEBRA_SNAPSHOT = null;\n";
+
 #[derive(Parser)]
 #[command(
     name = "zebra-topology",
     about = "3D traffic path visualizer for the isis-flexalgo playset (MCP-backed)"
 )]
 struct Cli {
-    /// HTTP server port.
-    #[arg(long, default_value_t = 8080)]
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    /// HTTP server port (serve mode).
+    #[arg(long, global = true, default_value_t = 8080)]
     port: u16,
 
     /// Path to the playset ontology (router names, cities, regions).
-    #[arg(long, default_value = "playset/isis-flexalgo/ontology.json")]
+    #[arg(
+        long,
+        global = true,
+        default_value = "playset/isis-flexalgo/ontology.json"
+    )]
     ontology: PathBuf,
 
     /// vtyctl binary providing `vtyctl mcp`. Defaults to $VTYCTL_BIN,
     /// then a vtyctl next to this executable, then target/debug/vtyctl,
     /// then plain `vtyctl` from PATH.
-    #[arg(long)]
+    #[arg(long, global = true)]
     vtyctl: Option<String>,
 
     /// VTY gRPC endpoint passed to `vtyctl mcp -H` (as seen from inside
     /// each router's namespace).
-    #[arg(long, default_value = "unix:zebra-rs/vty")]
+    #[arg(long, global = true, default_value = "unix:zebra-rs/vty")]
     mcp_host: String,
 
     /// Per-MCP-call timeout in seconds.
-    #[arg(long, default_value_t = 15)]
+    #[arg(long, global = true, default_value_t = 15)]
     timeout: u64,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Serve the viewer live against the running lab (the default).
+    Serve,
+    /// Export the viewer plus pre-fetched data for every source router ×
+    /// algorithm as a static site (for GitHub Pages and the like).
+    Snapshot {
+        /// Output directory for the static site.
+        #[arg(long, default_value = "dist/topology")]
+        out: PathBuf,
+        /// How long to wait (seconds) for the lab to converge before
+        /// giving up rather than exporting a partial topology.
+        #[arg(long, default_value_t = 120)]
+        settle_timeout: u64,
+        /// Only export these algorithms (comma-separated, e.g. `0` or
+        /// `0,128`). The exported Algorithm dropdown is filtered to
+        /// match. Default: every algorithm the lab runs.
+        #[arg(long, value_delimiter = ',')]
+        algorithms: Option<Vec<u8>>,
+    },
 }
 
 /// Resolve the vtyctl binary the same way the playset scripts do, plus an
@@ -105,12 +143,6 @@ async fn main() -> Result<()> {
         },
     });
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], cli.port));
-    let listener = TcpListener::bind(addr)
-        .await
-        .with_context(|| format!("failed to bind {addr}"))?;
-
-    println!("zebra-topology: http://localhost:{}", cli.port);
     println!(
         "  ontology : {} ({} routers)",
         cli.ontology.display(),
@@ -118,6 +150,32 @@ async fn main() -> Result<()> {
     );
     println!("  vtyctl   : {vtyctl}");
     println!("  mcp host : {}", cli.mcp_host);
+
+    match cli.command {
+        Some(Command::Snapshot {
+            out,
+            settle_timeout,
+            algorithms,
+        }) => {
+            snapshot::run(
+                &app,
+                &out,
+                Duration::from_secs(settle_timeout),
+                algorithms.as_deref(),
+            )
+            .await
+        }
+        None | Some(Command::Serve) => serve(app, cli.port).await,
+    }
+}
+
+async fn serve(app: Arc<App>, port: u16) -> Result<()> {
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let listener = TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("failed to bind {addr}"))?;
+
+    println!("zebra-topology: http://localhost:{port}");
 
     loop {
         let (stream, _) = listener.accept().await?;
@@ -181,6 +239,7 @@ async fn handle(
         "/" => respond(StatusCode::OK, "text/html; charset=utf-8", INDEX_HTML),
         "/static/app.js" => respond(StatusCode::OK, "application/javascript", APP_JS),
         "/static/style.css" => respond(StatusCode::OK, "text/css", STYLE_CSS),
+        "/data/manifest.js" => respond(StatusCode::OK, "application/javascript", LIVE_MANIFEST_JS),
         "/api/routers" => json_ok(app.api_routers()),
         "/api/algorithms" => api_algorithms(&req, &app).await,
         "/api/topology" => api_topology(&req, &app).await,

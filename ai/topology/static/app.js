@@ -4,6 +4,35 @@
 // backend, which queries each router over MCP (vtyctl mcp). There is no
 // TE telemetry here — the lab carries connectivity, IGP metrics, and
 // per-algorithm SPF paths, so that is what the globe shows.
+//
+// The frontend also runs from a static snapshot (`zebra-topology
+// snapshot`): data/manifest.js sets window.ZEBRA_SNAPSHOT, and every
+// query becomes a fetch of a pre-baked data/ file instead of the live
+// API. Destination filtering is client-side in both modes, so one
+// all-destinations topology per (source, algorithm) covers everything.
+
+// Set by data/manifest.js: null when served live, snapshot metadata
+// ({generatedAtEpoch, ...}) when exported as a static site.
+const SNAPSHOT = window.ZEBRA_SNAPSHOT || null;
+
+function routersUrl() {
+    return SNAPSHOT ? './data/routers.json' : './api/routers';
+}
+
+function algorithmsUrl(source) {
+    return SNAPSHOT
+        ? './data/algorithms-' + encodeURIComponent(source) + '.json'
+        : './api/algorithms?source=' + encodeURIComponent(source);
+}
+
+function topologyUrl(source, algorithm) {
+    return SNAPSHOT
+        ? './data/topology-' + encodeURIComponent(source) + '-' +
+            encodeURIComponent(algorithm) + '.json'
+        : './api/topology?source=' + encodeURIComponent(source) +
+            '&algorithm=' + encodeURIComponent(algorithm) +
+            '&destination=__all__';
+}
 
 const COLORS = ['#e6194b', '#3cb44b', '#4363d8', '#f58231', '#911eb4', '#42d4f4', '#f032e6', '#bfef45'];
 
@@ -66,6 +95,10 @@ let currentAlgorithm = 0;
 // state a newer selection produced.
 let topologySeq = 0;
 let algorithmsSeq = 0;
+
+// The all-destinations topology for the current source|algorithm.
+// Flipping the destination re-renders from here — no re-query.
+let topologyCache = { key: null, data: null };
 
 // The camera auto-aims only when the vantage point changes (new source
 // or destination) — never on an algorithm flip or refresh, so the view
@@ -205,7 +238,7 @@ function escapeHtml(s) {
 async function loadRouters() {
     try {
         setStatus('Loading routers...');
-        const data = await apiFetch('/api/routers');
+        const data = await apiFetch(routersUrl());
         const routers = data.routers || [];
 
         const srcSel = document.getElementById('source');
@@ -256,7 +289,7 @@ async function loadAlgorithms(source, preferred) {
     const seq = ++algorithmsSeq;
     try {
         setStatus('Loading algorithms...');
-        const data = await apiFetch('/api/algorithms?source=' + encodeURIComponent(source));
+        const data = await apiFetch(algorithmsUrl(source));
         if (seq !== algorithmsSeq) return;
         const algorithms = data.algorithms || [];
         // Capture the selection at rebuild time — not at call time — so a
@@ -283,31 +316,52 @@ async function loadAlgorithms(source, preferred) {
     }
 }
 
-async function loadTopology() {
+// The destination filter is applied here, client-side, to the cached
+// all-destinations response. Paths are re-indexed after filtering so
+// colors and legend numbering always start from the first visible path.
+function filterPaths(data, destination) {
+    const paths = (data.paths || []).filter(p =>
+        destination === '__all__' || p.destination === destination);
+    return paths.map((p, i) => ({ ...p, index: i }));
+}
+
+async function loadTopology(opts) {
+    const force = !!(opts && opts.force);
     const source = document.getElementById('source').value;
-    const destination = document.getElementById('destination').value;
     const algorithm = document.getElementById('algorithm').value || '0';
 
     if (!source) return;
 
     syncUrl();
 
+    const key = source + '|' + algorithm;
+    if (!force && topologyCache.key === key && topologyCache.data) {
+        renderFromCache();
+        return;
+    }
+
     const seq = ++topologySeq;
     // Keep the current view (and the user's camera) on screen while the
     // routers are queried; the map is replaced only when new data lands.
-    setStatus('Querying ' + source + ' over MCP...');
+    setStatus(SNAPSHOT ? 'Loading snapshot data...' : 'Querying ' + source + ' over MCP...');
 
     try {
-        const url = '/api/topology?source=' + encodeURIComponent(source) +
-            '&algorithm=' + encodeURIComponent(algorithm) +
-            '&destination=' + encodeURIComponent(destination);
-        const data = await apiFetch(url);
+        const data = await apiFetch(topologyUrl(source, algorithm));
         if (seq !== topologySeq) return;
-        renderTopology(data, `${source}|${destination}`);
+        topologyCache = { key, data };
+        renderFromCache();
     } catch (e) {
         if (seq !== topologySeq) return;
         setStatus('Failed to load topology: ' + e.message, true);
     }
+}
+
+function renderFromCache() {
+    const data = topologyCache.data;
+    // The destination is read at render time, not fetch time, so a flip
+    // made while a fetch was in flight is what ends up on screen.
+    const destination = document.getElementById('destination').value;
+    renderTopology(data, filterPaths(data, destination), `${data.source}|${destination}`);
 }
 
 // --- Map rendering ---
@@ -319,7 +373,7 @@ function nodeLabel(n) {
         `IS-IS: ${n.active ? 'up' : 'not in topology'}`;
 }
 
-function renderTopology(data, focusKey) {
+function renderTopology(data, paths, focusKey) {
     clearMap();
 
     currentAlgorithm = data.algorithm || 0;
@@ -360,7 +414,6 @@ function renderTopology(data, focusKey) {
     });
 
     // Path arcs, one color per path, with a legend toggle each.
-    const paths = data.paths || [];
     const legendEl = document.getElementById('legend');
     legendEl.innerHTML = '';
     let allPathBtn = null;
@@ -467,8 +520,11 @@ function renderTopology(data, focusKey) {
 
     const unplotted = data.nodes.filter(n => n.lat == null || n.lng == null).map(n => n.name);
     const extra = unplotted.length > 0 ? ` (${unplotted.length} node(s) without coordinates: ${unplotted.join(', ')})` : '';
+    const snapNote = SNAPSHOT && SNAPSHOT.generatedAtEpoch
+        ? ` Snapshot of ${new Date(SNAPSHOT.generatedAtEpoch * 1000).toUTCString()}.`
+        : '';
     setStatus(`Algorithm ${currentAlgorithm} from ${data.source}: ` +
-        `${paths.length} path(s), ${data.nodes.length} node(s), ${plottedEdges} link(s)${extra}.`);
+        `${paths.length} path(s), ${data.nodes.length} node(s), ${plottedEdges} link(s)${extra}.${snapNote}`);
 }
 
 function refreshArcs() {
@@ -552,6 +608,14 @@ function populatePathDetail(idx) {
 document.addEventListener('DOMContentLoaded', () => {
     initGlobeSelect();
     initMap();
+
+    // A snapshot cannot re-query the routers — hide Refresh and let the
+    // status bar carry the snapshot timestamp instead.
+    if (SNAPSHOT) {
+        const refresh = document.getElementById('refresh');
+        (refresh.closest('label') || refresh).style.display = 'none';
+    }
+
     loadRouters();
 
     // A globe-design flip only restyles the earth — no router re-query.
@@ -569,5 +633,5 @@ document.addEventListener('DOMContentLoaded', () => {
 
     document.getElementById('destination').addEventListener('change', () => loadTopology());
     document.getElementById('algorithm').addEventListener('change', () => loadTopology());
-    document.getElementById('refresh').addEventListener('click', () => loadTopology());
+    document.getElementById('refresh').addEventListener('click', () => loadTopology({ force: true }));
 });
