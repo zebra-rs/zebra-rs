@@ -316,7 +316,7 @@ fn abdicate(isis: &mut Isis) {
         proxy_id
     );
     let lsdb = isis.lsdb.get_mut(&Level::L2);
-    for (_, lsa) in lsdb.map.iter_mut() {
+    for lsa in lsdb.map.values_mut() {
         if lsa.lsp.lsp_id.sys_id() == proxy_id && lsa.originated {
             lsa.originated = false;
             lsa.refresh_timer = None;
