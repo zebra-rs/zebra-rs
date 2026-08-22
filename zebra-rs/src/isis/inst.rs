@@ -2124,6 +2124,12 @@ impl Isis {
             Message::DisOriginate(level, neighbor_id, base) => {
                 self.schedule_dis_originate(level, neighbor_id, base);
             }
+            Message::ProxyOriginate(base) => {
+                // No dedicated throttle: fired from `area_proxy::refresh`,
+                // which is itself paced by the SPF backoff, and the
+                // handler's content compare makes repeats free.
+                super::area_proxy::process_originate(self, base);
+            }
             Message::DisGenFire(level, neighbor_id) => {
                 // Commit gate: same contract as LspGenFire — park the
                 // run (base stays accumulated, no mark_run) and let the
@@ -3312,6 +3318,11 @@ impl Isis {
             tx: &self.tx,
             ptx: &link.ptx,
             up_config: &self.config,
+            area_proxy_owned: if self.area_proxy.advertise_proxy_id {
+                self.config.area_proxy_sys_id
+            } else {
+                None
+            },
             restarting: self.restarting.as_ref(),
             tracing: &self.tracing,
             lsdb: &mut self.lsdb,
@@ -3974,6 +3985,10 @@ pub enum Message {
     /// throttle, and clears the timer slot.
     LspGenFire(Level),
     LspPurge(Level, IsisLspId),
+    /// (Re)originate the RFC 9666 Proxy LSP as the advertising Area
+    /// Leader. The payload is the §7.3.16.4 reclaim floor when a peer
+    /// reflected our Proxy LSP at a higher sequence number.
+    ProxyOriginate(Option<u32>),
     /// Re-originate the pseudonode LSP whose owner is the given
     /// `IsisNeighborId` (sys_id + pseudo_id). The handler resolves
     /// this back to the local ifindex by walking `top.links`; if no
@@ -4069,6 +4084,9 @@ impl Display for Message {
             }
             Message::DisOriginate(level, neighbor_id, _) => {
                 write!(f, "[Message::DisOriginate({}, {})]", level, neighbor_id)
+            }
+            Message::ProxyOriginate(floor) => {
+                write!(f, "[Message::ProxyOriginate(floor={:?})]", floor)
             }
             Message::DisGenFire(level, neighbor_id) => {
                 write!(f, "[Message::DisGenFire({}, {})]", level, neighbor_id)

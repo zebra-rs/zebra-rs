@@ -119,6 +119,13 @@ pub fn graph(
     // entry because LspMap keys by IsisNeighborId (no fragment byte).
     let mut nodes_to_process = Vec::new();
     for (_, lsa) in top.lsdb.get(&level).iter() {
+        // RFC 9666 §6.1: Inside Routers MUST ignore the Proxy LSP in
+        // their own SPF — they see the area's real topology, and
+        // consuming the abstraction alongside it could loop. (The
+        // Proxy LSP only exists at L2; the check is inert at L1.)
+        if top.config.area_proxy && top.area_proxy.proxy_sys_id == Some(lsa.lsp.lsp_id.sys_id()) {
+            continue;
+        }
         let neighbor_id = lsa.lsp.lsp_id.neighbor_id();
         let is_originated = lsa.originated;
         let lsp = lsa.lsp.clone();
@@ -282,6 +289,10 @@ pub fn graph_mt2(
 
     let mut nodes_to_process = Vec::new();
     for (_, lsa) in top.lsdb.get(&level).iter() {
+        // Same RFC 9666 §6.1 Proxy-LSP exclusion as `graph()`.
+        if top.config.area_proxy && top.area_proxy.proxy_sys_id == Some(lsa.lsp.lsp_id.sys_id()) {
+            continue;
+        }
         let neighbor_id = lsa.lsp.lsp_id.neighbor_id();
         let is_originated = lsa.originated;
         let is_pseudo = lsa.lsp.lsp_id.is_pseudo();
