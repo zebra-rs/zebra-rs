@@ -25,6 +25,10 @@ pub enum IsisTlvType {
     /// systemId-anonymous zero-lifetime LSP.
     PurgeOrigId = 13,
     LspBufferSize = 14,
+    /// Area Proxy TLV (RFC 9666). Carried in fragment 0 of an L2 LSP;
+    /// signals Area Proxy readiness and, from the Area Leader, carries
+    /// the Proxy System Identifier and Area SID sub-TLVs.
+    AreaProxy = 20,
     ExtIsReach = 22,
     MtIsReach = 222,
     Srv6 = 27,
@@ -77,6 +81,7 @@ impl IsisTlvType {
                 | Auth
                 | PurgeOrigId
                 | LspBufferSize
+                | AreaProxy
                 | ExtIsReach
                 | MtIsReach
                 | Srv6
@@ -113,6 +118,7 @@ impl From<IsisTlvType> for u8 {
             Auth => 10,
             PurgeOrigId => 13,
             LspBufferSize => 14,
+            AreaProxy => 20,
             ExtIsReach => 22,
             MtIsReach => 222,
             Srv6 => 27,
@@ -150,6 +156,7 @@ impl From<u8> for IsisTlvType {
             10 => Auth,
             13 => PurgeOrigId,
             14 => LspBufferSize,
+            20 => AreaProxy,
             22 => ExtIsReach,
             222 => MtIsReach,
             27 => Srv6,

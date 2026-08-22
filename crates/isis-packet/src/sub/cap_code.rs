@@ -12,6 +12,9 @@ pub enum IsisCapCode {
     NodeMaxSidDepth = 23,
     Srv6 = 25,
     FlexAlgoDef = 26,
+    /// IS-IS Area Leader sub-TLV (RFC 9667 §5.1.1). Election machinery
+    /// shared by Dynamic Flooding and Area Proxy (RFC 9666).
+    AreaLeader = 27,
     Unknown(u8),
 }
 
@@ -25,6 +28,7 @@ impl From<IsisCapCode> for u8 {
             NodeMaxSidDepth => 23,
             Srv6 => 25,
             FlexAlgoDef => 26,
+            AreaLeader => 27,
             Unknown(v) => v,
         }
     }
@@ -40,6 +44,7 @@ impl From<u8> for IsisCapCode {
             23 => NodeMaxSidDepth,
             25 => Srv6,
             26 => FlexAlgoDef,
+            27 => AreaLeader,
             v => Unknown(v),
         }
     }

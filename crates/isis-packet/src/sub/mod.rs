@@ -37,12 +37,22 @@ macro_rules! impl_parse_subs {
     )+};
 }
 
+pub mod area_proxy;
+pub use area_proxy::{
+    AreaSidFlags, AreaSidPrefix, IsisAreaProxySub, IsisSubAreaSid, IsisSubProxySystemId,
+    IsisTlvAreaProxy,
+};
+pub mod area_proxy_code;
+pub use area_proxy_code::IsisAreaProxyCode;
+pub mod area_proxy_disp;
+
 pub mod cap;
 pub use cap::{
-    ExtAdminGroup, FadSubCode, FadSubTlv, IsisSubFadExcludeAg, IsisSubFadExcludeSrlg,
-    IsisSubFadFlags, IsisSubFadIncludeAllAg, IsisSubFadIncludeAnyAg, IsisSubFlexAlgoDef,
-    IsisSubNodeMaxSidDepth, IsisSubSegmentRoutingAlgo, IsisSubSegmentRoutingCap,
-    IsisSubSegmentRoutingLB, IsisSubSrv6, IsisSubTlv, IsisTlvRouterCap, SegmentRoutingCapFlags,
+    ExtAdminGroup, FadSubCode, FadSubTlv, IsisSubAreaLeader, IsisSubFadExcludeAg,
+    IsisSubFadExcludeSrlg, IsisSubFadFlags, IsisSubFadIncludeAllAg, IsisSubFadIncludeAnyAg,
+    IsisSubFlexAlgoDef, IsisSubNodeMaxSidDepth, IsisSubSegmentRoutingAlgo,
+    IsisSubSegmentRoutingCap, IsisSubSegmentRoutingLB, IsisSubSrv6, IsisSubTlv, IsisTlvRouterCap,
+    SegmentRoutingCapFlags,
 };
 pub use packet_utils::SidLabelTlv;
 pub mod cap_code;
