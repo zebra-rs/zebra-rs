@@ -14,9 +14,10 @@ use super::checksum_calc;
 use super::error::{IsisIResult, IsisParseError};
 use super::util::{ParseBe, TlvEmitter, u32_u8_3};
 use super::{
-    IsisTlvExtIpReach, IsisTlvExtIsReach, IsisTlvIpv6Reach, IsisTlvIpv6Srlg, IsisTlvMtIpReach,
-    IsisTlvMtIpv6Reach, IsisTlvMtIsReach, IsisTlvMultiTopology, IsisTlvRestart, IsisTlvRouterCap,
-    IsisTlvSidLabelBinding, IsisTlvSrlg, IsisTlvSrv6, IsisTlvType, IsisType, many0_complete,
+    IsisTlvAreaProxy, IsisTlvExtIpReach, IsisTlvExtIsReach, IsisTlvIpv6Reach, IsisTlvIpv6Srlg,
+    IsisTlvMtIpReach, IsisTlvMtIpv6Reach, IsisTlvMtIsReach, IsisTlvMultiTopology, IsisTlvRestart,
+    IsisTlvRouterCap, IsisTlvSidLabelBinding, IsisTlvSrlg, IsisTlvSrv6, IsisTlvType, IsisType,
+    many0_complete,
 };
 
 // IS-IS discriminator.
@@ -528,6 +529,8 @@ pub enum IsisTlv {
     PurgeOrigId(IsisTlvPurgeOrigId),
     #[nom(Selector = "IsisTlvType::LspBufferSize")]
     LspBufferSize(IsisTlvLspBufferSize),
+    #[nom(Selector = "IsisTlvType::AreaProxy")]
+    AreaProxy(IsisTlvAreaProxy),
     #[nom(Selector = "IsisTlvType::ExtIsReach")]
     ExtIsReach(IsisTlvExtIsReach),
     #[nom(Selector = "IsisTlvType::MtIsReach")]
@@ -602,6 +605,7 @@ impl IsisTlv {
             MtIpv6Reach(v) => v.value_wire_len(),
             Srv6(v) => v.value_wire_len(),
             RouterCap(v) => v.value_wire_len(),
+            AreaProxy(v) => v.value_wire_len(),
             // Fixed-stride lists whose u8 `len()` would wrap.
             LspEntries(v) => v.entries.len() * 16,
             MultiTopology(v) => v.entries.len() * 2,
@@ -659,6 +663,7 @@ impl IsisTlv {
             MtIpv6Reach(v) => v.tlv_emit(buf),
             P2p3Way(v) => v.tlv_emit(buf),
             RouterCap(v) => v.tlv_emit(buf),
+            AreaProxy(v) => v.tlv_emit(buf),
             Restart(v) => v.tlv_emit(buf),
             Unknown(v) => v.tlv_emit(buf),
         }

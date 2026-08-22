@@ -1,6 +1,8 @@
 use std::fmt::{Display, Formatter, Result};
 
-use super::cap::{FadSubTlv, IsisSubFlexAlgoDef, IsisSubSrv6, IsisSubTlv, RouterCapFlags};
+use super::cap::{
+    FadSubTlv, IsisSubAreaLeader, IsisSubFlexAlgoDef, IsisSubSrv6, IsisSubTlv, RouterCapFlags,
+};
 use super::{
     IsisSubNodeMaxSidDepth, IsisSubSegmentRoutingAlgo, IsisSubSegmentRoutingCap,
     IsisSubSegmentRoutingLB, IsisTlvRouterCap, SegmentRoutingCapFlags,
@@ -36,8 +38,19 @@ impl Display for IsisSubTlv {
             NodeMaxSidDepth(v) => write!(f, "{}", v),
             Srv6(v) => write!(f, "{}", v),
             FlexAlgoDef(v) => write!(f, "{}", v),
+            AreaLeader(v) => write!(f, "{}", v),
             Unknown(v) => write!(f, "   Unknown Code: {} Len: {}", v.code, v.len),
         }
+    }
+}
+
+impl Display for IsisSubAreaLeader {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        write!(
+            f,
+            "   Area Leader: Priority {}, Algorithm {}",
+            self.priority, self.algorithm
+        )
     }
 }
 

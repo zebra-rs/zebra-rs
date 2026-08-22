@@ -202,6 +202,7 @@ impl Display for IsisTlv {
             Ipv6GlobalIfAddr(v) => write!(f, "{}", v),
             Ipv6Reach(v) => write!(f, "{}", v),
             RouterCap(v) => write!(f, "{}", v),
+            AreaProxy(v) => write!(f, "{}", v),
             MultiTopology(v) => write!(f, "{}", v),
             MtIpReach(v) => write!(f, "{}", v),
             MtIpv6Reach(v) => write!(f, "{}", v),

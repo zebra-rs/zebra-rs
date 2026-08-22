@@ -31,6 +31,8 @@ pub enum IsisSubTlv {
     Srv6(IsisSubSrv6),
     #[nom(Selector = "IsisCapCode::FlexAlgoDef")]
     FlexAlgoDef(IsisSubFlexAlgoDef),
+    #[nom(Selector = "IsisCapCode::AreaLeader")]
+    AreaLeader(IsisSubAreaLeader),
     #[nom(Selector = "_")]
     Unknown(IsisSubTlvUnknown),
 }
@@ -45,6 +47,7 @@ impl IsisSubTlv {
             NodeMaxSidDepth(v) => v.len(),
             Srv6(v) => v.len(),
             FlexAlgoDef(v) => v.len(),
+            AreaLeader(v) => v.len(),
             Unknown(v) => v.len,
         }
     }
@@ -58,6 +61,7 @@ impl IsisSubTlv {
             NodeMaxSidDepth(v) => v.tlv_emit(buf),
             Srv6(v) => v.tlv_emit(buf),
             FlexAlgoDef(v) => v.tlv_emit(buf),
+            AreaLeader(v) => v.tlv_emit(buf),
             Unknown(v) => v.tlv_emit(buf),
         }
     }
@@ -649,6 +653,43 @@ impl TlvEmitter for IsisSubFlexAlgoDef {
 impl From<IsisSubFlexAlgoDef> for IsisSubTlv {
     fn from(sub: IsisSubFlexAlgoDef) -> Self {
         IsisSubTlv::FlexAlgoDef(sub)
+    }
+}
+
+/// IS-IS Area Leader sub-TLV (RFC 9667 §5.1.1, IsisCapCode = 27).
+/// Advertising it signals eligibility for Area Leader election: the
+/// candidate with the numerically highest priority wins, ties broken by
+/// the highest system ID; unreachable nodes are ineligible. Reused by
+/// Area Proxy (RFC 9666) to elect the router that originates the Proxy
+/// LSP.
+#[derive(Debug, Default, NomBE, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IsisSubAreaLeader {
+    /// Election priority, 0-255; higher wins.
+    pub priority: u8,
+    /// Flooding-topology algorithm (RFC 9667 §5.1.1): 0 = centralized
+    /// computation by the Area Leader, 1-127 standardized distributed,
+    /// 128-254 private distributed.
+    pub algorithm: u8,
+}
+
+impl TlvEmitter for IsisSubAreaLeader {
+    fn typ(&self) -> u8 {
+        IsisCapCode::AreaLeader.into()
+    }
+
+    fn len(&self) -> u8 {
+        2
+    }
+
+    fn emit(&self, buf: &mut BytesMut) {
+        buf.put_u8(self.priority);
+        buf.put_u8(self.algorithm);
+    }
+}
+
+impl From<IsisSubAreaLeader> for IsisSubTlv {
+    fn from(sub: IsisSubAreaLeader) -> Self {
+        IsisSubTlv::AreaLeader(sub)
     }
 }
 

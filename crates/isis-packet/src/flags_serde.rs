@@ -21,6 +21,7 @@ use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::parser::IsisLspTypes;
+use crate::sub::area_proxy::AreaSidFlags;
 use crate::sub::cap::{RouterCapFlags, SegmentRoutingCapFlags, Srv6Flags};
 use crate::sub::neigh::AdjSidFlags;
 use crate::sub::prefix::{
@@ -118,6 +119,12 @@ bitfield_serde!(RouterCapFlags {
 } reserved { resvd: u8 });
 
 bitfield_serde!(Srv6Flags { o_flag: bool } reserved { resvd1: bool, resvd2: u16 });
+
+bitfield_serde!(AreaSidFlags {
+    l_flag: bool,
+    v_flag: bool,
+    f_flag: bool,
+} reserved { resvd: u8 });
 
 bitfield_serde!(AdjSidFlags {
     p_flag: bool,

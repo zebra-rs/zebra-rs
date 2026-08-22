@@ -147,6 +147,10 @@ pub fn lsp_cap_view<'a>(tlv: &'a IsisTlvRouterCap) -> LspCapView<'a> {
             cap::IsisSubTlv::FlexAlgoDef(fad) => {
                 view.fads.push(fad);
             }
+            cap::IsisSubTlv::AreaLeader(_) => {
+                // Not surfaced in the view yet; the Area Proxy leader
+                // election reads it directly from the LSDB.
+            }
             cap::IsisSubTlv::Unknown(_) => {
                 // Simpply ignore unknown sub tlv.
             }
