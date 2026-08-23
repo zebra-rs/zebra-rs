@@ -909,6 +909,16 @@ fn build_rib_from_spf<F: IsisRibFamily>(
 ) -> PrefixMap<F::Prefix, SpfRoute<F>> {
     let mut rib: PrefixMap<F::Prefix, SpfRoute<F>> = PrefixMap::new();
 
+    // RFC 9666 §3.2: the L2 graph packs (inter-area, intra-area)
+    // metric fields into the SPF cost while Area Proxy is in force
+    // (see `area_proxy::encode_inter_metric`); collapse installed
+    // route metrics back to the traditional total. MT 2 graphs are
+    // not packed.
+    let packed_cost = !mt2_mode
+        && level == Level::L2
+        && top.config.area_proxy
+        && top.area_proxy.proxy_sys_id.is_some();
+
     for (node, nhops) in spf_result {
         if *node == source {
             continue;
@@ -1005,8 +1015,13 @@ fn build_rib_from_spf<F: IsisRibFamily>(
             for entry in entries.iter() {
                 let prefix = F::entry_prefix(entry);
                 let (sid, prefix_sid, no_php) = F::resolve_sid(top, &level, &dest_sys_id, entry);
+                let vertex_metric = if packed_cost {
+                    super::area_proxy::decode_metric(nhops.cost)
+                } else {
+                    nhops.cost
+                };
                 let route = SpfRoute::<F> {
-                    metric: nhops.cost + F::entry_metric(entry),
+                    metric: vertex_metric + F::entry_metric(entry),
                     nhops: spf_nhops.clone(),
                     sid,
                     prefix_sid,

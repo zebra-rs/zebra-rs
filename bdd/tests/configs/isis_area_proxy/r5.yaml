@@ -1,0 +1,20 @@
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.5/32
+- if-name: i4
+  ipv4:
+    address: 10.0.45.2/30
+router:
+  isis:
+    net: 49.0002.0000.0000.0005.00
+    hostname: r5
+    is-type: level-2-only
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+    - if-name: i4
+      network-type: point-to-point
+      ipv4:
+        enabled: true
