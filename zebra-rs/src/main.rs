@@ -107,10 +107,7 @@ struct Arg {
 //   1. `--yang-path` argument, if the path exists
 //   2. `~/.zebra-rs/yang`, if it exists
 //   3. `/usr/share/zebra-rs/yang`, if it exists (`make install` + .deb layout)
-// Returns `None` if none resolve, which causes startup to abort. The schemas
-// are program data (not operator config), so `make install` and the .deb both
-// place them under /usr/share; a bare `/usr/bin/zebra-rs` on a package host
-// resolves here without any flag.
+// Returns `None` if none resolve, which causes startup to abort.
 fn yang_path(arg: &Arg) -> Option<String> {
     if !arg.yang_path.is_empty() {
         let path = Path::new(&arg.yang_path);
@@ -166,14 +163,6 @@ const NOFILE_TARGET: libc::rlim_t = 1_048_576;
 #[cfg(target_os = "macos")]
 const MACOS_OPEN_MAX: libc::rlim_t = 10_240;
 
-/// Raise the open-file limit as far as the environment allows. BGP
-/// holds one TCP socket per established peer — two while RFC 4271
-/// §6.8 collision resolution is pending — so the commonly inherited
-/// soft limit of 1024 exhausts fds well below ~1000 peers. Bump the
-/// hard limit to [`NOFILE_TARGET`] when privileged (failure means we
-/// lack CAP_SYS_RESOURCE and keep the inherited hard limit), then
-/// lift the soft limit to the hard limit, which never needs
-/// privilege. Returns the resulting (soft, hard) pair.
 fn raise_fd_limit() -> std::io::Result<(libc::rlim_t, libc::rlim_t)> {
     let mut rlim = libc::rlimit {
         rlim_cur: 0,
