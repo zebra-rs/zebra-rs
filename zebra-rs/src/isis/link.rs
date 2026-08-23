@@ -202,6 +202,12 @@ pub struct LinkTop<'a> {
     /// advertising Area Leader. Read by `lsp_recv` so the §7.3.16.4
     /// self-reclaim applies to reflected Proxy LSP copies too.
     pub area_proxy_owned: Option<isis_packet::IsisSysId>,
+    /// The Proxy System ID in force for the area (our own when we are
+    /// the advertising leader, otherwise learned from the leader's L2
+    /// Area Proxy TLV) — `Isis::area_proxy.proxy_sys_id`. Sources L2
+    /// IIHs and SNPs on Outside Circuits; `None` gates them off
+    /// entirely (RFC 9666 §5.1).
+    pub area_proxy_learned: Option<isis_packet::IsisSysId>,
     /// Snapshot of the per-instance `Isis.restarting` state. `Some`
     /// only between `clear isis graceful-restart begin` and either
     /// `abort`, `restarter-enabled=false`, or successful exit.
@@ -289,6 +295,35 @@ impl<'a> LinkTop<'a> {
         !self.is_p2p()
     }
 
+    /// RFC 9666 §5.1 circuit classification. Only meaningful while the
+    /// instance participates in Area Proxy: an explicit per-interface
+    /// `area-proxy inside|outside` wins; otherwise a circuit that is
+    /// not also a Level 1 circuit (effective level L2-only) is an
+    /// Outside Circuit.
+    pub fn is_outside_circuit(&self) -> bool {
+        if !self.up_config.area_proxy {
+            return false;
+        }
+        use super::area_proxy::AreaProxyCircuit;
+        match self.config.area_proxy_circuit {
+            Some(AreaProxyCircuit::Inside) => false,
+            Some(AreaProxyCircuit::Outside) => true,
+            None => self.state.level() == IsLevel::L2,
+        }
+    }
+
+    /// The system ID this circuit's IIHs and SNPs are sourced from:
+    /// our own on inside circuits; the Proxy System ID on Outside
+    /// Circuits — `None` there until it is learned, which per RFC 9666
+    /// §5.1 MUST suppress L2 IIH (and with it SNP) transmission.
+    pub fn hello_source_id(&self) -> Option<isis_packet::IsisSysId> {
+        if self.is_outside_circuit() {
+            self.area_proxy_learned
+        } else {
+            Some(self.up_config.net.sys_id())
+        }
+    }
+
     /// A passive circuit runs no Hello protocol: it advertises its
     /// prefixes into the LSP but never sends or processes Hellos, so it
     /// forms no adjacency. True when the operator set `passive`, and
@@ -331,6 +366,12 @@ pub struct LinkConfig {
 
     /// Link type one of LAN or Point-to-point.
     pub network_type: Option<NetworkType>,
+
+    /// RFC 9666 circuit role override
+    /// (`/router/isis/interface/<name>/area-proxy`). Absent ⇒ derived:
+    /// an L2-only circuit on an area-proxy-enabled instance is
+    /// Outside. See `LinkTop::is_outside_circuit`.
+    pub area_proxy_circuit: Option<super::area_proxy::AreaProxyCircuit>,
 
     /// Passive circuit (`/router/isis/interface/<name>/passive`). When
     /// set, the interface's prefixes are still advertised into the LSP
@@ -1999,6 +2040,34 @@ pub fn config_passive(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<(
         isis.link_state_up(ifindex);
     }
 
+    Some(())
+}
+
+/// `set router isis interface X area-proxy inside|outside` — explicit
+/// RFC 9666 circuit-role override; absent ⇒ derived (an L2-only
+/// circuit on an area-proxy-enabled instance is Outside).
+pub fn config_area_proxy_circuit(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    use super::area_proxy::AreaProxyCircuit;
+    let name = args.string()?;
+    let role = args.string()?;
+    let ifindex = {
+        let link = isis.links.get_mut_by_name(&name)?;
+        link.config.area_proxy_circuit = if op == ConfigOp::Set {
+            match role.as_str() {
+                "inside" => Some(AreaProxyCircuit::Inside),
+                "outside" => Some(AreaProxyCircuit::Outside),
+                _ => return None,
+            }
+        } else {
+            None
+        };
+        link.ifindex
+    };
+    // Reclassification changes what this circuit puts on the wire (IIH
+    // source identity, boundary filters) — refresh the Hello now
+    // rather than at the next timer tick.
+    let msg = Message::Ifsm(IfsmEvent::HelloOriginate, ifindex, None);
+    let _ = isis.tx.send(msg);
     Some(())
 }
 

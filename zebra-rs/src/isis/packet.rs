@@ -385,6 +385,16 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
         return;
     }
 
+    // RFC 9666: on an Outside Circuit our IIHs are sourced from the
+    // Proxy System ID, so a received IIH sourced from it is "self" too
+    // — another Inside Edge Router on the same boundary LAN (a
+    // topology §5.2 declares unsupported). Never key a neighbor under
+    // the proxy identity.
+    if link.is_outside_circuit() && Some(pdu.source_id) == link.area_proxy_learned {
+        isis_pdu_trace!(link, &level, "[Hello:Recv] proxy-sourced IIH — ignored");
+        return;
+    }
+
     // Check link type.
     if !link.is_lan() {
         isis_pdu_trace!(
@@ -407,6 +417,15 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
         );
         return;
     }
+
+    // The identity the peer sees us as: the Proxy System ID on an
+    // Outside Circuit (RFC 9666 §5.1), our own everywhere else — the
+    // 3-way handshake's neighbor echo is validated against it.
+    // Snapshot before borrowing `nbr` (method calls on `link` borrow
+    // the whole struct).
+    let hello_src = link
+        .hello_source_id()
+        .unwrap_or_else(|| link.up_config.net.sys_id());
 
     // RFC 5882 §3.2 BFD hold-down: while this neighbour's attached BFD
     // session is Down we keep its adjacency from (re-)reaching Up even though
@@ -486,7 +505,7 @@ pub fn hello_recv(link: &mut LinkTop, level: Level, pdu: IsisHello, mac: Option<
     // RR (HelperEdge::Stay) to prevent a repetitive restart from
     // pinning the adjacency indefinitely.
     let mac = link.state.mac;
-    let sys_id = link.up_config.net.sys_id();
+    let sys_id = hello_src;
     let ifname = link.state.name.clone();
     let (has_mac, _, helper_edge) =
         nbr_hello_interpret(nbr, &pdu.tlvs, mac, sys_id, link.local_pool);
@@ -687,6 +706,17 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
         return;
     }
 
+    // See `hello_recv`: a proxy-sourced IIH on an Outside Circuit is
+    // another Inside Edge Router speaking as the same proxy identity.
+    if link.is_outside_circuit() && Some(pdu.source_id) == link.area_proxy_learned {
+        isis_pdu_trace!(
+            link,
+            &Level::L2,
+            "[Hello P2P:Recv] proxy-sourced IIH — ignored"
+        );
+        return;
+    }
+
     // Process the Hello for each compatible level
     for level in [Level::L1, Level::L2] {
         // Check if both sender and receiver support this level
@@ -729,6 +759,13 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
             continue;
         }
 
+        // See `hello_recv`: on an Outside Circuit the peer echoes the
+        // Proxy System ID back in its 3-way TLV, not our real one.
+        // Snapshot before borrowing `nbr`.
+        let hello_src = link
+            .hello_source_id()
+            .unwrap_or_else(|| link.up_config.net.sys_id());
+
         // RFC 5882 §3.2 BFD hold-down — see the LAN handler. Snapshot the flag
         // (per level) before borrowing `nbr` from `link.state.nbrs`.
         let held = link.config.bfd.resolve(&link.up_config.bfd).enable
@@ -756,7 +793,7 @@ pub fn hello_p2p_recv(link: &mut LinkTop, pdu: IsisP2pHello, mac: Option<MacAddr
         // hold-timer refresh decision below. Matches the LAN ordering
         // — see hello_recv for the RFC 5306 §3.2(a) rationale.
         let mac = link.state.mac;
-        let sys_id = link.up_config.net.sys_id();
+        let sys_id = hello_src;
         let ifname = link.state.name.clone();
         let (_, has_my_sys_id, helper_edge) =
             nbr_hello_interpret(nbr, &pdu.tlvs, mac, sys_id, link.local_pool);

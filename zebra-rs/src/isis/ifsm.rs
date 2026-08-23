@@ -139,7 +139,14 @@ fn helper_ra_tlvs(link: &LinkTop, level: Level, include_restarting_neighbor: boo
 }
 
 pub fn hello_generate(link: &LinkTop, level: Level) -> IsisHello {
-    let source_id = link.up_config.net.sys_id();
+    // Outside Circuits source IIHs from the Proxy System ID (RFC 9666
+    // §5.1) so the outside neighbor adjacencies — and its TLV 22 —
+    // terminate on the proxy node. The unwrap fallback never reaches
+    // the wire: `hello_send` suppresses outside IIHs until the id is
+    // learned.
+    let source_id = link
+        .hello_source_id()
+        .unwrap_or_else(|| link.up_config.net.sys_id());
     let lan_id = link
         .state
         .adj
@@ -221,7 +228,10 @@ pub fn hello_generate(link: &LinkTop, level: Level) -> IsisHello {
 }
 
 pub fn hello_p2p_generate(link: &LinkTop, level: Level) -> IsisP2pHello {
-    let source_id = link.up_config.net.sys_id();
+    // Same Outside-Circuit proxy sourcing as `hello_generate`.
+    let source_id = link
+        .hello_source_id()
+        .unwrap_or_else(|| link.up_config.net.sys_id());
 
     // P2P Hello doesn't use LAN ID
     let mut hello = IsisP2pHello {
@@ -356,6 +366,19 @@ pub fn hello_send(link: &mut LinkTop, level: Level) -> Result<()> {
     // immediate Hello on every enabled circuit once the identity lands.
     if link.up_config.net.sys_id().is_empty() {
         return Ok(());
+    }
+
+    // RFC 9666 §5.1: an Outside Circuit runs L2 only, and its IIHs are
+    // sourced from the Proxy System ID — a router that has not yet
+    // learned it MUST NOT send IIHs there, so the outside adjacency
+    // can never form under our real identity.
+    if link.is_outside_circuit() {
+        if level == Level::L1 {
+            return Ok(());
+        }
+        if link.hello_source_id().is_none() {
+            return Ok(());
+        }
     }
 
     let hello = if link.config.network_type() == NetworkType::P2p {
