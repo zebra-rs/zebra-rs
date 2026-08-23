@@ -126,6 +126,48 @@ pub enum AreaProxyCircuit {
     Outside,
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// RFC 9666 §3.2 metric encoding for the Inside Router's L2 SPF.
+//
+// "Intra-area metrics MUST be treated as less than any inter-area
+// metric" — i.e. paths compare lexicographically by (inter-area
+// total, intra-area total). The shared Dijkstra runs on a single u32
+// cost, so the two keys are packed into it at graph-build time:
+// inter-area edge metrics occupy the high 16 bits, intra-area the low
+// 16. Ordering is exact while each field's path total stays under
+// 65536 (each edge is capped at 0xFFFF before packing); beyond that
+// the relaxation's saturating add degrades to plain
+// largest-cost-loses without wrapping. Comfortably above realistic
+// inside-area diameters and boundary metrics; revisit with a wider
+// cost type if a deployment ever exceeds it.
+// ─────────────────────────────────────────────────────────────────────
+
+pub(super) const METRIC_SHIFT: u32 = 16;
+
+pub(super) fn encode_intra_metric(metric: u32) -> u32 {
+    metric.min(0xFFFF)
+}
+
+pub(super) fn encode_inter_metric(metric: u32) -> u32 {
+    metric.min(0xFFFF) << METRIC_SHIFT
+}
+
+/// Collapse an encoded path cost back to the traditional total metric
+/// (inter + intra) for RIB installation and show output.
+pub(super) fn decode_metric(cost: u32) -> u32 {
+    (cost >> METRIC_SHIFT) + (cost & 0xFFFF)
+}
+
+/// Display form of a possibly-packed SPF cost: identity unless the
+/// §3.2 metric packing is in force at this level.
+pub(super) fn display_metric(isis: &Isis, level: &Level, cost: u32) -> u32 {
+    if *level == Level::L2 && isis.config.area_proxy && isis.area_proxy.proxy_sys_id.is_some() {
+        decode_metric(cost)
+    } else {
+        cost
+    }
+}
+
 /// RFC 9666 §5.2 boundary filter: true when this L2 LSP must NOT be
 /// flooded toward Outside Routers — its source system is an Inside
 /// Router (live router LSP in the L1 LSDB, pseudonode LSPs of inside
@@ -709,6 +751,28 @@ mod tests {
             lsdb.map.insert(entry.0, entry.1);
         }
         assert_eq!(inside_routers(&lsdb), BTreeSet::from([sys(1)]));
+    }
+
+    /// RFC 9666 §3.2 metric packing: any inter-area cost outweighs
+    /// every intra-area total, path comparison is lexicographic
+    /// (inter, intra), and decode restores the traditional sum.
+    #[test]
+    fn metric_packing_orders_inter_before_intra() {
+        // A single unit of inter-area metric beats the largest intra
+        // total the field can hold.
+        assert!(encode_inter_metric(1) > encode_intra_metric(u32::MAX));
+
+        // §3.2 example: inter 10 + intra 100 must beat inter 50 +
+        // intra 5, even though the raw totals point the other way.
+        let a = encode_inter_metric(10) + encode_intra_metric(100);
+        let b = encode_inter_metric(50) + encode_intra_metric(5);
+        assert!(a < b);
+
+        // Decode restores the traditional total; caps saturate.
+        assert_eq!(decode_metric(a), 110);
+        assert_eq!(decode_metric(b), 55);
+        assert_eq!(decode_metric(encode_intra_metric(7)), 7);
+        assert_eq!(decode_metric(encode_inter_metric(u32::MAX)), 0xFFFF);
     }
 
     /// RFC 9666 §5.2 boundary filter: inside-sourced L2 LSPs and any

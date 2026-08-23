@@ -1,0 +1,31 @@
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.3/32
+- if-name: i2
+  ipv4:
+    address: 10.0.23.2/30
+- if-name: i4
+  ipv4:
+    address: 10.0.34.1/30
+router:
+  isis:
+    net: 49.0001.0000.0000.0003.00
+    hostname: r3
+    area-proxy:
+      proxy-system-id: 0000.0000.00aa
+      priority: 10
+      hostname: zaparea
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+    - if-name: i2
+      network-type: point-to-point
+      ipv4:
+        enabled: true
+    - if-name: i4
+      network-type: point-to-point
+      circuit-type: level-2-only
+      ipv4:
+        enabled: true

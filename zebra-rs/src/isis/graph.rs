@@ -167,6 +167,54 @@ pub fn graph(
         }
     }
 
+    // RFC 9666 §3.2 context for an Inside Router's L2 SPF: the inside
+    // set (live L1 router LSPs) classifies every edge as intra- or
+    // inter-area for the packed-metric precedence, and the Proxy
+    // System ID marks outside routers' proxy-pointing adjacencies for
+    // resolution. None when Area Proxy isn't shaping this SPF (the
+    // Proxy LSP vertex itself is already excluded above).
+    let proxy_ctx: Option<(std::collections::BTreeSet<IsisSysId>, IsisSysId)> = if level
+        == Level::L2
+        && top.config.area_proxy
+        && let Some(proxy_id) = top.area_proxy.proxy_sys_id
+    {
+        Some((
+            super::area_proxy::inside_routers(top.lsdb.get(&Level::L1)),
+            proxy_id,
+        ))
+    } else {
+        None
+    };
+
+    // Outside routers advertise their boundary adjacency toward the
+    // Proxy System ID, not toward the Inside Edge Router that actually
+    // holds it — which would fail the two-way check in our (inside)
+    // SPF. Pre-collect, per outside neighbor id, the inside vertices
+    // advertising an adjacency to it, so those proxy-pointing edges
+    // can be resolved back to the real edge routers below.
+    let mut boundary_rev: BTreeMap<IsisNeighborId, Vec<usize>> = BTreeMap::new();
+    if let Some((inside, proxy_id)) = proxy_ctx.as_ref() {
+        for (neighbor_id, _, lsp) in nodes_to_process.iter() {
+            if !inside.contains(&neighbor_id.sys_id()) {
+                continue;
+            }
+            let from_id = top.lsp_map.get_mut(&level).get(neighbor_id);
+            for tlv in &lsp.tlvs {
+                if let IsisTlv::ExtIsReach(ext_reach) = tlv {
+                    for entry in &ext_reach.entries {
+                        let to_sys = entry.neighbor_id.sys_id();
+                        if !inside.contains(&to_sys) && to_sys != *proxy_id {
+                            boundary_rev
+                                .entry(entry.neighbor_id)
+                                .or_default()
+                                .push(from_id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Process links.
     for (neighbor_id, is_originated, lsp) in nodes_to_process.iter() {
         let node_id = top.lsp_map.get_mut(&level).get(neighbor_id);
@@ -182,6 +230,37 @@ pub fn graph(
             if let IsisTlv::ExtIsReach(ext_reach) = tlv {
                 for entry in &ext_reach.entries {
                     let neighbor_lsp_id: IsisLspId = entry.neighbor_id.into();
+
+                    // RFC 9666 §3.2: classify the edge and resolve
+                    // proxy-pointing adjacencies.
+                    let mut metric = entry.metric;
+                    if let Some((inside, proxy_id)) = proxy_ctx.as_ref() {
+                        if entry.neighbor_id.sys_id() == *proxy_id {
+                            // An outside router's adjacency toward the
+                            // proxy: materialize an inter-area edge to
+                            // every Inside Edge Router advertising this
+                            // outside router, restoring two-way
+                            // connectivity for the inside SPF.
+                            let cost = super::area_proxy::encode_inter_metric(entry.metric);
+                            for &edge_id in boundary_rev.get(neighbor_id).into_iter().flatten() {
+                                let link = spf::Link::with_id(node_id, edge_id, cost, 0);
+                                if let Some(from) = graph.get_mut(&node_id) {
+                                    from.olinks.push(link.clone());
+                                }
+                                if let Some(to) = graph.get_mut(&edge_id) {
+                                    to.ilinks.push(link);
+                                }
+                            }
+                            continue;
+                        }
+                        let from_inside = inside.contains(&neighbor_id.sys_id());
+                        let to_inside = inside.contains(&entry.neighbor_id.sys_id());
+                        metric = if from_inside && to_inside {
+                            super::area_proxy::encode_intra_metric(metric)
+                        } else {
+                            super::area_proxy::encode_inter_metric(metric)
+                        };
+                    }
 
                     if top.lsdb.get(&level).get(&neighbor_lsp_id).is_none() {
                         continue;
@@ -200,7 +279,7 @@ pub fn graph(
                         0
                     };
 
-                    let link = spf::Link::with_id(node_id, to_id, entry.metric, link_id);
+                    let link = spf::Link::with_id(node_id, to_id, metric, link_id);
                     if let Some(from_id) = graph.get_mut(&node_id) {
                         from_id.olinks.push(link.clone());
                     }

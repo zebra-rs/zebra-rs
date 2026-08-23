@@ -1623,7 +1623,8 @@ where
                 prefixes.push(TopoPrefixJson {
                     prefix: F::trunc_prefix(F::entry_prefix(entry)).to_string(),
                     prefix_type: F::spf_prefix_type(is_self).to_string(),
-                    metric: path.cost + F::entry_metric(entry),
+                    metric: super::area_proxy::display_metric(isis, level, path.cost)
+                        + F::entry_metric(entry),
                     nexthop: nexthop_str.clone(),
                     interface: iface_str.clone(),
                 });
@@ -1634,7 +1635,7 @@ where
             vertex: node_hostname,
             system_id: node_sys_id.to_string(),
             is_self,
-            metric: path.cost,
+            metric: super::area_proxy::display_metric(isis, level, path.cost),
             nexthop: nexthop_str,
             interface: iface_str,
             parent: parent_str,
@@ -2062,7 +2063,7 @@ where
             ("TE-IS", 2u8)
         };
         rows.push(TreeRow {
-            metric: path.cost,
+            metric: super::area_proxy::display_metric(isis, level, path.cost),
             kind,
             vertex: node_hostname.clone(),
             typ,
@@ -2090,7 +2091,8 @@ where
                 .unwrap_or_default();
             for entry in entries.iter() {
                 rows.push(TreeRow {
-                    metric: path.cost + F::entry_metric(entry),
+                    metric: super::area_proxy::display_metric(isis, level, path.cost)
+                        + F::entry_metric(entry),
                     kind: 3,
                     vertex: F::trunc_prefix(F::entry_prefix(entry)).to_string(),
                     typ: F::spf_prefix_type(false),
