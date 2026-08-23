@@ -17,8 +17,6 @@ mod bgp;
 mod config;
 mod context;
 use config::{Cli, ConfigManager};
-// The cradle eBPF-engine supervisor rides on the Linux-only gRPC tee
-// (`fib::cradle`) and Linux process semantics (PR_SET_PDEATHSIG).
 #[cfg(target_os = "linux")]
 mod cradle;
 mod fib;
@@ -44,8 +42,6 @@ mod script;
 mod spf;
 mod srv6;
 mod stamp;
-/// IOS-XR-style exponential-backoff throttle, shared by the IS-IS and
-/// OSPF SPF/LSA schedulers.
 mod throttle;
 mod version;
 
