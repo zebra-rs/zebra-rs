@@ -767,7 +767,6 @@ mod tests {
         let a = encode_inter_metric(10) + encode_intra_metric(100);
         let b = encode_inter_metric(50) + encode_intra_metric(5);
         assert!(a < b);
-        assert!(10 + 100 > 50 + 5);
 
         // Decode restores the traditional total; caps saturate.
         assert_eq!(decode_metric(a), 110);
