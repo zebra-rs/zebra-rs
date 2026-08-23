@@ -284,12 +284,6 @@ async fn run(arg: Arg) -> anyhow::Result<()> {
     config.subscribe_show("rib", rib.show.tx.clone());
     config.subscribe_show("policy", policy.show.tx.clone());
 
-    // The firewall and IPsec backends live in the external insomnia
-    // daemon: it consumes both subtrees over the zebra.config.v1 JSON
-    // subscription and serves `show firewall` / `show vpn ipsec` back
-    // through the zebra.show.v1 provider registration (the subtrees
-    // only exist with `--feature iso`).
-
     let cli = Cli::new(config.tx.clone());
 
     let vty_addr = config::VtyAddr::parse(&arg.vty_socket)?;
