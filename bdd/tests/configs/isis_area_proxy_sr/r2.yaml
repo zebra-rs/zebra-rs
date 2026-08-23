@@ -1,0 +1,38 @@
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.2/32
+- if-name: i1
+  ipv4:
+    address: 10.0.12.2/30
+- if-name: i3
+  ipv4:
+    address: 10.0.23.1/30
+router:
+  isis:
+    net: 49.0001.0000.0000.0002.00
+    hostname: r2
+    te-router-id: 10.0.0.2
+    segment-routing: mpls
+    area-proxy:
+      proxy-system-id: 0000.0000.00aa
+      priority: 50
+      hostname: zaparea
+      area-sid:
+        prefix: 10.0.0.100/32
+        index: 500
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+        prefix-sid:
+          index: 200
+    - if-name: i1
+      network-type: point-to-point
+      ipv4:
+        enabled: true
+    - if-name: i3
+      network-type: point-to-point
+      circuit-type: level-2-only
+      ipv4:
+        enabled: true

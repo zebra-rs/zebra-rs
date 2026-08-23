@@ -49,3 +49,4 @@ destinations past the Area Proxy Boundary.
 | Outside routers see one proxy node, never the inside topology | |
 | Traffic crosses the abstraction in both directions, one hop beyond included | |
 | Area Leader failover regenerates the Proxy LSP from the successor | |
+| Teardown topology | |

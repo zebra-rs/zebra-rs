@@ -29,7 +29,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
-use isis_packet::{IsisAreaProxySub, IsisLspId, IsisSubTlv, IsisSysId, IsisTlv};
+use ipnet::Ipv4Net;
+use isis_packet::{
+    AreaSidPrefix, IsisAreaProxySub, IsisLspId, IsisSubTlv, IsisSysId, IsisTlv, SidLabelValue,
+};
 use serde::Serialize;
 
 use crate::config::Args;
@@ -66,6 +69,12 @@ pub struct AreaProxy {
     /// originated under, kept so abdication / teardown can find them
     /// after the config or election that named it has moved on.
     pub owned_proxy_id: Option<IsisSysId>,
+    /// RFC 9666 §4.3.2 Area SID in force: our configured
+    /// (prefix, index) when we are the advertising leader, otherwise
+    /// the pair learned from the leader's Area SID sub-TLV. Inside
+    /// Edge Routers install a pop for SRGB-start + index
+    /// (`rib::update_self_sid_ilm`).
+    pub area_sid: Option<(Ipv4Net, u32)>,
     /// Distinct Proxy System IDs seen in the L2 LSDB, kept to log each
     /// conflicting occurrence once (RFC 9666 §4.4.1: multiple unique
     /// Proxy System IDs are a misconfiguration) instead of on every
@@ -112,6 +121,45 @@ fn proxy_id_sub(tlvs: &[IsisTlv]) -> Option<IsisSysId> {
             _ => None,
         })
     })
+}
+
+/// The (prefix, index) pair of an Area SID sub-TLV (RFC 9666 §4.3.2).
+/// Only the IPv4 + index form is consumed; a label-form or IPv6 Area
+/// SID from a foreign implementation is ignored rather than
+/// misinstalled.
+fn area_sid_sub(tlvs: &[IsisTlv]) -> Option<(Ipv4Net, u32)> {
+    tlvs.iter().find_map(|tlv| {
+        let IsisTlv::AreaProxy(ap) = tlv else {
+            return None;
+        };
+        ap.subs.iter().find_map(|sub| match sub {
+            IsisAreaProxySub::AreaSid(s) => match (&s.prefix, &s.sid) {
+                (AreaSidPrefix::V4(p), SidLabelValue::Index(i)) => Some((*p, *i)),
+                _ => None,
+            },
+            _ => None,
+        })
+    })
+}
+
+/// RFC 9666 §5.3.2 SRGB merge for the Proxy LSP: every inside router
+/// must advertise an SRGB and every starting value must be identical;
+/// the merged range is the minimum. `expected` is the usable
+/// inside-router count — any router without an SRGB vetoes the merge
+/// (None), as does a starting-value mismatch (the caller logs that
+/// case).
+pub(super) fn merge_srgb(srgbs: &[(u32, u32)], expected: usize) -> Option<(u32, u32)> {
+    if expected == 0 || srgbs.len() != expected {
+        return None;
+    }
+    let (start, mut range) = srgbs[0];
+    for &(s, r) in &srgbs[1..] {
+        if s != start {
+            return None;
+        }
+        range = range.min(r);
+    }
+    Some((start, range))
 }
 
 /// Per-circuit Area Proxy role override
@@ -317,6 +365,28 @@ pub fn refresh(isis: &mut Isis) {
         learned
     };
 
+    // Area SID in force (§4.3.2): our configured pair when we are the
+    // advertising leader, else the pair from the leader's L2 Area
+    // Proxy TLV.
+    let area_sid = if advertise_proxy_id {
+        match (
+            isis.config.area_proxy_area_sid_prefix,
+            isis.config.area_proxy_area_sid_index,
+        ) {
+            (Some(prefix), Some(index)) => Some((prefix, index)),
+            _ => None,
+        }
+    } else {
+        leader.and_then(|(_, l)| {
+            let l2_id = IsisLspId::new(l, 0, 0);
+            isis.lsdb
+                .get(&Level::L2)
+                .get(&l2_id)
+                .filter(|lsa| lsa.lsp.hold_time > 0)
+                .and_then(|lsa| area_sid_sub(&lsa.lsp.tlvs))
+        })
+    };
+
     if distinct.len() > 1 {
         for id in distinct.difference(&isis.area_proxy.seen_proxy_ids) {
             tracing::warn!(
@@ -334,6 +404,7 @@ pub fn refresh(isis: &mut Isis) {
         );
     }
     let prev_advertise = state.advertise_proxy_id;
+    let prev_area_sid = state.area_sid;
     state.leader = leader.map(|(_, id)| id);
     state.leader_priority = leader.map(|(p, _)| p);
     state.proxy_sys_id = proxy_sys_id;
@@ -342,9 +413,19 @@ pub fn refresh(isis: &mut Isis) {
     state.ready_count = ready_count;
     state.advertise_proxy_id = advertise_proxy_id;
     state.seen_proxy_ids = distinct;
+    state.area_sid = area_sid;
 
     if prev_advertise != advertise_proxy_id {
         let _ = isis.tx.send(Message::LspOriginate(Level::L2, None));
+    }
+
+    // A changed Area SID re-reconciles the edge-router pop entry right
+    // away — the SpfDone handler runs the ILM reconcile before this
+    // refresh, so waiting for the next cycle would install one settle
+    // late. The reconcile is a diff-apply, so this is free when
+    // nothing changed.
+    if prev_area_sid != area_sid {
+        super::rib::update_self_sid_ilm(isis);
     }
 
     // Proxy LSP lifecycle. While we are the advertising leader, drive
@@ -517,6 +598,8 @@ struct AreaProxyBrief {
     proxy_lsp_fragments: usize,
     proxy_lsp_seq_number: Option<u32>,
     outside_circuits: Vec<String>,
+    area_sid_prefix: Option<String>,
+    area_sid_index: Option<u32>,
 }
 
 /// Names of this instance's Outside Circuits — same classification as
@@ -535,6 +618,12 @@ fn outside_circuit_names(isis: &Isis) -> Vec<String> {
         })
         .map(|(_, link)| link.state.name.clone())
         .collect()
+}
+
+/// True when this router is an Inside Edge Router (≥ 1 Outside
+/// Circuit) — the routers that install the Area SID pop (§7).
+pub(super) fn has_outside_circuit(isis: &Isis) -> bool {
+    !outside_circuit_names(isis).is_empty()
 }
 
 pub fn show(isis: &Isis, _args: Args, json: bool) -> std::result::Result<String, std::fmt::Error> {
@@ -575,6 +664,8 @@ pub fn show(isis: &Isis, _args: Args, json: bool) -> std::result::Result<String,
         proxy_lsp_fragments: owned.len(),
         proxy_lsp_seq_number: frag0_seq,
         outside_circuits: outside_circuit_names(isis),
+        area_sid_prefix: state.area_sid.map(|(p, _)| p.to_string()),
+        area_sid_index: state.area_sid.map(|(_, i)| i),
     };
 
     if json {
@@ -656,6 +747,9 @@ pub fn show(isis: &Isis, _args: Args, json: bool) -> std::result::Result<String,
             "Outside Circuits: {}",
             brief.outside_circuits.join(", ")
         )?;
+    }
+    if let Some((prefix, index)) = state.area_sid {
+        writeln!(buf, "Area SID:        {} index {}", prefix, index)?;
     }
     Ok(buf)
 }
@@ -773,6 +867,23 @@ mod tests {
         assert_eq!(decode_metric(b), 55);
         assert_eq!(decode_metric(encode_intra_metric(7)), 7);
         assert_eq!(decode_metric(encode_inter_metric(u32::MAX)), 0xFFFF);
+    }
+
+    /// RFC 9666 §5.3.2 SRGB merge: every usable inside router must
+    /// advertise an SRGB, all starting values must match, and the
+    /// merged range is the minimum.
+    #[test]
+    fn srgb_merge_requires_universal_identical_starts() {
+        assert_eq!(merge_srgb(&[], 0), None);
+        assert_eq!(merge_srgb(&[(16000, 8000)], 1), Some((16000, 8000)));
+        assert_eq!(
+            merge_srgb(&[(16000, 8000), (16000, 4000), (16000, 6000)], 3),
+            Some((16000, 4000))
+        );
+        // Starting-value mismatch vetoes the merge.
+        assert_eq!(merge_srgb(&[(16000, 8000), (20000, 8000)], 2), None);
+        // A router without an SRGB vetoes it too.
+        assert_eq!(merge_srgb(&[(16000, 8000)], 2), None);
     }
 
     /// RFC 9666 §5.2 boundary filter: inside-sourced L2 LSPs and any
