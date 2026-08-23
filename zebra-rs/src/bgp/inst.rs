@@ -118,7 +118,7 @@ pub enum Message {
         withdraw: Vec<bgp_packet::BgpLsNlri>,
     },
     /// A session/association change reported by the in-process MUP
-    /// controller (`src/mup-c/`), which the BGP task spawns when
+    /// controller (`src/mup_c/`), which the BGP task spawns when
     /// `router bgp mup-c enabled true` is committed and hands
     /// `self.tx`. Recorded in [`Bgp::mup_c_view`] for `show bgp
     /// mup-c`; MUP route origination from these lands in a

@@ -52,7 +52,7 @@ static, config-driven `End.DT46` decap.
 ## The user-plane forwarding contract (shared)
 
 Everything a MUP-U node must forward, mapped to state we already hold in
-`MupSession` (`mup-c/session.rs:14-57`). Both plans satisfy the same contract;
+`MupSession` (`mup_c/session.rs:14-57`). Both plans satisfy the same contract;
 they differ only in the datapath primitive used at the mobile edge.
 
 | Plane | Trigger | Action | Plan A primitive | Plan B primitive | State held |
@@ -221,7 +221,7 @@ mobile-uplane taxonomy* — exactly the reuse seam.
   `bgp-prefix-sid-rfc9252.md` describe for other off-kernel behaviours.
 - Drive the behaviour from the MUP install path: B1 swaps the `End.DT46` SID for
   the GTP behaviour in `reconcile_mup_st*` when the peer is a GTP edge; B2 has
-  MUP-C drive cradle directly from PFCP PDR/FAR (`mup-c/`), bypassing BGP for the
+  MUP-C drive cradle directly from PFCP PDR/FAR (`mup_c/`), bypassing BGP for the
   local datapath.
 
 ### Phases
