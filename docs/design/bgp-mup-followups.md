@@ -353,7 +353,7 @@ zenoh encoding to design).
   enable; controller-address; pfcp {…}; srv6 {…} }` (lifted out of the
   former `afi-safi mup` wrapper) — so the controller is spawned by the BGP
   task and handed its `Message` channel, the way a per-VRF BGP instance is.
-  Module: `zebra-rs/src/mup-c/`
+  Module: `zebra-rs/src/mup_c/`
   (`inst` task, `pfcp` socket/handlers, `session`/`assoc` tables); spawn /
   reconfigure / teardown in `Bgp::apply_mup_c_commit_diff`.
 * **PR-A (ingest):** PFCP listener (own tokio UDP socket); Association
