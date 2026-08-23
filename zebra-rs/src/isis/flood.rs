@@ -184,8 +184,29 @@ pub fn srm_advertise(top: &mut LinkTop, level: Level, ifindex: u32) {
         return;
     }
 
+    // RFC 9666 §5.2: toward Outside Routers, L2 LSPs of Inside
+    // Routers (or any LSP carrying the Area Proxy TLV) must not be
+    // flooded — only the Proxy LSP and other outside LSPs cross the
+    // boundary. This transmit choke point covers every SRM setter
+    // (origination fan-out, §7.3.15.1 re-flood, PSNP/CSNP-driven
+    // requests), so an outside peer requesting a suppressed LSP gets
+    // silence rather than a leak.
+    let boundary = level == Level::L2 && top.is_outside_circuit();
+
     // Send LSPs for each SRM entry.
     for lsp_id in srm_entries {
+        if boundary
+            && super::area_proxy::boundary_filtered(
+                top.lsdb.get(&Level::L1),
+                top.lsdb.get(&Level::L2),
+                &lsp_id,
+            )
+        {
+            if let Some(adj) = top.lsdb.get_mut(&level).adj.get_mut(&ifindex) {
+                adj.srm.0.remove(&lsp_id);
+            }
+            continue;
+        }
         let lsdb = top.lsdb.get(&level);
         if let Some(lsa) = lsdb.get(&lsp_id) {
             let hold_time = lsa.hold_timer.as_ref().map_or(0, |timer| timer.rem_sec()) as u16;
@@ -211,14 +232,50 @@ pub fn srm_advertise(top: &mut LinkTop, level: Level, ifindex: u32) {
 }
 
 pub fn ssn_advertise(link: &mut LinkTop, level: Level) {
-    let Some(adj) = link.lsdb.get_mut(&level).adj.get_mut(&link.ifindex) else {
-        return;
+    // Drain the SSN set first so the boundary filter below can borrow
+    // the LSDB immutably.
+    let drained: Vec<IsisLspEntry> = {
+        let Some(adj) = link.lsdb.get_mut(&level).adj.get_mut(&link.ifindex) else {
+            return;
+        };
+        adj.ssn_timer = None;
+        if adj.ssn.0.is_empty() {
+            return;
+        }
+        let mut entries = Vec::new();
+        while let Some((_, entry)) = adj.ssn.0.pop_first() {
+            entries.push(entry);
+        }
+        entries
     };
-    adj.ssn_timer = None;
 
-    if adj.ssn.0.is_empty() {
+    // RFC 9666 §5.2: PSNPs toward Outside Routers must not reference
+    // boundary-filtered LSPs (an ack or request for a suppressed LSP
+    // would resurrect it); an emptied PSNP is not sent at all.
+    let boundary = level == Level::L2 && link.is_outside_circuit();
+    let drained: Vec<IsisLspEntry> = if boundary {
+        drained
+            .into_iter()
+            .filter(|entry| {
+                !super::area_proxy::boundary_filtered(
+                    link.lsdb.get(&Level::L1),
+                    link.lsdb.get(&Level::L2),
+                    &entry.lsp_id,
+                )
+            })
+            .collect()
+    } else {
+        drained
+    };
+    if drained.is_empty() {
         return;
     }
+
+    // §5.2: SNPs on an Outside Circuit are sourced from the Proxy
+    // System ID, like the IIHs that formed the adjacency.
+    let source_id = link
+        .hello_source_id()
+        .unwrap_or_else(|| link.up_config.net.sys_id());
 
     // Interface MTU.
     let mtu = link.state.mtu as usize;
@@ -267,7 +324,7 @@ pub fn ssn_advertise(link: &mut LinkTop, level: Level) {
 
     let mut entry_size = 0;
 
-    while let Some((_, entry)) = adj.ssn.0.pop_first() {
+    for entry in drained {
         tlvs.entries.push(entry);
 
         entry_size += 1;
@@ -276,7 +333,7 @@ pub fn ssn_advertise(link: &mut LinkTop, level: Level) {
             auth::append_auth_tlv(&mut psnp_tlvs, resolved.as_ref());
             let psnp = IsisPsnp {
                 pdu_len: 0,
-                source_id: link.up_config.net.sys_id(),
+                source_id,
                 source_id_circuit: 0,
                 tlvs: psnp_tlvs,
             };
@@ -291,7 +348,7 @@ pub fn ssn_advertise(link: &mut LinkTop, level: Level) {
         auth::append_auth_tlv(&mut psnp_tlvs, resolved.as_ref());
         let psnp = IsisPsnp {
             pdu_len: 0,
-            source_id: link.up_config.net.sys_id(),
+            source_id,
             source_id_circuit: 0,
             tlvs: psnp_tlvs,
         };

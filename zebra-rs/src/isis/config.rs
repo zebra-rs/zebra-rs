@@ -299,6 +299,10 @@ impl Isis {
         );
         self.callback_add("/router/isis/interface/passive", link::config_passive);
         self.callback_add(
+            "/router/isis/interface/area-proxy",
+            link::config_area_proxy_circuit,
+        );
+        self.callback_add(
             "/router/isis/interface/hello/interval",
             link::config_hello_interval,
         );

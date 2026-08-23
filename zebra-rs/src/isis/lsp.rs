@@ -1870,6 +1870,20 @@ pub fn lsp_emit(
 }
 
 pub fn csnp_generate(link: &LinkTop, level: Level) -> Vec<IsisCsnp> {
+    // RFC 9666 §5.2: an Outside Circuit runs no L1, its CSNPs
+    // summarize only the LSPs allowed to cross the boundary, they are
+    // sourced from the Proxy System ID, and none are sent before that
+    // id is learned (the IIH gate means no adjacency exists then
+    // anyway). Everything filtered ⇒ no CSNP at all — the entry-empty
+    // guards below already ensure that.
+    if link.is_outside_circuit() && level == Level::L1 {
+        return vec![];
+    }
+    let boundary = level == Level::L2 && link.is_outside_circuit();
+    let Some(source_id) = link.hello_source_id() else {
+        return vec![];
+    };
+
     // Interface MTU.
     let mtu = link.state.mtu as usize;
 
@@ -1927,6 +1941,15 @@ pub fn csnp_generate(link: &LinkTop, level: Level) -> Vec<IsisCsnp> {
 
     let mut entry_size = 0;
     for (_lsp_id, lsa) in link.lsdb.get(&level).iter() {
+        if boundary
+            && super::area_proxy::boundary_filtered(
+                link.lsdb.get(&Level::L1),
+                link.lsdb.get(&Level::L2),
+                &lsa.lsp.lsp_id,
+            )
+        {
+            continue;
+        }
         if start.is_none() {
             start = Some(lsa.lsp.lsp_id);
         }
@@ -1939,7 +1962,7 @@ pub fn csnp_generate(link: &LinkTop, level: Level) -> Vec<IsisCsnp> {
             auth::append_auth_tlv(&mut csnp_tlvs, resolved.as_ref());
             let csnp = IsisCsnp {
                 pdu_len: 0,
-                source_id: link.up_config.net.sys_id(),
+                source_id,
                 source_id_circuit: 0,
                 start: start.unwrap_or(IsisLspId::start()),
                 end: lsa.lsp.lsp_id,
@@ -1957,7 +1980,7 @@ pub fn csnp_generate(link: &LinkTop, level: Level) -> Vec<IsisCsnp> {
         auth::append_auth_tlv(&mut csnp_tlvs, resolved.as_ref());
         let csnp = IsisCsnp {
             pdu_len: 0,
-            source_id: link.up_config.net.sys_id(),
+            source_id,
             source_id_circuit: 0,
             start: start.unwrap_or(IsisLspId::start()),
             end: IsisLspId::end(),

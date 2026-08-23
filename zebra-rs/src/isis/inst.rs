@@ -3323,6 +3323,7 @@ impl Isis {
             } else {
                 None
             },
+            area_proxy_learned: self.area_proxy.proxy_sys_id,
             restarting: self.restarting.as_ref(),
             tracing: &self.tracing,
             lsdb: &mut self.lsdb,

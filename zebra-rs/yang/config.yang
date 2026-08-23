@@ -3552,6 +3552,24 @@ module config {
             }
           }
 
+          leaf area-proxy {
+            ext:help "Area Proxy circuit role (RFC 9666): inside / outside";
+            type enumeration {
+              enum inside;
+              enum outside;
+            }
+            description
+              "Explicit RFC 9666 circuit-role override, meaningful only
+               while the instance's area-proxy is enabled. Absent, the
+               role is derived per §5.1: a circuit that is not also a
+               Level 1 circuit (effective level L2-only) is an Outside
+               Circuit. On an Outside Circuit L2 IIHs and SNPs are
+               sourced from the Proxy System ID (suppressed until it is
+               learned), and inside L2 LSPs are filtered from flooding
+               and SNPs. Outside circuits should not be configured to
+               run Level 1.";
+          }
+
           leaf network-type {
             ext:help "Media type: LAN or point-to-point";
             type enumeration {

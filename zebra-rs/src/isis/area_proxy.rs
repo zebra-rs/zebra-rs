@@ -114,6 +114,32 @@ fn proxy_id_sub(tlvs: &[IsisTlv]) -> Option<IsisSysId> {
     })
 }
 
+/// Per-circuit Area Proxy role override
+/// (`/router/isis/interface/<name>/area-proxy`). Absent ⇒ derive:
+/// an L2-only circuit on an area-proxy-enabled instance is an
+/// Outside Circuit (RFC 9666 §5.1: Outside Circuits "may be
+/// identified by explicit configuration or by the fact that they
+/// are not also Level 1 circuits").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AreaProxyCircuit {
+    Inside,
+    Outside,
+}
+
+/// RFC 9666 §5.2 boundary filter: true when this L2 LSP must NOT be
+/// flooded toward Outside Routers — its source system is an Inside
+/// Router (live router LSP in the L1 LSDB, pseudonode LSPs of inside
+/// DISes included via the sys-id portion), or it carries the Area
+/// Proxy TLV. The Proxy LSP matches neither and crosses the boundary.
+pub(super) fn boundary_filtered(l1: &Lsdb, l2: &Lsdb, lsp_id: &IsisLspId) -> bool {
+    let l1_router = IsisLspId::new(lsp_id.sys_id(), 0, 0);
+    if l1.get(&l1_router).is_some_and(|lsa| lsa.lsp.hold_time > 0) {
+        return true;
+    }
+    l2.get(lsp_id)
+        .is_some_and(|lsa| has_area_proxy_tlv(&lsa.lsp.tlvs))
+}
+
 /// The inside-router set: every system with a live router LSP in the
 /// L1 LSDB (RFC 9666 terminology — the L1 LSDB *is* the Inside Area).
 pub(super) fn inside_routers(lsdb: &Lsdb) -> BTreeSet<IsisSysId> {
@@ -448,6 +474,25 @@ struct AreaProxyBrief {
     originating_proxy_lsp: bool,
     proxy_lsp_fragments: usize,
     proxy_lsp_seq_number: Option<u32>,
+    outside_circuits: Vec<String>,
+}
+
+/// Names of this instance's Outside Circuits — same classification as
+/// `LinkTop::is_outside_circuit`, computed from the link table for
+/// show output.
+fn outside_circuit_names(isis: &Isis) -> Vec<String> {
+    if !isis.config.area_proxy {
+        return Vec::new();
+    }
+    isis.links
+        .iter()
+        .filter(|(_, link)| match link.config.area_proxy_circuit {
+            Some(AreaProxyCircuit::Inside) => false,
+            Some(AreaProxyCircuit::Outside) => true,
+            None => link.state.level() == isis_packet::IsLevel::L2,
+        })
+        .map(|(_, link)| link.state.name.clone())
+        .collect()
 }
 
 pub fn show(isis: &Isis, _args: Args, json: bool) -> std::result::Result<String, std::fmt::Error> {
@@ -487,6 +532,7 @@ pub fn show(isis: &Isis, _args: Args, json: bool) -> std::result::Result<String,
         originating_proxy_lsp: !owned.is_empty(),
         proxy_lsp_fragments: owned.len(),
         proxy_lsp_seq_number: frag0_seq,
+        outside_circuits: outside_circuit_names(isis),
     };
 
     if json {
@@ -560,6 +606,13 @@ pub fn show(isis: &Isis, _args: Args, json: bool) -> std::result::Result<String,
             owned.len(),
             if owned.len() == 1 { "" } else { "s" },
             frag0_seq.unwrap_or(0),
+        )?;
+    }
+    if !brief.outside_circuits.is_empty() {
+        writeln!(
+            buf,
+            "Outside Circuits: {}",
+            brief.outside_circuits.join(", ")
         )?;
     }
     Ok(buf)
@@ -656,6 +709,38 @@ mod tests {
             lsdb.map.insert(entry.0, entry.1);
         }
         assert_eq!(inside_routers(&lsdb), BTreeSet::from([sys(1)]));
+    }
+
+    /// RFC 9666 §5.2 boundary filter: inside-sourced L2 LSPs and any
+    /// LSP carrying the Area Proxy TLV are suppressed toward Outside
+    /// Routers; the Proxy LSP (neither) crosses.
+    #[test]
+    fn boundary_filter_suppresses_inside_and_tlv20_lsps() {
+        let mut l1 = Lsdb::default();
+        let inside = lsa(1, 0, 0, 1200);
+        l1.map.insert(inside.0, inside.1);
+        let aged = lsa(2, 0, 0, 0); // purged L1 LSP — not inside
+        l1.map.insert(aged.0, aged.1);
+
+        let mut l2 = Lsdb::default();
+        // Outside router LSP carrying TLV 20 (bogus but the filter
+        // must still key on it).
+        let (id20, mut lsa20) = lsa(7, 0, 0, 1200);
+        lsa20.lsp.tlvs = vec![isis_packet::IsisTlvAreaProxy::default().into()];
+        l2.map.insert(id20, lsa20);
+        // Plain outside LSP.
+        let plain = lsa(8, 0, 0, 1200);
+        l2.map.insert(plain.0, plain.1);
+
+        // Inside-sourced: filtered, its pseudonode LSP too.
+        assert!(boundary_filtered(&l1, &l2, &IsisLspId::new(sys(1), 0, 0)));
+        assert!(boundary_filtered(&l1, &l2, &IsisLspId::new(sys(1), 3, 0)));
+        // Purged L1 entry does not define inside membership.
+        assert!(!boundary_filtered(&l1, &l2, &IsisLspId::new(sys(2), 0, 0)));
+        // TLV 20 carrier: filtered even though not inside.
+        assert!(boundary_filtered(&l1, &l2, &id20));
+        // Plain outside LSP (and the Proxy LSP shape): crosses.
+        assert!(!boundary_filtered(&l1, &l2, &plain.0));
     }
 
     /// The L1 reachability gate maps SPF vertex ids back to system
