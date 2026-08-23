@@ -2531,6 +2531,50 @@ pub(super) fn update_self_sid_ilm(isis: &mut Isis) {
         }
     }
 
+    // RFC 9666 §7: an Inside Edge Router accepts packets carrying the
+    // area's anycast Area SID and consumes them — a local pop,
+    // installed exactly like a self node-SID. Only edge routers (at
+    // least one Outside Circuit) take the ILM; interior inside routers
+    // never receive the label from outside.
+    if isis.config.sr_mpls_enabled
+        && isis.config.area_proxy
+        && super::area_proxy::has_outside_circuit(isis)
+        && let Some((_prefix, index)) = isis.area_proxy.area_sid
+        && let Some(global) = isis.sr_block.as_ref().and_then(|b| b.global.as_ref())
+        && index < global.end - global.start
+    {
+        let label = global.start + index;
+        // Local delivery via any routable loopback address, same rule
+        // as the self Prefix-SID above.
+        let local = isis.links.iter().find_map(|(&ifindex, link)| {
+            if !link.flags.is_loopback() {
+                return None;
+            }
+            v4_primary_where(&link.state.v4addr, |e| !e.prefix.addr().is_loopback())
+                .map(|e| (ifindex, e.prefix.addr()))
+        });
+        if let Some((ifindex, addr)) = local {
+            let mut nhops = BTreeMap::new();
+            nhops.insert(
+                addr,
+                SpfNexthop::<V4> {
+                    ifindex,
+                    adjacency: true,
+                    sys_id: None,
+                    backup: None,
+                },
+            );
+            desired.insert(
+                label,
+                SpfIlm {
+                    nhops,
+                    ilm_type: IlmType::Node(index),
+                    no_php: false,
+                },
+            );
+        }
+    }
+
     let diff = spf::table_diff(
         isis.self_sid_ilm.iter().map(|(&k, v)| (k, v)),
         desired.iter().map(|(&k, v)| (k, v)),

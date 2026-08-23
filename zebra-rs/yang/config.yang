@@ -2827,6 +2827,25 @@ module config {
               pattern "[A-Za-z0-9][A-Za-z0-9.-]*";
             }
           }
+          container area-sid {
+            ext:help "Anycast Area SID representing the entire area (RFC 9666)";
+            description
+              "RFC 9666 §4.3.2 Area SID: an anycast prefix + SID index
+               the Area Leader distributes in its Area Proxy TLV and
+               advertises as a Node SID in the Proxy LSP. Every Inside
+               Edge Router installs a pop for SRGB-start + index, so a
+               packet carrying the SID is delivered to whichever edge
+               router receives it and the SID is consumed. Configure
+               identically on every Area Leader candidate.";
+            leaf prefix {
+              ext:help "Anycast IPv4 prefix for the Area SID";
+              type inet:ipv4-prefix;
+            }
+            leaf index {
+              ext:help "SID index into the SRGB";
+              type uint32;
+            }
+          }
         }
 
         container segment-routing {

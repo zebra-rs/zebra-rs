@@ -136,3 +136,16 @@ Feature: IS-IS Area Proxy (RFC 9666) — an L1 area appears as one L2 node
     # still crosses the boundary.
     And show command "show isis database" in namespace "r4" should contain "zaparea.00-00"
     And ping from "r5" to "10.0.0.2" should succeed
+
+  Scenario: Teardown topology
+    Given the test topology exists
+    When I stop zebra-rs in namespace "r2"
+    And I stop zebra-rs in namespace "r3"
+    And I stop zebra-rs in namespace "r4"
+    And I stop zebra-rs in namespace "r5"
+    And I delete namespace "r1"
+    And I delete namespace "r2"
+    And I delete namespace "r3"
+    And I delete namespace "r4"
+    And I delete namespace "r5"
+    Then the test environment should be clean

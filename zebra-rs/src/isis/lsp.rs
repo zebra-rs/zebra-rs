@@ -561,12 +561,89 @@ pub fn proxy_generate(
         inside.contains(sys) && reachable.as_ref().is_none_or(|r| r.contains(sys))
     };
 
+    // SR-MPLS capability merge (§5.3.2): the Proxy LSP advertises an
+    // SRGB only when every usable inside router advertises one with an
+    // identical starting value; the merged range is the minimum.
+    // Mismatched starting values are a logged error and nothing is
+    // advertised; routers without SR simply keep the SRGB out (an
+    // SR-free area advertises no capability).
+    let mut srgbs: Vec<(u32, u32)> = Vec::new();
+    let mut usable_count = 0usize;
+    for (_, lsa) in top.lsdb.get(&Level::L2).iter() {
+        let id = lsa.lsp.lsp_id;
+        if id.pseudo_id() != 0
+            || id.fragment_id() != 0
+            || lsa.lsp.hold_time == 0
+            || !usable(&id.sys_id())
+        {
+            continue;
+        }
+        usable_count += 1;
+        let mut found: Option<(u32, u32)> = None;
+        for tlv in &lsa.lsp.tlvs {
+            let IsisTlv::RouterCap(cap) = tlv else {
+                continue;
+            };
+            for sub in &cap.subs {
+                if let IsisSubTlv::SegmentRoutingCap(sr) = sub
+                    && let SidLabelTlv::Label(start) = sr.sid_label
+                {
+                    found.get_or_insert((start, sr.range));
+                }
+            }
+        }
+        if let Some(srgb) = found {
+            srgbs.push(srgb);
+        }
+    }
+    match super::area_proxy::merge_srgb(&srgbs, usable_count) {
+        Some((start, range)) => {
+            let mut flags = SegmentRoutingCapFlags::default();
+            flags.set_i_flag(true);
+            flags.set_v_flag(true);
+            let mut cap = IsisTlvRouterCap {
+                router_id: top
+                    .config
+                    .te_router_id
+                    .or(top.config.rib_router_id)
+                    .unwrap_or(Ipv4Addr::UNSPECIFIED),
+                flags: 0.into(),
+                subs: Vec::new(),
+            };
+            cap.subs.push(
+                IsisSubSegmentRoutingCap {
+                    flags,
+                    range,
+                    sid_label: SidLabelTlv::Label(start),
+                }
+                .into(),
+            );
+            cap.subs.push(
+                IsisSubSegmentRoutingAlgo {
+                    algo: vec![Algo::Spf],
+                }
+                .into(),
+            );
+            anchors.push(cap.into());
+        }
+        None if !srgbs.is_empty() && srgbs.len() == usable_count => {
+            // Everyone advertises one but the starting values differ —
+            // the RFC 9666 §5.3.2 misconfiguration case.
+            tracing::warn!(
+                "isis: area-proxy: inside routers advertise mismatched SRGB starting values — omitting SRGB from the Proxy LSP"
+            );
+        }
+        None => {}
+    }
+
     // Outside adjacencies (§5.3.4): every Extended IS Reachability
     // entry an inside router advertises at L2 toward a neighbor that
     // is not itself inside. Lowest metric wins when several edge
-    // routers reach the same outside neighbor. Sub-TLVs (Adj-SID, TE)
-    // are not copied in the phase-3 core.
-    let mut outside: BTreeMap<IsisNeighborId, u32> = BTreeMap::new();
+    // routers reach the same outside neighbor. Adjacency-SID sub-TLVs
+    // ride along only when their L-Flag is unset (§5.3.5) — a
+    // locally-significant SID is meaningless once the adjacency is
+    // re-attributed to the proxy node. TE sub-TLVs are not copied.
+    let mut outside: BTreeMap<IsisNeighborId, (u32, Vec<neigh::IsisSubTlv>)> = BTreeMap::new();
     for (_, lsa) in top.lsdb.get(&Level::L2).iter() {
         if lsa.lsp.hold_time == 0 || !usable(&lsa.lsp.lsp_id.sys_id()) {
             continue;
@@ -580,27 +657,39 @@ pub fn proxy_generate(
                 if inside.contains(&nsys) || nsys == proxy_id {
                     continue;
                 }
-                let metric = outside.entry(entry.neighbor_id).or_insert(entry.metric);
-                *metric = (*metric).min(entry.metric);
+                if outside
+                    .get(&entry.neighbor_id)
+                    .is_none_or(|(m, _)| entry.metric < *m)
+                {
+                    let subs: Vec<neigh::IsisSubTlv> = entry
+                        .subs
+                        .iter()
+                        .filter(|s| matches!(s, neigh::IsisSubTlv::AdjSid(a) if !a.flags.l_flag()))
+                        .cloned()
+                        .collect();
+                    outside.insert(entry.neighbor_id, (entry.metric, subs));
+                }
             }
         }
     }
     if !outside.is_empty() {
         let mut is_reach = IsisTlvExtIsReach::default();
-        for (neighbor_id, metric) in outside {
+        for (neighbor_id, (metric, subs)) in outside {
             is_reach.entries.push(IsisTlvExtIsReachEntry {
                 neighbor_id,
                 metric,
-                subs: vec![],
+                subs,
             });
         }
         distributable.extend(split_distributable_at_255(IsisTlv::ExtIsReach(is_reach)));
     }
 
     // Prefix reachability (§5.3.6): merge the inside routers' L1
-    // advertisements, lowest metric per prefix. Sub-TLVs (Prefix-SID)
-    // join with the SR merge phase.
-    let mut v4: BTreeMap<Ipv4Net, u32> = BTreeMap::new();
+    // advertisements, lowest metric per prefix. The winning entry's
+    // Prefix-SID rides along, rewritten per §5.3.6: P-Flag set (the
+    // boundary consumes no label), E-Flag reset, R-Flag carried
+    // through.
+    let mut v4: BTreeMap<Ipv4Net, (u32, Option<IsisSubPrefixSid>)> = BTreeMap::new();
     let mut v6: BTreeMap<Ipv6Net, u32> = BTreeMap::new();
     for (_, lsa) in top.lsdb.get(&Level::L1).iter() {
         if lsa.lsp.hold_time == 0 || !usable(&lsa.lsp.lsp_id.sys_id()) {
@@ -610,8 +699,13 @@ pub fn proxy_generate(
             match tlv {
                 IsisTlv::ExtIpReach(reach) => {
                     for entry in &reach.entries {
-                        let metric = v4.entry(entry.prefix).or_insert(entry.metric);
-                        *metric = (*metric).min(entry.metric);
+                        if v4.get(&entry.prefix).is_none_or(|(m, _)| entry.metric < *m) {
+                            let sid = entry.subs.iter().find_map(|s| match s {
+                                prefix::IsisSubTlv::PrefixSid(p) => Some(p.clone()),
+                                _ => None,
+                            });
+                            v4.insert(entry.prefix, (entry.metric, sid));
+                        }
                     }
                 }
                 IsisTlv::Ipv6Reach(reach) => {
@@ -624,10 +718,32 @@ pub fn proxy_generate(
             }
         }
     }
+
+    // Area SID (§4.4 / §7): the area's anycast identity, advertised as
+    // a Node SID in the Proxy LSP so the backbone can steer to "any
+    // edge of the area"; every Inside Edge Router installs the pop.
+    if let (Some(prefix), Some(index)) = (
+        top.config.area_proxy_area_sid_prefix,
+        top.config.area_proxy_area_sid_index,
+    ) {
+        let sid = IsisSubPrefixSid {
+            flags: PrefixSidFlags::new().with_n_flag(true).with_p_flag(true),
+            algo: Algo::Spf,
+            sid: SidLabelValue::Index(index),
+        };
+        v4.insert(prefix, (0, Some(sid)));
+    }
+
     if !v4.is_empty() {
         let mut reach = IsisTlvExtIpReach::default();
-        for (prefix, metric) in v4 {
-            reach.entries.push(ext_ip_reach_entry(prefix, metric));
+        for (prefix, (metric, sid)) in v4 {
+            let mut entry = ext_ip_reach_entry(prefix, metric);
+            if let Some(sid) = sid {
+                entry
+                    .subs
+                    .push(prefix::IsisSubTlv::PrefixSid(proxy_prefix_sid(&sid)));
+            }
+            reach.entries.push(entry);
         }
         distributable.extend(split_distributable_at_255(IsisTlv::ExtIpReach(reach)));
     }
@@ -1146,6 +1262,22 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
             && let Some(sys_id) = top.config.area_proxy_sys_id
         {
             subs.push(IsisSubProxySystemId { sys_id }.into());
+            // Area SID (§4.3.2): distributed by the leader alongside
+            // the proxy identity; Inside Edge Routers learn it here
+            // and install the anycast pop.
+            if let (Some(prefix), Some(index)) = (
+                top.config.area_proxy_area_sid_prefix,
+                top.config.area_proxy_area_sid_index,
+            ) {
+                subs.push(
+                    IsisSubAreaSid {
+                        flags: AreaSidFlags::new(),
+                        sid: SidLabelValue::Index(index),
+                        prefix: AreaSidPrefix::V4(prefix),
+                    }
+                    .into(),
+                );
+            }
         }
         anchors.push(IsisTlvAreaProxy { subs }.into());
     }
@@ -2079,6 +2211,18 @@ fn redist_external_bit(metric_type: Option<IsisRedistMetricType>) -> bool {
     )
 }
 
+/// RFC 9666 §5.3.6 rewrite for a Prefix-SID copied into the Proxy
+/// LSP: set the P-Flag (the boundary consumes no label on behalf of
+/// the abstracted area), reset the E-Flag, carry the R-Flag through
+/// with the rest of the flags.
+fn proxy_prefix_sid(src: &IsisSubPrefixSid) -> IsisSubPrefixSid {
+    IsisSubPrefixSid {
+        flags: src.flags.with_p_flag(true).with_e_flag(false),
+        algo: src.algo,
+        sid: src.sid.clone(),
+    }
+}
+
 /// TLV 135 entry of the plain shape shared by `network` statements
 /// and redistributed prefixes: metric + prefix, no sub-TLVs. TLV 135
 /// has no I/E bit, so external-ness never shows on the wire for
@@ -2148,6 +2292,33 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RFC 9666 §5.3.6: a Prefix-SID copied into the Proxy LSP sets
+    /// P, resets E, and carries R (and the SID value) through.
+    #[test]
+    fn proxy_prefix_sid_rewrites_flags_per_rfc9666() {
+        let src = IsisSubPrefixSid {
+            flags: PrefixSidFlags::new()
+                .with_r_flag(true)
+                .with_e_flag(true)
+                .with_p_flag(false),
+            algo: Algo::Spf,
+            sid: SidLabelValue::Index(7),
+        };
+        let out = proxy_prefix_sid(&src);
+        assert!(out.flags.p_flag());
+        assert!(!out.flags.e_flag());
+        assert!(out.flags.r_flag());
+        assert_eq!(out.sid, SidLabelValue::Index(7));
+
+        // R unset stays unset.
+        let src2 = IsisSubPrefixSid {
+            flags: PrefixSidFlags::new(),
+            algo: Algo::Spf,
+            sid: SidLabelValue::Index(9),
+        };
+        assert!(!proxy_prefix_sid(&src2).flags.r_flag());
+    }
 
     #[test]
     fn target_block_is_default_when_enabled() {

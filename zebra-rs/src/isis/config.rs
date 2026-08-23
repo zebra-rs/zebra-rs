@@ -62,6 +62,14 @@ impl Isis {
             "/router/isis/area-proxy/hostname",
             config_area_proxy_hostname,
         );
+        self.callback_add(
+            "/router/isis/area-proxy/area-sid/prefix",
+            config_area_proxy_area_sid_prefix,
+        );
+        self.callback_add(
+            "/router/isis/area-proxy/area-sid/index",
+            config_area_proxy_area_sid_index,
+        );
         // Authentication storage. The runtime sign/verify paths
         // read these for Hello/SNP and LSP.
         self.callback_add("/router/isis/area-password", config_area_password);
@@ -496,6 +504,14 @@ pub struct IsisConfig {
     /// RECOMMENDED). Preconfigure the same value on every candidate so
     /// a leadership change keeps the proxy's name stable.
     pub area_proxy_hostname: Option<String>,
+
+    /// `/router/isis/area-proxy/area-sid/{prefix,index}` — the RFC 9666
+    /// §4.3.2 anycast Area SID. The leader distributes it in the Area
+    /// Proxy TLV and advertises it as a Node SID in the Proxy LSP;
+    /// Inside Edge Routers install a pop for SRGB-start + index.
+    /// Preconfigure identically on every candidate.
+    pub area_proxy_area_sid_prefix: Option<Ipv4Net>,
+    pub area_proxy_area_sid_index: Option<u32>,
     pub refresh_time: Option<u16>,
     pub hold_time: Option<u16>,
     pub min_lsp_arrival_time: Option<u32>,
@@ -838,6 +854,8 @@ impl Default for IsisConfig {
             area_proxy_sys_id: Default::default(),
             area_proxy_priority: Default::default(),
             area_proxy_hostname: Default::default(),
+            area_proxy_area_sid_prefix: Default::default(),
+            area_proxy_area_sid_index: Default::default(),
             refresh_time: Default::default(),
             hold_time: Default::default(),
             min_lsp_arrival_time: Default::default(),
@@ -1200,6 +1218,26 @@ fn config_area_proxy_hostname(isis: &mut Isis, mut args: Args, op: ConfigOp) -> 
     let hostname = args.string()?;
     isis.config.area_proxy_hostname = if op == ConfigOp::Set {
         Some(hostname)
+    } else {
+        None
+    };
+    area_proxy_config_changed(isis)
+}
+
+fn config_area_proxy_area_sid_prefix(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let prefix = args.v4net()?;
+    isis.config.area_proxy_area_sid_prefix = if op == ConfigOp::Set {
+        Some(prefix)
+    } else {
+        None
+    };
+    area_proxy_config_changed(isis)
+}
+
+fn config_area_proxy_area_sid_index(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
+    let index = args.u32()?;
+    isis.config.area_proxy_area_sid_index = if op == ConfigOp::Set {
+        Some(index)
     } else {
         None
     };
