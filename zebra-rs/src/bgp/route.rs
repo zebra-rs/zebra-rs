@@ -821,12 +821,32 @@ fn widen_to_multipath(entry: &mut rib::entry::RibEntry, rest: &[BgpRib], v6: boo
     };
     multi.nexthops.push(base.clone());
     for path in rest {
+        // RFC 8950 ENHE member (IPv6-unnumbered interface neighbor):
+        // the gateway is the peer's v6 link-local pinned to the
+        // receiving interface — `ifindex_origin` makes the RIB
+        // resolver take it as-is, the same install shape
+        // `make_bgp_rib_entry_v4` gives an ENHE winner. The attribute
+        // next-hop (absent, or a v4 NEXT_HOP RFC 8950 §4 ignores) is
+        // irrelevant, and so is the family check below — a v6 gateway
+        // leg on a v4 prefix is the point (RFC 5549 style).
+        if let Some((nh6, ifindex)) = path.enhe_egress {
+            multi.nexthops.push(rib::NexthopUni {
+                addr: IpAddr::V6(nh6),
+                metric: entry.metric,
+                weight: 1,
+                valid: true,
+                ifindex_origin: Some(ifindex),
+                ..Default::default()
+            });
+            continue;
+        }
         let Some(nh) = super::nht::bgp_nexthop_ip(&path.attr) else {
             continue;
         };
         // Family must match the prefix: a v4 prefix cannot be reached
-        // through a v6 next-hop leg here (the ENHE case has its own
-        // install path and is excluded by the `Uni`/no-encap guard).
+        // through a v6 next-hop leg derived from the attribute alone —
+        // only an ENHE leg (above) carries the ifindex a v6 gateway
+        // needs.
         if nh.is_ipv6() != v6 {
             continue;
         }
@@ -2040,20 +2060,20 @@ impl<P: Prefix + Copy> LocalRibTable<P> {
                     cands[i].remote_id,
                 )
             });
-            // Deduplicate by BGP next-hop: two peers can advertise the
-            // same next-hop (routine behind a route reflector), and
-            // installing it twice would double its share of the ECMP
-            // hash.
-            let mut seen: Vec<Option<std::net::IpAddr>> = vec![super::nht::nht_target(&best.attr)];
+            // Deduplicate by forwarding identity: two peers can
+            // advertise the same next-hop (routine behind a route
+            // reflector), and installing it twice would double its
+            // share of the ECMP hash.
+            let mut seen = vec![Self::multipath_dedup_key(&best)];
             for index in eligible {
                 if selected.len() as u32 >= max_paths {
                     break;
                 }
-                let nh = super::nht::nht_target(&cands[index].attr);
-                if seen.contains(&nh) {
+                let key = Self::multipath_dedup_key(&cands[index]);
+                if seen.contains(&key) {
                     continue;
                 }
-                seen.push(nh);
+                seen.push(key);
                 cands[index].multipath = true;
                 selected.push(cands[index].clone());
             }
@@ -2279,6 +2299,26 @@ impl<P: Prefix + Copy> LocalRibTable<P> {
             return false;
         }
         true
+    }
+
+    /// The forwarding identity a multipath member is deduplicated on.
+    ///
+    /// An RFC 8950 ENHE path (IPv6-unnumbered interface neighbor) has
+    /// no usable next-hop attribute — `attr.nexthop` is absent and the
+    /// real egress is the `enhe_egress` (link-local, ifindex) pair — so
+    /// keying the dedup on the attribute alone collapsed every
+    /// unnumbered path into a "duplicate" of the winner, and
+    /// `maximum-paths` silently did nothing on interface-neighbor
+    /// fabrics (issue #2318). The ifindex is part of the identity: the
+    /// same link-local on two different links is two distinct gateways.
+    fn multipath_dedup_key(rib: &BgpRib) -> (Option<(Ipv6Addr, u32)>, Option<std::net::IpAddr>) {
+        match rib.enhe_egress {
+            // RFC 8950 §4: the receiver MUST ignore the v4 NEXT_HOP on
+            // an ENHE path, so it must not separate two paths that
+            // share one ENHE egress.
+            Some(egress) => (Some(egress), None),
+            None => (None, super::nht::nht_target(&rib.attr)),
+        }
     }
 
     /// The BGP Identifier a path is compared on for the RFC 4271
@@ -23939,7 +23979,7 @@ mod multipath_tests {
     use super::*;
     use bgp_packet::{BgpNexthop, LocalPref, Med};
     use ipnet::Ipv4Net;
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::str::FromStr;
 
     /// An eBGP path from `as_path`, next-hop `nh`, at peer slot `ident`.
@@ -23980,6 +24020,18 @@ mod multipath_tests {
     fn ibgp_row(ident: usize, as_path: &str, nh: [u8; 4]) -> BgpRib {
         let mut row = ebgp_row(ident, as_path, nh);
         row.typ = BgpRibType::IBGP;
+        row
+    }
+
+    /// An RFC 8950 ENHE path (IPv6-unnumbered interface neighbor): no
+    /// next-hop attribute; the egress is the peer's link-local pinned
+    /// to the receiving interface.
+    fn enhe_row(ident: usize, as_path: &str, ll_octet: u16, ifindex: u32) -> BgpRib {
+        let mut row = ebgp_row(ident, as_path, [0, 0, 0, 0]);
+        let mut attr = (*row.attr).clone();
+        attr.nexthop = None;
+        row.attr = std::sync::Arc::new(attr);
+        row.enhe_egress = Some((Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, ll_octet), ifindex));
         row
     }
 
@@ -24313,6 +24365,102 @@ mod multipath_tests {
         match multi.nexthop {
             rib::Nexthop::Multi(m) => assert_eq!(m.nexthops.len(), 2),
             other => panic!("expected Multi, got {other:?}"),
+        }
+    }
+
+    /// Issue #2318: an RFC 8950 path has no next-hop attribute, so a
+    /// dedup keyed on the attribute collapsed every unnumbered path
+    /// into a "duplicate" of the winner — `maximum-paths` silently did
+    /// nothing on interface-neighbor fabrics. Four equal-cost spines
+    /// must yield four members, deduplicated by the (link-local,
+    /// ifindex) egress instead.
+    #[test]
+    fn enhe_paths_are_multipath() {
+        let mut t = table(8, false);
+        let set = select(
+            &mut t,
+            vec![
+                enhe_row(1, "65000 65042", 0x1, 1),
+                enhe_row(2, "65000 65042", 0x2, 2),
+                enhe_row(3, "65000 65042", 0x3, 3),
+                enhe_row(4, "65000 65042", 0x4, 4),
+            ],
+        );
+        assert_eq!(set.len(), 4, "every unnumbered uplink must be a member");
+        assert!(set[0].best_path, "the winner leads the set");
+        assert!(
+            set[1..].iter().all(|r| r.multipath),
+            "the other members are flagged multipath"
+        );
+    }
+
+    /// The dedup still applies to ENHE paths — on the (link-local,
+    /// ifindex) egress pair, ifindex included: the same link-local on
+    /// two different links is two distinct gateways.
+    #[test]
+    fn enhe_dedup_is_by_link_local_and_ifindex() {
+        // The same egress twice → one member.
+        let mut t = table(8, false);
+        let set = select(
+            &mut t,
+            vec![
+                enhe_row(1, "65000 65042", 0x1, 1),
+                enhe_row(2, "65000 65042", 0x1, 1),
+            ],
+        );
+        assert_eq!(set.len(), 1, "an identical egress must install once");
+
+        // The same link-local on different links → two members.
+        let mut t = table(8, false);
+        let set = select(
+            &mut t,
+            vec![
+                enhe_row(1, "65000 65042", 0x1, 1),
+                enhe_row(2, "65000 65042", 0x1, 2),
+            ],
+        );
+        assert_eq!(set.len(), 2, "the same LL on two links is two gateways");
+    }
+
+    /// Issue #2318, install half: `widen_to_multipath` must build a
+    /// v6-gateway leg pinned to its interface for an ENHE member —
+    /// deriving legs from the (absent) next-hop attribute alone left
+    /// the kernel route single-legged even once selection widened.
+    #[test]
+    fn widening_builds_pinned_v6_legs_for_enhe_members() {
+        let ll1 = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0x1);
+        let mut entry = rib::entry::RibEntry {
+            nexthop: rib::Nexthop::Uni(rib::NexthopUni {
+                addr: IpAddr::V6(ll1),
+                weight: 1,
+                valid: true,
+                ifindex_origin: Some(1),
+                ..Default::default()
+            }),
+            ..rib::entry::RibEntry::new(rib::RibType::Bgp)
+        };
+        widen_to_multipath(
+            &mut entry,
+            &[
+                enhe_row(2, "65000 65042", 0x2, 2),
+                enhe_row(3, "65000 65042", 0x3, 3),
+            ],
+            false,
+        );
+        let rib::Nexthop::Multi(m) = entry.nexthop else {
+            panic!("expected Multi");
+        };
+        assert_eq!(m.nexthops.len(), 3);
+        for (uni, (octet, ifindex)) in m.nexthops.iter().zip([(0x1u16, 1u32), (0x2, 2), (0x3, 3)]) {
+            assert_eq!(
+                uni.addr,
+                IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, octet))
+            );
+            assert_eq!(
+                uni.ifindex_origin,
+                Some(ifindex),
+                "a link-local gateway must be pinned to its interface"
+            );
         }
     }
 }
