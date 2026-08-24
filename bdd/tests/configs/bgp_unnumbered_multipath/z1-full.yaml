@@ -1,0 +1,28 @@
+# Phase 2 (DUT): enable Router Advertisements on both uplinks, declare
+# the two interface-keyed (IPv6 unnumbered) neighbors — both spines in
+# one AS, like the issue's fabric — and open the multipath gate with
+# `maximum-paths 8` for ipv4. The 10.99.0.0/24 z2 and z3 both advertise
+# arrives over each session via RFC 8950 ENHE (auto-negotiated for
+# interface-keyed peers) and must install as two-leg v4-over-v6 ECMP.
+interface:
+- if-name: i1
+  ipv6:
+    router-advertisements:
+      send-advertisements: true
+- if-name: i2
+  ipv6:
+    router-advertisements:
+      send-advertisements: true
+router:
+  bgp:
+    global:
+      as: 65031
+      router-id: 10.0.0.31
+    interface-neighbor:
+    - interface: i1
+      remote-as: 65000
+    - interface: i2
+      remote-as: 65000
+    afi-safi:
+    - name: ipv4
+      maximum-paths: 8

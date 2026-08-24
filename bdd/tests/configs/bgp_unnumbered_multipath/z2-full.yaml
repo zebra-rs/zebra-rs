@@ -1,0 +1,23 @@
+# Phase 2: RA on the uplink, the interface-keyed neighbor toward z1,
+# and the prefix both "spines" advertise. `adv-interval ebgp 0` keeps
+# the restore scenario from stalling a full MRAI.
+interface:
+- if-name: i1
+  ipv6:
+    router-advertisements:
+      send-advertisements: true
+router:
+  bgp:
+    global:
+      as: 65000
+      router-id: 10.0.0.101
+    timer:
+      adv-interval:
+        ebgp: 0
+    interface-neighbor:
+    - interface: i1
+      remote-as: 65031
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.99.0.0/24
