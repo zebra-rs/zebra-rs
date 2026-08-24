@@ -109,6 +109,13 @@ body {
     background: #fdecea;
 }
 
+/* ?ui=off — globe-only mode: no header, controls or status bar */
+html.bare .header,
+html.bare .controls,
+html.bare .status-bar {
+    display: none;
+}
+
 .path-legend {
     display: flex;
     gap: 10px;
