@@ -93,6 +93,24 @@ Feature: BGP multipath over IPv6-unnumbered interface neighbors
     And kernel route "10.99.0.0/24" in namespace "z1" should eventually contain "dev i1"
     And kernel route "10.99.0.0/24" in namespace "z1" should eventually contain "dev i2"
 
+  Scenario: Lowering maximum-paths at runtime collapses the ENHE set
+    Given the test topology exists
+    # The issue's other observation was that a runtime `set … commit`
+    # changed nothing either. Dropping to 1 must withdraw the surplus
+    # leg, leaving a flat (non-`nexthop`) route via the tie-break
+    # winner — z2 has the lower router-id, so its uplink i1 survives.
+    When I apply command "set router bgp afi-safi ipv4 maximum-paths 1" in namespace "z1"
+    Then kernel route "10.99.0.0/24" in namespace "z1" should eventually not contain "nexthop via"
+    And kernel route "10.99.0.0/24" in namespace "z1" should eventually contain "via inet6 fe80::"
+    And kernel route "10.99.0.0/24" in namespace "z1" should eventually contain "dev i1"
+
+  Scenario: Raising maximum-paths at runtime rediscovers the second leg
+    Given the test topology exists
+    When I apply command "set router bgp afi-safi ipv4 maximum-paths 8" in namespace "z1"
+    Then kernel route "10.99.0.0/24" in namespace "z1" should eventually contain "nexthop via inet6 fe80::"
+    And kernel route "10.99.0.0/24" in namespace "z1" should eventually contain "dev i1"
+    And kernel route "10.99.0.0/24" in namespace "z1" should eventually contain "dev i2"
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "z1"

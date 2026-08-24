@@ -51,4 +51,6 @@ bgp_unnumbered_neighbor — see z1-base.yaml for why):
 | Two equal-cost ENHE paths install as one v4-over-v6 ECMP route | |
 | Losing one unnumbered uplink leaves the other leg installed | |
 | The uplink coming back restores the second leg | |
+| Lowering maximum-paths at runtime collapses the ENHE set | |
+| Raising maximum-paths at runtime rediscovers the second leg | |
 | Teardown topology | |
