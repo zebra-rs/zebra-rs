@@ -121,6 +121,16 @@ rules:
 - **Legacy clients** negotiate `2025-06-18` or `2024-11-05` through the classic
   `initialize` handshake, unchanged.
 
+The whole JSON-RPC surface is five methods:
+
+| method | purpose |
+|:-------|:--------|
+| `initialize` | the classic handshake for legacy clients: negotiates the protocol version and returns the server's capabilities and identity. |
+| `server/discover` | the stateless-era probe: supported protocol versions, capabilities, usage instructions, and cache hints, answered without any session state. |
+| `tools/list` | the tool catalog above, with cache hints (`ttlMs`, `cacheScope`) so modern clients need not refetch it. |
+| `tools/call` | invokes one tool by name with its arguments. |
+| `ping` | liveness check; returns an empty result. |
+
 Either way the transport is stdio: the server runs as a local subprocess of
 your MCP client, so the daemon sees your own OS identity — no tokens, no
 network listener.
