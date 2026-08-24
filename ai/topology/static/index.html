@@ -5,6 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>zebra-rs Traffic Path Visualizer</title>
     <link rel="stylesheet" href="./static/style.css" />
+    <script>
+        // ?ui=off hides the header, controls and status bar so only the
+        // globe remains — for sharing a link that focuses on the path.
+        // Runs in <head> so the chrome never flashes before hiding.
+        if (new URLSearchParams(location.search).get('ui') === 'off')
+            document.documentElement.classList.add('bare');
+    </script>
 </head>
 <body>
     <div class="header">zebra-rs Traffic Path Visualizer</div>

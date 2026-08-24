@@ -126,6 +126,8 @@ function syncUrl() {
     params.set('algorithm', document.getElementById('algorithm').value || '0');
     const globe = document.getElementById('globe').value;
     if (globe !== DEFAULT_DESIGN) params.set('globe', globe);
+    // keep the globe-only switch (index.html reads it in <head>)
+    if (initialParams.get('ui') === 'off') params.set('ui', 'off');
     history.replaceState(null, '', '?' + params.toString());
 }
 
