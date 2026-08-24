@@ -4,9 +4,12 @@
 `zebra-rs/src/isis/network.rs`) · nom 8.0.0
 **History:** security audit 2026-03-19, revised 2026-04-09 · whole-crate code
 review arc 2026-07-18 (15 ranked findings + follow-ups 1–7, PRs #1952–#1996)
-**This revision:** 2026-07-21 — `SECURITY_AUDIT.md` is replaced by this file,
-every fixed finding dropped, and each surviving item re-verified against `main`
-at `57828933`.
+· 2026-07-21 — `SECURITY_AUDIT.md` replaced by this file, every fixed finding
+dropped, each surviving item re-verified against `main` at `57828933`
+**This revision:** 2026-08-23 — security sweep of the RFC 9666/9667 Area Proxy
+codec added in PRs #2306/#2312: no reachable panic in the new TLV 20 path;
+**F5b** added (Area Proxy / Router Cap emit desync, same class as F5) and
+**F2** gains the two Area Proxy sub-parsers as call sites.
 
 Fixed findings are deliberately **not** restated. The security audit's history
 lives in the git history of `crates/isis-packet/SECURITY_AUDIT.md`
@@ -24,6 +27,11 @@ length-check before indexing, `ptake`/`ptakev6` validate prefix lengths,
 `From<u8>`/`From<u16>` conversions fall through to `Unknown`, and
 `Nsap::from_str` returns `NsapParseError` instead of indexing out of bounds.
 `many0_complete` sub-parsers all consume ≥1 byte, so no loop can spin.
+The 2026-08-23 Area Proxy sweep re-confirmed this for the new TLV 20 path: a
+throwaway probe over all 256 `IsisSubAreaSid` flag bytes × body lengths 0–30
+produced no panic — the flag-gated SID width (only V/L = 1,1 or 0,0 proceed,
+everything else degrades to `Unknown`) and the exact `safe_split_at` carve
+before `SidLabelValue::parse_be` hold invariant 5.
 
 **All 15 ranked code-review findings are fixed**, as are follow-up items 1–7.
 The emit-side length cluster in particular is largely closed:
@@ -32,8 +40,9 @@ and `emit()` from the same bound, and `emit_sub_tlvs()` now truncates an
 over-full block instead of mislabeling it.
 
 **What is left** is one High parser-strictness gap that a real wire can trigger
-(**F1**), its Medium sibling (**F2**), three residual local-construction length
-desyncs, and two test/validation gaps. Nothing open is a memory-safety issue.
+(**F1**), its Medium sibling (**F2**), four residual local-construction length
+desyncs (F5b covers two sites), and two test/validation gaps. Nothing open is a
+memory-safety issue.
 
 ---
 
@@ -91,6 +100,13 @@ desyncs, and two test/validation gaps. Nothing open is a memory-safety issue.
     odd-length payload and drops the final octet.
   - `IsisTlvP2p3Way::parse_be` (`src/parser.rs:1262`) — parses its optional
     fields by *remaining length*, so 1–3 trailing octets are simply ignored.
+  - `IsisSubAreaSid::parse_be` (`src/sub/area_proxy.rs:154`) and
+    `IsisSubProxySystemId` (`:67`, derived `NomBE`, exactly 6 octets) — added
+    by the 2026-08-23 Area Proxy sweep. Both consume their fixed/flag-keyed
+    span of the carved sub slice and `impl_parse_subs!` discards the
+    remainder, so e.g. an Area SID sub with a `/0` prefix plus appended
+    garbage parses clean and the garbage vanishes on re-emit. Include both
+    when the `rest.is_empty()` fix lands.
 - **Why this is cheap to fix now:** finding #10's fix means a TLV whose value
   parse *errors* degrades to `Unknown` (bytes preserved, rest of the PDU still
   parses) instead of truncating the TLV list. Making the length-bounded parsers
@@ -136,9 +152,30 @@ desyncs, and two test/validation gaps. Nothing open is a memory-safety issue.
 - **Severity:** low — 255 octets of ASLA sub-TLVs is not a shape the config
   path can produce today.
 
+### F5b. `IsisTlvAreaProxy` and `IsisTlvRouterCap` share F5's half-invariant — CONFIRMED (low)
+- **Files:** `src/sub/area_proxy.rs:252` (`len`), `:256` (`emit`);
+  `src/sub/cap.rs:271` (`len`), `:275` (`emit`)
+- **Category:** robustness (local construction)
+- **Bug:** both container TLVs compute `len()` as `(…).min(255) as u8` while
+  `emit()` writes every sub unconditionally — the exact saturate-without-
+  truncate shape of F5, found by the 2026-08-23 Area Proxy sweep (the new
+  TLV 20 container inherited the pattern from `IsisTlvRouterCap` rather than
+  introducing it). Probe-proven: an `IsisTlvAreaProxy` built with 40 Area SID
+  subs (480-byte body) declares length **255** over a **480-byte** body, and
+  re-parsing the emitted bytes frames 255 and leaves 225 phantom trailing
+  bytes.
+- **Not reachable from the wire:** parsing bounds the sub block by the TLV's
+  own one-octet length, and the live builder (`zebra-rs/src/isis/lsp.rs`)
+  pushes at most a Proxy System ID plus an Area SID sub (~32 octets);
+  RouterCap likewise stays far below 255 today.
+- **Fix shape:** bound `emit()` by the same expression that saturates `len()`
+  — truncate the sub loop at a running byte budget (or reject the build), the
+  way `emit_sub_tlvs()` and the TLV 132/232/233 codecs (`min()`/`take()` in
+  both places) already do.
+
 ### F6. No negative or fuzz coverage for malformed length fields — GAP
 - **Category:** test coverage
-- **Gap:** the crate has 113 tests and they all pass, but the 2026-04-09
+- **Gap:** the crate has 123 tests and they all pass, but the 2026-04-09
   audit's Priority-3 list is still outstanding: there are no tests for a TLV
   with a valid prefix plus trailing garbage, a PDU carrying TLVs past its
   declared `pdu_len`, or oversized nested sub-TLV emission, and there is no
@@ -205,7 +242,7 @@ are unrelated and stay.
    bug waiting to be re-emitted.
 2. **Lengths compute in `usize` and saturate once at the `u8` boundary** — and
    the body must be bounded by the *same* expression, so a saturated length can
-   never disagree with the bytes written (see F3–F5 for the sites that still
+   never disagree with the bytes written (see F3–F5b for the sites that still
    only do half of this).
 3. `IsisTlv::wire_len()` is arithmetic — never serialize-to-measure. The LSP
    packer probes the growing TLV through the `SplittableTlv` trait; keep
@@ -226,6 +263,7 @@ are unrelated and stay.
 cargo test -p isis-packet
 ```
 
-113 tests, all passing as of `57828933`. F1's table above came from a
-throwaway integration test run against this tree and then removed; the
-permanent version belongs with F1's fix (see F6).
+123 tests (+1 ignored), all passing as of the 2026-08-23 revision. F1's table
+and F5b's overflow numbers each came from a throwaway integration test run
+against the tree and then removed; the permanent versions belong with their
+fixes (see F6).
