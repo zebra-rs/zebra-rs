@@ -145,6 +145,10 @@ impl IsisLinks {
         self.map.values_mut().find(|link| link.state.name == name)
     }
 
+    pub fn contains_name(&self, name: &str) -> bool {
+        self.map.values().any(|link| link.state.name == name)
+    }
+
     pub fn insert(&mut self, key: u32, value: IsisLink) -> Option<IsisLink> {
         self.map.insert(key, value)
     }
@@ -1058,7 +1062,18 @@ impl Isis {
                 // existing reservation into the link's cache, should the
                 // name already hold one.
                 is_link.circuit_id = self.circuit_ids.get(&is_link.state.name).unwrap_or(0);
+                // The instance's `is-type` only reaches links that exist
+                // when it is configured (`config_is_type` walks the
+                // current links); a link appearing afterwards must not
+                // keep the L1L2 default, or a level-2-only instance runs
+                // L1 on it until a `circuit-type` line happens to
+                // recompute the level.
+                is_link.state.level =
+                    config_level_common(self.config.is_type(), is_link.config.circuit_type());
                 self.links.insert(is_link.ifindex, is_link);
+                // Intent outlives the link: replay everything ever
+                // configured for this interface name into the fresh link.
+                self.replay_interface_config(&name);
             }
             Err(e) => {
                 tracing::warn!(

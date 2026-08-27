@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -16,6 +16,12 @@ use serde_json::Value;
 pub struct World {
     topology_running: bool,
     feature_tag: String,
+    /// Byte length of `logs/<ns>.log` when this run started the daemon
+    /// in `<ns>` (0 when the file did not exist). Daemon logs append
+    /// across runs, so the log-content steps only look past this
+    /// offset — a line from an earlier run must never satisfy an
+    /// assertion about the daemon started now.
+    log_offsets: HashMap<String, u64>,
 }
 
 impl World {
@@ -30,6 +36,23 @@ impl World {
 
     fn ns(&self, logical: &str) -> String {
         format!("{}_{}", self.feature_tag, logical)
+    }
+
+    /// Remember where `logs/<scoped>.log` ends right now; called by every
+    /// daemon-start step so `daemon_log_since` reads only this run's lines.
+    fn mark_log_start(&mut self, scoped: &str) {
+        let len = fs::metadata(format!("logs/{}.log", scoped))
+            .map(|m| m.len())
+            .unwrap_or(0);
+        self.log_offsets.insert(scoped.to_string(), len);
+    }
+
+    /// The daemon log of `scoped` from this run's start mark onward
+    /// (whole file if the daemon was started outside a start step).
+    fn daemon_log_since(&self, scoped: &str) -> String {
+        let content = fs::read_to_string(format!("logs/{}.log", scoped)).unwrap_or_default();
+        let offset = self.log_offsets.get(scoped).copied().unwrap_or(0) as usize;
+        content.get(offset..).unwrap_or("").to_string()
     }
 
     fn bridge(&self, _logical: &str) -> String {
@@ -478,6 +501,7 @@ async fn ping_should_fail(world: &mut World, namespace: String, target: String) 
 async fn start_zebra_rs(world: &mut World, namespace: String) {
     let scoped = world.ns(&namespace);
     let log_file = format!("logs/{}.log", scoped);
+    world.mark_log_start(&scoped);
     let pid_file = world.pid_file(&namespace);
 
     // BFD Echo reflection off a bridge-enslaved veth needs generic (SKB) XDP:
@@ -523,6 +547,7 @@ async fn start_zebra_rs(world: &mut World, namespace: String) {
 async fn start_zebra_rs_sharded(world: &mut World, namespace: String, shards: usize) {
     let scoped = world.ns(&namespace);
     let log_file = format!("logs/{}.log", scoped);
+    world.mark_log_start(&scoped);
     let pid_file = world.pid_file(&namespace);
     let shards = shards.to_string();
 
@@ -555,6 +580,7 @@ async fn start_zebra_rs_sharded(world: &mut World, namespace: String, shards: us
 async fn start_zebra_rs_sharded_peer_task(world: &mut World, namespace: String, shards: usize) {
     let scoped = world.ns(&namespace);
     let log_file = format!("logs/{}.log", scoped);
+    world.mark_log_start(&scoped);
     let pid_file = world.pid_file(&namespace);
     let shards = shards.to_string();
 
@@ -591,6 +617,7 @@ async fn start_zebra_rs_sharded_peer_task(world: &mut World, namespace: String, 
 async fn start_zebra_rs_egress_group_task(world: &mut World, namespace: String) {
     let scoped = world.ns(&namespace);
     let log_file = format!("logs/{}.log", scoped);
+    world.mark_log_start(&scoped);
     let pid_file = world.pid_file(&namespace);
 
     let _child = netns::spawn_in_netns_env(
@@ -627,6 +654,7 @@ async fn start_zebra_rs_sharded_egress_group_task(
 ) {
     let scoped = world.ns(&namespace);
     let log_file = format!("logs/{}.log", scoped);
+    world.mark_log_start(&scoped);
     let pid_file = world.pid_file(&namespace);
     let shards = shards.to_string();
 
@@ -663,6 +691,7 @@ async fn start_zebra_rs_sharded_egress_group_task(
 async fn start_zebra_rs_sync_chunk(world: &mut World, namespace: String, chunk: usize) {
     let scoped = world.ns(&namespace);
     let log_file = format!("logs/{}.log", scoped);
+    world.mark_log_start(&scoped);
     let pid_file = world.pid_file(&namespace);
     let chunk = chunk.to_string();
 
@@ -704,6 +733,7 @@ async fn start_zebra_rs_sync_chunk_egress(
 ) {
     let scoped = world.ns(&namespace);
     let log_file = format!("logs/{}.log", scoped);
+    world.mark_log_start(&scoped);
     let pid_file = world.pid_file(&namespace);
     let chunk = chunk.to_string();
     let egress_high = egress_high.to_string();
@@ -771,8 +801,10 @@ async fn stop_zebra_rs(world: &mut World, namespace: String) {
 async fn log_should_contain(world: &mut World, namespace: String, needle: String) {
     let scoped = world.ns(&namespace);
     let log_file = format!("logs/{}.log", scoped);
-    let contents = std::fs::read_to_string(&log_file)
-        .unwrap_or_else(|e| panic!("failed to read zebra-rs log {log_file}: {e}"));
+    if !Path::new(&log_file).exists() {
+        panic!("failed to read zebra-rs log {log_file}: no such file");
+    }
+    let contents = world.daemon_log_since(&scoped);
     assert!(
         contents.contains(&needle),
         "zebra-rs log {} for namespace {} does not contain {:?}",
@@ -913,6 +945,9 @@ async fn run_exec_command(world: &mut World, command: String, namespace: String)
 #[when(expr = "I spawn {string} in namespace {string}")]
 async fn spawn_background_command(world: &mut World, command: String, namespace: String) {
     let scoped = world.ns(&namespace);
+    // The spawned command may launch this namespace's daemon (e.g. the
+    // IPsec node script): log assertions must not see earlier runs.
+    world.mark_log_start(&scoped);
     let parts: Vec<&str> = command.split_whitespace().collect();
     let (cmd, args) = parts
         .split_first()
@@ -3056,7 +3091,7 @@ async fn daemon_log_eventually_contains(world: &mut World, namespace: String, ne
     const ATTEMPTS: u32 = 30;
     let mut last_len = 0usize;
     for i in 0..ATTEMPTS {
-        let content = fs::read_to_string(&path).unwrap_or_default();
+        let content = world.daemon_log_since(&scoped);
         if content.contains(&needle) {
             println!("✓ daemon log {} contains '{}'", path, needle);
             return;

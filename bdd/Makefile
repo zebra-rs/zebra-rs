@@ -396,6 +396,10 @@ isis_passive:
 	mkdir -p allure-results
 	$(CUCUMBER) -- --concurrency=1 --tags "@isis_passive"
 
+isis_vrf_late_enslave:
+	mkdir -p allure-results
+	$(CUCUMBER) -- --concurrency=1 --tags "@isis_vrf_late_enslave"
+
 vrf_phantom_instance:
 	mkdir -p allure-results
 	$(CUCUMBER) -- --concurrency=1 --tags "@vrf_phantom_instance"
