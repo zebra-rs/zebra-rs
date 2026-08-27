@@ -5,7 +5,12 @@
 
 BASH_VERSION  := 5.3
 BASH_TARBALL  := bash-$(BASH_VERSION).tar.gz
-BASH_URL      := https://ftp.gnu.org/gnu/bash/$(BASH_TARBALL)
+# Tried in order. ftp.gnu.org alone took every Stable Release build job
+# down with it when it stopped answering (2026-08-27); ftpmirror.gnu.org
+# redirects to a live GNU mirror. The SHA-256 check below is what makes
+# any source trustworthy, not the host.
+BASH_URLS     := https://ftp.gnu.org/gnu/bash/$(BASH_TARBALL) \
+                 https://ftpmirror.gnu.org/gnu/bash/$(BASH_TARBALL)
 BASH_SHA256   := 0d5cd86965f869a26cf64f4b71be7b96f90a3ba8b3d74e27e8e9d9d5550f31ba
 
 CACHE_DIR     ?= $(HOME)/.cache/zebra-rs
@@ -39,9 +44,16 @@ $(STAMP_PREPARE): $(TARBALL) $(PATCH) $(ADDITIONS)
 	cd $(BUILD_DIR) && patch -p1 --no-backup-if-mismatch < $(abspath $(PATCH))
 	touch $@
 
+# A dead host costs 20 s, not the 130 s of the TCP default; a flaky one
+# gets three retries before the next URL is tried.
 $(TARBALL):
 	mkdir -p $(CACHE_DIR)
-	curl -fL -o $@.tmp $(BASH_URL)
+	rm -f $@.tmp
+	for url in $(BASH_URLS); do \
+	    echo "fetching $$url"; \
+	    curl -fL --connect-timeout 20 --retry 3 --retry-all-errors \
+	        -o $@.tmp "$$url" && break; \
+	done; [ -s $@.tmp ] || { echo "could not fetch $(BASH_TARBALL) from any of: $(BASH_URLS)" >&2; exit 1; }
 	echo "$(BASH_SHA256)  $@.tmp" | sha256sum -c -
 	mv $@.tmp $@
 
