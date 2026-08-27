@@ -22,11 +22,12 @@ Status as of 2026-08-04. The core port of the VyOS 1.5 (circinus)
   `sa`/`connections` over charon's VICI socket through the minimal
   in-tree client `src/system/vici.rs`, `state`/`policy` via
   `ip xfrm … list`. Tables mirror vyos-1x `src/op_mode/ipsec.py`.
-- **#2244 BDD** — `bdd/tests/features/ipsec_s2s.feature`: two
+- **#2244 BDD** — `ipsec_s2s.feature` (moved with the backend to the
+  insomnia repository's `bdd/`, where each node also runs insomnia): two
   namespace nodes each running charon-systemd + zebra-rs, live IKEv2
   PSK tunnel, ESP traffic with counters, declarative unload,
   teardown. Each node runs under `unshare -m` with tmpfs over `/run`
-  and `/etc/swanctl` (`bdd/tests/scripts/ipsec_node.sh`) because the
+  and `/etc/swanctl` (`tests/scripts/ipsec_node.sh` there) because the
   filesystem is shared across network namespaces and swanctl's
   *enforced* AppArmor profile pins exactly `/etc/swanctl/**` and
   `/run/charon.vici` — private mounts keep every path stock.
@@ -106,10 +107,11 @@ much new infrastructure each item needs.
 
 ## Testing
 
-- **BDD depth.** `ipsec_s2s` covers establishment, traffic,
+- **BDD depth.** `ipsec_s2s` (in the insomnia repository since the
+  backend moved there) covers establishment, traffic,
   declarative unload and teardown. Not covered: rekey (short
   lifetimes), DPD action on peer loss, transport-mode tunnels,
   IKEv1/aggressive, VTI. Each fits the existing two-node recipe.
 - **Host prerequisite.** The feature needs `charon-systemd` +
-  `strongswan-swanctl` installed (documented on the `ipsec_s2s`
+  `strongswan-swanctl` installed (documented on insomnia's `ipsec_s2s`
   Makefile target); it fails fast with a clear message otherwise.
