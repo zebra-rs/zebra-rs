@@ -1,0 +1,28 @@
+# z1 — the VRF is declared and IS-IS is configured on i1 INSIDE the VRF,
+# but i1 itself is deliberately NOT yet enslaved to the VRF. The feature
+# moves it in with a second commit (`set interface i1 vrf vrf-a`), so the
+# per-VRF IS-IS child is guaranteed to have seen i1's config before its
+# RIB link dump contains i1 at all.
+vrf:
+- name: vrf-a
+interface:
+- if-name: i1
+  ipv4:
+    address: 10.0.12.1/30
+router:
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    hostname: z1
+    is-type: level-2-only
+    vrf:
+    - name: vrf-a
+      net: 49.0001.0000.0000.0011.00
+      is-type: level-2-only
+      # No circuit-type on purpose: the circuit's level must come from
+      # the instance's is-type even though i1 appears after it was set.
+      interface:
+      - if-name: i1
+        network-type: point-to-point
+        metric: 10
+        ipv4:
+          enabled: true

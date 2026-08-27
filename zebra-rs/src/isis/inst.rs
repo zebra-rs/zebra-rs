@@ -147,6 +147,26 @@ pub struct Isis {
     /// when IS-IS is enabled on an interface, released when it is
     /// disabled, read by `dis_becoming` to name the pseudonode LSP.
     pub circuit_ids: CircuitIdMap,
+
+    /// Durable per-interface configuration, keyed by interface name:
+    /// every `interface <name> …` Set/Delete line in commit order
+    /// (mirrors OSPF's `interface_config_log`).
+    ///
+    /// `IsisLink` is operational state keyed by ifindex — dropped on
+    /// `LinkDel`, rebuilt on `LinkAdd` — and the interface callbacks
+    /// resolve their link by name and drop the line when it is
+    /// missing. Intent must outlive the link: a per-VRF child
+    /// subscribes to the RIB while the kernel may still be moving the
+    /// interface into the VRF (so its initial link dump lacks the
+    /// interface its replayed config names), an interface can be
+    /// created after its config, re-created under a new ifindex, or
+    /// cross a VRF boundary as a `LinkDel` + `LinkAdd` pair. The log
+    /// is replayed into every fresh link from `link_add`.
+    pub interface_config_log: BTreeMap<String, Vec<(Vec<CommandPath>, ConfigOp)>>,
+    /// Set while `replay_interface_config` feeds logged lines back
+    /// through `process_cm_msg`, so they are applied without being
+    /// recorded a second time.
+    interface_config_replaying: bool,
     pub show: ShowChannel,
     pub show_cb: HashMap<String, ShowCallback>,
     pub config: IsisConfig,
@@ -818,6 +838,8 @@ impl Isis {
                 ctx,
                 links: IsisLinks::default(),
                 circuit_ids: CircuitIdMap::default(),
+                interface_config_log: BTreeMap::new(),
+                interface_config_replaying: false,
                 show: ShowChannel::new(),
                 show_cb: HashMap::new(),
                 config: IsisConfig::default(),
@@ -1109,6 +1131,22 @@ impl Isis {
             return;
         }
 
+        // Every `/router/isis/interface` callback resolves its link by
+        // name and silently drops the line when the link is unknown.
+        // Record interface lines durably (`interface_config_log`) and
+        // let a fresh link pick them up (`replay_interface_config`), so
+        // config that outruns the kernel — a per-VRF child spawned
+        // before the interface's VRF enslavement reached the RIB, an
+        // interface created after its config, or one re-created — still
+        // takes effect.
+        if path.starts_with("/router/isis/interface")
+            && let Some(name) = args.0.front().cloned()
+            && !self.interface_config_replaying
+            && !self.record_interface_config(name, &path, msg.paths.clone(), msg.op)
+        {
+            return;
+        }
+
         if let Some(f) = self.callbacks.get(&path) {
             f(self, args, msg.op);
         } else if path.starts_with("/router/isis/tracing") {
@@ -1118,6 +1156,62 @@ impl Isis {
             // OSPF's `config_tracing_dispatch`).
             super::tracing::config_tracing_dispatch(self, &path, args, msg.op);
         }
+    }
+
+    /// Record an `interface <name> …` line in `interface_config_log`.
+    /// Returns whether the line should also be applied now — false when
+    /// no link of that name exists yet (the replay applies it later).
+    /// Deleting the whole interface entry discards its log: nothing is
+    /// left to replay, and a live link takes the delete normally.
+    fn record_interface_config(
+        &mut self,
+        name: String,
+        path: &str,
+        paths: Vec<CommandPath>,
+        op: ConfigOp,
+    ) -> bool {
+        let known = self.links.contains_name(&name);
+        if op == ConfigOp::Delete && path == "/router/isis/interface" {
+            self.interface_config_log.remove(&name);
+            return known;
+        }
+        if !known && !self.interface_config_log.contains_key(&name) {
+            tracing::info!(
+                "isis: interface {name} is not known yet; deferring its config until the link appears"
+            );
+        }
+        self.interface_config_log
+            .entry(name)
+            .or_default()
+            .push((paths, op));
+        known
+    }
+
+    /// Replay `name`'s logged config into its (fresh) link. Outside a
+    /// commit the replay is wrapped in a synthetic CommitStart/CommitEnd
+    /// so the commit-time reconciles (SRLG fold, self-SID ILM, STAMP
+    /// sessions, gated LSP generation) run once for it; inside a live
+    /// commit the real CommitEnd covers it.
+    pub fn replay_interface_config(&mut self, name: &str) {
+        let Some(lines) = self.interface_config_log.get(name).cloned() else {
+            return;
+        };
+        tracing::info!(
+            "isis: link {name} appeared; replaying {} deferred config line(s)",
+            lines.len()
+        );
+        let wrap = !self.in_commit;
+        self.interface_config_replaying = true;
+        if wrap {
+            self.process_cm_msg(ConfigRequest::new(Vec::new(), ConfigOp::CommitStart));
+        }
+        for (paths, op) in lines {
+            self.process_cm_msg(ConfigRequest::new(paths, op));
+        }
+        if wrap {
+            self.process_cm_msg(ConfigRequest::new(Vec::new(), ConfigOp::CommitEnd));
+        }
+        self.interface_config_replaying = false;
     }
 
     /// Record a rewritten per-VRF config line (parent only). Appends to
@@ -4522,6 +4616,54 @@ mod commit_and_microloop_gate_tests {
 
     fn commit_end() -> ConfigRequest {
         ConfigRequest::new(Vec::new(), ConfigOp::CommitEnd)
+    }
+
+    fn cp(name: &str, ymatch: i32) -> CommandPath {
+        CommandPath {
+            name: name.to_string(),
+            ymatch,
+            ..Default::default()
+        }
+    }
+
+    /// `/router/isis/interface[<name>]/<tail…>` as the manager would
+    /// deliver it (ymatch: 0 Dir, 2 Key, 3 KeyMatched, 4 Leaf, 5 LeafMatched).
+    fn if_line(name: &str, tail: &[(&str, i32)]) -> Vec<CommandPath> {
+        let mut paths = vec![
+            cp("router", 0),
+            cp("isis", 0),
+            cp("interface", 2),
+            cp(name, 3),
+        ];
+        paths.extend(tail.iter().map(|(n, m)| cp(n, *m)));
+        paths
+    }
+
+    #[tokio::test]
+    async fn interface_config_before_its_link_is_logged_not_dropped() {
+        let mut isis = fresh_isis();
+        assert!(!isis.links.contains_name("ce1"));
+
+        let enable = if_line("ce1", &[("ipv4", 0), ("enabled", 4), ("true", 5)]);
+        isis.process_cm_msg(ConfigRequest::new(enable, ConfigOp::Set));
+        let metric = if_line("ce1", &[("metric", 4), ("10", 5)]);
+        isis.process_cm_msg(ConfigRequest::new(metric, ConfigOp::Set));
+
+        // Logged in arrival order, and nothing was applied on the side:
+        // the enable never reserved a circuit id.
+        assert_eq!(isis.interface_config_log["ce1"].len(), 2);
+        assert!(isis.circuit_ids.get("ce1").is_none());
+
+        // A replay with the link still absent re-parks nothing and
+        // applies nothing — the log is left exactly as it was.
+        isis.replay_interface_config("ce1");
+        assert_eq!(isis.interface_config_log["ce1"].len(), 2);
+        assert!(isis.circuit_ids.get("ce1").is_none());
+
+        // Deleting the whole entry before the link ever appeared
+        // discards the log — there is nothing left to replay.
+        isis.process_cm_msg(ConfigRequest::new(if_line("ce1", &[]), ConfigOp::Delete));
+        assert!(!isis.interface_config_log.contains_key("ce1"));
     }
 
     /// The gate is seeded closed: the spawning commit's `CommitStart`
