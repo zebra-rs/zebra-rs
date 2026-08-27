@@ -11,6 +11,101 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit them,
 # changelog-gen.sh defaults to distribution "unstable" and urgency "medium".
 
+- semver: 26.8.4
+  date: 2026-08-27T18:00:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### IS-IS Area Proxy (RFC 9666)
+        * A Level 1 area can now present itself to the Level 2
+          backbone as a single node: `router isis area-proxy` with a
+          `proxy-system-id` makes the router an Area Leader candidate,
+          the RFC 9667 Area Leader sub-TLV drives the election over
+          the L1 LSDB, and once every inside router signals readiness
+          the leader distributes the proxy identity and originates the
+          Proxy LSP under it — adjacencies, hostname and merged
+          IPv4/IPv6 reachability at lowest metric per prefix
+        * Inside Edge Routers enforce the boundary: L2 Hellos and SNPs
+          on Outside Circuits are sourced from the Proxy System ID
+          (`area-proxy inside|outside` overrides the per-interface
+          classification), inside LSPs and the Area Proxy TLV never
+          cross, and Outside Routers see exactly their own LSPs plus
+          the Proxy LSP
+        * Inside routers resolve proxy-pointing adjacencies back to
+          the edge routers in their L2 SPF and rank intra-area metrics
+          strictly below inter-area ones (§3.2), so routes beyond the
+          boundary keep working; the Area Leader abdicates on loss of
+          leadership and unreachable candidates are displaced
+          immediately
+        * Segment Routing rides along: SRGB merged across the inside
+          area, Prefix-SIDs copied into the Proxy LSP with the P-Flag
+          set, and an `area-proxy area-sid` anycast Node SID installed
+          as a pop ILM on every Inside Edge Router
+        * `show isis area-proxy` reports participation, the election,
+          the readiness census and Proxy LSP origination; two BDD
+          features (5-router abstraction with leader failover, and a
+          3-router SR-MPLS topology) prove it end to end, and the
+          book gains an Area Proxy chapter
+    - note: |
+        ### IS-IS TI-LFA micro-loop avoidance
+        * `fast-reroute micro-loop-avoidance rib-update-delay` keeps
+          an activated TI-LFA repair in use for a fixed interval after
+          a local failure while the rest of the network converges,
+          gated on SPF having observed the post-failure topology;
+          activation failure, overlapping failures, recovery or a
+          relevant config change fail open to normal convergence
+    - note: |
+        ### BGP multipath over unnumbered peers
+        * `maximum-paths` now applies to interface-neighbor (IPv6
+          unnumbered) peers: RFC 8950 paths carry no next-hop
+          attribute, so both halves of multipath keyed every one of
+          them to the same empty key and silently collapsed the set to
+          one path — selection and FIB widening now key on the
+          (link-local, ifindex) egress and install FRR-style
+          v4-over-v6 ECMP legs, with BDD covering uplink loss,
+          restore and runtime `maximum-paths` changes (#2318)
+    - note: |
+        ### Scaling for large peerings
+        * The daemon raises RLIMIT_NOFILE at startup (hard limit to
+          1048576 when privileged, soft limit to the hard limit
+          otherwise) and the packaged unit sets `LimitNOFILE`, so a
+          2000-peer BGP deployment no longer hits EMFILE under the
+          inherited 1024-fd ceiling; the raise is logged only when it
+          fails
+        * The netlink FIB monitor socket runs with a 16 MiB receive
+          buffer (`SO_RCVBUFFORCE`, falling back to `SO_RCVBUF`) and an
+          overrun now triggers a rate-limited re-dump of links,
+          addresses, neighbors and bridge MDB instead of silently
+          desyncing the RIB from kernel state
+    - note: |
+        ### vty transports
+        * `--vty-socket` is accepted by the vty shell and vtyctl
+          (before or after the subcommand, `--host` still overrides),
+          and `unix:/PATH` now means a filesystem Unix socket on the
+          daemon and every client — stale files are unlinked, live ones
+          refused, and authorization stays per-RPC via SO_PEERCRED —
+          with `unix:@NAME` forcing the abstract socket; the book
+          documents the transport-to-session posture
+    - note: |
+        ### Topology viewer and playsets
+        * `zebra-topology snapshot --out <dir>` exports the FlexAlgo
+          globe viewer as a convergence-guarded static site with every
+          API response pre-fetched, `--algorithms` narrows the export
+          (backing zebra.rs/topology/ and /topology0/), the globe gains
+          selectable designs with Day as the default, and `?ui=off`
+          hides the chrome for path-focused sharing
+        * The isis-flexalgo-ai playset prompt links the new Flexible
+          Algorithm configuration chapter
+    - note: |
+        ### Documentation and housekeeping
+        * The MCP server chapter lists the JSON-RPC method surface,
+          the BDD documents are refreshed, the isis-packet AUDIT.md
+          records the Area Proxy security sweep, the `src/mup-c`
+          module directory is renamed to `src/mup_c`, stale comments
+          are dropped from main.rs, and Rust 1.98 clippy lints are
+          addressed
 - semver: 26.8.3
   date: 2026-08-11T18:00:00+09:00
   distribution: unstable
