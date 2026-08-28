@@ -11,6 +11,104 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit them,
 # changelog-gen.sh defaults to distribution "unstable" and urgency "medium".
 
+- semver: 26.8.5
+  date: 2026-08-28T18:00:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### EVPN multihoming on the cradle-rs dataplane
+        * EVPN multihoming is now implemented end to end, and it is
+          cradle-only by decision: the kernel VXLAN backend stays
+          single-homed, and every multihoming verdict BGP reaches is
+          teed over gRPC to the cradle-rs eBPF dataplane, which has
+          the source VTEP, the bridge domain and the FDB verdict in
+          hand where the kernel bridge model loses them
+          (`docs/design/bgp-evpn-multihoming-dataplane.md` records
+          the analysis of the ENOG91 FRR EVPN-MH talk that motivated
+          it)
+        * Designated-Forwarder election results are pushed per
+          (segment, bridge domain) as the non-DF BUM filter; the
+          segment's peer VTEPs are pushed as the RFC 8365 §8.3.1
+          split-horizon list, so BUM never loops back to the segment
+          it came from
+        * Aliasing and mass withdraw (RFC 7432 §8.4/§8.2): every
+          (segment, EVI) with live per-ES and per-EVI A-D routes
+          becomes an Ethernet Segment nexthop group; MACs behind the
+          segment resolve through it per flow, a peer's MAC on our
+          own segment installs as a local entry on our port, and one
+          group update re-points every MAC when a PE leaves
+        * The segment port may be a kernel bond (LAG toward the CE),
+          and `redundancy-mode single-active` now blocks the standby
+          port both ways; single-active segments keep a backup path
+          — the group is teed DF-first and cradle forwards to the
+          primary alone, so the DF's per-ES A-D withdrawal fails
+          every MAC over before its stale MAC routes are gone
+        * The pinned cradle-rs engine release is v1.1.0, which
+          carries the matching dataplane; the APT pipeline ingests
+          it and the package recommends `cradle-rs (>= 1.1.0)`
+    - note: |
+        ### EVPN DF election: HRW, AC-DF and access link state
+        * `df-election algorithm hrw` elects by RFC 8584 §3 Highest
+          Random Weight (Alg 1), bit-exact with the RFC formula so a
+          segment shared with other vendors agrees on the DF; a
+          `preference` still overrides it and a mixed segment falls
+          back to service carving as before
+        * The `ac-df` capability is now honoured, not only advertised:
+          once every PE on a segment sets it, each EVI's election
+          counts only the PEs whose per-EVI A-D for it is present
+          (RFC 8584 §4), so a PE whose attachment circuit for one
+          service went down drops out of that election alone
+        * BGP tracks the operational state of access links: a VPWS
+          service whose AC goes down withdraws its Type-1, and an
+          Ethernet Segment whose port goes down — including a bond
+          that loses carrier while staying UP, given a link monitor
+          such as `miimon` — withholds its ES routes exactly as the
+          startup delay does, restoring them on link up
+        * `show bgp evpn ethernet-segment` reports the negotiated
+          algorithm, AC-DF status, a withheld port, and the nexthop
+          groups teed to the datapath (primary and backup for
+          single-active), on a remote PE with no segment of its own
+          as well
+    - note: |
+        ### BGP Roles and Only-to-Customer (RFC 9234)
+        * `neighbor X otc-local-role customer|provider|peer|
+          route-server|route-server-client [strict]` — the Cisco IOS
+          XR spelling — negotiates the BGP Role capability at OPEN,
+          rejects a mismatched pair with the Role Mismatch
+          NOTIFICATION, and in strict mode refuses a peer that sends
+          no role at all; inheritable from a neighbor-group and
+          available on VRF neighbors
+        * The OTC path attribute drives route-leak prevention on IPv4
+          and IPv6 unicast: leaked routes from a customer, or from a
+          peer carrying another AS's OTC, are dropped on ingress and
+          counted; routes from a provider or peer are stamped with
+          OTC; and on egress OTC is added toward customers and peers
+          and routes already carrying it are never sent up to a
+          provider, with `show bgp neighbor` and the book's new
+          chapter explaining every rule
+    - note: |
+        ### BGP route-server mode (RFC 7947)
+        * `neighbor X route-server-client` makes zebra-rs an Internet
+          Exchange route server toward that peer: AS_PATH is passed
+          through untouched (no local-AS prepend or rewrites), the
+          received next-hop is kept on forwarded routes, MED and
+          communities pass through, and ADD-PATH on the client
+          sessions avoids path hiding
+    - note: |
+        ### BFD over IPv6-unnumbered peers
+        * An `interface-neighbor` (RA-discovered, IPv6 unnumbered)
+          peer with BFD enabled established BGP but never transmitted
+          a BFD control packet, so the session stayed Down: the
+          ND-materialize path now re-runs the BFD reconcile, the
+          all-`::` session key can no longer collide, and the egress
+          interface is resolved for link-local addresses (#2324)
+    - note: |
+        ### Housekeeping
+        * The `isis_srv6_base` BDD topology no longer carries a
+          stale interface stanza that the interface-intent change in
+          26.8.4 started reporting
 - semver: 26.8.4
   date: 2026-08-27T18:00:00+09:00
   distribution: unstable
