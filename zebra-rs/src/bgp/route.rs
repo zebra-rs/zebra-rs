@@ -17660,9 +17660,9 @@ impl Bgp {
         let role = if self.es_holding(&esi) {
             VpwsRole::NonDesignated
         } else {
-            vpws_role(mode, &cands, me, local_id)
+            vpws_role(mode, &cands, me, &esi, local_id)
         };
-        let (df, _backup) = elect_forwarders(&cands, local_id);
+        let (df, _backup) = elect_forwarders(&cands, &esi, local_id);
         (esi, role, df)
     }
 
@@ -18080,7 +18080,10 @@ impl Bgp {
                         );
                         continue;
                     }
-                    roles.insert(vni, (elan_df(&cands, me, vni, holding), single_active));
+                    roles.insert(
+                        vni,
+                        (elan_df(&cands, me, &esi, vni, holding), single_active),
+                    );
                 }
             }
             desired.insert(esi, (port, roles, peers));

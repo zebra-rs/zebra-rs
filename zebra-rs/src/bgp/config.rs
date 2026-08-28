@@ -2187,6 +2187,24 @@ fn config_es_df_preference(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
     Some(())
 }
 
+/// `router bgp afi-safi evpn ethernet-segment <name> df-election algorithm
+/// <default|hrw>` — elect with RFC 8584 §3 Highest Random Weight (Alg 1)
+/// instead of service carving. A configured preference (Alg 2) still takes
+/// precedence. The Type-4 is re-originated so peers see the algorithm, and
+/// the segment re-elects.
+fn config_es_df_algorithm(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
+        return None;
+    }
+    let name = args.string()?;
+    let hrw = op.is_set() && args.string()? == "hrw";
+    let es = bgp.ethernet_segments.entry(name).or_default();
+    es.hrw = hrw;
+    es_df_election_changed(bgp);
+    Some(())
+}
+
 /// `router bgp afi-safi evpn ethernet-segment <name> df-election ac-df` —
 /// advertise the RFC 8584 §2.2 AC-Influenced DF election capability bit.
 fn config_es_ac_df(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
@@ -5457,6 +5475,10 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/afi-safi/ethernet-segment/interface",
             config_ethernet_segment_interface,
+        );
+        self.callback_add(
+            "/router/bgp/afi-safi/ethernet-segment/df-election/algorithm",
+            config_es_df_algorithm,
         );
         self.callback_add(
             "/router/bgp/afi-safi/ethernet-segment/df-election/preference",

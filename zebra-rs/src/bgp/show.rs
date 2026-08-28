@@ -2602,12 +2602,13 @@ fn show_bgp_evpn_ethernet_segment(
                 df_algorithm = Some(
                     match alg {
                         bgp_packet::DfElectionEc::ALG_DEFAULT => "service-carving",
+                        bgp_packet::DfElectionEc::ALG_HRW => "hrw",
                         bgp_packet::DfElectionEc::ALG_PREF => "preference-based",
                         _ => "unsupported (carving fallback)",
                     }
                     .to_string(),
                 );
-                designated_forwarder = super::ethernet_segment::elect_forwarders(&cands, 0)
+                designated_forwarder = super::ethernet_segment::elect_forwarders(&cands, &esi, 0)
                     .0
                     .map(|df| df.to_string());
             }
@@ -2694,13 +2695,14 @@ fn show_bgp_evpn_ethernet_segment(
                         None => "preference-based".to_string(),
                     }
                 }
+                bgp_packet::DfElectionEc::ALG_HRW => "hrw (RFC 8584 §3)".to_string(),
                 other => format!("alg {other} (unsupported; carving fallback)"),
             };
             writeln!(buf, "  DF algorithm: {alg_name}")?;
             if es.ac_df {
                 writeln!(buf, "  AC-DF capability: advertised")?;
             }
-            if let Some(df) = super::ethernet_segment::elect_forwarders(&cands, 0).0 {
+            if let Some(df) = super::ethernet_segment::elect_forwarders(&cands, &esi, 0).0 {
                 let tag = if df == local { " (this node)" } else { "" };
                 writeln!(buf, "  Designated Forwarder (tag 0): {df}{tag}")?;
             }

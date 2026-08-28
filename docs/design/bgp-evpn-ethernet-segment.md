@@ -271,6 +271,15 @@ kernel VXLAN backend stays single-homed.**
   `cradle_evpn_mh_sa_zebra` (BGP-driven).
 - **LAG as the segment port ✅ (slice 4, cradle-rs #187)**: the ES
   `interface` is a kernel bond; nothing zebra-side beyond naming it.
+- **HRW DF election (RFC 8584 §3, Alg 1) ✅**: `df-election algorithm hrw`.
+  `hrw_digest` = CRC-32 (IEEE/zlib) of `tag || ESI` with the top bit
+  dropped; `hrw_weight` = the RFC's LCG in wrapping 32-bit arithmetic mod
+  2^31 (IPv6 addresses by their low-order 32 bits); `hrw_ranked` orders by
+  weight then lowest address, DF first, backup second. `elect_forwarders`
+  now takes the ESI (HRW's salt) and dispatches on the negotiated
+  algorithm; a `preference` still overrides `hrw`. Unit vectors computed
+  independently from the formula guard interop. BDD: `bgp_evpn_es`
+  (both PEs advertise `df-election:alg1` and agree on the DF).
 - **Open risk:** Linux VXLAN/bridge multihoming primitives are limited;
   local-bias + aliasing may need **eBPF/tc** assists (cf. the RFC 9524
   replication work, `zebra-rs-evpn-rfc9524-replication-plan`). Feasibility

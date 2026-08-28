@@ -12,6 +12,7 @@
 /router/bgp/afi-safi/encapsulation
 /router/bgp/afi-safi/ethernet-segment
 /router/bgp/afi-safi/ethernet-segment/df-election/ac-df
+/router/bgp/afi-safi/ethernet-segment/df-election/algorithm
 /router/bgp/afi-safi/ethernet-segment/df-election/preference
 /router/bgp/afi-safi/ethernet-segment/df-election/startup-delay
 /router/bgp/afi-safi/ethernet-segment/esi

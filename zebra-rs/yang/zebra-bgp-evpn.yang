@@ -258,6 +258,28 @@ module zebra-bgp-evpn {
            segment's Type-4 DF Election extended community (RFC 8584 §2.2).
            Absent = the RFC 7432 §8.5 default: service carving, no
            capabilities.";
+        leaf algorithm {
+          ext:help "DF election algorithm: default (service carving) or hrw";
+          type enumeration {
+            enum default {
+              description "RFC 7432 §8.5 service carving (RFC 8584 Alg 0).";
+            }
+            enum hrw {
+              description "RFC 8584 §3 Highest Random Weight (Alg 1).";
+            }
+          }
+          description
+            "The DF election algorithm this segment advertises in its Type-4
+             DF Election extended community and runs locally. `hrw` (RFC
+             8584 §3, Alg 1) ranks the segment's PEs by a pseudo-random
+             weight of (Ethernet Tag, ESI, PE address) — the highest wins,
+             ties go to the lowest address, the runner-up is the backup —
+             which spreads service instances across the PEs like carving
+             does but keeps every other instance's DF unchanged when a PE
+             joins or leaves. A configured `preference` overrides this leaf
+             (Alg 2). As with any algorithm, all PEs on the segment must
+             agree or the segment falls back to carving.";
+        }
         leaf preference {
           ext:help "DF preference; highest wins (selects Alg 2)";
           type uint16 {
