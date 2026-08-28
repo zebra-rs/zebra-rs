@@ -18,7 +18,7 @@ use super::route_clean;
 use super::{
     AssistedReplicationRole, BGP_PORT, Bgp, EvpnBumTunnel,
     inst::{Callback, EvpnEncap},
-    peer::{AllowAsIn, LocalAs, PasswordEncoding, Peer, PeerType, RemovePrivateAs},
+    peer::{AllowAsIn, LocalAs, OtcLocalRole, PasswordEncoding, Peer, PeerType, RemovePrivateAs},
     timer,
 };
 
@@ -1076,6 +1076,106 @@ fn config_enforce_first_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
 pub(super) fn apply_enforce_first_as(peer: &mut Peer, want: bool) -> bool {
     peer.config.enforce_first_as = want;
     false
+}
+
+/// `set router bgp neighbor X otc-local-role <role>` — the RFC 9234 list
+/// node (zebra-bgp-otc.yang, IOS XR syntax). Records the verbatim
+/// statement, resolves through the neighbor-group precedence and applies
+/// it. Roles are exchanged only in the OPEN, so a live session whose
+/// effective role changed is bounced with `Event::Stop` to renegotiate
+/// (IOS XR: "Down - OTC local role changed"); an Idle peer picks it up
+/// on its first connect. Single-instance: a second role is refused with
+/// a warning — delete the current one first (same rule as `local-as`).
+fn config_otc_local_role(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let key = args.string();
+    let (ident, bounce) = {
+        let peer = bgp.peers.get_mut(&addr)?;
+        if op.is_set() {
+            let role = super::neighbor_group::parse_otc_role(&key?)?;
+            if !peer.config.knobs_explicit.stage_otc_local_role(role) {
+                tracing::warn!(
+                    peer = %peer.display_name(),
+                    "bgp: otc-local-role is single-instance (already {}); delete it before setting {}",
+                    peer.config
+                        .knobs_explicit
+                        .otc_local_role
+                        .map(|r| r.role.cli_name())
+                        .unwrap_or("?"),
+                    role.cli_name(),
+                );
+                return None;
+            }
+        } else {
+            peer.config.knobs_explicit.unstage_otc_local_role(
+                key.as_deref()
+                    .and_then(super::neighbor_group::parse_otc_role),
+            );
+        }
+        let want = super::neighbor_group::resolve_knob(&bgp.neighbor_groups, &peer.config, |k| {
+            k.otc_local_role
+        });
+        (peer.ident, apply_otc_local_role(peer, want))
+    };
+    if bounce {
+        let _ = bgp
+            .tx
+            .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
+    }
+    Some(())
+}
+
+/// `set router bgp neighbor X otc-local-role <role> strict` — the strict
+/// modifier leaf. Strict changes what the next OPEN must carry, so it
+/// bounces a live session like the list node does.
+fn config_otc_local_role_strict(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let role = super::neighbor_group::parse_otc_role(&args.string()?)?;
+    let (ident, bounce) = {
+        let peer = bgp.peers.get_mut(&addr)?;
+        if !peer
+            .config
+            .knobs_explicit
+            .stage_otc_local_role_strict(role, op.is_set())
+        {
+            tracing::warn!(
+                peer = %peer.display_name(),
+                "bgp: otc-local-role is single-instance; delete the current role before setting {} strict",
+                role.cli_name(),
+            );
+            return None;
+        }
+        let want = super::neighbor_group::resolve_knob(&bgp.neighbor_groups, &peer.config, |k| {
+            k.otc_local_role
+        });
+        (peer.ident, apply_otc_local_role(peer, want))
+    };
+    if bounce {
+        let _ = bgp
+            .tx
+            .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
+    }
+    Some(())
+}
+
+/// Write a resolved `otc-local-role` onto the peer and return whether a
+/// live session must be bounced: the role rides the OPEN (RFC 9234
+/// §4.1), so any change to the effective role or mode renegotiates.
+/// Diff-gated so re-resolving an unchanged value never disturbs a
+/// session. The knob is stored but inert on iBGP (roles are eBGP-only);
+/// `show bgp neighbor` says so rather than a warning here — within a
+/// commit this callback can run before `remote-as` has classified the
+/// session, so `peer_type` is not yet trustworthy. Shared by the
+/// per-neighbor callbacks, the neighbor-group sweep and VRF
+/// materialization.
+pub(super) fn apply_otc_local_role(peer: &mut Peer, want: Option<OtcLocalRole>) -> bool {
+    if peer.config.otc_local_role == want {
+        return false;
+    }
+    peer.config.otc_local_role = want;
+    peer.otc_role_mismatch = None;
+    peer.start();
+    !matches!(peer.state, super::peer::State::Idle)
 }
 
 /// Parse the compact `attach-unknown-attribute` spec
@@ -4680,6 +4780,14 @@ impl Bgp {
             super::neighbor_group::config_neighbor_group_enforce_first_as,
         );
         self.callback_add(
+            "/router/bgp/neighbor-group/otc-local-role",
+            super::neighbor_group::config_neighbor_group_otc_local_role,
+        );
+        self.callback_add(
+            "/router/bgp/neighbor-group/otc-local-role/strict",
+            super::neighbor_group::config_neighbor_group_otc_local_role_strict,
+        );
+        self.callback_add(
             "/router/bgp/neighbor-group/route-reflector/client",
             super::neighbor_group::config_neighbor_group_route_reflector_client,
         );
@@ -4879,6 +4987,14 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/vrf/neighbor/enforce-first-as",
             super::vrf_config::config_vrf_neighbor_enforce_first_as,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/otc-local-role",
+            super::vrf_config::config_vrf_neighbor_otc_local_role,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/otc-local-role/strict",
+            super::vrf_config::config_vrf_neighbor_otc_local_role_strict,
         );
         self.callback_add(
             "/router/bgp/vrf/neighbor/route-reflector/client",
@@ -5537,6 +5653,12 @@ impl Bgp {
         // left-most AS_PATH segment begins with the neighbor's own AS
         // (eBGP only).
         self.callback_peer("/enforce-first-as", config_enforce_first_as);
+
+        // RFC 9234 BGP Role (zebra-bgp-otc.yang, IOS XR syntax):
+        // `otc-local-role <role> [strict]`. Advertised in the OPEN on
+        // eBGP; a change bounces the session.
+        self.callback_peer("/otc-local-role", config_otc_local_role);
+        self.callback_peer("/otc-local-role/strict", config_otc_local_role_strict);
         self.callback_peer("/pic-retention", config_pic_retention);
 
         // Per-neighbor capability advertisement (zebra-bgp-capability.yang):
@@ -6258,6 +6380,116 @@ mod bfd_wiring_tests {
         config_enforce_first_as(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
         config_enforce_first_as(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Delete).unwrap();
         assert!(!peer_enforce_first_as(&bgp, "10.0.0.2"));
+    }
+
+    fn peer_otc(bgp: &Bgp, addr: &str) -> Option<OtcLocalRole> {
+        bgp.peers
+            .get(&addr.parse().unwrap())
+            .unwrap()
+            .config
+            .otc_local_role
+    }
+
+    /// `otc-local-role <role>` seeds a loose entry, `strict` toggles the
+    /// mode, a second role is refused, and deletes are keyed.
+    #[tokio::test]
+    async fn otc_local_role_set_strict_refuse_and_delete() {
+        use bgp_packet::BgpRole;
+        let (mut bgp, _rx) = fresh_bgp_with_bfd();
+        config_peer(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
+        assert_eq!(peer_otc(&bgp, "10.0.0.2"), None);
+
+        config_otc_local_role(
+            &mut bgp,
+            arg_words(&["10.0.0.2", "customer"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert_eq!(
+            peer_otc(&bgp, "10.0.0.2"),
+            Some(OtcLocalRole {
+                role: BgpRole::Customer,
+                strict: false
+            })
+        );
+
+        config_otc_local_role_strict(
+            &mut bgp,
+            arg_words(&["10.0.0.2", "customer"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert_eq!(peer_otc(&bgp, "10.0.0.2").map(|r| r.strict), Some(true));
+
+        // Single-instance: a different role is refused, the first stays.
+        assert!(
+            config_otc_local_role(
+                &mut bgp,
+                arg_words(&["10.0.0.2", "provider"]),
+                ConfigOp::Set
+            )
+            .is_none()
+        );
+        assert_eq!(
+            peer_otc(&bgp, "10.0.0.2").map(|r| r.role),
+            Some(BgpRole::Customer)
+        );
+
+        // Strict off again.
+        config_otc_local_role_strict(
+            &mut bgp,
+            arg_words(&["10.0.0.2", "customer"]),
+            ConfigOp::Delete,
+        )
+        .unwrap();
+        assert_eq!(peer_otc(&bgp, "10.0.0.2").map(|r| r.strict), Some(false));
+
+        // A keyed delete naming another role is a no-op; the matching
+        // (or unkeyed) delete clears the entry.
+        config_otc_local_role(
+            &mut bgp,
+            arg_words(&["10.0.0.2", "provider"]),
+            ConfigOp::Delete,
+        )
+        .unwrap();
+        assert!(peer_otc(&bgp, "10.0.0.2").is_some());
+        config_otc_local_role(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Delete).unwrap();
+        assert_eq!(peer_otc(&bgp, "10.0.0.2"), None);
+    }
+
+    /// The `strict` leaf landing before the list node within a commit
+    /// seeds the entry; a strict delete on an absent entry seeds nothing.
+    #[tokio::test]
+    async fn otc_local_role_strict_leaf_seeds_but_never_resurrects() {
+        use bgp_packet::BgpRole;
+        let (mut bgp, _rx) = fresh_bgp_with_bfd();
+        config_peer(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
+        config_otc_local_role_strict(
+            &mut bgp,
+            arg_words(&["10.0.0.2", "provider"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert_eq!(
+            peer_otc(&bgp, "10.0.0.2"),
+            Some(OtcLocalRole {
+                role: BgpRole::Provider,
+                strict: true
+            })
+        );
+        config_otc_local_role(
+            &mut bgp,
+            arg_words(&["10.0.0.2", "provider"]),
+            ConfigOp::Delete,
+        )
+        .unwrap();
+        config_otc_local_role_strict(
+            &mut bgp,
+            arg_words(&["10.0.0.2", "provider"]),
+            ConfigOp::Delete,
+        )
+        .unwrap();
+        assert_eq!(peer_otc(&bgp, "10.0.0.2"), None);
     }
 
     fn peer_attach_unknown(bgp: &Bgp, addr: &str) -> Option<UnknownAttr> {
@@ -8563,7 +8795,8 @@ mod neighbor_group_wiring_tests {
         config_neighbor_group_allowas_in, config_neighbor_group_allowas_in_count,
         config_neighbor_group_allowas_in_origin, config_neighbor_group_as_override,
         config_neighbor_group_disable_connected_check, config_neighbor_group_ebgp_multihop,
-        config_neighbor_group_enforce_first_as, config_neighbor_group_passive,
+        config_neighbor_group_enforce_first_as, config_neighbor_group_otc_local_role,
+        config_neighbor_group_otc_local_role_strict, config_neighbor_group_passive,
         config_neighbor_group_port, config_neighbor_group_remove_private_as,
         config_neighbor_group_remove_private_as_all,
         config_neighbor_group_remove_private_as_replace_as,
@@ -8919,6 +9152,75 @@ mod neighbor_group_wiring_tests {
             drain_stop_events(&mut bgp).is_empty(),
             "enforce-first-as changes must never bounce the session",
         );
+    }
+
+    /// Group `otc-local-role` propagates, bounces a live member (the
+    /// role rides the OPEN), and the explicit per-neighbor role wins.
+    #[tokio::test]
+    async fn group_otc_local_role_propagates_explicit_wins_and_bounces_live() {
+        use crate::bgp::peer::{OtcLocalRole, State};
+        use bgp_packet::BgpRole;
+        let mut bgp = bgp_with_member();
+        bgp.peers.get_mut(&peer_addr()).unwrap().state = State::Established;
+
+        config_neighbor_group_otc_local_role(
+            &mut bgp,
+            arg_words(&["G", "customer"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert_eq!(
+            member(&bgp).config.otc_local_role,
+            Some(OtcLocalRole {
+                role: BgpRole::Customer,
+                strict: false
+            }),
+            "group opinion must apply"
+        );
+        assert_eq!(
+            drain_stop_events(&mut bgp).len(),
+            1,
+            "a changed role bounces a live member"
+        );
+
+        // Strict via the group, no role change on the member beyond mode.
+        config_neighbor_group_otc_local_role_strict(
+            &mut bgp,
+            arg_words(&["G", "customer"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert_eq!(
+            member(&bgp).config.otc_local_role.map(|r| r.strict),
+            Some(true)
+        );
+
+        // Explicit wins over the group and survives the group delete.
+        config_otc_local_role(
+            &mut bgp,
+            arg_words(&["10.0.0.1", "provider"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert_eq!(
+            member(&bgp).config.otc_local_role.map(|r| r.role),
+            Some(BgpRole::Provider)
+        );
+        config_neighbor_group_otc_local_role(&mut bgp, arg_words(&["G"]), ConfigOp::Delete)
+            .unwrap();
+        assert_eq!(
+            member(&bgp).config.otc_local_role.map(|r| r.role),
+            Some(BgpRole::Provider),
+            "explicit statement survives the group delete",
+        );
+        config_otc_local_role(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Delete).unwrap();
+        assert_eq!(member(&bgp).config.otc_local_role, None);
+
+        // Re-applying an unchanged value never bounces.
+        let _ = drain_stop_events(&mut bgp);
+        config_neighbor_group_otc_local_role(&mut bgp, arg_words(&["G"]), ConfigOp::Delete)
+            .unwrap();
+        assert!(drain_stop_events(&mut bgp).is_empty());
     }
 
     /// Group `route-reflector client` flows to the member's

@@ -1087,6 +1087,63 @@ pub fn config_vrf_neighbor_enforce_first_as(
     Some(())
 }
 
+/// `set router bgp vrf <NAME> neighbor <addr> otc-local-role <role>` —
+/// RFC 9234 list node (zebra-bgp-vrf.yang mirrors zebra-bgp-otc.yang).
+/// Staged verbatim; resolved and applied at materialization like the
+/// other inheritable knobs.
+pub fn config_vrf_neighbor_otc_local_role(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let vrf = args.string()?;
+    let addr = args.addr()?;
+    let key = args.string();
+    let cfg = vrf_entry(bgp, vrf, op)?;
+    let nbr = neighbor_entry(cfg, addr, op)?;
+    if op.is_set() {
+        let role = super::neighbor_group::parse_otc_role(&key?)?;
+        if !nbr.config.knobs_explicit.stage_otc_local_role(role) {
+            tracing::warn!(
+                "bgp: vrf neighbor {addr}: otc-local-role is single-instance; delete the current role before setting {}",
+                role.cli_name(),
+            );
+            return None;
+        }
+    } else {
+        nbr.config.knobs_explicit.unstage_otc_local_role(
+            key.as_deref()
+                .and_then(super::neighbor_group::parse_otc_role),
+        );
+    }
+    Some(())
+}
+
+/// `set router bgp vrf <NAME> neighbor <addr> otc-local-role <role> strict`.
+pub fn config_vrf_neighbor_otc_local_role_strict(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let vrf = args.string()?;
+    let addr = args.addr()?;
+    let role = super::neighbor_group::parse_otc_role(&args.string()?)?;
+    let cfg = vrf_entry(bgp, vrf, op)?;
+    let nbr = neighbor_entry(cfg, addr, op)?;
+    if !nbr
+        .config
+        .knobs_explicit
+        .stage_otc_local_role_strict(role, op.is_set())
+    {
+        tracing::warn!(
+            "bgp: vrf neighbor {addr}: otc-local-role is single-instance; delete the current role before setting {} strict",
+            role.cli_name(),
+        );
+        return None;
+    }
+    Some(())
+}
+
 pub fn config_vrf_neighbor_route_reflector_client(
     bgp: &mut Bgp,
     mut args: Args,

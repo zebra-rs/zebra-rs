@@ -76,15 +76,15 @@ yields OTC=AS(z1) on z2 via ER1 on z1, and "z1 no role → z2 customer
    ingress rule 2: n`, `OTC-AS: <asn>` on a path, and the last-reset reason
    `OTC role mismatch`. FRR/VyOS `local-role` is **not** offered as an alias.
 2. **YANG shape** — `list otc-local-role { key role; max-elements 1; leaf role { enumeration customer|provider|peer|route-server-client|route-server }; leaf strict { type empty } }`
-   gives exactly the `otc-local-role customer [strict]` CLI (memory
-   `zebra-rs-exec-keyword-at-key-position` covers keyword-at-list-key).
-   Fallback if `max-elements` is not honoured by the libyang port: enforce
-   "one role per neighbor" in the callback (later set replaces). Fallback if
-   an enum list-key does not complete in the CLI: `leaf otc-local-role { enumeration }`
-   + `leaf otc-local-role-strict { empty }`. Prove the chosen shape with a
-   `config/manager.rs` parse test **first** (`bgp_neighbor_otc_local_role_paths_parse`).
+   gives exactly the `otc-local-role customer [strict]` CLI. **Proven in
+   PR 2** by `config/manager.rs::bgp_neighbor_otc_local_role_paths_parse`
+   (enum list-key + empty leaf parse on the neighbor, neighbor-group and
+   VRF neighbor). `max-elements` is not engine-enforced (same as
+   `local-as`): the staging helpers on `InheritableKnobs` refuse a second
+   role with a warning — delete the current role before setting another.
    Module `zebra-bgp-otc.yang`, prefix `zbotc`, grouping
-   `bgp-neighbor-otc-local-role-extension`.
+   `bgp-neighbor-otc-local-role-extension`; the VRF copy is inline in
+   `zebra-bgp-vrf.yang`.
 3. **Local AS for ER1** = `peer.open_local_as()` (the substitute when
    `local-as` is active — the AS the neighbor sees us as, and what its own
    IR3 would stamp). **Remote AS for IR2/IR3** = `peer.remote_as`.
@@ -121,7 +121,7 @@ yields OTC=AS(z1) on z2 via ER1 on z1, and "z1 no role → z2 customer
 * YANG `zebra-bgp-otc.yang` (prefix `zbotc`), grouping `bgp-neighbor-otc-local-role-extension`, augments for set/delete; import in `config.yang`; `uses` in `zebra-bgp-neighbor-group.yang`; inline list in `zebra-bgp-vrf.yang` next to `enforce-first-as`. `yang_load_tests` grammar pin + parse test.
 * `PeerConfig.otc_local_role: Option<OtcLocalRole { role: BgpRole, strict: bool }>`; `InheritableKnobs.otc_local_role` (compiler forces `apply_inherited`); `config_otc_local_role` (record→resolve→`apply_otc_local_role`), `config_neighbor_group_otc_local_role` **with `sweep_members_inherit`** (memory: forgetting the sweep is a silent bug), `config_vrf_neighbor_otc_local_role`; registrations under `/otc-local-role`. `apply_otc_local_role` bounces an Established/Open* session on change (`ConfigChange`; log line mirrors XR: "neighbor X Down - OTC local role changed").
 * `build_open_packet`: `if is_ebgp() && let Some(r) = config.otc_local_role { bgp_cap.role = Some(CapRole::new(r.role)) }`.
-* `fsm_bgp_open`: right after the `BadPeerAS`/AS4-consistency block (so it covers both `ConnTag::Primary` and `ConnTag::Collision` via the same `close_collision` / `peer_send_notification` split): `otc_role_check(local, &packet.bgp_cap)` → `Ok(Received(r) | Inferred(r) | None)` or `Err(RoleMismatch)` → NOTIFICATION 2/11, `State::Idle`, `PeerDownReason::OtcRoleMismatch` ("OTC role mismatch"). Store `peer.otc_remote_role: Option<(BgpRole, RoleSource)>` for show and for the OTC gates.
+* `fsm_bgp_open`: right after the `BadPeerAS`/AS4-consistency block (so it covers both `ConnTag::Primary` and `ConnTag::Collision` via the same `close_collision` / `peer_send_notification` split): `otc_role_check(local, is_ebgp, &packet.bgp_cap) -> Result<(), OtcRoleMismatch>` → NOTIFICATION 2/11 + `State::Idle` on `Err`. **As built:** no `PeerDownReason` variant — `last_reset` is only written when an *Established* session ends, and a role mismatch happens in OpenSent, so the reason lives in `Peer::otc_role_mismatch` (cleared by the next passing OPEN) and is rendered as `OTC Role Mismatch: …`. The remote role is not stored; `Peer::otc_remote_role()` derives it from `cap_recv` (received, while OpenConfirm/Established) or the local role's counterpart (inferred).
 * `show bgp neighbor` (text + JSON), Cisco strings verbatim:
   ```
    OTC Local Mode: Loose

@@ -109,6 +109,8 @@
 /router/bgp/neighbor-group/ebgp-multihop
 /router/bgp/neighbor-group/enforce-first-as
 /router/bgp/neighbor-group/ip-transparent
+/router/bgp/neighbor-group/otc-local-role
+/router/bgp/neighbor-group/otc-local-role/strict
 /router/bgp/neighbor-group/passive
 /router/bgp/neighbor-group/password
 /router/bgp/neighbor-group/policy/in
@@ -164,6 +166,8 @@
 /router/bgp/neighbor/local-as/replace-as
 /router/bgp/neighbor/local-identifier
 /router/bgp/neighbor/neighbor-group
+/router/bgp/neighbor/otc-local-role
+/router/bgp/neighbor/otc-local-role/strict
 /router/bgp/neighbor/password
 /router/bgp/neighbor/pic-retention
 /router/bgp/neighbor/port
@@ -264,6 +268,8 @@
 /router/bgp/vrf/neighbor/enforce-first-as
 /router/bgp/vrf/neighbor/ip-transparent
 /router/bgp/vrf/neighbor/neighbor-group
+/router/bgp/vrf/neighbor/otc-local-role
+/router/bgp/vrf/neighbor/otc-local-role/strict
 /router/bgp/vrf/neighbor/password
 /router/bgp/vrf/neighbor/port
 /router/bgp/vrf/neighbor/remote-as

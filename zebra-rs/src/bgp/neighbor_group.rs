@@ -80,6 +80,10 @@ pub struct InheritableKnobs {
     pub as_override: Option<bool>,
     pub remove_private_as: Option<RemovePrivateAs>,
     pub enforce_first_as: Option<bool>,
+    /// RFC 9234 `otc-local-role <role> [strict]` (zebra-bgp-otc.yang).
+    /// Single-instance list: the staging helpers below refuse a second
+    /// role, mirroring `local-as`.
+    pub otc_local_role: Option<super::peer::OtcLocalRole>,
     pub route_reflector_client: Option<bool>,
     /// RFC 9572 §6.1 region identifier — the 8-octet, EC-formatted Region ID
     /// (`region_id_from_asn`). A peer-group carrying this *is* a region; a
@@ -91,6 +95,54 @@ pub struct InheritableKnobs {
 }
 
 impl InheritableKnobs {
+    /// `otc-local-role <role>` list node, Set: seed the entry (strict
+    /// off) or keep the existing one. Returns `false` — and leaves the
+    /// record untouched — when a *different* role is already staged:
+    /// the list is single-instance (YANG `max-elements 1` is not
+    /// engine-enforced), so the caller warns and refuses, like
+    /// `local-as`. Delete the current role before setting another.
+    pub fn stage_otc_local_role(&mut self, role: bgp_packet::BgpRole) -> bool {
+        match self.otc_local_role {
+            Some(existing) if existing.role != role => false,
+            Some(_) => true,
+            None => {
+                self.otc_local_role = Some(super::peer::OtcLocalRole {
+                    role,
+                    strict: false,
+                });
+                true
+            }
+        }
+    }
+
+    /// `otc-local-role [<role>]` Delete: a keyed delete only removes the
+    /// matching entry, an unkeyed one clears the lot (there is at most
+    /// one).
+    pub fn unstage_otc_local_role(&mut self, role: Option<bgp_packet::BgpRole>) {
+        if let Some(existing) = self.otc_local_role
+            && role.is_none_or(|r| r == existing.role)
+        {
+            self.otc_local_role = None;
+        }
+    }
+
+    /// `otc-local-role <role> strict` leaf. A Set seeds the entry when
+    /// the leaf lands before the list node within a commit (same
+    /// single-instance refusal as [`Self::stage_otc_local_role`]); a
+    /// Delete reverts to loose without seeding, so a flag delete never
+    /// resurrects an entry the same commit already removed.
+    pub fn stage_otc_local_role_strict(&mut self, role: bgp_packet::BgpRole, strict: bool) -> bool {
+        if strict && !self.stage_otc_local_role(role) {
+            return false;
+        }
+        if let Some(entry) = self.otc_local_role.as_mut()
+            && entry.role == role
+        {
+            entry.strict = strict;
+        }
+        true
+    }
+
     /// Staging state machines for the two structured knobs, factored so
     /// the per-neighbor callbacks (`config.rs`) and the per-VRF-neighbor
     /// callbacks (`vrf_config.rs`) share one definition rather than each
@@ -882,6 +934,75 @@ pub fn config_neighbor_group_enforce_first_as(
     Some(())
 }
 
+/// Decode an `otc-local-role` list key (IOS XR token) or warn.
+pub(super) fn parse_otc_role(token: &str) -> Option<bgp_packet::BgpRole> {
+    match token.parse::<bgp_packet::BgpRole>() {
+        Ok(role) => Some(role),
+        Err(e) => {
+            tracing::warn!("bgp: {e}; ignoring");
+            None
+        }
+    }
+}
+
+/// `set router bgp neighbor-group <name> otc-local-role <role>` — the
+/// RFC 9234 list node (zebra-bgp-otc.yang). Stores the opinion and
+/// re-resolves every member; a live member whose effective role changed
+/// is bounced (roles are exchanged only in OPEN).
+pub fn config_neighbor_group_otc_local_role(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    let key = args.string();
+    let knobs = &mut bgp.neighbor_groups.entry(name.clone()).or_default().knobs;
+    if op.is_set() {
+        let role = parse_otc_role(&key?)?;
+        if !knobs.stage_otc_local_role(role) {
+            tracing::warn!(
+                "bgp: neighbor-group {name}: otc-local-role is single-instance (already {}); delete it before setting {}",
+                knobs
+                    .otc_local_role
+                    .map(|r| r.role.cli_name())
+                    .unwrap_or("?"),
+                role.cli_name(),
+            );
+            return None;
+        }
+    } else {
+        knobs.unstage_otc_local_role(key.as_deref().and_then(parse_otc_role));
+    }
+    sweep_members(bgp, &name, |groups, peer| {
+        let want = resolve_knob(groups, &peer.config, |k| k.otc_local_role);
+        super::config::apply_otc_local_role(peer, want)
+    });
+    Some(())
+}
+
+/// `set router bgp neighbor-group <name> otc-local-role <role> strict`.
+pub fn config_neighbor_group_otc_local_role_strict(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    let role = parse_otc_role(&args.string()?)?;
+    let knobs = &mut bgp.neighbor_groups.entry(name.clone()).or_default().knobs;
+    if !knobs.stage_otc_local_role_strict(role, op.is_set()) {
+        tracing::warn!(
+            "bgp: neighbor-group {name}: otc-local-role is single-instance; delete the current role before setting {} strict",
+            role.cli_name(),
+        );
+        return None;
+    }
+    sweep_members(bgp, &name, |groups, peer| {
+        let want = resolve_knob(groups, &peer.config, |k| k.otc_local_role);
+        super::config::apply_otc_local_role(peer, want)
+    });
+    Some(())
+}
+
 /// `set router bgp neighbor-group <name> route-reflector client <bool>`.
 ///
 /// Stores the opinion and re-resolves every member. The effective
@@ -1410,6 +1531,7 @@ pub(super) fn resolve_inherited_knobs(
         as_override: resolve_knob(groups, config, |k| k.as_override),
         remove_private_as: resolve_knob(groups, config, |k| k.remove_private_as),
         enforce_first_as: resolve_knob(groups, config, |k| k.enforce_first_as),
+        otc_local_role: resolve_knob(groups, config, |k| k.otc_local_role),
         route_reflector_client: resolve_knob(groups, config, |k| k.route_reflector_client),
         region_id: resolve_knob(groups, config, |k| k.region_id),
     }
@@ -1452,6 +1574,7 @@ pub(super) fn apply_resolved_session_knobs(peer: &mut Peer, want: &InheritableKn
     super::config::apply_as_override(peer, want.as_override.unwrap_or(false));
     super::config::apply_remove_private_as(peer, want.remove_private_as);
     super::config::apply_enforce_first_as(peer, want.enforce_first_as.unwrap_or(false));
+    bounce |= super::config::apply_otc_local_role(peer, want.otc_local_role);
     super::config::apply_route_reflector_client(peer, want.route_reflector_client.unwrap_or(false));
     // The BFD re-arm this returns is only meaningful for a live session.
     let _ = super::config::apply_update_source(peer, want.update_source);
@@ -1511,6 +1634,7 @@ pub(super) fn apply_inherited(
         as_override,
         remove_private_as,
         enforce_first_as,
+        otc_local_role,
         route_reflector_client,
         region_id,
     } = resolved;
@@ -1545,6 +1669,9 @@ pub(super) fn apply_inherited(
     super::config::apply_as_override(peer, as_override.unwrap_or(false));
     super::config::apply_remove_private_as(peer, remove_private_as);
     super::config::apply_enforce_first_as(peer, enforce_first_as.unwrap_or(false));
+    // Roles ride the OPEN, so a changed effective role bounces a live
+    // member like the transport knobs do.
+    bounce |= super::config::apply_otc_local_role(peer, otc_local_role);
     super::config::apply_route_reflector_client(peer, route_reflector_client.unwrap_or(false));
     outcome.bfd_reapply = super::config::apply_update_source(peer, update_source);
     outcome.mss_refresh = super::config::apply_tcp_mss(peer, tcp_mss);

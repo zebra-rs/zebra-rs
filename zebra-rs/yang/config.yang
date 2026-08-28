@@ -164,6 +164,9 @@ module config {
   import zebra-bgp-enforce-first-as {
     prefix zbef;
   }
+  import zebra-bgp-otc {
+    prefix zbotc;
+  }
   import zebra-bgp-capability {
     prefix zbcap;
   }

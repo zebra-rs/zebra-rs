@@ -44,6 +44,10 @@ module zebra-bgp-neighbor-group {
     prefix zbef;
   }
 
+  import zebra-bgp-otc {
+    prefix zbotc;
+  }
+
   import config {
     prefix config;
   }
@@ -157,6 +161,7 @@ module zebra-bgp-neighbor-group {
       uses zbao:bgp-neighbor-as-override-extension;
       uses zbrpa:bgp-neighbor-remove-private-as-extension;
       uses zbef:bgp-neighbor-enforce-first-as-extension;
+      uses zbotc:bgp-neighbor-otc-local-role-extension;
       /* TCP-AO for members, and — via a listen-range binding — for
          the whole range: a dynamic peer is materialized only after
          its SYN is accepted, so the MKT must already be on the

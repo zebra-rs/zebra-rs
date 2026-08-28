@@ -1,0 +1,154 @@
+module zebra-bgp-otc {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-bgp-otc";
+  prefix "zbotc";
+
+  import ietf-bgp {
+    prefix bgp;
+  }
+
+  import config {
+    prefix config;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "RFC 9234 BGP Roles — route-leak prevention and detection using the
+     BGP Role capability and the Only-to-Customer (OTC) path attribute.
+     Cisco IOS XR compatible syntax:
+
+       router bgp {
+         neighbor 10.10.10.2 {
+           remote-as 65540;
+           otc-local-role customer;          // loose mode (default)
+           otc-local-role provider strict;   // strict mode
+         }
+       }
+
+     The local role describes this router's relationship to the
+     neighbor from the local AS's point of view: `provider` (the local
+     AS gives the neighbor transit), `customer` (the local AS buys
+     transit from the neighbor), `peer` (settlement-free lateral
+     peering), `route-server-client` (the neighbor is an IXP route
+     server) and — a zebra-rs superset over IOS XR, which has no
+     route-server function — `route-server` (this router is the route
+     server). The neighbor configures the matching role on its side:
+     provider<->customer, route-server<->route-server-client,
+     peer<->peer.
+
+     A configured role is advertised in the OPEN message as the BGP Role
+     capability (code 9) on eBGP sessions. If both sides send a role and
+     the pair is invalid, the session is rejected with a Role Mismatch
+     NOTIFICATION (OPEN Message Error, subcode 11). In the default loose
+     mode a neighbor that sends no role is tolerated and its role is
+     inferred from ours; `strict` requires the neighbor to send one.
+
+     Roles are exchanged only in OPEN, so changing the role (or strict
+     mode) on a live session resets it. The knob is ignored on iBGP
+     sessions (RFC 9234 defines roles for eBGP only). The OTC ingress /
+     egress procedures that use the negotiated role apply to IPv4 and
+     IPv6 unicast only.
+
+     The node is a list keyed by the role so the CLI reads
+     `otc-local-role customer [strict]` exactly like IOS XR, but it is
+     semantically single-instance: the config callback refuses a
+     second entry with a warning (max-elements is not engine-enforced) —
+     delete the current role before setting another.";
+
+  revision 2026-08-28 {
+    description "Initial revision.";
+    reference
+      "RFC 9234: Route Leak Prevention and Detection Using Roles in
+       UPDATE and OPEN Messages. Cisco IOS XR 26.4.1
+       `neighbor X otc-local-role {customer|provider|peer|route-server-client} [strict]`.";
+  }
+
+  grouping bgp-neighbor-otc-local-role-extension {
+    description
+      "IOS XR-style `otc-local-role` on a BGP neighbor: a single-entry
+       list keyed by the local BGP Role, with an optional `strict`
+       modifier.";
+
+    list otc-local-role {
+      key "role";
+      max-elements 1;
+      ext:help "RFC 9234 BGP Role toward this neighbor (route-leak prevention)";
+      description
+        "The local BGP Role for this eBGP session. Single-instance: a
+         second entry is rejected by the config callback.";
+
+      leaf role {
+        ext:help "Local role: customer, provider, peer, route-server-client or route-server";
+        type enumeration {
+          enum customer {
+            description "The local AS receives transit from the neighbor.";
+          }
+          enum provider {
+            description "The local AS provides transit to the neighbor.";
+          }
+          enum peer {
+            description
+              "Lateral peering: routes are exchanged without transit in
+               either direction.";
+          }
+          enum route-server-client {
+            description "The neighbor is a route server (RFC 7947).";
+          }
+          enum route-server {
+            description
+              "This router is a route server toward the neighbor
+               (zebra-rs superset; not configurable on IOS XR).";
+          }
+        }
+        description
+          "Value carried in the BGP Role capability of the OPEN message
+           (IANA BGP Role Value: provider 0, route-server 1,
+           route-server-client 2, customer 3, peer 4).";
+      }
+
+      leaf strict {
+        ext:help "Require the neighbor to send its BGP Role (strict mode)";
+        type empty;
+        description
+          "Strict mode: reject the session with a Role Mismatch
+           NOTIFICATION when the neighbor sends no BGP Role capability.
+           Without it (loose mode, the default) the neighbor's role is
+           inferred from the local one.";
+      }
+    }
+  }
+
+  /* =========================================================
+   * Augments into the zebra-rs configure tree
+   * ========================================================= */
+
+  augment "/configure:set/config:router"
+        + "/bgp:bgp/bgp:neighbor" {
+    description
+      "Attach otc-local-role to BGP neighbors in the candidate-set
+       subtree.";
+    uses bgp-neighbor-otc-local-role-extension;
+  }
+
+  augment "/configure:delete/config:router"
+        + "/bgp:bgp/bgp:neighbor" {
+    description
+      "Same attachment for the delete subtree so
+       `delete router bgp neighbor X otc-local-role [...]` is path-valid.";
+    uses bgp-neighbor-otc-local-role-extension;
+  }
+}
