@@ -453,6 +453,36 @@ pub fn elan_df(
     !holding && elect_forwarders(candidates, esi, vni).0 == Some(me)
 }
 
+/// RFC 8584 §4 AC-Influenced DF election is in effect on a segment only
+/// when **every** PE on it advertises the capability (§4: a PE that does
+/// not support it would keep electing over the full Type-4 set, and the
+/// two views of the DF would diverge). `advertising` of `total` Type-4s
+/// carry the bit; an empty segment is not in effect.
+pub fn ac_df_in_effect(advertising: usize, total: usize) -> bool {
+    total > 0 && advertising == total
+}
+
+/// The AC-DF candidate list for one `(ES, EVI, Ethernet Tag)` (RFC 8584
+/// §4.1): of the segment's Type-4 `candidates`, a PE stays only if its
+/// per-ES A-D is `live` and it has a per-EVI A-D for this EVI/tag
+/// (`ad_evi`) — a PE that withdrew that route has the attachment circuit
+/// down. `me` always stays: the callers elect for EVIs this PE is itself
+/// advertising for, and our own routes are not in the sets (they are
+/// originated, not received). The relative order — and so the carving
+/// ordinals — is preserved.
+pub fn ac_df_filter(
+    candidates: &[DfCandidate],
+    me: IpAddr,
+    live: &std::collections::BTreeSet<IpAddr>,
+    ad_evi: &std::collections::BTreeSet<IpAddr>,
+) -> Vec<DfCandidate> {
+    candidates
+        .iter()
+        .filter(|(ip, _, _)| *ip == me || (live.contains(ip) && ad_evi.contains(ip)))
+        .copied()
+        .collect()
+}
+
 /// What the E-LAN DF tee last told the cradle datapath about one segment
 /// (`Bgp::es_df_sent`), so a re-sync emits only the deltas: the access port
 /// sent as the segment's port list (`None` = not sent, or must be re-sent
@@ -849,6 +879,60 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(es.df_election_ec().df_alg, DfElectionEc::ALG_PREF);
+    }
+
+    /// AC-DF is a unanimous capability: any PE without the bit keeps the
+    /// segment on the plain Type-4 election, and nobody is not a segment.
+    #[test]
+    fn ac_df_needs_every_pe() {
+        assert!(ac_df_in_effect(2, 2));
+        assert!(ac_df_in_effect(1, 1));
+        assert!(!ac_df_in_effect(1, 2));
+        assert!(!ac_df_in_effect(0, 1));
+        assert!(!ac_df_in_effect(0, 0));
+    }
+
+    /// RFC 8584 §4.1: a PE whose per-EVI A-D for the EVI is missing — its
+    /// attachment circuit is down — drops out of that EVI's candidate list,
+    /// and so does one whose per-ES A-D is gone; the local PE stays. The
+    /// election then runs over what is left: with the carved DF gone, the
+    /// survivor is DF for the service.
+    #[test]
+    fn ac_df_drops_the_pe_with_the_ac_down() {
+        use std::collections::BTreeSet;
+        let [a, b, c] = pes();
+        let cands: Vec<DfCandidate> = vec![
+            (a, DfElectionEc::ALG_DEFAULT, 0),
+            (b, DfElectionEc::ALG_DEFAULT, 0),
+            (c, DfElectionEc::ALG_DEFAULT, 0),
+        ];
+        // Tag 1 carves to ordinal 1 = b over the full set.
+        assert_eq!(elect_forwarders(&cands, &ESI_T, 1).0, Some(b));
+        let live: BTreeSet<IpAddr> = [b, c].into_iter().collect();
+        // b's per-EVI A-D for this EVI is gone; c's is up.
+        let ad_evi: BTreeSet<IpAddr> = [c].into_iter().collect();
+        let narrowed = ac_df_filter(&cands, a, &live, &ad_evi);
+        assert_eq!(
+            narrowed.iter().map(|(ip, _, _)| *ip).collect::<Vec<_>>(),
+            vec![a, c]
+        );
+        // Tag 1 now carves to ordinal 1 of [a, c] = c.
+        assert_eq!(elect_forwarders(&narrowed, &ESI_T, 1).0, Some(c));
+        // c's per-ES A-D withdrawn (mass withdraw) removes it even with the
+        // per-EVI A-D still selected.
+        let live: BTreeSet<IpAddr> = [b].into_iter().collect();
+        let ad_evi: BTreeSet<IpAddr> = [b, c].into_iter().collect();
+        let narrowed = ac_df_filter(&cands, a, &live, &ad_evi);
+        assert_eq!(
+            narrowed.iter().map(|(ip, _, _)| *ip).collect::<Vec<_>>(),
+            vec![a, b]
+        );
+        // The local PE is never filtered by its own (originated) routes.
+        let narrowed = ac_df_filter(&cands, a, &BTreeSet::new(), &BTreeSet::new());
+        assert_eq!(
+            narrowed.iter().map(|(ip, _, _)| *ip).collect::<Vec<_>>(),
+            vec![a]
+        );
     }
 
     #[test]

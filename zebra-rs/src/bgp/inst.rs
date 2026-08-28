@@ -905,6 +905,15 @@ pub struct Bgp {
     /// The Ethernet Segment nexthop groups last teed to cradle per
     /// `(ESI, EVI)` (`evpn_es_nhg_sync` diffs against it, RFC 7432 §8.4).
     pub es_nhg_sent: BTreeMap<([u8; 10], u32), Vec<crate::rib::EsNhgMember>>,
+    /// Access-side links currently down, by name — maintained from
+    /// `RibRx::LinkAdd` (the link's flags), `LinkDown`, `LinkUp` and
+    /// `LinkDel`. An Ethernet Segment whose port is here withholds its ES
+    /// routes (RFC 7432 §8.2) and is never DF; a VPWS service whose
+    /// attachment circuit is here advertises no Type-1 (RFC 8214 §3 — and
+    /// the RFC 8584 §4 AC-DF trigger). By name rather than ifindex so a
+    /// link deleted and re-created under a new ifindex resolves the same
+    /// way.
+    pub links_down: std::collections::BTreeSet<String>,
     /// Local snooped IGMP/MLD membership shadow, keyed by
     /// `(vni, group, source)` → local VTEP IP. Populated from
     /// `RibRx::SnoopJoin`, removed on `RibRx::SnoopLeave`. Drives
@@ -1415,6 +1424,7 @@ impl Bgp {
             l2_port_evis: BTreeMap::new(),
             es_df_sent: BTreeMap::new(),
             es_nhg_sent: BTreeMap::new(),
+            links_down: std::collections::BTreeSet::new(),
             local_smet: BTreeMap::new(),
             ethernet_segments: BTreeMap::new(),
             hostname: None,
@@ -4343,6 +4353,11 @@ impl Bgp {
                     }
                     self.evpn_es_df_sync();
                 }
+                // The link's flags say whether the access side is usable:
+                // a segment port or VPWS attachment circuit that arrived
+                // down — or came back under a new ifindex — is handled
+                // exactly like a LinkDown / LinkUp on it.
+                self.evpn_link_state(&link.name, link.is_up());
             }
             // Fast external failover: a link going operationally down
             // (or disappearing) immediately resets the single-hop eBGP
@@ -4351,9 +4366,11 @@ impl Bgp {
             // reconvergence.
             RibRx::LinkDown(ifindex) => {
                 self.link_down_failover(ifindex);
+                self.evpn_link_ifindex_state(ifindex, false);
             }
             RibRx::LinkDel(ifindex) => {
                 self.link_down_failover(ifindex);
+                self.evpn_link_ifindex_state(ifindex, false);
                 // A deleted link's addresses are not reliably withdrawn
                 // one by one (a veth moved into another netns emits only
                 // RTM_DELLINK), so sweep its contributions out of the
@@ -4370,6 +4387,7 @@ impl Bgp {
             }
             RibRx::LinkUp(ifindex) => {
                 self.link_up_kick(ifindex);
+                self.evpn_link_ifindex_state(ifindex, true);
             }
             RibRx::AddrAdd(addr) => {
                 self.interface_addrs.record(&addr);

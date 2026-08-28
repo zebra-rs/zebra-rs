@@ -186,6 +186,52 @@ Feature: BGP EVPN VPWS multihoming — ESI and DF-elected P/B (RFC 8214 §5)
     Then show command "show bgp evpn vpws" in namespace "z3" should eventually contain "Remote SID: fcbb:bbbb:2:"
     And show command "show bgp evpn vpws" in namespace "z3" should contain "(via 192.168.0.2)"
 
+  Scenario: AC-influenced DF election re-elects the service whose AC went down (RFC 8584 §4)
+    Given the test topology exists
+    # Real links this time. The segment port is a dummy ce1; the E-Line's
+    # attachment circuit is the VLAN sub-interface ce1.100 on it, bound to
+    # es1 explicitly. Taking the AC down then withdraws only the service's
+    # Type-1 while the segment (Type-4, per-ES A-D) stays up — the case
+    # AC-DF exists for. A segment *port* down is plain segment loss: the ES
+    # routes are withheld and every PE re-elects without AC-DF.
+    When I execute "ip link add ce1 type dummy" in namespace "z1"
+    And I execute "ip link add link ce1 name ce1.100 type vlan id 100" in namespace "z1"
+    And I execute "ip link set ce1 up" in namespace "z1"
+    And I execute "ip link set ce1.100 up" in namespace "z1"
+    And I execute "ip link add ce1 type dummy" in namespace "z2"
+    And I execute "ip link add link ce1 name ce1.100 type vlan id 100" in namespace "z2"
+    And I execute "ip link set ce1 up" in namespace "z2"
+    And I execute "ip link set ce1.100 up" in namespace "z2"
+    And I apply config "z1-acdf.yaml" to namespace "z1"
+    And I apply config "z2-acdf.yaml" to namespace "z2"
+    # Both Type-4s carry the capability, so it is in effect on the segment;
+    # the election itself is unchanged while every AC is up.
+    Then show command "show bgp evpn" in namespace "z1" should eventually contain "df-election:alg0+ac-df"
+    And show command "show bgp evpn ethernet-segment" in namespace "z1" should eventually contain "AC-DF: advertised, in effect (2 of 2 PEs advertise it)"
+    And show command "show bgp evpn vpws" in namespace "z1" should eventually contain "Role: backup (DF 192.168.0.2)"
+    # z2's AC fails: its Type-1 is withdrawn, its Type-4 is not. Under
+    # AC-DF z1's candidate list for instance 101 shrinks to itself, so z1
+    # takes the primary role — with the segment still two members strong.
+    When I execute "ip link set ce1.100 down" in namespace "z2"
+    Then show command "show bgp evpn vpws" in namespace "z1" should eventually contain "Role: primary (DF 192.168.0.1)"
+    And show command "show bgp evpn ethernet-segment" in namespace "z1" should contain "Member VTEPs (2)"
+    And show command "show bgp evpn vpws" in namespace "z3" should eventually contain "(via 192.168.0.1)"
+    # The AC returns: z2 re-originates and the carving picks it again.
+    When I execute "ip link set ce1.100 up" in namespace "z2"
+    Then show command "show bgp evpn vpws" in namespace "z1" should eventually contain "Role: backup (DF 192.168.0.2)"
+    And show command "show bgp evpn vpws" in namespace "z3" should eventually contain "(via 192.168.0.2)"
+    # Negative control: without the capability the same AC failure leaves
+    # z1 a backup — z2 is still on the segment, so the carving still picks
+    # it — and the remote end rides z1's B route instead.
+    When I apply config "z1-acdf-off.yaml" to namespace "z1"
+    And I apply config "z2-acdf-off.yaml" to namespace "z2"
+    Then show command "show bgp evpn" in namespace "z1" should eventually not contain "+ac-df"
+    When I execute "ip link set ce1.100 down" in namespace "z2"
+    Then show command "show bgp evpn vpws" in namespace "z3" should eventually contain "(via 192.168.0.1, backup)"
+    And show command "show bgp evpn vpws" in namespace "z1" should contain "Role: backup (DF 192.168.0.2)"
+    When I execute "ip link set ce1.100 up" in namespace "z2"
+    Then show command "show bgp evpn vpws" in namespace "z3" should eventually contain "(via 192.168.0.2)"
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "z1"

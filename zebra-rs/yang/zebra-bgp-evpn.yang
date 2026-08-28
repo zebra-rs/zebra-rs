@@ -313,7 +313,17 @@ module zebra-bgp-evpn {
             "Advertise the AC-DF (AC-Influenced DF election) capability bit
              in the DF Election extended community (RFC 8584 §2.2), telling
              the other PEs on the segment that this PE excludes itself from
-             the election while its attachment circuit is down.";
+             the election while its attachment circuit is down.
+
+             Once every PE on the segment advertises it, the election for
+             each EVI (each VPWS service instance, each bridge domain)
+             counts only the PEs whose per-EVI Ethernet A-D route for it
+             is present alongside their per-ES A-D (RFC 8584 §4.1). A PE
+             whose attachment circuit for one EVI goes down withdraws that
+             per-EVI A-D and drops out of that EVI's election alone — the
+             other PEs re-elect at once, without the segment changing.
+             Any PE without the capability keeps the whole segment on the
+             plain Type-4 election.";
         }
         leaf startup-delay {
           ext:help "Seconds to stay out of the election after joining the segment";

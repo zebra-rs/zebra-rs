@@ -179,7 +179,7 @@ rows are C3 (modulus/HRW) and C9.
 | Type-4 ES, Type-1 A-D per ES (ESI-label EC), Type-1 A-D per EVI | ✅ originated | `bgp/route.rs:16968`, `:17034`, `:17082` |
 | DF election: modulus (Alg 0) + preference (Alg 2), RFC 8584 negotiation | ✅ | `bgp/ethernet_segment.rs:215-280` |
 | DF election: HRW (Alg 1) | ✅ `df-election algorithm hrw` (RFC 8584 §3) | `ethernet_segment.rs` `hrw_ranked` |
-| AC-DF behaviour (withdraw on AC down) | ❌ bit only | no `LinkDown` path touches `ethernet_segments` |
+| AC-DF behaviour (withdraw on AC down) | ✅ RFC 8584 §4: per-EVI candidate filter once every PE advertises it; an AC link-down withdraws the VPWS Type-1 / the port's per-EVI A-Ds; an ES port link-down withholds the ES routes | `route.rs` `es_ac_df_candidates`, `evpn_link_state` |
 | Where the DF result goes | `show` and the VPWS P/B bits only | `bgp/show.rs:2565-2698`, `route.rs:17389-17422` |
 | non-DF filter, SPH/local-bias | ❌ **nothing programmed anywhere** | `EvpnFloodState::desired` `route.rs:3046-3069` filters on P2MP/prune/AR only; zero `IFLA_BRPORT` in `fib/` |
 | Aliasing consumer | ❌ modelled in RIB, first dest installed | `rib/inst.rs:5037-5052`, `MacEntry::installed_dest` `:901` |
