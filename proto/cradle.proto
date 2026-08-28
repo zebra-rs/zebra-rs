@@ -44,6 +44,10 @@ message EsRole {
   string esi = 1;
   uint32 bd = 2;
   bool df = 3;
+  // Single-active redundancy (RFC 7432 §14.1.1): a non-DF port is a standby
+  // that passes nothing in either direction — known unicast toward the CE
+  // and anything the CE sends — not only BUM. Ignored when `df` is set.
+  bool single_active = 4;
 }
 
 // The other PEs attached to Ethernet Segment `esi` — their VTEP / overlay
