@@ -1,8 +1,18 @@
 # BGP Route Server mode (RFC 7947) — design
 
-Status: **planned, not started** (2026-08-28). Split out of the RFC 9234
-plan (`bgp-rfc9234-plan.md`) so the OTC work can land first; this document
-is self-contained and can be picked up independently.
+Status: **implemented 2026-08-28** on branch `bgp-route-server` (one PR, as
+sized below): knob + inheritance + VRF, `EgressAs.route_server_client`
+early-return in `ebgp_egress_aspath`, next-hop-unchanged implied for
+forwarded unicast rows (v4 via `sync_ctx`, v6 in the builder),
+`UpdateGroupSig.route_server_client` (SIGNATURE_VERSION 8), show, BDD
+`bgp_route_server.feature` on a bridged LAN, book `ch-02-43`. Deviations
+from §3.2: incompatible AS_PATH knobs are *ignored with a warning* rather
+than rejected in the callback (callback order within a commit makes
+rejection unreliable); a change bounces the live session so the client
+re-receives the table in the new form.
+
+Originally split out of the RFC 9234 plan (`bgp-rfc9234-plan.md`) so the
+OTC work could land first.
 
 ## 1. Why
 

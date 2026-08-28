@@ -124,6 +124,7 @@
 /router/bgp/neighbor-group/remove-private-as/all
 /router/bgp/neighbor-group/remove-private-as/replace-as
 /router/bgp/neighbor-group/route-reflector/client
+/router/bgp/neighbor-group/route-server-client
 /router/bgp/neighbor-group/tcp-ao/include-tcp-options
 /router/bgp/neighbor-group/tcp-ao/key-chain
 /router/bgp/neighbor-group/tcp-mss
@@ -176,6 +177,7 @@
 /router/bgp/neighbor/remove-private-as/all
 /router/bgp/neighbor/remove-private-as/replace-as
 /router/bgp/neighbor/route-reflector/client
+/router/bgp/neighbor/route-server-client
 /router/bgp/neighbor/soft-reconfiguration/inbound
 /router/bgp/neighbor/tcp-ao/include-tcp-options
 /router/bgp/neighbor/tcp-ao/key-chain
@@ -277,6 +279,7 @@
 /router/bgp/vrf/neighbor/remove-private-as/all
 /router/bgp/vrf/neighbor/remove-private-as/replace-as
 /router/bgp/vrf/neighbor/route-reflector/client
+/router/bgp/vrf/neighbor/route-server-client
 /router/bgp/vrf/neighbor/tcp-ao/include-tcp-options
 /router/bgp/vrf/neighbor/tcp-ao/key-chain
 /router/bgp/vrf/neighbor/timers/advertisement-interval

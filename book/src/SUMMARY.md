@@ -38,6 +38,7 @@
   - [Remove Private AS](ch-02-14-bgp-remove-private-as.md)
   - [Enforce First AS](ch-02-15-bgp-enforce-first-as.md)
   - [BGP Roles & Only-to-Customer (RFC 9234)](ch-02-42-bgp-otc-local-role.md)
+  - [Route Server (RFC 7947)](ch-02-43-bgp-route-server.md)
   - [AS_SET / AS_CONFED_SET Withdrawal (RFC 9774)](ch-02-39-bgp-as-sets-withdraw.md)
   - [Well-Known Communities](ch-02-24-bgp-well-known-communities.md)
   - [Table-Map (Policy at the BGP→RIB Install Point)](ch-02-28-bgp-table-map.md)

@@ -1087,6 +1087,23 @@ pub fn config_vrf_neighbor_enforce_first_as(
     Some(())
 }
 
+/// `set router bgp vrf <NAME> neighbor <addr> route-server-client` —
+/// RFC 7947 presence container (zebra-bgp-vrf.yang mirrors
+/// zebra-bgp-route-server.yang). Staged verbatim; resolved and applied at
+/// materialization like the other inheritable knobs.
+pub fn config_vrf_neighbor_route_server_client(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let vrf = args.string()?;
+    let addr = args.addr()?;
+    let cfg = vrf_entry(bgp, vrf, op)?;
+    let nbr = neighbor_entry(cfg, addr, op)?;
+    nbr.config.knobs_explicit.route_server_client = op.is_set().then_some(true);
+    Some(())
+}
+
 /// `set router bgp vrf <NAME> neighbor <addr> otc-local-role <role>` —
 /// RFC 9234 list node (zebra-bgp-vrf.yang mirrors zebra-bgp-otc.yang).
 /// Staged verbatim; resolved and applied at materialization like the

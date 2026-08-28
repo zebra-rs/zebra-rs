@@ -368,6 +368,14 @@ module zebra-bgp-vrf {
            segment begins with the CE's own AS. No-op for iBGP. Same as
            the global neighbor.";
       }
+      container route-server-client {
+        ext:help "Treat this CE as a route-server client (RFC 7947)";
+        presence "Advertise routes to this CE transparently, as a route server";
+        description
+          "Keep the AS_PATH (no local-AS prepend) and the received
+           NEXT_HOP on routes advertised to this eBGP CE. No-op for
+           iBGP. Same as the global neighbor (zebra-bgp-route-server.yang).";
+      }
       list otc-local-role {
         key "role";
         max-elements 1;

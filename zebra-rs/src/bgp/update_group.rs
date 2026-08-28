@@ -40,7 +40,7 @@ use crate::context::Timer;
 
 /// Bumped whenever a new field is added to `UpdateGroupSig`. Surfaced
 /// in `show bgp update-group` so a stale view is detectable.
-pub const SIGNATURE_VERSION: u32 = 7;
+pub const SIGNATURE_VERSION: u32 = 8;
 
 /// Address families the grouping logic considers — every family whose
 /// advertise pipeline consults `peer.update_group_id`. IPv6 unicast
@@ -152,6 +152,11 @@ pub struct UpdateGroupSig {
     /// Peer / RS an OTC-marked route is suppressed (ER2). Two peers under
     /// different roles must therefore never share canonical UPDATE bytes.
     pub otc_local_role: Option<bgp_packet::BgpRole>,
+    /// RFC 7947 `route-server-client` (eBGP only). The egress AS_PATH is
+    /// left untouched and the forwarded next-hop preserved toward such a
+    /// peer, so it must never share canonical bytes with an ordinary
+    /// eBGP neighbor that gets the prepended / rewritten form.
+    pub route_server_client: bool,
     // Negotiated wire-format capabilities (intersection of cap_send
     // and cap_recv on the peer). Anything that changes encoded
     // UPDATE bytes belongs here.
@@ -449,6 +454,9 @@ pub fn signature_of(peer: &Peer, afi: Afi, safi: Safi) -> Option<UpdateGroupSig>
         } else {
             None
         },
+        // route-server-client makes the egress AS_PATH transparent and
+        // keeps the forwarded next-hop (eBGP only — iBGP never prepends).
+        route_server_client: peer.is_ebgp() && peer.config.route_server_client,
         as4_negotiated: peer.as4,
         extended_message: peer.opt.extended_message,
         addpath_send: peer.opt.is_add_path_send(afi, safi),
@@ -1495,6 +1503,7 @@ mod tests {
             remove_private_as: None,
             local_as_substitute: None,
             otc_local_role: None,
+            route_server_client: false,
             as4_negotiated: true,
             extended_message: true,
             addpath_send: false,
@@ -1707,6 +1716,12 @@ mod tests {
         let mut b = a.clone();
         b.otc_local_role = Some(bgp_packet::BgpRole::Customer);
         assert_ne!(a, b);
+
+        // RFC 7947: a route-server client gets the untouched AS_PATH and
+        // next-hop — its own group.
+        let mut a = base.clone();
+        a.route_server_client = true;
+        assert_ne!(base, a);
 
         let mut a = base.clone();
         a.as4_negotiated = false;

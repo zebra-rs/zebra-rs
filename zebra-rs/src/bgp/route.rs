@@ -164,6 +164,9 @@ pub struct EgressAs {
     /// RFC 9234 `otc-local-role` on this eBGP session (`None` when unset
     /// or iBGP) — drives the OTC egress procedures in [`otc_egress`].
     pub otc_local_role: Option<BgpRole>,
+    /// RFC 7947 `route-server-client` (eBGP only): the egress AS_PATH is
+    /// left exactly as received — no prepend, no rewrites.
+    pub route_server_client: bool,
 }
 
 impl EgressAs {
@@ -331,6 +334,7 @@ impl SyncCtx {
                 local_as_substitute: None,
                 local_as_replace: false,
                 otc_local_role: None,
+                route_server_client: false,
             },
             out_policy: Arc::new(super::policy::OutPolicy::default()),
             packet_tx: None,
@@ -365,6 +369,13 @@ impl SyncCtx {
 /// the transforms apply uniformly across address families.
 fn ebgp_egress_aspath(eas: &EgressAs, attrs: &mut BgpAttr) {
     if !eas.is_ebgp {
+        return;
+    }
+    // RFC 7947 §2.2.2: a route server is transparent — the client must
+    // see the originating member's AS_PATH untouched. No local-AS
+    // prepend, and none of the rewrites that only exist to shape a
+    // prepended path (remove-private-as, as-override, local-as).
+    if eas.route_server_client {
         return;
     }
     let Some(aspath) = attrs.aspath.as_mut() else {
@@ -12590,7 +12601,11 @@ pub fn route_update_ipv6(
     // (both eBGP and iBGP) and wins over next-hop-self; next-hop-self forces
     // self even iBGP→iBGP. Originated rows always rewrite (RFC 2545 §2 — the
     // originator is the only valid next-hop).
-    let nh_unchanged = !rib.is_originated() && peer.next_hop_unchanged(Afi::Ip6, Safi::Unicast);
+    // RFC 7947 §2.2.1: toward a route-server client a forwarded route
+    // keeps the received next-hop (same as the v4 `sync_ctx` rule).
+    let nh_unchanged = !rib.is_originated()
+        && (peer.next_hop_unchanged(Afi::Ip6, Safi::Unicast)
+            || (peer.is_ebgp() && peer.config.route_server_client));
     let needs_self = rib.is_originated()
         || (peer.is_ebgp() && !nh_unchanged)
         || (peer.next_hop_self(Afi::Ip6, Safi::Unicast) && !nh_unchanged);
@@ -23692,6 +23707,7 @@ mod as_sets_withdraw_tests {
                 local_as_substitute: None,
                 local_as_replace: false,
                 otc_local_role: None,
+                route_server_client: false,
             },
             out_policy: Arc::new(crate::bgp::policy::OutPolicy::default()),
             packet_tx: None,
@@ -23750,6 +23766,7 @@ mod as_sets_withdraw_tests {
                 local_as_substitute: None,
                 local_as_replace: false,
                 otc_local_role: None,
+                route_server_client: false,
             },
             out_policy: Arc::new(crate::bgp::policy::OutPolicy::default()),
             packet_tx: None,
@@ -23841,6 +23858,7 @@ mod as_sets_withdraw_tests {
                 local_as_substitute: None,
                 local_as_replace: false,
                 otc_local_role: None,
+                route_server_client: false,
             },
             out_policy: Arc::new(crate::bgp::policy::OutPolicy::default()),
             packet_tx: None,
@@ -23910,6 +23928,7 @@ mod as_sets_withdraw_tests {
                 local_as_substitute: None,
                 local_as_replace: false,
                 otc_local_role: None,
+                route_server_client: false,
             },
             out_policy: Arc::new(crate::bgp::policy::OutPolicy::default()),
             packet_tx: None,
@@ -25548,6 +25567,7 @@ mod otc_procedure_tests {
             local_as_substitute: substitute,
             local_as_replace: false,
             otc_local_role: role,
+            route_server_client: false,
         }
     }
 
@@ -25600,5 +25620,58 @@ mod otc_procedure_tests {
             &mut attrs
         ));
         assert_eq!(attrs.otc, Some(Otc::new(64999)));
+    }
+}
+
+#[cfg(test)]
+mod route_server_tests {
+    use super::*;
+
+    fn eas(rs_client: bool) -> EgressAs {
+        EgressAs {
+            is_ebgp: true,
+            local_as: 65000,
+            remote_as: 65003,
+            as_override: true,
+            remove_private_as: Some(super::super::peer::RemovePrivateAs {
+                all: true,
+                replace_as: false,
+            }),
+            local_as_substitute: Some(64999),
+            local_as_replace: false,
+            otc_local_role: None,
+            route_server_client: rs_client,
+        }
+    }
+
+    fn path(asns: &[u32]) -> BgpAttr {
+        let mut attrs = BgpAttr::new();
+        attrs.aspath = Some(As4Path::from(asns.to_vec()));
+        attrs
+    }
+
+    /// RFC 7947 §2.2.2: toward a route-server client the AS_PATH is the
+    /// originating member's, untouched — no prepend, and none of the
+    /// prepend-time rewrites even when they are configured.
+    #[test]
+    fn route_server_client_egress_aspath_is_transparent() {
+        let mut attrs = path(&[65001, 65100]);
+        ebgp_egress_aspath(&eas(true), &mut attrs);
+        assert_eq!(attrs.aspath, Some(As4Path::from(vec![65001, 65100])));
+    }
+
+    /// The same session without the knob behaves as ordinary eBGP: the
+    /// local-as substitute and real AS are prepended (as-override /
+    /// remove-private-as act as configured).
+    #[test]
+    fn plain_ebgp_still_prepends() {
+        let mut attrs = path(&[65001]);
+        ebgp_egress_aspath(&eas(false), &mut attrs);
+        let got = attrs.aspath.expect("aspath");
+        assert_eq!(got.neighboring_as(), Some(64999), "substitute first");
+        assert!(
+            got.to_string().contains("65000"),
+            "real AS prepended: {got}"
+        );
     }
 }

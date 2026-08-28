@@ -1078,6 +1078,60 @@ pub(super) fn apply_enforce_first_as(peer: &mut Peer, want: bool) -> bool {
     false
 }
 
+/// `set router bgp neighbor X route-server-client` — the RFC 7947
+/// presence container (zebra-bgp-route-server.yang). Toward this eBGP
+/// neighbor this router behaves as a transparent route server: no
+/// local-AS prepend (and none of the prepend-time AS_PATH rewrites) and
+/// the received next-hop is kept on forwarded routes. `delete` restores
+/// ordinary eBGP advertisement. A live session is bounced either way so
+/// the client re-receives every route in the new form.
+fn config_route_server_client(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let addr = args.addr()?;
+    let (ident, bounce) = {
+        let peer = bgp.peers.get_mut(&addr)?;
+        peer.config.knobs_explicit.route_server_client = op.is_set().then_some(true);
+        let want = super::neighbor_group::resolve_knob(&bgp.neighbor_groups, &peer.config, |k| {
+            k.route_server_client
+        })
+        .unwrap_or(false);
+        (peer.ident, apply_route_server_client(peer, want))
+    };
+    if bounce {
+        let _ = bgp
+            .tx
+            .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
+    }
+    Some(())
+}
+
+/// Write a resolved `route-server-client` value onto the peer and return
+/// whether a live session must be bounced. Diff-gated. The knob changes
+/// the AS_PATH and next-hop of every route already advertised to the
+/// client, so a live session renegotiates rather than leaving the client
+/// with the pre-change form until the next churn. The AS_PATH rewrites
+/// (as-override / remove-private-as / local-as) are meaningless toward a
+/// route-server client and are ignored while it is set — a warning says
+/// so at the moment they overlap. Shared by the per-neighbor callback,
+/// the neighbor-group sweep and VRF materialization.
+pub(super) fn apply_route_server_client(peer: &mut Peer, want: bool) -> bool {
+    if peer.config.route_server_client == want {
+        return false;
+    }
+    if want
+        && (peer.config.as_override
+            || peer.config.remove_private_as.is_some()
+            || peer.config.local_as.is_some())
+    {
+        tracing::warn!(
+            peer = %peer.display_name(),
+            "bgp: route-server-client leaves the egress AS_PATH untouched; as-override / remove-private-as / local-as are ignored toward this neighbor",
+        );
+    }
+    peer.config.route_server_client = want;
+    peer.start();
+    !matches!(peer.state, super::peer::State::Idle)
+}
+
 /// `set router bgp neighbor X otc-local-role <role>` — the RFC 9234 list
 /// node (zebra-bgp-otc.yang, IOS XR syntax). Records the verbatim
 /// statement, resolves through the neighbor-group precedence and applies
@@ -4780,6 +4834,10 @@ impl Bgp {
             super::neighbor_group::config_neighbor_group_enforce_first_as,
         );
         self.callback_add(
+            "/router/bgp/neighbor-group/route-server-client",
+            super::neighbor_group::config_neighbor_group_route_server_client,
+        );
+        self.callback_add(
             "/router/bgp/neighbor-group/otc-local-role",
             super::neighbor_group::config_neighbor_group_otc_local_role,
         );
@@ -4987,6 +5045,10 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/vrf/neighbor/enforce-first-as",
             super::vrf_config::config_vrf_neighbor_enforce_first_as,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/neighbor/route-server-client",
+            super::vrf_config::config_vrf_neighbor_route_server_client,
         );
         self.callback_add(
             "/router/bgp/vrf/neighbor/otc-local-role",
@@ -5657,6 +5719,9 @@ impl Bgp {
         // RFC 9234 BGP Role (zebra-bgp-otc.yang, IOS XR syntax):
         // `otc-local-role <role> [strict]`. Advertised in the OPEN on
         // eBGP; a change bounces the session.
+        // RFC 7947 route-server behaviour toward this neighbor
+        // (zebra-bgp-route-server.yang): transparent AS_PATH + next-hop.
+        self.callback_peer("/route-server-client", config_route_server_client);
         self.callback_peer("/otc-local-role", config_otc_local_role);
         self.callback_peer("/otc-local-role/strict", config_otc_local_role_strict);
         self.callback_peer("/pic-retention", config_pic_retention);
@@ -6380,6 +6445,27 @@ mod bfd_wiring_tests {
         config_enforce_first_as(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
         config_enforce_first_as(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Delete).unwrap();
         assert!(!peer_enforce_first_as(&bgp, "10.0.0.2"));
+    }
+
+    fn peer_rs_client(bgp: &Bgp, addr: &str) -> bool {
+        bgp.peers
+            .get(&addr.parse().unwrap())
+            .unwrap()
+            .config
+            .route_server_client
+    }
+
+    /// `route-server-client` defaults off; the presence container turns
+    /// it on and its delete turns it back off.
+    #[tokio::test]
+    async fn route_server_client_set_and_delete() {
+        let (mut bgp, _rx) = fresh_bgp_with_bfd();
+        config_peer(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
+        assert!(!peer_rs_client(&bgp, "10.0.0.2"));
+        config_route_server_client(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
+        assert!(peer_rs_client(&bgp, "10.0.0.2"));
+        config_route_server_client(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Delete).unwrap();
+        assert!(!peer_rs_client(&bgp, "10.0.0.2"));
     }
 
     fn peer_otc(bgp: &Bgp, addr: &str) -> Option<OtcLocalRole> {
@@ -8800,7 +8886,7 @@ mod neighbor_group_wiring_tests {
         config_neighbor_group_port, config_neighbor_group_remove_private_as,
         config_neighbor_group_remove_private_as_all,
         config_neighbor_group_remove_private_as_replace_as,
-        config_neighbor_group_route_reflector_client,
+        config_neighbor_group_route_reflector_client, config_neighbor_group_route_server_client,
     };
 
     /// Attach `10.0.0.1` to group `G` (which has a remote-as so the
@@ -9151,6 +9237,41 @@ mod neighbor_group_wiring_tests {
         assert!(
             drain_stop_events(&mut bgp).is_empty(),
             "enforce-first-as changes must never bounce the session",
+        );
+    }
+
+    /// Group `route-server-client` propagates, bounces a live member (its
+    /// advertised routes change shape), and the explicit statement wins.
+    #[tokio::test]
+    async fn group_route_server_client_propagates_explicit_wins_and_bounces_live() {
+        use crate::bgp::peer::State;
+        let mut bgp = bgp_with_member();
+        bgp.peers.get_mut(&peer_addr()).unwrap().state = State::Established;
+
+        config_neighbor_group_route_server_client(&mut bgp, arg_words(&["G"]), ConfigOp::Set)
+            .unwrap();
+        assert!(
+            member(&bgp).config.route_server_client,
+            "group opinion must apply"
+        );
+        assert_eq!(
+            drain_stop_events(&mut bgp).len(),
+            1,
+            "a live member is bounced"
+        );
+
+        config_route_server_client(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_neighbor_group_route_server_client(&mut bgp, arg_words(&["G"]), ConfigOp::Delete)
+            .unwrap();
+        assert!(
+            member(&bgp).config.route_server_client,
+            "explicit statement survives the group delete",
+        );
+        let _ = drain_stop_events(&mut bgp);
+        config_route_server_client(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Delete).unwrap();
+        assert!(
+            !member(&bgp).config.route_server_client,
+            "dropping both clears it"
         );
     }
 

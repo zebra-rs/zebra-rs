@@ -3092,6 +3092,10 @@ struct Neighbor<'a> {
     /// replaced with the local AS in the AS_PATH of outbound eBGP
     /// UPDATEs (before the local-AS prepend).
     as_override: bool,
+    /// RFC 7947 `neighbor X route-server-client`
+    /// (zebra-bgp-route-server.yang): routes are advertised to this
+    /// neighbor with the AS_PATH and forwarded next-hop untouched.
+    route_server_client: bool,
     /// FRR-style `neighbor X remove-private-as`
     /// (zebra-bgp-remove-private-as.yang), if configured. `None` leaves
     /// the egress AS_PATH untouched; `Some` strips (or, with
@@ -3430,6 +3434,7 @@ fn fetch(peer: &Peer) -> Neighbor<'_> {
         soft_reconfig_in: peer.config.soft_reconfig_in,
         allowas_in: peer.config.allowas_in,
         as_override: peer.config.as_override,
+        route_server_client: peer.config.route_server_client,
         remove_private_as: peer.config.remove_private_as,
         local_as_config: peer.config.local_as,
         local_as_dual_fallback: peer.local_as_dual_fallback,
@@ -3654,6 +3659,13 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
 
     if neighbor.as_override {
         writeln!(out, "  AS-Override enabled (outbound AS_PATH replacement)")?;
+    }
+
+    if neighbor.route_server_client {
+        writeln!(
+            out,
+            "  Route-server client: enabled (transparent AS_PATH and next-hop, RFC 7947)"
+        )?;
     }
 
     if let Some(rpa) = neighbor.remove_private_as {
@@ -6319,6 +6331,7 @@ Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down Sta
             soft_reconfig_in: false,
             allowas_in: None,
             as_override: false,
+            route_server_client: false,
             remove_private_as: None,
             local_as_config: None,
             local_as_dual_fallback: false,
@@ -7863,6 +7876,8 @@ struct NeighborGroupKnobsJson {
     allowas_in: Option<AllowAsIn>,
     #[serde(skip_serializing_if = "Option::is_none")]
     as_override: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    route_server_client: Option<bool>,
     /// Serializes as `{"all":bool,"replace_as":bool}`
     /// (RemovePrivateAs's own Serialize derive).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -7900,6 +7915,7 @@ impl NeighborGroupKnobsJson {
             prefix_set_out: k.prefix_set_out.clone(),
             allowas_in: k.allowas_in,
             as_override: k.as_override,
+            route_server_client: k.route_server_client,
             remove_private_as: k.remove_private_as,
             enforce_first_as: k.enforce_first_as,
             otc_local_role: k.otc_local_role.map(|r| OtcLocalRoleJson {
@@ -8133,6 +8149,9 @@ fn show_bgp_neighbor_group_detail(
     }
     if k.as_override == Some(true) {
         writeln!(buf, "  As-override: enabled")?;
+    }
+    if k.route_server_client == Some(true) {
+        writeln!(buf, "  Route-server-client: enabled")?;
     }
     if let Some(rpa) = k.remove_private_as {
         let mut desc = "enabled".to_string();
