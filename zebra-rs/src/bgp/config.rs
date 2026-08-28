@@ -1291,7 +1291,15 @@ pub(super) fn bfd_apply_ident(bgp: &mut Bgp, ident: usize) -> Option<()> {
         // instance-level `router bgp { bfd {} }` default (blanket enable +
         // per-neighbor override). Hop-mode / min-ttl stay per-neighbor.
         let eff = peer.config.bfd.resolve(&bgp.bfd);
-        let enable = eff.enable;
+        // Never subscribe a session against an unspecified remote. An
+        // `interface-neighbor` peer materializes dormant with `address ==
+        // ::` before any RA surfaces its link-local (see
+        // `interface_neighbor::materialize`); a `::`-keyed session is
+        // meaningless and, worse, collides — two dormant unnumbered peers
+        // would collapse onto one `{local: ::, remote: ::, ifindex: 0}`
+        // entry. The RA path re-runs `bfd_apply_ident` once a real
+        // link-local lands, at which point this flips back to enabled.
+        let enable = eff.enable && !addr.is_unspecified();
         let local = peer
             .config
             .transport
@@ -1306,18 +1314,23 @@ pub(super) fn bfd_apply_ident(bgp: &mut Bgp, ident: usize) -> Option<()> {
         } else {
             255 // GTSM (RFC 5881 §5): single-hop accepts only TTL 255.
         };
-        // Key single-hop sessions by the connected interface when we know it
-        // (from `RibRx::AddrAdd`): the XDP data plane — the Echo
-        // reflector and the expiration watchdog — attaches by ifindex, so an
-        // ifindex-0 key can never bring it up. Unknown (no address info yet,
-        // or a v6 link-local peer) falls back to 0 — the session still works,
-        // helper-backed features stay off; the `RibRx::AddrAdd` hook
-        // re-reconciles once the interface is learned. Multihop has no single
-        // egress interface.
+        // Key single-hop sessions by the egress interface. `resolve_session_
+        // ifindex` picks the most precise source: the interface key itself
+        // for an unnumbered (`PeerOrigin::Interface`) peer, the link-local
+        // connect scope, the local socket's scope/subnet, then the subnet
+        // covering the peer address. This is mandatory for a v6 link-local
+        // remote: `write_packet_v6` needs a pinned egress ifindex to route to
+        // `fe80::`, and `ConnectedSubnets::ifindex_for` deliberately returns
+        // `None` for link-locals (fe80::/64 is on every v6 interface). It
+        // also feeds the XDP data plane (Echo reflector + expiration
+        // watchdog), which attaches by ifindex. Falls back to 0 when nothing
+        // is known yet; the `RibRx::AddrAdd` hook re-reconciles once the
+        // interface is learned. Multihop has no single egress interface.
         let ifindex = if multihop {
             0
         } else {
-            bgp.connected_subnets.ifindex_for(addr).unwrap_or(0)
+            peer.resolve_session_ifindex(&bgp.connected_subnets)
+                .unwrap_or(0)
         };
         let key = SessionKey {
             local,
@@ -6369,6 +6382,25 @@ mod neighbor_group_wiring_tests {
         )
     }
 
+    /// Like [`fresh_bgp`], but wires a real BFD `client_tx` and returns
+    /// its receiver so a test can assert what BGP subscribed to BFD.
+    fn fresh_bgp_with_bfd() -> (Bgp, mpsc::UnboundedReceiver<ClientReq>) {
+        let (ctx, rib_rx) = test_ctx();
+        let (policy_tx, _policy_rx) = mpsc::unbounded_channel();
+        Box::leak(Box::new(_policy_rx));
+        let (bfd_client_tx, bfd_client_rx) = mpsc::unbounded_channel();
+        let bgp = Bgp::new(
+            ctx,
+            rib_rx,
+            test_rib_subscriber(),
+            policy_tx,
+            Some(bfd_client_tx),
+            None,
+            tokio::sync::mpsc::channel(1).0,
+        );
+        (bgp, bfd_client_rx)
+    }
+
     fn peer_addr() -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))
     }
@@ -8055,6 +8087,63 @@ mod neighbor_group_wiring_tests {
         assert_eq!(peer.remote_as, 65003);
         assert!(peer.config.remote_as_inherited);
         assert!(!peer.active, "still no RA — stays dormant");
+    }
+
+    /// Regression for #2324: an IPv6-unnumbered (`interface-neighbor`)
+    /// peer must subscribe its single-hop BFD session pinned to the
+    /// interface's ifindex, keyed on the RA-learned link-local — not on
+    /// `::`/ifindex-0. Two gaps caused the bug: the ND-materialize path
+    /// never re-ran `bfd_apply_ident`, and the ifindex derivation went
+    /// through `ConnectedSubnets::ifindex_for`, which returns `None` for
+    /// link-locals. Without a pinned ifindex `write_packet_v6` can't
+    /// route to `fe80::`, so the session transmits nothing.
+    #[tokio::test]
+    async fn interface_neighbor_bfd_subscribes_on_interface_ifindex_after_ra() {
+        use super::super::interface_neighbor::{
+            config_interface_neighbor, config_interface_neighbor_remote_as, materialize_peer,
+        };
+
+        let (mut bgp, mut bfd_rx) = fresh_bgp_with_bfd();
+        // Blanket `router bgp { bfd { enabled true } }`.
+        config_bgp_bfd_enable(&mut bgp, arg_words(&["true"]), ConfigOp::Set).unwrap();
+        // RIB announced the link; configure the unnumbered neighbor. The
+        // peer materializes dormant (`address == ::`).
+        bgp.link_index_by_name.insert("i1".to_string(), 7);
+        config_interface_neighbor(&mut bgp, arg_words(&["i1"]), ConfigOp::Set).unwrap();
+        config_interface_neighbor_remote_as(&mut bgp, arg_words(&["i1", "65002"]), ConfigOp::Set)
+            .unwrap();
+
+        // A dormant peer must NOT subscribe a `::` session — the
+        // unspecified-remote guard suppresses it (which is also what
+        // keeps two dormant unnumbered peers from colliding onto one
+        // `{::, ::, 0}` entry).
+        assert!(
+            bfd_rx.try_recv().is_err(),
+            "no BFD subscribe while the peer is dormant (remote still ::)",
+        );
+
+        // RA surfaces the peer's link-local: the materialize path must
+        // re-reconcile BFD.
+        let link_local: std::net::Ipv6Addr = "fe80::2".parse().unwrap();
+        materialize_peer(&mut bgp, "i1", 7, link_local).expect("RA upgrades the peer");
+
+        let mut subscribe = None;
+        while let Ok(req) = bfd_rx.try_recv() {
+            if let ClientReq::Subscribe { key, .. } = req {
+                subscribe = Some(key);
+            }
+        }
+        let key = subscribe.expect("the RA must trigger a BFD Subscribe");
+        assert_eq!(
+            key.remote,
+            IpAddr::from(link_local),
+            "session must key on the RA-learned link-local, not ::",
+        );
+        assert_eq!(
+            key.ifindex, 7,
+            "single-hop session must pin the interface's ifindex (the #2324 fix)",
+        );
+        assert!(!key.multihop, "an unnumbered eBGP session is single-hop",);
     }
 
     // ---- whole-session knob inheritance (ttl-security exemplar) --

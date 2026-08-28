@@ -18,6 +18,12 @@ router:
     global:
       as: 65001
       router-id: 1.1.1.1
+    # BFD over the unnumbered link (regression for #2324): the
+    # blanket instance-level default enables single-hop BFD on the
+    # interface-neighbor, keyed on the RA-learned link-local and
+    # pinned to i1's ifindex.
+    bfd:
+      enabled: true
     interface-neighbor:
     - interface: i1
       remote-as: 65002

@@ -72,6 +72,19 @@ Feature: BGP IPv6 unnumbered neighbor discovered via Router Advertisements
     And BGP route in "z2" has "10.0.0.1/32"
     And BGP route in "z1" has "10.0.0.2/32"
 
+  Scenario: BFD comes up over the unnumbered link and transmits both ways
+    Given the test topology exists
+    # Regression for #2324. `bfd { enabled true }` attaches a single-hop
+    # BFD session to the interface-keyed peer. The session must key on
+    # the RA-learned link-local (not `::`) and pin i1's ifindex — a v6
+    # link-local destination is unroutable without a pinned egress
+    # interface, so an ifindex-0 session transmits zero control packets
+    # and never leaves Down. Each end reaching Up therefore proves the
+    # *other* end is transmitting: this fails flat on the pre-fix build,
+    # where zebra1 ends up with no BFD session at all.
+    Then bfd session in namespace "z1" on interface "i1" should be up
+    And bfd session in namespace "z2" on interface "i1" should be up
+
   Scenario: IPv4 LAN prefixes forward over the IPv6 link-local next-hop
     Given the test topology exists
     # The ENHE-learned LAN prefix must make it past the BGP table:
