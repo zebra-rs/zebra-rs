@@ -280,6 +280,20 @@ kernel VXLAN backend stays single-homed.**
   algorithm; a `preference` still overrides `hrw`. Unit vectors computed
   independently from the formula guard interop. BDD: `bgp_evpn_es`
   (both PEs advertise `df-election:alg1` and agree on the DF).
+- **Single-active backup path (RFC 7432 §14.1.1) ✅**: `evpn_es_nhg_sync`
+  no longer skips single-active ESIs. Their `(ESI, EVI)` group is teed with
+  `single_active` and ordered — `es_sa_primary` (the PE whose selected
+  Type-2s carry the ESI in that EVI, i.e. the DF, chosen among the group's
+  own live PEs; most MACs, ties to the lowest address) first, the rest
+  sorted behind it (`ethernet_segment::order_es_members`, pure). cradle
+  forwards to slot 0 alone (`ES_NHG_F_SINGLE_ACTIVE`). `Rib::mac_install`
+  therefore sends such MACs through the group, so a DF whose port fails —
+  ES routes withheld at once, its cradle-learned Type-2s lingering — is
+  replaced by the backup in one group update. `Message::EsNhg`,
+  `cradle_es_nhg`, `CradleMirror.es_nhg` and `es_nhg_sent` carry the flag.
+  `show bgp evpn ethernet-segment` ends with the teed groups (`… bd 100:
+  single-active primary 192.0.2.2, backup 192.0.2.3`), shown on a remote
+  PE with no segment of its own too. BDD: cradle `cradle_evpn_mh_sa_zebra`.
 - **AC-influenced DF election (RFC 8584 §4) ✅**: the `ac-df` bit was
   advertised before; now it is consumed. `es_ac_df_in_effect` = every
   selected Type-4 on the segment carries the bit (unanimity, as for the

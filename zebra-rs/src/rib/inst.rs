@@ -516,7 +516,11 @@ pub enum Message {
     EsNhg {
         esi: [u8; 10],
         bd: u32,
+        /// Ordered: under `single_active` the first member is the primary
+        /// (the DF, the PE advertising the segment's MACs) and the rest
+        /// the backup path (RFC 7432 §14.1.1).
         members: Vec<EsNhgMember>,
+        single_active: bool,
     },
     /// MUP `dataplane gtp` downlink encap (`GTP4.E`): a GTP-U encap route teed
     /// to cradle — traffic to `prefix` in VRF `table_id` is wrapped in outer
@@ -3981,8 +3985,13 @@ impl Rib {
             Message::EsPeers { esi, vteps } => {
                 self.fib_handle.cradle_es_peers(&esi, &vteps).await;
             }
-            Message::EsNhg { esi, bd, members } => {
-                self.es_nhg_set(esi, bd, members).await;
+            Message::EsNhg {
+                esi,
+                bd,
+                members,
+                single_active,
+            } => {
+                self.es_nhg_set(esi, bd, members, single_active).await;
             }
             Message::CradleGtpEncapAdd {
                 prefix,
@@ -5187,13 +5196,21 @@ impl Rib {
     /// per-ES / per-EVI A-D view): tee it, remember whether the segment
     /// has one, and re-install every MAC on the segment in that domain so
     /// it moves between the group form and the single-destination form.
-    async fn es_nhg_set(&mut self, esi: [u8; 10], bd: u32, members: Vec<EsNhgMember>) {
+    async fn es_nhg_set(
+        &mut self,
+        esi: [u8; 10],
+        bd: u32,
+        members: Vec<EsNhgMember>,
+        single_active: bool,
+    ) {
         if members.is_empty() {
             self.es_groups.remove(&(esi, bd));
         } else {
             self.es_groups.insert((esi, bd));
         }
-        self.fib_handle.cradle_es_nhg(&esi, bd, &members).await;
+        self.fib_handle
+            .cradle_es_nhg(&esi, bd, &members, single_active)
+            .await;
         let macs: Vec<MacAddr> = self
             .mac_table
             .iter()
