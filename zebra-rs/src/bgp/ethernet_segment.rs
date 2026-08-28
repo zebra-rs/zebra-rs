@@ -371,6 +371,9 @@ pub fn elan_df(candidates: &[DfCandidate], me: IpAddr, vni: u32, holding: bool) 
 pub struct EsTeeState {
     pub port: Option<String>,
     pub roles: std::collections::BTreeMap<u32, bool>,
+    /// The peer PEs sent as the segment's split-horizon list (the Type-4
+    /// candidates other than this PE).
+    pub peers: std::collections::BTreeSet<IpAddr>,
 }
 
 #[cfg(test)]

@@ -228,8 +228,18 @@ kernel VXLAN backend stays single-homed.**
   `(port, bd)` in its flood loop (`ES_DF`, `l2_drop_nondf`). BDD:
   cradle-rs `cradle_evpn_mh_df_zebra` (dual-homed CE sees exactly one copy;
   stopping the DF's zebra re-elects the other PE).
-- **Split-horizon (local-bias, RFC 8365 §8.3.1)**: drop overlay BUM whose
-  ingress VTEP is a known peer on the same ES (no MPLS ESI label in VXLAN).
+- **Split-horizon (local-bias, RFC 8365 §8.3.1) ✅ (slice 2)**: drop
+  overlay BUM whose ingress VTEP is a known peer on the same ES (no MPLS ESI
+  label in VXLAN). `evpn_es_df_sync` also tees the segment's other Type-4
+  candidates as `Message::EsPeers` → `SetEsPeers`; cradle resolves the
+  outer source at decap (`VTEP_ES` → `es_bits`) and its flood loop withholds
+  the copy from the segment's ports (`l2_drop_sph`). **The Type-4
+  Originating IP must be the VTEP** for the match — it is
+  `evpn_local_source()`, so configure `vtep-source` (or let the router-id
+  double as the VTEP). SRv6 uses the outer source; MPLS has none (ESI
+  label: open). BDD: cradle-rs `cradle_evpn_mh_sph` (static),
+  `cradle_evpn_mh_df_zebra` (BGP-driven; CE injects via the non-DF, the DF
+  must not echo).
 - **Aliasing**: ECMP a remote MAC across all all-active PEs that advertised
   the per-ES + per-EVI A-D pair.
 - **Open risk:** Linux VXLAN/bridge multihoming primitives are limited;

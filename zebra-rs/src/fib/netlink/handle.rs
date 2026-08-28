@@ -1006,6 +1006,15 @@ impl FibHandle {
         }
     }
 
+    /// EVPN multihoming tee (RFC 8365 §8.3.1): the other PEs on segment
+    /// `esi` — cradle withholds overlay BUM arriving from any of them from
+    /// the segment's ports (split horizon / local bias).
+    pub async fn cradle_es_peers(&self, esi: &str, vteps: &[IpAddr]) {
+        if let Some(cradle) = &self.cradle {
+            cradle.set_es_peers(esi, vteps).await;
+        }
+    }
+
     pub async fn cradle_xconnect_del(
         &self,
         port: &str,
