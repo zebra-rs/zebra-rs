@@ -44,6 +44,8 @@ pub enum AttrType {
     // optional-transitive path: retained with the Partial bit and propagated.
     Aigp = 26,
     LargeCom = 32,
+    /// RFC 9234 Only-to-Customer.
+    Otc = 35,
     PrefixSid = 40,
     TunnelEncap = 23,
     BgpLsAttr = 29,
@@ -72,6 +74,7 @@ impl From<u8> for AttrType {
             22 => PmsiTunnel,
             26 => Aigp,
             32 => LargeCom,
+            35 => Otc,
             40 => PrefixSid,
             23 => TunnelEncap,
             29 => BgpLsAttr,
@@ -102,6 +105,7 @@ impl From<AttrType> for u8 {
             PmsiTunnel => 22,
             Aigp => 26,
             LargeCom => 32,
+            Otc => 35,
             PrefixSid => 40,
             TunnelEncap => 23,
             BgpLsAttr => 29,
@@ -155,6 +159,8 @@ pub enum Attr {
     Aigp(Aigp),
     #[nom(Selector = "AttrSelector(AttrType::LargeCom, None)")]
     LargeCom(LargeCommunity),
+    #[nom(Selector = "AttrSelector(AttrType::Otc, None)")]
+    Otc(Otc),
     #[nom(Selector = "AttrSelector(AttrType::PrefixSid, None)")]
     PrefixSid(PrefixSid),
     #[nom(Selector = "AttrSelector(AttrType::TunnelEncap, None)")]
@@ -184,6 +190,7 @@ impl Attr {
             Attr::PmsiTunnel(v) => v.attr_emit(buf),
             Attr::LargeCom(v) => v.attr_emit(buf),
             Attr::Aigp(v) => v.attr_emit(buf),
+            Attr::Otc(v) => v.attr_emit(buf),
             Attr::PrefixSid(v) => v.attr_emit(buf),
             Attr::TunnelEncap(v) => v.attr_emit(buf),
             Attr::BgpLs(v) => v.attr_emit(buf),
@@ -216,6 +223,7 @@ impl fmt::Display for Attr {
             Attr::PmsiTunnel(v) => write!(f, "{}", v),
             Attr::LargeCom(v) => write!(f, "{}", v),
             Attr::Aigp(v) => write!(f, "{}", v),
+            Attr::Otc(v) => write!(f, "{}", v),
             Attr::PrefixSid(v) => write!(f, "{}", v),
             Attr::TunnelEncap(v) => write!(f, "{}", v),
             Attr::BgpLs(v) => write!(f, "{}", v),
@@ -246,6 +254,7 @@ impl fmt::Debug for Attr {
             Attr::PmsiTunnel(v) => write!(f, "{:?}", v),
             Attr::LargeCom(v) => write!(f, "{:?}", v),
             Attr::Aigp(v) => write!(f, "{:?}", v),
+            Attr::Otc(v) => write!(f, "{:?}", v),
             Attr::PrefixSid(v) => write!(f, "{:?}", v),
             Attr::TunnelEncap(v) => write!(f, "{:?}", v),
             Attr::BgpLs(v) => write!(f, "{:?}", v),
@@ -370,6 +379,9 @@ fn attr_malformation_is_withdraw(attr_type: AttrType) -> bool {
             // RFC 7606 §7.5: same for AGGREGATOR (wrong length for the
             // session's negotiated ASN width).
             | AttrType::Aggregator
+            // RFC 9234 §5: an OTC attribute whose length is not 4 "SHALL be
+            // handled using the approach of 'treat-as-withdraw'".
+            | AttrType::Otc
     )
 }
 
@@ -587,6 +599,9 @@ pub fn parse_bgp_update_attribute(
             }
             Attr::Aigp(v) => {
                 bgp_attr.aigp = Some(v);
+            }
+            Attr::Otc(v) => {
+                bgp_attr.otc = Some(v);
             }
             Attr::LargeCom(v) => {
                 bgp_attr.lcom = Some(v);
@@ -1206,5 +1221,71 @@ mod tests {
         assert_eq!(parsed.unknown[0].type_code, 240);
         assert_eq!(parsed.unknown[0].value, vec![1, 2, 3, 4]);
         assert!(parsed.unknown[0].is_partial());
+    }
+}
+
+#[cfg(test)]
+mod otc_tests {
+    use super::*;
+    use crate::Otc;
+
+    /// ORIGIN=IGP, AS_PATH = AS_SEQUENCE [65001] (4-octet), NEXT_HOP, then
+    /// the OTC attribute under test.
+    fn attr_block(otc: &[u8]) -> Vec<u8> {
+        let mut attrs = vec![0x40u8, 0x01, 0x01, 0x00];
+        attrs.extend_from_slice(&[0x40, 0x02, 0x06, 0x02, 0x01, 0x00, 0x00, 0xfd, 0xe9]);
+        attrs.extend_from_slice(&[0x40, 0x03, 0x04, 192, 0, 2, 1]);
+        attrs.push(0xc0); // optional | transitive
+        attrs.push(35); // OTC
+        attrs.push(otc.len() as u8);
+        attrs.extend_from_slice(otc);
+        attrs
+    }
+
+    #[test]
+    fn otc_decodes_into_bgp_attr_and_round_trips() {
+        let attrs = attr_block(&[0x00, 0x01, 0x00, 0x04]); // AS 65540
+        let (_, bgp_attr, _, _, treat_as_withdraw) =
+            parse_bgp_update_attribute(&attrs, attrs.len() as u16, true, None).unwrap();
+        assert!(!treat_as_withdraw);
+        let bgp_attr = bgp_attr.expect("attributes");
+        assert_eq!(bgp_attr.otc, Some(Otc::new(65540)));
+        // Recognised now — it must not also land in the unknown-attribute
+        // passthrough (which would re-emit a second, Partial-flagged copy).
+        assert!(bgp_attr.unknown.is_empty());
+
+        let mut buf = BytesMut::new();
+        bgp_attr.attr_emit(&mut buf);
+        let (_, again, _, _, _) =
+            parse_bgp_update_attribute(&buf, buf.len() as u16, true, None).unwrap();
+        assert_eq!(again.unwrap().otc, Some(Otc::new(65540)));
+        // Emitted with Optional+Transitive and no Partial bit.
+        let pos = buf
+            .windows(2)
+            .position(|w| w == [0xc0, 35])
+            .expect("OTC header");
+        assert_eq!(&buf[pos..pos + 7], &[0xc0, 35, 4, 0x00, 0x01, 0x00, 0x04]);
+    }
+
+    /// RFC 9234 §5: a length other than 4 is malformed and handled as
+    /// treat-as-withdraw — the attribute is dropped, the UPDATE's NLRI are
+    /// withdrawn, the session stays up (no error is returned).
+    #[test]
+    fn malformed_otc_length_is_treat_as_withdraw() {
+        for bad in [
+            &[0x00u8, 0x01, 0x00][..],
+            &[0x00u8, 0x01, 0x00, 0x04, 0x00][..],
+        ] {
+            let attrs = attr_block(bad);
+            let (_, bgp_attr, _, _, treat_as_withdraw) =
+                parse_bgp_update_attribute(&attrs, attrs.len() as u16, true, None)
+                    .expect("malformed OTC must not reset the session");
+            assert!(treat_as_withdraw, "len {}", bad.len());
+            let bgp_attr = bgp_attr.expect("attributes");
+            assert_eq!(bgp_attr.otc, None);
+            assert!(bgp_attr.unknown.is_empty());
+            // The well-formed attributes before it are still decoded.
+            assert!(bgp_attr.aspath.is_some());
+        }
     }
 }

@@ -11,9 +11,10 @@ pub struct CapUnknown {
     /// stripped the code/length header. It is deliberately NOT parsed from the
     /// value: the slice handed to this parser already has the 2-byte header
     /// removed, so parsing a `CapabilityHeader` here would re-read two value
-    /// octets and fail on any capability (e.g. RFC 9234 Role, code 9 len 1)
-    /// whose value is shorter than two bytes — rejecting the whole OPEN instead
-    /// of ignoring the unknown capability as RFC 5492 requires.
+    /// octets and fail on any capability whose value is shorter than two
+    /// bytes (a one-octet unassigned capability, or a malformed-length RFC
+    /// 9234 Role that `parse_cap` routes here) — rejecting the whole OPEN
+    /// instead of ignoring the unknown capability as RFC 5492 requires.
     #[nom(Ignore)]
     pub code: u8,
     pub data: Vec<u8>,

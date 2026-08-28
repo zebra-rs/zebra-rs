@@ -6,7 +6,7 @@ use bytes::BytesMut;
 use crate::{
     AddPathValue, AfiSafi, CapAddPath, CapAs4, CapDynamic, CapEmit, CapEnhancedRefresh,
     CapExtended, CapExtendedNextHop, CapFqdn, CapLlgr, CapMultiProtocol, CapPathLimit, CapRefresh,
-    CapRefreshCisco, CapRestart, CapVersion, CapabilityPacket, LlgrValue, PathLimitValue,
+    CapRefreshCisco, CapRestart, CapRole, CapVersion, CapabilityPacket, LlgrValue, PathLimitValue,
 };
 
 #[derive(Default, Debug, PartialEq, Clone)]
@@ -25,6 +25,15 @@ pub struct BgpCap {
     pub fqdn: Option<CapFqdn>,
     pub version: Option<CapVersion>,
     pub path_limit: BTreeMap<AfiSafi, PathLimitValue>,
+    /// RFC 9234 BGP Role (code 9). On the receive side this is the first
+    /// Role capability in the OPEN; see [`Self::role_conflict`].
+    pub role: Option<CapRole>,
+    /// RFC 9234 §4.2: "If multiple BGP Role Capabilities are received and
+    /// not all of them have the same value, then the BGP speaker MUST
+    /// reject the connection using the Role Mismatch Notification."
+    /// Set when a later Role capability disagreed with [`Self::role`];
+    /// identical duplicates are collapsed silently.
+    pub role_conflict: bool,
 }
 
 impl BgpCap {
@@ -81,6 +90,9 @@ impl BgpCap {
             for val in self.path_limit.values() {
                 v.values.push(val.clone());
             }
+            v.emit(buf, false);
+        }
+        if let Some(v) = &self.role {
             v.emit(buf, false);
         }
     }
@@ -148,6 +160,10 @@ impl BgpCap {
                             bgp_cap.llgr.insert(key, llgr);
                         }
                     }
+                    CapabilityPacket::Role(v) => match bgp_cap.role {
+                        Some(first) if first.value != v.value => bgp_cap.role_conflict = true,
+                        _ => bgp_cap.role = Some(v),
+                    },
                     CapabilityPacket::Unknown(_v) => {
                         // Ignore unknown capability.
                     }
@@ -211,6 +227,58 @@ impl fmt::Display for BgpCap {
             }
             writeln!(f, " {}", v)?;
         }
+        if let Some(v) = &self.role {
+            writeln!(f, " {}", v)?;
+        }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::BgpRole;
+
+    fn role(r: BgpRole) -> CapabilityPacket {
+        CapabilityPacket::Role(CapRole::new(r))
+    }
+
+    #[test]
+    fn single_role_capability_is_recorded() {
+        let cap = BgpCap::from(vec![vec![role(BgpRole::Provider)]]);
+        assert_eq!(cap.role.and_then(|r| r.role()), Some(BgpRole::Provider));
+        assert!(!cap.role_conflict);
+    }
+
+    /// RFC 9234 §4.2: identical duplicates count as one Role capability.
+    #[test]
+    fn identical_duplicate_roles_collapse() {
+        let cap = BgpCap::from(vec![
+            vec![role(BgpRole::Customer)],
+            vec![role(BgpRole::Customer)],
+        ]);
+        assert_eq!(cap.role.and_then(|r| r.role()), Some(BgpRole::Customer));
+        assert!(!cap.role_conflict);
+    }
+
+    /// RFC 9234 §4.2: differing duplicates are a Role Mismatch. The first
+    /// value is kept for display; the conflict flag carries the verdict.
+    #[test]
+    fn differing_duplicate_roles_flag_a_conflict() {
+        let cap = BgpCap::from(vec![vec![role(BgpRole::Customer), role(BgpRole::Provider)]]);
+        assert_eq!(cap.role.and_then(|r| r.role()), Some(BgpRole::Customer));
+        assert!(cap.role_conflict);
+    }
+
+    #[test]
+    fn role_capability_is_emitted_and_displayed() {
+        let cap = BgpCap {
+            role: Some(CapRole::new(BgpRole::Peer)),
+            ..Default::default()
+        };
+        let mut buf = BytesMut::new();
+        cap.emit(&mut buf);
+        assert_eq!(&buf[..], &[2u8, 3, 9, 1, 4]);
+        assert_eq!(cap.to_string(), " Role: Peer\n");
     }
 }
