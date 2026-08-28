@@ -123,6 +123,7 @@ fn materialize(
     // the FSM alone — except a dormant peer (materialized at config
     // time, address still unspecified), which gets its first kick here.
     if let Some(existing) = bgp.peers.get_mut_by_key(&PeerKey::Interface(ifindex)) {
+        let ident = existing.ident;
         if let Some(link_local) = link_local {
             let incoming: std::net::IpAddr = link_local.into();
             let unspecified =
@@ -147,7 +148,20 @@ fn materialize(
             // a dormant one leaves Idle now that it can dial.
             existing.start();
         }
-        return Some(existing.ident);
+        // The `existing` borrow ends above; reconcile BFD now that the
+        // address may have been upgraded from `::` to the RA-learned
+        // link-local. `bfd_apply_ident` reads the remote and egress
+        // ifindex straight off the peer, so this is what finally
+        // subscribes (or re-keys) the session. The ND-materialize path
+        // is otherwise the one BFD reconcile trigger that never fires —
+        // config / `RibRx::AddrAdd` / `LinkDel` all route through
+        // `bfd_reconcile_all` — which left unnumbered peers with either
+        // no session or a stale `::` one that transmits nothing. Only on
+        // an RA upgrade (a dormant→dormant refresh changes nothing).
+        if link_local.is_some() {
+            let _ = super::config::bfd_apply_ident(bgp, ident);
+        }
+        return Some(ident);
     }
 
     let address: std::net::IpAddr = match link_local {
@@ -224,7 +238,14 @@ fn materialize(
     // OPEN-side validation) and ones materialized without a link-local
     // (no RA yet — the RA path upgrades them in place).
     peer.start();
-    Some(peer.ident)
+    let ident = peer.ident;
+    // Reconcile BFD for the freshly materialized peer (the `peer` borrow
+    // ends above). `bfd_apply_ident` no-ops while the address is still
+    // unspecified (dormant create) and subscribes the real single-hop
+    // session — pinned to this interface's ifindex — when the peer was
+    // created straight from an RA (`materialize_peer`).
+    let _ = super::config::bfd_apply_ident(bgp, ident);
+    Some(ident)
 }
 
 /// Stamp the initial ND discovery fields on a freshly created
