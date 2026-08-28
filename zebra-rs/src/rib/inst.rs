@@ -496,6 +496,9 @@ pub enum Message {
         esi: String,
         bd: u32,
         df: bool,
+        /// Single-active redundancy (RFC 7432 §14.1.1): a non-DF port is a
+        /// standby that blocks both directions, not only BUM.
+        single_active: bool,
     },
     /// The other PEs on segment `esi` (their VTEP / overlay source
     /// addresses, from the Type-4 routes; replace semantics), teed as
@@ -3965,8 +3968,15 @@ impl Rib {
             Message::EsDel { esi } => {
                 self.fib_handle.cradle_es_del(&esi).await;
             }
-            Message::EsRole { esi, bd, df } => {
-                self.fib_handle.cradle_es_role(&esi, bd, df).await;
+            Message::EsRole {
+                esi,
+                bd,
+                df,
+                single_active,
+            } => {
+                self.fib_handle
+                    .cradle_es_role(&esi, bd, df, single_active)
+                    .await;
             }
             Message::EsPeers { esi, vteps } => {
                 self.fib_handle.cradle_es_peers(&esi, &vteps).await;

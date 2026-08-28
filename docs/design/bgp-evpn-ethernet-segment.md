@@ -259,6 +259,18 @@ kernel VXLAN backend stays single-homed.**
   overlay one. Kernel backend: unchanged, first destination. BDD: cradle-rs
   `cradle_evpn_mh_df_zebra` (`l2_es_nhg` on the remote PE; the CE stays
   reachable through the surviving PE after the DF's zebra dies).
+- **Single-active (RFC 7432 §14.1.1) ✅ (slice 5)**: `redundancy-mode
+  single-active` rides `EsRole.single_active` in `evpn_es_df_sync` — a
+  non-DF port becomes a standby that cradle blocks in both directions
+  (`ES_DF_F_BLOCK`, `l2_drop_sa`) — and `evpn_es_nhg_sync` forms no aliasing
+  group for a segment whose per-ES A-D carries a single-active ESI-label EC
+  (only the DF learns and advertises the MAC, so its Type-2 next hop is the
+  whole answer). The backup-path pre-installation (§8.4's single-active
+  variant) is not done: on the DF's mass withdraw the MAC follows the next
+  Type-2. BDD: cradle-rs `cradle_evpn_mh_sa` (static),
+  `cradle_evpn_mh_sa_zebra` (BGP-driven).
+- **LAG as the segment port ✅ (slice 4, cradle-rs #187)**: the ES
+  `interface` is a kernel bond; nothing zebra-side beyond naming it.
 - **Open risk:** Linux VXLAN/bridge multihoming primitives are limited;
   local-bias + aliasing may need **eBPF/tc** assists (cf. the RFC 9524
   replication work, `zebra-rs-evpn-rfc9524-replication-plan`). Feasibility

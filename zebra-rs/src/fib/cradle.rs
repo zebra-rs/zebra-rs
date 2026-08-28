@@ -143,7 +143,7 @@ struct CradleMirror {
     /// NOT the Designated Forwarder (`SetEsRole{df: false}` — the non-DF BUM
     /// filter). Only non-DF roles are kept: cradle holds no row for a DF
     /// ("no role = forward"), so replaying `df = true` would be a no-op.
-    es_nondf: HashSet<(String, u32)>,
+    es_nondf: HashMap<(String, u32), bool>,
     /// EVPN multihoming: Ethernet Segment → the other PEs on it (their VTEP
     /// / overlay source addresses, from the Type-4 routes) — `SetEsPeers`,
     /// the split-horizon / local-bias filter's peer list.
@@ -598,8 +598,8 @@ impl CradleFib {
         for (esi, ports) in &m.es_ports {
             self.set_ethernet_segment(esi, ports).await;
         }
-        for (esi, bd) in &m.es_nondf {
-            self.set_es_role(esi, *bd, false).await;
+        for ((esi, bd), single_active) in &m.es_nondf {
+            self.set_es_role(esi, *bd, false, *single_active).await;
         }
         for (esi, vteps) in &m.es_peers {
             self.set_es_peers(esi, vteps).await;
@@ -2202,7 +2202,7 @@ impl CradleFib {
         {
             let mut m = self.mirror.lock().await;
             m.es_ports.remove(esi);
-            m.es_nondf.retain(|(e, _)| e != esi);
+            m.es_nondf.retain(|(e, _), _| e != esi);
             m.es_peers.remove(esi);
         }
         let result = async {
@@ -2222,15 +2222,16 @@ impl CradleFib {
 
     /// This PE's Designated Forwarder role for segment `esi` in bridge
     /// domain `bd` (RFC 7432 §8.5): `df == false` is the non-DF BUM filter,
-    /// `true` clears it. Only the non-DF side is mirrored (see
-    /// `CradleMirror::es_nondf`).
-    pub async fn set_es_role(&self, esi: &str, bd: u32, df: bool) {
+    /// `true` clears it; under `single_active` (§14.1.1) a non-DF port is
+    /// a standby that blocks both directions. Only the non-DF side is
+    /// mirrored (see `CradleMirror::es_nondf`).
+    pub async fn set_es_role(&self, esi: &str, bd: u32, df: bool, single_active: bool) {
         {
             let mut m = self.mirror.lock().await;
             if df {
                 m.es_nondf.remove(&(esi.to_string(), bd));
             } else {
-                m.es_nondf.insert((esi.to_string(), bd));
+                m.es_nondf.insert((esi.to_string(), bd), single_active);
             }
         }
         let result = async {
@@ -2240,13 +2241,17 @@ impl CradleFib {
                     esi: esi.to_string(),
                     bd,
                     df,
+                    single_active,
                 })
                 .await?;
             anyhow::Ok(())
         }
         .await;
         if let Err(e) = result {
-            tracing::warn!("fib: cradle set_es_role {esi} bd {bd} df {df} failed: {e}");
+            tracing::warn!(
+                "fib: cradle set_es_role {esi} bd {bd} df {df} single-active {single_active} \
+                 failed: {e}"
+            );
         }
     }
 

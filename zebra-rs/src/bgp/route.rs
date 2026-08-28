@@ -17905,12 +17905,37 @@ impl Bgp {
     pub fn evpn_es_nhg_sync(&mut self) {
         let mut desired: BTreeMap<([u8; 10], u32), Vec<crate::rib::EsNhgMember>> = BTreeMap::new();
         let mut live_cache: BTreeMap<[u8; 10], BTreeSet<IpAddr>> = BTreeMap::new();
+        // Single-active segments (RFC 7432 §14.1.1) are not aliased: only
+        // the DF forwards, and the DF is the PE that advertised the MAC —
+        // so its Type-2's own next hop is the whole answer. A segment is
+        // single-active when its per-ES A-D routes' ESI Label EC says so.
+        let mut sa_esis: BTreeSet<[u8; 10]> = BTreeSet::new();
+        for table in self.local_rib.evpn.values() {
+            for (prefix, rib) in table.selected.iter() {
+                if let EvpnPrefix::EthernetAd { esi, eth_tag } = prefix
+                    && *eth_tag == MAX_ET
+                    && rib.typ != BgpRibType::Originated
+                    && rib
+                        .attr
+                        .ecom
+                        .as_ref()
+                        .and_then(|ec| ec.0.iter().find_map(|v| v.as_esi_label()))
+                        .is_some_and(|l| l.single_active)
+                {
+                    sa_esis.insert(*esi);
+                }
+            }
+        }
         for table in self.local_rib.evpn.values() {
             for (prefix, rib) in table.selected.iter() {
                 let EvpnPrefix::EthernetAd { esi, eth_tag } = prefix else {
                     continue;
                 };
-                if *eth_tag != 0 || rib.typ == BgpRibType::Originated || *esi == ZERO_ESI {
+                if *eth_tag != 0
+                    || rib.typ == BgpRibType::Originated
+                    || *esi == ZERO_ESI
+                    || sa_esis.contains(esi)
+                {
                     continue;
                 }
                 let Some(vni) = extract_vni_from_attr(&rib.attr) else {
@@ -18000,7 +18025,7 @@ impl Bgp {
             [u8; 10],
             (
                 String,
-                BTreeMap<u32, bool>,
+                BTreeMap<u32, (bool, bool)>,
                 std::collections::BTreeSet<IpAddr>,
             ),
         > = BTreeMap::new();
@@ -18019,6 +18044,9 @@ impl Bgp {
                 .map(|(ip, _, _)| *ip)
                 .filter(|ip| *ip != me)
                 .collect();
+            // Single-active (RFC 7432 §14.1.1): a non-DF port is a standby
+            // that blocks both directions, not only BUM.
+            let single_active = es.redundancy_mode.single_active();
             let mut roles = BTreeMap::new();
             let vnis = self
                 .link_index_by_name
@@ -18037,7 +18065,7 @@ impl Bgp {
                         );
                         continue;
                     }
-                    roles.insert(vni, elan_df(&cands, me, vni, holding));
+                    roles.insert(vni, (elan_df(&cands, me, vni, holding), single_active));
                 }
             }
             desired.insert(esi, (port, roles, peers));
@@ -18066,21 +18094,23 @@ impl Bgp {
                 });
                 sent.port = Some(port);
             }
-            for (&bd, &was_df) in &sent.roles {
+            for (&bd, &(was_df, _)) in &sent.roles {
                 if !roles.contains_key(&bd) && !was_df {
                     out.push(crate::rib::Message::EsRole {
                         esi: esi_str.clone(),
                         bd,
                         df: true,
+                        single_active: false,
                     });
                 }
             }
-            for (&bd, &df) in &roles {
-                if sent.roles.get(&bd) != Some(&df) {
+            for (&bd, &(df, single_active)) in &roles {
+                if sent.roles.get(&bd) != Some(&(df, single_active)) {
                     out.push(crate::rib::Message::EsRole {
                         esi: esi_str.clone(),
                         bd,
                         df,
+                        single_active,
                     });
                 }
             }

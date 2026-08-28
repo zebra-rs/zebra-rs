@@ -1000,9 +1000,9 @@ impl FibHandle {
     /// EVPN multihoming tee (RFC 7432 §8.5): this PE's Designated Forwarder
     /// role for segment `esi` in bridge domain `bd` — `df == false` makes
     /// cradle withhold BUM from the segment's ports there.
-    pub async fn cradle_es_role(&self, esi: &str, bd: u32, df: bool) {
+    pub async fn cradle_es_role(&self, esi: &str, bd: u32, df: bool, single_active: bool) {
         if let Some(cradle) = &self.cradle {
-            cradle.set_es_role(esi, bd, df).await;
+            cradle.set_es_role(esi, bd, df, single_active).await;
         }
     }
 
