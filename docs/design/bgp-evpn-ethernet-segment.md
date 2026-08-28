@@ -205,14 +205,29 @@ NOT added** — it needs EVI-to-ES mapping config that doesn't exist yet, so
 aliasing (Phase 6) is still blocked on it. Import/storage of peers' A-D
 routes rides the generic EVPN Loc-RIB.
 
-**Phase 6 — Data plane (hardest; likely its own multi-PR plan). Planned.**
+**Phase 6 — Data plane (hardest; likely its own multi-PR plan). In
+progress — cradle-only by decision (2026-08-28, see
+`bgp-evpn-multihoming-dataplane.md`): the kernel bridge has no primitive
+for the two filters, so they live in the cradle-rs eBPF datapath and the
+kernel VXLAN backend stays single-homed.**
 - **Control-plane prerequisites carried over** (must land first, both
   deferred from earlier phases): the **per-EVI A-D** route (Phase 5 shipped
   only per-ES; aliasing needs the per-ES + per-EVI pair) and — if the DF/
   membership derivation is tightened — **EVPN import-RT filtering** (Phase 3
   left routes stored globally; the `route_rts_from_ecom` high-type gotcha
   bites here).
-- **DF-gated BUM**: only the DF floods BUM toward the local segment.
+- **DF-gated BUM ✅ (slice 1)**: only the DF floods BUM toward the local
+  segment. `Bgp::evpn_es_df_sync` carves per `(ESI, VNI)` — the VNI is the
+  Ethernet Tag — with `ethernet_segment::elan_df` (holding ⇒ non-DF) and
+  tees `Message::EsSet` / `EsRole` → `FibHandle::cradle_es_*` →
+  `CradleFib` (`SetEthernetSegment` / `SetEsRole`, mirrored and replayed
+  after the VNI bindings). Re-synced on every Type-4 install/withdraw and
+  hold edge (`vpws_df_drain`), ES config edits, the port's EVI set
+  (`L2PortEvis` — the access port must be a bridge member), the port's link
+  appearing, and router-id changes. cradle withholds BUM from a non-DF
+  `(port, bd)` in its flood loop (`ES_DF`, `l2_drop_nondf`). BDD:
+  cradle-rs `cradle_evpn_mh_df_zebra` (dual-homed CE sees exactly one copy;
+  stopping the DF's zebra re-elects the other PE).
 - **Split-horizon (local-bias, RFC 8365 §8.3.1)**: drop overlay BUM whose
   ingress VTEP is a known peer on the same ES (no MPLS ESI label in VXLAN).
 - **Aliasing**: ECMP a remote MAC across all all-active PEs that advertised

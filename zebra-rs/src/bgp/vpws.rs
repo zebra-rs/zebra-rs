@@ -380,6 +380,12 @@ pub struct VpwsState {
     /// pool, peers), so it marks here and `Bgp::vpws_df_drain` re-elects
     /// once the `BgpTop` borrow has ended.
     pub df_dirty: BTreeSet<String>,
+    /// The E-LAN twin of `df_dirty`, at segment granularity: some segment's
+    /// DF candidate set (or hold state) changed, so the drain must re-run
+    /// `Bgp::evpn_es_df_sync` — the DF-role tee to the cradle datapath.
+    /// A bool, not a set: the sync is a cheap full recompute that only
+    /// emits what changed.
+    pub es_df_dirty: bool,
 }
 
 #[cfg(test)]

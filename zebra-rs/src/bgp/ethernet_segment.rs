@@ -349,6 +349,30 @@ pub fn vpws_role(
     }
 }
 
+/// The E-LAN DF verdict for this PE on a segment in one bridge domain
+/// (RFC 7432 §8.5): service carving over the segment's Type-4 candidates
+/// with the VNI as the Ethernet Tag — `elect_forwarders` honours the
+/// negotiated algorithm, so a unanimous preference-based segment elects by
+/// preference instead. A holding PE (startup delay) is never DF: its own
+/// Type-4 is withheld, so it must not forward BUM before it has joined the
+/// election. A PE absent from the candidates (its Type-4 not selected yet)
+/// is not DF either — unlike `vpws_role`'s primary fallback, a BUM copy
+/// delivered by a not-yet-elected PE is exactly the duplicate the filter
+/// exists to stop, while known unicast keeps flowing regardless.
+pub fn elan_df(candidates: &[DfCandidate], me: IpAddr, vni: u32, holding: bool) -> bool {
+    !holding && elect_forwarders(candidates, vni).0 == Some(me)
+}
+
+/// What the E-LAN DF tee last told the cradle datapath about one segment
+/// (`Bgp::es_df_sent`), so a re-sync emits only the deltas: the access port
+/// sent as the segment's port list (`None` = not sent, or must be re-sent
+/// because the link reappeared) and the per-bridge-domain DF verdicts.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EsTeeState {
+    pub port: Option<String>,
+    pub roles: std::collections::BTreeMap<u32, bool>,
+}
+
 #[cfg(test)]
 mod ac_esi_tests {
     use super::*;
@@ -653,6 +677,30 @@ mod tests {
         let [a, _, _] = pes();
         assert_eq!(elect_forwarders(&prefs(&[(a, 1)]), 0), (Some(a), None));
         assert_eq!(elect_forwarders(&[], 0), (None, None));
+    }
+
+    /// E-LAN DF per bridge domain: carving spreads consecutive VNIs across
+    /// the segment's PEs, a holding PE never forwards BUM, and a PE that
+    /// is not (yet) a candidate is non-DF rather than primary.
+    #[test]
+    fn elan_df_carves_by_vni_and_holds() {
+        let [a, b, c] = pes();
+        let cands: Vec<DfCandidate> = vec![(a, 0, 0), (b, 0, 0)];
+        // VNI 100 % 2 == 0 → a; VNI 101 % 2 == 1 → b.
+        assert!(elan_df(&cands, a, 100, false));
+        assert!(!elan_df(&cands, b, 100, false));
+        assert!(!elan_df(&cands, a, 101, false));
+        assert!(elan_df(&cands, b, 101, false));
+        // Holding trumps winning.
+        assert!(!elan_df(&cands, a, 100, true));
+        // Not a candidate: never DF.
+        assert!(!elan_df(&cands, c, 100, false));
+        assert!(!elan_df(&[], a, 100, false));
+        // Unanimous preference: the preferred PE is DF in every domain.
+        let pref = prefs(&[(a, 10), (b, 200)]);
+        assert!(elan_df(&pref, b, 100, false));
+        assert!(elan_df(&pref, b, 101, false));
+        assert!(!elan_df(&pref, a, 100, false));
     }
 
     #[test]

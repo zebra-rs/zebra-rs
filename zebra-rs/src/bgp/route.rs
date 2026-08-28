@@ -8029,6 +8029,9 @@ pub(super) fn vpws_mark_df_dirty(local_rib: &mut LocalRib, esi: &[u8; 10]) {
         .map(|(name, _)| name.clone())
         .collect();
     local_rib.evpn_vpws.df_dirty.extend(names);
+    // The E-LAN DF-role tee re-elects every segment on the drain; it does
+    // not need to know which one moved.
+    local_rib.evpn_vpws.es_df_dirty = true;
 }
 
 /// The Router's MAC of a received EVPN route (RFC 9135 §6): the advertising
@@ -17650,6 +17653,110 @@ impl Bgp {
             } else if let Some(svc) = self.local_rib.evpn_vpws.services.get_mut(&name) {
                 svc.df = df;
             }
+        }
+        // Same trigger set, E-LAN side: push the per-bridge-domain DF roles
+        // to the cradle datapath (the non-DF filter).
+        if std::mem::take(&mut self.local_rib.evpn_vpws.es_df_dirty) {
+            self.evpn_es_df_sync();
+        }
+    }
+
+    /// Tee the E-LAN DF election to the cradle datapath (RFC 7432 §8.5).
+    /// For every configured Ethernet Segment with an access port: the
+    /// segment's port list (`EsSet`) and, per EVI the port is in, whether
+    /// this PE is the Designated Forwarder (`EsRole`) — the non-DF BUM filter
+    /// cradle enforces in its flood loop. Service carving takes the VNI as
+    /// the Ethernet Tag, so the role is per `(ESI, bridge domain)`; cradle's
+    /// bridge domain for a VNI is the VNI itself (`cradle_vni_register`). A
+    /// holding segment (startup delay) is non-DF everywhere: its Type-4 is
+    /// withheld, so it is not in anyone's candidate set either.
+    ///
+    /// An idempotent full recompute diffed against `es_df_sent`, so every
+    /// trigger that can move the answer just calls it — Type-4 install /
+    /// withdraw and hold edges (via `vpws_df_drain`), ES config edits, the
+    /// port's EVI set, the port's link appearing, router-id / vtep-source
+    /// changes — and only what changed is emitted. A bridge domain the port
+    /// left has its role cleared (`df = true`; cradle keeps no row for a DF).
+    pub fn evpn_es_df_sync(&mut self) {
+        use super::ethernet_segment::elan_df;
+        use bgp_packet::esi_display;
+
+        let me = self.evpn_local_source();
+        let mut desired: BTreeMap<[u8; 10], (String, BTreeMap<u32, bool>)> = BTreeMap::new();
+        for es in self.ethernet_segments.values() {
+            let (Some(esi), Some(port)) = (es.esi, es.interface.clone()) else {
+                continue;
+            };
+            let mut roles = BTreeMap::new();
+            let vnis = self
+                .link_index_by_name
+                .get(&port)
+                .and_then(|ifindex| self.l2_port_evis.get(ifindex));
+            if let Some(vnis) = vnis {
+                let cands = self.es_df_candidates(&esi);
+                let holding = self.es_holding(&esi);
+                for &vni in vnis {
+                    if u16::try_from(vni).is_err() {
+                        // cradle's port bridge domain is a u16; the tee's
+                        // `bd == vni` convention cannot name this one.
+                        tracing::warn!(
+                            "evpn: es {} vni {vni} exceeds the cradle bridge-domain range; \
+                             DF role not teed",
+                            esi_display(&esi)
+                        );
+                        continue;
+                    }
+                    roles.insert(vni, elan_df(&cands, me, vni, holding));
+                }
+            }
+            desired.insert(esi, (port, roles));
+        }
+
+        let mut out: Vec<crate::rib::Message> = Vec::new();
+        let gone: Vec<[u8; 10]> = self
+            .es_df_sent
+            .keys()
+            .filter(|esi| !desired.contains_key(*esi))
+            .copied()
+            .collect();
+        for esi in gone {
+            self.es_df_sent.remove(&esi);
+            out.push(crate::rib::Message::EsDel {
+                esi: esi_display(&esi),
+            });
+        }
+        for (esi, (port, roles)) in desired {
+            let esi_str = esi_display(&esi);
+            let sent = self.es_df_sent.entry(esi).or_default();
+            if sent.port.as_deref() != Some(port.as_str()) {
+                out.push(crate::rib::Message::EsSet {
+                    esi: esi_str.clone(),
+                    ports: vec![port.clone()],
+                });
+                sent.port = Some(port);
+            }
+            for (&bd, &was_df) in &sent.roles {
+                if !roles.contains_key(&bd) && !was_df {
+                    out.push(crate::rib::Message::EsRole {
+                        esi: esi_str.clone(),
+                        bd,
+                        df: true,
+                    });
+                }
+            }
+            for (&bd, &df) in &roles {
+                if sent.roles.get(&bd) != Some(&df) {
+                    out.push(crate::rib::Message::EsRole {
+                        esi: esi_str.clone(),
+                        bd,
+                        df,
+                    });
+                }
+            }
+            sent.roles = roles;
+        }
+        for msg in out {
+            let _ = self.ctx.rib.send(msg);
         }
     }
 

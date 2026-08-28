@@ -460,6 +460,26 @@ pub enum Message {
         vid: u16,
         table: u32,
     },
+    /// EVPN multihoming (RFC 7432 §5): the local access port(s) of Ethernet
+    /// Segment `esi` (colon-hex), teed to cradle as `SetEthernetSegment`
+    /// (replace semantics). No kernel counterpart — multihoming is
+    /// cradle-only; the kernel bridge backend stays single-homed.
+    EsSet {
+        esi: String,
+        ports: Vec<String>,
+    },
+    /// Forget Ethernet Segment `esi` in the cradle datapath.
+    EsDel {
+        esi: String,
+    },
+    /// This PE's Designated Forwarder role for segment `esi` in bridge
+    /// domain `bd` (RFC 7432 §8.5), teed as `SetEsRole`: `df == false` is
+    /// the non-DF BUM filter, `true` clears it.
+    EsRole {
+        esi: String,
+        bd: u32,
+        df: bool,
+    },
     /// MUP `dataplane gtp` downlink encap (`GTP4.E`): a GTP-U encap route teed
     /// to cradle — traffic to `prefix` in VRF `table_id` is wrapped in outer
     /// IPv4 + UDP(2152) + GTP-U(`teid`) toward `gtp_dst` (sourced from
@@ -3889,6 +3909,15 @@ impl Rib {
                 self.fib_handle
                     .cradle_xconnect_del(&ifname, local_sid, local_vni, local_label, vid, table)
                     .await;
+            }
+            Message::EsSet { esi, ports } => {
+                self.fib_handle.cradle_es_set(&esi, &ports).await;
+            }
+            Message::EsDel { esi } => {
+                self.fib_handle.cradle_es_del(&esi).await;
+            }
+            Message::EsRole { esi, bd, df } => {
+                self.fib_handle.cradle_es_role(&esi, bd, df).await;
             }
             Message::CradleGtpEncapAdd {
                 prefix,

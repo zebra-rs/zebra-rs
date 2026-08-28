@@ -136,6 +136,14 @@ struct CradleMirror {
     /// (neighbor ip, oif) → mac. Grow-only, like the upstream tee (no
     /// neighbor delete exists).
     neighbors: HashMap<(IpAddr, u32), [u8; 6]>,
+    /// EVPN multihoming: Ethernet Segment (colon-hex ESI) → its local access
+    /// port names (`SetEthernetSegment`, replace semantics).
+    es_ports: HashMap<String, Vec<String>>,
+    /// EVPN multihoming: the `(ESI, bridge domain)` pairs where this PE is
+    /// NOT the Designated Forwarder (`SetEsRole{df: false}` — the non-DF BUM
+    /// filter). Only non-DF roles are kept: cradle holds no row for a DF
+    /// ("no role = forward"), so replaying `df = true` would be a no-op.
+    es_nondf: HashSet<(String, u32)>,
 }
 
 /// Map zebra's `SidBehavior` to cradle's `SRV6_BH_*` (data-plane ABI). The
@@ -569,6 +577,17 @@ impl CradleFib {
         for (vni, (vrf, rmac)) in &m.vnis_l3 {
             self.set_vni_l3(*vni, *vrf, *rmac).await;
         }
+        // EVPN multihoming: segment ports, then the non-DF roles that render
+        // onto them. The ports themselves are the supervisor's to re-apply on
+        // this same engine-up edge; a segment naming a port cradle has not
+        // re-attached yet fails here and lands on the next `EsSet` the BGP
+        // side emits when the link (re)appears.
+        for (esi, ports) in &m.es_ports {
+            self.set_ethernet_segment(esi, ports).await;
+        }
+        for (esi, bd) in &m.es_nondf {
+            self.set_es_role(esi, *bd, false).await;
+        }
         for ((vni, mac), vtep) in &m.fdb_vxlan {
             self.fdb_add_vxlan(*vni, *mac, *vtep).await;
         }
@@ -606,7 +625,8 @@ impl CradleFib {
         tracing::info!(
             "fib: cradle replay: {} v4 + {} v6 routes, {} ILM, {} SIDs (+{} static), \
              {} FDB (+{} vxlan), {} repl slots (+{} vxlan), {} repl segs, {} vnis, \
-             {} xconnects, {} GTP PDRs + {} encaps, {} mirror routes, {} neighbors re-applied",
+             {} ES (+{} non-DF roles), {} xconnects, {} GTP PDRs + {} encaps, \
+             {} mirror routes, {} neighbors re-applied",
             m.routes4.len(),
             m.routes6.len(),
             m.ilm.len(),
@@ -618,6 +638,8 @@ impl CradleFib {
             m.repl_slots_vxlan.len(),
             m.repl_segs.len(),
             m.vnis.len(),
+            m.es_ports.len(),
+            m.es_nondf.len(),
             m.xconnects.len(),
             m.gtp_pdrs.len(),
             m.gtp_encaps.len(),
@@ -2108,6 +2130,86 @@ impl CradleFib {
         .await;
         if let Err(e) = result {
             tracing::warn!("fib: cradle del_vni {vni} failed: {e}");
+        }
+    }
+
+    /// EVPN multihoming (RFC 7432 §5): name Ethernet Segment `esi`'s local
+    /// access ports (replace semantics). Mirrored — the port list is what the
+    /// non-DF rows render onto, so a respawned engine needs it back before
+    /// any role. cradle resolves the names, so a port it has not attached
+    /// yet is a (logged) failure the caller re-sends on the link edge.
+    pub async fn set_ethernet_segment(&self, esi: &str, ports: &[String]) {
+        self.mirror
+            .lock()
+            .await
+            .es_ports
+            .insert(esi.to_string(), ports.to_vec());
+        let result = async {
+            self.client()
+                .await?
+                .set_ethernet_segment(pb::EthernetSegment {
+                    esi: esi.to_string(),
+                    ports: ports.to_vec(),
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle set_ethernet_segment {esi} {ports:?} failed: {e}");
+        }
+    }
+
+    /// Forget Ethernet Segment `esi` (its ports forward BUM unconditionally
+    /// again) and every role recorded for it.
+    pub async fn del_ethernet_segment(&self, esi: &str) {
+        {
+            let mut m = self.mirror.lock().await;
+            m.es_ports.remove(esi);
+            m.es_nondf.retain(|(e, _)| e != esi);
+        }
+        let result = async {
+            self.client()
+                .await?
+                .del_ethernet_segment(pb::EthernetSegmentDel {
+                    esi: esi.to_string(),
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle del_ethernet_segment {esi} failed: {e}");
+        }
+    }
+
+    /// This PE's Designated Forwarder role for segment `esi` in bridge
+    /// domain `bd` (RFC 7432 §8.5): `df == false` is the non-DF BUM filter,
+    /// `true` clears it. Only the non-DF side is mirrored (see
+    /// `CradleMirror::es_nondf`).
+    pub async fn set_es_role(&self, esi: &str, bd: u32, df: bool) {
+        {
+            let mut m = self.mirror.lock().await;
+            if df {
+                m.es_nondf.remove(&(esi.to_string(), bd));
+            } else {
+                m.es_nondf.insert((esi.to_string(), bd));
+            }
+        }
+        let result = async {
+            self.client()
+                .await?
+                .set_es_role(pb::EsRole {
+                    esi: esi.to_string(),
+                    bd,
+                    df,
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle set_es_role {esi} bd {bd} df {df} failed: {e}");
         }
     }
 

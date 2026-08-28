@@ -980,6 +980,32 @@ impl FibHandle {
         }
     }
 
+    /// EVPN multihoming tee (RFC 7432 §5): an Ethernet Segment's local
+    /// access ports. cradle-only — the kernel bridge has no non-DF /
+    /// split-horizon filter, so the kernel VXLAN backend stays single-homed
+    /// and there is no kernel counterpart here.
+    pub async fn cradle_es_set(&self, esi: &str, ports: &[String]) {
+        if let Some(cradle) = &self.cradle {
+            cradle.set_ethernet_segment(esi, ports).await;
+        }
+    }
+
+    /// Inverse of [`Self::cradle_es_set`].
+    pub async fn cradle_es_del(&self, esi: &str) {
+        if let Some(cradle) = &self.cradle {
+            cradle.del_ethernet_segment(esi).await;
+        }
+    }
+
+    /// EVPN multihoming tee (RFC 7432 §8.5): this PE's Designated Forwarder
+    /// role for segment `esi` in bridge domain `bd` — `df == false` makes
+    /// cradle withhold BUM from the segment's ports there.
+    pub async fn cradle_es_role(&self, esi: &str, bd: u32, df: bool) {
+        if let Some(cradle) = &self.cradle {
+            cradle.set_es_role(esi, bd, df).await;
+        }
+    }
+
     pub async fn cradle_xconnect_del(
         &self,
         port: &str,
