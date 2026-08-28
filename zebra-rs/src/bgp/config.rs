@@ -1916,6 +1916,9 @@ fn config_ethernet_segment(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
     // ... and the per-EVI A-D routes that let a remote PE alias toward us
     // for MACs on the segment it has not learned itself (RFC 7432 §8.4).
     bgp.evpn_resync_ad_evi();
+    // ... and the DF roles the cradle datapath enforces (a segment, its ESI
+    // or its port changing moves what is teed, or removes it).
+    bgp.evpn_es_df_sync();
     Some(())
 }
 
@@ -1965,6 +1968,9 @@ fn config_ethernet_segment_esi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> O
     // ... and the per-EVI A-D routes that let a remote PE alias toward us
     // for MACs on the segment it has not learned itself (RFC 7432 §8.4).
     bgp.evpn_resync_ad_evi();
+    // ... and the DF roles the cradle datapath enforces (a segment, its ESI
+    // or its port changing moves what is teed, or removes it).
+    bgp.evpn_es_df_sync();
     Some(())
 }
 
@@ -2121,6 +2127,9 @@ fn config_ethernet_segment_interface(bgp: &mut Bgp, mut args: Args, op: ConfigOp
     // ... and the per-EVI A-D routes that let a remote PE alias toward us
     // for MACs on the segment it has not learned itself (RFC 7432 §8.4).
     bgp.evpn_resync_ad_evi();
+    // ... and the DF roles the cradle datapath enforces (a segment, its ESI
+    // or its port changing moves what is teed, or removes it).
+    bgp.evpn_es_df_sync();
     Some(())
 }
 

@@ -23,6 +23,29 @@ message L2Domain {
   repeated string members = 2;  // interface names flooded within the domain
 }
 
+// An Ethernet Segment (EVPN multihoming, RFC 7432 §5): the local access
+// port(s) of a multihomed CE. Replace semantics on `ports`; DF roles set with
+// SetEsRole are re-rendered onto the new list. A port belongs to at most one
+// segment.
+message EthernetSegment {
+  string esi = 1;             // 10-octet ESI, colon-hex — the segment's name
+  repeated string ports = 2;  // local access port interface names
+}
+
+message EthernetSegmentDel {
+  string esi = 1;
+}
+
+// This PE's Designated Forwarder role on an Ethernet Segment in one bridge
+// domain (RFC 7432 §8.5). `df = false` withholds broadcast, multicast and
+// unknown-unicast from the segment's ports in that domain (the non-DF
+// filter); known unicast is unaffected (all-active). No role = forward.
+message EsRole {
+  string esi = 1;
+  uint32 bd = 2;
+  bool df = 3;
+}
+
 message PortDel {
   string name = 1;  // interface name (matched against the attach-time name
                     // when the device is already gone)
@@ -527,6 +550,11 @@ service Cradle {
   // the full member list).
   rpc DelPort(PortDel) returns (Empty);
   rpc SetL2Domain(L2Domain) returns (Empty);
+  // EVPN multihoming: define an Ethernet Segment's local ports, drop it, and
+  // set this PE's per-bridge-domain DF role (the non-DF BUM filter).
+  rpc SetEthernetSegment(EthernetSegment) returns (Empty);
+  rpc DelEthernetSegment(EthernetSegmentDel) returns (Empty);
+  rpc SetEsRole(EsRole) returns (Empty);
   // Flush locally-learned FDB entries (never control-plane-installed remote
   // entries). WatchFdb subscribers observe the removals as age events.
   rpc FlushFdb(FdbFlush) returns (Empty);

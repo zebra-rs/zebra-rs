@@ -898,6 +898,10 @@ pub struct Bgp {
     /// (RFC 7432 §8.4). Absent means "no EVI", which is also what a port
     /// that left its bridge reports.
     pub l2_port_evis: BTreeMap<u32, std::collections::BTreeSet<u32>>,
+    /// What the E-LAN DF tee last pushed to the cradle datapath per
+    /// Ethernet Segment (`evpn_es_df_sync` diffs against it, RFC 7432
+    /// §8.5 non-DF filter). Keyed by ESI.
+    pub es_df_sent: BTreeMap<[u8; 10], super::ethernet_segment::EsTeeState>,
     /// Local snooped IGMP/MLD membership shadow, keyed by
     /// `(vni, group, source)` → local VTEP IP. Populated from
     /// `RibRx::SnoopJoin`, removed on `RibRx::SnoopLeave`. Drives
@@ -1406,6 +1410,7 @@ impl Bgp {
             local_fdb: BTreeMap::new(),
             local_vxlans: BTreeMap::new(),
             l2_port_evis: BTreeMap::new(),
+            es_df_sent: BTreeMap::new(),
             local_smet: BTreeMap::new(),
             ethernet_segments: BTreeMap::new(),
             hostname: None,
@@ -2212,6 +2217,9 @@ impl Bgp {
             for (esi, single_active) in es_list {
                 self.evpn_originate_es_routes(esi, std::net::IpAddr::V4(router_id), single_active);
             }
+            // The election's "me" moved with the router-id (absent a
+            // `vtep-source`): re-derive the DF roles teed to cradle.
+            self.evpn_es_df_sync();
             // Re-originate VPWS Type-1s under the new router-id RD (the
             // originate body re-checks that the config is complete).
             let vpws_names: Vec<String> =
@@ -4313,12 +4321,23 @@ impl Bgp {
                 // so MACs learned there originated single-homed Type-2s —
                 // the config-edit resync sites all ran before the name
                 // resolved. Re-originate them under the segment ESI.
-                if self
+                let esis_on_link: Vec<[u8; 10]> = self
                     .ethernet_segments
                     .values()
-                    .any(|es| es.esi.is_some() && es.interface.as_deref() == Some(&link.name))
-                {
+                    .filter(|es| es.interface.as_deref() == Some(&link.name))
+                    .filter_map(|es| es.esi)
+                    .collect();
+                if !esis_on_link.is_empty() {
                     self.evpn_resync_macip_esi();
+                    // The cradle tee names the port; a `SetEthernetSegment`
+                    // sent before cradle attached it was refused, so force
+                    // the port list out again now that the link exists.
+                    for esi in &esis_on_link {
+                        if let Some(sent) = self.es_df_sent.get_mut(esi) {
+                            sent.port = None;
+                        }
+                    }
+                    self.evpn_es_df_sync();
                 }
             }
             // Fast external failover: a link going operationally down
@@ -4460,6 +4479,9 @@ impl Bgp {
                 };
                 if previous.unwrap_or_default() != vnis {
                     self.evpn_reconcile_ad_evi_for_port(ifindex);
+                    // The EVI set is the bridge-domain set the DF-role tee
+                    // carves over (one role per (ESI, bd)).
+                    self.evpn_es_df_sync();
                 }
             }
             RibRx::SnoopJoin {
