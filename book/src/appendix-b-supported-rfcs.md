@@ -32,8 +32,8 @@ implementation; the corresponding features track the referenced draft revision.
 | RFC 7311 | The Accumulated IGP Metric Attribute for BGP (AIGP). |
 | RFC 7606 | Revised Error Handling for BGP UPDATE messages (treat-as-withdraw / attribute discard). |
 | RFC 9774 | Deprecation of AS_SET and AS_CONFED_SET in BGP (`as-sets-withdraw`, on by default). |
+| RFC 9234 | Route Leak Prevention and Detection Using Roles in UPDATE and OPEN Messages — `otc-local-role`, the BGP Role capability and the Only-to-Customer attribute. |
 | RFC 4456 | BGP Route Reflection — an alternative to full IBGP mesh. |
-| RFC 7947 | Internet Exchange BGP Route Server behaviour. |
 | RFC 2385 | Protection of BGP Sessions via the TCP MD5 Signature Option. |
 | RFC 5925 | The TCP Authentication Option (TCP-AO). |
 | RFC 5926 | Cryptographic Algorithms for the TCP Authentication Option. |
