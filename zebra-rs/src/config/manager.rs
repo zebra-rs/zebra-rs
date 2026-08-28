@@ -2929,6 +2929,36 @@ mod yang_load_tests {
         }
     }
 
+    /// RFC 7947 `route-server-client` (zebra-bgp-route-server.yang): the
+    /// presence container must be settable on the global neighbor and the
+    /// VRF neighbor (the group copy is pinned with the other group knobs).
+    #[test]
+    fn bgp_neighbor_route_server_client_paths_parse() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .unwrap_or_else(|e| panic!("configure failed to load: {e:#}"));
+        yang.identity_resolve();
+        let module = yang.find_module("configure").unwrap();
+        let entry = to_entry(&yang, module);
+
+        for cmd in [
+            "set router bgp neighbor 192.168.1.3 route-server-client",
+            "set router bgp vrf RED neighbor 192.168.1.3 route-server-client",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(
+                code,
+                ExecCode::Success,
+                "should parse as a settable path: {cmd}"
+            );
+        }
+    }
+
     /// RFC 9234 `otc-local-role` (zebra-bgp-otc.yang): the list keyed by
     /// an enumeration and its `strict` empty leaf must parse as settable
     /// paths on the global neighbor, the neighbor-group and the VRF
@@ -4395,6 +4425,7 @@ mod yang_load_tests {
             "set router bgp neighbor-group G allowas-in count 5",
             "set router bgp neighbor-group G allowas-in origin",
             "set router bgp neighbor-group G as-override",
+            "set router bgp neighbor-group G route-server-client",
             "set router bgp neighbor-group G remove-private-as",
             "set router bgp neighbor-group G remove-private-as all",
             "set router bgp neighbor-group G remove-private-as replace-as",

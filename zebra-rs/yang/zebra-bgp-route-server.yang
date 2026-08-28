@@ -1,0 +1,107 @@
+module zebra-bgp-route-server {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-bgp-route-server";
+  prefix "zbrs";
+
+  import ietf-bgp {
+    prefix bgp;
+  }
+
+  import config {
+    prefix config;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "RFC 7947 Internet Exchange route-server behaviour, per client:
+
+       router bgp {
+         neighbor 192.168.0.1 {
+           remote-as 65001;
+           route-server-client;
+         }
+       }
+
+     A route server re-advertises its clients' routes to each other
+     transparently. Toward a neighbor marked `route-server-client` this
+     router:
+
+       - does NOT prepend its own AS to the AS_PATH (§2.2.2) — nor apply
+         the AS_PATH rewrites that only make sense with a prepend
+         (as-override, remove-private-as, the local-as substitute);
+       - keeps the received NEXT_HOP on forwarded routes (§2.2.1), so a
+         client forwards straight to the originating member on the
+         exchange LAN; locally originated routes still carry this
+         router's address;
+       - passes MED and communities through unchanged (§2.2.2.1/2),
+         as it always does.
+
+     IPv4 and IPv6 unicast only. Inbound processing from a client is
+     ordinary eBGP. Path hiding (§2.3) is addressed with ADD-PATH on the
+     client sessions (`afi-safi ipv4 add-path send`), not with a
+     per-client Loc-RIB.
+
+     On the client side, do NOT enable `enforce-first-as` toward a
+     route server — every route it sends starts with another member's
+     AS. Together with RFC 9234 the pair is `otc-local-role route-server`
+     on the server and `otc-local-role route-server-client` on the
+     client (zebra-bgp-otc.yang).
+
+     Changing the knob on a live session resets it so the client
+     re-receives every route with the transparent AS_PATH and next-hop.";
+
+  revision 2026-08-28 {
+    description "Initial revision.";
+    reference
+      "RFC 7947: Internet Exchange BGP Route Server.
+       FRR / BIRD `route-server-client` / `rs client`.";
+  }
+
+  grouping bgp-neighbor-route-server-client-extension {
+    description
+      "`route-server-client` presence container on a BGP neighbor.";
+
+    container route-server-client {
+      ext:help "Treat this neighbor as a route-server client (RFC 7947)";
+      presence "Advertise routes to this neighbor transparently, as a route server";
+      description
+        "When present, routes advertised to this eBGP neighbor keep the
+         AS_PATH exactly as received (no local-AS prepend) and, for
+         forwarded routes, the received NEXT_HOP. No-op for iBGP.";
+    }
+  }
+
+  /* =========================================================
+   * Augments into the zebra-rs configure tree
+   * ========================================================= */
+
+  augment "/configure:set/config:router"
+        + "/bgp:bgp/bgp:neighbor" {
+    description
+      "Attach route-server-client to BGP neighbors in the candidate-set
+       subtree.";
+    uses bgp-neighbor-route-server-client-extension;
+  }
+
+  augment "/configure:delete/config:router"
+        + "/bgp:bgp/bgp:neighbor" {
+    description
+      "Same attachment for the delete subtree so
+       `delete router bgp neighbor X route-server-client` is path-valid.";
+    uses bgp-neighbor-route-server-client-extension;
+  }
+}

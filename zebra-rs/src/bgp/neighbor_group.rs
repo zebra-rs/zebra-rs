@@ -84,6 +84,8 @@ pub struct InheritableKnobs {
     /// Single-instance list: the staging helpers below refuse a second
     /// role, mirroring `local-as`.
     pub otc_local_role: Option<super::peer::OtcLocalRole>,
+    /// RFC 7947 `route-server-client` presence container.
+    pub route_server_client: Option<bool>,
     pub route_reflector_client: Option<bool>,
     /// RFC 9572 §6.1 region identifier — the 8-octet, EC-formatted Region ID
     /// (`region_id_from_asn`). A peer-group carrying this *is* a region; a
@@ -934,6 +936,28 @@ pub fn config_neighbor_group_enforce_first_as(
     Some(())
 }
 
+/// `set router bgp neighbor-group <name> route-server-client` — presence
+/// container (zebra-bgp-route-server.yang). Stores the opinion and
+/// re-resolves every member; a live member whose effective value changed
+/// is bounced so the client re-receives its routes transparently.
+pub fn config_neighbor_group_route_server_client(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    bgp.neighbor_groups
+        .entry(name.clone())
+        .or_default()
+        .knobs
+        .route_server_client = op.is_set().then_some(true);
+    sweep_members(bgp, &name, |groups, peer| {
+        let want = resolve_knob(groups, &peer.config, |k| k.route_server_client).unwrap_or(false);
+        super::config::apply_route_server_client(peer, want)
+    });
+    Some(())
+}
+
 /// Decode an `otc-local-role` list key (IOS XR token) or warn.
 pub(super) fn parse_otc_role(token: &str) -> Option<bgp_packet::BgpRole> {
     match token.parse::<bgp_packet::BgpRole>() {
@@ -1532,6 +1556,7 @@ pub(super) fn resolve_inherited_knobs(
         remove_private_as: resolve_knob(groups, config, |k| k.remove_private_as),
         enforce_first_as: resolve_knob(groups, config, |k| k.enforce_first_as),
         otc_local_role: resolve_knob(groups, config, |k| k.otc_local_role),
+        route_server_client: resolve_knob(groups, config, |k| k.route_server_client),
         route_reflector_client: resolve_knob(groups, config, |k| k.route_reflector_client),
         region_id: resolve_knob(groups, config, |k| k.region_id),
     }
@@ -1575,6 +1600,8 @@ pub(super) fn apply_resolved_session_knobs(peer: &mut Peer, want: &InheritableKn
     super::config::apply_remove_private_as(peer, want.remove_private_as);
     super::config::apply_enforce_first_as(peer, want.enforce_first_as.unwrap_or(false));
     bounce |= super::config::apply_otc_local_role(peer, want.otc_local_role);
+    bounce |=
+        super::config::apply_route_server_client(peer, want.route_server_client.unwrap_or(false));
     super::config::apply_route_reflector_client(peer, want.route_reflector_client.unwrap_or(false));
     // The BFD re-arm this returns is only meaningful for a live session.
     let _ = super::config::apply_update_source(peer, want.update_source);
@@ -1635,6 +1662,7 @@ pub(super) fn apply_inherited(
         remove_private_as,
         enforce_first_as,
         otc_local_role,
+        route_server_client,
         route_reflector_client,
         region_id,
     } = resolved;
@@ -1672,6 +1700,7 @@ pub(super) fn apply_inherited(
     // Roles ride the OPEN, so a changed effective role bounces a live
     // member like the transport knobs do.
     bounce |= super::config::apply_otc_local_role(peer, otc_local_role);
+    bounce |= super::config::apply_route_server_client(peer, route_server_client.unwrap_or(false));
     super::config::apply_route_reflector_client(peer, route_reflector_client.unwrap_or(false));
     outcome.bfd_reapply = super::config::apply_update_source(peer, update_source);
     outcome.mss_refresh = super::config::apply_tcp_mss(peer, tcp_mss);

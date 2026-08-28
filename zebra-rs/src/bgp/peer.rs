@@ -616,6 +616,13 @@ pub struct PeerConfig {
     /// no role check on the peer's OPEN, no OTC processing). Ignored on
     /// iBGP sessions.
     pub otc_local_role: Option<OtcLocalRole>,
+    /// RFC 7947 `route-server-client` (zebra-bgp-route-server.yang).
+    /// When `true`, routes advertised to this eBGP neighbor keep the
+    /// AS_PATH exactly as received (no local-AS prepend, and none of the
+    /// prepend-time rewrites) and forwarded routes keep the received
+    /// NEXT_HOP — this router acts as a transparent route server toward
+    /// it. IPv4/IPv6 unicast only; ignored on iBGP. Default `false`.
+    pub route_server_client: bool,
     /// Per-neighbor `local-as` (zebra-bgp-local-as.yang). `None` runs
     /// the session under the router's global AS; `Some` presents the
     /// substitute AS to this neighbor (see [`LocalAs`]).
@@ -777,6 +784,7 @@ impl Default for PeerConfig {
             remove_private_as: None,
             enforce_first_as: false,
             otc_local_role: None,
+            route_server_client: false,
             local_as: None,
             attach_unknown_attr: None,
             description: None,
@@ -1738,7 +1746,12 @@ impl Peer {
             vpnv4_next_hop_self: self.next_hop_self(Afi::Ip, Safi::MplsVpn),
             vpnv4_next_hop_unchanged: self.next_hop_unchanged(Afi::Ip, Safi::MplsVpn),
             unicast_next_hop_self: self.next_hop_self(Afi::Ip, Safi::Unicast),
-            unicast_next_hop_unchanged: self.next_hop_unchanged(Afi::Ip, Safi::Unicast),
+            // RFC 7947 §2.2.1: a route server never rewrites the next-hop
+            // of a forwarded route — the client must reach the originating
+            // member directly. Locally originated rows still rewrite
+            // (`route_update_ipv4` applies this to forwarded rows only).
+            unicast_next_hop_unchanged: self.next_hop_unchanged(Afi::Ip, Safi::Unicast)
+                || (self.is_ebgp() && self.config.route_server_client),
             egress_as: self.egress_as(),
             out_policy: self.out_policy.clone(),
             packet_tx: self.packet_tx.clone(),
@@ -1769,6 +1782,7 @@ impl Peer {
             } else {
                 None
             },
+            route_server_client: self.is_ebgp() && self.config.route_server_client,
         }
     }
 

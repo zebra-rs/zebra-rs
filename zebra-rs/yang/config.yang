@@ -167,6 +167,9 @@ module config {
   import zebra-bgp-otc {
     prefix zbotc;
   }
+  import zebra-bgp-route-server {
+    prefix zbrs;
+  }
   import zebra-bgp-capability {
     prefix zbcap;
   }
