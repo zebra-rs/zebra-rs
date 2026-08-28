@@ -17682,18 +17682,36 @@ impl Bgp {
         use bgp_packet::esi_display;
 
         let me = self.evpn_local_source();
-        let mut desired: BTreeMap<[u8; 10], (String, BTreeMap<u32, bool>)> = BTreeMap::new();
+        #[allow(clippy::type_complexity)]
+        let mut desired: BTreeMap<
+            [u8; 10],
+            (
+                String,
+                BTreeMap<u32, bool>,
+                std::collections::BTreeSet<IpAddr>,
+            ),
+        > = BTreeMap::new();
         for es in self.ethernet_segments.values() {
             let (Some(esi), Some(port)) = (es.esi, es.interface.clone()) else {
                 continue;
             };
+            let cands = self.es_df_candidates(&esi);
+            // The segment's other PEs — cradle's split-horizon list (RFC
+            // 8365 §8.3.1). A Type-4's Originating IP is the PE's
+            // `evpn_local_source`, so it matches the overlay source only
+            // when that is the VTEP (`vtep-source`, or the router-id doubling
+            // as VTEP) — the RFC 7432 §7.4 requirement, restated.
+            let peers: std::collections::BTreeSet<IpAddr> = cands
+                .iter()
+                .map(|(ip, _, _)| *ip)
+                .filter(|ip| *ip != me)
+                .collect();
             let mut roles = BTreeMap::new();
             let vnis = self
                 .link_index_by_name
                 .get(&port)
                 .and_then(|ifindex| self.l2_port_evis.get(ifindex));
             if let Some(vnis) = vnis {
-                let cands = self.es_df_candidates(&esi);
                 let holding = self.es_holding(&esi);
                 for &vni in vnis {
                     if u16::try_from(vni).is_err() {
@@ -17709,7 +17727,7 @@ impl Bgp {
                     roles.insert(vni, elan_df(&cands, me, vni, holding));
                 }
             }
-            desired.insert(esi, (port, roles));
+            desired.insert(esi, (port, roles, peers));
         }
 
         let mut out: Vec<crate::rib::Message> = Vec::new();
@@ -17725,7 +17743,7 @@ impl Bgp {
                 esi: esi_display(&esi),
             });
         }
-        for (esi, (port, roles)) in desired {
+        for (esi, (port, roles, peers)) in desired {
             let esi_str = esi_display(&esi);
             let sent = self.es_df_sent.entry(esi).or_default();
             if sent.port.as_deref() != Some(port.as_str()) {
@@ -17754,6 +17772,13 @@ impl Bgp {
                 }
             }
             sent.roles = roles;
+            if sent.peers != peers {
+                out.push(crate::rib::Message::EsPeers {
+                    esi: esi_str.clone(),
+                    vteps: peers.iter().copied().collect(),
+                });
+                sent.peers = peers;
+            }
         }
         for msg in out {
             let _ = self.ctx.rib.send(msg);

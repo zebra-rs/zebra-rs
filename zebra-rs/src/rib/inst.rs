@@ -480,6 +480,14 @@ pub enum Message {
         bd: u32,
         df: bool,
     },
+    /// The other PEs on segment `esi` (their VTEP / overlay source
+    /// addresses, from the Type-4 routes; replace semantics), teed as
+    /// `SetEsPeers` — cradle's split-horizon / local-bias peer list
+    /// (RFC 8365 §8.3.1).
+    EsPeers {
+        esi: String,
+        vteps: Vec<IpAddr>,
+    },
     /// MUP `dataplane gtp` downlink encap (`GTP4.E`): a GTP-U encap route teed
     /// to cradle — traffic to `prefix` in VRF `table_id` is wrapped in outer
     /// IPv4 + UDP(2152) + GTP-U(`teid`) toward `gtp_dst` (sourced from
@@ -3918,6 +3926,9 @@ impl Rib {
             }
             Message::EsRole { esi, bd, df } => {
                 self.fib_handle.cradle_es_role(&esi, bd, df).await;
+            }
+            Message::EsPeers { esi, vteps } => {
+                self.fib_handle.cradle_es_peers(&esi, &vteps).await;
             }
             Message::CradleGtpEncapAdd {
                 prefix,

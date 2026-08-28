@@ -144,6 +144,10 @@ struct CradleMirror {
     /// filter). Only non-DF roles are kept: cradle holds no row for a DF
     /// ("no role = forward"), so replaying `df = true` would be a no-op.
     es_nondf: HashSet<(String, u32)>,
+    /// EVPN multihoming: Ethernet Segment → the other PEs on it (their VTEP
+    /// / overlay source addresses, from the Type-4 routes) — `SetEsPeers`,
+    /// the split-horizon / local-bias filter's peer list.
+    es_peers: HashMap<String, Vec<IpAddr>>,
 }
 
 /// Map zebra's `SidBehavior` to cradle's `SRV6_BH_*` (data-plane ABI). The
@@ -588,6 +592,9 @@ impl CradleFib {
         for (esi, bd) in &m.es_nondf {
             self.set_es_role(esi, *bd, false).await;
         }
+        for (esi, vteps) in &m.es_peers {
+            self.set_es_peers(esi, vteps).await;
+        }
         for ((vni, mac), vtep) in &m.fdb_vxlan {
             self.fdb_add_vxlan(*vni, *mac, *vtep).await;
         }
@@ -625,7 +632,7 @@ impl CradleFib {
         tracing::info!(
             "fib: cradle replay: {} v4 + {} v6 routes, {} ILM, {} SIDs (+{} static), \
              {} FDB (+{} vxlan), {} repl slots (+{} vxlan), {} repl segs, {} vnis, \
-             {} ES (+{} non-DF roles), {} xconnects, {} GTP PDRs + {} encaps, \
+             {} ES (+{} non-DF roles, {} peer sets), {} xconnects, {} GTP PDRs + {} encaps, \
              {} mirror routes, {} neighbors re-applied",
             m.routes4.len(),
             m.routes6.len(),
@@ -640,6 +647,7 @@ impl CradleFib {
             m.vnis.len(),
             m.es_ports.len(),
             m.es_nondf.len(),
+            m.es_peers.len(),
             m.xconnects.len(),
             m.gtp_pdrs.len(),
             m.gtp_encaps.len(),
@@ -2167,6 +2175,7 @@ impl CradleFib {
             let mut m = self.mirror.lock().await;
             m.es_ports.remove(esi);
             m.es_nondf.retain(|(e, _)| e != esi);
+            m.es_peers.remove(esi);
         }
         let result = async {
             self.client()
@@ -2210,6 +2219,32 @@ impl CradleFib {
         .await;
         if let Err(e) = result {
             tracing::warn!("fib: cradle set_es_role {esi} bd {bd} df {df} failed: {e}");
+        }
+    }
+
+    /// The other PEs on segment `esi` (their VTEP / overlay source addresses,
+    /// from the Type-4 routes; replace semantics) — cradle's split-horizon /
+    /// local-bias peer list (RFC 8365 §8.3.1). Mirrored; replayed after the
+    /// segment's ports.
+    pub async fn set_es_peers(&self, esi: &str, vteps: &[IpAddr]) {
+        self.mirror
+            .lock()
+            .await
+            .es_peers
+            .insert(esi.to_string(), vteps.to_vec());
+        let result = async {
+            self.client()
+                .await?
+                .set_es_peers(pb::EsPeers {
+                    esi: esi.to_string(),
+                    vteps: vteps.iter().map(|v| v.to_string()).collect(),
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle set_es_peers {esi} {vteps:?} failed: {e}");
         }
     }
 

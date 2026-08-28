@@ -46,6 +46,16 @@ message EsRole {
   bool df = 3;
 }
 
+// The other PEs attached to Ethernet Segment `esi` — their VTEP / overlay
+// source addresses, as learned from the Type-4 ES routes. Replace
+// semantics. BUM that arrives from one of them is never sent back onto the
+// segment's local ports (split horizon / local bias, RFC 8365 §8.3.1): that
+// PE already delivered it to the CE, or the CE sent it.
+message EsPeers {
+  string esi = 1;
+  repeated string vteps = 2;  // IPv4 or IPv6
+}
+
 message PortDel {
   string name = 1;  // interface name (matched against the attach-time name
                     // when the device is already gone)
@@ -555,6 +565,7 @@ service Cradle {
   rpc SetEthernetSegment(EthernetSegment) returns (Empty);
   rpc DelEthernetSegment(EthernetSegmentDel) returns (Empty);
   rpc SetEsRole(EsRole) returns (Empty);
+  rpc SetEsPeers(EsPeers) returns (Empty);
   // Flush locally-learned FDB entries (never control-plane-installed remote
   // entries). WatchFdb subscribers observe the removals as age events.
   rpc FlushFdb(FdbFlush) returns (Empty);
