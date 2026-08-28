@@ -1015,6 +1015,40 @@ impl FibHandle {
         }
     }
 
+    /// EVPN multihoming tee (RFC 7432 §8.4): the nexthop group for segment
+    /// `esi` in bridge domain `bd` — the PEs a MAC behind the segment may be
+    /// sent to (empty = no group).
+    pub async fn cradle_es_nhg(
+        &self,
+        esi: &[u8; 10],
+        bd: u32,
+        members: &[crate::rib::EsNhgMember],
+    ) {
+        if let Some(cradle) = &self.cradle {
+            cradle
+                .set_es_nhg(&bgp_packet::esi_display(esi), bd, members)
+                .await;
+        }
+    }
+
+    /// EVPN multihoming tee: `mac` in `vni` sits behind segment `esi` —
+    /// install it through the segment's nexthop group (a member per flow).
+    pub async fn cradle_fdb_es(&self, vni: u32, mac: &MacAddr, esi: &[u8; 10]) {
+        if let Some(cradle) = &self.cradle {
+            cradle
+                .fdb_add_es(vni, mac.octets(), &bgp_packet::esi_display(esi))
+                .await;
+        }
+    }
+
+    /// EVPN multihoming tee: `mac` in `vni` is on a segment this node is
+    /// attached to — a static local entry on our access port `port`.
+    pub async fn cradle_fdb_local(&self, vni: u32, mac: &MacAddr, port: &str) {
+        if let Some(cradle) = &self.cradle {
+            cradle.fdb_add_local(vni, mac.octets(), port).await;
+        }
+    }
+
     pub async fn cradle_xconnect_del(
         &self,
         port: &str,

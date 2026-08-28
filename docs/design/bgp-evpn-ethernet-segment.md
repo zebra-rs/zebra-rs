@@ -240,8 +240,25 @@ kernel VXLAN backend stays single-homed.**
   label: open). BDD: cradle-rs `cradle_evpn_mh_sph` (static),
   `cradle_evpn_mh_df_zebra` (BGP-driven; CE injects via the non-DF, the DF
   must not echo).
-- **Aliasing**: ECMP a remote MAC across all all-active PEs that advertised
-  the per-ES + per-EVI A-D pair.
+- **Aliasing ✅ (slice 3)**: ECMP a remote MAC across all all-active PEs
+  that advertised the per-ES + per-EVI A-D pair. `Bgp::evpn_es_nhg_sync`
+  derives, per `(ESI, VNI)`, the members from the selected per-EVI A-Ds
+  whose PE also has a live per-ES A-D (`vpws_es_live_pes`) — each as the
+  encapsulation its A-D named (`elan_es_member`: End.DT2U SID / PE + label
+  / VTEP) — and tees `Message::EsNhg` → `SetEsNhg` on every A-D
+  install/withdraw (the `es_nhg_dirty` flag, drained with the DF
+  re-election). The RIB records which `(ESI, VNI)` have a group
+  (`Rib::es_groups`); `Rib::mac_install` installs a MAC with that ESI
+  through the group (`FdbRemote.esi`, `FDB_F_ESNHG`) and re-installs every
+  MAC on the segment when the group appears or vanishes. **Mass withdraw
+  (§8.2)** is the same path: a per-ES A-D withdraw drops the PE from every
+  group in one `SetEsNhg` each. The **own-segment rule** (§8.4): the Type-2
+  install arm reads `LocalRib::own_es` (ESI → our access port, refreshed by
+  `evpn_es_df_sync`) and sends `MacAdd.local_port`, which the RIB installs
+  as a static local entry (`AddFdbLocal`, `FDB_F_STATIC`) instead of an
+  overlay one. Kernel backend: unchanged, first destination. BDD: cradle-rs
+  `cradle_evpn_mh_df_zebra` (`l2_es_nhg` on the remote PE; the CE stays
+  reachable through the surviving PE after the DF's zebra dies).
 - **Open risk:** Linux VXLAN/bridge multihoming primitives are limited;
   local-bias + aliasing may need **eBPF/tc** assists (cf. the RFC 9524
   replication work, `zebra-rs-evpn-rfc9524-replication-plan`). Feasibility

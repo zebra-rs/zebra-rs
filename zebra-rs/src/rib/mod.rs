@@ -11,7 +11,7 @@ pub mod client;
 // `unused_imports`.
 
 pub mod inst;
-pub use inst::{Message, Rib, XconnectRemote, serve};
+pub use inst::{EsNhgMember, Message, Rib, XconnectRemote, serve};
 
 pub mod link;
 pub use link::{Link, LinkType};

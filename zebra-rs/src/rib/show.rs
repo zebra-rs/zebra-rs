@@ -2448,6 +2448,7 @@ mod tests {
             flags: 0,
             seq: 0,
             installed: false,
+            local_port: None,
         }
     }
 

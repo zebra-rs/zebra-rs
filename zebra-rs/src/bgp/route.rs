@@ -3203,6 +3203,17 @@ pub struct LocalRib {
     /// (`&mut Bgp`) and the Type-1 import arm (`BgpTop`) reach it without
     /// threading a new `BgpTop` field.
     pub evpn_vpws: super::vpws::VpwsState,
+    /// EVPN multihoming: the Ethernet Segments THIS node is attached to,
+    /// ESI → our access port. Refreshed by `Bgp::evpn_es_df_sync` on every
+    /// segment config edit; read by the Type-2 install arm (which sees only
+    /// `BgpTop`) to install a peer's MAC on one of our own segments over
+    /// that port instead of the overlay (RFC 7432 §8.4).
+    pub own_es: BTreeMap<[u8; 10], String>,
+    /// A per-ES or per-EVI Ethernet A-D route was installed or withdrawn:
+    /// the aliasing nexthop groups must be re-derived once the receive
+    /// path's borrow ends (`Bgp::evpn_es_nhg_sync`, drained with the DF
+    /// re-election).
+    pub es_nhg_dirty: bool,
 }
 
 impl LocalRib {
@@ -7807,6 +7818,27 @@ fn vpws_remote_endpoint(rib: &BgpRib) -> Option<VpwsEndpoint> {
     None
 }
 
+/// The aliasing-group member a peer's per-EVI Ethernet A-D route names
+/// (RFC 7432 §8.4): its `End.DT2U` SID under SRv6, its EVI service label
+/// on the PE under MPLS (no Encapsulation EC, or an explicit MPLS one, and a
+/// non-zero label), else its VTEP — our own per-EVI A-D under VXLAN carries
+/// label 0, and the VNI is the bridge domain's.
+fn elan_es_member(rib: &BgpRib, originator: IpAddr) -> crate::rib::EsNhgMember {
+    if let Some(sid) = evpn_srv6_sid(&rib.attr, bgp_packet::SRV6_BEHAVIOR_END_DT2U) {
+        return crate::rib::EsNhgMember::Srv6(sid);
+    }
+    let label = rib.label.as_ref().map(|l| l.label).filter(|&l| l != 0);
+    if let Some(label) = label
+        && attr_encap_is_mpls(&rib.attr)
+    {
+        return crate::rib::EsNhgMember::Mpls {
+            pe: originator,
+            label,
+        };
+    }
+    crate::rib::EsNhgMember::Vxlan(originator)
+}
+
 /// The PEs currently advertising a live per-ES Ethernet A-D route
 /// (`[1]:[esi]:[MAX-ET]`) for `esi` — the RFC 7432 §8.2 liveness signal a
 /// multihomed PE keeps up for as long as its segment is usable.
@@ -8180,6 +8212,11 @@ fn route_evpn_export_selected(
                 if *eth_tag == MAX_ET || scope.is_some() {
                     vpws_rebind_scope(bgp.local_rib, bgp.rib_client, scope);
                 }
+                // A per-ES A-D gone is the RFC 7432 §8.2 mass withdraw; a
+                // per-EVI one gone shrinks that EVI's aliasing set. Either
+                // way the segment's nexthop groups are re-derived once
+                // this borrow ends (`Bgp::evpn_es_nhg_sync`).
+                bgp.local_rib.es_nhg_dirty = true;
             }
             // A withdrawn Type-4: a PE left the Ethernet Segment, so every
             // carving ordinal on it shifts and the VPWS services bound to
@@ -8241,6 +8278,12 @@ fn route_evpn_export_selected(
                     // bridge. The next hop is the PE the transport LSP
                     // resolves on (`tunnel_endpoint`).
                     mpls_label: evpn_mpls_label(best),
+                    // RFC 7432 §8.4: a MAC a peer advertised on a segment
+                    // THIS node is attached to is reached over our own
+                    // access port, never tunneled back over the overlay.
+                    local_port: best
+                        .esi
+                        .and_then(|esi| bgp.local_rib.own_es.get(&esi).cloned()),
                 };
                 let _ = bgp.rib_client.send(msg);
             } else {
@@ -8371,6 +8414,10 @@ fn route_evpn_export_selected(
         // `vpws_rebind` — arrival never binds directly, because the route
         // that just arrived may lose to one already in the Loc-RIB.
         EvpnPrefix::EthernetAd { eth_tag, .. } => {
+            // A PE joined the segment (per-ES A-D) or an EVI on it (per-EVI
+            // A-D): the aliasing nexthop groups gain a member — re-derived
+            // once this borrow ends (`Bgp::evpn_es_nhg_sync`).
+            bgp.local_rib.es_nhg_dirty = true;
             let scope = if *eth_tag == MAX_ET {
                 None
             } else {
@@ -17659,6 +17706,83 @@ impl Bgp {
         if std::mem::take(&mut self.local_rib.evpn_vpws.es_df_dirty) {
             self.evpn_es_df_sync();
         }
+        // And the aliasing nexthop groups, from the A-D routes.
+        if std::mem::take(&mut self.local_rib.es_nhg_dirty) {
+            self.evpn_es_nhg_sync();
+        }
+    }
+
+    /// Tee the Ethernet Segment nexthop groups to the cradle datapath (RFC
+    /// 7432 §8.4 aliasing, §8.2 mass withdraw). For every `(ESI, EVI)` a
+    /// peer advertised a per-EVI Ethernet A-D route for, the group is the
+    /// set of PEs whose per-EVI A-D is selected AND whose per-ES A-D
+    /// (`[1]:[ESI]:[MAX-ET]`, the liveness signal) is still up — each as
+    /// the encapsulation its per-EVI A-D named: an `End.DT2U` SID (SRv6),
+    /// a service label on the PE (MPLS), or the PE's VTEP (VXLAN; the VNI
+    /// is the bridge domain's). Withdrawing a per-ES A-D drops the PE from
+    /// every group at once: the mass withdraw. Idempotent full recompute
+    /// diffed against `es_nhg_sent`; a group that vanished is sent empty.
+    pub fn evpn_es_nhg_sync(&mut self) {
+        let mut desired: BTreeMap<([u8; 10], u32), Vec<crate::rib::EsNhgMember>> = BTreeMap::new();
+        let mut live_cache: BTreeMap<[u8; 10], BTreeSet<IpAddr>> = BTreeMap::new();
+        for table in self.local_rib.evpn.values() {
+            for (prefix, rib) in table.selected.iter() {
+                let EvpnPrefix::EthernetAd { esi, eth_tag } = prefix else {
+                    continue;
+                };
+                if *eth_tag != 0 || rib.typ == BgpRibType::Originated || *esi == ZERO_ESI {
+                    continue;
+                }
+                let Some(vni) = extract_vni_from_attr(&rib.attr) else {
+                    continue;
+                };
+                let Some(BgpNexthop::Evpn(originator)) = rib.attr.nexthop else {
+                    continue;
+                };
+                let live = live_cache
+                    .entry(*esi)
+                    .or_insert_with(|| vpws_es_live_pes(&self.local_rib, esi));
+                if !live.contains(&originator) {
+                    continue;
+                }
+                let member = elan_es_member(rib, originator);
+                let members = desired.entry((*esi, vni)).or_default();
+                if !members.contains(&member) {
+                    members.push(member);
+                }
+            }
+        }
+        for members in desired.values_mut() {
+            members.sort();
+        }
+        let mut out: Vec<crate::rib::Message> = Vec::new();
+        let gone: Vec<([u8; 10], u32)> = self
+            .es_nhg_sent
+            .keys()
+            .filter(|k| !desired.contains_key(*k))
+            .copied()
+            .collect();
+        for (esi, bd) in gone {
+            self.es_nhg_sent.remove(&(esi, bd));
+            out.push(crate::rib::Message::EsNhg {
+                esi,
+                bd,
+                members: Vec::new(),
+            });
+        }
+        for ((esi, bd), members) in desired {
+            if self.es_nhg_sent.get(&(esi, bd)) != Some(&members) {
+                out.push(crate::rib::Message::EsNhg {
+                    esi,
+                    bd,
+                    members: members.clone(),
+                });
+                self.es_nhg_sent.insert((esi, bd), members);
+            }
+        }
+        for msg in out {
+            let _ = self.ctx.rib.send(msg);
+        }
     }
 
     /// Tee the E-LAN DF election to the cradle datapath (RFC 7432 §8.5).
@@ -17680,6 +17804,15 @@ impl Bgp {
     pub fn evpn_es_df_sync(&mut self) {
         use super::ethernet_segment::elan_df;
         use bgp_packet::esi_display;
+
+        // The receive path's "is this ESI one of ours, and which port" —
+        // refreshed here because every segment config edit funnels through
+        // this sync (RFC 7432 §8.4 own-segment MAC install).
+        self.local_rib.own_es = self
+            .ethernet_segments
+            .values()
+            .filter_map(|es| Some((es.esi?, es.interface.clone()?)))
+            .collect();
 
         let me = self.evpn_local_source();
         #[allow(clippy::type_complexity)]
