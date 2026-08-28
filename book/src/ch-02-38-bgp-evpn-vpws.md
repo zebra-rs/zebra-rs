@@ -326,14 +326,27 @@ advertised, in effect (2 of 2 PEs advertise it)`; as with the algorithm,
 one PE without the capability keeps the whole segment on the plain
 Type-4 election, and the show says so.
 
-The link state that drives this is the kernel's own: a VPWS service whose
+The link state that drives this is the kernel's operational state —
+administratively up *and* carrier, so a bond toward the CE whose members
+all fail counts as down even though it stays `UP` (give the bond a link
+monitor, `miimon 100` or ARP monitoring — a bond with the kernel's
+default of none never notices a member's carrier and never reports the
+loss): a VPWS service whose
 `interface` goes down withdraws its Type-1, and an Ethernet Segment whose
 `interface` goes down withholds its ES routes altogether — the RFC 7432
 mass withdraw — exactly as the startup delay does, and re-originates when
 the link returns. A VLAN sub-interface (`ce1.100`) as the service's
 `interface`, with `ethernet-segment` naming the segment on the parent
 port, is the shape that makes the two distinct: the E-Line's AC can fail
-while the segment stays up.
+while the segment stays up. A segment whose port is down says so:
+
+```
+show bgp evpn ethernet-segment
+Ethernet Segment: es1
+  ESI: 00:11:22:33:44:55:66:77:88:99
+  Interface: bond0
+  Port bond0 is down: ES routes withheld
+```
 
 Because the candidate set comes from the Type-4 routes in the Loc-RIB, the
 role is re-elected whenever a PE joins or leaves the segment — a peer's
