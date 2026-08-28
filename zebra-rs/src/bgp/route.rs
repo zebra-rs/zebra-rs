@@ -17953,12 +17953,19 @@ impl Bgp {
     /// every group at once: the mass withdraw. Idempotent full recompute
     /// diffed against `es_nhg_sent`; a group that vanished is sent empty.
     pub fn evpn_es_nhg_sync(&mut self) {
-        let mut desired: BTreeMap<([u8; 10], u32), Vec<crate::rib::EsNhgMember>> = BTreeMap::new();
+        // `(ESI, EVI)` → the `(advertising PE, member)` pairs of the group.
+        #[allow(clippy::type_complexity)]
+        let mut desired: BTreeMap<([u8; 10], u32), Vec<(IpAddr, crate::rib::EsNhgMember)>> =
+            BTreeMap::new();
         let mut live_cache: BTreeMap<[u8; 10], BTreeSet<IpAddr>> = BTreeMap::new();
-        // Single-active segments (RFC 7432 §14.1.1) are not aliased: only
+        // Single-active segments (RFC 7432 §14.1.1) are not aliased — only
         // the DF forwards, and the DF is the PE that advertised the MAC —
-        // so its Type-2's own next hop is the whole answer. A segment is
-        // single-active when its per-ES A-D routes' ESI Label EC says so.
+        // but they do get a group: the DF first, the other attached PEs
+        // after it as the pre-installed backup path, so the DF's per-ES
+        // A-D withdrawal (its port failed) fails every MAC over to the
+        // backup in one update, while its stale Type-2s are still in the
+        // table. A segment is single-active when its per-ES A-D routes'
+        // ESI Label EC says so.
         let mut sa_esis: BTreeSet<[u8; 10]> = BTreeSet::new();
         for table in self.local_rib.evpn.values() {
             for (prefix, rib) in table.selected.iter() {
@@ -17981,11 +17988,7 @@ impl Bgp {
                 let EvpnPrefix::EthernetAd { esi, eth_tag } = prefix else {
                     continue;
                 };
-                if *eth_tag != 0
-                    || rib.typ == BgpRibType::Originated
-                    || *esi == ZERO_ESI
-                    || sa_esis.contains(esi)
-                {
+                if *eth_tag != 0 || rib.typ == BgpRibType::Originated || *esi == ZERO_ESI {
                     continue;
                 }
                 let Some(vni) = extract_vni_from_attr(&rib.attr) else {
@@ -18002,19 +18005,28 @@ impl Bgp {
                 }
                 let member = elan_es_member(rib, originator);
                 let members = desired.entry((*esi, vni)).or_default();
-                if !members.contains(&member) {
-                    members.push(member);
+                if !members.iter().any(|(_, m)| *m == member) {
+                    members.push((originator, member));
                 }
             }
         }
-        for members in desired.values_mut() {
-            members.sort();
+        let mut groups: BTreeMap<([u8; 10], u32), (bool, Vec<crate::rib::EsNhgMember>)> =
+            BTreeMap::new();
+        for ((esi, vni), pairs) in desired {
+            let single_active = sa_esis.contains(&esi);
+            let primary = if single_active {
+                self.es_sa_primary(&esi, vni, &pairs)
+            } else {
+                None
+            };
+            let members = super::ethernet_segment::order_es_members(pairs, primary);
+            groups.insert((esi, vni), (single_active, members));
         }
         let mut out: Vec<crate::rib::Message> = Vec::new();
         let gone: Vec<([u8; 10], u32)> = self
             .es_nhg_sent
             .keys()
-            .filter(|k| !desired.contains_key(*k))
+            .filter(|k| !groups.contains_key(*k))
             .copied()
             .collect();
         for (esi, bd) in gone {
@@ -18023,21 +18035,60 @@ impl Bgp {
                 esi,
                 bd,
                 members: Vec::new(),
+                single_active: false,
             });
         }
-        for ((esi, bd), members) in desired {
-            if self.es_nhg_sent.get(&(esi, bd)) != Some(&members) {
+        for ((esi, bd), group) in groups {
+            if self.es_nhg_sent.get(&(esi, bd)) != Some(&group) {
                 out.push(crate::rib::Message::EsNhg {
                     esi,
                     bd,
-                    members: members.clone(),
+                    members: group.1.clone(),
+                    single_active: group.0,
                 });
-                self.es_nhg_sent.insert((esi, bd), members);
+                self.es_nhg_sent.insert((esi, bd), group);
             }
         }
         for msg in out {
             let _ = self.ctx.rib.send(msg);
         }
+    }
+
+    /// The primary of a single-active segment's group for `vni` (RFC 7432
+    /// §14.1.1): the PE whose selected Type-2s carry this ESI in this EVI —
+    /// the Designated Forwarder, the only PE learning from the CE — chosen
+    /// among the group's own PEs (`pairs`), so a PE whose per-ES A-D is
+    /// gone cannot be primary however many stale MACs it still advertises.
+    /// Most MACs wins, ties to the lowest address; `None` when no MAC is
+    /// advertised yet.
+    fn es_sa_primary(
+        &self,
+        esi: &[u8; 10],
+        vni: u32,
+        pairs: &[(IpAddr, crate::rib::EsNhgMember)],
+    ) -> Option<IpAddr> {
+        let mut counts: BTreeMap<IpAddr, usize> = BTreeMap::new();
+        for table in self.local_rib.evpn.values() {
+            for (prefix, rib) in table.selected.iter() {
+                if !matches!(prefix, EvpnPrefix::MacIp { .. })
+                    || rib.typ == BgpRibType::Originated
+                    || rib.esi.as_ref() != Some(esi)
+                    || extract_vni_from_attr(&rib.attr) != Some(vni)
+                {
+                    continue;
+                }
+                let Some(BgpNexthop::Evpn(nh)) = rib.attr.nexthop else {
+                    continue;
+                };
+                if pairs.iter().any(|(pe, _)| *pe == nh) {
+                    *counts.entry(nh).or_default() += 1;
+                }
+            }
+        }
+        counts
+            .into_iter()
+            .max_by(|(ip_a, n_a), (ip_b, n_b)| n_a.cmp(n_b).then(ip_b.cmp(ip_a)))
+            .map(|(ip, _)| ip)
     }
 
     /// Tee the E-LAN DF election to the cradle datapath (RFC 7432 §8.5).

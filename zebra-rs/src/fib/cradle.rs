@@ -150,7 +150,8 @@ struct CradleMirror {
     es_peers: HashMap<String, Vec<IpAddr>>,
     /// EVPN multihoming aliasing: `(ESI, bridge domain)` → the nexthop
     /// group's members (`SetEsNhg`, replace semantics).
-    es_nhg: HashMap<(String, u32), Vec<crate::rib::EsNhgMember>>,
+    /// `(esi, bd)` → `(single_active, ordered members)`.
+    es_nhg: HashMap<(String, u32), (bool, Vec<crate::rib::EsNhgMember>)>,
     /// `(bd, mac)` → ESI: overlay FDB entries that resolve through the
     /// segment's group (`FdbRemote.esi`) rather than a single remote.
     fdb_es: HashMap<(u32, [u8; 6]), String>,
@@ -606,8 +607,8 @@ impl CradleFib {
         }
         // Aliasing groups (after the VNI bindings above), then the FDB
         // entries that resolve through them and the static local ones.
-        for ((esi, bd), members) in &m.es_nhg {
-            self.set_es_nhg(esi, *bd, members).await;
+        for ((esi, bd), (single_active, members)) in &m.es_nhg {
+            self.set_es_nhg(esi, *bd, members, *single_active).await;
         }
         for ((bd, mac), esi) in &m.fdb_es {
             self.fdb_add_es(*bd, *mac, esi).await;
@@ -2259,13 +2260,20 @@ impl CradleFib {
     /// aliasing; replace semantics, empty = no group). Mirrored; replayed
     /// after the VNI bindings (a VXLAN member takes the domain's VNI from
     /// them) and before the FDB entries that resolve through it.
-    pub async fn set_es_nhg(&self, esi: &str, bd: u32, members: &[crate::rib::EsNhgMember]) {
+    pub async fn set_es_nhg(
+        &self,
+        esi: &str,
+        bd: u32,
+        members: &[crate::rib::EsNhgMember],
+        single_active: bool,
+    ) {
         {
             let mut m = self.mirror.lock().await;
             if members.is_empty() {
                 m.es_nhg.remove(&(esi.to_string(), bd));
             } else {
-                m.es_nhg.insert((esi.to_string(), bd), members.to_vec());
+                m.es_nhg
+                    .insert((esi.to_string(), bd), (single_active, members.to_vec()));
             }
         }
         let pb_members = members
@@ -2298,6 +2306,7 @@ impl CradleFib {
                     esi: esi.to_string(),
                     bd,
                     members: pb_members,
+                    single_active,
                 })
                 .await?;
             anyhow::Ok(())

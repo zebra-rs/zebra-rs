@@ -2646,6 +2646,7 @@ fn show_bgp_evpn_ethernet_segment(
     let mut buf = String::new();
     if bgp.ethernet_segments.is_empty() {
         writeln!(buf, "No EVPN Ethernet Segments configured")?;
+        write_es_nhg_groups(&mut buf, bgp)?;
         return Ok(buf);
     }
     let local = std::net::IpAddr::V4(bgp.router_id);
@@ -2742,7 +2743,50 @@ fn show_bgp_evpn_ethernet_segment(
             }
         }
     }
+    write_es_nhg_groups(&mut buf, bgp)?;
     Ok(buf)
+}
+
+/// The Ethernet Segment nexthop groups this PE has teed to the datapath
+/// (`Bgp::es_nhg_sent`, from the peers' per-ES / per-EVI A-D routes) — a
+/// remote PE's view of every multihomed segment, configured here or not.
+/// A single-active group names its primary (the DF) and the backup path
+/// behind it (RFC 7432 §14.1.1); an all-active one lists the aliasing set.
+fn write_es_nhg_groups(buf: &mut String, bgp: &Bgp) -> std::fmt::Result {
+    use std::fmt::Write;
+    if bgp.es_nhg_sent.is_empty() {
+        return Ok(());
+    }
+    writeln!(
+        buf,
+        "Ethernet Segment nexthop groups (teed to the datapath):"
+    )?;
+    for ((esi, bd), (single_active, members)) in &bgp.es_nhg_sent {
+        let rendered: Vec<String> = members
+            .iter()
+            .map(|m| match m {
+                crate::rib::EsNhgMember::Srv6(sid) => sid.to_string(),
+                crate::rib::EsNhgMember::Vxlan(vtep) => vtep.to_string(),
+                crate::rib::EsNhgMember::Mpls { pe, label } => format!("{pe}/{label}"),
+            })
+            .collect();
+        let esi = bgp_packet::esi_display(esi);
+        if *single_active {
+            let (primary, backup) = rendered.split_first().expect("a sent group is non-empty");
+            let backup = if backup.is_empty() {
+                String::new()
+            } else {
+                format!(", backup {}", backup.join(" "))
+            };
+            writeln!(
+                buf,
+                "  {esi} bd {bd}: single-active primary {primary}{backup}"
+            )?;
+        } else {
+            writeln!(buf, "  {esi} bd {bd}: all-active {}", rendered.join(" "))?;
+        }
+    }
+    Ok(())
 }
 
 fn show_bgp_evpn_summary(

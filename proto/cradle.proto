@@ -81,6 +81,12 @@ message EsNhg {
   string esi = 1;
   uint32 bd = 2;
   repeated EsNhgMember members = 3;
+  // RFC 7432 §14.1.1 single-active: only members[0] — the Designated
+  // Forwarder, the PE that advertised the segment's MACs — forwards; the
+  // rest are the pre-installed backup path. A group update that drops the
+  // primary (its per-ES A-D withdrawn) fails every MAC over to the next
+  // member in one step, before any per-MAC route moves.
+  bool single_active = 4;
 }
 
 message PortDel {

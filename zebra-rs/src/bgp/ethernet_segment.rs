@@ -453,6 +453,28 @@ pub fn elan_df(
     !holding && elect_forwarders(candidates, esi, vni).0 == Some(me)
 }
 
+/// Order an Ethernet Segment nexthop group's members for the datapath.
+/// `pairs` are `(advertising PE, member)`; the result is sorted by PE then
+/// member so it is stable across recomputes, except that a single-active
+/// segment's `primary` — the Designated Forwarder, the PE the segment's
+/// MACs were learned from — leads (RFC 7432 §14.1.1): the datapath
+/// forwards to slot 0 alone and holds the rest as the pre-installed backup
+/// path. `None` (no MAC advertised yet, or an all-active segment) leaves
+/// the sorted order; on a single-active segment that is the lowest PE,
+/// which is moot until a MAC exists to forward.
+pub fn order_es_members(
+    mut pairs: Vec<(IpAddr, crate::rib::EsNhgMember)>,
+    primary: Option<IpAddr>,
+) -> Vec<crate::rib::EsNhgMember> {
+    pairs.sort();
+    if let Some(primary) = primary {
+        // Stable: the primary's members keep their own order at the front.
+        let (front, back): (Vec<_>, Vec<_>) = pairs.into_iter().partition(|(pe, _)| *pe == primary);
+        pairs = front.into_iter().chain(back).collect();
+    }
+    pairs.into_iter().map(|(_, m)| m).collect()
+}
+
 /// RFC 8584 §4 AC-Influenced DF election is in effect on a segment only
 /// when **every** PE on it advertises the capability (§4: a PE that does
 /// not support it would keep electing over the full Type-4 set, and the
@@ -932,6 +954,44 @@ mod tests {
         assert_eq!(
             narrowed.iter().map(|(ip, _, _)| *ip).collect::<Vec<_>>(),
             vec![a]
+        );
+    }
+
+    /// The single-active group leads with the MAC advertiser and keeps the
+    /// rest, sorted, as the backup path; without a primary (all-active, or
+    /// no MAC yet) the order is the sorted one.
+    #[test]
+    fn single_active_group_leads_with_the_primary() {
+        use crate::rib::EsNhgMember;
+        let [a, b, c] = pes();
+        let pairs = vec![
+            (c, EsNhgMember::Vxlan(c)),
+            (a, EsNhgMember::Vxlan(a)),
+            (b, EsNhgMember::Vxlan(b)),
+        ];
+        assert_eq!(
+            order_es_members(pairs.clone(), None),
+            vec![
+                EsNhgMember::Vxlan(a),
+                EsNhgMember::Vxlan(b),
+                EsNhgMember::Vxlan(c)
+            ]
+        );
+        assert_eq!(
+            order_es_members(pairs.clone(), Some(b)),
+            vec![
+                EsNhgMember::Vxlan(b),
+                EsNhgMember::Vxlan(a),
+                EsNhgMember::Vxlan(c)
+            ]
+        );
+        // A primary that is not (any longer) a member — its per-ES A-D
+        // withdrawn — changes nothing: the survivors lead in sorted order,
+        // which is the failover.
+        let survivors: Vec<_> = pairs.into_iter().filter(|(pe, _)| *pe != b).collect();
+        assert_eq!(
+            order_es_members(survivors, Some(b)),
+            vec![EsNhgMember::Vxlan(a), EsNhgMember::Vxlan(c)]
         );
     }
 

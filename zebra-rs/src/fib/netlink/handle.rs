@@ -1023,10 +1023,11 @@ impl FibHandle {
         esi: &[u8; 10],
         bd: u32,
         members: &[crate::rib::EsNhgMember],
+        single_active: bool,
     ) {
         if let Some(cradle) = &self.cradle {
             cradle
-                .set_es_nhg(&bgp_packet::esi_display(esi), bd, members)
+                .set_es_nhg(&bgp_packet::esi_display(esi), bd, members, single_active)
                 .await;
         }
     }
