@@ -311,6 +311,30 @@ segment shared with Junos `df-election-type mod`/Arista `algorithm hrw`
 peers elects the same DF on every box. For the E-LAN election the tag is
 the VNI; for VPWS it is the service identifier.
 
+**AC-influenced election** (RFC 8584 §4) changes *who is a candidate*
+rather than how they are ranked. Ordinarily the candidates are every PE
+that advertised the segment's Type-4, and that stays true even when one of
+them has lost the attachment circuit for a particular service: its Type-1
+for that instance is withdrawn, but its Type-4 is not, so the carving can
+still hand it the DF role for a circuit it cannot forward on. With `ac-df`
+on every PE of the segment, the election for each service instance counts
+only the PEs whose Type-1 for it (and per-ES A-D) is present — a PE whose
+AC went down withdraws that one route and drops out of that one election,
+and the others re-elect immediately. Nothing changes for the segment's
+other services. `show bgp evpn ethernet-segment` reports `AC-DF:
+advertised, in effect (2 of 2 PEs advertise it)`; as with the algorithm,
+one PE without the capability keeps the whole segment on the plain
+Type-4 election, and the show says so.
+
+The link state that drives this is the kernel's own: a VPWS service whose
+`interface` goes down withdraws its Type-1, and an Ethernet Segment whose
+`interface` goes down withholds its ES routes altogether — the RFC 7432
+mass withdraw — exactly as the startup delay does, and re-originates when
+the link returns. A VLAN sub-interface (`ce1.100`) as the service's
+`interface`, with `ethernet-segment` naming the segment on the parent
+port, is the shape that makes the two distinct: the E-Line's AC can fail
+while the segment stays up.
+
 Because the candidate set comes from the Type-4 routes in the Loc-RIB, the
 role is re-elected whenever a PE joins or leaves the segment — a peer's
 Type-4 arriving or being withdrawn re-runs the election and re-advertises

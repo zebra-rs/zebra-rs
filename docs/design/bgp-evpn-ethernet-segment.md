@@ -280,6 +280,28 @@ kernel VXLAN backend stays single-homed.**
   algorithm; a `preference` still overrides `hrw`. Unit vectors computed
   independently from the formula guard interop. BDD: `bgp_evpn_es`
   (both PEs advertise `df-election:alg1` and agree on the DF).
+- **AC-influenced DF election (RFC 8584 §4) ✅**: the `ac-df` bit was
+  advertised before; now it is consumed. `es_ac_df_in_effect` = every
+  selected Type-4 on the segment carries the bit (unanimity, as for the
+  algorithm). When in effect, `es_ac_df_candidates` narrows the Type-4 set
+  per `(EVI, Ethernet Tag)` to the PEs with a live per-ES A-D **and** a
+  selected per-EVI A-D for it (`ethernet_segment::ac_df_filter`, pure and
+  unit-tested); this PE always counts, since it elects only for EVIs it
+  advertises. Applied in `evpn_es_df_sync` per bridge domain (tag 0 in the
+  VNI's table) and in `vpws_elect_role` per service instance (tag =
+  service id in the EVI's table). Both Ethernet A-D install/withdraw arms
+  now mark the segment's election dirty. Link state feeds the producer
+  side: `Bgp::links_down` (by name, from `LinkAdd` flags / `LinkDown` /
+  `LinkUp` / `LinkDel`) — a VPWS AC down withdraws its Type-1
+  (`evpn_originate_vpws` gate), an ES port down empties the port's per-EVI
+  A-D set **and** withholds the ES routes through `es_holding` (the
+  startup-hold path, RFC 7432 §8.2 mass withdraw), both restored on up.
+  `LinkDown` is the kernel's `IFF_UP` transition; a bond that keeps
+  `IFF_UP` while losing carrier does not trigger it (RUNNING/LOWER_UP are
+  not tracked — follow-up). Show: `AC-DF: advertised, in effect (2 of 2
+  PEs advertise it)`. BDD: `bgp_evpn_vpws_multihoming` (AC = VLAN
+  sub-interface of the segment port; AC down re-elects the survivor
+  primary only with AC-DF, with the negative control).
 - **Open risk:** Linux VXLAN/bridge multihoming primitives are limited;
   local-bias + aliasing may need **eBPF/tc** assists (cf. the RFC 9524
   replication work, `zebra-rs-evpn-rfc9524-replication-plan`). Feasibility

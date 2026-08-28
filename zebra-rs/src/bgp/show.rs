@@ -2562,6 +2562,9 @@ struct EthernetSegmentJson {
     interface: Option<String>,
     df_preference: Option<u16>,
     ac_df: bool,
+    /// RFC 8584 §4 AC-Influenced DF election is in effect: every PE on
+    /// the segment advertises the capability.
+    ac_df_in_effect: bool,
     es_import_rt: Option<String>,
     /// Configured `df-election startup-delay`, in seconds.
     startup_delay: Option<u16>,
@@ -2588,8 +2591,11 @@ fn show_bgp_evpn_ethernet_segment(
             let mut member_vteps = Vec::new();
             let mut df_algorithm = None;
             let mut designated_forwarder = None;
+            let mut ac_df_in_effect = false;
             if let Some(esi) = es.esi {
                 let cands = bgp.es_df_candidates(&esi);
+                let (advertising, total) = bgp.es_ac_df_bids(&esi);
+                ac_df_in_effect = super::ethernet_segment::ac_df_in_effect(advertising, total);
                 for (ordinal, (vtep, _, _)) in cands.iter().enumerate() {
                     member_vteps.push(EsMemberVtepJson {
                         ordinal,
@@ -2619,6 +2625,7 @@ fn show_bgp_evpn_ethernet_segment(
                 interface: es.interface.clone(),
                 df_preference: es.df_preference,
                 ac_df: es.ac_df,
+                ac_df_in_effect,
                 es_import_rt: es.es_import_rt().map(|rt| format_evpn_ecom_value(&rt)),
                 startup_delay: es.startup_delay,
                 startup_hold_remaining: es.hold_remaining_at(std::time::Instant::now()),
@@ -2699,8 +2706,25 @@ fn show_bgp_evpn_ethernet_segment(
                 other => format!("alg {other} (unsupported; carving fallback)"),
             };
             writeln!(buf, "  DF algorithm: {alg_name}")?;
-            if es.ac_df {
-                writeln!(buf, "  AC-DF capability: advertised")?;
+            // RFC 8584 §4 AC-DF: shown whenever anyone on the segment asks
+            // for it, with whether the segment as a whole has it — it takes
+            // every PE.
+            let (advertising, total) = bgp.es_ac_df_bids(&esi);
+            if es.ac_df || advertising > 0 {
+                let state = if super::ethernet_segment::ac_df_in_effect(advertising, total) {
+                    "in effect"
+                } else {
+                    "not in effect"
+                };
+                writeln!(
+                    buf,
+                    "  AC-DF: {}, {state} ({advertising} of {total} PEs advertise it)",
+                    if es.ac_df {
+                        "advertised"
+                    } else {
+                        "not advertised"
+                    }
+                )?;
             }
             if let Some(df) = super::ethernet_segment::elect_forwarders(&cands, &esi, 0).0 {
                 let tag = if df == local { " (this node)" } else { "" };

@@ -8378,7 +8378,14 @@ fn route_evpn_export_selected(
             // multihomed, losing the primary must fail the service over to
             // the backup, not tear it down. `vpws_rebind` unbinds only when
             // the re-scan genuinely finds nothing usable.
-            EvpnPrefix::EthernetAd { eth_tag, .. } => {
+            EvpnPrefix::EthernetAd { esi, eth_tag } => {
+                // Under AC-DF (RFC 8584 §4) a per-EVI A-D gone is an
+                // attachment circuit down, and a per-ES A-D gone is the
+                // segment gone: either shrinks a candidate list, so the
+                // segment re-elects once this borrow ends.
+                if *esi != ZERO_ESI {
+                    vpws_mark_df_dirty(bgp.local_rib, esi);
+                }
                 let scope = if *eth_tag == MAX_ET {
                     None
                 } else {
@@ -8588,11 +8595,16 @@ fn route_evpn_export_selected(
         // re-selects. Either way the decision itself lives in
         // `vpws_rebind` — arrival never binds directly, because the route
         // that just arrived may lose to one already in the Loc-RIB.
-        EvpnPrefix::EthernetAd { eth_tag, .. } => {
+        EvpnPrefix::EthernetAd { esi, eth_tag } => {
             // A PE joined the segment (per-ES A-D) or an EVI on it (per-EVI
             // A-D): the aliasing nexthop groups gain a member — re-derived
-            // once this borrow ends (`Bgp::evpn_es_nhg_sync`).
+            // once this borrow ends (`Bgp::evpn_es_nhg_sync`) — and under
+            // AC-DF (RFC 8584 §4) that EVI's candidate list grows, so the
+            // segment re-elects.
             bgp.local_rib.es_nhg_dirty = true;
+            if *esi != ZERO_ESI {
+                vpws_mark_df_dirty(bgp.local_rib, esi);
+            }
             let scope = if *eth_tag == MAX_ET {
                 None
             } else {
@@ -17433,8 +17445,14 @@ impl Bgp {
         else {
             return;
         };
-        let wanted: std::collections::BTreeSet<u32> =
-            self.l2_port_evis.get(&ifindex).cloned().unwrap_or_default();
+        // A down port has no usable attachment circuit in any EVI: every
+        // per-EVI A-D comes off (RFC 8584 §4.1.2), its bridge membership
+        // notwithstanding, and goes back with the link.
+        let wanted: std::collections::BTreeSet<u32> = if self.links_down.contains(&port) {
+            Default::default()
+        } else {
+            self.l2_port_evis.get(&ifindex).cloned().unwrap_or_default()
+        };
         let segments: Vec<[u8; 10]> = self
             .ethernet_segments
             .values()
@@ -17529,6 +17547,14 @@ impl Bgp {
         if let Some(svc) = self.local_rib.evpn_vpws.services.get_mut(name) {
             svc.role = role;
             svc.df = df;
+        }
+        // RFC 8214 §3 / RFC 8584 §4.1.2: a service whose attachment circuit
+        // is down advertises nothing — the missing Type-1 is what tells the
+        // remote end, and the other PEs on the segment, to stop counting on
+        // it. `vpws_reconcile` withdrew it on the way here; `evpn_link_state`
+        // reconciles again when the link returns.
+        if self.vpws_ac_down(name) {
+            return;
         }
         // Per the afi-safi encapsulation: VXLAN advertises the service
         // VNI (the `vni` leaf, default the EVI); MPLS advertises a
@@ -17650,6 +17676,15 @@ impl Bgp {
             EsRedundancyMode::AllActive
         };
         let cands = self.es_df_candidates(&esi);
+        // RFC 8584 §4: with AC-DF in effect on the segment, a PE whose
+        // Type-1 for this service instance is missing has its attachment
+        // circuit down and is not a candidate for it.
+        let cands = match svc.evi {
+            Some(evi) if self.es_ac_df_in_effect(&esi) => {
+                self.es_ac_df_candidates(&cands, &esi, evi, local_id)
+            }
+            _ => cands,
+        };
         let me = self.evpn_local_source();
         // Inside the segment's startup hold this PE is deliberately missing
         // from `cands` — its Type-4 is suppressed — and `vpws_role` reads an
@@ -18069,6 +18104,7 @@ impl Bgp {
                 .and_then(|ifindex| self.l2_port_evis.get(ifindex));
             if let Some(vnis) = vnis {
                 let holding = self.es_holding(&esi);
+                let ac_df = self.es_ac_df_in_effect(&esi);
                 for &vni in vnis {
                     if u16::try_from(vni).is_err() {
                         // cradle's port bridge domain is a u16; the tee's
@@ -18080,9 +18116,19 @@ impl Bgp {
                         );
                         continue;
                     }
+                    // RFC 8584 §4: with AC-DF in effect this bridge
+                    // domain's candidates are only the PEs whose per-EVI
+                    // A-D for it is up.
+                    let narrowed;
+                    let bd_cands: &[super::ethernet_segment::DfCandidate] = if ac_df {
+                        narrowed = self.es_ac_df_candidates(&cands, &esi, vni, 0);
+                        &narrowed
+                    } else {
+                        &cands
+                    };
                     roles.insert(
                         vni,
-                        (elan_df(&cands, me, &esi, vni, holding), single_active),
+                        (elan_df(bd_cands, me, &esi, vni, holding), single_active),
                     );
                 }
             }
@@ -18167,13 +18213,194 @@ impl Bgp {
         self.evpn_originate_ethernet_ad_es(esi, vtep_local, single_active);
     }
 
-    /// True while the segment carrying `esi` is inside its startup hold
-    /// (`ethernet-segment <name> df-election startup-delay`).
+    /// True while the segment carrying `esi` is held out of the election:
+    /// inside its startup hold (`ethernet-segment <name> df-election
+    /// startup-delay`), or with its access port down (`links_down`). Both
+    /// withhold the ES routes and make this PE non-DF everywhere on the
+    /// segment.
     pub fn es_holding(&self, esi: &[u8; 10]) -> bool {
         let now = Instant::now();
-        self.ethernet_segments
+        self.ethernet_segments.values().any(|es| {
+            es.esi.as_ref() == Some(esi) && (es.is_holding_at(now) || self.es_port_down(es))
+        })
+    }
+
+    /// Whether segment `es`'s access port is a link we know to be down.
+    fn es_port_down(&self, es: &super::ethernet_segment::EthernetSegment) -> bool {
+        es.interface
+            .as_ref()
+            .is_some_and(|port| self.links_down.contains(port))
+    }
+
+    /// Whether VPWS service `name`'s attachment circuit is a link we know
+    /// to be down.
+    fn vpws_ac_down(&self, name: &str) -> bool {
+        self.local_rib
+            .evpn_vpws
+            .services
+            .get(name)
+            .and_then(|svc| svc.interface.as_ref())
+            .is_some_and(|ac| self.links_down.contains(ac))
+    }
+
+    /// `RibRx::LinkDown` / `LinkUp` / `LinkDel` by ifindex: resolve the name
+    /// and apply `evpn_link_state`. A link BGP never saw a `LinkAdd` for is
+    /// not ours to track.
+    pub fn evpn_link_ifindex_state(&mut self, ifindex: u32, up: bool) {
+        if let Some(name) =
+            super::ethernet_segment::ac_name_for_ifindex(ifindex, &self.link_index_by_name)
+        {
+            self.evpn_link_state(&name, up);
+        }
+    }
+
+    /// The EVPN access side of a link state change. An Ethernet Segment
+    /// whose port went down has lost the segment: its ES routes come off
+    /// the wire — the per-ES A-D withdrawal is the RFC 7432 §8.2 mass
+    /// withdraw, and the missing Type-4 takes this PE out of every other
+    /// PE's candidate set — exactly as the startup hold withholds them, and
+    /// they go back when the port returns. A VPWS service whose attachment
+    /// circuit went down withdraws its Type-1 (RFC 8214 §3); under RFC 8584
+    /// §4 AC-DF that withdrawal is what removes the PE from that service
+    /// instance's election on the other PEs. Idempotent: only a transition
+    /// does anything, so the `LinkAdd` re-publishes the RIB emits on every
+    /// flag change cost nothing.
+    pub fn evpn_link_state(&mut self, name: &str, up: bool) {
+        let changed = if up {
+            self.links_down.remove(name)
+        } else {
+            self.links_down.insert(name.to_string())
+        };
+        if !changed {
+            return;
+        }
+        let segments: Vec<([u8; 10], bool)> = self
+            .ethernet_segments
             .values()
-            .any(|es| es.esi.as_ref() == Some(esi) && es.is_holding_at(now))
+            .filter(|es| es.interface.as_deref() == Some(name))
+            .filter_map(|es| Some((es.esi?, es.redundancy_mode.single_active())))
+            .collect();
+        let services: Vec<String> = self
+            .local_rib
+            .evpn_vpws
+            .services
+            .iter()
+            .filter(|(_, svc)| svc.interface.as_deref() == Some(name))
+            .map(|(svc, _)| svc.clone())
+            .collect();
+        if segments.is_empty() && services.is_empty() {
+            return;
+        }
+        let me = self.evpn_local_source();
+        for (esi, single_active) in &segments {
+            if up {
+                // `evpn_originate_es_routes` still defers to a running
+                // startup hold; `es_hold_leave` originates then.
+                self.evpn_originate_es_routes(*esi, me, *single_active);
+                if let Some(ifindex) = self.link_index_by_name.get(name).copied() {
+                    self.evpn_reconcile_ad_evi_for_port(ifindex);
+                }
+            } else {
+                self.evpn_withdraw_es_routes(*esi, me);
+            }
+            vpws_mark_df_dirty(&mut self.local_rib, esi);
+            tracing::info!(
+                proto = "bgp",
+                category = "evpn",
+                port = %name,
+                esi = %bgp_packet::esi_display(esi),
+                "bgp: ethernet-segment port {}; ES routes {}",
+                if up { "up" } else { "down" },
+                if up { "re-originated" } else { "withdrawn" },
+            );
+        }
+        for svc in &services {
+            self.vpws_reconcile(svc);
+        }
+        self.vpws_df_drain();
+    }
+
+    /// RFC 8584 §4 AC-Influenced DF election: how many of the PEs on `esi`
+    /// — every selected Type-4, our own included — advertise the AC-DF
+    /// capability bit, and how many PEs there are. In effect only when the
+    /// two agree (`ethernet_segment::ac_df_in_effect`).
+    pub fn es_ac_df_bids(&self, esi: &[u8; 10]) -> (usize, usize) {
+        let (mut advertising, mut total) = (0usize, 0usize);
+        for table in self.local_rib.evpn.values() {
+            for (prefix, rib) in table.selected.iter() {
+                if let EvpnPrefix::EthernetSeg { esi: e, .. } = prefix
+                    && e == esi
+                {
+                    total += 1;
+                    let ac_df = rib
+                        .attr
+                        .ecom
+                        .as_ref()
+                        .and_then(|ec| ec.0.iter().find_map(|v| v.as_df_election()))
+                        .is_some_and(|d| d.ac_df());
+                    if ac_df {
+                        advertising += 1;
+                    }
+                }
+            }
+        }
+        (advertising, total)
+    }
+
+    /// Whether AC-DF is in effect on `esi`: every PE on it advertises it.
+    pub fn es_ac_df_in_effect(&self, esi: &[u8; 10]) -> bool {
+        let (advertising, total) = self.es_ac_df_bids(esi);
+        super::ethernet_segment::ac_df_in_effect(advertising, total)
+    }
+
+    /// The PEs whose per-EVI A-D for `(esi, evi, eth_tag)` is selected —
+    /// the attachment circuits that are up, in AC-DF terms. Identified the
+    /// way the aliasing sync identifies them: a received route's next hop
+    /// is the PE (its Type-4 Originating IP, the RFC 7432 §7.4 VTEP), and
+    /// our own originated route is `me`.
+    fn es_ad_evi_pes(
+        &self,
+        esi: &[u8; 10],
+        evi: u32,
+        eth_tag: u32,
+        me: IpAddr,
+    ) -> BTreeSet<IpAddr> {
+        let mut pes = BTreeSet::new();
+        for table in self.local_rib.evpn.values() {
+            for (prefix, rib) in table.selected.iter() {
+                let EvpnPrefix::EthernetAd { esi: e, eth_tag: t } = prefix else {
+                    continue;
+                };
+                if e != esi || *t != eth_tag || extract_vni_from_attr(&rib.attr) != Some(evi) {
+                    continue;
+                }
+                if rib.typ == BgpRibType::Originated {
+                    pes.insert(me);
+                } else if let Some(BgpNexthop::Evpn(nh)) = rib.attr.nexthop {
+                    pes.insert(nh);
+                }
+            }
+        }
+        pes
+    }
+
+    /// `cands` narrowed for one `(EVI, Ethernet Tag)` per RFC 8584 §4.1: a
+    /// PE stays a candidate only with a live per-ES A-D and a selected
+    /// per-EVI A-D for it. This PE always counts — the callers elect for
+    /// EVIs this PE is advertising for. Meaningful only once
+    /// `es_ac_df_in_effect`; a segment without unanimous AC-DF elects over
+    /// the plain Type-4 set.
+    pub fn es_ac_df_candidates(
+        &self,
+        cands: &[super::ethernet_segment::DfCandidate],
+        esi: &[u8; 10],
+        evi: u32,
+        eth_tag: u32,
+    ) -> Vec<super::ethernet_segment::DfCandidate> {
+        let me = self.evpn_local_source();
+        let live = vpws_es_live_pes(&self.local_rib, esi);
+        let ad_evi = self.es_ad_evi_pes(esi, evi, eth_tag, me);
+        super::ethernet_segment::ac_df_filter(cands, me, &live, &ad_evi)
     }
 
     /// Put segment `name` into its startup hold, if one is configured and is
