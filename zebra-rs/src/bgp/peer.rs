@@ -610,6 +610,12 @@ pub struct PeerConfig {
     /// that forwards routes without prepending its AS. Ignored for iBGP
     /// peers (which never prepend). Default `false`.
     pub enforce_first_as: bool,
+    /// RFC 9234 `otc-local-role` (zebra-bgp-otc.yang, IOS XR syntax):
+    /// the local BGP Role toward this neighbor and whether strict mode
+    /// is on. `None` = roles not configured (no Role capability sent,
+    /// no role check on the peer's OPEN, no OTC processing). Ignored on
+    /// iBGP sessions.
+    pub otc_local_role: Option<OtcLocalRole>,
     /// Per-neighbor `local-as` (zebra-bgp-local-as.yang). `None` runs
     /// the session under the router's global AS; `Some` presents the
     /// substitute AS to this neighbor (see [`LocalAs`]).
@@ -658,6 +664,91 @@ impl PeerConfig {
     }
 }
 
+/// RFC 9234 BGP Role configured toward one neighbor —
+/// `neighbor X otc-local-role <role> [strict]` (zebra-bgp-otc.yang,
+/// Cisco IOS XR syntax).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OtcLocalRole {
+    /// The local speaker's role, advertised in the OPEN as the Role
+    /// capability (code 9) on eBGP sessions.
+    pub role: BgpRole,
+    /// Strict mode (RFC 9234 §4.2): a neighbor that sends no Role
+    /// capability is rejected with a Role Mismatch NOTIFICATION instead
+    /// of having its role inferred from ours.
+    pub strict: bool,
+}
+
+impl OtcLocalRole {
+    /// IOS XR `show bgp neighbor` spelling of the mode.
+    pub fn mode_str(&self) -> &'static str {
+        if self.strict { "Strict" } else { "Loose" }
+    }
+}
+
+/// Why the peer's OPEN failed the RFC 9234 §4.2 role check. Kept on the
+/// peer after the Role Mismatch NOTIFICATION so `show bgp neighbor` can
+/// explain a session that never reaches Established.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OtcRoleMismatch {
+    /// Both sides sent a role and the pair is not one of
+    /// provider/customer, route-server/route-server-client, peer/peer.
+    Pair { local: BgpRole, received: BgpRole },
+    /// The peer sent a role value outside the IANA-assigned 0–4.
+    Unassigned(u8),
+    /// Strict mode and the peer sent no Role capability.
+    Absent,
+    /// The peer sent several Role capabilities with different values.
+    Conflict,
+}
+
+impl std::fmt::Display for OtcRoleMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pair { local, received } => {
+                write!(f, "received {received}, local {local} (not a valid pair)")
+            }
+            Self::Unassigned(v) => write!(f, "received unassigned role value {v}"),
+            Self::Absent => write!(f, "no BGP Role capability received (strict mode)"),
+            Self::Conflict => write!(f, "conflicting BGP Role capabilities received"),
+        }
+    }
+}
+
+/// RFC 9234 §4.2 role correctness of a received OPEN against the local
+/// `otc-local-role`. `Ok` when roles are not configured locally, on an
+/// iBGP session (roles are defined for eBGP only), when the received
+/// role forms a valid pair with ours, or — in loose mode — when the peer
+/// sent no Role capability at all (its role is then inferred from ours).
+/// Every `Err` is answered with a Role Mismatch NOTIFICATION (OPEN
+/// Message Error, subcode 11).
+pub fn otc_role_check(
+    local: Option<OtcLocalRole>,
+    is_ebgp: bool,
+    caps: &BgpCap,
+) -> Result<(), OtcRoleMismatch> {
+    let Some(local) = local else {
+        return Ok(());
+    };
+    if !is_ebgp {
+        return Ok(());
+    }
+    if caps.role_conflict {
+        return Err(OtcRoleMismatch::Conflict);
+    }
+    match caps.role {
+        Some(cap) => match cap.role() {
+            Some(received) if local.role.pairs_with(received) => Ok(()),
+            Some(received) => Err(OtcRoleMismatch::Pair {
+                local: local.role,
+                received,
+            }),
+            None => Err(OtcRoleMismatch::Unassigned(cap.value)),
+        },
+        None if local.strict => Err(OtcRoleMismatch::Absent),
+        None => Ok(()),
+    }
+}
+
 impl Default for PeerConfig {
     fn default() -> Self {
         Self {
@@ -685,6 +776,7 @@ impl Default for PeerConfig {
             as_override: false,
             remove_private_as: None,
             enforce_first_as: false,
+            otc_local_role: None,
             local_as: None,
             attach_unknown_attr: None,
             description: None,
@@ -999,6 +1091,11 @@ pub struct Peer {
     /// Survives re-establishment (FRR semantics: it describes the
     /// *last* reset, not the current session).
     pub last_reset: Option<(PeerDownReason, Instant)>,
+    /// Why the last received OPEN failed the RFC 9234 role check (a
+    /// Role Mismatch NOTIFICATION was sent). Cleared when an OPEN passes
+    /// the check. Surfaced by `show bgp neighbor`, since a session that
+    /// never reaches Established leaves no `last_reset`.
+    pub otc_role_mismatch: Option<OtcRoleMismatch>,
     pub peer_type: PeerType,
     /// RFC 9572 §6.1 region identifier, resolved from this peer's
     /// neighbor-group (`region-id`) by `apply_inherited`. `Some` marks the
@@ -1233,6 +1330,7 @@ impl Peer {
             session_ifindex: None,
             down_reason: None,
             last_reset: None,
+            otc_role_mismatch: None,
             peer_type: PeerType::IBGP,
             region_id: None,
             state: State::Idle,
@@ -1396,6 +1494,23 @@ impl Peer {
 
     pub fn is_ibgp(&self) -> bool {
         self.peer_type.is_ibgp()
+    }
+
+    /// The neighbor's RFC 9234 role as this session sees it, with its
+    /// provenance for `show bgp neighbor`: `"received"` when the peer
+    /// sent a Role capability on the current session, `"inferred"` (the
+    /// counterpart of our role, loose mode) otherwise. `None` unless an
+    /// `otc-local-role` is configured on an eBGP session.
+    pub fn otc_remote_role(&self) -> Option<(BgpRole, &'static str)> {
+        let local = self.config.otc_local_role?;
+        if !self.is_ebgp() {
+            return None;
+        }
+        let negotiated = self.state.is_established() || matches!(self.state, State::OpenConfirm);
+        match self.cap_recv.role.and_then(|cap| cap.role()) {
+            Some(received) if negotiated => Some((received, "received")),
+            _ => Some((local.role.counterpart(), "inferred")),
+        }
     }
 
     /// The active `local-as` substitute for this session, if any.
@@ -2259,6 +2374,37 @@ pub fn fsm_bgp_open(peer: &mut Peer, conn: ConnTag, packet: OpenPacket) -> State
         );
         return State::Idle;
     }
+
+    // RFC 9234 §4.2 role correctness. Same connection-tag split as the
+    // AS check above: a failing collision conn is torn down alone, a
+    // failing primary conn takes the session to Idle.
+    if let Err(mismatch) =
+        otc_role_check(peer.config.otc_local_role, peer.is_ebgp(), &packet.bgp_cap)
+    {
+        tracing::warn!(
+            peer = %peer.display_name(),
+            "bgp: OTC role mismatch — {mismatch}; sending Role Mismatch NOTIFICATION",
+        );
+        peer.otc_role_mismatch = Some(mismatch);
+        if conn == ConnTag::Collision
+            && let Some(collision) = peer.collision.take()
+        {
+            close_collision(
+                collision,
+                NotifyCode::OpenMsgError,
+                OpenError::RoleMismatch.into(),
+            );
+            return peer.state;
+        }
+        peer_send_notification(
+            peer,
+            NotifyCode::OpenMsgError,
+            OpenError::RoleMismatch.into(),
+            Vec::new(),
+        );
+        return State::Idle;
+    }
+    peer.otc_role_mismatch = None;
 
     if peer.state != State::OpenSent && peer.state != State::OpenConfirm {
         // OPEN in an unexpected state — discard.
@@ -3124,6 +3270,14 @@ fn build_open_packet(peer: &mut Peer) -> BytesMut {
         // FQDN capability (draft-walton, code 73). Domain name is left
         // empty for now — operators have only asked for hostname.
         bgp_cap.fqdn = Some(CapFqdn::new(name, ""));
+    }
+    // RFC 9234 §4.1: "If the BGP Role is locally configured, the eBGP
+    // speaker MUST advertise the BGP Role Capability". Roles are
+    // defined for eBGP only, so an iBGP session never carries one.
+    if peer.is_ebgp()
+        && let Some(local) = peer.config.otc_local_role
+    {
+        bgp_cap.role = Some(CapRole::new(local.role));
     }
     for (key, addpath) in peer.config.addpath.iter() {
         // RFC 7911 §3: a negotiated Send obliges us to stamp a path-id
@@ -5331,5 +5485,204 @@ mod holdtimer_starvation_tests {
         assert_eq!(next, State::Idle, "stale UPDATE must not resurrect");
         assert!(matches!(effect, FsmEffect::None));
         assert_eq!(peer.counter[BgpType::Update as usize].rcvd, 0);
+    }
+}
+
+#[cfg(test)]
+mod otc_role_tests {
+    use super::*;
+    use tokio::sync::mpsc;
+
+    /// Peer in OpenSent with the given `otc-local-role`. `remote_as`
+    /// 65002 makes it eBGP (local AS is 65001), 65001 makes it iBGP.
+    fn opensent_peer(remote_as: u32, role: Option<OtcLocalRole>) -> Peer {
+        let (tx, rx) = mpsc::channel::<Message>(64);
+        Box::leak(Box::new(rx));
+        let mut peer = Peer::new(
+            1,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            remote_as,
+            "10.0.0.2".parse().unwrap(),
+            None,
+            tx,
+            crate::context::ProtoContext::default_table_no_rib(),
+        );
+        peer.config.otc_local_role = role;
+        // `Peer::new` leaves the session type to the `remote-as`
+        // callback; derive it here the way that callback would.
+        peer.peer_type = if remote_as == 65001 {
+            PeerType::IBGP
+        } else {
+            PeerType::EBGP
+        };
+        peer.state = State::OpenSent;
+        let _ = build_open_packet(&mut peer);
+        peer
+    }
+
+    fn open_from(my_as: u16, bgp_cap: BgpCap) -> OpenPacket {
+        let header = BgpHeader::new(BgpType::Open, BGP_HEADER_LEN + 10);
+        OpenPacket::new(header, my_as, 180, &Ipv4Addr::new(2, 2, 2, 2), bgp_cap)
+    }
+
+    /// An OPEN from the eBGP neighbor (AS 65002).
+    fn open_with(bgp_cap: BgpCap) -> OpenPacket {
+        open_from(65002, bgp_cap)
+    }
+
+    fn caps_with_role(role: BgpRole) -> BgpCap {
+        BgpCap {
+            role: Some(CapRole::new(role)),
+            ..Default::default()
+        }
+    }
+
+    fn customer(strict: bool) -> Option<OtcLocalRole> {
+        Some(OtcLocalRole {
+            role: BgpRole::Customer,
+            strict,
+        })
+    }
+
+    /// RFC 9234 §4.1: a configured role is advertised on eBGP.
+    #[tokio::test]
+    async fn ebgp_open_advertises_configured_role() {
+        let peer = opensent_peer(65002, customer(false));
+        assert_eq!(
+            peer.cap_send.role.and_then(|c| c.role()),
+            Some(BgpRole::Customer)
+        );
+    }
+
+    /// Roles are defined for eBGP only: an iBGP OPEN carries none even
+    /// when the knob is set, and the peer's role is never checked.
+    #[tokio::test]
+    async fn ibgp_session_neither_sends_nor_checks_roles() {
+        let mut peer = opensent_peer(65001, customer(true));
+        assert!(peer.cap_send.role.is_none());
+        let next = fsm_bgp_open(
+            &mut peer,
+            ConnTag::Primary,
+            open_from(65001, caps_with_role(BgpRole::Customer)),
+        );
+        assert_eq!(next, State::OpenConfirm);
+        assert_eq!(peer.otc_remote_role(), None);
+    }
+
+    /// Provider<->Customer is a valid pair (§4.2 Table 2).
+    #[tokio::test]
+    async fn valid_pair_proceeds_with_received_role() {
+        let mut peer = opensent_peer(65002, customer(true));
+        let next = fsm_bgp_open(
+            &mut peer,
+            ConnTag::Primary,
+            open_with(caps_with_role(BgpRole::Provider)),
+        );
+        assert_eq!(next, State::OpenConfirm);
+        assert_eq!(peer.otc_role_mismatch, None);
+        peer.state = State::OpenConfirm;
+        assert_eq!(
+            peer.otc_remote_role(),
+            Some((BgpRole::Provider, "received"))
+        );
+    }
+
+    /// Customer<->Customer is not: Role Mismatch, session to Idle.
+    #[tokio::test]
+    async fn invalid_pair_is_role_mismatch() {
+        let mut peer = opensent_peer(65002, customer(false));
+        let next = fsm_bgp_open(
+            &mut peer,
+            ConnTag::Primary,
+            open_with(caps_with_role(BgpRole::Customer)),
+        );
+        assert_eq!(next, State::Idle);
+        assert_eq!(
+            peer.otc_role_mismatch,
+            Some(OtcRoleMismatch::Pair {
+                local: BgpRole::Customer,
+                received: BgpRole::Customer,
+            })
+        );
+    }
+
+    /// Loose mode (§4.2 backward compatibility): no Role capability
+    /// from the peer is tolerated and its role inferred from ours.
+    #[tokio::test]
+    async fn loose_mode_infers_absent_role() {
+        let mut peer = opensent_peer(65002, customer(false));
+        let next = fsm_bgp_open(&mut peer, ConnTag::Primary, open_with(BgpCap::default()));
+        assert_eq!(next, State::OpenConfirm);
+        peer.state = State::OpenConfirm;
+        assert_eq!(
+            peer.otc_remote_role(),
+            Some((BgpRole::Provider, "inferred"))
+        );
+    }
+
+    /// Strict mode: a missing Role capability is a Role Mismatch.
+    #[tokio::test]
+    async fn strict_mode_rejects_absent_role() {
+        let mut peer = opensent_peer(65002, customer(true));
+        let next = fsm_bgp_open(&mut peer, ConnTag::Primary, open_with(BgpCap::default()));
+        assert_eq!(next, State::Idle);
+        assert_eq!(peer.otc_role_mismatch, Some(OtcRoleMismatch::Absent));
+    }
+
+    /// §4.2: differing duplicate Role capabilities are rejected.
+    #[tokio::test]
+    async fn conflicting_role_capabilities_rejected() {
+        let mut peer = opensent_peer(65002, customer(false));
+        let mut caps = caps_with_role(BgpRole::Provider);
+        caps.role_conflict = true;
+        let next = fsm_bgp_open(&mut peer, ConnTag::Primary, open_with(caps));
+        assert_eq!(next, State::Idle);
+        assert_eq!(peer.otc_role_mismatch, Some(OtcRoleMismatch::Conflict));
+    }
+
+    /// An unassigned role value pairs with nothing.
+    #[tokio::test]
+    async fn unassigned_role_value_rejected() {
+        let mut peer = opensent_peer(65002, customer(false));
+        let caps = BgpCap {
+            role: Some(CapRole { value: 7 }),
+            ..Default::default()
+        };
+        let next = fsm_bgp_open(&mut peer, ConnTag::Primary, open_with(caps));
+        assert_eq!(next, State::Idle);
+        assert_eq!(peer.otc_role_mismatch, Some(OtcRoleMismatch::Unassigned(7)));
+    }
+
+    /// Without a local role the peer's Role capability is simply
+    /// ignored — today's behaviour for every existing deployment.
+    #[tokio::test]
+    async fn no_local_role_ignores_peer_role() {
+        let mut peer = opensent_peer(65002, None);
+        assert!(peer.cap_send.role.is_none());
+        let next = fsm_bgp_open(
+            &mut peer,
+            ConnTag::Primary,
+            open_with(caps_with_role(BgpRole::Customer)),
+        );
+        assert_eq!(next, State::OpenConfirm);
+        assert_eq!(peer.otc_role_mismatch, None);
+        assert_eq!(peer.otc_remote_role(), None);
+    }
+
+    /// A mismatch recorded by one OPEN is cleared by a later good one.
+    #[tokio::test]
+    async fn passing_open_clears_recorded_mismatch() {
+        let mut peer = opensent_peer(65002, customer(true));
+        let _ = fsm_bgp_open(&mut peer, ConnTag::Primary, open_with(BgpCap::default()));
+        assert!(peer.otc_role_mismatch.is_some());
+        peer.state = State::OpenSent;
+        let next = fsm_bgp_open(
+            &mut peer,
+            ConnTag::Primary,
+            open_with(caps_with_role(BgpRole::Provider)),
+        );
+        assert_eq!(next, State::OpenConfirm);
+        assert_eq!(peer.otc_role_mismatch, None);
     }
 }

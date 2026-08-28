@@ -3100,6 +3100,12 @@ struct Neighbor<'a> {
     /// UPDATE is dropped unless its AS_PATH begins with this neighbor's
     /// own AS.
     enforce_first_as: bool,
+    /// RFC 9234 `otc-local-role` (zebra-bgp-otc.yang): local mode/role,
+    /// the neighbor's role as negotiated or inferred, and the reason the
+    /// last OPEN failed the role check, if it did. `None` when the knob
+    /// is not configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    otc: Option<OtcRoleView>,
     /// `afi-safi ipv6 encapsulation-type` (ietf-bgp-neighbor): the SRv6
     /// encapsulation mode configured for the IPv6 unicast family on this
     /// neighbor. `None` = unset.
@@ -3321,6 +3327,21 @@ fn uptime(instant: &Option<Instant>) -> String {
     peer_uptime(instant, false).0
 }
 
+/// `show bgp neighbor` view of the RFC 9234 role state
+/// ([`crate::bgp::peer::PeerConfig::otc_local_role`]). Strings use the
+/// IOS XR spellings (`Loose`/`Strict`, `Provider`, `received`/`inferred`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct OtcRoleView {
+    local_mode: &'static str,
+    local_role: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote_role: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote_role_source: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mismatch: Option<String>,
+}
+
 /// `show bgp neighbor` view of [`Peer::last_reset`].
 #[derive(Debug, Serialize)]
 struct LastReset {
@@ -3398,6 +3419,16 @@ fn fetch(peer: &Peer) -> Neighbor<'_> {
         local_as_config: peer.config.local_as,
         local_as_dual_fallback: peer.local_as_dual_fallback,
         enforce_first_as: peer.config.enforce_first_as,
+        otc: peer.config.otc_local_role.map(|local| {
+            let remote = peer.otc_remote_role();
+            OtcRoleView {
+                local_mode: local.mode_str(),
+                local_role: local.role.as_str(),
+                remote_role: remote.map(|(role, _)| role.as_str()),
+                remote_role_source: remote.map(|(_, source)| source),
+                mismatch: peer.otc_role_mismatch.map(|m| m.to_string()),
+            }
+        }),
         encapsulation_type_ipv6: peer
             .config
             .sub
@@ -3645,6 +3676,27 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
         )?;
     }
 
+    // RFC 9234 roles — the IOS XR `show bgp neighbor detail` lines,
+    // spelling included, so XR-trained eyes and scripts find them.
+    if let Some(otc) = &neighbor.otc {
+        writeln!(out, "  OTC Local Mode: {}", otc.local_mode)?;
+        write!(out, "  OTC Local Role : {}", otc.local_role)?;
+        if otc.remote_role.is_none() && neighbor.peer_type == "internal" {
+            // Stored but inert: RFC 9234 defines roles for eBGP only.
+            write!(out, " (ignored on iBGP)")?;
+        }
+        writeln!(out)?;
+        if let (Some(role), Some(source)) = (otc.remote_role, otc.remote_role_source) {
+            writeln!(out, "  OTC Remote Role: {role} ({source})")?;
+        }
+        if let Some(mismatch) = &otc.mismatch {
+            writeln!(
+                out,
+                "  OTC Role Mismatch: {mismatch} (sent Role Mismatch NOTIFICATION)"
+            )?;
+        }
+    }
+
     if let Some(encap) = neighbor.encapsulation_type_ipv6 {
         writeln!(out, "  IPv6 Unicast encapsulation-type: {}", encap.as_str())?;
     }
@@ -3738,6 +3790,23 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
                     write!(out, " and")?;
                 }
                 write!(out, " received")?;
+            }
+            writeln!(out)?;
+        }
+
+        // RFC 9234 Role capability (IOS XR calls the row "OTC Role").
+        if neighbor.cap_send.role.is_some() || neighbor.cap_recv.role.is_some() {
+            let name =
+                |cap: &bgp_packet::CapRole| cap.role().map(|r| r.as_str()).unwrap_or("unassigned");
+            write!(out, "    OTC Role:")?;
+            if let Some(v) = &neighbor.cap_send.role {
+                write!(out, " advertised ({})", name(v))?;
+            }
+            if let Some(v) = &neighbor.cap_recv.role {
+                if neighbor.cap_send.role.is_some() {
+                    write!(out, " and")?;
+                }
+                write!(out, " received ({})", name(v))?;
             }
             writeln!(out)?;
         }
@@ -6229,6 +6298,7 @@ Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down Sta
             local_as_config: None,
             local_as_dual_fallback: false,
             enforce_first_as: false,
+            otc: None,
             encapsulation_type_ipv6: None,
             ttl_security: false,
             ebgp_multihop: None,
@@ -7774,8 +7844,17 @@ struct NeighborGroupKnobsJson {
     remove_private_as: Option<RemovePrivateAs>,
     #[serde(skip_serializing_if = "Option::is_none")]
     enforce_first_as: Option<bool>,
+    /// Serializes as `{"role":"customer","strict":bool}`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    otc_local_role: Option<OtcLocalRoleJson>,
     #[serde(skip_serializing_if = "Option::is_none")]
     route_reflector_client: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct OtcLocalRoleJson {
+    role: &'static str,
+    strict: bool,
 }
 
 impl NeighborGroupKnobsJson {
@@ -7798,6 +7877,10 @@ impl NeighborGroupKnobsJson {
             as_override: k.as_override,
             remove_private_as: k.remove_private_as,
             enforce_first_as: k.enforce_first_as,
+            otc_local_role: k.otc_local_role.map(|r| OtcLocalRoleJson {
+                role: r.role.cli_name(),
+                strict: r.strict,
+            }),
             route_reflector_client: k.route_reflector_client,
         }
     }
@@ -8038,6 +8121,10 @@ fn show_bgp_neighbor_group_detail(
     }
     if k.enforce_first_as == Some(true) {
         writeln!(buf, "  Enforce-first-as: enabled")?;
+    }
+    if let Some(r) = k.otc_local_role {
+        let mode = if r.strict { ", strict" } else { "" };
+        writeln!(buf, "  OTC local role: {}{mode}", r.role.as_str())?;
     }
     if let Some(v) = k.route_reflector_client {
         writeln!(buf, "  Route-reflector-client: {v}")?;

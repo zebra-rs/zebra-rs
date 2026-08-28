@@ -113,6 +113,8 @@
 /router/bgp/neighbor-group/ebgp-multihop	leaf
 /router/bgp/neighbor-group/enforce-first-as	p-container
 /router/bgp/neighbor-group/ip-transparent	p-container
+/router/bgp/neighbor-group/otc-local-role	list keys=role
+/router/bgp/neighbor-group/otc-local-role/strict	leaf
 /router/bgp/neighbor-group/passive	leaf
 /router/bgp/neighbor-group/password	leaf
 /router/bgp/neighbor-group/policy	container
@@ -179,6 +181,8 @@
 /router/bgp/neighbor/local-as/replace-as	leaf
 /router/bgp/neighbor/local-identifier	leaf
 /router/bgp/neighbor/neighbor-group	leaf
+/router/bgp/neighbor/otc-local-role	list keys=role
+/router/bgp/neighbor/otc-local-role/strict	leaf
 /router/bgp/neighbor/password	leaf
 /router/bgp/neighbor/pic-retention	p-container
 /router/bgp/neighbor/port	leaf
@@ -359,6 +363,8 @@
 /router/bgp/vrf/neighbor/enforce-first-as	p-container
 /router/bgp/vrf/neighbor/ip-transparent	p-container
 /router/bgp/vrf/neighbor/neighbor-group	leaf
+/router/bgp/vrf/neighbor/otc-local-role	list keys=role
+/router/bgp/vrf/neighbor/otc-local-role/strict	leaf
 /router/bgp/vrf/neighbor/password	leaf
 /router/bgp/vrf/neighbor/port	leaf
 /router/bgp/vrf/neighbor/remote-as	leaf

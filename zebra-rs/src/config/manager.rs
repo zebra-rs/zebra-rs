@@ -2929,6 +2929,59 @@ mod yang_load_tests {
         }
     }
 
+    /// RFC 9234 `otc-local-role` (zebra-bgp-otc.yang): the list keyed by
+    /// an enumeration and its `strict` empty leaf must parse as settable
+    /// paths on the global neighbor, the neighbor-group and the VRF
+    /// neighbor — in IOS XR spelling (`otc-local-role customer strict`).
+    /// Pinned because the module only reaches the schema through
+    /// config.yang's import list and the group / VRF copies are separate
+    /// YANG text that could drift.
+    #[test]
+    fn bgp_neighbor_otc_local_role_paths_parse() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .unwrap_or_else(|e| panic!("configure failed to load: {e:#}"));
+        yang.identity_resolve();
+        let module = yang.find_module("configure").unwrap();
+        let entry = to_entry(&yang, module);
+
+        for cmd in [
+            "set router bgp neighbor 192.168.1.3 otc-local-role customer",
+            "set router bgp neighbor 192.168.1.3 otc-local-role provider strict",
+            "set router bgp neighbor 192.168.1.3 otc-local-role peer",
+            "set router bgp neighbor 192.168.1.3 otc-local-role route-server-client",
+            "set router bgp neighbor 192.168.1.3 otc-local-role route-server",
+            "set router bgp neighbor-group G otc-local-role customer strict",
+            "set router bgp vrf RED neighbor 192.168.1.3 otc-local-role customer",
+            "set router bgp vrf RED neighbor 192.168.1.3 otc-local-role provider strict",
+        ] {
+            let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(
+                code,
+                ExecCode::Success,
+                "should parse as a settable path: {cmd}"
+            );
+        }
+
+        // A token outside the enumeration must not parse.
+        let (code, _comps, _state) = parse(
+            "set router bgp neighbor 192.168.1.3 otc-local-role rs-server",
+            entry.clone(),
+            None,
+            State::new(),
+        );
+        assert_ne!(
+            code,
+            ExecCode::Success,
+            "rs-server is not an otc-local-role"
+        );
+    }
+
     /// Grammar-rot guard for the per-neighbor `capability four-octet`
     /// knob (zebra-bgp-capability.yang). The augment reaches the schema
     /// only through config.yang's import list — dropping the import
@@ -4346,6 +4399,8 @@ mod yang_load_tests {
             "set router bgp neighbor-group G remove-private-as all",
             "set router bgp neighbor-group G remove-private-as replace-as",
             "set router bgp neighbor-group G enforce-first-as",
+            "set router bgp neighbor-group G otc-local-role customer",
+            "set router bgp neighbor-group G otc-local-role provider strict",
             "set router bgp neighbor-group G policy in PL-IN",
             "set router bgp neighbor-group G policy out PL-OUT",
             "set router bgp neighbor-group G prefix-set in PS-IN",

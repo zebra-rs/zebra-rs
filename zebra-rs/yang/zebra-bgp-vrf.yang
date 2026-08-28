@@ -368,6 +368,32 @@ module zebra-bgp-vrf {
            segment begins with the CE's own AS. No-op for iBGP. Same as
            the global neighbor.";
       }
+      list otc-local-role {
+        key "role";
+        max-elements 1;
+        ext:help "RFC 9234 BGP Role toward this CE (route-leak prevention)";
+        description
+          "RFC 9234 local BGP Role for this eBGP session, IOS XR
+           `otc-local-role` syntax. Single-instance. Same as the global
+           neighbor (zebra-bgp-otc.yang).";
+        leaf role {
+          ext:help "Local role: customer, provider, peer, route-server-client or route-server";
+          type enumeration {
+            enum customer;
+            enum provider;
+            enum peer;
+            enum route-server-client;
+            enum route-server;
+          }
+        }
+        leaf strict {
+          ext:help "Require the CE to send its BGP Role (strict mode)";
+          type empty;
+          description
+            "Reject the session with a Role Mismatch NOTIFICATION when
+             the CE sends no BGP Role capability.";
+        }
+      }
       container route-reflector {
         ext:help "Route-reflector settings for this CE";
         leaf client {
