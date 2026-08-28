@@ -43,5 +43,8 @@ pub use path_limit::{CapPathLimit, PathLimitValue};
 pub mod unknown;
 pub use unknown::CapUnknown;
 
+pub mod role;
+pub use role::{BgpRole, CapRole, ParseBgpRoleError};
+
 pub mod emit;
 pub use emit::CapEmit;

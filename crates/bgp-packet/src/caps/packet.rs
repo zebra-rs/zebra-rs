@@ -55,6 +55,8 @@ pub enum CapabilityPacket {
     RouteRefreshCisco(CapRefreshCisco),
     #[nom(Selector = "CapCode::LlgrOld")]
     LlgrOld(CapLlgr),
+    #[nom(Selector = "CapCode::Role")]
+    Role(CapRole),
     #[nom(Selector = "_")]
     Unknown(CapUnknown),
 }
@@ -64,7 +66,17 @@ impl CapabilityPacket {
         let (input, cap_header) = CapabilityHeader::parse_be(input)?;
         let len = cap_header.length as usize;
         let (input, cap) = packet_utils::safe_split_at(input, len)?;
-        let (remaining, mut cap) = CapabilityPacket::parse_be(cap, cap_header.code.into())?;
+        // RFC 9234 §4.1: the Role capability value is exactly one octet.
+        // Any other length is malformed, but failing the whole OPEN over it
+        // would reset a session RFC 5492 says to keep (unusable
+        // capabilities are ignored). Route it through the opaque `Unknown`
+        // passthrough instead, so the session logic sees "no role
+        // received" — which strict mode then rejects on its own terms.
+        let mut code: CapCode = cap_header.code.into();
+        if code == CapCode::Role && len != 1 {
+            code = CapCode::Unknown(cap_header.code);
+        }
+        let (remaining, mut cap) = CapabilityPacket::parse_be(cap, code)?;
         if !remaining.is_empty() {
             return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue)));
         }
@@ -118,6 +130,9 @@ impl CapabilityPacket {
             Self::PathLimit(m) => {
                 m.emit(buf, false);
             }
+            Self::Role(m) => {
+                m.emit(buf, false);
+            }
             Self::RouteRefreshCisco(m) => {
                 m.emit(buf, false);
             }
@@ -149,6 +164,7 @@ impl fmt::Display for CapabilityPacket {
             Self::PathLimit(v) => write!(f, "{}", v),
             Self::RouteRefreshCisco(v) => write!(f, "{}", v),
             Self::LlgrOld(v) => write!(f, "{}", v),
+            Self::Role(v) => write!(f, "{}", v),
             Self::Unknown(v) => write!(f, "{}", v),
         }
     }
@@ -159,20 +175,22 @@ mod tests {
     use super::*;
     use crate::CapEmit;
 
-    // RFC 9234 Role capability: code 9, length 1, one value octet. zebra-rs has
-    // no explicit `CapabilityPacket` arm for it, so it must fall through to the
-    // opaque `Unknown` passthrough and parse without error (RFC 5492 requires
-    // ignoring unknown capabilities). Regression: the old `CapUnknown` re-read a
-    // 2-byte header from the 1-byte value and failed the whole OPEN.
+    // A one-octet capability with an unassigned code (200) has no
+    // `CapabilityPacket` arm, so it must fall through to the opaque `Unknown`
+    // passthrough and parse without error (RFC 5492 requires ignoring unknown
+    // capabilities). Regression: the old `CapUnknown` re-read a 2-byte header
+    // from the 1-byte value and failed the whole OPEN. (This test used the
+    // RFC 9234 Role capability, code 9, as its example until that grew a
+    // typed arm — see `role_capability_parses_to_typed_variant`.)
     #[test]
     fn unknown_short_capability_parses_and_round_trips() {
-        let wire = [9u8, 1, 0x03]; // code=9 (Role), len=1, value=0x03
+        let wire = [200u8, 1, 0x03]; // code=200 (unassigned), len=1
         let (rest, cap) = CapabilityPacket::parse_cap(&wire).unwrap();
         assert!(rest.is_empty());
         let CapabilityPacket::Unknown(u) = &cap else {
             panic!("expected Unknown, got {cap:?}");
         };
-        assert_eq!(u.code, 9);
+        assert_eq!(u.code, 200);
         assert_eq!(u.data, vec![0x03]);
 
         // Grouped re-emit (code + length + value) preserves the code and value.
@@ -185,14 +203,46 @@ mod tests {
     // rather than error on the missing header.
     #[test]
     fn unknown_zero_length_capability_parses() {
-        let wire = [9u8, 0]; // code=9, len=0, no value
+        let wire = [200u8, 0]; // code=200, len=0, no value
         let (rest, cap) = CapabilityPacket::parse_cap(&wire).unwrap();
         assert!(rest.is_empty());
         let CapabilityPacket::Unknown(u) = &cap else {
             panic!("expected Unknown");
         };
-        assert_eq!(u.code, 9);
+        assert_eq!(u.code, 200);
         assert!(u.data.is_empty());
+    }
+
+    // RFC 9234 §4.1 Role capability: code 9, length 1, one value octet.
+    #[test]
+    fn role_capability_parses_to_typed_variant() {
+        let wire = [9u8, 1, 0x03]; // Customer
+        let (rest, cap) = CapabilityPacket::parse_cap(&wire).unwrap();
+        assert!(rest.is_empty());
+        let CapabilityPacket::Role(role) = &cap else {
+            panic!("expected Role, got {cap:?}");
+        };
+        assert_eq!(role.role(), Some(crate::BgpRole::Customer));
+
+        let mut buf = BytesMut::new();
+        cap.encode(&mut buf);
+        assert_eq!(&buf[..], &[2u8, 3, 9, 1, 0x03]);
+    }
+
+    // A Role capability whose length is not 1 is malformed (RFC 9234 §4.1).
+    // It must neither fail the OPEN nor surface as a role: it lands in the
+    // opaque `Unknown` passthrough with its code preserved.
+    #[test]
+    fn role_capability_wrong_length_falls_to_unknown() {
+        for wire in [&[9u8, 0][..], &[9u8, 2, 0x03, 0x00][..]] {
+            let (rest, cap) = CapabilityPacket::parse_cap(wire).unwrap();
+            assert!(rest.is_empty());
+            let CapabilityPacket::Unknown(u) = &cap else {
+                panic!("expected Unknown for {wire:?}, got {cap:?}");
+            };
+            assert_eq!(u.code, 9);
+            assert_eq!(u.data.len(), wire.len() - 2);
+        }
     }
 
     // A known capability still routes to its typed variant, and the Unknown

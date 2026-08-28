@@ -5,7 +5,7 @@ use bytes::BytesMut;
 use crate::{
     Aggregator, Aggregator2, Aigp, As2Path, As4Aggregator, As4Path, As4PathAttr, AtomicAggregate,
     AttrEmitter, BgpLsAttr, BgpNexthop, ClusterList, Color, Community, ExtCommunity,
-    LargeCommunity, LocalPref, Med, NexthopAttr, Origin, OriginatorId, PmsiTunnel, PrefixSid,
+    LargeCommunity, LocalPref, Med, NexthopAttr, Origin, OriginatorId, Otc, PmsiTunnel, PrefixSid,
     PrefixSidTlv, TunnelEncap, UnknownAttr,
 };
 
@@ -39,6 +39,10 @@ pub struct BgpAttr {
     pub pmsi_tunnel: Option<PmsiTunnel>,
     /// AIGP
     pub aigp: Option<Aigp>,
+    /// Only-to-Customer (RFC 9234): the AS that marked this route as not
+    /// to be propagated beyond customers. Preserved unchanged once set;
+    /// stamped / checked by the role-aware ingress and egress paths.
+    pub otc: Option<Otc>,
     /// Large Community
     pub lcom: Option<LargeCommunity>,
     /// BGP Prefix-SID (RFC 8669) — Label-Index, Originator-SRGB, and
@@ -142,6 +146,9 @@ impl BgpAttr {
             v.attr_emit(buf);
         }
         if let Some(v) = &self.aigp {
+            v.attr_emit(buf);
+        }
+        if let Some(v) = &self.otc {
             v.attr_emit(buf);
         }
         // Likewise RFC 8092 §3: a non-zero multiple of 12.
@@ -287,6 +294,9 @@ impl fmt::Display for BgpAttr {
         }
         if let Some(v) = &self.aigp {
             writeln!(f, " AIGP: {}", v)?;
+        }
+        if let Some(v) = &self.otc {
+            writeln!(f, " OTC: {}", v)?;
         }
         if let Some(v) = &self.lcom {
             writeln!(f, " LargeCommunity: {}", v)?;
