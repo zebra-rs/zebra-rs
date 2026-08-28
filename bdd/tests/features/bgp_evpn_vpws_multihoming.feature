@@ -232,6 +232,40 @@ Feature: BGP EVPN VPWS multihoming — ESI and DF-elected P/B (RFC 8214 §5)
     When I execute "ip link set ce1.100 up" in namespace "z2"
     Then show command "show bgp evpn vpws" in namespace "z3" should eventually contain "(via 192.168.0.2)"
 
+  Scenario: A segment port on a bond that loses carrier withholds the ES routes (RFC 7432 §8.2)
+    Given the test topology exists
+    # z2's segment port becomes a bond with one veth member; the E-Line's
+    # AC is the bond itself. Bringing the member's *peer* down takes the
+    # bond's carrier away while it stays administratively up — the way a
+    # LAG toward the CE fails in the field, and the transition a plain
+    # `ip link set down` does not exercise. `miimon` matters: a bond only
+    # notices a member's carrier through its link monitor (the kernel
+    # default is none), so without it the bond would stay LOWER_UP.
+    When I execute "ip link add m0 type veth peer name m0p" in namespace "z2"
+    And I execute "ip link add bond0 type bond mode active-backup miimon 100" in namespace "z2"
+    And I execute "ip link set m0 down" in namespace "z2"
+    And I execute "ip link set m0 master bond0" in namespace "z2"
+    And I execute "ip link set m0 up" in namespace "z2"
+    And I execute "ip link set m0p up" in namespace "z2"
+    And I execute "ip link set bond0 up" in namespace "z2"
+    And I apply config "z2-bond.yaml" to namespace "z2"
+    Then show command "show bgp evpn ethernet-segment" in namespace "z2" should eventually contain "Interface: bond0"
+    And show command "show bgp evpn" in namespace "z1" should eventually contain "[4]:[00:11:22:33:44:55:66:77:88:99]:[32]:[192.168.0.2]"
+    And show command "show bgp evpn vpws" in namespace "z1" should eventually contain "Role: backup (DF 192.168.0.2)"
+    # Carrier lost: bond0 is NO-CARRIER, still UP. z2 withholds its Type-4,
+    # per-ES A-D and Type-1 — the mass withdraw — and says why; z1 is alone
+    # on the segment and turns primary.
+    When I execute "ip link set m0p down" in namespace "z2"
+    Then show command "show bgp evpn ethernet-segment" in namespace "z2" should eventually contain "Port bond0 is down: ES routes withheld"
+    And show command "show bgp evpn" in namespace "z1" should eventually not contain "[4]:[00:11:22:33:44:55:66:77:88:99]:[32]:[192.168.0.2]"
+    And show command "show bgp evpn vpws" in namespace "z1" should eventually contain "Role: primary (DF 192.168.0.1)"
+    And show command "show bgp evpn ethernet-segment" in namespace "z1" should contain "Member VTEPs (1)"
+    # Carrier back: z2 rejoins the segment and the carving hands it the DF.
+    When I execute "ip link set m0p up" in namespace "z2"
+    Then show command "show bgp evpn" in namespace "z1" should eventually contain "[4]:[00:11:22:33:44:55:66:77:88:99]:[32]:[192.168.0.2]"
+    And show command "show bgp evpn vpws" in namespace "z1" should eventually contain "Role: backup (DF 192.168.0.2)"
+    And show command "show bgp evpn ethernet-segment" in namespace "z2" should eventually not contain "ES routes withheld"
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "z1"

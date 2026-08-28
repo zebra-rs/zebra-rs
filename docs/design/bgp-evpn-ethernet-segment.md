@@ -296,9 +296,17 @@ kernel VXLAN backend stays single-homed.**
   (`evpn_originate_vpws` gate), an ES port down empties the port's per-EVI
   A-D set **and** withholds the ES routes through `es_holding` (the
   startup-hold path, RFC 7432 §8.2 mass withdraw), both restored on up.
-  `LinkDown` is the kernel's `IFF_UP` transition; a bond that keeps
-  `IFF_UP` while losing carrier does not trigger it (RUNNING/LOWER_UP are
-  not tracked — follow-up). Show: `AC-DF: advertised, in effect (2 of 2
+  `LinkDown` is the RIB's *operational* down — `LinkFlagsExt::is_up` is
+  `IFF_UP && IFF_LOWER_UP` — so a bond whose members all lose carrier
+  while it stays administratively up takes the same path (a kernel LAG
+  toward the CE failing is exactly this — provided the bond has a link
+  monitor: with the kernel default `miimon 0` a bond never learns its
+  members' carrier and stays `LOWER_UP`, a kernel fact, not ours), and so
+  does a VLAN sub-interface on it. `show bgp evpn ethernet-segment` names it: `Port
+  bond0 is down: ES routes withheld` (JSON `port_down`). BDD:
+  `bgp_evpn_vpws_multihoming` (one-member bond; the member's peer down =
+  NO-CARRIER with `IFF_UP` kept → Type-4/A-D/Type-1 withheld and the
+  survivor primary; carrier back → rejoined). Show: `AC-DF: advertised, in effect (2 of 2
   PEs advertise it)`. BDD: `bgp_evpn_vpws_multihoming` (AC = VLAN
   sub-interface of the segment port; AC down re-elects the survivor
   primary only with AC-DF, with the negative control).

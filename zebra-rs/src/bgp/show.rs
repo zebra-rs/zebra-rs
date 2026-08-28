@@ -2560,6 +2560,10 @@ struct EthernetSegmentJson {
     esi: Option<String>,
     redundancy_mode: String,
     interface: Option<String>,
+    /// The access port is operationally down (administratively down, or
+    /// no carrier — a bond whose members all failed), so this segment's
+    /// ES routes are withheld and it is DF nowhere (RFC 7432 §8.2).
+    port_down: bool,
     df_preference: Option<u16>,
     ac_df: bool,
     /// RFC 8584 §4 AC-Influenced DF election is in effect: every PE on
@@ -2623,6 +2627,7 @@ fn show_bgp_evpn_ethernet_segment(
                 esi: es.esi.map(|esi| bgp_packet::esi_display(&esi)),
                 redundancy_mode: es.redundancy_mode.as_str().to_string(),
                 interface: es.interface.clone(),
+                port_down: bgp.es_port_down(es),
                 df_preference: es.df_preference,
                 ac_df: es.ac_df,
                 ac_df_in_effect,
@@ -2653,6 +2658,11 @@ fn show_bgp_evpn_ethernet_segment(
         writeln!(buf, "  Redundancy mode: {}", es.redundancy_mode.as_str())?;
         if let Some(ifname) = &es.interface {
             writeln!(buf, "  Interface: {ifname}")?;
+            // Operationally down (admin down or no carrier): the ES routes
+            // are withheld and this PE is DF nowhere on the segment.
+            if bgp.es_port_down(es) {
+                writeln!(buf, "  Port {ifname} is down: ES routes withheld")?;
+            }
         }
         if let Some(rt) = es.es_import_rt() {
             writeln!(buf, "  ES-Import RT: {}", format_evpn_ecom_value(&rt))?;

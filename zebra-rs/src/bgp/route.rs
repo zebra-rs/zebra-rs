@@ -18226,7 +18226,7 @@ impl Bgp {
     }
 
     /// Whether segment `es`'s access port is a link we know to be down.
-    fn es_port_down(&self, es: &super::ethernet_segment::EthernetSegment) -> bool {
+    pub(crate) fn es_port_down(&self, es: &super::ethernet_segment::EthernetSegment) -> bool {
         es.interface
             .as_ref()
             .is_some_and(|port| self.links_down.contains(port))
