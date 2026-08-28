@@ -592,6 +592,10 @@ struct BgpRouteJson {
     /// carried verbatim on this route. Empty for routes without any.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     unknown_attributes: Vec<UnknownAttrJson>,
+    /// RFC 9234 Only-to-Customer attribute: the AS that marked the route
+    /// as not to be propagated beyond customers. Absent when unmarked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    otc_as: Option<u32>,
 }
 
 /// Render the standard / extended / large COMMUNITIES attributes of a
@@ -681,6 +685,7 @@ fn bgp_route_json(prefix: String, rib: &BgpRib) -> BgpRouteJson {
         ext_community,
         large_community,
         unknown_attributes: show_unknown_attrs(&rib.attr),
+        otc_as: rib.attr.otc.map(|o| o.asn),
     }
 }
 
@@ -1003,6 +1008,7 @@ where
                     ext_community,
                     large_community,
                     unknown_attributes: show_unknown_attrs(&rib.attr),
+                    otc_as: rib.attr.otc.map(|o| o.asn),
                 });
             }
         }
@@ -1913,6 +1919,11 @@ fn write_bgp_entry_detail<V: BgpShowView>(
             writeln!(out, "    AIGP metric: {}", aigp.aigp)?;
         }
 
+        // RFC 9234 Only-to-Customer (IOS XR spelling).
+        if let Some(otc) = &rib.attr.otc {
+            writeln!(out, "    OTC-AS: {}", otc.asn)?;
+        }
+
         // Surface BGP Color extended communities (RFC 9012 §4.3). The
         // color-aware nexthop resolver consumes these; surfacing here
         // gives operators visibility into the CO bits.
@@ -2172,6 +2183,7 @@ pub(super) fn show_adj_rib_routes<P: std::fmt::Display>(
                     ext_community,
                     large_community,
                     unknown_attributes: show_unknown_attrs(&rib.attr),
+                    otc_as: rib.attr.otc.map(|o| o.asn),
                 });
             }
         }
@@ -3340,6 +3352,9 @@ struct OtcRoleView {
     remote_role_source: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     mismatch: Option<String>,
+    /// RFC 9234 §5 ingress rejections (IR1 / IR2) on this session.
+    denied_rule1: u64,
+    denied_rule2: u64,
 }
 
 /// `show bgp neighbor` view of [`Peer::last_reset`].
@@ -3427,6 +3442,8 @@ fn fetch(peer: &Peer) -> Neighbor<'_> {
                 remote_role: remote.map(|(role, _)| role.as_str()),
                 remote_role_source: remote.map(|(_, source)| source),
                 mismatch: peer.otc_role_mismatch.map(|m| m.to_string()),
+                denied_rule1: peer.otc_denied[0],
+                denied_rule2: peer.otc_denied[1],
             }
         }),
         encapsulation_type_ipv6: peer
@@ -3689,6 +3706,11 @@ fn render(out: &mut String, neighbor: &Neighbor) -> std::fmt::Result {
         if let (Some(role), Some(source)) = (otc.remote_role, otc.remote_role_source) {
             writeln!(out, "  OTC Remote Role: {role} ({source})")?;
         }
+        writeln!(
+            out,
+            "    By OTC ingress rule 1: {}, By OTC ingress rule 2: {}",
+            otc.denied_rule1, otc.denied_rule2
+        )?;
         if let Some(mismatch) = &otc.mismatch {
             writeln!(
                 out,
@@ -4477,6 +4499,9 @@ fn write_evpn_path_attrs(
     // Accumulated IGP metric (RFC 7311).
     if let Some(aigp) = &attr.aigp {
         writeln!(buf, "{PAD}AIGP metric: {}", aigp.aigp)?;
+    }
+    if let Some(otc) = &attr.otc {
+        writeln!(buf, "{PAD}OTC-AS: {}", otc.asn)?;
     }
 
     Ok(())
