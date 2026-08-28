@@ -161,6 +161,18 @@ pub struct EgressAs {
     pub remove_private_as: Option<super::peer::RemovePrivateAs>,
     pub local_as_substitute: Option<u32>, // resolved peer.change_local_as()
     pub local_as_replace: bool,           // config.local_as.is_some_and(replace_as)
+    /// RFC 9234 `otc-local-role` on this eBGP session (`None` when unset
+    /// or iBGP) — drives the OTC egress procedures in [`otc_egress`].
+    pub otc_local_role: Option<BgpRole>,
+}
+
+impl EgressAs {
+    /// The AS number the neighbor sees us as — the `local-as` substitute
+    /// when one is active, else the router's AS. RFC 9234 ER1 stamps this
+    /// into OTC, matching what the neighbor's own IR3 would stamp.
+    pub fn otc_local_as(&self) -> u32 {
+        self.local_as_substitute.unwrap_or(self.local_as)
+    }
 }
 
 /// Per-session egress snapshot for the IPv4-unicast advertise build (A2).
@@ -318,6 +330,7 @@ impl SyncCtx {
                 remove_private_as: None,
                 local_as_substitute: None,
                 local_as_replace: false,
+                otc_local_role: None,
             },
             out_policy: Arc::new(super::policy::OutPolicy::default()),
             packet_tx: None,
@@ -378,6 +391,106 @@ fn ebgp_egress_aspath(eas: &EgressAs, attrs: &mut BgpAttr) {
             aspath.prepend_mut(As4Path::from(vec![substitute]));
         }
         None => aspath.prepend_mut(As4Path::from(vec![eas.local_as])),
+    }
+}
+
+/// Outcome of the RFC 9234 §5 ingress procedures for one received
+/// route (IPv4 / IPv6 unicast only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum OtcIngress {
+    /// No role configured, iBGP, or nothing to do: keep the route as is.
+    Pass,
+    /// IR3: OTC was absent on a route from a Provider / Peer / RS — add
+    /// it with the remote AS. The stored route carries the stamp.
+    Stamp(Otc),
+    /// IR1 (rule 1) or IR2 (rule 2): a route leak. The route is
+    /// ineligible — not selected, not re-advertised, not stored.
+    Deny(u8),
+}
+
+/// RFC 9234 §5 ingress procedures, as a pure function of the local role,
+/// the neighbor's AS and the received OTC:
+///
+/// * IR1 — OTC present on a route from a **Customer** (we are Provider)
+///   or an **RS-Client** (we are RS): leak, ineligible.
+/// * IR2 — OTC present on a route from a **Peer** (we are Peer) with a
+///   value other than the remote AS: leak, ineligible.
+/// * IR3 — OTC absent on a route from a **Provider** (we are Customer),
+///   a **Peer** (we are Peer) or an **RS** (we are RS-Client): add OTC =
+///   remote AS.
+///
+/// Everything else passes unchanged; an OTC already present is never
+/// rewritten ("once set, preserved").
+pub(super) fn otc_ingress_rule(
+    local: Option<BgpRole>,
+    remote_as: u32,
+    otc: Option<Otc>,
+) -> OtcIngress {
+    let Some(local) = local else {
+        return OtcIngress::Pass;
+    };
+    match (local, otc) {
+        (BgpRole::Provider | BgpRole::RouteServer, Some(_)) => OtcIngress::Deny(1),
+        (BgpRole::Peer, Some(otc)) if otc.asn != remote_as => OtcIngress::Deny(2),
+        (BgpRole::Customer | BgpRole::Peer | BgpRole::RouteServerClient, None) => {
+            OtcIngress::Stamp(Otc::new(remote_as))
+        }
+        _ => OtcIngress::Pass,
+    }
+}
+
+/// [`otc_ingress_rule`] for a live session: roles apply to eBGP only.
+pub(super) fn otc_ingress(peer: &Peer, attr: &BgpAttr) -> OtcIngress {
+    if !peer.is_ebgp() {
+        return OtcIngress::Pass;
+    }
+    otc_ingress_rule(
+        peer.config.otc_local_role.map(|r| r.role),
+        peer.remote_as,
+        attr.otc,
+    )
+}
+
+/// Account and trace an RFC 9234 ingress rejection (`rule` = 1 or 2).
+/// `what` names the rejected unit — a prefix, or "UPDATE" when the whole
+/// batch shares the attribute.
+pub(super) fn otc_ingress_deny(peer: &mut Peer, rule: u8, what: &str) {
+    peer.otc_denied[usize::from(rule.saturating_sub(1)).min(1)] += 1;
+    let reason = match rule {
+        1 => "route leak from Customer/RS-Client",
+        _ => "OTC AS mismatch from Peer",
+    };
+    bgp_adj_in_trace!(
+        peer,
+        "{what} received from {} DENIED due to OTC ingress rule {rule}: {reason}",
+        peer.address,
+    );
+}
+
+/// RFC 9234 §5 egress procedures, applied to the outbound attribute copy
+/// of an IPv4 / IPv6 unicast route toward an eBGP neighbor with a local
+/// role. Returns `true` when the route must **not** be advertised:
+///
+/// * ER2 — OTC present and the neighbor is a **Provider** (we are
+///   Customer), a **Peer** (we are Peer) or an **RS** (we are RS-Client):
+///   suppress.
+/// * ER1 — OTC absent and the neighbor is a **Customer** (we are
+///   Provider), a **Peer** (we are Peer) or an **RS-Client** (we are RS):
+///   add OTC = local AS (`EgressAs::otc_local_as`).
+///
+/// No role (or iBGP, where `otc_local_role` is `None`): nothing happens
+/// and an OTC already on the route rides through untouched.
+pub(super) fn otc_egress(eas: &EgressAs, attrs: &mut BgpAttr) -> bool {
+    let Some(role) = eas.otc_local_role else {
+        return false;
+    };
+    match (role, attrs.otc) {
+        (BgpRole::Customer | BgpRole::Peer | BgpRole::RouteServerClient, Some(_)) => true,
+        (BgpRole::Provider | BgpRole::Peer | BgpRole::RouteServer, None) => {
+            attrs.otc = Some(Otc::new(eas.otc_local_as()));
+            false
+        }
+        _ => false,
     }
 }
 
@@ -3894,12 +4007,13 @@ pub fn route_ipv4_update(
     stale: bool,
 ) {
     let checks = {
-        let peer = peers.get_by_idx(ident).expect("peer must exist");
-        inbound_attr_checks(peer, attr, bgp.router_id)
+        let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
+        inbound_attr_checks(peer, attr, bgp.router_id, rd.is_none() && label.is_none())
     };
-    let Some((peer_ident, peer_router_id, typ)) = checks else {
+    let Some((peer_ident, peer_router_id, typ, otc_stamped)) = checks else {
         return;
     };
+    let attr = otc_stamped.as_ref().unwrap_or(attr);
     let stale = stale || attr_has_llgr_stale(attr);
     // Per-AFI inbound policy: a route carrying an RD is VPNv4, otherwise
     // it is IPv4 unicast (the RFC 8950 IPv4-over-IPv6 path also lands
@@ -3935,13 +4049,17 @@ pub fn route_ipv4_update(
 }
 
 /// Per-attr inbound checks shared by every prefix in an UPDATE (AS-path
-/// loop, enforce-first-as, route-reflection). Returns the peer identity
-/// or `None` if the UPDATE is dropped; the batch path runs it once.
+/// loop, enforce-first-as, route-reflection, RFC 9234 OTC). Returns the
+/// peer identity — plus the attribute rewritten by OTC ingress rule 3,
+/// when it applied — or `None` if the UPDATE is dropped; the batch path
+/// runs it once. `otc_unicast` is true for plain IPv4 unicast, the only
+/// v4 family the RFC 9234 procedures cover (§6).
 fn inbound_attr_checks(
-    peer: &Peer,
+    peer: &mut Peer,
     attr: &BgpAttr,
     local_router_id: &Ipv4Addr,
-) -> Option<(usize, Ipv4Addr, BgpRibType)> {
+    otc_unicast: bool,
+) -> Option<(usize, Ipv4Addr, BgpRibType, Option<BgpAttr>)> {
     if let Some(ref aspath) = attr.aspath
         && aspath_own_as_loop(peer, aspath)
     {
@@ -3960,12 +4078,30 @@ fn inbound_attr_checks(
     {
         return None;
     }
+    // RFC 9234 §5 ingress: a leak is dropped here (ineligible, never
+    // stored); IR3 hands back a stamped copy the callers ingest instead.
+    let otc_stamped = if otc_unicast {
+        match otc_ingress(peer, attr) {
+            OtcIngress::Pass => None,
+            OtcIngress::Stamp(otc) => {
+                let mut stamped = attr.clone();
+                stamped.otc = Some(otc);
+                Some(stamped)
+            }
+            OtcIngress::Deny(rule) => {
+                otc_ingress_deny(peer, rule, "UPDATE");
+                return None;
+            }
+        }
+    } else {
+        None
+    };
     let typ = if peer.is_ibgp() {
         BgpRibType::IBGP
     } else {
         BgpRibType::EBGP
     };
-    Some((peer.ident, peer.remote_id, typ))
+    Some((peer.ident, peer.remote_id, typ, otc_stamped))
 }
 
 /// Parallel ingest for a packet's plain IPv4-unicast NLRIs (RIB
@@ -3984,12 +4120,15 @@ pub fn route_ipv4_update_batch(
     stale: bool,
 ) {
     let checks = {
-        let peer = peers.get_by_idx(ident).expect("peer must exist");
-        inbound_attr_checks(peer, attr, bgp.router_id)
+        let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
+        inbound_attr_checks(peer, attr, bgp.router_id, true)
     };
-    let Some((peer_ident, peer_router_id, typ)) = checks else {
+    let Some((peer_ident, peer_router_id, typ, otc_stamped)) = checks else {
         return;
     };
+    // IR3 stamped once for the whole UPDATE, main-side, before the shard
+    // split — every prefix (and the N>1 batch clone) sees the same attr.
+    let attr = otc_stamped.as_ref().unwrap_or(attr);
     let stale = stale || attr_has_llgr_stale(attr);
 
     // N>1 (RIB sharding Phase C + RouteBatch): inbound policy runs in the
@@ -6932,7 +7071,7 @@ pub fn route_ipv6_update(
         attr
     };
 
-    let (peer_ident, peer_router_id, typ) = {
+    let (peer_ident, peer_router_id, typ, otc_stamp) = {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
 
         // RFC 4271 / 4456 loop detection — identical to the v4 path.
@@ -6946,6 +7085,20 @@ pub fn route_ipv6_update(
         if aspath_enforce_first_as_violation(peer, attr.aspath.as_ref()) {
             return;
         }
+        // RFC 9234 §5 ingress procedures — IPv6 unicast only (VPNv6 rows
+        // carry an RD and are exempt per §6).
+        let otc_stamp = if rd.is_none() {
+            match otc_ingress(peer, attr) {
+                OtcIngress::Pass => None,
+                OtcIngress::Stamp(otc) => Some(otc),
+                OtcIngress::Deny(rule) => {
+                    otc_ingress_deny(peer, rule, &nlri.prefix.to_string());
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         if let Some(ref originator_id) = attr.originator_id
             && originator_id.id == *bgp.router_id
         {
@@ -6976,7 +7129,18 @@ pub fn route_ipv6_update(
         } else {
             BgpRibType::EBGP
         };
-        (peer.ident, peer.remote_id, typ)
+        (peer.ident, peer.remote_id, typ, otc_stamp)
+    };
+
+    // IR3: ingest the stamped copy so the stored route carries OTC.
+    let otc_stamped_attr;
+    let attr = if let Some(otc) = otc_stamp {
+        let mut a = attr.clone();
+        a.otc = Some(otc);
+        otc_stamped_attr = a;
+        &otc_stamped_attr
+    } else {
+        attr
     };
 
     let stale = stale || attr_has_llgr_stale(attr);
@@ -12209,6 +12373,16 @@ pub fn route_update_ipv4(
         return None;
     }
 
+    // RFC 9234 §5 egress procedures — plain IPv4 unicast only (VPNv4 rows
+    // carry a VPN next-hop and are exempt per §6). ER2 suppresses an
+    // OTC-marked route toward a Provider / Peer / RS; ER1 stamps OTC =
+    // local AS toward a Customer / Peer / RS-Client. Keyed by
+    // `UpdateGroupSig::otc_local_role`, so the canonical-member memo is
+    // safe.
+    if rib.nexthop.is_none() && otc_egress(&ctx.egress_as, &mut attrs) {
+        return None;
+    }
+
     // 3. NEXT_HOP
     //
     // eBGP and self-originated routes always get a v4 rewrite. ENHE-
@@ -12391,6 +12565,12 @@ pub fn route_update_ipv6(
     // AS_PATH prepend for eBGP.
     ebgp_egress_aspath(&peer.egress_as(), &mut attrs);
     if as_sets_withdraw_suppresses_egress(bgp.as_sets_withdraw, &attrs) {
+        return None;
+    }
+
+    // RFC 9234 §5 egress procedures — plain IPv6 unicast only (VPNv6 rows
+    // are exempt per §6); see `route_update_ipv4`.
+    if rib.nexthop.is_none() && otc_egress(&peer.egress_as(), &mut attrs) {
         return None;
     }
 
@@ -23481,6 +23661,7 @@ mod as_sets_withdraw_tests {
                 remove_private_as: None,
                 local_as_substitute: None,
                 local_as_replace: false,
+                otc_local_role: None,
             },
             out_policy: Arc::new(crate::bgp::policy::OutPolicy::default()),
             packet_tx: None,
@@ -23538,6 +23719,7 @@ mod as_sets_withdraw_tests {
                 remove_private_as: None,
                 local_as_substitute: None,
                 local_as_replace: false,
+                otc_local_role: None,
             },
             out_policy: Arc::new(crate::bgp::policy::OutPolicy::default()),
             packet_tx: None,
@@ -23628,6 +23810,7 @@ mod as_sets_withdraw_tests {
                 remove_private_as: None,
                 local_as_substitute: None,
                 local_as_replace: false,
+                otc_local_role: None,
             },
             out_policy: Arc::new(crate::bgp::policy::OutPolicy::default()),
             packet_tx: None,
@@ -23696,6 +23879,7 @@ mod as_sets_withdraw_tests {
                 remove_private_as: None,
                 local_as_substitute: None,
                 local_as_replace: false,
+                otc_local_role: None,
             },
             out_policy: Arc::new(crate::bgp::policy::OutPolicy::default()),
             packet_tx: None,
@@ -25272,5 +25456,119 @@ mod rfc4456_reflect_stamp_tests {
             assert_eq!(attrs.originator_id, None);
             assert_eq!(attrs.cluster_list, None);
         });
+    }
+}
+
+#[cfg(test)]
+mod otc_procedure_tests {
+    use super::*;
+
+    const ALL: [Option<BgpRole>; 6] = [
+        None,
+        Some(BgpRole::Provider),
+        Some(BgpRole::RouteServer),
+        Some(BgpRole::RouteServerClient),
+        Some(BgpRole::Customer),
+        Some(BgpRole::Peer),
+    ];
+
+    /// RFC 9234 §5 ingress, every role × {absent, OTC = remote, OTC ≠ remote}.
+    #[test]
+    fn ingress_rules_cover_the_rfc_table() {
+        let remote = 65002;
+        for local in ALL {
+            let absent = otc_ingress_rule(local, remote, None);
+            let own = otc_ingress_rule(local, remote, Some(Otc::new(remote)));
+            let other = otc_ingress_rule(local, remote, Some(Otc::new(65099)));
+            match local {
+                None => {
+                    assert_eq!(absent, OtcIngress::Pass);
+                    assert_eq!(own, OtcIngress::Pass);
+                    assert_eq!(other, OtcIngress::Pass);
+                }
+                // From a Customer / RS-Client: any OTC is a leak (IR1).
+                Some(BgpRole::Provider | BgpRole::RouteServer) => {
+                    assert_eq!(absent, OtcIngress::Pass);
+                    assert_eq!(own, OtcIngress::Deny(1));
+                    assert_eq!(other, OtcIngress::Deny(1));
+                }
+                // From a Peer: OTC must equal the remote AS (IR2); absent → IR3.
+                Some(BgpRole::Peer) => {
+                    assert_eq!(absent, OtcIngress::Stamp(Otc::new(remote)));
+                    assert_eq!(own, OtcIngress::Pass);
+                    assert_eq!(other, OtcIngress::Deny(2));
+                }
+                // From a Provider / RS: absent → IR3, present → preserved.
+                Some(BgpRole::Customer | BgpRole::RouteServerClient) => {
+                    assert_eq!(absent, OtcIngress::Stamp(Otc::new(remote)));
+                    assert_eq!(own, OtcIngress::Pass);
+                    assert_eq!(other, OtcIngress::Pass);
+                }
+            }
+        }
+    }
+
+    fn eas(role: Option<BgpRole>, substitute: Option<u32>) -> EgressAs {
+        EgressAs {
+            is_ebgp: true,
+            local_as: 65001,
+            remote_as: 65002,
+            as_override: false,
+            remove_private_as: None,
+            local_as_substitute: substitute,
+            local_as_replace: false,
+            otc_local_role: role,
+        }
+    }
+
+    /// RFC 9234 §5 egress, every role × {absent, present}.
+    #[test]
+    fn egress_rules_cover_the_rfc_table() {
+        for role in ALL {
+            let mut absent = BgpAttr::new();
+            let suppress_absent = otc_egress(&eas(role, None), &mut absent);
+            let mut present = BgpAttr::new();
+            present.otc = Some(Otc::new(65099));
+            let suppress_present = otc_egress(&eas(role, None), &mut present);
+            match role {
+                None => {
+                    assert!(!suppress_absent && absent.otc.is_none());
+                    assert!(!suppress_present && present.otc == Some(Otc::new(65099)));
+                }
+                // Toward a Customer / RS-Client: stamp (ER1), never suppress.
+                Some(BgpRole::Provider | BgpRole::RouteServer) => {
+                    assert!(!suppress_absent);
+                    assert_eq!(absent.otc, Some(Otc::new(65001)));
+                    assert!(
+                        !suppress_present,
+                        "an existing OTC is preserved, not a leak"
+                    );
+                    assert_eq!(present.otc, Some(Otc::new(65099)));
+                }
+                // Toward a Peer: stamp when absent (ER1), suppress when present (ER2).
+                Some(BgpRole::Peer) => {
+                    assert!(!suppress_absent);
+                    assert_eq!(absent.otc, Some(Otc::new(65001)));
+                    assert!(suppress_present);
+                }
+                // Toward a Provider / RS: never stamp, suppress when present (ER2).
+                Some(BgpRole::Customer | BgpRole::RouteServerClient) => {
+                    assert!(!suppress_absent && absent.otc.is_none());
+                    assert!(suppress_present);
+                }
+            }
+        }
+    }
+
+    /// ER1 stamps the AS the neighbor sees — the `local-as` substitute
+    /// when active — so it agrees with the neighbor's own IR3 stamp.
+    #[test]
+    fn egress_stamp_uses_the_presented_local_as() {
+        let mut attrs = BgpAttr::new();
+        assert!(!otc_egress(
+            &eas(Some(BgpRole::Provider), Some(64999)),
+            &mut attrs
+        ));
+        assert_eq!(attrs.otc, Some(Otc::new(64999)));
     }
 }

@@ -1096,6 +1096,10 @@ pub struct Peer {
     /// the check. Surfaced by `show bgp neighbor`, since a session that
     /// never reaches Established leaves no `last_reset`.
     pub otc_role_mismatch: Option<OtcRoleMismatch>,
+    /// RFC 9234 §5 ingress rejections on this session, indexed by rule
+    /// (`[0]` = IR1 leak from a Customer / RS-Client, `[1]` = IR2 OTC ≠
+    /// remote AS from a Peer). Shown as "By OTC ingress rule 1/2".
+    pub otc_denied: [u64; 2],
     pub peer_type: PeerType,
     /// RFC 9572 §6.1 region identifier, resolved from this peer's
     /// neighbor-group (`region-id`) by `apply_inherited`. `Some` marks the
@@ -1331,6 +1335,7 @@ impl Peer {
             down_reason: None,
             last_reset: None,
             otc_role_mismatch: None,
+            otc_denied: [0; 2],
             peer_type: PeerType::IBGP,
             region_id: None,
             state: State::Idle,
@@ -1757,6 +1762,13 @@ impl Peer {
             remove_private_as: self.config.remove_private_as,
             local_as_substitute: self.change_local_as(),
             local_as_replace: self.config.local_as.is_some_and(|la| la.replace_as),
+            // Roles are defined for eBGP only (RFC 9234 §4): an iBGP
+            // session never runs the OTC egress procedures.
+            otc_local_role: if self.is_ebgp() {
+                self.config.otc_local_role.map(|r| r.role)
+            } else {
+                None
+            },
         }
     }
 

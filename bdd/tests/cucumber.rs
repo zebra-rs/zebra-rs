@@ -1539,6 +1539,38 @@ async fn verify_no_unknown_attr(world: &mut World, namespace: String, prefix: St
     );
 }
 
+/// Assert the route carries no RFC 9234 OTC attribute (`otc_as` absent
+/// from the `show bgp -j` row). Presence is asserted with the generic
+/// `... with "otc_as" value "<asn>"` step.
+#[then(expr = "BGP route in {string} has {string} without OTC")]
+async fn verify_no_otc(world: &mut World, namespace: String, prefix: String) {
+    let scoped = world.ns(&namespace);
+    let output = netns::exec_in_netns(&scoped, "vtyctl", &["show", "-j", "show bgp"])
+        .await
+        .expect("Failed to get BGP routes");
+    let routes: Value = serde_json::from_str(&output).expect("Failed to parse JSON output");
+    let route = routes
+        .as_array()
+        .and_then(|arr| {
+            arr.iter()
+                .find(|r| r.get("prefix").and_then(|p| p.as_str()) == Some(prefix.as_str()))
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "BGP route {} not found in namespace {}, got: {}",
+                prefix, scoped, output
+            )
+        });
+    assert!(
+        route.get("otc_as").is_none(),
+        "route {} in {} must carry no OTC, got: {}",
+        prefix,
+        scoped,
+        route
+    );
+    println!("✓ route {} in {} carries no OTC", prefix, scoped);
+}
+
 #[given("the test topology exists")]
 async fn test_topology_exists(world: &mut World) {
     let z1 = world.ns("z1");

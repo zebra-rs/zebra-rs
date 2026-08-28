@@ -40,7 +40,7 @@ use crate::context::Timer;
 
 /// Bumped whenever a new field is added to `UpdateGroupSig`. Surfaced
 /// in `show bgp update-group` so a stale view is detectable.
-pub const SIGNATURE_VERSION: u32 = 6;
+pub const SIGNATURE_VERSION: u32 = 7;
 
 /// Address families the grouping logic considers — every family whose
 /// advertise pipeline consults `peer.update_group_id`. IPv6 unicast
@@ -146,6 +146,12 @@ pub struct UpdateGroupSig {
     /// different substitute (or none) cannot share canonical UPDATE
     /// bytes. `(substitute, replace_as)`.
     pub local_as_substitute: Option<(u32, bool)>,
+    /// RFC 9234 `otc-local-role` (eBGP only; `None` when unset or iBGP).
+    /// The egress procedures depend on it: toward a Customer / Peer /
+    /// RS-Client the OTC attribute is added (ER1), toward a Provider /
+    /// Peer / RS an OTC-marked route is suppressed (ER2). Two peers under
+    /// different roles must therefore never share canonical UPDATE bytes.
+    pub otc_local_role: Option<bgp_packet::BgpRole>,
     // Negotiated wire-format capabilities (intersection of cap_send
     // and cap_recv on the peer). Anything that changes encoded
     // UPDATE bytes belongs here.
@@ -433,6 +439,13 @@ pub fn signature_of(peer: &Peer, afi: Afi, safi: Safi) -> Option<UpdateGroupSig>
         local_as_substitute: if peer.is_ebgp() {
             peer.change_local_as()
                 .map(|asn| (asn, peer.config.local_as.is_some_and(|la| la.replace_as)))
+        } else {
+            None
+        },
+        // RFC 9234 egress procedures are keyed by the local role (eBGP
+        // only — roles are undefined on iBGP and must not split groups).
+        otc_local_role: if peer.is_ebgp() {
+            peer.config.otc_local_role.map(|r| r.role)
         } else {
             None
         },
@@ -1481,6 +1494,7 @@ mod tests {
             as_override_target: None,
             remove_private_as: None,
             local_as_substitute: None,
+            otc_local_role: None,
             as4_negotiated: true,
             extended_message: true,
             addpath_send: false,
@@ -1684,6 +1698,15 @@ mod tests {
         let mut c = a.clone();
         c.local_as_substitute = Some((64999, true));
         assert_ne!(a, c);
+
+        // RFC 9234: the role selects whether OTC is added or the route
+        // suppressed on egress — every role is its own group.
+        let mut a = base.clone();
+        a.otc_local_role = Some(bgp_packet::BgpRole::Provider);
+        assert_ne!(base, a);
+        let mut b = a.clone();
+        b.otc_local_role = Some(bgp_packet::BgpRole::Customer);
+        assert_ne!(a, b);
 
         let mut a = base.clone();
         a.as4_negotiated = false;

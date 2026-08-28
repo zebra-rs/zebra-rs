@@ -134,6 +134,20 @@ yields OTC=AS(z1) on z2 via ER1 on z1, and "z1 no role → z2 customer
 * Unit tests (`peer.rs` FSM tests already have an `open_packet(...)` helper): valid pair, invalid pair → 2/11, loose absent → OpenConfirm with inferred, strict absent → 2/11, conflicting duplicates → 2/11, unknown value → 2/11, iBGP → no cap sent; config tests mirroring `enforce_first_as_*` and `group_enforce_first_as_propagates_no_bounce` (this one *does* bounce).
 
 ### PR 3 — OTC procedures + BDD
+**As built (2026-08-28):** `route.rs` `otc_ingress_rule(local, remote_as, otc) -> OtcIngress
+{Pass|Stamp(Otc)|Deny(rule)}` (pure, table-tested) + `otc_ingress(&Peer, &BgpAttr)`
+(eBGP gate) + `otc_ingress_deny(&mut Peer, rule, what)` (counter `Peer::otc_denied[2]`
++ `bgp_adj_in_trace!`); `otc_egress(&EgressAs, &mut BgpAttr) -> suppress` with
+`EgressAs.otc_local_role` (set by `Peer::egress_as()` on eBGP only) and
+`EgressAs::otc_local_as()` = substitute-or-global. `inbound_attr_checks` now takes
+`&mut Peer` + `otc_unicast: bool` and returns the IR3-stamped attr as a 4th tuple
+element; both v4 callers rebind `attr` to it before the shard split. v6 threads
+`otc_stamp` out of its check block. Egress gates on `rib.nexthop.is_none()` (plain
+unicast rows only). `UpdateGroupSig.otc_local_role`, `SIGNATURE_VERSION = 7`.
+Show: `OTC-AS: N` (detail + path-attr printer), JSON `otc_as`, neighbor line
+`By OTC ingress rule 1: n, By OTC ingress rule 2: n`. BDD `bgp_otc_local_role.feature`
+(9 scenarios + teardown) reuses the generic `with "otc_as" value` JSON step; one new
+step `BGP route in X has P without OTC`.
 * Ingress (v4 unicast: `inbound_attr_checks` + the single-prefix `route_ipv4_update` path; v6 unicast: `route_ipv6_update` ~6896). Only these two families — **not** the other six `enforce-first-as` sites. IR1/IR2 → return `None` + counter + `bgp_packet_trace!`-style trace "DENIED by OTC ingress rule N". IR3 mutates the attr: clone the UPDATE's attr once *before* the batch/shard split (N>1 runs policy in the shard, so the stamp must be main-side and shared by all prefixes).
 * Egress: `SyncCtx.otc_local_role` (from `Peer::sync_ctx`) and `EgressAs`-adjacent helper `otc_egress(role, local_as, &mut attrs) -> bool /*suppress*/` called in `route_update_ipv4` right after `ebgp_egress_aspath` (ER2 → `return None`, which already flows into `AdvertiseOutcome::Withdraw`); same in `route_update_ipv6` (takes `&mut Peer`, read `peer.config` directly).
 * `UpdateGroupSig.otc_local_role`, `SIGNATURE_VERSION = 7`, extend `signature_fields_each_distinguish`.
