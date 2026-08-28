@@ -9,6 +9,16 @@ encapsulation is the data plane — the Linux kernel natively forwards only
 VXLAN, so all SRv6-L2 and MPLS-L2 forwarding runs in the cradle-rs eBPF
 datapath, driven from zebra-rs via the FibHandle tee.
 
+**Multihoming is cradle-only (decision 2026-08-28).** The EVPN-MH forwarding
+behaviours — non-DF BUM filter, split-horizon/local-bias filter, ES nexthop
+group (aliasing / mass withdraw), single-active enforcement — will be
+implemented in the cradle-rs eBPF datapath for all three encapsulations and
+driven from zebra-rs. The kernel VXLAN backend remains **single-homed**: the
+Linux bridge has no dataplane for the two filters (see
+`bgp-evpn-multihoming-dataplane.md`), and zebra-rs will not replicate the
+tc/eBPF workarounds required to fake them there. A multihomed ES therefore
+requires `system ebpf enabled`.
+
 ## Feature Matrix
 
 | Feature | EVPN/VXLAN | EVPN/SRv6 | EVPN/MPLS |
@@ -19,6 +29,7 @@ datapath, driven from zebra-rs via the FibHandle tee.
 | **L3 / Type-5 IP Prefix (RFC 9136)** | ✅ Symmetric IRB, L3VNI + Router's-MAC EC (zebra #1913 + cradle #119) | ✅ End.DT46/DT4/DT6 per RFC 9252 (no RMAC by design) | ✅ Reuses VPNv4/v6 L3VPN data plane (#1035–#1039) |
 | **Multihoming ESI (Type-1/4, DF election)** | ✅ Control plane (shared) | ✅ Full signal set incl. Type-2 ESI (#2148/#2150/#2152) | ✅ Control plane (shared) |
 | **MAC aliasing / mass-withdraw consumers** | ❌ Open (receive side) | ❌ Open — exists for VPWS only | ❌ Open |
+| **Multihoming dataplane (non-DF filter, split-horizon, ES NHG, single-active)** | ❌ Open — **cradle-only by decision**; kernel backend stays single-homed | ❌ Open (cradle) | ❌ Open (cradle; ESI label) |
 | **E-Line / VPWS (RFC 8214)** | ✅ Type-1 VNI + Encapsulation EC + VTEP next hop; cradle eBPF xconnect (VTEP+VNI encap, E-Line-VNI decap) | ✅ End.DX2/DX2V, VLAN scoping, MTU check, P/B multihoming (#2116) | ✅ Per-service label, no Encapsulation EC; cradle eBPF xconnect (label encap under the transport LSP, pop-to-AC decap) |
 | **IPv6 underlay transport** | ✅ Kernel: zero code changes (#1850); eBPF: native v6 VTEPs incl. E-Line + `vtep-source` origination knob (cradle #168) | ✅ (native) | ✅ v6 PEs: FIB6 service-label resolution (engine) + `vtep-source` next hops; labeled static v6 routes + static-ILM v6 bindings for transport incl. pure-P transit (IS-IS SR-MPLS prefix-SIDs remain v4-only) |
 | **IGMP/MLD proxy / SMET (RFC 9251)** | ✅ Incl. per-VTEP selective MDB | ✅ Control plane (shared) | ✅ Control plane (shared) |

@@ -28,6 +28,14 @@ lists (HRW election, single-active E-LAN, aliasing/mass-withdraw consumers
 bridge solved for free: the LAG/LACP bundle that an Ethernet Segment is built
 on**. Details, the full challenge inventory and the pros/cons follow.
 
+**Decision (2026-08-28, maintainer): EVPN multihoming is cradle-only.** The
+non-DF filter, split-horizon filter, ES nexthop group and single-active
+enforcement will be implemented in the cradle-rs eBPF dataplane and driven
+from zebra-rs over the existing gRPC tee. The kernel VXLAN backend (SVD,
+`external vnifilter`) stays **single-homed**: zebra-rs will not replicate the
+deck's tc/eBPF workarounds on the kernel bridge. Recorded in
+`bgp-evpn-support-status.md`.
+
 ---
 
 ## 1. What the deck establishes
@@ -383,8 +391,9 @@ DF line. The deck's demo had to prove filtering with `bpf_printk`.
 2. **EVPN-MH becomes cradle-only.** zebra-rs keeps a kernel VXLAN backend
    (SVD, vlan 1) for hosts without cradle; that backend stays single-homed
    unless the deck's tc/eBPF approach is replicated there — which inherits all
-   of its hacks. Decision to make explicit in `bgp-evpn-support-status.md`:
-   *kernel backend = single-homed; multihoming requires `system ebpf enabled`*.
+   of its hacks. **Decided 2026-08-28**: *kernel backend = single-homed;
+   multihoming requires `system ebpf enabled`* — recorded in
+   `bgp-evpn-support-status.md`.
 3. **Verifier and stack budget.** `cradle_tc` sits ~430 bytes into a 448-byte
    wall; the DF/SPH gates are map lookups (cheap) but the ES-NHG member
    selection in the encap path competes with the single `l2_overlay_encap`
@@ -440,10 +449,11 @@ What it does **not** do is finish EVPN-MH. The control-plane consumers
 (aliasing, mass withdraw for MACs, HRW, single-active E-LAN, AC-DF) are open
 in zebra-rs exactly as they are open in FRR, and the ES-as-LAG problem that
 the kernel bridge absorbed silently becomes cradle's to solve. The
-recommendation is to accept "multihoming is cradle-only", ship the two filters
-first (they are the cheapest and the ones with a live demo topology to prove
-against), then the ES nexthop group, then LAG-as-bond, and to record the
-kernel backend as single-homed rather than chase the deck's workarounds there.
+recommendation — **adopted as the decision above** — is "multihoming is
+cradle-only": ship the two filters first (they are the cheapest and the ones
+with a live demo topology to prove against), then the ES nexthop group, then
+LAG-as-bond, and record the kernel backend as single-homed rather than chase
+the deck's workarounds there.
 
 ---
 
