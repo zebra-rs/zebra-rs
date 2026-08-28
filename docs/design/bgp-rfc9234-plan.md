@@ -175,6 +175,7 @@ step `BGP route in X has P without OTC`.
   ```
 
 ### PR 4 — docs (can fold into PR 3)
+**Status (2026-08-28): shipped as its own PR** — book `ch-02-42-bgp-otc-local-role.md` + SUMMARY, appendix-b RFC 9234 row (and the unbacked RFC 7947 row removed — see `bgp-route-server-plan.md`), update-groups §3.1 row. The changelog note is owed at the next release cut, per project practice.
 * `book/src/ch-02-42-bgp-otc-local-role.md` ("Route Leak Prevention: OTC Local Role (RFC 9234)") + `SUMMARY.md` (after Enforce First AS), `appendix-b-supported-rfcs.md` row for RFC 9234, `docs/design/bgp-update-groups.md` §3.1 (otc-local-role now a sig field), `CHANGELOG.yaml` note at release cut. The chapter should state the XR-compatible syntax and the one superset value (`route-server`).
 
 ### PR 5 — optional follow-ups

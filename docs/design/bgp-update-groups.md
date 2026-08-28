@@ -87,6 +87,7 @@ Two peers belong to the same update-group for a given `(afi, safi)` iff
 | `prefix_set.output.name` | Outbound prefix filter identity. |
 | `config.as_override` + `remote_as` (eBGP only) | `as-override` rewrites the peer's remote-AS to `local_as` in the egress AS_PATH; the result depends on `remote_as`, so it joins the key as `as_override_target: Some(remote_as)` (else `None`). |
 | `config.remove_private_as` + `remote_as` (eBGP only) | `remove-private-as` strips (or, with `replace-as`, rewrites) private ASNs from the egress AS_PATH; the result depends on the two modifiers and on the kept AS (`remote_as`), so it joins the key as `remove_private_as: Some(RemovePrivateAsKey { all, replace_as, keep_as })` (else `None`). |
+| `config.otc_local_role` (eBGP only) | RFC 9234 egress: toward a Customer / Peer / RS-Client the OTC attribute is added (ER1), toward a Provider / Peer / RS an OTC-marked route is suppressed (ER2) — the role decides stamp-or-suppress, so it joins the key as `otc_local_role: Some(role)` (else `None`; iBGP never runs the procedures). |
 | `is_afi_safi(afi, safi)` membership | Implicit — only members of the AFI/SAFI participate in that group. |
 | `addpath_send` for `(afi, safi)` | Different framing → different group. |
 
