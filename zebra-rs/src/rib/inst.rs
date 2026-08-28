@@ -29,6 +29,19 @@ use tokio::sync::oneshot;
 
 pub type ShowCallback = fn(&Rib, Args, bool) -> String;
 
+/// One PE in an Ethernet Segment nexthop group (RFC 7432 §8.4 aliasing) —
+/// the per-EVI encapsulation that PE's per-EVI Ethernet A-D route named,
+/// in the shape cradle's `EsNhgMember` takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum EsNhgMember {
+    /// The PE's `End.DT2U` SID for the bridge domain (EVPN over SRv6).
+    Srv6(std::net::Ipv6Addr),
+    /// The PE's VTEP; tunnels with the bridge domain's VNI (EVPN over VXLAN).
+    Vxlan(IpAddr),
+    /// The PE's address and its EVI service label (EVPN over MPLS).
+    Mpls { pe: IpAddr, label: u32 },
+}
+
 /// The remote endpoint of an EVPN VPWS cross-connect ([`Message::XconnectAdd`])
 /// — what AC-ingress frames are encapsulated toward, per the encapsulation
 /// the remote PE signalled on its Type-1 route.
@@ -383,6 +396,10 @@ pub enum Message {
         /// reaches `tunnel_endpoint`. `Some` selects the cradle L2 tee — the
         /// kernel has no MPLS-to-bridge data path.
         mpls_label: Option<u32>,
+        /// EVPN multihoming: the MAC's segment is one THIS node is attached
+        /// to, and this is our access port on it — reach the MAC over that
+        /// port, not the overlay (RFC 7432 §8.4; cradle `AddFdbLocal`).
+        local_port: Option<String>,
     },
     MacDel {
         vni: u32,
@@ -487,6 +504,16 @@ pub enum Message {
     EsPeers {
         esi: String,
         vteps: Vec<IpAddr>,
+    },
+    /// The Ethernet Segment nexthop group for one bridge domain (RFC 7432
+    /// §8.4 aliasing): every PE with a live per-ES A-D and a per-EVI A-D
+    /// for `bd` on `esi`. Replace semantics; empty = no group. Teed as
+    /// `SetEsNhg`; MACs on the segment in `bd` then install through the
+    /// group (`FdbRemote.esi`) and one update moves them all (§8.2).
+    EsNhg {
+        esi: [u8; 10],
+        bd: u32,
+        members: Vec<EsNhgMember>,
     },
     /// MUP `dataplane gtp` downlink encap (`GTP4.E`): a GTP-U encap route teed
     /// to cradle — traffic to `prefix` in VRF `table_id` is wrapped in outer
@@ -849,6 +876,11 @@ pub struct MacEntry {
     pub flags: u8,
     pub seq: u32,
     pub installed: bool,
+    /// EVPN multihoming: `esi` is a segment this node is attached to and
+    /// this is our access port on it — the MAC is reached over the port,
+    /// not the overlay (RFC 7432 §8.4). Set by BGP, which alone knows the
+    /// local segments; the overlay `dests` are still recorded for `show`.
+    pub local_port: Option<String>,
 }
 
 /// One overlay destination for a MAC. The three encapsulations are
@@ -878,6 +910,7 @@ impl MacEntry {
             flags,
             seq,
             installed: false,
+            local_port: None,
         }
     }
 
@@ -1151,6 +1184,11 @@ pub struct Rib {
     /// label for service routes carrying a Color extcomm.
     pub flex_algo_routes: BTreeMap<u8, PrefixMap<Ipv4Net, crate::rib::api::FlexAlgoRoute>>,
     pub mac_table: BTreeMap<(u32, MacAddr), MacEntry>,
+    /// EVPN multihoming: the `(ESI, VNI)` pairs BGP currently has a
+    /// non-empty nexthop group for (`Message::EsNhg`). A MAC on such a
+    /// segment installs through the group (RFC 7432 §8.4 aliasing); the
+    /// rest install a single destination.
+    pub es_groups: BTreeSet<([u8; 10], u32)>,
     /// Remote VTEPs we've installed as VXLAN BUM ingress-replication
     /// targets (zero-MAC FDB rows on the VXLAN device, keyed by
     /// `(vni, peer-VTEP-IP)`). Populated by `mdb_add`, removed by
@@ -1342,6 +1380,7 @@ impl Rib {
             ilm: BTreeMap::new(),
             flex_algo_routes: BTreeMap::new(),
             mac_table: BTreeMap::new(),
+            es_groups: BTreeSet::new(),
             vtep_table: std::collections::BTreeSet::new(),
             neighbors: BTreeMap::new(),
             tx,
@@ -3819,6 +3858,7 @@ impl Rib {
                 esi,
                 srv6_sid,
                 mpls_label,
+                local_port,
             } => {
                 self.mac_add(
                     vni,
@@ -3829,6 +3869,7 @@ impl Rib {
                     esi,
                     srv6_sid,
                     mpls_label,
+                    local_port,
                 )
                 .await;
             }
@@ -3929,6 +3970,9 @@ impl Rib {
             }
             Message::EsPeers { esi, vteps } => {
                 self.fib_handle.cradle_es_peers(&esi, &vteps).await;
+            }
+            Message::EsNhg { esi, bd, members } => {
+                self.es_nhg_set(esi, bd, members).await;
             }
             Message::CradleGtpEncapAdd {
                 prefix,
@@ -5060,6 +5104,7 @@ impl Rib {
         esi: Option<[u8; 10]>,
         srv6_sid: Option<std::net::Ipv6Addr>,
         mpls_label: Option<u32>,
+        local_port: Option<String>,
     ) {
         let dest = MacDest::from_parts(tunnel_endpoint, srv6_sid, mpls_label);
         match self.mac_table.get_mut(&(vni, mac)) {
@@ -5067,27 +5112,51 @@ impl Rib {
                 if !existing.absorb(dest, esi, flags, seq) {
                     return; // stale mobility duplicate
                 }
+                existing.local_port = local_port;
             }
             None => {
-                self.mac_table
-                    .insert((vni, mac), MacEntry::new(dest, esi, flags, seq));
+                let mut entry = MacEntry::new(dest, esi, flags, seq);
+                entry.local_port = local_port;
+                self.mac_table.insert((vni, mac), entry);
             }
         }
+        self.mac_install(vni, mac).await;
+    }
 
-        // Forward to kernel FIB (or, with an SRv6 L2 service SID, the
-        // cradle eBPF tee).
-        //
-        // One destination is installed even when the entry holds several:
-        // neither FIB backend can express "this MAC is reachable via N
-        // PEs" yet, so aliasing is modelled in the RIB and not yet acted
-        // on (`handle.rs::mac_add` still only logs the ESI). Installing
-        // the first is deterministic because `dests` is ordered — the
-        // alternative, whichever advertisement arrived last, would make
-        // the datapath depend on BGP arrival order.
-        let (tunnel_endpoint, srv6_sid, mpls_label) = self
-            .mac_table
-            .get(&(vni, mac))
-            .and_then(MacEntry::installed_dest)
+    /// Program the FIB for `(vni, mac)` from its `MacEntry`, choosing the
+    /// EVPN multihoming form when cradle is the data plane (multihoming is
+    /// cradle-only):
+    ///
+    /// 1. a segment THIS node is attached to (`local_port`) — a static local
+    ///    entry on our access port (RFC 7432 §8.4: never tunnel a MAC on our
+    ///    own segment back over the overlay);
+    /// 2. a segment with a live nexthop group (`es_groups`, from BGP's
+    ///    per-ES + per-EVI A-D routes) — the entry points at the group and
+    ///    the datapath picks a PE per flow (§8.4 aliasing); one group update
+    ///    re-points every such MAC (§8.2 mass withdraw);
+    /// 3. otherwise one destination. An entry may hold several (segment
+    ///    mates that each advertised the MAC) — `dests` is ordered, so the
+    ///    first is deterministic rather than arrival-order dependent, and
+    ///    the kernel backend can express no more.
+    async fn mac_install(&mut self, vni: u32, mac: MacAddr) {
+        let Some(entry) = self.mac_table.get(&(vni, mac)) else {
+            return;
+        };
+        let (flags, seq, esi) = (entry.flags, entry.seq, entry.esi);
+        if self.fib_handle.cradle_active() {
+            if let Some(port) = entry.local_port.clone() {
+                self.fib_handle.cradle_fdb_local(vni, &mac, &port).await;
+                return;
+            }
+            if let Some(esi) = esi
+                && self.es_groups.contains(&(esi, vni))
+            {
+                self.fib_handle.cradle_fdb_es(vni, &mac, &esi).await;
+                return;
+            }
+        }
+        let (tunnel_endpoint, srv6_sid, mpls_label) = entry
+            .installed_dest()
             .map(MacDest::into_parts)
             .unwrap_or((None, None, None));
         self.fib_handle
@@ -5102,6 +5171,28 @@ impl Rib {
                 mpls_label,
             )
             .await;
+    }
+
+    /// The Ethernet Segment nexthop group for `(esi, bd)` changed (BGP's
+    /// per-ES / per-EVI A-D view): tee it, remember whether the segment
+    /// has one, and re-install every MAC on the segment in that domain so
+    /// it moves between the group form and the single-destination form.
+    async fn es_nhg_set(&mut self, esi: [u8; 10], bd: u32, members: Vec<EsNhgMember>) {
+        if members.is_empty() {
+            self.es_groups.remove(&(esi, bd));
+        } else {
+            self.es_groups.insert((esi, bd));
+        }
+        self.fib_handle.cradle_es_nhg(&esi, bd, &members).await;
+        let macs: Vec<MacAddr> = self
+            .mac_table
+            .iter()
+            .filter(|((vni, _), e)| *vni == bd && e.esi == Some(esi))
+            .map(|((_, mac), _)| *mac)
+            .collect();
+        for mac in macs {
+            self.mac_install(bd, mac).await;
+        }
     }
 
     async fn mac_del(&mut self, vni: u32, mac: MacAddr) {

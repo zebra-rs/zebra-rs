@@ -56,6 +56,29 @@ message EsPeers {
   repeated string vteps = 2;  // IPv4 or IPv6
 }
 
+// One PE a MAC behind an Ethernet Segment can be sent to — the same
+// (SRv6 SID | VTEP | PE+label) triple a replication slot names: exactly one
+// of remote_sid / remote_vtep / remote_pe. A VXLAN member tunnels with the
+// bridge domain's VNI (SetVni binding).
+message EsNhgMember {
+  string remote_sid   = 1;  // SRv6: the PE's End.DT2U SID for this bridge domain
+  string remote_vtep  = 2;  // VXLAN: the PE's VTEP (IPv4 or IPv6)
+  string remote_pe    = 3;  // MPLS: the PE's address
+  uint32 remote_label = 4;  // MPLS: the PE's EVI service label for this domain
+}
+
+// The Ethernet Segment nexthop group for one bridge domain (RFC 7432 §8.4
+// aliasing): every PE currently attached to `esi` in `bd` — those with a
+// live per-ES A-D route and a per-EVI A-D for this EVI. Replace semantics;
+// an empty member list removes the group. FDB entries pointing at the
+// segment (FdbRemote.esi) pick a member per flow, and one update here
+// re-points all of them (§8.2 mass withdraw).
+message EsNhg {
+  string esi = 1;
+  uint32 bd = 2;
+  repeated EsNhgMember members = 3;
+}
+
 message PortDel {
   string name = 1;  // interface name (matched against the attach-time name
                     // when the device is already gone)
@@ -204,11 +227,25 @@ message FdbRemote {
   string remote_vtep = 5;   // VXLAN: remote VTEP IPv4
   string remote_pe    = 6;  // MPLS: remote PE address (exactly one of sid/vtep/pe)
   uint32 remote_label = 7;  // MPLS: that PE's EVI service label
+  // EVPN multihoming aliasing: when set, the MAC sits behind this Ethernet
+  // Segment and is reached through the segment's nexthop group for `bd`
+  // (SetEsNhg) instead of a single remote — the remote_* fields are ignored.
+  string esi = 8;
 }
 
 message FdbRemoteDel {
   string mac = 1;
   uint32 bd  = 2;
+}
+
+// A control-plane LOCAL FDB entry: `mac` in `bd` is reached over local
+// `port`, like a learned entry, but it is neither aged nor reported by
+// WatchFdb. EVPN multihoming: a MAC a peer PE advertised on a segment this
+// node is also attached to (RFC 7432 §8.4). Removed with DelFdbRemote.
+message FdbLocal {
+  string mac = 1;
+  uint32 bd = 2;
+  string port = 3;  // interface name
 }
 
 // A VPWS cross-connect (EVPN E-Line, RFC 8214): bind the attachment
@@ -566,6 +603,8 @@ service Cradle {
   rpc DelEthernetSegment(EthernetSegmentDel) returns (Empty);
   rpc SetEsRole(EsRole) returns (Empty);
   rpc SetEsPeers(EsPeers) returns (Empty);
+  rpc SetEsNhg(EsNhg) returns (Empty);
+  rpc AddFdbLocal(FdbLocal) returns (Empty);
   // Flush locally-learned FDB entries (never control-plane-installed remote
   // entries). WatchFdb subscribers observe the removals as age events.
   rpc FlushFdb(FdbFlush) returns (Empty);

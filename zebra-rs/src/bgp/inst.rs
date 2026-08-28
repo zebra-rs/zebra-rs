@@ -902,6 +902,9 @@ pub struct Bgp {
     /// Ethernet Segment (`evpn_es_df_sync` diffs against it, RFC 7432
     /// §8.5 non-DF filter). Keyed by ESI.
     pub es_df_sent: BTreeMap<[u8; 10], super::ethernet_segment::EsTeeState>,
+    /// The Ethernet Segment nexthop groups last teed to cradle per
+    /// `(ESI, EVI)` (`evpn_es_nhg_sync` diffs against it, RFC 7432 §8.4).
+    pub es_nhg_sent: BTreeMap<([u8; 10], u32), Vec<crate::rib::EsNhgMember>>,
     /// Local snooped IGMP/MLD membership shadow, keyed by
     /// `(vni, group, source)` → local VTEP IP. Populated from
     /// `RibRx::SnoopJoin`, removed on `RibRx::SnoopLeave`. Drives
@@ -1411,6 +1414,7 @@ impl Bgp {
             local_vxlans: BTreeMap::new(),
             l2_port_evis: BTreeMap::new(),
             es_df_sent: BTreeMap::new(),
+            es_nhg_sent: BTreeMap::new(),
             local_smet: BTreeMap::new(),
             ethernet_segments: BTreeMap::new(),
             hostname: None,

@@ -148,6 +148,15 @@ struct CradleMirror {
     /// / overlay source addresses, from the Type-4 routes) — `SetEsPeers`,
     /// the split-horizon / local-bias filter's peer list.
     es_peers: HashMap<String, Vec<IpAddr>>,
+    /// EVPN multihoming aliasing: `(ESI, bridge domain)` → the nexthop
+    /// group's members (`SetEsNhg`, replace semantics).
+    es_nhg: HashMap<(String, u32), Vec<crate::rib::EsNhgMember>>,
+    /// `(bd, mac)` → ESI: overlay FDB entries that resolve through the
+    /// segment's group (`FdbRemote.esi`) rather than a single remote.
+    fdb_es: HashMap<(u32, [u8; 6]), String>,
+    /// `(bd, mac)` → local port: static local entries for MACs on a segment
+    /// this node is attached to (`AddFdbLocal`).
+    fdb_local: HashMap<(u32, [u8; 6]), String>,
 }
 
 /// Map zebra's `SidBehavior` to cradle's `SRV6_BH_*` (data-plane ABI). The
@@ -595,6 +604,17 @@ impl CradleFib {
         for (esi, vteps) in &m.es_peers {
             self.set_es_peers(esi, vteps).await;
         }
+        // Aliasing groups (after the VNI bindings above), then the FDB
+        // entries that resolve through them and the static local ones.
+        for ((esi, bd), members) in &m.es_nhg {
+            self.set_es_nhg(esi, *bd, members).await;
+        }
+        for ((bd, mac), esi) in &m.fdb_es {
+            self.fdb_add_es(*bd, *mac, esi).await;
+        }
+        for ((bd, mac), port) in &m.fdb_local {
+            self.fdb_add_local(*bd, *mac, port).await;
+        }
         for ((vni, mac), vtep) in &m.fdb_vxlan {
             self.fdb_add_vxlan(*vni, *mac, *vtep).await;
         }
@@ -632,8 +652,8 @@ impl CradleFib {
         tracing::info!(
             "fib: cradle replay: {} v4 + {} v6 routes, {} ILM, {} SIDs (+{} static), \
              {} FDB (+{} vxlan), {} repl slots (+{} vxlan), {} repl segs, {} vnis, \
-             {} ES (+{} non-DF roles, {} peer sets), {} xconnects, {} GTP PDRs + {} encaps, \
-             {} mirror routes, {} neighbors re-applied",
+             {} ES (+{} non-DF roles, {} peer sets, {} groups, {} ES FDB, {} local FDB), \
+             {} xconnects, {} GTP PDRs + {} encaps, {} mirror routes, {} neighbors re-applied",
             m.routes4.len(),
             m.routes6.len(),
             m.ilm.len(),
@@ -648,6 +668,9 @@ impl CradleFib {
             m.es_ports.len(),
             m.es_nondf.len(),
             m.es_peers.len(),
+            m.es_nhg.len(),
+            m.fdb_es.len(),
+            m.fdb_local.len(),
             m.xconnects.len(),
             m.gtp_pdrs.len(),
             m.gtp_encaps.len(),
@@ -1552,6 +1575,7 @@ impl CradleFib {
                     remote_vtep: String::new(),
                     remote_pe: String::new(),
                     remote_label: 0,
+                    esi: String::new(),
                 })
                 .await?;
             anyhow::Ok(())
@@ -1583,6 +1607,7 @@ impl CradleFib {
                     remote_vtep: vtep.to_string(),
                     remote_pe: String::new(),
                     remote_label: 0,
+                    esi: String::new(),
                 })
                 .await?;
             anyhow::Ok(())
@@ -1619,6 +1644,7 @@ impl CradleFib {
                     remote_vtep: String::new(),
                     remote_pe: pe.to_string(),
                     remote_label: label,
+                    esi: String::new(),
                 })
                 .await?;
             anyhow::Ok(())
@@ -1637,6 +1663,8 @@ impl CradleFib {
             m.fdb.remove(&(vni, mac));
             m.fdb_vxlan.remove(&(vni, mac));
             m.fdb_mpls.remove(&(vni, mac));
+            m.fdb_es.remove(&(vni, mac));
+            m.fdb_local.remove(&(vni, mac));
         }
         let mac_str = format!(
             "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
@@ -2219,6 +2247,131 @@ impl CradleFib {
         .await;
         if let Err(e) = result {
             tracing::warn!("fib: cradle set_es_role {esi} bd {bd} df {df} failed: {e}");
+        }
+    }
+
+    /// The Ethernet Segment nexthop group for `(esi, bd)` (RFC 7432 §8.4
+    /// aliasing; replace semantics, empty = no group). Mirrored; replayed
+    /// after the VNI bindings (a VXLAN member takes the domain's VNI from
+    /// them) and before the FDB entries that resolve through it.
+    pub async fn set_es_nhg(&self, esi: &str, bd: u32, members: &[crate::rib::EsNhgMember]) {
+        {
+            let mut m = self.mirror.lock().await;
+            if members.is_empty() {
+                m.es_nhg.remove(&(esi.to_string(), bd));
+            } else {
+                m.es_nhg.insert((esi.to_string(), bd), members.to_vec());
+            }
+        }
+        let pb_members = members
+            .iter()
+            .map(|mm| match *mm {
+                crate::rib::EsNhgMember::Srv6(sid) => pb::EsNhgMember {
+                    remote_sid: sid.to_string(),
+                    remote_vtep: String::new(),
+                    remote_pe: String::new(),
+                    remote_label: 0,
+                },
+                crate::rib::EsNhgMember::Vxlan(vtep) => pb::EsNhgMember {
+                    remote_sid: String::new(),
+                    remote_vtep: vtep.to_string(),
+                    remote_pe: String::new(),
+                    remote_label: 0,
+                },
+                crate::rib::EsNhgMember::Mpls { pe, label } => pb::EsNhgMember {
+                    remote_sid: String::new(),
+                    remote_vtep: String::new(),
+                    remote_pe: pe.to_string(),
+                    remote_label: label,
+                },
+            })
+            .collect();
+        let result = async {
+            self.client()
+                .await?
+                .set_es_nhg(pb::EsNhg {
+                    esi: esi.to_string(),
+                    bd,
+                    members: pb_members,
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle set_es_nhg {esi} bd {bd} {members:?} failed: {e}");
+        }
+    }
+
+    /// `mac` in bridge domain `bd` sits behind Ethernet Segment `esi`: an
+    /// overlay FDB entry that resolves through the segment's nexthop group
+    /// (`FdbRemote.esi`). Mirrored under the MAC like the other FDB kinds;
+    /// `fdb_del` clears it.
+    pub async fn fdb_add_es(&self, bd: u32, mac: [u8; 6], esi: &str) {
+        {
+            let mut m = self.mirror.lock().await;
+            m.fdb.remove(&(bd, mac));
+            m.fdb_vxlan.remove(&(bd, mac));
+            m.fdb_mpls.remove(&(bd, mac));
+            m.fdb_local.remove(&(bd, mac));
+            m.fdb_es.insert((bd, mac), esi.to_string());
+        }
+        let mac_str = format!(
+            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+        );
+        let result = async {
+            self.client()
+                .await?
+                .add_fdb_remote(pb::FdbRemote {
+                    mac: mac_str.clone(),
+                    bd,
+                    remote_sid: String::new(),
+                    nexthop_id: 0,
+                    remote_vtep: String::new(),
+                    remote_pe: String::new(),
+                    remote_label: 0,
+                    esi: esi.to_string(),
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle fdb_add_es bd {bd} {mac_str} es {esi} failed: {e}");
+        }
+    }
+
+    /// `mac` in bridge domain `bd` is on a segment this node is attached to:
+    /// a static local entry on our access port `port` (`AddFdbLocal` — not
+    /// aged, not reported by WatchFdb). Mirrored; `fdb_del` clears it.
+    pub async fn fdb_add_local(&self, bd: u32, mac: [u8; 6], port: &str) {
+        {
+            let mut m = self.mirror.lock().await;
+            m.fdb.remove(&(bd, mac));
+            m.fdb_vxlan.remove(&(bd, mac));
+            m.fdb_mpls.remove(&(bd, mac));
+            m.fdb_es.remove(&(bd, mac));
+            m.fdb_local.insert((bd, mac), port.to_string());
+        }
+        let mac_str = format!(
+            "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+        );
+        let result = async {
+            self.client()
+                .await?
+                .add_fdb_local(pb::FdbLocal {
+                    mac: mac_str.clone(),
+                    bd,
+                    port: port.to_string(),
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle fdb_add_local bd {bd} {mac_str} port {port} failed: {e}");
         }
     }
 
