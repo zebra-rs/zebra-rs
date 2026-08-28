@@ -112,6 +112,10 @@ pub struct EthernetSegment {
     /// Advertise the RFC 8584 §2.2 AC-DF (AC-Influenced DF election)
     /// capability on this segment's Type-4.
     pub ac_df: bool,
+    /// Elect with the RFC 8584 §3 Highest Random Weight algorithm (Alg 1)
+    /// instead of service carving; a configured `df_preference` (Alg 2)
+    /// takes precedence.
+    pub hrw: bool,
     /// Seconds to stay out of this segment's DF election after joining it
     /// (IOS-XR `timers peering`, Junos
     /// `designated-forwarder-election-hold-time`, FRR
@@ -176,7 +180,11 @@ impl EthernetSegment {
                 pref,
             },
             None => DfElectionEc {
-                df_alg: DfElectionEc::ALG_DEFAULT,
+                df_alg: if self.hrw {
+                    DfElectionEc::ALG_HRW
+                } else {
+                    DfElectionEc::ALG_DEFAULT
+                },
                 bitmap: 0,
                 pref: 0,
             },
@@ -253,6 +261,70 @@ fn pref_ranked(candidates: &[DfCandidate]) -> Vec<IpAddr> {
     ranked.into_iter().map(|(ip, _, _)| ip).collect()
 }
 
+/// CRC-32 (IEEE 802.3 / ISO 3309: polynomial 0x04C11DB7 reflected, initial
+/// and final XOR all-ones — the CRC of zlib and Ethernet), as RFC 8584 §3.2
+/// uses for the HRW digest. Bitwise; the inputs are 14 bytes.
+pub fn crc32_ieee(bytes: &[u8]) -> u32 {
+    let mut crc: u32 = 0xffff_ffff;
+    for &b in bytes {
+        crc ^= b as u32;
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0xedb8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
+}
+
+/// RFC 8584 §3.2 `D(V, Es)`: the 31-bit digest of the 14-octet stream
+/// `Ethernet Tag (4, network order) || ESI (10)` — CRC-32 with the top bit
+/// discarded.
+pub fn hrw_digest(esi: &[u8; 10], tag: u32) -> u32 {
+    let mut stream = [0u8; 14];
+    stream[..4].copy_from_slice(&tag.to_be_bytes());
+    stream[4..].copy_from_slice(esi);
+    crc32_ieee(&stream) & 0x7fff_ffff
+}
+
+/// RFC 8584 §3.2 `Wrand(V, Es, Si)`:
+/// `(1103515245 · ((1103515245 · Si + 12345) ⊕ D) + 12345) mod 2^31`, with
+/// `Si` the PE's address as a 32-bit integer — an IPv4 address whole, an
+/// IPv6 address by its low-order 32 bits (the RFC notes only the low 31
+/// bits are significant). Computed in wrapping 32-bit arithmetic, which
+/// preserves the residue mod 2^31 the RFC defines.
+pub fn hrw_weight(addr: IpAddr, digest: u32) -> u32 {
+    let si: u32 = match addr {
+        IpAddr::V4(v4) => u32::from(v4),
+        IpAddr::V6(v6) => {
+            let o = v6.octets();
+            u32::from_be_bytes([o[12], o[13], o[14], o[15]])
+        }
+    };
+    let a = 1_103_515_245u32.wrapping_mul(si).wrapping_add(12_345);
+    1_103_515_245u32
+        .wrapping_mul(a ^ digest)
+        .wrapping_add(12_345)
+        & 0x7fff_ffff
+}
+
+/// The candidates ordered best-DF-first under HRW (RFC 8584 §3.2): highest
+/// weight wins, a tie goes to the numerically lowest address; the runner-up
+/// is the backup DF. Deterministic and order-independent, so every PE on
+/// the segment computes the same ranking from the same Type-4 set.
+fn hrw_ranked(candidates: &[DfCandidate], esi: &[u8; 10], tag: u32) -> Vec<IpAddr> {
+    let d = hrw_digest(esi, tag);
+    let mut ranked: Vec<(u32, IpAddr)> = candidates
+        .iter()
+        .map(|(ip, _, _)| (hrw_weight(*ip, d), *ip))
+        .collect();
+    ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    ranked.dedup_by_key(|(_, ip)| *ip);
+    ranked.into_iter().map(|(_, ip)| ip).collect()
+}
+
 /// Elect the Designated Forwarder and its backup for one service instance,
 /// dispatching on the algorithm the segment's PEs agreed on.
 ///
@@ -264,11 +336,22 @@ fn pref_ranked(candidates: &[DfCandidate]) -> Vec<IpAddr> {
 ///
 /// `candidates` need not be sorted; carving sorts by address internally so
 /// the ordinal is stable across PEs.
-pub fn elect_forwarders(candidates: &[DfCandidate], tag: u32) -> (Option<IpAddr>, Option<IpAddr>) {
+pub fn elect_forwarders(
+    candidates: &[DfCandidate],
+    esi: &[u8; 10],
+    tag: u32,
+) -> (Option<IpAddr>, Option<IpAddr>) {
     let algs: Vec<u8> = candidates.iter().map(|(_, alg, _)| *alg).collect();
-    if negotiate_df_alg(&algs) == DfElectionEc::ALG_PREF {
-        let ranked = pref_ranked(candidates);
-        return (ranked.first().copied(), ranked.get(1).copied());
+    match negotiate_df_alg(&algs) {
+        DfElectionEc::ALG_PREF => {
+            let ranked = pref_ranked(candidates);
+            return (ranked.first().copied(), ranked.get(1).copied());
+        }
+        DfElectionEc::ALG_HRW => {
+            let ranked = hrw_ranked(candidates, esi, tag);
+            return (ranked.first().copied(), ranked.get(1).copied());
+        }
+        _ => {}
     }
     let mut vteps: Vec<IpAddr> = candidates.iter().map(|(ip, _, _)| *ip).collect();
     vteps.sort();
@@ -333,13 +416,14 @@ pub fn vpws_role(
     mode: EsRedundancyMode,
     candidates: &[DfCandidate],
     me: IpAddr,
+    esi: &[u8; 10],
     service_id: u32,
 ) -> VpwsRole {
     let on_segment = candidates.iter().any(|(ip, _, _)| *ip == me);
     if !matches!(mode, EsRedundancyMode::SingleActive) || !on_segment {
         return VpwsRole::Primary;
     }
-    let (df, backup) = elect_forwarders(candidates, service_id);
+    let (df, backup) = elect_forwarders(candidates, esi, service_id);
     if df == Some(me) {
         VpwsRole::Primary
     } else if backup == Some(me) {
@@ -359,8 +443,14 @@ pub fn vpws_role(
 /// is not DF either — unlike `vpws_role`'s primary fallback, a BUM copy
 /// delivered by a not-yet-elected PE is exactly the duplicate the filter
 /// exists to stop, while known unicast keeps flowing regardless.
-pub fn elan_df(candidates: &[DfCandidate], me: IpAddr, vni: u32, holding: bool) -> bool {
-    !holding && elect_forwarders(candidates, vni).0 == Some(me)
+pub fn elan_df(
+    candidates: &[DfCandidate],
+    me: IpAddr,
+    esi: &[u8; 10],
+    vni: u32,
+    holding: bool,
+) -> bool {
+    !holding && elect_forwarders(candidates, esi, vni).0 == Some(me)
 }
 
 /// What the E-LAN DF tee last told the cradle datapath about one segment
@@ -461,6 +551,9 @@ mod ac_esi_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The segment the election tests run on (its ESI is HRW's salt).
+    const ESI_T: [u8; 10] = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99];
 
     #[test]
     fn redundancy_mode_keyword_round_trip() {
@@ -580,7 +673,7 @@ mod tests {
         for me in [a, b, c] {
             for service_id in 0..4u32 {
                 assert_eq!(
-                    vpws_role(EsRedundancyMode::AllActive, &cands, me, service_id),
+                    vpws_role(EsRedundancyMode::AllActive, &cands, me, &ESI_T, service_id),
                     VpwsRole::Primary
                 );
             }
@@ -594,14 +687,20 @@ mod tests {
         let mode = EsRedundancyMode::SingleActive;
         // Service instance 0 carves to ordinal 0: a is DF, b backs it up,
         // c must not be used for this instance.
-        assert_eq!(vpws_role(mode, &cands, a, 0), VpwsRole::Primary);
-        assert_eq!(vpws_role(mode, &cands, b, 0), VpwsRole::Backup);
-        assert_eq!(vpws_role(mode, &cands, c, 0), VpwsRole::NonDesignated);
+        assert_eq!(vpws_role(mode, &cands, a, &ESI_T, 0), VpwsRole::Primary);
+        assert_eq!(vpws_role(mode, &cands, b, &ESI_T, 0), VpwsRole::Backup);
+        assert_eq!(
+            vpws_role(mode, &cands, c, &ESI_T, 0),
+            VpwsRole::NonDesignated
+        );
         // Instance 1 shifts the whole assignment by one — that spread is the
         // point of carving per <ESI, service instance>.
-        assert_eq!(vpws_role(mode, &cands, b, 1), VpwsRole::Primary);
-        assert_eq!(vpws_role(mode, &cands, c, 1), VpwsRole::Backup);
-        assert_eq!(vpws_role(mode, &cands, a, 1), VpwsRole::NonDesignated);
+        assert_eq!(vpws_role(mode, &cands, b, &ESI_T, 1), VpwsRole::Primary);
+        assert_eq!(vpws_role(mode, &cands, c, &ESI_T, 1), VpwsRole::Backup);
+        assert_eq!(
+            vpws_role(mode, &cands, a, &ESI_T, 1),
+            VpwsRole::NonDesignated
+        );
     }
 
     #[test]
@@ -610,10 +709,16 @@ mod tests {
         let mode = EsRedundancyMode::SingleActive;
         // Our own Type-4 not selected yet (or no segment at all): advertise
         // primary rather than blackhole the service while it converges.
-        assert_eq!(vpws_role(mode, &carving(&[a, b]), c, 0), VpwsRole::Primary);
-        assert_eq!(vpws_role(mode, &[], a, 0), VpwsRole::Primary);
+        assert_eq!(
+            vpws_role(mode, &carving(&[a, b]), c, &ESI_T, 0),
+            VpwsRole::Primary
+        );
+        assert_eq!(vpws_role(mode, &[], a, &ESI_T, 0), VpwsRole::Primary);
         // Sole PE on the segment is the DF.
-        assert_eq!(vpws_role(mode, &carving(&[a]), a, 3), VpwsRole::Primary);
+        assert_eq!(
+            vpws_role(mode, &carving(&[a]), a, &ESI_T, 3),
+            VpwsRole::Primary
+        );
     }
 
     #[test]
@@ -622,11 +727,11 @@ mod tests {
         // a is the lowest address but the lowest preference, so under Alg 2
         // it loses to both — the whole point of preference over carving.
         let cands = prefs(&[(a, 10), (b, 300), (c, 200)]);
-        assert_eq!(elect_forwarders(&cands, 0), (Some(b), Some(c)));
+        assert_eq!(elect_forwarders(&cands, &ESI_T, 0), (Some(b), Some(c)));
         // ... and the service instance no longer shifts the winner, unlike
         // carving: preference is per-segment, not per-service.
         for tag in 0..5u32 {
-            assert_eq!(elect_forwarders(&cands, tag).0, Some(b));
+            assert_eq!(elect_forwarders(&cands, &ESI_T, tag).0, Some(b));
         }
     }
 
@@ -636,7 +741,7 @@ mod tests {
         // draft-ietf-bess-evpn-pref-df, and FRR's comparison: equal pref ->
         // lowest IP wins. Both PEs must agree or they both forward.
         let cands = prefs(&[(c, 100), (a, 100), (b, 100)]);
-        assert_eq!(elect_forwarders(&cands, 0), (Some(a), Some(b)));
+        assert_eq!(elect_forwarders(&cands, &ESI_T, 0), (Some(a), Some(b)));
     }
 
     #[test]
@@ -648,10 +753,10 @@ mod tests {
         let mut cands = prefs(&[(a, 10), (b, 300)]);
         cands.push((c, DfElectionEc::ALG_DEFAULT, 0));
         // Carving on the address-sorted list [a, b, c], tag 1 -> ordinal 1.
-        assert_eq!(elect_forwarders(&cands, 1), (Some(b), Some(c)));
+        assert_eq!(elect_forwarders(&cands, &ESI_T, 1), (Some(b), Some(c)));
         // Whereas all-Alg-2 would have given b (highest pref) for every tag.
         let agreed = prefs(&[(a, 10), (b, 300), (c, 0)]);
-        assert_eq!(elect_forwarders(&agreed, 1).0, Some(b));
+        assert_eq!(elect_forwarders(&agreed, &ESI_T, 1).0, Some(b));
     }
 
     #[test]
@@ -663,24 +768,97 @@ mod tests {
         // must not be used — and unlike carving this holds for every
         // service instance.
         for tag in 0..4u32 {
-            assert_eq!(vpws_role(mode, &cands, b, tag), VpwsRole::Primary);
-            assert_eq!(vpws_role(mode, &cands, c, tag), VpwsRole::Backup);
-            assert_eq!(vpws_role(mode, &cands, a, tag), VpwsRole::NonDesignated);
+            assert_eq!(vpws_role(mode, &cands, b, &ESI_T, tag), VpwsRole::Primary);
+            assert_eq!(vpws_role(mode, &cands, c, &ESI_T, tag), VpwsRole::Backup);
+            assert_eq!(
+                vpws_role(mode, &cands, a, &ESI_T, tag),
+                VpwsRole::NonDesignated
+            );
         }
         // All-active still overrides the election entirely.
         for me in [a, b, c] {
             assert_eq!(
-                vpws_role(EsRedundancyMode::AllActive, &cands, me, 0),
+                vpws_role(EsRedundancyMode::AllActive, &cands, me, &ESI_T, 0),
                 VpwsRole::Primary
             );
         }
     }
 
+    /// The CRC-32 the HRW digest is built on is the IEEE/zlib one: its
+    /// standard check value.
+    #[test]
+    fn crc32_is_the_ieee_crc() {
+        assert_eq!(crc32_ieee(b"123456789"), 0xcbf4_3926);
+    }
+
+    /// RFC 8584 §3.2 vectors, computed independently from the formula
+    /// (`zlib.crc32` over `tag || ESI`, then the LCG in 32-bit wrapping
+    /// arithmetic, mod 2^31): for ESI 00:11:…:99 and tag 0 the digest is
+    /// 0x19981279, and 192.168.0.1 outweighs 192.168.0.2; for tag 100 the
+    /// order flips. Any implementation on the far end of the segment that
+    /// follows the RFC must agree on these, or two DFs forward.
+    #[test]
+    fn hrw_matches_the_rfc_8584_formula() {
+        use std::net::Ipv4Addr;
+        let a = IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1));
+        let b = IpAddr::V4(Ipv4Addr::new(192, 168, 0, 2));
+        assert_eq!(hrw_digest(&ESI_T, 0), 0x1998_1279);
+        assert_eq!(hrw_weight(a, 0x1998_1279), 1_676_836_140);
+        assert_eq!(hrw_weight(b, 0x1998_1279), 1_477_024_859);
+        assert_eq!(hrw_digest(&ESI_T, 100), 0x7995_f7c3);
+        assert_eq!(hrw_weight(a, 0x7995_f7c3), 712_275_514);
+        assert_eq!(hrw_weight(b, 0x7995_f7c3), 2_110_888_649);
+        let cands: Vec<DfCandidate> =
+            vec![(a, DfElectionEc::ALG_HRW, 0), (b, DfElectionEc::ALG_HRW, 0)];
+        assert_eq!(elect_forwarders(&cands, &ESI_T, 0), (Some(a), Some(b)));
+        assert_eq!(elect_forwarders(&cands, &ESI_T, 100), (Some(b), Some(a)));
+        // Order-independent: every PE ranks the same set the same way.
+        let rev: Vec<DfCandidate> = cands.iter().rev().copied().collect();
+        assert_eq!(elect_forwarders(&rev, &ESI_T, 0), (Some(a), Some(b)));
+        // A single candidate is DF with nobody to back it up; none elects nobody.
+        assert_eq!(elect_forwarders(&cands[..1], &ESI_T, 0), (Some(a), None));
+        assert_eq!(elect_forwarders(&[], &ESI_T, 0), (None, None));
+    }
+
+    /// One PE asking for HRW while another asks for carving is a disagreed
+    /// segment: RFC 8584 negotiation falls back to carving, whose tag-0 DF
+    /// is the lowest address regardless of weights.
+    #[test]
+    fn hrw_needs_unanimity() {
+        let [a, b, _] = pes();
+        let mixed: Vec<DfCandidate> = vec![
+            (a, DfElectionEc::ALG_HRW, 0),
+            (b, DfElectionEc::ALG_DEFAULT, 0),
+        ];
+        assert_eq!(elect_forwarders(&mixed, &ESI_T, 0).0, Some(a));
+        assert_eq!(elect_forwarders(&mixed, &ESI_T, 1).0, Some(b));
+    }
+
+    /// The election the segment advertises follows the config: HRW when
+    /// asked for, but a preference still wins over it.
+    #[test]
+    fn segment_advertises_hrw_when_configured() {
+        let es = EthernetSegment {
+            hrw: true,
+            ..Default::default()
+        };
+        assert_eq!(es.df_election_ec().df_alg, DfElectionEc::ALG_HRW);
+        let es = EthernetSegment {
+            hrw: true,
+            df_preference: Some(7),
+            ..Default::default()
+        };
+        assert_eq!(es.df_election_ec().df_alg, DfElectionEc::ALG_PREF);
+    }
+
     #[test]
     fn single_pe_wins_and_empty_elects_nobody() {
         let [a, _, _] = pes();
-        assert_eq!(elect_forwarders(&prefs(&[(a, 1)]), 0), (Some(a), None));
-        assert_eq!(elect_forwarders(&[], 0), (None, None));
+        assert_eq!(
+            elect_forwarders(&prefs(&[(a, 1)]), &ESI_T, 0),
+            (Some(a), None)
+        );
+        assert_eq!(elect_forwarders(&[], &ESI_T, 0), (None, None));
     }
 
     /// E-LAN DF per bridge domain: carving spreads consecutive VNIs across
@@ -691,20 +869,20 @@ mod tests {
         let [a, b, c] = pes();
         let cands: Vec<DfCandidate> = vec![(a, 0, 0), (b, 0, 0)];
         // VNI 100 % 2 == 0 → a; VNI 101 % 2 == 1 → b.
-        assert!(elan_df(&cands, a, 100, false));
-        assert!(!elan_df(&cands, b, 100, false));
-        assert!(!elan_df(&cands, a, 101, false));
-        assert!(elan_df(&cands, b, 101, false));
+        assert!(elan_df(&cands, a, &ESI_T, 100, false));
+        assert!(!elan_df(&cands, b, &ESI_T, 100, false));
+        assert!(!elan_df(&cands, a, &ESI_T, 101, false));
+        assert!(elan_df(&cands, b, &ESI_T, 101, false));
         // Holding trumps winning.
-        assert!(!elan_df(&cands, a, 100, true));
+        assert!(!elan_df(&cands, a, &ESI_T, 100, true));
         // Not a candidate: never DF.
-        assert!(!elan_df(&cands, c, 100, false));
-        assert!(!elan_df(&[], a, 100, false));
+        assert!(!elan_df(&cands, c, &ESI_T, 100, false));
+        assert!(!elan_df(&[], a, &ESI_T, 100, false));
         // Unanimous preference: the preferred PE is DF in every domain.
         let pref = prefs(&[(a, 10), (b, 200)]);
-        assert!(elan_df(&pref, b, 100, false));
-        assert!(elan_df(&pref, b, 101, false));
-        assert!(!elan_df(&pref, a, 100, false));
+        assert!(elan_df(&pref, b, &ESI_T, 100, false));
+        assert!(elan_df(&pref, b, &ESI_T, 101, false));
+        assert!(!elan_df(&pref, a, &ESI_T, 100, false));
     }
 
     #[test]

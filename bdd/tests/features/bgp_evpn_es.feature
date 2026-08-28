@@ -83,6 +83,24 @@ Feature: BGP EVPN Ethernet Segment discovery (RFC 7432 Type-4)
     Then show command "show bgp evpn" in namespace "z1" should eventually not contain "[4]:[00:11:22:33:44:55:66:77:88:99]:[32]:[192.168.0.2]"
     And show command "show bgp evpn ethernet-segment" in namespace "z1" should eventually contain "Member VTEPs (1)"
 
+  Scenario: HRW election (RFC 8584 Alg 1) is negotiated and agreed on both PEs
+    Given the test topology exists
+    # Restore z2's ES and switch both PEs to `df-election algorithm hrw`.
+    When I apply config "z1-hrw.yaml" to namespace "z1"
+    And I apply config "z2-hrw.yaml" to namespace "z2"
+    # Both Type-4s now carry the DF Election EC with Alg 1, so the
+    # negotiated algorithm is HRW.
+    Then show command "show bgp evpn" in namespace "z1" should eventually contain "df-election:alg1"
+    And show command "show bgp evpn ethernet-segment" in namespace "z1" should eventually contain "DF algorithm: hrw"
+    And show command "show bgp evpn ethernet-segment" in namespace "z1" should eventually contain "Member VTEPs (2)"
+    # The RFC 8584 §3.2 weights for ESI 00:11:…:99, tag 0 rank 192.168.0.1
+    # (1676836140) over 192.168.0.2 (1477024859); the same DF as carving
+    # here, but reached through the hash, and both PEs must agree.
+    And show command "show bgp evpn ethernet-segment" in namespace "z1" should eventually contain "Designated Forwarder (tag 0): 192.168.0.1 (this node)"
+    And show command "show bgp evpn ethernet-segment" in namespace "z2" should eventually contain "DF algorithm: hrw"
+    And show command "show bgp evpn ethernet-segment" in namespace "z2" should eventually contain "Designated Forwarder (tag 0): 192.168.0.1"
+    And show command "show bgp evpn ethernet-segment" in namespace "z2" should not contain "Designated Forwarder (tag 0): 192.168.0.2"
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "z1"

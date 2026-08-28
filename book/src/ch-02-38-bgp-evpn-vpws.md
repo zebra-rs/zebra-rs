@@ -285,6 +285,32 @@ This interoperates with IOS-XR `service-carving preference-based`, Junos
 `designated-forwarder election algorithm preference` and FRR
 `evpn mh es-df-pref`.
 
+**Highest Random Weight** (Alg 1, RFC 8584 §3) keeps a hash but fixes
+carving's two weaknesses — a PE joining or leaving renumbers every ordinal
+and so reshuffles *every* service on the segment, and the lowest address
+gets a disproportionate share. HRW gives each `<PE, tag>` pair a
+pseudo-random weight seeded by the ESI and the service identifier, and the
+highest weight is the DF; adding or removing a PE only moves the services
+that PE won or wins. Ask for it with:
+
+```
+  ethernet-segment ES1
+   esi 00:11:22:33:44:55:66:77:88:99
+   interface ce1
+   df-election
+    algorithm hrw
+```
+
+The Type-4 then carries `df-election:alg1`, and the same unanimity rule
+applies: any PE still advertising Alg 0 drops the segment back to carving. A
+`preference` on the same segment takes priority over `algorithm hrw` — a
+pinned DF is a stronger statement than a better hash. The weight is the
+RFC's formula bit for bit (CRC-32 of the tag and ESI, then the RFC's
+linear-congruential mix, modulo 2^31, ties to the lowest address), so a
+segment shared with Junos `df-election-type mod`/Arista `algorithm hrw`
+peers elects the same DF on every box. For the E-LAN election the tag is
+the VNI; for VPWS it is the service identifier.
+
 Because the candidate set comes from the Type-4 routes in the Loc-RIB, the
 role is re-elected whenever a PE joins or leaves the segment — a peer's
 Type-4 arriving or being withdrawn re-runs the election and re-advertises

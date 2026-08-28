@@ -178,7 +178,7 @@ rows are C3 (modulus/HRW) and C9.
 | ES config (Type-0 manual ESI, redundancy mode, one interface, DF preference, AC-DF bit, startup-delay) | ✅ | `yang/zebra-bgp-evpn.yang:208-296`, `bgp/config.rs:1891-2105`, `bgp/ethernet_segment.rs:100-126` |
 | Type-4 ES, Type-1 A-D per ES (ESI-label EC), Type-1 A-D per EVI | ✅ originated | `bgp/route.rs:16968`, `:17034`, `:17082` |
 | DF election: modulus (Alg 0) + preference (Alg 2), RFC 8584 negotiation | ✅ | `bgp/ethernet_segment.rs:215-280` |
-| DF election: HRW (Alg 1) | ❌ falls back to carving | `ethernet_segment.rs:267-280`, `show.rs:2687` |
+| DF election: HRW (Alg 1) | ✅ `df-election algorithm hrw` (RFC 8584 §3) | `ethernet_segment.rs` `hrw_ranked` |
 | AC-DF behaviour (withdraw on AC down) | ❌ bit only | no `LinkDown` path touches `ethernet_segments` |
 | Where the DF result goes | `show` and the VPWS P/B bits only | `bgp/show.rs:2565-2698`, `route.rs:17389-17422` |
 | non-DF filter, SPH/local-bias | ❌ **nothing programmed anywhere** | `EvpnFloodState::desired` `route.rs:3046-3069` filters on P2MP/prune/AR only; zero `IFLA_BRPORT` in `fib/` |
