@@ -8495,6 +8495,103 @@ mod neighbor_group_wiring_tests {
         assert!(!key.multihop, "an unnumbered eBGP session is single-hop",);
     }
 
+    /// Bring an `interface-neighbor i1` (ifindex 7) up to the point
+    /// where its RA-learned link-local has subscribed a BFD session, and
+    /// hand back the instance, the subscribed `SessionKey` and the peer's
+    /// ident. Shared by the #2343 teardown tests below.
+    fn interface_neighbor_with_bfd_session() -> (Bgp, SessionKey, usize) {
+        use super::super::interface_neighbor::{
+            config_interface_neighbor, config_interface_neighbor_remote_as, materialize_peer,
+        };
+        use super::super::peer_key::PeerKey;
+
+        let (mut bgp, mut bfd_rx) = fresh_bgp_with_bfd();
+        config_bgp_bfd_enable(&mut bgp, arg_words(&["true"]), ConfigOp::Set).unwrap();
+        bgp.link_index_by_name.insert("i1".to_string(), 7);
+        config_interface_neighbor(&mut bgp, arg_words(&["i1"]), ConfigOp::Set).unwrap();
+        config_interface_neighbor_remote_as(&mut bgp, arg_words(&["i1", "65002"]), ConfigOp::Set)
+            .unwrap();
+        let link_local: std::net::Ipv6Addr = "fe80::2".parse().unwrap();
+        materialize_peer(&mut bgp, "i1", 7, link_local).expect("RA upgrades the peer");
+
+        let mut subscribe = None;
+        while let Ok(req) = bfd_rx.try_recv() {
+            if let ClientReq::Subscribe { key, .. } = req {
+                subscribe = Some(key);
+            }
+        }
+        let key = subscribe.expect("the RA must trigger a BFD Subscribe");
+        let ident = bgp
+            .peers
+            .get_by_key(&PeerKey::Interface(7))
+            .expect("interface-keyed peer exists")
+            .ident;
+        // Materialization queued `Event::Start`; clear the channel so the
+        // tests below see only what the BFD event produces.
+        while bgp.rx.try_recv().is_ok() {}
+        (bgp, key, ident)
+    }
+
+    fn bfd_up_to_down(key: SessionKey) -> crate::bfd::inst::BfdEvent {
+        crate::bfd::inst::BfdEvent::StateChange {
+            key,
+            change: crate::bfd::session::StateChange {
+                from: bfd_packet::State::Up,
+                to: bfd_packet::State::Down,
+                diag: bfd_packet::Diag::ControlDetectionTimeExpired,
+            },
+        }
+    }
+
+    /// Regression for #2343: BFD going Down on an IPv6-unnumbered
+    /// (`interface-neighbor`) peer must tear the BGP session down, as it
+    /// does for an addressed peer. The event's `remote` is the RA-learned
+    /// link-local, which is NOT the peer's map key (that is
+    /// `PeerKey::Interface(ifindex)`), so `process_bfd_event` has to
+    /// resolve the peer through the session's pinned ifindex. Pre-fix
+    /// the address lookup missed, the event was logged as "unknown
+    /// peer" and dropped, and the session stayed Established.
+    #[tokio::test]
+    async fn interface_neighbor_bfd_down_tears_session_down() {
+        use super::super::peer::PeerDownReason;
+        let (mut bgp, key, ident) = interface_neighbor_with_bfd_session();
+        assert_eq!(key.ifindex, 7, "precondition: session pinned to i1");
+
+        bgp.process_bfd_event(bfd_up_to_down(key));
+
+        assert_eq!(
+            drain_stop_events(&mut bgp),
+            vec![ident],
+            "BFD Down must queue Event::Stop for the interface-keyed peer",
+        );
+        assert_eq!(
+            bgp.peers.get_by_idx(ident).unwrap().down_reason,
+            Some(PeerDownReason::BfdDown),
+            "the teardown must be attributed to BFD in `show bgp neighbor`",
+        );
+    }
+
+    /// The ifindex fallback must not fire for a session key the peer
+    /// does not own: a late Down for a session that was re-keyed (the
+    /// neighbour surfaced a new link-local) is stale, not a path
+    /// failure, and must leave the peer alone.
+    #[tokio::test]
+    async fn interface_neighbor_ignores_bfd_down_for_stale_session_key() {
+        let (mut bgp, key, ident) = interface_neighbor_with_bfd_session();
+        let stale = SessionKey {
+            remote: "fe80::3".parse().unwrap(),
+            ..key
+        };
+
+        bgp.process_bfd_event(bfd_up_to_down(stale));
+
+        assert!(
+            drain_stop_events(&mut bgp).is_empty(),
+            "a Down for a key the peer never subscribed must not stop it",
+        );
+        assert_eq!(bgp.peers.get_by_idx(ident).unwrap().down_reason, None);
+    }
+
     // ---- whole-session knob inheritance (ttl-security exemplar) --
 
     use super::super::neighbor_group::config_neighbor_group_ttl_security;

@@ -113,6 +113,45 @@ Feature: BGP IPv6 unnumbered neighbor discovered via Router Advertisements
     And show command "show bgp ipv4 summary" in namespace "z1" should contain "i1 "
     And show command "show bgp neighbor i1" in namespace "z1" should contain "BGP neighbor on i1: fe80::"
 
+  Scenario: BFD going Down tears the unnumbered session down and withdraws its routes
+    Given the test topology exists
+    # Regression for #2343. Drop inbound BFD control packets on z2 only:
+    # the link stays up and BGP's own TCP session keeps flowing, so the
+    # teardown can only come from BFD. z2's detect timer expires first;
+    # it then signals Down to z1 (z1 still receives z2's packets), so
+    # both ends see an Up→Down transition. Pre-fix, `process_bfd_event`
+    # looked the peer up by the link-local in the session key — an
+    # interface-keyed peer's map key is its ifindex, so the lookup
+    # missed, the event was dropped as "unknown peer", and the session
+    # stayed Established with its ENHE routes still in the kernel FIB
+    # (a blackhole under ECMP). The FIB assertions come right after the
+    # state checks: the idle-hold pacer restarts the session ~5 s after
+    # the teardown, so they must land inside that window. Both ends log
+    # the BFD-initiated teardown, but only z2's `Last reset` is
+    # deterministically "BFD down": z2 detects first and its NOTIFICATION
+    # / TCP close usually reaches z1 before z1's own BFD Down event, so
+    # z1 records the TCP failure and its parked BFD cause is discarded.
+    When I drop bfd control packets in namespace "z2"
+    Then bfd session in namespace "z1" on interface "i1" should be down
+    And daemon log in namespace "z2" should eventually contain "tearing down peer on bfd-down"
+    And daemon log in namespace "z1" should eventually contain "tearing down peer on bfd-down"
+    And BGP session in namespace "z1" should eventually not be "Established"
+    And BGP session in namespace "z2" should eventually not be "Established"
+    And kernel route "10.10.2.0/24" in namespace "z1" should eventually be gone
+    And kernel route "10.10.1.0/24" in namespace "z2" should eventually be gone
+    And show command "show bgp neighbor i1" in namespace "z2" should eventually contain "due to BFD down"
+    # Recovery: with BFD packets flowing again the session comes back
+    # (BFD Up on both ends proves both are transmitting) and the
+    # v4-over-v6 routes return to the kernel, so the removal scenario
+    # below still has a live session to tear down.
+    When I restore bfd control packets in namespace "z2"
+    Then bfd session in namespace "z1" on interface "i1" should be up
+    And bfd session in namespace "z2" on interface "i1" should be up
+    And BGP session in namespace "z1" should eventually be "Established"
+    And BGP session in namespace "z2" should eventually be "Established"
+    And kernel route "10.10.2.0/24" in namespace "z1" should eventually contain "via inet6 fe80::"
+    And kernel route "10.10.1.0/24" in namespace "z2" should eventually contain "via inet6 fe80::"
+
   Scenario: Removing the interface-neighbor tears the session down
     Given the test topology exists
     When I apply config "z1-base.yaml" to namespace "z1"

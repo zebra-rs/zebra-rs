@@ -7076,10 +7076,9 @@ impl Bgp {
             return;
         }
 
-        // SessionKey.remote is the BGP neighbor address — direct
-        // lookup. A missing peer means the user removed the
-        // neighbor since BGP last subscribed; safe to ignore.
-        let Some(peer) = self.peers.get_mut(&key.remote) else {
+        // A missing peer means the user removed the neighbor since
+        // BGP last subscribed; safe to ignore.
+        let Some(peer) = self.bfd_session_peer_mut(&key) else {
             bgp_bfd_trace!(
                 self.tracing,
                 ?key,
@@ -7095,6 +7094,39 @@ impl Bgp {
             "bgp: tearing down peer on bfd-down (RFC 5882 §5)",
         );
         let _ = self.tx.try_send(Message::Event(peer_idx, Event::Stop));
+    }
+
+    /// Resolve the peer that owns a BFD session, for a `SessionKey`
+    /// handed back by BFD.
+    ///
+    /// `SessionKey.remote` is the BGP neighbor address, so an addressed
+    /// peer is a direct `PeerKey::Addr` lookup. An IPv6-unnumbered
+    /// (`interface-neighbor`) peer is keyed by its ifindex
+    /// (`PeerKey::Interface`), NOT by the RA-learned link-local that
+    /// sits in `key.remote`, so the address lookup can never find it —
+    /// which is exactly how #2343 left such peers Established after
+    /// BFD went Down. `bfd_apply_ident` pins a single-hop session to the
+    /// peer's egress ifindex (`Peer::resolve_session_ifindex` returns
+    /// the interface key itself for an unnumbered peer), so `key.ifindex`
+    /// is the map key to fall back to. The peer's recorded
+    /// `bfd_session_key` must match exactly: a stale event for a
+    /// session that has since been re-keyed (the neighbour moved to a
+    /// new link-local) must not tear down whatever peer now owns that
+    /// interface.
+    fn bfd_session_peer_mut(
+        &mut self,
+        key: &crate::bfd::session::SessionKey,
+    ) -> Option<&mut super::peer::Peer> {
+        if self.peers.get(&key.remote).is_some() {
+            return self.peers.get_mut(&key.remote);
+        }
+        if key.multihop || key.ifindex == 0 {
+            return None;
+        }
+        let peer = self
+            .peers
+            .get_mut_by_key(&super::peer_key::PeerKey::Interface(key.ifindex))?;
+        (peer.bfd_session_key == Some(*key)).then_some(peer)
     }
 }
 
