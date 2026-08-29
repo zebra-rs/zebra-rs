@@ -236,8 +236,12 @@ kernel VXLAN backend stays single-homed.**
   the copy from the segment's ports (`l2_drop_sph`). **The Type-4
   Originating IP must be the VTEP** for the match — it is
   `evpn_local_source()`, so configure `vtep-source` (or let the router-id
-  double as the VTEP). SRv6 uses the outer source; MPLS has none (ESI
-  label: open). BDD: cradle-rs `cradle_evpn_mh_sph` (static),
+  double as the VTEP). SRv6 uses the outer IPv6 source of the MAC-in-SRv6
+  packet, which the tee sets to the PE's IPv6 EVPN source (the VNI
+  declaration's `local-address`, `FibHandle::set_vtep_source`) rather than
+  the first local SID — so `vtep-source` must be that same address for the
+  peers' match to hold (BDD: cradle-rs `cradle_evpn_mh_srv6_zebra`). MPLS
+  has none (ESI label: open). BDD: cradle-rs `cradle_evpn_mh_sph` (static),
   `cradle_evpn_mh_df_zebra` (BGP-driven; CE injects via the non-DF, the DF
   must not echo).
 - **Aliasing ✅ (slice 3)**: ECMP a remote MAC across all all-active PEs

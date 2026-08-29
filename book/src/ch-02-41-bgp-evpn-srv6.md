@@ -162,10 +162,14 @@ automatically when the engine restarts.
 
 - **Requires cradle** — without an engine the routes are advertised and
   received but nothing forwards (the kernel has no DT2U/DT2M action).
-- **Multihoming is signalled in full** (Type-1/Type-4, DF election, the
-  ESI on Type-2s); what remains open across all encapsulations is the
-  aliasing / mass-withdraw *consumer* side for E-LAN MACs, and ARP
-  suppression.
+- **Multihoming works over SRv6 on cradle** — DF election and the non-DF
+  filter, split horizon, aliasing / mass withdraw and single-active, the
+  same as over VXLAN (the aliasing group's members are the PEs' `End.DT2U`
+  SIDs). One rule: split horizon identifies a segment peer by the **outer
+  IPv6 source** of its MAC-in-SRv6 packets, which zebra-rs sets to the
+  PE's IPv6 EVPN source — the VNI declaration's `local-address` — so set
+  the afi-safi `vtep-source` to that same address, making it the Type-4
+  Originating IP the peers learn. ARP suppression remains open.
 - **EVPN-VPWS** (RFC 8214) over SRv6 — the point-to-point E-Line with
   `End.DX2`/`End.DX2V` — is covered in
   [EVPN VPWS](ch-02-38-bgp-evpn-vpws.md).
