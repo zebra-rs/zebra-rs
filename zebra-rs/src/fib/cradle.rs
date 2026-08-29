@@ -1323,25 +1323,34 @@ impl CradleFib {
         if let Err(e) = result {
             tracing::warn!("fib: cradle local_sid_install {} failed: {e}", sid.addr);
         }
-        // Best-effort: the SRv6 H.Encaps outer source (zebra has no explicit
-        // config for it). A local SID is in the node's locator, so its
-        // address is a routable node source; forwarding does not depend on it.
-        // Set it once, from the first local SID installed.
+        // Best-effort fallback for the SRv6 H.Encaps outer source: a local
+        // SID is in the node's locator, so its address is a routable node
+        // source; forwarding does not depend on it. Only until an IPv6 EVPN
+        // source arrives (`set_vtep_source`), which then takes over.
         if self.encap_src_set.swap(true, Ordering::Relaxed) {
             return;
         }
+        self.set_srv6_encap_source(IpAddr::V6(sid.addr)).await;
+    }
+
+    /// Set the outer IPv6 source cradle stamps on its SRv6 encapsulation
+    /// (H.Encaps and MAC-in-SRv6 alike). Best-effort; forwarding does not
+    /// depend on it, but EVPN multihoming's split horizon does: a peer PE
+    /// recognises our overlay BUM by this address, so it must be the one we
+    /// advertise as our EVPN source (Type-4 Originating IP, `vtep-source`).
+    async fn set_srv6_encap_source(&self, addr: IpAddr) {
         if let Err(e) = async {
             self.client()
                 .await?
                 .set_srv6_encap_source(pb::Srv6EncapSource {
-                    addr: sid.addr.to_string(),
+                    addr: addr.to_string(),
                 })
                 .await?;
             anyhow::Ok(())
         }
         .await
         {
-            tracing::debug!("fib: cradle set_srv6_encap_source failed: {e}");
+            tracing::debug!("fib: cradle set_srv6_encap_source {addr} failed: {e}");
         }
     }
 
@@ -2418,6 +2427,14 @@ impl CradleFib {
     /// Set the local VTEP source (VXLAN outer source + decap match) for
     /// `addr`'s address family — cradle keeps one slot per family, so a
     /// dual-stack fabric sets both. Idempotent; last write per family wins.
+    ///
+    /// An IPv6 source is also the outer source of our MAC-in-SRv6
+    /// encapsulation: an EVPN-over-SRv6 PE declares its VNIs with the same
+    /// device shape (an IPv6 `local-address`), and that address — the PE's
+    /// EVPN source, its Type-4 Originating IP under `vtep-source` — is what
+    /// a multihoming peer matches our overlay BUM against for split
+    /// horizon (RFC 8365 §8.3.1). It overrides the first-local-SID fallback
+    /// whichever arrives first.
     pub async fn set_vtep_source(&self, addr: IpAddr) {
         {
             let mut m = self.mirror.lock().await;
@@ -2425,6 +2442,10 @@ impl CradleFib {
                 IpAddr::V4(v4) => m.vtep_source = Some(v4),
                 IpAddr::V6(v6) => m.vtep_source6 = Some(v6),
             }
+        }
+        if addr.is_ipv6() {
+            self.encap_src_set.store(true, Ordering::Relaxed);
+            self.set_srv6_encap_source(addr).await;
         }
         let result = async {
             self.client()
