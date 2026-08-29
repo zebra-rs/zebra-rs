@@ -2657,6 +2657,12 @@ fn show_bgp_evpn_ethernet_segment(
             None => writeln!(buf, "  ESI: (unset)")?,
         }
         writeln!(buf, "  Redundancy mode: {}", es.redundancy_mode.as_str())?;
+        if let Some(label) = es.esi_label {
+            writeln!(
+                buf,
+                "  ESI label: {label} (MPLS split horizon, RFC 7432 §8.3)"
+            )?;
+        }
         if let Some(ifname) = &es.interface {
             writeln!(buf, "  Interface: {ifname}")?;
             // Operationally down (admin down or no carrier): the ES routes

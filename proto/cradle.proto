@@ -30,6 +30,7 @@ message L2Domain {
 message EthernetSegment {
   string esi = 1;             // 10-octet ESI, colon-hex — the segment's name
   repeated string ports = 2;  // local access port interface names
+  uint32 esi_label = 3;       // RFC 7432 §8.3 (MPLS): our ESI label for the segment, for decap; 0 = none
 }
 
 message EthernetSegmentDel {
@@ -313,6 +314,8 @@ message ReplSlot {
   string remote_vtep = 3;   // VXLAN: remote VTEP IPv4 (VNI from the bd's SetVni)
   string remote_pe    = 4;  // MPLS: remote PE address
   uint32 remote_label = 5;  // MPLS: that PE's BUM (EVI) service label
+  string esi = 6;           // RFC 7432 §8.3 (MPLS): the segment this slot serves exclusively (empty = plain slot)
+  uint32 esi_label = 7;     // ... pushing the remote PE's ESI label for it under the service label
 }
 
 // An RFC 9524 Replication segment: the local End.Replicate SID `sid` is an SR

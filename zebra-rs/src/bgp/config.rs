@@ -1984,6 +1984,9 @@ fn config_evpn_encapsulation(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opt
     // leaving it hands them back (the routes now carry a VNI or an SRv6 SID,
     // and a stale ILM would decap traffic the label no longer owns).
     bgp.evi_reconcile();
+    // ... and every Ethernet Segment an ESI label (RFC 7432 §8.3), likewise
+    // handed back on the way out.
+    bgp.es_label_reconcile();
     // Re-originate under the new encapsulation (no-op when
     // advertise-all-vni is off; the config-load gate replay covers
     // cold boot, where this leaf lands before the FdbAdds arrive).
@@ -2057,6 +2060,7 @@ fn config_ethernet_segment(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
             if let Some(esi) = bgp.ethernet_segments.get(&name).and_then(|es| es.esi) {
                 bgp.evpn_withdraw_es_routes(esi, vtep);
             }
+            bgp.es_label_release(&name);
             bgp.ethernet_segments.remove(&name);
         }
         _ => {}
@@ -2102,6 +2106,13 @@ fn config_ethernet_segment_esi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> O
         es.esi = new_esi;
         es.redundancy_mode.single_active()
     };
+    // RFC 7432 §8.3: under MPLS the segment needs its ESI label before the
+    // per-ES A-D below goes out; without an ESI it needs none.
+    if new_esi.is_some() {
+        bgp.es_label_reconcile();
+    } else {
+        bgp.es_label_release(&name);
+    }
     if let Some(esi) = new_esi {
         // Joining the segment starts its startup hold, when one is
         // configured. Arm before originating so the origination below finds
@@ -2349,6 +2360,11 @@ fn config_evi_bridge(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> 
         return Some(());
     }
     entry.bridge = bridge;
+    // Ports enslaved to that bridge just gained (or lost) this EVI: their
+    // per-EVI A-D routes and the DF roles / ESI-label slots teed for them
+    // follow (`Bgp::port_evis`).
+    bgp.evpn_resync_ad_evi();
+    bgp.evpn_es_df_sync();
     Some(())
 }
 

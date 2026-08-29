@@ -105,6 +105,9 @@ struct CradleMirror {
     /// `fdb` / `fdb_vxlan` / `fdb_mpls`, per the received route's encap.
     fdb_mpls: HashMap<(u32, [u8; 6]), (IpAddr, u32)>,
     repl_slots_mpls: HashSet<(u32, IpAddr, u32)>,
+    /// RFC 7432 §8.3 (MPLS): ESI-label replication slots, per
+    /// `(bd, peer PE, its BUM label, ESI, its ESI label for the segment)`.
+    repl_slots_mpls_es: HashSet<(u32, IpAddr, u32, String, u32)>,
     /// RFC 9524 Replication segments (operator `replication-segment` config):
     /// local End.Replicate SID → (hop-limit threshold, downstream branches
     /// `(sid, nexthop_id, local)`). Replayed as `SetReplSeg` on engine restart.
@@ -137,8 +140,9 @@ struct CradleMirror {
     /// neighbor delete exists).
     neighbors: HashMap<(IpAddr, u32), [u8; 6]>,
     /// EVPN multihoming: Ethernet Segment (colon-hex ESI) → its local access
-    /// port names (`SetEthernetSegment`, replace semantics).
-    es_ports: HashMap<String, Vec<String>>,
+    /// port names and our RFC 7432 §8.3 ESI label (0 = none)
+    /// (`SetEthernetSegment`, replace semantics).
+    es_ports: HashMap<String, (Vec<String>, u32)>,
     /// EVPN multihoming: the `(ESI, bridge domain)` pairs where this PE is
     /// NOT the Designated Forwarder (`SetEsRole{df: false}` — the non-DF BUM
     /// filter). Only non-DF roles are kept: cradle holds no row for a DF
@@ -596,8 +600,8 @@ impl CradleFib {
         // this same engine-up edge; a segment naming a port cradle has not
         // re-attached yet fails here and lands on the next `EsSet` the BGP
         // side emits when the link (re)appears.
-        for (esi, ports) in &m.es_ports {
-            self.set_ethernet_segment(esi, ports).await;
+        for (esi, (ports, esi_label)) in &m.es_ports {
+            self.set_ethernet_segment(esi, ports, *esi_label).await;
         }
         for ((esi, bd), single_active) in &m.es_nondf {
             self.set_es_role(esi, *bd, false, *single_active).await;
@@ -627,6 +631,10 @@ impl CradleFib {
         }
         for (vni, pe, label) in &m.repl_slots_mpls {
             self.repl_slot_add_mpls(*vni, *pe, *label).await;
+        }
+        for (vni, pe, label, esi, esi_label) in &m.repl_slots_mpls_es {
+            self.repl_slot_add_mpls_es(*vni, *pe, *label, esi, *esi_label)
+                .await;
         }
         for ((port, vid, table), (remote, local_sid, local_vni, local_label)) in &m.xconnects {
             self.xconnect_add(
@@ -1816,6 +1824,8 @@ impl CradleFib {
                     remote_vtep: String::new(),
                     remote_pe: String::new(),
                     remote_label: 0,
+                    esi: String::new(),
+                    esi_label: 0,
                 })
                 .await?;
             anyhow::Ok(())
@@ -1990,6 +2000,8 @@ impl CradleFib {
                     remote_vtep: String::new(),
                     remote_pe: String::new(),
                     remote_label: 0,
+                    esi: String::new(),
+                    esi_label: 0,
                 })
                 .await?;
             anyhow::Ok(())
@@ -2019,6 +2031,8 @@ impl CradleFib {
                     remote_vtep: vtep.to_string(),
                     remote_pe: String::new(),
                     remote_label: 0,
+                    esi: String::new(),
+                    esi_label: 0,
                 })
                 .await?;
             anyhow::Ok(())
@@ -2047,6 +2061,8 @@ impl CradleFib {
                     remote_vtep: String::new(),
                     remote_pe: pe.to_string(),
                     remote_label: label,
+                    esi: String::new(),
+                    esi_label: 0,
                 })
                 .await?;
             anyhow::Ok(())
@@ -2054,6 +2070,74 @@ impl CradleFib {
         .await;
         if let Err(e) = result {
             tracing::warn!("fib: cradle repl_slot_add_mpls bd {bd} {pe} failed: {e}");
+        }
+    }
+
+    /// RFC 7432 §8.3 (MPLS): a replication slot toward `pe` serving
+    /// Ethernet Segment `esi` alone — its copies carry `pe`'s ESI label for
+    /// the segment (`esi_label`) under its BUM `label`. cradle keys it apart
+    /// from the plain `(bd, pe)` slot by the ESI.
+    pub async fn repl_slot_add_mpls_es(
+        &self,
+        bd: u32,
+        pe: IpAddr,
+        label: u32,
+        esi: &str,
+        esi_label: u32,
+    ) {
+        {
+            let mut m = self.mirror.lock().await;
+            m.repl_slots_mpls_es
+                .retain(|(b, p, _, e, _)| !(*b == bd && *p == pe && e == esi));
+            m.repl_slots_mpls_es
+                .insert((bd, pe, label, esi.to_string(), esi_label));
+        }
+        let result = async {
+            self.client()
+                .await?
+                .add_repl_slot(pb::ReplSlot {
+                    bd,
+                    remote_sid: String::new(),
+                    remote_vtep: String::new(),
+                    remote_pe: pe.to_string(),
+                    remote_label: label,
+                    esi: esi.to_string(),
+                    esi_label,
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle repl_slot_add_mpls_es bd {bd} {pe} es {esi} failed: {e}");
+        }
+    }
+
+    /// Inverse of [`Self::repl_slot_add_mpls_es`].
+    pub async fn repl_slot_del_mpls_es(&self, bd: u32, pe: IpAddr, esi: &str) {
+        self.mirror
+            .lock()
+            .await
+            .repl_slots_mpls_es
+            .retain(|(b, p, _, e, _)| !(*b == bd && *p == pe && e == esi));
+        let result = async {
+            self.client()
+                .await?
+                .del_repl_slot(pb::ReplSlot {
+                    bd,
+                    remote_sid: String::new(),
+                    remote_vtep: String::new(),
+                    remote_pe: pe.to_string(),
+                    remote_label: 0,
+                    esi: esi.to_string(),
+                    esi_label: 0,
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle repl_slot_del_mpls_es bd {bd} {pe} es {esi} failed: {e}");
         }
     }
 
@@ -2074,6 +2158,8 @@ impl CradleFib {
                     remote_vtep: String::new(),
                     remote_pe: pe.to_string(),
                     remote_label: 0,
+                    esi: String::new(),
+                    esi_label: 0,
                 })
                 .await?;
             anyhow::Ok(())
@@ -2100,6 +2186,8 @@ impl CradleFib {
                     remote_vtep: vtep.to_string(),
                     remote_pe: String::new(),
                     remote_label: 0,
+                    esi: String::new(),
+                    esi_label: 0,
                 })
                 .await?;
             anyhow::Ok(())
@@ -2184,18 +2272,19 @@ impl CradleFib {
     /// non-DF rows render onto, so a respawned engine needs it back before
     /// any role. cradle resolves the names, so a port it has not attached
     /// yet is a (logged) failure the caller re-sends on the link edge.
-    pub async fn set_ethernet_segment(&self, esi: &str, ports: &[String]) {
+    pub async fn set_ethernet_segment(&self, esi: &str, ports: &[String], esi_label: u32) {
         self.mirror
             .lock()
             .await
             .es_ports
-            .insert(esi.to_string(), ports.to_vec());
+            .insert(esi.to_string(), (ports.to_vec(), esi_label));
         let result = async {
             self.client()
                 .await?
                 .set_ethernet_segment(pb::EthernetSegment {
                     esi: esi.to_string(),
                     ports: ports.to_vec(),
+                    esi_label,
                 })
                 .await?;
             anyhow::Ok(())

@@ -825,6 +825,30 @@ impl FibHandle {
         }
     }
 
+    /// RFC 7432 §8.3 (EVPN over MPLS): a replication slot toward `pe` that
+    /// serves Ethernet Segment `esi` alone, its copies carrying `pe`'s ESI
+    /// label for the segment under its BUM `label`.
+    pub async fn cradle_repl_add_mpls_es(
+        &self,
+        bd: u32,
+        pe: IpAddr,
+        label: u32,
+        esi: &str,
+        esi_label: u32,
+    ) {
+        if let Some(cradle) = &self.cradle {
+            cradle
+                .repl_slot_add_mpls_es(bd, pe, label, esi, esi_label)
+                .await;
+        }
+    }
+
+    pub async fn cradle_repl_del_mpls_es(&self, bd: u32, pe: IpAddr, esi: &str) {
+        if let Some(cradle) = &self.cradle {
+            cradle.repl_slot_del_mpls_es(bd, pe, esi).await;
+        }
+    }
+
     /// Tee an RFC 9524 Replication segment (operator `replication-segment`
     /// config) to cradle: the local End.Replicate SID and its downstream
     /// branches. No kernel counterpart — cradle's `REPL_SEG` is the SR-P2MP
@@ -984,9 +1008,9 @@ impl FibHandle {
     /// access ports. cradle-only — the kernel bridge has no non-DF /
     /// split-horizon filter, so the kernel VXLAN backend stays single-homed
     /// and there is no kernel counterpart here.
-    pub async fn cradle_es_set(&self, esi: &str, ports: &[String]) {
+    pub async fn cradle_es_set(&self, esi: &str, ports: &[String], esi_label: u32) {
         if let Some(cradle) = &self.cradle {
-            cradle.set_ethernet_segment(esi, ports).await;
+            cradle.set_ethernet_segment(esi, ports, esi_label).await;
         }
     }
 

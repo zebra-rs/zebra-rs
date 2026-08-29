@@ -127,6 +127,13 @@ pub struct EthernetSegment {
     /// config it derives from, as [`super::vpws::VpwsService`] already does
     /// for its own derived state.
     pub hold_until: Option<Instant>,
+    /// RFC 7432 §8.3: this PE's ESI label for the segment under
+    /// `encapsulation mpls` — drawn from the dynamic label block
+    /// (`Bgp::es_label_reconcile`), advertised in the per-ES A-D's ESI
+    /// Label EC, and teed to cradle so a peer's BUM carrying it is kept
+    /// off the segment. `None` under any other encapsulation, or until the
+    /// block arrives.
+    pub esi_label: Option<u32>,
 }
 
 impl EthernetSegment {
@@ -517,6 +524,12 @@ pub struct EsTeeState {
     /// The peer PEs sent as the segment's split-horizon list (the Type-4
     /// candidates other than this PE).
     pub peers: std::collections::BTreeSet<IpAddr>,
+    /// RFC 7432 §8.3 (MPLS): our ESI label sent with the port list (0 =
+    /// none).
+    pub esi_label: u32,
+    /// RFC 7432 §8.3 (MPLS): the ESI-label replication slots sent — per
+    /// `(bridge domain, peer PE, its BUM label, its ESI label for us)`.
+    pub slots: std::collections::BTreeSet<(u32, IpAddr, u32, u32)>,
 }
 
 #[cfg(test)]

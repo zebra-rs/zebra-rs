@@ -207,6 +207,14 @@ pub enum RibRx {
         mup_export_rts: std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
     },
     EoR,
+    /// The cradle eBPF tee just came up (`system cradle enabled` at config
+    /// load, or the engine restarted). Whatever a subscriber teed through
+    /// the FIB handle before this point was dropped, and the RIB's mirror
+    /// replay cannot know about it — so a subscriber that diffs against
+    /// what it believes it already sent must forget that and re-send. BGP
+    /// re-syncs its Ethernet Segment state (ports and ESI label, DF roles,
+    /// peers, aliasing groups, ESI-label slots).
+    CradleUp,
 
     // ---- redistribute route push ---------------------------------
     //
@@ -466,6 +474,13 @@ impl Rib {
     pub fn api_vxlan_add(&self, vni: u32, vtep_local: IpAddr) {
         for (_, sub) in self.client_registry.iter() {
             let _ = sub.rib_rx_tx.send(RibRx::VxlanAdd { vni, vtep_local });
+        }
+    }
+
+    /// Announce that the cradle tee is up (see [`RibRx::CradleUp`]).
+    pub fn api_cradle_up(&self) {
+        for (_, sub) in self.client_registry.iter() {
+            let _ = sub.rib_rx_tx.send(RibRx::CradleUp);
         }
     }
 

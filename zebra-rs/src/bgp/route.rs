@@ -8040,6 +8040,52 @@ fn vpws_es_live_pes(local_rib: &LocalRib, esi: &[u8; 10]) -> BTreeSet<IpAddr> {
     live
 }
 
+/// RFC 7432 §8.3: the ESI label each peer PE advertised for `esi` in its
+/// live per-ES A-D route (the ESI Label EC), by advertising PE. Peers
+/// advertising label 0 (VXLAN / SRv6 local bias) are absent.
+fn es_peer_esi_labels(local_rib: &LocalRib, esi: &[u8; 10]) -> BTreeMap<IpAddr, u32> {
+    let mut out = BTreeMap::new();
+    for table in local_rib.evpn.values() {
+        for (prefix, rib) in table.selected.iter() {
+            if let EvpnPrefix::EthernetAd { esi: e, eth_tag } = prefix
+                && eth_tag == &MAX_ET
+                && e == esi
+                && rib.typ != BgpRibType::Originated
+                && let Some(BgpNexthop::Evpn(nh)) = rib.attr.nexthop
+                && let Some(label) = rib
+                    .attr
+                    .ecom
+                    .as_ref()
+                    .and_then(|ec| ec.0.iter().find_map(|v| v.as_esi_label()))
+                    .map(|l| l.label)
+                    .filter(|l| *l != 0)
+            {
+                out.insert(nh, label);
+            }
+        }
+    }
+    out
+}
+
+/// RFC 7432 §11.2: the MPLS BUM (ingress-replication) label each remote PE
+/// advertised for `vni` in its Type-3 IMET, by PE — what a replication
+/// slot toward it imposes.
+fn imet_mpls_bum_labels(local_rib: &LocalRib, vni: u32) -> BTreeMap<IpAddr, u32> {
+    let mut out = BTreeMap::new();
+    for table in local_rib.evpn.values() {
+        for (prefix, rib) in table.selected.iter() {
+            if let EvpnPrefix::InclusiveMulticast { .. } = prefix
+                && rib.typ != BgpRibType::Originated
+                && extract_vni_from_attr(&rib.attr) == Some(vni)
+                && let Some((pe, label)) = evpn_mpls_bum(rib)
+            {
+                out.insert(pe, label);
+            }
+        }
+    }
+    out
+}
+
 /// Every remote endpoint advertised for VPWS service instance `remote_id`
 /// within `evi`: the non-originated per-EVI Type-1s carrying an
 /// `End.DX2`/`End.DX2V` SID, with their ESI, advertising PE and RFC 8214
@@ -8331,6 +8377,9 @@ fn route_evpn_export_selected(
                         let _ = bgp
                             .rib_client
                             .send(rib::Message::CradleReplDelMpls { bd: vni, pe });
+                        // The ESI-label slots toward that PE went with it
+                        // (RFC 7432 §8.3): re-sync the segments.
+                        bgp.local_rib.evpn_vpws.es_df_dirty = true;
                     }
                     bgp.local_rib.evpn_flood.remove_remote(vni, *orig);
                     bgp.local_rib.evpn_flood.reconcile(vni, bgp.rib_client);
@@ -8504,6 +8553,10 @@ fn route_evpn_export_selected(
                     let _ =
                         bgp.rib_client
                             .send(rib::Message::CradleReplAddMpls { bd: vni, pe, label });
+                    // A peer's BUM label is half of an ESI-label slot toward
+                    // it (RFC 7432 §8.3) — it may land after the peer's
+                    // per-ES A-D did: re-sync the segments.
+                    bgp.local_rib.evpn_vpws.es_df_dirty = true;
                 }
                 let pmsi = best.attr.pmsi_tunnel.as_ref();
                 if let Some(p) = pmsi.filter(|p| p.is_sr_p2mp()) {
@@ -17307,7 +17360,9 @@ impl Bgp {
         let mut attr = BgpAttr::new();
         attr.ecom = Some(ExtCommunity::from([
             ExtCommunityValue::es_import_rt(&esi),
-            ExtCommunityValue::esi_label(single_active, 0),
+            // RFC 7432 §8.3: the ESI label under MPLS; 0 under VXLAN / SRv6,
+            // where the outer source does the split horizon (RFC 8365 §8.3.1).
+            ExtCommunityValue::esi_label(single_active, self.es_esi_label(&esi)),
         ]));
         attr.nexthop = Some(BgpNexthop::Evpn(vtep_local));
         let mut rib = BgpRib::new(
@@ -17451,7 +17506,7 @@ impl Bgp {
         let wanted: std::collections::BTreeSet<u32> = if self.links_down.contains(&port) {
             Default::default()
         } else {
-            self.l2_port_evis.get(&ifindex).cloned().unwrap_or_default()
+            self.port_evis(ifindex)
         };
         let segments: Vec<[u8; 10]> = self
             .ethernet_segments
@@ -18128,8 +18183,12 @@ impl Bgp {
                 String,
                 BTreeMap<u32, (bool, bool)>,
                 std::collections::BTreeSet<IpAddr>,
+                u32,
+                std::collections::BTreeSet<(u32, IpAddr, u32, u32)>,
             ),
         > = BTreeMap::new();
+        let mpls = self.evpn_encap.is_mpls();
+        let mut bum_labels: BTreeMap<u32, BTreeMap<IpAddr, u32>> = BTreeMap::new();
         for es in self.ethernet_segments.values() {
             let (Some(esi), Some(port)) = (es.esi, es.interface.clone()) else {
                 continue;
@@ -18152,8 +18211,8 @@ impl Bgp {
             let vnis = self
                 .link_index_by_name
                 .get(&port)
-                .and_then(|ifindex| self.l2_port_evis.get(ifindex));
-            if let Some(vnis) = vnis {
+                .map(|ifindex| self.port_evis(*ifindex));
+            if let Some(vnis) = &vnis {
                 let holding = self.es_holding(&esi);
                 let ac_df = self.es_ac_df_in_effect(&esi);
                 for &vni in vnis {
@@ -18183,7 +18242,31 @@ impl Bgp {
                     );
                 }
             }
-            desired.insert(esi, (port, roles, peers));
+            // RFC 7432 §8.3 (MPLS): our ESI label for decap, and toward
+            // each peer of the segment — per bridge domain the port is in
+            // — a replication slot carrying that peer's ESI label for the
+            // segment under its BUM label, so the copies of what the CE
+            // sent into us are withheld from the segment over there.
+            let mut slots = std::collections::BTreeSet::new();
+            let esi_label = if mpls {
+                let peer_labels = es_peer_esi_labels(&self.local_rib, &esi);
+                if let Some(vnis) = &vnis {
+                    for &vni in vnis {
+                        let bum = bum_labels
+                            .entry(vni)
+                            .or_insert_with(|| imet_mpls_bum_labels(&self.local_rib, vni));
+                        for (pe, peer_label) in &peer_labels {
+                            if let Some(&label) = bum.get(pe) {
+                                slots.insert((vni, *pe, label, *peer_label));
+                            }
+                        }
+                    }
+                }
+                es.esi_label.unwrap_or(0)
+            } else {
+                0
+            };
+            desired.insert(esi, (port, roles, peers, esi_label, slots));
         }
 
         let mut out: Vec<crate::rib::Message> = Vec::new();
@@ -18194,21 +18277,47 @@ impl Bgp {
             .copied()
             .collect();
         for esi in gone {
-            self.es_df_sent.remove(&esi);
-            out.push(crate::rib::Message::EsDel {
-                esi: esi_display(&esi),
-            });
+            let esi_str = esi_display(&esi);
+            if let Some(sent) = self.es_df_sent.remove(&esi) {
+                for &(bd, pe, _, _) in &sent.slots {
+                    out.push(crate::rib::Message::CradleReplDelMplsEs {
+                        bd,
+                        pe,
+                        esi: esi_str.clone(),
+                    });
+                }
+            }
+            out.push(crate::rib::Message::EsDel { esi: esi_str });
         }
-        for (esi, (port, roles, peers)) in desired {
+        for (esi, (port, roles, peers, esi_label, slots)) in desired {
             let esi_str = esi_display(&esi);
             let sent = self.es_df_sent.entry(esi).or_default();
-            if sent.port.as_deref() != Some(port.as_str()) {
+            if sent.port.as_deref() != Some(port.as_str()) || sent.esi_label != esi_label {
                 out.push(crate::rib::Message::EsSet {
                     esi: esi_str.clone(),
                     ports: vec![port.clone()],
+                    esi_label,
                 });
                 sent.port = Some(port);
+                sent.esi_label = esi_label;
             }
+            for &(bd, pe, _, _) in sent.slots.difference(&slots) {
+                out.push(crate::rib::Message::CradleReplDelMplsEs {
+                    bd,
+                    pe,
+                    esi: esi_str.clone(),
+                });
+            }
+            for &(bd, pe, label, peer_label) in slots.difference(&sent.slots) {
+                out.push(crate::rib::Message::CradleReplAddMplsEs {
+                    bd,
+                    pe,
+                    label,
+                    esi: esi_str.clone(),
+                    esi_label: peer_label,
+                });
+            }
+            sent.slots = slots;
             for (&bd, &(was_df, _)) in &sent.roles {
                 if !roles.contains_key(&bd) && !was_df {
                     out.push(crate::rib::Message::EsRole {
