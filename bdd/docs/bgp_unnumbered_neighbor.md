@@ -48,7 +48,9 @@ interface-keyed peers), and the FIB assertion pins the substring
 |----------|--------|
 | Setup topology | |
 | RA discovery establishes the unnumbered session and exchanges IPv4 routes | |
+| BFD comes up over the unnumbered link and transmits both ways | |
 | IPv4 LAN prefixes forward over the IPv6 link-local next-hop | |
 | The unnumbered peer is listed in summaries and addressable by interface name | |
+| BFD going Down tears the unnumbered session down and withdraws its routes | |
 | Removing the interface-neighbor tears the session down | |
 | Teardown topology | |
