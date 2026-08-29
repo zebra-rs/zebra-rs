@@ -11,6 +11,70 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit them,
 # changelog-gen.sh defaults to distribution "unstable" and urgency "medium".
 
+- semver: 26.8.6
+  date: 2026-08-29T18:00:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### EVPN multihoming over SRv6 and MPLS
+        * Multihoming is no longer VXLAN-only in practice: the same
+          DF election, non-DF filter, aliasing / mass withdraw and
+          single-active now hold over SRv6 and MPLS, each proven by a
+          static and a BGP-driven cradle-rs BDD feature
+        * SRv6 split horizon was broken end to end: cradle stamped the
+          first local SID as the outer source of its MAC-in-SRv6
+          packets while the segment peers were told the Type-4
+          Originating IP, so a peer's copies of the CE's own BUM came
+          back onto the segment. An IPv6 `vtep-source` — the VNI
+          declaration's `local-address`, the PE's EVPN source — is
+          now also the SRv6 outer source, whichever arrives first, and
+          the rule is documented: `vtep-source` must be that address
+        * MPLS split horizon by ESI label (RFC 7432 §8.3): under
+          `encapsulation mpls` every Ethernet Segment draws an ESI
+          label from the dynamic label block, advertises it in the
+          per-ES A-D's ESI Label EC and tees it to cradle for decap;
+          from each peer's A-D and Type-3 the tee builds an ESI-label
+          replication slot toward the peer, so the label is pushed
+          only toward the segment's own peers and only for BUM that
+          entered through the segment. `show bgp evpn
+          ethernet-segment` prints the label
+        * Two tee gaps closed on the way: a segment port under an EVI
+          declared by bridge name (`evi <id> bridge <name>`, the MPLS
+          shape) had no EVI set at all — no DF role was ever teed
+          under MPLS — and a segment configured before `system cradle`
+          took effect had its segment tee dropped for good; the RIB
+          now announces the tee coming up and BGP re-syncs
+    - note: |
+        ### BGP: IPv6-unnumbered peers and BFD
+        * A BFD Down on an `interface-neighbor` (IPv6 link-local,
+          unnumbered) peer was dropped as "unknown peer" — the session
+          stayed Established with its routes in the FIB, a blackhole
+          under ECMP. BFD state changes now resolve interface-keyed
+          peers too, guarded by the recorded session key so a stale
+          Down for a re-keyed session cannot stop the wrong peer; the
+          teardown logs `BFD down` as the reset reason and recovers
+          once BFD packets flow again (#2343)
+    - note: |
+        ### Documentation
+        * `docs/design/bgp-evpn-mh-frr-interop-lab.md`: the interop
+          lab plan for validating the multihoming arc against FRR on
+          a shared Ethernet Segment — topology, five ordered phases
+          with pass criteria (remote-only, mixed-segment DF
+          agreement, BUM filters both ways, aliasing / mass withdraw,
+          the known divergences, LACP MC-LAG), method and deliverables
+        * The EVPN over SRv6 and over MPLS book chapters now state the
+          multihoming status for their encapsulation; the design docs
+          and dataplane matrix follow
+    - note: |
+        ### Housekeeping
+        * The pinned cradle-rs engine release is v1.1.1 (bond
+          membership tracked live — enslave, release or replace a LAG
+          member without re-applying the port; the SRv6 and MPLS
+          multihoming features; the ESI-label datapath; `cradle dump
+          l2` shows the segment / MPLS / static FDB flags); the
+          package recommends `cradle-rs (>= 1.1.1)`
 - semver: 26.8.5
   date: 2026-08-28T18:00:00+09:00
   distribution: unstable
