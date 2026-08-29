@@ -241,9 +241,34 @@ kernel VXLAN backend stays single-homed.**
   declaration's `local-address`, `FibHandle::set_vtep_source`) rather than
   the first local SID — so `vtep-source` must be that same address for the
   peers' match to hold (BDD: cradle-rs `cradle_evpn_mh_srv6_zebra`). MPLS
-  has none (ESI label: open). BDD: cradle-rs `cradle_evpn_mh_sph` (static),
+  has no source address: there the **ESI label** does it (next bullet). BDD: cradle-rs `cradle_evpn_mh_sph` (static),
   `cradle_evpn_mh_df_zebra` (BGP-driven; CE injects via the non-DF, the DF
   must not echo).
+- **MPLS split horizon — the ESI label (RFC 7432 §8.3) ✅**: under
+  `encapsulation mpls` every segment with an ESI draws an ESI label from
+  the dynamic label block (`Bgp::es_label_reconcile`, beside the EVI
+  labels; released on delete or on leaving MPLS), advertises it in the
+  per-ES A-D's ESI Label EC (`es_esi_label`), and tees it as
+  `SetEthernetSegment.esi_label` — cradle pops it under our EVI label into
+  the segment's `es_bits` bit. From each peer's per-ES A-D
+  (`es_peer_esi_labels`) and Type-3 BUM label (`imet_mpls_bum_labels`),
+  `evpn_es_df_sync` tees, per bridge domain the port is in, an ESI-label
+  replication slot toward the peer (`Message::CradleReplAddMplsEs` →
+  `AddReplSlot {remote_pe, remote_label, esi, esi_label}`), diffed in
+  `EsTeeState.slots`; an MPLS Type-3 install/withdraw marks the segments
+  dirty so a late-arriving BUM label completes the slot. `show bgp evpn
+  ethernet-segment` prints `ESI label: N`. Two gaps this uncovered and
+  closed on the way: a port's EVI set came only from a VXLAN sibling on
+  its bridge (`RibRx::L2PortEvis`), so an MPLS EVI (`evi <id> bridge
+  <name>`) gave a segment port no EVIs — no DF role, nothing teed;
+  `Bgp::port_evis` now unions the EVIs whose configured bridge is the
+  port's master (`link_master` / `link_name_by_index` from `LinkAdd`).
+  And a segment configured before `system cradle` took effect had its
+  `SetEthernetSegment` dropped for good, since the tee diffs against
+  `es_df_sent`; the RIB now broadcasts `RibRx::CradleUp` on the engine-up
+  edge and BGP clears its sent state and re-syncs. BDD: cradle-rs
+  `cradle_evpn_mh_mpls` (static), `cradle_evpn_mh_mpls_zebra`
+  (BGP-driven, incl. deleting and re-adding the segment through BGP).
 - **Aliasing ✅ (slice 3)**: ECMP a remote MAC across all all-active PEs
   that advertised the per-ES + per-EVI A-D pair. `Bgp::evpn_es_nhg_sync`
   derives, per `(ESI, VNI)`, the members from the selected per-EVI A-Ds

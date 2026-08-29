@@ -429,6 +429,22 @@ pub enum Message {
         bd: u32,
         pe: IpAddr,
     },
+    /// RFC 7432 §8.3 (EVPN over MPLS): a replication slot toward PE `pe`
+    /// for bridge domain `bd` that serves Ethernet Segment `esi` alone —
+    /// its copies carry `pe`'s ESI label for the segment (`esi_label`)
+    /// under its BUM `label`, so `pe` withholds them from the segment.
+    CradleReplAddMplsEs {
+        bd: u32,
+        pe: IpAddr,
+        label: u32,
+        esi: String,
+        esi_label: u32,
+    },
+    CradleReplDelMplsEs {
+        bd: u32,
+        pe: IpAddr,
+        esi: String,
+    },
     /// MUP `dataplane gtp` uplink decap (`H.M.GTP4.D`): a GTP-U decap PDR teed
     /// to cradle — a G-PDU on (`dst`, `teid`), arriving on a port bound to VRF
     /// table `match_vrf` (0 = global), is stripped and its inner packet
@@ -484,6 +500,9 @@ pub enum Message {
     EsSet {
         esi: String,
         ports: Vec<String>,
+        /// RFC 7432 §8.3 (MPLS): our ESI label for the segment, for decap
+        /// (0 = none).
+        esi_label: u32,
     },
     /// Forget Ethernet Segment `esi` in the cradle datapath.
     EsDel {
@@ -3896,6 +3915,10 @@ impl Rib {
                 // (enable-after-routes). Both are idempotent overwrites.
                 self.fib_handle.cradle_replay().await;
                 self.cradle_rib_walk().await;
+                // ... and what subscribers teed before the tee existed
+                // (an Ethernet Segment configured before `system cradle`
+                // took effect): they re-send from their own state.
+                self.api_cradle_up();
             }
             Message::FpmResync => {
                 self.fpm_rib_walk().await;
@@ -3911,6 +3934,20 @@ impl Rib {
             }
             Message::CradleReplDelMpls { bd, pe } => {
                 self.fib_handle.cradle_repl_del_mpls(bd, pe).await;
+            }
+            Message::CradleReplAddMplsEs {
+                bd,
+                pe,
+                label,
+                esi,
+                esi_label,
+            } => {
+                self.fib_handle
+                    .cradle_repl_add_mpls_es(bd, pe, label, &esi, esi_label)
+                    .await;
+            }
+            Message::CradleReplDelMplsEs { bd, pe, esi } => {
+                self.fib_handle.cradle_repl_del_mpls_es(bd, pe, &esi).await;
             }
             Message::CradleGtpPdrAdd {
                 dst,
@@ -3966,8 +4003,12 @@ impl Rib {
                     .cradle_xconnect_del(&ifname, local_sid, local_vni, local_label, vid, table)
                     .await;
             }
-            Message::EsSet { esi, ports } => {
-                self.fib_handle.cradle_es_set(&esi, &ports).await;
+            Message::EsSet {
+                esi,
+                ports,
+                esi_label,
+            } => {
+                self.fib_handle.cradle_es_set(&esi, &ports, esi_label).await;
             }
             Message::EsDel { esi } => {
                 self.fib_handle.cradle_es_del(&esi).await;

@@ -252,8 +252,18 @@ iBGP session riding the LSP through the routeless P. Its E-Line sibling is
   `system cradle enabled` teeing to an external one — see
   [Enabling the data plane](#enabling-the-data-plane)). Without it the routes
   are advertised and received but nothing forwards.
-- **Single-homed.** Multihoming (Type-1/Type-4 and the ESI label's
-  split-horizon check) is not implemented for MPLS.
+- **Multihoming works over MPLS on cradle** — DF election and the non-DF
+  filter, aliasing / mass withdraw, single-active, and the split horizon
+  RFC 7432 §8.3 specifies for MPLS: with no source address on a labelled
+  frame, each PE draws an **ESI label** per segment from its dynamic label
+  block, advertises it in the per-ES A-D's ESI Label EC, and a peer PE of
+  the segment pushes it under the EVI label on BUM that entered the
+  segment through it; the receiver pops it and keeps the copy off the
+  segment. Nothing to configure beyond the segment itself: `show bgp evpn
+  ethernet-segment` prints `ESI label: N`, and `cradle stats` counts the
+  pushes and pops (`mpls_l2_esi_push`, `mpls_l2_esi_pop`). An EVI's
+  access port is attributed to the EVI by the bridge it is enslaved to
+  (`evi <id> bridge <name>`).
 - **No control word.** RFC 7432 leaves it optional and both ends must agree.
   Its absence is only a hazard where a P router hashes deeply enough to
   mistake a customer frame beginning with nibble 4 or 6 for an IP packet.

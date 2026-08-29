@@ -1270,6 +1270,14 @@ pub struct Bgp {
     /// (config staged before the link surfaces) defer materialization
     /// until the next link-add event.
     pub link_index_by_name: BTreeMap<String, u32>,
+    /// ifindex → name, the inverse mirror, and ifindex → enslaving master
+    /// (a bridge, for an EVPN access port), both fed by `RibRx::LinkAdd`.
+    /// Together they name the bridge a port sits in, which is how an EVI
+    /// declared by bridge name (`evi <id> bridge <name>`, the MPLS shape —
+    /// no VXLAN device on the bridge for the RIB to derive the EVI from)
+    /// is attributed to the port (`Bgp::port_evis`).
+    pub link_name_by_index: BTreeMap<u32, String>,
+    pub link_master: BTreeMap<u32, u32>,
     /// Per-ifindex IPv6 link-local registry, populated from
     /// `RibRx::AddrAdd`/`AddrDel`. Source of the v6 next-hop emitted
     /// in MP_REACH for IPv4-unicast advertisements on interface peers
@@ -1495,6 +1503,8 @@ impl Bgp {
             vrf_global_tx: vrf_global_tx_init,
             vrf_global_rx: vrf_global_rx_init,
             link_index_by_name: BTreeMap::new(),
+            link_name_by_index: BTreeMap::new(),
+            link_master: BTreeMap::new(),
             interface_addrs: super::interface_addrs::InterfaceAddrs::new(),
             connected_subnets: super::connected::ConnectedSubnets::new(),
             update_groups: super::update_group::empty_map(),
@@ -4323,6 +4333,19 @@ impl Bgp {
                 // covered by simple insert-replaces-on-collision.
                 self.link_index_by_name
                     .insert(link.name.clone(), link.index);
+                self.link_name_by_index
+                    .insert(link.index, link.name.clone());
+                // The port's bridge membership, for EVIs declared by
+                // bridge name: a change re-derives the port's per-EVI A-D
+                // routes and the DF roles / ESI-label slots teed for it.
+                let old_master = match link.master {
+                    Some(m) => self.link_master.insert(link.index, m),
+                    None => self.link_master.remove(&link.index),
+                };
+                if old_master != link.master {
+                    self.evpn_reconcile_ad_evi_for_port(link.index);
+                    self.evpn_es_df_sync();
+                }
                 // An `interface-neighbor` typed before RIB announced
                 // this link (config replay at startup races the link
                 // dump) materializes its dormant peer now, so the
@@ -4372,6 +4395,8 @@ impl Bgp {
             RibRx::LinkDel(ifindex) => {
                 self.link_down_failover(ifindex);
                 self.evpn_link_ifindex_state(ifindex, false);
+                self.link_name_by_index.remove(&ifindex);
+                self.link_master.remove(&ifindex);
                 // A deleted link's addresses are not reliably withdrawn
                 // one by one (a veth moved into another netns emits only
                 // RTM_DELLINK), so sweep its contributions out of the
@@ -4489,6 +4514,15 @@ impl Bgp {
                 // The removed L2VNI may have been the owner a parked VPWS
                 // service was waiting on.
                 self.vpws_retry_conflicts();
+            }
+            RibRx::CradleUp => {
+                // The tee is (re)born: everything ES-related sent before
+                // this point never reached it. Forget what was sent and
+                // re-sync from the segments' state.
+                self.es_df_sent.clear();
+                self.es_nhg_sent.clear();
+                self.evpn_es_df_sync();
+                self.evpn_es_nhg_sync();
             }
             RibRx::L2PortEvis { ifindex, vnis } => {
                 // A snapshot, so an unchanged set is a no-op — the RIB
@@ -4774,6 +4808,8 @@ impl Bgp {
         // EVPN-over-MPLS instances draw from the same block, and an EVI
         // configured before the grant is sitting label-less too.
         self.evi_reconcile();
+        // ... as do the Ethernet Segments' ESI labels (RFC 7432 §8.3).
+        self.es_label_reconcile();
         // So do VPWS E-Lines: a service configured before the grant
         // originated its Type-1 with label 0, which no remote binds.
         self.vpws_label_drain();
@@ -4869,6 +4905,114 @@ impl Bgp {
             self.evpn_originate_macip(&entry);
         }
         super::config::reoriginate_all_imet(self);
+    }
+
+    /// Bring every configured Ethernet Segment's ESI label (RFC 7432 §8.3)
+    /// in line with the encapsulation: under `encapsulation mpls` each
+    /// segment with an ESI draws one from the dynamic block — advertised in
+    /// its per-ES A-D's ESI Label EC, teed to cradle for decap — and hands
+    /// it back under any other encapsulation (VXLAN and SRv6 identify the
+    /// ingress PE by the outer source instead). Idempotent; a segment
+    /// whose label appears or goes re-originates its ES routes and re-syncs
+    /// the tee. Called from the ESI/encapsulation config handlers and from
+    /// a label-block grant.
+    pub(super) fn es_label_reconcile(&mut self) {
+        let want = self.evpn_encap.is_mpls();
+        let names: Vec<String> = self.ethernet_segments.keys().cloned().collect();
+        let mut freed = Vec::new();
+        let mut short = false;
+        let mut changed = Vec::new();
+        for name in names {
+            let Some(es) = self.ethernet_segments.get(&name) else {
+                continue;
+            };
+            match (want && es.esi.is_some(), es.esi_label) {
+                (true, None) => {
+                    let Some(label) = self.vrf_label_alloc.as_mut().and_then(|a| a.alloc()) else {
+                        short = true;
+                        continue;
+                    };
+                    if let Some(es) = self.ethernet_segments.get_mut(&name) {
+                        es.esi_label = Some(label);
+                    }
+                    changed.push(name);
+                }
+                (false, Some(label)) => {
+                    if let Some(es) = self.ethernet_segments.get_mut(&name) {
+                        es.esi_label = None;
+                    }
+                    freed.push(label);
+                    changed.push(name);
+                }
+                _ => {}
+            }
+        }
+        self.free_evi_labels(freed);
+        if short {
+            self.request_label_block();
+        }
+        if changed.is_empty() {
+            return;
+        }
+        // The ESI Label EC on the per-ES A-D changed for these segments:
+        // re-originate (the startup hold, if running, keeps gating inside),
+        // and re-tee the label and the peers' ESI-label slots.
+        let vtep = self.evpn_local_source();
+        for name in changed {
+            let Some(es) = self.ethernet_segments.get(&name) else {
+                continue;
+            };
+            let Some(esi) = es.esi else {
+                continue;
+            };
+            let single_active = es.redundancy_mode.single_active();
+            self.evpn_originate_es_routes(esi, vtep, single_active);
+        }
+        self.evpn_es_df_sync();
+    }
+
+    /// Hand back the ESI label of segment `name` (about to be deleted, or
+    /// losing its ESI). No re-origination: the caller withdraws the routes.
+    pub(super) fn es_label_release(&mut self, name: &str) {
+        if let Some(label) = self
+            .ethernet_segments
+            .get_mut(name)
+            .and_then(|es| es.esi_label.take())
+        {
+            self.free_evi_labels(vec![label]);
+        }
+    }
+
+    /// The EVIs access port `ifindex` attaches to: what the RIB derived from
+    /// the bridge's VXLAN member (`RibRx::L2PortEvis`), plus every EVI whose
+    /// configured bridge (`evi <id> bridge <name>`) is the port's master —
+    /// the MPLS shape, where the bridge has no VXLAN device and the RIB
+    /// alone cannot tell.
+    pub fn port_evis(&self, ifindex: u32) -> std::collections::BTreeSet<u32> {
+        let mut out = self.l2_port_evis.get(&ifindex).cloned().unwrap_or_default();
+        if let Some(bridge) = self
+            .link_master
+            .get(&ifindex)
+            .and_then(|m| self.link_name_by_index.get(m))
+        {
+            out.extend(
+                self.evpn_evis
+                    .iter()
+                    .filter(|(_, cfg)| cfg.bridge.as_deref() == Some(bridge.as_str()))
+                    .map(|(evi, _)| *evi),
+            );
+        }
+        out
+    }
+
+    /// The ESI label this PE advertises for `esi` (RFC 7432 §8.3): its
+    /// segment's label under MPLS, else 0 (VXLAN / SRv6 local bias).
+    pub(super) fn es_esi_label(&self, esi: &[u8; 10]) -> u32 {
+        self.ethernet_segments
+            .values()
+            .find(|es| es.esi == Some(*esi))
+            .and_then(|es| es.esi_label)
+            .unwrap_or(0)
     }
 
     /// Allocate (or return the memoized) MPLS service label for VPWS
