@@ -2458,36 +2458,49 @@ pub fn fsm_bgp_open(peer: &mut Peer, conn: ConnTag, packet: OpenPacket) -> State
             ConnTag::Collision => collision.role,
         };
         if winner_role != arriving_role {
-            // OPEN came on the loser. Close it, keep the other conn
-            // alive, and stay in OpenSent waiting for the winner's
-            // OPEN to arrive.
             match conn {
                 ConnTag::Primary => {
-                    // The arriving conn (primary) loses; promote the
-                    // collision (winner) to primary.
-                    close_primary(peer, NotifyCode::Cease, 7); // ConnectionCollisionResolution
-                    promote_collision_to_primary(peer, collision);
+                    // The primary loses to the parked conn — but that
+                    // conn is still pre-OPEN, and §6.8 only resolves
+                    // against a connection that has itself reached
+                    // OpenConfirm. It may already be dead: when both
+                    // sides dial at once, the remote that accepts our
+                    // dial while still in Connect aborts its own, so
+                    // its dial reaches us as a socket nobody will ever
+                    // speak on. Closing the live primary in its favor
+                    // (Cease/7) sent the remote to Idle and promoted a
+                    // corpse; both sides then redialled in 5s lockstep
+                    // and repeated it. Defer instead: take this OPEN to
+                    // OpenConfirm, keep the parked conn — its OPEN, if
+                    // one comes, resolves the collision below on the
+                    // `ConnTag::Collision` arm, and its death just frees
+                    // the slot.
+                    peer.collision = Some(collision);
                 }
                 ConnTag::Collision => {
-                    // The arriving conn (collision) loses; just drop it.
-                    close_collision(collision, NotifyCode::Cease, 7);
+                    // The arriving conn (collision) loses; just drop it
+                    // and stay in OpenSent waiting for the winner's OPEN.
+                    close_collision(collision, NotifyCode::Cease, 7); // ConnectionCollisionResolution
+                    return State::OpenSent;
                 }
             }
-            return State::OpenSent;
-        }
-        // Arriving conn is the winner. Close the other conn and
-        // continue processing this OPEN.
-        match conn {
-            ConnTag::Primary => {
-                // Primary wins, collision loses.
-                close_collision(collision, NotifyCode::Cease, 7);
-            }
-            ConnTag::Collision => {
-                // Collision wins, primary loses. Tear down primary,
-                // then move collision into the primary slot so the
-                // rest of fsm_bgp_open writes to the right tx.
-                close_primary(peer, NotifyCode::Cease, 7);
-                promote_collision_to_primary(peer, collision);
+        } else {
+            // Arriving conn is the winner. Close the other conn and
+            // continue processing this OPEN.
+            match conn {
+                ConnTag::Primary => {
+                    // Primary wins, collision loses.
+                    close_collision(collision, NotifyCode::Cease, 7);
+                }
+                ConnTag::Collision => {
+                    // Collision wins, primary loses (from OpenSent, or
+                    // from OpenConfirm after a deferral above). Tear
+                    // down primary, then move collision into the
+                    // primary slot so the rest of fsm_bgp_open writes
+                    // to the right tx.
+                    close_primary(peer, NotifyCode::Cease, 7);
+                    promote_collision_to_primary(peer, collision);
+                }
             }
         }
     } else if conn == ConnTag::Collision {
@@ -2574,10 +2587,18 @@ pub fn fsm_bgp_notification(peer: &mut Peer, conn: ConnTag, packet: Notification
         drop(collision);
         return peer.state;
     }
-    // NOTIFICATION on the primary tears the session down. Also drop
-    // any pending collision conn — the peer is asking us to stop.
+    // NOTIFICATION on the primary closes that connection. With a §6.8
+    // conn still parked, the session continues on it in OpenSent (its
+    // OPEN went out when it was parked) rather than restarting from
+    // Idle: this is the remote closing its collision loser, and it is
+    // waiting for us on the other conn — a restart here drops that
+    // conn too and puts both sides back into a lockstep redial.
     if let Some(collision) = peer.collision.take() {
-        drop(collision);
+        peer.packet_tx = None;
+        peer.task.reader = None;
+        peer.task.writer = None;
+        promote_collision_to_primary(peer, collision);
+        return State::OpenSent;
     }
     State::Idle
 }
@@ -2593,8 +2614,15 @@ pub fn fsm_bgp_keepalive(peer: &mut Peer, conn: ConnTag) -> State {
     timer::refresh_hold_timer(peer);
     match peer.state {
         // RFC 4271 §8.2.2: KEEPALIVE in OpenConfirm completes the
-        // handshake and moves us to Established.
-        State::OpenConfirm | State::Established => State::Established,
+        // handshake and moves us to Established. A conn still parked
+        // from a deferred §6.8 resolution collides with an Established
+        // session, which §6.8 settles in the session's favor.
+        State::OpenConfirm | State::Established => {
+            if let Some(collision) = peer.collision.take() {
+                close_collision(collision, NotifyCode::Cease, 7); // ConnectionCollisionResolution
+            }
+            State::Established
+        }
         // KEEPALIVE arriving in any other state is unexpected. The
         // FSM should ignore it here rather than spuriously promote;
         // stricter handling (tear down to Idle) is deferred.
@@ -4598,6 +4626,141 @@ mod fsm_idle_hold_tests {
             "the pending dial must be cancelled"
         );
         assert_eq!(peer.primary_role, Some(Role::Passive));
+    }
+
+    /// The remote's OPEN as `test_peer` expects it (AS 65002), carrying
+    /// the given BGP Identifier — `test_peer`'s own is 10.0.0.1, so
+    /// `id > 10.0.0.1` makes the remote-initiated (parked) conn the §6.8
+    /// winner and `id < 10.0.0.1` our own dial.
+    fn open_with_id(id: Ipv4Addr) -> OpenPacket {
+        let header = BgpHeader::new(BgpType::Open, BGP_HEADER_LEN + 10);
+        OpenPacket::new(header, 65002, 180, &id, BgpCap::default())
+    }
+
+    fn sent_notifications(peer: &Peer) -> u64 {
+        peer.counter[BgpType::Notification as usize].sent
+    }
+
+    /// The remote's OPEN arrives on our dial while the parked conn (the
+    /// remote's dial, which §6.8 says should win) is still pre-OPEN.
+    /// Resolution is deferred: the live primary stays, this OPEN takes
+    /// us to OpenConfirm, no Cease goes out. Closing the primary here is
+    /// the bug that livelocked `bgp_otc_local_role`: the remote had
+    /// already abandoned that dial, so we promoted a dead socket and sent
+    /// the remote to Idle, every 5s.
+    #[tokio::test]
+    async fn open_on_primary_defers_to_a_pre_open_winning_collision() {
+        let (mut peer, primary_id, _collision_id) = peer_with_collision();
+        let next = fsm_bgp_open(
+            &mut peer,
+            ConnTag::Primary,
+            open_with_id(Ipv4Addr::new(10, 0, 0, 2)),
+        );
+        assert_eq!(next, State::OpenConfirm);
+        assert_eq!(
+            peer.primary_conn_id,
+            Some(primary_id),
+            "primary must survive"
+        );
+        assert!(peer.collision.is_some(), "parked conn stays parked");
+        assert_eq!(sent_notifications(&peer), 0, "no Cease on a deferral");
+    }
+
+    /// The parked conn's OPEN arrives after a deferral: now both conns
+    /// are known live and §6.8 resolves — the primary is closed with
+    /// Cease/7 and the parked conn is promoted, carrying the session on.
+    #[tokio::test]
+    async fn deferred_collision_open_resolves_from_open_confirm() {
+        let (mut peer, _primary_id, collision_id) = peer_with_collision();
+        let open = || open_with_id(Ipv4Addr::new(10, 0, 0, 2));
+        peer.state = fsm_bgp_open(&mut peer, ConnTag::Primary, open());
+        let next = fsm_bgp_open(&mut peer, ConnTag::Collision, open());
+        assert_eq!(next, State::OpenConfirm);
+        assert_eq!(peer.primary_conn_id, Some(collision_id), "winner promoted");
+        assert!(peer.collision.is_none());
+        assert_eq!(sent_notifications(&peer), 1, "Cease/7 on the loser");
+    }
+
+    /// The parked conn dies after a deferral (the remote had aborted
+    /// that dial): its slot is freed and the session on the primary is
+    /// untouched.
+    #[tokio::test]
+    async fn deferred_collision_death_leaves_the_primary_intact() {
+        let (mut peer, primary_id, collision_id) = peer_with_collision();
+        peer.state = fsm_bgp_open(
+            &mut peer,
+            ConnTag::Primary,
+            open_with_id(Ipv4Addr::new(10, 0, 0, 2)),
+        );
+        let (next, _) = fsm_next_state(&mut peer, Event::ConnFail(collision_id));
+        assert_eq!(next, State::OpenConfirm);
+        assert!(peer.collision.is_none());
+        assert_eq!(peer.primary_conn_id, Some(primary_id));
+        assert!(peer.packet_tx.is_some());
+    }
+
+    /// Reaching Established with a conn still parked from a deferral
+    /// closes it (§6.8: a collision with an Established session is
+    /// settled in the session's favor) — nothing stays parked forever.
+    #[tokio::test]
+    async fn established_closes_a_still_parked_collision() {
+        let (mut peer, primary_id, _collision_id) = peer_with_collision();
+        peer.state = fsm_bgp_open(
+            &mut peer,
+            ConnTag::Primary,
+            open_with_id(Ipv4Addr::new(10, 0, 0, 2)),
+        );
+        let (next, _) = fsm_next_state(&mut peer, Event::KeepAliveMsg(primary_id));
+        assert_eq!(next, State::Established);
+        assert!(peer.collision.is_none());
+        assert_eq!(peer.primary_conn_id, Some(primary_id));
+    }
+
+    /// When our dial is the §6.8 winner the pre-OPEN parked conn is the
+    /// loser and is closed at once, as before — the deferral is only for
+    /// the case where the *winner* is unproven.
+    #[tokio::test]
+    async fn open_on_winning_primary_still_closes_the_parked_loser() {
+        let (mut peer, primary_id, _collision_id) = peer_with_collision();
+        let next = fsm_bgp_open(
+            &mut peer,
+            ConnTag::Primary,
+            open_with_id(Ipv4Addr::new(1, 1, 1, 1)),
+        );
+        assert_eq!(next, State::OpenConfirm);
+        assert_eq!(peer.primary_conn_id, Some(primary_id));
+        assert!(peer.collision.is_none());
+    }
+
+    /// A NOTIFICATION on the primary while a conn is parked closes only
+    /// that connection: the session falls back to the parked conn in
+    /// OpenSent instead of restarting from Idle. This is the remote
+    /// closing its collision loser; it is waiting for us on the other
+    /// conn, and a restart would drop that one too.
+    #[tokio::test]
+    async fn notification_on_primary_falls_back_to_the_parked_collision() {
+        let (mut peer, primary_id, collision_id) = peer_with_collision();
+        let cease = NotificationPacket::new(NotifyCode::Cease, 7, Vec::new());
+        let (next, _) = fsm_next_state(&mut peer, Event::NotifMsg(primary_id, cease));
+        assert_eq!(next, State::OpenSent);
+        assert_eq!(
+            peer.primary_conn_id,
+            Some(collision_id),
+            "parked conn promoted"
+        );
+        assert!(peer.collision.is_none());
+        assert!(peer.packet_tx.is_some());
+    }
+
+    /// Without a parked conn a NOTIFICATION on the primary still tears
+    /// the session down to Idle.
+    #[tokio::test]
+    async fn notification_on_primary_without_collision_goes_idle() {
+        let (mut peer, primary_id, _collision_id) = peer_with_collision();
+        peer.collision = None;
+        let cease = NotificationPacket::new(NotifyCode::Cease, 7, Vec::new());
+        let (next, _) = fsm_next_state(&mut peer, Event::NotifMsg(primary_id, cease));
+        assert_eq!(next, State::Idle);
     }
 }
 
