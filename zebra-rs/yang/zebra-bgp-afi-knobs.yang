@@ -166,12 +166,18 @@ module zebra-bgp-afi-knobs {
          endpoint — as its next-hop (and its original VPN label). The
          receiving PE resolves that PE loopback over BGP-LU.
 
-         Honored on the unicast (SAFI 1), VPNv4 (SAFI 128), and (for the
-         VPN next-hop) related advertise paths; for unicast it preserves
-         the received next-hop on both eBGP and iBGP advertisement and
-         takes precedence over next-hop-self. Locally-originated routes
-         always advertise with self as the next-hop (the originator is
-         the only valid next-hop).";
+         Required likewise on an EVPN (SAFI 70) session where this
+         speaker forwards EVPN between other speakers without being a
+         VXLAN tunnel endpoint itself: the receiving PE builds its
+         remote FDB from the Type-2 next-hop, so rewriting it points
+         the tunnel at a node that cannot decapsulate.
+
+         Honored on the unicast (SAFI 1), VPNv4 (SAFI 128), EVPN
+         (SAFI 70), and (for the VPN next-hop) related advertise paths;
+         for unicast it preserves the received next-hop on both eBGP and
+         iBGP advertisement and takes precedence over next-hop-self.
+         Locally-originated routes always advertise with self as the
+         next-hop (the originator is the only valid next-hop).";
     }
 
     container policy {

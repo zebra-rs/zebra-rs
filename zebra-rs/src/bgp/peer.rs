@@ -904,8 +904,12 @@ pub struct PeerSubConfig {
     /// session between the route reflectors of an RR-based Inter-AS
     /// Option C — the RRs are outside the forwarding path, so the
     /// reflected route must keep the originating PE as the LSP endpoint.
+    /// EVPN routes likewise keep the originating VTEP: an EVPN transit
+    /// speaker is not a tunnel endpoint, and the receiver builds its
+    /// remote FDB from the Type-2 next-hop.
     /// Locally-originated routes still rewrite. Honored on the VPNv4
-    /// advertise path (`route_update_ipv4` / `vpnv4_service_label`).
+    /// (`route_update_ipv4` / `vpnv4_service_label`) and EVPN
+    /// (`route_update_evpn`) advertise paths.
     pub next_hop_unchanged: bool,
 }
 
@@ -1799,8 +1803,8 @@ impl Peer {
 
     /// Whether `afi-safi <name> next-hop-unchanged` is set for this
     /// neighbor in the given address family. Keeps the received next-hop
-    /// (and VPN label) on eBGP advertisement of forwarded VPN routes —
-    /// see [`PeerSubConfig::next_hop_unchanged`].
+    /// (and VPN label) on eBGP advertisement of forwarded VPN and EVPN
+    /// routes — see [`PeerSubConfig::next_hop_unchanged`].
     pub fn next_hop_unchanged(&self, afi: Afi, safi: Safi) -> bool {
         self.config
             .sub
