@@ -5813,6 +5813,20 @@ fn route_advertise_batch<A: BatchAfi>(
     }
 }
 
+/// Whether EVPN egress must replace the received next-hop with self.
+///
+/// Locally originated routes always use this speaker as their next-hop.
+/// Forwarded eBGP routes do so by default, unless the per-neighbor
+/// `afi-safi evpn next-hop-unchanged` knob asks to retain the originating
+/// VTEP — an EVPN transit speaker is not a tunnel endpoint.
+fn evpn_should_rewrite_nexthop(
+    peer_is_ebgp: bool,
+    rib_is_originated: bool,
+    next_hop_unchanged: bool,
+) -> bool {
+    rib_is_originated || (peer_is_ebgp && !next_hop_unchanged)
+}
+
 /// Per-peer EVPN advertise builder. Mirrors `route_update_ipv4`:
 /// applies split-horizon, the iBGP-iBGP / route-reflector filter,
 /// and fixes up AS_PATH / NEXT_HOP / LOCAL_PREF for the outgoing
@@ -6014,7 +6028,11 @@ pub fn route_update_evpn(
         return None;
     }
 
-    if peer.is_ebgp() || rib.is_originated() {
+    if evpn_should_rewrite_nexthop(
+        peer.is_ebgp(),
+        rib.is_originated(),
+        peer.next_hop_unchanged(Afi::L2vpn, Safi::Evpn),
+    ) {
         let nexthop: IpAddr = if let Some(ref local_addr) = peer.param.local_addr {
             local_addr.ip()
         } else {
@@ -6056,6 +6074,173 @@ pub fn route_update_evpn(
     }
 
     Some((route, attrs))
+}
+
+#[cfg(test)]
+mod evpn_nexthop_tests {
+    use super::evpn_should_rewrite_nexthop;
+
+    #[test]
+    fn plain_ebgp_forwarded_route_rewrites_to_self() {
+        assert!(evpn_should_rewrite_nexthop(true, false, false));
+    }
+
+    #[test]
+    fn next_hop_unchanged_preserves_forwarded_evpn_vtep() {
+        assert!(!evpn_should_rewrite_nexthop(true, false, true));
+    }
+
+    #[test]
+    fn locally_originated_route_always_rewrites_to_self() {
+        assert!(evpn_should_rewrite_nexthop(true, true, true));
+    }
+
+    #[test]
+    fn ibgp_forwarded_route_preserves_next_hop() {
+        assert!(!evpn_should_rewrite_nexthop(false, false, false));
+    }
+}
+
+/// The predicate above fixes the *rule*; these fix the *wiring* — that
+/// `route_update_evpn` actually reads the `(L2vpn, Evpn)` knob and puts
+/// the result on the outgoing attribute. Without this a caller passing a
+/// constant, or keying the lookup at the wrong AFI/SAFI, still passes
+/// every predicate test. That was exactly the original defect.
+#[cfg(test)]
+mod evpn_nexthop_wiring_tests {
+    use super::*;
+    use crate::bgp::peer::{PeerSubConfig, State};
+    use std::net::IpAddr;
+
+    const SPINE: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 101);
+    const VTEP: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 11);
+
+    /// EVPN transit speaker's eBGP peer toward a leaf. `local_addr` is
+    /// the session-local address `route_update_evpn` installs when it
+    /// rewrites the next-hop to self.
+    fn ebgp_peer(next_hop_unchanged: bool) -> Peer {
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        Box::leak(Box::new(rx));
+        let mut peer = Peer::new(
+            1,
+            65001,
+            SPINE,
+            65002,
+            "10.0.0.12".parse::<IpAddr>().unwrap(),
+            None,
+            tx,
+            crate::context::ProtoContext::default_table_no_rib(),
+        );
+        peer.state = State::Established;
+        peer.peer_type = PeerType::EBGP;
+        peer.param.local_addr = Some("10.0.0.101:179".parse().unwrap());
+        if next_hop_unchanged {
+            peer.config.sub.insert(
+                AfiSafi::new(Afi::L2vpn, Safi::Evpn),
+                PeerSubConfig {
+                    next_hop_unchanged: true,
+                    ..Default::default()
+                },
+            );
+        }
+        peer
+    }
+
+    /// A Type-2 learned from another eBGP peer, carrying the originating
+    /// VTEP as its next-hop. ident 2 != peer.ident 1 (no split-horizon)
+    /// and `BgpRibType::EBGP` keeps `is_originated()` false.
+    fn forwarded_macip_rib() -> BgpRib {
+        let mut attr = BgpAttr::new();
+        attr.aspath = Some(As4Path::from(vec![65003]));
+        attr.nexthop = Some(BgpNexthop::Evpn(IpAddr::V4(VTEP)));
+        BgpRib::new(2, VTEP, BgpRibType::EBGP, 0, 0, &attr, None, None, false)
+    }
+
+    fn empty_top<'a>(
+        router_id: &'a Ipv4Addr,
+        local_rib: &'a mut LocalRib,
+        shard: &'a mut crate::bgp::shard::BgpShard,
+        attr_store: &'a mut crate::bgp::BgpAttrStore,
+        update_groups: &'a mut crate::bgp::update_group::UpdateGroupMap,
+        interface_addrs: &'a crate::bgp::interface_addrs::InterfaceAddrs,
+        rib_client: &'a crate::rib::client::RibClient,
+        tx: &'a tokio::sync::mpsc::Sender<crate::bgp::inst::Message>,
+    ) -> BgpTop<'a> {
+        BgpTop {
+            router_id,
+            srv6_ipv6_export: None,
+            local_rib,
+            shard,
+            tx,
+            rib_client,
+            attr_store,
+            update_groups,
+            interface_addrs,
+            vrf_export: None,
+            color_policy: None,
+            flex_algo_routes: None,
+            flex_algo_srv6_routes: None,
+            vrf_import: None,
+            nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+            central_label_alloc: None,
+            as_sets_withdraw: false,
+        }
+    }
+
+    /// A forwarded EVPN route keeps the originating VTEP when the peer
+    /// carries `afi-safi evpn next-hop-unchanged`, and is rewritten to
+    /// this speaker's session-local address when it does not.
+    #[tokio::test]
+    async fn evpn_egress_honors_next_hop_unchanged() {
+        let router_id = SPINE;
+        let ctx = crate::context::ProtoContext::default_table_no_rib();
+        let mut local_rib = LocalRib::default();
+        let mut shard = crate::bgp::shard::BgpShard::default();
+        let mut attr_store = crate::bgp::BgpAttrStore::default();
+        let mut update_groups = crate::bgp::update_group::empty_map();
+        let interface_addrs = crate::bgp::interface_addrs::InterfaceAddrs::default();
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        Box::leak(Box::new(rx));
+
+        let rd = RouteDistinguisher::default();
+        let prefix = EvpnPrefix::MacIp {
+            eth_tag: 0,
+            mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x11],
+            ip: None,
+        };
+        let rib = forwarded_macip_rib();
+
+        let mut top = empty_top(
+            &router_id,
+            &mut local_rib,
+            &mut shard,
+            &mut attr_store,
+            &mut update_groups,
+            &interface_addrs,
+            &ctx.rib,
+            &tx,
+        );
+
+        let mut peer = ebgp_peer(true);
+        let (_, attrs) =
+            route_update_evpn(&mut peer, &rd, &prefix, &rib, &mut top, false).expect("advertise");
+        assert_eq!(
+            attrs.nexthop,
+            Some(BgpNexthop::Evpn(IpAddr::V4(VTEP))),
+            "next-hop-unchanged must keep the originating VTEP on eBGP egress"
+        );
+
+        let mut peer = ebgp_peer(false);
+        let (_, attrs) =
+            route_update_evpn(&mut peer, &rd, &prefix, &rib, &mut top, false).expect("advertise");
+        assert_eq!(
+            attrs.nexthop,
+            Some(BgpNexthop::Evpn(IpAddr::V4(SPINE))),
+            "without the knob an eBGP peer still gets next-hop-self"
+        );
+    }
 }
 
 /// Send a single EVPN withdraw to one peer. Mirrors
