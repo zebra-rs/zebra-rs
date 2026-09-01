@@ -6099,6 +6099,16 @@ mod evpn_nexthop_tests {
     fn ibgp_forwarded_route_preserves_next_hop() {
         assert!(!evpn_should_rewrite_nexthop(false, false, false));
     }
+
+    #[test]
+    fn locally_originated_route_rewrites_on_ibgp_too() {
+        assert!(evpn_should_rewrite_nexthop(false, true, false));
+    }
+
+    #[test]
+    fn next_hop_unchanged_is_a_no_op_on_ibgp() {
+        assert!(!evpn_should_rewrite_nexthop(false, false, true));
+    }
 }
 
 /// The predicate above fixes the *rule*; these fix the *wiring* — that
@@ -6239,6 +6249,53 @@ mod evpn_nexthop_wiring_tests {
             attrs.nexthop,
             Some(BgpNexthop::Evpn(IpAddr::V4(SPINE))),
             "without the knob an eBGP peer still gets next-hop-self"
+        );
+    }
+
+    /// A locally-originated route rewrites to self even when the peer
+    /// carries `next-hop-unchanged` — the knob only shields *forwarded*
+    /// routes, and the originator is the route's only valid tunnel
+    /// endpoint. The rib deliberately carries a foreign next-hop so a
+    /// wrongly-skipped rewrite would show up as the preserved VTEP.
+    #[tokio::test]
+    async fn locally_originated_route_still_rewrites_with_knob_set() {
+        let router_id = SPINE;
+        let ctx = crate::context::ProtoContext::default_table_no_rib();
+        let mut local_rib = LocalRib::default();
+        let mut shard = crate::bgp::shard::BgpShard::default();
+        let mut attr_store = crate::bgp::BgpAttrStore::default();
+        let mut update_groups = crate::bgp::update_group::empty_map();
+        let interface_addrs = crate::bgp::interface_addrs::InterfaceAddrs::default();
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        Box::leak(Box::new(rx));
+
+        let rd = RouteDistinguisher::default();
+        let prefix = EvpnPrefix::MacIp {
+            eth_tag: 0,
+            mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x11],
+            ip: None,
+        };
+        let mut rib = forwarded_macip_rib();
+        rib.typ = BgpRibType::Originated;
+
+        let mut top = empty_top(
+            &router_id,
+            &mut local_rib,
+            &mut shard,
+            &mut attr_store,
+            &mut update_groups,
+            &interface_addrs,
+            &ctx.rib,
+            &tx,
+        );
+
+        let mut peer = ebgp_peer(true);
+        let (_, attrs) =
+            route_update_evpn(&mut peer, &rd, &prefix, &rib, &mut top, false).expect("advertise");
+        assert_eq!(
+            attrs.nexthop,
+            Some(BgpNexthop::Evpn(IpAddr::V4(SPINE))),
+            "origination must keep rewriting to self even with next-hop-unchanged"
         );
     }
 }
