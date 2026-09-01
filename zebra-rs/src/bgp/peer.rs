@@ -905,7 +905,11 @@ pub struct PeerSubConfig {
     /// Option C — the RRs are outside the forwarding path, so the
     /// reflected route must keep the originating PE as the LSP endpoint.
     /// Locally-originated routes still rewrite. Honored on the VPNv4
-    /// advertise path (`route_update_ipv4` / `vpnv4_service_label`).
+    /// advertise path (`route_update_ipv4` / `vpnv4_service_label`) and
+    /// the EVPN advertise path (`route_update_evpn`) — an EVPN transit
+    /// speaker with no VTEP of its own must keep the originating VTEP
+    /// as the tunnel endpoint, or the leaves' remote FDB points at a
+    /// node that cannot decap and known unicast blackholes.
     pub next_hop_unchanged: bool,
 }
 
