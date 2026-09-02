@@ -47,6 +47,26 @@ Feature: OSPFv2 redistributes routes from a kernel routing table
     Then show command "show ospf route" in namespace "r1" should eventually not contain "10.55.1.0/24"
     And show command "show ospf route" in namespace "r1" should contain "10.55.2.0/24"
 
+  Scenario: Router-ID change re-originates the table externals
+    # A Router-ID change flushes every LSA self-originated under the
+    # old identity. The table-sourced Type-5s have no trigger of their
+    # own to come back (the table store only re-fires on a kernel
+    # delta), so the identity change itself must re-originate them.
+    # This is the same hole the startup race opens: inside the initial
+    # commit the table replay (RIB channel) and `router-id` (config
+    # channel) are unordered, and when the replay lands first its
+    # Type-5 is originated under the provisional identity and then
+    # flushed by the Router-ID change — r1 never saw 10.55.1.0/24.
+    When I apply command "set router ospf router-id 10.0.0.22" in namespace "r2"
+    # The flush is flooded before the first Hello under the new
+    # identity, so once r1 lists the new neighbor the old external is
+    # already gone from its table; the settle makes that ordering
+    # certain, so the route assert below cannot pass on stale state.
+    Then show command "show ospf neighbor" in namespace "r1" should eventually contain "10.0.0.22"
+    And I wait 5 seconds
+    And show command "show ospf route" in namespace "r1" should eventually contain "10.55.2.0/24"
+    And show command "show ip route" in namespace "r1" should eventually contain "10.55.2.0/24"
+
   Scenario: Teardown topology
     # Separate scenario so cleanup still runs when a step above fails
     # (a failed step skips the rest of its own scenario only).

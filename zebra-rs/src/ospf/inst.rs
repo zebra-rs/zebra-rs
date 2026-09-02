@@ -6159,6 +6159,18 @@ impl Ospf<Ospfv2> {
         // next route churn) `default-information originate always` and
         // the NSSA defaults have no later trigger.
         self.as_external_redist_resync_all();
+        // `redistribute table <id>` externals must be re-originated
+        // here too: the table store only re-fires on a kernel-table
+        // delta, so a route present before the daemon started (learned
+        // from the netlink dump and replayed when the watch registered)
+        // has no later trigger either. The replay rides the RIB
+        // channel while `router-id` rides the config channel, and the
+        // two are unordered within one commit — when the replay lands
+        // first, its Type-5 is originated under the provisional
+        // identity and the flush above withdraws it; without this
+        // resync it stayed withdrawn until the next table change
+        // (bit `@ospfv2_redist_table`: r1 never saw 10.55.1.0/24).
+        self.as_external_table_resync_all();
         self.default_originate_resync();
         let nssa_areas: Vec<Ipv4Addr> = self
             .areas
