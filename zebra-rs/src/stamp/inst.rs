@@ -26,6 +26,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::sync::Arc;
+use std::time::Duration;
 
 use stamp_packet::{ErrorEstimate, ReflectorPacket, SenderPacket, StampTimestamp};
 use tokio::io::unix::AsyncFd;
@@ -88,6 +89,10 @@ pub struct ReflectorStats {
     pub t2_userspace: u64,
 }
 
+/// How long a session whose socket could not be created waits before
+/// the next creation attempt (see [`Stamp::retry_pending`]).
+const SESSION_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+
 #[derive(Debug)]
 pub enum Message {
     /// A Session-Sender probe arrived on the reflector socket. `rx_ts`
@@ -119,6 +124,8 @@ pub enum Message {
     TxTick { key: SessionKey },
     /// Export (damping-period) timer fired for `key`.
     ExportTick { key: SessionKey },
+    /// Retry timer fired: re-attempt every parked session creation.
+    RetryPending,
 }
 
 /// Top-level STAMP instance.
@@ -152,6 +159,14 @@ pub struct Stamp {
     /// `[::]:862` listener bound (so v6 probes can't be answered).
     reflect_tx_v6: Option<UnboundedSender<ReflectRequest>>,
     probers: HashMap<SessionKey, ProberHandle>,
+    /// Sessions whose creation failed (`add_session` error) while a
+    /// subscriber still wants them, with the params to retry with.
+    /// Retried on every [`Message::RetryPending`] tick until the socket
+    /// comes up or the last subscriber leaves.
+    pending: BTreeMap<SessionKey, SessionParams>,
+    /// One-shot timer that sends [`Message::RetryPending`]; `None`
+    /// while nothing is parked.
+    retry_timer: Option<Task<()>>,
     pub reflector_stats: ReflectorStats,
 }
 
@@ -230,6 +245,8 @@ impl Stamp {
             reflect_tx,
             reflect_tx_v6,
             probers: HashMap::new(),
+            pending: BTreeMap::new(),
+            retry_timer: None,
             reflector_stats: ReflectorStats::default(),
         };
         stamp.show_build();
@@ -297,10 +314,32 @@ impl Stamp {
         notifier: UnboundedSender<StampEvent>,
     ) {
         if self.sessions.get(&key).is_none() {
-            if let Err(e) = self.add_session(key, params) {
-                tracing::warn!(?key, error = %e, "stamp: cannot create session");
-                // Keep the subscription anyway: unsubscribe stays
-                // symmetric for the IGP, it just never hears updates.
+            match self.add_session(key, params) {
+                Ok(()) => {
+                    self.pending.remove(&key);
+                }
+                Err(e) => {
+                    // A transient socket failure must not strand the
+                    // subscriber for the life of the adjacency: the IGP
+                    // never re-subscribes on its own (its key is stable
+                    // while the neighbor stays Up), so a creation that
+                    // fails once used to leave the link unmeasured
+                    // forever. Seen live as EADDRNOTAVAIL binding a v6
+                    // link-local that was still tentative under DAD.
+                    // Keep the subscription (unsubscribe stays
+                    // symmetric), park the params, and retry on the
+                    // pending tick until the socket comes up or the
+                    // last subscriber leaves.
+                    if self.pending.insert(key, params).is_none() {
+                        tracing::warn!(
+                            ?key, error = %e,
+                            "stamp: cannot create session, will retry"
+                        );
+                    } else {
+                        tracing::debug!(?key, error = %e, "stamp: session retry failed");
+                    }
+                    self.arm_retry_timer();
+                }
             }
         } else {
             self.update_params(&key, params);
@@ -330,7 +369,50 @@ impl Stamp {
         };
         if now_empty {
             self.subscribers.remove(key);
+            self.pending.remove(key);
             self.remove_session(key);
+        }
+    }
+
+    /// Arm the one-shot [`Message::RetryPending`] timer unless one is
+    /// already running. The task handle is held so despawning the
+    /// instance aborts it.
+    fn arm_retry_timer(&mut self) {
+        if self.retry_timer.is_some() {
+            return;
+        }
+        let tx = self.main_tx.clone();
+        self.retry_timer = Some(Task::spawn(async move {
+            tokio::time::sleep(SESSION_RETRY_INTERVAL).await;
+            let _ = tx.send(Message::RetryPending);
+        }));
+    }
+
+    /// [`Message::RetryPending`]: re-attempt every parked session
+    /// creation. Entries whose subscribers have all left (or that got
+    /// created meanwhile) are dropped; the timer is re-armed while
+    /// anything remains parked.
+    fn retry_pending(&mut self) {
+        self.retry_timer = None;
+        let parked: Vec<(SessionKey, SessionParams)> =
+            self.pending.iter().map(|(k, p)| (*k, *p)).collect();
+        for (key, params) in parked {
+            if !self.subscribers.contains_key(&key) || self.sessions.get(&key).is_some() {
+                self.pending.remove(&key);
+                continue;
+            }
+            match self.add_session(key, params) {
+                Ok(()) => {
+                    self.pending.remove(&key);
+                    tracing::info!(?key, "stamp: session created on retry");
+                }
+                Err(e) => {
+                    tracing::debug!(?key, error = %e, "stamp: session retry failed");
+                }
+            }
+        }
+        if !self.pending.is_empty() {
+            self.arm_retry_timer();
         }
     }
 
@@ -601,6 +683,7 @@ impl Stamp {
                         self.on_reply_recv(key, reply, t4, t4_kernel),
                     Message::TxTick { key } => self.on_tx_tick(key),
                     Message::ExportTick { key } => self.on_export_tick(key),
+                    Message::RetryPending => self.retry_pending(),
                 },
                 Some(msg) = self.cm.rx.recv() => self.process_cm_msg(msg),
                 Some(msg) = self.show.rx.recv() => {
@@ -678,6 +761,44 @@ mod tests {
         stamp.unsubscribe("ospf", &key);
         assert_eq!(stamp.sessions.len(), 0, "last unsubscribe tears down");
         assert!(stamp.probers.is_empty());
+    }
+
+    /// A session whose socket can't be created (here a local address
+    /// that is on no interface — the shape of a v6 link-local still
+    /// tentative under DAD) keeps its subscription and is parked for
+    /// retry instead of being dropped; the last unsubscribe clears the
+    /// parked entry so nothing retries a session nobody wants.
+    #[tokio::test]
+    async fn failed_create_is_parked_until_unsubscribe() {
+        let mut stamp = fresh_stamp();
+        // TEST-NET-1 (RFC 5737): never configured on a host interface,
+        // so the sender bind fails with EADDRNOTAVAIL.
+        let key = SessionKey {
+            local: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            remote: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
+            ifindex: 0,
+        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        stamp.subscribe("isis".into(), key, SessionParams::default(), tx);
+        assert!(stamp.sessions.get(&key).is_none(), "no socket, no session");
+        assert_eq!(stamp.pending.get(&key), Some(&SessionParams::default()));
+        assert!(stamp.subscribers.contains_key(&key), "subscription kept");
+        assert!(stamp.retry_timer.is_some(), "retry armed");
+
+        // The tick finds the address still unusable: stays parked,
+        // timer re-armed.
+        stamp.retry_pending();
+        assert!(stamp.sessions.get(&key).is_none());
+        assert!(stamp.pending.contains_key(&key));
+        assert!(stamp.retry_timer.is_some(), "re-armed while parked");
+
+        // Last unsubscribe drops the parked entry; the next tick has
+        // nothing to do and does not re-arm.
+        stamp.unsubscribe("isis", &key);
+        assert!(stamp.pending.is_empty());
+        stamp.retry_pending();
+        assert!(stamp.retry_timer.is_none());
     }
 
     /// A later Subscribe with different timing retunes the stored
