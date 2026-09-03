@@ -1855,6 +1855,9 @@ impl Isis {
             RibRx::LinkMtu { ifindex, mtu } => {
                 self.link_mtu(ifindex, mtu);
             }
+            RibRx::LinkMac { ifindex, mac } => {
+                self.link_mac(ifindex, mac);
+            }
             RibRx::AddrAdd(addr) => {
                 // isis_info!("Isis::AddrAdd {}", addr.addr);
                 self.addr_add(addr);
@@ -4545,7 +4548,7 @@ mod commit_and_microloop_gate_tests {
     use super::bfd_wiring_tests::{test_config_tx, test_ctx, test_rib_subscriber};
     use super::*;
 
-    fn fresh_isis() -> Isis {
+    pub(super) fn fresh_isis() -> Isis {
         let (ctx, rib_rx) = test_ctx();
         let (policy_tx, policy_rx) = mpsc::unbounded_channel();
         Box::leak(Box::new(policy_rx));
@@ -4808,5 +4811,95 @@ mod commit_and_microloop_gate_tests {
         assert_eq!(isis.dis_gen_timer.l1.len(), 2);
         assert_eq!(isis.dis_gen_pending_base.l1.get(&nid(3)), Some(&Some(5)));
         assert_eq!(isis.dis_gen_pending_base.l1.get(&nid(4)), Some(&None));
+    }
+}
+
+#[cfg(test)]
+mod link_mac_tests {
+    use netlink_packet_route::link::LinkFlags;
+    use tokio::sync::mpsc;
+
+    use super::commit_and_microloop_gate_tests::fresh_isis;
+    use super::*;
+    use crate::isis::link::{IsisLink, LinkConfig, LinkState, LinkTimer};
+    use crate::rib::MacAddr;
+
+    fn mac(last: u8) -> MacAddr {
+        MacAddr::from([0x02, 0, 0, 0, 0, last])
+    }
+
+    /// A socket-less link record. The RIB-driven attribute refreshers
+    /// (`link_mtu`, `link_mac`) only touch `state`, so no packet task
+    /// is needed; the parked `prx` keeps `ptx` sendable.
+    fn parked_link(ifindex: u32, mac: Option<MacAddr>) -> IsisLink {
+        let (ptx, prx) = mpsc::unbounded_channel();
+        Box::leak(Box::new(prx));
+        let mut link = IsisLink {
+            ifindex,
+            ptx,
+            read_task: tokio::spawn(async {}),
+            flags: LinkFlags::empty(),
+            circuit_id: 0,
+            config: LinkConfig::default(),
+            state: LinkState::default(),
+            timer: LinkTimer::default(),
+        };
+        link.state.mac = mac;
+        link
+    }
+
+    fn drain(isis: &mut Isis) {
+        while isis.rx.try_recv().is_ok() {}
+    }
+
+    /// The bridge/bond case: the SNPA moves, and the instance nudges
+    /// itself — a Hello on every level so neighbours learn the new
+    /// source address at once, then a level-agnostic DIS re-election
+    /// because the address is the priority tie-breaker.
+    #[tokio::test]
+    async fn changed_address_refreshes_snpa_and_nudges_hello_then_dis() {
+        let mut isis = fresh_isis();
+        isis.links.insert(7, parked_link(7, Some(mac(1))));
+        drain(&mut isis);
+
+        isis.link_mac(7, mac(2));
+
+        assert_eq!(isis.links.get(&7).unwrap().state.mac, Some(mac(2)));
+        assert!(matches!(
+            isis.rx.try_recv(),
+            Ok(Message::Ifsm(IfsmEvent::HelloOriginate, 7, None))
+        ));
+        assert!(matches!(
+            isis.rx.try_recv(),
+            Ok(Message::Ifsm(IfsmEvent::DisSelection, 7, None))
+        ));
+        assert!(isis.rx.try_recv().is_err());
+    }
+
+    /// The RIB only fans out genuine changes, but a duplicate must
+    /// still be harmless: no Hello burst, no election churn.
+    #[tokio::test]
+    async fn same_address_is_silent() {
+        let mut isis = fresh_isis();
+        isis.links.insert(7, parked_link(7, Some(mac(1))));
+        drain(&mut isis);
+
+        isis.link_mac(7, mac(1));
+
+        assert_eq!(isis.links.get(&7).unwrap().state.mac, Some(mac(1)));
+        assert!(isis.rx.try_recv().is_err());
+    }
+
+    /// A link IS-IS never saw (not in this VRF, or deleted meanwhile)
+    /// is ignored rather than created.
+    #[tokio::test]
+    async fn unknown_link_is_ignored() {
+        let mut isis = fresh_isis();
+        drain(&mut isis);
+
+        isis.link_mac(9, mac(1));
+
+        assert!(isis.links.get(&9).is_none());
+        assert!(isis.rx.try_recv().is_err());
     }
 }

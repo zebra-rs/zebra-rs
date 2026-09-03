@@ -868,6 +868,12 @@ impl Rib {
         let prev_mtu: Option<u32> = self.links.get(&ifindex).map(|l| l.mtu);
         let new_mtu: u32 = fib_link.mtu;
 
+        // Hardware-address pre-state, for the same reason as `prev_mtu`:
+        // IS-IS caches it as the circuit SNPA. `None` for a brand-new
+        // link (its address rides on `api_link_add`); `Some(None)` for
+        // a known link the kernel reports no address for.
+        let prev_mac: Option<Option<MacAddr>> = self.links.get(&ifindex).map(|l| l.mac);
+
         // Capture master pre-state so an existing link crossing a VRF
         // boundary (operator `interface X vrf Y`, applied by the kernel
         // as an RTM_NEWLINK on an already-known ifindex) can be
@@ -997,6 +1003,16 @@ impl Rib {
             && prev != new_mtu
         {
             self.api_link_mtu(ifindex, new_mtu);
+        }
+
+        // Likewise for the hardware address. Compare against the value
+        // now *stored* rather than `fib_link.mac`, so the adopt-if-present
+        // rule above is honoured: an RTM_NEWLINK that omits IFLA_ADDRESS
+        // leaves the cache untouched and fires nothing.
+        if let Some(prev) = prev_mac
+            && let Some(mac) = link_mac_delta(prev, self.links.get(&ifindex).and_then(|l| l.mac))
+        {
+            self.api_link_mac(ifindex, mac);
         }
 
         // A master change that crosses a VRF boundary moves this
@@ -1913,6 +1929,57 @@ pub fn link_vrf_name<'a>(rib: &'a Rib, link: &Link) -> Option<&'a str> {
         .values()
         .find(|v| v.ifindex == master)
         .map(|v| v.name.as_str())
+}
+
+/// The hardware address to fan out after reconciling an already-known
+/// link, if any: the address now cached, when it is present and differs
+/// from what was cached before. `None` means nothing changed that a
+/// subscriber could act on — including a cache that went from an
+/// address to none, which the adopt-if-present rule in [`Rib::link_add`]
+/// never produces but which would carry nothing to announce anyway.
+pub fn link_mac_delta(prev: Option<MacAddr>, now: Option<MacAddr>) -> Option<MacAddr> {
+    match now {
+        Some(mac) if prev != Some(mac) => Some(mac),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod link_mac_delta_tests {
+    use super::*;
+
+    fn mac(last: u8) -> MacAddr {
+        MacAddr::from([0x02, 0, 0, 0, 0, last])
+    }
+
+    /// The bridge case: the address the link was created with gives
+    /// way to one recomputed from its port set.
+    #[test]
+    fn changed_address_is_announced() {
+        assert_eq!(link_mac_delta(Some(mac(1)), Some(mac(2))), Some(mac(2)));
+    }
+
+    /// Every other RTM_NEWLINK on the link (flag flips, MTU, master)
+    /// re-reports the same address; that must not fan out.
+    #[test]
+    fn unchanged_address_is_silent() {
+        assert_eq!(link_mac_delta(Some(mac(1)), Some(mac(1))), None);
+    }
+
+    /// A link known without an address that gains one (not something
+    /// the kernel does, but the honest answer is to announce it).
+    #[test]
+    fn first_address_is_announced() {
+        assert_eq!(link_mac_delta(None, Some(mac(1))), Some(mac(1)));
+    }
+
+    /// Nothing cached now means nothing to announce, whatever was
+    /// cached before.
+    #[test]
+    fn absent_address_is_silent() {
+        assert_eq!(link_mac_delta(Some(mac(1)), None), None);
+        assert_eq!(link_mac_delta(None, None), None);
+    }
 }
 
 #[cfg(test)]

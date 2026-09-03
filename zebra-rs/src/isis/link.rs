@@ -1148,6 +1148,40 @@ impl Isis {
         }
     }
 
+    /// Refresh the cached SNPA after the kernel changed the interface's
+    /// hardware address (`RibRx::LinkMac`: a bridge recomputing its
+    /// address from its port set, a bond adopting its first slave's,
+    /// an operator `ip link set ... address`). The SNPA is what the LAN
+    /// three-way check compares against a neighbour's IS Neighbors TLV
+    /// (ISO 10589 §8.4.2.5): once a neighbour has learnt the new source
+    /// address from our Hellos, every IIH it sends lists that address,
+    /// and a stale copy here fails the check on each one — the
+    /// adjacency drops to Init and stays there. It is also the DIS
+    /// election tie-breaker (§8.4.5) and the `show isis interface` SNPA.
+    ///
+    /// Beyond the in-place update, two nudges keep the flap short:
+    /// an immediate Hello on every level, so neighbours learn the new
+    /// address now rather than at the next interval, and a
+    /// level-agnostic DIS re-election, since an address change can
+    /// flip a priority tie. Both are no-ops on a circuit that runs no
+    /// Hello protocol (passive, or a level the link is not in), and
+    /// the re-election on a level with no Up neighbour.
+    pub fn link_mac(&mut self, ifindex: u32, mac: MacAddr) {
+        let Some(link) = self.links.get_mut(&ifindex) else {
+            return;
+        };
+        if link.state.mac == Some(mac) {
+            return;
+        }
+        link.state.mac = Some(mac);
+        let _ = self
+            .tx
+            .send(Message::Ifsm(IfsmEvent::HelloOriginate, ifindex, None));
+        let _ = self
+            .tx
+            .send(Message::Ifsm(IfsmEvent::DisSelection, ifindex, None));
+    }
+
     /// React to a kernel-side link-down event. Adjacencies on this
     /// link can't continue — packets stop flowing the moment IFF_UP
     /// drops — so tear them down immediately rather than ride out

@@ -111,6 +111,22 @@ pub enum RibRx {
         ifindex: u32,
         mtu: u32,
     },
+    /// The hardware address of an already-known link changed. The
+    /// kernel moves it on a live link in the ordinary course of our
+    /// own configuration — a bridge recomputes its address from its
+    /// port set on every enslave/release, a bond adopts its first
+    /// slave's — and `ip link set ... address` is always available to
+    /// the operator. IS-IS caches it as the circuit SNPA: the value
+    /// the LAN three-way check compares against a neighbour's IS
+    /// Neighbors TLV (ISO 10589 §8.4.2.5) and the DIS-election
+    /// tie-breaker (§8.4.5), so a stale copy pins adjacencies at
+    /// Init. Subscribers update the cached value in place. A
+    /// brand-new link carries its address on `LinkAdd` and never
+    /// sees this.
+    LinkMac {
+        ifindex: u32,
+        mac: MacAddr,
+    },
     AddrAdd(LinkAddr),
     AddrDel(LinkAddr),
     RouterIdUpdate(Ipv4Addr),
@@ -396,6 +412,15 @@ impl Rib {
         let vrf_id = self.ifindex_vrf_id(ifindex);
         for (_, sub) in self.client_registry.iter_link_subs(vrf_id) {
             let _ = sub.rib_rx_tx.send(RibRx::LinkMtu { ifindex, mtu });
+        }
+    }
+
+    /// Push a hardware-address change to subscribers bound to this
+    /// link's VRF.
+    pub fn api_link_mac(&self, ifindex: u32, mac: MacAddr) {
+        let vrf_id = self.ifindex_vrf_id(ifindex);
+        for (_, sub) in self.client_registry.iter_link_subs(vrf_id) {
+            let _ = sub.rib_rx_tx.send(RibRx::LinkMac { ifindex, mac });
         }
     }
 

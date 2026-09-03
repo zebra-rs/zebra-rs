@@ -390,6 +390,34 @@ async fn set_namespace_interface_mtu(
     );
 }
 
+/// Set the kernel hardware address of an interface inside a namespace.
+/// zebra-rs has no MAC config leaf — it mirrors the kernel value via
+/// netlink (`Rib::link_add` adopts it, `RibRx::LinkMac` fans it out,
+/// `Isis::link_mac` refreshes the SNPA) — so this is THE way a test
+/// moves the address that IS-IS's LAN three-way check and DIS election
+/// read.
+#[given(expr = "I set mac {string} on interface {string} in namespace {string}")]
+#[when(expr = "I set mac {string} on interface {string} in namespace {string}")]
+async fn set_namespace_interface_mac(
+    world: &mut World,
+    mac: String,
+    interface: String,
+    namespace: String,
+) {
+    let scoped = world.ns(&namespace);
+    netns::exec_in_netns(
+        &scoped,
+        "ip",
+        &["link", "set", "dev", &interface, "address", &mac],
+    )
+    .await
+    .expect("Failed to set interface MAC");
+    println!(
+        "✓ Interface {} in namespace {} address {}",
+        interface, scoped, mac
+    );
+}
+
 // Keyword-agnostic on purpose: cucumber-rs binds a step to its
 // attribute keyword, and an `And` inherits the preceding `Given`/
 // `When`/`Then` — a `when`-only utility step silently SKIPS (along
