@@ -2009,7 +2009,39 @@ pub fn fsm_next_state(peer: &mut Peer, event: Event) -> (State, FsmEffect) {
         Event::HoldTimerExpires => (fsm_holdtimer_expires(peer), FsmEffect::None),
         Event::KeepaliveTimerExpires => (fsm_keepalive_expires(peer), FsmEffect::None),
         Event::IdleHoldTimerExpires => (fsm_idle_hold_timer_expires(peer), FsmEffect::None),
-        Event::Connected(stream) => (fsm_connected(peer, Role::Active, stream), FsmEffect::None),
+        Event::Connected(stream) => match peer.state {
+            // No primary conn yet — our completed dial becomes it
+            // (Idle drops the stream inside `fsm_connected`).
+            State::Idle | State::Connect | State::Active => {
+                (fsm_connected(peer, Role::Active, stream), FsmEffect::None)
+            }
+            // A primary already exists: an inbound we accepted while
+            // still dialing reached the FSM first and took the primary
+            // slot (role Passive). Our dial completing now is the
+            // *second* connection, not a replacement — park it as the
+            // §6.8 collision conn (role Active, since we initiated it)
+            // and let resolution pick the survivor. Overwriting the
+            // primary here silently orphaned the accepted conn's reader
+            // — the very conn the remote was establishing on — and the
+            // stray OPEN/Cease that followed knocked one side to Idle
+            // while the other sat in Active, both redialling in 5s
+            // lockstep. Mirror image of the inbound-accept arm in
+            // `handle_peer_connection`; a third connection (primary
+            // already Active, or a collision already parked) is
+            // dropped, as two conns is the RFC max.
+            State::OpenSent | State::OpenConfirm => {
+                if peer.primary_role == Some(Role::Passive) && peer.collision.is_none() {
+                    start_collision_conn(peer, Role::Active, stream);
+                } else {
+                    drop(stream);
+                }
+                (peer.state, FsmEffect::None)
+            }
+            State::Established => {
+                drop(stream);
+                (peer.state, FsmEffect::None)
+            }
+        },
         Event::ConnFail(id) => match resolve_conn(peer, id) {
             Some(conn) => (fsm_conn_fail(peer, conn), FsmEffect::None),
             None => (peer.state, FsmEffect::None),
@@ -2829,26 +2861,31 @@ pub fn fsm_conn_fail(peer: &mut Peer, conn: ConnTag) -> State {
         }
         return peer.state;
     }
-    // Primary conn failed. A parked collision conn is closed, not
-    // promoted. Historically promotion here caused a permanent wedge
-    // because the promoted conn's events were misrouted (the role tag
-    // was baked into its reader at spawn — see the `ConnId` doc);
-    // dispatch-time resolution has since fixed that for the
-    // legitimate §6.8 promotion. Close-and-restart is kept here
-    // regardless: the parked conn is pre-OPEN by definition, so
-    // restarting costs one reconnect round-trip and keeps this arm a
-    // plain teardown.
+    // Primary conn failed. If a §6.8 conn is parked, fall back to it
+    // instead of tearing the session down: promote it to primary and
+    // wait for its OPEN in OpenSent. Closing it here (Cease) used to
+    // send that Cease down the very connection the remote is
+    // establishing on — when both peers dial at once, one side's dial
+    // is refused/RST *after* it has already accepted the other's
+    // inbound as a collision conn, and Cease-ing that live collision
+    // knocked the remote back to Idle; both sides then redialled in 5s
+    // lockstep and repeated it (the same crossed-dial family as the
+    // OPEN/NOTIFICATION arms fixed in #2350). The parked conn is
+    // pre-OPEN, so if it too is dead its own ConnFail lands right back
+    // here — now with no collision parked — for the plain teardown
+    // below, costing one reconnect round-trip but never a spurious
+    // Cease to a healthy peer. Dispatch-time conn resolution
+    // (`resolve_conn`) routes the promoted conn's events correctly, so
+    // the historical "promotion wedges" hazard is gone. Mirrors the
+    // NOTIFICATION-on-primary arm in `fsm_bgp_notification`.
     peer.task.writer = None;
     peer.task.reader = None;
     peer.packet_tx = None;
     peer.primary_role = None;
     peer.primary_conn_id = None;
     if let Some(collision) = peer.collision.take() {
-        close_collision(
-            collision,
-            NotifyCode::Cease,
-            CeaseError::ConnectionRejected.into(),
-        );
+        promote_collision_to_primary(peer, collision);
+        return State::OpenSent;
     }
     // RFC 4271 TcpConnectionFails cells, by the state the failure
     // arrived in. Either way the peer keeps retrying until the
@@ -3549,7 +3586,7 @@ fn reject_connection(stream: TcpStream, code: NotifyCode, sub_code: u8) {
 /// arrives on either connection; if this conn wins, promotion moves
 /// its `ConnId` into the primary slot and its events resolve to
 /// Primary from then on.
-fn start_collision_conn(peer: &mut Peer, stream: TcpStream) {
+fn start_collision_conn(peer: &mut Peer, role: Role, stream: TcpStream) {
     // Same TTL policy as the primary connection: if this collision conn
     // wins §6.8 resolution it is promoted to primary, so it must carry
     // the egress TTL and (for ttl-security) the ingress floor too. Record
@@ -3572,7 +3609,7 @@ fn start_collision_conn(peer: &mut Peer, stream: TcpStream) {
         packet_tx: packet_tx.clone(),
         reader,
         writer,
-        role: Role::Passive,
+        role,
         local_addr,
         remote_addr,
     });
@@ -3662,7 +3699,7 @@ pub(super) fn handle_peer_connection(
                 // pending, drop the new one — having three TCPs to
                 // the same peer isn't worth modeling.
                 if peer.primary_role == Some(Role::Active) && peer.collision.is_none() {
-                    start_collision_conn(peer, stream);
+                    start_collision_conn(peer, Role::Passive, stream);
                     None
                 } else {
                     reject_connection(stream, NotifyCode::Cease, 7); // ConnectionCollisionResolution
@@ -4765,6 +4802,105 @@ mod fsm_idle_hold_tests {
         let cease = NotificationPacket::new(NotifyCode::Cease, 7, Vec::new());
         let (next, _) = fsm_next_state(&mut peer, Event::NotifMsg(primary_id, cease));
         assert_eq!(next, State::Idle);
+    }
+
+    /// A TCP failure on the primary while a §6.8 conn is parked falls
+    /// back to that conn — promote it and wait for its OPEN in
+    /// OpenSent — instead of Cease-closing it and tearing the session
+    /// down. Closing it used to send a Cease down the very connection
+    /// the remote was establishing on (the crossed-dial case where our
+    /// dial is RST after we accepted the remote's inbound as the
+    /// collision), knocking both sides into a 5s lockstep redial.
+    /// Mirrors `notification_on_primary_falls_back_to_the_parked_collision`.
+    #[tokio::test]
+    async fn conn_fail_on_primary_falls_back_to_the_parked_collision() {
+        let (mut peer, primary_id, collision_id) = peer_with_collision();
+        let (next, _) = fsm_next_state(&mut peer, Event::ConnFail(primary_id));
+        assert_eq!(next, State::OpenSent);
+        assert_eq!(
+            peer.primary_conn_id,
+            Some(collision_id),
+            "parked conn promoted"
+        );
+        assert!(peer.collision.is_none());
+        assert!(peer.packet_tx.is_some());
+    }
+
+    /// Without a parked conn a primary TCP failure in OpenSent still
+    /// tears the connection down and parks in Active for the paced
+    /// redial (unchanged behaviour).
+    #[tokio::test]
+    async fn conn_fail_on_primary_without_collision_parks_active() {
+        let (mut peer, primary_id, _collision_id) = peer_with_collision();
+        peer.collision = None;
+        let (next, _) = fsm_next_state(&mut peer, Event::ConnFail(primary_id));
+        assert_eq!(next, State::Active);
+        assert!(peer.primary_conn_id.is_none());
+        assert!(peer.packet_tx.is_none());
+    }
+
+    /// A dial that completes *after* we already accepted an inbound
+    /// (primary role Passive) is the second connection, not a
+    /// replacement: it must be parked as the §6.8 collision conn (role
+    /// Active, since we initiated it), leaving the accepted primary —
+    /// the conn the remote is establishing on — intact. Overwriting it
+    /// silently orphaned that reader and drove the crossed-dial
+    /// lockstep.
+    #[tokio::test]
+    async fn dial_completing_after_accept_parks_as_collision() {
+        let mut peer = test_peer(false);
+        let primary_id = peer.alloc_conn_id();
+        let (packet_tx, packet_rx) = mpsc::unbounded_channel::<BytesMut>();
+        Box::leak(Box::new(packet_rx));
+        peer.packet_tx = Some(packet_tx);
+        peer.primary_role = Some(Role::Passive);
+        peer.primary_conn_id = Some(primary_id);
+        peer.state = State::OpenSent;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stream = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+
+        let (next, _) = fsm_next_state(&mut peer, Event::Connected(stream));
+        assert_eq!(next, State::OpenSent, "primary session must be preserved");
+        assert_eq!(
+            peer.primary_conn_id,
+            Some(primary_id),
+            "the accepted primary must not be overwritten"
+        );
+        let collision = peer.collision.as_ref().expect("dial parked as collision");
+        assert_eq!(
+            collision.role,
+            Role::Active,
+            "our own dial is the active side of §6.8"
+        );
+        assert_ne!(collision.conn_id, primary_id);
+    }
+
+    /// A spurious second dial completion when our own dial is already
+    /// the primary (role Active) is dropped, not parked or promoted —
+    /// two connections is the RFC max and the primary stays put.
+    #[tokio::test]
+    async fn dial_completing_with_active_primary_is_dropped() {
+        let mut peer = test_peer(false);
+        let primary_id = peer.alloc_conn_id();
+        let (packet_tx, packet_rx) = mpsc::unbounded_channel::<BytesMut>();
+        Box::leak(Box::new(packet_rx));
+        peer.packet_tx = Some(packet_tx);
+        peer.primary_role = Some(Role::Active);
+        peer.primary_conn_id = Some(primary_id);
+        peer.state = State::OpenSent;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stream = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+
+        let (next, _) = fsm_next_state(&mut peer, Event::Connected(stream));
+        assert_eq!(next, State::OpenSent);
+        assert_eq!(peer.primary_conn_id, Some(primary_id));
+        assert!(peer.collision.is_none(), "no third connection is parked");
     }
 }
 
