@@ -933,6 +933,19 @@ impl Rib {
             // here, as does an external `ip link set`). The fan-out to
             // protocols happens after the borrow is released, below.
             link.mtu = fib_link.mtu;
+            // Hardware address: adopt-if-present, same rule as parent /
+            // vlan_id above. It DOES change on a live link, and our own
+            // config is what moves it: the kernel recomputes a bridge's
+            // address from its port set whenever that set changes
+            // (`br_stp_recalculate_bridge_id`), so `interface <x> bridge
+            // <br>` and `vxlan <v> bridge <br>` both retarget it — as does
+            // an external `ip link set <dev> address`. Without this the
+            // cache keeps the address the link happened to have when it
+            // first appeared, which `show interface` then reports for the
+            // rest of the run.
+            if fib_link.mac.is_some() {
+                link.mac = fib_link.mac;
+            }
         } else {
             let link = Link::from(fib_link);
             let _ = sysctl_mpls_enable(&link.name);
