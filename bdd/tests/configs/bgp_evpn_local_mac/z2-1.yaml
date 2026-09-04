@@ -1,0 +1,24 @@
+# z2 — the peer PE, same shape as z1 (VNI 10, `advertise-all-vni`). Its
+# bridge br10 owns 02:00:00:00:fe:02 and its access port host0
+# 02:00:00:00:0a:02.
+vxlan:
+- name: vxlan10
+  vni: 10
+  local-address: 192.168.0.2
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.2
+    afi-safi:
+    - name: evpn
+      advertise-all-vni: true
+    neighbor:
+    - remote-address: 192.168.0.1
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: evpn
+        enabled: true
