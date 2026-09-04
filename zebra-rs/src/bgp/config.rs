@@ -4040,6 +4040,22 @@ pub(super) fn apply_tcp_mss_refresh_all(bgp: &mut Bgp) {
         // 0 resets the user MSS to the kernel default.
         let value = min.unwrap_or(0);
         if let Err(e) = super::mss::set_tcp_mss(fd, value) {
+            if value == 0 && super::mss::is_reset_unsupported(&e) {
+                // Older kernels (Ubuntu 16.04's 4.4) reject TCP_MAXSEG = 0
+                // instead of treating it as "clear the clamp". No peer
+                // configures `tcp-mss`, so there is nothing to clamp and
+                // the listener simply keeps the MSS it has (the kernel
+                // default, unless a clamp was applied earlier in this
+                // daemon's life). Say so once, not on every reconcile.
+                if !MSS_RESET_UNSUPPORTED_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    tracing::info!(
+                        error = %e,
+                        "bgp: kernel rejects resetting TCP MSS to default; \
+                         BGP listener keeps its current MSS",
+                    );
+                }
+                continue;
+            }
             tracing::warn!(
                 error = %e,
                 mss = value,
@@ -4048,6 +4064,12 @@ pub(super) fn apply_tcp_mss_refresh_all(bgp: &mut Bgp) {
         }
     }
 }
+
+/// Set once the listener reconciler has learned that this kernel rejects
+/// `TCP_MAXSEG = 0`, so the notice is logged a single time rather than on
+/// every config change that re-derives the listener MSS.
+static MSS_RESET_UNSUPPORTED_LOGGED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// `[no] router bgp neighbor <addr> port <1-65535>` — TCP destination
 /// port used when this router actively dials the neighbor; deleting the
