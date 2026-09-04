@@ -43,3 +43,6 @@ typescript
 # Per-worktree staged toolchain (make -C bdd stage)
 /bdd/.stage/
 /bdd/.stage.tmp/
+
+# Scratch daemon config dropped in the repo root for local testing; never commit it.
+/zebra.yaml
