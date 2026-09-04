@@ -1,0 +1,29 @@
+# Route reflector (AS 64512): reflects VPNv4 between pe1 and pe2, no VRF
+# of its own, next-hop and label passed through untouched. It is never in
+# the forwarding path, so it must program no MPLS ILM at all.
+router:
+  bgp:
+    global:
+      as: 64512
+      router-id: 192.168.0.1
+    neighbor:
+    - remote-address: 192.168.0.2
+      afi-safi:
+      - name: vpnv4
+        enabled: true
+      - name: ipv4
+        enabled: false
+      enabled: true
+      remote-as: 64512
+      route-reflector:
+        client: true
+    - remote-address: 192.168.0.3
+      afi-safi:
+      - name: vpnv4
+        enabled: true
+      - name: ipv4
+        enabled: false
+      enabled: true
+      remote-as: 64512
+      route-reflector:
+        client: true

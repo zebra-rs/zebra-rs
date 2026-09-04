@@ -2865,6 +2865,14 @@ async fn ilm_should_be_empty(world: &mut World, namespace: String) {
     println!("✓ MPLS ILM in {} is empty", scoped);
 }
 
+#[then(expr = "mpls ilm in namespace {string} should not be empty")]
+async fn ilm_should_not_be_empty(world: &mut World, namespace: String) {
+    let scoped = world.ns(&namespace);
+    let labels = ilm_local_labels(&scoped).await;
+    assert!(!labels.is_empty(), "MPLS ILM in {} is empty", scoped);
+    println!("✓ MPLS ILM in {} has labels {:?}", scoped, labels);
+}
+
 /// Add a secondary IP address to an existing interface inside a namespace.
 /// Used to create a truly-external prefix (not in the OSPF domain) for
 /// redistribute-connected AS-External testing without needing a separate
