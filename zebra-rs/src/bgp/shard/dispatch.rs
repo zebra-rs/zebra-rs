@@ -715,8 +715,11 @@ impl BgpShard {
     }
 
     /// Shard half of `route_labelv4_update` / `route_labelv6_update`.
-    /// No inbound policy; the shard mints a per-prefix local label from
-    /// its own sub-block (`None` central refill until LabelBlockLow).
+    /// No inbound policy; when the family is a transit
+    /// (`lu_v4_transit` / `lu_v6_transit`) the shard mints a per-prefix
+    /// local label from its own sub-block (`None` central refill until
+    /// LabelBlockLow); a reflector passes the received label through and
+    /// mints nothing.
     fn handle_update_lu(
         &mut self,
         u: ShardUpdateLu,
@@ -753,12 +756,20 @@ impl BgpShard {
         rib.nexthop_reachable = nexthop_reachable;
         let (replaced, selected, survivor_nexthops) = match &nlri {
             LuNlri::V4(n) => {
-                rib.local_label = self.labels.label_lu_v4(central, n.prefix);
+                rib.local_label = if self.lu_v4_transit {
+                    self.labels.label_lu_v4(central, n.prefix)
+                } else {
+                    None
+                };
                 let (replaced, selected, _) = self.update_v4lu(n.prefix, rib);
                 (replaced, selected, self.candidate_nexthops_v4lu(n.prefix))
             }
             LuNlri::V6(n) => {
-                rib.local_label = self.labels.label_lu_v6(central, n.prefix);
+                rib.local_label = if self.lu_v6_transit {
+                    self.labels.label_lu_v6(central, n.prefix)
+                } else {
+                    None
+                };
                 let (replaced, selected, _) = self.update_v6lu(n.prefix, rib);
                 (replaced, selected, self.candidate_nexthops_v6lu(n.prefix))
             }
@@ -1203,7 +1214,11 @@ mod tests {
 
     #[test]
     fn update_lu_v4_installs_and_mints_local_label() {
-        let mut shard = BgpShard::default();
+        // A transit (a `label-v4` peer gets next-hop-self) mints.
+        let mut shard = BgpShard {
+            lu_v4_transit: true,
+            ..Default::default()
+        };
         // The shard mints a local label by carving a chunk from the
         // central pool (>= SHARD_LABEL_CHUNK so the carve succeeds).
         let mut central = VrfLabelAllocator::bounded(1000, 5000);
@@ -1219,6 +1234,21 @@ mod tests {
             matches!(&down[..], [ShardOut::BestPathLu { selected, .. }] if selected.is_empty())
         );
         assert!(shard.v4lu.0.is_empty());
+    }
+
+    #[test]
+    fn update_lu_v4_reflector_mints_no_local_label() {
+        // A labeled-unicast route reflector (iBGP, next-hop unchanged)
+        // passes the received label through and never advertises one of
+        // its own, so it must not mint — `lu_v4_transit` stays false.
+        let mut shard = BgpShard::default();
+        let mut central = VrfLabelAllocator::bounded(1000, 5000);
+        let out = shard.handle(update_lu_v4(2, "10.0.0.0/24", 50), Some(&mut central));
+        let row = shard.v4lu.0.values().next().unwrap().first().unwrap();
+        assert_eq!(row.local_label, None, "reflector must not mint a label");
+        // No carve happened either: the central frontier is untouched.
+        assert_eq!(central.alloc(), Some(1000));
+        assert!(matches!(&out[..], [ShardOut::BestPathLu { selected, .. }] if selected.len() == 1));
     }
 
     #[test]

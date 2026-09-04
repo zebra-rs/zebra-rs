@@ -1502,6 +1502,68 @@ pub(super) fn ilm_swap_remove(rib_client: &crate::rib::client::RibClient, local_
     });
 }
 
+/// One Loc-RIB table's share of `Bgp::reconcile_transit_labels`: bring
+/// every *received* row of `table` in step with `need` — mint a local
+/// label (`mint` on `labels`, refilling from `central`) and reconcile its
+/// swap ILM when transit is needed, release it (`free`) and tear the ILM
+/// down when not. Self-originated
+/// rows are skipped: we are their egress FEC and they carry no transit
+/// label. Returns the prefixes whose rows changed, so the caller can
+/// re-advertise exactly those. Stops early — leaving the rest
+/// unlabelled — when `mint` yields `None` (no dynamic block bound yet;
+/// `label_block_arrived` runs the reconcile again).
+pub(super) fn transit_table_reconcile<P, M, F>(
+    need: bool,
+    table: &mut LocalRibTable<P>,
+    labels: &mut super::shard::ShardLabelPool,
+    mut central: Option<&mut super::vrf::VrfLabelAllocator>,
+    mut mint: M,
+    mut free: F,
+    rib_client: &crate::rib::client::RibClient,
+    cache: &super::nht::NexthopCache,
+) -> Vec<P>
+where
+    P: Prefix + Copy,
+    M: FnMut(
+        &mut super::shard::ShardLabelPool,
+        Option<&mut super::vrf::VrfLabelAllocator>,
+        P,
+    ) -> Option<u32>,
+    F: FnMut(&mut super::shard::ShardLabelPool, P) -> Option<u32>,
+{
+    let prefixes: Vec<P> = table
+        .0
+        .iter()
+        .filter(|(_, cands)| cands.iter().any(|r| r.typ != BgpRibType::Originated))
+        .map(|(prefix, _)| prefix)
+        .collect();
+    let mut changed = Vec::new();
+    for prefix in prefixes {
+        if need {
+            let Some(label) = mint(labels, central.as_deref_mut(), prefix) else {
+                break;
+            };
+            if table.set_local_label(prefix, Some(label)) {
+                reconcile_swap_ilm(rib_client, Some(cache), table.1.get(&prefix));
+                changed.push(prefix);
+            }
+        } else {
+            let mut touched = false;
+            if let Some(label) = free(labels, prefix) {
+                ilm_swap_remove(rib_client, label);
+                touched = true;
+            }
+            if table.set_local_label(prefix, None) {
+                touched = true;
+            }
+            if touched {
+                changed.push(prefix);
+            }
+        }
+    }
+    changed
+}
+
 /// Install / reconcile the kernel FIB for an IPv4 Labeled-Unicast prefix
 /// (ingress LSR: push the label toward the BGP next-hop). Takes the RIB
 /// client + NHT cache directly (not a `BgpTop`) so it is callable both
@@ -7775,13 +7837,18 @@ pub fn route_labelv4_update(
             rib.tag = decision.tag;
             nht_track_received(bgp, &mut rib, dep.clone());
             // Allocate a per-prefix local label so re-advertising with
-            // next-hop-self forwards via a swap ILM. `None`
-            // when no dynamic block is granted yet — advertise the
-            // received label until then.
-            rib.local_label = bgp
-                .shard
-                .labels
-                .label_lu_v4(bgp.central_label_alloc.as_deref_mut(), lu.nlri.prefix);
+            // next-hop-self forwards via a swap ILM. `None` when no
+            // dynamic block is granted yet — advertise the received label
+            // until then — and always `None` unless some `label-v4` peer
+            // is sent next-hop-self (`lu_v4_transit`): a reflector passes
+            // the received label through and must not park a dead ILM.
+            rib.local_label = if bgp.shard.lu_v4_transit {
+                bgp.shard
+                    .labels
+                    .label_lu_v4(bgp.central_label_alloc.as_deref_mut(), lu.nlri.prefix)
+            } else {
+                None
+            };
             let (replaced, selected, _next_id) = bgp.shard.update_v4lu(lu.nlri.prefix, rib);
             (replaced, selected)
         }
@@ -7898,10 +7965,14 @@ pub fn route_labelv6_update(
             rib.weight = decision.weight;
             rib.tag = decision.tag;
             nht_track_received(bgp, &mut rib, dep.clone());
-            rib.local_label = bgp
-                .shard
-                .labels
-                .label_lu_v6(bgp.central_label_alloc.as_deref_mut(), lu.nlri.prefix);
+            // Transit-gated like the v4 path (`lu_v6_transit`).
+            rib.local_label = if bgp.shard.lu_v6_transit {
+                bgp.shard
+                    .labels
+                    .label_lu_v6(bgp.central_label_alloc.as_deref_mut(), lu.nlri.prefix)
+            } else {
+                None
+            };
             let (replaced, selected, _next_id) = bgp.shard.update_v6lu(lu.nlri.prefix, rib);
             (replaced, selected)
         }

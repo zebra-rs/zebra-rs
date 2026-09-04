@@ -3892,7 +3892,16 @@ pub fn apply_soft_out_peer(bgp: &mut Bgp, peer_idx: usize) {
     if !peer.state.is_established() {
         return;
     }
-    let mut bgp_ref = BgpTop {
+    let (mut bgp_ref, peers) = advertise_top(bgp);
+    super::route::route_soft_out_peer(peer_idx, &mut bgp_ref, peers);
+}
+
+/// The [`BgpTop`] view an advertise-only path needs (no NHT cache, no VRF
+/// export/import), split from the peer map so both can be borrowed at
+/// once. Shared by [`apply_soft_out_peer`] and the transit-label
+/// reconcile's per-prefix Labeled-Unicast re-advertise.
+pub fn advertise_top(bgp: &mut Bgp) -> (BgpTop<'_>, &mut PeerMap) {
+    let top = BgpTop {
         router_id: &bgp.router_id,
         srv6_ipv6_export: bgp.srv6_ipv6_export.as_ref(),
         local_rib: &mut bgp.local_rib,
@@ -3913,7 +3922,7 @@ pub fn apply_soft_out_peer(bgp: &mut Bgp, peer_idx: usize) {
         central_label_alloc: None,
         as_sets_withdraw: bgp.as_sets_withdraw,
     };
-    super::route::route_soft_out_peer(peer_idx, &mut bgp_ref, &mut bgp.peers);
+    (top, &mut bgp.peers)
 }
 
 /// Action selector for the `clear bgp <afi> <peer> ...` family of
