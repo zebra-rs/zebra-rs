@@ -672,10 +672,9 @@ impl VtyPeerInterceptor {
 ///
 /// Enforces the same `ZEBRA_VTY_ALLOW_UIDS` allow-list from
 /// SO_PEERCRED as [`VtyPeerInterceptor`], but does NOT resolve a vty
-/// session: machine peers are typically daemons whose parent is init,
-/// which the session model rejects as orphan clients, and these RPCs
-/// carry no role-gated operations — they are read/serve surfaces at
-/// the same trust level as the session-less `Show` phase. TCP peers
+/// session: these RPCs carry no role-gated operations — they are
+/// read/serve surfaces at the same trust level as the session-less
+/// `Show` phase — so there is nothing a session would gate. TCP peers
 /// pass through untouched, matching the vty interceptor's posture.
 #[derive(Clone)]
 struct MachinePeerInterceptor {
@@ -759,12 +758,6 @@ impl tonic::service::Interceptor for VtyPeerInterceptor {
                         "client not visible in daemon's PID namespace",
                     ));
                 }
-                Err(SessionError::OrphanClient) => {
-                    tracing::warn!(uid, gid, pid, "vty rpc denied: orphan client");
-                    return Err(tonic::Status::unauthenticated(
-                        "orphan client (no parent shell)",
-                    ));
-                }
                 Err(SessionError::ParentVanished) => {
                     tracing::warn!(uid, gid, pid, "vty rpc denied: parent shell vanished");
                     return Err(tonic::Status::unauthenticated("parent shell vanished"));
@@ -813,9 +806,9 @@ pub fn serve(cli: Cli, addr: VtyAddr) -> anyhow::Result<()> {
     };
     // Machine-facing APIs: running-config subscription
     // (zebra.config.v1) and the external show provider
-    // (zebra.show.v1). Both use the session-less machine interceptor
-    // so daemonized peers (init-parented) are not rejected as orphan
-    // clients.
+    // (zebra.show.v1). Both use the session-less machine interceptor:
+    // they carry no role-gated operations, so there is no session to
+    // resolve.
     let config_service = ConfigSubscribeService { tx: cli.tx.clone() };
     let show_provider = ShowProviderBridge { tx: cli.tx.clone() };
     let machine_interceptor = MachinePeerInterceptor::from_env();

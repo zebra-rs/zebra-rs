@@ -113,13 +113,13 @@ Two things that cost time to work out, both worth knowing before writing
 any rig of your own:
 
 * Configuration goes in as a **startup config file** (`zebra-rs -c`), not
-  through `vtyctl`. zebra-rs ties a VTY session to the caller's parent
-  shell and rejects any client whose ppid is `<= 1`
-  (`SessionError::OrphanClient`) — which is every `docker exec`, and
-  `bash -c "vtyctl ..."` does not help because bash execs a lone command
-  and inherits the same orphaned parent. Using a config file is also
-  closer to the real deployment, where a container renders its config and
-  starts the daemon on it.
+  through `vtyctl`. That is closer to the real deployment, where a
+  container renders its config and starts the daemon on it. (Older
+  zebra-rs also rejected any client whose ppid was `<= 1` as an orphan —
+  which is every `docker exec` — so `vtyctl` from outside the container
+  was not an option; since D30 in the VTY session design a parent-less
+  client gets a session keyed on its own pid, so `docker exec … vtyctl`
+  now works too.)
 * The tee is enabled with `set system fpm enabled true` in that config.
   Address and port default to `127.0.0.1:2620`, where fpmsyncd listens in
   SONiC's bgp container; `system fpm address` / `system fpm port` override
