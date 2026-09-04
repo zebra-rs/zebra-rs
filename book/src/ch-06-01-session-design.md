@@ -118,11 +118,14 @@ fn resolve_session_key(peer_uid: u32, peer_pid: u32)
         .map_err(|_| Status::internal("cannot read /proc"))?;
     let ppid = stat.ppid as u32;
 
-    // Guard 1: orphan client (parent died, reparented to init).
+    // Guard 1: no visible parent (D30). PPid 1 = parented by init
+    // (systemd service, snap daemon, an agent speaking gRPC itself, or a
+    // client whose shell already died); PPid 0 = the parent lives outside
+    // our PID namespace (`docker exec`, `nsenter -p`). There is no shell
+    // to own the session, so key it on the client itself: the session
+    // then lives exactly as long as that process.
     if ppid <= 1 {
-        return Err(Status::unauthenticated(
-            "orphan client (no parent shell)"
-        ));
+        return Ok((peer_uid, peer_pid));
     }
 
     // Guard 2: parent uid must match peer uid (PID-reuse race), except
@@ -149,6 +152,13 @@ Why this design:
 - The same key `(uid, bash_pid)` is derived for every `vtyhelper`
   invocation spawned from the same vty bash, automatically grouping
   all RPCs from one shell into one session.
+- A client with **no visible parent** (`PPid` 0 or 1) is keyed on its
+  own pid instead (D30). This is the shape of a systemd service or snap
+  daemon that speaks gRPC to the socket itself, and of any process
+  started by `docker exec` / `nsenter -p`, whose parent sits outside
+  the daemon's PID namespace. Because a child that such an agent forks
+  (say, `vtyctl`) carries the agent's pid as its `PPid`, it lands in the
+  agent's session through the ordinary parent-keyed lookup.
 
 When the immediate-parent key has no session, the resolver walks a
 bounded number of parent hops (`MAX_ANCESTOR_WALK`) looking for an
@@ -173,7 +183,8 @@ at the first existing session, at init (pid ≤ 1), or after
 [create]  Lazy on first RPC; no explicit OpenSession call.
 [active]  Each RPC updates Session.last_active.
 [end]     Triggered by any of:
-            - Parent bash death (pidfd, immediate)
+            - Parent bash death (pidfd, immediate); for a
+              parent-less client (D30), the client's own death
             - Idle TTL expiry (~10 min, periodic sweep)
             - Explicit Logout RPC (bash EXIT trap)
             - Daemon shutdown
@@ -293,6 +304,12 @@ and `vtyctl` rarely has a long-lived parent shell, **interactive
 `enable` is effectively a `vty` shell-only feature**. Scripted
 admin work uses `sudo vtyctl …`.
 
+A long-lived agent that connects to the socket directly (a systemd
+service, a snap daemon) holds one session for its whole lifetime,
+keyed on its own pid (D30). Running as root it is Admin from the first
+RPC; as a non-root uid it starts at View and must `enable` like any
+other session.
+
 ## Pipeline / parent-process conventions
 
 vty's `vty.sh` invokes `vtyhelper` via `$(vtyhelper ...)` so the
@@ -373,7 +390,7 @@ Each phase is intended to ship as an independent PR.
 | D5 | The initial Session struct is minimal; enable-related fields are added later. |
 | D6 | PAM is invoked via a separate setuid (or capability-restricted) helper named `vtypam`, installed at `/usr/sbin/vtypam` for distribution. |
 | D7 | The initial Enable RPC uses a single password field. Bidirectional PAM conversation (for OTP, password change) is deferred. |
-| D8 | Session key derivation assumes the direct vty-bash-to-vtyhelper parent relationship; the daemon verifies via `/proc` (orphan check + parent uid match) but does not inspect the parent's command name. |
+| D8 | Session key derivation assumes the direct vty-bash-to-vtyhelper parent relationship; the daemon verifies via `/proc` (parent uid match) but does not inspect the parent's command name. Parent-less clients are keyed on themselves (D30). |
 | D9 | vtyctl receives no special-casing. Stateful RPCs (configure, enable, monitor) naturally fail across vtyctl invocations because the session is not continuous. |
 | D10 | Script-driven admin operations use `sudo vtyctl …` (root), not interactive enable. |
 | D11 | Configure-mode locking is not part of the initial implementation. Concurrent edits are tolerated; conflict-resolution policy is left to commit semantics. |
@@ -389,10 +406,11 @@ Each phase is intended to ship as an independent PR.
 | D22 | **Initial admin gates: Apply and Clear RPCs.** `SessionTable::require_admin` checks `enabled`, enforces sliding TTL + hard cap (with auto-downgrade on expiry), and slides the idle deadline on each authorized call. |
 | D23 | **Configure-mode admin gate** on `DoExec`. For `ExecType::Exec` only (completion paths remain free): admin is required when `mode != "exec"` (catches a client that sets `mode=configure` directly) and when `mode == "exec" && first_word == "configure"` (UX courtesy — block at entry so the prompt doesn't flip uselessly). Configure-mode mutex/lock is deliberately NOT included; multiple admins can enter configure simultaneously (D11 still deferred). |
 | D24 | **Auto-elevate on `configure`**. When a non-admin user types `configure`, root (uid 0) and group members send a passwordless `Enable` RPC; non-members are prompted for **Root password:** immediately (no configure probe). |
-| D26 | **Root peers bypass the parent-uid check.** `resolve_session_key` skips Guard 2 when `peer_uid == 0`. Rationale: the strict match rejected the common `sudo <cmd>` pattern, where the outer `sudo` process retains the invoking user's ruid while the client itself runs as uid 0. Risk surface: any uid-0 connector is trusted regardless of ancestry, but `SO_PEERCRED`'s effective-uid attestation already implies that — a process running as root can already do anything on the host. The remaining guards (D12 cross-PID-namespace, OrphanClient, ParentVanished) still fire for root peers. Non-root peers are unaffected — the parent-uid match is still enforced, so a setuid escalation to a non-zero uid is still refused. |
+| D26 | **Root peers bypass the parent-uid check.** `resolve_session_key` skips Guard 2 when `peer_uid == 0`. Rationale: the strict match rejected the common `sudo <cmd>` pattern, where the outer `sudo` process retains the invoking user's ruid while the client itself runs as uid 0. Risk surface: any uid-0 connector is trusted regardless of ancestry, but `SO_PEERCRED`'s effective-uid attestation already implies that — a process running as root can already do anything on the host. The remaining guards (D12 cross-PID-namespace, ParentVanished) still fire for root peers. Non-root peers are unaffected — the parent-uid match is still enforced, so a setuid escalation to a non-zero uid is still refused. |
 | D27 | **`zebra-rs` Linux group for passwordless enable.** Package postinstall creates the group. Supplementary membership is checked on `enable` via `getgrouplist`; members are promoted without PAM. Group name overridable with `ZEBRA_VTY_CONFIG_GROUP`. Missing group → PAM-only fallback. |
 | D28 | **PAM authenticates root for non-group callers.** Non-members who type `enable`/`configure` are prompted for the root password immediately (no passwordless probe). Client `auth_user` is ignored. |
 | D29 | **Uncommitted changes are confirmed at shell exit, from the client.** The bash `EXIT` trap asks `vtyhelper -u` (a comparison of `show running-config formal` against `show candidate-config formal`, both exec-mode and un-gated) and, when they differ, prompts `y`=commit / `n`=discard / anything else=leave pending. It runs **before** the `Logout` RPC: dropping the session first would make the commit re-resolve as a fresh View session and be refused. The check is client-side because none of the daemon's session-teardown paths owns the candidate — `ExecService` has no handle to `ConfigStore` — and because only the client has a terminal to ask on. Since the candidate is global (D11), the prompt is gated on *this shell* having entered configure mode, so a read-only session is never offered the chance to discard someone else's edits. |
+| D30 | **Parent-less clients get a session keyed on their own pid.** Guard 1 used to reject any peer whose `/proc` `PPid` was 0 or 1 as an "orphan client (no parent shell)". That refused two legitimate automation shapes: a daemon that speaks gRPC to the socket itself (systemd service, snap daemon — `PPid` 1), and anything started by `docker exec` / `nsenter -p`, whose parent sits outside the daemon's PID namespace (`PPid` 0). The resolver now keys such a peer on `(uid, peer_pid)` and points the pidfd death watcher at the client, so the session lives exactly as long as the process. Authorization is unchanged: the role still comes from the `SO_PEERCRED` uid (root → Admin per D20, others → View plus `enable`), and D26 already trusted any uid-0 connector regardless of ancestry — the orphan guard was a session-lifetime mechanism, not an authorization gate. A child the agent forks (`vtyctl`) attaches to the agent's session because its `PPid` is the agent pid. `ParentVanished` still fires when a parent pid *was* reported but has since disappeared. |
 
 ## Deferred work
 

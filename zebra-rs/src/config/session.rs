@@ -3,9 +3,11 @@
 //! See `book/src/ch-06-01-session-design.md` for the full design.
 //!
 //! Provides an in-memory [`SessionTable`] keyed by
-//! `(peer_uid, parent_pid)`. Both components are derived from kernel-backed
-//! sources (`SO_PEERCRED` plus `/proc/{pid}/status`) and never from
-//! client-supplied data. Per-RPC integration lives in `serve.rs`.
+//! `(peer_uid, parent_pid)` — or `(peer_uid, peer_pid)` when the client has
+//! no visible parent (init-parented daemons, `docker exec`-shaped peers).
+//! Both components are derived from kernel-backed sources (`SO_PEERCRED`
+//! plus `/proc/{pid}/status`) and never from client-supplied data. Per-RPC
+//! integration lives in `serve.rs`.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -37,7 +39,12 @@ pub const DEFAULT_GC_INTERVAL: Duration = Duration::from_secs(60);
 #[cfg(target_os = "linux")]
 const MAX_ANCESTOR_WALK: usize = 8;
 
-/// Composite session identifier: `(peer_uid, parent_pid)`.
+/// Composite session identifier: `(peer_uid, lifetime_pid)`.
+///
+/// `lifetime_pid` is the parent shell for an ordinary client and the
+/// client's own pid when it has no visible parent (see
+/// [`SessionTable::resolve`]). Either way it is the process whose death
+/// ends the session.
 pub type SessionKey = (u32, u32);
 
 /// VTY authorization role. See decision D18.
@@ -69,6 +76,8 @@ pub struct SessionContext {
 /// Session record.
 #[derive(Debug, Clone)]
 pub struct Session {
+    /// Process the session's lifetime is bound to: the parent shell, or
+    /// the client itself when it has no visible parent. Mirrors `key.1`.
     pub bash_pid: u32,
     /// Resolved via `getpwuid_r` at session creation. Retained for
     /// future audit logging; not used by the enable/PAM path today.
@@ -146,9 +155,6 @@ pub enum SessionError {
     CrossPidNamespace,
     /// `/proc/{peer_pid}/status` could not be read.
     ProcReadFailure,
-    /// Parent pid is 0 or 1 — the client has been reparented to init,
-    /// indicating its shell already died.
-    OrphanClient,
     /// Parent process disappeared between the SO_PEERCRED snapshot and the
     /// `/proc` lookup.
     ParentVanished,
@@ -211,12 +217,20 @@ impl SessionTable {
     /// for the peer's parent pid, verify the parent uid matches, then create
     /// the session.
     ///
+    /// No visible parent (D30): when `/proc` reports PPid 0 or 1 there is
+    /// no shell to key the session on — the peer is init-parented (a
+    /// systemd service, a snap daemon, an agent speaking gRPC itself) or
+    /// its parent sits outside our PID namespace (`docker exec`,
+    /// `nsenter -p`). The session is then keyed on the client's own pid and
+    /// lives exactly as long as that process; the caller's death watcher
+    /// follows `key.1` either way.
+    ///
     /// Root short-circuit (D26): when `peer_uid == 0`, the parent-uid check
     /// is skipped. This lets `sudo <cmd>` invocations work (the outer `sudo`
     /// process retains the invoking user's ruid, which would otherwise fail
     /// the match) without weakening the check for non-root peers. The
-    /// `ParentVanished` guard still runs so an orphaned uid-0 client is
-    /// rejected.
+    /// `ParentVanished` guard still runs when a parent pid was reported but
+    /// has since disappeared.
     ///
     /// Returns `(key, is_new)` so callers can choose log verbosity.
     pub fn resolve<P: ProcStatusReader>(
@@ -234,9 +248,24 @@ impl SessionTable {
             .read_ppid(peer_pid)
             .map_err(|_| SessionError::ProcReadFailure)?;
 
-        // Guard 1: orphan client (parent died, reparented to init).
+        // Guard 1 (D30): no visible parent. PPid 1 = parented by init
+        // (daemon-shaped peer, or a client whose shell already died); PPid 0
+        // = the parent lives outside our PID namespace (`docker exec`,
+        // `nsenter -p`). Neither has a shell to own the session, so key it
+        // on the client itself. Authorization is unaffected: the role still
+        // derives from the SO_PEERCRED uid, and there is no parent whose
+        // uid could be matched. A child the peer forks later (an agent
+        // running `vtyctl`) carries this pid as its PPid and therefore
+        // attaches to this same session through the fast path below.
         if ppid <= 1 {
-            return Err(SessionError::OrphanClient);
+            let key = (peer_uid, peer_pid as u32);
+            if let Some(mut entry) = self.sessions.get_mut(&key) {
+                entry.last_active = Instant::now();
+                return Ok((key, false));
+            }
+            let session = Self::new_session(reader, peer_uid, key.1);
+            self.sessions.insert(key, session);
+            return Ok((key, true));
         }
         let ppid_u32 = ppid as u32;
         let key = (peer_uid, ppid_u32);
@@ -290,15 +319,21 @@ impl SessionTable {
             return Err(SessionError::ParentUidMismatch);
         }
 
+        let session = Self::new_session(reader, peer_uid, ppid_u32);
+        self.sessions.insert(key, session);
+        Ok((key, true))
+    }
+
+    /// Build a fresh session whose lifetime is bound to `lifetime_pid`.
+    /// Permanent admin: root only (D20); everyone else starts at `View`.
+    fn new_session<P: ProcStatusReader>(reader: &P, peer_uid: u32, lifetime_pid: u32) -> Session {
         let username = reader.resolve_username(peer_uid);
-        let mut session = Session::new(ppid_u32, username);
-        // Permanent admin: root only (D20).
+        let mut session = Session::new(lifetime_pid, username);
         if peer_uid == 0 {
             session.role = Role::Admin;
             session.enabled = true;
         }
-        self.sessions.insert(key, session);
-        Ok((key, true))
+        session
     }
 
     /// Promote a session to Admin after a successful `enable`.
@@ -795,17 +830,64 @@ mod tests {
     }
 
     #[test]
-    fn orphan_client_is_rejected() {
+    fn init_parented_client_gets_self_keyed_session() {
+        // D30: a daemon-shaped peer (systemd service, snap daemon, an agent
+        // that speaks gRPC itself) is parented by init. There is no shell to
+        // key the session on, so it is keyed on the client's own pid.
         let table = SessionTable::new();
         let reader = StubReader::default();
-        // Reparented to init (ppid=1).
         reader.set_ppid(1234, 1);
-        let err = table.resolve(&reader, 1000, 1234).unwrap_err();
-        assert_eq!(err, SessionError::OrphanClient);
-        // ppid=0 should also be rejected (defensive).
+        let (key, is_new) = table.resolve(&reader, 0, 1234).unwrap();
+        assert_eq!(key, (0, 1234));
+        assert!(is_new);
+        let sess = table.get(&key).unwrap();
+        assert_eq!(sess.bash_pid, 1234);
+        // Root is still implicit Admin (D20).
+        assert_eq!(sess.role, Role::Admin);
+        assert!(sess.enabled);
+        assert!(table.require_admin(&key).is_ok());
+        // A second RPC from the same process hits the fast path.
+        let (again, is_new) = table.resolve(&reader, 0, 1234).unwrap();
+        assert_eq!(again, key);
+        assert!(!is_new);
+        assert_eq!(table.len(), 1);
+    }
+
+    #[test]
+    fn invisible_parent_client_gets_self_keyed_session() {
+        // D30: `docker exec` / `nsenter -p` leave the parent outside our PID
+        // namespace, so /proc reports PPid 0. Same treatment as PPid 1, and
+        // a non-root peer starts at View like any other non-root session —
+        // there is no parent whose uid could be matched, and the role comes
+        // from SO_PEERCRED alone.
+        let table = SessionTable::new();
+        let reader = StubReader::default();
         reader.set_ppid(1235, 0);
-        let err = table.resolve(&reader, 1000, 1235).unwrap_err();
-        assert_eq!(err, SessionError::OrphanClient);
+        let (key, is_new) = table.resolve(&reader, 1000, 1235).unwrap();
+        assert_eq!(key, (1000, 1235));
+        assert!(is_new);
+        let sess = table.get(&key).unwrap();
+        assert_eq!(sess.bash_pid, 1235);
+        assert_eq!(sess.role, Role::View);
+        assert!(!sess.enabled);
+        assert_eq!(table.require_admin(&key).unwrap_err(), AuthzError::NotAdmin);
+    }
+
+    #[test]
+    fn child_of_self_keyed_client_shares_its_session() {
+        // An init-parented agent that later forks `vtyctl`: the child's PPid
+        // is the agent pid, which is exactly the agent's own session key, so
+        // the child attaches to the agent's session instead of opening a
+        // second one.
+        let table = SessionTable::new();
+        let reader = StubReader::default();
+        reader.set_ppid(1234, 1);
+        let (agent_key, _) = table.resolve(&reader, 0, 1234).unwrap();
+        reader.set_ppid(5678, 1234);
+        let (child_key, is_new) = table.resolve(&reader, 0, 5678).unwrap();
+        assert_eq!(child_key, agent_key);
+        assert!(!is_new);
+        assert_eq!(table.len(), 1);
     }
 
     #[test]
@@ -849,7 +931,7 @@ mod tests {
     #[test]
     fn root_peer_still_rejects_vanished_parent() {
         // The D26 bypass only skips the uid match; the ParentVanished
-        // guard still fires so an orphaned uid-0 client is refused.
+        // guard still fires for a uid-0 client whose reported parent is gone.
         let table = SessionTable::new();
         let reader = StubReader::default();
         reader.set_ppid(1234, 1000);

@@ -227,9 +227,16 @@ sudo ip netns exec vrf-red vtyctl show 'show ip route'
 ```
 
 The remaining guards still apply to root peers: cross-PID-namespace
-clients and orphaned clients (parent reparented to init, or the
-parent process disappeared between the credential snapshot and the
-`/proc` lookup) are rejected regardless of uid.
+clients, and clients whose parent process disappeared between the
+credential snapshot and the `/proc` lookup, are rejected regardless
+of uid.
+
+A client with no visible parent at all — a systemd service or snap
+daemon that connects to the socket itself, or a process started by
+`docker exec` / `nsenter -p` whose parent lives outside the daemon's
+PID namespace — is not rejected. It gets a session of its own, keyed
+on its pid and torn down when the process exits, with the role its
+uid implies (root is Admin immediately).
 
 Non-root peers must connect from a same-uid shell — a setuid
 escalation to a non-root effective uid is still refused.

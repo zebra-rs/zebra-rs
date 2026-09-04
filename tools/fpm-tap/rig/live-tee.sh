@@ -91,12 +91,10 @@ sleep 2
 
 # Configuration goes in as a startup config file rather than through
 # vtyctl. That is both simpler and closer to the real deployment: a SONiC
-# container renders its config and starts the daemon on it. It also
-# sidesteps the VTY session model, which ties a session to the caller's
-# parent shell and rejects any client whose ppid is <= 1
-# (SessionError::OrphanClient) — which is every `docker exec`, including
-# `bash -c "vtyctl ..."`, because bash execs a lone command and so
-# inherits the same orphaned parent.
+# container renders its config and starts the daemon on it. (It also used
+# to be the only option: older zebra-rs rejected any client whose ppid was
+# <= 1 as an orphan — which is every `docker exec`. Since D30 in the VTY
+# session design a parent-less client is keyed on its own pid instead.)
 echo "live-tee: writing startup config"
 cat > "$SOCKDIR/routes.conf" <<'EOF'
 set system fpm enabled true
