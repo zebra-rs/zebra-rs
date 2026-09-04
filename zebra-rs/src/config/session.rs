@@ -446,6 +446,11 @@ impl SessionTable {
         self.sessions.remove(key).is_some()
     }
 
+    /// Whether a session with `key` is currently present.
+    pub fn contains(&self, key: &SessionKey) -> bool {
+        self.sessions.contains_key(key)
+    }
+
     /// Number of active sessions.
     #[cfg(test)]
     pub fn len(&self) -> usize {
@@ -509,19 +514,63 @@ mod pidfd {
     }
 }
 
+/// Poll interval for the `/proc` fallback watcher used when the kernel has
+/// no `pidfd_open(2)` (Linux < 5.3, e.g. Ubuntu 16.04).
+#[cfg(target_os = "linux")]
+pub const PROC_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Set once the daemon has discovered that the running kernel lacks
+/// `pidfd_open(2)`, so the fallback notice is logged a single time rather
+/// than once per session.
+#[cfg(target_os = "linux")]
+static PIDFD_UNSUPPORTED_LOGGED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Per-session watcher: opens a pidfd for the parent bash and removes the
 /// session from the table the moment bash exits (even via `kill -9`).
 ///
 /// Intended to be `tokio::spawn`'d once per new session created by
-/// [`SessionTable::resolve`]. If pidfd open fails (bash already dead, or the
-/// kernel is < 5.3), the session is removed immediately and the task exits.
+/// [`SessionTable::resolve`]. If the kernel has no `pidfd_open` (`ENOSYS`,
+/// Linux < 5.3) the session is kept and its lifetime is tracked by
+/// [`watch_bash_death_by_polling`] instead (D31). Any other open failure
+/// means the process is already gone, and the session is removed
+/// immediately.
 #[cfg(target_os = "linux")]
 pub async fn watch_bash_death(table: Arc<SessionTable>, key: SessionKey, bash_pid: u32) {
+    watch_bash_death_with(table, key, bash_pid, pidfd::open, PROC_POLL_INTERVAL).await;
+}
+
+/// [`watch_bash_death`] with the pidfd opener and the fallback poll
+/// interval injectable, so tests can drive the `ENOSYS` path on kernels
+/// that do have `pidfd_open`.
+#[cfg(target_os = "linux")]
+async fn watch_bash_death_with<F>(
+    table: Arc<SessionTable>,
+    key: SessionKey,
+    bash_pid: u32,
+    open: F,
+    poll_interval: Duration,
+) where
+    F: FnOnce(i32) -> std::io::Result<std::os::fd::OwnedFd>,
+{
     use tokio::io::Interest;
     use tokio::io::unix::AsyncFd;
 
-    let fd = match pidfd::open(bash_pid as i32) {
+    let fd = match open(bash_pid as i32) {
         Ok(fd) => fd,
+        Err(e) if e.raw_os_error() == Some(libc::ENOSYS) => {
+            // D31: the kernel predates pidfd_open (Linux 5.3). The shell is
+            // alive — we just cannot get a pidfd for it — so keep the
+            // session and watch `/proc` instead of refusing service.
+            if !PIDFD_UNSUPPORTED_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                tracing::info!(
+                    poll_secs = poll_interval.as_secs_f64(),
+                    "kernel lacks pidfd_open (Linux 5.3+); vty session lifetimes tracked by polling /proc",
+                );
+            }
+            watch_bash_death_by_polling(table, key, bash_pid, poll_interval).await;
+            return;
+        }
         Err(e) => {
             tracing::warn!(
                 uid = key.0,
@@ -564,6 +613,46 @@ pub async fn watch_bash_death(table: Arc<SessionTable>, key: SessionKey, bash_pi
         Err(e) => {
             tracing::warn!(uid = key.0, bash_pid, error = %e, "pidfd readable() failed");
         }
+    }
+}
+
+/// Fallback watcher for kernels without `pidfd_open` (D31): checks
+/// `/proc/{bash_pid}` every `interval` and removes the session once it is
+/// gone. Also exits once the session has been removed by someone else
+/// (GC, `Logout`), so watchers don't pile up behind long-lived shells.
+#[cfg(target_os = "linux")]
+pub async fn watch_bash_death_by_polling(
+    table: Arc<SessionTable>,
+    key: SessionKey,
+    bash_pid: u32,
+    interval: Duration,
+) {
+    let mut ticker = tokio::time::interval(interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // The first tick completes immediately; skip it so the first check
+    // happens one interval from now.
+    ticker.tick().await;
+    loop {
+        ticker.tick().await;
+        if !table.contains(&key) {
+            tracing::debug!(
+                uid = key.0,
+                bash_pid,
+                "session already gone; /proc poll watcher exits",
+            );
+            return;
+        }
+        if ProcfsReader.process_exists(bash_pid as i32) {
+            continue;
+        }
+        if table.remove(&key) && super::tracing::vty() {
+            tracing::info!(
+                uid = key.0,
+                bash_pid,
+                "vty session removed (bash exited, /proc poll)",
+            );
+        }
+        return;
     }
 }
 
@@ -1458,6 +1547,129 @@ mod tests {
         table.insert_for_test(key, Instant::now());
 
         super::watch_bash_death(table.clone(), key, 0).await;
+
+        assert!(table.get(&key).is_none());
+    }
+
+    /// Spawn a `/bin/sleep` child to stand in for a vty bash; the caller
+    /// kills it to simulate the shell dying.
+    fn spawn_fake_bash() -> std::process::Child {
+        std::process::Command::new("/bin/sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn /bin/sleep")
+    }
+
+    fn reap(mut child: std::process::Child) {
+        child.kill().expect("kill child");
+        let _ = child.wait();
+    }
+
+    #[tokio::test]
+    async fn polling_watcher_removes_session_when_bash_dies() {
+        let child = spawn_fake_bash();
+        let bash_pid = child.id();
+        let key = (1000u32, bash_pid);
+        let table = SessionTable::new();
+        table.insert_for_test(key, Instant::now());
+
+        let watcher = tokio::spawn(super::watch_bash_death_by_polling(
+            table.clone(),
+            key,
+            bash_pid,
+            Duration::from_millis(20),
+        ));
+
+        // A few polls while bash is alive must leave the session alone.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            table.get(&key).is_some(),
+            "session dropped while bash was alive"
+        );
+
+        reap(child);
+        tokio::time::timeout(Duration::from_secs(5), watcher)
+            .await
+            .expect("watcher timed out")
+            .expect("watcher panicked");
+        assert!(table.get(&key).is_none(), "session was not removed");
+    }
+
+    #[tokio::test]
+    async fn polling_watcher_exits_when_session_removed_elsewhere() {
+        let child = spawn_fake_bash();
+        let bash_pid = child.id();
+        let key = (1000u32, bash_pid);
+        let table = SessionTable::new();
+        table.insert_for_test(key, Instant::now());
+
+        let watcher = tokio::spawn(super::watch_bash_death_by_polling(
+            table.clone(),
+            key,
+            bash_pid,
+            Duration::from_millis(20),
+        ));
+
+        // Logout / GC removes the session while bash is still alive; the
+        // watcher must notice and stop rather than poll until bash dies.
+        assert!(table.remove(&key));
+        tokio::time::timeout(Duration::from_secs(5), watcher)
+            .await
+            .expect("watcher kept polling a removed session")
+            .expect("watcher panicked");
+
+        reap(child);
+    }
+
+    #[tokio::test]
+    async fn enosys_keeps_session_and_falls_back_to_polling() {
+        // Kernels before 5.3 have no pidfd_open (Ubuntu 16.04). The watcher
+        // must keep the session (D31) instead of treating the failure as a
+        // dead parent, and still notice when bash actually dies.
+        let child = spawn_fake_bash();
+        let bash_pid = child.id();
+        let key = (1000u32, bash_pid);
+        let table = SessionTable::new();
+        table.insert_for_test(key, Instant::now());
+
+        let enosys = |_pid: i32| -> std::io::Result<std::os::fd::OwnedFd> {
+            Err(std::io::Error::from_raw_os_error(libc::ENOSYS))
+        };
+        let watcher = tokio::spawn(super::watch_bash_death_with(
+            table.clone(),
+            key,
+            bash_pid,
+            enosys,
+            Duration::from_millis(20),
+        ));
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            table.get(&key).is_some(),
+            "ENOSYS must not drop a live session"
+        );
+
+        reap(child);
+        tokio::time::timeout(Duration::from_secs(5), watcher)
+            .await
+            .expect("watcher timed out")
+            .expect("watcher panicked");
+        assert!(table.get(&key).is_none(), "session was not removed");
+    }
+
+    #[tokio::test]
+    async fn non_enosys_open_failure_still_drops_session() {
+        // Every other pidfd_open failure (ESRCH: parent already dead) keeps
+        // the immediate-drop behaviour.
+        let key = (1000u32, 4242u32);
+        let table = SessionTable::new();
+        table.insert_for_test(key, Instant::now());
+
+        let esrch = |_pid: i32| -> std::io::Result<std::os::fd::OwnedFd> {
+            Err(std::io::Error::from_raw_os_error(libc::ESRCH))
+        };
+        super::watch_bash_death_with(table.clone(), key, 4242, esrch, Duration::from_millis(20))
+            .await;
 
         assert!(table.get(&key).is_none());
     }

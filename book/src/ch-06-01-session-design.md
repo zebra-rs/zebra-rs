@@ -183,8 +183,9 @@ at the first existing session, at init (pid ≤ 1), or after
 [create]  Lazy on first RPC; no explicit OpenSession call.
 [active]  Each RPC updates Session.last_active.
 [end]     Triggered by any of:
-            - Parent bash death (pidfd, immediate); for a
-              parent-less client (D30), the client's own death
+            - Parent bash death (pidfd, immediate; /proc poll on
+              kernels < 5.3, D31); for a parent-less client (D30),
+              the client's own death
             - Idle TTL expiry (~10 min, periodic sweep)
             - Explicit Logout RPC (bash EXIT trap)
             - Daemon shutdown
@@ -194,7 +195,9 @@ Bash-death detection uses a three-tier strategy:
 
 1. **`pidfd_open(bash_pid)`** wrapped in `tokio::io::unix::AsyncFd`.
    Fires immediately when the bash process exits, including via
-   `kill -9`. (Linux 5.3+.)
+   `kill -9`. (Linux 5.3+.) On older kernels the syscall returns
+   `ENOSYS`; the session is kept and the watcher polls
+   `/proc/{bash_pid}` once a second instead (D31).
 2. **`Logout` RPC** sent from the bash EXIT trap. Covers normal
    `exit` cleanly even if pidfd notification is briefly delayed.
    The same trap first offers to commit uncommitted config changes
@@ -411,6 +414,7 @@ Each phase is intended to ship as an independent PR.
 | D28 | **PAM authenticates root for non-group callers.** Non-members who type `enable`/`configure` are prompted for the root password immediately (no passwordless probe). Client `auth_user` is ignored. |
 | D29 | **Uncommitted changes are confirmed at shell exit, from the client.** The bash `EXIT` trap asks `vtyhelper -u` (a comparison of `show running-config formal` against `show candidate-config formal`, both exec-mode and un-gated) and, when they differ, prompts `y`=commit / `n`=discard / anything else=leave pending. It runs **before** the `Logout` RPC: dropping the session first would make the commit re-resolve as a fresh View session and be refused. The check is client-side because none of the daemon's session-teardown paths owns the candidate — `ExecService` has no handle to `ConfigStore` — and because only the client has a terminal to ask on. Since the candidate is global (D11), the prompt is gated on *this shell* having entered configure mode, so a read-only session is never offered the chance to discard someone else's edits. |
 | D30 | **Parent-less clients get a session keyed on their own pid.** Guard 1 used to reject any peer whose `/proc` `PPid` was 0 or 1 as an "orphan client (no parent shell)". That refused two legitimate automation shapes: a daemon that speaks gRPC to the socket itself (systemd service, snap daemon — `PPid` 1), and anything started by `docker exec` / `nsenter -p`, whose parent sits outside the daemon's PID namespace (`PPid` 0). The resolver now keys such a peer on `(uid, peer_pid)` and points the pidfd death watcher at the client, so the session lives exactly as long as the process. Authorization is unchanged: the role still comes from the `SO_PEERCRED` uid (root → Admin per D20, others → View plus `enable`), and D26 already trusted any uid-0 connector regardless of ancestry — the orphan guard was a session-lifetime mechanism, not an authorization gate. A child the agent forks (`vtyctl`) attaches to the agent's session because its `PPid` is the agent pid. `ParentVanished` still fires when a parent pid *was* reported but has since disappeared. |
+| D31 | **Kernels without `pidfd_open` keep their sessions.** The death watcher used to treat every `pidfd_open` failure as "the parent is already dead" and dropped the session on the spot. On Linux < 5.3 (Ubuntu 16.04) the syscall returns `ENOSYS` for every live process, so each RPC created a session that was gone before the next one arrived: root still worked (Admin at creation), but non-root operators lost `enable` between RPCs and the log carried one warning per RPC. `ENOSYS` now keeps the session and falls back to polling `/proc/{bash_pid}` every second, so bash death is still noticed within about a second and a reused PID cannot inherit a stale session for long; the notice is logged once per daemon lifetime. Every other open failure (`ESRCH`, the parent really is gone) still drops the session immediately. |
 
 ## Deferred work
 
