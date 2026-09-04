@@ -10470,3 +10470,257 @@ mod es_linkadd_resync_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod vpn_transit_label_tests {
+    //! `Bgp::vpn_v4_transit_needed` / `reconcile_vpn_v4_transit`: a VPNv4
+    //! route reflector (iBGP, next-hop unchanged) must not mint transit
+    //! labels or program swap ILMs; an Inter-AS Option B ASBR (eBGP, or
+    //! iBGP with `next-hop-self`) must — including for the rows that
+    //! arrived before the knob was set. Independent test module with its
+    //! own mock channels, mirroring `next_hop_self_wiring_tests`.
+
+    use std::collections::VecDeque;
+    use std::net::Ipv4Addr;
+
+    use bgp_packet::{BgpAttr, BgpNexthop, Ipv4Nlri, Label, RouteDistinguisher};
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::bgp::route::BgpRibType;
+    use crate::bgp::shard::ShardMsg;
+    use crate::bgp::shard::msg::ShardUpdateV4;
+    use crate::bgp::vrf::VrfLabelAllocator;
+
+    fn arg_words(parts: &[&str]) -> Args {
+        Args(
+            parts
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect::<VecDeque<_>>(),
+        )
+    }
+
+    /// A `Bgp` whose RIB client channel is kept, so the test can observe
+    /// the `IlmAdd` / `IlmDel` traffic the transit reconcile emits.
+    fn fresh_bgp_observed() -> (Bgp, mpsc::UnboundedReceiver<crate::rib::client::RibInbound>) {
+        let (client_tx, client_rx) = mpsc::unbounded_channel();
+        let (_rib_rx_tx, rib_rx) = mpsc::unbounded_channel();
+        let client =
+            crate::rib::client::RibClient::new(client_tx, crate::rib::client::ProtoId::from_raw(0));
+        let ctx = crate::context::ProtoContext::default_table(client);
+
+        let (rib_tx, _rib_msg_rx) = mpsc::unbounded_channel();
+        let (rib_inbound_tx, _sub_inbound_rx) = mpsc::unbounded_channel();
+        Box::leak(Box::new(_rib_msg_rx));
+        Box::leak(Box::new(_sub_inbound_rx));
+        let next_proto_id = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(1));
+        let subscriber =
+            crate::config::RibSubscriber::for_test(rib_tx, rib_inbound_tx, next_proto_id);
+
+        let (policy_tx, _policy_rx) = mpsc::unbounded_channel();
+        Box::leak(Box::new(_policy_rx));
+        let bgp = Bgp::new(
+            ctx,
+            rib_rx,
+            subscriber,
+            policy_tx,
+            None,
+            None,
+            tokio::sync::mpsc::channel(1).0,
+        );
+        (bgp, client_rx)
+    }
+
+    /// AS 64512 with one VPNv4 neighbor; `remote_as` picks iBGP or eBGP.
+    fn setup_vpnv4_peer(bgp: &mut Bgp, addr: &str, remote_as: &str) {
+        config_global_asn(bgp, arg_words(&["64512"]), ConfigOp::Set).unwrap();
+        config_peer(bgp, arg_words(&[addr]), ConfigOp::Set).unwrap();
+        config_remote_as(bgp, arg_words(&[addr, remote_as]), ConfigOp::Set).unwrap();
+        config_afi_safi(bgp, arg_words(&[addr, "vpnv4", "true"]), ConfigOp::Set).unwrap();
+    }
+
+    /// A received (iBGP) VPNv4 route for `prefix` under `rd`.
+    fn vpnv4_update(rd: RouteDistinguisher, prefix: &str) -> ShardMsg {
+        ShardMsg::UpdateV4(ShardUpdateV4 {
+            ident: 1,
+            rd: Some(rd),
+            nlri: Ipv4Nlri {
+                id: 0,
+                prefix: prefix.parse().unwrap(),
+            },
+            peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+            typ: BgpRibType::IBGP,
+            attr: BgpAttr {
+                nexthop: Some(BgpNexthop::Ipv4("10.0.0.2".parse().unwrap())),
+                ..Default::default()
+            },
+            label: Some(Label::new(24, 0, true)),
+            nexthop: None,
+            enhe_egress: None,
+            stale: false,
+            nexthop_reachable: true,
+            vrf_transit_only: false,
+            decision: None,
+            compute_policy: true,
+        })
+    }
+
+    /// Every queued ILM message as `(is_add, label)`; other messages are
+    /// ignored.
+    fn drain_ilm(
+        rx: &mut mpsc::UnboundedReceiver<crate::rib::client::RibInbound>,
+    ) -> Vec<(bool, u32)> {
+        let mut out = Vec::new();
+        while let Ok(inbound) = rx.try_recv() {
+            match inbound.msg {
+                crate::rib::Message::IlmAdd { label, .. } => out.push((true, label)),
+                crate::rib::Message::IlmDel { label, .. } => out.push((false, label)),
+                _ => {}
+            }
+        }
+        out.sort();
+        out
+    }
+
+    fn local_label_of(bgp: &Bgp, rd: RouteDistinguisher, prefix: &str) -> Option<Option<u32>> {
+        let prefix: ipnet::Ipv4Net = prefix.parse().unwrap();
+        bgp.shard
+            .v4vpn
+            .get(&rd)
+            .and_then(|t| t.0.get(&prefix))
+            .and_then(|cands| cands.first())
+            .map(|r| r.local_label)
+    }
+
+    /// The transit need follows exactly the per-peer rule the advertise
+    /// path (`vpnv4_service_label`) applies: rewritten next-hop ⇒ our
+    /// label goes on the wire ⇒ we need the ILM behind it.
+    #[tokio::test]
+    async fn transit_needed_follows_peer_type_and_next_hop_knobs() {
+        let (mut bgp, _rx) = fresh_bgp_observed();
+        let addr = "10.0.0.2";
+        setup_vpnv4_peer(&mut bgp, addr, "64512");
+        assert!(
+            !bgp.vpn_v4_transit_needed(),
+            "iBGP reflector keeps the next-hop: no transit",
+        );
+
+        config_next_hop_self(&mut bgp, arg_words(&[addr, "vpnv4", "true"]), ConfigOp::Set).unwrap();
+        assert!(
+            bgp.vpn_v4_transit_needed(),
+            "iBGP + next-hop-self = Option B"
+        );
+        config_next_hop_self(&mut bgp, arg_words(&[addr, "vpnv4"]), ConfigOp::Delete).unwrap();
+        assert!(!bgp.vpn_v4_transit_needed());
+
+        config_remote_as(&mut bgp, arg_words(&[addr, "65001"]), ConfigOp::Set).unwrap();
+        assert!(
+            bgp.vpn_v4_transit_needed(),
+            "eBGP rewrites the next-hop by default"
+        );
+        config_next_hop_unchanged(&mut bgp, arg_words(&[addr, "vpnv4", "true"]), ConfigOp::Set)
+            .unwrap();
+        assert!(
+            !bgp.vpn_v4_transit_needed(),
+            "eBGP + next-hop-unchanged passes label and next-hop through",
+        );
+        config_next_hop_unchanged(&mut bgp, arg_words(&[addr, "vpnv4"]), ConfigOp::Delete).unwrap();
+        assert!(bgp.vpn_v4_transit_needed());
+
+        config_afi_safi(
+            &mut bgp,
+            arg_words(&[addr, "vpnv4", "false"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert!(
+            !bgp.vpn_v4_transit_needed(),
+            "family off: nothing is advertised"
+        );
+    }
+
+    /// Flipping the reflector into a transit labels the rows it already
+    /// holds (and reconciles their ILMs); flipping back releases them.
+    #[tokio::test]
+    async fn reconcile_mints_and_releases_transit_labels_on_flip() {
+        let (mut bgp, mut rx) = fresh_bgp_observed();
+        let addr = "10.0.0.2";
+        setup_vpnv4_peer(&mut bgp, addr, "64512");
+        bgp.vrf_label_alloc = Some(VrfLabelAllocator::bounded(1000, 5000));
+        bgp.reconcile_vpn_v4_transit(false);
+        assert!(!bgp.shard.vpn_v4_transit);
+        let _ = drain_ilm(&mut rx);
+
+        // Reflected route: no transit label, no ILM traffic.
+        let rd = RouteDistinguisher::default();
+        bgp.shard.handle(
+            vpnv4_update(rd, "10.1.0.0/30"),
+            bgp.vrf_label_alloc.as_mut(),
+        );
+        assert_eq!(local_label_of(&bgp, rd, "10.1.0.0/30"), Some(None));
+        assert!(
+            drain_ilm(&mut rx).is_empty(),
+            "reflector must not touch the LFIB"
+        );
+
+        // The operator turns the reflector into an Option B transit: the
+        // row already in the table is labelled and its ILM reconciled.
+        // (No transport has resolved in this harness, so the reconcile
+        // withdraws the ILM at the minted label rather than installing
+        // it — the point is that it ran against that label.)
+        config_next_hop_self(&mut bgp, arg_words(&[addr, "vpnv4", "true"]), ConfigOp::Set).unwrap();
+        bgp.reconcile_vpn_v4_transit(false);
+        assert!(bgp.shard.vpn_v4_transit);
+        assert_eq!(local_label_of(&bgp, rd, "10.1.0.0/30"), Some(Some(1000)));
+        assert_eq!(drain_ilm(&mut rx), vec![(false, 1000)]);
+
+        // A route arriving while transit is on mints at receive time.
+        bgp.shard.handle(
+            vpnv4_update(rd, "10.2.0.0/30"),
+            bgp.vrf_label_alloc.as_mut(),
+        );
+        assert_eq!(local_label_of(&bgp, rd, "10.2.0.0/30"), Some(Some(1001)));
+
+        // Back to a plain reflector: both labels released, ILMs torn
+        // down, rows cleared.
+        config_next_hop_self(&mut bgp, arg_words(&[addr, "vpnv4"]), ConfigOp::Delete).unwrap();
+        bgp.reconcile_vpn_v4_transit(false);
+        assert!(!bgp.shard.vpn_v4_transit);
+        assert_eq!(local_label_of(&bgp, rd, "10.1.0.0/30"), Some(None));
+        assert_eq!(local_label_of(&bgp, rd, "10.2.0.0/30"), Some(None));
+        assert_eq!(drain_ilm(&mut rx), vec![(false, 1000), (false, 1001)]);
+
+        // Steady state: a re-run with nothing flipped is a no-op.
+        bgp.reconcile_vpn_v4_transit(false);
+        assert!(drain_ilm(&mut rx).is_empty());
+    }
+
+    /// A label block that arrives after the routes did (the daemon's
+    /// first block request races the first UPDATE) must still label the
+    /// transit rows: `label_block_arrived` re-runs the reconcile with
+    /// `force`.
+    #[tokio::test]
+    async fn late_label_block_labels_existing_transit_rows() {
+        let (mut bgp, mut rx) = fresh_bgp_observed();
+        let addr = "10.0.0.2";
+        setup_vpnv4_peer(&mut bgp, addr, "64512");
+        config_next_hop_self(&mut bgp, arg_words(&[addr, "vpnv4", "true"]), ConfigOp::Set).unwrap();
+        bgp.reconcile_vpn_v4_transit(false);
+        assert!(bgp.shard.vpn_v4_transit);
+
+        // Transit on, but no block yet: the receive path cannot mint.
+        let rd = RouteDistinguisher::default();
+        bgp.shard.handle(
+            vpnv4_update(rd, "10.1.0.0/30"),
+            bgp.vrf_label_alloc.as_mut(),
+        );
+        assert_eq!(local_label_of(&bgp, rd, "10.1.0.0/30"), Some(None));
+        let _ = drain_ilm(&mut rx);
+
+        bgp.vrf_label_alloc = Some(VrfLabelAllocator::bounded(2000, 5000));
+        bgp.reconcile_vpn_v4_transit(true);
+        assert_eq!(local_label_of(&bgp, rd, "10.1.0.0/30"), Some(Some(2000)));
+        assert_eq!(drain_ilm(&mut rx), vec![(false, 2000)]);
+    }
+}

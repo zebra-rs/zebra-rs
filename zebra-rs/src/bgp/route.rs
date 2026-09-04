@@ -1494,7 +1494,7 @@ fn ilm_swap_install(
 
 /// Tear down the swap ILM at `local_label` (route withdrawn / next-hop
 /// unresolved). The RIB ignores a Del for a label it never installed.
-fn ilm_swap_remove(rib_client: &crate::rib::client::RibClient, local_label: u32) {
+pub(super) fn ilm_swap_remove(rib_client: &crate::rib::client::RibClient, local_label: u32) {
     let ilm = rib::inst::IlmEntry::new(rib::RibType::Bgp);
     let _ = rib_client.send(rib::Message::IlmDel {
         label: local_label,
@@ -2243,6 +2243,30 @@ impl<P: Prefix + Copy> LocalRibTable<P> {
     /// The surviving candidates for `prefix` (after a removal). Used by
     /// NHT untrack to tell whether another path still keeps a withdrawn
     /// path's next-hop alive.
+    /// Stamp `label` as the per-prefix local label on every candidate and
+    /// on the selected row of `prefix`. Returns whether any row changed.
+    /// Used by the VPNv4 transit reconcile to bring rows minted (or not)
+    /// under a previous `vpn_v4_transit` value in step with the current
+    /// one.
+    pub fn set_local_label(&mut self, prefix: P, label: Option<u32>) -> bool {
+        let mut changed = false;
+        if let Some(cands) = self.0.get_mut(&prefix) {
+            for rib in cands.iter_mut() {
+                if rib.local_label != label {
+                    rib.local_label = label;
+                    changed = true;
+                }
+            }
+        }
+        if let Some(selected) = self.1.get_mut(&prefix)
+            && selected.local_label != label
+        {
+            selected.local_label = label;
+            changed = true;
+        }
+        changed
+    }
+
     pub fn candidates(&self, prefix: P) -> &[BgpRib] {
         self.0.get(&prefix).map(|c| c.as_slice()).unwrap_or(&[])
     }

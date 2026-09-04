@@ -207,6 +207,19 @@ pub struct BgpShard {
     /// [`VrfLabelAllocator`] on `Bgp`. Empty on per-VRF shards — the
     /// LU/VPN label path is global-instance-only today.
     pub labels: ShardLabelPool,
+    /// Whether this instance re-advertises received VPNv4 routes with the
+    /// next-hop rewritten to itself on at least one peer — eBGP without
+    /// `next-hop-unchanged`, or iBGP with `next-hop-self` — i.e. it is an
+    /// Inter-AS Option B transit ASBR. Only then does a received VPNv4
+    /// route mint a per-`(RD, prefix)` local label and program a swap ILM
+    /// (`handle_update_v4`); a route reflector that passes next-hop and
+    /// label through untouched (the default iBGP case) must not touch the
+    /// MPLS data plane at all. Derived by main from the peer config at
+    /// `CommitEnd` (`Bgp::reconcile_vpn_v4_transit`), which also brings
+    /// the rows already in the table in step when the value flips. Only
+    /// the inline (N=1) shard is ever set: pool workers are handed no
+    /// central allocator (`pool.rs`) and cannot mint regardless.
+    pub vpn_v4_transit: bool,
 
     /// Per-peer inbound policy snapshots, replicated from the main task
     /// via [`ShardMsg::PolicyReplace`]. Looked up by source `ident` in

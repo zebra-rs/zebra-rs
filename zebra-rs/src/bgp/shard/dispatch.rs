@@ -452,7 +452,9 @@ impl BgpShard {
         // it before best-path (it's a tiebreaker / FIB-eligibility input).
         rib.nexthop_reachable = nexthop_reachable;
         rib.vrf_transit_only = vrf_transit_only;
-        if let Some(rd) = rd {
+        if let Some(rd) = rd
+            && self.vpn_v4_transit
+        {
             // VPNv4 transit local label (Inter-AS Option B): re-advertising
             // with next-hop-self forwards via a swap ILM keyed on this
             // label (`reconcile_swap_ilm`), so without it the ASBR sends a
@@ -460,6 +462,9 @@ impl BgpShard {
             // black-holes. Drawn from the shard's own sub-block, refilled
             // from `central` (the same allocator the BGP-LU path uses) —
             // passing `None` here was the bug that left `local_label` unset.
+            // Gated on `vpn_v4_transit`: a route reflector (iBGP, next-hop
+            // unchanged) never advertises a label of its own, so minting
+            // one would only park a dead swap ILM in the kernel.
             rib.local_label = self.labels.label_vpn_v4(central, rd, nlri.prefix);
         }
         // Snapshot the row (for AddPath advertise) and stamp the
@@ -1223,7 +1228,10 @@ mod tests {
         // a swap ILM keyed on it. The bug was `handle` passing `None`
         // central to `handle_update_v4`, leaving `local_label` unset and
         // the data plane black-holing. Regression guard.
-        let mut shard = BgpShard::default();
+        let mut shard = BgpShard {
+            vpn_v4_transit: true,
+            ..Default::default()
+        };
         let mut central = VrfLabelAllocator::bounded(1000, 5000);
         let rd = RouteDistinguisher::default();
         let out = shard.handle(
@@ -1256,6 +1264,46 @@ mod tests {
             Some(1000),
             "transit label minted from the central pool"
         );
+        assert!(matches!(&out[..], [ShardOut::BestPathV4 { .. }]));
+    }
+
+    #[test]
+    fn update_v4_vpn_reflector_mints_no_local_label() {
+        // A VPNv4 route reflector (iBGP, next-hop unchanged) passes the
+        // received label through and never advertises one of its own, so
+        // it must not mint a transit label: that label would only park a
+        // dead swap ILM in the kernel. `vpn_v4_transit` stays false.
+        let mut shard = BgpShard::default();
+        let mut central = VrfLabelAllocator::bounded(1000, 5000);
+        let rd = RouteDistinguisher::default();
+        let out = shard.handle(
+            ShardMsg::UpdateV4(ShardUpdateV4 {
+                ident: 2,
+                rd: Some(rd),
+                nlri: v4("10.2.0.0/30"),
+                peer_router_id: std::net::Ipv4Addr::new(10, 0, 0, 1),
+                typ: BgpRibType::IBGP,
+                attr: attr_with_nh("172.16.0.2"),
+                label: Some(bgp_packet::Label::new(16, 0, true)),
+                nexthop: None,
+                enhe_egress: None,
+                stale: false,
+                nexthop_reachable: true,
+                vrf_transit_only: false,
+                decision: None,
+                compute_policy: true,
+            }),
+            Some(&mut central),
+        );
+        let row = shard
+            .v4vpn
+            .get(&rd)
+            .and_then(|t| t.0.values().next())
+            .and_then(|c| c.first())
+            .expect("vpnv4 row stored");
+        assert_eq!(row.local_label, None, "reflector must not mint a label");
+        // No carve happened either: the central frontier is untouched.
+        assert_eq!(central.alloc(), Some(1000));
         assert!(matches!(&out[..], [ShardOut::BestPathV4 { .. }]));
     }
 

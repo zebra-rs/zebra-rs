@@ -1,0 +1,31 @@
+# pe2 (AS 64512 provider edge): one VRF whose customer prefix is
+# exported as VPNv4 to the route reflector; imports the other PE's prefix.
+vrf:
+- name: vrf-cust
+  ipv4:
+    route-target:
+      import:
+      - 64512:100
+      export:
+      - 64512:100
+router:
+  bgp:
+    global:
+      as: 64512
+      router-id: 192.168.0.3
+    neighbor:
+    - remote-address: 192.168.0.1
+      afi-safi:
+      - name: vpnv4
+        enabled: true
+      - name: ipv4
+        enabled: false
+      enabled: true
+      remote-as: 64512
+    vrf:
+    - name: vrf-cust
+      rd: 64512:2
+      afi-safi:
+        ipv4:
+          network:
+          - prefix: 10.2.0.0/24
