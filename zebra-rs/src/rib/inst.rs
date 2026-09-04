@@ -1671,48 +1671,21 @@ impl Rib {
     /// idempotent (matches on `(ident, remote_id)`), so a benign
     /// re-fire on already-known entries doesn't multiply the route.
     pub fn rescan_fdb_for_bridge(&self, bridge_ifindex: u32) {
-        let Some(vni) = self.vni_for_bridge(bridge_ifindex) else {
-            return;
-        };
-        let vxlan_local = self.vxlan_local_for_bridge(bridge_ifindex);
-        for (key, nbr) in self.neighbors.iter() {
-            let NeighborKey::Bridge {
-                ifindex,
-                mac,
-                vlan: _,
-            } = key
-            else {
-                continue;
-            };
-            // Match only entries whose slave port belongs to this
-            // bridge (either via the cached IFLA_MASTER on the slave
-            // link, or via NDA_MASTER on the FDB entry itself).
-            let slave_master = self.links.get(ifindex).and_then(|l| l.master);
-            let belongs_here =
-                slave_master == Some(bridge_ifindex) || nbr.master == Some(bridge_ifindex);
-            if !belongs_here {
-                continue;
-            }
-            // Match `fdb_entry_from_neighbor`: drop multicast/broadcast.
-            if mac.is_multicast() {
-                continue;
-            }
-            // And drop MACs learned on VXLAN ports (remote hosts).
-            if let Some(slave) = self.links.get(ifindex)
-                && slave.vni.is_some()
+        // One predicate for every path that turns a kernel row into a
+        // Type-2 candidate — the event path, the subscribe replay and
+        // this rescan — so a row is publishable everywhere or nowhere.
+        for nbr in self.neighbors.values() {
+            if let Some(entry) = fdb_entry_from_neighbor(self, nbr)
+                && entry.bridge_ifindex == bridge_ifindex
             {
-                continue;
+                self.api_fdb_add(&entry);
             }
-            let entry = FdbEntry {
-                vni,
-                mac: *mac,
-                ifindex: *ifindex,
-                bridge_ifindex,
-                flags: nbr.flags.bits(),
-                vxlan_local,
-            };
-            self.api_fdb_add(&entry);
         }
+    }
+
+    /// See [`local_device_mac_bridge`].
+    fn local_device_mac_bridge(&self, vni: u32, mac: MacAddr) -> Option<u32> {
+        local_device_mac_bridge(&self.links, &self.neighbors, vni, mac)
     }
 
     /// Resolve the device the kernel binds the seg6local action to,
@@ -4487,18 +4460,28 @@ impl Rib {
                         .await;
                 }
                 let fdb_entry = fdb_entry_from_neighbor(self, &nbr);
-                if let Some(key) = neighbor_key(&nbr) {
-                    self.neighbors.insert(key, nbr);
-                }
-                if let Some(entry) = fdb_entry {
-                    // When the cradle eBPF tee owns the data plane, cradle's
-                    // WatchFdb is the single source of truth for bridge-domain
-                    // MAC learning. The kernel bridge FDB (e.g. br100/vxlan100)
-                    // does not forward here, so its stale/racy NEWNEIGH events
-                    // would conflict with the cradle learn/age stream and thrash
-                    // EVPN Type-2 origination on MAC mobility (RFC 7432 §7.7).
-                    // Suppress the kernel feed while the tee is active.
-                    if self.cradle_fdb_watch.is_none() {
+                let prev = neighbor_key(&nbr).and_then(|key| self.neighbors.insert(key, nbr));
+                // A row that no longer qualifies withdraws whatever its
+                // previous shape originated. The kernel updates a row in
+                // place when the operator makes a learned MAC a device's
+                // own (`bridge fdb replace ... permanent`), so without
+                // this the Type-2 would outlive the station it described.
+                let withdrawn = match (&fdb_entry, prev) {
+                    (None, Some(old)) => fdb_entry_from_neighbor(self, &old),
+                    _ => None,
+                };
+                // When the cradle eBPF tee owns the data plane, cradle's
+                // WatchFdb is the single source of truth for bridge-domain
+                // MAC learning. The kernel bridge FDB (e.g. br100/vxlan100)
+                // does not forward here, so its stale/racy NEWNEIGH events
+                // would conflict with the cradle learn/age stream and thrash
+                // EVPN Type-2 origination on MAC mobility (RFC 7432 §7.7).
+                // Suppress the kernel feed while the tee is active.
+                if self.cradle_fdb_watch.is_none() {
+                    if let Some(entry) = withdrawn {
+                        self.api_fdb_del(&entry);
+                    }
+                    if let Some(entry) = fdb_entry {
                         self.api_fdb_add(&entry);
                     }
                 }
@@ -5166,6 +5149,18 @@ impl Rib {
         mpls_label: Option<u32>,
         local_port: Option<String>,
     ) {
+        // A MAC the kernel holds as one of this node's own addresses is
+        // never a remote station, whatever a peer says — see
+        // `local_device_mac_bridge`. Keep it out of `mac_table` as well,
+        // so neither a segment re-install nor the shutdown sweep can
+        // reach the FIB with it.
+        if let Some(bridge) = self.local_device_mac_bridge(vni, mac) {
+            tracing::warn!(
+                "mac_add: VNI {vni} mac {mac} is a local address on bridge ifindex {bridge}; \
+                 ignoring the remote EVPN route for it"
+            );
+            return;
+        }
         let dest = MacDest::from_parts(tunnel_endpoint, srv6_sid, mpls_label);
         match self.mac_table.get_mut(&(vni, mac)) {
             Some(existing) => {
@@ -5199,6 +5194,12 @@ impl Rib {
     ///    first is deterministic rather than arrival-order dependent, and
     ///    the kernel backend can express no more.
     async fn mac_install(&mut self, vni: u32, mac: MacAddr) {
+        // The address may have become local after the route was accepted
+        // (the operator gave a device this address): never program over
+        // the kernel's own row.
+        if self.local_device_mac_bridge(vni, mac).is_some() {
+            return;
+        }
         let Some(entry) = self.mac_table.get(&(vni, mac)) else {
             return;
         };
@@ -5265,6 +5266,17 @@ impl Rib {
 
     async fn mac_del(&mut self, vni: u32, mac: MacAddr) {
         self.mac_table.remove(&(vni, mac));
+        // A delete keyed on the VXLAN port removes whatever row holds the
+        // address there — including the kernel's own local row once an
+        // install had moved it onto that port. Never issue it for an
+        // address that is local in this bridge domain.
+        if let Some(bridge) = self.local_device_mac_bridge(vni, mac) {
+            tracing::debug!(
+                "mac_del: VNI {vni} mac {mac} is a local address on bridge ifindex {bridge}; \
+                 leaving the kernel row alone"
+            );
+            return;
+        }
         // Forward deletion to kernel FIB
         self.fib_handle.mac_del(vni, &mac).await;
     }
@@ -5525,6 +5537,22 @@ fn fdb_entry_from_neighbor(rib: &Rib, nbr: &FibNeighbor) -> Option<FdbEntry> {
     if mac.is_multicast() {
         return None;
     }
+    // Skip the rows that are this node's own devices rather than
+    // stations behind a port. The kernel keeps the bridge's own
+    // address and every enslaved port's own address in the same FDB
+    // (`fdb_add_local`: BR_FDB_LOCAL, reported as NUD_PERMANENT) so
+    // it can deliver frames for them locally. They are not hosts an
+    // EVPN peer should learn: FRR drops them for the same reason
+    // (`netlink_macfdb_change`, "Dropping entry because of
+    // NUD_PERMANENT") and re-adds an SVI or gateway MAC only through
+    // its opt-in `advertise-svi-ip` / `advertise-default-gw`, while
+    // originating them as plain MAC-only Type-2s made every peer
+    // install our SVI address as a remote station (#2362). Operator
+    // `static` rows (NUD_NOARP) stay eligible — that is how a host
+    // is parked on a port by hand.
+    if is_local_device_row(nbr) {
+        return None;
+    }
     // Skip MACs the bridge learned on a VXLAN port — those are
     // remote hosts whose frames came in over a tunnel; advertising
     // them as locally-originated would loop the route back to
@@ -5551,6 +5579,81 @@ fn fdb_entry_from_neighbor(rib: &Rib, nbr: &FibNeighbor) -> Option<FdbEntry> {
         flags: nbr.flags.bits(),
         vxlan_local,
     })
+}
+
+/// Whether a bridge-FDB row records one of this node's own addresses —
+/// the bridge device itself or a port enslaved to it — rather than a
+/// station learned behind a port. The kernel marks those `BR_FDB_LOCAL`
+/// and reports them as `NUD_PERMANENT` (`fdb_to_nud`, br_fdb.c); a
+/// learned row carries `NUD_REACHABLE` / `NUD_STALE` and an operator
+/// `bridge fdb add ... static` row `NUD_NOARP`. An operator can also
+/// declare a row local with `bridge fdb add ... permanent`; that lands
+/// here too, which is the kernel's own meaning of the word.
+///
+/// A row in a device's *own* FDB (`NTF_SELF`) is not a bridge row at
+/// all. On a VXLAN port it maps a remote MAC to its VTEP — the row
+/// `mac_add` itself installs — and the kernel reports it `NUD_PERMANENT`
+/// too, so without this exclusion every remote MAC would turn local the
+/// moment it was programmed and its next update would be refused.
+fn is_local_device_row(nbr: &FibNeighbor) -> bool {
+    use netlink_packet_route::neighbour::{NeighbourFlags, NeighbourState};
+    nbr.state == NeighbourState::Permanent && !nbr.flags.contains(NeighbourFlags::Own)
+}
+
+/// The bridge on which `mac` is one of this node's own addresses within
+/// the bridge domain of `vni`, or `None` when it is not local there.
+///
+/// Guards the EVPN receive path: a remote Type-2 for a MAC the kernel
+/// holds as a local row must never be programmed. A `bridge fdb` upsert
+/// on the VXLAN port moves the local row onto that port (the kernel's
+/// external-learn path keeps BR_FDB_LOCAL, so delivery still works),
+/// and the matching delete on withdraw then removes the row outright —
+/// after which frames for the SVI's own address are flooded instead of
+/// delivered and the gateway is unreachable from its own hosts (#2362).
+/// The route that does this is an ordinary one for an anycast gateway:
+/// every PE holds the same SVI address, so a peer advertising its own
+/// is advertising ours.
+///
+/// Only the bridge's own rows and its ports' rows count — the same
+/// address being local on some other bridge says nothing about this
+/// bridge domain. Pure over the two tables so it is testable.
+fn local_device_mac_bridge(
+    links: &BTreeMap<u32, Link>,
+    neighbors: &BTreeMap<NeighborKey, FibNeighbor>,
+    vni: u32,
+    mac: MacAddr,
+) -> Option<u32> {
+    let bridge = links
+        .values()
+        .find(|link| link.vni == Some(vni))
+        .and_then(|link| link.master)?;
+    let ports = std::iter::once(bridge).chain(
+        links
+            .values()
+            .filter(|link| link.master == Some(bridge))
+            .map(|link| link.index),
+    );
+    for ifindex in ports {
+        // Every VLAN's row for `(ifindex, mac)` — the key orders `vlan`
+        // last, with `None` (the untagged row) first.
+        let lo = NeighborKey::Bridge {
+            ifindex,
+            mac,
+            vlan: None,
+        };
+        let hi = NeighborKey::Bridge {
+            ifindex,
+            mac,
+            vlan: Some(u16::MAX),
+        };
+        if neighbors
+            .range(lo..=hi)
+            .any(|(_, nbr)| is_local_device_row(nbr))
+        {
+            return Some(bridge);
+        }
+    }
+    None
 }
 
 fn neighbor_key(nbr: &FibNeighbor) -> Option<NeighborKey> {
@@ -5605,6 +5708,191 @@ pub fn serve(mut rib: Rib) {
         let _ = rx.await;
         std::process::exit(0);
     });
+}
+
+/// The two decisions #2362 added: which kernel FDB rows are this node's
+/// own devices (never originated), and whether a remote MAC is one of
+/// them in its bridge domain (never programmed). Both pure over their
+/// inputs, since a live `Rib` needs a netlink socket.
+#[cfg(test)]
+mod local_device_mac_tests {
+    use super::*;
+    use netlink_packet_route::AddressFamily;
+    use netlink_packet_route::neighbour::{NeighbourFlags, NeighbourState};
+    use std::str::FromStr;
+
+    const BR10: u32 = 3;
+    const VXLAN10: u32 = 4;
+    const HOST0: u32 = 5;
+    const BR20: u32 = 6;
+    const VXLAN20: u32 = 7;
+
+    fn link(index: u32, name: &str, master: Option<u32>, vni: Option<u32>) -> Link {
+        Link {
+            index,
+            name: name.to_string(),
+            mtu: 1500,
+            original_mtu: 1500,
+            metric: 1,
+            flags: Default::default(),
+            link_type: crate::rib::LinkType::Ethernet,
+            label: false,
+            mac: None,
+            addr4: Vec::new(),
+            addr6: Vec::new(),
+            master,
+            vni,
+            vrf_table: None,
+            bridge: vni.is_none() && master.is_none(),
+            vxlan_local: None,
+            parent: None,
+            vlan_id: None,
+            mtu_error: None,
+        }
+    }
+
+    fn row(ifindex: u32, mac: &str, vlan: Option<u16>, state: NeighbourState) -> FibNeighbor {
+        FibNeighbor {
+            family: AddressFamily::Bridge,
+            ifindex,
+            state,
+            lladdr: Some(MacAddr::from_str(mac).unwrap()),
+            vlan,
+            master: Some(BR10),
+            ..Default::default()
+        }
+    }
+
+    /// The VXLAN device's own FDB row for a remote MAC, as `mac_add`
+    /// installs it: `NTF_SELF | NTF_EXT_LEARNED`, permanent, no master.
+    fn self_row(ifindex: u32, mac: &str) -> FibNeighbor {
+        FibNeighbor {
+            family: AddressFamily::Bridge,
+            ifindex,
+            state: NeighbourState::Permanent,
+            flags: NeighbourFlags::Own | NeighbourFlags::ExtLearned,
+            lladdr: Some(MacAddr::from_str(mac).unwrap()),
+            ..Default::default()
+        }
+    }
+
+    fn mac(s: &str) -> MacAddr {
+        MacAddr::from_str(s).unwrap()
+    }
+
+    /// Two bridge domains: br10/vxlan10 (VNI 10) with an access port, and
+    /// br20/vxlan20 (VNI 20). br10 owns fe:01, host0 owns 0a:01, and a
+    /// station aa:..:01 is parked on host0 by hand.
+    fn tables() -> (BTreeMap<u32, Link>, BTreeMap<NeighborKey, FibNeighbor>) {
+        let links: BTreeMap<u32, Link> = [
+            link(BR10, "br10", None, None),
+            link(VXLAN10, "vxlan10", Some(BR10), Some(10)),
+            link(HOST0, "host0", Some(BR10), None),
+            link(BR20, "br20", None, None),
+            link(VXLAN20, "vxlan20", Some(BR20), Some(20)),
+        ]
+        .into_iter()
+        .map(|l| (l.index, l))
+        .collect();
+        let rows = [
+            row(BR10, "02:00:00:00:fe:01", None, NeighbourState::Permanent),
+            row(
+                BR10,
+                "02:00:00:00:fe:01",
+                Some(1),
+                NeighbourState::Permanent,
+            ),
+            row(
+                HOST0,
+                "02:00:00:00:0a:01",
+                Some(1),
+                NeighbourState::Permanent,
+            ),
+            row(HOST0, "aa:bb:cc:dd:ee:01", None, NeighbourState::Noarp),
+            row(HOST0, "aa:bb:cc:dd:ee:02", None, NeighbourState::Reachable),
+            self_row(VXLAN10, "aa:bb:cc:dd:ee:03"),
+        ];
+        let neighbors = rows
+            .into_iter()
+            .map(|nbr| (neighbor_key(&nbr).unwrap(), nbr))
+            .collect();
+        (links, neighbors)
+    }
+
+    #[test]
+    fn only_permanent_rows_are_local_devices() {
+        let local = |state| is_local_device_row(&row(HOST0, "02:00:00:00:0a:01", None, state));
+        assert!(local(NeighbourState::Permanent), "the kernel's own rows");
+        assert!(
+            !local(NeighbourState::Noarp),
+            "`bridge fdb add ... static` is a station"
+        );
+        assert!(!local(NeighbourState::Reachable), "a data-plane learn");
+        assert!(
+            !local(NeighbourState::Stale),
+            "an aged learn is still a station"
+        );
+        assert!(!local(NeighbourState::None));
+        assert!(
+            !is_local_device_row(&self_row(VXLAN10, "aa:bb:cc:dd:ee:03")),
+            "a VXLAN self row is permanent but maps a remote MAC to its VTEP"
+        );
+    }
+
+    #[test]
+    fn bridge_and_port_addresses_are_local_in_their_domain() {
+        let (links, neighbors) = tables();
+        assert_eq!(
+            local_device_mac_bridge(&links, &neighbors, 10, mac("02:00:00:00:fe:01")),
+            Some(BR10),
+            "the bridge's own (SVI) address"
+        );
+        assert_eq!(
+            local_device_mac_bridge(&links, &neighbors, 10, mac("02:00:00:00:0a:01")),
+            Some(BR10),
+            "an enslaved port's own address, found through the tagged row"
+        );
+    }
+
+    #[test]
+    fn stations_are_not_local() {
+        let (links, neighbors) = tables();
+        assert_eq!(
+            local_device_mac_bridge(&links, &neighbors, 10, mac("aa:bb:cc:dd:ee:01")),
+            None,
+            "a static row is a host the operator parked"
+        );
+        assert_eq!(
+            local_device_mac_bridge(&links, &neighbors, 10, mac("aa:bb:cc:dd:ee:02")),
+            None,
+            "a learned row"
+        );
+        assert_eq!(
+            local_device_mac_bridge(&links, &neighbors, 10, mac("11:22:33:44:55:66")),
+            None,
+            "an address with no row at all"
+        );
+        assert_eq!(
+            local_device_mac_bridge(&links, &neighbors, 10, mac("aa:bb:cc:dd:ee:03")),
+            None,
+            "a remote MAC we programmed onto the VXLAN port stays remote"
+        );
+    }
+
+    #[test]
+    fn locality_is_per_bridge_domain() {
+        let (links, neighbors) = tables();
+        assert_eq!(
+            local_device_mac_bridge(&links, &neighbors, 20, mac("02:00:00:00:fe:01")),
+            None,
+            "br10's address is a valid remote station in br20's domain"
+        );
+        assert_eq!(
+            local_device_mac_bridge(&links, &neighbors, 30, mac("02:00:00:00:fe:01")),
+            None,
+            "a VNI with no local bridge has no local addresses"
+        );
+    }
 }
 
 #[cfg(test)]

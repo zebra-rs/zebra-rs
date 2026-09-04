@@ -77,7 +77,16 @@ module zebra-bgp-evpn {
          import / export RT is auto-derived as <local-AS>:<VNI>.
 
          Equivalent to FRR's `advertise-all-vni` under
-         `address-family l2vpn evpn`.";
+         `address-family l2vpn evpn`.
+
+         Like FRR, this never originates a Type-2 for one of this
+         node's own addresses — the bridge's (SVI) MAC or an enslaved
+         port's MAC, the rows the kernel FDB reports as `permanent`.
+         Those are not stations behind a port, and a peer that
+         installed them would treat this node's gateway as a remote
+         host. Rows an operator parks with `bridge fdb add ... static`
+         are stations and are advertised. There is no equivalent of
+         FRR's `advertise-svi-ip` / `advertise-default-gw` yet.";
     }
     leaf encapsulation {
       ext:help "EVPN overlay encapsulation (vxlan, srv6 or mpls)";
