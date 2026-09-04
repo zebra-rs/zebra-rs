@@ -43,6 +43,15 @@ pub fn set_tcp_mss(fd: RawFd, mss: u16) -> io::Result<()> {
     setsockopt_int(fd, libc::IPPROTO_TCP, libc::TCP_MAXSEG, mss as c_int)
 }
 
+/// Whether `set_tcp_mss(fd, 0)` failed because this kernel does not accept
+/// `TCP_MAXSEG = 0` as "clear the clamp". Older kernels (Ubuntu 16.04's
+/// 4.4) range-check the value before special-casing zero, so the reset the
+/// listener reconciler issues when no peer configures `tcp-mss` comes back
+/// `EINVAL` there; newer kernels accept it and restore the default MSS.
+pub fn is_reset_unsupported(err: &io::Error) -> bool {
+    err.raw_os_error() == Some(libc::EINVAL)
+}
+
 /// Read back the kernel's current TCP MSS (`getsockopt(TCP_MAXSEG)`) on
 /// `fd`. On an established socket this is the negotiated `mss_cache` (the
 /// "synced" value). Returns 0 only if the kernel reports a non-positive
@@ -94,6 +103,21 @@ mod tests {
     use super::*;
     use std::net::{TcpListener, TcpStream};
     use std::os::fd::AsRawFd;
+
+    /// Only `EINVAL` means "this kernel rejects TCP_MAXSEG = 0"; any other
+    /// failure of the reset is a real error the caller must still report.
+    #[test]
+    fn reset_unsupported_is_exactly_einval() {
+        assert!(is_reset_unsupported(&io::Error::from_raw_os_error(
+            libc::EINVAL
+        )));
+        assert!(!is_reset_unsupported(&io::Error::from_raw_os_error(
+            libc::EBADF
+        )));
+        assert!(!is_reset_unsupported(&io::Error::from_raw_os_error(
+            libc::ENOTSOCK
+        )));
+    }
 
     /// Setting `TCP_MAXSEG` before the handshake reduces the MSS the
     /// kernel reads back on the established socket. Both ends advertise
