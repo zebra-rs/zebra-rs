@@ -11,6 +11,90 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit them,
 # changelog-gen.sh defaults to distribution "unstable" and urgency "medium".
 
+- semver: 26.9.1
+  date: 2026-09-05T18:00:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### BGP: route reflectors no longer program transit labels
+        * A VPNv4 or labeled-unicast route reflector used to mint a
+          per-route local label and install an MPLS swap ILM for every
+          route it reflected, although it relays each route with the
+          originating PE's next-hop and label untouched — dead kernel
+          MPLS state on every kernel, and one `NewRoute error: EINVAL`
+          per route on a host without an MPLS label space. Transit
+          labels are now minted only when some peer in the family is
+          actually sent routes with next-hop-self (eBGP, or iBGP with
+          `next-hop-self`: the Inter-AS Option B / Option C transit
+          ASBR). The flags are re-derived at every commit, on
+          label-block arrival, and when a dynamic listen-range peer is
+          accepted or removed; a flip labels or releases the rows
+          already in the table and re-advertises them, so a transit
+          enabled on a running router no longer black-holes the
+          routes it already held
+        * A prefix both locally originated and received (the
+          originated path wins) never carries a transit label: the
+          originated winner advertises implicit-null and the swap ILM
+          it would have needed is never installed
+        * Labeled-unicast advertisements are now deduplicated against
+          the Adj-RIB-Out. Two routers originating the same prefix in a
+          reflector mesh used to re-send byte-identical UPDATEs to each
+          other at ~20,000 per second, flapping the client's route.
+          The dedup compares everything the render reads — attributes,
+          labels, origin type and the source router-id — so a best-path
+          switch to another iBGP source with identical attributes still
+          re-advertises its changed ORIGINATOR_ID
+    - note: |
+        ### BGP: session establishment
+        * Collision resolution (§6.8) is deferred while the winning
+          connection is still pre-OPEN, so two routers dialling each
+          other at once no longer pick a dead connection and settle
+          into a 5-second lockstep livelock
+        * The two crossed-dial FSM holes that fix left — a Cease on
+          the connect-fail arm and an `Event::Connected` overwriting the
+          parked collision winner — now both keep the surviving
+          connection
+        * The listener TCP MSS reset to the kernel default is tolerated
+          on kernels that reject `TCP_MAXSEG = 0` (Ubuntu 16.04's 4.4):
+          it is logged once instead of warning on every config change
+          when no peer configures `tcp-mss`
+    - note: |
+        ### EVPN
+        * `next-hop-unchanged` is honored on the EVPN advertise path
+          (kurokiyokiyo), with test coverage widened around it
+        * The RIB never originates or overwrites a node's own MACs in
+          EVPN (#2362)
+    - note: |
+        ### RIB: link hardware addresses
+        * A hardware-address change on an existing link is adopted from
+          the kernel instead of being ignored (kurokiyokiyo), and fanned
+          out to the protocol subscribers so IS-IS refreshes its SNPA
+    - note: |
+        ### OSPF and STAMP
+        * OSPFv2 re-originates `redistribute-table` Type-5 externals
+          after a Router-ID change instead of losing them
+        * A STAMP session whose socket could not be created — an IPv6
+          link-local reflector still in DAD returns `EADDRNOTAVAIL` —
+          is retried rather than abandoned
+    - note: |
+        ### VTY on constrained hosts
+        * A client with no visible parent shell — an init-parented
+          daemon or snap service, or anything started by `docker exec`
+          / `nsenter -p` — was refused as an `orphan client`. It now
+          gets a session keyed on its own pid, with root an Admin
+          immediately and the session ending with the process (D30)
+        * On kernels without `pidfd_open` (Linux < 5.3) every VTY
+          session was dropped the moment it was created, so non-root
+          operators lost `enable` between RPCs and the log carried one
+          warning per RPC. The session is kept and the parent shell's
+          death is tracked by polling `/proc` instead (D31)
+    - note: |
+        ### Housekeeping
+        * A scratch daemon config that slipped into the tree was
+          removed and `/zebra.yaml` is now ignored at the repo root
+        * The pinned cradle-rs engine release stays at v1.1.1
 - semver: 26.8.6
   date: 2026-08-29T18:00:00+09:00
   distribution: unstable
