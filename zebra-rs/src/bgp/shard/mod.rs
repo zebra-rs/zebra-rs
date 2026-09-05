@@ -215,11 +215,19 @@ pub struct BgpShard {
     /// (`handle_update_v4`); a route reflector that passes next-hop and
     /// label through untouched (the default iBGP case) must not touch the
     /// MPLS data plane at all. Derived by main from the peer config at
-    /// `CommitEnd` (`Bgp::reconcile_vpn_v4_transit`), which also brings
+    /// `CommitEnd` (`Bgp::reconcile_transit_labels`), which also brings
     /// the rows already in the table in step when the value flips. Only
     /// the inline (N=1) shard is ever set: pool workers are handed no
     /// central allocator (`pool.rs`) and cannot mint regardless.
     pub vpn_v4_transit: bool,
+    /// [`Self::vpn_v4_transit`] for IPv4 Labeled-Unicast (SAFI 4): true
+    /// when a `label-v4` peer is sent routes with next-hop-self (eBGP
+    /// always rewrites for LU; iBGP only with `next-hop-self` — the
+    /// Inter-AS Option C ASBR → PE leg). Gates the per-prefix mint in
+    /// `handle_update_lu` and the inline `route_labelv4_update`.
+    pub lu_v4_transit: bool,
+    /// [`Self::lu_v4_transit`] for IPv6 Labeled-Unicast / 6PE.
+    pub lu_v6_transit: bool,
 
     /// Per-peer inbound policy snapshots, replicated from the main task
     /// via [`ShardMsg::PolicyReplace`]. Looked up by source `ident` in

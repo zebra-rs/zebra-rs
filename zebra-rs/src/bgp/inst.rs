@@ -2736,6 +2736,10 @@ impl Bgp {
         super::update_group::detach(&mut self.update_groups, &mut self.peers, ident);
         self.peers.remove(&addr);
         self.dynamic_peer_count = self.dynamic_peer_count.saturating_sub(1);
+        // Losing this peer may drop the last next-hop-self holder for a
+        // VPNv4 / Labeled-Unicast family, so re-derive the transit flags
+        // and release any now-unneeded local labels and swap ILMs.
+        self.reconcile_transit_labels(false);
     }
 
     /// Candidates for the `bgp:neighbor` dynamic completion (`show ip
@@ -3392,10 +3396,11 @@ impl Bgp {
                 self.vrf_commit_baseline.clear();
                 self.vrf_neighbor_group_commit_baseline.clear();
                 self.apply_mup_c_commit_diff();
-                // Peer-derived: whether any VPNv4 peer is sent routes with
-                // the next-hop rewritten to us (Option B transit). Re-derive
-                // after every commit; a flip brings the VPNv4 rows in step.
-                self.reconcile_vpn_v4_transit(false);
+                // Peer-derived: whether any VPNv4 / Labeled-Unicast peer is
+                // sent routes with the next-hop rewritten to us (Option B /
+                // Option C transit). Re-derive after every commit; a flip
+                // brings that family's rows in step.
+                self.reconcile_transit_labels(false);
             }
             ConfigOp::Completion => {
                 // `comps_dynamic` carries the dynamic handler name
@@ -4777,126 +4782,174 @@ impl Bgp {
         }
     }
 
-    /// Whether at least one configured VPNv4 peer is sent routes with the
-    /// next-hop rewritten to this router: eBGP without `next-hop-unchanged`,
-    /// or iBGP with `next-hop-self` — the Inter-AS Option B transit ASBR.
-    /// Mirrors the per-peer rule in `vpnv4_service_label` (`route.rs`),
-    /// evaluated over *configured* peers rather than established ones so
-    /// the labels exist before the first such session comes up (the same
-    /// eagerness as the label-block request in `config_afi_safi`).
+    /// Whether at least one configured peer in `family` — VPNv4 or IPv4/6
+    /// Labeled-Unicast — is sent routes with the next-hop rewritten to
+    /// this router, so our per-prefix local label goes on the wire and we
+    /// must hold a swap ILM behind it: the Inter-AS Option B (VPNv4) or
+    /// Option C (BGP-LU) transit ASBR. Mirrors the per-peer rules the
+    /// advertise paths apply (`vpnv4_service_label`, `route_update_labelv4`
+    /// in `route.rs`): eBGP rewrites — VPNv4 unless `next-hop-unchanged`,
+    /// LU always — and iBGP only with `next-hop-self`. Evaluated over
+    /// *configured* peers rather than established ones so the labels exist
+    /// before the first such session comes up (the same eagerness as the
+    /// label-block request in `config_afi_safi`).
     ///
-    /// A plain VPNv4 route reflector — iBGP clients, next-hop unchanged —
-    /// is `false`: it relays every route with the originating PE's
+    /// A plain route reflector — iBGP clients, next-hop unchanged — is
+    /// `false`: it relays every route with the originating router's
     /// next-hop and label, so a label of its own would never reach the
     /// wire and its swap ILM could never match traffic.
-    pub(super) fn vpn_v4_transit_needed(&self) -> bool {
-        use bgp_packet::{Afi, AfiSafi, Safi};
-        let vpnv4 = AfiSafi::new(Afi::Ip, Safi::MplsVpn);
+    pub(super) fn transit_needed(&self, family: bgp_packet::AfiSafi) -> bool {
         for ident in self.peers.idents() {
             let Some(peer) = self.peers.get_by_idx(ident) else {
                 continue;
             };
-            if !peer.config.mp.get(&vpnv4).copied().unwrap_or(false) {
+            if !peer.config.mp.get(&family).copied().unwrap_or(false) {
                 continue;
             }
-            if (peer.is_ebgp() && !peer.next_hop_unchanged(Afi::Ip, Safi::MplsVpn))
-                || peer.next_hop_self(Afi::Ip, Safi::MplsVpn)
-            {
+            let ebgp_rewrites = match family.safi {
+                bgp_packet::Safi::MplsVpn => {
+                    peer.is_ebgp() && !peer.next_hop_unchanged(family.afi, family.safi)
+                }
+                _ => peer.is_ebgp(),
+            };
+            if ebgp_rewrites || peer.next_hop_self(family.afi, family.safi) {
                 return true;
             }
         }
         false
     }
 
-    /// Re-derive [`super::shard::BgpShard::vpn_v4_transit`] from the peer
-    /// config and, when it flipped — or `force`, after a label block
-    /// arrived — bring every received VPNv4 row in the table in step: mint
-    /// the per-`(RD, prefix)` label and program its swap ILM when transit
-    /// is needed, release both when it is not. Rows that changed are then
-    /// re-advertised (soft-out to the VPNv4 peers) so the label and
-    /// next-hop on the wire match the data plane: a next-hop-self peer is
-    /// handed our label only once we hold the ILM for it, and stops being
-    /// handed it as soon as the ILM goes.
-    pub(super) fn reconcile_vpn_v4_transit(&mut self, force: bool) {
-        let need = self.vpn_v4_transit_needed();
-        let flipped = need != self.shard.vpn_v4_transit;
-        self.shard.vpn_v4_transit = need;
-        if !flipped && !(force && need) {
-            return;
-        }
-        // Self-originated rows (VRF exports) carry no transit label: we
-        // are the egress FEC and the VRF's decap label owns forwarding.
-        let keys: Vec<(bgp_packet::RouteDistinguisher, ipnet::Ipv4Net)> = self
-            .shard
-            .v4vpn
-            .iter()
-            .flat_map(|(rd, table)| {
-                table
-                    .0
-                    .iter()
-                    .filter(|(_, cands)| {
-                        cands
-                            .iter()
-                            .any(|r| r.typ != super::route::BgpRibType::Originated)
-                    })
-                    .map(move |(prefix, _)| (*rd, prefix))
-            })
-            .collect();
-        let mut changed = false;
-        for (rd, prefix) in keys {
-            if need {
-                let Some(label) =
-                    self.shard
-                        .labels
-                        .label_vpn_v4(self.vrf_label_alloc.as_mut(), rd, prefix)
-                else {
-                    // No dynamic block bound yet; `label_block_arrived`
-                    // runs this again once one is granted.
-                    break;
-                };
+    /// Re-derive the shard's transit flags (VPNv4, LU v4, LU v6) from the
+    /// peer config and, for each family that flipped — or, under `force`
+    /// (a label block just arrived), each family that is a transit — bring
+    /// the rows already in its Loc-RIB in step: mint the per-prefix label
+    /// and program its swap ILM when transit is needed, release both when
+    /// it is not (`transit_table_reconcile`). Rows that changed are then
+    /// re-advertised so the label and next-hop on the wire match the LFIB:
+    /// a next-hop-self peer is handed our label only once we hold the ILM
+    /// for it, and stops being handed it as soon as the ILM goes. VPNv4
+    /// re-advertises by soft-out to its peers; Labeled-Unicast per changed
+    /// prefix, since `route_soft_out_peer` does not walk the LU tables.
+    pub(super) fn reconcile_transit_labels(&mut self, force: bool) {
+        use bgp_packet::{Afi, AfiSafi, Safi};
+        let vpnv4 = AfiSafi::new(Afi::Ip, Safi::MplsVpn);
+        let need_vpn = self.transit_needed(vpnv4);
+        let need_lu4 = self.transit_needed(AfiSafi::new(Afi::Ip, Safi::MplsLabel));
+        let need_lu6 = self.transit_needed(AfiSafi::new(Afi::Ip6, Safi::MplsLabel));
+        // A family's walk runs when its flag flipped, or when forced and
+        // it is a transit (rows received before the block lack labels).
+        let arm = |need: bool, flag: &mut bool| {
+            let flipped = need != *flag;
+            *flag = need;
+            flipped || (force && need)
+        };
+        let run_vpn = arm(need_vpn, &mut self.shard.vpn_v4_transit);
+        let run_lu4 = arm(need_lu4, &mut self.shard.lu_v4_transit);
+        let run_lu6 = arm(need_lu6, &mut self.shard.lu_v6_transit);
+
+        if run_vpn {
+            let rds: Vec<bgp_packet::RouteDistinguisher> =
+                self.shard.v4vpn.keys().copied().collect();
+            let mut changed = false;
+            for rd in rds {
                 let Some(table) = self.shard.v4vpn.get_mut(&rd) else {
                     continue;
                 };
-                if table.set_local_label(prefix, Some(label)) {
-                    changed = true;
-                    super::route::reconcile_swap_ilm(
-                        &self.ctx.rib,
-                        Some(&self.nexthop_cache),
-                        table.1.get(&prefix),
-                    );
-                }
-            } else {
-                if let Some(label) = self.shard.labels.free_vpn_v4(rd, prefix) {
-                    super::route::ilm_swap_remove(&self.ctx.rib, label);
-                    changed = true;
-                }
-                if let Some(table) = self.shard.v4vpn.get_mut(&rd)
-                    && table.set_local_label(prefix, None)
-                {
-                    changed = true;
+                let touched = super::route::transit_table_reconcile(
+                    need_vpn,
+                    table,
+                    &mut self.shard.labels,
+                    self.vrf_label_alloc.as_mut(),
+                    |labels, central, p| labels.label_vpn_v4(central, rd, p),
+                    |labels, p| labels.free_vpn_v4(rd, p),
+                    &self.ctx.rib,
+                    &self.nexthop_cache,
+                );
+                changed |= !touched.is_empty();
+            }
+            if changed {
+                tracing::debug!(
+                    transit = need_vpn,
+                    "bgp: VPNv4 transit labels reconciled; soft-out to VPNv4 peers"
+                );
+                let idents: Vec<usize> = self
+                    .peers
+                    .idents()
+                    .into_iter()
+                    .filter(|&ident| {
+                        self.peers
+                            .get_by_idx(ident)
+                            .is_some_and(|p| p.config.mp.get(&vpnv4).copied().unwrap_or(false))
+                    })
+                    .collect();
+                for ident in idents {
+                    super::peer::apply_soft_out_peer(self, ident);
                 }
             }
         }
-        if !changed {
-            return;
+
+        if run_lu4 {
+            let changed = super::route::transit_table_reconcile(
+                need_lu4,
+                &mut self.shard.v4lu,
+                &mut self.shard.labels,
+                self.vrf_label_alloc.as_mut(),
+                |labels, central, p| labels.label_lu_v4(central, p),
+                |labels, p| labels.free_lu_v4(p),
+                &self.ctx.rib,
+                &self.nexthop_cache,
+            );
+            if !changed.is_empty() {
+                tracing::debug!(
+                    transit = need_lu4,
+                    prefixes = changed.len(),
+                    "bgp: IPv4 Labeled-Unicast transit labels reconciled; re-advertising"
+                );
+            }
+            for prefix in changed {
+                let selected: Vec<super::route::BgpRib> = self
+                    .shard
+                    .v4lu
+                    .1
+                    .get(&prefix)
+                    .cloned()
+                    .into_iter()
+                    .collect();
+                let (mut top, peers) = super::peer::advertise_top(self);
+                super::route::route_advertise_to_peers_labelv4(prefix, &selected, &mut top, peers);
+            }
         }
-        tracing::debug!(
-            transit = need,
-            "bgp: VPNv4 transit labels reconciled; re-advertising to VPNv4 peers"
-        );
-        let vpnv4 = bgp_packet::AfiSafi::new(bgp_packet::Afi::Ip, bgp_packet::Safi::MplsVpn);
-        let idents: Vec<usize> = self
-            .peers
-            .idents()
-            .into_iter()
-            .filter(|&ident| {
-                self.peers
-                    .get_by_idx(ident)
-                    .is_some_and(|p| p.config.mp.get(&vpnv4).copied().unwrap_or(false))
-            })
-            .collect();
-        for ident in idents {
-            super::peer::apply_soft_out_peer(self, ident);
+
+        if run_lu6 {
+            let changed = super::route::transit_table_reconcile(
+                need_lu6,
+                &mut self.shard.v6lu,
+                &mut self.shard.labels,
+                self.vrf_label_alloc.as_mut(),
+                |labels, central, p| labels.label_lu_v6(central, p),
+                |labels, p| labels.free_lu_v6(p),
+                &self.ctx.rib,
+                &self.nexthop_cache,
+            );
+            if !changed.is_empty() {
+                tracing::debug!(
+                    transit = need_lu6,
+                    prefixes = changed.len(),
+                    "bgp: IPv6 Labeled-Unicast transit labels reconciled; re-advertising"
+                );
+            }
+            for prefix in changed {
+                let selected: Vec<super::route::BgpRib> = self
+                    .shard
+                    .v6lu
+                    .1
+                    .get(&prefix)
+                    .cloned()
+                    .into_iter()
+                    .collect();
+                let (mut top, peers) = super::peer::advertise_top(self);
+                super::route::route_advertise_to_peers_labelv6(prefix, &selected, &mut top, peers);
+            }
         }
     }
 
@@ -4940,9 +4993,9 @@ impl Bgp {
         // So do VPWS E-Lines: a service configured before the grant
         // originated its Type-1 with label 0, which no remote binds.
         self.vpws_label_drain();
-        // VPNv4 transit rows received before the grant carry no local
-        // label yet (`label_vpn_v4` returned `None`); mint them now.
-        self.reconcile_vpn_v4_transit(true);
+        // VPNv4 / Labeled-Unicast transit rows received before the grant
+        // carry no local label yet (the mint returned `None`); mint now.
+        self.reconcile_transit_labels(true);
         // The reconcile may have outgrown this block too (a large VRF
         // fleet). If any VRF is still label-less, ask for another.
         if self.vrf_registry.values().any(|h| h.label == 0) {

@@ -3814,6 +3814,16 @@ fn try_dynamic_accept(bgp: &mut Bgp, peer_addr: IpAddr, stream: TcpStream) -> Op
         peer.start();
     }
 
+    // A dynamic peer inherits its afi-safi knobs from the listen-range's
+    // neighbor-group (`apply_inherited` above), so it can arrive already
+    // requiring next-hop-self on VPNv4 / Labeled-Unicast. Config commits
+    // and label-block grants are the only other places the transit flags
+    // are re-derived, and neither fires on accept — so without this a
+    // dynamic Option B/C peer would be advertised routes with next-hop-self
+    // while the reflector holds no swap ILM for the label. Re-derive now
+    // that the peer's inherited config is resolved.
+    bgp.reconcile_transit_labels(false);
+
     // Dynamic (listen-range) peers are always address-keyed, so no
     // interface scope is needed here.
     handle_peer_connection(&mut bgp.peers, peer_addr, None, stream)
@@ -3892,7 +3902,16 @@ pub fn apply_soft_out_peer(bgp: &mut Bgp, peer_idx: usize) {
     if !peer.state.is_established() {
         return;
     }
-    let mut bgp_ref = BgpTop {
+    let (mut bgp_ref, peers) = advertise_top(bgp);
+    super::route::route_soft_out_peer(peer_idx, &mut bgp_ref, peers);
+}
+
+/// The [`BgpTop`] view an advertise-only path needs (no NHT cache, no VRF
+/// export/import), split from the peer map so both can be borrowed at
+/// once. Shared by [`apply_soft_out_peer`] and the transit-label
+/// reconcile's per-prefix Labeled-Unicast re-advertise.
+pub fn advertise_top(bgp: &mut Bgp) -> (BgpTop<'_>, &mut PeerMap) {
+    let top = BgpTop {
         router_id: &bgp.router_id,
         srv6_ipv6_export: bgp.srv6_ipv6_export.as_ref(),
         local_rib: &mut bgp.local_rib,
@@ -3913,7 +3932,7 @@ pub fn apply_soft_out_peer(bgp: &mut Bgp, peer_idx: usize) {
         central_label_alloc: None,
         as_sets_withdraw: bgp.as_sets_withdraw,
     };
-    super::route::route_soft_out_peer(peer_idx, &mut bgp_ref, &mut bgp.peers);
+    (top, &mut bgp.peers)
 }
 
 /// Action selector for the `clear bgp <afi> <peer> ...` family of

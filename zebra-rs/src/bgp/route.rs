@@ -1502,6 +1502,68 @@ pub(super) fn ilm_swap_remove(rib_client: &crate::rib::client::RibClient, local_
     });
 }
 
+/// One Loc-RIB table's share of `Bgp::reconcile_transit_labels`: bring
+/// every *received* row of `table` in step with `need` — mint a local
+/// label (`mint` on `labels`, refilling from `central`) and reconcile its
+/// swap ILM when transit is needed, release it (`free`) and tear the ILM
+/// down when not. Self-originated
+/// rows are skipped: we are their egress FEC and they carry no transit
+/// label. Returns the prefixes whose rows changed, so the caller can
+/// re-advertise exactly those. Stops early — leaving the rest
+/// unlabelled — when `mint` yields `None` (no dynamic block bound yet;
+/// `label_block_arrived` runs the reconcile again).
+pub(super) fn transit_table_reconcile<P, M, F>(
+    need: bool,
+    table: &mut LocalRibTable<P>,
+    labels: &mut super::shard::ShardLabelPool,
+    mut central: Option<&mut super::vrf::VrfLabelAllocator>,
+    mut mint: M,
+    mut free: F,
+    rib_client: &crate::rib::client::RibClient,
+    cache: &super::nht::NexthopCache,
+) -> Vec<P>
+where
+    P: Prefix + Copy,
+    M: FnMut(
+        &mut super::shard::ShardLabelPool,
+        Option<&mut super::vrf::VrfLabelAllocator>,
+        P,
+    ) -> Option<u32>,
+    F: FnMut(&mut super::shard::ShardLabelPool, P) -> Option<u32>,
+{
+    let prefixes: Vec<P> = table
+        .0
+        .iter()
+        .filter(|(_, cands)| cands.iter().any(|r| r.typ != BgpRibType::Originated))
+        .map(|(prefix, _)| prefix)
+        .collect();
+    let mut changed = Vec::new();
+    for prefix in prefixes {
+        if need {
+            let Some(label) = mint(labels, central.as_deref_mut(), prefix) else {
+                break;
+            };
+            if table.set_local_label(prefix, Some(label)) {
+                reconcile_swap_ilm(rib_client, Some(cache), table.1.get(&prefix));
+                changed.push(prefix);
+            }
+        } else {
+            let mut touched = false;
+            if let Some(label) = free(labels, prefix) {
+                ilm_swap_remove(rib_client, label);
+                touched = true;
+            }
+            if table.set_local_label(prefix, None) {
+                touched = true;
+            }
+            if touched {
+                changed.push(prefix);
+            }
+        }
+    }
+    changed
+}
+
 /// Install / reconcile the kernel FIB for an IPv4 Labeled-Unicast prefix
 /// (ingress LSR: push the label toward the BGP next-hop). Takes the RIB
 /// client + NHT cache directly (not a `BgpTop`) so it is callable both
@@ -2245,24 +2307,41 @@ impl<P: Prefix + Copy> LocalRibTable<P> {
     /// path's next-hop alive.
     /// Stamp `label` as the per-prefix local label on every candidate and
     /// on the selected row of `prefix`. Returns whether any row changed.
-    /// Used by the VPNv4 transit reconcile to bring rows minted (or not)
-    /// under a previous `vpn_v4_transit` value in step with the current
-    /// one.
+    /// Used by the transit reconcile to bring rows minted (or not) under a
+    /// previous transit value in step with the current one.
+    ///
+    /// A *locally originated* row is exempt and is always forced to `None`:
+    /// it is the egress FEC, advertises implicit-null, and never carries a
+    /// transit label — even for a mixed-origin prefix that also has a
+    /// received candidate. Without this, `set_local_label(Some(l))` on such
+    /// a prefix would stamp the originated winner too; it would then be
+    /// advertised with next-hop-self and label `l`, while `reconcile_swap_ilm`
+    /// (correctly) installs no swap ILM for an originated winner — so the
+    /// peer pushes a label we hold no ILM for and the traffic black-holes.
     pub fn set_local_label(&mut self, prefix: P, label: Option<u32>) -> bool {
+        fn want_for(rib: &BgpRib, label: Option<u32>) -> Option<u32> {
+            if rib.typ == BgpRibType::Originated {
+                None
+            } else {
+                label
+            }
+        }
         let mut changed = false;
         if let Some(cands) = self.0.get_mut(&prefix) {
             for rib in cands.iter_mut() {
-                if rib.local_label != label {
-                    rib.local_label = label;
+                let want = want_for(rib, label);
+                if rib.local_label != want {
+                    rib.local_label = want;
                     changed = true;
                 }
             }
         }
-        if let Some(selected) = self.1.get_mut(&prefix)
-            && selected.local_label != label
-        {
-            selected.local_label = label;
-            changed = true;
+        if let Some(selected) = self.1.get_mut(&prefix) {
+            let want = want_for(selected, label);
+            if selected.local_label != want {
+                selected.local_label = want;
+                changed = true;
+            }
         }
         changed
     }
@@ -7775,13 +7854,18 @@ pub fn route_labelv4_update(
             rib.tag = decision.tag;
             nht_track_received(bgp, &mut rib, dep.clone());
             // Allocate a per-prefix local label so re-advertising with
-            // next-hop-self forwards via a swap ILM. `None`
-            // when no dynamic block is granted yet — advertise the
-            // received label until then.
-            rib.local_label = bgp
-                .shard
-                .labels
-                .label_lu_v4(bgp.central_label_alloc.as_deref_mut(), lu.nlri.prefix);
+            // next-hop-self forwards via a swap ILM. `None` when no
+            // dynamic block is granted yet — advertise the received label
+            // until then — and always `None` unless some `label-v4` peer
+            // is sent next-hop-self (`lu_v4_transit`): a reflector passes
+            // the received label through and must not park a dead ILM.
+            rib.local_label = if bgp.shard.lu_v4_transit {
+                bgp.shard
+                    .labels
+                    .label_lu_v4(bgp.central_label_alloc.as_deref_mut(), lu.nlri.prefix)
+            } else {
+                None
+            };
             let (replaced, selected, _next_id) = bgp.shard.update_v4lu(lu.nlri.prefix, rib);
             (replaced, selected)
         }
@@ -7898,10 +7982,14 @@ pub fn route_labelv6_update(
             rib.weight = decision.weight;
             rib.tag = decision.tag;
             nht_track_received(bgp, &mut rib, dep.clone());
-            rib.local_label = bgp
-                .shard
-                .labels
-                .label_lu_v6(bgp.central_label_alloc.as_deref_mut(), lu.nlri.prefix);
+            // Transit-gated like the v4 path (`lu_v6_transit`).
+            rib.local_label = if bgp.shard.lu_v6_transit {
+                bgp.shard
+                    .labels
+                    .label_lu_v6(bgp.central_label_alloc.as_deref_mut(), lu.nlri.prefix)
+            } else {
+                None
+            };
             let (replaced, selected, _next_id) = bgp.shard.update_v6lu(lu.nlri.prefix, rib);
             (replaced, selected)
         }
@@ -13493,7 +13581,16 @@ trait LabeledAfi {
     type Nlri;
     const AFI: Afi;
 
-    fn adj_out_add(peer: &mut Peer, prefix: Self::Prefix, rib: BgpRib);
+    /// Record `rib` as the outbound path for `prefix` and return the path
+    /// it replaced (non-AddPath), so the caller can skip re-sending an
+    /// UPDATE identical to the one already advertised. `add_path` keeps
+    /// every path-id as a distinct row instead of replacing.
+    fn adj_out_record(
+        peer: &mut Peer,
+        prefix: Self::Prefix,
+        rib: BgpRib,
+        add_path: bool,
+    ) -> Option<BgpRib>;
     fn adj_out_contains(peer: &Peer, prefix: &Self::Prefix) -> bool;
     fn adj_out_remove(peer: &mut Peer, prefix: Self::Prefix, id: u32);
     fn adj_out_ids(peer: &Peer, prefix: &Self::Prefix) -> Vec<u32>;
@@ -13526,8 +13623,13 @@ impl LabeledAfi for LabeledV4 {
     type Nlri = Ipv4Nlri;
     const AFI: Afi = Afi::Ip;
 
-    fn adj_out_add(peer: &mut Peer, prefix: Ipv4Net, rib: BgpRib) {
-        peer.adj_out.v4lu.add(prefix, rib);
+    fn adj_out_record(
+        peer: &mut Peer,
+        prefix: Ipv4Net,
+        rib: BgpRib,
+        add_path: bool,
+    ) -> Option<BgpRib> {
+        peer.adj_out.v4lu.record_out(prefix, rib, add_path)
     }
     fn adj_out_contains(peer: &Peer, prefix: &Ipv4Net) -> bool {
         peer.adj_out.v4lu.0.contains_key(prefix)
@@ -13591,8 +13693,13 @@ impl LabeledAfi for LabeledV6 {
     type Nlri = Ipv6Nlri;
     const AFI: Afi = Afi::Ip6;
 
-    fn adj_out_add(peer: &mut Peer, prefix: Ipv6Net, rib: BgpRib) {
-        peer.adj_out.v6lu.add(prefix, rib);
+    fn adj_out_record(
+        peer: &mut Peer,
+        prefix: Ipv6Net,
+        rib: BgpRib,
+        add_path: bool,
+    ) -> Option<BgpRib> {
+        peer.adj_out.v6lu.record_out(prefix, rib, add_path)
     }
     fn adj_out_contains(peer: &Peer, prefix: &Ipv6Net) -> bool {
         peer.adj_out.v6lu.0.contains_key(prefix)
@@ -13655,6 +13762,29 @@ impl LabeledAfi for LabeledV6 {
 /// to actual recipients through the per-AF Adj-RIB-Out); AddPath members
 /// get every candidate path-id, with the same diff-based withdraw of the
 /// path-ids that fell out. Immediate per-peer send — no update-group cache.
+/// Whether two Loc-RIB winners produce an identical labeled-unicast
+/// advertisement on the wire. Out-policy and next-hop-self are a
+/// deterministic function of the (peer, best), so an unchanged best
+/// yields an unchanged UPDATE. The compared fields are every render input
+/// `route_update_labelv4` reads from the winner. `attr` carries the path
+/// attributes, the received next-hop, and any inherited cluster-list or
+/// originator-id. `label` and `local_label` are the received and locally
+/// minted labels. `typ` drives the next-hop-self and iBGP-attribute
+/// decisions. `router_id` is the reflected ORIGINATOR_ID a route reflector
+/// stamps on an iBGP path that carries none: without it, a best-path flip
+/// to a different iBGP source with identical attributes and labels would
+/// be suppressed and clients would keep the stale originator. Every other
+/// render input is a constant (the local address, this router's cluster
+/// id) or the peer's own config, unchanged across the re-advertise this
+/// dedup guards.
+fn same_advertised(a: &BgpRib, b: &BgpRib) -> bool {
+    a.typ == b.typ
+        && a.label == b.label
+        && a.local_label == b.local_label
+        && a.router_id == b.router_id
+        && a.attr == b.attr
+}
+
 fn route_advertise_labeled<A: LabeledAfi>(
     prefix: A::Prefix,
     selected: &[BgpRib],
@@ -13690,11 +13820,19 @@ fn route_advertise_labeled<A: LabeledAfi>(
 
         match to_advertise {
             Some((nlri, attr, nhop, label, best)) => {
-                A::adj_out_add(peer, prefix, best);
-                let mut update = peer.update_packet();
-                update.bgp_attr = Some(attr);
-                update.mp_update = Some(A::reach(nhop, label, nlri));
-                peer.send_update(update);
+                // Adj-RIB-Out dedup: a received UPDATE re-triggers this
+                // advertise even when the best path is unchanged. Without
+                // deduping, two routers that both originate the same prefix
+                // ping-pong identical UPDATEs forever (each re-advertise
+                // re-triggers the peer's). Skip the send when the winner
+                // matches what the peer already holds.
+                let prev = A::adj_out_record(peer, prefix, best.clone(), false);
+                if prev.as_ref().is_none_or(|p| !same_advertised(p, &best)) {
+                    let mut update = peer.update_packet();
+                    update.bgp_attr = Some(attr);
+                    update.mp_update = Some(A::reach(nhop, label, nlri));
+                    peer.send_update(update);
+                }
             }
             None => {
                 if A::adj_out_contains(peer, &prefix) {
@@ -13746,7 +13884,7 @@ fn route_advertise_labeled<A: LabeledAfi>(
             update.bgp_attr = Some(decision.attr);
             update.mp_update = Some(A::reach(nhop, label, nlri));
             peer.send_update(update);
-            A::adj_out_add(peer, prefix, cand.clone());
+            A::adj_out_record(peer, prefix, cand.clone(), true);
             newly.insert(cand.local_id);
         }
         for id in was {
@@ -26073,6 +26211,37 @@ mod rfc4456_reflect_stamp_tests {
         }};
     }
 
+    /// A best-path switch between iBGP sources can preserve every received
+    /// attribute and label while changing the ORIGINATOR_ID we synthesize.
+    /// Dedup must allow that changed reflection to reach the client.
+    #[tokio::test]
+    async fn lu_dedup_preserves_changed_originator() {
+        with_top!(top, {
+            let mut top = top;
+            let mut peer = client_peer();
+            let prefix = "10.9.0.0/24".parse().unwrap();
+            let mut first = ibgp_rib(&base_attr());
+            first.label = Some(bgp_packet::Label::new(100, 0, true));
+            let mut second = first.clone();
+            second.ident = 3;
+            second.router_id = Ipv4Addr::new(3, 3, 3, 3);
+
+            let (_, old_attrs, _, _) =
+                route_update_labelv4(&mut peer, &prefix, &first, &mut top, false).unwrap();
+            let (_, new_attrs, _, _) =
+                route_update_labelv4(&mut peer, &prefix, &second, &mut top, false).unwrap();
+            assert_eq!(old_attrs.originator_id, Some(OriginatorId::new(SOURCE_RID)));
+            assert_eq!(
+                new_attrs.originator_id,
+                Some(OriginatorId::new(second.router_id))
+            );
+            assert!(
+                !same_advertised(&first, &second),
+                "different on-wire ORIGINATOR_ID must not be suppressed"
+            );
+        });
+    }
+
     /// RFC 4456 §8: a reflected route must carry ORIGINATOR_ID (set by
     /// the first reflector, preserved thereafter) and our cluster id
     /// prepended to CLUSTER_LIST. The MUP path reflected with neither.
@@ -26329,5 +26498,81 @@ mod route_server_tests {
             got.to_string().contains("65000"),
             "real AS prepended: {got}"
         );
+    }
+
+    /// `same_advertised` is the labeled-unicast Adj-RIB-Out dedup predicate:
+    /// an unchanged winner must read as a duplicate (suppress the re-send
+    /// that would otherwise ping-pong between two originators of one
+    /// prefix), while any change that alters the wire must read as new.
+    #[test]
+    fn same_advertised_suppresses_only_identical_winners() {
+        use bgp_packet::Label;
+        use std::net::Ipv4Addr;
+        let attr = BgpAttr::default();
+        let mk = |typ, label: Option<Label>, llabel: Option<u32>| {
+            let mut r = BgpRib::new(
+                1,
+                Ipv4Addr::UNSPECIFIED,
+                typ,
+                0,
+                0,
+                &attr,
+                label,
+                None,
+                false,
+            );
+            r.local_label = llabel;
+            r
+        };
+        let base = mk(BgpRibType::Originated, Some(Label::new(3, 0, true)), None);
+
+        // Identical winner: a duplicate advertisement, suppress it.
+        assert!(same_advertised(
+            &base,
+            &mk(BgpRibType::Originated, Some(Label::new(3, 0, true)), None)
+        ));
+        // A different winning source changes the reflected ORIGINATOR_ID
+        // (synthesized from the winner's router-id) even when attributes
+        // and labels are identical — a real on-wire change.
+        let mut other_source = mk(BgpRibType::Originated, Some(Label::new(3, 0, true)), None);
+        other_source.router_id = Ipv4Addr::new(9, 9, 9, 9);
+        assert!(!same_advertised(&base, &other_source));
+        // A minted transit local label (transit flip) changes the wire.
+        assert!(!same_advertised(
+            &base,
+            &mk(
+                BgpRibType::Originated,
+                Some(Label::new(3, 0, true)),
+                Some(16)
+            )
+        ));
+        // A different received label changes the wire.
+        assert!(!same_advertised(
+            &base,
+            &mk(BgpRibType::Originated, Some(Label::new(100, 0, true)), None)
+        ));
+        // Same attrs and labels but a different origin type flips the
+        // next-hop-self decision, so the next-hop on the wire differs.
+        assert!(!same_advertised(
+            &base,
+            &mk(BgpRibType::IBGP, Some(Label::new(3, 0, true)), None)
+        ));
+        // A different path-attribute set (MED here) changes the wire.
+        let attr2 = BgpAttr {
+            med: Some(bgp_packet::Med { med: 50 }),
+            ..Default::default()
+        };
+        let with_med = BgpRib::new(
+            1,
+            Ipv4Addr::UNSPECIFIED,
+            BgpRibType::Originated,
+            0,
+            0,
+            &attr2,
+            Some(Label::new(3, 0, true)),
+            None,
+            false,
+        );
+        assert!(!same_advertised(&base, &with_med));
     }
 }

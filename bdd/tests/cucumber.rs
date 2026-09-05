@@ -1350,6 +1350,43 @@ async fn poll_bgp_route_presence(scoped: &str, prefix: &str, want_present: bool)
     (false, last)
 }
 
+/// Assert the mixed-candidate precondition before transit reconciliation;
+/// merely finding the prefix would also pass with only an originated row.
+#[then(
+    expr = "labeled-unicast prefix {string} in namespace {string} should eventually have {int} paths"
+)]
+async fn labeled_unicast_path_count(
+    world: &mut World,
+    prefix: String,
+    namespace: String,
+    expected: usize,
+) {
+    let scoped = world.ns(&namespace);
+    let mut last = String::new();
+    for attempt in 0..30 {
+        last = netns::exec_in_netns(
+            &scoped,
+            "vtyctl",
+            &["show", "-j", "show bgp labeled-unicast"],
+        )
+        .await
+        .expect("Failed to get labeled-unicast routes");
+        let routes: Value = serde_json::from_str(&last).expect("Invalid LU route JSON");
+        let rows = routes.as_array().expect("Expected LU route array");
+        let count = rows
+            .iter()
+            .filter(|row| row.get("prefix").and_then(Value::as_str) == Some(prefix.as_str()))
+            .count();
+        if count == expected {
+            return;
+        }
+        if attempt < 29 {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    }
+    panic!("LU prefix {prefix} in {scoped} did not have {expected} paths; last output:\n{last}");
+}
+
 #[then(expr = "BGP route in {string} should eventually have {string}")]
 async fn verify_bgp_route_eventually(
     world: &mut World,
