@@ -1,0 +1,20 @@
+# c2 (AS 64512 reflector client): originates its loopback into IPv4
+# labeled-unicast toward the reflector and learns the other client's.
+router:
+  bgp:
+    global:
+      as: 64512
+      router-id: 192.168.0.3
+    neighbor:
+    - remote-address: 192.168.0.1
+      afi-safi:
+      - name: label-v4
+        enabled: true
+      - name: ipv4
+        enabled: false
+      enabled: true
+      remote-as: 64512
+    afi-safi:
+    - name: label-v4
+      network:
+      - prefix: 10.2.0.1/32

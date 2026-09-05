@@ -1,0 +1,34 @@
+# c1 is a static iBGP source. c2 is accepted dynamically through group LU
+# and inherits next-hop-self: its arrival must activate transit labels
+# and swap ILMs without requiring another configuration commit.
+router:
+  bgp:
+    global:
+      as: 64512
+      router-id: 192.168.0.1
+    neighbor:
+    - remote-address: 192.168.0.2
+      afi-safi:
+      - name: label-v4
+        enabled: true
+      - name: ipv4
+        enabled: false
+      enabled: true
+      remote-as: 64512
+      route-reflector:
+        client: true
+    neighbor-group:
+    - name: LU
+      remote-as: 64512
+      route-reflector:
+        client: true
+      afi-safi:
+      - name: label-v4
+        enabled: true
+        next-hop-self: true
+      - name: ipv4
+        enabled: false
+    dynamic-neighbors:
+      listen-range:
+      - prefix: 192.168.0.3/32
+        neighbor-group: LU

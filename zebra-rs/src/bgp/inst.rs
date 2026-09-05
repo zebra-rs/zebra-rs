@@ -2736,6 +2736,10 @@ impl Bgp {
         super::update_group::detach(&mut self.update_groups, &mut self.peers, ident);
         self.peers.remove(&addr);
         self.dynamic_peer_count = self.dynamic_peer_count.saturating_sub(1);
+        // Losing this peer may drop the last next-hop-self holder for a
+        // VPNv4 / Labeled-Unicast family, so re-derive the transit flags
+        // and release any now-unneeded local labels and swap ILMs.
+        self.reconcile_transit_labels(false);
     }
 
     /// Candidates for the `bgp:neighbor` dynamic completion (`show ip
