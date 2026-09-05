@@ -77,6 +77,41 @@ Feature: A labeled-unicast route reflector programs no MPLS transit label
     Then mpls ilm in namespace "rr" should be empty
     And show command "show ip route" in namespace "c2" should eventually contain "192.168.0.2"
 
+  Scenario: A locally originated winner also has a received candidate
+    Given the test topology exists
+    When I create dummy interface "lo3" with address "10.3.0.1/32" in namespace "rr"
+    And I create dummy interface "lo3" with address "10.3.0.1/32" in namespace "c1"
+    And I apply command "set router bgp afi-safi label-v4 network 10.3.0.1/32" in namespace "rr"
+    And I apply command "set router bgp afi-safi label-v4 network 10.3.0.1/32" in namespace "c1"
+    # Both candidates must exist before reconciliation. The locally
+    # originated path wins on weight and advertises implicit-null (3).
+    Then labeled-unicast prefix "10.3.0.1/32" in namespace "rr" should eventually have 2 paths
+    And kernel route "10.3.0.1/32" in namespace "c2" should eventually contain "via 192.168.0.1"
+    And kernel route "10.3.0.1/32" in namespace "c2" should eventually not contain "encap mpls"
+    And ping from "c2" to "10.3.0.1" should succeed
+
+  Scenario: Transit reconciliation preserves the locally originated winner's implicit-null label
+    Given the test topology exists
+    When I apply command "set router bgp neighbor 192.168.0.3 afi-safi label-v4 next-hop-self true" in namespace "rr"
+    And I wait 5 seconds for BGP to operate
+    Then mpls ilm in namespace "rr" should not be empty
+    And labeled-unicast prefix "10.3.0.1/32" in namespace "rr" should eventually have 2 paths
+    # A per-prefix stamp must not give the originated winner a transit
+    # label: no swap ILM is installed for an originated path. On the
+    # buggy daemon c2 instead pushes an unbound label and ping fails.
+    And kernel route "10.3.0.1/32" in namespace "c2" should eventually contain "via 192.168.0.1"
+    And ping from "c2" to "10.3.0.1" should succeed
+    And kernel route "10.3.0.1/32" in namespace "c2" should eventually not contain "encap mpls"
+
+  Scenario: Removing transit restores forwarding for the mixed prefix
+    Given the test topology exists
+    When I apply command "delete router bgp neighbor 192.168.0.3 afi-safi label-v4 next-hop-self" in namespace "rr"
+    And I wait 5 seconds for BGP to operate
+    Then mpls ilm in namespace "rr" should be empty
+    And kernel route "10.3.0.1/32" in namespace "c2" should eventually contain "via 192.168.0.1"
+    And kernel route "10.3.0.1/32" in namespace "c2" should eventually not contain "encap mpls"
+    And ping from "c2" to "10.3.0.1" should succeed
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "rr"
