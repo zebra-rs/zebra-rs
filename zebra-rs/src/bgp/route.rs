@@ -13765,11 +13765,24 @@ impl LabeledAfi for LabeledV6 {
 /// Whether two Loc-RIB winners produce an identical labeled-unicast
 /// advertisement on the wire. Out-policy and next-hop-self are a
 /// deterministic function of the (peer, best), so an unchanged best
-/// yields an unchanged UPDATE; comparing the path attributes, the
-/// received and local labels, and the origin type (which drives the
-/// next-hop-self decision) is sufficient to suppress a duplicate send.
+/// yields an unchanged UPDATE. The compared fields are every render input
+/// `route_update_labelv4` reads from the winner. `attr` carries the path
+/// attributes, the received next-hop, and any inherited cluster-list or
+/// originator-id. `label` and `local_label` are the received and locally
+/// minted labels. `typ` drives the next-hop-self and iBGP-attribute
+/// decisions. `router_id` is the reflected ORIGINATOR_ID a route reflector
+/// stamps on an iBGP path that carries none: without it, a best-path flip
+/// to a different iBGP source with identical attributes and labels would
+/// be suppressed and clients would keep the stale originator. Every other
+/// render input is a constant (the local address, this router's cluster
+/// id) or the peer's own config, unchanged across the re-advertise this
+/// dedup guards.
 fn same_advertised(a: &BgpRib, b: &BgpRib) -> bool {
-    a.typ == b.typ && a.label == b.label && a.local_label == b.local_label && a.attr == b.attr
+    a.typ == b.typ
+        && a.label == b.label
+        && a.local_label == b.local_label
+        && a.router_id == b.router_id
+        && a.attr == b.attr
 }
 
 fn route_advertise_labeled<A: LabeledAfi>(
@@ -26198,6 +26211,37 @@ mod rfc4456_reflect_stamp_tests {
         }};
     }
 
+    /// A best-path switch between iBGP sources can preserve every received
+    /// attribute and label while changing the ORIGINATOR_ID we synthesize.
+    /// Dedup must allow that changed reflection to reach the client.
+    #[tokio::test]
+    async fn lu_dedup_preserves_changed_originator() {
+        with_top!(top, {
+            let mut top = top;
+            let mut peer = client_peer();
+            let prefix = "10.9.0.0/24".parse().unwrap();
+            let mut first = ibgp_rib(&base_attr());
+            first.label = Some(bgp_packet::Label::new(100, 0, true));
+            let mut second = first.clone();
+            second.ident = 3;
+            second.router_id = Ipv4Addr::new(3, 3, 3, 3);
+
+            let (_, old_attrs, _, _) =
+                route_update_labelv4(&mut peer, &prefix, &first, &mut top, false).unwrap();
+            let (_, new_attrs, _, _) =
+                route_update_labelv4(&mut peer, &prefix, &second, &mut top, false).unwrap();
+            assert_eq!(old_attrs.originator_id, Some(OriginatorId::new(SOURCE_RID)));
+            assert_eq!(
+                new_attrs.originator_id,
+                Some(OriginatorId::new(second.router_id))
+            );
+            assert!(
+                !same_advertised(&first, &second),
+                "different on-wire ORIGINATOR_ID must not be suppressed"
+            );
+        });
+    }
+
     /// RFC 4456 §8: a reflected route must carry ORIGINATOR_ID (set by
     /// the first reflector, preserved thereafter) and our cluster id
     /// prepended to CLUSTER_LIST. The MUP path reflected with neither.
@@ -26487,6 +26531,12 @@ mod route_server_tests {
             &base,
             &mk(BgpRibType::Originated, Some(Label::new(3, 0, true)), None)
         ));
+        // A different winning source changes the reflected ORIGINATOR_ID
+        // (synthesized from the winner's router-id) even when attributes
+        // and labels are identical — a real on-wire change.
+        let mut other_source = mk(BgpRibType::Originated, Some(Label::new(3, 0, true)), None);
+        other_source.router_id = Ipv4Addr::new(9, 9, 9, 9);
+        assert!(!same_advertised(&base, &other_source));
         // A minted transit local label (transit flip) changes the wire.
         assert!(!same_advertised(
             &base,
