@@ -269,28 +269,22 @@ impl UpdatePacket {
         Some(buf)
     }
 
-    /// Emit the BGP UPDATE that carries an `MP_REACH_NLRI` for EVPN
+    /// Emit one BGP UPDATE carrying an `MP_REACH_NLRI` for EVPN
     /// (AFI=25 / SAFI=70). Mirrors `pop_vpnv4`'s framing — empty IPv4
-    /// withdraw, attributes, MP_REACH — but uses the un-paginated
-    /// `evpn_attr_emit` helper from `mp_reach`. All NLRIs in the
-    /// `MpReachAttr::Evpn::updates` vector are emitted in a single
-    /// packet; pagination across multiple UPDATEs (e.g. when a
-    /// large RD's MAC table doesn't fit) is a follow-up.
+    /// withdraw, attributes, MP_REACH — and its pagination: as many
+    /// routes as fit within `max_packet_size` go into this packet and
+    /// the rest stay in `MpReachAttr::Evpn::updates` for the next call,
+    /// so callers loop until `None`.
     ///
-    /// Returns `None` when the packet has no EVPN payload to emit
-    /// (caller can stop iterating). Distinct from `pop_vpnv4` in
-    /// that it's idempotently single-shot — callers that want to
-    /// emit multiple UPDATEs should batch into separate
-    /// `UpdatePacket` instances.
+    /// Returns `None` when no EVPN payload is left, or when not even the
+    /// first route fits beside the path attributes (an empty MP_REACH is
+    /// never emitted).
     pub fn pop_evpn(&mut self) -> Option<BytesMut> {
-        let (snpa, nhop, updates) = match &self.mp_update {
-            Some(MpReachAttr::Evpn {
-                snpa,
-                nhop,
-                updates,
-            }) if !updates.is_empty() => (*snpa, *nhop, updates.clone()),
+        match &self.mp_update {
+            Some(MpReachAttr::Evpn { updates, .. }) if !updates.is_empty() => {}
             _ => return None,
-        };
+        }
+        let mp_update = self.mp_update.as_mut().unwrap();
 
         let mut buf = FixedBuf::new(self.max_packet_size);
         let header: BytesMut = self.header.clone().into();
@@ -306,19 +300,18 @@ impl UpdatePacket {
             bgp_attr.attr_emit_opt(buf.get_mut(), self.as4);
         }
 
-        super::attrs::mp_reach::evpn_attr_emit(snpa, &nhop, &updates, buf.get_mut());
+        // MP reach: as many routes as fit next to what the packet already
+        // holds; the rest stay queued for the next call.
+        let emitted = mp_update.attr_emit_mut(buf.get_mut(), self.max_packet_size);
+        if emitted == 0 {
+            return None;
+        }
 
         let attr_len: u16 = (buf.len() - attr_len_pos - 2) as u16;
         let _ = buf.put_u16_at(attr_len_pos, attr_len);
 
         let length: u16 = buf.len() as u16;
         let _ = buf.put_u16_at(16, length);
-
-        // Drain so a second call returns None — matches VPNv4's
-        // "consume once" semantics from the flush_vpnv4 callers.
-        if let Some(MpReachAttr::Evpn { updates, .. }) = self.mp_update.as_mut() {
-            updates.clear();
-        }
 
         Some(buf.get())
     }
@@ -417,9 +410,14 @@ impl UpdatePacket {
             bgp_attr.attr_emit_opt(buf.get_mut(), self.as4);
         }
 
-        // MP reach (dispatches to Vpnv6Reach::attr_emit_mut, which
-        // paginates the NLRI list across calls).
-        mp_update.attr_emit_mut(buf.get_mut(), self.max_packet_size);
+        // MP reach: as many NLRIs as fit next to what the packet already
+        // holds; the rest stay queued for the next call. Not even one
+        // fitting means the fixed preamble alone exceeds the budget —
+        // refuse to emit an empty MP_REACH, as `pop_ipv4_mp_reach` does.
+        let emitted = mp_update.attr_emit_mut(buf.get_mut(), self.max_packet_size);
+        if emitted == 0 {
+            return None;
+        }
 
         let attr_len: u16 = (buf.len() - attr_len_pos - 2) as u16;
         let _ = buf.put_u16_at(attr_len_pos, attr_len);
@@ -453,8 +451,14 @@ impl UpdatePacket {
             bgp_attr.attr_emit_opt(buf.get_mut(), self.as4);
         }
 
-        // MP reach.
-        mp_update.attr_emit_mut(buf.get_mut(), self.max_packet_size);
+        // MP reach: as many NLRIs as fit next to what the packet already
+        // holds; the rest stay queued for the next call. Not even one
+        // fitting means the fixed preamble alone exceeds the budget —
+        // refuse to emit an empty MP_REACH, as `pop_ipv4_mp_reach` does.
+        let emitted = mp_update.attr_emit_mut(buf.get_mut(), self.max_packet_size);
+        if emitted == 0 {
+            return None;
+        }
 
         // Fill in attr length.
         let attr_len: u16 = (buf.len() - attr_len_pos - 2) as u16;
@@ -946,5 +950,279 @@ mod tests {
                 .pop_ipv4_mp_reach(Ipv4MpReachNextHop::LinkLocal(ll))
                 .is_none()
         );
+    }
+}
+
+/// Pagination of the MP_REACH families whose flush batches one attribute
+/// group per `UpdatePacket` (VPNv4, VPNv6, EVPN): every emitted packet must
+/// stay within `max_packet_size`, and every queued NLRI must come out
+/// exactly once.
+#[cfg(test)]
+mod mp_reach_pagination_tests {
+    use super::*;
+    use crate::{
+        As4Path, BgpNexthop, Community, EvpnMulticast, EvpnRoute, Ipv6Nlri, Label,
+        RouteDistinguisher, Vpnv4Nexthop, Vpnv4Nlri, Vpnv4Reach, Vpnv6Nexthop, Vpnv6Nlri,
+        Vpnv6Reach,
+    };
+    use ipnet::{Ipv4Net, Ipv6Net};
+    use std::collections::BTreeSet;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use std::str::FromStr;
+
+    fn rd() -> RouteDistinguisher {
+        RouteDistinguisher::from_str("65001:1").unwrap()
+    }
+
+    /// A reflected route's ordinary attributes: AS_PATH plus a community.
+    fn attrs(nexthop: BgpNexthop) -> BgpAttr {
+        BgpAttr {
+            aspath: Some(As4Path::from_str("65001 65002 65003").unwrap()),
+            com: Some(Community::from_str("65001:100").unwrap()),
+            nexthop: Some(nexthop),
+            ..Default::default()
+        }
+    }
+
+    fn vpnv4_nlri(i: u32) -> Vpnv4Nlri {
+        Vpnv4Nlri {
+            label: Label::new(100, 0, true),
+            rd: rd(),
+            nlri: Ipv4Nlri {
+                id: 0,
+                prefix: Ipv4Net::new(Ipv4Addr::from(0x0A00_0000u32 + (i << 8)), 24).unwrap(),
+            },
+        }
+    }
+
+    /// One VPNv4 attribute group of `n` /24s, as `Peer::flush_vpnv4` builds it.
+    fn vpnv4_group(n: u32, max: usize) -> UpdatePacket {
+        let nhop = Vpnv4Nexthop {
+            rd: rd(),
+            nhop: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+        };
+        let mut update = UpdatePacket::with_max_packet_size(max);
+        update.bgp_attr = Some(attrs(BgpNexthop::Vpnv4(nhop.clone())));
+        update.mp_update = Some(MpReachAttr::Vpnv4(Vpnv4Reach {
+            snpa: 0,
+            nhop,
+            updates: (0..n).map(vpnv4_nlri).collect(),
+        }));
+        update
+    }
+
+    fn vpnv6_nlri(i: u32) -> Vpnv6Nlri {
+        let addr =
+            Ipv6Addr::from(0x2001_0DB8_0000_0000_0000_0000_0000_0000u128 | ((i as u128) << 64));
+        Vpnv6Nlri {
+            label: Label::new(100, 0, true),
+            rd: rd(),
+            nlri: Ipv6Nlri {
+                id: 0,
+                prefix: Ipv6Net::new(addr, 64).unwrap(),
+            },
+        }
+    }
+
+    /// One VPNv6 attribute group of `n` /64s, as `Peer::flush_vpnv6` builds it.
+    fn vpnv6_group(n: u32, max: usize) -> UpdatePacket {
+        let nhop = Vpnv6Nexthop {
+            rd: rd(),
+            nhop: "2001:db8::1".parse().unwrap(),
+        };
+        let mut update = UpdatePacket::with_max_packet_size(max);
+        update.bgp_attr = Some(attrs(BgpNexthop::Vpnv6(nhop.clone())));
+        update.mp_update = Some(MpReachAttr::Vpnv6(Vpnv6Reach {
+            snpa: 0,
+            nhop,
+            updates: (0..n).map(vpnv6_nlri).collect(),
+        }));
+        update
+    }
+
+    /// Type-3 Inclusive Multicast route from originator `10.0.0.0 + i`.
+    fn evpn_route(i: u32) -> EvpnRoute {
+        EvpnRoute::Multicast(EvpnMulticast {
+            id: 0,
+            rd: rd(),
+            ether_tag: 0,
+            addr: IpAddr::V4(Ipv4Addr::from(0x0A00_0000u32 + i)),
+        })
+    }
+
+    /// One EVPN attribute group of `n` routes, as `Peer::flush_evpn` builds it.
+    fn evpn_group(n: u32, max: usize) -> UpdatePacket {
+        let nhop = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+        let mut update = UpdatePacket::with_max_packet_size(max);
+        update.bgp_attr = Some(attrs(BgpNexthop::Evpn(nhop)));
+        update.mp_update = Some(MpReachAttr::Evpn {
+            snpa: 0,
+            nhop,
+            updates: (0..n).map(evpn_route).collect(),
+        });
+        update
+    }
+
+    /// Pop packets until the emitter runs dry, checking that each one fits
+    /// `max`, declares its true length, and parses back; returns the parsed
+    /// packets in emission order.
+    fn drain(
+        update: &mut UpdatePacket,
+        pop: fn(&mut UpdatePacket) -> Option<BytesMut>,
+        max: usize,
+    ) -> Vec<UpdatePacket> {
+        let mut parsed = vec![];
+        while let Some(bytes) = pop(update) {
+            assert!(
+                bytes.len() <= max,
+                "packet of {} octets exceeds the {} octet budget",
+                bytes.len(),
+                max
+            );
+            let declared = u16::from_be_bytes([bytes[16], bytes[17]]) as usize;
+            assert_eq!(declared, bytes.len(), "header Length matches the body");
+            let (_, packet) = UpdatePacket::parse_packet(&bytes, true, None)
+                .expect("an emitted packet must parse back");
+            parsed.push(packet);
+        }
+        parsed
+    }
+
+    fn vpnv4_prefixes(packets: &[UpdatePacket]) -> Vec<Ipv4Net> {
+        packets
+            .iter()
+            .flat_map(|p| -> Vec<Ipv4Net> {
+                match &p.mp_update {
+                    Some(MpReachAttr::Vpnv4(r)) => {
+                        r.updates.iter().map(|u| u.nlri.prefix).collect()
+                    }
+                    other => panic!("expected a VPNv4 MP_REACH, got {:?}", other),
+                }
+            })
+            .collect()
+    }
+
+    fn vpnv6_prefixes(packets: &[UpdatePacket]) -> Vec<Ipv6Net> {
+        packets
+            .iter()
+            .flat_map(|p| -> Vec<Ipv6Net> {
+                match &p.mp_update {
+                    Some(MpReachAttr::Vpnv6(r)) => {
+                        r.updates.iter().map(|u| u.nlri.prefix).collect()
+                    }
+                    other => panic!("expected a VPNv6 MP_REACH, got {:?}", other),
+                }
+            })
+            .collect()
+    }
+
+    fn evpn_routes(packets: &[UpdatePacket]) -> Vec<EvpnRoute> {
+        packets
+            .iter()
+            .flat_map(|p| -> Vec<EvpnRoute> {
+                match &p.mp_update {
+                    Some(MpReachAttr::Evpn { updates, .. }) => updates.clone(),
+                    other => panic!("expected an EVPN MP_REACH, got {:?}", other),
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn vpnv4_group_shares_one_packet() {
+        let mut update = vpnv4_group(3, BGP_PACKET_LEN);
+        let packets = drain(&mut update, UpdatePacket::pop_vpnv4, BGP_PACKET_LEN);
+        assert_eq!(
+            packets.len(),
+            1,
+            "three same-attribute NLRIs ride one UPDATE"
+        );
+        assert_eq!(vpnv4_prefixes(&packets).len(), 3);
+    }
+
+    /// A full-table sized group used to spill past 4096 octets by the
+    /// header, path attributes and MP_REACH header, because the budget was
+    /// checked against the attribute value alone.
+    #[test]
+    fn vpnv4_group_paginates_within_4096() {
+        let mut update = vpnv4_group(1000, BGP_PACKET_LEN);
+        let packets = drain(&mut update, UpdatePacket::pop_vpnv4, BGP_PACKET_LEN);
+        assert!(
+            packets.len() > 1,
+            "1000 VPNv4 NLRIs need more than one packet"
+        );
+        let got: BTreeSet<Ipv4Net> = vpnv4_prefixes(&packets).into_iter().collect();
+        let want: BTreeSet<Ipv4Net> = (0..1000).map(|i| vpnv4_nlri(i).nlri.prefix).collect();
+        assert_eq!(got.len(), 1000, "no NLRI is emitted twice");
+        assert_eq!(got, want, "every NLRI is emitted");
+    }
+
+    /// With RFC 8654 extended messages the same overrun would have wrapped
+    /// the 2-octet Length field; the budget must hold at 65535 as well.
+    #[test]
+    fn vpnv4_group_paginates_within_extended_max() {
+        let mut update = vpnv4_group(5000, BGP_EXTENDED_PACKET_LEN);
+        let packets = drain(
+            &mut update,
+            UpdatePacket::pop_vpnv4,
+            BGP_EXTENDED_PACKET_LEN,
+        );
+        assert!(
+            packets.len() > 1,
+            "5000 VPNv4 NLRIs exceed one extended message"
+        );
+        assert_eq!(vpnv4_prefixes(&packets).len(), 5000);
+    }
+
+    /// A budget too small for even one NLRI beside the attributes yields
+    /// `None` instead of an empty MP_REACH, so the flush loop terminates.
+    #[test]
+    fn vpnv4_returns_none_when_first_nlri_does_not_fit() {
+        let mut update = vpnv4_group(1, 40);
+        assert!(update.pop_vpnv4().is_none());
+    }
+
+    #[test]
+    fn vpnv6_group_paginates_within_4096() {
+        let mut update = vpnv6_group(1000, BGP_PACKET_LEN);
+        let packets = drain(&mut update, UpdatePacket::pop_vpnv6, BGP_PACKET_LEN);
+        assert!(
+            packets.len() > 1,
+            "1000 VPNv6 NLRIs need more than one packet"
+        );
+        let got: BTreeSet<Ipv6Net> = vpnv6_prefixes(&packets).into_iter().collect();
+        let want: BTreeSet<Ipv6Net> = (0..1000).map(|i| vpnv6_nlri(i).nlri.prefix).collect();
+        assert_eq!(got.len(), 1000, "no NLRI is emitted twice");
+        assert_eq!(got, want, "every NLRI is emitted");
+    }
+
+    #[test]
+    fn vpnv6_returns_none_when_first_nlri_does_not_fit() {
+        let mut update = vpnv6_group(1, 40);
+        assert!(update.pop_vpnv6().is_none());
+    }
+
+    /// EVPN used to emit a whole attribute group in one packet regardless
+    /// of size; it now paginates like VPNv4 and keeps the route order.
+    #[test]
+    fn evpn_group_paginates_within_4096_in_order() {
+        let mut update = evpn_group(1000, BGP_PACKET_LEN);
+        let packets = drain(&mut update, UpdatePacket::pop_evpn, BGP_PACKET_LEN);
+        assert!(
+            packets.len() > 1,
+            "1000 EVPN routes need more than one packet"
+        );
+        let want: Vec<EvpnRoute> = (0..1000).map(evpn_route).collect();
+        assert_eq!(evpn_routes(&packets), want, "every route once, in order");
+        assert!(
+            update.pop_evpn().is_none(),
+            "nothing left after the last packet"
+        );
+    }
+
+    #[test]
+    fn evpn_returns_none_when_first_route_does_not_fit() {
+        let mut update = evpn_group(1, 40);
+        assert!(update.pop_evpn().is_none());
     }
 }
