@@ -11,6 +11,7 @@ use nom_derive::*;
 
 use crate::{Afi, AttrType, Label, ParseNlri, RouteDistinguisher, Safi, nlri_psize};
 
+use super::mp_reach::{MP_REACH_HEADER_LEN, put_mp_reach_attr};
 use super::{AttrEmitter, AttrFlags, Ipv6Nlri};
 
 #[derive(Debug, Clone)]
@@ -168,88 +169,67 @@ impl AttrEmitter for Vpnv6Reach {
 }
 
 impl Vpnv6Reach {
-    pub fn attr_emit_mut(&mut self, buf: &mut BytesMut, max_size: usize) {
-        let flags = self.attr_flags();
-        let attr_type = self.attr_type();
-        let emit_header = |buf: &mut BytesMut, len: usize, extended: bool| {
-            if extended {
-                buf.put_u8(flags.with_extended(true).into());
-                buf.put_u8(attr_type.into());
-                buf.put_u16(len as u16);
-            } else {
-                buf.put_u8(flags.into());
-                buf.put_u8(attr_type.into());
-                buf.put_u8(len as u8);
-            }
-        };
-
-        if let Some(len) = self.len() {
-            // Length is known.
-            let extended = len > 255;
-            emit_header(buf, len, extended);
-            self.emit_mut(buf, max_size);
-        } else {
-            // Buffer the attribute to determine its length.
-            let mut attr_buf = BytesMut::new();
-            self.emit_mut(&mut attr_buf, max_size);
-            let len = attr_buf.len();
-            let extended = len > 255;
-            emit_header(buf, len, extended);
-            buf.put(&attr_buf[..]);
+    /// Emit the MP_REACH_NLRI attribute into `buf` with as many NLRIs from
+    /// `updates` as fit in a packet of `max_packet_size` octets, and return
+    /// how many were emitted. See [`Vpnv4Reach::attr_emit_mut`] for the
+    /// budget rule; this is its VPNv6 twin.
+    pub fn attr_emit_mut(&mut self, buf: &mut BytesMut, max_packet_size: usize) -> usize {
+        let budget = max_packet_size.saturating_sub(buf.len() + MP_REACH_HEADER_LEN);
+        let mut value = BytesMut::new();
+        let emitted = self.emit_value(&mut value, budget);
+        if emitted == 0 {
+            return 0;
         }
+        put_mp_reach_attr(buf, &value);
+        emitted
     }
 
-    fn emit_mut(&mut self, buf: &mut BytesMut, max_size: usize) {
+    /// Write the attribute value (AFI/SAFI, next-hop, SNPA, NLRIs) into
+    /// `value`, stopping before the NLRI that would push it past `budget`
+    /// octets. Returns the number of NLRIs written.
+    fn emit_value(&mut self, value: &mut BytesMut, budget: usize) -> usize {
         // AFI/SAFI.
-        buf.put_u16(u16::from(Afi::Ip6));
-        buf.put_u8(u8::from(Safi::MplsVpn));
+        value.put_u16(u16::from(Afi::Ip6));
+        value.put_u8(u8::from(Safi::MplsVpn));
         // Nexthop
-        buf.put_u8(24); // Nexthop length.  RD(8)+IPv6 Nexthop(16);
+        value.put_u8(24); // Nexthop length.  RD(8)+IPv6 Nexthop(16);
         // Nexthop RD.
         let rd = [0u8; 8];
-        buf.put(&rd[..]);
+        value.put(&rd[..]);
         // Nexthop.
-        buf.put(&self.nhop.nhop.octets()[..]);
+        value.put(&self.nhop.nhop.octets()[..]);
         // SNPA
-        buf.put_u8(0);
+        value.put_u8(0);
 
-        // Prefix.
+        let mut emitted = 0;
         while let Some(update) = self.updates.pop() {
-            // Need to check remaining buffer size.
-            let mut nlri_len: usize = 0;
-            if update.nlri.id != 0 {
-                nlri_len += 4;
-            }
-            // Plen.
-            nlri_len += 1;
-            // Label.
-            nlri_len += 4;
-            // RD.
-            nlri_len += 8;
-            // Prefix.
-            nlri_len += nlri_psize(update.nlri.prefix.prefix_len());
-
-            if nlri_len + buf.len() > max_size {
+            // Exact wire size of this NLRI: optional 4-octet path-id,
+            // 1-octet length, 3-octet label, 8-octet RD, prefix octets.
+            let path_id_len = if update.nlri.id != 0 { 4 } else { 0 };
+            let nlri_len = path_id_len + 1 + 3 + 8 + nlri_psize(update.nlri.prefix.prefix_len());
+            if value.len() + nlri_len > budget {
                 self.updates.push(update);
-                return;
+                break;
             }
 
             // AddPath
             if update.nlri.id != 0 {
-                buf.put_u32(update.nlri.id);
+                value.put_u32(update.nlri.id);
             }
             // Plen
             let plen = update.nlri.prefix.prefix_len() + 88;
-            buf.put_u8(plen);
+            value.put_u8(plen);
             // Label
-            buf.put(&update.label.to_bytes()[..]);
+            value.put(&update.label.to_bytes()[..]);
             // RD
-            buf.put_u16(update.rd.typ as u16);
-            buf.put(&update.rd.val[..]);
+            value.put_u16(update.rd.typ as u16);
+            value.put(&update.rd.val[..]);
             // Prefix
             let plen = nlri_psize(update.nlri.prefix.prefix_len());
-            buf.put(&update.nlri.prefix.addr().octets()[0..plen]);
+            value.put(&update.nlri.prefix.addr().octets()[0..plen]);
+            emitted += 1;
         }
+        emitted
     }
 }
 

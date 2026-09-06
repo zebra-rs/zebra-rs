@@ -14038,10 +14038,9 @@ impl Peer {
         }
     }
 
-    /// Drain `cache_evpn` and emit one BGP UPDATE per attribute
-    /// group via `pop_evpn`. Pagination across multiple UPDATEs is a
-    /// follow-up; the encoder currently emits all NLRIs from a
-    /// single attr group in one packet.
+    /// Drain `cache_evpn` and emit the BGP UPDATEs for each attribute
+    /// group via `pop_evpn`, which paginates a group that does not fit
+    /// one packet across as many as it needs.
     pub fn flush_evpn(&mut self) {
         let packet_tx = self.packet_tx.clone();
         let max_size = self.max_packet_size();
@@ -14066,10 +14065,10 @@ impl Peer {
             });
             update.bgp_attr = Some((*attr).clone());
 
-            if let Some(bytes) = update.pop_evpn()
-                && let Some(ref tx) = packet_tx
-            {
-                let _ = tx.send(bytes);
+            while let Some(bytes) = update.pop_evpn() {
+                if let Some(ref tx) = packet_tx {
+                    let _ = tx.send(bytes);
+                }
             }
         }
         self.cache_evpn_rev.clear();

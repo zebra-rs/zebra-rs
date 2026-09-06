@@ -17,6 +17,32 @@ use crate::{
 
 use super::{AttrEmitter, RouteDistinguisher, Rtcv4Reach, Rtcv6Reach, Vpnv4Reach, Vpnv6Reach};
 
+/// Octets of an MP_REACH_NLRI attribute header in its extended-length form
+/// (flags, type, 2-octet length). The paginating emitters budget for this
+/// form; when the value ends up at 255 octets or less the short header is
+/// used and one octet of the budget goes unused.
+pub(crate) const MP_REACH_HEADER_LEN: usize = 4;
+
+/// Append a complete MP_REACH_NLRI path attribute (header + `value`) to
+/// `buf`, choosing the short or extended-length header by the value size.
+pub(crate) fn put_mp_reach_attr(buf: &mut BytesMut, value: &[u8]) {
+    let len = value.len();
+    let extended = len > 255;
+    let flags = if extended {
+        AttrFlags::new().with_optional(true).with_extended(true)
+    } else {
+        AttrFlags::new().with_optional(true)
+    };
+    buf.put_u8(flags.into());
+    buf.put_u8(AttrType::MpReachNlri.into());
+    if extended {
+        buf.put_u16(len as u16);
+    } else {
+        buf.put_u8(len as u8);
+    }
+    buf.put(value);
+}
+
 #[derive(Clone, Debug, NomBE)]
 pub struct MpReachHeader {
     pub afi: Afi,
@@ -164,17 +190,23 @@ impl MpReachAttr {
         }
     }
 
-    pub fn attr_emit_mut(&mut self, buf: &mut BytesMut, max_size: usize) {
+    /// Paginating twin of [`attr_emit`](Self::attr_emit) for the families
+    /// whose flush batches one attribute group per `UpdatePacket` (VPNv4,
+    /// VPNv6, EVPN). Emits as many NLRIs as fit in a packet of
+    /// `max_packet_size` octets given what `buf` already holds, leaves the
+    /// rest queued for the next call, and returns the number written. Writes
+    /// nothing and returns 0 when not even the first NLRI fits; families
+    /// without a paginating emitter also return 0.
+    pub fn attr_emit_mut(&mut self, buf: &mut BytesMut, max_packet_size: usize) -> usize {
         match self {
-            MpReachAttr::Vpnv4(attr) => {
-                attr.attr_emit_mut(buf, max_size);
-            }
-            MpReachAttr::Vpnv6(attr) => {
-                attr.attr_emit_mut(buf, max_size);
-            }
-            _ => {
-                //
-            }
+            MpReachAttr::Vpnv4(attr) => attr.attr_emit_mut(buf, max_packet_size),
+            MpReachAttr::Vpnv6(attr) => attr.attr_emit_mut(buf, max_packet_size),
+            MpReachAttr::Evpn {
+                snpa,
+                nhop,
+                updates,
+            } => evpn_attr_emit_mut(*snpa, nhop, updates, buf, max_packet_size),
+            _ => 0,
         }
     }
 }
@@ -862,8 +894,9 @@ pub(crate) fn ipv6_attr_emit(nhop: &IpAddr, updates: &[Ipv6Nlri], buf: &mut Byte
     buf.put(&value[..]);
 }
 
-pub(crate) fn evpn_attr_emit(_snpa: u8, nhop: &IpAddr, updates: &[EvpnRoute], buf: &mut BytesMut) {
-    let mut value = BytesMut::new();
+/// Write the EVPN MP_REACH_NLRI value preamble (AFI/SAFI, next-hop, SNPA)
+/// into `value`.
+fn evpn_value_preamble(nhop: &IpAddr, value: &mut BytesMut) {
     value.put_u16(u16::from(Afi::L2vpn));
     value.put_u8(u8::from(Safi::Evpn));
     match nhop {
@@ -878,25 +911,52 @@ pub(crate) fn evpn_attr_emit(_snpa: u8, nhop: &IpAddr, updates: &[EvpnRoute], bu
     }
     // Reserved / SNPA byte, always zero per RFC 4760 §3.
     value.put_u8(0);
+}
+
+pub(crate) fn evpn_attr_emit(_snpa: u8, nhop: &IpAddr, updates: &[EvpnRoute], buf: &mut BytesMut) {
+    let mut value = BytesMut::new();
+    evpn_value_preamble(nhop, &mut value);
     for r in updates {
         r.nlri_emit(&mut value);
     }
+    put_mp_reach_attr(buf, &value);
+}
 
-    let len = value.len();
-    let extended = len > 255;
-    let flags = if extended {
-        AttrFlags::new().with_optional(true).with_extended(true)
-    } else {
-        AttrFlags::new().with_optional(true)
-    };
-    buf.put_u8(flags.into());
-    buf.put_u8(AttrType::MpReachNlri.into());
-    if extended {
-        buf.put_u16(len as u16);
-    } else {
-        buf.put_u8(len as u8);
+/// Paginating twin of [`evpn_attr_emit`]: emit the EVPN MP_REACH_NLRI
+/// attribute with as many leading routes from `updates` as fit in a packet
+/// of `max_packet_size` octets given what `buf` already holds, remove the
+/// emitted routes from `updates` (order preserved) and return their count.
+/// Writes nothing and returns 0 when even the first route does not fit.
+pub(crate) fn evpn_attr_emit_mut(
+    _snpa: u8,
+    nhop: &IpAddr,
+    updates: &mut Vec<EvpnRoute>,
+    buf: &mut BytesMut,
+    max_packet_size: usize,
+) -> usize {
+    let budget = max_packet_size.saturating_sub(buf.len() + MP_REACH_HEADER_LEN);
+    let mut value = BytesMut::new();
+    evpn_value_preamble(nhop, &mut value);
+
+    // EVPN NLRIs vary in size by route type and address family, so
+    // measure each one by encoding it rather than estimating.
+    let mut emitted = 0;
+    let mut nlri = BytesMut::new();
+    for r in updates.iter() {
+        nlri.clear();
+        r.nlri_emit(&mut nlri);
+        if value.len() + nlri.len() > budget {
+            break;
+        }
+        value.put(&nlri[..]);
+        emitted += 1;
     }
-    buf.put(&value[..]);
+    if emitted == 0 {
+        return 0;
+    }
+    updates.drain(..emitted);
+    put_mp_reach_attr(buf, &value);
+    emitted
 }
 
 /// Serialize an `MpReachAttr::Mup { afi, snpa, nhop, updates }` as a
