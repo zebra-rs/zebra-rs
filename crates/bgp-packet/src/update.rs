@@ -976,11 +976,12 @@ mod mp_reach_pagination_tests {
 
     /// A reflected route's ordinary attributes: AS_PATH plus a community.
     fn attrs(nexthop: BgpNexthop) -> BgpAttr {
-        let mut attr = BgpAttr::default();
-        attr.aspath = Some(As4Path::from_str("65001 65002 65003").unwrap());
-        attr.com = Some(Community::from_str("65001:100").unwrap());
-        attr.nexthop = Some(nexthop);
-        attr
+        BgpAttr {
+            aspath: Some(As4Path::from_str("65001 65002 65003").unwrap()),
+            com: Some(Community::from_str("65001:100").unwrap()),
+            nexthop: Some(nexthop),
+            ..Default::default()
+        }
     }
 
     fn vpnv4_nlri(i: u32) -> Vpnv4Nlri {
