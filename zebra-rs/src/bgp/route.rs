@@ -6034,7 +6034,7 @@ impl BatchAfi for V4Batch {
             }
         }
         if peer.adj_out.contains_key(rd, &prefix) {
-            withdraw_ipv4_deferrable(bgp.update_groups, peer, rd, prefix, 0);
+            route_withdraw_ipv4(peer, rd, prefix, 0);
             peer.adj_out.remove(rd, prefix, 0);
         }
     }
@@ -6120,7 +6120,7 @@ impl BatchAfi for V4Batch {
                 super::update_group::cache_remove_ipv4(group, prefix, id);
             }
         }
-        withdraw_ipv4_deferrable(bgp.update_groups, peer, rd, prefix, id);
+        route_withdraw_ipv4(peer, rd, prefix, id);
         peer.adj_out.remove(rd, prefix, id);
     }
 }
@@ -6277,7 +6277,7 @@ impl BatchAfi for V6Batch {
                 {
                     super::update_group::cache_remove_ipv6(group, prefix, 0);
                 }
-                withdraw_ipv6_deferrable(bgp.update_groups, peer, prefix, 0);
+                route_withdraw_ipv6(peer, prefix, 0);
                 peer.adj_out.v6.remove(prefix, 0);
             }
         }
@@ -6376,7 +6376,7 @@ impl BatchAfi for V6Batch {
                 {
                     super::update_group::cache_remove_ipv6(group, prefix, id);
                 }
-                withdraw_ipv6_deferrable(bgp.update_groups, peer, prefix, id);
+                route_withdraw_ipv6(peer, prefix, id);
                 peer.adj_out.v6.remove(prefix, id);
             }
         }
@@ -7090,16 +7090,16 @@ mod evpn_nexthop_wiring_tests {
     }
 }
 
-/// Send a single EVPN withdraw to one peer. Mirrors
-/// `route_withdraw_ipv4` — no caching, straight to the wire as a
-/// one-NLRI MP_UNREACH UPDATE. The receiver removes the route from
-/// its adj-RIB-in and re-runs best-path; an empty selection at the
-/// peer triggers `route_evpn_export_selected` which sends
-/// `Message::MacDel` / `MdbDel` and the kernel FDB row goes away.
+/// Queue a single EVPN withdraw for one peer. Mirrors
+/// `route_withdraw_ipv4`: the NLRI joins the peer's pending withdrawals
+/// and the next-tick flush packs it into an MP_UNREACH UPDATE with
+/// whatever else is queued (see [`super::pending_withdraw`]). The
+/// receiver removes the route from its adj-RIB-in and re-runs best-path;
+/// an empty selection at the peer triggers `route_evpn_export_selected`
+/// which sends `Message::MacDel` / `MdbDel` and the kernel FDB row goes
+/// away.
 fn route_withdraw_evpn(peer: &mut Peer, route: EvpnRoute) {
-    let mut update = peer.update_packet();
-    update.mp_withdraw = Some(MpUnreachAttr::Evpn(vec![route]));
-    peer.send_update(update);
+    peer.queue_withdraw_evpn(evpn_cache_key(&route), route);
 }
 
 /// Fan out a withdraw to every peer with `(L2vpn, Evpn)` Established.
@@ -7206,7 +7206,7 @@ pub(super) fn evpn_path_id(route: &EvpnRoute) -> u32 {
 }
 
 /// The advertise-cache identity of `route` — see [`super::peer::EvpnCacheKey`].
-fn evpn_cache_key(route: &EvpnRoute) -> super::peer::EvpnCacheKey {
+pub(super) fn evpn_cache_key(route: &EvpnRoute) -> super::peer::EvpnCacheKey {
     let (rd, prefix) = EvpnPrefix::from_route(route);
     (rd, prefix, evpn_path_id(route))
 }
@@ -7465,66 +7465,28 @@ pub fn route_advertise_evpn_to_peers(
     }
 }
 
-// Send BGP withdrawal for a prefix
+/// Queue a per-peer IPv4-unicast (`rd = None`) or VPNv4 withdraw. The
+/// NLRI joins the peer's pending withdrawals and the next-tick flush
+/// packs it with whatever else is queued — one UPDATE per full message
+/// rather than one per route. The caller has already dropped the route
+/// from the peer's Adj-RIB-Out; the flush re-checks that table, so a
+/// re-advertise landing before the flush cancels the withdraw, and a
+/// unicast withdraw stays queued while the peer's update-group has an
+/// announce job in flight (see [`super::pending_withdraw`]).
 pub(super) fn route_withdraw_ipv4(
     peer: &mut Peer,
     rd: Option<RouteDistinguisher>,
     prefix: Ipv4Net,
     id: u32,
 ) {
-    let mut update = peer.update_packet();
-
     match rd {
-        Some(rd) => {
-            let vpnv4_nlri = Vpnv4Nlri {
-                label: Label::default(),
-                rd,
-                nlri: Ipv4Nlri { id, prefix },
-            };
-            let mp_withdraw = MpUnreachAttr::Vpnv4(vec![vpnv4_nlri]);
-            update.mp_withdraw = Some(mp_withdraw);
-        }
-        None => {
-            let nlri = Ipv4Nlri { id, prefix };
-            update.ipv4_withdraw.push(nlri);
-        }
+        Some(rd) => peer.queue_withdraw_v4vpn(Vpnv4Nlri {
+            label: Label::default(),
+            rd,
+            nlri: Ipv4Nlri { id, prefix },
+        }),
+        None => peer.queue_withdraw_v4(Ipv4Nlri { id, prefix }),
     }
-
-    peer.send_update(update);
-}
-
-/// Send — or, while the peer's update-group has a flush job in
-/// flight, defer — a per-peer IPv4 withdraw (sharding plan A.2).
-///
-/// The flush worker may still be writing the in-flight job's announce
-/// bytes onto the members' writer channels; a withdraw enqueued from
-/// the main task now could be overtaken by an in-flight announce of
-/// the same prefix, leaving the peer holding a stale route — and
-/// unlike announce/announce inversions, nothing later corrects it.
-/// Parked withdraws are replayed by `flush_done_ipv4` after every job
-/// byte is enqueued. VPN withdraws (`rd = Some`) never ride the group
-/// cache and always send immediately.
-pub(super) fn withdraw_ipv4_deferrable(
-    update_groups: &mut super::update_group::UpdateGroupMap,
-    peer: &mut Peer,
-    rd: Option<RouteDistinguisher>,
-    prefix: Ipv4Net,
-    id: u32,
-) {
-    if rd.is_none() {
-        let afi_safi = AfiSafi::new(Afi::Ip, Safi::Unicast);
-        if let Some(gid) = peer.update_group_id.get(&afi_safi)
-            && let Some(af) = update_groups.get_mut(&afi_safi)
-            && let Some(group) = af.group_by_id_mut(gid)
-            && group.flush_inflight_ipv4
-        {
-            group
-                .deferred_withdraw_ipv4
-                .push((peer.ident, Ipv4Nlri { id, prefix }));
-            return;
-        }
-    }
-    route_withdraw_ipv4(peer, rd, prefix, id);
 }
 
 // Soft-reconfiguration outbound: walk Loc-RIB for the AFI/SAFIs the
@@ -7899,7 +7861,7 @@ fn route_soft_out_peer_table(
             }
         }
         peer.adj_out.remove(rd, prefix, id);
-        withdraw_ipv4_deferrable(bgp.update_groups, peer, rd, prefix, id);
+        route_withdraw_ipv4(peer, rd, prefix, id);
     }
 }
 
@@ -8014,7 +7976,7 @@ fn route_soft_out_peer_table_v6(peer_idx: usize, bgp: &mut BgpTop, peers: &mut P
         {
             super::update_group::cache_remove_ipv6(group, prefix, id);
         }
-        withdraw_ipv6_deferrable(bgp.update_groups, peer, prefix, id);
+        route_withdraw_ipv6(peer, prefix, id);
         peer.adj_out.v6.remove(prefix, id);
     }
 }
@@ -13568,6 +13530,10 @@ pub fn route_clean(
     peer.cache_vpnv6.clear();
     peer.cache_vpnv6_rev.clear();
     peer.cache_vpnv6_timer = None;
+    // Withdrawals queued for the dead session go with it (every family):
+    // the new session re-syncs from the Loc-RIB, and the flush marker must
+    // not push a stale queue onto its writer.
+    peer.clear_pending_withdraws();
 
     // IPv6 unicast. Same shape as the IPv4 block above — withdraw
     // every prefix the peer gave us from the Loc-RIB (which fans out
@@ -15071,35 +15037,11 @@ pub fn route_update_ipv6(
     Some((nlri, attrs))
 }
 
-/// Per-peer IPv6 unicast withdraw — emit an MP_UNREACH(AFI=2, SAFI=1)
+/// Per-peer IPv6 unicast withdraw — queue an MP_UNREACH(AFI=2, SAFI=1)
 /// for `prefix`. The v6 counterpart of [`route_withdraw_ipv4`]'s
 /// unicast arm; v6 has no legacy withdraw field.
 pub(super) fn route_withdraw_ipv6(peer: &mut Peer, prefix: Ipv6Net, id: u32) {
-    let mut update = peer.update_packet();
-    update.mp_withdraw = Some(MpUnreachAttr::Ipv6Nlri(vec![Ipv6Nlri { id, prefix }]));
-    peer.send_update(update);
-}
-
-/// v6 twin of [`withdraw_ipv4_deferrable`] — defer the per-peer
-/// MP_UNREACH while the peer's group has a v6 flush job in flight.
-fn withdraw_ipv6_deferrable(
-    update_groups: &mut super::update_group::UpdateGroupMap,
-    peer: &mut Peer,
-    prefix: Ipv6Net,
-    id: u32,
-) {
-    let afi_safi = AfiSafi::new(Afi::Ip6, Safi::Unicast);
-    if let Some(gid) = peer.update_group_id.get(&afi_safi)
-        && let Some(af) = update_groups.get_mut(&afi_safi)
-        && let Some(group) = af.group_by_id_mut(gid)
-        && group.flush_inflight_ipv6
-    {
-        group
-            .deferred_withdraw_ipv6
-            .push((peer.ident, Ipv6Nlri { id, prefix }));
-        return;
-    }
-    route_withdraw_ipv6(peer, prefix, id);
+    peer.queue_withdraw_v6(Ipv6Nlri { id, prefix });
 }
 
 /// IPv6 unicast advertise — the v6 counterpart of
@@ -15242,7 +15184,7 @@ pub(super) fn route_advertise_to_peers_v6(
             {
                 super::update_group::cache_remove_ipv6(group, prefix, id);
             }
-            withdraw_ipv6_deferrable(bgp.update_groups, peer, prefix, id);
+            route_withdraw_ipv6(peer, prefix, id);
             peer.adj_out.v6.remove(prefix, id);
         }
     }
@@ -15282,18 +15224,15 @@ fn route_withdraw_ineligible_addpath_v6(prefix: Ipv6Net, bgp: &mut BgpTop, peers
     }
 }
 
-/// Per-peer VPNv6 withdraw — emit an MP_UNREACH(AFI=2, SAFI=128) for
+/// Per-peer VPNv6 withdraw — queue an MP_UNREACH(AFI=2, SAFI=128) for
 /// `(rd, prefix)`. The v6 counterpart of the VPNv4 withdraw arm of
 /// [`route_withdraw_ipv4`].
 fn route_withdraw_vpnv6(peer: &mut Peer, rd: RouteDistinguisher, prefix: Ipv6Net, id: u32) {
-    let mut update = peer.update_packet();
-    let vpnv6_nlri = Vpnv6Nlri {
+    peer.queue_withdraw_v6vpn(Vpnv6Nlri {
         label: Label::default(),
         rd,
         nlri: Ipv6Nlri { id, prefix },
-    };
-    update.mp_withdraw = Some(MpUnreachAttr::Vpnv6(vec![vpnv6_nlri]));
-    peer.send_update(update);
+    });
 }
 
 /// VPNv6 advertise — the v6 counterpart of the `rd.is_some()` branch
@@ -15600,7 +15539,8 @@ trait LabeledAfi {
         weight: u32,
     ) -> Option<PolicyDecision>;
     fn reach(nhop: IpAddr, label: Label, nlri: Self::Nlri) -> MpReachAttr;
-    fn unreach(prefix: Self::Prefix, id: u32) -> MpUnreachAttr;
+    /// Queue a withdraw of `(prefix, id)` on the peer's pending set.
+    fn queue_withdraw(peer: &mut Peer, prefix: Self::Prefix, id: u32);
 }
 
 struct LabeledV4;
@@ -15665,11 +15605,8 @@ impl LabeledAfi for LabeledV4 {
             updates: vec![Labelv4Nlri { label, nlri }],
         }
     }
-    fn unreach(prefix: Ipv4Net, id: u32) -> MpUnreachAttr {
-        MpUnreachAttr::Labelv4(vec![Labelv4Nlri {
-            label: Label::default(),
-            nlri: Ipv4Nlri { id, prefix },
-        }])
+    fn queue_withdraw(peer: &mut Peer, prefix: Ipv4Net, id: u32) {
+        peer.queue_withdraw_v4lu(Ipv4Nlri { id, prefix });
     }
 }
 
@@ -15735,11 +15672,8 @@ impl LabeledAfi for LabeledV6 {
             updates: vec![Labelv6Nlri { label, nlri }],
         }
     }
-    fn unreach(prefix: Ipv6Net, id: u32) -> MpUnreachAttr {
-        MpUnreachAttr::Labelv6(vec![Labelv6Nlri {
-            label: Label::default(),
-            nlri: Ipv6Nlri { id, prefix },
-        }])
+    fn queue_withdraw(peer: &mut Peer, prefix: Ipv6Net, id: u32) {
+        peer.queue_withdraw_v6lu(Ipv6Nlri { id, prefix });
     }
 }
 
@@ -15859,10 +15793,8 @@ fn route_advertise_labeled<A: LabeledAfi>(
             }
             None => {
                 if A::adj_out_contains(peer, &prefix) {
-                    let mut update = peer.update_packet();
-                    update.mp_withdraw = Some(A::unreach(prefix, 0));
-                    peer.send_update(update);
                     A::adj_out_remove(peer, prefix, 0);
+                    A::queue_withdraw(peer, prefix, 0);
                 }
             }
         }
@@ -15934,10 +15866,8 @@ fn route_advertise_labeled<A: LabeledAfi>(
             if newly.contains(&id) {
                 continue;
             }
-            let mut update = peer.update_packet();
-            update.mp_withdraw = Some(A::unreach(prefix, id));
-            peer.send_update(update);
             A::adj_out_remove(peer, prefix, id);
+            A::queue_withdraw(peer, prefix, id);
         }
     }
 }
@@ -16007,6 +15937,9 @@ impl Peer {
     }
 
     pub fn send_vpnv4(&mut self, nlri: Vpnv4Nlri, attr: Arc<BgpAttr>, timer: bool) {
+        // A re-advertise supersedes a queued withdraw of the same route:
+        // the peer sees one implicit replace, never a withdraw racing it.
+        self.pending_withdraw.v4vpn.remove(&nlri);
         // Evict whatever copy of this route is already queued, on its
         // label-free identity, before queuing the new one (the `send_evpn`
         // rule). From the old bucket when the attr changed: left there, a
@@ -16060,6 +15993,7 @@ impl Peer {
         // NLRI) also catches a re-advertise that changed only the label /
         // gateway under an unchanged attribute set.
         let key = evpn_cache_key(&route);
+        self.pending_withdraw.evpn.remove(&key);
         if let Some((old_attr, old_route)) = self
             .cache_evpn_rev
             .insert(key, (attr.clone(), route.clone()))
@@ -16159,6 +16093,7 @@ impl Peer {
     // VPNv6 advertise cache — mirror of the VPNv4 trio above.
 
     pub fn send_vpnv6(&mut self, nlri: Vpnv6Nlri, attr: Arc<BgpAttr>, timer: bool) {
+        self.pending_withdraw.v6vpn.remove(&nlri);
         // Evict the queued copy on identity first — see `send_vpnv4`.
         if let Some(old) = self.cache_vpnv6_rev.insert(nlri.clone(), attr.clone())
             && let Some(set) = self.cache_vpnv6.get_mut(&old)
@@ -22940,6 +22875,7 @@ mod evpn_addpath_fanout_tests {
         // withdrawn from the member — it would otherwise keep forwarding to
         // the dead VTEP until the MAC is withdrawn everywhere.
         route_evpn_withdraw(a, &mac_route(0), &mut top, &mut peers);
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
         assert_eq!(
             top.local_rib.evpn[&rd()].selected[&prefix].ident,
             b,
@@ -23022,6 +22958,7 @@ mod evpn_addpath_fanout_tests {
         let mut stale = top.local_rib.evpn[&rd()].selected[&prefix].clone();
         stale.stale = true;
         route_advertise_evpn_to_peers(rd(), prefix.clone(), &[stale], &mut top, &mut peers);
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
         peers.get_mut_by_idx(c).unwrap().flush_evpn();
         let (reach, unreach) = drain_opt(&mut c_rx, false);
         assert!(
@@ -23627,6 +23564,7 @@ mod vpnv6_transit_label_tests {
             slot.policy_list = Some(policy);
         }
         route_soft_out_peer(ap, &mut top, &mut peers);
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
         peers.get_mut_by_idx(ap).unwrap().flush_vpnv6();
         assert_eq!(
             withdrawn_vpnv6(&mut ap_rx, true),
@@ -23714,6 +23652,7 @@ mod vpnv6_transit_label_tests {
         // A soft-out must not re-advertise the unreachable candidate under
         // its path-id; it must withdraw it.
         route_soft_out_peer(ap, &mut top, &mut peers);
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
         peers.get_mut_by_idx(ap).unwrap().flush_vpnv6();
         let (reach, unreach) = vpnv6_traffic(&mut ap_rx, true);
         assert_eq!(
@@ -23795,6 +23734,7 @@ mod vpnv6_transit_label_tests {
             &mut peers,
             false,
         );
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
         peers.get_mut_by_idx(ap).unwrap().flush_vpnv6();
         assert_eq!(
             sent_vpnv6_opt(&mut ap_rx, true),
@@ -23858,6 +23798,7 @@ mod vpnv6_transit_label_tests {
             Some(1000),
             "the denied prefix's label is reusable"
         );
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
         peers.get_mut_by_idx(ap).unwrap().flush_vpnv6();
         assert_eq!(
             withdrawn_vpnv6(&mut ap_rx, true),
@@ -30635,6 +30576,7 @@ mod v6_addpath_policy_out_tests {
             "2001:db8:16::/64",
             "65002 65009 65010",
         );
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
         assert!(
             !peers
                 .get_by_idx(c)
@@ -30710,6 +30652,7 @@ mod v6_addpath_policy_out_tests {
             "2001:db8:16::/64",
             "65002 65009 65010",
         );
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
         let rows = &peers.get_by_idx(c).unwrap().adj_out.v6.0[&prefix];
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].local_id, kept_id);
@@ -31119,6 +31062,7 @@ mod addpath_exact_id_tests {
         let mut stale = top.shard.v4.candidates(prefix)[0].clone();
         stale.stale = true;
         route_advertise_to_addpath(None, prefix, &stale, a, &mut top, &mut peers);
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
         assert!(
             held_v4(&peers, c, "10.17.3.0/24").is_empty(),
             "the stale path-id is withdrawn from the non-LLGR peer"
@@ -31217,6 +31161,7 @@ mod addpath_exact_id_tests {
             &mut top,
             &mut peers,
         );
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
         assert!(
             held(&peers).is_empty(),
             "the refused re-send withdraws path-id 7"
@@ -31270,13 +31215,16 @@ mod addpath_exact_id_tests {
         rib.local_id = 7;
         let mut top = fx.top();
         route_advertise_to_addpath(Some(rd), prefix, &rib, a, &mut top, &mut peers);
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
         let mut other = rib.clone();
         other.local_id = 8;
         other.remote_id = 8;
         route_advertise_to_addpath(Some(rd), prefix, &other, a, &mut top, &mut peers);
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
         std::sync::Arc::make_mut(&mut rib.attr).com =
             Some([CommunityValue::NO_ADVERTISE.value()].into_iter().collect());
         route_advertise_to_addpath(Some(rd), prefix, &rib, a, &mut top, &mut peers);
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
         peers.get_mut_by_idx(c).unwrap().flush_vpnv4();
         let packets = updates(&mut rc, VPNV4);
         let mut withdrawn = Vec::new();
@@ -31341,6 +31289,7 @@ mod addpath_exact_id_tests {
         drain(&mut rc);
         bind_out(peers.get_mut_by_idx(c).unwrap(), V4U, deny_all());
         route_soft_out_peer(c, &mut top, &mut peers);
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
         let mut withdrawn: Vec<u32> = updates(&mut rc, V4U)
             .iter()
             .flat_map(|u| u.ipv4_withdraw.iter().map(|n| n.id))
@@ -31392,6 +31341,7 @@ mod addpath_exact_id_tests {
         drain(&mut rc);
         bind_out(peers.get_mut_by_idx(c).unwrap(), V4U, deny_long_paths());
         route_soft_out_peer(c, &mut top, &mut peers);
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
         let withdrawn: Vec<u32> = updates(&mut rc, V4U)
             .iter()
             .flat_map(|u| u.ipv4_withdraw.iter().map(|n| n.id))
@@ -31448,6 +31398,7 @@ mod addpath_exact_id_tests {
         drain(&mut rc);
         bind_out(peers.get_mut_by_idx(c).unwrap(), V4U, deny_short_paths());
         route_soft_out_peer(c, &mut top, &mut peers);
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
         let withdrawn: Vec<u32> = updates(&mut rc, V4U)
             .iter()
             .flat_map(|u| u.ipv4_withdraw.iter().map(|n| n.id))
@@ -31514,6 +31465,7 @@ mod addpath_exact_id_tests {
         let mut top = fx.top();
         bind_out(peers.get_mut_by_idx(c).unwrap(), VPNV4, deny_all());
         route_soft_out_peer(c, &mut top, &mut peers);
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
         peers.get_mut_by_idx(c).unwrap().flush_vpnv4();
         let mut withdrawn: Vec<u32> = updates(&mut rc, VPNV4)
             .into_iter()
@@ -31585,12 +31537,17 @@ mod addpath_exact_id_tests {
                 .clone();
             sent.push(rib.local_id);
             route_advertise_to_addpath(Some(rd), prefix, &rib, a, &mut top, &mut peers);
+            crate::bgp::pending_withdraw::flush_all_pending_withdraws(
+                &*top.update_groups,
+                &mut peers,
+            );
         }
         let table = top.shard.v4vpn.get_mut(&rd).unwrap();
         assert!(table.set_nexthop_reachable(prefix, "10.0.0.7".parse().unwrap(), false));
         assert_eq!(table.select_best_path(prefix)[0].local_id, sent[1]);
         drain(&mut rc);
         route_soft_out_peer(c, &mut top, &mut peers);
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
         peers.get_mut_by_idx(c).unwrap().flush_vpnv4();
         let mut reach = Vec::new();
         let mut withdraw = Vec::new();
@@ -31642,6 +31599,7 @@ mod addpath_exact_id_tests {
         assert!(top.shard.v4.select_best_path(prefix).is_empty());
         drain(&mut rc);
         route_soft_out_peer(c, &mut top, &mut peers);
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
         let packets = updates(&mut rc, V4U);
         let reach: Vec<_> = packets
             .iter()
@@ -32320,6 +32278,7 @@ mod v6_empty_selection_tests {
         }
 
         route_soft_out_peer(b, &mut top, &mut peers);
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
 
         let peer_b = peers.get_by_idx(b).unwrap();
         assert!(
@@ -32424,6 +32383,7 @@ mod v6_empty_selection_tests {
         }
 
         route_soft_out_peer(b, &mut top, &mut peers);
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
 
         let mut opt = bgp_packet::ParseOption::default();
         opt.add_path.entry(v6u).or_default().recv = true;
@@ -32694,6 +32654,19 @@ mod v6_empty_selection_tests {
         route_ipv6_update(
             a, &nlri, None, None, &attr, None, &mut top, &mut peers, false,
         );
+
+        // The withdraw is queued on B and packed by the next-tick flush
+        // (`Message::FlushWithdraw`); service that flush here.
+        assert!(
+            drain(&mut rx_b).is_empty(),
+            "the withdraw rides the pending queue, not an immediate send"
+        );
+        let b = peers.get(&"2001:db8::2".parse().unwrap()).unwrap().ident;
+        assert!(
+            peers.get_by_idx(b).unwrap().withdraw_timer.is_some(),
+            "queueing the withdraw must arm the flush marker"
+        );
+        crate::bgp::pending_withdraw::flush_pending_withdraws(b, &update_groups, &mut peers);
 
         let packets = drain(&mut rx_b);
         assert!(

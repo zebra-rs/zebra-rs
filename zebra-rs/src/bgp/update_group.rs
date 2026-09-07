@@ -334,18 +334,16 @@ pub struct UpdateGroup {
     // first's on the members' writer channels. A timer that fires
     // mid-flight latches `flush_pending_*`; `flush_done_*` re-runs
     // the flush. Per-peer withdraws that would race the in-flight
-    // announces are parked in `deferred_withdraw_*` and replayed by
+    // announces stay queued on the peer (`Peer::pending_withdraw`)
+    // while `flush_inflight_*` is set and are drained by
     // `flush_done_*` after every job byte is enqueued.
     /// An IPv4 flush job is running on the blocking pool.
     pub flush_inflight_ipv4: bool,
     /// The IPv4 debounce timer fired while a job was in flight.
     pub flush_pending_ipv4: bool,
-    /// `(ident, nlri)` withdraws parked during an IPv4 flight.
-    pub deferred_withdraw_ipv4: Vec<(usize, Ipv4Nlri)>,
-    /// IPv6 twins of the three fields above.
+    /// IPv6 twins of the two fields above.
     pub flush_inflight_ipv6: bool,
     pub flush_pending_ipv6: bool,
-    pub deferred_withdraw_ipv6: Vec<(usize, Ipv6Nlri)>,
     /// Members whose signature changed while this group still had a flush
     /// in flight or advertisements queued: `regroup_if_stale` parks them
     /// here instead of moving them, and `flush_done_*` moves them once the
@@ -671,10 +669,8 @@ fn attach_family(
             adv_interval,
             flush_inflight_ipv4: false,
             flush_pending_ipv4: false,
-            deferred_withdraw_ipv4: Vec::new(),
             flush_inflight_ipv6: false,
             flush_pending_ipv6: false,
-            deferred_withdraw_ipv6: Vec::new(),
             regroup_pending: BTreeSet::new(),
             task,
         }
@@ -1347,15 +1343,16 @@ pub fn flush_ipv4(
 }
 
 /// Worker completion for an IPv4 flush: merge the counter deltas,
-/// release the in-flight latch, replay the withdraws parked during
-/// the flight, and re-run the flush if the debounce timer fired
+/// release the in-flight latch, drain the withdraws the members queued
+/// during the flight, and re-run the flush if the debounce timer fired
 /// while the job was out.
 ///
-/// The replay is ordered-safe by construction: the worker sends
+/// The drain is ordered-safe by construction: the worker sends
 /// `FlushDoneIpv4` only after [`FlushJob::run`] returned, so every
 /// announce byte is already on the members' writer channels and a
-/// replayed withdraw lands strictly after the announce it must
-/// override.
+/// drained withdraw lands strictly after the announce it must
+/// override. Withdraws a newer announce has superseded are dropped by
+/// the drain's Adj-RIB-Out check (see [`super::pending_withdraw`]).
 pub fn flush_done_ipv4(
     update_groups: &mut UpdateGroupMap,
     peers: &mut PeerMap,
@@ -1375,31 +1372,13 @@ pub fn flush_done_ipv4(
     };
     group.counters.merge(&deltas);
     group.flush_inflight_ipv4 = false;
-    let deferred = std::mem::take(&mut group.deferred_withdraw_ipv4);
     let rerun = std::mem::take(&mut group.flush_pending_ipv4);
-    let members = group.members.clone();
-    for (ident, nlri) in deferred {
-        // Skip members that left the group during the flight (a
-        // session bounce re-syncs the table from scratch) and peers
-        // whose Adj-RIB-Out re-acquired the prefix (a newer announce
-        // superseded this withdraw; it is sitting in the pending
-        // cache and the next flush carries it).
-        if !members.contains(&ident) {
-            continue;
-        }
-        let Some(peer) = peers.get_mut_by_idx(ident) else {
-            continue;
-        };
-        if !peer.state.is_established() {
-            continue;
-        }
-        if nlri.id == 0 && peer.adj_out.contains_key(None, &nlri.prefix) {
-            continue;
-        }
-        super::route::route_withdraw_ipv4(peer, None, nlri.prefix, nlri.id);
-    }
+    // The job's announce bytes are all on the members' writers: drain the
+    // unicast withdrawals its members queued during the flight (see
+    // `super::pending_withdraw`) before anything moves or re-runs.
+    super::pending_withdraw::drain_after_flush(Afi::Ip, update_groups, peers);
     // Members frozen for a pending move: the job that pinned them has
-    // completed and their deferred withdraws went out above, so move them
+    // completed and their queued withdraws went out above, so move them
     // now — before any re-run, whose job must not snapshot their senders
     // — and hand them back for the outbound re-sync that replaces
     // whatever they were skipped for while frozen. A member whose
@@ -1689,23 +1668,13 @@ pub fn flush_done_ipv6(
     };
     group.counters.merge(&deltas);
     group.flush_inflight_ipv6 = false;
-    let deferred = std::mem::take(&mut group.deferred_withdraw_ipv6);
     let rerun = std::mem::take(&mut group.flush_pending_ipv6);
-    let members = group.members.clone();
-    for (ident, nlri) in deferred {
-        if !members.contains(&ident) {
-            continue;
-        }
-        let Some(peer) = peers.get_mut_by_idx(ident) else {
-            continue;
-        };
-        if !peer.state.is_established() {
-            continue;
-        }
-        super::route::route_withdraw_ipv6(peer, nlri.prefix, nlri.id);
-    }
+    // The job's announce bytes are all on the members' writers: drain the
+    // unicast withdrawals its members queued during the flight (see
+    // `super::pending_withdraw`) before anything moves or re-runs.
+    super::pending_withdraw::drain_after_flush(Afi::Ip6, update_groups, peers);
     // Members frozen for a pending move: the job that pinned them has
-    // completed and their deferred withdraws went out above, so move them
+    // completed and their queued withdraws went out above, so move them
     // now — before any re-run, whose job must not snapshot their senders
     // — and hand them back for the outbound re-sync that replaces
     // whatever they were skipped for while frozen. A member whose
@@ -2410,8 +2379,15 @@ mod tests {
                 .group_by_id_mut(&shared)
                 .unwrap();
             g.flush_inflight_ipv4 = true;
-            g.deferred_withdraw_ipv4.push((0, nlri));
         }
+        // Queued on the peer (the marker is not armed here: `Timer` needs
+        // a runtime); it stays queued while the group's job is out.
+        peers
+            .get_mut_by_idx(0)
+            .unwrap()
+            .pending_withdraw
+            .v4
+            .insert(nlri.clone());
         peers
             .get_mut_by_idx(0)
             .unwrap()
@@ -2444,9 +2420,9 @@ mod tests {
                 .unwrap();
             assert!(g.regroup_pending.contains(&0));
             assert_eq!(
-                g.deferred_withdraw_ipv4.len(),
+                peers.get_by_idx(0).unwrap().pending_withdraw.v4.len(),
                 1,
-                "the withdraw stays parked"
+                "the withdraw stays queued"
             );
             // A job built now must not snapshot the frozen member's sender.
             let attr = Arc::new(BgpAttr::new());
@@ -2465,7 +2441,7 @@ mod tests {
             assert_eq!(recipients, vec![1], "the frozen member is not a recipient");
         }
 
-        // The pinning job completes: the deferred withdraw goes out, the
+        // The pinning job completes: the queued withdraw goes out, the
         // frozen member moves and is handed back for a re-sync.
         let (tx, _rx) = mpsc::channel(8);
         let addrs = super::super::interface_addrs::InterfaceAddrs::default();
@@ -2498,7 +2474,7 @@ mod tests {
             .group_by_id_mut(&shared)
             .unwrap();
         assert!(g.regroup_pending.is_empty());
-        assert!(g.deferred_withdraw_ipv4.is_empty());
+        assert!(peers.get_by_idx(0).unwrap().pending_withdraw.v4.is_empty());
         assert!(rx[1].try_recv().is_err(), "the group-mate was sent nothing");
     }
 
@@ -2768,10 +2744,8 @@ mod tests {
                 adv_interval: AdvInterval::default(),
                 flush_inflight_ipv4: false,
                 flush_pending_ipv4: false,
-                deferred_withdraw_ipv4: Vec::new(),
                 flush_inflight_ipv6: false,
                 flush_pending_ipv6: false,
-                deferred_withdraw_ipv6: Vec::new(),
                 regroup_pending: BTreeSet::new(),
                 task: None,
             },
@@ -3118,10 +3092,8 @@ mod tests {
             adv_interval: AdvInterval::default(),
             flush_inflight_ipv4: false,
             flush_pending_ipv4: false,
-            deferred_withdraw_ipv4: Vec::new(),
             flush_inflight_ipv6: false,
             flush_pending_ipv6: false,
-            deferred_withdraw_ipv6: Vec::new(),
             regroup_pending: BTreeSet::new(),
             task: None,
         };
@@ -3287,15 +3259,11 @@ mod tests {
 
     /// FlushDone merges the worker's deltas, releases the latch, and
     /// consumes the pending flag (empty cache ⇒ the rerun no-ops).
-    /// Deferred withdraws whose peers left the group are dropped.
     #[test]
-    fn flush_done_ipv4_releases_latch_and_drops_departed() {
+    fn flush_done_ipv4_releases_latch() {
         let (id, mut group) = test_group(0);
         group.flush_inflight_ipv4 = true;
         group.flush_pending_ipv4 = true;
-        // ident 7 is NOT a member: its parked withdraw must be dropped
-        // (a session bounce re-syncs the table from scratch).
-        group.deferred_withdraw_ipv4.push((7, nlri("10.0.0.1/32")));
         let mut groups = groups_with(group);
         let mut peers = PeerMap::new();
         let (tx, _rx) = mpsc::channel(8);
@@ -3323,9 +3291,81 @@ mod tests {
         let group = af.group_by_id_mut(&id).unwrap();
         assert!(!group.flush_inflight_ipv4);
         assert!(!group.flush_pending_ipv4);
-        assert!(group.deferred_withdraw_ipv4.is_empty());
         assert_eq!(group.counters.messages_formatted, 2);
         assert_eq!(group.counters.bytes_formatted, 100);
+    }
+
+    /// A withdraw queued while the member's group has a job in flight
+    /// stays queued — draining it now could put it on the writer ahead
+    /// of the job's announce of the same prefix — and `flush_done_ipv4`
+    /// drains it once the job is done. The sharding-plan A.2 race, now
+    /// gated on the peer's pending set instead of a per-group park.
+    #[tokio::test]
+    async fn flush_inflight_gates_queued_withdraws_until_flush_done() {
+        use super::super::pending_withdraw::flush_pending_withdraws;
+        use bgp_packet::UpdatePacket;
+
+        let (id, mut group) = test_group(0);
+        group.flush_inflight_ipv4 = true;
+        let (tx, _rx) = mpsc::channel::<Message>(64);
+        let mut peer = super::super::peer::Peer::new(
+            0,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            65002,
+            "10.0.0.2".parse().unwrap(),
+            None,
+            tx.clone(),
+            crate::context::ProtoContext::default_table_no_rib(),
+        );
+        peer.state = super::super::peer::State::Established;
+        let (ptx, mut prx) = mpsc::unbounded_channel::<bytes::BytesMut>();
+        peer.packet_tx = Some(ptx);
+        peer.update_group_id
+            .insert(AfiSafi::new(Afi::Ip, Safi::Unicast), id.clone());
+        group.members.insert(0);
+        let mut groups = groups_with(group);
+        let mut peers = PeerMap::new();
+        peers.insert("10.0.0.2".parse().unwrap(), peer);
+        let ident = peers.get(&"10.0.0.2".parse().unwrap()).unwrap().ident;
+
+        let peer = peers.get_mut_by_idx(ident).unwrap();
+        peer.queue_withdraw_v4(nlri("10.0.0.1/32"));
+        // A VPNv4 withdraw on the same peer is not gated by the unicast job.
+        peer.queue_withdraw_v4vpn(bgp_packet::Vpnv4Nlri {
+            label: bgp_packet::Label::default(),
+            rd: bgp_packet::RouteDistinguisher::default(),
+            nlri: nlri("10.0.0.9/32"),
+        });
+
+        flush_pending_withdraws(ident, &groups, &mut peers);
+        let sent = recv_all(&mut prx);
+        assert_eq!(sent.len(), 1, "only the VPNv4 withdraw goes out");
+        let (_, p) = UpdatePacket::parse_packet(&sent[0], true, None).unwrap();
+        assert!(matches!(
+            p.mp_withdraw,
+            Some(bgp_packet::MpUnreachAttr::Vpnv4(_))
+        ));
+        let peer = peers.get_by_idx(ident).unwrap();
+        assert_eq!(peer.pending_withdraw.v4.len(), 1, "unicast stays queued");
+
+        let addrs = super::super::interface_addrs::InterfaceAddrs::default();
+        flush_done_ipv4(
+            &mut groups,
+            &mut peers,
+            &tx,
+            &id,
+            UpdateGroupCounters::default(),
+            &addrs,
+            std::net::Ipv4Addr::new(10, 0, 0, 9),
+            false,
+        );
+        let sent = recv_all(&mut prx);
+        assert_eq!(sent.len(), 1, "flush_done drains the gated withdraw");
+        let (_, p) = UpdatePacket::parse_packet(&sent[0], true, None).unwrap();
+        assert_eq!(p.ipv4_withdraw, vec![nlri("10.0.0.1/32")]);
+        let peer = peers.get_by_idx(ident).unwrap();
+        assert!(peer.pending_withdraw.v4.is_empty());
     }
 
     /// End-to-end offload: flush spawns the job on the blocking pool,

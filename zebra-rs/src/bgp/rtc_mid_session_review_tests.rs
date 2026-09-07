@@ -333,6 +333,7 @@ fn session_up(bgp: &mut Bgp, c: usize, vpn: AfiSafi, ms: &[M], rx: &mut Rx) {
 /// Every VPN prefix C was advertised and withdrawn (after flushing its VPN
 /// queues): `(advertised, withdrawn)`, each sorted.
 fn vpn_updates(bgp: &mut Bgp, c: usize, rx: &mut Rx) -> (Vec<String>, Vec<String>) {
+    bgp.flush_all_pending_withdraws();
     let peer = bgp.peers.get_mut_by_idx(c).unwrap();
     peer.flush_vpnv4();
     peer.flush_vpnv6();

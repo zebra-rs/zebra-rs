@@ -2226,6 +2226,13 @@ impl BgpVrf {
                     self.soft_reapply_peer(ident, super::super::policy::InOut::Output);
                 }
             }
+            Message::FlushWithdraw(ident) => {
+                super::super::pending_withdraw::flush_pending_withdraws(
+                    ident,
+                    &self.update_groups,
+                    &mut self.peers,
+                );
+            }
             Message::BgpLs { .. } => {
                 // BGP-LS (RFC 9552) is produced and stored only by the
                 // global BGP instance — per-VRF tasks never see it.

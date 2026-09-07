@@ -178,6 +178,7 @@ fn resolve(bgp: &mut Bgp, nh: &str, reachable: bool) {
         nexthops: Vec::new(),
     };
     bgp.nht_handle_update(0, nh.parse().unwrap(), &resolution);
+    bgp.flush_all_pending_withdraws();
 }
 
 /// A received IPv4-unicast UPDATE for `prefix` from `from`.
@@ -195,6 +196,7 @@ fn announce_v4(bgp: &mut Bgp, from: usize, prefix: &str, path: &str, nh: &str) {
     });
     let (mut top, peers) = split(bgp);
     route_from_peer(from, packet, &mut top, peers, None);
+    bgp.flush_all_pending_withdraws();
 }
 
 /// The path-ids `ident` holds for `prefix` in its IPv4-unicast Adj-RIB-Out.
@@ -319,6 +321,7 @@ fn fib_ack(bgp: &mut Bgp, prefix: &str) {
         .fib_pending
         .insert(prefix, crate::bgp::route::FibPending::Confirmed);
     bgp.fib_pending_release(prefix);
+    bgp.flush_all_pending_withdraws();
 }
 
 /// `suppress-fib-pending`: a first-contact path whose next-hop resolves
@@ -682,6 +685,7 @@ async fn v4_sharded_non_best_flip_reaches_addpath_neighbors_and_the_late_dump() 
         );
         let (mut top, peers) = split(bgp);
         route_apply_bestpath_v4_batch(&mut top, peers, outs);
+        bgp.flush_all_pending_withdraws();
     };
     flip(&mut worker, &mut bgp, false);
     assert_eq!(fam.held(&bgp, c), vec![id_a]);
@@ -749,6 +753,7 @@ async fn v4_sharded_flip_under_suppress_fib_pending_withdraws_now_and_releases_l
         );
         let (mut top, peers) = split(bgp);
         route_apply_bestpath_v4_batch(&mut top, peers, outs);
+        bgp.flush_all_pending_withdraws();
     };
     flip(&mut worker, &mut bgp, false);
     assert_eq!(fam.held(&bgp, c), vec![id_a], "B withdrawn at once");

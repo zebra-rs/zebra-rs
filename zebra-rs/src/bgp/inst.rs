@@ -108,6 +108,12 @@ pub enum Message {
         super::update_group::UpdateGroupId,
         super::update_group::UpdateGroupCounters,
     ),
+    /// Next-tick flush marker for a peer's queued withdrawals (see
+    /// [`super::pending_withdraw`]): drain them into as few UPDATEs as the
+    /// session's message size allows. Armed once per peer while anything
+    /// is queued; lands behind the ingest already on this channel, so a
+    /// burst of withdrawals shares one drain.
+    FlushWithdraw(usize),
     /// BGP Link-State (RFC 9552) objects produced by the local IS-IS task
     /// and pushed over the IS-IS→BGP channel. `add` are originated into the
     /// `bgp_ls` Loc-RIB; `withdraw` are removed. The IS-IS producer diffs
@@ -1400,6 +1406,12 @@ pub struct Bgp {
 }
 
 impl Bgp {
+    /// Test support: see [`super::pending_withdraw::flush_all_pending_withdraws`].
+    #[cfg(test)]
+    pub(crate) fn flush_all_pending_withdraws(&mut self) {
+        super::pending_withdraw::flush_all_pending_withdraws(&self.update_groups, &mut self.peers);
+    }
+
     pub fn new(
         ctx: ProtoContext,
         rib_rx: UnboundedReceiver<RibRx>,
@@ -2712,6 +2724,13 @@ impl Bgp {
                 for ident in resync {
                     super::peer::apply_soft_out_peer(self, ident);
                 }
+            }
+            Message::FlushWithdraw(ident) => {
+                super::pending_withdraw::flush_pending_withdraws(
+                    ident,
+                    &self.update_groups,
+                    &mut self.peers,
+                );
             }
             Message::BgpLs { add, withdraw } => {
                 // Locally-produced BGP-LS (IS-IS producer, RFC 9552):

@@ -882,6 +882,7 @@ async fn vpnv4_rtc_member_is_withdrawn_a_route_that_leaves_its_rts() {
         let (mut top, peers) = split(&mut bgp);
         route_advertise_to_peers(Some(rd), prefix, &selected, 1, &mut top, peers);
     }
+    bgp.flush_all_pending_withdraws();
     assert!(!held(&bgp), "C no longer holds P");
     assert_eq!(vpn_withdrawn(&mut rc), vec!["10.24.4.0/24".to_string()]);
 }
@@ -917,6 +918,7 @@ async fn vpnv6_rtc_member_is_withdrawn_a_route_that_leaves_its_rts() {
         let (mut top, peers) = split(&mut bgp);
         route_advertise_to_peers_vpnv6(rd, prefix, &selected, &mut top, peers);
     }
+    bgp.flush_all_pending_withdraws();
     assert!(!held(&bgp), "C no longer holds P");
     assert_eq!(
         vpn_withdrawn(&mut rc),
