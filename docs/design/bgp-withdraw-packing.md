@@ -162,6 +162,18 @@ matching rows, minus the queue's own source, and dropped for everyone
 else. (Found in review: the first cut dropped it for all members, and the
 peer whose own path had just become best kept the stale route.)
 
+Deferral also opened a window at membership changes (review finding):
+before packing, a withdrawal was fanned the moment it arrived, so a member
+removed a moment later — an egress-policy change reassigns a live peer to
+another group without resetting the session — had already received it.
+Queued, it would have been fanned to the membership at flush time, after
+the member left, and the new group starts from the Loc-RIB, which no
+longer has the prefix. So `RemoveMember` flushes the queue before the
+member is removed, and when the group empties `detach` lets the task
+drain and exit (`GroupEgressTask::drain_and_exit`: close the channel,
+detach the handle) instead of aborting it with that delta unread; the run
+loop flushes once more on channel close for members still present.
+
 ### What still sends immediately
 
 MUP, Flowspec, SR Policy, RTC and BGP-LS withdrawals keep their
