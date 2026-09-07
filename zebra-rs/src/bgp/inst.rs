@@ -4518,10 +4518,12 @@ impl Bgp {
             .and_then(|gid| self.update_groups.get(&v4)?.group_by_id(gid))
             .and_then(|group| group.task.as_ref());
         if let Some(task) = group_task {
+            // The same engine, a refreshed `SyncCtx`: no handoff to wait on.
             task.send(super::group_egress::GroupEgressDeltaV4::AddMember {
                 ident,
                 ctx: Box::new(ctx),
                 add_path,
+                after: None,
             });
             task.send(super::group_egress::GroupEgressDeltaV4::Resend { ident });
         } else if let Some(pet) = peer.pet.as_ref() {

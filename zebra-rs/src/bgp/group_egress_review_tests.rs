@@ -62,6 +62,7 @@ fn member(engine: &mut Engine, ident: usize, add_path: bool) -> mpsc::UnboundedR
         ident,
         ctx: Box::new(ctx),
         add_path,
+        after: None,
     });
     engine.flush_withdraws();
     rx
