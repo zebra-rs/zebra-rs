@@ -83,8 +83,11 @@ withdraw goes out. Two rules close it:
    dropped. So those two families stay queued while any job carrying the
    peer's announcements is out: `flush_ipv4/6` counts the job up on each
    member (`Peer::flush_jobs_v4/v6`), the `FlushDone` message carries the
-   member list, and `flush_done_ipv4/6` counts it off and drains the
-   released members after every job byte is on the writer — replacing the
+   member list as `(ident, Peer::instance)` — the instance is a creation
+   nonce, because a peer removed and re-created at the same address gets
+   its `PeerMap` slot back and an old job's late completion must not count
+   itself off the replacement — and `flush_done_ipv4/6` counts it off and
+   drains the released members after every job byte is on the writer — replacing the
    per-group `deferred_withdraw_*` parking that served the same race
    (sharding plan A.2). The count lives on the peer, not the group, and
    `flush_done` settles it whether or not the group still exists:

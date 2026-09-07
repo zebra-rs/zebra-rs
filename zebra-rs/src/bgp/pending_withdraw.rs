@@ -171,12 +171,22 @@ pub fn flush_pending_withdraws(ident: usize, peers: &mut PeerMap) {
 /// After an update-group flush job for `afi` unicast completed — its
 /// `members` already counted off their `flush_jobs_*` — drain the unicast
 /// withdrawals those members parked behind it. A member another job is
-/// still carrying stays parked until that one completes too.
-pub fn drain_after_flush(afi: Afi, members: &[usize], peers: &mut PeerMap) {
-    for &ident in members {
+/// still carrying stays parked until that one completes too, and a slot
+/// whose `Peer` value changed since the job was spawned (the peer was
+/// removed and re-created at the same address) is not the job's member
+/// at all and is left alone.
+pub fn drain_after_flush(
+    afi: Afi,
+    members: &[super::update_group::JobMember],
+    peers: &mut PeerMap,
+) {
+    for &(ident, instance) in members {
         let Some(peer) = peers.get_mut_by_idx(ident) else {
             continue;
         };
+        if peer.instance != instance {
+            continue;
+        }
         let (queued, gated) = match afi {
             Afi::Ip => (!peer.pending_withdraw.v4.is_empty(), peer.flush_jobs_v4 > 0),
             _ => (!peer.pending_withdraw.v6.is_empty(), peer.flush_jobs_v6 > 0),

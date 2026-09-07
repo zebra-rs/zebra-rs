@@ -825,12 +825,47 @@ pub(super) struct FlushJob<N> {
     pub enhe: bool,
 }
 
-impl<N: FlushNlri> FlushJob<N> {
-    /// Idents of the members this job will send to.
-    pub(super) fn member_idents(&self) -> Vec<usize> {
-        self.members.iter().map(|m| m.ident).collect()
-    }
+/// One member a flush job was spawned against: its `PeerMap` slot and the
+/// `Peer::instance` nonce that was in that slot at the time. The completion
+/// settles `Peer::flush_jobs_*` only where the nonce still matches, so a
+/// job whose peer was removed and re-created at the same address (same
+/// slot) cannot count itself off the replacement.
+pub type JobMember = (usize, u64);
 
+/// Stamp the job's members with the `Peer::instance` currently in each
+/// slot and count the job up on them (see [`Peer::flush_jobs_v4`]).
+fn count_job_up(job_members: &[FlushMember], peers: &mut PeerMap, afi: Afi) -> Vec<JobMember> {
+    job_members
+        .iter()
+        .filter_map(|m| {
+            let peer = peers.get_mut_by_idx(m.ident)?;
+            match afi {
+                Afi::Ip => peer.flush_jobs_v4 += 1,
+                _ => peer.flush_jobs_v6 += 1,
+            }
+            Some((m.ident, peer.instance))
+        })
+        .collect()
+}
+
+/// Count a completed job off the members it was spawned against, skipping
+/// any slot whose occupant has changed since.
+fn count_job_down(members: &[JobMember], peers: &mut PeerMap, afi: Afi) {
+    for &(ident, instance) in members {
+        let Some(peer) = peers.get_mut_by_idx(ident) else {
+            continue;
+        };
+        if peer.instance != instance {
+            continue;
+        }
+        match afi {
+            Afi::Ip => peer.flush_jobs_v4 = peer.flush_jobs_v4.saturating_sub(1),
+            _ => peer.flush_jobs_v6 = peer.flush_jobs_v6.saturating_sub(1),
+        }
+    }
+}
+
+impl<N: FlushNlri> FlushJob<N> {
     /// Encode and send every bucket; returns the counter deltas for
     /// the caller to merge into the group. Per attr-bucket we encode
     /// at most:
@@ -1074,12 +1109,7 @@ pub fn flush_ipv4(
     group.flush_inflight_ipv4 = true;
     // Count the job against each member so its queued unicast withdrawals
     // wait for `flush_done_ipv4` (see `Peer::flush_jobs_v4`).
-    let members = job.member_idents();
-    for &ident in &members {
-        if let Some(peer) = peers.get_mut_by_idx(ident) {
-            peer.flush_jobs_v4 += 1;
-        }
-    }
+    let members = count_job_up(&job.members, peers, Afi::Ip);
     let tx = tx.clone();
     let id = id.clone();
     let _ = tokio::task::spawn_blocking(move || {
@@ -1114,14 +1144,10 @@ pub fn flush_done_ipv4(
     tx: &mpsc::Sender<Message>,
     id: &UpdateGroupId,
     deltas: UpdateGroupCounters,
-    members: &[usize],
+    members: &[JobMember],
     interface_addrs: &super::interface_addrs::InterfaceAddrs,
 ) {
-    for &ident in members {
-        if let Some(peer) = peers.get_mut_by_idx(ident) {
-            peer.flush_jobs_v4 = peer.flush_jobs_v4.saturating_sub(1);
-        }
-    }
+    count_job_down(members, peers, Afi::Ip);
     let afi_safi = AfiSafi::new(Afi::Ip, Safi::Unicast);
     let rerun = match update_groups
         .get_mut(&afi_safi)
@@ -1348,12 +1374,7 @@ pub fn flush_ipv6(
         return;
     };
     group.flush_inflight_ipv6 = true;
-    let members = job.member_idents();
-    for &ident in &members {
-        if let Some(peer) = peers.get_mut_by_idx(ident) {
-            peer.flush_jobs_v6 += 1;
-        }
-    }
+    let members = count_job_up(&job.members, peers, Afi::Ip6);
     let tx = tx.clone();
     let id = id.clone();
     let _ = tokio::task::spawn_blocking(move || {
@@ -1370,13 +1391,9 @@ pub fn flush_done_ipv6(
     tx: &mpsc::Sender<Message>,
     id: &UpdateGroupId,
     deltas: UpdateGroupCounters,
-    members: &[usize],
+    members: &[JobMember],
 ) {
-    for &ident in members {
-        if let Some(peer) = peers.get_mut_by_idx(ident) {
-            peer.flush_jobs_v6 = peer.flush_jobs_v6.saturating_sub(1);
-        }
-    }
+    count_job_down(members, peers, Afi::Ip6);
     let afi_safi = AfiSafi::new(Afi::Ip6, Safi::Unicast);
     let rerun = match update_groups
         .get_mut(&afi_safi)
@@ -2430,6 +2447,7 @@ mod tests {
         ));
         let peer = peers.get_by_idx(ident).unwrap();
         assert_eq!(peer.pending_withdraw.v4.len(), 1, "unicast stays queued");
+        let instance = peer.instance;
 
         let addrs = super::super::interface_addrs::InterfaceAddrs::default();
         flush_done_ipv4(
@@ -2438,7 +2456,7 @@ mod tests {
             &tx,
             &id,
             UpdateGroupCounters::default(),
-            &[ident],
+            &[(ident, instance)],
             &addrs,
         );
         let sent = recv_all(&mut prx);
@@ -2506,6 +2524,7 @@ mod tests {
                 .is_none()
         );
 
+        let instance = peers.get_by_idx(ident).unwrap().instance;
         let addrs = super::super::interface_addrs::InterfaceAddrs::default();
         flush_done_ipv4(
             &mut groups,
@@ -2513,7 +2532,7 @@ mod tests {
             &tx,
             &id,
             UpdateGroupCounters::default(),
-            &[ident],
+            &[(ident, instance)],
             &addrs,
         );
         let sent = recv_all(&mut prx);
@@ -2523,6 +2542,91 @@ mod tests {
         let peer = peers.get_by_idx(ident).unwrap();
         assert!(peer.pending_withdraw.v4.is_empty());
         assert_eq!(peer.flush_jobs_v4, 0);
+    }
+
+    /// A peer removed and re-created at the same address gets its old
+    /// `PeerMap` slot back. A job the *old* peer was a member of must not
+    /// count itself off the replacement when it completes: the
+    /// replacement may have a job of its own in flight, and releasing its
+    /// parked withdrawal early would let that job re-announce the
+    /// withdrawn route afterwards. (Review finding — the completion is
+    /// matched on `Peer::instance`, not the slot.)
+    #[tokio::test]
+    async fn stale_completion_does_not_release_replacement_peer() {
+        use super::super::pending_withdraw::flush_pending_withdraws;
+        use bgp_packet::UpdatePacket;
+
+        let addr: IpAddr = "10.0.0.2".parse().unwrap();
+        let (tx, _rx) = mpsc::channel::<Message>(64);
+        let new_peer = |tx: &mpsc::Sender<Message>| {
+            let mut peer = super::super::peer::Peer::new(
+                0,
+                65001,
+                Ipv4Addr::new(10, 0, 0, 1),
+                65002,
+                addr,
+                None,
+                tx.clone(),
+                crate::context::ProtoContext::default_table_no_rib(),
+            );
+            peer.state = super::super::peer::State::Established;
+            peer
+        };
+        let (id, _group) = test_group(0);
+        let mut groups = empty_map();
+        let mut peers = PeerMap::new();
+
+        // The old peer, with one job out.
+        peers.insert(addr, new_peer(&tx));
+        let ident = peers.get(&addr).unwrap().ident;
+        let old = peers.get_mut_by_idx(ident).unwrap();
+        old.flush_jobs_v4 = 1;
+        let old_stamp = (ident, old.instance);
+
+        // Removed and re-created: same slot, new Peer value, its own job
+        // out and a withdrawal parked behind it.
+        peers.remove(&addr);
+        peers.insert(addr, new_peer(&tx));
+        assert_eq!(peers.get(&addr).unwrap().ident, ident, "slot reused");
+        let (ptx, mut prx) = mpsc::unbounded_channel::<bytes::BytesMut>();
+        let fresh = peers.get_mut_by_idx(ident).unwrap();
+        fresh.packet_tx = Some(ptx);
+        fresh.flush_jobs_v4 = 1;
+        fresh.queue_withdraw_v4(nlri("10.0.0.1/32"));
+        let fresh_stamp = (ident, fresh.instance);
+        assert_ne!(old_stamp, fresh_stamp);
+        flush_pending_withdraws(ident, &mut peers);
+        assert!(recv_all(&mut prx).is_empty(), "parked behind its own job");
+
+        // The old peer's job completes: nothing to settle on the new peer.
+        let addrs = super::super::interface_addrs::InterfaceAddrs::default();
+        flush_done_ipv4(
+            &mut groups,
+            &mut peers,
+            &tx,
+            &id,
+            UpdateGroupCounters::default(),
+            &[old_stamp],
+            &addrs,
+        );
+        assert!(recv_all(&mut prx).is_empty(), "still parked");
+        assert_eq!(peers.get_by_idx(ident).unwrap().flush_jobs_v4, 1);
+
+        // The new peer's own job completes: released.
+        flush_done_ipv4(
+            &mut groups,
+            &mut peers,
+            &tx,
+            &id,
+            UpdateGroupCounters::default(),
+            &[fresh_stamp],
+            &addrs,
+        );
+        let sent = recv_all(&mut prx);
+        assert_eq!(sent.len(), 1);
+        let (_, p) = UpdatePacket::parse_packet(&sent[0], true, None).unwrap();
+        assert_eq!(p.ipv4_withdraw, vec![nlri("10.0.0.1/32")]);
+        assert_eq!(peers.get_by_idx(ident).unwrap().flush_jobs_v4, 0);
     }
 
     /// End-to-end offload: flush spawns the job on the blocking pool,

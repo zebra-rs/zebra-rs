@@ -1020,6 +1020,9 @@ impl PeerStat {
 /// gateway IP) that the NLRI also carries.
 pub type EvpnCacheKey = (RouteDistinguisher, EvpnPrefix, u32);
 
+/// Source of [`Peer::instance`] nonces.
+static NEXT_PEER_INSTANCE: AtomicU64 = AtomicU64::new(1);
+
 #[derive(Debug)]
 pub struct Peer {
     pub ident: usize,
@@ -1259,6 +1262,15 @@ pub struct Peer {
     pub flush_jobs_v4: u32,
     /// IPv6-unicast twin of `flush_jobs_v4`.
     pub flush_jobs_v6: u32,
+    /// Creation nonce: distinct for every `Peer` value ever constructed,
+    /// unlike `ident`, which is a `PeerMap` slot that a peer removed and
+    /// re-added at the same address gets back. A flush job's completion
+    /// carries `(ident, instance)` for each member and settles
+    /// `flush_jobs_*` only on the `Peer` value it was spawned against —
+    /// an old session's late completion must not count a job off the
+    /// replacement peer and release its parked withdrawals under a job
+    /// of its own.
+    pub instance: u64,
     // Runtime bookkeeping for TCP-AO listener state: the (send_id,
     // recv_id) pair most recently installed via TCP_AO_ADD_KEY for
     // this peer. Needed because TCP_AO_DEL_KEY requires the exact
@@ -1422,6 +1434,7 @@ impl Peer {
             withdraw_timer: None,
             flush_jobs_v4: 0,
             flush_jobs_v6: 0,
+            instance: NEXT_PEER_INSTANCE.fetch_add(1, Ordering::Relaxed),
             last_ao_installed: None,
             update_group_id: BTreeMap::new(),
             adv_interval: timer::AdvInterval::default(),
