@@ -41,6 +41,12 @@ rule for keeping the wire in step with the Adj-RIB-Out.
   #2370 established for MP_REACH.
 - End-of-RIB variants are refused by the pop (an empty MP_UNREACH *is* an
   EoR on the wire) and keep going through `try_emit`.
+- `pop_mp_withdraw` returns `Result<Option<_>, UpdateEmitError>`: a
+  family with no per-NLRI emitter (Route-Target membership) or an NLRI
+  that cannot fit even an empty UPDATE of the session's size (a Flowspec
+  NLRI can run to 4095 octets) is an error with the queue left intact, so
+  the drain logs how many withdrawals it is dropping instead of losing
+  them silently — a `while let Some` loop would simply have ended.
 
 ### Queue and drain (`zebra-rs/src/bgp/pending_withdraw.rs`)
 
@@ -127,6 +133,16 @@ momentarily empties packs partially, because the main task fans the burst
 across several executor turns, so the engine would wake mid-burst and emit
 a fraction each time. An idle single withdrawal still flushes one timer
 tick later, the same latency the main-task queue already accepts.
+
+The bias has a failure mode of its own: the timer branch is only polled
+when the channel is momentarily empty, so a producer that keeps it
+non-empty (a full-table re-advertise outpacing the engine) would hold
+every queued withdrawal until the stream ended, with the pending set
+growing to table size. Two bounds close that (review finding): each wake
+drains at most `DRAIN_BATCH` (1024) deltas, and after every drain
+`settle_flush` checks the deadline itself and flushes if it has passed. A
+queued withdrawal therefore waits at most one `WITHDRAW_FLUSH_DELAY` plus
+one batch, whether or not the channel ever goes idle.
 
 Advertises stay immediate (the engine records the Adj-RIB-Out row and sends
 during `handle`); withdrawals queue and flush at the end of the batch. The
