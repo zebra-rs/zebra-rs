@@ -647,6 +647,89 @@ mod tests {
         assert_eq!(peer.cache_vpnv4_rev.len(), 1);
     }
 
+    /// The VPNv6 AddPath withdraw must drop the path's Adj-RIB-Out row
+    /// before queueing, or the drain's reconciliation would read the row
+    /// as a re-advertise and cancel the withdraw. Found by
+    /// `bgp_shard_addpath_vpnv6`: the session-up dump recorded the rows,
+    /// the AddPath withdraw never removed them, and the peer kept the
+    /// withdrawn path.
+    #[tokio::test]
+    async fn vpnv6_addpath_withdraw_drops_adj_rib_out_row_so_it_is_sent() {
+        use super::super::route::route_withdraw_vpnv6_addpath;
+        use bgp_packet::{AfiSafi, Direct};
+        use ipnet::Ipv6Net;
+
+        let (mut peer, mut prx, _rx) = established_peer();
+        // VPNv6 negotiated both ways with AddPath-send, so the membership
+        // index puts the peer in the AddPath fan-out set.
+        let mp = bgp_packet::CapMultiProtocol::new(&Afi::Ip6, &Safi::MplsVpn);
+        if let Some(sr) = peer.cap_map.get_mut(&mp) {
+            sr.send = true;
+            sr.recv = true;
+        }
+        peer.opt.add_path.insert(
+            AfiSafi::new(Afi::Ip6, Safi::MplsVpn),
+            Direct {
+                recv: true,
+                send: true,
+            },
+        );
+        let rd = RouteDistinguisher::from_str("65001:100").unwrap();
+        let prefix: Ipv6Net = "2001:db8:9::/64".parse().unwrap();
+        // Two paths advertised (as the session-up dump records them).
+        peer.adj_out
+            .v6vpn
+            .entry(rd)
+            .or_default()
+            .add(prefix, rib(1));
+        peer.adj_out
+            .v6vpn
+            .entry(rd)
+            .or_default()
+            .add(prefix, rib(2));
+        let mut peers = PeerMap::new();
+        let address = peer.address;
+        peers.insert(address, peer);
+        let ident = peers.get(&address).unwrap().ident;
+        peers.membership_enroll(ident);
+
+        route_withdraw_vpnv6_addpath(rd, prefix, &rib(1), &mut peers);
+
+        let peer = peers.get_mut_by_idx(ident).unwrap();
+        let rows: Vec<u32> = peer.adj_out.v6vpn[&rd].0[&prefix]
+            .iter()
+            .map(|r| r.local_id)
+            .collect();
+        assert_eq!(rows, vec![2], "path 1's row is gone, path 2 stays");
+        assert_eq!(peer.pending_withdraw.v6vpn.len(), 1);
+
+        drain_peer(peer, &empty_map());
+        let packets = sent_opt(
+            &mut prx,
+            Some({
+                let mut opt = bgp_packet::ParseOption::default();
+                opt.add_path.insert(
+                    AfiSafi::new(Afi::Ip6, Safi::MplsVpn),
+                    Direct {
+                        recv: true,
+                        send: true,
+                    },
+                );
+                opt
+            }),
+        );
+        assert_eq!(packets.len(), 1, "the withdraw of path 1 goes out");
+        match &packets[0].mp_withdraw {
+            Some(MpUnreachAttr::Vpnv6(w)) => {
+                assert_eq!(w.len(), 1);
+                assert_eq!(w[0].rd, rd);
+                assert_eq!(w[0].nlri.prefix, prefix);
+                assert_eq!(w[0].nlri.id, 1);
+            }
+            other => panic!("expected a VPNv6 MP_UNREACH, got {other:?}"),
+        }
+    }
+
     /// A flush on a peer that left Established discards the queue instead
     /// of pushing stale withdrawals onto whatever session comes next.
     #[tokio::test]
