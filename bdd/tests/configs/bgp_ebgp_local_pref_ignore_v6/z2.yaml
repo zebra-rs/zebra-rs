@@ -1,0 +1,19 @@
+router:
+  bgp:
+    global:
+      as: 65030
+      router-id: 192.168.40.3
+    neighbor:
+    - remote-address: 2001:db8:40::1
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65030
+    afi-safi:
+    - name: ipv6
+      # The contested prefix: z1 also hears it from the eBGP speaker h1 with a
+      # bogus LOCAL_PREF 500. With that attribute ignored, both candidates sit
+      # at the default 100 and z2's empty AS_PATH beats h1's one-hop path.
+      network:
+      - prefix: 2001:db8:99::/64
