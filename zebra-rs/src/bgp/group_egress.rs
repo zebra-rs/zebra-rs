@@ -36,6 +36,13 @@ use tokio::time::{Duration, Instant, sleep_until};
 /// race would otherwise produce.
 const WITHDRAW_FLUSH_DELAY: Duration = Duration::from_millis(1);
 
+/// Most deltas one channel wake handles before the engine checks its flush
+/// deadline again — the group twin of the PET's bound. The run loop is
+/// biased toward the channel, so with no bound a producer that keeps the
+/// channel non-empty would keep the timer branch from ever being polled and
+/// hold every queued withdrawal until the stream ended.
+const DRAIN_BATCH: usize = 1024;
+
 use crate::context::task::Task;
 
 use super::adj_rib::{AdjRibTable, Out};
@@ -227,8 +234,10 @@ impl Engine {
     /// the burst settles (a `WITHDRAW_FLUSH_DELAY` timer armed when the first
     /// withdrawal queues, re-used for the whole burst). `biased` prefers
     /// draining new deltas over flushing so a burst accumulates into one
-    /// flush. Exits when the channel closes (the group emptied); any queued
-    /// withdrawal is dropped with it.
+    /// flush; each wake drains at most `DRAIN_BATCH` deltas and then
+    /// [`settle_flush`](Self::settle_flush) checks the deadline itself, so a
+    /// sustained stream cannot starve the flush. Exits when the channel
+    /// closes (the group emptied); any queued withdrawal is dropped with it.
     async fn run(&mut self, mut rx: mpsc::UnboundedReceiver<GroupEgressDeltaV4>) {
         let mut flush_at: Option<Instant> = None;
         loop {
@@ -237,18 +246,38 @@ impl Engine {
                 maybe = rx.recv() => {
                     let Some(delta) = maybe else { break };
                     self.handle(delta);
-                    while let Ok(delta) = rx.try_recv() {
+                    for _ in 1..DRAIN_BATCH {
+                        let Ok(delta) = rx.try_recv() else { break };
                         self.handle(delta);
                     }
-                    if !self.pending_withdraw.is_empty() && flush_at.is_none() {
-                        flush_at = Some(Instant::now() + WITHDRAW_FLUSH_DELAY);
-                    }
+                    self.settle_flush(&mut flush_at);
                 }
                 _ = async { sleep_until(flush_at.unwrap()).await }, if flush_at.is_some() => {
                     self.flush_withdraws();
                     flush_at = None;
                 }
             }
+        }
+    }
+
+    /// After a channel drain: arm the deferred flush when a withdrawal first
+    /// queues, and flush now if an armed deadline has already passed — the
+    /// group twin of the PET's `settle_flush`. The select is biased toward
+    /// the channel, so under a sustained delta stream the timer branch may
+    /// never be polled; checking the deadline here, after every bounded
+    /// drain, caps a queued withdrawal's wait at one `WITHDRAW_FLUSH_DELAY`
+    /// plus one batch instead of the end of the stream.
+    fn settle_flush(&mut self, flush_at: &mut Option<Instant>) {
+        match *flush_at {
+            Some(at) if Instant::now() >= at => {
+                self.flush_withdraws();
+                *flush_at = None;
+            }
+            Some(_) => {}
+            None if !self.pending_withdraw.is_empty() => {
+                *flush_at = Some(Instant::now() + WITHDRAW_FLUSH_DELAY);
+            }
+            None => {}
         }
     }
 
@@ -781,6 +810,91 @@ mod tests {
             assert_eq!(frames.len(), 1, "{who} gets exactly the replacement");
             assert!(!is_withdraw(&frames[0]), "{who} gets no withdraw");
         }
+    }
+
+    /// The reviewer's exact shape: the original announcement came from
+    /// member A, so only member B held it; B then announces P itself. B is
+    /// split-horizoned out of its own path and must still receive the
+    /// withdraw of A's copy; A receives B's path as a plain announce.
+    #[test]
+    fn superseded_withdraw_reaches_the_new_source_when_the_old_source_was_a_member() {
+        let mut engine = Engine::default();
+        let mut rx_a = member(&mut engine, 1);
+        let mut rx_b = member(&mut engine, 2);
+        let p: Ipv4Net = "10.10.10.0/24".parse().unwrap();
+        engine.handle(GroupEgressDeltaV4::Advertise {
+            prefix: p,
+            rib: rib(1, "192.0.2.1"),
+        });
+        assert!(rx_a.try_recv().is_err(), "A sourced P, does not get it");
+        assert!(rx_b.try_recv().is_ok(), "B holds A's P");
+
+        engine.handle(GroupEgressDeltaV4::Withdraw {
+            prefix: p,
+            id: 0,
+            source_ident: 1,
+        });
+        engine.handle(GroupEgressDeltaV4::Advertise {
+            prefix: p,
+            rib: rib(2, "192.0.2.2"),
+        });
+        engine.flush_withdraws();
+
+        let to_a: Vec<BytesMut> = std::iter::from_fn(|| rx_a.try_recv().ok()).collect();
+        let to_b: Vec<BytesMut> = std::iter::from_fn(|| rx_b.try_recv().ok()).collect();
+        assert_eq!(to_a.len(), 1, "A gets exactly B's path");
+        assert!(!is_withdraw(&to_a[0]), "A's frame is an announce");
+        assert_eq!(to_b.len(), 1, "B gets exactly one frame");
+        assert!(is_withdraw(&to_b[0]), "B's frame withdraws A's stale copy");
+    }
+
+    /// The deadline is serviced by the drain itself, not only by the timer
+    /// branch — the group twin of the PET test: a withdrawal queued and then
+    /// left behind by a stream of further deltas flushes once its deadline
+    /// has passed, at the end of the next drain, without the channel ever
+    /// going idle.
+    #[tokio::test(start_paused = true)]
+    async fn drain_flushes_an_expired_deadline_without_the_timer_branch() {
+        let mut engine = Engine::default();
+        let mut rx = member(&mut engine, 1);
+        let p1: Ipv4Net = "10.10.10.0/24".parse().unwrap();
+        let p2: Ipv4Net = "10.10.11.0/24".parse().unwrap();
+        for p in [p1, p2] {
+            engine.handle(GroupEgressDeltaV4::Advertise {
+                prefix: p,
+                rib: rib(99, "192.0.2.9"),
+            });
+        }
+        let _ = std::iter::from_fn(|| rx.try_recv().ok()).count();
+
+        let mut flush_at: Option<Instant> = None;
+        engine.handle(GroupEgressDeltaV4::Withdraw {
+            prefix: p1,
+            id: 0,
+            source_ident: 99,
+        });
+        engine.settle_flush(&mut flush_at);
+        let armed = flush_at.expect("first queued withdrawal arms the deadline");
+        assert!(
+            rx.try_recv().is_err(),
+            "nothing flushes before the deadline"
+        );
+
+        engine.handle(GroupEgressDeltaV4::Withdraw {
+            prefix: p2,
+            id: 0,
+            source_ident: 99,
+        });
+        engine.settle_flush(&mut flush_at);
+        assert_eq!(flush_at, Some(armed), "the deadline is not pushed out");
+        assert!(rx.try_recv().is_err());
+
+        tokio::time::advance(WITHDRAW_FLUSH_DELAY).await;
+        engine.settle_flush(&mut flush_at);
+        assert!(flush_at.is_none(), "flushed and disarmed");
+        let frames: Vec<BytesMut> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert_eq!(frames.len(), 1, "both withdrawals in one UPDATE");
+        assert!(engine.pending_withdraw.is_empty());
     }
 
     #[tokio::test(start_paused = true)]

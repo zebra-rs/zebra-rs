@@ -521,15 +521,33 @@ impl UpdatePacket {
 
     /// Emit one withdraw-only UPDATE carrying as many of the queued
     /// MP_UNREACH_NLRI withdrawals as fit in `max_packet_size`; the rest
-    /// stay queued for the next call. `None` once nothing is queued —
+    /// stay queued for the next call. `Ok(None)` once nothing is queued —
     /// including for the end-of-RIB variants, which have nothing to
     /// paginate and go out through [`try_emit`](Self::try_emit). Path
     /// attributes on `self` are not emitted: a withdraw-only UPDATE carries
     /// only the MP_UNREACH_NLRI attribute (RFC 4760 §4).
-    pub fn pop_mp_withdraw(&mut self) -> Option<BytesMut> {
-        let mp_withdraw = self.mp_withdraw.as_mut()?;
+    ///
+    /// Errors leave the queue untouched, so a caller looping on `Ok(Some)`
+    /// must stop on `Err` and account for what is still queued rather than
+    /// spin: [`UpdateEmitError::Unpaginatable`] for the Route-Target
+    /// families, which have no per-NLRI emitter, and
+    /// [`UpdateEmitError::WithdrawExceedsPacket`] when the next NLRI does not
+    /// fit even an otherwise empty UPDATE (a Flowspec NLRI can run to 4095
+    /// octets, more than a 4096-octet message can carry).
+    pub fn pop_mp_withdraw(&mut self) -> Result<Option<BytesMut>, UpdateEmitError> {
+        let Some(mp_withdraw) = self.mp_withdraw.as_mut() else {
+            return Ok(None);
+        };
         if mp_withdraw.is_empty() {
-            return None;
+            return Ok(None);
+        }
+        if matches!(
+            mp_withdraw,
+            MpUnreachAttr::Rtcv4(_) | MpUnreachAttr::Rtcv6(_)
+        ) {
+            return Err(UpdateEmitError::Unpaginatable {
+                family: "Route-Target membership",
+            });
         }
         let mut buf = BytesMut::with_capacity(self.max_packet_size);
         let header: BytesMut = self.header.clone().into();
@@ -540,7 +558,9 @@ impl UpdatePacket {
         buf.put_u16(0u16); // Placeholder.
         let emitted = mp_withdraw.attr_emit_mut(&mut buf, self.max_packet_size);
         if emitted == 0 {
-            return None;
+            return Err(UpdateEmitError::WithdrawExceedsPacket {
+                max_packet_size: self.max_packet_size,
+            });
         }
         let attr_len = (buf.len() - attr_len_pos - 2) as u16;
         buf[attr_len_pos..attr_len_pos + 2].copy_from_slice(&attr_len.to_be_bytes());
@@ -548,7 +568,7 @@ impl UpdatePacket {
         const LENGTH_POS: std::ops::Range<usize> = 16..18;
         let length = buf.len() as u16;
         buf[LENGTH_POS].copy_from_slice(&length.to_be_bytes());
-        Some(buf)
+        Ok(Some(buf))
     }
 }
 
@@ -567,6 +587,22 @@ pub enum UpdateEmitError {
         field: &'static str,
         /// The octet count that could not be encoded.
         len: usize,
+    },
+    /// [`UpdatePacket::pop_mp_withdraw`]: the next queued MP_UNREACH NLRI does
+    /// not fit even an otherwise empty UPDATE of the session's size, so no
+    /// packet can carry it. The queue is left as it was.
+    #[error("queued MP_UNREACH withdrawal does not fit an empty {max_packet_size}-octet UPDATE")]
+    WithdrawExceedsPacket {
+        /// The session's negotiated message size.
+        max_packet_size: usize,
+    },
+    /// [`UpdatePacket::pop_mp_withdraw`]: the family has no per-NLRI emitter
+    /// to paginate with; its withdrawals go out through
+    /// [`UpdatePacket::try_emit`]. The queue is left as it was.
+    #[error("MP_UNREACH withdrawals of {family} cannot be paginated")]
+    Unpaginatable {
+        /// The address family, for the log line.
+        family: &'static str,
     },
 }
 
@@ -772,6 +808,7 @@ mod tests {
                 assert_eq!(field, "message length");
                 assert!(len > u16::MAX as usize, "reported the real octet count");
             }
+            Err(other) => panic!("expected TooLong, got {other}"),
             Ok(buf) => panic!(
                 "oversized UPDATE must not encode (got {} octets)",
                 buf.len()
@@ -1391,6 +1428,12 @@ mod withdraw_pagination_tests {
         }
     }
 
+    /// `pop_mp_withdraw` for the `drain` helper: every family these tests
+    /// queue paginates, so an error is a test failure.
+    fn pop_mp(update: &mut UpdatePacket) -> Option<BytesMut> {
+        update.pop_mp_withdraw().expect("family paginates")
+    }
+
     /// Pop packets until the emitter runs dry, checking that each one fits
     /// `max`, declares its true length, and parses back as a withdraw-only
     /// UPDATE; returns the parsed packets in emission order.
@@ -1521,12 +1564,7 @@ mod withdraw_pagination_tests {
     fn mp_withdraw_vpnv4_fills_each_packet_to_the_budget() {
         let mut update = UpdatePacket::with_max_packet_size(BGP_PACKET_LEN);
         update.mp_withdraw = Some(MpUnreachAttr::Vpnv4((0..2000).map(vpnv4).collect()));
-        let packets = drain(
-            &mut update,
-            UpdatePacket::pop_mp_withdraw,
-            BGP_PACKET_LEN,
-            None,
-        );
+        let packets = drain(&mut update, pop_mp, BGP_PACKET_LEN, None);
         assert_eq!(packets.len(), 8);
         let counts: Vec<usize> = packets
             .iter()
@@ -1553,12 +1591,7 @@ mod withdraw_pagination_tests {
     fn mp_withdraw_vpnv6_and_ipv6_round_trip() {
         let mut update = UpdatePacket::with_max_packet_size(BGP_PACKET_LEN);
         update.mp_withdraw = Some(MpUnreachAttr::Vpnv6((0..500).map(vpnv6).collect()));
-        let packets = drain(
-            &mut update,
-            UpdatePacket::pop_mp_withdraw,
-            BGP_PACKET_LEN,
-            None,
-        );
+        let packets = drain(&mut update, pop_mp, BGP_PACKET_LEN, None);
         // 28 octets each: 145 per packet, four packets.
         assert_eq!(packets.len(), 4);
         let n: usize = packets
@@ -1574,12 +1607,7 @@ mod withdraw_pagination_tests {
         update.mp_withdraw = Some(MpUnreachAttr::Ipv6Nlri(
             (0..500).map(|i| vpnv6(i).nlri).collect(),
         ));
-        let packets = drain(
-            &mut update,
-            UpdatePacket::pop_mp_withdraw,
-            BGP_PACKET_LEN,
-            None,
-        );
+        let packets = drain(&mut update, pop_mp, BGP_PACKET_LEN, None);
         // 17 octets each: 239 per packet, three packets.
         assert_eq!(packets.len(), 3);
         let n: usize = packets
@@ -1599,12 +1627,7 @@ mod withdraw_pagination_tests {
         let routes: Vec<EvpnRoute> = (0..1500).map(evpn).collect();
         let mut update = UpdatePacket::with_max_packet_size(BGP_PACKET_LEN);
         update.mp_withdraw = Some(MpUnreachAttr::Evpn(routes.clone()));
-        let packets = drain(
-            &mut update,
-            UpdatePacket::pop_mp_withdraw,
-            BGP_PACKET_LEN,
-            None,
-        );
+        let packets = drain(&mut update, pop_mp, BGP_PACKET_LEN, None);
         assert!(packets.len() > 1, "1500 EVPN routes cannot fit one packet");
         let seen: Vec<EvpnRoute> = packets
             .iter()
@@ -1634,7 +1657,12 @@ mod withdraw_pagination_tests {
     fn mp_withdraw_eor_is_left_to_try_emit() {
         let mut update = UpdatePacket::with_max_packet_size(BGP_PACKET_LEN);
         update.mp_withdraw = Some(MpUnreachAttr::Vpnv4Eor);
-        assert!(update.pop_mp_withdraw().is_none());
+        assert!(
+            update
+                .pop_mp_withdraw()
+                .expect("EoR is not an error")
+                .is_none()
+        );
         let bytes = update.try_emit().expect("EoR encodes");
         let (_, parsed) = UpdatePacket::parse_packet(&bytes, true, None).unwrap();
         assert!(matches!(parsed.mp_withdraw, Some(MpUnreachAttr::Vpnv4Eor)));
@@ -1650,12 +1678,7 @@ mod withdraw_pagination_tests {
             ..Default::default()
         });
         update.mp_withdraw = Some(MpUnreachAttr::Vpnv4((0..3).map(vpnv4).collect()));
-        let packets = drain(
-            &mut update,
-            UpdatePacket::pop_mp_withdraw,
-            BGP_PACKET_LEN,
-            None,
-        );
+        let packets = drain(&mut update, pop_mp, BGP_PACKET_LEN, None);
         assert_eq!(packets.len(), 1);
         assert!(
             packets[0]
@@ -1665,5 +1688,43 @@ mod withdraw_pagination_tests {
             "AS_PATH must not ride on a withdraw-only UPDATE"
         );
         assert_eq!(vpnv4_withdrawn(&packets).len(), 3);
+    }
+
+    /// An NLRI that cannot fit an otherwise empty UPDATE of the session's
+    /// size is reported, not silently dropped, and the queue is left intact
+    /// for the caller to account for. A 30-octet budget cannot carry the
+    /// 27-octet preamble plus a 15-octet VPNv4 NLRI.
+    #[test]
+    fn mp_withdraw_reports_an_nlri_that_cannot_fit_the_packet() {
+        let mut update = UpdatePacket::with_max_packet_size(30);
+        update.mp_withdraw = Some(MpUnreachAttr::Vpnv4((0..3).map(vpnv4).collect()));
+        match update.pop_mp_withdraw() {
+            Err(UpdateEmitError::WithdrawExceedsPacket { max_packet_size }) => {
+                assert_eq!(max_packet_size, 30);
+            }
+            other => panic!("expected WithdrawExceedsPacket, got {other:?}"),
+        }
+        assert_eq!(
+            update.mp_withdraw.as_ref().map(MpUnreachAttr::len),
+            Some(3),
+            "the queue is left as it was"
+        );
+    }
+
+    /// Route-Target membership has no per-NLRI emitter: the pop refuses
+    /// rather than returning `None` with the withdrawals still queued.
+    #[test]
+    fn mp_withdraw_reports_route_target_as_unpaginatable() {
+        use crate::{ExtCommunityValue, Rtcv4};
+        let mut update = UpdatePacket::with_max_packet_size(BGP_PACKET_LEN);
+        update.mp_withdraw = Some(MpUnreachAttr::Rtcv4(vec![Rtcv4::new(
+            65001,
+            ExtCommunityValue::default(),
+        )]));
+        assert!(matches!(
+            update.pop_mp_withdraw(),
+            Err(UpdateEmitError::Unpaginatable { .. })
+        ));
+        assert_eq!(update.mp_withdraw.as_ref().map(MpUnreachAttr::len), Some(1));
     }
 }

@@ -31,7 +31,7 @@ fn withdraw_pagination_scaling() {
         // Exclude route construction; measure only pagination and encoding.
         let start = Instant::now();
         let mut packets = 0;
-        while let Some(bytes) = update.pop_mp_withdraw() {
+        while let Some(bytes) = update.pop_mp_withdraw().expect("VPNv6 paginates") {
             assert!(bytes.len() <= 4096);
             packets += 1;
         }

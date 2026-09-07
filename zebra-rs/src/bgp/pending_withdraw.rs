@@ -237,12 +237,26 @@ pub(super) fn adj_out_has<P: Ord>(table: &AdjRibTable<Out, P>, prefix: &P, id: u
 }
 
 /// Emit `attr`'s withdrawals as as many UPDATEs as the session's message
-/// size needs.
+/// size needs. A queue the codec cannot paginate — a family with no
+/// per-NLRI emitter, or an NLRI larger than an empty UPDATE of the session's
+/// size — is logged with the number of withdrawals it still held and
+/// dropped, rather than lost silently or spun on.
 fn send_mp_withdraws(peer: &Peer, attr: MpUnreachAttr) {
     let mut update = peer.update_packet();
     update.mp_withdraw = Some(attr);
-    while let Some(bytes) = update.pop_mp_withdraw() {
-        peer.send_packet(bytes);
+    loop {
+        match update.pop_mp_withdraw() {
+            Ok(Some(bytes)) => peer.send_packet(bytes),
+            Ok(None) => break,
+            Err(e) => {
+                let left = update.mp_withdraw.as_ref().map_or(0, MpUnreachAttr::len);
+                tracing::warn!(
+                    peer = %peer.address,
+                    "dropping {left} queued withdrawals that cannot be sent: {e}"
+                );
+                break;
+            }
+        }
     }
 }
 
@@ -728,6 +742,20 @@ mod tests {
             }
             other => panic!("expected a VPNv6 MP_UNREACH, got {other:?}"),
         }
+    }
+
+    /// A queue the codec refuses to paginate (Route-Target membership has
+    /// no per-NLRI emitter) is dropped with a log line: nothing goes on the
+    /// wire and the send loop terminates instead of spinning on the error.
+    #[tokio::test]
+    async fn send_mp_withdraws_drops_an_unpaginatable_queue_and_returns() {
+        use bgp_packet::{ExtCommunityValue, Rtcv4};
+        let (peer, mut prx, _rx) = established_peer();
+        send_mp_withdraws(
+            &peer,
+            MpUnreachAttr::Rtcv4(vec![Rtcv4::new(65001, ExtCommunityValue::default())]),
+        );
+        assert!(sent(&mut prx).is_empty(), "nothing is sent");
     }
 
     /// A flush on a peer that left Established discards the queue instead

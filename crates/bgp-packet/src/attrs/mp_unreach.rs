@@ -225,25 +225,23 @@ impl MpUnreachAttr {
 }
 
 impl MpUnreachAttr {
-    /// Whether this attribute withdraws nothing: an end-of-RIB variant, or
-    /// a list variant whose list has been drained. `attr_emit_mut` never
-    /// writes such an attribute (an empty MP_UNREACH on the wire *is* an
-    /// end-of-RIB marker), so callers use this to stop paginating.
-    pub fn is_empty(&self) -> bool {
+    /// How many withdrawals this attribute still queues: zero for an
+    /// end-of-RIB variant or a list variant whose list has been drained.
+    pub fn len(&self) -> usize {
         match self {
-            MpUnreachAttr::Ipv4Nlri(w) => w.is_empty(),
-            MpUnreachAttr::Ipv6Nlri(w) => w.is_empty(),
-            MpUnreachAttr::Vpnv4(w) => w.is_empty(),
-            MpUnreachAttr::Vpnv6(w) => w.is_empty(),
-            MpUnreachAttr::Evpn(w) => w.is_empty(),
-            MpUnreachAttr::Rtcv4(w) => w.is_empty(),
-            MpUnreachAttr::Rtcv6(w) => w.is_empty(),
-            MpUnreachAttr::Mup { withdraws, .. } => withdraws.is_empty(),
-            MpUnreachAttr::Flowspec { withdraws, .. } => withdraws.is_empty(),
-            MpUnreachAttr::Labelv4(w) => w.is_empty(),
-            MpUnreachAttr::Labelv6(w) => w.is_empty(),
-            MpUnreachAttr::SrPolicy { withdraws, .. } => withdraws.is_empty(),
-            MpUnreachAttr::LinkState { withdraws } => withdraws.is_empty(),
+            MpUnreachAttr::Ipv4Nlri(w) => w.len(),
+            MpUnreachAttr::Ipv6Nlri(w) => w.len(),
+            MpUnreachAttr::Vpnv4(w) => w.len(),
+            MpUnreachAttr::Vpnv6(w) => w.len(),
+            MpUnreachAttr::Evpn(w) => w.len(),
+            MpUnreachAttr::Rtcv4(w) => w.len(),
+            MpUnreachAttr::Rtcv6(w) => w.len(),
+            MpUnreachAttr::Mup { withdraws, .. } => withdraws.len(),
+            MpUnreachAttr::Flowspec { withdraws, .. } => withdraws.len(),
+            MpUnreachAttr::Labelv4(w) => w.len(),
+            MpUnreachAttr::Labelv6(w) => w.len(),
+            MpUnreachAttr::SrPolicy { withdraws, .. } => withdraws.len(),
+            MpUnreachAttr::LinkState { withdraws } => withdraws.len(),
             MpUnreachAttr::Ipv4Eor
             | MpUnreachAttr::Ipv6Eor
             | MpUnreachAttr::Vpnv4Eor
@@ -252,8 +250,16 @@ impl MpUnreachAttr {
             | MpUnreachAttr::Rtcv4Eor
             | MpUnreachAttr::Rtcv6Eor
             | MpUnreachAttr::Labelv4Eor
-            | MpUnreachAttr::Labelv6Eor => true,
+            | MpUnreachAttr::Labelv6Eor => 0,
         }
+    }
+
+    /// Whether this attribute withdraws nothing: an end-of-RIB variant, or
+    /// a list variant whose list has been drained. `attr_emit_mut` never
+    /// writes such an attribute (an empty MP_UNREACH on the wire *is* an
+    /// end-of-RIB marker), so callers use this to stop paginating.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// Paginating twin of [`attr_emit`](Self::attr_emit): emit as many of
