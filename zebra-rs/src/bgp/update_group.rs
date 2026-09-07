@@ -655,8 +655,11 @@ pub fn detach(update_groups: &mut UpdateGroupMap, peers: &mut PeerMap, peer_idx:
             let drop_group = {
                 let group = af.groups.get_mut(&key).expect("just located");
                 group.members.remove(&peer_idx);
-                // Mirror the removal into the group's egress task (the task
-                // itself is dropped + aborted below if the group empties).
+                // Mirror the removal into the group's egress task. Handling
+                // it settles the withdrawals the member is still owed, so
+                // if the group empties the task is let drain and exit
+                // below rather than dropped (aborted) with that delta and
+                // its queued withdrawals unread.
                 if let Some(t) = &group.task {
                     t.send(super::group_egress::GroupEgressDeltaV4::RemoveMember {
                         ident: peer_idx,
@@ -664,8 +667,11 @@ pub fn detach(update_groups: &mut UpdateGroupMap, peers: &mut PeerMap, peer_idx:
                 }
                 group.members.is_empty()
             };
-            if drop_group {
-                af.groups.remove(&key);
+            if drop_group
+                && let Some(mut group) = af.groups.remove(&key)
+                && let Some(task) = group.task.take()
+            {
+                task.drain_and_exit();
             }
         }
     }
@@ -2542,6 +2548,117 @@ mod tests {
         let peer = peers.get_by_idx(ident).unwrap();
         assert!(peer.pending_withdraw.v4.is_empty());
         assert_eq!(peer.flush_jobs_v4, 0);
+    }
+
+    /// Gate-on group task: an egress-policy change detaches the last live
+    /// member — the group is deleted — while the engine still holds a
+    /// withdrawal that member is owed. `detach` must let the task drain
+    /// (settling the withdrawal on `RemoveMember`) and exit, not abort it
+    /// with the delta unread. (Review finding.)
+    #[tokio::test]
+    async fn detach_of_the_last_member_drains_the_group_task_withdrawals() {
+        use super::super::group_egress::{GroupEgressDeltaV4, GroupEgressTask};
+        use super::super::route::{BgpRib, BgpRibType, SyncCtx};
+        use ipnet::Ipv4Net;
+        use std::sync::Arc;
+
+        let (id, mut group) = test_group(0);
+        group.task = Some(GroupEgressTask::spawn(id.clone()));
+        let (tx, _rx) = mpsc::channel::<Message>(64);
+        let mut peer = super::super::peer::Peer::new(
+            0,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            65002,
+            "10.0.0.2".parse().unwrap(),
+            None,
+            tx.clone(),
+            crate::context::ProtoContext::default_table_no_rib(),
+        );
+        peer.state = super::super::peer::State::Established;
+        let (ptx, mut prx) = mpsc::unbounded_channel::<bytes::BytesMut>();
+        peer.packet_tx = Some(ptx.clone());
+        peer.update_group_id
+            .insert(AfiSafi::new(Afi::Ip, Safi::Unicast), id.clone());
+        group.members.insert(0);
+        let mut groups = groups_with(group);
+        let mut peers = PeerMap::new();
+        peers.insert("10.0.0.2".parse().unwrap(), peer);
+        let ident = peers.get(&"10.0.0.2".parse().unwrap()).unwrap().ident;
+
+        // The engine holds the member and one advertised prefix.
+        let prefix: Ipv4Net = "10.10.10.0/24".parse().unwrap();
+        let rib = BgpRib::new_arc(
+            99,
+            "10.0.0.9".parse().unwrap(),
+            BgpRibType::EBGP,
+            0,
+            100,
+            Arc::new(BgpAttr {
+                nexthop: Some(BgpNexthop::Ipv4("192.0.2.9".parse().unwrap())),
+                ..Default::default()
+            }),
+            None,
+            None,
+            false,
+        );
+        {
+            let af = groups.get(&AfiSafi::new(Afi::Ip, Safi::Unicast)).unwrap();
+            let task = af.group_by_id(&id).unwrap().task.as_ref().unwrap();
+            let mut ctx = SyncCtx::for_test();
+            ctx.packet_tx = Some(ptx);
+            task.send(GroupEgressDeltaV4::AddMember {
+                ident,
+                ctx: Box::new(ctx),
+                add_path: false,
+            });
+            task.send(GroupEgressDeltaV4::Advertise {
+                prefix,
+                rib: rib.clone(),
+            });
+        }
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            recv_all(&mut prx).len(),
+            1,
+            "the advertise reached the member"
+        );
+
+        // The prefix goes away (queued behind the flush delay), then the
+        // policy change detaches the still-Established member: the group
+        // empties and is deleted.
+        {
+            let af = groups.get(&AfiSafi::new(Afi::Ip, Safi::Unicast)).unwrap();
+            let task = af.group_by_id(&id).unwrap().task.as_ref().unwrap();
+            task.send(GroupEgressDeltaV4::Withdraw {
+                prefix,
+                id: 0,
+                source_ident: 99,
+            });
+        }
+        detach(&mut groups, &mut peers, ident);
+        assert!(peers.get_by_idx(ident).unwrap().state.is_established());
+        assert!(
+            groups[&AfiSafi::new(Afi::Ip, Safi::Unicast)]
+                .group_by_id(&id)
+                .is_none()
+        );
+
+        let mut sent = Vec::new();
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+            sent.extend(recv_all(&mut prx));
+            if !sent.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(sent.len(), 1, "the detached member still gets the withdraw");
+        assert!(
+            u16::from_be_bytes([sent[0][19], sent[0][20]]) > 0,
+            "the frame is a withdraw"
+        );
     }
 
     /// A peer removed and re-created at the same address gets its old

@@ -121,16 +121,16 @@ pub enum GroupEgressDeltaV4 {
 }
 
 /// Handle main keeps on each [`UpdateGroup`](super::update_group::UpdateGroup)
-/// for its egress task. Dropping it — when the group empties in `detach`, or
-/// when the whole map is torn down — aborts the task (abort-on-drop) and
-/// closes the channel.
+/// for its egress task. Dropping it — when the whole map is torn down —
+/// aborts the task (abort-on-drop) and closes the channel. When the group
+/// empties in `detach`, [`drain_and_exit`](Self::drain_and_exit) is used
+/// instead so the engine settles the withdrawals its departing members are
+/// owed before it goes.
 #[derive(Debug)]
 pub struct GroupEgressTask {
     /// `attach` / `detach` (and, later, the reduce) push deltas here.
     delta_tx: UnboundedSender<GroupEgressDeltaV4>,
-    // Held only for its abort-on-drop teardown; the task is driven entirely by
-    // the channel, so the handle is never read after spawn.
-    #[allow(dead_code)]
+    /// Abort-on-drop handle; the task is driven entirely by the channel.
     task: Task<()>,
 }
 
@@ -171,6 +171,20 @@ impl GroupEgressTask {
     /// gone (the group is tearing down), which is harmless here.
     pub fn send(&self, delta: GroupEgressDeltaV4) {
         let _ = self.delta_tx.send(delta);
+    }
+
+    /// Tear the task down gracefully: close the delta channel and let the
+    /// engine drain what is already queued — the `RemoveMember` deltas
+    /// `detach` just sent, whose handling settles the withdrawals the
+    /// departing members are owed — and then exit on its own. Used when the
+    /// group empties. A plain drop would abort the engine with those deltas
+    /// unread and its queued withdrawals unsent; before packing deferred
+    /// them, a withdrawal was fanned the moment it arrived, so a member
+    /// removed a moment later had already received it.
+    pub fn drain_and_exit(self) {
+        let GroupEgressTask { delta_tx, task } = self;
+        drop(delta_tx);
+        task.detach();
     }
 
     /// Request the group's adj-out over a oneshot (for `show advertised-routes`
@@ -237,14 +251,18 @@ impl Engine {
     /// flush; each wake drains at most `DRAIN_BATCH` deltas and then
     /// [`settle_flush`](Self::settle_flush) checks the deadline itself, so a
     /// sustained stream cannot starve the flush. Exits when the channel
-    /// closes (the group emptied); any queued withdrawal is dropped with it.
+    /// closes (the group emptied, see `GroupEgressTask::drain_and_exit`),
+    /// flushing whatever is still queued to the members still present.
     async fn run(&mut self, mut rx: mpsc::UnboundedReceiver<GroupEgressDeltaV4>) {
         let mut flush_at: Option<Instant> = None;
         loop {
             tokio::select! {
                 biased;
                 maybe = rx.recv() => {
-                    let Some(delta) = maybe else { break };
+                    let Some(delta) = maybe else {
+                        self.flush_withdraws();
+                        break;
+                    };
                     self.handle(delta);
                     for _ in 1..DRAIN_BATCH {
                         let Ok(delta) = rx.try_recv() else { break };
@@ -292,6 +310,13 @@ impl Engine {
                 self.members.insert(ident, *ctx);
             }
             GroupEgressDeltaV4::RemoveMember { ident } => {
+                // Settle the queue while the member can still be fanned to:
+                // a withdrawal queued before this delta is owed to it (it
+                // held the route), and once it is gone nothing else will
+                // send it — the group it moves to starts from the Loc-RIB,
+                // which no longer has the prefix. Before packing deferred
+                // withdrawals this was implicit (fanned on arrival).
+                self.flush_withdraws();
                 self.members.remove(&ident);
             }
             GroupEgressDeltaV4::Advertise { prefix, rib } => self.advertise(prefix, rib),
@@ -895,6 +920,99 @@ mod tests {
         let frames: Vec<BytesMut> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
         assert_eq!(frames.len(), 1, "both withdrawals in one UPDATE");
         assert!(engine.pending_withdraw.is_empty());
+    }
+
+    /// A withdrawal queued before a member leaves is owed to that member:
+    /// `RemoveMember` flushes the queue while it can still be fanned to.
+    /// (Review finding: flushing against the membership at flush time let a
+    /// peer reassigned by an egress-policy change keep the route; before
+    /// packing deferred withdrawals it received them on arrival.)
+    #[test]
+    fn remove_member_settles_the_withdrawals_it_is_owed() {
+        let mut engine = Engine::default();
+        let mut rx1 = member(&mut engine, 1);
+        let mut rx2 = member(&mut engine, 2);
+        let p: Ipv4Net = "10.10.10.0/24".parse().unwrap();
+        engine.handle(GroupEgressDeltaV4::Advertise {
+            prefix: p,
+            rib: rib(99, "192.0.2.9"),
+        });
+        let _ = rx1.try_recv();
+        let _ = rx2.try_recv();
+
+        engine.handle(GroupEgressDeltaV4::Withdraw {
+            prefix: p,
+            id: 0,
+            source_ident: 99,
+        });
+        assert!(rx2.try_recv().is_err(), "queued, not yet flushed");
+        engine.handle(GroupEgressDeltaV4::RemoveMember { ident: 2 });
+
+        let to_2: Vec<BytesMut> = std::iter::from_fn(|| rx2.try_recv().ok()).collect();
+        assert_eq!(to_2.len(), 1, "the departing member gets the withdraw");
+        assert!(is_withdraw(&to_2[0]));
+        let to_1: Vec<BytesMut> = std::iter::from_fn(|| rx1.try_recv().ok()).collect();
+        assert_eq!(
+            to_1.len(),
+            1,
+            "the staying member gets it in the same flush"
+        );
+        assert!(is_withdraw(&to_1[0]));
+        assert!(engine.pending_withdraw.is_empty());
+        assert!(!engine.members.contains_key(&2));
+    }
+
+    /// The group emptied: `detach` sends `RemoveMember` for the last member
+    /// and then closes the channel (`drain_and_exit`). The run loop must
+    /// process the removal — settling the withdrawal the member is owed —
+    /// and exit on its own, rather than be aborted with the delta unread.
+    #[tokio::test(start_paused = true)]
+    async fn closing_the_channel_drains_owed_withdrawals_before_exit() {
+        let (pkt_tx, mut pkt_rx) = mpsc::unbounded_channel();
+        let mut member_ctx = SyncCtx::for_test();
+        member_ctx.packet_tx = Some(pkt_tx);
+        let (delta_tx, delta_rx) = mpsc::unbounded_channel();
+        let mut engine = Engine::default();
+        let task = tokio::spawn(async move { engine.run(delta_rx).await });
+
+        let p: Ipv4Net = "10.10.10.0/24".parse().unwrap();
+        delta_tx
+            .send(GroupEgressDeltaV4::AddMember {
+                ident: 1,
+                ctx: Box::new(member_ctx),
+                add_path: false,
+            })
+            .unwrap();
+        delta_tx
+            .send(GroupEgressDeltaV4::Advertise {
+                prefix: p,
+                rib: rib(99, "192.0.2.9"),
+            })
+            .unwrap();
+        tokio::task::yield_now().await;
+        let _ = std::iter::from_fn(|| pkt_rx.try_recv().ok()).count();
+
+        // Withdraw, then the member leaves and the group empties: the
+        // channel closes with both deltas queued behind the flush delay.
+        delta_tx
+            .send(GroupEgressDeltaV4::Withdraw {
+                prefix: p,
+                id: 0,
+                source_ident: 99,
+            })
+            .unwrap();
+        delta_tx
+            .send(GroupEgressDeltaV4::RemoveMember { ident: 1 })
+            .unwrap();
+        drop(delta_tx);
+
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("the engine exits once the channel closes")
+            .expect("the engine task does not panic");
+        let frames: Vec<BytesMut> = std::iter::from_fn(|| pkt_rx.try_recv().ok()).collect();
+        assert_eq!(frames.len(), 1, "the departing member gets the withdraw");
+        assert!(is_withdraw(&frames[0]));
     }
 
     #[tokio::test(start_paused = true)]
