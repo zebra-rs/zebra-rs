@@ -196,13 +196,17 @@ fn reassign_all_update_groups(bgp: &mut Bgp) {
         .map(|(_, peer)| peer.ident)
         .collect();
     for ident in idents {
-        super::update_group::detach(&mut bgp.update_groups, &mut bgp.peers, ident);
+        // The handoff orders the two groups' egress tasks on the peer's
+        // writer: the new group sends nothing until the old one has
+        // settled what it owed the peer.
+        let handoff = super::update_group::detach(&mut bgp.update_groups, &mut bgp.peers, ident);
         super::update_group::attach(
             &mut bgp.update_groups,
             &mut bgp.peers,
             ident,
             router_id,
             bgp.as_sets_withdraw,
+            handoff,
         );
     }
 }

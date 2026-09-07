@@ -2270,6 +2270,7 @@ pub fn fsm(
                 id,
                 *bgp_ref.router_id,
                 bgp_ref.as_sets_withdraw,
+                None,
             );
         }
         peer_map.debug_verify_membership();

@@ -546,13 +546,20 @@ fn enhe_negotiated_for(
 /// Takes split borrows on `update_groups` and `peers` so the caller
 /// can be the FSM (which holds a `BgpTop` separately from the
 /// `PeerMap`).
+///
+/// `after` is the handoff [`detach`] returned when this is a reassignment
+/// of a live peer (an egress-policy change re-forms the groups): the
+/// group's egress task will not send the peer anything until the group it
+/// left has settled what it owed it. `None` at session up.
 pub fn attach(
     update_groups: &mut UpdateGroupMap,
     peers: &mut PeerMap,
     peer_idx: usize,
     router_id: Ipv4Addr,
     as_sets_withdraw: bool,
+    after: Option<tokio::sync::oneshot::Receiver<()>>,
 ) {
+    let mut after = after;
     let Some(peer) = peers.get_by_idx(peer_idx) else {
         return;
     };
@@ -613,6 +620,7 @@ pub fn attach(
                 ident: peer_idx,
                 ctx: Box::new(peer.sync_ctx(router_id, as_sets_withdraw)),
                 add_path,
+                after: after.take(),
             });
         }
 
@@ -628,11 +636,20 @@ pub fn attach(
 /// a future signature gets a fresh ID rather than reusing a retired
 /// one, so log correlation across the lifetime of the daemon stays
 /// stable.
-pub fn detach(update_groups: &mut UpdateGroupMap, peers: &mut PeerMap, peer_idx: usize) {
+///
+/// Returns the handoff for the peer's egress task (gate-on, IPv4 unicast):
+/// it resolves once that task has settled what it owed the peer. A caller
+/// re-attaching a live peer passes it to [`attach`] so the new group's task
+/// does not send the peer anything before then; other callers (session
+/// down, peer deletion) drop it.
+pub fn detach(
+    update_groups: &mut UpdateGroupMap,
+    peers: &mut PeerMap,
+    peer_idx: usize,
+) -> Option<tokio::sync::oneshot::Receiver<()>> {
+    let mut handoff_rx = None;
     let memberships: Vec<(AfiSafi, UpdateGroupId)> = {
-        let Some(peer) = peers.get_mut_by_idx(peer_idx) else {
-            return;
-        };
+        let peer = peers.get_mut_by_idx(peer_idx)?;
         let ms = peer
             .update_group_id
             .iter()
@@ -661,8 +678,11 @@ pub fn detach(update_groups: &mut UpdateGroupMap, peers: &mut PeerMap, peer_idx:
                 // below rather than dropped (aborted) with that delta and
                 // its queued withdrawals unread.
                 if let Some(t) = &group.task {
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    handoff_rx = Some(rx);
                     t.send(super::group_egress::GroupEgressDeltaV4::RemoveMember {
                         ident: peer_idx,
+                        handoff: Some(tx),
                     });
                 }
                 group.members.is_empty()
@@ -675,6 +695,7 @@ pub fn detach(update_groups: &mut UpdateGroupMap, peers: &mut PeerMap, peer_idx:
             }
         }
     }
+    handoff_rx
 }
 
 // ── IPv4 unicast send / cache_remove / flush ──
@@ -1904,8 +1925,8 @@ mod tests {
 
         let mut groups = empty_map();
         let rid = "1.1.1.1".parse().unwrap();
-        attach(&mut groups, &mut peers, dual_idx, rid, true);
-        attach(&mut groups, &mut peers, v4only_idx, rid, true);
+        attach(&mut groups, &mut peers, dual_idx, rid, true, None);
+        attach(&mut groups, &mut peers, v4only_idx, rid, true, None);
 
         let v4_key = AfiSafi::new(Afi::Ip, Safi::Unicast);
         let v6_key = AfiSafi::new(Afi::Ip6, Safi::Unicast);
@@ -2611,6 +2632,7 @@ mod tests {
                 ident,
                 ctx: Box::new(ctx),
                 add_path: false,
+                after: None,
             });
             task.send(GroupEgressDeltaV4::Advertise {
                 prefix,
@@ -2638,7 +2660,8 @@ mod tests {
                 source_ident: 99,
             });
         }
-        detach(&mut groups, &mut peers, ident);
+        let handoff = detach(&mut groups, &mut peers, ident)
+            .expect("a group with an egress task hands the member off");
         assert!(peers.get_by_idx(ident).unwrap().state.is_established());
         assert!(
             groups[&AfiSafi::new(Afi::Ip, Safi::Unicast)]
@@ -2646,19 +2669,43 @@ mod tests {
                 .is_none()
         );
 
-        let mut sent = Vec::new();
-        for _ in 0..20 {
-            tokio::task::yield_now().await;
-            sent.extend(recv_all(&mut prx));
-            if !sent.is_empty() {
-                break;
-            }
-        }
+        // The handoff resolves only once the old task has settled the
+        // member — by then the withdraw is on the member's writer.
+        tokio::time::timeout(std::time::Duration::from_secs(5), handoff)
+            .await
+            .expect("the old task settles the member promptly")
+            .expect("the old task fires the handoff rather than dropping it");
+        let sent = recv_all(&mut prx);
         assert_eq!(sent.len(), 1, "the detached member still gets the withdraw");
         assert!(
             u16::from_be_bytes([sent[0][19], sent[0][20]]) > 0,
             "the frame is a withdraw"
         );
+    }
+
+    /// Gate-off (no egress task) has nothing to hand off.
+    #[test]
+    fn detach_without_an_egress_task_returns_no_handoff() {
+        let (id, mut group) = test_group(0);
+        let (tx, _rx) = mpsc::channel::<Message>(64);
+        let mut peer = super::super::peer::Peer::new(
+            0,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            65002,
+            "10.0.0.2".parse().unwrap(),
+            None,
+            tx,
+            crate::context::ProtoContext::default_table_no_rib(),
+        );
+        peer.update_group_id
+            .insert(AfiSafi::new(Afi::Ip, Safi::Unicast), id.clone());
+        group.members.insert(0);
+        let mut groups = groups_with(group);
+        let mut peers = PeerMap::new();
+        peers.insert("10.0.0.2".parse().unwrap(), peer);
+        let ident = peers.get(&"10.0.0.2".parse().unwrap()).unwrap().ident;
+        assert!(detach(&mut groups, &mut peers, ident).is_none());
     }
 
     /// A peer removed and re-created at the same address gets its old

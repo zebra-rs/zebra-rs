@@ -26,6 +26,7 @@ use bgp_packet::{Ipv4Nlri, UpdatePacket};
 use bytes::BytesMut;
 use ipnet::Ipv4Net;
 use tokio::sync::mpsc::{self, UnboundedSender};
+use tokio::sync::oneshot;
 use tokio::time::{Duration, Instant, sleep_until};
 
 /// How long a queued withdrawal waits for the rest of its burst before the
@@ -74,25 +75,31 @@ pub enum GroupEgressDeltaV4 {
         ident: usize,
         ctx: Box<SyncCtx>,
         add_path: bool,
+        /// Handoff from the group the member is leaving (`detach` → `attach`
+        /// on a reassignment): resolves once that group's engine has settled
+        /// — put on the wire — everything it owed the member. The engine
+        /// must not send this member anything before it resolves, or a
+        /// withdraw the old group still owes could follow this group's
+        /// re-announcement of the same prefix and tear it down. `None` when
+        /// the member comes from no group (session up). `run` awaits it
+        /// before handling the delta.
+        after: Option<oneshot::Receiver<()>>,
     },
     RemoveMember {
         ident: usize,
+        /// Fired after the engine has flushed its queue with the member
+        /// still present — the other half of `AddMember::after`.
+        handoff: Option<oneshot::Sender<()>>,
     },
     /// The new best path for `prefix`. The split-horizon source is the path's
     /// own origin (`rib.ident`), derived in the engine — no separate field.
-    Advertise {
-        prefix: Ipv4Net,
-        rib: BgpRib,
-    },
+    Advertise { prefix: Ipv4Net, rib: BgpRib },
     /// A route the session-up sync (`route_sync_ipv4`) already sent to a NEW
     /// member directly — record it in the group `adj_out` *without* re-sending,
     /// so the group's later withdraws reach that member (a late peer that is
     /// the first of a new group would otherwise be invisible to the group).
     /// Mirrors the PET's DumpV4 ③ `RecordAdjOut`.
-    RecordAdjOut {
-        prefix: Ipv4Net,
-        rib: BgpRib,
-    },
+    RecordAdjOut { prefix: Ipv4Net, rib: BgpRib },
     /// `prefix` is gone; `source_ident` is the withdrawing peer (excluded from
     /// the fan — it never received the advertisement under split-horizon).
     Withdraw {
@@ -263,10 +270,10 @@ impl Engine {
                         self.flush_withdraws();
                         break;
                     };
-                    self.handle(delta);
+                    self.admit(delta).await;
                     for _ in 1..DRAIN_BATCH {
                         let Ok(delta) = rx.try_recv() else { break };
-                        self.handle(delta);
+                        self.admit(delta).await;
                     }
                     self.settle_flush(&mut flush_at);
                 }
@@ -276,6 +283,38 @@ impl Engine {
                 }
             }
         }
+    }
+
+    /// Handle a delta from the channel, honouring a joining member's
+    /// handoff first: the group it is leaving must have put everything it
+    /// owed the member on the wire before this engine sends it anything,
+    /// or an old-group withdraw of P could land after this group's
+    /// re-announcement of P and tear it down. The wait is bounded by the
+    /// old engine reaching its `RemoveMember` (already queued when the
+    /// handoff was created); a dropped sender (that engine torn down)
+    /// releases the wait too. Ordering cannot deadlock: `detach` enqueues
+    /// the `RemoveMember` before `attach` enqueues the `AddMember` that
+    /// waits on it, so the earliest-enqueued outstanding wait always has
+    /// its releasing delta ahead of any wait in the releasing engine.
+    async fn admit(&mut self, delta: GroupEgressDeltaV4) {
+        let delta = match delta {
+            GroupEgressDeltaV4::AddMember {
+                ident,
+                ctx,
+                add_path,
+                after: Some(after),
+            } => {
+                let _ = after.await;
+                GroupEgressDeltaV4::AddMember {
+                    ident,
+                    ctx,
+                    add_path,
+                    after: None,
+                }
+            }
+            other => other,
+        };
+        self.handle(delta);
     }
 
     /// After a channel drain: arm the deferred flush when a withdrawal first
@@ -299,25 +338,33 @@ impl Engine {
         }
     }
 
+    /// Handle one delta from the run loop. An `AddMember` carrying a
+    /// handoff has already had it awaited by [`admit`](Self::admit); a
+    /// caller reaching `handle` directly (tests) gets no barrier.
     fn handle(&mut self, delta: GroupEgressDeltaV4) {
         match delta {
             GroupEgressDeltaV4::AddMember {
                 ident,
                 ctx,
                 add_path,
+                after: _,
             } => {
                 self.add_path = add_path;
                 self.members.insert(ident, *ctx);
             }
-            GroupEgressDeltaV4::RemoveMember { ident } => {
+            GroupEgressDeltaV4::RemoveMember { ident, handoff } => {
                 // Settle the queue while the member can still be fanned to:
                 // a withdrawal queued before this delta is owed to it (it
                 // held the route), and once it is gone nothing else will
                 // send it — the group it moves to starts from the Loc-RIB,
                 // which no longer has the prefix. Before packing deferred
-                // withdrawals this was implicit (fanned on arrival).
+                // withdrawals this was implicit (fanned on arrival). Then
+                // release the group the member is moving to.
                 self.flush_withdraws();
                 self.members.remove(&ident);
+                if let Some(handoff) = handoff {
+                    let _ = handoff.send(());
+                }
             }
             GroupEgressDeltaV4::Advertise { prefix, rib } => self.advertise(prefix, rib),
             GroupEgressDeltaV4::RecordAdjOut { prefix, rib } => self.record_adj_out(prefix, rib),
@@ -562,6 +609,7 @@ mod tests {
             ident,
             ctx: Box::new(ctx),
             add_path: false,
+            after: None,
         });
         rx
     }
@@ -631,7 +679,10 @@ mod tests {
     fn removed_member_is_dropped_from_the_fan() {
         let mut engine = Engine::default();
         let mut rx1 = member(&mut engine, 1);
-        engine.handle(GroupEgressDeltaV4::RemoveMember { ident: 1 });
+        engine.handle(GroupEgressDeltaV4::RemoveMember {
+            ident: 1,
+            handoff: None,
+        });
         advertise(&mut engine, "10.10.10.0/24", 99);
         assert!(rx1.try_recv().is_err(), "removed member receives nothing");
     }
@@ -946,7 +997,10 @@ mod tests {
             source_ident: 99,
         });
         assert!(rx2.try_recv().is_err(), "queued, not yet flushed");
-        engine.handle(GroupEgressDeltaV4::RemoveMember { ident: 2 });
+        engine.handle(GroupEgressDeltaV4::RemoveMember {
+            ident: 2,
+            handoff: None,
+        });
 
         let to_2: Vec<BytesMut> = std::iter::from_fn(|| rx2.try_recv().ok()).collect();
         assert_eq!(to_2.len(), 1, "the departing member gets the withdraw");
@@ -981,6 +1035,7 @@ mod tests {
                 ident: 1,
                 ctx: Box::new(member_ctx),
                 add_path: false,
+                after: None,
             })
             .unwrap();
         delta_tx
@@ -1002,7 +1057,10 @@ mod tests {
             })
             .unwrap();
         delta_tx
-            .send(GroupEgressDeltaV4::RemoveMember { ident: 1 })
+            .send(GroupEgressDeltaV4::RemoveMember {
+                ident: 1,
+                handoff: None,
+            })
             .unwrap();
         drop(delta_tx);
 
@@ -1013,6 +1071,148 @@ mod tests {
         let frames: Vec<BytesMut> = std::iter::from_fn(|| pkt_rx.try_recv().ok()).collect();
         assert_eq!(frames.len(), 1, "the departing member gets the withdraw");
         assert!(is_withdraw(&frames[0]));
+    }
+
+    /// The reviewer's two-engine ordering: the old group still owes the
+    /// member a withdraw of P (queued, deferred) when the member is
+    /// reassigned and the new group announces P. Without a barrier the new
+    /// group's announce could reach the writer first and the old group's
+    /// late withdraw would tear P down. With the handoff, the new engine
+    /// sends the member nothing until the old engine has settled it, so the
+    /// member sees the withdraw and then the announcement.
+    #[tokio::test(start_paused = true)]
+    async fn replacement_group_waits_for_the_old_group_to_settle_the_member() {
+        let (pkt_tx, mut pkt_rx) = mpsc::unbounded_channel();
+        let ctx_for_old = {
+            let mut c = SyncCtx::for_test();
+            c.packet_tx = Some(pkt_tx.clone());
+            c
+        };
+        let ctx_for_new = {
+            let mut c = SyncCtx::for_test();
+            c.packet_tx = Some(pkt_tx);
+            c
+        };
+        let (old_tx, old_rx) = mpsc::unbounded_channel();
+        let (new_tx, new_rx) = mpsc::unbounded_channel();
+        let mut old_engine = Engine::default();
+        let mut new_engine = Engine::default();
+        let old_task = tokio::spawn(async move { old_engine.run(old_rx).await });
+        let new_task = tokio::spawn(async move { new_engine.run(new_rx).await });
+        let p: Ipv4Net = "10.10.10.0/24".parse().unwrap();
+
+        // 1. The old group advertised P to the member and now queues its
+        //    withdrawal (deferred behind the flush delay).
+        old_tx
+            .send(GroupEgressDeltaV4::AddMember {
+                ident: 1,
+                ctx: Box::new(ctx_for_old),
+                add_path: false,
+                after: None,
+            })
+            .unwrap();
+        old_tx
+            .send(GroupEgressDeltaV4::Advertise {
+                prefix: p,
+                rib: rib(99, "192.0.2.9"),
+            })
+            .unwrap();
+        tokio::task::yield_now().await;
+        assert_eq!(
+            std::iter::from_fn(|| pkt_rx.try_recv().ok()).count(),
+            1,
+            "the member holds P from the old group"
+        );
+        old_tx
+            .send(GroupEgressDeltaV4::Withdraw {
+                prefix: p,
+                id: 0,
+                source_ident: 99,
+            })
+            .unwrap();
+
+        // 2. Reassignment: the member joins the new group carrying the
+        //    handoff, and the new group announces P — before the old group
+        //    has handled the removal.
+        let (handoff_tx, handoff_rx) = oneshot::channel();
+        new_tx
+            .send(GroupEgressDeltaV4::AddMember {
+                ident: 1,
+                ctx: Box::new(ctx_for_new),
+                add_path: false,
+                after: Some(handoff_rx),
+            })
+            .unwrap();
+        new_tx
+            .send(GroupEgressDeltaV4::Advertise {
+                prefix: p,
+                rib: rib(99, "192.0.2.8"),
+            })
+            .unwrap();
+        for _ in 0..3 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            pkt_rx.try_recv().is_err(),
+            "the new group sends nothing before the old group settles the member"
+        );
+
+        // 3. The old group handles the removal: flushes the withdraw, fires
+        //    the handoff; the new group then delivers its announcement.
+        old_tx
+            .send(GroupEgressDeltaV4::RemoveMember {
+                ident: 1,
+                handoff: Some(handoff_tx),
+            })
+            .unwrap();
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+        let frames: Vec<BytesMut> = std::iter::from_fn(|| pkt_rx.try_recv().ok()).collect();
+        assert_eq!(frames.len(), 2, "withdraw then announce, nothing else");
+        assert!(
+            is_withdraw(&frames[0]),
+            "the old group's withdraw goes first"
+        );
+        assert!(
+            !is_withdraw(&frames[1]),
+            "the new group's announce follows it"
+        );
+        old_task.abort();
+        new_task.abort();
+    }
+
+    /// A joining member whose old engine is already gone (sender dropped)
+    /// must not wait forever: the barrier releases on a closed handoff.
+    #[tokio::test(start_paused = true)]
+    async fn a_dropped_handoff_releases_the_joining_member() {
+        let (pkt_tx, mut pkt_rx) = mpsc::unbounded_channel();
+        let mut ctx = SyncCtx::for_test();
+        ctx.packet_tx = Some(pkt_tx);
+        let (delta_tx, delta_rx) = mpsc::unbounded_channel();
+        let mut engine = Engine::default();
+        let task = tokio::spawn(async move { engine.run(delta_rx).await });
+        let (handoff_tx, handoff_rx) = oneshot::channel::<()>();
+        drop(handoff_tx);
+        delta_tx
+            .send(GroupEgressDeltaV4::AddMember {
+                ident: 1,
+                ctx: Box::new(ctx),
+                add_path: false,
+                after: Some(handoff_rx),
+            })
+            .unwrap();
+        delta_tx
+            .send(GroupEgressDeltaV4::Advertise {
+                prefix: "10.10.10.0/24".parse().unwrap(),
+                rib: rib(99, "192.0.2.9"),
+            })
+            .unwrap();
+        for _ in 0..3 {
+            tokio::task::yield_now().await;
+        }
+        assert!(pkt_rx.try_recv().is_ok(), "the announce goes out");
+        task.abort();
     }
 
     #[tokio::test(start_paused = true)]
@@ -1032,6 +1232,7 @@ mod tests {
             ident: 1,
             ctx: Box::new(member_ctx),
             add_path: false,
+            after: None,
         });
         let task = tokio::spawn(async move { engine.run(delta_rx).await });
 

@@ -174,6 +174,20 @@ drain and exit (`GroupEgressTask::drain_and_exit`: close the channel,
 detach the handle) instead of aborting it with that delta unread; the run
 loop flushes once more on channel close for members still present.
 
+That settlement is asynchronous, and the reassignment attaches the peer
+to its new group at once, so the two engines' sends to the peer's writer
+were unordered: the old group's late withdraw of P could follow the new
+group's re-announcement of P (review finding). The handoff orders them.
+`detach` puts a oneshot in the `RemoveMember` it sends and returns the
+receiver; the old engine fires it after its flush. A reassigning caller
+(`reassign_all_update_groups`) passes the receiver to `attach`, which puts
+it in the `AddMember`, and the new engine's run loop awaits it before
+handling that delta — so it sends the member nothing until the old group
+has settled it. A dropped sender (the old task torn down) releases the
+wait. It cannot deadlock: the `RemoveMember` is enqueued before the
+`AddMember` that waits on it, so the earliest outstanding wait always has
+its release ahead of any wait in the releasing engine.
+
 ### What still sends immediately
 
 MUP, Flowspec, SR Policy, RTC and BGP-LS withdrawals keep their
