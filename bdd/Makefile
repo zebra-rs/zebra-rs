@@ -556,6 +556,13 @@ bgp_evpn_capability:
 	mkdir -p allure-results
 	$(CUCUMBER) -- --concurrency=1 --tags "@bgp_evpn_capability"
 
+# Wire-level bulk withdrawal packing + Adj-RIB-Out coherence for IPv4, IPv6,
+# VPNv4/v6 and EVPN.
+.PHONY: bgp_withdraw_packing
+bgp_withdraw_packing:
+	mkdir -p allure-results
+	$(CUCUMBER) -- --concurrency=1 --tags "@bgp_withdraw_packing"
+
 bgp_vrf_evpn_type5:
 	mkdir -p allure-results
 	$(CUCUMBER) -- --concurrency=1 --tags "@bgp_vrf_evpn_type5"

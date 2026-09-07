@@ -6411,8 +6411,17 @@ mod evpn_nexthop_wiring_tests {
 /// an empty selection at the peer triggers `route_evpn_export_selected`
 /// which sends `Message::MacDel` / `MdbDel` and the kernel FDB row goes
 /// away.
-fn route_withdraw_evpn(peer: &mut Peer, route: EvpnRoute) {
-    peer.queue_withdraw_evpn(evpn_cache_key(&route), route);
+fn route_withdraw_evpn(
+    peer: &mut Peer,
+    rd: &RouteDistinguisher,
+    prefix: &EvpnPrefix,
+    id: u32,
+    route: EvpnRoute,
+) {
+    // Keyed on the RIB identity the caller withdrew by — the same key the
+    // Adj-RIB-Out and `cache_evpn_rev` use — so the drain's Adj-RIB-Out
+    // check and a re-advertise's cancel both find it.
+    peer.queue_withdraw_evpn((*rd, prefix.clone(), id), route);
 }
 
 /// Fan out a withdraw to every peer with `(L2vpn, Evpn)` Established.
@@ -6439,7 +6448,7 @@ fn evpn_withdraw_one(peer: &mut Peer, rd: &RouteDistinguisher, prefix: &EvpnPref
     // reality — without this a follow-up policy change would think the
     // route is still advertised and emit a redundant withdraw.
     peer.adj_out.remove_evpn(*rd, prefix, id);
-    route_withdraw_evpn(peer, route);
+    route_withdraw_evpn(peer, rd, prefix, id, route);
 }
 
 pub fn route_withdraw_evpn_to_peers(
@@ -6730,8 +6739,8 @@ pub fn route_advertise_evpn_to_peers(
 /// Queue a per-peer IPv4-unicast (`rd = None`) or VPNv4 withdraw. The
 /// NLRI joins the peer's pending withdrawals and the next-tick flush
 /// packs it with whatever else is queued — one UPDATE per full message
-/// rather than one per route. The caller has already dropped the route
-/// from the peer's Adj-RIB-Out; the flush re-checks that table, so a
+/// rather than one per route. The caller drops the route from the peer's
+/// Adj-RIB-Out in the same pass; the flush re-checks that table, so a
 /// re-advertise landing before the flush cancels the withdraw, and a
 /// unicast withdraw stays queued while the peer's update-group has an
 /// announce job in flight (see [`super::pending_withdraw`]).
