@@ -383,7 +383,8 @@ value.) Fix: apply a sane default (e.g. 120 s, clamped) or add a real config lea
   and clone only when a bound policy will rewrite.
 - Unbatched per-prefix withdraw packets (`route.rs:5505`) — ~100× the packet count
   on a full-table withdraw sweep; batch withdrawn NLRIs per peer like the announce
-  path.
+  path. — FIXED 2026-09-06 (`Peer::pending_withdraw` + next-tick flush, see
+  `bgp-withdraw-packing.md`; 1000 IPv4 withdrawals → 2 UPDATEs at 4096 octets).
 - Legacy whole-table session-up dump inline on the main loop by default
   (`route.rs:13655`); the bounded-chunk cursor exists behind an unset env var.
 - `sync_ctx` rebuilt per-route in dumps (`route.rs:13058`); `mem::replace` wins in
