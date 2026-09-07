@@ -5831,6 +5831,7 @@ fn soft_out_v4_to_group(peer_idx: usize, bgp: &BgpTop, peers: &PeerMap) {
                 ident,
                 ctx: Box::new(m.sync_ctx(*bgp.router_id, bgp.as_sets_withdraw)),
                 add_path: m.opt.is_add_path_send(Afi::Ip, Safi::Unicast),
+                after: None,
             });
         }
     }
