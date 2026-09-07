@@ -655,6 +655,7 @@ fn advertise_with_flush_in_flight(
 ) -> (
     crate::bgp::update_group::UpdateGroupId,
     crate::bgp::update_group::FlushJob<bgp_packet::Ipv4Nlri>,
+    Vec<crate::bgp::update_group::JobMember>,
 ) {
     let prefix: Ipv4Net = P.parse().unwrap();
     let selected = vec![bgp.shard.v4.1.get(&prefix).unwrap().clone()];
@@ -674,12 +675,9 @@ fn advertise_with_flush_in_flight(
             .expect("a job carrying P");
     group.flush_inflight_ipv4 = true;
     // Counted against its members, as `flush_ipv4` does.
-    for ident in job.member_idents() {
-        if let Some(peer) = bgp.peers.get_mut_by_idx(ident) {
-            peer.flush_jobs_v4 += 1;
-        }
-    }
-    (gid, job)
+    let members =
+        crate::bgp::update_group::count_job_up(&job.members, &mut bgp.peers, bgp_packet::Afi::Ip);
+    (gid, job, members)
 }
 
 /// The job runs to completion and the worker reports back to main.
@@ -687,8 +685,8 @@ fn flush_completes(
     bgp: &mut Bgp,
     gid: crate::bgp::update_group::UpdateGroupId,
     job: crate::bgp::update_group::FlushJob<bgp_packet::Ipv4Nlri>,
+    members: Vec<crate::bgp::update_group::JobMember>,
 ) {
-    let members = job.member_idents();
     let deltas = job.run();
     bgp.process_msg(Message::FlushDoneIpv4(gid, deltas, members));
 }
@@ -714,9 +712,9 @@ async fn a_flush_in_flight_when_the_link_local_moves_does_not_have_the_last_word
     put(&mut bgp);
     let (c, mut rx) = add_peer(&mut bgp, true);
     link_local_appears(&mut bgp);
-    let (gid, job) = advertise_with_flush_in_flight(&mut bgp, c);
+    let (gid, job, members) = advertise_with_flush_in_flight(&mut bgp, c);
     link_local_moves(&mut bgp);
-    flush_completes(&mut bgp, gid, job);
+    flush_completes(&mut bgp, gid, job, members);
     let ll = |a: &str| Sent::Enhe(P.to_string(), a.parse().unwrap());
     assert_eq!(
         sent(&mut rx),
@@ -733,7 +731,7 @@ async fn a_flush_in_flight_with_the_link_local_unchanged_sends_once() {
     put(&mut bgp);
     let (c, mut rx) = add_peer(&mut bgp, true);
     link_local_appears(&mut bgp);
-    let (gid, job) = advertise_with_flush_in_flight(&mut bgp, c);
-    flush_completes(&mut bgp, gid, job);
+    let (gid, job, members) = advertise_with_flush_in_flight(&mut bgp, c);
+    flush_completes(&mut bgp, gid, job, members);
     assert_eq!(sent(&mut rx), enhe_sent());
 }
