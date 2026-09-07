@@ -1,0 +1,45 @@
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.0.2.1
+    timer:
+      adv-interval:
+        ibgp: 0
+    neighbor:
+    - remote-address: 192.0.2.2
+      remote-as: 65001
+      enabled: true
+      transport:
+        passive-mode: true
+      route-reflector:
+        client: true
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: ipv6
+        enabled: true
+      - name: vpnv4
+        enabled: true
+      - name: vpnv6
+        enabled: true
+      - name: evpn
+        enabled: true
+    - remote-address: 192.0.2.3
+      remote-as: 65001
+      enabled: true
+      transport:
+        passive-mode: true
+      route-reflector:
+        client: true
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: ipv6
+        enabled: true
+      - name: vpnv4
+        enabled: true
+      - name: vpnv6
+        enabled: true
+      - name: evpn
+        enabled: true

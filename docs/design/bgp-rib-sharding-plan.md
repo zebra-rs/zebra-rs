@@ -701,6 +701,10 @@ Invariants this preserves:
   skipping it if `adj_out` shows a newer announce re-acquired the prefix.
   Announce-before-withdraw ordering holds even though the two originated
   from different shard messages at different times.
+  *2026-09-06: the park moved from the group to the peer — withdraws now
+  queue in `Peer::pending_withdraw` for packing, the in-flight gate holds
+  the unicast drain, and `flush_done_ipv4` drains it with the same
+  `adj_out` check; see `bgp-withdraw-packing.md`.*
 - **Per-prefix order preserved.** Each prefix lives on exactly one shard,
   so its add→withdraw sequence traverses that shard's queue in order and
   reaches main in order; the deferred-withdraw machinery preserves it on
