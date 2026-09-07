@@ -1613,7 +1613,10 @@ mod withdraw_pagination_tests {
                 other => panic!("expected an EVPN MP_UNREACH, got {:?}", other),
             })
             .collect();
-        assert_eq!(seen, routes, "every route once, in queue order");
+        // Packets take routes from the end of the queue, so the wire order
+        // is the reverse of the queue order — every route exactly once.
+        let expected: Vec<EvpnRoute> = routes.into_iter().rev().collect();
+        assert_eq!(seen, expected, "every route once");
         // Every packet but the last is full: the next route would not fit.
         for p in &packets[..packets.len() - 1] {
             let body = p.header.length as usize;

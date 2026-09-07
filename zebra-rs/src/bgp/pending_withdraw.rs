@@ -36,10 +36,14 @@
 //!    that job runs could land on the writer *before* the job's
 //!    announcement of the same prefix, leaving the peer with a route the
 //!    Adj-RIB-Out has already dropped. So those two families stay queued
-//!    while the peer's group has a job in flight, and
-//!    [`flush_done`](super::update_group::flush_done_ipv4) drains them
-//!    once every job byte is on the writer channel. (This replaces the
-//!    per-group `deferred_withdraw_*` parking that served the same race.)
+//!    while any job carrying this peer's announcements is out
+//!    (`Peer::flush_jobs_v4` / `v6`, counted up when the job is spawned),
+//!    and [`flush_done`](super::update_group::flush_done_ipv4) counts the
+//!    job off and drains them once every job byte is on the writer
+//!    channel. The count lives on the peer rather than the group so it
+//!    survives the group being deleted or the peer moving to another
+//!    group while the job is out. (This replaces the per-group
+//!    `deferred_withdraw_*` parking that served the same race.)
 //!
 //! A session leaving Established clears the queue and cancels the marker
 //! (`route_clean`); the flush itself is gated on Established so a marker
@@ -47,9 +51,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use bgp_packet::{
-    Afi, AfiSafi, EvpnRoute, Ipv4Nlri, Ipv6Nlri, MpUnreachAttr, Safi, Vpnv4Nlri, Vpnv6Nlri,
-};
+use bgp_packet::{Afi, EvpnRoute, Ipv4Nlri, Ipv6Nlri, MpUnreachAttr, Vpnv4Nlri, Vpnv6Nlri};
 
 use crate::context::Timer;
 
@@ -57,7 +59,6 @@ use super::Message;
 use super::adj_rib::{AdjRibTable, Out};
 use super::peer::{EvpnCacheKey, Peer};
 use super::peer_map::PeerMap;
-use super::update_group::UpdateGroupMap;
 
 /// The withdrawals queued for one peer, per family. Each family is a set
 /// keyed on route identity — for the VPN families that identity is
@@ -157,28 +158,30 @@ impl Peer {
 
 /// `Message::FlushWithdraw(ident)`: drain the peer's queued withdrawals
 /// onto the wire, family by family. Unicast IPv4 / IPv6 stay queued while
-/// the peer's update-group has a flush job in flight (see the module doc);
-/// `flush_done_*` drains them afterwards.
-pub fn flush_pending_withdraws(ident: usize, update_groups: &UpdateGroupMap, peers: &mut PeerMap) {
+/// a flush job carrying the peer's announcements is in flight (see the
+/// module doc); `flush_done_*` drains them afterwards.
+pub fn flush_pending_withdraws(ident: usize, peers: &mut PeerMap) {
     let Some(peer) = peers.get_mut_by_idx(ident) else {
         return;
     };
     peer.withdraw_timer = None;
-    drain_peer(peer, update_groups);
+    drain_peer(peer);
 }
 
-/// After an update-group flush job for `afi` unicast completed: drain the
-/// unicast withdrawals every peer parked behind that job. Walks every peer
-/// rather than the group's members — a peer can change groups while its
-/// withdrawals are parked — and re-checks each peer's *current* group,
-/// so a peer whose new group is itself mid-flight stays parked.
-pub fn drain_after_flush(afi: Afi, update_groups: &UpdateGroupMap, peers: &mut PeerMap) {
-    for (_, peer) in peers.iter_mut_all() {
-        let queued = match afi {
-            Afi::Ip => !peer.pending_withdraw.v4.is_empty(),
-            _ => !peer.pending_withdraw.v6.is_empty(),
+/// After an update-group flush job for `afi` unicast completed — its
+/// `members` already counted off their `flush_jobs_*` — drain the unicast
+/// withdrawals those members parked behind it. A member another job is
+/// still carrying stays parked until that one completes too.
+pub fn drain_after_flush(afi: Afi, members: &[usize], peers: &mut PeerMap) {
+    for &ident in members {
+        let Some(peer) = peers.get_mut_by_idx(ident) else {
+            continue;
         };
-        if !queued || group_flush_inflight(peer, update_groups, afi) {
+        let (queued, gated) = match afi {
+            Afi::Ip => (!peer.pending_withdraw.v4.is_empty(), peer.flush_jobs_v4 > 0),
+            _ => (!peer.pending_withdraw.v6.is_empty(), peer.flush_jobs_v6 > 0),
+        };
+        if !queued || gated {
             continue;
         }
         if !peer.state.is_established() {
@@ -192,15 +195,15 @@ pub fn drain_after_flush(afi: Afi, update_groups: &UpdateGroupMap, peers: &mut P
     }
 }
 
-fn drain_peer(peer: &mut Peer, update_groups: &UpdateGroupMap) {
+fn drain_peer(peer: &mut Peer) {
     if !peer.state.is_established() {
         peer.clear_pending_withdraws();
         return;
     }
-    if !group_flush_inflight(peer, update_groups, Afi::Ip) {
+    if peer.flush_jobs_v4 == 0 {
         drain_v4(peer);
     }
-    if !group_flush_inflight(peer, update_groups, Afi::Ip6) {
+    if peer.flush_jobs_v6 == 0 {
         drain_v6(peer);
     }
     drain_v4vpn(peer);
@@ -208,22 +211,6 @@ fn drain_peer(peer: &mut Peer, update_groups: &UpdateGroupMap) {
     drain_evpn(peer);
     drain_v4lu(peer);
     drain_v6lu(peer);
-}
-
-/// Whether the peer's `afi`-unicast update-group has a flush job on the
-/// blocking pool right now.
-fn group_flush_inflight(peer: &Peer, update_groups: &UpdateGroupMap, afi: Afi) -> bool {
-    let afi_safi = AfiSafi::new(afi, Safi::Unicast);
-    let Some(gid) = peer.update_group_id.get(&afi_safi) else {
-        return false;
-    };
-    update_groups
-        .get(&afi_safi)
-        .and_then(|af| af.group_by_id(gid))
-        .is_some_and(|group| match afi {
-            Afi::Ip => group.flush_inflight_ipv4,
-            _ => group.flush_inflight_ipv6,
-        })
 }
 
 /// Whether the Adj-RIB-Out still (or again) holds `(prefix, id)`. `id == 0`
@@ -380,9 +367,10 @@ fn drain_v6lu(peer: &mut Peer) {
 mod tests {
     use super::super::peer::State;
     use super::super::route::{BgpRib, BgpRibType};
-    use super::super::update_group::empty_map;
     use super::*;
-    use bgp_packet::{BgpAttr, EvpnMulticast, EvpnPrefix, Label, RouteDistinguisher, UpdatePacket};
+    use bgp_packet::{
+        AfiSafi, BgpAttr, EvpnMulticast, EvpnPrefix, Label, RouteDistinguisher, Safi, UpdatePacket,
+    };
     use bytes::BytesMut;
     use ipnet::Ipv4Net;
     use std::net::{IpAddr, Ipv4Addr};
@@ -505,7 +493,7 @@ mod tests {
         for i in 0..3000 {
             peer.queue_withdraw_v4(v4(i, 0));
         }
-        flush_pending_withdraws(1, &empty_map(), &mut PeerMap::new());
+        flush_pending_withdraws(1, &mut PeerMap::new());
         // No such peer in that map — nothing sent, queue intact.
         assert_eq!(queued(&peer.pending_withdraw), 3000);
 
@@ -513,7 +501,7 @@ mod tests {
         let address = peer.address;
         peers.insert(address, peer);
         let ident = peers.get(&address).unwrap().ident;
-        flush_pending_withdraws(ident, &empty_map(), &mut peers);
+        flush_pending_withdraws(ident, &mut peers);
         let packets = sent(&mut prx);
         assert_eq!(packets.len(), 4);
         let n: usize = packets.iter().map(|p| p.ipv4_withdraw.len()).sum();
@@ -535,7 +523,7 @@ mod tests {
         peer.queue_withdraw_v4(v4(1, 0));
         peer.adj_out.v4.add(v4(1, 0).prefix, rib(7));
         peer.queue_withdraw_v4(v4(2, 0));
-        drain_peer(&mut peer, &empty_map());
+        drain_peer(&mut peer);
         let packets = sent(&mut prx);
         assert_eq!(packets.len(), 1);
         let got: Vec<Ipv4Net> = packets[0].ipv4_withdraw.iter().map(|n| n.prefix).collect();
@@ -549,7 +537,7 @@ mod tests {
         peer.adj_out.v4.add(v4(3, 0).prefix, rib(4));
         peer.queue_withdraw_v4(v4(4, 5));
         peer.adj_out.v4.add(v4(4, 0).prefix, rib(5));
-        drain_peer(&mut peer, &empty_map());
+        drain_peer(&mut peer);
         let packets = sent_opt(&mut prx, Some(add_path_v4()));
         assert_eq!(packets.len(), 1);
         let got: Vec<(Ipv4Net, u32)> = packets[0]
@@ -602,7 +590,7 @@ mod tests {
         let (_, prefix0) = EvpnPrefix::from_route(&mcast(0));
         peer.adj_out.add_evpn(rd, prefix0, rib(2));
 
-        drain_peer(&mut peer, &empty_map());
+        drain_peer(&mut peer);
         let packets = sent(&mut prx);
         assert_eq!(packets.len(), 2, "one VPNv4 UPDATE and one EVPN UPDATE");
         let vpn: Vec<Ipv4Net> = packets
@@ -703,7 +691,7 @@ mod tests {
         assert_eq!(rows, vec![2], "path 1's row is gone, path 2 stays");
         assert_eq!(peer.pending_withdraw.v6vpn.len(), 1);
 
-        drain_peer(peer, &empty_map());
+        drain_peer(peer);
         let packets = sent_opt(
             &mut prx,
             Some({
@@ -737,7 +725,7 @@ mod tests {
         let (mut peer, mut prx, _rx) = established_peer();
         peer.queue_withdraw_v4(v4(1, 0));
         peer.state = State::Idle;
-        drain_peer(&mut peer, &empty_map());
+        drain_peer(&mut peer);
         assert!(sent(&mut prx).is_empty());
         assert_eq!(queued(&peer.pending_withdraw), 0);
         assert!(peer.withdraw_timer.is_none());

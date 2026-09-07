@@ -1248,6 +1248,17 @@ pub struct Peer {
     /// The next-tick `Message::FlushWithdraw` marker, `Some` while one is
     /// armed; consumed by the flush, cancelled by `route_clean`.
     pub withdraw_timer: Option<Timer>,
+    /// Update-group flush jobs currently on the blocking pool that carry
+    /// this peer's IPv4-unicast announcements (`flush_ipv4` counts one
+    /// up per member when it spawns a job, `flush_done_ipv4` counts it
+    /// back down). While non-zero the peer's queued IPv4 withdrawals stay
+    /// queued: a withdraw enqueued now could reach the writer before the
+    /// job's announcement of the same prefix. Kept on the peer, not the
+    /// group, so it survives the group being deleted or the peer moving
+    /// to another group while the job is out.
+    pub flush_jobs_v4: u32,
+    /// IPv6-unicast twin of `flush_jobs_v4`.
+    pub flush_jobs_v6: u32,
     // Runtime bookkeeping for TCP-AO listener state: the (send_id,
     // recv_id) pair most recently installed via TCP_AO_ADD_KEY for
     // this peer. Needed because TCP_AO_DEL_KEY requires the exact
@@ -1409,6 +1420,8 @@ impl Peer {
             cache_evpn_timer: None,
             pending_withdraw: super::pending_withdraw::PendingWithdraw::default(),
             withdraw_timer: None,
+            flush_jobs_v4: 0,
+            flush_jobs_v6: 0,
             last_ao_installed: None,
             update_group_id: BTreeMap::new(),
             adv_interval: timer::AdvInterval::default(),

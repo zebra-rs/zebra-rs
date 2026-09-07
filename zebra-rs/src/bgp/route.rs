@@ -24950,7 +24950,7 @@ mod v6_empty_selection_tests {
             peers.get_by_idx(b).unwrap().withdraw_timer.is_some(),
             "queueing the withdraw must arm the flush marker"
         );
-        crate::bgp::pending_withdraw::flush_pending_withdraws(b, &update_groups, &mut peers);
+        crate::bgp::pending_withdraw::flush_pending_withdraws(b, &mut peers);
 
         let packets = drain(&mut rx_b);
         assert!(

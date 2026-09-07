@@ -826,6 +826,11 @@ pub(super) struct FlushJob<N> {
 }
 
 impl<N: FlushNlri> FlushJob<N> {
+    /// Idents of the members this job will send to.
+    pub(super) fn member_idents(&self) -> Vec<usize> {
+        self.members.iter().map(|m| m.ident).collect()
+    }
+
     /// Encode and send every bucket; returns the counter deltas for
     /// the caller to merge into the group. Per attr-bucket we encode
     /// at most:
@@ -1067,6 +1072,14 @@ pub fn flush_ipv4(
         return;
     };
     group.flush_inflight_ipv4 = true;
+    // Count the job against each member so its queued unicast withdrawals
+    // wait for `flush_done_ipv4` (see `Peer::flush_jobs_v4`).
+    let members = job.member_idents();
+    for &ident in &members {
+        if let Some(peer) = peers.get_mut_by_idx(ident) {
+            peer.flush_jobs_v4 += 1;
+        }
+    }
     let tx = tx.clone();
     let id = id.clone();
     let _ = tokio::task::spawn_blocking(move || {
@@ -1074,14 +1087,14 @@ pub fn flush_ipv4(
         // blocking_send is correct here — this runs on a blocking-pool
         // thread, not in async context. Failure means the BGP instance
         // is shutting down; the deltas die with it.
-        let _ = tx.blocking_send(Message::FlushDoneIpv4(id, deltas));
+        let _ = tx.blocking_send(Message::FlushDoneIpv4(id, deltas, members));
     });
 }
 
-/// Worker completion for an IPv4 flush: merge the counter deltas,
-/// release the in-flight latch, drain the withdraws the members queued
-/// during the flight, and re-run the flush if the debounce timer fired
-/// while the job was out.
+/// Worker completion for an IPv4 flush: count the job off each member
+/// it carried, merge the counter deltas, release the in-flight latch,
+/// drain the withdraws the members queued during the flight, and re-run
+/// the flush if the debounce timer fired while the job was out.
 ///
 /// The drain is ordered-safe by construction: the worker sends
 /// `FlushDoneIpv4` only after [`FlushJob::run`] returned, so every
@@ -1089,25 +1102,39 @@ pub fn flush_ipv4(
 /// drained withdraw lands strictly after the announce it must
 /// override. Withdraws a newer announce has superseded are dropped by
 /// the drain's Adj-RIB-Out check (see [`super::pending_withdraw`]).
+///
+/// The per-member settlement happens whether or not the group still
+/// exists: configuration can detach a group's last member — deleting
+/// the group — while its job is out, and the parked withdrawals of a
+/// still-Established peer must be released by *this* completion, not
+/// stranded until some later withdraw arms a new marker.
 pub fn flush_done_ipv4(
     update_groups: &mut UpdateGroupMap,
     peers: &mut PeerMap,
     tx: &mpsc::Sender<Message>,
     id: &UpdateGroupId,
     deltas: UpdateGroupCounters,
+    members: &[usize],
     interface_addrs: &super::interface_addrs::InterfaceAddrs,
 ) {
+    for &ident in members {
+        if let Some(peer) = peers.get_mut_by_idx(ident) {
+            peer.flush_jobs_v4 = peer.flush_jobs_v4.saturating_sub(1);
+        }
+    }
     let afi_safi = AfiSafi::new(Afi::Ip, Safi::Unicast);
-    let Some(af) = update_groups.get_mut(&afi_safi) else {
-        return;
+    let rerun = match update_groups
+        .get_mut(&afi_safi)
+        .and_then(|af| af.group_by_id_mut(id))
+    {
+        Some(group) => {
+            group.counters.merge(&deltas);
+            group.flush_inflight_ipv4 = false;
+            std::mem::take(&mut group.flush_pending_ipv4)
+        }
+        None => false,
     };
-    let Some(group) = af.group_by_id_mut(id) else {
-        return;
-    };
-    group.counters.merge(&deltas);
-    group.flush_inflight_ipv4 = false;
-    let rerun = std::mem::take(&mut group.flush_pending_ipv4);
-    super::pending_withdraw::drain_after_flush(Afi::Ip, update_groups, peers);
+    super::pending_withdraw::drain_after_flush(Afi::Ip, members, peers);
     if rerun {
         flush_ipv4(update_groups, peers, tx, id, interface_addrs);
     }
@@ -1321,11 +1348,17 @@ pub fn flush_ipv6(
         return;
     };
     group.flush_inflight_ipv6 = true;
+    let members = job.member_idents();
+    for &ident in &members {
+        if let Some(peer) = peers.get_mut_by_idx(ident) {
+            peer.flush_jobs_v6 += 1;
+        }
+    }
     let tx = tx.clone();
     let id = id.clone();
     let _ = tokio::task::spawn_blocking(move || {
         let deltas = job.run();
-        let _ = tx.blocking_send(Message::FlushDoneIpv6(id, deltas));
+        let _ = tx.blocking_send(Message::FlushDoneIpv6(id, deltas, members));
     });
 }
 
@@ -1337,18 +1370,26 @@ pub fn flush_done_ipv6(
     tx: &mpsc::Sender<Message>,
     id: &UpdateGroupId,
     deltas: UpdateGroupCounters,
+    members: &[usize],
 ) {
+    for &ident in members {
+        if let Some(peer) = peers.get_mut_by_idx(ident) {
+            peer.flush_jobs_v6 = peer.flush_jobs_v6.saturating_sub(1);
+        }
+    }
     let afi_safi = AfiSafi::new(Afi::Ip6, Safi::Unicast);
-    let Some(af) = update_groups.get_mut(&afi_safi) else {
-        return;
+    let rerun = match update_groups
+        .get_mut(&afi_safi)
+        .and_then(|af| af.group_by_id_mut(id))
+    {
+        Some(group) => {
+            group.counters.merge(&deltas);
+            group.flush_inflight_ipv6 = false;
+            std::mem::take(&mut group.flush_pending_ipv6)
+        }
+        None => false,
     };
-    let Some(group) = af.group_by_id_mut(id) else {
-        return;
-    };
-    group.counters.merge(&deltas);
-    group.flush_inflight_ipv6 = false;
-    let rerun = std::mem::take(&mut group.flush_pending_ipv6);
-    super::pending_withdraw::drain_after_flush(Afi::Ip6, update_groups, peers);
+    super::pending_withdraw::drain_after_flush(Afi::Ip6, members, peers);
     if rerun {
         flush_ipv6(update_groups, peers, tx, id);
     }
@@ -2321,7 +2362,7 @@ mod tests {
             bytes_formatted: 100,
             ..Default::default()
         };
-        flush_done_ipv4(&mut groups, &mut peers, &tx, &id, deltas, &addrs);
+        flush_done_ipv4(&mut groups, &mut peers, &tx, &id, deltas, &[], &addrs);
 
         let af = groups
             .get_mut(&AfiSafi::new(Afi::Ip, Safi::Unicast))
@@ -2333,11 +2374,12 @@ mod tests {
         assert_eq!(group.counters.bytes_formatted, 100);
     }
 
-    /// A withdraw queued while the member's group has a job in flight
-    /// stays queued — draining it now could put it on the writer ahead
-    /// of the job's announce of the same prefix — and `flush_done_ipv4`
-    /// drains it once the job is done. The sharding-plan A.2 race, now
-    /// gated on the peer's pending set instead of a per-group park.
+    /// A withdraw queued while a job carrying the member's announcements
+    /// is in flight stays queued — draining it now could put it on the
+    /// writer ahead of the job's announce of the same prefix — and
+    /// `flush_done_ipv4` drains it once the job is done. The sharding-plan
+    /// A.2 race, now gated on the peer's job count instead of a per-group
+    /// park.
     #[tokio::test]
     async fn flush_inflight_gates_queued_withdraws_until_flush_done() {
         use super::super::pending_withdraw::flush_pending_withdraws;
@@ -2368,6 +2410,8 @@ mod tests {
         let ident = peers.get(&"10.0.0.2".parse().unwrap()).unwrap().ident;
 
         let peer = peers.get_mut_by_idx(ident).unwrap();
+        // The job `flush_ipv4` spawned counts against the member.
+        peer.flush_jobs_v4 = 1;
         peer.queue_withdraw_v4(nlri("10.0.0.1/32"));
         // A VPNv4 withdraw on the same peer is not gated by the unicast job.
         peer.queue_withdraw_v4vpn(bgp_packet::Vpnv4Nlri {
@@ -2376,7 +2420,7 @@ mod tests {
             nlri: nlri("10.0.0.9/32"),
         });
 
-        flush_pending_withdraws(ident, &groups, &mut peers);
+        flush_pending_withdraws(ident, &mut peers);
         let sent = recv_all(&mut prx);
         assert_eq!(sent.len(), 1, "only the VPNv4 withdraw goes out");
         let (_, p) = UpdatePacket::parse_packet(&sent[0], true, None).unwrap();
@@ -2394,6 +2438,7 @@ mod tests {
             &tx,
             &id,
             UpdateGroupCounters::default(),
+            &[ident],
             &addrs,
         );
         let sent = recv_all(&mut prx);
@@ -2402,6 +2447,82 @@ mod tests {
         assert_eq!(p.ipv4_withdraw, vec![nlri("10.0.0.1/32")]);
         let peer = peers.get_by_idx(ident).unwrap();
         assert!(peer.pending_withdraw.v4.is_empty());
+        assert_eq!(peer.flush_jobs_v4, 0);
+    }
+
+    /// A live peer leaves its last-member group — deleting the group —
+    /// after its withdraw marker parked behind that group's in-flight job.
+    /// The job's completion must still release the parked withdrawal:
+    /// the gate lives on the peer, and `flush_done_ipv4` settles it
+    /// whether or not the group still exists. (Review finding: an earlier
+    /// version returned early on a missing group and stranded the
+    /// withdrawal indefinitely, with no marker left to fire.)
+    #[tokio::test]
+    async fn parked_withdraw_survives_group_reassignment() {
+        use super::super::pending_withdraw::flush_pending_withdraws;
+        use bgp_packet::UpdatePacket;
+
+        let (id, mut group) = test_group(0);
+        group.flush_inflight_ipv4 = true;
+        let (tx, _rx) = mpsc::channel::<Message>(64);
+        let mut peer = super::super::peer::Peer::new(
+            0,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            65002,
+            "10.0.0.2".parse().unwrap(),
+            None,
+            tx.clone(),
+            crate::context::ProtoContext::default_table_no_rib(),
+        );
+        peer.state = super::super::peer::State::Established;
+        let (ptx, mut prx) = mpsc::unbounded_channel::<bytes::BytesMut>();
+        peer.packet_tx = Some(ptx);
+        peer.update_group_id
+            .insert(AfiSafi::new(Afi::Ip, Safi::Unicast), id.clone());
+        group.members.insert(0);
+        let mut groups = groups_with(group);
+        let mut peers = PeerMap::new();
+        peers.insert("10.0.0.2".parse().unwrap(), peer);
+        let ident = peers.get(&"10.0.0.2".parse().unwrap()).unwrap().ident;
+
+        let peer = peers.get_mut_by_idx(ident).unwrap();
+        peer.flush_jobs_v4 = 1;
+        peer.queue_withdraw_v4(nlri("10.0.0.1/32"));
+
+        flush_pending_withdraws(ident, &mut peers);
+        assert!(recv_all(&mut prx).is_empty(), "gated behind the job");
+        let peer = peers.get_by_idx(ident).unwrap();
+        assert_eq!(peer.pending_withdraw.v4.len(), 1, "unicast stays queued");
+        assert!(peer.withdraw_timer.is_none(), "flush marker was consumed");
+
+        // Configuration detaches the Established peer; the group empties
+        // and is deleted while its job is still out.
+        detach(&mut groups, &mut peers, ident);
+        assert!(peers.get_by_idx(ident).unwrap().state.is_established());
+        assert!(
+            groups[&AfiSafi::new(Afi::Ip, Safi::Unicast)]
+                .group_by_id(&id)
+                .is_none()
+        );
+
+        let addrs = super::super::interface_addrs::InterfaceAddrs::default();
+        flush_done_ipv4(
+            &mut groups,
+            &mut peers,
+            &tx,
+            &id,
+            UpdateGroupCounters::default(),
+            &[ident],
+            &addrs,
+        );
+        let sent = recv_all(&mut prx);
+        assert_eq!(sent.len(), 1, "the job's completion releases the withdraw");
+        let (_, p) = UpdatePacket::parse_packet(&sent[0], true, None).unwrap();
+        assert_eq!(p.ipv4_withdraw, vec![nlri("10.0.0.1/32")]);
+        let peer = peers.get_by_idx(ident).unwrap();
+        assert!(peer.pending_withdraw.v4.is_empty());
+        assert_eq!(peer.flush_jobs_v4, 0);
     }
 
     /// End-to-end offload: flush spawns the job on the blocking pool,
@@ -2435,14 +2556,14 @@ mod tests {
             assert!(group.cache_ipv4.is_empty(), "cache drained into the job");
         }
 
-        let Some(Message::FlushDoneIpv4(done_id, deltas)) = rx.recv().await else {
+        let Some(Message::FlushDoneIpv4(done_id, deltas, _)) = rx.recv().await else {
             panic!("expected FlushDoneIpv4 from the worker");
         };
         assert_eq!(done_id, id);
         assert_eq!(deltas.messages_formatted, 1);
         assert!(deltas.bytes_formatted > 0);
 
-        flush_done_ipv4(&mut groups, &mut peers, &tx, &id, deltas, &addrs);
+        flush_done_ipv4(&mut groups, &mut peers, &tx, &id, deltas, &[], &addrs);
         let af = groups
             .get_mut(&AfiSafi::new(Afi::Ip, Safi::Unicast))
             .unwrap();
