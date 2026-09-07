@@ -46,8 +46,11 @@ pub(crate) fn put_mp_unreach_attr(buf: &mut BytesMut, value: &[u8]) {
 
 /// Write one MP_UNREACH_NLRI attribute carrying as many of `withdraws` as
 /// fit in a packet of `max_packet_size` octets given what `buf` already
-/// holds. The NLRIs written are drained from the front of `withdraws`;
-/// the rest stay for the next call. Returns the number written, or 0 —
+/// holds. The NLRIs written are taken from the *end* of `withdraws` — the
+/// order among withdrawals is immaterial, and truncating the tail keeps
+/// each call proportional to what it emitted instead of shifting the
+/// whole remainder down (a 400k-route burst paid for that quadratically).
+/// The rest stay for the next call. Returns the number written, or 0 —
 /// writing nothing — when not even the first NLRI fits, so the caller can
 /// refuse to emit an empty MP_UNREACH (which would read as end-of-RIB).
 ///
@@ -69,7 +72,7 @@ fn unreach_emit_mut<T>(
 
     let mut emitted = 0;
     let mut nlri = BytesMut::new();
-    for w in withdraws.iter() {
+    for w in withdraws.iter().rev() {
         nlri.clear();
         emit(w, &mut nlri);
         if value.len() + nlri.len() > budget {
@@ -81,7 +84,7 @@ fn unreach_emit_mut<T>(
     if emitted == 0 {
         return 0;
     }
-    withdraws.drain(..emitted);
+    withdraws.truncate(withdraws.len() - emitted);
     put_mp_unreach_attr(buf, &value);
     emitted
 }

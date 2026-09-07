@@ -673,6 +673,12 @@ fn advertise_with_flush_in_flight(
         crate::bgp::update_group::build_flush_job_ipv4(group, &bgp.peers, &bgp.interface_addrs)
             .expect("a job carrying P");
     group.flush_inflight_ipv4 = true;
+    // Counted against its members, as `flush_ipv4` does.
+    for ident in job.member_idents() {
+        if let Some(peer) = bgp.peers.get_mut_by_idx(ident) {
+            peer.flush_jobs_v4 += 1;
+        }
+    }
     (gid, job)
 }
 
@@ -682,8 +688,9 @@ fn flush_completes(
     gid: crate::bgp::update_group::UpdateGroupId,
     job: crate::bgp::update_group::FlushJob<bgp_packet::Ipv4Nlri>,
 ) {
+    let members = job.member_idents();
     let deltas = job.run();
-    bgp.process_msg(Message::FlushDoneIpv4(gid, deltas));
+    bgp.process_msg(Message::FlushDoneIpv4(gid, deltas, members));
 }
 
 /// Our link-local on [`IFINDEX`] is replaced: [`OUR_LL`] goes, `fe80::3`
