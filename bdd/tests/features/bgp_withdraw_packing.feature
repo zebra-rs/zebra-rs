@@ -33,6 +33,28 @@ Feature: Bulk withdrawals are packed per peer and stay coherent with the Adj-RIB
     When I wait 6 seconds for BGP to operate
     When I execute "timeout 300 python3 tests/scripts/bgp_withdraw_packing.py 65535" in namespace "h1"
 
+  # The IPv4-unicast egress is diverted off the update-group path at gate-on:
+  # ZEBRA_BGP_PEER_TASK routes it to the per-peer egress task, and
+  # ZEBRA_BGP_EGRESS_GROUP_TASK to the per-update-group task. Both engines pack
+  # their own IPv4 withdrawals; the other families stay on the shared queue.
+  # Restart the reflector under each gate and re-run the wire check so the
+  # packing bound and Adj-RIB-Out coherence hold in every egress model.
+  Scenario: Pack withdrawals with the per-peer egress task
+    Given the test topology exists
+    When I stop zebra-rs in namespace "z1"
+    And I start zebra-rs in namespace "z1" with peer task
+    And I apply config "z1.yaml" to namespace "z1"
+    And I wait 6 seconds for BGP to operate
+    And I execute "timeout 300 python3 tests/scripts/bgp_withdraw_packing.py 4096" in namespace "h1"
+
+  Scenario: Pack withdrawals with the per-update-group egress task
+    Given the test topology exists
+    When I stop zebra-rs in namespace "z1"
+    And I start zebra-rs in namespace "z1" with egress group task
+    And I apply config "z1.yaml" to namespace "z1"
+    And I wait 6 seconds for BGP to operate
+    And I execute "timeout 300 python3 tests/scripts/bgp_withdraw_packing.py 4096" in namespace "h1"
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "z1"

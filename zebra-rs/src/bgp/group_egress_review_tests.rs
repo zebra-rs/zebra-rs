@@ -63,6 +63,7 @@ fn member(engine: &mut Engine, ident: usize, add_path: bool) -> mpsc::UnboundedR
         ctx: Box::new(ctx),
         add_path,
     });
+    engine.flush_withdraws();
     rx
 }
 
@@ -117,6 +118,7 @@ fn a_withdraw_reaches_the_member_in_slot_0() {
         prefix: prefix(),
         rib: rib(99, "192.0.2.1"),
     });
+    engine.flush_withdraws();
     assert_eq!(sent(&mut rx0).0, vec![P.to_string()], "setup");
     assert_eq!(sent(&mut rx1).0, vec![P.to_string()], "setup");
 
@@ -124,6 +126,8 @@ fn a_withdraw_reaches_the_member_in_slot_0() {
         prefix: prefix(),
         id: 0,
     });
+
+    engine.flush_withdraws();
     assert_eq!(sent(&mut rx0), (vec![], vec![P.to_string()]));
     assert_eq!(sent(&mut rx1), (vec![], vec![P.to_string()]));
 }
@@ -139,12 +143,15 @@ fn an_addpath_withdraw_reaches_the_member_in_slot_0() {
         prefix: prefix(),
         rib: path,
     });
+    engine.flush_withdraws();
     assert_eq!(sent_with(&mut rx0, true).0, vec![P.to_string()], "setup");
 
     engine.handle(GroupEgressDeltaV4::Withdraw {
         prefix: prefix(),
         id: 11,
     });
+
+    engine.flush_withdraws();
     assert_eq!(sent_with(&mut rx0, true), (vec![], vec![P.to_string()]));
 }
 
@@ -160,6 +167,7 @@ fn a_withdraw_skips_only_the_member_whose_path_it_was() {
         prefix: prefix(),
         rib: rib(1, "192.0.2.1"),
     });
+    engine.flush_withdraws();
     assert!(sent(&mut rx1).0.is_empty(), "split horizon");
     sent(&mut rx0);
     sent(&mut rx2);
@@ -168,6 +176,8 @@ fn a_withdraw_skips_only_the_member_whose_path_it_was() {
         prefix: prefix(),
         id: 0,
     });
+
+    engine.flush_withdraws();
     assert_eq!(sent(&mut rx0), (vec![], vec![P.to_string()]));
     assert_eq!(sent(&mut rx1), (vec![], vec![]), "never sent the route");
     assert_eq!(sent(&mut rx2), (vec![], vec![P.to_string()]));
@@ -185,6 +195,7 @@ fn the_member_whose_path_becomes_best_is_withdrawn_the_route_it_held() {
         prefix: prefix(),
         rib: rib(99, "192.0.2.1"),
     });
+    engine.flush_withdraws();
     sent(&mut rx1);
     sent(&mut rx2);
 
@@ -192,6 +203,8 @@ fn the_member_whose_path_becomes_best_is_withdrawn_the_route_it_held() {
         prefix: prefix(),
         rib: rib(1, "192.0.2.2"),
     });
+
+    engine.flush_withdraws();
     assert_eq!(sent(&mut rx2), (vec![P.to_string()], vec![]));
     assert_eq!(
         sent(&mut rx1),
@@ -211,6 +224,7 @@ fn the_member_whose_path_stops_being_best_is_sent_the_new_best() {
         prefix: prefix(),
         rib: rib(1, "192.0.2.2"),
     });
+    engine.flush_withdraws();
     sent(&mut rx1);
     sent(&mut rx2);
 
@@ -218,6 +232,8 @@ fn the_member_whose_path_stops_being_best_is_sent_the_new_best() {
         prefix: prefix(),
         rib: rib(99, "192.0.2.1"),
     });
+
+    engine.flush_withdraws();
     assert_eq!(sent(&mut rx1), (vec![P.to_string()], vec![]));
     assert_eq!(sent(&mut rx2), (vec![P.to_string()], vec![]));
 }
@@ -234,6 +250,7 @@ fn a_filtered_best_path_withdraws_the_previous_route_from_its_source_member() {
         prefix: prefix(),
         rib: rib(99, "192.0.2.1"),
     });
+    engine.flush_withdraws();
     sent(&mut rx1);
     sent(&mut rx2);
 
@@ -245,6 +262,7 @@ fn a_filtered_best_path_withdraws_the_previous_route_from_its_source_member() {
         prefix: prefix(),
         rib: filtered,
     });
+    engine.flush_withdraws();
     assert_eq!(sent(&mut rx2), (vec![], vec![P.to_string()]));
     assert_eq!(
         sent(&mut rx1),
@@ -273,6 +291,7 @@ fn a_new_best_that_builds_the_same_update_still_withdraws_its_source_member() {
         prefix: prefix(),
         rib: same_path(99, "192.0.2.1"),
     });
+    engine.flush_withdraws();
     sent(&mut rx1);
     sent(&mut rx2);
 
@@ -280,6 +299,8 @@ fn a_new_best_that_builds_the_same_update_still_withdraws_its_source_member() {
         prefix: prefix(),
         rib: same_path(1, "192.0.2.2"),
     });
+
+    engine.flush_withdraws();
     assert_eq!(
         sent(&mut rx2),
         (vec![], vec![]),
@@ -304,12 +325,15 @@ fn a_sole_member_whose_path_becomes_best_is_withdrawn_the_route_it_held() {
         prefix: prefix(),
         rib: rib(99, "192.0.2.1"),
     });
+    engine.flush_withdraws();
     assert_eq!(sent(&mut rx1).0, vec![P.to_string()], "setup");
 
     engine.handle(GroupEgressDeltaV4::Advertise {
         prefix: prefix(),
         rib: rib(1, "192.0.2.2"),
     });
+
+    engine.flush_withdraws();
     assert_eq!(sent(&mut rx1), (vec![], vec![P.to_string()]));
     assert!(
         !engine.adj_out.0.contains_key(&prefix()),
@@ -336,6 +360,7 @@ fn a_best_moving_between_members_with_the_same_update_reaches_the_previous_sourc
         prefix: prefix(),
         rib: first,
     });
+    engine.flush_withdraws();
     assert_eq!(sent(&mut rx1), (vec![], vec![]), "split horizon");
     assert_eq!(sent(&mut rx2), (vec![P.to_string()], vec![]));
     assert_eq!(sent(&mut rx3), (vec![P.to_string()], vec![]));
@@ -344,6 +369,8 @@ fn a_best_moving_between_members_with_the_same_update_reaches_the_previous_sourc
         prefix: prefix(),
         rib: second,
     });
+
+    engine.flush_withdraws();
     assert_eq!(
         sent(&mut rx3),
         (vec![], vec![]),
@@ -370,6 +397,7 @@ fn an_unchanged_re_advertise_of_a_members_own_path_sends_it_nothing() {
             prefix: prefix(),
             rib: rib(1, "192.0.2.1"),
         });
+        engine.flush_withdraws();
     }
     assert_eq!(sent(&mut rx1), (vec![], vec![]), "split horizon");
     assert_eq!(sent(&mut rx2), (vec![P.to_string()], vec![]), "sent once");
