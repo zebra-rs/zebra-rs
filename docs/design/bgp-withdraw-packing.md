@@ -80,13 +80,17 @@ withdraw goes out. Two rules close it:
    blocking-pool thread. A withdraw enqueued from the main task while that
    job runs could reach the writer *before* the job's announcement of the
    same prefix and leave the peer holding a route the Adj-RIB-Out has
-   dropped. So those two families stay queued while the peer's group has
-   `flush_inflight_*` set, and `flush_done_ipv4/6` drains them after every
-   job byte is on the writer — replacing the per-group
-   `deferred_withdraw_*` parking that served the same race (sharding plan
-   A.2). `flush_done` walks every peer rather than the group's members: a
-   peer can change groups while parked, and the drain re-checks its
-   *current* group.
+   dropped. So those two families stay queued while any job carrying the
+   peer's announcements is out: `flush_ipv4/6` counts the job up on each
+   member (`Peer::flush_jobs_v4/v6`), the `FlushDone` message carries the
+   member list, and `flush_done_ipv4/6` counts it off and drains the
+   released members after every job byte is on the writer — replacing the
+   per-group `deferred_withdraw_*` parking that served the same race
+   (sharding plan A.2). The count lives on the peer, not the group, and
+   `flush_done` settles it whether or not the group still exists:
+   configuration can detach a group's last member (deleting the group) or
+   move a peer to another group while the job is out, and neither may
+   strand a parked withdrawal or release it early.
 
 `route_clean` (session leaves Established) drops the queue and the marker
 with the advertise caches; the flush is gated on Established so a marker
