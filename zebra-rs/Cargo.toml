@@ -209,6 +209,13 @@ default = []
 # Compile the embedded Lua scripting engine (src/script).
 lua = ["dep:mlua"]
 
+[dev-dependencies]
+# `test-util` (paused clock: `start_paused`, `tokio::time::advance`) is a
+# test-only feature — it drives the deferred withdraw-flush timers in the
+# egress-engine coalescing tests deterministically. Dev-dependency features
+# do not reach a normal `cargo build`, so the release binary is unaffected.
+tokio = { workspace = true, features = ["test-util"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 rtnetlink = { git = "https://github.com/zebra-rs/rtnetlink", rev = "2d7b1830e9bd9a049a757f0a79ccd16216450bf2" }
 #rtnetlink = { path = "../../rtnetlink" }

@@ -109,6 +109,34 @@ twin never recorded one, so only dump-recorded rows existed and
 AddPath path. Any new withdraw site must remove its Adj-RIB-Out row
 before queueing.
 
+### Gate-on egress engines (`peer_egress.rs`, `group_egress.rs`)
+
+The per-peer (`ZEBRA_BGP_PEER_TASK`) and per-update-group
+(`ZEBRA_BGP_EGRESS_GROUP_TASK`) egress engines own the v4-unicast
+Adj-RIB-Out at gate-on, so the reduce fans IPv4 advertise/withdraw deltas
+to them and bypasses the main-task queue above. They pack their own
+IPv4 withdrawals. Each engine runs in a task driven by its delta channel:
+it handles a delta, drains everything else already queued (`try_recv`),
+and — when a withdrawal is now pending — arms a `WITHDRAW_FLUSH_DELAY`
+(1 ms) timer, the mirror of the main-task queue's `FlushWithdraw` marker.
+The select loop is `biased` toward the channel, so a burst still arriving
+(a peer-down `route_clean`, an RR sweep) keeps draining and only flushes
+once it settles — packing into as few `pop_ipv4_withdraw` UPDATEs as the
+message size allows. The delay matters: flushing the instant the channel
+momentarily empties packs partially, because the main task fans the burst
+across several executor turns, so the engine would wake mid-burst and emit
+a fraction each time. An idle single withdrawal still flushes one timer
+tick later, the same latency the main-task queue already accepts.
+
+Advertises stay immediate (the engine records the Adj-RIB-Out row and sends
+during `handle`); withdrawals queue and flush at the end of the batch. The
+reconcile rule carries over verbatim — a queued NLRI back in the engine's
+`adj_out` (re-advertised within the batch) is dropped at flush via the
+shared `pending_withdraw::adj_out_has`, so a withdraw never overtakes or
+outlives the announcement it races. The group engine keys its queue by the
+path's source peer so a mixed-source burst still honours split-horizon:
+each source's withdrawals fan to the members that are not that source.
+
 ### What still sends immediately
 
 MUP, Flowspec, SR Policy, RTC and BGP-LS withdrawals keep their
@@ -129,9 +157,20 @@ rustybgp switches to MP_UNREACH there.
   VPN withdraw; a down peer discards. `update_group` test: the in-flight
   gate holds a unicast withdraw (a VPN one on the same peer still goes) and
   `flush_done_ipv4` releases it.
+- `peer_egress` / `group_egress` unit tests: each engine packs a
+  1000-withdrawal batch into at most two UPDATEs (was one per route) and
+  drops a withdraw re-advertised within the batch; the group engine fans a
+  mixed-source batch per source so a member never loses a withdrawal it
+  should receive nor gets one it sourced. A paused-clock test drives the
+  `run` loop's deferred flush end to end — a burst delivered across many
+  channel wakes still coalesces into one UPDATE after the timer, and
+  nothing goes out before it.
 - BDD `@bgp_withdraw_packing` (`bdd/tests/scripts/bgp_withdraw_packing.py`):
   two scripted iBGP clients of a zebra-rs RR; the observer parses the raw
   TCP stream. Per family (IPv4, IPv6, VPNv4, VPNv6, EVPN) and per message
   size (4096 / 65535): 1000 withdrawals arrive within a computed UPDATE
   bound with no stale announcement overtaking one; announce+withdraw and
-  withdraw+announce sent back to back settle absent / present.
+  withdraw+announce sent back to back settle absent / present. The reflector
+  is then restarted under `ZEBRA_BGP_PEER_TASK` and `ZEBRA_BGP_EGRESS_GROUP_TASK`
+  and the check re-run, so the IPv4 packing and coherence hold in both
+  gate-on egress models, not only the default queue.

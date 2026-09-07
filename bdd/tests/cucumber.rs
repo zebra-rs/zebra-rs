@@ -641,6 +641,39 @@ async fn start_zebra_rs_sharded_peer_task(world: &mut World, namespace: String, 
     );
 }
 
+#[when(expr = "I start zebra-rs in namespace {string} with peer task")]
+async fn start_zebra_rs_peer_task(world: &mut World, namespace: String) {
+    let scoped = world.ns(&namespace);
+    let log_file = format!("logs/{}.log", scoped);
+    world.mark_log_start(&scoped);
+    let pid_file = world.pid_file(&namespace);
+
+    let _child = netns::spawn_in_netns_env(
+        &scoped,
+        // A2 ⑥ gate-on: ZEBRA_BGP_PEER_TASK runs the v4-unicast egress in
+        // per-peer tasks (the GoBGP model, no update-groups). Un-sharded, so
+        // this exercises the per-peer egress axis alone — used by the withdraw
+        // packing feature to confirm IPv4 withdrawals pack in the PET.
+        &[("ZEBRA_BGP_PEER_TASK", "1")],
+        "zebra-rs",
+        &[
+            "--daemon",
+            "--log-output=file",
+            &format!("--log-file={}", log_file),
+            &format!("--pid-file={}", pid_file),
+        ],
+    )
+    .await
+    .expect("Failed to start zebra-rs");
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+    println!(
+        "✓ zebra-rs started in namespace {} with peer task (pid file {})",
+        scoped, pid_file
+    );
+}
+
 #[when(expr = "I start zebra-rs in namespace {string} with egress group task")]
 async fn start_zebra_rs_egress_group_task(world: &mut World, namespace: String) {
     let scoped = world.ns(&namespace);

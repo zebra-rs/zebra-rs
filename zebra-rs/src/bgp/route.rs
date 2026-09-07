@@ -246,15 +246,6 @@ impl SyncCtx {
         enqueue_update(&self.packet_tx, &self.egress_depth, self.ident, bytes);
     }
 
-    /// Serialise and enqueue one UPDATE, dropping it with a log if its length
-    /// fields cannot describe it. See [`Peer::send_update`].
-    pub fn send_update(&self, update: UpdatePacket) {
-        match update.try_emit() {
-            Ok(bytes) => self.send_packet(bytes),
-            Err(e) => tracing::warn!("dropping UPDATE to {}: {}", self.ident, e),
-        }
-    }
-
     /// Max on-wire UPDATE size for this session (RFC 8654 extended).
     pub fn max_packet_size(&self) -> usize {
         if self.extended_message {

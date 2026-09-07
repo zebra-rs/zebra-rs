@@ -226,8 +226,10 @@ fn drain_peer(peer: &mut Peer) {
 /// Whether the Adj-RIB-Out still (or again) holds `(prefix, id)`. `id == 0`
 /// is the non-AddPath wire id and matches any row for the prefix — a
 /// non-AddPath advertisement is stored under the Loc-RIB `local_id`, never
-/// 0 — while a real path-id must match exactly.
-fn adj_out_has<P: Ord>(table: &AdjRibTable<Out, P>, prefix: &P, id: u32) -> bool {
+/// 0 — while a real path-id must match exactly. Shared with the gate-on
+/// egress engines ([`super::peer_egress`], [`super::group_egress`]), which
+/// pack their own IPv4 withdrawals and apply the same reconcile at flush.
+pub(super) fn adj_out_has<P: Ord>(table: &AdjRibTable<Out, P>, prefix: &P, id: u32) -> bool {
     table
         .0
         .get(prefix)

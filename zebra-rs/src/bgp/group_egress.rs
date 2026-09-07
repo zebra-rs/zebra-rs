@@ -19,13 +19,22 @@
 //! gate-on egress is unchanged; the engine is exercised by the unit tests.
 //! Default off; gate-off is byte-identical.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
 use bgp_packet::{Ipv4Nlri, UpdatePacket};
 use bytes::BytesMut;
 use ipnet::Ipv4Net;
 use tokio::sync::mpsc::{self, UnboundedSender};
+use tokio::time::{Duration, Instant, sleep_until};
+
+/// How long a queued withdrawal waits for the rest of its burst before the
+/// engine flushes — the group twin of the PET's delay and of the main-task
+/// queue's 1 ms `FlushWithdraw` marker. Lets a peer-down / RR-sweep burst
+/// accumulate on the delta channel so it packs into as few UPDATEs as the
+/// message size allows, rather than the partial flushes the main-task/engine
+/// race would otherwise produce.
+const WITHDRAW_FLUSH_DELAY: Duration = Duration::from_millis(1);
 
 use crate::context::task::Task;
 
@@ -123,7 +132,7 @@ impl GroupEgressTask {
     /// member set from `AddMember` deltas. Exits when `delta_tx` is dropped
     /// (the group emptied).
     pub fn spawn(id: UpdateGroupId) -> Self {
-        let (delta_tx, mut delta_rx) = mpsc::unbounded_channel::<GroupEgressDeltaV4>();
+        let (delta_tx, delta_rx) = mpsc::unbounded_channel::<GroupEgressDeltaV4>();
         // `spawn` is a plain constructor with no `BgpTracing` in reach, so
         // both this and the "exited" line below ride the process-global
         // `sharding` gate (see `bgp::tracing::TRACE_SHARDING`). Read once
@@ -139,9 +148,7 @@ impl GroupEgressTask {
         }
         let task = Task::spawn(async move {
             let mut engine = Engine::default();
-            while let Some(delta) = delta_rx.recv().await {
-                engine.handle(delta);
-            }
+            engine.run(delta_rx).await;
             if trace {
                 tracing::info!(
                     proto = "bgp",
@@ -200,9 +207,49 @@ struct Engine {
     add_path: bool,
     adj_out: AdjRibTable<Out>,
     attr_store: BgpAttrStore,
+    /// IPv4 withdrawals accumulated during the current channel-drain batch,
+    /// keyed by the path's source peer (the split-horizon target excluded
+    /// from that withdrawal's fan). Each source's set is packed into as few
+    /// UPDATEs as the message size allows at
+    /// [`flush_withdraws`](Self::flush_withdraws) and fanned to the members
+    /// that are not that source. Grouping by source keeps a mixed-source
+    /// burst correct — a member that sourced one withdrawn path still
+    /// receives the withdrawals it did not source.
+    pending_withdraw: BTreeMap<usize, HashSet<Ipv4Nlri>>,
 }
 
 impl Engine {
+    /// Drive the engine off its delta channel, coalescing withdrawal bursts —
+    /// the group twin of the PET's `run`. Advertises fan immediately in
+    /// [`handle`](Self::handle); withdrawals queue per source and flush once
+    /// the burst settles (a `WITHDRAW_FLUSH_DELAY` timer armed when the first
+    /// withdrawal queues, re-used for the whole burst). `biased` prefers
+    /// draining new deltas over flushing so a burst accumulates into one
+    /// flush. Exits when the channel closes (the group emptied); any queued
+    /// withdrawal is dropped with it.
+    async fn run(&mut self, mut rx: mpsc::UnboundedReceiver<GroupEgressDeltaV4>) {
+        let mut flush_at: Option<Instant> = None;
+        loop {
+            tokio::select! {
+                biased;
+                maybe = rx.recv() => {
+                    let Some(delta) = maybe else { break };
+                    self.handle(delta);
+                    while let Ok(delta) = rx.try_recv() {
+                        self.handle(delta);
+                    }
+                    if !self.pending_withdraw.is_empty() && flush_at.is_none() {
+                        flush_at = Some(Instant::now() + WITHDRAW_FLUSH_DELAY);
+                    }
+                }
+                _ = async { sleep_until(flush_at.unwrap()).await }, if flush_at.is_some() => {
+                    self.flush_withdraws();
+                    flush_at = None;
+                }
+            }
+        }
+    }
+
     fn handle(&mut self, delta: GroupEgressDeltaV4) {
         match delta {
             GroupEgressDeltaV4::AddMember {
@@ -321,20 +368,47 @@ impl Engine {
             self.adj_out.remove(prefix, id).is_some()
         };
         if removed {
-            let max = self
-                .members
-                .values()
-                .next()
-                .map(|c| c.max_packet_size())
-                .unwrap_or(4096);
+            // Queue rather than fan: the batch's withdrawals pack together in
+            // `flush_withdraws`. Removing the `adj_out` row here (not at flush)
+            // keeps the reconcile authoritative — a re-advertise later in the
+            // same batch re-adds the row and cancels this withdrawal.
+            self.pending_withdraw
+                .entry(source_ident)
+                .or_default()
+                .insert(Ipv4Nlri { id, prefix });
+        }
+    }
+
+    /// Drain the batch's queued IPv4 withdrawals. Each source peer's set is
+    /// packed into as few UPDATEs as the negotiated message size allows and
+    /// fanned to every member except that source (split-horizon — the source
+    /// never received the advertisement). A queued NLRI whose `(prefix, id)`
+    /// is back in `adj_out` was re-advertised within the batch (`fan` already
+    /// put the announcement on the wire), so it is dropped: sending it would
+    /// tear down a route the members now hold.
+    fn flush_withdraws(&mut self) {
+        if self.pending_withdraw.is_empty() {
+            return;
+        }
+        let max = self
+            .members
+            .values()
+            .next()
+            .map(|c| c.max_packet_size())
+            .unwrap_or(4096);
+        let pending = std::mem::take(&mut self.pending_withdraw);
+        for (source_ident, queued) in pending {
+            let withdraws: Vec<Ipv4Nlri> = queued
+                .into_iter()
+                .filter(|n| !super::pending_withdraw::adj_out_has(&self.adj_out, &n.prefix, n.id))
+                .collect();
+            if withdraws.is_empty() {
+                continue;
+            }
             let mut update = UpdatePacket::with_max_packet_size(max);
-            update.ipv4_withdraw.push(Ipv4Nlri { id, prefix });
-            // One withdrawn prefix cannot overflow a length field, but encode
-            // through the checked path anyway so no emit site can put a frame on
-            // the wire whose header contradicts its body.
-            match update.try_emit() {
-                Ok(bytes) => self.fan(&[bytes], source_ident),
-                Err(e) => tracing::warn!("dropping IPv4 withdraw for {}: {}", prefix, e),
+            update.ipv4_withdraw = withdraws;
+            while let Some(bytes) = update.pop_ipv4_withdraw() {
+                self.fan(&[bytes], source_ident);
             }
         }
     }
@@ -472,14 +546,174 @@ mod tests {
         advertise(&mut engine, "10.10.10.0/24", 99);
         let _ = rx1.try_recv();
         let _ = rx2.try_recv();
-        // Withdraw of an advertised prefix reaches the non-source members.
+        // Withdraw of an advertised prefix reaches the non-source members
+        // once the batch flushes.
         engine.handle(GroupEgressDeltaV4::Withdraw {
             prefix: "10.10.10.0/24".parse().unwrap(),
             id: 0,
             source_ident: 99,
         });
+        engine.flush_withdraws();
         assert!(rx1.try_recv().is_ok(), "member 1 receives the withdraw");
         assert!(rx2.try_recv().is_ok(), "member 2 receives the withdraw");
+    }
+
+    #[test]
+    fn withdraws_pack_into_few_updates() {
+        // A burst of withdrawals from an external source fans to the member
+        // packed into far fewer UPDATEs than one per route: 1000 /24
+        // withdrawals fit the default 4096-octet message in a single UPDATE.
+        let mut engine = Engine::default();
+        let mut rx = member(&mut engine, 1);
+        let prefixes: Vec<Ipv4Net> = (0..1000)
+            .map(|i| format!("10.{}.{}.0/24", i / 256, i % 256).parse().unwrap())
+            .collect();
+        for p in &prefixes {
+            engine.handle(GroupEgressDeltaV4::Advertise {
+                prefix: *p,
+                rib: rib(99, "192.0.2.1"),
+            });
+        }
+        let _ = std::iter::from_fn(|| rx.try_recv().ok()).count();
+
+        for p in &prefixes {
+            engine.handle(GroupEgressDeltaV4::Withdraw {
+                prefix: *p,
+                id: 0,
+                source_ident: 99,
+            });
+        }
+        engine.flush_withdraws();
+        let updates: usize = std::iter::from_fn(|| rx.try_recv().ok()).count();
+        assert!(updates >= 1, "the batch is flushed");
+        assert!(
+            updates <= 2,
+            "1000 /24 withdrawals pack into at most two UPDATEs (got {updates})"
+        );
+    }
+
+    #[test]
+    fn mixed_source_withdraws_fan_per_source() {
+        // Two member-sourced prefixes withdrawn in one batch: split-horizon
+        // is per withdrawal, so grouping by source must hold. Member 1 sees
+        // only the prefix it did NOT source, and member 2 the same — a
+        // single packed UPDATE cannot suppress a withdrawal a member should
+        // receive just because another member sourced a different one.
+        let mut engine = Engine::default();
+        let mut rx1 = member(&mut engine, 1);
+        let mut rx2 = member(&mut engine, 2);
+        let p1: Ipv4Net = "10.11.0.0/24".parse().unwrap(); // sourced by member 1
+        let p2: Ipv4Net = "10.22.0.0/24".parse().unwrap(); // sourced by member 2
+
+        // Advertise each: split-horizon fans p1 to member 2, p2 to member 1,
+        // and both are recorded in the group adj_out.
+        engine.handle(GroupEgressDeltaV4::Advertise {
+            prefix: p1,
+            rib: rib(1, "192.0.2.1"),
+        });
+        engine.handle(GroupEgressDeltaV4::Advertise {
+            prefix: p2,
+            rib: rib(2, "192.0.2.2"),
+        });
+        let _ = std::iter::from_fn(|| rx1.try_recv().ok()).count();
+        let _ = std::iter::from_fn(|| rx2.try_recv().ok()).count();
+
+        // Withdraw both in one batch, then flush.
+        engine.handle(GroupEgressDeltaV4::Withdraw {
+            prefix: p1,
+            id: 0,
+            source_ident: 1,
+        });
+        engine.handle(GroupEgressDeltaV4::Withdraw {
+            prefix: p2,
+            id: 0,
+            source_ident: 2,
+        });
+        engine.flush_withdraws();
+
+        // A /24 withdraw NLRI is `plen(24)` then the three significant
+        // octets. Member 1 must see p2's withdraw but not p1's (it sourced
+        // p1); member 2 the reverse.
+        let p1_nlri = [24u8, 10, 11, 0];
+        let p2_nlri = [24u8, 10, 22, 0];
+        let to_1: Vec<_> = std::iter::from_fn(|| rx1.try_recv().ok()).collect();
+        let to_2: Vec<_> = std::iter::from_fn(|| rx2.try_recv().ok()).collect();
+        let carries = |frames: &[bytes::BytesMut], nlri: [u8; 4]| {
+            frames.iter().any(|f| f.windows(4).any(|w| w == nlri))
+        };
+        assert!(carries(&to_1, p2_nlri), "member 1 receives p2's withdraw");
+        assert!(
+            !carries(&to_1, p1_nlri),
+            "member 1 does not receive its own sourced p1"
+        );
+        assert!(carries(&to_2, p1_nlri), "member 2 receives p1's withdraw");
+        assert!(
+            !carries(&to_2, p2_nlri),
+            "member 2 does not receive its own sourced p2"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn run_coalesces_a_withdraw_burst_into_few_updates() {
+        // The group twin of the PET coalescing test: a burst arriving across
+        // several channel wakes packs into one UPDATE after the deferred
+        // flush, not one flush per wake. Paused time makes the delay
+        // deterministic.
+        let (pkt_tx, mut pkt_rx) = mpsc::unbounded_channel();
+        let mut member_ctx = SyncCtx::for_test();
+        member_ctx.packet_tx = Some(pkt_tx);
+        let (delta_tx, delta_rx) = mpsc::unbounded_channel();
+        let mut engine = Engine::default();
+        // The engine must hold the member before the run loop starts driving,
+        // so seed it directly, then hand the receiver to `run`.
+        engine.handle(GroupEgressDeltaV4::AddMember {
+            ident: 1,
+            ctx: Box::new(member_ctx),
+            add_path: false,
+        });
+        let task = tokio::spawn(async move { engine.run(delta_rx).await });
+
+        let prefixes: Vec<Ipv4Net> = (0..200)
+            .map(|i| format!("10.{}.{}.0/24", i / 256, i % 256).parse().unwrap())
+            .collect();
+        // Advertise from an external source (99) so member 1 receives and the
+        // group adj_out records each row; drain those advertise frames.
+        for p in &prefixes {
+            delta_tx
+                .send(GroupEgressDeltaV4::Advertise {
+                    prefix: *p,
+                    rib: rib(99, "192.0.2.1"),
+                })
+                .unwrap();
+        }
+        tokio::task::yield_now().await;
+        let _ = std::iter::from_fn(|| pkt_rx.try_recv().ok()).count();
+
+        for p in &prefixes {
+            delta_tx
+                .send(GroupEgressDeltaV4::Withdraw {
+                    prefix: *p,
+                    id: 0,
+                    source_ident: 99,
+                })
+                .unwrap();
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            pkt_rx.try_recv().is_err(),
+            "withdrawals wait for the flush delay"
+        );
+
+        tokio::time::advance(WITHDRAW_FLUSH_DELAY * 2).await;
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+        let updates: usize = std::iter::from_fn(|| pkt_rx.try_recv().ok()).count();
+        assert!(updates >= 1, "the burst is flushed after the delay");
+        assert!(
+            updates <= 2,
+            "the deferred burst packs into at most two UPDATEs (got {updates})"
+        );
+        task.abort();
     }
 
     #[test]
@@ -501,6 +735,7 @@ mod tests {
         // exercises the local-id used by Add-Path Adj-RIB-Out and withdraw.
         path1.ident = 0;
         engine.advertise(prefix, path1);
+        engine.flush_withdraws();
 
         let packet = rx.try_recv().expect("filtered Add-Path row is withdrawn");
         assert_eq!(engine.adj_out.0[&prefix].len(), 1);
@@ -560,6 +795,7 @@ mod tests {
             id: 0,
             source_ident: 99,
         });
+        engine.flush_withdraws();
         assert!(
             rx1.try_recv().is_ok(),
             "the withdraw reaches the sync-recorded member"
