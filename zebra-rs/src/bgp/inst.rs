@@ -100,19 +100,21 @@ pub enum Message {
     /// the group's in-flight latch, replay withdraws parked during
     /// the flight, and re-run the flush if the debounce timer fired
     /// while the job was out.
-    /// The third field is the job's member idents: each had
-    /// `Peer::flush_jobs_v4/v6` counted up when the job was spawned and is
-    /// counted back down here, releasing its parked unicast withdrawals —
-    /// even if the group itself is gone by now.
+    /// The third field is the job's members as `(ident, Peer::instance)`:
+    /// each had `Peer::flush_jobs_v4/v6` counted up when the job was
+    /// spawned and is counted back down here, releasing its parked unicast
+    /// withdrawals — even if the group itself is gone by now. The instance
+    /// nonce keeps a late completion from settling a *replacement* peer
+    /// that reused the slot.
     FlushDoneIpv4(
         super::update_group::UpdateGroupId,
         super::update_group::UpdateGroupCounters,
-        Vec<usize>,
+        Vec<super::update_group::JobMember>,
     ),
     FlushDoneIpv6(
         super::update_group::UpdateGroupId,
         super::update_group::UpdateGroupCounters,
-        Vec<usize>,
+        Vec<super::update_group::JobMember>,
     ),
     /// Next-tick flush marker for a peer's queued withdrawals (see
     /// [`super::pending_withdraw`]): drain them into as few UPDATEs as the
