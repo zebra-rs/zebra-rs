@@ -1,0 +1,66 @@
+   Compiling zebra-rs v26.9.1 (/home/kunihiro/zebra-rs.bgp-review/zebra-rs)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 18.83s
+     Running unittests src/main.rs (target/debug/deps/zebra_rs-514a95517e47badd)
+
+running 7 tests
+test bgp::update_group::tests::adversarial_review_cache_v6_withdraw_after_attr_change ... FAILED
+test bgp::update_group::tests::adversarial_review_cache_withdraw_after_attr_change ... FAILED
+test bgp::route::multipath_tests::adversarial_review_ecmp_egress_uses_actual_best ... FAILED
+test bgp::update_group::tests::adversarial_review_unicast_nexthop_knob_splits_groups ... FAILED
+test bgp::group_egress::tests::adversarial_review_best_becomes_member_requires_withdraw ... FAILED
+test bgp::route::rfc4456_reflect_stamp_tests::adversarial_review_v4_addpath_denied_replacement_withdraws ... FAILED
+test bgp::route::rfc4456_reflect_stamp_tests::adversarial_review_v6_addpath_honors_deny_policy ... FAILED
+
+failures:
+
+---- bgp::update_group::tests::adversarial_review_cache_v6_withdraw_after_attr_change stdout ----
+
+thread 'bgp::update_group::tests::adversarial_review_cache_v6_withdraw_after_attr_change' (972433) panicked at zebra-rs/src/bgp/update_group.rs:2308:9:
+stale v6 cache at ids [0, 7]
+
+---- bgp::update_group::tests::adversarial_review_cache_withdraw_after_attr_change stdout ----
+
+thread 'bgp::update_group::tests::adversarial_review_cache_withdraw_after_attr_change' (972434) panicked at zebra-rs/src/bgp/update_group.rs:2292:9:
+stale v4 cache at ids [0, 7]
+
+---- bgp::route::multipath_tests::adversarial_review_ecmp_egress_uses_actual_best stdout ----
+
+thread 'bgp::route::multipath_tests::adversarial_review_ecmp_egress_uses_actual_best' (972430) panicked at zebra-rs/src/bgp/route.rs:25306:9:
+egress selected.last() chooses an ECMP alternate
+
+---- bgp::update_group::tests::adversarial_review_unicast_nexthop_knob_splits_groups stdout ----
+
+thread 'bgp::update_group::tests::adversarial_review_unicast_nexthop_knob_splits_groups' (972435) panicked at zebra-rs/src/bgp/update_group.rs:2317:9:
+assertion `left != right` failed: different unicast next-hop transforms share a group
+  left: Some(UpdateGroupSig { peer_type: IBGP, reflector_client: false, local_as: 65001, local_addr: None, policy_out_name: None, prefix_set_out_name: None, as_override_target: None, remove_private_as: None, local_as_substitute: None, otc_local_role: None, route_server_client: false, as4_negotiated: true, extended_message: false, addpath_send: false, extended_next_hop: false, multiple_labels: false, ipv6_encap_type: None, vpnv4_next_hop_self: false, vpnv4_next_hop_unchanged: false, egress_script: None, attach_unknown_attr: None, adv_interval_override: None, signature_version: 8 })
+ right: Some(UpdateGroupSig { peer_type: IBGP, reflector_client: false, local_as: 65001, local_addr: None, policy_out_name: None, prefix_set_out_name: None, as_override_target: None, remove_private_as: None, local_as_substitute: None, otc_local_role: None, route_server_client: false, as4_negotiated: true, extended_message: false, addpath_send: false, extended_next_hop: false, multiple_labels: false, ipv6_encap_type: None, vpnv4_next_hop_self: false, vpnv4_next_hop_unchanged: false, egress_script: None, attach_unknown_attr: None, adv_interval_override: None, signature_version: 8 })
+
+---- bgp::group_egress::tests::adversarial_review_best_becomes_member_requires_withdraw stdout ----
+
+thread 'bgp::group_egress::tests::adversarial_review_best_becomes_member_requires_withdraw' (972429) panicked at zebra-rs/src/bgp/group_egress.rs:415:9:
+new source member keeps the previous external route: no withdrawal
+
+---- bgp::route::rfc4456_reflect_stamp_tests::adversarial_review_v4_addpath_denied_replacement_withdraws stdout ----
+
+thread 'bgp::route::rfc4456_reflect_stamp_tests::adversarial_review_v4_addpath_denied_replacement_withdraws' (972431) panicked at zebra-rs/src/bgp/route.rs:26279:13:
+previous AddPath advertisement survives a denied replacement
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- bgp::route::rfc4456_reflect_stamp_tests::adversarial_review_v6_addpath_honors_deny_policy stdout ----
+
+thread 'bgp::route::rfc4456_reflect_stamp_tests::adversarial_review_v6_addpath_honors_deny_policy' (972432) panicked at zebra-rs/src/bgp/route.rs:26255:13:
+DENY-ALL route was recorded as advertised to an AddPath peer
+
+
+failures:
+    bgp::group_egress::tests::adversarial_review_best_becomes_member_requires_withdraw
+    bgp::route::multipath_tests::adversarial_review_ecmp_egress_uses_actual_best
+    bgp::route::rfc4456_reflect_stamp_tests::adversarial_review_v4_addpath_denied_replacement_withdraws
+    bgp::route::rfc4456_reflect_stamp_tests::adversarial_review_v6_addpath_honors_deny_policy
+    bgp::update_group::tests::adversarial_review_cache_v6_withdraw_after_attr_change
+    bgp::update_group::tests::adversarial_review_cache_withdraw_after_attr_change
+    bgp::update_group::tests::adversarial_review_unicast_nexthop_knob_splits_groups
+
+test result: FAILED. 0 passed; 7 failed; 0 ignored; 0 measured; 2149 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p zebra-rs --bin zebra-rs`
