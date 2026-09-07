@@ -1240,6 +1240,14 @@ pub struct Peer {
     pub cache_evpn_rev: HashMap<EvpnCacheKey, (Arc<BgpAttr>, EvpnRoute)>,
     pub cache_vpnv4_timer: Option<Timer>,
     pub cache_evpn_timer: Option<Timer>,
+    /// Withdrawals queued for the next flush, per family — the withdraw
+    /// twin of the advertise caches above. See [`super::pending_withdraw`]
+    /// for the drain and the Adj-RIB-Out reconciliation that keeps a
+    /// queued withdraw from racing a later re-advertise.
+    pub pending_withdraw: super::pending_withdraw::PendingWithdraw,
+    /// The next-tick `Message::FlushWithdraw` marker, `Some` while one is
+    /// armed; consumed by the flush, cancelled by `route_clean`.
+    pub withdraw_timer: Option<Timer>,
     // Runtime bookkeeping for TCP-AO listener state: the (send_id,
     // recv_id) pair most recently installed via TCP_AO_ADD_KEY for
     // this peer. Needed because TCP_AO_DEL_KEY requires the exact
@@ -1399,6 +1407,8 @@ impl Peer {
             cache_evpn_rev: HashMap::default(),
             cache_vpnv4_timer: None,
             cache_evpn_timer: None,
+            pending_withdraw: super::pending_withdraw::PendingWithdraw::default(),
+            withdraw_timer: None,
             last_ao_installed: None,
             update_group_id: BTreeMap::new(),
             adv_interval: timer::AdvInterval::default(),
@@ -5233,6 +5243,12 @@ mod adv_timer_phantom_tests {
         let mut peer = idle_peer();
         peer.cache_vpnv4_timer = Some(timer::start_adv_timer_vpnv4(&peer));
         peer.cache_vpnv6_timer = Some(timer::start_adv_timer_vpnv6(&peer));
+        // A withdraw queued for the dead session, with its flush marker.
+        peer.queue_withdraw_v4(Ipv4Nlri {
+            id: 0,
+            prefix: "10.9.0.0/24".parse().unwrap(),
+        });
+        assert!(peer.withdraw_timer.is_some());
         peers.insert("10.0.0.2".parse().unwrap(), peer);
         let ident = peers.get(&"10.0.0.2".parse().unwrap()).unwrap().ident;
 
@@ -5275,6 +5291,14 @@ mod adv_timer_phantom_tests {
         assert!(
             peer.cache_vpnv6_timer.is_none(),
             "route_clean must cancel the VPNv6 advertise timer"
+        );
+        assert!(
+            peer.pending_withdraw.v4.is_empty(),
+            "route_clean must drop the queued withdrawals"
+        );
+        assert!(
+            peer.withdraw_timer.is_none(),
+            "route_clean must cancel the withdraw flush marker"
         );
     }
 

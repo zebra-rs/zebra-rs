@@ -19,6 +19,7 @@ pub mod peer;
 pub mod peer_egress;
 pub mod peer_key;
 pub mod peer_map;
+pub mod pending_withdraw;
 pub mod show;
 pub mod show_update_group;
 pub mod update_group;
