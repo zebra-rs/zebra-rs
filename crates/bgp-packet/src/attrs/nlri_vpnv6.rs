@@ -21,6 +21,22 @@ pub struct Vpnv6Nlri {
     pub nlri: Ipv6Nlri,
 }
 
+impl Vpnv6Nlri {
+    /// Encode this NLRI as it appears in an MP_REACH / MP_UNREACH NLRI
+    /// list — the v6 twin of [`super::nlri_vpnv4::Vpnv4Nlri::nlri_emit`].
+    pub fn nlri_emit(&self, buf: &mut BytesMut) {
+        if self.nlri.id != 0 {
+            buf.put_u32(self.nlri.id);
+        }
+        buf.put_u8(self.nlri.prefix.prefix_len() + 88);
+        buf.put(&self.label.to_bytes()[..]);
+        buf.put_u16(self.rd.typ as u16);
+        buf.put(&self.rd.val[..]);
+        let plen = nlri_psize(self.nlri.prefix.prefix_len());
+        buf.put(&self.nlri.prefix.addr().octets()[0..plen]);
+    }
+}
+
 // Identity excludes the MPLS `label` — see [`super::nlri_vpnv4::Vpnv4Nlri`].
 // A VPNv6 route is identified by (RD, prefix, path-id); the label is a
 // forwarding property, and the advertise-cache removal path
@@ -256,21 +272,7 @@ impl AttrEmitter for Vpnv6Unreach {
         buf.put_u8(u8::from(Safi::MplsVpn));
         // Prefix.
         for withdraw in self.withdraw.iter() {
-            // AddPath
-            if withdraw.nlri.id != 0 {
-                buf.put_u32(withdraw.nlri.id);
-            }
-            // Plen
-            let plen = withdraw.nlri.prefix.prefix_len() + 88;
-            buf.put_u8(plen);
-            // Label
-            buf.put(&withdraw.label.to_bytes()[..]);
-            // RD
-            buf.put_u16(withdraw.rd.typ as u16);
-            buf.put(&withdraw.rd.val[..]);
-            // Prefix
-            let plen = nlri_psize(withdraw.nlri.prefix.prefix_len());
-            buf.put(&withdraw.nlri.prefix.addr().octets()[0..plen]);
+            withdraw.nlri_emit(buf);
         }
     }
 }

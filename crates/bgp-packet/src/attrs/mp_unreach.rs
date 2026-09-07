@@ -18,6 +18,74 @@ pub struct MpUnreachHeader {
     pub safi: Safi,
 }
 
+/// Octets of an MP_UNREACH_NLRI attribute header in its extended-length
+/// form (flags, type, 2-octet length). The paginating emitter budgets for
+/// this form; a value of 255 octets or less takes the short header and one
+/// octet of the budget goes unused. Twin of `MP_REACH_HEADER_LEN`.
+pub(crate) const MP_UNREACH_HEADER_LEN: usize = 4;
+
+/// Append a complete MP_UNREACH_NLRI path attribute (header + `value`) to
+/// `buf`, choosing the short or extended-length header by the value size.
+pub(crate) fn put_mp_unreach_attr(buf: &mut BytesMut, value: &[u8]) {
+    let len = value.len();
+    let extended = len > 255;
+    let flags = if extended {
+        AttrFlags::new().with_optional(true).with_extended(true)
+    } else {
+        AttrFlags::new().with_optional(true)
+    };
+    buf.put_u8(flags.into());
+    buf.put_u8(AttrType::MpUnreachNlri.into());
+    if extended {
+        buf.put_u16(len as u16);
+    } else {
+        buf.put_u8(len as u8);
+    }
+    buf.put(value);
+}
+
+/// Write one MP_UNREACH_NLRI attribute carrying as many of `withdraws` as
+/// fit in a packet of `max_packet_size` octets given what `buf` already
+/// holds. The NLRIs written are drained from the front of `withdraws`;
+/// the rest stay for the next call. Returns the number written, or 0 —
+/// writing nothing — when not even the first NLRI fits, so the caller can
+/// refuse to emit an empty MP_UNREACH (which would read as end-of-RIB).
+///
+/// Each NLRI is measured by encoding it into a scratch buffer rather than
+/// by a per-family size formula, so one routine serves every family
+/// (EVPN and Flowspec NLRIs vary in length by route type).
+fn unreach_emit_mut<T>(
+    afi: Afi,
+    safi: Safi,
+    withdraws: &mut Vec<T>,
+    emit: impl Fn(&T, &mut BytesMut),
+    buf: &mut BytesMut,
+    max_packet_size: usize,
+) -> usize {
+    let budget = max_packet_size.saturating_sub(buf.len() + MP_UNREACH_HEADER_LEN);
+    let mut value = BytesMut::new();
+    value.put_u16(u16::from(afi));
+    value.put_u8(u8::from(safi));
+
+    let mut emitted = 0;
+    let mut nlri = BytesMut::new();
+    for w in withdraws.iter() {
+        nlri.clear();
+        emit(w, &mut nlri);
+        if value.len() + nlri.len() > budget {
+            break;
+        }
+        value.put(&nlri[..]);
+        emitted += 1;
+    }
+    if emitted == 0 {
+        return 0;
+    }
+    withdraws.drain(..emitted);
+    put_mp_unreach_attr(buf, &value);
+    emitted
+}
+
 #[derive(Clone)]
 pub enum MpUnreachAttr {
     /// IPv4 unicast withdrawals carried in MP_UNREACH (RFC 4760 §4,
@@ -149,6 +217,122 @@ impl MpUnreachAttr {
             _ => {
                 //
             }
+        }
+    }
+}
+
+impl MpUnreachAttr {
+    /// Whether this attribute withdraws nothing: an end-of-RIB variant, or
+    /// a list variant whose list has been drained. `attr_emit_mut` never
+    /// writes such an attribute (an empty MP_UNREACH on the wire *is* an
+    /// end-of-RIB marker), so callers use this to stop paginating.
+    pub fn is_empty(&self) -> bool {
+        match self {
+            MpUnreachAttr::Ipv4Nlri(w) => w.is_empty(),
+            MpUnreachAttr::Ipv6Nlri(w) => w.is_empty(),
+            MpUnreachAttr::Vpnv4(w) => w.is_empty(),
+            MpUnreachAttr::Vpnv6(w) => w.is_empty(),
+            MpUnreachAttr::Evpn(w) => w.is_empty(),
+            MpUnreachAttr::Rtcv4(w) => w.is_empty(),
+            MpUnreachAttr::Rtcv6(w) => w.is_empty(),
+            MpUnreachAttr::Mup { withdraws, .. } => withdraws.is_empty(),
+            MpUnreachAttr::Flowspec { withdraws, .. } => withdraws.is_empty(),
+            MpUnreachAttr::Labelv4(w) => w.is_empty(),
+            MpUnreachAttr::Labelv6(w) => w.is_empty(),
+            MpUnreachAttr::SrPolicy { withdraws, .. } => withdraws.is_empty(),
+            MpUnreachAttr::LinkState { withdraws } => withdraws.is_empty(),
+            MpUnreachAttr::Ipv4Eor
+            | MpUnreachAttr::Ipv6Eor
+            | MpUnreachAttr::Vpnv4Eor
+            | MpUnreachAttr::Vpnv6Eor
+            | MpUnreachAttr::EvpnEor
+            | MpUnreachAttr::Rtcv4Eor
+            | MpUnreachAttr::Rtcv6Eor
+            | MpUnreachAttr::Labelv4Eor
+            | MpUnreachAttr::Labelv6Eor => true,
+        }
+    }
+
+    /// Paginating twin of [`attr_emit`](Self::attr_emit): emit as many of
+    /// the queued withdrawals as fit in a packet of `max_packet_size`
+    /// octets given what `buf` already holds, drain those from the list,
+    /// and return the number written. Writes nothing and returns 0 when
+    /// not even the first NLRI fits, and for the end-of-RIB variants
+    /// (which have nothing to paginate — emit those with `attr_emit`).
+    /// Route-Target withdrawals (`Rtcv4` / `Rtcv6`) have no emitter and
+    /// also return 0.
+    pub fn attr_emit_mut(&mut self, buf: &mut BytesMut, max_packet_size: usize) -> usize {
+        let max = max_packet_size;
+        match self {
+            MpUnreachAttr::Ipv4Nlri(w) => {
+                unreach_emit_mut(Afi::Ip, Safi::Unicast, w, Ipv4Nlri::nlri_emit, buf, max)
+            }
+            MpUnreachAttr::Ipv6Nlri(w) => {
+                unreach_emit_mut(Afi::Ip6, Safi::Unicast, w, Ipv6Nlri::nlri_emit, buf, max)
+            }
+            MpUnreachAttr::Vpnv4(w) => {
+                unreach_emit_mut(Afi::Ip, Safi::MplsVpn, w, Vpnv4Nlri::nlri_emit, buf, max)
+            }
+            MpUnreachAttr::Vpnv6(w) => {
+                unreach_emit_mut(Afi::Ip6, Safi::MplsVpn, w, Vpnv6Nlri::nlri_emit, buf, max)
+            }
+            MpUnreachAttr::Evpn(w) => {
+                unreach_emit_mut(Afi::L2vpn, Safi::Evpn, w, EvpnRoute::nlri_emit, buf, max)
+            }
+            MpUnreachAttr::Mup { afi, withdraws } => {
+                unreach_emit_mut(*afi, Safi::Mup, withdraws, MupRoute::nlri_emit, buf, max)
+            }
+            MpUnreachAttr::Flowspec { afi, withdraws } => unreach_emit_mut(
+                *afi,
+                Safi::Flowspec,
+                withdraws,
+                FlowspecNlri::nlri_emit,
+                buf,
+                max,
+            ),
+            MpUnreachAttr::Labelv4(w) => unreach_emit_mut(
+                Afi::Ip,
+                Safi::MplsLabel,
+                w,
+                Labelv4Nlri::nlri_emit,
+                buf,
+                max,
+            ),
+            MpUnreachAttr::Labelv6(w) => unreach_emit_mut(
+                Afi::Ip6,
+                Safi::MplsLabel,
+                w,
+                Labelv6Nlri::nlri_emit,
+                buf,
+                max,
+            ),
+            MpUnreachAttr::SrPolicy { afi, withdraws } => unreach_emit_mut(
+                *afi,
+                Safi::SrTePolicy,
+                withdraws,
+                |r, b| r.nlri_emit(b, false),
+                buf,
+                max,
+            ),
+            MpUnreachAttr::LinkState { withdraws } => unreach_emit_mut(
+                Afi::LinkState,
+                Safi::LinkState,
+                withdraws,
+                |w, b| crate::bgpls_nlri_emit(b, w),
+                buf,
+                max,
+            ),
+            MpUnreachAttr::Rtcv4(_)
+            | MpUnreachAttr::Rtcv6(_)
+            | MpUnreachAttr::Ipv4Eor
+            | MpUnreachAttr::Ipv6Eor
+            | MpUnreachAttr::Vpnv4Eor
+            | MpUnreachAttr::Vpnv6Eor
+            | MpUnreachAttr::EvpnEor
+            | MpUnreachAttr::Rtcv4Eor
+            | MpUnreachAttr::Rtcv6Eor
+            | MpUnreachAttr::Labelv4Eor
+            | MpUnreachAttr::Labelv6Eor => 0,
         }
     }
 }

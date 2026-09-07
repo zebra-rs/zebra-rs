@@ -472,6 +472,86 @@ impl UpdatePacket {
     }
 }
 
+impl UpdatePacket {
+    /// Emit one withdraw-only UPDATE carrying as many of the queued IPv4
+    /// unicast withdrawals (the legacy Withdrawn Routes field, RFC 4271
+    /// §4.3) as fit in `max_packet_size`; the rest stay queued for the
+    /// next call. `None` once the queue is empty. Path attributes and
+    /// reachable NLRI on `self` are not emitted — a withdraw-only UPDATE
+    /// carries neither — so a caller building one puts nothing else on it.
+    pub fn pop_ipv4_withdraw(&mut self) -> Option<BytesMut> {
+        if self.ipv4_withdraw.is_empty() {
+            return None;
+        }
+        let mut buf = BytesMut::with_capacity(self.max_packet_size);
+        let header: BytesMut = self.header.clone().into();
+        buf.put(&header[..]);
+
+        let withdraw_len_pos = buf.len();
+        buf.put_u16(0u16); // Placeholder.
+        // The 2-octet (zero) Total Path Attribute Length still follows the
+        // withdrawn routes, so keep room for it.
+        let budget = self.max_packet_size.saturating_sub(2);
+        let mut emitted = 0;
+        while let Some(ip) = self.ipv4_withdraw.pop() {
+            let path_id_len = if ip.id != 0 { 4 } else { 0 };
+            let nlri_len = path_id_len + 1 + nlri_psize(ip.prefix.prefix_len());
+            if buf.len() + nlri_len > budget {
+                self.ipv4_withdraw.push(ip);
+                break;
+            }
+            ip.nlri_emit(&mut buf);
+            emitted += 1;
+        }
+        // Not even one fits: only reachable with a budget under the 19-octet
+        // header plus one NLRI, which no negotiated size allows. Refuse
+        // rather than emit an empty UPDATE (that is the IPv4 end-of-RIB).
+        if emitted == 0 {
+            return None;
+        }
+        let withdraw_len = (buf.len() - withdraw_len_pos - 2) as u16;
+        buf[withdraw_len_pos..withdraw_len_pos + 2].copy_from_slice(&withdraw_len.to_be_bytes());
+        buf.put_u16(0u16); // No path attributes.
+
+        const LENGTH_POS: std::ops::Range<usize> = 16..18;
+        let length = buf.len() as u16;
+        buf[LENGTH_POS].copy_from_slice(&length.to_be_bytes());
+        Some(buf)
+    }
+
+    /// Emit one withdraw-only UPDATE carrying as many of the queued
+    /// MP_UNREACH_NLRI withdrawals as fit in `max_packet_size`; the rest
+    /// stay queued for the next call. `None` once nothing is queued —
+    /// including for the end-of-RIB variants, which have nothing to
+    /// paginate and go out through [`try_emit`](Self::try_emit). Path
+    /// attributes on `self` are not emitted: a withdraw-only UPDATE carries
+    /// only the MP_UNREACH_NLRI attribute (RFC 4760 §4).
+    pub fn pop_mp_withdraw(&mut self) -> Option<BytesMut> {
+        let mp_withdraw = self.mp_withdraw.as_mut()?;
+        if mp_withdraw.is_empty() {
+            return None;
+        }
+        let mut buf = BytesMut::with_capacity(self.max_packet_size);
+        let header: BytesMut = self.header.clone().into();
+        buf.put(&header[..]);
+        buf.put_u16(0u16); // No legacy IPv4 withdraw.
+
+        let attr_len_pos = buf.len();
+        buf.put_u16(0u16); // Placeholder.
+        let emitted = mp_withdraw.attr_emit_mut(&mut buf, self.max_packet_size);
+        if emitted == 0 {
+            return None;
+        }
+        let attr_len = (buf.len() - attr_len_pos - 2) as u16;
+        buf[attr_len_pos..attr_len_pos + 2].copy_from_slice(&attr_len.to_be_bytes());
+
+        const LENGTH_POS: std::ops::Range<usize> = 16..18;
+        let length = buf.len() as u16;
+        buf[LENGTH_POS].copy_from_slice(&length.to_be_bytes());
+        Some(buf)
+    }
+}
+
 /// Why an [`UpdatePacket`] could not be serialised.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum UpdateEmitError {
@@ -1224,5 +1304,363 @@ mod mp_reach_pagination_tests {
     fn evpn_returns_none_when_first_route_does_not_fit() {
         let mut update = evpn_group(1, 40);
         assert!(update.pop_evpn().is_none());
+    }
+}
+
+#[cfg(test)]
+mod withdraw_pagination_tests {
+    use super::*;
+    use crate::{
+        AfiSafi, As4Path, Direct, EvpnIpPrefix, EvpnMac, EvpnMulticast, EvpnRoute, Ipv6Nlri, Label,
+        RouteDistinguisher, Vpnv4Nlri, Vpnv6Nlri,
+    };
+    use ipnet::{Ipv4Net, Ipv6Net};
+    use std::collections::BTreeSet;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use std::str::FromStr;
+
+    fn rd() -> RouteDistinguisher {
+        RouteDistinguisher::from_str("65001:1").unwrap()
+    }
+
+    fn v4(i: u32, id: u32) -> Ipv4Nlri {
+        Ipv4Nlri {
+            id,
+            prefix: Ipv4Net::new(Ipv4Addr::from(0x0A00_0000u32 + i), 32).unwrap(),
+        }
+    }
+
+    fn vpnv4(i: u32) -> Vpnv4Nlri {
+        Vpnv4Nlri {
+            label: Label::default(),
+            rd: rd(),
+            nlri: Ipv4Nlri {
+                id: 0,
+                prefix: Ipv4Net::new(Ipv4Addr::from(0x0A00_0000u32 + (i << 8)), 24).unwrap(),
+            },
+        }
+    }
+
+    fn vpnv6(i: u32) -> Vpnv6Nlri {
+        Vpnv6Nlri {
+            label: Label::default(),
+            rd: rd(),
+            nlri: Ipv6Nlri {
+                id: 0,
+                prefix: Ipv6Net::new(
+                    Ipv6Addr::from(0x2001_0db8_0000_0000_0000_0000_0000_0000u128 + (i as u128)),
+                    128,
+                )
+                .unwrap(),
+            },
+        }
+    }
+
+    /// EVPN routes of three types so the NLRI wire sizes vary.
+    fn evpn(i: u32) -> EvpnRoute {
+        match i % 3 {
+            0 => EvpnRoute::Multicast(EvpnMulticast {
+                id: 0,
+                rd: rd(),
+                ether_tag: 0,
+                addr: IpAddr::V4(Ipv4Addr::from(0x0A00_0000u32 + i)),
+            }),
+            1 => EvpnRoute::Mac(EvpnMac {
+                id: 0,
+                rd: rd(),
+                esi: [0; 10],
+                ether_tag: 0,
+                mac: [0, 0x11, 0x22, (i >> 16) as u8, (i >> 8) as u8, i as u8],
+                vni: 100,
+            }),
+            _ => EvpnRoute::Prefix(EvpnIpPrefix {
+                id: 0,
+                rd: rd(),
+                esi: [0; 10],
+                ether_tag: 0,
+                prefix: ipnet::IpNet::V6(
+                    Ipv6Net::new(
+                        Ipv6Addr::from(0x2001_0db8_0000_0000_0000_0000_0000_0000u128 + i as u128),
+                        128,
+                    )
+                    .unwrap(),
+                ),
+                gw: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+                label: 0,
+            }),
+        }
+    }
+
+    /// Pop packets until the emitter runs dry, checking that each one fits
+    /// `max`, declares its true length, and parses back as a withdraw-only
+    /// UPDATE; returns the parsed packets in emission order.
+    fn drain(
+        update: &mut UpdatePacket,
+        pop: fn(&mut UpdatePacket) -> Option<BytesMut>,
+        max: usize,
+        opt: Option<ParseOption>,
+    ) -> Vec<UpdatePacket> {
+        let mut parsed = vec![];
+        while let Some(bytes) = pop(update) {
+            assert!(
+                bytes.len() <= max,
+                "packet of {} octets exceeds the {} octet budget",
+                bytes.len(),
+                max
+            );
+            let declared = u16::from_be_bytes([bytes[16], bytes[17]]) as usize;
+            assert_eq!(declared, bytes.len(), "header Length matches the body");
+            let (rest, packet) = UpdatePacket::parse_packet(&bytes, true, opt.clone())
+                .expect("an emitted packet must parse back");
+            assert!(rest.is_empty(), "no trailing octets");
+            assert!(packet.ipv4_update.is_empty(), "withdraw-only: no NLRI");
+            assert!(packet.mp_update.is_none(), "withdraw-only: no MP_REACH");
+            parsed.push(packet);
+        }
+        parsed
+    }
+
+    fn add_path_opt(afi: Afi, safi: Safi) -> ParseOption {
+        let mut opt = ParseOption::default();
+        opt.add_path.insert(
+            AfiSafi { afi, safi },
+            Direct {
+                recv: true,
+                send: true,
+            },
+        );
+        opt
+    }
+
+    /// 3000 host routes are 15000 octets of withdrawn NLRI: four 4096-octet
+    /// UPDATEs, each full to within one NLRI, every route exactly once.
+    #[test]
+    fn ipv4_withdraw_fills_each_packet_to_the_budget() {
+        let mut update = UpdatePacket::with_max_packet_size(BGP_PACKET_LEN);
+        update.ipv4_withdraw = (0..3000).map(|i| v4(i, 0)).collect();
+        let packets = drain(
+            &mut update,
+            UpdatePacket::pop_ipv4_withdraw,
+            BGP_PACKET_LEN,
+            None,
+        );
+        // 19 header + 2 + 2 leaves 4073 octets for 5-octet NLRIs: 814 per
+        // packet, so 3000 need four.
+        assert_eq!(packets.len(), 4);
+        for p in &packets[..3] {
+            assert_eq!(p.ipv4_withdraw.len(), 814);
+        }
+        let seen: BTreeSet<Ipv4Net> = packets
+            .iter()
+            .flat_map(|p| p.ipv4_withdraw.iter().map(|n| n.prefix))
+            .collect();
+        assert_eq!(seen.len(), 3000);
+        assert!(packets.iter().all(|p| p.bgp_attr.is_none()));
+        assert!(update.ipv4_withdraw.is_empty(), "queue drained");
+    }
+
+    /// Add-Path ids ride along (RFC 7911 §3) and are budgeted as 4 extra
+    /// octets per NLRI.
+    #[test]
+    fn ipv4_withdraw_carries_add_path_ids() {
+        let mut update = UpdatePacket::with_max_packet_size(BGP_PACKET_LEN);
+        update.ipv4_withdraw = (0..1000).map(|i| v4(i, i + 1)).collect();
+        let opt = add_path_opt(Afi::Ip, Safi::Unicast);
+        let packets = drain(
+            &mut update,
+            UpdatePacket::pop_ipv4_withdraw,
+            BGP_PACKET_LEN,
+            Some(opt),
+        );
+        // 4073 / 9 = 452 per packet: three packets.
+        assert_eq!(packets.len(), 3);
+        let ids: BTreeSet<u32> = packets
+            .iter()
+            .flat_map(|p| p.ipv4_withdraw.iter().map(|n| n.id))
+            .collect();
+        assert_eq!(ids, (1..=1000).collect());
+    }
+
+    /// The extended-message budget (RFC 8654) packs the same 3000 routes
+    /// into one UPDATE.
+    #[test]
+    fn ipv4_withdraw_extended_message_takes_one_packet() {
+        let mut update = UpdatePacket::with_max_packet_size(BGP_EXTENDED_PACKET_LEN);
+        update.ipv4_withdraw = (0..3000).map(|i| v4(i, 0)).collect();
+        let packets = drain(
+            &mut update,
+            UpdatePacket::pop_ipv4_withdraw,
+            BGP_EXTENDED_PACKET_LEN,
+            None,
+        );
+        assert_eq!(packets.len(), 1);
+        assert_eq!(packets[0].ipv4_withdraw.len(), 3000);
+    }
+
+    #[test]
+    fn ipv4_withdraw_empty_queue_pops_nothing() {
+        let mut update = UpdatePacket::with_max_packet_size(BGP_PACKET_LEN);
+        assert!(update.pop_ipv4_withdraw().is_none());
+    }
+
+    fn vpnv4_withdrawn(packets: &[UpdatePacket]) -> Vec<Ipv4Net> {
+        packets
+            .iter()
+            .flat_map(|p| -> Vec<Ipv4Net> {
+                match &p.mp_withdraw {
+                    Some(MpUnreachAttr::Vpnv4(w)) => w.iter().map(|n| n.nlri.prefix).collect(),
+                    other => panic!("expected a VPNv4 MP_UNREACH, got {:?}", other),
+                }
+            })
+            .collect()
+    }
+
+    /// 2000 VPNv4 /24 withdrawals are 15 octets each: 4066 octets of value
+    /// room after the fixed preamble fits 271 per packet, so eight packets.
+    #[test]
+    fn mp_withdraw_vpnv4_fills_each_packet_to_the_budget() {
+        let mut update = UpdatePacket::with_max_packet_size(BGP_PACKET_LEN);
+        update.mp_withdraw = Some(MpUnreachAttr::Vpnv4((0..2000).map(vpnv4).collect()));
+        let packets = drain(
+            &mut update,
+            UpdatePacket::pop_mp_withdraw,
+            BGP_PACKET_LEN,
+            None,
+        );
+        assert_eq!(packets.len(), 8);
+        let counts: Vec<usize> = packets
+            .iter()
+            .map(|p| match &p.mp_withdraw {
+                Some(MpUnreachAttr::Vpnv4(w)) => w.len(),
+                _ => 0,
+            })
+            .collect();
+        assert!(counts[..7].iter().all(|&c| c == 271), "{counts:?}");
+        let seen: BTreeSet<Ipv4Net> = vpnv4_withdrawn(&packets).into_iter().collect();
+        assert_eq!(seen.len(), 2000);
+        assert!(
+            update
+                .mp_withdraw
+                .as_ref()
+                .is_some_and(MpUnreachAttr::is_empty),
+            "queue drained"
+        );
+    }
+
+    /// The VPNv6 and IPv6-unicast emitters share the generic paginator;
+    /// pin one packet of each family parsing back under the right AFI/SAFI.
+    #[test]
+    fn mp_withdraw_vpnv6_and_ipv6_round_trip() {
+        let mut update = UpdatePacket::with_max_packet_size(BGP_PACKET_LEN);
+        update.mp_withdraw = Some(MpUnreachAttr::Vpnv6((0..500).map(vpnv6).collect()));
+        let packets = drain(
+            &mut update,
+            UpdatePacket::pop_mp_withdraw,
+            BGP_PACKET_LEN,
+            None,
+        );
+        // 28 octets each: 145 per packet, four packets.
+        assert_eq!(packets.len(), 4);
+        let n: usize = packets
+            .iter()
+            .map(|p| match &p.mp_withdraw {
+                Some(MpUnreachAttr::Vpnv6(w)) => w.len(),
+                other => panic!("expected a VPNv6 MP_UNREACH, got {:?}", other),
+            })
+            .sum();
+        assert_eq!(n, 500);
+
+        let mut update = UpdatePacket::with_max_packet_size(BGP_PACKET_LEN);
+        update.mp_withdraw = Some(MpUnreachAttr::Ipv6Nlri(
+            (0..500).map(|i| vpnv6(i).nlri).collect(),
+        ));
+        let packets = drain(
+            &mut update,
+            UpdatePacket::pop_mp_withdraw,
+            BGP_PACKET_LEN,
+            None,
+        );
+        // 17 octets each: 239 per packet, three packets.
+        assert_eq!(packets.len(), 3);
+        let n: usize = packets
+            .iter()
+            .map(|p| match &p.mp_withdraw {
+                Some(MpUnreachAttr::Ipv6Nlri(w)) => w.len(),
+                other => panic!("expected an IPv6 MP_UNREACH, got {:?}", other),
+            })
+            .sum();
+        assert_eq!(n, 500);
+    }
+
+    /// EVPN NLRIs vary in size by route type; each is measured by encoding
+    /// it, so mixed types still fill packets without overflowing.
+    #[test]
+    fn mp_withdraw_evpn_mixed_route_types() {
+        let routes: Vec<EvpnRoute> = (0..1500).map(evpn).collect();
+        let mut update = UpdatePacket::with_max_packet_size(BGP_PACKET_LEN);
+        update.mp_withdraw = Some(MpUnreachAttr::Evpn(routes.clone()));
+        let packets = drain(
+            &mut update,
+            UpdatePacket::pop_mp_withdraw,
+            BGP_PACKET_LEN,
+            None,
+        );
+        assert!(packets.len() > 1, "1500 EVPN routes cannot fit one packet");
+        let seen: Vec<EvpnRoute> = packets
+            .iter()
+            .flat_map(|p| match &p.mp_withdraw {
+                Some(MpUnreachAttr::Evpn(w)) => w.clone(),
+                other => panic!("expected an EVPN MP_UNREACH, got {:?}", other),
+            })
+            .collect();
+        assert_eq!(seen, routes, "every route once, in queue order");
+        // Every packet but the last is full: the next route would not fit.
+        for p in &packets[..packets.len() - 1] {
+            let body = p.header.length as usize;
+            assert!(
+                body > BGP_PACKET_LEN - 64,
+                "packet {body} octets is under-filled"
+            );
+        }
+    }
+
+    /// End-of-RIB markers are not withdrawals to paginate: the pop refuses
+    /// them (an empty MP_UNREACH would *be* an EoR) and `try_emit` still
+    /// encodes the marker.
+    #[test]
+    fn mp_withdraw_eor_is_left_to_try_emit() {
+        let mut update = UpdatePacket::with_max_packet_size(BGP_PACKET_LEN);
+        update.mp_withdraw = Some(MpUnreachAttr::Vpnv4Eor);
+        assert!(update.pop_mp_withdraw().is_none());
+        let bytes = update.try_emit().expect("EoR encodes");
+        let (_, parsed) = UpdatePacket::parse_packet(&bytes, true, None).unwrap();
+        assert!(matches!(parsed.mp_withdraw, Some(MpUnreachAttr::Vpnv4Eor)));
+    }
+
+    /// A withdraw-only UPDATE carries no path attributes besides
+    /// MP_UNREACH_NLRI, whatever the packet builder left on `bgp_attr`.
+    #[test]
+    fn mp_withdraw_drops_path_attributes() {
+        let mut update = UpdatePacket::with_max_packet_size(BGP_PACKET_LEN);
+        update.bgp_attr = Some(BgpAttr {
+            aspath: Some(As4Path::from_str("65001 65002").unwrap()),
+            ..Default::default()
+        });
+        update.mp_withdraw = Some(MpUnreachAttr::Vpnv4((0..3).map(vpnv4).collect()));
+        let packets = drain(
+            &mut update,
+            UpdatePacket::pop_mp_withdraw,
+            BGP_PACKET_LEN,
+            None,
+        );
+        assert_eq!(packets.len(), 1);
+        assert!(
+            packets[0]
+                .bgp_attr
+                .as_ref()
+                .is_none_or(|a| a.aspath.is_none()),
+            "AS_PATH must not ride on a withdraw-only UPDATE"
+        );
+        assert_eq!(vpnv4_withdrawn(&packets).len(), 3);
     }
 }
