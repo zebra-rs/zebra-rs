@@ -214,7 +214,9 @@ struct Engine {
     /// [`flush_withdraws`](Self::flush_withdraws) and fanned to the members
     /// that are not that source. Grouping by source keeps a mixed-source
     /// burst correct — a member that sourced one withdrawn path still
-    /// receives the withdrawals it did not source.
+    /// receives the withdrawals it did not source. A withdrawal superseded
+    /// by a re-advertise within the batch is still owed to the member that
+    /// sourced the superseding path (see `flush_withdraws`).
     pending_withdraw: BTreeMap<usize, HashSet<Ipv4Nlri>>,
 }
 
@@ -382,10 +384,20 @@ impl Engine {
     /// Drain the batch's queued IPv4 withdrawals. Each source peer's set is
     /// packed into as few UPDATEs as the negotiated message size allows and
     /// fanned to every member except that source (split-horizon — the source
-    /// never received the advertisement). A queued NLRI whose `(prefix, id)`
-    /// is back in `adj_out` was re-advertised within the batch (`fan` already
-    /// put the announcement on the wire), so it is dropped: sending it would
-    /// tear down a route the members now hold.
+    /// never received the advertisement).
+    ///
+    /// A queued NLRI whose `(prefix, id)` is back in `adj_out` was
+    /// re-advertised within the batch: `fan` already put the announcement on
+    /// the wire, so the withdraw must not follow it to the members that hold
+    /// the replacement. But this Adj-RIB-Out is shared by the whole group with
+    /// split-horizon applied at fan time, so "row present" does not mean
+    /// *every* member holds the replacement: the member that **sourced** the
+    /// superseding row was excluded from its fan and still holds the copy the
+    /// queued withdraw is for (it received the original announcement, being a
+    /// non-source of that one). Such a withdraw is sent to exactly those
+    /// members — the sources of the matching rows, minus this queue's own
+    /// source — and dropped for everyone else. (The per-peer engines need no
+    /// such split: their Adj-RIB-Out is one member's.)
     fn flush_withdraws(&mut self) {
         if self.pending_withdraw.is_empty() {
             return;
@@ -398,17 +410,49 @@ impl Engine {
             .unwrap_or(4096);
         let pending = std::mem::take(&mut self.pending_withdraw);
         for (source_ident, queued) in pending {
-            let withdraws: Vec<Ipv4Nlri> = queued
-                .into_iter()
-                .filter(|n| !super::pending_withdraw::adj_out_has(&self.adj_out, &n.prefix, n.id))
-                .collect();
-            if withdraws.is_empty() {
-                continue;
+            // Not superseded: fan to every member but the source.
+            let mut fanned: Vec<Ipv4Nlri> = Vec::new();
+            // Superseded: owed only to the members that sourced the
+            // superseding row(s), keyed by that member.
+            let mut owed: BTreeMap<usize, HashSet<Ipv4Nlri>> = BTreeMap::new();
+            for nlri in queued {
+                let superseders: Vec<usize> = self
+                    .adj_out
+                    .0
+                    .get(&nlri.prefix)
+                    .map(|rows| {
+                        rows.iter()
+                            .filter(|r| nlri.id == 0 || r.local_id == nlri.id)
+                            .map(|r| r.ident)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if superseders.is_empty() {
+                    fanned.push(nlri);
+                    continue;
+                }
+                for ident in superseders {
+                    if ident != source_ident && self.members.contains_key(&ident) {
+                        owed.entry(ident).or_default().insert(nlri.clone());
+                    }
+                }
             }
-            let mut update = UpdatePacket::with_max_packet_size(max);
-            update.ipv4_withdraw = withdraws;
-            while let Some(bytes) = update.pop_ipv4_withdraw() {
-                self.fan(&[bytes], source_ident);
+            if !fanned.is_empty() {
+                let mut update = UpdatePacket::with_max_packet_size(max);
+                update.ipv4_withdraw = fanned;
+                while let Some(bytes) = update.pop_ipv4_withdraw() {
+                    self.fan(&[bytes], source_ident);
+                }
+            }
+            for (ident, withdraws) in owed {
+                let Some(ctx) = self.members.get(&ident) else {
+                    continue;
+                };
+                let mut update = UpdatePacket::with_max_packet_size(ctx.max_packet_size());
+                update.ipv4_withdraw = withdraws.into_iter().collect();
+                while let Some(bytes) = update.pop_ipv4_withdraw() {
+                    ctx.send_packet(bytes);
+                }
             }
         }
     }
@@ -651,6 +695,92 @@ mod tests {
             !carries(&to_2, p2_nlri),
             "member 2 does not receive its own sourced p2"
         );
+    }
+
+    /// Whether an UPDATE frame carries withdrawn routes (non-zero Withdrawn
+    /// Routes Length at octets 19..21).
+    fn is_withdraw(frame: &BytesMut) -> bool {
+        u16::from_be_bytes([frame[19], frame[20]]) > 0
+    }
+
+    /// P is advertised from an external source, so both members hold it.
+    /// Then, in one batch, the selection empties (Withdraw P) and member 2
+    /// announces P itself (Advertise P sourced by member 2). Member 1 gets
+    /// the new announcement — an implicit replace, its queued withdraw is
+    /// dropped. Member 2 is split-horizoned out of that announcement and
+    /// still holds the stale copy, so the withdraw must reach it. (Review
+    /// finding: the group Adj-RIB-Out is shared, so "row back in adj_out"
+    /// alone dropped the withdraw for member 2 as well.)
+    #[test]
+    fn superseded_withdraw_still_reaches_the_member_that_sourced_the_replacement() {
+        let mut engine = Engine::default();
+        let mut rx1 = member(&mut engine, 1);
+        let mut rx2 = member(&mut engine, 2);
+        let p: Ipv4Net = "10.10.10.0/24".parse().unwrap();
+        engine.handle(GroupEgressDeltaV4::Advertise {
+            prefix: p,
+            rib: rib(99, "192.0.2.9"),
+        });
+        assert!(rx1.try_recv().is_ok(), "member 1 holds P");
+        assert!(rx2.try_recv().is_ok(), "member 2 holds P");
+
+        engine.handle(GroupEgressDeltaV4::Withdraw {
+            prefix: p,
+            id: 0,
+            source_ident: 99,
+        });
+        engine.handle(GroupEgressDeltaV4::Advertise {
+            prefix: p,
+            rib: rib(2, "192.0.2.2"),
+        });
+        engine.flush_withdraws();
+
+        let to_1: Vec<BytesMut> = std::iter::from_fn(|| rx1.try_recv().ok()).collect();
+        let to_2: Vec<BytesMut> = std::iter::from_fn(|| rx2.try_recv().ok()).collect();
+        assert_eq!(to_1.len(), 1, "member 1 gets exactly the replacement");
+        assert!(!is_withdraw(&to_1[0]), "member 1's frame is an announce");
+        assert_eq!(to_2.len(), 1, "member 2 gets exactly one frame");
+        assert!(is_withdraw(&to_2[0]), "member 2's frame is the withdraw");
+        let p_nlri = [24u8, 10, 10, 10];
+        assert!(
+            to_2[0].windows(4).any(|w| w == p_nlri),
+            "member 2's withdraw carries P"
+        );
+    }
+
+    /// The pure re-advertise case: P withdrawn and re-advertised from the
+    /// same external source within one batch. Every member got the
+    /// replacement, so nobody is owed the withdraw and none goes out.
+    #[test]
+    fn withdraw_re_advertised_from_the_same_source_is_dropped_for_everyone() {
+        let mut engine = Engine::default();
+        let mut rx1 = member(&mut engine, 1);
+        let mut rx2 = member(&mut engine, 2);
+        let p: Ipv4Net = "10.10.10.0/24".parse().unwrap();
+        engine.handle(GroupEgressDeltaV4::Advertise {
+            prefix: p,
+            rib: rib(99, "192.0.2.9"),
+        });
+        let _ = rx1.try_recv();
+        let _ = rx2.try_recv();
+
+        engine.handle(GroupEgressDeltaV4::Withdraw {
+            prefix: p,
+            id: 0,
+            source_ident: 99,
+        });
+        // A different next-hop so the re-advertise is not deduped away.
+        engine.handle(GroupEgressDeltaV4::Advertise {
+            prefix: p,
+            rib: rib(99, "192.0.2.8"),
+        });
+        engine.flush_withdraws();
+
+        for (who, rx) in [("member 1", &mut rx1), ("member 2", &mut rx2)] {
+            let frames: Vec<BytesMut> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+            assert_eq!(frames.len(), 1, "{who} gets exactly the replacement");
+            assert!(!is_withdraw(&frames[0]), "{who} gets no withdraw");
+        }
     }
 
     #[tokio::test(start_paused = true)]

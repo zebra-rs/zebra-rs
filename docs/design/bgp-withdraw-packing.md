@@ -130,12 +130,21 @@ tick later, the same latency the main-task queue already accepts.
 
 Advertises stay immediate (the engine records the Adj-RIB-Out row and sends
 during `handle`); withdrawals queue and flush at the end of the batch. The
-reconcile rule carries over verbatim — a queued NLRI back in the engine's
-`adj_out` (re-advertised within the batch) is dropped at flush via the
-shared `pending_withdraw::adj_out_has`, so a withdraw never overtakes or
-outlives the announcement it races. The group engine keys its queue by the
-path's source peer so a mixed-source burst still honours split-horizon:
-each source's withdrawals fan to the members that are not that source.
+reconcile rule carries over — a queued NLRI back in the engine's `adj_out`
+(re-advertised within the batch) is dropped at flush, so a withdraw never
+overtakes or outlives the announcement it races. For the per-peer engine
+that is the shared `pending_withdraw::adj_out_has` check verbatim. The
+group engine keys its queue by the path's source peer so a mixed-source
+burst still honours split-horizon: each source's withdrawals fan to the
+members that are not that source. Its Adj-RIB-Out is shared by the whole
+group with split-horizon applied at fan time, which changes what "row back
+in `adj_out`" means: the member that *sourced* the superseding row was
+excluded from that row's fan and still holds the copy the queued withdraw
+is for (it was a non-source of the original announcement). So a superseded
+withdraw is not simply dropped — it is sent to exactly the sources of the
+matching rows, minus the queue's own source, and dropped for everyone
+else. (Found in review: the first cut dropped it for all members, and the
+peer whose own path had just become best kept the stale route.)
 
 ### What still sends immediately
 
