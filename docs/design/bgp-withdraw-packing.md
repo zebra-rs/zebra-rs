@@ -92,6 +92,16 @@ withdraw goes out. Two rules close it:
 with the advertise caches; the flush is gated on Established so a marker
 that outlives its session cannot push anything onto a new one.
 
+Rule 1 makes the Adj-RIB-Out load-bearing in a way it was not before: a
+withdraw site that forgets to remove its row now silently cancels its own
+withdraw instead of merely leaving a phantom row for soft-out. The first
+full-suite run caught exactly one such site — the VPNv6 AddPath withdraw
+(`route_withdraw_vpnv6_addpath`) never removed the row, and its advertise
+twin never recorded one, so only dump-recorded rows existed and
+`bgp_shard_addpath_vpnv6` kept a withdrawn path. Both now mirror the VPNv4
+AddPath path. Any new withdraw site must remove its Adj-RIB-Out row
+before queueing.
+
 ### What still sends immediately
 
 MUP, Flowspec, SR Policy, RTC and BGP-LS withdrawals keep their

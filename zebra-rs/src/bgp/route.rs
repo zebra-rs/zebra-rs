@@ -15281,10 +15281,16 @@ pub(super) fn route_advertise_to_peers_vpnv6_addpath(
     route_advertise_batch_addpath::<V6Batch>(Some(rd), prefix, rib, bgp, peers);
 }
 
-/// VPNv6 AddPath withdraw twin — emit an MP_UNREACH carrying the
-/// withdrawn path's `local_id` to every AddPath-Send member, and drop
-/// the matching entry from each peer's pending cache. The other paths
-/// for the prefix stay advertised (they carry different path-ids).
+/// VPNv6 AddPath withdraw twin — queue an MP_UNREACH carrying the
+/// withdrawn path's `local_id` to every AddPath-Send member, drop the
+/// matching entry from each peer's pending cache, and drop the path's
+/// row from the peer's VPNv6 Adj-RIB-Out. The other paths for the
+/// prefix stay advertised (they carry different path-ids).
+///
+/// The Adj-RIB-Out removal is load-bearing: the pending-withdraw drain
+/// drops a queued withdraw whose `(prefix, path-id)` is still in that
+/// table (a re-advertise supersedes it), so a row left behind here would
+/// silently cancel the withdraw and leave the peer holding the path.
 pub(super) fn route_withdraw_vpnv6_addpath(
     rd: RouteDistinguisher,
     prefix: Ipv6Net,
@@ -15298,10 +15304,10 @@ pub(super) fn route_withdraw_vpnv6_addpath(
     for ident in peer_idents {
         let peer = peers.get_mut_by_idx(ident).expect("peer exists");
         peer.cache_remove_vpnv6(rd, prefix, removed.local_id);
-        route_withdraw_vpnv6(peer, rd, prefix, removed.local_id);
         if let Some(t) = peer.adj_out.v6vpn.get_mut(&rd) {
             t.remove(prefix, removed.local_id);
         }
+        route_withdraw_vpnv6(peer, rd, prefix, removed.local_id);
     }
 }
 
