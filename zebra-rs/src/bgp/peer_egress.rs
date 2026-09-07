@@ -32,6 +32,13 @@ use tokio::time::{Duration, Instant, sleep_until};
 /// partial flushes the main-task/engine race would otherwise produce.
 const WITHDRAW_FLUSH_DELAY: Duration = Duration::from_millis(1);
 
+/// Most deltas one channel wake handles before the engine checks its flush
+/// deadline again. The run loop is biased toward the channel, so with no
+/// bound a producer that keeps the channel non-empty (a full-table
+/// re-advertise outpacing the engine) would keep the timer branch from ever
+/// being polled and hold every queued withdrawal until the stream ended.
+const DRAIN_BATCH: usize = 1024;
+
 use crate::context::task::Task;
 
 use super::adj_rib::{AdjRibTable, Out};
@@ -203,8 +210,11 @@ impl Engine {
     /// `biased` prefers draining new deltas over flushing, so a burst still
     /// arriving on the channel accumulates into one flush instead of the
     /// partial flushes the main-task/engine race would otherwise produce.
-    /// Exits when the channel closes at teardown; the session is gone, so any
-    /// still-queued withdrawal is dropped (a new session re-syncs).
+    /// Each wake drains at most `DRAIN_BATCH` deltas and then
+    /// [`settle_flush`](Self::settle_flush) checks the deadline itself, so a
+    /// sustained stream cannot starve the flush. Exits when the channel closes
+    /// at teardown; the session is gone, so any still-queued withdrawal is
+    /// dropped (a new session re-syncs).
     async fn run(&mut self, mut rx: mpsc::UnboundedReceiver<EgressDeltaV4>) {
         let mut flush_at: Option<Instant> = None;
         loop {
@@ -213,18 +223,37 @@ impl Engine {
                 maybe = rx.recv() => {
                     let Some(delta) = maybe else { break };
                     self.handle(delta);
-                    while let Ok(delta) = rx.try_recv() {
+                    for _ in 1..DRAIN_BATCH {
+                        let Ok(delta) = rx.try_recv() else { break };
                         self.handle(delta);
                     }
-                    if !self.pending_withdraw.is_empty() && flush_at.is_none() {
-                        flush_at = Some(Instant::now() + WITHDRAW_FLUSH_DELAY);
-                    }
+                    self.settle_flush(&mut flush_at);
                 }
                 _ = async { sleep_until(flush_at.unwrap()).await }, if flush_at.is_some() => {
                     self.flush_withdraws();
                     flush_at = None;
                 }
             }
+        }
+    }
+
+    /// After a channel drain: arm the deferred flush when a withdrawal first
+    /// queues, and flush now if an armed deadline has already passed. The
+    /// select is biased toward the channel, so under a sustained delta stream
+    /// the timer branch may never be polled; checking the deadline here, after
+    /// every bounded drain, caps a queued withdrawal's wait at one
+    /// `WITHDRAW_FLUSH_DELAY` plus one batch instead of the end of the stream.
+    fn settle_flush(&mut self, flush_at: &mut Option<Instant>) {
+        match *flush_at {
+            Some(at) if Instant::now() >= at => {
+                self.flush_withdraws();
+                *flush_at = None;
+            }
+            Some(_) => {}
+            None if !self.pending_withdraw.is_empty() => {
+                *flush_at = Some(Instant::now() + WITHDRAW_FLUSH_DELAY);
+            }
+            None => {}
         }
     }
 
@@ -626,6 +655,54 @@ mod tests {
         let entries = reply_rx.try_recv().expect("DumpAdjOut replied");
         assert_eq!(entries.len(), 1, "the advertised prefix is in the dump");
         assert_eq!(entries[0].0, prefix);
+    }
+
+    /// The deadline is serviced by the drain itself, not only by the timer
+    /// branch: a withdrawal queued and then left behind by a stream of
+    /// further deltas flushes once its deadline has passed, at the end of
+    /// the next drain, without the channel ever going idle.
+    #[tokio::test(start_paused = true)]
+    async fn drain_flushes_an_expired_deadline_without_the_timer_branch() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut ctx = SyncCtx::for_test();
+        ctx.packet_tx = Some(tx);
+        let mut engine = Engine {
+            ctx,
+            add_path: false,
+            adj_out: AdjRibTable::new(),
+            attr_store: BgpAttrStore::new(),
+            pending_withdraw: HashSet::new(),
+        };
+        let p1: Ipv4Net = "10.10.10.0/24".parse().unwrap();
+        let p2: Ipv4Net = "10.10.11.0/24".parse().unwrap();
+        engine.advertise(p1, rib(5, "192.0.2.1"));
+        engine.advertise(p2, rib(5, "192.0.2.1"));
+        let _ = std::iter::from_fn(|| rx.try_recv().ok()).count();
+
+        // First drain queues a withdrawal: the deadline is armed, nothing sent.
+        let mut flush_at: Option<Instant> = None;
+        engine.withdraw(p1, 0);
+        engine.settle_flush(&mut flush_at);
+        let armed = flush_at.expect("first queued withdrawal arms the deadline");
+        assert!(
+            rx.try_recv().is_err(),
+            "nothing flushes before the deadline"
+        );
+
+        // A later drain before the deadline: still armed at the same instant.
+        engine.withdraw(p2, 0);
+        engine.settle_flush(&mut flush_at);
+        assert_eq!(flush_at, Some(armed), "the deadline is not pushed out");
+        assert!(rx.try_recv().is_err());
+
+        // The deadline passes while the channel stays busy (no timer branch
+        // is polled here): the next drain flushes both, packed.
+        tokio::time::advance(WITHDRAW_FLUSH_DELAY).await;
+        engine.settle_flush(&mut flush_at);
+        assert!(flush_at.is_none(), "flushed and disarmed");
+        let frames: Vec<bytes::BytesMut> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert_eq!(frames.len(), 1, "both withdrawals in one UPDATE");
+        assert!(engine.pending_withdraw.is_empty());
     }
 
     #[tokio::test(start_paused = true)]
