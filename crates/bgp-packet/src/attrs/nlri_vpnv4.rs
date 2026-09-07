@@ -21,6 +21,24 @@ pub struct Vpnv4Nlri {
     pub nlri: Ipv4Nlri,
 }
 
+impl Vpnv4Nlri {
+    /// Encode this NLRI as it appears in an MP_REACH / MP_UNREACH NLRI
+    /// list (RFC 4364 §4.3.4 / RFC 8277): the optional 4-octet path-id,
+    /// the 1-octet length in bits (label + RD + prefix), the 3-octet
+    /// label, the 8-octet RD, then the significant prefix octets.
+    pub fn nlri_emit(&self, buf: &mut BytesMut) {
+        if self.nlri.id != 0 {
+            buf.put_u32(self.nlri.id);
+        }
+        buf.put_u8(self.nlri.prefix.prefix_len() + 88);
+        buf.put(&self.label.to_bytes()[..]);
+        buf.put_u16(self.rd.typ as u16);
+        buf.put(&self.rd.val[..]);
+        let plen = nlri_psize(self.nlri.prefix.prefix_len());
+        buf.put(&self.nlri.prefix.addr().octets()[0..plen]);
+    }
+}
+
 // Identity excludes the MPLS `label`: a VPNv4 route is identified by its
 // (RD, prefix, path-id), and the label is a forwarding property attached
 // to it (and may not be known at every comparison site — e.g. an
@@ -280,21 +298,7 @@ impl AttrEmitter for Vpnv4Unreach {
         buf.put_u8(u8::from(Safi::MplsVpn));
         // Prefix.
         for withdraw in self.withdraw.iter() {
-            // AddPath
-            if withdraw.nlri.id != 0 {
-                buf.put_u32(withdraw.nlri.id);
-            }
-            // Plen
-            let plen = withdraw.nlri.prefix.prefix_len() + 88;
-            buf.put_u8(plen);
-            // Label
-            buf.put(&withdraw.label.to_bytes()[..]);
-            // RD
-            buf.put_u16(withdraw.rd.typ as u16);
-            buf.put(&withdraw.rd.val[..]);
-            // Prefix
-            let plen = nlri_psize(withdraw.nlri.prefix.prefix_len());
-            buf.put(&withdraw.nlri.prefix.addr().octets()[0..plen]);
+            withdraw.nlri_emit(buf);
         }
     }
 }
