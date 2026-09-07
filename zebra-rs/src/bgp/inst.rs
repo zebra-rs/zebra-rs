@@ -100,13 +100,19 @@ pub enum Message {
     /// the group's in-flight latch, replay withdraws parked during
     /// the flight, and re-run the flush if the debounce timer fired
     /// while the job was out.
+    /// The third field is the job's member idents: each had
+    /// `Peer::flush_jobs_v4/v6` counted up when the job was spawned and is
+    /// counted back down here, releasing its parked unicast withdrawals —
+    /// even if the group itself is gone by now.
     FlushDoneIpv4(
         super::update_group::UpdateGroupId,
         super::update_group::UpdateGroupCounters,
+        Vec<usize>,
     ),
     FlushDoneIpv6(
         super::update_group::UpdateGroupId,
         super::update_group::UpdateGroupCounters,
+        Vec<usize>,
     ),
     /// Next-tick flush marker for a peer's queued withdrawals (see
     /// [`super::pending_withdraw`]): drain them into as few UPDATEs as the
@@ -1409,7 +1415,7 @@ impl Bgp {
     /// Test support: see [`super::pending_withdraw::flush_all_pending_withdraws`].
     #[cfg(test)]
     pub(crate) fn flush_all_pending_withdraws(&mut self) {
-        super::pending_withdraw::flush_all_pending_withdraws(&self.update_groups, &mut self.peers);
+        super::pending_withdraw::flush_all_pending_withdraws(&mut self.peers);
     }
 
     pub fn new(
@@ -2688,13 +2694,14 @@ impl Bgp {
                     &group_id,
                 );
             }
-            Message::FlushDoneIpv4(group_id, deltas) => {
+            Message::FlushDoneIpv4(group_id, deltas, members) => {
                 let resync = super::update_group::flush_done_ipv4(
                     &mut self.update_groups,
                     &mut self.peers,
                     &self.tx,
                     &group_id,
                     deltas,
+                    &members,
                     &self.interface_addrs,
                     self.router_id,
                     self.as_sets_withdraw,
@@ -2707,13 +2714,14 @@ impl Bgp {
                     super::peer::apply_soft_out_peer(self, ident);
                 }
             }
-            Message::FlushDoneIpv6(group_id, deltas) => {
+            Message::FlushDoneIpv6(group_id, deltas, members) => {
                 let resync = super::update_group::flush_done_ipv6(
                     &mut self.update_groups,
                     &mut self.peers,
                     &self.tx,
                     &group_id,
                     deltas,
+                    &members,
                     self.router_id,
                     self.as_sets_withdraw,
                 );
@@ -2726,11 +2734,7 @@ impl Bgp {
                 }
             }
             Message::FlushWithdraw(ident) => {
-                super::pending_withdraw::flush_pending_withdraws(
-                    ident,
-                    &self.update_groups,
-                    &mut self.peers,
-                );
+                super::pending_withdraw::flush_pending_withdraws(ident, &mut self.peers);
             }
             Message::BgpLs { add, withdraw } => {
                 // Locally-produced BGP-LS (IS-IS producer, RFC 9552):

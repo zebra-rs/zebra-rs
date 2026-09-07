@@ -22890,7 +22890,7 @@ mod evpn_addpath_fanout_tests {
         // withdrawn from the member — it would otherwise keep forwarding to
         // the dead VTEP until the MAC is withdrawn everywhere.
         route_evpn_withdraw(a, &mac_route(0), &mut top, &mut peers);
-        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&mut peers);
         assert_eq!(
             top.local_rib.evpn[&rd()].selected[&prefix].ident,
             b,
@@ -22973,7 +22973,7 @@ mod evpn_addpath_fanout_tests {
         let mut stale = top.local_rib.evpn[&rd()].selected[&prefix].clone();
         stale.stale = true;
         route_advertise_evpn_to_peers(rd(), prefix.clone(), &[stale], &mut top, &mut peers);
-        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&mut peers);
         peers.get_mut_by_idx(c).unwrap().flush_evpn();
         let (reach, unreach) = drain_opt(&mut c_rx, false);
         assert!(
@@ -23579,7 +23579,7 @@ mod vpnv6_transit_label_tests {
             slot.policy_list = Some(policy);
         }
         route_soft_out_peer(ap, &mut top, &mut peers);
-        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&mut peers);
         peers.get_mut_by_idx(ap).unwrap().flush_vpnv6();
         assert_eq!(
             withdrawn_vpnv6(&mut ap_rx, true),
@@ -23667,7 +23667,7 @@ mod vpnv6_transit_label_tests {
         // A soft-out must not re-advertise the unreachable candidate under
         // its path-id; it must withdraw it.
         route_soft_out_peer(ap, &mut top, &mut peers);
-        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&mut peers);
         peers.get_mut_by_idx(ap).unwrap().flush_vpnv6();
         let (reach, unreach) = vpnv6_traffic(&mut ap_rx, true);
         assert_eq!(
@@ -23749,7 +23749,7 @@ mod vpnv6_transit_label_tests {
             &mut peers,
             false,
         );
-        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&mut peers);
         peers.get_mut_by_idx(ap).unwrap().flush_vpnv6();
         assert_eq!(
             sent_vpnv6_opt(&mut ap_rx, true),
@@ -23813,7 +23813,7 @@ mod vpnv6_transit_label_tests {
             Some(1000),
             "the denied prefix's label is reusable"
         );
-        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&mut peers);
         peers.get_mut_by_idx(ap).unwrap().flush_vpnv6();
         assert_eq!(
             withdrawn_vpnv6(&mut ap_rx, true),
@@ -30591,7 +30591,7 @@ mod v6_addpath_policy_out_tests {
             "2001:db8:16::/64",
             "65002 65009 65010",
         );
-        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&mut peers);
         assert!(
             !peers
                 .get_by_idx(c)
@@ -30667,7 +30667,7 @@ mod v6_addpath_policy_out_tests {
             "2001:db8:16::/64",
             "65002 65009 65010",
         );
-        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&mut peers);
         let rows = &peers.get_by_idx(c).unwrap().adj_out.v6.0[&prefix];
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].local_id, kept_id);
@@ -31077,7 +31077,7 @@ mod addpath_exact_id_tests {
         let mut stale = top.shard.v4.candidates(prefix)[0].clone();
         stale.stale = true;
         route_advertise_to_addpath(None, prefix, &stale, a, &mut top, &mut peers);
-        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&mut peers);
         assert!(
             held_v4(&peers, c, "10.17.3.0/24").is_empty(),
             "the stale path-id is withdrawn from the non-LLGR peer"
@@ -31176,7 +31176,7 @@ mod addpath_exact_id_tests {
             &mut top,
             &mut peers,
         );
-        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&mut peers);
         assert!(
             held(&peers).is_empty(),
             "the refused re-send withdraws path-id 7"
@@ -31230,16 +31230,16 @@ mod addpath_exact_id_tests {
         rib.local_id = 7;
         let mut top = fx.top();
         route_advertise_to_addpath(Some(rd), prefix, &rib, a, &mut top, &mut peers);
-        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&mut peers);
         let mut other = rib.clone();
         other.local_id = 8;
         other.remote_id = 8;
         route_advertise_to_addpath(Some(rd), prefix, &other, a, &mut top, &mut peers);
-        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&mut peers);
         std::sync::Arc::make_mut(&mut rib.attr).com =
             Some([CommunityValue::NO_ADVERTISE.value()].into_iter().collect());
         route_advertise_to_addpath(Some(rd), prefix, &rib, a, &mut top, &mut peers);
-        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&mut peers);
         peers.get_mut_by_idx(c).unwrap().flush_vpnv4();
         let packets = updates(&mut rc, VPNV4);
         let mut withdrawn = Vec::new();
@@ -31304,7 +31304,7 @@ mod addpath_exact_id_tests {
         drain(&mut rc);
         bind_out(peers.get_mut_by_idx(c).unwrap(), V4U, deny_all());
         route_soft_out_peer(c, &mut top, &mut peers);
-        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&mut peers);
         let mut withdrawn: Vec<u32> = updates(&mut rc, V4U)
             .iter()
             .flat_map(|u| u.ipv4_withdraw.iter().map(|n| n.id))
@@ -31356,7 +31356,7 @@ mod addpath_exact_id_tests {
         drain(&mut rc);
         bind_out(peers.get_mut_by_idx(c).unwrap(), V4U, deny_long_paths());
         route_soft_out_peer(c, &mut top, &mut peers);
-        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&mut peers);
         let withdrawn: Vec<u32> = updates(&mut rc, V4U)
             .iter()
             .flat_map(|u| u.ipv4_withdraw.iter().map(|n| n.id))
@@ -31413,7 +31413,7 @@ mod addpath_exact_id_tests {
         drain(&mut rc);
         bind_out(peers.get_mut_by_idx(c).unwrap(), V4U, deny_short_paths());
         route_soft_out_peer(c, &mut top, &mut peers);
-        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&mut peers);
         let withdrawn: Vec<u32> = updates(&mut rc, V4U)
             .iter()
             .flat_map(|u| u.ipv4_withdraw.iter().map(|n| n.id))
@@ -31480,7 +31480,7 @@ mod addpath_exact_id_tests {
         let mut top = fx.top();
         bind_out(peers.get_mut_by_idx(c).unwrap(), VPNV4, deny_all());
         route_soft_out_peer(c, &mut top, &mut peers);
-        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&mut peers);
         peers.get_mut_by_idx(c).unwrap().flush_vpnv4();
         let mut withdrawn: Vec<u32> = updates(&mut rc, VPNV4)
             .into_iter()
@@ -31552,17 +31552,14 @@ mod addpath_exact_id_tests {
                 .clone();
             sent.push(rib.local_id);
             route_advertise_to_addpath(Some(rd), prefix, &rib, a, &mut top, &mut peers);
-            crate::bgp::pending_withdraw::flush_all_pending_withdraws(
-                &*top.update_groups,
-                &mut peers,
-            );
+            crate::bgp::pending_withdraw::flush_all_pending_withdraws(&mut peers);
         }
         let table = top.shard.v4vpn.get_mut(&rd).unwrap();
         assert!(table.set_nexthop_reachable(prefix, "10.0.0.7".parse().unwrap(), false));
         assert_eq!(table.select_best_path(prefix)[0].local_id, sent[1]);
         drain(&mut rc);
         route_soft_out_peer(c, &mut top, &mut peers);
-        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&mut peers);
         peers.get_mut_by_idx(c).unwrap().flush_vpnv4();
         let mut reach = Vec::new();
         let mut withdraw = Vec::new();
@@ -31614,7 +31611,7 @@ mod addpath_exact_id_tests {
         assert!(top.shard.v4.select_best_path(prefix).is_empty());
         drain(&mut rc);
         route_soft_out_peer(c, &mut top, &mut peers);
-        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&mut peers);
         let packets = updates(&mut rc, V4U);
         let reach: Vec<_> = packets
             .iter()
@@ -32293,7 +32290,7 @@ mod v6_empty_selection_tests {
         }
 
         route_soft_out_peer(b, &mut top, &mut peers);
-        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&mut peers);
 
         let peer_b = peers.get_by_idx(b).unwrap();
         assert!(
@@ -32398,7 +32395,7 @@ mod v6_empty_selection_tests {
         }
 
         route_soft_out_peer(b, &mut top, &mut peers);
-        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&*top.update_groups, &mut peers);
+        crate::bgp::pending_withdraw::flush_all_pending_withdraws(&mut peers);
 
         let mut opt = bgp_packet::ParseOption::default();
         opt.add_path.entry(v6u).or_default().recv = true;
@@ -32681,7 +32678,7 @@ mod v6_empty_selection_tests {
             peers.get_by_idx(b).unwrap().withdraw_timer.is_some(),
             "queueing the withdraw must arm the flush marker"
         );
-        crate::bgp::pending_withdraw::flush_pending_withdraws(b, &update_groups, &mut peers);
+        crate::bgp::pending_withdraw::flush_pending_withdraws(b, &mut peers);
 
         let packets = drain(&mut rx_b);
         assert!(
