@@ -49,6 +49,13 @@ impl RemoteAsSpec {
 pub struct InterfaceNeighborCfg {
     pub neighbor_group: Option<String>,
     pub remote_as: RemoteAsSpec,
+    /// Session timers typed on the interface-neighbor. Held here — not
+    /// only on the peer — because an interface-neighbor is configurable
+    /// before its peer exists: materialization waits for the link and a
+    /// resolvable remote-as. [`materialize`] copies this onto the peer
+    /// it creates; the callbacks below additionally write through to an
+    /// already-materialized peer.
+    pub timer: super::timer::Config,
 }
 
 /// Resolved remote-as for an interface-neighbor plus a hint about
@@ -213,6 +220,10 @@ fn materialize(
     // (it additionally consults the interface-neighbor cfg for the
     // `external`-placeholder case — see `sweep_peers_for_group`).
     peer.config.neighbor_group = cfg.neighbor_group.clone();
+    // Session timers typed on the interface-neighbor. Must land before
+    // `peer.start()` below: the idle-hold timer it arms reads
+    // `config.timer.idle_hold_time`.
+    peer.config.timer = cfg.timer.clone();
     if resolved.inherited_from_group {
         peer.config.remote_as_inherited = true;
     }
@@ -416,6 +427,133 @@ pub fn config_interface_neighbor_remote_as(
         }
         ConfigOp::Delete => entry.remote_as = RemoteAsSpec::Unset,
         _ => {}
+    }
+    Some(())
+}
+
+/// The peer an `interface-neighbor <name>` materialized into, if it
+/// exists yet. The timers callbacks below stage onto the
+/// interface-neighbor config unconditionally and write through here, so
+/// a live edit behaves like the addressed `neighbor <addr> timers …`
+/// path; before the link or the first RA there is simply no peer, and
+/// [`materialize`] picks the staged value up when it builds one.
+///
+/// A plain accessor shared by the four callbacks, in the shape of the
+/// `vrf_entry` / `neighbor_entry` helpers the per-VRF timers callbacks
+/// share.
+fn interface_peer_mut<'a>(bgp: &'a mut Bgp, name: &str) -> Option<&'a mut Peer> {
+    let ifindex = *bgp.link_index_by_name.get(name)?;
+    bgp.peers.get_mut_by_key(&PeerKey::Interface(ifindex))
+}
+
+/// `set router bgp interface-neighbor <name> timers hold-time <SECS>`.
+///
+/// Argument consumption mirrors the addressed `timers` callbacks: the
+/// value is parsed on Delete too, because a leaf delete carries it.
+pub fn config_interface_neighbor_hold_time(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    let hold_time: u16 = args.u16()?;
+    let value = if op.is_set() { Some(hold_time) } else { None };
+
+    bgp.interface_neighbors
+        .entry(name.clone())
+        .or_default()
+        .timer
+        .hold_time = value;
+    if let Some(peer) = interface_peer_mut(bgp, &name) {
+        peer.config.timer.hold_time = value;
+    }
+    Some(())
+}
+
+/// `set router bgp interface-neighbor <name> timers idle-hold-time <SECS>`.
+///
+/// The one leaf whose current value is already captured in a running
+/// timer, so — like the addressed callback — it drops and re-arms it.
+pub fn config_interface_neighbor_idle_hold_time(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    let idle_hold_time: u16 = args.u16()?;
+    let value = if op.is_set() {
+        Some(idle_hold_time)
+    } else {
+        None
+    };
+
+    bgp.interface_neighbors
+        .entry(name.clone())
+        .or_default()
+        .timer
+        .idle_hold_time = value;
+    if let Some(peer) = interface_peer_mut(bgp, &name) {
+        peer.config.timer.idle_hold_time = value;
+        // Gate the re-arm on the same dialability condition
+        // `Peer::start()` uses: an interface-neighbor peer materialized
+        // before its first RA sits at `address == ::`, and
+        // `update_timers` does not re-check that, so an ungated re-arm
+        // would drive such a peer into `fsm_start` and dial the
+        // unspecified address.
+        if peer.is_dialable() {
+            peer.timer.idle_hold_timer = None;
+            super::timer::update_timers(peer);
+        }
+    }
+    Some(())
+}
+
+/// `set router bgp interface-neighbor <name> timers connect-retry-time <SECS>`.
+pub fn config_interface_neighbor_connect_retry_time(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    let connect_retry_time: u16 = args.u16()?;
+    let value = if op.is_set() {
+        Some(connect_retry_time)
+    } else {
+        None
+    };
+
+    bgp.interface_neighbors
+        .entry(name.clone())
+        .or_default()
+        .timer
+        .connect_retry_time = value;
+    if let Some(peer) = interface_peer_mut(bgp, &name) {
+        peer.config.timer.connect_retry_time = value;
+    }
+    Some(())
+}
+
+/// `set router bgp interface-neighbor <name> timers advertisement-interval <SECS>`.
+pub fn config_interface_neighbor_advertisement_interval(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    let adv_interval: u16 = args.u16()?;
+    let value = if op.is_set() {
+        Some(adv_interval)
+    } else {
+        None
+    };
+
+    bgp.interface_neighbors
+        .entry(name.clone())
+        .or_default()
+        .timer
+        .min_adv_interval = value;
+    if let Some(peer) = interface_peer_mut(bgp, &name) {
+        peer.config.timer.min_adv_interval = value;
     }
     Some(())
 }
