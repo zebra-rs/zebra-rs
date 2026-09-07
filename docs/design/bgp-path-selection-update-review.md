@@ -86,6 +86,24 @@ cap. The two reviews agree on every overlapping item.
   the eBGP path, iBGP peer receives 500) and passes its four control
   scenarios, so the fix must cover `route_ipv4_update` and
   `route_ipv6_update` ingest alike.
+- FIXED (branch `bgp-ebgp-local-pref-ignore`) at the parser, the way FRR
+  does it: `ParseOption` gained `peer_type: BgpPeerType` (`Ibgp` by
+  default, so callers that do not say keep every attribute),
+  `peer_start_reader` stamps it from the peer's configured type next to
+  the AS4 stamp (`opt.peer_type = peer.peer_type.into()`), and
+  `parse_bgp_update_attribute` skips a LOCAL_PREF from an external session
+  (`is_ebgp`) before the value parse, so a malformed one is discarded too
+  instead of resetting the session (RFC 7606 §7.6). A parse with no
+  option keeps the attribute (default session type `Ibgp`); every
+  production parse passes the session's option. Every family and the
+  Adj-RIB-In see the UPDATE as if the attribute had never been sent;
+  inbound policy still runs after parsing, so `set local-pref` on an eBGP
+  session keeps working.
+  Both BDD gates pass 7/7 with the fix. Not covered: ORIGINATOR_ID /
+  CLUSTER_LIST from eBGP (#11, same parser site), and a malformed
+  LOCAL_PREF from an *internal* peer still resets the session where
+  RFC 7606 §7.6 asks for treat-as-withdraw (`attr_malformation_is_withdraw`
+  does not list `LocalPref`).
 
 ### 2. P1 CONFIRMED (probe) — a route learned from a reflector client is never reflected to non-client iBGP peers
 
@@ -636,6 +654,29 @@ cap. The two reviews agree on every overlapping item.
   (`5820-5835`, `13359-13372`) sends without recording; only
   `route_sync_vpnv6` (`15275`) records, so `advertised-routes` / PfxSnt
   drift (the recorded "plausible" item, confirmed display-only).
+
+### Found while fixing #1
+
+- **P1 CONFIRMED (probe) — a dynamic listen-range peer is typed iBGP
+  regardless of the group's `remote-as`.** `try_dynamic_accept`
+  (`peer.rs:3770-3850`) builds the peer with `Peer::new`, which hard-codes
+  `peer_type: PeerType::IBGP` (`peer.rs:1361`), and neither it nor
+  `apply_inherited` re-derives the type from `remote_as` versus `bgp.asn`;
+  the only derivation for dynamic peers is the group sweep in
+  `config_neighbor_group_remote_as`, which runs on a later config change,
+  never on accept. Probe: group `A remote-as 65002` under local AS 65001,
+  range `10.1.0.0/24` bound to `A`, `try_dynamic_accept` with a loopback
+  stream → `remote_as == 65002` but `peer_type == IBGP`. Consequences for
+  every dynamic eBGP peer: the parser keeps its LOCAL_PREF (the #1 fix
+  keys on the reader's `peer_type`), egress skips the AS_PATH prepend and
+  the eBGP next-hop rewrite, its routes rank as iBGP (distance 200, the
+  iBGP-to-iBGP rule blocks relaying them to iBGP peers, LOCAL_PREF is
+  defaulted onto them) and the iBGP-only attributes are not stripped
+  toward it. The dynamic-neighbor BDDs (`bgp_dynamic_neighbors`,
+  `bgp_dynamic_nbr_policy`, `bgp_dynamic_nbr_md5`) all use an eBGP group
+  but assert route presence only. Fix: derive `peer_type` in
+  `try_dynamic_accept` exactly as `interface_neighbor.rs:188` does; the
+  probe becomes the regression test.
 
 ### Below the cap (one line each, all read-confirmed)
 

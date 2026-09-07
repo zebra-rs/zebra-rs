@@ -670,6 +670,7 @@ mod tests {
     use ipnet::Ipv4Net;
 
     use super::*;
+    use crate::{BgpPeerType, Direct};
 
     /// An UPDATE too long for the 2-octet header Length must be refused, not
     /// wrapped. Regression: `buf.len() as u16` silently truncated, so a
@@ -839,6 +840,92 @@ mod tests {
             }
             other => panic!("expected MpReachAttr::Ipv4 with v4 next-hop, got {other:?}"),
         }
+    }
+
+    /// A full UPDATE with ORIGIN / AS_PATH / NEXT_HOP, one LOCAL_PREF
+    /// attribute of `lp_len` octets (4 = well-formed, carrying 500) and
+    /// the traditional NLRI 10.0.0.0/24.
+    fn update_with_local_pref(lp_len: u8) -> Vec<u8> {
+        let mut attrs = vec![0x40u8, 0x01, 0x01, 0x00]; // ORIGIN = IGP
+        // AS_PATH: one AS_SEQUENCE of AS 65001 (4-octet, as4 session).
+        attrs.extend_from_slice(&[0x40, 0x02, 0x06, 0x02, 0x01, 0x00, 0x00, 0xfd, 0xe9]);
+        attrs.extend_from_slice(&[0x40, 0x03, 0x04, 192, 0, 2, 1]); // NEXT_HOP
+        attrs.extend_from_slice(&[0x40, 0x05, lp_len]); // LOCAL_PREF header
+        attrs.extend_from_slice(&500u32.to_be_bytes()[..lp_len as usize]);
+        let nlri = [24u8, 10, 0, 0];
+        let mut buf = vec![0xffu8; 16];
+        let total = BGP_HEADER_LEN as usize + 2 + 2 + attrs.len() + nlri.len();
+        buf.extend_from_slice(&(total as u16).to_be_bytes());
+        buf.push(2); // type = UPDATE
+        buf.extend_from_slice(&0u16.to_be_bytes()); // withdrawn routes length
+        buf.extend_from_slice(&(attrs.len() as u16).to_be_bytes());
+        buf.extend_from_slice(&attrs);
+        buf.extend_from_slice(&nlri);
+        buf
+    }
+
+    fn opt_for(peer_type: BgpPeerType) -> Option<ParseOption> {
+        Some(ParseOption {
+            as4: Direct {
+                send: true,
+                recv: true,
+            },
+            peer_type,
+            ..Default::default()
+        })
+    }
+
+    /// RFC 4271 §5.1.5: a LOCAL_PREF received from an external peer MUST
+    /// be ignored — the parser drops it, the rest of the UPDATE stands.
+    #[test]
+    fn local_pref_from_ebgp_peer_is_discarded() {
+        let buf = update_with_local_pref(4);
+        let (_, parsed) = UpdatePacket::parse_packet(&buf, true, opt_for(BgpPeerType::Ebgp))
+            .expect("must decode");
+        let attr = parsed.bgp_attr.expect("attributes present");
+        assert_eq!(attr.local_pref, None, "eBGP: attribute discard");
+        assert_eq!(attr.aspath.map(|p| p.length), Some(1), "AS_PATH intact");
+        assert!(attr.nexthop.is_some(), "NEXT_HOP intact");
+        assert_eq!(parsed.ipv4_update.len(), 1, "the route itself is accepted");
+        assert!(!parsed.treat_as_withdraw);
+    }
+
+    /// The internal side keeps it: on iBGP the attribute is the signal it
+    /// exists to carry.
+    #[test]
+    fn local_pref_from_ibgp_peer_is_kept() {
+        let buf = update_with_local_pref(4);
+        let (_, parsed) = UpdatePacket::parse_packet(&buf, true, opt_for(BgpPeerType::Ibgp))
+            .expect("must decode");
+        let attr = parsed.bgp_attr.expect("attributes present");
+        assert_eq!(attr.local_pref.map(|lp| lp.local_pref), Some(500));
+    }
+
+    /// With no `ParseOption` at all nothing says the session is external,
+    /// so the parser keeps the attribute (the default session type is
+    /// `Ibgp`). Every production parse passes the session's option; this
+    /// pins the stance for option-less callers.
+    #[test]
+    fn local_pref_is_kept_when_no_option_is_given() {
+        let buf = update_with_local_pref(4);
+        let (_, parsed) = UpdatePacket::parse_packet(&buf, true, None).expect("must decode");
+        let attr = parsed.bgp_attr.expect("attributes present");
+        assert_eq!(attr.local_pref.map(|lp| lp.local_pref), Some(500));
+        assert_eq!(parsed.ipv4_update.len(), 1);
+    }
+
+    /// RFC 7606 §7.6: from an external peer the discard applies whether
+    /// or not the attribute is well-formed; a 3-octet LOCAL_PREF must not
+    /// cost the route or the session.
+    #[test]
+    fn malformed_local_pref_from_ebgp_peer_is_discarded_not_withdrawn() {
+        let buf = update_with_local_pref(3);
+        let (_, parsed) = UpdatePacket::parse_packet(&buf, true, opt_for(BgpPeerType::Ebgp))
+            .expect("must decode");
+        let attr = parsed.bgp_attr.expect("attributes present");
+        assert_eq!(attr.local_pref, None);
+        assert_eq!(parsed.ipv4_update.len(), 1);
+        assert!(!parsed.treat_as_withdraw);
     }
 
     /// The withdraw-side counterpart: a full UPDATE whose only content is
