@@ -290,6 +290,8 @@ async fn the_session_up_dump_is_recorded_in_the_group_engine_the_peer_joins() {
             id: 0,
         });
     assert_eq!(group_adj_out(&bgp, c).await, Vec::<String>::new());
+    // Packed withdrawals flush a moment after the burst settles.
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     assert_eq!(withdrawn(&mut rx), vec![P1.to_string()]);
 }
 
@@ -328,6 +330,9 @@ async fn a_route_from_the_session_up_dump_is_withdrawn_through_the_peer_egress_t
         })
         .unwrap();
     let held = pet_adj_out(&bgp, c).await;
+    // The engine packs withdrawals and flushes them a moment after the
+    // burst settles (`WITHDRAW_FLUSH_DELAY`); wait it out before reading.
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     assert_eq!(withdrawn(&mut rx), vec![P1.to_string()]);
     assert_eq!(held, vec![P2.to_string()]);
 }

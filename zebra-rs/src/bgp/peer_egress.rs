@@ -16,11 +16,21 @@
 //! Gate-off (the default) is untouched — the egress stays on the main task
 //! via update-groups.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use bgp_packet::{Ipv4Nlri, UpdatePacket};
 use ipnet::Ipv4Net;
 use tokio::sync::mpsc::{self, UnboundedSender};
+use tokio::time::{Duration, Instant, sleep_until};
+
+/// How long a queued withdrawal waits for the rest of its burst before the
+/// engine flushes. Mirrors the main-task queue's `FlushWithdraw` marker
+/// (`pending_withdraw::start_withdraw_flush_timer`, also 1 ms): the delay
+/// lets a peer-down / RR-sweep burst accumulate on the delta channel so it
+/// packs into as few UPDATEs as the message size allows, instead of the
+/// partial flushes the main-task/engine race would otherwise produce.
+const WITHDRAW_FLUSH_DELAY: Duration = Duration::from_millis(1);
 
 use crate::context::task::Task;
 
@@ -152,17 +162,16 @@ impl PeerEgressTask {
     /// be refreshed by a `Refresh` delta on policy / connection change.
     /// Exits when `delta_tx` is dropped at teardown.
     pub fn spawn(ctx: SyncCtx, add_path: bool) -> Self {
-        let (delta_tx, mut delta_rx) = mpsc::unbounded_channel::<EgressDeltaV4>();
+        let (delta_tx, delta_rx) = mpsc::unbounded_channel::<EgressDeltaV4>();
         let task = Task::spawn(async move {
             let mut engine = Engine {
                 ctx,
                 add_path,
                 adj_out: AdjRibTable::new(),
                 attr_store: BgpAttrStore::new(),
+                pending_withdraw: HashSet::new(),
             };
-            while let Some(delta) = delta_rx.recv().await {
-                engine.handle(delta);
-            }
+            engine.run(delta_rx).await;
         });
         PeerEgressTask { delta_tx, task }
     }
@@ -177,9 +186,48 @@ struct Engine {
     add_path: bool,
     adj_out: AdjRibTable<Out>,
     attr_store: BgpAttrStore,
+    /// IPv4 withdrawals accumulated during the current channel-drain batch,
+    /// packed into as few UPDATEs as the message size allows at
+    /// [`flush_withdraws`](Self::flush_withdraws). Keyed on wire identity
+    /// (`Ipv4Nlri` = `{id, prefix}`) so a route withdrawn twice in one batch
+    /// is sent once.
+    pending_withdraw: HashSet<Ipv4Nlri>,
 }
 
 impl Engine {
+    /// Drive the engine off its delta channel, coalescing withdrawal bursts.
+    /// Advertises act immediately in [`handle`](Self::handle); withdrawals
+    /// queue and flush once the burst settles — a `WITHDRAW_FLUSH_DELAY`
+    /// timer armed when the first withdrawal queues and re-used for the whole
+    /// burst, the mirror of the main-task queue's `FlushWithdraw` marker.
+    /// `biased` prefers draining new deltas over flushing, so a burst still
+    /// arriving on the channel accumulates into one flush instead of the
+    /// partial flushes the main-task/engine race would otherwise produce.
+    /// Exits when the channel closes at teardown; the session is gone, so any
+    /// still-queued withdrawal is dropped (a new session re-syncs).
+    async fn run(&mut self, mut rx: mpsc::UnboundedReceiver<EgressDeltaV4>) {
+        let mut flush_at: Option<Instant> = None;
+        loop {
+            tokio::select! {
+                biased;
+                maybe = rx.recv() => {
+                    let Some(delta) = maybe else { break };
+                    self.handle(delta);
+                    while let Ok(delta) = rx.try_recv() {
+                        self.handle(delta);
+                    }
+                    if !self.pending_withdraw.is_empty() && flush_at.is_none() {
+                        flush_at = Some(Instant::now() + WITHDRAW_FLUSH_DELAY);
+                    }
+                }
+                _ = async { sleep_until(flush_at.unwrap()).await }, if flush_at.is_some() => {
+                    self.flush_withdraws();
+                    flush_at = None;
+                }
+            }
+        }
+    }
+
     fn handle(&mut self, delta: EgressDeltaV4) {
         match delta {
             EgressDeltaV4::Advertise { prefix, rib } => self.advertise(prefix, rib),
@@ -254,9 +302,35 @@ impl Engine {
     /// `id` (0 for non-AddPath). Per-path AddPath withdraw is a follow-on.
     fn withdraw(&mut self, prefix: Ipv4Net, id: u32) {
         if self.adj_out.0.remove(&prefix).is_some() {
-            let mut update = UpdatePacket::with_max_packet_size(self.ctx.max_packet_size());
-            update.ipv4_withdraw.push(Ipv4Nlri { id, prefix });
-            self.ctx.send_update(update);
+            // Queue rather than emit: the batch's withdrawals pack together
+            // in `flush_withdraws`. Removing the `adj_out` row here (not at
+            // flush) keeps the reconcile authoritative — a re-advertise later
+            // in the same batch re-adds the row and cancels this withdrawal.
+            self.pending_withdraw.insert(Ipv4Nlri { id, prefix });
+        }
+    }
+
+    /// Drain the batch's queued IPv4 withdrawals onto the wire, packed into
+    /// as few UPDATEs as the negotiated message size allows. A queued NLRI
+    /// whose `(prefix, id)` is back in `adj_out` was re-advertised within the
+    /// batch (`send_ipv4_direct` already put the announcement on the wire), so
+    /// it is dropped — sending it would tear down a route the peer now holds.
+    fn flush_withdraws(&mut self) {
+        if self.pending_withdraw.is_empty() {
+            return;
+        }
+        let queued = std::mem::take(&mut self.pending_withdraw);
+        let withdraws: Vec<Ipv4Nlri> = queued
+            .into_iter()
+            .filter(|n| !super::pending_withdraw::adj_out_has(&self.adj_out, &n.prefix, n.id))
+            .collect();
+        if withdraws.is_empty() {
+            return;
+        }
+        let mut update = UpdatePacket::with_max_packet_size(self.ctx.max_packet_size());
+        update.ipv4_withdraw = withdraws;
+        while let Some(bytes) = update.pop_ipv4_withdraw() {
+            self.ctx.send_packet(bytes);
         }
     }
 }
@@ -313,6 +387,7 @@ mod tests {
             add_path: false,
             adj_out: AdjRibTable::new(),
             attr_store: BgpAttrStore::new(),
+            pending_withdraw: HashSet::new(),
         };
         let prefix: Ipv4Net = "10.10.10.0/24".parse().unwrap();
 
@@ -341,6 +416,7 @@ mod tests {
             add_path: false,
             adj_out: AdjRibTable::new(),
             attr_store: BgpAttrStore::new(),
+            pending_withdraw: HashSet::new(),
         };
         let prefix: Ipv4Net = "10.10.10.0/24".parse().unwrap();
 
@@ -350,8 +426,10 @@ mod tests {
 
         // The best is now from peer 0 (== the ctx's own ident) →
         // `route_update_ipv4` returns None (split-horizon), so the prior
-        // advertisement is withdrawn (gate-off's `Withdraw` outcome).
+        // advertisement is withdrawn (gate-off's `Withdraw` outcome). The
+        // withdrawal queues; the batch flush puts it on the wire.
         engine.advertise(prefix, rib(0, "192.0.2.2"));
+        engine.flush_withdraws();
         assert!(
             rx.try_recv().is_ok(),
             "split-horizon withdraws the prior advertisement"
@@ -368,20 +446,23 @@ mod tests {
             add_path: false,
             adj_out: AdjRibTable::new(),
             attr_store: BgpAttrStore::new(),
+            pending_withdraw: HashSet::new(),
         };
         let prefix: Ipv4Net = "10.10.10.0/24".parse().unwrap();
 
         // Withdraw of a never-advertised prefix → nothing on the wire.
         engine.withdraw(prefix, 0);
+        engine.flush_withdraws();
         assert!(
             rx.try_recv().is_err(),
             "withdraw of an unadvertised prefix sends nothing"
         );
 
-        // Advertise, then withdraw → the withdraw is sent.
+        // Advertise, then withdraw → the withdraw is sent at flush.
         engine.advertise(prefix, rib(5, "192.0.2.1"));
         let _ = std::iter::from_fn(|| rx.try_recv().ok()).count();
         engine.withdraw(prefix, 0);
+        engine.flush_withdraws();
         assert!(
             rx.try_recv().is_ok(),
             "withdraw of an advertised prefix sends an UPDATE"
@@ -398,6 +479,7 @@ mod tests {
             add_path: false,
             adj_out: AdjRibTable::new(),
             attr_store: BgpAttrStore::new(),
+            pending_withdraw: HashSet::new(),
         };
         let prefix: Ipv4Net = "10.10.10.0/24".parse().unwrap();
 
@@ -416,9 +498,78 @@ mod tests {
         // A later withdraw with wire id 0 must still reach the peer — it
         // matches by prefix, not the local_id (the gate-on bug 1f caught).
         engine.withdraw(prefix, 0);
+        engine.flush_withdraws();
         assert!(
             rx.try_recv().is_ok(),
             "a dump-learned prefix can be withdrawn"
+        );
+    }
+
+    #[test]
+    fn engine_packs_a_batch_of_withdraws_into_few_updates() {
+        // A burst of withdrawals — a peer-down `route_clean` fanned to the
+        // PET — must pack into far fewer UPDATEs than one per route. 1000
+        // /24 withdrawals fit the default 4096-octet message in a single
+        // UPDATE; the old immediate path emitted 1000.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut ctx = SyncCtx::for_test();
+        ctx.packet_tx = Some(tx);
+        let mut engine = Engine {
+            ctx,
+            add_path: false,
+            adj_out: AdjRibTable::new(),
+            attr_store: BgpAttrStore::new(),
+            pending_withdraw: HashSet::new(),
+        };
+        let prefixes: Vec<Ipv4Net> = (0..1000)
+            .map(|i| format!("10.{}.{}.0/24", i / 256, i % 256).parse().unwrap())
+            .collect();
+        for p in &prefixes {
+            engine.advertise(*p, rib(5, "192.0.2.1"));
+        }
+        let _ = std::iter::from_fn(|| rx.try_recv().ok()).count();
+
+        // Queue every withdrawal, then flush the whole batch once.
+        for p in &prefixes {
+            engine.withdraw(*p, 0);
+        }
+        engine.flush_withdraws();
+        let updates: usize = std::iter::from_fn(|| rx.try_recv().ok()).count();
+        assert!(updates >= 1, "the batch is flushed");
+        assert!(
+            updates <= 2,
+            "1000 /24 withdrawals pack into at most two UPDATEs (got {updates})"
+        );
+    }
+
+    #[test]
+    fn engine_reconcile_drops_a_withdraw_readvertised_in_the_batch() {
+        // A withdraw queued behind a re-advertise of the same prefix in one
+        // batch must be dropped: the Adj-RIB-Out holds the prefix again, so
+        // sending the withdraw would tear down the route the peer now holds.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut ctx = SyncCtx::for_test();
+        ctx.packet_tx = Some(tx);
+        let mut engine = Engine {
+            ctx,
+            add_path: false,
+            adj_out: AdjRibTable::new(),
+            attr_store: BgpAttrStore::new(),
+            pending_withdraw: HashSet::new(),
+        };
+        let prefix: Ipv4Net = "10.10.10.0/24".parse().unwrap();
+        engine.advertise(prefix, rib(5, "192.0.2.1"));
+        let _ = std::iter::from_fn(|| rx.try_recv().ok()).count();
+
+        // Within one batch: withdraw, then re-advertise a DIFFERENT attr (a
+        // new next-hop, so the advertise is not deduped and re-sends).
+        engine.withdraw(prefix, 0);
+        engine.advertise(prefix, rib(5, "192.0.2.2"));
+        let _ = std::iter::from_fn(|| rx.try_recv().ok()).count();
+        engine.flush_withdraws();
+        assert!(
+            rx.try_recv().is_err(),
+            "the re-advertised prefix's queued withdraw is dropped"
         );
     }
 
@@ -432,6 +583,7 @@ mod tests {
             add_path: false,
             adj_out: AdjRibTable::new(),
             attr_store: BgpAttrStore::new(),
+            pending_withdraw: HashSet::new(),
         };
 
         // Refresh to a new snapshot whose writer is a different channel.
@@ -463,6 +615,7 @@ mod tests {
             add_path: false,
             adj_out: AdjRibTable::new(),
             attr_store: BgpAttrStore::new(),
+            pending_withdraw: HashSet::new(),
         };
         let prefix: Ipv4Net = "10.10.10.0/24".parse().unwrap();
         engine.advertise(prefix, rib(5, "192.0.2.1"));
@@ -473,6 +626,69 @@ mod tests {
         let entries = reply_rx.try_recv().expect("DumpAdjOut replied");
         assert_eq!(entries.len(), 1, "the advertised prefix is in the dump");
         assert_eq!(entries[0].0, prefix);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn run_coalesces_a_withdraw_burst_into_few_updates() {
+        // The run loop defers its flush by WITHDRAW_FLUSH_DELAY, so a burst
+        // that arrives across several channel wakes (the main-task/engine
+        // race) still packs into one UPDATE instead of one flush per wake.
+        // Drive the real channel under paused time to make the delay
+        // deterministic.
+        let (pkt_tx, mut pkt_rx) = mpsc::unbounded_channel();
+        let mut ctx = SyncCtx::for_test();
+        ctx.packet_tx = Some(pkt_tx);
+        let (delta_tx, delta_rx) = mpsc::unbounded_channel();
+        let mut engine = Engine {
+            ctx,
+            add_path: false,
+            adj_out: AdjRibTable::new(),
+            attr_store: BgpAttrStore::new(),
+            pending_withdraw: HashSet::new(),
+        };
+        let task = tokio::spawn(async move { engine.run(delta_rx).await });
+
+        let prefixes: Vec<Ipv4Net> = (0..200)
+            .map(|i| format!("10.{}.{}.0/24", i / 256, i % 256).parse().unwrap())
+            .collect();
+        // Advertise the set so each withdrawal has a row to remove, then
+        // drain the advertise frames — only withdraw UPDATEs are counted.
+        for p in &prefixes {
+            delta_tx
+                .send(EgressDeltaV4::Advertise {
+                    prefix: *p,
+                    rib: rib(5, "192.0.2.1"),
+                })
+                .unwrap();
+        }
+        tokio::task::yield_now().await;
+        let _ = std::iter::from_fn(|| pkt_rx.try_recv().ok()).count();
+
+        // Withdraw the set one delta at a time, yielding between sends so the
+        // engine wakes repeatedly — the deferred flush must still coalesce.
+        for p in &prefixes {
+            delta_tx
+                .send(EgressDeltaV4::Withdraw { prefix: *p, id: 0 })
+                .unwrap();
+            tokio::task::yield_now().await;
+        }
+        // Nothing on the wire yet: the flush deadline has not passed.
+        assert!(
+            pkt_rx.try_recv().is_err(),
+            "withdrawals wait for the flush delay"
+        );
+
+        // Pass the deadline; the whole burst flushes once.
+        tokio::time::advance(WITHDRAW_FLUSH_DELAY * 2).await;
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+        let updates: usize = std::iter::from_fn(|| pkt_rx.try_recv().ok()).count();
+        assert!(updates >= 1, "the burst is flushed after the delay");
+        assert!(
+            updates <= 2,
+            "the deferred burst packs into at most two UPDATEs (got {updates})"
+        );
+        task.abort();
     }
 
     #[tokio::test]
