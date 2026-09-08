@@ -532,7 +532,8 @@ mod sweep_tests {
     use tokio::sync::mpsc;
 
     use super::*;
-    use crate::bgp::peer::Peer;
+    use crate::bgp::neighbor_group::config_neighbor_group_remote_as;
+    use crate::bgp::peer::{Peer, PeerType, try_dynamic_accept};
     use crate::bgp::peer_key::PeerOrigin;
 
     fn net(s: &str) -> IpNet {
@@ -616,6 +617,62 @@ mod sweep_tests {
         peer.config.transport.passive = true;
         bgp.peers.insert(address, peer);
         bgp.dynamic_peer_count += 1;
+    }
+
+    /// A listen-range peer takes its remote-as from the group, and its
+    /// session type must follow: under local AS 65001 a group saying
+    /// `remote-as 65002` materializes an eBGP peer. `Peer::new` defaults
+    /// to iBGP, and the accept path once left it there — the peer then
+    /// ran every iBGP rule (no AS_PATH prepend, no next-hop rewrite,
+    /// LOCAL_PREF honored and relayed, distance 200) for its whole
+    /// session, until an unrelated group `remote-as` change swept it.
+    #[tokio::test]
+    async fn accepted_dynamic_peer_takes_its_type_from_the_group_remote_as() {
+        let mut bgp = fresh_bgp();
+        bgp.asn = 65001;
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["A", "65002"]), ConfigOp::Set)
+            .unwrap();
+        configure_range(&mut bgp, "10.1.0.0/24", "A");
+        // Any connected socket will do: the accept path reads the peer
+        // address from its argument, not from the stream.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+
+        let peer_addr = addr("10.1.0.7");
+        assert!(
+            try_dynamic_accept(&mut bgp, peer_addr, server).is_none(),
+            "the stream is promoted onto the materialized peer"
+        );
+        let peer = bgp
+            .peers
+            .get(&peer_addr)
+            .expect("dynamic peer materialized");
+        assert_eq!(peer.remote_as, 65002);
+        assert_eq!(peer.peer_type, PeerType::EBGP);
+        drop(client);
+
+        // And the internal spelling: a group in our own AS yields iBGP.
+        let mut bgp = fresh_bgp();
+        bgp.asn = 65001;
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["I", "65001"]), ConfigOp::Set)
+            .unwrap();
+        configure_range(&mut bgp, "10.2.0.0/24", "I");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let peer_addr = addr("10.2.0.7");
+        assert!(try_dynamic_accept(&mut bgp, peer_addr, server).is_none());
+        let peer = bgp
+            .peers
+            .get(&peer_addr)
+            .expect("dynamic peer materialized");
+        assert_eq!((peer.remote_as, peer.peer_type), (65001, PeerType::IBGP));
+        drop(client);
     }
 
     /// Config a range bound to a group, the way an operator would.

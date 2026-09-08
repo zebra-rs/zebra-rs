@@ -54,6 +54,12 @@ Feature: BGP dynamic neighbors materialize passive peers from a listen-range
     Given the test topology exists
     Then BGP route in "z1" has "10.0.2.2/32"
     And BGP route in "z2" has "10.0.1.1/32"
+    # The listen-range peer is an eBGP session (group remote-as 65002 under
+    # AS 65001): z1 ranks z2's route as eBGP, and z2 sees z1's origination
+    # with z1's AS prepended. The accept path once typed the peer iBGP,
+    # which failed both — no prepend, distance 200, LOCAL_PREF honored.
+    And BGP route in "z1" has "10.0.2.2/32" with "route_type" value "eBGP"
+    And BGP route in "z2" has "10.0.1.1/32" with "as_path" value "65001"
 
   Scenario: A source outside every listen-range is refused without peer state
     Given the test topology exists

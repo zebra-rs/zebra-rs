@@ -3767,7 +3767,11 @@ pub fn accept(bgp: &mut Bgp, stream: TcpStream, sockaddr: SocketAddr) {
 /// `listen-range`. Returns `Some(stream)` (i.e. caller should drop)
 /// on any failure path so the listen-range never holds the socket
 /// open while we sort out a config gap.
-fn try_dynamic_accept(bgp: &mut Bgp, peer_addr: IpAddr, stream: TcpStream) -> Option<TcpStream> {
+pub(super) fn try_dynamic_accept(
+    bgp: &mut Bgp,
+    peer_addr: IpAddr,
+    stream: TcpStream,
+) -> Option<TcpStream> {
     // Soft cap. The listen-limit guards against an attacker spamming
     // SYNs from many sources in a wide listen-range — once we hit
     // the limit, additional matches drop silently until a slot frees
@@ -3797,6 +3801,18 @@ fn try_dynamic_accept(bgp: &mut Bgp, peer_addr: IpAddr, stream: TcpStream) -> Op
     // GR config callbacks ran, so it must be seeded here or its OPEN
     // (exchanged moments from now) advertises no GR capability.
     peer.config.gr_global = bgp.gr_global_resolved();
+    // `Peer::new` defaults to iBGP; derive the session type from the
+    // group's remote-as the way the addressed, group-sweep and
+    // interface-neighbor paths do. It drives the AS_PATH prepend, the
+    // eBGP next-hop rewrite, LOCAL_PREF handling (RFC 4271 §5.1.5, via
+    // the reader's `ParseOption`), admin distance and the iBGP relay
+    // rules — left at the default, every listen-range eBGP peer ran the
+    // internal rules until an unrelated group remote-as change swept it.
+    peer.peer_type = if remote_as == bgp.asn {
+        PeerType::IBGP
+    } else {
+        PeerType::EBGP
+    };
     peer.origin = super::peer_key::PeerOrigin::Dynamic { range_prefix };
     // Dynamic peers are passive-only — they never initiate a connect.
     peer.config.transport.passive = true;
