@@ -292,9 +292,14 @@ cap. The two reviews agree on every overlapping item.
 - FIXED (branch `bgp-update-group-live-regroup`):
   `update_group::regroup_if_stale` compares, per tracked family, a fresh
   `signature_of` with the signature of the group the Established peer
-  sits in and detaches/attaches on any mismatch, carrying the peer's
-  deferred withdraws out of the old group (they would otherwise be
-  dropped by `flush_done_*` as a departed member's). The two outbound
+  sits in and moves the peer, family by family, on a mismatch (a VPNv4
+  edit never touches the IPv6 group and its queued advertises, which
+  nothing replays). A family whose group still has a flush in flight,
+  advertises queued or withdraws deferred is not moved yet: the in-flight
+  job holds the peer's sender and will still announce, so a withdraw sent
+  at move time would precede it on the wire; the peer is parked in the
+  group's `regroup_pending` and `flush_done_*` moves it once the group is
+  idle, after its deferred withdraws went out. The two outbound
   binding handlers (`policy out`, `prefix-set out`) and the per-VRF
   `rebind_policy_refs` call it synchronously, right after the slot name
   changes and before the policy actor answers, so the resolve path's
@@ -827,8 +832,9 @@ cap. The two reviews agree on every overlapping item.
   `reassign_all_update_groups` (`config.rs:190-209`) moves Established
   peers whose `adj_out` row `V4Batch::withdraw` already removed, so the
   withdraw is lost. (The regroup half is closed by #4's helper, which
-  carries the mover's deferred withdraws; the session-bounce drop is by
-  design, the re-sync starts from scratch.)
+  never moves a peer out of a group with a flush in flight or withdraws
+  deferred; the session-bounce drop is by design, the re-sync starts
+  from scratch.)
 - `allowas-in` / `enforce-first-as` edits (`config.rs:913`, `1080`) run no
   soft-in; policy-out edits replay v4/VPNv4/EVPN only and are not
   family-scoped (`route.rs:6801-6826`); accepted-but-inert: neighbor

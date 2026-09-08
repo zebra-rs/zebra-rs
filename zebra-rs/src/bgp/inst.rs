@@ -2620,6 +2620,8 @@ impl Bgp {
                     &group_id,
                     deltas,
                     &self.interface_addrs,
+                    self.router_id,
+                    self.as_sets_withdraw,
                 );
             }
             Message::FlushDoneIpv6(group_id, deltas) => {
@@ -2629,6 +2631,8 @@ impl Bgp {
                     &self.tx,
                     &group_id,
                     deltas,
+                    self.router_id,
+                    self.as_sets_withdraw,
                 );
             }
             Message::BgpLs { add, withdraw } => {

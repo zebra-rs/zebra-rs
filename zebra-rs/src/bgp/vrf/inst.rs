@@ -2197,6 +2197,8 @@ impl BgpVrf {
                     &group_id,
                     deltas,
                     &self.interface_addrs,
+                    self.router_id,
+                    true,
                 );
             }
             Message::FlushDoneIpv6(group_id, deltas) => {
@@ -2206,6 +2208,8 @@ impl BgpVrf {
                     &self.tx,
                     &group_id,
                     deltas,
+                    self.router_id,
+                    true,
                 );
             }
             Message::BgpLs { .. } => {
