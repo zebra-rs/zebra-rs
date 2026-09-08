@@ -32,6 +32,10 @@ module config {
     prefix ipsec;
   }
 
+  import vrrp {
+    prefix vrrp;
+  }
+
   import ietf-bgp {
     prefix bgp;
   }
@@ -5077,6 +5081,14 @@ module config {
         ext:help "VPN IP security (IPsec) parameters";
         uses "ipsec:vpn-ipsec";
       }
+    }
+
+    // VyOS-derived VRRP (see vrrp.yang): VyOS's `high-availability`
+    // wrapper is dropped, `vrrp` is a top-level node. ISO-only.
+    container vrrp {
+      if-feature feat:iso;
+      ext:help "Virtual Router Redundancy Protocol (VRRP)";
+      uses "vrrp:vrrp";
     }
 
     list interface {

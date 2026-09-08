@@ -1619,6 +1619,8 @@ impl ConfigManager {
                                 "Firewall"
                             } else if is_vpn(&paths) {
                                 "IPsec"
+                            } else if is_vrrp(&paths) {
+                                "VRRP"
                             } else if is_policy(&paths) {
                                 "Policy"
                             } else {
@@ -1813,6 +1815,14 @@ fn is_vpn(paths: &[CommandPath]) -> bool {
     paths.iter().any(|x| x.name == "vpn")
 }
 
+/// `show vrrp …` — served by the external insomnia daemon, which
+/// registers the `"vrrp"` show provider (zebra.show.v1); iso-gated
+/// exec grammar. With no provider connected the not-running fallback
+/// answers.
+fn is_vrrp(paths: &[CommandPath]) -> bool {
+    paths.iter().any(|x| x.name == "vrrp")
+}
+
 /// `show pim ...`, `show igmp ...` and `show mroute` — all served by
 /// the PIM task (IGMP membership tracking and the multicast routing
 /// table live inside the PIM module).
@@ -1869,6 +1879,8 @@ fn show_proto(paths: &[CommandPath]) -> &'static str {
         "firewall"
     } else if is_vpn(paths) {
         "ipsec"
+    } else if is_vrrp(paths) {
+        "vrrp"
     } else if is_policy(paths) {
         "policy"
     } else {
@@ -7074,6 +7086,214 @@ module test-iso-gated {
         assert_eq!(
             json,
             r#"{"authentication":{"psk": [{"name":"MAIN","id": ["192.0.2.9"],"secret":"s3cret-key"}]},"esp-group": [{"name":"ESP-A","lifetime":1800,"proposal": [{"number":10,"encryption":"aes256gcm128","hash":"sha256"}]}],"ike-group": [{"name":"IKE-A","key-exchange":"ikev2","proposal": [{"number":10,"dh-group":19,"encryption":"aes256gcm128","hash":"sha256"}]}],"site-to-site":{"peer": [{"name":"192.0.2.9","authentication":{"mode":"pre-shared-secret"},"connection-type":"respond","default-esp-group":"ESP-A","ike-group":"IKE-A","local-address":"192.0.2.1","remote-address": ["192.0.2.9"],"tunnel": [{"number":1,"local":{"prefix": ["10.0.1.0/24"]},"remote":{"prefix": ["10.0.2.0/24"]}}]}]}}"#
+        );
+    }
+
+    /// The VyOS-derived `vrrp` subtree (vrrp.yang, instantiated as an
+    /// iso-gated top-level container in config.yang) is part of the
+    /// ISO-only config surface: absent on a stock start, present with
+    /// `--feature iso`.
+    #[test]
+    fn shipped_vrrp_gated_on_iso() {
+        let child = |e: &Rc<Entry>, name: &str| -> Option<Rc<Entry>> {
+            e.dir.borrow().iter().find(|c| c.name == name).cloned()
+        };
+
+        let set = child(&shipped_tree(&[]), "set").expect("set subtree");
+        assert!(
+            child(&set, "vrrp").is_none(),
+            "vrrp subtree must be absent on a stock start"
+        );
+
+        let set = child(&shipped_tree(&["iso"]), "set").expect("set subtree");
+        let vrrp = child(&set, "vrrp").expect("vrrp subtree with --feature iso");
+        // The grouping expanded: every top-level branch exists.
+        for name in ["disable", "global-parameters", "group", "sync-group"] {
+            assert!(child(&vrrp, name).is_some(), "vrrp {name} branch missing");
+        }
+    }
+
+    /// End-to-end CLI grammar for the `vrrp` subtree: representative
+    /// `set vrrp …` commands parse with iso and are rejected on a
+    /// stock start. The negatives pin the VyOS ranges and enums, the
+    /// address-typed leaves, the decimal `advertise-interval`
+    /// extension, and the absence of VyOS's `high-availability`
+    /// wrapper.
+    #[test]
+    fn vrrp_commands_parse_only_with_iso() {
+        use crate::config::parse::{State, parse};
+
+        let ok = [
+            "set vrrp disable",
+            "set vrrp global-parameters garp master-delay 10",
+            "set vrrp global-parameters garp interval 0.5",
+            "set vrrp global-parameters startup-delay 30",
+            "set vrrp global-parameters version 3",
+            "set vrrp group WAN interface eth0",
+            "set vrrp group WAN vrid 10",
+            "set vrrp group WAN priority 200",
+            "set vrrp group WAN address 192.0.2.254/24",
+            "set vrrp group WAN address 192.0.2.253/24 interface eth1",
+            "set vrrp group WAN excluded-address 2001:db8::1/64",
+            "set vrrp group WAN peer-address 192.0.2.1",
+            "set vrrp group WAN peer-address 192.0.2.2",
+            "set vrrp group WAN hello-source-address 192.0.2.1",
+            "set vrrp group WAN no-preempt",
+            "set vrrp group WAN preempt-delay 30",
+            "set vrrp group WAN rfc3768-compatibility",
+            "set vrrp group WAN v3-checksum-as-v2",
+            "set vrrp group WAN version 3",
+            "set vrrp group WAN advertise-interval 1",
+            "set vrrp group WAN advertise-interval 0.5",
+            "set vrrp group WAN authentication password s3cret",
+            "set vrrp group WAN authentication type plaintext-password",
+            "set vrrp group WAN authentication type ah",
+            "set vrrp group WAN health-check ping 192.0.2.9",
+            "set vrrp group WAN health-check script /usr/local/bin/check.sh",
+            "set vrrp group WAN health-check interval 10",
+            "set vrrp group WAN health-check failure-count 3",
+            "set vrrp group WAN health-check timeout 5",
+            "set vrrp group WAN track interface eth2",
+            "set vrrp group WAN track exclude-vrrp-interface",
+            "set vrrp group WAN transition-script master /usr/local/bin/master.sh",
+            "set vrrp group WAN description upstream gateway pair",
+            "set vrrp group WAN garp master-repeat 3",
+            "set vrrp group WAN disable",
+            "set vrrp sync-group SG member WAN",
+            "set vrrp sync-group SG health-check ping 192.0.2.9",
+            "set vrrp sync-group SG transition-script backup /usr/local/bin/backup.sh",
+        ];
+
+        let bad_with_iso = [
+            "set vrrp group WAN vrid 0",
+            "set vrrp group WAN vrid 256",
+            "set vrrp group WAN priority 0",
+            "set vrrp group WAN version 1",
+            "set vrrp group WAN authentication type md5",
+            "set vrrp group WAN preempt-delay 1001",
+            "set vrrp group WAN advertise-interval fast",
+            "set vrrp group WAN hello-source-address not-an-address",
+            "set vrrp global-parameters startup-delay 0",
+            "set vrrp global-parameters version 4",
+            // VyOS's wrapper node does not exist here.
+            "set high-availability vrrp group WAN vrid 10",
+        ];
+
+        let entry = shipped_tree(&["iso"]);
+        for cmd in ok {
+            let (code, _, _) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "`{cmd}` must parse with iso");
+        }
+        for cmd in bad_with_iso {
+            let (code, _, _) = parse(cmd, entry.clone(), None, State::new());
+            assert_ne!(code, ExecCode::Success, "`{cmd}` must not parse");
+        }
+
+        let entry = shipped_tree(&[]);
+        for cmd in [
+            "set vrrp group WAN vrid 10",
+            "set vrrp global-parameters version 3",
+        ] {
+            let (code, _, _) = parse(cmd, entry.clone(), None, State::new());
+            assert_ne!(
+                code,
+                ExecCode::Success,
+                "`{cmd}` must be rejected on a stock start"
+            );
+        }
+    }
+
+    /// `show vrrp …` grammar (exec.yang, iso-gated): the summary, the
+    /// two views, and their per-group filters map to the dispatch
+    /// paths the insomnia provider matches on, and every one of them
+    /// routes to the `"vrrp"` show subscriber.
+    #[test]
+    fn show_vrrp_grammar_gated_on_iso() {
+        use crate::config::parse::{State, parse};
+        use crate::config::path_from_command;
+
+        let entry = shipped_tree_mode("exec", &["iso"]);
+
+        let cases: Vec<(&str, &str, Vec<&str>)> = vec![
+            ("show vrrp", "/show/vrrp", vec![]),
+            ("show vrrp statistics", "/show/vrrp/statistics", vec![]),
+            (
+                "show vrrp statistics group WAN",
+                "/show/vrrp/statistics/group",
+                vec!["WAN"],
+            ),
+            ("show vrrp detail", "/show/vrrp/detail", vec![]),
+            (
+                "show vrrp detail group WAN",
+                "/show/vrrp/detail/group",
+                vec!["WAN"],
+            ),
+        ];
+        for (cmd, want_path, want_args) in &cases {
+            let (code, _, state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "parse `{cmd}`");
+            let (path, args) = path_from_command(&state.paths);
+            assert_eq!(path, *want_path, "path for `{cmd}`");
+            let args: Vec<&str> = args.0.iter().map(String::as_str).collect();
+            assert_eq!(args, *want_args, "args for `{cmd}`");
+            assert_eq!(show_proto(&state.paths), "vrrp", "routing for `{cmd}`");
+        }
+
+        // Stock start: the whole tree is absent.
+        let entry = shipped_tree_mode("exec", &[]);
+        let (code, _, _) = parse("show vrrp", entry, None, State::new());
+        assert_ne!(code, ExecCode::Success, "gated off without --feature iso");
+    }
+
+    /// The `/vrrp` half of the marshal contract — same story as
+    /// [`ipsec_json_marshal_contract`]: the keepalived backend lives in
+    /// the insomnia daemon, this golden pins what the JSON
+    /// subscription delivers, and insomnia's backend tests pin the
+    /// parse half. Covers a keyed list whose key leaf shares the list
+    /// name (`address`), a per-entry sub-leaf, a leaf-list, a presence
+    /// leaf and a decimal.
+    #[test]
+    fn vrrp_json_marshal_contract() {
+        use crate::config::parse::{State, parse};
+
+        let entry = shipped_tree(&["iso"]);
+
+        let store = ConfigStore::new();
+        for cmd in [
+            "set vrrp global-parameters version 3",
+            "set vrrp group WAN interface eth0",
+            "set vrrp group WAN vrid 10",
+            "set vrrp group WAN priority 200",
+            "set vrrp group WAN advertise-interval 0.5",
+            "set vrrp group WAN no-preempt",
+            "set vrrp group WAN address 192.0.2.254/24",
+            "set vrrp group WAN address 192.0.2.253/24 interface eth1",
+            "set vrrp group WAN peer-address 192.0.2.1",
+            "set vrrp group WAN peer-address 192.0.2.2",
+            "set vrrp sync-group SG member WAN",
+        ] {
+            let candidate = store.candidate.borrow().clone();
+            let (code, _, state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "parse `{cmd}`");
+            set(path_try_trim("set", state.paths), candidate);
+        }
+
+        // Marshal the /vrrp subtree the way `subtree_json` does. Note
+        // the shape: children come out in name order (not schema
+        // order), keyed-list entries in key order, the key leaf first.
+        let node = store
+            .candidate
+            .borrow()
+            .clone()
+            .lookup(&"vrrp".to_string())
+            .expect("subtree exists");
+        let mut json = String::new();
+        node.json(&mut json);
+        eprintln!("vrrp json: {json}");
+
+        assert_eq!(
+            json,
+            r#"{"global-parameters":{"version":3},"group": [{"name":"WAN","address": [{"address":"192.0.2.253/24","interface":"eth1"},{"address":"192.0.2.254/24"}],"advertise-interval":0.5,"interface":"eth0","no-preempt":null,"peer-address": ["192.0.2.1","192.0.2.2"],"priority":200,"vrid":10}],"sync-group": [{"name":"SG","member": ["WAN"]}]}"#
         );
     }
 }

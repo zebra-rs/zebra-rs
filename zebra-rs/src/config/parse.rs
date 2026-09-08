@@ -187,6 +187,24 @@ where
     }
 }
 
+/// decimal64 value: an unsigned decimal number with an optional
+/// fraction (`1`, `0.5`, `12.345`), first word only. Range statements
+/// on decimal64 leaves are not enforced here — libyang extracts
+/// integer ranges only — so consumers validate bounds themselves.
+fn match_decimal(input: &str) -> (MatchType, usize) {
+    let s = input.split(' ').next().unwrap_or("");
+    let (int, frac) = match s.split_once('.') {
+        Some((int, frac)) => (int, Some(frac)),
+        None => (s, None),
+    };
+    let digits = |p: &str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit());
+    if digits(int) && frac.is_none_or(digits) {
+        (MatchType::Exact, s.len())
+    } else {
+        (MatchType::None, 0usize)
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct Match {
     pub pos: usize,
@@ -288,6 +306,10 @@ fn match_builder() -> MatchMap {
         .kind(YangType::Uint64)
         .exec(|m, entry, input, node| {
             m.process(entry, match_range::<u64>(input, node), crange(entry, node));
+        })
+        .kind(YangType::Decimal64)
+        .exec(|m, entry, input, node| {
+            m.process(entry, match_decimal(input), crange(entry, node));
         })
         .kind(YangType::Ipv4Addr)
         .exec(|m, entry, input, _node| {
@@ -904,6 +926,21 @@ pub fn parse(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// decimal64 leaves accept an integer or a dotted fraction and
+    /// consume only the first word; a bare or trailing dot, a leading
+    /// sign and non-digits are rejected.
+    #[test]
+    fn match_decimal_accepts_integer_and_fraction() {
+        assert_eq!(match_decimal("1"), (MatchType::Exact, 1));
+        assert_eq!(match_decimal("0.5 rest"), (MatchType::Exact, 3));
+        assert_eq!(match_decimal("12.345"), (MatchType::Exact, 6));
+        assert_eq!(match_decimal(".5"), (MatchType::None, 0));
+        assert_eq!(match_decimal("1."), (MatchType::None, 0));
+        assert_eq!(match_decimal("-1"), (MatchType::None, 0));
+        assert_eq!(match_decimal("fast"), (MatchType::None, 0));
+        assert_eq!(match_decimal(""), (MatchType::None, 0));
+    }
 
     /// A patterned string leaf consumes the entire trimmed remainder
     /// of the line. With a fully-matching value the helper reports

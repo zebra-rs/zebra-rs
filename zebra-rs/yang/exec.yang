@@ -95,6 +95,39 @@ module exec {
     }
   }
 
+  // `show vrrp …` views, shared by the default-VRF tree and a future
+  // per-VRF `show vrrp vrf <name> …` list. Served by the external
+  // insomnia provider (zebra.show.v1 name "vrrp"): `statistics` and
+  // `detail` each take an optional group name.
+  grouping vrrp-show-views {
+    container statistics {
+      ext:help "VRRP statistics";
+      presence "VRRP statistics for all groups";
+      list group {
+        ext:help "Statistics for one VRRP group";
+        ext:presence "Statistics for one VRRP group";
+        key "name";
+        leaf name {
+          ext:help "VRRP group name";
+          type string;
+        }
+      }
+    }
+    container detail {
+      ext:help "VRRP group details";
+      presence "VRRP details for all groups";
+      list group {
+        ext:help "Details for one VRRP group";
+        ext:presence "Details for one VRRP group";
+        key "name";
+        leaf name {
+          ext:help "VRRP group name";
+          type string;
+        }
+      }
+    }
+  }
+
   container show {
     ext:help "Show command";
     presence "Show command";
@@ -374,6 +407,14 @@ module exec {
           presence "Kernel XFRM state list";
         }
       }
+    }
+    // `show vrrp …` — served by the external insomnia provider
+    // (zebra.show.v1 name "vrrp"); iso-gated like the config tree.
+    container vrrp {
+      if-feature feat:iso;
+      ext:help "VRRP information";
+      presence "VRRP group summary";
+      uses vrrp-show-views;
     }
     container evpn {
       ext:help "EVPN information";
