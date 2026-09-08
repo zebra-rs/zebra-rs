@@ -130,8 +130,24 @@ impl PeerMap {
     pub fn established_plain_idents(&self, afi: Afi, safi: Safi) -> Vec<usize> {
         self.membership
             .family(afi, safi)
-            .map(|fam| fam.plain.iter().copied().collect())
+            .map(|fam| {
+                fam.plain
+                    .iter()
+                    .copied()
+                    .filter(|&idx| !self.regroup_frozen(idx, afi, safi))
+                    .collect()
+            })
             .unwrap_or_default()
+    }
+
+    /// Whether `idx` is frozen in `(afi, safi)` by a pending update-group
+    /// move (`Peer::regroup_frozen`): the fan-outs skip it — it must be
+    /// neither the canonical member nor a recipient of the shared cache
+    /// under its changed settings — until `flush_done_*` has moved and
+    /// re-synced it.
+    fn regroup_frozen(&self, idx: usize, afi: Afi, safi: Safi) -> bool {
+        self.get_by_idx(idx)
+            .is_some_and(|p| p.regroup_frozen.contains(&AfiSafi::new(afi, safi)))
     }
 
     /// Established `(afi, safi)` peers WITH AddPath Send negotiated —
@@ -140,7 +156,13 @@ impl PeerMap {
     pub fn established_addpath_idents(&self, afi: Afi, safi: Safi) -> Vec<usize> {
         self.membership
             .family(afi, safi)
-            .map(|fam| fam.addpath_tx.iter().copied().collect())
+            .map(|fam| {
+                fam.addpath_tx
+                    .iter()
+                    .copied()
+                    .filter(|&idx| !self.regroup_frozen(idx, afi, safi))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 

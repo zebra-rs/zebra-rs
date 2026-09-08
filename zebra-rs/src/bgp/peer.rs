@@ -1261,6 +1261,15 @@ pub struct Peer {
     /// the peer is in; written by `update_group::attach` on entering
     /// Established and cleared by `detach` on leaving. Empty otherwise.
     pub update_group_id: BTreeMap<AfiSafi, super::update_group::UpdateGroupId>,
+    /// Families in which this peer is FROZEN: its update-group signature
+    /// changed while its group had a flush in flight, so
+    /// `update_group::regroup_if_stale` left the membership in place (the
+    /// job holds this peer's sender, and its deferred withdraws must follow
+    /// the job) and every advertise fan-out skips the peer meanwhile — it
+    /// must be neither the canonical member nor a recipient of the shared
+    /// cache under its new settings. `flush_done_*` moves it once that job
+    /// completes, clears this, and the caller re-syncs it.
+    pub regroup_frozen: BTreeSet<AfiSafi>,
 
     /// Snapshot of `Bgp::adv_interval` captured at peer construction
     /// and refreshed by the global config callback. Read by the VPNv4
@@ -1411,6 +1420,7 @@ impl Peer {
             cache_evpn_timer: None,
             last_ao_installed: None,
             update_group_id: BTreeMap::new(),
+            regroup_frozen: BTreeSet::new(),
             adv_interval: timer::AdvInterval::default(),
             bfd_session_key: None,
             bfd_session_params: None,
@@ -3929,6 +3939,13 @@ pub fn apply_soft_out_peer(bgp: &mut Bgp, peer_idx: usize) {
         return;
     };
     if !peer.state.is_established() {
+        return;
+    }
+    // Frozen in some family: that family's old update-group has a flush
+    // job in flight holding this peer's sender, so a direct re-send now
+    // could be overtaken by the job's older bytes. `flush_done_*` re-syncs
+    // the peer (every family) right after it moves; that covers this.
+    if !peer.regroup_frozen.is_empty() {
         return;
     }
     let (mut bgp_ref, peers) = advertise_top(bgp);

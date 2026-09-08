@@ -39,8 +39,8 @@ Feature: Binding an outbound policy on a live neighbor must re-form its update-g
   - While every session is Established, z1 binds `policy out DENY-P2`
     (deny 2001:db8:42::/64, permit the rest) toward z3 only.
   - z4 then adds 2001:db8:42::/64: z2 must receive it, z3 must not.
-  - z1 unbinds the policy: z3 rejoins z2's group; z4's third prefix
-    reaches both.
+  - z1 unbinds the policy: z3 rejoins z2's group and receives
+    2001:db8:42::/64 through the re-sync; z4's third prefix reaches both.
 
   Config files:
   - z1.yaml: no policy; z1-deny-z3.yaml: policy bound toward z3;
@@ -91,10 +91,7 @@ Feature: Binding an outbound policy on a live neighbor must re-form its update-g
     Given the test topology exists
     When I apply config "z1-undeny.yaml" to namespace "z1"
     Then show command "show bgp update-group" in namespace "z1" should eventually contain "4 groups, 6 members."
-    # (The IPv4 twin also checks that the unbound neighbor receives the
-    # previously denied prefix through the re-sync. The IPv6 family has no
-    # outbound re-sync on a policy change — a separate, recorded gap — so
-    # only a fresh best-path event is asserted here.)
+    And show command "show bgp ipv6" in namespace "z3" should eventually contain "2001:db8:42::/64"
     When I apply config "z4-three.yaml" to namespace "z4"
     Then show command "show bgp ipv6" in namespace "z2" should eventually contain "2001:db8:43::/64"
     And show command "show bgp ipv6" in namespace "z3" should eventually contain "2001:db8:43::/64"

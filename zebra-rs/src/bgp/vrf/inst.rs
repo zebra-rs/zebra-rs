@@ -2190,7 +2190,7 @@ impl BgpVrf {
                 );
             }
             Message::FlushDoneIpv4(group_id, deltas) => {
-                super::super::update_group::flush_done_ipv4(
+                let resync = super::super::update_group::flush_done_ipv4(
                     &mut self.update_groups,
                     &mut self.peers,
                     &self.tx,
@@ -2200,9 +2200,16 @@ impl BgpVrf {
                     self.router_id,
                     true,
                 );
+                // Peers moved out of this group once its job completed
+                // (`regroup_if_stale`): re-sync them under their new egress
+                // transform, replacing whatever they were skipped for while
+                // frozen.
+                for ident in resync {
+                    self.soft_reapply_peer(ident, super::super::policy::InOut::Output);
+                }
             }
             Message::FlushDoneIpv6(group_id, deltas) => {
-                super::super::update_group::flush_done_ipv6(
+                let resync = super::super::update_group::flush_done_ipv6(
                     &mut self.update_groups,
                     &mut self.peers,
                     &self.tx,
@@ -2211,6 +2218,13 @@ impl BgpVrf {
                     self.router_id,
                     true,
                 );
+                // Peers moved out of this group once its job completed
+                // (`regroup_if_stale`): re-sync them under their new egress
+                // transform, replacing whatever they were skipped for while
+                // frozen.
+                for ident in resync {
+                    self.soft_reapply_peer(ident, super::super::policy::InOut::Output);
+                }
             }
             Message::BgpLs { .. } => {
                 // BGP-LS (RFC 9552) is produced and stored only by the

@@ -286,20 +286,25 @@ cap. The two reviews agree on every overlapping item.
   not touch), and either the plain group-mate never receives the prefix
   (IPv4) or the bound neighbor receives what its own policy denies
   (IPv6). The unbind controls pass: the count is unchanged and, in
-  IPv4, the re-sync delivers the previously denied prefix. The IPv6
-  feature asserts no re-sync because the v6 family has no outbound
-  soft-out at all (the below-the-cap item on policy-out edits).
+  IPv4, the re-sync delivers the previously denied prefix (the IPv6
+  feature asserts it too since the fix added the v6 outbound soft-out).
 - FIXED (branch `bgp-update-group-live-regroup`):
   `update_group::regroup_if_stale` compares, per tracked family, a fresh
   `signature_of` with the signature of the group the Established peer
   sits in and moves the peer, family by family, on a mismatch (a VPNv4
-  edit never touches the IPv6 group and its queued advertises, which
-  nothing replays). A family whose group still has a flush in flight,
-  advertises queued or withdraws deferred is not moved yet: the in-flight
-  job holds the peer's sender and will still announce, so a withdraw sent
-  at move time would precede it on the wire; the peer is parked in the
-  group's `regroup_pending` and `flush_done_*` moves it once the group is
-  idle, after its deferred withdraws went out. The two outbound
+  edit never touches the IPv6 group). A family whose group has a flush
+  job in flight is not moved yet — the job holds the peer's sender, so a
+  withdraw sent at move time would precede its announce on the wire —
+  but the peer does not keep taking part in the group either: it is
+  frozen (`Peer::regroup_frozen`), skipped by every fan-out so it is
+  neither the canonical member nor a recipient of the shared cache under
+  its changed settings, and left out of any job built meanwhile; its
+  deferred withdraws still go out at the group's `flush_done_*`, which
+  then moves it and hands it back for a full outbound re-sync. That
+  re-sync now covers the IPv6 family too (`route_soft_out_peer_table_v6`
+  is new — the v6 family had no outbound re-sync before), which is also
+  what re-sends anything a mover had queued in its old group. The two
+  outbound
   binding handlers (`policy out`, `prefix-set out`) and the per-VRF
   `rebind_policy_refs` call it synchronously, right after the slot name
   changes and before the policy actor answers, so the resolve path's
@@ -316,10 +321,9 @@ cap. The two reviews agree on every overlapping item.
   out_of_the_old_group`, `binding_an_outbound_policy_on_an_established_
   peer_regroups_it_at_once` (drives the real handlers, both directions)
   and `commit_end_sweep_regroups_and_resyncs_a_peer_whose_knob_changed`.
-  Not in scope: the missing IPv6 outbound soft-out (a moved peer's
-  pending v6 advertises in the old group's cache are not rebuilt; the
-  window is one MRAI) and the `bgp router-id` item of #21, which is not
-  a signature field.
+  Not in scope: the `bgp router-id` item of #21, which is not a
+  signature field. A soft-out requested while a peer is frozen (policy
+  reply, commit end) is deferred to the post-move re-sync.
 
 ### 5. P1 CONFIRMED (probe) — `V6Batch::withdraw` clobbers the group's pending advertise when the source member is withdrawn
 
@@ -836,8 +840,9 @@ cap. The two reviews agree on every overlapping item.
   deferred; the session-bounce drop is by design, the re-sync starts
   from scratch.)
 - `allowas-in` / `enforce-first-as` edits (`config.rs:913`, `1080`) run no
-  soft-in; policy-out edits replay v4/VPNv4/EVPN only and are not
-  family-scoped (`route.rs:6801-6826`); accepted-but-inert: neighbor
+  soft-in; policy-out edits replay v4/v6/VPNv4/EVPN (v6 added by the #4
+  fix; LU and VPNv6 still not) and are not family-scoped
+  (`route.rs:6801-6826`); accepted-but-inert: neighbor
   `enabled`, `vpnv6 next-hop-self|unchanged`, `evpn next-hop-self`,
   `labeled-unicast next-hop-unchanged`.
 - `show bgp -j` (`show.rs:986`, `render_unicast_table`) stamps

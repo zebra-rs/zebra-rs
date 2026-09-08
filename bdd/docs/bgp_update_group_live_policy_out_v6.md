@@ -44,8 +44,8 @@ policy must not touch: the group counts below include them.
 - While every session is Established, z1 binds `policy out DENY-P2`
   (deny 2001:db8:42::/64, permit the rest) toward z3 only.
 - z4 then adds 2001:db8:42::/64: z2 must receive it, z3 must not.
-- z1 unbinds the policy: z3 rejoins z2's group; z4's third prefix
-  reaches both.
+- z1 unbinds the policy: z3 rejoins z2's group and receives
+  2001:db8:42::/64 through the re-sync; z4's third prefix reaches both.
 
 ## Config Files
 

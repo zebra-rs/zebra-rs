@@ -2613,7 +2613,7 @@ impl Bgp {
                 );
             }
             Message::FlushDoneIpv4(group_id, deltas) => {
-                super::update_group::flush_done_ipv4(
+                let resync = super::update_group::flush_done_ipv4(
                     &mut self.update_groups,
                     &mut self.peers,
                     &self.tx,
@@ -2623,9 +2623,16 @@ impl Bgp {
                     self.router_id,
                     self.as_sets_withdraw,
                 );
+                // Peers moved out of this group once its job completed
+                // (`regroup_if_stale`): re-sync them under their new egress
+                // transform, replacing whatever they were skipped for while
+                // frozen.
+                for ident in resync {
+                    super::peer::apply_soft_out_peer(self, ident);
+                }
             }
             Message::FlushDoneIpv6(group_id, deltas) => {
-                super::update_group::flush_done_ipv6(
+                let resync = super::update_group::flush_done_ipv6(
                     &mut self.update_groups,
                     &mut self.peers,
                     &self.tx,
@@ -2634,6 +2641,13 @@ impl Bgp {
                     self.router_id,
                     self.as_sets_withdraw,
                 );
+                // Peers moved out of this group once its job completed
+                // (`regroup_if_stale`): re-sync them under their new egress
+                // transform, replacing whatever they were skipped for while
+                // frozen.
+                for ident in resync {
+                    super::peer::apply_soft_out_peer(self, ident);
+                }
             }
             Message::BgpLs { add, withdraw } => {
                 // Locally-produced BGP-LS (IS-IS producer, RFC 9552). Store
