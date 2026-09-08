@@ -97,7 +97,7 @@ impl BgpShard {
                 vec![self.best_path_delta_lu(ident, nlri, Vec::new())]
             }
             ShardMsg::PeerDown { ident } => self.handle_peer_down(ident),
-            ShardMsg::SoftInV4 { ident } => self.handle_soft_in_v4(ident),
+            ShardMsg::SoftInV4 { ident, from_client } => self.handle_soft_in_v4(ident, from_client),
             ShardMsg::PolicyReplace { ident, policy } => {
                 self.set_in_policy(ident, policy);
                 Vec::new()
@@ -955,7 +955,7 @@ impl BgpShard {
     /// next replay), a permitted route re-interns + re-runs best-path; the
     /// async reduce drives FIB + advertise (incl. AddPath via `added`).
     /// v4-unicast only — VPNv4 soft-in stays on the synchronous shard.
-    fn handle_soft_in_v4(&mut self, ident: usize) -> Vec<ShardOut> {
+    fn handle_soft_in_v4(&mut self, ident: usize, from_client: bool) -> Vec<ShardOut> {
         // Snapshot the stored rows so the per-row Loc-RIB mutation below
         // doesn't alias the Adj-RIB-In iteration.
         let entries: Vec<(Ipv4Net, Vec<BgpRib>)> = match self.adj_in(ident) {
@@ -1001,6 +1001,7 @@ impl BgpShard {
                     }
                     Some(d) => {
                         let mut new_rib = stored.clone();
+                        new_rib.from_client = from_client;
                         new_rib.attr = self.intern(d.attr);
                         new_rib.weight = d.weight;
                         // The replayed policy may stamp a different tag

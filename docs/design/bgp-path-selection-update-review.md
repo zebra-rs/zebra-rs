@@ -138,10 +138,18 @@ cap. The two reviews agree on every overlapping item.
   only the client-to-non-client scenario failed, 6/7 each. Unit:
   `client_route_is_reflected_to_non_client_peers_in_every_family`
   (v4, v6, LU v4/v6, EVPN, MUP, Flowspec) and
-  `ingest_stamps_from_client_on_routes_learned_from_a_client`. Known
-  caveat: toggling `route-reflector-client` on a live SOURCE peer leaves
-  already-learned paths with the old bit until re-learned or soft-in
-  replayed (same class as #21).
+  `ingest_stamps_from_client_on_routes_learned_from_a_client`.
+  Review follow-ups folded in: the SR-Policy WITHDRAW reflector
+  (`sr_policy::reflect_withdraw_to`) takes the source role too, so a
+  withdrawal reaches exactly the peers the announcement reached; both
+  soft-in replay paths (main and the sharded `SoftInV4`) re-stamp
+  `from_client` from the peer's current role instead of copying the
+  learn-time bit; and a `route-reflector-client` change on a live session
+  now bounces it (`apply_route_reflector_client` returns the bounce like
+  the other role knobs; FRR resets on this knob too), which relearns the
+  source-side bit, resyncs what the peer is sent, and re-forms its
+  update-group — this reverses the earlier "storage-only, never bounce"
+  choice recorded in `config.rs`, and closes the rr-client item of #21.
 
 ### 3. P1 CONFIRMED (probe) — `afi-safi ipv4|ipv6 next-hop-self` / `next-hop-unchanged` are missing from `UpdateGroupSig`
 

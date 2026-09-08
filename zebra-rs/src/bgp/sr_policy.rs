@@ -939,8 +939,15 @@ pub fn reflect_attr(
 /// destination peer (RFC 4456 client rule; the NO_ADVERTISE check is
 /// moot for a withdraw — reflecting a never-advertised withdraw is a
 /// harmless no-op on the peer).
-pub fn reflect_withdraw_to(source_ibgp: bool, dest_ibgp: bool, dest_is_client: bool) -> bool {
-    !(source_ibgp && dest_ibgp && !dest_is_client)
+pub fn reflect_withdraw_to(
+    source_ibgp: bool,
+    source_is_client: bool,
+    dest_ibgp: bool,
+    dest_is_client: bool,
+) -> bool {
+    // Mirror of `reflect_attr`'s RFC 4456 §6 gate: the withdrawal must
+    // reach exactly the peers the announcement reached.
+    !(source_ibgp && dest_ibgp && !dest_is_client && !source_is_client)
 }
 
 #[cfg(test)]
@@ -1666,8 +1673,9 @@ mod tests {
 
     #[test]
     fn reflect_withdraw_to_follows_client_rule() {
-        assert!(!reflect_withdraw_to(true, true, false)); // iBGP→iBGP non-client: no
-        assert!(reflect_withdraw_to(true, true, true)); // iBGP→iBGP client: yes
-        assert!(reflect_withdraw_to(false, true, false)); // eBGP→iBGP: yes
+        assert!(!reflect_withdraw_to(true, false, true, false)); // non-client→non-client: no
+        assert!(reflect_withdraw_to(true, false, true, true)); // non-client→client: yes
+        assert!(reflect_withdraw_to(true, true, true, false)); // client→non-client: yes (RFC 4456 §6)
+        assert!(reflect_withdraw_to(false, false, true, false)); // eBGP→iBGP: yes
     }
 }

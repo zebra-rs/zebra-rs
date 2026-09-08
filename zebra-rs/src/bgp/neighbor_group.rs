@@ -1602,7 +1602,10 @@ pub(super) fn apply_resolved_session_knobs(peer: &mut Peer, want: &InheritableKn
     bounce |= super::config::apply_otc_local_role(peer, want.otc_local_role);
     bounce |=
         super::config::apply_route_server_client(peer, want.route_server_client.unwrap_or(false));
-    super::config::apply_route_reflector_client(peer, want.route_reflector_client.unwrap_or(false));
+    bounce |= super::config::apply_route_reflector_client(
+        peer,
+        want.route_reflector_client.unwrap_or(false),
+    );
     // The BFD re-arm this returns is only meaningful for a live session.
     let _ = super::config::apply_update_source(peer, want.update_source);
     // TCP-MD5 password (active/connect side): apply the already-resolved
@@ -1701,7 +1704,8 @@ pub(super) fn apply_inherited(
     // member like the transport knobs do.
     bounce |= super::config::apply_otc_local_role(peer, otc_local_role);
     bounce |= super::config::apply_route_server_client(peer, route_server_client.unwrap_or(false));
-    super::config::apply_route_reflector_client(peer, route_reflector_client.unwrap_or(false));
+    bounce |=
+        super::config::apply_route_reflector_client(peer, route_reflector_client.unwrap_or(false));
     outcome.bfd_reapply = super::config::apply_update_source(peer, update_source);
     outcome.mss_refresh = super::config::apply_tcp_mss(peer, tcp_mss);
     outcome.md5_refresh = super::config::apply_md5_password(peer, password);

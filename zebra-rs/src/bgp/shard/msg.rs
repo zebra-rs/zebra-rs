@@ -142,7 +142,9 @@ pub enum ShardMsg {
     /// change (or `clear … soft in`) re-converges the pool-owned Loc-RIB
     /// without the peer re-sending. v4-unicast only; VPNv4 soft-in stays
     /// on the synchronous shard.
-    SoftInV4 { ident: usize },
+    /// `from_client`: the peer's current reflector-client role, re-stamped
+    /// on every replayed row (see `BgpRib::from_client`).
+    SoftInV4 { ident: usize, from_client: bool },
 
     /// Render a sharded Loc-RIB table for a `show` command — the
     /// scatter-gather half of the show split. The reply travels on the

@@ -7169,14 +7169,21 @@ fn route_soft_in_peer_table(
     // reduce drives FIB + advertise. `process_policy_msg` sends the
     // matching `PolicyReplace` first, so the replay sees the new policy.
     // VPNv4 (`rd = Some`) is not pooled and replays synchronously below.
+    // The replay re-derives everything the ingest derives from the peer,
+    // not only the policy verdict: the stored row's `from_client` is the
+    // role at learn time, and a `route-reflector-client` change since
+    // then would otherwise survive the replay.
+    let (ident, from_client) = {
+        let Some(peer) = peers.get_by_idx(peer_idx) else {
+            return;
+        };
+        (peer.ident, peer.is_ibgp() && peer.is_reflector_client())
+    };
     if rd.is_none()
         && let Some(pool) = shards
     {
-        let Some(ident) = peers.get_by_idx(peer_idx).map(|p| p.ident) else {
-            return;
-        };
         for idx in 0..pool.n() {
-            pool.dispatch(idx, ShardMsg::SoftInV4 { ident });
+            pool.dispatch(idx, ShardMsg::SoftInV4 { ident, from_client });
         }
         return;
     }
@@ -7236,6 +7243,7 @@ fn route_soft_in_peer_table(
                 }
                 Some(decision) => {
                     let mut new_rib = stored.clone();
+                    new_rib.from_client = from_client;
                     new_rib.attr = bgp.shard.intern(decision.attr);
                     new_rib.weight = decision.weight;
                     new_rib.tag = decision.tag;
@@ -10620,6 +10628,7 @@ fn srpolicy_reflect_withdraw(source_ident: usize, nlri: &SrPolicyNlri, peers: &m
         return;
     };
     let source_ibgp = src.is_ibgp();
+    let source_is_client = source_ibgp && src.is_reflector_client();
     let mut dests: Vec<usize> = peers.established_idents(afi, Safi::SrTePolicy);
     dests.retain(|&ident| ident != source_ident);
     for ident in dests {
@@ -10628,6 +10637,7 @@ fn srpolicy_reflect_withdraw(source_ident: usize, nlri: &SrPolicyNlri, peers: &m
         };
         if !super::sr_policy::reflect_withdraw_to(
             source_ibgp,
+            source_is_client,
             peer.is_ibgp(),
             peer.is_reflector_client(),
         ) {
@@ -26480,6 +26490,60 @@ mod rfc4456_reflect_stamp_tests {
                 assert_eq!(rows[0].from_client, client, "client={client}");
             });
         }
+    }
+
+    /// A soft-in replay re-derives `from_client` from the peer's CURRENT
+    /// role rather than copying the stored row's learn-time value, so a
+    /// role change followed by a replay leaves no stale bit behind.
+    #[tokio::test]
+    async fn soft_in_replay_restamps_from_client_from_the_current_role() {
+        use crate::bgp::peer_map::PeerMap;
+        use bgp_packet::CapMultiProtocol;
+
+        with_top!(top, {
+            let mut top = top;
+            let mut peers = PeerMap::new();
+            let mut peer = client_peer();
+            let key = CapMultiProtocol::new(&Afi::Ip, &Safi::Unicast);
+            let entry = peer
+                .cap_map
+                .entries
+                .get_mut(&key)
+                .expect("v4 unicast pre-seeded");
+            entry.send = true;
+            entry.recv = true;
+            let addr: IpAddr = "10.0.0.2".parse().unwrap();
+            peers.insert(addr, peer);
+            let id = peers.get(&addr).unwrap().ident;
+            peers.membership_enroll(id);
+
+            let prefix: Ipv4Net = "10.9.0.0/24".parse().unwrap();
+            let mut packet = UpdatePacket::new();
+            packet.bgp_attr = Some(base_attr());
+            packet.ipv4_update.push(Ipv4Nlri { id: 0, prefix });
+            route_from_peer(id, packet, &mut top, &mut peers, None);
+            assert!(top.shard.v4.0.get(&prefix).unwrap()[0].from_client);
+
+            // The operator drops the client role; the replay must follow.
+            peers.get_mut_by_idx(id).unwrap().reflector_client = false;
+            route_soft_in_peer(id, &mut top, &mut peers, None);
+            let rows = top
+                .shard
+                .v4
+                .0
+                .get(&prefix)
+                .expect("row survives the replay");
+            assert_eq!(rows.len(), 1);
+            assert!(
+                !rows[0].from_client,
+                "replayed row carries the current role"
+            );
+
+            // And back again.
+            peers.get_mut_by_idx(id).unwrap().reflector_client = true;
+            route_soft_in_peer(id, &mut top, &mut peers, None);
+            assert!(top.shard.v4.0.get(&prefix).unwrap()[0].from_client);
+        });
     }
 
     /// A best-path switch between iBGP sources can preserve every received
