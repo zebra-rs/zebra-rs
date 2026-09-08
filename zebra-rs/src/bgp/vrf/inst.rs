@@ -3670,6 +3670,17 @@ impl BgpVrf {
                 }
             }
         }
+        // The outbound names are update-group signature fields: re-form
+        // the peer's groups now, before the policy actor's reply runs the
+        // soft-out on the peer's new group (review finding #4). The VRF
+        // instance always advertises with `as_sets_withdraw: true`.
+        super::super::update_group::regroup_if_stale(
+            &mut self.update_groups,
+            &mut self.peers,
+            ident,
+            self.router_id,
+            true,
+        );
 
         // The wanted watch set, computed from the resolved refs.
         let wanted: Vec<(String, usize, crate::policy::PolicyType)> = policy_refs

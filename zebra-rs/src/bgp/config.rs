@@ -181,30 +181,68 @@ fn config_loc_rib_hook_withdraw_evpn(_bgp: &mut Bgp, mut args: Args, op: ConfigO
     Some(())
 }
 
-/// Re-evaluate every established peer's update-group membership
-/// (detach + attach, which recompute `signature_of`). Needed after an
-/// egress-script binding change: a bound egress script must move each
+/// Re-form one Established peer's update-groups if a signature-bearing
+/// input changed on it ([`update_group::regroup_if_stale`]). The outbound
+/// policy / prefix-set binding handlers call this right after rewriting
+/// the slot name, BEFORE the policy actor answers: the resolve path's
+/// soft-out then rebuilds the peer's table on its new group, and its
+/// `cache_remove` for newly denied prefixes no longer deletes the former
+/// group-mates' pending advertisements (review finding #4).
+pub(super) fn regroup_peer_if_stale(bgp: &mut Bgp, ident: usize) -> bool {
+    let router_id = bgp.router_id;
+    super::update_group::regroup_if_stale(
+        &mut bgp.update_groups,
+        &mut bgp.peers,
+        ident,
+        router_id,
+        bgp.as_sets_withdraw,
+    )
+}
+
+/// [`update_group::regroup_stale_peers`] over this instance, queuing the
+/// movers for the outbound re-sync [`finish_commit_regroup`] runs at
+/// `CommitEnd`: a knob that changes the egress transform (as-override,
+/// remove-private-as, the next-hop knobs, an egress script, …) must also
+/// re-advertise under it, the way FRR resets outbound on those flags. The
+/// direct policy binding handlers do not queue a re-sync — their resolve
+/// path runs the soft-out once the policy actor answers.
+pub(super) fn regroup_stale_peers(bgp: &mut Bgp) -> Vec<usize> {
+    let router_id = bgp.router_id;
+    let moved = super::update_group::regroup_stale_peers(
+        &mut bgp.update_groups,
+        &mut bgp.peers,
+        router_id,
+        bgp.as_sets_withdraw,
+    );
+    bgp.regroup_resync.extend(moved.iter().copied());
+    moved
+}
+
+/// `CommitEnd`: any signature-bearing knob toggled on an Established peer
+/// during the commit re-forms that peer's update-groups now (the handlers
+/// only rewrite peer state), and every peer that moved — here or in a
+/// sweep earlier in the commit — is re-synced under its new egress
+/// transform. Peers the commit is bouncing anyway re-sync on the way back
+/// up; the extra soft-out here is harmless.
+pub(super) fn finish_commit_regroup(bgp: &mut Bgp) {
+    regroup_stale_peers(bgp);
+    let resync: Vec<usize> = std::mem::take(&mut bgp.regroup_resync)
+        .into_iter()
+        .collect();
+    for ident in resync {
+        super::peer::apply_soft_out_peer(bgp, ident);
+    }
+}
+
+/// Re-evaluate every established peer's update-group membership after
+/// an egress-script binding change: a bound egress script must move each
 /// scripted peer into its own singleton group (Model B) *before* the
 /// transform runs, or the canonical-member encode would replicate one
-/// peer's rewritten bytes to another.
+/// peer's rewritten bytes to another. The script key is a signature
+/// field, so this is the stale-signature sweep; the movers are re-synced
+/// at `CommitEnd`.
 fn reassign_all_update_groups(bgp: &mut Bgp) {
-    let router_id = bgp.router_id;
-    let idents: Vec<usize> = bgp
-        .peers
-        .iter_all()
-        .filter(|(_, peer)| peer.state.is_established())
-        .map(|(_, peer)| peer.ident)
-        .collect();
-    for ident in idents {
-        super::update_group::detach(&mut bgp.update_groups, &mut bgp.peers, ident);
-        super::update_group::attach(
-            &mut bgp.update_groups,
-            &mut bgp.peers,
-            ident,
-            router_id,
-            bgp.as_sets_withdraw,
-        );
-    }
+    regroup_stale_peers(bgp);
 }
 
 /// `set router bgp adj-rib-out-hook ipv4-unicast export <name>` — bind a
@@ -739,6 +777,7 @@ fn config_afi_safi_policy_out(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Op
         None
     };
     let peer = bgp.peers.get_mut(&addr)?;
+    let ident = peer.ident;
     apply_peer_afi_policy_ref(
         &bgp.policy_tx,
         peer,
@@ -746,6 +785,9 @@ fn config_afi_safi_policy_out(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Op
         policy::PolicyType::PolicyListOut,
         new_name,
     );
+    // The outbound policy name is an update-group signature field; on an
+    // Established peer the group must follow it now (review finding #4).
+    regroup_peer_if_stale(bgp, ident);
     Some(())
 }
 
@@ -781,6 +823,7 @@ fn config_afi_safi_prefix_out(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Op
         None
     };
     let peer = bgp.peers.get_mut(&addr)?;
+    let ident = peer.ident;
     apply_peer_afi_policy_ref(
         &bgp.policy_tx,
         peer,
@@ -788,6 +831,8 @@ fn config_afi_safi_prefix_out(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Op
         policy::PolicyType::PrefixSetOut,
         new_name,
     );
+    // Signature field too — see `config_afi_safi_policy_out`.
+    regroup_peer_if_stale(bgp, ident);
     Some(())
 }
 
@@ -8084,6 +8129,166 @@ mod neighbor_group_wiring_tests {
         assert!(
             drain_stop_events(&mut bgp).contains(&peer_ident),
             "disabling a group afi-safi must bounce an Established member",
+        );
+    }
+
+    /// Two Established peers with the same signature, attached the way
+    /// the Established edge does it.
+    fn two_attached_peers(bgp: &mut Bgp, addrs: [&str; 2], ebgp: bool) -> [usize; 2] {
+        use bgp_packet::CapMultiProtocol;
+        let mut idents = [0usize; 2];
+        for (i, addr) in addrs.iter().enumerate() {
+            config_peer(bgp, arg_words(&[addr]), ConfigOp::Set).unwrap();
+            let peer = bgp.peers.get_mut(&addr.parse::<IpAddr>().unwrap()).unwrap();
+            peer.state = super::super::peer::State::Established;
+            if ebgp {
+                peer.peer_type = super::super::peer::PeerType::EBGP;
+                peer.remote_as = 65002;
+            }
+            let key = CapMultiProtocol::new(&Afi::Ip, &Safi::Unicast);
+            let entry = peer.cap_map.entries.get_mut(&key).expect("pre-seeded");
+            entry.send = true;
+            entry.recv = true;
+            idents[i] = peer.ident;
+        }
+        let router_id = bgp.router_id;
+        for ident in idents {
+            super::super::update_group::attach(
+                &mut bgp.update_groups,
+                &mut bgp.peers,
+                ident,
+                router_id,
+                bgp.as_sets_withdraw,
+            );
+        }
+        idents
+    }
+
+    fn v4_group_of(bgp: &Bgp, addr: &str) -> super::super::update_group::UpdateGroupId {
+        bgp.peers
+            .get(&addr.parse::<IpAddr>().unwrap())
+            .unwrap()
+            .update_group_id[&AfiSafi::new(Afi::Ip, Safi::Unicast)]
+            .clone()
+    }
+
+    fn v4_sig_of(
+        bgp: &Bgp,
+        id: &super::super::update_group::UpdateGroupId,
+    ) -> super::super::update_group::UpdateGroupSig {
+        bgp.update_groups[&AfiSafi::new(Afi::Ip, Safi::Unicast)]
+            .groups
+            .values()
+            .find(|g| g.id == *id)
+            .map(|g| g.sig.clone())
+            .expect("group exists")
+    }
+
+    /// Review finding #4: `afi-safi ipv4 policy out` / `prefix-set out`
+    /// bound on an Established peer must move it out of the group it
+    /// shares with a plain peer in the same handler call — before the
+    /// policy actor answers — and unbinding must merge it back. The
+    /// policy path leaves the commit-end re-sync queue alone: its own
+    /// resolve path runs the soft-out.
+    #[tokio::test]
+    async fn binding_an_outbound_policy_on_an_established_peer_regroups_it_at_once() {
+        let mut bgp = fresh_bgp();
+        two_attached_peers(&mut bgp, ["10.0.0.4", "10.0.0.5"], false);
+        assert_eq!(v4_group_of(&bgp, "10.0.0.4"), v4_group_of(&bgp, "10.0.0.5"));
+
+        config_afi_safi_policy_out(
+            &mut bgp,
+            arg_words(&["10.0.0.4", "ipv4", "DENY"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert_ne!(
+            v4_group_of(&bgp, "10.0.0.4"),
+            v4_group_of(&bgp, "10.0.0.5"),
+            "the bound peer must leave the shared group in the handler"
+        );
+        assert_eq!(
+            v4_sig_of(&bgp, &v4_group_of(&bgp, "10.0.0.4"))
+                .policy_out_name
+                .as_deref(),
+            Some("DENY"),
+            "and sit in the group of its new signature"
+        );
+        assert!(
+            bgp.regroup_resync.is_empty(),
+            "the policy path re-syncs through the policy reply, not the commit-end drain"
+        );
+
+        config_afi_safi_prefix_out(
+            &mut bgp,
+            arg_words(&["10.0.0.5", "ipv4", "PFX"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert_eq!(
+            v4_sig_of(&bgp, &v4_group_of(&bgp, "10.0.0.5"))
+                .prefix_set_out_name
+                .as_deref(),
+            Some("PFX"),
+            "prefix-set out is a signature field too"
+        );
+
+        config_afi_safi_policy_out(
+            &mut bgp,
+            arg_words(&["10.0.0.4", "ipv4", "DENY"]),
+            ConfigOp::Delete,
+        )
+        .unwrap();
+        config_afi_safi_prefix_out(
+            &mut bgp,
+            arg_words(&["10.0.0.5", "ipv4", "PFX"]),
+            ConfigOp::Delete,
+        )
+        .unwrap();
+        assert_eq!(
+            v4_group_of(&bgp, "10.0.0.4"),
+            v4_group_of(&bgp, "10.0.0.5"),
+            "unbinding merges the peers back into one group"
+        );
+    }
+
+    /// Review finding #21 via the same helper: a signature-bearing knob
+    /// that changes on an Established peer with no handler-level regroup
+    /// (here `as-override`) is picked up by the commit-end sweep, which
+    /// moves exactly that peer and queues it for the outbound re-sync
+    /// that `finish_commit_regroup` drains.
+    #[tokio::test]
+    async fn commit_end_sweep_regroups_and_resyncs_a_peer_whose_knob_changed() {
+        let mut bgp = fresh_bgp();
+        let [a, _b] = two_attached_peers(&mut bgp, ["10.0.0.4", "10.0.0.5"], true);
+        assert_eq!(v4_group_of(&bgp, "10.0.0.4"), v4_group_of(&bgp, "10.0.0.5"));
+        assert!(regroup_stale_peers(&mut bgp).is_empty(), "nothing changed");
+
+        bgp.peers
+            .get_mut(&"10.0.0.4".parse::<IpAddr>().unwrap())
+            .unwrap()
+            .config
+            .as_override = true;
+        assert_eq!(
+            regroup_stale_peers(&mut bgp),
+            vec![a],
+            "only the changed peer moves"
+        );
+        assert_ne!(v4_group_of(&bgp, "10.0.0.4"), v4_group_of(&bgp, "10.0.0.5"));
+        assert_eq!(
+            v4_sig_of(&bgp, &v4_group_of(&bgp, "10.0.0.4")).as_override_target,
+            Some(65002)
+        );
+        assert!(
+            bgp.regroup_resync.contains(&a),
+            "queued for the commit-end re-sync"
+        );
+
+        finish_commit_regroup(&mut bgp);
+        assert!(bgp.regroup_resync.is_empty(), "drained");
+        assert!(
+            regroup_stale_peers(&mut bgp).is_empty(),
+            "stable after the sweep"
         );
     }
 

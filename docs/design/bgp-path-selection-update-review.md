@@ -239,7 +239,7 @@ cap. The two reviews agree on every overlapping item.
   peer still does not regroup (#21's class, #4's helper) — the toggle
   does not re-advertise today either, so nothing regresses.
 
-### 4. P1 CONFIRMED (probe) — binding an out-policy or prefix-set on a live peer never regroups, so the memo applies one peer's policy to its group-mates
+### 4. P1 CONFIRMED (probe), FIXED on branch `bgp-update-group-live-regroup` — binding an out-policy or prefix-set on a live peer never regroups, so the memo applies one peer's policy to its group-mates
 
 - `config.rs:733-749` (`config_afi_safi_policy_out`) → `683-708`
   (`apply_peer_afi_policy_ref`), `757+` (prefix-set out),
@@ -289,6 +289,32 @@ cap. The two reviews agree on every overlapping item.
   IPv4, the re-sync delivers the previously denied prefix. The IPv6
   feature asserts no re-sync because the v6 family has no outbound
   soft-out at all (the below-the-cap item on policy-out edits).
+- FIXED (branch `bgp-update-group-live-regroup`):
+  `update_group::regroup_if_stale` compares, per tracked family, a fresh
+  `signature_of` with the signature of the group the Established peer
+  sits in and detaches/attaches on any mismatch, carrying the peer's
+  deferred withdraws out of the old group (they would otherwise be
+  dropped by `flush_done_*` as a departed member's). The two outbound
+  binding handlers (`policy out`, `prefix-set out`) and the per-VRF
+  `rebind_policy_refs` call it synchronously, right after the slot name
+  changes and before the policy actor answers, so the resolve path's
+  soft-out rebuilds the peer's table on its new group and its
+  `cache_remove` no longer hits the former group-mates (the aggravator).
+  `CommitEnd` runs `regroup_stale_peers` over every Established peer and
+  then re-syncs each mover (`apply_soft_out_peer`), which also closes
+  the signature-knob half of #21 and makes those knobs take effect live,
+  as FRR does; the neighbor-group inheritance sweep runs the same sweep,
+  and the egress-script rebind (`reassign_all_update_groups`) is now the
+  same stale-signature sweep instead of an unconditional detach/attach
+  of every peer. Unit: `regroup_if_stale_moves_only_the_peer_whose_
+  signature_changed`, `regroup_carries_the_movers_deferred_withdraws_
+  out_of_the_old_group`, `binding_an_outbound_policy_on_an_established_
+  peer_regroups_it_at_once` (drives the real handlers, both directions)
+  and `commit_end_sweep_regroups_and_resyncs_a_peer_whose_knob_changed`.
+  Not in scope: the missing IPv6 outbound soft-out (a moved peer's
+  pending v6 advertises in the old group's cache are not rebuilt; the
+  window is one MRAI) and the `bgp router-id` item of #21, which is not
+  a signature field.
 
 ### 5. P1 CONFIRMED (probe) — `V6Batch::withdraw` clobbers the group's pending advertise when the source member is withdrawn
 
@@ -608,6 +634,10 @@ cap. The two reviews agree on every overlapping item.
   leaked to a plain CE, Option-B next-hop blackhole), and an iBGP/eBGP
   flip shares prepend/strip/next-hop rules with the wrong group.
 - Fix direction: same helper as #4.
+- FIXED for the signature knobs by #4's `CommitEnd` sweep: each such
+  change re-forms the peer's groups and re-syncs it within the commit.
+  The `bgp router-id` item (ORIGINATOR_ID / CLUSTER_LIST and the gate-on
+  `SyncCtx.router_id`) is not a signature field and stays open.
 
 ### 22. P2 CONFIRMED (env-gated) — gate-on group engine skips peer slot 0 on every NHT-, FIB-release- and import-driven withdraw
 
@@ -796,7 +826,9 @@ cap. The two reviews agree on every overlapping item.
   withdraws for members that left the group mid-flight;
   `reassign_all_update_groups` (`config.rs:190-209`) moves Established
   peers whose `adj_out` row `V4Batch::withdraw` already removed, so the
-  withdraw is lost.
+  withdraw is lost. (The regroup half is closed by #4's helper, which
+  carries the mover's deferred withdraws; the session-bounce drop is by
+  design, the re-sync starts from scratch.)
 - `allowas-in` / `enforce-first-as` edits (`config.rs:913`, `1080`) run no
   soft-in; policy-out edits replay v4/VPNv4/EVPN only and are not
   family-scoped (`route.rs:6801-6826`); accepted-but-inert: neighbor

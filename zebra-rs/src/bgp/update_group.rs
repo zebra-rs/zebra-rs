@@ -698,6 +698,132 @@ pub fn detach(update_groups: &mut UpdateGroupMap, peers: &mut PeerMap, peer_idx:
     }
 }
 
+/// Re-form `peer_idx`'s update-group membership when a signature-bearing
+/// input changed on the live session (review finding #4). For every
+/// tracked AFI/SAFI a fresh [`signature_of`] is compared with the
+/// signature of the group the peer sits in; on any mismatch the peer is
+/// detached and attached again, which files it under the group matching
+/// it now. The Established edge is otherwise the only attach point, so
+/// without this an outbound policy bound (or any egress knob toggled) on
+/// an Established peer left it in a group whose canonical member no
+/// longer transforms the way it does — and the memoized canonical outcome
+/// was replayed to it, or its own outcome to its group-mates.
+///
+/// A withdraw parked for this peer in an old group's deferred list (a
+/// flush was in flight when its Adj-RIB-Out row was removed) would be
+/// dropped by `flush_done_*` once the peer is no longer a member, so it is
+/// carried out and sent here. Pending *advertises* in the old group's
+/// cache are not carried: their bytes were built under the old signature;
+/// the caller's soft-out (the policy resolve's, or the commit-end
+/// sweep's) rebuilds the peer's table under the new one.
+///
+/// Returns `true` when the peer moved. Peers that are not Established are
+/// never touched — they attach on the Established edge.
+pub fn regroup_if_stale(
+    update_groups: &mut UpdateGroupMap,
+    peers: &mut PeerMap,
+    peer_idx: usize,
+    router_id: Ipv4Addr,
+    as_sets_withdraw: bool,
+) -> bool {
+    let stale = {
+        let Some(peer) = peers.get_by_idx(peer_idx) else {
+            return false;
+        };
+        if !peer.state.is_established() {
+            return false;
+        }
+        TRACKED_AFI_SAFIS.iter().any(|&(afi, safi)| {
+            let afi_safi = AfiSafi::new(afi, safi);
+            let fresh = signature_of(peer, afi, safi);
+            let current = peer
+                .update_group_id
+                .get(&afi_safi)
+                .and_then(|id| {
+                    update_groups
+                        .get(&afi_safi)?
+                        .groups
+                        .values()
+                        .find(|g| g.id == *id)
+                })
+                .map(|g| &g.sig);
+            match (fresh.as_ref(), current) {
+                (None, None) => false,
+                (Some(fresh), Some(current)) => fresh != current,
+                _ => true,
+            }
+        })
+    };
+    if !stale {
+        return false;
+    }
+
+    // Carry this peer's parked withdraws out of the groups it is leaving.
+    let mut deferred_v4: Vec<Ipv4Nlri> = Vec::new();
+    let mut deferred_v6: Vec<Ipv6Nlri> = Vec::new();
+    if let Some(peer) = peers.get_by_idx(peer_idx) {
+        for (afi_safi, id) in &peer.update_group_id {
+            let Some(af) = update_groups.get_mut(afi_safi) else {
+                continue;
+            };
+            let Some(group) = af.group_by_id_mut(id) else {
+                continue;
+            };
+            deferred_v4.extend(
+                group
+                    .deferred_withdraw_ipv4
+                    .extract_if(.., |(ident, _)| *ident == peer_idx)
+                    .map(|(_, nlri)| nlri),
+            );
+            deferred_v6.extend(
+                group
+                    .deferred_withdraw_ipv6
+                    .extract_if(.., |(ident, _)| *ident == peer_idx)
+                    .map(|(_, nlri)| nlri),
+            );
+        }
+    }
+
+    detach(update_groups, peers, peer_idx);
+    attach(update_groups, peers, peer_idx, router_id, as_sets_withdraw);
+
+    if let Some(peer) = peers.get_mut_by_idx(peer_idx) {
+        for nlri in deferred_v4 {
+            // Same rule as `flush_done_ipv4`: a re-acquired prefix has a
+            // newer announce pending, which supersedes this withdraw.
+            if nlri.id == 0 && peer.adj_out.contains_key(None, &nlri.prefix) {
+                continue;
+            }
+            super::route::route_withdraw_ipv4(peer, None, nlri.prefix, nlri.id);
+        }
+        for nlri in deferred_v6 {
+            super::route::route_withdraw_ipv6(peer, nlri.prefix, nlri.id);
+        }
+    }
+    true
+}
+
+/// [`regroup_if_stale`] over every Established peer; returns the idents
+/// that moved. The commit-end sweep and the neighbor-group inheritance
+/// sweep use it so a knob toggled on a live session takes effect in the
+/// group structure within the same commit (review finding #21).
+pub fn regroup_stale_peers(
+    update_groups: &mut UpdateGroupMap,
+    peers: &mut PeerMap,
+    router_id: Ipv4Addr,
+    as_sets_withdraw: bool,
+) -> Vec<usize> {
+    let idents: Vec<usize> = peers
+        .iter_all()
+        .filter(|(_, peer)| peer.state.is_established())
+        .map(|(_, peer)| peer.ident)
+        .collect();
+    idents
+        .into_iter()
+        .filter(|&ident| regroup_if_stale(update_groups, peers, ident, router_id, as_sets_withdraw))
+        .collect()
+}
+
 // ── IPv4 unicast send / cache_remove / flush ──
 //
 // Owns the per-attr-bucket batching that used to live on `Peer`
@@ -1904,6 +2030,191 @@ mod tests {
         let mut b = a.clone();
         b.attach_unknown_attr = Some(UnknownAttr::new(0xC0, 251, vec![0xde, 0xad]));
         assert_ne!(a, b);
+    }
+
+    /// Review finding #4: a signature field changed on an Established
+    /// peer (here the outbound policy name) must move exactly that peer
+    /// into the group matching its new signature; a fresh peer and a
+    /// second call are no-ops, and a non-Established peer is left alone.
+    #[test]
+    fn regroup_if_stale_moves_only_the_peer_whose_signature_changed() {
+        use super::super::peer::State;
+        let v6u = AfiSafi::new(Afi::Ip6, Safi::Unicast);
+        let mut peers = PeerMap::new();
+        for addr in ["10.0.0.1", "10.0.0.2"] {
+            let mut peer = sig_peer(addr);
+            peer.state = State::Established;
+            peers.insert(addr.parse().unwrap(), peer);
+        }
+        let mut groups = empty_map();
+        let router_id = std::net::Ipv4Addr::new(10, 0, 0, 9);
+        for ident in 0..2 {
+            attach(&mut groups, &mut peers, ident, router_id, false);
+        }
+        let gid = |peers: &PeerMap, ident: usize| {
+            peers
+                .get_by_idx(ident)
+                .unwrap()
+                .update_group_id
+                .get(&v6u)
+                .cloned()
+                .expect("attached")
+        };
+        assert_eq!(gid(&peers, 0), gid(&peers, 1), "same signature, one group");
+        assert!(
+            !regroup_if_stale(&mut groups, &mut peers, 0, router_id, false),
+            "nothing changed: no move"
+        );
+
+        // Bind an outbound policy on peer 0 the way the config handler
+        // does (slot name only; the policy actor resolves later).
+        peers
+            .get_mut_by_idx(0)
+            .unwrap()
+            .policy_list_slot(v6u, InOut::Output)
+            .name = Some("DENY".to_string());
+        assert!(
+            regroup_if_stale(&mut groups, &mut peers, 0, router_id, false),
+            "a changed signature field must move the peer"
+        );
+        assert_ne!(
+            gid(&peers, 0),
+            gid(&peers, 1),
+            "peer 0 left the shared group"
+        );
+        let sig_of = |groups: &UpdateGroupMap, id: &UpdateGroupId| {
+            groups[&v6u]
+                .groups
+                .values()
+                .find(|g| g.id == *id)
+                .map(|g| g.sig.clone())
+                .expect("group exists")
+        };
+        assert_eq!(
+            sig_of(&groups, &gid(&peers, 0)).policy_out_name.as_deref(),
+            Some("DENY"),
+            "peer 0 sits in the group of its NEW signature"
+        );
+        assert_eq!(sig_of(&groups, &gid(&peers, 1)).policy_out_name, None);
+        assert_eq!(groups[&v6u].groups.len(), 2);
+        assert!(
+            !regroup_if_stale(&mut groups, &mut peers, 0, router_id, false),
+            "already in the matching group: no move"
+        );
+        assert!(
+            !regroup_if_stale(&mut groups, &mut peers, 1, router_id, false),
+            "the untouched group-mate must not move"
+        );
+
+        // Unbinding merges the peer back into its group-mate's group.
+        peers
+            .get_mut_by_idx(0)
+            .unwrap()
+            .policy_list_slot(v6u, InOut::Output)
+            .name = None;
+        assert!(regroup_if_stale(
+            &mut groups,
+            &mut peers,
+            0,
+            router_id,
+            false
+        ));
+        assert_eq!(gid(&peers, 0), gid(&peers, 1), "back in one group");
+        assert_eq!(groups[&v6u].groups.len(), 1, "the singleton was dropped");
+
+        // A peer that is not Established is never touched.
+        peers.get_mut_by_idx(0).unwrap().state = State::Idle;
+        peers
+            .get_mut_by_idx(0)
+            .unwrap()
+            .policy_list_slot(v6u, InOut::Output)
+            .name = Some("DENY".to_string());
+        assert!(!regroup_if_stale(
+            &mut groups,
+            &mut peers,
+            0,
+            router_id,
+            false
+        ));
+    }
+
+    /// A withdraw parked for the moving peer in its old group's deferred
+    /// list (a flush was in flight) must leave with it and be sent, not be
+    /// dropped by the next `flush_done_*` as belonging to a departed
+    /// member; the group-mate's parked withdraw stays where it is.
+    #[test]
+    fn regroup_carries_the_movers_deferred_withdraws_out_of_the_old_group() {
+        use super::super::peer::State;
+        use bgp_packet::CapMultiProtocol;
+        let v4u = AfiSafi::new(Afi::Ip, Safi::Unicast);
+        let v6u = AfiSafi::new(Afi::Ip6, Safi::Unicast);
+        let mut peers = PeerMap::new();
+        let mut rx = Vec::new();
+        for addr in ["10.0.0.1", "10.0.0.2"] {
+            let mut peer = sig_peer(addr);
+            peer.state = State::Established;
+            let key = CapMultiProtocol::new(&Afi::Ip, &Safi::Unicast);
+            let entry = peer.cap_map.entries.get_mut(&key).expect("pre-seeded");
+            entry.send = true;
+            entry.recv = true;
+            let (ptx, prx) = tokio::sync::mpsc::unbounded_channel();
+            peer.packet_tx = Some(ptx);
+            rx.push(prx);
+            peers.insert(addr.parse().unwrap(), peer);
+        }
+        let mut groups = empty_map();
+        let router_id = std::net::Ipv4Addr::new(10, 0, 0, 9);
+        for ident in 0..2 {
+            attach(&mut groups, &mut peers, ident, router_id, false);
+        }
+        let v4_nlri = |s: &str| Ipv4Nlri {
+            id: 0,
+            prefix: s.parse().unwrap(),
+        };
+        let v6_nlri = |s: &str| Ipv6Nlri {
+            id: 0,
+            prefix: s.parse().unwrap(),
+        };
+        {
+            let id = peers.get_by_idx(0).unwrap().update_group_id[&v4u].clone();
+            let g = groups.get_mut(&v4u).unwrap().group_by_id_mut(&id).unwrap();
+            g.deferred_withdraw_ipv4.push((0, v4_nlri("10.9.0.0/24")));
+            g.deferred_withdraw_ipv4.push((1, v4_nlri("10.9.1.0/24")));
+            let id = peers.get_by_idx(0).unwrap().update_group_id[&v6u].clone();
+            let g = groups.get_mut(&v6u).unwrap().group_by_id_mut(&id).unwrap();
+            g.deferred_withdraw_ipv6
+                .push((0, v6_nlri("2001:db8:9::/64")));
+        }
+
+        peers
+            .get_mut_by_idx(0)
+            .unwrap()
+            .policy_list_slot(v4u, InOut::Output)
+            .name = Some("DENY".to_string());
+        assert!(regroup_if_stale(
+            &mut groups,
+            &mut peers,
+            0,
+            router_id,
+            false
+        ));
+
+        let mut sent = 0;
+        while rx[0].try_recv().is_ok() {
+            sent += 1;
+        }
+        assert_eq!(
+            sent, 2,
+            "the v4 and the v6 parked withdraw were sent to the mover"
+        );
+        assert!(rx[1].try_recv().is_err(), "the group-mate was sent nothing");
+        let id = peers.get_by_idx(1).unwrap().update_group_id[&v4u].clone();
+        let g = groups.get_mut(&v4u).unwrap().group_by_id_mut(&id).unwrap();
+        assert_eq!(
+            g.deferred_withdraw_ipv4,
+            vec![(1, v4_nlri("10.9.1.0/24"))],
+            "only the group-mate's parked withdraw remains in the old group"
+        );
     }
 
     #[test]

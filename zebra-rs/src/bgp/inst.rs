@@ -1293,6 +1293,11 @@ pub struct Bgp {
     /// does not yet share work across members. See
     /// `docs/design/bgp-update-groups.md`.
     pub update_groups: super::update_group::UpdateGroupMap,
+    /// Peers whose update-groups were re-formed during the current commit
+    /// (`config::regroup_stale_peers`), drained by
+    /// `config::finish_commit_regroup` at `CommitEnd`, which re-syncs each
+    /// of them under its new egress transform.
+    pub regroup_resync: std::collections::BTreeSet<usize>,
     /// Instance-wide conditional tracing config (zebra-bgp-tracing.yang
     /// `router bgp tracing`). Written by the tracing config dispatch;
     /// read by the gated `bgp_*_trace!` macros (follow-up).
@@ -1508,6 +1513,7 @@ impl Bgp {
             interface_addrs: super::interface_addrs::InterfaceAddrs::new(),
             connected_subnets: super::connected::ConnectedSubnets::new(),
             update_groups: super::update_group::empty_map(),
+            regroup_resync: std::collections::BTreeSet::new(),
             tracing: super::tracing::BgpTracing::default(),
             policy_tx,
             policy_rx: policy_chan.rx,
@@ -3401,6 +3407,11 @@ impl Bgp {
                 // Option C transit). Re-derive after every commit; a flip
                 // brings that family's rows in step.
                 self.reconcile_transit_labels(false);
+                // Signature-bearing knobs toggled on Established peers in
+                // this commit re-form their update-groups now, and every
+                // peer that moved is re-synced under its new transform
+                // (review findings #4 / #21).
+                super::config::finish_commit_regroup(self);
             }
             ConfigOp::Completion => {
                 // `comps_dynamic` carries the dynamic handler name

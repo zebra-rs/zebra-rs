@@ -1783,6 +1783,11 @@ pub(super) fn sweep_members_inherit(bgp: &mut Bgp, name: &str) {
     for ident in stops {
         let _ = bgp.tx.try_send(Message::Event(ident, Event::Stop));
     }
+    // Inherited knobs may have changed update-group signature fields on
+    // Established members (outbound bindings, as-override, next-hop
+    // knobs, …): re-form their groups now; the commit-end re-sync covers
+    // the movers (review finding #4).
+    super::config::regroup_stale_peers(bgp);
     if mss_refresh {
         super::config::apply_tcp_mss_refresh_all(bgp);
     }
