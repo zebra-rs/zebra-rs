@@ -7,6 +7,14 @@ MUP/Flowspec/SR-Policy/RTC where they share the machinery). Reviewed
 against `main` at `2f1e9a09` (2026-09-07). Line numbers are as of that
 commit.
 
+Status (2026-09-08): three items are fixed on `main` — #1 (PR #2372,
+merge `3beacbcc`), the listen-range peer-type item found while fixing it
+(PR #2373, `ba327126`) and #2 (PR #2375, `308b196a`). Each fixed entry
+ends with its fix note; everything else is open. Suggested order for the
+rest: #3 (unicast next-hop knobs missing from the update-group
+signature), #4 (live out-policy binding never regroups), #5 (v6 withdraw
+clobbers a sibling's pending advertise), then #6–#9.
+
 Method: one lead read the selection ladder and every egress builder, then
 five independent read-only reviewers each took one dimension (update-group
 sharing, the selection ladder and inbound attrs, AddPath, per-family egress
@@ -36,12 +44,13 @@ below the cap. Four root causes account for most of them:
 2. **Inbound attributes from eBGP taken at face value.** LOCAL_PREF,
    ORIGINATOR_ID and CLUSTER_LIST are never discarded on eBGP ingest, so an
    external neighbor decides our best path and gets relayed AS-wide (#1,
-   #11).
+   #11). #1 is fixed at the parser (#2372); #11 is open at the same site.
 3. **Reflection, AddPath and stale handling modeled on "best only" or
-   "VPNv4 only".** No per-path "learned from a client" state (#2); EVPN
-   AddPath and several sync/soft paths still iterate `selected` (#7, #16,
-   #18, #20); the plain fan-out takes `selected.last()` although the
-   winner is first (#14); the stale sweep walks VPNv4 only (#9).
+   "VPNv4 only".** No per-path "learned from a client" state (#2, fixed
+   in #2375); EVPN AddPath and several sync/soft paths still iterate
+   `selected` (#7, #16, #18, #20); the plain fan-out takes
+   `selected.last()` although the winner is first (#14); the stale sweep
+   walks VPNv4 only (#9).
 4. **v4/v6 twins that drifted.** The v6 withdraw lacks the v4 guard (#5),
    the v6 AddPath loop lacks the v4 out-policy call (#16), VPNv6 lacks the
    VPNv4 transit label (#8), and the `(Ip6, Unicast)` knobs govern VPNv6
@@ -58,7 +67,7 @@ cap. The two reviews agree on every overlapping item.
 
 ## Ranked findings
 
-### 1. P1 CONFIRMED (probe) — LOCAL_PREF received from an eBGP peer decides our best path and is relayed AS-wide
+### 1. P1 CONFIRMED (probe), FIXED in #2372 — LOCAL_PREF received from an eBGP peer decides our best path and is relayed AS-wide
 
 - `crates/bgp-packet/src/attrs/attr.rs:501` stores LOCAL_PREF for every
   session; `route.rs:4171` `inbound_attr_checks` (and the seven inlined
@@ -86,9 +95,10 @@ cap. The two reviews agree on every overlapping item.
   the eBGP path, iBGP peer receives 500) and passes its four control
   scenarios, so the fix must cover `route_ipv4_update` and
   `route_ipv6_update` ingest alike.
-- FIXED (branch `bgp-ebgp-local-pref-ignore`) at the parser, the way FRR
-  does it: `ParseOption` gained `peer_type: BgpPeerType` (`Ibgp` by
-  default, so callers that do not say keep every attribute),
+- FIXED — PR #2372, merged to `main` as `3beacbcc` (2026-09-08) — at
+  the parser, the way FRR does it: `ParseOption` gained
+  `peer_type: BgpPeerType` (`Ibgp` by default, so callers that do not
+  say keep every attribute),
   `peer_start_reader` stamps it from the peer's configured type next to
   the AS4 stamp (`opt.peer_type = peer.peer_type.into()`), and
   `parse_bgp_update_attribute` skips a LOCAL_PREF from an external session
@@ -105,7 +115,7 @@ cap. The two reviews agree on every overlapping item.
   RFC 7606 §7.6 asks for treat-as-withdraw (`attr_malformation_is_withdraw`
   does not list `LocalPref`).
 
-### 2. P1 CONFIRMED (probe) — a route learned from a reflector client is never reflected to non-client iBGP peers
+### 2. P1 CONFIRMED (probe), FIXED in #2375 — a route learned from a reflector client is never reflected to non-client iBGP peers
 
 - `BgpRib` (`route.rs:1811`) has no "learned from a client" bit. Every
   builder gates iBGP-to-iBGP on the destination alone:
@@ -127,7 +137,8 @@ cap. The two reviews agree on every overlapping item.
   `inbound_attr_checks`) and reflect when `ctx.reflector_client ||
   rib.from_client`. This is a source-path input, not a destination knob,
   so it is signature-neutral.
-- FIXED (branch `bgp-rr-client-to-nonclient`): `BgpRib::from_client`,
+- FIXED — PR #2375, merged to `main` as `308b196a` (2026-09-08):
+  `BgpRib::from_client`,
   stamped where each family's ingest decides `typ` (the shared
   `inbound_attr_checks` and the seven inlined copies; carried in the four
   shard messages that carry `typ`), and all eight reflection gates now
@@ -164,7 +175,7 @@ cap. The two reviews agree on every overlapping item.
   second entry); a single removal stranded the other, and the returned
   role is now the OR over the removed candidates.
 
-### 3. P1 CONFIRMED (probe) — `afi-safi ipv4|ipv6 next-hop-self` / `next-hop-unchanged` are missing from `UpdateGroupSig`
+### 3. P1 CONFIRMED (probe), FIXED on branch `bgp-update-group-next-hop-sig` — `afi-safi ipv4|ipv6 next-hop-self` / `next-hop-unchanged` are missing from `UpdateGroupSig`
 
 - Commit `0fcce89d` added `unicast_next_hop_self` /
   `unicast_next_hop_unchanged` to `SyncCtx` (`peer.rs:1752-1757`) and made
@@ -191,6 +202,39 @@ cap. The two reviews agree on every overlapping item.
   to the signature for `(Ip, Unicast)` and `(Ip6, Unicast)` (family-gated
   like `vpnv4_*`), bump `SIGNATURE_VERSION`, extend
   `egress_knobs_shard_only_their_family`.
+- BDD gates: `bgp_update_group_next_hop_knobs` (IPv4) and
+  `bgp_update_group_next_hop_knobs_v6` (IPv6). One bridge, z1 under
+  test with two iBGP neighbors (one `next-hop-self`) and two eBGP
+  neighbors (one `next-hop-unchanged`), so each pair shares z1's local
+  address and lands in one group; the knob placement is mirrored between
+  the two families so the canonical member is the knob-bearing peer in
+  IPv4 and the plain peer in IPv6. Routes are injected only after every
+  session is Established, because the session-up dump builds per peer
+  and would mask the memo. On `main` (308b196a) each feature fails 3 of
+  8 scenarios: the second member of each pair carries the first member's
+  next-hop, and `show bgp update-group` reports 2 shared groups per
+  family (IPv4: "2 groups, 4 members"; IPv6: "4 groups, 8 members",
+  the extra two being the default-negotiated ipv4-unicast pairs, which
+  an ipv6 knob must not shard).
+- FIXED (branch `bgp-update-group-next-hop-sig`): `UpdateGroupSig`
+  gained `unicast_next_hop_self` and `unicast_next_hop_unchanged`,
+  stamped only for the `(Ip, Unicast)` and `(Ip6, Unicast)` groups from
+  that family's own knob, so the ipv4 knob cannot shard the ipv6 group
+  or the reverse; `next-hop-self` is stamped for iBGP only, because eBGP
+  always rewrites unless unchanged, so the knob is a no-op there and
+  must not split eBGP groups. `SIGNATURE_VERSION` 8 → 9. Unit:
+  `unicast_next_hop_knobs_shard_only_their_family` (each knob shards its
+  own family's unicast group and no other; the eBGP no-op rule) and the
+  two new fields in `signature_fields_each_distinguish`; route-level
+  `update_group_next_hop_knob_tests` attach four Established peers on
+  one local address (an iBGP pair, an eBGP pair, one knob per pair) to
+  real update-groups, ingest a forwarded route and read every member's
+  Adj-RIB-Out next-hop, IPv4 and IPv6 with the pair order mirrored, so
+  both leak directions are pinned; both fail with the stamps disabled.
+  The design doc's signature table (`bgp-update-groups.md` §3.1) now
+  lists the pair. Not in scope: toggling either knob on an Established
+  peer still does not regroup (#21's class, #4's helper) — the toggle
+  does not re-advertise today either, so nothing regresses.
 
 ### 4. P1 CONFIRMED (probe) — binding an out-policy or prefix-set on a live peer never regroups, so the memo applies one peer's policy to its group-mates
 
@@ -369,7 +413,9 @@ cap. The two reviews agree on every overlapping item.
   outside. PLAUSIBLE adjunct: an OPEN with BGP Identifier 0.0.0.0 is
   accepted (`peer.rs:2478-2483`, `2549`; RFC 6286 §2.2 says NOTIFY) and
   then wins all (f) ties.
-- Fix direction: same site as #1.
+- Fix direction: same site as #1 — `parse_bgp_update_attribute` now
+  keys on `ParseOption::peer_type` (#2372), so the eBGP skip only needs
+  two more attribute types.
 
 ### 12. P2 CONFIRMED (probe) — `enforce-first-as` with `local-as` (without `no-prepend`) drops every route from the neighbor
 
@@ -523,7 +569,8 @@ cap. The two reviews agree on every overlapping item.
 
 ### 21. P2 CONFIRMED — more signature-bearing knobs change on a live Established peer without detach/attach
 
-- Beyond the recorded as-override / remove-private-as / rr-client:
+- Beyond the recorded as-override / remove-private-as (rr-client is
+  closed: #2375 bounces the session on that knob):
   `config_remote_as` (`config.rs:561-590`, rewrites `remote_as` and flips
   `peer_type`; `peer.start()` is a no-op on an active peer), vpnv4
   `next-hop-self` / `next-hop-unchanged` (`config.rs:3644-3663` →
@@ -691,7 +738,7 @@ cap. The two reviews agree on every overlapping item.
   `route_sync_vpnv6` (`15275`) records, so `advertised-routes` / PfxSnt
   drift (the recorded "plausible" item, confirmed display-only).
 
-### Found while fixing #1 (FIXED on branch `bgp-dynamic-peer-type`: `try_dynamic_accept` now derives `peer_type` from the group's remote-as the way `interface_neighbor.rs` does; regression test `accepted_dynamic_peer_takes_its_type_from_the_group_remote_as` and `bgp_dynamic_neighbors` asserts `route_type eBGP` / `as_path 65001`)
+### Found while fixing #1 (FIXED — PR #2373, merged to `main` as `ba327126` on 2026-09-08: `try_dynamic_accept` now derives `peer_type` from the group's remote-as the way `interface_neighbor.rs` does; regression test `accepted_dynamic_peer_takes_its_type_from_the_group_remote_as` and `bgp_dynamic_neighbors` asserts `route_type eBGP` / `as_path 65001`)
 
 - **P1 CONFIRMED (probe) — a dynamic listen-range peer is typed iBGP
   regardless of the group's `remote-as`.** `try_dynamic_accept`
@@ -817,17 +864,24 @@ cap. The two reviews agree on every overlapping item.
   v4/v6 prefix; RD change / VRF delete / `no afi-safi vpnv4` /
   `label-mode` change purge old exports and withdraw from PE peers and
   sibling VRFs; `local-as`, `otc-local-role`, `route-server-client`,
-  `ttl-security`, `ebgp-multihop` changes bounce the session.
+  `ttl-security`, `ebgp-multihop` and (since #2375)
+  `route-reflector-client` changes bounce the session.
 - No crafted-UPDATE panic in the selection or ingest code.
 
 ## Test and BDD gaps this review exposes
 
-- No RR BDD has a non-client iBGP neighbor receiving a client's route.
+- Closed by #2375 (`bgp_rr_client_to_nonclient`, `_v6`: reflector, two
+  clients, two non-clients, the full RFC 4456 §6 matrix plus withdraw):
+  no RR BDD had a non-client iBGP neighbor receiving a client's route.
 - No BDD puts two peers with different `next-hop-self` /
   `next-hop-unchanged` / out-policy in the same update-group (same
   `local_addr`); `bgp_vrf_neighbor_next_hop` separates them by subnet.
-- No test feeds LOCAL_PREF / ORIGINATOR_ID / CLUSTER_LIST from an eBGP
-  peer.
+- LOCAL_PREF half closed by #2372 (`bgp_ebgp_local_pref_ignore`, `_v6`,
+  and the `update.rs` codec tests incl. the malformed case); no test
+  feeds ORIGINATOR_ID / CLUSTER_LIST from an eBGP peer (#11).
+- Closed by #2373: the dynamic-neighbor BDDs asserted route presence
+  only; `bgp_dynamic_neighbors` now checks the session type and the
+  AS_PATH prepend.
 - No selection test uses three candidates with mixed neighbor ASes and
   MED, or re-feeds an unchanged route.
 - No test asserts which path a plain peer is advertised under
@@ -852,5 +906,10 @@ review session's scratchpad and is written against the helpers already in
 `update_group::attach`, `route_advertise_to_peers*`, `LocalRibTable`).
 Each probe asserts the RFC-conformant outcome and fails on `main`; they
 are the starting point for the regression tests of the corresponding
-fixes. Twelve of the thirteen probes fail on `main`; the v4 control for
-finding 5 passes, which is what isolates the v6 drift.
+fixes. Twelve of the thirteen probes failed on `2f1e9a09`; the v4
+control for finding 5 passes, which is what isolates the v6 drift. The
+#1 and #2 probes are superseded by in-tree regression tests
+(`local_pref_from_ebgp_peer_is_discarded` and siblings in
+`crates/bgp-packet/src/update.rs`; `rfc4456_reflect_stamp_tests` in
+`route.rs`) and pass on `main` since #2372 / #2375; the listen-range
+probe became `accepted_dynamic_peer_takes_its_type_from_the_group_remote_as`.

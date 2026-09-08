@@ -89,6 +89,7 @@ Two peers belong to the same update-group for a given `(afi, safi)` iff
 | `config.remove_private_as` + `remote_as` (eBGP only) | `remove-private-as` strips (or, with `replace-as`, rewrites) private ASNs from the egress AS_PATH; the result depends on the two modifiers and on the kept AS (`remote_as`), so it joins the key as `remove_private_as: Some(RemovePrivateAsKey { all, replace_as, keep_as })` (else `None`). |
 | `config.otc_local_role` (eBGP only) | RFC 9234 egress: toward a Customer / Peer / RS-Client the OTC attribute is added (ER1), toward a Provider / Peer / RS an OTC-marked route is suppressed (ER2) — the role decides stamp-or-suppress, so it joins the key as `otc_local_role: Some(role)` (else `None`; iBGP never runs the procedures). |
 | `config.route_server_client` (eBGP only) | RFC 7947: the egress AS_PATH is left untouched (no prepend, no rewrites) and the forwarded next-hop preserved toward a route-server client, so it joins the key as `route_server_client: bool`. |
+| `config.sub[(afi, unicast)].next_hop_self` (iBGP only) / `.next_hop_unchanged` | Per-neighbor `afi-safi ipv4\|ipv6 next-hop-self` / `next-hop-unchanged` select the unicast egress NEXT_HOP (`route_update_ipv4` via `SyncCtx`, `route_update_ipv6` from the peer), so they join the key as `unicast_next_hop_self` / `unicast_next_hop_unchanged`, stamped only for that family's unicast group. `next-hop-self` is iBGP-only in the key: eBGP always rewrites unless unchanged, so it is a no-op there and must not split eBGP groups. The VPNv4 twins are `vpnv4_next_hop_self` / `vpnv4_next_hop_unchanged`, stamped only for the `(Ip, MplsVpn)` group. |
 | `is_afi_safi(afi, safi)` membership | Implicit — only members of the AFI/SAFI participate in that group. |
 | `addpath_send` for `(afi, safi)` | Different framing → different group. |
 
@@ -126,12 +127,14 @@ UPDATE wire format, or are informational):
 - Software Version capability — informational only.
 
 Knobs that don't yet exist in zebra-rs but will join the signature when
-they land: `next-hop-self`, `next-hop-unchanged`, `send-community`
-flags (standard / extended / large), outbound `route-map` (when separate
-from policy-list), per-peer `update-source` distinct from
-`transport.local-address`. (`as-override` and `remove-private-as` have
-landed and are modeled as `as_override_target` / `remove_private_as` —
-see the signature table above.)
+they land: `send-community` flags (standard / extended / large),
+outbound `route-map` (when separate from policy-list), per-peer
+`update-source` distinct from `transport.local-address`. (`as-override`,
+`remove-private-as` and the per-AFI `next-hop-self` / `next-hop-unchanged`
+have landed and are modeled as `as_override_target`, `remove_private_as`,
+`unicast_next_hop_self` / `unicast_next_hop_unchanged` and
+`vpnv4_next_hop_self` / `vpnv4_next_hop_unchanged` — see the signature
+table above.)
 
 **Conservatism rule**: any outbound-affecting setting that the
 signature does not yet model forces the peer into a singleton group.

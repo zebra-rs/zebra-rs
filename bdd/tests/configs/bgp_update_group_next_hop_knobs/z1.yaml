@@ -1,0 +1,43 @@
+# z1 — the router under test (AS 65001). Four neighbors on one bridge, so
+# every session shares z1's local address 192.168.60.1 and, family by
+# family, lands in one update-group per (peer type, knobs):
+#   z2 iBGP  `afi-safi ipv4 next-hop-self`       — forwarded routes get z1
+#   z3 iBGP  plain                                — forwarded routes keep
+#                                                   the received next-hop
+#   z4 eBGP  plain                                — eBGP default rewrite
+#   z5 eBGP  `afi-safi ipv4 next-hop-unchanged`  — keeps the received
+#                                                   next-hop
+# The lower-address neighbor of each pair is the canonical member of the
+# shared group when the knob is missing from the signature.
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.60.0.1
+    neighbor:
+    - remote-address: 192.168.60.2
+      afi-safi:
+      - name: ipv4
+        enabled: true
+        next-hop-self: true
+      enabled: true
+      remote-as: 65001
+    - remote-address: 192.168.60.3
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65001
+    - remote-address: 192.168.60.4
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65002
+    - remote-address: 192.168.60.5
+      afi-safi:
+      - name: ipv4
+        enabled: true
+        next-hop-unchanged: true
+      enabled: true
+      remote-as: 65003

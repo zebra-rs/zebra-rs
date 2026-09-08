@@ -1,0 +1,43 @@
+# z1 — the router under test (AS 65001), IPv6 twin. Same bridge design as
+# the IPv4 feature with the knob placement MIRRORED, so the canonical
+# (lower-address) member of each wrongly shared group is the one WITHOUT
+# the knob and the knob-bearing member is the one that gets the wrong
+# next-hop:
+#   z2 iBGP  plain                                — keeps the received
+#                                                   next-hop
+#   z3 iBGP  `afi-safi ipv6 next-hop-self`       — forwarded routes get z1
+#   z4 eBGP  `afi-safi ipv6 next-hop-unchanged`  — keeps the received
+#                                                   next-hop
+#   z5 eBGP  plain                                — eBGP default rewrite
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.61.0.1
+    neighbor:
+    - remote-address: 2001:db8:60::2
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65001
+    - remote-address: 2001:db8:60::3
+      afi-safi:
+      - name: ipv6
+        enabled: true
+        next-hop-self: true
+      enabled: true
+      remote-as: 65001
+    - remote-address: 2001:db8:60::4
+      afi-safi:
+      - name: ipv6
+        enabled: true
+        next-hop-unchanged: true
+      enabled: true
+      remote-as: 65002
+    - remote-address: 2001:db8:60::5
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65003
