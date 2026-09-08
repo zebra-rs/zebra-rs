@@ -1,0 +1,27 @@
+# z1 — the router under test (AS 65001). z2 and z3 are iBGP neighbors on
+# the same bridge (same local address → one update-group); z4 is an eBGP
+# neighbor that originates the test prefixes. No policy yet.
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.70.0.1
+    neighbor:
+    - remote-address: 192.168.70.2
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65001
+    - remote-address: 192.168.70.3
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65001
+    - remote-address: 192.168.70.4
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65002

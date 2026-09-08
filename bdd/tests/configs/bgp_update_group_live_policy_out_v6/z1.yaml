@@ -1,0 +1,27 @@
+# z1 — the router under test (AS 65001), IPv6 twin. z2 and z3 are iBGP
+# neighbors on the same bridge (one update-group); z4 is the eBGP
+# originator. No policy yet.
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.71.0.1
+    neighbor:
+    - remote-address: 2001:db8:70::2
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65001
+    - remote-address: 2001:db8:70::3
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65001
+    - remote-address: 2001:db8:70::4
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65002

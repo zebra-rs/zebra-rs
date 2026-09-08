@@ -1,0 +1,44 @@
+# z1 — same sessions, now with an outbound policy toward z3 ONLY (the
+# HIGHER-index member of the shared group, mirroring the IPv4 feature)
+# that denies 2001:db8:42::/64 and permits everything else. Bound while
+# Established: z3 must leave the group it shares with z2, or z2's
+# permit is memoized for z3 too.
+prefix-set:
+- name: DENY-P2
+  prefixes:
+  - prefix: 2001:db8:42::/64
+policy:
+- name: DENY-P2
+  entry:
+  - number: 10
+    action: deny
+    match:
+      prefix-set: DENY-P2
+  - number: 20
+    action: permit
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.71.0.1
+    neighbor:
+    - remote-address: 2001:db8:70::2
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65001
+    - remote-address: 2001:db8:70::3
+      afi-safi:
+      - name: ipv6
+        enabled: true
+        policy:
+          out: DENY-P2
+      enabled: true
+      remote-as: 65001
+    - remote-address: 2001:db8:70::4
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65002

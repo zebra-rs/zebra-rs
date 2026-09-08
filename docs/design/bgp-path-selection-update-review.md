@@ -7,13 +7,14 @@ MUP/Flowspec/SR-Policy/RTC where they share the machinery). Reviewed
 against `main` at `2f1e9a09` (2026-09-07). Line numbers are as of that
 commit.
 
-Status (2026-09-08): three items are fixed on `main` — #1 (PR #2372,
+Status (2026-09-08): four items are fixed on `main` — #1 (PR #2372,
 merge `3beacbcc`), the listen-range peer-type item found while fixing it
-(PR #2373, `ba327126`) and #2 (PR #2375, `308b196a`). Each fixed entry
-ends with its fix note; everything else is open. Suggested order for the
-rest: #3 (unicast next-hop knobs missing from the update-group
-signature), #4 (live out-policy binding never regroups), #5 (v6 withdraw
-clobbers a sibling's pending advertise), then #6–#9.
+(PR #2373, `ba327126`), #2 (PR #2375, `308b196a`) and #3 (PR #2376,
+`b8fef738`). Each fixed entry ends with its fix note; everything else is
+open. Suggested order for the rest: #4 (live out-policy binding never
+regroups — its regroup helper also closes #21 and the live toggle of the
+knobs #3 added to the signature), #5 (v6 withdraw clobbers a sibling's
+pending advertise), then #6–#9.
 
 Method: one lead read the selection ladder and every egress builder, then
 five independent read-only reviewers each took one dimension (update-group
@@ -37,7 +38,8 @@ below the cap. Four root causes account for most of them:
 
 1. **Per-peer egress inputs outside the update-group signature.** The
    memoized canonical-member transform is replayed to group-mates whose
-   own knob or policy differs (#3, #4, #13, #21). The invariant stated
+   own knob or policy differs (#3, #4, #13, #21; #3 is fixed in #2376,
+   the other three are open). The invariant stated
    near `route.rs:4975` is not enforced by anything structural, and the
    only regroup points are the Established edge and the egress-script
    rebind.
@@ -175,7 +177,7 @@ cap. The two reviews agree on every overlapping item.
   second entry); a single removal stranded the other, and the returned
   role is now the OR over the removed candidates.
 
-### 3. P1 CONFIRMED (probe), FIXED on branch `bgp-update-group-next-hop-sig` — `afi-safi ipv4|ipv6 next-hop-self` / `next-hop-unchanged` are missing from `UpdateGroupSig`
+### 3. P1 CONFIRMED (probe), FIXED in #2376 — `afi-safi ipv4|ipv6 next-hop-self` / `next-hop-unchanged` are missing from `UpdateGroupSig`
 
 - Commit `0fcce89d` added `unicast_next_hop_self` /
   `unicast_next_hop_unchanged` to `SyncCtx` (`peer.rs:1752-1757`) and made
@@ -216,7 +218,8 @@ cap. The two reviews agree on every overlapping item.
   family (IPv4: "2 groups, 4 members"; IPv6: "4 groups, 8 members",
   the extra two being the default-negotiated ipv4-unicast pairs, which
   an ipv6 knob must not shard).
-- FIXED (branch `bgp-update-group-next-hop-sig`): `UpdateGroupSig`
+- FIXED — PR #2376, merged to `main` as `b8fef738` (2026-09-08):
+  `UpdateGroupSig`
   gained `unicast_next_hop_self` and `unicast_next_hop_unchanged`,
   stamped only for the `(Ip, Unicast)` and `(Ip6, Unicast)` groups from
   that family's own knob, so the ipv4 knob cannot shard the ipv6 group
@@ -269,6 +272,23 @@ cap. The two reviews agree on every overlapping item.
   sweep, and every knob in #21). The already-recorded `config.rs:961`
   finding is the same class; this one is the most common runtime
   operation.
+- BDD gates: `bgp_update_group_live_policy_out` (IPv4) and
+  `bgp_update_group_live_policy_out_v6` (IPv6). One bridge, z1 under
+  test with two iBGP neighbors in one group and an eBGP originator;
+  with every session Established, z1 binds a deny-one-prefix `policy
+  out` toward one iBGP neighbor, the originator then announces that
+  prefix, and the binding is removed again. IPv4 binds on the canonical
+  (lower-index) member, IPv6 on the other one, so both leak directions
+  are pinned. On `main` (b8fef738) each fails 2 of 5 scenarios: the
+  group count does not change on the bind (IPv4 "2 groups, 3 members"
+  instead of 3; IPv6 "4 groups, 6 members" instead of 5, the extra two
+  being the default-negotiated ipv4-unicast pairs an ipv6 policy must
+  not touch), and either the plain group-mate never receives the prefix
+  (IPv4) or the bound neighbor receives what its own policy denies
+  (IPv6). The unbind controls pass: the count is unchanged and, in
+  IPv4, the re-sync delivers the previously denied prefix. The IPv6
+  feature asserts no re-sync because the v6 family has no outbound
+  soft-out at all (the below-the-cap item on policy-out edits).
 
 ### 5. P1 CONFIRMED (probe) — `V6Batch::withdraw` clobbers the group's pending advertise when the source member is withdrawn
 
@@ -873,9 +893,10 @@ cap. The two reviews agree on every overlapping item.
 - Closed by #2375 (`bgp_rr_client_to_nonclient`, `_v6`: reflector, two
   clients, two non-clients, the full RFC 4456 §6 matrix plus withdraw):
   no RR BDD had a non-client iBGP neighbor receiving a client's route.
-- No BDD puts two peers with different `next-hop-self` /
-  `next-hop-unchanged` / out-policy in the same update-group (same
-  `local_addr`); `bgp_vrf_neighbor_next_hop` separates them by subnet.
+- Next-hop half closed by #2376 (`bgp_update_group_next_hop_knobs`,
+  `_v6`: an iBGP pair and an eBGP pair on one bridge, one knob per pair,
+  routes injected after every session is up); no BDD yet puts two peers
+  with different out-policy in the same update-group (#4).
 - LOCAL_PREF half closed by #2372 (`bgp_ebgp_local_pref_ignore`, `_v6`,
   and the `update.rs` codec tests incl. the malformed case); no test
   feeds ORIGINATOR_ID / CLUSTER_LIST from an eBGP peer (#11).
@@ -913,3 +934,7 @@ control for finding 5 passes, which is what isolates the v6 drift. The
 `crates/bgp-packet/src/update.rs`; `rfc4456_reflect_stamp_tests` in
 `route.rs`) and pass on `main` since #2372 / #2375; the listen-range
 probe became `accepted_dynamic_peer_takes_its_type_from_the_group_remote_as`.
+The #3 probes (`probe_f1_*`, `probe_f1c_*`) are superseded by
+`update_group_next_hop_knob_tests` in `route.rs` and
+`unicast_next_hop_knobs_shard_only_their_family` in `update_group.rs`,
+which pass on `main` since #2376.

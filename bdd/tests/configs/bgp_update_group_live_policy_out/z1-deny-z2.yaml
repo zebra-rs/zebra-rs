@@ -1,0 +1,43 @@
+# z1 — same sessions, now with an outbound policy toward z2 ONLY that
+# denies 10.40.2.0/24 and permits everything else. Bound while the
+# session is Established: z2 must leave the update-group it shares with
+# z3, or z2's outcome (deny) is memoized for both.
+prefix-set:
+- name: DENY-P2
+  prefixes:
+  - prefix: 10.40.2.0/24
+policy:
+- name: DENY-P2
+  entry:
+  - number: 10
+    action: deny
+    match:
+      prefix-set: DENY-P2
+  - number: 20
+    action: permit
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.70.0.1
+    neighbor:
+    - remote-address: 192.168.70.2
+      afi-safi:
+      - name: ipv4
+        enabled: true
+        policy:
+          out: DENY-P2
+      enabled: true
+      remote-as: 65001
+    - remote-address: 192.168.70.3
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65001
+    - remote-address: 192.168.70.4
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65002
