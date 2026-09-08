@@ -848,6 +848,15 @@ pub fn regroup_if_stale(
                     .and_then(|af| af.group_by_id_mut(&id))
                 {
                     group.regroup_pending.insert(peer_idx);
+                    // The gate-on engine fans to its own member list: take
+                    // the frozen peer out of it too, until it moves (a new
+                    // group re-adds it) or settles (`flush_done_*` re-adds
+                    // it here).
+                    if let Some(t) = &group.task {
+                        t.send(super::group_egress::GroupEgressDeltaV4::RemoveMember {
+                            ident: peer_idx,
+                        });
+                    }
                 }
                 if let Some(peer) = peers.get_mut_by_idx(peer_idx) {
                     peer.regroup_frozen.insert(afi_safi);
@@ -1377,7 +1386,22 @@ pub fn flush_done_ipv4(
         if let Some(peer) = peers.get_mut_by_idx(ident) {
             peer.regroup_frozen.remove(&afi_safi);
         }
-        regroup_if_stale(update_groups, peers, ident, router_id, as_sets_withdraw);
+        let moved = regroup_if_stale(update_groups, peers, ident, router_id, as_sets_withdraw);
+        if !moved
+            && let Some(group) = update_groups
+                .get_mut(&afi_safi)
+                .and_then(|af| af.group_by_id_mut(id))
+            && let Some(t) = &group.task
+            && let Some(peer) = peers.get_by_idx(ident)
+        {
+            // Settled back without moving: put it back on the gate-on
+            // engine's member list it was taken off when it froze.
+            t.send(super::group_egress::GroupEgressDeltaV4::AddMember {
+                ident,
+                ctx: Box::new(peer.sync_ctx(router_id, as_sets_withdraw)),
+                add_path: peer.opt.is_add_path_send(afi_safi.afi, afi_safi.safi),
+            });
+        }
     }
     if rerun {
         flush_ipv4(update_groups, peers, tx, id, interface_addrs);
@@ -1659,7 +1683,22 @@ pub fn flush_done_ipv6(
         if let Some(peer) = peers.get_mut_by_idx(ident) {
             peer.regroup_frozen.remove(&afi_safi);
         }
-        regroup_if_stale(update_groups, peers, ident, router_id, as_sets_withdraw);
+        let moved = regroup_if_stale(update_groups, peers, ident, router_id, as_sets_withdraw);
+        if !moved
+            && let Some(group) = update_groups
+                .get_mut(&afi_safi)
+                .and_then(|af| af.group_by_id_mut(id))
+            && let Some(t) = &group.task
+            && let Some(peer) = peers.get_by_idx(ident)
+        {
+            // Settled back without moving: put it back on the gate-on
+            // engine's member list it was taken off when it froze.
+            t.send(super::group_egress::GroupEgressDeltaV4::AddMember {
+                ident,
+                ctx: Box::new(peer.sync_ctx(router_id, as_sets_withdraw)),
+                add_path: peer.opt.is_add_path_send(afi_safi.afi, afi_safi.safi),
+            });
+        }
     }
     if rerun {
         flush_ipv6(update_groups, peers, tx, id);
