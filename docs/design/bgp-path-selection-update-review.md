@@ -655,7 +655,7 @@ cap. The two reviews agree on every overlapping item.
   `route_sync_vpnv6` (`15275`) records, so `advertised-routes` / PfxSnt
   drift (the recorded "plausible" item, confirmed display-only).
 
-### Found while fixing #1
+### Found while fixing #1 (FIXED on branch `bgp-dynamic-peer-type`: `try_dynamic_accept` now derives `peer_type` from the group's remote-as the way `interface_neighbor.rs` does; regression test `accepted_dynamic_peer_takes_its_type_from_the_group_remote_as` and `bgp_dynamic_neighbors` asserts `route_type eBGP` / `as_path 65001`)
 
 - **P1 CONFIRMED (probe) — a dynamic listen-range peer is typed iBGP
   regardless of the group's `remote-as`.** `try_dynamic_accept`
