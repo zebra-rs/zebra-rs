@@ -10535,7 +10535,13 @@ pub fn route_srpolicy_update(
         .and_then(|res| res.ok())
         .unwrap_or_default();
 
-    let cp = sr_policy::candidate_path(&tlvs, originator, nlri.distinguisher, ident);
+    let mut cp = sr_policy::candidate_path(&tlvs, originator, nlri.distinguisher, ident);
+    // Remember the role the announcement was reflected under (see
+    // `CandidatePath::from_client`).
+    cp.from_client = {
+        let peer = peers.get_by_idx(ident).expect("peer must exist");
+        peer.is_ibgp() && peer.is_reflector_client()
+    };
     let key = sr_policy::SrPolicyKey {
         color: nlri.color,
         endpoint: nlri.endpoint,
@@ -10562,8 +10568,8 @@ pub fn route_srpolicy_withdraw(
         bgp.local_rib
             .sr_policy
             .withdraw(nlri.color, nlri.endpoint, nlri.distinguisher, ident);
-    if removed {
-        srpolicy_reflect_withdraw(ident, nlri, peers);
+    if let Some(source_is_client) = removed {
+        srpolicy_reflect_withdraw(ident, source_is_client, nlri, peers);
     }
     apply_srpolicy_fib(delta, nlri.color, bgp);
     sr_policy_mpls_sync(bgp, nlri.color, nlri.endpoint);
@@ -10622,13 +10628,21 @@ fn srpolicy_reflect(
 }
 
 /// Reflect a received SR Policy withdrawal to the RR-eligible peers.
-fn srpolicy_reflect_withdraw(source_ident: usize, nlri: &SrPolicyNlri, peers: &mut PeerMap) {
+/// `source_is_client` is the role the candidate was ANNOUNCED under
+/// (stored on it), not the peer's current role: a demotion writes the new
+/// role before the session reset's cleanup runs, and the withdrawal must
+/// still reach the non-clients the announcement reached.
+fn srpolicy_reflect_withdraw(
+    source_ident: usize,
+    source_is_client: bool,
+    nlri: &SrPolicyNlri,
+    peers: &mut PeerMap,
+) {
     let afi = nlri.afi();
     let Some(src) = peers.get_by_idx(source_ident) else {
         return;
     };
     let source_ibgp = src.is_ibgp();
-    let source_is_client = source_ibgp && src.is_reflector_client();
     let mut dests: Vec<usize> = peers.established_idents(afi, Safi::SrTePolicy);
     dests.retain(|&ident| ident != source_ident);
     for ident in dests {
@@ -26544,6 +26558,67 @@ mod rfc4456_reflect_stamp_tests {
             route_soft_in_peer(id, &mut top, &mut peers, None);
             assert!(top.shard.v4.0.get(&prefix).unwrap()[0].from_client);
         });
+    }
+
+    /// A client's SR Policy was reflected to a non-client; the client is
+    /// then demoted and its session reset. The cleanup's withdrawal must
+    /// follow the announcement (announce-time role), not the peer's
+    /// current role, or the non-client keeps the policy.
+    #[tokio::test]
+    async fn srpolicy_withdraw_follows_the_announce_time_role_after_demotion() {
+        use crate::bgp::peer_map::PeerMap;
+        use bgp_packet::{CapMultiProtocol, SrPolicyNlri};
+
+        fn srp_peer(
+            addr: &str,
+            client: bool,
+        ) -> (Peer, tokio::sync::mpsc::UnboundedReceiver<bytes::BytesMut>) {
+            let mut peer = client_peer();
+            peer.address = addr.parse().unwrap();
+            peer.reflector_client = client;
+            let key = CapMultiProtocol::new(&Afi::Ip, &Safi::SrTePolicy);
+            let entry = peer
+                .cap_map
+                .entries
+                .get_mut(&key)
+                .expect("SAFI 73 pre-seeded");
+            entry.send = true;
+            entry.recv = true;
+            let (ptx, prx) = tokio::sync::mpsc::unbounded_channel();
+            peer.packet_tx = Some(ptx);
+            (peer, prx)
+        }
+        let mut peers = PeerMap::new();
+        // The source: a client at announce time, demoted before the withdraw.
+        let (src, _src_rx) = srp_peer("10.0.0.2", false);
+        let (dst, mut dst_rx) = srp_peer("10.0.0.3", false); // a non-client
+        peers.insert("10.0.0.2".parse().unwrap(), src);
+        peers.insert("10.0.0.3".parse().unwrap(), dst);
+        let s = peers.get(&"10.0.0.2".parse().unwrap()).unwrap().ident;
+        let d = peers.get(&"10.0.0.3".parse().unwrap()).unwrap().ident;
+        peers.membership_enroll(s);
+        peers.membership_enroll(d);
+        let nlri = SrPolicyNlri {
+            id: 0,
+            distinguisher: 1,
+            color: 100,
+            endpoint: "10.0.0.9".parse().unwrap(),
+        };
+
+        // Announced while the source was a client → the withdraw must reach
+        // the non-client although the source is no longer a client now.
+        srpolicy_reflect_withdraw(s, true, &nlri, &mut peers);
+        assert!(
+            dst_rx.try_recv().is_ok(),
+            "non-client receives the withdrawal"
+        );
+
+        // Announced by a non-client → the non-client never had it: nothing.
+        srpolicy_reflect_withdraw(s, false, &nlri, &mut peers);
+        assert!(
+            dst_rx.try_recv().is_err(),
+            "no withdrawal for a path it never received"
+        );
     }
 
     /// A best-path switch between iBGP sources can preserve every received

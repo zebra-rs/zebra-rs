@@ -66,6 +66,12 @@ pub struct CandidatePath {
     /// withdrawals — the originator alone is not always reconstructable
     /// from a withdraw).
     pub peer: usize,
+    /// The peer's route-reflector-client role when this path was
+    /// announced. Reflection of the WITHDRAWAL must reach exactly the
+    /// peers the announcement reached (RFC 4456 §6), and the peer's
+    /// current role cannot say that: a demotion writes the new role
+    /// before the session reset's cleanup withdraws the path.
+    pub from_client: bool,
     pub preference: u32,
     pub priority: u8,
     pub binding_sid: Option<BindingSid>,
@@ -305,17 +311,23 @@ impl SrPolicyDb {
         endpoint: IpAddr,
         discriminator: u32,
         peer: usize,
-    ) -> (bool, SrPolicyFibDelta) {
+    ) -> (Option<bool>, SrPolicyFibDelta) {
         let key = SrPolicyKey { color, endpoint };
         let Some(policy) = self.policies.get_mut(&key) else {
-            return (false, SrPolicyFibDelta::default());
+            return (None, SrPolicyFibDelta::default());
         };
         let prev = policy.active.clone();
-        let before = policy.candidates.len();
-        policy
+        // `Some(from_client)` of the candidate removed — the role its
+        // announcement was reflected under, which the withdrawal must
+        // follow; `None` when nothing was removed.
+        let removed_key = policy
             .candidates
-            .retain(|k, cp| !(k.discriminator == discriminator && cp.peer == peer));
-        let removed = policy.candidates.len() != before;
+            .iter()
+            .find(|(k, cp)| k.discriminator == discriminator && cp.peer == peer)
+            .map(|(k, _)| k.clone());
+        let removed = removed_key
+            .and_then(|k| policy.candidates.remove(&k))
+            .map(|cp| cp.from_client);
         if policy.candidates.is_empty() {
             let remove = policy.installed.take().map(|b| b.bsid);
             let mpls_remove = policy.installed_mpls.take();
@@ -523,6 +535,7 @@ pub fn candidate_path(
     let valid = !tlvs.segment_lists.is_empty()
         && tlvs.segment_lists.iter().all(|sl| !sl.segments.is_empty());
     CandidatePath {
+        from_client: false,
         key: CandidatePathKey {
             protocol_origin: PROTOCOL_ORIGIN_BGP,
             originator,
@@ -991,6 +1004,7 @@ mod tests {
                 discriminator: disc,
             },
             peer: 1,
+            from_client: false,
             preference: pref,
             priority: DEFAULT_PRIORITY,
             binding_sid: None,
@@ -1102,17 +1116,27 @@ mod tests {
 
         // Absent policy color → no-op.
         let (removed, _) = db.withdraw(999, endpoint("10.0.0.9"), 1, 1);
-        assert!(!removed, "withdraw of an absent policy removes nothing");
+        assert!(
+            removed.is_none(),
+            "withdraw of an absent policy removes nothing"
+        );
         // Policy exists but not this (discriminator, peer) → no-op.
         let (removed, _) = db.withdraw(100, endpoint("10.0.0.9"), 7, 7);
-        assert!(!removed, "withdraw of an absent candidate removes nothing");
+        assert!(
+            removed.is_none(),
+            "withdraw of an absent candidate removes nothing"
+        );
         // The real candidate → removed.
         let (removed, _) = db.withdraw(100, endpoint("10.0.0.9"), 1, 1);
-        assert!(removed, "withdraw of a present candidate removes it");
+        assert_eq!(
+            removed,
+            Some(false),
+            "withdraw of a present candidate removes it"
+        );
         // Re-withdraw the now-absent candidate → no-op (breaks the storm).
         let (removed, _) = db.withdraw(100, endpoint("10.0.0.9"), 1, 1);
         assert!(
-            !removed,
+            removed.is_none(),
             "re-withdraw of an already-absent candidate is a no-op"
         );
     }
@@ -1540,6 +1564,24 @@ mod tests {
 
     fn v4(s: &str) -> Ipv4Addr {
         s.parse().unwrap()
+    }
+
+    /// The withdraw reports the role the candidate was announced under,
+    /// so the reflected withdrawal can follow the announcement even after
+    /// the peer's role changed.
+    #[test]
+    fn withdraw_reports_the_announce_time_source_role() {
+        let mut db = SrPolicyDb::default();
+        let key = SrPolicyKey {
+            color: 100,
+            endpoint: endpoint("10.0.0.9"),
+        };
+        let mut a = cp(20, "10.0.0.1", 1, 100, true);
+        a.peer = 1;
+        a.from_client = true;
+        db.insert(key, a);
+        let (removed, _) = db.withdraw(100, endpoint("10.0.0.9"), 1, 1);
+        assert_eq!(removed, Some(true));
     }
 
     #[test]

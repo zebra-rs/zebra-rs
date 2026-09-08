@@ -150,6 +150,15 @@ cap. The two reviews agree on every overlapping item.
   source-side bit, resyncs what the peer is sent, and re-forms its
   update-group — this reverses the earlier "storage-only, never bounce"
   choice recorded in `config.rs`, and closes the rr-client item of #21.
+  Second follow-up: the SR-Policy WITHDRAW must follow the ANNOUNCE-time
+  role, not the peer's current one — a demotion writes the new role
+  before the reset's cleanup withdraws the path, which would have
+  suppressed the withdrawal toward the non-clients that received the
+  announcement. `CandidatePath::from_client` is stamped at ingest,
+  `SrPolicyDb::withdraw` returns it for the removed candidate, and
+  `srpolicy_reflect_withdraw` takes it as an argument. The BgpRib-based
+  families are unaffected: their withdrawals follow the per-peer
+  Adj-RIB-Out, not a role.
 
 ### 3. P1 CONFIRMED (probe) — `afi-safi ipv4|ipv6 next-hop-self` / `next-hop-unchanged` are missing from `UpdateGroupSig`
 
