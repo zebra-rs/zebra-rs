@@ -1,0 +1,14 @@
+# z4 — eBGP neighbor (AS 65002), plain on z1's side. Session only;
+# z4-network.yaml adds its prefix once every session is Established.
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 10.60.0.4
+    neighbor:
+    - remote-address: 192.168.60.1
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65001

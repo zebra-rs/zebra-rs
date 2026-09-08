@@ -1,0 +1,17 @@
+# z4 — same session, now originating 2001:db8:40::/64 (next-hop 2001:db8:60::4).
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 10.61.0.4
+    neighbor:
+    - remote-address: 2001:db8:60::1
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65001
+    afi-safi:
+    - name: ipv6
+      network:
+      - prefix: 2001:db8:40::/64
