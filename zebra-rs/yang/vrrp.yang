@@ -1,0 +1,365 @@
+module vrrp {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-vrrp";
+  prefix "vrrp";
+
+  import ietf-inet-types {
+    prefix inet;
+  }
+
+  import extension {
+    prefix ext;
+  }
+
+  description
+    "VyOS-derived VRRP configuration, ported from the VyOS 1.5
+     (circinus) interface definitions (vyos-1x
+     interface-definitions/high-availability.xml.in with its
+     include/vrrp/garp.xml.i and include/vrrp-transition-script.xml.i
+     fragments). Enforced by the out-of-process insomnia daemon, which
+     renders this tree into keepalived.conf; zebra-rs owns only the
+     schema and the config store.
+
+     This module is a grouping library in the firewall.yang /
+     ipsec.yang style: config.yang instantiates `grouping vrrp` under
+     an iso-gated top-level `container vrrp`, so every node here exists
+     only when the daemon runs with `--feature iso`.
+
+     Placement differs from VyOS on purpose: VyOS wraps VRRP in
+     `high-availability`, a node that exists only to co-locate it with
+     the IPVS load balancer (`virtual-server`). zebra-rs has no such
+     grouping, so `vrrp` is a top-level node and a VyOS line ports by
+     dropping the `high-availability` prefix; everything below `vrrp`
+     keeps VyOS's leaf names verbatim.
+
+     Three leaves are extensions borrowed from FRR's vrrpd model (they
+     map 1:1 onto keepalived keywords VyOS does not expose): a
+     per-group `version`, `v3-checksum-as-v2`, and a fractional
+     `advertise-interval`. A config that omits them is exactly VyOS's.
+
+     Current scope: `disable`, `global-parameters`, `group` and
+     `sync-group`. Deliberately deferred: VyOS `virtual-server`
+     (IPVS; would be its own top-level node), `vrrp snmp trap`, the
+     conntrack-sync failover hook, and the per-VRF `vrf` list.
+
+     Value-shape conventions follow ipsec.yang: no `pattern` statements
+     on value leaves (a patterned string leaf consumes the rest of the
+     line); `description` uses exactly that rest-of-line pattern on
+     purpose; references (`interface`, sync-group `member`) are plain
+     `type string` — not leafref — so the referent may be staged after
+     the referrer. Defaults are not declared here: the enforcement
+     daemon applies VyOS's defaults when rendering, so the JSON batch
+     carries only what the operator set.";
+
+  // ---------------------------------------------------------------
+  // Shared building blocks
+  // ---------------------------------------------------------------
+
+  // Gratuitous-ARP tuning — VyOS include/vrrp/garp.xml.i, verbatim.
+  // Used both under `global-parameters` (keepalived `vrrp_garp_*`)
+  // and per group (keepalived `garp_*`).
+  grouping garp-parameters {
+    container garp {
+      ext:help "Gratuitous ARP parameters";
+      leaf interval {
+        ext:help "Interval between gratuitous ARPs in seconds, resolution microseconds (0.000-1000, VyOS default: 0)";
+        type decimal64 {
+          fraction-digits 3;
+        }
+      }
+      leaf master-delay {
+        ext:help "Delay for second set of gratuitous ARPs after transition to master, seconds (VyOS default: 5)";
+        type uint32 {
+          range "1..1000";
+        }
+      }
+      leaf master-refresh {
+        ext:help "Minimum interval for refreshing gratuitous ARPs while master, seconds; 0 = no refresh (VyOS default: 5)";
+        type uint32 {
+          range "0..255";
+        }
+      }
+      leaf master-refresh-repeat {
+        ext:help "Number of gratuitous ARP messages to send at a time while master (VyOS default: 1)";
+        type uint32 {
+          range "1..255";
+        }
+      }
+      leaf master-repeat {
+        ext:help "Number of gratuitous ARP messages to send at a time after transition to master (VyOS default: 5)";
+        type uint32 {
+          range "1..255";
+        }
+      }
+    }
+  }
+
+  // Health check — the `health-check` node shared by `group` and
+  // `sync-group`. Exactly one of `script` / `ping` is meaningful;
+  // the enforcement daemon warns and drops the check otherwise.
+  grouping health-check {
+    container health-check {
+      ext:help "Health check script";
+      leaf failure-count {
+        ext:help "Health check failure count required for transition to fault (VyOS default: 3)";
+        type uint32 {
+          range "1..max";
+        }
+      }
+      leaf interval {
+        ext:help "Health check execution interval in seconds (VyOS default: 60)";
+        type uint32 {
+          range "1..max";
+        }
+      }
+      leaf ping {
+        ext:help "ICMP ping health check to this address";
+        type union {
+          type inet:ipv4-address;
+          type inet:ipv6-address;
+        }
+      }
+      leaf script {
+        ext:help "Health check script file";
+        type string;
+      }
+      leaf timeout {
+        ext:help "Health check script timeout in seconds";
+        type uint32;
+      }
+    }
+  }
+
+  // VRRP transition scripts — VyOS include/vrrp-transition-script.xml.i,
+  // verbatim; shared by `group` and `sync-group`.
+  grouping transition-script {
+    container transition-script {
+      ext:help "VRRP transition scripts";
+      leaf master {
+        ext:help "Script to run on VRRP state transition to master";
+        type string;
+      }
+      leaf backup {
+        ext:help "Script to run on VRRP state transition to backup";
+        type string;
+      }
+      leaf fault {
+        ext:help "Script to run on VRRP state transition to fault";
+        type string;
+      }
+      leaf stop {
+        ext:help "Script to run on VRRP state transition to stop";
+        type string;
+      }
+    }
+  }
+
+  // A virtual address entry: the address (with or without a prefix
+  // length) keyed by its own spelling, plus the optional interface it
+  // is placed on (keepalived `dev`) when that differs from the group's.
+  grouping virtual-address-entry {
+    leaf address {
+      ext:help "Virtual address (IPv4/IPv6 address or address/prefix)";
+      type string;
+    }
+    leaf interface {
+      ext:help "Interface to place this virtual address on";
+      type string;
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // global-parameters
+  // ---------------------------------------------------------------
+
+  grouping global-parameters {
+    container global-parameters {
+      ext:help "VRRP global parameters";
+      uses garp-parameters;
+      leaf startup-delay {
+        ext:help "Time VRRP startup process is delayed, seconds";
+        type uint32 {
+          range "1..600";
+        }
+      }
+      leaf version {
+        ext:help "Default VRRP version to use (keepalived: 2 for IPv4, 3 for IPv6)";
+        type enumeration {
+          enum 2;
+          enum 3;
+        }
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // group
+  // ---------------------------------------------------------------
+
+  grouping group-list {
+    list group {
+      ext:help "VRRP group";
+      key "name";
+      leaf name {
+        ext:help "VRRP group name";
+        type string;
+      }
+      leaf interface {
+        ext:help "Network interface the group runs on";
+        type string;
+      }
+      leaf vrid {
+        ext:help "Virtual router identifier";
+        type uint8 {
+          range "1..255";
+        }
+      }
+      // Extension (FRR-derived): per-group protocol version,
+      // overriding `global-parameters version`.
+      leaf version {
+        ext:help "VRRP version for this group, overriding global-parameters version";
+        type enumeration {
+          enum 2;
+          enum 3;
+        }
+      }
+      // Extension (FRR-derived): interoperate with peers that omit the
+      // IPv4 pseudoheader from the VRRPv3 checksum (keepalived
+      // `v3_checksum_as_v2`).
+      leaf v3-checksum-as-v2 {
+        ext:help "Compute the VRRPv3 IPv4 checksum without the pseudoheader";
+        type empty;
+      }
+      list address {
+        ext:help "Virtual address";
+        key "address";
+        uses virtual-address-entry;
+      }
+      list excluded-address {
+        ext:help "Virtual address not included in VRRP packets";
+        key "address";
+        uses virtual-address-entry;
+      }
+      // Extension (FRR-derived): fractional seconds. VyOS allows whole
+      // seconds 1-255 only; keepalived accepts fractions for VRRPv3
+      // (wire field is centiseconds, so 0.01-40.95 there).
+      leaf advertise-interval {
+        ext:help "Advertise interval in seconds, fractions allowed for VRRPv3 (0.01-255, VyOS default: 1)";
+        type decimal64 {
+          fraction-digits 2;
+        }
+      }
+      container authentication {
+        ext:help "VRRP authentication";
+        leaf password {
+          ext:help "VRRP password (1-8 characters)";
+          type string;
+        }
+        leaf type {
+          ext:help "Authentication type";
+          type enumeration {
+            enum plaintext-password;
+            enum ah;
+          }
+        }
+      }
+      leaf description {
+        ext:help "Description";
+        // Rest-of-line value: the pattern makes the leaf consume
+        // the remainder of the command, whitespace included
+        // (`match_regexp` in config/parse.rs).
+        type string {
+          pattern '.*';
+        }
+      }
+      leaf disable {
+        ext:help "Disable this group";
+        type empty;
+      }
+      uses garp-parameters;
+      uses health-check;
+      leaf hello-source-address {
+        ext:help "VRRP hello source address";
+        type union {
+          type inet:ipv4-address;
+          type inet:ipv6-address;
+        }
+      }
+      leaf-list peer-address {
+        ext:help "Unicast VRRP peer address";
+        type union {
+          type inet:ipv4-address;
+          type inet:ipv6-address;
+        }
+      }
+      leaf no-preempt {
+        ext:help "Disable master preemption";
+        type empty;
+      }
+      leaf preempt-delay {
+        ext:help "Preempt delay in seconds (VyOS default: 0)";
+        type uint32 {
+          range "0..1000";
+        }
+      }
+      leaf priority {
+        ext:help "Router priority (VyOS default: 100)";
+        type uint8 {
+          range "1..255";
+        }
+      }
+      leaf rfc3768-compatibility {
+        ext:help "Use VRRP virtual MAC address as per RFC3768";
+        type empty;
+      }
+      container track {
+        ext:help "Track settings";
+        leaf exclude-vrrp-interface {
+          ext:help "Ignore VRRP main interface faults";
+          type empty;
+        }
+        leaf-list interface {
+          ext:help "Interface name state check";
+          type string;
+        }
+      }
+      uses transition-script;
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // sync-group
+  // ---------------------------------------------------------------
+
+  grouping sync-group-list {
+    list sync-group {
+      ext:help "VRRP sync group";
+      key "name";
+      leaf name {
+        ext:help "VRRP sync group name";
+        type string;
+      }
+      leaf-list member {
+        ext:help "Sync group member (VRRP group name)";
+        type string;
+      }
+      uses health-check;
+      uses transition-script;
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // The whole `vrrp` tree
+  // ---------------------------------------------------------------
+
+  grouping vrrp {
+    leaf disable {
+      ext:help "Disable VRRP entirely";
+      type empty;
+    }
+    uses global-parameters;
+    uses group-list;
+    uses sync-group-list;
+  }
+}
