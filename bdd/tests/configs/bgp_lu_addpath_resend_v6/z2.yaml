@@ -1,0 +1,23 @@
+# z2 — AS 65002. eBGP to z1 with AddPath labeled-unicast in both
+# directions, and its own copy of the shared test prefix, so each router
+# holds two candidates (its own and the peer's) and fans its own back.
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 10.91.0.2
+    timer:
+      adv-interval:
+        ebgp: 1
+    neighbor:
+    - remote-address: 2001:db8:90::1
+      afi-safi:
+      - name: label-v6
+        enabled: true
+        add-path: send-receive
+      enabled: true
+      remote-as: 65001
+    afi-safi:
+    - name: label-v6
+      network:
+      - prefix: 2001:db8:95::/64
