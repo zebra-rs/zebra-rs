@@ -40,7 +40,7 @@ use crate::context::Timer;
 
 /// Bumped whenever a new field is added to `UpdateGroupSig`. Surfaced
 /// in `show bgp update-group` so a stale view is detectable.
-pub const SIGNATURE_VERSION: u32 = 8;
+pub const SIGNATURE_VERSION: u32 = 9;
 
 /// Address families the grouping logic considers — every family whose
 /// advertise pipeline consults `peer.update_group_id`. IPv6 unicast
@@ -184,6 +184,19 @@ pub struct UpdateGroupSig {
     /// and blackhole VPN traffic.
     pub vpnv4_next_hop_self: bool,
     pub vpnv4_next_hop_unchanged: bool,
+    /// Per-peer `afi-safi ipv4|ipv6 next-hop-self` / `next-hop-unchanged`,
+    /// stamped only for the `(Ip, Unicast)` and `(Ip6, Unicast)` groups
+    /// from that family's own knob. The unicast egress builders
+    /// (`route_update_ipv4` via `SyncCtx`, `route_update_ipv6` straight
+    /// from the peer) select the NEXT_HOP with them, so two neighbors that
+    /// differ only in a knob must not share canonical bytes: a reflector's
+    /// plain client would be handed the reflector as next-hop (or the
+    /// `next-hop-self` client the far eBGP neighbor), and an IXP peer with
+    /// `next-hop-unchanged` would get the rewritten form. `next-hop-self`
+    /// is stamped for iBGP only — eBGP always rewrites unless unchanged,
+    /// so the knob is a no-op there and must not split eBGP groups.
+    pub unicast_next_hop_self: bool,
+    pub unicast_next_hop_unchanged: bool,
     /// Bound egress (Adj-RIB-Out) Lua script identity for this family, or
     /// `None`. A bound egress script is an arbitrary black-box attribute
     /// transform, so it cannot ride the canonical-member "encode once,
@@ -483,6 +496,16 @@ pub fn signature_of(peer: &Peer, afi: Afi, safi: Safi) -> Option<UpdateGroupSig>
         vpnv4_next_hop_unchanged: afi == Afi::Ip
             && safi == Safi::MplsVpn
             && peer.next_hop_unchanged(Afi::Ip, Safi::MplsVpn),
+        // The unicast twins, keyed by this group's own family so the
+        // ipv4 knob cannot shard the ipv6 group or vice versa. (iBGP only
+        // for next-hop-self — see the field doc.)
+        unicast_next_hop_self: safi == Safi::Unicast
+            && matches!(afi, Afi::Ip | Afi::Ip6)
+            && peer.is_ibgp()
+            && peer.next_hop_self(afi, Safi::Unicast),
+        unicast_next_hop_unchanged: safi == Safi::Unicast
+            && matches!(afi, Afi::Ip | Afi::Ip6)
+            && peer.next_hop_unchanged(afi, Safi::Unicast),
         egress_script: egress_script_key(peer, afi, safi),
         // The egress attach knob (debug/test) stamps an extra attribute
         // onto every advertised route, so peers with different attach
@@ -1512,6 +1535,8 @@ mod tests {
             ipv6_encap_type: None,
             vpnv4_next_hop_self: false,
             vpnv4_next_hop_unchanged: false,
+            unicast_next_hop_self: false,
+            unicast_next_hop_unchanged: false,
             egress_script: None,
             attach_unknown_attr: None,
             adv_interval_override: None,
@@ -1627,6 +1652,107 @@ mod tests {
         let a = signature_of(&nhs, Afi::Ip, Safi::MplsVpn).unwrap();
         let b = signature_of(&nhu, Afi::Ip, Safi::MplsVpn).unwrap();
         assert_ne!(a, b, "next-hop-self and next-hop-unchanged differ");
+    }
+
+    /// Review finding #3: the unicast `next-hop-self` / `next-hop-unchanged`
+    /// knobs select the NEXT_HOP of IPv4- and IPv6-unicast advertisements
+    /// but were missing from the signature, so an iBGP peer with
+    /// `next-hop-self` shared its group (and the memoized canonical
+    /// UPDATE) with a plain iBGP peer on the same local address. Each knob
+    /// must shard exactly its own family's unicast group.
+    #[test]
+    fn unicast_next_hop_knobs_shard_only_their_family() {
+        use bgp_packet::CapMultiProtocol;
+        // `sig_peer` negotiates ipv6-unicast and vpnv4; add ipv4-unicast.
+        let unicast_peer = |addr: &str| {
+            let mut peer = sig_peer(addr);
+            let key = CapMultiProtocol::new(&Afi::Ip, &Safi::Unicast);
+            let entry = peer.cap_map.entries.get_mut(&key).expect("pre-seeded");
+            entry.send = true;
+            entry.recv = true;
+            peer
+        };
+        let plain = unicast_peer("10.0.0.1");
+
+        let mut nhs4 = unicast_peer("10.0.0.2");
+        nhs4.config
+            .sub
+            .entry(AfiSafi::new(Afi::Ip, Safi::Unicast))
+            .or_default()
+            .next_hop_self = true;
+        let a = signature_of(&plain, Afi::Ip, Safi::Unicast).unwrap();
+        let b = signature_of(&nhs4, Afi::Ip, Safi::Unicast).unwrap();
+        assert_ne!(a, b, "ipv4 next-hop-self must shard the ipv4-unicast group");
+        for (afi, safi) in [(Afi::Ip6, Safi::Unicast), (Afi::Ip, Safi::MplsVpn)] {
+            let a = signature_of(&plain, afi, safi).unwrap();
+            let b = signature_of(&nhs4, afi, safi).unwrap();
+            assert_eq!(
+                a, b,
+                "an ipv4 knob must not shard the {afi:?}/{safi:?} group"
+            );
+        }
+
+        let mut nhu6 = unicast_peer("10.0.0.3");
+        nhu6.config
+            .sub
+            .entry(AfiSafi::new(Afi::Ip6, Safi::Unicast))
+            .or_default()
+            .next_hop_unchanged = true;
+        let a = signature_of(&plain, Afi::Ip6, Safi::Unicast).unwrap();
+        let b = signature_of(&nhu6, Afi::Ip6, Safi::Unicast).unwrap();
+        assert_ne!(
+            a, b,
+            "ipv6 next-hop-unchanged must shard the ipv6-unicast group"
+        );
+        for (afi, safi) in [(Afi::Ip, Safi::Unicast), (Afi::Ip, Safi::MplsVpn)] {
+            let a = signature_of(&plain, afi, safi).unwrap();
+            let b = signature_of(&nhu6, afi, safi).unwrap();
+            assert_eq!(
+                a, b,
+                "an ipv6 knob must not shard the {afi:?}/{safi:?} group"
+            );
+        }
+
+        // The two knobs are distinct transforms, so they are distinct groups.
+        let mut nhu4 = unicast_peer("10.0.0.4");
+        nhu4.config
+            .sub
+            .entry(AfiSafi::new(Afi::Ip, Safi::Unicast))
+            .or_default()
+            .next_hop_unchanged = true;
+        let a = signature_of(&nhs4, Afi::Ip, Safi::Unicast).unwrap();
+        let b = signature_of(&nhu4, Afi::Ip, Safi::Unicast).unwrap();
+        assert_ne!(a, b, "unicast next-hop-self and next-hop-unchanged differ");
+
+        // eBGP always rewrites the next-hop unless unchanged, so
+        // `next-hop-self` is a no-op there and must not split eBGP groups;
+        // `next-hop-unchanged` is not a no-op on eBGP and must.
+        let mut ebgp_plain = unicast_peer("10.0.0.5");
+        ebgp_plain.peer_type = PeerType::EBGP;
+        ebgp_plain.remote_as = 65002;
+        let mut ebgp_nhs = unicast_peer("10.0.0.6");
+        ebgp_nhs.peer_type = PeerType::EBGP;
+        ebgp_nhs.remote_as = 65002;
+        ebgp_nhs
+            .config
+            .sub
+            .entry(AfiSafi::new(Afi::Ip, Safi::Unicast))
+            .or_default()
+            .next_hop_self = true;
+        let mut ebgp_nhu = unicast_peer("10.0.0.7");
+        ebgp_nhu.peer_type = PeerType::EBGP;
+        ebgp_nhu.remote_as = 65002;
+        ebgp_nhu
+            .config
+            .sub
+            .entry(AfiSafi::new(Afi::Ip, Safi::Unicast))
+            .or_default()
+            .next_hop_unchanged = true;
+        let a = signature_of(&ebgp_plain, Afi::Ip, Safi::Unicast).unwrap();
+        let b = signature_of(&ebgp_nhs, Afi::Ip, Safi::Unicast).unwrap();
+        assert_eq!(a, b, "next-hop-self is a no-op on eBGP and must not shard");
+        let c = signature_of(&ebgp_nhu, Afi::Ip, Safi::Unicast).unwrap();
+        assert_ne!(a, c, "next-hop-unchanged must shard eBGP groups");
     }
 
     /// Two structurally identical signatures must hash and compare equal.
@@ -1758,6 +1884,15 @@ mod tests {
 
         let mut a = base.clone();
         a.vpnv4_next_hop_unchanged = true;
+        assert_ne!(base, a);
+
+        // Review finding #3: the unicast twins of the two VPNv4 knobs.
+        let mut a = base.clone();
+        a.unicast_next_hop_self = true;
+        assert_ne!(base, a);
+
+        let mut a = base.clone();
+        a.unicast_next_hop_unchanged = true;
         assert_ne!(base, a);
 
         // The egress attach knob (debug/test) appends an attribute to the

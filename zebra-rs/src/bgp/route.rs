@@ -26986,3 +26986,308 @@ mod route_server_tests {
         assert!(!same_advertised(&base, &with_med));
     }
 }
+
+/// Review finding #3 regression: the per-neighbor `afi-safi ipv4|ipv6
+/// next-hop-self` / `next-hop-unchanged` knobs select the unicast egress
+/// NEXT_HOP but were missing from the update-group signature, so two
+/// neighbors that differed only in a knob shared one group and one
+/// memoized canonical UPDATE — the lower-ident member decided the
+/// next-hop for both. Each test attaches four established peers to REAL
+/// update-groups on one local address (an iBGP pair and an eBGP pair,
+/// one knob per pair), ingests a forwarded route from a fifth peer, and
+/// reads back every member's Adj-RIB-Out next-hop. Within a shared group
+/// the lowest ident is the canonical member, so the insertion order of
+/// each pair decides which leak direction a test pins; the IPv6 test
+/// orders both pairs the opposite way from the IPv4 one, matching the
+/// two BDD features (`bgp_update_group_next_hop_knobs`, `_v6`).
+#[cfg(test)]
+mod update_group_next_hop_knob_tests {
+    use super::*;
+    use crate::bgp::peer::{Peer, PeerType, State};
+    use crate::bgp::peer_map::PeerMap;
+    use bgp_packet::{Afi, CapMultiProtocol, Safi};
+    use std::net::{IpAddr, SocketAddr};
+
+    const LOCAL_AS: u32 = 65001;
+    const ROUTER_ID: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 9);
+
+    /// Established peer with both unicast families negotiated, the shared
+    /// session-local address (so every signature agrees on `local_addr`),
+    /// its type derived from `remote_as`, and a captured egress channel.
+    fn peer(addr: &str, remote_as: u32, local_addr: &str) -> Peer {
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        Box::leak(Box::new(rx));
+        let mut peer = Peer::new(
+            0,
+            LOCAL_AS,
+            ROUTER_ID,
+            remote_as,
+            addr.parse::<IpAddr>().unwrap(),
+            None,
+            tx,
+            crate::context::ProtoContext::default_table_no_rib(),
+        );
+        peer.state = State::Established;
+        peer.peer_type = if remote_as == LOCAL_AS {
+            PeerType::IBGP
+        } else {
+            PeerType::EBGP
+        };
+        for (afi, safi) in [(Afi::Ip, Safi::Unicast), (Afi::Ip6, Safi::Unicast)] {
+            let key = CapMultiProtocol::new(&afi, &safi);
+            let entry = peer.cap_map.entries.get_mut(&key).expect("pre-seeded");
+            entry.send = true;
+            entry.recv = true;
+        }
+        peer.param.local_addr = Some(local_addr.parse::<SocketAddr>().unwrap());
+        let (ptx, prx) = tokio::sync::mpsc::unbounded_channel();
+        Box::leak(Box::new(prx));
+        peer.packet_tx = Some(ptx);
+        peer
+    }
+
+    fn set_knob(peer: &mut Peer, afi: Afi, next_hop_self: bool, next_hop_unchanged: bool) {
+        let sub = peer
+            .config
+            .sub
+            .entry(AfiSafi::new(afi, Safi::Unicast))
+            .or_default();
+        sub.next_hop_self = next_hop_self;
+        sub.next_hop_unchanged = next_hop_unchanged;
+    }
+
+    /// Insert in the given order (idents 0, 1, 2, …), enrol and attach to
+    /// the update-groups the way the Established edge does.
+    fn attach_all(
+        peers: &mut PeerMap,
+        update_groups: &mut crate::bgp::update_group::UpdateGroupMap,
+        members: Vec<Peer>,
+    ) {
+        let n = members.len();
+        for p in members {
+            let addr = p.address;
+            peers.insert(addr, p);
+        }
+        for ident in 0..n {
+            peers.membership_enroll(ident);
+            crate::bgp::update_group::attach(update_groups, peers, ident, ROUTER_ID, false);
+        }
+    }
+
+    fn group_of(peers: &PeerMap, addr: &str, afi: Afi) -> crate::bgp::update_group::UpdateGroupId {
+        peers
+            .get(&addr.parse::<IpAddr>().unwrap())
+            .unwrap()
+            .update_group_id
+            .get(&AfiSafi::new(afi, Safi::Unicast))
+            .cloned()
+            .expect("attached to a unicast update-group")
+    }
+
+    macro_rules! bgp_top {
+        ($top:ident, $update_groups:ident) => {
+            let router_id = ROUTER_ID;
+            let ctx = crate::context::ProtoContext::default_table_no_rib();
+            let mut local_rib = LocalRib::default();
+            let mut shard = crate::bgp::shard::BgpShard::default();
+            let mut attr_store = crate::bgp::BgpAttrStore::default();
+            let interface_addrs = crate::bgp::interface_addrs::InterfaceAddrs::default();
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            Box::leak(Box::new(rx));
+            let mut $top = crate::bgp::peer::BgpTop {
+                router_id: &router_id,
+                srv6_ipv6_export: None,
+                local_rib: &mut local_rib,
+                shard: &mut shard,
+                tx: &tx,
+                rib_client: &ctx.rib,
+                attr_store: &mut attr_store,
+                update_groups: &mut $update_groups,
+                interface_addrs: &interface_addrs,
+                vrf_export: None,
+                color_policy: None,
+                flex_algo_routes: None,
+                flex_algo_srv6_routes: None,
+                vrf_import: None,
+                nexthop_cache: None,
+                vrf_transport_v4: None,
+                vrf_transport_v6: None,
+                central_label_alloc: None,
+                as_sets_withdraw: false,
+            };
+        };
+    }
+
+    /// IPv4: the iBGP pair is knob-first (before the fix the plain iBGP
+    /// peer was handed self) and the eBGP pair is plain-first (the
+    /// `next-hop-unchanged` peer was handed the rewritten form).
+    #[tokio::test]
+    async fn ipv4_unicast_next_hop_knobs_are_honored_per_member_of_a_shared_local_address() {
+        const LOCAL: &str = "10.0.0.9:179";
+        let src = peer("10.0.0.2", 65009, LOCAL);
+        let mut ibgp_nhs = peer("10.0.0.3", LOCAL_AS, LOCAL);
+        set_knob(&mut ibgp_nhs, Afi::Ip, true, false);
+        let ibgp_plain = peer("10.0.0.4", LOCAL_AS, LOCAL);
+        let ebgp_plain = peer("10.0.0.5", 65002, LOCAL);
+        let mut ebgp_nhu = peer("10.0.0.6", 65003, LOCAL);
+        set_knob(&mut ebgp_nhu, Afi::Ip, false, true);
+
+        let mut peers = PeerMap::new();
+        let mut update_groups = crate::bgp::update_group::empty_map();
+        attach_all(
+            &mut peers,
+            &mut update_groups,
+            vec![src, ibgp_nhs, ibgp_plain, ebgp_plain, ebgp_nhu],
+        );
+        bgp_top!(top, update_groups);
+        let nlri = Ipv4Nlri {
+            id: 0,
+            prefix: "10.99.0.0/24".parse().unwrap(),
+        };
+        let mut attr = BgpAttr::new();
+        attr.aspath = Some(bgp_packet::As4Path::from(vec![65009]));
+        attr.nexthop = Some(BgpNexthop::Ipv4("10.0.0.2".parse().unwrap()));
+        route_ipv4_update(
+            0, &nlri, None, None, &attr, None, None, &mut top, &mut peers, false,
+        );
+
+        let sent_nh = |addr: &str| -> Ipv4Addr {
+            let rows = peers
+                .get(&addr.parse::<IpAddr>().unwrap())
+                .unwrap()
+                .adj_out
+                .v4
+                .0
+                .get(&nlri.prefix)
+                .unwrap_or_else(|| panic!("{addr} must have been advertised the route"));
+            match &rows[0].attr.nexthop {
+                Some(BgpNexthop::Ipv4(nh)) => *nh,
+                other => panic!("{addr}: unexpected next-hop {other:?}"),
+            }
+        };
+        let this_router: Ipv4Addr = "10.0.0.9".parse().unwrap();
+        let received: Ipv4Addr = "10.0.0.2".parse().unwrap();
+        assert_eq!(
+            sent_nh("10.0.0.3"),
+            this_router,
+            "iBGP next-hop-self → self"
+        );
+        assert_eq!(
+            sent_nh("10.0.0.4"),
+            received,
+            "plain iBGP keeps the received next-hop"
+        );
+        assert_eq!(
+            sent_nh("10.0.0.5"),
+            this_router,
+            "plain eBGP → self (default rewrite)"
+        );
+        assert_eq!(
+            sent_nh("10.0.0.6"),
+            received,
+            "eBGP next-hop-unchanged keeps it"
+        );
+
+        // The structural half of the fix: the knob shards the group.
+        assert_ne!(
+            group_of(&peers, "10.0.0.3", Afi::Ip),
+            group_of(&peers, "10.0.0.4", Afi::Ip),
+            "ipv4 next-hop-self must put the iBGP peers in different groups"
+        );
+        assert_ne!(
+            group_of(&peers, "10.0.0.5", Afi::Ip),
+            group_of(&peers, "10.0.0.6", Afi::Ip),
+            "ipv4 next-hop-unchanged must put the eBGP peers in different groups"
+        );
+    }
+
+    /// IPv6, both pairs the other way round: the iBGP pair is plain-first
+    /// (before the fix the `next-hop-self` peer kept the received next-hop)
+    /// and the eBGP pair is knob-first (the plain eBGP peer was handed the
+    /// unchanged form).
+    #[tokio::test]
+    async fn ipv6_unicast_next_hop_knobs_are_honored_per_member_of_a_shared_local_address() {
+        const LOCAL: &str = "[2001:db8::9]:179";
+        let src = peer("2001:db8::2", 65009, LOCAL);
+        let ibgp_plain = peer("2001:db8::3", LOCAL_AS, LOCAL);
+        let mut ibgp_nhs = peer("2001:db8::4", LOCAL_AS, LOCAL);
+        set_knob(&mut ibgp_nhs, Afi::Ip6, true, false);
+        let mut ebgp_nhu = peer("2001:db8::5", 65002, LOCAL);
+        set_knob(&mut ebgp_nhu, Afi::Ip6, false, true);
+        let ebgp_plain = peer("2001:db8::6", 65003, LOCAL);
+
+        let mut peers = PeerMap::new();
+        let mut update_groups = crate::bgp::update_group::empty_map();
+        attach_all(
+            &mut peers,
+            &mut update_groups,
+            vec![src, ibgp_plain, ibgp_nhs, ebgp_nhu, ebgp_plain],
+        );
+        bgp_top!(top, update_groups);
+        let nlri = Ipv6Nlri {
+            id: 0,
+            prefix: "2001:db8:99::/64".parse().unwrap(),
+        };
+        let mut attr = BgpAttr::new();
+        attr.aspath = Some(bgp_packet::As4Path::from(vec![65009]));
+        attr.nexthop = Some(BgpNexthop::Ipv6("2001:db8::2".parse().unwrap()));
+        route_ipv6_update(
+            0, &nlri, None, None, &attr, None, &mut top, &mut peers, false,
+        );
+
+        let sent_nh = |addr: &str| -> Ipv6Addr {
+            let rows = peers
+                .get(&addr.parse::<IpAddr>().unwrap())
+                .unwrap()
+                .adj_out
+                .v6
+                .0
+                .get(&nlri.prefix)
+                .unwrap_or_else(|| panic!("{addr} must have been advertised the route"));
+            match &rows[0].attr.nexthop {
+                Some(BgpNexthop::Ipv6(nh)) => *nh,
+                other => panic!("{addr}: unexpected next-hop {other:?}"),
+            }
+        };
+        let this_router: Ipv6Addr = "2001:db8::9".parse().unwrap();
+        let received: Ipv6Addr = "2001:db8::2".parse().unwrap();
+        assert_eq!(
+            sent_nh("2001:db8::3"),
+            received,
+            "plain iBGP keeps the received next-hop"
+        );
+        assert_eq!(
+            sent_nh("2001:db8::4"),
+            this_router,
+            "iBGP next-hop-self → self"
+        );
+        assert_eq!(
+            sent_nh("2001:db8::5"),
+            received,
+            "eBGP next-hop-unchanged keeps it"
+        );
+        assert_eq!(
+            sent_nh("2001:db8::6"),
+            this_router,
+            "plain eBGP → self (default rewrite)"
+        );
+
+        // The structural half of the fix: the knob shards the group.
+        assert_ne!(
+            group_of(&peers, "2001:db8::3", Afi::Ip6),
+            group_of(&peers, "2001:db8::4", Afi::Ip6),
+            "ipv6 next-hop-self must put the iBGP peers in different groups"
+        );
+        assert_ne!(
+            group_of(&peers, "2001:db8::5", Afi::Ip6),
+            group_of(&peers, "2001:db8::6", Afi::Ip6),
+            "ipv6 next-hop-unchanged must put the eBGP peers in different groups"
+        );
+        // Family gating: the ipv6 knobs must not shard the ipv4 groups.
+        assert_eq!(
+            group_of(&peers, "2001:db8::3", Afi::Ip),
+            group_of(&peers, "2001:db8::4", Afi::Ip),
+            "an ipv6 knob must not split the ipv4-unicast iBGP group"
+        );
+    }
+}

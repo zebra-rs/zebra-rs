@@ -175,7 +175,7 @@ cap. The two reviews agree on every overlapping item.
   second entry); a single removal stranded the other, and the returned
   role is now the OR over the removed candidates.
 
-### 3. P1 CONFIRMED (probe) — `afi-safi ipv4|ipv6 next-hop-self` / `next-hop-unchanged` are missing from `UpdateGroupSig`
+### 3. P1 CONFIRMED (probe), FIXED on branch `bgp-update-group-next-hop-sig` — `afi-safi ipv4|ipv6 next-hop-self` / `next-hop-unchanged` are missing from `UpdateGroupSig`
 
 - Commit `0fcce89d` added `unicast_next_hop_self` /
   `unicast_next_hop_unchanged` to `SyncCtx` (`peer.rs:1752-1757`) and made
@@ -216,6 +216,25 @@ cap. The two reviews agree on every overlapping item.
   family (IPv4: "2 groups, 4 members"; IPv6: "4 groups, 8 members",
   the extra two being the default-negotiated ipv4-unicast pairs, which
   an ipv6 knob must not shard).
+- FIXED (branch `bgp-update-group-next-hop-sig`): `UpdateGroupSig`
+  gained `unicast_next_hop_self` and `unicast_next_hop_unchanged`,
+  stamped only for the `(Ip, Unicast)` and `(Ip6, Unicast)` groups from
+  that family's own knob, so the ipv4 knob cannot shard the ipv6 group
+  or the reverse; `next-hop-self` is stamped for iBGP only, because eBGP
+  always rewrites unless unchanged, so the knob is a no-op there and
+  must not split eBGP groups. `SIGNATURE_VERSION` 8 → 9. Unit:
+  `unicast_next_hop_knobs_shard_only_their_family` (each knob shards its
+  own family's unicast group and no other; the eBGP no-op rule) and the
+  two new fields in `signature_fields_each_distinguish`; route-level
+  `update_group_next_hop_knob_tests` attach four Established peers on
+  one local address (an iBGP pair, an eBGP pair, one knob per pair) to
+  real update-groups, ingest a forwarded route and read every member's
+  Adj-RIB-Out next-hop, IPv4 and IPv6 with the pair order mirrored, so
+  both leak directions are pinned; both fail with the stamps disabled.
+  The design doc's signature table (`bgp-update-groups.md` §3.1) now
+  lists the pair. Not in scope: toggling either knob on an Established
+  peer still does not regroup (#21's class, #4's helper) — the toggle
+  does not re-advertise today either, so nothing regresses.
 
 ### 4. P1 CONFIRMED (probe) — binding an out-policy or prefix-set on a live peer never regroups, so the memo applies one peer's policy to its group-mates
 
