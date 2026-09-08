@@ -158,7 +158,11 @@ cap. The two reviews agree on every overlapping item.
   `SrPolicyDb::withdraw` returns it for the removed candidate, and
   `srpolicy_reflect_withdraw` takes it as an argument. The BgpRib-based
   families are unaffected: their withdrawals follow the per-peer
-  Adj-RIB-Out, not a role.
+  Adj-RIB-Out, not a role. Third follow-up: that withdraw must remove
+  EVERY candidate the peer holds for the NLRI (the key carries the
+  originator, so a re-announcement under a changed ORIGINATOR_ID stores a
+  second entry); a single removal stranded the other, and the returned
+  role is now the OR over the removed candidates.
 
 ### 3. P1 CONFIRMED (probe) — `afi-safi ipv4|ipv6 next-hop-self` / `next-hop-unchanged` are missing from `UpdateGroupSig`
 

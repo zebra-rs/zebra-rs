@@ -317,17 +317,24 @@ impl SrPolicyDb {
             return (None, SrPolicyFibDelta::default());
         };
         let prev = policy.active.clone();
-        // `Some(from_client)` of the candidate removed — the role its
-        // announcement was reflected under, which the withdrawal must
-        // follow; `None` when nothing was removed.
-        let removed_key = policy
+        // Every candidate this peer holds for the NLRI goes: the key also
+        // carries the originator, so a re-announcement under a changed
+        // ORIGINATOR_ID left a second entry that a single removal would
+        // strand. `Some(from_client)` folds the removed candidates' roles
+        // (any announced as a client's ⇒ the withdrawal must reach the
+        // non-clients); `None` when nothing was removed.
+        let removed_keys: Vec<CandidatePathKey> = policy
             .candidates
             .iter()
-            .find(|(k, cp)| k.discriminator == discriminator && cp.peer == peer)
-            .map(|(k, _)| k.clone());
-        let removed = removed_key
-            .and_then(|k| policy.candidates.remove(&k))
-            .map(|cp| cp.from_client);
+            .filter(|(k, cp)| k.discriminator == discriminator && cp.peer == peer)
+            .map(|(k, _)| k.clone())
+            .collect();
+        let mut removed: Option<bool> = None;
+        for k in removed_keys {
+            if let Some(cp) = policy.candidates.remove(&k) {
+                removed = Some(removed.unwrap_or(false) || cp.from_client);
+            }
+        }
         if policy.candidates.is_empty() {
             let remove = policy.installed.take().map(|b| b.bsid);
             let mpls_remove = policy.installed_mpls.take();
@@ -1582,6 +1589,39 @@ mod tests {
         db.insert(key, a);
         let (removed, _) = db.withdraw(100, endpoint("10.0.0.9"), 1, 1);
         assert_eq!(removed, Some(true));
+    }
+
+    /// The same peer re-announcing the NLRI under a changed ORIGINATOR_ID
+    /// stores a second candidate (the originator is part of the key); a
+    /// withdrawal of that NLRI from that peer removes both, and reports the
+    /// client role if either announcement carried it.
+    #[test]
+    fn withdraw_removes_every_candidate_of_the_peer_for_the_nlri() {
+        let mut db = SrPolicyDb::default();
+        let key = SrPolicyKey {
+            color: 100,
+            endpoint: endpoint("10.0.0.9"),
+        };
+        let mut old = cp(20, "10.0.0.1", 1, 100, true);
+        old.peer = 1;
+        old.from_client = true;
+        let mut new = cp(20, "10.0.0.2", 1, 100, true); // new originator, same peer + discriminator
+        new.peer = 1;
+        new.from_client = false;
+        db.insert(key.clone(), old);
+        db.insert(key.clone(), new);
+        assert_eq!(db.policies.get(&key).map(|p| p.candidates.len()), Some(2));
+
+        let (removed, _) = db.withdraw(100, endpoint("10.0.0.9"), 1, 1);
+        assert_eq!(
+            removed,
+            Some(true),
+            "one of the removed announcements was a client's"
+        );
+        assert!(
+            !db.policies.contains_key(&key),
+            "no candidate of the peer survives the withdrawal"
+        );
     }
 
     #[test]
