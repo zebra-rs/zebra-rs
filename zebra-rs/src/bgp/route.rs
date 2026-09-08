@@ -7041,26 +7041,58 @@ fn route_soft_out_peer_table(
 /// — a policy-out edit or an egress knob change took effect only on the
 /// next best-path event — and it is also what repairs a peer after an
 /// update-group move (`update_group::regroup_if_stale`).
+///
+/// An AddPath peer holds every candidate, each under its path-id, so the
+/// reconcile is per `(prefix, path-id)` over the full candidate table (as
+/// the session-up dump does) and a dropped row is withdrawn under its own
+/// id — a path-id-0 MP_UNREACH is encoded without the path-id field and
+/// rejected by the peer. A plain peer holds the best path only, keyed by
+/// prefix, and is withdrawn with id 0.
 fn route_soft_out_peer_table_v6(peer_idx: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
     let (afi, safi) = (Afi::Ip6, Safi::Unicast);
     let afi_safi = AfiSafi::new(afi, safi);
-    let selected: Vec<(Ipv6Net, BgpRib)> =
-        bgp.shard.v6.1.iter().map(|(p, r)| (p, r.clone())).collect();
-    let was_advertised: BTreeSet<Ipv6Net> = peers
+    let Some(add_path) = peers
         .get_by_idx(peer_idx)
-        .map(|peer| peer.adj_out.v6.0.keys().copied().collect())
+        .map(|peer| peer.opt.is_add_path_send(afi, safi))
+    else {
+        return;
+    };
+    let candidates: Vec<(Ipv6Net, BgpRib)> = if add_path {
+        bgp.shard
+            .v6
+            .0
+            .iter()
+            .flat_map(|(prefix, ribs)| ribs.iter().map(move |rib| (prefix, rib.clone())))
+            .collect()
+    } else {
+        bgp.shard.v6.1.iter().map(|(p, r)| (p, r.clone())).collect()
+    };
+    // What the peer holds now: `(prefix, path-id)` rows for AddPath, the
+    // prefixes (id 0) otherwise.
+    let was_advertised: BTreeSet<(Ipv6Net, u32)> = peers
+        .get_by_idx(peer_idx)
+        .map(|peer| {
+            peer.adj_out
+                .v6
+                .0
+                .iter()
+                .flat_map(|(prefix, rows)| {
+                    rows.iter()
+                        .map(move |row| (*prefix, if add_path { row.local_id } else { 0 }))
+                })
+                .collect()
+        })
         .unwrap_or_default();
 
-    let mut newly_advertised: BTreeSet<Ipv6Net> = BTreeSet::new();
+    let mut newly_advertised: BTreeSet<(Ipv6Net, u32)> = BTreeSet::new();
     let mut entries: Vec<(Arc<BgpAttr>, Ipv6Nlri)> = Vec::new();
-    for (prefix, rib) in &selected {
+    for (prefix, rib) in &candidates {
         // Same gate as the session-up dump: never re-send a route the
         // dataplane has not confirmed.
         if fib_pending_blocks_sync(bgp.local_rib, IpNet::V6(*prefix)) {
             continue;
         }
         let peer = peers.get_mut_by_idx(peer_idx).expect("peer exists");
-        let add_path = peer.opt.is_add_path_send(afi, safi);
         if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, afi, safi) {
             continue;
         }
@@ -7075,28 +7107,30 @@ fn route_soft_out_peer_table_v6(peer_idx: usize, bgp: &mut BgpTop, peers: &mut P
         let attr = bgp.attr_store.intern(decision.attr);
         let mut adj = rib.clone();
         adj.attr = attr.clone();
-        peer.adj_out.v6.add(*prefix, adj);
+        // A plain peer's row is replaced whole; an AddPath peer's rows are
+        // kept per path-id (`nlri.id` is the row's local id under AddPath).
+        peer.adj_out.v6.record_out(*prefix, adj, add_path);
+        newly_advertised.insert((*prefix, nlri.id));
         entries.push((attr, nlri));
-        newly_advertised.insert(*prefix);
     }
     if let Some(peer) = peers.get_by_idx(peer_idx) {
         super::update_group::send_ipv6_direct(peer, entries);
     }
 
-    let to_withdraw: Vec<Ipv6Net> = was_advertised
+    let to_withdraw: Vec<(Ipv6Net, u32)> = was_advertised
         .difference(&newly_advertised)
         .copied()
         .collect();
-    for prefix in to_withdraw {
+    for (prefix, id) in to_withdraw {
         let peer = peers.get_mut_by_idx(peer_idx).expect("peer exists");
         if let Some(gid) = peer.update_group_id.get(&afi_safi).cloned()
             && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
             && let Some(group) = af.group_by_id_mut(&gid)
         {
-            super::update_group::cache_remove_ipv6(group, prefix, 0);
+            super::update_group::cache_remove_ipv6(group, prefix, id);
         }
-        withdraw_ipv6_deferrable(bgp.update_groups, peer, prefix, 0);
-        peer.adj_out.v6.remove(prefix, 0);
+        withdraw_ipv6_deferrable(bgp.update_groups, peer, prefix, id);
+        peer.adj_out.v6.remove(prefix, id);
     }
 }
 
@@ -25126,6 +25160,128 @@ mod v6_empty_selection_tests {
             2,
             "one re-sent reach for the selected route, one withdraw for the stale row"
         );
+    }
+
+    /// Review follow-up: an AddPath peer holds every candidate under its
+    /// path-id, so the re-sync must reconcile `(prefix, path-id)` rows and
+    /// withdraw a dropped row under its own id — a path-id-0 MP_UNREACH
+    /// is encoded without the path-id field and rejected by the peer.
+    /// Every UPDATE the re-sync emits must parse as AddPath.
+    #[tokio::test]
+    async fn v6_soft_out_reconciles_addpath_rows_by_path_id() {
+        let v6u = AfiSafi::new(Afi::Ip6, Safi::Unicast);
+        let mut peers = PeerMap::new();
+        let (peer_a, _rx_a) = v6_peer("2001:db8::1", 65002);
+        let (mut peer_b, mut rx_b) = v6_peer("2001:db8::2", 65003);
+        peer_b.opt.add_path.entry(v6u).or_default().send = true;
+        peers.insert("2001:db8::1".parse().unwrap(), peer_a);
+        peers.insert("2001:db8::2".parse().unwrap(), peer_b);
+        let a = peers.get(&"2001:db8::1".parse().unwrap()).unwrap().ident;
+        let b = peers.get(&"2001:db8::2".parse().unwrap()).unwrap().ident;
+        peers.membership_enroll(a);
+        peers.membership_enroll(b);
+
+        let router_id = Ipv4Addr::new(10, 0, 0, 9);
+        let ctx = crate::context::ProtoContext::default_table_no_rib();
+        let mut local_rib = LocalRib::default();
+        let mut shard = crate::bgp::shard::BgpShard::default();
+        let mut attr_store = crate::bgp::BgpAttrStore::default();
+        let mut update_groups = crate::bgp::update_group::empty_map();
+        // The AddPath fan-out buckets into the peer's update-group cache, so
+        // the peers must sit in real groups (the Established edge does this).
+        for ident in [a, b] {
+            crate::bgp::update_group::attach(
+                &mut update_groups,
+                &mut peers,
+                ident,
+                router_id,
+                false,
+            );
+        }
+        let interface_addrs = crate::bgp::interface_addrs::InterfaceAddrs::default();
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        Box::leak(Box::new(rx));
+        let mut top = crate::bgp::peer::BgpTop {
+            router_id: &router_id,
+            srv6_ipv6_export: None,
+            local_rib: &mut local_rib,
+            shard: &mut shard,
+            tx: &tx,
+            rib_client: &ctx.rib,
+            attr_store: &mut attr_store,
+            update_groups: &mut update_groups,
+            interface_addrs: &interface_addrs,
+            vrf_export: None,
+            color_policy: None,
+            flex_algo_routes: None,
+            flex_algo_srv6_routes: None,
+            vrf_import: None,
+            nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+            central_label_alloc: None,
+            as_sets_withdraw: false,
+        };
+
+        // A candidate from A, advertised to B under its path-id.
+        let nlri = Ipv6Nlri {
+            id: 0,
+            prefix: "2001:db8:beef::/64".parse().unwrap(),
+        };
+        let mut attr = BgpAttr::new();
+        attr.aspath = Some(bgp_packet::As4Path::from(vec![65002]));
+        attr.nexthop = Some(BgpNexthop::Ipv6("2001:db8::1".parse().unwrap()));
+        route_ipv6_update(
+            a, &nlri, None, None, &attr, None, &mut top, &mut peers, false,
+        );
+        drain(&mut rx_b);
+        let live_id = peers.get_by_idx(b).unwrap().adj_out.v6.0[&nlri.prefix][0].local_id;
+
+        // A stale row B still holds under path-id 17; the Loc-RIB has no
+        // such path.
+        let stale: Ipv6Net = "2001:db8:dead::/64".parse().unwrap();
+        {
+            let peer_b = peers.get_mut_by_idx(b).unwrap();
+            let mut row = peer_b.adj_out.v6.0[&nlri.prefix][0].clone();
+            row.local_id = 17;
+            row.remote_id = 17;
+            peer_b.adj_out.v6.add(stale, row);
+        }
+
+        route_soft_out_peer(b, &mut top, &mut peers);
+
+        let mut opt = bgp_packet::ParseOption::default();
+        opt.add_path.entry(v6u).or_default().recv = true;
+        let mut withdrawn: Vec<(Ipv6Net, u32)> = Vec::new();
+        let mut reached: Vec<(Ipv6Net, u32)> = Vec::new();
+        for bytes in drain(&mut rx_b) {
+            let parsed = BgpPacket::parse_packet(&bytes, false, Some(opt.clone()));
+            let (_, packet) = parsed.expect("every re-sync UPDATE must parse as AddPath");
+            let BgpPacket::Update(update) = packet else {
+                panic!("not an UPDATE");
+            };
+            if let Some(bgp_packet::MpUnreachAttr::Ipv6Nlri(nlris)) = &update.mp_withdraw {
+                withdrawn.extend(nlris.iter().map(|n| (n.prefix, n.id)));
+            }
+            if let Some(bgp_packet::MpReachAttr::Ipv6 { updates, .. }) = &update.mp_update {
+                reached.extend(updates.iter().map(|n| (n.prefix, n.id)));
+            }
+        }
+        assert!(
+            withdrawn.contains(&(stale, 17)),
+            "the stale row is withdrawn under its advertised path-id: {withdrawn:?}"
+        );
+        assert!(
+            !withdrawn.iter().any(|(_, id)| *id == 0),
+            "no path-id-0 withdraw toward an AddPath peer: {withdrawn:?}"
+        );
+        assert!(
+            reached.contains(&(nlri.prefix, live_id)),
+            "the live candidate is re-sent under its path-id {live_id}: {reached:?}"
+        );
+        let peer_b = peers.get_by_idx(b).unwrap();
+        assert!(!peer_b.adj_out.v6.0.contains_key(&stale));
+        assert_eq!(peer_b.adj_out.v6.0[&nlri.prefix].len(), 1);
     }
 
     /// Review finding #6 regression: an UPDATE whose best-path delta

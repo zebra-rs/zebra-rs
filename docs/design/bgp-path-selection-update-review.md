@@ -594,6 +594,10 @@ cap. The two reviews agree on every overlapping item.
   later exact-id withdraws find nothing to prune.
 - Fix direction: give the v4/VPNv4 soft-out the EVPN (prefix, id) diff
   and never send id 0 to an AddPath-negotiated peer.
+- The IPv6 soft-out added by the #4 fix does this already (full
+  candidate table, `(prefix, path-id)` reconcile, withdraw under the row's
+  id, pinned by `v6_soft_out_reconciles_addpath_rows_by_path_id`); the
+  v4/VPNv4 one is still as described above.
 
 ### 19. P2 CONFIRMED — RTC membership learned mid-session never triggers an advertisement
 
