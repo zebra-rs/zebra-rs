@@ -127,6 +127,42 @@ cap. The two reviews agree on every overlapping item.
   `inbound_attr_checks`) and reflect when `ctx.reflector_client ||
   rib.from_client`. This is a source-path input, not a destination knob,
   so it is signature-neutral.
+- FIXED (branch `bgp-rr-client-to-nonclient`): `BgpRib::from_client`,
+  stamped where each family's ingest decides `typ` (the shared
+  `inbound_attr_checks` and the seven inlined copies; carried in the four
+  shard messages that carry `typ`), and all eight reflection gates now
+  read "destination is a client OR the path came from one"
+  (`sr_policy::reflect_attr` gained `source_is_client`). BDD gates
+  `bgp_rr_client_to_nonclient` and `_v6` (five routers: reflector, two
+  clients, two non-clients) pin the whole RFC 4456 §6 matrix; on `main`
+  only the client-to-non-client scenario failed, 6/7 each. Unit:
+  `client_route_is_reflected_to_non_client_peers_in_every_family`
+  (v4, v6, LU v4/v6, EVPN, MUP, Flowspec) and
+  `ingest_stamps_from_client_on_routes_learned_from_a_client`.
+  Review follow-ups folded in: the SR-Policy WITHDRAW reflector
+  (`sr_policy::reflect_withdraw_to`) takes the source role too, so a
+  withdrawal reaches exactly the peers the announcement reached; both
+  soft-in replay paths (main and the sharded `SoftInV4`) re-stamp
+  `from_client` from the peer's current role instead of copying the
+  learn-time bit; and a `route-reflector-client` change on a live session
+  now bounces it (`apply_route_reflector_client` returns the bounce like
+  the other role knobs; FRR resets on this knob too), which relearns the
+  source-side bit, resyncs what the peer is sent, and re-forms its
+  update-group — this reverses the earlier "storage-only, never bounce"
+  choice recorded in `config.rs`, and closes the rr-client item of #21.
+  Second follow-up: the SR-Policy WITHDRAW must follow the ANNOUNCE-time
+  role, not the peer's current one — a demotion writes the new role
+  before the reset's cleanup withdraws the path, which would have
+  suppressed the withdrawal toward the non-clients that received the
+  announcement. `CandidatePath::from_client` is stamped at ingest,
+  `SrPolicyDb::withdraw` returns it for the removed candidate, and
+  `srpolicy_reflect_withdraw` takes it as an argument. The BgpRib-based
+  families are unaffected: their withdrawals follow the per-peer
+  Adj-RIB-Out, not a role. Third follow-up: that withdraw must remove
+  EVERY candidate the peer holds for the NLRI (the key carries the
+  originator, so a re-announcement under a changed ORIGINATOR_ID stores a
+  second entry); a single removal stranded the other, and the returned
+  role is now the OR over the removed candidates.
 
 ### 3. P1 CONFIRMED (probe) — `afi-safi ipv4|ipv6 next-hop-self` / `next-hop-unchanged` are missing from `UpdateGroupSig`
 

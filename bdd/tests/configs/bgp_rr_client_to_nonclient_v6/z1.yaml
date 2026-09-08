@@ -1,0 +1,38 @@
+# z1 — the route reflector (AS 65001). z2 and z3 are clients, z4 and z5
+# are ordinary (non-client) iBGP peers. RFC 4456 §6: a route from a client
+# is reflected to every other client AND to every non-client; a route from
+# a non-client is reflected to clients only.
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.50.0.1
+    neighbor:
+    - remote-address: 2001:db8:50::2
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65001
+      route-reflector:
+        client: true
+    - remote-address: 2001:db8:50::3
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65001
+      route-reflector:
+        client: true
+    - remote-address: 2001:db8:50::4
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65001
+    - remote-address: 2001:db8:50::5
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65001

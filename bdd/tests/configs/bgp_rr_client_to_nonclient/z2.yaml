@@ -1,0 +1,17 @@
+# z2 — route-reflector client; originates 10.20.0.0/24.
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.50.0.2
+    neighbor:
+    - remote-address: 192.168.50.1
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65001
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.20.0.0/24

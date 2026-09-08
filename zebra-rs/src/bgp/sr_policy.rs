@@ -66,6 +66,12 @@ pub struct CandidatePath {
     /// withdrawals — the originator alone is not always reconstructable
     /// from a withdraw).
     pub peer: usize,
+    /// The peer's route-reflector-client role when this path was
+    /// announced. Reflection of the WITHDRAWAL must reach exactly the
+    /// peers the announcement reached (RFC 4456 §6), and the peer's
+    /// current role cannot say that: a demotion writes the new role
+    /// before the session reset's cleanup withdraws the path.
+    pub from_client: bool,
     pub preference: u32,
     pub priority: u8,
     pub binding_sid: Option<BindingSid>,
@@ -305,17 +311,30 @@ impl SrPolicyDb {
         endpoint: IpAddr,
         discriminator: u32,
         peer: usize,
-    ) -> (bool, SrPolicyFibDelta) {
+    ) -> (Option<bool>, SrPolicyFibDelta) {
         let key = SrPolicyKey { color, endpoint };
         let Some(policy) = self.policies.get_mut(&key) else {
-            return (false, SrPolicyFibDelta::default());
+            return (None, SrPolicyFibDelta::default());
         };
         let prev = policy.active.clone();
-        let before = policy.candidates.len();
-        policy
+        // Every candidate this peer holds for the NLRI goes: the key also
+        // carries the originator, so a re-announcement under a changed
+        // ORIGINATOR_ID left a second entry that a single removal would
+        // strand. `Some(from_client)` folds the removed candidates' roles
+        // (any announced as a client's ⇒ the withdrawal must reach the
+        // non-clients); `None` when nothing was removed.
+        let removed_keys: Vec<CandidatePathKey> = policy
             .candidates
-            .retain(|k, cp| !(k.discriminator == discriminator && cp.peer == peer));
-        let removed = policy.candidates.len() != before;
+            .iter()
+            .filter(|(k, cp)| k.discriminator == discriminator && cp.peer == peer)
+            .map(|(k, _)| k.clone())
+            .collect();
+        let mut removed: Option<bool> = None;
+        for k in removed_keys {
+            if let Some(cp) = policy.candidates.remove(&k) {
+                removed = Some(removed.unwrap_or(false) || cp.from_client);
+            }
+        }
         if policy.candidates.is_empty() {
             let remove = policy.installed.take().map(|b| b.bsid);
             let mpls_remove = policy.installed_mpls.take();
@@ -523,6 +542,7 @@ pub fn candidate_path(
     let valid = !tlvs.segment_lists.is_empty()
         && tlvs.segment_lists.iter().all(|sl| !sl.segments.is_empty());
     CandidatePath {
+        from_client: false,
         key: CandidatePathKey {
             protocol_origin: PROTOCOL_ORIGIN_BGP,
             originator,
@@ -892,6 +912,7 @@ pub fn reflect_attr(
     attr: &BgpAttr,
     source_ibgp: bool,
     source_router_id: Ipv4Addr,
+    source_is_client: bool,
     dest_ibgp: bool,
     dest_is_client: bool,
     our_router_id: Ipv4Addr,
@@ -903,7 +924,9 @@ pub fn reflect_attr(
     {
         return None;
     }
-    if source_ibgp && dest_ibgp && !dest_is_client {
+    // RFC 4456 §6: iBGP-to-iBGP only when the destination is a client or
+    // the path came from one.
+    if source_ibgp && dest_ibgp && !dest_is_client && !source_is_client {
         return None;
     }
     let mut out = attr.clone();
@@ -936,8 +959,15 @@ pub fn reflect_attr(
 /// destination peer (RFC 4456 client rule; the NO_ADVERTISE check is
 /// moot for a withdraw — reflecting a never-advertised withdraw is a
 /// harmless no-op on the peer).
-pub fn reflect_withdraw_to(source_ibgp: bool, dest_ibgp: bool, dest_is_client: bool) -> bool {
-    !(source_ibgp && dest_ibgp && !dest_is_client)
+pub fn reflect_withdraw_to(
+    source_ibgp: bool,
+    source_is_client: bool,
+    dest_ibgp: bool,
+    dest_is_client: bool,
+) -> bool {
+    // Mirror of `reflect_attr`'s RFC 4456 §6 gate: the withdrawal must
+    // reach exactly the peers the announcement reached.
+    !(source_ibgp && dest_ibgp && !dest_is_client && !source_is_client)
 }
 
 #[cfg(test)]
@@ -981,6 +1011,7 @@ mod tests {
                 discriminator: disc,
             },
             peer: 1,
+            from_client: false,
             preference: pref,
             priority: DEFAULT_PRIORITY,
             binding_sid: None,
@@ -1092,17 +1123,27 @@ mod tests {
 
         // Absent policy color → no-op.
         let (removed, _) = db.withdraw(999, endpoint("10.0.0.9"), 1, 1);
-        assert!(!removed, "withdraw of an absent policy removes nothing");
+        assert!(
+            removed.is_none(),
+            "withdraw of an absent policy removes nothing"
+        );
         // Policy exists but not this (discriminator, peer) → no-op.
         let (removed, _) = db.withdraw(100, endpoint("10.0.0.9"), 7, 7);
-        assert!(!removed, "withdraw of an absent candidate removes nothing");
+        assert!(
+            removed.is_none(),
+            "withdraw of an absent candidate removes nothing"
+        );
         // The real candidate → removed.
         let (removed, _) = db.withdraw(100, endpoint("10.0.0.9"), 1, 1);
-        assert!(removed, "withdraw of a present candidate removes it");
+        assert_eq!(
+            removed,
+            Some(false),
+            "withdraw of a present candidate removes it"
+        );
         // Re-withdraw the now-absent candidate → no-op (breaks the storm).
         let (removed, _) = db.withdraw(100, endpoint("10.0.0.9"), 1, 1);
         assert!(
-            !removed,
+            removed.is_none(),
             "re-withdraw of an already-absent candidate is a no-op"
         );
     }
@@ -1532,6 +1573,57 @@ mod tests {
         s.parse().unwrap()
     }
 
+    /// The withdraw reports the role the candidate was announced under,
+    /// so the reflected withdrawal can follow the announcement even after
+    /// the peer's role changed.
+    #[test]
+    fn withdraw_reports_the_announce_time_source_role() {
+        let mut db = SrPolicyDb::default();
+        let key = SrPolicyKey {
+            color: 100,
+            endpoint: endpoint("10.0.0.9"),
+        };
+        let mut a = cp(20, "10.0.0.1", 1, 100, true);
+        a.peer = 1;
+        a.from_client = true;
+        db.insert(key, a);
+        let (removed, _) = db.withdraw(100, endpoint("10.0.0.9"), 1, 1);
+        assert_eq!(removed, Some(true));
+    }
+
+    /// The same peer re-announcing the NLRI under a changed ORIGINATOR_ID
+    /// stores a second candidate (the originator is part of the key); a
+    /// withdrawal of that NLRI from that peer removes both, and reports the
+    /// client role if either announcement carried it.
+    #[test]
+    fn withdraw_removes_every_candidate_of_the_peer_for_the_nlri() {
+        let mut db = SrPolicyDb::default();
+        let key = SrPolicyKey {
+            color: 100,
+            endpoint: endpoint("10.0.0.9"),
+        };
+        let mut old = cp(20, "10.0.0.1", 1, 100, true);
+        old.peer = 1;
+        old.from_client = true;
+        let mut new = cp(20, "10.0.0.2", 1, 100, true); // new originator, same peer + discriminator
+        new.peer = 1;
+        new.from_client = false;
+        db.insert(key.clone(), old);
+        db.insert(key.clone(), new);
+        assert_eq!(db.policies.get(&key).map(|p| p.candidates.len()), Some(2));
+
+        let (removed, _) = db.withdraw(100, endpoint("10.0.0.9"), 1, 1);
+        assert_eq!(
+            removed,
+            Some(true),
+            "one of the removed announcements was a client's"
+        );
+        assert!(
+            !db.policies.contains_key(&key),
+            "no candidate of the peer survives the withdrawal"
+        );
+    }
+
     #[test]
     fn reflect_attr_suppresses_no_advertise() {
         let attr = BgpAttr {
@@ -1539,19 +1631,58 @@ mod tests {
             ..Default::default()
         };
         // NO_ADVERTISE → never reflected, regardless of peer roles.
-        assert!(reflect_attr(&attr, true, v4("2.2.2.2"), true, true, v4("1.1.1.1")).is_none());
-        assert!(reflect_attr(&attr, false, v4("2.2.2.2"), true, true, v4("1.1.1.1")).is_none());
+        assert!(
+            reflect_attr(&attr, true, v4("2.2.2.2"), false, true, true, v4("1.1.1.1")).is_none()
+        );
+        assert!(
+            reflect_attr(
+                &attr,
+                false,
+                v4("2.2.2.2"),
+                false,
+                true,
+                true,
+                v4("1.1.1.1")
+            )
+            .is_none()
+        );
     }
 
     #[test]
     fn reflect_attr_ibgp_requires_client() {
         let attr = BgpAttr::default();
         // iBGP source → iBGP non-client dest: suppressed.
-        assert!(reflect_attr(&attr, true, v4("2.2.2.2"), true, false, v4("1.1.1.1")).is_none());
+        assert!(
+            reflect_attr(
+                &attr,
+                true,
+                v4("2.2.2.2"),
+                false,
+                true,
+                false,
+                v4("1.1.1.1")
+            )
+            .is_none()
+        );
         // iBGP source → iBGP client dest: reflected, with RR attrs stamped.
-        let out = reflect_attr(&attr, true, v4("2.2.2.2"), true, true, v4("1.1.1.1")).unwrap();
+        let out =
+            reflect_attr(&attr, true, v4("2.2.2.2"), false, true, true, v4("1.1.1.1")).unwrap();
         assert_eq!(out.originator_id.map(|o| o.id), Some(v4("2.2.2.2")));
         assert_eq!(out.cluster_list.map(|c| c.list), Some(vec![v4("1.1.1.1")]));
+    }
+
+    /// RFC 4456 §6: a client's policy is reflected to a NON-client iBGP peer
+    /// (source client, destination not), with the reflection attributes.
+    #[test]
+    fn reflect_attr_client_source_reaches_non_client() {
+        let attr = BgpAttr::new();
+        let out = reflect_attr(&attr, true, v4("2.2.2.2"), true, true, false, v4("1.1.1.1"))
+            .expect("client-sourced policy reflected to a non-client");
+        assert_eq!(out.originator_id.map(|o| o.id), Some(v4("2.2.2.2")));
+        assert_eq!(
+            out.cluster_list.map(|cl| cl.list),
+            Some(vec![v4("1.1.1.1")])
+        );
     }
 
     #[test]
@@ -1563,7 +1694,8 @@ mod tests {
             }),
             ..Default::default()
         };
-        let out = reflect_attr(&attr, true, v4("2.2.2.2"), true, true, v4("1.1.1.1")).unwrap();
+        let out =
+            reflect_attr(&attr, true, v4("2.2.2.2"), false, true, true, v4("1.1.1.1")).unwrap();
         // ORIGINATOR_ID preserved (not overwritten); our id prepended.
         assert_eq!(out.originator_id.map(|o| o.id), Some(v4("9.9.9.9")));
         assert_eq!(
@@ -1577,7 +1709,16 @@ mod tests {
         let attr = BgpAttr::default();
         // eBGP source → iBGP dest: reflected without ORIGINATOR_ID /
         // CLUSTER_LIST (it's a fresh iBGP advertisement).
-        let out = reflect_attr(&attr, false, v4("2.2.2.2"), true, false, v4("1.1.1.1")).unwrap();
+        let out = reflect_attr(
+            &attr,
+            false,
+            v4("2.2.2.2"),
+            false,
+            true,
+            false,
+            v4("1.1.1.1"),
+        )
+        .unwrap();
         assert!(out.originator_id.is_none());
         assert!(out.cluster_list.is_none());
     }
@@ -1597,7 +1738,16 @@ mod tests {
             ..Default::default()
         };
         // source iBGP, dest eBGP (dest_ibgp = false).
-        let out = reflect_attr(&attr, true, v4("2.2.2.2"), false, false, v4("1.1.1.1")).unwrap();
+        let out = reflect_attr(
+            &attr,
+            true,
+            v4("2.2.2.2"),
+            false,
+            false,
+            false,
+            v4("1.1.1.1"),
+        )
+        .unwrap();
         assert!(out.originator_id.is_none());
         assert!(out.cluster_list.is_none());
         assert!(out.local_pref.is_none());
@@ -1605,8 +1755,9 @@ mod tests {
 
     #[test]
     fn reflect_withdraw_to_follows_client_rule() {
-        assert!(!reflect_withdraw_to(true, true, false)); // iBGP→iBGP non-client: no
-        assert!(reflect_withdraw_to(true, true, true)); // iBGP→iBGP client: yes
-        assert!(reflect_withdraw_to(false, true, false)); // eBGP→iBGP: yes
+        assert!(!reflect_withdraw_to(true, false, true, false)); // non-client→non-client: no
+        assert!(reflect_withdraw_to(true, false, true, true)); // non-client→client: yes
+        assert!(reflect_withdraw_to(true, true, true, false)); // client→non-client: yes (RFC 4456 §6)
+        assert!(reflect_withdraw_to(false, false, true, false)); // eBGP→iBGP: yes
     }
 }

@@ -807,19 +807,79 @@ fn config_route_reflector(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option
         k.route_reflector_client
     })
     .unwrap_or(false);
-    apply_route_reflector_client(peer, want);
+    let ident = peer.ident;
+    if apply_route_reflector_client(peer, want) {
+        let _ = bgp
+            .tx
+            .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
+    }
     Some(())
 }
 
 /// Write a resolved `route-reflector client` value onto the peer.
 /// Note the field lives on [`Peer`] directly (`peer.reflector_client`),
-/// not on [`super::peer::PeerConfig`]. Storage-only effective state — no
-/// FSM ritual: like the per-neighbor knob the new role applies to route
-/// reflection performed after the change. Shared by the per-neighbor
-/// callback and the neighbor-group sweep.
+/// not on [`super::peer::PeerConfig`]. Returns whether a live session
+/// must bounce: a changed role alters what the peer is sent (its
+/// update-group signature and the RFC 4456 §6 gate toward it) AND the
+/// source-side `from_client` bit already stamped on every path learned
+/// from it — a reset relearns and resyncs all of that in one motion, the
+/// way FRR resets on this knob. Shared by the per-neighbor callback and
+/// the neighbor-group sweeps.
 pub(super) fn apply_route_reflector_client(peer: &mut Peer, want: bool) -> bool {
+    let changed = peer.reflector_client != want;
     peer.reflector_client = want;
-    false
+    changed && !matches!(peer.state, super::peer::State::Idle)
+}
+
+#[cfg(test)]
+mod route_reflector_client_apply_tests {
+    use super::*;
+    use crate::bgp::peer::{Peer, State};
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn peer() -> Peer {
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        Box::leak(Box::new(rx));
+        Peer::new(
+            0,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 9),
+            65001,
+            "10.0.0.2".parse::<IpAddr>().unwrap(),
+            None,
+            tx,
+            crate::context::ProtoContext::default_table_no_rib(),
+        )
+    }
+
+    /// A changed role on a live session asks for a bounce (the paths
+    /// learned from the peer carry the old `from_client`, and what the
+    /// peer is sent changes too); an unchanged one, or a change on an Idle
+    /// peer, does not.
+    #[test]
+    fn role_change_bounces_only_a_live_session_whose_role_changed() {
+        let mut p = peer();
+        assert!(!p.reflector_client);
+        assert!(
+            !apply_route_reflector_client(&mut p, false),
+            "unchanged, Idle"
+        );
+        assert!(
+            !apply_route_reflector_client(&mut p, true),
+            "changed but Idle"
+        );
+        assert!(p.reflector_client);
+        p.state = State::Established;
+        assert!(
+            !apply_route_reflector_client(&mut p, true),
+            "unchanged, live"
+        );
+        assert!(
+            apply_route_reflector_client(&mut p, false),
+            "changed on a live session"
+        );
+        assert!(!p.reflector_client);
+    }
 }
 
 fn config_soft_reconfig_in(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
@@ -9505,11 +9565,17 @@ mod neighbor_group_wiring_tests {
     /// `reflector_client` (a `Peer` field), explicit wins / falls back,
     /// and the sweep never bounces.
     #[tokio::test]
-    async fn group_route_reflector_client_propagates_explicit_wins_no_bounce() {
+    async fn group_route_reflector_client_propagates_explicit_wins_and_bounces_live() {
         use crate::bgp::peer::State;
         let mut bgp = bgp_with_member();
         bgp.peers.get_mut(&peer_addr()).unwrap().state = State::Established;
+        let ident = member(&bgp).ident;
+        let _ = drain_stop_events(&mut bgp);
 
+        // Every effective role change on the live member bounces it once:
+        // the paths learned from it carry the old `from_client`, and what
+        // it is sent changes — a relearn/resync is the one motion that
+        // fixes both (FRR resets on this knob as well).
         config_neighbor_group_route_reflector_client(
             &mut bgp,
             arg_words(&["G", "true"]),
@@ -9517,12 +9583,29 @@ mod neighbor_group_wiring_tests {
         )
         .unwrap();
         assert!(member(&bgp).reflector_client, "group opinion must apply");
+        assert_eq!(
+            drain_stop_events(&mut bgp),
+            vec![ident],
+            "role changed: bounce"
+        );
 
         // Explicit per-neighbor false outranks the group's true.
         config_route_reflector(&mut bgp, arg_words(&["10.0.0.1", "false"]), ConfigOp::Set).unwrap();
         assert!(
             !member(&bgp).reflector_client,
             "explicit statement must win"
+        );
+        assert_eq!(
+            drain_stop_events(&mut bgp),
+            vec![ident],
+            "role changed: bounce"
+        );
+
+        // Re-stating the same explicit value changes nothing: no bounce.
+        config_route_reflector(&mut bgp, arg_words(&["10.0.0.1", "false"]), ConfigOp::Set).unwrap();
+        assert!(
+            drain_stop_events(&mut bgp).is_empty(),
+            "an unchanged role must not bounce"
         );
 
         // Removing the explicit statement falls back to the group.
@@ -9533,15 +9616,20 @@ mod neighbor_group_wiring_tests {
         )
         .unwrap();
         assert!(member(&bgp).reflector_client, "fallback to group opinion");
+        assert_eq!(
+            drain_stop_events(&mut bgp),
+            vec![ident],
+            "role changed: bounce"
+        );
 
         // Dropping the group opinion clears it.
         config_neighbor_group_route_reflector_client(&mut bgp, arg_words(&["G"]), ConfigOp::Delete)
             .unwrap();
         assert!(!member(&bgp).reflector_client, "group delete clears");
-
-        assert!(
-            drain_stop_events(&mut bgp).is_empty(),
-            "route-reflector changes must never bounce the session",
+        assert_eq!(
+            drain_stop_events(&mut bgp),
+            vec![ident],
+            "role changed: bounce"
         );
     }
 
@@ -10561,6 +10649,7 @@ mod transit_label_tests {
             },
             peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
             typ: BgpRibType::IBGP,
+            from_client: false,
             attr: BgpAttr {
                 nexthop: Some(BgpNexthop::Ipv4("10.0.0.2".parse().unwrap())),
                 ..Default::default()
@@ -10749,6 +10838,7 @@ mod transit_label_tests {
             }),
             peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
             typ: BgpRibType::IBGP,
+            from_client: false,
             attr: BgpAttr {
                 nexthop: Some(BgpNexthop::Ipv4("10.0.0.2".parse().unwrap())),
                 ..Default::default()

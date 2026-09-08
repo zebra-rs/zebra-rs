@@ -142,7 +142,9 @@ pub enum ShardMsg {
     /// change (or `clear … soft in`) re-converges the pool-owned Loc-RIB
     /// without the peer re-sending. v4-unicast only; VPNv4 soft-in stays
     /// on the synchronous shard.
-    SoftInV4 { ident: usize },
+    /// `from_client`: the peer's current reflector-client role, re-stamped
+    /// on every replayed row (see `BgpRib::from_client`).
+    SoftInV4 { ident: usize, from_client: bool },
 
     /// Render a sharded Loc-RIB table for a `show` command — the
     /// scatter-gather half of the show split. The reply travels on the
@@ -248,6 +250,8 @@ pub struct ShardUpdateV4 {
     pub nlri: Ipv4Nlri,
     pub peer_router_id: Ipv4Addr,
     pub typ: BgpRibType,
+    /// Learned from a route-reflector client (see `BgpRib::from_client`).
+    pub from_client: bool,
     pub attr: bgp_packet::BgpAttr,
     pub label: Option<Label>,
     pub nexthop: Option<VpnNexthop>,
@@ -281,6 +285,8 @@ pub struct ShardRouteBatchV4 {
     pub ident: usize,
     pub peer_router_id: Ipv4Addr,
     pub typ: BgpRibType,
+    /// Learned from a route-reflector client (see `BgpRib::from_client`).
+    pub from_client: bool,
     pub attr: bgp_packet::BgpAttr,
     pub nlris: Vec<Ipv4Nlri>,
     pub enhe_egress: Option<(std::net::Ipv6Addr, u32)>,
@@ -300,6 +306,8 @@ pub struct ShardUpdateV6 {
     pub nlri: Ipv6Nlri,
     pub peer_router_id: Ipv4Addr,
     pub typ: BgpRibType,
+    /// Learned from a route-reflector client (see `BgpRib::from_client`).
+    pub from_client: bool,
     pub attr: bgp_packet::BgpAttr,
     /// VPNv6 service label (`None` for plain v6 unicast).
     pub label: Option<Label>,
@@ -340,6 +348,8 @@ pub struct ShardUpdateLu {
     pub nlri: LuNlri,
     pub peer_router_id: Ipv4Addr,
     pub typ: BgpRibType,
+    /// Learned from a route-reflector client (see `BgpRib::from_client`).
+    pub from_client: bool,
     pub attr: bgp_packet::BgpAttr,
     pub received_label: Label,
     pub stale: bool,
@@ -448,6 +458,7 @@ mod tests {
             nlri: v4("10.0.0.0/24"),
             peer_router_id: Ipv4Addr::new(10, 0, 0, 1),
             typ: BgpRibType::EBGP,
+            from_client: false,
             attr: bgp_packet::BgpAttr::default(),
             label: None,
             nexthop: None,
