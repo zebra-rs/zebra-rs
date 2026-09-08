@@ -1,0 +1,17 @@
+# z4 — eBGP neighbor (AS 65002) originating 10.80.5.0/24.
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 10.80.0.4
+    neighbor:
+    - remote-address: 192.168.80.1
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65001
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.80.5.0/24

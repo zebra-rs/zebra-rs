@@ -1,0 +1,31 @@
+# z1 — the route reflector (AS 65001). z2 and z3 are clients on one bridge
+# (same local address → one update-group, z2 the lower-index member); z4 is
+# an eBGP neighbor (AS 65002) that originates the test prefix first.
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.81.0.1
+    neighbor:
+    - remote-address: 2001:db8:80::2
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65001
+      route-reflector:
+        client: true
+    - remote-address: 2001:db8:80::3
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65001
+      route-reflector:
+        client: true
+    - remote-address: 2001:db8:80::4
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65002

@@ -7,14 +7,14 @@ MUP/Flowspec/SR-Policy/RTC where they share the machinery). Reviewed
 against `main` at `2f1e9a09` (2026-09-07). Line numbers are as of that
 commit.
 
-Status (2026-09-08): four items are fixed on `main` — #1 (PR #2372,
+Status (2026-09-08): five items are fixed on `main` — #1 (PR #2372,
 merge `3beacbcc`), the listen-range peer-type item found while fixing it
-(PR #2373, `ba327126`), #2 (PR #2375, `308b196a`) and #3 (PR #2376,
-`b8fef738`). Each fixed entry ends with its fix note; everything else is
-open. Suggested order for the rest: #4 (live out-policy binding never
-regroups — its regroup helper also closes #21 and the live toggle of the
-knobs #3 added to the signature), #5 (v6 withdraw clobbers a sibling's
-pending advertise), then #6–#9.
+(PR #2373, `ba327126`), #2 (PR #2375, `308b196a`), #3 (PR #2376,
+`b8fef738`) and #4 (PR #2377, `1cc31738`, which also closed the
+signature-knob half of #21 and added the IPv6 outbound soft-out). Each
+fixed entry ends with its fix note; everything else is open. Suggested
+order for the rest: #5 (v6 withdraw clobbers a sibling's pending
+advertise), then #6–#9.
 
 Method: one lead read the selection ladder and every egress builder, then
 five independent read-only reviewers each took one dimension (update-group
@@ -39,7 +39,8 @@ below the cap. Four root causes account for most of them:
 1. **Per-peer egress inputs outside the update-group signature.** The
    memoized canonical-member transform is replayed to group-mates whose
    own knob or policy differs (#3, #4, #13, #21; #3 is fixed in #2376,
-   the other three are open). The invariant stated
+   #4 and the signature-knob half of #21 in #2377; #13 is open). The
+   invariant stated
    near `route.rs:4975` is not enforced by anything structural, and the
    only regroup points are the Established edge and the egress-script
    rebind.
@@ -239,7 +240,7 @@ cap. The two reviews agree on every overlapping item.
   peer still does not regroup (#21's class, #4's helper) — the toggle
   does not re-advertise today either, so nothing regresses.
 
-### 4. P1 CONFIRMED (probe), FIXED on branch `bgp-update-group-live-regroup` — binding an out-policy or prefix-set on a live peer never regroups, so the memo applies one peer's policy to its group-mates
+### 4. P1 CONFIRMED (probe), FIXED in #2377 — binding an out-policy or prefix-set on a live peer never regroups, so the memo applies one peer's policy to its group-mates
 
 - `config.rs:733-749` (`config_afi_safi_policy_out`) → `683-708`
   (`apply_peer_afi_policy_ref`), `757+` (prefix-set out),
@@ -288,7 +289,7 @@ cap. The two reviews agree on every overlapping item.
   (IPv6). The unbind controls pass: the count is unchanged and, in
   IPv4, the re-sync delivers the previously denied prefix (the IPv6
   feature asserts it too since the fix added the v6 outbound soft-out).
-- FIXED (branch `bgp-update-group-live-regroup`):
+- FIXED — PR #2377, merged to `main` as `1cc31738` (2026-09-08):
   `update_group::regroup_if_stale` compares, per tracked family, a fresh
   `signature_of` with the signature of the group the Established peer
   sits in and moves the peer, family by family, on a mismatch (a VPNv4
@@ -647,8 +648,9 @@ cap. The two reviews agree on every overlapping item.
   leaked to a plain CE, Option-B next-hop blackhole), and an iBGP/eBGP
   flip shares prepend/strip/next-hop rules with the wrong group.
 - Fix direction: same helper as #4.
-- FIXED for the signature knobs by #4's `CommitEnd` sweep: each such
-  change re-forms the peer's groups and re-syncs it within the commit.
+- FIXED for the signature knobs by #4's `CommitEnd` sweep (#2377): each
+  such change re-forms the peer's groups and re-syncs it within the
+  commit.
   The `bgp router-id` item (ORIGINATOR_ID / CLUSTER_LIST and the gate-on
   `SyncCtx.router_id`) is not a signature field and stays open.
 
@@ -941,9 +943,9 @@ cap. The two reviews agree on every overlapping item.
   clients, two non-clients, the full RFC 4456 §6 matrix plus withdraw):
   no RR BDD had a non-client iBGP neighbor receiving a client's route.
 - Next-hop half closed by #2376 (`bgp_update_group_next_hop_knobs`,
-  `_v6`: an iBGP pair and an eBGP pair on one bridge, one knob per pair,
-  routes injected after every session is up); no BDD yet puts two peers
-  with different out-policy in the same update-group (#4).
+  `_v6`), out-policy half by #2377 (`bgp_update_group_live_policy_out`,
+  `_v6`: a policy bound on one member of a shared group while every
+  session is up, in both leak directions).
 - LOCAL_PREF half closed by #2372 (`bgp_ebgp_local_pref_ignore`, `_v6`,
   and the `update.rs` codec tests incl. the malformed case); no test
   feeds ORIGINATOR_ID / CLUSTER_LIST from an eBGP peer (#11).
@@ -984,4 +986,8 @@ probe became `accepted_dynamic_peer_takes_its_type_from_the_group_remote_as`.
 The #3 probes (`probe_f1_*`, `probe_f1c_*`) are superseded by
 `update_group_next_hop_knob_tests` in `route.rs` and
 `unicast_next_hop_knobs_shard_only_their_family` in `update_group.rs`,
-which pass on `main` since #2376.
+which pass on `main` since #2376. The #4 probe
+(`probe_a2_out_policy_bound_live_leaks_through_group_memo`) is superseded
+by `binding_an_outbound_policy_on_an_established_peer_regroups_it_at_once`
+in `config.rs` and the `regroup_*` tests in `update_group.rs`, which pass
+on `main` since #2377.

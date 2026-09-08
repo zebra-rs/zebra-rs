@@ -5784,7 +5784,7 @@ impl BatchAfi for V6Batch {
         peer: &mut Peer,
         rd: Option<RouteDistinguisher>,
         prefix: Ipv6Net,
-        _new_best: Option<&BgpRib>,
+        new_best: Option<&BgpRib>,
         bgp: &mut BgpTop,
     ) {
         let (afi, safi) = Self::afi_safi(rd);
@@ -5804,10 +5804,21 @@ impl BatchAfi for V6Batch {
                 }
             }
         } else {
+            // A per-peer Withdraw (the member the new best was learned from,
+            // split-horizon; or an LLGR-blocked member) must not clobber the
+            // group's pending entry — the entry it would remove is the one
+            // just queued for the other members. Mirror `V4Batch::withdraw`;
+            // a `new_best == None` withdraw still clears the stale entry.
+            let per_peer_suppress = new_best
+                .map(|b| {
+                    b.ident == peer.ident
+                        || llgr_blocks_advertisement(b.stale, &peer.cap_recv, afi, safi)
+                })
+                .unwrap_or(false);
             // v6-unicast: withdraw only from peers whose v6 Adj-RIB-Out holds it.
             if peer.adj_out.v6.0.contains_key(&prefix) {
-                let group_id = peer.update_group_id.get(&afi_safi).cloned();
-                if let Some(gid) = group_id
+                if !per_peer_suppress
+                    && let Some(gid) = peer.update_group_id.get(&afi_safi).cloned()
                     && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
                     && let Some(group) = af.group_by_id_mut(&gid)
                 {
@@ -25282,6 +25293,148 @@ mod v6_empty_selection_tests {
         let peer_b = peers.get_by_idx(b).unwrap();
         assert!(!peer_b.adj_out.v6.0.contains_key(&stale));
         assert_eq!(peer_b.adj_out.v6.0[&nlri.prefix].len(), 1);
+    }
+
+    /// Review finding #5: when the best path for a prefix flips to a path
+    /// learned from one member of an update-group, the batch queues the new
+    /// advertisement for the other members and runs the source member's
+    /// per-peer withdraw (it held the previous best). That withdraw must not
+    /// pop the entry just queued for the group-mates.
+    #[tokio::test]
+    async fn v6_source_member_withdraw_keeps_the_group_mates_pending_advertise() {
+        let v6u = AfiSafi::new(Afi::Ip6, Safi::Unicast);
+        let mut peers = PeerMap::new();
+        // T is the first source; M (lower ident) and S share T's group.
+        let (mut peer_t, _rx_t) = v6_peer("2001:db8::4", 65002);
+        let (mut peer_m, _rx_m) = v6_peer("2001:db8::2", 65003);
+        let (mut peer_s, _rx_s) = v6_peer("2001:db8::3", 65004);
+        peer_t.remote_id = Ipv4Addr::new(10, 0, 0, 4);
+        peer_m.remote_id = Ipv4Addr::new(10, 0, 0, 2);
+        peer_s.remote_id = Ipv4Addr::new(10, 0, 0, 3);
+        peers.insert("2001:db8::4".parse().unwrap(), peer_t);
+        peers.insert("2001:db8::2".parse().unwrap(), peer_m);
+        peers.insert("2001:db8::3".parse().unwrap(), peer_s);
+        let t = peers.get(&"2001:db8::4".parse().unwrap()).unwrap().ident;
+        let m = peers.get(&"2001:db8::2".parse().unwrap()).unwrap().ident;
+        let s_ = peers.get(&"2001:db8::3".parse().unwrap()).unwrap().ident;
+        assert!(m < s_, "M must be the lower-ident member");
+        let router_id = Ipv4Addr::new(10, 0, 0, 9);
+        let mut update_groups = crate::bgp::update_group::empty_map();
+        for ident in [t, m, s_] {
+            peers.membership_enroll(ident);
+            crate::bgp::update_group::attach(
+                &mut update_groups,
+                &mut peers,
+                ident,
+                router_id,
+                false,
+            );
+        }
+        let gid = peers.get_by_idx(m).unwrap().update_group_id[&v6u].clone();
+        assert_eq!(gid, peers.get_by_idx(s_).unwrap().update_group_id[&v6u]);
+
+        let ctx = crate::context::ProtoContext::default_table_no_rib();
+        let mut local_rib = LocalRib::default();
+        let mut shard = crate::bgp::shard::BgpShard::default();
+        let mut attr_store = crate::bgp::BgpAttrStore::default();
+        let interface_addrs = crate::bgp::interface_addrs::InterfaceAddrs::default();
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        Box::leak(Box::new(rx));
+        let mut top = crate::bgp::peer::BgpTop {
+            router_id: &router_id,
+            srv6_ipv6_export: None,
+            local_rib: &mut local_rib,
+            shard: &mut shard,
+            tx: &tx,
+            rib_client: &ctx.rib,
+            attr_store: &mut attr_store,
+            update_groups: &mut update_groups,
+            interface_addrs: &interface_addrs,
+            vrf_export: None,
+            color_policy: None,
+            flex_algo_routes: None,
+            flex_algo_srv6_routes: None,
+            vrf_import: None,
+            nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+            central_label_alloc: None,
+            as_sets_withdraw: false,
+        };
+
+        let nlri = Ipv6Nlri {
+            id: 0,
+            prefix: "2001:db8:beef::/64".parse().unwrap(),
+        };
+        // P from T: M and S both hold it, and the group's queued entry is
+        // flushed (drained into a job the way the timer does).
+        let mut attr_t = BgpAttr::new();
+        attr_t.aspath = Some(bgp_packet::As4Path::from(vec![65002]));
+        attr_t.nexthop = Some(BgpNexthop::Ipv6("2001:db8::4".parse().unwrap()));
+        route_ipv6_update(
+            t, &nlri, None, None, &attr_t, None, &mut top, &mut peers, false,
+        );
+        for ident in [m, s_] {
+            assert!(
+                peers
+                    .get_by_idx(ident)
+                    .unwrap()
+                    .adj_out
+                    .v6
+                    .0
+                    .contains_key(&nlri.prefix),
+                "both group-mates hold P via T"
+            );
+        }
+        {
+            let group = top
+                .update_groups
+                .get_mut(&v6u)
+                .unwrap()
+                .group_by_id_mut(&gid)
+                .unwrap();
+            let _drained = crate::bgp::update_group::build_flush_job_ipv6(group, &peers);
+            assert!(group.cache_ipv6_rev.is_empty(), "flushed");
+        }
+
+        // P from S, better by router-id: the best flips to S's path. M is
+        // queued the new advertisement; S, the source, is withdrawn.
+        let mut attr_s = BgpAttr::new();
+        attr_s.aspath = Some(bgp_packet::As4Path::from(vec![65004]));
+        attr_s.nexthop = Some(BgpNexthop::Ipv6("2001:db8::3".parse().unwrap()));
+        route_ipv6_update(
+            s_, &nlri, None, None, &attr_s, None, &mut top, &mut peers, false,
+        );
+
+        let best = top.shard.v6.1.get(&nlri.prefix).expect("selected");
+        assert_eq!(best.ident, s_, "the best flipped to S's path");
+        {
+            let group = top
+                .update_groups
+                .get_mut(&v6u)
+                .unwrap()
+                .group_by_id_mut(&gid)
+                .unwrap();
+            assert!(
+                group.cache_ipv6_rev.contains_key(&nlri),
+                "the advertisement queued for M must survive S's per-peer withdraw"
+            );
+        }
+        let m_rows = &peers.get_by_idx(m).unwrap().adj_out.v6.0[&nlri.prefix];
+        assert!(
+            m_rows.iter().any(|r| r.ident == s_),
+            "M's Adj-RIB-Out records the new best"
+        );
+        assert!(
+            !peers
+                .get_by_idx(s_)
+                .unwrap()
+                .adj_out
+                .v6
+                .0
+                .contains_key(&nlri.prefix),
+            "S, the source, no longer holds it"
+        );
     }
 
     /// Review finding #6 regression: an UPDATE whose best-path delta
