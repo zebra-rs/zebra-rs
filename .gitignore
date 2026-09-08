@@ -46,3 +46,6 @@ typescript
 
 # Scratch daemon config dropped in the repo root for local testing; never commit it.
 /zebra.yaml
+
+# Python (BDD helper scripts)
+__pycache__/

@@ -459,6 +459,15 @@ pub fn parse_bgp_update_attribute(
             continue;
         }
 
+        // RFC 7606 §7.6: from an external neighbor LOCAL_PREF is
+        // discarded whether or not it is well-formed — a bad length
+        // must not cost the session (the well-formed case is dropped
+        // in the fold below).
+        if attr_type == AttrType::LocalPref && opt.as_ref().is_some_and(|o| o.is_ebgp()) {
+            remaining = new_remaining;
+            continue;
+        }
+
         let attr = match Attr::parse_attr_value(attr_type, attr_payload, as4, &opt) {
             Ok(attr) => attr,
             Err(e) => {

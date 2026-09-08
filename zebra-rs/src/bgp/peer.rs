@@ -936,6 +936,16 @@ impl PeerType {
     }
 }
 
+/// The parser's view of the session type (`ParseOption::peer_type`).
+impl From<PeerType> for BgpPeerType {
+    fn from(peer_type: PeerType) -> Self {
+        match peer_type {
+            PeerType::IBGP => BgpPeerType::Ibgp,
+            PeerType::EBGP => BgpPeerType::Ebgp,
+        }
+    }
+}
+
 #[derive(Debug, Default, Serialize, Clone)]
 pub struct PeerParam {
     pub hold_time: u16,
@@ -3063,6 +3073,9 @@ pub fn peer_start_reader(peer: &Peer, conn: ConnId, read_half: OwnedReadHalf) ->
     // than inherit whatever the previous session negotiated.
     opt.as4.send = peer.config.four_octet || peer.open_local_as() > u16::MAX as u32;
     opt.as4.recv = false;
+    // Internal or external, from configuration (RFC 4271 §1.1): the parser
+    // discards a LOCAL_PREF received over an external session (§5.1.5).
+    opt.peer_type = peer.peer_type.into();
     // A fresh connection proves the remote alive right now; without
     // this stamp a pre-flood `last_rx_ms` of 0 would let the very
     // first hold-timer expiry kill a session whose traffic is still
@@ -6032,5 +6045,23 @@ mod otc_role_tests {
         );
         assert_eq!(next, State::OpenConfirm);
         assert_eq!(peer.otc_role_mismatch, None);
+    }
+}
+
+/// `peer_start_reader` stamps the reader's [`ParseOption`] with the
+/// peer's configured session type through this conversion (RFC 4271
+/// §5.1.5: the parser discards a LOCAL_PREF from an external peer).
+#[cfg(test)]
+mod bgp_peer_type_conversion_tests {
+    use super::*;
+
+    #[test]
+    fn peer_type_maps_onto_the_parser_session_type() {
+        assert_eq!(BgpPeerType::from(PeerType::EBGP), BgpPeerType::Ebgp);
+        assert_eq!(BgpPeerType::from(PeerType::IBGP), BgpPeerType::Ibgp);
+        let mut opt = ParseOption::default();
+        assert!(!opt.is_ebgp(), "a default option is internal");
+        opt.peer_type = PeerType::EBGP.into();
+        assert!(opt.is_ebgp());
     }
 }

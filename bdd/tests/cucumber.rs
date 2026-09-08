@@ -1434,9 +1434,13 @@ async fn verify_bgp_route_field(
     expected_value: String,
 ) {
     let scoped = world.ns(&namespace);
-    let output = netns::exec_in_netns(&scoped, "vtyctl", &["show", "-j", "show bgp"])
-        .await
-        .expect("Failed to get BGP routes");
+    let output = netns::exec_in_netns(
+        &scoped,
+        "vtyctl",
+        &["show", "-j", bgp_table_show(&expected_prefix)],
+    )
+    .await
+    .expect("Failed to get BGP routes");
 
     let routes: Value = serde_json::from_str(&output).expect("Failed to parse JSON output");
 
@@ -1459,12 +1463,7 @@ async fn verify_bgp_route_field(
         )
     });
 
-    let actual_str = match actual_value {
-        Value::String(s) => s.clone(),
-        Value::Number(n) => n.to_string(),
-        Value::Bool(b) => b.to_string(),
-        _ => actual_value.to_string(),
-    };
+    let actual_str = json_scalar(actual_value);
 
     assert!(
         actual_str == expected_value,
@@ -1478,6 +1477,130 @@ async fn verify_bgp_route_field(
     println!(
         "✓ BGP route {} in namespace {} has {} = {}",
         expected_prefix, scoped, field_name, expected_value
+    );
+}
+
+/// The Loc-RIB table `show` for a prefix's family: the unicast tables are
+/// rendered by one routine for both families, so the IPv6 twin of every
+/// `show bgp` route step is the same step with the IPv6 table selected.
+fn bgp_table_show(prefix: &str) -> &'static str {
+    if prefix.contains(':') {
+        "show bgp ipv6"
+    } else {
+        "show bgp"
+    }
+}
+
+/// Render a JSON scalar the way `verify_bgp_route_field` compares it.
+fn json_scalar(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        _ => value.to_string(),
+    }
+}
+
+/// The next-hop of the SELECTED path for a prefix, read from the `show
+/// bgp` text table: the row flagged `*>` (`path_marker`). The JSON form
+/// cannot answer this — `render_unicast_table` stamps `best: true` on
+/// every row — and a prefix with several candidates lists one row per
+/// path in arrival order, so "first row with the prefix" is not the
+/// selection either.
+#[then(expr = "BGP best path in {string} for {string} has next-hop {string}")]
+async fn verify_bgp_best_path_nexthop(
+    world: &mut World,
+    namespace: String,
+    expected_prefix: String,
+    expected_nexthop: String,
+) {
+    let scoped = world.ns(&namespace);
+    let output = netns::exec_in_netns(
+        &scoped,
+        "vtyctl",
+        &["show", bgp_table_show(&expected_prefix)],
+    )
+    .await
+    .expect("Failed to run show bgp");
+    // Row shape: `{stale}{valid}{best}{internal} {prefix:18} {nexthop:18} …`;
+    // the marker block is one whitespace-delimited token (`*>`, `*>i`,
+    // `*=`, `*`), so the prefix and the next-hop are the two tokens that
+    // follow it.
+    let best_row = output.lines().find(|line| {
+        let mut tokens = line.split_whitespace();
+        matches!(
+            (tokens.next(), tokens.next()),
+            (Some(marker), Some(prefix)) if marker.starts_with("*>") && prefix == expected_prefix
+        )
+    });
+    let row = best_row.unwrap_or_else(|| {
+        panic!(
+            "no `*>` row for {} in namespace {}, got:\n{}",
+            expected_prefix, scoped, output
+        )
+    });
+    let actual_nexthop = row.split_whitespace().nth(2).unwrap_or("");
+    assert!(
+        actual_nexthop == expected_nexthop,
+        "BGP best path for {} in namespace {} expected next-hop {}, got {} (row: {:?})",
+        expected_prefix,
+        scoped,
+        expected_nexthop,
+        actual_nexthop,
+        row
+    );
+    println!(
+        "✓ BGP best path for {} in namespace {} has next-hop {}",
+        expected_prefix, scoped, expected_nexthop
+    );
+}
+
+/// The field must be ABSENT from the prefix's row: `show bgp -j` omits
+/// `local_pref` / `metric` / `as_path` / … when the attribute is not
+/// carried, so "absent" is how "the attribute was discarded" reads.
+/// Positive guard: the route itself must exist (a missing route would
+/// make any "without" assertion pass vacuously).
+#[then(expr = "BGP route in {string} has {string} without {string}")]
+async fn verify_bgp_route_field_absent(
+    world: &mut World,
+    namespace: String,
+    expected_prefix: String,
+    field_name: String,
+) {
+    let scoped = world.ns(&namespace);
+    let output = netns::exec_in_netns(
+        &scoped,
+        "vtyctl",
+        &["show", "-j", bgp_table_show(&expected_prefix)],
+    )
+    .await
+    .expect("Failed to get BGP routes");
+    let routes: Value = serde_json::from_str(&output).expect("Failed to parse JSON output");
+    let route = routes
+        .as_array()
+        .and_then(|arr| {
+            arr.iter()
+                .find(|r| r.get("prefix").and_then(|p| p.as_str()) == Some(&expected_prefix))
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "BGP route {} not found in namespace {}, got: {}",
+                expected_prefix, scoped, output
+            )
+        });
+    if let Some(value) = route.get(&field_name) {
+        panic!(
+            "BGP route {} in namespace {} must not carry {}, got {} (row: {})",
+            expected_prefix,
+            scoped,
+            field_name,
+            json_scalar(value),
+            route
+        );
+    }
+    println!(
+        "✓ BGP route {} in namespace {} has no {}",
+        expected_prefix, scoped, field_name
     );
 }
 

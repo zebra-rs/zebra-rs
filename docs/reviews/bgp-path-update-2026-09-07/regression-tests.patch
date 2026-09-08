@@ -1,0 +1,157 @@
+--- a/zebra-rs/src/bgp/update_group.rs
++++ b/zebra-rs/src/bgp/update_group.rs
+@@ -2276,6 +2276,49 @@
+ 
+     /// Bare group for the offload state-machine tests; fields beyond
+     /// id/sig are all empty defaults.
++    #[test]
++    fn adversarial_review_cache_withdraw_after_attr_change() {
++        let mut leftovers = Vec::new();
++        for id in [0, 7] {
++            let (_, mut group) = test_group(1);
++            let (tx, _rx) = mpsc::channel(8);
++            let prefix = "192.0.2.0/24".parse().unwrap();
++            let n = Ipv4Nlri { id, prefix };
++            send_ipv4(&mut group, n.clone(), test_attr(10), 99, &tx, false);
++            send_ipv4(&mut group, n, test_attr(20), 99, &tx, false);
++            cache_remove_ipv4(&mut group, prefix, id);
++            if !group.cache_ipv4.is_empty() { leftovers.push(id); }
++        }
++        assert!(leftovers.is_empty(), "stale v4 cache at ids {leftovers:?}");
++    }
++
++    #[test]
++    fn adversarial_review_cache_v6_withdraw_after_attr_change() {
++        let mut leftovers = Vec::new();
++        for id in [0, 7] {
++            let (_, mut group) = test_group(1);
++            let (tx, _rx) = mpsc::channel(8);
++            let prefix = "2001:db8::/64".parse().unwrap();
++            let n = Ipv6Nlri { id, prefix };
++            send_ipv6(&mut group, n.clone(), test_attr(10), 99, &tx, false);
++            send_ipv6(&mut group, n, test_attr(20), 99, &tx, false);
++            cache_remove_ipv6(&mut group, prefix, id);
++            if !group.cache_ipv6.is_empty() { leftovers.push(id); }
++        }
++        assert!(leftovers.is_empty(), "stale v6 cache at ids {leftovers:?}");
++    }
++
++    #[test]
++    fn adversarial_review_unicast_nexthop_knob_splits_groups() {
++        let plain = sig_peer("10.0.0.1");
++        let mut changed = sig_peer("10.0.0.2");
++        changed.config.sub.entry(AfiSafi::new(Afi::Ip6, Safi::Unicast))
++            .or_default().next_hop_self = true;
++        assert_ne!(signature_of(&plain, Afi::Ip6, Safi::Unicast),
++            signature_of(&changed, Afi::Ip6, Safi::Unicast),
++            "different unicast next-hop transforms share a group");
++    }
++
+     fn test_group(seq: u32) -> (UpdateGroupId, UpdateGroup) {
+         let id = UpdateGroupId::new(Afi::Ip, Safi::Unicast, seq);
+         let group = UpdateGroup {
+--- a/zebra-rs/src/bgp/group_egress.rs
++++ b/zebra-rs/src/bgp/group_egress.rs
+@@ -404,6 +404,18 @@
+     }
+ 
+     #[test]
++    fn adversarial_review_best_becomes_member_requires_withdraw() {
++        let mut engine = Engine::default();
++        let mut rx1 = member(&mut engine, 1);
++        let mut rx2 = member(&mut engine, 2);
++        advertise(&mut engine, "10.10.10.0/24", 99);
++        assert!(rx1.try_recv().is_ok());
++        assert!(rx2.try_recv().is_ok());
++        advertise(&mut engine, "10.10.10.0/24", 1);
++        assert!(rx1.try_recv().is_ok(), "new source member keeps the previous external route: no withdrawal");
++    }
++
++    #[test]
+     fn advertise_encodes_once_and_fans_to_all_members_when_source_is_external() {
+         let mut engine = Engine::default();
+         let mut rx1 = member(&mut engine, 1);
+--- a/zebra-rs/src/bgp/route.rs
++++ b/zebra-rs/src/bgp/route.rs
+@@ -25295,6 +25295,17 @@
+         )
+     }
+ 
++    #[test]
++    fn adversarial_review_ecmp_egress_uses_actual_best() {
++        let mut t = table(2, false);
++        let selected = select(&mut t, vec![
++            ebgp_row(1, "65001", [192, 0, 2, 1]),
++            ebgp_row(2, "65001", [192, 0, 2, 2]),
++        ]);
++        assert_eq!(selected.len(), 2);
++        assert!(selected.last().unwrap().best_path, "egress selected.last() chooses an ECMP alternate");
++    }
++
+     fn table(max_paths: u32, relax: bool) -> LocalRibTable<Ipv4Net> {
+         LocalRibTable(
+             Default::default(),
+@@ -26213,6 +26224,63 @@
+     /// A best-path switch between iBGP sources can preserve every received
+     /// attribute and label while changing the ORIGINATOR_ID we synthesize.
+     /// Dedup must allow that changed reflection to reach the client.
++    #[tokio::test]
++    async fn adversarial_review_v6_addpath_honors_deny_policy() {
++        with_top!(top, {
++            let mut top = top;
++            let mut peer = client_peer();
++            let afi_safi = AfiSafi::new(Afi::Ip6, Safi::Unicast);
++            let cap = CapMultiProtocol::new(&Afi::Ip6, &Safi::Unicast);
++            let entry = peer.cap_map.entries.get_mut(&cap).unwrap();
++            entry.send = true;
++            entry.recv = true;
++            peer.opt.add_path.insert(afi_safi, Direct { recv: false, send: true });
++            let mut deny = crate::policy::PolicyList::default();
++            deny.entry(10).action = crate::policy::PolicyAction::Deny;
++            let slot = peer.policy_list_slot(afi_safi, InOut::Output);
++            slot.name = Some("DENY".into());
++            slot.policy_list = Some(deny);
++            let addr: IpAddr = "10.0.0.2".parse().unwrap();
++            let mut peers = PeerMap::new();
++            peers.insert(addr, peer);
++            let ident = peers.get(&addr).unwrap().ident;
++            peers.membership_enroll(ident);
++            super::super::update_group::attach(top.update_groups, &mut peers, ident, OUR_RID, false);
++            let prefix = "2001:db8:1::/64".parse().unwrap();
++            let mut attr = base_attr();
++            attr.nexthop = Some(BgpNexthop::Ipv6("2001:db8::1".parse().unwrap()));
++            let rib = ibgp_rib(&attr);
++            let (_, selected, _) = top.shard.v6.update(prefix, rib);
++            route_advertise_to_peers_v6(prefix, &selected, &mut top, &mut peers);
++            assert!(peers.get(&addr).unwrap().adj_out.v6.0.is_empty(),
++                "DENY-ALL route was recorded as advertised to an AddPath peer");
++        });
++    }
++
++    #[tokio::test]
++    async fn adversarial_review_v4_addpath_denied_replacement_withdraws() {
++        with_top!(top, {
++            let mut top = top;
++            let mut peer = client_peer();
++            let prefix = "192.0.2.0/24".parse().unwrap();
++            let mut rib = ibgp_rib(&base_attr());
++            rib.local_id = 7;
++            peer.adj_out.add(None, prefix, rib.clone());
++            let afi_safi = AfiSafi::new(Afi::Ip, Safi::MplsVpn);
++            // A VPN outbound deny avoids relying on the v4 snapshot cache.
++            let rd = RouteDistinguisher::default();
++            peer.adj_out.add(Some(rd), prefix, rib.clone());
++            let mut deny = crate::policy::PolicyList::default();
++            deny.entry(10).action = crate::policy::PolicyAction::Deny;
++            let slot = peer.policy_list_slot(afi_safi, InOut::Output);
++            slot.name = Some("DENY".into());
++            slot.policy_list = Some(deny);
++            V4Batch::advertise_addpath(&mut peer, Some(rd), prefix, &rib, &mut top);
++            assert!(!peer.adj_out.contains_key(Some(rd), &prefix),
++                "previous AddPath advertisement survives a denied replacement");
++        });
++    }
++
+     #[tokio::test]
+     async fn lu_dedup_preserves_changed_originator() {
+         with_top!(top, {

@@ -1,0 +1,27 @@
+router:
+  bgp:
+    global:
+      as: 65030
+      router-id: 192.168.40.1
+    neighbor:
+    # h1 is the scripted eBGP speaker (tests/scripts/bgp_ebgp_local_pref_send.py)
+    # on an IPv6 session. It never listens on 179, so dialing it just cycles
+    # this peer Idle -> Connect -> Idle, and Idle refuses the inbound
+    # connection. Passive parks the peer in Active listening so the script's
+    # connect is always accepted.
+    - remote-address: 2001:db8:40::2
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65031
+      transport:
+        passive-mode: true
+    # z2 is an ordinary iBGP peer over IPv6: it originates the contested
+    # prefix and receives z1's re-advertisement of the uncontested one.
+    - remote-address: 2001:db8:40::3
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65030

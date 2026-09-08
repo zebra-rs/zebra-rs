@@ -14,6 +14,13 @@ pub struct Direct {
     pub send: bool,
 }
 
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BgpPeerType {
+    #[default]
+    Ibgp,
+    Ebgp,
+}
+
 #[derive(Default, Debug, Clone)]
 pub struct ParseOption {
     // AS4
@@ -22,11 +29,18 @@ pub struct ParseOption {
     pub add_path: BTreeMap<AfiSafi, Direct>,
     // Extended Message (RFC 8654)
     pub extended_message: bool,
+    /// Internal or external session. Derived from configuration (remote
+    /// AS versus local AS), not negotiated, so `clear` leaves it alone.
+    pub peer_type: BgpPeerType,
 }
 
 impl ParseOption {
     pub fn is_as4(&self) -> bool {
         self.as4.send && self.as4.recv
+    }
+
+    pub fn is_ebgp(&self) -> bool {
+        self.peer_type == BgpPeerType::Ebgp
     }
 
     pub fn is_add_path_recv(&self, afi: Afi, safi: Safi) -> bool {
@@ -47,6 +61,8 @@ impl ParseOption {
         }
     }
 
+    /// Forget everything the OPEN exchange negotiated. `peer_type` is
+    /// configuration, not negotiation, and stays.
     pub fn clear(&mut self) {
         self.as4 = Direct::default();
         self.add_path.clear();
@@ -132,5 +148,28 @@ impl BgpPacket {
                 "Unknown BGP packet type".to_string(),
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `clear` (run on leaving Established) forgets what the OPEN exchange
+    /// negotiated but not the configured session type, which the next
+    /// session's parser still needs.
+    #[test]
+    fn clear_keeps_the_peer_type() {
+        let mut opt = ParseOption {
+            peer_type: BgpPeerType::Ebgp,
+            extended_message: true,
+            ..Default::default()
+        };
+        opt.as4.send = true;
+        opt.as4.recv = true;
+        opt.clear();
+        assert!(!opt.is_as4() && !opt.extended_message);
+        assert!(opt.is_ebgp());
+        assert_eq!(opt.peer_type, BgpPeerType::Ebgp);
     }
 }
