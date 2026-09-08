@@ -1,0 +1,39 @@
+# z1 — the policy definition stays, the binding toward z2 is removed
+# (still Established): z2 must rejoin z3's update-group.
+prefix-set:
+- name: DENY-P2
+  prefixes:
+  - prefix: 10.40.2.0/24
+policy:
+- name: DENY-P2
+  entry:
+  - number: 10
+    action: deny
+    match:
+      prefix-set: DENY-P2
+  - number: 20
+    action: permit
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.70.0.1
+    neighbor:
+    - remote-address: 192.168.70.2
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65001
+    - remote-address: 192.168.70.3
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65001
+    - remote-address: 192.168.70.4
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65002

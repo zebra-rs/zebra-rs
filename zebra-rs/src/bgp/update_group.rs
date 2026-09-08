@@ -337,6 +337,13 @@ pub struct UpdateGroup {
     pub flush_inflight_ipv6: bool,
     pub flush_pending_ipv6: bool,
     pub deferred_withdraw_ipv6: Vec<(usize, Ipv6Nlri)>,
+    /// Members whose signature changed while this group still had a flush
+    /// in flight or advertisements queued: `regroup_if_stale` parks them
+    /// here instead of moving them, and `flush_done_*` moves them once the
+    /// group is idle, after its deferred withdraws went out — so the wire
+    /// order announce-then-withdraw of the in-flight job is preserved and
+    /// nothing queued for the mover is lost.
+    pub regroup_pending: BTreeSet<usize>,
     /// Per-update-group egress task (see
     /// `docs/design/bgp-egress-group-task-migration.md`). `Some` only at
     /// gate-on (`ZEBRA_BGP_EGRESS_GROUP_TASK`); spawned when the group is
@@ -583,10 +590,7 @@ pub fn attach(
     };
 
     // Snapshot signatures so we can mutate update_groups + peer
-    // without overlapping borrows. The adv_interval snapshot rides
-    // along onto every freshly-created group so the IPv4 adv-timer
-    // can read its cadence without reaching back into `Bgp`.
-    let adv_interval = peer.adv_interval;
+    // without overlapping borrows.
     let mut sigs: Vec<(AfiSafi, UpdateGroupSig)> = Vec::new();
     for (afi, safi) in TRACKED_AFI_SAFIS {
         if let Some(sig) = signature_of(peer, afi, safi) {
@@ -595,58 +599,89 @@ pub fn attach(
     }
 
     for (afi_safi, sig) in sigs {
-        let af = update_groups.entry(afi_safi).or_default();
-        let entry = af.groups.entry(sig.clone()).or_insert_with(|| {
-            let id = UpdateGroupId::new(afi_safi.afi, afi_safi.safi, af.next_seq);
-            af.next_seq += 1;
-            // Spawn the per-group egress task at gate-on for
-            // v4-unicast (the family being migrated); dropped (abort-on-drop)
-            // when this group is removed in `detach`.
-            let task = (afi_safi.afi == Afi::Ip
-                && afi_safi.safi == Safi::Unicast
-                && super::group_egress::egress_group_task_enabled())
-            .then(|| super::group_egress::GroupEgressTask::spawn(id.clone()));
-            UpdateGroup {
-                id,
-                sig: sig.clone(),
-                members: BTreeSet::new(),
-                created_at: Instant::now(),
-                counters: UpdateGroupCounters::default(),
-                cache_ipv4: HashMap::new(),
-                cache_ipv4_rev: HashMap::new(),
-                cache_ipv4_timer: None,
-                cache_ipv6: HashMap::new(),
-                cache_ipv6_rev: HashMap::new(),
-                cache_ipv6_timer: None,
-                adv_interval,
-                flush_inflight_ipv4: false,
-                flush_pending_ipv4: false,
-                deferred_withdraw_ipv4: Vec::new(),
-                flush_inflight_ipv6: false,
-                flush_pending_ipv6: false,
-                deferred_withdraw_ipv6: Vec::new(),
-                task,
-            }
-        });
-        entry.members.insert(peer_idx);
-        // Mirror the membership into the group's egress task with the
-        // member's SyncCtx (its packet sink + the shared egress identity) so the
-        // engine can build + fan once advertises are routed there (later).
-        if let Some(t) = &entry.task
-            && let Some(peer) = peers.get_by_idx(peer_idx)
-        {
-            let add_path = peer.opt.is_add_path_send(afi_safi.afi, afi_safi.safi);
-            t.send(super::group_egress::GroupEgressDeltaV4::AddMember {
-                ident: peer_idx,
-                ctx: Box::new(peer.sync_ctx(router_id, as_sets_withdraw)),
-                add_path,
-            });
-        }
+        attach_family(
+            update_groups,
+            peers,
+            peer_idx,
+            afi_safi,
+            sig,
+            router_id,
+            as_sets_withdraw,
+        );
+    }
+}
 
-        let id = entry.id.clone();
-        if let Some(peer) = peers.get_mut_by_idx(peer_idx) {
-            peer.update_group_id.insert(afi_safi, id);
+/// [`attach`] for one AFI/SAFI: file `peer_idx` under the group whose
+/// signature is `sig` (creating it if needed). `regroup_if_stale` uses
+/// this per family so a change in one family never touches another's
+/// membership, pending cache or in-flight flush.
+fn attach_family(
+    update_groups: &mut UpdateGroupMap,
+    peers: &mut PeerMap,
+    peer_idx: usize,
+    afi_safi: AfiSafi,
+    sig: UpdateGroupSig,
+    router_id: Ipv4Addr,
+    as_sets_withdraw: bool,
+) {
+    // The adv_interval snapshot rides along onto a freshly-created group
+    // so the IPv4 adv-timer can read its cadence without reaching back
+    // into `Bgp`.
+    let Some(adv_interval) = peers.get_by_idx(peer_idx).map(|p| p.adv_interval) else {
+        return;
+    };
+    let af = update_groups.entry(afi_safi).or_default();
+    let entry = af.groups.entry(sig.clone()).or_insert_with(|| {
+        let id = UpdateGroupId::new(afi_safi.afi, afi_safi.safi, af.next_seq);
+        af.next_seq += 1;
+        // Spawn the per-group egress task at gate-on for
+        // v4-unicast (the family being migrated); dropped (abort-on-drop)
+        // when this group is removed in `detach`.
+        let task = (afi_safi.afi == Afi::Ip
+            && afi_safi.safi == Safi::Unicast
+            && super::group_egress::egress_group_task_enabled())
+        .then(|| super::group_egress::GroupEgressTask::spawn(id.clone()));
+        UpdateGroup {
+            id,
+            sig: sig.clone(),
+            members: BTreeSet::new(),
+            created_at: Instant::now(),
+            counters: UpdateGroupCounters::default(),
+            cache_ipv4: HashMap::new(),
+            cache_ipv4_rev: HashMap::new(),
+            cache_ipv4_timer: None,
+            cache_ipv6: HashMap::new(),
+            cache_ipv6_rev: HashMap::new(),
+            cache_ipv6_timer: None,
+            adv_interval,
+            flush_inflight_ipv4: false,
+            flush_pending_ipv4: false,
+            deferred_withdraw_ipv4: Vec::new(),
+            flush_inflight_ipv6: false,
+            flush_pending_ipv6: false,
+            deferred_withdraw_ipv6: Vec::new(),
+            regroup_pending: BTreeSet::new(),
+            task,
         }
+    });
+    entry.members.insert(peer_idx);
+    // Mirror the membership into the group's egress task with the
+    // member's SyncCtx (its packet sink + the shared egress identity) so the
+    // engine can build + fan once advertises are routed there (later).
+    if let Some(t) = &entry.task
+        && let Some(peer) = peers.get_by_idx(peer_idx)
+    {
+        let add_path = peer.opt.is_add_path_send(afi_safi.afi, afi_safi.safi);
+        t.send(super::group_egress::GroupEgressDeltaV4::AddMember {
+            ident: peer_idx,
+            ctx: Box::new(peer.sync_ctx(router_id, as_sets_withdraw)),
+            add_path,
+        });
+    }
+
+    let id = entry.id.clone();
+    if let Some(peer) = peers.get_mut_by_idx(peer_idx) {
+        peer.update_group_id.insert(afi_safi, id);
     }
 }
 
@@ -657,45 +692,216 @@ pub fn attach(
 /// stable.
 pub fn detach(update_groups: &mut UpdateGroupMap, peers: &mut PeerMap, peer_idx: usize) {
     let memberships: Vec<(AfiSafi, UpdateGroupId)> = {
-        let Some(peer) = peers.get_mut_by_idx(peer_idx) else {
+        let Some(peer) = peers.get_by_idx(peer_idx) else {
             return;
         };
-        let ms = peer
-            .update_group_id
+        peer.update_group_id
             .iter()
             .map(|(k, v)| (*k, v.clone()))
-            .collect();
-        peer.update_group_id.clear();
-        ms
+            .collect()
     };
-
     for (afi_safi, id) in memberships {
-        let Some(af) = update_groups.get_mut(&afi_safi) else {
-            continue;
+        detach_family(update_groups, peers, peer_idx, afi_safi, &id);
+    }
+}
+
+/// [`detach`] for one AFI/SAFI: remove `peer_idx` from group `id` of that
+/// family (and drop the group if it empties), leaving the peer's other
+/// families untouched.
+fn detach_family(
+    update_groups: &mut UpdateGroupMap,
+    peers: &mut PeerMap,
+    peer_idx: usize,
+    afi_safi: AfiSafi,
+    id: &UpdateGroupId,
+) {
+    if let Some(peer) = peers.get_mut_by_idx(peer_idx) {
+        peer.update_group_id.remove(&afi_safi);
+        peer.regroup_frozen.remove(&afi_safi);
+    }
+    let Some(af) = update_groups.get_mut(&afi_safi) else {
+        return;
+    };
+    let key = af
+        .groups
+        .iter()
+        .find(|(_, g)| g.id == *id)
+        .map(|(k, _)| k.clone());
+    if let Some(key) = key {
+        let drop_group = {
+            let group = af.groups.get_mut(&key).expect("just located");
+            group.members.remove(&peer_idx);
+            group.regroup_pending.remove(&peer_idx);
+            // Mirror the removal into the group's egress task (the task
+            // itself is dropped + aborted below if the group empties).
+            if let Some(t) = &group.task {
+                t.send(super::group_egress::GroupEgressDeltaV4::RemoveMember { ident: peer_idx });
+            }
+            group.members.is_empty()
         };
-        let key = af
-            .groups
-            .iter()
-            .find(|(_, g)| g.id == id)
-            .map(|(k, _)| k.clone());
-        if let Some(key) = key {
-            let drop_group = {
-                let group = af.groups.get_mut(&key).expect("just located");
-                group.members.remove(&peer_idx);
-                // Mirror the removal into the group's egress task (the task
-                // itself is dropped + aborted below if the group empties).
-                if let Some(t) = &group.task {
-                    t.send(super::group_egress::GroupEgressDeltaV4::RemoveMember {
-                        ident: peer_idx,
-                    });
-                }
-                group.members.is_empty()
+        if drop_group {
+            af.groups.remove(&key);
+        }
+    }
+}
+
+/// Re-form `peer_idx`'s update-group membership when a signature-bearing
+/// input changed on the live session (review finding #4). For every
+/// tracked AFI/SAFI a fresh [`signature_of`] is compared with the
+/// signature of the group the peer sits in; on a mismatch the peer is
+/// moved, family by family, to the group matching it now. The Established
+/// edge is otherwise the only attach point, so without this an outbound
+/// policy bound (or any egress knob toggled) on an Established peer left
+/// it in a group whose canonical member no longer transforms the way it
+/// does — and the memoized canonical outcome was replayed to it, or its
+/// own outcome to its group-mates.
+///
+/// Only the families whose signature changed are touched: a VPNv4 policy
+/// edit must not detach the peer's IPv6-unicast group and lose the
+/// advertisements queued there (nothing replays IPv6).
+///
+/// A family whose current group has a flush job IN FLIGHT is not moved
+/// yet: the job holds the peer's sender and will still announce, so a
+/// withdraw sent now would precede it on the wire and never be repeated,
+/// and the peer's deferred withdraws must follow the job. Instead the
+/// peer is FROZEN in that family (`Peer::regroup_frozen`, parked in the
+/// group's `regroup_pending`): it keeps its membership so `flush_done_*`
+/// still sends its deferred withdraws, but every advertise fan-out skips
+/// it meanwhile — it is neither the canonical member (its changed
+/// settings must not be memoized for its group-mates) nor a recipient of
+/// the shared cache (their outcome must not be replayed to it), and no
+/// job built after the freeze snapshots its sender. `flush_done_*` moves
+/// it as soon as the job that pinned it completes and hands it to the
+/// caller for a full outbound re-sync, which replaces everything it was
+/// skipped for. Anything merely QUEUED in a group (no job in flight) is no
+/// reason to wait: the peer moves at once and the re-sync that follows
+/// every move (the policy resolve's, the commit-end sweep's, or the
+/// `flush_done_*` caller's) re-sends it — for IPv6 too, since
+/// `route_soft_out_peer` now covers the v6 family.
+///
+/// Returns `true` when any family moved or was parked for a move. Peers
+/// that are not Established are never touched — they attach on the
+/// Established edge.
+pub fn regroup_if_stale(
+    update_groups: &mut UpdateGroupMap,
+    peers: &mut PeerMap,
+    peer_idx: usize,
+    router_id: Ipv4Addr,
+    as_sets_withdraw: bool,
+) -> bool {
+    enum Plan {
+        Move(Option<UpdateGroupId>, Option<UpdateGroupSig>),
+        Park(UpdateGroupId),
+    }
+    let plans: Vec<(AfiSafi, Plan)> = {
+        let Some(peer) = peers.get_by_idx(peer_idx) else {
+            return false;
+        };
+        if !peer.state.is_established() {
+            return false;
+        }
+        let mut plans = Vec::new();
+        for (afi, safi) in TRACKED_AFI_SAFIS {
+            let afi_safi = AfiSafi::new(afi, safi);
+            let fresh = signature_of(peer, afi, safi);
+            let current_id = peer.update_group_id.get(&afi_safi);
+            let current = current_id.and_then(|id| {
+                update_groups
+                    .get(&afi_safi)?
+                    .groups
+                    .values()
+                    .find(|g| g.id == *id)
+            });
+            let stale = match (fresh.as_ref(), current) {
+                (None, None) => false,
+                (Some(fresh), Some(group)) => *fresh != group.sig,
+                _ => true,
             };
-            if drop_group {
-                af.groups.remove(&key);
+            if !stale {
+                continue;
+            }
+            // Only an in-flight job pins the peer (see the doc above).
+            let busy = current.is_some_and(|g| match (afi, safi) {
+                (Afi::Ip, Safi::Unicast) => g.flush_inflight_ipv4,
+                (Afi::Ip6, Safi::Unicast) => g.flush_inflight_ipv6,
+                // VPNv4 / EVPN advertise per peer; the group only carries
+                // membership and the memo, so a move is always safe.
+                _ => false,
+            });
+            let plan = if busy {
+                Plan::Park(current_id.cloned().expect("busy implies a current group"))
+            } else {
+                Plan::Move(current_id.cloned(), fresh)
+            };
+            plans.push((afi_safi, plan));
+        }
+        plans
+    };
+    if plans.is_empty() {
+        return false;
+    }
+    for (afi_safi, plan) in plans {
+        match plan {
+            Plan::Park(id) => {
+                if let Some(group) = update_groups
+                    .get_mut(&afi_safi)
+                    .and_then(|af| af.group_by_id_mut(&id))
+                {
+                    group.regroup_pending.insert(peer_idx);
+                    // The gate-on engine fans to its own member list: take
+                    // the frozen peer out of it too, until it moves (a new
+                    // group re-adds it) or settles (`flush_done_*` re-adds
+                    // it here).
+                    if let Some(t) = &group.task {
+                        t.send(super::group_egress::GroupEgressDeltaV4::RemoveMember {
+                            ident: peer_idx,
+                        });
+                    }
+                }
+                if let Some(peer) = peers.get_mut_by_idx(peer_idx) {
+                    peer.regroup_frozen.insert(afi_safi);
+                }
+            }
+            Plan::Move(current_id, fresh) => {
+                if let Some(id) = current_id {
+                    detach_family(update_groups, peers, peer_idx, afi_safi, &id);
+                }
+                if let Some(sig) = fresh {
+                    attach_family(
+                        update_groups,
+                        peers,
+                        peer_idx,
+                        afi_safi,
+                        sig,
+                        router_id,
+                        as_sets_withdraw,
+                    );
+                }
             }
         }
     }
+    true
+}
+
+/// [`regroup_if_stale`] over every Established peer; returns the idents
+/// that moved. The commit-end sweep and the neighbor-group inheritance
+/// sweep use it so a knob toggled on a live session takes effect in the
+/// group structure within the same commit (review finding #21).
+pub fn regroup_stale_peers(
+    update_groups: &mut UpdateGroupMap,
+    peers: &mut PeerMap,
+    router_id: Ipv4Addr,
+    as_sets_withdraw: bool,
+) -> Vec<usize> {
+    let idents: Vec<usize> = peers
+        .iter_all()
+        .filter(|(_, peer)| peer.state.is_established())
+        .map(|(_, peer)| peer.ident)
+        .collect();
+    idents
+        .into_iter()
+        .filter(|&ident| regroup_if_stale(update_groups, peers, ident, router_id, as_sets_withdraw))
+        .collect()
 }
 
 // ── IPv4 unicast send / cache_remove / flush ──
@@ -1040,6 +1246,10 @@ pub(super) fn build_flush_job_ipv4(
     let members: Vec<FlushMember> = group
         .members
         .iter()
+        // A member frozen for a pending move gets nothing new from this
+        // group: it moves as soon as the job that was in flight when it
+        // froze completes, and is re-synced then.
+        .filter(|ident| !group.regroup_pending.contains(ident))
         .map(|ident| {
             let peer = peers.get_by_idx(*ident);
             FlushMember {
@@ -1122,13 +1332,15 @@ pub fn flush_done_ipv4(
     id: &UpdateGroupId,
     deltas: UpdateGroupCounters,
     interface_addrs: &super::interface_addrs::InterfaceAddrs,
-) {
+    router_id: Ipv4Addr,
+    as_sets_withdraw: bool,
+) -> Vec<usize> {
     let afi_safi = AfiSafi::new(Afi::Ip, Safi::Unicast);
     let Some(af) = update_groups.get_mut(&afi_safi) else {
-        return;
+        return Vec::new();
     };
     let Some(group) = af.group_by_id_mut(id) else {
-        return;
+        return Vec::new();
     };
     group.counters.merge(&deltas);
     group.flush_inflight_ipv4 = false;
@@ -1155,9 +1367,46 @@ pub fn flush_done_ipv4(
         }
         super::route::route_withdraw_ipv4(peer, None, nlri.prefix, nlri.id);
     }
+    // Members frozen for a pending move: the job that pinned them has
+    // completed and their deferred withdraws went out above, so move them
+    // now — before any re-run, whose job must not snapshot their senders
+    // — and hand them back for the outbound re-sync that replaces
+    // whatever they were skipped for while frozen. A member whose
+    // signature settled back meanwhile is not moved but is re-synced too.
+    let frozen: Vec<usize> = update_groups
+        .get_mut(&afi_safi)
+        .and_then(|af| af.group_by_id_mut(id))
+        .map(|group| {
+            std::mem::take(&mut group.regroup_pending)
+                .into_iter()
+                .collect()
+        })
+        .unwrap_or_default();
+    for &ident in &frozen {
+        if let Some(peer) = peers.get_mut_by_idx(ident) {
+            peer.regroup_frozen.remove(&afi_safi);
+        }
+        let moved = regroup_if_stale(update_groups, peers, ident, router_id, as_sets_withdraw);
+        if !moved
+            && let Some(group) = update_groups
+                .get_mut(&afi_safi)
+                .and_then(|af| af.group_by_id_mut(id))
+            && let Some(t) = &group.task
+            && let Some(peer) = peers.get_by_idx(ident)
+        {
+            // Settled back without moving: put it back on the gate-on
+            // engine's member list it was taken off when it froze.
+            t.send(super::group_egress::GroupEgressDeltaV4::AddMember {
+                ident,
+                ctx: Box::new(peer.sync_ctx(router_id, as_sets_withdraw)),
+                add_path: peer.opt.is_add_path_send(afi_safi.afi, afi_safi.safi),
+            });
+        }
+    }
     if rerun {
         flush_ipv4(update_groups, peers, tx, id, interface_addrs);
     }
+    frozen
 }
 
 /// Per-peer batched encode + send. Used by the route_sync_ipv4 and
@@ -1326,6 +1575,10 @@ pub(super) fn build_flush_job_ipv6(
     let members: Vec<FlushMember> = group
         .members
         .iter()
+        // A member frozen for a pending move gets nothing new from this
+        // group: it moves as soon as the job that was in flight when it
+        // froze completes, and is re-synced then.
+        .filter(|ident| !group.regroup_pending.contains(ident))
         .map(|ident| {
             let peer = peers.get_by_idx(*ident);
             FlushMember {
@@ -1384,13 +1637,15 @@ pub fn flush_done_ipv6(
     tx: &mpsc::Sender<Message>,
     id: &UpdateGroupId,
     deltas: UpdateGroupCounters,
-) {
+    router_id: Ipv4Addr,
+    as_sets_withdraw: bool,
+) -> Vec<usize> {
     let afi_safi = AfiSafi::new(Afi::Ip6, Safi::Unicast);
     let Some(af) = update_groups.get_mut(&afi_safi) else {
-        return;
+        return Vec::new();
     };
     let Some(group) = af.group_by_id_mut(id) else {
-        return;
+        return Vec::new();
     };
     group.counters.merge(&deltas);
     group.flush_inflight_ipv6 = false;
@@ -1409,9 +1664,46 @@ pub fn flush_done_ipv6(
         }
         super::route::route_withdraw_ipv6(peer, nlri.prefix, nlri.id);
     }
+    // Members frozen for a pending move: the job that pinned them has
+    // completed and their deferred withdraws went out above, so move them
+    // now — before any re-run, whose job must not snapshot their senders
+    // — and hand them back for the outbound re-sync that replaces
+    // whatever they were skipped for while frozen. A member whose
+    // signature settled back meanwhile is not moved but is re-synced too.
+    let frozen: Vec<usize> = update_groups
+        .get_mut(&afi_safi)
+        .and_then(|af| af.group_by_id_mut(id))
+        .map(|group| {
+            std::mem::take(&mut group.regroup_pending)
+                .into_iter()
+                .collect()
+        })
+        .unwrap_or_default();
+    for &ident in &frozen {
+        if let Some(peer) = peers.get_mut_by_idx(ident) {
+            peer.regroup_frozen.remove(&afi_safi);
+        }
+        let moved = regroup_if_stale(update_groups, peers, ident, router_id, as_sets_withdraw);
+        if !moved
+            && let Some(group) = update_groups
+                .get_mut(&afi_safi)
+                .and_then(|af| af.group_by_id_mut(id))
+            && let Some(t) = &group.task
+            && let Some(peer) = peers.get_by_idx(ident)
+        {
+            // Settled back without moving: put it back on the gate-on
+            // engine's member list it was taken off when it froze.
+            t.send(super::group_egress::GroupEgressDeltaV4::AddMember {
+                ident,
+                ctx: Box::new(peer.sync_ctx(router_id, as_sets_withdraw)),
+                add_path: peer.opt.is_add_path_send(afi_safi.afi, afi_safi.safi),
+            });
+        }
+    }
     if rerun {
         flush_ipv6(update_groups, peers, tx, id);
     }
+    frozen
 }
 
 /// Encode one or more UPDATE PDUs carrying `nlris` under `attr` as
@@ -1906,6 +2198,352 @@ mod tests {
         assert_ne!(a, b);
     }
 
+    /// Review finding #4: a signature field changed on an Established
+    /// peer (here the outbound policy name) must move exactly that peer
+    /// into the group matching its new signature; a fresh peer and a
+    /// second call are no-ops, and a non-Established peer is left alone.
+    #[test]
+    fn regroup_if_stale_moves_only_the_peer_whose_signature_changed() {
+        use super::super::peer::State;
+        let v6u = AfiSafi::new(Afi::Ip6, Safi::Unicast);
+        let mut peers = PeerMap::new();
+        for addr in ["10.0.0.1", "10.0.0.2"] {
+            let mut peer = sig_peer(addr);
+            peer.state = State::Established;
+            peers.insert(addr.parse().unwrap(), peer);
+        }
+        let mut groups = empty_map();
+        let router_id = std::net::Ipv4Addr::new(10, 0, 0, 9);
+        for ident in 0..2 {
+            attach(&mut groups, &mut peers, ident, router_id, false);
+        }
+        let gid = |peers: &PeerMap, ident: usize| {
+            peers
+                .get_by_idx(ident)
+                .unwrap()
+                .update_group_id
+                .get(&v6u)
+                .cloned()
+                .expect("attached")
+        };
+        assert_eq!(gid(&peers, 0), gid(&peers, 1), "same signature, one group");
+        assert!(
+            !regroup_if_stale(&mut groups, &mut peers, 0, router_id, false),
+            "nothing changed: no move"
+        );
+
+        // Bind an outbound policy on peer 0 the way the config handler
+        // does (slot name only; the policy actor resolves later).
+        peers
+            .get_mut_by_idx(0)
+            .unwrap()
+            .policy_list_slot(v6u, InOut::Output)
+            .name = Some("DENY".to_string());
+        assert!(
+            regroup_if_stale(&mut groups, &mut peers, 0, router_id, false),
+            "a changed signature field must move the peer"
+        );
+        assert_ne!(
+            gid(&peers, 0),
+            gid(&peers, 1),
+            "peer 0 left the shared group"
+        );
+        let sig_of = |groups: &UpdateGroupMap, id: &UpdateGroupId| {
+            groups[&v6u]
+                .groups
+                .values()
+                .find(|g| g.id == *id)
+                .map(|g| g.sig.clone())
+                .expect("group exists")
+        };
+        assert_eq!(
+            sig_of(&groups, &gid(&peers, 0)).policy_out_name.as_deref(),
+            Some("DENY"),
+            "peer 0 sits in the group of its NEW signature"
+        );
+        assert_eq!(sig_of(&groups, &gid(&peers, 1)).policy_out_name, None);
+        assert_eq!(groups[&v6u].groups.len(), 2);
+        assert!(
+            !regroup_if_stale(&mut groups, &mut peers, 0, router_id, false),
+            "already in the matching group: no move"
+        );
+        assert!(
+            !regroup_if_stale(&mut groups, &mut peers, 1, router_id, false),
+            "the untouched group-mate must not move"
+        );
+
+        // Unbinding merges the peer back into its group-mate's group.
+        peers
+            .get_mut_by_idx(0)
+            .unwrap()
+            .policy_list_slot(v6u, InOut::Output)
+            .name = None;
+        assert!(regroup_if_stale(
+            &mut groups,
+            &mut peers,
+            0,
+            router_id,
+            false
+        ));
+        assert_eq!(gid(&peers, 0), gid(&peers, 1), "back in one group");
+        assert_eq!(groups[&v6u].groups.len(), 1, "the singleton was dropped");
+
+        // A peer that is not Established is never touched.
+        peers.get_mut_by_idx(0).unwrap().state = State::Idle;
+        peers
+            .get_mut_by_idx(0)
+            .unwrap()
+            .policy_list_slot(v6u, InOut::Output)
+            .name = Some("DENY".to_string());
+        assert!(!regroup_if_stale(
+            &mut groups,
+            &mut peers,
+            0,
+            router_id,
+            false
+        ));
+    }
+
+    /// Review follow-ups (P1 ×2): a family whose group has a flush job in
+    /// flight is not moved yet — the job holds the peer's sender, so a
+    /// withdraw parked behind it must go out after the job — but the peer
+    /// must not keep taking part in the group either: frozen, it is skipped
+    /// by the fan-out audience (neither canonical nor a recipient) and by
+    /// any job built meanwhile. `flush_done_ipv4` sends the deferred
+    /// withdraw, moves the peer and hands it back for a re-sync.
+    #[test]
+    fn regroup_freezes_a_member_of_a_group_with_a_flush_in_flight_until_flush_done() {
+        use super::super::peer::State;
+        use bgp_packet::CapMultiProtocol;
+        let v4u = AfiSafi::new(Afi::Ip, Safi::Unicast);
+        let mut peers = PeerMap::new();
+        let mut rx = Vec::new();
+        for addr in ["10.0.0.1", "10.0.0.2"] {
+            let mut peer = sig_peer(addr);
+            peer.state = State::Established;
+            let key = CapMultiProtocol::new(&Afi::Ip, &Safi::Unicast);
+            let entry = peer.cap_map.entries.get_mut(&key).expect("pre-seeded");
+            entry.send = true;
+            entry.recv = true;
+            let (ptx, prx) = tokio::sync::mpsc::unbounded_channel();
+            peer.packet_tx = Some(ptx);
+            rx.push(prx);
+            peers.insert(addr.parse().unwrap(), peer);
+        }
+        peers.membership_enroll(0);
+        peers.membership_enroll(1);
+        let mut groups = empty_map();
+        let router_id = std::net::Ipv4Addr::new(10, 0, 0, 9);
+        for ident in 0..2 {
+            attach(&mut groups, &mut peers, ident, router_id, false);
+        }
+        let gid = |peers: &PeerMap, ident: usize| {
+            peers.get_by_idx(ident).unwrap().update_group_id[&v4u].clone()
+        };
+        let shared = gid(&peers, 0);
+        assert_eq!(shared, gid(&peers, 1));
+        assert_eq!(
+            peers.established_plain_idents(Afi::Ip, Safi::Unicast),
+            vec![0, 1]
+        );
+
+        // A flush is in flight and peer 0's withdraw is parked behind it.
+        let nlri = Ipv4Nlri {
+            id: 0,
+            prefix: "10.9.0.0/24".parse().unwrap(),
+        };
+        {
+            let g = groups
+                .get_mut(&v4u)
+                .unwrap()
+                .group_by_id_mut(&shared)
+                .unwrap();
+            g.flush_inflight_ipv4 = true;
+            g.deferred_withdraw_ipv4.push((0, nlri));
+        }
+        peers
+            .get_mut_by_idx(0)
+            .unwrap()
+            .policy_list_slot(v4u, InOut::Output)
+            .name = Some("DENY".to_string());
+        assert!(
+            regroup_if_stale(&mut groups, &mut peers, 0, router_id, false),
+            "stale: frozen for a move"
+        );
+        assert_eq!(
+            gid(&peers, 0),
+            shared,
+            "membership stays while the job is in flight"
+        );
+        assert!(peers.get_by_idx(0).unwrap().regroup_frozen.contains(&v4u));
+        assert_eq!(
+            peers.established_plain_idents(Afi::Ip, Safi::Unicast),
+            vec![1],
+            "the frozen member is out of the fan-out audience"
+        );
+        assert!(
+            rx[0].try_recv().is_err(),
+            "nothing sent before the in-flight job"
+        );
+        {
+            let g = groups
+                .get_mut(&v4u)
+                .unwrap()
+                .group_by_id_mut(&shared)
+                .unwrap();
+            assert!(g.regroup_pending.contains(&0));
+            assert_eq!(
+                g.deferred_withdraw_ipv4.len(),
+                1,
+                "the withdraw stays parked"
+            );
+            // A job built now must not snapshot the frozen member's sender.
+            let attr = Arc::new(BgpAttr::new());
+            let queued = Ipv4Nlri {
+                id: 0,
+                prefix: "10.9.1.0/24".parse().unwrap(),
+            };
+            g.cache_ipv4
+                .entry(attr.clone())
+                .or_default()
+                .insert(queued.clone(), 7);
+            g.cache_ipv4_rev.insert(queued.clone(), attr);
+            let addrs = super::super::interface_addrs::InterfaceAddrs::default();
+            let job = build_flush_job_ipv4(g, &peers, &addrs).expect("one bucket");
+            let recipients: Vec<usize> = job.members.iter().map(|m| m.ident).collect();
+            assert_eq!(recipients, vec![1], "the frozen member is not a recipient");
+        }
+
+        // The pinning job completes: the deferred withdraw goes out, the
+        // frozen member moves and is handed back for a re-sync.
+        let (tx, _rx) = mpsc::channel(8);
+        let addrs = super::super::interface_addrs::InterfaceAddrs::default();
+        let resync = flush_done_ipv4(
+            &mut groups,
+            &mut peers,
+            &tx,
+            &shared,
+            UpdateGroupCounters::default(),
+            &addrs,
+            router_id,
+            false,
+        );
+        assert_eq!(resync, vec![0], "handed back for the outbound re-sync");
+        let mut sent = 0;
+        while rx[0].try_recv().is_ok() {
+            sent += 1;
+        }
+        assert_eq!(sent, 1, "the parked withdraw was sent after the job");
+        assert_ne!(gid(&peers, 0), shared, "and the peer moved");
+        assert_eq!(gid(&peers, 1), shared);
+        assert!(!peers.get_by_idx(0).unwrap().regroup_frozen.contains(&v4u));
+        assert_eq!(
+            peers.established_plain_idents(Afi::Ip, Safi::Unicast),
+            vec![0, 1]
+        );
+        let g = groups
+            .get_mut(&v4u)
+            .unwrap()
+            .group_by_id_mut(&shared)
+            .unwrap();
+        assert!(g.regroup_pending.is_empty());
+        assert!(g.deferred_withdraw_ipv4.is_empty());
+        assert!(rx[1].try_recv().is_err(), "the group-mate was sent nothing");
+    }
+
+    /// Review follow-up (P2): only the family whose signature changed is
+    /// touched. A VPNv4 policy edit on a peer that is alone in its
+    /// IPv6-unicast group must leave that group — and the IPv6
+    /// advertisements queued in it, which nothing replays — untouched;
+    /// and an IPv6 change while those advertisements are queued parks the
+    /// peer instead of dropping them.
+    #[test]
+    fn regroup_touches_only_the_family_whose_signature_changed() {
+        use super::super::peer::State;
+        let v6u = AfiSafi::new(Afi::Ip6, Safi::Unicast);
+        let vpn4 = AfiSafi::new(Afi::Ip, Safi::MplsVpn);
+        let mut peers = PeerMap::new();
+        let mut peer = sig_peer("10.0.0.1");
+        peer.state = State::Established;
+        peers.insert("10.0.0.1".parse().unwrap(), peer);
+        let mut groups = empty_map();
+        let router_id = std::net::Ipv4Addr::new(10, 0, 0, 9);
+        attach(&mut groups, &mut peers, 0, router_id, false);
+        let gid = |peers: &PeerMap, fam: AfiSafi| {
+            peers.get_by_idx(0).unwrap().update_group_id[&fam].clone()
+        };
+        let v6_id = gid(&peers, v6u);
+        let vpn_id = gid(&peers, vpn4);
+
+        // An IPv6 advertisement queued for the next flush.
+        let attr = Arc::new(BgpAttr::new());
+        let nlri = Ipv6Nlri {
+            id: 0,
+            prefix: "2001:db8:9::/64".parse().unwrap(),
+        };
+        {
+            let g = groups
+                .get_mut(&v6u)
+                .unwrap()
+                .group_by_id_mut(&v6_id)
+                .unwrap();
+            g.cache_ipv6
+                .entry(attr.clone())
+                .or_default()
+                .insert(nlri.clone(), 7);
+            g.cache_ipv6_rev.insert(nlri.clone(), attr.clone());
+        }
+
+        // VPNv4 policy edit: the VPNv4 group changes, the IPv6 one does not.
+        peers
+            .get_mut_by_idx(0)
+            .unwrap()
+            .policy_list_slot(vpn4, InOut::Output)
+            .name = Some("VPN-OUT".to_string());
+        assert!(regroup_if_stale(
+            &mut groups,
+            &mut peers,
+            0,
+            router_id,
+            false
+        ));
+        assert_ne!(gid(&peers, vpn4), vpn_id, "the VPNv4 membership moved");
+        assert_eq!(gid(&peers, v6u), v6_id, "the IPv6 membership is untouched");
+        {
+            let g = groups
+                .get_mut(&v6u)
+                .unwrap()
+                .group_by_id_mut(&v6_id)
+                .unwrap();
+            assert!(
+                g.cache_ipv6
+                    .get(&attr)
+                    .is_some_and(|b| b.contains_key(&nlri)),
+                "the queued IPv6 advertisement survived"
+            );
+            assert!(g.regroup_pending.is_empty());
+        }
+
+        // IPv6 policy edit while the advertisement is still queued (no job
+        // in flight): the peer moves at once — the queue is the re-sync's
+        // business — and the emptied singleton group is dropped.
+        peers
+            .get_mut_by_idx(0)
+            .unwrap()
+            .policy_list_slot(v6u, InOut::Output)
+            .name = Some("V6-OUT".to_string());
+        assert!(regroup_if_stale(
+            &mut groups,
+            &mut peers,
+            0,
+            router_id,
+            false
+        ));
+        assert_ne!(gid(&peers, v6u), v6_id, "moved at once");
+        assert!(!peers.get_by_idx(0).unwrap().regroup_frozen.contains(&v6u));
+        assert_eq!(groups[&v6u].groups.len(), 1, "only the new group remains");
+    }
+
     #[test]
     fn id_format_matches_iosxr_style() {
         let id = UpdateGroupId::new(Afi::Ip, Safi::Unicast, 0);
@@ -2083,6 +2721,7 @@ mod tests {
                 flush_inflight_ipv6: false,
                 flush_pending_ipv6: false,
                 deferred_withdraw_ipv6: Vec::new(),
+                regroup_pending: BTreeSet::new(),
                 task: None,
             },
         );
@@ -2432,6 +3071,7 @@ mod tests {
             flush_inflight_ipv6: false,
             flush_pending_ipv6: false,
             deferred_withdraw_ipv6: Vec::new(),
+            regroup_pending: BTreeSet::new(),
             task: None,
         };
         (id, group)
@@ -2501,7 +3141,16 @@ mod tests {
             bytes_formatted: 100,
             ..Default::default()
         };
-        flush_done_ipv4(&mut groups, &mut peers, &tx, &id, deltas, &addrs);
+        flush_done_ipv4(
+            &mut groups,
+            &mut peers,
+            &tx,
+            &id,
+            deltas,
+            &addrs,
+            std::net::Ipv4Addr::new(10, 0, 0, 9),
+            false,
+        );
 
         let af = groups
             .get_mut(&AfiSafi::new(Afi::Ip, Safi::Unicast))
@@ -2552,7 +3201,16 @@ mod tests {
         assert_eq!(deltas.messages_formatted, 1);
         assert!(deltas.bytes_formatted > 0);
 
-        flush_done_ipv4(&mut groups, &mut peers, &tx, &id, deltas, &addrs);
+        flush_done_ipv4(
+            &mut groups,
+            &mut peers,
+            &tx,
+            &id,
+            deltas,
+            &addrs,
+            std::net::Ipv4Addr::new(10, 0, 0, 9),
+            false,
+        );
         let af = groups
             .get_mut(&AfiSafi::new(Afi::Ip, Safi::Unicast))
             .unwrap();

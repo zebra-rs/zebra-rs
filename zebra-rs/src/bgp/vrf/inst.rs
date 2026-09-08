@@ -2190,23 +2190,41 @@ impl BgpVrf {
                 );
             }
             Message::FlushDoneIpv4(group_id, deltas) => {
-                super::super::update_group::flush_done_ipv4(
+                let resync = super::super::update_group::flush_done_ipv4(
                     &mut self.update_groups,
                     &mut self.peers,
                     &self.tx,
                     &group_id,
                     deltas,
                     &self.interface_addrs,
+                    self.router_id,
+                    true,
                 );
+                // Peers moved out of this group once its job completed
+                // (`regroup_if_stale`): re-sync them under their new egress
+                // transform, replacing whatever they were skipped for while
+                // frozen.
+                for ident in resync {
+                    self.soft_reapply_peer(ident, super::super::policy::InOut::Output);
+                }
             }
             Message::FlushDoneIpv6(group_id, deltas) => {
-                super::super::update_group::flush_done_ipv6(
+                let resync = super::super::update_group::flush_done_ipv6(
                     &mut self.update_groups,
                     &mut self.peers,
                     &self.tx,
                     &group_id,
                     deltas,
+                    self.router_id,
+                    true,
                 );
+                // Peers moved out of this group once its job completed
+                // (`regroup_if_stale`): re-sync them under their new egress
+                // transform, replacing whatever they were skipped for while
+                // frozen.
+                for ident in resync {
+                    self.soft_reapply_peer(ident, super::super::policy::InOut::Output);
+                }
             }
             Message::BgpLs { .. } => {
                 // BGP-LS (RFC 9552) is produced and stored only by the
@@ -3670,6 +3688,17 @@ impl BgpVrf {
                 }
             }
         }
+        // The outbound names are update-group signature fields: re-form
+        // the peer's groups now, before the policy actor's reply runs the
+        // soft-out on the peer's new group (review finding #4). The VRF
+        // instance always advertises with `as_sets_withdraw: true`.
+        super::super::update_group::regroup_if_stale(
+            &mut self.update_groups,
+            &mut self.peers,
+            ident,
+            self.router_id,
+            true,
+        );
 
         // The wanted watch set, computed from the resolved refs.
         let wanted: Vec<(String, usize, crate::policy::PolicyType)> = policy_refs
