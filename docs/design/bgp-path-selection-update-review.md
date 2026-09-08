@@ -127,6 +127,21 @@ cap. The two reviews agree on every overlapping item.
   `inbound_attr_checks`) and reflect when `ctx.reflector_client ||
   rib.from_client`. This is a source-path input, not a destination knob,
   so it is signature-neutral.
+- FIXED (branch `bgp-rr-client-to-nonclient`): `BgpRib::from_client`,
+  stamped where each family's ingest decides `typ` (the shared
+  `inbound_attr_checks` and the seven inlined copies; carried in the four
+  shard messages that carry `typ`), and all eight reflection gates now
+  read "destination is a client OR the path came from one"
+  (`sr_policy::reflect_attr` gained `source_is_client`). BDD gates
+  `bgp_rr_client_to_nonclient` and `_v6` (five routers: reflector, two
+  clients, two non-clients) pin the whole RFC 4456 §6 matrix; on `main`
+  only the client-to-non-client scenario failed, 6/7 each. Unit:
+  `client_route_is_reflected_to_non_client_peers_in_every_family`
+  (v4, v6, LU v4/v6, EVPN, MUP, Flowspec) and
+  `ingest_stamps_from_client_on_routes_learned_from_a_client`. Known
+  caveat: toggling `route-reflector-client` on a live SOURCE peer leaves
+  already-learned paths with the old bit until re-learned or soft-in
+  replayed (same class as #21).
 
 ### 3. P1 CONFIRMED (probe) — `afi-safi ipv4|ipv6 next-hop-self` / `next-hop-unchanged` are missing from `UpdateGroupSig`
 

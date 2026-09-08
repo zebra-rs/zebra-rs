@@ -1827,6 +1827,15 @@ pub struct BgpRib {
     pub tag: u32,
     // Route type.
     pub typ: BgpRibType,
+    /// The path was learned from an iBGP peer configured as a
+    /// route-reflector client. RFC 4456 §6 reflects such a path to every
+    /// other client AND to every non-client iBGP peer, whereas a path from
+    /// a non-client goes to clients only — the egress builders need the
+    /// source side of that rule and `ident` alone cannot say it. Stamped at
+    /// ingest next to `typ`; false for eBGP, originated and imported rows.
+    /// A property of the path, identical for every member of an
+    /// update-group, so it is signature-neutral.
+    pub from_client: bool,
     // Whether this cand is currently the best path.
     pub best_path: bool,
     /// Installed alongside the bestpath as a member of an ECMP set.
@@ -2006,6 +2015,7 @@ impl BgpRib {
             // what stamps it.
             tag: 0,
             typ: rib_type,
+            from_client: false,
             best_path: false,
             multipath: false,
             best_reason: Reason::NotSelected,
@@ -4124,7 +4134,7 @@ pub fn route_ipv4_update(
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
         inbound_attr_checks(peer, attr, bgp.router_id, rd.is_none() && label.is_none())
     };
-    let Some((peer_ident, peer_router_id, typ, otc_stamped)) = checks else {
+    let Some((peer_ident, peer_router_id, typ, from_client, otc_stamped)) = checks else {
         return;
     };
     let attr = otc_stamped.as_ref().unwrap_or(attr);
@@ -4146,6 +4156,7 @@ pub fn route_ipv4_update(
         peer_ident,
         peer_router_id,
         typ,
+        from_client,
         nlri,
         rd,
         label,
@@ -4173,7 +4184,7 @@ fn inbound_attr_checks(
     attr: &BgpAttr,
     local_router_id: &Ipv4Addr,
     otc_unicast: bool,
-) -> Option<(usize, Ipv4Addr, BgpRibType, Option<BgpAttr>)> {
+) -> Option<(usize, Ipv4Addr, BgpRibType, bool, Option<BgpAttr>)> {
     if let Some(ref aspath) = attr.aspath
         && aspath_own_as_loop(peer, aspath)
     {
@@ -4215,7 +4226,8 @@ fn inbound_attr_checks(
     } else {
         BgpRibType::EBGP
     };
-    Some((peer.ident, peer.remote_id, typ, otc_stamped))
+    let from_client = peer.is_ibgp() && peer.is_reflector_client();
+    Some((peer.ident, peer.remote_id, typ, from_client, otc_stamped))
 }
 
 /// Parallel ingest for a packet's plain IPv4-unicast NLRIs (RIB
@@ -4237,7 +4249,7 @@ pub fn route_ipv4_update_batch(
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
         inbound_attr_checks(peer, attr, bgp.router_id, true)
     };
-    let Some((peer_ident, peer_router_id, typ, otc_stamped)) = checks else {
+    let Some((peer_ident, peer_router_id, typ, from_client, otc_stamped)) = checks else {
         return;
     };
     // IR3 stamped once for the whole UPDATE, main-side, before the shard
@@ -4271,6 +4283,7 @@ pub fn route_ipv4_update_batch(
                     ident: peer_ident,
                     peer_router_id,
                     typ,
+                    from_client,
                     attr: attr.clone(),
                     nlris,
                     enhe_egress: None,
@@ -4301,6 +4314,7 @@ pub fn route_ipv4_update_batch(
             nlri: nlri.clone(),
             peer_router_id,
             typ,
+            from_client,
             attr: attr.clone(),
             label: None,
             nexthop: None,
@@ -4487,6 +4501,7 @@ fn route_ipv4_update_decided(
     peer_ident: usize,
     peer_router_id: Ipv4Addr,
     typ: BgpRibType,
+    from_client: bool,
     nlri: &Ipv4Nlri,
     rd: Option<RouteDistinguisher>,
     label: Option<Label>,
@@ -4526,6 +4541,7 @@ fn route_ipv4_update_decided(
             nlri: nlri.clone(),
             peer_router_id,
             typ,
+            from_client,
             attr: attr.clone(),
             label,
             nexthop,
@@ -4565,6 +4581,7 @@ fn route_ipv4_update_decided(
         nlri: nlri.clone(),
         peer_router_id,
         typ,
+        from_client,
         attr: attr.clone(),
         label,
         nexthop,
@@ -5955,6 +5972,7 @@ pub fn route_update_evpn(
     if peer.peer_type == PeerType::IBGP
         && rib.typ == BgpRibType::IBGP
         && !peer.is_reflector_client()
+        && !rib.from_client
     {
         return None;
     }
@@ -7427,7 +7445,7 @@ pub fn route_ipv6_update(
         attr
     };
 
-    let (peer_ident, peer_router_id, typ, otc_stamp) = {
+    let (peer_ident, peer_router_id, typ, from_client, otc_stamp) = {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
 
         // RFC 4271 / 4456 loop detection — identical to the v4 path.
@@ -7485,7 +7503,8 @@ pub fn route_ipv6_update(
         } else {
             BgpRibType::EBGP
         };
-        (peer.ident, peer.remote_id, typ, otc_stamp)
+        let from_client = peer.is_ibgp() && peer.is_reflector_client();
+        (peer.ident, peer.remote_id, typ, from_client, otc_stamp)
     };
 
     // IR3: ingest the stamped copy so the stored route carries OTC.
@@ -7548,6 +7567,7 @@ pub fn route_ipv6_update(
             nlri: nlri.clone(),
             peer_router_id,
             typ,
+            from_client,
             attr: attr.clone(),
             label,
             nexthop,
@@ -7763,7 +7783,7 @@ pub fn route_labelv4_update(
     peers: &mut PeerMap,
     stale: bool,
 ) {
-    let (peer_ident, peer_router_id, typ) = {
+    let (peer_ident, peer_router_id, typ, from_client) = {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
 
         // RFC 4271 / 4456 loop detection — identical to the unicast path.
@@ -7793,7 +7813,12 @@ pub fn route_labelv4_update(
         } else {
             BgpRibType::EBGP
         };
-        (peer.ident, peer.remote_id, typ)
+        (
+            peer.ident,
+            peer.remote_id,
+            typ,
+            peer.is_ibgp() && peer.is_reflector_client(),
+        )
     };
 
     // Stamp the MP_REACH next-hop so best-path / show read the LU
@@ -7833,6 +7858,7 @@ pub fn route_labelv4_update(
         None,
         stale,
     );
+    rib.from_client = from_client;
     bgp.shard
         .adj_in_mut(peer_ident)
         .add_v4lu(lu.nlri.prefix, rib.clone());
@@ -7898,7 +7924,7 @@ pub fn route_labelv6_update(
     peers: &mut PeerMap,
     stale: bool,
 ) {
-    let (peer_ident, peer_router_id, typ) = {
+    let (peer_ident, peer_router_id, typ, from_client) = {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
 
         if let Some(ref aspath) = attr.aspath
@@ -7927,7 +7953,12 @@ pub fn route_labelv6_update(
         } else {
             BgpRibType::EBGP
         };
-        (peer.ident, peer.remote_id, typ)
+        (
+            peer.ident,
+            peer.remote_id,
+            typ,
+            peer.is_ibgp() && peer.is_reflector_client(),
+        )
     };
 
     let mut attr = attr.clone();
@@ -7964,6 +7995,7 @@ pub fn route_labelv6_update(
         None,
         stale,
     );
+    rib.from_client = from_client;
     bgp.shard
         .adj_in_mut(peer_ident)
         .add_v6lu(lu.nlri.prefix, rib.clone());
@@ -9337,7 +9369,7 @@ pub fn route_evpn_update(
 
     // Loop detection mirrors route_ipv4_update — drop the route silently
     // (no eprintln) on local-AS / ORIGINATOR_ID / CLUSTER_LIST hits.
-    let (peer_ident, peer_router_id, typ) = {
+    let (peer_ident, peer_router_id, typ, from_client) = {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
 
         if let Some(ref aspath) = attr.aspath
@@ -9367,7 +9399,12 @@ pub fn route_evpn_update(
             BgpRibType::EBGP
         };
 
-        (peer.ident, peer.remote_id, typ)
+        (
+            peer.ident,
+            peer.remote_id,
+            typ,
+            peer.is_ibgp() && peer.is_reflector_client(),
+        )
     };
 
     let stale = stale || attr_has_llgr_stale(attr);
@@ -9382,6 +9419,7 @@ pub fn route_evpn_update(
         None, // nexthop — see function doc
         stale,
     );
+    rib.from_client = from_client;
 
     // RFC 9572 §6.1: stamp the ingress peer's segmentation region so the
     // advertise gate can suppress per-PE IMET (Type-3) across region
@@ -9634,7 +9672,7 @@ pub fn route_mup_update(
         return;
     }
 
-    let (peer_ident, peer_router_id, typ) = {
+    let (peer_ident, peer_router_id, typ, from_client) = {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
 
         if let Some(ref aspath) = attr.aspath
@@ -9661,7 +9699,12 @@ pub fn route_mup_update(
         } else {
             BgpRibType::EBGP
         };
-        (peer.ident, peer.remote_id, typ)
+        (
+            peer.ident,
+            peer.remote_id,
+            typ,
+            peer.is_ibgp() && peer.is_reflector_client(),
+        )
     };
 
     let stale = stale || attr_has_llgr_stale(attr);
@@ -9676,6 +9719,7 @@ pub fn route_mup_update(
         None, // nexthop (VpnNexthop) — not used by MUP at this layer
         stale,
     );
+    rib.from_client = from_client;
     // §3.2.1: an ST1's TEID/QFI/endpoint/source are off the route key, so
     // carry them on the path — the FIB reconcile, show and re-advertise all
     // read them here rather than from the (RD+Prefix-only) key. `None` for
@@ -9935,6 +9979,7 @@ fn route_update_mup(
     if peer.peer_type == PeerType::IBGP
         && rib.typ == BgpRibType::IBGP
         && !peer.is_reflector_client()
+        && !rib.from_client
     {
         return None;
     }
@@ -10313,7 +10358,7 @@ pub fn route_flowspec_update(
 ) {
     let id = nlri.id;
 
-    let (peer_ident, peer_router_id, typ) = {
+    let (peer_ident, peer_router_id, typ, from_client) = {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
 
         if let Some(ref aspath) = attr.aspath
@@ -10343,7 +10388,12 @@ pub fn route_flowspec_update(
             BgpRibType::EBGP
         };
 
-        (peer.ident, peer.remote_id, typ)
+        (
+            peer.ident,
+            peer.remote_id,
+            typ,
+            peer.is_ibgp() && peer.is_reflector_client(),
+        )
     };
 
     let stale = stale || attr_has_llgr_stale(attr);
@@ -10358,6 +10408,7 @@ pub fn route_flowspec_update(
         None, // nexthop — flow specs carry actions, not a next-hop
         stale,
     );
+    rib.from_client = from_client;
     rib.attr = bgp.attr_store.intern(attr.clone());
 
     {
@@ -10527,6 +10578,7 @@ fn srpolicy_reflect(
         return;
     };
     let (source_ibgp, source_rid) = (src.is_ibgp(), src.remote_id);
+    let source_is_client = source_ibgp && src.is_reflector_client();
 
     let mut dests: Vec<usize> = peers.established_idents(afi, Safi::SrTePolicy);
     dests.retain(|&ident| ident != source_ident);
@@ -10538,6 +10590,7 @@ fn srpolicy_reflect(
             attr,
             source_ibgp,
             source_rid,
+            source_is_client,
             peer.is_ibgp(),
             peer.is_reflector_client(),
             our_rid,
@@ -10613,7 +10666,7 @@ pub fn route_bgpls_update(
     peers: &mut PeerMap,
     stale: bool,
 ) {
-    let (peer_ident, peer_router_id, typ) = {
+    let (peer_ident, peer_router_id, typ, from_client) = {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
 
         if let Some(ref aspath) = attr.aspath
@@ -10643,7 +10696,12 @@ pub fn route_bgpls_update(
             BgpRibType::EBGP
         };
 
-        (peer.ident, peer.remote_id, typ)
+        (
+            peer.ident,
+            peer.remote_id,
+            typ,
+            peer.is_ibgp() && peer.is_reflector_client(),
+        )
     };
 
     let stale = stale || attr_has_llgr_stale(attr);
@@ -10658,6 +10716,7 @@ pub fn route_bgpls_update(
         None, // nexthop — re-advertise next-hop is a later phase
         stale,
     );
+    rib.from_client = from_client;
     rib.attr = bgp.attr_store.intern(attr.clone());
 
     {
@@ -11104,6 +11163,7 @@ pub fn route_update_flowspec(
     if peer.peer_type == PeerType::IBGP
         && rib.typ == BgpRibType::IBGP
         && !peer.is_reflector_client()
+        && !rib.from_client
     {
         return None;
     }
@@ -12772,9 +12832,15 @@ pub fn route_update_ipv4(
         return None;
     }
 
-    // iBGP to iBGP: Don't advertise iBGP-learned routes except the peer is
-    // route reflector client.
-    if ctx.peer_type == PeerType::IBGP && rib.typ == BgpRibType::IBGP && !ctx.reflector_client {
+    // iBGP to iBGP (RFC 4456 §6): an iBGP-learned route is reflected when
+    // the destination is a route-reflector client OR the route came from
+    // one (a client's route goes to every other client and to every
+    // non-client); a non-client's route toward a non-client is not.
+    if ctx.peer_type == PeerType::IBGP
+        && rib.typ == BgpRibType::IBGP
+        && !ctx.reflector_client
+        && !rib.from_client
+    {
         return None;
     }
 
@@ -12981,6 +13047,7 @@ pub fn route_update_ipv6(
     if peer.peer_type == PeerType::IBGP
         && rib.typ == BgpRibType::IBGP
         && !peer.is_reflector_client()
+        && !rib.from_client
     {
         return None;
     }
@@ -13410,6 +13477,7 @@ fn route_update_labelv4(
     if peer.peer_type == PeerType::IBGP
         && rib.typ == BgpRibType::IBGP
         && !peer.is_reflector_client()
+        && !rib.from_client
     {
         return None;
     }
@@ -13501,6 +13569,7 @@ fn route_update_labelv6(
     if peer.peer_type == PeerType::IBGP
         && rib.typ == BgpRibType::IBGP
         && !peer.is_reflector_client()
+        && !rib.from_client
     {
         return None;
     }
@@ -26208,6 +26277,209 @@ mod rfc4456_reflect_stamp_tests {
             );
             $body
         }};
+    }
+
+    /// An ordinary (non-client) iBGP peer of the reflector.
+    fn non_client_peer() -> Peer {
+        let mut peer = client_peer();
+        peer.reflector_client = false;
+        peer
+    }
+
+    /// `ibgp_rib`, learned from a route-reflector client.
+    fn client_rib(attr: &BgpAttr) -> BgpRib {
+        let mut rib = ibgp_rib(attr);
+        rib.from_client = true;
+        rib
+    }
+
+    fn assert_reflected(attrs: &BgpAttr, family: &str) {
+        assert_eq!(
+            attrs.originator_id,
+            Some(OriginatorId::new(SOURCE_RID)),
+            "{family}: ORIGINATOR_ID is the client's Identifier"
+        );
+        assert_eq!(
+            attrs.cluster_list.as_ref().map(|cl| cl.list.clone()),
+            Some(vec![OUR_RID]),
+            "{family}: our cluster id is prepended"
+        );
+    }
+
+    /// RFC 4456 §6, second bullet: a route learned from a client is
+    /// reflected to the NON-client iBGP peers too (with ORIGINATOR_ID and
+    /// CLUSTER_LIST), while a non-client's route toward a non-client still
+    /// is not. Every family builder used to gate on the destination alone.
+    #[tokio::test]
+    async fn client_route_is_reflected_to_non_client_peers_in_every_family() {
+        with_top!(top, {
+            let mut top = top;
+            let mut peer = non_client_peer();
+            let attr = base_attr();
+
+            // IPv4 unicast (SyncCtx builder).
+            let ctx = peer.sync_ctx(OUR_RID, false);
+            let prefix: Ipv4Net = "10.9.0.0/24".parse().unwrap();
+            assert!(
+                route_update_ipv4(&ctx, &prefix, &ibgp_rib(&attr), false).is_none(),
+                "v4: a non-client's route is not reflected to a non-client"
+            );
+            let (_, attrs) = route_update_ipv4(&ctx, &prefix, &client_rib(&attr), false)
+                .expect("v4: a client's route reaches the non-client");
+            assert_reflected(&attrs, "v4");
+
+            // IPv6 unicast.
+            let mut attr6 = BgpAttr::new();
+            attr6.nexthop = Some(BgpNexthop::Ipv6("2001:db8::3".parse().unwrap()));
+            let prefix6: Ipv6Net = "2001:db8:9::/64".parse().unwrap();
+            assert!(
+                route_update_ipv6(&mut peer, &prefix6, &ibgp_rib(&attr6), &mut top, false)
+                    .is_none()
+            );
+            let (_, attrs) =
+                route_update_ipv6(&mut peer, &prefix6, &client_rib(&attr6), &mut top, false)
+                    .expect("v6: a client's route reaches the non-client");
+            assert_reflected(&attrs, "v6");
+
+            // Labeled unicast v4 / v6.
+            let labeled = |mut rib: BgpRib| {
+                rib.label = Some(Label::new(100, 0, true));
+                rib
+            };
+            assert!(
+                route_update_labelv4(
+                    &mut peer,
+                    &prefix,
+                    &labeled(ibgp_rib(&attr)),
+                    &mut top,
+                    false
+                )
+                .is_none()
+            );
+            let (_, attrs, _, _) = route_update_labelv4(
+                &mut peer,
+                &prefix,
+                &labeled(client_rib(&attr)),
+                &mut top,
+                false,
+            )
+            .expect("lu4: a client's route reaches the non-client");
+            assert_reflected(&attrs, "lu4");
+            assert!(
+                route_update_labelv6(
+                    &mut peer,
+                    &prefix6,
+                    &labeled(ibgp_rib(&attr6)),
+                    &mut top,
+                    false
+                )
+                .is_none()
+            );
+            let (_, attrs, _, _) = route_update_labelv6(
+                &mut peer,
+                &prefix6,
+                &labeled(client_rib(&attr6)),
+                &mut top,
+                false,
+            )
+            .expect("lu6: a client's route reaches the non-client");
+            assert_reflected(&attrs, "lu6");
+
+            // EVPN.
+            let rd = RouteDistinguisher::default();
+            let macip = EvpnPrefix::MacIp {
+                eth_tag: 0,
+                mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x11],
+                ip: None,
+            };
+            let mut attr_evpn = base_attr();
+            attr_evpn.nexthop = Some(BgpNexthop::Evpn(IpAddr::V4(SOURCE_RID)));
+            assert!(
+                route_update_evpn(
+                    &mut peer,
+                    &rd,
+                    &macip,
+                    &ibgp_rib(&attr_evpn),
+                    &mut top,
+                    false
+                )
+                .is_none()
+            );
+            let (_, attrs) = route_update_evpn(
+                &mut peer,
+                &rd,
+                &macip,
+                &client_rib(&attr_evpn),
+                &mut top,
+                false,
+            )
+            .expect("evpn: a client's route reaches the non-client");
+            assert_reflected(&attrs, "evpn");
+
+            // MUP.
+            let mup = MupPrefix::Isd {
+                prefix: "10.9.0.0/24".parse().unwrap(),
+            };
+            assert!(route_update_mup(&mut peer, rd, &mup, &ibgp_rib(&attr), &top).is_none());
+            let (_, attrs, _) = route_update_mup(&mut peer, rd, &mup, &client_rib(&attr), &top)
+                .expect("mup: a client's route reaches the non-client");
+            assert_reflected(&attrs, "mup");
+
+            // Flowspec.
+            let fs = FlowspecNlri::new(Afi::Ip, vec![]);
+            assert!(route_update_flowspec(&mut peer, &fs, &ibgp_rib(&attr), false, &top).is_none());
+            let (_, attrs) = route_update_flowspec(&mut peer, &fs, &client_rib(&attr), false, &top)
+                .expect("flowspec: a client's route reaches the non-client");
+            assert_reflected(&attrs, "flowspec");
+        });
+    }
+
+    /// The bit is stamped at ingest: a route received from a client peer
+    /// lands in the Loc-RIB with `from_client`, one from a non-client
+    /// without it.
+    #[tokio::test]
+    async fn ingest_stamps_from_client_on_routes_learned_from_a_client() {
+        use crate::bgp::peer_map::PeerMap;
+        use bgp_packet::CapMultiProtocol;
+
+        fn negotiated(mut peer: Peer) -> Peer {
+            let key = CapMultiProtocol::new(&Afi::Ip, &Safi::Unicast);
+            let entry = peer
+                .cap_map
+                .entries
+                .get_mut(&key)
+                .expect("v4 unicast pre-seeded");
+            entry.send = true;
+            entry.recv = true;
+            peer
+        }
+        for (client, addr) in [(true, "10.0.0.2"), (false, "10.0.0.3")] {
+            with_top!(top, {
+                let mut top = top;
+                let mut peers = PeerMap::new();
+                let mut peer = negotiated(if client {
+                    client_peer()
+                } else {
+                    non_client_peer()
+                });
+                peer.address = addr.parse().unwrap();
+                let addr: IpAddr = addr.parse().unwrap();
+                peers.insert(addr, peer);
+                let id = peers.get(&addr).unwrap().ident;
+                peers.membership_enroll(id);
+
+                let prefix: Ipv4Net = "10.9.0.0/24".parse().unwrap();
+                let mut packet = UpdatePacket::new();
+                packet.bgp_attr = Some(base_attr());
+                packet.ipv4_update.push(Ipv4Nlri { id: 0, prefix });
+                route_from_peer(id, packet, &mut top, &mut peers, None);
+
+                let rows = top.shard.v4.0.get(&prefix).expect("route accepted");
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].typ, BgpRibType::IBGP);
+                assert_eq!(rows[0].from_client, client, "client={client}");
+            });
+        }
     }
 
     /// A best-path switch between iBGP sources can preserve every received

@@ -892,6 +892,7 @@ pub fn reflect_attr(
     attr: &BgpAttr,
     source_ibgp: bool,
     source_router_id: Ipv4Addr,
+    source_is_client: bool,
     dest_ibgp: bool,
     dest_is_client: bool,
     our_router_id: Ipv4Addr,
@@ -903,7 +904,9 @@ pub fn reflect_attr(
     {
         return None;
     }
-    if source_ibgp && dest_ibgp && !dest_is_client {
+    // RFC 4456 §6: iBGP-to-iBGP only when the destination is a client or
+    // the path came from one.
+    if source_ibgp && dest_ibgp && !dest_is_client && !source_is_client {
         return None;
     }
     let mut out = attr.clone();
@@ -1539,19 +1542,58 @@ mod tests {
             ..Default::default()
         };
         // NO_ADVERTISE → never reflected, regardless of peer roles.
-        assert!(reflect_attr(&attr, true, v4("2.2.2.2"), true, true, v4("1.1.1.1")).is_none());
-        assert!(reflect_attr(&attr, false, v4("2.2.2.2"), true, true, v4("1.1.1.1")).is_none());
+        assert!(
+            reflect_attr(&attr, true, v4("2.2.2.2"), false, true, true, v4("1.1.1.1")).is_none()
+        );
+        assert!(
+            reflect_attr(
+                &attr,
+                false,
+                v4("2.2.2.2"),
+                false,
+                true,
+                true,
+                v4("1.1.1.1")
+            )
+            .is_none()
+        );
     }
 
     #[test]
     fn reflect_attr_ibgp_requires_client() {
         let attr = BgpAttr::default();
         // iBGP source → iBGP non-client dest: suppressed.
-        assert!(reflect_attr(&attr, true, v4("2.2.2.2"), true, false, v4("1.1.1.1")).is_none());
+        assert!(
+            reflect_attr(
+                &attr,
+                true,
+                v4("2.2.2.2"),
+                false,
+                true,
+                false,
+                v4("1.1.1.1")
+            )
+            .is_none()
+        );
         // iBGP source → iBGP client dest: reflected, with RR attrs stamped.
-        let out = reflect_attr(&attr, true, v4("2.2.2.2"), true, true, v4("1.1.1.1")).unwrap();
+        let out =
+            reflect_attr(&attr, true, v4("2.2.2.2"), false, true, true, v4("1.1.1.1")).unwrap();
         assert_eq!(out.originator_id.map(|o| o.id), Some(v4("2.2.2.2")));
         assert_eq!(out.cluster_list.map(|c| c.list), Some(vec![v4("1.1.1.1")]));
+    }
+
+    /// RFC 4456 §6: a client's policy is reflected to a NON-client iBGP peer
+    /// (source client, destination not), with the reflection attributes.
+    #[test]
+    fn reflect_attr_client_source_reaches_non_client() {
+        let attr = BgpAttr::new();
+        let out = reflect_attr(&attr, true, v4("2.2.2.2"), true, true, false, v4("1.1.1.1"))
+            .expect("client-sourced policy reflected to a non-client");
+        assert_eq!(out.originator_id.map(|o| o.id), Some(v4("2.2.2.2")));
+        assert_eq!(
+            out.cluster_list.map(|cl| cl.list),
+            Some(vec![v4("1.1.1.1")])
+        );
     }
 
     #[test]
@@ -1563,7 +1605,8 @@ mod tests {
             }),
             ..Default::default()
         };
-        let out = reflect_attr(&attr, true, v4("2.2.2.2"), true, true, v4("1.1.1.1")).unwrap();
+        let out =
+            reflect_attr(&attr, true, v4("2.2.2.2"), false, true, true, v4("1.1.1.1")).unwrap();
         // ORIGINATOR_ID preserved (not overwritten); our id prepended.
         assert_eq!(out.originator_id.map(|o| o.id), Some(v4("9.9.9.9")));
         assert_eq!(
@@ -1577,7 +1620,16 @@ mod tests {
         let attr = BgpAttr::default();
         // eBGP source → iBGP dest: reflected without ORIGINATOR_ID /
         // CLUSTER_LIST (it's a fresh iBGP advertisement).
-        let out = reflect_attr(&attr, false, v4("2.2.2.2"), true, false, v4("1.1.1.1")).unwrap();
+        let out = reflect_attr(
+            &attr,
+            false,
+            v4("2.2.2.2"),
+            false,
+            true,
+            false,
+            v4("1.1.1.1"),
+        )
+        .unwrap();
         assert!(out.originator_id.is_none());
         assert!(out.cluster_list.is_none());
     }
@@ -1597,7 +1649,16 @@ mod tests {
             ..Default::default()
         };
         // source iBGP, dest eBGP (dest_ibgp = false).
-        let out = reflect_attr(&attr, true, v4("2.2.2.2"), false, false, v4("1.1.1.1")).unwrap();
+        let out = reflect_attr(
+            &attr,
+            true,
+            v4("2.2.2.2"),
+            false,
+            false,
+            false,
+            v4("1.1.1.1"),
+        )
+        .unwrap();
         assert!(out.originator_id.is_none());
         assert!(out.cluster_list.is_none());
         assert!(out.local_pref.is_none());

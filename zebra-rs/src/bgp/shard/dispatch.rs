@@ -307,6 +307,7 @@ impl BgpShard {
                     nlri,
                     peer_router_id: b.peer_router_id,
                     typ: b.typ,
+                    from_client: b.from_client,
                     attr: b.attr.clone(),
                     label: None,
                     nexthop: None,
@@ -342,6 +343,7 @@ impl BgpShard {
             nlri,
             peer_router_id,
             typ,
+            from_client,
             attr,
             label,
             nexthop,
@@ -368,6 +370,7 @@ impl BgpShard {
             stale,
         );
         rib.enhe_egress = enhe_egress;
+        rib.from_client = from_client;
         // Adj-RIB-In keeps the pre-policy attribute (soft-reconfig replay).
         self.adj_in_mut(ident).add(rd, nlri.prefix, rib.clone());
 
@@ -611,6 +614,7 @@ impl BgpShard {
             nlri,
             peer_router_id,
             typ,
+            from_client,
             attr,
             label,
             nexthop,
@@ -634,6 +638,7 @@ impl BgpShard {
             nexthop,
             stale,
         );
+        rib.from_client = from_client;
         match rd {
             Some(rd) => self
                 .adj_in_mut(ident)
@@ -730,6 +735,7 @@ impl BgpShard {
             nlri,
             peer_router_id,
             typ,
+            from_client,
             attr,
             received_label,
             stale,
@@ -749,6 +755,7 @@ impl BgpShard {
             None,
             stale,
         );
+        rib.from_client = from_client;
         match &nlri {
             LuNlri::V4(n) => self.adj_in_mut(ident).add_v4lu(n.prefix, rib.clone()),
             LuNlri::V6(n) => self.adj_in_mut(ident).add_v6lu(n.prefix, rib.clone()),
@@ -1053,6 +1060,7 @@ mod tests {
             nlri: v4(prefix),
             peer_router_id: std::net::Ipv4Addr::new(10, 0, 0, 1),
             typ: BgpRibType::EBGP,
+            from_client: false,
             attr: attr.clone(),
             label: None,
             nexthop: None,
@@ -1081,6 +1089,7 @@ mod tests {
             nlri: v4(prefix),
             peer_router_id: std::net::Ipv4Addr::new(10, 0, 0, 1),
             typ: BgpRibType::EBGP,
+            from_client: false,
             attr,
             label: None,
             nexthop: None,
@@ -1111,6 +1120,7 @@ mod tests {
             nlri: v6(prefix),
             peer_router_id: std::net::Ipv4Addr::new(10, 0, 0, 1),
             typ: BgpRibType::EBGP,
+            from_client: false,
             attr: attr.clone(),
             label: None,
             nexthop: None,
@@ -1131,6 +1141,7 @@ mod tests {
             nlri: LuNlri::V4(v4(prefix)),
             peer_router_id: std::net::Ipv4Addr::new(10, 0, 0, 1),
             typ: BgpRibType::EBGP,
+            from_client: false,
             attr: attr_with_nh("192.0.2.1"),
             received_label: bgp_packet::Label::new(recv_label, 0, true),
             stale: false,
@@ -1155,6 +1166,7 @@ mod tests {
                 nlri: v4("10.0.0.0/24"),
                 peer_router_id: std::net::Ipv4Addr::new(10, 0, 0, 1),
                 typ: BgpRibType::EBGP,
+                from_client: false,
                 attr: attr.clone(),
                 label: None,
                 nexthop: None,
@@ -1192,6 +1204,7 @@ mod tests {
                 nlri: v6("2001:db8:1::/48"),
                 peer_router_id: std::net::Ipv4Addr::new(10, 0, 0, 1),
                 typ: BgpRibType::EBGP,
+                from_client: false,
                 attr: attr.clone(),
                 label: None,
                 nexthop: None,
@@ -1271,6 +1284,7 @@ mod tests {
                 nlri: v4("10.2.0.0/30"),
                 peer_router_id: std::net::Ipv4Addr::new(10, 0, 0, 1),
                 typ: BgpRibType::EBGP,
+                from_client: false,
                 attr: attr_with_nh("172.16.0.2"),
                 label: Some(bgp_packet::Label::new(16, 0, true)),
                 nexthop: None,
@@ -1313,6 +1327,7 @@ mod tests {
                 nlri: v4("10.2.0.0/30"),
                 peer_router_id: std::net::Ipv4Addr::new(10, 0, 0, 1),
                 typ: BgpRibType::IBGP,
+                from_client: false,
                 attr: attr_with_nh("172.16.0.2"),
                 label: Some(bgp_packet::Label::new(16, 0, true)),
                 nexthop: None,

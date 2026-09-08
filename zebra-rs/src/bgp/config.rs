@@ -10561,6 +10561,7 @@ mod transit_label_tests {
             },
             peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
             typ: BgpRibType::IBGP,
+            from_client: false,
             attr: BgpAttr {
                 nexthop: Some(BgpNexthop::Ipv4("10.0.0.2".parse().unwrap())),
                 ..Default::default()
@@ -10749,6 +10750,7 @@ mod transit_label_tests {
             }),
             peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
             typ: BgpRibType::IBGP,
+            from_client: false,
             attr: BgpAttr {
                 nexthop: Some(BgpNexthop::Ipv4("10.0.0.2".parse().unwrap())),
                 ..Default::default()
