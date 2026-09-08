@@ -1,0 +1,13 @@
+# z3 — route-reflector client (AS 65001), the higher-index client; z3-network.yaml makes it originate the prefix.
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.81.0.3
+    neighbor:
+    - remote-address: 2001:db8:80::1
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65001

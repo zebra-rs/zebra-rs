@@ -1,0 +1,13 @@
+# z4 — same session, the prefix withdrawn.
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 10.81.0.4
+    neighbor:
+    - remote-address: 2001:db8:80::1
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65001
