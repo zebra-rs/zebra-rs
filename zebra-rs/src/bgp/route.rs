@@ -6727,9 +6727,11 @@ fn evpn_advertise_one(
 
 /// Fan out an EVPN selection to every Established `(L2vpn, Evpn)` peer.
 /// Plain members receive only the best path; AddPath members receive
-/// every candidate in `selected`, each NLRI carrying its own path-id
-/// (RFC 7911 §3). Split-horizon / iBGP rules are applied per candidate
-/// inside `route_update_evpn`. Pairs with `route_withdraw_evpn_to_peers`.
+/// every candidate of the key (read from the Loc-RIB, not from
+/// `selected`), each NLRI carrying its own path-id (RFC 7911 §3), and a
+/// withdraw for every path-id they held that is no longer a candidate.
+/// Split-horizon / iBGP rules are applied per candidate inside
+/// `route_update_evpn`. Pairs with `route_withdraw_evpn_to_peers`.
 pub fn route_advertise_evpn_to_peers(
     rd: RouteDistinguisher,
     prefix: EvpnPrefix,
@@ -6747,11 +6749,52 @@ pub fn route_advertise_evpn_to_peers(
         evpn_advertise_one(peer, &rd, &prefix, new_best, bgp, false);
     }
 
-    // AddPath members: every candidate path, each with its path-id.
-    for ident in peers.established_addpath_idents(Afi::L2vpn, Safi::Evpn) {
-        for rib in selected {
-            let peer = peers.get_mut_by_idx(ident).expect("peer exists");
-            evpn_advertise_one(peer, &rd, &prefix, rib, bgp, true);
+    // AddPath members: every candidate path, each under its own path-id,
+    // then a withdraw for every path-id previously advertised that is no
+    // longer in the candidate set — the v6-unicast / labeled-unicast
+    // shape. The candidate set is the FULL Loc-RIB entry, not the
+    // best-only `selected`: `LocalRibEvpnTable::select_best_path` returns
+    // exactly one winner, so iterating `selected` only ever sent the best,
+    // and on a flip the survivor went out under its own path-id while the
+    // superseded path-id stayed in the member's table (and in our
+    // Adj-RIB-Out) until the key was withdrawn everywhere — a leaf kept
+    // forwarding to a dead VTEP (review finding #7).
+    let addpath_idents = peers.established_addpath_idents(Afi::L2vpn, Safi::Evpn);
+    if addpath_idents.is_empty() {
+        return;
+    }
+    // Only clone the candidate list when there is an AddPath audience —
+    // the common best-path-only fan-out must not pay a per-route clone.
+    let all_cands: Vec<BgpRib> = bgp
+        .local_rib
+        .evpn
+        .get(&rd)
+        .and_then(|t| t.cands.get(&prefix))
+        .cloned()
+        .unwrap_or_default();
+    for ident in addpath_idents {
+        let peer = peers.get_mut_by_idx(ident).expect("peer exists");
+        // The Adj-RIB-Out is the record of what was sent, keyed by path-id.
+        let was: Vec<u32> = peer
+            .adj_out
+            .evpn
+            .get(&rd)
+            .and_then(|t| t.0.get(&prefix))
+            .map(|c| c.iter().map(|r| r.local_id).collect())
+            .unwrap_or_default();
+        let mut newly: BTreeSet<u32> = BTreeSet::new();
+        for cand in &all_cands {
+            // Split-horizon, iBGP, LLGR, community and outbound-policy gates
+            // live in `evpn_advertise_one`; a candidate they reject is not
+            // "newly" advertised, so a previously sent copy is withdrawn.
+            if evpn_advertise_one(peer, &rd, &prefix, cand, bgp, true) {
+                newly.insert(cand.local_id);
+            }
+        }
+        for id in was {
+            if !newly.contains(&id) {
+                evpn_withdraw_one(peer, &rd, &prefix, id);
+            }
         }
     }
 }
@@ -15614,9 +15657,10 @@ fn send_eor_evpn(peer: &mut Peer) {
     peer.send_update(update);
 }
 
-/// Replay every selected EVPN route from the local-RIB to a peer
-/// that just transitioned to Established. Mirrors `route_sync_ipv4`:
-/// per-RD walk over `LocalRib::evpn[rd].selected`, push through
+/// Replay the EVPN Loc-RIB to a peer that just transitioned to
+/// Established — every selected route to a plain member, every candidate
+/// to an AddPath member. Mirrors `route_sync_ipv4`:
+/// per-RD walk over `LocalRib::evpn[rd]`, push through
 /// `route_update_evpn` (which handles split-horizon and iBGP gating),
 /// batch into the per-peer EVPN cache, then flush a single batched
 /// MP_REACH and finish with the EVPN EoR.
@@ -15629,16 +15673,32 @@ pub fn route_sync_evpn(peer: &mut Peer, bgp: &mut BgpTop) {
 
     // Snapshot first to dodge the borrow checker — `route_update_evpn`
     // takes `&mut Peer` and `&mut BgpTop`, both of which alias the
-    // RIB we're walking.
+    // RIB we're walking. An AddPath member is dumped EVERY candidate of
+    // each key (each under its own path-id), a plain member the selected
+    // best only — the event-driven fan-out's shape (review finding #7:
+    // dumping `selected` to an AddPath member left it holding only the
+    // best, which the next flip then never withdrew).
     let snapshot: Vec<(RouteDistinguisher, EvpnPrefix, BgpRib)> = bgp
         .local_rib
         .evpn
         .iter()
         .flat_map(|(rd, table)| {
-            table
-                .selected
-                .iter()
-                .map(move |(prefix, rib)| (*rd, prefix.clone(), rib.clone()))
+            if add_path {
+                table
+                    .cands
+                    .iter()
+                    .flat_map(|(prefix, ribs)| {
+                        ribs.iter()
+                            .map(move |rib| (*rd, prefix.clone(), rib.clone()))
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                table
+                    .selected
+                    .iter()
+                    .map(|(prefix, rib)| (*rd, prefix.clone(), rib.clone()))
+                    .collect::<Vec<_>>()
+            }
         })
         .collect();
 
@@ -20243,6 +20303,346 @@ fn evpn_encap_vxlan() -> ExtCommunityValue {
     // Encapsulation type 8 = VXLAN, occupies the trailing 2 octets.
     encap.val[5] = 8;
     encap
+}
+
+/// Review finding #7: the EVPN AddPath fan-out. An AddPath member must
+/// receive EVERY candidate of an EVPN key, each under its own path-id, and
+/// when a candidate leaves the Loc-RIB its path-id must be withdrawn from
+/// the member — the v6-unicast / labeled-unicast AddPath shape, one family
+/// later. Pre-fix the fan-out iterated the single selected best path, so a
+/// member only ever held the best, and on a flip the survivor was sent
+/// under its own path-id while the superseded one stayed in the member's
+/// table (and in our Adj-RIB-Out) until the key was withdrawn everywhere.
+#[cfg(test)]
+mod evpn_addpath_fanout_tests {
+    use super::*;
+    use crate::bgp::peer::State;
+    use std::collections::BTreeSet;
+    use std::net::IpAddr;
+    use std::str::FromStr;
+
+    /// This speaker: an iBGP route reflector.
+    const RR: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 2);
+    const VTEP_A: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
+    const VTEP_B: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 4);
+    const LEAF: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 3);
+
+    fn empty_top<'a>(
+        router_id: &'a Ipv4Addr,
+        local_rib: &'a mut LocalRib,
+        shard: &'a mut crate::bgp::shard::BgpShard,
+        attr_store: &'a mut crate::bgp::BgpAttrStore,
+        update_groups: &'a mut crate::bgp::update_group::UpdateGroupMap,
+        interface_addrs: &'a crate::bgp::interface_addrs::InterfaceAddrs,
+        rib_client: &'a crate::rib::client::RibClient,
+        tx: &'a tokio::sync::mpsc::Sender<crate::bgp::inst::Message>,
+    ) -> BgpTop<'a> {
+        BgpTop {
+            router_id,
+            srv6_ipv6_export: None,
+            local_rib,
+            shard,
+            tx,
+            rib_client,
+            attr_store,
+            update_groups,
+            interface_addrs,
+            vrf_export: None,
+            color_policy: None,
+            flex_algo_routes: None,
+            flex_algo_srv6_routes: None,
+            vrf_import: None,
+            nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+            central_label_alloc: None,
+            as_sets_withdraw: false,
+        }
+    }
+
+    fn rd() -> RouteDistinguisher {
+        RouteDistinguisher::from_str("65001:100").unwrap()
+    }
+
+    /// One MAC/IP (Type-2) key, as received from a VTEP; `id` is the
+    /// path-id on the wire (0 from a non-AddPath client).
+    fn mac_route(id: u32) -> EvpnRoute {
+        EvpnRoute::Mac(bgp_packet::EvpnMac {
+            id,
+            rd: rd(),
+            esi: [0; 10],
+            ether_tag: 0,
+            mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x11],
+            vni: 100,
+        })
+    }
+
+    fn vtep_attr(vtep: Ipv4Addr) -> BgpAttr {
+        let mut attr = BgpAttr::new();
+        attr.nexthop = Some(BgpNexthop::Evpn(IpAddr::V4(vtep)));
+        attr
+    }
+
+    /// An Established iBGP reflector client with EVPN negotiated;
+    /// `addpath` negotiates AddPath send toward it. Returns its slot and
+    /// its writer channel.
+    fn client(
+        peers: &mut PeerMap,
+        addr: &str,
+        remote_id: Ipv4Addr,
+        addpath: bool,
+    ) -> (usize, tokio::sync::mpsc::UnboundedReceiver<bytes::BytesMut>) {
+        use bgp_packet::CapMultiProtocol;
+        let (ptx, prx) = tokio::sync::mpsc::unbounded_channel();
+        let (mtx, mrx) = tokio::sync::mpsc::channel(8);
+        Box::leak(Box::new(mrx));
+        let mut peer = Peer::new(
+            0,
+            65001,
+            RR,
+            65001,
+            addr.parse::<IpAddr>().unwrap(),
+            None,
+            mtx,
+            crate::context::ProtoContext::default_table_no_rib(),
+        );
+        peer.state = State::Established;
+        peer.peer_type = PeerType::IBGP;
+        peer.reflector_client = true;
+        peer.remote_id = remote_id;
+        peer.param.local_addr = Some("10.0.0.2:179".parse().unwrap());
+        let key = CapMultiProtocol::new(&Afi::L2vpn, &Safi::Evpn);
+        let entry = peer.cap_map.entries.get_mut(&key).expect("pre-seeded");
+        entry.send = true;
+        entry.recv = true;
+        if addpath {
+            peer.opt.add_path.insert(
+                AfiSafi::new(Afi::L2vpn, Safi::Evpn),
+                bgp_packet::Direct {
+                    send: true,
+                    recv: false,
+                },
+            );
+        }
+        peer.packet_tx = Some(ptx);
+        peers.insert(addr.parse().unwrap(), peer);
+        let ident = peers.get(&addr.parse::<IpAddr>().unwrap()).unwrap().ident;
+        peers.membership_enroll(ident);
+        (ident, prx)
+    }
+
+    /// The path-ids this speaker's Adj-RIB-Out toward `ident` holds for
+    /// the key.
+    fn adj_out_ids(peers: &PeerMap, ident: usize, prefix: &EvpnPrefix) -> BTreeSet<u32> {
+        peers
+            .get_by_idx(ident)
+            .unwrap()
+            .adj_out
+            .evpn
+            .get(&rd())
+            .and_then(|t| t.0.get(prefix))
+            .map(|v| v.iter().map(|r| r.local_id).collect())
+            .unwrap_or_default()
+    }
+
+    /// Drain a peer's writer channel: the path-ids carried by every EVPN
+    /// MP_REACH NLRI and every EVPN MP_UNREACH NLRI sent.
+    fn drain(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<bytes::BytesMut>,
+    ) -> (BTreeSet<u32>, BTreeSet<u32>) {
+        let mut opt = bgp_packet::ParseOption::default();
+        opt.add_path
+            .entry(AfiSafi::new(Afi::L2vpn, Safi::Evpn))
+            .or_default()
+            .recv = true;
+        let mut reach = BTreeSet::new();
+        let mut unreach = BTreeSet::new();
+        while let Ok(bytes) = rx.try_recv() {
+            let (_, packet) = bgp_packet::BgpPacket::parse_packet(&bytes, false, Some(opt.clone()))
+                .expect("a well-formed UPDATE");
+            let bgp_packet::BgpPacket::Update(update) = packet else {
+                continue;
+            };
+            if let Some(MpReachAttr::Evpn { updates, .. }) = update.mp_update {
+                reach.extend(updates.iter().map(evpn_path_id));
+            }
+            if let Some(MpUnreachAttr::Evpn(routes)) = update.mp_withdraw {
+                unreach.extend(routes.iter().map(evpn_path_id));
+            }
+        }
+        (reach, unreach)
+    }
+
+    /// Two VTEPs advertise the same MAC under one RD; the AddPath leaf must
+    /// hold both path-ids, and when the best VTEP's path leaves the Loc-RIB
+    /// its path-id must be withdrawn from the leaf while the survivor keeps
+    /// its own id.
+    #[tokio::test]
+    async fn addpath_member_receives_every_candidate_and_a_superseded_id_is_withdrawn() {
+        let router_id = RR;
+        let ctx = crate::context::ProtoContext::default_table_no_rib();
+        let mut local_rib = LocalRib::default();
+        let mut shard = crate::bgp::shard::BgpShard::default();
+        let mut attr_store = crate::bgp::BgpAttrStore::default();
+        let mut update_groups = crate::bgp::update_group::empty_map();
+        let interface_addrs = crate::bgp::interface_addrs::InterfaceAddrs::default();
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        Box::leak(Box::new(rx));
+
+        let mut peers = PeerMap::new();
+        let (a, _a_rx) = client(&mut peers, "10.0.0.1", VTEP_A, false);
+        let (b, _b_rx) = client(&mut peers, "10.0.0.4", VTEP_B, false);
+        let (c, mut c_rx) = client(&mut peers, "10.0.0.3", LEAF, true);
+        assert_eq!(
+            peers.established_addpath_idents(Afi::L2vpn, Safi::Evpn),
+            vec![c],
+            "the AddPath EVPN audience"
+        );
+        let mut top = empty_top(
+            &router_id,
+            &mut local_rib,
+            &mut shard,
+            &mut attr_store,
+            &mut update_groups,
+            &interface_addrs,
+            &ctx.rib,
+            &tx,
+        );
+        let (_, prefix) = EvpnPrefix::from_route(&mac_route(0));
+
+        // VTEP A's path: the best (lower ORIGINATOR_ID), path-id 1.
+        route_evpn_update(
+            a,
+            &mac_route(0),
+            IpAddr::V4(VTEP_A),
+            &vtep_attr(VTEP_A),
+            &mut top,
+            &mut peers,
+            false,
+        );
+        peers.get_mut_by_idx(c).unwrap().flush_evpn();
+        let (reach, unreach) = drain(&mut c_rx);
+        assert_eq!(
+            reach,
+            BTreeSet::from([1]),
+            "A's path is sent under path-id 1"
+        );
+        assert!(unreach.is_empty());
+        assert_eq!(adj_out_ids(&peers, c, &prefix), BTreeSet::from([1]));
+
+        // VTEP B's path: not best, path-id 2. An AddPath member must receive
+        // every candidate, so it is sent too.
+        route_evpn_update(
+            b,
+            &mac_route(0),
+            IpAddr::V4(VTEP_B),
+            &vtep_attr(VTEP_B),
+            &mut top,
+            &mut peers,
+            false,
+        );
+        assert_eq!(
+            top.local_rib.evpn[&rd()].selected[&prefix].ident,
+            a,
+            "A stays best"
+        );
+        peers.get_mut_by_idx(c).unwrap().flush_evpn();
+        let (reach, unreach) = drain(&mut c_rx);
+        assert!(
+            reach.contains(&2),
+            "the non-best candidate is sent under its own path-id; sent {reach:?}"
+        );
+        assert!(unreach.is_empty());
+        assert_eq!(
+            adj_out_ids(&peers, c, &prefix),
+            BTreeSet::from([1, 2]),
+            "the Adj-RIB-Out holds both path-ids"
+        );
+
+        // VTEP A's path leaves the Loc-RIB (session death sweeps through the
+        // same withdraw): the survivor keeps path-id 2 and path-id 1 must be
+        // withdrawn from the member — it would otherwise keep forwarding to
+        // the dead VTEP until the MAC is withdrawn everywhere.
+        route_evpn_withdraw(a, &mac_route(0), &mut top, &mut peers);
+        assert_eq!(
+            top.local_rib.evpn[&rd()].selected[&prefix].ident,
+            b,
+            "B is now best"
+        );
+        peers.get_mut_by_idx(c).unwrap().flush_evpn();
+        let (reach, unreach) = drain(&mut c_rx);
+        assert_eq!(
+            unreach,
+            BTreeSet::from([1]),
+            "the superseded path-id is withdrawn (reach sent: {reach:?})"
+        );
+        assert!(!reach.contains(&1), "the departed path is not re-sent");
+        assert_eq!(
+            adj_out_ids(&peers, c, &prefix),
+            BTreeSet::from([2]),
+            "the Adj-RIB-Out holds only the survivor"
+        );
+    }
+
+    /// The session-up dump toward an AddPath member must carry every
+    /// candidate of a key, not only the selected best — a member that comes
+    /// up after both VTEPs advertised must hold both path-ids.
+    #[tokio::test]
+    async fn session_up_dump_sends_every_candidate_to_an_addpath_member() {
+        let router_id = RR;
+        let ctx = crate::context::ProtoContext::default_table_no_rib();
+        let mut local_rib = LocalRib::default();
+        let mut shard = crate::bgp::shard::BgpShard::default();
+        let mut attr_store = crate::bgp::BgpAttrStore::default();
+        let mut update_groups = crate::bgp::update_group::empty_map();
+        let interface_addrs = crate::bgp::interface_addrs::InterfaceAddrs::default();
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        Box::leak(Box::new(rx));
+
+        let mut peers = PeerMap::new();
+        let (a, _a_rx) = client(&mut peers, "10.0.0.1", VTEP_A, false);
+        let (b, _b_rx) = client(&mut peers, "10.0.0.4", VTEP_B, false);
+        let mut top = empty_top(
+            &router_id,
+            &mut local_rib,
+            &mut shard,
+            &mut attr_store,
+            &mut update_groups,
+            &interface_addrs,
+            &ctx.rib,
+            &tx,
+        );
+        let (_, prefix) = EvpnPrefix::from_route(&mac_route(0));
+        route_evpn_update(
+            a,
+            &mac_route(0),
+            IpAddr::V4(VTEP_A),
+            &vtep_attr(VTEP_A),
+            &mut top,
+            &mut peers,
+            false,
+        );
+        route_evpn_update(
+            b,
+            &mac_route(0),
+            IpAddr::V4(VTEP_B),
+            &vtep_attr(VTEP_B),
+            &mut top,
+            &mut peers,
+            false,
+        );
+
+        // The leaf comes up afterwards and is dumped the table.
+        let (c, mut c_rx) = client(&mut peers, "10.0.0.3", LEAF, true);
+        route_sync_evpn(peers.get_mut_by_idx(c).unwrap(), &mut top);
+        let (reach, _unreach) = drain(&mut c_rx);
+        assert_eq!(
+            reach,
+            BTreeSet::from([1, 2]),
+            "the dump carries every candidate under its path-id"
+        );
+        assert_eq!(adj_out_ids(&peers, c, &prefix), BTreeSet::from([1, 2]));
+    }
 }
 
 /// Receive-side encapsulation classification: which overlay is a received
