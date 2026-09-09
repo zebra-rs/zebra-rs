@@ -14028,6 +14028,37 @@ impl LabeledAfi for LabeledV6 {
 /// render input is a constant (the local address, this router's cluster
 /// id) or the peer's own config, unchanged across the re-advertise this
 /// dedup guards.
+/// The Adj-RIB-Out row for a labeled advertisement: the Loc-RIB candidate
+/// with its attr replaced by the interned post-policy egress attr, its
+/// label by the advertised label, and the MP_REACH next-hop written back
+/// into that attr — what the peer was actually sent, so `same_advertised`
+/// compares sends, not received candidates. A changed outbound policy
+/// result, label or next-hop on an unchanged candidate is therefore a
+/// change.
+///
+/// The next-hop must be written back explicitly: the labeled builders
+/// (`route_update_labelv4/6`) return it beside the attr and clear
+/// `attr.nexthop` (MP_REACH carries it, not the NEXT_HOP attribute), so a
+/// row built from the returned attr alone would never see a next-hop
+/// change — an iBGP peer would keep forwarding to the obsolete next-hop.
+fn advertised_form(
+    bgp: &mut BgpTop,
+    cand: &BgpRib,
+    attr: &BgpAttr,
+    nhop: IpAddr,
+    label: Label,
+) -> BgpRib {
+    let mut attr = attr.clone();
+    attr.nexthop = Some(match nhop {
+        IpAddr::V4(a) => BgpNexthop::Ipv4(a),
+        IpAddr::V6(a) => BgpNexthop::Ipv6(a),
+    });
+    let mut sent = cand.clone();
+    sent.attr = bgp.attr_store.intern(attr);
+    sent.label = Some(label);
+    sent
+}
+
 fn same_advertised(a: &BgpRib, b: &BgpRib) -> bool {
     a.typ == b.typ
         && a.label == b.label
@@ -14077,8 +14108,14 @@ fn route_advertise_labeled<A: LabeledAfi>(
                 // ping-pong identical UPDATEs forever (each re-advertise
                 // re-triggers the peer's). Skip the send when the winner
                 // matches what the peer already holds.
-                let prev = A::adj_out_record(peer, prefix, best.clone(), false);
-                if prev.as_ref().is_none_or(|p| !same_advertised(p, &best)) {
+                //
+                // The row holds what was SENT — the post-policy attr, the
+                // MP_REACH next-hop and the advertised label — so a changed
+                // outbound policy result, next-hop or label on an unchanged
+                // Loc-RIB candidate is a change (review follow-ups on #6).
+                let sent = advertised_form(bgp, &best, &attr, nhop, label);
+                let prev = A::adj_out_record(peer, prefix, sent.clone(), false);
+                if prev.as_ref().is_none_or(|p| !same_advertised(p, &sent)) {
                     let mut update = peer.update_packet();
                     update.bgp_attr = Some(attr);
                     update.mp_update = Some(A::reach(nhop, label, nlri));
@@ -14131,12 +14168,26 @@ fn route_advertise_labeled<A: LabeledAfi>(
             let Some(decision) = A::apply_policy_out(peer, &nlri, attr, cand.weight) else {
                 continue;
             };
+            // Record first: under AddPath `adj_out_record` hands back the row
+            // previously advertised under this path-id, so an unchanged
+            // advertisement is recognised and NOT re-sent — the best-path-only
+            // branch above does the same with `same_advertised`. Without
+            // this, two AddPath labeled-unicast peers holding the same
+            // prefix re-fan their own candidate to each other on every
+            // UPDATE received, a loop bounded only by the round-trip time.
+            // The row holds the advertised form (post-policy attr, MP_REACH
+            // next-hop, label), so a changed policy result or next-hop on an
+            // unchanged candidate is sent.
+            let sent = advertised_form(bgp, cand, &decision.attr, nhop, label);
+            let prev = A::adj_out_record(peer, prefix, sent.clone(), true);
+            newly.insert(cand.local_id);
+            if prev.as_ref().is_some_and(|p| same_advertised(p, &sent)) {
+                continue;
+            }
             let mut update = peer.update_packet();
             update.bgp_attr = Some(decision.attr);
             update.mp_update = Some(A::reach(nhop, label, nlri));
             peer.send_update(update);
-            A::adj_out_record(peer, prefix, cand.clone(), true);
-            newly.insert(cand.local_id);
         }
         for id in was {
             if newly.contains(&id) {
@@ -15779,6 +15830,9 @@ pub fn route_sync_labelv4(peer: &mut Peer, bgp: &mut BgpTop) {
         ) else {
             continue;
         };
+        // Record the advertised form (post-policy attr, label) so the
+        // event path's dedup compares like with like after the sync.
+        let sent = advertised_form(bgp, &best, &decision.attr, nhop, label);
         let mut update = peer.update_packet();
         update.bgp_attr = Some(decision.attr);
         update.mp_update = Some(MpReachAttr::Labelv4 {
@@ -15791,7 +15845,7 @@ pub fn route_sync_labelv4(peer: &mut Peer, bgp: &mut BgpTop) {
         // withdraw reaches a peer that learned the prefix only via this
         // session-up dump (the event-driven LU withdraw gates on
         // `adj_out.v4lu`; mirrors the route_sync_ipv4/ipv6 fix).
-        peer.adj_out.v4lu.add(prefix, best);
+        peer.adj_out.v4lu.add(prefix, sent);
     }
 }
 
@@ -15828,6 +15882,8 @@ pub fn route_sync_labelv6(peer: &mut Peer, bgp: &mut BgpTop) {
         ) else {
             continue;
         };
+        // Record the advertised form (post-policy attr, label), as for v4.
+        let sent = advertised_form(bgp, &best, &decision.attr, nhop, label);
         let mut update = peer.update_packet();
         update.bgp_attr = Some(decision.attr);
         update.mp_update = Some(MpReachAttr::Labelv6 {
@@ -15838,7 +15894,7 @@ pub fn route_sync_labelv6(peer: &mut Peer, bgp: &mut BgpTop) {
         peer.send_update(update);
         // See route_sync_labelv4: register so a later withdraw reaches a
         // peer that learned the prefix only via this session-up dump.
-        peer.adj_out.v6lu.add(prefix, best);
+        peer.adj_out.v6lu.add(prefix, sent);
     }
 }
 
@@ -26888,6 +26944,443 @@ mod labeled_community_suppress_tests {
     /// update path used to skip the RFC 1997 filter entirely, leaking
     /// it. NO_EXPORT does the same toward this eBGP peer. A plain route
     /// still advertises.
+    /// Review finding #6: the labeled-unicast AddPath fan-out must not
+    /// re-send a candidate the peer already holds unchanged under that
+    /// path-id. Two AddPath LU peers holding the same prefix otherwise
+    /// re-fan their own candidate to each other on every UPDATE received,
+    /// forever. Ingest the same route twice from a source peer: the AddPath
+    /// peer must be sent it once; a changed candidate is sent again.
+    #[tokio::test]
+    async fn lu_addpath_peer_is_not_resent_an_unchanged_candidate() {
+        use bgp_packet::{CapMultiProtocol, Label};
+        let router_id = Ipv4Addr::new(10, 0, 0, 9);
+        let ctx = crate::context::ProtoContext::default_table_no_rib();
+        let mut local_rib = LocalRib::default();
+        let mut shard = crate::bgp::shard::BgpShard::default();
+        let mut attr_store = crate::bgp::BgpAttrStore::default();
+        let mut update_groups = crate::bgp::update_group::empty_map();
+        let interface_addrs = crate::bgp::interface_addrs::InterfaceAddrs::default();
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        Box::leak(Box::new(rx));
+
+        let mut peers = PeerMap::new();
+        let mut make = |addr: &str, remote_as: u32, addpath: bool| {
+            let (ptx, prx) = tokio::sync::mpsc::unbounded_channel();
+            let (mtx, mrx) = tokio::sync::mpsc::channel(8);
+            Box::leak(Box::new(mrx));
+            let mut peer = Peer::new(
+                0,
+                65001,
+                router_id,
+                remote_as,
+                addr.parse::<IpAddr>().unwrap(),
+                None,
+                mtx,
+                crate::context::ProtoContext::default_table_no_rib(),
+            );
+            peer.state = State::Established;
+            peer.peer_type = PeerType::EBGP;
+            peer.param.local_addr = Some("10.0.0.9:179".parse().unwrap());
+            let key = CapMultiProtocol::new(&Afi::Ip, &Safi::MplsLabel);
+            let entry = peer.cap_map.entries.get_mut(&key).expect("pre-seeded");
+            entry.send = true;
+            entry.recv = true;
+            if addpath {
+                peer.opt.add_path.insert(
+                    AfiSafi::new(Afi::Ip, Safi::MplsLabel),
+                    bgp_packet::Direct {
+                        send: true,
+                        recv: false,
+                    },
+                );
+            }
+            peer.packet_tx = Some(ptx);
+            peers.insert(addr.parse().unwrap(), peer);
+            prx
+        };
+        let _src_rx = make("10.0.0.3", 65003, false);
+        let mut ap_rx = make("10.0.0.4", 65004, true);
+        let src = peers
+            .get(&"10.0.0.3".parse::<IpAddr>().unwrap())
+            .unwrap()
+            .ident;
+        let ap = peers
+            .get(&"10.0.0.4".parse::<IpAddr>().unwrap())
+            .unwrap()
+            .ident;
+        peers.membership_enroll(src);
+        peers.membership_enroll(ap);
+        assert_eq!(
+            peers.established_addpath_idents(Afi::Ip, Safi::MplsLabel),
+            vec![ap],
+            "the AddPath LU audience"
+        );
+
+        let mut top = empty_top(
+            &router_id,
+            &mut local_rib,
+            &mut shard,
+            &mut attr_store,
+            &mut update_groups,
+            &interface_addrs,
+            &ctx.rib,
+            &tx,
+        );
+        let lu = Labelv4Nlri {
+            label: Label::new(100, 0, true),
+            nlri: Ipv4Nlri {
+                id: 0,
+                prefix: "10.9.0.0/24".parse().unwrap(),
+            },
+        };
+        let nhop: IpAddr = "10.0.0.3".parse().unwrap();
+        let mut attr = BgpAttr::new();
+        attr.aspath = Some(As4Path::from(vec![65003]));
+        attr.nexthop = Some(BgpNexthop::Ipv4("10.0.0.3".parse().unwrap()));
+        let count = |rx: &mut tokio::sync::mpsc::UnboundedReceiver<bytes::BytesMut>| {
+            let mut n = 0;
+            while rx.try_recv().is_ok() {
+                n += 1;
+            }
+            n
+        };
+
+        route_labelv4_update(src, &lu, nhop, &attr, &mut top, &mut peers, false);
+        assert_eq!(count(&mut ap_rx), 1, "the new candidate is sent once");
+
+        // The same route again (an identical implicit replace): nothing to
+        // tell the AddPath peer.
+        route_labelv4_update(src, &lu, nhop, &attr, &mut top, &mut peers, false);
+        assert_eq!(
+            count(&mut ap_rx),
+            0,
+            "an unchanged candidate is not re-sent"
+        );
+
+        // A changed candidate (new MED) is sent again.
+        let mut changed = attr.clone();
+        changed.med = Some(bgp_packet::Med::new(7));
+        route_labelv4_update(src, &lu, nhop, &changed, &mut top, &mut peers, false);
+        assert_eq!(count(&mut ap_rx), 1, "a changed candidate is sent");
+
+        // Review follow-up: a changed OUTBOUND POLICY RESULT on an unchanged
+        // candidate is a change too — the dedup compares what was sent,
+        // not the received candidate. Bind a policy that sets MED 77, then
+        // ingest the identical route again.
+        let mut policy = crate::policy::PolicyList::default();
+        policy.entry(10).action = crate::policy::PolicyAction::Permit;
+        policy.entry(10).med = Some(crate::policy::NumericSet::Set(77));
+        // A per-AFI slot is consulted only once it carries a name (an
+        // unnamed slot falls back to the legacy per-direction policy).
+        let slot = peers
+            .get_mut_by_idx(ap)
+            .unwrap()
+            .policy_list_slot(AfiSafi::new(Afi::Ip, Safi::MplsLabel), InOut::Output);
+        slot.name = Some("SET-MED".into());
+        slot.policy_list = Some(policy);
+        assert_eq!(
+            LabeledV4::apply_policy_out(
+                peers.get_by_idx(ap).unwrap(),
+                &lu.nlri,
+                changed.clone(),
+                0
+            )
+            .unwrap()
+            .attr
+            .med,
+            Some(bgp_packet::Med::new(77)),
+            "the policy resolves and rewrites MED"
+        );
+        route_labelv4_update(src, &lu, nhop, &changed, &mut top, &mut peers, false);
+        assert_eq!(
+            count(&mut ap_rx),
+            1,
+            "the changed policy result is sent although the candidate is unchanged"
+        );
+        let sent = &peers.get_by_idx(ap).unwrap().adj_out.v4lu.0[&lu.nlri.prefix][0];
+        assert_eq!(
+            sent.attr.med,
+            Some(bgp_packet::Med::new(77)),
+            "the Adj-RIB-Out holds the advertised (post-policy) attr"
+        );
+        route_labelv4_update(src, &lu, nhop, &changed, &mut top, &mut peers, false);
+        assert_eq!(
+            count(&mut ap_rx),
+            0,
+            "and that send is dedup'ed like any other"
+        );
+    }
+
+    /// Review follow-up on the advertised-form dedup: the labeled builders
+    /// return the MP_REACH next-hop beside the attr and clear `attr.nexthop`,
+    /// so a row built from the returned attr alone never sees a next-hop
+    /// change. Toward iBGP peers (no next-hop-self) the received next-hop
+    /// IS the advertised one: a route re-learned with only its next-hop
+    /// changed must be re-sent to both an AddPath and a plain LU peer, and
+    /// the identical route after that is deduplicated again.
+    #[tokio::test]
+    async fn lu_ibgp_peers_are_sent_a_next_hop_only_change() {
+        use bgp_packet::{CapMultiProtocol, Label};
+        let router_id = Ipv4Addr::new(10, 0, 0, 9);
+        let ctx = crate::context::ProtoContext::default_table_no_rib();
+        let mut local_rib = LocalRib::default();
+        let mut shard = crate::bgp::shard::BgpShard::default();
+        let mut attr_store = crate::bgp::BgpAttrStore::default();
+        let mut update_groups = crate::bgp::update_group::empty_map();
+        let interface_addrs = crate::bgp::interface_addrs::InterfaceAddrs::default();
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        Box::leak(Box::new(rx));
+
+        let mut peers = PeerMap::new();
+        let mut make = |addr: &str, remote_as: u32, ibgp: bool, addpath: bool| {
+            let (ptx, prx) = tokio::sync::mpsc::unbounded_channel();
+            let (mtx, mrx) = tokio::sync::mpsc::channel(8);
+            Box::leak(Box::new(mrx));
+            let mut peer = Peer::new(
+                0,
+                65001,
+                router_id,
+                remote_as,
+                addr.parse::<IpAddr>().unwrap(),
+                None,
+                mtx,
+                crate::context::ProtoContext::default_table_no_rib(),
+            );
+            peer.state = State::Established;
+            peer.peer_type = if ibgp { PeerType::IBGP } else { PeerType::EBGP };
+            peer.param.local_addr = Some("10.0.0.9:179".parse().unwrap());
+            let key = CapMultiProtocol::new(&Afi::Ip, &Safi::MplsLabel);
+            let entry = peer.cap_map.entries.get_mut(&key).expect("pre-seeded");
+            entry.send = true;
+            entry.recv = true;
+            if addpath {
+                peer.opt.add_path.insert(
+                    AfiSafi::new(Afi::Ip, Safi::MplsLabel),
+                    bgp_packet::Direct {
+                        send: true,
+                        recv: false,
+                    },
+                );
+            }
+            peer.packet_tx = Some(ptx);
+            peers.insert(addr.parse().unwrap(), peer);
+            prx
+        };
+        let _src_rx = make("10.0.0.3", 65003, false, false);
+        let mut ap_rx = make("10.0.0.4", 65001, true, true);
+        let mut plain_rx = make("10.0.0.5", 65001, true, false);
+        let src = peers
+            .get(&"10.0.0.3".parse::<IpAddr>().unwrap())
+            .unwrap()
+            .ident;
+        let ap = peers
+            .get(&"10.0.0.4".parse::<IpAddr>().unwrap())
+            .unwrap()
+            .ident;
+        let plain = peers
+            .get(&"10.0.0.5".parse::<IpAddr>().unwrap())
+            .unwrap()
+            .ident;
+        peers.membership_enroll(src);
+        peers.membership_enroll(ap);
+        peers.membership_enroll(plain);
+        assert_eq!(
+            peers.established_addpath_idents(Afi::Ip, Safi::MplsLabel),
+            vec![ap]
+        );
+        assert_eq!(
+            peers.established_plain_idents(Afi::Ip, Safi::MplsLabel),
+            vec![src, plain]
+        );
+
+        let mut top = empty_top(
+            &router_id,
+            &mut local_rib,
+            &mut shard,
+            &mut attr_store,
+            &mut update_groups,
+            &interface_addrs,
+            &ctx.rib,
+            &tx,
+        );
+        let lu = Labelv4Nlri {
+            label: Label::new(100, 0, true),
+            nlri: Ipv4Nlri {
+                id: 0,
+                prefix: "10.9.0.0/24".parse().unwrap(),
+            },
+        };
+        let mut attr = BgpAttr::new();
+        attr.aspath = Some(As4Path::from(vec![65003]));
+        attr.nexthop = Some(BgpNexthop::Ipv4("10.0.0.3".parse().unwrap()));
+        let count = |rx: &mut tokio::sync::mpsc::UnboundedReceiver<bytes::BytesMut>| {
+            let mut n = 0;
+            while rx.try_recv().is_ok() {
+                n += 1;
+            }
+            n
+        };
+        let nhop_of = |peers: &PeerMap, ident: usize| {
+            let row = &peers.get_by_idx(ident).unwrap().adj_out.v4lu.0[&lu.nlri.prefix][0];
+            row.attr.nexthop.clone()
+        };
+
+        let nhop: IpAddr = "10.0.0.3".parse().unwrap();
+        route_labelv4_update(src, &lu, nhop, &attr, &mut top, &mut peers, false);
+        assert_eq!(
+            count(&mut ap_rx),
+            1,
+            "AddPath peer: the new candidate is sent"
+        );
+        assert_eq!(count(&mut plain_rx), 1, "plain peer: the new best is sent");
+        route_labelv4_update(src, &lu, nhop, &attr, &mut top, &mut peers, false);
+        assert_eq!(count(&mut ap_rx), 0, "AddPath peer: unchanged, not re-sent");
+        assert_eq!(
+            count(&mut plain_rx),
+            0,
+            "plain peer: unchanged, not re-sent"
+        );
+
+        // Only the next-hop changes (same attrs, same label); toward an iBGP
+        // peer that is the advertised next-hop, so both must be told.
+        let new_nhop: IpAddr = "10.0.0.7".parse().unwrap();
+        route_labelv4_update(src, &lu, new_nhop, &attr, &mut top, &mut peers, false);
+        assert_eq!(
+            count(&mut ap_rx),
+            1,
+            "AddPath peer: a next-hop-only change is advertised"
+        );
+        assert_eq!(
+            count(&mut plain_rx),
+            1,
+            "plain peer: a next-hop-only change is advertised"
+        );
+        let expect = Some(BgpNexthop::Ipv4("10.0.0.7".parse().unwrap()));
+        assert_eq!(
+            nhop_of(&peers, ap),
+            expect,
+            "the row holds the advertised next-hop"
+        );
+        assert_eq!(nhop_of(&peers, plain), expect);
+        route_labelv4_update(src, &lu, new_nhop, &attr, &mut top, &mut peers, false);
+        assert_eq!(count(&mut ap_rx), 0, "AddPath peer: dedup'ed again");
+        assert_eq!(count(&mut plain_rx), 0, "plain peer: dedup'ed again");
+    }
+
+    /// Best-path-only twin of the policy case above: the plain labeled
+    /// branch had the same blindness (it compared received candidates), so
+    /// a changed outbound policy result must reach a plain LU peer too.
+    #[tokio::test]
+    async fn lu_plain_peer_is_sent_a_changed_outbound_policy_result() {
+        use bgp_packet::{CapMultiProtocol, Label};
+        let router_id = Ipv4Addr::new(10, 0, 0, 9);
+        let ctx = crate::context::ProtoContext::default_table_no_rib();
+        let mut local_rib = LocalRib::default();
+        let mut shard = crate::bgp::shard::BgpShard::default();
+        let mut attr_store = crate::bgp::BgpAttrStore::default();
+        let mut update_groups = crate::bgp::update_group::empty_map();
+        let interface_addrs = crate::bgp::interface_addrs::InterfaceAddrs::default();
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        Box::leak(Box::new(rx));
+
+        let mut peers = PeerMap::new();
+        let mut make = |addr: &str, remote_as: u32| {
+            let (ptx, prx) = tokio::sync::mpsc::unbounded_channel();
+            let (mtx, mrx) = tokio::sync::mpsc::channel(8);
+            Box::leak(Box::new(mrx));
+            let mut peer = Peer::new(
+                0,
+                65001,
+                router_id,
+                remote_as,
+                addr.parse::<IpAddr>().unwrap(),
+                None,
+                mtx,
+                crate::context::ProtoContext::default_table_no_rib(),
+            );
+            peer.state = State::Established;
+            peer.peer_type = PeerType::EBGP;
+            peer.param.local_addr = Some("10.0.0.9:179".parse().unwrap());
+            let key = CapMultiProtocol::new(&Afi::Ip, &Safi::MplsLabel);
+            let entry = peer.cap_map.entries.get_mut(&key).expect("pre-seeded");
+            entry.send = true;
+            entry.recv = true;
+            peer.packet_tx = Some(ptx);
+            peers.insert(addr.parse().unwrap(), peer);
+            prx
+        };
+        let _src_rx = make("10.0.0.3", 65003);
+        let mut plain_rx = make("10.0.0.4", 65004);
+        let src = peers
+            .get(&"10.0.0.3".parse::<IpAddr>().unwrap())
+            .unwrap()
+            .ident;
+        let plain = peers
+            .get(&"10.0.0.4".parse::<IpAddr>().unwrap())
+            .unwrap()
+            .ident;
+        peers.membership_enroll(src);
+        peers.membership_enroll(plain);
+        assert_eq!(
+            peers.established_plain_idents(Afi::Ip, Safi::MplsLabel),
+            vec![src, plain]
+        );
+
+        let mut top = empty_top(
+            &router_id,
+            &mut local_rib,
+            &mut shard,
+            &mut attr_store,
+            &mut update_groups,
+            &interface_addrs,
+            &ctx.rib,
+            &tx,
+        );
+        let lu = Labelv4Nlri {
+            label: Label::new(100, 0, true),
+            nlri: Ipv4Nlri {
+                id: 0,
+                prefix: "10.9.0.0/24".parse().unwrap(),
+            },
+        };
+        let nhop: IpAddr = "10.0.0.3".parse().unwrap();
+        let mut attr = BgpAttr::new();
+        attr.aspath = Some(As4Path::from(vec![65003]));
+        attr.nexthop = Some(BgpNexthop::Ipv4("10.0.0.3".parse().unwrap()));
+        let count = |rx: &mut tokio::sync::mpsc::UnboundedReceiver<bytes::BytesMut>| {
+            let mut n = 0;
+            while rx.try_recv().is_ok() {
+                n += 1;
+            }
+            n
+        };
+
+        route_labelv4_update(src, &lu, nhop, &attr, &mut top, &mut peers, false);
+        assert_eq!(count(&mut plain_rx), 1, "the best is sent once");
+        route_labelv4_update(src, &lu, nhop, &attr, &mut top, &mut peers, false);
+        assert_eq!(count(&mut plain_rx), 0, "an unchanged best is not re-sent");
+
+        let mut policy = crate::policy::PolicyList::default();
+        policy.entry(10).action = crate::policy::PolicyAction::Permit;
+        policy.entry(10).med = Some(crate::policy::NumericSet::Set(77));
+        let slot = peers
+            .get_mut_by_idx(plain)
+            .unwrap()
+            .policy_list_slot(AfiSafi::new(Afi::Ip, Safi::MplsLabel), InOut::Output);
+        slot.name = Some("SET-MED".into());
+        slot.policy_list = Some(policy);
+        route_labelv4_update(src, &lu, nhop, &attr, &mut top, &mut peers, false);
+        assert_eq!(
+            count(&mut plain_rx),
+            1,
+            "the changed policy result is sent to the plain peer"
+        );
+        let sent = &peers.get_by_idx(plain).unwrap().adj_out.v4lu.0[&lu.nlri.prefix][0];
+        assert_eq!(sent.attr.med, Some(bgp_packet::Med::new(77)));
+        route_labelv4_update(src, &lu, nhop, &attr, &mut top, &mut peers, false);
+        assert_eq!(count(&mut plain_rx), 0, "and dedup'ed thereafter");
+    }
+
     #[tokio::test]
     async fn labelv4_honors_no_advertise_and_no_export() {
         let router_id = Ipv4Addr::new(10, 0, 0, 9);

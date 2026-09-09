@@ -1507,6 +1507,65 @@ fn json_scalar(value: &Value) -> String {
 /// every row — and a prefix with several candidates lists one row per
 /// path in arrival order, so "first row with the prefix" is not the
 /// selection either.
+/// Message-rate guard: sample what `namespace` has RECEIVED from `neighbor`
+/// (`msg_rcvd` in `show bgp summary -j`) twice, `window` seconds apart, and
+/// require the difference to stay under `max`. The received side is the
+/// one that counts: the daemon counts every received message by type but
+/// never counts sent UPDATEs, so a sender-side check would see nothing. A
+/// re-send loop between two AddPath labeled-unicast peers runs at line
+/// rate, so one window separates it from the keepalive trickle (at most
+/// one keepalive per window here).
+#[then(
+    expr = "BGP neighbor {string} in {string} receives fewer than {int} messages over {int} seconds"
+)]
+async fn verify_bgp_neighbor_receive_rate(
+    world: &mut World,
+    neighbor: String,
+    namespace: String,
+    max: u64,
+    window: u64,
+) {
+    let scoped = world.ns(&namespace);
+    async fn msg_rcvd(scoped: &str, neighbor: &str) -> u64 {
+        let out = netns::exec_in_netns(scoped, "vtyctl", &["show", "-j", "show bgp summary"])
+            .await
+            .expect("Failed to run show bgp summary");
+        let v: Value = serde_json::from_str(&out)
+            .unwrap_or_else(|e| panic!("summary JSON in {}: {} — {}", scoped, e, out));
+        fn find(v: &Value, neighbor: &str) -> Option<u64> {
+            match v {
+                Value::Array(items) => items.iter().find_map(|i| find(i, neighbor)),
+                Value::Object(map) => {
+                    if map.get("neighbor").and_then(|n| n.as_str()) == Some(neighbor) {
+                        return map.get("msg_rcvd").and_then(|m| m.as_u64());
+                    }
+                    map.values().find_map(|c| find(c, neighbor))
+                }
+                _ => None,
+            }
+        }
+        find(&v, neighbor)
+            .unwrap_or_else(|| panic!("no summary row for {} in {}: {}", neighbor, scoped, out))
+    }
+    let before = msg_rcvd(&scoped, &neighbor).await;
+    tokio::time::sleep(tokio::time::Duration::from_secs(window)).await;
+    let after = msg_rcvd(&scoped, &neighbor).await;
+    let received = after.saturating_sub(before);
+    assert!(
+        received < max,
+        "BGP neighbor {} in {} received {} messages in {}s (limit {}): a re-send loop",
+        neighbor,
+        scoped,
+        received,
+        window,
+        max
+    );
+    println!(
+        "✓ BGP neighbor {} in {} received {} messages in {}s (< {})",
+        neighbor, scoped, received, window, max
+    );
+}
+
 #[then(expr = "BGP best path in {string} for {string} has next-hop {string}")]
 async fn verify_bgp_best_path_nexthop(
     world: &mut World,

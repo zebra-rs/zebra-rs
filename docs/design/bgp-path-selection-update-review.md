@@ -7,16 +7,16 @@ MUP/Flowspec/SR-Policy/RTC where they share the machinery). Reviewed
 against `main` at `2f1e9a09` (2026-09-07). Line numbers are as of that
 commit.
 
-Status (2026-09-09): six items are fixed on `main` — #1 (PR #2372,
+Status (2026-09-09): seven items are fixed on `main` — #1 (PR #2372,
 merge `3beacbcc`), the listen-range peer-type item found while fixing it
 (PR #2373, `ba327126`), #2 (PR #2375, `308b196a`), #3 (PR #2376,
 `b8fef738`), #4 (PR #2377, `1cc31738`, which also closed the
 signature-knob half of #21 and added the IPv6 outbound soft-out) and #5
-(PR #2378, `b2007701`). Two more are fixed on branches awaiting merge:
-#6 (branch `bgp-lu-addpath-dedup`, PR #2379, with two review
-follow-ups) and #7 (branch `bgp-evpn-addpath-withdraw`). Each fixed
-entry ends with its fix note; everything else is open. Suggested order
-for the rest: #8 (VPNv6 transit label), #9 (stale sweep VPNv4-only).
+(PR #2378, `b2007701`) and #6 (PR #2379, `0464828a`, with two review
+follow-ups). One more is fixed on a branch awaiting merge: #7 (branch
+`bgp-evpn-addpath-withdraw`, PR #2380). Each fixed entry ends with its
+fix note; everything else is open. Suggested order for the rest: #8
+(VPNv6 transit label), #9 (stale sweep VPNv4-only).
 
 Method: one lead read the selection ladder and every egress builder, then
 five independent read-only reviewers each took one dimension (update-group
@@ -377,7 +377,7 @@ cap. The two reviews agree on every overlapping item.
   best-path flip to a different local id can append a phantom row; see
   the below-the-cap list.
 
-### 6. P1 CONFIRMED (probe for the re-send; loop confirmed end-to-end), FIXED on branch `bgp-lu-addpath-dedup` — labeled-unicast AddPath fan-out has no Adj-RIB-Out dedup, so two mutual AddPath LU peers re-send each other forever
+### 6. P1 CONFIRMED (probe for the re-send; loop confirmed end-to-end), FIXED in #2379 — labeled-unicast AddPath fan-out has no Adj-RIB-Out dedup, so two mutual AddPath LU peers re-send each other forever
 
 - `route.rs:13905-13925` (AddPath loop of `route_advertise_labeled`)
   calls `A::adj_out_record(peer, prefix, cand, true)` and discards the
