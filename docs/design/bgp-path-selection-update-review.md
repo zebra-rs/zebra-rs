@@ -434,6 +434,21 @@ cap. The two reviews agree on every overlapping item.
   UPDATE, the Adj-RIB-Out row holds MED 77, the next identical ingest is
   deduplicated) and `lu_plain_peer_is_sent_a_changed_outbound_policy_result`
   covers the best-path-only branch.
+- Review follow-up 2 (P1, same branch; a regression of the follow-up
+  above): the labeled builders return the MP_REACH next-hop beside the
+  attr and clear `attr.nexthop`, so the advertised form built from the
+  returned attr alone no longer saw a next-hop change (the original
+  candidate comparison had, since the candidate's attr still carried the
+  received next-hop). A probe re-learned a route with only its next-hop
+  changed (10.0.0.3 to 10.0.0.7) toward an iBGP AddPath peer, the
+  builder selected the new next-hop, and zero UPDATEs went out, so the
+  peer kept forwarding to the obsolete next-hop. `advertised_form` now
+  takes the next-hop and writes it back into the stored attr before
+  interning, at all four sites (both event branches and both dumps).
+  Unit: `lu_ibgp_peers_are_sent_a_next_hop_only_change` (an iBGP AddPath
+  and an iBGP plain peer; a next-hop-only re-learn is sent to both, the
+  rows hold the new next-hop, the identical route after it is
+  deduplicated), which fails with the write-back removed.
 
 ### 7. P1 CONFIRMED — EVPN AddPath members receive the best path only, and the superseded path-id is never withdrawn on a flip
 
