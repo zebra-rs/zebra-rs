@@ -7,14 +7,16 @@ MUP/Flowspec/SR-Policy/RTC where they share the machinery). Reviewed
 against `main` at `2f1e9a09` (2026-09-07). Line numbers are as of that
 commit.
 
-Status (2026-09-08): five items are fixed on `main` — #1 (PR #2372,
+Status (2026-09-09): six items are fixed on `main` — #1 (PR #2372,
 merge `3beacbcc`), the listen-range peer-type item found while fixing it
 (PR #2373, `ba327126`), #2 (PR #2375, `308b196a`), #3 (PR #2376,
-`b8fef738`) and #4 (PR #2377, `1cc31738`, which also closed the
-signature-knob half of #21 and added the IPv6 outbound soft-out). Each
-fixed entry ends with its fix note; everything else is open. Suggested
-order for the rest: #5 (v6 withdraw clobbers a sibling's pending
-advertise), then #6–#9.
+`b8fef738`), #4 (PR #2377, `1cc31738`, which also closed the
+signature-knob half of #21 and added the IPv6 outbound soft-out) and #5
+(PR #2378, `b2007701`). Two more are fixed on branches awaiting merge:
+#6 (branch `bgp-lu-addpath-dedup`, PR #2379, with two review
+follow-ups) and #7 (branch `bgp-evpn-addpath-withdraw`). Each fixed
+entry ends with its fix note; everything else is open. Suggested order
+for the rest: #8 (VPNv6 transit label), #9 (stale sweep VPNv4-only).
 
 Method: one lead read the selection ladder and every egress builder, then
 five independent read-only reviewers each took one dimension (update-group
@@ -54,7 +56,8 @@ below the cap. Four root causes account for most of them:
    `selected` (#7, #16, #18, #20); the plain fan-out takes
    `selected.last()` although the winner is first (#14); the stale sweep
    walks VPNv4 only (#9).
-4. **v4/v6 twins that drifted.** The v6 withdraw lacks the v4 guard (#5),
+4. **v4/v6 twins that drifted.** The v6 withdraw lacks the v4 guard (#5,
+   fixed in #2378),
    the v6 AddPath loop lacks the v4 out-policy call (#16), VPNv6 lacks the
    VPNv4 transit label (#8), and the `(Ip6, Unicast)` knobs govern VPNv6
    rows (#13).
@@ -326,7 +329,7 @@ cap. The two reviews agree on every overlapping item.
   signature field. A soft-out requested while a peer is frozen (policy
   reply, commit end) is deferred to the post-move re-sync.
 
-### 5. P1 CONFIRMED (probe) — `V6Batch::withdraw` clobbers the group's pending advertise when the source member is withdrawn
+### 5. P1 CONFIRMED (probe), FIXED in #2378 — `V6Batch::withdraw` clobbers the group's pending advertise when the source member is withdrawn
 
 - `route.rs:5787-5806` (v6) has no `per_peer_suppress` guard, unlike
   `V4Batch::withdraw` (`5585-5598`). `route_advertise_batch` yields
@@ -346,8 +349,35 @@ cap. The two reviews agree on every overlapping item.
   control `probe_a1_control_v4_*` passes.
 - Fix direction: mirror the v4 `per_peer_suppress` computation in
   `V6Batch::withdraw`.
+- BDD gates: `bgp_update_group_source_withdraw` (IPv4, the control) and
+  `bgp_update_group_source_withdraw_v6`. One bridge, a reflector with
+  two clients in one update-group and an eBGP originator; the eBGP path
+  is reflected to both clients, then the higher-index client originates
+  the prefix itself (an empty AS_PATH beats the eBGP path) so the
+  reflector's best flips to it, then the eBGP path is withdrawn. Both
+  pass on `main` (1cc31738) and with the fix: the clobber is real at the
+  code level but masked end-to-end — a kept topology with a packet
+  capture showed a later flush re-advertising the flipped path to the
+  group-mate within the poll window — so they are behavioural guards,
+  not fail-on-`main` gates. The deterministic gate is the unit test
+  below.
+- FIXED — PR #2378, merged to `main` as `b2007701` (2026-09-08):
+  `V6Batch::withdraw` now computes `per_peer_suppress` from the
+  `new_best` it used to ignore (the withdrawn member is the new best's
+  source, or is LLGR-blocked) and skips `cache_remove_ipv6` in those
+  cases while still sending the member its own withdraw; a
+  `new_best == None` withdraw still clears the entry — an exact mirror of
+  the v4 twin. Unit:
+  `v6_source_member_withdraw_keeps_the_group_mates_pending_advertise`
+  (three eBGP peers in one real group, the best flips to a member by
+  router-id, the group-mate's queued entry must survive), which fails
+  without the guard. Found while fixing and left out (shared with v4,
+  pre-existing): both batch `advertise` implementations record the
+  Adj-RIB-Out row with `AdjRibTable::add` rather than `record_out`, so a
+  best-path flip to a different local id can append a phantom row; see
+  the below-the-cap list.
 
-### 6. P1 CONFIRMED (probe for the re-send; loop by mechanism) — labeled-unicast AddPath fan-out has no Adj-RIB-Out dedup, so two mutual AddPath LU peers re-send each other forever
+### 6. P1 CONFIRMED (probe for the re-send; loop confirmed end-to-end), FIXED on branch `bgp-lu-addpath-dedup` — labeled-unicast AddPath fan-out has no Adj-RIB-Out dedup, so two mutual AddPath LU peers re-send each other forever
 
 - `route.rs:13905-13925` (AddPath loop of `route_advertise_labeled`)
   calls `A::adj_out_record(peer, prefix, cand, true)` and discards the
@@ -367,6 +397,59 @@ cap. The two reviews agree on every overlapping item.
 - Fix direction: in the AddPath branch, skip `send_update` when
   `adj_out_record` returns a previous row for the same `local_id` and
   `same_advertised(prev, cand)`.
+- BDD gates: `bgp_lu_addpath_resend` (IPv4) and `bgp_lu_addpath_resend_v6`
+  (IPv6). Two eBGP routers on one bridge with AddPath labeled-unicast in
+  both directions, each originating the same prefix; after the exchange
+  a new step samples what one router RECEIVES from the other over ten
+  seconds (`show bgp summary -j`, `msg_rcvd`) and requires fewer than
+  fifteen messages. On `main` (b2007701) both fail: 591,443 messages
+  received in ten seconds for IPv4 and 578,893 for IPv6, a re-send loop
+  at roughly 59,000 UPDATEs per second, so the "loop by mechanism" half
+  of this finding is confirmed end-to-end. The step counts on the receiving
+  side because the daemon never counts sent UPDATEs (below the cap); a
+  first version that read the sender's `msg_sent` passed on `main` with
+  "0 messages" and was a false pass.
+- FIXED (branch `bgp-lu-addpath-dedup`): the AddPath loop of
+  `route_advertise_labeled` now records the candidate first — under
+  AddPath `adj_out_record` hands back the row previously advertised under
+  that path-id — and skips the send when `same_advertised` says the
+  candidate is unchanged, exactly as the best-path-only branch has done
+  since the 2026-09-04 loop fix; the trailing per-id withdraw loop is
+  untouched. Unit: `lu_addpath_peer_is_not_resent_an_unchanged_candidate`
+  (a source peer and an AddPath labeled-unicast peer; the same route
+  ingested twice yields one UPDATE, a changed one a second), which fails
+  with the guard forced off. On the fix both BDD gates settle to zero
+  messages received in ten seconds in each direction.
+- Review follow-up (P2, same branch): the first fix recorded and
+  compared the RECEIVED candidate, so a changed outbound-policy result
+  (a probe bound an out-policy setting MED 77) or a changed advertised
+  label on an unchanged candidate was suppressed, and labeled-unicast
+  has no soft-out to repair it; the best-path-only branch had carried
+  the same blindness since 2026-09-04, and the two session-up dumps
+  (`route_sync_labelv4/v6`) recorded the received row while sending the
+  policy result. Both branches and both dumps now record the advertised
+  form (`advertised_form`: the candidate with the interned post-policy
+  attr, which carries the egress next-hop, and the advertised label), so
+  `same_advertised` compares sends with sends. Unit: the AddPath gate
+  above gained the policy case (MED 77 bound after the first send: one
+  UPDATE, the Adj-RIB-Out row holds MED 77, the next identical ingest is
+  deduplicated) and `lu_plain_peer_is_sent_a_changed_outbound_policy_result`
+  covers the best-path-only branch.
+- Review follow-up 2 (P1, same branch; a regression of the follow-up
+  above): the labeled builders return the MP_REACH next-hop beside the
+  attr and clear `attr.nexthop`, so the advertised form built from the
+  returned attr alone no longer saw a next-hop change (the original
+  candidate comparison had, since the candidate's attr still carried the
+  received next-hop). A probe re-learned a route with only its next-hop
+  changed (10.0.0.3 to 10.0.0.7) toward an iBGP AddPath peer, the
+  builder selected the new next-hop, and zero UPDATEs went out, so the
+  peer kept forwarding to the obsolete next-hop. `advertised_form` now
+  takes the next-hop and writes it back into the stored attr before
+  interning, at all four sites (both event branches and both dumps).
+  Unit: `lu_ibgp_peers_are_sent_a_next_hop_only_change` (an iBGP AddPath
+  and an iBGP plain peer; a next-hop-only re-learn is sent to both, the
+  rows hold the new next-hop, the identical route after it is
+  deduplicated), which fails with the write-back removed.
 
 ### 7. P1 CONFIRMED (probe), FIXED on branch `bgp-evpn-addpath-withdraw` — EVPN AddPath members receive the best path only, and the superseded path-id is never withdrawn on a flip
 
@@ -893,6 +976,12 @@ cap. The two reviews agree on every overlapping item.
   (`route.rs:6801-6826`); accepted-but-inert: neighbor
   `enabled`, `vpnv6 next-hop-self|unchanged`, `evpn next-hop-self`,
   `labeled-unicast next-hop-unchanged`.
+- `peer.counter[BgpType::Update].sent` is never incremented (`peer.rs`
+  bumps the sent counter only for OPEN, NOTIFICATION, KEEPALIVE and
+  ROUTE-REFRESH; the received side counts every type), so the neighbor
+  detail's "Updates: sent" column and the summary's `MsgSent` never see
+  an UPDATE — a re-send loop of tens of thousands of UPDATEs per second
+  reads as zero on the sender. Found while gating #6.
 - `show bgp -j` (`show.rs:986`, `render_unicast_table`) stamps
   `best: true` on every row, so the JSON table cannot say which of a
   prefix's candidates was selected; the per-prefix `bgp_route_json`
@@ -922,10 +1011,15 @@ cap. The two reviews agree on every overlapping item.
   which needs the best to have flipped to the later VTEP at least once;
   this staleness, with each VTEP re-advertising its Type-5 after
   importing the other's, is the mechanism that fits (not instrumented).
-  Fix direction: refresh the EVPN table in the
-  NHT arm as the other families do, or drop reachability from EVPN
-  selection entirely (the review already records that EVPN egress is not
-  NHT-gated).
+  Fix direction: refresh the EVPN table in the NHT arm as the other
+  families do, or drop reachability from EVPN selection entirely (the
+  review already records that EVPN egress is not NHT-gated).
+- (Found while fixing #5) `V4Batch::advertise` and `V6Batch::advertise`
+  record the group-mate's Adj-RIB-Out row with `AdjRibTable::add`, which
+  keys Out rows by local id, so a best-path flip to a path with a
+  different local id appends a second row instead of replacing the first;
+  `record_out` exists for exactly this and the sync and soft-out paths use
+  it. Shared by both families, not reproduced on the wire.
 
 ### Gaps (not bugs, consequences only)
 
@@ -1016,8 +1110,14 @@ cap. The two reviews agree on every overlapping item.
   MED, or re-feeds an unchanged route.
 - No test asserts which path a plain peer is advertised under
   `maximum-paths`.
-- No EVPN AddPath test with two candidates and a flip; no LU AddPath test
-  with two mutual AddPath peers.
+- EVPN half closed on branch `bgp-evpn-addpath-withdraw`
+  (`bgp_evpn_addpath_flip`, `_v6`: two VTEPs under one RD, a reflector
+  with AddPath send toward a leaf, VTEP A's daemon stopped; unit module
+  `evpn_addpath_fanout_tests`); LU half closed on branch
+  `bgp-lu-addpath-dedup` (`bgp_lu_addpath_resend`, `_v6`: two mutual
+  AddPath labeled-unicast peers, messages received sampled over ten
+  seconds). Was: no EVPN AddPath test with two candidates and a flip; no
+  LU AddPath test with two mutual AddPath peers.
 - No LLGR/PIC test for VPNv6 or EVPN stale expiry, and no GR test where
   the ipv4-unicast EoR arrives before the VPNv4 refresh.
 - `signature_fields_each_distinguish` cannot catch a field that does not
@@ -1050,4 +1150,8 @@ which pass on `main` since #2376. The #4 probe
 (`probe_a2_out_policy_bound_live_leaks_through_group_memo`) is superseded
 by `binding_an_outbound_policy_on_an_established_peer_regroups_it_at_once`
 in `config.rs` and the `regroup_*` tests in `update_group.rs`, which pass
-on `main` since #2377.
+on `main` since #2377. The #5 probe
+(`probe_a1_v6_source_member_withdraw_clobbers_sibling_pending_advertise`)
+is superseded by
+`v6_source_member_withdraw_keeps_the_group_mates_pending_advertise` in
+`route.rs`, which passes on `main` since #2378.
