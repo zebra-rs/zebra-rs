@@ -5750,8 +5750,10 @@ impl BatchAfi for V6Batch {
                     .add(prefix, best.clone());
             }
             let vpnv6_nlri = Vpnv6Nlri {
+                // Our transit label behind our next-hop, the received label
+                // otherwise (review finding #8).
                 label: new_best
-                    .map(|b| b.label.unwrap_or_default())
+                    .map(|b| vpnv6_service_label(peer, b))
                     .unwrap_or_default(),
                 rd,
                 nlri,
@@ -5856,7 +5858,7 @@ impl BatchAfi for V6Batch {
                 return;
             }
             let vpnv6_nlri = Vpnv6Nlri {
-                label: rib.label.unwrap_or_default(),
+                label: vpnv6_service_label(peer, rib),
                 rd,
                 nlri,
             };
@@ -7808,6 +7810,13 @@ pub fn route_ipv6_update(
                         );
                     }
                 }
+                // Inter-AS Option B transit (review finding #8): the swap-ILM
+                // reconcile the VPNv4 arm runs for our local label.
+                reconcile_swap_ilm(
+                    bgp.rib_client,
+                    bgp.nexthop_cache.as_deref(),
+                    selected.first(),
+                );
                 // Unconditional — see the unicast arm above (finding #6).
                 route_advertise_to_peers_vpnv6(rd, prefix.prefix, &selected, bgp, peers);
                 // VPNv6 AddPath: advertise the just-updated candidate path
@@ -7862,6 +7871,22 @@ pub fn route_ipv6_withdraw(
             // No no-op guard — `route_advertise_to_peers_vpnv6` now prunes
             // via its Adj-RIB-Out (`adj_out.v6vpn`), like the v4 VPN path.
             let selected = bgp.shard.select_best_path_vpn_v6(&rd, nlri.prefix);
+
+            // VPNv6 transit (Option B, review finding #8), as the VPNv4 arm:
+            // the prefix fully gone → release its local label and tear down
+            // the swap ILM; a surviving winner keeps the per-(RD,prefix)
+            // label, whose ILM is reconciled for the new winner.
+            if selected.is_empty() {
+                if let Some(local) = bgp.shard.labels.free_vpn_v6(rd, nlri.prefix) {
+                    ilm_swap_remove(bgp.rib_client, local);
+                }
+            } else {
+                reconcile_swap_ilm(
+                    bgp.rib_client,
+                    bgp.nexthop_cache.as_deref(),
+                    selected.first(),
+                );
+            }
 
             // Remote VPNv6 withdraw → per-VRF import update/withdraw
             // (global task only). A surviving winner re-imports with
@@ -12884,6 +12909,22 @@ fn vpnv4_service_label(peer: &Peer, rib: &BgpRib) -> Label {
     }
 }
 
+/// The VPNv6 twin of [`vpnv4_service_label`] (review finding #8). The
+/// rewrite predicate is the one `route_update_ipv6` applies to a VPNv6
+/// row — the `(Ip6, MplsVpn)` knobs — so the label on the wire always
+/// belongs to the next-hop on the wire: our transit label behind our
+/// address, the received label behind the received next-hop. Before
+/// this, every VPNv6 egress sent the received label regardless, so a
+/// transit's peer pushed a label the transit held no ILM for.
+fn vpnv6_service_label(peer: &Peer, rib: &BgpRib) -> Label {
+    let unchanged = !rib.is_originated() && peer.next_hop_unchanged(Afi::Ip6, Safi::MplsVpn);
+    let rewrites_nh = !unchanged && (peer.is_ebgp() || peer.next_hop_self(Afi::Ip6, Safi::MplsVpn));
+    match (rewrites_nh, rib.local_label) {
+        (true, Some(l)) => Label::new(l, 0, true),
+        _ => rib.label.unwrap_or_default(),
+    }
+}
+
 /// RFC 1997 well-known community egress gate, shared by the IPv4 /
 /// IPv6 / EVPN outbound builders. NO_ADVERTISE suppresses
 /// advertisement to every peer; NO_EXPORT — and NO_EXPORT_SUBCONFED,
@@ -13263,20 +13304,31 @@ pub fn route_update_ipv6(
     //     route (whose stored next-hop is empty) went on the wire as
     //     `::` — the peer kept it best-path-selected but could never
     //     resolve or install it.
-    // Honor the per-neighbor `afi-safi ipv6 {next-hop-self|next-hop-unchanged}`
-    // knobs (v6-unicast rows carry no VPN next-hop, so this is the plain case):
-    // next-hop-unchanged preserves the received next-hop for FORWARDED rows
-    // (both eBGP and iBGP) and wins over next-hop-self; next-hop-self forces
-    // self even iBGP→iBGP. Originated rows always rewrite (RFC 2545 §2 — the
+    // Honor the per-neighbor `next-hop-self` / `next-hop-unchanged` knobs of
+    // the row's OWN family: `afi-safi ipv6 …` for a v6-unicast row (no VPN
+    // next-hop), `afi-safi vpnv6 …` for a VPNv6 row (`Some(VpnNexthop::V6)`).
+    // Reading the unicast knobs for every row (review finding #13) made the
+    // `vpnv6` knobs dead and let `ipv6 next-hop-self` rewrite VPNv6 rows —
+    // to self, behind the originating PE's label (#8). next-hop-unchanged
+    // preserves the received next-hop for FORWARDED rows (both eBGP and
+    // iBGP) and wins over next-hop-self; next-hop-self forces self even
+    // iBGP→iBGP. Originated rows always rewrite (RFC 2545 §2 — the
     // originator is the only valid next-hop).
-    // RFC 7947 §2.2.1: toward a route-server client a forwarded route
-    // keeps the received next-hop (same as the v4 `sync_ctx` rule).
+    // RFC 7947 §2.2.1: toward a route-server client a forwarded v6-unicast
+    // route keeps the received next-hop (same as the v4 `sync_ctx` rule).
+    // `vpnv6_service_label` applies the same predicate to pick the label.
+    let plain_unicast = rib.nexthop.is_none();
+    let knob_safi = if plain_unicast {
+        Safi::Unicast
+    } else {
+        Safi::MplsVpn
+    };
     let nh_unchanged = !rib.is_originated()
-        && (peer.next_hop_unchanged(Afi::Ip6, Safi::Unicast)
-            || (peer.is_ebgp() && peer.config.route_server_client));
+        && (peer.next_hop_unchanged(Afi::Ip6, knob_safi)
+            || (plain_unicast && peer.is_ebgp() && peer.config.route_server_client));
     let needs_self = rib.is_originated()
         || (peer.is_ebgp() && !nh_unchanged)
-        || (peer.next_hop_self(Afi::Ip6, Safi::Unicast) && !nh_unchanged);
+        || (peer.next_hop_self(Afi::Ip6, knob_safi) && !nh_unchanged);
     if needs_self {
         let self_v6: Option<Ipv6Addr> = match peer.param.local_addr.as_ref().map(|a| a.ip()) {
             Some(IpAddr::V6(v6)) => Some(v6),
@@ -13374,9 +13426,8 @@ pub fn route_update_ipv6(
 
     // The two SRv6 hooks below apply only to plain IPv6 unicast rows.
     // `route_update_ipv6` is shared with the VPNv6 advertise path, whose
-    // rows carry `Some(VpnNexthop::V6)`; gating on `rib.nexthop.is_none()`
-    // keeps the unicast `encapsulation-type` knob from touching VPNv6.
-    let plain_unicast = rib.nexthop.is_none();
+    // rows carry `Some(VpnNexthop::V6)`; gating on `plain_unicast` keeps
+    // the unicast `encapsulation-type` knob from touching VPNv6.
 
     // SRv6 (global IPv6 unicast origination): a locally-originated route
     // already carries its End.DT6 Prefix-SID from origination (it's in
@@ -15574,7 +15625,7 @@ pub fn route_sync_vpnv6(peer: &mut Peer, bgp: &mut BgpTop) {
             }
             rib.attr = bgp.attr_store.intern(attr);
             let arc_attr = rib.attr.clone();
-            let label = rib.label.unwrap_or_default();
+            let label = vpnv6_service_label(peer, &rib);
             peer.adj_out.v6vpn.entry(rd).or_default().add(prefix, rib);
             let vpnv6_nlri = Vpnv6Nlri { label, rd, nlri };
             peer.send_vpnv6(vpnv6_nlri, arc_attr, false);

@@ -40,7 +40,7 @@ use crate::context::Timer;
 
 /// Bumped whenever a new field is added to `UpdateGroupSig`. Surfaced
 /// in `show bgp update-group` so a stale view is detectable.
-pub const SIGNATURE_VERSION: u32 = 9;
+pub const SIGNATURE_VERSION: u32 = 10;
 
 /// Address families the grouping logic considers — every family whose
 /// advertise pipeline consults `peer.update_group_id`. IPv6 unicast
@@ -184,6 +184,12 @@ pub struct UpdateGroupSig {
     /// and blackhole VPN traffic.
     pub vpnv4_next_hop_self: bool,
     pub vpnv4_next_hop_unchanged: bool,
+    /// The VPNv6 twins, stamped only for the `(Ip6, MplsVpn)` group.
+    /// `route_update_ipv6` selects a VPNv6 row's NEXT_HOP (and thereby
+    /// `vpnv6_service_label` its label) with them (review findings #8
+    /// and #13).
+    pub vpnv6_next_hop_self: bool,
+    pub vpnv6_next_hop_unchanged: bool,
     /// Per-peer `afi-safi ipv4|ipv6 next-hop-self` / `next-hop-unchanged`,
     /// stamped only for the `(Ip, Unicast)` and `(Ip6, Unicast)` groups
     /// from that family's own knob. The unicast egress builders
@@ -503,6 +509,12 @@ pub fn signature_of(peer: &Peer, afi: Afi, safi: Safi) -> Option<UpdateGroupSig>
         vpnv4_next_hop_unchanged: afi == Afi::Ip
             && safi == Safi::MplsVpn
             && peer.next_hop_unchanged(Afi::Ip, Safi::MplsVpn),
+        vpnv6_next_hop_self: afi == Afi::Ip6
+            && safi == Safi::MplsVpn
+            && peer.next_hop_self(Afi::Ip6, Safi::MplsVpn),
+        vpnv6_next_hop_unchanged: afi == Afi::Ip6
+            && safi == Safi::MplsVpn
+            && peer.next_hop_unchanged(Afi::Ip6, Safi::MplsVpn),
         // The unicast twins, keyed by this group's own family so the
         // ipv4 knob cannot shard the ipv6 group or vice versa. (iBGP only
         // for next-hop-self — see the field doc.)
@@ -1827,6 +1839,8 @@ mod tests {
             ipv6_encap_type: None,
             vpnv4_next_hop_self: false,
             vpnv4_next_hop_unchanged: false,
+            vpnv6_next_hop_self: false,
+            vpnv6_next_hop_unchanged: false,
             unicast_next_hop_self: false,
             unicast_next_hop_unchanged: false,
             egress_script: None,
@@ -2176,6 +2190,15 @@ mod tests {
 
         let mut a = base.clone();
         a.vpnv4_next_hop_unchanged = true;
+        assert_ne!(base, a);
+
+        // Review findings #8 / #13: the VPNv6 twins of the two VPNv4 knobs.
+        let mut a = base.clone();
+        a.vpnv6_next_hop_self = true;
+        assert_ne!(base, a);
+
+        let mut a = base.clone();
+        a.vpnv6_next_hop_unchanged = true;
         assert_ne!(base, a);
 
         // Review finding #3: the unicast twins of the two VPNv4 knobs.

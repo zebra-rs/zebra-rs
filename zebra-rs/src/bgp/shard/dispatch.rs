@@ -88,7 +88,7 @@ impl BgpShard {
             ShardMsg::OriginateV4 { prefix, withdraw } => {
                 self.handle_originate_v4(prefix, withdraw)
             }
-            ShardMsg::UpdateV6(u) => self.handle_update_v6(u),
+            ShardMsg::UpdateV6(u) => self.handle_update_v6(u, central),
             ShardMsg::WithdrawV6 { ident, rd, nlri } => {
                 vec![self.best_path_delta_v6(ident, rd, nlri, Vec::new())]
             }
@@ -607,7 +607,11 @@ impl BgpShard {
     /// intern the post-policy attribute into the Loc-RIB, gate with
     /// main's NHT result, update, and report the best-path delta. A
     /// denied route (`decision == None`) withdraws any prior Loc-RIB row.
-    fn handle_update_v6(&mut self, u: ShardUpdateV6) -> Vec<ShardOut> {
+    fn handle_update_v6(
+        &mut self,
+        u: ShardUpdateV6,
+        central: Option<&mut VrfLabelAllocator>,
+    ) -> Vec<ShardOut> {
         let ShardUpdateV6 {
             ident,
             rd,
@@ -661,6 +665,16 @@ impl BgpShard {
         rib.tag = decision.tag;
         rib.nexthop_reachable = nexthop_reachable;
         rib.vrf_transit_only = vrf_transit_only;
+        if let Some(rd) = rd
+            && self.vpn_v6_transit
+        {
+            // VPNv6 transit local label (Inter-AS Option B), the twin of the
+            // VPNv4 mint above: re-advertising with next-hop-self forwards
+            // via a swap ILM keyed on this label, so without it the ASBR
+            // sent the received label it holds no ILM for (review finding
+            // #8). Gated on `vpn_v6_transit` for the same reason as VPNv4.
+            rib.local_label = self.labels.label_vpn_v6(central, rd, nlri.prefix);
+        }
         // VPNv6 AddPath: clone the candidate before it moves into the
         // table, then stamp its allocated `local_id` after the update so
         // main can advertise it as one of several paths.
@@ -1351,6 +1365,80 @@ mod tests {
         // No carve happened either: the central frontier is untouched.
         assert_eq!(central.alloc(), Some(1000));
         assert!(matches!(&out[..], [ShardOut::BestPathV4 { .. }]));
+    }
+
+    /// Review finding #8: the VPNv6 twin of `update_v4_vpn_mints_transit_local_label`.
+    #[test]
+    fn update_v6_vpn_mints_transit_local_label() {
+        let mut shard = BgpShard {
+            vpn_v6_transit: true,
+            ..Default::default()
+        };
+        let mut central = VrfLabelAllocator::bounded(1000, 5000);
+        let rd = RouteDistinguisher::default();
+        let out = shard.handle(vpnv6_update(2, rd, "2001:db8:2::/64"), Some(&mut central));
+        let row = shard
+            .v6vpn
+            .get(&rd)
+            .and_then(|t| t.0.values().next())
+            .and_then(|c| c.first())
+            .expect("vpnv6 transit row stored");
+        assert_eq!(
+            row.local_label,
+            Some(1000),
+            "transit label minted from the central pool"
+        );
+        assert!(matches!(&out[..], [ShardOut::BestPathV6 { .. }]));
+    }
+
+    /// A VPNv6 route reflector (iBGP, next-hop unchanged) must not mint.
+    #[test]
+    fn update_v6_vpn_reflector_mints_no_local_label() {
+        let mut shard = BgpShard::default();
+        let mut central = VrfLabelAllocator::bounded(1000, 5000);
+        let rd = RouteDistinguisher::default();
+        let out = shard.handle(vpnv6_update(2, rd, "2001:db8:2::/64"), Some(&mut central));
+        let row = shard
+            .v6vpn
+            .get(&rd)
+            .and_then(|t| t.0.values().next())
+            .and_then(|c| c.first())
+            .expect("vpnv6 row stored");
+        assert_eq!(row.local_label, None, "reflector must not mint a label");
+        assert_eq!(central.alloc(), Some(1000), "no carve happened");
+        assert!(matches!(&out[..], [ShardOut::BestPathV6 { .. }]));
+    }
+
+    /// A received VPNv6 route for `prefix` under `rd` with the originating
+    /// PE's service label 16 and its IPv6 next-hop.
+    fn vpnv6_update(ident: usize, rd: RouteDistinguisher, prefix: &str) -> ShardMsg {
+        let nhop = bgp_packet::Vpnv6Nexthop {
+            rd,
+            nhop: "2001:db8::2".parse().unwrap(),
+        };
+        let attr = BgpAttr {
+            nexthop: Some(BgpNexthop::Vpnv6(nhop.clone())),
+            ..Default::default()
+        };
+        ShardMsg::UpdateV6(ShardUpdateV6 {
+            ident,
+            rd: Some(rd),
+            nlri: v6(prefix),
+            peer_router_id: std::net::Ipv4Addr::new(10, 0, 0, 1),
+            typ: BgpRibType::EBGP,
+            from_client: false,
+            attr: attr.clone(),
+            label: Some(bgp_packet::Label::new(16, 0, true)),
+            nexthop: Some(super::super::super::route::VpnNexthop::V6(nhop)),
+            stale: false,
+            nexthop_reachable: true,
+            vrf_transit_only: false,
+            decision: Some(PolicyDecision {
+                attr,
+                weight: 0,
+                tag: 0,
+            }),
+        })
     }
 
     #[test]

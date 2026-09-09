@@ -4848,8 +4848,8 @@ impl Bgp {
         false
     }
 
-    /// Re-derive the shard's transit flags (VPNv4, LU v4, LU v6) from the
-    /// peer config and, for each family that flipped — or, under `force`
+    /// Re-derive the shard's transit flags (VPNv4, VPNv6, LU v4, LU v6)
+    /// from the peer config and, for each family that flipped — or, under `force`
     /// (a label block just arrived), each family that is a transit — bring
     /// the rows already in its Loc-RIB in step: mint the per-prefix label
     /// and program its swap ILM when transit is needed, release both when
@@ -4857,12 +4857,14 @@ impl Bgp {
     /// re-advertised so the label and next-hop on the wire match the LFIB:
     /// a next-hop-self peer is handed our label only once we hold the ILM
     /// for it, and stops being handed it as soon as the ILM goes. VPNv4
-    /// re-advertises by soft-out to its peers; Labeled-Unicast per changed
-    /// prefix, since `route_soft_out_peer` does not walk the LU tables.
+    /// re-advertises by soft-out to its peers; VPNv6 and Labeled-Unicast
+    /// per changed prefix, since `route_soft_out_peer` walks neither the
+    /// VPNv6 nor the LU tables.
     pub(super) fn reconcile_transit_labels(&mut self, force: bool) {
         use bgp_packet::{Afi, AfiSafi, Safi};
         let vpnv4 = AfiSafi::new(Afi::Ip, Safi::MplsVpn);
         let need_vpn = self.transit_needed(vpnv4);
+        let need_vpn6 = self.transit_needed(AfiSafi::new(Afi::Ip6, Safi::MplsVpn));
         let need_lu4 = self.transit_needed(AfiSafi::new(Afi::Ip, Safi::MplsLabel));
         let need_lu6 = self.transit_needed(AfiSafi::new(Afi::Ip6, Safi::MplsLabel));
         // A family's walk runs when its flag flipped, or when forced and
@@ -4873,6 +4875,7 @@ impl Bgp {
             flipped || (force && need)
         };
         let run_vpn = arm(need_vpn, &mut self.shard.vpn_v4_transit);
+        let run_vpn6 = arm(need_vpn6, &mut self.shard.vpn_v6_transit);
         let run_lu4 = arm(need_lu4, &mut self.shard.lu_v4_transit);
         let run_lu6 = arm(need_lu6, &mut self.shard.lu_v6_transit);
 
@@ -4913,6 +4916,50 @@ impl Bgp {
                     .collect();
                 for ident in idents {
                     super::peer::apply_soft_out_peer(self, ident);
+                }
+            }
+        }
+
+        if run_vpn6 {
+            // Review finding #8: the VPNv6 arm. No VPNv6 soft-out exists, so
+            // the rows that changed are re-advertised per prefix, as LU does.
+            let rds: Vec<bgp_packet::RouteDistinguisher> =
+                self.shard.v6vpn.keys().copied().collect();
+            for rd in rds {
+                let Some(table) = self.shard.v6vpn.get_mut(&rd) else {
+                    continue;
+                };
+                let changed = super::route::transit_table_reconcile(
+                    need_vpn6,
+                    table,
+                    &mut self.shard.labels,
+                    self.vrf_label_alloc.as_mut(),
+                    |labels, central, p| labels.label_vpn_v6(central, rd, p),
+                    |labels, p| labels.free_vpn_v6(rd, p),
+                    &self.ctx.rib,
+                    &self.nexthop_cache,
+                );
+                if !changed.is_empty() {
+                    tracing::debug!(
+                        transit = need_vpn6,
+                        %rd,
+                        prefixes = changed.len(),
+                        "bgp: VPNv6 transit labels reconciled; re-advertising"
+                    );
+                }
+                for prefix in changed {
+                    let selected: Vec<super::route::BgpRib> = self
+                        .shard
+                        .v6vpn
+                        .get(&rd)
+                        .and_then(|t| t.1.get(&prefix))
+                        .cloned()
+                        .into_iter()
+                        .collect();
+                    let (mut top, peers) = super::peer::advertise_top(self);
+                    super::route::route_advertise_to_peers_vpnv6(
+                        rd, prefix, &selected, &mut top, peers,
+                    );
                 }
             }
         }
@@ -5538,6 +5585,13 @@ impl Bgp {
                         None,
                     );
                 }
+                // Inter-AS Option B transit (VPNv6, review finding #8): the
+                // VPNv4 arm's swap-ILM re-program.
+                super::route::reconcile_swap_ilm(
+                    &self.ctx.rib,
+                    Some(&self.nexthop_cache),
+                    selected.first(),
+                );
             }
             NhtDep::Evpn(rd, prefix) => {
                 // EVPN Type-5: the imported IP prefix's underlay
@@ -5966,6 +6020,13 @@ impl Bgp {
                 {
                     super::vrf::dispatch_withdraw_import_v6(&dispatcher, *rd, *p, &attr, None);
                 }
+                // Inter-AS Option B transit (VPNv6, review finding #8): the
+                // VPNv4 arm's swap-ILM re-program.
+                super::route::reconcile_swap_ilm(
+                    &self.ctx.rib,
+                    top.nexthop_cache.as_deref(),
+                    selected.first(),
+                );
             }
             NhtDep::Evpn(rd, prefix) => {
                 // EVPN Type-5 analog: advertise the re-selected best-path
