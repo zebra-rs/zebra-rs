@@ -7,15 +7,16 @@ MUP/Flowspec/SR-Policy/RTC where they share the machinery). Reviewed
 against `main` at `2f1e9a09` (2026-09-07). Line numbers are as of that
 commit.
 
-Status (2026-09-08): six items are fixed on `main` — #1 (PR #2372,
+Status (2026-09-09): seven items are fixed on `main` — #1 (PR #2372,
 merge `3beacbcc`), the listen-range peer-type item found while fixing it
 (PR #2373, `ba327126`), #2 (PR #2375, `308b196a`), #3 (PR #2376,
 `b8fef738`), #4 (PR #2377, `1cc31738`, which also closed the
 signature-knob half of #21 and added the IPv6 outbound soft-out) and #5
-(PR #2378, `b2007701`). Each fixed entry ends with its fix note;
-everything else is open. Suggested order for the rest: #6 (LU AddPath
-re-send loop), #7 (EVPN AddPath), #8 (VPNv6 transit label), #9 (stale
-sweep VPNv4-only).
+(PR #2378, `b2007701`) and #6 (PR #2379, `0464828a`, with two review
+follow-ups). One more is fixed on a branch awaiting merge: #7 (branch
+`bgp-evpn-addpath-withdraw`, PR #2380). Each fixed entry ends with its
+fix note; everything else is open. Suggested order for the rest: #8
+(VPNv6 transit label), #9 (stale sweep VPNv4-only).
 
 Method: one lead read the selection ladder and every egress builder, then
 five independent read-only reviewers each took one dimension (update-group
@@ -376,7 +377,7 @@ cap. The two reviews agree on every overlapping item.
   best-path flip to a different local id can append a phantom row; see
   the below-the-cap list.
 
-### 6. P1 CONFIRMED (probe for the re-send; loop confirmed end-to-end), FIXED on branch `bgp-lu-addpath-dedup` — labeled-unicast AddPath fan-out has no Adj-RIB-Out dedup, so two mutual AddPath LU peers re-send each other forever
+### 6. P1 CONFIRMED (probe for the re-send; loop confirmed end-to-end), FIXED in #2379 — labeled-unicast AddPath fan-out has no Adj-RIB-Out dedup, so two mutual AddPath LU peers re-send each other forever
 
 - `route.rs:13905-13925` (AddPath loop of `route_advertise_labeled`)
   calls `A::adj_out_record(peer, prefix, cand, true)` and discards the
@@ -450,7 +451,7 @@ cap. The two reviews agree on every overlapping item.
   rows hold the new next-hop, the identical route after it is
   deduplicated), which fails with the write-back removed.
 
-### 7. P1 CONFIRMED — EVPN AddPath members receive the best path only, and the superseded path-id is never withdrawn on a flip
+### 7. P1 CONFIRMED (probe), FIXED on branch `bgp-evpn-addpath-withdraw` — EVPN AddPath members receive the best path only, and the superseded path-id is never withdrawn on a flip
 
 - `route.rs:6704-6728` iterates `selected` for AddPath members;
   `LocalRibEvpnTable::select_best_path` (`2660-2706`) returns exactly
@@ -468,6 +469,48 @@ cap. The two reviews agree on every overlapping item.
 - Fix direction: give the EVPN AddPath loop the v6/LU shape (read the full
   `cands` from `local_rib.evpn[rd].cands`, diff against `adj_out` ids,
   withdraw the ids that dropped out).
+- Gates (branch `bgp-evpn-addpath-withdraw`). Unit, module
+  `evpn_addpath_fanout_tests` (a route-reflector fixture with three iBGP
+  clients, the third negotiating AddPath; the leaf's UPDATEs are parsed
+  back with AddPath receive to collect the path-ids of every MP_REACH and
+  MP_UNREACH): `addpath_member_receives_every_candidate_and_a_superseded_id_is_withdrawn`
+  (VTEP A's MAC/IP then VTEP B's under one RD: the leaf must hold path-ids
+  1 and 2; withdrawing A's path must send MP_UNREACH for path-id 1 and
+  leave only 2 in the Adj-RIB-Out) and
+  `session_up_dump_sends_every_candidate_to_an_addpath_member` (a leaf
+  that comes up after both VTEPs advertised must be dumped both
+  path-ids). On `main` (b2007701) both fail: the leaf holds `{1}`, never
+  `{1, 2}`, and nothing is withdrawn. BDD, `bgp_evpn_addpath_flip` (IPv4
+  Type-5) and `bgp_evpn_addpath_flip_v6` (IPv6 Type-5): two VTEPs
+  originate the same Type-5 under the SAME route distinguisher toward a
+  reflector that negotiates AddPath send toward a leaf; VTEP B is brought
+  up after VTEP A's path is on the leaf, then VTEP A's daemon is stopped.
+  On `main` both twins fail at the flip: sixty seconds after VTEP A died
+  the leaf's `show bgp evpn` still selects the path via 192.168.0.1 (the
+  dead VTEP wins on ORIGINATOR_ID), its received-routes still list both
+  path-ids and the reflector's Adj-RIB-Out toward it still holds VTEP
+  A's row. The "VTEP B's path reaches the leaf as a second candidate"
+  scenario passes on `main` by accident (see the below-the-cap item on
+  EVPN `nexthop_reachable`: a transient best flip at the reflector sends
+  the non-best path once), so it is a behavioural guard; the unit gate is
+  the deterministic one for that half. The per-neighbor
+  `advertised-routes evpn` / `received-routes evpn` views are the
+  observation points because `show bgp evpn` lists only the selected path
+  per key.
+- FIXED (branch `bgp-evpn-addpath-withdraw`): the AddPath loop of
+  `route_advertise_evpn_to_peers` now has the v6-unicast shape — it reads
+  the key's full candidate list from `local_rib.evpn[rd].cands`, runs
+  every candidate through `evpn_advertise_one` (whose split-horizon,
+  iBGP, LLGR, community and out-policy gates decide what is "newly"
+  advertised), and withdraws through `evpn_withdraw_one` every path-id
+  the Adj-RIB-Out held that is no longer advertised; the candidate list
+  is cloned only when an AddPath audience exists. `route_sync_evpn` dumps
+  every candidate to an AddPath member (the selected best to a plain
+  one). The empty-selection withdraw fan-out and the EVPN soft-out were
+  already path-id-aware and are untouched. On the fix both unit gates
+  pass, and both BDD twins pass: after VTEP A dies the leaf drops
+  path-id 1, selects VTEP B's path, and the reflector's Adj-RIB-Out
+  toward it holds VTEP B's row only.
 
 ### 8. P1 CONFIRMED — VPNv6 next-hop-self / eBGP re-advertisement sends the received label behind a self next-hop; no VPNv6 transit label exists
 
@@ -954,6 +997,23 @@ cap. The two reviews agree on every overlapping item.
 - Empty per-RD Loc-RIB tables also leak on the remove/NHT paths
   (`shard/mod.rs:307,384`, `inst.rs:5759,5767`, `route.rs:3465,3494`),
   extending the recorded `entry(rd).or_default()` item.
+- EVPN candidates' `nexthop_reachable` is stamped once at ingest from the
+  NHT cache (`nht_track_received`, Type-5 only) and never refreshed: the
+  NHT re-evaluation's EVPN arm (`inst.rs`, `NhtDep::Evpn`) only
+  re-selects, unlike every unicast/VPN arm which calls
+  `set_nexthop_reachable` first. Reachability is the first comparison in
+  `is_better`, so a candidate that arrives before its next-hop resolves
+  (a brand-new next-hop answers `reachable = false`) loses to one that
+  arrives after its own next-hop resolved, regardless of LOCAL_PREF, and
+  wins again only when it happens to be re-ingested. Found while gating
+  #7: on `main` the reflector's Adj-RIB-Out toward the AddPath leaf held
+  both VTEPs' rows although the fan-out sends the selected path only,
+  which needs the best to have flipped to the later VTEP at least once;
+  this staleness, with each VTEP re-advertising its Type-5 after
+  importing the other's, is the mechanism that fits (not instrumented).
+  Fix direction: refresh the EVPN table in the NHT arm as the other
+  families do, or drop reachability from EVPN selection entirely (the
+  review already records that EVPN egress is not NHT-gated).
 - (Found while fixing #5) `V4Batch::advertise` and `V6Batch::advertise`
   record the group-mate's Adj-RIB-Out row with `AdjRibTable::add`, which
   keys Out rows by local id, so a best-path flip to a path with a
@@ -1050,8 +1110,14 @@ cap. The two reviews agree on every overlapping item.
   MED, or re-feeds an unchanged route.
 - No test asserts which path a plain peer is advertised under
   `maximum-paths`.
-- No EVPN AddPath test with two candidates and a flip; no LU AddPath test
-  with two mutual AddPath peers.
+- EVPN half closed on branch `bgp-evpn-addpath-withdraw`
+  (`bgp_evpn_addpath_flip`, `_v6`: two VTEPs under one RD, a reflector
+  with AddPath send toward a leaf, VTEP A's daemon stopped; unit module
+  `evpn_addpath_fanout_tests`); LU half closed on branch
+  `bgp-lu-addpath-dedup` (`bgp_lu_addpath_resend`, `_v6`: two mutual
+  AddPath labeled-unicast peers, messages received sampled over ten
+  seconds). Was: no EVPN AddPath test with two candidates and a flip; no
+  LU AddPath test with two mutual AddPath peers.
 - No LLGR/PIC test for VPNv6 or EVPN stale expiry, and no GR test where
   the ipv4-unicast EoR arrives before the VPNv4 refresh.
 - `signature_fields_each_distinguish` cannot catch a field that does not

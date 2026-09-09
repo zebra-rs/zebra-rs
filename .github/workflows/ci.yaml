@@ -31,7 +31,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
       - name: Install build deps
+        # The runner image ships third-party apt sources (Google Chrome)
+        # this step never installs from; a stale index on one of them
+        # ("Hash Sum mismatch" from dl.google.com, 2026-09-09, three
+        # reruns) must not fail the build, so drop it before the update.
         run: |
+          ls -la /etc/apt/sources.list.d
+          grep -l dl.google.com /etc/apt/sources.list.d/* | xargs -r sudo rm -f
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler libpam0g-dev
       - name: Rust
@@ -63,7 +69,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
       - name: Install build deps
+        # The runner image ships third-party apt sources (Google Chrome)
+        # this step never installs from; a stale index on one of them
+        # ("Hash Sum mismatch" from dl.google.com, 2026-09-09, three
+        # reruns) must not fail the build, so drop it before the update.
         run: |
+          ls -la /etc/apt/sources.list.d
+          grep -l dl.google.com /etc/apt/sources.list.d/* | xargs -r sudo rm -f
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler libpam0g-dev
       - name: Rust
@@ -87,7 +99,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
       - name: Install build deps
+        # The runner image ships third-party apt sources (Google Chrome)
+        # this step never installs from; a stale index on one of them
+        # ("Hash Sum mismatch" from dl.google.com, 2026-09-09, three
+        # reruns) must not fail the build, so drop it before the update.
         run: |
+          ls -la /etc/apt/sources.list.d
+          grep -l dl.google.com /etc/apt/sources.list.d/* | xargs -r sudo rm -f
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler libpam0g-dev
       - name: Rust
