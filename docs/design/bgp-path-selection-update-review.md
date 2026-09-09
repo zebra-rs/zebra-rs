@@ -512,7 +512,7 @@ cap. The two reviews agree on every overlapping item.
   path-id 1, selects VTEP B's path, and the reflector's Adj-RIB-Out
   toward it holds VTEP B's row only.
 
-### 8. P1 CONFIRMED — VPNv6 next-hop-self / eBGP re-advertisement sends the received label behind a self next-hop; no VPNv6 transit label exists
+### 8. P1 CONFIRMED (probe), FIXED on branch `bgp-vpnv6-transit-label` — VPNv6 next-hop-self / eBGP re-advertisement sends the received label behind a self next-hop; no VPNv6 transit label exists
 
 - `route.rs:5737` (`V6Batch::advertise`, `b.label.unwrap_or_default()`),
   `5831` (AddPath), `15275` (`route_sync_vpnv6`) put the received label
@@ -531,6 +531,60 @@ cap. The two reviews agree on every overlapping item.
 - Fix direction: either add the VPNv6 transit flag + minting + swap ILM
   (`label_vpn_v6`, `vpn_v6_transit`), or reject `vpnv6` on eBGP /
   `next-hop-self` sessions and fix the book.
+- Gates (branch `bgp-vpnv6-transit-label`; every gate compiles on
+  `main` and fails there). Unit, `config.rs` `transit_label_tests`:
+  `reconcile_mints_and_releases_vpnv6_transit_labels_on_flip` (the VPNv6
+  twin of the VPNv4 flip test: a reflected VPNv6 row is unlabelled; after
+  `afi-safi vpnv6 next-hop-self` the row already held must be labelled
+  from the block and its swap ILM reconciled, a row received under
+  transit must be labelled at receive, and removing the knob must release
+  both and tear the ILMs down) and `vpnv6_transit_is_armed_per_family`
+  (the VPNv6 and VPNv4 arms are independent). On `main` the first
+  labelled-row assertion fails with `Some(None)`. Unit, `route.rs`
+  `vpnv6_transit_label_tests` (an iBGP reflector client over an IPv6
+  session, one VPNv6 row received from PE1 with PE1's label 24 and a
+  transit local label set on the row, the session-up dump parsed back):
+  `vpnv6_next_hop_self_peer_is_sent_our_transit_label` expects our
+  address and our label 1000 and on `main` gets PE1's address and label
+  24 (the `vpnv6` knob is dead: #13's other face);
+  `vpnv6_rows_follow_the_vpnv6_knob_not_the_ipv6_unicast_knob` expects
+  the v6-unicast knob to leave the VPNv6 row alone and on `main` sees it
+  rewritten to self, with PE1's label 24 behind it (this finding's
+  black-hole, reached through #13); the reflector and
+  `next-hop-unchanged` cases pass on both. BDD, `bgp_vpnv6_rr_transit_label`
+  (the VPNv6 twin of `bgp_vpnv4_rr_transit_label`: VPNv6 sessions over
+  IPv4 with a global IPv6 on each bridge link as the VPNv6 next-hop; the
+  reflector relays with no ILM, then `afi-safi vpnv6 next-hop-self`
+  toward pe2 must re-advertise pe1's prefix behind the reflector's own
+  address with an ILM behind the label, and removing the knob must
+  release it). On `main` it fails at the flip: sixty seconds after the
+  knob is set pe2 still holds pe1's next-hop (and pe1's label 16 — the
+  same value the reflector's own block starts at, so a relayed label is
+  indistinguishable from a minted one). Note for the fix: the VPNv6 knob
+  half of #13 must be closed at the same time, since the service label
+  and the next-hop rewrite have to follow one predicate.
+- FIXED (branch `bgp-vpnv6-transit-label`), the "add the machinery"
+  option, mirroring VPNv4 site for site: `BgpShard::vpn_v6_transit`
+  armed by `reconcile_transit_labels` from the generic `transit_needed`;
+  `ShardLabelPool::label_vpn_v6` / `free_vpn_v6` keyed by `(RD, Ipv6Net)`
+  and minted at VPNv6 ingest under the flag (the v6 shard handler now
+  takes the central allocator like the v4 one); a VPNv6 reconcile arm
+  that labels or releases the rows already held and re-advertises the
+  changed prefixes per prefix (there is no VPNv6 soft-out); the swap ILM
+  reconciled at the VPNv6 best-path, at both NHT re-evaluation sites and
+  on withdraw (label released with its ILM when the prefix is gone);
+  `vpnv6_service_label` at the batch, AddPath and session-up dump sites.
+  `route_update_ipv6` reads a VPNv6 row's own `(Ip6, MplsVpn)` knobs (a
+  v6-unicast row keeps the unicast knobs and the route-server rule), so
+  the label and the next-hop follow one predicate; `vpnv6_next_hop_self`
+  / `vpnv6_next_hop_unchanged` join `UpdateGroupSig` (version 10) for
+  the `(Ip6, MplsVpn)` group. That closes #13 as well. Shard tests
+  `update_v6_vpn_mints_transit_local_label` /
+  `update_v6_vpn_reflector_mints_no_local_label` added; every gate above
+  passes on the fix. The book's Option B chapter needs no change: the
+  transit ASBR's swap is label-to-label and family-agnostic (an existing
+  feature records that zebra-rs PEs have no 6VPE data plane, which is a
+  PE limitation, not an ASBR one).
 
 ### 9. P1 CONFIRMED — LLGR / PIC stale rows for VPNv6 and EVPN never expire, and any family's EoR flushes the VPNv4 stale set
 
@@ -612,7 +666,7 @@ cap. The two reviews agree on every overlapping item.
 - Fix direction: run the first-AS check on the pre-prepend path (or accept
   `substitute` as the first AS when `change_local_as()` is active).
 
-### 13. P2 CONFIRMED — `afi-safi ipv6 next-hop-self|next-hop-unchanged` silently govern VPNv6 rows
+### 13. P2 CONFIRMED, FIXED on branch `bgp-vpnv6-transit-label` (with #8) — `afi-safi ipv6 next-hop-self|next-hop-unchanged` silently govern VPNv6 rows
 
 - `route.rs:13026` and `13030` evaluate the `(Ip6, Unicast)` knobs for
   every row, including `Some(VpnNexthop::V6)` rows (the VPNv6 shape is only
@@ -628,6 +682,15 @@ cap. The two reviews agree on every overlapping item.
   between group-mates.
 - Fix direction: gate the two reads on `rib.nexthop.is_none()` and read
   `(Ip6, MplsVpn)` for VPN rows; add both to the VPNv6 signature.
+- FIXED (branch `bgp-vpnv6-transit-label`, with #8): exactly that —
+  `route_update_ipv6` picks the knob family from `rib.nexthop` (VPNv6
+  rows read `(Ip6, MplsVpn)`, unicast rows `(Ip6, Unicast)` plus the
+  route-server rule), and `vpnv6_next_hop_self` /
+  `vpnv6_next_hop_unchanged` are stamped into the `(Ip6, MplsVpn)`
+  signature (version 10). Gates: `vpnv6_rows_follow_the_vpnv6_knob_not_the_ipv6_unicast_knob`
+  and `vpnv6_next_hop_self_peer_is_sent_our_transit_label` in
+  `vpnv6_transit_label_tests`, plus the `signature_fields_each_distinguish`
+  rows.
 
 ### 14. P2 CONFIRMED (probe) — with `maximum-paths > 1` the plain fan-out advertises a multipath member, not the winner
 

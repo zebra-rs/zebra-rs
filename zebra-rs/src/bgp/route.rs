@@ -20701,6 +20701,225 @@ mod evpn_addpath_fanout_tests {
     }
 }
 
+/// Review finding #8 (and the VPNv6 half of #13): what a VPNv6 peer is
+/// sent when this router rewrites the next-hop to itself. A transit
+/// (eBGP, or iBGP with `afi-safi vpnv6 next-hop-self`) must put ITS OWN
+/// local label on the wire — the one its swap ILM is keyed on — never the
+/// received label, which only the original next-hop can pop; a reflector
+/// passes the received label and next-hop through. And the knobs that
+/// decide it are the `(Ip6, MplsVpn)` ones: `afi-safi ipv6
+/// next-hop-self` governs v6-unicast rows only.
+#[cfg(test)]
+mod vpnv6_transit_label_tests {
+    use super::*;
+    use crate::bgp::peer::{PeerSubConfig, State};
+    use std::net::IpAddr;
+    use std::str::FromStr;
+
+    const SELF_V6: Ipv6Addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+    const PE1_V6: Ipv6Addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2);
+
+    fn empty_top<'a>(
+        router_id: &'a Ipv4Addr,
+        local_rib: &'a mut LocalRib,
+        shard: &'a mut crate::bgp::shard::BgpShard,
+        attr_store: &'a mut crate::bgp::BgpAttrStore,
+        update_groups: &'a mut crate::bgp::update_group::UpdateGroupMap,
+        interface_addrs: &'a crate::bgp::interface_addrs::InterfaceAddrs,
+        rib_client: &'a crate::rib::client::RibClient,
+        tx: &'a tokio::sync::mpsc::Sender<crate::bgp::inst::Message>,
+    ) -> BgpTop<'a> {
+        BgpTop {
+            router_id,
+            srv6_ipv6_export: None,
+            local_rib,
+            shard,
+            tx,
+            rib_client,
+            attr_store,
+            update_groups,
+            interface_addrs,
+            vrf_export: None,
+            color_policy: None,
+            flex_algo_routes: None,
+            flex_algo_srv6_routes: None,
+            vrf_import: None,
+            nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+            central_label_alloc: None,
+            as_sets_withdraw: false,
+        }
+    }
+
+    fn rd() -> RouteDistinguisher {
+        RouteDistinguisher::from_str("64512:1").unwrap()
+    }
+
+    fn prefix() -> Ipv6Net {
+        "2001:db8:1::/64".parse().unwrap()
+    }
+
+    /// A VPNv6 row received over iBGP from PE1 (peer slot 2): PE1's
+    /// service label 24 behind PE1's IPv6 next-hop.
+    fn received_from_pe1() -> BgpRib {
+        let nhop = Vpnv6Nexthop {
+            rd: rd(),
+            nhop: PE1_V6,
+        };
+        let mut attr = BgpAttr::new();
+        attr.nexthop = Some(BgpNexthop::Vpnv6(nhop.clone()));
+        BgpRib::new(
+            2,
+            Ipv4Addr::new(10, 0, 0, 2),
+            BgpRibType::IBGP,
+            0,
+            0,
+            &attr,
+            Some(Label::new(24, 0, true)),
+            Some(VpnNexthop::V6(nhop)),
+            false,
+        )
+    }
+
+    /// An Established iBGP VPNv6 peer over an IPv6 session (so a
+    /// next-hop-self has a v6 self address), with the given per-family
+    /// knobs. Returns the peer and its writer channel.
+    fn ibgp_peer(
+        knobs: &[(Safi, bool, bool)],
+    ) -> (Peer, tokio::sync::mpsc::UnboundedReceiver<bytes::BytesMut>) {
+        use bgp_packet::CapMultiProtocol;
+        let (ptx, prx) = tokio::sync::mpsc::unbounded_channel();
+        let (mtx, mrx) = tokio::sync::mpsc::channel(8);
+        Box::leak(Box::new(mrx));
+        let mut peer = Peer::new(
+            1,
+            64512,
+            Ipv4Addr::new(10, 0, 0, 1),
+            64512,
+            IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 3)),
+            None,
+            mtx,
+            crate::context::ProtoContext::default_table_no_rib(),
+        );
+        peer.state = State::Established;
+        peer.peer_type = PeerType::IBGP;
+        // A reflector client: an iBGP-learned row is reflected to it.
+        peer.reflector_client = true;
+        peer.param.local_addr = Some(std::net::SocketAddr::new(IpAddr::V6(SELF_V6), 179));
+        let key = CapMultiProtocol::new(&Afi::Ip6, &Safi::MplsVpn);
+        let entry = peer.cap_map.entries.get_mut(&key).expect("pre-seeded");
+        entry.send = true;
+        entry.recv = true;
+        for (safi, next_hop_self, next_hop_unchanged) in knobs {
+            peer.config.sub.insert(
+                AfiSafi::new(Afi::Ip6, *safi),
+                PeerSubConfig {
+                    next_hop_self: *next_hop_self,
+                    next_hop_unchanged: *next_hop_unchanged,
+                    ..Default::default()
+                },
+            );
+        }
+        peer.packet_tx = Some(ptx);
+        (peer, prx)
+    }
+
+    /// Drain the peer's writer channel: every `(next-hop, label)` pair of
+    /// every VPNv6 MP_REACH NLRI sent.
+    fn sent_vpnv6(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<bytes::BytesMut>,
+    ) -> Vec<(Ipv6Addr, u32)> {
+        let mut out = Vec::new();
+        while let Ok(bytes) = rx.try_recv() {
+            let (_, packet) = bgp_packet::BgpPacket::parse_packet(&bytes, false, None)
+                .expect("a well-formed UPDATE");
+            let bgp_packet::BgpPacket::Update(update) = packet else {
+                continue;
+            };
+            if let Some(MpReachAttr::Vpnv6(reach)) = update.mp_update {
+                for nlri in &reach.updates {
+                    out.push((reach.nhop.nhop, nlri.label.label));
+                }
+            }
+        }
+        out
+    }
+
+    /// Run the session-up VPNv6 dump toward `peer` with one received row
+    /// whose transit local label is `local_label`.
+    fn dump_to(peer: &mut Peer, local_label: Option<u32>) {
+        let router_id = Ipv4Addr::new(10, 0, 0, 1);
+        let ctx = crate::context::ProtoContext::default_table_no_rib();
+        let mut local_rib = LocalRib::default();
+        let mut shard = crate::bgp::shard::BgpShard::default();
+        let mut attr_store = crate::bgp::BgpAttrStore::default();
+        let mut update_groups = crate::bgp::update_group::empty_map();
+        let interface_addrs = crate::bgp::interface_addrs::InterfaceAddrs::default();
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        Box::leak(Box::new(rx));
+        {
+            let table = shard.v6vpn.entry(rd()).or_default();
+            table.update(prefix(), received_from_pe1());
+            table.set_local_label(prefix(), local_label);
+        }
+        let mut top = empty_top(
+            &router_id,
+            &mut local_rib,
+            &mut shard,
+            &mut attr_store,
+            &mut update_groups,
+            &interface_addrs,
+            &ctx.rib,
+            &tx,
+        );
+        route_sync_vpnv6(peer, &mut top);
+    }
+
+    /// The Option B transit: `afi-safi vpnv6 next-hop-self` toward an
+    /// iBGP PE puts our next-hop AND our transit label on the wire.
+    #[tokio::test]
+    async fn vpnv6_next_hop_self_peer_is_sent_our_transit_label() {
+        let (mut peer, mut rx) = ibgp_peer(&[(Safi::MplsVpn, true, false)]);
+        dump_to(&mut peer, Some(1000));
+        assert_eq!(
+            sent_vpnv6(&mut rx),
+            vec![(SELF_V6, 1000)],
+            "next-hop-self: our address and our swap label, not PE1's label"
+        );
+    }
+
+    /// A plain reflector passes PE1's next-hop and label through.
+    #[tokio::test]
+    async fn vpnv6_reflector_passes_the_received_label_and_next_hop() {
+        let (mut peer, mut rx) = ibgp_peer(&[]);
+        dump_to(&mut peer, None);
+        assert_eq!(sent_vpnv6(&mut rx), vec![(PE1_V6, 24)]);
+    }
+
+    /// Review finding #13 (VPNv6 half): the v6-UNICAST `next-hop-self`
+    /// knob must not rewrite VPNv6 rows — they follow the `vpnv6` knob.
+    #[tokio::test]
+    async fn vpnv6_rows_follow_the_vpnv6_knob_not_the_ipv6_unicast_knob() {
+        let (mut peer, mut rx) = ibgp_peer(&[(Safi::Unicast, true, false)]);
+        dump_to(&mut peer, None);
+        assert_eq!(
+            sent_vpnv6(&mut rx),
+            vec![(PE1_V6, 24)],
+            "`afi-safi ipv6 next-hop-self` governs v6-unicast rows only"
+        );
+    }
+
+    /// And `afi-safi vpnv6 next-hop-unchanged` keeps PE1's next-hop and
+    /// label even though the peer would otherwise be rewritten to self.
+    #[tokio::test]
+    async fn vpnv6_next_hop_unchanged_keeps_the_received_label_and_next_hop() {
+        let (mut peer, mut rx) = ibgp_peer(&[(Safi::MplsVpn, true, true)]);
+        dump_to(&mut peer, Some(1000));
+        assert_eq!(sent_vpnv6(&mut rx), vec![(PE1_V6, 24)]);
+    }
+}
+
 /// Receive-side encapsulation classification: which overlay is a received
 /// EVPN L2 route asking us to use?
 #[cfg(test)]

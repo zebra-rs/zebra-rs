@@ -1,0 +1,33 @@
+# pe2 (AS 64512 provider edge): one VRF whose IPv6 customer prefix is
+# exported as VPNv6 (MPLS label) to the route reflector; imports the
+# other PE's prefix. The VPNv6 session runs over IPv4; the PE's global
+# IPv6 address on the bridge link is its VPNv6 next-hop.
+vrf:
+- name: vrf-cust
+  ipv6:
+    route-target:
+      import:
+      - 64512:100
+      export:
+      - 64512:100
+router:
+  bgp:
+    global:
+      as: 64512
+      router-id: 192.168.0.3
+    neighbor:
+    - remote-address: 192.168.0.1
+      afi-safi:
+      - name: vpnv6
+        enabled: true
+      - name: ipv4
+        enabled: false
+      enabled: true
+      remote-as: 64512
+    vrf:
+    - name: vrf-cust
+      rd: 64512:2
+      afi-safi:
+        ipv6:
+          network:
+          - prefix: 2001:db8:2::/64

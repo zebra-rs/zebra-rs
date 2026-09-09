@@ -10777,13 +10777,15 @@ mod transit_label_tests {
     use std::collections::VecDeque;
     use std::net::Ipv4Addr;
 
-    use bgp_packet::{BgpAttr, BgpNexthop, Ipv4Nlri, Label, RouteDistinguisher};
+    use bgp_packet::{
+        BgpAttr, BgpNexthop, Ipv4Nlri, Ipv6Nlri, Label, RouteDistinguisher, Vpnv6Nexthop,
+    };
     use tokio::sync::mpsc;
 
     use super::*;
     use crate::bgp::route::BgpRibType;
     use crate::bgp::shard::ShardMsg;
-    use crate::bgp::shard::msg::{LuNlri, ShardUpdateLu, ShardUpdateV4};
+    use crate::bgp::shard::msg::{LuNlri, ShardUpdateLu, ShardUpdateV4, ShardUpdateV6};
     use crate::bgp::vrf::VrfLabelAllocator;
 
     const VPNV4: AfiSafi = AfiSafi {
@@ -10895,6 +10897,183 @@ mod transit_label_tests {
             .and_then(|t| t.0.get(&prefix))
             .and_then(|cands| cands.first())
             .map(|r| r.local_label)
+    }
+
+    // ---- VPNv6 twins (review finding #8) ------------------------------------
+
+    const VPNV6: AfiSafi = AfiSafi {
+        afi: Afi::Ip6,
+        safi: Safi::MplsVpn,
+    };
+
+    fn setup_vpnv6_peer(bgp: &mut Bgp, addr: &str, remote_as: &str) {
+        config_global_asn(bgp, arg_words(&["64512"]), ConfigOp::Set).unwrap();
+        config_peer(bgp, arg_words(&[addr]), ConfigOp::Set).unwrap();
+        config_remote_as(bgp, arg_words(&[addr, remote_as]), ConfigOp::Set).unwrap();
+        config_afi_safi(bgp, arg_words(&[addr, "vpnv6", "true"]), ConfigOp::Set).unwrap();
+    }
+
+    /// A received (iBGP) VPNv6 route for `prefix` carrying the originating
+    /// PE's service label 24 and its IPv6 next-hop.
+    fn vpnv6_update(rd: RouteDistinguisher, prefix: &str) -> ShardMsg {
+        let nhop = Vpnv6Nexthop {
+            rd,
+            nhop: "2001:db8::2".parse().unwrap(),
+        };
+        let attr = BgpAttr {
+            nexthop: Some(BgpNexthop::Vpnv6(nhop.clone())),
+            ..Default::default()
+        };
+        ShardMsg::UpdateV6(ShardUpdateV6 {
+            ident: 1,
+            rd: Some(rd),
+            nlri: Ipv6Nlri {
+                id: 0,
+                prefix: prefix.parse().unwrap(),
+            },
+            peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+            typ: BgpRibType::IBGP,
+            from_client: false,
+            attr: attr.clone(),
+            label: Some(Label::new(24, 0, true)),
+            nexthop: Some(crate::bgp::route::VpnNexthop::V6(nhop)),
+            stale: false,
+            nexthop_reachable: true,
+            vrf_transit_only: false,
+            // The v6 shard handler takes the inbound decision ready-made
+            // (no `compute_policy` switch as on the v4 side).
+            decision: Some(crate::bgp::route::PolicyDecision {
+                attr,
+                weight: 0,
+                tag: 0,
+            }),
+        })
+    }
+
+    fn local_label_of_v6(bgp: &Bgp, rd: RouteDistinguisher, prefix: &str) -> Option<Option<u32>> {
+        let prefix: ipnet::Ipv6Net = prefix.parse().unwrap();
+        bgp.shard
+            .v6vpn
+            .get(&rd)
+            .and_then(|t| t.0.get(&prefix))
+            .and_then(|cands| cands.first())
+            .map(|r| r.local_label)
+    }
+
+    /// Review finding #8: the VPNv6 twin of
+    /// `reconcile_mints_and_releases_transit_labels_on_flip`. A VPNv6
+    /// next-hop-self (Inter-AS Option B) transit must mint a per-(RD,
+    /// prefix) local label for the rows it already holds, reconcile a
+    /// swap ILM for each, mint at receive time while transit is on, and
+    /// release everything when the knob goes — exactly what VPNv4 does.
+    /// Pre-fix VPNv6 had no transit flag, no mint and no ILM: the ASBR
+    /// re-advertised the received label behind its own next-hop.
+    #[tokio::test]
+    async fn reconcile_mints_and_releases_vpnv6_transit_labels_on_flip() {
+        let (mut bgp, mut rx) = fresh_bgp_observed();
+        let addr = "10.0.0.2";
+        setup_vpnv6_peer(&mut bgp, addr, "64512");
+        bgp.vrf_label_alloc = Some(VrfLabelAllocator::bounded(1000, 5000));
+        bgp.reconcile_transit_labels(false);
+        assert!(
+            !bgp.transit_needed(VPNV6),
+            "a plain reflector is no transit"
+        );
+        let _ = drain_ilm(&mut rx);
+
+        // Reflected route: no transit label, no ILM traffic.
+        let rd = RouteDistinguisher::default();
+        bgp.shard.handle(
+            vpnv6_update(rd, "2001:db8:1::/64"),
+            bgp.vrf_label_alloc.as_mut(),
+        );
+        assert_eq!(local_label_of_v6(&bgp, rd, "2001:db8:1::/64"), Some(None));
+        assert!(
+            drain_ilm(&mut rx).is_empty(),
+            "reflector must not touch the LFIB"
+        );
+
+        // The operator turns the reflector into an Option B transit for
+        // VPNv6: the row already in the table is labelled and its ILM
+        // reconciled (no transport resolves in this harness, so the
+        // reconcile withdraws the ILM at the minted label — the point is
+        // that it ran against that label).
+        config_next_hop_self(&mut bgp, arg_words(&[addr, "vpnv6", "true"]), ConfigOp::Set).unwrap();
+        assert!(bgp.transit_needed(VPNV6));
+        bgp.reconcile_transit_labels(false);
+        assert_eq!(
+            local_label_of_v6(&bgp, rd, "2001:db8:1::/64"),
+            Some(Some(1000)),
+            "the VPNv6 row held before the flip is labelled"
+        );
+        assert_eq!(drain_ilm(&mut rx), vec![(false, 1000)]);
+
+        // A route arriving while transit is on mints at receive time.
+        bgp.shard.handle(
+            vpnv6_update(rd, "2001:db8:2::/64"),
+            bgp.vrf_label_alloc.as_mut(),
+        );
+        assert_eq!(
+            local_label_of_v6(&bgp, rd, "2001:db8:2::/64"),
+            Some(Some(1001)),
+            "a VPNv6 row received under transit is labelled at receive"
+        );
+
+        // Back to a plain reflector: both labels released, ILMs torn
+        // down, rows cleared.
+        config_next_hop_self(&mut bgp, arg_words(&[addr, "vpnv6"]), ConfigOp::Delete).unwrap();
+        bgp.reconcile_transit_labels(false);
+        assert!(!bgp.transit_needed(VPNV6));
+        assert_eq!(local_label_of_v6(&bgp, rd, "2001:db8:1::/64"), Some(None));
+        assert_eq!(local_label_of_v6(&bgp, rd, "2001:db8:2::/64"), Some(None));
+        assert_eq!(drain_ilm(&mut rx), vec![(false, 1000), (false, 1001)]);
+
+        // Steady state: a re-run with nothing flipped is a no-op.
+        bgp.reconcile_transit_labels(false);
+        assert!(drain_ilm(&mut rx).is_empty());
+    }
+
+    /// The VPNv6 arm must be independent of the VPNv4 one: a VPNv4 transit
+    /// labels no VPNv6 row and vice versa.
+    #[tokio::test]
+    async fn vpnv6_transit_is_armed_per_family() {
+        let (mut bgp, mut rx) = fresh_bgp_observed();
+        let addr = "10.0.0.2";
+        setup_vpnv6_peer(&mut bgp, addr, "64512");
+        config_afi_safi(&mut bgp, arg_words(&[addr, "vpnv4", "true"]), ConfigOp::Set).unwrap();
+        bgp.vrf_label_alloc = Some(VrfLabelAllocator::bounded(1000, 5000));
+        let rd = RouteDistinguisher::default();
+        bgp.shard.handle(
+            vpnv4_update(rd, "10.1.0.0/30"),
+            bgp.vrf_label_alloc.as_mut(),
+        );
+        bgp.shard.handle(
+            vpnv6_update(rd, "2001:db8:1::/64"),
+            bgp.vrf_label_alloc.as_mut(),
+        );
+        let _ = drain_ilm(&mut rx);
+
+        // Only the VPNv6 knob: the VPNv6 row is labelled, the VPNv4 row is not.
+        config_next_hop_self(&mut bgp, arg_words(&[addr, "vpnv6", "true"]), ConfigOp::Set).unwrap();
+        bgp.reconcile_transit_labels(false);
+        assert!(!bgp.transit_needed(VPNV4));
+        assert!(bgp.transit_needed(VPNV6));
+        assert_eq!(local_label_of(&bgp, rd, "10.1.0.0/30"), Some(None));
+        assert_eq!(
+            local_label_of_v6(&bgp, rd, "2001:db8:1::/64"),
+            Some(Some(1000))
+        );
+        let _ = drain_ilm(&mut rx);
+
+        // Add the VPNv4 knob: the VPNv4 row is labelled from the same pool.
+        config_next_hop_self(&mut bgp, arg_words(&[addr, "vpnv4", "true"]), ConfigOp::Set).unwrap();
+        bgp.reconcile_transit_labels(false);
+        assert_eq!(local_label_of(&bgp, rd, "10.1.0.0/30"), Some(Some(1001)));
+        assert_eq!(
+            local_label_of_v6(&bgp, rd, "2001:db8:1::/64"),
+            Some(Some(1000)),
+            "the VPNv6 label is untouched by the VPNv4 flip"
+        );
     }
 
     /// The transit need follows exactly the per-peer rule the advertise
