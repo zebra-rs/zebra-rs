@@ -419,6 +419,21 @@ cap. The two reviews agree on every overlapping item.
   ingested twice yields one UPDATE, a changed one a second), which fails
   with the guard forced off. On the fix both BDD gates settle to zero
   messages received in ten seconds in each direction.
+- Review follow-up (P2, same branch): the first fix recorded and
+  compared the RECEIVED candidate, so a changed outbound-policy result
+  (a probe bound an out-policy setting MED 77) or a changed advertised
+  label on an unchanged candidate was suppressed, and labeled-unicast
+  has no soft-out to repair it; the best-path-only branch had carried
+  the same blindness since 2026-09-04, and the two session-up dumps
+  (`route_sync_labelv4/v6`) recorded the received row while sending the
+  policy result. Both branches and both dumps now record the advertised
+  form (`advertised_form`: the candidate with the interned post-policy
+  attr, which carries the egress next-hop, and the advertised label), so
+  `same_advertised` compares sends with sends. Unit: the AddPath gate
+  above gained the policy case (MED 77 bound after the first send: one
+  UPDATE, the Adj-RIB-Out row holds MED 77, the next identical ingest is
+  deduplicated) and `lu_plain_peer_is_sent_a_changed_outbound_policy_result`
+  covers the best-path-only branch.
 
 ### 7. P1 CONFIRMED — EVPN AddPath members receive the best path only, and the superseded path-id is never withdrawn on a flip
 
