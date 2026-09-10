@@ -78,6 +78,10 @@
 /router/bgp/interface-neighbor
 /router/bgp/interface-neighbor/neighbor-group
 /router/bgp/interface-neighbor/remote-as
+/router/bgp/interface-neighbor/timers/advertisement-interval
+/router/bgp/interface-neighbor/timers/connect-retry-time
+/router/bgp/interface-neighbor/timers/hold-time
+/router/bgp/interface-neighbor/timers/idle-hold-time
 /router/bgp/loc-rib-hook/ipv4-unicast/import
 /router/bgp/loc-rib-hook/ipv4-unicast/withdraw
 /router/bgp/loc-rib-hook/l2vpn-evpn/import

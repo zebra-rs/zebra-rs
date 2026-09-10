@@ -86,6 +86,11 @@
 /router/bgp/interface-neighbor	list keys=interface
 /router/bgp/interface-neighbor/neighbor-group	leaf
 /router/bgp/interface-neighbor/remote-as	leaf
+/router/bgp/interface-neighbor/timers	container
+/router/bgp/interface-neighbor/timers/advertisement-interval	leaf
+/router/bgp/interface-neighbor/timers/connect-retry-time	leaf
+/router/bgp/interface-neighbor/timers/hold-time	leaf
+/router/bgp/interface-neighbor/timers/idle-hold-time	leaf
 /router/bgp/long-lived-graceful-restart	container
 /router/bgp/long-lived-graceful-restart/stale-time	leaf
 /router/bgp/mup-c	container

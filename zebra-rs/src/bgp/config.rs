@@ -5456,6 +5456,26 @@ impl Bgp {
             "/router/bgp/interface-neighbor/remote-as",
             super::interface_neighbor::config_interface_neighbor_remote_as,
         );
+        // Session timers for an interface-keyed peer. The addressed
+        // `/router/bgp/neighbor/timers/...` callbacks cannot serve one:
+        // they resolve the peer with `PeerMap::get_mut(&IpAddr)`, which
+        // only looks under `PeerKey::Addr`.
+        self.callback_add(
+            "/router/bgp/interface-neighbor/timers/hold-time",
+            super::interface_neighbor::config_interface_neighbor_hold_time,
+        );
+        self.callback_add(
+            "/router/bgp/interface-neighbor/timers/idle-hold-time",
+            super::interface_neighbor::config_interface_neighbor_idle_hold_time,
+        );
+        self.callback_add(
+            "/router/bgp/interface-neighbor/timers/connect-retry-time",
+            super::interface_neighbor::config_interface_neighbor_connect_retry_time,
+        );
+        self.callback_add(
+            "/router/bgp/interface-neighbor/timers/advertisement-interval",
+            super::interface_neighbor::config_interface_neighbor_advertisement_interval,
+        );
         self.callback_peer("/local-identifier", config_local_identifier);
         self.callback_peer("/transport/passive-mode", config_transport_passive);
         self.callback_peer("/transport/local-address", config_transport_local_address);
@@ -8707,6 +8727,188 @@ mod neighbor_group_wiring_tests {
             .expect("LinkAdd must materialize the configured neighbor");
         assert_eq!(peer.ifname.as_deref(), Some("i1"));
         assert!(!peer.active, "still no RA — stays dormant");
+    }
+
+    // ---- interface-neighbor timers --------------------------------
+
+    /// Timers typed before the peer exists must reach it when it
+    /// materializes. This is the case the addressed
+    /// `neighbor <addr> timers` callbacks cannot cover for an
+    /// interface-keyed peer: they resolve through
+    /// `PeerMap::get_mut(&IpAddr)`, which only looks under
+    /// `PeerKey::Addr`.
+    #[tokio::test]
+    async fn interface_neighbor_timers_reach_the_materialized_peer() {
+        use super::super::interface_neighbor::{
+            config_interface_neighbor, config_interface_neighbor_advertisement_interval,
+            config_interface_neighbor_connect_retry_time, config_interface_neighbor_hold_time,
+            config_interface_neighbor_idle_hold_time, config_interface_neighbor_remote_as,
+        };
+        use super::super::peer_key::PeerKey;
+
+        let mut bgp = fresh_bgp();
+        // No link yet: every callback below can only stage onto the
+        // interface-neighbor config.
+        config_interface_neighbor(&mut bgp, arg_words(&["i1"]), ConfigOp::Set).unwrap();
+        config_interface_neighbor_remote_as(&mut bgp, arg_words(&["i1", "65002"]), ConfigOp::Set)
+            .unwrap();
+        config_interface_neighbor_hold_time(&mut bgp, arg_words(&["i1", "30"]), ConfigOp::Set)
+            .unwrap();
+        config_interface_neighbor_idle_hold_time(&mut bgp, arg_words(&["i1", "1"]), ConfigOp::Set)
+            .unwrap();
+        config_interface_neighbor_connect_retry_time(
+            &mut bgp,
+            arg_words(&["i1", "7"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        config_interface_neighbor_advertisement_interval(
+            &mut bgp,
+            arg_words(&["i1", "0"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert!(
+            bgp.peers.get_by_key(&PeerKey::Interface(7)).is_none(),
+            "no link yet — nothing to key the peer by"
+        );
+
+        // The link surfaces; the dormant peer is built from the config.
+        bgp.link_index_by_name.insert("i1".to_string(), 7);
+        super::super::interface_neighbor::materialize_dormant(&mut bgp, "i1")
+            .expect("peer materializes");
+
+        let peer = bgp.peers.get_by_key(&PeerKey::Interface(7)).unwrap();
+        assert_eq!(peer.config.timer.hold_time, Some(30));
+        assert_eq!(peer.config.timer.idle_hold_time, Some(1));
+        assert_eq!(peer.config.timer.connect_retry_time, Some(7));
+        assert_eq!(peer.config.timer.min_adv_interval, Some(0));
+    }
+
+    /// An edit made while the peer is already materialized writes
+    /// through to it, and a delete falls back to the built-in default —
+    /// matching the addressed `neighbor <addr> timers` callbacks.
+    #[tokio::test]
+    async fn interface_neighbor_timers_write_through_and_delete() {
+        use super::super::interface_neighbor::{
+            config_interface_neighbor, config_interface_neighbor_hold_time,
+            config_interface_neighbor_remote_as, materialize_peer,
+        };
+        use super::super::peer_key::PeerKey;
+
+        let mut bgp = fresh_bgp();
+        bgp.link_index_by_name.insert("i1".to_string(), 7);
+        config_interface_neighbor(&mut bgp, arg_words(&["i1"]), ConfigOp::Set).unwrap();
+        config_interface_neighbor_remote_as(&mut bgp, arg_words(&["i1", "65002"]), ConfigOp::Set)
+            .unwrap();
+        let link_local: std::net::Ipv6Addr = "fe80::2".parse().unwrap();
+        materialize_peer(&mut bgp, "i1", 7, link_local).expect("peer materializes");
+        assert_eq!(
+            bgp.peers
+                .get_by_key(&PeerKey::Interface(7))
+                .unwrap()
+                .config
+                .timer
+                .hold_time,
+            None,
+            "no statement — the 180s default applies"
+        );
+
+        config_interface_neighbor_hold_time(&mut bgp, arg_words(&["i1", "9"]), ConfigOp::Set)
+            .unwrap();
+        let peer = bgp.peers.get_by_key(&PeerKey::Interface(7)).unwrap();
+        assert_eq!(peer.config.timer.hold_time, Some(9));
+        assert_eq!(peer.config.timer.hold_time(), 9);
+
+        config_interface_neighbor_hold_time(&mut bgp, arg_words(&["i1", "9"]), ConfigOp::Delete)
+            .unwrap();
+        let peer = bgp.peers.get_by_key(&PeerKey::Interface(7)).unwrap();
+        assert_eq!(peer.config.timer.hold_time, None);
+        assert_eq!(peer.config.timer.hold_time(), 180, "back to the default");
+        assert_eq!(
+            bgp.interface_neighbors["i1"].timer.hold_time, None,
+            "the staged record follows the delete too"
+        );
+    }
+
+    /// `idle-hold-time` is the one leaf that re-arms a running timer.
+    /// On a peer materialized before its first RA the address is still
+    /// unspecified, and `timer::update_timers` — unlike `Peer::start()`
+    /// — does not re-check that, so the re-arm must stay gated: an
+    /// ungated one would drive the peer into `fsm_start` and dial `::`.
+    #[tokio::test]
+    async fn interface_neighbor_idle_hold_time_does_not_dial_a_dormant_peer() {
+        use super::super::interface_neighbor::{
+            config_interface_neighbor, config_interface_neighbor_idle_hold_time,
+            config_interface_neighbor_remote_as,
+        };
+        use super::super::peer_key::PeerKey;
+
+        let mut bgp = fresh_bgp();
+        bgp.link_index_by_name.insert("i1".to_string(), 7);
+        config_interface_neighbor(&mut bgp, arg_words(&["i1"]), ConfigOp::Set).unwrap();
+        config_interface_neighbor_remote_as(&mut bgp, arg_words(&["i1", "65002"]), ConfigOp::Set)
+            .unwrap();
+        let peer = bgp.peers.get_by_key(&PeerKey::Interface(7)).unwrap();
+        assert!(peer.address.is_unspecified() && !peer.active, "dormant");
+
+        config_interface_neighbor_idle_hold_time(&mut bgp, arg_words(&["i1", "1"]), ConfigOp::Set)
+            .unwrap();
+
+        let peer = bgp.peers.get_by_key(&PeerKey::Interface(7)).unwrap();
+        assert_eq!(peer.config.timer.idle_hold_time, Some(1), "value lands");
+        assert!(
+            peer.timer.idle_hold_timer.is_none(),
+            "no idle-hold timer may be armed while the address is unspecified"
+        );
+        assert!(!peer.active, "the peer must stay dormant");
+    }
+
+    /// The positive half of the gate above. On a materialized,
+    /// dialable peer the re-arm must happen even though `active` is
+    /// already true: `Peer::is_dialable` deliberately does not include
+    /// `!active` — `Peer::start` adds that separately, because `start`
+    /// is a one-shot kick while this callback re-arms a timer that is
+    /// already running. Folding `!active` into the predicate would
+    /// silently stop honoring a live `idle-hold-time` change; this
+    /// pins the split.
+    #[tokio::test]
+    async fn interface_neighbor_idle_hold_time_rearms_an_already_active_peer() {
+        use super::super::interface_neighbor::{
+            config_interface_neighbor, config_interface_neighbor_idle_hold_time,
+            config_interface_neighbor_remote_as, materialize_peer,
+        };
+        use super::super::peer_key::PeerKey;
+        use crate::bgp::peer::State;
+
+        let mut bgp = fresh_bgp();
+        bgp.link_index_by_name.insert("i1".to_string(), 7);
+        config_interface_neighbor(&mut bgp, arg_words(&["i1"]), ConfigOp::Set).unwrap();
+        config_interface_neighbor_remote_as(&mut bgp, arg_words(&["i1", "65002"]), ConfigOp::Set)
+            .unwrap();
+        let link_local: std::net::Ipv6Addr = "fe80::2".parse().unwrap();
+        materialize_peer(&mut bgp, "i1", 7, link_local).expect("peer materializes");
+
+        {
+            let peer = bgp.peers.get_mut_by_key(&PeerKey::Interface(7)).unwrap();
+            assert!(peer.is_dialable(), "RA-learned address and a resolved ASN");
+            assert!(peer.active, "materialization kicked the FSM");
+            assert_eq!(peer.state, State::Idle, "still dwelling in Idle");
+            // `materialize_peer` -> `start()` -> `update_timers` already
+            // armed this at the default. Clear it, or the callback's
+            // Some -> Some transition would prove nothing.
+            peer.timer.idle_hold_timer = None;
+        }
+
+        config_interface_neighbor_idle_hold_time(&mut bgp, arg_words(&["i1", "1"]), ConfigOp::Set)
+            .unwrap();
+
+        let peer = bgp.peers.get_by_key(&PeerKey::Interface(7)).unwrap();
+        assert_eq!(peer.config.timer.idle_hold_time, Some(1), "value lands");
+        assert!(
+            peer.timer.idle_hold_timer.is_some(),
+            "a dialable peer must have its idle-hold timer re-armed, active or not"
+        );
     }
 
     /// The group supplies the remote-as after an interface-neighbor
