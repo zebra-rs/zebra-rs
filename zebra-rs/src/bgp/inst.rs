@@ -4960,6 +4960,24 @@ impl Bgp {
                     super::route::route_advertise_to_peers_vpnv6(
                         rd, prefix, &selected, &mut top, peers,
                     );
+                    // The plain fan-out visits plain members only; AddPath
+                    // members hold every candidate under its path-id, so
+                    // refresh each of them too — otherwise they keep
+                    // advertisements carrying labels this reconcile just
+                    // freed (review follow-up on #8).
+                    let cands: Vec<super::route::BgpRib> = self
+                        .shard
+                        .v6vpn
+                        .get(&rd)
+                        .and_then(|t| t.0.get(&prefix))
+                        .cloned()
+                        .unwrap_or_default();
+                    for cand in &cands {
+                        let (mut top, peers) = super::peer::advertise_top(self);
+                        super::route::route_advertise_to_peers_vpnv6_addpath(
+                            rd, prefix, cand, &mut top, peers,
+                        );
+                    }
                 }
             }
         }

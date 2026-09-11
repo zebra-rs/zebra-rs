@@ -10916,6 +10916,10 @@ mod transit_label_tests {
     /// A received (iBGP) VPNv6 route for `prefix` carrying the originating
     /// PE's service label 24 and its IPv6 next-hop.
     fn vpnv6_update(rd: RouteDistinguisher, prefix: &str) -> ShardMsg {
+        vpnv6_update_from(1, rd, prefix)
+    }
+
+    fn vpnv6_update_from(ident: usize, rd: RouteDistinguisher, prefix: &str) -> ShardMsg {
         let nhop = Vpnv6Nexthop {
             rd,
             nhop: "2001:db8::2".parse().unwrap(),
@@ -10925,7 +10929,7 @@ mod transit_label_tests {
             ..Default::default()
         };
         ShardMsg::UpdateV6(ShardUpdateV6 {
-            ident: 1,
+            ident,
             rd: Some(rd),
             nlri: Ipv6Nlri {
                 id: 0,
@@ -11031,6 +11035,99 @@ mod transit_label_tests {
         // Steady state: a re-run with nothing flipped is a no-op.
         bgp.reconcile_transit_labels(false);
         assert!(drain_ilm(&mut rx).is_empty());
+    }
+
+    /// Drain a peer's writer channel: every `(next-hop, label)` of every
+    /// VPNv6 MP_REACH NLRI sent (AddPath path-ids parsed).
+    fn sent_vpnv6(
+        rx: &mut mpsc::UnboundedReceiver<bytes::BytesMut>,
+    ) -> Vec<(std::net::Ipv6Addr, u32)> {
+        let mut opt = ParseOption::default();
+        opt.add_path.entry(VPNV6).or_default().recv = true;
+        let mut out = Vec::new();
+        while let Ok(bytes) = rx.try_recv() {
+            let (_, packet) = BgpPacket::parse_packet(&bytes, false, Some(opt.clone()))
+                .expect("a well-formed UPDATE");
+            let BgpPacket::Update(update) = packet else {
+                continue;
+            };
+            if let Some(MpReachAttr::Vpnv6(reach)) = update.mp_update {
+                for nlri in &reach.updates {
+                    out.push((reach.nhop.nhop, nlri.label.label));
+                }
+            }
+        }
+        out
+    }
+
+    /// Review follow-up 2: the transit reconcile must refresh AddPath
+    /// members too. The plain fan-out it used visits plain members only,
+    /// so removing `next-hop-self` freed the labels and deleted the ILMs
+    /// while AddPath members kept advertisements carrying them.
+    #[tokio::test]
+    async fn reconcile_refreshes_addpath_members_too() {
+        use crate::bgp::peer::State;
+        let (mut bgp, _rx) = fresh_bgp_observed();
+        let addr = "10.0.0.2";
+        setup_vpnv6_peer(&mut bgp, addr, "64512");
+        let ident = bgp.peers.get(&addr.parse().unwrap()).unwrap().ident;
+        let (ptx, mut prx) = mpsc::unbounded_channel();
+        {
+            let peer = bgp.peers.get_mut_by_idx(ident).unwrap();
+            peer.state = State::Established;
+            peer.reflector_client = true;
+            peer.param.local_addr = Some("[2001:db8::1]:179".parse().unwrap());
+            let key = CapMultiProtocol::new(&Afi::Ip6, &Safi::MplsVpn);
+            let entry = peer.cap_map.entries.get_mut(&key).expect("pre-seeded");
+            entry.send = true;
+            entry.recv = true;
+            peer.opt.add_path.insert(
+                VPNV6,
+                Direct {
+                    send: true,
+                    recv: false,
+                },
+            );
+            peer.packet_tx = Some(ptx);
+        }
+        bgp.peers.membership_enroll(ident);
+        assert_eq!(
+            bgp.peers
+                .established_addpath_idents(Afi::Ip6, Safi::MplsVpn),
+            vec![ident]
+        );
+        bgp.vrf_label_alloc = Some(VrfLabelAllocator::bounded(1000, 5000));
+
+        // A row from another PE (slot 9), held while the reflector is plain.
+        let rd = RouteDistinguisher::default();
+        bgp.shard.handle(
+            vpnv6_update_from(9, rd, "2001:db8:1::/64"),
+            bgp.vrf_label_alloc.as_mut(),
+        );
+
+        // Transit on: the AddPath member is refreshed with our label behind
+        // our next-hop ...
+        config_next_hop_self(&mut bgp, arg_words(&[addr, "vpnv6", "true"]), ConfigOp::Set).unwrap();
+        bgp.reconcile_transit_labels(false);
+        // VPNv6 sends are batched behind the advertisement-interval timer;
+        // flush synchronously to read them.
+        bgp.peers.get_mut_by_idx(ident).unwrap().flush_vpnv6();
+        assert_eq!(
+            sent_vpnv6(&mut prx),
+            vec![("2001:db8::1".parse().unwrap(), 1000)],
+            "the AddPath member is re-advertised our transit label"
+        );
+
+        // ... and transit off: refreshed back to PE1's label and next-hop,
+        // so it never keeps an advertisement whose label we just freed.
+        config_next_hop_self(&mut bgp, arg_words(&[addr, "vpnv6"]), ConfigOp::Delete).unwrap();
+        bgp.reconcile_transit_labels(false);
+        bgp.peers.get_mut_by_idx(ident).unwrap().flush_vpnv6();
+        assert_eq!(
+            sent_vpnv6(&mut prx),
+            vec![("2001:db8::2".parse().unwrap(), 24)],
+            "the AddPath member is re-advertised the received label"
+        );
     }
 
     /// The VPNv6 twin of `late_label_block_labels_existing_transit_rows`:

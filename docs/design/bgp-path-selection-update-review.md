@@ -608,6 +608,27 @@ cap. The two reviews agree on every overlapping item.
   here: `vpnv4_service_label` and the LU builders keep the
   received-label / implicit-null fallback when a rewritten next-hop has
   no local label (below the cap).
+- Review follow-up 2 (three P1s, same branch). (a) The withdraw arm
+  freed the transit label whenever the selection came back empty, which
+  also happens when every surviving candidate's next-hop is unreachable;
+  the survivors still referenced the label and the next prefix was
+  handed the same one. Now the label is freed only when no candidate
+  remains; with unreachable survivors only the ILM is dropped (the NHT
+  re-evaluation re-installs it). The VPNv4 arm had the identical
+  hazard and got the same shape. (b) `vpnv6_service_label` re-derived
+  the rewrite from the knobs, but the builder keeps the remote next-hop
+  when the knobs ask for self and no usable local IPv6 exists (an IPv4
+  transport with no global IPv6 on the link), so our label went out
+  behind the remote next-hop; the label is now read off the attributes
+  actually sent, and the withhold moved to where the rewrite is
+  certain. (c) The reconcile refreshed plain members only, so AddPath
+  members kept advertisements carrying labels the reconcile had just
+  freed; every candidate is now re-advertised to AddPath members per
+  path-id as well. Gates:
+  `vpnv6_withdraw_keeps_the_label_while_unreachable_survivors_remain`,
+  `vpnv6_peer_without_a_self_address_is_passed_the_remote_label_and_next_hop`
+  and `reconcile_refreshes_addpath_members_too`, each failing before its
+  fix.
 
 ### 9. P1 CONFIRMED — LLGR / PIC stale rows for VPNv6 and EVPN never expire, and any family's EoR flushes the VPNv4 stale set
 

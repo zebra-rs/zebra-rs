@@ -5753,7 +5753,7 @@ impl BatchAfi for V6Batch {
                 // Our transit label behind our next-hop, the received label
                 // otherwise (review finding #8).
                 label: new_best
-                    .map(|b| vpnv6_service_label(peer, b))
+                    .map(|b| vpnv6_service_label(b, &attr))
                     .unwrap_or_default(),
                 rd,
                 nlri,
@@ -5858,7 +5858,7 @@ impl BatchAfi for V6Batch {
                 return;
             }
             let vpnv6_nlri = Vpnv6Nlri {
-                label: vpnv6_service_label(peer, rib),
+                label: vpnv6_service_label(rib, &attr),
                 rd,
                 nlri,
             };
@@ -7510,17 +7510,32 @@ pub fn route_ipv4_withdraw(
         // VPNv4 transit (Option B): the prefix is fully gone → release
         // its local label and tear down the swap ILM; a surviving winner
         // keeps the same per-(RD,prefix) label, whose ILM is reconciled
-        // for the (possibly new) winner's received label / transport.
-        if selected.is_empty() {
-            if let Some(local) = bgp.shard.labels.free_vpn_v4(rd, nlri.prefix) {
-                ilm_swap_remove(bgp.rib_client, local);
+        // for the (possibly new) winner's received label / transport. An
+        // empty selection with candidates left (every survivor's next-hop
+        // unreachable) keeps the label the survivors reference and only
+        // drops the ILM — see the VPNv6 arm (review follow-up on #8).
+        let survivor_label = bgp
+            .shard
+            .v4vpn
+            .get(&rd)
+            .and_then(|t| t.0.get(&nlri.prefix))
+            .map(|c| c.iter().find_map(|r| r.local_label));
+        match survivor_label {
+            None => {
+                if let Some(local) = bgp.shard.labels.free_vpn_v4(rd, nlri.prefix) {
+                    ilm_swap_remove(bgp.rib_client, local);
+                }
             }
-        } else {
-            reconcile_swap_ilm(
+            Some(label) if selected.is_empty() => {
+                if let Some(local) = label {
+                    ilm_swap_remove(bgp.rib_client, local);
+                }
+            }
+            Some(_) => reconcile_swap_ilm(
                 bgp.rib_client,
                 bgp.nexthop_cache.as_deref(),
                 selected.first(),
-            );
+            ),
         }
     } else {
         fib_install_v4(bgp, nlri.prefix, &selected);
@@ -7880,17 +7895,34 @@ pub fn route_ipv6_withdraw(
             // VPNv6 transit (Option B, review finding #8), as the VPNv4 arm:
             // the prefix fully gone → release its local label and tear down
             // the swap ILM; a surviving winner keeps the per-(RD,prefix)
-            // label, whose ILM is reconciled for the new winner.
-            if selected.is_empty() {
-                if let Some(local) = bgp.shard.labels.free_vpn_v6(rd, nlri.prefix) {
-                    ilm_swap_remove(bgp.rib_client, local);
+            // label, whose ILM is reconciled for the new winner. An empty
+            // selection with candidates left (every survivor's next-hop
+            // unreachable) keeps the label — the survivors still reference
+            // it, and freeing it would hand the same label to another prefix
+            // (review follow-up) — and only drops the ILM, which the NHT
+            // re-evaluation re-installs when a next-hop resolves.
+            let survivor_label = bgp
+                .shard
+                .v6vpn
+                .get(&rd)
+                .and_then(|t| t.0.get(&nlri.prefix))
+                .map(|c| c.iter().find_map(|r| r.local_label));
+            match survivor_label {
+                None => {
+                    if let Some(local) = bgp.shard.labels.free_vpn_v6(rd, nlri.prefix) {
+                        ilm_swap_remove(bgp.rib_client, local);
+                    }
                 }
-            } else {
-                reconcile_swap_ilm(
+                Some(label) if selected.is_empty() => {
+                    if let Some(local) = label {
+                        ilm_swap_remove(bgp.rib_client, local);
+                    }
+                }
+                Some(_) => reconcile_swap_ilm(
                     bgp.rib_client,
                     bgp.nexthop_cache.as_deref(),
                     selected.first(),
-                );
+                ),
             }
 
             // Remote VPNv6 withdraw → per-VRF import update/withdraw
@@ -12914,17 +12946,27 @@ fn vpnv4_service_label(peer: &Peer, rib: &BgpRib) -> Label {
     }
 }
 
-/// The VPNv6 twin of [`vpnv4_service_label`] (review finding #8). The
-/// rewrite predicate is the one `route_update_ipv6` applies to a VPNv6
-/// row — the `(Ip6, MplsVpn)` knobs — so the label on the wire always
-/// belongs to the next-hop on the wire: our transit label behind our
-/// address, the received label behind the received next-hop. Before
-/// this, every VPNv6 egress sent the received label regardless, so a
-/// transit's peer pushed a label the transit held no ILM for.
-fn vpnv6_service_label(peer: &Peer, rib: &BgpRib) -> Label {
-    let unchanged = !rib.is_originated() && peer.next_hop_unchanged(Afi::Ip6, Safi::MplsVpn);
-    let rewrites_nh = !unchanged && (peer.is_ebgp() || peer.next_hop_self(Afi::Ip6, Safi::MplsVpn));
-    match (rewrites_nh, rib.local_label) {
+/// The VPNv6 twin of [`vpnv4_service_label`] (review finding #8): the
+/// label on the wire must belong to the next-hop on the wire — our transit
+/// label behind our address, the received label behind the received
+/// next-hop. It is read off the ACTUAL outcome of `route_update_ipv6`
+/// (`attrs`, the attributes about to be sent) rather than re-deriving the
+/// knobs: the builder can keep the remote next-hop even when the knobs ask
+/// for self (an IPv4 transport with no usable local IPv6), and the remote
+/// label must then travel with it (review follow-up). A row whose next-hop
+/// we rewrite always carries a transit label — the builder withholds it
+/// otherwise. Originated rows advertise their own VRF label.
+fn vpnv6_service_label(rib: &BgpRib, attrs: &BgpAttr) -> Label {
+    let received = match &rib.nexthop {
+        Some(VpnNexthop::V6(v6nh)) => Some(v6nh.nhop),
+        _ => None,
+    };
+    let advertised = match &attrs.nexthop {
+        Some(BgpNexthop::Vpnv6(v6nh)) => Some(v6nh.nhop),
+        _ => None,
+    };
+    let rewritten = !rib.is_originated() && advertised.is_some() && advertised != received;
+    match (rewritten, rib.local_label) {
         (true, Some(l)) => Label::new(l, 0, true),
         _ => rib.label.unwrap_or_default(),
     }
@@ -13335,22 +13377,6 @@ pub fn route_update_ipv6(
         || (peer.is_ebgp() && !nh_unchanged)
         || (peer.next_hop_self(Afi::Ip6, knob_safi) && !nh_unchanged);
     if needs_self {
-        // A rewritten next-hop on a RECEIVED MPLS VPNv6 row needs our transit
-        // label behind it (review finding #8). Without one — the dynamic
-        // block not bound yet — the only label we could send is the received
-        // one, which the peer would push toward us and we hold no ILM for: a
-        // black hole. Withhold the row instead (the fan-out withdraws it
-        // from a peer that holds it); `label_block_arrived` runs the transit
-        // reconcile, which labels the row and re-advertises it. SRv6 rows
-        // carry no MPLS service label and keep the PE locator as next-hop;
-        // originated rows advertise their own VRF label.
-        if !plain_unicast
-            && !rib.is_originated()
-            && attrs.srv6_l3_sid().is_none()
-            && rib.local_label.is_none()
-        {
-            return None;
-        }
         let self_v6: Option<Ipv6Addr> = match peer.param.local_addr.as_ref().map(|a| a.ip()) {
             Some(IpAddr::V6(v6)) => Some(v6),
             Some(IpAddr::V4(v4)) => bgp
@@ -13360,6 +13386,25 @@ pub fn route_update_ipv6(
             None => None,
         };
         if let Some(local_v6) = self_v6 {
+            // A rewritten next-hop on a RECEIVED MPLS VPNv6 row needs our
+            // transit label behind it (review finding #8). Without one — the
+            // dynamic block not bound yet — the only label we could send is
+            // the received one, which the peer would push toward us and we
+            // hold no ILM for: a black hole. Withhold the row instead (the
+            // fan-out withdraws it from a peer that holds it);
+            // `label_block_arrived` runs the transit reconcile, which labels
+            // the row and re-advertises it. SRv6 rows carry no MPLS service
+            // label and keep the PE locator as next-hop; originated rows
+            // advertise their own VRF label. Checked here, once the rewrite
+            // is certain: with no self address the builder keeps the remote
+            // next-hop below, and the remote label is right behind it.
+            if !plain_unicast
+                && !rib.is_originated()
+                && attrs.srv6_l3_sid().is_none()
+                && rib.local_label.is_none()
+            {
+                return None;
+            }
             // VPNv6 rows carry a `VpnNexthop::V6` (the route's RD); emit a
             // VPNv6-shaped next-hop so `flush_vpnv6` picks it up. Plain
             // v6-unicast rows get a bare IPv6 next-hop.
@@ -15644,9 +15689,9 @@ pub fn route_sync_vpnv6(peer: &mut Peer, bgp: &mut BgpTop) {
             if !peer.rtcv6.is_empty() && !rtc_match(&peer.rtcv6, &attr.ecom) {
                 continue;
             }
+            let label = vpnv6_service_label(&rib, &attr);
             rib.attr = bgp.attr_store.intern(attr);
             let arc_attr = rib.attr.clone();
-            let label = vpnv6_service_label(peer, &rib);
             peer.adj_out.v6vpn.entry(rd).or_default().add(prefix, rib);
             let vpnv6_nlri = Vpnv6Nlri { label, rd, nlri };
             peer.send_vpnv6(vpnv6_nlri, arc_attr, false);
@@ -21006,6 +21051,111 @@ mod vpnv6_transit_label_tests {
         );
         dump_to(&mut peer, Some(1000));
         assert_eq!(sent_vpnv6(&mut rx), vec![(SELF_V6, 1000)]);
+    }
+
+    /// Review follow-up 2: a withdraw that leaves the prefix with survivors
+    /// whose next-hops are unreachable yields an EMPTY selection, but the
+    /// survivors still reference the transit label — it must not be freed
+    /// (a later prefix would be handed the same label and the two would
+    /// collide when the survivors' next-hop recovers). Free only when no
+    /// candidate remains.
+    #[tokio::test]
+    async fn vpnv6_withdraw_keeps_the_label_while_unreachable_survivors_remain() {
+        let router_id = Ipv4Addr::new(10, 0, 0, 1);
+        let ctx = crate::context::ProtoContext::default_table_no_rib();
+        let mut local_rib = LocalRib::default();
+        let mut shard = crate::bgp::shard::BgpShard {
+            vpn_v6_transit: true,
+            ..Default::default()
+        };
+        let mut attr_store = crate::bgp::BgpAttrStore::default();
+        let mut update_groups = crate::bgp::update_group::empty_map();
+        let interface_addrs = crate::bgp::interface_addrs::InterfaceAddrs::default();
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        Box::leak(Box::new(rx));
+        let mut central = crate::bgp::vrf::VrfLabelAllocator::bounded(1000, 5000);
+
+        // Two candidates from PE1 (slot 2) and PE2 (slot 3); PE2's next-hop
+        // is unreachable. The prefix holds transit label 1000.
+        let reachable = received_from_pe1();
+        let mut unreachable = received_from_pe1();
+        unreachable.ident = 3;
+        unreachable.nexthop_reachable = false;
+        {
+            let table = shard.v6vpn.entry(rd()).or_default();
+            table.update(prefix(), reachable);
+            table.update(prefix(), unreachable);
+            let label = shard
+                .labels
+                .label_vpn_v6(Some(&mut central), rd(), prefix())
+                .expect("minted");
+            assert_eq!(label, 1000);
+            table.set_local_label(prefix(), Some(1000));
+            assert_eq!(table.select_best_path(prefix()).len(), 1);
+        }
+        let mut peers = PeerMap::new();
+        let mut top = empty_top(
+            &router_id,
+            &mut local_rib,
+            &mut shard,
+            &mut attr_store,
+            &mut update_groups,
+            &interface_addrs,
+            &ctx.rib,
+            &tx,
+        );
+
+        // PE1 withdraws: only the unreachable survivor remains → empty
+        // selection, but a candidate still references label 1000.
+        route_ipv6_withdraw(
+            2,
+            &Ipv6Nlri {
+                id: 0,
+                prefix: prefix(),
+            },
+            Some(rd()),
+            &mut top,
+            &mut peers,
+            false,
+        );
+        let survivor_label = top
+            .shard
+            .v6vpn
+            .get(&rd())
+            .and_then(|t| t.0.get(&prefix()))
+            .and_then(|c| c.first())
+            .map(|r| r.local_label);
+        assert_eq!(
+            survivor_label,
+            Some(Some(1000)),
+            "the survivor keeps its label"
+        );
+        // The label was NOT recycled: another prefix gets a different one.
+        let other: Ipv6Net = "2001:db8:9::/64".parse().unwrap();
+        let next = top
+            .shard
+            .labels
+            .label_vpn_v6(Some(&mut central), rd(), other)
+            .expect("minted");
+        assert_ne!(next, 1000, "label 1000 is still referenced by the survivor");
+    }
+
+    /// Review follow-up 2: the label must follow the ACTUAL next-hop
+    /// outcome. Over an IPv4 transport with no usable local IPv6 address
+    /// the builder keeps the remote next-hop (a pass-through); the label
+    /// must then be the remote one too, never ours.
+    #[tokio::test]
+    async fn vpnv6_peer_without_a_self_address_is_passed_the_remote_label_and_next_hop() {
+        let (mut peer, mut rx) = ibgp_peer(&[(Safi::MplsVpn, true, false)]);
+        // IPv4 transport; the harness has no interface addresses, so no
+        // global IPv6 to rewrite to.
+        peer.param.local_addr = Some("10.0.0.1:179".parse().unwrap());
+        dump_to(&mut peer, Some(1000));
+        assert_eq!(
+            sent_vpnv6(&mut rx),
+            vec![(PE1_V6, 24)],
+            "no rewrite happened, so the remote label goes with the remote next-hop"
+        );
     }
 
     /// Review follow-up: the LIVE VPNv6 ingest (`route_ipv6_update`) must
