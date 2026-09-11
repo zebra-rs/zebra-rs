@@ -5582,11 +5582,19 @@ impl Bgp {
                     );
                 }
                 // Inter-AS Option B transit: re-program the swap ILM for our
-                // advertised local label toward the rerouted transport.
-                super::route::reconcile_swap_ilm(
+                // advertised local label toward the rerouted transport, or
+                // tear it down when no winner is left.
+                let survivor_label = self
+                    .shard
+                    .v4vpn
+                    .get(&rd)
+                    .and_then(|t| t.0.get(&p))
+                    .and_then(|c| c.iter().find_map(|r| r.local_label));
+                super::route::reconcile_vpn_swap_ilm(
                     &self.ctx.rib,
                     Some(&self.nexthop_cache),
-                    selected.first(),
+                    &selected,
+                    survivor_label,
                 );
             }
             NhtDep::V6vpn(rd, p) => {
@@ -5604,11 +5612,18 @@ impl Bgp {
                     );
                 }
                 // Inter-AS Option B transit (VPNv6, review finding #8): the
-                // VPNv4 arm's swap-ILM re-program.
-                super::route::reconcile_swap_ilm(
+                // VPNv4 arm's swap-ILM re-program / tear-down.
+                let survivor_label = self
+                    .shard
+                    .v6vpn
+                    .get(&rd)
+                    .and_then(|t| t.0.get(&p))
+                    .and_then(|c| c.iter().find_map(|r| r.local_label));
+                super::route::reconcile_vpn_swap_ilm(
                     &self.ctx.rib,
                     Some(&self.nexthop_cache),
-                    selected.first(),
+                    &selected,
+                    survivor_label,
                 );
             }
             NhtDep::Evpn(rd, prefix) => {
@@ -5827,7 +5842,7 @@ impl Bgp {
     /// import with the resolved transport — register-then-gate means an
     /// imported route only becomes best-path here, so this is where the
     /// VRF dataplane install is triggered.
-    fn nht_reeval_dep(
+    pub(super) fn nht_reeval_dep(
         &mut self,
         vrf_id: u32,
         nh: std::net::IpAddr,
@@ -5996,11 +6011,19 @@ impl Bgp {
                 }
                 // Inter-AS Option B transit: (re-)install the swap ILM for
                 // our advertised local label now that the next-hop's
-                // transport resolved, or tear it down if it went away.
-                super::route::reconcile_swap_ilm(
+                // transport resolved, or tear it down if it went away —
+                // including when the loss emptied the selection.
+                let survivor_label = top
+                    .shard
+                    .v4vpn
+                    .get(rd)
+                    .and_then(|t| t.0.get(p))
+                    .and_then(|c| c.iter().find_map(|r| r.local_label));
+                super::route::reconcile_vpn_swap_ilm(
                     &self.ctx.rib,
                     top.nexthop_cache.as_deref(),
-                    selected.first(),
+                    &selected,
+                    survivor_label,
                 );
             }
             NhtDep::V6vpn(rd, p) => {
@@ -6039,11 +6062,18 @@ impl Bgp {
                     super::vrf::dispatch_withdraw_import_v6(&dispatcher, *rd, *p, &attr, None);
                 }
                 // Inter-AS Option B transit (VPNv6, review finding #8): the
-                // VPNv4 arm's swap-ILM re-program.
-                super::route::reconcile_swap_ilm(
+                // VPNv4 arm's swap-ILM re-program / tear-down.
+                let survivor_label = top
+                    .shard
+                    .v6vpn
+                    .get(rd)
+                    .and_then(|t| t.0.get(p))
+                    .and_then(|c| c.iter().find_map(|r| r.local_label));
+                super::route::reconcile_vpn_swap_ilm(
                     &self.ctx.rib,
                     top.nexthop_cache.as_deref(),
-                    selected.first(),
+                    &selected,
+                    survivor_label,
                 );
             }
             NhtDep::Evpn(rd, prefix) => {

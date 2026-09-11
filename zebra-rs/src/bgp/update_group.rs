@@ -184,10 +184,13 @@ pub struct UpdateGroupSig {
     /// and blackhole VPN traffic.
     pub vpnv4_next_hop_self: bool,
     pub vpnv4_next_hop_unchanged: bool,
-    /// The VPNv6 twins, stamped only for the `(Ip6, MplsVpn)` group.
+    /// The VPNv6 twins, stamped only for an `(Ip6, MplsVpn)` group.
     /// `route_update_ipv6` selects a VPNv6 row's NEXT_HOP (and thereby
     /// `vpnv6_service_label` its label) with them (review findings #8
-    /// and #13).
+    /// and #13). VPNv6 is not in `TRACKED_AFI_SAFIS` today — its plain
+    /// fan-out computes per peer with no memo — so these are inert until
+    /// it is; a live change of the knobs reaches the wire through the
+    /// commit-end re-sync `config_next_hop_self` queues instead.
     pub vpnv6_next_hop_self: bool,
     pub vpnv6_next_hop_unchanged: bool,
     /// Per-peer `afi-safi ipv4|ipv6 next-hop-self` / `next-hop-unchanged`,

@@ -629,6 +629,24 @@ cap. The two reviews agree on every overlapping item.
   `vpnv6_peer_without_a_self_address_is_passed_the_remote_label_and_next_hop`
   and `reconcile_refreshes_addpath_members_too`, each failing before its
   fix.
+- Review follow-up 3 (two P2s, same branch). (a) A `vpnv6
+  next-hop-self` / `next-hop-unchanged` change on one peer while another
+  peer keeps transit enabled flips no transit flag, so the reconcile
+  re-advertises nothing; VPNv6 had no soft-out, and — unlike the unicast,
+  VPNv4 and EVPN knobs — no update-group signature to move the peer
+  through (VPNv6 is not a tracked family; the two signature fields
+  added for it are inert until it is). Now `route_soft_out_peer` walks
+  VPNv6 per RD (`route_soft_out_peer_table_v6vpn`, AddPath-aware,
+  `(prefix, path-id)` reconcile against `adj_out.v6vpn`, label from the
+  attributes sent), and the two knob handlers queue the peer for the
+  commit-end re-sync when the resolved value changes. (b) An empty
+  selection — the winner's next-hop lost — passed `None` to the swap-ILM
+  reconcile, which returned without deleting the entry; a
+  `reconcile_vpn_swap_ilm` wrapper now tears the ILM down whenever no
+  winner is left, at the VPNv4 and VPNv6 ingest sites and in both NHT
+  handlers' VPN arms. Gates:
+  `next_hop_self_change_on_a_second_peer_refreshes_its_vpnv6_rows` and
+  `nht_loss_removes_the_vpnv6_swap_ilm`, both failing before the fix.
 
 ### 9. P1 CONFIRMED — LLGR / PIC stale rows for VPNv6 and EVPN never expire, and any family's EoR flushes the VPNv4 stale set
 

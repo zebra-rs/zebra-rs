@@ -1442,6 +1442,29 @@ pub(super) fn reconcile_swap_ilm(
     ilm_swap_install(rib_client, local, service_label, transport);
 }
 
+/// [`reconcile_swap_ilm`] for a VPN prefix after a (re)selection: a winner
+/// (re)programs the swap ILM; no winner — every candidate's next-hop
+/// unreachable, or none left — tears it down, since traffic arriving with
+/// our label has nowhere to go. `survivor_label` is the transit label the
+/// prefix's candidates still hold (`None` when nothing references one).
+/// `reconcile_swap_ilm(None)` alone returns without touching the entry, so
+/// an ILM used to survive its next-hop's loss (review follow-up on #8).
+pub(super) fn reconcile_vpn_swap_ilm(
+    rib_client: &crate::rib::client::RibClient,
+    cache: Option<&super::nht::NexthopCache>,
+    selected: &[BgpRib],
+    survivor_label: Option<u32>,
+) {
+    match selected.first() {
+        Some(best) => reconcile_swap_ilm(rib_client, cache, Some(best)),
+        None => {
+            if let Some(local) = survivor_label {
+                ilm_swap_remove(rib_client, local);
+            }
+        }
+    }
+}
+
 /// Send `Message::IlmAdd` for a swap entry at `local_label`. The outgoing
 /// label stack `[transport labels…, service_label]` rides `mpls_label`
 /// (the ILM swap field, distinct from `mpls` used by IP-route installs);
@@ -4653,10 +4676,15 @@ fn route_ipv4_update_decided(
         if rd.is_none() {
             fib_install_v4(bgp, prefix.prefix, &selected);
         } else {
-            reconcile_swap_ilm(
+            let survivor_label = rd
+                .and_then(|rd| bgp.shard.v4vpn.get(&rd))
+                .and_then(|t| t.0.get(&prefix.prefix))
+                .and_then(|c| c.iter().find_map(|r| r.local_label));
+            reconcile_vpn_swap_ilm(
                 bgp.rib_client,
                 bgp.nexthop_cache.as_deref(),
-                selected.first(),
+                &selected,
+                survivor_label,
             );
         }
         // Defer the advertise (out-policy + AddPath) to the caller so the
@@ -6873,7 +6901,7 @@ pub(super) fn withdraw_ipv4_deferrable(
 // stored Adj-RIB-In through the new inbound policy) remains a
 // separate path — see `route_soft_in_peer`.
 pub fn route_soft_out_peer(peer_idx: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
-    let (do_v4, do_v6, vpn_rds, evpn_rds) = {
+    let (do_v4, do_v6, vpn_rds, v6vpn_rds, evpn_rds) = {
         let Some(peer) = peers.get_by_idx(peer_idx) else {
             return;
         };
@@ -6883,9 +6911,20 @@ pub fn route_soft_out_peer(peer_idx: usize, bgp: &mut BgpTop, peers: &mut PeerMa
         let do_v4 = peer.is_afi_safi(Afi::Ip, Safi::Unicast);
         let do_v6 = peer.is_afi_safi(Afi::Ip6, Safi::Unicast);
         let do_vpn = peer.is_afi_safi(Afi::Ip, Safi::MplsVpn);
+        let do_v6vpn = peer.is_afi_safi(Afi::Ip6, Safi::MplsVpn);
         let do_evpn = peer.is_afi_safi(Afi::L2vpn, Safi::Evpn);
         let v4vpn_rds: Vec<RouteDistinguisher> = if do_vpn {
             bgp.shard.v4vpn.keys().copied().collect()
+        } else {
+            Vec::new()
+        };
+        // VPNv6 (review follow-up on #8): Loc-RIB RDs plus the peer's
+        // Adj-RIB-Out RDs, as EVPN below, so an RD the peer still holds but
+        // the Loc-RIB no longer has is withdrawn.
+        let v6vpn_rds: Vec<RouteDistinguisher> = if do_v6vpn {
+            let mut s: BTreeSet<RouteDistinguisher> = bgp.shard.v6vpn.keys().copied().collect();
+            s.extend(peer.adj_out.v6vpn.keys().copied());
+            s.into_iter().collect()
         } else {
             Vec::new()
         };
@@ -6900,7 +6939,7 @@ pub fn route_soft_out_peer(peer_idx: usize, bgp: &mut BgpTop, peers: &mut PeerMa
         } else {
             Vec::new()
         };
-        (do_v4, do_v6, v4vpn_rds, evpn_rds)
+        (do_v4, do_v6, v4vpn_rds, v6vpn_rds, evpn_rds)
     };
 
     if do_v4 {
@@ -6918,8 +6957,109 @@ pub fn route_soft_out_peer(peer_idx: usize, bgp: &mut BgpTop, peers: &mut PeerMa
     for rd in vpn_rds {
         route_soft_out_peer_table(peer_idx, Some(rd), bgp, peers);
     }
+    for rd in v6vpn_rds {
+        route_soft_out_peer_table_v6vpn(peer_idx, rd, bgp, peers);
+    }
     for rd in evpn_rds {
         route_soft_out_peer_table_evpn(peer_idx, rd, bgp, peers);
+    }
+}
+
+/// Outbound soft-reconfiguration of one RD of the VPNv6 Loc-RIB toward one
+/// peer — the VPNv6 twin of [`route_soft_out_peer_table_v6`] (AddPath-aware,
+/// `(prefix, path-id)` reconcile against the peer's `adj_out.v6vpn`). Before
+/// this VPNv6 had no soft-out at all: a `vpnv6 next-hop-self` change on one
+/// peer while another kept transit enabled flipped no transit flag, so the
+/// reconcile re-advertised nothing and the changed peer kept the stale
+/// next-hop/label pair (review follow-up on #8).
+fn route_soft_out_peer_table_v6vpn(
+    peer_idx: usize,
+    rd: RouteDistinguisher,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+) {
+    let (afi, safi) = (Afi::Ip6, Safi::MplsVpn);
+    let afi_safi = AfiSafi::new(afi, safi);
+    let Some(add_path) = peers
+        .get_by_idx(peer_idx)
+        .map(|peer| peer.opt.is_add_path_send(afi, safi))
+    else {
+        return;
+    };
+    let candidates: Vec<(Ipv6Net, BgpRib)> = bgp
+        .shard
+        .v6vpn
+        .get(&rd)
+        .map(|t| {
+            if add_path {
+                t.0.iter()
+                    .flat_map(|(prefix, ribs)| ribs.iter().map(move |rib| (prefix, rib.clone())))
+                    .collect()
+            } else {
+                t.1.iter().map(|(p, r)| (p, r.clone())).collect()
+            }
+        })
+        .unwrap_or_default();
+    // What the peer holds now: `(prefix, path-id)` rows for AddPath, the
+    // prefixes (id 0) otherwise.
+    let was_advertised: BTreeSet<(Ipv6Net, u32)> = peers
+        .get_by_idx(peer_idx)
+        .and_then(|peer| peer.adj_out.v6vpn.get(&rd))
+        .map(|t| {
+            t.0.iter()
+                .flat_map(|(prefix, rows)| {
+                    rows.iter()
+                        .map(move |row| (*prefix, if add_path { row.local_id } else { 0 }))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut newly_advertised: BTreeSet<(Ipv6Net, u32)> = BTreeSet::new();
+    for (prefix, rib) in &candidates {
+        let peer = peers.get_mut_by_idx(peer_idx).expect("peer exists");
+        if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, afi, safi) {
+            continue;
+        }
+        let Some((nlri, attr)) = route_update_ipv6(peer, prefix, rib, bgp, add_path) else {
+            continue;
+        };
+        let Some(decision) =
+            route_apply_policy_out_v6(peer, afi_safi, &nlri, attr, rib.weight, rib.tag)
+        else {
+            continue;
+        };
+        let attr = decision.attr;
+        // RTC: per-peer route-target constraint.
+        if !peer.rtcv6.is_empty() && !rtc_match(&peer.rtcv6, &attr.ecom) {
+            continue;
+        }
+        // Our transit label behind our next-hop, the received label behind
+        // the received next-hop — read off the attributes actually sent.
+        let label = vpnv6_service_label(rib, &attr);
+        let attr = bgp.attr_store.intern(attr);
+        let mut adj = rib.clone();
+        adj.attr = attr.clone();
+        peer.adj_out
+            .v6vpn
+            .entry(rd)
+            .or_default()
+            .record_out(*prefix, adj, add_path);
+        newly_advertised.insert((*prefix, nlri.id));
+        peer.send_vpnv6(Vpnv6Nlri { label, rd, nlri }, attr, true);
+    }
+
+    let to_withdraw: Vec<(Ipv6Net, u32)> = was_advertised
+        .difference(&newly_advertised)
+        .copied()
+        .collect();
+    for (prefix, id) in to_withdraw {
+        let peer = peers.get_mut_by_idx(peer_idx).expect("peer exists");
+        peer.cache_remove_vpnv6(rd, prefix, id);
+        route_withdraw_vpnv6(peer, rd, prefix, id);
+        if let Some(t) = peer.adj_out.v6vpn.get_mut(&rd) {
+            t.remove(prefix, id);
+        }
     }
 }
 
@@ -7832,10 +7972,17 @@ pub fn route_ipv6_update(
                 }
                 // Inter-AS Option B transit (review finding #8): the swap-ILM
                 // reconcile the VPNv4 arm runs for our local label.
-                reconcile_swap_ilm(
+                let survivor_label = bgp
+                    .shard
+                    .v6vpn
+                    .get(&rd)
+                    .and_then(|t| t.0.get(&prefix.prefix))
+                    .and_then(|c| c.iter().find_map(|r| r.local_label));
+                reconcile_vpn_swap_ilm(
                     bgp.rib_client,
                     bgp.nexthop_cache.as_deref(),
-                    selected.first(),
+                    &selected,
+                    survivor_label,
                 );
                 // Unconditional — see the unicast arm above (finding #6).
                 route_advertise_to_peers_vpnv6(rd, prefix.prefix, &selected, bgp, peers);
