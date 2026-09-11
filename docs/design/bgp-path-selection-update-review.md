@@ -662,6 +662,19 @@ cap. The two reviews agree on every overlapping item.
   `addpath_soft_out_withdraws_a_live_advertisement_the_policy_now_denies`
   and `group_next_hop_self_change_refreshes_the_members_vpnv6_rows`,
   each failing with its fix removed.
+- Review follow-up 5 (P2, same branch): an inbound-policy denial that
+  replaces the LAST candidate removes the row in the shard before the
+  delta handler runs, so the ingest-side cleanup (which read the
+  transit label off the survivors) found nothing and left the label
+  allocated and the swap ILM installed. One helper
+  (`vpn_transit_after_change`) now serves both ingest sites and both
+  withdraw arms: with no candidate left it releases the label and tears
+  the ILM down, otherwise it reconciles the ILM for the winner. VPNv4
+  had the same leak on its ingest site. Gate:
+  `last_candidate_denied_inbound_releases_the_transit_label` (the live
+  ingest accepts a row, a deny-all inbound policy is bound, the same
+  route arrives again; the next prefix must be handed label 1000 back),
+  which failed with 1001 before the fix.
 
 ### 9. P1 CONFIRMED — LLGR / PIC stale rows for VPNv6 and EVPN never expire, and any family's EoR flushes the VPNv4 stale set
 
