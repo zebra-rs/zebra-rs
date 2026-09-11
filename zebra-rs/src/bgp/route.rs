@@ -7744,7 +7744,12 @@ pub fn route_ipv6_update(
             vrf_transit_only,
             decision,
         }),
-        None,
+        // The central label allocator, as the v4 ingest passes: a VPNv6
+        // transit mints its per-(RD,prefix) label at receive, and the
+        // shard's own pool is empty until its first carve — passing `None`
+        // here left every row received under a transit configured before
+        // the first route unlabelled (review follow-up on finding #8).
+        bgp.central_label_alloc.as_deref_mut(),
     );
 
     for delta in deltas {
@@ -13330,6 +13335,22 @@ pub fn route_update_ipv6(
         || (peer.is_ebgp() && !nh_unchanged)
         || (peer.next_hop_self(Afi::Ip6, knob_safi) && !nh_unchanged);
     if needs_self {
+        // A rewritten next-hop on a RECEIVED MPLS VPNv6 row needs our transit
+        // label behind it (review finding #8). Without one — the dynamic
+        // block not bound yet — the only label we could send is the received
+        // one, which the peer would push toward us and we hold no ILM for: a
+        // black hole. Withhold the row instead (the fan-out withdraws it
+        // from a peer that holds it); `label_block_arrived` runs the transit
+        // reconcile, which labels the row and re-advertises it. SRv6 rows
+        // carry no MPLS service label and keep the PE locator as next-hop;
+        // originated rows advertise their own VRF label.
+        if !plain_unicast
+            && !rib.is_originated()
+            && attrs.srv6_l3_sid().is_none()
+            && rib.local_label.is_none()
+        {
+            return None;
+        }
         let self_v6: Option<Ipv6Addr> = match peer.param.local_addr.as_ref().map(|a| a.ip()) {
             Some(IpAddr::V6(v6)) => Some(v6),
             Some(IpAddr::V4(v4)) => bgp
@@ -20968,6 +20989,98 @@ mod vpnv6_transit_label_tests {
         let (mut peer, mut rx) = ibgp_peer(&[(Safi::MplsVpn, true, true)]);
         dump_to(&mut peer, Some(1000));
         assert_eq!(sent_vpnv6(&mut rx), vec![(PE1_V6, 24)]);
+    }
+
+    /// Review follow-up: a rewritten next-hop with NO transit label behind
+    /// it (the dynamic block not bound yet) must withhold the row rather
+    /// than send PE1's label behind our address — the peer would push a
+    /// label we hold no ILM for. The row is advertised once a label exists.
+    #[tokio::test]
+    async fn vpnv6_next_hop_self_peer_gets_nothing_until_a_transit_label_exists() {
+        let (mut peer, mut rx) = ibgp_peer(&[(Safi::MplsVpn, true, false)]);
+        dump_to(&mut peer, None);
+        assert_eq!(
+            sent_vpnv6(&mut rx),
+            vec![],
+            "no transit label: withhold, never PE1's label behind our next-hop"
+        );
+        dump_to(&mut peer, Some(1000));
+        assert_eq!(sent_vpnv6(&mut rx), vec![(SELF_V6, 1000)]);
+    }
+
+    /// Review follow-up: the LIVE VPNv6 ingest (`route_ipv6_update`) must
+    /// hand the shard the central label allocator, or a transit whose
+    /// shard pool is still empty — transit configured before any route
+    /// arrived — mints nothing at receive and the row goes out unlabelled.
+    #[tokio::test]
+    async fn vpnv6_row_received_under_transit_is_labelled_on_the_live_path() {
+        let router_id = Ipv4Addr::new(10, 0, 0, 1);
+        let ctx = crate::context::ProtoContext::default_table_no_rib();
+        let mut local_rib = LocalRib::default();
+        let mut shard = crate::bgp::shard::BgpShard {
+            vpn_v6_transit: true,
+            ..Default::default()
+        };
+        let mut attr_store = crate::bgp::BgpAttrStore::default();
+        let mut update_groups = crate::bgp::update_group::empty_map();
+        let interface_addrs = crate::bgp::interface_addrs::InterfaceAddrs::default();
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        Box::leak(Box::new(rx));
+        let mut central = crate::bgp::vrf::VrfLabelAllocator::bounded(1000, 5000);
+
+        // The source PE (a reflector client); its slot is the row's ident.
+        let mut peers = PeerMap::new();
+        let (pe1, _pe1_rx) = ibgp_peer(&[]);
+        peers.insert(pe1.address, pe1);
+        let src = peers
+            .get(&IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 3)))
+            .unwrap()
+            .ident;
+        peers.membership_enroll(src);
+
+        let mut top = empty_top(
+            &router_id,
+            &mut local_rib,
+            &mut shard,
+            &mut attr_store,
+            &mut update_groups,
+            &interface_addrs,
+            &ctx.rib,
+            &tx,
+        );
+        top.central_label_alloc = Some(&mut central);
+
+        let nhop = Vpnv6Nexthop {
+            rd: rd(),
+            nhop: PE1_V6,
+        };
+        let attr = BgpAttr::new();
+        route_ipv6_update(
+            src,
+            &Ipv6Nlri {
+                id: 0,
+                prefix: prefix(),
+            },
+            Some(rd()),
+            Some(Label::new(24, 0, true)),
+            &attr,
+            Some(VpnNexthop::V6(nhop)),
+            &mut top,
+            &mut peers,
+            false,
+        );
+        let row_label = top
+            .shard
+            .v6vpn
+            .get(&rd())
+            .and_then(|t| t.0.get(&prefix()))
+            .and_then(|c| c.first())
+            .map(|r| r.local_label);
+        assert_eq!(
+            row_label,
+            Some(Some(1000)),
+            "the live ingest mints the transit label from the central block"
+        );
     }
 }
 

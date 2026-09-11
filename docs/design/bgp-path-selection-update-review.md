@@ -585,6 +585,29 @@ cap. The two reviews agree on every overlapping item.
   transit ASBR's swap is label-to-label and family-agnostic (an existing
   feature records that zebra-rs PEs have no 6VPE data plane, which is a
   PE limitation, not an ASBR one).
+- Review follow-up (P1, same branch): the live VPNv6 ingest
+  (`route_ipv6_update`) still handed the shard no central label
+  allocator, so a transit configured before the first route arrived —
+  the shard's own pool empty, nothing carved yet — minted nothing at
+  receive, and `vpnv6_service_label` fell back to the received label
+  behind our next-hop: the original black hole, reachable whenever
+  transit is on from the start. The gate missed it because it turns
+  `next-hop-self` on after the routes are in the table, where the
+  reconcile mints. Fixed by passing `central_label_alloc` as the v4
+  ingest does, and by withholding a received MPLS VPNv6 row whose
+  next-hop we rewrite while it has no transit label (`route_update_ipv6`
+  returns `None`, so the fan-out withdraws it from a peer that holds it;
+  `label_block_arrived` reconciles and re-advertises once a label
+  exists) — SRv6 rows and originated rows are unaffected. Gates:
+  `vpnv6_row_received_under_transit_is_labelled_on_the_live_path`,
+  `vpnv6_next_hop_self_peer_gets_nothing_until_a_transit_label_exists`,
+  `late_label_block_labels_existing_vpnv6_transit_rows`, and BDD
+  `bgp_vpnv6_transit_label_at_receive` (the reflector is a transit
+  toward pe2 from its initial config; pe2 must get pe1's prefix behind
+  the reflector with an ILM behind the label). Adjacent, not changed
+  here: `vpnv4_service_label` and the LU builders keep the
+  received-label / implicit-null fallback when a rewritten next-hop has
+  no local label (below the cap).
 
 ### 9. P1 CONFIRMED — LLGR / PIC stale rows for VPNv6 and EVPN never expire, and any family's EoR flushes the VPNv4 stale set
 
@@ -1060,6 +1083,13 @@ cap. The two reviews agree on every overlapping item.
 - Empty per-RD Loc-RIB tables also leak on the remove/NHT paths
   (`shard/mod.rs:307,384`, `inst.rs:5759,5767`, `route.rs:3465,3494`),
   extending the recorded `entry(rd).or_default()` item.
+- `vpnv4_service_label` (`route.rs`) and the labeled-unicast builders
+  fall back to the received label (LU: implicit-null) when the next-hop
+  is rewritten to self but the row has no local label yet (no dynamic
+  block bound): the peer then pushes a label the transit holds no ILM
+  for. The VPNv6 twin now withholds the row instead (fix of #8, review
+  follow-up); the v4 and LU paths still send the unsafe fallback until
+  `label_block_arrived` reconciles.
 - EVPN candidates' `nexthop_reachable` is stamped once at ingest from the
   NHT cache (`nht_track_received`, Type-5 only) and never refreshed: the
   NHT re-evaluation's EVPN arm (`inst.rs`, `NhtDep::Evpn`) only

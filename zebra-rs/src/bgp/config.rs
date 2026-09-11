@@ -11033,6 +11033,36 @@ mod transit_label_tests {
         assert!(drain_ilm(&mut rx).is_empty());
     }
 
+    /// The VPNv6 twin of `late_label_block_labels_existing_transit_rows`:
+    /// rows received under transit before the dynamic block is bound are
+    /// labelled (and their ILMs reconciled) when the block arrives.
+    #[tokio::test]
+    async fn late_label_block_labels_existing_vpnv6_transit_rows() {
+        let (mut bgp, mut rx) = fresh_bgp_observed();
+        let addr = "10.0.0.2";
+        setup_vpnv6_peer(&mut bgp, addr, "64512");
+        config_next_hop_self(&mut bgp, arg_words(&[addr, "vpnv6", "true"]), ConfigOp::Set).unwrap();
+        bgp.reconcile_transit_labels(false);
+        assert!(bgp.shard.vpn_v6_transit);
+
+        // Transit on, but no block yet: the receive path cannot mint.
+        let rd = RouteDistinguisher::default();
+        bgp.shard.handle(
+            vpnv6_update(rd, "2001:db8:1::/64"),
+            bgp.vrf_label_alloc.as_mut(),
+        );
+        assert_eq!(local_label_of_v6(&bgp, rd, "2001:db8:1::/64"), Some(None));
+        let _ = drain_ilm(&mut rx);
+
+        bgp.vrf_label_alloc = Some(VrfLabelAllocator::bounded(2000, 5000));
+        bgp.reconcile_transit_labels(true);
+        assert_eq!(
+            local_label_of_v6(&bgp, rd, "2001:db8:1::/64"),
+            Some(Some(2000))
+        );
+        assert_eq!(drain_ilm(&mut rx), vec![(false, 2000)]);
+    }
+
     /// The VPNv6 arm must be independent of the VPNv4 one: a VPNv4 transit
     /// labels no VPNv6 row and vice versa.
     #[tokio::test]

@@ -1,0 +1,31 @@
+# Route reflector (AS 64512) that is a VPNv6 Option B transit toward pe2
+# FROM THE START (`afi-safi vpnv6 next-hop-self` in the initial config):
+# every VPNv6 route it receives must be labelled at receive time and
+# forwarded behind a swap ILM — before any reconcile has run.
+router:
+  bgp:
+    global:
+      as: 64512
+      router-id: 192.168.0.1
+    neighbor:
+    - remote-address: 192.168.0.2
+      afi-safi:
+      - name: vpnv6
+        enabled: true
+      - name: ipv4
+        enabled: false
+      enabled: true
+      remote-as: 64512
+      route-reflector:
+        client: true
+    - remote-address: 192.168.0.3
+      afi-safi:
+      - name: vpnv6
+        enabled: true
+        next-hop-self: true
+      - name: ipv4
+        enabled: false
+      enabled: true
+      remote-as: 64512
+      route-reflector:
+        client: true
