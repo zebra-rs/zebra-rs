@@ -647,6 +647,21 @@ cap. The two reviews agree on every overlapping item.
   handlers' VPN arms. Gates:
   `next_hop_self_change_on_a_second_peer_refreshes_its_vpnv6_rows` and
   `nht_loss_removes_the_vpnv6_swap_ilm`, both failing before the fix.
+- Review follow-up 4 (two P2s, same branch). (a) The live AddPath VPNv6
+  advertise (`V6Batch::advertise_addpath`) never recorded the row in
+  `adj_out.v6vpn`, so the new soft-out had nothing to reconcile against:
+  after a live AddPath advertisement, binding a deny-all outbound policy
+  and running the soft-out produced no withdrawal. Every AddPath
+  advertisement is now recorded under its path-id (and dropped by the
+  AddPath withdraw). (b) A neighbor-group `vpnv6 next-hop-self` change
+  reached its members through the inheritance sweep without queuing
+  them, so with another peer keeping transit enabled a group change
+  produced no refresh; the group handler and the inheritance sweep now
+  queue the members whose effective value changed for the commit-end
+  re-sync, as the direct handler does. Gates:
+  `addpath_soft_out_withdraws_a_live_advertisement_the_policy_now_denies`
+  and `group_next_hop_self_change_refreshes_the_members_vpnv6_rows`,
+  each failing with its fix removed.
 
 ### 9. P1 CONFIRMED — LLGR / PIC stale rows for VPNv6 and EVPN never expire, and any family's EoR flushes the VPNv4 stale set
 

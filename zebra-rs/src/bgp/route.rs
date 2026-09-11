@@ -5885,6 +5885,17 @@ impl BatchAfi for V6Batch {
             if !peer.rtcv6.is_empty() && !rtc_match(&peer.rtcv6, &attr.ecom) {
                 return;
             }
+            // Record the advertisement under its path-id: the VPNv6
+            // soft-out reconciles `adj_out.v6vpn` at `(prefix, path-id)`,
+            // and a live AddPath advertisement that was never recorded
+            // could never be withdrawn by it (review follow-up on #8).
+            let mut adj = rib.clone();
+            adj.attr = attr.clone();
+            peer.adj_out
+                .v6vpn
+                .entry(rd)
+                .or_default()
+                .record_out(prefix, adj, true);
             let vpnv6_nlri = Vpnv6Nlri {
                 label: vpnv6_service_label(rib, &attr),
                 rd,
@@ -13883,6 +13894,9 @@ pub(super) fn route_withdraw_vpnv6_addpath(
         let peer = peers.get_mut_by_idx(ident).expect("peer exists");
         peer.cache_remove_vpnv6(rd, prefix, removed.local_id);
         route_withdraw_vpnv6(peer, rd, prefix, removed.local_id);
+        if let Some(t) = peer.adj_out.v6vpn.get_mut(&rd) {
+            t.remove(prefix, removed.local_id);
+        }
     }
 }
 
@@ -21052,6 +21066,19 @@ mod vpnv6_transit_label_tests {
     fn ibgp_peer(
         knobs: &[(Safi, bool, bool)],
     ) -> (Peer, tokio::sync::mpsc::UnboundedReceiver<bytes::BytesMut>) {
+        ibgp_peer_at(
+            IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 3)),
+            knobs,
+            false,
+        )
+    }
+
+    /// [`ibgp_peer`] at `address`; `addpath` negotiates AddPath send.
+    fn ibgp_peer_at(
+        address: IpAddr,
+        knobs: &[(Safi, bool, bool)],
+        addpath: bool,
+    ) -> (Peer, tokio::sync::mpsc::UnboundedReceiver<bytes::BytesMut>) {
         use bgp_packet::CapMultiProtocol;
         let (ptx, prx) = tokio::sync::mpsc::unbounded_channel();
         let (mtx, mrx) = tokio::sync::mpsc::channel(8);
@@ -21061,7 +21088,7 @@ mod vpnv6_transit_label_tests {
             64512,
             Ipv4Addr::new(10, 0, 0, 1),
             64512,
-            IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 3)),
+            address,
             None,
             mtx,
             crate::context::ProtoContext::default_table_no_rib(),
@@ -21085,8 +21112,44 @@ mod vpnv6_transit_label_tests {
                 },
             );
         }
+        if addpath {
+            peer.opt.add_path.insert(
+                AfiSafi::new(Afi::Ip6, Safi::MplsVpn),
+                bgp_packet::Direct {
+                    send: true,
+                    recv: false,
+                },
+            );
+        }
         peer.packet_tx = Some(ptx);
         (peer, prx)
+    }
+
+    /// Drain a peer's writer channel: every `(prefix, path-id)` of every
+    /// VPNv6 MP_UNREACH NLRI sent (`addpath`: the NLRIs carry path-ids).
+    fn withdrawn_vpnv6(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<bytes::BytesMut>,
+        addpath: bool,
+    ) -> Vec<(Ipv6Net, u32)> {
+        let mut opt = bgp_packet::ParseOption::default();
+        opt.add_path
+            .entry(AfiSafi::new(Afi::Ip6, Safi::MplsVpn))
+            .or_default()
+            .recv = addpath;
+        let mut out = Vec::new();
+        while let Ok(bytes) = rx.try_recv() {
+            let (_, packet) = bgp_packet::BgpPacket::parse_packet(&bytes, false, Some(opt.clone()))
+                .expect("a well-formed UPDATE");
+            let bgp_packet::BgpPacket::Update(update) = packet else {
+                continue;
+            };
+            if let Some(MpUnreachAttr::Vpnv6(nlris)) = update.mp_withdraw {
+                for nlri in &nlris {
+                    out.push((nlri.nlri.prefix, nlri.nlri.id));
+                }
+            }
+        }
+        out
     }
 
     /// Drain the peer's writer channel: every `(next-hop, label)` pair of
@@ -21094,9 +21157,22 @@ mod vpnv6_transit_label_tests {
     fn sent_vpnv6(
         rx: &mut tokio::sync::mpsc::UnboundedReceiver<bytes::BytesMut>,
     ) -> Vec<(Ipv6Addr, u32)> {
+        sent_vpnv6_opt(rx, false)
+    }
+
+    /// [`sent_vpnv6`]; `addpath`: the NLRIs carry path-ids.
+    fn sent_vpnv6_opt(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<bytes::BytesMut>,
+        addpath: bool,
+    ) -> Vec<(Ipv6Addr, u32)> {
+        let mut opt = bgp_packet::ParseOption::default();
+        opt.add_path
+            .entry(AfiSafi::new(Afi::Ip6, Safi::MplsVpn))
+            .or_default()
+            .recv = addpath;
         let mut out = Vec::new();
         while let Ok(bytes) = rx.try_recv() {
-            let (_, packet) = bgp_packet::BgpPacket::parse_packet(&bytes, false, None)
+            let (_, packet) = bgp_packet::BgpPacket::parse_packet(&bytes, false, Some(opt.clone()))
                 .expect("a well-formed UPDATE");
             let bgp_packet::BgpPacket::Update(update) = packet else {
                 continue;
@@ -21302,6 +21378,116 @@ mod vpnv6_transit_label_tests {
             sent_vpnv6(&mut rx),
             vec![(PE1_V6, 24)],
             "no rewrite happened, so the remote label goes with the remote next-hop"
+        );
+    }
+
+    /// Review follow-up 4: every AddPath VPNv6 advertisement must be
+    /// recorded in the peer's Adj-RIB-Out (keyed by path-id), or the
+    /// soft-out has nothing to reconcile against — after a live AddPath
+    /// advertisement, binding a deny-all outbound policy and running the
+    /// soft-out produced no withdrawal.
+    #[tokio::test]
+    async fn addpath_soft_out_withdraws_a_live_advertisement_the_policy_now_denies() {
+        let router_id = Ipv4Addr::new(10, 0, 0, 1);
+        let ctx = crate::context::ProtoContext::default_table_no_rib();
+        let mut local_rib = LocalRib::default();
+        let mut shard = crate::bgp::shard::BgpShard {
+            vpn_v6_transit: true,
+            ..Default::default()
+        };
+        let mut attr_store = crate::bgp::BgpAttrStore::default();
+        let mut update_groups = crate::bgp::update_group::empty_map();
+        let interface_addrs = crate::bgp::interface_addrs::InterfaceAddrs::default();
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        Box::leak(Box::new(rx));
+        let mut central = crate::bgp::vrf::VrfLabelAllocator::bounded(1000, 5000);
+
+        // PE1 (the source) and an AddPath member with next-hop-self.
+        let mut peers = PeerMap::new();
+        let (pe1, _pe1_rx) = ibgp_peer(&[]);
+        let pe1_addr = pe1.address;
+        peers.insert(pe1_addr, pe1);
+        let (ap, mut ap_rx) = ibgp_peer_at(
+            IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 4)),
+            &[(Safi::MplsVpn, true, false)],
+            true,
+        );
+        let ap_addr = ap.address;
+        peers.insert(ap_addr, ap);
+        let src = peers.get(&pe1_addr).unwrap().ident;
+        let ap = peers.get(&ap_addr).unwrap().ident;
+        peers.membership_enroll(src);
+        peers.membership_enroll(ap);
+        assert_eq!(
+            peers.established_addpath_idents(Afi::Ip6, Safi::MplsVpn),
+            vec![ap]
+        );
+
+        let mut top = empty_top(
+            &router_id,
+            &mut local_rib,
+            &mut shard,
+            &mut attr_store,
+            &mut update_groups,
+            &interface_addrs,
+            &ctx.rib,
+            &tx,
+        );
+        top.central_label_alloc = Some(&mut central);
+        let nlri = Ipv6Nlri {
+            id: 0,
+            prefix: prefix(),
+        };
+        route_ipv6_update(
+            src,
+            &nlri,
+            Some(rd()),
+            Some(Label::new(24, 0, true)),
+            &BgpAttr::new(),
+            Some(VpnNexthop::V6(Vpnv6Nexthop {
+                rd: rd(),
+                nhop: PE1_V6,
+            })),
+            &mut top,
+            &mut peers,
+            false,
+        );
+        peers.get_mut_by_idx(ap).unwrap().flush_vpnv6();
+        assert_eq!(
+            sent_vpnv6_opt(&mut ap_rx, true),
+            vec![(SELF_V6, 1000)],
+            "the live ingest advertises the row to the AddPath member"
+        );
+        let held: Vec<u32> = peers
+            .get_by_idx(ap)
+            .unwrap()
+            .adj_out
+            .v6vpn
+            .get(&rd())
+            .and_then(|t| t.0.get(&prefix()))
+            .map(|rows| rows.iter().map(|r| r.local_id).collect())
+            .unwrap_or_default();
+        assert_eq!(
+            held,
+            vec![1],
+            "the advertisement is recorded under its path-id"
+        );
+
+        // Deny everything outbound, then soft-out: the path-id is withdrawn.
+        let mut policy = crate::policy::PolicyList::default();
+        policy.entry(10).action = crate::policy::PolicyAction::Deny;
+        {
+            let peer = peers.get_mut_by_idx(ap).unwrap();
+            let slot = peer.policy_list_slot(AfiSafi::new(Afi::Ip6, Safi::MplsVpn), InOut::Output);
+            slot.name = Some("DENY".into());
+            slot.policy_list = Some(policy);
+        }
+        route_soft_out_peer(ap, &mut top, &mut peers);
+        peers.get_mut_by_idx(ap).unwrap().flush_vpnv6();
+        assert_eq!(
+            withdrawn_vpnv6(&mut ap_rx, true),
+            vec![(prefix(), 1)],
+            "the soft-out withdraws the now-denied path-id"
         );
     }
 
