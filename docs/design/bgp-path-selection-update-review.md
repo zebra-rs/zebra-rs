@@ -675,6 +675,15 @@ cap. The two reviews agree on every overlapping item.
   ingest accepts a row, a deny-all inbound policy is bound, the same
   route arrives again; the next prefix must be handed label 1000 back),
   which failed with 1001 before the fix.
+- Review follow-up 6 (P1, same branch): with the label now released on
+  a denial, the delta handler still never withdrew the removed path
+  from AddPath members — the plain fan-out serves plain members only —
+  so a member kept forwarding on a label that was reusable for another
+  prefix. The VPNv6 delta handler now has the v4 handler's shape: a new
+  row is advertised to AddPath members under its path-id, and with no
+  new row every removed row is withdrawn from them by its path-id
+  (`route_withdraw_vpnv6_addpath`). Gate: the reviewer's probe, kept as
+  `inbound_denial_withdraws_the_path_from_addpath_members_before_its_label_is_reused`.
 
 ### 9. P1 CONFIRMED — LLGR / PIC stale rows for VPNv6 and EVPN never expire, and any family's EoR flushes the VPNv4 stale set
 

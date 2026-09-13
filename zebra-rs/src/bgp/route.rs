@@ -8024,9 +8024,28 @@ pub fn route_ipv6_update(
                 route_advertise_to_peers_vpnv6(rd, prefix.prefix, &selected, bgp, peers);
                 // VPNv6 AddPath: advertise the just-updated candidate path
                 // itself (with its shard-allocated local_id), independent of
-                // whether it won best-path.
-                if let Some(rib_ap) = added {
-                    route_advertise_to_peers_vpnv6_addpath(rd, prefix.prefix, &rib_ap, bgp, peers);
+                // whether it won best-path; with no new row (an inbound
+                // denial dropped it) withdraw every removed path from the
+                // AddPath members by its path-id — they hold it under that
+                // id, the plain fan-out above only serves plain members, and
+                // the transit label just released would otherwise be reused
+                // for another prefix while they still forward on it (review
+                // follow-up on #8; the v4 delta handler's shape).
+                match &added {
+                    Some(rib_ap) => {
+                        route_advertise_to_peers_vpnv6_addpath(
+                            rd,
+                            prefix.prefix,
+                            rib_ap,
+                            bgp,
+                            peers,
+                        );
+                    }
+                    None => {
+                        for removed in &replaced {
+                            route_withdraw_vpnv6_addpath(rd, prefix.prefix, removed, peers);
+                        }
+                    }
                 }
             }
         }
@@ -21504,6 +21523,148 @@ mod vpnv6_transit_label_tests {
             withdrawn_vpnv6(&mut ap_rx, true),
             vec![(prefix(), 1)],
             "the soft-out withdraws the now-denied path-id"
+        );
+    }
+
+    /// Review follow-up 6 (the reviewer's probe, kept): an inbound denial
+    /// that drops a candidate must withdraw that path from the AddPath
+    /// members by its path-id — they hold it under that id and the plain
+    /// fan-out serves plain members only — before the prefix's transit
+    /// label can be reused for another prefix.
+    #[tokio::test]
+    async fn inbound_denial_withdraws_the_path_from_addpath_members_before_its_label_is_reused() {
+        let router_id = Ipv4Addr::new(10, 0, 0, 1);
+        let ctx = crate::context::ProtoContext::default_table_no_rib();
+        let mut local_rib = LocalRib::default();
+        let mut shard = crate::bgp::shard::BgpShard {
+            vpn_v6_transit: true,
+            ..Default::default()
+        };
+        let mut attr_store = crate::bgp::BgpAttrStore::default();
+        let mut update_groups = crate::bgp::update_group::empty_map();
+        let interface_addrs = crate::bgp::interface_addrs::InterfaceAddrs::default();
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        Box::leak(Box::new(rx));
+        let mut central = crate::bgp::vrf::VrfLabelAllocator::bounded(1000, 5000);
+
+        // PE1 (the source) and an AddPath member with next-hop-self.
+        let mut peers = PeerMap::new();
+        let (pe1, _pe1_rx) = ibgp_peer(&[]);
+        let pe1_addr = pe1.address;
+        peers.insert(pe1_addr, pe1);
+        let (ap, mut ap_rx) = ibgp_peer_at(
+            IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 4)),
+            &[(Safi::MplsVpn, true, false)],
+            true,
+        );
+        let ap_addr = ap.address;
+        peers.insert(ap_addr, ap);
+        let src = peers.get(&pe1_addr).unwrap().ident;
+        let ap = peers.get(&ap_addr).unwrap().ident;
+        peers.membership_enroll(src);
+        peers.membership_enroll(ap);
+        assert_eq!(
+            peers.established_addpath_idents(Afi::Ip6, Safi::MplsVpn),
+            vec![ap]
+        );
+
+        let mut top = empty_top(
+            &router_id,
+            &mut local_rib,
+            &mut shard,
+            &mut attr_store,
+            &mut update_groups,
+            &interface_addrs,
+            &ctx.rib,
+            &tx,
+        );
+        top.central_label_alloc = Some(&mut central);
+        let nlri = Ipv6Nlri {
+            id: 0,
+            prefix: prefix(),
+        };
+        route_ipv6_update(
+            src,
+            &nlri,
+            Some(rd()),
+            Some(Label::new(24, 0, true)),
+            &BgpAttr::new(),
+            Some(VpnNexthop::V6(Vpnv6Nexthop {
+                rd: rd(),
+                nhop: PE1_V6,
+            })),
+            &mut top,
+            &mut peers,
+            false,
+        );
+        peers.get_mut_by_idx(ap).unwrap().flush_vpnv6();
+        assert_eq!(
+            sent_vpnv6_opt(&mut ap_rx, true),
+            vec![(SELF_V6, 1000)],
+            "the live ingest advertises the row to the AddPath member"
+        );
+        let held: Vec<u32> = peers
+            .get_by_idx(ap)
+            .unwrap()
+            .adj_out
+            .v6vpn
+            .get(&rd())
+            .and_then(|t| t.0.get(&prefix()))
+            .map(|rows| rows.iter().map(|r| r.local_id).collect())
+            .unwrap_or_default();
+        assert_eq!(
+            held,
+            vec![1],
+            "the advertisement is recorded under its path-id"
+        );
+
+        // Deny the replacement UPDATE inbound: its advertised path-id must be withdrawn.
+        let mut policy = crate::policy::PolicyList::default();
+        policy.entry(10).action = crate::policy::PolicyAction::Deny;
+        {
+            let peer = peers.get_mut_by_idx(src).unwrap();
+            let slot = peer.policy_list_slot(AfiSafi::new(Afi::Ip6, Safi::MplsVpn), InOut::Input);
+            slot.name = Some("DENY".into());
+            slot.policy_list = Some(policy);
+        }
+        route_ipv6_update(
+            src,
+            &nlri,
+            Some(rd()),
+            Some(Label::new(24, 0, true)),
+            &BgpAttr::new(),
+            Some(VpnNexthop::V6(Vpnv6Nexthop {
+                rd: rd(),
+                nhop: PE1_V6,
+            })),
+            &mut top,
+            &mut peers,
+            false,
+        );
+        assert!(
+            top.shard
+                .v6vpn
+                .get(&rd())
+                .unwrap()
+                .0
+                .get(&prefix())
+                .is_none()
+        );
+        let other: Ipv6Net = "2001:db8:99::/64".parse().unwrap();
+        let recycled =
+            top.shard
+                .labels
+                .label_vpn_v6(top.central_label_alloc.as_deref_mut(), rd(), other);
+        assert_eq!(
+            recycled,
+            Some(1000),
+            "the denied prefix's label is reusable"
+        );
+        peers.get_mut_by_idx(ap).unwrap().flush_vpnv6();
+        assert_eq!(
+            withdrawn_vpnv6(&mut ap_rx, true),
+            vec![(prefix(), 1)],
+            "the inbound denial must withdraw the path whose label has been recycled"
         );
     }
 
