@@ -1,0 +1,35 @@
+# z1: originates an IPv6 VRF prefix as VPNv6 toward z2 over an IPv4
+# session; both ends negotiate long-lived graceful restart with a 10 s
+# stale time for vpnv6.
+vrf:
+- name: vrf-cust
+  ipv6:
+    route-target:
+      import:
+      - 64512:100
+      export:
+      - 64512:100
+router:
+  bgp:
+    global:
+      as: 64512
+      router-id: 192.168.0.1
+    neighbor:
+    - remote-address: 192.168.0.2
+      afi-safi:
+      - name: vpnv6
+        enabled: true
+        long-lived-graceful-restart:
+          enabled: true
+          restart-time: 10
+      - name: ipv4
+        enabled: false
+      enabled: true
+      remote-as: 64512
+    vrf:
+    - name: vrf-cust
+      rd: 64512:1
+      afi-safi:
+        ipv6:
+          network:
+          - prefix: 2001:db8:1::/64
