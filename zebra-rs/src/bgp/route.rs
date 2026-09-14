@@ -7028,6 +7028,13 @@ fn route_soft_out_peer_table_v6vpn(
     else {
         return;
     };
+    // Every candidate for AddPath — minus the ones whose next-hop is
+    // unreachable: the NHT loss emptied the selection and tore the swap
+    // ILM down, so re-advertising such a row with our transit label behind
+    // next-hop-self would direct traffic to a missing forwarding entry.
+    // Skipping it here lets the reconcile below withdraw its path-id
+    // (review follow-up on #8). A plain member gets the selected best,
+    // which is already empty while the winner is unreachable.
     let candidates: Vec<(Ipv6Net, BgpRib)> = bgp
         .shard
         .v6vpn
@@ -7035,7 +7042,11 @@ fn route_soft_out_peer_table_v6vpn(
         .map(|t| {
             if add_path {
                 t.0.iter()
-                    .flat_map(|(prefix, ribs)| ribs.iter().map(move |rib| (prefix, rib.clone())))
+                    .flat_map(|(prefix, ribs)| {
+                        ribs.iter()
+                            .filter(|rib| rib.nexthop_reachable)
+                            .map(move |rib| (prefix, rib.clone()))
+                    })
                     .collect()
             } else {
                 t.1.iter().map(|(p, r)| (p, r.clone())).collect()
@@ -21166,25 +21177,42 @@ mod vpnv6_transit_label_tests {
         rx: &mut tokio::sync::mpsc::UnboundedReceiver<bytes::BytesMut>,
         addpath: bool,
     ) -> Vec<(Ipv6Net, u32)> {
+        vpnv6_traffic(rx, addpath).1
+    }
+
+    /// Drain a peer's writer channel once: the `(next-hop, label)` of every
+    /// VPNv6 MP_REACH NLRI and the `(prefix, path-id)` of every VPNv6
+    /// MP_UNREACH NLRI sent. One drain, so a gate can assert on both.
+    #[allow(clippy::type_complexity)]
+    fn vpnv6_traffic(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<bytes::BytesMut>,
+        addpath: bool,
+    ) -> (Vec<(Ipv6Addr, u32)>, Vec<(Ipv6Net, u32)>) {
         let mut opt = bgp_packet::ParseOption::default();
         opt.add_path
             .entry(AfiSafi::new(Afi::Ip6, Safi::MplsVpn))
             .or_default()
             .recv = addpath;
-        let mut out = Vec::new();
+        let mut reach = Vec::new();
+        let mut unreach = Vec::new();
         while let Ok(bytes) = rx.try_recv() {
             let (_, packet) = bgp_packet::BgpPacket::parse_packet(&bytes, false, Some(opt.clone()))
                 .expect("a well-formed UPDATE");
             let bgp_packet::BgpPacket::Update(update) = packet else {
                 continue;
             };
+            if let Some(MpReachAttr::Vpnv6(r)) = update.mp_update {
+                for nlri in &r.updates {
+                    reach.push((r.nhop.nhop, nlri.label.label));
+                }
+            }
             if let Some(MpUnreachAttr::Vpnv6(nlris)) = update.mp_withdraw {
                 for nlri in &nlris {
-                    out.push((nlri.nlri.prefix, nlri.nlri.id));
+                    unreach.push((nlri.nlri.prefix, nlri.nlri.id));
                 }
             }
         }
-        out
+        (reach, unreach)
     }
 
     /// Drain the peer's writer channel: every `(next-hop, label)` pair of
@@ -21524,6 +21552,95 @@ mod vpnv6_transit_label_tests {
             vec![(prefix(), 1)],
             "the soft-out withdraws the now-denied path-id"
         );
+    }
+
+    /// Review follow-up 8: the VPNv6 soft-out's AddPath walk must skip
+    /// candidates whose next-hop is unreachable, so the `(prefix, path-id)`
+    /// reconcile withdraws them. After an NHT loss emptied the selection
+    /// (and tore the swap ILM down) it re-advertised the candidate with our
+    /// transit label behind next-hop-self — traffic to a missing ILM.
+    #[tokio::test]
+    async fn addpath_soft_out_withdraws_an_unreachable_candidate() {
+        let router_id = Ipv4Addr::new(10, 0, 0, 1);
+        let ctx = crate::context::ProtoContext::default_table_no_rib();
+        let mut local_rib = LocalRib::default();
+        let mut shard = crate::bgp::shard::BgpShard {
+            vpn_v6_transit: true,
+            ..Default::default()
+        };
+        let mut attr_store = crate::bgp::BgpAttrStore::default();
+        let mut update_groups = crate::bgp::update_group::empty_map();
+        let interface_addrs = crate::bgp::interface_addrs::InterfaceAddrs::default();
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        Box::leak(Box::new(rx));
+        let mut central = crate::bgp::vrf::VrfLabelAllocator::bounded(1000, 5000);
+
+        let mut peers = PeerMap::new();
+        let (pe1, _pe1_rx) = ibgp_peer(&[]);
+        let pe1_addr = pe1.address;
+        peers.insert(pe1_addr, pe1);
+        let (ap, mut ap_rx) = ibgp_peer_at(
+            IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 4)),
+            &[(Safi::MplsVpn, true, false)],
+            true,
+        );
+        let ap_addr = ap.address;
+        peers.insert(ap_addr, ap);
+        let src = peers.get(&pe1_addr).unwrap().ident;
+        let ap = peers.get(&ap_addr).unwrap().ident;
+        peers.membership_enroll(src);
+        peers.membership_enroll(ap);
+
+        let mut top = empty_top(
+            &router_id,
+            &mut local_rib,
+            &mut shard,
+            &mut attr_store,
+            &mut update_groups,
+            &interface_addrs,
+            &ctx.rib,
+            &tx,
+        );
+        top.central_label_alloc = Some(&mut central);
+        route_ipv6_update(
+            src,
+            &Ipv6Nlri {
+                id: 0,
+                prefix: prefix(),
+            },
+            Some(rd()),
+            Some(Label::new(24, 0, true)),
+            &BgpAttr::new(),
+            Some(VpnNexthop::V6(Vpnv6Nexthop {
+                rd: rd(),
+                nhop: PE1_V6,
+            })),
+            &mut top,
+            &mut peers,
+            false,
+        );
+        peers.get_mut_by_idx(ap).unwrap().flush_vpnv6();
+        assert_eq!(sent_vpnv6_opt(&mut ap_rx, true), vec![(SELF_V6, 1000)]);
+
+        // PE1's next-hop goes away: the NHT re-evaluation clears the
+        // reachability flag and the selection empties.
+        {
+            let table = top.shard.v6vpn.get_mut(&rd()).unwrap();
+            assert!(table.set_nexthop_reachable(prefix(), IpAddr::V6(PE1_V6), false));
+            assert!(table.select_best_path(prefix()).is_empty());
+        }
+
+        // A soft-out must not re-advertise the unreachable candidate under
+        // its path-id; it must withdraw it.
+        route_soft_out_peer(ap, &mut top, &mut peers);
+        peers.get_mut_by_idx(ap).unwrap().flush_vpnv6();
+        let (reach, unreach) = vpnv6_traffic(&mut ap_rx, true);
+        assert_eq!(
+            reach,
+            vec![],
+            "an unreachable candidate is not advertised with our label behind next-hop-self"
+        );
+        assert_eq!(unreach, vec![(prefix(), 1)], "and its path-id is withdrawn");
     }
 
     /// Review follow-up 6 (the reviewer's probe, kept): an inbound denial

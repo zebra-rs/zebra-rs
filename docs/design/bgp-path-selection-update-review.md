@@ -696,6 +696,17 @@ cap. The two reviews agree on every overlapping item.
   (peer B keeps its explicit remote-as so it stays up across the
   membership change; refreshed both on joining and on leaving), which
   failed before the fix.
+- Review follow-up 8 (P1, same branch): the VPNv6 soft-out's AddPath
+  walk took every candidate without checking `nexthop_reachable`, so
+  after an NHT loss emptied the selection (and tore the swap ILM down)
+  a soft-out re-advertised the candidate with our transit label behind
+  next-hop-self, directing traffic to a missing forwarding entry. The
+  walk now skips unreachable candidates, so the `(prefix, path-id)`
+  reconcile withdraws them. Gate:
+  `addpath_soft_out_withdraws_an_unreachable_candidate`. The
+  event-driven side of the same story — an NHT flip never reaching
+  AddPath members at all — is #23 and stays open; until it is fixed, a
+  soft-out is what brings an AddPath member's VPNv6 rows back in step.
 
 ### 9. P1 CONFIRMED — LLGR / PIC stale rows for VPNv6 and EVPN never expire, and any family's EoR flushes the VPNv4 stale set
 
