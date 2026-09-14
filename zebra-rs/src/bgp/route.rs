@@ -6818,7 +6818,15 @@ pub fn route_advertise_evpn_to_peers(
     // Non-AddPath members: the best path only.
     for ident in peers.established_plain_idents(Afi::L2vpn, Safi::Evpn) {
         let peer = peers.get_mut_by_idx(ident).expect("peer exists");
-        evpn_advertise_one(peer, &rd, &prefix, new_best, bgp, false);
+        if !evpn_advertise_one(peer, &rd, &prefix, new_best, bgp, false)
+            && peer
+                .adj_out
+                .evpn
+                .get(&rd)
+                .is_some_and(|t| t.0.contains_key(&prefix))
+        {
+            evpn_withdraw_one(peer, &rd, &prefix, 0);
+        }
     }
 
     // AddPath members: every candidate path, each under its own path-id,
@@ -13083,48 +13091,90 @@ fn eor_stale_expire(peer_id: usize, afi_safi: AfiSafi, bgp: &mut BgpTop, peers: 
     if let Some(peer) = peers.get_mut_by_idx(peer_id) {
         peer.timer.stale_timer.remove(&afi_safi);
     }
-    stale_route_withdraw(peer_id, bgp, peers);
+    stale_route_withdraw(peer_id, afi_safi, bgp, peers);
 }
 
-pub fn stale_route_withdraw(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
-    // Fetch all of route which has stale flag.
-    let withdrawn = {
-        let mut withdrawn: Vec<Vpnv4Nlri> = vec![];
-        let Some(adj_in) = bgp.shard.adj_in(peer_id) else {
-            return;
-        };
-        for (rd, table) in adj_in.v4vpn.iter() {
-            for (prefix, ribs) in table.0.iter() {
-                for rib in ribs.iter() {
-                    if rib.stale {
-                        let withdraw = Vpnv4Nlri {
-                            label: rib.label.unwrap_or(Label::default()),
-                            rd: *rd,
-                            nlri: Ipv4Nlri {
-                                id: rib.remote_id,
-                                prefix: *prefix,
-                            },
-                        };
-                        withdrawn.push(withdraw);
+/// Expire only the stale paths retained for this family. Use the normal
+/// withdrawal paths so imports, forwarding entries, labels and downstream
+/// advertisements are reconciled along with the Adj-RIB-In and Loc-RIB.
+pub fn stale_route_withdraw(
+    peer_id: usize,
+    afi_safi: AfiSafi,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+) {
+    match (afi_safi.afi, afi_safi.safi) {
+        (Afi::Ip, Safi::MplsVpn) => {
+            let mut withdrawn = Vec::new();
+            if let Some(adj_in) = bgp.shard.adj_in(peer_id) {
+                for (rd, table) in &adj_in.v4vpn {
+                    for (prefix, ribs) in &table.0 {
+                        for rib in ribs.iter().filter(|rib| rib.stale) {
+                            withdrawn.push(Vpnv4Nlri {
+                                label: rib.label.unwrap_or_default(),
+                                rd: *rd,
+                                nlri: Ipv4Nlri {
+                                    id: rib.remote_id,
+                                    prefix: *prefix,
+                                },
+                            });
+                        }
                     }
                 }
             }
+            for withdraw in withdrawn {
+                route_ipv4_withdraw(
+                    peer_id,
+                    &withdraw.nlri,
+                    Some(withdraw.rd),
+                    Some(withdraw.label),
+                    bgp,
+                    peers,
+                    None,
+                    true,
+                );
+            }
         }
-        withdrawn
-    };
-
-    // Withdraw routes.
-    for withdraw in withdrawn.iter() {
-        route_ipv4_withdraw(
-            peer_id,
-            &withdraw.nlri,
-            Some(withdraw.rd),
-            Some(withdraw.label),
-            bgp,
-            peers,
-            None,
-            true,
-        );
+        (Afi::Ip6, Safi::MplsVpn) => {
+            let mut withdrawn = Vec::new();
+            if let Some(adj_in) = bgp.shard.adj_in(peer_id) {
+                for (rd, table) in &adj_in.v6vpn {
+                    for (prefix, ribs) in &table.0 {
+                        for rib in ribs.iter().filter(|rib| rib.stale) {
+                            withdrawn.push((
+                                *rd,
+                                Ipv6Nlri {
+                                    id: rib.remote_id,
+                                    prefix: *prefix,
+                                },
+                            ));
+                        }
+                    }
+                }
+            }
+            for (rd, nlri) in withdrawn {
+                route_ipv6_withdraw(peer_id, &nlri, Some(rd), bgp, peers, true);
+            }
+        }
+        (Afi::L2vpn, Safi::Evpn) => {
+            let mut withdrawn = Vec::new();
+            if let Some(peer) = peers.get_by_idx(peer_id) {
+                for (rd, table) in &peer.adj_in.evpn {
+                    for (prefix, ribs) in &table.0 {
+                        for rib in ribs.iter().filter(|rib| rib.stale) {
+                            if let Some(route) = build_evpn_route(rd, prefix, rib) {
+                                withdrawn.push(route);
+                            }
+                        }
+                    }
+                }
+            }
+            for route in withdrawn {
+                route_evpn_withdraw(peer_id, &route, bgp, peers);
+            }
+        }
+        // route_clean retains no stale routes in the other families.
+        _ => {}
     }
 }
 

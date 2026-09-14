@@ -2141,8 +2141,8 @@ fn fsm_effect(
         FsmEffect::RouteUpdate(packet) => {
             route_from_peer(id, packet, bgp, peers, shards);
         }
-        FsmEffect::StaleExpire(_afi_safi) => {
-            stale_route_withdraw(id, bgp, peers);
+        FsmEffect::StaleExpire(afi_safi) => {
+            stale_route_withdraw(id, afi_safi, bgp, peers);
         }
         FsmEffect::RouteRefreshRecv { afi: _, safi: _ } => {
             super::route::route_soft_out_peer(id, bgp, peers);
