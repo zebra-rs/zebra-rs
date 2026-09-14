@@ -7,16 +7,16 @@ MUP/Flowspec/SR-Policy/RTC where they share the machinery). Reviewed
 against `main` at `2f1e9a09` (2026-09-07). Line numbers are as of that
 commit.
 
-Status (2026-09-09): seven items are fixed on `main` — #1 (PR #2372,
+Status (2026-09-13): eight items are fixed on `main` — #1 (PR #2372,
 merge `3beacbcc`), the listen-range peer-type item found while fixing it
 (PR #2373, `ba327126`), #2 (PR #2375, `308b196a`), #3 (PR #2376,
 `b8fef738`), #4 (PR #2377, `1cc31738`, which also closed the
-signature-knob half of #21 and added the IPv6 outbound soft-out) and #5
-(PR #2378, `b2007701`) and #6 (PR #2379, `0464828a`, with two review
-follow-ups). One more is fixed on a branch awaiting merge: #7 (branch
-`bgp-evpn-addpath-withdraw`, PR #2380). Each fixed entry ends with its
-fix note; everything else is open. Suggested order for the rest: #8
-(VPNv6 transit label), #9 (stale sweep VPNv4-only).
+signature-knob half of #21 and added the IPv6 outbound soft-out), #5
+(PR #2378, `b2007701`), #6 (PR #2379, `0464828a`, with two review
+follow-ups) and #7 (PR #2380, `d7476601`). Two more are fixed in PR
+#2383 (branch `bgp-vpnv6-transit-label`, eight review rounds folded
+in): #8 and, with it, #13. Each fixed entry ends with its fix note;
+everything else is open. Next: #9 (stale sweep VPNv4-only).
 
 Method: one lead read the selection ladder and every egress builder, then
 five independent read-only reviewers each took one dimension (update-group
@@ -451,7 +451,7 @@ cap. The two reviews agree on every overlapping item.
   rows hold the new next-hop, the identical route after it is
   deduplicated), which fails with the write-back removed.
 
-### 7. P1 CONFIRMED (probe), FIXED on branch `bgp-evpn-addpath-withdraw` — EVPN AddPath members receive the best path only, and the superseded path-id is never withdrawn on a flip
+### 7. P1 CONFIRMED (probe), FIXED in #2380 — EVPN AddPath members receive the best path only, and the superseded path-id is never withdrawn on a flip
 
 - `route.rs:6704-6728` iterates `selected` for AddPath members;
   `LocalRibEvpnTable::select_best_path` (`2660-2706`) returns exactly
@@ -512,7 +512,7 @@ cap. The two reviews agree on every overlapping item.
   path-id 1, selects VTEP B's path, and the reflector's Adj-RIB-Out
   toward it holds VTEP B's row only.
 
-### 8. P1 CONFIRMED (probe), FIXED on branch `bgp-vpnv6-transit-label` — VPNv6 next-hop-self / eBGP re-advertisement sends the received label behind a self next-hop; no VPNv6 transit label exists
+### 8. P1 CONFIRMED (probe), FIXED in #2383 — VPNv6 next-hop-self / eBGP re-advertisement sends the received label behind a self next-hop; no VPNv6 transit label exists
 
 - `route.rs:5737` (`V6Batch::advertise`, `b.label.unwrap_or_default()`),
   `5831` (AddPath), `15275` (`route_sync_vpnv6`) put the received label
@@ -788,7 +788,7 @@ cap. The two reviews agree on every overlapping item.
 - Fix direction: run the first-AS check on the pre-prepend path (or accept
   `substitute` as the first AS when `change_local_as()` is active).
 
-### 13. P2 CONFIRMED, FIXED on branch `bgp-vpnv6-transit-label` (with #8) — `afi-safi ipv6 next-hop-self|next-hop-unchanged` silently govern VPNv6 rows
+### 13. P2 CONFIRMED, FIXED in #2383 (with #8) — `afi-safi ipv6 next-hop-self|next-hop-unchanged` silently govern VPNv6 rows
 
 - `route.rs:13026` and `13030` evaluate the `(Ip6, Unicast)` knobs for
   every row, including `Some(VpnNexthop::V6)` rows (the VPNv6 shape is only
@@ -1302,7 +1302,7 @@ cap. The two reviews agree on every overlapping item.
   MED, or re-feeds an unchanged route.
 - No test asserts which path a plain peer is advertised under
   `maximum-paths`.
-- EVPN half closed on branch `bgp-evpn-addpath-withdraw`
+- EVPN half closed by #2380
   (`bgp_evpn_addpath_flip`, `_v6`: two VTEPs under one RD, a reflector
   with AddPath send toward a leaf, VTEP A's daemon stopped; unit module
   `evpn_addpath_fanout_tests`); LU half closed on branch
