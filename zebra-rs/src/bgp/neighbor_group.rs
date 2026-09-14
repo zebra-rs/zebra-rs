@@ -454,12 +454,31 @@ pub fn config_neighbor_group_afi_safi_next_hop_self(
         }
         _ => return Some(()),
     }
+    let mut vpnv6_changed: Vec<usize> = Vec::new();
     sweep_members(bgp, &name, |groups, peer| {
         let value = resolve_next_hop_self(groups, &peer.config, family);
-        peer.config.sub.entry(family).or_default().next_hop_self = value;
+        let resync = vpnv6_needs_resync(peer, family);
+        let ident = peer.ident;
+        let slot = peer.config.sub.entry(family).or_default();
+        if slot.next_hop_self != value && resync {
+            vpnv6_changed.push(ident);
+        }
+        slot.next_hop_self = value;
         false
     });
+    bgp.regroup_resync.extend(vpnv6_changed);
     Some(())
+}
+
+/// Whether a changed effective `next-hop-self` on `peer` for `family`
+/// must be queued for the commit-end re-sync directly: VPNv6 has no
+/// update groups, so — unlike every tracked family, which
+/// `regroup_stale_peers` moves and re-syncs — nothing else would refresh
+/// an Established member's VPNv6 advertisements (review follow-up on #8:
+/// with another peer keeping transit enabled no transit flag flips, and
+/// the transit reconcile alone re-advertises nothing).
+fn vpnv6_needs_resync(peer: &Peer, family: AfiSafi) -> bool {
+    family == AfiSafi::new(Afi::Ip6, Safi::MplsVpn) && peer.state.is_established()
 }
 
 /// Resolve a member's effective per-family `next-hop-self`: the
@@ -1763,11 +1782,19 @@ pub(super) fn sweep_members_inherit(bgp: &mut Bgp, name: &str) {
     // link-local is not a map key (`get(&peer.address)` would miss it).
     let mut md5_idents: Vec<usize> = Vec::new();
     let mut bfd_idents: Vec<usize> = Vec::new();
+    let vpnv6 = AfiSafi::new(Afi::Ip6, Safi::MplsVpn);
+    let mut vpnv6_changed: Vec<usize> = Vec::new();
     for (_, peer) in bgp.peers.iter_mut_all() {
         if peer.config.neighbor_group.as_deref() != Some(name) {
             continue;
         }
+        let nhs_before = peer.next_hop_self(Afi::Ip6, Safi::MplsVpn);
         let outcome = apply_inherited(&bgp.neighbor_groups, &policy_tx, peer);
+        if peer.next_hop_self(Afi::Ip6, Safi::MplsVpn) != nhs_before
+            && vpnv6_needs_resync(peer, vpnv6)
+        {
+            vpnv6_changed.push(peer.ident);
+        }
         if outcome.bounce && !matches!(peer.state, State::Idle) {
             stops.push(peer.ident);
         }
@@ -1786,7 +1813,10 @@ pub(super) fn sweep_members_inherit(bgp: &mut Bgp, name: &str) {
     // Inherited knobs may have changed update-group signature fields on
     // Established members (outbound bindings, as-override, next-hop
     // knobs, …): re-form their groups now; the commit-end re-sync covers
-    // the movers (review finding #4).
+    // the movers (review finding #4). VPNv6 has no groups: its members
+    // whose effective next-hop-self changed are queued for the same
+    // re-sync directly.
+    bgp.regroup_resync.extend(vpnv6_changed);
     super::config::regroup_stale_peers(bgp);
     if mss_refresh {
         super::config::apply_tcp_mss_refresh_all(bgp);

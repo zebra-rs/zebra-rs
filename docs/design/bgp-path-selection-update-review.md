@@ -7,16 +7,16 @@ MUP/Flowspec/SR-Policy/RTC where they share the machinery). Reviewed
 against `main` at `2f1e9a09` (2026-09-07). Line numbers are as of that
 commit.
 
-Status (2026-09-09): seven items are fixed on `main` — #1 (PR #2372,
+Status (2026-09-13): eight items are fixed on `main` — #1 (PR #2372,
 merge `3beacbcc`), the listen-range peer-type item found while fixing it
 (PR #2373, `ba327126`), #2 (PR #2375, `308b196a`), #3 (PR #2376,
 `b8fef738`), #4 (PR #2377, `1cc31738`, which also closed the
-signature-knob half of #21 and added the IPv6 outbound soft-out) and #5
-(PR #2378, `b2007701`) and #6 (PR #2379, `0464828a`, with two review
-follow-ups). One more is fixed on a branch awaiting merge: #7 (branch
-`bgp-evpn-addpath-withdraw`, PR #2380). Each fixed entry ends with its
-fix note; everything else is open. Suggested order for the rest: #8
-(VPNv6 transit label), #9 (stale sweep VPNv4-only).
+signature-knob half of #21 and added the IPv6 outbound soft-out), #5
+(PR #2378, `b2007701`), #6 (PR #2379, `0464828a`, with two review
+follow-ups) and #7 (PR #2380, `d7476601`). Two more are fixed in PR
+#2383 (branch `bgp-vpnv6-transit-label`, eight review rounds folded
+in): #8 and, with it, #13. Each fixed entry ends with its fix note;
+everything else is open. Next: #9 (stale sweep VPNv4-only).
 
 Method: one lead read the selection ladder and every egress builder, then
 five independent read-only reviewers each took one dimension (update-group
@@ -451,7 +451,7 @@ cap. The two reviews agree on every overlapping item.
   rows hold the new next-hop, the identical route after it is
   deduplicated), which fails with the write-back removed.
 
-### 7. P1 CONFIRMED (probe), FIXED on branch `bgp-evpn-addpath-withdraw` — EVPN AddPath members receive the best path only, and the superseded path-id is never withdrawn on a flip
+### 7. P1 CONFIRMED (probe), FIXED in #2380 — EVPN AddPath members receive the best path only, and the superseded path-id is never withdrawn on a flip
 
 - `route.rs:6704-6728` iterates `selected` for AddPath members;
   `LocalRibEvpnTable::select_best_path` (`2660-2706`) returns exactly
@@ -512,7 +512,7 @@ cap. The two reviews agree on every overlapping item.
   path-id 1, selects VTEP B's path, and the reflector's Adj-RIB-Out
   toward it holds VTEP B's row only.
 
-### 8. P1 CONFIRMED — VPNv6 next-hop-self / eBGP re-advertisement sends the received label behind a self next-hop; no VPNv6 transit label exists
+### 8. P1 CONFIRMED (probe), FIXED in #2383 — VPNv6 next-hop-self / eBGP re-advertisement sends the received label behind a self next-hop; no VPNv6 transit label exists
 
 - `route.rs:5737` (`V6Batch::advertise`, `b.label.unwrap_or_default()`),
   `5831` (AddPath), `15275` (`route_sync_vpnv6`) put the received label
@@ -531,6 +531,182 @@ cap. The two reviews agree on every overlapping item.
 - Fix direction: either add the VPNv6 transit flag + minting + swap ILM
   (`label_vpn_v6`, `vpn_v6_transit`), or reject `vpnv6` on eBGP /
   `next-hop-self` sessions and fix the book.
+- Gates (branch `bgp-vpnv6-transit-label`; every gate compiles on
+  `main` and fails there). Unit, `config.rs` `transit_label_tests`:
+  `reconcile_mints_and_releases_vpnv6_transit_labels_on_flip` (the VPNv6
+  twin of the VPNv4 flip test: a reflected VPNv6 row is unlabelled; after
+  `afi-safi vpnv6 next-hop-self` the row already held must be labelled
+  from the block and its swap ILM reconciled, a row received under
+  transit must be labelled at receive, and removing the knob must release
+  both and tear the ILMs down) and `vpnv6_transit_is_armed_per_family`
+  (the VPNv6 and VPNv4 arms are independent). On `main` the first
+  labelled-row assertion fails with `Some(None)`. Unit, `route.rs`
+  `vpnv6_transit_label_tests` (an iBGP reflector client over an IPv6
+  session, one VPNv6 row received from PE1 with PE1's label 24 and a
+  transit local label set on the row, the session-up dump parsed back):
+  `vpnv6_next_hop_self_peer_is_sent_our_transit_label` expects our
+  address and our label 1000 and on `main` gets PE1's address and label
+  24 (the `vpnv6` knob is dead: #13's other face);
+  `vpnv6_rows_follow_the_vpnv6_knob_not_the_ipv6_unicast_knob` expects
+  the v6-unicast knob to leave the VPNv6 row alone and on `main` sees it
+  rewritten to self, with PE1's label 24 behind it (this finding's
+  black-hole, reached through #13); the reflector and
+  `next-hop-unchanged` cases pass on both. BDD, `bgp_vpnv6_rr_transit_label`
+  (the VPNv6 twin of `bgp_vpnv4_rr_transit_label`: VPNv6 sessions over
+  IPv4 with a global IPv6 on each bridge link as the VPNv6 next-hop; the
+  reflector relays with no ILM, then `afi-safi vpnv6 next-hop-self`
+  toward pe2 must re-advertise pe1's prefix behind the reflector's own
+  address with an ILM behind the label, and removing the knob must
+  release it). On `main` it fails at the flip: sixty seconds after the
+  knob is set pe2 still holds pe1's next-hop (and pe1's label 16 — the
+  same value the reflector's own block starts at, so a relayed label is
+  indistinguishable from a minted one). Note for the fix: the VPNv6 knob
+  half of #13 must be closed at the same time, since the service label
+  and the next-hop rewrite have to follow one predicate.
+- FIXED (branch `bgp-vpnv6-transit-label`), the "add the machinery"
+  option, mirroring VPNv4 site for site: `BgpShard::vpn_v6_transit`
+  armed by `reconcile_transit_labels` from the generic `transit_needed`;
+  `ShardLabelPool::label_vpn_v6` / `free_vpn_v6` keyed by `(RD, Ipv6Net)`
+  and minted at VPNv6 ingest under the flag (the v6 shard handler now
+  takes the central allocator like the v4 one); a VPNv6 reconcile arm
+  that labels or releases the rows already held and re-advertises the
+  changed prefixes per prefix (there is no VPNv6 soft-out); the swap ILM
+  reconciled at the VPNv6 best-path, at both NHT re-evaluation sites and
+  on withdraw (label released with its ILM when the prefix is gone);
+  `vpnv6_service_label` at the batch, AddPath and session-up dump sites.
+  `route_update_ipv6` reads a VPNv6 row's own `(Ip6, MplsVpn)` knobs (a
+  v6-unicast row keeps the unicast knobs and the route-server rule), so
+  the label and the next-hop follow one predicate; `vpnv6_next_hop_self`
+  / `vpnv6_next_hop_unchanged` join `UpdateGroupSig` (version 10) for
+  the `(Ip6, MplsVpn)` group. That closes #13 as well. Shard tests
+  `update_v6_vpn_mints_transit_local_label` /
+  `update_v6_vpn_reflector_mints_no_local_label` added; every gate above
+  passes on the fix. The book's Option B chapter needs no change: the
+  transit ASBR's swap is label-to-label and family-agnostic (an existing
+  feature records that zebra-rs PEs have no 6VPE data plane, which is a
+  PE limitation, not an ASBR one).
+- Review follow-up (P1, same branch): the live VPNv6 ingest
+  (`route_ipv6_update`) still handed the shard no central label
+  allocator, so a transit configured before the first route arrived —
+  the shard's own pool empty, nothing carved yet — minted nothing at
+  receive, and `vpnv6_service_label` fell back to the received label
+  behind our next-hop: the original black hole, reachable whenever
+  transit is on from the start. The gate missed it because it turns
+  `next-hop-self` on after the routes are in the table, where the
+  reconcile mints. Fixed by passing `central_label_alloc` as the v4
+  ingest does, and by withholding a received MPLS VPNv6 row whose
+  next-hop we rewrite while it has no transit label (`route_update_ipv6`
+  returns `None`, so the fan-out withdraws it from a peer that holds it;
+  `label_block_arrived` reconciles and re-advertises once a label
+  exists) — SRv6 rows and originated rows are unaffected. Gates:
+  `vpnv6_row_received_under_transit_is_labelled_on_the_live_path`,
+  `vpnv6_next_hop_self_peer_gets_nothing_until_a_transit_label_exists`,
+  `late_label_block_labels_existing_vpnv6_transit_rows`, and BDD
+  `bgp_vpnv6_transit_label_at_receive` (the reflector is a transit
+  toward pe2 from its initial config; pe2 must get pe1's prefix behind
+  the reflector with an ILM behind the label). Adjacent, not changed
+  here: `vpnv4_service_label` and the LU builders keep the
+  received-label / implicit-null fallback when a rewritten next-hop has
+  no local label (below the cap).
+- Review follow-up 2 (three P1s, same branch). (a) The withdraw arm
+  freed the transit label whenever the selection came back empty, which
+  also happens when every surviving candidate's next-hop is unreachable;
+  the survivors still referenced the label and the next prefix was
+  handed the same one. Now the label is freed only when no candidate
+  remains; with unreachable survivors only the ILM is dropped (the NHT
+  re-evaluation re-installs it). The VPNv4 arm had the identical
+  hazard and got the same shape. (b) `vpnv6_service_label` re-derived
+  the rewrite from the knobs, but the builder keeps the remote next-hop
+  when the knobs ask for self and no usable local IPv6 exists (an IPv4
+  transport with no global IPv6 on the link), so our label went out
+  behind the remote next-hop; the label is now read off the attributes
+  actually sent, and the withhold moved to where the rewrite is
+  certain. (c) The reconcile refreshed plain members only, so AddPath
+  members kept advertisements carrying labels the reconcile had just
+  freed; every candidate is now re-advertised to AddPath members per
+  path-id as well. Gates:
+  `vpnv6_withdraw_keeps_the_label_while_unreachable_survivors_remain`,
+  `vpnv6_peer_without_a_self_address_is_passed_the_remote_label_and_next_hop`
+  and `reconcile_refreshes_addpath_members_too`, each failing before its
+  fix.
+- Review follow-up 3 (two P2s, same branch). (a) A `vpnv6
+  next-hop-self` / `next-hop-unchanged` change on one peer while another
+  peer keeps transit enabled flips no transit flag, so the reconcile
+  re-advertises nothing; VPNv6 had no soft-out, and — unlike the unicast,
+  VPNv4 and EVPN knobs — no update-group signature to move the peer
+  through (VPNv6 is not a tracked family; the two signature fields
+  added for it are inert until it is). Now `route_soft_out_peer` walks
+  VPNv6 per RD (`route_soft_out_peer_table_v6vpn`, AddPath-aware,
+  `(prefix, path-id)` reconcile against `adj_out.v6vpn`, label from the
+  attributes sent), and the two knob handlers queue the peer for the
+  commit-end re-sync when the resolved value changes. (b) An empty
+  selection — the winner's next-hop lost — passed `None` to the swap-ILM
+  reconcile, which returned without deleting the entry; a
+  `reconcile_vpn_swap_ilm` wrapper now tears the ILM down whenever no
+  winner is left, at the VPNv4 and VPNv6 ingest sites and in both NHT
+  handlers' VPN arms. Gates:
+  `next_hop_self_change_on_a_second_peer_refreshes_its_vpnv6_rows` and
+  `nht_loss_removes_the_vpnv6_swap_ilm`, both failing before the fix.
+- Review follow-up 4 (two P2s, same branch). (a) The live AddPath VPNv6
+  advertise (`V6Batch::advertise_addpath`) never recorded the row in
+  `adj_out.v6vpn`, so the new soft-out had nothing to reconcile against:
+  after a live AddPath advertisement, binding a deny-all outbound policy
+  and running the soft-out produced no withdrawal. Every AddPath
+  advertisement is now recorded under its path-id (and dropped by the
+  AddPath withdraw). (b) A neighbor-group `vpnv6 next-hop-self` change
+  reached its members through the inheritance sweep without queuing
+  them, so with another peer keeping transit enabled a group change
+  produced no refresh; the group handler and the inheritance sweep now
+  queue the members whose effective value changed for the commit-end
+  re-sync, as the direct handler does. Gates:
+  `addpath_soft_out_withdraws_a_live_advertisement_the_policy_now_denies`
+  and `group_next_hop_self_change_refreshes_the_members_vpnv6_rows`,
+  each failing with its fix removed.
+- Review follow-up 5 (P2, same branch): an inbound-policy denial that
+  replaces the LAST candidate removes the row in the shard before the
+  delta handler runs, so the ingest-side cleanup (which read the
+  transit label off the survivors) found nothing and left the label
+  allocated and the swap ILM installed. One helper
+  (`vpn_transit_after_change`) now serves both ingest sites and both
+  withdraw arms: with no candidate left it releases the label and tears
+  the ILM down, otherwise it reconciles the ILM for the winner. VPNv4
+  had the same leak on its ingest site. Gate:
+  `last_candidate_denied_inbound_releases_the_transit_label` (the live
+  ingest accepts a row, a deny-all inbound policy is bound, the same
+  route arrives again; the next prefix must be handed label 1000 back),
+  which failed with 1001 before the fix.
+- Review follow-up 6 (P1, same branch): with the label now released on
+  a denial, the delta handler still never withdrew the removed path
+  from AddPath members — the plain fan-out serves plain members only —
+  so a member kept forwarding on a label that was reusable for another
+  prefix. The VPNv6 delta handler now has the v4 handler's shape: a new
+  row is advertised to AddPath members under its path-id, and with no
+  new row every removed row is withdrawn from them by its path-id
+  (`route_withdraw_vpnv6_addpath`). Gate: the reviewer's probe, kept as
+  `inbound_denial_withdraws_the_path_from_addpath_members_before_its_label_is_reused`.
+- Review follow-up 7 (P2, same branch): the third path that changes a
+  peer's effective `vpnv6 next-hop-self` — joining or leaving a
+  neighbor group (`config_peer_neighbor_group`, which re-applies the
+  inherited knobs) — queued no re-sync either, so with another peer
+  keeping transit enabled the changed peer kept its old next-hop/label
+  pair. It now compares the effective value across the inheritance and
+  queues an Established peer whose value flipped, as the direct and
+  group-level handlers do. Gate:
+  `joining_or_leaving_a_neighbor_group_refreshes_the_peers_vpnv6_rows`
+  (peer B keeps its explicit remote-as so it stays up across the
+  membership change; refreshed both on joining and on leaving), which
+  failed before the fix.
+- Review follow-up 8 (P1, same branch): the VPNv6 soft-out's AddPath
+  walk took every candidate without checking `nexthop_reachable`, so
+  after an NHT loss emptied the selection (and tore the swap ILM down)
+  a soft-out re-advertised the candidate with our transit label behind
+  next-hop-self, directing traffic to a missing forwarding entry. The
+  walk now skips unreachable candidates, so the `(prefix, path-id)`
+  reconcile withdraws them. Gate:
+  `addpath_soft_out_withdraws_an_unreachable_candidate`. The
+  event-driven side of the same story — an NHT flip never reaching
+  AddPath members at all — is #23 and stays open; until it is fixed, a
+  soft-out is what brings an AddPath member's VPNv6 rows back in step.
 
 ### 9. P1 CONFIRMED — LLGR / PIC stale rows for VPNv6 and EVPN never expire, and any family's EoR flushes the VPNv4 stale set
 
@@ -612,7 +788,7 @@ cap. The two reviews agree on every overlapping item.
 - Fix direction: run the first-AS check on the pre-prepend path (or accept
   `substitute` as the first AS when `change_local_as()` is active).
 
-### 13. P2 CONFIRMED — `afi-safi ipv6 next-hop-self|next-hop-unchanged` silently govern VPNv6 rows
+### 13. P2 CONFIRMED, FIXED in #2383 (with #8) — `afi-safi ipv6 next-hop-self|next-hop-unchanged` silently govern VPNv6 rows
 
 - `route.rs:13026` and `13030` evaluate the `(Ip6, Unicast)` knobs for
   every row, including `Some(VpnNexthop::V6)` rows (the VPNv6 shape is only
@@ -628,6 +804,15 @@ cap. The two reviews agree on every overlapping item.
   between group-mates.
 - Fix direction: gate the two reads on `rib.nexthop.is_none()` and read
   `(Ip6, MplsVpn)` for VPN rows; add both to the VPNv6 signature.
+- FIXED (branch `bgp-vpnv6-transit-label`, with #8): exactly that —
+  `route_update_ipv6` picks the knob family from `rib.nexthop` (VPNv6
+  rows read `(Ip6, MplsVpn)`, unicast rows `(Ip6, Unicast)` plus the
+  route-server rule), and `vpnv6_next_hop_self` /
+  `vpnv6_next_hop_unchanged` are stamped into the `(Ip6, MplsVpn)`
+  signature (version 10). Gates: `vpnv6_rows_follow_the_vpnv6_knob_not_the_ipv6_unicast_knob`
+  and `vpnv6_next_hop_self_peer_is_sent_our_transit_label` in
+  `vpnv6_transit_label_tests`, plus the `signature_fields_each_distinguish`
+  rows.
 
 ### 14. P2 CONFIRMED (probe) — with `maximum-paths > 1` the plain fan-out advertises a multipath member, not the winner
 
@@ -997,6 +1182,13 @@ cap. The two reviews agree on every overlapping item.
 - Empty per-RD Loc-RIB tables also leak on the remove/NHT paths
   (`shard/mod.rs:307,384`, `inst.rs:5759,5767`, `route.rs:3465,3494`),
   extending the recorded `entry(rd).or_default()` item.
+- `vpnv4_service_label` (`route.rs`) and the labeled-unicast builders
+  fall back to the received label (LU: implicit-null) when the next-hop
+  is rewritten to self but the row has no local label yet (no dynamic
+  block bound): the peer then pushes a label the transit holds no ILM
+  for. The VPNv6 twin now withholds the row instead (fix of #8, review
+  follow-up); the v4 and LU paths still send the unsafe fallback until
+  `label_block_arrived` reconciles.
 - EVPN candidates' `nexthop_reachable` is stamped once at ingest from the
   NHT cache (`nht_track_received`, Type-5 only) and never refreshed: the
   NHT re-evaluation's EVPN arm (`inst.rs`, `NhtDep::Evpn`) only
@@ -1110,7 +1302,7 @@ cap. The two reviews agree on every overlapping item.
   MED, or re-feeds an unchanged route.
 - No test asserts which path a plain peer is advertised under
   `maximum-paths`.
-- EVPN half closed on branch `bgp-evpn-addpath-withdraw`
+- EVPN half closed by #2380
   (`bgp_evpn_addpath_flip`, `_v6`: two VTEPs under one RD, a reflector
   with AddPath send toward a leaf, VTEP A's daemon stopped; unit module
   `evpn_addpath_fanout_tests`); LU half closed on branch

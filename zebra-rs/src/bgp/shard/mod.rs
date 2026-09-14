@@ -61,6 +61,9 @@ pub struct ShardLabelPool {
     /// Per-`(RD, prefix)` VPNv4 transit local labels (Inter-AS
     /// Option B): the swap ILM forwards `our label → received label`.
     vpn_v4: BTreeMap<(RouteDistinguisher, Ipv4Net), u32>,
+    /// [`Self::vpn_v4`] for VPNv6 (review finding #8: the VPNv6 transit
+    /// advertised the received label behind its own next-hop).
+    vpn_v6: BTreeMap<(RouteDistinguisher, Ipv6Net), u32>,
 }
 
 impl Default for ShardLabelPool {
@@ -70,6 +73,7 @@ impl Default for ShardLabelPool {
             lu_v4: BTreeMap::new(),
             lu_v6: BTreeMap::new(),
             vpn_v4: BTreeMap::new(),
+            vpn_v6: BTreeMap::new(),
         }
     }
 }
@@ -155,6 +159,26 @@ impl ShardLabelPool {
         self.pool.free(label);
         Some(label)
     }
+
+    pub fn label_vpn_v6(
+        &mut self,
+        central: Option<&mut VrfLabelAllocator>,
+        rd: RouteDistinguisher,
+        prefix: Ipv6Net,
+    ) -> Option<u32> {
+        if let Some(l) = self.vpn_v6.get(&(rd, prefix)) {
+            return Some(*l);
+        }
+        let label = self.alloc(central)?;
+        self.vpn_v6.insert((rd, prefix), label);
+        Some(label)
+    }
+
+    pub fn free_vpn_v6(&mut self, rd: RouteDistinguisher, prefix: Ipv6Net) -> Option<u32> {
+        let label = self.vpn_v6.remove(&(rd, prefix))?;
+        self.pool.free(label);
+        Some(label)
+    }
 }
 
 /// A peer's inbound policy snapshot, replicated from the main task into
@@ -220,6 +244,10 @@ pub struct BgpShard {
     /// the inline (N=1) shard is ever set: pool workers are handed no
     /// central allocator (`pool.rs`) and cannot mint regardless.
     pub vpn_v4_transit: bool,
+    /// [`Self::vpn_v4_transit`] for VPNv6: gates the per-`(RD, prefix)`
+    /// mint in `handle_update_v6` and the VPNv6 arm of
+    /// `Bgp::reconcile_transit_labels` (review finding #8).
+    pub vpn_v6_transit: bool,
     /// [`Self::vpn_v4_transit`] for IPv4 Labeled-Unicast (SAFI 4): true
     /// when a `label-v4` peer is sent routes with next-hop-self (eBGP
     /// always rewrites for LU; iBGP only with `next-hop-self` — the

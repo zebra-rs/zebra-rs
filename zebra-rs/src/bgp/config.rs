@@ -517,8 +517,18 @@ fn config_peer_neighbor_group(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Op
         // defaults + explicit. A knob whose effective value changed
         // on a live session asks for a bounce; the listener/BFD jobs
         // run after the peer borrow ends.
+        let vpnv6_nhs_before = peer.next_hop_self(Afi::Ip6, Safi::MplsVpn);
         let outcome =
             super::neighbor_group::apply_inherited(&bgp.neighbor_groups, &bgp.policy_tx, peer);
+        // A membership change that flips the effective `vpnv6
+        // next-hop-self` reaches the wire only through the commit-end
+        // re-sync (VPNv6 has no update groups), as for the direct and
+        // group-level handlers (review follow-up on #8).
+        if peer.next_hop_self(Afi::Ip6, Safi::MplsVpn) != vpnv6_nhs_before
+            && peer.state.is_established()
+        {
+            bgp.regroup_resync.insert(peer.ident);
+        }
 
         match op {
             ConfigOp::Set => {
@@ -3757,15 +3767,44 @@ fn config_next_hop_self(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<(
     super::afi_knob::set_next_hop_self_explicit(&mut peer.config, afi_safi, op, &mut args)?;
     let value =
         super::neighbor_group::resolve_next_hop_self(&bgp.neighbor_groups, &peer.config, afi_safi);
-    peer.config.sub.entry(afi_safi).or_default().next_hop_self = value;
+    let slot = peer.config.sub.entry(afi_safi).or_default();
+    let changed = slot.next_hop_self != value;
+    slot.next_hop_self = value;
+    if changed {
+        queue_vpnv6_knob_resync(bgp, addr, afi_safi);
+    }
     Some(())
+}
+
+/// A `vpnv6 next-hop-self` / `next-hop-unchanged` change on a live peer
+/// must reach the wire at commit end. The unicast / VPNv4 / EVPN knobs get
+/// there through the update-group signature (`regroup_stale_peers` moves
+/// the peer and re-syncs it), but VPNv6 has no update groups, so queue the
+/// peer for the same commit-end re-sync directly; `route_soft_out_peer`
+/// walks VPNv6 (review follow-up on #8: with another peer keeping transit
+/// enabled the transit flag does not flip, so the reconcile alone
+/// re-advertised nothing and the changed peer kept a stale next-hop/label).
+fn queue_vpnv6_knob_resync(bgp: &mut Bgp, addr: IpAddr, afi_safi: AfiSafi) {
+    if afi_safi != AfiSafi::new(Afi::Ip6, Safi::MplsVpn) {
+        return;
+    }
+    if let Some(peer) = bgp.peers.get(&addr)
+        && peer.state.is_established()
+    {
+        bgp.regroup_resync.insert(peer.ident);
+    }
 }
 
 fn config_next_hop_unchanged(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let addr = args.addr()?;
     let afi_safi: AfiSafi = args.afi_safi()?;
     let peer = bgp.peers.get_mut(&addr)?;
-    super::afi_knob::set_next_hop_unchanged(&mut peer.config, afi_safi, op, &mut args)
+    let before = peer.next_hop_unchanged(afi_safi.afi, afi_safi.safi);
+    super::afi_knob::set_next_hop_unchanged(&mut peer.config, afi_safi, op, &mut args)?;
+    if peer.next_hop_unchanged(afi_safi.afi, afi_safi.safi) != before {
+        queue_vpnv6_knob_resync(bgp, addr, afi_safi);
+    }
+    Some(())
 }
 
 fn config_llgr(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
@@ -10979,13 +11018,15 @@ mod transit_label_tests {
     use std::collections::VecDeque;
     use std::net::Ipv4Addr;
 
-    use bgp_packet::{BgpAttr, BgpNexthop, Ipv4Nlri, Label, RouteDistinguisher};
+    use bgp_packet::{
+        BgpAttr, BgpNexthop, Ipv4Nlri, Ipv6Nlri, Label, RouteDistinguisher, Vpnv6Nexthop,
+    };
     use tokio::sync::mpsc;
 
     use super::*;
     use crate::bgp::route::BgpRibType;
     use crate::bgp::shard::ShardMsg;
-    use crate::bgp::shard::msg::{LuNlri, ShardUpdateLu, ShardUpdateV4};
+    use crate::bgp::shard::msg::{LuNlri, ShardUpdateLu, ShardUpdateV4, ShardUpdateV6};
     use crate::bgp::vrf::VrfLabelAllocator;
 
     const VPNV4: AfiSafi = AfiSafi {
@@ -11097,6 +11138,633 @@ mod transit_label_tests {
             .and_then(|t| t.0.get(&prefix))
             .and_then(|cands| cands.first())
             .map(|r| r.local_label)
+    }
+
+    // ---- VPNv6 twins (review finding #8) ------------------------------------
+
+    const VPNV6: AfiSafi = AfiSafi {
+        afi: Afi::Ip6,
+        safi: Safi::MplsVpn,
+    };
+
+    fn setup_vpnv6_peer(bgp: &mut Bgp, addr: &str, remote_as: &str) {
+        config_global_asn(bgp, arg_words(&["64512"]), ConfigOp::Set).unwrap();
+        config_peer(bgp, arg_words(&[addr]), ConfigOp::Set).unwrap();
+        config_remote_as(bgp, arg_words(&[addr, remote_as]), ConfigOp::Set).unwrap();
+        config_afi_safi(bgp, arg_words(&[addr, "vpnv6", "true"]), ConfigOp::Set).unwrap();
+    }
+
+    /// A received (iBGP) VPNv6 route for `prefix` carrying the originating
+    /// PE's service label 24 and its IPv6 next-hop.
+    fn vpnv6_update(rd: RouteDistinguisher, prefix: &str) -> ShardMsg {
+        vpnv6_update_from(1, rd, prefix)
+    }
+
+    fn vpnv6_update_from(ident: usize, rd: RouteDistinguisher, prefix: &str) -> ShardMsg {
+        let nhop = Vpnv6Nexthop {
+            rd,
+            nhop: "2001:db8::2".parse().unwrap(),
+        };
+        let attr = BgpAttr {
+            nexthop: Some(BgpNexthop::Vpnv6(nhop.clone())),
+            ..Default::default()
+        };
+        ShardMsg::UpdateV6(ShardUpdateV6 {
+            ident,
+            rd: Some(rd),
+            nlri: Ipv6Nlri {
+                id: 0,
+                prefix: prefix.parse().unwrap(),
+            },
+            peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+            typ: BgpRibType::IBGP,
+            from_client: false,
+            attr: attr.clone(),
+            label: Some(Label::new(24, 0, true)),
+            nexthop: Some(crate::bgp::route::VpnNexthop::V6(nhop)),
+            stale: false,
+            nexthop_reachable: true,
+            vrf_transit_only: false,
+            // The v6 shard handler takes the inbound decision ready-made
+            // (no `compute_policy` switch as on the v4 side).
+            decision: Some(crate::bgp::route::PolicyDecision {
+                attr,
+                weight: 0,
+                tag: 0,
+            }),
+        })
+    }
+
+    fn local_label_of_v6(bgp: &Bgp, rd: RouteDistinguisher, prefix: &str) -> Option<Option<u32>> {
+        let prefix: ipnet::Ipv6Net = prefix.parse().unwrap();
+        bgp.shard
+            .v6vpn
+            .get(&rd)
+            .and_then(|t| t.0.get(&prefix))
+            .and_then(|cands| cands.first())
+            .map(|r| r.local_label)
+    }
+
+    /// Review finding #8: the VPNv6 twin of
+    /// `reconcile_mints_and_releases_transit_labels_on_flip`. A VPNv6
+    /// next-hop-self (Inter-AS Option B) transit must mint a per-(RD,
+    /// prefix) local label for the rows it already holds, reconcile a
+    /// swap ILM for each, mint at receive time while transit is on, and
+    /// release everything when the knob goes — exactly what VPNv4 does.
+    /// Pre-fix VPNv6 had no transit flag, no mint and no ILM: the ASBR
+    /// re-advertised the received label behind its own next-hop.
+    #[tokio::test]
+    async fn reconcile_mints_and_releases_vpnv6_transit_labels_on_flip() {
+        let (mut bgp, mut rx) = fresh_bgp_observed();
+        let addr = "10.0.0.2";
+        setup_vpnv6_peer(&mut bgp, addr, "64512");
+        bgp.vrf_label_alloc = Some(VrfLabelAllocator::bounded(1000, 5000));
+        bgp.reconcile_transit_labels(false);
+        assert!(
+            !bgp.transit_needed(VPNV6),
+            "a plain reflector is no transit"
+        );
+        let _ = drain_ilm(&mut rx);
+
+        // Reflected route: no transit label, no ILM traffic.
+        let rd = RouteDistinguisher::default();
+        bgp.shard.handle(
+            vpnv6_update(rd, "2001:db8:1::/64"),
+            bgp.vrf_label_alloc.as_mut(),
+        );
+        assert_eq!(local_label_of_v6(&bgp, rd, "2001:db8:1::/64"), Some(None));
+        assert!(
+            drain_ilm(&mut rx).is_empty(),
+            "reflector must not touch the LFIB"
+        );
+
+        // The operator turns the reflector into an Option B transit for
+        // VPNv6: the row already in the table is labelled and its ILM
+        // reconciled (no transport resolves in this harness, so the
+        // reconcile withdraws the ILM at the minted label — the point is
+        // that it ran against that label).
+        config_next_hop_self(&mut bgp, arg_words(&[addr, "vpnv6", "true"]), ConfigOp::Set).unwrap();
+        assert!(bgp.transit_needed(VPNV6));
+        bgp.reconcile_transit_labels(false);
+        assert_eq!(
+            local_label_of_v6(&bgp, rd, "2001:db8:1::/64"),
+            Some(Some(1000)),
+            "the VPNv6 row held before the flip is labelled"
+        );
+        assert_eq!(drain_ilm(&mut rx), vec![(false, 1000)]);
+
+        // A route arriving while transit is on mints at receive time.
+        bgp.shard.handle(
+            vpnv6_update(rd, "2001:db8:2::/64"),
+            bgp.vrf_label_alloc.as_mut(),
+        );
+        assert_eq!(
+            local_label_of_v6(&bgp, rd, "2001:db8:2::/64"),
+            Some(Some(1001)),
+            "a VPNv6 row received under transit is labelled at receive"
+        );
+
+        // Back to a plain reflector: both labels released, ILMs torn
+        // down, rows cleared.
+        config_next_hop_self(&mut bgp, arg_words(&[addr, "vpnv6"]), ConfigOp::Delete).unwrap();
+        bgp.reconcile_transit_labels(false);
+        assert!(!bgp.transit_needed(VPNV6));
+        assert_eq!(local_label_of_v6(&bgp, rd, "2001:db8:1::/64"), Some(None));
+        assert_eq!(local_label_of_v6(&bgp, rd, "2001:db8:2::/64"), Some(None));
+        assert_eq!(drain_ilm(&mut rx), vec![(false, 1000), (false, 1001)]);
+
+        // Steady state: a re-run with nothing flipped is a no-op.
+        bgp.reconcile_transit_labels(false);
+        assert!(drain_ilm(&mut rx).is_empty());
+    }
+
+    /// Drain a peer's writer channel: every `(next-hop, label)` of every
+    /// VPNv6 MP_REACH NLRI sent (`addpath`: the NLRIs carry path-ids).
+    fn sent_vpnv6(
+        rx: &mut mpsc::UnboundedReceiver<bytes::BytesMut>,
+        addpath: bool,
+    ) -> Vec<(std::net::Ipv6Addr, u32)> {
+        let mut opt = ParseOption::default();
+        opt.add_path.entry(VPNV6).or_default().recv = addpath;
+        let mut out = Vec::new();
+        while let Ok(bytes) = rx.try_recv() {
+            let (_, packet) = BgpPacket::parse_packet(&bytes, false, Some(opt.clone()))
+                .expect("a well-formed UPDATE");
+            let BgpPacket::Update(update) = packet else {
+                continue;
+            };
+            if let Some(MpReachAttr::Vpnv6(reach)) = update.mp_update {
+                for nlri in &reach.updates {
+                    out.push((reach.nhop.nhop, nlri.label.label));
+                }
+            }
+        }
+        out
+    }
+
+    /// Review follow-up 2: the transit reconcile must refresh AddPath
+    /// members too. The plain fan-out it used visits plain members only,
+    /// so removing `next-hop-self` freed the labels and deleted the ILMs
+    /// while AddPath members kept advertisements carrying them.
+    #[tokio::test]
+    async fn reconcile_refreshes_addpath_members_too() {
+        use crate::bgp::peer::State;
+        let (mut bgp, _rx) = fresh_bgp_observed();
+        let addr = "10.0.0.2";
+        setup_vpnv6_peer(&mut bgp, addr, "64512");
+        let ident = bgp.peers.get(&addr.parse().unwrap()).unwrap().ident;
+        let (ptx, mut prx) = mpsc::unbounded_channel();
+        {
+            let peer = bgp.peers.get_mut_by_idx(ident).unwrap();
+            peer.state = State::Established;
+            peer.reflector_client = true;
+            peer.param.local_addr = Some("[2001:db8::1]:179".parse().unwrap());
+            let key = CapMultiProtocol::new(&Afi::Ip6, &Safi::MplsVpn);
+            let entry = peer.cap_map.entries.get_mut(&key).expect("pre-seeded");
+            entry.send = true;
+            entry.recv = true;
+            peer.opt.add_path.insert(
+                VPNV6,
+                Direct {
+                    send: true,
+                    recv: false,
+                },
+            );
+            peer.packet_tx = Some(ptx);
+        }
+        bgp.peers.membership_enroll(ident);
+        assert_eq!(
+            bgp.peers
+                .established_addpath_idents(Afi::Ip6, Safi::MplsVpn),
+            vec![ident]
+        );
+        bgp.vrf_label_alloc = Some(VrfLabelAllocator::bounded(1000, 5000));
+
+        // A row from another PE (slot 9), held while the reflector is plain.
+        let rd = RouteDistinguisher::default();
+        bgp.shard.handle(
+            vpnv6_update_from(9, rd, "2001:db8:1::/64"),
+            bgp.vrf_label_alloc.as_mut(),
+        );
+
+        // Transit on: the AddPath member is refreshed with our label behind
+        // our next-hop ...
+        config_next_hop_self(&mut bgp, arg_words(&[addr, "vpnv6", "true"]), ConfigOp::Set).unwrap();
+        bgp.reconcile_transit_labels(false);
+        // VPNv6 sends are batched behind the advertisement-interval timer;
+        // flush synchronously to read them.
+        bgp.peers.get_mut_by_idx(ident).unwrap().flush_vpnv6();
+        assert_eq!(
+            sent_vpnv6(&mut prx, true),
+            vec![("2001:db8::1".parse().unwrap(), 1000)],
+            "the AddPath member is re-advertised our transit label"
+        );
+
+        // ... and transit off: refreshed back to PE1's label and next-hop,
+        // so it never keeps an advertisement whose label we just freed.
+        config_next_hop_self(&mut bgp, arg_words(&[addr, "vpnv6"]), ConfigOp::Delete).unwrap();
+        bgp.reconcile_transit_labels(false);
+        bgp.peers.get_mut_by_idx(ident).unwrap().flush_vpnv6();
+        assert_eq!(
+            sent_vpnv6(&mut prx, true),
+            vec![("2001:db8::2".parse().unwrap(), 24)],
+            "the AddPath member is re-advertised the received label"
+        );
+    }
+
+    /// Add a second iBGP VPNv6 neighbor (the global ASN is already set).
+    fn add_vpnv6_peer(bgp: &mut Bgp, addr: &str) {
+        config_peer(bgp, arg_words(&[addr]), ConfigOp::Set).unwrap();
+        config_remote_as(bgp, arg_words(&[addr, "64512"]), ConfigOp::Set).unwrap();
+        config_afi_safi(bgp, arg_words(&[addr, "vpnv6", "true"]), ConfigOp::Set).unwrap();
+    }
+
+    /// Make a configured VPNv6 neighbor Established (a reflector client
+    /// over an IPv6 session, VPNv6 negotiated, enrolled) with a writer
+    /// channel to read what it is sent.
+    fn establish_vpnv6_peer(
+        bgp: &mut Bgp,
+        addr: &str,
+        addpath: bool,
+    ) -> (usize, mpsc::UnboundedReceiver<bytes::BytesMut>) {
+        use crate::bgp::peer::State;
+        let ident = bgp.peers.get(&addr.parse().unwrap()).unwrap().ident;
+        let (ptx, prx) = mpsc::unbounded_channel();
+        {
+            let peer = bgp.peers.get_mut_by_idx(ident).unwrap();
+            peer.state = State::Established;
+            peer.reflector_client = true;
+            peer.param.local_addr = Some("[2001:db8::1]:179".parse().unwrap());
+            let key = CapMultiProtocol::new(&Afi::Ip6, &Safi::MplsVpn);
+            let entry = peer.cap_map.entries.get_mut(&key).expect("pre-seeded");
+            entry.send = true;
+            entry.recv = true;
+            if addpath {
+                peer.opt.add_path.insert(
+                    VPNV6,
+                    Direct {
+                        send: true,
+                        recv: false,
+                    },
+                );
+            }
+            peer.packet_tx = Some(ptx);
+        }
+        bgp.peers.membership_enroll(ident);
+        (ident, prx)
+    }
+
+    /// Review follow-up 4: a neighbor-group `vpnv6 next-hop-self` change
+    /// reaches its members through the inheritance sweep, which — like the
+    /// direct handler — must queue the members whose effective value
+    /// changed for the commit-end re-sync, since no transit flag flips
+    /// while another peer keeps transit enabled.
+    #[tokio::test]
+    async fn group_next_hop_self_change_refreshes_the_members_vpnv6_rows() {
+        use crate::bgp::neighbor_group::{
+            config_neighbor_group_afi_safi_next_hop_self, config_neighbor_group_remote_as,
+        };
+        let (mut bgp, _rx) = fresh_bgp_observed();
+        let a = "10.0.0.2";
+        let b = "10.0.0.3";
+        setup_vpnv6_peer(&mut bgp, a, "64512");
+        // B is a member of group G (remote-as from the group), VPNv6 enabled.
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["G", "64512"]), ConfigOp::Set)
+            .unwrap();
+        config_peer(&mut bgp, arg_words(&[b]), ConfigOp::Set).unwrap();
+        config_peer_neighbor_group(&mut bgp, arg_words(&[b, "G"]), ConfigOp::Set).unwrap();
+        config_afi_safi(&mut bgp, arg_words(&[b, "vpnv6", "true"]), ConfigOp::Set).unwrap();
+        let (_a_ident, mut a_rx) = establish_vpnv6_peer(&mut bgp, a, false);
+        let (b_ident, mut b_rx) = establish_vpnv6_peer(&mut bgp, b, false);
+
+        // A is a transit from the start; the row is labelled at receive.
+        config_next_hop_self(&mut bgp, arg_words(&[a, "vpnv6", "true"]), ConfigOp::Set).unwrap();
+        bgp.vrf_label_alloc = Some(VrfLabelAllocator::bounded(1000, 5000));
+        bgp.reconcile_transit_labels(false);
+        let rd = RouteDistinguisher::default();
+        bgp.shard.handle(
+            vpnv6_update_from(9, rd, "2001:db8:1::/64"),
+            bgp.vrf_label_alloc.as_mut(),
+        );
+        for ident in bgp.peers.idents() {
+            bgp.peers.get_mut_by_idx(ident).unwrap().flush_vpnv6();
+        }
+        let _ = sent_vpnv6(&mut a_rx, false);
+        let _ = sent_vpnv6(&mut b_rx, false);
+
+        // The group turns next-hop-self on for vpnv6: B's effective value
+        // changes, no transit flag flips (A keeps it on) — B must be
+        // refreshed at commit end.
+        config_neighbor_group_afi_safi_next_hop_self(
+            &mut bgp,
+            arg_words(&["G", "vpnv6", "true"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        assert!(
+            bgp.peers
+                .get_by_idx(b_ident)
+                .unwrap()
+                .next_hop_self(Afi::Ip6, Safi::MplsVpn),
+            "the group knob reached B"
+        );
+        bgp.reconcile_transit_labels(false);
+        finish_commit_regroup(&mut bgp);
+        for ident in bgp.peers.idents() {
+            bgp.peers.get_mut_by_idx(ident).unwrap().flush_vpnv6();
+        }
+        assert_eq!(
+            sent_vpnv6(&mut b_rx, false),
+            vec![("2001:db8::1".parse().unwrap(), 1000)],
+            "B is refreshed with our label behind our next-hop"
+        );
+
+        // And back off at the group.
+        config_neighbor_group_afi_safi_next_hop_self(
+            &mut bgp,
+            arg_words(&["G", "vpnv6"]),
+            ConfigOp::Delete,
+        )
+        .unwrap();
+        bgp.reconcile_transit_labels(false);
+        finish_commit_regroup(&mut bgp);
+        for ident in bgp.peers.idents() {
+            bgp.peers.get_mut_by_idx(ident).unwrap().flush_vpnv6();
+        }
+        assert_eq!(
+            sent_vpnv6(&mut b_rx, false),
+            vec![("2001:db8::2".parse().unwrap(), 24)],
+            "B is refreshed with the received label behind the received next-hop"
+        );
+    }
+
+    /// Review follow-up 7: joining (or leaving) a neighbor group whose
+    /// `vpnv6 next-hop-self` opinion differs from the peer's current
+    /// effective value changes that value through the inheritance in
+    /// `config_peer_neighbor_group`, which — like the group and direct
+    /// handlers — must queue the peer for the commit-end re-sync: with
+    /// another peer keeping transit enabled no transit flag flips and the
+    /// reconcile alone refreshes nothing.
+    #[tokio::test]
+    async fn joining_or_leaving_a_neighbor_group_refreshes_the_peers_vpnv6_rows() {
+        use crate::bgp::neighbor_group::{
+            config_neighbor_group_afi_safi_next_hop_self, config_neighbor_group_remote_as,
+        };
+        let (mut bgp, _rx) = fresh_bgp_observed();
+        let a = "10.0.0.2";
+        let b = "10.0.0.3";
+        setup_vpnv6_peer(&mut bgp, a, "64512");
+        add_vpnv6_peer(&mut bgp, b);
+        // B's reflector-client role is CONFIGURED (not just stamped on the
+        // peer): joining a group re-resolves every inherited knob, and an
+        // unconfigured role would resolve to `false` and bounce the session.
+        config_route_reflector(&mut bgp, arg_words(&[b, "true"]), ConfigOp::Set).unwrap();
+        // Group G says next-hop-self for vpnv6; B is not a member yet.
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["G", "64512"]), ConfigOp::Set)
+            .unwrap();
+        config_neighbor_group_afi_safi_next_hop_self(
+            &mut bgp,
+            arg_words(&["G", "vpnv6", "true"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        let (_a_ident, mut a_rx) = establish_vpnv6_peer(&mut bgp, a, false);
+        let (b_ident, mut b_rx) = establish_vpnv6_peer(&mut bgp, b, false);
+
+        // A is a transit from the start; the row is labelled at receive.
+        config_next_hop_self(&mut bgp, arg_words(&[a, "vpnv6", "true"]), ConfigOp::Set).unwrap();
+        bgp.vrf_label_alloc = Some(VrfLabelAllocator::bounded(1000, 5000));
+        bgp.reconcile_transit_labels(false);
+        let rd = RouteDistinguisher::default();
+        bgp.shard.handle(
+            vpnv6_update_from(9, rd, "2001:db8:1::/64"),
+            bgp.vrf_label_alloc.as_mut(),
+        );
+        for ident in bgp.peers.idents() {
+            bgp.peers.get_mut_by_idx(ident).unwrap().flush_vpnv6();
+        }
+        let _ = sent_vpnv6(&mut a_rx, false);
+        let _ = sent_vpnv6(&mut b_rx, false);
+
+        // B joins G: its effective vpnv6 next-hop-self flips on, no transit
+        // flag flips (A keeps it on) — B must be refreshed at commit end.
+        config_peer_neighbor_group(&mut bgp, arg_words(&[b, "G"]), ConfigOp::Set).unwrap();
+        assert!(
+            bgp.peers
+                .get_by_idx(b_ident)
+                .unwrap()
+                .next_hop_self(Afi::Ip6, Safi::MplsVpn),
+            "joining the group flipped B's effective value"
+        );
+        assert!(
+            bgp.peers
+                .get_by_idx(b_ident)
+                .unwrap()
+                .state
+                .is_established(),
+            "B keeps its explicit remote-as and stays up"
+        );
+        bgp.reconcile_transit_labels(false);
+        finish_commit_regroup(&mut bgp);
+        for ident in bgp.peers.idents() {
+            bgp.peers.get_mut_by_idx(ident).unwrap().flush_vpnv6();
+        }
+        assert_eq!(
+            sent_vpnv6(&mut b_rx, false),
+            vec![("2001:db8::1".parse().unwrap(), 1000)],
+            "B is refreshed with our label behind our next-hop"
+        );
+
+        // B leaves G: back to the received pair.
+        config_peer_neighbor_group(&mut bgp, arg_words(&[b]), ConfigOp::Delete).unwrap();
+        assert!(
+            !bgp.peers
+                .get_by_idx(b_ident)
+                .unwrap()
+                .next_hop_self(Afi::Ip6, Safi::MplsVpn)
+        );
+        bgp.reconcile_transit_labels(false);
+        finish_commit_regroup(&mut bgp);
+        for ident in bgp.peers.idents() {
+            bgp.peers.get_mut_by_idx(ident).unwrap().flush_vpnv6();
+        }
+        assert_eq!(
+            sent_vpnv6(&mut b_rx, false),
+            vec![("2001:db8::2".parse().unwrap(), 24)],
+            "B is refreshed with the received label behind the received next-hop"
+        );
+    }
+
+    /// Review follow-up 3: a `vpnv6 next-hop-self` change on one peer
+    /// while ANOTHER peer keeps transit enabled flips no transit flag, so
+    /// the reconcile re-advertises nothing — the changed peer must still be
+    /// refreshed (our label behind our next-hop, or back to the received
+    /// pair) at commit end. VPNv6 has no update groups and had no soft-out,
+    /// so nothing refreshed it.
+    #[tokio::test]
+    async fn next_hop_self_change_on_a_second_peer_refreshes_its_vpnv6_rows() {
+        let (mut bgp, _rx) = fresh_bgp_observed();
+        let a = "10.0.0.2";
+        let b = "10.0.0.3";
+        setup_vpnv6_peer(&mut bgp, a, "64512");
+        add_vpnv6_peer(&mut bgp, b);
+        let (_a_ident, mut a_rx) = establish_vpnv6_peer(&mut bgp, a, false);
+        let (b_ident, mut b_rx) = establish_vpnv6_peer(&mut bgp, b, false);
+
+        // B is a transit from the start; the row is labelled at receive.
+        config_next_hop_self(&mut bgp, arg_words(&[b, "vpnv6", "true"]), ConfigOp::Set).unwrap();
+        bgp.vrf_label_alloc = Some(VrfLabelAllocator::bounded(1000, 5000));
+        bgp.reconcile_transit_labels(false);
+        assert!(bgp.shard.vpn_v6_transit);
+        let rd = RouteDistinguisher::default();
+        bgp.shard.handle(
+            vpnv6_update_from(9, rd, "2001:db8:1::/64"),
+            bgp.vrf_label_alloc.as_mut(),
+        );
+        assert_eq!(
+            local_label_of_v6(&bgp, rd, "2001:db8:1::/64"),
+            Some(Some(1000))
+        );
+        bgp.peers.get_mut_by_idx(b_ident).unwrap().flush_vpnv6();
+        let _ = sent_vpnv6(&mut a_rx, false);
+        let _ = sent_vpnv6(&mut b_rx, false);
+
+        // A turns next-hop-self on: no flag flips (B keeps transit on), so
+        // the reconcile is a no-op — the commit-end re-sync must refresh A.
+        config_next_hop_self(&mut bgp, arg_words(&[a, "vpnv6", "true"]), ConfigOp::Set).unwrap();
+        bgp.reconcile_transit_labels(false);
+        finish_commit_regroup(&mut bgp);
+        for ident in bgp.peers.idents() {
+            bgp.peers.get_mut_by_idx(ident).unwrap().flush_vpnv6();
+        }
+        assert_eq!(
+            sent_vpnv6(&mut a_rx, false),
+            vec![("2001:db8::1".parse().unwrap(), 1000)],
+            "A is refreshed with our label behind our next-hop"
+        );
+
+        // A turns it off again: refreshed back to the received pair.
+        config_next_hop_self(&mut bgp, arg_words(&[a, "vpnv6"]), ConfigOp::Delete).unwrap();
+        bgp.reconcile_transit_labels(false);
+        finish_commit_regroup(&mut bgp);
+        for ident in bgp.peers.idents() {
+            bgp.peers.get_mut_by_idx(ident).unwrap().flush_vpnv6();
+        }
+        assert_eq!(
+            sent_vpnv6(&mut a_rx, false),
+            vec![("2001:db8::2".parse().unwrap(), 24)],
+            "A is refreshed with the received label behind the received next-hop"
+        );
+    }
+
+    /// Review follow-up 3: when the winner's next-hop becomes unreachable
+    /// the selection is empty, and the swap ILM keyed on our transit label
+    /// must be torn down — traffic arriving with that label has nowhere to
+    /// go. `reconcile_swap_ilm(None)` used to leave it installed.
+    #[tokio::test]
+    async fn nht_loss_removes_the_vpnv6_swap_ilm() {
+        let (mut bgp, mut rx) = fresh_bgp_observed();
+        let addr = "10.0.0.2";
+        setup_vpnv6_peer(&mut bgp, addr, "64512");
+        config_next_hop_self(&mut bgp, arg_words(&[addr, "vpnv6", "true"]), ConfigOp::Set).unwrap();
+        bgp.vrf_label_alloc = Some(VrfLabelAllocator::bounded(1000, 5000));
+        bgp.reconcile_transit_labels(false);
+        let rd = RouteDistinguisher::default();
+        bgp.shard.handle(
+            vpnv6_update(rd, "2001:db8:1::/64"),
+            bgp.vrf_label_alloc.as_mut(),
+        );
+        assert_eq!(
+            local_label_of_v6(&bgp, rd, "2001:db8:1::/64"),
+            Some(Some(1000))
+        );
+        let _ = drain_ilm(&mut rx);
+
+        // The winner's next-hop goes away.
+        bgp.nht_reeval_dep(
+            0,
+            "2001:db8::2".parse().unwrap(),
+            false,
+            crate::bgp::nht::NhtDep::V6vpn(rd, "2001:db8:1::/64".parse().unwrap()),
+        );
+        assert_eq!(
+            drain_ilm(&mut rx),
+            vec![(false, 1000)],
+            "an empty selection tears the swap ILM down"
+        );
+    }
+
+    /// The VPNv6 twin of `late_label_block_labels_existing_transit_rows`:
+    /// rows received under transit before the dynamic block is bound are
+    /// labelled (and their ILMs reconciled) when the block arrives.
+    #[tokio::test]
+    async fn late_label_block_labels_existing_vpnv6_transit_rows() {
+        let (mut bgp, mut rx) = fresh_bgp_observed();
+        let addr = "10.0.0.2";
+        setup_vpnv6_peer(&mut bgp, addr, "64512");
+        config_next_hop_self(&mut bgp, arg_words(&[addr, "vpnv6", "true"]), ConfigOp::Set).unwrap();
+        bgp.reconcile_transit_labels(false);
+        assert!(bgp.shard.vpn_v6_transit);
+
+        // Transit on, but no block yet: the receive path cannot mint.
+        let rd = RouteDistinguisher::default();
+        bgp.shard.handle(
+            vpnv6_update(rd, "2001:db8:1::/64"),
+            bgp.vrf_label_alloc.as_mut(),
+        );
+        assert_eq!(local_label_of_v6(&bgp, rd, "2001:db8:1::/64"), Some(None));
+        let _ = drain_ilm(&mut rx);
+
+        bgp.vrf_label_alloc = Some(VrfLabelAllocator::bounded(2000, 5000));
+        bgp.reconcile_transit_labels(true);
+        assert_eq!(
+            local_label_of_v6(&bgp, rd, "2001:db8:1::/64"),
+            Some(Some(2000))
+        );
+        assert_eq!(drain_ilm(&mut rx), vec![(false, 2000)]);
+    }
+
+    /// The VPNv6 arm must be independent of the VPNv4 one: a VPNv4 transit
+    /// labels no VPNv6 row and vice versa.
+    #[tokio::test]
+    async fn vpnv6_transit_is_armed_per_family() {
+        let (mut bgp, mut rx) = fresh_bgp_observed();
+        let addr = "10.0.0.2";
+        setup_vpnv6_peer(&mut bgp, addr, "64512");
+        config_afi_safi(&mut bgp, arg_words(&[addr, "vpnv4", "true"]), ConfigOp::Set).unwrap();
+        bgp.vrf_label_alloc = Some(VrfLabelAllocator::bounded(1000, 5000));
+        let rd = RouteDistinguisher::default();
+        bgp.shard.handle(
+            vpnv4_update(rd, "10.1.0.0/30"),
+            bgp.vrf_label_alloc.as_mut(),
+        );
+        bgp.shard.handle(
+            vpnv6_update(rd, "2001:db8:1::/64"),
+            bgp.vrf_label_alloc.as_mut(),
+        );
+        let _ = drain_ilm(&mut rx);
+
+        // Only the VPNv6 knob: the VPNv6 row is labelled, the VPNv4 row is not.
+        config_next_hop_self(&mut bgp, arg_words(&[addr, "vpnv6", "true"]), ConfigOp::Set).unwrap();
+        bgp.reconcile_transit_labels(false);
+        assert!(!bgp.transit_needed(VPNV4));
+        assert!(bgp.transit_needed(VPNV6));
+        assert_eq!(local_label_of(&bgp, rd, "10.1.0.0/30"), Some(None));
+        assert_eq!(
+            local_label_of_v6(&bgp, rd, "2001:db8:1::/64"),
+            Some(Some(1000))
+        );
+        let _ = drain_ilm(&mut rx);
+
+        // Add the VPNv4 knob: the VPNv4 row is labelled from the same pool.
+        config_next_hop_self(&mut bgp, arg_words(&[addr, "vpnv4", "true"]), ConfigOp::Set).unwrap();
+        bgp.reconcile_transit_labels(false);
+        assert_eq!(local_label_of(&bgp, rd, "10.1.0.0/30"), Some(Some(1001)));
+        assert_eq!(
+            local_label_of_v6(&bgp, rd, "2001:db8:1::/64"),
+            Some(Some(1000)),
+            "the VPNv6 label is untouched by the VPNv4 flip"
+        );
     }
 
     /// The transit need follows exactly the per-peer rule the advertise
