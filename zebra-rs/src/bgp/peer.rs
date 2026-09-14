@@ -1511,8 +1511,25 @@ impl Peer {
         update
     }
 
+    /// Whether the FSM may dial this peer: it needs a resolved remote AS
+    /// and a specified remote address.
+    ///
+    /// Both halves can be unmet on an `interface-neighbor`, which is
+    /// materialized from config before the peer is reachable: one
+    /// created from `remote-as external` carries the placeholder ASN 0
+    /// until the OPEN backfills it, and one materialized before its
+    /// first Router Advertisement sits at `address == ::`.
+    ///
+    /// [`timer::update_timers`] re-checks neither, so **any caller that
+    /// arms the idle-hold timer outside [`Peer::start`] must consult
+    /// this first** — an ungated arm sends the peer into `fsm_start`,
+    /// which dials whatever `address` holds.
+    pub fn is_dialable(&self) -> bool {
+        self.remote_as != 0 && !self.address.is_unspecified()
+    }
+
     pub fn start(&mut self) {
-        if self.remote_as != 0 && !self.address.is_unspecified() && !self.active {
+        if self.is_dialable() && !self.active {
             timer::update_timers(self);
             self.active = true;
         }

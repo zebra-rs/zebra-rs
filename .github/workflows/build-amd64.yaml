@@ -16,7 +16,11 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
 
       - name: Build vty
+        # Drop the runner image's Google Chrome apt source before refreshing: its
+        # index answered "Hash Sum mismatch" for hours on 2026-09-09 and failed
+        # every apt refresh on main (see ci.yaml).
         run: |
+          grep -l dl.google.com /etc/apt/sources.list.d/* | xargs -r sudo rm -f
           sudo apt update -y
           sudo apt install -y protobuf-compiler bison xxd libpam0g-dev
           make -C vty

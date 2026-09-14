@@ -134,6 +134,92 @@ module zebra-bgp-interface-neighbor {
            session-establishment time (an unset value silently
            prevents materialization).";
       }
+      container timers {
+        ext:help "Per-neighbor BGP timers";
+        description
+          "Session timers for this unnumbered peer. The addressed
+           `neighbor <addr> timers` leaves cannot reach one: their
+           callbacks resolve the peer by remote address, and an
+           interface-neighbor peer is keyed by ifindex
+           (`PeerKey::Interface`), so it is not in that lookup.
+
+           Deliberately NOT `uses neighbor-group-timers` (the grouping
+           the addressed neighbor takes), for the same reason the
+           per-VRF neighbor hand-mirrors it: two of that grouping's
+           leaves (originate-interval, delay-open-time) are staged onto
+           `PeerConfig::timer` and never read by any timer-arming path,
+           so mirroring it here would expose knobs that silently do
+           nothing. Only the leaves `crate::bgp::timer::Config` actually
+           consumes are modelled.
+
+           Values are staged on the interface-neighbor config and
+           copied onto the peer when it materializes, so they apply to
+           a neighbor configured before its interface or its first
+           Router Advertisement exists. An edit made while the peer is
+           already materialized writes through to it, matching the
+           addressed neighbor's callbacks. When the change takes
+           effect is per-leaf: `hold-time` is negotiated, so it applies
+           to the next session establishment (`clear bgp`); the others
+           follow the runtime semantics described on each leaf.";
+        leaf advertisement-interval {
+          ext:help "MinRouteAdvertisementInterval (MRAI) in seconds";
+          type uint16 {
+            range "0..max";
+          }
+          units "seconds";
+          description
+            "Per-neighbor MRAI: how long the advertise debounce
+             coalesces burst route changes before flushing to this
+             peer. `0` disables the debounce (flush on the next
+             event-loop tick). When unset the peer follows the
+             instance-level `router bgp timer adv-interval`, which does
+             reach interface-keyed peers (30s eBGP / 5s iBGP by
+             default).";
+          reference
+            "RFC 4271: A Border Gateway Protocol 4 (BGP-4),
+             Section 9.2.1.1.";
+        }
+        leaf connect-retry-time {
+          ext:help "ConnectRetry timer (seconds)";
+          type uint16 {
+            range "1..max";
+          }
+          units "seconds";
+          description
+            "Time interval for the ConnectRetryTimer, pacing the
+             Connect/Active redial loop. Defaults to 30s when unset.";
+          reference
+            "RFC 4271: A Border Gateway Protocol 4 (BGP-4),
+             Section 8.2.2.";
+        }
+        leaf hold-time {
+          ext:help "Hold timer negotiated with the peer (seconds)";
+          type uint16 {
+            range "0 | 3..65535";
+          }
+          units "seconds";
+          description
+            "Hold Time proposed in this session's OPEN; the session
+             uses the smaller of this and the peer's, and the keepalive
+             interval is a third of the result. Must be 0 or at least
+             3. Defaults to 180s when unset.";
+          reference
+            "RFC 4271: A Border Gateway Protocol 4 (BGP-4),
+             Section 4.2.";
+        }
+        leaf idle-hold-time {
+          ext:help "IdleHold timer before reconnect (seconds)";
+          type uint16 {
+            range "0..max";
+          }
+          units "seconds";
+          description
+            "Time the FSM dwells in Idle before the automatic restart
+             re-arms the connect. Defaults to 5s when unset. A change
+             on a materialized, dialable peer re-arms the running
+             timer, so it takes effect without a session reset.";
+        }
+      }
     }
   }
 

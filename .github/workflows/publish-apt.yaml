@@ -45,7 +45,13 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Install apt tooling
-        run: sudo apt-get update && sudo apt-get install -y dpkg-dev apt-utils gnupg
+        # Drop the runner image's Google Chrome apt source before refreshing: its
+        # index answered "Hash Sum mismatch" for hours on 2026-09-09 and failed
+        # every apt refresh on main (see ci.yaml).
+        run: |
+          grep -l dl.google.com /etc/apt/sources.list.d/* | xargs -r sudo rm -f
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev apt-utils gnupg
 
       - name: Download this codename's freshly built .debs
         uses: actions/download-artifact@v8
