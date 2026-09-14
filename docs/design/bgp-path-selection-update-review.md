@@ -684,6 +684,18 @@ cap. The two reviews agree on every overlapping item.
   new row every removed row is withdrawn from them by its path-id
   (`route_withdraw_vpnv6_addpath`). Gate: the reviewer's probe, kept as
   `inbound_denial_withdraws_the_path_from_addpath_members_before_its_label_is_reused`.
+- Review follow-up 7 (P2, same branch): the third path that changes a
+  peer's effective `vpnv6 next-hop-self` — joining or leaving a
+  neighbor group (`config_peer_neighbor_group`, which re-applies the
+  inherited knobs) — queued no re-sync either, so with another peer
+  keeping transit enabled the changed peer kept its old next-hop/label
+  pair. It now compares the effective value across the inheritance and
+  queues an Established peer whose value flipped, as the direct and
+  group-level handlers do. Gate:
+  `joining_or_leaving_a_neighbor_group_refreshes_the_peers_vpnv6_rows`
+  (peer B keeps its explicit remote-as so it stays up across the
+  membership change; refreshed both on joining and on leaving), which
+  failed before the fix.
 
 ### 9. P1 CONFIRMED — LLGR / PIC stale rows for VPNv6 and EVPN never expire, and any family's EoR flushes the VPNv4 stale set
 
