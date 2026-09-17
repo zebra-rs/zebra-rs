@@ -176,6 +176,7 @@ implementation; the corresponding features track the referenced draft revision.
 | RFC 8365 | A Network Virtualization Overlay Solution Using EVPN (EVPN over VXLAN). |
 | RFC 9136 | IP Prefix Advertisement in EVPN (Type-5 routes). |
 | RFC 8584 | Framework for EVPN Designated Forwarder (DF) Election Extensibility. |
+| RFC 9785 | Preference-Based EVPN DF Election (Alg 2 / Alg 3, the Don't-Preempt capability) — `df-election algorithm preference`. |
 | RFC 8214 | Virtual Private Wire Service (VPWS) Support in EVPN (E-Line services). |
 | RFC 9251 | IGMP and MLD Proxy for EVPN (selective multicast). |
 | RFC 9574 | Optimized Ingress Replication Solution for EVPN. |

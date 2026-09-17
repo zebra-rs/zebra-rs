@@ -2291,11 +2291,13 @@ fn config_ethernet_segment_redundancy_mode(
 }
 
 /// `router bgp afi-safi evpn ethernet-segment <name> df-election preference
-/// <1..65535>` — switch the segment to preference-based DF election (Alg 2,
-/// draft-ietf-bess-evpn-pref-df) and set this PE's preference. Clearing it
-/// reverts to service carving. Either way the Type-4 is re-originated so
-/// peers see the new algorithm, and the VPWS services on the segment
-/// re-elect against it.
+/// <0..65535>` — this PE's bid under a preference-based DF election
+/// (RFC 9785). With no `algorithm` configured, setting it also selects Alg 2;
+/// clearing it then reverts to service carving. Under an explicitly
+/// configured preference algorithm, clearing it falls back to the RFC's
+/// default bid of 32767 rather than leaving the algorithm. Either way the
+/// Type-4 is re-originated so peers see the new bid, and the VPWS services
+/// on the segment re-elect against it.
 fn config_es_df_preference(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let afi_safi: AfiSafi = args.afi_safi()?;
     if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
@@ -2314,19 +2316,44 @@ fn config_es_df_preference(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
 }
 
 /// `router bgp afi-safi evpn ethernet-segment <name> df-election algorithm
-/// <default|hrw>` — elect with RFC 8584 §3 Highest Random Weight (Alg 1)
-/// instead of service carving. A configured preference (Alg 2) still takes
-/// precedence. The Type-4 is re-originated so peers see the algorithm, and
-/// the segment re-elects.
+/// <default|hrw|preference|lowest-preference>` — the DF election algorithm
+/// this segment advertises and runs: RFC 7432 §8.5 service carving (Alg 0),
+/// RFC 8584 §3 Highest Random Weight (Alg 1), or RFC 9785 Highest- /
+/// Lowest-Preference (Alg 2 / Alg 3). The explicit leaf decides; only when
+/// it is absent does a bare `preference` value select Alg 2 on its own. The
+/// Type-4 is re-originated so peers see the algorithm, and the segment
+/// re-elects.
 fn config_es_df_algorithm(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let afi_safi: AfiSafi = args.afi_safi()?;
     if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
         return None;
     }
     let name = args.string()?;
-    let hrw = op.is_set() && args.string()? == "hrw";
+    let alg = if op.is_set() {
+        super::ethernet_segment::DfAlgorithm::from_keyword(&args.string()?)
+    } else {
+        None
+    };
     let es = bgp.ethernet_segments.entry(name).or_default();
-    es.hrw = hrw;
+    es.df_algorithm = alg;
+    es_df_election_changed(bgp);
+    Some(())
+}
+
+/// `router bgp afi-safi evpn ethernet-segment <name> df-election
+/// dont-preempt` — advertise the RFC 9785 §3 "Don't Preempt" (DP)
+/// capability. On a preference tie this PE ranks ahead of one without the
+/// bit, so a peer that comes back with the same preference leaves the role
+/// where it is. Only advertised under a preference-based algorithm, which is
+/// where the RFC defines it.
+fn config_es_dont_preempt(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
+        return None;
+    }
+    let name = args.string()?;
+    let es = bgp.ethernet_segments.entry(name).or_default();
+    es.dont_preempt = op.is_set();
     es_df_election_changed(bgp);
     Some(())
 }
@@ -5693,6 +5720,10 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/afi-safi/ethernet-segment/df-election/ac-df",
             config_es_ac_df,
+        );
+        self.callback_add(
+            "/router/bgp/afi-safi/ethernet-segment/df-election/dont-preempt",
+            config_es_dont_preempt,
         );
 
         // EVPN VPWS E-Line services (RFC 8214), under

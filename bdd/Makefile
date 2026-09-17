@@ -639,6 +639,10 @@ bgp_evpn_capability:
 	mkdir -p allure-results
 	$(CUCUMBER) -- --concurrency=1 --tags "@bgp_evpn_capability"
 
+bgp_evpn_es:
+	mkdir -p allure-results
+	$(CUCUMBER) -- --concurrency=1 --tags "@bgp_evpn_es"
+
 bgp_vrf_evpn_type5:
 	mkdir -p allure-results
 	$(CUCUMBER) -- --concurrency=1 --tags "@bgp_vrf_evpn_type5"

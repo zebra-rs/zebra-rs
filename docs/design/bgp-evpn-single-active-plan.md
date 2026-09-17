@@ -518,9 +518,9 @@ router bgp <asn>
    redundancy-mode single-active
    interface bond0
    df-election
-    algorithm preference          # default | hrw | preference | lowest-preference
-    preference 200                # 0..65535; default 32767 under (lowest-)preference
-    dont-preempt                  # empty; RFC 9785 D bit + non-revertive operation
+    algorithm preference          # ✅ default | hrw | preference | lowest-preference
+    preference 200                # ✅ 0..65535; default 32767 under (lowest-)preference
+    dont-preempt                  # ✅ empty; RFC 9785 D bit (non-revertive = phase 1b)
     ac-df                         # existing
     startup-delay 3               # existing; mutually exclusive with fast-recovery
     fast-recovery                 # presence container, RFC 9722
@@ -566,9 +566,32 @@ Notes:
 Small slices, each independently mergeable and separately provable —
 smallest first, per the standing preference.
 
+**Status: phase 1 is implemented on `evpn-single-active`.** The DF Election EC
+grew `CAP_DONT_PREEMPT` (`0x8000`) and `ALG_PREF_LOWEST` (Alg 3);
+`DfCandidate` is a struct carrying the whole advertised capability bitmap;
+`pref_wins()` ranks preference → DP → address, with the preference
+comparison reversed under Alg 3; `df_election_ec()` bids RFC 9785's
+mandatory 32767 default and advertises DP only under a preference algorithm;
+YANG gained the `preference` / `lowest-preference` arms, the `dont-preempt`
+leaf and a `0..65535` preference range, with the explicit `algorithm` leaf
+deciding and a bare `preference` still meaning Alg 2. `show bgp evpn
+ethernet-segment` renders each PE's bid and DP bit, names a segment that
+fell back for disagreement, and carries the same in JSON. Proof: 10
+`df_election*` codec tests, the `preference_ranks_pref_then_dp_then_address`
+and `preference_defaults_to_the_rfc_9785_midpoint` unit tests, and three new
+`bgp_evpn_es.feature` scenarios (preference beats address order; equal bids
+fall to the lowest address; the DP bit alone moves the DF) — the last two
+are a control/treatment pair, and removing the `dont-preempt` leaf from the
+treatment config was verified to turn exactly that scenario red. Adjacent
+features `bgp_evpn_vpws_multihoming`, `bgp_evpn_vpws_startup_delay`,
+`bgp_evpn_vpws_vxlan_multihoming`, `bgp_evpn_df_election`,
+`bgp_evpn_gateway_df` and `bgp_evpn_srv6_macip_multihoming` all still pass.
+Not in phase 1, by design: the non-revertive operational preference
+(item 5 of §3.4), which needs the incumbent state §4.3 introduces.
+
 | Phase | Deliverable | Gate |
 | ----- | ----------- | ---- |
-| **1** | **RFC 9785 completion**: DP bit codec + tie-break, `DfCandidate` → struct with caps, Alg 3, default pref 32767, YANG `algorithm` arms + `0..65535` | Unit: wire layout vs the RFC figure; tie-break table (pref > DP > address, v4 before v6); mixed-alg fallback. BDD: extend `bgp_evpn_df_election.feature` with a preference + DP scenario asserting the same DF on both PEs |
+| **1** ✅ | **RFC 9785 completion**: DP bit codec + tie-break, `DfCandidate` → struct with caps, Alg 3, default pref 32767, YANG `algorithm` arms + `0..65535` + `dont-preempt` | **Done** — see the status note below |
 | **2** | **SCT codec + T bit** (no behaviour change): `SctEc`, NTP conversions, parse/emit/Display, `T` advertised only when configured | Unit: round-trip, epoch conversion against known NTP vectors, era-rollover clamp |
 | **3** | **`EvpnEsRemote` + L2-Attr P/B on the E-LAN per-EVI A-D**: origination with the elected role, consumption into the remote table, `evpn_es_nhg_sync()` uses it, `es_sa_primary()` retained as fallback, conflict + provenance in `show` | Unit: selection/conflict/eligibility table. BDD: new `bgp_evpn_single_active.feature` — role flip via attribute-only update (no withdraw observed), backup promotion on per-ES A-D withdraw, two-RR duplicate-copy scenario |
 | **4** | **RFC 9722 behaviour**: staged vs applied verdicts, `EsCarveDue` timer, skew, `fast-recovery` config, exclusivity with `startup-delay`, fallbacks | Unit with an injected clock: SCT accept/reject bounds, skew ordering, T=0 fallback, superseding SCT. BDD: joining PE does not become DF before its SCT; incumbent steps down first |

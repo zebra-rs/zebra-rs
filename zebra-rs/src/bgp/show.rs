@@ -2565,6 +2565,13 @@ struct EthernetSegmentJson {
     /// ES routes are withheld and it is DF nowhere (RFC 7432 §8.2).
     port_down: bool,
     df_preference: Option<u16>,
+    /// The DF Election EC this PE actually advertises: the algorithm
+    /// keyword it was configured with (absent = implied by `df_preference`),
+    /// the preference it bids — the RFC 9785 default of 32767 when a
+    /// preference algorithm is selected with no value — and the DP bit.
+    df_algorithm_configured: Option<String>,
+    df_preference_bid: Option<u16>,
+    dont_preempt: bool,
     ac_df: bool,
     /// RFC 8584 §4 AC-Influenced DF election is in effect: every PE on
     /// the segment advertises the capability.
@@ -2600,20 +2607,21 @@ fn show_bgp_evpn_ethernet_segment(
                 let cands = bgp.es_df_candidates(&esi);
                 let (advertising, total) = bgp.es_ac_df_bids(&esi);
                 ac_df_in_effect = super::ethernet_segment::ac_df_in_effect(advertising, total);
-                for (ordinal, (vtep, _, _)) in cands.iter().enumerate() {
+                for (ordinal, cand) in cands.iter().enumerate() {
                     member_vteps.push(EsMemberVtepJson {
                         ordinal,
-                        vtep: vtep.to_string(),
-                        local: *vtep == local,
+                        vtep: cand.addr.to_string(),
+                        local: cand.addr == local,
                     });
                 }
-                let algs: Vec<u8> = cands.iter().map(|(_, a, _)| *a).collect();
+                let algs: Vec<u8> = cands.iter().map(|c| c.alg).collect();
                 let alg = super::ethernet_segment::negotiate_df_alg(&algs);
                 df_algorithm = Some(
                     match alg {
                         bgp_packet::DfElectionEc::ALG_DEFAULT => "service-carving",
                         bgp_packet::DfElectionEc::ALG_HRW => "hrw",
                         bgp_packet::DfElectionEc::ALG_PREF => "preference-based",
+                        bgp_packet::DfElectionEc::ALG_PREF_LOWEST => "preference-based (lowest)",
                         _ => "unsupported (carving fallback)",
                     }
                     .to_string(),
@@ -2629,6 +2637,12 @@ fn show_bgp_evpn_ethernet_segment(
                 interface: es.interface.clone(),
                 port_down: bgp.es_port_down(es),
                 df_preference: es.df_preference,
+                df_algorithm_configured: es.df_algorithm.map(|a| a.as_str().to_string()),
+                df_preference_bid: bgp_packet::DfElectionEc::is_preference_alg(
+                    es.df_election_ec().df_alg,
+                )
+                .then(|| es.df_election_ec().pref),
+                dont_preempt: es.df_election_ec().dont_preempt(),
                 ac_df: es.ac_df,
                 ac_df_in_effect,
                 es_import_rt: es.es_import_rt().map(|rt| format_evpn_ecom_value(&rt)),
@@ -2693,36 +2707,66 @@ fn show_bgp_evpn_ethernet_segment(
         // §8.5 service-carving ordinal.
         if let Some(esi) = es.esi {
             let cands = bgp.es_df_candidates(&esi);
-            let vteps: Vec<std::net::IpAddr> = cands.iter().map(|(ip, _, _)| *ip).collect();
-            writeln!(buf, "  Member VTEPs ({}):", vteps.len())?;
-            for (ordinal, (vtep, valg, vpref)) in cands.iter().enumerate() {
-                let tag = if *vtep == local { " (local)" } else { "" };
+            writeln!(buf, "  Member VTEPs ({}):", cands.len())?;
+            for (ordinal, cand) in cands.iter().enumerate() {
+                let tag = if cand.addr == local { " (local)" } else { "" };
                 // Each PE's own bid, so a disagreement is visible per-PE
-                // rather than only as the segment-wide carving fallback.
-                let bid = if *valg == bgp_packet::DfElectionEc::ALG_PREF {
-                    format!(" pref {vpref}")
-                } else {
-                    String::new()
-                };
+                // rather than only as the segment-wide carving fallback —
+                // including the RFC 9785 DP bit, which decides a tie.
+                let mut bid = String::new();
+                if bgp_packet::DfElectionEc::is_preference_alg(cand.alg) {
+                    bid.push_str(&format!(" pref {}", cand.pref));
+                }
+                if cand.dont_preempt() {
+                    bid.push_str(" dp");
+                }
+                let vtep = cand.addr;
                 writeln!(buf, "    [{ordinal}] {vtep}{bid}{tag}")?;
             }
             // RFC 8584 algorithm negotiation, then the elected DF.
-            let algs: Vec<u8> = cands.iter().map(|(_, a, _)| *a).collect();
+            let algs: Vec<u8> = cands.iter().map(|c| c.alg).collect();
             let alg = super::ethernet_segment::negotiate_df_alg(&algs);
+            // What this PE puts on its own Type-4 — the bid a preference
+            // algorithm defaults to 32767, and the capability bits.
+            let bid = es.df_election_ec();
             let alg_name = match alg {
                 bgp_packet::DfElectionEc::ALG_DEFAULT => "service-carving (default)".to_string(),
-                bgp_packet::DfElectionEc::ALG_PREF => {
-                    // Under Alg 2 the local preference is what this PE is
-                    // bidding with, so show it next to the algorithm.
-                    match es.df_preference {
-                        Some(pref) => format!("preference-based (local pref {pref})"),
-                        None => "preference-based".to_string(),
-                    }
+                bgp_packet::DfElectionEc::ALG_PREF | bgp_packet::DfElectionEc::ALG_PREF_LOWEST => {
+                    // Under a preference algorithm the local preference is
+                    // what this PE is bidding with, so show it next to the
+                    // algorithm, with the DP tie-break bit when set.
+                    let lowest = if alg == bgp_packet::DfElectionEc::ALG_PREF_LOWEST {
+                        ", lowest wins"
+                    } else {
+                        ""
+                    };
+                    let dp = if bid.dont_preempt() {
+                        ", dont-preempt"
+                    } else {
+                        ""
+                    };
+                    format!("preference-based (local pref {}{lowest}{dp})", bid.pref)
                 }
                 bgp_packet::DfElectionEc::ALG_HRW => "hrw (RFC 8584 §3)".to_string(),
                 other => format!("alg {other} (unsupported; carving fallback)"),
             };
             writeln!(buf, "  DF algorithm: {alg_name}")?;
+            // RFC 8584 §2.2 negotiation is unanimous-or-carving, so a PE
+            // advertising something the segment did not settle on is a
+            // degraded state the operator should see named, not infer from
+            // an unexpected DF.
+            if bid.df_alg != alg {
+                let want = es
+                    .df_algorithm
+                    .map(|a| a.as_str().to_string())
+                    .unwrap_or_else(|| format!("alg{}", bid.df_alg));
+                writeln!(
+                    buf,
+                    "  DF election: segment disagrees — this PE advertises {want} (alg{}), \
+                     negotiated alg{alg}",
+                    bid.df_alg
+                )?;
+            }
             // RFC 8584 §4 AC-DF: shown whenever anyone on the segment asks
             // for it, with whether the segment as a whole has it — it takes
             // every PE.
