@@ -2,6 +2,23 @@
 
 Reviewed commit `06c19727009c5134705c1347de64fe2592bafa69` on 2026-09-16. Scope includes the IS-IS performance-metric export, new accessors, BGP-LS display, and the accompanying Flex-Algo receive change. Implementation source was not changed.
 
+## Current review: `68851ee7` and `224a49cb`
+
+Reviewed the zero-mask fix in `68851ee7` and the new BDD topology in `224a49cb`. R4 is fixed. No new functional findings were identified in these changes.
+
+The exporter now distinguishes originally empty masks from masks emptied by removing RSVP-TE. Both zero-mask export paths have regression tests, and RSVP-TE-only export remains top-level only.
+
+The BDD feature correctly expects both routers to hold both directed links from their complete LSDBs. Neighbor-specific delay assertions exercise remote IS-IS encoding/decoding followed by local BGP-LS translation. The `+2 more` assertion checks only the additional TLV count; it does not decode TLV 1122 or verify its masks.
+
+Validation during this review:
+
+- `cargo test -p zebra-rs --bin zebra-rs bgp_ls`: 23 passed, including both zero-mask regressions.
+- `cargo test -p zebra-rs --bin zebra-rs peer_min_delay`: 12 passed.
+- `cargo test -p bgp-packet bgpls_attr`: 10 passed.
+- `git diff --check HEAD~2 HEAD`: passed.
+
+The new BDD topology/configs were inspected but not run during this review. BGP-LS transmission to peers remains deferred in `route_bgpls_originate`, a pre-existing limitation. These checks do not establish delivery to an external controller. Implementation source was not changed.
+
 ## Resolution
 
 All six findings are fixed on branch `bgp-ls-te-perf-tlvs`. The review
