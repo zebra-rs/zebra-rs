@@ -2914,7 +2914,7 @@ fn write_es_nhg_groups(buf: &mut String, bgp: &Bgp) -> std::fmt::Result {
         buf,
         "Ethernet Segment nexthop groups (teed to the datapath):"
     )?;
-    for ((esi, bd), (single_active, members)) in &bgp.es_nhg_sent {
+    for ((esi, bd), (single_active, members, blocked)) in &bgp.es_nhg_sent {
         let rendered: Vec<String> = members
             .iter()
             .map(|m| match m {
@@ -2933,7 +2933,23 @@ fn write_es_nhg_groups(buf: &mut String, bgp: &Bgp) -> std::fmt::Result {
             .unwrap_or_default();
         let esi = bgp_packet::esi_display(esi);
         if *single_active {
-            let (primary, backup) = rendered.split_first().expect("a sent group is non-empty");
+            // A signalled segment where every member declared itself
+            // non-designated is teed as an empty group — nothing to forward
+            // to — and must render as that rather than panicking on a
+            // missing first member.
+            let Some((primary, backup)) = rendered.split_first() else {
+                // Blocked: every PE on the segment advertised a
+                // non-designated role, so the segment's MACs are installed
+                // nowhere — distinct from the group simply being absent,
+                // which would install each toward its advertiser.
+                let state = if *blocked {
+                    "no forwarder (MACs withheld)"
+                } else {
+                    "no forwarder"
+                };
+                writeln!(buf, "  {esi} bd {bd}: single-active, {state}{why}")?;
+                continue;
+            };
             let backup = if backup.is_empty() {
                 String::new()
             } else {

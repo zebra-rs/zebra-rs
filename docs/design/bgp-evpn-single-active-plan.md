@@ -707,6 +707,32 @@ path counting**: two RRs reflecting one PE's route collide on the same
 one copy is withdrawn. What §4.4 really wanted there was observability,
 which the reason line now provides.
 
+Three review findings, each a layer deeper than the last, are folded in.
+**(1)** A segment where every member advertises P=0/B=0 was reported as
+`Unsignalled`, so the caller fell back to inference and installed a PE that
+had explicitly said "not me" — a distinct `NoForwarder` reason now separates
+"nobody is selectable" from "nobody is talking", and inference does not run
+for it. **(2)** Withholding the group was not enough: an empty
+`Message::EsNhg` means *deletion*, and deletion semantics re-install each MAC
+toward the PE that advertised it — which is the same PE. The message now
+carries `blocked`, the RIB keeps `es_blocked` beside `es_groups`, and a
+blocked MAC is withdrawn from the FIB while its Type-2 and `mac_table` entry
+stay put, so it returns the moment a forwarder reappears. **(3)** That block
+must never apply to a MAC on a segment *this* PE is attached to: the group is
+built from other PEs' per-EVI A-Ds, so on the Designated Forwarder itself
+every other member correctly says "not me" and the segment reads
+`NoForwarder` — a blanket block would tear out the local rows of the one PE
+that is actually forwarding. `local_port` now takes precedence.
+
+**Reaching that third state in a test needs five PEs**, which is worth
+recording: the DF and its backup have to sit on PEs with no access port (so
+they never join a group), leaving two port-carrying PEs both non-designated —
+one to advertise the MAC and one to be attached-and-blocked. With two PEs it
+is unreachable, because one of them is always DF or backup. The same feature
+also caught that iBGP without a route reflector gives each PE a *different*
+candidate set (§4.4): a PE peering with only some of the segment reached a
+different election result, which is a real divergence, not a test artefact.
+
 Proof: four unit tests over the selection table (the ordinary case, input
 order, the fallback boundary, the double-primary tie-break, and the group
 ordering) and a new `bgp_evpn_single_active_remote.feature` — three PEs,

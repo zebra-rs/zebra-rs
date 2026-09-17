@@ -1,0 +1,51 @@
+# z5 — a SECOND PE with an access port on segment es1, preference 50. With z2
+# and z4 outranking everyone from their portless seats, both z5 and z1 end up
+# non-designated — which is what lets z1's own group (built from OTHER PEs'
+# per-EVI A-Ds, so z5's alone) read "no forwarder" while z1 is itself attached
+# to the segment. A MAC parked here is therefore a MAC on z1's own segment.
+vxlan:
+- name: vxlan10
+  vni: 10
+  local-address: 192.168.0.5
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.5
+    afi-safi:
+    - name: evpn
+      advertise-all-vni: true
+      ethernet-segment:
+      - name: es1
+        esi: "00:11:22:33:44:55:66:77:88:99"
+        redundancy-mode: single-active
+        interface: host0
+        role-signaling: l2-attr
+        df-election:
+          algorithm: preference
+          preference: 50
+    neighbor:
+    - remote-address: 192.168.0.1
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: evpn
+        enabled: true
+    - remote-address: 192.168.0.2
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: evpn
+        enabled: true
+    - remote-address: 192.168.0.3
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: evpn
+        enabled: true
+    - remote-address: 192.168.0.4
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: evpn
+        enabled: true

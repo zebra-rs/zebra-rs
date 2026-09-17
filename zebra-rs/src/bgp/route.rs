@@ -19272,10 +19272,14 @@ impl Bgp {
                 }
             }
         }
-        let mut groups: BTreeMap<([u8; 10], u32), (bool, Vec<crate::rib::EsNhgMember>)> =
-            BTreeMap::new();
+        #[allow(clippy::type_complexity)]
+        let mut groups: BTreeMap<
+            ([u8; 10], u32),
+            (bool, Vec<crate::rib::EsNhgMember>, bool),
+        > = BTreeMap::new();
         let mut reasons: BTreeMap<([u8; 10], u32), super::ethernet_segment::SaSelectReason> =
             BTreeMap::new();
+        let mut invalid: BTreeMap<([u8; 10], u32), Vec<IpAddr>> = BTreeMap::new();
         for ((esi, vni), pairs) in desired {
             let single_active = sa_esis.contains(&esi);
             // Only a single-active segment has one forwarder to pick; an
@@ -19288,6 +19292,10 @@ impl Bgp {
                 let (primary, backup, reason) =
                     super::ethernet_segment::select_sa_forwarder(&signals);
                 reasons.insert((esi, vni), reason);
+                invalid.insert(
+                    (esi, vni),
+                    super::ethernet_segment::invalid_role_members(&signals),
+                );
                 match reason {
                     // Nobody signalled: keep inferring the forwarder from
                     // which PE advertised the segment's MACs, the behaviour
@@ -19295,13 +19303,31 @@ impl Bgp {
                     super::ethernet_segment::SaSelectReason::Unsignalled => {
                         (self.es_sa_primary(&esi, vni, &pairs), None)
                     }
+                    // Signalled, and every member says it is not the
+                    // forwarder. Inference must NOT run here — it would
+                    // install the stale MAC advertiser over an explicit
+                    // "not me" — and no member may lead, so the group is
+                    // withheld below.
+                    super::ethernet_segment::SaSelectReason::NoForwarder => (None, None),
                     _ => (primary, backup),
                 }
             } else {
                 (None, None)
             };
-            let members = super::ethernet_segment::order_es_members(pairs, primary, backup);
-            groups.insert((esi, vni), (single_active, members));
+            // A signalled segment with no selectable forwarder is teed as an
+            // empty group: the datapath then has nothing to send the
+            // segment's MACs to, rather than slot 0 falling to whichever
+            // member sorts first. It is kept as an entry (not dropped) so
+            // the state is visible in `show` instead of looking like a
+            // segment nobody ever advertised.
+            let blocked = reasons.get(&(esi, vni))
+                == Some(&super::ethernet_segment::SaSelectReason::NoForwarder);
+            let members = if blocked {
+                Vec::new()
+            } else {
+                super::ethernet_segment::order_es_members(pairs, primary, backup)
+            };
+            groups.insert((esi, vni), (single_active, members, blocked));
         }
         let mut out: Vec<crate::rib::Message> = Vec::new();
         let gone: Vec<([u8; 10], u32)> = self
@@ -19317,6 +19343,9 @@ impl Bgp {
                 bd,
                 members: Vec::new(),
                 single_active: false,
+                // The segment is gone, not blocked: whatever MACs remain go
+                // back to installing toward the PE that advertised them.
+                blocked: false,
             });
         }
         for ((esi, bd), group) in groups {
@@ -19324,17 +19353,43 @@ impl Bgp {
                 // Gated on the group actually changing: this sync runs on
                 // every ES event, and a conflict that persists would
                 // otherwise log on each of them.
-                if reasons.get(&(esi, bd))
-                    == Some(&super::ethernet_segment::SaSelectReason::Conflict)
+                match reasons.get(&(esi, bd)) {
+                    Some(super::ethernet_segment::SaSelectReason::Conflict) => {
+                        tracing::warn!(
+                            proto = "bgp",
+                            category = "evpn",
+                            esi = %bgp_packet::esi_display(&esi),
+                            bd,
+                            "bgp: more than one PE advertises primary for this single-active \
+                             segment; forwarding to the lowest address. Both of them believe \
+                             they forward — check the segment's DF election configuration",
+                        );
+                    }
+                    Some(super::ethernet_segment::SaSelectReason::NoForwarder) => {
+                        tracing::warn!(
+                            proto = "bgp",
+                            category = "evpn",
+                            esi = %bgp_packet::esi_display(&esi),
+                            bd,
+                            "bgp: no PE advertises a forwarding role for this single-active \
+                             segment; withholding the nexthop group rather than picking one \
+                             that declared itself non-designated",
+                        );
+                    }
+                    _ => {}
+                }
+                if let Some(bad) = invalid.get(&(esi, bd))
+                    && !bad.is_empty()
                 {
                     tracing::warn!(
                         proto = "bgp",
                         category = "evpn",
                         esi = %bgp_packet::esi_display(&esi),
                         bd,
-                        "bgp: more than one PE advertises primary for this single-active \
-                         segment; forwarding to the lowest address. Both of them believe \
-                         they forward — check the segment's DF election configuration",
+                        pes = %bad.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(","),
+                        "bgp: ignoring per-EVI A-D role with both P and B set — the two bits \
+                         are disjoint (rfc7432bis §7.11.1), so the advertisement names no \
+                         role and takes no part in the election",
                     );
                 }
                 out.push(crate::rib::Message::EsNhg {
@@ -19342,6 +19397,7 @@ impl Bgp {
                     bd,
                     members: group.1.clone(),
                     single_active: group.0,
+                    blocked: group.2,
                 });
                 self.es_nhg_sent.insert((esi, bd), group);
             }
