@@ -3267,6 +3267,9 @@ impl Ospf<Ospfv2> {
             };
             if let Some(lsa) = flushed {
                 self.flood_self_originated_lsa(AREA0, &lsa);
+                // A withdrawn delay prunes the link from a
+                // metric-type-1 topology (RFC 9350 §15).
+                self.spf_schedule_area(AREA0);
             }
         }
     }
@@ -13082,13 +13085,11 @@ fn flex_algo_link_affinity(
         };
         let adv_router = lsa.data.h.adv_router;
         for tlv in &el.tlvs {
-            for sub in &tlv.subs {
-                if let ExtLinkSubTlv::Asla(asla) = sub
-                    && asla.is_flex_algo()
-                    && let Some(group) = asla.ext_admin_group()
-                {
-                    map.insert((adv_router, tlv.link_id, tlv.link_data), group.clone());
-                }
+            // Same RFC 9492 §5 selection the delay reader uses — the
+            // two must agree about which advertisements apply, or a
+            // link gets costed from one ASLA and constrained by another.
+            if let Some(group) = super::flex_algo::asla_admin_group_v2(&tlv.subs) {
+                map.insert((adv_router, tlv.link_id, tlv.link_data), group.clone());
             }
         }
     }
@@ -14577,7 +14578,7 @@ fn flex_algo_participants_v3(area: &OspfArea<Ospfv3>, algo: u8) -> BTreeSet<Ipv4
 /// owning router's standard Router-LSA link `interface_id`.
 fn flex_algo_link_affinity_v3(area: &OspfArea<Ospfv3>) -> BTreeMap<(Ipv4Addr, u32), ExtAdminGroup> {
     use crate::ospf::lsdb::OSPF_MAX_AGE;
-    use ospf_packet::{OSPFV3_E_ROUTER_LSA_TYPE, Ospfv3ExtTlv, Ospfv3LsBody, Ospfv3SubTlv};
+    use ospf_packet::{OSPFV3_E_ROUTER_LSA_TYPE, Ospfv3ExtTlv, Ospfv3LsBody};
 
     let mut map = BTreeMap::new();
     for (_, lsa) in area.lsdb.iter_by_raw_type(OSPFV3_E_ROUTER_LSA_TYPE) {
@@ -14592,13 +14593,9 @@ fn flex_algo_link_affinity_v3(area: &OspfArea<Ospfv3>) -> BTreeMap<(Ipv4Addr, u3
             let Ospfv3ExtTlv::RouterLink(rl) = tlv else {
                 continue;
             };
-            for sub in &rl.subs {
-                if let Ospfv3SubTlv::Asla(asla) = sub
-                    && asla.is_flex_algo()
-                    && let Some(group) = asla.ext_admin_group()
-                {
-                    map.insert((adv_router, rl.link.interface_id), group.clone());
-                }
+            // Same selection as the delay reader; see the v2 twin.
+            if let Some(group) = super::flex_algo::asla_admin_group_v3(&rl.subs) {
+                map.insert((adv_router, rl.link.interface_id), group.clone());
             }
         }
     }
