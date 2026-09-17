@@ -101,6 +101,72 @@ Feature: BGP EVPN Ethernet Segment discovery (RFC 7432 Type-4)
     And show command "show bgp evpn ethernet-segment" in namespace "z2" should eventually contain "Designated Forwarder (tag 0): 192.168.0.1"
     And show command "show bgp evpn ethernet-segment" in namespace "z2" should not contain "Designated Forwarder (tag 0): 192.168.0.2"
 
+  Scenario: Preference-based election (RFC 9785 Alg 2) pins the DF to one PE
+    Given the test topology exists
+    # Both PEs switch to `df-election algorithm preference`. z1 configures no
+    # value, so it bids RFC 9785 §3's mandatory default of 32767; z2 bids
+    # 50000 and therefore wins — although 192.168.0.2 is the HIGHER address,
+    # which is what makes this discriminating: carving and HRW both elect
+    # 192.168.0.1 for tag 0 (the two scenarios above).
+    When I apply config "z1-pref.yaml" to namespace "z1"
+    And I apply config "z2-pref.yaml" to namespace "z2"
+    # The bid is on the wire, including the defaulted one — a PE that bid 0
+    # here would silently rank below every peer that took the default.
+    Then show command "show bgp evpn" in namespace "z1" should eventually contain "df-election:alg2:pref50000"
+    And show command "show bgp evpn" in namespace "z2" should eventually contain "df-election:alg2:pref32767"
+    And show command "show bgp evpn ethernet-segment" in namespace "z1" should eventually contain "DF algorithm: preference-based (local pref 32767)"
+    And show command "show bgp evpn ethernet-segment" in namespace "z2" should eventually contain "DF algorithm: preference-based (local pref 50000)"
+    # Both PEs agree, and the winner is the preferred one, not the lowest.
+    And show command "show bgp evpn ethernet-segment" in namespace "z1" should eventually contain "Designated Forwarder (tag 0): 192.168.0.2"
+    And show command "show bgp evpn ethernet-segment" in namespace "z2" should eventually contain "Designated Forwarder (tag 0): 192.168.0.2 (this node)"
+    And show command "show bgp evpn ethernet-segment" in namespace "z1" should not contain "Designated Forwarder (tag 0): 192.168.0.1"
+
+  Scenario: Equal preferences fall to the lowest address
+    Given the test topology exists
+    # Negative control for the DP scenario below: z2 drops its explicit value,
+    # so both PEs bid the default 32767 and the tie breaks on the address.
+    When I apply config "z2-prefonly.yaml" to namespace "z2"
+    Then show command "show bgp evpn" in namespace "z1" should eventually contain "df-election:alg2:pref32767"
+    And show command "show bgp evpn ethernet-segment" in namespace "z1" should eventually contain "Designated Forwarder (tag 0): 192.168.0.1 (this node)"
+    And show command "show bgp evpn ethernet-segment" in namespace "z2" should eventually contain "Designated Forwarder (tag 0): 192.168.0.1"
+
+  Scenario: The Don't Preempt bit (RFC 9785) decides a preference tie
+    Given the test topology exists
+    # Same tied bids, but z2 now advertises the DP capability. RFC 9785 §4.1
+    # ranks DP=1 ahead of DP=0 before the address is consulted, so the DF
+    # moves to z2 — the ONLY change from the scenario above is that one leaf.
+    When I apply config "z2-dp.yaml" to namespace "z2"
+    # The bit is on the wire and rendered next to the bid, on the EC and in
+    # the member list, so an operator can see which PE claimed it.
+    Then show command "show bgp evpn" in namespace "z1" should eventually contain "df-election:alg2:pref32767+dp"
+    And show command "show bgp evpn ethernet-segment" in namespace "z1" should eventually contain "192.168.0.2 pref 32767 dp"
+    And show command "show bgp evpn ethernet-segment" in namespace "z2" should eventually contain "DF algorithm: preference-based (local pref 32767, dont-preempt)"
+    # Both PEs must reach the same answer, or both forward and the CE sees
+    # duplicates — honouring a PEER's bit is what this proves on z1.
+    And show command "show bgp evpn ethernet-segment" in namespace "z1" should eventually contain "Designated Forwarder (tag 0): 192.168.0.2"
+    And show command "show bgp evpn ethernet-segment" in namespace "z2" should eventually contain "Designated Forwarder (tag 0): 192.168.0.2 (this node)"
+    And show command "show bgp evpn ethernet-segment" in namespace "z1" should not contain "Designated Forwarder (tag 0): 192.168.0.1"
+
+  Scenario: A preference value still overrides the legacy algorithm arms
+    Given the test topology exists
+    # `algorithm hrw` PLUS a preference is the spelling that predates the
+    # preference arms, and it advertised Alg 2 then. It must still do so: a PE
+    # that switched to Alg 1 across an upgrade, while its peers were still on
+    # Alg 2, would fail the RFC 8584 unanimity check and drop the WHOLE
+    # segment to carving — moving the DF on a live single-active service.
+    When I apply config "z1-hrwpref.yaml" to namespace "z1"
+    And I apply config "z2-hrwpref.yaml" to namespace "z2"
+    Then show command "show bgp evpn" in namespace "z1" should eventually contain "df-election:alg2:pref400"
+    And show command "show bgp evpn" in namespace "z1" should not contain "df-election:alg1"
+    And show command "show bgp evpn ethernet-segment" in namespace "z1" should eventually contain "DF algorithm: preference-based (local pref 200)"
+    # The override is named rather than left to be discovered.
+    And show command "show bgp evpn ethernet-segment" in namespace "z1" should contain "`preference` overrides `algorithm hrw`"
+    # ... and the election really is the preference one: z2 bids higher and
+    # wins, which HRW would not do for this ESI at tag 0 (the scenario above
+    # elects 192.168.0.1).
+    And show command "show bgp evpn ethernet-segment" in namespace "z1" should eventually contain "Designated Forwarder (tag 0): 192.168.0.2"
+    And show command "show bgp evpn ethernet-segment" in namespace "z2" should eventually contain "Designated Forwarder (tag 0): 192.168.0.2 (this node)"
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "z1"

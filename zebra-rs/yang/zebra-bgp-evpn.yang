@@ -268,7 +268,7 @@ module zebra-bgp-evpn {
            Absent = the RFC 7432 §8.5 default: service carving, no
            capabilities.";
         leaf algorithm {
-          ext:help "DF election algorithm: default (service carving) or hrw";
+          ext:help "DF election algorithm: default, hrw, preference or lowest-preference";
           type enumeration {
             enum default {
               description "RFC 7432 §8.5 service carving (RFC 8584 Alg 0).";
@@ -276,23 +276,53 @@ module zebra-bgp-evpn {
             enum hrw {
               description "RFC 8584 §3 Highest Random Weight (Alg 1).";
             }
+            enum preference {
+              description
+                "RFC 9785 Highest-Preference (Alg 2): the highest
+                 `preference` wins the whole segment.";
+            }
+            enum lowest-preference {
+              description
+                "RFC 9785 Lowest-Preference (Alg 3): the same ranking with
+                 the preference comparison reversed.";
+            }
           }
           description
             "The DF election algorithm this segment advertises in its Type-4
-             DF Election extended community and runs locally. `hrw` (RFC
-             8584 §3, Alg 1) ranks the segment's PEs by a pseudo-random
-             weight of (Ethernet Tag, ESI, PE address) — the highest wins,
-             ties go to the lowest address, the runner-up is the backup —
-             which spreads service instances across the PEs like carving
-             does but keeps every other instance's DF unchanged when a PE
-             joins or leaves. A configured `preference` overrides this leaf
-             (Alg 2). As with any algorithm, all PEs on the segment must
-             agree or the segment falls back to carving.";
+             DF Election extended community and runs locally.
+
+             `hrw` (RFC 8584 §3, Alg 1) ranks the segment's PEs by a
+             pseudo-random weight of (Ethernet Tag, ESI, PE address) — the
+             highest wins, ties go to the lowest address, the runner-up is
+             the backup — which spreads service instances across the PEs
+             like carving does but keeps every other instance's DF unchanged
+             when a PE joins or leaves.
+
+             `preference` / `lowest-preference` (RFC 9785, Alg 2 / Alg 3)
+             elect by the operator's `preference` instead of a hash, so one
+             PE is Designated Forwarder for **every** Ethernet Tag on the
+             segment. That is what makes deterministic active/standby
+             possible: give every segment on the intended active PE the
+             better preference. Carving and HRW cannot express it — they
+             deliberately spread the tags.
+
+             A configured `preference` still overrides the `default` and
+             `hrw` arms, as it did before this leaf had preference arms: a
+             segment spelled that way keeps advertising Alg 2 across an
+             upgrade instead of switching to Alg 1 and dropping the whole
+             segment to carving on the RFC 8584 unanimity check. Beside the
+             two preference arms a `preference` value simply selects which
+             of them bids. `show bgp evpn ethernet-segment` names the
+             override where it applies.
+
+             As with any algorithm, all PEs on the segment must advertise the
+             same one (RFC 8584 §2.2) or the segment falls back to carving —
+             the same show command names that disagreement too.";
         }
         leaf preference {
           ext:help "DF preference; highest wins (selects Alg 2)";
           type uint16 {
-            range "1..65535";
+            range "0..65535";
           }
           description
             "Setting a preference switches this segment to preference-based
@@ -307,6 +337,12 @@ module zebra-bgp-evpn {
              the DF instead of accepting a hash. Carving instead spreads
              instances across the PEs.
 
+             Selecting a preference algorithm through `algorithm` and leaving
+             this leaf unset bids RFC 9785 §3's mandatory default of 32767,
+             the midpoint of the range — not 0, which would rank this PE
+             below every peer that took the default. Ties are broken by
+             `dont-preempt`, then by the lowest originating address.
+
              All PEs on the segment must advertise the same algorithm; RFC
              8584 negotiation falls the whole segment back to carving if any
              one of them disagrees. Interoperates with IOS-XR
@@ -314,6 +350,31 @@ module zebra-bgp-evpn {
              `df-election-type preference`, Arista
              `designated-forwarder election algorithm preference` and FRR
              `evpn mh es-df-pref`.";
+        }
+        leaf dont-preempt {
+          ext:help "Advertise the RFC 9785 Don't Preempt capability";
+          type empty;
+          description
+            "Advertise the RFC 9785 §3 'Don't Preempt' (DP) capability bit in
+             the DF Election extended community.
+
+             On a preference **tie** a PE with the bit ranks ahead of one
+             that does not set it; the comparison runs after the preference
+             and before the originating address. It is a tie-break input on
+             every PE of the segment, so a peer's bit is honoured whether or
+             not this PE sets its own — ignoring it would make the two ends
+             rank the segment differently and both would forward.
+
+             The bit is defined for the preference-based algorithms and is
+             advertised only under them.
+
+             **This is the tie-break only, not non-revertive operation.**
+             RFC 9785 §4.3 additionally has a recovering PE advertise an
+             *operational* preference and DP inherited from the incumbent
+             Designated Forwarder; that is not implemented. With the bit set
+             on every PE at equal preference — the usual configuration — the
+             tie still falls through to the address, so the lowest-address PE
+             reclaims the role when it comes back.";
         }
         leaf ac-df {
           ext:help "Advertise the AC-Influenced DF election capability";

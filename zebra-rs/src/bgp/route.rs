@@ -19252,7 +19252,7 @@ impl Bgp {
             // as VTEP) — the RFC 7432 §7.4 requirement, restated.
             let peers: std::collections::BTreeSet<IpAddr> = cands
                 .iter()
-                .map(|(ip, _, _)| *ip)
+                .map(|c| c.addr)
                 .filter(|ip| *ip != me)
                 .collect();
             // Single-active (RFC 7432 §14.1.1): a non-DF port is a standby
@@ -19764,11 +19764,18 @@ impl Bgp {
                         .map(|d| d.df_alg)
                         .unwrap_or(bgp_packet::DfElectionEc::ALG_DEFAULT);
                     let pref = df.map(|d| d.pref).unwrap_or(0);
-                    cands.push((*orig, alg, pref));
+                    // The whole bitmap is kept, not just the bits this
+                    // version acts on: the DP tie-break (RFC 9785) reads one
+                    // of them, `show` renders the rest, and a future
+                    // capability needs no re-plumbing.
+                    let caps = df.map(|d| d.bitmap).unwrap_or(0);
+                    cands.push(
+                        super::ethernet_segment::DfCandidate::new(*orig, alg, pref).with_caps(caps),
+                    );
                 }
             }
         }
-        cands.sort_by_key(|(ip, _, _)| *ip);
+        cands.sort_by_key(|c| c.addr);
         cands
     }
 

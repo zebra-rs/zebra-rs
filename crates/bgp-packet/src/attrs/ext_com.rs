@@ -529,9 +529,10 @@ pub struct DfElectionEc {
     pub df_alg: u8,
     /// Capability Bitmap (16 bits, RFC MSB-0 numbering: Bit 0 = `0x8000`).
     pub bitmap: u16,
-    /// DF Preference, in the last two octets of the value
-    /// (draft-ietf-bess-evpn-pref-df). Only meaningful under
-    /// [`ALG_PREF`](Self::ALG_PREF); zero and ignored otherwise.
+    /// DF Preference, in the last two octets of the value (RFC 9785 §3).
+    /// Only meaningful under [`ALG_PREF`](Self::ALG_PREF) /
+    /// [`ALG_PREF_LOWEST`](Self::ALG_PREF_LOWEST); zero and ignored
+    /// otherwise.
     pub pref: u16,
 }
 
@@ -543,18 +544,39 @@ impl DfElectionEc {
     pub const ALG_DEFAULT: u8 = 0;
     /// DF Alg 1 — Highest Random Weight (HRW, RFC 8584 §3).
     pub const ALG_HRW: u8 = 1;
-    /// DF Alg 2 — Preference-based (draft-ietf-bess-evpn-pref-df). The
-    /// highest [`pref`](Self::pref) wins, ties broken by lowest IP. This is
-    /// what IOS-XR (`service-carving preference-based`), Junos
+    /// DF Alg 2 — Highest-Preference (RFC 9785 §3). The highest
+    /// [`pref`](Self::pref) wins, ties broken by the Don't-Preempt bit and
+    /// then the lowest IP. This is what IOS-XR
+    /// (`service-carving preference-based`), Junos
     /// (`df-election-type preference`), Arista
     /// (`designated-forwarder election algorithm preference`) and FRR
     /// (`evpn mh es-df-pref`) all expose.
     pub const ALG_PREF: u8 = 2;
+    /// DF Alg 3 — Lowest-Preference (RFC 9785 §3): the same ranking with the
+    /// preference comparison reversed, for fabrics that number their PEs the
+    /// other way round. A segment mixing Alg 2 and Alg 3 falls back to the
+    /// default algorithm, which callers get from the usual RFC 8584
+    /// unanimity check over the advertised algorithms.
+    pub const ALG_PREF_LOWEST: u8 = 3;
+
+    /// True for the two preference-based algorithms, the ones for which
+    /// [`pref`](Self::pref) is meaningful on the wire.
+    pub fn is_preference_alg(alg: u8) -> bool {
+        alg == Self::ALG_PREF || alg == Self::ALG_PREF_LOWEST
+    }
 
     /// The preference every implementation defaults to when the algorithm
     /// is selected but no value is configured (FRR
     /// `EVPN_MH_DF_PREF_DEFAULT`).
     pub const PREF_DEFAULT: u16 = 32767;
+
+    /// Bitmap Bit 0 (RFC 9785 §3): the "Don't Preempt" (DP) Capability —
+    /// this PE asks not to be preempted as DF. MSB-0 within the 16-bit
+    /// Bitmap → `0x8000`. It is a **tie-break input**, applied after the
+    /// preference comparison and before the address comparison, so honouring
+    /// a peer's bit is required for the two ends to rank a segment the same
+    /// way.
+    pub const CAP_DONT_PREEMPT: u16 = 0x8000;
 
     /// Bitmap Bit 1 (RFC 8584 §2.2): AC-DF Capability (AC-Influenced DF
     /// election). MSB-0 within the 16-bit Bitmap → `0x4000`.
@@ -563,6 +585,26 @@ impl DfElectionEc {
     /// True when the AC-DF (AC-Influenced DF election) capability bit is set.
     pub fn ac_df(&self) -> bool {
         self.bitmap & Self::CAP_AC_DF != 0
+    }
+
+    /// True when the RFC 9785 "Don't Preempt" capability bit is set.
+    pub fn dont_preempt(&self) -> bool {
+        self.bitmap & Self::CAP_DONT_PREEMPT != 0
+    }
+
+    /// Set or clear the "Don't Preempt" capability bit.
+    pub fn set_dont_preempt(&mut self, on: bool) {
+        if on {
+            self.bitmap |= Self::CAP_DONT_PREEMPT;
+        } else {
+            self.bitmap &= !Self::CAP_DONT_PREEMPT;
+        }
+    }
+
+    /// Builder form of [`set_dont_preempt`](Self::set_dont_preempt).
+    pub fn with_dont_preempt(mut self, on: bool) -> Self {
+        self.set_dont_preempt(on);
+        self
     }
 
     /// Set or clear the AC-DF capability bit. RFC 9572 §5.3.1 clears it on the
@@ -719,11 +761,14 @@ impl fmt::Display for ExtCommunityValue {
             // DF Election EC (RFC 8584 §2.2): render the algorithm and append
             // `+ac-df` when the AC-Influenced DF election bit is set.
             write!(f, "df-election:alg{}", df.df_alg)?;
-            if df.df_alg == DfElectionEc::ALG_PREF {
+            if DfElectionEc::is_preference_alg(df.df_alg) {
                 write!(f, ":pref{}", df.pref)?;
             }
             if df.ac_df() {
                 write!(f, "+ac-df")?;
+            }
+            if df.dont_preempt() {
+                write!(f, "+dp")?;
             }
             Ok(())
         } else if let Some(es) = self.as_es_import_rt() {
@@ -1188,6 +1233,71 @@ mod tests {
         let mut buf = BytesMut::new();
         ec.encode(&mut buf);
         assert_eq!(&buf[..], &[0x06, 0x06, 0x01, 0x40, 0x00, 0, 0, 0]);
+    }
+
+    #[test]
+    fn df_election_dont_preempt_is_bitmap_bit_zero() {
+        // RFC 9785 §3 Figure 2: Bitmap Bit 0 = D ("Don't Preempt"), Bit 1 =
+        // A (AC-DF). MSB-0, so D is 0x8000 and the two coexist in val[1..3].
+        let ec: ExtCommunityValue = DfElectionEc {
+            df_alg: DfElectionEc::ALG_PREF,
+            bitmap: 0,
+            pref: DfElectionEc::PREF_DEFAULT,
+        }
+        .with_dont_preempt(true)
+        .into();
+        assert_eq!(ec.val, [0x02, 0x80, 0x00, 0, 0x7f, 0xff]);
+        let back = ec.as_df_election().expect("decodes");
+        assert!(back.dont_preempt());
+        assert!(!back.ac_df());
+
+        let both: ExtCommunityValue = DfElectionEc {
+            df_alg: DfElectionEc::ALG_PREF,
+            bitmap: DfElectionEc::CAP_AC_DF,
+            pref: 0,
+        }
+        .with_dont_preempt(true)
+        .into();
+        assert_eq!(both.val[1..3], [0xc0, 0x00]);
+        let back = both.as_df_election().expect("decodes");
+        assert!(back.dont_preempt() && back.ac_df());
+        // Clearing leaves the other capability alone.
+        let cleared = DfElectionEc {
+            bitmap: back.bitmap,
+            ..back
+        }
+        .with_dont_preempt(false);
+        assert!(!cleared.dont_preempt() && cleared.ac_df());
+    }
+
+    #[test]
+    fn df_election_lowest_preference_is_alg_three() {
+        // RFC 9785 §3: Alg 3 = Lowest-Preference, carried in the same 5-bit
+        // field and with the same Preference offset as Alg 2.
+        let ec: ExtCommunityValue = DfElectionEc {
+            df_alg: DfElectionEc::ALG_PREF_LOWEST,
+            bitmap: 0,
+            pref: 100,
+        }
+        .into();
+        assert_eq!(ec.val, [0x03, 0x00, 0x00, 0, 0x00, 0x64]);
+        let back = ec.as_df_election().expect("decodes");
+        assert_eq!(back.df_alg, DfElectionEc::ALG_PREF_LOWEST);
+        assert_eq!(back.pref, 100);
+        assert!(DfElectionEc::is_preference_alg(back.df_alg));
+        assert!(DfElectionEc::is_preference_alg(DfElectionEc::ALG_PREF));
+        assert!(!DfElectionEc::is_preference_alg(DfElectionEc::ALG_HRW));
+        assert!(!DfElectionEc::is_preference_alg(DfElectionEc::ALG_DEFAULT));
+        // Both preference algorithms render their bid; the DP bit appends.
+        assert_eq!(format!("{ec}"), "df-election:alg3:pref100");
+        let dp: ExtCommunityValue = DfElectionEc {
+            df_alg: DfElectionEc::ALG_PREF,
+            bitmap: 0,
+            pref: DfElectionEc::PREF_DEFAULT,
+        }
+        .with_dont_preempt(true)
+        .into();
+        assert_eq!(format!("{dp}"), "df-election:alg2:pref32767+dp");
     }
 
     #[test]

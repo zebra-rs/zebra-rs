@@ -92,6 +92,54 @@ impl EsRedundancyMode {
     }
 }
 
+/// The DF election algorithm a segment advertises and runs (RFC 8584 §2.2
+/// DF Alg values; RFC 9785 adds the two preference-based ones).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DfAlgorithm {
+    /// Alg 0 — RFC 7432 §8.5 service carving (the modulus).
+    Default,
+    /// Alg 1 — RFC 8584 §3 Highest Random Weight.
+    Hrw,
+    /// Alg 2 — RFC 9785 Highest-Preference.
+    Preference,
+    /// Alg 3 — RFC 9785 Lowest-Preference.
+    LowestPreference,
+}
+
+impl DfAlgorithm {
+    /// Parse the YANG `df-election algorithm` keyword; `None` for anything
+    /// else, which leaves the segment on whatever the preference leaf implies.
+    pub fn from_keyword(s: &str) -> Option<Self> {
+        match s {
+            "default" => Some(DfAlgorithm::Default),
+            "hrw" => Some(DfAlgorithm::Hrw),
+            "preference" => Some(DfAlgorithm::Preference),
+            "lowest-preference" => Some(DfAlgorithm::LowestPreference),
+            _ => None,
+        }
+    }
+
+    /// The YANG keyword for this algorithm.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DfAlgorithm::Default => "default",
+            DfAlgorithm::Hrw => "hrw",
+            DfAlgorithm::Preference => "preference",
+            DfAlgorithm::LowestPreference => "lowest-preference",
+        }
+    }
+
+    /// The 5-bit DF Alg value this algorithm puts on the wire.
+    pub fn wire(&self) -> u8 {
+        match self {
+            DfAlgorithm::Default => DfElectionEc::ALG_DEFAULT,
+            DfAlgorithm::Hrw => DfElectionEc::ALG_HRW,
+            DfAlgorithm::Preference => DfElectionEc::ALG_PREF,
+            DfAlgorithm::LowestPreference => DfElectionEc::ALG_PREF_LOWEST,
+        }
+    }
+}
+
 /// A locally-configured Ethernet Segment: an ESI, a redundancy mode, and the
 /// access interface it is bound to. Keyed by an operator-chosen name in
 /// `Bgp::ethernet_segments`. DF state and the per-ES PE membership set are
@@ -104,18 +152,30 @@ pub struct EthernetSegment {
     pub redundancy_mode: EsRedundancyMode,
     /// Access interface bound to this ES (the multihomed CE-facing port).
     pub interface: Option<String>,
-    /// DF Preference (draft-ietf-bess-evpn-pref-df). `Some` switches this
-    /// segment to Alg 2, where the highest preference wins and ties break on
-    /// the lowest address, instead of the RFC 7432 §8.5 carving modulus.
-    /// `None` = service carving (Alg 0), the default.
+    /// DF Preference (RFC 9785 §3). Under a preference-based algorithm this
+    /// is what the segment bids; `None` there means the RFC's mandatory
+    /// default of 32767. With no `df_algorithm` configured at all, `Some`
+    /// still selects Alg 2 on its own — the spelling that shipped before the
+    /// `algorithm` leaf grew its preference arms.
     pub df_preference: Option<u16>,
     /// Advertise the RFC 8584 §2.2 AC-DF (AC-Influenced DF election)
     /// capability on this segment's Type-4.
     pub ac_df: bool,
-    /// Elect with the RFC 8584 §3 Highest Random Weight algorithm (Alg 1)
-    /// instead of service carving; a configured `df_preference` (Alg 2)
-    /// takes precedence.
-    pub hrw: bool,
+    /// The configured DF election algorithm. `None` = not configured, which
+    /// means carving unless `df_preference` is set (see that field).
+    pub df_algorithm: Option<DfAlgorithm>,
+    /// Advertise the RFC 9785 "Don't Preempt" (DP) capability: on a
+    /// preference tie this PE is ranked ahead of one that does **not** set
+    /// the bit. Only meaningful — and only advertised — under a
+    /// preference-based algorithm.
+    ///
+    /// This is the tie-break input alone. It is not RFC 9785 §4.3
+    /// non-revertive operation, which additionally has a recovering PE
+    /// advertise an *operational* `(Pref, DP)` inherited from the incumbent
+    /// DF; without that, two PEs that both set the bit at equal preference
+    /// still fall through to the address comparison, and the lower-address
+    /// one reclaims the role when it comes back.
+    pub dont_preempt: bool,
     /// Seconds to stay out of this segment's DF election after joining it
     /// (IOS-XR `timers peering`, Junos
     /// `designated-forwarder-election-hold-time`, FRR
@@ -177,26 +237,54 @@ impl EthernetSegment {
     }
 
     /// The DF Election extended community this segment advertises on its
-    /// Type-4: Alg 2 with the configured preference when one is set,
-    /// otherwise the default carving algorithm.
+    /// Type-4: the configured algorithm, the preference it bids under a
+    /// preference-based one, and the capability bits.
+    ///
+    /// A preference-based algorithm with no configured value bids RFC 9785
+    /// §3's mandatory default of 32767 rather than 0 — a PE that bid 0 would
+    /// silently rank below every peer that took the default. The DP bit is
+    /// advertised only under those algorithms, since it is defined as a
+    /// preference tie-break.
+    /// **Precedence, and why it is not simply "the explicit leaf wins".**
+    /// Before the `algorithm` leaf had preference arms, its only values were
+    /// `default` and `hrw`, and a `preference` value selected Alg 2 over
+    /// either of them. Configurations spelled that way exist, so they keep
+    /// that meaning: a preference value still beats `algorithm default` and
+    /// `algorithm hrw`. Making the algorithm leaf win instead would change
+    /// what such a PE advertises across an upgrade — and a PE that starts
+    /// advertising Alg 1 to peers still on Alg 2 does not merely differ, it
+    /// breaks the RFC 8584 unanimity check and drops the **whole segment**
+    /// to carving, moving the DF as it goes. The new arms are how an
+    /// operator now says which preference algorithm they mean; `algorithm
+    /// hrw` plus a preference stays the legacy spelling of Alg 2, which
+    /// `show bgp evpn ethernet-segment` calls out rather than leaving to be
+    /// discovered.
     pub fn df_election_ec(&self) -> DfElectionEc {
-        let mut ec = match self.df_preference {
-            Some(pref) => DfElectionEc {
-                df_alg: DfElectionEc::ALG_PREF,
-                bitmap: 0,
-                pref,
-            },
-            None => DfElectionEc {
-                df_alg: if self.hrw {
-                    DfElectionEc::ALG_HRW
-                } else {
-                    DfElectionEc::ALG_DEFAULT
-                },
-                bitmap: 0,
-                pref: 0,
+        let alg = match (self.df_algorithm, self.df_preference) {
+            // The preference arms name the algorithm themselves, so a value
+            // beside them selects between Alg 2 and Alg 3 rather than
+            // overriding anything.
+            (Some(alg @ (DfAlgorithm::Preference | DfAlgorithm::LowestPreference)), _) => {
+                alg.wire()
+            }
+            // Legacy precedence, preserved for configurations written before
+            // those arms existed.
+            (_, Some(_)) => DfElectionEc::ALG_PREF,
+            (Some(alg), None) => alg.wire(),
+            (None, None) => DfElectionEc::ALG_DEFAULT,
+        };
+        let preference_based = DfElectionEc::is_preference_alg(alg);
+        let mut ec = DfElectionEc {
+            df_alg: alg,
+            bitmap: 0,
+            pref: if preference_based {
+                self.df_preference.unwrap_or(DfElectionEc::PREF_DEFAULT)
+            } else {
+                0
             },
         };
         ec.set_ac_df(self.ac_df);
+        ec.set_dont_preempt(preference_based && self.dont_preempt);
         ec
     }
 
@@ -248,24 +336,73 @@ pub fn backup_forwarder(candidates: &[IpAddr], tag: u32) -> Option<IpAddr> {
 }
 
 /// One PE's advertised DF-election parameters, read off its Type-4's DF
-/// Election extended community: `(VTEP, algorithm, preference)`.
-pub type DfCandidate = (IpAddr, u8, u16);
+/// Election extended community: the VTEP, the algorithm, the preference and
+/// the capability bitmap (RFC 9785 DP, RFC 8584 AC-DF).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DfCandidate {
+    /// The PE's Originating Router IP — the Type-4 NLRI key, and the
+    /// identity every PE on the segment ranks by.
+    pub addr: IpAddr,
+    /// DF Alg this PE advertises (RFC 8584 §2.2 / RFC 9785 §3).
+    pub alg: u8,
+    /// Its DF Preference; meaningful under the preference-based algorithms.
+    pub pref: u16,
+    /// Its capability bitmap, kept whole so a bit this version does not act
+    /// on is still visible in `show` rather than dropped at parse time.
+    pub caps: u16,
+}
 
-/// Order two preference-based candidates by who wins
-/// (draft-ietf-bess-evpn-pref-df): the higher preference, and on a tie the
-/// **lower** IP address. Matches FRR's comparison in
-/// `zebra_evpn_es_run_df_election`, so the two agree on a shared segment —
+impl DfCandidate {
+    /// A candidate with no capability bits — the common case in tests and
+    /// for a Type-4 carrying no DF Election EC at all.
+    pub fn new(addr: IpAddr, alg: u8, pref: u16) -> Self {
+        Self {
+            addr,
+            alg,
+            pref,
+            caps: 0,
+        }
+    }
+
+    /// Builder: attach the advertised capability bitmap.
+    pub fn with_caps(mut self, caps: u16) -> Self {
+        self.caps = caps;
+        self
+    }
+
+    /// Whether this PE asked not to be preempted (RFC 9785 §3, D bit).
+    pub fn dont_preempt(&self) -> bool {
+        self.caps & DfElectionEc::CAP_DONT_PREEMPT != 0
+    }
+}
+
+/// Order two preference-based candidates by who wins (RFC 9785 §4.1): the
+/// better preference — highest under Alg 2, `lowest` under Alg 3 — then the
+/// PE that asked not to be preempted, then the **lower** IP address.
+///
+/// The address step matches FRR's comparison in
+/// `zebra_evpn_es_run_df_election`, so the two agree on a shared segment;
 /// disagreement here means two PEs both forward and the CE sees duplicates.
-fn pref_wins(a: &DfCandidate, b: &DfCandidate) -> std::cmp::Ordering {
-    // Higher pref first, then lower IP first.
-    b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0))
+/// The DP step sits between them because RFC 9785 §4.1 orders it that way —
+/// ignoring a peer's bit would rank the segment differently at each end,
+/// which is the same duplicate.
+fn pref_wins(a: &DfCandidate, b: &DfCandidate, lowest: bool) -> std::cmp::Ordering {
+    let by_pref = if lowest {
+        a.pref.cmp(&b.pref)
+    } else {
+        b.pref.cmp(&a.pref)
+    };
+    by_pref
+        // `false < true`, so comparing b to a puts DP=1 first.
+        .then_with(|| b.dont_preempt().cmp(&a.dont_preempt()))
+        .then_with(|| a.addr.cmp(&b.addr))
 }
 
 /// The candidates ordered best-DF-first under preference-based election.
-fn pref_ranked(candidates: &[DfCandidate]) -> Vec<IpAddr> {
+fn pref_ranked(candidates: &[DfCandidate], lowest: bool) -> Vec<IpAddr> {
     let mut ranked = candidates.to_vec();
-    ranked.sort_by(pref_wins);
-    ranked.into_iter().map(|(ip, _, _)| ip).collect()
+    ranked.sort_by(|a, b| pref_wins(a, b, lowest));
+    ranked.into_iter().map(|c| c.addr).collect()
 }
 
 /// CRC-32 (IEEE 802.3 / ISO 3309: polynomial 0x04C11DB7 reflected, initial
@@ -325,7 +462,7 @@ fn hrw_ranked(candidates: &[DfCandidate], esi: &[u8; 10], tag: u32) -> Vec<IpAdd
     let d = hrw_digest(esi, tag);
     let mut ranked: Vec<(u32, IpAddr)> = candidates
         .iter()
-        .map(|(ip, _, _)| (hrw_weight(*ip, d), *ip))
+        .map(|c| (hrw_weight(c.addr, d), c.addr))
         .collect();
     ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
     ranked.dedup_by_key(|(_, ip)| *ip);
@@ -335,8 +472,9 @@ fn hrw_ranked(candidates: &[DfCandidate], esi: &[u8; 10], tag: u32) -> Vec<IpAdd
 /// Elect the Designated Forwarder and its backup for one service instance,
 /// dispatching on the algorithm the segment's PEs agreed on.
 ///
-/// Alg 2 (preference) ranks by preference then address, so the DF is the
-/// winner and the backup is the runner-up. Anything else falls back to
+/// Alg 2 / Alg 3 (RFC 9785 preference) rank by preference, then the DP bit,
+/// then address, so the DF is the winner and the backup is the runner-up.
+/// Anything else falls back to
 /// service carving, where the ordinal is `tag mod N` and the backup is the
 /// next ordinal — the RFC 8584 fallback for a disagreed algorithm, which
 /// [`negotiate_df_alg`] already resolves to Alg 0.
@@ -348,10 +486,11 @@ pub fn elect_forwarders(
     esi: &[u8; 10],
     tag: u32,
 ) -> (Option<IpAddr>, Option<IpAddr>) {
-    let algs: Vec<u8> = candidates.iter().map(|(_, alg, _)| *alg).collect();
-    match negotiate_df_alg(&algs) {
-        DfElectionEc::ALG_PREF => {
-            let ranked = pref_ranked(candidates);
+    let algs: Vec<u8> = candidates.iter().map(|c| c.alg).collect();
+    let alg = negotiate_df_alg(&algs);
+    match alg {
+        DfElectionEc::ALG_PREF | DfElectionEc::ALG_PREF_LOWEST => {
+            let ranked = pref_ranked(candidates, alg == DfElectionEc::ALG_PREF_LOWEST);
             return (ranked.first().copied(), ranked.get(1).copied());
         }
         DfElectionEc::ALG_HRW => {
@@ -360,7 +499,7 @@ pub fn elect_forwarders(
         }
         _ => {}
     }
-    let mut vteps: Vec<IpAddr> = candidates.iter().map(|(ip, _, _)| *ip).collect();
+    let mut vteps: Vec<IpAddr> = candidates.iter().map(|c| c.addr).collect();
     vteps.sort();
     vteps.dedup();
     (
@@ -426,7 +565,7 @@ pub fn vpws_role(
     esi: &[u8; 10],
     service_id: u32,
 ) -> VpwsRole {
-    let on_segment = candidates.iter().any(|(ip, _, _)| *ip == me);
+    let on_segment = candidates.iter().any(|c| c.addr == me);
     if !matches!(mode, EsRedundancyMode::SingleActive) || !on_segment {
         return VpwsRole::Primary;
     }
@@ -507,7 +646,7 @@ pub fn ac_df_filter(
 ) -> Vec<DfCandidate> {
     candidates
         .iter()
-        .filter(|(ip, _, _)| *ip == me || (live.contains(ip) && ad_evi.contains(ip)))
+        .filter(|c| c.addr == me || (live.contains(&c.addr) && ad_evi.contains(&c.addr)))
         .copied()
         .collect()
 }
@@ -717,7 +856,7 @@ mod tests {
     /// Carving candidates: every PE advertising Alg 0 with no preference.
     fn carving(ips: &[IpAddr]) -> Vec<DfCandidate> {
         ips.iter()
-            .map(|ip| (*ip, DfElectionEc::ALG_DEFAULT, 0))
+            .map(|ip| DfCandidate::new(*ip, DfElectionEc::ALG_DEFAULT, 0))
             .collect()
     }
 
@@ -725,7 +864,15 @@ mod tests {
     fn prefs(entries: &[(IpAddr, u16)]) -> Vec<DfCandidate> {
         entries
             .iter()
-            .map(|(ip, p)| (*ip, DfElectionEc::ALG_PREF, *p))
+            .map(|(ip, p)| DfCandidate::new(*ip, DfElectionEc::ALG_PREF, *p))
+            .collect()
+    }
+
+    /// Lowest-Preference (Alg 3) candidates.
+    fn prefs_low(entries: &[(IpAddr, u16)]) -> Vec<DfCandidate> {
+        entries
+            .iter()
+            .map(|(ip, p)| DfCandidate::new(*ip, DfElectionEc::ALG_PREF_LOWEST, *p))
             .collect()
     }
 
@@ -816,7 +963,7 @@ mod tests {
         // negotiation drops everyone to carving — preference is ignored even
         // though two PEs advertised it.
         let mut cands = prefs(&[(a, 10), (b, 300)]);
-        cands.push((c, DfElectionEc::ALG_DEFAULT, 0));
+        cands.push(DfCandidate::new(c, DfElectionEc::ALG_DEFAULT, 0));
         // Carving on the address-sorted list [a, b, c], tag 1 -> ordinal 1.
         assert_eq!(elect_forwarders(&cands, &ESI_T, 1), (Some(b), Some(c)));
         // Whereas all-Alg-2 would have given b (highest pref) for every tag.
@@ -873,8 +1020,10 @@ mod tests {
         assert_eq!(hrw_digest(&ESI_T, 100), 0x7995_f7c3);
         assert_eq!(hrw_weight(a, 0x7995_f7c3), 712_275_514);
         assert_eq!(hrw_weight(b, 0x7995_f7c3), 2_110_888_649);
-        let cands: Vec<DfCandidate> =
-            vec![(a, DfElectionEc::ALG_HRW, 0), (b, DfElectionEc::ALG_HRW, 0)];
+        let cands: Vec<DfCandidate> = vec![
+            DfCandidate::new(a, DfElectionEc::ALG_HRW, 0),
+            DfCandidate::new(b, DfElectionEc::ALG_HRW, 0),
+        ];
         assert_eq!(elect_forwarders(&cands, &ESI_T, 0), (Some(a), Some(b)));
         assert_eq!(elect_forwarders(&cands, &ESI_T, 100), (Some(b), Some(a)));
         // Order-independent: every PE ranks the same set the same way.
@@ -892,28 +1041,185 @@ mod tests {
     fn hrw_needs_unanimity() {
         let [a, b, _] = pes();
         let mixed: Vec<DfCandidate> = vec![
-            (a, DfElectionEc::ALG_HRW, 0),
-            (b, DfElectionEc::ALG_DEFAULT, 0),
+            DfCandidate::new(a, DfElectionEc::ALG_HRW, 0),
+            DfCandidate::new(b, DfElectionEc::ALG_DEFAULT, 0),
         ];
         assert_eq!(elect_forwarders(&mixed, &ESI_T, 0).0, Some(a));
         assert_eq!(elect_forwarders(&mixed, &ESI_T, 1).0, Some(b));
     }
 
-    /// The election the segment advertises follows the config: HRW when
-    /// asked for, but a preference still wins over it.
+    /// Upgrade safety: every spelling that existed before the `algorithm`
+    /// leaf grew preference arms advertises exactly what it advertised then.
+    /// A PE that changed algorithm across an upgrade would break the RFC
+    /// 8584 unanimity check against its not-yet-upgraded peers and drop the
+    /// whole segment to carving, moving the DF as it went.
     #[test]
-    fn segment_advertises_hrw_when_configured() {
-        let es = EthernetSegment {
-            hrw: true,
+    fn a_preference_value_still_overrides_the_legacy_algorithm_arms() {
+        // `algorithm hrw` alone: Alg 1, unchanged.
+        let hrw = EthernetSegment {
+            df_algorithm: Some(DfAlgorithm::Hrw),
             ..Default::default()
         };
-        assert_eq!(es.df_election_ec().df_alg, DfElectionEc::ALG_HRW);
-        let es = EthernetSegment {
-            hrw: true,
+        assert_eq!(hrw.df_election_ec().df_alg, DfElectionEc::ALG_HRW);
+        // `algorithm hrw` PLUS a preference: Alg 2 carrying that bid — the
+        // pre-upgrade meaning of this combination.
+        let hrw_with_pref = EthernetSegment {
+            df_algorithm: Some(DfAlgorithm::Hrw),
             df_preference: Some(7),
             ..Default::default()
         };
-        assert_eq!(es.df_election_ec().df_alg, DfElectionEc::ALG_PREF);
+        assert_eq!(
+            hrw_with_pref.df_election_ec().df_alg,
+            DfElectionEc::ALG_PREF
+        );
+        assert_eq!(hrw_with_pref.df_election_ec().pref, 7);
+        // Same for the explicit `algorithm default` spelling.
+        let carving_with_pref = EthernetSegment {
+            df_algorithm: Some(DfAlgorithm::Default),
+            df_preference: Some(9),
+            ..Default::default()
+        };
+        assert_eq!(
+            carving_with_pref.df_election_ec().df_alg,
+            DfElectionEc::ALG_PREF
+        );
+        assert_eq!(carving_with_pref.df_election_ec().pref, 9);
+        // Preference alone: Alg 2 with that bid.
+        let bare = EthernetSegment {
+            df_preference: Some(7),
+            ..Default::default()
+        };
+        assert_eq!(bare.df_election_ec().df_alg, DfElectionEc::ALG_PREF);
+        assert_eq!(bare.df_election_ec().pref, 7);
+        // The new arms name the algorithm, so a value beside them selects
+        // between Alg 2 and Alg 3 instead of overriding them.
+        let lowest = EthernetSegment {
+            df_algorithm: Some(DfAlgorithm::LowestPreference),
+            df_preference: Some(100),
+            ..Default::default()
+        };
+        assert_eq!(
+            lowest.df_election_ec().df_alg,
+            DfElectionEc::ALG_PREF_LOWEST
+        );
+        assert_eq!(lowest.df_election_ec().pref, 100);
+        assert_eq!(
+            DfAlgorithm::from_keyword("lowest-preference"),
+            Some(DfAlgorithm::LowestPreference)
+        );
+        assert_eq!(DfAlgorithm::from_keyword("nonsense"), None);
+    }
+
+    /// The DP bit is a tie-break, not non-revertive operation: it ranks a PE
+    /// ahead of one that does not set it, and two PEs that both set it at
+    /// equal preference still fall through to the address — so the
+    /// lower-address PE reclaims the role on recovery. RFC 9785 §4.3
+    /// non-revertive behaviour needs the operational-preference adjustment
+    /// this phase does not implement, and no documentation may read as if it
+    /// did.
+    #[test]
+    fn dont_preempt_does_not_by_itself_make_the_election_non_revertive() {
+        let [a, b, _] = pes();
+        let dp = DfElectionEc::CAP_DONT_PREEMPT;
+        // The incumbent keeps the role only while the returning PE leaves
+        // the bit clear.
+        let one_sided = vec![
+            DfCandidate::new(a, DfElectionEc::ALG_PREF, 32767),
+            DfCandidate::new(b, DfElectionEc::ALG_PREF, 32767).with_caps(dp),
+        ];
+        assert_eq!(elect_forwarders(&one_sided, &ESI_T, 0).0, Some(b));
+        // Both configured the same way — the usual case — and the lower
+        // address takes it back.
+        let both = vec![
+            DfCandidate::new(a, DfElectionEc::ALG_PREF, 32767).with_caps(dp),
+            DfCandidate::new(b, DfElectionEc::ALG_PREF, 32767).with_caps(dp),
+        ];
+        assert_eq!(elect_forwarders(&both, &ESI_T, 0).0, Some(a));
+    }
+
+    /// RFC 9785 §3: a preference-based segment with no configured value bids
+    /// the mandatory default of 32767, not 0 — bidding 0 would rank this PE
+    /// below every peer that took the default. The DP bit rides only under
+    /// those algorithms.
+    #[test]
+    fn preference_defaults_to_the_rfc_9785_midpoint() {
+        let es = EthernetSegment {
+            df_algorithm: Some(DfAlgorithm::Preference),
+            ..Default::default()
+        };
+        let ec = es.df_election_ec();
+        assert_eq!(ec.df_alg, DfElectionEc::ALG_PREF);
+        assert_eq!(ec.pref, DfElectionEc::PREF_DEFAULT);
+        assert!(!ec.dont_preempt());
+
+        let low = EthernetSegment {
+            df_algorithm: Some(DfAlgorithm::LowestPreference),
+            dont_preempt: true,
+            ac_df: true,
+            ..Default::default()
+        };
+        let ec = low.df_election_ec();
+        assert_eq!(ec.df_alg, DfElectionEc::ALG_PREF_LOWEST);
+        assert_eq!(ec.pref, DfElectionEc::PREF_DEFAULT);
+        assert!(ec.dont_preempt() && ec.ac_df());
+
+        // Carving never advertises a preference or the DP bit — the bit is
+        // defined as a preference tie-break, so it would mean nothing on the
+        // wire here. (With a `preference` value this segment would not be
+        // carving at all: see
+        // `a_preference_value_still_overrides_the_legacy_algorithm_arms`.)
+        let carving = EthernetSegment {
+            df_algorithm: Some(DfAlgorithm::Default),
+            dont_preempt: true,
+            ..Default::default()
+        };
+        let ec = carving.df_election_ec();
+        assert_eq!(ec.df_alg, DfElectionEc::ALG_DEFAULT);
+        assert_eq!(ec.pref, 0);
+        assert!(!ec.dont_preempt());
+    }
+
+    /// RFC 9785 §4.1 ranking, in order: preference, then the DP bit, then
+    /// the lowest address. Each step is proven by a case the previous step
+    /// cannot decide, and Alg 3 reverses only the first.
+    #[test]
+    fn preference_ranks_pref_then_dp_then_address() {
+        let [a, b, c] = pes();
+        // Preference beats address order: c bids highest despite the highest
+        // address, and the runner-up (backup DF) is the next best bid.
+        let cands = prefs(&[(a, 100), (b, 200), (c, 300)]);
+        assert_eq!(elect_forwarders(&cands, &ESI_T, 0), (Some(c), Some(b)));
+        // ... for every tag, unlike carving.
+        assert_eq!(elect_forwarders(&cands, &ESI_T, 7).0, Some(c));
+        // Alg 3 reverses the preference comparison alone.
+        let low = prefs_low(&[(a, 100), (b, 200), (c, 300)]);
+        assert_eq!(elect_forwarders(&low, &ESI_T, 0), (Some(a), Some(b)));
+        // Equal preference: the PE asking not to be preempted wins, even
+        // though its address is higher.
+        let tie = vec![
+            DfCandidate::new(a, DfElectionEc::ALG_PREF, 32767),
+            DfCandidate::new(b, DfElectionEc::ALG_PREF, 32767)
+                .with_caps(DfElectionEc::CAP_DONT_PREEMPT),
+        ];
+        assert_eq!(elect_forwarders(&tie, &ESI_T, 0), (Some(b), Some(a)));
+        // Without the bit the same tie falls to the lowest address.
+        let tie = prefs(&[(a, 32767), (b, 32767)]);
+        assert_eq!(elect_forwarders(&tie, &ESI_T, 0), (Some(a), Some(b)));
+        // An unrelated capability (AC-DF) is not a tie-break.
+        let tie = vec![
+            DfCandidate::new(a, DfElectionEc::ALG_PREF, 32767),
+            DfCandidate::new(b, DfElectionEc::ALG_PREF, 32767).with_caps(DfElectionEc::CAP_AC_DF),
+        ];
+        assert_eq!(elect_forwarders(&tie, &ESI_T, 0).0, Some(a));
+        // A segment split between Alg 2 and Alg 3 is a disagreed segment:
+        // RFC 8584 negotiation drops the whole thing to carving, where tag 0
+        // is the lowest address regardless of the bids.
+        let mixed = vec![
+            DfCandidate::new(a, DfElectionEc::ALG_PREF, 100),
+            DfCandidate::new(b, DfElectionEc::ALG_PREF_LOWEST, 300),
+        ];
+        assert_eq!(elect_forwarders(&mixed, &ESI_T, 0).0, Some(a));
+        assert_eq!(elect_forwarders(&mixed, &ESI_T, 1).0, Some(b));
     }
 
     /// AC-DF is a unanimous capability: any PE without the bit keeps the
@@ -937,9 +1243,9 @@ mod tests {
         use std::collections::BTreeSet;
         let [a, b, c] = pes();
         let cands: Vec<DfCandidate> = vec![
-            (a, DfElectionEc::ALG_DEFAULT, 0),
-            (b, DfElectionEc::ALG_DEFAULT, 0),
-            (c, DfElectionEc::ALG_DEFAULT, 0),
+            DfCandidate::new(a, DfElectionEc::ALG_DEFAULT, 0),
+            DfCandidate::new(b, DfElectionEc::ALG_DEFAULT, 0),
+            DfCandidate::new(c, DfElectionEc::ALG_DEFAULT, 0),
         ];
         // Tag 1 carves to ordinal 1 = b over the full set.
         assert_eq!(elect_forwarders(&cands, &ESI_T, 1).0, Some(b));
@@ -948,7 +1254,7 @@ mod tests {
         let ad_evi: BTreeSet<IpAddr> = [c].into_iter().collect();
         let narrowed = ac_df_filter(&cands, a, &live, &ad_evi);
         assert_eq!(
-            narrowed.iter().map(|(ip, _, _)| *ip).collect::<Vec<_>>(),
+            narrowed.iter().map(|c| c.addr).collect::<Vec<_>>(),
             vec![a, c]
         );
         // Tag 1 now carves to ordinal 1 of [a, c] = c.
@@ -959,15 +1265,12 @@ mod tests {
         let ad_evi: BTreeSet<IpAddr> = [b, c].into_iter().collect();
         let narrowed = ac_df_filter(&cands, a, &live, &ad_evi);
         assert_eq!(
-            narrowed.iter().map(|(ip, _, _)| *ip).collect::<Vec<_>>(),
+            narrowed.iter().map(|c| c.addr).collect::<Vec<_>>(),
             vec![a, b]
         );
         // The local PE is never filtered by its own (originated) routes.
         let narrowed = ac_df_filter(&cands, a, &BTreeSet::new(), &BTreeSet::new());
-        assert_eq!(
-            narrowed.iter().map(|(ip, _, _)| *ip).collect::<Vec<_>>(),
-            vec![a]
-        );
+        assert_eq!(narrowed.iter().map(|c| c.addr).collect::<Vec<_>>(), vec![a]);
     }
 
     /// The single-active group leads with the MAC advertiser and keeps the
@@ -1024,7 +1327,7 @@ mod tests {
     #[test]
     fn elan_df_carves_by_vni_and_holds() {
         let [a, b, c] = pes();
-        let cands: Vec<DfCandidate> = vec![(a, 0, 0), (b, 0, 0)];
+        let cands: Vec<DfCandidate> = vec![DfCandidate::new(a, 0, 0), DfCandidate::new(b, 0, 0)];
         // VNI 100 % 2 == 0 → a; VNI 101 % 2 == 1 → b.
         assert!(elan_df(&cands, a, &ESI_T, 100, false));
         assert!(!elan_df(&cands, b, &ESI_T, 100, false));
