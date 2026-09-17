@@ -2427,6 +2427,143 @@ module config {
                 type uint32;
               }
             }
+            container te-metric {
+              ext:help "Static TE link metrics (RFC 7471) for this interface";
+              description
+                "Per-interface traffic-engineering link metrics advertised
+                 as RFC 7471 link-attribute sub-TLVs carried in this link's
+                 ASLA sub-TLV (RFC 9492) on the E-Router-LSA Router-Link TLV —
+                 the same place flex-algo affinity is advertised, and what
+                 Flex-Algorithm metric-type 1 consumes. OSPFv3 draws
+                 these code points from the Extended-LSA sub-TLV registry
+                 (13-16), not the OSPFv2 TE Opaque LSA one (27-30).
+                 Origination is gated on Segment Routing (MPLS or SRv6)
+                 being enabled, since the E-Router-LSA is only originated
+                 then — the same coupling OSPFv2 has to its
+                 Extended-Link Opaque LSA. Static configuration and STAMP
+                 measurement populate the same fields; a static leaf,
+                 when set, wins per field. All delay values are in
+                 microseconds.";
+
+              leaf unidirectional-delay {
+                ext:help "Average unidirectional link delay (us)";
+                type uint32 {
+                  range "0..16777215";
+                }
+                units "microseconds";
+                description
+                  "Average unidirectional link delay (RFC 7471 §4.1,
+                   sub-TLV 13).";
+              }
+              leaf min-delay {
+                ext:help "Minimum unidirectional link delay (us)";
+                type uint32 {
+                  range "0..16777215";
+                }
+                units "microseconds";
+                description
+                  "Minimum unidirectional link delay (RFC 7471 §4.2,
+                   sub-TLV 14). Advertised with max-delay; the Min/Max
+                   sub-TLV is emitted only when both are set.";
+              }
+              leaf max-delay {
+                ext:help "Maximum unidirectional link delay (us)";
+                type uint32 {
+                  range "0..16777215";
+                }
+                units "microseconds";
+                description
+                  "Maximum unidirectional link delay (RFC 7471 §4.2,
+                   sub-TLV 14).";
+              }
+              leaf delay-variation {
+                ext:help "Unidirectional delay variation / jitter (us)";
+                type uint32 {
+                  range "0..16777215";
+                }
+                units "microseconds";
+                description
+                  "Unidirectional delay variation / jitter (RFC 7471
+                   §4.3, sub-TLV 15).";
+              }
+              leaf loss {
+                ext:help "Unidirectional link loss ratio";
+                type uint32 {
+                  range "0..16777214";
+                }
+                description
+                  "Unidirectional link loss (RFC 7471 §4.4, sub-TLV 16),
+                   encoded in units of 0.000003 %; the maximum 16777214
+                   (0xFFFFFE) is ~50.33 %.";
+              }
+              container measurement {
+                ext:help "Measure this link's delay dynamically (STAMP, RFC 8762)";
+                description
+                  "Active performance measurement of this link. When
+                   enabled, a STAMP Session-Sender (RFC 8762,
+                   unauthenticated) probes the P2P neighbor once the
+                   adjacency reaches Full; the damped min/max/avg delay
+                   and delay variation populate the same te-metric
+                   fields as static configuration (a static leaf, when
+                   set, overrides the measured value per field). The
+                   probes are answered by the neighbor's implicit
+                   Session-Reflector, so measurement must be enabled on
+                   both ends of the link.";
+                leaf enabled {
+                  ext:help "Activate measurement on this interface";
+                  type boolean;
+                  description "Activate measurement on this interface.";
+                }
+                leaf interval {
+                  ext:help "Probe transmit interval in milliseconds";
+                  type uint32 {
+                    range "100..60000";
+                  }
+                  units "milliseconds";
+                  description "Probe transmit interval. Default 1000 ms.";
+                }
+                leaf damping-period {
+                  ext:help "Minimum spacing between IGP exports (s)";
+                  type uint32 {
+                    range "1..3600";
+                  }
+                  units "seconds";
+                  description
+                    "Minimum spacing between exports to the IGP; each
+                     period's samples form the advertised min/max/avg
+                     window. Default 30 s.";
+                }
+                leaf anomaly-threshold {
+                  ext:help "Average delay at/above which the Anomalous bit is set (us)";
+                  type uint32 {
+                    range "0..16777215";
+                  }
+                  units "microseconds";
+                  description
+                    "Upper bound for the measured average one-way delay. At or
+                     above it, the Anomalous (A) bit is set on the delay
+                     sub-TLVs this link advertises (RFC 7471 §4.1 and §4.2), telling
+                     receivers the link has degraded past what the operator
+                     accepts. Only measured values carry the bit: a delay
+                     pinned by the sibling static leaves is always advertised
+                     with it clear. Unset disables anomaly detection.";
+                }
+                leaf reuse-threshold {
+                  ext:help "Average delay below which the Anomalous bit clears (us)";
+                  type uint32 {
+                    range "0..16777215";
+                  }
+                  units "microseconds";
+                  description
+                    "Lower bound at which a set Anomalous bit clears again.
+                     Between this and anomaly-threshold the bit holds its
+                     current state, so a link resting on the bound does not
+                     re-originate every export period. Values above
+                     anomaly-threshold are clamped to it. Unset means no
+                     hysteresis band: anomaly-threshold both sets and clears.";
+                }
+              }
+            }
             leaf-list affinity {
               ext:help "Affinity (admin-group) names on this link";
               // Names of /affinity-map entries this link carries.

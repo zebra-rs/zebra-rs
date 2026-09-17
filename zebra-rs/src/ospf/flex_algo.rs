@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use ospf_packet::{
-    ExtLinkSubTlv, FadFlags, FadSrlg, OSPF_SABM_FLEX_ALGO, OSPFV3_SABM_FLEX_ALGO,
+    ExtAdminGroup, ExtLinkSubTlv, FadFlags, FadSrlg, OSPF_SABM_FLEX_ALGO, OSPFV3_SABM_FLEX_ALGO,
     OspfAslaSubSubTlv, OspfAslaSubTlv, OspfFadSubTlv, Ospfv3AslaSubSubTlv, Ospfv3AslaSubTlv,
     Ospfv3FadSubTlv, Ospfv3FadTlv, Ospfv3SubTlv, RouterInfoTlvFad,
 };
@@ -190,20 +190,115 @@ pub fn build_link_asla(
     }))
 }
 
+/// The ASLA advertisements on one link that apply to Flex-Algorithm,
+/// and the attributes read out of them — RFC 9492 §5.
+///
+/// The selection is by *presence*, not by content: zero-length-mask
+/// attributes "MUST be used ... when no link attribute advertisements
+/// with a non-zero-length Application Identifier Bit Mask and a
+/// matching Application Identifier Bit set are present for a given
+/// link. Otherwise, such link attribute advertisements MUST NOT be
+/// used." So an explicit Flex-Algorithm advertisement carrying only an
+/// admin group still excludes a generic one carrying delay: delay is
+/// then simply not advertised for this application, and metric-type 1
+/// prunes the link. Asking instead "did an explicit ASLA supply this
+/// attribute?" quietly borrows the generic value, which is the same
+/// mistake as ignoring zero-mask advertisements altogether, in the
+/// other direction.
+///
+/// Selecting the set once and reading every attribute from it also
+/// keeps the consumers consistent: delay and affinity must agree about
+/// which advertisements apply, or a link can be costed from one ASLA
+/// and constrained by another.
+macro_rules! asla_readers {
+    ($applicable:ident, $delay:ident, $admin_group:ident, $sub:ty, $asla:ty, $variant:path) => {
+        fn $applicable(subs: &[$sub]) -> Vec<&$asla> {
+            let mut explicit = Vec::new();
+            let mut any_application = Vec::new();
+            for sub in subs {
+                if let $variant(asla) = sub {
+                    // RFC 9492 §5: an ASLA whose mask lengths are not
+                    // 0, 4 or 8 is ignored outright. It must not count
+                    // as an explicit advertisement either — otherwise a
+                    // malformed container suppresses a valid zero-mask
+                    // one under the presence rule and prunes the link.
+                    if !asla.has_valid_masks() {
+                        continue;
+                    }
+                    if asla.is_flex_algo() {
+                        explicit.push(asla);
+                    } else if asla.is_any_application() {
+                        any_application.push(asla);
+                    }
+                }
+            }
+            if explicit.is_empty() {
+                any_application
+            } else {
+                explicit
+            }
+        }
+
+        /// Min unidirectional delay for metric-type 1, or `None` when
+        /// the applicable advertisements carry none.
+        pub fn $delay(subs: &[$sub]) -> Option<u32> {
+            $applicable(subs)
+                .into_iter()
+                .find_map(|asla| asla.min_unidir_delay())
+        }
+
+        /// Extended Admin Group for the FAD constraints, from the same
+        /// applicable set.
+        pub fn $admin_group(subs: &[$sub]) -> Option<&ExtAdminGroup> {
+            $applicable(subs)
+                .into_iter()
+                .find_map(|asla| asla.ext_admin_group())
+        }
+    };
+}
+
+asla_readers!(
+    applicable_aslas_v2,
+    asla_min_delay_v2,
+    asla_admin_group_v2,
+    ExtLinkSubTlv,
+    OspfAslaSubTlv,
+    ExtLinkSubTlv::Asla
+);
+asla_readers!(
+    applicable_aslas_v3,
+    asla_min_delay_v3,
+    asla_admin_group_v3,
+    Ospfv3SubTlv,
+    Ospfv3AslaSubTlv,
+    Ospfv3SubTlv::Asla
+);
+
 /// OSPFv3 sibling of `build_link_asla`: build the per-link ASLA sub-TLV
 /// (RFC 9492) that rides as an `Ospfv3SubTlv::Asla` on the E-Router-LSA
-/// Router-Link TLV. Same SABM X-bit framing and empty-bitmap guard as
-/// the v2 builder; only the wire type differs (OSPFv3 sub-TLV 11 with
-/// the Extended Admin Group sub-sub-TLV 21).
-pub fn build_link_asla_v3(affinity: &BTreeSet<String>, am: &AffinityMap) -> Option<Ospfv3SubTlv> {
+/// Router-Link TLV, carrying this link's affinity and any RFC 7471 TE
+/// metrics. Same SABM X-bit framing and same "nothing to say, say
+/// nothing" guard as the v2 builder; the wire types differ throughout
+/// (OSPFv3 sub-TLV 11, Extended Admin Group 21, performance metrics
+/// 13-16).
+pub fn build_link_asla_v3(
+    affinity: &BTreeSet<String>,
+    am: &AffinityMap,
+    extra: Vec<Ospfv3AslaSubSubTlv>,
+) -> Option<Ospfv3SubTlv> {
     let group = local_link_affinity(affinity, am);
-    if group.words.is_empty() {
+    let mut subs = Vec::new();
+    if !group.words.is_empty() {
+        subs.push(Ospfv3AslaSubSubTlv::ExtAdminGroup(group));
+    }
+    subs.extend(extra);
+    if subs.is_empty() {
         return None;
     }
     Some(Ospfv3SubTlv::Asla(Ospfv3AslaSubTlv {
         sabm: vec![OSPFV3_SABM_FLEX_ALGO, 0, 0, 0],
         udabm: Vec::new(),
-        subs: vec![Ospfv3AslaSubSubTlv::ExtAdminGroup(group)],
+        subs,
     }))
 }
 
@@ -355,7 +450,8 @@ mod tests {
             .unwrap();
             am.commit();
         }
-        let asla = build_link_asla_v3(&affinity_set(&["blue", "red"]), &am).expect("ASLA");
+        let asla =
+            build_link_asla_v3(&affinity_set(&["blue", "red"]), &am, Vec::new()).expect("ASLA");
         let Ospfv3SubTlv::Asla(a) = &asla else {
             panic!("expected Asla, got {asla:?}");
         };
@@ -365,11 +461,281 @@ mod tests {
         assert!(g.get(0) && g.get(200) && !g.get(1));
     }
 
+    /// A link with TE metrics but no affinity still originates the ASLA
+    /// — otherwise flex-algo metric-type 1 would have nothing to read.
+    fn v3_asla(sabm: Vec<u8>, min_delay: u32) -> Ospfv3SubTlv {
+        use ospf_packet::OspfSubMinMaxLinkDelay;
+        Ospfv3SubTlv::Asla(Ospfv3AslaSubTlv {
+            sabm,
+            udabm: Vec::new(),
+            subs: vec![Ospfv3AslaSubSubTlv::MinMaxLinkDelay(
+                OspfSubMinMaxLinkDelay {
+                    anomalous: false,
+                    min_delay,
+                    max_delay: min_delay + 100,
+                },
+            )],
+        })
+    }
+
+    /// The ordinary case: an explicit Flex-Algorithm advertisement.
+    #[test]
+    fn asla_min_delay_reads_the_explicit_x_bit_advertisement() {
+        let subs = vec![v3_asla(vec![OSPFV3_SABM_FLEX_ALGO, 0, 0, 0], 900)];
+        assert_eq!(asla_min_delay_v3(&subs), Some(900));
+    }
+
+    /// RFC 9492 §5: a zero-length-mask advertisement covers any
+    /// application with nothing more specific. Ignoring it prunes the
+    /// link from a metric-type-1 topology, which can remove the only
+    /// path.
+    #[test]
+    fn asla_min_delay_accepts_a_zero_length_mask_advertisement() {
+        let subs = vec![v3_asla(Vec::new(), 1_100)];
+        assert_eq!(asla_min_delay_v3(&subs), Some(1_100));
+    }
+
+    /// ... but only when nothing more specific exists, and the answer
+    /// must not depend on which arrived first.
+    #[test]
+    fn asla_min_delay_prefers_the_explicit_advertisement_either_order() {
+        let specific = v3_asla(vec![OSPFV3_SABM_FLEX_ALGO, 0, 0, 0], 900);
+        let generic = v3_asla(Vec::new(), 1_100);
+        assert_eq!(
+            asla_min_delay_v3(&[generic.clone(), specific.clone()]),
+            Some(900)
+        );
+        assert_eq!(asla_min_delay_v3(&[specific, generic]), Some(900));
+    }
+
+    /// An advertisement scoped to some other application says nothing
+    /// about Flex-Algorithm, and does not license the generic one it
+    /// isn't.
+    #[test]
+    fn asla_min_delay_ignores_another_applications_scope() {
+        // Bit 0 is RSVP-TE, not the Flex-Algorithm X-bit.
+        let subs = vec![v3_asla(vec![0x80, 0, 0, 0], 900)];
+        assert_eq!(asla_min_delay_v3(&subs), None);
+    }
+
+    /// The OSPFv2 reader follows the same rule.
+    fn v3_asla_eag(sabm: Vec<u8>) -> Ospfv3SubTlv {
+        Ospfv3SubTlv::Asla(Ospfv3AslaSubTlv {
+            sabm,
+            udabm: Vec::new(),
+            subs: vec![Ospfv3AslaSubSubTlv::ExtAdminGroup(ExtAdminGroup {
+                words: vec![0x0000_0001],
+            })],
+        })
+    }
+
+    /// RFC 9492 §5 tests whether a matching advertisement is *present*,
+    /// not whether it happens to carry the attribute being read. An
+    /// explicit Flex-Algo ASLA carrying only an admin group therefore
+    /// excludes a generic one carrying delay: delay is not advertised
+    /// for this application, and metric-type 1 must prune the link
+    /// rather than borrow the generic value.
+    #[test]
+    fn explicit_advertisement_without_delay_still_excludes_the_generic_one() {
+        let affinity_only = v3_asla_eag(vec![OSPFV3_SABM_FLEX_ALGO, 0, 0, 0]);
+        let generic_delay = v3_asla(Vec::new(), 1_100);
+        assert_eq!(
+            asla_min_delay_v3(&[affinity_only.clone(), generic_delay.clone()]),
+            None
+        );
+        assert_eq!(
+            asla_min_delay_v3(&[generic_delay, affinity_only]),
+            None,
+            "and not by advertisement order"
+        );
+    }
+
+    /// Delay split across two explicit advertisements is still found —
+    /// the exclusion is of the generic set, not of the other explicit
+    /// ones.
+    #[test]
+    fn delay_is_found_across_several_explicit_advertisements() {
+        let affinity_only = v3_asla_eag(vec![OSPFV3_SABM_FLEX_ALGO, 0, 0, 0]);
+        let with_delay = v3_asla(vec![OSPFV3_SABM_FLEX_ALGO, 0, 0, 0], 900);
+        assert_eq!(
+            asla_min_delay_v3(&[affinity_only.clone(), with_delay.clone()]),
+            Some(900)
+        );
+        assert_eq!(asla_min_delay_v3(&[with_delay, affinity_only]), Some(900));
+    }
+
+    fn v3_asla_masks(sabm: Vec<u8>, udabm: Vec<u8>, min_delay: u32) -> Ospfv3SubTlv {
+        use ospf_packet::OspfSubMinMaxLinkDelay;
+        Ospfv3SubTlv::Asla(Ospfv3AslaSubTlv {
+            sabm,
+            udabm,
+            subs: vec![Ospfv3AslaSubSubTlv::MinMaxLinkDelay(
+                OspfSubMinMaxLinkDelay {
+                    anomalous: false,
+                    min_delay,
+                    max_delay: min_delay + 100,
+                },
+            )],
+        })
+    }
+
+    /// RFC 9492 §5: a mask length outside 0/4/8 means the whole ASLA is
+    /// ignored. A one-octet SABM with the X-bit set is not a
+    /// Flex-Algorithm advertisement, however much it looks like one.
+    #[test]
+    fn invalid_mask_lengths_make_an_asla_unusable() {
+        // Invalid SABM.
+        let bad_sabm = v3_asla_masks(vec![OSPFV3_SABM_FLEX_ALGO], Vec::new(), 900);
+        assert_eq!(asla_min_delay_v3(&[bad_sabm]), None);
+        // Invalid UDABM, valid SABM — checked independently.
+        let bad_udabm = v3_asla_masks(
+            vec![OSPFV3_SABM_FLEX_ALGO, 0, 0, 0],
+            vec![0x01, 0x02, 0x03],
+            900,
+        );
+        assert_eq!(asla_min_delay_v3(&[bad_udabm]), None);
+        // 8-octet masks are legal.
+        let long_masks = v3_asla_masks(
+            vec![OSPFV3_SABM_FLEX_ALGO, 0, 0, 0, 0, 0, 0, 0],
+            vec![0; 8],
+            900,
+        );
+        assert_eq!(asla_min_delay_v3(&[long_masks]), Some(900));
+    }
+
+    /// And it must not count as "an explicit advertisement is present":
+    /// otherwise a malformed container silently suppresses a valid
+    /// generic one and the link is pruned.
+    #[test]
+    fn an_invalid_asla_does_not_suppress_a_valid_generic_one() {
+        let bad_explicit = Ospfv3SubTlv::Asla(Ospfv3AslaSubTlv {
+            sabm: vec![OSPFV3_SABM_FLEX_ALGO],
+            udabm: Vec::new(),
+            subs: vec![Ospfv3AslaSubSubTlv::ExtAdminGroup(ExtAdminGroup {
+                words: vec![0x0000_0001],
+            })],
+        });
+        let generic_delay = v3_asla(Vec::new(), 1_100);
+        assert_eq!(
+            asla_min_delay_v3(&[bad_explicit.clone(), generic_delay.clone()]),
+            Some(1_100)
+        );
+        assert_eq!(
+            asla_min_delay_v3(&[generic_delay, bad_explicit]),
+            Some(1_100),
+            "and not by advertisement order"
+        );
+    }
+
+    /// The OSPFv2 selector applies the same guard.
+    #[test]
+    fn invalid_mask_lengths_are_rejected_on_v2_too() {
+        use ospf_packet::OspfSubMinMaxLinkDelay;
+        let asla = |sabm: Vec<u8>| {
+            ExtLinkSubTlv::Asla(OspfAslaSubTlv {
+                sabm,
+                udabm: Vec::new(),
+                subs: vec![OspfAslaSubSubTlv::MinMaxLinkDelay(OspfSubMinMaxLinkDelay {
+                    anomalous: false,
+                    min_delay: 900,
+                    max_delay: 1_000,
+                })],
+            })
+        };
+        assert_eq!(
+            asla_min_delay_v2(&[asla(vec![OSPF_SABM_FLEX_ALGO, 0])]),
+            None
+        );
+        assert_eq!(
+            asla_min_delay_v2(&[asla(vec![OSPF_SABM_FLEX_ALGO, 0, 0, 0])]),
+            Some(900)
+        );
+    }
+
+    /// Affinity is read from the same applicable set, so the two
+    /// consumers cannot disagree about which ASLA governs a link.
+    #[test]
+    fn affinity_and_delay_use_the_same_applicable_set() {
+        use ospf_packet::OspfSubMinMaxLinkDelay;
+        // One zero-mask ASLA carrying both: both readers must take it.
+        let both = Ospfv3SubTlv::Asla(Ospfv3AslaSubTlv {
+            sabm: Vec::new(),
+            udabm: Vec::new(),
+            subs: vec![
+                Ospfv3AslaSubSubTlv::ExtAdminGroup(ExtAdminGroup {
+                    words: vec![0x0000_0001],
+                }),
+                Ospfv3AslaSubSubTlv::MinMaxLinkDelay(OspfSubMinMaxLinkDelay {
+                    anomalous: false,
+                    min_delay: 1_100,
+                    max_delay: 1_200,
+                }),
+            ],
+        });
+        assert_eq!(asla_min_delay_v3(std::slice::from_ref(&both)), Some(1_100));
+        assert!(asla_admin_group_v3(std::slice::from_ref(&both)).is_some());
+
+        // An explicit advertisement excludes it for both readers alike.
+        let explicit = v3_asla(vec![OSPFV3_SABM_FLEX_ALGO, 0, 0, 0], 900);
+        assert_eq!(
+            asla_min_delay_v3(&[both.clone(), explicit.clone()]),
+            Some(900)
+        );
+        assert!(
+            asla_admin_group_v3(&[both, explicit]).is_none(),
+            "the generic colour is out of scope once an explicit ASLA exists"
+        );
+    }
+
+    #[test]
+    fn asla_min_delay_v2_follows_the_same_selection() {
+        use ospf_packet::OspfSubMinMaxLinkDelay;
+        let asla = |sabm: Vec<u8>, min_delay: u32| {
+            ExtLinkSubTlv::Asla(OspfAslaSubTlv {
+                sabm,
+                udabm: Vec::new(),
+                subs: vec![OspfAslaSubSubTlv::MinMaxLinkDelay(OspfSubMinMaxLinkDelay {
+                    anomalous: false,
+                    min_delay,
+                    max_delay: min_delay + 100,
+                })],
+            })
+        };
+        assert_eq!(asla_min_delay_v2(&[asla(Vec::new(), 1_100)]), Some(1_100));
+        assert_eq!(
+            asla_min_delay_v2(&[
+                asla(Vec::new(), 1_100),
+                asla(vec![OSPF_SABM_FLEX_ALGO, 0, 0, 0], 900)
+            ]),
+            Some(900)
+        );
+        assert_eq!(asla_min_delay_v2(&[asla(vec![0x80, 0, 0, 0], 900)]), None);
+    }
+
+    #[test]
+    fn build_link_asla_v3_emits_te_metrics_without_affinity() {
+        use ospf_packet::{OspfSubUniLinkDelay, Ospfv3AslaSubSubTlv};
+        let am = AffinityMap::new();
+        let extra = vec![Ospfv3AslaSubSubTlv::UniLinkDelay(OspfSubUniLinkDelay {
+            anomalous: false,
+            delay: 1_000,
+        })];
+        let asla = build_link_asla_v3(&BTreeSet::new(), &am, extra).expect("ASLA");
+        let Ospfv3SubTlv::Asla(a) = &asla else {
+            panic!("expected ASLA, got {asla:?}");
+        };
+        assert!(
+            matches!(a.subs.as_slice(), [Ospfv3AslaSubSubTlv::UniLinkDelay(_)]),
+            "only the metric, no empty admin group: {:?}",
+            a.subs
+        );
+    }
+
     #[test]
     fn build_link_asla_v3_none_when_no_affinity_resolves() {
         let am = AffinityMap::new();
-        assert!(build_link_asla_v3(&BTreeSet::new(), &am).is_none());
-        assert!(build_link_asla_v3(&affinity_set(&["ghost"]), &am).is_none());
+        assert!(build_link_asla_v3(&BTreeSet::new(), &am, Vec::new()).is_none());
+        assert!(build_link_asla_v3(&affinity_set(&["ghost"]), &am, Vec::new()).is_none());
     }
 
     #[test]

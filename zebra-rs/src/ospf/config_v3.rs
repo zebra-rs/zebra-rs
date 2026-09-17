@@ -259,6 +259,46 @@ impl Ospf<Ospfv3> {
             ("/area/interface/priority", config_ospfv3_interface_priority),
             ("/area/interface/cost", config_ospfv3_interface_cost),
             (
+                "/area/interface/te-metric/unidirectional-delay",
+                config_ospfv3_interface_te_delay,
+            ),
+            (
+                "/area/interface/te-metric/min-delay",
+                config_ospfv3_interface_te_min_delay,
+            ),
+            (
+                "/area/interface/te-metric/max-delay",
+                config_ospfv3_interface_te_max_delay,
+            ),
+            (
+                "/area/interface/te-metric/delay-variation",
+                config_ospfv3_interface_te_delay_variation,
+            ),
+            (
+                "/area/interface/te-metric/loss",
+                config_ospfv3_interface_te_loss,
+            ),
+            (
+                "/area/interface/te-metric/measurement/enabled",
+                config_ospfv3_interface_te_measurement_enable,
+            ),
+            (
+                "/area/interface/te-metric/measurement/interval",
+                config_ospfv3_interface_te_measurement_interval,
+            ),
+            (
+                "/area/interface/te-metric/measurement/damping-period",
+                config_ospfv3_interface_te_measurement_damping_period,
+            ),
+            (
+                "/area/interface/te-metric/measurement/anomaly-threshold",
+                config_ospfv3_interface_te_measurement_anomaly_threshold,
+            ),
+            (
+                "/area/interface/te-metric/measurement/reuse-threshold",
+                config_ospfv3_interface_te_measurement_reuse_threshold,
+            ),
+            (
                 "/area/interface/instance-id",
                 config_ospfv3_interface_instance_id,
             ),
@@ -1429,6 +1469,141 @@ fn config_ospfv3_interface_priority(
 /// the Intra-Area-Prefix-LSA (per-prefix metric), and the
 /// E-Intra-Area-Prefix-LSA (Prefix-SID host metric on non-loopbacks).
 /// Each origination path schedules the area's SPF itself.
+// `/router/ospfv3/area/interface/te-metric/*` — the RFC 7471 link
+// metrics and the STAMP measurement block. Mirrors the OSPFv2 twins in
+// `config.rs`; the values are shared (`LinkTeMetric`) and only the wire
+// rendering differs, so only the registration and the re-origination
+// hook are version-specific.
+fn config_ospfv3_interface_te_metric(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    op: ConfigOp,
+    set: impl FnOnce(&mut crate::ospf::link::LinkTeMetric, Option<u32>),
+) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
+    let name = args.string()?;
+    let value = args.u32()?;
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    let ifindex = link.index;
+    set(&mut link.config.te_metric, op.is_set().then_some(value));
+    ospf.e_router_v3_lsa_originate(ifindex);
+    Some(())
+}
+
+fn config_ospfv3_interface_te_delay(
+    ospf: &mut Ospf<Ospfv3>,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospfv3_interface_te_metric(ospf, args, op, |m, v| m.unidirectional_delay = v)
+}
+
+fn config_ospfv3_interface_te_min_delay(
+    ospf: &mut Ospf<Ospfv3>,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospfv3_interface_te_metric(ospf, args, op, |m, v| m.min_delay = v)
+}
+
+fn config_ospfv3_interface_te_max_delay(
+    ospf: &mut Ospf<Ospfv3>,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospfv3_interface_te_metric(ospf, args, op, |m, v| m.max_delay = v)
+}
+
+fn config_ospfv3_interface_te_delay_variation(
+    ospf: &mut Ospf<Ospfv3>,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospfv3_interface_te_metric(ospf, args, op, |m, v| m.delay_variation = v)
+}
+
+fn config_ospfv3_interface_te_loss(
+    ospf: &mut Ospf<Ospfv3>,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospfv3_interface_te_metric(ospf, args, op, |m, v| m.loss = v)
+}
+
+fn config_ospfv3_interface_te_measurement(
+    ospf: &mut Ospf<Ospfv3>,
+    mut args: Args,
+    set: impl FnOnce(&mut crate::stamp::session::MeasurementConfig, &mut Args) -> Option<()>,
+) -> Option<()> {
+    let _area_id = parse_area_id(&args.string()?)?;
+    let name = args.string()?;
+    let link = ospf_link_get_mut_by_name(&mut ospf.links, &name)?;
+    let ifindex = link.index;
+    set(&mut link.config.te_metric_measurement, &mut args)?;
+    ospf.stamp_reconcile_and_originate(ifindex);
+    Some(())
+}
+
+fn config_ospfv3_interface_te_measurement_enable(
+    ospf: &mut Ospf<Ospfv3>,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospfv3_interface_te_measurement(ospf, args, |m, args| {
+        let value = args.boolean()?;
+        m.enable = op.is_set().then_some(value);
+        Some(())
+    })
+}
+
+fn config_ospfv3_interface_te_measurement_interval(
+    ospf: &mut Ospf<Ospfv3>,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospfv3_interface_te_measurement(ospf, args, |m, args| {
+        let value = args.u32()?;
+        m.interval_ms = op.is_set().then_some(value);
+        Some(())
+    })
+}
+
+fn config_ospfv3_interface_te_measurement_damping_period(
+    ospf: &mut Ospf<Ospfv3>,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospfv3_interface_te_measurement(ospf, args, |m, args| {
+        let value = args.u32()?;
+        m.damping_period_secs = op.is_set().then_some(value);
+        Some(())
+    })
+}
+
+fn config_ospfv3_interface_te_measurement_anomaly_threshold(
+    ospf: &mut Ospf<Ospfv3>,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospfv3_interface_te_measurement(ospf, args, |m, args| {
+        let value = args.u32()?;
+        m.anomaly_threshold_us = op.is_set().then_some(value);
+        Some(())
+    })
+}
+
+fn config_ospfv3_interface_te_measurement_reuse_threshold(
+    ospf: &mut Ospf<Ospfv3>,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospfv3_interface_te_measurement(ospf, args, |m, args| {
+        let value = args.u32()?;
+        m.reuse_threshold_us = op.is_set().then_some(value);
+        Some(())
+    })
+}
+
 fn config_ospfv3_interface_cost(
     ospf: &mut Ospf<Ospfv3>,
     mut args: Args,
