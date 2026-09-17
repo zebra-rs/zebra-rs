@@ -7005,6 +7005,13 @@ pub fn route_soft_out_peer(peer_idx: usize, bgp: &mut BgpTop, peers: &mut PeerMa
     for rd in evpn_rds {
         route_soft_out_peer_table_evpn(peer_idx, rd, bgp, peers);
     }
+    // SAFI 71: a collector that asks for a refresh after changing its
+    // receive policy needs the topology replayed. Without this it gets
+    // nothing until the next IGP delta — and an unchanged LSDB produces
+    // none, so the feed can stay missing indefinitely.
+    if let Some(peer) = peers.get_mut_by_idx(peer_idx) {
+        route_sync_bgpls(peer, bgp);
+    }
 }
 
 /// Outbound soft-reconfiguration of one RD of the VPNv6 Loc-RIB toward one
@@ -11211,6 +11218,13 @@ pub fn route_bgpls_originate(
     if !ls_attr.is_empty() {
         attr.bgp_ls = Some(ls_attr);
     }
+    // ORIGIN and AS_PATH are well-known mandatory on any UPDATE that
+    // carries reachability (RFC 4271 §4.3), and MP_REACH does not
+    // exempt them (RFC 4760 §3). An originated row starts with an empty
+    // AS_SEQUENCE so the eBGP egress prepend has something to prepend
+    // to — `ebgp_egress_aspath` no-ops on `None`.
+    attr.origin = Some(Origin::Igp);
+    attr.aspath = Some(As4Path::from(Vec::<u32>::new()));
     let mut rib = BgpRib::new(
         ORIGINATED_PEER,
         Ipv4Addr::UNSPECIFIED,
@@ -11241,6 +11255,91 @@ fn bgpls_peer_idents(peers: &PeerMap) -> Vec<usize> {
     peers.established_idents(Afi::LinkState, Safi::LinkState)
 }
 
+/// Outbound-policy evaluation for a Link-State object, the SAFI-71
+/// analogue of [`route_apply_policy_out_evpn`].
+///
+/// A Link-State NLRI is a Node, Link or Prefix descriptor set, not an
+/// IP prefix, so the prefix-matching clauses of a policy have nothing
+/// to match against here and no prefix is invented to give them one.
+/// What is honoured is the binding itself: a peer with a policy bound
+/// whose list is unresolved or denies is not sent the feed, and one
+/// with no binding is. That is the difference between an accepted
+/// `deny` doing nothing at all — the state before this — and doing what
+/// it says. Matching on Link-State descriptors is a separate extension.
+fn bgpls_policy_out(peer: &mut Peer, attr: BgpAttr) -> Option<BgpAttr> {
+    let family = AfiSafi::new(Afi::LinkState, Safi::LinkState);
+    let config = peer.policy_list_at(family, InOut::Output);
+    if config.name.is_none() {
+        return Some(attr);
+    }
+    let Some(policy_list) = &config.policy_list else {
+        // A bound name that resolves to nothing denies: the operator
+        // asked for a filter and we cannot honour it.
+        return None;
+    };
+    // No prefix context, so only an unconditional clause is meaningful:
+    // the first entry that matches everything decides. A policy whose
+    // clauses all carry match conditions has nothing to say about a
+    // Link-State object and falls through to the implicit deny, as it
+    // would for any NLRI it does not match.
+    for entry in policy_list.entry.values() {
+        if !bgpls_entry_matches_everything(entry) {
+            continue;
+        }
+        return match entry.action {
+            crate::policy::PolicyAction::Permit => Some(attr),
+            crate::policy::PolicyAction::Deny => None,
+            crate::policy::PolicyAction::Next => continue,
+        };
+    }
+    None
+}
+
+/// True when a policy entry carries no match conditions, so it applies
+/// to every route regardless of family. Only such an entry can decide a
+/// Link-State object, which has no prefix, communities or AS path for
+/// the other clauses to test.
+fn bgpls_entry_matches_everything(entry: &crate::policy::PolicyEntry) -> bool {
+    entry.prefix_set_name.is_none()
+        && entry.community_set_name.is_none()
+        && entry.ext_community_set_name.is_none()
+        && entry.large_community_set_name.is_none()
+        && entry.as_path_set_name.is_none()
+        && entry.match_next_hop.is_none()
+        && entry.match_med.is_none()
+        && entry.match_as_path_len.is_none()
+        && entry.match_as_path_len_uniq.is_none()
+        && entry.match_local_pref.is_none()
+        && entry.match_weight.is_none()
+        && entry.match_origin.is_none()
+        && entry.match_evpn_route_type.is_none()
+        && entry.match_evpn_vni.is_none()
+        && entry.match_color.is_none()
+        && entry.match_tag.is_none()
+}
+
+/// The egress copy of a locally originated BGP-LS attribute for one
+/// peer: prepend our AS toward an external peer (RFC 4271 §5.1.2) and
+/// supply LOCAL_PREF toward an internal one (§5.1.5).
+///
+/// Without this an external collector sees an empty AS_PATH — which a
+/// peer enforcing first-AS rejects outright, as this implementation's
+/// own receive path does — and an internal one sees no LOCAL_PREF.
+fn bgpls_egress_attr(peer: &Peer, base: &BgpAttr) -> BgpAttr {
+    let mut attrs = base.clone();
+    if attrs.origin.is_none() {
+        attrs.origin = Some(Origin::Igp);
+    }
+    if attrs.aspath.is_none() {
+        attrs.aspath = Some(As4Path::from(Vec::<u32>::new()));
+    }
+    ebgp_egress_aspath(&peer.egress_as(), &mut attrs);
+    if peer.is_ibgp() && attrs.local_pref.is_none() {
+        attrs.local_pref = Some(LocalPref::default());
+    }
+    attrs
+}
+
 /// Advertise one locally originated Link-State object to every
 /// established BGP-LS peer.
 ///
@@ -11260,12 +11359,15 @@ pub(super) fn bgpls_origin_reach(bgp: &mut Bgp, nlri: &BgpLsNlri, attr: &BgpAttr
         let Some(peer) = bgp.peers.get_mut_by_idx(ident) else {
             continue;
         };
+        let Some(out_attr) = bgpls_policy_out(peer, bgpls_egress_attr(peer, attr)) else {
+            continue;
+        };
         let mut update = peer.update_packet();
         update.mp_update = Some(MpReachAttr::LinkState {
             nhop,
             updates: vec![nlri.clone()],
         });
-        update.bgp_attr = Some(attr.clone());
+        update.bgp_attr = Some(out_attr);
         if let Some(bytes) = update.pop_bgpls()
             && let Some(ref tx) = peer.packet_tx
         {
@@ -11311,12 +11413,15 @@ pub fn route_sync_bgpls(peer: &mut Peer, bgp: &BgpTop) {
         .map(|(nlri, rib)| (nlri.clone(), (*rib.attr).clone()))
         .collect();
     for (nlri, attr) in adverts {
+        let Some(out_attr) = bgpls_policy_out(peer, bgpls_egress_attr(peer, &attr)) else {
+            continue;
+        };
         let mut update = peer.update_packet();
         update.mp_update = Some(MpReachAttr::LinkState {
             nhop,
             updates: vec![nlri],
         });
-        update.bgp_attr = Some(attr);
+        update.bgp_attr = Some(out_attr);
         if let Some(bytes) = update.pop_bgpls()
             && let Some(ref tx) = peer.packet_tx
         {

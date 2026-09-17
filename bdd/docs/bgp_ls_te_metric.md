@@ -27,7 +27,10 @@ translates what it parsed into RFC 8571 attributes.
 
 A third node, lsc, plays the collector: it runs no IGP at all and
 peers with ls1 over BGP-LS alone, which is how a PCE or controller
-actually attaches. Everything in its RIB arrived over the wire, so
+actually attaches. It sits in a different AS and enforces first-AS, so
+the feed has to carry a well-formed AS_PATH with ls1's AS at the
+front — an originated object whose AS_PATH was left empty is rejected
+outright, and the session shows it. Everything in its RIB arrived over the wire, so
 that is where the BGP half of the round trip can be observed — the
 RFC 8571 attributes and the RFC 9294 ASLA TLV emitted into an UPDATE,
 parsed by the receiver, and rendered from the decode.

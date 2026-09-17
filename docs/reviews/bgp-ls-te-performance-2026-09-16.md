@@ -1,5 +1,7 @@
 # BGP-LS TE performance export review
 
+Status update (2026-09-17): `09b6fc6f` implements outbound advertisement and establishment synchronization for locally originated BGP-LS objects. The older transmission limitation below is historical. Peer-specific attribute, policy, refresh, and size-limit findings are recorded in the [BGP-LS feed review](bgp-ls-feed-2026-09-17.md). Strict external-controller delivery and ASLA internals remain unverified by this review.
+
 Reviewed commit `06c19727009c5134705c1347de64fe2592bafa69` on 2026-09-16. Scope includes the IS-IS performance-metric export, new accessors, BGP-LS display, and the accompanying Flex-Algo receive change. Implementation source was not changed.
 
 ## Current review: `68851ee7` and `224a49cb`

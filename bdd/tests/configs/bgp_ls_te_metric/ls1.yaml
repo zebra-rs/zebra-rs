@@ -41,7 +41,7 @@ router:
       - name: link-state
         enabled: true
     - remote-address: 192.168.73.2
-      remote-as: 65071
+      remote-as: 65072
       enabled: true
       afi-safi:
       - name: link-state

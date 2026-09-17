@@ -412,6 +412,16 @@ impl UpdatePacket {
         }
         super::attrs::mp_reach::linkstate_attr_emit(&nhop, &updates, buf.get_mut());
 
+        // `get_mut()` hands out the growable `BytesMut` underneath, so
+        // the emitters above are not capacity-checked. A single object
+        // whose BGP-LS Attribute is larger than the negotiated maximum
+        // cannot be split into a smaller message — batching only helps
+        // multiple NLRIs — so it is dropped rather than framed as an
+        // UPDATE the peer is not allowed to receive (RFC 9552 §5.3).
+        // The queue is drained either way: retrying would just rebuild
+        // the same oversized message forever.
+        let oversize = buf.len() > self.max_packet_size;
+
         let attr_len: u16 = (buf.len() - attr_len_pos - 2) as u16;
         let _ = buf.put_u16_at(attr_len_pos, attr_len);
         let length: u16 = buf.len() as u16;
@@ -419,6 +429,9 @@ impl UpdatePacket {
 
         if let Some(MpReachAttr::LinkState { updates, .. }) = self.mp_update.as_mut() {
             updates.clear();
+        }
+        if oversize {
+            return None;
         }
         Some(buf.get())
     }
@@ -443,6 +456,16 @@ impl UpdatePacket {
             mp.attr_emit(buf.get_mut());
         }
 
+        // `get_mut()` hands out the growable `BytesMut` underneath, so
+        // the emitters above are not capacity-checked. A single object
+        // whose BGP-LS Attribute is larger than the negotiated maximum
+        // cannot be split into a smaller message — batching only helps
+        // multiple NLRIs — so it is dropped rather than framed as an
+        // UPDATE the peer is not allowed to receive (RFC 9552 §5.3).
+        // The queue is drained either way: retrying would just rebuild
+        // the same oversized message forever.
+        let oversize = buf.len() > self.max_packet_size;
+
         let attr_len: u16 = (buf.len() - attr_len_pos - 2) as u16;
         let _ = buf.put_u16_at(attr_len_pos, attr_len);
         let length: u16 = buf.len() as u16;
@@ -450,6 +473,9 @@ impl UpdatePacket {
 
         if let Some(MpUnreachAttr::LinkState { withdraws }) = self.mp_withdraw.as_mut() {
             withdraws.clear();
+        }
+        if oversize {
+            return None;
         }
         Some(buf.get())
     }
