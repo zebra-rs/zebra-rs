@@ -452,7 +452,7 @@ router isis {
 | Populate min-delay + max-delay | Flex-Algo metric-type 1 and Min/Max sub-TLV origination require both |
 | Unauthenticated first | Auth does not interwork between TWAMP and STAMP |
 | RFC 9503 in Phase 3 | Tier 1 sufficient for on-link IP probes; 9503 needed for SR-MPLS same-path PM |
-| OSPF gated on SR-MPLS | Extended-Link Opaque / ASLA only originated with `segment-routing / mpls` today |
+| ~~OSPF gated on SR-MPLS~~ | RESOLVED: SR gates the Adj-SID/End.X contributions, not the Extended-Link Opaque or E-Router LSA, so `te-metric` originates without SR on both versions |
 
 ---
 

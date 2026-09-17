@@ -12,7 +12,7 @@ step 1 are marked accordingly; everything else is as first reviewed.
 
 Measured against the three layers in the stamp document:
 
-- **Pattern A (link PM feeding IGP TE metrics)** is partially implemented: IS-IS and OSPFv2 support STAMP-derived delay advertisements and Flex-Algo min-delay SPF. OSPFv3 does not have the corresponding measurement, metric advertisement, or delay-SPF integration. Neither RFC is fully implemented end to end.
+- **Pattern A (link PM feeding IGP TE metrics)** is implemented on all three IGPs — IS-IS, OSPFv2 and OSPFv3 — for STAMP-derived delay advertisement and Flex-Algo min-delay SPF. Neither RFC is fully implemented end to end: loss is never measured and the bandwidth attributes are absent or originate nowhere.
 - **Pattern B (IGP auto-discovery of STAMP endpoints)** is absent. Sessions are derived from IGP adjacency state instead of from flooded measurement-group membership.
 - **Pattern C (consumers of the flooded metrics)** is limited to Flex-Algo metric-type 1. BGP-LS export and SR path PM are not wired up.
 
@@ -21,10 +21,10 @@ Measured against the three layers in the stamp document:
 | Average delay, min/max delay, delay variation, loss codecs | Implemented: sub-TLVs 33–36 | Implemented: sub-TLVs 27–30 |
 | Residual, available, utilized bandwidth codecs | Implemented: sub-TLVs 37–39 | No typed support found |
 | Static delay/loss configuration | Implemented | OSPFv2 only |
-| Metric advertisement | Inline TLV 22/222 and Flex-Algo ASLA | ASLA in OSPFv2 Extended-Link Opaque LSA; requires `segment-routing mpls` |
+| Metric advertisement | Inline TLV 22/222 and Flex-Algo ASLA | ASLA in the OSPFv2 Extended-Link Opaque LSA and the OSPFv3 E-Router-LSA; no Segment Routing required |
 | STAMP feeding advertised delay metrics | P2P, IPv4 or IPv6 | OSPFv2 P2P, IPv4 |
 | Anomalous bit origination | Implemented; per-value bits, per-IGP thresholds | Implemented; per-value bits, per-IGP thresholds |
-| Flex-Algo min-delay SPF | Implemented | OSPFv2 implemented; OSPFv3 still uses IGP cost |
+| Flex-Algo min-delay SPF | Implemented | Implemented on both versions |
 | STAMP endpoint auto-discovery (AMG) | Not implemented | Not implemented |
 | BGP-LS export of measured metrics | Not implemented | Not implemented |
 
@@ -42,7 +42,7 @@ Measured against the three layers in the stamp document:
 
 - [Packet codecs](../../crates/ospf-packet/src/parser.rs) support delay/loss types 27–30 inside ASLA in Extended-Link LSAs.
 - [Configuration](../../zebra-rs/src/ospf/config.rs) and [per-interface metric builders](../../zebra-rs/src/ospf/link.rs) support the same five configurable fields as IS-IS.
-- [Instance integration and origination](../../zebra-rs/src/ospf/inst.rs) subscribe enabled IPv4 P2P links with a Full adjacency, apply measured snapshots, and refresh Extended-Link Opaque LSAs. Origination is gated on SR-MPLS being enabled.
+- [Instance integration and origination](../../zebra-rs/src/ospf/inst.rs) subscribe enabled IPv4 P2P links with a Full adjacency, apply measured snapshots, and refresh Extended-Link Opaque LSAs. Origination no longer requires SR-MPLS: Segment Routing gates the Adj-SID contributions to that LSA, not the LSA itself.
 - Flex-Algo metric-type 1 reads minimum delay from advertised ASLA and uses it as the SPF edge cost.
 
 For both protocols, static configuration overrides measured values per field. Unconfigured fields use the measurement.
@@ -59,7 +59,7 @@ That pruning is correct, not a gap. RFC 9350 §12 requires Flex-Algorithm link a
 2. **Measured loss export:** [STAMP statistics](../../zebra-rs/src/stamp/stats.rs) count sent/received probes for display, but explicitly exclude loss from IGP exports. Static loss advertisement exists.
 3. **Bandwidth integration:** IS-IS packet codecs exist, but its per-interface metric model has no residual/available/utilized bandwidth fields. OSPF has no typed support for the corresponding bandwidth metrics. STAMP itself is not the source of these bandwidth values.
 4. **OSPF carriers:** The implemented OSPFv2 path is application-specific Extended-Link advertisement. The classic TE Opaque LSA Link TLV path described in the stamp document is absent.
-5. **OSPFv3:** No corresponding `te-metric` configuration is registered in [config_v3.rs](../../zebra-rs/src/ospf/config_v3.rs). STAMP subscription address selection accepts IPv4 pairs only. The OSPFv3 Flex-Algo graph uses Router-LSA IGP metrics rather than minimum delay.
+5. ~~**OSPFv3:** no `te-metric` configuration, IPv4-only STAMP address selection, and a Flex-Algo graph costing on the IGP metric.~~ **Delivered** (#2387): the full config tree under `router ospfv3`, IPv6 link-local STAMP sessions, origination into the E-Router-LSA ASLA at OSPFv3 code points 13-16, and metric-type-1 SPF with RFC 9350 §15 pruning.
 6. **Circuit types:** Measurement is gated on a P2P circuit in both IGPs, so broadcast/LAN adjacencies are never measured — a LAN link can only carry statically configured metrics.
 7. **LAG member measurement:** [RFC9534](https://www.rfc-editor.org/rfc/rfc9534.html) micro-sessions are not implemented; there is no per-member session model, so a bundle is measured as one link or not at all.
 
@@ -120,7 +120,7 @@ and a params-only config edit must re-subscribe in place rather than
 unsubscribe, or it discards the hysteresis and silently clears a standing
 bit. The original reasoning is kept below as written.
 
-The only remaining piece of the RFC8570 §5 / RFC7471 §5 advertisement contract. Both metric builders currently hard-code `anomalous: false`, so the daemon asserts "not anomalous" without ever evaluating the condition. Every other gap is either outside the RFCs (measurement quality, cost fallback) or a coverage extension (OSPFv3, bandwidth, LAN).
+The only remaining piece of the RFC8570 §5 / RFC7471 §5 advertisement contract. Both metric builders currently hard-code `anomalous: false`, so the daemon asserts "not anomalous" without ever evaluating the condition. Every other gap is either outside the RFCs (measurement quality, cost fallback) or a coverage extension (OSPFv3 — since delivered — bandwidth, LAN).
 
 Structurally cheap, because the measurement side is already shared: thresholds extend the existing `MeasurementConfig`, detection lands in [damping](../../zebra-rs/src/stamp/damping.rs), and each IGP needs only a small plumb into its `sub_tlvs()` / `asla_sub_subs()` builder. One change covers both protocols.
 
@@ -136,7 +136,7 @@ Anomaly-driven IGP/TE cost fallback is a routing action outside both RFCs; it be
 
 The performance TLVs and application-specific translation are implemented in [`link_attr`](../../zebra-rs/src/isis/bgp_ls.rs). The remaining step for controller delivery is outbound BGP-LS advertisement to external peers. Validate that path by receiving BGP UPDATEs on a peer and decoding the performance attributes and TLV 1122 application masks. Local RIB display and IS-IS round-trip tests do not establish controller delivery.
 
-### 3. OSPFv3 TE metrics
+### 3. OSPFv3 TE metrics — DELIVERED (#2387)
 
 The largest remaining asymmetry: an IPv6-only fabric can measure and advertise delay through IS-IS today, but has nowhere to publish it on the OSPF side. Largest single item, though nearly all of it mirrors existing v2 and IS-IS code. Components: delay/loss variants in `Ospfv3AslaSubSubTlv`, `te-metric` registration in [config_v3.rs](../../zebra-rs/src/ospf/config_v3.rs), origination into the E-Router-LSA ASLA, IPv6 pair support in `stamp_reconcile_link` (which currently accepts IPv4 pairs only — the IS-IS v4-preferred / v6-link-local rule is the model), and the delay join in the v3 Flex-Algo graph.
 

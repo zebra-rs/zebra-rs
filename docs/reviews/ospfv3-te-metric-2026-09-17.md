@@ -48,8 +48,9 @@ No BDD exercises delay-based path switching, endpoint renumbering, or
 malformed-packet receive handling; those rest on selector unit tests
 built from constructed ASLAs. The two topologies here cover origination,
 measurement, and the static-over-measured merge. Interop against another
-implementation is untested, and the SR origination gate, static-only
-loss and absent bandwidth variants remain implementation limits.
+implementation is untested. Static-only loss and the absent bandwidth
+variants remain implementation limits; the SR origination gate was
+removed in `d5c268ea`.
 
 ## Current re-review: `7b8bc851`
 
@@ -64,7 +65,7 @@ Validation:
 - `git diff --check f7d774ae HEAD`: passed.
 - BDD was not run. Live delay-based path switching and STAMP endpoint renumbering remain unverified by this review.
 
-The SR origination gate, static-only loss support, and absent bandwidth metric variants remain implementation limits rather than new findings. Historical review sections below retain the issues as originally reported.
+Static-only loss support and absent bandwidth metric variants remain implementation limits rather than new findings; the SR origination gate was removed in `d5c268ea`, after this review. Historical review sections below retain the issues as originally reported.
 
 ## Previous re-review: `f7d774ae`
 
@@ -174,7 +175,7 @@ Reconcile STAMP in the source-change handler so the old subscription ends, its m
 | Per-value anomaly flags and static-over-measured merge | Shared with OSPFv2; OSPFv3 rendering implemented |
 | IPv6 P2P STAMP measurement | Subscription, event-loop consumption, and E-Router-LSA refresh implemented; renumber gap above |
 | Delay-based Flex-Algo SPF | Delay join and missing-delay pruning implemented; local recalculation and zero-mask selection gaps above |
-| Advertisement without SR | Not supported: origination requires SR-MPLS or active SRv6; documented in YANG |
+| Advertisement without SR | Supported since `d5c268ea`: SR gates the Adj-SID and End.X contributions, not the E-Router-LSA |
 | Measured loss and bandwidth metrics | Not supplied by this change; loss is static-only and bandwidth variants are absent |
 | Live route-selection validation | Not established by this review |
 

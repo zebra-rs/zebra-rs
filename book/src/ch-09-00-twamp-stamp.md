@@ -35,6 +35,7 @@ consumption — end to end:
 |---|---|---|---|
 | IS-IS | yes — IPv4 and IPv6 link-local | RFC 8570 sub-TLVs, inline + ASLA | yes |
 | OSPFv2 | yes — IPv4 | RFC 7471 attributes in ASLA | yes |
+| OSPFv3 | yes — IPv6 link-local | RFC 7471 attributes in ASLA | yes |
 
 The per-interface `te-metric` fields can be **driven two ways**, and the
 two are interchangeable because they write the same struct:
@@ -52,10 +53,10 @@ link the configured value wins **per field** — a hand-set bound is
 authoritative and the measured stream backfills only the fields left
 unset.
 
-> **OSPFv3** has no TE-metric origination, so there is nowhere to publish
-> an IPv6 delay on the OSPF side; IPv6 measurement is therefore an IS-IS
-> feature, riding the link's IPv6 link-local adjacency. OSPFv2 is
-> IPv4-only on the wire. See [The measurement plane](#the-measurement-plane).
+> **Address families** — OSPFv2 is IPv4-only on the wire, so it cannot
+> measure a link that carries no IPv4. IS-IS and OSPFv3 both measure over
+> the link's IPv6 link-local pair, so an IPv6-only fabric is fully
+> covered by either. See [The measurement plane](#the-measurement-plane).
 
 ## Configuration
 
@@ -112,6 +113,29 @@ router ospf {
 attribute and are emitted only when **both** are set — a half-populated
 bound would be a meaningless wire artifact. Statically configured values
 carry a clear Anomalous flag.
+
+### OSPFv3
+
+Identical to OSPFv2, under `router ospfv3`:
+
+```
+router ospfv3 {
+  area 0 {
+    interface eth1 {
+      te-metric {
+        unidirectional-delay 1000;
+        min-delay 900;
+        max-delay 1200;
+        delay-variation 50;
+        loss 0;
+      }
+    }
+  }
+}
+```
+
+The leaves, ranges and units are the same as the OSPFv2 table above —
+the values are shared, and only the wire code points differ.
 
 ### Measured delay (`te-metric measurement`)
 
@@ -201,12 +225,28 @@ The wire shapes are byte-identical to the IS-IS sub-TLVs above (a 1-bit
 Anomalous flag and a 24-bit value, in microseconds); only the code
 points differ.
 
-> **Note** — OSPFv2 originates the Extended-Link Opaque LSA only when
-> Segment Routing over MPLS is enabled (`router ospf / segment-routing /
-> mpls`). Because that LSA is where the ASLA — and therefore the
-> metrics — ride, OSPF advertises `te-metric` only when SR-MPLS is on.
-> This matches how Flex-Algo affinity is already gated and is the
-> expected configuration for delay-based Flex-Algorithm.
+### OSPFv3 (RFC 7471 values, OSPFv3 code points)
+
+OSPFv3 carries the same four attributes in the ASLA of its E-Router-LSA
+(RFC 8362) Router-Link TLV. The *values* are the RFC 7471 encodings
+unchanged — same Anomalous bit, same 24-bit fields — but the code points
+come from the OSPFv3 Extended-LSA sub-TLV registry, not the OSPFv2 TE
+Opaque LSA one:
+
+| Sub-sub-TLV | OSPFv3 code | OSPFv2 code |
+|---|---|---|
+| Unidirectional Link Delay | 13 | 27 |
+| Min/Max Unidirectional Link Delay | 14 | 28 |
+| Unidirectional Delay Variation | 15 | 29 |
+| Unidirectional Link Loss | 16 | 30 |
+
+> **Segment Routing is not required.** Both LSAs that carry the ASLA —
+> the OSPFv2 Extended-Link Opaque LSA and the OSPFv3 E-Router-LSA — used
+> to be originated only when SR was enabled, which meant configuring
+> `te-metric` without SR advertised nothing at all, silently. SR now
+> gates the Adj-SID and End.X contributions to those LSAs rather than
+> the LSAs themselves, so `te-metric` works on its own. All three IGPs
+> now behave the same way.
 
 ## Flexible Algorithm consumption
 
