@@ -197,6 +197,86 @@ impl IsisTlvExtIsReachEntry {
         })
     }
 
+    /// Every link-attribute sub-TLV this entry carries: the inline
+    /// copies first, then any nested inside an ASLA sub-TLV (RFC 9479).
+    ///
+    /// Both carriers are legal for the RFC 8570 performance metrics and
+    /// we originate both, but other implementations pick one — a reader
+    /// that looks in a single place silently drops the other half of
+    /// the deployments. Application scoping is deliberately *not*
+    /// applied here: these accessors serve consumers like BGP-LS, whose
+    /// TLVs are the generic link attributes. Flex-Algorithm has its own
+    /// X-bit-aware read, because there the application mask is load
+    /// bearing (RFC 9350 §12).
+    fn link_attr_subs(&self) -> impl Iterator<Item = &IsisSubTlv> {
+        self.subs.iter().chain(
+            self.subs
+                .iter()
+                .filter_map(|s| match s {
+                    IsisSubTlv::Asla(a) => Some(a.subs.iter()),
+                    _ => None,
+                })
+                .flatten(),
+        )
+    }
+
+    /// Unidirectional Link Delay (sub-TLV 33, RFC 8570 §4.1).
+    pub fn uni_link_delay(&self) -> Option<&IsisSubUniLinkDelay> {
+        self.link_attr_subs().find_map(|s| match s {
+            IsisSubTlv::UniLinkDelay(v) => Some(v),
+            _ => None,
+        })
+    }
+
+    /// Min/Max Unidirectional Link Delay (sub-TLV 34, RFC 8570 §4.2).
+    pub fn min_max_link_delay(&self) -> Option<&IsisSubMinMaxLinkDelay> {
+        self.link_attr_subs().find_map(|s| match s {
+            IsisSubTlv::MinMaxLinkDelay(v) => Some(v),
+            _ => None,
+        })
+    }
+
+    /// Unidirectional Delay Variation (sub-TLV 35, RFC 8570 §4.3).
+    pub fn delay_variation(&self) -> Option<&IsisSubDelayVariation> {
+        self.link_attr_subs().find_map(|s| match s {
+            IsisSubTlv::DelayVariation(v) => Some(v),
+            _ => None,
+        })
+    }
+
+    /// Unidirectional Link Loss (sub-TLV 36, RFC 8570 §4.4).
+    pub fn link_loss(&self) -> Option<&IsisSubLinkLoss> {
+        self.link_attr_subs().find_map(|s| match s {
+            IsisSubTlv::LinkLoss(v) => Some(v),
+            _ => None,
+        })
+    }
+
+    /// Unidirectional Residual Bandwidth (sub-TLV 37, RFC 8570 §4.5),
+    /// in bytes per second.
+    pub fn residual_bw(&self) -> Option<f32> {
+        self.link_attr_subs().find_map(|s| match s {
+            IsisSubTlv::ResidualBw(v) => Some(v.bw.bw_bps),
+            _ => None,
+        })
+    }
+
+    /// Unidirectional Available Bandwidth (sub-TLV 38, RFC 8570 §4.6).
+    pub fn available_bw(&self) -> Option<f32> {
+        self.link_attr_subs().find_map(|s| match s {
+            IsisSubTlv::AvailableBw(v) => Some(v.bw.bw_bps),
+            _ => None,
+        })
+    }
+
+    /// Unidirectional Utilized Bandwidth (sub-TLV 39, RFC 8570 §4.7).
+    pub fn utilized_bw(&self) -> Option<f32> {
+        self.link_attr_subs().find_map(|s| match s {
+            IsisSubTlv::UtilizedBw(v) => Some(v.bw.bw_bps),
+            _ => None,
+        })
+    }
+
     fn len(&self) -> u8 {
         // 11 is the entry length without sub-TLVs. usize + min keeps the
         // packer's wire_len() probe of an over-full entry debug-safe

@@ -5658,10 +5658,14 @@ fn show_bgp_link_state(
 }
 
 /// Compact one-line summary of the high-value BGP-LS Attribute TLVs (RFC
-/// 9552 §4) the IS-IS producer emits: IGP metric (1095, 3-octet), prefix
-/// metric (1155, 4-octet), admin-group (1088, 4-octet hex), TE default
-/// metric (1092, 4-octet). Unknown/other TLVs are summarized by count so
-/// the line stays readable.
+/// 9552 §4, RFC 8571) the IS-IS producer emits: IGP metric (1095,
+/// 3-octet), prefix metric (1155, 4-octet), admin-group (1088, 4-octet
+/// hex), TE default metric (1092, 4-octet), and the measured delay set
+/// (1114/1115/1117) with its Anomalous flag. Unknown/other TLVs are
+/// summarized by count so the line stays readable.
+///
+/// Lengths are checked before slicing: these values arrive from a peer,
+/// and a short TLV must render as "+1 more", not panic.
 fn show_bgp_ls_attr(attr: &BgpLsAttr) -> String {
     fn be(bytes: &[u8]) -> u64 {
         bytes.iter().fold(0u64, |acc, b| (acc << 8) | *b as u64)
@@ -5679,12 +5683,68 @@ fn show_bgp_ls_attr(attr: &BgpLsAttr) -> String {
     if let Some(v) = attr.get(BGPLS_ATTR_ADMIN_GROUP) {
         parts.push(format!("admin-group 0x{:08x}", be(v) as u32));
     }
+    // RFC 8571: A bit in the top bit of octet 0, value in the low 24.
+    let anomalous = |v: &[u8]| if v[0] & 0x80 != 0 { " [A]" } else { "" };
+    if let Some(v) = attr.get(BGPLS_ATTR_UNI_LINK_DELAY)
+        && v.len() == 4
+    {
+        parts.push(format!("delay {}us{}", be(&v[1..4]), anomalous(v)));
+    }
+    if let Some(v) = attr.get(BGPLS_ATTR_MIN_MAX_LINK_DELAY)
+        && v.len() == 8
+    {
+        parts.push(format!(
+            "min/max-delay {}/{}us{}",
+            be(&v[1..4]),
+            be(&v[5..8]),
+            anomalous(v)
+        ));
+    }
+    if let Some(v) = attr.get(BGPLS_ATTR_LINK_LOSS)
+        && v.len() == 4
+    {
+        // RFC 8571 §2.4 units are 0.000003 % per LSB.
+        let pct = be(&v[1..4]) as f64 * 0.000003;
+        parts.push(format!("loss {pct:.6}%{}", anomalous(v)));
+    }
     let known = parts.len();
     let extra = attr.tlvs.len().saturating_sub(known);
     if extra > 0 {
         parts.push(format!("+{extra} more"));
     }
     parts.join(", ")
+}
+
+#[cfg(test)]
+mod bgp_ls_show_tests {
+    use super::*;
+
+    #[test]
+    fn summary_renders_measured_delay_with_the_anomalous_flag() {
+        let mut attr = BgpLsAttr::new();
+        attr.push(BGPLS_ATTR_IGP_METRIC, vec![0, 0, 10]);
+        attr.push(BGPLS_ATTR_UNI_LINK_DELAY, vec![0x80, 0x00, 0x03, 0xe8]);
+        attr.push(
+            BGPLS_ATTR_MIN_MAX_LINK_DELAY,
+            vec![0x00, 0x00, 0x03, 0x84, 0x00, 0x00, 0x04, 0xb0],
+        );
+        let line = show_bgp_ls_attr(&attr);
+        assert!(line.contains("delay 1000us [A]"), "{line}");
+        assert!(line.contains("min/max-delay 900/1200us"), "{line}");
+        assert!(!line.contains("more"), "all TLVs accounted for: {line}");
+    }
+
+    /// These bytes come off the wire. A peer sending a truncated delay
+    /// TLV must fall through to the "+N more" count, not panic on the
+    /// slice.
+    #[test]
+    fn summary_survives_a_short_delay_tlv() {
+        let mut attr = BgpLsAttr::new();
+        attr.push(BGPLS_ATTR_UNI_LINK_DELAY, vec![0x80, 0x00]);
+        attr.push(BGPLS_ATTR_MIN_MAX_LINK_DELAY, vec![]);
+        let line = show_bgp_ls_attr(&attr);
+        assert_eq!(line, "+2 more", "{line}");
+    }
 }
 
 #[cfg(test)]

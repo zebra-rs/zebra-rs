@@ -23,10 +23,12 @@
 use std::collections::BTreeMap;
 
 use bgp_packet::{
-    BGPLS_ATTR_ADMIN_GROUP, BGPLS_ATTR_EXT_ADMIN_GROUP, BGPLS_ATTR_IGP_METRIC,
-    BGPLS_ATTR_PREFIX_METRIC, BGPLS_ATTR_TE_DEFAULT_METRIC, BgpLsAttr, BgpLsNlri, LsLinkDescriptor,
-    LsLinkNlri, LsNodeDescSub, LsNodeDescriptor, LsNodeNlri, LsPrefixDescriptor, LsPrefixNlri,
-    LsProtocolId,
+    BGPLS_ATTR_ADMIN_GROUP, BGPLS_ATTR_AVAILABLE_BANDWIDTH, BGPLS_ATTR_DELAY_VARIATION,
+    BGPLS_ATTR_EXT_ADMIN_GROUP, BGPLS_ATTR_IGP_METRIC, BGPLS_ATTR_LINK_LOSS,
+    BGPLS_ATTR_MIN_MAX_LINK_DELAY, BGPLS_ATTR_PREFIX_METRIC, BGPLS_ATTR_RESIDUAL_BANDWIDTH,
+    BGPLS_ATTR_TE_DEFAULT_METRIC, BGPLS_ATTR_UNI_LINK_DELAY, BGPLS_ATTR_UTILIZED_BANDWIDTH,
+    BgpLsAttr, BgpLsNlri, LsLinkDescriptor, LsLinkNlri, LsNodeDescSub, LsNodeDescriptor,
+    LsNodeNlri, LsPrefixDescriptor, LsPrefixNlri, LsProtocolId,
 };
 use ipnet::IpNet;
 use isis_packet::{IsisLsp, IsisSysId, IsisTlv, IsisTlvExtIsReachEntry};
@@ -66,12 +68,19 @@ fn ip_reach(net: IpNet) -> LsPrefixDescriptor {
 /// Empty when the source TLV had no translatable attributes.
 type Object = (BgpLsNlri, BgpLsAttr);
 
-/// Build the Link Attribute TLVs (RFC 9552 §4.2) for one IS-IS adjacency:
-/// IGP metric (1095, the base TLV-22 metric), and — when the entry carries
-/// the corresponding sub-TLVs — admin-group (1088), extended admin-group
-/// (1173), and TE default metric (1092). Max-link-bandwidth (1089) is omitted:
-/// the IS-IS link sub-TLV set parsed here has no max-bandwidth variant (only
-/// residual/available/utilized), so there is nothing to translate yet.
+/// Build the Link Attribute TLVs (RFC 9552 §4.2, RFC 8571) for one IS-IS
+/// adjacency: IGP metric (1095, the base TLV-22 metric), and — when the entry
+/// carries the corresponding sub-TLVs — admin-group (1088), extended
+/// admin-group (1173), TE default metric (1092), and the RFC 8571 performance
+/// set (1114-1120) translated from the RFC 8570 sub-TLVs 33-39.
+///
+/// Max-link-bandwidth (1089) stays omitted: the IS-IS link sub-TLV set has no
+/// max-bandwidth variant, only residual/available/utilized, and those have
+/// their own code points.
+///
+/// The performance values are re-emitted byte-for-byte — RFC 8571 reuses the
+/// IGP field layout, A bit included — so a controller sees exactly what the
+/// IGP advertised, anomalies and all.
 fn link_attr(e: &IsisTlvExtIsReachEntry) -> BgpLsAttr {
     let mut attr = BgpLsAttr::new();
     // IGP metric is a 3-octet value in BGP-LS (RFC 9552 §4.2; 1, 2, or 3
@@ -92,7 +101,54 @@ fn link_attr(e: &IsisTlvExtIsReachEntry) -> BgpLsAttr {
     if let Some(te) = e.te_metric() {
         attr.push(BGPLS_ATTR_TE_DEFAULT_METRIC, te.to_be_bytes().to_vec());
     }
+    push_te_performance(&mut attr, e);
     attr
+}
+
+/// `A` in the top bit, the value in the low 24 — the shared shape of
+/// RFC 8571's delay and loss TLVs.
+fn anomalous_u24(anomalous: bool, value: u32) -> u32 {
+    let a = if anomalous { 0x8000_0000 } else { 0 };
+    a | (value & 0x00FF_FFFF)
+}
+
+/// Append the RFC 8571 performance TLVs this entry can supply. Each is
+/// emitted only when the source sub-TLV is present, so a link with no
+/// measurement contributes nothing rather than a run of zeroes.
+fn push_te_performance(attr: &mut BgpLsAttr, e: &IsisTlvExtIsReachEntry) {
+    if let Some(d) = e.uni_link_delay() {
+        let value = anomalous_u24(d.anomalous, d.delay);
+        attr.push(BGPLS_ATTR_UNI_LINK_DELAY, value.to_be_bytes().to_vec());
+    }
+    if let Some(d) = e.min_max_link_delay() {
+        // One A bit, covering both bounds; the max word's top octet is
+        // reserved and sent as zero.
+        let mut value = anomalous_u24(d.anomalous, d.min_delay)
+            .to_be_bytes()
+            .to_vec();
+        value.extend_from_slice(&(d.max_delay & 0x00FF_FFFF).to_be_bytes());
+        attr.push(BGPLS_ATTR_MIN_MAX_LINK_DELAY, value);
+    }
+    if let Some(v) = e.delay_variation() {
+        // No A bit here — RFC 8571 §2.3 leaves the octet reserved.
+        let value = v.variation & 0x00FF_FFFF;
+        attr.push(BGPLS_ATTR_DELAY_VARIATION, value.to_be_bytes().to_vec());
+    }
+    if let Some(l) = e.link_loss() {
+        let value = anomalous_u24(l.anomalous, l.loss);
+        attr.push(BGPLS_ATTR_LINK_LOSS, value.to_be_bytes().to_vec());
+    }
+    // Bandwidths are IEEE 754 single-precision bytes/sec on both sides,
+    // so the bit pattern carries across unchanged.
+    for (tlv, bw) in [
+        (BGPLS_ATTR_RESIDUAL_BANDWIDTH, e.residual_bw()),
+        (BGPLS_ATTR_AVAILABLE_BANDWIDTH, e.available_bw()),
+        (BGPLS_ATTR_UTILIZED_BANDWIDTH, e.utilized_bw()),
+    ] {
+        if let Some(bw) = bw {
+            attr.push(tlv, bw.to_bits().to_be_bytes().to_vec());
+        }
+    }
 }
 
 /// Build the Prefix Attribute TLVs (RFC 9552 §4.3): the Prefix Metric
@@ -494,6 +550,145 @@ mod tests {
 
         let attr = link_attr(&entry);
         assert_eq!(attr.get(BGPLS_ATTR_EXT_ADMIN_GROUP), None);
+    }
+
+    /// The RFC 8571 performance TLVs are a byte-for-byte re-emit of the
+    /// RFC 8570 sub-TLVs, A bit included — the whole point is that a
+    /// controller sees what the IGP advertised.
+    #[test]
+    fn link_attr_maps_te_performance_to_1114_1117() {
+        use isis_packet::{
+            IsisSubDelayVariation, IsisSubLinkLoss, IsisSubMinMaxLinkDelay, IsisSubUniLinkDelay,
+        };
+        let entry = IsisTlvExtIsReachEntry {
+            neighbor_id: IsisNeighborId::from_sys_id(&sysid(2), 0),
+            metric: 10,
+            subs: vec![
+                IsisSubUniLinkDelay {
+                    anomalous: true,
+                    delay: 0x0012_3456,
+                }
+                .into(),
+                IsisSubMinMaxLinkDelay {
+                    anomalous: false,
+                    min_delay: 0x0000_0900,
+                    max_delay: 0x0000_1200,
+                }
+                .into(),
+                IsisSubDelayVariation { variation: 0x32 }.into(),
+                IsisSubLinkLoss {
+                    anomalous: true,
+                    loss: 0x0000_0333,
+                }
+                .into(),
+            ],
+        };
+
+        let attr = link_attr(&entry);
+        // A bit in the top bit of octet 0, value in the low 24.
+        assert_eq!(
+            attr.get(BGPLS_ATTR_UNI_LINK_DELAY),
+            Some(&[0x80, 0x12, 0x34, 0x56][..])
+        );
+        // One A bit for both bounds; the max word's top octet reserved.
+        assert_eq!(
+            attr.get(BGPLS_ATTR_MIN_MAX_LINK_DELAY),
+            Some(&[0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x12, 0x00][..])
+        );
+        // Delay variation has no A bit — octet 0 stays reserved.
+        assert_eq!(
+            attr.get(BGPLS_ATTR_DELAY_VARIATION),
+            Some(&[0x00, 0x00, 0x00, 0x32][..])
+        );
+        assert_eq!(
+            attr.get(BGPLS_ATTR_LINK_LOSS),
+            Some(&[0x80, 0x00, 0x03, 0x33][..])
+        );
+    }
+
+    /// A link with no measurement contributes no performance TLVs,
+    /// rather than a run of zeroes a controller would read as "0 us".
+    #[test]
+    fn link_attr_omits_absent_te_performance() {
+        let entry = IsisTlvExtIsReachEntry {
+            neighbor_id: IsisNeighborId::from_sys_id(&sysid(2), 0),
+            metric: 10,
+            subs: vec![],
+        };
+        let attr = link_attr(&entry);
+        for tlv in [
+            BGPLS_ATTR_UNI_LINK_DELAY,
+            BGPLS_ATTR_MIN_MAX_LINK_DELAY,
+            BGPLS_ATTR_DELAY_VARIATION,
+            BGPLS_ATTR_LINK_LOSS,
+            BGPLS_ATTR_RESIDUAL_BANDWIDTH,
+            BGPLS_ATTR_AVAILABLE_BANDWIDTH,
+            BGPLS_ATTR_UTILIZED_BANDWIDTH,
+        ] {
+            assert_eq!(attr.get(tlv), None, "tlv {tlv}");
+        }
+    }
+
+    /// We advertise the performance metrics both inline and inside the
+    /// ASLA, but other implementations pick one. A peer that only uses
+    /// the ASLA carrier must still be translated.
+    #[test]
+    fn link_attr_reads_performance_from_asla_too() {
+        use isis_packet::{IsisSubAsla, IsisSubMinMaxLinkDelay};
+        let entry = IsisTlvExtIsReachEntry {
+            neighbor_id: IsisNeighborId::from_sys_id(&sysid(2), 0),
+            metric: 10,
+            subs: vec![
+                IsisSubAsla {
+                    l_flag: false,
+                    sabm: vec![0x10],
+                    udabm: vec![],
+                    subs: vec![
+                        IsisSubMinMaxLinkDelay {
+                            anomalous: true,
+                            min_delay: 0x0000_0900,
+                            max_delay: 0x0000_1200,
+                        }
+                        .into(),
+                    ],
+                }
+                .into(),
+            ],
+        };
+        let attr = link_attr(&entry);
+        assert_eq!(
+            attr.get(BGPLS_ATTR_MIN_MAX_LINK_DELAY),
+            Some(&[0x80, 0x00, 0x09, 0x00, 0x00, 0x00, 0x12, 0x00][..])
+        );
+    }
+
+    /// Bandwidth values are IEEE 754 on both sides, so the bit pattern
+    /// crosses unchanged. We never originate these, but peers do.
+    #[test]
+    fn link_attr_maps_bandwidths_to_1118_1120() {
+        use isis_packet::{IsisSubAvailableBw, IsisSubResidualBw, IsisSubUtilizedBw};
+        let bw = |v: f32| isis_packet::IsisSubBandwidthMetric { bw_bps: v };
+        let entry = IsisTlvExtIsReachEntry {
+            neighbor_id: IsisNeighborId::from_sys_id(&sysid(2), 0),
+            metric: 10,
+            subs: vec![
+                IsisSubResidualBw { bw: bw(1.25e9) }.into(),
+                IsisSubAvailableBw { bw: bw(1.0e9) }.into(),
+                IsisSubUtilizedBw { bw: bw(2.5e8) }.into(),
+            ],
+        };
+        let attr = link_attr(&entry);
+        for (tlv, expect) in [
+            (BGPLS_ATTR_RESIDUAL_BANDWIDTH, 1.25e9f32),
+            (BGPLS_ATTR_AVAILABLE_BANDWIDTH, 1.0e9f32),
+            (BGPLS_ATTR_UTILIZED_BANDWIDTH, 2.5e8f32),
+        ] {
+            assert_eq!(
+                attr.get(tlv),
+                Some(&expect.to_bits().to_be_bytes()[..]),
+                "tlv {tlv}"
+            );
+        }
     }
 
     #[test]

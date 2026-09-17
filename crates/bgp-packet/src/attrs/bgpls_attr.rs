@@ -57,6 +57,34 @@ pub const BGPLS_ATTR_LAN_ADJACENCY_SID: u16 = 1100;
 /// from the classic Administrative Group (1088).
 pub const BGPLS_ATTR_EXT_ADMIN_GROUP: u16 = 1173;
 
+// ===== TE performance link attributes (RFC 8571) =====
+//
+// The value encodings are byte-identical to their IGP originals — the
+// same A (Anomalous) bit in the top bit of the first octet and the same
+// 24-bit microsecond fields — so a producer re-emits what it parsed
+// from IS-IS RFC 8570 sub-TLVs 33-39 / OSPF RFC 7471 sub-TLVs 27-33
+// without rescaling.
+/// Unidirectional Link Delay (RFC 8571 §2.1): `A|RESERVED(7)` then a
+/// 24-bit average delay in microseconds. 4 octets.
+pub const BGPLS_ATTR_UNI_LINK_DELAY: u16 = 1114;
+/// Min/Max Unidirectional Link Delay (RFC 8571 §2.2): `A|RESERVED(7)`
+/// then 24-bit Min, then `RESERVED(8)` then 24-bit Max. 8 octets. One A
+/// bit covers both bounds.
+pub const BGPLS_ATTR_MIN_MAX_LINK_DELAY: u16 = 1115;
+/// Unidirectional Delay Variation (RFC 8571 §2.3): `RESERVED(8)` then a
+/// 24-bit value. 4 octets, and no A bit — the RFC defines none.
+pub const BGPLS_ATTR_DELAY_VARIATION: u16 = 1116;
+/// Unidirectional Link Loss (RFC 8571 §2.4): `A|RESERVED(7)` then a
+/// 24-bit loss ratio in units of 0.000003 %. 4 octets.
+pub const BGPLS_ATTR_LINK_LOSS: u16 = 1117;
+/// Unidirectional Residual Bandwidth (RFC 8571 §2.5): IEEE 754
+/// single-precision bytes/sec. 4 octets, no flags.
+pub const BGPLS_ATTR_RESIDUAL_BANDWIDTH: u16 = 1118;
+/// Unidirectional Available Bandwidth (RFC 8571 §2.6).
+pub const BGPLS_ATTR_AVAILABLE_BANDWIDTH: u16 = 1119;
+/// Unidirectional Utilized Bandwidth (RFC 8571 §2.7).
+pub const BGPLS_ATTR_UTILIZED_BANDWIDTH: u16 = 1120;
+
 // ===== Prefix Attribute TLVs (RFC 9552 Section 4.3, RFC 9085) =====
 pub const BGPLS_ATTR_IGP_FLAGS: u16 = 1152;
 pub const BGPLS_ATTR_IGP_ROUTE_TAG: u16 = 1153;

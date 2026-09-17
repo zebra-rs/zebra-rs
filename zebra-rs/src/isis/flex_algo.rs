@@ -4,7 +4,7 @@ use isis_packet::neigh::IsisSubTlv as NeighSubTlv;
 use isis_packet::{
     Algo, ExtAdminGroup, FadSubTlv, IsisSubAdminGrp, IsisSubAsla, IsisSubFadExcludeAg,
     IsisSubFadExcludeSrlg, IsisSubFadFlags, IsisSubFadIncludeAllAg, IsisSubFadIncludeAnyAg,
-    IsisSubFlexAlgoDef, IsisSubPrefixSid, PrefixSidFlags, SidLabelValue,
+    IsisSubFlexAlgoDef, IsisSubPrefixSid, IsisTlvExtIsReachEntry, PrefixSidFlags, SidLabelValue,
 };
 
 use crate::config::{Args, ConfigOp};
@@ -83,6 +83,31 @@ pub fn parse_asla_min_delay(asla: &IsisSubAsla) -> Option<u32> {
         }
     }
     None
+}
+
+/// The Min delay to cost a peer's link at for metric-type 1, or `None`
+/// when it advertises none and the link must be pruned (RFC 9350 §15).
+///
+/// The flex-algo-scoped ASLA copy wins, per RFC 9350 §12. The inline
+/// sub-TLV is an interop fallback, consulted only when the ASLA path
+/// yielded nothing: an implementation that advertises delay but never
+/// emits ASLA would otherwise have every one of its links pruned from a
+/// metric-type-1 topology. Because the fallback is last, a peer that
+/// does scope its attributes keeps that scoping.
+pub fn peer_min_delay(entry: &IsisTlvExtIsReachEntry) -> Option<u32> {
+    entry
+        .subs
+        .iter()
+        .find_map(|sub| match sub {
+            NeighSubTlv::Asla(asla) => parse_asla_min_delay(asla),
+            _ => None,
+        })
+        .or_else(|| {
+            entry.subs.iter().find_map(|sub| match sub {
+                NeighSubTlv::MinMaxLinkDelay(d) => Some(d.min_delay),
+                _ => None,
+            })
+        })
 }
 
 /// SABM byte (RFC 9479 §4.2) with the Flex-Algorithm (X-bit) set.
@@ -525,6 +550,79 @@ mod tests {
             })],
         };
         assert_eq!(parse_asla_min_delay(&asla), Some(900));
+    }
+
+    fn reach_entry(subs: Vec<NeighSubTlv>) -> IsisTlvExtIsReachEntry {
+        IsisTlvExtIsReachEntry {
+            neighbor_id: Default::default(),
+            metric: 10,
+            subs,
+        }
+    }
+
+    fn min_delay_inline(min_delay: u32) -> NeighSubTlv {
+        min_max(min_delay)
+    }
+
+    fn min_max(min_delay: u32) -> NeighSubTlv {
+        use isis_packet::IsisSubMinMaxLinkDelay;
+        NeighSubTlv::MinMaxLinkDelay(IsisSubMinMaxLinkDelay {
+            anomalous: false,
+            min_delay,
+            max_delay: min_delay + 300,
+        })
+    }
+
+    fn flex_algo_asla(subs: Vec<NeighSubTlv>) -> NeighSubTlv {
+        NeighSubTlv::Asla(IsisSubAsla {
+            l_flag: false,
+            sabm: vec![SABM_FLEX_ALGO],
+            udabm: vec![],
+            subs,
+        })
+    }
+
+    /// The flex-algo-scoped copy wins when both carriers are present —
+    /// which is what we ourselves advertise.
+    #[test]
+    fn peer_min_delay_prefers_the_flex_algo_asla() {
+        let entry = reach_entry(vec![
+            min_delay_inline(700),
+            flex_algo_asla(vec![min_max(900)]),
+        ]);
+        assert_eq!(peer_min_delay(&entry), Some(900));
+    }
+
+    /// A peer that advertises delay inline and never emits ASLA would
+    /// otherwise have every link pruned from a metric-type-1 topology.
+    #[test]
+    fn peer_min_delay_falls_back_to_the_inline_sub_tlv() {
+        let entry = reach_entry(vec![min_delay_inline(700)]);
+        assert_eq!(peer_min_delay(&entry), Some(700));
+    }
+
+    /// An ASLA scoped to some other application leaves nothing for
+    /// flex-algo, so the generic inline copy is what is left to use.
+    #[test]
+    fn peer_min_delay_uses_inline_when_asla_is_scoped_elsewhere() {
+        let rsvp_only = NeighSubTlv::Asla(IsisSubAsla {
+            l_flag: false,
+            sabm: vec![0x80], // R-bit, not X
+            udabm: vec![],
+            subs: vec![min_max(900)],
+        });
+        let entry = reach_entry(vec![rsvp_only, min_delay_inline(700)]);
+        assert_eq!(peer_min_delay(&entry), Some(700));
+    }
+
+    /// No delay in either carrier: the link is pruned (RFC 9350 §15).
+    #[test]
+    fn peer_min_delay_is_none_without_any_delay() {
+        assert_eq!(peer_min_delay(&reach_entry(vec![])), None);
+        assert_eq!(
+            peer_min_delay(&reach_entry(vec![flex_algo_asla(vec![])])),
+            None
+        );
     }
 
     #[test]
