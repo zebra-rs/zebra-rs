@@ -5,6 +5,9 @@ interface:
 - if-name: ls1-ls2
   ipv4:
     address: 192.168.71.1/30
+- if-name: ls1-lsc
+  ipv4:
+    address: 192.168.73.1/30
 
 router:
   isis:
@@ -33,6 +36,12 @@ router:
     - remote-address: 10.71.0.2
       remote-as: 65071
       update-source: 10.71.0.1
+      enabled: true
+      afi-safi:
+      - name: link-state
+        enabled: true
+    - remote-address: 192.168.73.2
+      remote-as: 65071
       enabled: true
       afi-safi:
       - name: link-state

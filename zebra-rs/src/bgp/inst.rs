@@ -2664,20 +2664,34 @@ impl Bgp {
                 }
             }
             Message::BgpLs { add, withdraw } => {
-                // Locally-produced BGP-LS (IS-IS producer, RFC 9552). Store
-                // into / remove from the `bgp_ls` Loc-RIB as Originated.
-                // Re-advertisement to peers is a later phase; this records
-                // the topology so `show bgp link-state` reflects it.
+                // Locally-produced BGP-LS (IS-IS producer, RFC 9552):
+                // store into / remove from the `bgp_ls` Loc-RIB as
+                // Originated, then advertise the delta to every peer
+                // that negotiated the family.
+                //
+                // The producer already diffs against what it advertised
+                // last, so a message only carries genuine changes —
+                // there is no Adj-RIB-Out here to re-filter them
+                // against, in the same direct-emit shape SR Policy
+                // origination uses.
                 for nlri in &withdraw {
                     super::route::route_bgpls_withdraw_originated(nlri, &mut self.local_rib);
+                    super::route::bgpls_origin_withdraw(self, nlri);
                 }
                 for (nlri, ls_attr) in add {
                     super::route::route_bgpls_originate(
-                        nlri,
+                        nlri.clone(),
                         ls_attr,
                         &mut self.local_rib,
                         &mut self.attr_store,
                     );
+                    // Re-read the interned attribute the Loc-RIB now
+                    // holds, so the wire carries exactly what
+                    // `show bgp link-state` renders.
+                    if let Some(rib) = self.local_rib.bgp_ls.selected.get(&nlri) {
+                        let attr = (*rib.attr).clone();
+                        super::route::bgpls_origin_reach(self, &nlri, &attr);
+                    }
                 }
             }
             Message::MupC(ev) => {

@@ -11234,6 +11234,97 @@ pub fn route_bgpls_withdraw_originated(nlri: &BgpLsNlri, local_rib: &mut LocalRi
     let _ = local_rib.select_best_path_bgpls(nlri);
 }
 
+/// Idents of established peers that negotiated BGP-LS (AFI 16388 /
+/// SAFI 71). BGP-LS is a single family — the v4/v6 distinction lives
+/// inside the NLRI — so there is no per-AFI split here.
+fn bgpls_peer_idents(peers: &PeerMap) -> Vec<usize> {
+    peers.established_idents(Afi::LinkState, Safi::LinkState)
+}
+
+/// Advertise one locally originated Link-State object to every
+/// established BGP-LS peer.
+///
+/// Self-originated only. Re-advertising a *received* object is route
+/// reflection, which BGP-LS gets no exemption from and which is not
+/// implemented — `route_bgpls_update` still stops at the Loc-RIB. A
+/// controller therefore sees this router's own IGP view, which is the
+/// topology-export case, and not a second-hand copy of its neighbours'.
+///
+/// The next hop is our router-id. RFC 9552 §5.1 makes the BGP-LS next
+/// hop informational — nothing is forwarded toward it — but the field
+/// is mandatory in MP_REACH, and the router-id is the value a consumer
+/// can correlate with the Node NLRI we also advertise.
+pub(super) fn bgpls_origin_reach(bgp: &mut Bgp, nlri: &BgpLsNlri, attr: &BgpAttr) {
+    let nhop = IpAddr::V4(bgp.router_id);
+    for ident in bgpls_peer_idents(&bgp.peers) {
+        let Some(peer) = bgp.peers.get_mut_by_idx(ident) else {
+            continue;
+        };
+        let mut update = peer.update_packet();
+        update.mp_update = Some(MpReachAttr::LinkState {
+            nhop,
+            updates: vec![nlri.clone()],
+        });
+        update.bgp_attr = Some(attr.clone());
+        if let Some(bytes) = update.pop_bgpls()
+            && let Some(ref tx) = peer.packet_tx
+        {
+            let _ = tx.send(bytes);
+        }
+    }
+}
+
+/// Withdraw one locally originated Link-State object from every
+/// established BGP-LS peer.
+pub(super) fn bgpls_origin_withdraw(bgp: &mut Bgp, nlri: &BgpLsNlri) {
+    for ident in bgpls_peer_idents(&bgp.peers) {
+        let Some(peer) = bgp.peers.get_mut_by_idx(ident) else {
+            continue;
+        };
+        let mut update = peer.update_packet();
+        update.mp_withdraw = Some(MpUnreachAttr::LinkState {
+            withdraws: vec![nlri.clone()],
+        });
+        if let Some(bytes) = update.pop_bgpls_withdraw()
+            && let Some(ref tx) = peer.packet_tx
+        {
+            let _ = tx.send(bytes);
+        }
+    }
+}
+
+/// Dump the self-originated Link-State objects to a newly established
+/// peer. BGP-LS is advertised event-driven off the IGP producer, and the
+/// IGP converges long before a controller session comes up — without
+/// this, everything originated before the session would never be sent.
+pub fn route_sync_bgpls(peer: &mut Peer, bgp: &BgpTop) {
+    if !peer.is_afi_safi(Afi::LinkState, Safi::LinkState) {
+        return;
+    }
+    let nhop = IpAddr::V4(*bgp.router_id);
+    let adverts: Vec<(BgpLsNlri, BgpAttr)> = bgp
+        .local_rib
+        .bgp_ls
+        .selected
+        .iter()
+        .filter(|(_, rib)| rib.typ.is_originated())
+        .map(|(nlri, rib)| (nlri.clone(), (*rib.attr).clone()))
+        .collect();
+    for (nlri, attr) in adverts {
+        let mut update = peer.update_packet();
+        update.mp_update = Some(MpReachAttr::LinkState {
+            nhop,
+            updates: vec![nlri],
+        });
+        update.bgp_attr = Some(attr);
+        if let Some(bytes) = update.pop_bgpls()
+            && let Some(ref tx) = peer.packet_tx
+        {
+            let _ = tx.send(bytes);
+        }
+    }
+}
+
 /// Realize an SR Policy active-path change in the dataplane: remove the
 /// previous SRv6 Binding SID and/or install the new one as an
 /// End.B6.Encaps local SID (RFC 8986 §4.14) pushing the policy's
@@ -16302,6 +16393,11 @@ pub fn route_sync(peer: &mut Peer, bgp: &mut BgpTop, v4_via_pool: bool) {
     if peer.is_afi_safi(Afi::Ip, Safi::SrTePolicy) || peer.is_afi_safi(Afi::Ip6, Safi::SrTePolicy) {
         route_sync_srpolicy(peer, bgp);
     }
+    // SAFI 71 (RFC 9552): dump the self-originated Link-State objects.
+    // The IGP producer runs off SPF, which converges long before a
+    // controller's session comes up, so without this a late peer sees
+    // the topology only after the next LSDB change.
+    route_sync_bgpls(peer, bgp);
 }
 
 impl Bgp {
