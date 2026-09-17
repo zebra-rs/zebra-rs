@@ -94,21 +94,50 @@ pub const BGPLS_ATTR_UTILIZED_BANDWIDTH: u16 = 1120;
 /// promoted to top level would read as an RSVP-TE attribute too.
 pub const BGPLS_ATTR_ASLA: u16 = 1122;
 
+/// Widen an IGP Application Identifier Bit Mask to a length BGP-LS
+/// accepts.
+///
+/// RFC 9294 §2 inherits the OSPF encoding (RFC 8920 §3.1): a mask is
+/// "of size 0, 4, or 8 octets as indicated by the SABM Length". IS-IS
+/// instead advertises the shortest mask that carries its set bits
+/// (RFC 9479 §4.1), so the ordinary one-octet `[0x10]` Flex-Algorithm
+/// mask is not a legal BGP-LS length and a conformant consumer cannot
+/// read the TLV.
+///
+/// Bits are numbered from the most significant bit of the first octet,
+/// so zero-padding on the right widens the mask without moving any bit.
+/// A mask longer than 8 octets cannot reach here from a parsed IS-IS
+/// ASLA — RFC 9479 §4.2 caps it at 8 and our parser rejects more — but
+/// it is truncated rather than trusted.
+fn normalize_mask(mask: &[u8]) -> Vec<u8> {
+    let width = match mask.len() {
+        0 => return Vec::new(),
+        n if n <= 4 => 4,
+        _ => 8,
+    };
+    let mut out = mask.to_vec();
+    out.truncate(width);
+    out.resize(width, 0);
+    out
+}
+
 /// Encode the value of a BGP-LS ASLA TLV (RFC 9294 §2):
 /// `SABM Length | UDABM Length | Reserved(2) | SABM | UDABM | sub-TLVs`,
 /// where the nested sub-TLVs use the ordinary BGP-LS 2-octet type and
 /// 2-octet length. The two reserved octets MUST be zero on transmit.
 ///
-/// The bit masks are copied from the IGP advertisement verbatim: their
-/// bit assignments are shared (RSVP-TE, SR Policy, LFA, Flex-Algorithm),
-/// so preserving the bytes preserves the scope.
+/// Both masks are widened to a BGP-LS-legal length by
+/// [`normalize_mask`]; their bit assignments are shared with the IGP
+/// (RSVP-TE, SR Policy, LFA, Flex-Algorithm), so the scope survives.
 pub fn bgpls_asla_value(sabm: &[u8], udabm: &[u8], subs: &[BgpLsAttrTlv]) -> Vec<u8> {
+    let sabm = normalize_mask(sabm);
+    let udabm = normalize_mask(udabm);
     let mut out = Vec::with_capacity(4 + sabm.len() + udabm.len());
     out.push(sabm.len() as u8);
     out.push(udabm.len() as u8);
     out.extend_from_slice(&[0, 0]); // Reserved
-    out.extend_from_slice(sabm);
-    out.extend_from_slice(udabm);
+    out.extend_from_slice(&sabm);
+    out.extend_from_slice(&udabm);
     for sub in subs {
         out.extend_from_slice(&sub.typ.to_be_bytes());
         out.extend_from_slice(&(sub.value.len() as u16).to_be_bytes());
@@ -351,5 +380,43 @@ mod tests {
             b'r', b'1', // value
         ];
         assert_eq!(&buf[..], expected);
+    }
+
+    /// RFC 9294 §2 takes the OSPF mask encoding: 0, 4 or 8 octets. IS-IS
+    /// sends the shortest mask that fits, so anything in 1..=4 widens to
+    /// 4 and 5..=8 to 8, zero-padded on the right so no bit moves.
+    #[test]
+    fn asla_masks_widen_to_a_bgp_ls_legal_length() {
+        for (input, want_len, want_mask) in [
+            (vec![], 0usize, vec![]),
+            (vec![0x10], 4, vec![0x10, 0, 0, 0]),
+            (
+                vec![0x10, 0x20, 0x30, 0x40],
+                4,
+                vec![0x10, 0x20, 0x30, 0x40],
+            ),
+            (vec![1, 2, 3, 4, 5], 8, vec![1, 2, 3, 4, 5, 0, 0, 0]),
+            (
+                vec![1, 2, 3, 4, 5, 6, 7, 8],
+                8,
+                vec![1, 2, 3, 4, 5, 6, 7, 8],
+            ),
+        ] {
+            let v = bgpls_asla_value(&input, &[], &[]);
+            assert_eq!(v[0] as usize, want_len, "SABM length for {input:?}");
+            assert_eq!(v[1], 0, "UDABM length");
+            assert_eq!(&v[2..4], &[0, 0], "reserved octets");
+            assert_eq!(&v[4..4 + want_len], &want_mask[..], "mask for {input:?}");
+        }
+    }
+
+    /// The user-defined mask is widened on its own, not copied from the
+    /// standard one.
+    #[test]
+    fn asla_widens_the_user_defined_mask_independently() {
+        let v = bgpls_asla_value(&[0x10], &[0xaa], &[]);
+        assert_eq!((v[0], v[1]), (4, 4));
+        assert_eq!(&v[4..8], &[0x10, 0, 0, 0]);
+        assert_eq!(&v[8..12], &[0xaa, 0, 0, 0]);
     }
 }

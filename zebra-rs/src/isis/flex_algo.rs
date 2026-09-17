@@ -76,43 +76,62 @@ pub fn parse_asla_flex_algo_bitmap(asla: &IsisSubAsla) -> Option<ExtAdminGroup> 
 /// this router a shorter edge than its neighbours compute, which is how
 /// delay-based topologies end up forwarding in loops.
 ///
-/// Selecting the applicable advertisement follows RFC 9479 §4.2:
+/// Selecting the applicable advertisements follows RFC 9479 §4.2:
 ///
-/// 1. an ASLA whose non-zero SABM has the X-bit wins outright;
-/// 2. otherwise an ASLA with zero-length masks applies, but only
-///    because no X-bit-specific one was present;
-/// 3. with an applicable ASLA in hand, the L-flag decides the source:
-///    set means "use the legacy advertisements for this link", clear
-///    means the attributes nested in that ASLA — and if it carries no
-///    Min/Max delay, the answer is `None`, not a peek at the legacy copy;
+/// 1. ASLAs whose non-zero SABM has the X-bit win outright; failing
+///    those, ASLAs with zero-length masks apply;
+/// 2. the L-flag then decides the source. Set means "use the legacy
+///    advertisements for this link"; the flag "MUST be the same in all
+///    sub-TLVs for a given link" and, "in cases where this constraint
+///    is violated, MUST be considered set", so one L-set advertisement
+///    settles it for the whole set;
+/// 3. otherwise the answer is the first Min/Max delay across the
+///    applicable set, which may be in any of them — attributes for one
+///    application may be split across containers. If none of them
+///    carries one, the answer is `None`, not a peek at the legacy copy;
 /// 4. no applicable ASLA at all means no Flex-Algorithm delay.
 pub fn peer_min_delay(entry: &IsisTlvExtIsReachEntry) -> Option<u32> {
-    let applicable = applicable_asla(entry)?;
-    if applicable.l_flag {
+    let applicable = applicable_aslas(entry);
+    if applicable.is_empty() {
+        return None;
+    }
+    if applicable.iter().any(|a| a.l_flag) {
         return inline_min_delay(entry);
     }
-    nested_min_delay(applicable)
+    applicable.into_iter().find_map(nested_min_delay)
 }
 
-/// The ASLA governing Flex-Algorithm on this link, per RFC 9479 §4.2:
-/// an explicit X-bit advertisement if there is one, else a zero-length
-/// mask advertisement (which applies only "when no link attribute
-/// advertisements with a non-zero-length Application Identifier Bit Mask
-/// and a matching Application Identifier Bit set are present").
-fn applicable_asla(entry: &IsisTlvExtIsReachEntry) -> Option<&IsisSubAsla> {
-    let mut any_application = None;
+/// The ASLAs governing Flex-Algorithm on this link, per RFC 9479 §4.2.
+///
+/// Plural deliberately: "Multiple Application-Specific Link Attributes
+/// sub-TLVs for the same link MAY be advertised", and conflicts are
+/// resolved per application/attribute pair, not per container. A sender
+/// may therefore put this link's affinity in one X-scoped ASLA and its
+/// delay in the next, and a reader that locks onto the first container
+/// prunes the link — or not, depending on which order they arrived in.
+///
+/// Explicit X-bit advertisements exclude the zero-length-mask ones
+/// entirely: those apply only "when no link attribute advertisements
+/// with a non-zero-length Application Identifier Bit Mask and a matching
+/// Application Identifier Bit set are present for a given link".
+fn applicable_aslas(entry: &IsisTlvExtIsReachEntry) -> Vec<&IsisSubAsla> {
+    let mut explicit = Vec::new();
+    let mut any_application = Vec::new();
     for sub in &entry.subs {
         let NeighSubTlv::Asla(asla) = sub else {
             continue;
         };
         if asla.sabm.first().is_some_and(|b| b & SABM_FLEX_ALGO != 0) {
-            return Some(asla);
-        }
-        if asla.sabm.is_empty() && asla.udabm.is_empty() && any_application.is_none() {
-            any_application = Some(asla);
+            explicit.push(asla);
+        } else if asla.sabm.is_empty() && asla.udabm.is_empty() {
+            any_application.push(asla);
         }
     }
-    any_application
+    if explicit.is_empty() {
+        any_application
+    } else {
+        explicit
+    }
 }
 
 /// Min field of the Min/Max Link Delay nested in this ASLA.
@@ -656,6 +675,59 @@ mod tests {
             peer_min_delay(&reach_entry(vec![specific, generic])),
             Some(900)
         );
+    }
+
+    /// RFC 9479 §4.2 lets one application's attributes be split across
+    /// several ASLAs, resolved per application/attribute pair. Reading
+    /// only the first container prunes the link — or not, depending on
+    /// which order the two arrived in.
+    #[test]
+    fn peer_min_delay_searches_every_applicable_asla() {
+        use isis_packet::IsisSubAdminGrp;
+        let affinity_only = asla(
+            vec![SABM_FLEX_ALGO],
+            false,
+            vec![NeighSubTlv::AdminGrp(IsisSubAdminGrp {
+                groups: vec![0x0000_0001],
+            })],
+        );
+        let delay_only = asla(vec![SABM_FLEX_ALGO], false, vec![min_max(900)]);
+        assert_eq!(
+            peer_min_delay(&reach_entry(vec![
+                affinity_only.clone(),
+                delay_only.clone()
+            ])),
+            Some(900)
+        );
+        assert_eq!(
+            peer_min_delay(&reach_entry(vec![delay_only, affinity_only])),
+            Some(900),
+            "and the answer must not depend on the order"
+        );
+    }
+
+    /// The same applies to zero-length-mask containers.
+    #[test]
+    fn peer_min_delay_searches_every_zero_mask_asla() {
+        let empty = asla(vec![], false, vec![]);
+        let carrying = asla(vec![], false, vec![min_max(1_100)]);
+        assert_eq!(
+            peer_min_delay(&reach_entry(vec![empty, carrying])),
+            Some(1_100)
+        );
+    }
+
+    /// "For a given application, the setting of the L-flag MUST be the
+    /// same in all sub-TLVs for a given link. In cases where this
+    /// constraint is violated, the L-flag MUST be considered set."
+    #[test]
+    fn peer_min_delay_treats_a_split_l_flag_as_set() {
+        let entry = reach_entry(vec![
+            asla(vec![SABM_FLEX_ALGO], false, vec![min_max(900)]),
+            asla(vec![SABM_FLEX_ALGO], true, vec![]),
+            min_max(700),
+        ]);
+        assert_eq!(peer_min_delay(&entry), Some(700), "legacy wins the tie");
     }
 
     #[test]

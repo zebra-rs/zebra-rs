@@ -167,39 +167,69 @@ fn perf_tlvs(m: &PerfMetrics<'_>) -> Vec<BgpLsAttrTlv> {
     out
 }
 
+/// Clear the RSVP-TE bit from a SABM copy. RFC 9294 §4 rule 2(B) sends
+/// RSVP-TE attributes to the top-level TLVs "rather than the ASLA TLV",
+/// so the scoped copy carries only the remaining applications.
+fn sabm_without_rsvp_te(sabm: &[u8]) -> Vec<u8> {
+    let mut out = sabm.to_vec();
+    if let Some(first) = out.first_mut() {
+        *first &= !SABM_RSVP_TE;
+    }
+    out
+}
+
 /// Append the RFC 8571 performance metrics this entry can supply,
-/// keeping each one's application scope (RFC 9294 §2).
+/// keeping each one's application scope (RFC 9294 §4).
 ///
-/// Three sources, three destinations:
+/// Inline (legacy) attributes are application-independent and go to the
+/// top-level TLVs. Each ASLA is then translated on its own terms:
 ///
-/// * inline (legacy) attributes are application-independent and go to
-///   the top-level TLVs;
-/// * every ASLA's attributes are re-encoded inside a BGP-LS ASLA TLV
-///   (1122) carrying that ASLA's own bit masks — flattening them would
-///   advertise, say, a Flex-Algorithm-only delay as an RSVP-TE
-///   attribute, and with two ASLAs present would silently pick one by
-///   sub-TLV order;
-/// * an ASLA that includes RSVP-TE additionally goes to the top-level
-///   TLVs, which RFC 9294 §3 requires for that application. The
-///   duplication is anticipated: RFC 9294 §2 says the ASLA TLV takes
-///   precedence where both appear.
+/// * the L-flag picks the *source*. Clear means the attributes nested
+///   in that ASLA; set means the legacy ones, because RFC 9479 §4.2
+///   makes an L-set advertisement say "use the legacy values for these
+///   applications" — and makes a receiver ignore any nested attributes
+///   it carries anyway. Rule 2(A) then requires those legacy values to
+///   be re-encoded inside a BGP-LS ASLA TLV for the non-RSVP-TE
+///   applications, so a consumer can see which application the legacy
+///   value is being used for;
+/// * the RSVP-TE bit picks the *destination*. Rule 2(B) keeps RSVP-TE
+///   attributes in the top-level TLVs rather than the ASLA TLV, so that
+///   bit is cleared from the scoped copy's mask and the attributes are
+///   mirrored top-level instead. An ASLA scoped to RSVP-TE alone
+///   therefore produces no ASLA TLV at all.
+///
+/// For an L-set ASLA the legacy attributes are already top-level from
+/// the inline pass, so they are not emitted there twice.
 fn push_te_performance(attr: &mut BgpLsAttr, e: &IsisTlvExtIsReachEntry) {
-    for tlv in perf_tlvs(&e.inline_perf()) {
-        attr.push(tlv.typ, tlv.value);
+    let inline = perf_tlvs(&e.inline_perf());
+    for tlv in &inline {
+        attr.push(tlv.typ, tlv.value.clone());
     }
     for asla in e.aslas() {
         let nested = perf_tlvs(&PerfMetrics::from_subs(&asla.subs));
-        if nested.is_empty() {
+        let (source, already_top_level) = if asla.l_flag {
+            (&inline, true)
+        } else {
+            (&nested, false)
+        };
+        if source.is_empty() {
             continue;
         }
-        if asla.sabm.first().is_some_and(|b| b & SABM_RSVP_TE != 0) {
-            for tlv in &nested {
+        let rsvp_te = asla.sabm.first().is_some_and(|b| b & SABM_RSVP_TE != 0);
+        if rsvp_te && !already_top_level {
+            for tlv in source {
                 attr.push(tlv.typ, tlv.value.clone());
             }
         }
+        // What is left once RSVP-TE has been peeled off. All-zero masks
+        // with nothing user-defined mean the ASLA was RSVP-TE-only.
+        let scoped_sabm = sabm_without_rsvp_te(&asla.sabm);
+        if scoped_sabm.iter().all(|b| *b == 0) && asla.udabm.iter().all(|b| *b == 0) {
+            continue;
+        }
         attr.push(
             BGPLS_ATTR_ASLA,
-            bgpls_asla_value(&asla.sabm, &asla.udabm, &nested),
+            bgpls_asla_value(&scoped_sabm, &asla.udabm, source),
         );
     }
 }
@@ -682,129 +712,197 @@ mod tests {
         }
     }
 
-    /// RFC 9294 §2: attributes received in an IGP ASLA MUST be
-    /// re-encoded in the BGP-LS ASLA TLV, not flattened to top level.
-    /// A Flex-Algorithm-only delay promoted to a top-level TLV would
-    /// read as an RSVP-TE attribute as well.
-    #[test]
-    fn asla_scoped_metrics_go_to_tlv_1122_not_top_level() {
-        use isis_packet::{IsisSubAsla, IsisSubMinMaxLinkDelay};
-        let entry = IsisTlvExtIsReachEntry {
+    fn asla_sub(
+        sabm: Vec<u8>,
+        l_flag: bool,
+        subs: Vec<isis_packet::neigh::IsisSubTlv>,
+    ) -> isis_packet::neigh::IsisSubTlv {
+        isis_packet::IsisSubAsla {
+            l_flag,
+            sabm,
+            udabm: vec![],
+            subs,
+        }
+        .into()
+    }
+
+    fn min_max_sub(min: u32) -> isis_packet::neigh::IsisSubTlv {
+        isis_packet::IsisSubMinMaxLinkDelay {
+            anomalous: false,
+            min_delay: min,
+            max_delay: min + 0x100,
+        }
+        .into()
+    }
+
+    fn entry_with(subs: Vec<isis_packet::neigh::IsisSubTlv>) -> IsisTlvExtIsReachEntry {
+        IsisTlvExtIsReachEntry {
             neighbor_id: IsisNeighborId::from_sys_id(&sysid(2), 0),
             metric: 10,
-            subs: vec![
-                IsisSubAsla {
-                    l_flag: false,
-                    sabm: vec![0x10], // X-bit: Flex-Algorithm only
-                    udabm: vec![],
-                    subs: vec![
-                        IsisSubMinMaxLinkDelay {
-                            anomalous: true,
-                            min_delay: 0x0000_0900,
-                            max_delay: 0x0000_1200,
-                        }
-                        .into(),
-                    ],
+            subs,
+        }
+    }
+
+    /// RFC 9294 §2: attributes received in an IGP ASLA MUST be
+    /// re-encoded in the BGP-LS ASLA TLV, not flattened to top level. A
+    /// Flex-Algorithm-only delay promoted to a top-level TLV would read
+    /// as an RSVP-TE attribute as well.
+    ///
+    /// The mask is widened on the way out: IS-IS sends the shortest
+    /// mask that fits (one octet here), BGP-LS takes the OSPF encoding
+    /// of 0, 4 or 8 octets.
+    #[test]
+    fn asla_scoped_metrics_go_to_tlv_1122_not_top_level() {
+        let entry = entry_with(vec![asla_sub(
+            vec![0x10], // X-bit: Flex-Algorithm only
+            false,
+            vec![
+                isis_packet::IsisSubMinMaxLinkDelay {
+                    anomalous: true,
+                    min_delay: 0x0000_0900,
+                    max_delay: 0x0000_1200,
                 }
                 .into(),
             ],
-        };
+        )]);
         let attr = link_attr(&entry);
         assert_eq!(
             attr.get(BGPLS_ATTR_MIN_MAX_LINK_DELAY),
             None,
             "a Flex-Algo-scoped metric must not appear at top level"
         );
-        // SABM len 1, UDABM len 0, 2 reserved zero octets, the mask,
-        // then the nested TLV in BGP-LS type/length form.
         assert_eq!(
             attr.get(BGPLS_ATTR_ASLA),
             Some(
                 &[
-                    0x01, 0x00, 0x00, 0x00, // lengths + reserved
-                    0x10, // SABM: X-bit
-                    0x04, 0x5b, 0x00, 0x08, // TLV 1115, length 8
+                    0x04, 0x00, 0x00, 0x00, // SABM len 4, UDABM len 0, reserved
+                    0x10, 0x00, 0x00, 0x00, // X-bit, zero-padded to 4 octets
+                    0x04, 0x5b, 0x00, 0x08, // nested TLV 1115, length 8
                     0x80, 0x00, 0x09, 0x00, 0x00, 0x00, 0x12, 0x00,
                 ][..]
             )
         );
     }
 
-    /// RFC 9294 §3 carves out RSVP-TE: those attributes are REQUIRED at
-    /// top level. They are also encoded in the ASLA TLV, which §2 makes
-    /// authoritative where both appear.
+    /// RFC 9294 §4 rule 2(B): RSVP-TE attributes go to the top-level
+    /// TLVs "rather than the ASLA TLV", so an ASLA scoped to RSVP-TE
+    /// alone produces no ASLA TLV.
     #[test]
-    fn rsvp_te_scoped_metrics_also_go_top_level() {
-        use isis_packet::{IsisSubAsla, IsisSubUniLinkDelay};
-        let entry = IsisTlvExtIsReachEntry {
-            neighbor_id: IsisNeighborId::from_sys_id(&sysid(2), 0),
-            metric: 10,
-            subs: vec![
-                IsisSubAsla {
-                    l_flag: false,
-                    sabm: vec![0x80], // R-bit: RSVP-TE
-                    udabm: vec![],
-                    subs: vec![
-                        IsisSubUniLinkDelay {
-                            anomalous: false,
-                            delay: 0x0000_03e8,
-                        }
-                        .into(),
-                    ],
-                }
-                .into(),
-            ],
-        };
+    fn rsvp_te_only_asla_goes_top_level_and_produces_no_asla_tlv() {
+        let entry = entry_with(vec![asla_sub(vec![0x80], false, vec![min_max_sub(0x384)])]);
         let attr = link_attr(&entry);
         assert_eq!(
-            attr.get(BGPLS_ATTR_UNI_LINK_DELAY),
-            Some(&[0x00, 0x00, 0x03, 0xe8][..])
+            attr.get(BGPLS_ATTR_MIN_MAX_LINK_DELAY),
+            Some(&[0x00, 0x00, 0x03, 0x84, 0x00, 0x00, 0x04, 0x84][..])
         );
-        assert!(attr.get(BGPLS_ATTR_ASLA).is_some());
+        assert_eq!(attr.get(BGPLS_ATTR_ASLA), None);
+    }
+
+    /// An ASLA covering both applications splits: RSVP-TE takes the
+    /// top-level copy, and the scoped copy keeps only what is left of
+    /// the mask.
+    #[test]
+    fn mixed_rsvp_te_and_flex_algo_asla_splits_by_destination() {
+        let entry = entry_with(vec![asla_sub(
+            vec![0x90], // R | X
+            false,
+            vec![min_max_sub(0x384)],
+        )]);
+        let attr = link_attr(&entry);
+        assert!(attr.get(BGPLS_ATTR_MIN_MAX_LINK_DELAY).is_some());
+        let asla = attr.get(BGPLS_ATTR_ASLA).expect("scoped copy");
+        // SABM len 4, and the RSVP-TE bit cleared from the mask.
+        assert_eq!(
+            &asla[..8],
+            &[0x04, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00]
+        );
+    }
+
+    /// RFC 9294 §4 rule 2(A): with the L-flag set the attributes come
+    /// from the legacy advertisements, and those legacy values MUST be
+    /// re-encoded inside the ASLA TLV for the non-RSVP-TE applications
+    /// — otherwise a consumer cannot tell which application is using
+    /// them.
+    #[test]
+    fn l_set_asla_carries_the_legacy_value_into_tlv_1122() {
+        let entry = entry_with(vec![
+            min_max_sub(0x2bc),                 // legacy, 700 us
+            asla_sub(vec![0x10], true, vec![]), // X-scoped, L set, empty
+        ]);
+        let attr = link_attr(&entry);
+        assert_eq!(
+            attr.get(BGPLS_ATTR_MIN_MAX_LINK_DELAY),
+            Some(&[0x00, 0x00, 0x02, 0xbc, 0x00, 0x00, 0x03, 0xbc][..]),
+            "the legacy value stays top-level too"
+        );
+        let asla = attr
+            .get(BGPLS_ATTR_ASLA)
+            .expect("scoped copy of the legacy value");
+        assert_eq!(
+            &asla[..8],
+            &[0x04, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00]
+        );
+        assert_eq!(
+            &asla[8..],
+            &[
+                0x04, 0x5b, 0x00, 0x08, 0x00, 0x00, 0x02, 0xbc, 0x00, 0x00, 0x03, 0xbc
+            ]
+        );
+    }
+
+    /// RFC 9479 §4.2 makes a receiver ignore attributes nested in an
+    /// L-set ASLA — the legacy ones are authoritative.
+    #[test]
+    fn l_set_asla_ignores_its_own_nested_values() {
+        let entry = entry_with(vec![
+            min_max_sub(0x2bc),                                   // legacy 700
+            asla_sub(vec![0x10], true, vec![min_max_sub(0x384)]), // nested 900, prohibited
+        ]);
+        let asla = link_attr(&entry)
+            .get(BGPLS_ATTR_ASLA)
+            .expect("scoped copy")
+            .to_vec();
+        assert_eq!(
+            &asla[8..],
+            &[
+                0x04, 0x5b, 0x00, 0x08, 0x00, 0x00, 0x02, 0xbc, 0x00, 0x00, 0x03, 0xbc
+            ],
+            "the legacy 700 us, not the nested 900 us"
+        );
     }
 
     /// Two applications advertising different values for one link must
-    /// both survive, and neither may depend on sub-TLV order.
+    /// each keep their own, in either sub-TLV order.
     #[test]
     fn two_aslas_keep_their_own_values() {
-        use isis_packet::{IsisSubAsla, IsisSubMinMaxLinkDelay};
-        let scoped = |sabm: u8, min: u32| -> isis_packet::neigh::IsisSubTlv {
-            IsisSubAsla {
-                l_flag: false,
-                sabm: vec![sabm],
-                udabm: vec![],
-                subs: vec![
-                    IsisSubMinMaxLinkDelay {
-                        anomalous: false,
-                        min_delay: min,
-                        max_delay: min + 100,
-                    }
-                    .into(),
-                ],
-            }
-            .into()
-        };
         for subs in [
-            vec![scoped(0x10, 100), scoped(0x80, 900)],
-            vec![scoped(0x80, 900), scoped(0x10, 100)],
+            vec![
+                asla_sub(vec![0x10], false, vec![min_max_sub(0x64)]),
+                asla_sub(vec![0x80], false, vec![min_max_sub(0x384)]),
+            ],
+            vec![
+                asla_sub(vec![0x80], false, vec![min_max_sub(0x384)]),
+                asla_sub(vec![0x10], false, vec![min_max_sub(0x64)]),
+            ],
         ] {
-            let entry = IsisTlvExtIsReachEntry {
-                neighbor_id: IsisNeighborId::from_sys_id(&sysid(2), 0),
-                metric: 10,
-                subs,
-            };
-            let attr = link_attr(&entry);
+            let attr = link_attr(&entry_with(subs));
+            // RSVP-TE goes top-level with its own 900 us ...
+            assert_eq!(
+                attr.get(BGPLS_ATTR_MIN_MAX_LINK_DELAY),
+                Some(&[0x00, 0x00, 0x03, 0x84, 0x00, 0x00, 0x04, 0x84][..])
+            );
+            // ... and only the Flex-Algo one gets an ASLA TLV, with 100.
             let aslas: Vec<_> = attr
                 .tlvs
                 .iter()
                 .filter(|t| t.typ == BGPLS_ATTR_ASLA)
                 .collect();
-            assert_eq!(aslas.len(), 2, "one ASLA TLV per application scope");
-            // The RSVP-TE one, and only it, is mirrored top-level with
-            // its own 900 us — not the Flex-Algo 100 us.
+            assert_eq!(aslas.len(), 1, "RSVP-TE contributes no ASLA TLV");
             assert_eq!(
-                attr.get(BGPLS_ATTR_MIN_MAX_LINK_DELAY),
-                Some(&[0x00, 0x00, 0x03, 0x84, 0x00, 0x00, 0x03, 0xe8][..])
+                &aslas[0].value[8..],
+                &[
+                    0x04, 0x5b, 0x00, 0x08, 0x00, 0x00, 0x00, 0x64, 0x00, 0x00, 0x01, 0x64
+                ]
             );
         }
     }
@@ -813,18 +911,13 @@ mod tests {
     /// the ones that belong at top level.
     #[test]
     fn inline_metrics_stay_top_level() {
-        use isis_packet::IsisSubUniLinkDelay;
-        let entry = IsisTlvExtIsReachEntry {
-            neighbor_id: IsisNeighborId::from_sys_id(&sysid(2), 0),
-            metric: 10,
-            subs: vec![
-                IsisSubUniLinkDelay {
-                    anomalous: false,
-                    delay: 0x0000_03e8,
-                }
-                .into(),
-            ],
-        };
+        let entry = entry_with(vec![
+            isis_packet::IsisSubUniLinkDelay {
+                anomalous: false,
+                delay: 0x0000_03e8,
+            }
+            .into(),
+        ]);
         let attr = link_attr(&entry);
         assert_eq!(
             attr.get(BGPLS_ATTR_UNI_LINK_DELAY),
