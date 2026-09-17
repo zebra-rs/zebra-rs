@@ -2490,6 +2490,17 @@ impl Ospfv3AslaSubTlv {
         })
     }
 
+    /// RFC 9492 §5: "The value MUST be 0, 4, or 8" for both mask
+    /// lengths, and "if the SABM or UDABM Length is other than 0, 4, or
+    /// 8, the ASLA sub-TLV MUST be ignored by the receiver."
+    ///
+    /// Checked at use rather than at parse so a malformed container
+    /// cannot take the rest of the LSA down with it — its siblings and
+    /// the enclosing TLV stay usable, and the sub-TLV round-trips.
+    pub fn has_valid_masks(&self) -> bool {
+        matches!(self.sabm.len(), 0 | 4 | 8) && matches!(self.udabm.len(), 0 | 4 | 8)
+    }
+
     /// True when both application masks are zero-length. RFC 9492 §5
     /// makes such an advertisement the fallback for any application
     /// that has no advertisement of its own on this link — and forbids

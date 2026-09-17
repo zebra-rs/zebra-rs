@@ -3267,9 +3267,6 @@ impl Ospf<Ospfv2> {
             };
             if let Some(lsa) = flushed {
                 self.flood_self_originated_lsa(AREA0, &lsa);
-                // A withdrawn delay prunes the link from a
-                // metric-type-1 topology (RFC 9350 §15).
-                self.spf_schedule_area(AREA0);
             }
         }
     }
@@ -3430,6 +3427,9 @@ impl Ospf<Ospfv2> {
             };
             if let Some(lsa) = flushed {
                 self.flood_self_originated_lsa(AREA0, &lsa);
+                // A withdrawn delay prunes the link from a
+                // metric-type-1 topology (RFC 9350 §15).
+                self.spf_schedule_area(AREA0);
             }
         }
     }

@@ -217,6 +217,14 @@ macro_rules! asla_readers {
             let mut any_application = Vec::new();
             for sub in subs {
                 if let $variant(asla) = sub {
+                    // RFC 9492 §5: an ASLA whose mask lengths are not
+                    // 0, 4 or 8 is ignored outright. It must not count
+                    // as an explicit advertisement either — otherwise a
+                    // malformed container suppresses a valid zero-mask
+                    // one under the presence rule and prunes the link.
+                    if !asla.has_valid_masks() {
+                        continue;
+                    }
                     if asla.is_flex_algo() {
                         explicit.push(asla);
                     } else if asla.is_any_application() {
@@ -554,6 +562,94 @@ mod tests {
             Some(900)
         );
         assert_eq!(asla_min_delay_v3(&[with_delay, affinity_only]), Some(900));
+    }
+
+    fn v3_asla_masks(sabm: Vec<u8>, udabm: Vec<u8>, min_delay: u32) -> Ospfv3SubTlv {
+        use ospf_packet::OspfSubMinMaxLinkDelay;
+        Ospfv3SubTlv::Asla(Ospfv3AslaSubTlv {
+            sabm,
+            udabm,
+            subs: vec![Ospfv3AslaSubSubTlv::MinMaxLinkDelay(
+                OspfSubMinMaxLinkDelay {
+                    anomalous: false,
+                    min_delay,
+                    max_delay: min_delay + 100,
+                },
+            )],
+        })
+    }
+
+    /// RFC 9492 §5: a mask length outside 0/4/8 means the whole ASLA is
+    /// ignored. A one-octet SABM with the X-bit set is not a
+    /// Flex-Algorithm advertisement, however much it looks like one.
+    #[test]
+    fn invalid_mask_lengths_make_an_asla_unusable() {
+        // Invalid SABM.
+        let bad_sabm = v3_asla_masks(vec![OSPFV3_SABM_FLEX_ALGO], Vec::new(), 900);
+        assert_eq!(asla_min_delay_v3(&[bad_sabm]), None);
+        // Invalid UDABM, valid SABM — checked independently.
+        let bad_udabm = v3_asla_masks(
+            vec![OSPFV3_SABM_FLEX_ALGO, 0, 0, 0],
+            vec![0x01, 0x02, 0x03],
+            900,
+        );
+        assert_eq!(asla_min_delay_v3(&[bad_udabm]), None);
+        // 8-octet masks are legal.
+        let long_masks = v3_asla_masks(
+            vec![OSPFV3_SABM_FLEX_ALGO, 0, 0, 0, 0, 0, 0, 0],
+            vec![0; 8],
+            900,
+        );
+        assert_eq!(asla_min_delay_v3(&[long_masks]), Some(900));
+    }
+
+    /// And it must not count as "an explicit advertisement is present":
+    /// otherwise a malformed container silently suppresses a valid
+    /// generic one and the link is pruned.
+    #[test]
+    fn an_invalid_asla_does_not_suppress_a_valid_generic_one() {
+        let bad_explicit = Ospfv3SubTlv::Asla(Ospfv3AslaSubTlv {
+            sabm: vec![OSPFV3_SABM_FLEX_ALGO],
+            udabm: Vec::new(),
+            subs: vec![Ospfv3AslaSubSubTlv::ExtAdminGroup(ExtAdminGroup {
+                words: vec![0x0000_0001],
+            })],
+        });
+        let generic_delay = v3_asla(Vec::new(), 1_100);
+        assert_eq!(
+            asla_min_delay_v3(&[bad_explicit.clone(), generic_delay.clone()]),
+            Some(1_100)
+        );
+        assert_eq!(
+            asla_min_delay_v3(&[generic_delay, bad_explicit]),
+            Some(1_100),
+            "and not by advertisement order"
+        );
+    }
+
+    /// The OSPFv2 selector applies the same guard.
+    #[test]
+    fn invalid_mask_lengths_are_rejected_on_v2_too() {
+        use ospf_packet::OspfSubMinMaxLinkDelay;
+        let asla = |sabm: Vec<u8>| {
+            ExtLinkSubTlv::Asla(OspfAslaSubTlv {
+                sabm,
+                udabm: Vec::new(),
+                subs: vec![OspfAslaSubSubTlv::MinMaxLinkDelay(OspfSubMinMaxLinkDelay {
+                    anomalous: false,
+                    min_delay: 900,
+                    max_delay: 1_000,
+                })],
+            })
+        };
+        assert_eq!(
+            asla_min_delay_v2(&[asla(vec![OSPF_SABM_FLEX_ALGO, 0])]),
+            None
+        );
+        assert_eq!(
+            asla_min_delay_v2(&[asla(vec![OSPF_SABM_FLEX_ALGO, 0, 0, 0])]),
+            Some(900)
+        );
     }
 
     /// Affinity is read from the same applicable set, so the two

@@ -2292,6 +2292,17 @@ impl OspfAslaSubTlv {
     }
 
     /// Minimum unidirectional link delay (microseconds) from the Min/Max
+    /// RFC 9492 §5: "The value MUST be 0, 4, or 8" for both mask
+    /// lengths, and "if the SABM or UDABM Length is other than 0, 4, or
+    /// 8, the ASLA sub-TLV MUST be ignored by the receiver."
+    ///
+    /// Checked at use rather than at parse so a malformed container
+    /// cannot take the rest of the LSA down with it — its siblings and
+    /// the enclosing TLV stay usable, and the sub-TLV round-trips.
+    pub fn has_valid_masks(&self) -> bool {
+        matches!(self.sabm.len(), 0 | 4 | 8) && matches!(self.udabm.len(), 0 | 4 | 8)
+    }
+
     /// True when both application masks are zero-length — the RFC 9492
     /// §5 "any application that has nothing more specific" fallback.
     pub fn is_any_application(&self) -> bool {
