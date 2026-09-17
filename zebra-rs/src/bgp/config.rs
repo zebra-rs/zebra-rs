@@ -2285,8 +2285,41 @@ fn config_ethernet_segment_redundancy_mode(
     }
     // Single-active carves one primary per service instance where all-active
     // makes every attached PE primary, so the mode changes the P/B bits the
-    // segment's VPWS services advertise (RFC 8214 §5).
+    // segment's VPWS services advertise (RFC 8214 §5) — and, when the
+    // segment signals its E-LAN role, whether its per-EVI A-Ds carry P/B at
+    // all.
     bgp.vpws_resync_es();
+    bgp.evpn_reconcile_ad_evi_roles();
+    Some(())
+}
+
+/// `router bgp afi-safi evpn ethernet-segment <name> role-signaling
+/// <inferred|l2-attr>` — whether this single-active segment advertises its
+/// elected role in the per-EVI Ethernet A-D's Layer-2 Attributes EC
+/// (rfc7432bis §7.11.1) or leaves remote PEs to infer the forwarder from
+/// MAC origination. Changing it re-originates the segment's per-EVI A-Ds so
+/// the bits appear or disappear at once.
+fn config_es_role_signaling(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
+        return None;
+    }
+    let name = args.string()?;
+    let mode = if op.is_set() {
+        super::ethernet_segment::RoleSignaling::from_keyword(&args.string()?)
+    } else {
+        super::ethernet_segment::RoleSignaling::default()
+    };
+    let esi = {
+        let es = bgp.ethernet_segments.entry(name).or_default();
+        es.role_signaling = mode;
+        es.esi
+    };
+    // The bits ride routes that are already advertised, so the change is an
+    // in-place re-origination of the segment's per-EVI A-Ds.
+    if esi.is_some() {
+        bgp.evpn_reconcile_ad_evi_roles();
+    }
     Some(())
 }
 
@@ -5712,6 +5745,10 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/afi-safi/ethernet-segment/interface",
             config_ethernet_segment_interface,
+        );
+        self.callback_add(
+            "/router/bgp/afi-safi/ethernet-segment/role-signaling",
+            config_es_role_signaling,
         );
         self.callback_add(
             "/router/bgp/afi-safi/ethernet-segment/df-election/algorithm",

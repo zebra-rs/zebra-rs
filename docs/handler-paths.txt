@@ -19,6 +19,7 @@
 /router/bgp/afi-safi/ethernet-segment/esi
 /router/bgp/afi-safi/ethernet-segment/interface
 /router/bgp/afi-safi/ethernet-segment/redundancy-mode
+/router/bgp/afi-safi/ethernet-segment/role-signaling
 /router/bgp/afi-safi/evi
 /router/bgp/afi-safi/evi/bridge
 /router/bgp/afi-safi/igmp-mld-proxy

@@ -18455,6 +18455,15 @@ impl Bgp {
         if !self.evpn_encap.is_mpls() {
             ecom.0.insert(evpn_encap_vxlan());
         }
+        // The elected role, for a single-active segment configured to
+        // signal it (rfc7432bis §7.11.1). All-active segments carry no P/B:
+        // every attached PE forwards there, so a "primary" would be a lie
+        // that costs the remote its aliasing set.
+        if let Some(role) = self.elan_ad_evi_role(&esi, vni) {
+            let (primary, backup) = role.bits();
+            ecom.0
+                .insert(ExtCommunityValue::l2_attr(primary, backup, false, 0));
+        }
         attr.ecom = Some(ecom);
         attr.nexthop = Some(BgpNexthop::Evpn(self.evpn_nexthop_for_vni(vni)));
         if self.evpn_encap.is_srv6() {
@@ -18482,6 +18491,132 @@ impl Bgp {
         );
         rib.esi = Some(esi);
         self.evpn_originate_synch(rd, prefix, rib);
+    }
+
+    /// The role this PE should advertise on the per-EVI A-D for `(esi,
+    /// vni)`, or `None` when the segment does not signal one — it is
+    /// all-active, it is not configured for `role-signaling l2-attr`, or
+    /// there is no such segment configured here at all (a replay before
+    /// config, or an ESI we only learned from a peer).
+    ///
+    /// The election is the same one `evpn_es_df_sync` tees to the datapath,
+    /// AC-DF narrowing included, so the advertised bit and the local BUM
+    /// filter cannot disagree.
+    fn elan_ad_evi_role(
+        &self,
+        esi: &[u8; 10],
+        vni: u32,
+    ) -> Option<super::ethernet_segment::VpwsRole> {
+        let es = self
+            .ethernet_segments
+            .values()
+            .find(|es| es.esi.as_ref() == Some(esi))?;
+        if !es.redundancy_mode.single_active() || !es.role_signaling.signals() {
+            return None;
+        }
+        let cands = self.es_df_candidates(esi);
+        let narrowed;
+        let cands = if self.es_ac_df_in_effect(esi) {
+            narrowed = self.es_ac_df_candidates(&cands, esi, vni, 0);
+            &narrowed
+        } else {
+            &cands
+        };
+        Some(super::ethernet_segment::elan_role(
+            cands,
+            self.evpn_local_source(),
+            esi,
+            vni,
+            self.es_holding(esi),
+        ))
+    }
+
+    /// The role this segment advertises in each bridge domain its access
+    /// port is in, for `show`. Empty when the segment signals no role, has
+    /// no port, or the port is in no EVI yet.
+    pub fn es_advertised_roles(
+        &self,
+        es: &super::ethernet_segment::EthernetSegment,
+    ) -> Vec<(u32, super::ethernet_segment::VpwsRole)> {
+        let (Some(esi), Some(port)) = (es.esi, es.interface.as_ref()) else {
+            return Vec::new();
+        };
+        let Some(ifindex) = self.link_index_by_name.get(port).copied() else {
+            return Vec::new();
+        };
+        self.port_evis(ifindex)
+            .into_iter()
+            .filter_map(|vni| Some((vni, self.elan_ad_evi_role(&esi, vni)?)))
+            .collect()
+    }
+
+    /// The `(P, B)` bits currently on the per-EVI A-D we originate for
+    /// `(esi, vni)`, read back from the Loc-RIB; `None` when we originate no
+    /// such route, or it carries no Layer-2 Attributes EC.
+    ///
+    /// The route is the state — the same reasoning as
+    /// `evpn_ad_evi_originated` — so a role change needs no shadow copy to
+    /// diff against, and a re-origination that would change nothing is
+    /// skipped rather than re-advertised on every drain.
+    fn evpn_ad_evi_role_originated(&self, esi: &[u8; 10], vni: u32) -> Option<(bool, bool)> {
+        let rd = rd_from_router_id_vni(self.router_id, vni)?;
+        let prefix = EvpnPrefix::EthernetAd {
+            esi: *esi,
+            eth_tag: 0,
+        };
+        let rib = self.local_rib.evpn.get(&rd)?.selected.get(&prefix)?;
+        if rib.typ != BgpRibType::Originated {
+            return None;
+        }
+        rib.attr
+            .ecom
+            .as_ref()?
+            .0
+            .iter()
+            .find_map(|v| v.as_l2_attr())
+            .map(|a| (a.primary, a.backup))
+    }
+
+    /// Re-originate the per-EVI A-Ds whose advertised role has changed —
+    /// including the transitions into and out of signalling it at all.
+    ///
+    /// The role moves when the segment's membership, the negotiated
+    /// algorithm, a preference, an AC-DF narrowing or the startup hold
+    /// moves it — every one of which already funnels through
+    /// `evpn_es_df_sync` — and the bits appear or vanish when
+    /// `role-signaling` or `redundancy-mode` is edited. This is the whole
+    /// point of the signal: the route stays where it is and only its
+    /// attributes change, so a remote PE re-points its forwarding without a
+    /// withdraw, an announce and a re-selection.
+    ///
+    /// Comparing what we *want* against what the Loc-RIB already carries
+    /// means a drain that changes nothing advertises nothing — this runs on
+    /// every ES event, and re-advertising an identical route on each of them
+    /// is how an update loop starts.
+    pub fn evpn_reconcile_ad_evi_roles(&mut self) {
+        let mut restate: Vec<([u8; 10], u32)> = Vec::new();
+        for es in self.ethernet_segments.values() {
+            let (Some(esi), Some(port)) = (es.esi, es.interface.clone()) else {
+                continue;
+            };
+            let Some(ifindex) = self.link_index_by_name.get(&port).copied() else {
+                continue;
+            };
+            for vni in self.port_evis(ifindex) {
+                // Only a route we actually originate can carry a role; the
+                // port reconciler owns creating and withdrawing them.
+                if !self.evpn_ad_evi_originated(&esi, vni) {
+                    continue;
+                }
+                let want = self.elan_ad_evi_role(&esi, vni).map(|role| role.bits());
+                if self.evpn_ad_evi_role_originated(&esi, vni) != want {
+                    restate.push((esi, vni));
+                }
+            }
+        }
+        for (esi, vni) in restate {
+            self.evpn_originate_ethernet_ad_evi(esi, vni);
+        }
     }
 
     /// Inverse of `evpn_originate_ethernet_ad_evi`.
@@ -19038,9 +19173,13 @@ impl Bgp {
             }
         }
         // Same trigger set, E-LAN side: push the per-bridge-domain DF roles
-        // to the cradle datapath (the non-DF filter).
+        // to the cradle datapath (the non-DF filter), and re-advertise the
+        // per-EVI A-Ds whose signalled role moved with them — the local
+        // filter and the bit a remote PE reads come from one election and
+        // must change together.
         if std::mem::take(&mut self.local_rib.evpn_vpws.es_df_dirty) {
             self.evpn_es_df_sync();
+            self.evpn_reconcile_ad_evi_roles();
         }
         // And the aliasing nexthop groups, from the A-D routes.
         if std::mem::take(&mut self.local_rib.es_nhg_dirty) {

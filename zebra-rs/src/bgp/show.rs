@@ -2586,6 +2586,17 @@ struct EthernetSegmentJson {
     member_vteps: Vec<EsMemberVtepJson>,
     df_algorithm: Option<String>,
     designated_forwarder: Option<String>,
+    /// `inferred` or `l2-attr` (rfc7432bis §7.11.1 role signalling).
+    role_signaling: String,
+    /// The role advertised per bridge domain, when the segment signals one.
+    advertised_roles: Vec<EsAdRoleJson>,
+}
+
+/// One bridge domain's advertised role on the per-EVI Ethernet A-D.
+#[derive(Serialize)]
+struct EsAdRoleJson {
+    bd: u32,
+    role: String,
 }
 
 fn show_bgp_evpn_ethernet_segment(
@@ -2637,6 +2648,15 @@ fn show_bgp_evpn_ethernet_segment(
                 interface: es.interface.clone(),
                 port_down: bgp.es_port_down(es),
                 df_preference: es.df_preference,
+                role_signaling: es.role_signaling.as_str().to_string(),
+                advertised_roles: bgp
+                    .es_advertised_roles(es)
+                    .into_iter()
+                    .map(|(bd, role)| EsAdRoleJson {
+                        bd,
+                        role: role.as_str().to_string(),
+                    })
+                    .collect(),
                 df_algorithm_configured: es.df_algorithm.map(|a| a.as_str().to_string()),
                 df_preference_bid: bgp_packet::DfElectionEc::is_preference_alg(
                     es.df_election_ec().df_alg,
@@ -2812,6 +2832,21 @@ fn show_bgp_evpn_ethernet_segment(
             if let Some(df) = super::ethernet_segment::elect_forwarders(&cands, &esi, 0).0 {
                 let tag = if df == local { " (this node)" } else { "" };
                 writeln!(buf, "  Designated Forwarder (tag 0): {df}{tag}")?;
+            }
+            // rfc7432bis §7.11.1: what this PE tells remote PEs about who
+            // forwards the segment's known unicast. Shown only when it
+            // signals — an `inferred` segment (the default) has nothing to
+            // say here, and the remote's view of it lives under the teed
+            // groups below.
+            if es.role_signaling.signals() {
+                writeln!(
+                    buf,
+                    "  Role signaling: {} (per-EVI A-D P/B)",
+                    es.role_signaling.as_str()
+                )?;
+                for (bd, role) in bgp.es_advertised_roles(es) {
+                    writeln!(buf, "    bd {bd}: {}", role.as_str())?;
+                }
             }
         }
     }

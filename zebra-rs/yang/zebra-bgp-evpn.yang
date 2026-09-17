@@ -259,6 +259,48 @@ module zebra-bgp-evpn {
         type string;
         description "Access interface (CE-facing port) bound to this ES.";
       }
+      leaf role-signaling {
+        ext:help "How remote PEs learn which PE forwards this segment";
+        type enumeration {
+          enum inferred {
+            description
+              "Advertise nothing; a remote PE infers the forwarder from
+               which PE advertised the segment's MACs.";
+          }
+          enum l2-attr {
+            description
+              "Advertise the elected role in the Layer-2 Attributes
+               extended community of the per-EVI Ethernet A-D.";
+          }
+        }
+        default inferred;
+        description
+          "How a remote PE learns which PE forwards this **single-active**
+           segment's known unicast. RFC 7432 does not say: the DF election
+           is local to the segment's PEs, and nothing on the wire tells an
+           ingress PE its outcome.
+
+           `inferred` (the default, and the pre-existing behaviour) leaves
+           the remote to deduce it from which PE advertised the segment's
+           MAC routes — only the DF learns from the CE, so the deduction is
+           usually right. It has two costs: before the CE has sourced
+           anything there is nothing to deduce from, and after a DF change
+           the old DF's MAC routes are still valid, so the remote follows
+           only as the MACs are relearned.
+
+           `l2-attr` advertises the role instead: the per-EVI Ethernet A-D
+           carries the Layer-2 Attributes extended community with P=1 on the
+           Designated Forwarder, B=1 on the election's runner-up and neither
+           bit on any other PE (draft-ietf-bess-rfc7432bis §7.11.1). A role
+           change is then an attribute-only update on a route that is
+           already there, so the remote re-points without a withdraw and a
+           re-selection.
+
+           The draft is work in progress and does not specify the ingress
+           procedure, so this is off by default; turn it on across a segment
+           rather than on one PE. All-active segments never carry P/B — every
+           attached PE forwards there.";
+      }
       container df-election {
         presence "Designated-Forwarder election tuning";
         ext:help "Designated-Forwarder election tuning";

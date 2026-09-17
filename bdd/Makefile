@@ -643,6 +643,10 @@ bgp_evpn_es:
 	mkdir -p allure-results
 	$(CUCUMBER) -- --concurrency=1 --tags "@bgp_evpn_es"
 
+bgp_evpn_single_active:
+	mkdir -p allure-results
+	$(CUCUMBER) -- --concurrency=1 --tags "@bgp_evpn_single_active"
+
 bgp_vrf_evpn_type5:
 	mkdir -p allure-results
 	$(CUCUMBER) -- --concurrency=1 --tags "@bgp_vrf_evpn_type5"
