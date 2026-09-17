@@ -637,7 +637,11 @@ keeps the whole advertised bitmap — a peer's T bit is retained and shown
 today. Era handling is explicit: a seconds field below the prime-epoch
 offset cannot be a real era-0 instant (it would predate 1970), so it reads
 as era 1, which keeps the codec correct across the 2036-02-07 rollover
-instead of jumping 136 years backwards. Proof: 4 SCT tests (wire layout
+instead of jumping 136 years backwards. `SctEc`'s `Ord` is **chronological,
+not the derived wire order**, for the same reason: §5.3 has this code take
+the *latest valid* SCT, and `.max()` over raw 32-bit seconds picks the
+earlier instant across the rollover (caught in review of the phase-2
+commit). Proof: 4 SCT tests (wire layout
 against the RFC figure, the 2208988800 epoch constant, the era-1 boundary in
 both directions, the ~15.26 µs quantum with a 10 ms skew surviving it, and a
 parse round trip) plus the T-bit position and its coexistence with AC-DF and

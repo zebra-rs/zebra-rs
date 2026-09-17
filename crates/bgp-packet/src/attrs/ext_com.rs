@@ -487,12 +487,39 @@ impl From<L2AttrEc> for ExtCommunityValue {
 /// low 16 fraction bits are not carried and read back as zero, so the
 /// resolution is 2^-16 s ≈ 15.26 µs — ample for a mechanism whose skew
 /// defaults to 10 ms.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+///
+/// [`Ord`] is **chronological, not the derived wire order** — see the impl.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SctEc {
     /// Seconds since the NTP prime epoch (1900-01-01 UTC).
     pub seconds: u32,
     /// High-order 16 bits of the NTP fraction.
     pub fraction: u16,
+}
+
+/// Order two carving times by **when they are**, not by their wire bytes.
+///
+/// The derived order would compare the raw 32-bit seconds field, and that
+/// reverses across the 2036-02-07 rollover: a time one second before it
+/// (`seconds` = `u32::MAX`) would sort *after* one second past it
+/// (`seconds` = 1). RFC 9722 §3.1 has a PE take the latest SCT it has been
+/// given, so `.max()` on the derived order would pick the earlier instant at
+/// exactly the moment the distinction matters. Comparing the interpreted
+/// Unix instants keeps `<`, `.max()` and `BTreeMap` all meaning what they
+/// read as.
+///
+/// This is the *decoded* value. [`ExtCommunityValue`] itself keeps its
+/// derived wire-byte ordering, which is what its `BTreeSet` needs.
+impl Ord for SctEc {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.to_unix_micros().cmp(&other.to_unix_micros())
+    }
+}
+
+impl PartialOrd for SctEc {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl SctEc {
@@ -1463,6 +1490,42 @@ mod tests {
         let before = SctEc::from_unix_micros(SctEc::ERA0_END_UNIX - 1, 0);
         assert_eq!(before.seconds, u32::MAX);
         assert_eq!(before.to_unix_micros(), (SctEc::ERA0_END_UNIX - 1, 0));
+    }
+
+    #[test]
+    fn sct_orders_chronologically_across_the_era_rollover() {
+        // One second either side of the 2036-02-07 rollover. On the wire the
+        // earlier instant has the LARGER seconds field, so the derived order
+        // would rank them backwards — and RFC 9722 §3.1 has a PE take the
+        // latest SCT, so `.max()` would pick the earlier one exactly when it
+        // matters.
+        let before = SctEc::from_unix_micros(SctEc::ERA0_END_UNIX - 1, 0);
+        let after = SctEc::from_unix_micros(SctEc::ERA0_END_UNIX + 1, 0);
+        assert_eq!(before.seconds, u32::MAX);
+        assert_eq!(after.seconds, 1);
+        assert!(
+            before.seconds > after.seconds,
+            "wire order is reversed here"
+        );
+        assert!(before < after);
+        assert!(after > before);
+        assert_eq!([before, after].into_iter().max(), Some(after));
+        assert_eq!([before, after].into_iter().min(), Some(before));
+
+        // The fraction still participates, and only after the seconds.
+        let late_before = SctEc::from_unix_micros(SctEc::ERA0_END_UNIX - 1, 999_999);
+        assert!(late_before < after);
+        assert!(before < late_before);
+
+        // Within one era the obvious thing holds, and the order agrees with
+        // equality (Ord must be consistent with the derived Eq).
+        let t0 = SctEc::from_unix_micros(1_767_225_600, 0);
+        let t1 = SctEc::from_unix_micros(1_767_225_600, 500_000);
+        let t2 = SctEc::from_unix_micros(1_767_225_601, 0);
+        assert!(t0 < t1 && t1 < t2);
+        assert_eq!(t0.cmp(&t0), std::cmp::Ordering::Equal);
+        assert_eq!(t0, SctEc::from_unix_micros(1_767_225_600, 0));
+        assert!(!(t0 < t0) && !(t0 > t0));
     }
 
     #[test]
