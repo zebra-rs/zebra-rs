@@ -66,7 +66,7 @@ pub use neigh::{
     IsisSubIpv6IfAddr, IsisSubIpv6NeighAddr, IsisSubLanAdjSid, IsisSubLinkLoss,
     IsisSubMinMaxLinkDelay, IsisSubResidualBw, IsisSubSrv6EndXSid, IsisSubSrv6LanEndXSid,
     IsisSubTeMetric, IsisSubUniLinkDelay, IsisSubUtilizedBw, IsisTlvExtIsReach,
-    IsisTlvExtIsReachEntry, IsisTlvMtIsReach,
+    IsisTlvExtIsReachEntry, IsisTlvMtIsReach, PerfMetrics,
 };
 pub mod neigh_code;
 pub use neigh_code::IsisNeighCode;
