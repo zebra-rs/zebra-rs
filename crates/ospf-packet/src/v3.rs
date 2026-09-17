@@ -45,7 +45,9 @@ use nom::number::complete::{be_u8, be_u16, be_u24, be_u32};
 use nom_derive::*;
 use packet_utils::{ParseBe, many0_complete};
 
-use crate::parser::GraceLsa;
+use crate::parser::{
+    GraceLsa, OspfSubDelayVariation, OspfSubLinkLoss, OspfSubMinMaxLinkDelay, OspfSubUniLinkDelay,
+};
 
 use super::parser::{AdjSidFlags, PrefixSidFlags};
 use super::{DbDescFlags, OspfType};
@@ -1644,6 +1646,23 @@ pub const OSPFV3_SABM_FLEX_ALGO: u8 = 0x10;
 /// uses 20).
 const OSPFV3_ASLA_SUB_EXT_ADMIN_GROUP: u16 = 21;
 
+// RFC 7471 performance metrics inside an OSPFv3 ASLA. The *values* are
+// the RFC 7471 encodings unchanged — same A bit in the top bit of octet
+// 0, same 24-bit fields — so the OSPFv2 structs are reused verbatim.
+// Only the code points differ: OSPFv3 draws them from the "OSPFv3
+// Extended-LSA Sub-TLVs" registry, where they are 13-16, whereas
+// OSPFv2's come from the TE Opaque LSA registry as 27-30. Reading
+// OSPFv2's numbers here would put delay under the Adj-SID and
+// Graceful-Link-Shutdown code points.
+/// Unidirectional Link Delay (RFC 7471 §4.1), OSPFv3 sub-TLV 13.
+const OSPFV3_ASLA_SUB_UNI_LINK_DELAY: u16 = 13;
+/// Min/Max Unidirectional Link Delay (§4.2), OSPFv3 sub-TLV 14.
+const OSPFV3_ASLA_SUB_MIN_MAX_LINK_DELAY: u16 = 14;
+/// Unidirectional Delay Variation (§4.3), OSPFv3 sub-TLV 15.
+const OSPFV3_ASLA_SUB_DELAY_VARIATION: u16 = 15;
+/// Unidirectional Link Loss (§4.4), OSPFv3 sub-TLV 16.
+const OSPFV3_ASLA_SUB_LINK_LOSS: u16 = 16;
+
 /// Prefix-SID Sub-TLV (RFC 8666 §5).
 ///
 /// Wire layout: flags(1) + algo(1) + reserved(2) + SID(3 or 4).
@@ -2306,6 +2325,15 @@ pub enum Ospfv3AslaSubSubTlv {
     /// Extended Administrative Group (RFC 7308), type 21 — the per-link
     /// affinity bitmap tested by Flex-Algorithm SPF.
     ExtAdminGroup(ExtAdminGroup),
+    /// Average unidirectional delay (RFC 7471 §4.1), type 13.
+    UniLinkDelay(OspfSubUniLinkDelay),
+    /// Min/Max unidirectional delay (§4.2), type 14. The `Min` bound is
+    /// the RFC 9350 metric-type 1 input.
+    MinMaxLinkDelay(OspfSubMinMaxLinkDelay),
+    /// Unidirectional delay variation (§4.3), type 15.
+    DelayVariation(OspfSubDelayVariation),
+    /// Unidirectional link loss (§4.4), type 16.
+    LinkLoss(OspfSubLinkLoss),
     Unknown {
         typ: u16,
         value: Vec<u8>,
@@ -2316,6 +2344,10 @@ impl Ospfv3AslaSubSubTlv {
     fn value_len(&self) -> usize {
         match self {
             Ospfv3AslaSubSubTlv::ExtAdminGroup(g) => g.byte_len(),
+            Ospfv3AslaSubSubTlv::MinMaxLinkDelay(_) => 8,
+            Ospfv3AslaSubSubTlv::UniLinkDelay(_)
+            | Ospfv3AslaSubSubTlv::DelayVariation(_)
+            | Ospfv3AslaSubSubTlv::LinkLoss(_) => 4,
             Ospfv3AslaSubSubTlv::Unknown { value, .. } => value.len(),
         }
     }
@@ -2327,6 +2359,10 @@ impl Ospfv3AslaSubSubTlv {
     fn typ(&self) -> u16 {
         match self {
             Ospfv3AslaSubSubTlv::ExtAdminGroup(_) => OSPFV3_ASLA_SUB_EXT_ADMIN_GROUP,
+            Ospfv3AslaSubSubTlv::UniLinkDelay(_) => OSPFV3_ASLA_SUB_UNI_LINK_DELAY,
+            Ospfv3AslaSubSubTlv::MinMaxLinkDelay(_) => OSPFV3_ASLA_SUB_MIN_MAX_LINK_DELAY,
+            Ospfv3AslaSubSubTlv::DelayVariation(_) => OSPFV3_ASLA_SUB_DELAY_VARIATION,
+            Ospfv3AslaSubSubTlv::LinkLoss(_) => OSPFV3_ASLA_SUB_LINK_LOSS,
             Ospfv3AslaSubSubTlv::Unknown { typ, .. } => *typ,
         }
     }
@@ -2337,6 +2373,10 @@ impl Ospfv3AslaSubSubTlv {
         buf.put_u16(value_len as u16);
         match self {
             Ospfv3AslaSubSubTlv::ExtAdminGroup(g) => g.emit(buf),
+            Ospfv3AslaSubSubTlv::UniLinkDelay(v) => v.emit_value(buf),
+            Ospfv3AslaSubSubTlv::MinMaxLinkDelay(v) => v.emit_value(buf),
+            Ospfv3AslaSubSubTlv::DelayVariation(v) => v.emit_value(buf),
+            Ospfv3AslaSubSubTlv::LinkLoss(v) => v.emit_value(buf),
             Ospfv3AslaSubSubTlv::Unknown { value, .. } => buf.put_slice(value),
         }
         let pad = ((value_len + 3) & !3) - value_len;
@@ -2350,14 +2390,31 @@ impl Ospfv3AslaSubSubTlv {
         let (input, len) = be_u16(input)?;
         let len = len as usize;
         let (input, value) = take(len)(input)?;
-        let parsed = if typ == OSPFV3_ASLA_SUB_EXT_ADMIN_GROUP {
-            let (_, g) = ExtAdminGroup::parse_be(value)?;
-            Ospfv3AslaSubSubTlv::ExtAdminGroup(g)
-        } else {
-            Ospfv3AslaSubSubTlv::Unknown {
+        let parsed = match typ {
+            OSPFV3_ASLA_SUB_EXT_ADMIN_GROUP => {
+                let (_, g) = ExtAdminGroup::parse_be(value)?;
+                Ospfv3AslaSubSubTlv::ExtAdminGroup(g)
+            }
+            OSPFV3_ASLA_SUB_UNI_LINK_DELAY => {
+                let (_, v) = OspfSubUniLinkDelay::parse_be(value)?;
+                Ospfv3AslaSubSubTlv::UniLinkDelay(v)
+            }
+            OSPFV3_ASLA_SUB_MIN_MAX_LINK_DELAY => {
+                let (_, v) = OspfSubMinMaxLinkDelay::parse_be(value)?;
+                Ospfv3AslaSubSubTlv::MinMaxLinkDelay(v)
+            }
+            OSPFV3_ASLA_SUB_DELAY_VARIATION => {
+                let (_, v) = OspfSubDelayVariation::parse_be(value)?;
+                Ospfv3AslaSubSubTlv::DelayVariation(v)
+            }
+            OSPFV3_ASLA_SUB_LINK_LOSS => {
+                let (_, v) = OspfSubLinkLoss::parse_be(value)?;
+                Ospfv3AslaSubSubTlv::LinkLoss(v)
+            }
+            _ => Ospfv3AslaSubSubTlv::Unknown {
                 typ,
                 value: value.to_vec(),
-            }
+            },
         };
         let padded = (len + 3) & !3;
         let (input, _) = take(padded - len)(input)?;
@@ -2429,7 +2486,17 @@ impl Ospfv3AslaSubTlv {
     pub fn ext_admin_group(&self) -> Option<&ExtAdminGroup> {
         self.subs.iter().find_map(|s| match s {
             Ospfv3AslaSubSubTlv::ExtAdminGroup(g) => Some(g),
-            Ospfv3AslaSubSubTlv::Unknown { .. } => None,
+            _ => None,
+        })
+    }
+
+    /// Minimum unidirectional delay from this ASLA's Min/Max Link Delay
+    /// sub-sub-TLV, if present — the RFC 9350 §5.1 metric-type 1 input.
+    /// The OSPFv2 twin is `OspfAslaSubTlv::min_unidir_delay`.
+    pub fn min_unidir_delay(&self) -> Option<u32> {
+        self.subs.iter().find_map(|s| match s {
+            Ospfv3AslaSubSubTlv::MinMaxLinkDelay(d) => Some(d.min_delay),
+            _ => None,
         })
     }
 }
@@ -5285,6 +5352,55 @@ mod tests {
     }
 
     /// RFC 9492 OSPFv3 ASLA sub-TLV (Router-Link sub-TLV 11) carrying a
+    /// The performance sub-sub-TLVs use the OSPFv3 Extended-LSA registry
+    /// code points (13-16), not the OSPFv2 TE Opaque LSA ones (27-30).
+    /// Emitting OSPFv2's numbers here would land on Adj-SID and
+    /// Graceful-Link-Shutdown, so the wire types are asserted directly.
+    #[test]
+    fn ospfv3_asla_performance_sub_sub_tlvs_use_the_v3_code_points() {
+        let asla = Ospfv3AslaSubTlv {
+            sabm: vec![OSPFV3_SABM_FLEX_ALGO, 0, 0, 0],
+            udabm: Vec::new(),
+            subs: vec![
+                Ospfv3AslaSubSubTlv::UniLinkDelay(OspfSubUniLinkDelay {
+                    anomalous: true,
+                    delay: 1_000,
+                }),
+                Ospfv3AslaSubSubTlv::MinMaxLinkDelay(OspfSubMinMaxLinkDelay {
+                    anomalous: false,
+                    min_delay: 900,
+                    max_delay: 1_200,
+                }),
+                Ospfv3AslaSubSubTlv::DelayVariation(OspfSubDelayVariation { variation: 50 }),
+                Ospfv3AslaSubSubTlv::LinkLoss(OspfSubLinkLoss {
+                    anomalous: true,
+                    loss: 333,
+                }),
+            ],
+        };
+
+        let mut buf = BytesMut::new();
+        asla.emit(&mut buf);
+        // SABM len(1) UDABM len(1) reserved(2) + 4 octets of SABM, then
+        // the sub-sub-TLVs, each 2-octet type + 2-octet length.
+        let types: Vec<u16> = {
+            let mut out = Vec::new();
+            let mut rest = &buf[8..];
+            while rest.len() >= 4 {
+                let typ = u16::from_be_bytes([rest[0], rest[1]]);
+                let len = u16::from_be_bytes([rest[2], rest[3]]) as usize;
+                out.push(typ);
+                rest = &rest[4 + ((len + 3) & !3)..];
+            }
+            out
+        };
+        assert_eq!(types, vec![13, 14, 15, 16]);
+
+        let (_, back) = Ospfv3AslaSubTlv::parse_be(&buf).expect("parse");
+        assert_eq!(back, asla, "round-trips including the anomalous bits");
+        assert_eq!(back.min_unidir_delay(), Some(900));
+    }
+
     /// Flex-Algo Extended Admin Group round-trips through the
     /// E-Router-LSA codec, and the Flex-Algo helpers read it back.
     #[test]

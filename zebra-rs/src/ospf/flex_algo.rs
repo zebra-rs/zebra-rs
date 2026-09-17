@@ -192,18 +192,29 @@ pub fn build_link_asla(
 
 /// OSPFv3 sibling of `build_link_asla`: build the per-link ASLA sub-TLV
 /// (RFC 9492) that rides as an `Ospfv3SubTlv::Asla` on the E-Router-LSA
-/// Router-Link TLV. Same SABM X-bit framing and empty-bitmap guard as
-/// the v2 builder; only the wire type differs (OSPFv3 sub-TLV 11 with
-/// the Extended Admin Group sub-sub-TLV 21).
-pub fn build_link_asla_v3(affinity: &BTreeSet<String>, am: &AffinityMap) -> Option<Ospfv3SubTlv> {
+/// Router-Link TLV, carrying this link's affinity and any RFC 7471 TE
+/// metrics. Same SABM X-bit framing and same "nothing to say, say
+/// nothing" guard as the v2 builder; the wire types differ throughout
+/// (OSPFv3 sub-TLV 11, Extended Admin Group 21, performance metrics
+/// 13-16).
+pub fn build_link_asla_v3(
+    affinity: &BTreeSet<String>,
+    am: &AffinityMap,
+    extra: Vec<Ospfv3AslaSubSubTlv>,
+) -> Option<Ospfv3SubTlv> {
     let group = local_link_affinity(affinity, am);
-    if group.words.is_empty() {
+    let mut subs = Vec::new();
+    if !group.words.is_empty() {
+        subs.push(Ospfv3AslaSubSubTlv::ExtAdminGroup(group));
+    }
+    subs.extend(extra);
+    if subs.is_empty() {
         return None;
     }
     Some(Ospfv3SubTlv::Asla(Ospfv3AslaSubTlv {
         sabm: vec![OSPFV3_SABM_FLEX_ALGO, 0, 0, 0],
         udabm: Vec::new(),
-        subs: vec![Ospfv3AslaSubSubTlv::ExtAdminGroup(group)],
+        subs,
     }))
 }
 
@@ -355,7 +366,8 @@ mod tests {
             .unwrap();
             am.commit();
         }
-        let asla = build_link_asla_v3(&affinity_set(&["blue", "red"]), &am).expect("ASLA");
+        let asla =
+            build_link_asla_v3(&affinity_set(&["blue", "red"]), &am, Vec::new()).expect("ASLA");
         let Ospfv3SubTlv::Asla(a) = &asla else {
             panic!("expected Asla, got {asla:?}");
         };
@@ -365,11 +377,32 @@ mod tests {
         assert!(g.get(0) && g.get(200) && !g.get(1));
     }
 
+    /// A link with TE metrics but no affinity still originates the ASLA
+    /// — otherwise flex-algo metric-type 1 would have nothing to read.
+    #[test]
+    fn build_link_asla_v3_emits_te_metrics_without_affinity() {
+        use ospf_packet::{OspfSubUniLinkDelay, Ospfv3AslaSubSubTlv};
+        let am = AffinityMap::new();
+        let extra = vec![Ospfv3AslaSubSubTlv::UniLinkDelay(OspfSubUniLinkDelay {
+            anomalous: false,
+            delay: 1_000,
+        })];
+        let asla = build_link_asla_v3(&BTreeSet::new(), &am, extra).expect("ASLA");
+        let Ospfv3SubTlv::Asla(a) = &asla else {
+            panic!("expected ASLA, got {asla:?}");
+        };
+        assert!(
+            matches!(a.subs.as_slice(), [Ospfv3AslaSubSubTlv::UniLinkDelay(_)]),
+            "only the metric, no empty admin group: {:?}",
+            a.subs
+        );
+    }
+
     #[test]
     fn build_link_asla_v3_none_when_no_affinity_resolves() {
         let am = AffinityMap::new();
-        assert!(build_link_asla_v3(&BTreeSet::new(), &am).is_none());
-        assert!(build_link_asla_v3(&affinity_set(&["ghost"]), &am).is_none());
+        assert!(build_link_asla_v3(&BTreeSet::new(), &am, Vec::new()).is_none());
+        assert!(build_link_asla_v3(&affinity_set(&["ghost"]), &am, Vec::new()).is_none());
     }
 
     #[test]

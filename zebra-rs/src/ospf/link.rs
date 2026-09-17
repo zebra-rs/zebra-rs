@@ -11,7 +11,7 @@ use bitfield_struct::bitfield;
 use netlink_packet_route::link::LinkFlags;
 use ospf_packet::{
     OspfAslaSubSubTlv, OspfSubDelayVariation, OspfSubLinkLoss, OspfSubMinMaxLinkDelay,
-    OspfSubUniLinkDelay,
+    OspfSubUniLinkDelay, Ospfv3AslaSubSubTlv,
 };
 use socket2::Socket;
 use tokio::io::unix::AsyncFd;
@@ -213,6 +213,42 @@ impl LinkTeMetric {
         }
         if let Some(loss) = self.loss {
             subs.push(OspfAslaSubSubTlv::LinkLoss(OspfSubLinkLoss {
+                anomalous: false,
+                loss,
+            }));
+        }
+        subs
+    }
+
+    /// OSPFv3 rendering of the same metrics. The values are identical —
+    /// RFC 7471 encodings, A bit and all — but OSPFv3 draws its
+    /// sub-TLV code points from the Extended-LSA registry (13-16)
+    /// rather than the TE Opaque LSA one (27-30), so the two cannot
+    /// share a type.
+    pub fn asla_sub_subs_v3(&self) -> Vec<Ospfv3AslaSubSubTlv> {
+        let mut subs = Vec::new();
+        if let Some(delay) = self.unidirectional_delay {
+            subs.push(Ospfv3AslaSubSubTlv::UniLinkDelay(OspfSubUniLinkDelay {
+                anomalous: self.delay_anomalous,
+                delay,
+            }));
+        }
+        if let (Some(min_delay), Some(max_delay)) = (self.min_delay, self.max_delay) {
+            subs.push(Ospfv3AslaSubSubTlv::MinMaxLinkDelay(
+                OspfSubMinMaxLinkDelay {
+                    anomalous: self.min_anomalous || self.max_anomalous,
+                    min_delay,
+                    max_delay,
+                },
+            ));
+        }
+        if let Some(variation) = self.delay_variation {
+            subs.push(Ospfv3AslaSubSubTlv::DelayVariation(OspfSubDelayVariation {
+                variation,
+            }));
+        }
+        if let Some(loss) = self.loss {
+            subs.push(Ospfv3AslaSubSubTlv::LinkLoss(OspfSubLinkLoss {
                 anomalous: false,
                 loss,
             }));
@@ -1051,6 +1087,44 @@ mod te_metric_tests {
                 ..Default::default()
             }
         );
+    }
+
+    /// The v3 rendering carries the same values in the same order, and
+    /// the same Anomalous flags — only the wire code points differ, and
+    /// those are asserted in the codec's own round-trip test.
+    #[test]
+    fn asla_sub_subs_v3_mirrors_the_v2_rendering() {
+        use ospf_packet::Ospfv3AslaSubSubTlv;
+        let m = LinkTeMetric {
+            unidirectional_delay: Some(1_000),
+            min_delay: Some(900),
+            max_delay: Some(1_200),
+            delay_variation: Some(50),
+            loss: Some(10),
+            delay_anomalous: true,
+            max_anomalous: true,
+            ..Default::default()
+        };
+        let subs = m.asla_sub_subs_v3();
+        assert_eq!(subs.len(), 4);
+        assert!(matches!(
+            subs[0],
+            Ospfv3AslaSubSubTlv::UniLinkDelay(ref v) if v.anomalous && v.delay == 1_000
+        ));
+        assert!(matches!(
+            subs[1],
+            Ospfv3AslaSubSubTlv::MinMaxLinkDelay(ref v)
+                if v.anomalous && v.min_delay == 900 && v.max_delay == 1_200
+        ));
+        assert!(matches!(subs[2], Ospfv3AslaSubSubTlv::DelayVariation(_)));
+        assert!(matches!(subs[3], Ospfv3AslaSubSubTlv::LinkLoss(_)));
+
+        // Same guard as v2: one bound alone is a meaningless wire artifact.
+        let half = LinkTeMetric {
+            min_delay: Some(900),
+            ..Default::default()
+        };
+        assert!(half.asla_sub_subs_v3().is_empty());
     }
 
     /// A measured anomaly reaches both delay sub-TLVs; delay variation

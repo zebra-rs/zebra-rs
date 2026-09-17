@@ -2264,7 +2264,7 @@ impl OspfAslaSubTlv {
         4 + self.sabm.len() as u16 + self.udabm.len() as u16 + subs
     }
 
-    fn emit_value(&self, buf: &mut BytesMut) {
+    pub(crate) fn emit_value(&self, buf: &mut BytesMut) {
         buf.put_u8(self.sabm.len() as u8);
         buf.put_u8(self.udabm.len() as u8);
         buf.put_u16(0); // reserved
@@ -2329,7 +2329,7 @@ impl OspfSubUniLinkDelay {
         ))
     }
 
-    fn emit_value(&self, buf: &mut BytesMut) {
+    pub(crate) fn emit_value(&self, buf: &mut BytesMut) {
         let a = if self.anomalous { 0x8000_0000 } else { 0 };
         buf.put_u32(a | (self.delay & 0x00FF_FFFF));
     }
@@ -2360,7 +2360,7 @@ impl OspfSubMinMaxLinkDelay {
         ))
     }
 
-    fn emit_value(&self, buf: &mut BytesMut) {
+    pub(crate) fn emit_value(&self, buf: &mut BytesMut) {
         let a = if self.anomalous { 0x8000_0000 } else { 0 };
         buf.put_u32(a | (self.min_delay & 0x00FF_FFFF));
         buf.put_u32(self.max_delay & 0x00FF_FFFF);
@@ -2386,7 +2386,7 @@ impl OspfSubDelayVariation {
         ))
     }
 
-    fn emit_value(&self, buf: &mut BytesMut) {
+    pub(crate) fn emit_value(&self, buf: &mut BytesMut) {
         buf.put_u32(self.variation & 0x00FF_FFFF);
     }
 }
@@ -2413,7 +2413,7 @@ impl OspfSubLinkLoss {
         ))
     }
 
-    fn emit_value(&self, buf: &mut BytesMut) {
+    pub(crate) fn emit_value(&self, buf: &mut BytesMut) {
         let a = if self.anomalous { 0x8000_0000 } else { 0 };
         buf.put_u32(a | (self.loss & 0x00FF_FFFF));
     }

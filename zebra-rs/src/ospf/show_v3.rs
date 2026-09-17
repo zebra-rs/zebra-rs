@@ -1142,6 +1142,39 @@ fn write_v3_asla_sub(
             Ospfv3AslaSubSubTlv::ExtAdminGroup(g) => {
                 writeln!(out, "      Extended Admin Group = {:08x?}", g.words)?;
             }
+            Ospfv3AslaSubSubTlv::UniLinkDelay(v) => {
+                writeln!(
+                    out,
+                    "      Unidirectional Link Delay = {} usec{}",
+                    v.delay,
+                    if v.anomalous { " (Anomalous)" } else { "" }
+                )?;
+            }
+            Ospfv3AslaSubSubTlv::MinMaxLinkDelay(v) => {
+                writeln!(
+                    out,
+                    "      Min/Max Unidirectional Link Delay = {}/{} usec{}",
+                    v.min_delay,
+                    v.max_delay,
+                    if v.anomalous { " (Anomalous)" } else { "" }
+                )?;
+            }
+            Ospfv3AslaSubSubTlv::DelayVariation(v) => {
+                writeln!(
+                    out,
+                    "      Unidirectional Delay Variation = {} usec",
+                    v.variation
+                )?;
+            }
+            Ospfv3AslaSubSubTlv::LinkLoss(v) => {
+                // RFC 7471 §4.4 encodes loss in units of 0.000003 %.
+                writeln!(
+                    out,
+                    "      Unidirectional Link Loss = {:.6}%{}",
+                    v.loss as f64 * 0.000003,
+                    if v.anomalous { " (Anomalous)" } else { "" }
+                )?;
+            }
             Ospfv3AslaSubSubTlv::Unknown { typ, value } => {
                 writeln!(
                     out,
