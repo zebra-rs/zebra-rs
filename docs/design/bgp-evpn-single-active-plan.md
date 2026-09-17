@@ -24,12 +24,15 @@ Read together with:
 
 Branch: `evpn-single-active`.
 
-> A second design write-up of the same request, `bgp-evpn-single-active.md`,
-> was produced concurrently by another session in this worktree. It is
-> untouched by this plan. The two agree on the protocol choices; this one is
-> the code-level plan (exact wire layouts, call sites, YANG leaves, PR
-> slices). Merging them into one file is a follow-up if you want a single
-> document.
+> This plan **absorbs** `bgp-evpn-single-active.md`, the design write-up
+> produced concurrently by another session in this worktree. The two agreed on
+> every protocol choice; what that document added — the acceptance scope
+> (§1.1), the AC-DF caveat on per-PE determinism (§3.5), the role-update and
+> forwarding-safety invariants (§4.5), the richer remote-state provenance
+> (§4.3/§4.4), concurrent-recovery handling (§5.3), and the acceptance
+> topology and measurements (§8.1) — is folded into the sections below and
+> itemized in Appendix C. That file is left on disk untracked; delete it once
+> you are satisfied nothing was lost.
 
 ## 1. What "single-active" means, and where RFC 7432 stops
 
@@ -52,6 +55,27 @@ Three gaps follow, and they are exactly the reviewer's three points:
 Gap 2 and gap 3 matter far more under single-active than under all-active: a
 non-DF that forwards for a moment is a *loop* on a bridged segment, and a
 moment with no DF is a black hole for the whole VLAN, not one flow.
+
+### 1.1 Scope and acceptance
+
+**In scope for the first release:** E-LAN over **VXLAN** with the cradle
+datapath, on a fabric that includes **two route reflectors**, with all-active
+and RFC 8214 VPWS behaviour unchanged throughout. The control-plane state and
+the tee messages are encapsulation-neutral, so MPLS and SRv6 inherit them —
+but neither is *claimed* until a packet test proves it, the way every other
+EVPN row in `bgp-evpn-support-status.md` is claimed.
+
+**Explicitly not claimed:**
+
+- **Whole-PE fate sharing.** Election stays per `(ES, service)`; identical
+  preference ordering on every segment makes one PE win everywhere *while all
+  members are equally eligible*, but a single access-circuit failure changes
+  eligibility on one segment alone (§3.5). Failing over every segment of a PE
+  together needs a health policy above the ES, which this plan does not build.
+- **Zero loss.** Failover removes route/FIB preparation delay, not detection
+  or election delay, and the ingress role update travels on its own BGP
+  schedule (§5.4). Report measured loss; do not promise a number that has not
+  been measured on the bench in §8.1.
 
 ## 2. What is already on main (do not re-derive)
 
@@ -136,11 +160,16 @@ are removing, and an inconsistent override duplicates or drops frames.
 
 ### 3.4 Deltas required
 
-1. **DP bit** — encode/decode `DfElectionEc::CAP_DONT_PREEMPT = 0x8000`;
-   add it to the tie-break in `pref_wins()` (`ethernet_segment.rs:259`),
-   between preference and address. This *changes an existing comparison*, so
-   the ordering must be proven against FRR's `zebra_evpn_es_run_df_election`
-   in the interop lab before it is enabled by default (§8).
+1. **DP bit** — encode/decode `DfElectionEc::CAP_DONT_PREEMPT = 0x8000` and
+   apply it in the tie-break in `pref_wins()` (`ethernet_segment.rs:259`),
+   between preference and address. **Honouring a remote PE's DP bit is
+   mandatory, not optional**: if a peer sets DP and we ignore it, the two
+   sides rank the segment differently and both forward. The bit only changes
+   an outcome once somebody sets it, so the existing FRR-matching comparison
+   is untouched on a segment where nobody does. What *is* staged is our own
+   advertisement: the first release advertises `DP=0` unless `dont-preempt`
+   is configured, and the non-revertive operational-preference behaviour
+   (item 5) lands after that.
 2. **Default preference 32767** — RFC 9785: when the algorithm is selected
    and no value is configured, the advertised preference MUST be 32767.
    Today `df_election_ec()` (`ethernet_segment.rs:182`) only selects Alg 2
@@ -163,6 +192,29 @@ are removing, and an inconsistent override duplicates or drops frames.
    with real state; it can ship after the rest.
 6. **Alg 3 (Lowest-Preference)** — trivial once ranking is parameterized;
    include it so a mixed vendor segment configured "lowest" interoperates.
+
+### 3.5 What preference does *not* give you
+
+Preference makes the *election* deterministic. It does not make the
+*candidate set* uniform, and the candidate set is what AC-DF narrows.
+
+Take PE-A (pref 500), PE-B (300) and PE-C (100) on both ES-1 and ES-2. While
+every member is eligible, A is DF and B is backup for every service on both
+segments — the intended result. Now let A's ES-1 access circuit fail with
+RFC 8584 AC-DF in effect: A drops out of ES-1's election only
+(`ac_df_filter()`, `ethernet_segment.rs:502`), so B wins ES-1 while A keeps
+ES-2. That is correct behaviour — it is the whole point of AC-DF — but it
+means "PE-A is the active PE" is a statement about a healthy fabric, not an
+invariant.
+
+The same holds one level down: AC-DF narrows per `(EVI, tag)`, so a PE can
+lose one bridge domain of a segment and keep the others. If a deployment
+genuinely needs all-or-nothing takeover, that is the whole-PE fate-sharing
+follow-up in §8, not a property of Alg 2.
+
+Also unchanged by any of this: **all-active segments never use the role
+signal**. Every attached PE is primary there, and the BUM DF elected for an
+all-active segment must not be advertised as the sole unicast endpoint (§4.5).
 
 ## 4. Gap 2 — telling the ingress PE which PE is the DF
 
@@ -261,12 +313,16 @@ struct EsRemoteMember {
     ad_es_live: bool,           // per-ES A-D present (mass-withdraw gate)
     ad_evi: bool,               // per-EVI A-D present for this bd
     member: EsNhgMember,        // the resolved forwarding endpoint
-    paths: u8,                  // contributing copies (RR fan-out, §4.4)
+    stale: bool,                // retained under graceful restart (§9 risk 6)
+    paths: Vec<PathRef>,        // provenance: (peer, RD, add-path id) — §4.4
 }
 struct EsRemoteBd {             // keyed (ESI, bd)
     members: BTreeMap<IpAddr, EsRemoteMember>,
     active: Option<IpAddr>,     // what we last programmed as slot 0
+    backup: Option<IpAddr>,     // slot 1
+    reason: SelectReason,       // signalled | inferred | incumbent | tie-break
     conflict: Option<String>,   // shown, not silently resolved
+    generation: u64,            // §4.5 item 7
 }
 ```
 
@@ -307,6 +363,57 @@ with two RRs". Concretely, in this tree:
   does not import the ES-Import RT, so it has no Type-4s and cannot re-run
   the election. It must read the role off the per-EVI A-D alone. That is the
   whole reason the signal goes on the A-D and not the Type-4.
+- **Every member must be visible as a path.** A backup that BGP never showed
+  us cannot be pre-installed. Per-EVI A-Ds from different PEs carry different
+  RDs (`<router-id>:<vni>`), so they are different prefixes and all are
+  visible — verify that invariant explicitly on the test fabric rather than
+  assuming it, and require ADD-PATH anywhere two PEs could share an RD.
+- **The full set of change triggers.** The remote table is reconciled on:
+  attribute-only updates, withdrawals, best-path changes, peer down, RT /
+  import changes, ADD-PATH path removal, graceful-restart stale expiry, and
+  the cradle reconnect replay (`RibRx::CradleUp`) — the last one rebuilds the
+  derived table and re-tees every group, because the datapath forgot
+  everything.
+
+### 4.5 Invariants the role signal must not break
+
+These are the traps that turn a correct election into a wrong forwarding
+state; each becomes an assertion or a test in phase 3.
+
+1. **Service identity is the VNI, not the Ethernet Tag.** The E-LAN per-EVI
+   A-D carries `eth_tag = 0` with the VNI in the label field
+   (`evpn_originate_ethernet_ad_evi()`, `route.rs:18445`), while the election
+   runs with the VNI *as* the tag (`elan_df()`). Key the role by the EVI /
+   bridge domain resolved from the attribute, never by the NLRI tag.
+2. **A role update is attribute-only.** Re-originating the A-D with a new
+   L2-Attr must preserve everything else on it: the EVI RT, the VXLAN
+   encapsulation EC, the MPLS EVI label, the SRv6 DT2U Prefix-SID, the next
+   hop and any policy-added communities. The route key must not move, or the
+   remote sees a withdraw + announce and loses exactly the fast path this
+   design exists to create.
+3. **`P=1,B=1` is invalid here** — reject with a diagnostic rather than
+   guessing. `P=0,B=0` means "on the segment, not selectable", and is never
+   promoted directly.
+4. **All-active is untouched.** No P/B on an all-active segment's A-Ds; the
+   aliasing group keeps every member.
+5. **Standby learning must not originate MAC mobility.** A single-active
+   non-DF blocks in both directions, so it should not be learning from the CE
+   at all — but if a stale or transient learn does occur, it must not be
+   originated as a Type-2 with a bumped mobility sequence, or the real DF's
+   entry loses to a MAC that is not reachable.
+6. **The non-DF gate covers all four traffic classes, both directions** —
+   known unicast, unknown unicast, broadcast and multicast, CE→core and
+   core→CE (cradle `ES_DF_F_BLOCK` does this today; phase 5 re-proves it per
+   class). Split horizon stays an independent filter: it is about where a
+   frame came from, not about who is DF.
+7. **One generation per endpoint switch.** When the active member changes,
+   the group is re-teed as a unit with a monotonically increasing generation;
+   a late completion from a superseded generation must not restore the old
+   primary.
+8. **Do not advertise `P=1` before forwarding is programmed.** Today
+   `Message::EsNhg` / `EsRole` are fire-and-forget, so this ordering cannot be
+   strictly enforced — §9 risk 4 decides whether cradle grows an ack or we
+   document the window.
 
 ## 5. Gap 3 — RFC 9722 synchronized service carving
 
@@ -383,6 +490,15 @@ carve, then everyone carves together".
   trust `SystemTime`, bound the accepted SCT window by the peering timer, and
   log every rejection. If the deployment needs more, a `clock-ready` gate can
   read chrony/timedatectl later — call it out rather than assume it.
+- **Concurrent recovery.** Two PEs joining at once produce two SCTs. Keep one
+  pending carve per segment, take the **latest valid** SCT, and recompute the
+  staged verdict from the candidate set as it stands at the deadline — never
+  run two carves for one segment, and cancel the superseded timer by its
+  `Instant` identity.
+- **Validation.** `skew` must be well under `peering-time` (reject at commit);
+  an SCT in the past, or further out than `peering-time`, is discarded with a
+  log line and the election runs immediately. Clock readiness and the last
+  rejection reason belong in `show` (§7), not only in the log.
 
 ### 5.4 What SCT does *not* fix
 
@@ -434,9 +550,12 @@ Notes:
   deadline and remaining time.
 - A new remote view (either a subsection of the above or
   `show bgp evpn ethernet-segment <esi> remote`): per `(bd, PE)` the role,
-  P/B provenance, per-ES/per-EVI liveness, contributing path count, and any
-  `conflict` reason. This is the view that makes the two-RR case debuggable
-  rather than archaeological.
+  P/B provenance (peer, RD, ADD-PATH id), per-ES/per-EVI liveness, stale/GR
+  status, the selection reason (`signalled` / `inferred` / `incumbent` /
+  `tie-break`), the programmed generation, and any `conflict` reason. This is
+  the view that makes the two-RR case debuggable rather than archaeological.
+- Under RFC 9722: clock readiness and the last rejected SCT (with the reason)
+  are shown, not only logged.
 - Log (info, `category = "evpn"`) every applied role transition with the
   reason (`pref`, `carve`, `ac-df`, `port-down`, `sct`), every rejected SCT,
   and every conflict onset/clear. Failover timing is then measurable from
@@ -460,6 +579,29 @@ Phases 1–2 are pure codec/config and can land in any order. Phase 3 is the
 one that changes forwarding decisions on a remote PE; it is the one to gate
 behind config. Phase 4 depends on 2. Phase 5 depends on 3.
 
+### 8.1 Acceptance topology and measurements
+
+One bench serves phases 3–5: **PE-A / PE-B / PE-C sharing two Ethernet
+Segments**, a **remote ingress PE** on neither segment (so it holds no Type-4
+and must read roles off the per-EVI A-D), and **two route reflectors whose
+update delivery can be delayed independently**. Cases to cover:
+
+- initial discovery; preference change; planned switchover; access-circuit
+  failure on one segment only (§3.5); PE failure; recovery; two PEs recovering
+  concurrently; asymmetric route delivery through the two RRs;
+- missing P/B, invalid `P=1,B=1`, two PEs both claiming `P=1`, a role update
+  arriving via one RR only, one RR failing while the other stays live;
+- SCT in the past, SCT beyond the peering timer, a `T=0` peer joining, a clock
+  step during a pending carve, graceful-restart stale expiry.
+
+Measure, per case: loss duration, duplicate frames seen by the CE, number of
+active-endpoint changes, any interval with two DFs or none, and convergence
+from failure *detection* (not from the event). Pass = exactly one active
+ingress endpoint at all times, no forwarding on a standby port, group failover
+completing while the old DF's Type-2s are still in the table, and no DF
+overlap across a synchronized recovery. Record the numbers in the phase-6
+status update; release notes quote measurements, not adjectives.
+
 Non-goals for this plan (explicit follow-ups): RFC 9786 port-active,
 whole-PE fate sharing (all segments of a PE failing over together — needs a
 health policy above the ES), ARP/ND synchronization on the standby PE,
@@ -467,11 +609,12 @@ and all-active behaviour, which is unchanged throughout.
 
 ## 9. Risks and open decisions
 
-1. **DP changes an existing tie-break.** Phase 1 alters `pref_wins()`, which
-   currently matches FRR exactly. Until the interop lab confirms FRR's DP
-   handling, ship DP encode/decode + `show` first and keep the comparison
-   change behind the `dont-preempt` leaf (a segment that never sets it sees
-   identical behaviour).
+1. **DP interop.** `pref_wins()` currently matches FRR's comparison exactly.
+   Adding the DP step is required for correctness (§3.4 item 1) and is inert
+   until some PE sets the bit — but whether FRR ranks it the same way is
+   unproven until interop-lab phases P1/P4. Ship the parse + tie-break +
+   `show` first, advertise `DP=0` by default, and treat a mixed-vendor segment
+   with DP set as unqualified until the lab says otherwise.
 2. **rfc7432bis is expired.** §4.2's ingress procedure is our definition.
    Config-gated, off by default, re-checked against the successor draft.
 3. **Clock trust for SCT.** No sync oracle today. Bounded acceptance +
@@ -483,6 +626,11 @@ and all-active behaviour, which is unchanged throughout.
 5. **Does the user want port-active too?** If the deployment is really
    "standby port down", RFC 9786 is a better fit than single-active +
    preference and would reorder this plan.
+6. **Graceful restart eligibility.** A member retained as stale across a
+   restart still has routes, but its forwarding state is unknown. Decide —
+   with evidence, in phase 3 — whether a stale member may stay `active`
+   (route retention says yes; forwarding health may say no) rather than
+   inheriting whatever falls out of the Loc-RIB.
 
 ## Appendix A — reviewer comments and responses
 
@@ -532,3 +680,32 @@ Point-by-point response:
 | L2 Attributes EC | `0x06`/`0x04` | per-EVI A-D (E-LAN, new here; VPWS already) | `B=0x0001` `P=0x0002` (`C=0x0004`, `F=0x0008` unused), MTU=0 |
 | Service Carving Time EC | `0x06`/`0x0F` | Type-4 ES | NTP seconds (4) + high-16 fraction (2), prime epoch 1900 |
 | ES-Import RT | `0x06`/`0x02` | Type-4, per-ES A-D | auto-derived from `esi[1..7]` |
+
+## Appendix C — what was folded in from `bgp-evpn-single-active.md`
+
+The parallel design document reached the same protocol conclusions
+independently (preference-based election, P/B on the per-EVI A-D, SCT on the
+Type-4, a dedicated remote-state table). These items of its were additive and
+now live here:
+
+| From that document | Landed as |
+| ------------------ | --------- |
+| Acceptance scope: VXLAN + cradle + two RRs first, MPLS/SRv6 qualified by packet tests, all-active and VPWS preserved | §1.1 |
+| "Election remains per ES and service" — an AC failure on one segment can flip that segment alone, so whole-PE takeover is not a preference property | §3.5 |
+| Honouring remote DP is required for interop even while we advertise DP=0 | §3.4 item 1, §9 risk 1 |
+| Service identity must not be read off the Type-1 Ethernet Tag (tag 0 vs the VNI) | §4.5 item 1 |
+| Role updates must preserve MTU / control word / encap / labels / SIDs / RTs / communities | §4.5 item 2 |
+| Reject `P=1,B=1`; never promote `P=0,B=0`; all-active must not reuse its BUM DF as the unicast primary | §4.5 items 3–4, §3.5 |
+| Non-DF gate must cover every traffic class in both directions; split horizon stays independent; standby learning must not originate false mobility | §4.5 items 5–6 |
+| One generation per endpoint switch; a completion barrier before advertising `P=1` | §4.5 items 7–8, §9 risk 4 |
+| Richer provenance in the remote table: contributing `(peer, RD, add-path id)`, stale/GR flag, selection reason, programmed generation | §4.3, §7 |
+| Change triggers: attribute-only update, withdraw, best-path change, peer loss, RT change, ADD-PATH removal, GR expiry, datapath reconnect | §4.4 |
+| Path visibility: unique RDs or ADD-PATH, or the backup cannot be pre-installed | §4.4 |
+| Concurrent recovery takes the latest valid SCT and runs one carve; `skew` < peering interval validated at commit | §5.3 |
+| Acceptance bench (PE-A/B/C, two ES, remote ingress PE, two RRs with controllable delay) and the measurement list | §8.1 |
+| Graceful-restart eligibility decided on forwarding health, not route retention alone | §9 risk 6 |
+
+Not carried over: its `EvpnScRemote` naming (this tree already calls the
+analogous VPWS state `VpwsRemote`, so the type here is `EsRemoteBd` /
+`EsRemoteMember`), and its phase numbering (the six slices in §8 are sized to
+this repository's PR conventions instead).
