@@ -2319,10 +2319,15 @@ fn config_es_df_preference(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
 /// <default|hrw|preference|lowest-preference>` — the DF election algorithm
 /// this segment advertises and runs: RFC 7432 §8.5 service carving (Alg 0),
 /// RFC 8584 §3 Highest Random Weight (Alg 1), or RFC 9785 Highest- /
-/// Lowest-Preference (Alg 2 / Alg 3). The explicit leaf decides; only when
-/// it is absent does a bare `preference` value select Alg 2 on its own. The
-/// Type-4 is re-originated so peers see the algorithm, and the segment
-/// re-elects.
+/// Lowest-Preference (Alg 2 / Alg 3).
+///
+/// A configured `preference` still overrides the `default` and `hrw` arms,
+/// as it did before this leaf had preference arms — changing that would move
+/// the DF across an upgrade, since a PE advertising Alg 1 to peers still on
+/// Alg 2 fails the RFC 8584 unanimity check and drops the whole segment to
+/// carving. Beside the two preference arms a value simply selects which of
+/// them bids. The Type-4 is re-originated so peers see the algorithm, and
+/// the segment re-elects.
 fn config_es_df_algorithm(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let afi_safi: AfiSafi = args.afi_safi()?;
     if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
@@ -2342,10 +2347,13 @@ fn config_es_df_algorithm(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option
 
 /// `router bgp afi-safi evpn ethernet-segment <name> df-election
 /// dont-preempt` — advertise the RFC 9785 §3 "Don't Preempt" (DP)
-/// capability. On a preference tie this PE ranks ahead of one without the
-/// bit, so a peer that comes back with the same preference leaves the role
-/// where it is. Only advertised under a preference-based algorithm, which is
+/// capability. On a preference tie this PE ranks ahead of one that does not
+/// set the bit. Only advertised under a preference-based algorithm, which is
 /// where the RFC defines it.
+///
+/// The tie-break alone is not RFC 9785 §4.3 non-revertive operation: with
+/// the bit on every PE at equal preference the tie still falls through to
+/// the address, so the lower-address PE reclaims the role on recovery.
 fn config_es_dont_preempt(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let afi_safi: AfiSafi = args.afi_safi()?;
     if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {

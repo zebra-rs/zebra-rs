@@ -170,12 +170,32 @@ are removing, and an inconsistent override duplicates or drops frames.
    advertisement: the first release advertises `DP=0` unless `dont-preempt`
    is configured, and the non-revertive operational-preference behaviour
    (item 5) lands after that.
+
+   **The bit alone is not non-revertive operation, and no user-facing text
+   may imply it is.** It ranks a PE ahead of one that does *not* set it; with
+   the bit on every PE at equal preference — how an operator would normally
+   configure it — the tie still falls through to the address, so the
+   lowest-address PE reclaims the role on recovery. Pinning a DF across a
+   recovery today means giving that PE the higher preference. (Caught in
+   review of the phase-1 commit: the book, the YANG description and the
+   config handler all promised the §4.3 behaviour; all three now state the
+   tie-break and the limitation.)
 2. **Default preference 32767** — RFC 9785: when the algorithm is selected
    and no value is configured, the advertised preference MUST be 32767.
    Today `df_election_ec()` (`ethernet_segment.rs:182`) only selects Alg 2
    when `df_preference` is `Some`, so "algorithm without a value" is not
    expressible. Add `algorithm {default|hrw|preference|lowest-preference}`
    and let `preference` be optional under it.
+
+   **Precedence is a compatibility constraint, not a taste question.** Before
+   the preference arms existed the leaf had only `default` and `hrw`, and a
+   `preference` value selected Alg 2 over either — so those spellings must
+   keep meaning Alg 2. A PE that changed algorithm across an upgrade would
+   not merely differ from its not-yet-upgraded peers: it would fail the RFC
+   8584 unanimity check and drop the **whole segment** to carving, moving the
+   DF on a live service. Beside the two new arms a value selects which of
+   them bids; `show` names the override where it applies. (Also caught in
+   review of the phase-1 commit, which had the explicit leaf winning.)
 3. **Preference `0` is legal** — the YANG range is `1..65535`; RFC 9785 uses
    the full `0..65535`. Widen it (a pure relaxation, no migration).
 4. **Candidate type** — `DfCandidate` is the tuple `(IpAddr, u8, u16)`
@@ -573,8 +593,9 @@ grew `CAP_DONT_PREEMPT` (`0x8000`) and `ALG_PREF_LOWEST` (Alg 3);
 comparison reversed under Alg 3; `df_election_ec()` bids RFC 9785's
 mandatory 32767 default and advertises DP only under a preference algorithm;
 YANG gained the `preference` / `lowest-preference` arms, the `dont-preempt`
-leaf and a `0..65535` preference range, with the explicit `algorithm` leaf
-deciding and a bare `preference` still meaning Alg 2. `show bgp evpn
+leaf and a `0..65535` preference range, with a `preference` value still
+overriding the pre-existing `default` / `hrw` arms so no configuration
+changes what it advertises across an upgrade (§3.4 item 2). `show bgp evpn
 ethernet-segment` renders each PE's bid and DP bit, names a segment that
 fell back for disagreement, and carries the same in JSON. Proof: 10
 `df_election*` codec tests, the `preference_ranks_pref_then_dp_then_address`
@@ -582,7 +603,9 @@ and `preference_defaults_to_the_rfc_9785_midpoint` unit tests, and three new
 `bgp_evpn_es.feature` scenarios (preference beats address order; equal bids
 fall to the lowest address; the DP bit alone moves the DF) — the last two
 are a control/treatment pair, and removing the `dont-preempt` leaf from the
-treatment config was verified to turn exactly that scenario red. Adjacent
+treatment config was verified to turn exactly that scenario red. A fourth
+scenario pins the legacy precedence (`algorithm hrw` + `preference` still
+advertises Alg 2), likewise verified by mutating the precedence back. Adjacent
 features `bgp_evpn_vpws_multihoming`, `bgp_evpn_vpws_startup_delay`,
 `bgp_evpn_vpws_vxlan_multihoming`, `bgp_evpn_df_election`,
 `bgp_evpn_gateway_df` and `bgp_evpn_srv6_macip_multihoming` all still pass.

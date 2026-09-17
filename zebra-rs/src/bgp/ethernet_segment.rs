@@ -165,10 +165,16 @@ pub struct EthernetSegment {
     /// means carving unless `df_preference` is set (see that field).
     pub df_algorithm: Option<DfAlgorithm>,
     /// Advertise the RFC 9785 "Don't Preempt" (DP) capability: on a
-    /// preference tie this PE is ranked ahead of one without it, so a
-    /// recovering peer of equal preference does not take the role back.
-    /// Only meaningful — and only advertised — under a preference-based
-    /// algorithm.
+    /// preference tie this PE is ranked ahead of one that does **not** set
+    /// the bit. Only meaningful — and only advertised — under a
+    /// preference-based algorithm.
+    ///
+    /// This is the tie-break input alone. It is not RFC 9785 §4.3
+    /// non-revertive operation, which additionally has a recovering PE
+    /// advertise an *operational* `(Pref, DP)` inherited from the incumbent
+    /// DF; without that, two PEs that both set the bit at equal preference
+    /// still fall through to the address comparison, and the lower-address
+    /// one reclaims the role when it comes back.
     pub dont_preempt: bool,
     /// Seconds to stay out of this segment's DF election after joining it
     /// (IOS-XR `timers peering`, Junos
@@ -239,11 +245,33 @@ impl EthernetSegment {
     /// silently rank below every peer that took the default. The DP bit is
     /// advertised only under those algorithms, since it is defined as a
     /// preference tie-break.
+    /// **Precedence, and why it is not simply "the explicit leaf wins".**
+    /// Before the `algorithm` leaf had preference arms, its only values were
+    /// `default` and `hrw`, and a `preference` value selected Alg 2 over
+    /// either of them. Configurations spelled that way exist, so they keep
+    /// that meaning: a preference value still beats `algorithm default` and
+    /// `algorithm hrw`. Making the algorithm leaf win instead would change
+    /// what such a PE advertises across an upgrade — and a PE that starts
+    /// advertising Alg 1 to peers still on Alg 2 does not merely differ, it
+    /// breaks the RFC 8584 unanimity check and drops the **whole segment**
+    /// to carving, moving the DF as it goes. The new arms are how an
+    /// operator now says which preference algorithm they mean; `algorithm
+    /// hrw` plus a preference stays the legacy spelling of Alg 2, which
+    /// `show bgp evpn ethernet-segment` calls out rather than leaving to be
+    /// discovered.
     pub fn df_election_ec(&self) -> DfElectionEc {
-        let alg = match self.df_algorithm {
-            Some(alg) => alg.wire(),
-            None if self.df_preference.is_some() => DfElectionEc::ALG_PREF,
-            None => DfElectionEc::ALG_DEFAULT,
+        let alg = match (self.df_algorithm, self.df_preference) {
+            // The preference arms name the algorithm themselves, so a value
+            // beside them selects between Alg 2 and Alg 3 rather than
+            // overriding anything.
+            (Some(alg @ (DfAlgorithm::Preference | DfAlgorithm::LowestPreference)), _) => {
+                alg.wire()
+            }
+            // Legacy precedence, preserved for configurations written before
+            // those arms existed.
+            (_, Some(_)) => DfElectionEc::ALG_PREF,
+            (Some(alg), None) => alg.wire(),
+            (None, None) => DfElectionEc::ALG_DEFAULT,
         };
         let preference_based = DfElectionEc::is_preference_alg(alg);
         let mut ec = DfElectionEc {
@@ -1020,38 +1048,93 @@ mod tests {
         assert_eq!(elect_forwarders(&mixed, &ESI_T, 1).0, Some(b));
     }
 
-    /// The election the segment advertises follows the config: the explicit
-    /// `algorithm` leaf decides, and a bare preference (no algorithm) still
-    /// selects Alg 2 — the spelling that shipped before the leaf had
-    /// preference arms.
+    /// Upgrade safety: every spelling that existed before the `algorithm`
+    /// leaf grew preference arms advertises exactly what it advertised then.
+    /// A PE that changed algorithm across an upgrade would break the RFC
+    /// 8584 unanimity check against its not-yet-upgraded peers and drop the
+    /// whole segment to carving, moving the DF as it went.
     #[test]
-    fn explicit_algorithm_leaf_wins_over_bare_preference() {
+    fn a_preference_value_still_overrides_the_legacy_algorithm_arms() {
+        // `algorithm hrw` alone: Alg 1, unchanged.
         let hrw = EthernetSegment {
             df_algorithm: Some(DfAlgorithm::Hrw),
             ..Default::default()
         };
         assert_eq!(hrw.df_election_ec().df_alg, DfElectionEc::ALG_HRW);
-        // An explicit algorithm wins over a stray preference value, which is
-        // then not advertised at all.
+        // `algorithm hrw` PLUS a preference: Alg 2 carrying that bid — the
+        // pre-upgrade meaning of this combination.
         let hrw_with_pref = EthernetSegment {
             df_algorithm: Some(DfAlgorithm::Hrw),
             df_preference: Some(7),
             ..Default::default()
         };
-        assert_eq!(hrw_with_pref.df_election_ec().df_alg, DfElectionEc::ALG_HRW);
-        assert_eq!(hrw_with_pref.df_election_ec().pref, 0);
-        // Back-compat: preference alone means Alg 2 with that bid.
+        assert_eq!(
+            hrw_with_pref.df_election_ec().df_alg,
+            DfElectionEc::ALG_PREF
+        );
+        assert_eq!(hrw_with_pref.df_election_ec().pref, 7);
+        // Same for the explicit `algorithm default` spelling.
+        let carving_with_pref = EthernetSegment {
+            df_algorithm: Some(DfAlgorithm::Default),
+            df_preference: Some(9),
+            ..Default::default()
+        };
+        assert_eq!(
+            carving_with_pref.df_election_ec().df_alg,
+            DfElectionEc::ALG_PREF
+        );
+        assert_eq!(carving_with_pref.df_election_ec().pref, 9);
+        // Preference alone: Alg 2 with that bid.
         let bare = EthernetSegment {
             df_preference: Some(7),
             ..Default::default()
         };
         assert_eq!(bare.df_election_ec().df_alg, DfElectionEc::ALG_PREF);
         assert_eq!(bare.df_election_ec().pref, 7);
+        // The new arms name the algorithm, so a value beside them selects
+        // between Alg 2 and Alg 3 instead of overriding them.
+        let lowest = EthernetSegment {
+            df_algorithm: Some(DfAlgorithm::LowestPreference),
+            df_preference: Some(100),
+            ..Default::default()
+        };
+        assert_eq!(
+            lowest.df_election_ec().df_alg,
+            DfElectionEc::ALG_PREF_LOWEST
+        );
+        assert_eq!(lowest.df_election_ec().pref, 100);
         assert_eq!(
             DfAlgorithm::from_keyword("lowest-preference"),
             Some(DfAlgorithm::LowestPreference)
         );
         assert_eq!(DfAlgorithm::from_keyword("nonsense"), None);
+    }
+
+    /// The DP bit is a tie-break, not non-revertive operation: it ranks a PE
+    /// ahead of one that does not set it, and two PEs that both set it at
+    /// equal preference still fall through to the address — so the
+    /// lower-address PE reclaims the role on recovery. RFC 9785 §4.3
+    /// non-revertive behaviour needs the operational-preference adjustment
+    /// this phase does not implement, and no documentation may read as if it
+    /// did.
+    #[test]
+    fn dont_preempt_does_not_by_itself_make_the_election_non_revertive() {
+        let [a, b, _] = pes();
+        let dp = DfElectionEc::CAP_DONT_PREEMPT;
+        // The incumbent keeps the role only while the returning PE leaves
+        // the bit clear.
+        let one_sided = vec![
+            DfCandidate::new(a, DfElectionEc::ALG_PREF, 32767),
+            DfCandidate::new(b, DfElectionEc::ALG_PREF, 32767).with_caps(dp),
+        ];
+        assert_eq!(elect_forwarders(&one_sided, &ESI_T, 0).0, Some(b));
+        // Both configured the same way — the usual case — and the lower
+        // address takes it back.
+        let both = vec![
+            DfCandidate::new(a, DfElectionEc::ALG_PREF, 32767).with_caps(dp),
+            DfCandidate::new(b, DfElectionEc::ALG_PREF, 32767).with_caps(dp),
+        ];
+        assert_eq!(elect_forwarders(&both, &ESI_T, 0).0, Some(a));
     }
 
     /// RFC 9785 §3: a preference-based segment with no configured value bids
@@ -1080,11 +1163,13 @@ mod tests {
         assert_eq!(ec.pref, DfElectionEc::PREF_DEFAULT);
         assert!(ec.dont_preempt() && ec.ac_df());
 
-        // Carving never advertises a preference or the DP bit, however the
-        // segment is configured.
+        // Carving never advertises a preference or the DP bit — the bit is
+        // defined as a preference tie-break, so it would mean nothing on the
+        // wire here. (With a `preference` value this segment would not be
+        // carving at all: see
+        // `a_preference_value_still_overrides_the_legacy_algorithm_arms`.)
         let carving = EthernetSegment {
             df_algorithm: Some(DfAlgorithm::Default),
-            df_preference: Some(500),
             dont_preempt: true,
             ..Default::default()
         };

@@ -306,11 +306,18 @@ module zebra-bgp-evpn {
              better preference. Carving and HRW cannot express it — they
              deliberately spread the tags.
 
-             This leaf decides; a `preference` value on its own selects Alg 2
-             only when this leaf is absent. As with any algorithm, all PEs on
-             the segment must advertise the same one (RFC 8584 §2.2) or the
-             segment falls back to carving — `show bgp evpn ethernet-segment`
-             names the disagreement.";
+             A configured `preference` still overrides the `default` and
+             `hrw` arms, as it did before this leaf had preference arms: a
+             segment spelled that way keeps advertising Alg 2 across an
+             upgrade instead of switching to Alg 1 and dropping the whole
+             segment to carving on the RFC 8584 unanimity check. Beside the
+             two preference arms a `preference` value simply selects which
+             of them bids. `show bgp evpn ethernet-segment` names the
+             override where it applies.
+
+             As with any algorithm, all PEs on the segment must advertise the
+             same one (RFC 8584 §2.2) or the segment falls back to carving —
+             the same show command names that disagreement too.";
         }
         leaf preference {
           ext:help "DF preference; highest wins (selects Alg 2)";
@@ -352,15 +359,22 @@ module zebra-bgp-evpn {
              the DF Election extended community.
 
              On a preference **tie** a PE with the bit ranks ahead of one
-             without it, so a peer that comes back after a failure with the
-             same preference leaves the Designated Forwarder role where it
-             is instead of taking it back — one fewer traffic-affecting
-             transition on a single-active segment.
+             that does not set it; the comparison runs after the preference
+             and before the originating address. It is a tie-break input on
+             every PE of the segment, so a peer's bit is honoured whether or
+             not this PE sets its own — ignoring it would make the two ends
+             rank the segment differently and both would forward.
 
              The bit is defined for the preference-based algorithms and is
-             advertised only under them. It is a tie-break input on every PE
-             of the segment, so a peer's bit is honoured whether or not this
-             PE sets its own.";
+             advertised only under them.
+
+             **This is the tie-break only, not non-revertive operation.**
+             RFC 9785 §4.3 additionally has a recovering PE advertise an
+             *operational* preference and DP inherited from the incumbent
+             Designated Forwarder; that is not implemented. With the bit set
+             on every PE at equal preference — the usual configuration — the
+             tie still falls through to the address, so the lowest-address PE
+             reclaims the role when it comes back.";
         }
         leaf ac-df {
           ext:help "Advertise the AC-Influenced DF election capability";

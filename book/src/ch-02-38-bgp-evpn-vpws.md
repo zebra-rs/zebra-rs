@@ -278,12 +278,20 @@ mandatory default of **32767**, the midpoint of the range — not 0, which
 would rank the PE below every peer that took the default.
 
 `dont-preempt` matters only when two PEs bid the same preference: the PE
-carrying the bit ranks ahead of one without it, so a peer that comes back
-after a failure with an equal bid leaves the DF role where it is instead of
-taking it back. It is a tie-break input on **every** PE of the segment, so a
-peer's bit is honoured whether or not this PE sets its own — ignoring it
-would make the two ends rank the segment differently, and both would
-forward.
+carrying the bit ranks ahead of one that does **not** set it, in a comparison
+that runs after the preference and before the originating address. It is a
+tie-break input on **every** PE of the segment, so a peer's bit is honoured
+whether or not this PE sets its own — ignoring it would make the two ends
+rank the segment differently, and both would forward.
+
+That tie-break is all it is today. RFC 9785 §4.3 *non-revertive* operation
+also has a recovering PE advertise an operational preference and DP inherited
+from the incumbent DF, and zebra-rs does not do that yet — so with
+`dont-preempt` on every PE at equal preference, which is how an operator
+would normally configure it, the tie still falls through to the address and
+the lowest-address PE reclaims the role when it returns. To pin the DF
+across a recovery today, give the intended PE the higher `preference` rather
+than relying on the bit.
 
 Preference is per-*segment*, so one PE wins every service instance on it —
 that is the trade against carving, and the reason to use it: the operator
@@ -319,10 +327,13 @@ that PE won or wins. Ask for it with:
 ```
 
 The Type-4 then carries `df-election:alg1`, and the same unanimity rule
-applies: any PE still advertising Alg 0 drops the segment back to carving.
-The `algorithm` leaf decides when it is set; a bare `preference` value with
-no `algorithm` still selects Alg 2 on its own, the spelling that shipped
-before the leaf had preference arms. The weight is the
+applies: any PE still advertising Alg 0 drops the segment back to carving. A
+`preference` on the same segment still takes priority over `algorithm hrw`
+— a pinned DF is a stronger statement than a better hash, and that is what
+the combination meant before `algorithm` had preference arms, so an upgrade
+does not change what the PE advertises. Beside `algorithm preference` or
+`algorithm lowest-preference` a value selects which of the two bids instead.
+The weight is the
 RFC's formula bit for bit (CRC-32 of the tag and ESI, then the RFC's
 linear-congruential mix, modulo 2^31, ties to the lowest address), so a
 segment shared with Junos `df-election-type mod`/Arista `algorithm hrw`

@@ -147,6 +147,26 @@ Feature: BGP EVPN Ethernet Segment discovery (RFC 7432 Type-4)
     And show command "show bgp evpn ethernet-segment" in namespace "z2" should eventually contain "Designated Forwarder (tag 0): 192.168.0.2 (this node)"
     And show command "show bgp evpn ethernet-segment" in namespace "z1" should not contain "Designated Forwarder (tag 0): 192.168.0.1"
 
+  Scenario: A preference value still overrides the legacy algorithm arms
+    Given the test topology exists
+    # `algorithm hrw` PLUS a preference is the spelling that predates the
+    # preference arms, and it advertised Alg 2 then. It must still do so: a PE
+    # that switched to Alg 1 across an upgrade, while its peers were still on
+    # Alg 2, would fail the RFC 8584 unanimity check and drop the WHOLE
+    # segment to carving — moving the DF on a live single-active service.
+    When I apply config "z1-hrwpref.yaml" to namespace "z1"
+    And I apply config "z2-hrwpref.yaml" to namespace "z2"
+    Then show command "show bgp evpn" in namespace "z1" should eventually contain "df-election:alg2:pref400"
+    And show command "show bgp evpn" in namespace "z1" should not contain "df-election:alg1"
+    And show command "show bgp evpn ethernet-segment" in namespace "z1" should eventually contain "DF algorithm: preference-based (local pref 200)"
+    # The override is named rather than left to be discovered.
+    And show command "show bgp evpn ethernet-segment" in namespace "z1" should contain "`preference` overrides `algorithm hrw`"
+    # ... and the election really is the preference one: z2 bids higher and
+    # wins, which HRW would not do for this ESI at tag 0 (the scenario above
+    # elects 192.168.0.1).
+    And show command "show bgp evpn ethernet-segment" in namespace "z1" should eventually contain "Designated Forwarder (tag 0): 192.168.0.2"
+    And show command "show bgp evpn ethernet-segment" in namespace "z2" should eventually contain "Designated Forwarder (tag 0): 192.168.0.2 (this node)"
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "z1"

@@ -2751,6 +2751,28 @@ fn show_bgp_evpn_ethernet_segment(
                 other => format!("alg {other} (unsupported; carving fallback)"),
             };
             writeln!(buf, "  DF algorithm: {alg_name}")?;
+            // The legacy spelling: `algorithm default|hrw` *plus* a
+            // preference value advertises Alg 2, because that is what it
+            // advertised before the algorithm leaf had preference arms and
+            // changing it would move the DF across an upgrade. Name it here
+            // rather than leave an operator to wonder why `algorithm hrw`
+            // shows alg2.
+            if matches!(
+                es.df_algorithm,
+                Some(
+                    super::ethernet_segment::DfAlgorithm::Default
+                        | super::ethernet_segment::DfAlgorithm::Hrw
+                )
+            ) && es.df_preference.is_some()
+            {
+                writeln!(
+                    buf,
+                    "  DF election: `preference` overrides `algorithm {}` here (the spelling \
+                     that predates the preference arms); advertising alg{}",
+                    es.df_algorithm.map(|a| a.as_str()).unwrap_or("default"),
+                    bid.df_alg
+                )?;
+            }
             // RFC 8584 §2.2 negotiation is unanimous-or-carving, so a PE
             // advertising something the segment did not settle on is a
             // degraded state the operator should see named, not infer from

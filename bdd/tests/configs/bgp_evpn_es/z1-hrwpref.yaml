@@ -1,0 +1,28 @@
+# z1 — the legacy spelling: `algorithm hrw` AND a preference value. Before
+# the algorithm leaf grew preference arms this combination advertised Alg 2,
+# and it still must: a PE that started advertising Alg 1 to peers still on
+# Alg 2 would fail the RFC 8584 unanimity check and drop the whole segment to
+# carving, moving the DF as it went.
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.1
+    afi-safi:
+    - name: evpn
+      ethernet-segment:
+      - name: es1
+        esi: "00:11:22:33:44:55:66:77:88:99"
+        redundancy-mode: all-active
+        df-election:
+          algorithm: hrw
+          preference: 200
+    neighbor:
+    - remote-address: 192.168.0.2
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: evpn
+        enabled: true
