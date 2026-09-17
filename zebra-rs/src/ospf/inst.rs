@@ -1521,6 +1521,25 @@ impl<V: OspfVersion> Ospf<V> {
     /// `maximum_wait` under sustained churn (`spf-interval`). The
     /// timer clears `spf_timer` and calls `spf_throttle.mark_run()`
     /// when it fires (see the `Message::SpfCalc` handlers).
+    /// Schedule `area_id`'s throttled SPF after a locally originated
+    /// LSA changed something SPF reads.
+    ///
+    /// Installing and flooding a self-originated LSA does not schedule
+    /// SPF — `install_originated` and `flood_self_originated_lsa` both
+    /// stop at the LSDB and the wire. That is harmless while a link's
+    /// own LSAs only carry information for *other* routers, but once
+    /// Flex-Algorithm metric-type 1 costs edges on the delay in our own
+    /// ASLA, a local delay change alters this router's own SPF inputs.
+    /// Without this, the originator keeps the old edge cost until some
+    /// unrelated peer LSA happens to schedule a run, and a delay that
+    /// was withdrawn keeps a link that should have been pruned.
+    pub(crate) fn spf_schedule_area(&mut self, area_id: Ipv4Addr) {
+        let cfg = self.spf_interval;
+        if let Some(area) = self.areas.get_mut(area_id) {
+            Self::ospf_spf_schedule_generic(&self.tx, area, cfg);
+        }
+    }
+
     fn ospf_spf_schedule_generic(
         tx: &UnboundedSender<Message<V>>,
         area: &mut OspfArea<V>,
@@ -3391,6 +3410,9 @@ impl Ospf<Ospfv2> {
                     .insert_self_originated(lsa, &self.tx, Some(AREA0), &self.tracing);
             }
             self.flood_self_originated_lsa(AREA0, &flood_lsa);
+            // Same reason as the v3 twin: this LSA's ASLA is one of our
+            // own metric-type-1 edge costs.
+            self.spf_schedule_area(AREA0);
         } else {
             let flushed = if let Some(area) = self.areas.get_mut(AREA0) {
                 area.lsdb.flush_lsa(
@@ -10623,6 +10645,13 @@ impl Ospf<Ospfv3> {
                 // configured.
                 self.bfd_reconcile_nbr(ifindex, nbr_router_id);
                 self.reconcile_endx_sid(ifindex, nbr_router_id);
+                // The STAMP session is keyed on the pair of link-local
+                // addresses, so it is a consumer of the old one too.
+                // The adjacency never leaves Full across a renumber, so
+                // the `Message::Nfsm` reconcile does not run: without
+                // this the session keeps probing an address the peer has
+                // deleted, and the measurement silently expires.
+                self.stamp_reconcile_and_originate(ifindex);
                 // The RIB is a consumer too, and was the one missing
                 // here. `collect_v3_nexthops` reads the next hop from
                 // `nbr.ident.prefix`, so every installed route through
@@ -11170,6 +11199,9 @@ impl Ospf<Ospfv3> {
                     .install_originated(lsa, &self.tx, Some(area_id), &self.tracing);
             }
             self.flood_self_originated_lsa(area_id, &flood_lsa);
+            // The ASLA we just (re)advertised is a metric-type-1 SPF
+            // input for this router too.
+            self.spf_schedule_area(area_id);
         } else {
             // Walk every area in case the link's area moved between
             // calls -- a stale LSA must be flushed wherever it lives.
@@ -11182,6 +11214,9 @@ impl Ospf<Ospfv3> {
                 };
                 if let Some(lsa) = flushed {
                     self.flood_self_originated_lsa(area_id, &lsa);
+                    // A withdrawn delay prunes the link from a
+                    // metric-type-1 topology (RFC 9350 §15).
+                    self.spf_schedule_area(area_id);
                 }
             }
         }
@@ -11399,6 +11434,9 @@ impl Ospf<Ospfv3> {
                     .install_originated(lsa, &self.tx, Some(area_id), &self.tracing);
             }
             self.flood_self_originated_lsa(area_id, &flood_lsa);
+            // The ASLA we just (re)advertised is a metric-type-1 SPF
+            // input for this router too.
+            self.spf_schedule_area(area_id);
         } else {
             // Walk every area in case the link's area moved between
             // calls -- a stale LSA must be flushed wherever it lives.
@@ -11411,6 +11449,9 @@ impl Ospf<Ospfv3> {
                 };
                 if let Some(lsa) = flushed {
                     self.flood_self_originated_lsa(area_id, &lsa);
+                    // A withdrawn delay prunes the link from a
+                    // metric-type-1 topology (RFC 9350 §15).
+                    self.spf_schedule_area(area_id);
                 }
             }
         }
@@ -13078,13 +13119,8 @@ fn flex_algo_link_delay(area: &OspfArea) -> BTreeMap<(Ipv4Addr, Ipv4Addr, Ipv4Ad
         };
         let adv_router = lsa.data.h.adv_router;
         for tlv in &el.tlvs {
-            for sub in &tlv.subs {
-                if let ExtLinkSubTlv::Asla(asla) = sub
-                    && asla.is_flex_algo()
-                    && let Some(delay) = asla.min_unidir_delay()
-                {
-                    map.insert((adv_router, tlv.link_id, tlv.link_data), delay);
-                }
+            if let Some(delay) = super::flex_algo::asla_min_delay_v2(&tlv.subs) {
+                map.insert((adv_router, tlv.link_id, tlv.link_data), delay);
             }
         }
     }
@@ -14587,7 +14623,7 @@ fn flex_algo_link_affinity_v3(area: &OspfArea<Ospfv3>) -> BTreeMap<(Ipv4Addr, u3
 /// `flex_algo_link_delay`; only the LSA and sub-TLV shapes differ.
 fn flex_algo_link_delay_v3(area: &OspfArea<Ospfv3>) -> BTreeMap<(Ipv4Addr, u32), u32> {
     use crate::ospf::lsdb::OSPF_MAX_AGE;
-    use ospf_packet::{OSPFV3_E_ROUTER_LSA_TYPE, Ospfv3ExtTlv, Ospfv3LsBody, Ospfv3SubTlv};
+    use ospf_packet::{OSPFV3_E_ROUTER_LSA_TYPE, Ospfv3ExtTlv, Ospfv3LsBody};
 
     let mut map = BTreeMap::new();
     for (_, lsa) in area.lsdb.iter_by_raw_type(OSPFV3_E_ROUTER_LSA_TYPE) {
@@ -14602,13 +14638,8 @@ fn flex_algo_link_delay_v3(area: &OspfArea<Ospfv3>) -> BTreeMap<(Ipv4Addr, u32),
             let Ospfv3ExtTlv::RouterLink(rl) = tlv else {
                 continue;
             };
-            for sub in &rl.subs {
-                if let Ospfv3SubTlv::Asla(asla) = sub
-                    && asla.is_flex_algo()
-                    && let Some(delay) = asla.min_unidir_delay()
-                {
-                    map.insert((adv_router, rl.link.interface_id), delay);
-                }
+            if let Some(delay) = super::flex_algo::asla_min_delay_v3(&rl.subs) {
+                map.insert((adv_router, rl.link.interface_id), delay);
             }
         }
     }

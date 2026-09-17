@@ -78,8 +78,9 @@ Feature: STAMP link-delay measurement over an IPv6-only IS-IS link
   # teardown.
   Scenario: OSPFv3 advertises the same measured delay
     Given the test topology exists
-    # The measured values ride the E-Router-LSA's ASLA sub-TLV. OSPFv3
-    # needs no segment-routing to originate it, unlike OSPFv2's
+    # The measured values ride the E-Router-LSA's ASLA sub-TLV, which
+    # is why the config enables segment-routing: that LSA is only
+    # originated when SR is on, the same coupling OSPFv2 has to its
     # Extended-Link Opaque LSA.
     Then show command "show ospfv3 database detail" in namespace "st1" should eventually contain "Min/Max Unidirectional Link Delay"
     And show command "show ospfv3 database detail" in namespace "st2" should eventually contain "Min/Max Unidirectional Link Delay"
@@ -91,7 +92,7 @@ Feature: STAMP link-delay measurement over an IPv6-only IS-IS link
     Then show command "show stamp session" in namespace "st1" should eventually contain "isis"
     And show command "show stamp session" in namespace "st1" should eventually contain "ospfv3"
     And show command "show isis database detail" in namespace "st1" should eventually contain "Min/Max Unidirectional Link Delay"
-    And show command "show ospfv3 database detail" in namespace "st1" should eventually not contain "Min/Max Unidirectional Link Delay = 0/0 usec"
+    And show command "show ospfv3 database detail" in namespace "st1" should eventually not contain "Min/Max Unidirectional Link Delay: 0/0 usec"
 
   Scenario: Teardown topology
     Given the test topology exists

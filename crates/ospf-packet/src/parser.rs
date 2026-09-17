@@ -2292,6 +2292,12 @@ impl OspfAslaSubTlv {
     }
 
     /// Minimum unidirectional link delay (microseconds) from the Min/Max
+    /// True when both application masks are zero-length — the RFC 9492
+    /// §5 "any application that has nothing more specific" fallback.
+    pub fn is_any_application(&self) -> bool {
+        self.sabm.is_empty() && self.udabm.is_empty()
+    }
+
     /// Link Delay sub-sub-TLV (RFC 7471 §4.2), if present. This is the
     /// RFC 9350 §6 metric-type 1 (min-unidir-link-delay) input.
     pub fn min_unidir_delay(&self) -> Option<u32> {

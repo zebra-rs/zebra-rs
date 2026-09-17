@@ -1145,7 +1145,7 @@ fn write_v3_asla_sub(
             Ospfv3AslaSubSubTlv::UniLinkDelay(v) => {
                 writeln!(
                     out,
-                    "      Unidirectional Link Delay = {} usec{}",
+                    "      Unidirectional Link Delay: {} usec{}",
                     v.delay,
                     if v.anomalous { " (Anomalous)" } else { "" }
                 )?;
@@ -1153,7 +1153,7 @@ fn write_v3_asla_sub(
             Ospfv3AslaSubSubTlv::MinMaxLinkDelay(v) => {
                 writeln!(
                     out,
-                    "      Min/Max Unidirectional Link Delay = {}/{} usec{}",
+                    "      Min/Max Unidirectional Link Delay: {}/{} usec{}",
                     v.min_delay,
                     v.max_delay,
                     if v.anomalous { " (Anomalous)" } else { "" }
@@ -1162,7 +1162,7 @@ fn write_v3_asla_sub(
             Ospfv3AslaSubSubTlv::DelayVariation(v) => {
                 writeln!(
                     out,
-                    "      Unidirectional Delay Variation = {} usec",
+                    "      Unidirectional Delay Variation: {} usec",
                     v.variation
                 )?;
             }
@@ -1170,7 +1170,7 @@ fn write_v3_asla_sub(
                 // RFC 7471 §4.4 encodes loss in units of 0.000003 %.
                 writeln!(
                     out,
-                    "      Unidirectional Link Loss = {:.6}%{}",
+                    "      Unidirectional Link Loss: {:.6} %{}",
                     v.loss as f64 * 0.000003,
                     if v.anomalous { " (Anomalous)" } else { "" }
                 )?;

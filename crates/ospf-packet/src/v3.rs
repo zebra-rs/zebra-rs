@@ -2490,6 +2490,14 @@ impl Ospfv3AslaSubTlv {
         })
     }
 
+    /// True when both application masks are zero-length. RFC 9492 §5
+    /// makes such an advertisement the fallback for any application
+    /// that has no advertisement of its own on this link — and forbids
+    /// using it for one that does.
+    pub fn is_any_application(&self) -> bool {
+        self.sabm.is_empty() && self.udabm.is_empty()
+    }
+
     /// Minimum unidirectional delay from this ASLA's Min/Max Link Delay
     /// sub-sub-TLV, if present — the RFC 9350 §5.1 metric-type 1 input.
     /// The OSPFv2 twin is `OspfAslaSubTlv::min_unidir_delay`.

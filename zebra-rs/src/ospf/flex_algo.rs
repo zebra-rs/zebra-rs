@@ -190,6 +190,39 @@ pub fn build_link_asla(
     }))
 }
 
+/// The Min unidirectional delay applying to Flex-Algorithm on one
+/// link, selected from that link's ASLA advertisements per RFC 9492 §5.
+///
+/// An explicit Flex-Algorithm advertisement (SABM X-bit) wins. Failing
+/// that, a zero-length-mask advertisement applies — those are defined
+/// to cover any application with nothing more specific, and forbidden
+/// for one that has something more specific. Picking whichever sub-TLV
+/// came first would make the answer depend on advertisement order, and
+/// accepting only the X-bit form would ignore a peer that advertises
+/// delay for every application, which at metric-type 1 means pruning
+/// its link from the topology entirely.
+macro_rules! asla_min_delay {
+    ($name:ident, $sub:ty, $variant:path) => {
+        pub fn $name(subs: &[$sub]) -> Option<u32> {
+            let mut specific = None;
+            let mut any_application = None;
+            for sub in subs {
+                if let $variant(asla) = sub {
+                    if asla.is_flex_algo() {
+                        specific = specific.or_else(|| asla.min_unidir_delay());
+                    } else if asla.is_any_application() {
+                        any_application = any_application.or_else(|| asla.min_unidir_delay());
+                    }
+                }
+            }
+            specific.or(any_application)
+        }
+    };
+}
+
+asla_min_delay!(asla_min_delay_v2, ExtLinkSubTlv, ExtLinkSubTlv::Asla);
+asla_min_delay!(asla_min_delay_v3, Ospfv3SubTlv, Ospfv3SubTlv::Asla);
+
 /// OSPFv3 sibling of `build_link_asla`: build the per-link ASLA sub-TLV
 /// (RFC 9492) that rides as an `Ospfv3SubTlv::Asla` on the E-Router-LSA
 /// Router-Link TLV, carrying this link's affinity and any RFC 7471 TE
@@ -379,6 +412,87 @@ mod tests {
 
     /// A link with TE metrics but no affinity still originates the ASLA
     /// — otherwise flex-algo metric-type 1 would have nothing to read.
+    fn v3_asla(sabm: Vec<u8>, min_delay: u32) -> Ospfv3SubTlv {
+        use ospf_packet::OspfSubMinMaxLinkDelay;
+        Ospfv3SubTlv::Asla(Ospfv3AslaSubTlv {
+            sabm,
+            udabm: Vec::new(),
+            subs: vec![Ospfv3AslaSubSubTlv::MinMaxLinkDelay(
+                OspfSubMinMaxLinkDelay {
+                    anomalous: false,
+                    min_delay,
+                    max_delay: min_delay + 100,
+                },
+            )],
+        })
+    }
+
+    /// The ordinary case: an explicit Flex-Algorithm advertisement.
+    #[test]
+    fn asla_min_delay_reads_the_explicit_x_bit_advertisement() {
+        let subs = vec![v3_asla(vec![OSPFV3_SABM_FLEX_ALGO, 0, 0, 0], 900)];
+        assert_eq!(asla_min_delay_v3(&subs), Some(900));
+    }
+
+    /// RFC 9492 §5: a zero-length-mask advertisement covers any
+    /// application with nothing more specific. Ignoring it prunes the
+    /// link from a metric-type-1 topology, which can remove the only
+    /// path.
+    #[test]
+    fn asla_min_delay_accepts_a_zero_length_mask_advertisement() {
+        let subs = vec![v3_asla(Vec::new(), 1_100)];
+        assert_eq!(asla_min_delay_v3(&subs), Some(1_100));
+    }
+
+    /// ... but only when nothing more specific exists, and the answer
+    /// must not depend on which arrived first.
+    #[test]
+    fn asla_min_delay_prefers_the_explicit_advertisement_either_order() {
+        let specific = v3_asla(vec![OSPFV3_SABM_FLEX_ALGO, 0, 0, 0], 900);
+        let generic = v3_asla(Vec::new(), 1_100);
+        assert_eq!(
+            asla_min_delay_v3(&[generic.clone(), specific.clone()]),
+            Some(900)
+        );
+        assert_eq!(asla_min_delay_v3(&[specific, generic]), Some(900));
+    }
+
+    /// An advertisement scoped to some other application says nothing
+    /// about Flex-Algorithm, and does not license the generic one it
+    /// isn't.
+    #[test]
+    fn asla_min_delay_ignores_another_applications_scope() {
+        // Bit 0 is RSVP-TE, not the Flex-Algorithm X-bit.
+        let subs = vec![v3_asla(vec![0x80, 0, 0, 0], 900)];
+        assert_eq!(asla_min_delay_v3(&subs), None);
+    }
+
+    /// The OSPFv2 reader follows the same rule.
+    #[test]
+    fn asla_min_delay_v2_follows_the_same_selection() {
+        use ospf_packet::OspfSubMinMaxLinkDelay;
+        let asla = |sabm: Vec<u8>, min_delay: u32| {
+            ExtLinkSubTlv::Asla(OspfAslaSubTlv {
+                sabm,
+                udabm: Vec::new(),
+                subs: vec![OspfAslaSubSubTlv::MinMaxLinkDelay(OspfSubMinMaxLinkDelay {
+                    anomalous: false,
+                    min_delay,
+                    max_delay: min_delay + 100,
+                })],
+            })
+        };
+        assert_eq!(asla_min_delay_v2(&[asla(Vec::new(), 1_100)]), Some(1_100));
+        assert_eq!(
+            asla_min_delay_v2(&[
+                asla(Vec::new(), 1_100),
+                asla(vec![OSPF_SABM_FLEX_ALGO, 0, 0, 0], 900)
+            ]),
+            Some(900)
+        );
+        assert_eq!(asla_min_delay_v2(&[asla(vec![0x80, 0, 0, 0], 900)]), None);
+    }
+
     #[test]
     fn build_link_asla_v3_emits_te_metrics_without_affinity() {
         use ospf_packet::{OspfSubUniLinkDelay, Ospfv3AslaSubSubTlv};
