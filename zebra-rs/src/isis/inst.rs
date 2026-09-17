@@ -2514,7 +2514,15 @@ impl Isis {
             return;
         }
         let stale = link.state.stamp_session;
-        if let Some((key, _)) = stale {
+        // Unsubscribe only when the subscription really ends or moves
+        // to a different key. A params-only edit (interval, damping
+        // period, anomaly bounds) re-subscribes in place: the STAMP
+        // side then retunes and adopts the new bounds while keeping
+        // this client's anomaly hysteresis, so changing an unrelated
+        // timer cannot clear a standing A bit that the delay has not
+        // yet dropped below the reuse bound to earn.
+        let torn_down = stale.is_some_and(|(key, _)| desired.map(|(k, _)| k) != Some(key));
+        if torn_down && let Some((key, _)) = stale {
             self.stamp_unsubscribe(key);
         }
         if let Some((key, params)) = desired {
@@ -2527,8 +2535,8 @@ impl Isis {
         // A torn-down session's measured values are stale the moment
         // the subscription ends — clear and re-advertise (static
         // config, if any, takes back over via `te_metric_effective`).
-        if stale.is_some() && link.state.measured_te_metric != super::link::LinkTeMetric::default()
-        {
+        // A params-only edit keeps measuring, so its values stand.
+        if torn_down && link.state.measured_te_metric != super::link::LinkTeMetric::default() {
             link.state.measured_te_metric = super::link::LinkTeMetric::default();
             let _ = self.tx.send(Message::LspOriginate(Level::L1, None));
             let _ = self.tx.send(Message::LspOriginate(Level::L2, None));
@@ -2583,6 +2591,13 @@ impl Isis {
                 max_delay: Some(snap.max),
                 delay_variation: Some(snap.variation),
                 loss: None,
+                // Per-value flags: the average drives its own
+                // sub-TLV, the two bounds jointly drive the Min/Max
+                // sub-TLV's single bit. `merged_over` drops whichever
+                // of them the operator pinned.
+                delay_anomalous: snap.anomaly.avg,
+                min_anomalous: snap.anomaly.min,
+                max_anomalous: snap.anomaly.max,
             },
             None => super::link::LinkTeMetric::default(),
         };

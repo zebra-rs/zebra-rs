@@ -14,6 +14,11 @@
 //!   * any field moved by more than `max(old/10, 50 µs)` against the
 //!     last exported snapshot.
 //!
+//! This gate sees only values. The Anomalous bits are evaluated per
+//! subscriber (each IGP carries its own thresholds), so their
+//! transitions are compared per subscriber in `on_export_tick` and can
+//! force an export for one subscriber alone.
+//!
 //! The relative threshold suppresses noise on stable links; the
 //! absolute floor stops sub-500 µs links from re-originating on every
 //! period's worth of scheduler jitter.
@@ -51,7 +56,8 @@ impl Damping {
     }
 
     /// Test-only introspection of the comparison basis (production
-    /// readers use `Session::last_export`, which mirrors it).
+    /// readers want `Session::last_snapshot`, which is the freshest
+    /// observation rather than this filter's baseline).
     #[cfg(test)]
     pub fn last(&self) -> Option<&MetricSnapshot> {
         self.last.as_ref()
@@ -81,6 +87,7 @@ mod tests {
             max,
             avg,
             variation,
+            anomaly: Default::default(),
         }
     }
 

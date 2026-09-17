@@ -51,12 +51,19 @@ fn state_str(s: &Session) -> &'static str {
     if s.is_active() { "Active" } else { "Idle" }
 }
 
-/// `min/avg/max (var)` µs, or `-` before the first export.
+/// `min/avg/max (var)` µs, or `-` before the first export. Values
+/// only: the Anomalous bits belong to a subscriber's advertisement,
+/// not to the shared measurement, so they are rendered per client by
+/// `show stamp session`.
 fn export_str(snap: &Option<MetricSnapshot>) -> String {
     match snap {
         Some(s) => format!("{}/{}/{}us ({}us)", s.min, s.avg, s.max, s.variation),
         None => "-".to_string(),
     }
+}
+
+fn yes_no(b: bool) -> &'static str {
+    if b { "yes" } else { "no" }
 }
 
 #[derive(Serialize)]
@@ -82,7 +89,7 @@ struct StampSessionJson {
     #[serde(skip_serializing_if = "Option::is_none")]
     window_loss_pct: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    last_export: Option<MetricSnapshot>,
+    last_snapshot: Option<MetricSnapshot>,
     uptime_secs: u64,
 }
 
@@ -105,7 +112,7 @@ fn session_json(key: &SessionKey, s: &Session) -> StampSessionJson {
         window_sent: s.window.sent,
         window_received: s.window.received,
         window_loss_pct: s.window.loss_pct(),
-        last_export: s.last_export,
+        last_snapshot: s.last_snapshot,
         uptime_secs: s.created.elapsed().as_secs(),
     }
 }
@@ -128,7 +135,7 @@ fn show_stamp(stamp: &Stamp, _args: Args, json: bool) -> Result<String, fmt::Err
     }
     writeln!(
         buf,
-        "{:<10} {:<16} {:<16} {:<8} {:>8} {:>8} {:>6}  Last export (min/avg/max)",
+        "{:<10} {:<16} {:<16} {:<8} {:>8} {:>8} {:>6}  Last sample (min/avg/max)",
         "Interface", "Local", "Remote", "State", "Sent", "Recv", "Loss%"
     )?;
     for (key, s) in stamp.sessions.iter() {
@@ -147,7 +154,7 @@ fn show_stamp(stamp: &Stamp, _args: Args, json: bool) -> Result<String, fmt::Err
             s.tx_count,
             s.rx_count,
             loss,
-            export_str(&s.last_export),
+            export_str(&s.last_snapshot),
         )?;
     }
     Ok(buf)
@@ -203,15 +210,41 @@ fn show_stamp_session(stamp: &Stamp, _args: Args, json: bool) -> Result<String, 
             "        Current window: sent {} received {}",
             s.window.sent, s.window.received
         )?;
-        match &s.last_export {
+        match &s.last_snapshot {
             Some(e) => {
-                writeln!(buf, "        Last export:")?;
+                writeln!(buf, "        Last sample:")?;
                 writeln!(buf, "            Min delay: {} usec", e.min)?;
                 writeln!(buf, "            Max delay: {} usec", e.max)?;
                 writeln!(buf, "            Average delay: {} usec", e.avg)?;
                 writeln!(buf, "            Delay variation: {} usec", e.variation)?;
             }
-            None => writeln!(buf, "        Last export: none")?,
+            None => writeln!(buf, "        Last sample: none")?,
+        }
+        // Anomaly policy is per subscribing IGP, so each one's bounds
+        // and current bits are listed separately — two IGPs on one
+        // link can legitimately advertise different flags.
+        writeln!(buf, "        Subscribers:")?;
+        let mut listed = false;
+        for (client, sub) in stamp.subscriber_rows(key) {
+            listed = true;
+            let policy = match sub.thresholds.bounds() {
+                Some((anomaly, reuse)) => {
+                    format!("anomaly-threshold {anomaly}us (reuse {reuse}us)")
+                }
+                None => "anomaly-threshold none".to_string(),
+            };
+            writeln!(
+                buf,
+                "            {}: {}, Anomalous: avg {}, min {}, max {}",
+                client,
+                policy,
+                yes_no(sub.last_flags.avg),
+                yes_no(sub.last_flags.min),
+                yes_no(sub.last_flags.max)
+            )?;
+        }
+        if !listed {
+            writeln!(buf, "            none")?;
         }
     }
     Ok(buf)
@@ -364,7 +397,7 @@ mod tests {
         let detail = show_stamp_session(&stamp, no_args(), false).unwrap();
         assert!(detail.contains("session 127.0.0.1 -> 127.0.0.2"));
         assert!(detail.contains("Probe interval: 1000ms"));
-        assert!(detail.contains("Last export: none"));
+        assert!(detail.contains("Last sample: none"));
     }
 
     #[tokio::test]

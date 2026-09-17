@@ -18,6 +18,7 @@ use tokio::io::unix::AsyncFd;
 
 use crate::context::Task;
 
+use super::anomaly::AnomalyThresholds;
 use super::damping::Damping;
 use super::stats::{MetricSnapshot, StatsWindow};
 
@@ -44,6 +45,15 @@ pub struct SessionParams {
     /// Destination UDP port. Production sessions probe the well-known
     /// STAMP port (862); tests aim at an instance's ephemeral port.
     pub dst_port: u16,
+    /// Bounds for the Anomalous bit this subscriber originates.
+    ///
+    /// Unlike the timing fields above, this is **not** applied to the
+    /// shared session: it is stored per subscriber (see
+    /// [`Subscriber`](super::client::Subscriber)), because each IGP
+    /// configures it separately and one must not overwrite the other.
+    /// It rides in `SessionParams` so the IGP-side reconcile diff
+    /// still notices a threshold-only config change and re-subscribes.
+    pub anomaly: AnomalyThresholds,
 }
 
 impl Default for SessionParams {
@@ -52,6 +62,7 @@ impl Default for SessionParams {
             interval_ms: DEFAULT_INTERVAL_MS,
             damping_secs: DEFAULT_DAMPING_SECS,
             dst_port: stamp_packet::STAMP_UDP_PORT,
+            anomaly: AnomalyThresholds::default(),
         }
     }
 }
@@ -72,6 +83,13 @@ pub struct MeasurementConfig {
     pub enable: Option<bool>,
     pub interval_ms: Option<u32>,
     pub damping_period_secs: Option<u32>,
+    /// Average delay at or above which the Anomalous bit is set on
+    /// this link's delay sub-TLVs. Unset leaves the bit permanently
+    /// clear — detection is opt-in.
+    pub anomaly_threshold_us: Option<u32>,
+    /// Average delay below which the bit clears again. Unset means no
+    /// hysteresis band: the anomaly threshold both sets and clears.
+    pub reuse_threshold_us: Option<u32>,
 }
 
 impl MeasurementConfig {
@@ -84,6 +102,10 @@ impl MeasurementConfig {
             interval_ms: self.interval_ms.unwrap_or(DEFAULT_INTERVAL_MS),
             damping_secs: self.damping_period_secs.unwrap_or(DEFAULT_DAMPING_SECS),
             dst_port: stamp_packet::STAMP_UDP_PORT,
+            anomaly: AnomalyThresholds {
+                anomaly_us: self.anomaly_threshold_us,
+                reuse_us: self.reuse_threshold_us,
+            },
         }
     }
 }
@@ -120,10 +142,15 @@ pub struct Session {
     pub reflected_count: u64,
     pub window: StatsWindow,
     pub damping: Damping,
-    /// Last snapshot actually exported to subscribers (`None` before
-    /// the first export or after a clear). Mirrored to late
-    /// subscribers and rendered by `show stamp`.
-    pub last_export: Option<MetricSnapshot>,
+    /// The most recent window's values — `None` before the first
+    /// window and after any empty one. Updated every export tick,
+    /// independently of whether the damping gate passed those values
+    /// on: a subscriber joining mid-session has to be seeded from what
+    /// the link is doing *now*, and its Anomalous bits evaluated
+    /// against that, not against whatever last cleared the filter. The
+    /// filter's own baseline lives in [`Damping`]. Rendered by
+    /// `show stamp`.
+    pub last_snapshot: Option<MetricSnapshot>,
     pub last_rx: Option<Instant>,
     pub created: Instant,
     /// Reply read task; aborted when the session drops.
@@ -153,7 +180,7 @@ impl Session {
             reflected_count: 0,
             window: StatsWindow::default(),
             damping: Damping::default(),
-            last_export: None,
+            last_snapshot: None,
             last_rx: None,
             created: Instant::now(),
             _read_task: read_task,
@@ -262,6 +289,7 @@ mod tests {
             enable: Some(true),
             interval_ms: Some(100),
             damping_period_secs: Some(2),
+            ..Default::default()
         };
         assert!(c.enabled());
         let p = c.resolve();
