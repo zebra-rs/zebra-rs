@@ -616,7 +616,8 @@ Not in phase 1, by design: the non-revertive operational preference
 | ----- | ----------- | ---- |
 | **1** ✅ | **RFC 9785 completion**: DP bit codec + tie-break, `DfCandidate` → struct with caps, Alg 3, default pref 32767, YANG `algorithm` arms + `0..65535` + `dont-preempt` | **Done** — see the status note below |
 | **2** ✅ | **SCT codec + T bit** (no behaviour change): `SctEc`, NTP conversions, parse/emit/Display | **Done** — see the status note below |
-| **3** | **`EvpnEsRemote` + L2-Attr P/B on the E-LAN per-EVI A-D**: origination with the elected role, consumption into the remote table, `evpn_es_nhg_sync()` uses it, `es_sa_primary()` retained as fallback, conflict + provenance in `show` | Unit: selection/conflict/eligibility table. BDD: new `bgp_evpn_single_active.feature` — role flip via attribute-only update (no withdraw observed), backup promotion on per-ES A-D withdraw, two-RR duplicate-copy scenario |
+| **3a** ✅ | **Origination**: `role-signaling l2-attr`, the elected role on the E-LAN per-EVI A-D, `show` | **Done** — see the status note below |
+| **3b** | **Consumption**: `EsRemoteBd` + provenance, `evpn_es_nhg_sync()` selects on the signalled role, `es_sa_primary()` retained as the fallback, conflict in `show` | Unit: selection/conflict/eligibility table. BDD: backup promotion on per-ES A-D withdraw, two-RR duplicate-copy scenario |
 | **4** | **RFC 9722 behaviour**: staged vs applied verdicts, `EsCarveDue` timer, skew, `fast-recovery` config, exclusivity with `startup-delay`, fallbacks | Unit with an injected clock: SCT accept/reject bounds, skew ordering, T=0 fallback, superseding SCT. BDD: joining PE does not become DF before its SCT; incumbent steps down first |
 | **5** | **Datapath proof (cradle)**: primary switch on a P/B change alone, with the old DF's Type-2s still in the table; both traffic directions on the standby stay blocked | cradle BDD twin of `cradle_evpn_mh_sa_zebra` driven by a role change instead of a port-down; `l2_drop_nondf` / `l2_es_nhg` counters as the discriminator |
 | **6** | **Docs + interop**: update `bgp-evpn-support-status.md` and the ES design doc, book chapter, CHANGELOG at the release cut; run interop-lab phases P1/P4 against FRR for the preference/DP tie-break | Lab report in `bgp-evpn-mh-frr-interop-report.md` |
@@ -646,6 +647,40 @@ against the RFC figure, the 2208988800 epoch constant, the era-1 boundary in
 both directions, the ~15.26 µs quantum with a 10 ms skew surviving it, and a
 parse round trip) plus the T-bit position and its coexistence with AC-DF and
 DP.
+
+**Status: phase 3a is implemented** on `evpn-elan-role-signal`. Phase 3 is
+split because origination and consumption fail differently: 3a only changes
+what this PE *says*, behind a config gate, while 3b changes what a remote PE
+*forwards*. 3a adds `RoleSignaling {Inferred, L2Attr}` (the
+`ethernet-segment <name> role-signaling` leaf, default `inferred` =
+unchanged behaviour), `elan_role()` beside `elan_df()` so the advertised bit
+and the local BUM filter come from one election, the L2-Attr EC on
+`evpn_originate_ethernet_ad_evi` for a single-active segment that signals,
+and `evpn_reconcile_ad_evi_roles()` hooked into `vpws_df_drain` so a role
+change is an attribute-only re-origination. It diffs against the bits
+already in the Loc-RIB rather than a shadow copy, so a drain that changes
+nothing advertises nothing. `show bgp evpn ethernet-segment` renders the
+mode and the role per bridge domain, in text and JSON, alongside what was
+last teed to the datapath.
+
+One thing 3a had to fix rather than add (found in review): the
+`redundancy-mode` handler re-originated the routes but never re-ran
+`evpn_es_df_sync`, so the datapath kept the previous mode until some
+unrelated BGP event happened to drain. That was invisible while nothing else
+in the handler moved; with 3a updating the advertisement in the same edit it
+becomes a divergence — all-active → single-active would advertise Backup
+while the standby port still only filtered BUM, and the reverse would go on
+blocking both directions with the P/B bits already gone. The handler now
+marks the segment dirty and drains, which re-tees the gate and reconciles
+the advertised role together. **The general shape: every ES config leaf that
+feeds `Message::EsRole` must reach the drain, not just the origination
+path.** Proof: three unit
+tests (the role tracks `elan_df`; a holding or not-yet-elected PE advertises
+*neither* bit, unlike `vpws_role`'s primary fallback; the keyword
+round-trip) and a new `bgp_evpn_single_active.feature` — the DF advertises
+P and its backup B, a preference change flips both PEs' bits on the route
+they are already advertising, and with `role-signaling` back at its default
+the EC disappears while the route stays.
 
 Phases 1–2 are pure codec/config and can land in any order. Phase 3 is the
 one that changes forwarding decisions on a remote PE; it is the one to gate

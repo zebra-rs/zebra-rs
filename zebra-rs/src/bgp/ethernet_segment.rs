@@ -92,6 +92,45 @@ impl EsRedundancyMode {
     }
 }
 
+/// How a remote PE is told which PE forwards a single-active segment's
+/// known unicast (`docs/design/bgp-evpn-single-active-plan.md` §4).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RoleSignaling {
+    /// Advertise nothing; a remote PE infers the forwarder from which PE
+    /// advertised the segment's MACs (`Bgp::es_sa_primary`). The
+    /// pre-existing behaviour, and the default.
+    #[default]
+    Inferred,
+    /// Advertise the elected role in the Layer-2 Attributes extended
+    /// community of the per-EVI Ethernet A-D (draft-ietf-bess-rfc7432bis
+    /// §7.11.1), so a remote PE reads the forwarder instead of guessing it
+    /// from MAC counts.
+    L2Attr,
+}
+
+impl RoleSignaling {
+    /// Parse the YANG `role-signaling` keyword.
+    pub fn from_keyword(s: &str) -> Self {
+        match s {
+            "l2-attr" => RoleSignaling::L2Attr,
+            _ => RoleSignaling::Inferred,
+        }
+    }
+
+    /// The YANG keyword for this mode.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RoleSignaling::Inferred => "inferred",
+            RoleSignaling::L2Attr => "l2-attr",
+        }
+    }
+
+    /// Whether the role rides the per-EVI A-D.
+    pub fn signals(&self) -> bool {
+        matches!(self, RoleSignaling::L2Attr)
+    }
+}
+
 /// The DF election algorithm a segment advertises and runs (RFC 8584 §2.2
 /// DF Alg values; RFC 9785 adds the two preference-based ones).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,6 +226,9 @@ pub struct EthernetSegment {
     /// config it derives from, as [`super::vpws::VpwsService`] already does
     /// for its own derived state.
     pub hold_until: Option<Instant>,
+    /// How this segment tells remote PEs which PE forwards its known
+    /// unicast. Default `Inferred` — the pre-existing MAC-count inference.
+    pub role_signaling: RoleSignaling,
     /// RFC 7432 §8.3: this PE's ESI label for the segment under
     /// `encapsulation mpls` — drawn from the dynamic label block
     /// (`Bgp::es_label_reconcile`), advertised in the per-ES A-D's ESI
@@ -597,6 +639,41 @@ pub fn elan_df(
     holding: bool,
 ) -> bool {
     !holding && elect_forwarders(candidates, esi, vni).0 == Some(me)
+}
+
+/// The role this PE advertises for a single-active segment in one bridge
+/// domain — the P/B bits of the per-EVI Ethernet A-D's Layer-2 Attributes
+/// extended community (draft-ietf-bess-rfc7432bis §7.11.1).
+///
+/// Elected exactly like [`elan_df`], over the same candidates and with the
+/// VNI as the Ethernet Tag, so the bit a remote PE reads and the BUM filter
+/// this PE enforces can never disagree: the DF is Primary, the election's
+/// runner-up is Backup, anyone else is neither.
+///
+/// A PE that is `holding`, or that is not in the candidate set at all (its
+/// own Type-4 not selected yet), advertises **neither** bit. That is the
+/// opposite of [`vpws_role`]'s "stay primary while the segment converges"
+/// fallback, and deliberately so: under single-active a non-DF blocks the
+/// access port in both directions, so attracting unicast to a PE that has
+/// not joined the election is a blackhole, not a duplicate.
+pub fn elan_role(
+    candidates: &[DfCandidate],
+    me: IpAddr,
+    esi: &[u8; 10],
+    vni: u32,
+    holding: bool,
+) -> VpwsRole {
+    if holding || !candidates.iter().any(|c| c.addr == me) {
+        return VpwsRole::NonDesignated;
+    }
+    let (df, backup) = elect_forwarders(candidates, esi, vni);
+    if df == Some(me) {
+        VpwsRole::Primary
+    } else if backup == Some(me) {
+        VpwsRole::Backup
+    } else {
+        VpwsRole::NonDesignated
+    }
 }
 
 /// Order an Ethernet Segment nexthop group's members for the datapath.
@@ -1220,6 +1297,106 @@ mod tests {
         ];
         assert_eq!(elect_forwarders(&mixed, &ESI_T, 0).0, Some(a));
         assert_eq!(elect_forwarders(&mixed, &ESI_T, 1).0, Some(b));
+    }
+
+    /// The E-LAN role advertised on the per-EVI A-D is the same election the
+    /// BUM filter uses, so the bit a remote reads and the filter this PE
+    /// enforces cannot disagree: the DF is Primary, the runner-up is Backup,
+    /// everyone else advertises neither bit.
+    #[test]
+    fn elan_role_tracks_the_same_election_as_the_bum_filter() {
+        let [a, b, c] = pes();
+        let cands = carving(&[a, b, c]);
+        // Carving on tag 0 elects a, so b (ordinal 1) is its backup.
+        assert_eq!(elan_role(&cands, a, &ESI_T, 0, false), VpwsRole::Primary);
+        assert_eq!(elan_role(&cands, b, &ESI_T, 0, false), VpwsRole::Backup);
+        assert_eq!(
+            elan_role(&cands, c, &ESI_T, 0, false),
+            VpwsRole::NonDesignated
+        );
+        // Whoever is Primary here is exactly who `elan_df` lets forward BUM.
+        for (pe, role) in [
+            (a, VpwsRole::Primary),
+            (b, VpwsRole::Backup),
+            (c, VpwsRole::NonDesignated),
+        ] {
+            assert_eq!(
+                elan_df(&cands, pe, &ESI_T, 0, false),
+                role == VpwsRole::Primary
+            );
+        }
+        // A different bridge domain carves differently, and the role follows.
+        assert_eq!(elan_role(&cands, b, &ESI_T, 1, false), VpwsRole::Primary);
+        assert_eq!(elan_role(&cands, c, &ESI_T, 1, false), VpwsRole::Backup);
+        // Preference pins one PE across every bridge domain.
+        let pref = prefs(&[(a, 10), (b, 200), (c, 30)]);
+        for vni in [0, 1, 4242] {
+            assert_eq!(elan_role(&pref, b, &ESI_T, vni, false), VpwsRole::Primary);
+            assert_eq!(elan_role(&pref, c, &ESI_T, vni, false), VpwsRole::Backup);
+            assert_eq!(
+                elan_role(&pref, a, &ESI_T, vni, false),
+                VpwsRole::NonDesignated
+            );
+        }
+    }
+
+    /// A PE that has not joined the election advertises NEITHER bit — the
+    /// opposite of `vpws_role`'s "stay primary while the segment converges"
+    /// fallback. Under single-active a non-DF blocks its access port in both
+    /// directions, so attracting a remote's unicast to a PE that is not
+    /// forwarding is a blackhole, where the VPWS fallback would only risk a
+    /// duplicate.
+    #[test]
+    fn elan_role_is_neither_bit_while_this_pe_is_out_of_the_election() {
+        let [a, b, _] = pes();
+        let cands = carving(&[a, b]);
+        // Holding (startup delay): our Type-4 is suppressed, so we are in
+        // nobody's candidate set and must not be used.
+        assert_eq!(
+            elan_role(&cands, a, &ESI_T, 0, true),
+            VpwsRole::NonDesignated
+        );
+        assert_eq!(
+            vpws_role(EsRedundancyMode::SingleActive, &cands, a, &ESI_T, 0),
+            VpwsRole::Primary
+        );
+        // Not in the candidate set at all (our own Type-4 not selected yet).
+        let others = carving(&[b]);
+        assert_eq!(
+            elan_role(&others, a, &ESI_T, 0, false),
+            VpwsRole::NonDesignated
+        );
+        // An empty segment elects nobody.
+        assert_eq!(elan_role(&[], a, &ESI_T, 0, false), VpwsRole::NonDesignated);
+        // A lone PE is Primary with no backup behind it.
+        let alone = carving(&[a]);
+        assert_eq!(elan_role(&alone, a, &ESI_T, 0, false), VpwsRole::Primary);
+    }
+
+    /// The config keyword round-trips, and only `l2-attr` signals.
+    #[test]
+    fn role_signaling_keyword_round_trip() {
+        assert_eq!(
+            RoleSignaling::from_keyword("l2-attr"),
+            RoleSignaling::L2Attr
+        );
+        assert_eq!(
+            RoleSignaling::from_keyword("inferred"),
+            RoleSignaling::Inferred
+        );
+        assert_eq!(
+            RoleSignaling::from_keyword("nonsense"),
+            RoleSignaling::Inferred
+        );
+        assert_eq!(RoleSignaling::default(), RoleSignaling::Inferred);
+        assert!(RoleSignaling::L2Attr.signals());
+        assert!(!RoleSignaling::Inferred.signals());
+        assert_eq!(RoleSignaling::L2Attr.as_str(), "l2-attr");
+        assert_eq!(RoleSignaling::Inferred.as_str(), "inferred");
+        // The bits the two signalling roles put on the wire.
+        assert_eq!(VpwsRole::Primary.bits(), (true, false));
+        assert_eq!(VpwsRole::Backup.bits(), (false, true));
+        assert_eq!(VpwsRole::NonDesignated.bits(), (false, false));
     }
 
     /// AC-DF is a unanimous capability: any PE without the bit keeps the
