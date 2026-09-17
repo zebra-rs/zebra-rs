@@ -688,14 +688,102 @@ pub fn elan_role(
 pub fn order_es_members(
     mut pairs: Vec<(IpAddr, crate::rib::EsNhgMember)>,
     primary: Option<IpAddr>,
+    backup: Option<IpAddr>,
 ) -> Vec<crate::rib::EsNhgMember> {
     pairs.sort();
-    if let Some(primary) = primary {
-        // Stable: the primary's members keep their own order at the front.
-        let (front, back): (Vec<_>, Vec<_>) = pairs.into_iter().partition(|(pe, _)| *pe == primary);
+    // Applied backup-first then primary-first, so the primary ends up ahead
+    // of the backup however the two were chosen. Each pass is stable, so a
+    // PE contributing several members keeps their relative order.
+    for lead in [backup, primary] {
+        let Some(lead) = lead else {
+            continue;
+        };
+        let (front, back): (Vec<_>, Vec<_>) = pairs.into_iter().partition(|(pe, _)| *pe == lead);
         pairs = front.into_iter().chain(back).collect();
     }
     pairs.into_iter().map(|(_, m)| m).collect()
+}
+
+/// Why a single-active group's forwarder was chosen the way it was —
+/// rendered by `show`, so an operator can tell a signalled answer from a
+/// guess without reading the routes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaSelectReason {
+    /// Exactly one member advertised P=1 (rfc7432bis §7.11.1).
+    Signalled,
+    /// More than one member claimed P=1; the lowest address broke the tie.
+    /// Both PEs believe they forward, which this PE cannot repair — it can
+    /// only avoid installing two forwarding members and say so.
+    Conflict,
+    /// Nobody claimed P=1 but exactly one member advertised B=1, so the
+    /// segment's own runner-up leads.
+    BackupOnly,
+    /// No member signals a role at all; the caller falls back to inferring
+    /// the forwarder from which PE advertised the segment's MACs.
+    Unsignalled,
+}
+
+impl SaSelectReason {
+    /// Short display form.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SaSelectReason::Signalled => "signalled",
+            SaSelectReason::Conflict => "conflict",
+            SaSelectReason::BackupOnly => "backup-only",
+            SaSelectReason::Unsignalled => "inferred",
+        }
+    }
+}
+
+/// The forwarder a remote ingress PE should use for a single-active segment
+/// in one bridge domain, from the roles its members advertise.
+///
+/// `signals` is one entry per **eligible** member — the caller has already
+/// dropped PEs whose per-ES A-D is gone (RFC 7432 §8.2 mass withdraw) or
+/// that have no per-EVI A-D for this bridge domain — as
+/// `(PE, Some((P, B)))`, or `(PE, None)` for a member carrying no Layer-2
+/// Attributes EC.
+///
+/// Returns `(primary, backup, reason)`. `Unsignalled` means nobody told us
+/// anything and the caller should fall back to its own inference; every
+/// other reason is an answer. Two PEs claiming P=1 is a segment-level
+/// misconfiguration that no ingress PE can repair — this one at least
+/// installs a single forwarder deterministically (the lowest address) and
+/// names the condition instead of silently forwarding to both.
+pub fn select_sa_forwarder(
+    signals: &[(IpAddr, Option<(bool, bool)>)],
+) -> (Option<IpAddr>, Option<IpAddr>, SaSelectReason) {
+    if signals.iter().all(|(_, bits)| bits.is_none()) {
+        return (None, None, SaSelectReason::Unsignalled);
+    }
+    let mut primaries: Vec<IpAddr> = signals
+        .iter()
+        .filter(|(_, bits)| matches!(bits, Some((true, _))))
+        .map(|(pe, _)| *pe)
+        .collect();
+    let mut backups: Vec<IpAddr> = signals
+        .iter()
+        .filter(|(_, bits)| matches!(bits, Some((false, true))))
+        .map(|(pe, _)| *pe)
+        .collect();
+    primaries.sort();
+    backups.sort();
+    // A single backup is the segment's own runner-up, so it leads when no
+    // primary is present — the alternative is slot 0 by address order, which
+    // is a worse guess, not a safer one.
+    let backup = (backups.len() == 1).then(|| backups[0]);
+    match primaries.len() {
+        0 => match backup {
+            Some(b) => (Some(b), None, SaSelectReason::BackupOnly),
+            None => (None, None, SaSelectReason::Unsignalled),
+        },
+        1 => (Some(primaries[0]), backup, SaSelectReason::Signalled),
+        _ => (
+            Some(primaries[0]),
+            backup.filter(|b| *b != primaries[0]),
+            SaSelectReason::Conflict,
+        ),
+    }
 }
 
 /// RFC 8584 §4 AC-Influenced DF election is in effect on a segment only
@@ -1450,6 +1538,139 @@ mod tests {
         assert_eq!(narrowed.iter().map(|c| c.addr).collect::<Vec<_>>(), vec![a]);
     }
 
+    /// A remote ingress PE picks the forwarder from the roles the segment's
+    /// PEs advertise: exactly one P=1 is the answer, the lone B=1 is the
+    /// prepared standby, and nobody signalling means fall back to inference.
+    #[test]
+    fn remote_selects_the_signalled_forwarder() {
+        use SaSelectReason::*;
+        let [a, b, c] = pes();
+        let p = Some((true, false));
+        let bk = Some((false, true));
+        let neither = Some((false, false));
+
+        // The ordinary case: one primary, one backup, one neither.
+        assert_eq!(
+            select_sa_forwarder(&[(a, p), (b, bk), (c, neither)]),
+            (Some(a), Some(b), Signalled)
+        );
+        // Order of the input does not matter.
+        assert_eq!(
+            select_sa_forwarder(&[(c, neither), (b, bk), (a, p)]),
+            (Some(a), Some(b), Signalled)
+        );
+        // No backup advertised: a primary alone is still an answer.
+        assert_eq!(
+            select_sa_forwarder(&[(a, p), (b, neither)]),
+            (Some(a), None, Signalled)
+        );
+        // Two PEs advertising B=1 is not a usable standby — it is ambiguous,
+        // so no slot-1 preference is expressed.
+        assert_eq!(
+            select_sa_forwarder(&[(a, p), (b, bk), (c, bk)]),
+            (Some(a), None, Signalled)
+        );
+    }
+
+    /// Nobody claiming primary is not the same as nobody signalling: the
+    /// segment's own runner-up leads, because the alternative is slot 0 by
+    /// address order — a worse guess, not a safer one. With no signal at all
+    /// the caller is told to fall back to its MAC-origination inference.
+    #[test]
+    fn remote_falls_back_only_when_nothing_is_signalled() {
+        use SaSelectReason::*;
+        let [a, b, c] = pes();
+        let bk = Some((false, true));
+        let neither = Some((false, false));
+
+        assert_eq!(
+            select_sa_forwarder(&[(a, neither), (b, bk)]),
+            (Some(b), None, BackupOnly)
+        );
+        // Every member on the segment but none of them selectable: there is
+        // nothing to forward to, and saying so beats picking one at random.
+        assert_eq!(
+            select_sa_forwarder(&[(a, neither), (b, neither)]),
+            (None, None, Unsignalled)
+        );
+        // No Layer-2 Attributes EC anywhere — a segment whose PEs run
+        // `role-signaling inferred`, or an older release.
+        assert_eq!(
+            select_sa_forwarder(&[(a, None), (b, None), (c, None)]),
+            (None, None, Unsignalled)
+        );
+        assert_eq!(select_sa_forwarder(&[]), (None, None, Unsignalled));
+        // A mixed segment (one PE upgraded, one not) still has an answer
+        // from the PE that does signal.
+        assert_eq!(
+            select_sa_forwarder(&[(a, None), (b, Some((true, false)))]),
+            (Some(b), None, Signalled)
+        );
+    }
+
+    /// Two PEs both claiming primary is a segment-level misconfiguration no
+    /// ingress PE can repair. This one installs a single forwarder
+    /// deterministically — the lowest address, so every remote PE picks the
+    /// same one — and reports the condition instead of forwarding to both.
+    #[test]
+    fn remote_tie_breaks_a_double_primary_and_says_so() {
+        use SaSelectReason::*;
+        let [a, b, c] = pes();
+        let p = Some((true, false));
+        assert_eq!(
+            select_sa_forwarder(&[(b, p), (a, p), (c, Some((false, true)))]),
+            (Some(a), Some(c), Conflict)
+        );
+        // A PE claiming both bits counts as a primary claim; it is never
+        // also the backup.
+        assert_eq!(
+            select_sa_forwarder(&[(a, p), (b, Some((true, true)))]),
+            (Some(a), None, Conflict)
+        );
+        assert_eq!(Conflict.as_str(), "conflict");
+        assert_eq!(Signalled.as_str(), "signalled");
+        assert_eq!(BackupOnly.as_str(), "backup-only");
+        assert_eq!(Unsignalled.as_str(), "inferred");
+    }
+
+    /// The group is ordered primary, then backup, then the rest — the
+    /// datapath forwards to slot 0 alone under single-active and holds the
+    /// remainder as the pre-installed backup path, so slot 1 must be the PE
+    /// the segment nominated rather than whichever address sorts next.
+    #[test]
+    fn group_orders_primary_then_backup_then_the_rest() {
+        use crate::rib::EsNhgMember;
+        let [a, b, c] = pes();
+        let pairs = vec![
+            (a, EsNhgMember::Vxlan(a)),
+            (b, EsNhgMember::Vxlan(b)),
+            (c, EsNhgMember::Vxlan(c)),
+        ];
+        assert_eq!(
+            order_es_members(pairs.clone(), Some(c), Some(b)),
+            vec![
+                EsNhgMember::Vxlan(c),
+                EsNhgMember::Vxlan(b),
+                EsNhgMember::Vxlan(a)
+            ]
+        );
+        // A backup with no primary still leads.
+        assert_eq!(
+            order_es_members(pairs.clone(), None, Some(c)),
+            vec![
+                EsNhgMember::Vxlan(c),
+                EsNhgMember::Vxlan(a),
+                EsNhgMember::Vxlan(b)
+            ]
+        );
+        // A backup that is no longer a member changes nothing.
+        let survivors: Vec<_> = pairs.into_iter().filter(|(pe, _)| *pe != b).collect();
+        assert_eq!(
+            order_es_members(survivors, Some(c), Some(b)),
+            vec![EsNhgMember::Vxlan(c), EsNhgMember::Vxlan(a)]
+        );
+    }
+
     /// The single-active group leads with the MAC advertiser and keeps the
     /// rest, sorted, as the backup path; without a primary (all-active, or
     /// no MAC yet) the order is the sorted one.
@@ -1463,7 +1684,7 @@ mod tests {
             (b, EsNhgMember::Vxlan(b)),
         ];
         assert_eq!(
-            order_es_members(pairs.clone(), None),
+            order_es_members(pairs.clone(), None, None),
             vec![
                 EsNhgMember::Vxlan(a),
                 EsNhgMember::Vxlan(b),
@@ -1471,7 +1692,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            order_es_members(pairs.clone(), Some(b)),
+            order_es_members(pairs.clone(), Some(b), None),
             vec![
                 EsNhgMember::Vxlan(b),
                 EsNhgMember::Vxlan(a),
@@ -1483,7 +1704,7 @@ mod tests {
         // which is the failover.
         let survivors: Vec<_> = pairs.into_iter().filter(|(pe, _)| *pe != b).collect();
         assert_eq!(
-            order_es_members(survivors, Some(b)),
+            order_es_members(survivors, Some(b), None),
             vec![EsNhgMember::Vxlan(a), EsNhgMember::Vxlan(c)]
         );
     }

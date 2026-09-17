@@ -2923,6 +2923,14 @@ fn write_es_nhg_groups(buf: &mut String, bgp: &Bgp) -> std::fmt::Result {
                 crate::rib::EsNhgMember::Mpls { pe, label } => format!("{pe}/{label}"),
             })
             .collect();
+        // How the primary was chosen: a signalled role, the inference from
+        // MAC origination, or a conflict this PE could only tie-break. The
+        // distinction is the whole of phase 3b — without it "primary
+        // 192.0.2.1" reads the same whether it was told to us or guessed.
+        let why = bgp
+            .es_group_selection(esi, *bd)
+            .map(|r| format!(" ({})", r.as_str()))
+            .unwrap_or_default();
         let esi = bgp_packet::esi_display(esi);
         if *single_active {
             let (primary, backup) = rendered.split_first().expect("a sent group is non-empty");
@@ -2933,7 +2941,7 @@ fn write_es_nhg_groups(buf: &mut String, bgp: &Bgp) -> std::fmt::Result {
             };
             writeln!(
                 buf,
-                "  {esi} bd {bd}: single-active primary {primary}{backup}"
+                "  {esi} bd {bd}: single-active primary {primary}{backup}{why}"
             )?;
         } else {
             writeln!(buf, "  {esi} bd {bd}: all-active {}", rendered.join(" "))?;

@@ -617,7 +617,8 @@ Not in phase 1, by design: the non-revertive operational preference
 | **1** ✅ | **RFC 9785 completion**: DP bit codec + tie-break, `DfCandidate` → struct with caps, Alg 3, default pref 32767, YANG `algorithm` arms + `0..65535` + `dont-preempt` | **Done** — see the status note below |
 | **2** ✅ | **SCT codec + T bit** (no behaviour change): `SctEc`, NTP conversions, parse/emit/Display | **Done** — see the status note below |
 | **3a** ✅ | **Origination**: `role-signaling l2-attr`, the elected role on the E-LAN per-EVI A-D, `show` | **Done** — see the status note below |
-| **3b** | **Consumption**: `EsRemoteBd` + provenance, `evpn_es_nhg_sync()` selects on the signalled role, `es_sa_primary()` retained as the fallback, conflict in `show` | Unit: selection/conflict/eligibility table. BDD: backup promotion on per-ES A-D withdraw, two-RR duplicate-copy scenario |
+| **3b** ✅ | **Consumption**: `evpn_es_nhg_sync()` selects on the signalled role, `es_sa_primary()` retained as the fallback, conflict + reason in `show` | **Done** — see the status note below |
+| **3c** | The stored `EsRemoteBd` with provenance, the incumbent rule and a generation — diagnostics and the state phase 4's timers need | Two-RR provenance in `show`; incumbent stickiness under a conflict |
 | **4** | **RFC 9722 behaviour**: staged vs applied verdicts, `EsCarveDue` timer, skew, `fast-recovery` config, exclusivity with `startup-delay`, fallbacks | Unit with an injected clock: SCT accept/reject bounds, skew ordering, T=0 fallback, superseding SCT. BDD: joining PE does not become DF before its SCT; incumbent steps down first |
 | **5** | **Datapath proof (cradle)**: primary switch on a P/B change alone, with the old DF's Type-2s still in the table; both traffic directions on the standby stay blocked | cradle BDD twin of `cradle_evpn_mh_sa_zebra` driven by a role change instead of a port-down; `l2_drop_nondf` / `l2_es_nhg` counters as the discriminator |
 | **6** | **Docs + interop**: update `bgp-evpn-support-status.md` and the ES design doc, book chapter, CHANGELOG at the release cut; run interop-lab phases P1/P4 against FRR for the preference/DP tie-break | Lab report in `bgp-evpn-mh-frr-interop-report.md` |
@@ -681,6 +682,41 @@ round-trip) and a new `bgp_evpn_single_active.feature` — the DF advertises
 P and its backup B, a preference change flips both PEs' bits on the route
 they are already advertising, and with `role-signaling` back at its default
 the EC disappears while the route stays.
+
+**Status: phase 3b is implemented** on `evpn-elan-role-consume`.
+`select_sa_forwarder()` is a pure function over each eligible member's
+advertised bits, returning `(primary, backup, reason)`: exactly one `P=1` is
+`Signalled`; several is `Conflict`, tie-broken on the lowest address so every
+remote PE picks the same one, and logged once per group change rather than
+once per drain; no `P=1` but one `B=1` is `BackupOnly`; nobody signalling is
+`Unsignalled`, where `es_sa_primary`'s MAC-count inference still runs, so a
+segment that does not signal behaves exactly as it does today.
+`order_es_members` now takes the backup too, so slot 1 is the PE the segment
+nominated rather than whichever address sorts next, and
+`show bgp evpn ethernet-segment` names the reason beside each teed group.
+
+Two calls worth recording. **`BackupOnly` deviates from §7's "a sole backup
+is usable only after confirmed loss of the previous primary"**: without the
+stored incumbent (deferred to 3c) this PE cannot tell first discovery from a
+lost primary, and the alternative is not "wait" — the datapath forwards to
+slot 0 regardless, so it would be "an arbitrary PE by address". Leading with
+the segment's own elected runner-up is the better guess; revisit when 3c
+lands the incumbent. **The two-RR duplicate-copy case needed no explicit
+path counting**: two RRs reflecting one PE's route collide on the same
+`(RD, prefix)`, and best-path selection already keeps the prefix alive when
+one copy is withdrawn. What §4.4 really wanted there was observability,
+which the reason line now provides.
+
+Proof: four unit tests over the selection table (the ordinary case, input
+order, the fallback boundary, the double-primary tie-break, and the group
+ordering) and a new `bgp_evpn_single_active_remote.feature` — three PEs,
+where the third is on **no** segment, holds no Type-4, and so cannot re-run
+the election. Its middle scenario is the load-bearing one: the topology has
+no CE and therefore no MAC anywhere, so the old inference has nothing to go
+on and could not move the group at all. Mutation-verified — forcing
+`Unsignalled` fails that scenario outright and fails the first scenario only
+on its `(signalled)` line, since there the signalled primary happens to also
+be the lowest address.
 
 Phases 1–2 are pure codec/config and can land in any order. Phase 3 is the
 one that changes forwarding decisions on a remote PE; it is the one to gate

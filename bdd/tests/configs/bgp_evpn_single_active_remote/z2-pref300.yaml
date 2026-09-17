@@ -1,0 +1,42 @@
+# z2 — the same PE with its preference raised to 300, above z1's 200, so the
+# election — and therefore the P bit, and therefore z3's forwarding — moves to z2.
+# the election, so which PE claims P is a property of the config. Both peer
+# with z3, the remote ingress PE that has to act on what they say.
+vxlan:
+- name: vxlan10
+  vni: 10
+  local-address: 192.168.0.2
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.2
+    afi-safi:
+    - name: evpn
+      advertise-all-vni: true
+      ethernet-segment:
+      - name: es1
+        esi: "00:11:22:33:44:55:66:77:88:99"
+        redundancy-mode: single-active
+        interface: host0
+        role-signaling: l2-attr
+        df-election:
+          algorithm: preference
+          preference: 300
+    neighbor:
+    - remote-address: 192.168.0.3
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: evpn
+        enabled: true
+    - remote-address: 192.168.0.1
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      - name: evpn
+        enabled: true
