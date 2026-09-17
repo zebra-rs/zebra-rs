@@ -17,7 +17,7 @@ Validation during this review:
 - `cargo test -p bgp-packet bgpls_attr`: 10 passed.
 - `git diff --check HEAD~2 HEAD`: passed.
 
-The new BDD topology/configs were inspected but not run during this review. BGP-LS transmission to peers remains deferred in `route_bgpls_originate`, a pre-existing limitation. These checks do not establish delivery to an external controller. Implementation source was not changed.
+The new BDD topology/configs were inspected but not run during this review. BGP-LS transmission to external peers remains unimplemented in [`route_bgpls_originate`](../../zebra-rs/src/bgp/route.rs), which stores locally originated routes in the local RIB and defers re-advertisement. Controller delivery is still unverified. Completing that validation requires implementing outbound BGP-LS advertisement, receiving BGP UPDATEs on an external peer, and decoding the performance attributes and TLV 1122 application masks. Implementation source was not changed.
 
 ## Resolution
 
