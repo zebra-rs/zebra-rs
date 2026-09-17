@@ -3300,8 +3300,16 @@ impl Ospf<Ospfv2> {
         // flush path. Returning `Option` keeps the borrow on `self`
         // confined to this block so the install / flood code below can
         // mutate `self.areas`.
-        let build_inputs = if self.segment_routing == SegmentRoutingMode::Mpls
-            && let Some(link) = self.links.get(&ifindex)
+        // Segment Routing gates the *Adj-SID* contributions, not the
+        // LSA. RFC 8379's Extended-Link Opaque LSA is a general-purpose
+        // carrier, and the RFC 9492 ASLA riding on it — affinity and
+        // the RFC 7471 TE metrics — has nothing to do with SR. Gating
+        // the whole LSA on SR-MPLS meant an operator who configured
+        // link delay and no Segment Routing advertised nothing at all,
+        // silently. The `subs.is_empty()` checks below decide whether
+        // there is anything worth originating.
+        let sr_mpls = self.segment_routing == SegmentRoutingMode::Mpls;
+        let build_inputs = if let Some(link) = self.links.get(&ifindex)
             && link.enabled
             && link.nbrs.values().any(|n| n.state == NfsmState::Full)
             && let Some(addr) =
@@ -3325,10 +3333,11 @@ impl Ospf<Ospfv2> {
                 OspfNetworkType::PointToPoint => {
                     if let Some(nbr) = link.nbrs.values().find(|n| n.state == NfsmState::Full) {
                         let mut subs = Vec::new();
-                        if let Some(adjacency_sid) = link.config.adjacency_sid {
+                        if sr_mpls && let Some(adjacency_sid) = link.config.adjacency_sid {
                             subs.push(super::srmpls::build_p2p_adj_sub(&adjacency_sid));
-                        } else if let Some(label) =
-                            self.lan_adj_sids.get(&(ifindex, nbr.ident.prefix.addr()))
+                        } else if sr_mpls
+                            && let Some(label) =
+                                self.lan_adj_sids.get(&(ifindex, nbr.ident.prefix.addr()))
                         {
                             // Dynamic SRLB Adj-SID fallback — see the
                             // v3 sibling in `e_router_v3_lsa_originate`.
@@ -3359,6 +3368,7 @@ impl Ospf<Ospfv2> {
                         let mut subs: Vec<_> = link
                             .nbrs
                             .values()
+                            .filter(|_| sr_mpls)
                             .filter(|n| n.state == NfsmState::Full)
                             .filter_map(|nbr| {
                                 let label =
@@ -11248,9 +11258,14 @@ impl Ospf<Ospfv3> {
         // Build the (area, link_type, metric, my_iid, peer_iid,
         // peer_rid, subs) tuple if origination is warranted, else
         // fall through to the flush path.
+        // As in the v2 twin, Segment Routing gates the SID contributions
+        // and not the LSA: the Adj-SID push below already tests SR-MPLS
+        // and the End.X push already tests SRv6, so the outer gate only
+        // ever suppressed the RFC 9492 ASLA — affinity and RFC 7471 TE
+        // metrics — for operators who run neither. `subs.is_empty()`
+        // decides whether there is anything worth originating.
         let srv6 = self.srv6_active();
-        let build_inputs = if (self.segment_routing == SegmentRoutingMode::Mpls || srv6)
-            && let Some(link) = self.links.get(&ifindex)
+        let build_inputs = if let Some(link) = self.links.get(&ifindex)
             && link.enabled
             && link.nbrs.values().any(|n| n.state == NfsmState::Full)
         {

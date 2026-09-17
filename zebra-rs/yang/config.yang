@@ -1305,12 +1305,12 @@ module config {
                  as RFC 7471 link-attribute sub-TLVs carried in this link's
                  ASLA sub-TLV (RFC 9492) on the Extended-Link Opaque LSA —
                  the same place flex-algo affinity is advertised, and what
-                 Flex-Algorithm metric-type 1 consumes. Origination is
-                 gated on Segment Routing over MPLS being enabled (the
-                 Extended-Link LSA is only originated then). Statically
-                 configured here; a future performance-measurement
-                 (TWAMP/STAMP) task will populate the same fields
-                 dynamically. All delay values are in microseconds.";
+                 Flex-Algorithm metric-type 1 consumes. Segment Routing
+                 is not required: it gates the Adj-SID contributions to
+                 that LSA, not the LSA itself. Static configuration and
+                 STAMP measurement populate the same fields; a static
+                 leaf, when set, wins per field. All delay values are in
+                 microseconds.";
 
               leaf unidirectional-delay {
                 ext:help "Average unidirectional link delay (us)";
@@ -2437,13 +2437,11 @@ module config {
                  Flex-Algorithm metric-type 1 consumes. OSPFv3 draws
                  these code points from the Extended-LSA sub-TLV registry
                  (13-16), not the OSPFv2 TE Opaque LSA one (27-30).
-                 Origination is gated on Segment Routing (MPLS or SRv6)
-                 being enabled, since the E-Router-LSA is only originated
-                 then — the same coupling OSPFv2 has to its
-                 Extended-Link Opaque LSA. Static configuration and STAMP
-                 measurement populate the same fields; a static leaf,
-                 when set, wins per field. All delay values are in
-                 microseconds.";
+                 Segment Routing is not required: it gates the Adj-SID
+                 and End.X contributions to the E-Router-LSA, not the
+                 LSA itself. Static configuration and STAMP measurement
+                 populate the same fields; a static leaf, when set, wins
+                 per field. All delay values are in microseconds.";
 
               leaf unidirectional-delay {
                 ext:help "Average unidirectional link delay (us)";

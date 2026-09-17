@@ -20,9 +20,14 @@ field is present, because the measured value varies run to run; here
 the values are known, so the encodings are checked exactly — including
 the RFC 8570 §4.4 loss unit of 0.000003 %, where 333 is 0.000999 %.
 
-Both OSPF versions need segment-routing enabled: their TE metrics ride
-LSAs (the Extended-Link Opaque LSA and the E-Router-LSA) that are only
-originated when SR is on.
+No Segment Routing is configured anywhere here, deliberately. TE
+metrics ride the Extended-Link Opaque LSA (OSPFv2) and the
+E-Router-LSA (OSPFv3), both of which used to be originated only when
+SR was on — so an operator who configured link delay and no SR
+advertised nothing, silently. SR now gates the Adj-SID and End.X
+contributions rather than the LSA, and this feature is the gate on
+that: if either LSA regains an SR precondition, every OSPF assertion
+below fails.
 
 Topology:
 
