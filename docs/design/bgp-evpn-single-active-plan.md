@@ -615,11 +615,33 @@ Not in phase 1, by design: the non-revertive operational preference
 | Phase | Deliverable | Gate |
 | ----- | ----------- | ---- |
 | **1** ✅ | **RFC 9785 completion**: DP bit codec + tie-break, `DfCandidate` → struct with caps, Alg 3, default pref 32767, YANG `algorithm` arms + `0..65535` + `dont-preempt` | **Done** — see the status note below |
-| **2** | **SCT codec + T bit** (no behaviour change): `SctEc`, NTP conversions, parse/emit/Display, `T` advertised only when configured | Unit: round-trip, epoch conversion against known NTP vectors, era-rollover clamp |
+| **2** ✅ | **SCT codec + T bit** (no behaviour change): `SctEc`, NTP conversions, parse/emit/Display | **Done** — see the status note below |
 | **3** | **`EvpnEsRemote` + L2-Attr P/B on the E-LAN per-EVI A-D**: origination with the elected role, consumption into the remote table, `evpn_es_nhg_sync()` uses it, `es_sa_primary()` retained as fallback, conflict + provenance in `show` | Unit: selection/conflict/eligibility table. BDD: new `bgp_evpn_single_active.feature` — role flip via attribute-only update (no withdraw observed), backup promotion on per-ES A-D withdraw, two-RR duplicate-copy scenario |
 | **4** | **RFC 9722 behaviour**: staged vs applied verdicts, `EsCarveDue` timer, skew, `fast-recovery` config, exclusivity with `startup-delay`, fallbacks | Unit with an injected clock: SCT accept/reject bounds, skew ordering, T=0 fallback, superseding SCT. BDD: joining PE does not become DF before its SCT; incumbent steps down first |
 | **5** | **Datapath proof (cradle)**: primary switch on a P/B change alone, with the old DF's Type-2s still in the table; both traffic directions on the standby stay blocked | cradle BDD twin of `cradle_evpn_mh_sa_zebra` driven by a role change instead of a port-down; `l2_drop_nondf` / `l2_es_nhg` counters as the discriminator |
 | **6** | **Docs + interop**: update `bgp-evpn-support-status.md` and the ES design doc, book chapter, CHANGELOG at the release cut; run interop-lab phases P1/P4 against FRR for the preference/DP tie-break | Lab report in `bgp-evpn-mh-frr-interop-report.md` |
+
+**Status: phase 2 is implemented** on `evpn-sct-codec`. `ExtCommunityValue::
+sct()/is_sct()/as_sct()` and `SctEc { seconds, fraction }` carry the RFC 9722
+§2.1 Service Carving Time (`0x06`/`0x0F`), with `from_unix_micros` /
+`to_unix_micros` / `from_system_time` / `to_system_time` doing the NTP
+prime-epoch conversion; `DfElectionEc::CAP_TIME_SYNC` (`0x1000`) plus
+`time_sync()` / `set_time_sync()` / `with_time_sync()` carry the T
+capability, and both render in `Display` (`sct:<unix>.<micros>`,
+`df-election:alg2:pref100+ac-df+dp+t`). Nothing advertises either yet —
+**deliberately**: RFC 9722 gates synchronized carving on every PE signalling
+T, so a PE that advertised the bit while ignoring SCT would be claiming a
+behaviour it does not have. Phase 4 turns it on together with the
+scheduling. Decoding is already live, because phase 1's `DfCandidate.caps`
+keeps the whole advertised bitmap — a peer's T bit is retained and shown
+today. Era handling is explicit: a seconds field below the prime-epoch
+offset cannot be a real era-0 instant (it would predate 1970), so it reads
+as era 1, which keeps the codec correct across the 2036-02-07 rollover
+instead of jumping 136 years backwards. Proof: 4 SCT tests (wire layout
+against the RFC figure, the 2208988800 epoch constant, the era-1 boundary in
+both directions, the ~15.26 µs quantum with a 10 ms skew surviving it, and a
+parse round trip) plus the T-bit position and its coexistence with AC-DF and
+DP.
 
 Phases 1–2 are pure codec/config and can land in any order. Phase 3 is the
 one that changes forwarding decisions on a remote PE; it is the one to gate
