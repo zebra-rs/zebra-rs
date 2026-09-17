@@ -51,10 +51,19 @@ fn state_str(s: &Session) -> &'static str {
     if s.is_active() { "Active" } else { "Idle" }
 }
 
-/// `min/avg/max (var)` µs, or `-` before the first export.
+/// `min/avg/max (var)` µs, or `-` before the first export. An export
+/// carrying the Anomalous bit is marked `[A]`, matching how the IS-IS
+/// and OSPF LSDB views render the flag on the wire sub-TLVs.
 fn export_str(snap: &Option<MetricSnapshot>) -> String {
     match snap {
-        Some(s) => format!("{}/{}/{}us ({}us)", s.min, s.avg, s.max, s.variation),
+        Some(s) => format!(
+            "{}/{}/{}us ({}us){}",
+            s.min,
+            s.avg,
+            s.max,
+            s.variation,
+            if s.anomalous { " [A]" } else { "" }
+        ),
         None => "-".to_string(),
     }
 }
@@ -183,6 +192,15 @@ fn show_stamp_session(stamp: &Stamp, _args: Args, json: bool) -> Result<String, 
         writeln!(buf, "        State: {}", state_str(s))?;
         writeln!(buf, "        Probe interval: {}ms", s.params.interval_ms)?;
         writeln!(buf, "        Damping period: {}s", s.params.damping_secs)?;
+        match s.params.anomaly.anomaly_us {
+            Some(anomaly) => writeln!(
+                buf,
+                "        Anomaly threshold: {}us (reuse {}us)",
+                anomaly,
+                s.params.anomaly.reuse_us.unwrap_or(anomaly).min(anomaly)
+            )?,
+            None => writeln!(buf, "        Anomaly threshold: not configured")?,
+        }
         writeln!(
             buf,
             "        Uptime: {} second(s)",
@@ -210,6 +228,11 @@ fn show_stamp_session(stamp: &Stamp, _args: Args, json: bool) -> Result<String, 
                 writeln!(buf, "            Max delay: {} usec", e.max)?;
                 writeln!(buf, "            Average delay: {} usec", e.avg)?;
                 writeln!(buf, "            Delay variation: {} usec", e.variation)?;
+                writeln!(
+                    buf,
+                    "            Anomalous: {}",
+                    if e.anomalous { "yes" } else { "no" }
+                )?;
             }
             None => writeln!(buf, "        Last export: none")?,
         }

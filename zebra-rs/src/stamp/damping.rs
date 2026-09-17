@@ -11,6 +11,9 @@
 //!     stale when the peer stops reflecting; the IGP withdraws the
 //!     sub-TLVs and metric-type-1 topologies prune the link
 //!     (RFC 9350 §15), or
+//!   * the Anomalous bit flipped (RFC 8570 §4.1 / RFC 7471 §4.1) —
+//!     a state change the operator asked to be told about, which must
+//!     not be filtered out by the value test below, or
 //!   * any field moved by more than `max(old/10, 50 µs)` against the
 //!     last exported snapshot.
 //!
@@ -58,9 +61,17 @@ impl Damping {
     }
 }
 
-/// Any field moved by more than `max(old/10, 50 µs)`?
+/// Any field moved by more than `max(old/10, 50 µs)` — or did the
+/// Anomalous bit flip?
+///
+/// The bit is checked first and on its own. A link that degrades past
+/// the threshold and then holds steady crosses the movement filter
+/// once, on the way up; every later period looks unchanged, so without
+/// this test the set (or a later clear) could be suppressed by the
+/// very filter that exists to damp value noise.
 fn significant(old: &MetricSnapshot, new: &MetricSnapshot) -> bool {
-    moved(old.min, new.min)
+    old.anomalous != new.anomalous
+        || moved(old.min, new.min)
         || moved(old.max, new.max)
         || moved(old.avg, new.avg)
         || moved(old.variation, new.variation)
@@ -81,7 +92,13 @@ mod tests {
             max,
             avg,
             variation,
+            anomalous: false,
         }
+    }
+
+    fn anomalous(mut s: MetricSnapshot) -> MetricSnapshot {
+        s.anomalous = true;
+        s
     }
 
     #[test]
@@ -139,5 +156,24 @@ mod tests {
         assert!(!d.should_export(None));
         // Peer back: first-export semantics again.
         assert!(d.should_export(Some(snap(1010, 2020, 1510, 101))));
+    }
+
+    /// The bit setting must export even though every value is
+    /// unchanged — the case a pure value filter would swallow.
+    #[test]
+    fn anomalous_transition_exports_without_value_movement() {
+        let mut d = Damping::default();
+        let steady = snap(1000, 1000, 1000, 0);
+        assert!(d.should_export(Some(steady)));
+        assert!(!d.should_export(Some(steady)), "identical snapshot damped");
+        assert!(
+            d.should_export(Some(anomalous(steady))),
+            "A bit set must reach the LSDB"
+        );
+        assert!(!d.should_export(Some(anomalous(steady))));
+        assert!(
+            d.should_export(Some(steady)),
+            "A bit clearing must reach the LSDB too"
+        );
     }
 }

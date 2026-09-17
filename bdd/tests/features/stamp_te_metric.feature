@@ -15,6 +15,11 @@ Feature: STAMP link-delay measurement feeding IGP TE metrics
   values appear as "Min/Max Unidirectional Link Delay" in both LSDBs
   (the OSPF Extended-Link Opaque LSA is gated on segment-routing mpls).
 
+  The later scenarios drive the Anomalous (A) bit: an anomaly-threshold
+  low enough that any real delay crosses it must raise the bit on both
+  IGPs' delay sub-TLVs, and raising the bound again must clear it even
+  though the delay values themselves never moved.
+
   Topology:
 
     st1 (10.61.0.1)                      st2 (10.61.0.2)
@@ -61,6 +66,34 @@ Feature: STAMP link-delay measurement feeding IGP TE metrics
     # RFC 7471 sub-TLV 28 inside the Extended-Link Opaque LSA's ASLA.
     Then show command "show ospf database detail" in namespace "st1" should eventually contain "Min/Max Unidirectional Link Delay"
     And show command "show ospf database detail" in namespace "st2" should eventually contain "Min/Max Unidirectional Link Delay"
+
+  Scenario: A measured delay past the threshold raises the Anomalous bit
+    Given the test topology exists
+    # A 1 us bound is below any real veth round-trip, so the crossing is
+    # deterministic without having to inject latency. Configured on st1
+    # only: st2 is then the receiving side, which proves the flag
+    # survives origination *and* the peer's decode.
+    When I apply command "set router isis interface st1-st2 te-metric measurement anomaly-threshold 1" in namespace "st1"
+    And I apply command "set router ospf area 0.0.0.0 interface st1-st2 te-metric measurement anomaly-threshold 1" in namespace "st1"
+    # IS-IS renders the A bit as "(A)" after the delay units; OSPF spells
+    # it out. Both hang off sub-TLV 34 / 28 in st1's LSP / Opaque LSA.
+    Then show command "show isis database detail" in namespace "st2" should eventually contain "us (A)"
+    And show command "show ospf database detail" in namespace "st2" should eventually contain "(Anomalous)"
+    And show command "show stamp session" in namespace "st1" should eventually contain "Anomalous: yes"
+    # st2 measures the same link but has no threshold, so its own
+    # advertisement stays clear — the bit is per-advertiser, not a
+    # property of the link both ends agree on.
+    And show command "show stamp session" in namespace "st2" should eventually contain "Anomalous: no"
+
+  Scenario: Raising the threshold clears the bit again
+    Given the test topology exists
+    # The damping gate suppresses unchanged values, so this only passes
+    # if the A-bit transition itself forces an export.
+    When I apply command "set router isis interface st1-st2 te-metric measurement anomaly-threshold 10000000" in namespace "st1"
+    And I apply command "set router ospf area 0.0.0.0 interface st1-st2 te-metric measurement anomaly-threshold 10000000" in namespace "st1"
+    Then show command "show isis database detail" in namespace "st2" should eventually not contain "us (A)"
+    And show command "show ospf database detail" in namespace "st2" should eventually not contain "(Anomalous)"
+    And show command "show stamp session" in namespace "st1" should eventually contain "Anomalous: no"
 
   # Pure P2P topology (no bridge): deleting each namespace destroys the
   # veth pair ends it holds, so only the daemons and namespaces need

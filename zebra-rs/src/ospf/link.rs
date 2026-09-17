@@ -152,6 +152,11 @@ pub struct LinkConfig {
 /// microseconds; `loss` is the raw 24-bit RFC 7471 encoding (units of
 /// 0.000003 %). `None` means "not configured / not measured" — the
 /// corresponding sub-TLV is simply not advertised.
+///
+/// Anomalous flags are per sub-TLV, mirroring
+/// `isis::link::LinkTeMetric`: RFC 7471 gives each sub-TLV its own A
+/// bit, and [`Self::merged_over`] can take neighbouring fields from
+/// different sources.
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct LinkTeMetric {
     pub unidirectional_delay: Option<u32>,
@@ -159,30 +164,39 @@ pub struct LinkTeMetric {
     pub max_delay: Option<u32>,
     pub delay_variation: Option<u32>,
     pub loss: Option<u32>,
+    /// A bit for sub-TLV 27 (average delay).
+    pub delay_anomalous: bool,
+    /// A bit for sub-TLV 28 (min/max delay). One bit covers both
+    /// bounds, so it may only be claimed when both were measured.
+    pub min_max_anomalous: bool,
 }
 
 impl LinkTeMetric {
     /// Build the RFC 7471 link-attribute sub-sub-TLVs for the configured
     /// metrics, in ascending code-point order (27/28/29/30). These ride
     /// inside the link's ASLA sub-TLV (RFC 9492) — see
-    /// `flex_algo::build_link_asla`. The anomalous flag is always clear
-    /// for statically-configured values; the dynamic measurement task
-    /// will set it on threshold crossings.
+    /// `flex_algo::build_link_asla`.
+    ///
+    /// The Anomalous flags arrive from the measurement's threshold
+    /// evaluation through [`Self::merged_over`], which clears them for
+    /// statically-configured fields. Delay variation (29) defines no A
+    /// bit; link loss (30) does, but loss is never measured today, so
+    /// it can only be static and static values originate clear.
     ///
     /// The Min/Max sub-TLV (28) is emitted only when *both* bounds are
-    /// configured — a half-populated bound would be a meaningless wire
+    /// present — a half-populated bound would be a meaningless wire
     /// artifact.
     pub fn asla_sub_subs(&self) -> Vec<OspfAslaSubSubTlv> {
         let mut subs = Vec::new();
         if let Some(delay) = self.unidirectional_delay {
             subs.push(OspfAslaSubSubTlv::UniLinkDelay(OspfSubUniLinkDelay {
-                anomalous: false,
+                anomalous: self.delay_anomalous,
                 delay,
             }));
         }
         if let (Some(min_delay), Some(max_delay)) = (self.min_delay, self.max_delay) {
             subs.push(OspfAslaSubSubTlv::MinMaxLinkDelay(OspfSubMinMaxLinkDelay {
-                anomalous: false,
+                anomalous: self.min_max_anomalous,
                 min_delay,
                 max_delay,
             }));
@@ -203,8 +217,11 @@ impl LinkTeMetric {
 
     /// Per-field merge of `self` (static config) over `fallback`
     /// (measured values): a configured field always wins, an
-    /// unconfigured one takes the measurement. Mirrors
-    /// `isis::LinkTeMetric::merged_over`.
+    /// unconfigured one takes the measurement. An Anomalous flag
+    /// survives only onto a sub-TLV whose value came wholly from the
+    /// measurement — a pinned value is an assertion, not an
+    /// observation, and sub-TLV 28's single bit covers both bounds.
+    /// Mirrors `isis::LinkTeMetric::merged_over`.
     pub fn merged_over(&self, fallback: &LinkTeMetric) -> LinkTeMetric {
         LinkTeMetric {
             unidirectional_delay: self.unidirectional_delay.or(fallback.unidirectional_delay),
@@ -212,6 +229,10 @@ impl LinkTeMetric {
             max_delay: self.max_delay.or(fallback.max_delay),
             delay_variation: self.delay_variation.or(fallback.delay_variation),
             loss: self.loss.or(fallback.loss),
+            delay_anomalous: self.unidirectional_delay.is_none() && fallback.delay_anomalous,
+            min_max_anomalous: self.min_delay.is_none()
+                && self.max_delay.is_none()
+                && fallback.min_max_anomalous,
         }
     }
 }
@@ -945,6 +966,7 @@ mod te_metric_tests {
             max_delay: Some(1_200),
             delay_variation: Some(50),
             loss: Some(10),
+            ..Default::default()
         };
         let subs = m.asla_sub_subs();
         assert_eq!(subs.len(), 4);
@@ -1004,6 +1026,7 @@ mod te_metric_tests {
             max_delay: Some(150),
             delay_variation: Some(10),
             loss: None,
+            ..Default::default()
         };
         let effective = config.merged_over(&measured);
         assert_eq!(effective.min_delay, Some(500), "config wins");
@@ -1022,6 +1045,83 @@ mod te_metric_tests {
                 loss: Some(3),
                 ..Default::default()
             }
+        );
+    }
+}
+/// A measured anomaly reaches both delay sub-TLVs; delay variation
+/// has no A bit and loss is static-only, so neither can claim one.
+#[test]
+fn measured_anomaly_sets_both_delay_sub_tlvs() {
+    let measured = LinkTeMetric {
+        unidirectional_delay: Some(2_000),
+        min_delay: Some(1_900),
+        max_delay: Some(2_200),
+        delay_variation: Some(50),
+        loss: None,
+        delay_anomalous: true,
+        min_max_anomalous: true,
+    };
+    let subs = LinkTeMetric::default()
+        .merged_over(&measured)
+        .asla_sub_subs();
+    assert!(
+        matches!(&subs[0], OspfAslaSubSubTlv::UniLinkDelay(v) if v.anomalous),
+        "sub-TLV 27 carries the bit"
+    );
+    assert!(
+        matches!(&subs[1], OspfAslaSubSubTlv::MinMaxLinkDelay(v) if v.anomalous),
+        "sub-TLV 28 carries the bit"
+    );
+}
+
+/// A pinned value is the operator's assertion, not an observation,
+/// so it must originate with the A bit clear even while the
+/// measurement underneath it is anomalous.
+#[test]
+fn static_value_never_originates_anomalous() {
+    let measured = LinkTeMetric {
+        unidirectional_delay: Some(2_000),
+        min_delay: Some(1_900),
+        max_delay: Some(2_200),
+        delay_anomalous: true,
+        min_max_anomalous: true,
+        ..Default::default()
+    };
+    let config = LinkTeMetric {
+        unidirectional_delay: Some(100),
+        ..Default::default()
+    };
+    let effective = config.merged_over(&measured);
+    assert!(!effective.delay_anomalous, "pinned average clears its bit");
+    assert!(
+        effective.min_max_anomalous,
+        "min/max still measured, keeps its own bit"
+    );
+}
+
+/// Sub-TLV 28 carries one A bit for both bounds, so pinning either
+/// bound disqualifies the whole sub-TLV from claiming an anomaly.
+#[test]
+fn one_pinned_bound_clears_the_min_max_bit() {
+    let measured = LinkTeMetric {
+        min_delay: Some(1_900),
+        max_delay: Some(2_200),
+        min_max_anomalous: true,
+        ..Default::default()
+    };
+    for config in [
+        LinkTeMetric {
+            min_delay: Some(100),
+            ..Default::default()
+        },
+        LinkTeMetric {
+            max_delay: Some(300),
+            ..Default::default()
+        },
+    ] {
+        assert!(
+            !config.merged_over(&measured).min_max_anomalous,
+            "a half-static min/max cannot be anomalous"
         );
     }
 }

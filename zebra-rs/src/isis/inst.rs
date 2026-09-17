@@ -2583,6 +2583,11 @@ impl Isis {
                 max_delay: Some(snap.max),
                 delay_variation: Some(snap.variation),
                 loss: None,
+                // One threshold evaluation, applied to both delay
+                // sub-TLVs that define an A bit; `merged_over` drops
+                // it again for any field the operator pinned.
+                delay_anomalous: snap.anomalous,
+                min_max_anomalous: snap.anomalous,
             },
             None => super::link::LinkTeMetric::default(),
         };

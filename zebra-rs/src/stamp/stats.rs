@@ -22,6 +22,12 @@ pub struct MetricSnapshot {
     /// variation" is implementation-defined; consecutive-difference
     /// is the common interpretation and is robust to slow drift).
     pub variation: u32,
+    /// Anomalous (A) bit to originate alongside the delay sub-TLVs.
+    /// [`StatsWindow::snapshot`] cannot decide this — the bounds are
+    /// per-session config and the state is hysteretic — so it leaves
+    /// the field clear and the export tick overwrites it with
+    /// [`Anomaly::evaluate`](super::anomaly::Anomaly::evaluate).
+    pub anomalous: bool,
 }
 
 /// Accumulates samples between export ticks. `sent` / `received`
@@ -74,6 +80,8 @@ impl StatsWindow {
             max,
             avg,
             variation,
+            // Overwritten by the export tick; see the field docs.
+            anomalous: false,
         })
     }
 

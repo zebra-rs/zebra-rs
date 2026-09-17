@@ -581,14 +581,25 @@ impl Stamp {
         session.window.record_delay(delay as u32);
     }
 
-    /// Export timer fired: snapshot the window, run the damping gate,
-    /// fan the update out, start a fresh window.
+    /// Export timer fired: snapshot the window, evaluate the Anomalous
+    /// bit, run the damping gate, fan the update out, start a fresh
+    /// window.
     fn on_export_tick(&mut self, key: SessionKey) {
         let Some(session) = self.sessions.get_mut(&key) else {
             return;
         };
-        let snapshot = session.window.snapshot();
+        let mut snapshot = session.window.snapshot();
         session.window.reset();
+        // The A bit qualifies an advertised value, so it is evaluated
+        // before the damping gate sees the snapshot — the gate treats
+        // a flip as reason enough to export. An empty window exports a
+        // clear instead, withdrawing the sub-TLVs the bit would have
+        // qualified, so the hysteresis state resets with them.
+        let thresholds = session.params.anomaly;
+        match &mut snapshot {
+            Some(snap) => snap.anomalous = session.anomaly.evaluate(snap.avg, thresholds),
+            None => session.anomaly.reset(),
+        }
         if !session.damping.should_export(snapshot) {
             return;
         }
