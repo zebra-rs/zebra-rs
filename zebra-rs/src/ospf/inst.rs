@@ -977,11 +977,13 @@ impl<V: OspfVersion> Ospf<V> {
                 max_delay: Some(snap.max),
                 delay_variation: Some(snap.variation),
                 loss: None,
-                // One threshold evaluation, applied to both delay
-                // sub-TLVs that define an A bit; `merged_over` drops
-                // it again for any field the operator pinned.
-                delay_anomalous: snap.anomalous,
-                min_max_anomalous: snap.anomalous,
+                // Per-value flags: the average drives its own
+                // sub-TLV, the two bounds jointly drive the Min/Max
+                // sub-TLV's single bit. `merged_over` drops whichever
+                // of them the operator pinned.
+                delay_anomalous: snap.anomaly.avg,
+                min_anomalous: snap.anomaly.min,
+                max_anomalous: snap.anomaly.max,
             },
             None => super::link::LinkTeMetric::default(),
         };

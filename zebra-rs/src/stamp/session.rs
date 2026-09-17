@@ -18,7 +18,7 @@ use tokio::io::unix::AsyncFd;
 
 use crate::context::Task;
 
-use super::anomaly::{Anomaly, AnomalyThresholds};
+use super::anomaly::AnomalyThresholds;
 use super::damping::Damping;
 use super::stats::{MetricSnapshot, StatsWindow};
 
@@ -45,10 +45,14 @@ pub struct SessionParams {
     /// Destination UDP port. Production sessions probe the well-known
     /// STAMP port (862); tests aim at an instance's ephemeral port.
     pub dst_port: u16,
-    /// Bounds for the Anomalous bit the IGPs originate. A change here
-    /// takes effect at the next export tick — `update_params` retunes
-    /// a live session rather than rebuilding it, so the sample window
-    /// and the current A-bit state both survive the edit.
+    /// Bounds for the Anomalous bit this subscriber originates.
+    ///
+    /// Unlike the timing fields above, this is **not** applied to the
+    /// shared session: it is stored per subscriber (see
+    /// [`Subscriber`](super::client::Subscriber)), because each IGP
+    /// configures it separately and one must not overwrite the other.
+    /// It rides in `SessionParams` so the IGP-side reconcile diff
+    /// still notices a threshold-only config change and re-subscribes.
     pub anomaly: AnomalyThresholds,
 }
 
@@ -138,10 +142,6 @@ pub struct Session {
     pub reflected_count: u64,
     pub window: StatsWindow,
     pub damping: Damping,
-    /// Hysteresis state behind `MetricSnapshot::anomalous`. Held per
-    /// session (not per subscriber) so both IGPs measuring one link
-    /// advertise the same bit.
-    pub anomaly: Anomaly,
     /// Last snapshot actually exported to subscribers (`None` before
     /// the first export or after a clear). Mirrored to late
     /// subscribers and rendered by `show stamp`.
@@ -175,7 +175,6 @@ impl Session {
             reflected_count: 0,
             window: StatsWindow::default(),
             damping: Damping::default(),
-            anomaly: Anomaly::default(),
             last_export: None,
             last_rx: None,
             created: Instant::now(),
