@@ -61,7 +61,10 @@ Carriers:
 
 - **IS-IS:** Extended IS Reachability TLV 22 (also 141, 222, 223)
 - **OSPFv2:** TE Opaque LSA, Link TLV
-- **OSPFv3:** Intra-Area-TE-LSA, Link TLV
+- **OSPFv3:** Intra-Area-TE-LSA, Link TLV (RFC 5329). zebra-rs does not
+  use this carrier: it advertises the metrics in the ASLA of the RFC 8362
+  E-Router-LSA Router-Link TLV, at the OSPFv3 Extended-LSA sub-TLV code
+  points 13-16 rather than OSPFv2's 27-30.
 - **Application-specific:** ASLA (RFC 8919 / RFC 8920) so Flex-Algo, RSVP-TE, and SR-MPLS can take different attributes from the same link
 
 RFC 8570/7471 **do not** specify the probe protocol. Juniper still documents TWAMP-Light for this; STAMP ([RFC 8762](https://datatracker.ietf.org/doc/html/rfc8762) + [RFC 8972](https://datatracker.ietf.org/doc/html/rfc8972)) is the interoperable replacement. Unauthenticated STAMP can interwork with TWAMP Light.
