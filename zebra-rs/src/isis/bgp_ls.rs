@@ -167,6 +167,11 @@ fn perf_tlvs(m: &PerfMetrics<'_>) -> Vec<BgpLsAttrTlv> {
     out
 }
 
+/// Does this mask select any application at all?
+fn has_bits(mask: &[u8]) -> bool {
+    mask.iter().any(|b| *b != 0)
+}
+
 /// Clear the RSVP-TE bit from a SABM copy. RFC 9294 §4 rule 2(B) sends
 /// RSVP-TE attributes to the top-level TLVs "rather than the ASLA TLV",
 /// so the scoped copy carries only the remaining applications.
@@ -221,10 +226,22 @@ fn push_te_performance(attr: &mut BgpLsAttr, e: &IsisTlvExtIsReachEntry) {
                 attr.push(tlv.typ, tlv.value.clone());
             }
         }
-        // What is left once RSVP-TE has been peeled off. All-zero masks
-        // with nothing user-defined mean the ASLA was RSVP-TE-only.
+        // What is left once RSVP-TE has been peeled off. Skip the ASLA
+        // TLV only when stripping that bit is what emptied the mask —
+        // i.e. the advertisement was RSVP-TE-only, and rule 2(B) has
+        // already placed it top-level.
+        //
+        // A mask that was empty to begin with is a different thing: a
+        // zero-length mask means "any application with no more specific
+        // advertisement" (RFC 9479 §4.2), and zero is itself one of the
+        // lengths BGP-LS defines, so it round-trips as-is. Testing
+        // `all(|b| *b == 0)` alone conflated the two, because that is
+        // vacuously true of an empty mask, and dropped every
+        // any-application metric on the floor.
         let scoped_sabm = sabm_without_rsvp_te(&asla.sabm);
-        if scoped_sabm.iter().all(|b| *b == 0) && asla.udabm.iter().all(|b| *b == 0) {
+        let had_bits = has_bits(&asla.sabm) || has_bits(&asla.udabm);
+        let keeps_bits = has_bits(&scoped_sabm) || has_bits(&asla.udabm);
+        if had_bits && !keeps_bits {
             continue;
         }
         attr.push(
@@ -905,6 +922,49 @@ mod tests {
                 ]
             );
         }
+    }
+
+    /// A zero-length mask is not an empty mask: RFC 9479 §4.2 defines it
+    /// as "any application with no more specific advertisement", and
+    /// zero is one of the lengths BGP-LS accepts. The ASLA TLV must
+    /// carry it through with both lengths zero.
+    #[test]
+    fn zero_length_mask_asla_is_preserved_in_tlv_1122() {
+        let entry = entry_with(vec![asla_sub(vec![], false, vec![min_max_sub(0x384)])]);
+        let attr = link_attr(&entry);
+        assert_eq!(
+            attr.get(BGPLS_ATTR_MIN_MAX_LINK_DELAY),
+            None,
+            "it is still a scoped advertisement, not a legacy one"
+        );
+        assert_eq!(
+            attr.get(BGPLS_ATTR_ASLA),
+            Some(
+                &[
+                    0x00, 0x00, 0x00, 0x00, // both lengths zero, reserved
+                    0x04, 0x5b, 0x00, 0x08, // nested TLV 1115, length 8
+                    0x00, 0x00, 0x03, 0x84, 0x00, 0x00, 0x04, 0x84,
+                ][..]
+            )
+        );
+    }
+
+    /// The same holds for a zero-length-mask ASLA whose attributes come
+    /// from the legacy advertisements.
+    #[test]
+    fn zero_length_mask_asla_with_l_flag_carries_the_legacy_value() {
+        let entry = entry_with(vec![min_max_sub(0x2bc), asla_sub(vec![], true, vec![])]);
+        let asla = link_attr(&entry)
+            .get(BGPLS_ATTR_ASLA)
+            .expect("any-application scope preserved")
+            .to_vec();
+        assert_eq!(&asla[..4], &[0x00, 0x00, 0x00, 0x00]);
+        assert_eq!(
+            &asla[4..],
+            &[
+                0x04, 0x5b, 0x00, 0x08, 0x00, 0x00, 0x02, 0xbc, 0x00, 0x00, 0x03, 0xbc
+            ]
+        );
     }
 
     /// Legacy inline attributes carry no application scope, so they are
