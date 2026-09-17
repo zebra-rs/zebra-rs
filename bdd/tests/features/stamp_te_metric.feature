@@ -95,11 +95,33 @@ Feature: STAMP link-delay measurement feeding IGP TE metrics
     # ... and IS-IS keeps its own.
     And show command "show isis database detail" in namespace "st2" should eventually contain "us (A)"
 
+  Scenario: An unrelated timing edit must not clear a standing anomaly
+    Given the test topology exists
+    # Widen the band so the measured delay sits between the reuse and
+    # anomaly bounds. The bit is already set from the scenarios above,
+    # and the rule inside the band is "hold whatever it was".
+    When I apply command "set router isis interface st1-st2 te-metric measurement reuse-threshold 1" in namespace "st1"
+    And I apply command "set router isis interface st1-st2 te-metric measurement anomaly-threshold 10000000" in namespace "st1"
+    # A full damping period plus flooding, so a lost hysteresis state
+    # shows up as a cleared bit here instead of being masked by the
+    # LSP the previous scenario left in the database.
+    And I wait 6 seconds
+    Then show command "show isis database detail" in namespace "st2" should eventually contain "us (A)"
+    # Now edit something that is not policy at all. The reconcile used
+    # to unsubscribe and resubscribe on any params change, which threw
+    # the hysteresis away and resolved the hold to "clear" without the
+    # delay ever dropping below the reuse bound.
+    When I apply command "set router isis interface st1-st2 te-metric measurement interval 200" in namespace "st1"
+    And I wait 6 seconds
+    Then show command "show isis database detail" in namespace "st2" should eventually contain "us (A)"
+    And show command "show stamp session" in namespace "st1" should eventually contain "Anomalous: avg yes"
+
   Scenario: Raising the thresholds clears the bits again
     Given the test topology exists
     # The damping gate suppresses unchanged values, so this only passes
     # if the A-bit transition itself forces an export.
-    When I apply command "set router isis interface st1-st2 te-metric measurement anomaly-threshold 10000000" in namespace "st1"
+    When I apply command "delete router isis interface st1-st2 te-metric measurement reuse-threshold" in namespace "st1"
+    And I apply command "set router isis interface st1-st2 te-metric measurement anomaly-threshold 10000000" in namespace "st1"
     And I apply command "set router ospf area 0.0.0.0 interface st1-st2 te-metric measurement anomaly-threshold 10000000" in namespace "st1"
     Then show command "show isis database detail" in namespace "st2" should eventually not contain "us (A)"
     And show command "show ospf database detail" in namespace "st2" should eventually not contain "(Anomalous)"

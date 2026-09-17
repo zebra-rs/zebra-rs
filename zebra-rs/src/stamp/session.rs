@@ -142,10 +142,15 @@ pub struct Session {
     pub reflected_count: u64,
     pub window: StatsWindow,
     pub damping: Damping,
-    /// Last snapshot actually exported to subscribers (`None` before
-    /// the first export or after a clear). Mirrored to late
-    /// subscribers and rendered by `show stamp`.
-    pub last_export: Option<MetricSnapshot>,
+    /// The most recent window's values — `None` before the first
+    /// window and after any empty one. Updated every export tick,
+    /// independently of whether the damping gate passed those values
+    /// on: a subscriber joining mid-session has to be seeded from what
+    /// the link is doing *now*, and its Anomalous bits evaluated
+    /// against that, not against whatever last cleared the filter. The
+    /// filter's own baseline lives in [`Damping`]. Rendered by
+    /// `show stamp`.
+    pub last_snapshot: Option<MetricSnapshot>,
     pub last_rx: Option<Instant>,
     pub created: Instant,
     /// Reply read task; aborted when the session drops.
@@ -175,7 +180,7 @@ impl Session {
             reflected_count: 0,
             window: StatsWindow::default(),
             damping: Damping::default(),
-            last_export: None,
+            last_snapshot: None,
             last_rx: None,
             created: Instant::now(),
             _read_task: read_task,

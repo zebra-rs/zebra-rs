@@ -56,7 +56,8 @@ impl Damping {
     }
 
     /// Test-only introspection of the comparison basis (production
-    /// readers use `Session::last_export`, which mirrors it).
+    /// readers want `Session::last_snapshot`, which is the freshest
+    /// observation rather than this filter's baseline).
     #[cfg(test)]
     pub fn last(&self) -> Option<&MetricSnapshot> {
         self.last.as_ref()

@@ -39,5 +39,6 @@ Topology:
 | OSPFv2 advertises the measured link delay | |
 | An IS-IS-only threshold raises the bit on IS-IS alone | |
 | Configuring OSPF's own threshold raises its bit too | |
+| An unrelated timing edit must not clear a standing anomaly | |
 | Raising the thresholds clears the bits again | |
 | Teardown topology | |

@@ -925,10 +925,15 @@ impl<V: OspfVersion> Ospf<V> {
             return false;
         }
         let stale = link.stamp_session;
+        // Unsubscribe only when the subscription really ends or moves
+        // to a different key; a params-only edit re-subscribes in
+        // place so this client's anomaly hysteresis survives it. See
+        // the IS-IS twin for the reasoning.
+        let torn_down = stale.is_some_and(|(key, _)| desired.map(|(k, _)| k) != Some(key));
         let Some(client_tx) = self.stamp_client_tx.as_ref() else {
             return false;
         };
-        if let Some((key, _)) = stale {
+        if torn_down && let Some((key, _)) = stale {
             let _ = client_tx.send(crate::stamp::client::ClientReq::Unsubscribe {
                 client: V::PROTO.to_string(),
                 key,
@@ -948,8 +953,9 @@ impl<V: OspfVersion> Ospf<V> {
         link.stamp_session = desired;
         // A torn-down session's measured values are stale the moment
         // the subscription ends — clear them; static config (if any)
-        // takes back over via `te_metric_effective`.
-        if stale.is_some() && link.measured_te_metric != super::link::LinkTeMetric::default() {
+        // takes back over via `te_metric_effective`. A params-only
+        // edit keeps measuring, so its values stand.
+        if torn_down && link.measured_te_metric != super::link::LinkTeMetric::default() {
             link.measured_te_metric = super::link::LinkTeMetric::default();
             return true;
         }
