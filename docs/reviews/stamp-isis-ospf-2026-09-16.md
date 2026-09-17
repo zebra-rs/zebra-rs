@@ -99,7 +99,7 @@ Session targets come from IGP adjacency state instead — interface/neighbor add
 
 - **Flex-Algo min-delay:** implemented on both IGPs, as described above.
 - **Flex-Algo link loss:** [draft-ietf-lsr-flex-algo-link-loss](https://datatracker.ietf.org/doc/html/draft-ietf-lsr-flex-algo-link-loss) is not implemented; there is no loss-threshold exclusion in either Flex-Algo graph builder, and loss is not measured in the first place.
-- **BGP-LS:** the [IS-IS BGP-LS translation](../../zebra-rs/src/isis/bgp_ls.rs) builds link attributes for IGP metric, admin-group, extended admin-group, and TE default metric only. The [RFC8571](https://www.rfc-editor.org/rfc/rfc8571.html) performance TLVs (unidirectional delay, min/max delay, delay variation, link loss) have no attribute constants and are never emitted, so measured delay is not exportable to a PCE or controller.
+- **BGP-LS (updated 2026-09-16):** the [IS-IS BGP-LS translation](../../zebra-rs/src/isis/bgp_ls.rs) now supports RFC8571 performance TLVs 1114–1120 and RFC9294 application-specific attributes in TLV 1122. These attributes reach the local BGP-LS RIB. Transmission to external BGP-LS peers remains unimplemented in [`route_bgpls_originate`](../../zebra-rs/src/bgp/route.rs), so delivery to a PCE or controller is still unverified. The BDD topology checks remote IS-IS flooding followed by local translation, not BGP UPDATE delivery; see the [BGP-LS review](bgp-ls-te-performance-2026-09-16.md).
 - **SR path PM:** the [STAMP TLV framework](../../crates/stamp-packet/src/tlv.rs) and [return path encoding](../../crates/stamp-packet/src/return_path.rs) implement the RFC8972 TLV shape plus the RFC9503 Destination Node Address and Return Path TLVs, but no daemon code constructs them. This is codec-only support with no path-measurement driver.
 - **RSVP-TE / SR-TE CSPF:** not applicable; there is no CSPF consumer in this codebase.
 
@@ -132,9 +132,9 @@ Design decisions to settle first:
 
 Anomaly-driven IGP/TE cost fallback is a routing action outside both RFCs; it belongs in a follow-on, once the bit is trustworthy.
 
-### 2. BGP-LS performance TLVs
+### 2. BGP-LS performance TLVs — LOCAL TRANSLATION DELIVERED; PEER TRANSMISSION PENDING
 
-Cheapest high-value item and independent of the rest, so it can proceed in parallel. [`link_attr`](../../zebra-rs/src/isis/bgp_ls.rs) already translates IGP metric, admin-group, extended admin-group and TE default metric; adding the [RFC8571](https://www.rfc-editor.org/rfc/rfc8571.html) delay/loss TLVs (1114–1117) is mechanical and needs no configuration. This is what makes measured data reachable by a PCE or controller.
+The performance TLVs and application-specific translation are implemented in [`link_attr`](../../zebra-rs/src/isis/bgp_ls.rs). The remaining step for controller delivery is outbound BGP-LS advertisement to external peers. Validate that path by receiving BGP UPDATEs on a peer and decoding the performance attributes and TLV 1122 application masks. Local RIB display and IS-IS round-trip tests do not establish controller delivery.
 
 ### 3. OSPFv3 TE metrics
 

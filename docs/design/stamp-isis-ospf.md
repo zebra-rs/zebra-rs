@@ -4,6 +4,8 @@ STAMP is **not** carried inside IS-IS or OSPF packets. The IGP stays the distrib
 
 There are three layers. You can deploy A today; B is the IETF discovery work; C is how routing actually uses the numbers.
 
+**Current BGP-LS implementation status (2026-09-16):** IS-IS performance attributes are translated into the local BGP-LS RIB, including RFC 8571 TLVs 1114–1120 and application-specific attributes in RFC 9294 TLV 1122. Transmission to external BGP-LS peers remains unimplemented: [`route_bgpls_originate`](../../zebra-rs/src/bgp/route.rs) stores locally originated routes but defers re-advertisement. Delivery to a PCE or controller is therefore still unverified. The BDD topology exercises remote IS-IS flooding and local BGP-LS translation; it does not verify BGP UPDATE delivery. The architecture below describes the intended integration. See the [BGP-LS review](../reviews/bgp-ls-te-performance-2026-09-16.md) for validation details.
+
 ## Architecture
 
 ```mermaid
