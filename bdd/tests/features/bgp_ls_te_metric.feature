@@ -148,6 +148,23 @@ Feature: BGP-LS carries the IS-IS TE performance metrics
     # the summary — the same "+2 more" the originator shows.
     And show command "show bgp link-state" in namespace "lsc" should eventually contain "+2 more"
 
+  Scenario: An outbound deny withdraws what was already advertised
+    Given the test topology exists
+    # Bind a policy whose only clause denies unconditionally. The
+    # collector already holds the topology, so honouring the edit means
+    # taking it back — not merely declining to send it again. Before
+    # the Adj-RIB-Out existed, an accepted deny left the feed in place
+    # until the session reset.
+    When I apply command "set policy DENYALL entry 10 action deny" in namespace "ls1"
+    And I apply command "set router bgp neighbor 192.168.73.2 afi-safi link-state policy out DENYALL" in namespace "ls1"
+    Then show command "show bgp link-state" in namespace "lsc" should eventually contain "no link-state objects"
+
+  Scenario: Removing the deny restores the feed
+    Given the test topology exists
+    When I apply command "delete router bgp neighbor 192.168.73.2 afi-safi link-state policy out" in namespace "ls1"
+    Then show command "show bgp link-state" in namespace "lsc" should eventually contain "min/max-delay 900/1200us"
+    And show command "show bgp link-state" in namespace "lsc" should eventually contain "from 192.168.73.1"
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "ls1"

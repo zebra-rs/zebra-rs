@@ -1,10 +1,90 @@
 # BGP-LS feed review
 
+## Resolution — second round
+
+R1, R2 and R3 are fixed. All three came back to the same absence: there
+was no Adj-RIB-Out for BGP-LS, so nothing knew what a peer currently
+held and every correction had to be phrased as "don't send it again".
+
+| # | Finding | Fix |
+|---|---|---|
+| R1 | Permit-to-deny never withdrew | `peer.adj_out.bgp_ls` is now populated on every send and drained on every withdraw; `route_sync_bgpls` reconciles held-against-eligible and withdraws the difference |
+| R2 | Permit ignored match and set actions | `policy_list_apply_bgpls` / `entry_matches_bgpls`, modelled on the EVPN pair: the common attribute matches and every set action apply |
+| R3 | Oversized replacement left stale state | An oversized object whose NLRI the peer already holds is withdrawn, so the collector cannot keep a copy that can never be corrected |
+
+The correction R1 makes to the previous resolution note is accepted: I
+wrote that a permit-to-deny edit "takes effect on the next refresh or
+delta", and for an object already sent that was simply wrong — a refresh
+re-sent the permitted set and said nothing about the rest.
+
+On R2's scope: the matcher takes the common BGP attribute clauses
+(communities, ext/large communities, AS-path set, MED, LOCAL_PREF,
+ORIGIN) and rejects the entry for anything needing context this family
+does not have — a prefix set, the EVPN discriminators, a non-zero tag.
+Those fail the entry rather than being skipped, because skipping is what
+turns `match prefix-set X deny` into a table-wide deny; the EVPN matcher
+documents the same trap for `match tag`. A descriptor-specific matcher
+remains a separate feature.
+
+The `adj_out` entries exist to answer "does the peer hold this", so they
+carry the advertised attribute and no path-selection state.
+
+Gated by two new scenarios: an unconditional deny bound while the
+collector already holds the topology must empty its RIB, and removing
+the binding must restore it — on a stable LSDB, with no session reset.
+Mutation-tested: dropping the reconcile's withdraw loop fails the deny
+scenario.
+
+Not addressed: a wire-visible set action and an attribute-only match
+have unit-level support but no BDD scenario, and the small-to-oversized
+transition is exercised only by the reviewer's probe, since the BDD
+topology produces nothing near the limit.
+
+## Current re-review: `9014602a`
+
+Reviewed `9014602a` on 2026-09-17. Peer-specific AS_PATH/LOCAL_PREF construction and Route Refresh replay are implemented in both advertisement paths. Oversized UPDATEs are no longer returned to the sender. Outbound filtering is partially implemented; three functional findings remain below. Implementation source was not changed. The original review and implementation author's resolution notes are retained below as history.
+
+### R1. P1 — Permit-to-deny changes never withdraw the existing feed
+
+Location: [route.rs](../../zebra-rs/src/bgp/route.rs), `bgpls_origin_reach` and `route_sync_bgpls`, their `bgpls_policy_out` rejection branches.
+
+Both paths simply continue when the policy denies. There is no per-peer advertised-object tracking or withdrawal for an object that previously passed. Reproduction: allow an initial topology dump, attach an unconditional deny-all outbound policy, and request soft-out or Route Refresh. Every object is skipped, but the collector receives no MP_UNREACH and keeps the previously advertised topology. Subsequent denied IGP attribute deltas also do not remove it. Only a real producer withdrawal or session teardown removes that copy.
+
+The resolution note's statement that a permit-to-deny edit takes effect on the next refresh or delta is therefore incorrect for objects already sent. Track accepted objects per peer and reconcile the previously advertised set against the currently eligible set, sending withdrawals for newly denied objects. Verify permit-to-deny and deny-to-permit edits on a stable LSDB without resetting the session.
+
+### R2. P2 — An unconditional permit ignores its attribute actions
+
+Location: [route.rs](../../zebra-rs/src/bgp/route.rs), `bgpls_policy_out`, `PolicyAction::Permit => Some(attr)`.
+
+The evaluator returns the attribute unchanged rather than applying the policy entry's set actions. An unconditional permit with `set origin`, MED, communities, or AS-path prepend therefore permits the feed but does not perform the configured transformation. This is independent of Link-State descriptor matching: the function already has a BGP attribute context and `bgpls_egress_attr` has already populated ORIGIN/AS_PATH and internal LOCAL_PREF.
+
+Likewise, ordinary attribute match clauses such as `match origin igp` or AS-path length are skipped merely because they are conditional, even though the required data is available. A descriptor-specific matcher can remain a separate feature, but absent IP-prefix context does not make BGP path attributes unavailable. Apply supported attribute match/set behavior and explicitly reject unsupported policy forms rather than silently accepting misleading configuration. Verify an unconditional permit with a wire-visible set action and an attribute-only match, in both delta and synchronization paths.
+
+### R3. P2 — An oversized replacement leaves stale attributes on the collector
+
+Location: [update.rs](../../crates/bgp-packet/src/update.rs), `pop_bgpls`, the `oversize` return; [route.rs](../../zebra-rs/src/bgp/route.rs), callers that send only when serialization returns `Some`.
+
+The size guard prevents illegal framing, but silently drops and drains the reachable object. If the same NLRI was previously advertised with a smaller attribute, an oversized replacement sends neither updated reachability nor a withdrawal. The collector keeps its obsolete metric/attribute view while the producer's local RIB contains the new view. The IGP producer's diff has already advanced after delivering the delta to BGP, so an unchanged LSDB will not retry it. Refresh attempts also drop the oversized replacement and leave the old copy intact.
+
+A temporary probe linked to the actual packet library emitted a small Node advertisement, then supplied the same NLRI with a 5000-byte BGP-LS TLV under a 4096-byte limit. The replacement returned `None` and its NLRI queue was empty; no withdrawal was generated. This establishes builder behavior, with stale remote state inferred from the checked caller paths. The synthetic object is larger than those in the current small BDD topology.
+
+Return a distinct serialization error and reconcile previously advertised state. Choose a size-safe advertisement strategy or withdraw an unsendable object that was previously sent, so the collector cannot retain the old values indefinitely. [RFC9552 section 5.3](https://www.rfc-editor.org/rfc/rfc9552.html#section-5.3) permits producer mitigation mechanisms; silently retaining obsolete remote state does not establish an accurate feed. Verify small-to-oversized-to-small transitions without a session reset.
+
+### Re-review validation
+
+- `cargo test -p zebra-rs --bin zebra-rs bgp_ls`: 23 passed.
+- `cargo test -p bgp-packet bgpls`: 20 passed.
+- Temporary probe: small advertisement serialized; oversized replacement returned `None` and drained the NLRI.
+- `git diff --check 09b6fc6f HEAD`: passed.
+- BDD was inspected, not run during this re-review. The collector now uses external AS 65072 with first-AS enforcement; the commit's reported mutation-test result was not independently reproduced here.
+
+## Original review: `09b6fc6f`
+
 Reviewed `09b6fc6fc5b5a5a39c8fcc19f3b2c6e15c1be995` on 2026-09-17. Scope: IS-IS producer delivery, local origination, initial synchronization, per-peer UPDATE construction, receive/withdraw handling, and collector coverage. Implementation source was not changed.
 
 ## Resolution
 
-All four findings are fixed on branch `bgp-ls-egress`.
+Implementation author's resolution notes for `9014602a` follow. The current re-review above supersedes the claim that all four findings are fully resolved.
 
 | # | Finding | Fix |
 |---|---|---|

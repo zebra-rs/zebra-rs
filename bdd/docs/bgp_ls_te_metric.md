@@ -62,4 +62,6 @@ Topology:
 | The BGP-LS session comes up | |
 | The collector learns the topology over BGP | |
 | The RFC 8571 attributes survive the BGP wire | |
+| An outbound deny withdraws what was already advertised | |
+| Removing the deny restores the feed | |
 | Teardown topology | |

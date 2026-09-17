@@ -11277,45 +11277,145 @@ fn bgpls_policy_out(peer: &mut Peer, attr: BgpAttr) -> Option<BgpAttr> {
         // asked for a filter and we cannot honour it.
         return None;
     };
-    // No prefix context, so only an unconditional clause is meaningful:
-    // the first entry that matches everything decides. A policy whose
-    // clauses all carry match conditions has nothing to say about a
-    // Link-State object and falls through to the implicit deny, as it
-    // would for any NLRI it does not match.
+    policy_list_apply_bgpls(policy_list, attr, peer.router_id)
+}
+
+/// Evaluate an outbound policy against a Link-State object, the SAFI-71
+/// twin of [`policy_list_apply_evpn`]. Attribute matches and set
+/// actions work exactly as they do for every other family; what cannot
+/// work is anything needing a prefix, since a Link-State NLRI is a
+/// descriptor set. Those clauses fail the entry rather than being
+/// skipped — skipping would make `match prefix X deny` a table-wide
+/// deny, the same trap the EVPN matcher documents for `match tag`.
+fn policy_list_apply_bgpls(
+    policy_list: &PolicyList,
+    attr: BgpAttr,
+    local_addr: Ipv4Addr,
+) -> Option<BgpAttr> {
+    use crate::policy::{PolicyAction, SetNextHop};
+    let mut decision = PolicyDecision {
+        attr,
+        weight: 0,
+        tag: 0,
+    };
     for entry in policy_list.entry.values() {
-        if !bgpls_entry_matches_everything(entry) {
+        if !entry_matches_bgpls(entry, &decision.attr) {
             continue;
         }
-        return match entry.action {
-            crate::policy::PolicyAction::Permit => Some(attr),
-            crate::policy::PolicyAction::Deny => None,
-            crate::policy::PolicyAction::Next => continue,
-        };
+        match entry.action {
+            PolicyAction::Deny => return None,
+            PolicyAction::Permit | PolicyAction::Next => {
+                if let Some(action) = &entry.local_pref {
+                    let current = decision
+                        .attr
+                        .local_pref
+                        .as_ref()
+                        .map(|l| l.local_pref)
+                        .unwrap_or(0);
+                    decision.attr.local_pref = Some(LocalPref::new(action.apply(current)));
+                }
+                if let Some(action) = &entry.med {
+                    let current = decision.attr.med.as_ref().map(|m| m.med).unwrap_or(0);
+                    decision.attr.med = Some(Med {
+                        med: action.apply(current),
+                    });
+                }
+                if let Some(cfg) = &entry.set_community {
+                    apply_set_community(&mut decision.attr, cfg);
+                }
+                if let Some(cfg) = &entry.set_ext_community {
+                    apply_set_ext_community(&mut decision.attr, cfg);
+                }
+                if let Some(cfg) = &entry.set_large_community {
+                    apply_set_large_community(&mut decision.attr, cfg);
+                }
+                if let Some(prepend) = &entry.set_as_path_prepend {
+                    apply_set_as_path_prepend(&mut decision.attr, prepend);
+                }
+                if let Some(nh) = &entry.set_next_hop {
+                    // As for EVPN: the BGP-LS next hop travels in
+                    // MP_REACH, so this has no wire effect today and is
+                    // honoured for parity.
+                    match nh {
+                        SetNextHop::Address(IpAddr::V4(addr)) => {
+                            decision.attr.nexthop = Some(BgpNexthop::Ipv4(*addr));
+                        }
+                        SetNextHop::Address(IpAddr::V6(_)) => {}
+                        SetNextHop::SelfAddr => {
+                            decision.attr.nexthop = Some(BgpNexthop::Ipv4(local_addr));
+                        }
+                    }
+                }
+                if let Some(origin) = entry.set_origin {
+                    decision.attr.origin = Some(origin);
+                }
+                if entry.action == PolicyAction::Permit {
+                    return Some(decision.attr);
+                }
+            }
+        }
     }
     None
 }
 
-/// True when a policy entry carries no match conditions, so it applies
-/// to every route regardless of family. Only such an entry can decide a
-/// Link-State object, which has no prefix, communities or AS path for
-/// the other clauses to test.
-fn bgpls_entry_matches_everything(entry: &crate::policy::PolicyEntry) -> bool {
-    entry.prefix_set_name.is_none()
-        && entry.community_set_name.is_none()
-        && entry.ext_community_set_name.is_none()
-        && entry.large_community_set_name.is_none()
-        && entry.as_path_set_name.is_none()
-        && entry.match_next_hop.is_none()
-        && entry.match_med.is_none()
-        && entry.match_as_path_len.is_none()
-        && entry.match_as_path_len_uniq.is_none()
-        && entry.match_local_pref.is_none()
-        && entry.match_weight.is_none()
-        && entry.match_origin.is_none()
-        && entry.match_evpn_route_type.is_none()
-        && entry.match_evpn_vni.is_none()
-        && entry.match_color.is_none()
-        && entry.match_tag.is_none()
+/// Match evaluator for a Link-State object: the common BGP attribute
+/// clauses, and nothing that needs an NLRI this family does not have.
+fn entry_matches_bgpls(entry: &crate::policy::PolicyEntry, bgp_attr: &BgpAttr) -> bool {
+    // No prefix, no EVPN discriminators, no tag. A clause naming any of
+    // them cannot be satisfied, so the entry does not apply.
+    if entry.prefix_set_name.is_some()
+        || entry.match_evpn_route_type.is_some()
+        || entry.match_evpn_vni.is_some()
+    {
+        return false;
+    }
+    if let Some(want) = entry.match_tag
+        && want != 0
+    {
+        return false;
+    }
+    if let Some(set) = &entry.community_set
+        && !set.matches(bgp_attr)
+    {
+        return false;
+    }
+    if let Some(set) = &entry.ext_community_set
+        && !set.matches(bgp_attr)
+    {
+        return false;
+    }
+    if let Some(set) = &entry.large_community_set
+        && !set.matches(bgp_attr)
+    {
+        return false;
+    }
+    if let Some(set) = &entry.as_path_set
+        && !set.matches(bgp_attr)
+    {
+        return false;
+    }
+    if let Some(m) = &entry.match_med {
+        let med = bgp_attr.med.as_ref().map(|m| m.med).unwrap_or(0);
+        if !m.matches(med) {
+            return false;
+        }
+    }
+    if let Some(m) = &entry.match_local_pref {
+        let lp = bgp_attr
+            .local_pref
+            .as_ref()
+            .map(|l| l.local_pref)
+            .unwrap_or(0);
+        if !m.matches(lp) {
+            return false;
+        }
+    }
+    if let Some(want) = entry.match_origin
+        && bgp_attr.origin != Some(want)
+    {
+        return false;
+    }
+    true
 }
 
 /// The egress copy of a locally originated BGP-LS attribute for one
@@ -11353,80 +11453,144 @@ fn bgpls_egress_attr(peer: &Peer, base: &BgpAttr) -> BgpAttr {
 /// hop informational — nothing is forwarded toward it — but the field
 /// is mandatory in MP_REACH, and the router-id is the value a consumer
 /// can correlate with the Node NLRI we also advertise.
+/// Send one Link-State object to `peer` and record it in the peer's
+/// Adj-RIB-Out, so a later policy change or producer withdrawal knows
+/// the peer holds it.
+///
+/// An oversized object cannot be framed legally (see `pop_bgpls`). If
+/// the peer already holds an earlier, smaller version of it, that copy
+/// is withdrawn: leaving it would be state we can never correct, since
+/// every future attempt to replace it is the same illegal message
+/// (RFC 9552 §5.3).
+fn bgpls_send_reach(peer: &mut Peer, nhop: IpAddr, nlri: &BgpLsNlri, attr: BgpAttr) {
+    let mut update = peer.update_packet();
+    update.mp_update = Some(MpReachAttr::LinkState {
+        nhop,
+        updates: vec![nlri.clone()],
+    });
+    update.bgp_attr = Some(attr.clone());
+    match update.pop_bgpls() {
+        Some(bytes) => {
+            if let Some(ref tx) = peer.packet_tx {
+                let _ = tx.send(bytes);
+            }
+            let rib = BgpRib::new(
+                peer.ident,
+                peer.router_id,
+                BgpRibType::Originated,
+                0,
+                0,
+                &attr,
+                None,
+                None,
+                false,
+            );
+            peer.adj_out.bgp_ls.add(nlri.clone(), rib);
+        }
+        None => {
+            if peer.adj_out.bgp_ls.0.contains_key(nlri) {
+                bgpls_send_withdraw(peer, nlri);
+            }
+        }
+    }
+}
+
+/// Withdraw one Link-State object from `peer` and drop it from the
+/// peer's Adj-RIB-Out.
+fn bgpls_send_withdraw(peer: &mut Peer, nlri: &BgpLsNlri) {
+    let mut update = peer.update_packet();
+    update.mp_withdraw = Some(MpUnreachAttr::LinkState {
+        withdraws: vec![nlri.clone()],
+    });
+    if let Some(bytes) = update.pop_bgpls_withdraw()
+        && let Some(ref tx) = peer.packet_tx
+    {
+        let _ = tx.send(bytes);
+    }
+    peer.adj_out.bgp_ls.remove(nlri, 0);
+}
+
+/// Advertise one locally originated Link-State object to every
+/// established BGP-LS peer whose outbound policy accepts it.
+///
+/// Self-originated only. Re-advertising a *received* object is route
+/// reflection, which BGP-LS gets no exemption from and which is not
+/// implemented — `route_bgpls_update` still stops at the Loc-RIB.
+///
+/// The next hop is our router-id. RFC 9552 §5.1 makes it informational
+/// — nothing is forwarded toward it — but the field is mandatory in
+/// MP_REACH, and the router-id is what a consumer can correlate with
+/// the Node NLRI we also advertise.
 pub(super) fn bgpls_origin_reach(bgp: &mut Bgp, nlri: &BgpLsNlri, attr: &BgpAttr) {
     let nhop = IpAddr::V4(bgp.router_id);
     for ident in bgpls_peer_idents(&bgp.peers) {
         let Some(peer) = bgp.peers.get_mut_by_idx(ident) else {
             continue;
         };
-        let Some(out_attr) = bgpls_policy_out(peer, bgpls_egress_attr(peer, attr)) else {
-            continue;
-        };
-        let mut update = peer.update_packet();
-        update.mp_update = Some(MpReachAttr::LinkState {
-            nhop,
-            updates: vec![nlri.clone()],
-        });
-        update.bgp_attr = Some(out_attr);
-        if let Some(bytes) = update.pop_bgpls()
-            && let Some(ref tx) = peer.packet_tx
-        {
-            let _ = tx.send(bytes);
+        match bgpls_policy_out(peer, bgpls_egress_attr(peer, attr)) {
+            Some(out_attr) => bgpls_send_reach(peer, nhop, nlri, out_attr),
+            // Newly denied by policy: if the peer still holds it from
+            // before the edit, take it back.
+            None => {
+                if peer.adj_out.bgp_ls.0.contains_key(nlri) {
+                    bgpls_send_withdraw(peer, nlri);
+                }
+            }
         }
     }
 }
 
 /// Withdraw one locally originated Link-State object from every
-/// established BGP-LS peer.
+/// established BGP-LS peer that holds it.
 pub(super) fn bgpls_origin_withdraw(bgp: &mut Bgp, nlri: &BgpLsNlri) {
     for ident in bgpls_peer_idents(&bgp.peers) {
         let Some(peer) = bgp.peers.get_mut_by_idx(ident) else {
             continue;
         };
-        let mut update = peer.update_packet();
-        update.mp_withdraw = Some(MpUnreachAttr::LinkState {
-            withdraws: vec![nlri.clone()],
-        });
-        if let Some(bytes) = update.pop_bgpls_withdraw()
-            && let Some(ref tx) = peer.packet_tx
-        {
-            let _ = tx.send(bytes);
-        }
+        bgpls_send_withdraw(peer, nlri);
     }
 }
 
-/// Dump the self-originated Link-State objects to a newly established
-/// peer. BGP-LS is advertised event-driven off the IGP producer, and the
-/// IGP converges long before a controller session comes up — without
-/// this, everything originated before the session would never be sent.
+/// Reconcile one peer's Link-State feed against the Loc-RIB and the
+/// peer's current outbound policy.
+///
+/// Used for the establishment dump, for Route Refresh, and for operator
+/// soft-out, which is what makes a policy edit take effect: an object
+/// the peer holds but policy now denies — or that the producer has
+/// dropped — is withdrawn here. Sending only the permitted set, as the
+/// first version did, left a flipped-to-deny policy with no visible
+/// effect until the session reset.
 pub fn route_sync_bgpls(peer: &mut Peer, bgp: &BgpTop) {
     if !peer.is_afi_safi(Afi::LinkState, Safi::LinkState) {
         return;
     }
     let nhop = IpAddr::V4(*bgp.router_id);
-    let adverts: Vec<(BgpLsNlri, BgpAttr)> = bgp
+    let desired: Vec<(BgpLsNlri, BgpAttr)> = bgp
         .local_rib
         .bgp_ls
         .selected
         .iter()
         .filter(|(_, rib)| rib.typ.is_originated())
-        .map(|(nlri, rib)| (nlri.clone(), (*rib.attr).clone()))
+        .filter_map(|(nlri, rib)| {
+            let attr = bgpls_egress_attr(peer, &rib.attr);
+            bgpls_policy_out(peer, attr).map(|out| (nlri.clone(), out))
+        })
         .collect();
-    for (nlri, attr) in adverts {
-        let Some(out_attr) = bgpls_policy_out(peer, bgpls_egress_attr(peer, &attr)) else {
-            continue;
-        };
-        let mut update = peer.update_packet();
-        update.mp_update = Some(MpReachAttr::LinkState {
-            nhop,
-            updates: vec![nlri],
-        });
-        update.bgp_attr = Some(out_attr);
-        if let Some(bytes) = update.pop_bgpls()
-            && let Some(ref tx) = peer.packet_tx
-        {
-            let _ = tx.send(bytes);
-        }
+
+    let keep: BTreeSet<BgpLsNlri> = desired.iter().map(|(nlri, _)| nlri.clone()).collect();
+    let stale: Vec<BgpLsNlri> = peer
+        .adj_out
+        .bgp_ls
+        .0
+        .keys()
+        .filter(|nlri| !keep.contains(*nlri))
+        .cloned()
+        .collect();
+    for nlri in stale {
+        bgpls_send_withdraw(peer, &nlri);
+    }
+    for (nlri, attr) in desired {
+        bgpls_send_reach(peer, nhop, &nlri, attr);
     }
 }
 
