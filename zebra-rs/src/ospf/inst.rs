@@ -11199,9 +11199,6 @@ impl Ospf<Ospfv3> {
                     .install_originated(lsa, &self.tx, Some(area_id), &self.tracing);
             }
             self.flood_self_originated_lsa(area_id, &flood_lsa);
-            // The ASLA we just (re)advertised is a metric-type-1 SPF
-            // input for this router too.
-            self.spf_schedule_area(area_id);
         } else {
             // Walk every area in case the link's area moved between
             // calls -- a stale LSA must be flushed wherever it lives.
@@ -11214,9 +11211,6 @@ impl Ospf<Ospfv3> {
                 };
                 if let Some(lsa) = flushed {
                     self.flood_self_originated_lsa(area_id, &lsa);
-                    // A withdrawn delay prunes the link from a
-                    // metric-type-1 topology (RFC 9350 §15).
-                    self.spf_schedule_area(area_id);
                 }
             }
         }
