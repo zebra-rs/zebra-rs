@@ -49,6 +49,8 @@ For both protocols, static configuration overrides measured values per field. Un
 
 On the receive side, only the application-specific copy feeds routing. IS-IS reads a peer's minimum delay from the ASLA sub-TLV; the inline TLV 22/222 copy is decoded and displayed but never consulted by SPF. A peer that advertises delay inline only — without ASLA — is therefore pruned from a metric-type-1 topology.
 
+That pruning is correct, not a gap. RFC 9350 §12 requires Flex-Algorithm link attributes to come from an ASLA advertisement "unless, in the case of IS-IS, the L-flag is set", so a peer that never emits an ASLA has advertised no Flex-Algorithm delay, and every conformant router in the domain prunes that link identically. An earlier revision of this review recommended adding a legacy fallback; that recommendation was wrong and is withdrawn — see the correction below.
+
 ## Remaining gaps against the stamp document
 
 ### Measurement and metric coverage
@@ -142,9 +144,11 @@ The largest remaining asymmetry: an IPv6-only fabric can measure and advertise d
 
 Requires a rolling multi-window loss estimator; a single export window is too noisy to advertise, as the original design plan records. Unblocks a measured source for sub-TLV 36/30 and makes [draft-ietf-lsr-flex-algo-link-loss](https://datatracker.ietf.org/doc/html/draft-ietf-lsr-flex-algo-link-loss) implementable.
 
-### Fold into whichever change lands first
+### Correction — the "receive-side fallback" recommendation was wrong
 
-Receive-side fallback so a peer advertising delay inline only, without ASLA, is not pruned from a metric-type-1 topology. A few lines, and a pure interoperability win.
+An earlier revision of this section recommended, as an easy interoperability win, falling back to a peer's inline delay sub-TLV when it advertises no ASLA. **Do not do this.** RFC 9350 §12 permits legacy sourcing for Flex-Algorithm only when an applicable ASLA sets the IS-IS L-flag; the absence of an ASLA is not that signal. A router that accepted the legacy value anyway would compute a shorter edge for that link than every conformant neighbour does, which is how a delay-based topology ends up with inconsistent paths.
+
+The fallback was briefly implemented on that recommendation and then removed. What replaced it is the actual RFC 9479 §4.2 selection, which the original ASLA-only code also lacked: an explicit X-bit advertisement wins; failing that a zero-length-mask advertisement applies; the applicable ASLA's L-flag then decides between its nested attributes and the legacy ones; and no applicable ASLA means no Flex-Algorithm delay. See `isis::flex_algo::peer_min_delay`.
 
 ### Deferred
 

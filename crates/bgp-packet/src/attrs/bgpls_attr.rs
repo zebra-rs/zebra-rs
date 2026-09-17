@@ -85,6 +85,38 @@ pub const BGPLS_ATTR_AVAILABLE_BANDWIDTH: u16 = 1119;
 /// Unidirectional Utilized Bandwidth (RFC 8571 §2.7).
 pub const BGPLS_ATTR_UTILIZED_BANDWIDTH: u16 = 1120;
 
+/// Application-Specific Link Attributes (RFC 9294 §2), type 1122.
+///
+/// Carries link attributes that the IGP scoped to particular
+/// applications, with that scope intact. RFC 9294 §2 is explicit that
+/// attributes received in an IGP ASLA MUST be re-encoded here rather
+/// than flattened into the top-level TLVs — a Flex-Algorithm-only delay
+/// promoted to top level would read as an RSVP-TE attribute too.
+pub const BGPLS_ATTR_ASLA: u16 = 1122;
+
+/// Encode the value of a BGP-LS ASLA TLV (RFC 9294 §2):
+/// `SABM Length | UDABM Length | Reserved(2) | SABM | UDABM | sub-TLVs`,
+/// where the nested sub-TLVs use the ordinary BGP-LS 2-octet type and
+/// 2-octet length. The two reserved octets MUST be zero on transmit.
+///
+/// The bit masks are copied from the IGP advertisement verbatim: their
+/// bit assignments are shared (RSVP-TE, SR Policy, LFA, Flex-Algorithm),
+/// so preserving the bytes preserves the scope.
+pub fn bgpls_asla_value(sabm: &[u8], udabm: &[u8], subs: &[BgpLsAttrTlv]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4 + sabm.len() + udabm.len());
+    out.push(sabm.len() as u8);
+    out.push(udabm.len() as u8);
+    out.extend_from_slice(&[0, 0]); // Reserved
+    out.extend_from_slice(sabm);
+    out.extend_from_slice(udabm);
+    for sub in subs {
+        out.extend_from_slice(&sub.typ.to_be_bytes());
+        out.extend_from_slice(&(sub.value.len() as u16).to_be_bytes());
+        out.extend_from_slice(&sub.value);
+    }
+    out
+}
+
 // ===== Prefix Attribute TLVs (RFC 9552 Section 4.3, RFC 9085) =====
 pub const BGPLS_ATTR_IGP_FLAGS: u16 = 1152;
 pub const BGPLS_ATTR_IGP_ROUTE_TAG: u16 = 1153;

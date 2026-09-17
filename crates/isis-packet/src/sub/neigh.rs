@@ -197,82 +197,23 @@ impl IsisTlvExtIsReachEntry {
         })
     }
 
-    /// Every link-attribute sub-TLV this entry carries: the inline
-    /// copies first, then any nested inside an ASLA sub-TLV (RFC 9479).
-    ///
-    /// Both carriers are legal for the RFC 8570 performance metrics and
-    /// we originate both, but other implementations pick one — a reader
-    /// that looks in a single place silently drops the other half of
-    /// the deployments. Application scoping is deliberately *not*
-    /// applied here: these accessors serve consumers like BGP-LS, whose
-    /// TLVs are the generic link attributes. Flex-Algorithm has its own
-    /// X-bit-aware read, because there the application mask is load
-    /// bearing (RFC 9350 §12).
-    fn link_attr_subs(&self) -> impl Iterator<Item = &IsisSubTlv> {
-        self.subs.iter().chain(
-            self.subs
-                .iter()
-                .filter_map(|s| match s {
-                    IsisSubTlv::Asla(a) => Some(a.subs.iter()),
-                    _ => None,
-                })
-                .flatten(),
-        )
+    /// The RFC 8570 performance metrics carried *inline* on this entry,
+    /// i.e. outside any ASLA sub-TLV. These are the legacy,
+    /// application-independent advertisements.
+    pub fn inline_perf(&self) -> PerfMetrics<'_> {
+        PerfMetrics::from_subs(&self.subs)
     }
 
-    /// Unidirectional Link Delay (sub-TLV 33, RFC 8570 §4.1).
-    pub fn uni_link_delay(&self) -> Option<&IsisSubUniLinkDelay> {
-        self.link_attr_subs().find_map(|s| match s {
-            IsisSubTlv::UniLinkDelay(v) => Some(v),
-            _ => None,
-        })
-    }
-
-    /// Min/Max Unidirectional Link Delay (sub-TLV 34, RFC 8570 §4.2).
-    pub fn min_max_link_delay(&self) -> Option<&IsisSubMinMaxLinkDelay> {
-        self.link_attr_subs().find_map(|s| match s {
-            IsisSubTlv::MinMaxLinkDelay(v) => Some(v),
-            _ => None,
-        })
-    }
-
-    /// Unidirectional Delay Variation (sub-TLV 35, RFC 8570 §4.3).
-    pub fn delay_variation(&self) -> Option<&IsisSubDelayVariation> {
-        self.link_attr_subs().find_map(|s| match s {
-            IsisSubTlv::DelayVariation(v) => Some(v),
-            _ => None,
-        })
-    }
-
-    /// Unidirectional Link Loss (sub-TLV 36, RFC 8570 §4.4).
-    pub fn link_loss(&self) -> Option<&IsisSubLinkLoss> {
-        self.link_attr_subs().find_map(|s| match s {
-            IsisSubTlv::LinkLoss(v) => Some(v),
-            _ => None,
-        })
-    }
-
-    /// Unidirectional Residual Bandwidth (sub-TLV 37, RFC 8570 §4.5),
-    /// in bytes per second.
-    pub fn residual_bw(&self) -> Option<f32> {
-        self.link_attr_subs().find_map(|s| match s {
-            IsisSubTlv::ResidualBw(v) => Some(v.bw.bw_bps),
-            _ => None,
-        })
-    }
-
-    /// Unidirectional Available Bandwidth (sub-TLV 38, RFC 8570 §4.6).
-    pub fn available_bw(&self) -> Option<f32> {
-        self.link_attr_subs().find_map(|s| match s {
-            IsisSubTlv::AvailableBw(v) => Some(v.bw.bw_bps),
-            _ => None,
-        })
-    }
-
-    /// Unidirectional Utilized Bandwidth (sub-TLV 39, RFC 8570 §4.7).
-    pub fn utilized_bw(&self) -> Option<f32> {
-        self.link_attr_subs().find_map(|s| match s {
-            IsisSubTlv::UtilizedBw(v) => Some(v.bw.bw_bps),
+    /// The ASLA sub-TLVs (RFC 9479 §4.2) this entry carries. Their
+    /// nested attributes are scoped to the applications in their bit
+    /// masks, so callers must keep that scope rather than merging them
+    /// into the inline set: RFC 9294 §2 makes a BGP-LS producer encode
+    /// them in the BGP-LS ASLA TLV, and RFC 9350 §12 makes
+    /// Flex-Algorithm read its attributes from here, not from the
+    /// legacy copies.
+    pub fn aslas(&self) -> impl Iterator<Item = &IsisSubAsla> {
+        self.subs.iter().filter_map(|s| match s {
+            IsisSubTlv::Asla(a) => Some(a),
             _ => None,
         })
     }
@@ -831,6 +772,76 @@ bandwidth_sub_tlv!(
     /// Actual link utilization as measured by the advertising node.
     IsisSubUtilizedBw => UtilizedBw
 );
+
+/// The RFC 8570 performance metrics present in one sub-TLV list —
+/// either an entry's inline sub-TLVs or the nested list of a single
+/// ASLA. Deliberately scoped to *one* list: merging an entry's inline
+/// attributes with its ASLAs' would erase the application scope that
+/// both RFC 9294 and RFC 9350 depend on.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct PerfMetrics<'a> {
+    /// Sub-TLV 33, average delay (RFC 8570 §4.1).
+    pub uni_delay: Option<&'a IsisSubUniLinkDelay>,
+    /// Sub-TLV 34, min/max delay (§4.2).
+    pub min_max_delay: Option<&'a IsisSubMinMaxLinkDelay>,
+    /// Sub-TLV 35, delay variation (§4.3).
+    pub variation: Option<&'a IsisSubDelayVariation>,
+    /// Sub-TLV 36, link loss (§4.4).
+    pub loss: Option<&'a IsisSubLinkLoss>,
+    /// Sub-TLV 37, residual bandwidth in bytes/sec (§4.5).
+    pub residual_bw: Option<f32>,
+    /// Sub-TLV 38, available bandwidth (§4.6).
+    pub available_bw: Option<f32>,
+    /// Sub-TLV 39, utilized bandwidth (§4.7).
+    pub utilized_bw: Option<f32>,
+}
+
+impl<'a> PerfMetrics<'a> {
+    /// First occurrence of each metric wins; duplicates in one list are
+    /// malformed and the extra copies are ignored.
+    pub fn from_subs(subs: &'a [IsisSubTlv]) -> Self {
+        let mut m = Self::default();
+        for sub in subs {
+            match sub {
+                IsisSubTlv::UniLinkDelay(v) => {
+                    m.uni_delay.get_or_insert(v);
+                }
+                IsisSubTlv::MinMaxLinkDelay(v) => {
+                    m.min_max_delay.get_or_insert(v);
+                }
+                IsisSubTlv::DelayVariation(v) => {
+                    m.variation.get_or_insert(v);
+                }
+                IsisSubTlv::LinkLoss(v) => {
+                    m.loss.get_or_insert(v);
+                }
+                IsisSubTlv::ResidualBw(v) => {
+                    m.residual_bw.get_or_insert(v.bw.bw_bps);
+                }
+                IsisSubTlv::AvailableBw(v) => {
+                    m.available_bw.get_or_insert(v.bw.bw_bps);
+                }
+                IsisSubTlv::UtilizedBw(v) => {
+                    m.utilized_bw.get_or_insert(v.bw.bw_bps);
+                }
+                _ => {}
+            }
+        }
+        m
+    }
+
+    /// True when this list carried none of the seven metrics — the
+    /// caller then has nothing to translate or advertise.
+    pub fn is_empty(&self) -> bool {
+        self.uni_delay.is_none()
+            && self.min_max_delay.is_none()
+            && self.variation.is_none()
+            && self.loss.is_none()
+            && self.residual_bw.is_none()
+            && self.available_bw.is_none()
+            && self.utilized_bw.is_none()
+    }
+}
 
 // RFC 9479 IS-IS Application-Specific Link Attributes
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
