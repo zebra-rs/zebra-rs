@@ -1,6 +1,73 @@
 # BGP-LS feed review
 
-## Resolution — second round
+## Resolution — third round
+
+Both findings are fixed.
+
+**Ignored match conditions.** `entry_matches_bgpls` checked nine clauses
+and silently ignored five — `match_next_hop`, `match_as_path_len`,
+`match_as_path_len_uniq`, `match_weight`, `match_color` — plus a nested
+`call`. An entry carrying only one of those therefore matched every
+object, so `match as-path-len ge 100 deny` became a table-wide deny.
+That is precisely the failure the function's own comment warned about
+for `match prefix-set`, written while the same bug sat five lines below
+it.
+
+The evaluator now destructures `PolicyEntry` field by field with no
+`..`, so adding a clause to the struct breaks this build rather than
+silently widening a conditional rule into an unconditional one. The
+evaluatable clauses are evaluated; the ones needing context this family
+has no NLRI for — a prefix set, an IPv4 next hop, the EVPN
+discriminators, a non-zero tag, a nested call — fail the entry.
+
+**LOCAL_PREF toward an external peer.** `bgpls_egress_attr` only added
+LOCAL_PREF for iBGP, but policy runs afterwards and `set
+local-preference` does not know the peer type, so a policy-set value
+reached eBGP UPDATEs. The final attribute is now produced in one place,
+`bgpls_out_attr` — egress transform, then policy, then the rules that
+hold regardless of what policy asked for — and the strip lives there,
+after every writer.
+
+Gates: a BDD scenario where entry 10 denies only paths of length 100 or
+more and entry 20 permits, so the feed survives only if the condition is
+actually read (mutation-tested by ignoring the clause again); and unit
+tests for the strip in both directions, since `show bgp link-state`
+renders BGP-LS TLVs and not path attributes, so the collector cannot
+observe LOCAL_PREF at all.
+
+## Current re-review: `8731c610`
+
+Reviewed `8731c610` on 2026-09-17. R1 is fixed: per-peer advertised objects are tracked and newly denied objects are withdrawn during delta handling or reconciliation. R3 is fixed for an oversized attribute replacement whose NLRI still fits in a withdrawal: the previous copy is withdrawn. R2 is partially fixed: common attribute matches and several set actions now run, but the matcher silently ignores other accepted conditions, and final session-specific attribute sanitation is missing. Implementation source was not changed.
+
+### R4. P1 — Several configured match conditions become unconditional
+
+Location: [route.rs](../../zebra-rs/src/bgp/route.rs:11363), `entry_matches_bgpls`.
+
+The matcher checks prefix/EVPN context, tag, community/AS-path sets, MED, LOCAL_PREF, and ORIGIN, but never checks `match_as_path_len`, `match_as_path_len_uniq`, `match_weight`, `match_color`, or `match_next_hop`. It falls through to `true` even when one of these conditions is configured and false. This differs from the previous implementation, which rejected conditional entries, and can now allow objects a policy was intended to reject.
+
+Reproduction: bind a policy whose first entry permits only AS-path length 99 and whose next entry denies unconditionally. An ordinary originated feed path has length 0 toward iBGP or 1 toward eBGP, but the first entry still matches and the topology is exported. Reversing the actions makes a conditional deny suppress the entire feed. Color can be available after a preceding policy action; lack of a prefix does not justify ignoring these conditions.
+
+Evaluate every accepted attribute condition, with explicit defaults/context for weight and the MP_REACH next hop. If a condition cannot be supported, fail the entry or reject its configuration rather than treating it as absent. Add negative-condition tests, especially an impossible AS-path length followed by deny-all, and verify both initial and delta feeds.
+
+### R5. P2 — Policy-set LOCAL_PREF leaks into external UPDATEs
+
+Location: [route.rs](../../zebra-rs/src/bgp/route.rs:11308), `policy_list_apply_bgpls`; callers apply `bgpls_egress_attr` before policy evaluation.
+
+An unconditional permit with a LOCAL_PREF set action adds the attribute even for an external peer. The policy result goes straight to `bgpls_send_reach`, whose serializer emits LOCAL_PREF whenever present. No final egress step removes it. Reproduction: apply an unconditional permit with LOCAL_PREF 200 to the external collector's link-state family; announcements contain path attribute type 5 despite the external session.
+
+[RFC4271 section 5.1.5](https://www.rfc-editor.org/rfc/rfc4271.html#section-5.1.5) prohibits LOCAL_PREF in external UPDATEs except for confederations. Sanitize the final post-policy attribute for the session before serialization. Verify that the policy value appears for iBGP and is absent for ordinary eBGP, in both initial synchronization and delta handling.
+
+### Validation and limits
+
+- `cargo test -p zebra-rs --bin zebra-rs bgp_ls`: 23 passed.
+- `cargo test -p bgp-packet bgpls`: 20 passed.
+- `git diff --check 9014602a HEAD`: passed.
+- BDD scenarios for deny withdrawal and restoration were inspected, not run during this review. Their reported mutation-test result was not independently reproduced.
+
+No direct feed-policy evaluator tests were added in this commit. The passing tests cover producer/translation/display and packet codecs, rather than R4/R5. The new evaluator also leaves some accepted set actions unsupported, including `set color`, and its next-hop action does not update MP_REACH. The resolution notes' claim that every set action applies should be narrowed accordingly. Live refresh, attribute-policy, oversized-replacement, and reconnect coverage remain incomplete.
+
+## Implementation author's resolution — second round
+
 
 R1, R2 and R3 are fixed. All three came back to the same absence: there
 was no Adj-RIB-Out for BGP-LS, so nothing knew what a peer currently
@@ -40,7 +107,7 @@ have unit-level support but no BDD scenario, and the small-to-oversized
 transition is exercised only by the reviewer's probe, since the BDD
 topology produces nothing near the limit.
 
-## Current re-review: `9014602a`
+## Previous re-review: `9014602a`
 
 Reviewed `9014602a` on 2026-09-17. Peer-specific AS_PATH/LOCAL_PREF construction and Route Refresh replay are implemented in both advertisement paths. Oversized UPDATEs are no longer returned to the sender. Outbound filtering is partially implemented; three functional findings remain below. Implementation source was not changed. The original review and implementation author's resolution notes are retained below as history.
 

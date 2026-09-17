@@ -6329,6 +6329,49 @@ mod evpn_nexthop_wiring_tests {
     const SPINE: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 101);
     const VTEP: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 11);
 
+    /// RFC 4271 §5.1.5: LOCAL_PREF is never sent to an external peer.
+    /// The egress transform only adds it for iBGP, but an outbound
+    /// policy runs afterwards and `set local-preference` knows nothing
+    /// about the peer type — so the attribute can arrive on an eBGP
+    /// UPDATE by way of the policy rather than the transform.
+    #[test]
+    fn bgpls_out_attr_strips_local_pref_toward_an_external_peer() {
+        let mut peer = ebgp_peer(false);
+        let mut base = BgpAttr::new();
+        base.origin = Some(Origin::Igp);
+        base.aspath = Some(As4Path::from(Vec::<u32>::new()));
+        // Stand in for a policy's `set local-preference`, which lands on
+        // the attribute after the egress transform has run.
+        base.local_pref = Some(LocalPref::new(300));
+
+        let out = bgpls_out_attr(&mut peer, &base).expect("no policy bound, so permitted");
+        assert!(
+            out.local_pref.is_none(),
+            "LOCAL_PREF must not reach an external peer"
+        );
+        assert!(
+            out.aspath.is_some(),
+            "AS_PATH is still mandatory on the same UPDATE"
+        );
+    }
+
+    /// The same attribute is kept toward an internal peer, and supplied
+    /// when absent.
+    #[test]
+    fn bgpls_out_attr_keeps_local_pref_toward_an_internal_peer() {
+        let mut peer = ebgp_peer(false);
+        peer.peer_type = PeerType::IBGP;
+        let mut base = BgpAttr::new();
+        base.origin = Some(Origin::Igp);
+        base.aspath = Some(As4Path::from(Vec::<u32>::new()));
+
+        let out = bgpls_out_attr(&mut peer, &base).expect("permitted");
+        assert!(
+            out.local_pref.is_some(),
+            "an internal advertisement carries LOCAL_PREF (RFC 4271 §5.1.5)"
+        );
+    }
+
     /// EVPN transit speaker's eBGP peer toward a leaf. `local_addr` is
     /// the session-local address `route_update_evpn` installs when it
     /// rewrites the next-hop to self.
@@ -11266,6 +11309,21 @@ fn bgpls_peer_idents(peers: &PeerMap) -> Vec<usize> {
 /// with no binding is. That is the difference between an accepted
 /// `deny` doing nothing at all — the state before this — and doing what
 /// it says. Matching on Link-State descriptors is a separate extension.
+/// The attribute this peer should actually receive, or `None` when
+/// policy denies: the egress transform, then policy, then the rules
+/// that hold regardless of what policy asked for.
+fn bgpls_out_attr(peer: &mut Peer, base: &BgpAttr) -> Option<BgpAttr> {
+    let mut attr = bgpls_policy_out(peer, bgpls_egress_attr(peer, base))?;
+    // RFC 4271 §5.1.5: LOCAL_PREF is never sent to an external peer.
+    // The egress transform only *adds* it for iBGP, but policy runs
+    // afterwards and `set local-preference` does not know the peer
+    // type, so the check belongs here — after every writer.
+    if !peer.is_ibgp() {
+        attr.local_pref = None;
+    }
+    Some(attr)
+}
+
 fn bgpls_policy_out(peer: &mut Peer, attr: BgpAttr) -> Option<BgpAttr> {
     let family = AfiSafi::new(Afi::LinkState, Safi::LinkState);
     let config = peer.policy_list_at(family, InOut::Output);
@@ -11358,49 +11416,125 @@ fn policy_list_apply_bgpls(
     None
 }
 
-/// Match evaluator for a Link-State object: the common BGP attribute
-/// clauses, and nothing that needs an NLRI this family does not have.
+/// Match evaluator for a Link-State object.
+///
+/// Every field of `PolicyEntry` is bound explicitly rather than reached
+/// through `entry.x`, so adding a match clause breaks this build instead
+/// of silently becoming "matches everything". That failure mode is not
+/// hypothetical: the first version of this function checked nine
+/// clauses and ignored five, which quietly turned
+/// `match as-path-length ge 5 deny` into a table-wide deny — the exact
+/// trap its own comment warned about for `match prefix-set`.
+///
+/// A clause this family cannot evaluate fails the entry. Skipping it
+/// would let a condition the operator wrote be silently dropped while
+/// its action still fired.
 fn entry_matches_bgpls(entry: &crate::policy::PolicyEntry, bgp_attr: &BgpAttr) -> bool {
-    // No prefix, no EVPN discriminators, no tag. A clause naming any of
-    // them cannot be satisfied, so the entry does not apply.
-    if entry.prefix_set_name.is_some()
-        || entry.match_evpn_route_type.is_some()
-        || entry.match_evpn_vni.is_some()
+    let crate::policy::PolicyEntry {
+        // Needs an IP prefix; a Link-State NLRI is a descriptor set.
+        prefix_set_name,
+        prefix_set: _,
+        // Ordinary attribute clauses — all evaluatable here.
+        community_set_name: _,
+        community_set,
+        ext_community_set_name: _,
+        ext_community_set,
+        large_community_set_name: _,
+        large_community_set,
+        as_path_set_name: _,
+        as_path_set,
+        // `BgpAttr::nexthop` is IPv4-only and is not the BGP-LS next
+        // hop, which travels in MP_REACH. Not evaluatable.
+        match_next_hop,
+        match_med,
+        match_as_path_len,
+        match_as_path_len_uniq,
+        match_local_pref,
+        match_weight,
+        match_origin,
+        // Other families' discriminators.
+        match_evpn_route_type,
+        match_evpn_vni,
+        match_color,
+        // BGP-LS objects carry no tag, so only `match tag 0` can hold.
+        match_tag,
+        // Set actions and bookkeeping: not conditions.
+        local_pref: _,
+        med: _,
+        weight: _,
+        set_community: _,
+        set_ext_community: _,
+        set_large_community: _,
+        set_as_path_prepend: _,
+        set_next_hop: _,
+        set_origin: _,
+        set_color: _,
+        set_prefix_sid_label_index: _,
+        set_tag: _,
+        // A nested `call` is control flow this evaluator does not
+        // follow; an entry using one is not applied rather than being
+        // treated as unconditional.
+        call_name,
+        call_policy: _,
+        action: _,
+    } = entry;
+
+    if prefix_set_name.is_some()
+        || match_next_hop.is_some()
+        || match_evpn_route_type.is_some()
+        || match_evpn_vni.is_some()
+        || call_name.is_some()
     {
         return false;
     }
-    if let Some(want) = entry.match_tag
-        && want != 0
+    if let Some(want) = match_tag
+        && *want != 0
     {
         return false;
     }
-    if let Some(set) = &entry.community_set
+    if let Some(set) = community_set
         && !set.matches(bgp_attr)
     {
         return false;
     }
-    if let Some(set) = &entry.ext_community_set
+    if let Some(set) = ext_community_set
         && !set.matches(bgp_attr)
     {
         return false;
     }
-    if let Some(set) = &entry.large_community_set
+    if let Some(set) = large_community_set
         && !set.matches(bgp_attr)
     {
         return false;
     }
-    if let Some(set) = &entry.as_path_set
+    if let Some(set) = as_path_set
         && !set.matches(bgp_attr)
     {
         return false;
     }
-    if let Some(m) = &entry.match_med {
+    if let Some(m) = match_med {
         let med = bgp_attr.med.as_ref().map(|m| m.med).unwrap_or(0);
         if !m.matches(med) {
             return false;
         }
     }
-    if let Some(m) = &entry.match_local_pref {
+    if let Some(m) = match_as_path_len {
+        let len = bgp_attr.aspath.as_ref().map(|p| p.length()).unwrap_or(0);
+        if !m.matches(len) {
+            return false;
+        }
+    }
+    if let Some(m) = match_as_path_len_uniq {
+        let uniq = bgp_attr
+            .aspath
+            .as_ref()
+            .map(|p| p.unique_length())
+            .unwrap_or(0);
+        if !m.matches(uniq) {
+            return false;
+        }
+    }
+    if let Some(m) = match_local_pref {
         let lp = bgp_attr
             .local_pref
             .as_ref()
@@ -11410,9 +11544,19 @@ fn entry_matches_bgpls(entry: &crate::policy::PolicyEntry, bgp_attr: &BgpAttr) -
             return false;
         }
     }
-    if let Some(want) = entry.match_origin
-        && bgp_attr.origin != Some(want)
+    // Weight is a local, pre-egress concept; an originated Link-State
+    // object carries none, so only a clause satisfied by 0 can hold.
+    if let Some(m) = match_weight
+        && !m.matches(0)
     {
+        return false;
+    }
+    if let Some(want) = match_origin
+        && bgp_attr.origin != Some(*want)
+    {
+        return false;
+    }
+    if match_color.is_some() && !matches_color(entry, bgp_attr) {
         return false;
     }
     true
@@ -11527,7 +11671,7 @@ pub(super) fn bgpls_origin_reach(bgp: &mut Bgp, nlri: &BgpLsNlri, attr: &BgpAttr
         let Some(peer) = bgp.peers.get_mut_by_idx(ident) else {
             continue;
         };
-        match bgpls_policy_out(peer, bgpls_egress_attr(peer, attr)) {
+        match bgpls_out_attr(peer, attr) {
             Some(out_attr) => bgpls_send_reach(peer, nhop, nlri, out_attr),
             // Newly denied by policy: if the peer still holds it from
             // before the edit, take it back.
@@ -11571,10 +11715,7 @@ pub fn route_sync_bgpls(peer: &mut Peer, bgp: &BgpTop) {
         .selected
         .iter()
         .filter(|(_, rib)| rib.typ.is_originated())
-        .filter_map(|(nlri, rib)| {
-            let attr = bgpls_egress_attr(peer, &rib.attr);
-            bgpls_policy_out(peer, attr).map(|out| (nlri.clone(), out))
-        })
+        .filter_map(|(nlri, rib)| bgpls_out_attr(peer, &rib.attr).map(|out| (nlri.clone(), out)))
         .collect();
 
     let keep: BTreeSet<BgpLsNlri> = desired.iter().map(|(nlri, _)| nlri.clone()).collect();

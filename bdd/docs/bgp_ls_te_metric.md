@@ -64,4 +64,5 @@ Topology:
 | The RFC 8571 attributes survive the BGP wire | |
 | An outbound deny withdraws what was already advertised | |
 | Removing the deny restores the feed | |
+| A conditional clause does not act unconditionally | |
 | Teardown topology | |

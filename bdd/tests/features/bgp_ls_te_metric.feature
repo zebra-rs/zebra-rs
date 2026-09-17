@@ -165,6 +165,19 @@ Feature: BGP-LS carries the IS-IS TE performance metrics
     Then show command "show bgp link-state" in namespace "lsc" should eventually contain "min/max-delay 900/1200us"
     And show command "show bgp link-state" in namespace "lsc" should eventually contain "from 192.168.73.1"
 
+  Scenario: A conditional clause does not act unconditionally
+    Given the test topology exists
+    # Entry 10 denies only paths of length 100 or more; ours is one hop
+    # long, so it must not fire and entry 20 must permit. An evaluator
+    # that ignores the condition it cannot be bothered to read treats
+    # entry 10 as matching everything and the feed disappears.
+    When I apply command "set policy LONGPATH entry 10 action deny" in namespace "ls1"
+    And I apply command "set policy LONGPATH entry 10 match as-path-len ge 100" in namespace "ls1"
+    And I apply command "set policy LONGPATH entry 20 action permit" in namespace "ls1"
+    And I apply command "set router bgp neighbor 192.168.73.2 afi-safi link-state policy out LONGPATH" in namespace "ls1"
+    Then show command "show bgp link-state" in namespace "lsc" should eventually contain "min/max-delay 900/1200us"
+    And show command "show bgp link-state" in namespace "lsc" should eventually not contain "no link-state objects"
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "ls1"
