@@ -2289,7 +2289,21 @@ fn config_ethernet_segment_redundancy_mode(
     // segment signals its E-LAN role, whether its per-EVI A-Ds carry P/B at
     // all.
     bgp.vpws_resync_es();
-    bgp.evpn_reconcile_ad_evi_roles();
+    // The mode is also what the datapath gate is made of: a single-active
+    // non-DF blocks its access port in both directions, an all-active one
+    // only filters BUM (`Message::EsRole.single_active`). Marking the
+    // segment dirty and draining re-runs the E-LAN DF sync — which re-tees
+    // the gate — and the per-EVI A-D role reconcile together, so what this
+    // PE forwards and what it advertises can never be left describing
+    // different modes. Without it the tee kept the previous mode until some
+    // unrelated BGP event happened to drain: after all-active → single-active
+    // the standby port would still only filter BUM while we advertised
+    // Backup, and after the reverse it would go on blocking both directions
+    // with the P/B bits already gone.
+    if let Some(esi) = esi {
+        super::route::vpws_mark_df_dirty(&mut bgp.local_rib, &esi);
+    }
+    bgp.vpws_df_drain();
     Some(())
 }
 

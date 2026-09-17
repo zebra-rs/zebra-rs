@@ -116,6 +116,29 @@ Feature: EVPN single-active — the elected role on the per-EVI Ethernet A-D
     And show command "show bgp evpn" in namespace "z2" should contain "l2-attr:P:mtu0"
     And show command "show bgp evpn" in namespace "z2" should contain "[1]:[00:11:22:33:44:55:66:77:88:99]:[0]"
 
+  Scenario: A redundancy-mode edit re-tees the datapath gate on its own
+    Given the test topology exists
+    # The mode is not only a wire attribute: it is what the datapath gate is
+    # made of. A single-active non-DF blocks its access port in BOTH
+    # directions; an all-active one only filters BUM. Both must follow a
+    # config edit immediately — with no incoming BGP update to trigger a
+    # drain — or the PE forwards under one mode while advertising the other.
+    # z1 is the non-DF here (z2 raised its preference two scenarios ago), so
+    # it is exactly the PE whose port the gate is holding down.
+    Then show command "show bgp evpn ethernet-segment" in namespace "z1" should eventually contain "bd 10: non-DF, single-active"
+    # all-active: the gate must stop blocking, and the role signal must go
+    # with it (all-active PEs all forward, so P/B would be a lie).
+    When I apply config "z1-allactive.yaml" to namespace "z1"
+    Then show command "show bgp evpn ethernet-segment" in namespace "z1" should eventually contain "bd 10: non-DF, all-active"
+    And show command "show bgp evpn ethernet-segment" in namespace "z1" should not contain "bd 10: non-DF, single-active"
+    And show command "show bgp evpn" in namespace "z2" should eventually not contain "l2-attr:B:mtu0"
+    # ... and back, which is the transition that would otherwise leave the
+    # port forwarding while we advertise Backup.
+    When I apply config "z1-1.yaml" to namespace "z1"
+    Then show command "show bgp evpn ethernet-segment" in namespace "z1" should eventually contain "bd 10: non-DF, single-active"
+    And show command "show bgp evpn ethernet-segment" in namespace "z1" should not contain "bd 10: non-DF, all-active"
+    And show command "show bgp evpn" in namespace "z2" should eventually contain "l2-attr:B:mtu0"
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "z1"

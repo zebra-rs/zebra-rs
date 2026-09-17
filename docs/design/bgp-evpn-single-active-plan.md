@@ -660,7 +660,21 @@ and `evpn_reconcile_ad_evi_roles()` hooked into `vpws_df_drain` so a role
 change is an attribute-only re-origination. It diffs against the bits
 already in the Loc-RIB rather than a shadow copy, so a drain that changes
 nothing advertises nothing. `show bgp evpn ethernet-segment` renders the
-mode and the role per bridge domain, in text and JSON. Proof: three unit
+mode and the role per bridge domain, in text and JSON, alongside what was
+last teed to the datapath.
+
+One thing 3a had to fix rather than add (found in review): the
+`redundancy-mode` handler re-originated the routes but never re-ran
+`evpn_es_df_sync`, so the datapath kept the previous mode until some
+unrelated BGP event happened to drain. That was invisible while nothing else
+in the handler moved; with 3a updating the advertisement in the same edit it
+becomes a divergence — all-active → single-active would advertise Backup
+while the standby port still only filtered BUM, and the reverse would go on
+blocking both directions with the P/B bits already gone. The handler now
+marks the segment dirty and drains, which re-tees the gate and reconciles
+the advertised role together. **The general shape: every ES config leaf that
+feeds `Message::EsRole` must reach the drain, not just the origination
+path.** Proof: three unit
 tests (the role tracks `elan_df`; a holding or not-yet-elected PE advertises
 *neither* bit, unlike `vpws_role`'s primary fallback; the keyword
 round-trip) and a new `bgp_evpn_single_active.feature` — the DF advertises
