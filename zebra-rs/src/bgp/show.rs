@@ -2914,7 +2914,7 @@ fn write_es_nhg_groups(buf: &mut String, bgp: &Bgp) -> std::fmt::Result {
         buf,
         "Ethernet Segment nexthop groups (teed to the datapath):"
     )?;
-    for ((esi, bd), (single_active, members)) in &bgp.es_nhg_sent {
+    for ((esi, bd), (single_active, members, blocked)) in &bgp.es_nhg_sent {
         let rendered: Vec<String> = members
             .iter()
             .map(|m| match m {
@@ -2923,9 +2923,33 @@ fn write_es_nhg_groups(buf: &mut String, bgp: &Bgp) -> std::fmt::Result {
                 crate::rib::EsNhgMember::Mpls { pe, label } => format!("{pe}/{label}"),
             })
             .collect();
+        // How the primary was chosen: a signalled role, the inference from
+        // MAC origination, or a conflict this PE could only tie-break. The
+        // distinction is the whole of phase 3b — without it "primary
+        // 192.0.2.1" reads the same whether it was told to us or guessed.
+        let why = bgp
+            .es_group_selection(esi, *bd)
+            .map(|r| format!(" ({})", r.as_str()))
+            .unwrap_or_default();
         let esi = bgp_packet::esi_display(esi);
         if *single_active {
-            let (primary, backup) = rendered.split_first().expect("a sent group is non-empty");
+            // A signalled segment where every member declared itself
+            // non-designated is teed as an empty group — nothing to forward
+            // to — and must render as that rather than panicking on a
+            // missing first member.
+            let Some((primary, backup)) = rendered.split_first() else {
+                // Blocked: every PE on the segment advertised a
+                // non-designated role, so the segment's MACs are installed
+                // nowhere — distinct from the group simply being absent,
+                // which would install each toward its advertiser.
+                let state = if *blocked {
+                    "no forwarder (MACs withheld)"
+                } else {
+                    "no forwarder"
+                };
+                writeln!(buf, "  {esi} bd {bd}: single-active, {state}{why}")?;
+                continue;
+            };
             let backup = if backup.is_empty() {
                 String::new()
             } else {
@@ -2933,7 +2957,7 @@ fn write_es_nhg_groups(buf: &mut String, bgp: &Bgp) -> std::fmt::Result {
             };
             writeln!(
                 buf,
-                "  {esi} bd {bd}: single-active primary {primary}{backup}"
+                "  {esi} bd {bd}: single-active primary {primary}{backup}{why}"
             )?;
         } else {
             writeln!(buf, "  {esi} bd {bd}: all-active {}", rendered.join(" "))?;

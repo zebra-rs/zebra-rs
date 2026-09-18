@@ -19203,6 +19203,11 @@ impl Bgp {
         let mut desired: BTreeMap<([u8; 10], u32), Vec<(IpAddr, crate::rib::EsNhgMember)>> =
             BTreeMap::new();
         let mut live_cache: BTreeMap<[u8; 10], BTreeSet<IpAddr>> = BTreeMap::new();
+        // `(ESI, EVI)` → each advertising PE's signalled `(P, B)`, or `None`
+        // where it carries no Layer-2 Attributes EC.
+        #[allow(clippy::type_complexity)]
+        let mut signals: BTreeMap<([u8; 10], u32), BTreeMap<IpAddr, Option<(bool, bool)>>> =
+            BTreeMap::new();
         // Single-active segments (RFC 7432 §14.1.1) are not aliased — only
         // the DF forwards, and the DF is the PE that advertised the MAC —
         // but they do get a group: the DF first, the other attached PEs
@@ -19249,23 +19254,80 @@ impl Bgp {
                     continue;
                 }
                 let member = elan_es_member(rib, originator);
+                // rfc7432bis §7.11.1: the role this PE advertises for the
+                // segment in this bridge domain, when it advertises one.
+                let role = rib
+                    .attr
+                    .ecom
+                    .as_ref()
+                    .and_then(|ec| ec.0.iter().find_map(|v| v.as_l2_attr()))
+                    .map(|a| (a.primary, a.backup));
+                signals
+                    .entry((*esi, vni))
+                    .or_default()
+                    .insert(originator, role);
                 let members = desired.entry((*esi, vni)).or_default();
                 if !members.iter().any(|(_, m)| *m == member) {
                     members.push((originator, member));
                 }
             }
         }
-        let mut groups: BTreeMap<([u8; 10], u32), (bool, Vec<crate::rib::EsNhgMember>)> =
+        #[allow(clippy::type_complexity)]
+        let mut groups: BTreeMap<
+            ([u8; 10], u32),
+            (bool, Vec<crate::rib::EsNhgMember>, bool),
+        > = BTreeMap::new();
+        let mut reasons: BTreeMap<([u8; 10], u32), super::ethernet_segment::SaSelectReason> =
             BTreeMap::new();
+        let mut invalid: BTreeMap<([u8; 10], u32), Vec<IpAddr>> = BTreeMap::new();
         for ((esi, vni), pairs) in desired {
             let single_active = sa_esis.contains(&esi);
-            let primary = if single_active {
-                self.es_sa_primary(&esi, vni, &pairs)
+            // Only a single-active segment has one forwarder to pick; an
+            // all-active group is the aliasing set, every member equal.
+            let (primary, backup) = if single_active {
+                let signals: Vec<(IpAddr, Option<(bool, bool)>)> = signals
+                    .get(&(esi, vni))
+                    .map(|m| m.iter().map(|(pe, bits)| (*pe, *bits)).collect())
+                    .unwrap_or_default();
+                let (primary, backup, reason) =
+                    super::ethernet_segment::select_sa_forwarder(&signals);
+                reasons.insert((esi, vni), reason);
+                invalid.insert(
+                    (esi, vni),
+                    super::ethernet_segment::invalid_role_members(&signals),
+                );
+                match reason {
+                    // Nobody signalled: keep inferring the forwarder from
+                    // which PE advertised the segment's MACs, the behaviour
+                    // every deployment has today.
+                    super::ethernet_segment::SaSelectReason::Unsignalled => {
+                        (self.es_sa_primary(&esi, vni, &pairs), None)
+                    }
+                    // Signalled, and every member says it is not the
+                    // forwarder. Inference must NOT run here — it would
+                    // install the stale MAC advertiser over an explicit
+                    // "not me" — and no member may lead, so the group is
+                    // withheld below.
+                    super::ethernet_segment::SaSelectReason::NoForwarder => (None, None),
+                    _ => (primary, backup),
+                }
             } else {
-                None
+                (None, None)
             };
-            let members = super::ethernet_segment::order_es_members(pairs, primary);
-            groups.insert((esi, vni), (single_active, members));
+            // A signalled segment with no selectable forwarder is teed as an
+            // empty group: the datapath then has nothing to send the
+            // segment's MACs to, rather than slot 0 falling to whichever
+            // member sorts first. It is kept as an entry (not dropped) so
+            // the state is visible in `show` instead of looking like a
+            // segment nobody ever advertised.
+            let blocked = reasons.get(&(esi, vni))
+                == Some(&super::ethernet_segment::SaSelectReason::NoForwarder);
+            let members = if blocked {
+                Vec::new()
+            } else {
+                super::ethernet_segment::order_es_members(pairs, primary, backup)
+            };
+            groups.insert((esi, vni), (single_active, members, blocked));
         }
         let mut out: Vec<crate::rib::Message> = Vec::new();
         let gone: Vec<([u8; 10], u32)> = self
@@ -19281,15 +19343,61 @@ impl Bgp {
                 bd,
                 members: Vec::new(),
                 single_active: false,
+                // The segment is gone, not blocked: whatever MACs remain go
+                // back to installing toward the PE that advertised them.
+                blocked: false,
             });
         }
         for ((esi, bd), group) in groups {
             if self.es_nhg_sent.get(&(esi, bd)) != Some(&group) {
+                // Gated on the group actually changing: this sync runs on
+                // every ES event, and a conflict that persists would
+                // otherwise log on each of them.
+                match reasons.get(&(esi, bd)) {
+                    Some(super::ethernet_segment::SaSelectReason::Conflict) => {
+                        tracing::warn!(
+                            proto = "bgp",
+                            category = "evpn",
+                            esi = %bgp_packet::esi_display(&esi),
+                            bd,
+                            "bgp: more than one PE advertises primary for this single-active \
+                             segment; forwarding to the lowest address. Both of them believe \
+                             they forward — check the segment's DF election configuration",
+                        );
+                    }
+                    Some(super::ethernet_segment::SaSelectReason::NoForwarder) => {
+                        tracing::warn!(
+                            proto = "bgp",
+                            category = "evpn",
+                            esi = %bgp_packet::esi_display(&esi),
+                            bd,
+                            "bgp: no PE advertises a forwarding role for this single-active \
+                             segment; withholding the nexthop group rather than picking one \
+                             that declared itself non-designated",
+                        );
+                    }
+                    _ => {}
+                }
+                if let Some(bad) = invalid.get(&(esi, bd))
+                    && !bad.is_empty()
+                {
+                    tracing::warn!(
+                        proto = "bgp",
+                        category = "evpn",
+                        esi = %bgp_packet::esi_display(&esi),
+                        bd,
+                        pes = %bad.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(","),
+                        "bgp: ignoring per-EVI A-D role with both P and B set — the two bits \
+                         are disjoint (rfc7432bis §7.11.1), so the advertisement names no \
+                         role and takes no part in the election",
+                    );
+                }
                 out.push(crate::rib::Message::EsNhg {
                     esi,
                     bd,
                     members: group.1.clone(),
                     single_active: group.0,
+                    blocked: group.2,
                 });
                 self.es_nhg_sent.insert((esi, bd), group);
             }
@@ -19297,6 +19405,53 @@ impl Bgp {
         for msg in out {
             let _ = self.ctx.rib.send(msg);
         }
+    }
+
+    /// How the forwarder of the single-active group `(esi, bd)` was chosen,
+    /// recomputed for `show` from the same inputs `evpn_es_nhg_sync` used.
+    ///
+    /// The sync collects every group's signals in one pass; this answers for
+    /// one group, which is what a show command needs. Eligibility matches:
+    /// a PE whose per-ES A-D is gone is not a member, however its per-EVI
+    /// A-D still reads.
+    pub fn es_group_selection(
+        &self,
+        esi: &[u8; 10],
+        bd: u32,
+    ) -> Option<super::ethernet_segment::SaSelectReason> {
+        let live = vpws_es_live_pes(&self.local_rib, esi);
+        let mut signals: BTreeMap<IpAddr, Option<(bool, bool)>> = BTreeMap::new();
+        for table in self.local_rib.evpn.values() {
+            for (prefix, rib) in table.selected.iter() {
+                let EvpnPrefix::EthernetAd { esi: e, eth_tag } = prefix else {
+                    continue;
+                };
+                if e != esi || *eth_tag != 0 || rib.typ == BgpRibType::Originated {
+                    continue;
+                }
+                if extract_vni_from_attr(&rib.attr) != Some(bd) {
+                    continue;
+                }
+                let Some(BgpNexthop::Evpn(originator)) = rib.attr.nexthop else {
+                    continue;
+                };
+                if !live.contains(&originator) {
+                    continue;
+                }
+                let role = rib
+                    .attr
+                    .ecom
+                    .as_ref()
+                    .and_then(|ec| ec.0.iter().find_map(|v| v.as_l2_attr()))
+                    .map(|a| (a.primary, a.backup));
+                signals.insert(originator, role);
+            }
+        }
+        if signals.is_empty() {
+            return None;
+        }
+        let signals: Vec<(IpAddr, Option<(bool, bool)>)> = signals.into_iter().collect();
+        Some(super::ethernet_segment::select_sa_forwarder(&signals).2)
     }
 
     /// The primary of a single-active segment's group for `vni` (RFC 7432

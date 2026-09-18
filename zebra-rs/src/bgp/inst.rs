@@ -905,7 +905,7 @@ pub struct Bgp {
     /// The Ethernet Segment nexthop groups last teed to cradle per
     /// `(ESI, EVI)` (`evpn_es_nhg_sync` diffs against it, RFC 7432 §8.4).
     /// `(ESI, EVI)` → `(single_active, ordered members)`.
-    pub es_nhg_sent: BTreeMap<([u8; 10], u32), (bool, Vec<crate::rib::EsNhgMember>)>,
+    pub es_nhg_sent: BTreeMap<([u8; 10], u32), (bool, Vec<crate::rib::EsNhgMember>, bool)>,
     /// Access-side links currently down, by name — maintained from
     /// `RibRx::LinkAdd` (the link's flags), `LinkDown`, `LinkUp` and
     /// `LinkDel`. An Ethernet Segment whose port is here withholds its ES
