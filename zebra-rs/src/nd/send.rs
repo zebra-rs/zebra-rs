@@ -183,6 +183,19 @@ impl<R: RngSource> RaSender<R> {
         self.cfg = cfg;
     }
 
+    /// Drop requests received before the link became unavailable.
+    pub fn cancel_solicited(&mut self) {
+        self.pending_solicited_at = None;
+    }
+
+    /// Re-enter the initial schedule after link recovery. Keep the last
+    /// multicast time so an RS after a short flap still obeys the rate limit.
+    pub fn restart_initial(&mut self, now: Instant) {
+        self.initial_remaining = MAX_INITIAL_RTR_ADVERTISEMENTS;
+        self.pending_solicited_at = None;
+        self.next_unsolicited_at = now + schedule_initial(&self.cfg, &mut self.rng);
+    }
+
     /// Drain events that are due as of `now`.
     pub fn tick(&mut self, now: Instant) -> Vec<RaEvent> {
         let mut out = Vec::new();
@@ -458,5 +471,25 @@ mod tests {
         s.on_router_solicit("fe80::2".parse().unwrap(), start);
 
         assert_eq!(s.next_wakeup(), start + Duration::from_millis(300));
+    }
+
+    #[test]
+    fn recovery_preserves_multicast_rate_limit_for_an_immediate_rs() {
+        let start = t0();
+        let mut sender = RaSender::new(RaSendConfig::default(), start);
+        let sent = start + Duration::from_secs(16);
+        assert_eq!(sender.tick(sent).len(), 1);
+        sender.on_router_solicit("fe80::2".parse().unwrap(), sent);
+        sender.cancel_solicited();
+        assert!(sender.pending_solicited_at().is_none());
+        sender.restart_initial(sent + Duration::from_millis(100));
+        assert_eq!(sender.last_multicast_at(), Some(sent));
+        sender.on_router_solicit(
+            "fe80::2".parse().unwrap(),
+            sent + Duration::from_millis(200),
+        );
+        assert_eq!(sender.next_wakeup(), sent + MIN_DELAY_BETWEEN_RAS);
+        assert!(sender.tick(sent + Duration::from_secs(2)).is_empty());
+        assert_eq!(sender.tick(sent + MIN_DELAY_BETWEEN_RAS).len(), 1);
     }
 }
