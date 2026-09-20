@@ -618,7 +618,7 @@ Not in phase 1, by design: the non-revertive operational preference
 | **2** ✅ | **SCT codec + T bit** (no behaviour change): `SctEc`, NTP conversions, parse/emit/Display | **Done** — see the status note below |
 | **3a** ✅ | **Origination**: `role-signaling l2-attr`, the elected role on the E-LAN per-EVI A-D, `show` | **Done** — see the status note below |
 | **3b** ✅ | **Consumption**: `evpn_es_nhg_sync()` selects on the signalled role, `es_sa_primary()` retained as the fallback, conflict + reason in `show` | **Done** — see the status note below |
-| **3c** | The stored `EsRemoteBd` with provenance, the incumbent rule and a generation — diagnostics and the state phase 4's timers need | Two-RR provenance in `show`; incumbent stickiness under a conflict |
+| **3c** ✅ | The stored `EsRemoteBd` with provenance, the incumbent rule and a generation | **Done** — see the status note below |
 | **4** | **RFC 9722 behaviour**: staged vs applied verdicts, `EsCarveDue` timer, skew, `fast-recovery` config, exclusivity with `startup-delay`, fallbacks | Unit with an injected clock: SCT accept/reject bounds, skew ordering, T=0 fallback, superseding SCT. BDD: joining PE does not become DF before its SCT; incumbent steps down first |
 | **5** | **Datapath proof (cradle)**: primary switch on a P/B change alone, with the old DF's Type-2s still in the table; both traffic directions on the standby stay blocked | cradle BDD twin of `cradle_evpn_mh_sa_zebra` driven by a role change instead of a port-down; `l2_drop_nondf` / `l2_es_nhg` counters as the discriminator |
 | **6** | **Docs + interop**: update `bgp-evpn-support-status.md` and the ES design doc, book chapter, CHANGELOG at the release cut; run interop-lab phases P1/P4 against FRR for the preference/DP tie-break | Lab report in `bgp-evpn-mh-frr-interop-report.md` |
@@ -743,6 +743,45 @@ on and could not move the group at all. Mutation-verified — forcing
 `Unsignalled` fails that scenario outright and fails the first scenario only
 on its `(signalled)` line, since there the signalled primary happens to also
 be the lowest address.
+
+**Status: phase 3c is implemented** on `evpn-es-remote-state`. `Bgp::es_remote`
+holds, per `(ESI, bridge domain)`, each member's advertised role and **every
+copy** of its per-EVI A-D — `(peer, RD, ADD-PATH id, best, stale)` — rebuilt
+from the routes each sync. Only two things are carried forward rather than
+derived: the incumbent and a generation counting forwarder moves.
+`select_sa_forwarder` takes the incumbent and consults it **only** under
+`Conflict`: the PE already in use keeps the traffic if it is still claiming,
+else the lowest address, so remotes with no history still agree. Moving an
+established flow between two PEs that both believe they forward buys nothing.
+`show bgp evpn ethernet-segment` renders the view under each group, which is
+what finally makes the §4.4 two-RR case explicable — two copies of one PE's
+route appear as two paths, one `[best]`, and a graceful-restart copy shows
+`[stale]`.
+
+Two limits stated rather than implied. The **generation is advisory**: it is
+not teed and nothing acknowledges it, so it is not yet a completion barrier
+(phase 5, with a cradle ack). And `ad_es_live` is always `true` as recorded,
+because the caller drops members whose per-ES A-D is gone before the view is
+built; the field is for when this table becomes the *input* to selection
+rather than a record of it.
+
+Proof: four properties of the incumbent rule as unit tests (kept when still
+claiming; ignored when no longer a claimant; never consulted on a clean
+segment; never revives a member that stopped claiming), and a
+`bgp_evpn_single_active_conflict.feature` that builds the conflict the way it
+occurs in the field — the two segment PEs stop seeing each other's Type-4, so
+each elects over a candidate set of one and both claim P=1. Preference makes
+the **higher** address the incumbent, so keeping it and taking the lowest
+address give different answers. Mutation-verified.
+
+**A test-design note worth keeping.** The first version asserted absolute
+generation values and passed; the mutation run then showed `generation 1`
+with the *correct* primary, revealing that the counter includes transients
+during startup convergence — both PEs briefly elect themselves before they
+have each other's Type-4. An absolute value is therefore an assertion about
+convergence ordering, i.e. a race. Those assertions are gone; what the
+scenarios care about (whether the forwarder moved) is covered deterministically
+by the `primary` assertions. The feature was then run three times to confirm.
 
 Phases 1–2 are pure codec/config and can land in any order. Phase 3 is the
 one that changes forwarding decisions on a remote PE; it is the one to gate

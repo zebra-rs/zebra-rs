@@ -2931,6 +2931,7 @@ fn write_es_nhg_groups(buf: &mut String, bgp: &Bgp) -> std::fmt::Result {
             .es_group_selection(esi, *bd)
             .map(|r| format!(" ({})", r.as_str()))
             .unwrap_or_default();
+        let esi_key = esi;
         let esi = bgp_packet::esi_display(esi);
         if *single_active {
             // A signalled segment where every member declared itself
@@ -2959,6 +2960,46 @@ fn write_es_nhg_groups(buf: &mut String, bgp: &Bgp) -> std::fmt::Result {
                 buf,
                 "  {esi} bd {bd}: single-active primary {primary}{backup}{why}"
             )?;
+            // The derived view behind that one line: what each PE said, and
+            // how many copies of it we are holding. Two copies of one PE's
+            // route is the two-route-reflector case — the reason a member
+            // can outlive one RR's withdrawal — and a stale copy is one
+            // retained across a graceful restart.
+            if let Some(remote) = bgp.es_remote.get(&(*esi_key, *bd)) {
+                writeln!(buf, "    generation {}", remote.generation)?;
+                for (pe, m) in remote.members.iter() {
+                    let role = match m.role {
+                        Some((true, true)) => "P+B (invalid)",
+                        Some((true, false)) => "P",
+                        Some((false, true)) => "B",
+                        Some((false, false)) => "-",
+                        None => "not signalled",
+                    };
+                    let paths: Vec<String> = m
+                        .paths
+                        .iter()
+                        .map(|p| {
+                            let mut s = format!("peer {} rd {}", p.peer, p.rd);
+                            if p.path_id != 0 {
+                                s.push_str(&format!(" id {}", p.path_id));
+                            }
+                            if p.best {
+                                s.push_str(" [best]");
+                            }
+                            if p.stale {
+                                s.push_str(" [stale]");
+                            }
+                            s
+                        })
+                        .collect();
+                    writeln!(
+                        buf,
+                        "    {pe}: role {role}, {} path(s): {}",
+                        paths.len(),
+                        paths.join(", ")
+                    )?;
+                }
+            }
         } else {
             writeln!(buf, "  {esi} bd {bd}: all-active {}", rendered.join(" "))?;
         }

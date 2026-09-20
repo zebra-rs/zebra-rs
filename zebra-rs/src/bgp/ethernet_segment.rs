@@ -743,6 +743,67 @@ impl SaSelectReason {
     }
 }
 
+/// One contributing copy of a member's per-EVI A-D, for `show`. Two route
+/// reflectors reflecting the same PE's route produce two of these under one
+/// `(RD, prefix)` key, and best-path selection picks between them — so a
+/// member that persists after one RR withdrew is explained here rather than
+/// being a mystery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EsRemotePath {
+    /// Router-id of the session the copy arrived on (an RR, usually — not
+    /// the PE that originated it).
+    pub peer: std::net::Ipv4Addr,
+    /// The Route Distinguisher it was carried under.
+    pub rd: String,
+    /// ADD-PATH identifier; 0 when the family is not add-path enabled.
+    pub path_id: u32,
+    /// Retained across a graceful restart of the session it came from.
+    pub stale: bool,
+    /// The copy best-path selection chose.
+    pub best: bool,
+}
+
+/// One PE's contribution to a segment's group in one bridge domain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EsRemoteMember {
+    /// The advertising PE (the A-D's next hop), never the session peer.
+    pub pe: std::net::IpAddr,
+    /// Its advertised `(P, B)`, or `None` where it carries no Layer-2
+    /// Attributes EC — which is what makes the segment partly signalled.
+    pub role: Option<(bool, bool)>,
+    /// Its per-ES A-D is present (RFC 7432 §8.2: its withdrawal is the mass
+    /// withdraw that takes the PE out of the group).
+    ///
+    /// Always `true` as recorded today — the caller has already dropped
+    /// members whose per-ES A-D is gone before this view is built, so a PE
+    /// that failed that check never appears here at all. The field exists
+    /// for the point at which this table becomes the INPUT to selection
+    /// rather than a record of it; until then it must not be read as a live
+    /// check.
+    pub ad_es_live: bool,
+    /// Every copy of its per-EVI A-D we hold.
+    pub paths: Vec<EsRemotePath>,
+}
+
+/// What this PE currently believes about one `(ESI, bridge domain)` — the
+/// derived view behind the teed group, kept so the answer can be explained
+/// and so a choice can be *sticky*.
+///
+/// The routes remain authoritative; this is rebuilt from them on every
+/// sync. What it adds is memory: which PE was active last time (the
+/// incumbent, §4.3), and a generation that counts the times that answer
+/// moved.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EsRemoteBd {
+    pub members: BTreeMap<std::net::IpAddr, EsRemoteMember>,
+    pub active: Option<std::net::IpAddr>,
+    pub backup: Option<std::net::IpAddr>,
+    pub reason: Option<SaSelectReason>,
+    /// Incremented whenever `active` changes. Advisory today — the tee is
+    /// fire-and-forget — but it is what a completion barrier would key on.
+    pub generation: u64,
+}
+
 /// The members whose advertised role is malformed — P=1 and B=1 at once,
 /// which rfc7432bis §7.11.1 gives no meaning. They take no part in the
 /// election ([`select_sa_forwarder`] filters them out); this names them so
@@ -765,6 +826,9 @@ pub fn invalid_role_members(signals: &[(IpAddr, Option<(bool, bool)>)]) -> Vec<I
 /// `(PE, Some((P, B)))`, or `(PE, None)` for a member carrying no Layer-2
 /// Attributes EC.
 ///
+/// `incumbent` is the PE this node last used for the group, and is
+/// consulted **only** to settle a conflict (§4.3).
+///
 /// Returns `(primary, backup, reason)`. `Unsignalled` means the segment's
 /// roles cannot be read — nobody signalled, or only some of them did (see
 /// the unanimity rule below) — and the caller should fall back to its own
@@ -775,6 +839,7 @@ pub fn invalid_role_members(signals: &[(IpAddr, Option<(bool, bool)>)]) -> Vec<I
 /// names the condition instead of silently forwarding to both.
 pub fn select_sa_forwarder(
     signals: &[(IpAddr, Option<(bool, bool)>)],
+    incumbent: Option<IpAddr>,
 ) -> (Option<IpAddr>, Option<IpAddr>, SaSelectReason) {
     // **Roles are trusted only when every eligible member signals one.**
     // A segment where some PEs advertise a role and others do not cannot be
@@ -824,11 +889,23 @@ pub fn select_sa_forwarder(
             None => (None, None, SaSelectReason::NoForwarder),
         },
         1 => (Some(primaries[0]), backup, SaSelectReason::Signalled),
-        _ => (
-            Some(primaries[0]),
-            backup.filter(|b| *b != primaries[0]),
-            SaSelectReason::Conflict,
-        ),
+        _ => {
+            // Several PEs claim the role. Nothing an ingress PE does can
+            // repair that — both of them believe they forward — so the
+            // choice is only about which of them WE use, and moving
+            // traffic buys nothing. Keep the PE we were already using if
+            // it is still one of the claimants; otherwise the lowest
+            // address, which at least makes remotes that have no incumbent
+            // agree with each other.
+            let chosen = incumbent
+                .filter(|inc| primaries.contains(inc))
+                .unwrap_or(primaries[0]);
+            (
+                Some(chosen),
+                backup.filter(|b| *b != chosen),
+                SaSelectReason::Conflict,
+            )
+        }
     }
 }
 
@@ -1597,23 +1674,23 @@ mod tests {
 
         // The ordinary case: one primary, one backup, one neither.
         assert_eq!(
-            select_sa_forwarder(&[(a, p), (b, bk), (c, neither)]),
+            select_sa_forwarder(&[(a, p), (b, bk), (c, neither)], None),
             (Some(a), Some(b), Signalled)
         );
         // Order of the input does not matter.
         assert_eq!(
-            select_sa_forwarder(&[(c, neither), (b, bk), (a, p)]),
+            select_sa_forwarder(&[(c, neither), (b, bk), (a, p)], None),
             (Some(a), Some(b), Signalled)
         );
         // No backup advertised: a primary alone is still an answer.
         assert_eq!(
-            select_sa_forwarder(&[(a, p), (b, neither)]),
+            select_sa_forwarder(&[(a, p), (b, neither)], None),
             (Some(a), None, Signalled)
         );
         // Two PEs advertising B=1 is not a usable standby — it is ambiguous,
         // so no slot-1 preference is expressed.
         assert_eq!(
-            select_sa_forwarder(&[(a, p), (b, bk), (c, bk)]),
+            select_sa_forwarder(&[(a, p), (b, bk), (c, bk)], None),
             (Some(a), None, Signalled)
         );
     }
@@ -1630,7 +1707,7 @@ mod tests {
         let neither = Some((false, false));
 
         assert_eq!(
-            select_sa_forwarder(&[(a, neither), (b, bk)]),
+            select_sa_forwarder(&[(a, neither), (b, bk)], None),
             (Some(b), None, BackupOnly)
         );
         // Every member signalled, and every one of them said "not me". That
@@ -1639,13 +1716,13 @@ mod tests {
         // installs the stale MAC advertiser (or the lowest address) over an
         // explicit non-designated role.
         assert_eq!(
-            select_sa_forwarder(&[(a, neither), (b, neither)]),
+            select_sa_forwarder(&[(a, neither), (b, neither)], None),
             (None, None, NoForwarder)
         );
         // Two PEs claiming backup and nobody claiming primary is the same
         // state: ambiguous, so nobody leads.
         assert_eq!(
-            select_sa_forwarder(&[(a, bk), (b, bk), (c, neither)]),
+            select_sa_forwarder(&[(a, bk), (b, bk), (c, neither)], None),
             (None, None, NoForwarder)
         );
         // A PARTIALLY upgraded segment reads as unsignalled, not as "no
@@ -1656,28 +1733,28 @@ mod tests {
         // well. Enabling the feature one PE at a time is the ordinary
         // rollout, so it must not be the dangerous path.
         assert_eq!(
-            select_sa_forwarder(&[(a, neither), (b, None)]),
+            select_sa_forwarder(&[(a, neither), (b, None)], None),
             (None, None, Unsignalled)
         );
         // No Layer-2 Attributes EC anywhere — a segment whose PEs run
         // `role-signaling inferred`, or an older release.
         assert_eq!(
-            select_sa_forwarder(&[(a, None), (b, None), (c, None)]),
+            select_sa_forwarder(&[(a, None), (b, None), (c, None)], None),
             (None, None, Unsignalled)
         );
-        assert_eq!(select_sa_forwarder(&[]), (None, None, Unsignalled));
+        assert_eq!(select_sa_forwarder(&[], None), (None, None, Unsignalled));
         // Even an explicit P=1 is not trusted while a peer is silent: that
         // peer's own view is unknown, and the segment had a working answer
         // (inference) before anyone was upgraded. Unanimity first, exactly
         // as RFC 8584 §4 requires for AC-DF.
         assert_eq!(
-            select_sa_forwarder(&[(a, None), (b, Some((true, false)))]),
+            select_sa_forwarder(&[(a, None), (b, Some((true, false)))], None),
             (None, None, Unsignalled)
         );
         // Unanimous again once the last PE is upgraded, and the answer
         // appears.
         assert_eq!(
-            select_sa_forwarder(&[(a, neither), (b, Some((true, false)))]),
+            select_sa_forwarder(&[(a, neither), (b, Some((true, false)))], None),
             (Some(b), None, Signalled)
         );
     }
@@ -1692,7 +1769,7 @@ mod tests {
         let [a, b, c] = pes();
         let p = Some((true, false));
         assert_eq!(
-            select_sa_forwarder(&[(b, p), (a, p), (c, Some((false, true)))]),
+            select_sa_forwarder(&[(b, p), (a, p), (c, Some((false, true)))], None),
             (Some(a), Some(c), Conflict)
         );
         assert_eq!(Conflict.as_str(), "conflict");
@@ -1718,13 +1795,13 @@ mod tests {
         // even be a candidate: `b`'s valid claim stands alone and the result
         // is a clean Signalled, not a Conflict.
         assert_eq!(
-            select_sa_forwarder(&[(a, both), (b, p)]),
+            select_sa_forwarder(&[(a, both), (b, p)], None),
             (Some(b), None, Signalled)
         );
         assert_eq!(invalid_role_members(&[(a, both), (b, p)]), vec![a]);
         // It is not a backup either.
         assert_eq!(
-            select_sa_forwarder(&[(a, both), (b, p), (c, Some((false, true)))]),
+            select_sa_forwarder(&[(a, both), (b, p), (c, Some((false, true)))], None),
             (Some(b), Some(c), Signalled)
         );
         // A malformed role beside a silent peer is still a partially
@@ -1732,22 +1809,74 @@ mod tests {
         // `b` has none, so inference decides rather than the group being
         // withheld.
         assert_eq!(
-            select_sa_forwarder(&[(a, both), (b, None)]),
+            select_sa_forwarder(&[(a, both), (b, None)], None),
             (None, None, Unsignalled)
         );
         // With the segment unanimous, the malformed member is simply not
         // selectable and nobody else claims the role.
         assert_eq!(
-            select_sa_forwarder(&[(a, both), (b, Some((false, false)))]),
+            select_sa_forwarder(&[(a, both), (b, Some((false, false)))], None),
             (None, None, NoForwarder)
         );
         // Genuine double claims are still a conflict, and the malformed one
         // stays out of it.
         assert_eq!(
-            select_sa_forwarder(&[(a, both), (b, p), (c, p)]),
+            select_sa_forwarder(&[(a, both), (b, p), (c, p)], None),
             (Some(b), None, Conflict)
         );
         assert!(invalid_role_members(&[(b, p), (c, p)]).is_empty());
+    }
+
+    /// Under a conflict the incumbent keeps the traffic. Several PEs
+    /// claiming the role is a segment-level misconfiguration no ingress PE
+    /// can repair — both of them believe they forward — so the only
+    /// question is which of them WE use, and moving an established flow
+    /// buys nothing. With no incumbent among the claimants the lowest
+    /// address decides, so remotes that have no history still agree.
+    #[test]
+    fn a_conflict_keeps_the_incumbent_when_it_is_still_claiming() {
+        use SaSelectReason::*;
+        let [a, b, c] = pes();
+        let p = Some((true, false));
+        let both_claim = &[(a, p), (b, p)][..];
+
+        // No history: lowest address, as before.
+        assert_eq!(
+            select_sa_forwarder(both_claim, None),
+            (Some(a), None, Conflict)
+        );
+        // The PE we were already using is still claiming, so it stays —
+        // even though it is NOT the lowest address, which is exactly the
+        // case where this rule earns its keep.
+        assert_eq!(
+            select_sa_forwarder(both_claim, Some(b)),
+            (Some(b), None, Conflict)
+        );
+        // An incumbent that has stopped claiming (or left the group) has no
+        // vote; the deterministic tie-break takes over.
+        assert_eq!(
+            select_sa_forwarder(both_claim, Some(c)),
+            (Some(a), None, Conflict)
+        );
+        // A backup is still offered, unless it collides with the choice.
+        let with_backup = &[(a, p), (b, p), (c, Some((false, true)))][..];
+        assert_eq!(
+            select_sa_forwarder(with_backup, Some(b)),
+            (Some(b), Some(c), Conflict)
+        );
+        // The incumbent is consulted ONLY for a conflict: a clean segment
+        // follows the signal even when the incumbent is someone else.
+        let clean = &[(a, Some((false, false))), (b, p)][..];
+        assert_eq!(
+            select_sa_forwarder(clean, Some(a)),
+            (Some(b), None, Signalled)
+        );
+        // ... and it never revives a member that no longer signals.
+        let gone = &[(a, Some((false, false))), (b, Some((false, false)))][..];
+        assert_eq!(
+            select_sa_forwarder(gone, Some(b)),
+            (None, None, NoForwarder)
+        );
     }
 
     /// The group is ordered primary, then backup, then the rest — the
