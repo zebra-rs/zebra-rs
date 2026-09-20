@@ -128,6 +128,27 @@ Feature: EVPN single-active — a segment with no forwarder withholds its MACs
     # a MAC on our own segment is never withheld by a remote group's
     # verdict.)
 
+  Scenario: A partly signalled segment falls back instead of withholding
+    Given the test topology exists
+    # The rollout case. z5 goes back to `role-signaling inferred` — an older
+    # release, or a PE not migrated yet — while z1 still advertises P=0/B=0
+    # and the election still puts the DF on a portless PE. The group is now
+    # only PARTLY signalled: reading "no member claims primary" as "withhold
+    # the group" would blackhole a segment that is forwarding perfectly well,
+    # because the silent PE may be the very one forwarding.
+    #
+    # So the roles must not be read at all until every member signals, the
+    # way RFC 8584 §4 gates AC-DF — and the remote goes back to the inference
+    # it used before anyone was upgraded.
+    When I apply config "z5-inferred.yaml" to namespace "z5"
+    Then show command "show bgp evpn ethernet-segment" in namespace "z3" should eventually contain "(inferred)"
+    And show command "show bgp evpn ethernet-segment" in namespace "z3" should not contain "no forwarder"
+    # The MAC that the blocked state had withheld is forwarding again.
+    And bridge fdb "vxlan10" in namespace "z3" should eventually contain "aa:bb:cc:dd:ee:01"
+    # Put z5 back so the scenarios below see a fully signalled segment.
+    When I apply config "z5-1.yaml" to namespace "z5"
+    Then show command "show bgp evpn ethernet-segment" in namespace "z3" should eventually contain "no forwarder (MACs withheld)"
+
   Scenario: Restoring a forwarder reinstalls the withheld MAC
     Given the test topology exists
     # z1 outranks them again, advertises P=1, and the MAC that was never

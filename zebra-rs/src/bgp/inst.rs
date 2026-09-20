@@ -906,6 +906,19 @@ pub struct Bgp {
     /// `(ESI, EVI)` (`evpn_es_nhg_sync` diffs against it, RFC 7432 §8.4).
     /// `(ESI, EVI)` → `(single_active, ordered members)`.
     pub es_nhg_sent: BTreeMap<([u8; 10], u32), (bool, Vec<crate::rib::EsNhgMember>, bool)>,
+    /// The last diagnostic verdict reported for each single-active group —
+    /// `(reason, members advertising a malformed role)`. Diffed separately
+    /// from `es_nhg_sent` because a conflict can appear without the teed
+    /// member list changing: a second PE claiming primary leaves the lowest
+    /// address at slot 0 either way.
+    #[allow(clippy::type_complexity)]
+    pub es_nhg_diag: BTreeMap<
+        ([u8; 10], u32),
+        (
+            super::ethernet_segment::SaSelectReason,
+            Vec<std::net::IpAddr>,
+        ),
+    >,
     /// Access-side links currently down, by name — maintained from
     /// `RibRx::LinkAdd` (the link's flags), `LinkDown`, `LinkUp` and
     /// `LinkDel`. An Ethernet Segment whose port is here withholds its ES
@@ -1438,6 +1451,7 @@ impl Bgp {
             l2_port_evis: BTreeMap::new(),
             es_df_sent: BTreeMap::new(),
             es_nhg_sent: BTreeMap::new(),
+            es_nhg_diag: BTreeMap::new(),
             links_down: std::collections::BTreeSet::new(),
             local_smet: BTreeMap::new(),
             ethernet_segments: BTreeMap::new(),

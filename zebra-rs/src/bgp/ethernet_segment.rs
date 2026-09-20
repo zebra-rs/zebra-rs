@@ -765,8 +765,10 @@ pub fn invalid_role_members(signals: &[(IpAddr, Option<(bool, bool)>)]) -> Vec<I
 /// `(PE, Some((P, B)))`, or `(PE, None)` for a member carrying no Layer-2
 /// Attributes EC.
 ///
-/// Returns `(primary, backup, reason)`. `Unsignalled` means nobody told us
-/// anything and the caller should fall back to its own inference; every
+/// Returns `(primary, backup, reason)`. `Unsignalled` means the segment's
+/// roles cannot be read — nobody signalled, or only some of them did (see
+/// the unanimity rule below) — and the caller should fall back to its own
+/// inference; every
 /// other reason is an answer. Two PEs claiming P=1 is a segment-level
 /// misconfiguration that no ingress PE can repair — this one at least
 /// installs a single forwarder deterministically (the lowest address) and
@@ -774,7 +776,20 @@ pub fn invalid_role_members(signals: &[(IpAddr, Option<(bool, bool)>)]) -> Vec<I
 pub fn select_sa_forwarder(
     signals: &[(IpAddr, Option<(bool, bool)>)],
 ) -> (Option<IpAddr>, Option<IpAddr>, SaSelectReason) {
-    if signals.iter().all(|(_, bits)| bits.is_none()) {
+    // **Roles are trusted only when every eligible member signals one.**
+    // A segment where some PEs advertise a role and others do not cannot be
+    // read: the PE saying nothing may be the Designated Forwarder, and then
+    // "no member claims primary" would mean "withhold the group" — turning
+    // the ordinary rollout of enabling `role-signaling` one PE at a time
+    // into an outage on a segment that is forwarding perfectly well. RFC
+    // 8584 §4 treats AC-DF the same way (see [`ac_df_in_effect`]): a
+    // capability that changes how the answer is computed takes effect only
+    // once the whole segment has it.
+    //
+    // The cost is that an explicit P=1 is ignored while any peer is silent,
+    // and inference decides instead — the behaviour that segment had before
+    // anyone was upgraded.
+    if signals.is_empty() || signals.iter().any(|(_, bits)| bits.is_none()) {
         return (None, None, SaSelectReason::Unsignalled);
     }
     // P=1 together with B=1 is not a role, it is a malformed advertisement
@@ -1633,11 +1648,16 @@ mod tests {
             select_sa_forwarder(&[(a, bk), (b, bk), (c, neither)]),
             (None, None, NoForwarder)
         );
-        // One PE signalling "not me" while another says nothing at all is
-        // still not silence — the segment does signal.
+        // A PARTIALLY upgraded segment reads as unsignalled, not as "no
+        // forwarder". The silent PE may be the Designated Forwarder — an
+        // older release, or one whose `role-signaling` is still at the
+        // default — and withholding the group because the OTHER PE said
+        // "not me" would blackhole a segment that is forwarding perfectly
+        // well. Enabling the feature one PE at a time is the ordinary
+        // rollout, so it must not be the dangerous path.
         assert_eq!(
             select_sa_forwarder(&[(a, neither), (b, None)]),
-            (None, None, NoForwarder)
+            (None, None, Unsignalled)
         );
         // No Layer-2 Attributes EC anywhere — a segment whose PEs run
         // `role-signaling inferred`, or an older release.
@@ -1646,10 +1666,18 @@ mod tests {
             (None, None, Unsignalled)
         );
         assert_eq!(select_sa_forwarder(&[]), (None, None, Unsignalled));
-        // A mixed segment (one PE upgraded, one not) still has an answer
-        // from the PE that does signal.
+        // Even an explicit P=1 is not trusted while a peer is silent: that
+        // peer's own view is unknown, and the segment had a working answer
+        // (inference) before anyone was upgraded. Unanimity first, exactly
+        // as RFC 8584 §4 requires for AC-DF.
         assert_eq!(
             select_sa_forwarder(&[(a, None), (b, Some((true, false)))]),
+            (None, None, Unsignalled)
+        );
+        // Unanimous again once the last PE is upgraded, and the answer
+        // appears.
+        assert_eq!(
+            select_sa_forwarder(&[(a, neither), (b, Some((true, false)))]),
             (Some(b), None, Signalled)
         );
     }
@@ -1699,10 +1727,18 @@ mod tests {
             select_sa_forwarder(&[(a, both), (b, p), (c, Some((false, true)))]),
             (Some(b), Some(c), Signalled)
         );
-        // A segment where the only signal is malformed has no forwarder —
-        // not a primary, and not a fallback to inference.
+        // A malformed role beside a silent peer is still a partially
+        // signalled segment: unanimity is about the EC being present, and
+        // `b` has none, so inference decides rather than the group being
+        // withheld.
         assert_eq!(
             select_sa_forwarder(&[(a, both), (b, None)]),
+            (None, None, Unsignalled)
+        );
+        // With the segment unanimous, the malformed member is simply not
+        // selectable and nobody else claims the role.
+        assert_eq!(
+            select_sa_forwarder(&[(a, both), (b, Some((false, false)))]),
             (None, None, NoForwarder)
         );
         // Genuine double claims are still a conflict, and the malformed one

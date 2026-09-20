@@ -19336,6 +19336,14 @@ impl Bgp {
             .filter(|k| !groups.contains_key(*k))
             .copied()
             .collect();
+        // Diagnostics are keyed on the verdicts computed THIS pass, not on
+        // the surviving groups: a group that stays but leaves single-active
+        // has no verdict at all — `reasons` is only filled for single-active
+        // segments — and a stale entry would then suppress the warning if
+        // the same condition reappeared when it went back. Dropping
+        // everything absent from `reasons` covers that as well as the groups
+        // that vanished outright.
+        self.es_nhg_diag.retain(|k, _| reasons.contains_key(k));
         for (esi, bd) in gone {
             self.es_nhg_sent.remove(&(esi, bd));
             out.push(crate::rib::Message::EsNhg {
@@ -19348,50 +19356,60 @@ impl Bgp {
                 blocked: false,
             });
         }
-        for ((esi, bd), group) in groups {
-            if self.es_nhg_sent.get(&(esi, bd)) != Some(&group) {
-                // Gated on the group actually changing: this sync runs on
-                // every ES event, and a conflict that persists would
-                // otherwise log on each of them.
-                match reasons.get(&(esi, bd)) {
-                    Some(super::ethernet_segment::SaSelectReason::Conflict) => {
-                        tracing::warn!(
-                            proto = "bgp",
-                            category = "evpn",
-                            esi = %bgp_packet::esi_display(&esi),
-                            bd,
-                            "bgp: more than one PE advertises primary for this single-active \
-                             segment; forwarding to the lowest address. Both of them believe \
-                             they forward — check the segment's DF election configuration",
-                        );
-                    }
-                    Some(super::ethernet_segment::SaSelectReason::NoForwarder) => {
-                        tracing::warn!(
-                            proto = "bgp",
-                            category = "evpn",
-                            esi = %bgp_packet::esi_display(&esi),
-                            bd,
-                            "bgp: no PE advertises a forwarding role for this single-active \
-                             segment; withholding the nexthop group rather than picking one \
-                             that declared itself non-designated",
-                        );
-                    }
-                    _ => {}
-                }
-                if let Some(bad) = invalid.get(&(esi, bd))
-                    && !bad.is_empty()
-                {
+        // Diagnostics are diffed on their OWN state, not on the teed
+        // group. A segment can acquire a second PE claiming primary, or a
+        // member can start advertising a malformed P=1/B=1, without the
+        // ordered member list changing at all — the lower address stays at
+        // slot 0 either way — and gating the warning on the group's diff
+        // would swallow exactly those cases. Keyed diffing also keeps a
+        // persistent conflict from logging on every drain.
+        for ((esi, bd), reason) in reasons.iter() {
+            let bad = invalid.get(&(*esi, *bd)).cloned().unwrap_or_default();
+            let diag = (*reason, bad.clone());
+            if self.es_nhg_diag.get(&(*esi, *bd)) == Some(&diag) {
+                continue;
+            }
+            self.es_nhg_diag.insert((*esi, *bd), diag);
+            match reason {
+                super::ethernet_segment::SaSelectReason::Conflict => {
                     tracing::warn!(
                         proto = "bgp",
                         category = "evpn",
-                        esi = %bgp_packet::esi_display(&esi),
+                        esi = %bgp_packet::esi_display(esi),
                         bd,
-                        pes = %bad.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(","),
-                        "bgp: ignoring per-EVI A-D role with both P and B set — the two bits \
-                         are disjoint (rfc7432bis §7.11.1), so the advertisement names no \
-                         role and takes no part in the election",
+                        "bgp: more than one PE advertises primary for this single-active \
+                         segment; forwarding to the lowest address. Both of them believe \
+                         they forward — check the segment's DF election configuration",
                     );
                 }
+                super::ethernet_segment::SaSelectReason::NoForwarder => {
+                    tracing::warn!(
+                        proto = "bgp",
+                        category = "evpn",
+                        esi = %bgp_packet::esi_display(esi),
+                        bd,
+                        "bgp: no PE advertises a forwarding role for this single-active \
+                         segment; withholding the nexthop group rather than picking one \
+                         that declared itself non-designated",
+                    );
+                }
+                _ => {}
+            }
+            if !bad.is_empty() {
+                tracing::warn!(
+                    proto = "bgp",
+                    category = "evpn",
+                    esi = %bgp_packet::esi_display(esi),
+                    bd,
+                    pes = %bad.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(","),
+                    "bgp: ignoring per-EVI A-D role with both P and B set — the two bits \
+                     are disjoint (rfc7432bis §7.11.1), so the advertisement names no \
+                     role and takes no part in the election",
+                );
+            }
+        }
+        for ((esi, bd), group) in groups {
+            if self.es_nhg_sent.get(&(esi, bd)) != Some(&group) {
                 out.push(crate::rib::Message::EsNhg {
                     esi,
                     bd,
