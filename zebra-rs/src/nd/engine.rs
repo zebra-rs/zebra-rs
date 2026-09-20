@@ -19,6 +19,7 @@ use std::time::Instant;
 
 use nd_packet::RaFlags;
 
+use crate::rib::api::RibRx;
 use crate::rib::link::Link;
 
 use super::send::{RaEvent, RaSendConfig, RaSender};
@@ -149,6 +150,29 @@ impl NdEngine {
             ra_config_by_name: BTreeMap::new(),
             counters: BTreeMap::new(),
             neighbors: BTreeMap::new(),
+        }
+    }
+
+    /// Dispatch one RIB notification onto the handlers below.
+    ///
+    /// Link lifecycle is all the engine needs; address and route
+    /// notifications land when the BGP unnumbered hand-off needs to
+    /// derive the local source link-local in a follow-up PR.
+    ///
+    /// This lives on the engine rather than on `Nd` so it can be
+    /// tested: `Nd::new` takes a live raw ICMPv6 socket, which needs
+    /// `CAP_NET_RAW` and so cannot be built under `cargo test`. The
+    /// wiring is worth testing on its own — the bug this dispatch was
+    /// written to fix (RA never restarting after a link flap, #2393)
+    /// *was* a missing match arm, and swapping the `LinkUp` /
+    /// `LinkDown` arms is not otherwise caught by anything.
+    pub fn process_rib_msg(&mut self, msg: RibRx, now: Instant) {
+        match msg {
+            RibRx::LinkAdd(link) => self.process_link_add(&link, now),
+            RibRx::LinkDown(ifindex) => self.process_link_state(ifindex, false, now),
+            RibRx::LinkUp(ifindex) => self.process_link_state(ifindex, true, now),
+            RibRx::LinkDel(ifindex) => self.process_link_del(ifindex),
+            _ => {}
         }
     }
 
@@ -1374,9 +1398,11 @@ mod tests {
         assert!(!eng.counters().contains_key(&7));
         assert!(!eng.neighbors().contains_key(&7));
 
-        // A rename re-points the old name before the delete arrives:
-        // ifindex 7 is now swp1, and a different device took the name
-        // eth0. Deleting 7 must not take eth0's mapping with it.
+        // A rename: ifindex 7 goes eth0 -> swp1, and a third device
+        // takes the freed name eth0 on ifindex 9. Deleting 7 pops
+        // "swp1", which still points at 7, so the guarded removal and
+        // an unguarded one behave identically here — this leg covers
+        // the ordinary rename bookkeeping, not the guard.
         let mut eng = NdEngine::new();
         eng.process_link_add(&link("eth0", 7), start);
         eng.process_link_add(&link("swp1", 7), start);
@@ -1384,6 +1410,28 @@ mod tests {
         eng.process_link_del(7);
         assert!(eng.ifname_of(7).is_none());
         assert!(eng.ifindex_of("swp1").is_none());
+        assert_eq!(eng.ifindex_of("eth0"), Some(9));
+
+        // The guard itself. `process_link_del` pops `name_by_ifindex`
+        // and must only clear the forward entry when it still points
+        // back, because a name can have been re-pointed at a
+        // different ifindex in the meantime. Reaching that state
+        // needs no rename at all — eth0 re-created on a fresh ifindex
+        // while the stale row for 7 is still around (its LinkDel lost
+        // to a netlink overrun, or still in flight) is enough:
+        // `name_by_ifindex[7] == "eth0"` while `ifindex_by_name["eth0"]
+        // == 9`. An unguarded `ifindex_by_name.remove(&name)` would
+        // take the live ifindex 9 mapping with it, and `eth0` would
+        // stop resolving — so `unset_ra_config("eth0")` could no
+        // longer find the sender to disable, leaving a router
+        // advertising after the operator told it to stop.
+        let mut eng = NdEngine::new();
+        eng.process_link_add(&link("eth0", 7), start);
+        eng.process_link_add(&link("eth0", 9), start);
+        assert_eq!(eng.ifname_of(7), Some("eth0"));
+        assert_eq!(eng.ifindex_of("eth0"), Some(9));
+        eng.process_link_del(7);
+        assert!(eng.ifname_of(7).is_none());
         assert_eq!(eng.ifindex_of("eth0"), Some(9));
 
         // A delete for an ifindex we never saw is a no-op.
@@ -1528,5 +1576,128 @@ mod tests {
         assert!(eng.is_enabled(7));
         assert_eq!(eng.next_wakeup(), Some(start + Duration::from_secs(16)));
         assert_eq!(eng.tick(start + Duration::from_secs(16)).len(), 1);
+    }
+
+    // ── RIB dispatch wiring ─────────────────────────────────────────
+    //
+    // `process_rib_msg` is the seam where #2393's bug lived: the
+    // engine had the handlers, and the wrapper only ever called one of
+    // them. These drive the notifications RIB actually emits rather
+    // than the handlers directly, so a match arm pointed at the wrong
+    // handler — or at the wrong boolean — fails here.
+
+    /// `LinkDown` must suspend and `LinkUp` must resume. Pinned
+    /// against each other so swapping the two arms' `false` / `true`
+    /// literals cannot pass: a swap makes `LinkDown` resume (leaving
+    /// the sender armed, so `next_wakeup` stays `Some`) and `LinkUp`
+    /// suspend.
+    #[test]
+    fn rib_link_down_suspends_and_link_up_resumes() {
+        use std::time::Duration;
+        let start = t0();
+        let mut eng = NdEngine::new();
+        eng.process_rib_msg(RibRx::LinkAdd(link("eth0", 7)), start);
+        eng.set_ra_config("eth0".into(), RaSendConfig::default(), start);
+        for _ in 0..3 {
+            assert_eq!(eng.tick(eng.next_wakeup().unwrap()).len(), 1);
+        }
+        assert_eq!(eng.sender(7).unwrap().initial_remaining(), 0);
+
+        let down = start + Duration::from_secs(60);
+        eng.process_rib_msg(RibRx::LinkDown(7), down);
+        assert!(
+            eng.next_wakeup().is_none(),
+            "LinkDown must suspend scheduling"
+        );
+        assert!(eng.tick(down + Duration::from_secs(600)).is_empty());
+
+        let up = down + Duration::from_secs(700);
+        eng.process_rib_msg(RibRx::LinkUp(7), up);
+        assert_eq!(
+            eng.sender(7).unwrap().initial_remaining(),
+            super::super::send::MAX_INITIAL_RTR_ADVERTISEMENTS,
+            "LinkUp must restart the initial burst"
+        );
+        assert_eq!(eng.next_wakeup(), Some(up + Duration::from_secs(16)));
+    }
+
+    /// `LinkAdd` must reach `process_link_add` — the name → ifindex
+    /// map it builds is what the name-keyed `send-advertisements`
+    /// config resolves through, so a dropped arm means RA never arms.
+    #[test]
+    fn rib_link_add_learns_the_link_and_applies_pending_config() {
+        use std::time::Duration;
+        let start = t0();
+        let mut eng = NdEngine::new();
+        eng.set_ra_config("eth0".into(), RaSendConfig::default(), start);
+        assert!(eng.next_wakeup().is_none());
+
+        eng.process_rib_msg(RibRx::LinkAdd(link("eth0", 7)), start);
+
+        assert_eq!(eng.ifindex_of("eth0"), Some(7));
+        assert_eq!(eng.ifname_of(7), Some("eth0"));
+        assert!(eng.is_enabled(7));
+        assert_eq!(eng.next_wakeup(), Some(start + Duration::from_secs(16)));
+    }
+
+    /// `LinkDel` must reach `process_link_del`, not `process_link_state`
+    /// — the difference is whether the ifindex is released or merely
+    /// suspended, and a suspended ifindex would hand its sender to
+    /// whatever device the kernel gives the number to next.
+    #[test]
+    fn rib_link_del_releases_the_ifindex_rather_than_suspending_it() {
+        use std::time::Duration;
+        let start = t0();
+        let mut eng = NdEngine::new();
+        eng.process_rib_msg(RibRx::LinkAdd(link("eth0", 7)), start);
+        eng.set_ra_config("eth0".into(), RaSendConfig::default(), start);
+        assert!(eng.is_enabled(7));
+
+        eng.process_rib_msg(RibRx::LinkDel(7), start + Duration::from_secs(1));
+
+        // Released, not suspended: the name mapping is gone too, which
+        // `process_link_state` would have left alone.
+        assert!(!eng.is_enabled(7));
+        assert!(eng.ifname_of(7).is_none());
+        assert!(eng.ifindex_of("eth0").is_none());
+        assert!(eng.next_wakeup().is_none());
+
+        // And the ifindex is genuinely free: an unrelated device
+        // picking it up gets no sender, because nothing is configured
+        // under *its* name.
+        let reused = start + Duration::from_secs(300);
+        eng.process_rib_msg(RibRx::LinkAdd(link("eth9", 7)), reused);
+        assert!(!eng.is_enabled(7));
+        assert!(eng.next_wakeup().is_none());
+    }
+
+    /// The `_ => {}` arm. These variants reach ND on the same channel
+    /// and must not disturb a running sender — in particular `LinkMtu`
+    /// is how RIB actually reports an MTU change (not a re-issued
+    /// `LinkAdd`), and it arrives on links we are advertising on.
+    #[test]
+    fn rib_non_link_lifecycle_messages_are_ignored() {
+        use std::time::Duration;
+        let start = t0();
+        let mut eng = NdEngine::new();
+        eng.process_rib_msg(RibRx::LinkAdd(link("eth0", 7)), start);
+        eng.set_ra_config("eth0".into(), RaSendConfig::default(), start);
+        let due = eng.next_wakeup();
+        let remaining = eng.sender(7).unwrap().initial_remaining();
+
+        let now = start + Duration::from_secs(5);
+        eng.process_rib_msg(
+            RibRx::LinkMtu {
+                ifindex: 7,
+                mtu: 9000,
+            },
+            now,
+        );
+        eng.process_rib_msg(RibRx::RouterIdUpdate("1.1.1.1".parse().unwrap()), now);
+        eng.process_rib_msg(RibRx::EoR, now);
+
+        assert_eq!(eng.next_wakeup(), due, "schedule must be untouched");
+        assert_eq!(eng.sender(7).unwrap().initial_remaining(), remaining);
+        assert!(eng.is_enabled(7));
     }
 }
