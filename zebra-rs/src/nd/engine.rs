@@ -13,7 +13,7 @@
 //! a raw socket.
 #![allow(dead_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::Ipv6Addr;
 use std::time::Instant;
 
@@ -109,6 +109,7 @@ pub const MAX_TRACKED_SOURCES: usize = 256;
 
 pub struct NdEngine {
     senders: BTreeMap<u32, RaSender>,
+    down_links: BTreeSet<u32>,
     notifier: Option<tokio::sync::mpsc::UnboundedSender<NdEvent>>,
     /// Mirror of the RIB's link table — ifindex → name. Populated by
     /// [`Self::process_link_add`] on every `RibRx::LinkAdd`. Lets the
@@ -141,6 +142,7 @@ impl NdEngine {
     pub fn new() -> Self {
         Self {
             senders: BTreeMap::new(),
+            down_links: BTreeSet::new(),
             notifier: None,
             ifindex_by_name: BTreeMap::new(),
             name_by_ifindex: BTreeMap::new(),
@@ -150,10 +152,10 @@ impl NdEngine {
         }
     }
 
-    /// Absorb a link-add notification from RIB. The RIB never emits
-    /// LinkDel — once a link is known it stays in our table even if
-    /// the kernel administratively removes the device. That matches
-    /// the OSPF / BFD pattern in this repo.
+    /// Absorb a link-add notification from RIB. The reverse — the
+    /// kernel device going away — arrives as `RibRx::LinkDel` and is
+    /// handled by [`Self::process_link_del`], which must run so a
+    /// reused ifindex doesn't inherit the previous device's sender.
     pub fn process_link_add(&mut self, link: &Link, now: Instant) {
         // Insert preserves the most recently seen name; renaming a
         // link via `ip link set X name Y` is rare but if it happens,
@@ -173,6 +175,7 @@ impl NdEngine {
             }
         }
         self.ifindex_by_name.insert(link.name.clone(), link.index);
+        self.process_link_state(link.index, link.is_up(), now);
 
         // Deferred config apply: the operator's `send-advertisements`
         // may have been committed before RIB announced this link.
@@ -183,6 +186,58 @@ impl NdEngine {
             && let Some(cfg) = self.ra_config_by_name.get(&link.name).cloned()
         {
             self.enable_interface(link.index, cfg, now);
+        }
+    }
+
+    /// Suspend scheduling while down; only a real Down -> Up transition
+    /// restarts the initial burst. Attribute re-announcements are harmless.
+    pub fn process_link_state(&mut self, ifindex: u32, up: bool, now: Instant) {
+        if up {
+            if self.down_links.remove(&ifindex)
+                && let Some(sender) = self.senders.get_mut(&ifindex)
+            {
+                sender.restart_initial(now);
+            }
+        } else {
+            self.down_links.insert(ifindex);
+            if let Some(sender) = self.senders.get_mut(&ifindex) {
+                sender.cancel_solicited();
+            }
+        }
+    }
+
+    /// The kernel device for `ifindex` is gone, which `RibRx::LinkDel`
+    /// defines as permanent for that ifindex: drop everything keyed off
+    /// it — the sender, the down-link marker, the counters, the
+    /// neighbor records, and both directions of the name map.
+    ///
+    /// The ifindex is free for the kernel to hand to an unrelated
+    /// device. A leftover sender would keep advertising the old
+    /// interface's template out the new one, since
+    /// [`Self::process_link_add`] declines to replace a sender that
+    /// already exists. Leftover counters and neighbor records are the
+    /// same mistake one level down: both are keyed by ifindex alone and
+    /// are re-created on demand by `on_recv`, so the new device's
+    /// observations would accumulate on top of the old device's, and
+    /// `show ipv6 nd interface` — which lists the union of the sender,
+    /// counter and neighbor maps — would keep rendering a device that
+    /// no longer exists.
+    ///
+    /// `ra_config_by_name` is deliberately kept: it is the operator's
+    /// durable intent, keyed by name rather than ifindex, so an
+    /// interface re-created under the same name picks its RA config
+    /// back up through the deferred apply in `process_link_add`.
+    pub fn process_link_del(&mut self, ifindex: u32) {
+        self.senders.remove(&ifindex);
+        self.down_links.remove(&ifindex);
+        self.counters.remove(&ifindex);
+        self.neighbors.remove(&ifindex);
+        if let Some(name) = self.name_by_ifindex.remove(&ifindex) {
+            // Only clear the forward entry if it still points here; a
+            // rename may already have re-pointed the old name.
+            if self.ifindex_by_name.get(&name) == Some(&ifindex) {
+                self.ifindex_by_name.remove(&name);
+            }
         }
     }
 
@@ -245,7 +300,11 @@ impl NdEngine {
     /// when no interfaces are enabled — caller can park the timer
     /// indefinitely.
     pub fn next_wakeup(&self) -> Option<Instant> {
-        self.senders.values().map(|s| s.next_wakeup()).min()
+        self.senders
+            .iter()
+            .filter(|(ifindex, _)| !self.down_links.contains(*ifindex))
+            .map(|(_, sender)| sender.next_wakeup())
+            .min()
     }
 
     // ── Read accessors (used by the upcoming show command) ──────────────
@@ -315,7 +374,9 @@ impl NdEngine {
                     now,
                     |nb| nb.rx_rs += 1,
                 );
-                if let Some(sender) = self.senders.get_mut(&ifindex) {
+                if !self.down_links.contains(&ifindex)
+                    && let Some(sender) = self.senders.get_mut(&ifindex)
+                {
                     sender.on_router_solicit(src, now);
                 }
             }
@@ -357,6 +418,9 @@ impl NdEngine {
     pub fn tick(&mut self, now: Instant) -> Vec<NdSend> {
         let mut out = Vec::new();
         for (&ifindex, sender) in self.senders.iter_mut() {
+            if self.down_links.contains(&ifindex) {
+                continue;
+            }
             for ev in sender.tick(now) {
                 match ev {
                     RaEvent::SendUnsolicited { ra } => {
@@ -462,7 +526,7 @@ mod tests {
             mtu: 1500,
             original_mtu: 1500,
             metric: 1,
-            flags: LinkFlags::default(),
+            flags: LinkFlags::Up | LinkFlags::LowerUp,
             link_type: LinkType::Ethernet,
             label: false,
             mac: None,
@@ -1151,5 +1215,243 @@ mod tests {
                 "tx_ra_unsolicited should remain 0"
             );
         }
+    }
+
+    /// The engine builds its `RaSender`s with the production
+    /// [`super::send::ThreadRng`], so these tests would normally be at
+    /// the mercy of the jitter draw. They aren't, and not by luck:
+    /// with `RaSendConfig::default()` (200 / 600 s) `schedule_initial`
+    /// collapses to `duration_in(16s, 16s)`, and `RngSource` returns
+    /// `lo` whenever `hi <= lo`. Every `+16s` below rests on that. If
+    /// the default intervals ever drop under
+    /// `MAX_INITIAL_RTR_ADVERT_INTERVAL`, the draw stops being a point
+    /// and these assertions must become ranges (as the periodic gap
+    /// check at the end of this test already is).
+    #[test]
+    fn recovery_restarts_initials_after_a_long_down_without_consuming_them() {
+        use std::time::Duration;
+        let start = t0();
+        let mut eng = NdEngine::new();
+        eng.process_link_add(&link("eth0", 7), start);
+        eng.set_ra_config("eth0".into(), RaSendConfig::default(), start);
+        for _ in 0..3 {
+            assert_eq!(eng.tick(eng.next_wakeup().unwrap()).len(), 1);
+        }
+        assert_eq!(eng.sender(7).unwrap().initial_remaining(), 0);
+        let old_due = eng.next_wakeup().unwrap();
+        eng.process_link_state(7, false, old_due - Duration::from_secs(1));
+        assert!(eng.next_wakeup().is_none());
+        let up = old_due + Duration::from_secs(600);
+        assert!(eng.tick(up).is_empty());
+        assert_eq!(eng.counters()[&7].tx_ra_unsolicited, 3);
+        eng.process_link_state(7, true, up);
+        assert_eq!(eng.sender(7).unwrap().initial_remaining(), 3);
+        assert_eq!(eng.next_wakeup(), Some(up + Duration::from_secs(16)));
+        for _ in 0..3 {
+            assert_eq!(eng.tick(eng.next_wakeup().unwrap()).len(), 1);
+        }
+        assert_eq!(eng.sender(7).unwrap().initial_remaining(), 0);
+        let gap = eng.next_wakeup().unwrap() - eng.sender(7).unwrap().last_multicast_at().unwrap();
+        assert!((Duration::from_secs(200)..=Duration::from_secs(600)).contains(&gap));
+    }
+
+    #[test]
+    fn duplicate_up_and_attribute_updates_do_not_restart_periodic_schedule() {
+        use std::time::Duration;
+        let start = t0();
+        let mut eng = NdEngine::new();
+        eng.process_link_add(&link("eth0", 7), start);
+        eng.set_ra_config("eth0".into(), RaSendConfig::default(), start);
+        for _ in 0..3 {
+            eng.tick(eng.next_wakeup().unwrap());
+        }
+        let due = eng.next_wakeup();
+        let now = start + Duration::from_secs(50);
+        eng.process_link_state(7, true, now);
+        let mut updated = link("eth0", 7);
+        updated.mtu = 9000;
+        eng.process_link_add(&updated, now);
+        assert_eq!(eng.next_wakeup(), due);
+        assert_eq!(eng.sender(7).unwrap().initial_remaining(), 0);
+        eng.process_link_state(7, false, now);
+        eng.process_link_state(7, false, now + Duration::from_secs(1));
+        eng.process_link_state(7, true, now + Duration::from_secs(2));
+        let recovered_due = eng.next_wakeup();
+        eng.process_link_state(7, true, now + Duration::from_secs(3));
+        eng.process_link_add(&updated, now + Duration::from_secs(4));
+        assert_eq!(eng.next_wakeup(), recovered_due);
+    }
+
+    #[test]
+    fn down_clears_solicited_reply_and_does_not_suspend_other_interfaces() {
+        use std::time::Duration;
+        let start = t0();
+        let mut eng = NdEngine::new();
+        for idx in [7, 8] {
+            eng.enable_interface(idx, RaSendConfig::default(), start);
+        }
+        eng.on_recv(
+            NdRecv::RouterSolicit {
+                ifindex: 7,
+                src: ll("fe80::2"),
+                rs: RouterSolicit::default(),
+            },
+            start,
+        );
+        assert!(eng.sender(7).unwrap().pending_solicited_at().is_some());
+        eng.process_link_state(7, false, start);
+        assert!(eng.sender(7).unwrap().pending_solicited_at().is_none());
+        eng.on_recv(
+            NdRecv::RouterSolicit {
+                ifindex: 7,
+                src: ll("fe80::2"),
+                rs: RouterSolicit::default(),
+            },
+            start,
+        );
+        assert!(eng.sender(7).unwrap().pending_solicited_at().is_none());
+        let frames = eng.tick(start + Duration::from_secs(16));
+        assert_eq!(frames.len(), 1);
+        assert!(matches!(frames[0], NdSend::RouterAdvert { ifindex: 8, .. }));
+        assert_eq!(eng.sender(7).unwrap().initial_remaining(), 3);
+        eng.process_link_state(7, true, start + Duration::from_secs(20));
+        assert!(eng.sender(7).unwrap().pending_solicited_at().is_none());
+    }
+
+    #[test]
+    fn config_on_a_down_link_waits_for_up_in_either_arrival_order() {
+        use std::time::Duration;
+        for config_first in [false, true] {
+            let start = t0();
+            let mut eng = NdEngine::new();
+            let mut down = link("eth0", 7);
+            down.flags = LinkFlags::Up; // administrative up, carrier down
+            if config_first {
+                eng.set_ra_config("eth0".into(), RaSendConfig::default(), start);
+            }
+            eng.process_link_add(&down, start);
+            if !config_first {
+                eng.set_ra_config("eth0".into(), RaSendConfig::default(), start);
+            }
+            assert!(eng.is_enabled(7));
+            assert!(eng.next_wakeup().is_none());
+            assert!(eng.tick(start + Duration::from_secs(60)).is_empty());
+            eng.process_link_state(7, true, start + Duration::from_secs(60));
+            assert_eq!(eng.next_wakeup(), Some(start + Duration::from_secs(76)));
+        }
+    }
+
+    #[test]
+    fn recovery_does_not_enable_ra_when_config_was_removed_while_down() {
+        let start = t0();
+        let mut eng = NdEngine::new();
+        eng.process_link_add(&link("eth0", 7), start);
+        eng.set_ra_config("eth0".into(), RaSendConfig::default(), start);
+        eng.process_link_state(7, false, start);
+        eng.unset_ra_config("eth0");
+        eng.process_link_state(7, true, start);
+        eng.process_link_add(&link("eth0", 7), start);
+        assert!(!eng.is_enabled(7));
+        assert!(eng.next_wakeup().is_none());
+        assert!(eng.tick(start).is_empty());
+    }
+
+    #[test]
+    fn link_del_on_a_live_link_and_after_a_rename() {
+        use std::time::Duration;
+        let start = t0();
+        let mut eng = NdEngine::new();
+
+        // Deleting a link that is up mid-burst: the device is gone, so
+        // nothing is left to advertise from.
+        eng.process_link_add(&link("eth0", 7), start);
+        eng.set_ra_config("eth0".into(), RaSendConfig::default(), start);
+        assert_eq!(eng.tick(start + Duration::from_secs(16)).len(), 1);
+        eng.process_link_del(7);
+        assert!(!eng.is_enabled(7));
+        assert!(eng.next_wakeup().is_none());
+        assert!(eng.tick(start + Duration::from_secs(600)).is_empty());
+        assert!(!eng.counters().contains_key(&7));
+        assert!(!eng.neighbors().contains_key(&7));
+
+        // A rename re-points the old name before the delete arrives:
+        // ifindex 7 is now swp1, and a different device took the name
+        // eth0. Deleting 7 must not take eth0's mapping with it.
+        let mut eng = NdEngine::new();
+        eng.process_link_add(&link("eth0", 7), start);
+        eng.process_link_add(&link("swp1", 7), start);
+        eng.process_link_add(&link("eth0", 9), start);
+        eng.process_link_del(7);
+        assert!(eng.ifname_of(7).is_none());
+        assert!(eng.ifindex_of("swp1").is_none());
+        assert_eq!(eng.ifindex_of("eth0"), Some(9));
+
+        // A delete for an ifindex we never saw is a no-op.
+        eng.process_link_del(99);
+        assert_eq!(eng.ifindex_of("eth0"), Some(9));
+    }
+
+    #[test]
+    fn link_del_releases_the_ifindex_without_forgetting_the_operator_config() {
+        use std::time::Duration;
+        let start = t0();
+        let mut eng = NdEngine::new();
+        eng.process_link_add(&link("eth0", 7), start);
+        eng.set_ra_config("eth0".into(), RaSendConfig::default(), start);
+        eng.process_link_state(7, false, start);
+        eng.on_recv(
+            NdRecv::NeighborSolicit {
+                ifindex: 7,
+                src: ll("fe80::1"),
+                ns: make_ns(),
+            },
+            start,
+        );
+        assert!(eng.counters().contains_key(&7));
+        assert!(eng.neighbors().contains_key(&7));
+
+        eng.process_link_del(7);
+        assert!(!eng.is_enabled(7));
+        assert!(eng.ifname_of(7).is_none());
+        assert!(eng.ifindex_of("eth0").is_none());
+        assert!(eng.next_wakeup().is_none());
+        assert!(eng.tick(start + Duration::from_secs(600)).is_empty());
+        // Observation state is keyed by ifindex alone, so it goes with
+        // the ifindex; keeping it would attribute the old device's
+        // history to whatever reuses the number.
+        assert!(!eng.counters().contains_key(&7));
+        assert!(!eng.neighbors().contains_key(&7));
+
+        // The down marker goes too. `enable_interface` is the client
+        // path and carries no link event, so a leaked marker would
+        // silently suspend the new sender.
+        let marker = start + Duration::from_secs(300);
+        eng.enable_interface(7, RaSendConfig::default(), marker);
+        assert_eq!(eng.next_wakeup(), Some(marker + Duration::from_secs(16)));
+        eng.disable_interface(7);
+
+        // The kernel hands ifindex 7 to an unrelated device. Nothing
+        // was configured under that name, so nothing may advertise,
+        // and its observations start from zero.
+        let reused = start + Duration::from_secs(600);
+        eng.process_link_add(&link("eth9", 7), reused);
+        assert!(!eng.is_enabled(7));
+        assert!(eng.next_wakeup().is_none());
+        eng.on_recv(
+            NdRecv::NeighborSolicit {
+                ifindex: 7,
+                src: ll("fe80::1"),
+                ns: make_ns(),
+            },
+            reused,
+        );
+        assert_eq!(eng.counters()[&7].rx_ns, 1);
+
+        // eth0 comes back on a fresh ifindex: the name-keyed config
+        // survived the delete and the deferred apply picks it up.
+        eng.process_link_add(&link("eth0", 8), reused);
+        assert!(eng.is_enabled(8));
+        assert_eq!(eng.sender(8).unwrap().initial_remaining(), 3);
+        assert_eq!(eng.next_wakeup(), Some(reused + Duration::from_secs(16)));
     }
 }

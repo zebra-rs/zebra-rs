@@ -198,13 +198,17 @@ impl Nd {
         }
     }
 
+    /// Link lifecycle is all the engine needs from RIB; address and
+    /// route notifications land when the BGP unnumbered hand-off needs
+    /// to derive the local source link-local in a follow-up PR.
     fn process_rib_msg(&mut self, msg: RibRx) {
-        // Only LinkAdd is interesting at this stage; the engine doesn't
-        // need address or route notifications yet (those land when the
-        // BGP unnumbered hand-off needs to derive the local source
-        // link-local in a follow-up PR).
-        if let RibRx::LinkAdd(link) = msg {
-            self.engine.process_link_add(&link, Instant::now());
+        let now = Instant::now();
+        match msg {
+            RibRx::LinkAdd(link) => self.engine.process_link_add(&link, now),
+            RibRx::LinkDown(ifindex) => self.engine.process_link_state(ifindex, false, now),
+            RibRx::LinkUp(ifindex) => self.engine.process_link_state(ifindex, true, now),
+            RibRx::LinkDel(ifindex) => self.engine.process_link_del(ifindex),
+            _ => {}
         }
     }
 
