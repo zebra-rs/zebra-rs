@@ -540,6 +540,14 @@ pub enum Message {
         /// the backup path (RFC 7432 §14.1.1).
         members: Vec<EsNhgMember>,
         single_active: bool,
+        /// The segment signals its roles and **no** attached PE claims to
+        /// forward this bridge domain (every one advertises P=0/B=0). The
+        /// members list is empty, but this is not the same as the group
+        /// being deleted: a deleted group falls back to installing each MAC
+        /// toward the PE that advertised it, which here would send traffic
+        /// to a PE that explicitly declared itself non-designated. While
+        /// this is set the segment's MACs are installed nowhere.
+        blocked: bool,
     },
     /// MUP `dataplane gtp` downlink encap (`GTP4.E`): a GTP-U encap route teed
     /// to cradle — traffic to `prefix` in VRF `table_id` is wrapped in outer
@@ -1215,6 +1223,12 @@ pub struct Rib {
     /// segment installs through the group (RFC 7432 §8.4 aliasing); the
     /// rest install a single destination.
     pub es_groups: BTreeSet<([u8; 10], u32)>,
+    /// `(ESI, bridge domain)` pairs whose PEs all advertise a non-designated
+    /// role, so there is nobody to forward to (`Message::EsNhg.blocked`).
+    /// Distinct from "no group": a MAC on such a segment is installed
+    /// nowhere rather than falling back to the PE that advertised it, which
+    /// is precisely the PE that said not to use it.
+    pub es_blocked: BTreeSet<([u8; 10], u32)>,
     /// Remote VTEPs we've installed as VXLAN BUM ingress-replication
     /// targets (zero-MAC FDB rows on the VXLAN device, keyed by
     /// `(vni, peer-VTEP-IP)`). Populated by `mdb_add`, removed by
@@ -1407,6 +1421,7 @@ impl Rib {
             flex_algo_routes: BTreeMap::new(),
             mac_table: BTreeMap::new(),
             es_groups: BTreeSet::new(),
+            es_blocked: BTreeSet::new(),
             vtep_table: std::collections::BTreeSet::new(),
             neighbors: BTreeMap::new(),
             tx,
@@ -4004,8 +4019,10 @@ impl Rib {
                 bd,
                 members,
                 single_active,
+                blocked,
             } => {
-                self.es_nhg_set(esi, bd, members, single_active).await;
+                self.es_nhg_set(esi, bd, members, single_active, blocked)
+                    .await;
             }
             Message::CradleGtpEncapAdd {
                 prefix,
@@ -5204,6 +5221,31 @@ impl Rib {
             return;
         };
         let (flags, seq, esi) = (entry.flags, entry.seq, entry.esi);
+        // Every PE on the segment advertises a non-designated role for this
+        // bridge domain, so there is nobody this MAC may be sent to. Take
+        // any row we installed earlier back out rather than leaving it
+        // pointing at a PE that has since declared itself non-designated —
+        // the stale Type-2 that named it is still perfectly valid, which is
+        // exactly why the route alone cannot be trusted here.
+        //
+        // **Only remote destinations are blocked.** A MAC on a segment THIS
+        // node is attached to is reached through our own access port
+        // (`local_port`, RFC 7432 §8.4), and the group says nothing about
+        // that path: it is built from the per-EVI A-Ds of OTHER PEs, so our
+        // own role is not among the signals it weighed. On the PE that is
+        // itself the Designated Forwarder every other member correctly
+        // advertises "not me", which reads as "no forwarder" — and blocking
+        // there would tear out the local rows of the one PE that is
+        // actually forwarding.
+        if entry.local_port.is_none()
+            && let Some(esi) = esi
+            && self.es_blocked.contains(&(esi, vni))
+        {
+            if self.local_device_mac_bridge(vni, mac).is_none() {
+                self.fib_handle.mac_del(vni, &mac).await;
+            }
+            return;
+        }
         if self.fib_handle.cradle_active() {
             if let Some(port) = entry.local_port.clone() {
                 self.fib_handle.cradle_fdb_local(vni, &mac, &port).await;
@@ -5244,11 +5286,20 @@ impl Rib {
         bd: u32,
         members: Vec<EsNhgMember>,
         single_active: bool,
+        blocked: bool,
     ) {
         if members.is_empty() {
             self.es_groups.remove(&(esi, bd));
         } else {
             self.es_groups.insert((esi, bd));
+        }
+        // Blocked is a state of its own, not the absence of a group: the
+        // re-install loop below reads it and withdraws each MAC instead of
+        // pointing it at whichever PE advertised it.
+        if blocked {
+            self.es_blocked.insert((esi, bd));
+        } else {
+            self.es_blocked.remove(&(esi, bd));
         }
         self.fib_handle
             .cradle_es_nhg(&esi, bd, &members, single_active)

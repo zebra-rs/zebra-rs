@@ -1,0 +1,37 @@
+# z2 — on segment es1 but with NO access port, so it originates a Type-4 (and
+# therefore votes in the DF election) while never originating a per-EVI A-D and
+# never joining the remote's group. Preference 50: below z1's 100, leaving z1 the DF.
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.2
+    afi-safi:
+    - name: evpn
+      ethernet-segment:
+      - name: es1
+        esi: "00:11:22:33:44:55:66:77:88:99"
+        redundancy-mode: single-active
+        role-signaling: l2-attr
+        df-election:
+          algorithm: preference
+          preference: 50
+    neighbor:
+    - remote-address: 192.168.0.1
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: evpn
+        enabled: true
+    - remote-address: 192.168.0.4
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: evpn
+        enabled: true
+    - remote-address: 192.168.0.5
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: evpn
+        enabled: true
