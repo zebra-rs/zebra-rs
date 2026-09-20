@@ -1,0 +1,16 @@
+# Phase 1 of the two-step bring-up, same rationale as
+# tests/configs/nd_show/z1-base.yaml: a bare `router bgp` block spawns
+# ND eagerly, so it subscribes to the RIB and learns i1 BEFORE the next
+# commit enables RA on it. The `send-advertisements` callback stores the
+# config by name either way, but applying it against a known link means
+# the sender arms on the spot instead of waiting for a link replay.
+#
+# The VRF is declared here rather than in phase 2 so the kernel master
+# device exists before anything is enslaved to it.
+vrf:
+- name: blue
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 1.1.1.1
