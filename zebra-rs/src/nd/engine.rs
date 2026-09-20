@@ -1454,4 +1454,79 @@ mod tests {
         assert_eq!(eng.sender(8).unwrap().initial_remaining(), 3);
         assert_eq!(eng.next_wakeup(), Some(reused + Duration::from_secs(16)));
     }
+
+    /// RIB reports a live cross-VRF move as a `LinkDel` + `LinkAdd`
+    /// bounce of the same ifindex — `api_link_del_vrf(ifindex, old)`
+    /// then `api_link_add_vrf(link, new)` in `Rib::link_from_msg`.
+    /// The device never goes away, so `interface eth1 vrf blue` must
+    /// leave the interface advertising.
+    ///
+    /// Until the `global_links` subscription only the `LinkDel` half
+    /// reached ND (`iter_link_subs` filters on the subscriber's
+    /// `vrf_id`), which released the sender with nothing left to put
+    /// it back. Both halves now arrive; this pins the recovery that
+    /// depends on `ra_config_by_name` being keyed by name rather than
+    /// by ifindex.
+    #[test]
+    fn vrf_move_bounce_restores_the_sender_from_the_name_keyed_config() {
+        use std::time::Duration;
+        let start = t0();
+        let mut eng = NdEngine::new();
+        eng.process_link_add(&link("eth1", 7), start);
+        eng.set_ra_config("eth1".into(), RaSendConfig::default(), start);
+        assert_eq!(eng.tick(start + Duration::from_secs(16)).len(), 1);
+        eng.on_recv(
+            NdRecv::RouterSolicit {
+                ifindex: 7,
+                src: ll("fe80::2"),
+                rs: RouterSolicit::default(),
+            },
+            start + Duration::from_secs(17),
+        );
+        assert_eq!(eng.counters()[&7].rx_rs, 1);
+
+        let moved = start + Duration::from_secs(20);
+        eng.process_link_del(7);
+        assert!(!eng.is_enabled(7));
+        eng.process_link_add(&link("eth1", 7), moved);
+
+        // The operator asked for RA on eth1, and eth1 is still here.
+        assert!(eng.is_enabled(7));
+        assert_eq!(eng.ifindex_of("eth1"), Some(7));
+        assert_eq!(eng.sender(7).unwrap().initial_remaining(), 3);
+        // Not left suspended: the re-announced link carries its up
+        // flags, so `process_link_add` clears the down marker.
+        assert_eq!(eng.next_wakeup(), Some(moved + Duration::from_secs(16)));
+
+        // Known trade-off, asserted so a future change has to notice
+        // it: counters and neighbor records are keyed by ifindex
+        // alone, so `process_link_del` releases them and the move
+        // resets the observation history of an interface that never
+        // went down. Keeping them needs an identity check that can
+        // tell this bounce from a genuine ifindex reuse, which is
+        // more than the subscription fix should carry.
+        assert!(!eng.counters().contains_key(&7));
+        assert!(!eng.neighbors().contains_key(&7));
+    }
+
+    /// A VRF interface that is already enslaved when ND spawns has to
+    /// work too: the subscribe-time link dump used to skip it
+    /// entirely (`Rib::subscribe` applies the same `vrf_id` filter as
+    /// the steady-state fan-out), so `send-advertisements` on it
+    /// never resolved a name and silently did nothing.
+    #[test]
+    fn config_applies_to_a_link_that_only_a_global_links_dump_delivers() {
+        use std::time::Duration;
+        let start = t0();
+        let mut eng = NdEngine::new();
+        eng.set_ra_config("eth1".into(), RaSendConfig::default(), start);
+        assert!(eng.next_wakeup().is_none());
+
+        // The dump entry for an enslaved interface.
+        eng.process_link_add(&link("eth1", 7), start);
+
+        assert!(eng.is_enabled(7));
+        assert_eq!(eng.next_wakeup(), Some(start + Duration::from_secs(16)));
+        assert_eq!(eng.tick(start + Duration::from_secs(16)).len(), 1);
+    }
 }
