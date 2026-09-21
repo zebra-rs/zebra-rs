@@ -173,7 +173,11 @@ struct JsonRaScheduler {
     managed: bool,
     other: bool,
     initial_remaining: u32,
-    next_unsolicited_in_secs: u64,
+    /// `true` when RIB reports the link down. The sender is skipped by
+    /// `tick`, so it is not advertising and `next_unsolicited_in_secs`
+    /// is `null` — the deadline it still holds is stale.
+    suspended: bool,
+    next_unsolicited_in_secs: Option<u64>,
     solicited_pending: bool,
     last_multicast_secs_ago: Option<u64>,
 }
@@ -256,10 +260,21 @@ fn render_interface_text(
             managed,
             other
         )?;
-        let next_in = until(now, sender.next_unsolicited_at());
+        // A suspended sender is skipped by `tick`, so the deadline it
+        // still holds will never fire and `until()` saturates to "0s"
+        // once it passes. Rendering that as a countdown told the
+        // operator an RA was imminent on a link that had stopped
+        // advertising entirely.
+        // Carries its own "in" so the unsuspended line is byte-identical
+        // to what it has always been.
+        let next_in = if nd.is_suspended(ifindex) {
+            "suspended (link down)".to_string()
+        } else {
+            format!("in {}", until(now, sender.next_unsolicited_at()))
+        };
         writeln!(
             out,
-            "    initial advertisements remaining {}, next unsolicited in {}",
+            "    initial advertisements remaining {}, next unsolicited {}",
             sender.initial_remaining(),
             next_in
         )?;
@@ -417,10 +432,13 @@ fn build_interface_json(nd: &super::engine::NdEngine, ifindex: u32, now: Instant
             managed: cfg.flags.contains(nd_packet::RaFlags::M),
             other: cfg.flags.contains(nd_packet::RaFlags::O),
             initial_remaining: sender.initial_remaining(),
-            next_unsolicited_in_secs: sender
-                .next_unsolicited_at()
-                .saturating_duration_since(now)
-                .as_secs(),
+            suspended: nd.is_suspended(ifindex),
+            next_unsolicited_in_secs: (!nd.is_suspended(ifindex)).then(|| {
+                sender
+                    .next_unsolicited_at()
+                    .saturating_duration_since(now)
+                    .as_secs()
+            }),
             solicited_pending: sender.pending_solicited_at().is_some(),
             last_multicast_secs_ago: sender
                 .last_multicast_at()
@@ -641,6 +659,10 @@ mod tests {
         s.parse().unwrap()
     }
 
+    /// An interface that is genuinely up. `LinkFlags::default()` is
+    /// neither admin- nor carrier-up, so a fixture built with it lands
+    /// in `down_links` and every assertion below would silently be
+    /// describing a suspended interface. Mirrors `engine.rs`'s helper.
     fn link(name: &str, index: u32) -> Link {
         Link {
             index,
@@ -648,7 +670,7 @@ mod tests {
             mtu: 1500,
             original_mtu: 1500,
             metric: 1,
-            flags: LinkFlags::default(),
+            flags: LinkFlags::Up | LinkFlags::LowerUp,
             link_type: LinkType::Ethernet,
             label: false,
             mac: None,
@@ -853,5 +875,91 @@ Icmp6InUnrelated                    \t99
         assert_eq!(fmt_duration(3600), "1h");
         assert_eq!(fmt_duration(3661), "1h1m1s");
         assert_eq!(fmt_duration(7260), "2h1m");
+    }
+
+    /// The suspended state has to be legible. `tick` skips a suspended
+    /// sender, so the deadline it still holds never fires and `until()`
+    /// saturates — the old output counted down to "0s" and then sat
+    /// there, telling the operator an RA was imminent on an interface
+    /// that had stopped advertising. That is the exact surface #2393's
+    /// reporter used to diagnose the original bug.
+    #[test]
+    fn detail_text_distinguishes_a_suspended_sender_from_a_live_one() {
+        let start = t0();
+        let mut eng = NdEngine::new();
+        eng.process_link_add(&link("up0", 2), start);
+        eng.process_link_add(&link("down0", 3), start);
+        eng.enable_interface(2, RaSendConfig::default(), start);
+        eng.enable_interface(3, RaSendConfig::default(), start);
+        eng.process_link_state(3, false, start);
+
+        let mut live = String::new();
+        render_interface_text(&mut live, &eng, 2, start).unwrap();
+        assert!(
+            live.contains("next unsolicited in "),
+            "a live sender still renders a countdown: {}",
+            live
+        );
+        assert!(!live.contains("suspended"));
+
+        let mut down = String::new();
+        render_interface_text(&mut down, &eng, 3, start).unwrap();
+        assert!(
+            down.contains("next unsolicited suspended (link down)"),
+            "a suspended sender must say so: {}",
+            down
+        );
+        // Still "enabled" — the operator's config is untouched, which is
+        // precisely why the suspension needs saying out loud.
+        assert!(down.contains("Router advertisement: enabled"));
+    }
+
+    /// Same distinction in JSON: `suspended` is explicit and the stale
+    /// countdown is `null` rather than a misleading `0`.
+    #[test]
+    fn json_scheduler_reports_suspension_with_a_null_countdown() {
+        let start = t0();
+        let mut eng = NdEngine::new();
+        eng.process_link_add(&link("up0", 2), start);
+        eng.process_link_add(&link("down0", 3), start);
+        eng.enable_interface(2, RaSendConfig::default(), start);
+        eng.enable_interface(3, RaSendConfig::default(), start);
+        eng.process_link_state(3, false, start);
+
+        let live = build_interface_json(&eng, 2, start);
+        let live: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&live).unwrap()).unwrap();
+        assert_eq!(live["ra_scheduler"]["suspended"], serde_json::json!(false));
+        assert!(live["ra_scheduler"]["next_unsolicited_in_secs"].is_number());
+
+        let down = build_interface_json(&eng, 3, start);
+        let down: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&down).unwrap()).unwrap();
+        assert_eq!(down["ra_scheduler"]["suspended"], serde_json::json!(true));
+        assert!(
+            down["ra_scheduler"]["next_unsolicited_in_secs"].is_null(),
+            "a stale deadline must not be reported as a countdown"
+        );
+        // Still enabled, same as the text rendering.
+        assert_eq!(down["ra_enabled"], serde_json::json!(true));
+    }
+
+    /// Resuming clears it again — the marker is state, not a latch.
+    #[test]
+    fn suspension_clears_when_the_link_comes_back() {
+        let start = t0();
+        let mut eng = NdEngine::new();
+        eng.process_link_add(&link("eth0", 2), start);
+        eng.enable_interface(2, RaSendConfig::default(), start);
+        eng.process_link_state(2, false, start);
+        assert!(eng.is_suspended(2));
+
+        eng.process_link_state(2, true, start + std::time::Duration::from_secs(5));
+        assert!(!eng.is_suspended(2));
+
+        let mut out = String::new();
+        render_interface_text(&mut out, &eng, 2, start).unwrap();
+        assert!(out.contains("next unsolicited in "));
+        assert!(!out.contains("suspended"));
     }
 }
