@@ -758,6 +758,16 @@ what finally makes the §4.4 two-RR case explicable — two copies of one PE's
 route appear as two paths, one `[best]`, and a graceful-restart copy shows
 `[stale]`.
 
+Four review findings are folded in: the conflict warning asserted "lowest
+address" even where the incumbent rule had deliberately kept a higher one
+(the very case the new BDD builds); one `Conflict` reason could not say
+*which* rule decided, so it is now `ConflictIncumbent` / `ConflictTieBreak`;
+the generation lived inside the derived view, which is dropped whenever the
+group is absent or briefly all-active, so re-deriving restarted the count and
+a completion barrier could have matched a reused number — it now lives in
+`Bgp::es_gen`, outside the view; and the per-member detail was skipped for
+blocked groups, which is exactly where it is worth reading.
+
 Two limits stated rather than implied. The **generation is advisory**: it is
 not teed and nothing acknowledges it, so it is not yet a completion barrier
 (phase 5, with a cradle ack). And `ad_es_live` is always `true` as recorded,

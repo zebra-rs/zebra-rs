@@ -711,10 +711,17 @@ pub fn order_es_members(
 pub enum SaSelectReason {
     /// Exactly one member advertised P=1 (rfc7432bis §7.11.1).
     Signalled,
-    /// More than one member claimed P=1; the lowest address broke the tie.
-    /// Both PEs believe they forward, which this PE cannot repair — it can
-    /// only avoid installing two forwarding members and say so.
-    Conflict,
+    /// More than one member claimed P=1 and the PE we were already using is
+    /// among them, so it kept the traffic (§4.3). Both claimants believe
+    /// they forward, which this PE cannot repair — it can only avoid
+    /// installing two forwarding members, and not move an established flow
+    /// for nothing.
+    ConflictIncumbent,
+    /// More than one member claimed P=1 and none of them is the PE we were
+    /// using — or there was no incumbent at all — so the lowest address
+    /// broke the tie, which at least makes remotes without a history agree
+    /// with one another.
+    ConflictTieBreak,
     /// Nobody claimed P=1 but exactly one member advertised B=1, so the
     /// segment's own runner-up leads.
     BackupOnly,
@@ -735,7 +742,8 @@ impl SaSelectReason {
     pub fn as_str(&self) -> &'static str {
         match self {
             SaSelectReason::Signalled => "signalled",
-            SaSelectReason::Conflict => "conflict",
+            SaSelectReason::ConflictIncumbent => "conflict, incumbent kept",
+            SaSelectReason::ConflictTieBreak => "conflict, lowest address",
             SaSelectReason::BackupOnly => "backup-only",
             SaSelectReason::NoForwarder => "no forwarder",
             SaSelectReason::Unsignalled => "inferred",
@@ -897,14 +905,14 @@ pub fn select_sa_forwarder(
             // it is still one of the claimants; otherwise the lowest
             // address, which at least makes remotes that have no incumbent
             // agree with each other.
-            let chosen = incumbent
-                .filter(|inc| primaries.contains(inc))
-                .unwrap_or(primaries[0]);
-            (
-                Some(chosen),
-                backup.filter(|b| *b != chosen),
-                SaSelectReason::Conflict,
-            )
+            let kept = incumbent.filter(|inc| primaries.contains(inc));
+            let chosen = kept.unwrap_or(primaries[0]);
+            let reason = if kept.is_some() {
+                SaSelectReason::ConflictIncumbent
+            } else {
+                SaSelectReason::ConflictTieBreak
+            };
+            (Some(chosen), backup.filter(|b| *b != chosen), reason)
         }
     }
 }
@@ -1770,9 +1778,9 @@ mod tests {
         let p = Some((true, false));
         assert_eq!(
             select_sa_forwarder(&[(b, p), (a, p), (c, Some((false, true)))], None),
-            (Some(a), Some(c), Conflict)
+            (Some(a), Some(c), ConflictTieBreak)
         );
-        assert_eq!(Conflict.as_str(), "conflict");
+
         assert_eq!(NoForwarder.as_str(), "no forwarder");
         assert_eq!(Signalled.as_str(), "signalled");
         assert_eq!(BackupOnly.as_str(), "backup-only");
@@ -1822,7 +1830,7 @@ mod tests {
         // stays out of it.
         assert_eq!(
             select_sa_forwarder(&[(a, both), (b, p), (c, p)], None),
-            (Some(b), None, Conflict)
+            (Some(b), None, ConflictTieBreak)
         );
         assert!(invalid_role_members(&[(b, p), (c, p)]).is_empty());
     }
@@ -1843,26 +1851,31 @@ mod tests {
         // No history: lowest address, as before.
         assert_eq!(
             select_sa_forwarder(both_claim, None),
-            (Some(a), None, Conflict)
+            (Some(a), None, ConflictTieBreak)
         );
         // The PE we were already using is still claiming, so it stays —
         // even though it is NOT the lowest address, which is exactly the
         // case where this rule earns its keep.
         assert_eq!(
             select_sa_forwarder(both_claim, Some(b)),
-            (Some(b), None, Conflict)
+            (Some(b), None, ConflictIncumbent)
         );
         // An incumbent that has stopped claiming (or left the group) has no
         // vote; the deterministic tie-break takes over.
         assert_eq!(
             select_sa_forwarder(both_claim, Some(c)),
-            (Some(a), None, Conflict)
+            (Some(a), None, ConflictTieBreak)
         );
+        // The two resolutions are distinguishable, which is the point: a
+        // log or a show that cannot tell them apart misreports which rule
+        // decided.
+        assert_eq!(ConflictIncumbent.as_str(), "conflict, incumbent kept");
+        assert_eq!(ConflictTieBreak.as_str(), "conflict, lowest address");
         // A backup is still offered, unless it collides with the choice.
         let with_backup = &[(a, p), (b, p), (c, Some((false, true)))][..];
         assert_eq!(
             select_sa_forwarder(with_backup, Some(b)),
-            (Some(b), Some(c), Conflict)
+            (Some(b), Some(c), ConflictIncumbent)
         );
         // The incumbent is consulted ONLY for a conflict: a clean segment
         // follows the signal even when the incumbent is someone else.

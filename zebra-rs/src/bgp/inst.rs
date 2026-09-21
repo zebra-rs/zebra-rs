@@ -929,6 +929,13 @@ pub struct Bgp {
     /// and a generation. See `docs/design/bgp-evpn-single-active-plan.md`
     /// §4.3.
     pub es_remote: BTreeMap<([u8; 10], u32), super::ethernet_segment::EsRemoteBd>,
+    /// Forwarder-move counter per `(ESI, bridge domain)`, kept apart from
+    /// `es_remote` so it survives the derived view being dropped — a group
+    /// that momentarily disappears, or goes all-active and comes back, must
+    /// not restart at zero. A number that can be reused is no use to the
+    /// completion barrier this exists for. Bounded by the distinct segments
+    /// and bridge domains this node has seen.
+    pub es_gen: BTreeMap<([u8; 10], u32), u64>,
     pub es_nhg_diag: BTreeMap<
         ([u8; 10], u32),
         (
@@ -1482,6 +1489,7 @@ impl Bgp {
             es_df_sent: BTreeMap::new(),
             es_nhg_sent: BTreeMap::new(),
             es_remote: BTreeMap::new(),
+            es_gen: BTreeMap::new(),
             es_nhg_diag: BTreeMap::new(),
             links_down: std::collections::BTreeSet::new(),
             local_smet: BTreeMap::new(),

@@ -2905,6 +2905,57 @@ fn show_bgp_evpn_ethernet_segment(
 /// remote PE's view of every multihomed segment, configured here or not.
 /// A single-active group names its primary (the DF) and the backup path
 /// behind it (RFC 7432 §14.1.1); an all-active one lists the aliasing set.
+/// The derived view behind one single-active group: what each PE advertised,
+/// and how many copies of its per-EVI A-D we hold. Two copies of one PE's
+/// route is the two-route-reflector case — the reason a member can outlive
+/// one RR's withdrawal — and a stale copy is one retained across a graceful
+/// restart. Rendered for blocked groups too, where it is most useful.
+fn write_es_remote_detail(
+    buf: &mut String,
+    bgp: &Bgp,
+    esi: &[u8; 10],
+    bd: u32,
+) -> std::fmt::Result {
+    use std::fmt::Write;
+    let Some(remote) = bgp.es_remote.get(&(*esi, bd)) else {
+        return Ok(());
+    };
+    writeln!(buf, "    generation {}", remote.generation)?;
+    for (pe, m) in remote.members.iter() {
+        let role = match m.role {
+            Some((true, true)) => "P+B (invalid)",
+            Some((true, false)) => "P",
+            Some((false, true)) => "B",
+            Some((false, false)) => "-",
+            None => "not signalled",
+        };
+        let paths: Vec<String> = m
+            .paths
+            .iter()
+            .map(|p| {
+                let mut s = format!("peer {} rd {}", p.peer, p.rd);
+                if p.path_id != 0 {
+                    s.push_str(&format!(" id {}", p.path_id));
+                }
+                if p.best {
+                    s.push_str(" [best]");
+                }
+                if p.stale {
+                    s.push_str(" [stale]");
+                }
+                s
+            })
+            .collect();
+        writeln!(
+            buf,
+            "    {pe}: role {role}, {} path(s): {}",
+            paths.len(),
+            paths.join(", ")
+        )?;
+    }
+    Ok(())
+}
+
 fn write_es_nhg_groups(buf: &mut String, bgp: &Bgp) -> std::fmt::Result {
     use std::fmt::Write;
     if bgp.es_nhg_sent.is_empty() {
@@ -2949,6 +3000,11 @@ fn write_es_nhg_groups(buf: &mut String, bgp: &Bgp) -> std::fmt::Result {
                     "no forwarder"
                 };
                 writeln!(buf, "  {esi} bd {bd}: single-active, {state}{why}")?;
+                // Fall through to the per-member detail below rather than
+                // skipping it: a group with no forwarder is exactly where
+                // "who said what, and how many copies of it do we hold" is
+                // most worth reading.
+                write_es_remote_detail(buf, bgp, esi_key, *bd)?;
                 continue;
             };
             let backup = if backup.is_empty() {
@@ -2960,46 +3016,7 @@ fn write_es_nhg_groups(buf: &mut String, bgp: &Bgp) -> std::fmt::Result {
                 buf,
                 "  {esi} bd {bd}: single-active primary {primary}{backup}{why}"
             )?;
-            // The derived view behind that one line: what each PE said, and
-            // how many copies of it we are holding. Two copies of one PE's
-            // route is the two-route-reflector case — the reason a member
-            // can outlive one RR's withdrawal — and a stale copy is one
-            // retained across a graceful restart.
-            if let Some(remote) = bgp.es_remote.get(&(*esi_key, *bd)) {
-                writeln!(buf, "    generation {}", remote.generation)?;
-                for (pe, m) in remote.members.iter() {
-                    let role = match m.role {
-                        Some((true, true)) => "P+B (invalid)",
-                        Some((true, false)) => "P",
-                        Some((false, true)) => "B",
-                        Some((false, false)) => "-",
-                        None => "not signalled",
-                    };
-                    let paths: Vec<String> = m
-                        .paths
-                        .iter()
-                        .map(|p| {
-                            let mut s = format!("peer {} rd {}", p.peer, p.rd);
-                            if p.path_id != 0 {
-                                s.push_str(&format!(" id {}", p.path_id));
-                            }
-                            if p.best {
-                                s.push_str(" [best]");
-                            }
-                            if p.stale {
-                                s.push_str(" [stale]");
-                            }
-                            s
-                        })
-                        .collect();
-                    writeln!(
-                        buf,
-                        "    {pe}: role {role}, {} path(s): {}",
-                        paths.len(),
-                        paths.join(", ")
-                    )?;
-                }
-            }
+            write_es_remote_detail(buf, bgp, esi_key, *bd)?;
         } else {
             writeln!(buf, "  {esi} bd {bd}: all-active {}", rendered.join(" "))?;
         }

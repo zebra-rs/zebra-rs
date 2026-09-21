@@ -21000,8 +21000,17 @@ impl Bgp {
             if single_active {
                 let prev = self.es_remote.get(&(esi, vni));
                 let prev_active = prev.and_then(|r| r.active);
-                let generation = prev.map(|r| r.generation).unwrap_or(0)
-                    + u64::from(prev_active != primary && prev.is_some());
+                // The counter lives in `es_gen`, NOT in the derived view:
+                // the view is dropped whenever the group is absent or the
+                // segment is all-active for a moment, and re-deriving it
+                // must not restart the count. A number that can be reused
+                // is no use to a completion barrier, which is the only
+                // reason this exists.
+                let generation = self.es_gen.entry((esi, vni)).or_insert(0);
+                if prev.is_some() && prev_active != primary {
+                    *generation += 1;
+                }
+                let generation = *generation;
                 let members = signals
                     .get(&(esi, vni))
                     .map(|m| {
@@ -21083,15 +21092,40 @@ impl Bgp {
             }
             self.es_nhg_diag.insert((*esi, *bd), diag);
             match reason {
-                super::ethernet_segment::SaSelectReason::Conflict => {
+                super::ethernet_segment::SaSelectReason::ConflictIncumbent => {
                     tracing::warn!(
                         proto = "bgp",
                         category = "evpn",
                         esi = %bgp_packet::esi_display(esi),
                         bd,
+                        forwarder = %self
+                            .es_remote
+                            .get(&(*esi, *bd))
+                            .and_then(|r| r.active)
+                            .map(|pe| pe.to_string())
+                            .unwrap_or_else(|| "none".to_string()),
                         "bgp: more than one PE advertises primary for this single-active \
-                         segment; forwarding to the lowest address. Both of them believe \
-                         they forward — check the segment's DF election configuration",
+                         segment; KEEPING the PE already in use rather than moving an \
+                         established flow. Both of them believe they forward — check the \
+                         segment's DF election configuration",
+                    );
+                }
+                super::ethernet_segment::SaSelectReason::ConflictTieBreak => {
+                    tracing::warn!(
+                        proto = "bgp",
+                        category = "evpn",
+                        esi = %bgp_packet::esi_display(esi),
+                        bd,
+                        forwarder = %self
+                            .es_remote
+                            .get(&(*esi, *bd))
+                            .and_then(|r| r.active)
+                            .map(|pe| pe.to_string())
+                            .unwrap_or_else(|| "none".to_string()),
+                        "bgp: more than one PE advertises primary for this single-active \
+                         segment; none of them is the PE we were using, so the LOWEST \
+                         ADDRESS takes it. Both of them believe they forward — check the \
+                         segment's DF election configuration",
                     );
                 }
                 super::ethernet_segment::SaSelectReason::NoForwarder => {

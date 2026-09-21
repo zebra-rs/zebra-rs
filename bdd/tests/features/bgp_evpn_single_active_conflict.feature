@@ -92,7 +92,7 @@ Feature: EVPN single-active — a disputed role keeps the incumbent forwarder
     When I apply config "z1-split.yaml" to namespace "z1"
     And I apply config "z2-split.yaml" to namespace "z2"
     Then show command "show bgp evpn" in namespace "z3" should eventually contain "l2-attr:P:mtu0"
-    And show command "show bgp evpn ethernet-segment" in namespace "z3" should eventually contain "(conflict)"
+    And show command "show bgp evpn ethernet-segment" in namespace "z3" should eventually contain "(conflict, incumbent kept)"
     # z3 keeps the PE it was already using. The lowest-address tie-break
     # would have moved the traffic to 192.168.0.1 for no benefit — that is
     # the difference this scenario exists to pin.
