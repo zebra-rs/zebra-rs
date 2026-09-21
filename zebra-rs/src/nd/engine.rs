@@ -215,19 +215,62 @@ impl NdEngine {
 
     /// Suspend scheduling while down; only a real Down -> Up transition
     /// restarts the initial burst. Attribute re-announcements are harmless.
+    ///
+    /// Both transitions are logged, because suspension is otherwise
+    /// invisible: an interface that has stopped advertising still reads
+    /// `Router advertisement: enabled` in the config, and the operator
+    /// has nothing but `show ipv6 nd interface` (which now says
+    /// `suspended`) to tell them why the RAs stopped.
+    ///
+    /// Two conditions keep the volume honest. Only real *transitions*
+    /// log, so a repeated notification for a state we already hold is
+    /// silent; and only interfaces that actually hold a sender log,
+    /// because ND marks every link in the default VRF down/up, and a
+    /// line about an interface that was never advertising explains
+    /// nothing. A flapping RA interface therefore costs two lines per
+    /// flap — the same as RIB's own link up/down traces.
     pub fn process_link_state(&mut self, ifindex: u32, up: bool, now: Instant) {
         if up {
-            if self.down_links.remove(&ifindex)
-                && let Some(sender) = self.senders.get_mut(&ifindex)
-            {
-                sender.restart_initial(now);
+            if self.down_links.remove(&ifindex) {
+                let resumed = if let Some(sender) = self.senders.get_mut(&ifindex) {
+                    sender.restart_initial(now);
+                    true
+                } else {
+                    false
+                };
+                if resumed {
+                    tracing::info!(
+                        "nd: {} (ifindex {}) link up; RA scheduling resumed",
+                        self.ifname_of(ifindex).unwrap_or("?"),
+                        ifindex
+                    );
+                }
             }
         } else {
-            self.down_links.insert(ifindex);
-            if let Some(sender) = self.senders.get_mut(&ifindex) {
+            let newly_down = self.down_links.insert(ifindex);
+            let had_sender = if let Some(sender) = self.senders.get_mut(&ifindex) {
                 sender.cancel_solicited();
+                true
+            } else {
+                false
+            };
+            if newly_down && had_sender {
+                tracing::info!(
+                    "nd: {} (ifindex {}) link down; RA scheduling suspended",
+                    self.ifname_of(ifindex).unwrap_or("?"),
+                    ifindex
+                );
             }
         }
+    }
+
+    /// Is RA scheduling on `ifindex` suspended because RIB reports the
+    /// link down? A suspended sender keeps its state — it is skipped by
+    /// [`Self::tick`] and [`Self::next_wakeup`], not torn down — so the
+    /// deadline it still holds is stale and must not be rendered as a
+    /// countdown. `show` asks this before formatting one.
+    pub fn is_suspended(&self, ifindex: u32) -> bool {
+        self.down_links.contains(&ifindex)
     }
 
     /// The kernel device for `ifindex` is gone, which `RibRx::LinkDel`
