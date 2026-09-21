@@ -9,6 +9,10 @@
 //!   * **Initial**: the first `MAX_INITIAL_RTR_ADVERTISEMENTS` (3)
 //!     unsolicited RAs after enabling, each scheduled within
 //!     `MAX_INITIAL_RTR_ADVERT_INTERVAL` (16 s) per RFC 4861 §6.2.4.
+//!     After a link *recovers* the first of that burst is instead
+//!     scheduled within `MAX_RA_DELAY_TIME` — a peer that lost us has
+//!     waited out the whole outage already. See
+//!     [`RaSender::restart_initial`].
 //!   * **Periodic**: thereafter, scheduled uniformly at random in
 //!     `[MinRtrAdvInterval, MaxRtrAdvInterval]` (defaults 200/600 s).
 //!   * **Solicited**: in response to a Router Solicitation, with a
@@ -188,12 +192,48 @@ impl<R: RngSource> RaSender<R> {
         self.pending_solicited_at = None;
     }
 
-    /// Re-enter the initial schedule after link recovery. Keep the last
-    /// multicast time so an RS after a short flap still obeys the rate limit.
+    /// Re-enter the initial schedule after link recovery, and send the
+    /// first advertisement promptly rather than waiting out a full
+    /// `MAX_INITIAL_RTR_ADVERT_INTERVAL`.
+    ///
+    /// The delay is the same `[0, MAX_RA_DELAY_TIME]` jitter §6.2.6
+    /// uses for a solicited reply. Two reasons it is not
+    /// [`schedule_initial`]:
+    ///
+    ///   * A peer that learns our link-local from these RAs has been
+    ///     down for the length of the outage already. §6.2.4 caps the
+    ///     interval *between* initial advertisements at
+    ///     `MAX_INITIAL_RTR_ADVERT_INTERVAL` — an upper bound, chosen
+    ///     so "a router [is] discovered quickly" — and says nothing
+    ///     that requires waiting that long for the first one.
+    ///     Subsequent initials still go through `schedule_initial`.
+    ///
+    ///   * With the default 200/600 s config `schedule_initial`
+    ///     collapses to exactly 16 s, so re-arming it on every
+    ///     recovery starved any link whose up windows were shorter
+    ///     than that: the deadline was pushed past the next down
+    ///     before it could ever mature, and such a link emitted no
+    ///     unsolicited RA at all.
+    ///
+    /// `last_multicast_at` is kept, so `MIN_DELAY_BETWEEN_RAS` still
+    /// holds across a short flap. Clamping to it here rather than
+    /// leaving it to [`Self::tick`] is load-bearing: `tick` drops a
+    /// rate-limited advertisement without rescheduling it, so an
+    /// un-clamped `next_unsolicited_at` in the past would leave
+    /// [`Self::next_wakeup`] returning an instant that has already
+    /// passed and spin the driver's `select!` loop until the limit
+    /// expired.
     pub fn restart_initial(&mut self, now: Instant) {
         self.initial_remaining = MAX_INITIAL_RTR_ADVERTISEMENTS;
         self.pending_solicited_at = None;
-        self.next_unsolicited_at = now + schedule_initial(&self.cfg, &mut self.rng);
+        let mut at = now + self.rng.duration_in(Duration::ZERO, MAX_RA_DELAY_TIME);
+        if let Some(last) = self.last_multicast_at {
+            let earliest = last + MIN_DELAY_BETWEEN_RAS;
+            if at < earliest {
+                at = earliest;
+            }
+        }
+        self.next_unsolicited_at = at;
     }
 
     /// Drain events that are due as of `now`.
@@ -491,5 +531,62 @@ mod tests {
         assert_eq!(sender.next_wakeup(), sent + MIN_DELAY_BETWEEN_RAS);
         assert!(sender.tick(sent + Duration::from_secs(2)).is_empty());
         assert_eq!(sender.tick(sent + MIN_DELAY_BETWEEN_RAS).len(), 1);
+    }
+
+    /// `restart_initial` must never leave `next_unsolicited_at` in the
+    /// past. `tick` drops a rate-limited advertisement *without*
+    /// rescheduling it, so a past-due deadline makes `next_wakeup`
+    /// return an instant that has already passed — and the driver's
+    /// `sleep_until` then returns immediately, over and over, until
+    /// the rate limit expires. A flap shorter than
+    /// MIN_DELAY_BETWEEN_RAS is exactly that case.
+    #[test]
+    fn recovery_inside_the_rate_limit_does_not_leave_a_past_due_wakeup() {
+        let start = t0();
+        // Draw 0 for the recovery jitter, so only the clamp can move it.
+        let rng = FixedRng::new([Duration::from_secs(16), Duration::ZERO]);
+        let mut s = RaSender::with_rng(RaSendConfig::default(), rng, start);
+        let sent = start + Duration::from_secs(16);
+        assert_eq!(s.tick(sent).len(), 1);
+        assert_eq!(s.last_multicast_at(), Some(sent));
+
+        // Link bounces 1s later — well inside MIN_DELAY_BETWEEN_RAS.
+        let up = sent + Duration::from_secs(1);
+        s.restart_initial(up);
+
+        let due = s.next_wakeup();
+        assert!(due >= up, "wakeup must not be in the past: {:?}", due);
+        assert_eq!(
+            due,
+            sent + MIN_DELAY_BETWEEN_RAS,
+            "clamped to the rate limit, not the raw jitter draw"
+        );
+        // And it really is sendable when it comes due, so the deadline
+        // is not merely deferred into the same trap one tick later.
+        assert!(s.tick(up).is_empty());
+        assert_eq!(s.tick(sent + MIN_DELAY_BETWEEN_RAS).len(), 1);
+    }
+
+    /// The other side of the clamp: with no recent multicast the first
+    /// advertisement after recovery lands inside MAX_RA_DELAY_TIME,
+    /// not a full MAX_INITIAL_RTR_ADVERT_INTERVAL.
+    #[test]
+    fn recovery_after_a_quiet_period_schedules_promptly() {
+        let start = t0();
+        let mut s = RaSender::new(RaSendConfig::default(), start);
+        let up = start + Duration::from_secs(300);
+        s.restart_initial(up);
+        assert_eq!(s.initial_remaining(), MAX_INITIAL_RTR_ADVERTISEMENTS);
+        let due = s.next_wakeup();
+        assert!(
+            due >= up && due <= up + MAX_RA_DELAY_TIME,
+            "expected the first RA within {:?} of link-up, got {:?}",
+            MAX_RA_DELAY_TIME,
+            due.duration_since(up)
+        );
+        // Subsequent initials keep the RFC 4861 6.2.4 cadence.
+        assert_eq!(s.tick(due).len(), 1);
+        assert_eq!(s.initial_remaining(), MAX_INITIAL_RTR_ADVERTISEMENTS - 1);
+        assert_eq!(s.next_wakeup(), due + MAX_INITIAL_RTR_ADVERT_INTERVAL);
     }
 }

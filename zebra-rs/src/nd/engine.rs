@@ -1241,16 +1241,27 @@ mod tests {
         }
     }
 
+    /// Bounds on the first advertisement after `restart_initial`:
+    /// `[up, up + MAX_RA_DELAY_TIME]`, subject to
+    /// `MIN_DELAY_BETWEEN_RAS` when we multicast recently.
+    fn recovery_window(up: Instant) -> std::ops::RangeInclusive<Instant> {
+        up..=(up + super::super::send::MAX_RA_DELAY_TIME)
+    }
+
     /// The engine builds its `RaSender`s with the production
     /// [`super::send::ThreadRng`], so these tests would normally be at
-    /// the mercy of the jitter draw. They aren't, and not by luck:
-    /// with `RaSendConfig::default()` (200 / 600 s) `schedule_initial`
-    /// collapses to `duration_in(16s, 16s)`, and `RngSource` returns
-    /// `lo` whenever `hi <= lo`. Every `+16s` below rests on that. If
-    /// the default intervals ever drop under
-    /// `MAX_INITIAL_RTR_ADVERT_INTERVAL`, the draw stops being a point
-    /// and these assertions must become ranges (as the periodic gap
-    /// check at the end of this test already is).
+    /// the mercy of the jitter draw. Anything scheduled through
+    /// `schedule_initial` isn't, and not by luck: with
+    /// `RaSendConfig::default()` (200 / 600 s) it collapses to
+    /// `duration_in(16s, 16s)`, and `RngSource` returns `lo` whenever
+    /// `hi <= lo`. Every exact `+16s` below rests on that, and would
+    /// have to become a range if the default intervals ever dropped
+    /// under `MAX_INITIAL_RTR_ADVERT_INTERVAL`.
+    ///
+    /// The *recovery* deadline is a genuine draw — `restart_initial`
+    /// uses the `[0, MAX_RA_DELAY_TIME]` jitter so a peer that lost us
+    /// gets an RA back promptly — so those assertions are windows.
+    /// [`recovery_window`] names the bound rather than repeating it.
     #[test]
     fn recovery_restarts_initials_after_a_long_down_without_consuming_them() {
         use std::time::Duration;
@@ -1270,7 +1281,9 @@ mod tests {
         assert_eq!(eng.counters()[&7].tx_ra_unsolicited, 3);
         eng.process_link_state(7, true, up);
         assert_eq!(eng.sender(7).unwrap().initial_remaining(), 3);
-        assert_eq!(eng.next_wakeup(), Some(up + Duration::from_secs(16)));
+        // Prompt, not a full initial interval: the peer has already
+        // been without us for the length of the outage.
+        assert!(recovery_window(up).contains(&eng.next_wakeup().unwrap()));
         for _ in 0..3 {
             assert_eq!(eng.tick(eng.next_wakeup().unwrap()).len(), 1);
         }
@@ -1360,8 +1373,9 @@ mod tests {
             assert!(eng.is_enabled(7));
             assert!(eng.next_wakeup().is_none());
             assert!(eng.tick(start + Duration::from_secs(60)).is_empty());
-            eng.process_link_state(7, true, start + Duration::from_secs(60));
-            assert_eq!(eng.next_wakeup(), Some(start + Duration::from_secs(76)));
+            let up = start + Duration::from_secs(60);
+            eng.process_link_state(7, true, up);
+            assert!(recovery_window(up).contains(&eng.next_wakeup().unwrap()));
         }
     }
 
@@ -1618,7 +1632,7 @@ mod tests {
             super::super::send::MAX_INITIAL_RTR_ADVERTISEMENTS,
             "LinkUp must restart the initial burst"
         );
-        assert_eq!(eng.next_wakeup(), Some(up + Duration::from_secs(16)));
+        assert!(recovery_window(up).contains(&eng.next_wakeup().unwrap()));
     }
 
     /// `LinkAdd` must reach `process_link_add` — the name → ifindex
@@ -1699,5 +1713,92 @@ mod tests {
         assert_eq!(eng.next_wakeup(), due, "schedule must be untouched");
         assert_eq!(eng.sender(7).unwrap().initial_remaining(), remaining);
         assert!(eng.is_enabled(7));
+    }
+
+    /// Regression for the flap-starvation this schedule change fixes.
+    ///
+    /// `restart_initial` used to re-arm a full
+    /// `MAX_INITIAL_RTR_ADVERT_INTERVAL`, which with the default
+    /// 200/600 s config is exactly 16 s. Any link whose up windows
+    /// were shorter than that had its deadline pushed past the next
+    /// down before it could mature, so it emitted **no** unsolicited
+    /// RA at all — measured at 0 over 600 s of an 8 s-up / 2 s-down
+    /// flap, where the pre-#2393 code would at least have matured its
+    /// periodic timer. Now every up window carries one.
+    #[test]
+    fn a_link_flapping_faster_than_the_initial_interval_still_advertises() {
+        use std::time::Duration;
+        let start = t0();
+        let mut eng = NdEngine::new();
+        eng.process_link_add(&link("eth0", 7), start);
+        eng.set_ra_config("eth0".into(), RaSendConfig::default(), start);
+
+        let mut now = start;
+        let mut per_window = Vec::new();
+        for _ in 0..30 {
+            // 8 s up, stepped finely enough to catch a sub-second due time.
+            let mut sent = 0usize;
+            for _ in 0..80 {
+                now += Duration::from_millis(100);
+                sent += eng.tick(now).len();
+            }
+            per_window.push(sent);
+            eng.process_link_state(7, false, now);
+            now += Duration::from_secs(2);
+            eng.process_link_state(7, true, now);
+        }
+
+        // The first window is the *fresh enable* path, which is
+        // deliberately unchanged: `RaSender::new` still schedules
+        // through `schedule_initial`, so nothing is due inside 8 s.
+        // Only recovery is prompt.
+        assert_eq!(
+            per_window[0], 0,
+            "a freshly enabled sender keeps the RFC 4861 6.2.4 initial schedule"
+        );
+        // Every window that follows a recovery carries one.
+        for (i, sent) in per_window.iter().enumerate().skip(1) {
+            assert!(
+                *sent >= 1,
+                "up window {} after a recovery sent no RA (all windows: {:?})",
+                i,
+                per_window
+            );
+        }
+    }
+
+    /// The flap case above, but faster than `MIN_DELAY_BETWEEN_RAS`.
+    /// Nothing may be scheduled in the past — `tick` drops a
+    /// rate-limited advertisement without rescheduling, so a past-due
+    /// `next_wakeup` would spin the driver's `select!` loop.
+    #[test]
+    fn a_flap_inside_the_rate_limit_never_schedules_a_wakeup_in_the_past() {
+        use std::time::Duration;
+        let start = t0();
+        let mut eng = NdEngine::new();
+        eng.process_link_add(&link("eth0", 7), start);
+        eng.set_ra_config("eth0".into(), RaSendConfig::default(), start);
+
+        let mut now = start;
+        for _ in 0..40 {
+            for _ in 0..12 {
+                now += Duration::from_millis(100);
+                eng.tick(now);
+                if let Some(due) = eng.next_wakeup() {
+                    assert!(due >= now, "wakeup {:?} is already past {:?}", due, now);
+                }
+            }
+            eng.process_link_state(7, false, now);
+            now += Duration::from_millis(200);
+            eng.process_link_state(7, true, now);
+            if let Some(due) = eng.next_wakeup() {
+                assert!(
+                    due >= now,
+                    "recovery scheduled a wakeup in the past: {:?} < {:?}",
+                    due,
+                    now
+                );
+            }
+        }
     }
 }
