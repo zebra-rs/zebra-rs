@@ -2338,15 +2338,23 @@ async fn isis_database_not_has_lsp_from(
     );
 }
 
-/// Extract the on-wire lengths (Ethernet header included, FCS not — i.e.
-/// what tcpdump records) of the IS-IS Hello frames in a classic-format
-/// pcap byte stream. IIH frames are picked out of the capture by hand:
-/// 14-byte Ethernet header, 3-byte LLC `FE FE 03`, ISO discriminator
-/// 0x83, then PDU type (low 5 bits of byte 21) in {15, 16, 17} for
-/// L1-LAN / L2-LAN / P2P IIH. Doing the discrimination here keeps the
-/// BPF filter side down to the coarse `isis` primitive, so LSP / CSNP /
-/// PSNP frames in the same capture are simply skipped, not miscounted.
-fn pcap_iih_frame_lens(bytes: &[u8]) -> Vec<usize> {
+/// Extract the IS-IS Hello frames from a classic-format pcap byte
+/// stream as `(on-wire length, Ethernet length/type field)` pairs. The
+/// length is what tcpdump records: Ethernet header included, FCS not.
+/// IIH frames are picked out of the capture by hand: 14-byte Ethernet
+/// header, 3-byte LLC `FE FE 03`, ISO discriminator 0x83, then PDU type
+/// (low 5 bits of byte 21) in {15, 16, 17} for L1-LAN / L2-LAN / P2P
+/// IIH. Doing the discrimination here lets the BPF filter side stay
+/// coarse (LLC bytes plus discriminator), so LSP / CSNP / PSNP frames in
+/// the same capture are simply skipped, not miscounted.
+///
+/// The length/type field comes along because it is load-bearing for
+/// interop: an LLC payload of 1500 bytes or less states its own length
+/// there, while a longer one must carry the jumbo LLC EtherType 0x8870
+/// instead (IEEE 802.1AC-2016/Cor 1-2018) — a raw length above 1500 is
+/// read as a nonsense EtherType and dropped by peers that classify
+/// ingress frames that way.
+fn pcap_iih_frames(bytes: &[u8]) -> Vec<(usize, u16)> {
     if bytes.len() < 24 {
         return Vec::new();
     }
@@ -2364,7 +2372,7 @@ fn pcap_iih_frame_lens(bytes: &[u8]) -> Vec<usize> {
             u32::from_be_bytes(arr)
         }) as usize
     };
-    let mut lens = Vec::new();
+    let mut frames = Vec::new();
     let mut off = 24;
     while off + 16 <= bytes.len() {
         let incl = read_u32(&bytes[off + 8..off + 12]);
@@ -2379,10 +2387,10 @@ fn pcap_iih_frame_lens(bytes: &[u8]) -> Vec<usize> {
             continue;
         }
         if matches!(frame[21] & 0x1f, 15..=17) {
-            lens.push(orig);
+            frames.push((orig, u16::from_be_bytes([frame[12], frame[13]])));
         }
     }
-    lens
+    frames
 }
 
 /// Capture IS-IS frames *sent* on `interface` in `scoped` (`-Q out`, so
@@ -2396,13 +2404,13 @@ fn pcap_iih_frame_lens(bytes: &[u8]) -> Vec<usize> {
 /// dump file.
 ///
 /// The BPF filter matches the LLC + ISO discriminator bytes by offset
-/// rather than using libpcap's `isis` primitive: an IIH padded to an
-/// MTU above 1500 bytes carries the payload length in the 802.3 length
-/// field (zebra-rs and FRR both send it via sockaddr_ll that way), and
-/// a value above 1536 makes libpcap classify the frame as an unknown
-/// EtherType — so `isis` silently misses exactly the full-MTU frames
-/// this capture exists to measure.
-async fn capture_iih_frame_lens(scoped: &str, interface: &str) -> Vec<usize> {
+/// rather than using libpcap's `isis` primitive: that primitive first
+/// requires the Ethernet length/type field to be 1500 or less (an 802.3
+/// length), so it silently misses every IIH padded above a 1500-byte
+/// MTU — whether the frame carries the jumbo LLC EtherType 0x8870 that
+/// zebra-rs now sends, or the raw payload length it used to — which is
+/// exactly the frames this capture exists to measure.
+async fn capture_iih_frames(scoped: &str, interface: &str) -> Vec<(usize, u16)> {
     let pcap = format!("/tmp/{}_{}_iih.pcap", scoped, interface);
     let _ = netns::exec_in_netns(scoped, "rm", &["-f", &pcap]).await;
     let _ = netns::exec_in_netns(
@@ -2430,7 +2438,16 @@ async fn capture_iih_frame_lens(scoped: &str, interface: &str) -> Vec<usize> {
     let _ = netns::exec_in_netns(scoped, "chmod", &["644", &pcap]).await;
     let bytes = fs::read(&pcap)
         .unwrap_or_else(|e| panic!("no capture file {} ({}): did tcpdump start?", pcap, e));
-    pcap_iih_frame_lens(&bytes)
+    pcap_iih_frames(&bytes)
+}
+
+/// The captured IIH lengths alone, for the size assertions.
+async fn capture_iih_frame_lens(scoped: &str, interface: &str) -> Vec<usize> {
+    capture_iih_frames(scoped, interface)
+        .await
+        .into_iter()
+        .map(|(len, _)| len)
+        .collect()
 }
 
 /// Assert the padded size of transmitted IS-IS Hellos: every captured IIH
@@ -2514,6 +2531,91 @@ async fn isis_hellos_should_be_smaller(
         interface,
         scoped,
         bound
+    );
+}
+
+/// Assert every transmitted IIH is marked with the jumbo LLC EtherType
+/// 0x8870 — required once the LLC payload passes 1500 bytes, because the
+/// 802.3 length field cannot express the length and a receiver reads any
+/// value from 1536 up as an EtherType. Sending the raw length there (the
+/// pre-fix behaviour, still FRR's) stamps the frame with a nonsense
+/// EtherType that peers classifying ingress by EtherType drop, which
+/// looks exactly like an MTU black hole: pings pass, adjacency stuck.
+#[then(
+    expr = "IS-IS hellos sent on interface {string} in namespace {string} should carry the jumbo LLC ethertype"
+)]
+async fn isis_hellos_should_carry_jumbo_llc(
+    world: &mut World,
+    interface: String,
+    namespace: String,
+) {
+    let scoped = world.ns(&namespace);
+    let frames = capture_iih_frames(&scoped, &interface).await;
+    assert!(
+        frames.len() >= 2,
+        "captured only {} IIH frame(s) on {} in {}; need at least 2 for a stable assertion",
+        frames.len(),
+        interface,
+        scoped
+    );
+    assert!(
+        frames.iter().all(|&(_, ethertype)| ethertype == 0x8870),
+        "IIH frames on {} in {} carried length/type fields {:04x?}, expected 0x8870 (jumbo LLC)",
+        interface,
+        scoped,
+        frames.iter().map(|&(_, t)| t).collect::<Vec<_>>()
+    );
+    println!(
+        "✓ {} IIH frames on {} in {} all carry the jumbo LLC ethertype 0x8870",
+        frames.len(),
+        interface,
+        scoped
+    );
+}
+
+/// The sub-1500 sibling: a frame whose LLC payload still fits the 802.3
+/// length field must state that length there, not the jumbo EtherType.
+/// This is the plain form every IS-IS implementation emits on a
+/// standard-MTU link, and implementations are entitled to reject 0x8870
+/// on a frame of 1500 bytes or less.
+#[then(
+    expr = "IS-IS hellos sent on interface {string} in namespace {string} should carry the 802.3 length {int}"
+)]
+async fn isis_hellos_should_carry_802_3_length(
+    world: &mut World,
+    interface: String,
+    namespace: String,
+    expected: u64,
+) {
+    let scoped = world.ns(&namespace);
+    let frames = capture_iih_frames(&scoped, &interface).await;
+    let expected = expected as u16;
+    assert!(
+        frames.len() >= 2,
+        "captured only {} IIH frame(s) on {} in {}; need at least 2 for a stable assertion",
+        frames.len(),
+        interface,
+        scoped
+    );
+    // Same −2 tolerance as the size assertion: a 1–2-byte remainder
+    // cannot form a padding TLV, so the payload may land just short.
+    assert!(
+        frames
+            .iter()
+            .all(|&(_, t)| t <= expected && t >= expected.saturating_sub(2)),
+        "IIH frames on {} in {} carried length/type fields {:?}, expected the 802.3 length {} (−2 tolerated)",
+        interface,
+        scoped,
+        frames.iter().map(|&(_, t)| t).collect::<Vec<_>>(),
+        expected
+    );
+    println!(
+        "✓ {} IIH frames on {} in {} carry the 802.3 length {} (expected {})",
+        frames.len(),
+        interface,
+        scoped,
+        frames[0].1,
+        expected
     );
 }
 

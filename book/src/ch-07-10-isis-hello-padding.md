@@ -31,6 +31,37 @@ byte-identical to FRR and Cisco IOS behaviour. The interface MTU is
 read from the kernel via netlink; there is no separate zebra-rs MTU
 configuration.
 
+## Frames above 1500 bytes: the jumbo LLC EtherType
+
+IS-IS rides IEEE 802.3 with an 802.2 LLC header, so the two bytes after
+the MAC addresses are a *length* field — the payload length, LLC header
+included. That field tops out at 1500: a receiver reads anything from
+1536 upward as an EtherType instead. A Hello padded for an MTU above
+1500 therefore cannot state its length there at all.
+
+The resolution, introduced by the IS-IS working group for exactly this
+case (padded IIHs and extended-size LSPs) and retroactively
+standardised by IEEE 802.1AC-2016/Cor 1-2018, is the **jumbo LLC
+EtherType 0x8870**: frames whose LLC payload exceeds 1500 bytes carry
+0x8870 in the length/type field and state their real length only in the
+IS-IS PDU length field. zebra-rs follows that rule:
+
+| LLC payload (LLC + PDU) | Ethernet length/type field |
+|---|---|
+| ≤ 1500 bytes | the payload length (plain 802.3) |
+| > 1500 bytes | `0x8870`, jumbo LLC |
+
+This matters for interop, not for Linux. A Linux peer — zebra-rs or FRR
+— receives IS-IS on an `AF_PACKET` socket whose BPF filter matches the
+LLC bytes and never looks at the length/type field, so it accepts a
+frame stamped with anything. Peers that classify ingress frames by
+EtherType (Cisco, Juniper, and other ASIC-style pipelines) do not: a
+jumbo Hello carrying a raw length such as 0x0FEE is an unknown
+EtherType and is dropped before IS-IS ever sees it. Before this rule
+was implemented, zebra-rs sent the raw length — which is still what FRR
+does — and jumbo-MTU adjacencies against such a peer sat in Init/Down
+with the symptom pattern below, padding size notwithstanding.
+
 ## The interop trap: peers that count MTU differently
 
 Some platforms configure MTU in *media MTU* terms — the number includes
@@ -46,6 +77,12 @@ The symptom pattern is distinctive:
   at the other, or arrives in only one direction;
 - the adjacency sits in Down/Init forever with nothing logged — the
   drop happens in the receiving interface, below IS-IS.
+
+A peer's own padded Hellos tell you which frame size it accepts: read
+the length straight out of a capture and hand it to `padding-size`. If
+those frames carry EtherType 0x8870 while ours carry a raw length, the
+zebra-rs build predates the jumbo LLC rule above, and no padding size
+will bring the adjacency up until it is fixed.
 
 The clean fix is to make both sides agree on the payload size: raise
 the media-MTU peer's number by 18 (4096 → 4114), or lower the
@@ -96,10 +133,10 @@ adjacency then forms across the mismatch, which is acceptable while
 ## Debugging with tcpdump
 
 One capture pitfall: libpcap's `isis` filter primitive **misses**
-padded Hellos on links with MTU above ~1500. The 802.3 length field
-carries the payload length (zebra-rs and FRR both send it that way),
-and values above 1536 make libpcap classify the frame as an unknown
-EtherType, so `tcpdump isis` shows the small PDUs but not the padded
+padded Hellos on links with MTU above ~1500. That primitive first
+requires the length/type field to be 1500 or less, i.e. a valid 802.3
+length — which a jumbo frame never has, whether it carries 0x8870 or a
+raw length. So `tcpdump isis` shows the small PDUs but not the padded
 IIHs — exactly the frames under investigation. Match the LLC and ISO
 discriminator bytes by offset instead:
 
@@ -114,4 +151,7 @@ end: matched MTUs pad to exactly MTU + 14 and the adjacency forms; a
 receiver with a smaller MTU silently drops the padded Hellos while
 pings still pass; `padding-size` shrinks the frames to a length the
 peer accepts and the adjacency recovers; deleting it restores full-MTU
-probing; and `padding disable` skips the probe entirely.
+probing; and `padding disable` skips the probe entirely. It also pins
+the length/type field on both sides of the 1500-byte boundary: jumbo
+LLC 0x8870 on the 1600-byte-MTU frames, the plain 802.3 length 1500
+once `padding-size 1514` brings them back under the limit.
