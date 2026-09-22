@@ -6329,6 +6329,115 @@ mod evpn_nexthop_wiring_tests {
     const SPINE: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 101);
     const VTEP: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 11);
 
+    fn bgpls_policy(entries: Vec<(u32, crate::policy::PolicyEntry)>) -> PolicyList {
+        let mut list = PolicyList::default();
+        for (seq, entry) in entries {
+            list.entry.insert(seq, entry);
+        }
+        list
+    }
+
+    fn permit_entry() -> crate::policy::PolicyEntry {
+        crate::policy::PolicyEntry {
+            action: crate::policy::PolicyAction::Permit,
+            ..Default::default()
+        }
+    }
+
+    fn deny_entry() -> crate::policy::PolicyEntry {
+        crate::policy::PolicyEntry {
+            action: crate::policy::PolicyAction::Deny,
+            ..Default::default()
+        }
+    }
+
+    /// A set name whose set is undefined or deleted must not simply
+    /// drop the condition — that turns a *conditional* permit into an
+    /// unconditional one and exports the whole feed. The entry has to
+    /// be a permit for this to bite: a dangling deny denies either way,
+    /// which is what made the first version of this test pass against
+    /// the bug it was written for.
+    #[test]
+    fn bgpls_policy_denies_on_an_unresolved_set_reference() {
+        let mut dangling = permit_entry();
+        dangling.community_set_name = Some("GONE".to_string());
+        // `community_set` stays None: the name resolved to nothing.
+        let list = bgpls_policy(vec![(10, dangling)]);
+
+        assert!(
+            policy_list_apply_bgpls(&list, BgpAttr::new(), Ipv4Addr::UNSPECIFIED).is_none(),
+            "an unresolved reference is deny-all, not a dropped condition"
+        );
+
+        // ... and the guard keys on a name *without* a set, not on the
+        // presence of a name, so an entry that references nothing still
+        // permits.
+        let list = bgpls_policy(vec![(10, permit_entry())]);
+        assert!(
+            policy_list_apply_bgpls(&list, BgpAttr::new(), Ipv4Addr::UNSPECIFIED).is_some(),
+            "the guard must not deny entries that reference nothing"
+        );
+    }
+
+    /// A nested `call` is control flow: the callee's deny must reach the
+    /// caller. Treating the entry as unevaluatable and skipping it let
+    /// a later permit export what the callee had just denied.
+    #[test]
+    fn bgpls_policy_propagates_a_callee_deny() {
+        let callee = Arc::new(bgpls_policy(vec![(10, deny_entry())]));
+        let mut caller_10 = permit_entry();
+        caller_10.call_name = Some("DENYALL".to_string());
+        caller_10.call_policy = Some(callee);
+        let list = bgpls_policy(vec![(10, caller_10), (20, permit_entry())]);
+
+        assert!(
+            policy_list_apply_bgpls(&list, BgpAttr::new(), Ipv4Addr::UNSPECIFIED).is_none(),
+            "the callee denied; entry 20 must not rescue the feed"
+        );
+    }
+
+    /// A callee that permits lets the caller continue, and an
+    /// unresolved callee denies.
+    #[test]
+    fn bgpls_policy_continues_past_a_callee_permit() {
+        let callee = Arc::new(bgpls_policy(vec![(10, permit_entry())]));
+        let mut entry = permit_entry();
+        entry.call_name = Some("ALLOW".to_string());
+        entry.call_policy = Some(callee);
+        let list = bgpls_policy(vec![(10, entry)]);
+        assert!(policy_list_apply_bgpls(&list, BgpAttr::new(), Ipv4Addr::UNSPECIFIED).is_some());
+
+        let mut unresolved = permit_entry();
+        unresolved.call_name = Some("MISSING".to_string());
+        let list = bgpls_policy(vec![(10, unresolved)]);
+        assert!(
+            policy_list_apply_bgpls(&list, BgpAttr::new(), Ipv4Addr::UNSPECIFIED).is_none(),
+            "a filter that cannot consult its callee must not permit"
+        );
+    }
+
+    /// `set color` is a wire-visible action: it writes a Color extended
+    /// community, which a later `match color` also has to be able to see.
+    #[test]
+    fn bgpls_policy_applies_set_color() {
+        let mut entry = permit_entry();
+        entry.set_color = Some(100);
+        let list = bgpls_policy(vec![(10, entry)]);
+
+        let out = policy_list_apply_bgpls(&list, BgpAttr::new(), Ipv4Addr::UNSPECIFIED)
+            .expect("permitted");
+        let colored = out
+            .ecom
+            .as_ref()
+            .map(|e| {
+                e.0.iter()
+                    .filter_map(|v| v.as_color())
+                    .any(|c| c.color == 100)
+            })
+            .unwrap_or(false);
+        assert!(colored, "set color 100 must reach the advertised attribute");
+    }
+
     /// RFC 4271 §5.1.5: LOCAL_PREF is never sent to an external peer.
     /// The egress transform only adds it for iBGP, but an outbound
     /// policy runs afterwards and `set local-preference` knows nothing
@@ -11357,8 +11466,33 @@ fn policy_list_apply_bgpls(
         tag: 0,
     };
     for entry in policy_list.entry.values() {
+        // A bound-but-unresolved reference is deny-all — the rule the
+        // IPv4 evaluator already states for an unresolved `call`. The
+        // alternative, dropping the clause, turns a conditional entry
+        // into an unconditional one: `match community-set GONE deny`
+        // followed by a permit would export everything.
+        if bgpls_entry_unresolved(entry) {
+            return None;
+        }
         if !entry_matches_bgpls(entry, &decision.attr) {
             continue;
+        }
+        // `call <policy>`: run the callee once this entry's match
+        // clauses have matched and before its terminal action. A callee
+        // deny denies the caller outright; a callee permit continues
+        // with its set clauses folded in. Skipping the entry instead —
+        // which is what "unevaluatable clauses fail the entry" did to
+        // it — let `entry 10 call DENYALL` fall through to a later
+        // permit and export the feed the callee had just denied.
+        //
+        // Recursion is safe without a depth limit for the same reason
+        // the IPv4 evaluator gives: `resolve_calls` guarantees the
+        // resolved graph is acyclic.
+        if entry.call_name.is_some() {
+            let Some(callee) = &entry.call_policy else {
+                return None;
+            };
+            decision.attr = policy_list_apply_bgpls(callee, decision.attr, local_addr)?;
         }
         match entry.action {
             PolicyAction::Deny => return None,
@@ -11407,6 +11541,7 @@ fn policy_list_apply_bgpls(
                 if let Some(origin) = entry.set_origin {
                     decision.attr.origin = Some(origin);
                 }
+                apply_color_and_prefix_sid(&mut decision.attr, entry);
                 if entry.action == PolicyAction::Permit {
                     return Some(decision.attr);
                 }
@@ -11414,6 +11549,23 @@ fn policy_list_apply_bgpls(
         }
     }
     None
+}
+
+/// Does this entry name a set or policy that did not resolve?
+///
+/// The matcher below reads the *resolved* sets, so a name whose set is
+/// undefined or has been deleted would simply drop that condition and
+/// widen the entry to match everything. This is the same class of
+/// failure as ignoring a clause outright, one level further in: the
+/// clause is read, its subject is missing, and the condition silently
+/// evaporates.
+fn bgpls_entry_unresolved(entry: &crate::policy::PolicyEntry) -> bool {
+    (entry.prefix_set_name.is_some() && entry.prefix_set.is_none())
+        || (entry.community_set_name.is_some() && entry.community_set.is_none())
+        || (entry.ext_community_set_name.is_some() && entry.ext_community_set.is_none())
+        || (entry.large_community_set_name.is_some() && entry.large_community_set.is_none())
+        || (entry.as_path_set_name.is_some() && entry.as_path_set.is_none())
+        || (entry.call_name.is_some() && entry.call_policy.is_none())
 }
 
 /// Match evaluator for a Link-State object.
@@ -11471,10 +11623,9 @@ fn entry_matches_bgpls(entry: &crate::policy::PolicyEntry, bgp_attr: &BgpAttr) -
         set_color: _,
         set_prefix_sid_label_index: _,
         set_tag: _,
-        // A nested `call` is control flow this evaluator does not
-        // follow; an entry using one is not applied rather than being
-        // treated as unconditional.
-        call_name,
+        // `call` is control flow, not a condition: the evaluator runs
+        // the callee after the match clauses pass.
+        call_name: _,
         call_policy: _,
         action: _,
     } = entry;
@@ -11483,7 +11634,6 @@ fn entry_matches_bgpls(entry: &crate::policy::PolicyEntry, bgp_attr: &BgpAttr) -
         || match_next_hop.is_some()
         || match_evpn_route_type.is_some()
         || match_evpn_vni.is_some()
-        || call_name.is_some()
     {
         return false;
     }
