@@ -15,7 +15,14 @@ the padder fills the IIH PDU to MTU - 3, the send path prepends the
 3-byte LLC header (FE FE 03), so the Ethernet payload is EXACTLY the
 interface MTU, and a capture shows MTU + 14 (Ethernet header; +4 more
 with FCS on a physical wire). MTU 1600 here means 1614-byte frames in
-tcpdump — precisely as MTU 4096 means 4110-byte frames. That is correct
+tcpdump — precisely as MTU 4096 means 4110-byte frames. Once that
+payload passes 1500 bytes it no longer fits the 802.3 length field, so
+the frame carries the jumbo LLC EtherType 0x8870 (IEEE 802.1AC-2016/
+Cor 1-2018) there instead and states its real length only in the PDU
+length field; at or below 1500 it states the payload length as before.
+Both forms are asserted here, because a raw length above 1500 reads as
+a nonsense EtherType and peers that classify ingress frames that way
+drop it — an adjacency stuck in Init while pings pass. That is correct
 under Linux/IETF MTU semantics (MTU = max L2 payload); a peer whose
 configured "MTU" counts the Ethernet header and FCS inside the number
 (media-MTU semantics, 18 bytes of overhead) will both send smaller

@@ -14,7 +14,14 @@ Feature: IS-IS Hello padding fills the interface MTU exactly, with padding-size 
   3-byte LLC header (FE FE 03), so the Ethernet payload is EXACTLY the
   interface MTU, and a capture shows MTU + 14 (Ethernet header; +4 more
   with FCS on a physical wire). MTU 1600 here means 1614-byte frames in
-  tcpdump — precisely as MTU 4096 means 4110-byte frames. That is correct
+  tcpdump — precisely as MTU 4096 means 4110-byte frames. Once that
+  payload passes 1500 bytes it no longer fits the 802.3 length field, so
+  the frame carries the jumbo LLC EtherType 0x8870 (IEEE 802.1AC-2016/
+  Cor 1-2018) there instead and states its real length only in the PDU
+  length field; at or below 1500 it states the payload length as before.
+  Both forms are asserted here, because a raw length above 1500 reads as
+  a nonsense EtherType and peers that classify ingress frames that way
+  drop it — an adjacency stuck in Init while pings pass. That is correct
   under Linux/IETF MTU semantics (MTU = max L2 payload); a peer whose
   configured "MTU" counts the Ethernet header and FCS inside the number
   (media-MTU semantics, 18 bytes of overhead) will both send smaller
@@ -50,6 +57,11 @@ Feature: IS-IS Hello padding fills the interface MTU exactly, with padding-size 
     # (frames the peer must drop); anything below 1612 would be under-padding.
     And IS-IS hellos sent on interface "i2" in namespace "a1" should be 1614 bytes on the wire
     And IS-IS hellos sent on interface "i1" in namespace "a2" should be 1614 bytes on the wire
+    # The 1600-byte payload is too long for the 802.3 length field, so the
+    # frame must be marked with the jumbo LLC EtherType instead. Stamping
+    # the raw length (0x0640) there is what EtherType-classifying peers
+    # drop — the adjacency above only proves the Linux-to-Linux path.
+    And IS-IS hellos sent on interface "i2" in namespace "a1" should carry the jumbo LLC ethertype
     And ping from "a2" to "10.0.0.1" should succeed
 
   Scenario: Receiver with a smaller MTU silently drops the padded Hellos — adjacency refuses to form while ordinary traffic still flows
@@ -77,11 +89,16 @@ Feature: IS-IS Hello padding fills the interface MTU exactly, with padding-size 
     Then isis neighbor in namespace "a2" at level 2 on interface "i1" should be up
     And isis neighbor in namespace "a1" at level 2 on interface "i2" should be up
     And IS-IS hellos sent on interface "i2" in namespace "a1" should be 1514 bytes on the wire
+    # A 1514-byte frame is a 1500-byte payload, which fits the 802.3
+    # length field again: the same interface drops back out of jumbo LLC
+    # framing as it crosses the boundary downward.
+    And IS-IS hellos sent on interface "i2" in namespace "a1" should carry the 802.3 length 1500
     And ping from "a2" to "10.0.0.1" should eventually succeed
     # Deleting the override restores the default full-MTU probe (1600+14),
     # which this link (still 1500 on the a2 side) again cannot carry.
     When I apply command "delete router isis interface i2 hello padding-size" in namespace "a1"
     Then IS-IS hellos sent on interface "i2" in namespace "a1" should be 1614 bytes on the wire
+    And IS-IS hellos sent on interface "i2" in namespace "a1" should carry the jumbo LLC ethertype
 
   Scenario: hello padding disable on the big-MTU side brings the adjacency back up
     Given the test topology exists
