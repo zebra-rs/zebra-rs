@@ -11459,23 +11459,42 @@ fn policy_list_apply_bgpls(
     attr: BgpAttr,
     local_addr: Ipv4Addr,
 ) -> Option<BgpAttr> {
-    use crate::policy::{PolicyAction, SetNextHop};
-    let mut decision = PolicyDecision {
+    let decision = PolicyDecision {
         attr,
         weight: 0,
         tag: 0,
     };
+    policy_list_apply_bgpls_inner(policy_list, decision, local_addr).map(|d| d.attr)
+}
+
+/// The evaluator proper. Threads the whole [`PolicyDecision`] rather
+/// than the attribute alone so a `set weight` is visible to a later
+/// `match weight`, in this policy and in any it calls — weight never
+/// reaches the wire, but it is a condition other clauses can test, and
+/// an evaluator that always compares against zero silently drops every
+/// rule built on one.
+fn policy_list_apply_bgpls_inner(
+    policy_list: &PolicyList,
+    mut decision: PolicyDecision,
+    local_addr: Ipv4Addr,
+) -> Option<PolicyDecision> {
+    use crate::policy::{PolicyAction, SetNextHop};
     for entry in policy_list.entry.values() {
-        // A bound-but-unresolved reference is deny-all — the rule the
-        // IPv4 evaluator already states for an unresolved `call`. The
-        // alternative, dropping the clause, turns a conditional entry
-        // into an unconditional one: `match community-set GONE deny`
-        // followed by a permit would export everything.
+        // Conditions first. An entry whose decidable clauses do not
+        // match is not this object's entry at all, so neither its
+        // unresolved references nor its `call` have any bearing —
+        // rejecting on them first made `match origin egp` + a dangling
+        // call deny an IGP object that the entry never applied to.
+        if !entry_matches_bgpls(entry, &decision.attr, decision.weight) {
+            continue;
+        }
+        // Only now does an undecidable clause matter. A bound-but-
+        // unresolved reference is deny-all — the rule the IPv4
+        // evaluator states for an unresolved `call`: dropping the
+        // clause instead would turn a conditional entry into an
+        // unconditional one.
         if bgpls_entry_unresolved(entry) {
             return None;
-        }
-        if !entry_matches_bgpls(entry, &decision.attr) {
-            continue;
         }
         // `call <policy>`: run the callee once this entry's match
         // clauses have matched and before its terminal action. A callee
@@ -11492,7 +11511,7 @@ fn policy_list_apply_bgpls(
             let Some(callee) = &entry.call_policy else {
                 return None;
             };
-            decision.attr = policy_list_apply_bgpls(callee, decision.attr, local_addr)?;
+            decision = policy_list_apply_bgpls_inner(callee, decision, local_addr)?;
         }
         match entry.action {
             PolicyAction::Deny => return None,
@@ -11541,9 +11560,12 @@ fn policy_list_apply_bgpls(
                 if let Some(origin) = entry.set_origin {
                     decision.attr.origin = Some(origin);
                 }
+                if let Some(w) = entry.weight {
+                    decision.weight = w;
+                }
                 apply_color_and_prefix_sid(&mut decision.attr, entry);
                 if entry.action == PolicyAction::Permit {
-                    return Some(decision.attr);
+                    return Some(decision);
                 }
             }
         }
@@ -11581,7 +11603,11 @@ fn bgpls_entry_unresolved(entry: &crate::policy::PolicyEntry) -> bool {
 /// A clause this family cannot evaluate fails the entry. Skipping it
 /// would let a condition the operator wrote be silently dropped while
 /// its action still fired.
-fn entry_matches_bgpls(entry: &crate::policy::PolicyEntry, bgp_attr: &BgpAttr) -> bool {
+fn entry_matches_bgpls(
+    entry: &crate::policy::PolicyEntry,
+    bgp_attr: &BgpAttr,
+    weight: u32,
+) -> bool {
     let crate::policy::PolicyEntry {
         // Needs an IP prefix; a Link-State NLRI is a descriptor set.
         prefix_set_name,
@@ -11694,10 +11720,11 @@ fn entry_matches_bgpls(entry: &crate::policy::PolicyEntry, bgp_attr: &BgpAttr) -
             return false;
         }
     }
-    // Weight is a local, pre-egress concept; an originated Link-State
-    // object carries none, so only a clause satisfied by 0 can hold.
+    // Weight never reaches the wire, but `set weight` earlier in this
+    // policy (or in one it called) can have moved it, so the running
+    // value is what a `match weight` has to see.
     if let Some(m) = match_weight
-        && !m.matches(0)
+        && !m.matches(weight)
     {
         return false;
     }
@@ -30970,3 +30997,7 @@ mod update_group_next_hop_knob_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "bgpls_review_tests.rs"]
+mod bgpls_review_tests;
