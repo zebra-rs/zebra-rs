@@ -2690,7 +2690,8 @@ impl Bgp {
                     // `show bgp link-state` renders.
                     if let Some(rib) = self.local_rib.bgp_ls.selected.get(&nlri) {
                         let attr = (*rib.attr).clone();
-                        super::route::bgpls_origin_reach(self, &nlri, &attr);
+                        let weight = rib.weight;
+                        super::route::bgpls_origin_reach(self, &nlri, &attr, weight);
                     }
                 }
             }

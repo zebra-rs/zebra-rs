@@ -5824,8 +5824,56 @@ fn show_bgp_link_state(
                 writeln!(buf, "     attr: {summary}")?;
             }
         }
+        let path = show_bgp_ls_path_attr(&rib.attr);
+        if !path.is_empty() {
+            writeln!(buf, "     path: {path}")?;
+        }
     }
     Ok(buf)
+}
+
+/// The BGP path attributes a Link-State object carries, as distinct
+/// from the BGP-LS Attribute TLVs above.
+///
+/// Worth showing separately: the TLVs describe the *link*, these
+/// describe the *advertisement*, and an operator debugging a feed —
+/// why an object was preferred, what an outbound policy did to it, why
+/// a strict peer rejected it — is asking about these. They were
+/// invisible here until the egress path made them something this
+/// router chooses rather than merely stores.
+fn show_bgp_ls_path_attr(attr: &BgpAttr) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(v) = &attr.origin {
+        parts.push(format!("origin {v}"));
+    }
+    if let Some(v) = &attr.aspath {
+        let path = v.to_string();
+        // An originated object's AS_PATH is empty toward an internal
+        // peer; saying so beats an empty field.
+        parts.push(if path.is_empty() {
+            "as-path empty".to_string()
+        } else {
+            format!("as-path {path}")
+        });
+    }
+    if let Some(v) = &attr.med {
+        parts.push(format!("med {}", v.med));
+    }
+    if let Some(v) = &attr.local_pref {
+        parts.push(format!("local-pref {}", v.local_pref));
+    }
+    if let Some(v) = &attr.com {
+        parts.push(format!("community {v}"));
+    }
+    // The MP_REACH next hop of a received object (RFC 9552 §5.1). A
+    // locally originated row has none until an outbound policy sets
+    // one, so this line is the receiving side of `set next-hop`.
+    match &attr.nexthop {
+        Some(BgpNexthop::Ipv4(addr)) => parts.push(format!("next-hop {addr}")),
+        Some(BgpNexthop::Ipv6(addr)) => parts.push(format!("next-hop {addr}")),
+        _ => {}
+    }
+    parts.join(", ")
 }
 
 /// Compact one-line summary of the high-value BGP-LS Attribute TLVs (RFC

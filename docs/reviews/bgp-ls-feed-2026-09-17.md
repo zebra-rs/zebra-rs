@@ -1,5 +1,73 @@
 # BGP-LS feed review
 
+## Resolution — fourth round
+
+Three probes from the previous round failed on first run. All three are
+fixed, and each fix is mutation-verified against the probe that found
+it.
+
+**An outbound policy never saw the object's weight.** `bgpls_out_attr`
+took the attribute alone, so the evaluator seeded every decision at
+weight 0 while the Loc-RIB row carried 32768 for a locally originated
+object. `match weight 32768 permit` — the natural way to say "the
+objects this router produces" — therefore matched nothing and fell
+through to whatever followed. The row's weight is now an argument
+threaded from both call sites, the origination delta and the
+reconciliation sweep, and the probe pins that the argument reaches the
+match rather than a constant that happens to agree with it.
+
+**`set tag` was written and never read.** The decision already carried a
+tag — `set tag`/`match tag` are policy-local, exactly like weight — but
+the Link-State evaluator applied neither. The matcher compared against a
+hard 0 on the reasoning that a Link-State object carries no tag of its
+own, which is true and beside the point: a `set tag` earlier in the same
+policy is where the value comes from. `match tag 0` still holds for an
+object nothing has stamped, so no existing rule changes meaning; what
+changes is that `set tag 5` followed by `match tag 5` now works instead
+of being silently dead.
+
+**`set next-hop` was accepted, stored, and discarded.** A BGP-LS next hop
+rides in MP_REACH (RFC 9552 §5.1), not in the traditional NEXT_HOP
+attribute, and the evaluator could only park the value on the attribute
+— which the sender then ignored in favour of the router-id. The sender
+now lifts it out of the attribute into the MP_REACH header, which also
+stops a stray NEXT_HOP (type 3) being emitted beside an UPDATE that
+carries no traditional NLRI for one to describe. An IPv6 address is kept
+rather than dropped: MP_REACH's next hop is an address of either family,
+and the v6 arm was an empty match block.
+
+**Observability.** Two of those three were invisible from the collector,
+because `show bgp link-state` rendered BGP-LS TLVs and no path
+attributes, and because the receive path discarded the MP_REACH next hop
+outright. The show now prints a `path:` line — ORIGIN, AS_PATH, MED,
+LOCAL_PREF, communities, next hop — and the receive path keeps the
+next hop on the stored attribute, the same way EVPN carries its own.
+This is what lets the BDD assert end-to-end rather than at the unit
+boundary.
+
+**BDD.** Three scenarios were added to `bgp_ls_te_metric`, each
+mutation-tested by reverting the code it covers: an outbound `set med`
+reaching the collector (drop the set action → 1 step fails); a
+well-formed AS_PATH and ORIGIN on the external feed (skip the eBGP
+prepend → 6 steps fail, since the collector enforces first-AS; advertise
+ORIGIN incomplete → 1 step fails); and `set next-hop` reaching MP_REACH
+(stop lifting it out of the attribute → 1 step fails). The scenario that
+sets LOCAL_PREF also gates that the egress rule suppresses the
+*attribute* and not the route — replacing the strip with a denial fails
+6 steps.
+
+**A negative assertion that could not fail.** The first attempt at the
+above added `should eventually not contain "local-pref"` to the external
+feed scenario. It passed against a build with the egress strip deleted.
+The cause is not a harness defect: the collector discards LOCAL_PREF
+from an external peer at parse time (RFC 7606 §7.6), so a leak cannot
+reach any show command on a conforming receiver. The assertion was
+removed rather than left to look like coverage, the reason is recorded
+in the feature, and the strip stays held by unit tests. Gating it on the
+wire needs a scripted peer that reports raw attribute types — the
+receiving counterpart of `bgp_ebgp_local_pref_send.py`, which does not
+exist yet.
+
 ## Resolution — third round
 
 Both findings are fixed.
@@ -18,7 +86,8 @@ The evaluator now destructures `PolicyEntry` field by field with no
 silently widening a conditional rule into an unconditional one. The
 evaluatable clauses are evaluated; the ones needing context this family
 has no NLRI for — a prefix set, an IPv4 next hop, the EVPN
-discriminators, a non-zero tag, a nested call — fail the entry.
+discriminators — fail the entry. (`match tag` was in that list until
+the fourth round; see below.)
 
 **LOCAL_PREF toward an external peer.** `bgpls_egress_attr` only added
 LOCAL_PREF for iBGP, but policy runs afterwards and `set

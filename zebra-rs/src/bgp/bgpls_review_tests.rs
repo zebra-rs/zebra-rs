@@ -23,7 +23,7 @@ fn policy(entries: Vec<PolicyEntry>) -> PolicyList {
 fn evaluate(list: &PolicyList) -> Option<BgpAttr> {
     let mut attr = BgpAttr::new();
     attr.origin = Some(Origin::Igp);
-    policy_list_apply_bgpls(list, attr, Ipv4Addr::UNSPECIFIED)
+    policy_list_apply_bgpls(list, attr, 0, Ipv4Addr::UNSPECIFIED)
 }
 
 #[test]
@@ -158,4 +158,138 @@ fn bgpls_review_oversized_replacement_withdraws_then_small_restores() {
         matches!(decoded.mp_update, Some(MpReachAttr::LinkState { updates, .. }) if updates == vec![nlri.clone()])
     );
     assert!(peer.adj_out.bgp_ls.0.contains_key(&nlri));
+}
+
+#[test]
+fn bgpls_review_callee_weight_reaches_subsequent_match() {
+    let mut set = entry(PolicyAction::Permit);
+    set.weight = Some(100);
+    let mut caller = entry(PolicyAction::Next);
+    caller.call_name = Some("WEIGHT".into());
+    caller.call_policy = Some(Arc::new(policy(vec![set])));
+    let mut deny = entry(PolicyAction::Deny);
+    deny.match_weight = Some(NumericMatch::Eq(100));
+    assert!(evaluate(&policy(vec![caller, deny, entry(PolicyAction::Permit)])).is_none());
+}
+
+#[test]
+fn bgpls_review_set_tag_is_visible_to_later_deny() {
+    let mut set = entry(PolicyAction::Next);
+    set.set_tag = Some(100);
+    let mut deny = entry(PolicyAction::Deny);
+    deny.match_tag = Some(100);
+    assert!(
+        evaluate(&policy(vec![set, deny, entry(PolicyAction::Permit)])).is_none(),
+        "set tag 100 must make the following match tag 100 deny fire"
+    );
+}
+
+fn node() -> BgpLsNlri {
+    use bgp_packet::{LsNodeDescSub, LsNodeDescriptor, LsNodeNlri, LsProtocolId};
+    BgpLsNlri::Node(LsNodeNlri {
+        protocol_id: LsProtocolId::IsisL2,
+        identifier: 0,
+        local_node: LsNodeDescriptor {
+            subs: vec![LsNodeDescSub::IgpRouterId(vec![0, 0, 0, 0, 0, 1])],
+        },
+    })
+}
+
+#[test]
+fn bgpls_review_policy_next_hop_reaches_mp_reach() {
+    use crate::policy::SetNextHop;
+    for address in ["192.0.2.99", "2001:db8::99"] {
+        let expected: IpAddr = address.parse().unwrap();
+        let mut set = entry(PolicyAction::Permit);
+        set.set_next_hop = Some(SetNextHop::Address(expected));
+        let mut peer = peer();
+        let slot =
+            peer.policy_list_slot(AfiSafi::new(Afi::LinkState, Safi::LinkState), InOut::Output);
+        slot.name = Some("NEXTHOP".into());
+        slot.policy_list = Some(policy(vec![set]));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        peer.packet_tx = Some(tx);
+        let attr = bgpls_out_attr(&mut peer, &BgpAttr::new(), 0).expect("permitted");
+        let default_nhop = IpAddr::V4(peer.router_id);
+        // This is the same call shape used by delta and synchronization paths.
+        bgpls_send_reach(&mut peer, default_nhop, &node(), attr);
+        let bytes = rx.try_recv().expect("advertisement");
+        let (_, decoded) = UpdatePacket::parse_packet(&bytes, peer.as4, None).unwrap();
+        let Some(MpReachAttr::LinkState { nhop, .. }) = decoded.mp_update else {
+            panic!("expected BGP-LS MP_REACH");
+        };
+        assert_eq!(nhop, expected, "policy next hop must reach MP_REACH");
+    }
+}
+
+#[test]
+fn bgpls_review_packet_size_boundaries_and_queue_drain() {
+    for limit in [4096, 65535] {
+        let make = |value_len| {
+            let mut update = UpdatePacket::with_max_packet_size(limit);
+            update.mp_update = Some(MpReachAttr::LinkState {
+                nhop: "192.0.2.1".parse().unwrap(),
+                updates: vec![node()],
+            });
+            let mut attr = BgpAttr::new();
+            attr.origin = Some(Origin::Igp);
+            attr.aspath = Some(As4Path::from(vec![65001]));
+            let mut ls = BgpLsAttr::new();
+            ls.push(1024, vec![0; value_len]);
+            attr.bgp_ls = Some(ls);
+            update.bgp_attr = Some(attr);
+            update
+        };
+        // Use an extended-length attribute in both measurements so header size
+        // stays constant at the exact limit and one byte beyond it.
+        let baseline = make(300).pop_bgpls().unwrap();
+        let overhead = baseline.len() - 300;
+        let mut exact = make(limit - overhead);
+        let bytes = exact.pop_bgpls().expect("exactly the limit fits");
+        assert_eq!(bytes.len(), limit);
+        assert_eq!(u16::from_be_bytes([bytes[16], bytes[17]]) as usize, limit);
+        assert!(
+            exact.pop_bgpls().is_none(),
+            "successful send drains the queue"
+        );
+        let mut over = make(limit - overhead + 1);
+        assert!(
+            over.pop_bgpls().is_none(),
+            "one byte over the limit is rejected"
+        );
+        assert!(
+            matches!(over.mp_update, Some(MpReachAttr::LinkState { updates, .. }) if updates.is_empty())
+        );
+    }
+}
+
+#[test]
+fn bgpls_review_initial_weight_matches_originated_rib() {
+    let nlri = node();
+    let mut local_rib = LocalRib::default();
+    let mut store = crate::bgp::BgpAttrStore::default();
+    route_bgpls_originate(nlri.clone(), BgpLsAttr::new(), &mut local_rib, &mut store);
+    let rib = local_rib
+        .bgp_ls
+        .selected
+        .get(&nlri)
+        .expect("originated object");
+    assert_eq!(rib.weight, 32768);
+    let mut permit = entry(PolicyAction::Permit);
+    permit.match_weight = Some(NumericMatch::Eq(rib.weight));
+    let mut peer = peer();
+    let slot = peer.policy_list_slot(AfiSafi::new(Afi::LinkState, Safi::LinkState), InOut::Output);
+    slot.name = Some("ORIGINATED".into());
+    slot.policy_list = Some(policy(vec![permit, entry(PolicyAction::Deny)]));
+    assert!(
+        bgpls_out_attr(&mut peer, &rib.attr, rib.weight).is_some(),
+        "outbound policy must see the originated object's actual weight"
+    );
+    // And the argument is what carries it, not a constant the evaluator
+    // happens to seed: the same row evaluated as weight 0 must fail the
+    // very same match.
+    assert!(
+        bgpls_out_attr(&mut peer, &rib.attr, 0).is_none(),
+        "the weight argument must reach the match, not be ignored"
+    );
 }

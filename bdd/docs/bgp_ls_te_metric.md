@@ -65,4 +65,7 @@ Topology:
 | An outbound deny withdraws what was already advertised | |
 | Removing the deny restores the feed | |
 | A conditional clause does not act unconditionally | |
+| An outbound set action reaches the wire | |
+| The external feed carries a well-formed AS_PATH | |
+| An outbound set next-hop reaches MP_REACH | |
 | Teardown topology | |
