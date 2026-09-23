@@ -13,6 +13,21 @@ use crate::toolchain;
 /// to be unique on the host between `ip link add` and `ip link set`.
 static PAIR_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
+/// Throwaway host-namespace name for one veth end: `v`, the feature's
+/// 8-hex-digit `short_id`, a `kind` letter (`p` pair, `b` bridge link), the
+/// counter as exactly 4 hex digits, then `end` (`a`/`b` for the two ends of
+/// a pair, empty for a bridge link) — 15 bytes at most, the IFNAMSIZ limit.
+///
+/// The counter is shared by every feature in the run, so it must not widen
+/// the name: a full suite creates 1000+ links, and a decimal counter pushed
+/// the pair names to 16 bytes, which `ip link add` rejects as "not a valid
+/// ifname". Wrapping at 0x10000 is harmless because `short_id` scopes the
+/// name to one feature, whose links are created one at a time and leave the
+/// host namespace immediately.
+fn tmp_veth_name(short_id: &str, kind: char, n: usize, end: &str) -> String {
+    format!("v{}{}{:04x}{}", short_id, kind, n & 0xffff, end)
+}
+
 /// Run a command and check for success
 async fn run_cmd(args: &[&str], error_msg: &str) -> Result<()> {
     let output = Command::new("sudo")
@@ -247,7 +262,7 @@ pub async fn connect_netns_to_bridge(
     // Unique throwaway name for the namespace end during the brief window
     // it sits in the host namespace (between `ip link add` and the move).
     let n = PAIR_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp_ns = format!("v{}_b{}", short_id, n);
+    let tmp_ns = tmp_veth_name(short_id, 'b', n, "");
 
     // Create veth pair
     run_cmd(
@@ -305,11 +320,11 @@ pub async fn connect_netns_pair(
 ) -> Result<()> {
     // Temporary names live briefly in the host namespace; they need to be
     // unique on the host between `ip link add` and `ip link set ... netns`.
-    // Using `short_id` plus a per-process counter keeps them well under
-    // IFNAMSIZ (15) regardless of how long `netns_a` / `netns_b` are.
+    // `tmp_veth_name` keeps them within IFNAMSIZ (15) regardless of how
+    // long `netns_a` / `netns_b` are or how many links the run has made.
     let n = PAIR_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp_a = format!("v{}_p{}a", short_id, n);
-    let tmp_b = format!("v{}_p{}b", short_id, n);
+    let tmp_a = tmp_veth_name(short_id, 'p', n, "a");
+    let tmp_b = tmp_veth_name(short_id, 'p', n, "b");
 
     run_cmd(
         &[
@@ -626,4 +641,39 @@ pub async fn ping6(netns: &str, target: &str, count: u32, timeout_secs: u32) -> 
 /// used by the dual-stack IS-IS features.
 pub async fn ping4(netns: &str, target: &str, count: u32, timeout_secs: u32) -> Result<bool> {
     ping_family(netns, "-4", target, count, timeout_secs).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    /// IFNAMSIZ (16) less the trailing NUL.
+    const IFNAME_MAX: usize = 15;
+
+    #[test]
+    fn tmp_veth_name_format() {
+        assert_eq!(tmp_veth_name("deadbeef", 'p', 1000, "a"), "vdeadbeefp03e8a");
+        assert_eq!(tmp_veth_name("deadbeef", 'b', 1000, ""), "vdeadbeefb03e8");
+    }
+
+    #[test]
+    fn tmp_veth_names_fit_ifnamsiz_for_any_counter() {
+        for n in [0, 999, 1000, 9999, 10000, 0xffff, 0x10000, usize::MAX] {
+            for (kind, end) in [('p', "a"), ('p', "b"), ('b', "")] {
+                let name = tmp_veth_name("deadbeef", kind, n, end);
+                assert!(name.len() <= IFNAME_MAX, "{name} is {} bytes", name.len());
+            }
+        }
+    }
+
+    #[test]
+    fn tmp_veth_names_are_unique_until_the_counter_wraps() {
+        let mut seen = HashSet::new();
+        for n in 0..=0xffff {
+            for (kind, end) in [('p', "a"), ('p', "b"), ('b', "")] {
+                assert!(seen.insert(tmp_veth_name("deadbeef", kind, n, end)));
+            }
+        }
+    }
 }
