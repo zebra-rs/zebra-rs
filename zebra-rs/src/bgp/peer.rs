@@ -2551,10 +2551,19 @@ pub fn fsm_bgp_open(peer: &mut Peer, conn: ConnTag, packet: OpenPacket) -> State
                     peer.collision = Some(collision);
                 }
                 ConnTag::Collision => {
-                    // The arriving conn (collision) loses; just drop it
-                    // and stay in OpenSent waiting for the winner's OPEN.
+                    // The arriving conn (collision) loses; drop it and
+                    // leave the primary where it is. That is OpenSent
+                    // while the winner's OPEN is still to come, but
+                    // OpenConfirm when it has already been processed —
+                    // a crossed inbound can be accepted and parked after
+                    // our dial reached OpenConfirm. Forcing OpenSent
+                    // there discarded the winner's OPEN: we waited for
+                    // an OPEN that never comes again and dropped the
+                    // remote's KEEPALIVE, while the remote, holding ours,
+                    // sat Established on the same connection until its
+                    // hold timer expired.
                     close_collision(collision, NotifyCode::Cease, 7); // ConnectionCollisionResolution
-                    return State::OpenSent;
+                    return peer.state;
                 }
             }
         } else {
@@ -4820,6 +4829,79 @@ mod fsm_idle_hold_tests {
         assert!(peer.collision.is_none());
         assert_eq!(peer.primary_conn_id, Some(primary_id));
         assert!(peer.packet_tx.is_some());
+    }
+
+    /// The parked conn's OPEN loses §6.8 (our BGP Identifier is the
+    /// higher, so our own dial — the primary — wins) before the
+    /// primary's OPEN has arrived: the loser is closed and the session
+    /// keeps waiting in OpenSent for the winner's OPEN.
+    #[tokio::test]
+    async fn losing_collision_open_in_open_sent_waits_for_the_winner() {
+        let (mut peer, primary_id, _collision_id) = peer_with_collision();
+        let next = fsm_bgp_open(
+            &mut peer,
+            ConnTag::Collision,
+            open_with_id(Ipv4Addr::new(10, 0, 0, 0)),
+        );
+        assert_eq!(next, State::OpenSent);
+        assert!(peer.collision.is_none(), "the losing conn is closed");
+        assert_eq!(peer.primary_conn_id, Some(primary_id));
+    }
+
+    /// The same loss after the winner's OPEN was already processed must
+    /// leave the session in OpenConfirm. Both ends redial on link-up and
+    /// the SYNs cross; our dial wins §6.8 and reaches OpenConfirm on the
+    /// remote's OPEN, and only then is the remote's crossed dial accepted
+    /// and parked (the accept path parks from OpenConfirm too) and its
+    /// OPEN read. Forcing OpenSent here wedged `bgp_fast_external_failover`:
+    /// the primary waited for an OPEN that had already come and dropped
+    /// the remote's KEEPALIVE, while the remote, holding ours, sat
+    /// Established on the same connection until its hold timer expired.
+    #[tokio::test]
+    async fn losing_collision_open_keeps_open_confirm() {
+        let open = || open_with_id(Ipv4Addr::new(10, 0, 0, 0));
+        let mut peer = test_peer(false);
+        let primary_id = peer.alloc_conn_id();
+        let (packet_tx, packet_rx) = mpsc::unbounded_channel::<BytesMut>();
+        Box::leak(Box::new(packet_rx));
+        peer.packet_tx = Some(packet_tx);
+        peer.primary_role = Some(Role::Active);
+        peer.primary_conn_id = Some(primary_id);
+        peer.state = State::OpenSent;
+        peer.state = fsm_bgp_open(&mut peer, ConnTag::Primary, open());
+        assert_eq!(peer.state, State::OpenConfirm);
+
+        let addr: IpAddr = "10.0.0.2".parse().unwrap();
+        let mut peers = PeerMap::new();
+        peers.insert(addr, peer);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stream = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        assert!(handle_peer_connection(&mut peers, addr, None, stream).is_none());
+        let peer = peers.get_mut(&addr).unwrap();
+        assert_eq!(
+            peer.collision.as_ref().map(|c| c.role),
+            Some(Role::Passive),
+            "the late inbound is parked as the collision conn"
+        );
+
+        let next = fsm_bgp_open(peer, ConnTag::Collision, open());
+        assert_eq!(
+            next,
+            State::OpenConfirm,
+            "the winner's OPEN was already processed"
+        );
+        assert!(peer.collision.is_none(), "the losing conn is closed");
+        assert_eq!(peer.primary_conn_id, Some(primary_id));
+
+        peer.state = next;
+        let (next, _) = fsm_next_state(peer, Event::KeepAliveMsg(primary_id));
+        assert_eq!(
+            next,
+            State::Established,
+            "the remote's KEEPALIVE completes the handshake"
+        );
     }
 
     /// Reaching Established with a conn still parked from a deferral
