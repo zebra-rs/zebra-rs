@@ -1,6 +1,6 @@
 # Measured link loss for STAMP-driven TE metrics — design
 
-> **Status:** proposal, awaiting review (2026-09-24)
+> **Status:** proposal, under review (2026-09-24). Decision 1 settled; 2–4 open (§10).
 > **Parent docs:** [stamp-isis-ospf.md](./stamp-isis-ospf.md) (the STAMP → IGP integration
 > this completes), [review sequencing](../reviews/stamp-isis-ospf-2026-09-16.md), step 4 "Measured loss"
 > **Branch:** `stamp-measured-loss`
@@ -257,7 +257,7 @@ RFC 8570 §5 asks for per-sub-TLV filters anyway. Loss is evaluated at every exp
 - **Periodic:** re-advertise **at most once per loss interval**, and only when
   `|new − advertised| ≥ max(threshold % × advertised, minimum-change)`. The defaults are
   `threshold` **10 %** (zebra-rs delay and Juniper delay; Cisco XE uses 15 %) and
-  `minimum-change` **1.0 percentage point**.
+  `minimum-change` **1.0 percentage point** (settled in review, §10 decision 1).
 - Why 1.0 and not Cisco XE's 0.2: Cisco XE counts real traffic, so its resolution is fine.
   At the default probe rate one probe is 0.83 %, so a minimum change below that suppresses
   nothing, and a link dropping one stray probe would flap between 0 and 0.83 % every
@@ -443,10 +443,13 @@ closing out step 4 of the review sequencing.
 
 The recommendation is listed first in each.
 
-1. **`minimum-change` default 1.0 % vs Cisco XE's 0.2 %.** 1.0 % suppresses single-probe
-   flapping at the default probe rate but hides sub-1 % loss until the operator raises the
-   rate. The alternative is to raise the default probe rate on loss-enabled links, which
-   costs 10× the probes.
+1. **`minimum-change` default 1.0 % vs Cisco XE's 0.2 %.** **Decided 2026-09-24: 1.0 %.**
+   It suppresses single-probe flapping at the default probe rate but hides sub-1 % loss until
+   the operator raises the rate. The default is only what applies when the knob is unset:
+   `loss minimum-change` (D10) overrides it per link, and should be lowered together with the
+   probe `interval` (e.g. 100 ms gives 0.083 % resolution, where Cisco XE's 0.2 fits). Rejected
+   alternatives: raising the default probe rate on loss-enabled links (10× the probes), and a
+   default derived from the probe rate (less predictable than a fixed number).
 2. **Round-trip loss advertised as unidirectional under a stateless reflector.** It is
    conservative, and labelled in `show`. The alternative is to advertise nothing without a
    stateful peer, which would leave most interoperability cases without loss.
