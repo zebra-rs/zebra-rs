@@ -319,3 +319,207 @@ fn bgpls_review_match_next_hop_without_set_does_not_match() {
     deny.match_next_hop = Some("192.0.2.1".parse().unwrap());
     assert!(evaluate(&policy(vec![deny, entry(PolicyAction::Permit)])).is_some());
 }
+
+fn feed_instance() -> Bgp {
+    use tokio::sync::mpsc;
+    let subscriber = crate::config::RibSubscriber::for_test(
+        mpsc::unbounded_channel().0,
+        mpsc::unbounded_channel().0,
+        Arc::new(std::sync::atomic::AtomicU32::new(1)),
+    );
+    let mut bgp = Bgp::new(
+        crate::context::ProtoContext::default_table_no_rib(),
+        mpsc::unbounded_channel().1,
+        subscriber,
+        mpsc::unbounded_channel().0,
+        None,
+        None,
+        mpsc::channel(1).0,
+    );
+    bgp.router_id = "192.0.2.1".parse().unwrap();
+    bgp
+}
+
+fn feed_peer(
+    bgp: &mut Bgp,
+    address: &str,
+    negotiated: bool,
+) -> (usize, tokio::sync::mpsc::UnboundedReceiver<bytes::BytesMut>) {
+    let mut peer = peer();
+    peer.address = address.parse().unwrap();
+    peer.state = super::super::peer::State::Established;
+    peer.peer_type = super::super::peer::PeerType::EBGP;
+    peer.as4 = true;
+    let cap = bgp_packet::CapMultiProtocol::new(&Afi::LinkState, &Safi::LinkState);
+    let slot = peer
+        .cap_map
+        .entries
+        .get_mut(&cap)
+        .expect("BGP-LS capability");
+    slot.send = true;
+    slot.recv = negotiated;
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    peer.packet_tx = Some(tx);
+    let address = peer.address;
+    bgp.peers.insert(address, peer);
+    let ident = bgp.peers.get(&address).unwrap().ident;
+    bgp.peers.membership_enroll(ident);
+    (ident, rx)
+}
+
+fn bind_feed_policy(bgp: &mut Bgp, ident: usize, entries: Vec<PolicyEntry>) {
+    let slot = bgp
+        .peers
+        .get_mut_by_idx(ident)
+        .unwrap()
+        .policy_list_slot(AfiSafi::new(Afi::LinkState, Safi::LinkState), InOut::Output);
+    slot.name = Some("REVIEW".into());
+    slot.policy_list = Some(policy(entries));
+}
+
+fn decode_feed(rx: &mut tokio::sync::mpsc::UnboundedReceiver<bytes::BytesMut>) -> UpdatePacket {
+    let bytes = rx.try_recv().expect("expected a feed UPDATE");
+    UpdatePacket::parse_packet(&bytes, true, None).unwrap().1
+}
+
+/// Exercise the production delta fan-out, including membership and per-peer
+/// policy, rather than calling the serializer with an already prepared attr.
+#[tokio::test]
+async fn bgpls_review_delta_isolates_peers_and_withdraws_newly_denied_object() {
+    let mut bgp = feed_instance();
+    let (allowed, mut allowed_rx) = feed_peer(&mut bgp, "192.0.2.2", true);
+    let (denied, mut denied_rx) = feed_peer(&mut bgp, "192.0.2.3", true);
+    let (_, mut unnegotiated_rx) = feed_peer(&mut bgp, "192.0.2.4", false);
+    let mut permit = entry(PolicyAction::Permit);
+    permit.match_weight = Some(NumericMatch::Eq(32768));
+    permit.set_next_hop = Some(crate::policy::SetNextHop::Address(
+        "2001:db8::99".parse().unwrap(),
+    ));
+    bind_feed_policy(&mut bgp, allowed, vec![permit]);
+    bind_feed_policy(&mut bgp, denied, vec![entry(PolicyAction::Deny)]);
+    let nlri = node();
+    route_bgpls_originate(
+        nlri.clone(),
+        BgpLsAttr::new(),
+        &mut bgp.local_rib,
+        &mut bgp.attr_store,
+    );
+    let rib = bgp.local_rib.bgp_ls.selected[&nlri].clone();
+    bgpls_origin_reach(&mut bgp, &nlri, &rib.attr, rib.weight);
+    let update = decode_feed(&mut allowed_rx);
+    assert!(matches!(update.mp_update,
+        Some(MpReachAttr::LinkState { nhop, updates })
+        if nhop == "2001:db8::99".parse::<IpAddr>().unwrap() && updates == vec![nlri.clone()]));
+    let attr = update.bgp_attr.unwrap();
+    assert_eq!(attr.aspath.unwrap(), As4Path::from(vec![65001]));
+    assert!(attr.local_pref.is_none());
+    assert!(
+        attr.nexthop.is_none(),
+        "no traditional NEXT_HOP beside MP_REACH"
+    );
+    assert!(denied_rx.try_recv().is_err());
+    assert!(unnegotiated_rx.try_recv().is_err());
+    assert!(bgp.local_rib.bgp_ls.selected[&nlri].attr.nexthop.is_none());
+
+    bind_feed_policy(&mut bgp, allowed, vec![entry(PolicyAction::Deny)]);
+    bgpls_origin_reach(&mut bgp, &nlri, &rib.attr, rib.weight);
+    assert!(matches!(decode_feed(&mut allowed_rx).mp_withdraw,
+        Some(MpUnreachAttr::LinkState { withdraws }) if withdraws == vec![nlri.clone()]));
+    assert!(
+        !bgp.peers
+            .get_by_idx(allowed)
+            .unwrap()
+            .adj_out
+            .bgp_ls
+            .0
+            .contains_key(&nlri)
+    );
+    assert!(allowed_rx.try_recv().is_err());
+    assert!(denied_rx.try_recv().is_err());
+}
+
+/// A late collector must get an unchanged LSDB, and soft-out must reconcile
+/// policy changes and removed objects without waiting for another IGP delta.
+#[tokio::test]
+async fn bgpls_review_sync_replays_and_reconciles_policy_and_producer_removal() {
+    let mut bgp = feed_instance();
+    let nlri = node();
+    route_bgpls_originate(
+        nlri.clone(),
+        BgpLsAttr::new(),
+        &mut bgp.local_rib,
+        &mut bgp.attr_store,
+    );
+    let (ident, mut rx) = feed_peer(&mut bgp, "192.0.2.2", true);
+    let mut permit = entry(PolicyAction::Permit);
+    permit.match_weight = Some(NumericMatch::Eq(32768));
+    bind_feed_policy(&mut bgp, ident, vec![permit]);
+    {
+        let (top, peers) = super::super::peer::advertise_top(&mut bgp);
+        route_sync_bgpls(peers.get_mut_by_idx(ident).unwrap(), &top);
+    }
+    assert!(matches!(decode_feed(&mut rx).mp_update,
+        Some(MpReachAttr::LinkState { updates, .. }) if updates == vec![nlri.clone()]));
+    super::super::peer::apply_soft_out_peer(&mut bgp, ident);
+    assert!(matches!(decode_feed(&mut rx).mp_update,
+        Some(MpReachAttr::LinkState { updates, .. }) if updates == vec![nlri.clone()]));
+
+    bind_feed_policy(&mut bgp, ident, vec![entry(PolicyAction::Deny)]);
+    super::super::peer::apply_soft_out_peer(&mut bgp, ident);
+    assert!(matches!(decode_feed(&mut rx).mp_withdraw,
+        Some(MpUnreachAttr::LinkState { withdraws }) if withdraws == vec![nlri.clone()]));
+    assert!(rx.try_recv().is_err());
+
+    bind_feed_policy(&mut bgp, ident, vec![entry(PolicyAction::Permit)]);
+    super::super::peer::apply_soft_out_peer(&mut bgp, ident);
+    assert!(matches!(decode_feed(&mut rx).mp_update,
+        Some(MpReachAttr::LinkState { updates, .. }) if updates == vec![nlri.clone()]));
+    route_bgpls_withdraw_originated(&nlri, &mut bgp.local_rib);
+    super::super::peer::apply_soft_out_peer(&mut bgp, ident);
+    assert!(matches!(decode_feed(&mut rx).mp_withdraw,
+        Some(MpUnreachAttr::LinkState { withdraws }) if withdraws == vec![nlri.clone()]));
+    assert!(
+        bgp.peers
+            .get_by_idx(ident)
+            .unwrap()
+            .adj_out
+            .bgp_ls
+            .0
+            .is_empty()
+    );
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn bgpls_review_sender_honors_negotiated_extended_message_limit() {
+    for extended in [false, true] {
+        let mut peer = peer();
+        peer.opt.extended_message = extended;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        peer.packet_tx = Some(tx);
+        let mut attr = bgpls_out_attr(&mut peer, &BgpAttr::new(), 32768).unwrap();
+        let mut ls = BgpLsAttr::new();
+        ls.push(1024, vec![0; 5000]);
+        attr.bgp_ls = Some(ls);
+        let nhop = IpAddr::V4(peer.router_id);
+        bgpls_send_reach(&mut peer, nhop, &node(), attr);
+        if extended {
+            let bytes = rx.try_recv().expect("extended peer accepts the object");
+            assert!(bytes.len() > 4096 && bytes.len() <= 65535);
+            let decoded = UpdatePacket::parse_packet(&bytes, peer.as4, None)
+                .unwrap()
+                .1;
+            assert!(matches!(
+                decoded.mp_update,
+                Some(MpReachAttr::LinkState { .. })
+            ));
+            assert!(peer.adj_out.bgp_ls.0.contains_key(&node()));
+        } else {
+            assert!(
+                rx.try_recv().is_err(),
+                "ordinary peer must not get an oversized UPDATE"
+            );
+            assert!(peer.adj_out.bgp_ls.0.is_empty());
+        }
+    }
+}
