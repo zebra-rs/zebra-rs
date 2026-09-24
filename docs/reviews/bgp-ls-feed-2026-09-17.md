@@ -1,5 +1,34 @@
 # BGP-LS feed review
 
+## Resolution — fifth round
+
+**`match next-hop` could not match what `set next-hop` wrote.** The
+fourth round made `set next-hop` keep its value on the attribute so the
+sender could lift it into MP_REACH, but left the matcher refusing the
+clause on the grounds — true when written, false after that change —
+that `BgpAttr::nexthop` was IPv4-only and not the BGP-LS next hop. So
+
+    10: set next-hop 192.0.2.99; next
+    20: match next-hop 192.0.2.99; deny
+    30: permit
+
+exported the object. The matcher now compares against the running next
+hop in either family. An object no policy has given a next hop carries
+none during evaluation — the sender picks the router-id only when it
+builds MP_REACH — so `match next-hop <router-id>` does not match an
+untouched object; reading the default in would need the evaluator and
+the sender to agree on a router-id they are handed from different
+places.
+
+This is the third finding of one class — a value policy can set that the
+matcher does not read — after weight (third round) and tag (fourth).
+Every set action was checked against its match clause this time: the
+attribute clauses all read the running attribute, weight and tag are
+threaded, and the clauses still refused (prefix set, EVPN route type and
+VNI) have no set action that could give them a value. The fourth-round
+fix should have been followed by that sweep, since it was the change
+that made the refusal wrong.
+
 ## Resolution — fourth round
 
 Three probes from the previous round failed on first run. All three are
@@ -85,9 +114,9 @@ The evaluator now destructures `PolicyEntry` field by field with no
 `..`, so adding a clause to the struct breaks this build rather than
 silently widening a conditional rule into an unconditional one. The
 evaluatable clauses are evaluated; the ones needing context this family
-has no NLRI for — a prefix set, an IPv4 next hop, the EVPN
-discriminators — fail the entry. (`match tag` was in that list until
-the fourth round; see below.)
+has no NLRI for — a prefix set, the EVPN discriminators — fail the
+entry. (`match tag` and `match next-hop` were in that list until the
+fourth and fifth rounds; see above.)
 
 **LOCAL_PREF toward an external peer.** `bgpls_egress_attr` only added
 LOCAL_PREF for iBGP, but policy runs afterwards and `set

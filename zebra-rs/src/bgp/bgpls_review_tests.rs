@@ -293,3 +293,29 @@ fn bgpls_review_initial_weight_matches_originated_rib() {
         "the weight argument must reach the match, not be ignored"
     );
 }
+
+#[test]
+fn bgpls_review_set_next_hop_is_visible_to_later_match() {
+    use crate::policy::SetNextHop;
+    for address in ["192.0.2.99", "2001:db8::99"] {
+        let addr: IpAddr = address.parse().unwrap();
+        let mut set = entry(PolicyAction::Next);
+        set.set_next_hop = Some(SetNextHop::Address(addr));
+        let mut deny = entry(PolicyAction::Deny);
+        deny.match_next_hop = Some(addr);
+        assert!(
+            evaluate(&policy(vec![set, deny, entry(PolicyAction::Permit)])).is_none(),
+            "set next-hop {address} must make the following match next-hop {address} deny fire"
+        );
+    }
+}
+
+/// No `set next-hop` ran, so there is no next hop to compare yet — the
+/// sender picks the router-id only when it builds MP_REACH. A deny on
+/// any address must therefore not fire for an untouched object.
+#[test]
+fn bgpls_review_match_next_hop_without_set_does_not_match() {
+    let mut deny = entry(PolicyAction::Deny);
+    deny.match_next_hop = Some("192.0.2.1".parse().unwrap());
+    assert!(evaluate(&policy(vec![deny, entry(PolicyAction::Permit)])).is_some());
+}

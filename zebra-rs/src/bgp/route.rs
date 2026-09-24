@@ -11649,8 +11649,8 @@ fn entry_matches_bgpls(
         large_community_set,
         as_path_set_name: _,
         as_path_set,
-        // `BgpAttr::nexthop` is IPv4-only and is not the BGP-LS next
-        // hop, which travels in MP_REACH. Not evaluatable.
+        // Reads what `set next-hop` parked on the attribute, which
+        // the sender later lifts into MP_REACH.
         match_next_hop,
         match_med,
         match_as_path_len,
@@ -11678,8 +11678,8 @@ fn entry_matches_bgpls(
         set_origin: _,
         set_color: _,
         set_prefix_sid_label_index: _,
-        set_tag: _, // applied by the caller, like `weight`
-
+        // Applied by the caller, like `weight`.
+        set_tag: _,
         // `call` is control flow, not a condition: the evaluator runs
         // the callee after the match clauses pass.
         call_name: _,
@@ -11687,12 +11687,30 @@ fn entry_matches_bgpls(
         action: _,
     } = entry;
 
-    if prefix_set_name.is_some()
-        || match_next_hop.is_some()
-        || match_evpn_route_type.is_some()
-        || match_evpn_vni.is_some()
-    {
+    if prefix_set_name.is_some() || match_evpn_route_type.is_some() || match_evpn_vni.is_some() {
         return false;
+    }
+    // The next hop a `set next-hop` earlier in this policy (or one it
+    // called) wrote, in either family — refusing the clause, as this
+    // did until the set action started keeping its value, made
+    // `set next-hop X; next` followed by `match next-hop X; deny` fall
+    // through to a later permit.
+    //
+    // An object no policy has given a next hop carries none here: the
+    // sender only fills in the router-id when it builds MP_REACH. So
+    // `match next-hop <router-id>` does not match an untouched object.
+    // Reading the default in as well would need the evaluator and the
+    // sender to agree on which router-id that is, and they are handed
+    // it from different places.
+    if let Some(want) = match_next_hop {
+        let have = match &bgp_attr.nexthop {
+            Some(BgpNexthop::Ipv4(addr)) => Some(IpAddr::V4(*addr)),
+            Some(BgpNexthop::Ipv6(addr)) => Some(IpAddr::V6(*addr)),
+            _ => None,
+        };
+        if have != Some(*want) {
+            return false;
+        }
     }
     // An untagged object reads 0, so `match tag 0` still holds for one
     // nothing has stamped — what changed is that `match tag 5` can now
