@@ -25,12 +25,25 @@ That makes this a real round trip for the IS-IS half: ls1 encodes the
 RFC 8570 sub-TLVs, ls2 parses them off the wire, and ls2's producer
 translates what it parsed into RFC 8571 attributes.
 
-SCOPE: what is *not* covered is the BGP wire. BGP-LS re-advertisement
-to peers is not implemented (see `route_bgpls_originate`,
-"Re-advertisement to peers is deferred"), so nothing here puts a
-BGP-LS Attribute into an UPDATE. The BGP-LS ASLA TLV (1122) encoding
-in particular rests on unit tests until an egress path exists to
-carry it.
+A third node, lsc, plays the collector: it runs no IGP at all and
+peers with ls1 over BGP-LS alone, which is how a PCE or controller
+actually attaches. It sits in a different AS and enforces first-AS, so
+the feed has to carry a well-formed AS_PATH with ls1's AS at the
+front — an originated object whose AS_PATH was left empty is rejected
+outright, and the session shows it. Everything in its RIB arrived over the wire, so
+that is where the BGP half of the round trip can be observed — the
+RFC 8571 attributes and the RFC 9294 ASLA TLV emitted into an UPDATE,
+parsed by the receiver, and rendered from the decode.
+
+ls1 and ls2 also peer with each other, but neither can show a received
+object as best: each produces the whole LSDB itself, so its own
+Originated copy of every object wins path selection. That is correct,
+and it is why the collector is necessary rather than convenient.
+
+SCOPE: only self-originated objects are advertised. Re-advertising a
+*received* object is route reflection, which is not implemented — so
+lsc learns ls1's view of the topology, including the links ls1 learned
+from ls2's LSP, but would learn nothing through ls2.
 
 Topology:
 
@@ -46,4 +59,13 @@ Topology:
 | Each router originates its own link into the BGP-LS Loc-RIB | |
 | The RFC 8570 delay reaches BGP-LS as RFC 8571 attributes | |
 | A neighbour's delay survives the IGP wire and the translation | |
+| The BGP-LS session comes up | |
+| The collector learns the topology over BGP | |
+| The RFC 8571 attributes survive the BGP wire | |
+| An outbound deny withdraws what was already advertised | |
+| Removing the deny restores the feed | |
+| A conditional clause does not act unconditionally | |
+| An outbound set action reaches the wire | |
+| The external feed carries a well-formed AS_PATH | |
+| An outbound set next-hop reaches MP_REACH | |
 | Teardown topology | |

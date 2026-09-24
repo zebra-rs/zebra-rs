@@ -5844,9 +5844,11 @@ module config {
                explicit IPv4/IPv6 address, or the keyword `self`,
                which resolves at apply time to the local router
                identifier used for the session that's advertising
-               the route. IPv6 addresses parse and store but
-               currently do not affect the route's NEXT_HOP —
-               BgpNexthop is IPv4-only today.";
+               the route. Whether an IPv6 address reaches the wire
+               depends on the family: a Link-State advertisement
+               carries its next hop in MP_REACH and honours it, while
+               the traditional NEXT_HOP attribute of IPv4 unicast
+               cannot express one and ignores it.";
             choice "target" {
               mandatory true;
               case address-case {
