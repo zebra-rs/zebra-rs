@@ -1,6 +1,6 @@
 # Measured link loss for STAMP-driven TE metrics — design
 
-> **Status:** proposal, under review (2026-09-24). Decisions 1–3 settled; 4 open (§10).
+> **Status:** proposal, reviewed (2026-09-24). All four §10 decisions settled.
 > **Parent docs:** [stamp-isis-ospf.md](./stamp-isis-ospf.md) (the STAMP → IGP integration
 > this completes), [review sequencing](../reviews/stamp-isis-ospf-2026-09-16.md), step 4 "Measured loss"
 > **Branch:** `stamp-measured-loss`
@@ -94,10 +94,13 @@ the finding is taken from its published YANG models, which carry exact leaf name
 
 What the implementations that do advertise loss agree on, and what zebra-rs should copy:
 
-1. **Loss is opt-in.** Huawei needs an explicit `advertisement enable`, and Cisco configures
-   it per profile. Juniper, Nokia and Arista don't advertise measured loss at all, so a
-   router that starts flooding sub-TLV 36 is doing something most of the network isn't.
-   zebra-rs keeps it behind its own switch (D10).
+1. **The two vendors that advertise loss disagree on the default.** Huawei needs an explicit
+   `metric-link-loss advertisement enable`. Cisco IOS XR's interface delay profile has **no
+   loss switch at all** in the 26.2.1 config model: loss rides with delay measurement, and
+   only its `anomaly-loss` bounds are configurable. No Cisco document states outright that
+   IS-IS then advertises sub-TLV 36 by default, but the model leaves no way to measure delay
+   without it. zebra-rs follows Cisco — on wherever measurement is on, with a per-link off
+   switch (D10, §10 decision 4).
 2. **Two windows: a short computation window and a 120-second advertisement window.**
    Cisco's 30 s / 120 s probe and periodic windows, Nokia's 12 × 10 s aggregate, and RFC 8570
    §7's 30 s / 120 s defaults all have this shape (D4).
@@ -358,7 +361,8 @@ te-metric {
     reuse-threshold …;              # existing: delay
     reflector stateful;             # new: how THIS router reflects the peer's probes;
                                     #      default stateless (D3)
-    loss {                          # new; presence = loss measurement on
+    loss {                          # new; loss is measured whenever measurement is on
+      enabled true;                 # default true; false turns loss off on this link
       interval 120;                 # loss window, s; multiple of damping-period (D4)
       threshold 10;                 # periodic relative change, %            (D6)
       minimum-change 1.0;           # periodic absolute change, %-points     (D6)
@@ -372,11 +376,19 @@ te-metric {
 }
 ```
 
-**Loss measurement is opt-in** (a `loss` presence container). Links measured today keep
-advertising exactly what they do now after an upgrade. Turning it on by default would add
-sub-TLV 36 to every measured link's LSP, and any router running a Flex-Algo loss constraint
-would start pruning on it. That is the operator's decision, and Huawei and Cisco make it
-explicit too.
+**Loss measurement is on by default** wherever `measurement` is enabled, as on Cisco IOS XR
+(§10 decision 4); `loss enabled false` turns it off per link. That is a visible change on
+upgrade, and the release notes must say so:
+
+- Every measured link starts advertising sub-TLV 36 (and OSPF 30/16, BGP-LS 1117) once its
+  first full loss window has settled — about 120 s after the session comes up (D5). A clean
+  link advertises 0 %, which RFC 8570 gives no special meaning, unlike delay variation.
+- Each such LSP grows by one sub-TLV per measured link, inline and again inside the ASLA.
+- A router elsewhere running a Flex-Algo loss constraint starts seeing values it did not see
+  before. On a clean link that is 0 %, below any constraint.
+- The Anomalous bit stays off unless its bounds are configured (D7), so the default cannot
+  raise an anomaly on its own.
+- A static `loss` leaf still wins over the measured value (`merged_over`).
 
 The existing leaf descriptions are reworded where they now mean something narrower:
 `damping-period` becomes the delay export window, and `measurement`'s help ("Measure this
@@ -428,7 +440,9 @@ Static loss keeps originating a clear A bit, as delay does today.
   packet instead: nftables `numgen inc mod 10 == 0` on UDP 862, or iptables
   `-m statistic --mode nth --every 10`. That is exactly 10 % in the chosen direction.
   Scenarios:
-  1. **Loss off:** no sub-TLV 36 appears on a measured link. This is the upgrade guarantee.
+  1. **On by default:** a measured link with no `loss` configuration advertises sub-TLV 36
+     at 0 % once the window has filled, and `loss enabled false` withdraws it. This pins the
+     default in both directions.
   2. **Loss on, 10 % forward drop:** IS-IS and OSPF advertise ≈ 10 % (the exact encoded
      value is deterministic).
   3. **Crossing the anomaly bound:** the A bit sets, then clears once the drop rule is
@@ -439,12 +453,20 @@ Static loss keeps originating a clear A bit, as delay does today.
      A variant restarts the far-end session mid-run and checks the counter-restart rule.
   5. **Probes dropped, adjacency up:** the loss sub-TLV is withdrawn, not maxed (D8).
 
+  The existing features that enable measurement — `stamp_te_metric`, `stamp_v6_te_metric`,
+  `stamp_v6_dad_retry` — will start carrying a loss sub-TLV. Their negative assertions look for
+  the *delay* anomaly markers (`us (A)`, `(Anomalous)`), which a default-on loss with unset
+  bounds does not produce, but PR 2 must run them and review each LSP expectation.
+  `bgp_ls_te_metric` does not measure (its loss is static) and is unaffected.
+
 ## 8. Delivery — smallest PR first
 
 1. **Accounting core:** D2 plus D4/D5 computation, plus `show` (D11). Nothing reaches an IGP,
    so it is safe to merge alone, and the boundary-skew fix lands first.
 2. **Advertisement:** the D9 event split, D10 configuration, D6 filter and D8 withdrawal,
-   wired into IS-IS, OSPFv2 and OSPFv3. BDD scenarios 1, 2 and 5.
+   wired into IS-IS, OSPFv2 and OSPFv3. BDD scenarios 1, 2 and 5. **This PR changes what
+   every measured link advertises** (decision 4), so it carries the CHANGELOG entry that says
+   so, and the review of the existing STAMP features listed in §7.
 3. **Anomalous bit:** D7. BDD scenario 3.
 4. **Direction:** D3 — the opt-in stateful reflector (`reflector stateful`) and the
    sender's `peer-reflector` declaration. BDD scenario 4.
@@ -490,7 +512,12 @@ The recommendation is listed first in each.
    number by default (Cisco always, Juniper unless `stateful-sequence`), and although neither
    documents a sender that would break, Cisco's reply matching is undocumented. The cost of
    opt-in is configuring both ends for zebra-rs-to-zebra-rs directional loss.
-4. **Loss is opt-in** (D10), rather than on wherever measurement is enabled.
+4. **Should loss measurement be opt-in?** **Decided 2026-09-24: no — on by default, like
+   Cisco IOS XR**, with `loss enabled false` as the per-link off switch (D10). The original
+   recommendation was opt-in, citing Huawei's explicit enable and the upgrade change. The
+   decision follows Cisco instead, whose delay profile has no loss switch. The upgrade
+   consequences are listed in D10 and must reach the release notes. The loss A bit stays opt-in
+   (D7), so default-on loss cannot raise an anomaly by itself.
 
 ## Sources
 
