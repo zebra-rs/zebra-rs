@@ -1,6 +1,6 @@
 # Measured link loss for STAMP-driven TE metrics — design
 
-> **Status:** proposal, under review (2026-09-24). Decision 1 settled; 2–4 open (§10).
+> **Status:** proposal, under review (2026-09-24). Decisions 1–2 settled; 3–4 open (§10).
 > **Parent docs:** [stamp-isis-ospf.md](./stamp-isis-ospf.md) (the STAMP → IGP integration
 > this completes), [review sequencing](../reviews/stamp-isis-ospf-2026-09-16.md), step 4 "Measured loss"
 > **Branch:** `stamp-measured-loss`
@@ -195,7 +195,8 @@ loss indistinguishable, because the sender only sees that a reply is missing.
   bound on forward loss (`p_rt ≈ p_fwd + p_rev` for small rates). Overstating loss steers
   traffic away from a link that is only lossy in the other direction; understating it would
   leave traffic on one that really is lossy. Halving it would assume symmetric loss, which
-  nothing justifies. `show` labels the value **round-trip**.
+  nothing justifies. `show` labels the value **round-trip**. (Settled in review, §10
+  decision 2.)
 - **`reflector stateful`** (per link): the peer's reflector keeps its own sequence counter.
   Between two consecutive received replies `(S₁, R₁)` and `(S₂, R₂)`:
   - forward loss = `(S₂ − S₁) − (R₂ − R₁)`
@@ -450,9 +451,11 @@ The recommendation is listed first in each.
    probe `interval` (e.g. 100 ms gives 0.083 % resolution, where Cisco XE's 0.2 fits). Rejected
    alternatives: raising the default probe rate on loss-enabled links (10× the probes), and a
    default derived from the probe rate (less predictable than a fixed number).
-2. **Round-trip loss advertised as unidirectional under a stateless reflector.** It is
-   conservative, and labelled in `show`. The alternative is to advertise nothing without a
-   stateful peer, which would leave most interoperability cases without loss.
+2. **Round-trip loss advertised as unidirectional under a stateless reflector.**
+   **Decided 2026-09-24: yes.** It is conservative — an upper bound on forward loss — and
+   labelled round-trip in `show`. Rejected alternatives: advertising nothing without a
+   stateful peer, which would leave most interoperability cases without loss; and halving
+   the round-trip value, which assumes symmetric loss.
 3. **zebra-rs's reflector becomes stateful** (D3). It is backward compatible per RFC 8762,
    but it is a behaviour change visible on the wire in the reflector's own Sequence Number
    field.
