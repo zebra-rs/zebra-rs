@@ -1,6 +1,6 @@
 # Measured link loss for STAMP-driven TE metrics — design
 
-> **Status:** proposal, under review (2026-09-24). Decisions 1–2 settled; 3–4 open (§10).
+> **Status:** proposal, under review (2026-09-24). Decisions 1–3 settled; 4 open (§10).
 > **Parent docs:** [stamp-isis-ospf.md](./stamp-isis-ospf.md) (the STAMP → IGP integration
 > this completes), [review sequencing](../reviews/stamp-isis-ospf-2026-09-16.md), step 4 "Measured loss"
 > **Branch:** `stamp-measured-loss`
@@ -111,6 +111,14 @@ What the implementations that do advertise loss agree on, and what zebra-rs shou
    tunnel. zebra-rs already measures only P2P circuits.
 7. **Acting on the anomaly is a separate feature.** Cisco's metric penalty arrived in 25.1.1,
    years after loss advertisement, and lives in IS-IS configuration, not PM (§9).
+8. **Reflectors copy the sequence number by default.** Cisco's TWAMP Light reflector "simply
+   copies the Sequence Number of the received packet", with no option to do otherwise.
+   Juniper's does the same unless `stateful-sequence` is configured on the TWAMP Light or
+   managed server (Junos OS Evolved 23.4R1), which makes it "generate the sequence number in
+   the reflected payload independently" from a per-client cache. Juniper's sender then infers
+   per-direction drops from those numbers: "inferred minimum values, and … not guaranteed to be
+   exact". Cisco's sender counts loss from TX/RX packet counters per window, and its oper model
+   has no sequence-number fields and no per-direction loss (D3).
 
 ## 4. Where zebra-rs stands
 
@@ -197,22 +205,35 @@ loss indistinguishable, because the sender only sees that a reply is missing.
   leave traffic on one that really is lossy. Halving it would assume symmetric loss, which
   nothing justifies. `show` labels the value **round-trip**. (Settled in review, §10
   decision 2.)
-- **`reflector stateful`** (per link): the peer's reflector keeps its own sequence counter.
-  Between two consecutive received replies `(S₁, R₁)` and `(S₂, R₂)`:
+- **`peer-reflector stateful`** (per link, under `loss`): declares that the *peer's*
+  reflector keeps its own sequence counter — a zebra-rs peer with `reflector stateful`, or a
+  Juniper peer with `stateful-sequence`. Between two consecutive received replies
+  `(S₁, R₁)` and `(S₂, R₂)`:
   - forward loss = `(S₂ − S₁) − (R₂ − R₁)`
   - reverse loss = `(R₂ − R₁) − 1`
 
   Both use wrapping arithmetic. Probes after the last received reply are unresolved; they
-  settle as round-trip loss if the waiting time expires before another reply arrives.
+  settle as round-trip loss if the waiting time expires before another reply arrives. A
+  reflector counter that restarts (the peer rebooted, or its session was re-created) shows up
+  as `R₂ − R₁ > S₂ − S₁` — more reflections than probes, which is impossible — and that
+  interval is counted as round-trip rather than split.
 - **The mode is configured, not detected.** A stateless reflector on a link with forward loss
   and a stateful reflector on a link with reverse loss produce *identical* reply streams: in
   both, the sequence numbers stay equal. No amount of observation tells them apart, and
   guessing wrong puts reverse loss into the forward advertisement.
-- **zebra-rs's own reflector becomes stateful**, keeping a per-session counter in the entry
-  `reflect_allowed` already looks up. A zebra-rs pair then gets directional loss both ways.
-  This is backward compatible: every sender, including today's zebra-rs, identifies probes by
-  the copied Session-Sender fields, which do not change. What changes is the reflector's
-  *own* Sequence Number field, which a stateless-mode sender ignores.
+- **zebra-rs's own reflector stays stateless by default; `reflector stateful` is opt-in**
+  (per link, under `measurement`; settled in review, §10 decision 3). That is Juniper's model,
+  and Cisco's reflector has no stateful mode at all. When set, the reflector keeps a counter in
+  the per-session entry `reflect_allowed` already looks up — zebra-rs reflects only for peers
+  it also measures, so the state is bounded by configured links, not a client cache. Two
+  zebra-rs routers get directional loss by setting `reflector stateful` on one and
+  `peer-reflector stateful` on the other.
+- **What turning it on does to other senders**, as far as the vendors document it: a Juniper
+  sender gains per-direction drops, which is what `stateful-sequence` exists for. A Cisco
+  sender should be unaffected — its oper model has no sequence-number fields and counts loss
+  from TX/RX counters — but how it matches replies to probes is not documented, so that rests
+  on an interop test, not a citation. A zebra-rs sender matches by SSID and reads the copied
+  Session-Sender timestamp, so it is unaffected.
 
 ### D4 — Loss is averaged over its own window, the loss interval
 
@@ -335,6 +356,8 @@ te-metric {
     damping-period 30;              # existing: export window, s
     anomaly-threshold …;            # existing: delay
     reuse-threshold …;              # existing: delay
+    reflector stateful;             # new: how THIS router reflects the peer's probes;
+                                    #      default stateless (D3)
     loss {                          # new; presence = loss measurement on
       interval 120;                 # loss window, s; multiple of damping-period (D4)
       threshold 10;                 # periodic relative change, %            (D6)
@@ -343,7 +366,7 @@ te-metric {
       anomaly-threshold 5.0;        # %; unset = A bit never set             (D7)
       reuse-threshold 0.5;          # %; unset = no hysteresis band          (D7)
       integrity 90;                 # % of expected probes                   (D5)
-      reflector stateless;          # stateless | stateful                   (D3)
+      peer-reflector stateless;     # the PEER's mode: stateless | stateful  (D3)
     }
   }
 }
@@ -368,7 +391,7 @@ link's delay") gains loss.
     integrity 100%  advertised 0.833% (next periodic in 74s)  A-bit clear
 ```
 
-With `reflector stateful`, the direction line splits into forward and reverse. The IGP
+With `peer-reflector stateful`, the direction line splits into forward and reverse. The IGP
 database displays already render sub-TLV 36; they gain the A-bit marker the delay sub-TLVs
 show.
 
@@ -390,7 +413,9 @@ Static loss keeps originating a clear A bit, as delay does today.
     a probe sent just before a tick, whose reply lands just after it, must count as received
     once and never as lost. Also: a reply with a bad timestamp counts as received, a
     duplicate reply is ignored, and a reply after the waiting time stays lost.
-  - D3: the stateful forward/reverse arithmetic, including sequence wrap-around.
+  - D3: the stateful forward/reverse arithmetic, including sequence wrap-around and a
+    reflector counter restart (counted round-trip, never as a huge forward loss); the
+    stateful reflector's per-session counter.
   - D4: ring rollover.
   - D5: the integrity gate, the ring-full gate, and the encoding cap.
   - D6: the filter truth table, including the zero crossings and the once-per-interval
@@ -408,8 +433,10 @@ Static loss keeps originating a clear A bit, as delay does today.
      value is deterministic).
   3. **Crossing the anomaly bound:** the A bit sets, then clears once the drop rule is
      removed and the value falls below the reuse bound.
-  4. **Reverse-path-only drop:** `reflector stateless` advertises 10 %, `reflector stateful`
-     advertises ≈ 0 %. **This is the scenario that proves D3's direction handling.**
+  4. **Reverse-path-only drop:** with the default stateless reflector the sender advertises
+     10 %; with `reflector stateful` on the far end and `peer-reflector stateful` on the near
+     end it advertises ≈ 0 %. **This is the scenario that proves D3's direction handling.**
+     A variant restarts the far-end session mid-run and checks the counter-restart rule.
   5. **Probes dropped, adjacency up:** the loss sub-TLV is withdrawn, not maxed (D8).
 
 ## 8. Delivery — smallest PR first
@@ -419,7 +446,8 @@ Static loss keeps originating a clear A bit, as delay does today.
 2. **Advertisement:** the D9 event split, D10 configuration, D6 filter and D8 withdrawal,
    wired into IS-IS, OSPFv2 and OSPFv3. BDD scenarios 1, 2 and 5.
 3. **Anomalous bit:** D7. BDD scenario 3.
-4. **Direction:** D3 — the stateful reflector and the `reflector` knob. BDD scenario 4.
+4. **Direction:** D3 — the opt-in stateful reflector (`reflector stateful`) and the
+   sender's `peer-reflector` declaration. BDD scenario 4.
 
 Then the documentation: the book's TE-metric chapter, the supported-RFC appendix, and
 closing out step 4 of the review sequencing.
@@ -438,7 +466,7 @@ closing out step 4 of the review sequencing.
 - **LAN circuits.** Measurement is P2P-only today, as it is at Huawei and in every Cisco
   example. The pseudonode problem is already recorded in the review document.
 - **One-way loss with synchronized clocks.** Loss needs no clock synchronization. D3's
-  stateful reflector is the directional answer.
+  opt-in stateful reflector is the directional answer.
 
 ## 10. Decisions for the reviewer
 
@@ -456,9 +484,12 @@ The recommendation is listed first in each.
    labelled round-trip in `show`. Rejected alternatives: advertising nothing without a
    stateful peer, which would leave most interoperability cases without loss; and halving
    the round-trip value, which assumes symmetric loss.
-3. **zebra-rs's reflector becomes stateful** (D3). It is backward compatible per RFC 8762,
-   but it is a behaviour change visible on the wire in the reflector's own Sequence Number
-   field.
+3. **Should zebra-rs's reflector become stateful?** **Decided 2026-09-24: opt-in, same as
+   Juniper** — stateless by default, `reflector stateful` per link (D3). The original proposal
+   was stateful by default. The vendor check changed it: both vendors copy the sequence
+   number by default (Cisco always, Juniper unless `stateful-sequence`), and although neither
+   documents a sender that would break, Cisco's reply matching is undocumented. The cost of
+   opt-in is configuring both ends for zebra-rs-to-zebra-rs directional loss.
 4. **Loss is opt-in** (D10), rather than on wherever measurement is enabled.
 
 ## Sources
@@ -476,6 +507,8 @@ The recommendation is listed first in each.
 - Cisco — [IS-IS penalties for link loss anomalies (Cisco 8000, 25.1.1)](https://www.cisco.com/c/en/us/td/docs/iosxr/cisco8000/is-is/isis-config-guide-cisco8000/is-is-protection-and-resiliency-enhancements-w/is-is-penalty-for-link-loss-anomaly.html)
 - Cisco — [Configure Performance Measurement, IOS XE 17](https://www.cisco.com/c/en/us/td/docs/ios-xml/ios/seg_routing/configuration/xe-17/segrt-xe-17-book/m-sr-performance-measurement.html) (loss-profile, SDLM, anomaly-check defaults)
 - Cisco — IOS XR Segment Routing Configuration Guides, "Configure Performance Measurement" (computation interval default 30 s, range 1–3600; periodic advertisement default 120 s, range 30–3600), e.g. [NCS 5500, 7.9](https://www.cisco.com/c/en/us/td/docs/iosxr/ncs5500/segment-routing/79x/b-segment-routing-cg-ncs5500-79x/configure-performance-measurement.html) and [ASR 9000, 7.8](https://www.cisco.com/c/en/us/td/docs/routers/asr9000/software/asr9k-r7-8/segment-routing/configuration/guide/b-segment-routing-cg-asr9000-78x/configure-performance-measurement.html)
+- Juniper — [`light` (TWAMP server) statement: `stateful-sequence`](https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/statement/light-server-twamp-edit-services-evo.html); [Understand TWAMP (STAMP stateful reflection)](https://www.juniper.net/documentation/us/en/software/junos/flow-monitoring/topics/concept/twamp-overview.html)
+- Cisco — [Configure Performance Measurement, IOS XR 7.4 (NCS 5500)](https://www.cisco.com/c/en/us/td/docs/iosxr/ncs5500/segment-routing/74x/b-segment-routing-cg-ncs5500-74x/configure-performance-measurement.html) (TWAMP Light reflector copies the Sequence Number)
 - Juniper — [Enable Link Delay Measurement and Advertising in IS-IS](https://www.juniper.net/documentation/us/en/software/junos/is-is/topics/topic-map/enable-link-delay-advertise-in-is-is.html)
 - Juniper — [Pathfinder: IS-IS TWAMP Light link delay features](https://apps.juniper.net/feature-explorer/feature/5703?fn=IS-IS+:+TWAMP+Light+-+Unidirectional+Link+Delay+Measurement+-+Flex+Algo+Path+Selection)
 - Nokia SR OS YANG, release 26.7: `nokia-conf.yang` `oam link-measurement measurement-template` — [nokia/7x50_YangModels, latest_sros_26.7](https://github.com/nokia/7x50_YangModels/tree/master/latest_sros_26.7)
