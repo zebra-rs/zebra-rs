@@ -99,7 +99,7 @@ Session targets come from IGP adjacency state instead — interface/neighbor add
 
 - **Flex-Algo min-delay:** implemented on both IGPs, as described above.
 - **Flex-Algo link loss:** [draft-ietf-lsr-flex-algo-link-loss](https://datatracker.ietf.org/doc/html/draft-ietf-lsr-flex-algo-link-loss) is not implemented; there is no loss-threshold exclusion in either Flex-Algo graph builder, and loss is not measured in the first place.
-- **BGP-LS (updated 2026-09-16):** the [IS-IS BGP-LS translation](../../zebra-rs/src/isis/bgp_ls.rs) now supports RFC8571 performance TLVs 1114–1120 and RFC9294 application-specific attributes in TLV 1122. These attributes reach the local BGP-LS RIB. Transmission to external BGP-LS peers remains unimplemented in [`route_bgpls_originate`](../../zebra-rs/src/bgp/route.rs), so delivery to a PCE or controller is still unverified. The BDD topology checks remote IS-IS flooding followed by local translation, not BGP UPDATE delivery; see the [BGP-LS review](bgp-ls-te-performance-2026-09-16.md).
+- **BGP-LS (updated 2026-09-16):** the [IS-IS BGP-LS translation](../../zebra-rs/src/isis/bgp_ls.rs) now supports RFC8571 performance TLVs 1114–1120 and RFC9294 application-specific attributes in TLV 1122. These attributes reach the local BGP-LS RIB. Transmission to BGP-LS peers was added by #2400, and the BGP-LS BDD now checks delivery to a separate-AS collector over the wire; see the [BGP-LS feed review](bgp-ls-feed-2026-09-17.md). (Earlier text here, written before #2400, said transmission was unimplemented.)
 - **SR path PM:** the [STAMP TLV framework](../../crates/stamp-packet/src/tlv.rs) and [return path encoding](../../crates/stamp-packet/src/return_path.rs) implement the RFC8972 TLV shape plus the RFC9503 Destination Node Address and Return Path TLVs, but no daemon code constructs them. This is codec-only support with no path-measurement driver.
 - **RSVP-TE / SR-TE CSPF:** not applicable; there is no CSPF consumer in this codebase.
 
@@ -132,17 +132,17 @@ Design decisions to settle first:
 
 Anomaly-driven IGP/TE cost fallback is a routing action outside both RFCs; it belongs in a follow-on, once the bit is trustworthy.
 
-### 2. BGP-LS performance TLVs — LOCAL TRANSLATION DELIVERED; PEER TRANSMISSION PENDING
+### 2. BGP-LS performance TLVs — DELIVERED (#2385 translation, #2400 peer transmission)
 
-The performance TLVs and application-specific translation are implemented in [`link_attr`](../../zebra-rs/src/isis/bgp_ls.rs). The remaining step for controller delivery is outbound BGP-LS advertisement to external peers. Validate that path by receiving BGP UPDATEs on a peer and decoding the performance attributes and TLV 1122 application masks. Local RIB display and IS-IS round-trip tests do not establish controller delivery.
+The performance TLVs and application-specific translation are implemented in [`link_attr`](../../zebra-rs/src/isis/bgp_ls.rs) (#2385), and #2400 advertises the locally produced objects to BGP-LS peers — peer-specific attributes, outbound policy, refresh replay and the negotiated size limit; see the [BGP-LS feed review](bgp-ls-feed-2026-09-17.md). Its BDD collector decodes the top-level performance TLVs off the wire. Still unverified by a receiver: the nested metrics and application masks inside TLV 1122, which the collector's codec stores opaquely.
 
 ### 3. OSPFv3 TE metrics — DELIVERED (#2387)
 
 The largest remaining asymmetry: an IPv6-only fabric can measure and advertise delay through IS-IS today, but has nowhere to publish it on the OSPF side. Largest single item, though nearly all of it mirrors existing v2 and IS-IS code. Components: delay/loss variants in `Ospfv3AslaSubSubTlv`, `te-metric` registration in [config_v3.rs](../../zebra-rs/src/ospf/config_v3.rs), origination into the E-Router-LSA ASLA, IPv6 pair support in `stamp_reconcile_link` (which currently accepts IPv4 pairs only — the IS-IS v4-preferred / v6-link-local rule is the model), and the delay join in the v3 Flex-Algo graph.
 
-### 4. Measured loss
+### 4. Measured loss — DESIGN PROPOSED
 
-Requires a rolling multi-window loss estimator; a single export window is too noisy to advertise, as the original design plan records. Unblocks a measured source for sub-TLV 36/30 and makes [draft-ietf-lsr-flex-algo-link-loss](https://datatracker.ietf.org/doc/html/draft-ietf-lsr-flex-algo-link-loss) implementable.
+Design: [stamp-measured-loss.md](../design/stamp-measured-loss.md), including a survey of Cisco, Juniper, Nokia, Arista and Huawei. Requires a rolling multi-window loss estimator; a single export window is too noisy to advertise, as the original design plan records. Unblocks a measured source for sub-TLV 36/30 and makes [draft-ietf-lsr-flex-algo-link-loss](https://datatracker.ietf.org/doc/html/draft-ietf-lsr-flex-algo-link-loss) implementable.
 
 ### Correction — the "receive-side fallback" recommendation was wrong
 
