@@ -280,7 +280,11 @@ included, from its own LSP. That refines the "our own links" bullet above: the e
 exactly the static-over-measured value we advertise, and reading it per entry keeps parallel links
 to one neighbour apart, which a lookup by neighbour through the interfaces could not (PR 2 review:
 parallel links of 0 % and 10 % against a 5 % maximum were both pruned locally, while every other
-router kept the clean one). `link_prune_reason` returns why a link is pruned, so the graph and its `show` view
+router kept the clean one). The edge's forwarding identity needs the same care: each of our own
+entries is paired with the interface that produced it — among the unused interfaces adjacent to
+its neighbour, the one whose metric and attributes match the entry — so a surviving parallel edge
+leaves by its own interface, not its pruned twin's (second review finding), and its metric-type 1
+delay is that interface's. `link_prune_reason` returns why a link is pruned, so the graph and its `show` view
 share one decision. OSPF's `link_passes_fad` keeps its signature (affinity only; OSPF has no loss
 constraint). The per-peer affinity cache the LSDB rebuild used to fill, which read X-bit ASLAs
 only, is gone: affinity is read from the reach entry at graph time, like delay and loss.

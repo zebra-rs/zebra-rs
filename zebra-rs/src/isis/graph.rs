@@ -8,13 +8,16 @@ use isis_packet::{
 
 use crate::spf;
 
+use crate::flex_algo::local_link_affinity;
+
+use super::affinity_map::AffinityMap;
 use super::config::MtId;
 use super::flex_algo::{
-    FadConstraints, FadMetricType, Pruned, advertised_link_attrs, link_prune_reason,
+    FadConstraints, FadMetricType, LinkAttrs, Pruned, advertised_link_attrs, link_prune_reason,
 };
 use super::inst::IsisTop;
 use super::level::Level;
-use super::link::IsisLinks;
+use super::link::{IsisLink, IsisLinks};
 use super::lsdb::{Lsa, Lsdb};
 
 pub struct ReachMap<E> {
@@ -684,9 +687,17 @@ pub fn graph_flex_algo(
         graph.insert(node_id, vertex);
     }
 
-    // Same local-adj → ifindex map as graph(); used for link_id stamping
-    // and the local link's delay.
-    let local_adj_to_ifindex = local_adj_ifindex(top.links, level);
+    // Our own reach entries, each paired with the interface it advertises:
+    // the edge's link_id (its outgoing interface) and its delay.
+    let own_ifindex = own_entry_interfaces(
+        nodes_to_process
+            .iter()
+            .filter(|(_, originated, lsp)| *originated && !lsp.lsp_id.is_pseudo())
+            .map(|(_, _, lsp)| lsp),
+        top.links,
+        top.affinity_map,
+        level,
+    );
 
     // Edge construction with per-link affinity filtering.
     for (neighbor_id, is_originated, lsp) in nodes_to_process.iter() {
@@ -694,11 +705,18 @@ pub fn graph_flex_algo(
         let own_router_lsp = *is_originated && !lsp.lsp_id.is_pseudo();
         let source_sys_id = neighbor_id.sys_id();
 
+        let mut position = 0;
         for tlv in &lsp.tlvs {
             let IsisTlv::ExtIsReach(ext_reach) = tlv else {
                 continue;
             };
             for entry_reach in &ext_reach.entries {
+                let own_ifx = if own_router_lsp {
+                    own_ifindex.get(&(lsp.lsp_id, position)).copied()
+                } else {
+                    None
+                };
+                position += 1;
                 let neighbor_lsp_id: IsisLspId = entry_reach.neighbor_id.into();
 
                 if top.lsdb.get(&level).get(&neighbor_lsp_id).is_none() {
@@ -718,9 +736,8 @@ pub fn graph_flex_algo(
                 // Everything else uses the IGP metric.
                 let cost = if constraints.metric_type == FadMetricType::MinUnidirLinkDelay {
                     let delay = if source_sys_id == self_sys_id {
-                        local_adj_to_ifindex
-                            .get(&entry_reach.neighbor_id)
-                            .and_then(|ifx| top.links.get(ifx))
+                        own_ifx
+                            .and_then(|ifx| top.links.get(&ifx))
                             .and_then(|link| link.te_metric_effective().min_delay)
                     } else {
                         super::flex_algo::peer_min_delay(entry_reach)
@@ -738,14 +755,7 @@ pub fn graph_flex_algo(
                     .get_mut(&level)
                     .get(&neighbor_lsp_id.neighbor_id());
 
-                let link_id = if own_router_lsp {
-                    local_adj_to_ifindex
-                        .get(&entry_reach.neighbor_id)
-                        .copied()
-                        .unwrap_or(0)
-                } else {
-                    0
-                };
+                let link_id = own_ifx.unwrap_or(0);
 
                 let link = spf::Link::with_id(node_id, to_id, cost, link_id);
                 if let Some(from) = graph.get_mut(&node_id) {
@@ -761,19 +771,73 @@ pub fn graph_flex_algo(
     (graph, source_node, adjacency_sids)
 }
 
-/// This router's adjacencies at `level`, each with the interface it is
-/// on: resolves an edge of our own LSP to the link it leaves by.
-pub(super) fn local_adj_ifindex(links: &IsisLinks, level: Level) -> BTreeMap<IsisNeighborId, u32> {
-    links
-        .iter()
-        .filter_map(|(ifindex, link)| {
-            link.state
-                .adj
-                .get(&level)
-                .as_ref()
-                .map(|(adj, _)| (*adj, *ifindex))
-        })
-        .collect()
+/// This router's own reach entries, each paired with the interface that
+/// produced it, keyed by fragment and position among the fragment's
+/// IS-reach entries. Parallel links to one neighbour share its neighbour
+/// ID, so the neighbour alone cannot say which interface an entry is —
+/// and the interface is the edge's forwarding identity: stamp a clean
+/// edge with its pruned twin's interface and the algorithm's traffic
+/// leaves over the pruned link. Each entry takes an unused interface
+/// adjacent to its neighbour, preferring the one whose metric and current
+/// attributes are what the entry advertises; parallel links that differ
+/// therefore pair exactly, and identical ones still get one interface
+/// each.
+fn own_entry_interfaces<'a>(
+    own: impl Iterator<Item = &'a IsisLsp>,
+    links: &IsisLinks,
+    am: &AffinityMap,
+    level: Level,
+) -> BTreeMap<(IsisLspId, usize), u32> {
+    let mut used = BTreeSet::new();
+    let mut out = BTreeMap::new();
+    for lsp in own {
+        let entries = lsp
+            .tlvs
+            .iter()
+            .filter_map(|tlv| match tlv {
+                IsisTlv::ExtIsReach(reach) => Some(&reach.entries),
+                _ => None,
+            })
+            .flatten();
+        for (position, entry) in entries.enumerate() {
+            let candidates: Vec<(u32, &IsisLink)> = links
+                .iter()
+                .filter(|(ifindex, link)| {
+                    !used.contains(*ifindex)
+                        && link
+                            .state
+                            .adj
+                            .get(&level)
+                            .as_ref()
+                            .is_some_and(|(adj, _)| *adj == entry.neighbor_id)
+                })
+                .map(|(ifindex, link)| (*ifindex, link))
+                .collect();
+            let advertised = advertised_link_attrs(entry);
+            let chosen = candidates
+                .iter()
+                .find(|(_, link)| {
+                    link.config.metric() == entry.metric && own_link_attrs(link, am) == advertised
+                })
+                .or(candidates.first())
+                .map(|(ifindex, _)| *ifindex);
+            if let Some(ifindex) = chosen {
+                used.insert(ifindex);
+                out.insert((lsp.lsp_id, position), ifindex);
+            }
+        }
+    }
+    out
+}
+
+/// The attributes this router advertises for one of its links — the ASLA
+/// `build_link_asla` builds — in the form the reader returns them.
+fn own_link_attrs(link: &IsisLink, am: &AffinityMap) -> LinkAttrs {
+    let affinity = local_link_affinity(&link.config.affinity, am);
+    LinkAttrs {
+        affinity: (!affinity.words.is_empty()).then_some(affinity),
+        loss: link.te_metric_effective().loss,
+    }
 }
 
 /// Whether an LSP's router is in a Flexible Algorithm's graph (RFC 9350
