@@ -188,6 +188,12 @@ pub fn ospf_flood(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) {
         _ => Some(oi.area_id),
     };
     lsdb.insert_received(lsa.clone(), oi.tx, area_id, oi.tracing);
+    // Area-scoped opaque LSAs feed SPF too: Router Information carries
+    // the Flexible Algorithm definitions and each router's SR-Algorithm
+    // participation, Extended Link the per-link affinity and delay the
+    // per-algorithm graphs read, Extended Prefix the Prefix-SIDs. Without
+    // this, a definition appearing or changing, or a router joining an
+    // algorithm, waited for an unrelated LSA to be recomputed.
     if matches!(
         lsa.h.ls_type,
         OspfLsType::Router
@@ -195,6 +201,7 @@ pub fn ospf_flood(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) {
             | OspfLsType::Summary
             | OspfLsType::AsExternal
             | OspfLsType::NssaAsExternal
+            | OspfLsType::OpaqueAreaLocal
     ) {
         // For AS-scoped LSAs `area_id` is None; the dispatcher treats
         // that as "schedule SPF on all areas". Type-7 floods with

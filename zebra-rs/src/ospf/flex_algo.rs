@@ -13,9 +13,37 @@ use ospf_packet::{
     Ospfv3FadSubTlv, Ospfv3FadTlv, Ospfv3SubTlv, RouterInfoTlvFad,
 };
 
+use crate::flex_algo::selection::{Fad, FadSub};
 use crate::flex_algo::{
     AffinityMap, FadMetricType, FlexAlgoConfig, SrlgGroup, local_link_affinity,
 };
+
+/// An OSPFv2 definition as the protocol-neutral selection reads it (see
+/// `crate::flex_algo::selection`).
+pub fn fad_view(fad: &RouterInfoTlvFad) -> Fad {
+    Fad {
+        algo: fad.flex_algorithm,
+        metric_type: fad.metric_type,
+        calc_type: fad.calc_type,
+        priority: fad.priority,
+        subs: fad
+            .subs
+            .iter()
+            .map(|sub| match sub {
+                OspfFadSubTlv::ExcludeAg(g) => FadSub::ExcludeAny(g.clone()),
+                OspfFadSubTlv::IncludeAnyAg(g) => FadSub::IncludeAny(g.clone()),
+                OspfFadSubTlv::IncludeAllAg(g) => FadSub::IncludeAll(g.clone()),
+                OspfFadSubTlv::Flags(f) => FadSub::Flags {
+                    prefix_metric: f.m_flag,
+                    unknown: f.has_unknown(),
+                },
+                OspfFadSubTlv::ExcludeSrlg(s) => FadSub::ExcludeSrlg(s.srlgs.clone()),
+                OspfFadSubTlv::Unknown(u) => FadSub::Unknown(u.typ),
+            })
+            .collect(),
+        truncated: !fad.trailing.is_empty(),
+    }
+}
 
 /// Build the OSPF FAD TLVs (RFC 9350 §6.1) this router originates
 /// inside the Router Information Opaque LSA — one `RouterInfoTlvFad`
@@ -64,6 +92,7 @@ pub fn build_fad(
         if entry.prefix_metric == Some(true) {
             subs.push(OspfFadSubTlv::Flags(FadFlags {
                 m_flag: true,
+                other: 0,
                 trailing: Vec::new(),
             }));
         }
@@ -86,6 +115,7 @@ pub fn build_fad(
             calc_type: 0, // Only SPF defined today (RFC 9350 §5.1).
             priority,
             subs,
+            trailing: Vec::new(),
         });
     }
     out
@@ -131,6 +161,7 @@ pub fn build_fad_v3(
         if entry.prefix_metric == Some(true) {
             subs.push(Ospfv3FadSubTlv::Flags(FadFlags {
                 m_flag: true,
+                other: 0,
                 trailing: Vec::new(),
             }));
         }
@@ -320,6 +351,59 @@ mod tests {
         )
         .unwrap();
         fa.commit();
+    }
+
+    /// The selection reads an OSPFv2 definition as it was received: each
+    /// constraint, the flags — unknown bits included — the SRLGs, any
+    /// sub-TLV it could not read, and whether the definition was cut short.
+    #[test]
+    fn fad_view_keeps_what_selection_needs() {
+        use ospf_packet::RouterInfoTlvUnknown;
+        let mut g = ExtAdminGroup::default();
+        g.set(5);
+        let fad = RouterInfoTlvFad {
+            flex_algorithm: 130,
+            metric_type: 1,
+            calc_type: 0,
+            priority: 77,
+            subs: vec![
+                OspfFadSubTlv::ExcludeAg(g.clone()),
+                OspfFadSubTlv::IncludeAnyAg(g.clone()),
+                OspfFadSubTlv::IncludeAllAg(g.clone()),
+                OspfFadSubTlv::Flags(FadFlags {
+                    m_flag: false,
+                    other: 0x01,
+                    trailing: Vec::new(),
+                }),
+                OspfFadSubTlv::ExcludeSrlg(FadSrlg { srlgs: vec![9] }),
+                OspfFadSubTlv::Unknown(RouterInfoTlvUnknown {
+                    typ: 1,
+                    len: 6,
+                    values: vec![0; 6],
+                }),
+            ],
+            trailing: vec![0, 1, 0, 8],
+        };
+        let view = fad_view(&fad);
+        assert_eq!(
+            (view.algo, view.metric_type, view.calc_type, view.priority),
+            (130, 1, 0, 77)
+        );
+        assert_eq!(
+            view.subs,
+            vec![
+                FadSub::ExcludeAny(g.clone()),
+                FadSub::IncludeAny(g.clone()),
+                FadSub::IncludeAll(g),
+                FadSub::Flags {
+                    prefix_metric: false,
+                    unknown: true,
+                },
+                FadSub::ExcludeSrlg(vec![9]),
+                FadSub::Unknown(1),
+            ]
+        );
+        assert!(view.truncated);
     }
 
     #[test]

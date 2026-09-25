@@ -5343,6 +5343,7 @@ mod tests {
                 Ospfv3FadSubTlv::IncludeAllAg(admin_group(&[200])),
                 Ospfv3FadSubTlv::Flags(FadFlags {
                     m_flag: true,
+                    other: 0,
                     trailing: Vec::new(),
                 }),
                 Ospfv3FadSubTlv::ExcludeSrlg(FadSrlg {
