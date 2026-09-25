@@ -1,0 +1,14 @@
+# z2 (AS 65062): z1's downstream eBGP peer. It must lose the prefix when
+# z1 does, not keep the path z1 should have withdrawn.
+router:
+  bgp:
+    global:
+      as: 65062
+      router-id: 192.168.49.3
+    neighbor:
+    - remote-address: 192.168.49.1
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65060

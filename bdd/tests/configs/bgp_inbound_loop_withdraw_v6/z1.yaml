@@ -1,0 +1,29 @@
+# z1 (DUT, AS 65060): learns routes from the scripted eBGP speaker h1 and
+# re-advertises them to z2 (sessions over IPv4; the global IPv6 on the
+# link is the next-hop).
+router:
+  bgp:
+    global:
+      as: 65060
+      router-id: 192.168.49.1
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    # The scripted speaker never listens on 179: passive keeps this peer
+    # in Active so the script's connect is accepted.
+    - remote-address: 192.168.49.2
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65061
+      transport:
+        passive-mode: true
+    - remote-address: 192.168.49.3
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65062
