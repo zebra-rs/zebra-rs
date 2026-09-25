@@ -157,15 +157,15 @@ segments, … } ] }`.
 
 The Flexible Algorithm state (RFC 9350): each configured algorithm's
 metric type, priority, affinity constraints, SPF reachability, and the
-per-algorithm routes. For OSPFv2, each algorithm also lists, per area, the
-winning definition it is computed with — its originator and priority — and
+per-algorithm routes. Each algorithm also lists, per area, the winning
+definition it is computed with — its originator and priority — and
 whether this router participates, or why not. See
 [Segment Routing](ch-08-09-ospf-segment-routing.md#flexible-algorithm)
 for configuration.
 
 JSON: an array of flex-algo objects (`algorithm`, `metric_type`,
-`priority`, `include_any`/`exclude_any`/…, `spf_status`, `routes`, and
-for OSPFv2 `selection`).
+`priority`, `include_any`/`exclude_any`/…, `spf_status`, `routes`,
+`selection`).
 
 ## Graceful Restart (OSPFv2)
 

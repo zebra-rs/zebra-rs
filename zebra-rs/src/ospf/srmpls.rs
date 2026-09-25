@@ -48,8 +48,8 @@ pub fn router_info_lsa_build(
     tlvs.push(RouterInfoTlv::RouterInfo(RouterInfoTlvCap { caps }));
 
     // SR Algorithm TLV (type 8, RFC 8665 §3.1): SPF (algorithm 0) plus
-    // every configured Flexible Algorithm (RFC 9350 §6). The caller
-    // passes `flex_algo::sr_algorithms(&ospf.flex_algo)`.
+    // every Flexible Algorithm this router participates in (RFC 9350
+    // §5.3). The caller passes `flex_algo::sr_algorithms_for`.
     tlvs.push(RouterInfoTlv::Algo(RouterInfoTlvAlgo { algos }));
 
     // SID/Label Range TLV (type 9): Global block.
@@ -683,6 +683,7 @@ mod tests {
             calc_type: 0,
             priority: 128,
             subs: Vec::new(),
+            trailing: Vec::new(),
         };
         let lsa = e_router_v3_sr_info_lsa_build(
             Ipv4Addr::new(10, 0, 0, 1),

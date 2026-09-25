@@ -2241,28 +2241,28 @@ impl Ospfv3FadSubTlv {
         let (input, len) = be_u16(input)?;
         let len = len as usize;
         let (input, value) = take(len)(input)?;
-        let parsed = match typ {
-            1 => {
-                let (_, g) = ExtAdminGroup::parse_be(value)?;
-                Ospfv3FadSubTlv::ExcludeAg(g)
-            }
-            2 => {
-                let (_, g) = ExtAdminGroup::parse_be(value)?;
-                Ospfv3FadSubTlv::IncludeAnyAg(g)
-            }
-            3 => {
-                let (_, g) = ExtAdminGroup::parse_be(value)?;
-                Ospfv3FadSubTlv::IncludeAllAg(g)
-            }
-            4 => Ospfv3FadSubTlv::Flags(FadFlags::parse_value(value)),
-            5 => Ospfv3FadSubTlv::ExcludeSrlg(FadSrlg::parse_value(value)),
-            _ => Ospfv3FadSubTlv::Unknown {
-                typ,
-                value: value.to_vec(),
-            },
+        // A known sub-TLV whose value cannot be read — admin groups and
+        // SRLGs come in whole 32-bit words — is kept as unknown, bytes and
+        // all: it still re-floods as received, and a router cannot
+        // compute with a constraint it could not read.
+        let unknown = || Ospfv3FadSubTlv::Unknown {
+            typ,
+            value: value.to_vec(),
         };
+        let words = value.len() % 4 == 0;
+        let group = || ExtAdminGroup::parse_be(value).map(|(_, g)| g).ok();
+        let parsed = match typ {
+            1 if words => group().map_or_else(unknown, Ospfv3FadSubTlv::ExcludeAg),
+            2 if words => group().map_or_else(unknown, Ospfv3FadSubTlv::IncludeAnyAg),
+            3 if words => group().map_or_else(unknown, Ospfv3FadSubTlv::IncludeAllAg),
+            4 => Ospfv3FadSubTlv::Flags(FadFlags::parse_value(value)),
+            5 if words => Ospfv3FadSubTlv::ExcludeSrlg(FadSrlg::parse_value(value)),
+            _ => unknown(),
+        };
+        // The last sub-TLV's padding may be left to the enclosing TLV's,
+        // so padding that is not there is not an error.
         let padded = (len + 3) & !3;
-        let (input, _) = take(padded - len)(input)?;
+        let (input, _) = take((padded - len).min(input.len()))(input)?;
         Ok((input, parsed))
     }
 }
@@ -2277,11 +2277,16 @@ pub struct Ospfv3FadTlv {
     pub calc_type: u8,
     pub priority: u8,
     pub subs: Vec<Ospfv3FadSubTlv>,
+    /// Bytes after the last whole sub-TLV: a sub-TLV whose declared length
+    /// runs past the end of the definition. Kept, and re-emitted, so the
+    /// definition floods on as received; one carrying them cannot be read
+    /// in full, and a router must not compute with a part of it.
+    pub trailing: Vec<u8>,
 }
 
 impl Ospfv3FadTlv {
     fn value_len(&self) -> usize {
-        4 + self.subs.iter().map(|s| s.wire_len()).sum::<usize>()
+        4 + self.subs.iter().map(|s| s.wire_len()).sum::<usize>() + self.trailing.len()
     }
 
     fn emit(&self, buf: &mut BytesMut) {
@@ -2292,6 +2297,7 @@ impl Ospfv3FadTlv {
         for s in &self.subs {
             s.emit(buf);
         }
+        buf.put_slice(&self.trailing);
     }
 
     fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
@@ -2299,21 +2305,16 @@ impl Ospfv3FadTlv {
         let (input, metric_type) = be_u8(input)?;
         let (input, calc_type) = be_u8(input)?;
         let (input, priority) = be_u8(input)?;
-        let mut subs = Vec::new();
-        let mut rest = input;
-        while !rest.is_empty() {
-            let (r, s) = Ospfv3FadSubTlv::parse_one(rest)?;
-            subs.push(s);
-            rest = r;
-        }
+        let (input, subs) = many0_complete(Ospfv3FadSubTlv::parse_one).parse(input)?;
         Ok((
-            rest,
+            &[],
             Self {
                 flex_algorithm,
                 metric_type,
                 calc_type,
                 priority,
                 subs,
+                trailing: input.to_vec(),
             },
         ))
     }
@@ -5350,6 +5351,7 @@ mod tests {
                     srlgs: vec![100, 4_000_000_000],
                 }),
             ],
+            trailing: Vec::new(),
         };
         let body = Ospfv3ELsaBody {
             tlvs: vec![Ospfv3ExtTlv::Fad(fad.clone())],
@@ -5369,6 +5371,79 @@ mod tests {
             Ospfv3ExtTlv::Fad(p) => assert_eq!(p, &fad),
             other => panic!("expected Fad TLV, got {other:?}"),
         }
+    }
+
+    /// Parse one FAD value (the E-Router TLV value, header excluded) and
+    /// check it re-emits byte for byte.
+    fn fad_round_trip(value: &[u8]) -> Ospfv3FadTlv {
+        let (rest, fad) = Ospfv3FadTlv::parse_be(value).expect("parse");
+        assert!(rest.is_empty());
+        let mut buf = BytesMut::new();
+        fad.emit(&mut buf);
+        assert_eq!(&buf[..], value, "re-emits as received");
+        assert_eq!(fad.value_len(), value.len());
+        fad
+    }
+
+    /// RFC 9350 §6.4: every flag bit is checked, so an unknown one must
+    /// survive the parse.
+    #[test]
+    fn fad_keeps_unknown_flag_bits() {
+        let fad = fad_round_trip(&[128, 0, 0, 128, 0, 4, 0, 1, 0x41, 0, 0, 0]);
+        match &fad.subs[..] {
+            [Ospfv3FadSubTlv::Flags(f)] => assert!(!f.m_flag && f.has_unknown()),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A known sub-TLV whose value is not whole 32-bit words cannot be
+    /// read: it is kept as unknown, and the sub-TLVs after it still parse.
+    #[test]
+    fn fad_keeps_an_unreadable_known_sub_tlv() {
+        let fad = fad_round_trip(&[
+            128, 0, 0, 128, // header
+            0, 1, 0, 6, 0, 0, 0, 1, 0, 2, 0, 0, // exclude-any, 6 bytes + pad
+            0, 4, 0, 1, 0x80, 0, 0, 0, // flags, M
+        ]);
+        match &fad.subs[..] {
+            [
+                Ospfv3FadSubTlv::Unknown { typ, value },
+                Ospfv3FadSubTlv::Flags(f),
+            ] => {
+                assert_eq!((*typ, value.len()), (1, 6));
+                assert!(f.m_flag);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(fad.trailing.is_empty());
+    }
+
+    /// A sub-TLV whose declared length runs past the definition leaves
+    /// trailing bytes, kept and re-emitted, and the E-Router-LSA carrying
+    /// it still parses; the last sub-TLV's padding, though, may be missing
+    /// without that being an error.
+    #[test]
+    fn fad_keeps_a_truncated_sub_tlv_as_trailing() {
+        let fad = fad_round_trip(&[128, 0, 0, 128, 0, 1, 0, 8, 0, 0, 0, 1]);
+        assert!(fad.subs.is_empty());
+        assert_eq!(fad.trailing, vec![0, 1, 0, 8, 0, 0, 0, 1]);
+
+        let body = Ospfv3ELsaBody {
+            tlvs: vec![Ospfv3ExtTlv::Fad(fad.clone())],
+        };
+        let mut buf = BytesMut::new();
+        Ospfv3LsBody::ERouter(body).emit(&mut buf);
+        let (_, parsed) = Ospfv3LsBody::parse_be(&buf, OSPFV3_E_ROUTER_LSA_TYPE).unwrap();
+        let Ospfv3LsBody::ERouter(parsed) = parsed else {
+            panic!("expected ERouter variant");
+        };
+        assert!(matches!(&parsed.tlvs[..], [Ospfv3ExtTlv::Fad(p)] if p == &fad));
+
+        let (rest, unpadded) =
+            Ospfv3FadTlv::parse_be(&[128, 0, 0, 128, 0, 4, 0, 1, 0x80]).expect("parse");
+        assert!(rest.is_empty());
+        assert!(unpadded.trailing.is_empty());
+        assert!(matches!(&unpadded.subs[..], [Ospfv3FadSubTlv::Flags(f)] if f.m_flag));
     }
 
     /// RFC 9492 OSPFv3 ASLA sub-TLV (Router-Link sub-TLV 11) carrying a
