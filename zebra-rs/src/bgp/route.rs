@@ -6970,7 +6970,15 @@ pub fn route_advertise_evpn_to_peers(
     // Non-AddPath members: the best path only.
     for ident in peers.established_plain_idents(Afi::L2vpn, Safi::Evpn) {
         let peer = peers.get_mut_by_idx(ident).expect("peer exists");
-        evpn_advertise_one(peer, &rd, &prefix, new_best, bgp, false);
+        if !evpn_advertise_one(peer, &rd, &prefix, new_best, bgp, false)
+            && peer
+                .adj_out
+                .evpn
+                .get(&rd)
+                .is_some_and(|t| t.0.contains_key(&prefix))
+        {
+            evpn_withdraw_one(peer, &rd, &prefix, 0);
+        }
     }
 
     // AddPath members: every candidate path, each under its own path-id,
@@ -13830,48 +13838,90 @@ fn eor_stale_expire(peer_id: usize, afi_safi: AfiSafi, bgp: &mut BgpTop, peers: 
     if let Some(peer) = peers.get_mut_by_idx(peer_id) {
         peer.timer.stale_timer.remove(&afi_safi);
     }
-    stale_route_withdraw(peer_id, bgp, peers);
+    stale_route_withdraw(peer_id, afi_safi, bgp, peers);
 }
 
-pub fn stale_route_withdraw(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
-    // Fetch all of route which has stale flag.
-    let withdrawn = {
-        let mut withdrawn: Vec<Vpnv4Nlri> = vec![];
-        let Some(adj_in) = bgp.shard.adj_in(peer_id) else {
-            return;
-        };
-        for (rd, table) in adj_in.v4vpn.iter() {
-            for (prefix, ribs) in table.0.iter() {
-                for rib in ribs.iter() {
-                    if rib.stale {
-                        let withdraw = Vpnv4Nlri {
-                            label: rib.label.unwrap_or(Label::default()),
-                            rd: *rd,
-                            nlri: Ipv4Nlri {
-                                id: rib.remote_id,
-                                prefix: *prefix,
-                            },
-                        };
-                        withdrawn.push(withdraw);
+/// Expire only the stale paths retained for this family. Use the normal
+/// withdrawal paths so imports, forwarding entries, labels and downstream
+/// advertisements are reconciled along with the Adj-RIB-In and Loc-RIB.
+pub fn stale_route_withdraw(
+    peer_id: usize,
+    afi_safi: AfiSafi,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+) {
+    match (afi_safi.afi, afi_safi.safi) {
+        (Afi::Ip, Safi::MplsVpn) => {
+            let mut withdrawn = Vec::new();
+            if let Some(adj_in) = bgp.shard.adj_in(peer_id) {
+                for (rd, table) in &adj_in.v4vpn {
+                    for (prefix, ribs) in &table.0 {
+                        for rib in ribs.iter().filter(|rib| rib.stale) {
+                            withdrawn.push(Vpnv4Nlri {
+                                label: rib.label.unwrap_or_default(),
+                                rd: *rd,
+                                nlri: Ipv4Nlri {
+                                    id: rib.remote_id,
+                                    prefix: *prefix,
+                                },
+                            });
+                        }
                     }
                 }
             }
+            for withdraw in withdrawn {
+                route_ipv4_withdraw(
+                    peer_id,
+                    &withdraw.nlri,
+                    Some(withdraw.rd),
+                    Some(withdraw.label),
+                    bgp,
+                    peers,
+                    None,
+                    true,
+                );
+            }
         }
-        withdrawn
-    };
-
-    // Withdraw routes.
-    for withdraw in withdrawn.iter() {
-        route_ipv4_withdraw(
-            peer_id,
-            &withdraw.nlri,
-            Some(withdraw.rd),
-            Some(withdraw.label),
-            bgp,
-            peers,
-            None,
-            true,
-        );
+        (Afi::Ip6, Safi::MplsVpn) => {
+            let mut withdrawn = Vec::new();
+            if let Some(adj_in) = bgp.shard.adj_in(peer_id) {
+                for (rd, table) in &adj_in.v6vpn {
+                    for (prefix, ribs) in &table.0 {
+                        for rib in ribs.iter().filter(|rib| rib.stale) {
+                            withdrawn.push((
+                                *rd,
+                                Ipv6Nlri {
+                                    id: rib.remote_id,
+                                    prefix: *prefix,
+                                },
+                            ));
+                        }
+                    }
+                }
+            }
+            for (rd, nlri) in withdrawn {
+                route_ipv6_withdraw(peer_id, &nlri, Some(rd), bgp, peers, true);
+            }
+        }
+        (Afi::L2vpn, Safi::Evpn) => {
+            let mut withdrawn = Vec::new();
+            if let Some(peer) = peers.get_by_idx(peer_id) {
+                for (rd, table) in &peer.adj_in.evpn {
+                    for (prefix, ribs) in &table.0 {
+                        for rib in ribs.iter().filter(|rib| rib.stale) {
+                            if let Some(route) = build_evpn_route(rd, prefix, rib) {
+                                withdrawn.push(route);
+                            }
+                        }
+                    }
+                }
+            }
+            for route in withdrawn {
+                route_evpn_withdraw(peer_id, &route, bgp, peers);
+            }
+        }
+        // route_clean retains no stale routes in the other families.
+        _ => {}
     }
 }
 
@@ -21897,15 +21947,24 @@ mod evpn_addpath_fanout_tests {
     }
 
     /// Drain a peer's writer channel: the path-ids carried by every EVPN
-    /// MP_REACH NLRI and every EVPN MP_UNREACH NLRI sent.
+    /// MP_REACH NLRI and every EVPN MP_UNREACH NLRI sent (AddPath member).
     fn drain(
         rx: &mut tokio::sync::mpsc::UnboundedReceiver<bytes::BytesMut>,
+    ) -> (BTreeSet<u32>, BTreeSet<u32>) {
+        drain_opt(rx, true)
+    }
+
+    /// [`drain`]; `addpath`: whether the NLRIs carry path-ids (a plain
+    /// member's do not, and parse as path-id 0).
+    fn drain_opt(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<bytes::BytesMut>,
+        addpath: bool,
     ) -> (BTreeSet<u32>, BTreeSet<u32>) {
         let mut opt = bgp_packet::ParseOption::default();
         opt.add_path
             .entry(AfiSafi::new(Afi::L2vpn, Safi::Evpn))
             .or_default()
-            .recv = true;
+            .recv = addpath;
         let mut reach = BTreeSet::new();
         let mut unreach = BTreeSet::new();
         while let Ok(bytes) = rx.try_recv() {
@@ -22032,6 +22091,91 @@ mod evpn_addpath_fanout_tests {
             adj_out_ids(&peers, c, &prefix),
             BTreeSet::from([2]),
             "the Adj-RIB-Out holds only the survivor"
+        );
+    }
+
+    /// Review finding #9 (EVPN half of the stale flip): when a row turns
+    /// LLGR-stale, a plain member that negotiated no LLGR must be sent a
+    /// withdraw — `evpn_advertise_one` rejects the row at the LLGR gate,
+    /// and the fan-out used to ignore that, leaving the member forwarding
+    /// on the stale row until the key was withdrawn everywhere.
+    #[tokio::test]
+    async fn evpn_stale_flip_withdraws_from_a_non_llgr_plain_member() {
+        let router_id = RR;
+        let ctx = crate::context::ProtoContext::default_table_no_rib();
+        let mut local_rib = LocalRib::default();
+        let mut shard = crate::bgp::shard::BgpShard::default();
+        let mut attr_store = crate::bgp::BgpAttrStore::default();
+        let mut update_groups = crate::bgp::update_group::empty_map();
+        let interface_addrs = crate::bgp::interface_addrs::InterfaceAddrs::default();
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        Box::leak(Box::new(rx));
+
+        let mut peers = PeerMap::new();
+        let (a, _a_rx) = client(&mut peers, "10.0.0.1", VTEP_A, false);
+        let (c, mut c_rx) = client(&mut peers, "10.0.0.3", LEAF, false);
+        let mut top = empty_top(
+            &router_id,
+            &mut local_rib,
+            &mut shard,
+            &mut attr_store,
+            &mut update_groups,
+            &interface_addrs,
+            &ctx.rib,
+            &tx,
+        );
+        let (_, prefix) = EvpnPrefix::from_route(&mac_route(0));
+
+        // A fresh row from VTEP A reaches the plain member C.
+        route_evpn_update(
+            a,
+            &mac_route(0),
+            IpAddr::V4(VTEP_A),
+            &vtep_attr(VTEP_A),
+            &mut top,
+            &mut peers,
+            false,
+        );
+        peers.get_mut_by_idx(c).unwrap().flush_evpn();
+        let (reach, _) = drain_opt(&mut c_rx, false);
+        assert_eq!(reach, BTreeSet::from([0]), "C holds the route");
+        assert!(
+            peers
+                .get_by_idx(c)
+                .unwrap()
+                .adj_out
+                .evpn
+                .get(&rd())
+                .is_some_and(|t| t.0.contains_key(&prefix)),
+            "recorded in C's Adj-RIB-Out"
+        );
+
+        // The row turns stale (VTEP A's session died under LLGR); the
+        // re-advertise that follows must withdraw it from C, which never
+        // negotiated LLGR for EVPN.
+        let mut stale = top.local_rib.evpn[&rd()].selected[&prefix].clone();
+        stale.stale = true;
+        route_advertise_evpn_to_peers(rd(), prefix.clone(), &[stale], &mut top, &mut peers);
+        peers.get_mut_by_idx(c).unwrap().flush_evpn();
+        let (reach, unreach) = drain_opt(&mut c_rx, false);
+        assert!(
+            reach.is_empty(),
+            "a stale row is not advertised to a non-LLGR peer"
+        );
+        assert_eq!(
+            unreach,
+            BTreeSet::from([0]),
+            "and the copy the peer holds is withdrawn"
+        );
+        assert!(
+            !peers
+                .get_by_idx(c)
+                .unwrap()
+                .adj_out
+                .evpn
+                .get(&rd())
+                .is_some_and(|t| t.0.contains_key(&prefix)),
+            "and dropped from C's Adj-RIB-Out"
         );
     }
 
@@ -29884,6 +30028,366 @@ mod eor_stale_expire_tests {
                 .count()
         });
         assert_eq!(stale_left, 0, "EoR must flush the stale VPNv4 paths");
+    }
+}
+
+/// Review finding #9: the graceful-restart / LLGR / PIC stale sweep must be
+/// per family. `route_clean` retains VPNv4, VPNv6 and EVPN rows stale and
+/// arms one stale timer per family, but the only sweeper walked the VPNv4
+/// Adj-RIB-In: VPNv6 and EVPN stale rows never expired (an LLGR peer that
+/// never came back left them advertised and installed for the daemon's
+/// life), and ANY family's End-of-RIB — or timer expiry — flushed the
+/// VPNv4 stale set (a restarting PE's ipv4-unicast EoR, sent before its
+/// VPNv4 was re-advertised, blackholed the L3VPN that GR exists to keep).
+#[cfg(test)]
+mod stale_sweep_per_family_tests {
+    use super::*;
+    use crate::bgp::peer::{Event, State, fsm};
+    use std::net::IpAddr;
+    use std::str::FromStr;
+
+    const VPNV4: AfiSafi = AfiSafi {
+        afi: Afi::Ip,
+        safi: Safi::MplsVpn,
+    };
+    const VPNV6: AfiSafi = AfiSafi {
+        afi: Afi::Ip6,
+        safi: Safi::MplsVpn,
+    };
+    const EVPN: AfiSafi = AfiSafi {
+        afi: Afi::L2vpn,
+        safi: Safi::Evpn,
+    };
+    const V4U: AfiSafi = AfiSafi {
+        afi: Afi::Ip,
+        safi: Safi::Unicast,
+    };
+
+    fn established_peer() -> Peer {
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        Box::leak(Box::new(rx));
+        let mut peer = Peer::new(
+            1,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 9),
+            65001,
+            "10.0.0.2".parse::<IpAddr>().unwrap(),
+            None,
+            tx,
+            crate::context::ProtoContext::default_table_no_rib(),
+        );
+        peer.state = State::Established;
+        peer.peer_type = PeerType::IBGP;
+        peer
+    }
+
+    fn rd() -> RouteDistinguisher {
+        RouteDistinguisher::from_str("65001:1").unwrap()
+    }
+
+    fn arm(peers: &mut PeerMap, id: usize, afi_safi: AfiSafi) {
+        let peer = peers.get_mut_by_idx(id).unwrap();
+        let timer = super::super::timer::start_stale_timer(peer, afi_safi, 120);
+        peer.timer.stale_timer.insert(afi_safi, timer);
+    }
+
+    /// A GR-stale VPNv4 row in the peer's Adj-RIB-In.
+    fn add_stale_v4vpn(shard: &mut crate::bgp::shard::BgpShard, id: usize) {
+        let mut attr = BgpAttr::new();
+        attr.nexthop = Some(BgpNexthop::Ipv4("10.0.0.2".parse().unwrap()));
+        let prefix: Ipv4Net = "10.9.0.0/24".parse().unwrap();
+        let rib = BgpRib::new(
+            id,
+            Ipv4Addr::new(10, 0, 0, 2),
+            BgpRibType::IBGP,
+            0,
+            0,
+            &attr,
+            Some(Label::new(100, 0, true)),
+            None,
+            true,
+        );
+        shard.adj_in_mut(id).add(Some(rd()), prefix, rib);
+    }
+
+    /// A GR-stale VPNv6 row in the peer's Adj-RIB-In.
+    fn add_stale_v6vpn(shard: &mut crate::bgp::shard::BgpShard, id: usize) {
+        let nhop = Vpnv6Nexthop {
+            rd: rd(),
+            nhop: "2001:db8::2".parse().unwrap(),
+        };
+        let mut attr = BgpAttr::new();
+        attr.nexthop = Some(BgpNexthop::Vpnv6(nhop.clone()));
+        let prefix: Ipv6Net = "2001:db8:9::/64".parse().unwrap();
+        let rib = BgpRib::new(
+            id,
+            Ipv4Addr::new(10, 0, 0, 2),
+            BgpRibType::IBGP,
+            0,
+            0,
+            &attr,
+            Some(Label::new(100, 0, true)),
+            Some(VpnNexthop::V6(nhop)),
+            true,
+        );
+        shard.adj_in_mut(id).add_v6vpn(rd(), prefix, rib);
+    }
+
+    /// A GR-stale EVPN Type-2 row in the peer's Adj-RIB-In.
+    fn add_stale_evpn(peers: &mut PeerMap, id: usize) {
+        let mut attr = BgpAttr::new();
+        attr.nexthop = Some(BgpNexthop::Evpn(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))));
+        let prefix = EvpnPrefix::MacIp {
+            eth_tag: 0,
+            mac: [0x02, 0, 0, 0, 0, 0x11],
+            ip: None,
+        };
+        let rib = BgpRib::new(
+            id,
+            Ipv4Addr::new(10, 0, 0, 2),
+            BgpRibType::IBGP,
+            0,
+            0,
+            &attr,
+            None,
+            None,
+            true,
+        );
+        peers
+            .get_mut_by_idx(id)
+            .unwrap()
+            .adj_in
+            .add_evpn(rd(), prefix, rib);
+    }
+
+    fn stale_v4vpn(top: &BgpTop, id: usize) -> usize {
+        top.shard.adj_in(id).map_or(0, |slice| {
+            slice
+                .v4vpn
+                .values()
+                .flat_map(|t| t.0.values())
+                .flatten()
+                .filter(|r| r.stale)
+                .count()
+        })
+    }
+
+    fn stale_v6vpn(top: &BgpTop, id: usize) -> usize {
+        top.shard.adj_in(id).map_or(0, |slice| {
+            slice
+                .v6vpn
+                .values()
+                .flat_map(|t| t.0.values())
+                .flatten()
+                .filter(|r| r.stale)
+                .count()
+        })
+    }
+
+    fn stale_evpn(peers: &PeerMap, id: usize) -> usize {
+        peers.get_by_idx(id).map_or(0, |peer| {
+            peer.adj_in
+                .evpn
+                .values()
+                .flat_map(|t| t.0.values())
+                .flatten()
+                .filter(|r| r.stale)
+                .count()
+        })
+    }
+
+    fn timers(peers: &PeerMap, id: usize) -> Vec<AfiSafi> {
+        peers
+            .get_by_idx(id)
+            .unwrap()
+            .timer
+            .stale_timer
+            .keys()
+            .copied()
+            .collect()
+    }
+
+    struct Fx {
+        router_id: Ipv4Addr,
+        ctx: crate::context::ProtoContext,
+        local_rib: LocalRib,
+        shard: crate::bgp::shard::BgpShard,
+        attr_store: crate::bgp::BgpAttrStore,
+        update_groups: crate::bgp::update_group::UpdateGroupMap,
+        interface_addrs: crate::bgp::interface_addrs::InterfaceAddrs,
+        tx: tokio::sync::mpsc::Sender<crate::bgp::inst::Message>,
+    }
+
+    impl Fx {
+        fn new() -> Self {
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            Box::leak(Box::new(rx));
+            Self {
+                router_id: Ipv4Addr::new(10, 0, 0, 9),
+                ctx: crate::context::ProtoContext::default_table_no_rib(),
+                local_rib: LocalRib::default(),
+                shard: crate::bgp::shard::BgpShard::default(),
+                attr_store: crate::bgp::BgpAttrStore::default(),
+                update_groups: crate::bgp::update_group::empty_map(),
+                interface_addrs: crate::bgp::interface_addrs::InterfaceAddrs::default(),
+                tx,
+            }
+        }
+        fn top(&mut self) -> BgpTop<'_> {
+            BgpTop {
+                router_id: &self.router_id,
+                srv6_ipv6_export: None,
+                local_rib: &mut self.local_rib,
+                shard: &mut self.shard,
+                tx: &self.tx,
+                rib_client: &self.ctx.rib,
+                attr_store: &mut self.attr_store,
+                update_groups: &mut self.update_groups,
+                interface_addrs: &self.interface_addrs,
+                vrf_export: None,
+                color_policy: None,
+                flex_algo_routes: None,
+                flex_algo_srv6_routes: None,
+                vrf_import: None,
+                nexthop_cache: None,
+                vrf_transport_v4: None,
+                vrf_transport_v6: None,
+                central_label_alloc: None,
+                as_sets_withdraw: false,
+            }
+        }
+    }
+
+    fn peers_with(peer: Peer) -> (PeerMap, usize) {
+        let mut peers = PeerMap::new();
+        let addr = peer.address;
+        peers.insert(addr, peer);
+        let id = peers.get(&addr).unwrap().ident;
+        peers.membership_enroll(id);
+        (peers, id)
+    }
+
+    fn eor(top: &mut BgpTop, peers: &mut PeerMap, id: usize, marker: MpUnreachAttr) {
+        let mut packet = UpdatePacket::new();
+        packet.mp_withdraw = Some(marker);
+        route_from_peer(id, packet, top, peers, None);
+    }
+
+    /// The VPNv6 twin of `vpnv4_eor_flushes_stale_routes_and_cancels_timer`.
+    #[tokio::test]
+    async fn vpnv6_eor_flushes_stale_routes_and_cancels_timer() {
+        let mut fx = Fx::new();
+        let (mut peers, id) = peers_with(established_peer());
+        arm(&mut peers, id, VPNV6);
+        add_stale_v6vpn(&mut fx.shard, id);
+        let mut top = fx.top();
+        assert_eq!(stale_v6vpn(&top, id), 1);
+
+        eor(&mut top, &mut peers, id, MpUnreachAttr::Vpnv6Eor);
+
+        assert!(
+            timers(&peers, id).is_empty(),
+            "the VPNv6 stale timer is cancelled"
+        );
+        assert_eq!(
+            stale_v6vpn(&top, id),
+            0,
+            "the VPNv6 EoR flushes the stale VPNv6 paths"
+        );
+    }
+
+    /// The EVPN twin.
+    #[tokio::test]
+    async fn evpn_eor_flushes_stale_routes_and_cancels_timer() {
+        let mut fx = Fx::new();
+        let (mut peers, id) = peers_with(established_peer());
+        arm(&mut peers, id, EVPN);
+        add_stale_evpn(&mut peers, id);
+        assert_eq!(stale_evpn(&peers, id), 1);
+        let mut top = fx.top();
+
+        eor(&mut top, &mut peers, id, MpUnreachAttr::EvpnEor);
+
+        assert!(
+            timers(&peers, id).is_empty(),
+            "the EVPN stale timer is cancelled"
+        );
+        assert_eq!(
+            stale_evpn(&peers, id),
+            0,
+            "the EVPN EoR flushes the stale EVPN paths"
+        );
+    }
+
+    /// Scenario B of the finding: a restarting PE's first EoR is usually
+    /// ipv4-unicast, sent before its VPNv4 table is re-advertised. It must
+    /// end ONLY the unicast stale period — the VPNv4 stale rows and their
+    /// timer stay until the VPNv4 EoR (or that timer) says otherwise.
+    #[tokio::test]
+    async fn ipv4_unicast_eor_leaves_the_vpnv4_stale_set_alone() {
+        let mut fx = Fx::new();
+        let (mut peers, id) = peers_with(established_peer());
+        arm(&mut peers, id, V4U);
+        arm(&mut peers, id, VPNV4);
+        add_stale_v4vpn(&mut fx.shard, id);
+        let mut top = fx.top();
+
+        eor(&mut top, &mut peers, id, MpUnreachAttr::Ipv4Eor);
+
+        assert_eq!(
+            timers(&peers, id),
+            vec![VPNV4],
+            "only the unicast stale timer is cancelled"
+        );
+        assert_eq!(
+            stale_v4vpn(&top, id),
+            1,
+            "the ipv4-unicast EoR must not flush the VPNv4 stale set"
+        );
+
+        // The VPNv4 EoR then does.
+        eor(&mut top, &mut peers, id, MpUnreachAttr::Vpnv4Eor);
+        assert!(timers(&peers, id).is_empty());
+        assert_eq!(stale_v4vpn(&top, id), 0);
+    }
+
+    /// The backstop timer is per family too: the VPNv6 timer expiring
+    /// sweeps the VPNv6 stale rows and leaves the VPNv4 ones to theirs.
+    #[tokio::test]
+    async fn stale_timer_expiry_sweeps_only_its_family() {
+        let mut fx = Fx::new();
+        let (mut peers, id) = peers_with(established_peer());
+        arm(&mut peers, id, VPNV4);
+        arm(&mut peers, id, VPNV6);
+        add_stale_v4vpn(&mut fx.shard, id);
+        add_stale_v6vpn(&mut fx.shard, id);
+        let mut top = fx.top();
+
+        fsm(
+            &mut top,
+            &mut peers,
+            id,
+            Event::StaleTimerExpires(VPNV6),
+            None,
+        );
+
+        assert_eq!(
+            timers(&peers, id),
+            vec![VPNV4],
+            "the VPNv4 timer is still armed"
+        );
+        assert_eq!(stale_v6vpn(&top, id), 0, "the VPNv6 stale rows are swept");
+        assert_eq!(stale_v4vpn(&top, id), 1, "the VPNv4 stale rows are not");
+
+        fsm(
+            &mut top,
+            &mut peers,
+            id,
+            Event::StaleTimerExpires(VPNV4),
+            None,
+        );
+        assert!(timers(&peers, id).is_empty());
+        assert_eq!(stale_v4vpn(&top, id), 0);
     }
 }
 

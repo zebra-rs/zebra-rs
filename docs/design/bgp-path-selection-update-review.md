@@ -708,7 +708,7 @@ cap. The two reviews agree on every overlapping item.
   AddPath members at all — is #23 and stays open; until it is fixed, a
   soft-out is what brings an AddPath member's VPNv6 rows back in step.
 
-### 9. P1 CONFIRMED — LLGR / PIC stale rows for VPNv6 and EVPN never expire, and any family's EoR flushes the VPNv4 stale set
+### 9. P1 CONFIRMED, FIXED on branch `bgp-stale-sweep-per-family` — LLGR / PIC stale rows for VPNv6 and EVPN never expire, and any family's EoR flushes the VPNv4 stale set
 
 - `route.rs:12581-12620` `stale_route_withdraw` walks only
   `adj_in.v4vpn` and is the crate's sole stale sweeper; `12574-12579`
@@ -737,6 +737,39 @@ cap. The two reviews agree on every overlapping item.
 - Fix direction: make the sweep per-family (`stale_route_withdraw(peer,
   afi_safi)`) covering v4vpn, v6vpn, evpn (and any other family
   `route_clean` retains), and pass the EoR's family through.
+- Gates (branch `bgp-stale-sweep-per-family`; every gate compiles on
+  `main` and fails there). Unit, `stale_sweep_per_family_tests`: the
+  probe sketch above as `vpnv6_eor_flushes_stale_routes_and_cancels_timer`
+  and `evpn_eor_flushes_stale_routes_and_cancels_timer` (a stale VPNv6 /
+  EVPN row survives its own family's EoR on `main`),
+  `ipv4_unicast_eor_leaves_the_vpnv4_stale_set_alone` (scenario B: on
+  `main` the ipv4-unicast EoR empties the VPNv4 stale set and the VPNv4
+  timer is the only survivor of a family it never touched) and
+  `stale_timer_expiry_sweeps_only_its_family` (the VPNv6 backstop timer
+  expiring sweeps VPNv4 and leaves VPNv6 on `main`). The EVPN half of
+  the flip, in `evpn_addpath_fanout_tests`:
+  `evpn_stale_flip_withdraws_from_a_non_llgr_plain_member` (a plain
+  member without LLGR holds a row; the row turning stale must withdraw
+  it; on `main` nothing is sent and the Adj-RIB-Out keeps it). BDD,
+  `bgp_vpnv6_llgr_stale_expiry` and `bgp_evpn_llgr_stale_expiry`: two
+  routers with `long-lived-graceful-restart` (10-second stale time) for
+  vpnv6 / evpn, z1 originates one route, z1's daemon is stopped; z2
+  retains the row stale (asserted three seconds after the stop) and must
+  sweep it once the stale time elapses. On `main` both twins fail: sixty
+  seconds after the stop the row is still there.
+- FIXED on `bgp-stale-sweep-per-family`: the EoR and timer-expiry
+  callers pass their AFI/SAFI into the sweep. VPNv4, VPNv6 and EVPN
+  stale paths use their normal withdrawal handlers, including import,
+  forwarding and downstream cleanup. Other families are untouched.
+  The plain EVPN fan-out withdraws a previously advertised row when
+  the advertisement gate rejects it, clearing its pending cache too.
+  VPNv4/v6 support LLGR or PIC retention; EVPN currently retains only
+  under LLGR.
+- Validation: all five unit gates pass with the fix. Both BDD twins
+  pass all four scenarios (VPNv6: 26 steps; EVPN: 24 steps), including
+  retention three seconds after the stop and subsequent expiry. The
+  non-BDD workspace tests, strict workspace Clippy, formatting and
+  diff checks pass.
 
 ### 10. P2 CONFIRMED (probe) — MED comparison is order-dependent, and an unchanged re-advertisement rotates the winner
 
