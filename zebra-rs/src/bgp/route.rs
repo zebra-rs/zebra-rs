@@ -14780,12 +14780,23 @@ pub(super) fn route_advertise_to_peers_v6(
             let Some((nlri, attr)) = route_update_ipv6(peer, &prefix, cand, bgp, true) else {
                 continue;
             };
-            let attr = bgp.attr_store.intern(attr);
+            // The per-AFI Output policy, as every other v6 advertise path
+            // applies it (review finding #16: this loop is an AddPath
+            // peer's only route-change path, and skipping the policy
+            // leaked denied prefixes and dropped its set actions). A
+            // denied candidate is left out of `newly`, so the diff below
+            // withdraws it if it was sent before.
+            let Some(decision) =
+                route_apply_policy_out_v6(peer, afi_safi, &nlri, attr, cand.weight, cand.tag)
+            else {
+                continue;
+            };
+            let attr = bgp.attr_store.intern(decision.attr);
             if let Some(gid) = &group_id
                 && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
                 && let Some(group) = af.group_by_id_mut(gid)
             {
-                super::update_group::send_ipv6(group, nlri, attr, cand.ident, bgp.tx, true);
+                super::update_group::send_ipv6(group, nlri, attr.clone(), cand.ident, bgp.tx, true);
             } else {
                 tracing::warn!(
                     peer = %peer.address,
@@ -14794,7 +14805,11 @@ pub(super) fn route_advertise_to_peers_v6(
                 );
                 continue;
             }
-            peer.adj_out.v6.add(prefix, cand.clone());
+            // Record the advertised (post-policy) form, as the VPNv6
+            // AddPath path does.
+            let mut sent = cand.clone();
+            sent.attr = attr;
+            peer.adj_out.v6.add(prefix, sent);
             newly.insert(cand.local_id);
         }
         for id in was {
@@ -29666,6 +29681,438 @@ mod med_knob_tests {
             false,
             MISSING_WORST
         ));
+    }
+}
+
+/// Review finding #16: the IPv6-unicast AddPath event path
+/// (`route_advertise_to_peers_v6`'s AddPath loop) ran `route_update_ipv6`
+/// and queued the result with no outbound policy. AddPath-send peers are
+/// not in the plain fan-out, so this loop is their only event path: a
+/// prefix a `policy out` denies was filtered at session-up and leaked on
+/// the first change, and a policy's `set` actions were missing from every
+/// event-driven AddPath UPDATE.
+#[cfg(test)]
+mod v6_addpath_policy_out_tests {
+    use super::*;
+    use crate::bgp::peer::State;
+    use crate::policy::{NumericSet, PolicyAction, PolicyList};
+    use bgp_packet::CapMultiProtocol;
+    use std::net::IpAddr;
+    use std::str::FromStr;
+
+    const ROUTER_ID: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 9);
+    const V6U: AfiSafi = AfiSafi {
+        afi: Afi::Ip6,
+        safi: Safi::Unicast,
+    };
+
+    fn peer(addr: &str, remote_as: u32, addpath: bool, policy: Option<PolicyList>) -> Peer {
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        Box::leak(Box::new(rx));
+        let mut peer = Peer::new(
+            0,
+            65001,
+            ROUTER_ID,
+            remote_as,
+            addr.parse::<IpAddr>().unwrap(),
+            None,
+            tx,
+            crate::context::ProtoContext::default_table_no_rib(),
+        );
+        peer.state = State::Established;
+        peer.peer_type = PeerType::EBGP;
+        let entry = peer
+            .cap_map
+            .entries
+            .entry(CapMultiProtocol::new(&Afi::Ip6, &Safi::Unicast))
+            .or_default();
+        entry.send = true;
+        entry.recv = true;
+        if addpath {
+            peer.opt.add_path.entry(V6U).or_default().send = true;
+        }
+        if let Some(policy) = policy {
+            let slot = peer.policy_list_slot(V6U, InOut::Output);
+            slot.name = Some("OUT".into());
+            slot.policy_list = Some(policy);
+        }
+        peer.param.local_addr = Some("[2001:db8::99]:179".parse().unwrap());
+        let (ptx, prx) = tokio::sync::mpsc::unbounded_channel();
+        Box::leak(Box::new(prx));
+        peer.packet_tx = Some(ptx);
+        peer
+    }
+
+    fn deny_all() -> PolicyList {
+        let mut policy = PolicyList::default();
+        policy.entry(10).action = PolicyAction::Deny;
+        policy
+    }
+
+    fn set_med(med: u32) -> PolicyList {
+        let mut policy = PolicyList::default();
+        policy.entry(10).action = PolicyAction::Permit;
+        policy.entry(10).med = Some(NumericSet::Set(med));
+        policy
+    }
+
+    struct Fx {
+        router_id: Ipv4Addr,
+        ctx: crate::context::ProtoContext,
+        local_rib: LocalRib,
+        shard: crate::bgp::shard::BgpShard,
+        attr_store: crate::bgp::BgpAttrStore,
+        update_groups: crate::bgp::update_group::UpdateGroupMap,
+        interface_addrs: crate::bgp::interface_addrs::InterfaceAddrs,
+        tx: tokio::sync::mpsc::Sender<crate::bgp::inst::Message>,
+    }
+
+    impl Fx {
+        fn new() -> Self {
+            let (tx, rx) = tokio::sync::mpsc::channel(64);
+            Box::leak(Box::new(rx));
+            Self {
+                router_id: ROUTER_ID,
+                ctx: crate::context::ProtoContext::default_table_no_rib(),
+                local_rib: LocalRib::default(),
+                shard: crate::bgp::shard::BgpShard::default(),
+                attr_store: crate::bgp::BgpAttrStore::default(),
+                update_groups: crate::bgp::update_group::empty_map(),
+                interface_addrs: crate::bgp::interface_addrs::InterfaceAddrs::default(),
+                tx,
+            }
+        }
+        fn top(&mut self) -> BgpTop<'_> {
+            BgpTop {
+                router_id: &self.router_id,
+                srv6_ipv6_export: None,
+                local_rib: &mut self.local_rib,
+                shard: &mut self.shard,
+                tx: &self.tx,
+                rib_client: &self.ctx.rib,
+                attr_store: &mut self.attr_store,
+                update_groups: &mut self.update_groups,
+                interface_addrs: &self.interface_addrs,
+                vrf_export: None,
+                color_policy: None,
+                flex_algo_routes: None,
+                flex_algo_srv6_routes: None,
+                vrf_import: None,
+                nexthop_cache: None,
+                vrf_transport_v4: None,
+                vrf_transport_v6: None,
+                central_label_alloc: None,
+                as_sets_withdraw: false,
+            }
+        }
+    }
+
+    fn enroll(fx: &mut Fx, peers: &mut PeerMap, list: Vec<Peer>) -> Vec<usize> {
+        let mut ids = Vec::new();
+        for peer in list {
+            let addr = peer.address;
+            peers.insert(addr, peer);
+            let id = peers.get(&addr).unwrap().ident;
+            peers.membership_enroll(id);
+            crate::bgp::update_group::attach(&mut fx.update_groups, peers, id, ROUTER_ID, false);
+            ids.push(id);
+        }
+        ids
+    }
+
+    fn announce(top: &mut BgpTop, peers: &mut PeerMap, id: usize, prefix: &str) {
+        announce_path(top, peers, id, prefix, "65002");
+    }
+
+    fn announce_path(top: &mut BgpTop, peers: &mut PeerMap, id: usize, prefix: &str, path: &str) {
+        let mut packet = UpdatePacket::new();
+        packet.bgp_attr = Some(BgpAttr {
+            origin: Some(Origin::Igp),
+            aspath: Some(As4Path::from_str(path).unwrap()),
+            nexthop: Some(BgpNexthop::Ipv6("2001:db8::2".parse().unwrap())),
+            ..Default::default()
+        });
+        packet.mp_update = Some(MpReachAttr::Ipv6 {
+            snpa: 0,
+            nhop: "2001:db8::2".parse().unwrap(),
+            updates: vec![Ipv6Nlri {
+                id: 0,
+                prefix: prefix.parse().unwrap(),
+            }],
+        });
+        route_from_peer(id, packet, top, peers, None);
+    }
+
+    /// The attributes `ident`'s update-group has queued for `prefix`,
+    /// under any path-id.
+    fn queued(top: &BgpTop, peers: &PeerMap, ident: usize, prefix: Ipv6Net) -> Vec<BgpAttr> {
+        let Some(gid) = peers
+            .get_by_idx(ident)
+            .and_then(|p| p.update_group_id.get(&V6U))
+        else {
+            return Vec::new();
+        };
+        let Some(group) = top
+            .update_groups
+            .get(&V6U)
+            .and_then(|af| af.group_by_id(gid))
+        else {
+            return Vec::new();
+        };
+        group
+            .cache_ipv6_rev
+            .iter()
+            .filter(|(nlri, _)| nlri.prefix == prefix)
+            .map(|(_, attr)| (**attr).clone())
+            .collect()
+    }
+
+    /// An AddPath-send neighbor whose IPv6 out-policy denies everything
+    /// must not be sent the prefix on the event path.
+    #[tokio::test]
+    async fn addpath_v6_event_path_applies_a_deny_out_policy() {
+        let mut fx = Fx::new();
+        let mut peers = PeerMap::new();
+        let ids = enroll(
+            &mut fx,
+            &mut peers,
+            vec![
+                peer("2001:db8::2", 65002, false, None),
+                peer("2001:db8::4", 65004, true, Some(deny_all())),
+            ],
+        );
+        let (a, c) = (ids[0], ids[1]);
+        let mut top = fx.top();
+        announce(&mut top, &mut peers, a, "2001:db8:16::/64");
+        let prefix: Ipv6Net = "2001:db8:16::/64".parse().unwrap();
+        assert!(
+            top.shard.v6.1.contains_key(&prefix),
+            "the route is selected"
+        );
+        assert!(
+            !peers
+                .get_by_idx(c)
+                .unwrap()
+                .adj_out
+                .v6
+                .0
+                .contains_key(&prefix),
+            "the denied prefix is not recorded as sent"
+        );
+        assert!(queued(&top, &peers, c, prefix).is_empty(), "nothing queued");
+    }
+
+    /// The policy's `set` actions reach the AddPath UPDATE: a permit
+    /// entry setting MED 50 must show on what C's group queues.
+    #[tokio::test]
+    async fn addpath_v6_event_path_applies_out_policy_rewrites() {
+        let mut fx = Fx::new();
+        let mut peers = PeerMap::new();
+        let ids = enroll(
+            &mut fx,
+            &mut peers,
+            vec![
+                peer("2001:db8::2", 65002, false, None),
+                peer("2001:db8::4", 65004, true, Some(set_med(50))),
+            ],
+        );
+        let (a, c) = (ids[0], ids[1]);
+        let mut top = fx.top();
+        announce(&mut top, &mut peers, a, "2001:db8:16::/64");
+        let prefix: Ipv6Net = "2001:db8:16::/64".parse().unwrap();
+        let meds: Vec<Option<u32>> = queued(&top, &peers, c, prefix)
+            .iter()
+            .map(|attr| attr.med.as_ref().map(|m| m.med))
+            .collect();
+        assert_eq!(meds, vec![Some(50)], "the out-policy's set med is applied");
+    }
+
+    /// A path the policy starts denying is withdrawn: the first
+    /// announcement (egress AS_PATH length 2) is permitted and sent; the
+    /// replacement (length 4) matches the deny entry, so the loop leaves it
+    /// out and its Adj-RIB-Out diff withdraws the path-id sent before.
+    #[tokio::test]
+    async fn addpath_v6_path_the_policy_starts_denying_is_withdrawn() {
+        let mut policy = PolicyList::default();
+        policy.entry(10).action = PolicyAction::Deny;
+        policy.entry(10).match_as_path_len = Some(crate::policy::NumericMatch::Ge(3));
+        policy.entry(20).action = PolicyAction::Permit;
+        let mut fx = Fx::new();
+        let mut peers = PeerMap::new();
+        let ids = enroll(
+            &mut fx,
+            &mut peers,
+            vec![
+                peer("2001:db8::2", 65002, false, None),
+                peer("2001:db8::4", 65004, true, Some(policy)),
+            ],
+        );
+        let (a, c) = (ids[0], ids[1]);
+        let mut top = fx.top();
+        let prefix: Ipv6Net = "2001:db8:16::/64".parse().unwrap();
+        announce_path(&mut top, &mut peers, a, "2001:db8:16::/64", "65002");
+        assert!(
+            peers
+                .get_by_idx(c)
+                .unwrap()
+                .adj_out
+                .v6
+                .0
+                .contains_key(&prefix),
+            "permitted and sent"
+        );
+        announce_path(
+            &mut top,
+            &mut peers,
+            a,
+            "2001:db8:16::/64",
+            "65002 65009 65010",
+        );
+        assert!(
+            !peers
+                .get_by_idx(c)
+                .unwrap()
+                .adj_out
+                .v6
+                .0
+                .contains_key(&prefix),
+            "the now-denied path is withdrawn"
+        );
+        assert!(
+            queued(&top, &peers, c, prefix).is_empty(),
+            "nothing left queued"
+        );
+    }
+
+    /// Denying one candidate must withdraw its exact AddPath ID while
+    /// retaining the other candidate and its post-policy attributes.
+    #[tokio::test]
+    async fn review_probe_v6_policy_withdraws_only_the_denied_path_id() {
+        let mut policy = set_med(50);
+        policy.entry(10).action = PolicyAction::Deny;
+        policy.entry(10).match_as_path_len = Some(crate::policy::NumericMatch::Ge(3));
+        policy.entry(20).action = PolicyAction::Permit;
+        policy.entry(20).med = Some(NumericSet::Set(50));
+        let mut fx = Fx::new();
+        let mut peers = PeerMap::new();
+        let ids = enroll(
+            &mut fx,
+            &mut peers,
+            vec![
+                peer("2001:db8::2", 65002, false, None),
+                peer("2001:db8::3", 65003, false, None),
+                peer("2001:db8::4", 65004, true, Some(policy)),
+            ],
+        );
+        let (a, b, c) = (ids[0], ids[1], ids[2]);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        peers.get_mut_by_idx(c).unwrap().packet_tx = Some(tx);
+        let mut top = fx.top();
+        let prefix: Ipv6Net = "2001:db8:16::/64".parse().unwrap();
+        announce_path(&mut top, &mut peers, a, "2001:db8:16::/64", "65002");
+        announce_path(&mut top, &mut peers, b, "2001:db8:16::/64", "65003");
+        let rows = &peers.get_by_idx(c).unwrap().adj_out.v6.0[&prefix];
+        assert_eq!(rows.len(), 2);
+        let denied_id = rows.iter().find(|r| r.ident == a).unwrap().local_id;
+        let kept_id = rows.iter().find(|r| r.ident == b).unwrap().local_id;
+        assert_ne!(denied_id, 0);
+        assert_ne!(denied_id, kept_id);
+        assert!(
+            rows.iter()
+                .all(|r| r.attr.med.as_ref().map(|m| m.med) == Some(50))
+        );
+        let gid = peers.get_by_idx(c).unwrap().update_group_id[&V6U].clone();
+        let group = top
+            .update_groups
+            .get_mut(&V6U)
+            .unwrap()
+            .group_by_id_mut(&gid)
+            .unwrap();
+        let job = crate::bgp::update_group::build_flush_job_ipv6(group, &peers).unwrap();
+        job.run();
+        assert!(
+            rx.try_recv().is_ok(),
+            "initial advertisement reached the writer"
+        );
+        while rx.try_recv().is_ok() {}
+
+        announce_path(
+            &mut top,
+            &mut peers,
+            a,
+            "2001:db8:16::/64",
+            "65002 65009 65010",
+        );
+        let rows = &peers.get_by_idx(c).unwrap().adj_out.v6.0[&prefix];
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].local_id, kept_id);
+        assert_eq!(rows[0].attr.med.as_ref().map(|m| m.med), Some(50));
+        let group = top
+            .update_groups
+            .get(&V6U)
+            .unwrap()
+            .group_by_id(&gid)
+            .unwrap();
+        let queued_ids: Vec<_> = group
+            .cache_ipv6_rev
+            .keys()
+            .filter(|n| n.prefix == prefix)
+            .map(|n| n.id)
+            .collect();
+        assert_eq!(queued_ids, vec![kept_id]);
+        let bytes = rx
+            .try_recv()
+            .expect("exact-ID withdrawal reached the writer");
+        let mut opt = bgp_packet::ParseOption::default();
+        opt.add_path.entry(V6U).or_default().recv = true;
+        let (_, packet) = bgp_packet::BgpPacket::parse_packet(&bytes, false, Some(opt)).unwrap();
+        let bgp_packet::BgpPacket::Update(update) = packet else {
+            panic!("expected UPDATE")
+        };
+        let Some(MpUnreachAttr::Ipv6Nlri(nlris)) = update.mp_withdraw else {
+            panic!("expected IPv6 withdrawal")
+        };
+        assert_eq!(
+            nlris,
+            vec![Ipv6Nlri {
+                id: denied_id,
+                prefix
+            }]
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "the surviving path was not withdrawn"
+        );
+    }
+
+    /// Control: a plain (non-AddPath) neighbor with the same deny policy
+    /// is filtered by the generic fan-out already.
+    #[tokio::test]
+    async fn plain_v6_neighbor_with_a_deny_out_policy_is_filtered() {
+        let mut fx = Fx::new();
+        let mut peers = PeerMap::new();
+        let ids = enroll(
+            &mut fx,
+            &mut peers,
+            vec![
+                peer("2001:db8::2", 65002, false, None),
+                peer("2001:db8::4", 65004, false, Some(deny_all())),
+            ],
+        );
+        let (a, c) = (ids[0], ids[1]);
+        let mut top = fx.top();
+        announce(&mut top, &mut peers, a, "2001:db8:16::/64");
+        let prefix: Ipv6Net = "2001:db8:16::/64".parse().unwrap();
+        assert!(
+            !peers
+                .get_by_idx(c)
+                .unwrap()
+                .adj_out
+                .v6
+                .0
+                .contains_key(&prefix)
+        );
+        assert!(queued(&top, &peers, c, prefix).is_empty());
     }
 }
 
