@@ -7,7 +7,7 @@ MUP/Flowspec/SR-Policy/RTC where they share the machinery). Reviewed
 against `main` at `2f1e9a09` (2026-09-07). Line numbers are as of that
 commit.
 
-Status (2026-09-25): eighteen items are fixed on `main` — #1 (PR
+Status (2026-09-25): nineteen items are fixed on `main` — #1 (PR
 #2372, merge `3beacbcc`), the listen-range peer-type item found while
 fixing it (PR #2373, `ba327126`), #2 (PR #2375, `308b196a`), #3 (PR
 #2376, `b8fef738`), #4 (PR #2377, `1cc31738`, which also closed the
@@ -17,10 +17,11 @@ follow-ups), #7 (PR #2380, `d7476601`), #8 and with it #13 (PR #2383,
 `d72a06af`, eight review rounds folded in), #9 (PR #2405, `31f7458a`),
 #15 (PR #2413, `097ce15d`), #11 (PR #2415, `3401cb1b`), #12 (PR #2417,
 `4ba79217`), the item found while fixing #12 (PR #2418, `6b53ad6a`), #14
-(PR #2420, `49fb77b1`), #20 (PR #2422, `d8f6a0cf`) and #10 with the MED
-knobs (PR #2423, `7852fc15`). Each fixed entry ends with its fix note;
-everything else is open. #16 (IPv6 AddPath event path skipped outbound
-policy) is fixed on branch `bgp-v6-addpath-policy-out`.
+(PR #2420, `49fb77b1`), #20 (PR #2422, `d8f6a0cf`), #10 with the MED
+knobs (PR #2423, `7852fc15`) and #16 (PR #2425, `6d4446b1`). Each fixed
+entry ends with its fix note; everything else is open. #17 and #18
+(AddPath path-ids withdrawn by their exact id) are fixed on branch
+`bgp-addpath-exact-id-withdraw`, not yet merged.
 
 Method: one lead read the selection ladder and every egress builder, then
 five independent read-only reviewers each took one dimension (update-group
@@ -1171,7 +1172,7 @@ cap. The two reviews agree on every overlapping item.
   ten unit gates pass and both BDD twins leave z2 with the control prefix
   only.
 
-### 16. P2 CONFIRMED, FIXED on branch `bgp-v6-addpath-policy-out` — the IPv6-unicast AddPath event path bypasses outbound policy
+### 16. P2 CONFIRMED, FIXED in #2425 — the IPv6-unicast AddPath event path bypasses outbound policy
 
 - `route.rs:13253-13290`: `route_update_ipv6` → intern → `send_ipv6`,
   with no `route_apply_policy_out_v6`. Plain members go through
@@ -1215,7 +1216,7 @@ cap. The two reviews agree on every overlapping item.
   `bgp_vrf_neighbor_add_path`, `bgp_update_group_live_policy_out_v6`,
   `bgp_v6_route_map` and `bgp_v6_table_map` stay green.
 
-### 17. P2 CONFIRMED — v4-unicast / VPNv4 / VPNv6 AddPath: a replaced candidate that becomes egress-filtered (or LLGR-stale) is never withdrawn
+### 17. P2 CONFIRMED, FIXED on branch `bgp-addpath-exact-id-withdraw` — v4-unicast / VPNv4 / VPNv6 AddPath: a replaced candidate that becomes egress-filtered (or LLGR-stale) is never withdrawn
 
 - `route.rs:4716-4726` (`apply_ipv4_advertise_job`): `Some(added)` →
   advertise only; `replaced` is withdrawn only when `added.is_none()`.
@@ -1237,8 +1238,40 @@ cap. The two reviews agree on every overlapping item.
   never (#9).
 - Fix direction: when the AddPath advertise is filtered or LLGR-blocked
   and `adj_out` holds (prefix, id), send the exact-id withdraw.
+- The IPv6-unicast AddPath loop has withdrawn such a path-id since #2425
+  (its Adj-RIB-Out diff); IPv4 unicast, VPNv4 and VPNv6 remain.
+- Gates (branch `bgp-addpath-exact-id-withdraw`, together with #18; each
+  compiles on `main` and fails there, except the control). Unit, route.rs
+  `addpath_exact_id_tests`: `v4_addpath_candidate_that_turns_no_advertise_is_withdrawn`,
+  `v4_addpath_candidate_the_out_policy_starts_denying_is_withdrawn`,
+  `v4_addpath_candidate_that_turns_stale_is_withdrawn_from_a_non_llgr_peer`,
+  `vpnv6_addpath_candidate_that_turns_no_advertise_is_withdrawn` (on
+  `main` the peer's Adj-RIB-Out keeps the path-id and nothing is
+  withdrawn); control `v4_addpath_ordinary_replacement_keeps_the_path_id`.
+  BDD `bgp_addpath_refused_withdraw`: h1 re-announces a prefix with
+  NO_ADVERTISE (plus a control prefix); on `main` the plain neighbor z3
+  loses it and the AddPath neighbor z2 keeps it. Its IPv6 twin
+  (`_v6`) is the control and passes on `main`.
+- FIXED (branch `bgp-addpath-exact-id-withdraw`):
+  `BatchAfi::advertise_addpath` now reports whether the candidate went
+  out — `false` on a builder `None`, an out-policy deny or an RTC
+  mismatch. When it did not, or the LLGR gate blocked it, and the peer's
+  Adj-RIB-Out holds the candidate's path-id (`BatchAfi::addpath_held`),
+  `route_advertise_batch_addpath` withdraws that path-id
+  (`BatchAfi::withdraw_addpath`: drop the queued advertisement, send the
+  withdraw under the id, remove the Adj-RIB-Out row). A refused candidate
+  the peer never held sends nothing. The IPv4 / VPNv4 removal path
+  (`route_withdraw_from_addpath`) now uses the same
+  `V4Batch::withdraw_addpath`; its behavior is unchanged. On the fix the
+  four gates and the control pass; with the new withdraw disabled the
+  four gates fail again. Both BDD twins pass. Review of the fix added
+  `vpnv4_refused_candidate_cancels_only_its_own_pending_id`: two VPNv4
+  candidates queued for the AddPath peer, the first re-sent with
+  NO_ADVERTISE before the flush; the flush carries the withdraw of that
+  id and the other id's advertisement only (fails on `main`, passes on
+  the fix).
 
-### 18. P2 CONFIRMED — v4/VPNv4 soft-out toward an AddPath peer emits path-id-0 withdraws and never reconciles non-best ids
+### 18. P2 CONFIRMED, FIXED on branch `bgp-addpath-exact-id-withdraw` — v4/VPNv4 soft-out toward an AddPath peer emits path-id-0 withdraws and never reconciles non-best ids
 
 - `route_soft_out_peer_table` (`route.rs:6858-6870`) reads `.1`
   (best-only); its withdraw loop (`6980-7008`) uses id 0:
@@ -1260,6 +1293,50 @@ cap. The two reviews agree on every overlapping item.
   candidate table, `(prefix, path-id)` reconcile, withdraw under the row's
   id, pinned by `v6_soft_out_reconciles_addpath_rows_by_path_id`); the
   v4/VPNv4 one is still as described above.
+- Gates (with #17's). Unit, `addpath_exact_id_tests`:
+  `v4_soft_out_withdraws_addpath_rows_by_path_id` (deny-all then
+  soft-out: on `main` the withdraw carries no path-id, so an AddPath
+  parser reads an empty withdraw), `v4_soft_out_reconciles_non_best_addpath_ids`
+  (the policy starts denying the non-best path only: on `main` its
+  path-id is never examined), `v4_soft_out_keeps_the_permitted_non_best_addpath_id`
+  (the policy starts denying the best path only: on `main` the withdraw
+  carries no path-id and the wildcard removal erases the non-best row
+  too; a re-sync that reads only the best path would withdraw the
+  non-best path as well), `vpnv4_soft_out_withdraws_addpath_rows_by_path_id`
+  (on `main` the VPNv4 UPDATE does not parse as AddPath). BDD
+  `bgp_addpath_soft_out`: two paths for one prefix held by the AddPath
+  neighbor z2; an out-policy that denies the longer path, then one that
+  denies everything, each followed by a soft-out. On `main` z2 keeps both
+  paths after the first, and the second's path-id-0 withdraw makes z2
+  drop the session (z1 goes Idle) — which also empties z2's table, so the
+  feature asserts the session stays up. Its IPv6 twin (`_v6`) is the
+  control and passes on `main`.
+- FIXED (branch `bgp-addpath-exact-id-withdraw`): `route_soft_out_peer_table`
+  follows the IPv6 re-sync. Toward an AddPath neighbor it walks every
+  candidate in the Loc-RIB table, snapshots the Adj-RIB-Out as
+  `(prefix, path-id)` rows, and withdraws each row the new pass did not
+  send under its own path-id: the group cache, the Adj-RIB-Out removal
+  and the withdraw all use that id. A plain neighbor still re-syncs from
+  the best path, keyed by prefix with path-id 0, as before. On the fix
+  the four gates pass. Each gate fails again with its piece of the fix
+  undone: withdrawing under path-id 0 fails the three withdraw gates,
+  and walking only the best path fails
+  `v4_soft_out_keeps_the_permitted_non_best_addpath_id`.
+  Review follow-up: the full-candidate walk first re-announced candidates
+  whose next-hop is unreachable. On `main` the re-sync read the selected
+  path, which is already empty in that case, so this was new. The walk
+  now skips them, as the VPNv6 re-sync does, and the reconcile withdraws
+  their path-ids. Gate `v4_soft_out_withdraws_an_unreachable_addpath_candidate`
+  (the only path's next-hop goes unreachable, then a soft-out: its id
+  must be withdrawn and nothing announced) fails on `main` (id-0
+  withdraw) and without the filter, and passes on the fix. Both BDD twins
+  pass, and with #17's fix `bgp_addpath_ipv4` / `_ipv6`,
+  `bgp_addpath_group`, `bgp_addpath_policy_out` (and `_v6`),
+  `bgp_shard_addpath_v4` / `_v6` / `_vpnv4` / `_vpnv6` / `_lu4` / `_lu6`,
+  `bgp_vrf_neighbor_add_path`, `bgp_vpnv6_llgr_stale_expiry`,
+  `bgp_evpn_llgr_stale_expiry`, `bgp_update_group_live_policy_out` (and
+  `_v6`), `bgp_route_map_match`, `bgp_vpnv4_rr_transit_label`,
+  `bgp_evpn_addpath_flip` and `bgp_lu_addpath_resend` stay green.
 
 ### 19. P2 CONFIRMED — RTC membership learned mid-session never triggers an advertisement
 
@@ -1382,6 +1459,10 @@ cap. The two reviews agree on every overlapping item.
 - Fix direction: have the NHT re-evaluation report the flipped rows as
   AddPath deltas (add/withdraw per `local_id`), and gate the AddPath
   builders on `nexthop_reachable`.
+- Status: the AddPath soft-outs for VPNv6 (review follow-up on #8) and
+  IPv4 / VPNv4 (#18) skip unreachable candidates; the IPv6-unicast
+  soft-out, every family's AddPath session-up dump and the event path do
+  not yet.
 
 ### 24. P2 CONFIRMED — a `route-target import` change is silently ineffective; export re-tag skips sibling re-import and RTC-skipped peers
 

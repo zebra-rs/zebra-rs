@@ -1,0 +1,38 @@
+# z1 (DUT, AS 65001): learns 2001:db8:62:1::/64 from two scripted speakers — h1
+# (AS_PATH "65081") and h2 (AS_PATH "65082 65009 65010") — and sends both
+# paths to z2 with AddPath (IPv6 unicast over IPv4 sessions). No policy yet.
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.63.1
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    # The scripted speakers never listen on 179: passive keeps these peers
+    # in Active so the scripts' connects are accepted.
+    - remote-address: 192.168.63.2
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65081
+      transport:
+        passive-mode: true
+    - remote-address: 192.168.63.3
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65082
+      transport:
+        passive-mode: true
+    - remote-address: 192.168.63.4
+      afi-safi:
+      - name: ipv6
+        enabled: true
+        add-path: send-receive
+      enabled: true
+      remote-as: 65072
