@@ -29,7 +29,7 @@ use super::graph::{ReachMapV4, ReachMapV6};
 use super::ifsm::{self, has_level};
 use super::lsp::PacketMessage;
 use super::neigh::Neighbor;
-use super::network::{read_packet, write_packet};
+use super::network::{P2P_ISS, read_packet, write_packet};
 use super::socket::isis_socket;
 use super::srmpls::IsisLabelMap;
 use super::tracing::IsisTracing;
@@ -341,16 +341,21 @@ impl<'a> LinkTop<'a> {
         self.config.passive || self.flags.is_loopback()
     }
 
-    pub fn dest(&self, level: Level) -> Option<MacAddr> {
-        if self.is_p2p() {
-            if let Some((_, mac)) = self.state.adj.get(&level) {
-                *mac
-            } else {
-                None
-            }
-        } else {
-            None
-        }
+    /// Destination MAC for an LSP, CSNP or PSNP sent on this circuit;
+    /// `None` leaves `write_packet` to pick the level's AllL1ISs /
+    /// AllL2ISs group, which is right for a LAN.
+    ///
+    /// A point-to-point circuit sends every PDU to AllISs
+    /// (`09:00:2b:00:00:05`) — the same group its Hellos use — as
+    /// RFC 5309 recommends and FRR does. It must not unicast to the
+    /// neighbour's SNPA: a Linux peer takes either, but hardware NOSes
+    /// trap IS-IS to the CPU by group DMAC and drop a unicast IS-IS frame
+    /// in the forwarding plane. The adjacency (built from multicast
+    /// Hellos) then comes Up while every LSP and SNP we send vanishes —
+    /// the peer never learns our routes and keeps retransmitting its own
+    /// LSPs, because our PSNPs never reach it either.
+    pub fn dest(&self) -> Option<MacAddr> {
+        self.is_p2p().then(|| MacAddr::from(P2P_ISS))
     }
 
     pub fn event(&self, message: Message) {
