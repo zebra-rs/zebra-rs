@@ -16866,14 +16866,25 @@ pub fn route_sync_evpn(peer: &mut Peer, bgp: &mut BgpTop) {
 /// label.
 pub fn route_sync_labelv4(peer: &mut Peer, bgp: &mut BgpTop) {
     let add_path = peer.opt.is_add_path_send(Afi::Ip, Safi::MplsLabel);
-    let mut routes: Vec<(Ipv4Net, BgpRib)> = Vec::new();
-    for (prefix, ribs) in bgp.shard.v4lu.0.iter() {
-        if add_path {
-            routes.extend(ribs.iter().map(|rib| (prefix, rib.clone())));
-        } else if let Some(best) = ribs.last() {
-            routes.push((prefix, best.clone()));
-        }
-    }
+    // AddPath: every candidate. Plain: the selected best path (`.1`), as
+    // the unicast and VPN dumps do — not the candidate list's tail, which
+    // is merely the row added or refreshed most recently (review finding
+    // #20). A prefix with no selected path is not dumped.
+    let routes: Vec<(Ipv4Net, BgpRib)> = if add_path {
+        bgp.shard
+            .v4lu
+            .0
+            .iter()
+            .flat_map(|(prefix, ribs)| ribs.iter().map(move |rib| (prefix, rib.clone())))
+            .collect()
+    } else {
+        bgp.shard
+            .v4lu
+            .1
+            .iter()
+            .map(|(prefix, best)| (prefix, best.clone()))
+            .collect()
+    };
     for (prefix, best) in routes {
         // RFC 9494 §4.3: stale routes only go to LLGR peers.
         if llgr_blocks_advertisement(best.stale, &peer.cap_recv, Afi::Ip, Safi::MplsLabel) {
@@ -16920,14 +16931,25 @@ pub fn route_sync_labelv4(peer: &mut Peer, bgp: &mut BgpTop) {
 /// counterpart of [`route_sync_labelv4`].
 pub fn route_sync_labelv6(peer: &mut Peer, bgp: &mut BgpTop) {
     let add_path = peer.opt.is_add_path_send(Afi::Ip6, Safi::MplsLabel);
-    let mut routes: Vec<(Ipv6Net, BgpRib)> = Vec::new();
-    for (prefix, ribs) in bgp.shard.v6lu.0.iter() {
-        if add_path {
-            routes.extend(ribs.iter().map(|rib| (prefix, rib.clone())));
-        } else if let Some(best) = ribs.last() {
-            routes.push((prefix, best.clone()));
-        }
-    }
+    // AddPath: every candidate. Plain: the selected best path (`.1`), as
+    // the unicast and VPN dumps do — not the candidate list's tail, which
+    // is merely the row added or refreshed most recently (review finding
+    // #20). A prefix with no selected path is not dumped.
+    let routes: Vec<(Ipv6Net, BgpRib)> = if add_path {
+        bgp.shard
+            .v6lu
+            .0
+            .iter()
+            .flat_map(|(prefix, ribs)| ribs.iter().map(move |rib| (prefix, rib.clone())))
+            .collect()
+    } else {
+        bgp.shard
+            .v6lu
+            .1
+            .iter()
+            .map(|(prefix, best)| (prefix, best.clone()))
+            .collect()
+    };
     for (prefix, best) in routes {
         // RFC 9494 §4.3: stale routes only go to LLGR peers.
         if llgr_blocks_advertisement(best.stale, &peer.cap_recv, Afi::Ip6, Safi::MplsLabel) {

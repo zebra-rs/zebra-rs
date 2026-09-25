@@ -18,9 +18,8 @@ follow-ups), #7 (PR #2380, `d7476601`), #8 and with it #13 (PR #2383,
 #15 (PR #2413, `097ce15d`), #11 (PR #2415, `3401cb1b`), #12 (PR #2417,
 `4ba79217`), the item found while fixing #12 (PR #2418, `6b53ad6a`) and
 #14 (PR #2420, `49fb77b1`). Each fixed entry ends with its fix note;
-everything else is open. In progress: #20 (the labeled-unicast
-session-up dump sent the newest candidate), branch
-`bgp-lu-sync-winner`.
+everything else is open. #20 (the labeled-unicast session-up dump sent
+the newest candidate) is fixed on branch `bgp-lu-sync-winner`.
 
 Method: one lead read the selection ladder and every egress builder, then
 five independent read-only reviewers each took one dimension (update-group
@@ -1157,7 +1156,7 @@ cap. The two reviews agree on every overlapping item.
 - Fix direction: on an exact RTC add, run a targeted re-sync of the VPN
   tables filtered to the new RT (or the full `route_sync_vpnv4/6`).
 
-### 20. P2 CONFIRMED — LU session-up sync dumps the most recently updated candidate, not the winner
+### 20. P2 CONFIRMED, FIXED on branch `bgp-lu-sync-winner` — LU session-up sync dumps the most recently updated candidate, not the winner
 
 - `route.rs:15484-15490` and `15535-15541` (`route_sync_labelv4/v6`,
   plain branch): `ribs.last()` over `shard.v4lu.0` / `v6lu.0`, i.e. the
@@ -1184,6 +1183,17 @@ cap. The two reviews agree on every overlapping item.
   iBGP labeled-unicast neighbor, starts afterwards. On `main` both twins
   fail: z4 holds z3's path (next-hop 192.168.52.3 / 2001:db8:53::3) and
   keeps it, since nothing changes for the prefix afterwards.
+- FIXED (branch `bgp-lu-sync-winner`): the plain branch of
+  `route_sync_labelv4` / `route_sync_labelv6` dumps the selected path
+  (`shard.v4lu.1` / `v6lu.1`), as the unicast and VPN dumps do; a prefix
+  with no selected path is not dumped. The AddPath branch still dumps
+  every candidate. On the fix the three unit gates pass (each gate
+  exercises one of the two functions, and each failed on `main`). Both
+  BDD twins pass, and `bgp_interas_option_c`, `bgp_lu_addpath_resend`
+  (+`_v6`), `bgp_lu_dynamic_transit_review`, `bgp_lu_route_map`,
+  `bgp_lu_rr_transit_label`, `bgp_shard_addpath_lu4` / `lu6`,
+  `bgp_shard_lu`, `bgp_shard_sync_labelv6` and `bgp_shard_sync_lu` stay
+  green.
 
 ### 21. P2 CONFIRMED — more signature-bearing knobs change on a live Established peer without detach/attach
 
