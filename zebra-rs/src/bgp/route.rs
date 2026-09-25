@@ -101,6 +101,26 @@ fn aspath_own_as_loop(peer: &Peer, aspath: &As4Path) -> bool {
     aspath_local_as_loop(aspath, substitute, allow)
 }
 
+/// The inbound loop checks every family applies to a received route: our
+/// AS in the AS_PATH ([`aspath_own_as_loop`], run on the path after the
+/// `local-as` ingress prepend it budgets for), ORIGINATOR_ID equal to our
+/// router-id, or our router-id in CLUSTER_LIST (RFC 4456 §8). Run once
+/// per UPDATE by [`route_from_peer`]; a hit withdraws the neighbor's
+/// earlier path for each NLRI.
+fn inbound_loop_reject(peer: &Peer, attr: &BgpAttr, router_id: &Ipv4Addr) -> bool {
+    attr.aspath
+        .as_ref()
+        .is_some_and(|aspath| aspath_own_as_loop(peer, aspath))
+        || attr
+            .originator_id
+            .as_ref()
+            .is_some_and(|originator_id| originator_id.id == *router_id)
+        || attr
+            .cluster_list
+            .as_ref()
+            .is_some_and(|cluster_list| cluster_list.list.contains(router_id))
+}
+
 /// True when every occurrence of `local_as` is the trailing originating
 /// AS (prepends at the origin are allowed) — i.e. it never appears as a
 /// transit AS. Used by [`AllowAsIn::Origin`].
@@ -4183,9 +4203,13 @@ pub fn route_ipv4_update(
 ) {
     let checks = {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
-        inbound_attr_checks(peer, attr, bgp.router_id, rd.is_none() && label.is_none())
+        inbound_attr_checks(peer, attr, rd.is_none() && label.is_none())
     };
     let Some((peer_ident, peer_router_id, typ, from_client, otc_stamped)) = checks else {
+        // An RFC 9234 leak: the UPDATE replaces the neighbor's earlier
+        // path for this prefix, so that path goes too. (This entry runs
+        // without the shard pool, like the ingest below.)
+        route_ipv4_withdraw(ident, nlri, rd, label, bgp, peers, None, true);
         return;
     };
     let attr = otc_stamped.as_ref().unwrap_or(attr);
@@ -4224,36 +4248,22 @@ pub fn route_ipv4_update(
     }
 }
 
-/// Per-attr inbound checks shared by every prefix in an UPDATE (AS-path
-/// loop, route-reflection, RFC 9234 OTC; enforce-first-as runs earlier,
-/// in [`route_from_peer`], before the `local-as` prepend). Returns the
-/// peer identity — plus the attribute rewritten by OTC ingress rule 3,
-/// when it applied — or `None` if the UPDATE is dropped; the batch path
-/// runs it once. `otc_unicast` is true for plain IPv4 unicast, the only
+/// Per-attr inbound checks shared by every prefix in an UPDATE — the RFC
+/// 9234 OTC ingress rules. (Enforce-first-as and the loop checks run once
+/// per UPDATE in [`route_from_peer`].) Returns the peer identity — plus
+/// the attribute rewritten by OTC ingress rule 3, when it applied — or
+/// `None` for a leak, on which the caller withdraws the neighbor's earlier
+/// path for the prefix; the batch path runs it once. `otc_unicast` is true for plain IPv4 unicast, the only
 /// v4 family the RFC 9234 procedures cover (§6).
 fn inbound_attr_checks(
     peer: &mut Peer,
     attr: &BgpAttr,
-    local_router_id: &Ipv4Addr,
     otc_unicast: bool,
 ) -> Option<(usize, Ipv4Addr, BgpRibType, bool, Option<BgpAttr>)> {
-    if let Some(ref aspath) = attr.aspath
-        && aspath_own_as_loop(peer, aspath)
-    {
-        return None;
-    }
-    if let Some(ref originator_id) = attr.originator_id
-        && originator_id.id == *local_router_id
-    {
-        return None;
-    }
-    if let Some(ref cluster_list) = attr.cluster_list
-        && cluster_list.list.contains(local_router_id)
-    {
-        return None;
-    }
-    // RFC 9234 §5 ingress: a leak is dropped here (ineligible, never
-    // stored); IR3 hands back a stamped copy the callers ingest instead.
+    // RFC 9234 §5 ingress: a leak is ineligible, never stored — `None`,
+    // on which the callers withdraw the neighbor's earlier path for the
+    // prefix (the leaked UPDATE replaces it); IR3 hands back a stamped
+    // copy the callers ingest instead.
     let otc_stamped = if otc_unicast {
         match otc_ingress(peer, attr) {
             OtcIngress::Pass => None,
@@ -4296,9 +4306,14 @@ pub fn route_ipv4_update_batch(
 ) {
     let checks = {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
-        inbound_attr_checks(peer, attr, bgp.router_id, true)
+        inbound_attr_checks(peer, attr, true)
     };
     let Some((peer_ident, peer_router_id, typ, from_client, otc_stamped)) = checks else {
+        // An RFC 9234 leak: the UPDATE replaces the neighbor's earlier
+        // path for each prefix, so those paths go too.
+        for nlri in prefixes {
+            route_ipv4_withdraw(ident, nlri, None, None, bgp, peers, shards, true);
+        }
         return;
     };
     // IR3 stamped once for the whole UPDATE, main-side, before the shard
@@ -7980,15 +7995,10 @@ pub fn route_ipv6_update(
         attr
     };
 
-    let (peer_ident, peer_router_id, typ, from_client, otc_stamp) = {
+    // The loop checks ran once per UPDATE in `route_from_peer`.
+    let checks = 'checks: {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
 
-        // RFC 4271 / 4456 loop detection — identical to the v4 path.
-        if let Some(ref aspath) = attr.aspath
-            && aspath_own_as_loop(peer, aspath)
-        {
-            return;
-        }
         // RFC 9234 §5 ingress procedures — IPv6 unicast only (VPNv6 rows
         // carry an RD and are exempt per §6).
         let otc_stamp = if rd.is_none() {
@@ -7997,22 +8007,12 @@ pub fn route_ipv6_update(
                 OtcIngress::Stamp(otc) => Some(otc),
                 OtcIngress::Deny(rule) => {
                     otc_ingress_deny(peer, rule, &nlri.prefix.to_string());
-                    return;
+                    break 'checks None;
                 }
             }
         } else {
             None
         };
-        if let Some(ref originator_id) = attr.originator_id
-            && originator_id.id == *bgp.router_id
-        {
-            return;
-        }
-        if let Some(ref cluster_list) = attr.cluster_list
-            && cluster_list.list.contains(bgp.router_id)
-        {
-            return;
-        }
 
         // encapsulation-type srv6 (accept side): a plain IPv6 unicast
         // route from an SRv6-only peer must carry an SRv6 service SID;
@@ -8034,7 +8034,13 @@ pub fn route_ipv6_update(
             BgpRibType::EBGP
         };
         let from_client = peer.is_ibgp() && peer.is_reflector_client();
-        (peer.ident, peer.remote_id, typ, from_client, otc_stamp)
+        Some((peer.ident, peer.remote_id, typ, from_client, otc_stamp))
+    };
+    let Some((peer_ident, peer_router_id, typ, from_client, otc_stamp)) = checks else {
+        // An RFC 9234 leak: the UPDATE replaces the neighbor's earlier
+        // path for this prefix, so that path goes too.
+        route_ipv6_withdraw(ident, nlri, rd, bgp, peers, true);
+        return;
     };
 
     // IR3: ingest the stamped copy so the stored route carries OTC.
@@ -8381,22 +8387,8 @@ pub fn route_labelv4_update(
     let (peer_ident, peer_router_id, typ, from_client) = {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
 
-        // RFC 4271 / 4456 loop detection — identical to the unicast path.
-        if let Some(ref aspath) = attr.aspath
-            && aspath_own_as_loop(peer, aspath)
-        {
-            return;
-        }
-        if let Some(ref originator_id) = attr.originator_id
-            && originator_id.id == *bgp.router_id
-        {
-            return;
-        }
-        if let Some(ref cluster_list) = attr.cluster_list
-            && cluster_list.list.contains(bgp.router_id)
-        {
-            return;
-        }
+        // RFC 4271 / 4456 loop detection ran once per UPDATE in
+        // `route_from_peer`.
 
         let typ = if peer.is_ibgp() {
             BgpRibType::IBGP
@@ -8517,21 +8509,8 @@ pub fn route_labelv6_update(
     let (peer_ident, peer_router_id, typ, from_client) = {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
 
-        if let Some(ref aspath) = attr.aspath
-            && aspath_own_as_loop(peer, aspath)
-        {
-            return;
-        }
-        if let Some(ref originator_id) = attr.originator_id
-            && originator_id.id == *bgp.router_id
-        {
-            return;
-        }
-        if let Some(ref cluster_list) = attr.cluster_list
-            && cluster_list.list.contains(bgp.router_id)
-        {
-            return;
-        }
+        // RFC 4271 / 4456 loop detection ran once per UPDATE in
+        // `route_from_peer`.
 
         let typ = if peer.is_ibgp() {
             BgpRibType::IBGP
@@ -9957,21 +9936,8 @@ pub fn route_evpn_update(
     let (peer_ident, peer_router_id, typ, from_client) = {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
 
-        if let Some(ref aspath) = attr.aspath
-            && aspath_own_as_loop(peer, aspath)
-        {
-            return;
-        }
-        if let Some(ref originator_id) = attr.originator_id
-            && originator_id.id == *bgp.router_id
-        {
-            return;
-        }
-        if let Some(ref cluster_list) = attr.cluster_list
-            && cluster_list.list.contains(bgp.router_id)
-        {
-            return;
-        }
+        // RFC 4271 / 4456 loop detection ran once per UPDATE in
+        // `route_from_peer`.
 
         let typ = if peer.is_ibgp() {
             BgpRibType::IBGP
@@ -10255,21 +10221,8 @@ pub fn route_mup_update(
     let (peer_ident, peer_router_id, typ, from_client) = {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
 
-        if let Some(ref aspath) = attr.aspath
-            && aspath_own_as_loop(peer, aspath)
-        {
-            return;
-        }
-        if let Some(ref originator_id) = attr.originator_id
-            && originator_id.id == *bgp.router_id
-        {
-            return;
-        }
-        if let Some(ref cluster_list) = attr.cluster_list
-            && cluster_list.list.contains(bgp.router_id)
-        {
-            return;
-        }
+        // RFC 4271 / 4456 loop detection ran once per UPDATE in
+        // `route_from_peer`.
 
         let typ = if peer.is_ibgp() {
             BgpRibType::IBGP
@@ -10938,21 +10891,8 @@ pub fn route_flowspec_update(
     let (peer_ident, peer_router_id, typ, from_client) = {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
 
-        if let Some(ref aspath) = attr.aspath
-            && aspath_own_as_loop(peer, aspath)
-        {
-            return;
-        }
-        if let Some(ref originator_id) = attr.originator_id
-            && originator_id.id == *bgp.router_id
-        {
-            return;
-        }
-        if let Some(ref cluster_list) = attr.cluster_list
-            && cluster_list.list.contains(bgp.router_id)
-        {
-            return;
-        }
+        // RFC 4271 / 4456 loop detection ran once per UPDATE in
+        // `route_from_peer`.
 
         let typ = if peer.is_ibgp() {
             BgpRibType::IBGP
@@ -11044,26 +10984,9 @@ pub fn route_srpolicy_update(
         return;
     }
 
-    // RFC 4456 loop prevention — drop a looped update before reflecting
-    // or consuming it.
-    {
-        let peer = peers.get_by_idx(ident).expect("peer must exist");
-        if let Some(ref aspath) = attr.aspath
-            && aspath_own_as_loop(peer, aspath)
-        {
-            return;
-        }
-        if let Some(ref originator_id) = attr.originator_id
-            && originator_id.id == *bgp.router_id
-        {
-            return;
-        }
-        if let Some(ref cluster_list) = attr.cluster_list
-            && cluster_list.list.contains(bgp.router_id)
-        {
-            return;
-        }
-    }
+    // RFC 4271 / 4456 loop prevention ran once per UPDATE in
+    // `route_from_peer`, so a looped update never reaches reflection or
+    // the headend DB.
 
     // Route-reflector pass-through: a valid update (usable or not) is
     // reflected to other SAFI-73 peers per RR rules (unless NO_ADVERTISE).
@@ -11253,21 +11176,8 @@ pub fn route_bgpls_update(
     let (peer_ident, peer_router_id, typ, from_client) = {
         let peer = peers.get_mut_by_idx(ident).expect("peer must exist");
 
-        if let Some(ref aspath) = attr.aspath
-            && aspath_own_as_loop(peer, aspath)
-        {
-            return;
-        }
-        if let Some(ref originator_id) = attr.originator_id
-            && originator_id.id == *bgp.router_id
-        {
-            return;
-        }
-        if let Some(ref cluster_list) = attr.cluster_list
-            && cluster_list.list.contains(bgp.router_id)
-        {
-            return;
-        }
+        // RFC 4271 / 4456 loop detection ran once per UPDATE in
+        // `route_from_peer`.
 
         let typ = if peer.is_ibgp() {
             BgpRibType::IBGP
@@ -12587,6 +12497,22 @@ pub fn route_from_peer(
     {
         aspath.prepend_mut(As4Path::from(vec![substitute]));
     }
+    // Inbound loop checks: our AS in the AS_PATH (`aspath_own_as_loop`,
+    // whose budget counts the prepend above), ORIGINATOR_ID equal to our
+    // router-id or our router-id in CLUSTER_LIST (RFC 4456 §8). A route
+    // that fails one is unusable, but the UPDATE still replaces the path
+    // the neighbor sent before for the same NLRI (RFC 4271 §3.1), and that
+    // path must not stay installed: handled like treat-as-withdraw (FRR's
+    // `bgp_update` removes the existing path on its `filtered` exit).
+    // Keeping it held a forwarding loop in place when a neighbor that lost
+    // its own route re-routed through us. Checked once per UPDATE — every
+    // family shares `packet.bgp_attr` — so the per-family ingest no longer
+    // repeats it.
+    let loop_reject = packet.bgp_attr.as_ref().is_some_and(|attr| {
+        peers
+            .get_by_idx(peer_id)
+            .is_some_and(|peer| inbound_loop_reject(peer, attr, bgp.router_id))
+    });
     // Convert UpdatePacket to BgpAttr.
     // let attr = BgpAttr::from(&packet.attrs);
 
@@ -12601,8 +12527,16 @@ pub fn route_from_peer(
     if as_sets_withdraw_treat_as_withdraw(bgp.as_sets_withdraw, packet.bgp_attr.as_ref()) {
         treat_as_withdraw = true;
     }
+    // RTC membership carries no loop checks, so a looped UPDATE for it is
+    // processed as before; every other family withdraws.
+    let rtc = matches!(
+        packet.mp_update,
+        Some(MpReachAttr::Rtcv4(_) | MpReachAttr::Rtcv6(_))
+    );
+    let v4_withdraw = treat_as_withdraw || loop_reject;
+    let mp_withdraw = treat_as_withdraw || (loop_reject && !rtc);
 
-    if treat_as_withdraw {
+    if v4_withdraw {
         for update in packet.ipv4_update.iter() {
             route_ipv4_withdraw(peer_id, update, None, None, bgp, peers, shards, true);
         }
@@ -12624,7 +12558,7 @@ pub fn route_from_peer(
         route_ipv4_withdraw(peer_id, withdraw, None, None, bgp, peers, shards, true);
     }
     if let Some(mp_updates) = packet.mp_update {
-        if treat_as_withdraw {
+        if mp_withdraw {
             withdraw_mp_reach(peer_id, mp_updates, bgp, peers, shards);
         } else if let Some(bgp_attr) = &packet.bgp_attr {
             match mp_updates {
@@ -27816,6 +27750,454 @@ mod enforce_first_as_local_as_tests {
         assert!(
             v6_paths(&top, "2001:db8:12:4::/64").is_empty(),
             "the failing UPDATE withdraws the prefix"
+        );
+    }
+}
+
+/// A route that an inbound loop check rejects must still withdraw the
+/// neighbor's earlier path for the prefix. An UPDATE replaces the path the
+/// neighbor sent before for the same NLRI (RFC 4271 §3.1), and a
+/// replacement that is unusable — our AS in the AS_PATH (RFC 4271
+/// §9.1.2), ORIGINATOR_ID equal to our router-id or our router-id in
+/// CLUSTER_LIST (RFC 4456 §8), an RFC 9234 route leak — must not leave the
+/// old one standing; FRR's `bgp_update` removes it on the `filtered` exit.
+/// zebra-rs returned early from ingest and kept it: a neighbor that
+/// re-routed through us after losing its own path left us forwarding to
+/// it while it forwarded back.
+#[cfg(test)]
+mod inbound_drop_withdraw_tests {
+    use super::*;
+    use crate::bgp::peer::{OtcLocalRole, State};
+    use bgp_packet::{BgpRole, CapMultiProtocol, ClusterList, Otc};
+    use std::net::IpAddr;
+    use std::str::FromStr;
+
+    const LOCAL_AS: u32 = 65100;
+    const PEER_AS: u32 = 65001;
+    const OUR_RID: Ipv4Addr = Ipv4Addr::new(10, 255, 0, 1);
+
+    /// Established neighbor with both unicast families negotiated.
+    fn peer(remote_as: u32, peer_type: PeerType) -> Peer {
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        Box::leak(Box::new(rx));
+        let mut peer = Peer::new(
+            1,
+            LOCAL_AS,
+            OUR_RID,
+            remote_as,
+            "10.0.0.2".parse::<IpAddr>().unwrap(),
+            None,
+            tx,
+            crate::context::ProtoContext::default_table_no_rib(),
+        );
+        peer.state = State::Established;
+        peer.peer_type = peer_type;
+        for (afi, safi) in [(Afi::Ip, Safi::Unicast), (Afi::Ip6, Safi::Unicast)] {
+            let entry = peer
+                .cap_map
+                .entries
+                .entry(CapMultiProtocol::new(&afi, &safi))
+                .or_default();
+            entry.send = true;
+            entry.recv = true;
+        }
+        peer
+    }
+
+    fn ebgp_peer() -> Peer {
+        peer(PEER_AS, PeerType::EBGP)
+    }
+
+    fn ibgp_peer() -> Peer {
+        peer(LOCAL_AS, PeerType::IBGP)
+    }
+
+    struct Fx {
+        router_id: Ipv4Addr,
+        ctx: crate::context::ProtoContext,
+        local_rib: LocalRib,
+        shard: crate::bgp::shard::BgpShard,
+        attr_store: crate::bgp::BgpAttrStore,
+        update_groups: crate::bgp::update_group::UpdateGroupMap,
+        interface_addrs: crate::bgp::interface_addrs::InterfaceAddrs,
+        tx: tokio::sync::mpsc::Sender<crate::bgp::inst::Message>,
+    }
+
+    impl Fx {
+        fn new() -> Self {
+            let (tx, rx) = tokio::sync::mpsc::channel(64);
+            Box::leak(Box::new(rx));
+            Self {
+                router_id: OUR_RID,
+                ctx: crate::context::ProtoContext::default_table_no_rib(),
+                local_rib: LocalRib::default(),
+                shard: crate::bgp::shard::BgpShard::default(),
+                attr_store: crate::bgp::BgpAttrStore::default(),
+                update_groups: crate::bgp::update_group::empty_map(),
+                interface_addrs: crate::bgp::interface_addrs::InterfaceAddrs::default(),
+                tx,
+            }
+        }
+        fn top(&mut self) -> BgpTop<'_> {
+            BgpTop {
+                router_id: &self.router_id,
+                srv6_ipv6_export: None,
+                local_rib: &mut self.local_rib,
+                shard: &mut self.shard,
+                tx: &self.tx,
+                rib_client: &self.ctx.rib,
+                attr_store: &mut self.attr_store,
+                update_groups: &mut self.update_groups,
+                interface_addrs: &self.interface_addrs,
+                vrf_export: None,
+                color_policy: None,
+                flex_algo_routes: None,
+                flex_algo_srv6_routes: None,
+                vrf_import: None,
+                nexthop_cache: None,
+                vrf_transport_v4: None,
+                vrf_transport_v6: None,
+                central_label_alloc: None,
+                as_sets_withdraw: false,
+            }
+        }
+    }
+
+    fn peers_with(peer: Peer) -> (PeerMap, usize) {
+        let mut peers = PeerMap::new();
+        let addr = peer.address;
+        peers.insert(addr, peer);
+        let id = peers.get(&addr).unwrap().ident;
+        peers.membership_enroll(id);
+        (peers, id)
+    }
+
+    fn attr(path: &str) -> BgpAttr {
+        BgpAttr {
+            origin: Some(Origin::Igp),
+            aspath: Some(As4Path::from_str(path).unwrap()),
+            nexthop: Some(BgpNexthop::Ipv4(Ipv4Addr::new(10, 0, 0, 2))),
+            ..Default::default()
+        }
+    }
+
+    fn announce_v4(top: &mut BgpTop, peers: &mut PeerMap, id: usize, prefix: &str, attr: BgpAttr) {
+        let mut packet = UpdatePacket::new();
+        packet.bgp_attr = Some(attr);
+        packet.ipv4_update.push(Ipv4Nlri {
+            id: 0,
+            prefix: prefix.parse().unwrap(),
+        });
+        route_from_peer(id, packet, top, peers, None);
+    }
+
+    fn announce_v6(top: &mut BgpTop, peers: &mut PeerMap, id: usize, prefix: &str, attr: BgpAttr) {
+        let mut packet = UpdatePacket::new();
+        packet.bgp_attr = Some(attr);
+        packet.mp_update = Some(MpReachAttr::Ipv6 {
+            snpa: 0,
+            nhop: IpAddr::V6("2001:db8::2".parse().unwrap()),
+            updates: vec![Ipv6Nlri {
+                id: 0,
+                prefix: prefix.parse().unwrap(),
+            }],
+        });
+        route_from_peer(id, packet, top, peers, None);
+    }
+
+    fn v4_rows(top: &BgpTop, prefix: &str) -> usize {
+        let prefix: Ipv4Net = prefix.parse().unwrap();
+        top.shard.v4.candidates(prefix).len()
+    }
+
+    fn v6_rows(top: &BgpTop, prefix: &str) -> usize {
+        let prefix: Ipv6Net = prefix.parse().unwrap();
+        top.shard.v6.candidates(prefix).len()
+    }
+
+    /// Our AS (65100) in the replacement's AS_PATH: the neighbor now
+    /// routes through us, so its old path must go.
+    #[tokio::test]
+    async fn own_as_loop_withdraws_the_previous_path_v4() {
+        let mut fx = Fx::new();
+        let (mut peers, id) = peers_with(ebgp_peer());
+        let mut top = fx.top();
+        announce_v4(
+            &mut top,
+            &mut peers,
+            id,
+            "10.13.1.0/24",
+            attr("65001 65009"),
+        );
+        assert_eq!(v4_rows(&top, "10.13.1.0/24"), 1, "valid path in");
+        announce_v4(
+            &mut top,
+            &mut peers,
+            id,
+            "10.13.1.0/24",
+            attr("65001 65100 65009"),
+        );
+        assert_eq!(
+            v4_rows(&top, "10.13.1.0/24"),
+            0,
+            "looped replacement withdraws"
+        );
+    }
+
+    #[tokio::test]
+    async fn own_as_loop_withdraws_the_previous_path_v6() {
+        let mut fx = Fx::new();
+        let (mut peers, id) = peers_with(ebgp_peer());
+        let mut top = fx.top();
+        announce_v6(
+            &mut top,
+            &mut peers,
+            id,
+            "2001:db8:13:1::/64",
+            attr("65001 65009"),
+        );
+        assert_eq!(v6_rows(&top, "2001:db8:13:1::/64"), 1, "valid path in");
+        announce_v6(
+            &mut top,
+            &mut peers,
+            id,
+            "2001:db8:13:1::/64",
+            attr("65001 65100 65009"),
+        );
+        assert_eq!(
+            v6_rows(&top, "2001:db8:13:1::/64"),
+            0,
+            "looped replacement withdraws"
+        );
+    }
+
+    /// RFC 4456 §8: ORIGINATOR_ID equal to our router-id from an iBGP
+    /// neighbor is a reflection loop.
+    #[tokio::test]
+    async fn originator_id_loop_withdraws_the_previous_path_v4() {
+        let mut fx = Fx::new();
+        let (mut peers, id) = peers_with(ibgp_peer());
+        let mut top = fx.top();
+        announce_v4(&mut top, &mut peers, id, "10.13.2.0/24", attr("65009"));
+        assert_eq!(v4_rows(&top, "10.13.2.0/24"), 1, "valid path in");
+        let looped = BgpAttr {
+            originator_id: Some(OriginatorId::new(OUR_RID)),
+            ..attr("65009")
+        };
+        announce_v4(&mut top, &mut peers, id, "10.13.2.0/24", looped);
+        assert_eq!(
+            v4_rows(&top, "10.13.2.0/24"),
+            0,
+            "looped replacement withdraws"
+        );
+    }
+
+    /// RFC 4456 §8: our router-id in CLUSTER_LIST is a reflection loop.
+    #[tokio::test]
+    async fn cluster_list_loop_withdraws_the_previous_path_v6() {
+        let mut fx = Fx::new();
+        let (mut peers, id) = peers_with(ibgp_peer());
+        let mut top = fx.top();
+        announce_v6(
+            &mut top,
+            &mut peers,
+            id,
+            "2001:db8:13:2::/64",
+            attr("65009"),
+        );
+        assert_eq!(v6_rows(&top, "2001:db8:13:2::/64"), 1, "valid path in");
+        let looped = BgpAttr {
+            cluster_list: Some(ClusterList {
+                list: vec![Ipv4Addr::new(10, 255, 0, 9), OUR_RID],
+            }),
+            ..attr("65009")
+        };
+        announce_v6(&mut top, &mut peers, id, "2001:db8:13:2::/64", looped);
+        assert_eq!(
+            v6_rows(&top, "2001:db8:13:2::/64"),
+            0,
+            "looped replacement withdraws"
+        );
+    }
+
+    /// RFC 9234 §5 ingress rule 1: we are the Provider, so an OTC on a
+    /// route from this (Customer) neighbor is a leak — ineligible.
+    fn provider_of(mut peer: Peer) -> Peer {
+        peer.config.otc_local_role = Some(OtcLocalRole {
+            role: BgpRole::Provider,
+            strict: false,
+        });
+        peer
+    }
+
+    fn leaked(path: &str) -> BgpAttr {
+        BgpAttr {
+            otc: Some(Otc::new(65077)),
+            ..attr(path)
+        }
+    }
+
+    #[tokio::test]
+    async fn otc_leak_withdraws_the_previous_path_v4() {
+        let mut fx = Fx::new();
+        let (mut peers, id) = peers_with(provider_of(ebgp_peer()));
+        let mut top = fx.top();
+        announce_v4(
+            &mut top,
+            &mut peers,
+            id,
+            "10.13.3.0/24",
+            attr("65001 65009"),
+        );
+        assert_eq!(v4_rows(&top, "10.13.3.0/24"), 1, "valid path in");
+        announce_v4(
+            &mut top,
+            &mut peers,
+            id,
+            "10.13.3.0/24",
+            leaked("65001 65009"),
+        );
+        assert_eq!(
+            v4_rows(&top, "10.13.3.0/24"),
+            0,
+            "leaked replacement withdraws"
+        );
+    }
+
+    #[tokio::test]
+    async fn otc_leak_withdraws_the_previous_path_v6() {
+        let mut fx = Fx::new();
+        let (mut peers, id) = peers_with(provider_of(ebgp_peer()));
+        let mut top = fx.top();
+        announce_v6(
+            &mut top,
+            &mut peers,
+            id,
+            "2001:db8:13:3::/64",
+            attr("65001 65009"),
+        );
+        assert_eq!(v6_rows(&top, "2001:db8:13:3::/64"), 1, "valid path in");
+        announce_v6(
+            &mut top,
+            &mut peers,
+            id,
+            "2001:db8:13:3::/64",
+            leaked("65001 65009"),
+        );
+        assert_eq!(
+            v6_rows(&top, "2001:db8:13:3::/64"),
+            0,
+            "leaked replacement withdraws"
+        );
+    }
+
+    /// Review probe: rejecting one neighbor's replacement must preserve
+    /// another neighbor's path and remove the rejected copy from Adj-RIB-In.
+    #[tokio::test]
+    async fn probe_rejected_replacement_preserves_other_peer_and_cannot_replay() {
+        for otc in [false, true] {
+            let mut fx = Fx::new();
+            let source = if otc {
+                provider_of(ebgp_peer())
+            } else {
+                ebgp_peer()
+            };
+            let (mut peers, id) = peers_with(source);
+            let mut other = ebgp_peer();
+            other.address = "10.0.0.3".parse().unwrap();
+            let addr = other.address;
+            peers.insert(addr, other);
+            let other_id = peers.get(&addr).unwrap().ident;
+            peers.membership_enroll(other_id);
+            assert_ne!(id, other_id);
+            let mut top = fx.top();
+            let prefix4 = "10.13.5.0/24";
+            let prefix6 = "2001:db8:13:5::/64";
+            for source in [id, other_id] {
+                announce_v4(&mut top, &mut peers, source, prefix4, attr("65001 65009"));
+                announce_v6(&mut top, &mut peers, source, prefix6, attr("65001 65009"));
+            }
+            assert_eq!(v4_rows(&top, prefix4), 2);
+            assert_eq!(v6_rows(&top, prefix6), 2);
+            let rejected = if otc {
+                leaked("65001 65009")
+            } else {
+                attr("65001 65100 65009")
+            };
+            announce_v4(&mut top, &mut peers, id, prefix4, rejected.clone());
+            announce_v6(&mut top, &mut peers, id, prefix6, rejected);
+            assert_eq!(v4_rows(&top, prefix4), 1);
+            assert_eq!(v6_rows(&top, prefix6), 1);
+            assert_eq!(
+                top.shard.v4.candidates(prefix4.parse().unwrap())[0].ident,
+                other_id
+            );
+            assert_eq!(
+                top.shard.v6.candidates(prefix6.parse().unwrap())[0].ident,
+                other_id
+            );
+            let adj = top.shard.adj_in(id).unwrap();
+            assert!(!adj.v4.0.contains_key(&prefix4.parse().unwrap()));
+            assert!(!adj.v6.0.contains_key(&prefix6.parse().unwrap()));
+            route_soft_in_peer(id, &mut top, &mut peers, None);
+            assert_eq!(
+                v4_rows(&top, prefix4),
+                1,
+                "soft-in must not resurrect rejected path"
+            );
+        }
+    }
+
+    /// Control: RTC membership (RFC 4684) carries no loop checks, and a
+    /// looped UPDATE for it is processed as before — the membership is
+    /// recorded, not turned into a withdraw.
+    #[tokio::test]
+    async fn looped_update_still_records_rtc_membership() {
+        let mut fx = Fx::new();
+        let (mut peers, id) = peers_with(ebgp_peer());
+        let mut top = fx.top();
+        let mut packet = UpdatePacket::new();
+        packet.bgp_attr = Some(attr("65001 65100 65009"));
+        packet.mp_update = Some(MpReachAttr::Rtcv4(bgp_packet::Rtcv4Reach {
+            snpa: 0,
+            nhop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            updates: vec![bgp_packet::Rtcv4::new(
+                PEER_AS,
+                bgp_packet::ExtCommunityValue::default(),
+            )],
+        }));
+        route_from_peer(id, packet, &mut top, &mut peers, None);
+        assert_eq!(peers.get_by_idx(id).unwrap().rtcv4.len(), 1);
+    }
+
+    /// Control: a clean replacement replaces the path (one row, the new
+    /// AS_PATH), so the gates above are about the rejection, not about
+    /// replacement in general.
+    #[tokio::test]
+    async fn a_clean_replacement_replaces_the_previous_path() {
+        let mut fx = Fx::new();
+        let (mut peers, id) = peers_with(ebgp_peer());
+        let mut top = fx.top();
+        announce_v4(
+            &mut top,
+            &mut peers,
+            id,
+            "10.13.4.0/24",
+            attr("65001 65009"),
+        );
+        announce_v4(
+            &mut top,
+            &mut peers,
+            id,
+            "10.13.4.0/24",
+            attr("65001 65010"),
+        );
+        let prefix: Ipv4Net = "10.13.4.0/24".parse().unwrap();
+        let rows = top.shard.v4.candidates(prefix);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].attr.aspath.as_ref().map(|p| p.to_string()),
+            Some("65001 65010".to_string())
         );
     }
 }

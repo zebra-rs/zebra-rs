@@ -7,7 +7,7 @@ MUP/Flowspec/SR-Policy/RTC where they share the machinery). Reviewed
 against `main` at `2f1e9a09` (2026-09-07). Line numbers are as of that
 commit.
 
-Status (2026-09-25): thirteen items are fixed on `main` — #1 (PR #2372,
+Status (2026-09-25): fourteen items are fixed on `main` — #1 (PR #2372,
 merge `3beacbcc`), the listen-range peer-type item found while fixing it
 (PR #2373, `ba327126`), #2 (PR #2375, `308b196a`), #3 (PR #2376,
 `b8fef738`), #4 (PR #2377, `1cc31738`, which also closed the
@@ -15,10 +15,11 @@ signature-knob half of #21 and added the IPv6 outbound soft-out), #5
 (PR #2378, `b2007701`), #6 (PR #2379, `0464828a`, with two review
 follow-ups), #7 (PR #2380, `d7476601`), #8 and with it #13 (PR #2383,
 `d72a06af`, eight review rounds folded in), #9 (PR #2405, `31f7458a`),
-#15 (PR #2413, `097ce15d`) and #11 (PR #2415, `3401cb1b`). Each fixed
-entry ends with its fix note; everything else is open. #12
-(enforce-first-as with `local-as`) is fixed on branch
-`bgp-enforce-first-as-local-as`.
+#15 (PR #2413, `097ce15d`), #11 (PR #2415, `3401cb1b`) and #12 (PR
+#2417, `4ba79217`). Each fixed entry ends with its fix note; everything
+else is open. The item found while fixing #12 (a route rejected by an
+inbound loop check kept the neighbor's previous path) is fixed on branch
+`bgp-inbound-drop-implicit-withdraw`.
 
 Method: one lead read the selection ladder and every egress builder, then
 five independent read-only reviewers each took one dimension (update-group
@@ -882,7 +883,7 @@ cap. The two reviews agree on every overlapping item.
   `bgp_evpn_srv6_rr`, `bgp_vpnv4_rr_transit_label`,
   `bgp_unknown_attr_transitive` and `bgp_ls_te_metric` stay green.
 
-### 12. P2 CONFIRMED (probe), worse than recorded, FIXED on branch `bgp-enforce-first-as-local-as` — `enforce-first-as` with `local-as` (without `no-prepend`) drops every route from the neighbor
+### 12. P2 CONFIRMED (probe), worse than recorded, FIXED in #2417 — `enforce-first-as` with `local-as` (without `no-prepend`) drops every route from the neighbor
 
 - `route.rs:11328-11336` (`route_from_peer`) prepends the substitute AS
   before the per-family dispatch; `4182` then runs
@@ -1326,7 +1327,7 @@ cap. The two reviews agree on every overlapping item.
   `try_dynamic_accept` exactly as `interface_neighbor.rs:188` does; the
   probe becomes the regression test.
 
-### Found while fixing #12 (OPEN) — a route dropped by an inbound loop check leaves the neighbor's previous path installed
+### Found while fixing #12 (FIXED on branch `bgp-inbound-drop-implicit-withdraw`) — a route dropped by an inbound loop check leaves the neighbor's previous path installed
 
 - `inbound_attr_checks` returns `None` — and the ingest simply returns —
   when the AS_PATH contains our AS (`aspath_own_as_loop`), when
@@ -1343,6 +1344,42 @@ cap. The two reviews agree on every overlapping item.
 - Fix direction: treat a failed inbound check like a policy deny — remove
   the neighbor's existing path for each prefix of the UPDATE (the
   enforce-first-as case now does exactly that via `treat_as_withdraw`).
+- The same early return sat in every family: the three loop checks were
+  repeated in the eight per-family ingest functions (IPv6 / VPNv6,
+  labeled v4 and v6, EVPN, MUP, Flowspec, SR-Policy, BGP-LS), and the
+  IPv6-unicast OTC deny had its own copy.
+- Gates (branch `bgp-inbound-drop-implicit-withdraw`; each compiles on
+  `main` and fails there, except the two controls). Unit, route.rs
+  `inbound_drop_withdraw_tests`, all through `route_from_peer`:
+  `own_as_loop_withdraws_the_previous_path_v4` / `_v6`,
+  `originator_id_loop_withdraws_the_previous_path_v4`,
+  `cluster_list_loop_withdraws_the_previous_path_v6`,
+  `otc_leak_withdraws_the_previous_path_v4` / `_v6` (we are the Provider;
+  the replacement carries OTC); controls
+  `a_clean_replacement_replaces_the_previous_path` and
+  `looped_update_still_records_rtc_membership`. BDD
+  `bgp_inbound_loop_withdraw` and `_v6`: h1 (scripted, eBGP) → z1 (DUT)
+  → z2. h1 re-announces its prefix with z1's AS in the AS_PATH, plus a
+  control prefix in the same write. On `main` both twins fail: z1 keeps
+  the replaced path, and (checked by hand on the kept topology) z2 keeps
+  it too, since z1 never withdraws it downstream.
+- FIXED (branch `bgp-inbound-drop-implicit-withdraw`): `route_from_peer`
+  runs the three loop checks once per UPDATE (`inbound_loop_reject`,
+  after the `local-as` prepend the own-AS budget counts), and a hit
+  withdraws the UPDATE's reachable NLRI from the neighbor in every family
+  — the traditional IPv4 NLRI and the MP_REACH through
+  `withdraw_mp_reach` — except RTC, which never had loop checks and is
+  processed as before (MUP has no withdraw arm, so a looped MUP UPDATE is
+  dropped as before). The per-family copies are gone. An RFC 9234 leak
+  (`OtcIngress::Deny`) now withdraws the prefix in both places it is
+  checked: `inbound_attr_checks`' callers (IPv4 unicast, batch and
+  single) and `route_ipv6_update`. On the fix the six gates pass;
+  dropping the loop-check withdraw fails the four loop gates (and would
+  accept looped routes), dropping the OTC withdraw fails the two OTC
+  gates, and removing the RTC exemption fails its control.
+- Same shape, left as is: `route_ipv6_update` still drops a SID-less
+  IPv6 route from an `encapsulation-type srv6` peer without withdrawing
+  that neighbor's earlier path.
 
 ### Below the cap (one line each, all read-confirmed)
 
