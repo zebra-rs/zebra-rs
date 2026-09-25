@@ -1,0 +1,52 @@
+# p2 — two point-to-point links to p1: pa (created first, so the lower
+# ifindex) at metric 10, pb at metric 100, in the base topology and in
+# MT 2 (IPv6 unicast) alike.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.80.2/32
+  ipv6:
+    address: 2001:db8:80::2/128
+- if-name: p2-pa
+  ipv4:
+    address: 192.168.80.2/30
+  ipv6:
+    address: 2001:db8:80:a::2/64
+- if-name: p2-pb
+  ipv4:
+    address: 192.168.80.6/30
+  ipv6:
+    address: 2001:db8:80:b::2/64
+
+router:
+  isis:
+    net: 49.0080.0000.0000.0002.00
+    hostname: p2
+    is-type: level-2-only
+    multi-topology: ipv6-unicast
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+      ipv6:
+        enabled: true
+    - if-name: p2-pa
+      network-type: point-to-point
+      metric: 10
+      multi-topology:
+      - id: ipv6-unicast
+        metric: 10
+      ipv4:
+        enabled: true
+      ipv6:
+        enabled: true
+    - if-name: p2-pb
+      network-type: point-to-point
+      metric: 100
+      multi-topology:
+      - id: ipv6-unicast
+        metric: 100
+      ipv4:
+        enabled: true
+      ipv6:
+        enabled: true
