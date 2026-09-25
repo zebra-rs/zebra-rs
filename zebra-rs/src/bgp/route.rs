@@ -2259,15 +2259,7 @@ impl<P: Prefix + Copy> LocalRibTable<P> {
         let best = {
             let cands = self.0.get_mut(&prefix).expect("prefix checked above");
 
-            let mut best_index = 0usize;
-            let mut best_reason = Reason::Default;
-            for index in 1..cands.len() {
-                let (better, reason) = Self::is_better(&cands[index], &cands[best_index]);
-                if better {
-                    best_index = index;
-                }
-                best_reason = reason;
-            }
+            let (best_index, best_reason) = Self::best_candidate(cands);
 
             for rib in cands.iter_mut() {
                 rib.best_path = false;
@@ -2429,6 +2421,56 @@ impl<P: Prefix + Copy> LocalRibTable<P> {
 
     pub fn candidates(&self, prefix: P) -> &[BgpRib] {
         self.0.get(&prefix).map(|c| c.as_slice()).unwrap_or(&[])
+    }
+
+    /// The best candidate, independent of candidate order — deterministic
+    /// MED (review finding #10). MED is compared only between paths from
+    /// the same neighboring AS, so `is_better` is not transitive and a
+    /// single linear pass answered differently for different orders; the
+    /// order changes whenever a replaced row moves to the tail, so an
+    /// unchanged re-advertisement could move the winner. Instead: pick the
+    /// best within each neighboring AS (the ladder, MED included, is a
+    /// total order there), then compare those group winners (MED never
+    /// applies between them, so that is a total order too). This is FRR's
+    /// `bgp deterministic-med` and RFC 4271 §9.1.2.2's elimination order.
+    ///
+    /// Returns the winner's index and the reason it beat the runner-up at
+    /// the deciding stage (`Reason::Default` for a lone candidate).
+    /// `cands` must not be empty.
+    pub(crate) fn best_candidate(cands: &[BgpRib]) -> (usize, Reason) {
+        let scan = |indices: &[usize]| -> usize {
+            let mut best = indices[0];
+            for &index in &indices[1..] {
+                if Self::is_better(&cands[index], &cands[best]).0 {
+                    best = index;
+                }
+            }
+            best
+        };
+        let mut groups: Vec<(Option<u32>, Vec<usize>)> = Vec::new();
+        for (index, rib) in cands.iter().enumerate() {
+            let neighbor_as = rib.attr.neighboring_as();
+            match groups.iter_mut().find(|(key, _)| *key == neighbor_as) {
+                Some((_, members)) => members.push(index),
+                None => groups.push((neighbor_as, vec![index])),
+            }
+        }
+        let winners: Vec<usize> = groups.iter().map(|(_, members)| scan(members)).collect();
+        let best = scan(&winners);
+        // The deciding stage is the comparison between group winners when
+        // there is more than one group, else the one group's own.
+        let field: &[usize] = if winners.len() > 1 {
+            &winners
+        } else {
+            &groups[0].1
+        };
+        let rest: Vec<usize> = field.iter().copied().filter(|&i| i != best).collect();
+        let reason = if rest.is_empty() {
+            Reason::Default
+        } else {
+            Self::is_better(&cands[best], &cands[scan(&rest)]).1
+        };
+        (best, reason)
     }
 
     fn is_better(cand: &BgpRib, incb: &BgpRib) -> (bool, Reason) {
@@ -2761,19 +2803,10 @@ impl LocalRibEvpnTable {
         let best = {
             let cands = self.cands.get_mut(prefix).expect("prefix checked above");
 
-            let mut best_index = 0usize;
-            let mut best_reason = Reason::Default;
-            for index in 1..cands.len() {
-                // Reuse the best-path comparator — it operates only on
-                // BgpRib fields and is NLRI-agnostic. The type parameter
-                // is irrelevant (the fn ignores it); name a concrete one.
-                let (better, reason) =
-                    LocalRibTable::<Ipv4Net>::is_better(&cands[index], &cands[best_index]);
-                if better {
-                    best_index = index;
-                }
-                best_reason = reason;
-            }
+            // The shared, order-independent comparator (deterministic MED);
+            // it operates only on BgpRib fields, so the type parameter is
+            // irrelevant — name a concrete one.
+            let (best_index, best_reason) = LocalRibTable::<Ipv4Net>::best_candidate(cands);
 
             for rib in cands.iter_mut() {
                 rib.best_path = false;
@@ -2870,16 +2903,10 @@ impl LocalRibMupTable {
         let best = {
             let cands = self.cands.get_mut(prefix).expect("prefix checked above");
 
-            let mut best_index = 0usize;
-            let mut best_reason = Reason::Default;
-            for index in 1..cands.len() {
-                let (better, reason) =
-                    LocalRibTable::<Ipv4Net>::is_better(&cands[index], &cands[best_index]);
-                if better {
-                    best_index = index;
-                }
-                best_reason = reason;
-            }
+            // The shared, order-independent comparator (deterministic MED);
+            // it operates only on BgpRib fields, so the type parameter is
+            // irrelevant — name a concrete one.
+            let (best_index, best_reason) = LocalRibTable::<Ipv4Net>::best_candidate(cands);
 
             for rib in cands.iter_mut() {
                 rib.best_path = false;
@@ -2974,18 +3001,10 @@ impl LocalRibFlowspecTable {
         let best = {
             let cands = self.cands.get_mut(nlri).expect("nlri checked above");
 
-            let mut best_index = 0usize;
-            let mut best_reason = Reason::Default;
-            for index in 1..cands.len() {
-                // NLRI-agnostic comparator (operates only on BgpRib
-                // fields); the type parameter is irrelevant.
-                let (better, reason) =
-                    LocalRibTable::<Ipv4Net>::is_better(&cands[index], &cands[best_index]);
-                if better {
-                    best_index = index;
-                }
-                best_reason = reason;
-            }
+            // The shared, order-independent comparator (deterministic MED);
+            // it operates only on BgpRib fields, so the type parameter is
+            // irrelevant — name a concrete one.
+            let (best_index, best_reason) = LocalRibTable::<Ipv4Net>::best_candidate(cands);
 
             for rib in cands.iter_mut() {
                 rib.best_path = false;
@@ -3080,18 +3099,10 @@ impl LocalRibBgpLsTable {
         let best = {
             let cands = self.cands.get_mut(nlri).expect("nlri checked above");
 
-            let mut best_index = 0usize;
-            let mut best_reason = Reason::Default;
-            for index in 1..cands.len() {
-                // NLRI-agnostic comparator (operates only on BgpRib
-                // fields); the type parameter is irrelevant.
-                let (better, reason) =
-                    LocalRibTable::<Ipv4Net>::is_better(&cands[index], &cands[best_index]);
-                if better {
-                    best_index = index;
-                }
-                best_reason = reason;
-            }
+            // The shared, order-independent comparator (deterministic MED);
+            // it operates only on BgpRib fields, so the type parameter is
+            // irrelevant — name a concrete one.
+            let (best_index, best_reason) = LocalRibTable::<Ipv4Net>::best_candidate(cands);
 
             for rib in cands.iter_mut() {
                 rib.best_path = false;

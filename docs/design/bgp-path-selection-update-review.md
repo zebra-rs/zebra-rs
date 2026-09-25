@@ -18,8 +18,8 @@ follow-ups), #7 (PR #2380, `d7476601`), #8 and with it #13 (PR #2383,
 #15 (PR #2413, `097ce15d`), #11 (PR #2415, `3401cb1b`), #12 (PR #2417,
 `4ba79217`), the item found while fixing #12 (PR #2418, `6b53ad6a`), #14
 (PR #2420, `49fb77b1`) and #20 (PR #2422, `d8f6a0cf`). Each fixed entry
-ends with its fix note; everything else is open. In progress: #10 (MED order
-dependence), branch `bgp-med-order-independent`.
+ends with its fix note; everything else is open. #10 (MED order
+dependence) is fixed on branch `bgp-med-order-independent`.
 
 Method: one lead read the selection ladder and every egress builder, then
 five independent read-only reviewers each took one dimension (update-group
@@ -774,7 +774,7 @@ cap. The two reviews agree on every overlapping item.
   non-BDD workspace tests, strict workspace Clippy, formatting and
   diff checks pass.
 
-### 10. P2 CONFIRMED (probe) — MED comparison is order-dependent, and an unchanged re-advertisement rotates the winner
+### 10. P2 CONFIRMED (probe), FIXED on branch `bgp-med-order-independent` — MED comparison is order-dependent, and an unchanged re-advertisement rotates the winner
 
 - `route.rs:2182-2190` scans candidates linearly with pairwise
   `is_better`; MED is compared only within one neighboring AS
@@ -810,6 +810,28 @@ cap. The two reviews agree on every overlapping item.
   5), each tagged by community, arriving in the order A, B, C; z2 shows
   z1's choice. On `main` both twins fail both gates: z2 holds C's path,
   and after h1 re-announces A unchanged it holds A's.
+- FIXED (branch `bgp-med-order-independent`): deterministic MED in one
+  helper, `LocalRibTable::best_candidate`, shared by all five tables
+  (unicast / labeled-unicast / VPN, EVPN, MUP, Flowspec, BGP-LS). It
+  picks the best within each neighboring AS with the existing ladder — a
+  total order there, MED included — and then compares those group
+  winners, between which MED never applies, so that is a total order
+  too: the winner no longer depends on candidate order, and a replaced
+  row moving to the tail changes nothing. This is FRR's
+  `bgp deterministic-med` (on by default) and RFC 4271 §9.1.2.2's
+  elimination order; there is no knob to turn it off. `best_reason` is
+  now the reason the winner beat the runner-up at the deciding stage
+  (group winners when there are several, else the one group). Multipath
+  is untouched (it already sorts its members). On the fix the four gates
+  and the control pass; collapsing every candidate into one group (the
+  old linear pass) fails all four gates. Both BDD twins pass, and 20
+  selection-sensitive features stay green: `bgp_route_map_match`,
+  `bgp_multipath`, `bgp_unnumbered_multipath`, the basic RR / iBGP /
+  eBGP features, `bgp_addpath_ipv4` / `_ipv6`, `bgp_evpn_single_active`,
+  `bgp_evpn_es`, `bgp_vrf_dual_home`, `bgp_mup_e2e`, `bgp_ls_te_metric`,
+  `bgp_table_map`, `bgp_v6_route_map`, `bgp_ebgp_local_pref_ignore`,
+  `bgp_fast_external_failover`, `bgp_evpn_srv6_type5`, `l3vpn_bgp_v4`
+  and `bgp_multipath_advertise_winner`.
 
 ### 11. P2 CONFIRMED (probe), worse than recorded, FIXED in #2415 — ORIGINATOR_ID / CLUSTER_LIST from an eBGP peer decide ties and are relayed into the AS
 
