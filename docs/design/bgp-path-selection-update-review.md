@@ -18,8 +18,8 @@ follow-ups), #7 (PR #2380, `d7476601`), #8 and with it #13 (PR #2383,
 #15 (PR #2413, `097ce15d`), #11 (PR #2415, `3401cb1b`) and #12 (PR
 #2417, `4ba79217`). Each fixed entry ends with its fix note; everything
 else is open. The item found while fixing #12 (a route rejected by an
-inbound loop check kept the neighbor's previous path) is in progress on
-branch `bgp-inbound-drop-implicit-withdraw`.
+inbound loop check kept the neighbor's previous path) is fixed on branch
+`bgp-inbound-drop-implicit-withdraw`.
 
 Method: one lead read the selection ladder and every egress builder, then
 five independent read-only reviewers each took one dimension (update-group
@@ -1327,7 +1327,7 @@ cap. The two reviews agree on every overlapping item.
   `try_dynamic_accept` exactly as `interface_neighbor.rs:188` does; the
   probe becomes the regression test.
 
-### Found while fixing #12 (OPEN) — a route dropped by an inbound loop check leaves the neighbor's previous path installed
+### Found while fixing #12 (FIXED on branch `bgp-inbound-drop-implicit-withdraw`) — a route dropped by an inbound loop check leaves the neighbor's previous path installed
 
 - `inbound_attr_checks` returns `None` — and the ingest simply returns —
   when the AS_PATH contains our AS (`aspath_own_as_loop`), when
@@ -1363,6 +1363,23 @@ cap. The two reviews agree on every overlapping item.
   control prefix in the same write. On `main` both twins fail: z1 keeps
   the replaced path, and (checked by hand on the kept topology) z2 keeps
   it too, since z1 never withdraws it downstream.
+- FIXED (branch `bgp-inbound-drop-implicit-withdraw`): `route_from_peer`
+  runs the three loop checks once per UPDATE (`inbound_loop_reject`,
+  after the `local-as` prepend the own-AS budget counts), and a hit
+  withdraws the UPDATE's reachable NLRI from the neighbor in every family
+  — the traditional IPv4 NLRI and the MP_REACH through
+  `withdraw_mp_reach` — except RTC, which never had loop checks and is
+  processed as before (MUP has no withdraw arm, so a looped MUP UPDATE is
+  dropped as before). The per-family copies are gone. An RFC 9234 leak
+  (`OtcIngress::Deny`) now withdraws the prefix in both places it is
+  checked: `inbound_attr_checks`' callers (IPv4 unicast, batch and
+  single) and `route_ipv6_update`. On the fix the six gates pass;
+  dropping the loop-check withdraw fails the four loop gates (and would
+  accept looped routes), dropping the OTC withdraw fails the two OTC
+  gates, and removing the RTC exemption fails its control.
+- Same shape, left as is: `route_ipv6_update` still drops a SID-less
+  IPv6 route from an `encapsulation-type srv6` peer without withdrawing
+  that neighbor's earlier path.
 
 ### Below the cap (one line each, all read-confirmed)
 
