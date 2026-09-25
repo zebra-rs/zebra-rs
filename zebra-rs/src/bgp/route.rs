@@ -121,13 +121,16 @@ fn local_as_only_at_origin(aspath: &As4Path, local_as: u32) -> bool {
 }
 
 /// FRR-style `enforce-first-as` (zebra-bgp-enforce-first-as.yang) inbound
-/// check. Returns `true` when the UPDATE must be dropped because the
-/// neighbor is eBGP, has `enforce-first-as` enabled, and the left-most
-/// AS_PATH segment is not an `AS_SEQUENCE` whose first ASN is the
-/// neighbor's own AS (`peer.remote_as`).
+/// check. Returns `true` when the UPDATE's routes must be treated as
+/// withdrawn because the neighbor is eBGP, has `enforce-first-as` enabled,
+/// and the left-most AS_PATH segment is not an `AS_SEQUENCE` whose first
+/// ASN is the neighbor's own AS (`peer.remote_as`).
 ///
 /// Always `false` for iBGP peers and when the knob is off — iBGP never
-/// prepends, so it has no first-AS guarantee to enforce.
+/// prepends, so it has no first-AS guarantee to enforce. Run once per
+/// UPDATE by [`route_from_peer`], on the AS_PATH as received — before the
+/// `local-as` ingress prepend, which would otherwise make the substitute
+/// AS the first one.
 fn aspath_enforce_first_as_violation(peer: &Peer, aspath: Option<&As4Path>) -> bool {
     if !peer.config.enforce_first_as || !peer.is_ebgp() {
         return false;
@@ -4222,7 +4225,8 @@ pub fn route_ipv4_update(
 }
 
 /// Per-attr inbound checks shared by every prefix in an UPDATE (AS-path
-/// loop, enforce-first-as, route-reflection, RFC 9234 OTC). Returns the
+/// loop, route-reflection, RFC 9234 OTC; enforce-first-as runs earlier,
+/// in [`route_from_peer`], before the `local-as` prepend). Returns the
 /// peer identity — plus the attribute rewritten by OTC ingress rule 3,
 /// when it applied — or `None` if the UPDATE is dropped; the batch path
 /// runs it once. `otc_unicast` is true for plain IPv4 unicast, the only
@@ -4236,9 +4240,6 @@ fn inbound_attr_checks(
     if let Some(ref aspath) = attr.aspath
         && aspath_own_as_loop(peer, aspath)
     {
-        return None;
-    }
-    if aspath_enforce_first_as_violation(peer, attr.aspath.as_ref()) {
         return None;
     }
     if let Some(ref originator_id) = attr.originator_id
@@ -7988,11 +7989,6 @@ pub fn route_ipv6_update(
         {
             return;
         }
-        // FRR enforce-first-as: drop an inbound eBGP UPDATE whose AS_PATH
-        // does not begin with this neighbor's own AS (eBGP only).
-        if aspath_enforce_first_as_violation(peer, attr.aspath.as_ref()) {
-            return;
-        }
         // RFC 9234 §5 ingress procedures — IPv6 unicast only (VPNv6 rows
         // carry an RD and are exempt per §6).
         let otc_stamp = if rd.is_none() {
@@ -8391,11 +8387,6 @@ pub fn route_labelv4_update(
         {
             return;
         }
-        // FRR enforce-first-as: drop an inbound eBGP UPDATE whose AS_PATH
-        // does not begin with this neighbor's own AS (eBGP only).
-        if aspath_enforce_first_as_violation(peer, attr.aspath.as_ref()) {
-            return;
-        }
         if let Some(ref originator_id) = attr.originator_id
             && originator_id.id == *bgp.router_id
         {
@@ -8529,11 +8520,6 @@ pub fn route_labelv6_update(
         if let Some(ref aspath) = attr.aspath
             && aspath_own_as_loop(peer, aspath)
         {
-            return;
-        }
-        // FRR enforce-first-as: drop an inbound eBGP UPDATE whose AS_PATH
-        // does not begin with this neighbor's own AS (eBGP only).
-        if aspath_enforce_first_as_violation(peer, attr.aspath.as_ref()) {
             return;
         }
         if let Some(ref originator_id) = attr.originator_id
@@ -9976,11 +9962,6 @@ pub fn route_evpn_update(
         {
             return;
         }
-        // FRR enforce-first-as: drop an inbound eBGP UPDATE whose AS_PATH
-        // does not begin with this neighbor's own AS (eBGP only).
-        if aspath_enforce_first_as_violation(peer, attr.aspath.as_ref()) {
-            return;
-        }
         if let Some(ref originator_id) = attr.originator_id
             && originator_id.id == *bgp.router_id
         {
@@ -10277,9 +10258,6 @@ pub fn route_mup_update(
         if let Some(ref aspath) = attr.aspath
             && aspath_own_as_loop(peer, aspath)
         {
-            return;
-        }
-        if aspath_enforce_first_as_violation(peer, attr.aspath.as_ref()) {
             return;
         }
         if let Some(ref originator_id) = attr.originator_id
@@ -10965,11 +10943,6 @@ pub fn route_flowspec_update(
         {
             return;
         }
-        // FRR enforce-first-as: drop an inbound eBGP UPDATE whose AS_PATH
-        // does not begin with this neighbor's own AS (eBGP only).
-        if aspath_enforce_first_as_violation(peer, attr.aspath.as_ref()) {
-            return;
-        }
         if let Some(ref originator_id) = attr.originator_id
             && originator_id.id == *bgp.router_id
         {
@@ -11078,11 +11051,6 @@ pub fn route_srpolicy_update(
         if let Some(ref aspath) = attr.aspath
             && aspath_own_as_loop(peer, aspath)
         {
-            return;
-        }
-        // FRR enforce-first-as: drop an inbound eBGP UPDATE whose AS_PATH
-        // does not begin with this neighbor's own AS (eBGP only).
-        if aspath_enforce_first_as_violation(peer, attr.aspath.as_ref()) {
             return;
         }
         if let Some(ref originator_id) = attr.originator_id
@@ -11288,11 +11256,6 @@ pub fn route_bgpls_update(
         if let Some(ref aspath) = attr.aspath
             && aspath_own_as_loop(peer, aspath)
         {
-            return;
-        }
-        // FRR enforce-first-as: drop an inbound eBGP UPDATE whose AS_PATH
-        // does not begin with this neighbor's own AS (eBGP only).
-        if aspath_enforce_first_as_violation(peer, attr.aspath.as_ref()) {
             return;
         }
         if let Some(ref originator_id) = attr.originator_id
@@ -12579,6 +12542,33 @@ pub fn route_from_peer(
             "recv UPDATE NLRI"
         );
     }
+    // enforce-first-as (RFC 4271 §6.3's optional first-AS check), judged
+    // on the AS_PATH the neighbor sent: before the `local-as` ingress
+    // prepend below, which puts the substitute AS left-most and would
+    // fail every route from the neighbor — FRR checks first too
+    // (bgp_attr.c). One check per UPDATE covers every family; the
+    // per-family ingest no longer repeats it (it would see the prepended
+    // path, and so would `route_clean`'s stale replays of Adj-RIB-In rows,
+    // which are stored post-prepend). A route that fails is
+    // treat-as-withdraw (RFC 7606 §7.2): the UPDATE replaces the
+    // neighbor's earlier path for each prefix, so that path must go
+    // rather than stay installed.
+    let first_as_violation = packet.bgp_attr.as_ref().is_some_and(|attr| {
+        peers
+            .get_by_idx(peer_id)
+            .is_some_and(|peer| aspath_enforce_first_as_violation(peer, attr.aspath.as_ref()))
+    });
+    if first_as_violation
+        && (!packet.ipv4_update.is_empty() || packet.mp_update.is_some())
+        && let Some(peer) = peers.get_by_idx(peer_id)
+    {
+        tracing::warn!(
+            peer = %peer.display_name(),
+            "bgp: enforce-first-as: AS_PATH does not start with the neighbor's AS {}; \
+             treating the UPDATE's routes as withdrawn",
+            peer.remote_as,
+        );
+    }
     // `local-as` ingress prepend (FRR does this at the attribute-parse
     // stage, bgp_attr.c): routes received from an eBGP neighbor with an
     // active substitute AS get the substitute prepended once, so the
@@ -12607,7 +12597,7 @@ pub fn route_from_peer(
     // remove any installed copy from this peer instead of installing —
     // while the UPDATE's explicit withdrawals are still honoured and the
     // session stays up.
-    let mut treat_as_withdraw = packet.treat_as_withdraw;
+    let mut treat_as_withdraw = packet.treat_as_withdraw || first_as_violation;
     if as_sets_withdraw_treat_as_withdraw(bgp.as_sets_withdraw, packet.bgp_attr.as_ref()) {
         treat_as_withdraw = true;
     }
