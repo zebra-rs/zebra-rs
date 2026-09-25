@@ -8,25 +8,33 @@ branch `stamp-te-anomalous-bit` (`596416bf`, `666b417d`, `4c562c24`). The
 capability table, the anomaly bullets under "Advertisement stability", and
 step 1 are marked accordingly; everything else is as first reviewed.
 
+**Status update (2026-09-25).** Sequencing steps 2–4 have since been
+delivered: BGP-LS performance TLVs (#2385, #2400), OSPFv3 TE metrics (#2387)
+and measured loss (#2407–#2410). The Result, the capability table, gap 2,
+the advertisement-stability list, Pattern C and the Documentation finding
+are updated to match. Steps 2 and 3 had been marked delivered in the
+sequencing section only. Everything else stands as first reviewed.
+
 ## Result
 
 Measured against the three layers in the stamp document:
 
-- **Pattern A (link PM feeding IGP TE metrics)** is implemented on all three IGPs — IS-IS, OSPFv2 and OSPFv3 — for STAMP-derived delay advertisement and Flex-Algo min-delay SPF. Neither RFC is fully implemented end to end: loss is never measured and the bandwidth attributes are absent or originate nowhere.
+- **Pattern A (link PM feeding IGP TE metrics)** is implemented on all three IGPs — IS-IS, OSPFv2 and OSPFv3 — for STAMP-derived delay and loss advertisement and Flex-Algo min-delay SPF. Neither RFC is fully implemented end to end: the bandwidth attributes are absent or originate nowhere. (Loss has been measured and advertised since step 4.)
 - **Pattern B (IGP auto-discovery of STAMP endpoints)** is absent. Sessions are derived from IGP adjacency state instead of from flooded measurement-group membership.
-- **Pattern C (consumers of the flooded metrics)** is limited to Flex-Algo metric-type 1. BGP-LS export and SR path PM are not wired up.
+- **Pattern C (consumers of the flooded metrics)** is Flex-Algo metric-type 1, and BGP-LS export from IS-IS since step 2. SR path PM is not wired up, and no consumer uses the measured loss yet.
 
 | Capability | IS-IS RFC8570 | OSPF RFC7471 |
 |---|---|---|
 | Average delay, min/max delay, delay variation, loss codecs | Implemented: sub-TLVs 33–36 | Implemented: sub-TLVs 27–30 |
 | Residual, available, utilized bandwidth codecs | Implemented: sub-TLVs 37–39 | No typed support found |
-| Static delay/loss configuration | Implemented | OSPFv2 only |
+| Static delay/loss configuration | Implemented | Implemented on both versions |
 | Metric advertisement | Inline TLV 22/222 and Flex-Algo ASLA | ASLA in the OSPFv2 Extended-Link Opaque LSA and the OSPFv3 E-Router-LSA; no Segment Routing required |
-| STAMP feeding advertised delay metrics | P2P, IPv4 or IPv6 | OSPFv2 P2P, IPv4 |
-| Anomalous bit origination | Implemented; per-value bits, per-IGP thresholds | Implemented; per-value bits, per-IGP thresholds |
+| STAMP feeding advertised delay and loss metrics | P2P, IPv4 or IPv6 | P2P; OSPFv2 IPv4, OSPFv3 IPv6 link-local |
+| Anomalous bit origination | Implemented for delay and loss; per-value bits, per-IGP thresholds | Implemented for delay and loss; per-value bits, per-IGP thresholds |
+| Loss direction against a stateful reflector | Implemented; opt-in per link | Implemented; opt-in per link |
 | Flex-Algo min-delay SPF | Implemented | Implemented on both versions |
 | STAMP endpoint auto-discovery (AMG) | Not implemented | Not implemented |
-| BGP-LS export of measured metrics | Not implemented | Not implemented |
+| BGP-LS export of measured metrics | Implemented (#2385, #2400) | Not implemented |
 
 ## Implemented paths
 
@@ -56,7 +64,7 @@ That pruning is correct, not a gap. RFC 9350 §12 requires Flex-Algorithm link a
 ### Measurement and metric coverage
 
 1. **True one-way delay:** [STAMP delay calculation](../../zebra-rs/src/stamp/inst.rs) uses `((T4 - T1) - (T3 - T2)) / 2`. This removes reflector residence time but still approximates forward delay by assuming symmetric paths; it is not synchronized one-way measurement.
-2. **Measured loss export:** [STAMP statistics](../../zebra-rs/src/stamp/stats.rs) count sent/received probes for display, but explicitly exclude loss from IGP exports. Static loss advertisement exists.
+2. ~~**Measured loss export:** [STAMP statistics](../../zebra-rs/src/stamp/stats.rs) count sent/received probes for display, but explicitly exclude loss from IGP exports. Static loss advertisement exists.~~ **Delivered** (#2407–#2410): loss is measured per probe on its own clock ([loss.rs](../../zebra-rs/src/stamp/loss.rs)) and advertised by all three IGPs, on by default. See sequencing step 4.
 3. **Bandwidth integration:** IS-IS packet codecs exist, but its per-interface metric model has no residual/available/utilized bandwidth fields. OSPF has no typed support for the corresponding bandwidth metrics. STAMP itself is not the source of these bandwidth values.
 4. **OSPF carriers:** The implemented OSPFv2 path is application-specific Extended-Link advertisement. The classic TE Opaque LSA Link TLV path described in the stamp document is absent.
 5. ~~**OSPFv3:** no `te-metric` configuration, IPv4-only STAMP address selection, and a Flex-Algo graph costing on the IGP metric.~~ **Delivered** (#2387): the full config tree under `router ospfv3`, IPv6 link-local STAMP sessions, origination into the E-Router-LSA ASLA at OSPFv3 code points 13-16, and metric-type-1 SPF with RFC 9350 §15 pruning.
@@ -76,6 +84,12 @@ The following remain missing:
 - An accelerated advertisement path for large changes between periodic export ticks.
 - Interval-based hysteresis — "hold the bit for N periods". The implemented hysteresis is the band between the anomaly and reuse bounds, which is the RFC's own mechanism; a period-count qualifier on top of it is not implemented.
 - Anomaly-driven IGP/TE cost fallback.
+
+For **loss** (step 4), every item above except the cost fallback is
+implemented, per IGP: a configurable relative threshold and minimum
+change, re-advertisement at most once per loss interval, an optional
+accelerated threshold, and A-bit recovery only after a whole loss interval
+below the reuse bound. The list stands for delay.
 
 Since implemented (see the status update): configurable upper anomaly and
 reuse bounds, and origination of the Anomalous bit on threshold crossing.
@@ -98,7 +112,7 @@ Session targets come from IGP adjacency state instead — interface/neighbor add
 ### Pattern C — consumers of the flooded metrics
 
 - **Flex-Algo min-delay:** implemented on both IGPs, as described above.
-- **Flex-Algo link loss:** [draft-ietf-lsr-flex-algo-link-loss](https://datatracker.ietf.org/doc/html/draft-ietf-lsr-flex-algo-link-loss) is not implemented; there is no loss-threshold exclusion in either Flex-Algo graph builder, and loss is not measured in the first place.
+- **Flex-Algo link loss:** [draft-ietf-lsr-flex-algo-link-loss](https://datatracker.ietf.org/doc/html/draft-ietf-lsr-flex-algo-link-loss) is not implemented; there is no loss-threshold exclusion in either Flex-Algo graph builder. Loss has been measured and advertised since step 4, so the draft is now implementable.
 - **BGP-LS (updated 2026-09-16):** the [IS-IS BGP-LS translation](../../zebra-rs/src/isis/bgp_ls.rs) now supports RFC8571 performance TLVs 1114–1120 and RFC9294 application-specific attributes in TLV 1122. These attributes reach the local BGP-LS RIB. Transmission to BGP-LS peers was added by #2400, and the BGP-LS BDD now checks delivery to a separate-AS collector over the wire; see the [BGP-LS feed review](bgp-ls-feed-2026-09-17.md). (Earlier text here, written before #2400, said transmission was unimplemented.)
 - **SR path PM:** the [STAMP TLV framework](../../crates/stamp-packet/src/tlv.rs) and [return path encoding](../../crates/stamp-packet/src/return_path.rs) implement the RFC8972 TLV shape plus the RFC9503 Destination Node Address and Return Path TLVs, but no daemon code constructs them. This is codec-only support with no path-measurement driver.
 - **RSVP-TE / SR-TE CSPF:** not applicable; there is no CSPF consumer in this codebase.
@@ -106,6 +120,15 @@ Session targets come from IGP adjacency state instead — interface/neighbor add
 ### Documentation
 
 The [supported-RFC appendix](../../book/src/appendix-b-supported-rfcs.md) lists RFC7471 and RFC8570 with the qualifier "unidirectional delay / loss", which correctly excludes the bandwidth sub-TLVs, but does not record that RFC7471 support is OSPFv2-only.
+
+**Resolved (2026-09-25).** OSPFv3 has supported RFC7471 since #2387. The appendix now:
+- lists RFC7471 and RFC9492 under OSPFv3;
+- describes the delay and loss metrics as measured by STAMP or configured statically, with
+  the Anomalous bit;
+- gains a STAMP section (RFC8762, RFC8972, RFC7680) and the BGP-LS entries step 2 delivered
+  (RFC9552, RFC8571, RFC9294).
+
+The book's `show stamp session` reference also documents the per-IGP subscriber lines.
 
 ## Recommended sequencing
 
@@ -140,9 +163,16 @@ The performance TLVs and application-specific translation are implemented in [`l
 
 The largest remaining asymmetry: an IPv6-only fabric can measure and advertise delay through IS-IS today, but has nowhere to publish it on the OSPF side. Largest single item, though nearly all of it mirrors existing v2 and IS-IS code. Components: delay/loss variants in `Ospfv3AslaSubSubTlv`, `te-metric` registration in [config_v3.rs](../../zebra-rs/src/ospf/config_v3.rs), origination into the E-Router-LSA ASLA, IPv6 pair support in `stamp_reconcile_link` (which currently accepts IPv4 pairs only — the IS-IS v4-preferred / v6-link-local rule is the model), and the delay join in the v3 Flex-Algo graph.
 
-### 4. Measured loss — DESIGN PROPOSED
+### 4. Measured loss — DELIVERED (#2407–#2410)
 
-Design: [stamp-measured-loss.md](../design/stamp-measured-loss.md), including a survey of Cisco, Juniper, Nokia, Arista and Huawei. Requires a rolling multi-window loss estimator; a single export window is too noisy to advertise, as the original design plan records. Unblocks a measured source for sub-TLV 36/30 and makes [draft-ietf-lsr-flex-algo-link-loss](https://datatracker.ietf.org/doc/html/draft-ietf-lsr-flex-algo-link-loss) implementable.
+Design: [stamp-measured-loss.md](../design/stamp-measured-loss.md), including a survey of Cisco, Juniper, Nokia, Arista and Huawei. Delivered in four PRs, each through its own review rounds:
+
+1. **#2407, accounting.** Per-probe settlement against RFC 7680's waiting time, on a 30 s bucket clock independent of the delay export. Each probe is booked in the bucket it was sent in, and each bucket records the probes it should have had.
+2. **#2408, advertisement.** IS-IS sub-TLV 36 and OSPF 30/16, **on by default** as on Cisco IOS XR. The trust gates are a full window and integrity; each IGP has its own filter and cadence; silence withdraws the value rather than advertising the cap. The same PR added a commit-time value check (`config::check`), because YANG cannot express the loss settings' constraints.
+3. **#2409, the Anomalous bit.** Opt-in. It is evaluated on the value it travels with, compared exactly in micro-percent, and cleared only after a whole loss interval below the reuse bound.
+4. **#2410, direction.** Round-trip by default. Forward loss is advertised against a peer declared `peer-reflector stateful`, a peer whose `reflector stateful` puts its own sequence counter in each reply. Losses are classified by gap, never counted twice.
+
+The measured source for sub-TLV 36/30 now exists, so [draft-ietf-lsr-flex-algo-link-loss](https://datatracker.ietf.org/doc/html/draft-ietf-lsr-flex-algo-link-loss) is implementable. It is the natural next consumer and is not started.
 
 ### Correction — the "receive-side fallback" recommendation was wrong
 

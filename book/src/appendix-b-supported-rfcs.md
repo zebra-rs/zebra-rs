@@ -43,6 +43,9 @@ implementation; the corresponding features track the referenced draft revision.
 | RFC 6996 | Autonomous System (AS) Reservation for Private Use (remove-private-as range). |
 | RFC 8950 | Advertising IPv4 NLRI with an IPv6 Next Hop (updates RFC 5549) — used for IPv6 unnumbered peering. |
 | RFC 9830 | Advertising Segment Routing Policies in BGP (SR Policy, SAFI 73). |
+| RFC 9552 | Distribution of Link-State and Traffic Engineering Information Using BGP (BGP-LS) — the IS-IS topology, exported to BGP-LS peers. |
+| RFC 8571 | BGP-LS Advertisement of IGP Traffic Engineering Performance Metric Extensions — the delay and loss TLVs (1114–1120), Anomalous bit included. |
+| RFC 9294 | BGP-LS Advertisement of Application-Specific Link Attributes (TLV 1122). |
 | draft-ietf-bess-mup-safi | BGP Mobile User Plane (MUP) SAFI 85 — Type-1 Session Transformed and Type-2 Direct Segment routes. |
 
 ## OSPFv2
@@ -59,7 +62,7 @@ implementation; the corresponding features track the referenced draft revision.
 | RFC 7770 | Extensions to OSPF for Advertising Optional Router Capabilities (Router Information LSA). |
 | RFC 7684 | OSPFv2 Prefix/Link Attribute Advertisement (Extended Prefix / Extended Link LSAs). |
 | RFC 8665 | OSPF Extensions for Segment Routing (SR-MPLS). |
-| RFC 7471 | OSPF Traffic Engineering Metric Extensions (unidirectional delay / loss). |
+| RFC 7471 | OSPF Traffic Engineering Metric Extensions — unidirectional delay, min/max delay, delay variation and link loss, measured by STAMP or configured statically, with the Anomalous bit. |
 | RFC 9492 | OSPF Application-Specific Link Attributes (ASLA). |
 | RFC 9350 | IGP Flexible Algorithm (Flex-Algo) constraint-based SPF. |
 | RFC 9855 | Topology-Independent Loop-Free Alternate (TI-LFA) fast reroute using Segment Routing. |
@@ -76,6 +79,8 @@ implementation; the corresponding features track the referenced draft revision.
 | RFC 9513 | OSPFv3 Extensions for SRv6. |
 | RFC 3101 | The OSPF Not-So-Stubby Area (NSSA) Option. |
 | RFC 6987 | OSPF Stub Router Advertisement (max-metric). |
+| RFC 7471 | OSPF Traffic Engineering Metric Extensions — the same delay and loss metrics as OSPFv2, at the OSPFv3 Extended-LSA code points (13–16) in the E-Router-LSA ASLA. |
+| RFC 9492 | OSPF Application-Specific Link Attributes (ASLA), carried in the OSPFv3 E-Router-LSA. |
 | RFC 9350 | IGP Flexible Algorithm (Flex-Algo) constraint-based SPF. |
 | RFC 9855 | Topology-Independent Loop-Free Alternate (TI-LFA) fast reroute using Segment Routing. |
 
@@ -98,7 +103,7 @@ implementation; the corresponding features track the referenced draft revision.
 | RFC 6119 | IPv6 Traffic Engineering in IS-IS (IPv6 SRLG and TE). |
 | RFC 6232 | Purge Originator Identification TLV for IS-IS. |
 | RFC 7794 | IS-IS Prefix Attributes for Extended IPv4 and IPv6 Reachability. |
-| RFC 8570 | IS-IS Traffic Engineering Attributes (unidirectional delay / loss extended metrics). |
+| RFC 8570 | IS-IS Traffic Engineering Attributes — unidirectional delay, min/max delay, delay variation and link loss, measured by STAMP or configured statically, with the Anomalous bit. |
 | RFC 8667 | IS-IS Extensions for Segment Routing (SR-MPLS). |
 | RFC 9479 | IS-IS Application-Specific Link Attributes (ASLA). |
 | RFC 9352 | IS-IS Extensions to Support Segment Routing over the IPv6 Data Plane (SRv6). |
@@ -118,6 +123,14 @@ implementation; the corresponding features track the referenced draft revision.
 | RFC 5059 | Bootstrap Router (BSR) Mechanism for PIM — Candidate-BSR election and RP-set flooding. |
 | RFC 2362 | PIM-SM (historic) — the group-to-RP hash used to break same-priority RP-set ties consistently across the domain. |
 | RFC 3956 | Embedding the Rendezvous Point (RP) Address in an IPv6 Multicast Address (Embedded-RP). |
+
+## STAMP (performance measurement)
+
+| RFC / Internet-Draft | Description |
+| --- | --- |
+| RFC 8762 | Simple Two-Way Active Measurement Protocol (STAMP) — the Session-Sender measuring each P2P IGP link's delay and loss, and the Session-Reflector: stateless by default, stateful (its own per-peer sequence counter) on request. |
+| RFC 8972 | STAMP Optional Extensions — the Session-Sender Identifier (SSID) and the Extra Padding TLV for symmetric-size replies. |
+| RFC 7680 | A One-Way Loss Metric for IP Performance Metrics — the waiting time after which an unanswered probe counts as lost. |
 
 ## BFD
 

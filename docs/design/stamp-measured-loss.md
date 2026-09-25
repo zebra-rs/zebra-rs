@@ -1,7 +1,9 @@
 # Measured link loss for STAMP-driven TE metrics — design
 
-> **Status:** proposal, reviewed (2026-09-24). All four §10 decisions settled; design
-> review round 1's six findings resolved (§11).
+> **Status:** implemented (2026-09-25) in the four PRs of §8: #2407 (accounting), #2408
+> (advertisement), #2409 (Anomalous bit), #2410 (direction). All four §10 decisions settled;
+> design review round 1's six findings resolved (§11). Each PR's own review findings are
+> recorded in the section they changed.
 > **Parent docs:** [stamp-isis-ospf.md](./stamp-isis-ospf.md) (the STAMP → IGP integration
 > this completes), [review sequencing](../reviews/stamp-isis-ospf-2026-09-16.md), step 4 "Measured loss"
 > **Branch:** `stamp-measured-loss`

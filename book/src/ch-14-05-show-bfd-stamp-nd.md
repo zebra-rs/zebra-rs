@@ -139,14 +139,18 @@ JSON: an array of session objects (`interface`, `local`, `remote`,
 `lost`, and, once any probe has settled, `percent`,
 `resolution_percent`, `integrity_percent` and `encoded` (RFC 8570 units
 of 0.000003 %). It also counts `late`, `duplicate` and `unmatched`
-replies.
+replies. `forward`, `reverse` and `unresolved` split `lost` by
+direction. They mean something only against a stateful peer reflector:
+against a stateless one, every loss that can be placed at all reads as
+reverse (see [Direction](ch-09-00-twamp-stamp.md)).
 
 ### `show stamp session`
 
-The same session data rendered as a detail block per session — SSID,
+The same session data rendered as a detail block per session: SSID,
 probe interval, damping period, uptime, counters, the timestamp source
-(kernel vs. userspace), probe loss, and the last delay sample. The loss
-line has three states:
+(kernel vs. userspace), how this router reflects the peer's probes,
+probe loss, the last delay sample, and one entry for each IGP measuring
+the link. The loss line has three states:
 
 ```
         Loss (round-trip, 120s window): measuring, first bucket not closed yet
@@ -160,6 +164,50 @@ can express at the current probe rate. `integrity` is the share of the
 probes the probe interval should have produced that actually settled. A
 *late* reply arrived after its probe had already been counted lost, and
 it stays lost.
+
+`Reflector:` reads `stateless`, or `stateful, sequence N` while any IGP
+measuring the link sets `measurement reflector stateful`. `N` is this
+router's counter for the peer's probes.
+
+Each IGP measuring the link gets its own entry under `Subscribers:`,
+because each applies its own delay-anomaly bounds and loss settings to
+the shared session. The first line gives the delay anomaly bounds and
+bits. The second is the loss that IGP advertises, with the settings
+behind it. Here every lost packet was a reply on the way back, and the
+peer reflects statefully. IS-IS declares that, and advertises the forward
+loss: none. OSPF does not, and advertises the round-trip 10 %, which is
+over its 5 % anomaly bound:
+
+```
+        Reflector: stateful, sequence 1042
+        Loss (round-trip, 120s window): 10.000% (12 of 120 probes), resolution 0.833%, integrity 100%
+        Loss replies: late 0 duplicate 0 unmatched 0
+        Last sample:
+            Min delay: 42 usec
+            Max delay: 45 usec
+            Average delay: 43 usec
+            Delay variation: 3 usec
+        Subscribers:
+            isis: anomaly-threshold none, Anomalous: avg no, min no, max no
+                loss: advertised 0.000000% forward (interval 120s, threshold 10%, minimum-change 0.999999%, integrity 90%, peer-reflector stateful)
+                  direction over 120s: forward 0, reverse 12, unresolved 0 of 120 probes
+            ospf: anomaly-threshold none, Anomalous: avg no, min no, max no
+                loss: advertised 9.999999% (A) (interval 120s, threshold 10%, minimum-change 0.999999%, integrity 90%, anomaly 5.000000%, reuse 1.000000%)
+```
+
+The loss line reads `disabled` when the IGP has `loss enabled false`,
+and `not advertised` until a full, trusted window exists. After the
+value:
+
+- `forward` marks forward loss, advertised because the IGP declares
+  `peer-reflector stateful`. Without it the value is round-trip. Such an
+  IGP also gets a `direction` line for its own window.
+- `(A)` marks an advertisement carrying the Anomalous bit.
+- `anomaly` / `reuse` appear once bounds are configured, printed exactly
+  as configured.
+
+The value and the change thresholds print in the sub-TLV's units of
+0.000003 %, so a configured 1.0 % reads 0.999999 %.
 
 JSON: the same array of session objects as `show stamp`.
 
