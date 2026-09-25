@@ -1,0 +1,52 @@
+# ce — advertises algorithm 128's definition, which excludes links whose
+# advertised loss exceeds 5 %. Its link to n1 is measured (STAMP, 100 ms
+# probes, 30 s loss interval); its link to n2 is not, so it advertises no
+# loss and is never pruned for it.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.1/32
+- if-name: ce-n1
+  ipv4:
+    address: 192.168.70.1/30
+- if-name: ce-n2
+  ipv4:
+    address: 192.168.70.5/30
+
+router:
+  isis:
+    net: 49.0070.0000.0000.0001.00
+    hostname: ce
+    is-type: level-2-only
+    segment-routing: mpls
+    te-router-id: 10.0.0.1
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+        prefix-sid:
+          index: 1
+        flex-algo-prefix-sid:
+        - algo: 128
+          index: 11
+    - if-name: ce-n1
+      network-type: point-to-point
+      ipv4:
+        enabled: true
+      te-metric:
+        measurement:
+          enabled: true
+          interval: 100
+          damping-period: 2
+          loss:
+            interval: 30
+    - if-name: ce-n2
+      network-type: point-to-point
+      ipv4:
+        enabled: true
+    flex-algo:
+    - algo: 128
+      advertise-definition: true
+      exclude-max-link-loss: 5
+      dataplane:
+        sr-mpls: true

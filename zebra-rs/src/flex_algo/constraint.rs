@@ -61,42 +61,120 @@ pub fn link_passes_fad<A: AffinityBits>(
         exclude_any: local_link_affinity(&entry.exclude_any, am),
         include_any: local_link_affinity(&entry.include_any, am),
         include_all: local_link_affinity(&entry.include_all, am),
+        max_link_loss: None,
     };
-    link_passes_constraints(affinity, &constraints)
+    let link = LinkAttrs {
+        affinity: affinity.cloned(),
+        loss: None,
+    };
+    link_passes_constraints(&link, &constraints)
 }
 
 /// A Flexible Algorithm Definition resolved to what the path computation
-/// needs: the metric-type and the three admin-group rules as bitmaps. It
-/// is what a *winning* FAD (RFC 9350 §5.3) reduces to once every element
-/// in it is known to be supported, so the computation reads the
-/// definition every participant agreed on, not this router's config.
+/// needs: the metric-type, the three admin-group rules as bitmaps, and the
+/// maximum link loss. It is what a *winning* FAD (RFC 9350 §5.3) reduces
+/// to once every element in it is known to be supported, so the
+/// computation reads the definition every participant agreed on, not this
+/// router's config.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FadConstraints {
     pub metric_type: FadMetricType,
     pub exclude_any: ExtAdminGroup,
     pub include_any: ExtAdminGroup,
     pub include_all: ExtAdminGroup,
+    /// Exclude Maximum Link Loss (draft-ietf-lsr-flex-algo-link-loss), in
+    /// RFC 8570 units of 0.000003 %.
+    pub max_link_loss: Option<u32>,
 }
 
-/// RFC 9350 §13 rules 1, 3 and 4 against a link's admin-group bitmap:
-/// exclude-any, include-any, include-all. `affinity = None` is the empty
-/// bitmap — see [`link_passes_fad`].
-pub fn link_passes_constraints(affinity: Option<&ExtAdminGroup>, c: &FadConstraints) -> bool {
+/// A link's attributes as the Flexible Algorithm application sees them —
+/// for a peer's link, as RFC 9479 §4.2 selects them from its
+/// advertisement; for this router's own, what it advertises.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LinkAttrs {
+    /// The Extended Admin Group; `None` is the empty bitmap — see
+    /// [`link_passes_fad`].
+    pub affinity: Option<ExtAdminGroup>,
+    /// Unidirectional link loss (RFC 8570 §4.4) in its raw 24-bit units;
+    /// `None` when none is advertised.
+    pub loss: Option<u32>,
+}
+
+/// Why a link is pruned from a Flexible Algorithm's topology.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pruned {
+    /// RFC 9350 §13 rules 1, 3 or 4: exclude-any, include-any or
+    /// include-all.
+    Affinity,
+    /// Its advertised loss exceeds the definition's maximum.
+    LinkLoss { loss: u32, max: u32 },
+}
+
+impl std::fmt::Display for Pruned {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Pruned::Affinity => write!(f, "affinity"),
+            Pruned::LinkLoss { loss, max } => write!(
+                f,
+                "link loss {} ({loss}) exceeds {} ({max})",
+                LossPercent(*loss),
+                LossPercent(*max)
+            ),
+        }
+    }
+}
+
+/// An RFC 8570 loss value rendered as the percentage it encodes. One unit
+/// is 0.000003 %, three micro-percent, so the rendering is exact.
+pub struct LossPercent(pub u32);
+
+impl std::fmt::Display for LossPercent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let micro = u64::from(self.0) * 3;
+        write!(f, "{}.{:06}%", micro / 1_000_000, micro % 1_000_000)
+    }
+}
+
+/// The pruning rules a supported definition carries, applied to one link
+/// (RFC 9350 §13 rules 1, 3 and 4, then the link-loss rule), or `None`
+/// when the link stays in the algorithm's topology.
+///
+/// The loss rule prunes a link whose advertised loss is strictly greater
+/// than the maximum, and keeps one that advertises none: "if a link does
+/// not advertise the link loss but the FAD contains the FAEML sub-TLV, the
+/// link MUST NOT be excluded". Both are raw integers, compared as numbers
+/// — 0xFFFFFF included — so every router reaches the same answer. No
+/// hysteresis or damping: pruning is a pure function of the LSDB, or two
+/// routers that saw the same advertisements at different moments prune
+/// differently and Flex-Algo forwarding loops. Stability belongs to the
+/// advertiser.
+pub fn link_prune_reason(link: &LinkAttrs, c: &FadConstraints) -> Option<Pruned> {
     let empty = ExtAdminGroup::default();
-    let bitmap = affinity.unwrap_or(&empty);
+    let bitmap = link.affinity.as_ref().unwrap_or(&empty);
 
     if !ext_admin_group_intersection(&c.exclude_any, bitmap).is_empty() {
-        return false;
+        return Some(Pruned::Affinity);
     }
     if !c.include_any.words.iter().all(|w| *w == 0)
         && ext_admin_group_intersection(&c.include_any, bitmap).is_empty()
     {
-        return false;
+        return Some(Pruned::Affinity);
     }
     if !ext_admin_group_contains(bitmap, &c.include_all) {
-        return false;
+        return Some(Pruned::Affinity);
     }
-    true
+    if let (Some(max), Some(loss)) = (c.max_link_loss, link.loss)
+        && loss > max
+    {
+        return Some(Pruned::LinkLoss { loss, max });
+    }
+    None
+}
+
+/// Whether a link stays in the algorithm's topology — see
+/// [`link_prune_reason`].
+pub fn link_passes_constraints(link: &LinkAttrs, c: &FadConstraints) -> bool {
+    link_prune_reason(link, c).is_none()
 }
 
 /// Bitwise AND of two `ExtAdminGroup` bitmaps. Returned bitmap is
@@ -269,6 +347,92 @@ mod tests {
         assert!(link_passes_fad(None, &entry, &am));
         let red = admin_group(&[0]);
         assert!(link_passes_fad(Some(&red), &entry, &am));
+    }
+
+    fn with_max(max: Option<u32>) -> FadConstraints {
+        FadConstraints {
+            max_link_loss: max,
+            ..Default::default()
+        }
+    }
+
+    fn lossy(loss: Option<u32>) -> LinkAttrs {
+        LinkAttrs {
+            affinity: None,
+            loss,
+        }
+    }
+
+    /// draft-ietf-lsr-flex-algo-link-loss: pruned only when the loss
+    /// *exceeds* the maximum; kept when equal, below, or not advertised;
+    /// every value compared as a number — 0xFFFFFF too.
+    #[test]
+    fn link_loss_pruning_truth_table() {
+        let max = 1_666_667;
+        for (loss, pruned) in [
+            (Some(max + 1), true),
+            (Some(max), false),
+            (Some(max - 1), false),
+            (Some(0), false),
+            (None, false),
+            (Some(0x00FF_FFFF), true),
+        ] {
+            assert_eq!(
+                link_prune_reason(&lossy(loss), &with_max(Some(max))),
+                pruned.then(|| Pruned::LinkLoss {
+                    loss: loss.unwrap(),
+                    max
+                }),
+                "{loss:?}"
+            );
+        }
+        // No constraint, no pruning, however lossy.
+        assert_eq!(
+            link_prune_reason(&lossy(Some(0x00FF_FFFF)), &with_max(None)),
+            None
+        );
+        // Zero keeps only loss-free links — and links advertising none.
+        assert!(link_passes_constraints(&lossy(Some(0)), &with_max(Some(0))));
+        assert!(!link_passes_constraints(
+            &lossy(Some(1)),
+            &with_max(Some(0))
+        ));
+        assert!(link_passes_constraints(&lossy(None), &with_max(Some(0))));
+        // The ceiling RFC 8570 can express is compared like any value.
+        assert!(link_passes_constraints(
+            &lossy(Some(0x00FF_FFFE)),
+            &with_max(Some(0x00FF_FFFE))
+        ));
+    }
+
+    /// Affinity is checked first; a link failing both is reported for it.
+    #[test]
+    fn affinity_prunes_before_loss() {
+        let c = FadConstraints {
+            exclude_any: admin_group(&[3]),
+            max_link_loss: Some(10),
+            ..Default::default()
+        };
+        let link = LinkAttrs {
+            affinity: Some(admin_group(&[3])),
+            loss: Some(11),
+        };
+        assert_eq!(link_prune_reason(&link, &c), Some(Pruned::Affinity));
+    }
+
+    #[test]
+    fn loss_renders_as_the_percentage_it_encodes() {
+        assert_eq!(LossPercent(1_666_667).to_string(), "5.000001%");
+        assert_eq!(LossPercent(0x00FF_FFFE).to_string(), "50.331642%");
+        assert_eq!(LossPercent(0).to_string(), "0.000000%");
+        assert_eq!(
+            Pruned::LinkLoss {
+                loss: 2_500_000,
+                max: 1_666_667
+            }
+            .to_string(),
+            "link loss 7.500000% (2500000) exceeds 5.000001% (1666667)"
+        );
     }
 
     #[test]

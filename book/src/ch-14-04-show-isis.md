@@ -209,20 +209,25 @@ JSON: `{ local, received_mirror_sids, received_context_labels }`.
 
 The Flexible Algorithm state (RFC 9350): the locally-configured
 algorithms and their SRv6 locator bindings, plus the FADs, algorithms,
-and SRv6 locators received from peers, per level. Adding an algorithm
-id narrows the view to that algorithm — the FAD table keeps only its
-row and the participation list keeps only the peers that run it. See
-[Flexible Algorithm (Flex-Algo)](ch-07-11-isis-flexalgo.md) for the
-configuration side and the healthy-output signatures.
+and SRv6 locators received from peers, per level. For each configured
+algorithm and level, a selection line names the winning definition (RFC
+9350 §5.3) — its originator, priority, and maximum link loss if it
+carries one — and whether this router participates, or why not. Adding
+an algorithm id narrows the view to that algorithm — the FAD table keeps
+only its row and the participation list keeps only the peers that run
+it. See [Flexible Algorithm (Flex-Algo)](ch-07-11-isis-flexalgo.md) for
+the configuration side and the healthy-output signatures.
 
-JSON: `{ area, local_algorithms, local_srv6_locators, levels }`.
+JSON: `{ area, local_algorithms, local_srv6_locators, selection, levels }`.
 
 ### `show isis flex-algo <128-255> { route | topology | spf | graph | repair-list }`
 
 The per-algorithm twins of `show isis route|topology|spf|graph|repair-list`
 (which remain algorithm-0 views): the algorithm's own routing table,
 SPF tree, FRR-style topology table, FAD-pruned link-state graph, and
-TI-LFA repair list.
+TI-LFA repair list. The graph view ends with `Pruned links:`, one line
+per directed link the definition left out and why — `affinity`, or
+`link loss … exceeds …` (JSON: a `pruned` list per graph).
 
 ```
 r1> show isis flex-algo 128 route

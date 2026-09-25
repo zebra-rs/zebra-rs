@@ -1,7 +1,9 @@
 # Flex-Algo link-loss constraint — design
 
-> **Status:** proposal, reviewed (2026-09-25). All six §10 decisions settled: each takes the
-> recommendation. Implementation starts with PR 1 (§8).
+> **Status:** reviewed (2026-09-25); all six §10 decisions settled, each taking the
+> recommendation. PR 1 (D1) merged as #2414, with its review follow-up #2416; PR 2 (D2–D4, D7,
+> IS-IS) implemented on branch `flex-algo-link-loss-isis`. Where the implementation settled a
+> detail this document left open, the text below says so.
 > **Parent docs:** [stamp-measured-loss.md](./stamp-measured-loss.md) (the measured loss this
 > consumes), [review sequencing](../reviews/stamp-isis-ospf-2026-09-16.md) (Pattern C, "Flex-Algo
 > link loss"), [flex-algo-roadmap.md](./flex-algo-roadmap.md),
@@ -204,10 +206,17 @@ zebra-rs safe against a Huawei FAD carrying it: zebra-rs stops participating rat
   say so.
 - **Duplicate:** more than one FAEML in a FAD makes the whole FAD invalid (the draft's MUST).
   Invalid FADs are not candidates in D1.
-- **Malformed** (length ≠ 3): the same, the FAD is ignored. A router that cannot read the
-  constraint must not compute with a guess of it.
+- **Malformed** (length ≠ 3): the FAD is a candidate, but an unsupported one, so every router
+  configured for the algorithm stops participating. A router that cannot read the constraint must
+  not compute with a guess of it. (An earlier draft of this bullet said "ignored", as for a
+  duplicate; the implementation keeps D1's single rule for anything unreadable instead.)
 - **Robustness:** the codec keeps an unparseable FAEML as `Unknown`, as it does other malformed
   sub-TLVs, so the FAD still round-trips on re-flood; D1 then treats it as unsupported.
+- **Truncated:** a sub-TLV whose declared length runs past the end of the FAD — a FAEML among
+  them — used to end the sub-TLV walk, and the rest of the FAD was dropped, so routers computed
+  without the constraint. The FAD now keeps those bytes, re-floods them as received, and D1
+  treats the definition as unsupported ("truncated definition"). Found by the isis-packet
+  security review of PR 2; recorded in the crate's `AUDIT.md` (F2).
 - **OSPF: not in this plan.** No code point, a length that disagrees with RFC 9843, and no
   deployed peer: Huawei forbids it. Until then an OSPF FAD carrying an unknown sub-TLV simply
   makes zebra-rs stop participating (D1's OSPF follow-up).
@@ -265,8 +274,20 @@ The implementation generalises `peer_min_delay` into one attribute reader,
 `peer_link_attr(entry, pick)`, over the existing `applicable_aslas`, with delay and loss as two
 picks. §10 decision 6 proposes moving IS-IS affinity onto it too. Selecting affinity by one rule
 and loss by another is the same kind of inconsistency this design exists to remove.
-`link_passes_fad` widens from `Option<&ExtAdminGroup>` to a small struct of the link's
-attributes, so the three call sites stay single calls.
+As built: the IS-IS pruning check takes a `LinkAttrs { affinity, loss }` struct, read for every
+edge from that edge's own reach entry through the RFC 9479 reader — this router's own edges
+included, from its own LSP. That refines the "our own links" bullet above: the entry carries
+exactly the static-over-measured value we advertise, and reading it per entry keeps parallel links
+to one neighbour apart, which a lookup by neighbour through the interfaces could not (PR 2 review:
+parallel links of 0 % and 10 % against a 5 % maximum were both pruned locally, while every other
+router kept the clean one). The edge's forwarding identity needs the same care: each of our own
+entries is paired with the interface that produced it — among the unused interfaces adjacent to
+its neighbour, the one whose metric and attributes match the entry — so a surviving parallel edge
+leaves by its own interface, not its pruned twin's (second review finding), and its metric-type 1
+delay is that interface's. `link_prune_reason` returns why a link is pruned, so the graph and its `show` view
+share one decision. OSPF's `link_passes_fad` keeps its signature (affinity only; OSPF has no loss
+constraint). The per-peer affinity cache the LSDB rebuild used to fill, which read X-bit ASLAs
+only, is gone: affinity is read from the reach entry at graph time, like delay and loss.
 
 ### D5 — Stability belongs to the advertiser, never the receiver
 
@@ -312,8 +333,11 @@ Operational guidance for the book:
   - its originator;
   - whether this router participates and, if not, why (for example "not participating: unsupported
     FAD sub-TLV 252 from 0000.0000.0002");
-  - `exclude max-link-loss 5.000000% (1666667)` when present.
+  - `exclude max-link-loss 5.000000% (1666667)` when present. As built: the selection line
+    shows the winner's wire value, `max link loss 5.000001% (1666667)`, and the local row the
+    configured one, `max-link-loss=5.000000%(1666667)`.
 - `show isis flex-algo <n> graph` marks links pruned by loss, with the value that pruned them.
+  As built: a `Pruned links:` list of every pruned edge and its reason, affinity included.
 - `show isis database` renders the FAEML sub-TLV instead of an unknown one.
 
 ## 6. Code points
@@ -431,7 +455,7 @@ These are independent of the constraint, and listed so they are not lost:
   and drops the rest (`ospf-packet/src/parser.rs:1367`). In OSPFv3 it fails the whole FAD
   (`v3.rs:2305`). IS-IS keeps such a sub-TLV opaque. Fix in PR 3.
 - **IS-IS codec comment** (`isis-packet/src/sub/neigh.rs:652`): "The reserved value 0xFFFFFF marks
-  the metric as unavailable" is not in RFC 8570. Fix in PR 2 (it matters to D4).
+  the metric as unavailable" is not in RFC 8570. Fixed in PR 2 (it matters to D4).
 - **IS-IS Flex-Algo graphs walk TLV 22 only** (`isis/graph.rs:703`), not the multi-topology
   TLV 222.
 - **Stale documents:** `flex-algo-roadmap.md:295-308` and `ospf-flex-algo-recap.md:122-123` still

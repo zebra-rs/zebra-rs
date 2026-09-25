@@ -242,12 +242,6 @@ pub struct LinkTop<'a> {
             std::collections::BTreeMap<u8, isis_packet::IsisSubFlexAlgoDef>,
         >,
     >,
-    pub peer_link_affinity: &'a mut Levels<
-        std::collections::BTreeMap<
-            IsisSysId,
-            std::collections::BTreeMap<isis_packet::IsisNeighborId, isis_packet::ExtAdminGroup>,
-        >,
-    >,
     pub peer_algo_sid: &'a mut Levels<
         std::collections::BTreeMap<
             IsisSysId,

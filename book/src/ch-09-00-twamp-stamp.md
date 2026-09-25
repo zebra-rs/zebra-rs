@@ -435,8 +435,15 @@ metric:
 
 Algorithm 0 (the default SPF) and any algorithm using metric-type 0
 (IGP) are unaffected; they continue to use the configured interface
-cost. The TE-default metric-type (2) is not yet supported and falls back
-to the IGP metric.
+cost. The TE-default metric-type (2) is not supported: a winning
+definition asking for it stops participation.
+
+Measured loss feeds a constraint rather than a metric. An IS-IS
+algorithm whose definition carries `exclude-max-link-loss` prunes every
+link whose advertised loss exceeds it, and keeps links that advertise
+none — see [Link loss](ch-07-11-isis-flexalgo.md#link-loss). The loss
+settings above are what keep such a topology stable: pruning itself is
+never damped.
 
 ## Verifying
 

@@ -191,15 +191,6 @@ pub(super) struct SysStateRefs<'a> {
     /// rebuild only inspects fragment 0 for FAD content.
     pub peer_fad: &'a mut BTreeMap<IsisSysId, BTreeMap<u8, IsisSubFlexAlgoDef>>,
 
-    /// Per-peer per-link affinity bitmaps. Inner key is the IS-reach
-    /// neighbor identifier (6-byte sys-id + 1-byte circuit/pseudo
-    /// id). Populated from ASLA sub-TLVs on Ext IS-Reach (TLV 22)
-    /// and MT IS-Reach (TLV 222) entries whose SABM has the
-    /// Flex-Algorithm X-bit set (RFC 9479 §4.2). Union across
-    /// fragments — later fragments' entries overwrite earlier ones
-    /// for the same neighbor_id.
-    pub peer_link_affinity: &'a mut BTreeMap<IsisSysId, BTreeMap<IsisNeighborId, ExtAdminGroup>>,
-
     /// Per-peer per-algorithm Prefix-SIDs keyed by (algo, prefix).
     /// Populated from Ext IP-Reach (TLV 135) sub-TLVs with
     /// Algorithm in 128..=255 (RFC 9350 §7). Union across
@@ -276,7 +267,6 @@ pub(super) fn rebuild_sys_state(
         s.mt2_reach_v6.remove(sys_id);
         s.srv6_end_map.remove(sys_id);
         s.peer_fad.remove(sys_id);
-        s.peer_link_affinity.remove(sys_id);
         s.peer_algo_sid.remove(sys_id);
         s.peer_algos.remove(sys_id);
         s.peer_algo_srv6.remove(sys_id);
@@ -389,41 +379,6 @@ pub(super) fn rebuild_sys_state(
         s.peer_algos.remove(sys_id);
     } else {
         s.peer_algos.insert(*sys_id, algo_set);
-    }
-
-    // Per-link affinity bitmaps from peer-advertised ASLA sub-TLVs
-    // (RFC 9479). Walk every fragment's Ext IS-Reach (TLV 22) and
-    // MT IS-Reach (TLV 222) entries; for each entry's IsisSubAsla
-    // sub-TLV whose SABM marks Flex-Algorithm application, extract
-    // the nested IsisSubAdminGrp bitmap and stash it keyed by the
-    // neighbor_id. Multiple entries for the same neighbor_id across
-    // fragments (or across TLV 22 / TLV 222 for the same link) yield
-    // last-wins via BTreeMap::insert — by construction the producer
-    // emits the same bytes on both topologies, so any
-    // duplication is benign.
-    let mut link_affinity: BTreeMap<IsisNeighborId, ExtAdminGroup> = BTreeMap::new();
-    for f in &frags {
-        for tlv in &f.tlvs {
-            let entries: &[IsisTlvExtIsReachEntry] = match tlv {
-                IsisTlv::ExtIsReach(t) => &t.entries,
-                IsisTlv::MtIsReach(t) => &t.entries,
-                _ => continue,
-            };
-            for entry in entries {
-                for sub in &entry.subs {
-                    if let isis_packet::neigh::IsisSubTlv::Asla(asla) = sub
-                        && let Some(bitmap) = super::flex_algo::parse_asla_flex_algo_bitmap(asla)
-                    {
-                        link_affinity.insert(entry.neighbor_id, bitmap);
-                    }
-                }
-            }
-        }
-    }
-    if link_affinity.is_empty() {
-        s.peer_link_affinity.remove(sys_id);
-    } else {
-        s.peer_link_affinity.insert(*sys_id, link_affinity);
     }
 
     // Per-algorithm Prefix-SIDs from peer Ext IP-Reach (TLV 135)
@@ -627,7 +582,6 @@ pub fn insert_lsp(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>)
                 mt2_reach_v6: top.mt2_reach_map_v6.get_mut(&level),
                 srv6_end_map: top.srv6_end_map.get_mut(&level),
                 peer_fad: top.peer_fad.get_mut(&level),
-                peer_link_affinity: top.peer_link_affinity.get_mut(&level),
                 peer_algo_sid: top.peer_algo_sid.get_mut(&level),
                 peer_algos: top.peer_algos.get_mut(&level),
                 peer_algo_srv6: top.peer_algo_srv6.get_mut(&level),
@@ -761,7 +715,6 @@ pub fn remove_lsp(top: &mut IsisTop, level: Level, key: IsisLspId) {
             mt2_reach_v6: top.mt2_reach_map_v6.get_mut(&level),
             srv6_end_map: top.srv6_end_map.get_mut(&level),
             peer_fad: top.peer_fad.get_mut(&level),
-            peer_link_affinity: top.peer_link_affinity.get_mut(&level),
             peer_algo_sid: top.peer_algo_sid.get_mut(&level),
             peer_algos: top.peer_algos.get_mut(&level),
             peer_algo_srv6: top.peer_algo_srv6.get_mut(&level),
@@ -933,8 +886,6 @@ mod tests {
         let mut srv6_end_map: BTreeMap<IsisSysId, crate::isis::srv6::Srv6EndSidInfo> =
             BTreeMap::new();
         let mut peer_fad: BTreeMap<IsisSysId, BTreeMap<u8, IsisSubFlexAlgoDef>> = BTreeMap::new();
-        let mut peer_link_affinity: BTreeMap<IsisSysId, BTreeMap<IsisNeighborId, ExtAdminGroup>> =
-            BTreeMap::new();
         let mut peer_algo_sid: BTreeMap<IsisSysId, BTreeMap<(u8, Ipv4Net), SidLabelValue>> =
             BTreeMap::new();
         let mut peer_algos: BTreeMap<IsisSysId, BTreeSet<u8>> = BTreeMap::new();
@@ -954,7 +905,6 @@ mod tests {
                 mt2_reach_v6: &mut mt2_reach_v6,
                 srv6_end_map: &mut srv6_end_map,
                 peer_fad: &mut peer_fad,
-                peer_link_affinity: &mut peer_link_affinity,
                 peer_algo_sid: &mut peer_algo_sid,
                 peer_algos: &mut peer_algos,
                 peer_algo_srv6: &mut peer_algo_srv6,
@@ -986,7 +936,6 @@ mod tests {
                 mt2_reach_v6: &mut mt2_reach_v6,
                 srv6_end_map: &mut srv6_end_map,
                 peer_fad: &mut peer_fad,
-                peer_link_affinity: &mut peer_link_affinity,
                 peer_algo_sid: &mut peer_algo_sid,
                 peer_algos: &mut peer_algos,
                 peer_algo_srv6: &mut peer_algo_srv6,
@@ -1015,7 +964,6 @@ mod tests {
                 mt2_reach_v6: &mut mt2_reach_v6,
                 srv6_end_map: &mut srv6_end_map,
                 peer_fad: &mut peer_fad,
-                peer_link_affinity: &mut peer_link_affinity,
                 peer_algo_sid: &mut peer_algo_sid,
                 peer_algos: &mut peer_algos,
                 peer_algo_srv6: &mut peer_algo_srv6,
@@ -1053,8 +1001,6 @@ mod tests {
         let mut srv6_end_map: BTreeMap<IsisSysId, crate::isis::srv6::Srv6EndSidInfo> =
             BTreeMap::new();
         let mut peer_fad: BTreeMap<IsisSysId, BTreeMap<u8, IsisSubFlexAlgoDef>> = BTreeMap::new();
-        let mut peer_link_affinity: BTreeMap<IsisSysId, BTreeMap<IsisNeighborId, ExtAdminGroup>> =
-            BTreeMap::new();
         let mut peer_algo_sid: BTreeMap<IsisSysId, BTreeMap<(u8, Ipv4Net), SidLabelValue>> =
             BTreeMap::new();
         let mut peer_algos: BTreeMap<IsisSysId, BTreeSet<u8>> = BTreeMap::new();
@@ -1074,7 +1020,6 @@ mod tests {
                 mt2_reach_v6: &mut mt2_reach_v6,
                 srv6_end_map: &mut srv6_end_map,
                 peer_fad: &mut peer_fad,
-                peer_link_affinity: &mut peer_link_affinity,
                 peer_algo_sid: &mut peer_algo_sid,
                 peer_algos: &mut peer_algos,
                 peer_algo_srv6: &mut peer_algo_srv6,
@@ -1102,6 +1047,7 @@ mod tests {
             calc_type: 0,
             priority: 200,
             subs: vec![],
+            trailing: Vec::new(),
         };
         let fad_129 = IsisSubFlexAlgoDef {
             flex_algorithm: 129,
@@ -1109,6 +1055,7 @@ mod tests {
             calc_type: 0,
             priority: 128,
             subs: vec![],
+            trailing: Vec::new(),
         };
         let cap = IsisTlvRouterCap {
             router_id: Ipv4Addr::new(2, 2, 2, 2),
@@ -1131,8 +1078,6 @@ mod tests {
         let mut srv6_end_map: BTreeMap<IsisSysId, crate::isis::srv6::Srv6EndSidInfo> =
             BTreeMap::new();
         let mut peer_fad: BTreeMap<IsisSysId, BTreeMap<u8, IsisSubFlexAlgoDef>> = BTreeMap::new();
-        let mut peer_link_affinity: BTreeMap<IsisSysId, BTreeMap<IsisNeighborId, ExtAdminGroup>> =
-            BTreeMap::new();
         let mut peer_algo_sid: BTreeMap<IsisSysId, BTreeMap<(u8, Ipv4Net), SidLabelValue>> =
             BTreeMap::new();
         let mut peer_algos: BTreeMap<IsisSysId, BTreeSet<u8>> = BTreeMap::new();
@@ -1152,7 +1097,6 @@ mod tests {
                 mt2_reach_v6: &mut mt2_reach_v6,
                 srv6_end_map: &mut srv6_end_map,
                 peer_fad: &mut peer_fad,
-                peer_link_affinity: &mut peer_link_affinity,
                 peer_algo_sid: &mut peer_algo_sid,
                 peer_algos: &mut peer_algos,
                 peer_algo_srv6: &mut peer_algo_srv6,
@@ -1181,7 +1125,6 @@ mod tests {
                 mt2_reach_v6: &mut mt2_reach_v6,
                 srv6_end_map: &mut srv6_end_map,
                 peer_fad: &mut peer_fad,
-                peer_link_affinity: &mut peer_link_affinity,
                 peer_algo_sid: &mut peer_algo_sid,
                 peer_algos: &mut peer_algos,
                 peer_algo_srv6: &mut peer_algo_srv6,
@@ -1191,126 +1134,6 @@ mod tests {
             !peer_fad.contains_key(&peer),
             "FADs must clear when the fragment 0 / Router Capability TLV disappears"
         );
-    }
-
-    /// A peer Ext IS-Reach entry with an ASLA Flex-Algo bitmap must
-    /// populate `peer_link_affinity[sys_id][neighbor_id]`. An entry
-    /// without the X-bit set must be ignored. Dropping the fragment
-    /// must clear the peer entry.
-    #[test]
-    fn rebuild_populates_and_clears_peer_link_affinity() {
-        let mut lsdb = Lsdb::default();
-        let peer = sys(7);
-        let nbr_a = IsisNeighborId {
-            id: [1, 1, 1, 1, 1, 1, 0],
-        };
-        let nbr_b = IsisNeighborId {
-            id: [2, 2, 2, 2, 2, 2, 0],
-        };
-
-        // Entry A: ASLA with Flex-Algo X-bit (0x10) + AdminGrp.
-        let asla_flex = IsisSubAsla {
-            l_flag: false,
-            sabm: vec![0x10],
-            udabm: vec![],
-            subs: vec![isis_packet::neigh::IsisSubTlv::AdminGrp(IsisSubAdminGrp {
-                groups: vec![0b1001], // bits 0 and 3 set
-            })],
-        };
-        // Entry B: ASLA with only R-bit (0x80) — must be ignored.
-        let asla_rsvp = IsisSubAsla {
-            l_flag: false,
-            sabm: vec![0x80],
-            udabm: vec![],
-            subs: vec![isis_packet::neigh::IsisSubTlv::AdminGrp(IsisSubAdminGrp {
-                groups: vec![0xFF],
-            })],
-        };
-        let ext_is_reach = IsisTlvExtIsReach {
-            entries: vec![
-                IsisTlvExtIsReachEntry {
-                    neighbor_id: nbr_a,
-                    metric: 10,
-                    subs: vec![isis_packet::neigh::IsisSubTlv::Asla(asla_flex)],
-                },
-                IsisTlvExtIsReachEntry {
-                    neighbor_id: nbr_b,
-                    metric: 10,
-                    subs: vec![isis_packet::neigh::IsisSubTlv::Asla(asla_rsvp)],
-                },
-            ],
-        };
-        let mut f0 = frag(peer, 0);
-        f0.tlvs.push(IsisTlv::ExtIsReach(ext_is_reach));
-        lsdb.map.insert(f0.lsp_id, Lsa::new(f0));
-
-        let mut hostname = Hostname::default();
-        let mut label_map = IsisLabelMap::default();
-        let mut reach_v4 = ReachMapV4::default();
-        let mut reach_v6 = ReachMapV6::default();
-        let mut mt_membership: BTreeMap<IsisSysId, BTreeSet<MtId>> = BTreeMap::new();
-        let mut mt2_reach_v6 = ReachMapV6::default();
-        let mut srv6_end_map: BTreeMap<IsisSysId, crate::isis::srv6::Srv6EndSidInfo> =
-            BTreeMap::new();
-        let mut peer_fad: BTreeMap<IsisSysId, BTreeMap<u8, IsisSubFlexAlgoDef>> = BTreeMap::new();
-        let mut peer_link_affinity: BTreeMap<IsisSysId, BTreeMap<IsisNeighborId, ExtAdminGroup>> =
-            BTreeMap::new();
-        let mut peer_algo_sid: BTreeMap<IsisSysId, BTreeMap<(u8, Ipv4Net), SidLabelValue>> =
-            BTreeMap::new();
-        let mut peer_algos: BTreeMap<IsisSysId, BTreeSet<u8>> = BTreeMap::new();
-        let mut peer_algo_srv6: BTreeMap<IsisSysId, BTreeMap<u8, crate::isis::srv6::Srv6AlgoLoc>> =
-            BTreeMap::new();
-
-        rebuild_sys_state(
-            &lsdb,
-            &sys(0xFF),
-            &peer,
-            SysStateRefs {
-                hostname: &mut hostname,
-                label_map: &mut label_map,
-                reach_v4: &mut reach_v4,
-                reach_v6: &mut reach_v6,
-                mt_membership: &mut mt_membership,
-                mt2_reach_v6: &mut mt2_reach_v6,
-                srv6_end_map: &mut srv6_end_map,
-                peer_fad: &mut peer_fad,
-                peer_link_affinity: &mut peer_link_affinity,
-                peer_algo_sid: &mut peer_algo_sid,
-                peer_algos: &mut peer_algos,
-                peer_algo_srv6: &mut peer_algo_srv6,
-            },
-        );
-
-        let entries = peer_link_affinity
-            .get(&peer)
-            .expect("affinity map must populate for the Flex-Algo entry");
-        assert_eq!(entries.len(), 1, "RSVP-only entry must not be cached");
-        let bitmap = entries.get(&nbr_a).expect("nbr_a bitmap");
-        assert_eq!(bitmap.words, vec![0b1001]);
-        assert!(!entries.contains_key(&nbr_b));
-
-        // Drop the fragment — affinity map must clear.
-        lsdb.map.remove(&IsisLspId::new(peer, 0, 0));
-        rebuild_sys_state(
-            &lsdb,
-            &sys(0xFF),
-            &peer,
-            SysStateRefs {
-                hostname: &mut hostname,
-                label_map: &mut label_map,
-                reach_v4: &mut reach_v4,
-                reach_v6: &mut reach_v6,
-                mt_membership: &mut mt_membership,
-                mt2_reach_v6: &mut mt2_reach_v6,
-                srv6_end_map: &mut srv6_end_map,
-                peer_fad: &mut peer_fad,
-                peer_link_affinity: &mut peer_link_affinity,
-                peer_algo_sid: &mut peer_algo_sid,
-                peer_algos: &mut peer_algos,
-                peer_algo_srv6: &mut peer_algo_srv6,
-            },
-        );
-        assert!(!peer_link_affinity.contains_key(&peer));
     }
 
     /// A peer Ext IP-Reach entry with mixed algo-0 + flex-algo
@@ -1357,8 +1180,6 @@ mod tests {
         let mut srv6_end_map: BTreeMap<IsisSysId, crate::isis::srv6::Srv6EndSidInfo> =
             BTreeMap::new();
         let mut peer_fad: BTreeMap<IsisSysId, BTreeMap<u8, IsisSubFlexAlgoDef>> = BTreeMap::new();
-        let mut peer_link_affinity: BTreeMap<IsisSysId, BTreeMap<IsisNeighborId, ExtAdminGroup>> =
-            BTreeMap::new();
         let mut peer_algo_sid: BTreeMap<IsisSysId, BTreeMap<(u8, Ipv4Net), SidLabelValue>> =
             BTreeMap::new();
         let mut peer_algos: BTreeMap<IsisSysId, BTreeSet<u8>> = BTreeMap::new();
@@ -1378,7 +1199,6 @@ mod tests {
                 mt2_reach_v6: &mut mt2_reach_v6,
                 srv6_end_map: &mut srv6_end_map,
                 peer_fad: &mut peer_fad,
-                peer_link_affinity: &mut peer_link_affinity,
                 peer_algo_sid: &mut peer_algo_sid,
                 peer_algos: &mut peer_algos,
                 peer_algo_srv6: &mut peer_algo_srv6,
@@ -1409,7 +1229,6 @@ mod tests {
                 mt2_reach_v6: &mut mt2_reach_v6,
                 srv6_end_map: &mut srv6_end_map,
                 peer_fad: &mut peer_fad,
-                peer_link_affinity: &mut peer_link_affinity,
                 peer_algo_sid: &mut peer_algo_sid,
                 peer_algos: &mut peer_algos,
                 peer_algo_srv6: &mut peer_algo_srv6,
@@ -1448,6 +1267,7 @@ mod tests {
                     calc_type: 0,
                     priority: 200,
                     subs,
+                    trailing: Vec::new(),
                 })],
             })
         };
@@ -1495,6 +1315,7 @@ mod tests {
                 calc_type: 0,
                 priority: 200,
                 subs: vec![],
+                trailing: Vec::new(),
             })],
         }));
         lsdb.map.insert(f0.lsp_id, Lsa::new(f0.clone()));
@@ -1531,7 +1352,6 @@ mod tests {
                 mt2_reach_v6: &mut ReachMapV6::default(),
                 srv6_end_map: &mut BTreeMap::new(),
                 peer_fad,
-                peer_link_affinity: &mut BTreeMap::new(),
                 peer_algo_sid: &mut BTreeMap::new(),
                 peer_algos: &mut BTreeMap::new(),
                 peer_algo_srv6: &mut BTreeMap::new(),
@@ -1593,8 +1413,6 @@ mod tests {
         let mut srv6_end_map: BTreeMap<IsisSysId, crate::isis::srv6::Srv6EndSidInfo> =
             BTreeMap::new();
         let mut peer_fad: BTreeMap<IsisSysId, BTreeMap<u8, IsisSubFlexAlgoDef>> = BTreeMap::new();
-        let mut peer_link_affinity: BTreeMap<IsisSysId, BTreeMap<IsisNeighborId, ExtAdminGroup>> =
-            BTreeMap::new();
         let mut peer_algo_sid: BTreeMap<IsisSysId, BTreeMap<(u8, Ipv4Net), SidLabelValue>> =
             BTreeMap::new();
         let mut peer_algos: BTreeMap<IsisSysId, BTreeSet<u8>> = BTreeMap::new();
@@ -1614,7 +1432,6 @@ mod tests {
                 mt2_reach_v6: &mut mt2_reach_v6,
                 srv6_end_map: &mut srv6_end_map,
                 peer_fad: &mut peer_fad,
-                peer_link_affinity: &mut peer_link_affinity,
                 peer_algo_sid: &mut peer_algo_sid,
                 peer_algos: &mut peer_algos,
                 peer_algo_srv6: &mut peer_algo_srv6,
@@ -1644,7 +1461,6 @@ mod tests {
                 mt2_reach_v6: &mut mt2_reach_v6,
                 srv6_end_map: &mut srv6_end_map,
                 peer_fad: &mut peer_fad,
-                peer_link_affinity: &mut peer_link_affinity,
                 peer_algo_sid: &mut peer_algo_sid,
                 peer_algos: &mut peer_algos,
                 peer_algo_srv6: &mut peer_algo_srv6,
@@ -1686,8 +1502,6 @@ mod tests {
         let mut srv6_end_map: BTreeMap<IsisSysId, crate::isis::srv6::Srv6EndSidInfo> =
             BTreeMap::new();
         let mut peer_fad: BTreeMap<IsisSysId, BTreeMap<u8, IsisSubFlexAlgoDef>> = BTreeMap::new();
-        let mut peer_link_affinity: BTreeMap<IsisSysId, BTreeMap<IsisNeighborId, ExtAdminGroup>> =
-            BTreeMap::new();
         let mut peer_algo_sid: BTreeMap<IsisSysId, BTreeMap<(u8, Ipv4Net), SidLabelValue>> =
             BTreeMap::new();
         let mut peer_algos: BTreeMap<IsisSysId, BTreeSet<u8>> = BTreeMap::new();
@@ -1707,7 +1521,6 @@ mod tests {
                 mt2_reach_v6: &mut mt2_reach_v6,
                 srv6_end_map: &mut srv6_end_map,
                 peer_fad: &mut peer_fad,
-                peer_link_affinity: &mut peer_link_affinity,
                 peer_algo_sid: &mut peer_algo_sid,
                 peer_algos: &mut peer_algos,
                 peer_algo_srv6: &mut peer_algo_srv6,
@@ -1739,7 +1552,6 @@ mod tests {
                 mt2_reach_v6: &mut mt2_reach_v6,
                 srv6_end_map: &mut srv6_end_map,
                 peer_fad: &mut peer_fad,
-                peer_link_affinity: &mut peer_link_affinity,
                 peer_algo_sid: &mut peer_algo_sid,
                 peer_algos: &mut peer_algos,
                 peer_algo_srv6: &mut peer_algo_srv6,

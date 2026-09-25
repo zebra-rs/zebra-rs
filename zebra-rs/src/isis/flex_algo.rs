@@ -3,8 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use isis_packet::neigh::IsisSubTlv as NeighSubTlv;
 use isis_packet::{
     Algo, ExtAdminGroup, FadSubTlv, IsisSubAdminGrp, IsisSubAsla, IsisSubFadExcludeAg,
-    IsisSubFadExcludeSrlg, IsisSubFadFlags, IsisSubFadIncludeAllAg, IsisSubFadIncludeAnyAg,
-    IsisSubFlexAlgoDef, IsisSubPrefixSid, IsisTlvExtIsReachEntry, PrefixSidFlags, SidLabelValue,
+    IsisSubFadExcludeMaxLinkLoss, IsisSubFadExcludeSrlg, IsisSubFadFlags, IsisSubFadIncludeAllAg,
+    IsisSubFadIncludeAnyAg, IsisSubFlexAlgoDef, IsisSubPrefixSid, IsisTlvExtIsReachEntry,
+    PrefixSidFlags, SidLabelValue,
 };
 
 use crate::config::{Args, ConfigOp};
@@ -19,8 +20,8 @@ use super::srlg::SrlgGroup;
 // / inst.rs) keep resolving. Only the isis-packet wire builders and the
 // IS-IS callback shims below stay here.
 pub use crate::flex_algo::{
-    FadConstraints, FadMetricType, FlexAlgoConfig, FlexAlgoEntry, Participation, Unsupported,
-    link_passes_constraints, local_link_affinity,
+    FadConstraints, FadMetricType, FlexAlgoConfig, FlexAlgoEntry, LinkAttrs, LossPercent,
+    Participation, Pruned, Unsupported, link_prune_reason,
 };
 use isis_packet::IsisSysId;
 
@@ -42,40 +43,20 @@ pub fn parse_per_algo_prefix_sids(
     })
 }
 
-/// Extract the Extended Admin Group bitmap from a peer-advertised
-/// ASLA sub-TLV iff the ASLA's SABM marks it as applying to the
-/// Flex-Algorithm application (RFC 9479 §4.2 X-bit). Returns the
-/// nested IsisSubAdminGrp's bitmap as an ExtAdminGroup; returns
-/// `None` when the SABM byte 0 is missing, the X-bit is clear, or
-/// no AdminGrp sub-sub-TLV is present. Mirrors the producer-side
-/// `build_link_asla` so SPF gating sees the same bits a sender
-/// sets.
-pub fn parse_asla_flex_algo_bitmap(asla: &IsisSubAsla) -> Option<ExtAdminGroup> {
-    let first = asla.sabm.first()?;
-    if first & SABM_FLEX_ALGO == 0 {
-        return None;
-    }
-    for sub in &asla.subs {
-        if let NeighSubTlv::AdminGrp(g) = sub {
-            return Some(ExtAdminGroup {
-                words: g.groups.clone(),
-            });
-        }
-    }
-    None
-}
-
-/// The Min delay to cost a peer's link at for metric-type 1, or `None`
-/// when the link must be pruned (RFC 9350 §15).
+/// A peer's link attribute as the Flexible Algorithm application sees it
+/// (RFC 9479 §4.2), extracted from one sub-TLV by `pick`. Every
+/// Flex-Algorithm attribute — affinity, Min delay, loss — is read through
+/// here, so no link has one attribute selected by one rule and another by
+/// a different one.
 ///
-/// RFC 9350 §12 is strict about where this may come from: Flex-Algorithm
+/// RFC 9350 §12 is strict about where these may come from: Flex-Algorithm
 /// link attributes "MUST use the ASLA advertisements ... unless, in the
 /// case of IS-IS, the L-flag is set". A legacy inline sub-TLV is
 /// therefore *not* a fallback for a peer that simply never emitted an
-/// ASLA — that link is pruned, and every conformant router in the domain
-/// prunes it identically. Silently accepting the legacy value would give
-/// this router a shorter edge than its neighbours compute, which is how
-/// delay-based topologies end up forwarding in loops.
+/// ASLA — every conformant router in the domain reads nothing there, and
+/// silently accepting the legacy value would give this router a topology
+/// its neighbours do not compute, which is how Flex-Algorithm forwarding
+/// ends up in loops.
 ///
 /// Selecting the applicable advertisements follows RFC 9479 §4.2:
 ///
@@ -86,20 +67,68 @@ pub fn parse_asla_flex_algo_bitmap(asla: &IsisSubAsla) -> Option<ExtAdminGroup> 
 ///    sub-TLVs for a given link" and, "in cases where this constraint
 ///    is violated, MUST be considered set", so one L-set advertisement
 ///    settles it for the whole set;
-/// 3. otherwise the answer is the first Min/Max delay across the
-///    applicable set, which may be in any of them — attributes for one
-///    application may be split across containers. If none of them
-///    carries one, the answer is `None`, not a peek at the legacy copy;
-/// 4. no applicable ASLA at all means no Flex-Algorithm delay.
-pub fn peer_min_delay(entry: &IsisTlvExtIsReachEntry) -> Option<u32> {
+/// 3. otherwise the answer is the first occurrence across the applicable
+///    set, which may be in any of them — attributes for one application
+///    may be split across containers. If none of them carries one, the
+///    answer is `None`, not a peek at the legacy copy;
+/// 4. no applicable ASLA at all means no Flex-Algorithm attribute.
+fn peer_link_attr<T>(
+    entry: &IsisTlvExtIsReachEntry,
+    pick: impl Fn(&NeighSubTlv) -> Option<T>,
+) -> Option<T> {
     let applicable = applicable_aslas(entry);
     if applicable.is_empty() {
         return None;
     }
     if applicable.iter().any(|a| a.l_flag) {
-        return inline_min_delay(entry);
+        return entry.subs.iter().find_map(&pick);
     }
-    applicable.into_iter().find_map(nested_min_delay)
+    applicable
+        .into_iter()
+        .flat_map(|a| a.subs.iter())
+        .find_map(pick)
+}
+
+/// The Min delay to cost a peer's link at for metric-type 1, or `None`
+/// when the link must be pruned (RFC 9350 §15).
+pub fn peer_min_delay(entry: &IsisTlvExtIsReachEntry) -> Option<u32> {
+    peer_link_attr(entry, |sub| match sub {
+        NeighSubTlv::MinMaxLinkDelay(d) => Some(d.min_delay),
+        _ => None,
+    })
+}
+
+/// The unidirectional loss a peer advertises for its link (RFC 8570 §4.4),
+/// in raw units, for the link-loss constraint. `None` keeps the link.
+pub fn peer_link_loss(entry: &IsisTlvExtIsReachEntry) -> Option<u32> {
+    peer_link_attr(entry, |sub| match sub {
+        NeighSubTlv::LinkLoss(l) => Some(l.loss),
+        _ => None,
+    })
+}
+
+/// A peer link's affinity: its Extended Admin Group (RFC 7308). `None`
+/// is the empty bitmap.
+pub fn peer_link_affinity(entry: &IsisTlvExtIsReachEntry) -> Option<ExtAdminGroup> {
+    peer_link_attr(entry, |sub| match sub {
+        NeighSubTlv::AdminGrp(g) => Some(ExtAdminGroup {
+            words: g.groups.clone(),
+        }),
+        _ => None,
+    })
+}
+
+/// Everything the pruning rules read from one link, as its reach entry
+/// advertises it. This router's own links are read the same way, from our
+/// own LSP: each entry there carries exactly what we advertise for that
+/// link — parallel links to one neighbour each their own — so every
+/// router, this one included, prunes from the same LSDB and computes the
+/// same topology.
+pub fn advertised_link_attrs(entry: &IsisTlvExtIsReachEntry) -> LinkAttrs {
+    LinkAttrs {
+        affinity: peer_link_affinity(entry),
+        loss: peer_link_loss(entry),
+    }
 }
 
 /// The ASLAs governing Flex-Algorithm on this link, per RFC 9479 §4.2.
@@ -133,23 +162,6 @@ fn applicable_aslas(entry: &IsisTlvExtIsReachEntry) -> Vec<&IsisSubAsla> {
     } else {
         explicit
     }
-}
-
-/// Min field of the Min/Max Link Delay nested in this ASLA.
-fn nested_min_delay(asla: &IsisSubAsla) -> Option<u32> {
-    asla.subs.iter().find_map(|sub| match sub {
-        NeighSubTlv::MinMaxLinkDelay(d) => Some(d.min_delay),
-        _ => None,
-    })
-}
-
-/// Min field of the legacy (inline) Min/Max Link Delay — reachable only
-/// via an applicable ASLA with the L-flag set.
-fn inline_min_delay(entry: &IsisTlvExtIsReachEntry) -> Option<u32> {
-    entry.subs.iter().find_map(|sub| match sub {
-        NeighSubTlv::MinMaxLinkDelay(d) => Some(d.min_delay),
-        _ => None,
-    })
 }
 
 /// SABM byte (RFC 9479 §4.2) with the Flex-Algorithm (X-bit) set.
@@ -310,6 +322,11 @@ pub fn build_fad_subs(
                 subs.push(FadSubTlv::ExcludeSrlg(IsisSubFadExcludeSrlg { srlgs: ids }));
             }
         }
+        if let Some(max_loss) = entry.exclude_max_link_loss_units() {
+            subs.push(FadSubTlv::ExcludeMaxLinkLoss(
+                IsisSubFadExcludeMaxLinkLoss { max_loss },
+            ));
+        }
 
         out.push(IsisSubFlexAlgoDef {
             flex_algorithm: algo,
@@ -317,6 +334,7 @@ pub fn build_fad_subs(
             calc_type: 0, // Only SPF defined today (RFC 9350 §5.1).
             priority,
             subs,
+            trailing: Vec::new(),
         });
     }
     out
@@ -332,14 +350,15 @@ pub fn build_fad_subs(
 // algorithm, and Flex-Algo forwarding then loops.
 
 /// Whether one FAD sub-TLV counts at all. RFC 9350 §5.3: an algorithm
-/// outside 128..=255 "MUST be ignored". §6.1–§6.5: each constraint
-/// sub-TLV "MUST NOT appear more than once in a single IS-IS FAD sub-TLV.
-/// If it appears more than once, the IS-IS FAD sub-TLV MUST be ignored".
+/// outside 128..=255 "MUST be ignored". §6.1–§6.5, and the link-loss
+/// draft for its own sub-TLV: each constraint sub-TLV "MUST NOT appear
+/// more than once in a single IS-IS FAD sub-TLV. If it appears more than
+/// once, the IS-IS FAD sub-TLV MUST be ignored".
 fn fad_valid(fad: &IsisSubFlexAlgoDef) -> bool {
     if fad.flex_algorithm < 128 {
         return false;
     }
-    let mut seen = [false; 5];
+    let mut seen = [false; 6];
     for sub in &fad.subs {
         let slot = match sub {
             FadSubTlv::ExcludeAg(_) => 0,
@@ -347,6 +366,9 @@ fn fad_valid(fad: &IsisSubFlexAlgoDef) -> bool {
             FadSubTlv::IncludeAllAg(_) => 2,
             FadSubTlv::Flags(_) => 3,
             FadSubTlv::ExcludeSrlg(_) => 4,
+            // draft-ietf-lsr-flex-algo-link-loss §2.1: "If it appears more
+            // than once, the IS-IS FAD Sub-TLV MUST be ignored".
+            FadSubTlv::ExcludeMaxLinkLoss(_) => 5,
             FadSubTlv::Unknown(_) => continue,
         };
         if std::mem::replace(&mut seen[slot], true) {
@@ -367,7 +389,8 @@ fn fad_valid(fad: &IsisSubFlexAlgoDef) -> bool {
 ///   ... MUST be used, and any other occurrences MUST be ignored", except
 ///   Exclude SRLG, which "MAY appear more than once in the set" and so
 ///   accumulates;
-/// - unknown sub-TLVs are all kept: any one of them stops participation.
+/// - unknown sub-TLVs are all kept: any one of them stops participation,
+///   and so does a truncated definition in any fragment.
 pub fn merge_fads<'a>(
     fads: impl IntoIterator<Item = &'a IsisSubFlexAlgoDef>,
 ) -> BTreeMap<u8, IsisSubFlexAlgoDef> {
@@ -377,6 +400,8 @@ pub fn merge_fads<'a>(
             merged.insert(fad.flex_algorithm, fad.clone());
             continue;
         };
+        // A truncated fragment leaves the whole set unreadable.
+        into.trailing.extend_from_slice(&fad.trailing);
         for sub in &fad.subs {
             let present = into
                 .subs
@@ -424,6 +449,9 @@ pub fn winning_fad(
 /// The constraints to compute with, or the first element of the winning
 /// definition this router does not support (RFC 9350 §5.3).
 pub fn fad_constraints(fad: &IsisSubFlexAlgoDef) -> Result<FadConstraints, Unsupported> {
+    if !fad.trailing.is_empty() {
+        return Err(Unsupported::Truncated);
+    }
     if fad.calc_type != 0 {
         return Err(Unsupported::CalcType(fad.calc_type));
     }
@@ -447,6 +475,10 @@ pub fn fad_constraints(fad: &IsisSubFlexAlgoDef) -> Result<FadConstraints, Unsup
                 return Err(Unsupported::ExcludeSrlg);
             }
             FadSubTlv::ExcludeSrlg(_) => {}
+            FadSubTlv::ExcludeMaxLinkLoss(v) => c.max_link_loss = Some(v.max_loss),
+            // A FAEML of the wrong length lands here too, as sub-TLV 252:
+            // a constraint this router cannot read, so it cannot compute
+            // the algorithm without guessing at it.
             FadSubTlv::Unknown(u) => return Err(Unsupported::SubTlv(u.code.into())),
         }
     }
@@ -566,6 +598,10 @@ flex_algo_cb!(
 );
 flex_algo_cb!(cb_srlg_exclude, "/router/isis/flex-algo/srlg-exclude");
 flex_algo_cb!(
+    cb_exclude_max_link_loss,
+    "/router/isis/flex-algo/exclude-max-link-loss"
+);
+flex_algo_cb!(
     cb_frr_disable,
     "/router/isis/flex-algo/fast-reroute/disable"
 );
@@ -595,6 +631,10 @@ pub fn callback_register(isis: &mut Isis) {
         cb_affinity_exclude_any,
     );
     isis.callback_add("/router/isis/flex-algo/srlg-exclude", cb_srlg_exclude);
+    isis.callback_add(
+        "/router/isis/flex-algo/exclude-max-link-loss",
+        cb_exclude_max_link_loss,
+    );
     isis.callback_add(
         "/router/isis/flex-algo/fast-reroute/disable",
         cb_frr_disable,
@@ -714,60 +754,6 @@ mod tests {
                 (129, SidLabelValue::Label(20129)),
             ]
         );
-    }
-
-    #[test]
-    fn parse_asla_flex_algo_bitmap_returns_none_without_x_bit() {
-        // SABM = [0x80] sets R-bit (RSVP-TE) but not X-bit.
-        let asla = IsisSubAsla {
-            l_flag: false,
-            sabm: vec![0x80],
-            udabm: vec![],
-            subs: vec![NeighSubTlv::AdminGrp(IsisSubAdminGrp {
-                groups: vec![0xFF],
-            })],
-        };
-        assert!(parse_asla_flex_algo_bitmap(&asla).is_none());
-    }
-
-    #[test]
-    fn parse_asla_flex_algo_bitmap_returns_none_with_empty_sabm() {
-        let asla = IsisSubAsla {
-            l_flag: false,
-            sabm: vec![],
-            udabm: vec![],
-            subs: vec![NeighSubTlv::AdminGrp(IsisSubAdminGrp {
-                groups: vec![0xFF],
-            })],
-        };
-        assert!(parse_asla_flex_algo_bitmap(&asla).is_none());
-    }
-
-    #[test]
-    fn parse_asla_flex_algo_bitmap_returns_none_when_no_admin_grp_nested() {
-        let asla = IsisSubAsla {
-            l_flag: false,
-            sabm: vec![SABM_FLEX_ALGO],
-            udabm: vec![],
-            subs: vec![],
-        };
-        assert!(parse_asla_flex_algo_bitmap(&asla).is_none());
-    }
-
-    #[test]
-    fn parse_asla_flex_algo_bitmap_extracts_admin_grp_when_x_bit_set() {
-        // SABM = [0x90] sets R-bit AND X-bit — both are honored; X
-        // alone is enough to surface the bitmap.
-        let asla = IsisSubAsla {
-            l_flag: false,
-            sabm: vec![0x90],
-            udabm: vec![],
-            subs: vec![NeighSubTlv::AdminGrp(IsisSubAdminGrp {
-                groups: vec![0x11, 0x80000000],
-            })],
-        };
-        let bitmap = parse_asla_flex_algo_bitmap(&asla).expect("bitmap");
-        assert_eq!(bitmap.words, vec![0x11, 0x80000000]);
     }
 
     fn reach_entry(subs: Vec<NeighSubTlv>) -> IsisTlvExtIsReachEntry {
@@ -944,10 +930,10 @@ mod tests {
         assert_eq!(peer_min_delay(&entry), Some(1_500));
     }
 
+    /// Producer packs the affinity into the flex-algo ASLA; the consumer
+    /// recovers the bitmap bit-for-bit.
     #[test]
-    fn parse_asla_flex_algo_bitmap_round_trips_through_build_link_asla() {
-        // Build an ASLA on the producer side, parse it on the
-        // consumer side — the bitmap must round-trip bit-for-bit.
+    fn peer_link_affinity_round_trips_through_build_link_asla() {
         let mut am = AffinityMap::new();
         for (name, bit) in [("blue", "0"), ("red", "200")] {
             am.exec(
@@ -959,12 +945,115 @@ mod tests {
             am.commit();
         }
         let asla = build_link_asla(&affinity_set(&["blue", "red"]), &am, Vec::new()).expect("ASLA");
-        let parsed = parse_asla_flex_algo_bitmap(&asla).expect("bitmap");
+        let parsed =
+            peer_link_affinity(&reach_entry(vec![NeighSubTlv::Asla(asla)])).expect("bitmap");
         // bit 0 in word 0, bit (200 - 6*32 = 8) in word 6.
         assert_eq!(parsed.words.len(), 7);
         assert!(parsed.get(0));
         assert!(parsed.get(200));
         assert!(!parsed.get(1));
+    }
+
+    fn admin_grp(words: Vec<u32>) -> NeighSubTlv {
+        NeighSubTlv::AdminGrp(IsisSubAdminGrp { groups: words })
+    }
+
+    fn loss(value: u32) -> NeighSubTlv {
+        NeighSubTlv::LinkLoss(isis_packet::IsisSubLinkLoss {
+            anomalous: false,
+            loss: value,
+        })
+    }
+
+    /// Decision 6: affinity is selected by the same RFC 9479 §4.2 rule as
+    /// every other Flex-Algorithm attribute — an X-bit ASLA; failing one,
+    /// a zero-length-mask ASLA; the legacy copy only when the L flag says
+    /// so; nothing from an ASLA scoped to another application.
+    #[test]
+    fn peer_link_affinity_follows_rfc_9479() {
+        let x = |subs| asla(vec![SABM_FLEX_ALGO], false, subs);
+        // X bit, alongside R — the X bit is what counts.
+        let both = asla(vec![0x90], false, vec![admin_grp(vec![0x11, 0x8000_0000])]);
+        assert_eq!(
+            peer_link_affinity(&reach_entry(vec![both])).map(|g| g.words),
+            Some(vec![0x11, 0x8000_0000])
+        );
+        // Another application's ASLA only.
+        let rsvp = asla(vec![0x80], false, vec![admin_grp(vec![0xFF])]);
+        assert_eq!(peer_link_affinity(&reach_entry(vec![rsvp.clone()])), None);
+        // A zero-length mask applies to every application...
+        let generic = asla(vec![], false, vec![admin_grp(vec![0x2])]);
+        assert_eq!(
+            peer_link_affinity(&reach_entry(vec![rsvp, generic.clone()])).map(|g| g.words),
+            Some(vec![0x2])
+        );
+        // ...unless an X-bit ASLA exists, in either order.
+        let specific = x(vec![admin_grp(vec![0x4])]);
+        for entry in [
+            reach_entry(vec![generic.clone(), specific.clone()]),
+            reach_entry(vec![specific.clone(), generic]),
+        ] {
+            assert_eq!(peer_link_affinity(&entry).map(|g| g.words), Some(vec![0x4]));
+        }
+        // The L flag sends the reader to the legacy sub-TLV.
+        let legacy = reach_entry(vec![x(vec![]), admin_grp(vec![0x8])]);
+        assert_eq!(peer_link_affinity(&legacy), None, "L clear: no legacy");
+        let legacy = reach_entry(vec![
+            asla(vec![SABM_FLEX_ALGO], true, vec![]),
+            admin_grp(vec![0x8]),
+        ]);
+        assert_eq!(
+            peer_link_affinity(&legacy).map(|g| g.words),
+            Some(vec![0x8])
+        );
+        // No ASLA at all: no Flex-Algorithm affinity, legacy or not.
+        assert_eq!(
+            peer_link_affinity(&reach_entry(vec![admin_grp(vec![0x8])])),
+            None
+        );
+    }
+
+    /// The loss the link-loss rule compares, selected like every other
+    /// attribute — including through the L flag, as the draft spells out —
+    /// and returned as the raw value, 0xFFFFFF included: RFC 8570 gives it
+    /// no special meaning.
+    #[test]
+    fn peer_link_loss_follows_rfc_9479() {
+        let x = |l_flag, subs| asla(vec![SABM_FLEX_ALGO], l_flag, subs);
+        assert_eq!(
+            peer_link_loss(&reach_entry(vec![loss(7), x(false, vec![loss(9)])])),
+            Some(9),
+            "the ASLA copy, not the legacy one"
+        );
+        assert_eq!(peer_link_loss(&reach_entry(vec![loss(7)])), None);
+        assert_eq!(
+            peer_link_loss(&reach_entry(vec![x(false, vec![]), loss(7)])),
+            None
+        );
+        assert_eq!(
+            peer_link_loss(&reach_entry(vec![x(true, vec![]), loss(7)])),
+            Some(7)
+        );
+        assert_eq!(
+            peer_link_loss(&reach_entry(vec![asla(vec![], false, vec![loss(5)])])),
+            Some(5)
+        );
+        assert_eq!(
+            peer_link_loss(&reach_entry(vec![x(false, vec![loss(0x00FF_FFFF)])])),
+            Some(0x00FF_FFFF)
+        );
+        // Split across containers: affinity in one, loss in the next.
+        let entry = reach_entry(vec![
+            x(false, vec![admin_grp(vec![1])]),
+            x(false, vec![loss(3)]),
+        ]);
+        assert_eq!(
+            advertised_link_attrs(&entry),
+            LinkAttrs {
+                affinity: Some(ExtAdminGroup { words: vec![1] }),
+                loss: Some(3),
+            }
+        );
     }
 
     #[test]
@@ -1108,6 +1197,7 @@ mod tests {
             calc_type: 0,
             priority,
             subs,
+            trailing: Vec::new(),
         }
     }
 
@@ -1239,14 +1329,86 @@ mod tests {
             "excludes nothing"
         );
         let unknown = FadSubTlv::Unknown(isis_packet::IsisSubTlvUnknown {
-            code: 252,
+            code: 99,
             len: 3,
             data: vec![0, 0, 1],
         });
         assert_eq!(
             with(fad(128, 128, vec![unknown])),
+            Err(Unsupported::SubTlv(99))
+        );
+    }
+
+    fn max_loss(max_loss: u32) -> FadSubTlv {
+        FadSubTlv::ExcludeMaxLinkLoss(IsisSubFadExcludeMaxLinkLoss { max_loss })
+    }
+
+    /// The link-loss constraint is supported: the winner's value is what
+    /// the computation prunes with. One the codec could not read — the
+    /// wrong length, kept as sub-TLV 252 — stops participation instead:
+    /// computing without it would be guessing at the definition.
+    #[test]
+    fn a_winning_max_link_loss_is_computed_with() {
+        assert_eq!(
+            fad_constraints(&fad(128, 128, vec![max_loss(1_666_667)])).map(|c| c.max_link_loss),
+            Ok(Some(1_666_667))
+        );
+        assert_eq!(
+            fad_constraints(&fad(128, 128, vec![])).map(|c| c.max_link_loss),
+            Ok(None)
+        );
+        let unreadable = FadSubTlv::Unknown(isis_packet::IsisSubTlvUnknown {
+            code: 252,
+            len: 4,
+            data: vec![0, 0, 0, 1],
+        });
+        assert_eq!(
+            fad_constraints(&fad(128, 128, vec![unreadable])),
             Err(Unsupported::SubTlv(252))
         );
+    }
+
+    /// A definition with a sub-TLV running past its end cannot be read in
+    /// full — the missing part may be the loss constraint — so it stops
+    /// participation rather than being computed without it, whichever
+    /// fragment the truncated copy came in.
+    #[test]
+    fn a_truncated_definition_stops_participation() {
+        let mut truncated = fad(128, 128, vec![]);
+        truncated.trailing = vec![252, 3, 0x19, 0x6E];
+        assert_eq!(fad_constraints(&truncated), Err(Unsupported::Truncated));
+
+        let whole = fad(128, 128, vec![max_loss(5)]);
+        let merged = merge_fads([&whole, &truncated]);
+        assert_eq!(fad_constraints(&merged[&128]), Err(Unsupported::Truncated));
+        let merged = merge_fads([&whole]);
+        assert!(fad_constraints(&merged[&128]).is_ok());
+    }
+
+    /// The draft: "The FAEML sub-TLV MUST appear at most once in the FAD
+    /// Sub-TLV. If it appears more than once, the IS-IS FAD Sub-TLV MUST be
+    /// ignored" — so that definition is no candidate, and a lower-priority
+    /// one wins. Across fragments, as for every constraint, the first
+    /// occurrence in the lowest-numbered LSP is used.
+    #[test]
+    fn a_duplicate_max_link_loss_invalidates_the_definition() {
+        let twice = fad(128, 200, vec![max_loss(1), max_loss(2)]);
+        assert!(merge_fads([&twice]).is_empty());
+
+        let p = peers(&[(2, twice), (3, fad(128, 100, vec![max_loss(7)]))]);
+        // `peers` holds merged definitions; the invalid one must never get
+        // that far, so merge each peer's as the LSDB rebuild does.
+        let merged: BTreeMap<IsisSysId, BTreeMap<u8, IsisSubFlexAlgoDef>> = p
+            .iter()
+            .map(|(id, fads)| (*id, merge_fads(fads.values())))
+            .collect();
+        let w = winning_fad(128, &merged, &BTreeMap::new(), &sys(9)).expect("winner");
+        assert_eq!(w.originator, sys(3), "the valid, lower-priority one");
+
+        let frag0 = fad(128, 128, vec![max_loss(5)]);
+        let frag1 = fad(128, 128, vec![max_loss(6)]);
+        let merged = merge_fads([&frag0, &frag1]);
+        assert_eq!(merged[&128].subs, vec![max_loss(5)], "first occurrence");
     }
 
     /// Selection covers configured algorithms only, computes with the
@@ -1407,6 +1569,66 @@ mod tests {
             }
         }
         assert!(has_excl && has_flags && has_srlg);
+    }
+
+    /// `exclude-max-link-loss` is advertised in RFC 8570 units, rounded
+    /// to nearest; unset, no FAEML at all.
+    #[test]
+    fn build_fad_subs_emits_max_link_loss() {
+        let mut fa = FlexAlgoConfig::new("/router/isis/flex-algo");
+        for (algo, value) in [("128", Some("5")), ("129", None)] {
+            fa.exec(
+                "/router/isis/flex-algo/advertise-definition".into(),
+                args(&[algo, "true"]),
+                ConfigOp::Set,
+            )
+            .unwrap();
+            if let Some(v) = value {
+                fa.exec(
+                    "/router/isis/flex-algo/exclude-max-link-loss".into(),
+                    args(&[algo, v]),
+                    ConfigOp::Set,
+                )
+                .unwrap();
+            }
+            fa.commit();
+        }
+        let subs = build_fad_subs(&fa, &AffinityMap::new(), &BTreeMap::new());
+        assert_eq!(subs[0].subs, vec![max_loss(1_666_667)]);
+        assert!(subs[1].subs.is_empty());
+
+        // Beyond what the wire can carry, or finer than a micro-percent:
+        // refused, and the previous value stays.
+        for bad in ["50.331643", "1.0000001"] {
+            assert!(
+                fa.exec(
+                    "/router/isis/flex-algo/exclude-max-link-loss".into(),
+                    args(&["128", bad]),
+                    ConfigOp::Set,
+                )
+                .is_err(),
+                "{bad}"
+            );
+        }
+        fa.cache.clear();
+        fa.commit();
+        assert_eq!(
+            build_fad_subs(&fa, &AffinityMap::new(), &BTreeMap::new())[0].subs,
+            vec![max_loss(1_666_667)]
+        );
+
+        fa.exec(
+            "/router/isis/flex-algo/exclude-max-link-loss".into(),
+            args(&["128"]),
+            ConfigOp::Delete,
+        )
+        .unwrap();
+        fa.commit();
+        assert!(
+            build_fad_subs(&fa, &AffinityMap::new(), &BTreeMap::new())[0]
+                .subs
+                .is_empty()
+        );
     }
 
     #[test]
