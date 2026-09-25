@@ -369,6 +369,10 @@ pub async fn sender_read(
                     Some(&mut cmsgspace),
                     MsgFlags::empty(),
                 )?;
+                // Monotonic receive time for the loss deadline, taken at
+                // the read so event-loop queueing cannot make a timely
+                // reply late (measured-loss design D2).
+                let rx_at = std::time::Instant::now();
                 // Kernel stamp first (taken at skb receive, before the
                 // softirq→queue→wake→poll chain), userspace fallback.
                 let kernel_t4 = kernel_rx_stamp(msg.cmsgs()?);
@@ -391,6 +395,7 @@ pub async fn sender_read(
                     reply,
                     t4,
                     t4_kernel,
+                    rx_at,
                 });
                 Ok(())
             })

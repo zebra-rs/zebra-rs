@@ -2,34 +2,41 @@
 //! `docs/design/stamp-measured-loss.md`.
 //!
 //! Every probe a session sends is **settled exactly once**: *received*
-//! when its reply arrives, or *lost* once [`LOSS_WAIT`] passes without
-//! one (RFC 7680's waiting time, *Tmax*). The probe is credited to the
-//! loss bucket that is open *when it settles*, not the one it was sent
-//! in. That removes the window-boundary skew of the counter this
-//! replaces, where a probe sent just before a window closed had its
-//! reply counted in the next window — one loss too many, then one reply
-//! too many, with a `saturating_sub` hiding the negative.
+//! when its reply arrives before its deadline, or *lost* once
+//! [`LOSS_WAIT`] (RFC 7680's waiting time, *Tmax*) passes without one.
+//! The deadline is judged against the reply's **receive time**, taken
+//! at the socket read, not against when the event loop gets round to
+//! it. A reply after the deadline is *late*, and its probe stays lost.
 //!
 //! A reply is matched by the **copied Session-Sender sequence number**,
 //! and it counts as received whatever its timestamps say: the packet
 //! came back, so it was not lost. A timestamp fault is a delay problem,
 //! and the delay path keeps rejecting it on its own.
 //!
-//! Loss runs on **its own clock**: fixed [`BUCKET`]s, independent of the
-//! delay export period. A loss window is the sum of the last N closed
-//! buckets, so the value is literally "the percentage of probes lost
-//! over the last N × 30 s". Each bucket also records how many probes the
-//! probe rate then in force should have produced, which keeps the
-//! integrity check exact across a probe-interval retune.
+//! **Buckets are time-indexed** from the ledger's creation: bucket *k*
+//! covers `[epoch + k·30 s, epoch + (k+1)·30 s)`. Each settlement is
+//! booked into the bucket that contains **its own time** — the receive
+//! time for a received probe, the deadline for a lost one — whenever
+//! the event loop processes it. The loss clock only advances time
+//! ([`LossLedger::advance`]): a skipped tick, or a stall of the whole
+//! runtime, becomes buckets with no settlements, never one bucket
+//! stretched over several periods. So a window of N buckets always spans
+//! exactly N × 30 s, and a measurement gap shows up as an integrity dip
+//! rather than as old losses kept past their window.
+//!
+//! Loss runs on this clock alone, independent of the delay export
+//! period. Each bucket also records how many probes the probe rate then
+//! in force should have produced, which keeps the integrity check exact
+//! across a probe-interval retune.
 //!
 //! Nothing here reaches an IGP yet; `show stamp` renders it.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-/// RFC 7680's waiting time: a probe with no reply after this long is
-/// lost, and a reply arriving later is *late* — still lost. It must
-/// exceed any real one-link round trip by a wide margin and be much
+/// RFC 7680's waiting time: a probe with no reply received within this
+/// long is lost, and a reply received later is *late* — still lost. It
+/// must exceed any real one-link round trip by a wide margin and be much
 /// shorter than a bucket; 3 s is both at every supported interval.
 pub const LOSS_WAIT: Duration = Duration::from_secs(3);
 
@@ -37,8 +44,8 @@ pub const LOSS_WAIT: Duration = Duration::from_secs(3);
 /// interval.
 pub const BUCKET: Duration = Duration::from_secs(30);
 
-/// Buckets kept: the longest loss interval a subscriber may configure
-/// (3600 s) divided by [`BUCKET`].
+/// Closed buckets kept: the longest loss interval a subscriber may
+/// configure (3600 s) divided by [`BUCKET`].
 pub const MAX_BUCKETS: usize = 120;
 
 /// The default loss interval in buckets — 120 s, RFC 8570 §7's default
@@ -46,7 +53,8 @@ pub const MAX_BUCKETS: usize = 120;
 pub const DEFAULT_WINDOW_BUCKETS: usize = 4;
 
 /// Settled probes remembered after they leave the pending queue, so a
-/// reply for one can still be told apart as late or duplicate.
+/// reply for one can still be told apart as late, duplicate, or — if it
+/// was received in time but processed after a sweep — received.
 const RECENT: usize = 64;
 
 /// RFC 8570 §4.4's largest link-loss value, 2²⁴ − 2 (50.331642 %).
@@ -72,19 +80,27 @@ enum Fate {
     Lost,
 }
 
-#[derive(Debug)]
-struct Pending {
+#[derive(Debug, Clone, Copy)]
+struct Probe {
     seq: u32,
     sent_at: Instant,
     fate: Fate,
 }
 
+impl Probe {
+    fn deadline(&self) -> Instant {
+        self.sent_at + LOSS_WAIT
+    }
+}
+
 /// What a reply turned out to be, for the ledger.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplyFate {
-    /// It settled an outstanding probe as received.
+    /// It was received before its probe's deadline, so the probe
+    /// settles as received.
     Received,
-    /// Its probe had already settled as lost. It stays lost (RFC 7680).
+    /// It was received after its probe's deadline. The probe stays lost
+    /// (RFC 7680).
     Late,
     /// Its probe had already settled as received.
     Duplicate,
@@ -96,13 +112,16 @@ pub enum ReplyFate {
 /// Per-session probe-loss ledger.
 #[derive(Debug)]
 pub struct LossLedger {
+    /// Bucket 0 starts here.
+    epoch: Instant,
     /// Probes in send order, until they settle and reach the front.
-    pending: VecDeque<Pending>,
+    pending: VecDeque<Probe>,
     /// Recently settled probes that have left `pending`, oldest first.
-    recent: VecDeque<(u32, Fate)>,
-    current: Bucket,
-    /// Closed buckets, oldest first; at most [`MAX_BUCKETS`].
-    closed: VecDeque<Bucket>,
+    recent: VecDeque<Probe>,
+    /// Buckets by index, starting at `first`. The back is the open
+    /// bucket; every other one has closed.
+    buckets: VecDeque<Bucket>,
+    first: u64,
     /// Expected probes have been accrued up to this instant.
     mark: Instant,
     pub late: u64,
@@ -113,10 +132,11 @@ pub struct LossLedger {
 impl LossLedger {
     pub fn new(now: Instant) -> Self {
         Self {
+            epoch: now,
             pending: VecDeque::new(),
             recent: VecDeque::new(),
-            current: Bucket::default(),
-            closed: VecDeque::new(),
+            buckets: VecDeque::from([Bucket::default()]),
+            first: 0,
             mark: now,
             late: 0,
             duplicate: 0,
@@ -124,64 +144,138 @@ impl LossLedger {
         }
     }
 
+    fn index(&self, at: Instant) -> u64 {
+        (at.saturating_duration_since(self.epoch).as_nanos() / BUCKET.as_nanos()) as u64
+    }
+
+    fn open_index(&self) -> u64 {
+        self.first + self.buckets.len() as u64 - 1
+    }
+
+    fn bucket_end(&self, index: u64) -> Instant {
+        self.epoch + Duration::from_secs(BUCKET.as_secs() * (index + 1))
+    }
+
+    /// Open buckets up to `index`, closing every one before it. Buckets
+    /// no settlement reached stay empty — that is what a gap is.
+    fn open_to(&mut self, index: u64) {
+        while self.open_index() < index {
+            self.buckets.push_back(Bucket::default());
+            if self.buckets.len() > MAX_BUCKETS + 1 {
+                self.buckets.pop_front();
+                self.first += 1;
+            }
+        }
+    }
+
+    /// The bucket containing `at`, if it is still kept.
+    fn bucket_at(&mut self, at: Instant) -> Option<&mut Bucket> {
+        let index = self.index(at);
+        self.open_to(index);
+        let offset = index.checked_sub(self.first)?;
+        self.buckets.get_mut(offset as usize)
+    }
+
+    fn book(&mut self, at: Instant, lost: bool) {
+        if let Some(b) = self.bucket_at(at) {
+            b.settled += 1;
+            if lost {
+                b.lost += 1;
+            }
+        }
+    }
+
+    fn unbook(&mut self, at: Instant, lost: bool) {
+        if let Some(b) = self.bucket_at(at) {
+            b.settled = b.settled.saturating_sub(1);
+            if lost {
+                b.lost = b.lost.saturating_sub(1);
+            }
+        }
+    }
+
     /// A probe with sequence number `seq` went out.
     pub fn sent(&mut self, seq: u32, now: Instant) {
-        self.pending.push_back(Pending {
+        self.pending.push_back(Probe {
             seq,
             sent_at: now,
             fate: Fate::Outstanding,
         });
     }
 
-    /// A reply carrying Session-Sender sequence number `sender_seq`
-    /// arrived. An outstanding probe settles as received, in the bucket
-    /// open now.
-    pub fn reply(&mut self, sender_seq: u32) -> ReplyFate {
-        if let Some(p) = self.pending.iter_mut().find(|p| p.seq == sender_seq) {
-            return match p.fate {
-                Fate::Outstanding => {
-                    p.fate = Fate::Received;
-                    self.current.settled += 1;
-                    ReplyFate::Received
-                }
-                Fate::Received => {
-                    self.duplicate += 1;
-                    ReplyFate::Duplicate
-                }
-                Fate::Lost => {
-                    self.late += 1;
-                    ReplyFate::Late
-                }
-            };
-        }
-        match self.recent.iter().rev().find(|(seq, _)| *seq == sender_seq) {
-            Some((_, Fate::Lost)) => {
-                self.late += 1;
-                ReplyFate::Late
-            }
-            Some(_) => {
+    /// A reply carrying Session-Sender sequence number `sender_seq` was
+    /// received at `rx_at` — the socket read, not whenever the event
+    /// loop processes it.
+    ///
+    /// The deadline is judged here, against `rx_at`, not left to the next
+    /// sweep: with a 10 s probe interval nothing sweeps for 10 s, and a
+    /// reply 4 s late must not settle its probe as received. (The probe
+    /// itself is booked lost, at its deadline, by the next sweep.) A
+    /// reply received in time for a probe that a *later* sweep already
+    /// declared lost — the reply was queued behind that sweep — still
+    /// counts, and the probe moves from lost to received.
+    pub fn reply(&mut self, sender_seq: u32, rx_at: Instant) -> ReplyFate {
+        let found = match self.pending.iter().position(|p| p.seq == sender_seq) {
+            Some(i) => Some((true, i)),
+            None => self
+                .recent
+                .iter()
+                .rposition(|p| p.seq == sender_seq)
+                .map(|i| (false, i)),
+        };
+        let Some((queued, i)) = found else {
+            self.unmatched += 1;
+            return ReplyFate::Unmatched;
+        };
+        let probe = if queued {
+            self.pending[i]
+        } else {
+            self.recent[i]
+        };
+        let in_time = rx_at < probe.deadline();
+        let fate = match (probe.fate, in_time) {
+            (Fate::Received, _) => {
                 self.duplicate += 1;
-                ReplyFate::Duplicate
+                return ReplyFate::Duplicate;
             }
-            None => {
-                self.unmatched += 1;
-                ReplyFate::Unmatched
+            (Fate::Outstanding, true) => {
+                self.book(rx_at, false);
+                ReplyFate::Received
             }
-        }
+            (Fate::Lost, true) => {
+                self.unbook(probe.deadline(), true);
+                self.book(rx_at, false);
+                ReplyFate::Received
+            }
+            (_, false) => {
+                self.late += 1;
+                return ReplyFate::Late;
+            }
+        };
+        let slot = if queued {
+            &mut self.pending[i]
+        } else {
+            &mut self.recent[i]
+        };
+        slot.fate = Fate::Received;
+        fate
     }
 
-    /// Settle every probe that has waited [`LOSS_WAIT`] without a reply
-    /// as lost, then retire settled probes from the front of the queue.
-    ///
-    /// Called often (on every probe, and before a bucket closes), so a
-    /// probe settles within one probe interval of its deadline.
+    /// Settle every probe whose deadline has passed at `now` as lost —
+    /// booked at its deadline, not at `now` — then retire settled probes
+    /// from the front of the queue.
     pub fn sweep(&mut self, now: Instant) {
-        for p in self.pending.iter_mut() {
-            if p.fate == Fate::Outstanding && now.duration_since(p.sent_at) >= LOSS_WAIT {
+        let overdue: Vec<Instant> = self
+            .pending
+            .iter_mut()
+            .filter(|p| p.fate == Fate::Outstanding && now >= p.deadline())
+            .map(|p| {
                 p.fate = Fate::Lost;
-                self.current.settled += 1;
-                self.current.lost += 1;
-            }
+                p.deadline()
+            })
+            .collect();
+        for deadline in overdue {
+            self.book(deadline, true);
         }
         // Retire in send order only: a received probe behind an
         // outstanding one waits, so the queue stays in sequence order.
@@ -191,20 +285,32 @@ impl LossLedger {
             .is_some_and(|p| p.fate != Fate::Outstanding)
         {
             let p = self.pending.pop_front().expect("front checked");
-            self.recent.push_back((p.seq, p.fate));
+            self.recent.push_back(p);
             if self.recent.len() > RECENT {
                 self.recent.pop_front();
             }
         }
     }
 
-    /// Credit the open bucket with the probes `interval_ms` should have
-    /// produced since the last mark. Called when the interval is about
-    /// to change, and when a bucket closes.
-    pub fn accrue(&mut self, now: Instant, interval_ms: u32) {
-        let elapsed_ms = now.duration_since(self.mark).as_millis() as u64;
-        self.current.expected_milli += elapsed_ms * 1000 / u64::from(interval_ms.max(1));
-        self.mark = now;
+    /// Bring the ledger up to `now`: settle what is overdue, credit each
+    /// bucket with the probes `interval_ms` should have produced during
+    /// its share of the time since the last call, and close every bucket
+    /// that has ended. Called by the loss clock, and — with the *old*
+    /// interval — just before a probe-interval retune.
+    pub fn advance(&mut self, now: Instant, interval_ms: u32) {
+        self.sweep(now);
+        let interval = u64::from(interval_ms.max(1));
+        while self.mark < now {
+            let index = self.index(self.mark);
+            let end = self.bucket_end(index).min(now);
+            let elapsed_ms = end.duration_since(self.mark).as_millis() as u64;
+            if let Some(b) = self.bucket_at(self.mark) {
+                b.expected_milli += elapsed_ms * 1000 / interval;
+            }
+            self.mark = end;
+        }
+        let now_index = self.index(now);
+        self.open_to(now_index);
     }
 
     /// Where expected probes have been accrued up to — for tests that
@@ -214,20 +320,9 @@ impl LossLedger {
         self.mark
     }
 
-    /// Close the open bucket (the loss clock fired) and start a new one.
-    pub fn close_bucket(&mut self, now: Instant, interval_ms: u32) {
-        self.sweep(now);
-        self.accrue(now, interval_ms);
-        self.closed.push_back(self.current);
-        if self.closed.len() > MAX_BUCKETS {
-            self.closed.pop_front();
-        }
-        self.current = Bucket::default();
-    }
-
     /// The last `buckets` closed buckets, summed. Fewer are summed while
     /// the session is younger than that; [`LossWindow::is_full`] says
-    /// which.
+    /// which. The open bucket is never included.
     pub fn window(&self, buckets: usize) -> LossWindow {
         let wanted = buckets.clamp(1, MAX_BUCKETS);
         let mut w = LossWindow {
@@ -237,7 +332,7 @@ impl LossLedger {
             lost: 0,
             expected_milli: 0,
         };
-        for b in self.closed.iter().rev().take(wanted) {
+        for b in self.buckets.iter().rev().skip(1).take(wanted) {
             w.buckets += 1;
             w.settled += u64::from(b.settled);
             w.lost += u64::from(b.lost);
@@ -318,57 +413,74 @@ mod tests {
         base + Duration::from_millis(ms)
     }
 
-    /// The fault this replaces: a probe sent just before a window
-    /// closes, whose reply arrives just after, must count as received
-    /// exactly once — never as a loss in the first window plus a spare
-    /// reply in the second.
+    /// The fault the old counter had: a probe sent just before a bucket
+    /// closes, whose reply arrives just after, counts as received exactly
+    /// once — credited to the bucket its reply arrived in.
     #[test]
     fn a_reply_across_a_bucket_boundary_counts_once_as_received() {
         let t0 = Instant::now();
         let mut l = LossLedger::new(t0);
         l.sent(7, at(t0, 29_990));
-        l.close_bucket(at(t0, 30_000), 1000);
-        assert_eq!(l.reply(7), ReplyFate::Received);
-        l.close_bucket(at(t0, 60_000), 1000);
+        l.advance(at(t0, 30_000), 1000);
+        assert_eq!(l.reply(7, at(t0, 30_005)), ReplyFate::Received);
+        l.advance(at(t0, 60_000), 1000);
         let w = l.window(2);
         assert_eq!((w.settled, w.lost), (1, 0));
-        // The probe settled after the first bucket closed, so it is
-        // credited to the second.
-        assert_eq!(l.window(1).settled, 1);
+        assert_eq!(l.window(1).settled, 1, "booked in the second bucket");
     }
 
     #[test]
-    fn a_probe_with_no_reply_settles_lost_after_the_waiting_time() {
+    fn a_probe_with_no_reply_settles_lost_at_its_deadline() {
         let t0 = Instant::now();
         let mut l = LossLedger::new(t0);
-        l.sent(1, t0);
-        l.sweep(at(t0, 2_999));
-        l.close_bucket(at(t0, 2_999), 1000);
-        assert_eq!(l.window(1).settled, 0, "still within LOSS_WAIT");
-        l.sweep(at(t0, 3_000));
-        l.close_bucket(at(t0, 3_000), 1000);
+        l.sent(1, at(t0, 1_000));
+        l.sweep(at(t0, 3_999));
+        l.advance(at(t0, 30_000), 1000);
+        // Swept only at the tick, but booked at its deadline (4 s),
+        // in the first bucket.
         let w = l.window(1);
         assert_eq!((w.settled, w.lost), (1, 1));
     }
 
-    /// RFC 7680: a reply after the waiting time does not un-lose the
-    /// probe; it is counted as late. (A lost probe is always retired in
-    /// the sweep that settles it — every older probe has timed out too —
-    /// so the late reply is always matched against `recent`.)
+    /// Review finding: the deadline is enforced when the reply arrives,
+    /// not only when a sweep happens to run. With a 10 s probe interval
+    /// nothing sweeps between a probe and a reply 4 s later.
     #[test]
-    fn a_late_reply_stays_lost() {
+    fn a_reply_after_the_deadline_is_late_even_with_no_sweep_in_between() {
         let t0 = Instant::now();
         let mut l = LossLedger::new(t0);
         l.sent(1, t0);
-        l.sweep(at(t0, 3_000));
-        assert_eq!(l.reply(1), ReplyFate::Late);
-        l.sent(2, at(t0, 4_000));
-        l.sweep(at(t0, 7_000));
-        l.sweep(at(t0, 7_001)); // both retired now
-        assert_eq!(l.reply(2), ReplyFate::Late);
-        l.close_bucket(at(t0, 8_000), 1000);
+        assert_eq!(l.reply(1, at(t0, 4_000)), ReplyFate::Late);
+        l.sent(2, at(t0, 10_000));
+        assert_eq!(
+            l.reply(2, at(t0, 13_000)),
+            ReplyFate::Late,
+            "at the deadline"
+        );
+        l.sent(3, at(t0, 20_000));
+        assert_eq!(
+            l.reply(3, at(t0, 22_999)),
+            ReplyFate::Received,
+            "just before it"
+        );
+        l.advance(at(t0, 30_000), 1000);
         let w = l.window(1);
-        assert_eq!((w.settled, w.lost, l.late), (2, 2, 2));
+        assert_eq!((w.settled, w.lost, l.late), (3, 2, 2));
+    }
+
+    /// The reverse race: a reply received in time but processed after a
+    /// sweep that already declared its probe lost still counts, and the
+    /// probe moves from lost to received.
+    #[test]
+    fn a_reply_received_in_time_counts_even_if_processed_after_a_sweep() {
+        let t0 = Instant::now();
+        let mut l = LossLedger::new(t0);
+        l.sent(1, t0);
+        l.sweep(at(t0, 5_000));
+        assert_eq!(l.reply(1, at(t0, 1_000)), ReplyFate::Received);
+        l.advance(at(t0, 30_000), 1000);
+        let w = l.window(1);
+        assert_eq!((w.settled, w.lost, l.late), (1, 0, 0));
     }
 
     #[test]
@@ -376,15 +488,13 @@ mod tests {
         let t0 = Instant::now();
         let mut l = LossLedger::new(t0);
         l.sent(5, t0);
-        assert_eq!(l.reply(5), ReplyFate::Received);
-        assert_eq!(l.reply(5), ReplyFate::Duplicate, "while queued");
-        l.sweep(at(t0, 10));
-        assert_eq!(l.reply(5), ReplyFate::Duplicate, "after retirement");
-        assert_eq!(l.reply(99), ReplyFate::Unmatched);
-        l.close_bucket(at(t0, 30_000), 1000);
+        assert_eq!(l.reply(5, at(t0, 10)), ReplyFate::Received);
+        assert_eq!(l.reply(5, at(t0, 20)), ReplyFate::Duplicate);
+        assert_eq!(l.reply(99, at(t0, 30)), ReplyFate::Unmatched);
+        l.advance(at(t0, 30_000), 1000);
         let w = l.window(1);
         assert_eq!((w.settled, w.lost), (1, 0));
-        assert_eq!((l.duplicate, l.unmatched), (2, 1));
+        assert_eq!((l.duplicate, l.unmatched), (1, 1));
     }
 
     /// Replies can overtake one another. An out-of-order reply settles
@@ -396,12 +506,10 @@ mod tests {
         for seq in [10, 11, 12] {
             l.sent(seq, t0);
         }
-        assert_eq!(l.reply(10), ReplyFate::Received);
-        assert_eq!(l.reply(12), ReplyFate::Received);
-        l.sweep(at(t0, 1_000));
-        assert_eq!(l.reply(11), ReplyFate::Received);
-        l.sweep(at(t0, 5_000));
-        l.close_bucket(at(t0, 30_000), 1000);
+        assert_eq!(l.reply(10, at(t0, 10)), ReplyFate::Received);
+        assert_eq!(l.reply(12, at(t0, 20)), ReplyFate::Received);
+        assert_eq!(l.reply(11, at(t0, 1_000)), ReplyFate::Received);
+        l.advance(at(t0, 30_000), 1000);
         let w = l.window(1);
         assert_eq!((w.settled, w.lost), (3, 0));
     }
@@ -412,8 +520,8 @@ mod tests {
         let mut l = LossLedger::new(t0);
         l.sent(u32::MAX, t0);
         l.sent(0, t0);
-        assert_eq!(l.reply(0), ReplyFate::Received);
-        assert_eq!(l.reply(u32::MAX), ReplyFate::Received);
+        assert_eq!(l.reply(0, at(t0, 5)), ReplyFate::Received);
+        assert_eq!(l.reply(u32::MAX, at(t0, 6)), ReplyFate::Received);
     }
 
     #[test]
@@ -423,20 +531,18 @@ mod tests {
         let mut seq = 0;
         for bucket in 0..5u64 {
             // Bucket b loses b of its 10 probes.
+            let base = bucket * 30_000;
             for i in 0..10u64 {
-                l.sent(seq, at(t0, bucket * 30_000 + i));
+                l.sent(seq, at(t0, base + i));
                 if i >= bucket {
-                    l.reply(seq);
+                    l.reply(seq, at(t0, base + i + 5));
                 }
                 seq += 1;
             }
-            l.close_bucket(at(t0, bucket * 30_000 + 10_000), 1000);
-            if bucket < 3 {
-                assert!(!l.window(4).is_full());
-            }
+            l.advance(at(t0, base + 30_000), 1000);
+            assert_eq!(l.window(4).is_full(), bucket >= 3, "after bucket {bucket}");
         }
         let w = l.window(4);
-        assert!(w.is_full());
         assert_eq!(w.buckets, 4);
         // Buckets 1..=4: 40 probes, 1 + 2 + 3 + 4 lost.
         assert_eq!((w.settled, w.lost), (40, 10));
@@ -445,27 +551,51 @@ mod tests {
         assert_eq!(w.resolution_percent(), Some(2.5));
     }
 
+    /// Review finding: a stall that skips loss ticks must not stretch a
+    /// bucket over several periods. One tick after 240 s closes eight
+    /// buckets, not one, so the 120 s window really covers 120–240 s: the
+    /// loss settled at 30.5 s is outside it, and the empty stretch reads
+    /// as zero integrity rather than as a clean link.
+    #[test]
+    fn a_stall_that_skips_ticks_leaves_empty_buckets_not_a_stretched_one() {
+        let t0 = Instant::now();
+        let mut l = LossLedger::new(t0);
+        l.sent(1, at(t0, 27_500)); // deadline 30.5 s → bucket 1
+        l.advance(at(t0, 240_000), 1000);
+        let w = l.window(4);
+        assert_eq!((w.buckets, w.secs()), (4, 120));
+        assert_eq!((w.settled, w.lost), (0, 0), "the old loss has aged out");
+        assert_eq!(w.expected_milli, 120_000, "120 s at 1 s expected");
+        assert_eq!(w.integrity_percent(), Some(0));
+        // The loss is still where it happened.
+        let all = l.window(8);
+        assert_eq!((all.buckets, all.settled, all.lost), (8, 1, 1));
+    }
+
     #[test]
     fn the_ring_keeps_at_most_max_buckets() {
         let t0 = Instant::now();
         let mut l = LossLedger::new(t0);
-        for i in 0..(MAX_BUCKETS as u64 + 5) {
-            l.close_bucket(at(t0, i * 30_000), 1000);
-        }
+        l.advance(at(t0, (MAX_BUCKETS as u64 + 5) * 30_000), 1000);
         assert_eq!(l.window(MAX_BUCKETS).buckets, MAX_BUCKETS);
-        assert_eq!(l.closed.len(), MAX_BUCKETS);
+        assert_eq!(l.buckets.len(), MAX_BUCKETS + 1, "closed plus the open one");
     }
 
-    /// Each bucket carries its own expected count, so a retune from 1 s
-    /// to 100 ms mid-bucket is credited at both rates: 10 s at 1 s plus
-    /// 20 s at 100 ms = 10 + 200 probes.
+    /// Each bucket carries its own expected count: a retune from 1 s to
+    /// 100 ms ten seconds into a bucket is credited at both rates —
+    /// 10 s at 1 s plus 20 s at 100 ms = 10 + 200 probes. Expected
+    /// probes are also split correctly across a boundary.
     #[test]
-    fn expected_probes_follow_a_retune_within_a_bucket() {
+    fn expected_probes_follow_a_retune_and_split_at_boundaries() {
         let t0 = Instant::now();
         let mut l = LossLedger::new(t0);
-        l.accrue(at(t0, 10_000), 1000);
-        l.close_bucket(at(t0, 30_000), 100);
+        l.advance(at(t0, 10_000), 1000);
+        l.advance(at(t0, 30_000), 100);
         assert_eq!(l.window(1).expected_milli, 210_000);
+        l.advance(at(t0, 75_000), 1000); // 30 s into bucket 1, 15 s into 2
+        assert_eq!(l.window(1).expected_milli, 30_000);
+        l.advance(at(t0, 90_000), 1000);
+        assert_eq!(l.window(1).expected_milli, 30_000);
     }
 
     #[test]
@@ -474,12 +604,12 @@ mod tests {
         let mut l = LossLedger::new(t0);
         // 30 probes expected at 1 s; 27 sent and answered.
         for seq in 0..27 {
-            l.sent(seq, at(t0, u64::from(seq) * 1000));
-            l.reply(seq);
+            let sent = at(t0, u64::from(seq) * 1000);
+            l.sent(seq, sent);
+            l.reply(seq, sent + Duration::from_millis(5));
         }
-        l.close_bucket(at(t0, 30_000), 1000);
+        l.advance(at(t0, 30_000), 1000);
         assert_eq!(l.window(1).integrity_percent(), Some(90));
-        // Nothing expected yet: no integrity figure.
         assert_eq!(LossLedger::new(t0).window(1).integrity_percent(), None);
     }
 
