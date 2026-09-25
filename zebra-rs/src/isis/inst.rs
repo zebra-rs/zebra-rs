@@ -241,17 +241,6 @@ pub struct Isis {
     /// the LSDB. Cleared on peer purge.
     pub peer_fad: Levels<BTreeMap<IsisSysId, BTreeMap<u8, isis_packet::IsisSubFlexAlgoDef>>>,
 
-    /// Per-peer per-link affinity bitmaps. Outer key is peer sys-id;
-    /// inner key is the IS-reach neighbor identifier (a 7-byte tuple
-    /// of 6-byte sys-id and 1-byte circuit/pseudo id). Populated
-    /// from IsisSubAsla sub-TLVs on Ext IS-Reach (TLV 22) and MT
-    /// IS-Reach (TLV 222) entries whose SABM byte 0 has the
-    /// Flex-Algorithm X-bit set (RFC 9479 §4.2). Cleared on peer
-    /// purge.
-    pub peer_link_affinity: Levels<
-        BTreeMap<IsisSysId, BTreeMap<isis_packet::IsisNeighborId, isis_packet::ExtAdminGroup>>,
-    >,
-
     /// Per-peer per-algorithm Prefix-SIDs. Outer key is peer sys-id;
     /// inner key is `(algo, prefix)` so SPF can pick the SID for a
     /// resolved (algo, destination prefix) pair in one lookup.
@@ -680,14 +669,6 @@ pub struct IsisTop<'a> {
     pub peer_fad:
         &'a mut Levels<BTreeMap<IsisSysId, BTreeMap<u8, isis_packet::IsisSubFlexAlgoDef>>>,
 
-    /// Per-peer per-link affinity bitmaps (see
-    /// `Isis::peer_link_affinity`). Threaded through IsisTop so the
-    /// LSDB rebuild path can populate it from peer IS-reach ASLA
-    /// sub-TLVs.
-    pub peer_link_affinity: &'a mut Levels<
-        BTreeMap<IsisSysId, BTreeMap<isis_packet::IsisNeighborId, isis_packet::ExtAdminGroup>>,
-    >,
-
     /// Per-peer per-algorithm Prefix-SIDs (see `Isis::peer_algo_sid`).
     /// Threaded through IsisTop so the LSDB rebuild path can populate
     /// it from peer Ext IP-Reach TLVs.
@@ -873,12 +854,6 @@ impl Isis {
                 srv6_end_map: Levels::<BTreeMap<IsisSysId, super::srv6::Srv6EndSidInfo>>::default(),
                 peer_fad: Levels::<
                     BTreeMap<IsisSysId, BTreeMap<u8, isis_packet::IsisSubFlexAlgoDef>>,
-                >::default(),
-                peer_link_affinity: Levels::<
-                    BTreeMap<
-                        IsisSysId,
-                        BTreeMap<isis_packet::IsisNeighborId, isis_packet::ExtAdminGroup>,
-                    >,
                 >::default(),
                 peer_algo_sid: Levels::<
                     BTreeMap<IsisSysId, BTreeMap<(u8, Ipv4Net), isis_packet::SidLabelValue>>,
@@ -3407,7 +3382,6 @@ impl Isis {
             label_map: &mut self.label_map,
             srv6_end_map: &mut self.srv6_end_map,
             peer_fad: &mut self.peer_fad,
-            peer_link_affinity: &mut self.peer_link_affinity,
             peer_algo_sid: &mut self.peer_algo_sid,
             peer_algos: &mut self.peer_algos,
             peer_algo_srv6: &mut self.peer_algo_srv6,
@@ -3482,7 +3456,6 @@ impl Isis {
             label_map: &mut self.label_map,
             srv6_end_map: &mut self.srv6_end_map,
             peer_fad: &mut self.peer_fad,
-            peer_link_affinity: &mut self.peer_link_affinity,
             peer_algo_sid: &mut self.peer_algo_sid,
             peer_algos: &mut self.peer_algos,
             peer_algo_srv6: &mut self.peer_algo_srv6,
@@ -5124,6 +5097,7 @@ mod flex_algo_participation_tests {
                     calc_type: 0,
                     priority: 200,
                     subs: vec![],
+                    trailing: Vec::new(),
                 },
             )]),
         );

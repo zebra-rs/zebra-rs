@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use isis_packet::neigh;
 use isis_packet::{
@@ -10,10 +10,12 @@ use crate::spf;
 
 use super::config::MtId;
 use super::flex_algo::{
-    FadConstraints, FadMetricType, link_passes_constraints, local_link_affinity,
+    FadConstraints, FadMetricType, Pruned, advertised_link_attrs, link_prune_reason,
 };
 use super::inst::IsisTop;
 use super::level::Level;
+use super::link::IsisLinks;
+use super::lsdb::{Lsa, Lsdb};
 
 pub struct ReachMap<E> {
     map: BTreeMap<IsisSysId, Vec<E>>,
@@ -625,10 +627,12 @@ fn process_neighbor_link_mt2(
 ///     always included — `flex_algo.config[algo]` is the participation
 ///     signal on our side, and SPF is only called for algos in that
 ///     map.
-///   - **Per-link affinity gate (§6):** every ExtIsReach edge is
-///     filtered through `link_passes_constraints`. Our own edges resolve
-///     local `LinkConfig::affinity` via `affinity_map`; peer edges
-///     read `peer_link_affinity[source_sys][neighbor_id]`.
+///   - **Per-link pruning (§13 and the link-loss rule):** every
+///     ExtIsReach edge is filtered through `link_prune_reason` against
+///     its affinity and loss as RFC 9479 §4.2 selects them from that
+///     edge's own reach entry — ours included, so parallel links are
+///     judged each by its own advertisement, as every other router
+///     judges them.
 ///   - **Metric type (§5.1):** `MinUnidirLinkDelay` (metric-type 1)
 ///     routes on per-link Min delay — local links from
 ///     `LinkConfig::te_metric.min_delay`, peer links from the Min/Max
@@ -661,20 +665,12 @@ pub fn graph_flex_algo(
     let peer_algos_at_level = top.peer_algos.get(&level);
     let mut nodes_to_process = Vec::new();
     for (_, lsa) in top.lsdb.get(&level).iter() {
-        let neighbor_id = lsa.lsp.lsp_id.neighbor_id();
-        let is_originated = lsa.originated;
-        let is_pseudo = lsa.lsp.lsp_id.is_pseudo();
-
-        if !is_originated && !is_pseudo {
-            let participates = peer_algos_at_level
-                .get(&neighbor_id.sys_id())
-                .is_some_and(|s| s.contains(&algo));
-            if !participates {
-                continue;
-            }
+        if !flex_algo_node_included(lsa, peer_algos_at_level, algo) {
+            continue;
         }
+        let neighbor_id = lsa.lsp.lsp_id.neighbor_id();
         let lsp = lsa.lsp.clone();
-        nodes_to_process.push((neighbor_id, is_originated, lsp));
+        nodes_to_process.push((neighbor_id, lsa.originated, lsp));
     }
 
     // Vertex construction — identical to graph().
@@ -688,14 +684,9 @@ pub fn graph_flex_algo(
         graph.insert(node_id, vertex);
     }
 
-    // Same local-adj → ifindex map as graph(); used both for link_id
-    // stamping and for resolving the local link's affinity.
-    let mut local_adj_to_ifindex: BTreeMap<IsisNeighborId, u32> = BTreeMap::new();
-    for (ifindex, link) in top.links.iter() {
-        if let Some((adj, _)) = link.state.adj.get(&level) {
-            local_adj_to_ifindex.insert(*adj, *ifindex);
-        }
-    }
+    // Same local-adj → ifindex map as graph(); used for link_id stamping
+    // and the local link's delay.
+    let local_adj_to_ifindex = local_adj_ifindex(top.links, level);
 
     // Edge construction with per-link affinity filtering.
     for (neighbor_id, is_originated, lsp) in nodes_to_process.iter() {
@@ -714,32 +705,7 @@ pub fn graph_flex_algo(
                     continue;
                 }
 
-                // Resolve the link's affinity bitmap for the FAD
-                // predicate. Local LSPs are not in
-                // `peer_link_affinity` (rebuild skips self), so own
-                // edges go through `LinkConfig::affinity` + the
-                // configured `affinity_map`.
-                let local_affinity;
-                let affinity: Option<&isis_packet::ExtAdminGroup> = if source_sys_id == self_sys_id
-                {
-                    let ifindex = local_adj_to_ifindex.get(&entry_reach.neighbor_id).copied();
-                    if let Some(ifx) = ifindex
-                        && let Some(link) = top.links.get(&ifx)
-                    {
-                        local_affinity =
-                            local_link_affinity(&link.config.affinity, top.affinity_map);
-                        Some(&local_affinity)
-                    } else {
-                        None
-                    }
-                } else {
-                    top.peer_link_affinity
-                        .get(&level)
-                        .get(&source_sys_id)
-                        .and_then(|m| m.get(&entry_reach.neighbor_id))
-                };
-
-                if !link_passes_constraints(affinity, constraints) {
+                if link_prune_reason(&advertised_link_attrs(entry_reach), constraints).is_some() {
                     continue;
                 }
 
@@ -793,4 +759,170 @@ pub fn graph_flex_algo(
     }
 
     (graph, source_node, adjacency_sids)
+}
+
+/// This router's adjacencies at `level`, each with the interface it is
+/// on: resolves an edge of our own LSP to the link it leaves by.
+pub(super) fn local_adj_ifindex(links: &IsisLinks, level: Level) -> BTreeMap<IsisNeighborId, u32> {
+    links
+        .iter()
+        .filter_map(|(ifindex, link)| {
+            link.state
+                .adj
+                .get(&level)
+                .as_ref()
+                .map(|(adj, _)| (*adj, *ifindex))
+        })
+        .collect()
+}
+
+/// Whether an LSP's router is in a Flexible Algorithm's graph (RFC 9350
+/// §5.2): ours always — SPF is only computed for algorithms we
+/// participate in — and a pseudonode always, its real router being gated
+/// on its own; any other only when it lists the algorithm in its
+/// SR-Algorithm sub-TLV.
+fn flex_algo_node_included(
+    lsa: &Lsa,
+    peer_algos: &BTreeMap<IsisSysId, BTreeSet<u8>>,
+    algo: u8,
+) -> bool {
+    lsa.originated
+        || lsa.lsp.lsp_id.is_pseudo()
+        || peer_algos
+            .get(&lsa.lsp.lsp_id.sys_id())
+            .is_some_and(|s| s.contains(&algo))
+}
+
+/// One edge a Flexible Algorithm's graph leaves out, and why.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrunedEdge {
+    pub from: IsisNeighborId,
+    pub to: IsisNeighborId,
+    pub why: Pruned,
+}
+
+/// Every edge [`graph_flex_algo`] prunes for `constraints` — the same
+/// walk over the same routers, the same attributes, the same rules — so
+/// `show` can say which links an algorithm left out and why.
+pub(super) fn flex_algo_pruned_edges(
+    lsdb: &Lsdb,
+    peer_algos: &BTreeMap<IsisSysId, BTreeSet<u8>>,
+    algo: u8,
+    constraints: &FadConstraints,
+) -> Vec<PrunedEdge> {
+    let mut out = Vec::new();
+    for (_, lsa) in lsdb.iter() {
+        if !flex_algo_node_included(lsa, peer_algos, algo) {
+            continue;
+        }
+        let from = lsa.lsp.lsp_id.neighbor_id();
+        for tlv in &lsa.lsp.tlvs {
+            let IsisTlv::ExtIsReach(ext_reach) = tlv else {
+                continue;
+            };
+            for entry in &ext_reach.entries {
+                if lsdb.get(&entry.neighbor_id.into()).is_none() {
+                    continue;
+                }
+                if let Some(why) = link_prune_reason(&advertised_link_attrs(entry), constraints) {
+                    out.push(PrunedEdge {
+                        from,
+                        to: entry.neighbor_id,
+                        why,
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use isis_packet::neigh::IsisSubTlv as NeighSubTlv;
+    use isis_packet::{IsisLsp, IsisSubAsla, IsisSubLinkLoss, IsisTlvExtIsReach};
+
+    use super::*;
+    use crate::isis::flex_algo::LinkAttrs;
+
+    fn sys(n: u8) -> IsisSysId {
+        IsisSysId {
+            id: [0, 0, 0, 0, 0, n],
+        }
+    }
+
+    fn lossy_edge(to: u8, loss: u32) -> IsisTlvExtIsReachEntry {
+        IsisTlvExtIsReachEntry {
+            neighbor_id: IsisNeighborId::from_sys_id(&sys(to), 0),
+            metric: 10,
+            subs: vec![NeighSubTlv::Asla(IsisSubAsla {
+                l_flag: false,
+                sabm: vec![0x10],
+                udabm: vec![],
+                subs: vec![NeighSubTlv::LinkLoss(IsisSubLinkLoss {
+                    anomalous: false,
+                    loss,
+                })],
+            })],
+        }
+    }
+
+    fn lsa(from: u8, originated: bool, entries: Vec<IsisTlvExtIsReachEntry>) -> (IsisLspId, Lsa) {
+        let lsp = IsisLsp {
+            lsp_id: IsisLspId::new(sys(from), 0, 0),
+            hold_time: 1200,
+            tlvs: vec![IsisTlv::ExtIsReach(IsisTlvExtIsReach { entries })],
+            ..Default::default()
+        };
+        let mut lsa = Lsa::new(lsp);
+        lsa.originated = originated;
+        (lsa.lsp.lsp_id, lsa)
+    }
+
+    /// Two parallel point-to-point links to one neighbour share its
+    /// neighbour ID. Each must be judged by its own advertisement — here
+    /// 0 % and 10 % against a 5 % maximum — for our own LSP as for a
+    /// peer's: pruning the clean one too would give this router a topology
+    /// every other router lacks.
+    #[test]
+    fn parallel_links_are_pruned_each_by_its_own_loss() {
+        let max = 1_666_667; // 5 %
+        let clean = lossy_edge(2, 0);
+        let lossy = lossy_edge(2, 3_333_333); // 10 %
+        assert_eq!(
+            advertised_link_attrs(&lossy),
+            LinkAttrs {
+                affinity: None,
+                loss: Some(3_333_333),
+            }
+        );
+        let constraints = FadConstraints {
+            max_link_loss: Some(max),
+            ..Default::default()
+        };
+        for own in [true, false] {
+            let mut lsdb = Lsdb::default();
+            let (id, a) = lsa(1, own, vec![clean.clone(), lossy.clone()]);
+            lsdb.map.insert(id, a);
+            let (id, b) = lsa(2, false, vec![lossy_edge(1, 0)]);
+            lsdb.map.insert(id, b);
+            let peer_algos = BTreeMap::from([
+                (sys(1), BTreeSet::from([128])),
+                (sys(2), BTreeSet::from([128])),
+            ]);
+            let pruned = flex_algo_pruned_edges(&lsdb, &peer_algos, 128, &constraints);
+            assert_eq!(
+                pruned,
+                vec![PrunedEdge {
+                    from: IsisNeighborId::from_sys_id(&sys(1), 0),
+                    to: IsisNeighborId::from_sys_id(&sys(2), 0),
+                    why: Pruned::LinkLoss {
+                        loss: 3_333_333,
+                        max
+                    },
+                }],
+                "own: {own}"
+            );
+        }
+    }
 }

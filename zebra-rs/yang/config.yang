@@ -3441,6 +3441,26 @@ module config {
             type string;
           }
 
+          leaf exclude-max-link-loss {
+            ext:help "Exclude links whose advertised loss exceeds this percentage";
+            // FAD Exclude Maximum Link Loss sub-TLV (FAEML,
+            // draft-ietf-lsr-flex-algo-link-loss), advertised with the
+            // definition in the draft's placeholder type 252 until IANA
+            // assigns one. Rounded to the nearest RFC 8570 unit of
+            // 0.000003 %; the range and precision are checked at commit.
+            type decimal64 {
+              fraction-digits 6;
+            }
+            units "percent";
+            description
+              "Prune from this algorithm's topology every link whose
+               advertised unidirectional link loss (RFC 8570) is greater
+               than this percentage, 0 to 50.331642. A link that
+               advertises no loss is kept. Loss is compared as the
+               definition's winner advertises it, so the setting takes
+               effect only where this router's definition wins.";
+          }
+
           container fast-reroute {
             ext:help "Per-flex-algo fast-reroute";
             // Per-algorithm fast-reroute OPT-OUT. TI-LFA enablement is an

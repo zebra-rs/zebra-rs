@@ -10,6 +10,11 @@ dropped, each surviving item re-verified against `main` at `57828933`
 codec added in PRs #2306/#2312: no reachable panic in the new TLV 20 path;
 **F5b** added (Area Proxy / Router Cap emit desync, same class as F5) and
 **F2** gains the two Area Proxy sub-parsers as call sites.
+**2026-09-25:** review of the FAD Exclude Maximum Link Loss sub-TLV (type 252,
+draft-ietf-lsr-flex-algo-link-loss): no panic; any declared length round-trips
+(probe over 0–249). Its exact-3-octet parse leaves no F2 remainder, and the FAD
+itself no longer drops a sub-TLV that overruns it (F2). **F5b**'s Router Cap
+overflow comes sooner with the new sub-TLV.
 
 Fixed findings are deliberately **not** restated. The security audit's history
 lives in the git history of `crates/isis-packet/SECURITY_AUDIT.md`
@@ -107,6 +112,13 @@ memory-safety issue.
     remainder, so e.g. an Area SID sub with a `/0` prefix plus appended
     garbage parses clean and the garbage vanishes on re-emit. Include both
     when the `rest.is_empty()` fix lands.
+- **No longer a call site:** `IsisSubFlexAlgoDef::parse_be`
+  (`src/sub/cap.rs`). A FAD sub-TLV whose declared length ran past the FAD
+  used to stop the sub loop, and the remainder was dropped — silently removing
+  a constraint (a truncated link-loss maximum) while routers kept computing
+  the algorithm. Since 2026-09-25 the FAD keeps those bytes as `trailing`,
+  counts them in `len()`, re-emits them, and zebra-rs treats such a
+  definition as unsupported.
 - **Why this is cheap to fix now:** finding #10's fix means a TLV whose value
   parse *errors* degrades to `Unknown` (bytes preserved, rest of the PDU still
   parses) instead of truncating the TLV list. Making the length-bounded parsers
@@ -166,8 +178,11 @@ memory-safety issue.
   bytes.
 - **Not reachable from the wire:** parsing bounds the sub block by the TLV's
   own one-octet length, and the live builder (`zebra-rs/src/isis/lsp.rs`)
-  pushes at most a Proxy System ID plus an Area SID sub (~32 octets);
-  RouterCap likewise stays far below 255 today.
+  pushes at most a Proxy System ID plus an Area SID sub (~32 octets).
+  RouterCap is closer: every advertised FAD goes into the one TLV 242, and
+  its length byte overflows at 42 bare FADs, or at 23 when each carries the
+  5-octet link-loss maximum (2026-09-25 probe: declares 255 over a 258-byte
+  body), fewer still alongside the SR sub-TLVs. Local configuration only.
 - **Fix shape:** bound `emit()` by the same expression that saturates `len()`
   — truncate the sub loop at a running byte budget (or reject the build), the
   way `emit_sub_tlvs()` and the TLV 132/232/233 codecs (`min()`/`take()` in

@@ -177,6 +177,15 @@ A link may carry any number of colors, and different algorithms can
 test different subsets — the coloring describes the link, not the
 algorithm.
 
+**Which advertisement counts.** A peer's link attributes — colors, delay,
+loss — are read as RFC 9479 §4.2 selects them: from the ASLAs marked for
+the Flex-Algorithm application; failing any, from ASLAs with zero-length
+application masks, which apply to every application; and from the legacy
+sub-TLVs beside them only when the ASLA sets the L flag. A link with no
+applicable ASLA has no Flex-Algorithm attributes at all: no colors, no
+delay, no loss. Every attribute follows the same rule, so no link has its
+colors read from one advertisement and its loss from another.
+
 ### The algorithm definition — `flex-algo`
 
 ```
@@ -203,7 +212,9 @@ A router **stops participating** in an algorithm when there is no
 winning definition, or when the winner asks for something zebra-rs
 cannot compute. Today that is a `te-default` metric-type, the M flag
 (`prefix-metric`), an SRLG exclusion (`srlg-exclude`), a calculation
-type other than SPF, or any sub-TLV or flag it does not know. A router
+type other than SPF, any sub-TLV or flag it does not know, or a
+definition it cannot read in full — a sub-TLV of the wrong length, or one
+that runs past the end of the definition. A router
 that stops participating withdraws the algorithm from its SR-Algorithm
 list, stops advertising the algorithm's Prefix-SIDs, SRv6 locator and
 End.X SIDs, and removes the algorithm's routes. `show isis flex-algo`
@@ -226,6 +237,7 @@ Leaves under `flex-algo <n>`:
 | `affinity include-all <name>` | leaf-list | Keep only links carrying **all** of these colors. |
 | `affinity exclude-any <name>` | leaf-list | Prune every link carrying **any** of these colors. |
 | `srlg-exclude <name>` | leaf-list | FAD Exclude-SRLG sub-TLV (RFC 9350 §6.2), referencing `/srlg/group` names. Advertised in the FAD, but per-link SRLGs are not read yet, so the rule cannot be enforced: a winning definition carrying it stops participation. |
+| `exclude-max-link-loss <percent>` | `0`–`50.331642`, at most six decimal places; unset by default | Prune every link whose advertised loss exceeds this percentage. See [Link loss](#link-loss). |
 | `fast-reroute disable` | empty leaf | Opt this algorithm out of instance-level TI-LFA. See [TI-LFA interaction](#ti-lfa-interaction). |
 
 **Metric types.** `igp` (Metric-Type 0) routes on the ordinary IS-IS
@@ -237,8 +249,8 @@ it, and a link that advertises **no** delay is pruned from that
 algorithm's topology entirely (RFC 9350 §15) — so a delay-based
 algorithm needs delay configured on every link it should be able to
 use. `te-default` (Metric-Type 2, RFC 5305) is accepted and advertised
-but not yet honored in path computation — it currently falls back to
-the IGP metric.
+but not computed: a winning definition asking for it stops
+participation.
 
 **Constraint semantics.** All three affinity constraints may be
 combined; a link survives only if it passes every configured test. The
@@ -254,6 +266,66 @@ common patterns:
 Uncolored links pass `exclude-any` and fail both `include-*` tests —
 so an `include-*` algorithm only ever uses links that are explicitly
 colored.
+
+### Link loss
+
+```
+set router isis flex-algo 128 exclude-max-link-loss 5
+```
+
+`exclude-max-link-loss` adds the Exclude Maximum Link Loss sub-TLV
+(draft-ietf-lsr-flex-algo-link-loss) to the definition. Every router
+computing the algorithm prunes each link whose advertised unidirectional
+loss (RFC 8570 sub-TLV 36) is **greater than** the value.
+
+* **The value** is a percentage, 0 to 50.331642 with at most six decimal
+  places: the ceiling is the highest loss RFC 8570 can express. The
+  commit refuses anything else.
+* **On the wire** it travels in RFC 8570 units of 0.000003 %, rounded to
+  nearest: 5 % is 1666667 units. A measured loss is rounded the same way,
+  so a link measuring exactly the configured percentage encodes to the
+  same integer, does not exceed it, and is kept. `show` prints both
+  forms — `max-link-loss=5.000000%(1666667)` for the local setting, and
+  `max link loss 5.000001% (1666667)` for the winning definition, whose
+  wire value is exactly 5.000001 %.
+* **A link that advertises no loss is kept.** This is the opposite of
+  delay, whose absence prunes a link under metric-type 1. Measure every
+  link the constraint should act on.
+* **Where the loss comes from:** a static `te-metric loss` on the
+  interface, or the loss STAMP measures ([STAMP](ch-09-00-twamp-stamp.md)),
+  static over measured. Every router, the advertiser included, reads it
+  from the advertiser's LSP link by link, so all of them prune the same
+  links — parallel links to one neighbour each by its own value.
+* **`0`** keeps only links advertising no loss or zero loss. With
+  measured loss, that is one lost probe away from pruning.
+* The loss sub-TLV's Anomalous (A) bit plays no part; only the value is
+  compared.
+
+Pruning is a pure function of the link-state database — no hold-down,
+no damping — so every router prunes the same links from the same
+database, and the algorithm cannot loop. Stability is the advertiser's
+job, and measured loss provides it: a value is re-advertised at most once
+per loss interval, and only when it moves by more than `minimum-change`.
+Two things to keep in mind when choosing the threshold:
+
+* **Keep it well above the measurement's resolution.** At the default
+  1 s probes over a 120 s window, one lost probe is 0.83 %, so a 1 %
+  threshold is two lost probes. Raise the probe rate, or the loss
+  interval, for a tight threshold.
+* **Round-trip loss overstates forward loss.** By default each end
+  advertises the round-trip loss its probes see, so a link lossy only in
+  the reverse direction can be pruned for its forward traffic too. Where
+  the constraint matters, measure by direction: `reflector stateful` on
+  one end, `peer-reflector stateful` on the other.
+
+**Interoperability.** The sub-TLV's type, 252, is the draft's
+placeholder: IANA has not assigned one. It is most likely what Huawei
+(VRP 8.21.10 and later, the one other implementation) sends; Huawei
+configures the value in raw units, which is why `show` prints both. When
+IANA assigns a code point, a zebra-rs release will change it and say so
+in its notes. A router that does not know the sub-TLV — an older
+zebra-rs among them — stops participating in an algorithm whose winning
+definition carries it, rather than computing without it.
 
 ### Per-algorithm Prefix-SIDs — `flex-algo-prefix-sid`
 
@@ -406,9 +478,17 @@ to compare against — see [show isis](ch-14-04-show-isis.md) for the
 full grammar. The two most useful during bring-up:
 
 * `show isis flex-algo <n> graph` — the link-state graph *after* FAD
-  pruning. A colored-and-excluded neighbor is simply absent. This is
-  the first thing to check when paths look wrong: is the link actually
-  gone from the graph?
+  pruning. A pruned link is absent from the graph and listed at the end
+  with the reason, one line per direction:
+
+  ```
+  Pruned links:
+    ce -> n1: link loss 9.999999% (3333333) exceeds 5.000001% (1666667)
+    sj -> tk: affinity
+  ```
+
+  This is the first thing to check when paths look wrong: is the link
+  actually gone from the graph, and why?
 * `show isis flex-algo <n> route` — the algorithm's own RIB, with the
   per-algorithm labels. In the playset, every US destination leaves
   Tokyo via Singapore (`tk-sg`) at metric 40–60 while `show ip route`
@@ -466,6 +546,8 @@ repairs are inspected with `show isis flex-algo <n> repair-list`.
 | Participation (SR-Algorithm list) | SR-Algorithm sub-TLV 19 in Router Capability TLV 242 | RFC 8667 §3.2, RFC 9350 §5.2 |
 | FAD (metric-type, calc-type, priority, constraints) | FAD sub-TLV 26 in Router Capability TLV 242 | RFC 9350 §5.1 |
 | Link colors | Extended Admin Group in the ASLA sub-TLV, Flex-Algo application bit | RFC 7308, RFC 9479 |
+| Maximum link loss | Exclude Maximum Link Loss sub-TLV, type 252 (provisional), inside the FAD | draft-ietf-lsr-flex-algo-link-loss |
+| Link loss | Unidirectional Link Loss sub-TLV 36 in the ASLA, Flex-Algo application bit | RFC 8570, RFC 9479 |
 | Per-algorithm Prefix-SID | Prefix-SID sub-TLV with Algorithm = 128–255 | RFC 8667 §2.1, RFC 9350 §7 |
 | Per-algorithm SRv6 locator | SRv6 Locator TLV 27, Algorithm field | RFC 9352 §7.1 |
 

@@ -31,6 +31,9 @@ pub enum Unsupported {
     ExcludeSrlg,
     /// A FAD sub-TLV type this router does not know.
     SubTlv(u16),
+    /// A sub-TLV runs past the end of the definition, so the definition
+    /// cannot be read in full.
+    Truncated,
 }
 
 impl fmt::Display for Unsupported {
@@ -43,6 +46,7 @@ impl fmt::Display for Unsupported {
             Self::Flag => write!(f, "unsupported flag"),
             Self::ExcludeSrlg => write!(f, "unsupported constraint: exclude SRLG"),
             Self::SubTlv(t) => write!(f, "unsupported sub-TLV {t}"),
+            Self::Truncated => write!(f, "truncated definition"),
         }
     }
 }

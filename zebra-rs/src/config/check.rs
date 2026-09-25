@@ -8,6 +8,7 @@
 //! dispatched: a step (YANG has none), or a decimal64 range or
 //! `fraction-digits` (libyang extracts neither).
 
+use crate::flex_algo::check_max_link_loss;
 use crate::stamp::session::{check_loss_interval, check_loss_percent};
 
 /// A leaf value check: `Err` holds the reason, shown after the line.
@@ -16,6 +17,9 @@ pub type ValueCheck = fn(&str) -> Result<(), String>;
 /// The check for the leaf at `path`, the callback path with keys
 /// removed (`/router/isis/interface/te-metric/…`), if it has one.
 pub fn value_check(path: &str) -> Option<ValueCheck> {
+    if path == "/router/isis/flex-algo/exclude-max-link-loss" {
+        return Some(|v| check_max_link_loss(v).map(drop));
+    }
     // `te-metric measurement loss`, in IS-IS, OSPFv2 and OSPFv3 alike.
     let (_, leaf) = path
         .strip_prefix("/router/")?
@@ -61,5 +65,16 @@ mod tests {
             value_check("/router/isis/interface/te-metric/measurement/loss/threshold").is_none()
         );
         assert!(value_check("/router/isis/interface/te-metric/measurement/interval").is_none());
+    }
+
+    /// The link-loss constraint is bounded by what the wire can carry,
+    /// 50.331642 %, not 100 %.
+    #[test]
+    fn flex_algo_max_link_loss_is_checked() {
+        let check = value_check("/router/isis/flex-algo/exclude-max-link-loss").expect("checked");
+        assert!(check("5").is_ok());
+        assert!(check("50.331642").is_ok());
+        assert!(check("50.331643").is_err());
+        assert!(check("5.1234567").is_err());
     }
 }

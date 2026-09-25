@@ -1,0 +1,48 @@
+# n1 — participates in algorithm 128 without advertising a definition.
+# Measures its link to ce too, so ce's probes are reflected.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.2/32
+- if-name: n1-ce
+  ipv4:
+    address: 192.168.70.2/30
+- if-name: n1-n2
+  ipv4:
+    address: 192.168.70.10/30
+
+router:
+  isis:
+    net: 49.0070.0000.0000.0002.00
+    hostname: n1
+    is-type: level-2-only
+    segment-routing: mpls
+    te-router-id: 10.0.0.2
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+        prefix-sid:
+          index: 2
+        flex-algo-prefix-sid:
+        - algo: 128
+          index: 12
+    - if-name: n1-ce
+      network-type: point-to-point
+      ipv4:
+        enabled: true
+      te-metric:
+        measurement:
+          enabled: true
+          interval: 100
+          damping-period: 2
+          loss:
+            interval: 30
+    - if-name: n1-n2
+      network-type: point-to-point
+      ipv4:
+        enabled: true
+    flex-algo:
+    - algo: 128
+      dataplane:
+        sr-mpls: true

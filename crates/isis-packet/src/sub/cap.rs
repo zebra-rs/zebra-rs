@@ -348,6 +348,10 @@ pub enum FadSubCode {
     IncludeAllAg = 3, // RFC 9350 §6.1
     Flags = 4,        // RFC 9350 §6.4 (M-flag for prefix metric)
     ExcludeSrlg = 5,  // RFC 9350 §6.2
+    /// Exclude Maximum Link Loss (draft-ietf-lsr-flex-algo-link-loss
+    /// §2.1). PROVISIONAL: 252 is the draft's placeholder, not an IANA
+    /// assignment, and changes here when one is made.
+    ExcludeMaxLinkLoss = 252,
     Unknown(u8),
 }
 
@@ -360,6 +364,7 @@ impl From<FadSubCode> for u8 {
             IncludeAllAg => 3,
             Flags => 4,
             ExcludeSrlg => 5,
+            ExcludeMaxLinkLoss => 252,
             Unknown(v) => v,
         }
     }
@@ -374,6 +379,7 @@ impl From<u8> for FadSubCode {
             3 => IncludeAllAg,
             4 => Flags,
             5 => ExcludeSrlg,
+            252 => ExcludeMaxLinkLoss,
             v => Unknown(v),
         }
     }
@@ -551,6 +557,45 @@ impl TlvEmitter for IsisSubFadExcludeSrlg {
     }
 }
 
+/// FAD Exclude Maximum Link Loss sub-TLV (FAEML,
+/// draft-ietf-lsr-flex-algo-link-loss §2.1): a link whose advertised
+/// unidirectional loss (RFC 8570 §4.4) exceeds `max_loss` is pruned from
+/// the algorithm's topology; a link advertising no loss is kept.
+///
+/// Length is exactly 3 octets, a 24-bit value in the RFC 8570 unit of
+/// 0.000003 %. Any other length fails the parse, so the sub-TLV is kept
+/// as `Unknown` — still re-flooded intact, and a definition this router
+/// cannot read.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IsisSubFadExcludeMaxLinkLoss {
+    pub max_loss: u32,
+}
+
+impl ParseBe<IsisSubFadExcludeMaxLinkLoss> for IsisSubFadExcludeMaxLinkLoss {
+    fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        if input.len() != 3 {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::LengthValue,
+            )));
+        }
+        let (input, max_loss) = be_u24(input)?;
+        Ok((input, Self { max_loss }))
+    }
+}
+
+impl TlvEmitter for IsisSubFadExcludeMaxLinkLoss {
+    fn typ(&self) -> u8 {
+        FadSubCode::ExcludeMaxLinkLoss.into()
+    }
+    fn len(&self) -> u8 {
+        3
+    }
+    fn emit(&self, buf: &mut BytesMut) {
+        buf.put(&u32_u8_3(self.max_loss.min(0x00FF_FFFF))[..]);
+    }
+}
+
 /// Nested sub-TLV under a FAD. Dispatched by `FadSubCode` per
 /// RFC 9350 §5.1.
 #[derive(Debug, NomBE, Clone, Serialize, Deserialize, PartialEq)]
@@ -566,6 +611,8 @@ pub enum FadSubTlv {
     Flags(IsisSubFadFlags),
     #[nom(Selector = "FadSubCode::ExcludeSrlg")]
     ExcludeSrlg(IsisSubFadExcludeSrlg),
+    #[nom(Selector = "FadSubCode::ExcludeMaxLinkLoss")]
+    ExcludeMaxLinkLoss(IsisSubFadExcludeMaxLinkLoss),
     #[nom(Selector = "_")]
     Unknown(IsisSubTlvUnknown),
 }
@@ -579,6 +626,7 @@ impl FadSubTlv {
             IncludeAllAg(v) => v.len(),
             Flags(v) => v.len(),
             ExcludeSrlg(v) => v.len(),
+            ExcludeMaxLinkLoss(v) => v.len(),
             Unknown(v) => v.len,
         }
     }
@@ -591,6 +639,7 @@ impl FadSubTlv {
             IncludeAllAg(v) => v.tlv_emit(buf),
             Flags(v) => v.tlv_emit(buf),
             ExcludeSrlg(v) => v.tlv_emit(buf),
+            ExcludeMaxLinkLoss(v) => v.tlv_emit(buf),
             Unknown(v) => v.tlv_emit(buf),
         }
     }
@@ -624,6 +673,12 @@ pub struct IsisSubFlexAlgoDef {
     /// flags, exclude-SRLG).
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub subs: Vec<FadSubTlv>,
+    /// Bytes after the last whole sub-TLV: a sub-TLV whose declared length
+    /// runs past the end of the definition. Kept, and re-emitted, so the
+    /// definition floods on as received; one carrying them cannot be read
+    /// in full, and a router must not compute with a part of it.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub trailing: Vec<u8>,
 }
 
 impl ParseBe<IsisSubFlexAlgoDef> for IsisSubFlexAlgoDef {
@@ -634,13 +689,14 @@ impl ParseBe<IsisSubFlexAlgoDef> for IsisSubFlexAlgoDef {
         let (input, priority) = be_u8(input)?;
         let (input, subs) = many0_complete(FadSubTlv::parse_subs).parse(input)?;
         Ok((
-            input,
+            &[],
             Self {
                 flex_algorithm,
                 metric_type,
                 calc_type,
                 priority,
                 subs,
+                trailing: input.to_vec(),
             },
         ))
     }
@@ -659,7 +715,7 @@ impl TlvEmitter for IsisSubFlexAlgoDef {
     }
 
     fn len(&self) -> u8 {
-        (4 + self.sub_len()).min(255) as u8
+        (4 + self.sub_len() + self.trailing.len()).min(255) as u8
     }
 
     fn emit(&self, buf: &mut BytesMut) {
@@ -670,6 +726,7 @@ impl TlvEmitter for IsisSubFlexAlgoDef {
         for s in &self.subs {
             s.emit(buf);
         }
+        buf.put_slice(&self.trailing);
     }
 }
 
@@ -813,6 +870,7 @@ mod tests {
             calc_type: 0,   // SPF
             priority: 200,
             subs: vec![],
+            trailing: Vec::new(),
         };
         let parsed = round_trip_fad(fad.clone());
         assert_eq!(parsed, fad);
@@ -842,6 +900,7 @@ mod tests {
                     srlgs: vec![100, 200],
                 }),
             ],
+            trailing: Vec::new(),
         };
         let parsed = round_trip_fad(fad.clone());
         assert_eq!(parsed, fad);
@@ -874,6 +933,87 @@ mod tests {
         let mut buf = BytesMut::new();
         fad.emit(&mut buf);
         assert_eq!(&buf[..], bytes);
+    }
+
+    /// draft-ietf-lsr-flex-algo-link-loss §2.1: type 252 (provisional),
+    /// length 3, a 24-bit value in RFC 8570 units — every bit of it.
+    #[test]
+    fn fad_exclude_max_link_loss_round_trips() {
+        let bytes: &[u8] = &[
+            128, 0, 0, 128, // FAD header
+            252, 3, 0x19, 0x6E, 0x6B, // FAEML 1666667 (5.000001 %)
+        ];
+        let (rest, fad) = IsisSubFlexAlgoDef::parse_be(bytes).expect("parse");
+        assert!(rest.is_empty());
+        assert_eq!(
+            fad.subs,
+            vec![FadSubTlv::ExcludeMaxLinkLoss(
+                IsisSubFadExcludeMaxLinkLoss {
+                    max_loss: 1_666_667
+                }
+            )]
+        );
+        let mut buf = BytesMut::new();
+        fad.emit(&mut buf);
+        assert_eq!(&buf[..], bytes);
+
+        for max_loss in [0, 1, 0x00FF_FFFE, 0x00FF_FFFF] {
+            let sub = IsisSubFadExcludeMaxLinkLoss { max_loss };
+            let mut buf = BytesMut::new();
+            sub.emit(&mut buf);
+            let (rest, parsed) = IsisSubFadExcludeMaxLinkLoss::parse_be(&buf).expect("parse");
+            assert!(rest.is_empty());
+            assert_eq!(parsed.max_loss, max_loss);
+        }
+    }
+
+    /// A FAEML of any length but 3 is kept as `Unknown`, and re-emits as
+    /// received: the definition still floods intact, and a router cannot
+    /// compute with a constraint it could not read.
+    #[test]
+    fn fad_exclude_max_link_loss_wrong_length_is_unknown() {
+        for bytes in [
+            &[128u8, 0, 0, 128, 252, 2, 0x19, 0x6E][..],
+            &[128, 0, 0, 128, 252, 4, 0, 0x19, 0x6E, 0x6B][..],
+            &[128, 0, 0, 128, 252, 0][..],
+        ] {
+            let (rest, fad) = IsisSubFlexAlgoDef::parse_be(bytes).expect("parse");
+            assert!(rest.is_empty());
+            match &fad.subs[..] {
+                [FadSubTlv::Unknown(u)] => assert_eq!(u.code, 252, "{bytes:?}"),
+                other => panic!("{bytes:?}: {other:?}"),
+            }
+            let mut buf = BytesMut::new();
+            fad.emit(&mut buf);
+            assert_eq!(&buf[..], bytes);
+        }
+    }
+
+    /// A sub-TLV whose declared length runs past the end of the FAD — here
+    /// a FAEML claiming 3 bytes with 2 left — is not silently dropped: the
+    /// FAD keeps the bytes and re-emits them, length included, exactly.
+    #[test]
+    fn fad_truncated_sub_is_kept_as_trailing() {
+        let bytes: &[u8] = &[128, 0, 0, 128, 252, 3, 0x19, 0x6E];
+        let (rest, fad) = IsisSubFlexAlgoDef::parse_be(bytes).expect("parse");
+        assert!(rest.is_empty());
+        assert!(fad.subs.is_empty());
+        assert_eq!(fad.trailing, vec![252, 3, 0x19, 0x6E]);
+        assert_eq!(fad.len() as usize, bytes.len());
+        let mut buf = BytesMut::new();
+        fad.emit(&mut buf);
+        assert_eq!(&buf[..], bytes);
+
+        // Inside a Router Capability TLV, framed by the FAD's own length.
+        let tlv: &[u8] = &[
+            0xf2, 15, 1, 1, 1, 1, 0, // TLV 242, Router ID, flags
+            26, 8, 128, 0, 0, 128, 252, 3, 0x19, 0x6E, // FAD, truncated FAEML
+        ];
+        let (_, cap) = IsisTlvRouterCap::parse_be(&tlv[2..]).expect("parse");
+        match &cap.subs[..] {
+            [IsisSubTlv::FlexAlgoDef(f)] => assert_eq!(f.trailing, vec![252, 3, 0x19, 0x6E]),
+            other => panic!("{other:?}"),
+        }
     }
 
     /// RFC 9350 §6.4: every advertised flag bit is checked, so every bit
@@ -910,6 +1050,7 @@ mod tests {
             calc_type: 0,
             priority: 128,
             subs: vec![],
+            trailing: Vec::new(),
         };
         let cap = IsisTlvRouterCap {
             router_id: Ipv4Addr::new(1, 1, 1, 1),

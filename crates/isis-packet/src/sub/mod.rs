@@ -49,8 +49,8 @@ pub mod area_proxy_disp;
 pub mod cap;
 pub use cap::{
     ExtAdminGroup, FadSubCode, FadSubTlv, IsisSubAreaLeader, IsisSubFadExcludeAg,
-    IsisSubFadExcludeSrlg, IsisSubFadFlags, IsisSubFadIncludeAllAg, IsisSubFadIncludeAnyAg,
-    IsisSubFlexAlgoDef, IsisSubNodeMaxSidDepth, IsisSubSegmentRoutingAlgo,
+    IsisSubFadExcludeMaxLinkLoss, IsisSubFadExcludeSrlg, IsisSubFadFlags, IsisSubFadIncludeAllAg,
+    IsisSubFadIncludeAnyAg, IsisSubFlexAlgoDef, IsisSubNodeMaxSidDepth, IsisSubSegmentRoutingAlgo,
     IsisSubSegmentRoutingCap, IsisSubSegmentRoutingLB, IsisSubSrv6, IsisSubTlv, IsisTlvRouterCap,
     SegmentRoutingCapFlags,
 };

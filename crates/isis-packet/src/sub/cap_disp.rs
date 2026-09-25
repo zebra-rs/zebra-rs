@@ -64,6 +64,13 @@ impl Display for IsisSubFlexAlgoDef {
         for sub in &self.subs {
             write!(f, "\n{}", sub)?;
         }
+        if !self.trailing.is_empty() {
+            write!(
+                f,
+                "\n     FAD truncated: {} bytes after the last whole sub-TLV",
+                self.trailing.len()
+            )?;
+        }
         Ok(())
     }
 }
@@ -90,6 +97,17 @@ impl Display for FadSubTlv {
             Flags(v) => write!(f, "     FAD Flags M:{}", v.m_flag as u8),
             ExcludeSrlg(v) => {
                 write!(f, "     FAD Exclude SRLG: {} ids", v.srlgs.len())
+            }
+            // One unit is 0.000003 %, so three micro-percent: exact.
+            ExcludeMaxLinkLoss(v) => {
+                let micro = u64::from(v.max_loss) * 3;
+                write!(
+                    f,
+                    "     FAD Exclude Max Link Loss: {}.{:06}% ({})",
+                    micro / 1_000_000,
+                    micro % 1_000_000,
+                    v.max_loss
+                )
             }
             Unknown(v) => write!(f, "     FAD Unknown Code: {} Len: {}", v.code, v.len),
         }
