@@ -1,0 +1,26 @@
+# z1 (DUT, AS 65050): learns routes from the scripted eBGP speaker h1 and
+# relays them to its iBGP peer z2. It is not a route reflector: an
+# eBGP-learned route goes to z2 with the attributes it was learned with,
+# so an ORIGINATOR_ID / CLUSTER_LIST kept from h1 reaches z2 verbatim.
+router:
+  bgp:
+    global:
+      as: 65050
+      router-id: 192.168.44.1
+    neighbor:
+    # The scripted speaker never listens on 179: passive keeps this peer
+    # in Active so the script's connect is accepted.
+    - remote-address: 192.168.44.2
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65051
+      transport:
+        passive-mode: true
+    - remote-address: 192.168.44.3
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65050
