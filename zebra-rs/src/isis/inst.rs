@@ -4913,6 +4913,149 @@ mod commit_and_microloop_gate_tests {
 }
 
 #[cfg(test)]
+mod parallel_link_graph_tests {
+    use std::collections::BTreeSet;
+
+    use super::commit_and_microloop_gate_tests::fresh_isis;
+    use super::*;
+    use crate::isis::graph::{graph, graph_mt2};
+    use crate::isis::link::{IsisLink, LinkConfig, LinkState, LinkTimer};
+    use crate::isis::lsdb::Lsa;
+    use crate::spf::SpfOpt;
+
+    fn peer() -> IsisSysId {
+        IsisSysId {
+            id: [0, 0, 0, 0, 0, 9],
+        }
+    }
+
+    fn reach(neighbor: IsisNeighborId, metrics: impl Iterator<Item = u32>) -> Vec<IsisTlv> {
+        let entries: Vec<IsisTlvExtIsReachEntry> = metrics
+            .map(|metric| IsisTlvExtIsReachEntry {
+                neighbor_id: neighbor,
+                metric,
+                subs: Vec::new(),
+            })
+            .collect();
+        vec![
+            IsisTlv::ExtIsReach(IsisTlvExtIsReach {
+                entries: entries.clone(),
+            }),
+            IsisTlv::MtIsReach(IsisTlvMtIsReach {
+                mt: MultiTopologyId::from(MtId::Ipv6Unicast.wire_id()),
+                entries,
+            }),
+        ]
+    }
+
+    /// Our router with parallel IPv6-enabled point-to-point links to one
+    /// peer, one per `(ifindex, metric)`, advertised in TLV 22 and in
+    /// MT 2's TLV 222 alike, in `entry_order`.
+    fn topology(links: &[(u32, u32)], entry_order: &[u32]) -> Isis {
+        let mut isis = fresh_isis();
+        let own = isis.config.net.sys_id();
+        let to_peer = IsisNeighborId::from_sys_id(&peer(), 0);
+        for &(ifindex, metric) in links {
+            let (ptx, prx) = tokio::sync::mpsc::unbounded_channel();
+            Box::leak(Box::new(prx));
+            let mut link = IsisLink {
+                ifindex,
+                ptx,
+                read_task: tokio::spawn(async {}),
+                flags: netlink_packet_route::link::LinkFlags::empty(),
+                circuit_id: 0,
+                config: LinkConfig::default(),
+                state: LinkState::default(),
+                timer: LinkTimer::default(),
+            };
+            *link.state.adj.get_mut(&Level::L2) = Some((to_peer, None));
+            link.config.metric = Some(metric);
+            link.config.mt_metrics.insert(MtId::Ipv6Unicast, metric);
+            link.config.enable.v6 = true;
+            isis.links.insert(ifindex, link);
+        }
+        let metric = |ifindex: &u32| links.iter().find(|(i, _)| i == ifindex).unwrap().1;
+        let lsps = [
+            (own, true, reach(to_peer, entry_order.iter().map(metric))),
+            (
+                peer(),
+                false,
+                reach(
+                    IsisNeighborId::from_sys_id(&own, 0),
+                    links.iter().map(|(_, m)| *m),
+                ),
+            ),
+        ];
+        for (sys, originated, tlvs) in lsps {
+            let lsp = IsisLsp {
+                lsp_id: IsisLspId::new(sys, 0, 0),
+                hold_time: 1200,
+                tlvs,
+                ..Default::default()
+            };
+            let mut lsa = Lsa::new(lsp);
+            lsa.originated = originated;
+            isis.lsdb
+                .get_mut(&Level::L2)
+                .map
+                .insert(lsa.lsp.lsp_id, lsa);
+        }
+        isis.mt_membership
+            .get_mut(&Level::L2)
+            .insert(peer(), BTreeSet::from([MtId::Ipv6Unicast]));
+        isis
+    }
+
+    /// Our outgoing edges as (cost, interface), and the interfaces SPF
+    /// reaches the peer through.
+    fn edges_and_first_hops(
+        (graph, source, _): (crate::spf::Graph, Option<usize>, BTreeMap<u32, IsisSysId>),
+    ) -> (BTreeSet<(u32, u32)>, BTreeSet<u32>) {
+        let source = source.expect("our router");
+        let olinks = &graph[&source].olinks;
+        let edges = olinks.iter().map(|l| (l.cost, l.link_id)).collect();
+        let tree = crate::spf::spf(&graph, source, &SpfOpt::full_path());
+        let first_hops = tree[&olinks[0].to]
+            .first_hop_links
+            .iter()
+            .map(|(_, link_id)| *link_id)
+            .collect();
+        (edges, first_hops)
+    }
+
+    /// Parallel links to one neighbour share its neighbour ID, and our
+    /// edges used to take their interface from a lookup by it — the last
+    /// one — so SPF's choice of the cheaper link installed the expensive
+    /// one. Each edge now keeps its own interface, in the base topology
+    /// and in MT 2, whichever order our LSP lists them in; with equal
+    /// metrics both are first hops.
+    #[tokio::test]
+    async fn parallel_links_keep_their_own_interfaces() {
+        for order in [[7, 8], [8, 7]] {
+            let mut isis = topology(&[(7, 10), (8, 100)], &order);
+            let base = graph(&mut isis.top(), Level::L2);
+            let mt2 = graph_mt2(&mut isis.top(), Level::L2);
+            for (name, g) in [("base", base), ("mt2", mt2)] {
+                let (edges, first_hops) = edges_and_first_hops(g);
+                assert_eq!(
+                    edges,
+                    BTreeSet::from([(10, 7), (100, 8)]),
+                    "{name} {order:?}"
+                );
+                assert_eq!(first_hops, BTreeSet::from([7]), "{name} {order:?}");
+            }
+        }
+        let mut isis = topology(&[(7, 10), (8, 10)], &[7, 8]);
+        let base = graph(&mut isis.top(), Level::L2);
+        let mt2 = graph_mt2(&mut isis.top(), Level::L2);
+        for (name, g) in [("base", base), ("mt2", mt2)] {
+            let (_, first_hops) = edges_and_first_hops(g);
+            assert_eq!(first_hops, BTreeSet::from([7, 8]), "{name}: ECMP");
+        }
+    }
+}
+
+#[cfg(test)]
 mod flex_algo_graph_tests {
     use std::collections::BTreeSet;
 

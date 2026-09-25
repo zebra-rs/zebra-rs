@@ -154,25 +154,24 @@ pub fn graph(
         graph.insert(node_id, vertex);
     }
 
-    // Build a local-adjacency → ifindex map for this level. Each
-    // entry corresponds to one of our own ExtIsReach edges; the key
-    // is the IsisNeighborId carried in that edge's TLV. For P2P
-    // adjacencies the key is (peer_sys_id, 0); for LAN adjacencies
-    // it is the (DIS_sys_id, pseudo_id) of the LAN's pseudonode. The
-    // graph builder uses this to stamp link_id = ifindex onto edges
-    // emitted from our own router LSP, so the rib-builder can resolve
-    // back to a specific local interface instead of iterating every
-    // top.links entry.
-    //
-    // Case P4 (two NICs on the same LAN) collapses both interfaces to
-    // a single key here — only the last-inserted ifindex survives, and
-    // SPF installs one nexthop. Accepted per the design decision.
-    let mut local_adj_to_ifindex: BTreeMap<IsisNeighborId, u32> = BTreeMap::new();
-    for (ifindex, link) in top.links.iter() {
-        if let Some((adj, _)) = link.state.adj.get(&level) {
-            local_adj_to_ifindex.insert(*adj, *ifindex);
-        }
-    }
+    // Our own reach entries, each paired with the interface that
+    // produced it. The graph builder stamps link_id = ifindex onto the
+    // edges emitted from our own router LSP, so the rib-builder resolves
+    // each first hop to a specific local interface. Paired per entry, not
+    // per neighbour: parallel links to one neighbour — two P2P links, or
+    // two NICs on one LAN — share its neighbour ID, and keying by it gave
+    // every such edge the last interface's ifindex, so SPF's choice of
+    // the cheaper link installed the expensive one.
+    let own_ifindex = own_entry_interfaces(
+        nodes_to_process
+            .iter()
+            .filter(|(_, originated, lsp)| *originated && !lsp.lsp_id.is_pseudo())
+            .map(|(_, _, lsp)| lsp),
+        top.links,
+        top.affinity_map,
+        level,
+        ReachTopology::Base,
+    );
 
     // RFC 9666 §3.2 context for an Inside Router's L2 SPF: the inside
     // set (live L1 router LSPs) classifies every edge as intra- or
@@ -233,9 +232,12 @@ pub fn graph(
         // rib-builder only consumes first_hop_links anyway.
         let own_router_lsp = *is_originated && !lsp.lsp_id.is_pseudo();
 
+        let mut position = 0;
         for tlv in &lsp.tlvs {
             if let IsisTlv::ExtIsReach(ext_reach) = tlv {
                 for entry in &ext_reach.entries {
+                    let entry_key = (lsp.lsp_id, position);
+                    position += 1;
                     let neighbor_lsp_id: IsisLspId = entry.neighbor_id.into();
 
                     // RFC 9666 §3.2: classify the edge and resolve
@@ -278,10 +280,7 @@ pub fn graph(
                         .get(&neighbor_lsp_id.neighbor_id());
 
                     let link_id = if own_router_lsp {
-                        local_adj_to_ifindex
-                            .get(&entry.neighbor_id)
-                            .copied()
-                            .unwrap_or(0)
+                        own_ifindex.get(&entry_key).copied().unwrap_or(0)
                     } else {
                         0
                     };
@@ -404,19 +403,22 @@ pub fn graph_mt2(
         nodes_to_process.push((neighbor_id, is_originated, lsp));
     }
 
-    // Same local-adjacency → ifindex map as graph(). Used to stamp
-    // link_id = ifindex onto the first-hop edges emitted from our own
-    // router LSP so build_rib_from_spf_v6 can resolve each MT 2 nexthop
-    // back to a local interface. Without it every MT 2 edge would carry
-    // link_id = 0, which the v6 rib-builder skips — leaving the MT 2
-    // IPv6 RIB empty. For LAN adjacencies the key is the
-    // (DIS_sys_id, pseudo_id) of the pseudonode.
-    let mut local_adj_to_ifindex: BTreeMap<IsisNeighborId, u32> = BTreeMap::new();
-    for (ifindex, link) in top.links.iter() {
-        if let Some((adj, _)) = link.state.adj.get(&level) {
-            local_adj_to_ifindex.insert(*adj, *ifindex);
-        }
-    }
+    // Same own-entry pairing as graph(), over our MT 2 reach entries:
+    // stamps link_id = ifindex onto the first-hop edges emitted from our
+    // own router LSP so build_rib_from_spf_v6 can resolve each MT 2
+    // nexthop back to a local interface. Without it every MT 2 edge would
+    // carry link_id = 0, which the v6 rib-builder skips — leaving the
+    // MT 2 IPv6 RIB empty.
+    let own_ifindex = own_entry_interfaces(
+        nodes_to_process
+            .iter()
+            .filter(|(_, originated, lsp)| *originated && !lsp.lsp_id.is_pseudo())
+            .map(|(_, _, lsp)| lsp),
+        top.links,
+        top.affinity_map,
+        level,
+        ReachTopology::Mt2,
+    );
 
     for (neighbor_id, is_originated, lsp) in nodes_to_process {
         let node_id = top.lsp_map.get_mut(&level).get(&neighbor_id);
@@ -433,7 +435,7 @@ pub fn graph_mt2(
             &neighbor_id,
             &lsp,
             own_router_lsp,
-            &local_adj_to_ifindex,
+            &own_ifindex,
         );
         graph.insert(node_id, vertex);
     }
@@ -448,7 +450,7 @@ fn create_graph_vertex_mt2(
     neighbor_id: &IsisNeighborId,
     lsp: &IsisLsp,
     own_router_lsp: bool,
-    local_adj_to_ifindex: &BTreeMap<IsisNeighborId, u32>,
+    own_ifindex: &BTreeMap<(IsisLspId, usize), u32>,
 ) -> spf::Vertex {
     let sys_id = neighbor_id.sys_id();
     let is_pseudo = lsp.lsp_id.is_pseudo();
@@ -487,7 +489,7 @@ fn create_graph_vertex_mt2(
         node_id,
         lsp,
         own_router_lsp,
-        local_adj_to_ifindex,
+        own_ifindex,
         &mut vertex.olinks,
     );
 
@@ -500,7 +502,7 @@ fn process_outgoing_links_mt2(
     from_id: usize,
     lsp: &IsisLsp,
     own_router_lsp: bool,
-    local_adj_to_ifindex: &BTreeMap<IsisNeighborId, u32>,
+    own_ifindex: &BTreeMap<(IsisLspId, usize), u32>,
     links: &mut Vec<spf::Link>,
 ) {
     if lsp.lsp_id.is_pseudo() {
@@ -536,23 +538,20 @@ fn process_outgoing_links_mt2(
     }
 
     // Real router source: walk the MT 2 reach TLVs and emit one
-    // edge per entry, no flattening.
-    for tlv in &lsp.tlvs {
-        if let IsisTlv::MtIsReach(mt_reach) = tlv
-            && mt_reach.mt.id() == 2
-        {
-            for entry in &mt_reach.entries {
-                process_neighbor_link_mt2(
-                    top,
-                    level,
-                    from_id,
-                    entry,
-                    own_router_lsp,
-                    local_adj_to_ifindex,
-                    links,
-                );
-            }
-        }
+    // edge per entry, no flattening. link_id is meaningful only for
+    // edges out of our own router LSP — the SPF's first-hop slot the v6
+    // rib-builder resolves to a local interface; edges from other
+    // routers' LSPs carry link_id = 0, as in graph().
+    for (position, entry) in ReachTopology::Mt2.entries(lsp).enumerate() {
+        let link_id = if own_router_lsp {
+            own_ifindex
+                .get(&(lsp.lsp_id, position))
+                .copied()
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        process_neighbor_link_mt2(top, level, from_id, entry, link_id, links);
     }
 }
 
@@ -561,8 +560,7 @@ fn process_neighbor_link_mt2(
     level: Level,
     from_id: usize,
     entry: &IsisTlvExtIsReachEntry,
-    own_router_lsp: bool,
-    local_adj_to_ifindex: &BTreeMap<IsisNeighborId, u32>,
+    link_id: u32,
     links: &mut Vec<spf::Link>,
 ) {
     let neighbor_lsp_id: IsisLspId = entry.neighbor_id.into();
@@ -590,19 +588,6 @@ fn process_neighbor_link_mt2(
             return;
         }
     }
-
-    // link_id is meaningful only for edges out of our own router LSP —
-    // the SPF's first-hop slot the v6 rib-builder resolves to a local
-    // interface. Edges from other routers' LSPs carry link_id = 0.
-    // Mirrors graph()'s legacy ExtIsReach handling.
-    let link_id = if own_router_lsp {
-        local_adj_to_ifindex
-            .get(&entry.neighbor_id)
-            .copied()
-            .unwrap_or(0)
-    } else {
-        0
-    };
 
     let to_id = top
         .lsp_map
@@ -697,6 +682,7 @@ pub fn graph_flex_algo(
         top.links,
         top.affinity_map,
         level,
+        ReachTopology::Base,
     );
 
     // Edge construction with per-link affinity filtering.
@@ -771,39 +757,72 @@ pub fn graph_flex_algo(
     (graph, source_node, adjacency_sids)
 }
 
-/// This router's own reach entries, each paired with the interface that
-/// produced it, keyed by fragment and position among the fragment's
-/// IS-reach entries. Parallel links to one neighbour share its neighbour
-/// ID, so the neighbour alone cannot say which interface an entry is —
-/// and the interface is the edge's forwarding identity: stamp a clean
-/// edge with its pruned twin's interface and the algorithm's traffic
-/// leaves over the pruned link. Each entry takes an unused interface
-/// adjacent to its neighbour, preferring the one whose metric and current
-/// attributes are what the entry advertises; parallel links that differ
-/// therefore pair exactly, and identical ones still get one interface
-/// each.
+/// Which of this router's reach entries an own-entry pairing reads: the
+/// base topology's (TLV 22), as the algorithm-0 and Flexible Algorithm
+/// graphs do, or MT 2's (TLV 222), as the IPv6 multi-topology graph does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReachTopology {
+    Base,
+    Mt2,
+}
+
+impl ReachTopology {
+    /// The topology's reach entries in one LSP, in order.
+    fn entries(self, lsp: &IsisLsp) -> impl Iterator<Item = &IsisTlvExtIsReachEntry> {
+        lsp.tlvs
+            .iter()
+            .filter_map(move |tlv| match (self, tlv) {
+                (ReachTopology::Base, IsisTlv::ExtIsReach(reach)) => Some(&reach.entries),
+                (ReachTopology::Mt2, IsisTlv::MtIsReach(reach)) if reach.mt.id() == 2 => {
+                    Some(&reach.entries)
+                }
+                _ => None,
+            })
+            .flatten()
+    }
+
+    /// The metric this router advertises for `link` in the topology, or
+    /// `None` when the link is not in it (MT 2 carries IPv6 links only).
+    fn link_metric(self, link: &IsisLink) -> Option<u32> {
+        match self {
+            ReachTopology::Base => Some(link.config.metric()),
+            ReachTopology::Mt2 => link
+                .config
+                .enable
+                .v6
+                .then(|| link.config.mt_metric(MtId::Ipv6Unicast)),
+        }
+    }
+}
+
+/// This router's own reach entries in `topology`, each paired with the
+/// interface that produced it, keyed by fragment and position among the
+/// fragment's entries. The interface is the edge's forwarding identity —
+/// the link_id the rib-builder turns into the outgoing interface — and
+/// parallel links to one neighbour share its neighbour ID, so the
+/// neighbour alone cannot say which interface an entry is: keyed by it,
+/// SPF's cheaper parallel link installed the expensive one, and a
+/// Flex-Algorithm's surviving link its pruned twin. Each entry takes an
+/// unused interface adjacent to its neighbour, preferring the one whose
+/// metric and current attributes are what the entry advertises; parallel
+/// links that differ therefore pair exactly, and identical ones still get
+/// one interface each.
 fn own_entry_interfaces<'a>(
     own: impl Iterator<Item = &'a IsisLsp>,
     links: &IsisLinks,
     am: &AffinityMap,
     level: Level,
+    topology: ReachTopology,
 ) -> BTreeMap<(IsisLspId, usize), u32> {
     let mut used = BTreeSet::new();
     let mut out = BTreeMap::new();
     for lsp in own {
-        let entries = lsp
-            .tlvs
-            .iter()
-            .filter_map(|tlv| match tlv {
-                IsisTlv::ExtIsReach(reach) => Some(&reach.entries),
-                _ => None,
-            })
-            .flatten();
-        for (position, entry) in entries.enumerate() {
+        for (position, entry) in topology.entries(lsp).enumerate() {
             let candidates: Vec<(u32, &IsisLink)> = links
                 .iter()
                 .filter(|(ifindex, link)| {
                     !used.contains(*ifindex)
+                        && topology.link_metric(link).is_some()
                         && link
                             .state
                             .adj
@@ -817,7 +836,8 @@ fn own_entry_interfaces<'a>(
             let chosen = candidates
                 .iter()
                 .find(|(_, link)| {
-                    link.config.metric() == entry.metric && own_link_attrs(link, am) == advertised
+                    topology.link_metric(link) == Some(entry.metric)
+                        && own_link_attrs(link, am) == advertised
                 })
                 .or(candidates.first())
                 .map(|(ifindex, _)| *ifindex);
