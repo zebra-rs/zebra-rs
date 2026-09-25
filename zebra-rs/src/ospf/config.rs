@@ -290,6 +290,14 @@ impl Ospf {
             config_ospf_interface_te_measurement_loss_integrity,
         );
         self.ospf_add(
+            "/area/interface/te-metric/measurement/loss/anomaly-threshold",
+            config_ospf_interface_te_measurement_loss_anomaly_threshold,
+        );
+        self.ospf_add(
+            "/area/interface/te-metric/measurement/loss/reuse-threshold",
+            config_ospf_interface_te_measurement_loss_reuse_threshold,
+        );
+        self.ospf_add(
             "/area/interface/hello-interval",
             config_ospf_interface_hello_interval,
         );
@@ -1665,6 +1673,24 @@ fn config_ospf_interface_te_measurement_loss_integrity(
     config_ospf_interface_te_measurement(ospf, args, |m, args| {
         m.set_loss_integrity(args, op.is_set())
     })
+}
+
+fn config_ospf_interface_te_measurement_loss_anomaly_threshold(
+    ospf: &mut Ospf,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospf_interface_te_measurement(ospf, args, |m, args| {
+        m.set_loss_anomaly(args, op.is_set())
+    })
+}
+
+fn config_ospf_interface_te_measurement_loss_reuse_threshold(
+    ospf: &mut Ospf,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospf_interface_te_measurement(ospf, args, |m, args| m.set_loss_reuse(args, op.is_set()))
 }
 
 fn config_ospf_interface_hello_interval(

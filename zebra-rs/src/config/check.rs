@@ -22,7 +22,9 @@ pub fn value_check(path: &str) -> Option<ValueCheck> {
         .split_once("/te-metric/measurement/loss/")?;
     match leaf {
         "interval" => Some(|v| check_loss_interval(v).map(drop)),
-        "minimum-change" | "accelerated-threshold" => Some(|v| check_loss_percent(v).map(drop)),
+        "minimum-change" | "accelerated-threshold" | "anomaly-threshold" | "reuse-threshold" => {
+            Some(|v| check_loss_percent(v).map(drop))
+        }
         _ => None,
     }
 }
@@ -42,10 +44,17 @@ mod tests {
             let check = value_check(&path).expect(&path);
             assert!(check("60").is_ok());
             assert!(check("45").is_err(), "{path}");
-            let path = format!("{prefix}/te-metric/measurement/loss/minimum-change");
-            let check = value_check(&path).expect(&path);
-            assert!(check("0.5").is_ok());
-            assert!(check("100.5").is_err(), "{path}");
+            for leaf in [
+                "minimum-change",
+                "accelerated-threshold",
+                "anomaly-threshold",
+                "reuse-threshold",
+            ] {
+                let path = format!("{prefix}/te-metric/measurement/loss/{leaf}");
+                let check = value_check(&path).expect(&path);
+                assert!(check("0.5").is_ok());
+                assert!(check("100.5").is_err(), "{path}");
+            }
         }
         // Leaves YANG already bounds need nothing more.
         assert!(

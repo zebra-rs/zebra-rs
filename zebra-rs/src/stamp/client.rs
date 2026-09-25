@@ -23,7 +23,7 @@ use std::time::Instant;
 
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
-use super::anomaly::{AnomalyFlags, AnomalyThresholds, DelayAnomaly};
+use super::anomaly::{Anomaly, AnomalyFlags, AnomalyThresholds, DelayAnomaly};
 use super::loss::{LossAdvert, LossDecision};
 use super::session::{LossPolicy, SessionKey, SessionParams};
 use super::stats::MetricSnapshot;
@@ -121,6 +121,9 @@ pub struct Subscriber {
     /// cadence (design D6) — see [`super::loss::evaluate`] for which
     /// clock a decision is timed by.
     pub loss_advertised_at: Option<Instant>,
+    /// The loss A-bit hysteresis, against this subscriber's own bounds
+    /// (design D7).
+    pub loss_anomaly: Anomaly,
 }
 
 impl Subscriber {
@@ -138,6 +141,7 @@ impl Subscriber {
             advertised_delay: None,
             advertised_loss: None,
             loss_advertised_at: None,
+            loss_anomaly: Anomaly::default(),
         }
     }
 

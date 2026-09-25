@@ -478,6 +478,14 @@ impl Isis {
             link::config_te_measurement_loss_integrity,
         );
         self.callback_add(
+            "/router/isis/interface/te-metric/measurement/loss/anomaly-threshold",
+            link::config_te_measurement_loss_anomaly_threshold,
+        );
+        self.callback_add(
+            "/router/isis/interface/te-metric/measurement/loss/reuse-threshold",
+            link::config_te_measurement_loss_reuse_threshold,
+        );
+        self.callback_add(
             "/router/isis/interface/ipv4/flex-algo-prefix-sid",
             link::config_ipv4_flex_algo_prefix_sid,
         );

@@ -1500,6 +1500,29 @@ module config {
                        percentage of the probes the probe interval should have
                        produced actually settled. Default 90.";
                   }
+                  leaf anomaly-threshold {
+                    ext:help "Set the Anomalous bit at or above this loss (percent)";
+                    type decimal64 {
+                      fraction-digits 6;
+                    }
+                    units "percent";
+                    description
+                      "Loss, in percent, at or above which the link-loss sub-TLV's
+                       Anomalous (A) bit is set, evaluated on the value it is advertised
+                       with (RFC 8570 / RFC 7471 section 4.4). Unset (the default) never
+                       sets the bit.";
+                  }
+                  leaf reuse-threshold {
+                    ext:help "Clear the Anomalous bit after a loss interval below this loss (percent)";
+                    type decimal64 {
+                      fraction-digits 6;
+                    }
+                    units "percent";
+                    description
+                      "Loss, in percent, below which the Anomalous bit clears once the
+                       loss has stayed below it for a whole loss interval. Defaults to,
+                       and is capped at, anomaly-threshold.";
+                  }
                 }
               }
             }
@@ -2702,6 +2725,29 @@ module config {
                       "A loss window is advertised only when at least this
                        percentage of the probes the probe interval should have
                        produced actually settled. Default 90.";
+                  }
+                  leaf anomaly-threshold {
+                    ext:help "Set the Anomalous bit at or above this loss (percent)";
+                    type decimal64 {
+                      fraction-digits 6;
+                    }
+                    units "percent";
+                    description
+                      "Loss, in percent, at or above which the link-loss sub-TLV's
+                       Anomalous (A) bit is set, evaluated on the value it is advertised
+                       with (RFC 8570 / RFC 7471 section 4.4). Unset (the default) never
+                       sets the bit.";
+                  }
+                  leaf reuse-threshold {
+                    ext:help "Clear the Anomalous bit after a loss interval below this loss (percent)";
+                    type decimal64 {
+                      fraction-digits 6;
+                    }
+                    units "percent";
+                    description
+                      "Loss, in percent, below which the Anomalous bit clears once the
+                       loss has stayed below it for a whole loss interval. Defaults to,
+                       and is capped at, anomaly-threshold.";
                   }
                 }
               }
@@ -4384,6 +4430,29 @@ module config {
                     "A loss window is advertised only when at least this
                      percentage of the probes the probe interval should have
                      produced actually settled. Default 90.";
+                }
+                leaf anomaly-threshold {
+                  ext:help "Set the Anomalous bit at or above this loss (percent)";
+                  type decimal64 {
+                    fraction-digits 6;
+                  }
+                  units "percent";
+                  description
+                    "Loss, in percent, at or above which the link-loss sub-TLV's
+                     Anomalous (A) bit is set, evaluated on the value it is advertised
+                     with (RFC 8570 / RFC 7471 section 4.4). Unset (the default) never
+                     sets the bit.";
+                }
+                leaf reuse-threshold {
+                  ext:help "Clear the Anomalous bit after a loss interval below this loss (percent)";
+                  type decimal64 {
+                    fraction-digits 6;
+                  }
+                  units "percent";
+                  description
+                    "Loss, in percent, below which the Anomalous bit clears once the
+                     loss has stayed below it for a whole loss interval. Defaults to,
+                     and is capped at, anomaly-threshold.";
                 }
               }
             }

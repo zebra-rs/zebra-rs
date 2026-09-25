@@ -174,6 +174,9 @@ pub struct LinkTeMetric {
     /// pinned drops out without silencing the other.
     pub min_anomalous: bool,
     pub max_anomalous: bool,
+    /// A bit for sub-TLV 30 (link loss; 16 in OSPFv3), evaluated on the
+    /// loss value it travels with (measured-loss design D7).
+    pub loss_anomalous: bool,
 }
 
 impl LinkTeMetric {
@@ -185,8 +188,8 @@ impl LinkTeMetric {
     /// The Anomalous flags arrive from the measurement's threshold
     /// evaluation through [`Self::merged_over`], which clears them for
     /// statically-configured fields. Delay variation (29) defines no A
-    /// bit; link loss (30) does, but loss is never measured today, so
-    /// it can only be static and static values originate clear.
+    /// bit; link loss (30) does, set only for a measured loss — a static
+    /// value originates it clear.
     ///
     /// The Min/Max sub-TLV (28) is emitted only when *both* bounds are
     /// present — a half-populated bound would be a meaningless wire
@@ -213,7 +216,7 @@ impl LinkTeMetric {
         }
         if let Some(loss) = self.loss {
             subs.push(OspfAslaSubSubTlv::LinkLoss(OspfSubLinkLoss {
-                anomalous: false,
+                anomalous: self.loss_anomalous,
                 loss,
             }));
         }
@@ -249,7 +252,7 @@ impl LinkTeMetric {
         }
         if let Some(loss) = self.loss {
             subs.push(Ospfv3AslaSubSubTlv::LinkLoss(OspfSubLinkLoss {
-                anomalous: false,
+                anomalous: self.loss_anomalous,
                 loss,
             }));
         }
@@ -274,6 +277,7 @@ impl LinkTeMetric {
             delay_anomalous: self.unidirectional_delay.is_none() && fallback.delay_anomalous,
             min_anomalous: self.min_delay.is_none() && fallback.min_anomalous,
             max_anomalous: self.max_delay.is_none() && fallback.max_anomalous,
+            loss_anomalous: self.loss.is_none() && fallback.loss_anomalous,
         }
     }
 }
@@ -1128,7 +1132,7 @@ mod te_metric_tests {
     }
 
     /// A measured anomaly reaches both delay sub-TLVs; delay variation
-    /// has no A bit and loss is static-only, so neither can claim one.
+    /// has no A bit, so it cannot claim one.
     #[test]
     fn measured_anomaly_sets_both_delay_sub_tlvs() {
         let measured = LinkTeMetric {
@@ -1140,6 +1144,7 @@ mod te_metric_tests {
             delay_anomalous: true,
             min_anomalous: true,
             max_anomalous: true,
+            loss_anomalous: false,
         };
         let subs = LinkTeMetric::default()
             .merged_over(&measured)
@@ -1152,6 +1157,40 @@ mod te_metric_tests {
             matches!(&subs[1], OspfAslaSubSubTlv::MinMaxLinkDelay(v) if v.anomalous),
             "sub-TLV 28 carries the bit"
         );
+    }
+
+    /// Measured-loss design D7: a measured loss anomaly reaches the
+    /// link-loss sub-TLV in both OSPF versions (30, and 16 in OSPFv3),
+    /// and a static `loss` both wins and clears the bit.
+    #[test]
+    fn a_measured_loss_anomaly_reaches_the_loss_sub_tlv_unless_pinned() {
+        let measured = LinkTeMetric {
+            loss: Some(3_333_333),
+            loss_anomalous: true,
+            ..Default::default()
+        };
+        let effective = LinkTeMetric::default().merged_over(&measured);
+        assert!(matches!(
+            &effective.asla_sub_subs()[..],
+            [OspfAslaSubSubTlv::LinkLoss(v)] if v.anomalous && v.loss == 3_333_333
+        ));
+        assert!(matches!(
+            &effective.asla_sub_subs_v3()[..],
+            [Ospfv3AslaSubSubTlv::LinkLoss(v)] if v.anomalous && v.loss == 3_333_333
+        ));
+        let pinned = LinkTeMetric {
+            loss: Some(3),
+            ..Default::default()
+        }
+        .merged_over(&measured);
+        assert!(matches!(
+            &pinned.asla_sub_subs()[..],
+            [OspfAslaSubSubTlv::LinkLoss(v)] if !v.anomalous && v.loss == 3
+        ));
+        assert!(matches!(
+            &pinned.asla_sub_subs_v3()[..],
+            [Ospfv3AslaSubSubTlv::LinkLoss(v)] if !v.anomalous && v.loss == 3
+        ));
     }
 
     /// Only the maximum crossed the bound: the Min/Max sub-TLV must say

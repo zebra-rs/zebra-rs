@@ -37,6 +37,8 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+use super::anomaly::Anomaly;
+
 /// RFC 7680's waiting time: a probe with no reply received within this
 /// long is lost, and a reply received later is *late* — still lost. It
 /// must exceed any real one-link round trip by a wide margin and be much
@@ -453,6 +455,15 @@ impl LossWindow {
     pub fn encoded(&self) -> Option<u32> {
         (self.settled > 0).then(|| encode_loss(self.lost, self.settled))
     }
+
+    /// The measured loss in micro-percent (10⁻⁶ %), rounded down, and
+    /// neither capped nor in RFC units: what the Anomalous bit is judged
+    /// on (design D7). Rounding down loses nothing against a whole
+    /// micro-percent bound — `floor(x) >= b` exactly when `x >= b`.
+    pub fn micro_percent(&self) -> Option<u32> {
+        (self.settled > 0)
+            .then(|| (u128::from(self.lost) * 100_000_000 / u128::from(self.settled)) as u32)
+    }
 }
 
 /// A loss value as one subscriber advertises it.
@@ -460,8 +471,9 @@ impl LossWindow {
 pub struct LossAdvert {
     /// RFC 8570 §4.4 units, 0.000003 % each.
     pub value: u32,
-    /// The Anomalous bit (design D7). Not evaluated yet: always clear,
-    /// which is also what a statically configured loss originates.
+    /// The Anomalous bit (design D7), evaluated on the measurement
+    /// `value` encodes — exactly, and above the cap `value` saturates
+    /// at. A statically configured loss always originates it clear.
     pub anomalous: bool,
 }
 
@@ -476,30 +488,47 @@ pub enum LossDecision {
     Withdraw,
 }
 
-/// The encoded value of `w` if it can be trusted, or `None`:
+/// `w`'s value if it can be trusted, as `(encoded, micro-percent)`: the
+/// RFC 8570 value the sub-TLV carries, capped at 50.331642 %, and the
+/// exact measurement the A bit is judged on ([`LossWindow::micro_percent`]).
+/// `None` when the window is:
 /// - not yet full — a value from a handful of probes is noise (D5);
 /// - below the integrity threshold — the probe stream had a gap, or
 ///   silent buckets were left out of it (D5, D8);
 /// - nothing received at all.
-fn trusted(w: &LossWindow, integrity_pct: u32) -> Option<u32> {
+fn trusted(w: &LossWindow, integrity_pct: u32) -> Option<(u32, u32)> {
     if !w.is_full() || w.integrity_percent()? < integrity_pct || w.lost >= w.settled {
         return None;
     }
-    w.encoded()
+    Some((w.encoded()?, w.micro_percent()?))
 }
 
 /// Decide one subscriber's loss advertisement — design D5 (gates), D6
-/// (filter and cadence) and D8 (silence). `advertised` is what it
-/// currently advertises, `advertised_at` when that was decided, and
-/// `now` when this decision is made — both by the real clock, whether
-/// on a loss tick or when a subscription is seeded between ticks.
+/// (filter and cadence), D7 (Anomalous bit) and D8 (silence).
+/// `advertised` is what it currently advertises, `advertised_at` when
+/// that was decided, and `now` when this decision is made — both by the
+/// real clock, whether on a loss tick or when a subscription is seeded
+/// between ticks. `anomaly` is the subscriber's A-bit hysteresis.
 ///
-/// - Disabled, or no trustworthy window: withdraw anything advertised.
+/// - Disabled, or no trustworthy window: withdraw anything advertised,
+///   and forget the A-bit state — a value that comes back earns its
+///   anomaly again, as delay's does after an empty window.
+/// - The candidate is the rolling window's value, or — when
+///   acceleration fires — the latest bucket's. The A bit is evaluated
+///   on that candidate, the value it would travel with (D7), and clears
+///   only after a whole loss interval below the reuse bound. It is
+///   judged on the candidate's exact measurement in micro-percent
+///   against bounds kept as configured: the encoded value is capped at
+///   50.331642 % and quantised to 0.000003 %, and would miss a bound
+///   above the cap, or read a finer one as zero.
 /// - Nothing advertised yet: advertise at once. The RFC 8570 §6 cadence
 ///   limits *re*-advertisement.
 /// - Accelerated (opt-in): the latest bucket alone differs from the
 ///   advertised value by at least the configured step — advertise that
 ///   bucket's value now.
+/// - A flag change advertises its candidate with it, past the cadence
+///   and the value filter, so every advertised `(value, A)` pair is one
+///   the hysteresis produced from that value.
 /// - Periodic: at most once per loss interval, and only for a change of
 ///   at least `max(threshold % × advertised, minimum-change)`. The
 ///   minimum change governs the zero crossings, where a relative
@@ -514,15 +543,19 @@ pub fn evaluate(
     ledger: &LossLedger,
     advertised: Option<LossAdvert>,
     advertised_at: Option<Instant>,
+    anomaly: &mut Anomaly,
     now: Instant,
 ) -> LossDecision {
-    let withdraw = if advertised.is_some() {
-        LossDecision::Withdraw
-    } else {
-        LossDecision::Keep
+    let mut withdraw = || {
+        anomaly.reset();
+        if advertised.is_some() {
+            LossDecision::Withdraw
+        } else {
+            LossDecision::Keep
+        }
     };
     if !policy.enabled {
-        return withdraw;
+        return withdraw();
     }
     // D8, judged on the latest bucket: 30 s in which probes went out
     // and not one reply came back means the measurement has gone silent
@@ -531,34 +564,36 @@ pub fn evaluate(
     // the bucket the outage began in still holds replies from before
     // it, and a value built from it reads as near-total loss.
     if ledger.window(1).silent > 0 {
-        return withdraw;
+        return withdraw();
     }
-    let Some(value) = trusted(&ledger.window(policy.window_buckets), policy.integrity_pct) else {
-        return withdraw;
+    let Some(rolling) = trusted(&ledger.window(policy.window_buckets), policy.integrity_pct) else {
+        return withdraw();
     };
-    let set = |value| {
-        LossDecision::Set(LossAdvert {
-            value,
-            anomalous: false,
-        })
-    };
+    let accelerated = advertised.and_then(|current| {
+        let step = policy.accelerated?;
+        let latest = trusted(&ledger.window(1), policy.integrity_pct)?;
+        (latest.0 != current.value && latest.0.abs_diff(current.value) >= step).then_some(latest)
+    });
+    let (value, measured) = accelerated.unwrap_or(rolling);
+    let interval = policy.interval();
+    let anomalous = anomaly.evaluate_bounds(
+        measured,
+        policy.anomaly_bounds(),
+        Some((now, interval.saturating_sub(CADENCE_SLACK))),
+    );
+    let set = LossDecision::Set(LossAdvert { value, anomalous });
     let Some(current) = advertised else {
-        return set(value);
+        return set;
     };
-    if let Some(step) = policy.accelerated
-        && let Some(latest) = trusted(&ledger.window(1), policy.integrity_pct)
-        && latest != current.value
-        && latest.abs_diff(current.value) >= step
-    {
-        return set(latest);
+    if accelerated.is_some() || anomalous != current.anomalous {
+        return set;
     }
-    let interval = Duration::from_secs(BUCKET.as_secs() * policy.window_buckets as u64);
     let due = advertised_at
         .is_none_or(|at| now.saturating_duration_since(at) + CADENCE_SLACK >= interval);
     let need = (u64::from(current.value) * u64::from(policy.threshold_pct) / 100)
         .max(u64::from(policy.minimum_change));
     if due && value != current.value && u64::from(value.abs_diff(current.value)) >= need {
-        set(value)
+        set
     } else {
         LossDecision::Keep
     }
@@ -837,7 +872,14 @@ mod tests {
         ago: Option<u32>,
     ) -> LossDecision {
         let now = l.final_at();
-        evaluate(p, l, advertised, ago.map(|n| now - BUCKET * n), now)
+        evaluate(
+            p,
+            l,
+            advertised,
+            ago.map(|n| now - BUCKET * n),
+            &mut Anomaly::default(),
+            now,
+        )
     }
 
     const CLEAN: (u32, u32) = (30, 0);
@@ -988,16 +1030,37 @@ mod tests {
         let interval = Duration::from_secs(120);
         let jittered = interval - Duration::from_millis(5);
         assert_eq!(
-            evaluate(&p, &l, advert(0), ago(jittered), now),
+            evaluate(
+                &p,
+                &l,
+                advert(0),
+                ago(jittered),
+                &mut Anomaly::default(),
+                now
+            ),
             set(encode_loss(12, 120))
         );
         assert_eq!(
-            evaluate(&p, &l, advert(0), ago(interval - CADENCE_SLACK), now),
+            evaluate(
+                &p,
+                &l,
+                advert(0),
+                ago(interval - CADENCE_SLACK),
+                &mut Anomaly::default(),
+                now
+            ),
             set(encode_loss(12, 120))
         );
         let too_soon = interval - CADENCE_SLACK - Duration::from_millis(1);
         assert_eq!(
-            evaluate(&p, &l, advert(0), ago(too_soon), now),
+            evaluate(
+                &p,
+                &l,
+                advert(0),
+                ago(too_soon),
+                &mut Anomaly::default(),
+                now
+            ),
             LossDecision::Keep
         );
     }
@@ -1034,20 +1097,37 @@ mod tests {
         let joined = at(t0, 152_000);
         l.advance(joined, 1000);
         assert_eq!(l.final_index(), 4);
-        assert_eq!(evaluate(&p, &l, None, None, joined), set(ten));
+        assert_eq!(
+            evaluate(&p, &l, None, None, &mut Anomaly::default(), joined),
+            set(ten)
+        );
 
         l.advance(at(t0, 153_000), 1000);
         assert_eq!(l.final_at(), at(t0, 153_000));
         assert_eq!(l.window(1).encoded(), Some(twenty));
         assert_eq!(
-            evaluate(&p, &l, advert(ten), Some(joined), l.final_at()),
+            evaluate(
+                &p,
+                &l,
+                advert(ten),
+                Some(joined),
+                &mut Anomaly::default(),
+                l.final_at()
+            ),
             LossDecision::Keep,
             "one second after the last advertisement"
         );
 
         l.advance(at(t0, 183_000), 1000);
         assert_eq!(
-            evaluate(&p, &l, advert(ten), Some(joined), l.final_at()),
+            evaluate(
+                &p,
+                &l,
+                advert(ten),
+                Some(joined),
+                &mut Anomaly::default(),
+                l.final_at()
+            ),
             set(twenty)
         );
     }
@@ -1107,6 +1187,322 @@ mod tests {
         // Under the step: no early advertisement.
         let small = ledger(&[CLEAN, CLEAN, CLEAN, CLEAN, CLEAN, CLEAN, CLEAN, (30, 1)]);
         assert_eq!(eval(&accel, &small, advert(0), Some(2)), LossDecision::Keep);
+    }
+
+    /// One subscriber driven tick by tick over a ledger fed one 30 s
+    /// bucket of 30 probes at a time: the state `evaluate` is given
+    /// back at every tick, the way `Subscriber::apply_loss` keeps it.
+    struct Sim {
+        t0: Instant,
+        ledger: LossLedger,
+        seq: u32,
+        buckets: u64,
+        advertised: Option<LossAdvert>,
+        advertised_at: Option<Instant>,
+        anomaly: Anomaly,
+    }
+
+    impl Sim {
+        fn new() -> Self {
+            let t0 = Instant::now();
+            Self {
+                t0,
+                ledger: LossLedger::new(t0),
+                seq: 0,
+                buckets: 0,
+                advertised: None,
+                advertised_at: None,
+                anomaly: Anomaly::default(),
+            }
+        }
+
+        /// A bucket with `lost` of its 30 probes unanswered, then the
+        /// loss tick 3 s after it ends: its decision, as applied.
+        fn tick(&mut self, p: &LossPolicy, lost: u32) -> LossDecision {
+            self.tick_early(p, lost, 0)
+        }
+
+        /// [`Self::tick`] with the tick run `early_ms` before its place
+        /// on the grid, as timer jitter can.
+        fn tick_early(&mut self, p: &LossPolicy, lost: u32, early_ms: u64) -> LossDecision {
+            let base = self.buckets * 30_000;
+            for i in 0..30 {
+                let sent = at(self.t0, base + u64::from(i) * 1000);
+                self.ledger.sent(self.seq, sent);
+                if i >= lost {
+                    self.ledger.reply(self.seq, sent + Duration::from_millis(5));
+                }
+                self.seq += 1;
+            }
+            self.buckets += 1;
+            let now = at(self.t0, base + 33_000 - early_ms);
+            self.ledger.advance(now, 1000);
+            self.decide(p, now)
+        }
+
+        /// A decision between ticks, as when a subscription is seeded.
+        fn decide(&mut self, p: &LossPolicy, now: Instant) -> LossDecision {
+            let d = evaluate(
+                p,
+                &self.ledger,
+                self.advertised,
+                self.advertised_at,
+                &mut self.anomaly,
+                now,
+            );
+            match d {
+                LossDecision::Keep => {}
+                LossDecision::Set(a) => {
+                    self.advertised = Some(a);
+                    self.advertised_at = Some(now);
+                }
+                LossDecision::Withdraw => {
+                    self.advertised = None;
+                    self.advertised_at = None;
+                }
+            }
+            d
+        }
+    }
+
+    fn set_a(value: u32, anomalous: bool) -> LossDecision {
+        LossDecision::Set(LossAdvert { value, anomalous })
+    }
+
+    /// Retained PR 3 review probe: the configured range includes 60 %,
+    /// so 80 % measured loss must cross that bound even though the
+    /// advertised numeric field saturates at about 50.33 %.
+    #[test]
+    fn a_loss_bound_above_the_wire_cap_still_detects_measured_loss() {
+        let p = bounded(
+            LossPolicy {
+                window_buckets: 1,
+                ..LossPolicy::default()
+            },
+            60,
+            40,
+        );
+        let mut sim = Sim::new();
+        assert_eq!(sim.tick(&p, 24), set_a(MAX_ENCODED_LOSS, true));
+    }
+
+    /// Retained PR 3 review probe: a positive, valid six-decimal bound
+    /// must not become a zero bound that marks a lossless link anomalous.
+    #[test]
+    fn a_positive_sub_unit_loss_bound_does_not_flag_a_clean_link() {
+        let p = LossPolicy {
+            window_buckets: 1,
+            anomaly_micro_pct: Some(1), // configured 0.000001 %
+            ..LossPolicy::default()
+        };
+        let mut sim = Sim::new();
+        assert_eq!(sim.tick(&p, 0), set_a(0, false));
+    }
+
+    /// The bound is compared with the measurement exactly: 3 of 30 is
+    /// 10 % on the dot, which meets a 10 % bound and misses 10.000001 %.
+    /// In RFC units both bounds truncate to the unit 10 % encodes to,
+    /// and the finer one would set the bit too.
+    #[test]
+    fn the_a_bit_compares_the_measurement_exactly() {
+        let window = |micro| LossPolicy {
+            window_buckets: 1,
+            anomaly_micro_pct: Some(micro),
+            ..LossPolicy::default()
+        };
+        assert_eq!(
+            micro_pct_to_units(10_000_001),
+            encode_loss(3, 30),
+            "indistinguishable in RFC units"
+        );
+        let mut sim = Sim::new();
+        assert_eq!(
+            sim.tick(&window(10_000_000), 3),
+            set_a(encode_loss(3, 30), true)
+        );
+        let mut sim = Sim::new();
+        assert_eq!(
+            sim.tick(&window(10_000_001), 3),
+            set_a(encode_loss(3, 30), false)
+        );
+        // Rounded down, a third is 33.333333 %: floor never crosses a
+        // whole micro-percent bound it should not.
+        let w = LossWindow {
+            buckets: 1,
+            wanted: 1,
+            settled: 3,
+            lost: 1,
+            expected_milli: 3_000,
+            silent: 0,
+        };
+        assert_eq!(w.micro_percent(), Some(33_333_333));
+    }
+
+    /// `anomaly` / `reuse` in percent, as configured.
+    fn bounded(p: LossPolicy, anomaly: u32, reuse: u32) -> LossPolicy {
+        LossPolicy {
+            anomaly_micro_pct: Some(anomaly * 1_000_000),
+            reuse_micro_pct: Some(reuse * 1_000_000),
+            ..p
+        }
+    }
+
+    /// D7 (review round 1, finding 4): the A bit is evaluated on the
+    /// value it travels with. After three clean buckets, one at 10 %
+    /// accelerates out as 10 % — and carries A against a 5 % bound,
+    /// although the rolling value it replaced is only 2.5 %.
+    #[test]
+    fn an_accelerated_value_carries_its_own_a_bit() {
+        let p = bounded(
+            LossPolicy {
+                accelerated: Some(micro_pct_to_units(5_000_000)),
+                ..LossPolicy::default()
+            },
+            5,
+            1,
+        );
+        let mut sim = Sim::new();
+        for _ in 0..3 {
+            sim.tick(&p, 0);
+        }
+        assert_eq!(sim.tick(&p, 0), set_a(0, false), "the first full window");
+        assert_eq!(sim.tick(&p, 3), set_a(encode_loss(3, 30), true));
+    }
+
+    /// D7: a flag change advertises its candidate with it, past the
+    /// cadence and the value filter. Advertised clear at 4.17 %, the
+    /// rolling value rises to 5.0 % one tick later — 0.83 points, under
+    /// the 1.0-point minimum change, and a whole interval early — and
+    /// goes out at once, with A. Never 4.17 % with A.
+    #[test]
+    fn a_flag_change_advertises_its_candidate_at_once() {
+        let p = bounded(LossPolicy::default(), 5, 1);
+        let mut sim = Sim::new();
+        for lost in [1, 1, 2, 1] {
+            sim.tick(&p, lost);
+        }
+        assert_eq!(
+            sim.advertised,
+            Some(LossAdvert {
+                value: encode_loss(5, 120),
+                anomalous: false
+            })
+        );
+        assert_eq!(
+            sim.tick(&p, 2),
+            set_a(encode_loss(6, 120), true),
+            "4.17 % to 5.0 %: the bound is crossed"
+        );
+    }
+
+    /// D7 (review round 1, finding 6): A clears only once the value has
+    /// been below the reuse bound for a whole loss interval, and one
+    /// evaluation back in the band restarts that wait. A 30 s interval
+    /// keeps the rolling value to one bucket.
+    #[test]
+    fn a_clears_only_after_a_whole_interval_below_reuse() {
+        let p = bounded(
+            LossPolicy {
+                window_buckets: 1,
+                ..LossPolicy::default()
+            },
+            5,
+            1,
+        );
+        let ten = encode_loss(3, 30);
+        let mut sim = Sim::new();
+        assert_eq!(sim.tick(&p, 3), set_a(ten, true));
+        // Below reuse from here: the value goes out, A stays.
+        assert_eq!(sim.tick(&p, 0), set_a(0, true));
+        // A tick in the band (3.3 %) holds A and restarts the wait.
+        assert_eq!(sim.tick(&p, 1), set_a(encode_loss(1, 30), true));
+        assert_eq!(sim.tick(&p, 0), set_a(0, true), "the wait starts again");
+        assert_eq!(
+            sim.tick(&p, 0),
+            set_a(0, false),
+            "a whole 30 s interval below reuse"
+        );
+    }
+
+    /// The recovery wait allows the same tick jitter as the cadence: a
+    /// tick run 5 ms short of an interval after the recovery began still
+    /// clears the bit, rather than holding it for another whole tick.
+    #[test]
+    fn the_recovery_wait_absorbs_tick_jitter() {
+        let p = bounded(
+            LossPolicy {
+                window_buckets: 1,
+                ..LossPolicy::default()
+            },
+            5,
+            1,
+        );
+        let mut sim = Sim::new();
+        assert_eq!(sim.tick(&p, 3), set_a(encode_loss(3, 30), true));
+        assert_eq!(sim.tick(&p, 0), set_a(0, true), "the recovery begins");
+        assert_eq!(sim.tick_early(&p, 0, 5), set_a(0, false));
+    }
+
+    /// With the default 120 s interval a recovery takes 120 s, whatever
+    /// the rolling value did first: it falls under the reuse bound only
+    /// once the lossy bucket has left the window, and the wait starts
+    /// then.
+    #[test]
+    fn a_default_interval_recovery_waits_120_s() {
+        let p = bounded(LossPolicy::default(), 5, 1);
+        let mut sim = Sim::new();
+        for _ in 0..3 {
+            sim.tick(&p, 0);
+        }
+        assert_eq!(sim.tick(&p, 9), set_a(encode_loss(9, 120), true));
+        let mut cleared = None;
+        for t in 1..=10 {
+            if let LossDecision::Set(a) = sim.tick(&p, 0)
+                && !a.anomalous
+            {
+                cleared = Some(t);
+                break;
+            }
+        }
+        // Ticks 1–3 still hold the 30 % bucket, 7.5 % over the window;
+        // from tick 4 it is clean, and 120 s later — tick 8 — A clears.
+        assert_eq!(cleared, Some(8));
+    }
+
+    /// A withdrawal forgets the A-bit state: after a silent bucket the
+    /// value comes back and has to earn its anomaly again. Removing the
+    /// bounds clears a standing A at once — a flag change, so past the
+    /// cadence.
+    #[test]
+    fn a_withdrawal_or_removed_bounds_clears_the_bit() {
+        let p = bounded(
+            LossPolicy {
+                window_buckets: 1,
+                integrity_pct: 1,
+                ..LossPolicy::default()
+            },
+            5,
+            1,
+        );
+        let mut sim = Sim::new();
+        assert_eq!(sim.tick(&p, 3), set_a(encode_loss(3, 30), true));
+        assert_eq!(sim.tick(&p, 30), LossDecision::Withdraw, "silent");
+        // 3.3 % is in the band: held only by a standing bit, and there
+        // is none any more.
+        assert_eq!(sim.tick(&p, 1), set_a(encode_loss(1, 30), false));
+
+        assert_eq!(sim.tick(&p, 3), set_a(encode_loss(3, 30), true));
+        let unbounded = LossPolicy {
+            anomaly_micro_pct: None,
+            reuse_micro_pct: None,
+            ..p
+        };
+        let now = at(sim.t0, sim.buckets * 30_000 + 5_000);
+        assert_eq!(
+            sim.decide(&unbounded, now),
+            set_a(encode_loss(3, 30), false),
+            "seconds after the last advertisement"
+        );
     }
 
     #[test]

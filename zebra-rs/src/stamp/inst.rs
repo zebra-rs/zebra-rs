@@ -408,6 +408,7 @@ impl Stamp {
                 &session.loss,
                 sub.advertised_loss,
                 sub.loss_advertised_at,
+                &mut sub.loss_anomaly,
                 now,
             );
             changed |= sub.apply_loss(decision, now);
@@ -687,6 +688,7 @@ impl Stamp {
                 &session.loss,
                 sub.advertised_loss,
                 sub.loss_advertised_at,
+                &mut sub.loss_anomaly,
                 now,
             );
             if sub.apply_loss(decision, now) {
@@ -1279,6 +1281,47 @@ mod tests {
             Some(crate::stamp::loss::encode_loss(12, 120))
         );
         assert!(drain(&mut ospf_rx).is_empty(), "OSPF's loss is disabled");
+    }
+
+    /// Design D7/D10: the loss A-bit bounds are each IGP's own. IS-IS
+    /// with a 5 % bound advertises the shared 10 % with A; OSPF with
+    /// none advertises the same 10 % without. Removing IS-IS's bounds
+    /// (a config edit re-subscribes) clears its bit at once — a flag
+    /// change, past the cadence — and leaves OSPF alone.
+    #[tokio::test]
+    async fn loss_anomaly_bounds_are_per_subscriber() {
+        use crate::stamp::loss::encode_loss;
+        use crate::stamp::session::LossPolicy;
+        let mut stamp = fresh_stamp();
+        let key = loopback_key(2);
+        let bounded = SessionParams {
+            loss: LossPolicy {
+                anomaly_micro_pct: Some(5_000_000),
+                reuse_micro_pct: Some(1_000_000),
+                ..Default::default()
+            },
+            ..SessionParams::default()
+        };
+        let (isis_tx, mut isis_rx) = mpsc::unbounded_channel();
+        let (ospf_tx, mut ospf_rx) = mpsc::unbounded_channel();
+        stamp.subscribe("isis".into(), key, bounded, isis_tx.clone());
+        stamp.subscribe("ospf".into(), key, SessionParams::default(), ospf_tx);
+        fill_loss(&mut stamp, key, &[(30, 3); 4]);
+        stamp.on_loss_tick(key);
+
+        let with_a = |rx: &mut mpsc::UnboundedReceiver<StampEvent>| {
+            drain(rx)
+                .into_iter()
+                .map(|StampEvent::MetricUpdate { loss, .. }| loss.map(|l| (l.value, l.anomalous)))
+                .collect::<Vec<_>>()
+        };
+        let ten = encode_loss(12, 120);
+        assert_eq!(with_a(&mut isis_rx), [Some((ten, true))]);
+        assert_eq!(with_a(&mut ospf_rx), [Some((ten, false))]);
+
+        stamp.subscribe("isis".into(), key, SessionParams::default(), isis_tx);
+        assert_eq!(with_a(&mut isis_rx), [Some((ten, false))]);
+        assert_eq!(with_a(&mut ospf_rx), []);
     }
 
     /// Design D9: every event is the complete state. A delay export

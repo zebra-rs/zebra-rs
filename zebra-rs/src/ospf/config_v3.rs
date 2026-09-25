@@ -323,6 +323,14 @@ impl Ospf<Ospfv3> {
                 config_ospfv3_interface_te_measurement_loss_integrity,
             ),
             (
+                "/area/interface/te-metric/measurement/loss/anomaly-threshold",
+                config_ospfv3_interface_te_measurement_loss_anomaly_threshold,
+            ),
+            (
+                "/area/interface/te-metric/measurement/loss/reuse-threshold",
+                config_ospfv3_interface_te_measurement_loss_reuse_threshold,
+            ),
+            (
                 "/area/interface/instance-id",
                 config_ospfv3_interface_instance_id,
             ),
@@ -1686,6 +1694,26 @@ fn config_ospfv3_interface_te_measurement_loss_integrity(
 ) -> Option<()> {
     config_ospfv3_interface_te_measurement(ospf, args, |m, args| {
         m.set_loss_integrity(args, op.is_set())
+    })
+}
+
+fn config_ospfv3_interface_te_measurement_loss_anomaly_threshold(
+    ospf: &mut Ospf<Ospfv3>,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospfv3_interface_te_measurement(ospf, args, |m, args| {
+        m.set_loss_anomaly(args, op.is_set())
+    })
+}
+
+fn config_ospfv3_interface_te_measurement_loss_reuse_threshold(
+    ospf: &mut Ospf<Ospfv3>,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospfv3_interface_te_measurement(ospf, args, |m, args| {
+        m.set_loss_reuse(args, op.is_set())
     })
 }
 

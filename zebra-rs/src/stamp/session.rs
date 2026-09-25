@@ -100,6 +100,29 @@ pub struct LossPolicy {
     /// Settled probes, as a percentage of those the probe rate should
     /// have produced, below which a window is not trusted (D5).
     pub integrity_pct: u32,
+    /// Loss at or above which the Anomalous bit sets (D7), in
+    /// micro-percent exactly as configured — not RFC units, which would
+    /// truncate a bound finer than 0.000003 % to zero and could not
+    /// express one above the 50.331642 % the sub-TLV carries. `None` —
+    /// the default — never sets it, as for delay.
+    pub anomaly_micro_pct: Option<u32>,
+    /// Loss below which the bit may clear, once it has stayed below for
+    /// a whole loss interval (D7), in micro-percent. Defaults to, and is
+    /// clamped to, the anomaly bound.
+    pub reuse_micro_pct: Option<u32>,
+}
+
+impl LossPolicy {
+    /// The loss interval as a duration.
+    pub fn interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(BUCKET.as_secs() * self.window_buckets as u64)
+    }
+
+    /// The effective `(anomaly, reuse)` bounds in micro-percent, or
+    /// `None` when the A bit is off.
+    pub fn anomaly_bounds(&self) -> Option<(u32, u32)> {
+        super::anomaly::hysteresis_bounds(self.anomaly_micro_pct, self.reuse_micro_pct)
+    }
 }
 
 /// Default loss interval: 120 s, RFC 8570 §7's default announcement
@@ -122,6 +145,8 @@ impl Default for LossPolicy {
             minimum_change: micro_pct_to_units(DEFAULT_LOSS_MINIMUM_CHANGE_MICRO_PCT),
             accelerated: None,
             integrity_pct: DEFAULT_LOSS_INTEGRITY_PCT,
+            anomaly_micro_pct: None,
+            reuse_micro_pct: None,
         }
     }
 }
@@ -149,8 +174,8 @@ pub fn check_loss_interval(value: &str) -> Result<u32, String> {
     Ok(secs)
 }
 
-/// A loss percentage leaf (`minimum-change`, `accelerated-threshold`)
-/// in micro-percent. libyang enforces neither a decimal64 range nor
+/// A loss percentage leaf (`minimum-change`, `accelerated-threshold`,
+/// `anomaly-threshold`, `reuse-threshold`) in micro-percent. libyang enforces neither a decimal64 range nor
 /// `fraction-digits`, so, like [`check_loss_interval`], this runs at
 /// commit as well as in the setter.
 pub fn check_loss_percent(value: &str) -> Result<u64, String> {
@@ -216,6 +241,8 @@ pub struct MeasurementConfig {
     pub loss_minimum_change_micro_pct: Option<u64>,
     pub loss_accelerated_micro_pct: Option<u64>,
     pub loss_integrity_pct: Option<u32>,
+    pub loss_anomaly_micro_pct: Option<u64>,
+    pub loss_reuse_micro_pct: Option<u64>,
 }
 
 impl MeasurementConfig {
@@ -275,6 +302,20 @@ impl MeasurementConfig {
         Some(())
     }
 
+    /// `loss anomaly-threshold`, percent (YANG decimal64).
+    pub fn set_loss_anomaly(&mut self, args: &mut Args, set: bool) -> Option<()> {
+        let value = check_loss_percent(&args.string()?).ok()?;
+        self.loss_anomaly_micro_pct = set.then_some(value);
+        Some(())
+    }
+
+    /// `loss reuse-threshold`, percent (YANG decimal64).
+    pub fn set_loss_reuse(&mut self, args: &mut Args, set: bool) -> Option<()> {
+        let value = check_loss_percent(&args.string()?).ok()?;
+        self.loss_reuse_micro_pct = set.then_some(value);
+        Some(())
+    }
+
     /// `loss integrity`, percent of expected probes.
     pub fn set_loss_integrity(&mut self, args: &mut Args, set: bool) -> Option<()> {
         let value = args.u32()?;
@@ -296,6 +337,9 @@ impl MeasurementConfig {
                 .map_or(d.minimum_change, micro_pct_to_units),
             accelerated: self.loss_accelerated_micro_pct.map(micro_pct_to_units),
             integrity_pct: self.loss_integrity_pct.unwrap_or(d.integrity_pct),
+            // `check_loss_percent` bounds both to 100 %, 10⁸ micro-percent.
+            anomaly_micro_pct: self.loss_anomaly_micro_pct.map(|v| v as u32),
+            reuse_micro_pct: self.loss_reuse_micro_pct.map(|v| v as u32),
         }
     }
 }
@@ -485,6 +529,7 @@ mod tests {
         assert_eq!(p.minimum_change, 333_333, "1.0 % in 0.000003 % units");
         assert_eq!(p.accelerated, None);
         assert_eq!(p.integrity_pct, 90);
+        assert_eq!(p.anomaly_bounds(), None, "the A bit is opt-in (D7)");
     }
 
     #[test]
@@ -496,6 +541,8 @@ mod tests {
         c.set_loss_minimum_change(&mut args("0.2"), true).unwrap();
         c.set_loss_accelerated(&mut args("5"), true).unwrap();
         c.set_loss_integrity(&mut args("80"), true).unwrap();
+        c.set_loss_anomaly(&mut args("5"), true).unwrap();
+        c.set_loss_reuse(&mut args("0.5"), true).unwrap();
         let p = c.loss_policy();
         assert!(!p.enabled);
         assert_eq!(p.window_buckets, 1);
@@ -503,6 +550,11 @@ mod tests {
         assert_eq!(p.minimum_change, 66_666);
         assert_eq!(p.accelerated, Some(1_666_666));
         assert_eq!(p.integrity_pct, 80);
+        assert_eq!(
+            p.anomaly_bounds(),
+            Some((5_000_000, 500_000)),
+            "micro-percent, exactly as configured"
+        );
         // Deleting a leaf restores its default.
         c.set_loss_interval(&mut args("30"), false).unwrap();
         assert_eq!(c.loss_policy().window_buckets, 4);

@@ -2521,6 +2521,8 @@ mod save_config_tests {
             (format!("{isis} minimum-change 100.5"), percent),
             (format!("{ospf} minimum-change 1.0000001"), percent),
             (format!("{ospfv3} accelerated-threshold 101"), percent),
+            (format!("{isis} anomaly-threshold 100.000001"), percent),
+            (format!("{ospf} reuse-threshold 0.0000001"), percent),
         ] {
             let (code, output, _) = cm.execute(mode, &format!("set {line}"));
             assert_eq!(code, ExecCode::Show, "schema accepts `{line}`: {output:?}");
@@ -2539,6 +2541,8 @@ mod save_config_tests {
             format!("{ospf} interval 3600"),
             format!("{ospfv3} minimum-change 0.000003"),
             format!("{isis} accelerated-threshold 100"),
+            format!("{ospf} anomaly-threshold 5.5"),
+            format!("{ospfv3} reuse-threshold 0.5"),
         ];
         for line in &valid {
             let (code, output, _) = cm.execute(mode, &format!("set {line}"));

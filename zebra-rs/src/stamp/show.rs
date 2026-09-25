@@ -215,6 +215,7 @@ fn subscriber_loss_line(sub: &Subscriber) -> String {
         return "loss: disabled".to_string();
     }
     let state = match sub.advertised_loss {
+        Some(a) if a.anomalous => format!("advertised {:.6}% (A)", units_pct(a.value)),
         Some(a) => format!("advertised {:.6}%", units_pct(a.value)),
         None => "not advertised".to_string(),
     };
@@ -222,8 +223,15 @@ fn subscriber_loss_line(sub: &Subscriber) -> String {
         Some(step) => format!(", accelerated {:.6}%", units_pct(step)),
         None => String::new(),
     };
+    // The bounds are kept in micro-percent as configured, so they print
+    // exactly.
+    let micro = |v: u32| format!("{}.{:06}%", v / 1_000_000, v % 1_000_000);
+    let anomaly = match p.anomaly_bounds() {
+        Some((anomaly, reuse)) => format!(", anomaly {}, reuse {}", micro(anomaly), micro(reuse)),
+        None => String::new(),
+    };
     format!(
-        "loss: {state} (interval {}s, threshold {}%, minimum-change {:.6}%{accel}, integrity {}%)",
+        "loss: {state} (interval {}s, threshold {}%, minimum-change {:.6}%{accel}, integrity {}%{anomaly})",
         p.window_buckets as u64 * BUCKET.as_secs(),
         p.threshold_pct,
         units_pct(p.minimum_change),
@@ -565,6 +573,41 @@ mod tests {
         assert_eq!(
             loss_line(&window(4, 120, 1)),
             "Loss (round-trip, 120s window): 0.833% (1 of 120 probes), resolution 0.833%, integrity 100%"
+        );
+    }
+
+    /// Design D7: a subscriber's line marks an advertisement carrying
+    /// the A bit, and shows the bounds in effect — reuse defaulting to
+    /// the anomaly bound when unset.
+    #[test]
+    fn the_subscriber_loss_line_shows_the_a_bit_and_its_bounds() {
+        use crate::stamp::anomaly::AnomalyThresholds;
+        use crate::stamp::loss::LossAdvert;
+        use crate::stamp::session::LossPolicy;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let policy = LossPolicy {
+            anomaly_micro_pct: Some(5_000_000),
+            ..LossPolicy::default()
+        };
+        let mut sub = Subscriber::new(tx, AnomalyThresholds::default(), policy);
+        sub.advertised_loss = Some(LossAdvert {
+            value: 3_333_333,
+            anomalous: true,
+        });
+        assert_eq!(
+            subscriber_loss_line(&sub),
+            "loss: advertised 9.999999% (A) (interval 120s, threshold 10%, \
+             minimum-change 0.999999%, integrity 90%, anomaly 5.000000%, reuse 5.000000%)"
+        );
+        sub.advertised_loss = Some(LossAdvert {
+            value: 0,
+            anomalous: false,
+        });
+        sub.loss_policy.anomaly_micro_pct = None;
+        assert_eq!(
+            subscriber_loss_line(&sub),
+            "loss: advertised 0.000000% (interval 120s, threshold 10%, \
+             minimum-change 0.999999%, integrity 90%)"
         );
     }
 }

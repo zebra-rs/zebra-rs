@@ -84,6 +84,39 @@ Feature: Measured link loss advertised by IS-IS and OSPF
     And show command "show ospf database detail" in namespace "sl2" should eventually show link loss between 9.0 and 11.0 percent
     And show command "show stamp session" in namespace "sl1" should eventually contain "loss: advertised"
 
+  Scenario: Crossing the loss anomaly bound sets the A bit, and recovery clears it
+    Given the test topology exists
+    # Design D7. The previous scenario's 10 % drop is still in place.
+    # IS-IS on sl1 gets a 5 % anomaly bound and a 1 % reuse bound; OSPF
+    # gets none yet. Both advertise the same 10 %, and only IS-IS's
+    # carries the A bit: the bounds are each IGP's own (D10). sl2's own
+    # link has no bounds, so any A bit in sl2's databases is sl1's.
+    When I apply command "set router isis interface sl1-sl2 te-metric measurement loss anomaly-threshold 5" in namespace "sl1"
+    And I apply command "set router isis interface sl1-sl2 te-metric measurement loss reuse-threshold 1" in namespace "sl1"
+    Then show command "show isis database detail" in namespace "sl2" should eventually contain "% (A)"
+    And show command "show stamp session" in namespace "sl1" should eventually contain "% (A) (interval 30s"
+    And show command "show stamp session" in namespace "sl1" should contain ", anomaly "
+    And show command "show ospf database detail" in namespace "sl2" should eventually show link loss between 9.0 and 11.0 percent
+    And show command "show ospf database detail" in namespace "sl2" should not contain "% (Anomalous)"
+    # The same bound on OSPF sets its bit too. This is also the positive
+    # control for the check just above: an OSPF loss A bit renders as
+    # "% (Anomalous)".
+    When I apply command "set router ospf area 0.0.0.0 interface sl1-sl2 te-metric measurement loss anomaly-threshold 5" in namespace "sl1"
+    Then show command "show ospf database detail" in namespace "sl2" should eventually contain "% (Anomalous)"
+    # Recovery. The bucket the drop stops in is still lossy, the next is
+    # clean, and the bit clears only a whole loss interval (30 s) after
+    # the value first fell below the reuse bound: up to about 95 s in
+    # all. The unit tests pin that wait; this checks the bit does clear
+    # end to end.
+    When I stop dropping STAMP probes in namespace "sl2"
+    Then show command "show isis database detail" in namespace "sl2" should not contain "% (A)" within 120 seconds
+    And show command "show ospf database detail" in namespace "sl2" should not contain "% (Anomalous)" within 60 seconds
+    And show command "show stamp session" in namespace "sl1" should contain "loss: advertised 0." within 60 seconds
+    When I apply command "delete router isis interface sl1-sl2 te-metric measurement loss anomaly-threshold" in namespace "sl1"
+    And I apply command "delete router isis interface sl1-sl2 te-metric measurement loss reuse-threshold" in namespace "sl1"
+    And I apply command "delete router ospf area 0.0.0.0 interface sl1-sl2 te-metric measurement loss anomaly-threshold" in namespace "sl1"
+    Then show command "show stamp session" in namespace "sl1" should eventually not contain ", anomaly "
+
   Scenario: Probes that all vanish withdraw the loss at once
     Given the test topology exists
     # Design D8, judged on the latest bucket. sl1 goes back to the default

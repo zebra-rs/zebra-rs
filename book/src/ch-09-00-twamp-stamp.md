@@ -222,13 +222,16 @@ te-metric {
       accelerated-threshold 5.0;    # optional: advertise at once when the latest
                                     #   30 s differs by this many points (default off)
       integrity 90;                 # % of expected probes a window needs
+      anomaly-threshold 5.0;        # optional: set the A bit at or above this %
+      reuse-threshold 1.0;          # …and clear it after an interval below this %
     }
   }
 }
 ```
 
 The commit rejects a loss `interval` that is not a multiple of 30, and a
-`minimum-change` or `accelerated-threshold` over 100 or with more than six
+loss percentage (`minimum-change`, `accelerated-threshold`,
+`anomaly-threshold`, `reuse-threshold`) over 100 or with more than six
 decimal places, naming the offending line. Nothing is rounded.
 
 When a value is advertised:
@@ -256,7 +259,24 @@ When a value is advertised:
   window has refilled with real measurements. (A bucket needs at least
   10 probes to count as silent; at slow probe rates, all of a few probes
   being lost is ordinary loss.)
-- **A static `te-metric loss` always wins** over the measured value.
+- **The Anomalous (A) bit is opt-in.** With `anomaly-threshold` set, the
+  bit is set on the link-loss sub-TLV as soon as the value it is
+  advertised with reaches the bound. That value is the one in the
+  sub-TLV: with acceleration on, an accelerated 10 % carries the bit
+  against a 5 % bound even though the rolling average is lower. The
+  bound is compared with the measured loss exactly, so it works above
+  the 50.331642 % the sub-TLV can carry — 80 % loss against a 60 % bound
+  advertises the maximum with the bit set — and at bounds finer than the
+  sub-TLV's 0.000003 % unit. A change
+  of the bit is advertised at once, with its value, whatever the
+  interval and threshold would otherwise hold back. The bit clears only
+  once the loss has stayed below `reuse-threshold` (default: the anomaly
+  bound) for a whole loss interval; any evaluation back at or above the
+  reuse bound restarts that wait (RFC 8570 §5, "below … for one or more
+  advertisement intervals"). A withdrawal forgets the bit: a value that
+  comes back after silence has to cross the bound again.
+- **A static `te-metric loss` always wins** over the measured value, and
+  is always advertised with the A bit clear.
 
 The loss settings belong to each IGP. IS-IS and OSPF measuring the same
 link share one session and one set of buckets, but each applies its own
@@ -267,7 +287,17 @@ advertises:
 ```
         Subscribers:
             isis: anomaly-threshold none, Anomalous: avg no, min no, max no
-                loss: advertised 0.000000% (interval 120s, threshold 10%, minimum-change 1.000000%, integrity 90%)
+                loss: advertised 0.000000% (interval 120s, threshold 10%, minimum-change 0.999999%, integrity 90%)
+```
+
+The advertised value and the change thresholds are shown in the
+sub-TLV's own units of 0.000003 %, so a configured 1.0 % reads
+0.999999 %. Anomaly bounds are kept as configured and print exactly.
+With them configured the line lists them, and an advertisement carrying
+the A bit is marked `(A)`, as in `show isis database detail`:
+
+```
+                loss: advertised 9.999999% (A) (interval 120s, threshold 10%, minimum-change 0.999999%, integrity 90%, anomaly 5.000000%, reuse 1.000000%)
 ```
 
 ## Wire encoding

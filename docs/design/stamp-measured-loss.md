@@ -380,8 +380,15 @@ RFC 8570 §5 asks for per-sub-TLV filters anyway. Loss is evaluated at every los
 ### D7 — Anomalous bit: reuse the delay hysteresis, bounds in percent
 
 - `anomaly-threshold` / `reuse-threshold` under `loss`, in **percent** (decimal64, 6
-  fraction digits, matching the 0.000003 % unit). The pair follows Cisco XR's
-  `anomaly-loss upper-bound` / `lower-bound` and Cisco XE's `anomaly-check` bounds.
+  fraction digits). The pair follows Cisco XR's `anomaly-loss upper-bound` / `lower-bound`
+  and Cisco XE's `anomaly-check` bounds.
+- **The bounds are compared with the exact measurement**, not with the encoded value (PR 3
+  review). The bounds are kept in micro-percent as configured. The candidate's loss is taken
+  as `lost × 10⁸ / settled` micro-percent, rounded down, which is exact against a whole
+  micro-percent bound. The encoded value fails in two ways. It saturates at 50.331642 %, so
+  80 % measured loss never met a configured 60 % bound, and the sub-TLV then carries the cap
+  *with* A. It is quantised to 0.000003 %, so a 0.000001 % bound truncated to zero and marked
+  a clean link anomalous, with no way to recover.
 - **The bit is evaluated on the value it is advertised with** (review round 1, finding 4).
   At each loss tick a subscriber has exactly one candidate: the rolling window (D4), or the
   latest bucket when the accelerated condition fires (D6). The existing `Anomaly` hysteresis
@@ -406,6 +413,13 @@ RFC 8570 §5 asks for per-sub-TLV filters anyway. Loss is evaluated at every los
   gains an optional minimum recovery time.
   Delay does not need one: its window resets at every export, so each delay evaluation
   already averages exactly one advertisement interval of that sub-TLV.
+  Implemented in PR 3 as `Anomaly::evaluate_bounds(value, bounds, Some((now, min)))`. The wait
+  is timed by the real clock and allows D6's `CADENCE_SLACK`, so tick jitter cannot hold the
+  bit for an extra tick.
+- **A withdrawal forgets the state.** When loss is disabled, the window is untrusted or a
+  bucket goes silent (D8), the hysteresis resets, as delay's does after an empty window. A
+  value that comes back has to cross the anomaly bound again, rather than inherit a bit from
+  before the outage.
 - **Per subscriber**, as for delay: IS-IS and OSPF configure their bounds separately and must
   not overwrite each other (`client::Subscriber`).
 - **Unset means the bit is never set**, the same opt-in stance as delay. Cisco XE's 0.5 % /

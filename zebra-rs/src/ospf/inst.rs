@@ -1000,6 +1000,7 @@ impl<V: OspfVersion> Ospf<V> {
             delay_anomalous: delay.is_some_and(|d| d.anomaly.avg),
             min_anomalous: delay.is_some_and(|d| d.anomaly.min),
             max_anomalous: delay.is_some_and(|d| d.anomaly.max),
+            loss_anomalous: loss.is_some_and(|l| l.anomalous),
         };
         tracing::debug!(
             ifindex = key.ifindex,
