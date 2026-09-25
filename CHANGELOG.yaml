@@ -11,6 +11,124 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit them,
 # changelog-gen.sh defaults to distribution "unstable" and urgency "medium".
 
+- semver: 26.9.2
+  date: 2026-09-24T18:00:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### BGP: route reflection, update groups and AddPath
+        * A route reflector now reflects a client's routes to its
+          non-client iBGP peers as well (RFC 4456 §6). In the usual
+          hierarchy — reflectors peering as ordinary iBGP neighbors,
+          each serving its own clients — one reflector's clients never
+          learned the other's routes. SR Policy withdrawals follow the
+          role the route was announced with
+        * The unicast `next-hop-self` / `next-hop-unchanged` knobs are
+          part of the update-group signature, so two neighbors that
+          differ only in a knob no longer share one canonical UPDATE
+          and each other's next-hop
+        * Binding an outbound policy or prefix-set on an Established
+          neighbor re-forms its update-groups, once per family and only
+          after the old group has drained; before, the neighbor shared
+          its old group's memoized outcome and its soft-out deleted its
+          group-mates' pending advertisements
+        * An IPv6 withdraw toward the new best path's source no longer
+          drops the advertisement just queued for its group-mates
+        * Two AddPath labeled-unicast peers no longer re-send an
+          unchanged candidate to each other on every UPDATE (a loop of
+          ~59,000 UPDATEs per second in the test)
+        * EVPN AddPath members receive every candidate, and a
+          superseded path-id is withdrawn when the best path flips —
+          a leaf used to keep forwarding to a dead VTEP
+        * A VPNv6 route re-advertised with next-hop-self or to an eBGP
+          peer carries our own label behind a swap ILM, as VPNv4 does;
+          the label is released when an inbound denial drops the last
+          candidate, and unreachable AddPath candidates are withdrawn
+    - note: |
+        ### BGP: sessions and peers
+        * A crossed inbound connection accepted after our own dial had
+          reached OpenConfirm, whose OPEN then lost collision resolution
+          (§6.8), reset the session to OpenSent: it waited for an OPEN
+          it had already processed and dropped the peer's KEEPALIVE,
+          while the peer showed Established with no routes until its
+          hold timer expired. The session now stays in OpenConfirm.
+          Seen after a link flap with both ends redialling at once
+        * LOCAL_PREF received from an eBGP peer is ignored (RFC 4271
+          §5.1.5) instead of steering best-path and being relayed to
+          iBGP peers
+        * A listen-range (dynamic) peer takes its type from the
+          neighbor-group's remote-as; an eBGP dynamic peer used to run
+          the iBGP rules for its whole session
+        * `interface-neighbor` accepts `hold-time`, `idle-hold-time`,
+          `connect-retry-time` and `advertisement-interval`
+          (kurokiyokiyo)
+    - note: |
+        ### BGP-LS
+        * Link-State objects are now advertised to peers, not only
+          received and stored: per-peer attributes, outbound policy
+          (every condition read, unresolved references deny, `set
+          color` applied, LOCAL_PREF kept off eBGP), refresh replay
+          and the UPDATE size limit
+        * The RFC 8571 TE performance metrics (delay, min/max delay,
+          variation, loss, bandwidths) are exported from IS-IS, taken
+          from either the inline sub-TLVs or the ASLA; ASLA application
+          scope and mask lengths are honoured
+    - note: |
+        ### EVPN: single-active multihoming
+        * RFC 9785 preference-based DF election is complete: the
+          Don't-Preempt bit, the Lowest-Preference algorithm, and a
+          default preference of 32767; an upgraded PE keeps its
+          previous DF algorithm
+        * The single-active role (P/B) is advertised in the Layer-2
+          Attributes extended community of the per-EVI Ethernet A-D,
+          and a remote PE forwards known unicast to the PE that
+          signalled itself designated — never to one that declared
+          itself non-designated, and only once every PE of the segment
+          signals — instead of inferring it from MAC advertisements
+        * Codec for the RFC 9722 Service Carving Time extended
+          community and its T capability bit (not yet advertised)
+    - note: |
+        ### TE metrics and STAMP
+        * OSPFv3 gains TE metrics: configuration, origination in the
+          E-Router-LSA, STAMP measurement, and metric-type-1 SPF
+        * OSPF advertises TE metrics without Segment Routing; with SR
+          off they used to be silently dropped on both versions
+        * The Anomalous (A) bit of RFC 8570 / RFC 7471 is evaluated
+          from STAMP measurements with configurable upper and reuse
+          thresholds and advertised by IS-IS and OSPF, instead of being
+          hard-coded clear
+    - note: |
+        ### IS-IS interoperability
+        * LSPs, CSNPs and PSNPs on point-to-point circuits are sent to
+          AllISs, like Hellos, instead of unicast to the neighbor's MAC.
+          A hardware NOS that traps IS-IS by group address dropped them,
+          so an adjacency came Up but its LSDB never synchronized
+        * A Hello padded above 1500 bytes carries the jumbo LLC
+          EtherType 0x8870 instead of a bogus length that
+          EtherType-classifying peers drop
+    - note: |
+        ### IPv6 router advertisements
+        * The initial RA burst restarts when a link recovers
+          (kurokiyokiyo), and the first RA goes out within 0–500 ms of
+          link-up rather than after 16 s
+        * Interfaces enslaved to a VRF are followed, so
+          `send-advertisements` on them works
+        * `show ipv6 nd interface` reports `suspended (link down)`
+          instead of a countdown stuck at 0s
+    - note: |
+        ### Configuration and housekeeping
+        * `vrrp` configuration schema (VyOS-derived) and
+          `show vrrp [statistics|detail]`, served by the insomnia
+          daemon
+        * CI drops the runner image's Google Chrome apt source before
+          installing build dependencies
+        * BDD: temporary veth names stay within 15 characters past the
+          1000th link of a full run
+        * Design documents: measured link loss for STAMP TE metrics,
+          STAMP/IGP TE-metric and BGP-LS reviews
+
 - semver: 26.9.1
   date: 2026-09-05T18:00:00+09:00
   distribution: unstable

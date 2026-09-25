@@ -184,6 +184,166 @@ Defaults (`interval` 1000 ms, `damping-period` 30 s) match the
 periodic-advertisement cadence of IOS-XR / SR-OS; the lab values above
 (100 ms / 2 s) converge in seconds.
 
+### Measured loss (`te-metric measurement loss`)
+
+The same session also measures **probe loss**, and the IGP advertises
+it as the unidirectional link-loss sub-TLV (IS-IS 36, OSPFv2 30,
+OSPFv3 16). This is **on by default wherever `measurement` is
+enabled**, as on Cisco IOS XR. That means an upgrade adds a loss
+sub-TLV to every measured link: 0 % on a clean link, about 120 seconds
+after its session comes up. Turn it off per link with
+`loss { enabled false; }`.
+
+How it is measured:
+
+- **Every probe is settled once**, by its sequence number: received when
+  its reply is read within 3 seconds (RFC 7680's waiting time), lost
+  otherwise. A reply that arrives later still counts as lost. A reply
+  whose timestamps are rejected as a delay sample still counts as
+  received — a clock fault is not packet loss.
+- **Round-trip by default.** A stateless reflector copies the sender's
+  sequence number, so a lost probe and a lost reply look the same, and
+  the advertised value is round-trip loss — an upper bound on the
+  forward loss the sub-TLV describes. Against a stateful reflector,
+  forward loss can be advertised instead (see *Direction* below).
+- **Averaged over the loss interval** (default 120 s), counted in
+  30-second buckets on the session's own clock, independent of
+  `damping-period`. The smallest step the value can take is one probe:
+  0.83 % at the default 1 s probe interval over 120 s, 0.083 % at 100 ms.
+
+```
+te-metric {
+  measurement {
+    enabled true;
+    reflector stateful;             # optional: reflect with our own sequence
+                                    #   counter (default stateless)
+    loss {
+      enabled true;                 # default true
+      interval 120;                 # seconds, a multiple of 30 (30..3600)
+      threshold 10;                 # re-advertise on a change of this % of the value…
+      minimum-change 1.0;           # …and of at least this many percentage points
+      accelerated-threshold 5.0;    # optional: advertise at once when the latest
+                                    #   30 s differs by this many points (default off)
+      integrity 90;                 # % of expected probes a window needs
+      anomaly-threshold 5.0;        # optional: set the A bit at or above this %
+      reuse-threshold 1.0;          # …and clear it after an interval below this %
+      peer-reflector stateful;      # optional: the peer reflects statefully, so
+                                    #   advertise forward loss (default stateless)
+    }
+  }
+}
+```
+
+The commit rejects a loss `interval` that is not a multiple of 30, and a
+loss percentage (`minimum-change`, `accelerated-threshold`,
+`anomaly-threshold`, `reuse-threshold`) over 100 or with more than six
+decimal places, naming the offending line. Nothing is rounded.
+
+When a value is advertised:
+
+- **Not until a full, trustworthy window.** The window must be complete,
+  and at least `integrity` % of the probes the probe interval should have
+  produced must have settled. Before that, a static `te-metric loss` is
+  advertised if one is configured, and nothing otherwise.
+- **The first value goes out at once.** After that, a change is
+  re-advertised at most once per loss interval (measured from the last
+  advertisement), and only when it is at least
+  `max(threshold % × advertised value, minimum-change)`. The
+  default minimum change of 1.0 point is larger than one probe's worth at
+  the default rate, so a single stray lost probe does not re-flood the
+  LSP. To see finer loss, raise the probe rate *and* lower
+  `minimum-change` together.
+- **Silence withdraws, and is not counted as loss.** If a whole 30-second
+  bucket goes by with probes sent but not one reply while the adjacency
+  is up, the loss is withdrawn at once, not advertised as the
+  50.331642 % maximum. That is a measurement problem — a reflector not
+  running, an ACL, a policer on the probe DSCP — and advertising the
+  maximum would make every Flex-Algo loss constraint prune a link that
+  is forwarding traffic. Silent buckets are also left out of the window
+  as gaps, so once replies return, nothing is advertised until the
+  window has refilled with real measurements. (A bucket needs at least
+  10 probes to count as silent; at slow probe rates, all of a few probes
+  being lost is ordinary loss.)
+- **The Anomalous (A) bit is opt-in.** With `anomaly-threshold` set, the
+  bit is set on the link-loss sub-TLV as soon as the value it is
+  advertised with reaches the bound. That value is the one in the
+  sub-TLV: with acceleration on, an accelerated 10 % carries the bit
+  against a 5 % bound even though the rolling average is lower. The
+  bound is compared with the measured loss exactly, so it works above
+  the 50.331642 % the sub-TLV can carry — 80 % loss against a 60 % bound
+  advertises the maximum with the bit set — and at bounds finer than the
+  sub-TLV's 0.000003 % unit. A change
+  of the bit is advertised at once, with its value, whatever the
+  interval and threshold would otherwise hold back. The bit clears only
+  once the loss has stayed below `reuse-threshold` (default: the anomaly
+  bound) for a whole loss interval; any evaluation back at or above the
+  reuse bound restarts that wait (RFC 8570 §5, "below … for one or more
+  advertisement intervals"). A withdrawal forgets the bit: a value that
+  comes back after silence has to cross the bound again.
+- **A static `te-metric loss` always wins** over the measured value, and
+  is always advertised with the A bit clear.
+
+#### Direction: forward loss against a stateful reflector
+
+By default the advertised loss is round-trip, because a stateless
+reflector (RFC 8762 §4.3) copies the sender's sequence number: a lost
+probe and a lost reply look the same. A *stateful* reflector puts its
+own per-peer counter in every reply instead, and that tells the two
+apart. Between two replies that did come back, the counter says how many
+of the probes in between reached the reflector: those were lost on the
+way back, and the rest on the way out.
+
+Two zebra-rs routers get forward loss by setting both ends:
+
+- `measurement reflector stateful` on the router that reflects: it
+  answers this link's peer with its own counter. It is on if any IGP
+  measuring the link sets it, so a second IGP left at the default does
+  not turn it off.
+- `loss peer-reflector stateful` on the router that measures: the peer
+  reflects statefully, so advertise forward loss. A Juniper peer with
+  `stateful-sequence` counts as stateful.
+
+The peer's mode is **declared, not detected**: a stateless reflector with
+forward loss and a stateful one with reverse loss send exactly the same
+replies. Declaring a stateless peer stateful makes every loss read as
+reverse, and the advertised forward loss as zero. Changing
+`peer-reflector` starts that IGP's loss advertisement over: the new value
+goes out at once, not filtered against a value of the other kind.
+
+Losses are split once each gap of consecutive lost probes has closed,
+which happens when the next reply arrives. Until then they are
+*unresolved* and counted as forward: the value errs high, never low. A
+gap the counter cannot explain stays unresolved: the peer restarted, its
+counter moved backwards, or probes were reordered across the gap. `show
+stamp session` gives each such IGP's split:
+
+```
+                loss: advertised 0.000000% forward (interval 30s, threshold 10%, minimum-change 0.999999%, integrity 90%, peer-reflector stateful)
+                  direction over 30s: forward 0, reverse 30, unresolved 0 of 300 probes
+```
+
+The loss settings belong to each IGP. IS-IS and OSPF measuring the same
+link share one session and one set of buckets, but each applies its own
+`loss` settings: turning loss off in IS-IS leaves OSPF advertising it.
+`show stamp session` lists each IGP's policy and what it currently
+advertises:
+
+```
+        Subscribers:
+            isis: anomaly-threshold none, Anomalous: avg no, min no, max no
+                loss: advertised 0.000000% (interval 120s, threshold 10%, minimum-change 0.999999%, integrity 90%)
+```
+
+The advertised value and the change thresholds are shown in the
+sub-TLV's own units of 0.000003 %, so a configured 1.0 % reads
+0.999999 %. Anomaly bounds are kept as configured and print exactly.
+With them configured the line lists them, and an advertisement carrying
+the A bit is marked `(A)`, as in `show isis database detail`:
+
+```
+                loss: advertised 9.999999% (A) (interval 120s, threshold 10%, minimum-change 0.999999%, integrity 90%, anomaly 5.000000%, reuse 1.000000%)
+```
+
 ## Wire encoding
 
 ### IS-IS (RFC 8570)

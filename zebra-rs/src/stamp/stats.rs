@@ -33,28 +33,22 @@ pub struct MetricSnapshot {
     pub anomaly: AnomalyFlags,
 }
 
-/// Accumulates samples between export ticks. `sent` / `received`
-/// count probes during the current window for the `show stamp` loss
-/// figure; they are *not* exported to the IGP (a one-window sample is
-/// too noisy to advertise — parent plan §6).
+/// Accumulates delay samples between export ticks. Probe loss is not
+/// counted here: it has its own ledger and clock
+/// ([`LossLedger`](super::loss::LossLedger)), because a probe is settled
+/// by sequence number, not by which window its reply happened to land
+/// in.
 #[derive(Debug, Default)]
 pub struct StatsWindow {
     delays: Vec<u32>,
-    pub sent: u32,
-    pub received: u32,
 }
 
 impl StatsWindow {
-    pub fn record_sent(&mut self) {
-        self.sent = self.sent.saturating_add(1);
-    }
-
     /// Record one valid two-way delay sample (microseconds). The single
     /// entry point for samples — a future kernel-aggregate mode feeds
     /// pre-reduced `{min,max,sum,count}` through the same seam
     /// (offload notes §9b).
     pub fn record_delay(&mut self, delay_us: u32) {
-        self.received = self.received.saturating_add(1);
         self.delays.push(delay_us);
     }
 
@@ -92,18 +86,6 @@ impl StatsWindow {
     /// Start a fresh window (export tick).
     pub fn reset(&mut self) {
         self.delays.clear();
-        self.sent = 0;
-        self.received = 0;
-    }
-
-    /// Probe loss within the current window, percent. `None` until a
-    /// probe has been sent.
-    pub fn loss_pct(&self) -> Option<u32> {
-        if self.sent == 0 {
-            return None;
-        }
-        let lost = self.sent.saturating_sub(self.received);
-        Some(lost * 100 / self.sent)
     }
 }
 
@@ -115,7 +97,6 @@ mod tests {
     fn empty_window_has_no_snapshot() {
         let w = StatsWindow::default();
         assert_eq!(w.snapshot(), None);
-        assert_eq!(w.loss_pct(), None);
     }
 
     #[test]
@@ -146,25 +127,8 @@ mod tests {
     #[test]
     fn reset_clears_everything() {
         let mut w = StatsWindow::default();
-        w.record_sent();
         w.record_delay(100);
         w.reset();
         assert_eq!(w.snapshot(), None);
-        assert_eq!(w.sent, 0);
-        assert_eq!(w.received, 0);
-    }
-
-    #[test]
-    fn loss_pct_counts_unanswered_probes() {
-        let mut w = StatsWindow::default();
-        for _ in 0..4 {
-            w.record_sent();
-        }
-        w.record_delay(100);
-        assert_eq!(w.loss_pct(), Some(75));
-        w.record_delay(100);
-        w.record_delay(100);
-        w.record_delay(100);
-        assert_eq!(w.loss_pct(), Some(0));
     }
 }

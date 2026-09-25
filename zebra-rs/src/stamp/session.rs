@@ -16,10 +16,12 @@ use std::time::Instant;
 use socket2::Socket;
 use tokio::io::unix::AsyncFd;
 
+use crate::config::Args;
 use crate::context::Task;
 
 use super::anomaly::AnomalyThresholds;
 use super::damping::Damping;
+use super::loss::{BUCKET, LossLedger};
 use super::stats::{MetricSnapshot, StatsWindow};
 
 /// Identifies one measurement session at this system. `ifindex` is the
@@ -54,6 +56,17 @@ pub struct SessionParams {
     /// It rides in `SessionParams` so the IGP-side reconcile diff
     /// still notices a threshold-only config change and re-subscribes.
     pub anomaly: AnomalyThresholds,
+    /// This subscriber's loss-advertisement policy. Per subscriber for
+    /// the same reason as `anomaly` (measured-loss design D10): every
+    /// setting that decides what an IGP *advertises* is its own, and is
+    /// evaluated over the session's shared loss buckets.
+    pub loss: LossPolicy,
+    /// This subscriber asks for `reflector stateful`: reflect the peer's
+    /// probes with this router's own sequence counter (measured-loss
+    /// design D3). Wire-visible, so the session reflects statefully if
+    /// **any** current subscriber asks — a second IGP subscribing with
+    /// the default must not turn off what the first configured (D10).
+    pub reflector_stateful: bool,
 }
 
 impl Default for SessionParams {
@@ -63,8 +76,162 @@ impl Default for SessionParams {
             damping_secs: DEFAULT_DAMPING_SECS,
             dst_port: stamp_packet::STAMP_UDP_PORT,
             anomaly: AnomalyThresholds::default(),
+            loss: LossPolicy::default(),
+            reflector_stateful: false,
         }
     }
+}
+
+/// How one subscriber advertises measured loss (measured-loss design
+/// D5, D6, D10). Changes are compared in RFC 8570 units — 0.000003 %
+/// each — the same units the advertised value is encoded in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LossPolicy {
+    /// Advertise measured loss at all. On by default wherever
+    /// measurement is enabled, as on Cisco IOS XR (design §10
+    /// decision 4); `loss enabled false` turns it off per link.
+    pub enabled: bool,
+    /// The loss interval in 30 s buckets: the averaging window, and the
+    /// shortest spacing between periodic re-advertisements.
+    pub window_buckets: usize,
+    /// Periodic re-advertisement needs a change of at least this
+    /// percentage of the advertised value…
+    pub threshold_pct: u32,
+    /// …and at least this absolute change, in RFC units. Governs the
+    /// zero crossings, where a relative threshold means nothing.
+    pub minimum_change: u32,
+    /// Advertise at once, bypassing the cadence, when the latest bucket
+    /// alone differs from the advertised value by this much (RFC
+    /// units). `None` — the default — turns acceleration off.
+    pub accelerated: Option<u32>,
+    /// Settled probes, as a percentage of those the probe rate should
+    /// have produced, below which a window is not trusted (D5).
+    pub integrity_pct: u32,
+    /// Loss at or above which the Anomalous bit sets (D7), in
+    /// micro-percent exactly as configured — not RFC units, which would
+    /// truncate a bound finer than 0.000003 % to zero and could not
+    /// express one above the 50.331642 % the sub-TLV carries. `None` —
+    /// the default — never sets it, as for delay.
+    pub anomaly_micro_pct: Option<u32>,
+    /// Loss below which the bit may clear, once it has stayed below for
+    /// a whole loss interval (D7), in micro-percent. Defaults to, and is
+    /// clamped to, the anomaly bound.
+    pub reuse_micro_pct: Option<u32>,
+    /// `peer-reflector stateful`: the peer reflects with its own sequence
+    /// counter, so losses can be split by direction and forward loss
+    /// advertised (D3). Declared, not detected — a stateless reflector
+    /// with forward loss and a stateful one with reverse loss send the
+    /// same reply stream. Default `false`: round-trip loss.
+    pub peer_reflector_stateful: bool,
+}
+
+impl LossPolicy {
+    /// The loss interval as a duration.
+    pub fn interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(BUCKET.as_secs() * self.window_buckets as u64)
+    }
+
+    /// The effective `(anomaly, reuse)` bounds in micro-percent, or
+    /// `None` when the A bit is off.
+    pub fn anomaly_bounds(&self) -> Option<(u32, u32)> {
+        super::anomaly::hysteresis_bounds(self.anomaly_micro_pct, self.reuse_micro_pct)
+    }
+}
+
+/// Default loss interval: 120 s, RFC 8570 §7's default announcement
+/// periodicity.
+pub const DEFAULT_LOSS_INTERVAL_SECS: u32 = 120;
+/// Default periodic threshold (zebra-rs delay, Juniper delay).
+pub const DEFAULT_LOSS_THRESHOLD_PCT: u32 = 10;
+/// Default minimum change: 1.0 percentage point (design §10 decision 1),
+/// in micro-percent.
+pub const DEFAULT_LOSS_MINIMUM_CHANGE_MICRO_PCT: u64 = 1_000_000;
+/// Default window integrity (the concept is Nokia's `window-integrity`).
+pub const DEFAULT_LOSS_INTEGRITY_PCT: u32 = 90;
+
+impl Default for LossPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            window_buckets: (DEFAULT_LOSS_INTERVAL_SECS as u64 / BUCKET.as_secs()) as usize,
+            threshold_pct: DEFAULT_LOSS_THRESHOLD_PCT,
+            minimum_change: micro_pct_to_units(DEFAULT_LOSS_MINIMUM_CHANGE_MICRO_PCT),
+            accelerated: None,
+            integrity_pct: DEFAULT_LOSS_INTEGRITY_PCT,
+            anomaly_micro_pct: None,
+            reuse_micro_pct: None,
+            peer_reflector_stateful: false,
+        }
+    }
+}
+
+/// Micro-percent (10⁻⁶ %) to RFC 8570 loss units (3 × 10⁻⁶ % each),
+/// truncating.
+pub fn micro_pct_to_units(micro_pct: u64) -> u32 {
+    (micro_pct / 3).min(u64::from(u32::MAX)) as u32
+}
+
+/// A reflector mode leaf (`reflector`, `peer-reflector`): whether it
+/// names the stateful mode. YANG restricts it to the two names.
+fn reflector_mode(value: &str) -> Option<bool> {
+    match value {
+        "stateful" => Some(true),
+        "stateless" => Some(false),
+        _ => None,
+    }
+}
+
+/// `loss interval`: whole 30 s buckets only (design D4) — rejected
+/// rather than rounded, so what is configured is what runs. YANG has no
+/// step constraint, so the config manager also runs this at commit
+/// (`config::check`); the setter applies the same rule.
+pub fn check_loss_interval(value: &str) -> Result<u32, String> {
+    let secs: u32 = value
+        .parse()
+        .map_err(|_| format!("'{value}' is not a number of seconds"))?;
+    if secs == 0 || u64::from(secs) % BUCKET.as_secs() != 0 {
+        return Err(format!(
+            "must be a multiple of {} seconds",
+            BUCKET.as_secs()
+        ));
+    }
+    Ok(secs)
+}
+
+/// A loss percentage leaf (`minimum-change`, `accelerated-threshold`,
+/// `anomaly-threshold`, `reuse-threshold`) in micro-percent. libyang enforces neither a decimal64 range nor
+/// `fraction-digits`, so, like [`check_loss_interval`], this runs at
+/// commit as well as in the setter.
+pub fn check_loss_percent(value: &str) -> Result<u64, String> {
+    parse_percent_micro(value)
+        .ok_or_else(|| "must be 0 to 100 percent, with at most 6 decimal places".to_string())
+}
+
+/// Parse a percentage given as a YANG decimal64 string — `1`, `0.5`,
+/// `12.345678` — into micro-percent, exactly (no floating point). At
+/// most six fraction digits, the precision of the RFC unit; 0–100 %.
+pub fn parse_percent_micro(s: &str) -> Option<u64> {
+    // A dot needs digits on both sides, as the config layer's decimal64
+    // matcher requires.
+    let (int, frac) = match s.split_once('.') {
+        Some((_, "")) => return None,
+        Some((i, f)) => (i, f),
+        None => (s, ""),
+    };
+    if int.is_empty() || frac.len() > 6 {
+        return None;
+    }
+    if !int.bytes().all(|b| b.is_ascii_digit()) || !frac.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let int: u64 = int.parse().ok()?;
+    let frac: u64 = if frac.is_empty() {
+        0
+    } else {
+        format!("{frac:0<6}").parse().ok()?
+    };
+    let micro = int.checked_mul(1_000_000)?.checked_add(frac)?;
+    (micro <= 100_000_000).then_some(micro)
 }
 
 /// Default probe interval (Cisco SR-PM probes at 3 s, Juniper TWAMP at
@@ -90,6 +257,20 @@ pub struct MeasurementConfig {
     /// Average delay below which the bit clears again. Unset means no
     /// hysteresis band: the anomaly threshold both sets and clears.
     pub reuse_threshold_us: Option<u32>,
+    /// `te-metric measurement loss { … }` — each `None` takes the
+    /// [`LossPolicy`] default.
+    pub loss_enabled: Option<bool>,
+    pub loss_interval_secs: Option<u32>,
+    pub loss_threshold_pct: Option<u32>,
+    pub loss_minimum_change_micro_pct: Option<u64>,
+    pub loss_accelerated_micro_pct: Option<u64>,
+    pub loss_integrity_pct: Option<u32>,
+    pub loss_anomaly_micro_pct: Option<u64>,
+    pub loss_reuse_micro_pct: Option<u64>,
+    /// `measurement reflector stateful`.
+    pub reflector_stateful: Option<bool>,
+    /// `loss peer-reflector stateful`.
+    pub loss_peer_reflector_stateful: Option<bool>,
 }
 
 impl MeasurementConfig {
@@ -106,6 +287,103 @@ impl MeasurementConfig {
                 anomaly_us: self.anomaly_threshold_us,
                 reuse_us: self.reuse_threshold_us,
             },
+            loss: self.loss_policy(),
+            reflector_stateful: self.reflector_stateful.unwrap_or(false),
+        }
+    }
+
+    /// `measurement reflector stateless | stateful`.
+    pub fn set_reflector(&mut self, args: &mut Args, set: bool) -> Option<()> {
+        let stateful = reflector_mode(&args.string()?)?;
+        self.reflector_stateful = set.then_some(stateful);
+        Some(())
+    }
+
+    /// `loss peer-reflector stateless | stateful`.
+    pub fn set_loss_peer_reflector(&mut self, args: &mut Args, set: bool) -> Option<()> {
+        let stateful = reflector_mode(&args.string()?)?;
+        self.loss_peer_reflector_stateful = set.then_some(stateful);
+        Some(())
+    }
+
+    /// `loss enabled` (config callback helper, shared by every IGP).
+    pub fn set_loss_enabled(&mut self, args: &mut Args, set: bool) -> Option<()> {
+        let value = args.boolean()?;
+        self.loss_enabled = set.then_some(value);
+        Some(())
+    }
+
+    /// `loss interval`, whole 30 s buckets ([`check_loss_interval`]).
+    pub fn set_loss_interval(&mut self, args: &mut Args, set: bool) -> Option<()> {
+        let value = args.string()?;
+        self.loss_interval_secs = if set {
+            Some(check_loss_interval(&value).ok()?)
+        } else {
+            None
+        };
+        Some(())
+    }
+
+    /// `loss threshold`, percent of the advertised value.
+    pub fn set_loss_threshold(&mut self, args: &mut Args, set: bool) -> Option<()> {
+        let value = args.u32()?;
+        self.loss_threshold_pct = set.then_some(value);
+        Some(())
+    }
+
+    /// `loss minimum-change`, percentage points (YANG decimal64).
+    pub fn set_loss_minimum_change(&mut self, args: &mut Args, set: bool) -> Option<()> {
+        let value = check_loss_percent(&args.string()?).ok()?;
+        self.loss_minimum_change_micro_pct = set.then_some(value);
+        Some(())
+    }
+
+    /// `loss accelerated-threshold`, percentage points (YANG decimal64).
+    pub fn set_loss_accelerated(&mut self, args: &mut Args, set: bool) -> Option<()> {
+        let value = check_loss_percent(&args.string()?).ok()?;
+        self.loss_accelerated_micro_pct = set.then_some(value);
+        Some(())
+    }
+
+    /// `loss anomaly-threshold`, percent (YANG decimal64).
+    pub fn set_loss_anomaly(&mut self, args: &mut Args, set: bool) -> Option<()> {
+        let value = check_loss_percent(&args.string()?).ok()?;
+        self.loss_anomaly_micro_pct = set.then_some(value);
+        Some(())
+    }
+
+    /// `loss reuse-threshold`, percent (YANG decimal64).
+    pub fn set_loss_reuse(&mut self, args: &mut Args, set: bool) -> Option<()> {
+        let value = check_loss_percent(&args.string()?).ok()?;
+        self.loss_reuse_micro_pct = set.then_some(value);
+        Some(())
+    }
+
+    /// `loss integrity`, percent of expected probes.
+    pub fn set_loss_integrity(&mut self, args: &mut Args, set: bool) -> Option<()> {
+        let value = args.u32()?;
+        self.loss_integrity_pct = set.then_some(value);
+        Some(())
+    }
+
+    /// The resolved loss policy: every unset leaf takes its default.
+    pub fn loss_policy(&self) -> LossPolicy {
+        let d = LossPolicy::default();
+        LossPolicy {
+            enabled: self.loss_enabled.unwrap_or(d.enabled),
+            window_buckets: self.loss_interval_secs.map_or(d.window_buckets, |s| {
+                (u64::from(s) / BUCKET.as_secs()) as usize
+            }),
+            threshold_pct: self.loss_threshold_pct.unwrap_or(d.threshold_pct),
+            minimum_change: self
+                .loss_minimum_change_micro_pct
+                .map_or(d.minimum_change, micro_pct_to_units),
+            accelerated: self.loss_accelerated_micro_pct.map(micro_pct_to_units),
+            integrity_pct: self.loss_integrity_pct.unwrap_or(d.integrity_pct),
+            // `check_loss_percent` bounds both to 100 %, 10⁸ micro-percent.
+            anomaly_micro_pct: self.loss_anomaly_micro_pct.map(|v| v as u32),
+            reuse_micro_pct: self.loss_reuse_micro_pct.map(|v| v as u32),
+            peer_reflector_stateful: self.loss_peer_reflector_stateful.unwrap_or(false),
         }
     }
 }
@@ -140,7 +418,15 @@ pub struct Session {
     /// Probes from `key.remote` answered by the implicit reflector —
     /// the per-session half of the reflector counters.
     pub reflected_count: u64,
+    /// The stateful reflector's own sequence counter for this peer's
+    /// probes (RFC 8762 §4.2, measured-loss design D3): one per probe
+    /// received, whether or not the session currently reflects
+    /// statefully — only its use depends on the mode.
+    pub reflector_seq: u32,
     pub window: StatsWindow,
+    /// Probe-loss accounting on its own 30 s clock (design D2/D4) —
+    /// independent of the delay window above and of `damping_secs`.
+    pub loss: LossLedger,
     pub damping: Damping,
     /// The most recent window's values — `None` before the first
     /// window and after any empty one. Updated every export tick,
@@ -178,7 +464,9 @@ impl Session {
             t4_kernel: 0,
             t4_userspace: 0,
             reflected_count: 0,
+            reflector_seq: 0,
             window: StatsWindow::default(),
+            loss: LossLedger::new(Instant::now()),
             damping: Damping::default(),
             last_snapshot: None,
             last_rx: None,
@@ -275,6 +563,85 @@ mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr};
 
     use super::*;
+
+    fn args(v: &str) -> Args {
+        Args(std::collections::VecDeque::from([v.to_string()]))
+    }
+
+    /// Decision 4: loss is on by default wherever measurement is, with
+    /// the reviewed defaults — 120 s, 10 %, 1.0 point, 90 % integrity.
+    #[test]
+    fn loss_is_on_by_default_with_the_reviewed_defaults() {
+        let p = MeasurementConfig::default().resolve().loss;
+        assert!(p.enabled);
+        assert_eq!(p.window_buckets, 4);
+        assert_eq!(p.threshold_pct, 10);
+        assert_eq!(p.minimum_change, 333_333, "1.0 % in 0.000003 % units");
+        assert_eq!(p.accelerated, None);
+        assert_eq!(p.integrity_pct, 90);
+        assert_eq!(p.anomaly_bounds(), None, "the A bit is opt-in (D7)");
+    }
+
+    #[test]
+    fn configured_loss_leaves_override_the_defaults() {
+        let mut c = MeasurementConfig::default();
+        c.set_loss_enabled(&mut args("false"), true).unwrap();
+        c.set_loss_interval(&mut args("30"), true).unwrap();
+        c.set_loss_threshold(&mut args("15"), true).unwrap();
+        c.set_loss_minimum_change(&mut args("0.2"), true).unwrap();
+        c.set_loss_accelerated(&mut args("5"), true).unwrap();
+        c.set_loss_integrity(&mut args("80"), true).unwrap();
+        c.set_loss_anomaly(&mut args("5"), true).unwrap();
+        c.set_loss_reuse(&mut args("0.5"), true).unwrap();
+        c.set_loss_peer_reflector(&mut args("stateful"), true)
+            .unwrap();
+        c.set_reflector(&mut args("stateful"), true).unwrap();
+        assert!(c.resolve().reflector_stateful);
+        assert_eq!(c.set_reflector(&mut args("sometimes"), true), None);
+        let p = c.loss_policy();
+        assert!(p.peer_reflector_stateful);
+        assert!(!p.enabled);
+        assert_eq!(p.window_buckets, 1);
+        assert_eq!(p.threshold_pct, 15);
+        assert_eq!(p.minimum_change, 66_666);
+        assert_eq!(p.accelerated, Some(1_666_666));
+        assert_eq!(p.integrity_pct, 80);
+        assert_eq!(
+            p.anomaly_bounds(),
+            Some((5_000_000, 500_000)),
+            "micro-percent, exactly as configured"
+        );
+        // Deleting a leaf restores its default.
+        c.set_loss_interval(&mut args("30"), false).unwrap();
+        assert_eq!(c.loss_policy().window_buckets, 4);
+    }
+
+    /// Design D4: whole 30 s buckets only — rejected, not rounded.
+    #[test]
+    fn a_loss_interval_must_be_a_multiple_of_30_seconds() {
+        let mut c = MeasurementConfig::default();
+        assert_eq!(c.set_loss_interval(&mut args("45"), true), None);
+        assert_eq!(c.loss_interval_secs, None, "a rejected value is not stored");
+        assert!(c.set_loss_interval(&mut args("3600"), true).is_some());
+        assert_eq!(c.loss_policy().window_buckets, 120);
+    }
+
+    #[test]
+    fn percentages_parse_exactly_to_micro_percent() {
+        assert_eq!(parse_percent_micro("1"), Some(1_000_000));
+        assert_eq!(parse_percent_micro("0.5"), Some(500_000));
+        assert_eq!(parse_percent_micro("12.345678"), Some(12_345_678));
+        assert_eq!(parse_percent_micro("100"), Some(100_000_000));
+        assert_eq!(parse_percent_micro("100.000001"), None, "over 100 %");
+        assert_eq!(
+            parse_percent_micro("1.2345678"),
+            None,
+            "finer than the RFC unit"
+        );
+        for bad in ["", ".5", "5.", "abc", "-1", "1.2.3"] {
+            assert_eq!(parse_percent_micro(bad), None, "{bad:?}");
+        }
+    }
 
     #[test]
     fn measurement_config_resolves_defaults() {

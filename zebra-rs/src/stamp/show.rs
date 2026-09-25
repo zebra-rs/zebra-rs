@@ -5,7 +5,7 @@
 //! command takes a trailing `json` flag.
 //!
 //!   * `show stamp`            — one line per session: link, state,
-//!     window counters, last exported snapshot.
+//!     counters, round-trip probe loss, last exported snapshot.
 //!   * `show stamp session`    — per-session detail block.
 //!   * `show stamp statistics` — sender and reflector packet counters.
 
@@ -15,7 +15,9 @@ use serde::Serialize;
 
 use crate::config::{Args, Builder};
 
+use super::client::Subscriber;
 use super::inst::{ShowCallback, Stamp};
+use super::loss::{BUCKET, DEFAULT_WINDOW_BUCKETS, LossWindow};
 use super::session::{Session, SessionKey};
 use super::stats::MetricSnapshot;
 
@@ -84,10 +86,7 @@ struct StampSessionJson {
     /// stamp vs a userspace fallback.
     t4_kernel: u64,
     t4_userspace: u64,
-    window_sent: u32,
-    window_received: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    window_loss_pct: Option<u32>,
+    loss: StampLossJson,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_snapshot: Option<MetricSnapshot>,
     uptime_secs: u64,
@@ -109,12 +108,175 @@ fn session_json(key: &SessionKey, s: &Session) -> StampSessionJson {
         reflected_count: s.reflected_count,
         t4_kernel: s.t4_kernel,
         t4_userspace: s.t4_userspace,
-        window_sent: s.window.sent,
-        window_received: s.window.received,
-        window_loss_pct: s.window.loss_pct(),
+        loss: loss_json(s),
         last_snapshot: s.last_snapshot,
         uptime_secs: s.created.elapsed().as_secs(),
     }
+}
+
+/// Probe loss over the default loss window (measured-loss design D4/D5),
+/// round-trip. `forward` / `reverse` / `unresolved` are the session's
+/// classification of `lost` (design D3). They mean something only
+/// against a stateful peer reflector: one that copies the sender's
+/// sequence numbers makes every anchored loss read reverse. Which the
+/// peer is, is each subscriber's `peer-reflector` declaration.
+#[derive(Serialize)]
+struct StampLossJson {
+    direction: &'static str,
+    window_secs: u64,
+    buckets: usize,
+    buckets_wanted: usize,
+    settled: u64,
+    lost: u64,
+    forward: u64,
+    reverse: u64,
+    unresolved: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolution_percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    integrity_percent: Option<u32>,
+    /// RFC 8570 §4.4 units (0.000003 %), capped at 2²⁴ − 2.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    encoded: Option<u32>,
+    /// Buckets with probes but not one reply: measurement gaps, left
+    /// out of `settled` and `lost` (measured-loss design D8).
+    silent_buckets: usize,
+    late: u64,
+    duplicate: u64,
+    unmatched: u64,
+}
+
+/// Six decimals: the RFC's unit is 0.000003 %, so more would be noise.
+fn round6(v: f64) -> f64 {
+    (v * 1e6).round() / 1e6
+}
+
+fn default_loss_window(s: &Session) -> LossWindow {
+    s.loss.window(DEFAULT_WINDOW_BUCKETS)
+}
+
+fn loss_json(s: &Session) -> StampLossJson {
+    let w = default_loss_window(s);
+    StampLossJson {
+        direction: "round-trip",
+        window_secs: w.secs(),
+        buckets: w.buckets,
+        buckets_wanted: w.wanted,
+        settled: w.settled,
+        lost: w.lost,
+        forward: w.forward,
+        reverse: w.reverse,
+        unresolved: w.unresolved(),
+        percent: w.percent().map(round6),
+        resolution_percent: w.resolution_percent().map(round6),
+        integrity_percent: w.integrity_percent(),
+        encoded: w.encoded(),
+        silent_buckets: w.silent,
+        late: s.loss.late,
+        duplicate: s.loss.duplicate,
+        unmatched: s.loss.unmatched,
+    }
+}
+
+/// The loss line of `show stamp session`, in the three states a window
+/// can be in: not one bucket closed yet, filling, and full.
+fn loss_line(w: &LossWindow) -> String {
+    let head = format!("Loss (round-trip, {}s window)", w.secs());
+    if w.buckets == 0 {
+        return format!("{head}: measuring, first bucket not closed yet");
+    }
+    let value = match w.percent() {
+        Some(p) => format!("{p:.3}% ({} of {} probes)", w.lost, w.settled),
+        None => "no probes settled".to_string(),
+    };
+    if !w.is_full() {
+        return format!(
+            "{head}: filling, {} of {} buckets; so far {value}",
+            w.buckets, w.wanted
+        );
+    }
+    let mut line = format!("{head}: {value}");
+    if let Some(r) = w.resolution_percent() {
+        let _ = write!(line, ", resolution {r:.3}%");
+    }
+    if let Some(i) = w.integrity_percent() {
+        let _ = write!(line, ", integrity {i}%");
+    }
+    if w.silent > 0 {
+        let _ = write!(line, ", {} silent", w.silent);
+    }
+    line
+}
+
+/// RFC 8570 loss units (0.000003 % each) as a percentage.
+fn units_pct(units: u32) -> f64 {
+    f64::from(units) * 0.000003
+}
+
+/// One subscriber's loss policy and what it currently advertises — per
+/// subscriber because every setting that decides an advertisement is
+/// the IGP's own (measured-loss design D10).
+fn subscriber_loss_line(sub: &Subscriber) -> String {
+    let p = &sub.loss_policy;
+    if !p.enabled {
+        return "loss: disabled".to_string();
+    }
+    // Against a declared stateful peer the value is forward loss (D3).
+    let view = if p.peer_reflector_stateful {
+        " forward"
+    } else {
+        ""
+    };
+    let state = match sub.advertised_loss {
+        Some(a) if a.anomalous => format!("advertised {:.6}%{view} (A)", units_pct(a.value)),
+        Some(a) => format!("advertised {:.6}%{view}", units_pct(a.value)),
+        None => "not advertised".to_string(),
+    };
+    let peer = if p.peer_reflector_stateful {
+        ", peer-reflector stateful"
+    } else {
+        ""
+    };
+    let accel = match p.accelerated {
+        Some(step) => format!(", accelerated {:.6}%", units_pct(step)),
+        None => String::new(),
+    };
+    // The bounds are kept in micro-percent as configured, so they print
+    // exactly.
+    let micro = |v: u32| format!("{}.{:06}%", v / 1_000_000, v % 1_000_000);
+    let anomaly = match p.anomaly_bounds() {
+        Some((anomaly, reuse)) => format!(", anomaly {}, reuse {}", micro(anomaly), micro(reuse)),
+        None => String::new(),
+    };
+    format!(
+        "loss: {state} (interval {}s, threshold {}%, minimum-change {:.6}%{accel}, integrity {}%{anomaly}{peer})",
+        p.window_buckets as u64 * BUCKET.as_secs(),
+        p.threshold_pct,
+        units_pct(p.minimum_change),
+        p.integrity_pct,
+    )
+}
+
+/// For a subscriber that declares its peer's reflector stateful, how its
+/// window's losses split by direction (design D3) — what its forward
+/// value is made of. Unresolved losses count as forward until their gap
+/// closes.
+fn subscriber_direction_line(sub: &Subscriber, s: &Session) -> Option<String> {
+    let p = &sub.loss_policy;
+    if !p.enabled || !p.peer_reflector_stateful {
+        return None;
+    }
+    let w = s.loss.window(p.window_buckets);
+    Some(format!(
+        "direction over {}s: forward {}, reverse {}, unresolved {} of {} probes",
+        w.secs(),
+        w.forward,
+        w.reverse,
+        w.unresolved(),
+        w.settled
+    ))
 }
 
 fn show_stamp(stamp: &Stamp, _args: Args, json: bool) -> Result<String, fmt::Error> {
@@ -135,18 +297,19 @@ fn show_stamp(stamp: &Stamp, _args: Args, json: bool) -> Result<String, fmt::Err
     }
     writeln!(
         buf,
-        "{:<10} {:<16} {:<16} {:<8} {:>8} {:>8} {:>6}  Last sample (min/avg/max)",
+        "{:<10} {:<16} {:<16} {:<8} {:>8} {:>8} {:>8}  Last sample (min/avg/max)",
         "Interface", "Local", "Remote", "State", "Sent", "Recv", "Loss%"
     )?;
     for (key, s) in stamp.sessions.iter() {
-        let loss = s
-            .window
-            .loss_pct()
-            .map(|p| p.to_string())
+        // Round-trip probe loss over the default window, or over the
+        // buckets closed so far while it fills.
+        let loss = default_loss_window(s)
+            .percent()
+            .map(|p| format!("{p:.3}"))
             .unwrap_or_else(|| "-".to_string());
         writeln!(
             buf,
-            "{:<10} {:<16} {:<16} {:<8} {:>8} {:>8} {:>6}  {}",
+            "{:<10} {:<16} {:<16} {:<8} {:>8} {:>8} {:>8}  {}",
             iface_str(key),
             key.local.to_string(),
             key.remote.to_string(),
@@ -205,10 +368,25 @@ fn show_stamp_session(stamp: &Stamp, _args: Args, json: bool) -> Result<String, 
             "        T4 timestamp source: kernel {} userspace {}",
             s.t4_kernel, s.t4_userspace
         )?;
+        // How this router answers the peer's probes (design D3): stateful
+        // while any subscriber asks.
+        let stateful = stamp
+            .subscriber_rows(key)
+            .any(|(_, sub)| sub.reflector_stateful);
+        if stateful {
+            writeln!(
+                buf,
+                "        Reflector: stateful, sequence {}",
+                s.reflector_seq
+            )?;
+        } else {
+            writeln!(buf, "        Reflector: stateless")?;
+        }
+        writeln!(buf, "        {}", loss_line(&default_loss_window(s)))?;
         writeln!(
             buf,
-            "        Current window: sent {} received {}",
-            s.window.sent, s.window.received
+            "        Loss replies: late {} duplicate {} unmatched {}",
+            s.loss.late, s.loss.duplicate, s.loss.unmatched
         )?;
         match &s.last_snapshot {
             Some(e) => {
@@ -242,6 +420,10 @@ fn show_stamp_session(stamp: &Stamp, _args: Args, json: bool) -> Result<String, 
                 yes_no(sub.last_flags.min),
                 yes_no(sub.last_flags.max)
             )?;
+            writeln!(buf, "                {}", subscriber_loss_line(sub))?;
+            if let Some(line) = subscriber_direction_line(sub, s) {
+                writeln!(buf, "                  {}", line)?;
+            }
         }
         if !listed {
             writeln!(buf, "            none")?;
@@ -414,5 +596,137 @@ mod tests {
         let v: serde_json::Value =
             serde_json::from_str(&show_stamp_statistics(&stamp, no_args(), true).unwrap()).unwrap();
         assert_eq!(v["sessions"], 1);
+    }
+
+    fn window(buckets: usize, settled: u64, lost: u64) -> LossWindow {
+        LossWindow {
+            buckets,
+            wanted: 4,
+            settled,
+            lost,
+            forward: 0,
+            reverse: 0,
+            expected_milli: 120_000,
+            silent: 0,
+        }
+    }
+
+    #[test]
+    fn loss_line_before_the_first_bucket() {
+        assert_eq!(
+            loss_line(&window(0, 0, 0)),
+            "Loss (round-trip, 120s window): measuring, first bucket not closed yet"
+        );
+    }
+
+    #[test]
+    fn loss_line_while_filling_says_so() {
+        assert_eq!(
+            loss_line(&window(2, 60, 0)),
+            "Loss (round-trip, 120s window): filling, 2 of 4 buckets; so far 0.000% (0 of 60 probes)"
+        );
+    }
+
+    #[test]
+    fn loss_line_when_full_shows_resolution_and_integrity() {
+        assert_eq!(
+            loss_line(&window(4, 120, 1)),
+            "Loss (round-trip, 120s window): 0.833% (1 of 120 probes), resolution 0.833%, integrity 100%"
+        );
+    }
+
+    /// Design D7: a subscriber's line marks an advertisement carrying
+    /// the A bit, and shows the bounds in effect — reuse defaulting to
+    /// the anomaly bound when unset.
+    #[test]
+    fn the_subscriber_loss_line_shows_the_a_bit_and_its_bounds() {
+        use crate::stamp::anomaly::AnomalyThresholds;
+        use crate::stamp::loss::LossAdvert;
+        use crate::stamp::session::LossPolicy;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let policy = LossPolicy {
+            anomaly_micro_pct: Some(5_000_000),
+            ..LossPolicy::default()
+        };
+        let mut sub = Subscriber::new(tx, AnomalyThresholds::default(), policy);
+        sub.advertised_loss = Some(LossAdvert {
+            value: 3_333_333,
+            anomalous: true,
+        });
+        assert_eq!(
+            subscriber_loss_line(&sub),
+            "loss: advertised 9.999999% (A) (interval 120s, threshold 10%, \
+             minimum-change 0.999999%, integrity 90%, anomaly 5.000000%, reuse 5.000000%)"
+        );
+        sub.advertised_loss = Some(LossAdvert {
+            value: 0,
+            anomalous: false,
+        });
+        sub.loss_policy.anomaly_micro_pct = None;
+        assert_eq!(
+            subscriber_loss_line(&sub),
+            "loss: advertised 0.000000% (interval 120s, threshold 10%, \
+             minimum-change 0.999999%, integrity 90%)"
+        );
+        // Design D3: against a declared stateful peer the value is
+        // forward loss, and the line says so.
+        sub.loss_policy.peer_reflector_stateful = true;
+        assert_eq!(
+            subscriber_loss_line(&sub),
+            "loss: advertised 0.000000% forward (interval 120s, threshold 10%, \
+             minimum-change 0.999999%, integrity 90%, peer-reflector stateful)"
+        );
+    }
+
+    /// Design D3: the session says how this router reflects, and a
+    /// subscriber that declares its peer stateful gets its window's
+    /// direction split. Probe 1 is lost on the way out — the reflector
+    /// never counts it — and probe 2's reply is lost: the gap between
+    /// probes 0 and 3 is one forward, one reverse.
+    #[tokio::test]
+    async fn the_session_shows_the_reflector_mode_and_the_direction_split() {
+        use std::time::{Duration, Instant};
+
+        use crate::stamp::loss::LossLedger;
+        use crate::stamp::session::LossPolicy;
+        let mut stamp = fresh_stamp();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let params = SessionParams {
+            reflector_stateful: true,
+            loss: LossPolicy {
+                peer_reflector_stateful: true,
+                window_buckets: 1,
+                ..LossPolicy::default()
+            },
+            ..SessionParams::default()
+        };
+        stamp.subscribe("isis".into(), key(), params, tx);
+        let t0 = Instant::now() - Duration::from_secs(40);
+        let mut l = LossLedger::new(t0);
+        for s in 0..4u32 {
+            l.sent(s, t0 + Duration::from_secs(s.into()));
+        }
+        l.reply(0, 0, t0 + Duration::from_millis(5));
+        l.reply(3, 2, t0 + Duration::from_millis(3_005));
+        l.advance(t0 + Duration::from_secs(33), 1000);
+        stamp.sessions.get_mut(&key()).unwrap().loss = l;
+
+        let detail = show_stamp_session(&stamp, no_args(), false).unwrap();
+        assert!(
+            detail.contains("Reflector: stateful, sequence 0"),
+            "{detail}"
+        );
+        assert!(
+            detail.contains("direction over 30s: forward 1, reverse 1, unresolved 0 of 4 probes"),
+            "{detail}"
+        );
+        let v: serde_json::Value =
+            serde_json::from_str(&show_stamp_session(&stamp, no_args(), true).unwrap()).unwrap();
+        let loss = &v[0]["loss"];
+        assert_eq!(
+            (&loss["forward"], &loss["reverse"], &loss["unresolved"]),
+            (&1.into(), &1.into(), &0.into()),
+            "{v}"
+        );
     }
 }

@@ -968,40 +968,44 @@ impl<V: OspfVersion> Ospf<V> {
         false
     }
 
-    /// Store a damped STAMP export on its link. Returns the ifindex
-    /// when the link's measured values changed (the version-specific
-    /// caller re-originates), `None` for stale/unknown sessions.
+    /// Store a STAMP update — the complete measured delay and loss this
+    /// IGP should advertise — on its link. Delay and loss are
+    /// independent: a `None` for either withdraws only its own
+    /// sub-TLVs. Returns the ifindex when the link's measured values
+    /// changed (the version-specific caller re-originates), `None` for
+    /// stale/unknown sessions.
     pub(crate) fn stamp_apply_metric_update(
         &mut self,
         event: crate::stamp::client::StampEvent,
     ) -> Option<u32> {
-        let crate::stamp::client::StampEvent::MetricUpdate { key, snapshot } = event;
+        let crate::stamp::client::StampEvent::MetricUpdate { key, delay, loss } = event;
         let link = self.links.get_mut(&key.ifindex)?;
         // Only the tracked session may write — a late event from a
         // just-unsubscribed key must not resurrect stale values.
         if link.stamp_session.map(|(k, _)| k) != Some(key) {
             return None;
         }
-        link.measured_te_metric = match snapshot {
-            Some(snap) => super::link::LinkTeMetric {
-                unidirectional_delay: Some(snap.avg),
-                min_delay: Some(snap.min),
-                max_delay: Some(snap.max),
-                delay_variation: Some(snap.variation),
-                loss: None,
-                // Per-value flags: the average drives its own
-                // sub-TLV, the two bounds jointly drive the Min/Max
-                // sub-TLV's single bit. `merged_over` drops whichever
-                // of them the operator pinned.
-                delay_anomalous: snap.anomaly.avg,
-                min_anomalous: snap.anomaly.min,
-                max_anomalous: snap.anomaly.max,
-            },
-            None => super::link::LinkTeMetric::default(),
+        // Delay and loss arrive together but independently (measured-loss
+        // design D9): each `None` withdraws only its own sub-TLVs.
+        link.measured_te_metric = super::link::LinkTeMetric {
+            unidirectional_delay: delay.map(|d| d.avg),
+            min_delay: delay.map(|d| d.min),
+            max_delay: delay.map(|d| d.max),
+            delay_variation: delay.map(|d| d.variation),
+            loss: loss.map(|l| l.value),
+            // Per-value flags: the average drives its own
+            // sub-TLV, the two bounds jointly drive the Min/Max
+            // sub-TLV's single bit. `merged_over` drops whichever
+            // of them the operator pinned.
+            delay_anomalous: delay.is_some_and(|d| d.anomaly.avg),
+            min_anomalous: delay.is_some_and(|d| d.anomaly.min),
+            max_anomalous: delay.is_some_and(|d| d.anomaly.max),
+            loss_anomalous: loss.is_some_and(|l| l.anomalous),
         };
         tracing::debug!(
             ifindex = key.ifindex,
-            ?snapshot,
+            ?delay,
+            ?loss,
             "{}: stamp metric update applied",
             V::PROTO,
         );

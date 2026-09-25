@@ -1364,7 +1364,7 @@ module config {
                    (0xFFFFFE) is ~50.33 %.";
               }
               container measurement {
-                ext:help "Measure this link's delay dynamically (STAMP, RFC 8762)";
+                ext:help "Measure this link's delay and loss dynamically (STAMP, RFC 8762)";
                 description
                   "Active performance measurement of this link. When
                    enabled, a STAMP Session-Sender (RFC 8762,
@@ -1428,6 +1428,129 @@ module config {
                      re-originate every export period. Values above
                      anomaly-threshold are clamped to it. Unset means no
                      hysteresis band: anomaly-threshold both sets and clears.";
+                }
+                leaf reflector {
+                  ext:help "How this router reflects the peer's probes (default stateless)";
+                  type enumeration {
+                    enum stateless;
+                    enum stateful;
+                  }
+                  description
+                    "stateless (the default, RFC 8762 section 4.3): replies copy the
+                     sender's sequence number. stateful: replies carry this router's own
+                     per-peer sequence counter, which lets a peer that declares
+                     'loss peer-reflector stateful' tell forward loss from reverse. On if
+                     any IGP measuring this link sets it.";
+                }
+                container loss {
+                  ext:help "Measured link loss (RFC 8570 / RFC 7471 section 4.4)";
+                  description
+                    "Round-trip probe loss, measured on the same STAMP session
+                     and advertised as the unidirectional link-loss sub-TLV. On
+                     by default wherever measurement is enabled. Loss runs on
+                     its own 30 s bucket clock, independent of damping-period. A
+                     static te-metric loss, when set, overrides the measured
+                     value.";
+                  leaf enabled {
+                    ext:help "Advertise measured loss (default true)";
+                    type boolean;
+                    description "Advertise measured loss. Default true.";
+                  }
+                  leaf interval {
+                    ext:help "Loss averaging and advertisement interval (s, multiple of 30)";
+                    type uint32 {
+                      range "30..3600";
+                    }
+                    units "seconds";
+                    description
+                      "Loss is averaged over the last interval, and re-advertised
+                       at most once per interval. Must be a multiple of 30.
+                       Default 120 s.";
+                  }
+                  leaf threshold {
+                    ext:help "Re-advertise on a change of this percent of the advertised value";
+                    type uint32 {
+                      range "0..100";
+                    }
+                    units "percent";
+                    description
+                      "A periodic re-advertisement needs a change of at least this
+                       percentage of the advertised value, and at least
+                       minimum-change. Default 10.";
+                  }
+                  leaf minimum-change {
+                    ext:help "Re-advertise only on a change of at least this many percentage points";
+                    type decimal64 {
+                      fraction-digits 6;
+                    }
+                    units "percent";
+                    description
+                      "The smallest absolute change, in percentage points, that is
+                       re-advertised. It also governs changes to and from zero.
+                       At the default probe rate one lost probe is 0.83 %, so a
+                       smaller value lets single-probe noise re-flood. Default 1.0.";
+                  }
+                  leaf accelerated-threshold {
+                    ext:help "Advertise at once when the latest 30 s differs by this many points";
+                    type decimal64 {
+                      fraction-digits 6;
+                    }
+                    units "percent";
+                    description
+                      "When the latest 30 s bucket alone differs from the
+                       advertised value by at least this many percentage points,
+                       advertise that value at once instead of waiting for the
+                       interval. Unset (the default) disables acceleration.";
+                  }
+                  leaf integrity {
+                    ext:help "Minimum percent of expected probes for a window to be trusted";
+                    type uint32 {
+                      range "1..100";
+                    }
+                    units "percent";
+                    description
+                      "A loss window is advertised only when at least this
+                       percentage of the probes the probe interval should have
+                       produced actually settled. Default 90.";
+                  }
+                  leaf anomaly-threshold {
+                    ext:help "Set the Anomalous bit at or above this loss (percent)";
+                    type decimal64 {
+                      fraction-digits 6;
+                    }
+                    units "percent";
+                    description
+                      "Loss, in percent, at or above which the link-loss sub-TLV's
+                       Anomalous (A) bit is set, evaluated on the value it is advertised
+                       with (RFC 8570 / RFC 7471 section 4.4). Unset (the default) never
+                       sets the bit.";
+                  }
+                  leaf reuse-threshold {
+                    ext:help "Clear the Anomalous bit after a loss interval below this loss (percent)";
+                    type decimal64 {
+                      fraction-digits 6;
+                    }
+                    units "percent";
+                    description
+                      "Loss, in percent, below which the Anomalous bit clears once the
+                       loss has stayed below it for a whole loss interval. Defaults to,
+                       and is capped at, anomaly-threshold.";
+                  }
+                  leaf peer-reflector {
+                    ext:help "How the peer reflects this router's probes (default stateless)";
+                    type enumeration {
+                      enum stateless;
+                      enum stateful;
+                    }
+                    description
+                      "Declares the peer's reflector mode; it cannot be detected.
+                       stateless (the default): the advertised loss is round-trip, an upper
+                       bound on forward loss. stateful: the peer reflects with its own
+                       sequence counter (a zebra-rs peer with 'measurement reflector
+                       stateful', a Juniper peer with stateful-sequence), losses are split
+                       by direction, and forward loss is advertised. Declaring a stateless
+                       peer stateful makes every loss read as reverse.";
+                  }
                 }
               }
             }
@@ -2495,7 +2618,7 @@ module config {
                    (0xFFFFFE) is ~50.33 %.";
               }
               container measurement {
-                ext:help "Measure this link's delay dynamically (STAMP, RFC 8762)";
+                ext:help "Measure this link's delay and loss dynamically (STAMP, RFC 8762)";
                 description
                   "Active performance measurement of this link. When
                    enabled, a STAMP Session-Sender (RFC 8762,
@@ -2559,6 +2682,129 @@ module config {
                      re-originate every export period. Values above
                      anomaly-threshold are clamped to it. Unset means no
                      hysteresis band: anomaly-threshold both sets and clears.";
+                }
+                leaf reflector {
+                  ext:help "How this router reflects the peer's probes (default stateless)";
+                  type enumeration {
+                    enum stateless;
+                    enum stateful;
+                  }
+                  description
+                    "stateless (the default, RFC 8762 section 4.3): replies copy the
+                     sender's sequence number. stateful: replies carry this router's own
+                     per-peer sequence counter, which lets a peer that declares
+                     'loss peer-reflector stateful' tell forward loss from reverse. On if
+                     any IGP measuring this link sets it.";
+                }
+                container loss {
+                  ext:help "Measured link loss (RFC 8570 / RFC 7471 section 4.4)";
+                  description
+                    "Round-trip probe loss, measured on the same STAMP session
+                     and advertised as the unidirectional link-loss sub-TLV. On
+                     by default wherever measurement is enabled. Loss runs on
+                     its own 30 s bucket clock, independent of damping-period. A
+                     static te-metric loss, when set, overrides the measured
+                     value.";
+                  leaf enabled {
+                    ext:help "Advertise measured loss (default true)";
+                    type boolean;
+                    description "Advertise measured loss. Default true.";
+                  }
+                  leaf interval {
+                    ext:help "Loss averaging and advertisement interval (s, multiple of 30)";
+                    type uint32 {
+                      range "30..3600";
+                    }
+                    units "seconds";
+                    description
+                      "Loss is averaged over the last interval, and re-advertised
+                       at most once per interval. Must be a multiple of 30.
+                       Default 120 s.";
+                  }
+                  leaf threshold {
+                    ext:help "Re-advertise on a change of this percent of the advertised value";
+                    type uint32 {
+                      range "0..100";
+                    }
+                    units "percent";
+                    description
+                      "A periodic re-advertisement needs a change of at least this
+                       percentage of the advertised value, and at least
+                       minimum-change. Default 10.";
+                  }
+                  leaf minimum-change {
+                    ext:help "Re-advertise only on a change of at least this many percentage points";
+                    type decimal64 {
+                      fraction-digits 6;
+                    }
+                    units "percent";
+                    description
+                      "The smallest absolute change, in percentage points, that is
+                       re-advertised. It also governs changes to and from zero.
+                       At the default probe rate one lost probe is 0.83 %, so a
+                       smaller value lets single-probe noise re-flood. Default 1.0.";
+                  }
+                  leaf accelerated-threshold {
+                    ext:help "Advertise at once when the latest 30 s differs by this many points";
+                    type decimal64 {
+                      fraction-digits 6;
+                    }
+                    units "percent";
+                    description
+                      "When the latest 30 s bucket alone differs from the
+                       advertised value by at least this many percentage points,
+                       advertise that value at once instead of waiting for the
+                       interval. Unset (the default) disables acceleration.";
+                  }
+                  leaf integrity {
+                    ext:help "Minimum percent of expected probes for a window to be trusted";
+                    type uint32 {
+                      range "1..100";
+                    }
+                    units "percent";
+                    description
+                      "A loss window is advertised only when at least this
+                       percentage of the probes the probe interval should have
+                       produced actually settled. Default 90.";
+                  }
+                  leaf anomaly-threshold {
+                    ext:help "Set the Anomalous bit at or above this loss (percent)";
+                    type decimal64 {
+                      fraction-digits 6;
+                    }
+                    units "percent";
+                    description
+                      "Loss, in percent, at or above which the link-loss sub-TLV's
+                       Anomalous (A) bit is set, evaluated on the value it is advertised
+                       with (RFC 8570 / RFC 7471 section 4.4). Unset (the default) never
+                       sets the bit.";
+                  }
+                  leaf reuse-threshold {
+                    ext:help "Clear the Anomalous bit after a loss interval below this loss (percent)";
+                    type decimal64 {
+                      fraction-digits 6;
+                    }
+                    units "percent";
+                    description
+                      "Loss, in percent, below which the Anomalous bit clears once the
+                       loss has stayed below it for a whole loss interval. Defaults to,
+                       and is capped at, anomaly-threshold.";
+                  }
+                  leaf peer-reflector {
+                    ext:help "How the peer reflects this router's probes (default stateless)";
+                    type enumeration {
+                      enum stateless;
+                      enum stateful;
+                    }
+                    description
+                      "Declares the peer's reflector mode; it cannot be detected.
+                       stateless (the default): the advertised loss is round-trip, an upper
+                       bound on forward loss. stateful: the peer reflects with its own
+                       sequence counter (a zebra-rs peer with 'measurement reflector
+                       stateful', a Juniper peer with stateful-sequence), losses are split
+                       by direction, and forward loss is advertised. Declaring a stateless
+                       peer stateful makes every loss read as reverse.";
+                  }
                 }
               }
             }
@@ -4105,7 +4351,7 @@ module config {
                  (0xFFFFFE) is ~50.33 %.";
             }
             container measurement {
-              ext:help "Measure this link's delay dynamically (STAMP, RFC 8762)";
+              ext:help "Measure this link's delay and loss dynamically (STAMP, RFC 8762)";
               description
                 "Active performance measurement of this link. When
                  enabled, a STAMP Session-Sender (RFC 8762,
@@ -4169,6 +4415,129 @@ module config {
                    re-originate every export period. Values above
                    anomaly-threshold are clamped to it. Unset means no
                    hysteresis band: anomaly-threshold both sets and clears.";
+              }
+              leaf reflector {
+                ext:help "How this router reflects the peer's probes (default stateless)";
+                type enumeration {
+                  enum stateless;
+                  enum stateful;
+                }
+                description
+                  "stateless (the default, RFC 8762 section 4.3): replies copy the
+                   sender's sequence number. stateful: replies carry this router's own
+                   per-peer sequence counter, which lets a peer that declares
+                   'loss peer-reflector stateful' tell forward loss from reverse. On if
+                   any IGP measuring this link sets it.";
+              }
+              container loss {
+                ext:help "Measured link loss (RFC 8570 / RFC 7471 section 4.4)";
+                description
+                  "Round-trip probe loss, measured on the same STAMP session
+                   and advertised as the unidirectional link-loss sub-TLV. On
+                   by default wherever measurement is enabled. Loss runs on
+                   its own 30 s bucket clock, independent of damping-period. A
+                   static te-metric loss, when set, overrides the measured
+                   value.";
+                leaf enabled {
+                  ext:help "Advertise measured loss (default true)";
+                  type boolean;
+                  description "Advertise measured loss. Default true.";
+                }
+                leaf interval {
+                  ext:help "Loss averaging and advertisement interval (s, multiple of 30)";
+                  type uint32 {
+                    range "30..3600";
+                  }
+                  units "seconds";
+                  description
+                    "Loss is averaged over the last interval, and re-advertised
+                     at most once per interval. Must be a multiple of 30.
+                     Default 120 s.";
+                }
+                leaf threshold {
+                  ext:help "Re-advertise on a change of this percent of the advertised value";
+                  type uint32 {
+                    range "0..100";
+                  }
+                  units "percent";
+                  description
+                    "A periodic re-advertisement needs a change of at least this
+                     percentage of the advertised value, and at least
+                     minimum-change. Default 10.";
+                }
+                leaf minimum-change {
+                  ext:help "Re-advertise only on a change of at least this many percentage points";
+                  type decimal64 {
+                    fraction-digits 6;
+                  }
+                  units "percent";
+                  description
+                    "The smallest absolute change, in percentage points, that is
+                     re-advertised. It also governs changes to and from zero.
+                     At the default probe rate one lost probe is 0.83 %, so a
+                     smaller value lets single-probe noise re-flood. Default 1.0.";
+                }
+                leaf accelerated-threshold {
+                  ext:help "Advertise at once when the latest 30 s differs by this many points";
+                  type decimal64 {
+                    fraction-digits 6;
+                  }
+                  units "percent";
+                  description
+                    "When the latest 30 s bucket alone differs from the
+                     advertised value by at least this many percentage points,
+                     advertise that value at once instead of waiting for the
+                     interval. Unset (the default) disables acceleration.";
+                }
+                leaf integrity {
+                  ext:help "Minimum percent of expected probes for a window to be trusted";
+                  type uint32 {
+                    range "1..100";
+                  }
+                  units "percent";
+                  description
+                    "A loss window is advertised only when at least this
+                     percentage of the probes the probe interval should have
+                     produced actually settled. Default 90.";
+                }
+                leaf anomaly-threshold {
+                  ext:help "Set the Anomalous bit at or above this loss (percent)";
+                  type decimal64 {
+                    fraction-digits 6;
+                  }
+                  units "percent";
+                  description
+                    "Loss, in percent, at or above which the link-loss sub-TLV's
+                     Anomalous (A) bit is set, evaluated on the value it is advertised
+                     with (RFC 8570 / RFC 7471 section 4.4). Unset (the default) never
+                     sets the bit.";
+                }
+                leaf reuse-threshold {
+                  ext:help "Clear the Anomalous bit after a loss interval below this loss (percent)";
+                  type decimal64 {
+                    fraction-digits 6;
+                  }
+                  units "percent";
+                  description
+                    "Loss, in percent, below which the Anomalous bit clears once the
+                     loss has stayed below it for a whole loss interval. Defaults to,
+                     and is capped at, anomaly-threshold.";
+                }
+                leaf peer-reflector {
+                  ext:help "How the peer reflects this router's probes (default stateless)";
+                  type enumeration {
+                    enum stateless;
+                    enum stateful;
+                  }
+                  description
+                    "Declares the peer's reflector mode; it cannot be detected.
+                     stateless (the default): the advertised loss is round-trip, an upper
+                     bound on forward loss. stateful: the peer reflects with its own
+                     sequence counter (a zebra-rs peer with 'measurement reflector
+                     stateful', a Juniper peer with stateful-sequence), losses are split
+                     by direction, and forward loss is advertised. Declaring a stateless
+                     peer stateful makes every loss read as reverse.";
+                }
               }
             }
           }

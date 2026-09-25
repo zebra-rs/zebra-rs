@@ -299,6 +299,46 @@ impl Ospf<Ospfv3> {
                 config_ospfv3_interface_te_measurement_reuse_threshold,
             ),
             (
+                "/area/interface/te-metric/measurement/loss/enabled",
+                config_ospfv3_interface_te_measurement_loss_enabled,
+            ),
+            (
+                "/area/interface/te-metric/measurement/loss/interval",
+                config_ospfv3_interface_te_measurement_loss_interval,
+            ),
+            (
+                "/area/interface/te-metric/measurement/loss/threshold",
+                config_ospfv3_interface_te_measurement_loss_threshold,
+            ),
+            (
+                "/area/interface/te-metric/measurement/loss/minimum-change",
+                config_ospfv3_interface_te_measurement_loss_minimum_change,
+            ),
+            (
+                "/area/interface/te-metric/measurement/loss/accelerated-threshold",
+                config_ospfv3_interface_te_measurement_loss_accelerated_threshold,
+            ),
+            (
+                "/area/interface/te-metric/measurement/loss/integrity",
+                config_ospfv3_interface_te_measurement_loss_integrity,
+            ),
+            (
+                "/area/interface/te-metric/measurement/loss/anomaly-threshold",
+                config_ospfv3_interface_te_measurement_loss_anomaly_threshold,
+            ),
+            (
+                "/area/interface/te-metric/measurement/loss/reuse-threshold",
+                config_ospfv3_interface_te_measurement_loss_reuse_threshold,
+            ),
+            (
+                "/area/interface/te-metric/measurement/loss/peer-reflector",
+                config_ospfv3_interface_te_measurement_loss_peer_reflector,
+            ),
+            (
+                "/area/interface/te-metric/measurement/reflector",
+                config_ospfv3_interface_te_measurement_reflector,
+            ),
+            (
                 "/area/interface/instance-id",
                 config_ospfv3_interface_instance_id,
             ),
@@ -1601,6 +1641,105 @@ fn config_ospfv3_interface_te_measurement_reuse_threshold(
         let value = args.u32()?;
         m.reuse_threshold_us = op.is_set().then_some(value);
         Some(())
+    })
+}
+
+// `te-metric/measurement/loss/*` — measured-loss policy (design D10).
+fn config_ospfv3_interface_te_measurement_loss_enabled(
+    ospf: &mut Ospf<Ospfv3>,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospfv3_interface_te_measurement(ospf, args, |m, args| {
+        m.set_loss_enabled(args, op.is_set())
+    })
+}
+
+fn config_ospfv3_interface_te_measurement_loss_interval(
+    ospf: &mut Ospf<Ospfv3>,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospfv3_interface_te_measurement(ospf, args, |m, args| {
+        m.set_loss_interval(args, op.is_set())
+    })
+}
+
+fn config_ospfv3_interface_te_measurement_loss_threshold(
+    ospf: &mut Ospf<Ospfv3>,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospfv3_interface_te_measurement(ospf, args, |m, args| {
+        m.set_loss_threshold(args, op.is_set())
+    })
+}
+
+fn config_ospfv3_interface_te_measurement_loss_minimum_change(
+    ospf: &mut Ospf<Ospfv3>,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospfv3_interface_te_measurement(ospf, args, |m, args| {
+        m.set_loss_minimum_change(args, op.is_set())
+    })
+}
+
+fn config_ospfv3_interface_te_measurement_loss_accelerated_threshold(
+    ospf: &mut Ospf<Ospfv3>,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospfv3_interface_te_measurement(ospf, args, |m, args| {
+        m.set_loss_accelerated(args, op.is_set())
+    })
+}
+
+fn config_ospfv3_interface_te_measurement_loss_integrity(
+    ospf: &mut Ospf<Ospfv3>,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospfv3_interface_te_measurement(ospf, args, |m, args| {
+        m.set_loss_integrity(args, op.is_set())
+    })
+}
+
+fn config_ospfv3_interface_te_measurement_loss_anomaly_threshold(
+    ospf: &mut Ospf<Ospfv3>,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospfv3_interface_te_measurement(ospf, args, |m, args| {
+        m.set_loss_anomaly(args, op.is_set())
+    })
+}
+
+fn config_ospfv3_interface_te_measurement_loss_reuse_threshold(
+    ospf: &mut Ospf<Ospfv3>,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospfv3_interface_te_measurement(ospf, args, |m, args| {
+        m.set_loss_reuse(args, op.is_set())
+    })
+}
+
+fn config_ospfv3_interface_te_measurement_reflector(
+    ospf: &mut Ospf<Ospfv3>,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospfv3_interface_te_measurement(ospf, args, |m, args| m.set_reflector(args, op.is_set()))
+}
+
+fn config_ospfv3_interface_te_measurement_loss_peer_reflector(
+    ospf: &mut Ospf<Ospfv3>,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospfv3_interface_te_measurement(ospf, args, |m, args| {
+        m.set_loss_peer_reflector(args, op.is_set())
     })
 }
 
