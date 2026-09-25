@@ -201,10 +201,11 @@ How it is measured:
   otherwise. A reply that arrives later still counts as lost. A reply
   whose timestamps are rejected as a delay sample still counts as
   received — a clock fault is not packet loss.
-- **Round-trip.** The implicit reflector copies the sender's sequence
-  number, so a lost probe and a lost reply look the same, and the
-  advertised value is round-trip loss — an upper bound on the forward
-  loss the sub-TLV describes.
+- **Round-trip by default.** A stateless reflector copies the sender's
+  sequence number, so a lost probe and a lost reply look the same, and
+  the advertised value is round-trip loss — an upper bound on the
+  forward loss the sub-TLV describes. Against a stateful reflector,
+  forward loss can be advertised instead (see *Direction* below).
 - **Averaged over the loss interval** (default 120 s), counted in
   30-second buckets on the session's own clock, independent of
   `damping-period`. The smallest step the value can take is one probe:
@@ -214,6 +215,8 @@ How it is measured:
 te-metric {
   measurement {
     enabled true;
+    reflector stateful;             # optional: reflect with our own sequence
+                                    #   counter (default stateless)
     loss {
       enabled true;                 # default true
       interval 120;                 # seconds, a multiple of 30 (30..3600)
@@ -224,6 +227,8 @@ te-metric {
       integrity 90;                 # % of expected probes a window needs
       anomaly-threshold 5.0;        # optional: set the A bit at or above this %
       reuse-threshold 1.0;          # …and clear it after an interval below this %
+      peer-reflector stateful;      # optional: the peer reflects statefully, so
+                                    #   advertise forward loss (default stateless)
     }
   }
 }
@@ -277,6 +282,45 @@ When a value is advertised:
   comes back after silence has to cross the bound again.
 - **A static `te-metric loss` always wins** over the measured value, and
   is always advertised with the A bit clear.
+
+#### Direction: forward loss against a stateful reflector
+
+By default the advertised loss is round-trip, because a stateless
+reflector (RFC 8762 §4.3) copies the sender's sequence number: a lost
+probe and a lost reply look the same. A *stateful* reflector puts its
+own per-peer counter in every reply instead, and that tells the two
+apart. Between two replies that did come back, the counter says how many
+of the probes in between reached the reflector: those were lost on the
+way back, and the rest on the way out.
+
+Two zebra-rs routers get forward loss by setting both ends:
+
+- `measurement reflector stateful` on the router that reflects: it
+  answers this link's peer with its own counter. It is on if any IGP
+  measuring the link sets it, so a second IGP left at the default does
+  not turn it off.
+- `loss peer-reflector stateful` on the router that measures: the peer
+  reflects statefully, so advertise forward loss. A Juniper peer with
+  `stateful-sequence` counts as stateful.
+
+The peer's mode is **declared, not detected**: a stateless reflector with
+forward loss and a stateful one with reverse loss send exactly the same
+replies. Declaring a stateless peer stateful makes every loss read as
+reverse, and the advertised forward loss as zero. Changing
+`peer-reflector` starts that IGP's loss advertisement over: the new value
+goes out at once, not filtered against a value of the other kind.
+
+Losses are split once each gap of consecutive lost probes has closed,
+which happens when the next reply arrives. Until then they are
+*unresolved* and counted as forward: the value errs high, never low. A
+gap the counter cannot explain stays unresolved: the peer restarted, its
+counter moved backwards, or probes were reordered across the gap. `show
+stamp session` gives each such IGP's split:
+
+```
+                loss: advertised 0.000000% forward (interval 30s, threshold 10%, minimum-change 0.999999%, integrity 90%, peer-reflector stateful)
+                  direction over 30s: forward 0, reverse 30, unresolved 0 of 300 probes
+```
 
 The loss settings belong to each IGP. IS-IS and OSPF measuring the same
 link share one session and one set of buckets, but each applies its own

@@ -151,6 +151,37 @@ Feature: Measured link loss advertised by IS-IS and OSPF
     Then show command "show stamp session" in namespace "sl1" should contain "loss: advertised 0." within 150 seconds
     And show command "show isis database detail" in namespace "sl2" should eventually show no link loss between 1.1 and 100.0 percent
 
+  Scenario: Against a stateful reflector, loss is split by direction
+    Given the test topology exists
+    # Design D3. Every 10th reply arriving at sl1 is dropped: 10 % loss
+    # on sl1's return path alone. With the default stateless reflector
+    # that is 10 % round-trip, and both IGPs advertise it.
+    When I drop every 10th STAMP reply arriving in namespace "sl1"
+    And I wait 30 seconds
+    Then show command "show isis database detail" in namespace "sl2" should eventually show link loss between 9.0 and 11.0 percent
+    And show command "show ospf database detail" in namespace "sl2" should eventually show link loss between 9.0 and 11.0 percent
+    # sl2 reflects statefully, and IS-IS on sl1 declares it. IS-IS now
+    # advertises forward loss — about none — while OSPF, which declared
+    # nothing, keeps the round-trip 10 %.
+    When I apply command "set router isis interface sl2-sl1 te-metric measurement reflector stateful" in namespace "sl2"
+    And I apply command "set router isis interface sl1-sl2 te-metric measurement loss peer-reflector stateful" in namespace "sl1"
+    Then show command "show stamp session" in namespace "sl2" should eventually contain "Reflector: stateful"
+    And show command "show stamp session" in namespace "sl1" should contain "advertised 0.000000% forward" within 120 seconds
+    And show command "show isis database detail" in namespace "sl2" should eventually show no link loss between 1.1 and 100.0 percent
+    And show command "show ospf database detail" in namespace "sl2" should eventually show link loss between 9.0 and 11.0 percent
+    # Now the loss moves to the forward path. This is what proves the
+    # reflector stateful: against a stateless one, a forward loss also
+    # reads as reverse, and IS-IS's forward value would stay at zero.
+    When I stop dropping STAMP probes in namespace "sl1"
+    And I drop every 10th STAMP probe arriving in namespace "sl2"
+    And I wait 30 seconds
+    Then show command "show isis database detail" in namespace "sl2" should eventually show link loss between 9.0 and 11.0 percent
+    And show command "show stamp session" in namespace "sl1" should contain "direction over 30s: forward " within 5 seconds
+    When I stop dropping STAMP probes in namespace "sl2"
+    And I apply command "delete router isis interface sl2-sl1 te-metric measurement reflector" in namespace "sl2"
+    And I apply command "delete router isis interface sl1-sl2 te-metric measurement loss peer-reflector" in namespace "sl1"
+    Then show command "show stamp session" in namespace "sl2" should eventually contain "Reflector: stateless"
+
   Scenario: Turning loss off in one IGP leaves the other advertising it
     Given the test topology exists
     # Design D10: `loss enabled` belongs to each IGP, not to the shared

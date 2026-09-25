@@ -261,6 +261,39 @@ loss indistinguishable, because the sender only sees that a reply is missing.
     directions by up to the reordering depth. It never changes the round-trip total. Juniper
     documents the same limit: its directional drops are "inferred minimum values … not
     guaranteed to be exact".
+- **Implementation (PR 4).**
+  - Gaps are formed as settled probes retire from the pending queue, which happens in send
+    order and only once the head of the queue has settled. That is exactly "sender-sequence
+    order, closed only when every member has settled". A reply that is merely reordered
+    never forms a gap, and at a loss tick every gap of a bucket that just became final has
+    already closed.
+  - A gap spread over several buckets is split in proportion. Each bucket gets
+    `floor(d·seen/g)` minus what earlier buckets took, so the shares add up to `d` exactly;
+    only the gap-level split is actually known.
+  - A break in the sender's sequence resets the open gap to unresolved. That is defensive:
+    only successful sends are numbered.
+  - One race remains: a reply read in time but processed after the sweep that settled its
+    probe, while that probe's gap is already closed or still open. The reply proves the probe
+    reached the reflector, which is what the reverse share counts. So `unlose` takes it from
+    the bucket's reverse count first, and a classification is clamped to what its bucket has
+    left. `forward + reverse ≤ lost` always holds, and the race costs at most one probe's
+    attribution.
+  - The reflector's counter runs for every probe received from the peer, whatever the mode;
+    only its use in the reply depends on the mode. `build_reply` stays pure: the caller
+    supplies the number.
+  - **Changing a subscriber's `peer-reflector` starts its advertisement over** (PR 4
+    review). Round-trip and forward loss are different quantities, and the old value is no
+    baseline for the new one. Kept as one, a 0.833 % round-trip value on a link whose loss is
+    all reverse stayed advertised as forward loss indefinitely, because the correction to
+    0 % was under the 1.0-point minimum change. The subscriber's advertised value, cadence
+    and A-bit state are reset, and an event goes out at once with whatever the new view gives.
+    That event goes out even when the new view gives nothing, so the IGP withdraws the old
+    value instead of keeping it.
+  - **An open gap's history is bounded by the ring** (PR 4 review). A silent return path
+    with the adjacency up keeps one gap open indefinitely. The gap keeps per-bucket member
+    counts only for buckets still in the ring. Members in buckets that have rolled out are
+    folded into one count, which still sets the gap's size and each kept bucket's
+    proportional share.
 - **The mode is configured, not detected.** A stateless reflector on a link with forward loss
   and a stateful reflector on a link with reverse loss produce *identical* reply streams: in
   both, the sequence numbers stay equal. No amount of observation tells them apart, and

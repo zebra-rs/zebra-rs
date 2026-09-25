@@ -362,17 +362,32 @@ impl Stamp {
         // Re-subscribe (a config edit) keeps the accumulated
         // hysteresis but adopts the new bounds; a first subscribe
         // starts clean.
+        let mut reseed = false;
         match subs.get_mut(&client) {
             Some(existing) => {
                 existing.notifier = notifier;
                 existing.thresholds = params.anomaly;
+                // A new `peer-reflector` changes what the loss value *is*
+                // — round-trip or forward (design D3). The old value is
+                // no baseline for the new one: under the filter, a 0.83 %
+                // round-trip value could stay advertised as forward loss
+                // indefinitely. Start the advertisement over, and send
+                // whatever the new view gives, even nothing.
+                if existing.loss_policy.peer_reflector_stateful
+                    != params.loss.peer_reflector_stateful
+                {
+                    existing.advertised_loss = None;
+                    existing.loss_advertised_at = None;
+                    existing.loss_anomaly.reset();
+                    reseed = true;
+                }
                 existing.loss_policy = params.loss;
+                existing.reflector_stateful = params.reflector_stateful;
             }
             None => {
-                subs.insert(
-                    client.clone(),
-                    Subscriber::new(notifier, params.anomaly, params.loss),
-                );
+                let mut sub = Subscriber::new(notifier, params.anomaly, params.loss);
+                sub.reflector_stateful = params.reflector_stateful;
+                subs.insert(client.clone(), sub);
             }
         }
         // Seed the subscriber's complete state (measured-loss design D9):
@@ -388,7 +403,7 @@ impl Stamp {
             return;
         };
         let session = self.sessions.get(&key);
-        let mut changed = false;
+        let mut changed = reseed;
         let mirrored = session.and_then(|s| s.last_snapshot);
         if mirrored.is_some() {
             let snapshot = sub.apply(mirrored);
@@ -635,7 +650,7 @@ impl Stamp {
         // design D2): the reply came back, so its probe was not lost —
         // whatever its timestamps say. A timestamp fault is a delay
         // problem, rejected below as before.
-        session.loss.reply(reply.sender_seq, rx_at);
+        session.loss.reply(reply.sender_seq, reply.seq, rx_at);
         // delay = ((T4−T1) − (T3−T2)) / 2. T1/T4 are this node's
         // clock, T2/T3 the reflector's — each difference is
         // same-clock, so the inter-node offset cancels.
@@ -781,7 +796,21 @@ impl Stamp {
             tracing::debug!(?src, "stamp: probe from unregistered source dropped");
             return;
         };
-        let reply = build_reply(&probe, rx_ts, ttl, len);
+        // Stateful while any subscriber of this session asks (design D3,
+        // D10); the counter itself runs either way.
+        let stateful = self
+            .subscribers
+            .get(&session_key)
+            .is_some_and(|subs| subs.values().any(|s| s.reflector_stateful));
+        let seq = match self.sessions.get_mut(&session_key) {
+            Some(session) => {
+                let counter = session.reflector_seq;
+                session.reflector_seq = counter.wrapping_add(1);
+                if stateful { counter } else { probe.seq }
+            }
+            None => probe.seq,
+        };
+        let reply = build_reply(&probe, seq, rx_ts, ttl, len);
         let req = ReflectRequest {
             reply,
             dst: src,
@@ -1170,7 +1199,7 @@ mod tests {
             s.tx_failed_count
         );
         assert_eq!(
-            s.loss.reply(0, std::time::Instant::now()),
+            s.loss.reply(0, 0, std::time::Instant::now()),
             ReplyFate::Received
         );
         s.loss = LossLedger::new(std::time::Instant::now() - Duration::from_secs(64));
@@ -1235,7 +1264,7 @@ mod tests {
                 let sent = epoch + Duration::from_secs(b as u64 * 30 + u64::from(i));
                 l.sent(seq, sent);
                 if i >= lost {
-                    l.reply(seq, sent + Duration::from_millis(5));
+                    l.reply(seq, seq, sent + Duration::from_millis(5));
                 }
                 seq += 1;
             }
@@ -1501,6 +1530,245 @@ mod tests {
             advertised_at >= before_send,
             "cooldown was backdated by {:?} before the advertisement",
             before_send.saturating_duration_since(advertised_at)
+        );
+    }
+
+    /// Design D3/D10: this router reflects statefully while **any**
+    /// subscriber of the session asks. IS-IS asking is enough; OSPF
+    /// re-subscribing with the default does not turn it off; once IS-IS
+    /// stops asking, replies copy the sender's sequence number again.
+    /// The counter runs throughout, one per probe received.
+    #[tokio::test]
+    async fn the_reflector_is_stateful_while_any_subscriber_asks() {
+        let mut stamp = fresh_stamp();
+        let key = loopback_key(2);
+        let (reflect_tx, mut reflected) = mpsc::unbounded_channel();
+        stamp.reflect_tx = reflect_tx;
+        let stateful = SessionParams {
+            reflector_stateful: true,
+            ..SessionParams::default()
+        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+        stamp.subscribe("isis".into(), key, SessionParams::default(), tx.clone());
+        let peer = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 2), 5000));
+        let mut reflect = |stamp: &mut Stamp, seq: u32| {
+            let probe = SenderPacket {
+                seq,
+                ..SenderPacket::default()
+            };
+            stamp.on_probe_recv(
+                probe,
+                peer,
+                Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+                0,
+                255,
+                StampTimestamp::default(),
+                false,
+                stamp_packet::BASE_LEN,
+            );
+            let r = reflected.try_recv().expect("reflected").reply;
+            assert_eq!(r.sender_seq, seq, "the sender's number is always copied");
+            r.seq
+        };
+        assert_eq!(reflect(&mut stamp, 100), 100, "stateless by default");
+        stamp.subscribe("isis".into(), key, stateful, tx.clone());
+        assert_eq!(reflect(&mut stamp, 101), 1, "the counter, not a copy");
+        stamp.subscribe("ospf".into(), key, SessionParams::default(), tx.clone());
+        assert_eq!(reflect(&mut stamp, 102), 2, "OSPF's default does not win");
+        stamp.subscribe("isis".into(), key, SessionParams::default(), tx);
+        assert_eq!(reflect(&mut stamp, 103), 103, "nobody asks any more");
+        assert_eq!(stamp.sessions.get(&key).unwrap().reflector_seq, 4);
+    }
+
+    /// Design D3/D10: `peer-reflector` is each IGP's own view of the
+    /// shared buckets. Against a reflector that copies sequence numbers,
+    /// every anchored loss classifies reverse, so IS-IS declaring the
+    /// peer stateful advertises only the unanchored ones — the first
+    /// bucket's opening losses, before any reply — while OSPF advertises
+    /// round-trip.
+    #[tokio::test]
+    async fn peer_reflector_is_per_subscriber() {
+        use crate::stamp::loss::encode_loss;
+        let mut stamp = fresh_stamp();
+        let key = loopback_key(2);
+        let forward = SessionParams {
+            loss: crate::stamp::session::LossPolicy {
+                peer_reflector_stateful: true,
+                ..Default::default()
+            },
+            ..SessionParams::default()
+        };
+        let (isis_tx, mut isis_rx) = mpsc::unbounded_channel();
+        let (ospf_tx, mut ospf_rx) = mpsc::unbounded_channel();
+        stamp.subscribe("isis".into(), key, forward, isis_tx);
+        stamp.subscribe("ospf".into(), key, SessionParams::default(), ospf_tx);
+        fill_loss(&mut stamp, key, &[(30, 3); 4]);
+        stamp.on_loss_tick(key);
+        assert_eq!(
+            drain(&mut isis_rx).iter().map(loss_of).collect::<Vec<_>>(),
+            [Some(encode_loss(3, 120))]
+        );
+        assert_eq!(
+            drain(&mut ospf_rx).iter().map(loss_of).collect::<Vec<_>>(),
+            [Some(encode_loss(12, 120))]
+        );
+    }
+
+    /// Retained PR 4 review probe: switching the advertised direction
+    /// must replace the old view even when the numeric change is below
+    /// the noise filter. One reverse loss is 0.833 % round-trip and 0 %
+    /// forward; keeping the old value would mislabel it indefinitely.
+    #[tokio::test]
+    async fn changing_peer_mode_replaces_the_previous_loss_view() {
+        use crate::stamp::loss::encode_loss;
+        let mut stamp = fresh_stamp();
+        let key = loopback_key(2);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        stamp.subscribe("isis".into(), key, SessionParams::default(), tx.clone());
+        // Copied reflector numbers also model a stateful reflector
+        // which received every probe, with one reply lost on return.
+        fill_loss(&mut stamp, key, &[(30, 0), (30, 1), (30, 0), (30, 0)]);
+        stamp.on_loss_tick(key);
+        assert_eq!(
+            drain(&mut rx).iter().map(loss_of).collect::<Vec<_>>(),
+            [Some(encode_loss(1, 120))]
+        );
+        let forward = SessionParams {
+            loss: crate::stamp::session::LossPolicy {
+                peer_reflector_stateful: true,
+                ..Default::default()
+            },
+            ..SessionParams::default()
+        };
+        stamp.subscribe("isis".into(), key, forward, tx);
+        assert_eq!(
+            drain(&mut rx).iter().map(loss_of).collect::<Vec<_>>(),
+            [Some(0)],
+            "a new direction must not inherit the old view's filtered value"
+        );
+    }
+
+    /// The other way round, and when the new view has nothing to say
+    /// yet. Back from forward to round-trip, the 0.833 % comes back at
+    /// once. And a change of direction together with a longer interval
+    /// than the session has history for must withdraw the old view — not
+    /// leave it standing until the new window fills.
+    #[tokio::test]
+    async fn a_direction_change_withdraws_the_old_view_when_the_new_has_none() {
+        use crate::stamp::loss::encode_loss;
+        use crate::stamp::session::LossPolicy;
+        let mut stamp = fresh_stamp();
+        let key = loopback_key(2);
+        let params = |forward: bool, window_buckets: usize| SessionParams {
+            loss: LossPolicy {
+                peer_reflector_stateful: forward,
+                window_buckets,
+                ..Default::default()
+            },
+            ..SessionParams::default()
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        stamp.subscribe("isis".into(), key, params(true, 1), tx.clone());
+        fill_loss(&mut stamp, key, &[(30, 0), (30, 1)]);
+        stamp.on_loss_tick(key);
+        assert_eq!(
+            drain(&mut rx).iter().map(loss_of).collect::<Vec<_>>(),
+            [Some(0)]
+        );
+
+        stamp.subscribe("isis".into(), key, params(false, 1), tx.clone());
+        assert_eq!(
+            drain(&mut rx).iter().map(loss_of).collect::<Vec<_>>(),
+            [Some(encode_loss(1, 30))]
+        );
+
+        // Two buckets of history, a four-bucket window: nothing trusted.
+        stamp.subscribe("isis".into(), key, params(true, 4), tx);
+        assert_eq!(
+            drain(&mut rx).iter().map(loss_of).collect::<Vec<_>>(),
+            [None]
+        );
+    }
+
+    /// A direction change starts the A bit over too: 10 % round-trip set
+    /// it against a 5 % bound, and the forward view — 0 %, all of it
+    /// reflected — must not inherit it while a recovery wait runs.
+    #[tokio::test]
+    async fn a_direction_change_starts_the_a_bit_over() {
+        use crate::stamp::loss::encode_loss;
+        use crate::stamp::session::LossPolicy;
+        let mut stamp = fresh_stamp();
+        let key = loopback_key(2);
+        let params = |forward: bool| SessionParams {
+            loss: LossPolicy {
+                peer_reflector_stateful: forward,
+                window_buckets: 1,
+                anomaly_micro_pct: Some(5_000_000),
+                reuse_micro_pct: Some(1_000_000),
+                ..Default::default()
+            },
+            ..SessionParams::default()
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        stamp.subscribe("isis".into(), key, params(false), tx.clone());
+        fill_loss(&mut stamp, key, &[(30, 0), (30, 3)]);
+        stamp.on_loss_tick(key);
+        let with_a = |rx: &mut mpsc::UnboundedReceiver<StampEvent>| {
+            drain(rx)
+                .into_iter()
+                .map(|StampEvent::MetricUpdate { loss, .. }| loss.map(|l| (l.value, l.anomalous)))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(with_a(&mut rx), [Some((encode_loss(3, 30), true))]);
+        stamp.subscribe("isis".into(), key, params(true), tx);
+        assert_eq!(with_a(&mut rx), [Some((0, false))]);
+    }
+
+    /// The reflector's own sequence number reaches the ledger from the
+    /// reply itself. Against a stateful peer — counter 0 to 28 over 29
+    /// replies — probe 10 never reached it, so the gap is forward loss.
+    /// Read from the copied sender number instead, the gap would look
+    /// reflected and the loss would vanish from the forward view.
+    #[tokio::test]
+    async fn a_reply_carries_the_reflector_sequence_to_the_ledger() {
+        use crate::stamp::loss::{LossLedger, encode_loss};
+        let mut stamp = fresh_stamp();
+        let key = loopback_key(2);
+        let forward = SessionParams {
+            loss: crate::stamp::session::LossPolicy {
+                peer_reflector_stateful: true,
+                window_buckets: 1,
+                ..Default::default()
+            },
+            ..SessionParams::default()
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        stamp.subscribe("isis".into(), key, forward, tx);
+        let epoch = std::time::Instant::now() - Duration::from_secs(34);
+        let session = stamp.sessions.get_mut(&key).unwrap();
+        session.loss = LossLedger::new(epoch);
+        let ssid = session.ssid;
+        let mut counter = 0;
+        for seq in 0..30u32 {
+            let sent = epoch + Duration::from_secs(seq.into());
+            stamp.sessions.get_mut(&key).unwrap().loss.sent(seq, sent);
+            if seq == 10 {
+                continue;
+            }
+            let reply = ReflectorPacket {
+                seq: counter,
+                ssid,
+                sender_seq: seq,
+                ..ReflectorPacket::default()
+            };
+            counter += 1;
+            let rx_at = sent + Duration::from_millis(5);
+            stamp.on_reply_recv(key, reply, StampTimestamp::default(), false, rx_at);
+        }
+        stamp.on_loss_tick(key);
+        assert_eq!(
+            drain(&mut rx).iter().map(loss_of).collect::<Vec<_>>(),
+            [Some(encode_loss(1, 30))]
         );
     }
 

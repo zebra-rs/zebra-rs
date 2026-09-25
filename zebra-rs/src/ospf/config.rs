@@ -298,6 +298,14 @@ impl Ospf {
             config_ospf_interface_te_measurement_loss_reuse_threshold,
         );
         self.ospf_add(
+            "/area/interface/te-metric/measurement/loss/peer-reflector",
+            config_ospf_interface_te_measurement_loss_peer_reflector,
+        );
+        self.ospf_add(
+            "/area/interface/te-metric/measurement/reflector",
+            config_ospf_interface_te_measurement_reflector,
+        );
+        self.ospf_add(
             "/area/interface/hello-interval",
             config_ospf_interface_hello_interval,
         );
@@ -1691,6 +1699,24 @@ fn config_ospf_interface_te_measurement_loss_reuse_threshold(
     op: ConfigOp,
 ) -> Option<()> {
     config_ospf_interface_te_measurement(ospf, args, |m, args| m.set_loss_reuse(args, op.is_set()))
+}
+
+fn config_ospf_interface_te_measurement_reflector(
+    ospf: &mut Ospf,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospf_interface_te_measurement(ospf, args, |m, args| m.set_reflector(args, op.is_set()))
+}
+
+fn config_ospf_interface_te_measurement_loss_peer_reflector(
+    ospf: &mut Ospf,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospf_interface_te_measurement(ospf, args, |m, args| {
+        m.set_loss_peer_reflector(args, op.is_set())
+    })
 }
 
 fn config_ospf_interface_hello_interval(

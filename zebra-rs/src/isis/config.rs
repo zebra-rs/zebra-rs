@@ -486,6 +486,14 @@ impl Isis {
             link::config_te_measurement_loss_reuse_threshold,
         );
         self.callback_add(
+            "/router/isis/interface/te-metric/measurement/loss/peer-reflector",
+            link::config_te_measurement_loss_peer_reflector,
+        );
+        self.callback_add(
+            "/router/isis/interface/te-metric/measurement/reflector",
+            link::config_te_measurement_reflector,
+        );
+        self.callback_add(
             "/router/isis/interface/ipv4/flex-algo-prefix-sid",
             link::config_ipv4_flex_algo_prefix_sid,
         );

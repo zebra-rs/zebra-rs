@@ -2852,6 +2852,14 @@ async fn drop_unicast_isis_egress(world: &mut World, interface: String, namespac
 /// random loss would make a percentage assertion flaky; `None` drops
 /// them all. Measured-loss design §7.
 async fn stamp_probe_drop(scoped: &str, every: Option<u32>) {
+    stamp_drop(scoped, "dport", every).await;
+}
+
+/// The rule behind [`stamp_probe_drop`], on UDP port 862 as `port`:
+/// `dport` catches the peer's probes arriving here, `sport` the peer's
+/// replies to this node's own probes — loss on this node's return path
+/// alone (measured-loss design D3).
+async fn stamp_drop(scoped: &str, port: &str, every: Option<u32>) {
     let _ = netns::exec_in_netns(scoped, "nft", &["delete", "table", "inet", "stamp_loss"]).await;
     let chain: &[&str] = &[
         "add",
@@ -2877,7 +2885,7 @@ async fn stamp_probe_drop(scoped: &str, every: Option<u32>) {
         "stamp_loss",
         "input",
         "udp",
-        "dport",
+        port,
         "862",
     ];
     if let Some(m) = &modulus {
@@ -2901,6 +2909,20 @@ async fn drop_every_nth_stamp_probe(world: &mut World, every: u32, namespace: St
     stamp_probe_drop(&scoped, Some(every)).await;
     println!(
         "✓ Every {}th STAMP probe arriving in {} is dropped",
+        every, scoped
+    );
+}
+
+/// Loss on the return path alone: every Nth reply from the peer's
+/// reflector to this node's probes is dropped on arrival here. Replaces
+/// any STAMP drop already installed in this namespace.
+#[when(expr = "I drop every {int}th STAMP reply arriving in namespace {string}")]
+async fn drop_every_nth_stamp_reply(world: &mut World, every: u32, namespace: String) {
+    assert!(every >= 2, "dropping every reply is silence, not loss");
+    let scoped = world.ns(&namespace);
+    stamp_drop(&scoped, "sport", Some(every)).await;
+    println!(
+        "✓ Every {}th STAMP reply arriving in {} is dropped",
         every, scoped
     );
 }

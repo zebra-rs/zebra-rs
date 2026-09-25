@@ -124,6 +124,9 @@ pub struct Subscriber {
     /// The loss A-bit hysteresis, against this subscriber's own bounds
     /// (design D7).
     pub loss_anomaly: Anomaly,
+    /// This subscriber asks for `reflector stateful` (design D3): the
+    /// session reflects statefully while any subscriber does.
+    pub reflector_stateful: bool,
 }
 
 impl Subscriber {
@@ -142,6 +145,7 @@ impl Subscriber {
             advertised_loss: None,
             loss_advertised_at: None,
             loss_anomaly: Anomaly::default(),
+            reflector_stateful: false,
         }
     }
 

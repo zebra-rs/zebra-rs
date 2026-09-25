@@ -33,6 +33,21 @@
 //! period. Each bucket also records how many probes the probe rate then
 //! in force should have produced, which keeps the integrity check exact
 //! across a probe-interval retune.
+//!
+//! **Direction** (design D3) *classifies* settled losses; it never
+//! counts them. A lost probe starts unresolved; a gap of lost probes,
+//! once closed, moves its members to *forward* or *reverse*, so
+//! `forward + reverse + unresolved = lost` always holds. Gaps are formed
+//! as probes retire, which is in Session-Sender sequence order and only
+//! once settled — so a reply that is merely reordered never forms one.
+//! Against a stateful reflector (its own sequence counter in every
+//! reply) `d = R_B − R_A − 1` of a gap's `g` members reached it: `d`
+//! reverse, `g − d` forward. Anything outside `0 ≤ d ≤ g` — a counter
+//! restart, reordering across the gap — stays unresolved. Against a
+//! stateless reflector `R = S`, so `d = g` and every loss reads reverse:
+//! the mode is declared per subscriber (`peer-reflector`), not
+//! detected, and a subscriber that declares nothing advertises
+//! round-trip loss and ignores the split.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -93,6 +108,11 @@ pub struct Bucket {
     /// Probes the probe interval in force should have produced during
     /// this bucket, in thousandths of a probe.
     pub expected_milli: u64,
+    /// The lost probes classified as lost on the way to the reflector,
+    /// and on the way back (design D3). The rest are unresolved:
+    /// `forward + reverse <= lost` always.
+    pub forward: u32,
+    pub reverse: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +127,9 @@ struct Probe {
     seq: u32,
     sent_at: Instant,
     fate: Fate,
+    /// The reflector's sequence number from the reply, once received —
+    /// a gap anchor (design D3).
+    reflector_seq: u32,
 }
 
 impl Probe {
@@ -131,6 +154,27 @@ pub enum ReplyFate {
     Unmatched,
 }
 
+/// The open gap, as probes retire in sequence order (design D3). O(1)
+/// per gap: an anchor, a count and a per-bucket tally, not a record per
+/// probe.
+#[derive(Debug, Default)]
+struct Gaps {
+    /// The last received probe retired: `(sender seq, reflector seq)`,
+    /// the lower anchor of the next gap.
+    anchor: Option<(u32, u32)>,
+    /// The sender sequence number the next retiring probe should carry.
+    next: Option<u32>,
+    /// Lost probes retired since the anchor: the open gap.
+    members: u32,
+    /// The buckets they were sent in, as `(bucket index, members)`,
+    /// oldest first — only buckets still in the ring. Members from
+    /// buckets that have rolled out are only counted, in `expired`: a
+    /// silent peer with its adjacency up keeps a gap open indefinitely,
+    /// and its history must stay as bounded as the ring.
+    tally: VecDeque<(u64, u32)>,
+    expired: u32,
+}
+
 /// Per-session probe-loss ledger.
 #[derive(Debug)]
 pub struct LossLedger {
@@ -150,6 +194,7 @@ pub struct LossLedger {
     final_index: u64,
     /// Expected probes have been accrued up to this instant.
     mark: Instant,
+    gaps: Gaps,
     pub late: u64,
     pub duplicate: u64,
     pub unmatched: u64,
@@ -165,6 +210,7 @@ impl LossLedger {
             first: 0,
             final_index: 0,
             mark: now,
+            gaps: Gaps::default(),
             late: 0,
             duplicate: 0,
             unmatched: 0,
@@ -229,9 +275,101 @@ impl LossLedger {
 
     /// A probe booked lost turned out to be received in time: it stays
     /// settled in the bucket it was sent in, and is no longer lost.
+    ///
+    /// If it had already retired into a gap, that gap may have counted
+    /// it. Its reply came back, so it reached the reflector, which is
+    /// what a gap's reverse share counts: the bucket's reverse count
+    /// gives way first, to keep `forward + reverse <= lost`. The race —
+    /// a reply read in time but processed after the sweep that settled
+    /// its probe — costs at most that one probe's attribution.
     fn unlose(&mut self, sent_at: Instant) {
         if let Some(b) = self.bucket_at(sent_at) {
             b.lost = b.lost.saturating_sub(1);
+            while b.forward + b.reverse > b.lost {
+                if b.reverse > 0 {
+                    b.reverse -= 1;
+                } else {
+                    b.forward -= 1;
+                }
+            }
+        }
+    }
+
+    /// A settled probe leaves the pending queue, in sequence order: grow
+    /// the open gap, or — a received probe — close it (design D3).
+    fn retire(&mut self, p: &Probe) {
+        if self.gaps.next.is_some_and(|next| next != p.seq) {
+            // Not the next sequence number: the stream broke, and nothing
+            // before this probe can anchor a gap after it.
+            self.gaps = Gaps::default();
+        }
+        self.gaps.next = Some(p.seq.wrapping_add(1));
+        match p.fate {
+            Fate::Lost => {
+                let index = self.index(p.sent_at);
+                self.gaps.members = self.gaps.members.saturating_add(1);
+                match self.gaps.tally.back_mut() {
+                    Some((i, n)) if *i == index => *n += 1,
+                    _ => self.gaps.tally.push_back((index, 1)),
+                }
+                self.prune_gap();
+            }
+            Fate::Received => {
+                let members = std::mem::take(&mut self.gaps.members);
+                let expired = std::mem::take(&mut self.gaps.expired);
+                let tally = std::mem::take(&mut self.gaps.tally);
+                if members > 0
+                    && let Some((_, anchor)) = self.gaps.anchor
+                {
+                    // Serial arithmetic: a counter that restarted or moved
+                    // backwards wraps far above `members`.
+                    let reached = p.reflector_seq.wrapping_sub(anchor).wrapping_sub(1);
+                    if reached <= members {
+                        self.classify(reached, members, expired, &tally);
+                    }
+                }
+                self.gaps.anchor = Some((p.seq, p.reflector_seq));
+            }
+            Fate::Outstanding => {}
+        }
+    }
+
+    /// Fold the open gap's members in buckets that have left the ring
+    /// into its `expired` count: their share of a classification has
+    /// nowhere to go, but the gap's size still counts.
+    fn prune_gap(&mut self) {
+        while let Some(&(index, count)) = self.gaps.tally.front()
+            && index < self.first
+        {
+            self.gaps.expired = self.gaps.expired.saturating_add(count);
+            self.gaps.tally.pop_front();
+        }
+    }
+
+    /// A closed gap of `members` lost probes, `reverse` of which reached
+    /// the reflector, spread over the buckets in `tally` after `expired`
+    /// members in buckets no longer kept. The split is known only for
+    /// the gap as a whole, so each bucket gets its proportional share of
+    /// it, rounded so the shares add up exactly; the expired members'
+    /// share is dropped with their buckets.
+    fn classify(&mut self, reverse: u32, members: u32, expired: u32, tally: &VecDeque<(u64, u32)>) {
+        let seen0 = u64::from(expired);
+        let (mut seen, mut assigned) = (seen0, u64::from(reverse) * seen0 / u64::from(members));
+        for &(index, count) in tally {
+            seen += u64::from(count);
+            let upto = u64::from(reverse) * seen / u64::from(members);
+            let rev = (upto - assigned) as u32;
+            assigned = upto;
+            let Some(b) = index
+                .checked_sub(self.first)
+                .and_then(|offset| self.buckets.get_mut(offset as usize))
+            else {
+                continue;
+            };
+            let open = b.lost.saturating_sub(b.forward + b.reverse);
+            let rev = rev.min(open);
+            b.reverse += rev;
+            b.forward += (count - rev).min(open - rev);
         }
     }
 
@@ -241,12 +379,14 @@ impl LossLedger {
             seq,
             sent_at: now,
             fate: Fate::Outstanding,
+            reflector_seq: 0,
         });
     }
 
-    /// A reply carrying Session-Sender sequence number `sender_seq` was
-    /// received at `rx_at` — the socket read, not whenever the event
-    /// loop processes it.
+    /// A reply carrying Session-Sender sequence number `sender_seq`, and
+    /// the reflector's own sequence number `reflector_seq`, was received
+    /// at `rx_at` — the socket read, not whenever the event loop
+    /// processes it.
     ///
     /// The deadline is judged here, against `rx_at`, not left to the next
     /// sweep: with a 10 s probe interval nothing sweeps for 10 s, and a
@@ -255,7 +395,7 @@ impl LossLedger {
     /// reply received in time for a probe that a *later* sweep already
     /// declared lost — the reply was queued behind that sweep — still
     /// counts, and the probe moves from lost to received.
-    pub fn reply(&mut self, sender_seq: u32, rx_at: Instant) -> ReplyFate {
+    pub fn reply(&mut self, sender_seq: u32, reflector_seq: u32, rx_at: Instant) -> ReplyFate {
         let found = match self.pending.iter().position(|p| p.seq == sender_seq) {
             Some(i) => Some((true, i)),
             None => self
@@ -298,6 +438,7 @@ impl LossLedger {
             &mut self.recent[i]
         };
         slot.fate = Fate::Received;
+        slot.reflector_seq = reflector_seq;
         fate
     }
 
@@ -325,6 +466,7 @@ impl LossLedger {
             .is_some_and(|p| p.fate != Fate::Outstanding)
         {
             let p = self.pending.pop_front().expect("front checked");
+            self.retire(&p);
             self.recent.push_back(p);
             if self.recent.len() > RECENT {
                 self.recent.pop_front();
@@ -352,6 +494,7 @@ impl LossLedger {
         }
         let now_index = self.index(now);
         self.open_to(now_index);
+        self.prune_gap();
         let final_index = now
             .checked_sub(LOSS_WAIT)
             .map_or(0, |t| if t < self.epoch { 0 } else { self.index(t) });
@@ -384,6 +527,8 @@ impl LossLedger {
             wanted,
             settled: 0,
             lost: 0,
+            forward: 0,
+            reverse: 0,
             expected_milli: 0,
             silent: 0,
         };
@@ -397,6 +542,8 @@ impl LossLedger {
             }
             w.settled += u64::from(b.settled);
             w.lost += u64::from(b.lost);
+            w.forward += u64::from(b.forward);
+            w.reverse += u64::from(b.reverse);
         }
         w
     }
@@ -411,6 +558,10 @@ pub struct LossWindow {
     pub wanted: usize,
     pub settled: u64,
     pub lost: u64,
+    /// Of `lost`, those classified forward and reverse (design D3); the
+    /// rest are [unresolved](Self::unresolved).
+    pub forward: u64,
+    pub reverse: u64,
     pub expected_milli: u64,
     /// Buckets in which probes settled but none was received: gaps,
     /// left out of `settled` and `lost` (see [`LossLedger::window`]).
@@ -456,6 +607,23 @@ impl LossWindow {
         (self.settled > 0).then(|| encode_loss(self.lost, self.settled))
     }
 
+    /// Lost probes no gap has classified yet.
+    pub fn unresolved(&self) -> u64 {
+        self.lost.saturating_sub(self.forward + self.reverse)
+    }
+
+    /// The window as a `peer-reflector stateful` subscriber sees it:
+    /// forward loss, with unresolved losses counted as forward — the
+    /// upper bound, as round-trip loss is for a stateless peer. An open
+    /// burst reads high until its gap closes, never low.
+    pub fn as_forward(&self) -> LossWindow {
+        LossWindow {
+            lost: self.lost - self.reverse,
+            reverse: 0,
+            ..*self
+        }
+    }
+
     /// The measured loss in micro-percent (10⁻⁶ %), rounded down, and
     /// neither capped nor in RFC units: what the Anomalous bit is judged
     /// on (design D7). Rounding down loses nothing against a whole
@@ -496,10 +664,19 @@ pub enum LossDecision {
 /// - below the integrity threshold — the probe stream had a gap, or
 ///   silent buckets were left out of it (D5, D8);
 /// - nothing received at all.
-fn trusted(w: &LossWindow, integrity_pct: u32) -> Option<(u32, u32)> {
-    if !w.is_full() || w.integrity_percent()? < integrity_pct || w.lost >= w.settled {
+///
+/// A `peer-reflector stateful` subscriber sees the window's forward
+/// view ([`LossWindow::as_forward`]); "nothing received" is still judged
+/// round-trip.
+fn trusted(w: &LossWindow, policy: &super::session::LossPolicy) -> Option<(u32, u32)> {
+    if !w.is_full() || w.integrity_percent()? < policy.integrity_pct || w.lost >= w.settled {
         return None;
     }
+    let w = if policy.peer_reflector_stateful {
+        w.as_forward()
+    } else {
+        *w
+    };
     Some((w.encoded()?, w.micro_percent()?))
 }
 
@@ -566,12 +743,12 @@ pub fn evaluate(
     if ledger.window(1).silent > 0 {
         return withdraw();
     }
-    let Some(rolling) = trusted(&ledger.window(policy.window_buckets), policy.integrity_pct) else {
+    let Some(rolling) = trusted(&ledger.window(policy.window_buckets), policy) else {
         return withdraw();
     };
     let accelerated = advertised.and_then(|current| {
         let step = policy.accelerated?;
-        let latest = trusted(&ledger.window(1), policy.integrity_pct)?;
+        let latest = trusted(&ledger.window(1), policy)?;
         (latest.0 != current.value && latest.0.abs_diff(current.value) >= step).then_some(latest)
     });
     let (value, measured) = accelerated.unwrap_or(rolling);
@@ -629,7 +806,7 @@ mod tests {
         l.sent(7, at(t0, 29_990));
         l.advance(at(t0, 30_000), 1000);
         assert_eq!(l.window(1).buckets, 0, "not final until 33 s");
-        assert_eq!(l.reply(7, at(t0, 30_005)), ReplyFate::Received);
+        assert_eq!(l.reply(7, 7, at(t0, 30_005)), ReplyFate::Received);
         l.advance(at(t0, 63_000), 1000);
         let w = l.window(2);
         assert_eq!((w.buckets, w.settled, w.lost), (2, 1, 0));
@@ -657,16 +834,16 @@ mod tests {
         let t0 = Instant::now();
         let mut l = LossLedger::new(t0);
         l.sent(1, t0);
-        assert_eq!(l.reply(1, at(t0, 4_000)), ReplyFate::Late);
+        assert_eq!(l.reply(1, 1, at(t0, 4_000)), ReplyFate::Late);
         l.sent(2, at(t0, 10_000));
         assert_eq!(
-            l.reply(2, at(t0, 13_000)),
+            l.reply(2, 2, at(t0, 13_000)),
             ReplyFate::Late,
             "at the deadline"
         );
         l.sent(3, at(t0, 20_000));
         assert_eq!(
-            l.reply(3, at(t0, 22_999)),
+            l.reply(3, 3, at(t0, 22_999)),
             ReplyFate::Received,
             "just before it"
         );
@@ -684,7 +861,7 @@ mod tests {
         let mut l = LossLedger::new(t0);
         l.sent(1, t0);
         l.sweep(at(t0, 5_000));
-        assert_eq!(l.reply(1, at(t0, 1_000)), ReplyFate::Received);
+        assert_eq!(l.reply(1, 1, at(t0, 1_000)), ReplyFate::Received);
         l.advance(at(t0, 33_000), 1000);
         let w = l.window(1);
         assert_eq!((w.settled, w.lost, l.late), (1, 0, 0));
@@ -695,9 +872,9 @@ mod tests {
         let t0 = Instant::now();
         let mut l = LossLedger::new(t0);
         l.sent(5, t0);
-        assert_eq!(l.reply(5, at(t0, 10)), ReplyFate::Received);
-        assert_eq!(l.reply(5, at(t0, 20)), ReplyFate::Duplicate);
-        assert_eq!(l.reply(99, at(t0, 30)), ReplyFate::Unmatched);
+        assert_eq!(l.reply(5, 5, at(t0, 10)), ReplyFate::Received);
+        assert_eq!(l.reply(5, 5, at(t0, 20)), ReplyFate::Duplicate);
+        assert_eq!(l.reply(99, 99, at(t0, 30)), ReplyFate::Unmatched);
         l.advance(at(t0, 33_000), 1000);
         let w = l.window(1);
         assert_eq!((w.settled, w.lost), (1, 0));
@@ -713,9 +890,9 @@ mod tests {
         for seq in [10, 11, 12] {
             l.sent(seq, t0);
         }
-        assert_eq!(l.reply(10, at(t0, 10)), ReplyFate::Received);
-        assert_eq!(l.reply(12, at(t0, 20)), ReplyFate::Received);
-        assert_eq!(l.reply(11, at(t0, 1_000)), ReplyFate::Received);
+        assert_eq!(l.reply(10, 10, at(t0, 10)), ReplyFate::Received);
+        assert_eq!(l.reply(12, 12, at(t0, 20)), ReplyFate::Received);
+        assert_eq!(l.reply(11, 11, at(t0, 1_000)), ReplyFate::Received);
         l.advance(at(t0, 33_000), 1000);
         let w = l.window(1);
         assert_eq!((w.settled, w.lost), (3, 0));
@@ -727,8 +904,8 @@ mod tests {
         let mut l = LossLedger::new(t0);
         l.sent(u32::MAX, t0);
         l.sent(0, t0);
-        assert_eq!(l.reply(0, at(t0, 5)), ReplyFate::Received);
-        assert_eq!(l.reply(u32::MAX, at(t0, 6)), ReplyFate::Received);
+        assert_eq!(l.reply(0, 0, at(t0, 5)), ReplyFate::Received);
+        assert_eq!(l.reply(u32::MAX, u32::MAX, at(t0, 6)), ReplyFate::Received);
     }
 
     #[test]
@@ -742,7 +919,7 @@ mod tests {
             for i in 0..10u64 {
                 l.sent(seq, at(t0, base + i));
                 if i >= bucket {
-                    l.reply(seq, at(t0, base + i + 5));
+                    l.reply(seq, seq, at(t0, base + i + 5));
                 }
                 seq += 1;
             }
@@ -819,7 +996,7 @@ mod tests {
         for seq in 0..27 {
             let sent = at(t0, u64::from(seq) * 1000);
             l.sent(seq, sent);
-            l.reply(seq, sent + Duration::from_millis(5));
+            l.reply(seq, seq, sent + Duration::from_millis(5));
         }
         l.advance(at(t0, 33_000), 1000);
         assert_eq!(l.window(1).integrity_percent(), Some(90));
@@ -840,7 +1017,7 @@ mod tests {
                 let sent = at(t0, base + u64::from(i) * 1000);
                 l.sent(seq, sent);
                 if i >= lost {
-                    l.reply(seq, sent + Duration::from_millis(5));
+                    l.reply(seq, seq, sent + Duration::from_millis(5));
                 }
                 seq += 1;
             }
@@ -1087,7 +1264,7 @@ mod tests {
                 let sent = at(t0, b as u64 * 30_000 + i * 1000);
                 l.sent(seq, sent);
                 if i >= lost {
-                    l.reply(seq, sent + Duration::from_millis(5));
+                    l.reply(seq, seq, sent + Duration::from_millis(5));
                 }
                 seq += 1;
             }
@@ -1230,7 +1407,8 @@ mod tests {
                 let sent = at(self.t0, base + u64::from(i) * 1000);
                 self.ledger.sent(self.seq, sent);
                 if i >= lost {
-                    self.ledger.reply(self.seq, sent + Duration::from_millis(5));
+                    self.ledger
+                        .reply(self.seq, self.seq, sent + Duration::from_millis(5));
                 }
                 self.seq += 1;
             }
@@ -1332,6 +1510,8 @@ mod tests {
             wanted: 1,
             settled: 3,
             lost: 1,
+            forward: 0,
+            reverse: 0,
             expected_milli: 3_000,
             silent: 0,
         };
@@ -1503,6 +1683,380 @@ mod tests {
             set_a(encode_loss(3, 30), false),
             "seconds after the last advertisement"
         );
+    }
+
+    /// What happens to one probe on a link to a stateful reflector.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Path {
+        /// Reflected, and the reply is back in 5 ms.
+        Ok,
+        /// Lost on the way to the reflector: it never counts it.
+        Fwd,
+        /// Reflected — counted — and the reply lost.
+        Rev,
+        /// Reflected, and the reply back after the waiting time.
+        Late,
+    }
+
+    /// A session against a stateful reflector: probes at 1 s from `t0`,
+    /// sender sequence numbers from `s`, the reflector's counter from
+    /// `r`. Each probe's reply, if any, is processed as it arrives, and
+    /// the ledger is swept at every send, as the probe tick does.
+    struct Link {
+        t0: Instant,
+        ledger: LossLedger,
+        s: u32,
+        r: u32,
+        sent: u64,
+    }
+
+    impl Link {
+        fn new(s: u32, r: u32) -> Self {
+            let t0 = Instant::now();
+            Self {
+                t0,
+                ledger: LossLedger::new(t0),
+                s,
+                r,
+                sent: 0,
+            }
+        }
+
+        fn send(&mut self, path: Path) {
+            let sent = at(self.t0, self.sent * 1000);
+            self.ledger.sweep(sent);
+            self.ledger.sent(self.s, sent);
+            if path != Path::Fwd {
+                let reply_at = match path {
+                    Path::Late => sent + LOSS_WAIT + Duration::from_millis(500),
+                    _ => sent + Duration::from_millis(5),
+                };
+                if path != Path::Rev {
+                    self.ledger.reply(self.s, self.r, reply_at);
+                }
+                self.r = self.r.wrapping_add(1);
+            }
+            self.s = self.s.wrapping_add(1);
+            self.sent += 1;
+        }
+
+        fn run(&mut self, paths: &[Path]) {
+            for &p in paths {
+                self.send(p);
+            }
+        }
+
+        /// Advance to the loss tick after second `secs`, and the window
+        /// of every final bucket.
+        fn window_at(&mut self, secs: u64) -> LossWindow {
+            self.ledger.advance(at(self.t0, secs * 1000), 1000);
+            self.ledger.window(MAX_BUCKETS)
+        }
+    }
+
+    fn split(w: &LossWindow) -> (u64, u64, u64, u64) {
+        (w.lost, w.forward, w.reverse, w.unresolved())
+    }
+
+    /// D3, the invariant: whatever the mix of paths, `forward + reverse +
+    /// unresolved = lost` after every operation, never more. With no
+    /// reordering and every gap closed, the split is exact: forward the
+    /// probes lost outbound, reverse those lost inbound or answered late.
+    #[test]
+    fn direction_classifies_losses_and_never_counts_them() {
+        let mut link = Link::new(100, 5_000);
+        let (mut fwd, mut rev) = (0, 0);
+        let mut state = 0x2545_f491u32;
+        for i in 0..90 {
+            // A cheap deterministic mix, with runs: xorshift.
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            let path = match (i, state % 10) {
+                (0, _) | (89, _) => Path::Ok,
+                (_, 0) => Path::Fwd,
+                (_, 1) => Path::Rev,
+                (_, 2) => Path::Late,
+                _ => Path::Ok,
+            };
+            match path {
+                Path::Fwd => fwd += 1,
+                Path::Rev | Path::Late => rev += 1,
+                Path::Ok => {}
+            }
+            link.send(path);
+            let w = link.ledger.window(MAX_BUCKETS);
+            assert!(w.forward + w.reverse <= w.lost, "after probe {i}: {w:?}");
+        }
+        let w = link.window_at(123);
+        assert_eq!((w.lost, w.forward, w.reverse), (fwd + rev, fwd, rev));
+        assert!(fwd > 0 && rev > 0, "the mix exercised both directions");
+    }
+
+    /// Return-path reordering: replies 10, 12, 11. Probe 11 is still
+    /// outstanding when 12's reply arrives, and received before it could
+    /// settle, so no gap forms and no loss appears in either direction.
+    /// Forward-path reordering (the reflector sees 10, 12, 11) likewise.
+    #[test]
+    fn reordering_without_loss_forms_no_gap() {
+        for reflector in [[10, 12, 11], [10, 11, 12]] {
+            let t0 = Instant::now();
+            let mut l = LossLedger::new(t0);
+            for s in 10..13 {
+                l.sent(s, at(t0, u64::from(s) * 100));
+            }
+            // Replies in the order 10, 12, 11.
+            for (s, r) in [(10, reflector[0]), (12, reflector[2]), (11, reflector[1])] {
+                assert_eq!(l.reply(s, r, at(t0, 1_400)), ReplyFate::Received);
+            }
+            l.advance(at(t0, 33_000), 1000);
+            let w = l.window(1);
+            assert_eq!(split(&w), (0, 0, 0, 0), "{reflector:?}");
+        }
+    }
+
+    /// A reverse-path burst longer than the waiting time: its probes
+    /// settle lost and stay unresolved while it lasts — read as forward,
+    /// the upper bound — then all move to reverse once the first reply
+    /// after it closes the gap, including those in an already-final
+    /// bucket. A forward-path burst closes all forward.
+    #[test]
+    fn a_long_burst_is_unresolved_until_its_gap_closes() {
+        for (path, forward) in [(Path::Rev, false), (Path::Fwd, true)] {
+            let mut link = Link::new(0, 0);
+            link.run(&[Path::Ok; 25]);
+            link.run(&[path; 20]); // 25 s to 44 s
+            let w = link.window_at(33);
+            assert_eq!(split(&w), (5, 0, 0, 5), "{path:?}: open at 33 s");
+            assert_eq!(w.as_forward().lost, 5, "unresolved reads as forward");
+            link.run(&[Path::Ok; 20]);
+            let w = link.window_at(63);
+            let want = if forward {
+                (20, 20, 0, 0)
+            } else {
+                (20, 0, 20, 0)
+            };
+            assert_eq!(split(&w), want, "{path:?}: closed");
+        }
+    }
+
+    /// Retained PR 4 review probe: a peer can remain silent while its
+    /// IGP adjacency stays up. The open gap must not retain one tally
+    /// entry per bucket forever after those buckets leave the ring.
+    #[test]
+    fn an_open_gap_keeps_only_bounded_bucket_history() {
+        let t0 = Instant::now();
+        let mut l = LossLedger::new(t0);
+        // One probe per 30 s is a supported rate; all replies disappear.
+        for seq in 0..(MAX_BUCKETS as u32 * 3) {
+            let sent = t0 + BUCKET * seq;
+            l.sent(seq, sent);
+            l.advance(sent + LOSS_WAIT, 30_000);
+        }
+        assert!(
+            l.gaps.tally.len() <= MAX_BUCKETS + 2,
+            "open gap retained {} bucket records for a {}-bucket ring",
+            l.gaps.tally.len(),
+            l.buckets.len()
+        );
+    }
+
+    /// A gap that outlived the ring still classifies what is left of it.
+    /// A silent return path for 150 buckets, one probe each; the oldest
+    /// members' buckets roll out and are only counted. When the reply
+    /// comes, the 120-bucket window ends at the reply's own bucket, so it
+    /// holds 119 members. Reflected in full, all 119 read reverse;
+    /// reflected by a third, they take exactly their proportional share,
+    /// ⌊50·150/150⌋ − ⌊50·31/150⌋ = 40, with the 31 older members'
+    /// share dropped along with their buckets. (Counting the kept
+    /// members from zero instead would give 39.)
+    #[test]
+    fn a_gap_longer_than_the_ring_classifies_what_is_kept() {
+        for (reached, kept_reverse) in [(150u32, 119u64), (50, 40)] {
+            let t0 = Instant::now();
+            let mut l = LossLedger::new(t0);
+            l.sent(0, t0);
+            l.reply(0, 0, t0 + Duration::from_millis(5));
+            for seq in 1..=150u32 {
+                let sent = t0 + BUCKET * seq;
+                l.sent(seq, sent);
+                l.advance(sent + LOSS_WAIT, 30_000);
+            }
+            assert_eq!(l.gaps.members, 150);
+            assert!(l.gaps.tally.len() <= MAX_BUCKETS + 2);
+            let sent = t0 + BUCKET * 151;
+            l.sent(151, sent);
+            l.reply(151, reached + 1, sent + Duration::from_millis(5));
+            l.advance(sent + BUCKET + LOSS_WAIT, 30_000);
+            let w = l.window(MAX_BUCKETS);
+            assert_eq!(w.reverse, kept_reverse, "reached {reached}");
+            assert!(w.forward + w.reverse <= w.lost);
+        }
+    }
+
+    /// A reply after the waiting time leaves its probe lost (RFC 7680)
+    /// and anchors nothing; the reflector counted the probe, so the gap
+    /// classifies it reverse.
+    #[test]
+    fn a_late_reply_stays_lost_and_classifies_reverse() {
+        let mut link = Link::new(0, 0);
+        link.run(&[Path::Ok, Path::Late, Path::Ok, Path::Ok]);
+        let w = link.window_at(33);
+        assert_eq!(split(&w), (1, 0, 1, 0));
+        assert_eq!(link.ledger.late, 1);
+    }
+
+    /// A reflector counter restart inside a gap — the peer rebooted, or
+    /// toggled `reflector stateful` — leaves the gap unresolved. Serial
+    /// arithmetic sends the "negative" count far above the gap size, and
+    /// nothing goes negative or wraps into a count.
+    #[test]
+    fn a_reflector_counter_restart_leaves_the_gap_unresolved() {
+        let mut link = Link::new(0, 1_000);
+        link.run(&[Path::Ok, Path::Ok, Path::Fwd, Path::Rev]);
+        link.r = 0; // the restart
+        link.run(&[Path::Ok, Path::Ok]);
+        let w = link.window_at(33);
+        assert_eq!(split(&w), (2, 0, 0, 2));
+        // And the next gap, anchored in the new counter, classifies.
+        link.run(&[Path::Rev, Path::Ok]);
+        let w = link.window_at(63);
+        assert_eq!(split(&w), (3, 0, 1, 2));
+    }
+
+    /// Both counters wrap at 2³² in the middle of a gap.
+    #[test]
+    fn sequence_numbers_wrap_across_a_gap() {
+        let mut link = Link::new(u32::MAX - 1, u32::MAX);
+        link.run(&[Path::Ok, Path::Fwd, Path::Rev, Path::Fwd, Path::Ok]);
+        let w = link.window_at(33);
+        assert_eq!(split(&w), (3, 2, 1, 0));
+    }
+
+    /// The mode is declared, not detected. A stateless peer declared
+    /// `peer-reflector stateful` copies the sender's sequence number, so
+    /// `R = S` and every loss — forward ones too — classifies reverse:
+    /// the configured-not-detected hazard, pinned.
+    #[test]
+    fn a_stateless_peer_reads_as_all_reverse() {
+        let t0 = Instant::now();
+        let mut l = LossLedger::new(t0);
+        for s in 0..6u32 {
+            l.sent(s, at(t0, u64::from(s) * 1000));
+            if ![2, 3].contains(&s) {
+                l.reply(s, s, at(t0, u64::from(s) * 1000 + 5));
+            }
+        }
+        l.advance(at(t0, 33_000), 1000);
+        assert_eq!(split(&l.window(1)), (2, 0, 2, 0));
+    }
+
+    /// A gap over a bucket boundary: the split is known only for the gap
+    /// as a whole, so each bucket gets its proportional share, and the
+    /// shares add up exactly.
+    #[test]
+    fn a_gap_across_buckets_is_split_in_proportion() {
+        let mut link = Link::new(0, 0);
+        link.run(&[Path::Ok; 27]);
+        // 27–29 s in bucket 0, 30 s in bucket 1: 3 + 1 members, 2 reverse.
+        link.run(&[Path::Fwd, Path::Rev, Path::Fwd, Path::Rev, Path::Ok]);
+        link.run(&[Path::Ok; 28]);
+        link.ledger.advance(at(link.t0, 63_000), 1000);
+        let (b0, b1) = (link.ledger.buckets[0], link.ledger.buckets[1]);
+        assert_eq!((b0.lost, b0.forward, b0.reverse), (3, 2, 1));
+        assert_eq!((b1.lost, b1.forward, b1.reverse), (1, 0, 1));
+    }
+
+    /// The race `unlose` guards: a reply read in time but processed after
+    /// the sweep that settled — and retired and classified — its probe.
+    /// The probe is received after all. Its reply came back, so it
+    /// reached the reflector: it was one of the gap's reverse share, and
+    /// the bucket's reverse count gives way, not its forward one.
+    #[test]
+    fn a_reply_processed_after_its_gap_closed_keeps_the_invariant() {
+        let t0 = Instant::now();
+        let mut l = LossLedger::new(t0);
+        for s in 0..5u32 {
+            l.sent(s, at(t0, u64::from(s) * 1000));
+        }
+        // Probe 1 never reached the reflector; 2 and 3 did (counter 1
+        // and 2) and their replies went missing.
+        l.reply(0, 0, at(t0, 5));
+        l.reply(4, 3, at(t0, 4_005));
+        l.sweep(at(t0, 6_500));
+        l.advance(at(t0, 33_000), 1000);
+        assert_eq!(split(&l.window(1)), (3, 1, 2, 0));
+        // Probe 3's reply had been read at 5.9 s, before its deadline.
+        assert_eq!(l.reply(3, 2, at(t0, 5_900)), ReplyFate::Received);
+        assert_eq!(split(&l.window(1)), (2, 1, 1, 0));
+    }
+
+    /// The same race while the gap is still open: the probe had retired
+    /// into it as lost, and is received after all before the gap closes.
+    /// The gap still counts it, so its classification is clamped to what
+    /// the bucket has left — `forward + reverse <= lost` — rather than
+    /// running past it (and the forward view underflowing).
+    #[test]
+    fn a_reply_processed_while_its_gap_is_open_is_clamped() {
+        let t0 = Instant::now();
+        let mut l = LossLedger::new(t0);
+        for s in 0..4u32 {
+            l.sent(s, at(t0, u64::from(s) * 1000));
+        }
+        l.reply(0, 0, at(t0, 5));
+        l.sweep(at(t0, 5_500)); // probes 1 and 2 settle lost and retire
+        assert_eq!(l.reply(1, 1, at(t0, 3_900)), ReplyFate::Received);
+        l.reply(3, 3, at(t0, 3_005));
+        l.advance(at(t0, 33_000), 1000);
+        let w = l.window(1);
+        assert_eq!(split(&w), (1, 0, 1, 0));
+        assert_eq!(w.as_forward().lost, 0);
+    }
+
+    /// A break in the sender's sequence — the ledger never saw the
+    /// probes in between — cannot anchor a gap across it: the losses
+    /// before it stay unresolved, even though the reflector's counter
+    /// (0, then 2: one probe reached it in between) would classify the
+    /// one lost probe the ledger knows of as reverse.
+    #[test]
+    fn a_break_in_the_sequence_leaves_the_gap_unresolved() {
+        let t0 = Instant::now();
+        let mut l = LossLedger::new(t0);
+        for (i, s) in [0u32, 1, 5, 6].into_iter().enumerate() {
+            l.sent(s, at(t0, i as u64 * 1000));
+        }
+        l.reply(0, 0, at(t0, 5));
+        l.reply(5, 2, at(t0, 2_005));
+        l.reply(6, 3, at(t0, 3_005));
+        l.advance(at(t0, 33_000), 1000);
+        assert_eq!(split(&l.window(1)), (1, 0, 0, 1));
+    }
+
+    /// Design D3: a `peer-reflector stateful` subscriber advertises
+    /// forward loss, `(forward + unresolved) / settled`; the default one
+    /// round-trip. Reverse-only loss reads 10 % round-trip and 0 %
+    /// forward.
+    #[test]
+    fn a_stateful_peer_advertises_forward_loss() {
+        let mut link = Link::new(0, 0);
+        for _ in 0..3 {
+            link.run(&[Path::Ok, Path::Ok, Path::Ok, Path::Ok, Path::Rev]);
+            link.run(&[Path::Ok, Path::Ok, Path::Ok, Path::Ok, Path::Ok]);
+        }
+        link.ledger.advance(at(link.t0, 33_000), 1000);
+        let round_trip = LossPolicy {
+            window_buckets: 1,
+            ..LossPolicy::default()
+        };
+        let forward = LossPolicy {
+            peer_reflector_stateful: true,
+            ..round_trip
+        };
+        let now = at(link.t0, 33_000);
+        let decide =
+            |p: &LossPolicy| evaluate(p, &link.ledger, None, None, &mut Anomaly::default(), now);
+        assert_eq!(decide(&round_trip), set(encode_loss(3, 30)));
+        assert_eq!(decide(&forward), set(0));
     }
 
     #[test]
