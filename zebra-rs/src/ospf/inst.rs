@@ -4571,7 +4571,14 @@ impl Ospf<Ospfv2> {
 
         if ev == LsdbEvent::HoldTimerExpire {
             match ls_type {
-                OspfLsType::Router | OspfLsType::Network | OspfLsType::Summary => {
+                // Area-scoped opaque LSAs feed SPF as they do on arrival
+                // (see `ospf_flood`): an expiring Router Information LSA
+                // takes its Flexible Algorithm definitions and participation
+                // with it, and its winner's forwarding state must go too.
+                OspfLsType::Router
+                | OspfLsType::Network
+                | OspfLsType::Summary
+                | OspfLsType::OpaqueAreaLocal => {
                     if let Some(area_id) = area_id
                         && let Some(area) = self.areas.get_mut(area_id)
                     {
@@ -17375,6 +17382,174 @@ mod flex_algo_selection_tests {
         assert_eq!(peers.keys().copied().collect::<Vec<_>>(), vec![rid(2)]);
         assert_eq!(peers[&rid(2)][&128].priority, 200, "instance 0 comes first");
         assert_eq!(peers[&rid(2)][&129].priority, 50);
+    }
+
+    /// An `Ospf` without raw sockets or daemon tasks: a plain UDP socket and
+    /// a RIB-less context, so instance-level behaviour runs in a unit test.
+    fn fresh_ospf() -> Ospf {
+        let sock = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::DGRAM, None).unwrap();
+        sock.set_nonblocking(true).unwrap();
+        let sock = Arc::new(AsyncFd::new(sock).unwrap());
+        let ctx = crate::context::ProtoContext::default_table_no_rib();
+        let (_, rib_rx) = mpsc::unbounded_channel();
+        let (policy_tx, _) = mpsc::unbounded_channel();
+        let policy_chan = crate::policy::PolicyRxChannel::new();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (ptx, _) = mpsc::unbounded_channel();
+        let (_, sr_rx) = mpsc::unbounded_channel();
+        let (bfd_event_tx, bfd_event_rx) = mpsc::unbounded_channel();
+        let (stamp_event_tx, stamp_event_rx) = mpsc::unbounded_channel();
+        let (config_tx, _) = mpsc::channel(1);
+        let rib_subscriber = RibSubscriber::for_test(
+            mpsc::unbounded_channel().0,
+            mpsc::unbounded_channel().0,
+            Arc::new(std::sync::atomic::AtomicU32::new(1)),
+        );
+        let proto_label = "review-probe".to_string();
+        let bfd_client_tx = None;
+        let stamp_client_tx = None;
+        Ospf {
+            tx,
+            rx,
+            ptx,
+            cm: ConfigChannel::new(),
+            callbacks: HashMap::new(),
+            rib_rx,
+            ctx,
+            links: BTreeMap::new(),
+            bfd: OspfLinkBfdConfig::default(),
+            areas: OspfAreaMap::new(),
+            show: ShowChannel::new(),
+            show_cb: HashMap::new(),
+            router_id: DEFAULT_ROUTER_ID,
+            router_id_config: None,
+            rib_router_id: None,
+            lsdb_as: Lsdb::new(),
+            lsp_map: LspMap::default(),
+            spf_result: None,
+            graph: None,
+            ti_lfa_enabled: false,
+            ti_lfa_compute_mode: spf::TilfaComputeModeConfig::default(),
+            // Matches the YANG `default 8` on the sharding `shards` leaf.
+            ti_lfa_compute_shards: 8,
+            tilfa_stats: None,
+            fast_reroute_backup_as_primary: false,
+            tilfa_result: None,
+            spf_flex_algo: BTreeMap::new(),
+            rib_flex_algo: BTreeMap::new(),
+            rib6_flex_algo: BTreeMap::new(),
+            flex_algo_advertised: BTreeSet::new(),
+            rib: PrefixMap::new(),
+            rib_areas: BTreeMap::new(),
+            spf_results: BTreeMap::new(),
+            ilm: BTreeMap::new(),
+            ilm6: BTreeMap::new(),
+            local_pool: None,
+            lan_adj_sids: BTreeMap::new(),
+            rib6: PrefixMap::new(),
+            rib6_areas: BTreeMap::new(),
+            range_discards: BTreeSet::new(),
+            range_discards_v6: BTreeSet::new(),
+            tracing: OspfTracing::default(),
+            segment_routing: crate::ospf::srmpls::SegmentRoutingMode::default(),
+            srv6_locator_name: None,
+            watched_locator: None,
+            sr_locator: None,
+            sr_end_sid: None,
+            elib: crate::isis::srv6::ElibPool::new(),
+            endx_sids: BTreeMap::new(),
+            sr_rx,
+            gr_config: crate::ospf::neigh::GracefulRestartConfig::default(),
+            spf_interval: SpfIntervalConfig::default(),
+            in_commit: true,
+            pending_hello: BTreeSet::new(),
+            min_ls_interval_ms: OSPF_MIN_LS_INTERVAL_MS,
+            min_ls_arrival_ms: OSPF_MIN_LS_ARRIVAL_MS,
+            vl_ifindex_next: crate::ospf::link::VL_IFINDEX_BASE,
+            stub_router_admin: false,
+            stub_router_startup_active: false,
+            stub_router_startup_timer: None,
+            lsa_gen: std::collections::HashMap::new(),
+            restarting: None,
+            key_chains: BTreeMap::new(),
+            policy_tx,
+            policy_rx: policy_chan.rx,
+            spf_last: None,
+            spf_duration: None,
+            redist_v4: BTreeMap::new(),
+            redist_v6: BTreeMap::new(),
+            redist: BTreeMap::new(),
+            redist_route_map: BTreeMap::new(),
+            policy_lists: BTreeMap::new(),
+            redist_table: BTreeMap::new(),
+            redist_table_route_map: BTreeMap::new(),
+            redist_table_v4: BTreeMap::new(),
+            redist_table_originated: BTreeMap::new(),
+            redist_originated: BTreeMap::new(),
+            redist_originated_v6: BTreeMap::new(),
+            default_originate: None,
+            default_originated: false,
+            default_originated_v6: false,
+            default_watch_active: false,
+            flex_algo: crate::flex_algo::FlexAlgoConfig::new(Ospfv2::FLEX_ALGO_PREFIX),
+            affinity_map: crate::flex_algo::AffinityMap::new(),
+            srlg_config: crate::flex_algo::SrlgGroupBuilder::new(),
+            srlg_groups: BTreeMap::new(),
+            sock,
+            v3_send_tx: None,
+            v3_recv_rx: None,
+            proto_label,
+            rib_subscriber,
+            config_tx,
+            vrf_log: BTreeMap::new(),
+            vrf_registry: BTreeMap::new(),
+            rib_known_vrfs: BTreeMap::new(),
+            interface_config_log: BTreeMap::new(),
+            bfd_client_tx,
+            bfd_event_tx,
+            bfd_event_rx,
+            stamp_client_tx,
+            stamp_event_tx,
+            stamp_event_rx,
+        }
+    }
+
+    /// A Router Information LSA that ages out takes its Flexible Algorithm
+    /// definitions with it. If it held the winner, participation and the
+    /// algorithm's forwarding state must be recomputed at once, as on any
+    /// other change, not left until an unrelated event runs SPF.
+    #[tokio::test]
+    async fn an_expiring_definition_schedules_spf() {
+        let mut top = fresh_ospf();
+        top.router_id = rid(1);
+        top.segment_routing = super::super::srmpls::SegmentRoutingMode::Mpls;
+        top.flex_algo.config.insert(128, Default::default());
+        let lsa = super::super::srmpls::router_info_lsa_build(
+            rid(2),
+            false,
+            vec![Algo::Spf, Algo::FlexAlgo(128)],
+            vec![fad(128, 200)],
+        );
+        let key = super::super::lsdb::v2_lsa_key(lsa.h.ls_type, lsa.h.ls_id, rid(2));
+        top.areas
+            .get_mut(AREA0)
+            .unwrap()
+            .lsdb
+            .install_lsa(lsa, &top.tx, Some(AREA0), &top.tracing);
+        top.router_info_lsa_originate();
+        assert!(top.flex_algo_advertised.contains(&128));
+        assert!(top.areas.get(AREA0).unwrap().spf_timer.is_none());
+
+        top.process_lsdb(LsdbEvent::HoldTimerExpire, Some(AREA0), key);
+        assert!(flex_algo_selection(&top, AREA0)[&128].winner.is_none());
+        let mut scheduled = top.areas.get(AREA0).unwrap().spf_timer.is_some();
+        while let Ok(msg) = top.rx.try_recv() {
+            scheduled |= matches!(msg, Message::SpfSchedule(_));
+        }
+        assert!(
+            scheduled,
+            "the winning definition expired, and nothing recomputes"
+        );
     }
 }
 
