@@ -7,7 +7,7 @@ MUP/Flowspec/SR-Policy/RTC where they share the machinery). Reviewed
 against `main` at `2f1e9a09` (2026-09-07). Line numbers are as of that
 commit.
 
-Status (2026-09-25): seventeen items are fixed on `main` — #1 (PR
+Status (2026-09-25): eighteen items are fixed on `main` — #1 (PR
 #2372, merge `3beacbcc`), the listen-range peer-type item found while
 fixing it (PR #2373, `ba327126`), #2 (PR #2375, `308b196a`), #3 (PR
 #2376, `b8fef738`), #4 (PR #2377, `1cc31738`, which also closed the
@@ -17,9 +17,10 @@ follow-ups), #7 (PR #2380, `d7476601`), #8 and with it #13 (PR #2383,
 `d72a06af`, eight review rounds folded in), #9 (PR #2405, `31f7458a`),
 #15 (PR #2413, `097ce15d`), #11 (PR #2415, `3401cb1b`), #12 (PR #2417,
 `4ba79217`), the item found while fixing #12 (PR #2418, `6b53ad6a`), #14
-(PR #2420, `49fb77b1`) and #20 (PR #2422, `d8f6a0cf`). Each fixed entry
-ends with its fix note; everything else is open. #10 (MED order
-dependence) is fixed on branch `bgp-med-order-independent`.
+(PR #2420, `49fb77b1`), #20 (PR #2422, `d8f6a0cf`) and #10 with the MED
+knobs (PR #2423, `7852fc15`). Each fixed entry ends with its fix note;
+everything else is open. In progress: #16 (IPv6 AddPath event path
+skipped outbound policy), branch `bgp-v6-addpath-policy-out`.
 
 Method: one lead read the selection ladder and every egress builder, then
 five independent read-only reviewers each took one dimension (update-group
@@ -774,7 +775,7 @@ cap. The two reviews agree on every overlapping item.
   non-BDD workspace tests, strict workspace Clippy, formatting and
   diff checks pass.
 
-### 10. P2 CONFIRMED (probe), FIXED on branch `bgp-med-order-independent` — MED comparison is order-dependent, and an unchanged re-advertisement rotates the winner
+### 10. P2 CONFIRMED (probe), FIXED in #2423 — MED comparison is order-dependent, and an unchanged re-advertisement rotates the winner
 
 - `route.rs:2182-2190` scans candidates linearly with pairwise
   `is_better`; MED is compared only within one neighboring AS
@@ -1184,6 +1185,23 @@ cap. The two reviews agree on every overlapping item.
   community`/`set med` absent on every event-driven AddPath UPDATE.
 - Fix direction: call `route_apply_policy_out_v6` in the loop, as the LU
   generic (`13878`) does.
+- Gates (branch `bgp-v6-addpath-policy-out`; each compiles on `main` and
+  fails there, except the control). Unit, route.rs
+  `v6_addpath_policy_out_tests`, through `route_from_peer`:
+  `addpath_v6_event_path_applies_a_deny_out_policy` (an AddPath-send
+  neighbor with a deny-all IPv6 out-policy: on `main` the prefix is
+  recorded as sent and queued), `addpath_v6_event_path_applies_out_policy_rewrites`
+  (a permit entry setting MED 50: on `main` the queued attribute has no
+  MED), `addpath_v6_path_the_policy_starts_denying_is_withdrawn` (sent,
+  then replaced by a path the policy denies: on `main` the replacement is
+  sent too); control `plain_v6_neighbor_with_a_deny_out_policy_is_filtered`.
+  BDD `bgp_addpath_policy_out_v6`: z1 sends IPv6 unicast to z2 with
+  AddPath through an out-policy that denies one prefix and sets MED 50
+  on the rest; z1 and z2 establish before the scripted h1 announces
+  both prefixes, so they travel the route-change path. On `main` it
+  fails: z2 holds the denied prefix and neither carries MED 50 (checked
+  by hand on the kept topology). Its IPv4 twin `bgp_addpath_policy_out`
+  is the control and passes on `main`.
 
 ### 17. P2 CONFIRMED — v4-unicast / VPNv4 / VPNv6 AddPath: a replaced candidate that becomes egress-filtered (or LLGR-stale) is never withdrawn
 

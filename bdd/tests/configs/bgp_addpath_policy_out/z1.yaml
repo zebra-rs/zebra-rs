@@ -1,0 +1,48 @@
+# z1 (DUT, AS 65001): learns two IPv4 prefixes from the scripted speaker h1
+# and sends them to z2 with AddPath. The out-policy toward z2 denies
+# 10.58.1.0/24 and sets MED 50 on everything else.
+prefix-set:
+- name: DENY-P
+  prefixes:
+  - prefix: 10.58.1.0/24
+policy:
+- name: OUT-Z2
+  entry:
+  - number: 10
+    action: deny
+    match:
+      prefix-set: DENY-P
+  - number: 20
+    action: permit
+    set:
+      med:
+        set: 50
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.58.1
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    # The scripted speaker never listens on 179: passive keeps this peer
+    # in Active so the script's connect is accepted.
+    - remote-address: 192.168.58.2
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65061
+      transport:
+        passive-mode: true
+    - remote-address: 192.168.58.3
+      afi-safi:
+      - name: ipv4
+        enabled: true
+        add-path: send-receive
+        policy:
+          out: OUT-Z2
+      enabled: true
+      remote-as: 65062
