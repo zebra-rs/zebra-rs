@@ -19,9 +19,10 @@ use super::srlg::SrlgGroup;
 // / inst.rs) keep resolving. Only the isis-packet wire builders and the
 // IS-IS callback shims below stay here.
 pub use crate::flex_algo::{
-    FadMetricType, FlexAlgoConfig, FlexAlgoEntry, link_passes_fad, local_link_affinity,
-    sr_algorithms,
+    FadConstraints, FadMetricType, FlexAlgoConfig, FlexAlgoEntry, Participation, Unsupported,
+    link_passes_constraints, local_link_affinity,
 };
+use isis_packet::IsisSysId;
 
 /// Extract per-algorithm Prefix-SIDs from a peer-advertised Ext IP-
 /// Reach entry. Yields one (algo, sid) pair for each Prefix-SID
@@ -293,6 +294,7 @@ pub fn build_fad_subs(
         if entry.prefix_metric == Some(true) {
             subs.push(FadSubTlv::Flags(IsisSubFadFlags {
                 m_flag: true,
+                other: 0,
                 trailing: Vec::new(),
             }));
         }
@@ -318,6 +320,197 @@ pub fn build_fad_subs(
         });
     }
     out
+}
+
+// ── Winning-FAD selection and participation (RFC 9350 §5.3) ───────
+//
+// Every router configured for a Flexible Algorithm computes it with the
+// *winning* definition — the one every participant selects from the same
+// LSDB — not with its own configuration, and stops participating when it
+// cannot support everything in that definition. Computing with local
+// config instead lets two routers build different topologies for one
+// algorithm, and Flex-Algo forwarding then loops.
+
+/// Whether one FAD sub-TLV counts at all. RFC 9350 §5.3: an algorithm
+/// outside 128..=255 "MUST be ignored". §6.1–§6.5: each constraint
+/// sub-TLV "MUST NOT appear more than once in a single IS-IS FAD sub-TLV.
+/// If it appears more than once, the IS-IS FAD sub-TLV MUST be ignored".
+fn fad_valid(fad: &IsisSubFlexAlgoDef) -> bool {
+    if fad.flex_algorithm < 128 {
+        return false;
+    }
+    let mut seen = [false; 5];
+    for sub in &fad.subs {
+        let slot = match sub {
+            FadSubTlv::ExcludeAg(_) => 0,
+            FadSubTlv::IncludeAnyAg(_) => 1,
+            FadSubTlv::IncludeAllAg(_) => 2,
+            FadSubTlv::Flags(_) => 3,
+            FadSubTlv::ExcludeSrlg(_) => 4,
+            FadSubTlv::Unknown(_) => continue,
+        };
+        if std::mem::replace(&mut seen[slot], true) {
+            return false;
+        }
+    }
+    true
+}
+
+/// One router's FAD sub-TLVs, in LSP order (lowest fragment first), merged
+/// per algorithm as RFC 9350 §6 requires of "the set of FAD sub-TLVs for a
+/// given Flex-Algorithm from a given IS":
+///
+/// - invalid sub-TLVs ([`fad_valid`]) are ignored;
+/// - the first valid one supplies the header (metric-type, calc-type,
+///   priority);
+/// - for each constraint, "the first occurrence in the lowest-numbered LSP
+///   ... MUST be used, and any other occurrences MUST be ignored", except
+///   Exclude SRLG, which "MAY appear more than once in the set" and so
+///   accumulates;
+/// - unknown sub-TLVs are all kept: any one of them stops participation.
+pub fn merge_fads<'a>(
+    fads: impl IntoIterator<Item = &'a IsisSubFlexAlgoDef>,
+) -> BTreeMap<u8, IsisSubFlexAlgoDef> {
+    let mut merged: BTreeMap<u8, IsisSubFlexAlgoDef> = BTreeMap::new();
+    for fad in fads.into_iter().filter(|f| fad_valid(f)) {
+        let Some(into) = merged.get_mut(&fad.flex_algorithm) else {
+            merged.insert(fad.flex_algorithm, fad.clone());
+            continue;
+        };
+        for sub in &fad.subs {
+            let present = into
+                .subs
+                .iter()
+                .any(|have| std::mem::discriminant(have) == std::mem::discriminant(sub));
+            let accumulates = matches!(sub, FadSubTlv::ExcludeSrlg(_) | FadSubTlv::Unknown(_));
+            if accumulates || !present {
+                into.subs.push(sub.clone());
+            }
+        }
+    }
+    merged
+}
+
+/// The winning definition for one algorithm and who originated it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FadWinner {
+    pub originator: IsisSysId,
+    pub fad: IsisSubFlexAlgoDef,
+}
+
+/// RFC 9350 §5.3: among the definitions advertised in the level — this
+/// router's own included, when it advertises one — the numerically
+/// greatest priority wins, then the numerically greatest System-ID.
+/// Deterministic over the LSDB, so every router reaches the same winner.
+pub fn winning_fad(
+    algo: u8,
+    peer_fad: &BTreeMap<IsisSysId, BTreeMap<u8, IsisSubFlexAlgoDef>>,
+    own: &BTreeMap<u8, IsisSubFlexAlgoDef>,
+    self_sys_id: &IsisSysId,
+) -> Option<FadWinner> {
+    let peers = peer_fad
+        .iter()
+        .filter_map(|(sys_id, fads)| fads.get(&algo).map(|f| (*sys_id, f)));
+    let local = own.get(&algo).map(|f| (*self_sys_id, f));
+    peers
+        .chain(local)
+        .max_by(|(a_id, a), (b_id, b)| (a.priority, a_id).cmp(&(b.priority, b_id)))
+        .map(|(originator, fad)| FadWinner {
+            originator,
+            fad: fad.clone(),
+        })
+}
+
+/// The constraints to compute with, or the first element of the winning
+/// definition this router does not support (RFC 9350 §5.3).
+pub fn fad_constraints(fad: &IsisSubFlexAlgoDef) -> Result<FadConstraints, Unsupported> {
+    if fad.calc_type != 0 {
+        return Err(Unsupported::CalcType(fad.calc_type));
+    }
+    let metric_type = FadMetricType::supported(fad.metric_type)
+        .ok_or(Unsupported::MetricType(fad.metric_type))?;
+    let mut c = FadConstraints {
+        metric_type,
+        ..Default::default()
+    };
+    for sub in &fad.subs {
+        match sub {
+            FadSubTlv::ExcludeAg(v) => c.exclude_any = v.group.clone(),
+            FadSubTlv::IncludeAnyAg(v) => c.include_any = v.group.clone(),
+            FadSubTlv::IncludeAllAg(v) => c.include_all = v.group.clone(),
+            FadSubTlv::Flags(f) if f.m_flag => return Err(Unsupported::PrefixMetric),
+            FadSubTlv::Flags(f) if f.has_unknown() => return Err(Unsupported::Flag),
+            FadSubTlv::Flags(_) => {}
+            // Per-link SRLGs are not read, so the rule cannot be enforced;
+            // an empty list excludes nothing.
+            FadSubTlv::ExcludeSrlg(v) if !v.srlgs.is_empty() => {
+                return Err(Unsupported::ExcludeSrlg);
+            }
+            FadSubTlv::ExcludeSrlg(_) => {}
+            FadSubTlv::Unknown(u) => return Err(Unsupported::SubTlv(u.code.into())),
+        }
+    }
+    Ok(c)
+}
+
+/// One configured algorithm at one level: the winning definition, if any,
+/// and whether this router participates.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FadSelection {
+    pub winner: Option<FadWinner>,
+    pub participation: Participation,
+}
+
+/// Selection for every algorithm this router is configured for, at the
+/// level whose received definitions are `peer_fad`. Algorithms nobody here
+/// is configured for are ignored, as RFC 9350 §5.3 requires.
+pub fn fad_selection(
+    fa: &FlexAlgoConfig,
+    am: &AffinityMap,
+    srlg_groups: &BTreeMap<String, SrlgGroup>,
+    peer_fad: &BTreeMap<IsisSysId, BTreeMap<u8, IsisSubFlexAlgoDef>>,
+    self_sys_id: &IsisSysId,
+) -> BTreeMap<u8, FadSelection> {
+    let own = merge_fads(&build_fad_subs(fa, am, srlg_groups));
+    fa.config
+        .keys()
+        .map(|&algo| {
+            let winner = winning_fad(algo, peer_fad, &own, self_sys_id);
+            let participation = match &winner {
+                None => Participation::No(Unsupported::NoDefinition),
+                Some(w) => match fad_constraints(&w.fad) {
+                    Ok(c) => Participation::Yes(c),
+                    Err(why) => Participation::No(why),
+                },
+            };
+            (
+                algo,
+                FadSelection {
+                    winner,
+                    participation,
+                },
+            )
+        })
+        .collect()
+}
+
+/// The algorithms a selection participates in.
+pub fn participating(selection: &BTreeMap<u8, FadSelection>) -> BTreeSet<u8> {
+    selection
+        .iter()
+        .filter(|(_, s)| matches!(s.participation, Participation::Yes(_)))
+        .map(|(algo, _)| *algo)
+        .collect()
+}
+
+/// The SR-Algorithm list (RFC 8667 §3.2) for a level: algorithm 0, plus
+/// every Flexible Algorithm this router participates in there. Not every
+/// configured one: "it MUST NOT announce participation" in an algorithm it
+/// cannot support (RFC 9350 §5.3).
+pub fn sr_algorithms_participating(participating: &BTreeSet<u8>) -> Vec<Algo> {
+    std::iter::once(Algo::Spf)
+        .chain(participating.iter().map(|&n| Algo::FlexAlgo(n)))
+        .collect()
 }
 
 // ── Wiring into the existing IS-IS callback dispatcher ────────────
@@ -898,6 +1091,225 @@ mod tests {
         // AdminGrp first (affinity), then the delay sub-TLV.
         assert!(matches!(asla.subs[0], NeighSubTlv::AdminGrp(_)));
         assert!(matches!(asla.subs[1], NeighSubTlv::MinMaxLinkDelay(_)));
+    }
+
+    // ── Winning-FAD selection and participation (RFC 9350 §5.3) ──
+
+    fn sys(n: u8) -> IsisSysId {
+        IsisSysId {
+            id: [0, 0, 0, 0, 0, n],
+        }
+    }
+
+    fn fad(algo: u8, priority: u8, subs: Vec<FadSubTlv>) -> IsisSubFlexAlgoDef {
+        IsisSubFlexAlgoDef {
+            flex_algorithm: algo,
+            metric_type: 0,
+            calc_type: 0,
+            priority,
+            subs,
+        }
+    }
+
+    fn exclude(bit: u16) -> FadSubTlv {
+        let mut group = ExtAdminGroup::default();
+        group.set(bit);
+        FadSubTlv::ExcludeAg(IsisSubFadExcludeAg { group })
+    }
+
+    fn flags(m_flag: bool, other: u8) -> FadSubTlv {
+        FadSubTlv::Flags(IsisSubFadFlags {
+            m_flag,
+            other,
+            trailing: Vec::new(),
+        })
+    }
+
+    fn peers(
+        list: &[(u8, IsisSubFlexAlgoDef)],
+    ) -> BTreeMap<IsisSysId, BTreeMap<u8, IsisSubFlexAlgoDef>> {
+        let mut map: BTreeMap<IsisSysId, BTreeMap<u8, IsisSubFlexAlgoDef>> = BTreeMap::new();
+        for (n, f) in list {
+            map.entry(sys(*n))
+                .or_default()
+                .insert(f.flex_algorithm, f.clone());
+        }
+        map
+    }
+
+    /// RFC 9350 §5.3: the greatest priority wins; a tie goes to the
+    /// greatest System-ID; this router's own definition competes like any
+    /// other.
+    #[test]
+    fn the_winning_fad_is_greatest_priority_then_system_id() {
+        let own = BTreeMap::from([(128, fad(128, 150, vec![]))]);
+        let p = peers(&[(2, fad(128, 200, vec![])), (3, fad(128, 200, vec![]))]);
+        let w = winning_fad(128, &p, &own, &sys(9)).expect("winner");
+        assert_eq!(
+            (w.originator, w.fad.priority),
+            (sys(3), 200),
+            "tie → greater id"
+        );
+
+        let own = BTreeMap::from([(128, fad(128, 200, vec![]))]);
+        let w = winning_fad(128, &p, &own, &sys(1)).expect("winner");
+        assert_eq!(w.originator, sys(3), "our own ties, and loses on System-ID");
+
+        let own = BTreeMap::from([(128, fad(128, 201, vec![]))]);
+        let w = winning_fad(128, &p, &own, &sys(1)).expect("winner");
+        assert_eq!(w.originator, sys(1), "our own higher priority wins");
+
+        assert_eq!(
+            winning_fad(129, &p, &own, &sys(1)),
+            None,
+            "nobody defines 129"
+        );
+    }
+
+    /// RFC 9350 §6: one router's definitions are merged. A FAD sub-TLV
+    /// with a constraint twice, or an algorithm below 128, is ignored; the
+    /// first header wins; each constraint's first occurrence wins; Exclude
+    /// SRLG and unknown sub-TLVs accumulate.
+    #[test]
+    fn a_routers_fads_merge_as_rfc_9350_section_6_says() {
+        let srlg = |id| FadSubTlv::ExcludeSrlg(IsisSubFadExcludeSrlg { srlgs: vec![id] });
+        let unknown = |code| {
+            FadSubTlv::Unknown(isis_packet::IsisSubTlvUnknown {
+                code,
+                len: 0,
+                data: vec![],
+            })
+        };
+        let merged = merge_fads(&[
+            fad(127, 255, vec![]),
+            fad(128, 250, vec![exclude(1), exclude(2)]), // invalid: twice
+            fad(128, 100, vec![exclude(3), srlg(10), unknown(200)]),
+            fad(128, 200, vec![exclude(4), srlg(11), unknown(201)]),
+        ]);
+        assert!(!merged.contains_key(&127), "algorithm 127 is ignored");
+        let m = &merged[&128];
+        assert_eq!(m.priority, 100, "the first valid header");
+        assert_eq!(
+            m.subs,
+            vec![exclude(3), srlg(10), unknown(200), srlg(11), unknown(201)]
+        );
+    }
+
+    /// RFC 9350 §5.3: every element of the winning definition must be
+    /// supported, or the router stops participating.
+    #[test]
+    fn an_unsupported_winning_fad_stops_participation() {
+        let base = fad(128, 128, vec![exclude(5)]);
+        let c = fad_constraints(&base).expect("supported");
+        assert!(c.exclude_any.get(5));
+        assert_eq!(c.metric_type, FadMetricType::Igp);
+
+        let with = |f: IsisSubFlexAlgoDef| fad_constraints(&f);
+        let mut calc = base.clone();
+        calc.calc_type = 1;
+        assert_eq!(with(calc), Err(Unsupported::CalcType(1)));
+        let mut te = base.clone();
+        te.metric_type = 2;
+        assert_eq!(with(te), Err(Unsupported::MetricType(2)), "TE-default");
+        let mut delay = base.clone();
+        delay.metric_type = 1;
+        assert_eq!(
+            with(delay).map(|c| c.metric_type),
+            Ok(FadMetricType::MinUnidirLinkDelay)
+        );
+        assert_eq!(
+            with(fad(128, 128, vec![flags(true, 0)])),
+            Err(Unsupported::PrefixMetric)
+        );
+        assert_eq!(
+            with(fad(128, 128, vec![flags(false, 0x01)])),
+            Err(Unsupported::Flag)
+        );
+        assert!(
+            with(fad(128, 128, vec![flags(false, 0)])).is_ok(),
+            "no flag set"
+        );
+        let srlg = |ids: Vec<u32>| FadSubTlv::ExcludeSrlg(IsisSubFadExcludeSrlg { srlgs: ids });
+        assert_eq!(
+            with(fad(128, 128, vec![srlg(vec![7])])),
+            Err(Unsupported::ExcludeSrlg)
+        );
+        assert!(
+            with(fad(128, 128, vec![srlg(vec![])])).is_ok(),
+            "excludes nothing"
+        );
+        let unknown = FadSubTlv::Unknown(isis_packet::IsisSubTlvUnknown {
+            code: 252,
+            len: 3,
+            data: vec![0, 0, 1],
+        });
+        assert_eq!(
+            with(fad(128, 128, vec![unknown])),
+            Err(Unsupported::SubTlv(252))
+        );
+    }
+
+    /// Selection covers configured algorithms only, computes with the
+    /// *winner's* constraints — not this router's configuration — and an
+    /// unadvertised local definition is no candidate: with none advertised
+    /// anywhere, the router does not participate.
+    #[test]
+    fn selection_computes_with_the_winner_not_local_config() {
+        let mut fa = FlexAlgoConfig::new("/router/isis/flex-algo");
+        for (path, args_) in [
+            ("/router/isis/flex-algo/priority", &["128", "100"][..]),
+            ("/router/isis/flex-algo/priority", &["129", "100"]),
+        ] {
+            fa.exec(path.into(), args(args_), ConfigOp::Set).unwrap();
+            fa.commit();
+        }
+        let am = AffinityMap::new();
+        let srlg = BTreeMap::new();
+        let p = peers(&[
+            (2, fad(128, 200, vec![exclude(7)])),
+            (2, fad(130, 200, vec![])),
+        ]);
+        let sel = fad_selection(&fa, &am, &srlg, &p, &sys(1));
+
+        assert_eq!(
+            sel.keys().copied().collect::<Vec<_>>(),
+            vec![128, 129],
+            "130 is not ours"
+        );
+        let c = sel[&128]
+            .participation
+            .constraints()
+            .expect("participating");
+        assert!(c.exclude_any.get(7), "the peer's definition, not ours");
+        assert_eq!(
+            sel[&128].winner.as_ref().map(|w| w.originator),
+            Some(sys(2))
+        );
+        assert_eq!(
+            sel[&129].participation,
+            Participation::No(Unsupported::NoDefinition),
+            "our definition is not advertised"
+        );
+        assert_eq!(participating(&sel), BTreeSet::from([128]));
+        assert_eq!(
+            sr_algorithms_participating(&participating(&sel)),
+            vec![Algo::Spf, Algo::FlexAlgo(128)]
+        );
+
+        // Advertising it makes it a candidate, and ours is the only one.
+        fa.exec(
+            "/router/isis/flex-algo/advertise-definition".into(),
+            args(&["129", "true"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        fa.commit();
+        let sel = fad_selection(&fa, &am, &srlg, &p, &sys(1));
+        assert!(matches!(sel[&129].participation, Participation::Yes(_)));
+        assert_eq!(
+            sel[&129].winner.as_ref().map(|w| w.originator),
+            Some(sys(1))
+        );
     }
 
     #[test]

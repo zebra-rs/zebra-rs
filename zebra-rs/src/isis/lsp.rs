@@ -993,6 +993,25 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
     // get their own seq from the LSDB at emit time.
     let frag0_id = IsisLspId::new(top.config.net.sys_id(), 0, 0);
 
+    // The Flexible Algorithms this router participates in at this level,
+    // after winning-FAD selection (RFC 9350 §5.3). Only these are
+    // announced — SR-Algorithm, per-algorithm SRv6 locators, End.X SIDs
+    // and Prefix-SIDs: a router that cannot support the winning definition
+    // "MUST NOT announce participation".
+    let participating = super::flex_algo::participating(&super::flex_algo::fad_selection(
+        top.flex_algo,
+        top.affinity_map,
+        top.srlg_groups,
+        top.peer_fad.get(&level),
+        &top.config.net.sys_id(),
+    ));
+    let algo_locators: std::collections::BTreeMap<u8, Locator> = top
+        .sr_flex_algo_locators
+        .iter()
+        .filter(|(algo, _)| participating.contains(algo))
+        .map(|(algo, loc)| (*algo, loc.clone()))
+        .collect();
+
     // ISO 10589 §7.3.16.4: when fragment 0's previous origination's
     // seq hit 0xFFFFFFFF we sent a purge and armed a freeze. While
     // that freeze is active we must not emit any of the LSP set —
@@ -1180,7 +1199,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
             // we participate in (RFC 9350 §5.2 requires participants
             // to advertise here, not just FAD originators).
             let algo = IsisSubSegmentRoutingAlgo {
-                algo: super::flex_algo::sr_algorithms(top.flex_algo),
+                algo: super::flex_algo::sr_algorithms_participating(&participating),
             };
             cap.subs.push(algo.into());
 
@@ -1203,9 +1222,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
         // we don't claim SRv6 capability. Including the per-algo
         // locators here lets an SRv6-only Flex-Algo config advertise its
         // SR-Algorithm participation even without a base locator.
-        if top.config.sr_srv6_enabled
-            && (top.sr_locator.is_some() || !top.sr_flex_algo_locators.is_empty())
-        {
+        if top.config.sr_srv6_enabled && (top.sr_locator.is_some() || !algo_locators.is_empty()) {
             let srv6 = IsisSubSrv6::default();
             cap.subs.push(srv6.into());
 
@@ -1213,7 +1230,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
             // we still need to advertise the algorithm list once.
             if !top.config.sr_mpls_enabled {
                 let algo = IsisSubSegmentRoutingAlgo {
-                    algo: super::flex_algo::sr_algorithms(top.flex_algo),
+                    algo: super::flex_algo::sr_algorithms_participating(&participating),
                 };
                 cap.subs.push(algo.into());
             }
@@ -1337,7 +1354,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
             subs,
         });
     }
-    for (&algo, locator) in top.sr_flex_algo_locators.iter() {
+    for (&algo, locator) in algo_locators.iter() {
         let Some(end_sid) = top.sr_flex_algo_end_sid.get(&algo).copied() else {
             continue;
         };
@@ -1496,7 +1513,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
             // algo-N adjacency segments.
             is_reach
                 .subs
-                .extend(srv6_algo_endx_subs(nbr, top.sr_flex_algo_locators));
+                .extend(srv6_algo_endx_subs(nbr, &algo_locators));
         }
 
         ext_is_reach.entries.push(is_reach);
@@ -1649,9 +1666,7 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
                 }
 
                 // Per-Flex-Algorithm End.X (adjacency) SIDs (Algorithm = N).
-                entry
-                    .subs
-                    .extend(srv6_algo_endx_subs(nbr, top.sr_flex_algo_locators));
+                entry.subs.extend(srv6_algo_endx_subs(nbr, &algo_locators));
             }
             mt2_entries.push(entry);
         }
@@ -1698,8 +1713,15 @@ pub fn lsp_generate(top: &mut IsisTop, level: Level, seq_floor: Option<u32>) -> 
                     // the same IP-reach entry as the algo-0 SID so a
                     // receiver can resolve any of {0, N1, N2, ...}
                     // for this prefix from a single TLV.
+                    let participating_sids = link
+                        .config
+                        .ipv4_flex_algo_prefix_sids
+                        .iter()
+                        .filter(|(algo, _)| participating.contains(algo))
+                        .map(|(algo, sid)| (*algo, sid.clone()))
+                        .collect();
                     let per_algo_sids = super::flex_algo::build_per_algo_prefix_sids(
-                        &link.config.ipv4_flex_algo_prefix_sids,
+                        &participating_sids,
                         prefix.prefix_len() == 32,
                     );
                     let has_subs = sub_tlv.is_some() || !per_algo_sids.is_empty();

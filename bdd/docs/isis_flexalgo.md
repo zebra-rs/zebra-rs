@@ -14,7 +14,10 @@ link colors:
 
 The FAD (Flex-Algorithm Definition) for both algorithms is originated by
 the Chicago (ch) router; every other router participates without
-advertising a FAD.
+advertising a FAD. Every router computes with the winning definition
+(RFC 9350 §5.3) — the greatest priority, then the greatest System-ID —
+not its own configuration, and stops participating in an algorithm whose
+winning definition asks for something it cannot support.
 
 Topology (all links point-to-point; default metric 10):
 
@@ -35,4 +38,6 @@ Per-algo prefix-SIDs (SRGB base 16000):
 | Algo 128 (US-only) route table contains only US-region nodes | |
 | Algo 129 (EU-only) route table contains only EU-region nodes | |
 | Default algo-0 topology has full-mesh connectivity | |
+| Every router computes with the winning definition | |
+| A router that cannot support the winning definition stops participating | |
 | Teardown Flex-Algo topology | |
