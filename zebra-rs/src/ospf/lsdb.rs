@@ -478,18 +478,45 @@ impl<V: OspfVersion> Lsdb<V> {
         tx: &UnboundedSender<Message<V>>,
         area_id: Option<Ipv4Addr>,
     ) {
-        let lsa_key: OspfLsaKey = v2_lsa_key(ls_type, ls_id, adv_router);
-        if let Some(old_lsa) = self.tables.get(&lsa_key) {
-            let mut new_data = old_lsa.data.clone();
-            let h = V::lsa_header_mut(&mut new_data);
-            V::set_ls_seq_number(h, V::ls_seq_number(h) + 1);
-            V::set_ls_age(h, 0);
-            V::update_lsa(&mut new_data);
-            let mut lsa = Lsa::<V>::new(new_data);
-            lsa.originated = true;
-            lsa.hold_timer = Some(hold_timer(tx, area_id, lsa_key, 0));
-            lsa.refresh_timer = Some(refresh_timer(tx, area_id, lsa_key));
-            self.tables.insert(lsa_key, lsa);
+        self.refresh_lsa_by_raw_key(v2_lsa_key(ls_type, ls_id, adv_router), tx, area_id);
+    }
+
+    /// `refresh_lsa` by the flat 3-tuple key — v3 carries `ls_type` as a
+    /// raw `u16`. Returns the refreshed LSA, for flooding.
+    pub fn refresh_lsa_by_raw_key(
+        &mut self,
+        lsa_key: OspfLsaKey,
+        tx: &UnboundedSender<Message<V>>,
+        area_id: Option<Ipv4Addr>,
+    ) -> Option<V::Lsa> {
+        let old_lsa = self.tables.get(&lsa_key)?;
+        let mut new_data = old_lsa.data.clone();
+        let h = V::lsa_header_mut(&mut new_data);
+        V::set_ls_seq_number(h, V::ls_seq_number(h) + 1);
+        V::set_ls_age(h, 0);
+        V::update_lsa(&mut new_data);
+        let mut lsa = Lsa::<V>::new(new_data.clone());
+        lsa.originated = true;
+        lsa.hold_timer = Some(hold_timer(tx, area_id, lsa_key, 0));
+        lsa.refresh_timer = Some(refresh_timer(tx, area_id, lsa_key));
+        self.tables.insert(lsa_key, lsa);
+        Some(new_data)
+    }
+
+    /// Remove the LSA at `lsa_key` if its age has reached MaxAge — its hold
+    /// timer fired. A timer message still in flight for an instance
+    /// replaced since finds the fresh copy young, and leaves it. Returns
+    /// whether it was removed.
+    pub fn remove_expired_by_raw_key(&mut self, lsa_key: OspfLsaKey) -> bool {
+        if self
+            .tables
+            .get(&lsa_key)
+            .is_some_and(|lsa| lsa.current_age() >= OSPF_MAX_AGE)
+        {
+            self.tables.remove(&lsa_key);
+            true
+        } else {
+            false
         }
     }
 

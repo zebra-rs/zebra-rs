@@ -10077,6 +10077,94 @@ impl Ospf<Ospfv3> {
     /// AS-scope flood for v3. Walks every non-stub / non-NSSA
     /// area attached to this router and re-floods the LSA on each
     /// using the existing per-area flood path.
+    /// Re-originate a self-originated LSA at LSRefreshTime, contents
+    /// changed or not, so no router ever sees it reach MaxAge (RFC 2328
+    /// §12.4, as RFC 5340 keeps it) — the v3 twin of v2's
+    /// `RefreshTimerExpire` handling. v3 used to drop the event, so every
+    /// other router aged our LSAs out an hour after we last originated
+    /// them. A former identity's LSAs are left to age out.
+    fn lsa_refresh_v3(&mut self, area_id: Option<Ipv4Addr>, key: super::lsdb::OspfLsaKey) {
+        use super::packet_v3::{Ospfv3LsaScope, ospfv3_ls_type_scope};
+        let (ls_type, ls_id, adv_router) = key;
+        if adv_router != self.router_id {
+            return;
+        }
+        match ospfv3_ls_type_scope(ls_type) {
+            Ospfv3LsaScope::Area => {
+                let Some(area_id) = area_id else {
+                    return;
+                };
+                let refreshed = self.areas.get_mut(area_id).and_then(|area| {
+                    area.lsdb
+                        .refresh_lsa_by_raw_key(key, &self.tx, Some(area_id))
+                });
+                if let Some(lsa) = refreshed {
+                    self.flood_self_originated_lsa(area_id, &lsa);
+                }
+            }
+            Ospfv3LsaScope::As => {
+                if let Some(lsa) = self.lsdb_as.refresh_lsa_by_raw_key(key, &self.tx, None) {
+                    self.flood_lsa_through_as_v3(&lsa, None);
+                }
+            }
+            // A Link-LSA lives in its interface's own LSDB; its originator
+            // rebuilds and floods it there (`interface_id` = ifindex).
+            Ospfv3LsaScope::Link if ls_type == ospf_packet::OSPFV3_LINK_LSA_TYPE => {
+                self.link_lsa_originate(ls_id);
+            }
+            Ospfv3LsaScope::Link | Ospfv3LsaScope::Reserved => {}
+        }
+    }
+
+    /// An LSA whose age reached MaxAge leaves the LSDB, and what it
+    /// described leaves the routing computation (RFC 2328 §14, as RFC 5340
+    /// keeps it) — the v3 twin of v2's `HoldTimerExpire` handling. v3 used
+    /// to drop the event, so a router that vanished without flushing left
+    /// its LSAs, its routes and its Segment Routing state in place for
+    /// good.
+    fn lsa_expire_v3(&mut self, area_id: Option<Ipv4Addr>, key: super::lsdb::OspfLsaKey) {
+        use super::packet_v3::{Ospfv3LsaScope, ospfv3_ls_type_scope};
+        let (ls_type, _, _) = key;
+        match ospfv3_ls_type_scope(ls_type) {
+            Ospfv3LsaScope::Area => {
+                if let Some(area_id) = area_id
+                    && self
+                        .areas
+                        .get_mut(area_id)
+                        .is_some_and(|area| area.lsdb.remove_expired_by_raw_key(key))
+                {
+                    self.spf_schedule_area(area_id);
+                }
+            }
+            Ospfv3LsaScope::As => {
+                if self.lsdb_as.remove_expired_by_raw_key(key) {
+                    let _ = self.tx.send(Message::SpfSchedule(None));
+                }
+            }
+            // Link scope: the entry lives in one of the area's interfaces'
+            // LSDBs. A peer's Link-LSA going is re-evaluated as its
+            // arrival is.
+            Ospfv3LsaScope::Link => {
+                let ifindexes: Vec<u32> = self
+                    .links
+                    .iter()
+                    .filter(|(_, link)| Some(link.area) == area_id)
+                    .map(|(ifindex, _)| *ifindex)
+                    .collect();
+                for ifindex in ifindexes {
+                    let removed = self
+                        .links
+                        .get_mut(&ifindex)
+                        .is_some_and(|link| link.lsdb.remove_expired_by_raw_key(key));
+                    if removed && ls_type == ospf_packet::OSPFV3_LINK_LSA_TYPE {
+                        let _ = self.tx.send(Message::LinkLsaInstalled(ifindex));
+                    }
+                }
+            }
+            Ospfv3LsaScope::Reserved => {}
+        }
+    }
+
     fn flood_lsa_through_as_v3(
         &mut self,
         lsa: &ospf_packet::Ospfv3Lsa,
@@ -10942,6 +11030,11 @@ impl Ospf<Ospfv3> {
                         }
                         _ => {}
                     }
+                }
+                match ev {
+                    super::lsdb::LsdbEvent::RefreshTimerExpire => self.lsa_refresh_v3(area_id, key),
+                    super::lsdb::LsdbEvent::HoldTimerExpire => self.lsa_expire_v3(area_id, key),
+                    super::lsdb::LsdbEvent::SelfOriginatedReceived => {}
                 }
             }
             Message::GrHelperExpire(ifindex, router_id) => {
@@ -17344,75 +17437,13 @@ fn apply_routing_updates(top: &mut Ospf, rib: PrefixMap<Ipv4Net, SpfRoute>) {
 }
 
 #[cfg(test)]
-mod flex_algo_selection_tests {
+mod test_support {
     use super::*;
-    use crate::ospf::lsdb::OSPF_MAX_AGE;
-    use crate::ospf::tracing::OspfTracing;
-
-    fn fad(algo: u8, priority: u8) -> RouterInfoTlvFad {
-        RouterInfoTlvFad {
-            flex_algorithm: algo,
-            metric_type: 0,
-            calc_type: 0,
-            priority,
-            subs: Vec::new(),
-            trailing: Vec::new(),
-        }
-    }
-
-    fn rid(n: u8) -> Ipv4Addr {
-        Ipv4Addr::new(10, 0, 0, n)
-    }
-
-    /// Install `router`'s Router Information LSA instance `instance`.
-    fn install_ri(
-        area: &mut OspfArea,
-        tx: &UnboundedSender<Message<Ospfv2>>,
-        router: Ipv4Addr,
-        instance: u32,
-        fads: Vec<RouterInfoTlvFad>,
-        age: u16,
-    ) {
-        let mut lsa =
-            super::super::srmpls::router_info_lsa_build(router, false, vec![Algo::Spf], fads);
-        lsa.h.ls_id = Ipv4Addr::from(((OpaqueLsaType::ROUTER_INFO as u32) << 24) | instance);
-        lsa.h.ls_age = age;
-        lsa.update();
-        area.lsdb
-            .install_lsa(lsa, tx, Some(AREA0), &OspfTracing::default());
-    }
-
-    /// Each other router's definitions come from its Router Information
-    /// LSAs, the first occurrence across instances in ascending Instance
-    /// ID (RFC 9350 §5.2), whichever order they were installed in. A MaxAge
-    /// LSA's are gone, and this router's own are not a peer's.
-    #[tokio::test]
-    async fn peer_definitions_are_read_from_router_information_lsas() {
-        let (tx, rx) = mpsc::unbounded_channel();
-        Box::leak(Box::new(rx));
-        let mut area = OspfArea::new(AREA0);
-        install_ri(&mut area, &tx, rid(2), 1, vec![fad(128, 100)], 0);
-        install_ri(
-            &mut area,
-            &tx,
-            rid(2),
-            0,
-            vec![fad(128, 200), fad(129, 50)],
-            0,
-        );
-        install_ri(&mut area, &tx, rid(3), 0, vec![fad(128, 250)], OSPF_MAX_AGE);
-        install_ri(&mut area, &tx, rid(1), 0, vec![fad(128, 255)], 0);
-
-        let peers = flex_algo_peer_fads(&area, rid(1));
-        assert_eq!(peers.keys().copied().collect::<Vec<_>>(), vec![rid(2)]);
-        assert_eq!(peers[&rid(2)][&128].priority, 200, "instance 0 comes first");
-        assert_eq!(peers[&rid(2)][&129].priority, 50);
-    }
 
     /// An `Ospf` without raw sockets or daemon tasks: a plain UDP socket and
     /// a RIB-less context, so instance-level behaviour runs in a unit test.
-    fn fresh_ospf() -> Ospf {
-        let sock = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::DGRAM, None).unwrap();
+    fn fresh<V: OspfVersion>(domain: socket2::Domain) -> Ospf<V> {
+        let sock = socket2::Socket::new(domain, socket2::Type::DGRAM, None).unwrap();
         sock.set_nonblocking(true).unwrap();
         let sock = Arc::new(AsyncFd::new(sock).unwrap());
         let ctx = crate::context::ProtoContext::default_table_no_rib();
@@ -17517,7 +17548,7 @@ mod flex_algo_selection_tests {
             default_originated: false,
             default_originated_v6: false,
             default_watch_active: false,
-            flex_algo: crate::flex_algo::FlexAlgoConfig::new(Ospfv2::FLEX_ALGO_PREFIX),
+            flex_algo: crate::flex_algo::FlexAlgoConfig::new(V::FLEX_ALGO_PREFIX),
             affinity_map: crate::flex_algo::AffinityMap::new(),
             srlg_config: crate::flex_algo::SrlgGroupBuilder::new(),
             srlg_groups: BTreeMap::new(),
@@ -17538,6 +17569,189 @@ mod flex_algo_selection_tests {
             stamp_event_tx,
             stamp_event_rx,
         }
+    }
+
+    /// A v2 test instance.
+    pub(super) fn fresh_ospf() -> Ospf {
+        fresh(socket2::Domain::IPV4)
+    }
+
+    /// A v3 test instance.
+    pub(super) fn fresh_ospf_v3() -> Ospf<Ospfv3> {
+        fresh(socket2::Domain::IPV6)
+    }
+}
+
+#[cfg(test)]
+mod v3_lsa_aging_tests {
+    use ospf_packet::OSPFV3_E_ROUTER_LSA_TYPE;
+
+    use super::super::lsdb::{LsdbEvent, OSPF_MAX_AGE, OspfLsaKey};
+    use super::super::srmpls::{SR_INFO_LSID, e_router_v3_sr_info_lsa_build};
+    use super::test_support::fresh_ospf_v3;
+    use super::*;
+
+    fn rid(n: u8) -> Ipv4Addr {
+        Ipv4Addr::new(10, 0, 0, n)
+    }
+
+    fn key(router: Ipv4Addr) -> OspfLsaKey {
+        (OSPFV3_E_ROUTER_LSA_TYPE, SR_INFO_LSID, router)
+    }
+
+    /// `router`'s area-scoped SR-info E-Router-LSA, at `age`.
+    fn sr_info(router: Ipv4Addr, age: u16) -> ospf_packet::Ospfv3Lsa {
+        let mut lsa = e_router_v3_sr_info_lsa_build(router, vec![Algo::Spf], Vec::new(), false);
+        lsa.h.ls_age = age;
+        lsa.update();
+        lsa
+    }
+
+    fn spf_scheduled(top: &mut Ospf<Ospfv3>) -> bool {
+        let mut scheduled = top.areas.get(AREA0).unwrap().spf_timer.is_some();
+        while let Ok(msg) = top.rx.try_recv() {
+            scheduled |= matches!(msg, Message::SpfSchedule(_));
+        }
+        scheduled
+    }
+
+    /// An LSA whose age reached MaxAge leaves the LSDB and its area is
+    /// recomputed: a router that vanished without flushing does not leave
+    /// its LSAs behind for good. A timer message for an instance replaced
+    /// since — this one is young — leaves it alone.
+    #[tokio::test]
+    async fn an_expired_lsa_leaves_the_lsdb_and_its_area_recomputes() {
+        let mut top = fresh_ospf_v3();
+        top.router_id = rid(1);
+        let tx = top.tx.clone();
+        let tracing = top.tracing.clone();
+        let lsdb = &mut top.areas.get_mut(AREA0).unwrap().lsdb;
+        lsdb.install_lsa(sr_info(rid(2), OSPF_MAX_AGE), &tx, Some(AREA0), &tracing);
+        lsdb.install_lsa(sr_info(rid(3), 10), &tx, Some(AREA0), &tracing);
+        assert!(!spf_scheduled(&mut top));
+
+        top.process_msg(Message::Lsdb(
+            LsdbEvent::HoldTimerExpire,
+            Some(AREA0),
+            key(rid(3)),
+        ))
+        .await;
+        let lsdb = &top.areas.get(AREA0).unwrap().lsdb;
+        assert!(lsdb.lookup_by_raw_key(key(rid(3))).is_some(), "young: kept");
+        assert!(!spf_scheduled(&mut top));
+
+        top.process_msg(Message::Lsdb(
+            LsdbEvent::HoldTimerExpire,
+            Some(AREA0),
+            key(rid(2)),
+        ))
+        .await;
+        let lsdb = &top.areas.get(AREA0).unwrap().lsdb;
+        assert!(
+            lsdb.lookup_by_raw_key(key(rid(2))).is_none(),
+            "expired: gone"
+        );
+        assert!(spf_scheduled(&mut top));
+    }
+
+    /// Our own LSA is re-originated at LSRefreshTime — sequence number
+    /// bumped, age back to zero — so no other router ages it out. A former
+    /// identity's is left to age out.
+    #[tokio::test]
+    async fn a_self_originated_lsa_is_refreshed() {
+        let mut top = fresh_ospf_v3();
+        top.router_id = rid(1);
+        let tx = top.tx.clone();
+        let tracing = top.tracing.clone();
+        let lsdb = &mut top.areas.get_mut(AREA0).unwrap().lsdb;
+        let mine = sr_info(rid(1), 1700);
+        let seq = mine.h.ls_seq_number;
+        lsdb.install_originated(mine, &tx, Some(AREA0), &tracing);
+        lsdb.install_originated(sr_info(rid(9), 1700), &tx, Some(AREA0), &tracing);
+
+        for router in [rid(1), rid(9)] {
+            top.process_msg(Message::Lsdb(
+                LsdbEvent::RefreshTimerExpire,
+                Some(AREA0),
+                key(router),
+            ))
+            .await;
+        }
+        let lsdb = &top.areas.get(AREA0).unwrap().lsdb;
+        let refreshed = lsdb.lookup_by_raw_key(key(rid(1))).unwrap();
+        assert_eq!(refreshed.h.ls_seq_number, seq.wrapping_add(1));
+        assert_eq!(refreshed.h.ls_age, 0);
+        let former = lsdb.lookup_by_raw_key(key(rid(9))).unwrap();
+        assert_eq!(former.h.ls_seq_number, seq, "a former identity ages out");
+        assert_eq!(former.h.ls_age, 1700);
+    }
+}
+
+#[cfg(test)]
+mod flex_algo_selection_tests {
+    use super::test_support::fresh_ospf;
+    use super::*;
+    use crate::ospf::lsdb::OSPF_MAX_AGE;
+    use crate::ospf::tracing::OspfTracing;
+
+    fn fad(algo: u8, priority: u8) -> RouterInfoTlvFad {
+        RouterInfoTlvFad {
+            flex_algorithm: algo,
+            metric_type: 0,
+            calc_type: 0,
+            priority,
+            subs: Vec::new(),
+            trailing: Vec::new(),
+        }
+    }
+
+    fn rid(n: u8) -> Ipv4Addr {
+        Ipv4Addr::new(10, 0, 0, n)
+    }
+
+    /// Install `router`'s Router Information LSA instance `instance`.
+    fn install_ri(
+        area: &mut OspfArea,
+        tx: &UnboundedSender<Message<Ospfv2>>,
+        router: Ipv4Addr,
+        instance: u32,
+        fads: Vec<RouterInfoTlvFad>,
+        age: u16,
+    ) {
+        let mut lsa =
+            super::super::srmpls::router_info_lsa_build(router, false, vec![Algo::Spf], fads);
+        lsa.h.ls_id = Ipv4Addr::from(((OpaqueLsaType::ROUTER_INFO as u32) << 24) | instance);
+        lsa.h.ls_age = age;
+        lsa.update();
+        area.lsdb
+            .install_lsa(lsa, tx, Some(AREA0), &OspfTracing::default());
+    }
+
+    /// Each other router's definitions come from its Router Information
+    /// LSAs, the first occurrence across instances in ascending Instance
+    /// ID (RFC 9350 §5.2), whichever order they were installed in. A MaxAge
+    /// LSA's are gone, and this router's own are not a peer's.
+    #[tokio::test]
+    async fn peer_definitions_are_read_from_router_information_lsas() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        Box::leak(Box::new(rx));
+        let mut area = OspfArea::new(AREA0);
+        install_ri(&mut area, &tx, rid(2), 1, vec![fad(128, 100)], 0);
+        install_ri(
+            &mut area,
+            &tx,
+            rid(2),
+            0,
+            vec![fad(128, 200), fad(129, 50)],
+            0,
+        );
+        install_ri(&mut area, &tx, rid(3), 0, vec![fad(128, 250)], OSPF_MAX_AGE);
+        install_ri(&mut area, &tx, rid(1), 0, vec![fad(128, 255)], 0);
+
+        let peers = flex_algo_peer_fads(&area, rid(1));
+        assert_eq!(peers.keys().copied().collect::<Vec<_>>(), vec![rid(2)]);
+        assert_eq!(peers[&rid(2)][&128].priority, 200, "instance 0 comes first");
+        assert_eq!(peers[&rid(2)][&129].priority, 50);
     }
 
     /// A Router Information refresh on another path — a graceful-restart
