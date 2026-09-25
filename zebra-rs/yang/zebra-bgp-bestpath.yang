@@ -1,0 +1,120 @@
+module zebra-bgp-bestpath {
+  yang-version "1";
+
+  namespace "urn:ietf:params:xml:ns:yang:zebra-bgp-bestpath";
+  prefix "zbbp";
+
+  import ietf-bgp {
+    prefix bgp;
+  }
+
+  import config {
+    prefix config;
+  }
+
+  import configure {
+    prefix configure;
+  }
+
+  organization
+    "zebra-rs";
+
+  contact
+    "https://github.com/zebra-rs";
+
+  description
+    "Instance-level BGP best-path tuning: how the MULTI_EXIT_DISC (MED)
+     takes part in path selection.
+
+     Config shape:
+
+       router bgp {
+         bestpath {
+           always-compare-med true;
+           med {
+             missing-as-worst true;
+           }
+         }
+       }
+
+     By default MED is compared only between paths from the same
+     neighboring AS (RFC 4271 §9.1.2.2 (c)), and a path without MED is
+     treated as MED 0 — the most preferred value. Selection is always
+     deterministic: the best path within each neighboring AS is found
+     first and those winners are then compared, so the result never
+     depends on the order paths arrived in (FRR's `bgp deterministic-med`,
+     which zebra-rs has no knob to turn off).
+
+     The knobs apply to every address family and to the per-VRF
+     instances. Changing one re-runs best-path selection for the routes
+     of the default instance, in every address family, and propagates
+     each prefix whose best path moved, so the new rule takes effect at
+     once; a per-VRF instance applies it at each prefix's next best-path
+     run.
+
+     The per-family `afi-safi <af> bestpath as-path multipath-relax` knob
+     lives in zebra-bgp-multipath.yang.";
+
+  reference
+    "RFC 4271 §9.1.2.2, FRR bgpd `bgp always-compare-med` and
+     `bgp bestpath med missing-as-worst`, Cisco IOS `bgp always-compare-med`
+     and `bgp bestpath med missing-as-worst`.";
+
+  grouping bgp-bestpath-global {
+    description
+      "Attached to the global `router bgp` container.";
+
+    container bestpath {
+      ext:help "Best-path selection tuning";
+      description
+        "Instance-level knobs that change how paths are compared.";
+
+      leaf always-compare-med {
+        ext:help "Compare MED between paths from different neighboring ASes";
+        type boolean;
+        description
+          "When true, MED is compared between any two paths, whatever
+           their neighboring AS. When false — the default — only paths
+           from the same neighboring AS are compared on MED.
+
+           Enable it only when every neighboring AS sets MED on one
+           consistent scale: MED values are local to the AS that sets
+           them, and comparing unrelated scales picks an arbitrary exit.";
+      }
+
+      container med {
+        ext:help "MED comparison tuning";
+        description
+          "How the MED value itself is read.";
+
+        leaf missing-as-worst {
+          ext:help "Treat a path without MED as the least preferred";
+          type boolean;
+          description
+            "When true, a path that carries no MED is treated as having
+             the highest possible MED (4294967295), so it loses the MED
+             comparison. When false — the default, as RFC 4271 has it —
+             a missing MED counts as 0, the most preferred value.";
+        }
+      }
+    }
+  }
+
+  /* =========================================================
+   * Augments into the zebra-rs configure tree
+   * ========================================================= */
+
+  augment "/configure:set/config:router/bgp:bgp" {
+    description
+      "Attach the instance-level bestpath container in the candidate-set
+       subtree.";
+    uses bgp-bestpath-global;
+  }
+
+  augment "/configure:delete/config:router/bgp:bgp" {
+    description
+      "Same attachment for the delete subtree so
+       `delete router bgp bestpath always-compare-med` is path-valid.";
+    uses bgp-bestpath-global;
+  }
+}

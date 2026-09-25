@@ -59,6 +59,8 @@
 /router/bgp/afi-safi/vpws/vni
 /router/bgp/afi-safi/vtep-source
 /router/bgp/as-sets-withdraw
+/router/bgp/bestpath/always-compare-med
+/router/bgp/bestpath/med/missing-as-worst
 /router/bgp/bfd/detect-offload
 /router/bgp/bfd/echo-mode
 /router/bgp/bfd/echo-receive-interval

@@ -832,6 +832,55 @@ cap. The two reviews agree on every overlapping item.
   `bgp_table_map`, `bgp_v6_route_map`, `bgp_ebgp_local_pref_ignore`,
   `bgp_fast_external_failover`, `bgp_evpn_srv6_type5`, `l3vpn_bgp_v4`
   and `bgp_multipath_advertise_winner`.
+- Added with the fix, on the same branch: the two MED knobs FRR and Cisco
+  IOS have — `router bgp bestpath always-compare-med` (MED compared
+  between any two paths; all candidates then form one group) and
+  `router bgp bestpath med missing-as-worst` (a missing MED reads as
+  `u32::MAX`, not 0), in zebra-bgp-bestpath.yang. Selection reads them
+  through one `MedPolicy` snapshot per run, applied to the ladder's MED
+  step, the deterministic-MED grouping and multipath eligibility alike;
+  the values are process-wide so the RIB-shard workers and the per-VRF
+  instances see them. A change re-runs best-path selection for every
+  learned route of the default instance
+  (`Bgp::bestpath_recompute_all`: each tracked next-hop's dependents go
+  through the NHT re-eval path under the next-hop's current
+  reachability, batched per shard at N>1; VPN / EVPN rows under the
+  next-hop their new winner uses); a per-VRF instance applies a change
+  at each prefix's next best-path run. Unit `med_knob_tests` drive the
+  comparator through explicit policies (the process-wide copy is never
+  touched by tests). BDD `bgp_med_knobs` and `_v6` set and delete both
+  knobs at runtime and watch the downstream neighbor switch paths each
+  way; with the recompute disabled every knob-change scenario fails.
+  Book chapter `ch-02-44-bgp-bestpath-med.md`. On the final binary (fix
+  plus knobs) both knob twins, both #10 twins and 16 of the
+  selection-sensitive features above pass again.
+- Review round 1 on the knobs (P2): the recompute visited only
+  next-hop-tracked prefixes, so a knob change left FlowSpec and EVPN
+  Type-2 winners — and their advertisements — as they were until another
+  route event. The reviewer's retained probes
+  (`med_config_review_tests.rs`, `#[ignore]`: they flip the process-wide
+  policy through the config handlers, so they run alone with
+  `-- --ignored --test-threads=1`) failed on the branch. Fixed:
+  `bestpath_recompute_untracked` walks EVPN (every route type, so the NHT
+  replay now leaves EVPN to it), MUP, Flowspec (IPv4 and IPv6) and
+  BGP-LS directly and propagates each changed winner through the
+  family's own post-selection code (EVPN export + advertise; MUP
+  re-track + VRF dispatch + advertise; Flowspec propagate; BGP-LS
+  re-select only). Both passes now propagate only prefixes whose winner
+  the new rule moves (`LocalRibTable::winner_would_change` / the
+  family-agnostic `winner_changes`, conservative: multipath tables always
+  replay, the next-hop gate is ignored), so a knob toggle no longer
+  re-sends the whole table; at N>1 v4-unicast deps still go to the
+  shards unfiltered, since the main copy's reachability may lag the
+  pool. Both probes pass; removing the direct walk fails both. The
+  reviewer's third probe (`review_probe_med_recomputes_ecmp_when_winner_stays_the_same`:
+  a knob change must shrink and regrow an ECMP set whose winner does not
+  move) passes through the multipath rule of the filter. Unit
+  `winner_would_change_reports_only_real_moves` pins the filter. BDD
+  green on the fixed binary: both knob twins, both #10 twins,
+  `bgp_peer_down_cleanup` (FlowSpec), `bgp_evpn_es`,
+  `bgp_evpn_single_active`, `bgp_evpn_srv6_type5`, `bgp_vrf_evpn_type5`,
+  `bgp_mup_e2e`, `bgp_multipath`, `l3vpn_bgp_v4`, `bgp_basic_ebgp`.
 
 ### 11. P2 CONFIRMED (probe), worse than recorded, FIXED in #2415 — ORIGINATOR_ID / CLUSTER_LIST from an eBGP peer decide ties and are relayed into the AS
 

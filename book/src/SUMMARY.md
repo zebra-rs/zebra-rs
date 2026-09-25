@@ -41,6 +41,7 @@
   - [Route Server (RFC 7947)](ch-02-43-bgp-route-server.md)
   - [AS_SET / AS_CONFED_SET Withdrawal (RFC 9774)](ch-02-39-bgp-as-sets-withdraw.md)
   - [Well-Known Communities](ch-02-24-bgp-well-known-communities.md)
+  - [Best-Path Selection and MED](ch-02-44-bgp-bestpath-med.md)
   - [Table-Map (Policy at the BGP→RIB Install Point)](ch-02-28-bgp-table-map.md)
   - [disable-connected-check](ch-02-16-bgp-disable-connected-check.md)
   - [Fast External Failover](ch-02-37-bgp-fast-external-failover.md)

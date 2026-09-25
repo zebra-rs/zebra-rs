@@ -2138,6 +2138,180 @@ impl<P> Default for LocalRibTable<P> {
     }
 }
 
+/// Instance-level MED knobs (zebra-bgp-bestpath.yang): `router bgp
+/// bestpath always-compare-med` and `... bestpath med missing-as-worst`.
+///
+/// Process-wide rather than per table: best-path selection runs from a
+/// dozen call sites with no config in hand, in every family's table, in
+/// the RIB-shard worker threads and in the per-VRF instances, and the
+/// knobs are global `router bgp` settings. The config handler installs
+/// the values; selection reads a snapshot once per run
+/// ([`MedPolicy::current`]).
+static ALWAYS_COMPARE_MED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static MED_MISSING_AS_WORST: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// How MED takes part in best-path selection. The default is RFC 4271:
+/// MED compared only between paths from the same neighboring AS, a
+/// missing MED read as 0.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MedPolicy {
+    /// Compare MED between paths from different neighboring ASes too.
+    pub always_compare: bool,
+    /// Read a missing MED as the worst value (`u32::MAX`), not 0.
+    pub missing_as_worst: bool,
+}
+
+impl MedPolicy {
+    /// The configured policy.
+    pub fn current() -> Self {
+        use std::sync::atomic::Ordering::Relaxed;
+        Self {
+            always_compare: ALWAYS_COMPARE_MED.load(Relaxed),
+            missing_as_worst: MED_MISSING_AS_WORST.load(Relaxed),
+        }
+    }
+
+    /// Make this the configured policy (the config handler's side).
+    pub fn install(self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        ALWAYS_COMPARE_MED.store(self.always_compare, Relaxed);
+        MED_MISSING_AS_WORST.store(self.missing_as_worst, Relaxed);
+    }
+
+    /// Whether MED decides between `a` and `b`.
+    fn applies(&self, a: &BgpRib, b: &BgpRib) -> bool {
+        self.always_compare || a.attr.neighboring_as() == b.attr.neighboring_as()
+    }
+
+    /// The MED value `rib` is compared on.
+    fn value(&self, rib: &BgpRib) -> u32 {
+        match &rib.attr.med {
+            Some(med) => med.med,
+            None if self.missing_as_worst => u32::MAX,
+            None => 0,
+        }
+    }
+}
+
+/// Whether selecting over `cands` under `med` picks a different path than
+/// `current`, the table's recorded winner. Compared on path identity
+/// (peer slot, path-id) and without the next-hop gate — see
+/// [`LocalRibTable::winner_would_change`].
+fn winner_changes(cands: &[BgpRib], current: Option<&BgpRib>, med: MedPolicy) -> bool {
+    if cands.is_empty() {
+        return false;
+    }
+    let (index, _) = LocalRibTable::<Ipv4Net>::best_candidate_with(cands, med);
+    let new = (cands[index].ident, cands[index].remote_id);
+    current.map(|best| (best.ident, best.remote_id)) != Some(new)
+}
+
+/// After a MED knob change, re-run best-path selection for the families
+/// whose rows carry no tracked next-hop — so the NHT replay in
+/// `Bgp::bestpath_recompute_all` never reaches them — and propagate every
+/// changed winner exactly as the family's UPDATE path does:
+///
+/// - EVPN, every route type: export (FDB / VRF import — a Type-5 is
+///   re-imported with its new winner's transport) and advertise. Type-5
+///   rows are NHT-tracked too; the replay leaves EVPN to this walk so each
+///   prefix is handled once.
+/// - MUP: re-track the segment / endpoint next-hops, re-dispatch the VRF
+///   import, advertise.
+/// - Flowspec (IPv4 and IPv6): propagate (advertise or withdraw, install).
+/// - BGP-LS: re-select only; the Loc-RIB records the winner and the
+///   session-up dump reads it, nothing is propagated yet.
+///
+/// Prefixes whose winner the new policy does not move are left alone.
+pub fn bestpath_recompute_untracked(bgp: &mut BgpTop, peers: &mut PeerMap) {
+    let med = MedPolicy::current();
+
+    let evpn: Vec<(RouteDistinguisher, EvpnPrefix)> = bgp
+        .local_rib
+        .evpn
+        .iter()
+        .flat_map(|(rd, table)| {
+            table
+                .cands
+                .iter()
+                .filter(|(prefix, cands)| winner_changes(cands, table.selected.get(*prefix), med))
+                .map(move |(prefix, _)| (*rd, prefix.clone()))
+        })
+        .collect();
+    for (rd, prefix) in evpn {
+        let selected = bgp.local_rib.select_best_path_evpn(&rd, &prefix);
+        route_evpn_export_selected(&rd, &prefix, &selected, None, bgp);
+        if !selected.is_empty() {
+            route_advertise_evpn_to_peers(rd, prefix, &selected, bgp, peers);
+        }
+    }
+
+    let mup: Vec<(RouteDistinguisher, MupPrefix)> = bgp
+        .local_rib
+        .mup
+        .iter()
+        .flat_map(|(rd, table)| {
+            table
+                .cands
+                .iter()
+                .filter(|(prefix, cands)| winner_changes(cands, table.selected.get(*prefix), med))
+                .map(move |(prefix, _)| (*rd, prefix.clone()))
+        })
+        .collect();
+    for (rd, prefix) in mup {
+        let selected = bgp.local_rib.select_best_path_mup(&rd, &prefix);
+        let transport = mup_segment_track(bgp, rd, &prefix, selected.first());
+        let endpoint_transport = mup_endpoint_track(bgp, rd, &prefix, selected.first());
+        if let Some(dispatcher) = bgp.vrf_import {
+            super::vrf::dispatch_mup(
+                dispatcher,
+                rd,
+                &prefix,
+                selected.first(),
+                None,
+                &transport,
+                &endpoint_transport,
+            );
+        }
+        if !selected.is_empty() {
+            route_advertise_mup_to_peers(rd, prefix, &selected, bgp, peers);
+        }
+    }
+
+    for afi in [Afi::Ip, Afi::Ip6] {
+        let table = if afi == Afi::Ip {
+            &bgp.local_rib.flowspec_v4
+        } else {
+            &bgp.local_rib.flowspec_v6
+        };
+        let nlris: Vec<FlowspecNlri> = table
+            .cands
+            .iter()
+            .filter(|(nlri, cands)| winner_changes(cands, table.selected.get(*nlri), med))
+            .map(|(nlri, _)| nlri.clone())
+            .collect();
+        for nlri in nlris {
+            let selected = bgp.local_rib.select_best_path_flowspec(afi, &nlri);
+            route_flowspec_propagate(afi, &nlri, &selected, bgp, peers);
+        }
+    }
+
+    let bgp_ls: Vec<BgpLsNlri> = bgp
+        .local_rib
+        .bgp_ls
+        .cands
+        .iter()
+        .filter(|(nlri, cands)| {
+            winner_changes(cands, bgp.local_rib.bgp_ls.selected.get(*nlri), med)
+        })
+        .map(|(nlri, _)| nlri.clone())
+        .collect();
+    for nlri in bgp_ls {
+        bgp.local_rib.select_best_path_bgpls(&nlri);
+    }
+}
+
 /// Per-address-family multipath policy
 /// (`router bgp afi-safi <af> maximum-paths` and
 /// `... bestpath as-path multipath-relax`).
@@ -2256,10 +2430,13 @@ impl<P: Prefix + Copy> LocalRibTable<P> {
             return selected;
         }
 
+        // One snapshot of the MED knobs for the whole run, so the winner
+        // and the multipath set are judged by the same rule.
+        let med = MedPolicy::current();
         let best = {
             let cands = self.0.get_mut(&prefix).expect("prefix checked above");
 
-            let (best_index, best_reason) = Self::best_candidate(cands);
+            let (best_index, best_reason) = Self::best_candidate_with(cands, med);
 
             for rib in cands.iter_mut() {
                 rib.best_path = false;
@@ -2309,7 +2486,8 @@ impl<P: Prefix + Copy> LocalRibTable<P> {
             // change which of them are installed at all.
             let mut eligible: Vec<usize> = (0..cands.len())
                 .filter(|&i| {
-                    !cands[i].best_path && Self::multipath_eligible(&cands[i], &best, cfg.relax)
+                    !cands[i].best_path
+                        && Self::multipath_eligible(&cands[i], &best, cfg.relax, med)
                 })
                 .collect();
             eligible.sort_by_key(|&i| {
@@ -2438,10 +2616,35 @@ impl<P: Prefix + Copy> LocalRibTable<P> {
     /// the deciding stage (`Reason::Default` for a lone candidate).
     /// `cands` must not be empty.
     pub(crate) fn best_candidate(cands: &[BgpRib]) -> (usize, Reason) {
+        Self::best_candidate_with(cands, MedPolicy::current())
+    }
+
+    /// Whether re-running selection for `prefix` under `med` could change
+    /// what the table installs or advertises — the check that keeps a MED
+    /// knob change from re-advertising routes whose best path it does not
+    /// move. Conservative by construction: with multipath on it is always
+    /// true (the MED policy also decides which members qualify), and it
+    /// compares the new winner without the next-hop gate, so an
+    /// all-unreachable prefix counts as a change (re-running selection
+    /// there is a no-op) rather than risking a missed one.
+    pub fn winner_would_change(&self, prefix: P, med: MedPolicy) -> bool {
+        let Some(cands) = self.0.get(&prefix).filter(|cands| !cands.is_empty()) else {
+            return false;
+        };
+        if self.2.max_paths > 1 || self.2.max_paths_ibgp.is_some_and(|n| n > 1) {
+            return true;
+        }
+        winner_changes(cands, self.1.get(&prefix), med)
+    }
+
+    /// [`Self::best_candidate`] under an explicit MED policy. With
+    /// `always-compare-med` MED applies between any two paths, so the
+    /// ladder is a total order over all of them and they form one group.
+    pub(crate) fn best_candidate_with(cands: &[BgpRib], med: MedPolicy) -> (usize, Reason) {
         let scan = |indices: &[usize]| -> usize {
             let mut best = indices[0];
             for &index in &indices[1..] {
-                if Self::is_better(&cands[index], &cands[best]).0 {
+                if Self::is_better_with(&cands[index], &cands[best], med).0 {
                     best = index;
                 }
             }
@@ -2449,7 +2652,11 @@ impl<P: Prefix + Copy> LocalRibTable<P> {
         };
         let mut groups: Vec<(Option<u32>, Vec<usize>)> = Vec::new();
         for (index, rib) in cands.iter().enumerate() {
-            let neighbor_as = rib.attr.neighboring_as();
+            let neighbor_as = if med.always_compare {
+                None
+            } else {
+                rib.attr.neighboring_as()
+            };
             match groups.iter_mut().find(|(key, _)| *key == neighbor_as) {
                 Some((_, members)) => members.push(index),
                 None => groups.push((neighbor_as, vec![index])),
@@ -2468,12 +2675,18 @@ impl<P: Prefix + Copy> LocalRibTable<P> {
         let reason = if rest.is_empty() {
             Reason::Default
         } else {
-            Self::is_better(&cands[best], &cands[scan(&rest)]).1
+            Self::is_better_with(&cands[best], &cands[scan(&rest)], med).1
         };
         (best, reason)
     }
 
+    /// [`Self::is_better_with`] under the configured MED policy.
+    #[cfg(test)]
     fn is_better(cand: &BgpRib, incb: &BgpRib) -> (bool, Reason) {
+        Self::is_better_with(cand, incb, MedPolicy::current())
+    }
+
+    fn is_better_with(cand: &BgpRib, incb: &BgpRib, med: MedPolicy) -> (bool, Reason) {
         // NHT gate: a path whose next-hop resolves is strictly better
         // than one whose next-hop is unreachable, ahead of every other
         // attribute. (Both-unreachable falls through; `select_best_path`
@@ -2533,14 +2746,11 @@ impl<P: Prefix + Copy> LocalRibTable<P> {
             return (cand_origin_rank < incb_origin_rank, Reason::Origin);
         }
 
-        // By default, MED is only compared between routes learned from the neighboring AS.
-        // let cand_nei_as = cand.attr.aspath
-        let cand_neigh_as = cand.attr.neighboring_as();
-        let incb_neigh_as = incb.attr.neighboring_as();
-
-        if cand_neigh_as == incb_neigh_as {
-            let cand_med = cand.attr.med.clone().unwrap_or_default();
-            let incb_med = incb.attr.med.clone().unwrap_or_default();
+        // MED: compared only between paths from the same neighboring AS
+        // unless `always-compare-med`; a missing MED reads as 0 unless
+        // `med missing-as-worst`.
+        if med.applies(cand, incb) {
+            let (cand_med, incb_med) = (med.value(cand), med.value(incb));
             if cand_med != incb_med {
                 return (cand_med < incb_med, Reason::Med);
             }
@@ -2601,7 +2811,7 @@ impl<P: Prefix + Copy> LocalRibTable<P> {
     /// ECMP set or — worse — admits a path that is not actually
     /// equal-cost. `multipath_eligible_agrees_with_is_better` pins the
     /// relationship rather than trusting the comment.
-    fn multipath_eligible(cand: &BgpRib, best: &BgpRib, relax: bool) -> bool {
+    fn multipath_eligible(cand: &BgpRib, best: &BgpRib, relax: bool, med: MedPolicy) -> bool {
         // 1-2: reachability and LLGR staleness.
         if cand.nexthop_reachable != best.nexthop_reachable || cand.stale != best.stale {
             return false;
@@ -2634,14 +2844,9 @@ impl<P: Prefix + Copy> LocalRibTable<P> {
         if Self::origin_rank(cand.attr.origin) != Self::origin_rank(best.attr.origin) {
             return false;
         }
-        // 8: MED, compared only within the same neighbouring AS, exactly
-        // as the ladder does.
-        if cand.attr.neighboring_as() == best.attr.neighboring_as() {
-            let cand_med = cand.attr.med.clone().unwrap_or_default();
-            let best_med = best.attr.med.clone().unwrap_or_default();
-            if cand_med != best_med {
-                return false;
-            }
+        // 8: MED, under the same policy as the ladder.
+        if med.applies(cand, best) && med.value(cand) != med.value(best) {
+            return false;
         }
         // 9: eBGP vs iBGP. Mixing the two in one ECMP set is not
         // equal-cost forwarding.
@@ -29161,6 +29366,42 @@ mod med_order_tests {
         );
     }
 
+    /// Losing a group's preferred path must expose its runner-up, even
+    /// when that changes which neighboring AS wins overall.
+    #[test]
+    fn review_probe_med_group_failover_and_recovery() {
+        let prefix: Ipv4Net = "10.10.0.0/24".parse().unwrap();
+        for order in ORDERS {
+            let mut table: LocalRibTable<Ipv4Net> = LocalRibTable::default();
+            for name in order {
+                table.update(prefix, path(name));
+            }
+            assert_eq!(winner(&table.select_best_path(prefix)), 'B');
+
+            for stale in [false, true] {
+                let mut unavailable = path('C');
+                unavailable.nexthop_reachable = stale;
+                unavailable.stale = stale;
+                assert_eq!(
+                    winner(&table.update(prefix, unavailable).1),
+                    'A',
+                    "{order:?}"
+                );
+                assert_eq!(winner(&table.update(prefix, path('C')).1), 'B', "{order:?}");
+            }
+
+            assert_eq!(table.remove(prefix, 0, 3).len(), 1);
+            assert_eq!(winner(&table.select_best_path(prefix)), 'A', "{order:?}");
+            assert_eq!(winner(&table.update(prefix, path('C')).1), 'B', "{order:?}");
+
+            // A criterion ahead of MED must still override the lower MED.
+            let mut preferred = path('A');
+            preferred.weight = 100;
+            assert_eq!(winner(&table.update(prefix, preferred).1), 'A', "{order:?}");
+            assert_eq!(winner(&table.update(prefix, path('A')).1), 'B', "{order:?}");
+        }
+    }
+
     /// The EVPN table ran the same linear scan over the same comparison.
     #[test]
     fn evpn_med_winner_is_independent_of_candidate_order() {
@@ -29245,6 +29486,186 @@ mod med_order_tests {
             winners.push(winner(&selected));
         }
         assert!(winners.iter().all(|w| *w == winners[0]), "{winners:?}");
+    }
+}
+
+/// The MED knobs (zebra-bgp-bestpath.yang): `router bgp bestpath
+/// always-compare-med` and `... med missing-as-worst`. Exercised through
+/// an explicit `MedPolicy` — the process-wide copy the config handler
+/// installs is left alone, so parallel tests never see a knob flip.
+#[cfg(test)]
+mod med_knob_tests {
+    use super::*;
+    use bgp_packet::Med;
+    use std::str::FromStr;
+
+    const DEFAULT: MedPolicy = MedPolicy {
+        always_compare: false,
+        missing_as_worst: false,
+    };
+    const ALWAYS: MedPolicy = MedPolicy {
+        always_compare: true,
+        missing_as_worst: false,
+    };
+    const MISSING_WORST: MedPolicy = MedPolicy {
+        always_compare: false,
+        missing_as_worst: true,
+    };
+    const BOTH: MedPolicy = MedPolicy {
+        always_compare: true,
+        missing_as_worst: true,
+    };
+
+    /// An eBGP path from neighboring AS `asn`, BGP Identifier 10.0.0.`id`.
+    fn rib(id: u8, asn: u32, med: Option<u32>) -> BgpRib {
+        let attr = BgpAttr {
+            origin: Some(Origin::Igp),
+            aspath: Some(As4Path::from_str(&asn.to_string()).unwrap()),
+            med: med.map(Med::new),
+            nexthop: Some(BgpNexthop::Ipv4(Ipv4Addr::new(10, 0, 0, id))),
+            ..Default::default()
+        };
+        let mut rib = BgpRib::new(
+            id as usize,
+            Ipv4Addr::new(10, 0, 0, id),
+            BgpRibType::EBGP,
+            0,
+            0,
+            &attr,
+            None,
+            None,
+            false,
+        );
+        rib.nexthop_reachable = true;
+        rib
+    }
+
+    /// The winner's BGP Identifier octet, over both candidate orders.
+    fn winner(cands: &[BgpRib], med: MedPolicy) -> u8 {
+        let forward = cands[LocalRibTable::<Ipv4Net>::best_candidate_with(cands, med).0].ident;
+        let reversed: Vec<BgpRib> = cands.iter().rev().cloned().collect();
+        let backward =
+            reversed[LocalRibTable::<Ipv4Net>::best_candidate_with(&reversed, med).0].ident;
+        assert_eq!(forward, backward, "order-independent under {med:?}");
+        forward as u8
+    }
+
+    /// X{AS 65001, MED 10, .1} vs Y{AS 65002, MED 5, .2}: different
+    /// neighboring ASes, so by default MED is skipped and the lower BGP
+    /// Identifier (X) wins; `always-compare-med` lets Y's MED decide.
+    #[test]
+    fn always_compare_med_compares_across_neighbor_ases() {
+        let cands = [rib(1, 65001, Some(10)), rib(2, 65002, Some(5))];
+        assert_eq!(winner(&cands, DEFAULT), 1);
+        assert_eq!(winner(&cands, ALWAYS), 2);
+        let (_, reason) = LocalRibTable::<Ipv4Net>::best_candidate_with(&cands, ALWAYS);
+        assert!(matches!(reason, Reason::Med), "{reason:?}");
+    }
+
+    /// X{AS 65001, no MED, .1} vs Z{AS 65001, MED 5, .3}: a missing MED
+    /// reads as 0 and wins by default; `missing-as-worst` reads it as the
+    /// highest value and Z wins.
+    #[test]
+    fn missing_as_worst_ranks_a_path_without_med_last() {
+        let cands = [rib(1, 65001, None), rib(3, 65001, Some(5))];
+        assert_eq!(winner(&cands, DEFAULT), 1);
+        assert_eq!(winner(&cands, MISSING_WORST), 3);
+    }
+
+    /// X{AS 65001, no MED, .1} vs Y{AS 65002, MED 5, .2}: only both knobs
+    /// together hand it to Y — MED must be compared across the ASes AND
+    /// X's missing MED must lose.
+    #[test]
+    fn both_knobs_together() {
+        let cands = [rib(1, 65001, None), rib(2, 65002, Some(5))];
+        assert_eq!(winner(&cands, DEFAULT), 1, "different AS: BGP Identifier");
+        assert_eq!(winner(&cands, ALWAYS), 1, "0 beats 5");
+        assert_eq!(
+            winner(&cands, MISSING_WORST),
+            1,
+            "different AS: MED skipped"
+        );
+        assert_eq!(winner(&cands, BOTH), 2, "5 beats the missing MED");
+    }
+
+    /// With `always-compare-med` every pair compares MED, so all paths form
+    /// one group and every order agrees — on the finding #10 example too.
+    #[test]
+    fn always_compare_med_is_order_independent() {
+        let a = rib(1, 65001, Some(10));
+        let b = rib(2, 65002, None);
+        let c = rib(3, 65001, Some(5));
+        let orders = [
+            vec![a.clone(), b.clone(), c.clone()],
+            vec![a.clone(), c.clone(), b.clone()],
+            vec![b.clone(), a.clone(), c.clone()],
+            vec![b.clone(), c.clone(), a.clone()],
+            vec![c.clone(), a.clone(), b.clone()],
+            vec![c, b, a],
+        ];
+        for policy in [ALWAYS, BOTH] {
+            let winners: Vec<u8> = orders.iter().map(|o| winner(o, policy)).collect();
+            assert!(
+                winners.iter().all(|w| *w == winners[0]),
+                "{policy:?}: {winners:?}"
+            );
+        }
+        // B's missing MED: 0 wins everything under ALWAYS, loses under BOTH.
+        assert_eq!(winner(&orders[0], ALWAYS), 2);
+        assert_eq!(winner(&orders[0], BOTH), 3);
+    }
+
+    /// The recompute filter: a table built under the default policy asks
+    /// whether each knob would move its winner. X{AS 65001, MED 10} and
+    /// Y{AS 65002, MED 5}: only `always-compare-med` moves it (to Y). With
+    /// multipath on the answer is always yes — the knobs also decide which
+    /// members qualify.
+    #[test]
+    fn winner_would_change_reports_only_real_moves() {
+        let prefix: Ipv4Net = "10.10.0.0/24".parse().unwrap();
+        let mut table: LocalRibTable<Ipv4Net> = LocalRibTable::default();
+        table.update(prefix, rib(1, 65001, Some(10)));
+        table.update(prefix, rib(2, 65002, Some(5)));
+        assert_eq!(table.1.get(&prefix).map(|r| r.ident), Some(1), "default: X");
+        assert!(!table.winner_would_change(prefix, DEFAULT));
+        assert!(table.winner_would_change(prefix, ALWAYS));
+        assert!(!table.winner_would_change(prefix, MISSING_WORST));
+        assert!(table.winner_would_change(prefix, BOTH));
+        let absent: Ipv4Net = "10.99.0.0/24".parse().unwrap();
+        assert!(!table.winner_would_change(absent, ALWAYS), "no candidates");
+
+        table.2.max_paths = 2;
+        assert!(
+            table.winner_would_change(prefix, DEFAULT),
+            "multipath: always"
+        );
+    }
+
+    /// Multipath eligibility reads MED under the same policy as the ladder:
+    /// two different-AS paths (relaxed) with different MEDs tie by default
+    /// but not under `always-compare-med`; a missing MED and MED 0 tie by
+    /// default but not under `missing-as-worst`.
+    #[test]
+    fn multipath_eligibility_follows_the_med_policy() {
+        let x = rib(1, 65001, Some(10));
+        let y = rib(2, 65002, Some(5));
+        assert!(LocalRibTable::<Ipv4Net>::multipath_eligible(
+            &x, &y, true, DEFAULT
+        ));
+        assert!(!LocalRibTable::<Ipv4Net>::multipath_eligible(
+            &x, &y, true, ALWAYS
+        ));
+        let none = rib(1, 65001, None);
+        let zero = rib(3, 65001, Some(0));
+        assert!(LocalRibTable::<Ipv4Net>::multipath_eligible(
+            &none, &zero, false, DEFAULT
+        ));
+        assert!(!LocalRibTable::<Ipv4Net>::multipath_eligible(
+            &none,
+            &zero,
+            false,
+            MISSING_WORST
+        ));
     }
 }
 
@@ -30917,7 +31338,7 @@ mod multipath_tests {
         ];
         for (a, b) in cases {
             assert!(
-                LocalRibTable::<Ipv4Net>::multipath_eligible(&a, &b, false),
+                LocalRibTable::<Ipv4Net>::multipath_eligible(&a, &b, false, MedPolicy::default()),
                 "fixture should be equal-cost"
             );
             for (x, y) in [(&a, &b), (&b, &a)] {
