@@ -27,6 +27,17 @@ pub fn sr_algorithms(fa: &FlexAlgoConfig) -> Vec<Algo> {
     algos
 }
 
+/// The SR-Algorithm list (RFC 8665 / RFC 8667) for a participation set:
+/// algorithm 0, plus every Flexible Algorithm this router participates in —
+/// not every one it is configured for, since a router that cannot support
+/// an algorithm's winning definition "MUST NOT announce participation"
+/// (RFC 9350 §5.3).
+pub fn sr_algorithms_for(participating: &std::collections::BTreeSet<u8>) -> Vec<Algo> {
+    std::iter::once(Algo::Spf)
+        .chain(participating.iter().map(|&n| Algo::FlexAlgo(n)))
+        .collect()
+}
+
 /// Staged Flexible Algorithm Definitions (RFC 9350) for one IGP
 /// instance, keyed by algorithm id (128..=255). Protocol-neutral: the
 /// config path prefix is supplied at construction so IS-IS

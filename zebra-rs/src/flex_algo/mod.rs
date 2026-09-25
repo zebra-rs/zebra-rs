@@ -13,10 +13,11 @@ pub mod config;
 pub mod constraint;
 pub mod entry;
 pub mod participation;
+pub mod selection;
 pub mod srlg;
 
 pub use affinity_map::AffinityMap;
-pub use config::{FlexAlgoConfig, sr_algorithms};
+pub use config::{FlexAlgoConfig, sr_algorithms, sr_algorithms_for};
 pub use constraint::{
     AffinityBits, FadConstraints, LinkAttrs, LossPercent, Pruned, link_passes_fad,
     link_prune_reason, local_link_affinity,
