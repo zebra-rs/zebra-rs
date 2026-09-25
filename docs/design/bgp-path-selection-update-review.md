@@ -7,19 +7,19 @@ MUP/Flowspec/SR-Policy/RTC where they share the machinery). Reviewed
 against `main` at `2f1e9a09` (2026-09-07). Line numbers are as of that
 commit.
 
-Status (2026-09-25): sixteen items are fixed on `main` — #1 (PR #2372,
-merge `3beacbcc`), the listen-range peer-type item found while fixing it
-(PR #2373, `ba327126`), #2 (PR #2375, `308b196a`), #3 (PR #2376,
-`b8fef738`), #4 (PR #2377, `1cc31738`, which also closed the
+Status (2026-09-25): seventeen items are fixed on `main` — #1 (PR
+#2372, merge `3beacbcc`), the listen-range peer-type item found while
+fixing it (PR #2373, `ba327126`), #2 (PR #2375, `308b196a`), #3 (PR
+#2376, `b8fef738`), #4 (PR #2377, `1cc31738`, which also closed the
 signature-knob half of #21 and added the IPv6 outbound soft-out), #5
 (PR #2378, `b2007701`), #6 (PR #2379, `0464828a`, with two review
 follow-ups), #7 (PR #2380, `d7476601`), #8 and with it #13 (PR #2383,
 `d72a06af`, eight review rounds folded in), #9 (PR #2405, `31f7458a`),
 #15 (PR #2413, `097ce15d`), #11 (PR #2415, `3401cb1b`), #12 (PR #2417,
-`4ba79217`), the item found while fixing #12 (PR #2418, `6b53ad6a`) and
-#14 (PR #2420, `49fb77b1`). Each fixed entry ends with its fix note;
-everything else is open. #20 (the labeled-unicast session-up dump sent
-the newest candidate) is fixed on branch `bgp-lu-sync-winner`.
+`4ba79217`), the item found while fixing #12 (PR #2418, `6b53ad6a`), #14
+(PR #2420, `49fb77b1`) and #20 (PR #2422, `d8f6a0cf`). Each fixed entry
+ends with its fix note; everything else is open. #10 (MED order
+dependence) is fixed on branch `bgp-med-order-independent`.
 
 Method: one lead read the selection ladder and every egress builder, then
 five independent read-only reviewers each took one dimension (update-group
@@ -774,7 +774,7 @@ cap. The two reviews agree on every overlapping item.
   non-BDD workspace tests, strict workspace Clippy, formatting and
   diff checks pass.
 
-### 10. P2 CONFIRMED (probe) — MED comparison is order-dependent, and an unchanged re-advertisement rotates the winner
+### 10. P2 CONFIRMED (probe), FIXED on branch `bgp-med-order-independent` — MED comparison is order-dependent, and an unchanged re-advertisement rotates the winner
 
 - `route.rs:2182-2190` scans candidates linearly with pairwise
   `is_better`; MED is compared only within one neighboring AS
@@ -791,6 +791,96 @@ cap. The two reviews agree on every overlapping item.
 - Fix direction: deterministic MED (group candidates by neighboring AS,
   pick the per-AS MED winner, then compare winners), or at least keep the
   candidate order stable on replace.
+- The same linear scan over the same `is_better` picks the winner in the
+  EVPN, MUP, Flowspec and BGP-LS tables too.
+- Gates (branch `bgp-med-order-independent`; each compiles on `main` and
+  fails there, except the control). Unit, route.rs `med_order_tests`, on
+  the probe's A / B / C: `med_winner_is_independent_of_candidate_order`
+  (all six arrival orders must select B; on `main` they select C, B, C,
+  A, B, A), `unchanged_readvertisement_does_not_rotate_the_winner` (on
+  `main` re-feeding A, B, C unchanged cycles the winner A, B, C),
+  `evpn_med_winner_is_independent_of_candidate_order` (the EVPN table),
+  `winner_reason_is_the_deciding_comparison` (`show bgp`'s "Reason:"
+  must be why the winner beat the runner-up at the deciding stage — the
+  linear pass recorded its last comparison's reason even when the winner
+  took no part in it); control
+  `single_neighbor_as_is_order_independent_already`. BDD
+  `bgp_med_order_independent` and `_v6`: three scripted speakers send
+  one prefix as A (AS 65081, MED 10), B (AS 65082) and C (AS 65081, MED
+  5), each tagged by community, arriving in the order A, B, C; z2 shows
+  z1's choice. On `main` both twins fail both gates: z2 holds C's path,
+  and after h1 re-announces A unchanged it holds A's.
+- FIXED (branch `bgp-med-order-independent`): deterministic MED in one
+  helper, `LocalRibTable::best_candidate`, shared by all five tables
+  (unicast / labeled-unicast / VPN, EVPN, MUP, Flowspec, BGP-LS). It
+  picks the best within each neighboring AS with the existing ladder — a
+  total order there, MED included — and then compares those group
+  winners, between which MED never applies, so that is a total order
+  too: the winner no longer depends on candidate order, and a replaced
+  row moving to the tail changes nothing. This is FRR's
+  `bgp deterministic-med` (on by default) and RFC 4271 §9.1.2.2's
+  elimination order; there is no knob to turn it off. `best_reason` is
+  now the reason the winner beat the runner-up at the deciding stage
+  (group winners when there are several, else the one group). Multipath
+  is untouched (it already sorts its members). On the fix the four gates
+  and the control pass; collapsing every candidate into one group (the
+  old linear pass) fails all four gates. Both BDD twins pass, and 20
+  selection-sensitive features stay green: `bgp_route_map_match`,
+  `bgp_multipath`, `bgp_unnumbered_multipath`, the basic RR / iBGP /
+  eBGP features, `bgp_addpath_ipv4` / `_ipv6`, `bgp_evpn_single_active`,
+  `bgp_evpn_es`, `bgp_vrf_dual_home`, `bgp_mup_e2e`, `bgp_ls_te_metric`,
+  `bgp_table_map`, `bgp_v6_route_map`, `bgp_ebgp_local_pref_ignore`,
+  `bgp_fast_external_failover`, `bgp_evpn_srv6_type5`, `l3vpn_bgp_v4`
+  and `bgp_multipath_advertise_winner`.
+- Added with the fix, on the same branch: the two MED knobs FRR and Cisco
+  IOS have — `router bgp bestpath always-compare-med` (MED compared
+  between any two paths; all candidates then form one group) and
+  `router bgp bestpath med missing-as-worst` (a missing MED reads as
+  `u32::MAX`, not 0), in zebra-bgp-bestpath.yang. Selection reads them
+  through one `MedPolicy` snapshot per run, applied to the ladder's MED
+  step, the deterministic-MED grouping and multipath eligibility alike;
+  the values are process-wide so the RIB-shard workers and the per-VRF
+  instances see them. A change re-runs best-path selection for every
+  learned route of the default instance
+  (`Bgp::bestpath_recompute_all`: each tracked next-hop's dependents go
+  through the NHT re-eval path under the next-hop's current
+  reachability, batched per shard at N>1; VPN / EVPN rows under the
+  next-hop their new winner uses); a per-VRF instance applies a change
+  at each prefix's next best-path run. Unit `med_knob_tests` drive the
+  comparator through explicit policies (the process-wide copy is never
+  touched by tests). BDD `bgp_med_knobs` and `_v6` set and delete both
+  knobs at runtime and watch the downstream neighbor switch paths each
+  way; with the recompute disabled every knob-change scenario fails.
+  Book chapter `ch-02-44-bgp-bestpath-med.md`. On the final binary (fix
+  plus knobs) both knob twins, both #10 twins and 16 of the
+  selection-sensitive features above pass again.
+- Review round 1 on the knobs (P2): the recompute visited only
+  next-hop-tracked prefixes, so a knob change left FlowSpec and EVPN
+  Type-2 winners — and their advertisements — as they were until another
+  route event. The reviewer's retained probes
+  (`med_config_review_tests.rs`, `#[ignore]`: they flip the process-wide
+  policy through the config handlers, so they run alone with
+  `-- --ignored --test-threads=1`) failed on the branch. Fixed:
+  `bestpath_recompute_untracked` walks EVPN (every route type, so the NHT
+  replay now leaves EVPN to it), MUP, Flowspec (IPv4 and IPv6) and
+  BGP-LS directly and propagates each changed winner through the
+  family's own post-selection code (EVPN export + advertise; MUP
+  re-track + VRF dispatch + advertise; Flowspec propagate; BGP-LS
+  re-select only). Both passes now propagate only prefixes whose winner
+  the new rule moves (`LocalRibTable::winner_would_change` / the
+  family-agnostic `winner_changes`, conservative: multipath tables always
+  replay, the next-hop gate is ignored), so a knob toggle no longer
+  re-sends the whole table; at N>1 v4-unicast deps still go to the
+  shards unfiltered, since the main copy's reachability may lag the
+  pool. Both probes pass; removing the direct walk fails both. The
+  reviewer's third probe (`review_probe_med_recomputes_ecmp_when_winner_stays_the_same`:
+  a knob change must shrink and regrow an ECMP set whose winner does not
+  move) passes through the multipath rule of the filter. Unit
+  `winner_would_change_reports_only_real_moves` pins the filter. BDD
+  green on the fixed binary: both knob twins, both #10 twins,
+  `bgp_peer_down_cleanup` (FlowSpec), `bgp_evpn_es`,
+  `bgp_evpn_single_active`, `bgp_evpn_srv6_type5`, `bgp_vrf_evpn_type5`,
+  `bgp_mup_e2e`, `bgp_multipath`, `l3vpn_bgp_v4`, `bgp_basic_ebgp`.
 
 ### 11. P2 CONFIRMED (probe), worse than recorded, FIXED in #2415 — ORIGINATOR_ID / CLUSTER_LIST from an eBGP peer decide ties and are relayed into the AS
 
@@ -1156,7 +1246,7 @@ cap. The two reviews agree on every overlapping item.
 - Fix direction: on an exact RTC add, run a targeted re-sync of the VPN
   tables filtered to the new RT (or the full `route_sync_vpnv4/6`).
 
-### 20. P2 CONFIRMED, FIXED on branch `bgp-lu-sync-winner` — LU session-up sync dumps the most recently updated candidate, not the winner
+### 20. P2 CONFIRMED, FIXED in #2422 — LU session-up sync dumps the most recently updated candidate, not the winner
 
 - `route.rs:15484-15490` and `15535-15541` (`route_sync_labelv4/v6`,
   plain branch): `ribs.last()` over `shard.v4lu.0` / `v6lu.0`, i.e. the

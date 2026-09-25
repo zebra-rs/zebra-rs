@@ -3672,6 +3672,50 @@ fn config_gr_llgr_stale_time(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opt
     Some(())
 }
 
+#[cfg(test)]
+#[path = "med_config_review_tests.rs"]
+mod med_config_review_tests;
+
+/// `set/delete router bgp bestpath always-compare-med <bool>`
+/// (zebra-bgp-bestpath.yang).
+fn config_bestpath_always_compare_med(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let always_compare = op.is_set() && args.boolean()?;
+    bestpath_med_apply(
+        bgp,
+        super::route::MedPolicy {
+            always_compare,
+            ..bgp.bestpath_med
+        },
+    );
+    Some(())
+}
+
+/// `set/delete router bgp bestpath med missing-as-worst <bool>`
+/// (zebra-bgp-bestpath.yang).
+fn config_bestpath_med_missing_as_worst(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let missing_as_worst = op.is_set() && args.boolean()?;
+    bestpath_med_apply(
+        bgp,
+        super::route::MedPolicy {
+            missing_as_worst,
+            ..bgp.bestpath_med
+        },
+    );
+    Some(())
+}
+
+/// Record and install a new MED policy, then re-run best-path selection
+/// for every learned route so the new rule takes effect now rather than
+/// at each prefix's next change. A no-op when nothing changed.
+fn bestpath_med_apply(bgp: &mut Bgp, policy: super::route::MedPolicy) {
+    if bgp.bestpath_med == policy {
+        return;
+    }
+    bgp.bestpath_med = policy;
+    policy.install();
+    bgp.bestpath_recompute_all();
+}
+
 /// The table for a unicast family's multipath policy, or `None` for a
 /// family that has no multipath (VPN / EVPN / flowspec resolve their own
 /// transport and install through other paths).
@@ -5949,6 +5993,16 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/suppress-fib-pending",
             config_suppress_fib_pending,
+        );
+
+        // Instance-level best-path MED knobs (zebra-bgp-bestpath.yang).
+        self.callback_add(
+            "/router/bgp/bestpath/always-compare-med",
+            config_bestpath_always_compare_med,
+        );
+        self.callback_add(
+            "/router/bgp/bestpath/med/missing-as-worst",
+            config_bestpath_med_missing_as_worst,
         );
 
         // Instance-level graceful restart (zebra-bgp-graceful-restart.yang).

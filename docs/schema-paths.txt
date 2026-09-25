@@ -62,6 +62,10 @@
 /router/bgp/afi-safi/vpws/vni	leaf
 /router/bgp/afi-safi/vtep-source	leaf
 /router/bgp/as-sets-withdraw	leaf
+/router/bgp/bestpath	container
+/router/bgp/bestpath/always-compare-med	leaf
+/router/bgp/bestpath/med	container
+/router/bgp/bestpath/med/missing-as-worst	leaf
 /router/bgp/bfd	container
 /router/bgp/bfd/detect-offload	leaf
 /router/bgp/bfd/echo-mode	leaf

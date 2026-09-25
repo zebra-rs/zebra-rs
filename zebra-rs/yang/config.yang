@@ -76,6 +76,10 @@ module config {
     prefix zbmp;
   }
 
+  import zebra-bgp-bestpath {
+    prefix zbbp;
+  }
+
   import zebra-bgp-graceful-restart {
     prefix zbgr;
   }

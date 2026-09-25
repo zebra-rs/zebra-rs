@@ -1082,6 +1082,12 @@ pub struct Bgp {
     /// the resulting state depend on config order.
     pub graceful_restart_disable: bool,
 
+    /// `router bgp bestpath always-compare-med` / `... med
+    /// missing-as-worst` (zebra-bgp-bestpath.yang). The configured values;
+    /// selection reads the process-wide copy installed from these
+    /// ([`super::route::MedPolicy`]).
+    pub bestpath_med: super::route::MedPolicy,
+
     /// Color → Flex-Algorithm binding table
     /// (zebra-bgp-color-policy.yang). The colour-aware nexthop
     /// resolver consults this to pick a per-algo entry from
@@ -1433,6 +1439,7 @@ impl Bgp {
         let mut bgp = Self {
             graceful_restart: super::peer::GracefulRestartGlobal::default(),
             graceful_restart_disable: false,
+            bestpath_med: super::route::MedPolicy::default(),
             asn: 0,
             router_id: Ipv4Addr::UNSPECIFIED,
             router_id_config: None,
@@ -5505,45 +5512,7 @@ impl Bgp {
         match self.nexthop_cache.update(vrf_id, nh, resolution) {
             CacheChange::Unchanged => {}
             // Gate flipped → full re-eval: best-path, advertise, install.
-            CacheChange::Reachability(deps) => {
-                // At N>1, batch the v4-unicast re-evals per shard — every
-                // one of this next-hop's dependent prefixes hashing to a
-                // shard rides a single message instead of one dispatch
-                // each (RouteBatch for the release path; a first-seen
-                // next-hop can release a whole table's worth of held
-                // routes at once). Non-v4 deps (v6 / LU / VPN / EVPN /
-                // SR-Policy) stay on the inline sync-shard path.
-                let mut inline: Vec<super::nht::NhtDep> = Vec::new();
-                if let Some(pool) = self.shards.as_ref() {
-                    let mut per_shard: Vec<Vec<bgp_packet::Ipv4Nlri>> = vec![Vec::new(); pool.n()];
-                    for dep in deps {
-                        match dep {
-                            super::nht::NhtDep::V4(p) => {
-                                let idx = pool.shard_of(std::net::IpAddr::V4(p.addr()));
-                                per_shard[idx].push(bgp_packet::Ipv4Nlri { id: 0, prefix: p });
-                            }
-                            other => inline.push(other),
-                        }
-                    }
-                    for (idx, nlris) in per_shard.into_iter().enumerate() {
-                        if !nlris.is_empty() {
-                            pool.dispatch(
-                                idx,
-                                super::shard::ShardMsg::NexthopReachableBatchV4 {
-                                    nlris,
-                                    nh,
-                                    reachable,
-                                },
-                            );
-                        }
-                    }
-                } else {
-                    inline.extend(deps);
-                }
-                for dep in inline {
-                    self.nht_reeval_dep(vrf_id, nh, reachable, dep);
-                }
-            }
+            CacheChange::Reachability(deps) => self.nht_reeval_deps(vrf_id, nh, reachable, deps),
             // PE still reachable but its transport rerouted → only the
             // fully-resolved VPN FIB entry is stale; re-install it
             // without re-advertising (best-path is unchanged).
@@ -5871,6 +5840,178 @@ impl Bgp {
     /// import with the resolved transport — register-then-gate means an
     /// imported route only becomes best-path here, so this is where the
     /// VRF dataplane install is triggered.
+    /// Full re-evaluation — best-path, advertise, install — of the
+    /// prefixes that depend on `nh`, whose reachability is `reachable`.
+    fn nht_reeval_deps(
+        &mut self,
+        vrf_id: u32,
+        nh: std::net::IpAddr,
+        reachable: bool,
+        deps: Vec<super::nht::NhtDep>,
+    ) {
+        // At N>1, batch the v4-unicast re-evals per shard — every one of
+        // this next-hop's dependent prefixes hashing to a shard rides a
+        // single message instead of one dispatch each (RouteBatch for the
+        // release path; a first-seen next-hop can release a whole table's
+        // worth of held routes at once). Non-v4 deps (v6 / LU / VPN /
+        // EVPN / SR-Policy) stay on the inline sync-shard path.
+        let mut inline: Vec<super::nht::NhtDep> = Vec::new();
+        if let Some(pool) = self.shards.as_ref() {
+            let mut per_shard: Vec<Vec<bgp_packet::Ipv4Nlri>> = vec![Vec::new(); pool.n()];
+            for dep in deps {
+                match dep {
+                    super::nht::NhtDep::V4(p) => {
+                        let idx = pool.shard_of(std::net::IpAddr::V4(p.addr()));
+                        per_shard[idx].push(bgp_packet::Ipv4Nlri { id: 0, prefix: p });
+                    }
+                    other => inline.push(other),
+                }
+            }
+            for (idx, nlris) in per_shard.into_iter().enumerate() {
+                if !nlris.is_empty() {
+                    pool.dispatch(
+                        idx,
+                        super::shard::ShardMsg::NexthopReachableBatchV4 {
+                            nlris,
+                            nh,
+                            reachable,
+                        },
+                    );
+                }
+            }
+        } else {
+            inline.extend(deps);
+        }
+        for dep in inline {
+            self.nht_reeval_dep(vrf_id, nh, reachable, dep);
+        }
+    }
+
+    /// Re-run best-path selection — and advertise and install whatever
+    /// changed — for every route of this instance, after a change to the
+    /// rule selection compares paths by (the MED knobs,
+    /// zebra-bgp-bestpath.yang). Only prefixes whose best path the new
+    /// rule moves are propagated, so toggling a knob does not re-send the
+    /// whole table.
+    ///
+    /// Two passes:
+    ///
+    /// - Next-hop-tracked families (unicast, labeled unicast, VPN): each
+    ///   tracked prefix whose winner would change
+    ///   ([`super::route::LocalRibTable::winner_would_change`]) goes
+    ///   through the NHT re-eval path with its next-hop's current
+    ///   reachability — the same best-path, advertise and install code a
+    ///   reachability change drives. Refreshing a cached reachability to
+    ///   the value it already has changes nothing else. A prefix runs
+    ///   once, under one of its tracked next-hops: for VPN rows the one
+    ///   the new winner uses, since the VRF import dispatch reads that
+    ///   next-hop's transport. At N>1 the v4-unicast Loc-RIB lives in the
+    ///   pool and the main copy's reachability may lag it, so every
+    ///   tracked v4 prefix is batched to its shard unfiltered.
+    /// - Families whose rows carry no tracked next-hop — EVPN (all route
+    ///   types), MUP, Flowspec, BGP-LS — are walked directly
+    ///   ([`super::route::bestpath_recompute_untracked`]).
+    ///
+    /// SR-Policy has no best-path over paths that carry MED. Locally
+    /// originated unicast routes carry no tracked next-hop; a prefix with
+    /// only such paths has no MED choice to revisit.
+    pub(super) fn bestpath_recompute_all(&mut self) {
+        use super::nht::NhtDep;
+        let med = super::route::MedPolicy::current();
+        let mut keys_of: std::collections::BTreeMap<NhtDep, Vec<(u32, std::net::IpAddr, bool)>> =
+            std::collections::BTreeMap::new();
+        for ((vrf_id, nh), entry) in &self.nexthop_cache.entries {
+            for dep in &entry.deps {
+                keys_of
+                    .entry(dep.clone())
+                    .or_default()
+                    .push((*vrf_id, *nh, entry.reachable));
+            }
+        }
+        // One re-eval per dep, grouped by the key it runs under so the
+        // per-shard batching of v4-unicast deps still applies.
+        let mut batches: std::collections::BTreeMap<(u32, std::net::IpAddr, bool), Vec<NhtDep>> =
+            std::collections::BTreeMap::new();
+        for (dep, mut keys) in keys_of {
+            let changes = match &dep {
+                NhtDep::V4(p) => {
+                    self.shards.is_some() || self.shard.v4.winner_would_change(*p, med)
+                }
+                NhtDep::V6(p) => self.shard.v6.winner_would_change(*p, med),
+                NhtDep::V4lu(p) => self.shard.v4lu.winner_would_change(*p, med),
+                NhtDep::V6lu(p) => self.shard.v6lu.winner_would_change(*p, med),
+                NhtDep::V4vpn(rd, p) => self
+                    .shard
+                    .v4vpn
+                    .get(rd)
+                    .is_some_and(|t| t.winner_would_change(*p, med)),
+                NhtDep::V6vpn(rd, p) => self
+                    .shard
+                    .v6vpn
+                    .get(rd)
+                    .is_some_and(|t| t.winner_would_change(*p, med)),
+                // EVPN is re-run by the direct walk below (every route
+                // type, Type-5 included); MUP and SR-Policy likewise or
+                // not at all.
+                NhtDep::Evpn(..)
+                | NhtDep::Mup(..)
+                | NhtDep::MupEndpoint(..)
+                | NhtDep::SrPolicy { .. } => false,
+            };
+            if !changes {
+                continue;
+            }
+            keys.sort();
+            let winner_nh = match &dep {
+                NhtDep::V4vpn(rd, p) => self
+                    .shard
+                    .select_best_path_vpn(rd, *p)
+                    .first()
+                    .and_then(|w| super::nht::nht_target(&w.attr)),
+                NhtDep::V6vpn(rd, p) => self
+                    .shard
+                    .select_best_path_vpn_v6(rd, *p)
+                    .first()
+                    .and_then(|w| super::nht::nht_target(&w.attr)),
+                _ => None,
+            };
+            let key = winner_nh
+                .and_then(|target| keys.iter().find(|(_, nh, _)| *nh == target).copied())
+                .unwrap_or(keys[0]);
+            batches.entry(key).or_default().push(dep);
+        }
+        for ((vrf_id, nh, reachable), deps) in batches {
+            self.nht_reeval_deps(vrf_id, nh, reachable, deps);
+        }
+
+        let import_dispatcher = super::vrf::VrfImportDispatcher {
+            rib_known_vrfs: &self.rib_known_vrfs,
+            vrf_registry: &self.vrf_registry,
+        };
+        let mut top = BgpTop {
+            router_id: &self.router_id,
+            srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
+            local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
+            tx: &self.tx,
+            rib_client: &self.ctx.rib,
+            attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
+            vrf_export: None,
+            color_policy: Some(&self.color_policy),
+            flex_algo_routes: Some(&self.flex_algo_routes),
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
+            vrf_import: Some(&import_dispatcher),
+            nexthop_cache: Some(&mut self.nexthop_cache),
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+            central_label_alloc: self.vrf_label_alloc.as_mut(),
+            as_sets_withdraw: self.as_sets_withdraw,
+        };
+        super::route::bestpath_recompute_untracked(&mut top, &mut self.peers);
+    }
+
     pub(super) fn nht_reeval_dep(
         &mut self,
         vrf_id: u32,

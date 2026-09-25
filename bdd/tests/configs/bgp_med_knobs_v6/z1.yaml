@@ -1,0 +1,48 @@
+# z1 (DUT, AS 65001): eBGP paths for 2001:db8:56:1::/64 and
+# 2001:db8:56:2::/64 from three scripted speakers — h1 and h3 in AS 65081,
+# h2 in AS 65082 — and one downstream neighbor, z2, that shows which path
+# z1 selected. The MED knobs (`router bgp bestpath ...`) are set and deleted
+# at runtime by the feature.
+# IPv6 unicast over IPv4 sessions; each path's next-hop is its global IPv6.
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.57.1
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    # The scripted speakers never listen on 179: passive keeps these peers
+    # in Active so the scripts' connects are accepted.
+    - remote-address: 192.168.57.2
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65081
+      transport:
+        passive-mode: true
+    - remote-address: 192.168.57.3
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65082
+      transport:
+        passive-mode: true
+    - remote-address: 192.168.57.4
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65081
+      transport:
+        passive-mode: true
+    - remote-address: 192.168.57.5
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65090
