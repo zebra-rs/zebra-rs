@@ -195,10 +195,13 @@ Replace the two window counters with per-probe accounting:
   nothing sweeps for 10 s, and a reply 4 s late must not count as received. The reverse race
   is handled too: a reply read in time for a probe that a later sweep already declared lost
   moves that probe back to received. (PR 1 review, finding 1.)
-- A probe is credited to the loss bucket (D4) **that contains its settlement time** — the
-  receive time for a received probe, the deadline for a lost one — not the bucket it was
-  sent in, and not the one open when the event loop processed it. This removes the boundary
-  skew: every probe is counted exactly once, as received or as lost.
+- A probe is credited to the loss bucket (D4) **it was sent in**, received or lost — RFC 8570's
+  "percentage of the total traffic sent over a configurable interval", literally. A bucket is
+  **final** `LOSS_WAIT` after it ends, when every probe sent in it has settled, and only final
+  buckets enter a window. This removes the boundary skew: every probe is counted exactly once,
+  as received or as lost, in one bucket. (PR 1 booked each probe at its settlement time — the
+  receive time or the deadline. PR 2 moved to send time, because deadline booking put an
+  outage's last 3 s of probes into the first bucket after it as losses; see D8.)
 
 `LOSS_WAIT` is a constant, not a knob. It has to exceed any real one-link round-trip time by
 a wide margin and be much shorter than a 30 s loss bucket, and 3 s satisfies both at every
@@ -289,9 +292,10 @@ loss = Σ lost / Σ settled   over the subscriber's last N buckets
 ```
 
 **Buckets are indexed by time**, from the session's start: bucket *k* covers
-`[start + k·30 s, start + (k+1)·30 s)`. The loss clock's tick only advances time. If ticks
-are skipped — a runtime stall, a VM freeze — the elapsed boundaries become buckets with no
-settlements, never one bucket stretched over several periods. So a window of N buckets always
+`[start + k·30 s, start + (k+1)·30 s)`, and holds the probes sent in that span (D2). The
+loss clock ticks `LOSS_WAIT` after each boundary, just as the previous bucket becomes final,
+and only advances time. If ticks are skipped — a runtime stall, a VM freeze — the elapsed
+boundaries become buckets with no probes, never one bucket stretched over several periods. So a window of N buckets always
 spans exactly N × 30 s. A measurement gap then shows up as an integrity dip (D5), instead of
 keeping old losses past their window. (PR 1 review, finding 2: the first cut closed one
 bucket per tick, and a stall let a "120 s" window cover 240 s.)
@@ -304,7 +308,13 @@ it covers ("loss over the last 120 s"), forgets a burst on a known date, and mak
 resolution (D5) a plain count. An EWMA never quite forgets and has no sample count to show.
 
 `loss interval` must be a multiple of 30 s (30–3600 s). The configuration layer rejects
-anything else rather than silently rounding it. The constraint sits on the **new** leaf only,
+anything else rather than silently rounding it: the commit fails and names the line. YANG
+cannot express a step, and a protocol's config callback cannot reject a value once the commit
+is dispatched, so the config manager checks the leaf before dispatch (`config::check`).
+The two decimal64 percentages (`minimum-change`, `accelerated-threshold`) are checked the same
+way, because libyang enforces neither a decimal64 range nor `fraction-digits`: 0–100 %, at
+most six decimal places. PR 2 review, finding 1: a rejected value used to reach the running
+config while STAMP kept its previous setting. The constraint sits on the **new** leaf only,
 so it cannot invalidate an existing configuration. Review round 1, finding 2, caught that the
 first version tied loss buckets to `damping-period`, which accepts any value from 1 to
 3600 s: once loss became default-on, an existing `damping-period 7` or `300` would have
@@ -338,7 +348,18 @@ RFC 8570 §5 asks for per-sub-TLV filters anyway. Loss is evaluated at every los
 (30 s, D4), for each subscriber, but:
 
 - **Periodic:** re-advertise **at most once per loss interval**, and only when
-  `|new − advertised| ≥ max(threshold % × advertised, minimum-change)`. The defaults are
+  `|new − advertised| ≥ max(threshold % × advertised, minimum-change)`. The interval is
+  **real time elapsed** since the advertisement, not a count of buckets finalised since (PR 2
+  review, finding 2). A subscriber seeded between ticks (a late-joining IGP, a config edit)
+  is advertised at once, and the next tick may finalise a bucket a second later; counting
+  buckets, that re-advertised at once. Every decision is timed by the real clock at the
+  moment it is made, a tick's included. The first fix timed a tick on the 30 s grid, the
+  instant its bucket became final. A second review found that backdated the cooldown when
+  the event loop ran a tick late: a tick due at 123 s, run at 152 s, let the 153 s tick
+  re-advertise one second later. Real ticks are not exactly 30 s apart either, so the
+  comparison allows `CADENCE_SLACK` (1 s). Without it, a tick run a few milliseconds sooner
+  after its predecessor would push roughly every other periodic update out by a whole tick.
+  A re-advertisement can therefore come at most 1 s short of the interval, never sooner. The defaults are
   `threshold` **10 %** (zebra-rs delay and Juniper delay; Cisco XE uses 15 %) and
   `minimum-change` **1.0 percentage point** (settled in review, §10 decision 1).
 - Why 1.0 and not Cisco XE's 0.2: Cisco XE counts real traffic, so its resolution is fine.
@@ -403,6 +424,32 @@ forwarding traffic. Liveness belongs to BFD and the IGP hello.
 
 This matches delay, whose empty window already withdraws. Any received reply keeps the value
 advertised, capped per D5.
+
+**Silence is judged per bucket, and a silent bucket is a gap, not loss** (PR 2 BDD finding).
+Judging silence only over the whole window was not enough. When the drop began, the bucket
+that was open still held replies from before it, so the window was never "silent" while the
+outage began. With the default 120 s window, a dead reflector read as rising loss up to the
+50.33 % cap for as long as ~90 s. The same happened in reverse after recovery: the silent
+buckets still in the window counted as lost probes. Two rules close it:
+
+1. **The latest bucket is silent → withdraw at once**, whatever the integrity setting. The
+   measurement has gone silent *now*.
+2. **A silent bucket is a gap:** its probes count as neither settled nor lost, but they still
+   count as expected. So a gap lowers the window's integrity (D5) instead of inflating its loss,
+   and after recovery nothing is advertised until the window refills with real measurements —
+   the same way a scheduler stall is treated (D4).
+
+A bucket counts as silent only if **at least 10 probes settled** and none was received. At a
+slow probe rate, a bucket holds only a few probes, and all of them being lost is ordinary loss:
+3 probes at a 10 s interval are all lost 12.5 % of the time under 50 % loss. At the default 1 s
+rate, silence is 30 consecutive losses. Below the floor, the whole-window rule above still
+applies.
+
+An earlier residual is resolved by send-time booking (D2). With lost probes booked at their
+deadline, an outage's last 3 s of probes landed as losses in the first bucket after recovery —
+about 2.4 % for one advertisement interval at the defaults, after every outage. Booked in the
+bucket they were sent in, they stay inside the silent buckets, and the first recovery bucket
+reads clean.
 
 ### D9 — Delay and loss export independently
 
@@ -633,8 +680,9 @@ Static loss keeps originating a clear A bit, as delay does today.
    - D8 withdrawal;
 
    all wired into IS-IS, OSPFv2 and OSPFv3. BDD scenarios 1, 2 and 5. **This PR changes what
-   every measured link advertises** (decision 4), so it carries the CHANGELOG entry that says
-   so, and the review of the existing STAMP features listed in §7.
+   every measured link advertises** (decision 4). The CHANGELOG is written at release cut in
+   this repo, so the PR states the change for that entry to carry; the PR also reviews the
+   existing STAMP features listed in §7.
 3. **Anomalous bit:** D7 — the flag evaluated on its own candidate value, and the recovery
    timer. BDD scenario 3.
 4. **Direction:**

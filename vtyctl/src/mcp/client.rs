@@ -240,7 +240,9 @@ fn apply_code_name(code: i32) -> &'static str {
         Ok(ApplyCode::Applied) => "applied",
         Ok(ApplyCode::FormatError) => "format error",
         Ok(ApplyCode::ParseError) => "parse error",
-        Ok(ApplyCode::MissingMandatory) => "missing mandatory node",
+        // Any commit-validation failure, not only a missing mandatory
+        // node: the description says which.
+        Ok(ApplyCode::MissingMandatory) => "rejected by commit validation",
         Err(_) => "unknown error",
     }
 }

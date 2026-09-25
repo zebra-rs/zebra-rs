@@ -67,7 +67,8 @@ async fn loopback_session_exports_metrics() {
 
     let StampEvent::MetricUpdate {
         key: got_key,
-        snapshot,
+        delay: snapshot,
+        ..
     } = update;
     assert_eq!(got_key, key);
     let snap = snapshot.expect("first export carries a value, not a clear");
@@ -130,7 +131,8 @@ async fn loopback_session_v6_exports_metrics() {
 
     let StampEvent::MetricUpdate {
         key: got_key,
-        snapshot,
+        delay: snapshot,
+        ..
     } = update;
     assert_eq!(got_key, key);
     let snap = snapshot.expect("first export carries a value, not a clear");

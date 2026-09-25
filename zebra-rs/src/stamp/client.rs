@@ -19,10 +19,13 @@
 //! therefore kept per subscriber in [`Subscriber`], alongside that
 //! subscriber's hysteresis state.
 
+use std::time::Instant;
+
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use super::anomaly::{AnomalyFlags, AnomalyThresholds, DelayAnomaly};
-use super::session::{SessionKey, SessionParams};
+use super::loss::{LossAdvert, LossDecision};
+use super::session::{LossPolicy, SessionKey, SessionParams};
 use super::stats::MetricSnapshot;
 
 /// Identifier for a STAMP subscriber — conventionally the proto name
@@ -75,14 +78,24 @@ pub enum ClientReq {
 /// Events emitted to subscribers.
 #[derive(Debug, Clone, Copy)]
 pub enum StampEvent {
-    /// A damped export: the link's measured delay changed enough to
-    /// re-advertise. `None` clears — the measurement went stale (no
-    /// replies for a whole export period); the IGP must withdraw the
-    /// measured sub-TLVs (falling back to static config where present,
-    /// else pruning the link from delay-metric topologies).
+    /// **The complete state this subscriber should advertise** for
+    /// `key` (measured-loss design D9). Sent whenever either field
+    /// differs from what the subscriber was last sent.
+    ///
+    /// Each field is independent: `Some` means "advertise this", `None`
+    /// means "advertise nothing" — withdraw the measured sub-TLVs,
+    /// falling back to static config where present. A field whose
+    /// update was suppressed repeats its last advertised value, so the
+    /// IGP simply overwrites both from every event. Delay and loss run
+    /// on different clocks, so most events change only one of them.
+    ///
+    /// `delay: None` means the measurement went stale (no replies for a
+    /// whole export period); `loss: None` means loss is disabled, not
+    /// yet trustworthy, or its probes all vanished (design D5, D8).
     MetricUpdate {
         key: SessionKey,
-        snapshot: Option<MetricSnapshot>,
+        delay: Option<MetricSnapshot>,
+        loss: Option<LossAdvert>,
     },
 }
 
@@ -98,15 +111,60 @@ pub struct Subscriber {
     /// Last flags delivered to this subscriber, so a transition can
     /// force an export the shared value filter would have damped.
     pub last_flags: AnomalyFlags,
+    /// This subscriber's loss-advertisement policy (design D10).
+    pub loss_policy: LossPolicy,
+    /// The delay and loss this subscriber was last sent — together, the
+    /// complete state of every event (design D9).
+    pub advertised_delay: Option<MetricSnapshot>,
+    pub advertised_loss: Option<LossAdvert>,
+    /// When `advertised_loss` was decided, for the once-per-interval
+    /// cadence (design D6) — see [`super::loss::evaluate`] for which
+    /// clock a decision is timed by.
+    pub loss_advertised_at: Option<Instant>,
 }
 
 impl Subscriber {
-    pub fn new(notifier: UnboundedSender<StampEvent>, thresholds: AnomalyThresholds) -> Self {
+    pub fn new(
+        notifier: UnboundedSender<StampEvent>,
+        thresholds: AnomalyThresholds,
+        loss_policy: LossPolicy,
+    ) -> Self {
         Self {
             notifier,
             thresholds,
             anomaly: DelayAnomaly::default(),
             last_flags: AnomalyFlags::default(),
+            loss_policy,
+            advertised_delay: None,
+            advertised_loss: None,
+            loss_advertised_at: None,
+        }
+    }
+
+    /// Send this subscriber its complete current state.
+    pub fn send(&self, key: SessionKey) {
+        let _ = self.notifier.send(StampEvent::MetricUpdate {
+            key,
+            delay: self.advertised_delay,
+            loss: self.advertised_loss,
+        });
+    }
+
+    /// Adopt a loss decision made at `now`. Returns whether the
+    /// advertised loss changed — the caller then sends.
+    pub fn apply_loss(&mut self, decision: LossDecision, now: Instant) -> bool {
+        match decision {
+            LossDecision::Keep => false,
+            LossDecision::Set(advert) => {
+                self.loss_advertised_at = Some(now);
+                let changed = self.advertised_loss != Some(advert);
+                self.advertised_loss = Some(advert);
+                changed
+            }
+            LossDecision::Withdraw => {
+                self.loss_advertised_at = None;
+                self.advertised_loss.take().is_some()
+            }
         }
     }
 

@@ -2569,13 +2569,14 @@ impl Isis {
         });
     }
 
-    /// A damped STAMP export arrived: store the measured values on the
-    /// link and re-originate so the RFC 8570 sub-TLVs (and flex-algo
-    /// metric-type-1 SPF inputs) reflect them. A `None` snapshot
-    /// clears — the sub-TLVs are withdrawn unless static config backs
-    /// them ([`super::link::IsisLink::te_metric_effective`]).
+    /// A STAMP update arrived — the complete measured state this IGP
+    /// should advertise for the link: store it and re-originate so the
+    /// RFC 8570 sub-TLVs (and flex-algo metric-type-1 SPF inputs)
+    /// reflect it. Delay and loss are independent: a `None` for either
+    /// withdraws only its own sub-TLVs, unless static config backs them
+    /// ([`super::link::IsisLink::te_metric_effective`]).
     pub(crate) fn process_stamp_event(&mut self, event: crate::stamp::client::StampEvent) {
-        let crate::stamp::client::StampEvent::MetricUpdate { key, snapshot } = event;
+        let crate::stamp::client::StampEvent::MetricUpdate { key, delay, loss } = event;
         let Some(link) = self.links.get_mut(&key.ifindex) else {
             return;
         };
@@ -2584,26 +2585,26 @@ impl Isis {
         if link.state.stamp_session.map(|(k, _)| k) != Some(key) {
             return;
         }
-        link.state.measured_te_metric = match snapshot {
-            Some(snap) => super::link::LinkTeMetric {
-                unidirectional_delay: Some(snap.avg),
-                min_delay: Some(snap.min),
-                max_delay: Some(snap.max),
-                delay_variation: Some(snap.variation),
-                loss: None,
-                // Per-value flags: the average drives its own
-                // sub-TLV, the two bounds jointly drive the Min/Max
-                // sub-TLV's single bit. `merged_over` drops whichever
-                // of them the operator pinned.
-                delay_anomalous: snap.anomaly.avg,
-                min_anomalous: snap.anomaly.min,
-                max_anomalous: snap.anomaly.max,
-            },
-            None => super::link::LinkTeMetric::default(),
+        // Delay and loss arrive together but independently (measured-loss
+        // design D9): each `None` withdraws only its own sub-TLVs.
+        link.state.measured_te_metric = super::link::LinkTeMetric {
+            unidirectional_delay: delay.map(|d| d.avg),
+            min_delay: delay.map(|d| d.min),
+            max_delay: delay.map(|d| d.max),
+            delay_variation: delay.map(|d| d.variation),
+            loss: loss.map(|l| l.value),
+            // Per-value flags: the average drives its own
+            // sub-TLV, the two bounds jointly drive the Min/Max
+            // sub-TLV's single bit. `merged_over` drops whichever
+            // of them the operator pinned.
+            delay_anomalous: delay.is_some_and(|d| d.anomaly.avg),
+            min_anomalous: delay.is_some_and(|d| d.anomaly.min),
+            max_anomalous: delay.is_some_and(|d| d.anomaly.max),
         };
         tracing::info!(
             ifindex = key.ifindex,
-            ?snapshot,
+            ?delay,
+            ?loss,
             "isis: stamp metric update applied"
         );
         let _ = self.tx.send(Message::LspOriginate(Level::L1, None));

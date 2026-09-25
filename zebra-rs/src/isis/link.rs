@@ -1931,6 +1931,59 @@ pub fn config_te_measurement_reuse_threshold(
     })
 }
 
+// `te-metric/measurement/loss/*` — measured-loss policy (design D10).
+pub fn config_te_measurement_loss_enabled(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
+    config_te_measurement(isis, args, |m, args| m.set_loss_enabled(args, op.is_set()))
+}
+
+pub fn config_te_measurement_loss_interval(
+    isis: &mut Isis,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_te_measurement(isis, args, |m, args| m.set_loss_interval(args, op.is_set()))
+}
+
+pub fn config_te_measurement_loss_threshold(
+    isis: &mut Isis,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_te_measurement(isis, args, |m, args| {
+        m.set_loss_threshold(args, op.is_set())
+    })
+}
+
+pub fn config_te_measurement_loss_minimum_change(
+    isis: &mut Isis,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_te_measurement(isis, args, |m, args| {
+        m.set_loss_minimum_change(args, op.is_set())
+    })
+}
+
+pub fn config_te_measurement_loss_accelerated_threshold(
+    isis: &mut Isis,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_te_measurement(isis, args, |m, args| {
+        m.set_loss_accelerated(args, op.is_set())
+    })
+}
+
+pub fn config_te_measurement_loss_integrity(
+    isis: &mut Isis,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_te_measurement(isis, args, |m, args| {
+        m.set_loss_integrity(args, op.is_set())
+    })
+}
+
 pub fn config_metric(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     let ifname = args.string()?;
     let metric = args.u32()?;

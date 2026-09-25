@@ -38,6 +38,7 @@ use crate::config::{
 use crate::context::{ProtoContext, Task};
 
 use super::client::{ClientId, ClientReq, ClientReqChannel, StampEvent, Subscriber};
+use super::loss;
 use super::network::{
     ReflectRequest, reflector_read, reflector_read_v6, reflector_write, reflector_write_v6,
     sender_read,
@@ -365,25 +366,54 @@ impl Stamp {
             Some(existing) => {
                 existing.notifier = notifier;
                 existing.thresholds = params.anomaly;
+                existing.loss_policy = params.loss;
             }
             None => {
-                subs.insert(client.clone(), Subscriber::new(notifier, params.anomaly));
+                subs.insert(
+                    client.clone(),
+                    Subscriber::new(notifier, params.anomaly, params.loss),
+                );
             }
         }
-        let mirrored = self.sessions.get(&key).and_then(|s| s.last_snapshot);
-        if mirrored.is_some()
-            && let Some(sub) = self
-                .subscribers
-                .get_mut(&key)
-                .and_then(|m| m.get_mut(&client))
-        {
+        // Seed the subscriber's complete state (measured-loss design D9):
+        // the current delay export mirrored against its own bounds, and
+        // loss evaluated at once against the current buckets, so a
+        // late-joining IGP — or a config edit — does not wait a whole
+        // loss interval. One event carries both.
+        let Some(sub) = self
+            .subscribers
+            .get_mut(&key)
+            .and_then(|m| m.get_mut(&client))
+        else {
+            return;
+        };
+        let session = self.sessions.get(&key);
+        let mut changed = false;
+        let mirrored = session.and_then(|s| s.last_snapshot);
+        if mirrored.is_some() {
             let snapshot = sub.apply(mirrored);
             if let Some(snap) = snapshot {
                 sub.last_flags = snap.anomaly;
             }
-            let _ = sub
-                .notifier
-                .send(StampEvent::MetricUpdate { key, snapshot });
+            sub.advertised_delay = snapshot;
+            changed = true;
+        }
+        if let Some(session) = session {
+            // Timed by the real clock: the next tick may finalise a
+            // bucket a second from now, and must not count as an
+            // interval after this advertisement.
+            let now = std::time::Instant::now();
+            let decision = loss::evaluate(
+                &sub.loss_policy,
+                &session.loss,
+                sub.advertised_loss,
+                sub.loss_advertised_at,
+                now,
+            );
+            changed |= sub.apply_loss(decision, now);
+        }
+        if changed {
+            sub.send(key);
         }
     }
 
@@ -639,6 +669,36 @@ impl Stamp {
         session
             .loss
             .advance(std::time::Instant::now(), session.params.interval_ms);
+        // Each subscriber decides its own loss advertisement over the
+        // shared buckets (design D5, D6, D8, D10), and is sent its
+        // complete state only when that changed.
+        let Some(subs) = self.subscribers.get_mut(&key) else {
+            return;
+        };
+        // Timed by the real clock, when this tick actually runs, not
+        // when its bucket became final: a tick the event loop ran late
+        // would otherwise backdate the cooldown and let the next tick
+        // re-advertise at once. Tick jitter is absorbed by
+        // `loss::CADENCE_SLACK`.
+        let now = std::time::Instant::now();
+        for (client, sub) in subs.iter_mut() {
+            let decision = loss::evaluate(
+                &sub.loss_policy,
+                &session.loss,
+                sub.advertised_loss,
+                sub.loss_advertised_at,
+                now,
+            );
+            if sub.apply_loss(decision, now) {
+                tracing::info!(
+                    ?key,
+                    %client,
+                    loss = ?sub.advertised_loss,
+                    "stamp: exporting loss update"
+                );
+                sub.send(key);
+            }
+        }
     }
 
     /// Export timer fired: snapshot the window, run the shared value
@@ -675,16 +735,16 @@ impl Stamp {
                 continue;
             }
             sub.last_flags = flags;
+            sub.advertised_delay = stamped;
             tracing::info!(
                 ?key,
                 %client,
                 ?stamped,
                 "stamp: exporting metric update"
             );
-            let _ = sub.notifier.send(StampEvent::MetricUpdate {
-                key,
-                snapshot: stamped,
-            });
+            // The complete state: the new delay, and the loss this
+            // subscriber already advertises, untouched (design D9).
+            sub.send(key);
         }
     }
 
@@ -948,7 +1008,9 @@ mod tests {
 
         let (tx_b, mut rx_b) = mpsc::unbounded_channel();
         stamp.subscribe("ospf".into(), key, SessionParams::default(), tx_b);
-        let StampEvent::MetricUpdate { snapshot, .. } = rx_b.try_recv().expect("mirrored export");
+        let StampEvent::MetricUpdate {
+            delay: snapshot, ..
+        } = rx_b.try_recv().expect("mirrored export");
         assert!(snapshot.is_some());
     }
 
@@ -1061,7 +1123,7 @@ mod tests {
         assert_eq!(s.rx_invalid_count, 2, "the delay path rejected both");
         assert_eq!(s.rx_count, 0);
         let interval = s.params.interval_ms;
-        s.loss.advance(t0 + Duration::from_secs(30), interval);
+        s.loss.advance(t0 + Duration::from_secs(33), interval);
         let w = s.loss.window(1);
         assert_eq!(
             (w.settled, w.lost),
@@ -1089,8 +1151,8 @@ mod tests {
 
     /// A probe that went out is in the ledger under the sequence number
     /// it carried, and the loss clock advances the ledger to now at the
-    /// session's interval — closing every bucket that has ended, here
-    /// two on a ledger backdated 61 s.
+    /// session's interval — making final every bucket that ended at
+    /// least 3 s ago, here two on a ledger backdated 64 s.
     #[tokio::test]
     async fn a_sent_probe_enters_the_ledger_and_the_loss_tick_advances_it() {
         use crate::stamp::loss::{LossLedger, ReplyFate};
@@ -1109,7 +1171,7 @@ mod tests {
             s.loss.reply(0, std::time::Instant::now()),
             ReplyFate::Received
         );
-        s.loss = LossLedger::new(std::time::Instant::now() - Duration::from_secs(61));
+        s.loss = LossLedger::new(std::time::Instant::now() - Duration::from_secs(64));
         stamp.on_loss_tick(key);
         let w = stamp.sessions.get(&key).unwrap().loss.window(4);
         assert_eq!(w.buckets, 2);
@@ -1128,9 +1190,9 @@ mod tests {
         let key = loopback_key(2);
         let (tx, _rx) = mpsc::unbounded_channel();
         stamp.subscribe("isis".into(), key, SessionParams::default(), tx.clone());
-        // Backdated 31 s, so the tick closes the first bucket.
+        // Backdated 34 s, so the tick makes the first bucket final.
         stamp.sessions.get_mut(&key).unwrap().loss = crate::stamp::loss::LossLedger::new(
-            std::time::Instant::now() - Duration::from_secs(31),
+            std::time::Instant::now() - Duration::from_secs(34),
         );
         stamp.on_loss_tick(key);
         let before = stamp.sessions.get(&key).unwrap().loss.mark();
@@ -1154,6 +1216,249 @@ mod tests {
             "accrued before the interval changed"
         );
         assert_eq!(s.loss.window(1).buckets, 1, "closed buckets survive");
+    }
+
+    /// Replace `key`'s loss ledger with one whose buckets saw these
+    /// `(probes, lost)` counts at 1 s — backdated so the next loss tick
+    /// makes exactly those buckets final (each is final 3 s after it
+    /// ends). Returns the ledger's epoch.
+    fn fill_loss(stamp: &mut Stamp, key: SessionKey, buckets: &[(u32, u32)]) -> std::time::Instant {
+        use crate::stamp::loss::LossLedger;
+        let now = std::time::Instant::now();
+        let epoch = now - Duration::from_secs(buckets.len() as u64 * 30 + 4);
+        let mut l = LossLedger::new(epoch);
+        let mut seq = 0;
+        for (b, &(probes, lost)) in buckets.iter().enumerate() {
+            for i in 0..probes {
+                let sent = epoch + Duration::from_secs(b as u64 * 30 + u64::from(i));
+                l.sent(seq, sent);
+                if i >= lost {
+                    l.reply(seq, sent + Duration::from_millis(5));
+                }
+                seq += 1;
+            }
+        }
+        stamp.sessions.get_mut(&key).unwrap().loss = l;
+        epoch
+    }
+
+    fn drain(rx: &mut mpsc::UnboundedReceiver<StampEvent>) -> Vec<StampEvent> {
+        std::iter::from_fn(|| rx.try_recv().ok()).collect()
+    }
+
+    fn loss_of(ev: &StampEvent) -> Option<u32> {
+        let StampEvent::MetricUpdate { loss, .. } = ev;
+        loss.map(|l| l.value)
+    }
+
+    /// Design D10: each subscriber decides its own loss advertisement
+    /// over the shared buckets. IS-IS with the default (on) gets it;
+    /// OSPF with loss disabled on the same session gets nothing.
+    #[tokio::test]
+    async fn the_loss_tick_advertises_per_subscriber_policy() {
+        let mut stamp = fresh_stamp();
+        let key = loopback_key(2);
+        let (isis_tx, mut isis_rx) = mpsc::unbounded_channel();
+        let (ospf_tx, mut ospf_rx) = mpsc::unbounded_channel();
+        stamp.subscribe("isis".into(), key, SessionParams::default(), isis_tx);
+        let no_loss = SessionParams {
+            loss: crate::stamp::session::LossPolicy {
+                enabled: false,
+                ..Default::default()
+            },
+            ..SessionParams::default()
+        };
+        stamp.subscribe("ospf".into(), key, no_loss, ospf_tx);
+        fill_loss(&mut stamp, key, &[(30, 3); 4]);
+        stamp.on_loss_tick(key);
+
+        let isis = drain(&mut isis_rx);
+        assert_eq!(isis.len(), 1);
+        assert_eq!(
+            loss_of(&isis[0]),
+            Some(crate::stamp::loss::encode_loss(12, 120))
+        );
+        assert!(drain(&mut ospf_rx).is_empty(), "OSPF's loss is disabled");
+    }
+
+    /// Design D9: every event is the complete state. A delay export
+    /// between loss advertisements carries the loss already advertised —
+    /// neither `None` (a withdrawal) nor a newer, unfiltered value.
+    #[tokio::test]
+    async fn a_delay_export_carries_the_advertised_loss_unchanged() {
+        let mut stamp = fresh_stamp();
+        let key = loopback_key(2);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        stamp.subscribe("isis".into(), key, SessionParams::default(), tx);
+        fill_loss(&mut stamp, key, &[(30, 3); 4]);
+        stamp.on_loss_tick(key);
+        let ten = crate::stamp::loss::encode_loss(12, 120);
+        assert_eq!(
+            drain(&mut rx).iter().map(loss_of).collect::<Vec<_>>(),
+            [Some(ten)]
+        );
+
+        // The link gets cleaner, but not by enough to be re-advertised
+        // yet; meanwhile delay moves on every export.
+        fill_loss(&mut stamp, key, &[(30, 3), (30, 3), (30, 3), (30, 2)]);
+        for delay in [100, 900, 100] {
+            stamp
+                .sessions
+                .get_mut(&key)
+                .unwrap()
+                .window
+                .record_delay(delay);
+            stamp.on_export_tick(key);
+        }
+        let events = drain(&mut rx);
+        assert_eq!(events.len(), 3, "one per moving delay export");
+        for ev in &events {
+            let StampEvent::MetricUpdate { delay, .. } = ev;
+            assert!(delay.is_some());
+            assert_eq!(loss_of(ev), Some(ten), "loss rides along unchanged");
+        }
+    }
+
+    /// A config edit that turns loss off withdraws it at once, and one
+    /// that turns it back on re-advertises without waiting a window.
+    #[tokio::test]
+    async fn a_config_edit_withdraws_and_restores_loss() {
+        let mut stamp = fresh_stamp();
+        let key = loopback_key(2);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        stamp.subscribe("isis".into(), key, SessionParams::default(), tx.clone());
+        fill_loss(&mut stamp, key, &[(30, 0); 4]);
+        stamp.on_loss_tick(key);
+        assert_eq!(
+            drain(&mut rx).iter().map(loss_of).collect::<Vec<_>>(),
+            [Some(0)]
+        );
+
+        let off = SessionParams {
+            loss: crate::stamp::session::LossPolicy {
+                enabled: false,
+                ..Default::default()
+            },
+            ..SessionParams::default()
+        };
+        stamp.subscribe("isis".into(), key, off, tx.clone());
+        assert_eq!(
+            drain(&mut rx).iter().map(loss_of).collect::<Vec<_>>(),
+            [None]
+        );
+
+        stamp.subscribe("isis".into(), key, SessionParams::default(), tx);
+        assert_eq!(
+            drain(&mut rx).iter().map(loss_of).collect::<Vec<_>>(),
+            [Some(0)]
+        );
+    }
+
+    /// A subscriber joining a running session is evaluated against the
+    /// current buckets at once, rather than waiting a whole loss
+    /// interval.
+    #[tokio::test]
+    async fn a_late_subscriber_is_seeded_with_loss() {
+        let mut stamp = fresh_stamp();
+        let key = loopback_key(2);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        stamp.subscribe("isis".into(), key, SessionParams::default(), tx);
+        fill_loss(&mut stamp, key, &[(30, 0); 4]);
+        stamp.on_loss_tick(key);
+
+        let (late_tx, mut late_rx) = mpsc::unbounded_channel();
+        stamp.subscribe("ospf".into(), key, SessionParams::default(), late_tx);
+        assert_eq!(
+            drain(&mut late_rx).iter().map(loss_of).collect::<Vec<_>>(),
+            [Some(0)]
+        );
+    }
+
+    /// Review of PR 2, reproduced end to end: OSPF joins a running
+    /// session 152 s in, with a 30 s loss interval, and is seeded 10 %
+    /// from the bucket final then. The tick finalising the next bucket
+    /// (20 %) comes a moment later. Counting buckets, that was a whole
+    /// interval and 20 % went straight out; it must wait 30 s. IS-IS,
+    /// which had nothing advertised, gets its first value at once.
+    #[tokio::test]
+    async fn a_subscriber_seeded_between_ticks_waits_a_full_interval() {
+        use crate::stamp::loss::encode_loss;
+        let mut stamp = fresh_stamp();
+        let key = loopback_key(2);
+        let params = SessionParams {
+            loss: crate::stamp::session::LossPolicy {
+                window_buckets: 1,
+                ..Default::default()
+            },
+            ..SessionParams::default()
+        };
+        let (isis_tx, mut isis_rx) = mpsc::unbounded_channel();
+        stamp.subscribe("isis".into(), key, params, isis_tx);
+        let epoch = fill_loss(
+            &mut stamp,
+            key,
+            &[(30, 3), (30, 3), (30, 3), (30, 3), (30, 6)],
+        );
+        let ledger = &mut stamp.sessions.get_mut(&key).unwrap().loss;
+        ledger.advance(epoch + Duration::from_secs(152), 1000);
+        assert_eq!(ledger.final_index(), 4);
+        let (ten, twenty) = (encode_loss(3, 30), encode_loss(6, 30));
+
+        let (ospf_tx, mut ospf_rx) = mpsc::unbounded_channel();
+        stamp.subscribe("ospf".into(), key, params, ospf_tx);
+        assert_eq!(
+            drain(&mut ospf_rx).iter().map(loss_of).collect::<Vec<_>>(),
+            [Some(ten)]
+        );
+
+        stamp.on_loss_tick(key);
+        let session = stamp.sessions.get(&key).unwrap();
+        assert_eq!(session.loss.final_index(), 5);
+        assert_eq!(
+            drain(&mut ospf_rx).iter().map(loss_of).collect::<Vec<_>>(),
+            [],
+            "20 % must wait a full interval after the seeded 10 %"
+        );
+        assert_eq!(
+            drain(&mut isis_rx).iter().map(loss_of).collect::<Vec<_>>(),
+            [Some(twenty)]
+        );
+    }
+
+    /// A delayed loss tick must start the advertisement cooldown when
+    /// it actually sends. Backdating it to the bucket's finalisation
+    /// time permits the next periodic update less than an interval later.
+    /// Retained review probe for PR 2's elapsed-time cadence contract.
+    #[tokio::test]
+    async fn a_delayed_loss_tick_records_actual_advertisement_time() {
+        let mut stamp = fresh_stamp();
+        let key = loopback_key(2);
+        let params = SessionParams {
+            loss: crate::stamp::session::LossPolicy {
+                window_buckets: 1,
+                ..Default::default()
+            },
+            ..SessionParams::default()
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        stamp.subscribe("isis".into(), key, params, tx);
+        // The helper backdates the ledger by 34 s: its first bucket
+        // became final about one second before this tick is processed.
+        fill_loss(&mut stamp, key, &[(30, 3)]);
+        let before_send = std::time::Instant::now();
+        stamp.on_loss_tick(key);
+        assert_eq!(
+            drain(&mut rx).iter().map(loss_of).collect::<Vec<_>>(),
+            [Some(crate::stamp::loss::encode_loss(3, 30))]
+        );
+        let advertised_at = stamp.subscribers[&key]["isis"]
+            .loss_advertised_at
+            .expect("the first value was advertised");
+        assert!(
+            advertised_at >= before_send,
+            "cooldown was backdated by {:?} before the advertisement",
+            before_send.saturating_duration_since(advertised_at)
+        );
     }
 
     /// The implicit reflector only answers registered remotes: an
@@ -1233,7 +1538,10 @@ mod tests {
         stamp.on_export_tick(key); // still empty → quiet
 
         let mut updates = Vec::new();
-        while let Ok(StampEvent::MetricUpdate { snapshot, .. }) = rx.try_recv() {
+        while let Ok(StampEvent::MetricUpdate {
+            delay: snapshot, ..
+        }) = rx.try_recv()
+        {
             updates.push(snapshot);
         }
         assert_eq!(updates.len(), 2, "one export + one clear, got {updates:?}");
@@ -1295,11 +1603,15 @@ mod tests {
             stamp.on_export_tick(key);
 
             let isis_snap = match isis_rx.try_recv() {
-                Ok(StampEvent::MetricUpdate { snapshot, .. }) => snapshot.expect("value"),
+                Ok(StampEvent::MetricUpdate {
+                    delay: snapshot, ..
+                }) => snapshot.expect("value"),
                 other => panic!("isis got {other:?}"),
             };
             let ospf_snap = match ospf_rx.try_recv() {
-                Ok(StampEvent::MetricUpdate { snapshot, .. }) => snapshot.expect("value"),
+                Ok(StampEvent::MetricUpdate {
+                    delay: snapshot, ..
+                }) => snapshot.expect("value"),
                 other => panic!("ospf got {other:?}"),
             };
 
@@ -1360,7 +1672,10 @@ mod tests {
         stamp.on_export_tick(key);
 
         let mut delivered = Vec::new();
-        while let Ok(StampEvent::MetricUpdate { snapshot, .. }) = isis_rx.try_recv() {
+        while let Ok(StampEvent::MetricUpdate {
+            delay: snapshot, ..
+        }) = isis_rx.try_recv()
+        {
             delivered.push(snapshot.expect("value"));
         }
         assert_eq!(delivered.len(), 2, "first export + the flag flip");
@@ -1371,7 +1686,9 @@ mod tests {
         let (ospf_tx, mut ospf_rx) = mpsc::unbounded_channel();
         stamp.subscribe("ospf".into(), key, policy, ospf_tx);
         let seeded = match ospf_rx.try_recv() {
-            Ok(StampEvent::MetricUpdate { snapshot, .. }) => snapshot.expect("mirrored"),
+            Ok(StampEvent::MetricUpdate {
+                delay: snapshot, ..
+            }) => snapshot.expect("mirrored"),
             other => panic!("ospf got {other:?}"),
         };
         // Exactly what IS-IS last saw, not the pre-crossing sample
@@ -1479,7 +1796,9 @@ mod tests {
         stamp.on_export_tick(key);
 
         let snap = match ospf_rx.try_recv() {
-            Ok(StampEvent::MetricUpdate { snapshot, .. }) => snapshot.expect("value"),
+            Ok(StampEvent::MetricUpdate {
+                delay: snapshot, ..
+            }) => snapshot.expect("value"),
             other => panic!("ospf got {other:?}"),
         };
         assert_eq!(
@@ -1535,7 +1854,10 @@ mod tests {
         stamp.on_export_tick(key);
 
         let mut updates = Vec::new();
-        while let Ok(StampEvent::MetricUpdate { snapshot, .. }) = rx.try_recv() {
+        while let Ok(StampEvent::MetricUpdate {
+            delay: snapshot, ..
+        }) = rx.try_recv()
+        {
             updates.push(snapshot);
         }
         assert_eq!(

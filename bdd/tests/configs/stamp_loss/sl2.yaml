@@ -1,0 +1,47 @@
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.64.0.2/32
+- if-name: sl2-sl1
+  ipv4:
+    address: 192.168.62.2/30
+
+router:
+  isis:
+    net: 49.0064.0000.0000.0002.00
+    hostname: sl2
+    is-type: level-2-only
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+    - if-name: sl2-sl1
+      network-type: point-to-point
+      ipv4:
+        enabled: true
+      te-metric:
+        measurement:
+          enabled: true
+          interval: 100
+          damping-period: 2
+          loss:
+            interval: 30
+  ospf:
+    router-id: 10.64.0.2
+    segment-routing:
+      mpls: {}
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+      - if-name: sl2-sl1
+        enabled: true
+        network-type: point-to-point
+        te-metric:
+          measurement:
+            enabled: true
+            interval: 100
+            damping-period: 2
+            loss:
+              interval: 30

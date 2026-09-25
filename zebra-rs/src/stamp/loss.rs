@@ -14,22 +14,25 @@
 //! and the delay path keeps rejecting it on its own.
 //!
 //! **Buckets are time-indexed** from the ledger's creation: bucket *k*
-//! covers `[epoch + k·30 s, epoch + (k+1)·30 s)`. Each settlement is
-//! booked into the bucket that contains **its own time** — the receive
-//! time for a received probe, the deadline for a lost one — whenever
-//! the event loop processes it. The loss clock only advances time
-//! ([`LossLedger::advance`]): a skipped tick, or a stall of the whole
-//! runtime, becomes buckets with no settlements, never one bucket
-//! stretched over several periods. So a window of N buckets always spans
-//! exactly N × 30 s, and a measurement gap shows up as an integrity dip
-//! rather than as old losses kept past their window.
+//! covers `[epoch + k·30 s, epoch + (k+1)·30 s)`. Every probe is booked
+//! in **the bucket it was sent in**, received or lost — RFC 8570's
+//! "percentage of the total traffic sent over a configurable interval",
+//! literally. A bucket becomes **final** [`LOSS_WAIT`] after it ends,
+//! when every probe sent in it has settled, and only final buckets enter
+//! a window. Booking at settlement time instead put an outage's last
+//! [`LOSS_WAIT`] of probes into the first bucket after it, as losses.
+//!
+//! The loss clock only advances time ([`LossLedger::advance`]): a
+//! skipped tick, or a stall of the whole runtime, becomes buckets with
+//! no probes, never one bucket stretched over several periods. So a
+//! window of N buckets always spans exactly N × 30 s, and a measurement
+//! gap shows up as an integrity dip rather than as old losses kept past
+//! their window.
 //!
 //! Loss runs on this clock alone, independent of the delay export
 //! period. Each bucket also records how many probes the probe rate then
 //! in force should have produced, which keeps the integrity check exact
 //! across a probe-interval retune.
-//!
-//! Nothing here reaches an IGP yet; `show stamp` renders it.
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -44,6 +47,16 @@ pub const LOSS_WAIT: Duration = Duration::from_secs(3);
 /// interval.
 pub const BUCKET: Duration = Duration::from_secs(30);
 
+/// How much earlier than a full loss interval a periodic
+/// re-advertisement may go out (design D6). The cadence is judged by the
+/// real clock, and two loss ticks run 30 s apart on the grid but not
+/// exactly 30 s apart in real time: each runs when the event loop gets
+/// to it. Without this allowance, a tick run a few milliseconds sooner
+/// after its predecessor than the one before would push roughly every
+/// other periodic update out by a whole tick. It is far above timer
+/// jitter and far below a bucket.
+pub const CADENCE_SLACK: Duration = Duration::from_secs(1);
+
 /// Closed buckets kept: the longest loss interval a subscriber may
 /// configure (3600 s) divided by [`BUCKET`].
 pub const MAX_BUCKETS: usize = 120;
@@ -56,6 +69,13 @@ pub const DEFAULT_WINDOW_BUCKETS: usize = 4;
 /// reply for one can still be told apart as late, duplicate, or — if it
 /// was received in time but processed after a sweep — received.
 const RECENT: usize = 64;
+
+/// The fewest settled probes a bucket needs before "none received"
+/// means silence rather than loss. At a slow probe rate a bucket holds
+/// only a few probes, and all of them being lost is ordinary loss: at a
+/// 10 s interval, 3 probes all lost happens 12.5 % of the time under
+/// 50 % loss. At the default 1 s rate, silence is 30 consecutive losses.
+pub const SILENT_MIN_SETTLED: u32 = 10;
 
 /// RFC 8570 §4.4's largest link-loss value, 2²⁴ − 2 (50.331642 %).
 /// Larger measurements are encoded as this.
@@ -118,10 +138,14 @@ pub struct LossLedger {
     pending: VecDeque<Probe>,
     /// Recently settled probes that have left `pending`, oldest first.
     recent: VecDeque<Probe>,
-    /// Buckets by index, starting at `first`. The back is the open
-    /// bucket; every other one has closed.
+    /// Buckets by index, starting at `first`, up to the one containing
+    /// the latest time seen.
     buckets: VecDeque<Bucket>,
     first: u64,
+    /// Buckets with an index below this are **final**: they ended at
+    /// least [`LOSS_WAIT`] ago, so every probe sent in them has settled.
+    /// Only final buckets enter a window.
+    final_index: u64,
     /// Expected probes have been accrued up to this instant.
     mark: Instant,
     pub late: u64,
@@ -137,6 +161,7 @@ impl LossLedger {
             recent: VecDeque::new(),
             buckets: VecDeque::from([Bucket::default()]),
             first: 0,
+            final_index: 0,
             mark: now,
             late: 0,
             duplicate: 0,
@@ -148,6 +173,19 @@ impl LossLedger {
         (at.saturating_duration_since(self.epoch).as_nanos() / BUCKET.as_nanos()) as u64
     }
 
+    /// How many buckets are final. Advances by one per 30 s.
+    #[cfg(test)]
+    pub fn final_index(&self) -> u64 {
+        self.final_index
+    }
+
+    /// When the latest final bucket became final: LOSS_WAIT after it
+    /// ended — the loss tick's place on the 30 s grid.
+    #[cfg(test)]
+    pub fn final_at(&self) -> Instant {
+        self.epoch + Duration::from_secs(BUCKET.as_secs() * self.final_index) + LOSS_WAIT
+    }
+
     fn open_index(&self) -> u64 {
         self.first + self.buckets.len() as u64 - 1
     }
@@ -156,12 +194,14 @@ impl LossLedger {
         self.epoch + Duration::from_secs(BUCKET.as_secs() * (index + 1))
     }
 
-    /// Open buckets up to `index`, closing every one before it. Buckets
-    /// no settlement reached stay empty — that is what a gap is.
+    /// Keep buckets up to `index`. Buckets no probe was sent in stay
+    /// empty — that is what a gap is. Beyond the [`MAX_BUCKETS`] final
+    /// ones, at most two are not yet final: the open bucket, and the one
+    /// that ended less than [`LOSS_WAIT`] ago.
     fn open_to(&mut self, index: u64) {
         while self.open_index() < index {
             self.buckets.push_back(Bucket::default());
-            if self.buckets.len() > MAX_BUCKETS + 1 {
+            if self.buckets.len() > MAX_BUCKETS + 2 {
                 self.buckets.pop_front();
                 self.first += 1;
             }
@@ -185,12 +225,11 @@ impl LossLedger {
         }
     }
 
-    fn unbook(&mut self, at: Instant, lost: bool) {
-        if let Some(b) = self.bucket_at(at) {
-            b.settled = b.settled.saturating_sub(1);
-            if lost {
-                b.lost = b.lost.saturating_sub(1);
-            }
+    /// A probe booked lost turned out to be received in time: it stays
+    /// settled in the bucket it was sent in, and is no longer lost.
+    fn unlose(&mut self, sent_at: Instant) {
+        if let Some(b) = self.bucket_at(sent_at) {
+            b.lost = b.lost.saturating_sub(1);
         }
     }
 
@@ -239,12 +278,11 @@ impl LossLedger {
                 return ReplyFate::Duplicate;
             }
             (Fate::Outstanding, true) => {
-                self.book(rx_at, false);
+                self.book(probe.sent_at, false);
                 ReplyFate::Received
             }
             (Fate::Lost, true) => {
-                self.unbook(probe.deadline(), true);
-                self.book(rx_at, false);
+                self.unlose(probe.sent_at);
                 ReplyFate::Received
             }
             (_, false) => {
@@ -262,7 +300,7 @@ impl LossLedger {
     }
 
     /// Settle every probe whose deadline has passed at `now` as lost —
-    /// booked at its deadline, not at `now` — then retire settled probes
+    /// booked in the bucket it was sent in — then retire settled probes
     /// from the front of the queue.
     pub fn sweep(&mut self, now: Instant) {
         let overdue: Vec<Instant> = self
@@ -271,11 +309,11 @@ impl LossLedger {
             .filter(|p| p.fate == Fate::Outstanding && now >= p.deadline())
             .map(|p| {
                 p.fate = Fate::Lost;
-                p.deadline()
+                p.sent_at
             })
             .collect();
-        for deadline in overdue {
-            self.book(deadline, true);
+        for sent_at in overdue {
+            self.book(sent_at, true);
         }
         // Retire in send order only: a received probe behind an
         // outstanding one waits, so the queue stays in sequence order.
@@ -294,9 +332,10 @@ impl LossLedger {
 
     /// Bring the ledger up to `now`: settle what is overdue, credit each
     /// bucket with the probes `interval_ms` should have produced during
-    /// its share of the time since the last call, and close every bucket
-    /// that has ended. Called by the loss clock, and — with the *old*
-    /// interval — just before a probe-interval retune.
+    /// its share of the time since the last call, and make final every
+    /// bucket that ended at least [`LOSS_WAIT`] ago — by then every probe
+    /// sent in it has settled. Called by the loss clock, and — with the
+    /// *old* interval — just before a probe-interval retune.
     pub fn advance(&mut self, now: Instant, interval_ms: u32) {
         self.sweep(now);
         let interval = u64::from(interval_ms.max(1));
@@ -311,6 +350,10 @@ impl LossLedger {
         }
         let now_index = self.index(now);
         self.open_to(now_index);
+        let final_index = now
+            .checked_sub(LOSS_WAIT)
+            .map_or(0, |t| if t < self.epoch { 0 } else { self.index(t) });
+        self.final_index = self.final_index.max(final_index);
     }
 
     /// Where expected probes have been accrued up to — for tests that
@@ -320,9 +363,18 @@ impl LossLedger {
         self.mark
     }
 
-    /// The last `buckets` closed buckets, summed. Fewer are summed while
+    /// The last `buckets` final buckets, summed. Fewer are summed while
     /// the session is younger than that; [`LossWindow::is_full`] says
-    /// which. The open bucket is never included.
+    /// which. A bucket that is not yet final is never included.
+    ///
+    /// A **silent** bucket — at least [`SILENT_MIN_SETTLED`] probes
+    /// settled, not one reply received — is a measurement gap, not loss
+    /// (design D8): its probes count as
+    /// neither settled nor lost, but still as expected, so a gap lowers
+    /// the window's integrity instead of inflating its loss. Otherwise a
+    /// window straddling a reflector outage would read as heavy loss
+    /// both while the outage begins and for a whole window after it
+    /// ends.
     pub fn window(&self, buckets: usize) -> LossWindow {
         let wanted = buckets.clamp(1, MAX_BUCKETS);
         let mut w = LossWindow {
@@ -331,12 +383,18 @@ impl LossLedger {
             settled: 0,
             lost: 0,
             expected_milli: 0,
+            silent: 0,
         };
-        for b in self.buckets.iter().rev().skip(1).take(wanted) {
+        let finals = self.final_index.saturating_sub(self.first) as usize;
+        for b in self.buckets.iter().take(finals).rev().take(wanted) {
             w.buckets += 1;
+            w.expected_milli += b.expected_milli;
+            if b.settled >= SILENT_MIN_SETTLED && b.lost >= b.settled {
+                w.silent += 1;
+                continue;
+            }
             w.settled += u64::from(b.settled);
             w.lost += u64::from(b.lost);
-            w.expected_milli += b.expected_milli;
         }
         w
     }
@@ -352,6 +410,9 @@ pub struct LossWindow {
     pub settled: u64,
     pub lost: u64,
     pub expected_milli: u64,
+    /// Buckets in which probes settled but none was received: gaps,
+    /// left out of `settled` and `lost` (see [`LossLedger::window`]).
+    pub silent: usize,
 }
 
 impl LossWindow {
@@ -379,8 +440,8 @@ impl LossWindow {
     }
 
     /// Settled probes as a percentage of those the probe rate should
-    /// have produced, capped at 100. Settlement trails sending by up to
-    /// [`LOSS_WAIT`], so a window can briefly read a little over.
+    /// have produced, capped at 100 (timer jitter at a retune can put
+    /// one probe more in a bucket than its span strictly allows).
     pub fn integrity_percent(&self) -> Option<u32> {
         (self.expected_milli > 0)
             .then(|| (self.settled * 100_000 / self.expected_milli).min(100) as u32)
@@ -391,6 +452,115 @@ impl LossWindow {
     /// requires.
     pub fn encoded(&self) -> Option<u32> {
         (self.settled > 0).then(|| encode_loss(self.lost, self.settled))
+    }
+}
+
+/// A loss value as one subscriber advertises it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct LossAdvert {
+    /// RFC 8570 §4.4 units, 0.000003 % each.
+    pub value: u32,
+    /// The Anomalous bit (design D7). Not evaluated yet: always clear,
+    /// which is also what a statically configured loss originates.
+    pub anomalous: bool,
+}
+
+/// What a subscriber should do with its loss advertisement at a tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LossDecision {
+    /// Leave the advertisement as it is.
+    Keep,
+    /// Advertise this value.
+    Set(LossAdvert),
+    /// Stop advertising measured loss.
+    Withdraw,
+}
+
+/// The encoded value of `w` if it can be trusted, or `None`:
+/// - not yet full — a value from a handful of probes is noise (D5);
+/// - below the integrity threshold — the probe stream had a gap, or
+///   silent buckets were left out of it (D5, D8);
+/// - nothing received at all.
+fn trusted(w: &LossWindow, integrity_pct: u32) -> Option<u32> {
+    if !w.is_full() || w.integrity_percent()? < integrity_pct || w.lost >= w.settled {
+        return None;
+    }
+    w.encoded()
+}
+
+/// Decide one subscriber's loss advertisement — design D5 (gates), D6
+/// (filter and cadence) and D8 (silence). `advertised` is what it
+/// currently advertises, `advertised_at` when that was decided, and
+/// `now` when this decision is made — both by the real clock, whether
+/// on a loss tick or when a subscription is seeded between ticks.
+///
+/// - Disabled, or no trustworthy window: withdraw anything advertised.
+/// - Nothing advertised yet: advertise at once. The RFC 8570 §6 cadence
+///   limits *re*-advertisement.
+/// - Accelerated (opt-in): the latest bucket alone differs from the
+///   advertised value by at least the configured step — advertise that
+///   bucket's value now.
+/// - Periodic: at most once per loss interval, and only for a change of
+///   at least `max(threshold % × advertised, minimum-change)`. The
+///   minimum change governs the zero crossings, where a relative
+///   threshold means nothing. The interval is real time elapsed since
+///   the advertisement, less [`CADENCE_SLACK`] for tick jitter. It is
+///   not a count of buckets finalised since, nor the time a bucket
+///   became final: a value seeded between ticks, or advertised by a
+///   tick the event loop ran late, can be followed by the next tick a
+///   second later.
+pub fn evaluate(
+    policy: &super::session::LossPolicy,
+    ledger: &LossLedger,
+    advertised: Option<LossAdvert>,
+    advertised_at: Option<Instant>,
+    now: Instant,
+) -> LossDecision {
+    let withdraw = if advertised.is_some() {
+        LossDecision::Withdraw
+    } else {
+        LossDecision::Keep
+    };
+    if !policy.enabled {
+        return withdraw;
+    }
+    // D8, judged on the latest bucket: 30 s in which probes went out
+    // and not one reply came back means the measurement has gone silent
+    // *now* — a reflector down, an ACL, a policer. Withdraw at once,
+    // whatever older buckets or a lenient integrity setting would allow:
+    // the bucket the outage began in still holds replies from before
+    // it, and a value built from it reads as near-total loss.
+    if ledger.window(1).silent > 0 {
+        return withdraw;
+    }
+    let Some(value) = trusted(&ledger.window(policy.window_buckets), policy.integrity_pct) else {
+        return withdraw;
+    };
+    let set = |value| {
+        LossDecision::Set(LossAdvert {
+            value,
+            anomalous: false,
+        })
+    };
+    let Some(current) = advertised else {
+        return set(value);
+    };
+    if let Some(step) = policy.accelerated
+        && let Some(latest) = trusted(&ledger.window(1), policy.integrity_pct)
+        && latest != current.value
+        && latest.abs_diff(current.value) >= step
+    {
+        return set(latest);
+    }
+    let interval = Duration::from_secs(BUCKET.as_secs() * policy.window_buckets as u64);
+    let due = advertised_at
+        .is_none_or(|at| now.saturating_duration_since(at) + CADENCE_SLACK >= interval);
+    let need = (u64::from(current.value) * u64::from(policy.threshold_pct) / 100)
+        .max(u64::from(policy.minimum_change));
+    if due && value != current.value && u64::from(value.abs_diff(current.value)) >= need {
+        set(value)
+    } else {
+        LossDecision::Keep
     }
 }
 
@@ -414,19 +584,21 @@ mod tests {
     }
 
     /// The fault the old counter had: a probe sent just before a bucket
-    /// closes, whose reply arrives just after, counts as received exactly
-    /// once — credited to the bucket its reply arrived in.
+    /// ends, whose reply arrives just after, counts as received exactly
+    /// once — in the bucket it was sent in, which is not final (and so
+    /// not in any window) until its probes have had their wait.
     #[test]
     fn a_reply_across_a_bucket_boundary_counts_once_as_received() {
         let t0 = Instant::now();
         let mut l = LossLedger::new(t0);
         l.sent(7, at(t0, 29_990));
         l.advance(at(t0, 30_000), 1000);
+        assert_eq!(l.window(1).buckets, 0, "not final until 33 s");
         assert_eq!(l.reply(7, at(t0, 30_005)), ReplyFate::Received);
-        l.advance(at(t0, 60_000), 1000);
+        l.advance(at(t0, 63_000), 1000);
         let w = l.window(2);
-        assert_eq!((w.settled, w.lost), (1, 0));
-        assert_eq!(l.window(1).settled, 1, "booked in the second bucket");
+        assert_eq!((w.buckets, w.settled, w.lost), (2, 1, 0));
+        assert_eq!(l.window(1).settled, 0, "nothing was sent in the second");
     }
 
     #[test]
@@ -435,9 +607,9 @@ mod tests {
         let mut l = LossLedger::new(t0);
         l.sent(1, at(t0, 1_000));
         l.sweep(at(t0, 3_999));
-        l.advance(at(t0, 30_000), 1000);
-        // Swept only at the tick, but booked at its deadline (4 s),
-        // in the first bucket.
+        l.advance(at(t0, 33_000), 1000);
+        // Swept only at the tick, but booked in the bucket it was sent
+        // in, the first.
         let w = l.window(1);
         assert_eq!((w.settled, w.lost), (1, 1));
     }
@@ -463,7 +635,7 @@ mod tests {
             ReplyFate::Received,
             "just before it"
         );
-        l.advance(at(t0, 30_000), 1000);
+        l.advance(at(t0, 33_000), 1000);
         let w = l.window(1);
         assert_eq!((w.settled, w.lost, l.late), (3, 2, 2));
     }
@@ -478,7 +650,7 @@ mod tests {
         l.sent(1, t0);
         l.sweep(at(t0, 5_000));
         assert_eq!(l.reply(1, at(t0, 1_000)), ReplyFate::Received);
-        l.advance(at(t0, 30_000), 1000);
+        l.advance(at(t0, 33_000), 1000);
         let w = l.window(1);
         assert_eq!((w.settled, w.lost, l.late), (1, 0, 0));
     }
@@ -491,7 +663,7 @@ mod tests {
         assert_eq!(l.reply(5, at(t0, 10)), ReplyFate::Received);
         assert_eq!(l.reply(5, at(t0, 20)), ReplyFate::Duplicate);
         assert_eq!(l.reply(99, at(t0, 30)), ReplyFate::Unmatched);
-        l.advance(at(t0, 30_000), 1000);
+        l.advance(at(t0, 33_000), 1000);
         let w = l.window(1);
         assert_eq!((w.settled, w.lost), (1, 0));
         assert_eq!((l.duplicate, l.unmatched), (1, 1));
@@ -509,7 +681,7 @@ mod tests {
         assert_eq!(l.reply(10, at(t0, 10)), ReplyFate::Received);
         assert_eq!(l.reply(12, at(t0, 20)), ReplyFate::Received);
         assert_eq!(l.reply(11, at(t0, 1_000)), ReplyFate::Received);
-        l.advance(at(t0, 30_000), 1000);
+        l.advance(at(t0, 33_000), 1000);
         let w = l.window(1);
         assert_eq!((w.settled, w.lost), (3, 0));
     }
@@ -539,7 +711,7 @@ mod tests {
                 }
                 seq += 1;
             }
-            l.advance(at(t0, base + 30_000), 1000);
+            l.advance(at(t0, base + 33_000), 1000);
             assert_eq!(l.window(4).is_full(), bucket >= 3, "after bucket {bucket}");
         }
         let w = l.window(4);
@@ -552,15 +724,16 @@ mod tests {
     }
 
     /// Review finding: a stall that skips loss ticks must not stretch a
-    /// bucket over several periods. One tick after 240 s closes eight
-    /// buckets, not one, so the 120 s window really covers 120–240 s: the
-    /// loss settled at 30.5 s is outside it, and the empty stretch reads
-    /// as zero integrity rather than as a clean link.
+    /// bucket over several periods. One tick at 240 s finalizes seven
+    /// buckets (the eighth ended under 3 s ago), not one, so the 120 s
+    /// window really covers 90–210 s: the loss sent at 27.5 s is outside
+    /// it, and the empty stretch reads as zero integrity rather than as
+    /// a clean link.
     #[test]
     fn a_stall_that_skips_ticks_leaves_empty_buckets_not_a_stretched_one() {
         let t0 = Instant::now();
         let mut l = LossLedger::new(t0);
-        l.sent(1, at(t0, 27_500)); // deadline 30.5 s → bucket 1
+        l.sent(1, at(t0, 27_500)); // sent in bucket 0
         l.advance(at(t0, 240_000), 1000);
         let w = l.window(4);
         assert_eq!((w.buckets, w.secs()), (4, 120));
@@ -569,7 +742,7 @@ mod tests {
         assert_eq!(w.integrity_percent(), Some(0));
         // The loss is still where it happened.
         let all = l.window(8);
-        assert_eq!((all.buckets, all.settled, all.lost), (8, 1, 1));
+        assert_eq!((all.buckets, all.settled, all.lost), (7, 1, 1));
     }
 
     #[test]
@@ -578,7 +751,11 @@ mod tests {
         let mut l = LossLedger::new(t0);
         l.advance(at(t0, (MAX_BUCKETS as u64 + 5) * 30_000), 1000);
         assert_eq!(l.window(MAX_BUCKETS).buckets, MAX_BUCKETS);
-        assert_eq!(l.buckets.len(), MAX_BUCKETS + 1, "closed plus the open one");
+        assert_eq!(
+            l.buckets.len(),
+            MAX_BUCKETS + 2,
+            "final, plus two not yet final"
+        );
     }
 
     /// Each bucket carries its own expected count: a retune from 1 s to
@@ -591,10 +768,11 @@ mod tests {
         let mut l = LossLedger::new(t0);
         l.advance(at(t0, 10_000), 1000);
         l.advance(at(t0, 30_000), 100);
+        l.advance(at(t0, 33_000), 1000); // bucket 0 final
         assert_eq!(l.window(1).expected_milli, 210_000);
-        l.advance(at(t0, 75_000), 1000); // 30 s into bucket 1, 15 s into 2
+        l.advance(at(t0, 75_000), 1000); // bucket 1 final, 15 s into 2
         assert_eq!(l.window(1).expected_milli, 30_000);
-        l.advance(at(t0, 90_000), 1000);
+        l.advance(at(t0, 93_000), 1000); // bucket 2 final
         assert_eq!(l.window(1).expected_milli, 30_000);
     }
 
@@ -608,9 +786,327 @@ mod tests {
             l.sent(seq, sent);
             l.reply(seq, sent + Duration::from_millis(5));
         }
-        l.advance(at(t0, 30_000), 1000);
+        l.advance(at(t0, 33_000), 1000);
         assert_eq!(l.window(1).integrity_percent(), Some(90));
         assert_eq!(LossLedger::new(t0).window(1).integrity_percent(), None);
+    }
+
+    use crate::stamp::session::{LossPolicy, micro_pct_to_units};
+
+    /// A ledger whose buckets each saw `probes` probes at 1 s, the first
+    /// `lost` of them unanswered — closed up to the end of the last one.
+    fn ledger(buckets: &[(u32, u32)]) -> LossLedger {
+        let t0 = Instant::now();
+        let mut l = LossLedger::new(t0);
+        let mut seq = 0;
+        for (b, &(probes, lost)) in buckets.iter().enumerate() {
+            let base = b as u64 * 30_000;
+            for i in 0..probes {
+                let sent = at(t0, base + u64::from(i) * 1000);
+                l.sent(seq, sent);
+                if i >= lost {
+                    l.reply(seq, sent + Duration::from_millis(5));
+                }
+                seq += 1;
+            }
+            l.advance(at(t0, base + 33_000), 1000);
+        }
+        l
+    }
+
+    fn advert(value: u32) -> Option<LossAdvert> {
+        Some(LossAdvert {
+            value,
+            anomalous: false,
+        })
+    }
+
+    fn set(value: u32) -> LossDecision {
+        LossDecision::Set(LossAdvert {
+            value,
+            anomalous: false,
+        })
+    }
+
+    /// `evaluate` at the loss tick that finalised `l`'s latest bucket,
+    /// the value having been advertised `ago` buckets' time before it.
+    fn eval(
+        p: &LossPolicy,
+        l: &LossLedger,
+        advertised: Option<LossAdvert>,
+        ago: Option<u32>,
+    ) -> LossDecision {
+        let now = l.final_at();
+        evaluate(p, l, advertised, ago.map(|n| now - BUCKET * n), now)
+    }
+
+    const CLEAN: (u32, u32) = (30, 0);
+    const TEN_PCT: (u32, u32) = (30, 3);
+
+    #[test]
+    fn nothing_is_advertised_until_the_window_is_full() {
+        let p = LossPolicy::default();
+        let l = ledger(&[CLEAN, CLEAN, CLEAN]);
+        assert_eq!(eval(&p, &l, None, None), LossDecision::Keep);
+        assert_eq!(eval(&p, &l, advert(0), Some(3)), LossDecision::Withdraw);
+    }
+
+    /// Nothing advertised yet: the first trustworthy value goes out at
+    /// once — the cadence limits *re*-advertisement.
+    #[test]
+    fn a_full_trusted_window_is_advertised_at_once() {
+        let p = LossPolicy::default();
+        let l = ledger(&[TEN_PCT; 4]);
+        assert_eq!(eval(&p, &l, None, None), set(encode_loss(12, 120)));
+    }
+
+    #[test]
+    fn a_window_below_the_integrity_threshold_is_not_trusted() {
+        let p = LossPolicy::default(); // 90 %
+        let l = ledger(&[(26, 0); 4]); // 86 %
+        assert_eq!(eval(&p, &l, None, None), LossDecision::Keep);
+        assert_eq!(eval(&p, &l, advert(0), Some(4)), LossDecision::Withdraw);
+        let lenient = LossPolicy {
+            integrity_pct: 80,
+            ..p
+        };
+        assert_eq!(eval(&lenient, &l, None, None), set(0));
+    }
+
+    /// Design D8: every probe vanished is a measurement problem, not
+    /// 100 % loss on a link whose adjacency is up. Withdraw; never
+    /// advertise the 50.33 % cap.
+    #[test]
+    fn total_silence_withdraws_rather_than_advertising_the_cap() {
+        let p = LossPolicy::default();
+        let l = ledger(&[(30, 30); 4]);
+        assert_eq!(eval(&p, &l, None, None), LossDecision::Keep);
+        assert_eq!(
+            eval(&p, &l, advert(encode_loss(1, 120)), Some(4)),
+            LossDecision::Withdraw
+        );
+        // Silent buckets are gaps, not loss: one reply in the latest
+        // bucket does not make three silent ones count as 100 % loss.
+        // They lower integrity to 25 %, so nothing is advertised.
+        let l = ledger(&[(30, 30), (30, 30), (30, 30), (30, 29)]);
+        assert_eq!(l.window(4).silent, 3);
+        assert_eq!(eval(&p, &l, None, None), LossDecision::Keep);
+    }
+
+    /// Review of PR 2's BDD run: a reflector outage must be withdrawn as
+    /// soon as one whole bucket is silent — not once the whole window
+    /// is. The bucket the outage began in still holds replies, and a
+    /// value built from it reads as near-total loss. Holds even under a
+    /// lenient integrity setting.
+    #[test]
+    fn a_silent_latest_bucket_withdraws_at_once() {
+        let lenient = LossPolicy {
+            integrity_pct: 50,
+            ..LossPolicy::default()
+        };
+        let l = ledger(&[CLEAN, CLEAN, CLEAN, (30, 30)]);
+        assert_eq!(l.window(4).integrity_percent(), Some(75));
+        assert_eq!(
+            eval(&lenient, &l, advert(0), Some(4)),
+            LossDecision::Withdraw
+        );
+        assert_eq!(eval(&lenient, &l, None, None), LossDecision::Keep);
+    }
+
+    /// The other side of the outage: once replies return, the silent
+    /// buckets still in the window must not be read as loss. They are
+    /// gaps, so the window is untrusted until it refills. And because a
+    /// probe is booked in the bucket it was sent in, none of the
+    /// outage's probes spill into the first recovery bucket: with a
+    /// lenient integrity setting it reads a clean 0 %. (Booked at their
+    /// deadline, the outage's last 3 s of probes landed there as 3 of 33
+    /// lost.)
+    #[test]
+    fn recovery_does_not_advertise_the_outage() {
+        let l = ledger(&[(30, 30), (30, 30), (30, 30), CLEAN]);
+        let w = l.window(4);
+        assert_eq!((w.settled, w.lost, w.silent), (30, 0, 3));
+        assert_eq!(
+            eval(&LossPolicy::default(), &l, None, None),
+            LossDecision::Keep
+        );
+        let lenient = LossPolicy {
+            integrity_pct: 20,
+            ..LossPolicy::default()
+        };
+        assert_eq!(eval(&lenient, &l, None, None), set(0));
+    }
+
+    /// A thin bucket is never called silent: at a slow probe rate, every
+    /// probe being lost is ordinary loss, and counts as such.
+    #[test]
+    fn a_bucket_below_the_silence_floor_counts_as_loss() {
+        let l = ledger(&[(3, 3)]);
+        let w = l.window(1);
+        assert_eq!((w.settled, w.lost, w.silent), (3, 3, 0));
+        let l = ledger(&[(10, 10)]);
+        assert_eq!(l.window(1).silent, 1, "at the floor it is silence");
+    }
+
+    #[test]
+    fn a_disabled_policy_withdraws() {
+        let p = LossPolicy {
+            enabled: false,
+            ..LossPolicy::default()
+        };
+        let l = ledger(&[CLEAN; 4]);
+        assert_eq!(eval(&p, &l, None, None), LossDecision::Keep);
+        assert_eq!(eval(&p, &l, advert(0), Some(0)), LossDecision::Withdraw);
+    }
+
+    /// RFC 8570 §6: a change is re-advertised at most once per loss
+    /// interval, 120 s by default. Two ticks after the advertisement it
+    /// waits; four ticks is the interval.
+    #[test]
+    fn a_change_waits_for_the_interval() {
+        let p = LossPolicy::default();
+        let l = ledger(&[
+            CLEAN, CLEAN, CLEAN, CLEAN, TEN_PCT, TEN_PCT, TEN_PCT, TEN_PCT,
+        ]);
+        assert_eq!(l.final_index(), 8);
+        assert_eq!(eval(&p, &l, advert(0), Some(2)), LossDecision::Keep);
+        assert_eq!(eval(&p, &l, advert(0), Some(4)), set(encode_loss(12, 120)));
+    }
+
+    /// The cadence is real time, and ticks do not run exactly 30 s
+    /// apart: a tick run 5 ms sooner after the advertising one than the
+    /// grid spacing still counts as an interval later. Anything sooner
+    /// than the slack allows does not.
+    #[test]
+    fn the_cadence_absorbs_tick_jitter_and_nothing_more() {
+        let p = LossPolicy::default();
+        let l = ledger(&[
+            CLEAN, CLEAN, CLEAN, CLEAN, TEN_PCT, TEN_PCT, TEN_PCT, TEN_PCT,
+        ]);
+        let now = l.final_at();
+        let ago = |d: Duration| Some(now - d);
+        let interval = Duration::from_secs(120);
+        let jittered = interval - Duration::from_millis(5);
+        assert_eq!(
+            evaluate(&p, &l, advert(0), ago(jittered), now),
+            set(encode_loss(12, 120))
+        );
+        assert_eq!(
+            evaluate(&p, &l, advert(0), ago(interval - CADENCE_SLACK), now),
+            set(encode_loss(12, 120))
+        );
+        let too_soon = interval - CADENCE_SLACK - Duration::from_millis(1);
+        assert_eq!(
+            evaluate(&p, &l, advert(0), ago(too_soon), now),
+            LossDecision::Keep
+        );
+    }
+
+    /// Review of PR 2: the cadence is time since the advertisement, not
+    /// buckets finalised since. A value advertised at 152 s — by a
+    /// subscriber joining between ticks, or by the 123 s tick run late —
+    /// is the bucket final then, 10 %. The tick at 153 s finalises a
+    /// 20 % bucket one second later; counting buckets, or timing the
+    /// first advertisement at 123 s when its bucket became final, that
+    /// one was "an interval later" and went out at once. It waits until
+    /// 183 s.
+    #[test]
+    fn a_value_seeded_between_ticks_waits_a_full_interval() {
+        let p = LossPolicy {
+            window_buckets: 1,
+            ..LossPolicy::default()
+        };
+        let t0 = Instant::now();
+        let mut l = LossLedger::new(t0);
+        let mut seq = 0;
+        for (b, lost) in [3, 3, 3, 3, 6, 6].into_iter().enumerate() {
+            for i in 0..30 {
+                let sent = at(t0, b as u64 * 30_000 + i * 1000);
+                l.sent(seq, sent);
+                if i >= lost {
+                    l.reply(seq, sent + Duration::from_millis(5));
+                }
+                seq += 1;
+            }
+        }
+        let (ten, twenty) = (encode_loss(3, 30), encode_loss(6, 30));
+
+        let joined = at(t0, 152_000);
+        l.advance(joined, 1000);
+        assert_eq!(l.final_index(), 4);
+        assert_eq!(evaluate(&p, &l, None, None, joined), set(ten));
+
+        l.advance(at(t0, 153_000), 1000);
+        assert_eq!(l.final_at(), at(t0, 153_000));
+        assert_eq!(l.window(1).encoded(), Some(twenty));
+        assert_eq!(
+            evaluate(&p, &l, advert(ten), Some(joined), l.final_at()),
+            LossDecision::Keep,
+            "one second after the last advertisement"
+        );
+
+        l.advance(at(t0, 183_000), 1000);
+        assert_eq!(
+            evaluate(&p, &l, advert(ten), Some(joined), l.final_at()),
+            set(twenty)
+        );
+    }
+
+    /// The filter: a change must be at least `max(threshold % of the
+    /// advertised value, minimum-change)`. From 10 %, that is 1.0 point.
+    #[test]
+    fn small_changes_are_suppressed_and_large_ones_advertised() {
+        let p = LossPolicy::default();
+        let ten = encode_loss(12, 120);
+        // 13 of 120 = 10.83 %: 0.83 points, under the minimum change.
+        let l = ledger(&[(30, 4), TEN_PCT, TEN_PCT, TEN_PCT]);
+        assert_eq!(eval(&p, &l, advert(ten), Some(4)), LossDecision::Keep);
+        // 15 of 120 = 12.5 %: 2.5 points.
+        let l = ledger(&[(30, 6), TEN_PCT, TEN_PCT, TEN_PCT]);
+        assert_eq!(
+            eval(&p, &l, advert(ten), Some(4)),
+            set(encode_loss(15, 120))
+        );
+    }
+
+    /// From zero a relative threshold means nothing: the minimum change
+    /// (1.0 point by default) decides. One stray probe in 120 is 0.83 %
+    /// and stays suppressed; two is 1.67 % and goes out.
+    #[test]
+    fn the_minimum_change_governs_the_zero_crossings() {
+        let p = LossPolicy::default();
+        let one = ledger(&[(30, 1), CLEAN, CLEAN, CLEAN]);
+        assert_eq!(eval(&p, &one, advert(0), Some(4)), LossDecision::Keep);
+        let two = ledger(&[(30, 2), CLEAN, CLEAN, CLEAN]);
+        assert_eq!(eval(&p, &two, advert(0), Some(4)), set(encode_loss(2, 120)));
+        // And back to zero from 1.67 %: over the minimum change.
+        let clean = ledger(&[CLEAN; 4]);
+        assert_eq!(
+            eval(&p, &clean, advert(encode_loss(2, 120)), Some(4)),
+            set(0)
+        );
+    }
+
+    /// Acceleration (opt-in): the latest bucket alone differing by the
+    /// configured step advertises that bucket's value at once, before
+    /// the interval is due. Without it the same window waits.
+    #[test]
+    fn acceleration_advertises_the_latest_bucket_early() {
+        let l = ledger(&[CLEAN, CLEAN, CLEAN, CLEAN, CLEAN, CLEAN, CLEAN, TEN_PCT]);
+        let plain = LossPolicy::default();
+        assert_eq!(eval(&plain, &l, advert(0), Some(2)), LossDecision::Keep);
+        let accel = LossPolicy {
+            accelerated: Some(micro_pct_to_units(5_000_000)),
+            ..plain
+        };
+        assert_eq!(
+            eval(&accel, &l, advert(0), Some(2)),
+            set(encode_loss(3, 30)),
+            "the latest bucket's 10 %, not the rolling 2.5 %"
+        );
+        // Under the step: no early advertisement.
+        let small = ledger(&[CLEAN, CLEAN, CLEAN, CLEAN, CLEAN, CLEAN, CLEAN, (30, 1)]);
+        assert_eq!(eval(&accel, &small, advert(0), Some(2)), LossDecision::Keep);
     }
 
     #[test]
