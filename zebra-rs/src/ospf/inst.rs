@@ -4557,8 +4557,7 @@ impl Ospf<Ospfv2> {
                 } else {
                     &mut self.lsdb_as
                 };
-                lsdb.refresh_lsa(ls_type, ls_id, adv_router, &self.tx, area_id);
-                lsdb.lookup_by_id(ls_type, ls_id, adv_router).cloned()
+                lsdb.refresh_lsa_by_raw_key(key, &self.tx, area_id)
             };
             if let Some(lsa) = refreshed
                 && let Some(area_id) = area_id
@@ -4587,7 +4586,7 @@ impl Ospf<Ospfv2> {
                         ls_id,
                         adv_router
                     );
-                    lsdb.remove_lsa(ls_type, ls_id, adv_router);
+                    lsdb.expire_lsa(ls_type, ls_id, adv_router);
                 }
                 _ => unreachable!(),
             }
@@ -10131,7 +10130,7 @@ impl Ospf<Ospfv3> {
                     && self
                         .areas
                         .get_mut(area_id)
-                        .is_some_and(|area| area.lsdb.remove_expired_by_raw_key(key))
+                        .is_some_and(|area| area.lsdb.expire_lsa_v3(key))
                 {
                     self.spf_schedule_area(area_id);
                 }
@@ -10141,16 +10140,12 @@ impl Ospf<Ospfv3> {
                     let _ = self.tx.send(Message::SpfSchedule(None));
                 }
             }
-            // Link scope: the entry lives in one of the area's interfaces'
-            // LSDBs. A peer's Link-LSA going is re-evaluated as its
+            // Link scope: the entry lives in an interface's own LSDB. The
+            // timer does not say which: a peer's is armed with its area, our
+            // own with none. A peer's Link-LSA going is re-evaluated as its
             // arrival is.
             Ospfv3LsaScope::Link => {
-                let ifindexes: Vec<u32> = self
-                    .links
-                    .iter()
-                    .filter(|(_, link)| Some(link.area) == area_id)
-                    .map(|(ifindex, _)| *ifindex)
-                    .collect();
+                let ifindexes: Vec<u32> = self.links.keys().copied().collect();
                 for ifindex in ifindexes {
                     let removed = self
                         .links
@@ -17654,6 +17649,144 @@ mod v3_lsa_aging_tests {
         assert!(spf_scheduled(&mut top));
     }
 
+    /// A withdrawn LSA stays withdrawn. Flushing cancels the refresh timer,
+    /// but not a refresh it had already queued; that one must not bring the
+    /// advertisement back at age zero.
+    #[tokio::test]
+    async fn a_queued_refresh_does_not_revive_a_withdrawn_lsa() {
+        let mut top = fresh_ospf_v3();
+        top.router_id = rid(1);
+        let tx = top.tx.clone();
+        let tracing = top.tracing.clone();
+        let lsdb = &mut top.areas.get_mut(AREA0).unwrap().lsdb;
+        lsdb.install_originated(sr_info(rid(1), 1700), &tx, Some(AREA0), &tracing);
+        let event = Message::Lsdb(LsdbEvent::RefreshTimerExpire, Some(AREA0), key(rid(1)));
+        // The timer fired before withdrawal, but the handler runs after it.
+        tx.send(event).unwrap();
+        let flushed = lsdb
+            .flush_lsa_by_raw_key(key(rid(1)), &tx, Some(AREA0))
+            .unwrap();
+        assert_eq!(flushed.h.ls_age, OSPF_MAX_AGE);
+        let queued = top.rx.try_recv().expect("queued refresh");
+        assert!(matches!(
+            queued,
+            Message::Lsdb(LsdbEvent::RefreshTimerExpire, _, _)
+        ));
+        top.process_msg(queued).await;
+        let current = top
+            .areas
+            .get(AREA0)
+            .unwrap()
+            .lsdb
+            .lookup_by_raw_key(key(rid(1)));
+        assert!(
+            current.is_none_or(|lsa| lsa.h.ls_age == OSPF_MAX_AGE),
+            "a queued refresh revived and re-advertised the withdrawn LSA"
+        );
+    }
+
+    /// `router`'s E-Router-LSA at LS-ID 1 without SR capability TLVs, as
+    /// one describing a link would be.
+    fn plain_e_router(router: Ipv4Addr, age: u16) -> ospf_packet::Ospfv3Lsa {
+        let mut lsa = sr_info(router, age);
+        lsa.h.link_state_id = 1;
+        if let ospf_packet::Ospfv3LsBody::ERouter(ref mut body) = lsa.body {
+            body.tlvs.retain(|tlv| {
+                !matches!(
+                    tlv,
+                    ospf_packet::Ospfv3ExtTlv::SidLabelRange(_)
+                        | ospf_packet::Ospfv3ExtTlv::SrLocalBlock(_)
+                )
+            });
+        }
+        lsa.update();
+        lsa
+    }
+
+    /// An expiring E-Router-LSA takes the SRGB it carried out of the label
+    /// cache, as receiving it at MaxAge does, so SPF stops resolving
+    /// Prefix-SIDs against it. The cache follows what is left: another of
+    /// the router's E-Router-LSAs expiring leaves the SRGB, and a copy
+    /// already at MaxAge does not bring it back.
+    #[tokio::test(start_paused = true)]
+    async fn an_expiring_lsa_takes_the_srgb_it_carried() {
+        let mut top = fresh_ospf_v3();
+        top.router_id = rid(1);
+        let tx = top.tx.clone();
+        let tracing = top.tracing.clone();
+        let lsdb = &mut top.areas.get_mut(AREA0).unwrap().lsdb;
+        for lsa in [
+            sr_info(rid(2), OSPF_MAX_AGE - 1),
+            sr_info(rid(3), 0),
+            plain_e_router(rid(3), OSPF_MAX_AGE - 1),
+            sr_info(rid(4), OSPF_MAX_AGE),
+            plain_e_router(rid(4), OSPF_MAX_AGE - 1),
+        ] {
+            lsdb.insert_received_v3(lsa, &tx, Some(AREA0), &tracing);
+        }
+        assert!(lsdb.label_map.get(&rid(2)).is_some());
+        assert!(lsdb.label_map.get(&rid(3)).is_some());
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+
+        for key in [
+            key(rid(2)),
+            (OSPFV3_E_ROUTER_LSA_TYPE, 1, rid(3)),
+            (OSPFV3_E_ROUTER_LSA_TYPE, 1, rid(4)),
+        ] {
+            top.process_msg(Message::Lsdb(LsdbEvent::HoldTimerExpire, Some(AREA0), key))
+                .await;
+            let lsdb = &top.areas.get(AREA0).unwrap().lsdb;
+            assert!(lsdb.lookup_by_raw_key(key).is_none());
+        }
+        let lsdb = &top.areas.get(AREA0).unwrap().lsdb;
+        assert!(
+            lsdb.label_map.get(&rid(2)).is_none(),
+            "the SR-info LSA expired, but SPF can still resolve Prefix-SIDs using its cached SRGB"
+        );
+        assert!(
+            lsdb.label_map.get(&rid(3)).is_some(),
+            "its SR-info LSA remains"
+        );
+        assert!(
+            lsdb.label_map.get(&rid(4)).is_none(),
+            "withdrawn: not restored"
+        );
+    }
+
+    /// Our own flushed Link-LSA leaves its interface's database once its
+    /// hold timer fires, although that timer names no area.
+    #[tokio::test(start_paused = true)]
+    async fn our_flushed_link_lsa_leaves_the_interface_lsdb() {
+        let mut top = fresh_ospf_v3();
+        top.router_id = rid(1);
+        let mut link = OspfLink::from(
+            top.tx.clone(),
+            crate::rib::Link::from(crate::fib::message::FibLink {
+                index: 7,
+                name: "probe7".into(),
+                mtu: 1500,
+                ..Default::default()
+            }),
+            top.sock.clone(),
+            top.router_id,
+            top.ptx.clone(),
+        );
+        link.enabled = true;
+        top.links.insert(7, link);
+        top.areas.get_mut(AREA0).unwrap().links.insert(7);
+        let key = (ospf_packet::OSPFV3_LINK_LSA_TYPE, 7, rid(1));
+
+        top.link_lsa_originate(7);
+        assert!(top.links[&7].lsdb.lookup_by_raw_key(key).is_some());
+        top.link_lsa_flush(7);
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        let expired = std::iter::from_fn(|| top.rx.try_recv().ok())
+            .find(|msg| matches!(msg, Message::Lsdb(LsdbEvent::HoldTimerExpire, _, k) if *k == key))
+            .expect("hold timer fired");
+        top.process_msg(expired).await;
+        assert!(top.links[&7].lsdb.lookup_by_raw_key(key).is_none());
+    }
+
     /// Our own LSA is re-originated at LSRefreshTime — sequence number
     /// bumped, age back to zero — so no other router ages it out. A former
     /// identity's is left to age out.
@@ -17684,6 +17817,77 @@ mod v3_lsa_aging_tests {
         let former = lsdb.lookup_by_raw_key(key(rid(9))).unwrap();
         assert_eq!(former.h.ls_seq_number, seq, "a former identity ages out");
         assert_eq!(former.h.ls_age, 1700);
+    }
+}
+
+#[cfg(test)]
+mod v2_lsa_aging_tests {
+    use super::test_support::fresh_ospf;
+    use super::*;
+    use crate::ospf::lsdb::OSPF_MAX_AGE;
+
+    fn rid(n: u8) -> Ipv4Addr {
+        Ipv4Addr::new(10, 0, 0, n)
+    }
+
+    /// `router`'s Router Information LSA instance `instance` at `age`,
+    /// with or without its SRGB and SRLB.
+    fn router_info(router: Ipv4Addr, instance: u32, srgb: bool, age: u16) -> OspfLsa {
+        let mut lsa =
+            super::super::srmpls::router_info_lsa_build(router, false, vec![Algo::Spf], Vec::new());
+        lsa.h.ls_id = Ipv4Addr::from(((OpaqueLsaType::ROUTER_INFO as u32) << 24) | instance);
+        if !srgb && let OspfLsp::OpaqueAreaRouterInfo(ref mut ri) = lsa.lsp {
+            ri.tlvs.retain(|tlv| {
+                !matches!(
+                    tlv,
+                    RouterInfoTlv::SidLabelRnage(_) | RouterInfoTlv::LocalBlock(_)
+                )
+            });
+        }
+        lsa.h.ls_age = age;
+        lsa.update();
+        lsa
+    }
+
+    /// v2's twin of the v3 case: an expiring Router Information LSA takes
+    /// the SRGB it carried out of the label cache. Another instance of the
+    /// router's expiring leaves the SRGB, and a copy already at MaxAge does
+    /// not bring it back.
+    #[tokio::test(start_paused = true)]
+    async fn an_expiring_router_information_lsa_takes_its_srgb() {
+        let mut top = fresh_ospf();
+        top.router_id = rid(1);
+        let tx = top.tx.clone();
+        let tracing = top.tracing.clone();
+        let lsdb = &mut top.areas.get_mut(AREA0).unwrap().lsdb;
+        for lsa in [
+            router_info(rid(2), 0, true, OSPF_MAX_AGE - 1),
+            router_info(rid(3), 0, true, 0),
+            router_info(rid(3), 1, false, OSPF_MAX_AGE - 1),
+            router_info(rid(4), 0, true, OSPF_MAX_AGE),
+            router_info(rid(4), 1, false, OSPF_MAX_AGE - 1),
+        ] {
+            lsdb.insert_received(lsa, &tx, Some(AREA0), &tracing);
+        }
+        assert!(lsdb.label_map.get(&rid(2)).is_some());
+        assert!(lsdb.label_map.get(&rid(3)).is_some());
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+
+        for (router, instance) in [(rid(2), 0), (rid(3), 1), (rid(4), 1)] {
+            let ls_id = Ipv4Addr::from(((OpaqueLsaType::ROUTER_INFO as u32) << 24) | instance);
+            let key = super::super::lsdb::v2_lsa_key(OspfLsType::OpaqueAreaLocal, ls_id, router);
+            top.process_msg(Message::Lsdb(LsdbEvent::HoldTimerExpire, Some(AREA0), key))
+                .await;
+            let lsdb = &top.areas.get(AREA0).unwrap().lsdb;
+            assert!(lsdb.lookup_by_raw_key(key).is_none());
+        }
+        let lsdb = &top.areas.get(AREA0).unwrap().lsdb;
+        assert!(lsdb.label_map.get(&rid(2)).is_none());
+        assert!(lsdb.label_map.get(&rid(3)).is_some(), "instance 0 remains");
+        assert!(
+            lsdb.label_map.get(&rid(4)).is_none(),
+            "withdrawn: not restored"
+        );
     }
 }
 
