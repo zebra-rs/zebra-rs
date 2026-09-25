@@ -119,11 +119,19 @@ pub enum Message {
         /// `true` when `t4` is a kernel `SO_TIMESTAMPING` stamp, `false`
         /// when it fell back to a userspace read.
         t4_kernel: bool,
+        /// Monotonic time of the socket read — the reply's receive time
+        /// for the loss deadline, on the same clock as a probe's send
+        /// time. Taken at the read, so event-loop queueing cannot make a
+        /// timely reply late.
+        rx_at: std::time::Instant,
     },
     /// Probe transmit timer fired for `key`.
     TxTick { key: SessionKey },
     /// Export (damping-period) timer fired for `key`.
     ExportTick { key: SessionKey },
+    /// Loss clock fired for `key`: close its current loss bucket. A
+    /// separate clock from `ExportTick` (measured-loss design D4).
+    LossTick { key: SessionKey },
     /// Retry timer fired: re-attempt every parked session creation.
     RetryPending,
 }
@@ -505,6 +513,13 @@ impl Stamp {
             }
             return;
         }
+        // Credit the loss buckets with the probes the *old* interval
+        // should have produced so far, before the new one takes over.
+        if session.params.interval_ms != params.interval_ms {
+            session
+                .loss
+                .advance(std::time::Instant::now(), session.params.interval_ms);
+        }
         session.params = params;
         if let Some(h) = self.probers.get(key) {
             let _ = h.cmd_tx.send(ProberCmd::Retune(params));
@@ -529,6 +544,11 @@ impl Stamp {
         let Some(session) = self.sessions.get_mut(&key) else {
             return;
         };
+        // Settle timed-out probes before sending, whether or not this
+        // send succeeds, so a probe settles within one interval of its
+        // loss deadline.
+        let now = std::time::Instant::now();
+        session.loss.sweep(now);
         let packet = SenderPacket {
             seq: session.next_seq,
             timestamp: now_ntp(), // T1
@@ -546,9 +566,9 @@ impl Stamp {
         );
         match sent {
             Ok(_) => {
+                session.loss.sent(session.next_seq, now);
                 session.next_seq = session.next_seq.wrapping_add(1);
                 session.tx_count += 1;
-                session.window.record_sent();
             }
             Err(e) => {
                 session.tx_failed_count += 1;
@@ -565,6 +585,7 @@ impl Stamp {
         reply: ReflectorPacket,
         t4: StampTimestamp,
         t4_kernel: bool,
+        rx_at: std::time::Instant,
     ) {
         let Some(session) = self.sessions.get_mut(&key) else {
             return;
@@ -579,6 +600,11 @@ impl Stamp {
             );
             return;
         }
+        // Loss accounting comes before the delay checks (measured-loss
+        // design D2): the reply came back, so its probe was not lost —
+        // whatever its timestamps say. A timestamp fault is a delay
+        // problem, rejected below as before.
+        session.loss.reply(reply.sender_seq, rx_at);
         // delay = ((T4−T1) − (T3−T2)) / 2. T1/T4 are this node's
         // clock, T2/T3 the reflector's — each difference is
         // same-clock, so the inter-node offset cancels.
@@ -600,6 +626,19 @@ impl Stamp {
         }
         session.last_rx = Some(std::time::Instant::now());
         session.window.record_delay(delay as u32);
+    }
+
+    /// Loss clock fired: bring the session's loss ledger up to now,
+    /// closing every bucket that has ended — more than one if ticks were
+    /// skipped. Probe counts, not delay, so this runs regardless of the
+    /// export gate.
+    fn on_loss_tick(&mut self, key: SessionKey) {
+        let Some(session) = self.sessions.get_mut(&key) else {
+            return;
+        };
+        session
+            .loss
+            .advance(std::time::Instant::now(), session.params.interval_ms);
     }
 
     /// Export timer fired: snapshot the window, run the shared value
@@ -736,10 +775,11 @@ impl Stamp {
                 Some(msg) = self.rx.recv() => match msg {
                     Message::ProbeRecv { probe, src, dst, ifindex, ttl, rx_ts, t2_kernel, len } =>
                         self.on_probe_recv(probe, src, dst, ifindex, ttl, rx_ts, t2_kernel, len),
-                    Message::ReplyRecv { key, reply, t4, t4_kernel } =>
-                        self.on_reply_recv(key, reply, t4, t4_kernel),
+                    Message::ReplyRecv { key, reply, t4, t4_kernel, rx_at } =>
+                        self.on_reply_recv(key, reply, t4, t4_kernel, rx_at),
                     Message::TxTick { key } => self.on_tx_tick(key),
                     Message::ExportTick { key } => self.on_export_tick(key),
+                    Message::LossTick { key } => self.on_loss_tick(key),
                     Message::RetryPending => self.retry_pending(),
                 },
                 Some(msg) = self.cm.rx.recv() => self.process_cm_msg(msg),
@@ -896,7 +936,13 @@ mod tests {
             fraction: 4_294_967, // ~1000 µs
         };
         let ssid = stamp.sessions.get(&key).unwrap().ssid;
-        stamp.on_reply_recv(key, reply_for(ssid, t1), t4, false);
+        stamp.on_reply_recv(
+            key,
+            reply_for(ssid, t1),
+            t4,
+            false,
+            std::time::Instant::now(),
+        );
         stamp.on_export_tick(key);
         assert!(stamp.sessions.get(&key).unwrap().last_snapshot.is_some());
 
@@ -929,7 +975,7 @@ mod tests {
             timestamp: us(600),
             ..ReflectorPacket::default()
         };
-        stamp.on_reply_recv(key, reply, us(1000), true);
+        stamp.on_reply_recv(key, reply, us(1000), true, std::time::Instant::now());
         {
             let s = stamp.sessions.get(&key).unwrap();
             assert_eq!(s.rx_count, 1);
@@ -941,15 +987,173 @@ mod tests {
         }
 
         // Wrong SSID → invalid.
-        stamp.on_reply_recv(key, reply_for(ssid.wrapping_add(1), us(0)), us(1000), false);
+        stamp.on_reply_recv(
+            key,
+            reply_for(ssid.wrapping_add(1), us(0)),
+            us(1000),
+            false,
+            std::time::Instant::now(),
+        );
         // Negative delay (T4 before T1) → invalid.
-        stamp.on_reply_recv(key, reply_for(ssid, us(1000)), us(0), false);
+        stamp.on_reply_recv(
+            key,
+            reply_for(ssid, us(1000)),
+            us(0),
+            false,
+            std::time::Instant::now(),
+        );
         let s = stamp.sessions.get(&key).unwrap();
         assert_eq!(s.rx_invalid_count, 2);
         assert_eq!(s.rx_count, 1);
         // Rejected replies don't move the T4-source counters.
         assert_eq!(s.t4_kernel, 1);
         assert_eq!(s.t4_userspace, 0);
+    }
+
+    /// Measured-loss design D2: a reply settles its probe by the copied
+    /// Session-Sender sequence number, and counts as received even when
+    /// the delay path rejects its timestamps — a clock fault is not
+    /// packet loss. A reply carrying another session's SSID settles
+    /// nothing, so its probe still times out.
+    #[tokio::test]
+    async fn a_reply_with_bad_timestamps_still_settles_its_probe() {
+        let mut stamp = fresh_stamp();
+        let key = loopback_key(2);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        stamp.subscribe("isis".into(), key, SessionParams::default(), tx);
+        let ssid = stamp.sessions.get(&key).unwrap().ssid;
+        let t0 = std::time::Instant::now();
+        let s = stamp.sessions.get_mut(&key).unwrap();
+        s.loss.sent(40, t0);
+        s.loss.sent(41, t0);
+
+        // T4 before T1: an implausible delay.
+        let mut bad = reply_for(
+            ssid,
+            StampTimestamp {
+                seconds: 200,
+                fraction: 0,
+            },
+        );
+        bad.sender_seq = 40;
+        stamp.on_reply_recv(
+            key,
+            bad,
+            StampTimestamp {
+                seconds: 100,
+                fraction: 0,
+            },
+            false,
+            t0 + Duration::from_millis(5),
+        );
+        // The right sequence number, but not this session's SSID.
+        let mut foreign = reply_for(ssid.wrapping_add(1), StampTimestamp::default());
+        foreign.sender_seq = 41;
+        stamp.on_reply_recv(
+            key,
+            foreign,
+            StampTimestamp::default(),
+            false,
+            t0 + Duration::from_millis(6),
+        );
+
+        let s = stamp.sessions.get_mut(&key).unwrap();
+        assert_eq!(s.rx_invalid_count, 2, "the delay path rejected both");
+        assert_eq!(s.rx_count, 0);
+        let interval = s.params.interval_ms;
+        s.loss.advance(t0 + Duration::from_secs(30), interval);
+        let w = s.loss.window(1);
+        assert_eq!(
+            (w.settled, w.lost),
+            (2, 1),
+            "40 received despite its timestamps; 41 timed out"
+        );
+
+        // The deadline is judged at the socket read, not at processing:
+        // a reply read 0.5 s after its probe, but processed 10 s later
+        // behind a backlog, is still received.
+        let now = std::time::Instant::now();
+        s.loss.sent(42, now - Duration::from_secs(10));
+        let mut queued = reply_for(ssid, StampTimestamp::default());
+        queued.sender_seq = 42;
+        stamp.on_reply_recv(
+            key,
+            queued,
+            StampTimestamp::default(),
+            false,
+            now - Duration::from_millis(9_500),
+        );
+        let s = stamp.sessions.get(&key).unwrap();
+        assert_eq!(s.loss.late, 0, "read in time, so not late");
+    }
+
+    /// A probe that went out is in the ledger under the sequence number
+    /// it carried, and the loss clock advances the ledger to now at the
+    /// session's interval — closing every bucket that has ended, here
+    /// two on a ledger backdated 61 s.
+    #[tokio::test]
+    async fn a_sent_probe_enters_the_ledger_and_the_loss_tick_advances_it() {
+        use crate::stamp::loss::{LossLedger, ReplyFate};
+        let mut stamp = fresh_stamp();
+        let key = loopback_key(2);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        stamp.subscribe("isis".into(), key, SessionParams::default(), tx);
+        stamp.on_tx_tick(key);
+        let s = stamp.sessions.get_mut(&key).unwrap();
+        assert_eq!(
+            s.tx_count, 1,
+            "probe sent (tx-failed {})",
+            s.tx_failed_count
+        );
+        assert_eq!(
+            s.loss.reply(0, std::time::Instant::now()),
+            ReplyFate::Received
+        );
+        s.loss = LossLedger::new(std::time::Instant::now() - Duration::from_secs(61));
+        stamp.on_loss_tick(key);
+        let w = stamp.sessions.get(&key).unwrap().loss.window(4);
+        assert_eq!(w.buckets, 2);
+        assert_eq!(
+            w.expected_milli, 60_000,
+            "two 30 s buckets at the 1 s default"
+        );
+    }
+
+    /// A probe-interval retune credits the open bucket at the *old* rate
+    /// before switching (design D4), and keeps the closed buckets. A
+    /// retune that leaves the interval alone accrues nothing.
+    #[tokio::test]
+    async fn a_retune_accrues_at_the_old_rate_and_keeps_the_buckets() {
+        let mut stamp = fresh_stamp();
+        let key = loopback_key(2);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        stamp.subscribe("isis".into(), key, SessionParams::default(), tx.clone());
+        // Backdated 31 s, so the tick closes the first bucket.
+        stamp.sessions.get_mut(&key).unwrap().loss = crate::stamp::loss::LossLedger::new(
+            std::time::Instant::now() - Duration::from_secs(31),
+        );
+        stamp.on_loss_tick(key);
+        let before = stamp.sessions.get(&key).unwrap().loss.mark();
+        tokio::time::sleep(Duration::from_millis(2)).await;
+
+        let damping_only = SessionParams {
+            damping_secs: 60,
+            ..SessionParams::default()
+        };
+        stamp.subscribe("isis".into(), key, damping_only, tx.clone());
+        assert_eq!(stamp.sessions.get(&key).unwrap().loss.mark(), before);
+
+        let faster = SessionParams {
+            interval_ms: 100,
+            ..damping_only
+        };
+        stamp.subscribe("isis".into(), key, faster, tx);
+        let s = stamp.sessions.get(&key).unwrap();
+        assert!(
+            s.loss.mark() > before,
+            "accrued before the interval changed"
+        );
+        assert_eq!(s.loss.window(1).buckets, 1, "closed buckets survive");
     }
 
     /// The implicit reflector only answers registered remotes: an
@@ -1012,7 +1216,13 @@ mod tests {
             fraction: ((micros << 32) / 1_000_000) as u32,
         };
         let feed = |stamp: &mut Stamp| {
-            stamp.on_reply_recv(key, reply_for(ssid, us(0)), us(1000), false);
+            stamp.on_reply_recv(
+                key,
+                reply_for(ssid, us(0)),
+                us(1000),
+                false,
+                std::time::Instant::now(),
+            );
         };
 
         feed(&mut stamp);
@@ -1075,7 +1285,13 @@ mod tests {
                 seconds: 100,
                 fraction: ((micros << 32) / 1_000_000) as u32,
             };
-            stamp.on_reply_recv(key, reply_for(ssid, us(0)), us(1000), false);
+            stamp.on_reply_recv(
+                key,
+                reply_for(ssid, us(0)),
+                us(1000),
+                false,
+                std::time::Instant::now(),
+            );
             stamp.on_export_tick(key);
 
             let isis_snap = match isis_rx.try_recv() {
@@ -1125,7 +1341,13 @@ mod tests {
         // The reply stamps T2 == T3 == 0, so delay = (T4 - T1) / 2 —
         // feed twice the delay the window should record.
         let feed = |stamp: &mut Stamp, delay_us: u64| {
-            stamp.on_reply_recv(key, reply_for(ssid, us(0)), us(delay_us * 2), false);
+            stamp.on_reply_recv(
+                key,
+                reply_for(ssid, us(0)),
+                us(delay_us * 2),
+                false,
+                std::time::Instant::now(),
+            );
         };
 
         // Just inside the bound: exported, bits clear.
@@ -1191,7 +1413,13 @@ mod tests {
         // The reply stamps T2 == T3 == 0, so delay = (T4 - T1) / 2 —
         // feed twice the delay the window should record.
         let feed = |stamp: &mut Stamp, delay_us: u64| {
-            stamp.on_reply_recv(key, reply_for(ssid, us(0)), us(delay_us * 2), false);
+            stamp.on_reply_recv(
+                key,
+                reply_for(ssid, us(0)),
+                us(delay_us * 2),
+                false,
+                std::time::Instant::now(),
+            );
         };
 
         feed(&mut stamp, 1_100); // over the bound: bit sets
@@ -1241,7 +1469,13 @@ mod tests {
             seconds: 100,
             fraction: ((micros << 32) / 1_000_000) as u32,
         };
-        stamp.on_reply_recv(key, reply_for(ssid, us(0)), us(1000), false);
+        stamp.on_reply_recv(
+            key,
+            reply_for(ssid, us(0)),
+            us(1000),
+            false,
+            std::time::Instant::now(),
+        );
         stamp.on_export_tick(key);
 
         let snap = match ospf_rx.try_recv() {
@@ -1272,7 +1506,13 @@ mod tests {
             fraction: ((micros << 32) / 1_000_000) as u32,
         };
         let feed = |stamp: &mut Stamp| {
-            stamp.on_reply_recv(key, reply_for(ssid, us(0)), us(1000), false);
+            stamp.on_reply_recv(
+                key,
+                reply_for(ssid, us(0)),
+                us(1000),
+                false,
+                std::time::Instant::now(),
+            );
         };
 
         feed(&mut stamp);

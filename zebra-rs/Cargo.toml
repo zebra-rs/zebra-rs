@@ -230,3 +230,8 @@ net-route = "0.4.2"
 [build-dependencies]
 tonic-prost-build.workspace = true
 chrono = "0.4"
+
+[dev-dependencies]
+# Paused-clock tests (`#[tokio::test(start_paused = true)]`). Dev-only:
+# the feature never reaches the packaged binary.
+tokio = { workspace = true, features = ["test-util"] }

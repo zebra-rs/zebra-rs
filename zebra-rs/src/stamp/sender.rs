@@ -9,11 +9,17 @@
 //!     Session-Sender packet;
 //!   * the **export** timer fires every `damping_secs` →
 //!     [`Message::ExportTick`] → the event loop snapshots the stats
-//!     window, runs the damping gate, and fans `MetricUpdate`s out.
+//!     window, runs the damping gate, and fans `MetricUpdate`s out;
+//!   * the **loss** timer fires every [`BUCKET`] →
+//!     [`Message::LossTick`] → the event loop closes the session's
+//!     current loss bucket.
 //!
-//! [`ProberCmd::Retune`] re-arms both timers — the runtime path for a
-//! `Subscribe` carrying changed params (shared sessions are
-//! last-writer-wins, plan D11).
+//! [`ProberCmd::Retune`] re-arms the probe and export timers — the
+//! runtime path for a `Subscribe` carrying changed params (shared
+//! sessions are last-writer-wins, plan D11). It deliberately leaves the
+//! loss timer alone: loss runs on its own clock (measured-loss design
+//! D4), so a retune must not move a bucket boundary, and the buckets
+//! carry their own expected probe counts across the change.
 
 use std::time::Duration;
 
@@ -23,6 +29,7 @@ use tokio::time::{Instant, interval_at};
 use crate::context::Task;
 
 use super::inst::Message;
+use super::loss::BUCKET;
 use super::session::{SessionKey, SessionParams};
 
 /// Commands the event loop sends to a session's prober task.
@@ -52,6 +59,8 @@ pub async fn session_prober(
     event_tx: UnboundedSender<Message>,
 ) {
     let (mut probe, mut export) = arm(params);
+    let mut loss = interval_at(Instant::now() + BUCKET, BUCKET);
+    loss.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
@@ -62,6 +71,11 @@ pub async fn session_prober(
             }
             _ = export.tick() => {
                 if event_tx.send(Message::ExportTick { key }).is_err() {
+                    return;
+                }
+            }
+            _ = loss.tick() => {
+                if event_tx.send(Message::LossTick { key }).is_err() {
                     return;
                 }
             }
@@ -128,6 +142,37 @@ mod tests {
         }
         assert!(tx_ticks >= 10, "expected ≥10 probe ticks, got {tx_ticks}");
         assert_eq!(export_ticks, 0, "export period (1s) not yet reached");
+        task.abort();
+    }
+
+    /// The loss clock is not re-armed by a retune (measured-loss design
+    /// D4): the first bucket still closes 30 s after the prober started,
+    /// not 30 s after the retune. Re-arming it would move every bucket
+    /// boundary each time an IGP's probe interval changed.
+    #[tokio::test(start_paused = true)]
+    async fn retune_leaves_the_loss_clock_alone() {
+        let params = SessionParams {
+            interval_ms: 10_000,
+            damping_secs: 3600,
+            ..SessionParams::default()
+        };
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(session_prober(key(), params, cmd_rx, event_tx));
+
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        cmd_tx
+            .send(ProberCmd::Retune(SessionParams {
+                interval_ms: 5_000,
+                ..params
+            }))
+            .unwrap();
+        tokio::time::sleep(Duration::from_secs(11)).await; // t = 31 s
+
+        let loss_ticks = std::iter::from_fn(|| event_rx.try_recv().ok())
+            .filter(|m| matches!(m, Message::LossTick { .. }))
+            .count();
+        assert_eq!(loss_ticks, 1, "the first bucket closes at 30 s");
         task.abort();
     }
 

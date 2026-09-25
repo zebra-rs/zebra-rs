@@ -189,9 +189,16 @@ Replace the two window counters with per-probe accounting:
 - A probe with no reply after **`LOSS_WAIT` = 3 s** (RFC 7680's *Tmax*) is settled *lost*.
   A reply arriving later is still lost for loss accounting, as RFC 7680 defines. The delay
   path is untouched, so this project changes no delay behaviour.
-- A probe is credited to the loss bucket (D4) **in which it settles**, not the one in which it
-  was sent. This removes the boundary skew: every probe is counted exactly once, as
-  received or as lost.
+- **The deadline is judged against the reply's receive time**, taken at the socket read on
+  the same monotonic clock as the send time. It is not judged when the event loop gets
+  round to the reply, and it is not left to the next sweep. With a 10 s probe interval
+  nothing sweeps for 10 s, and a reply 4 s late must not count as received. The reverse race
+  is handled too: a reply read in time for a probe that a later sweep already declared lost
+  moves that probe back to received. (PR 1 review, finding 1.)
+- A probe is credited to the loss bucket (D4) **that contains its settlement time** — the
+  receive time for a received probe, the deadline for a lost one — not the bucket it was
+  sent in, and not the one open when the event loop processed it. This removes the boundary
+  skew: every probe is counted exactly once, as received or as lost.
 
 `LOSS_WAIT` is a constant, not a knob. It has to exceed any real one-link round-trip time by
 a wide margin and be much shorter than a 30 s loss bucket, and 3 s satisfies both at every
@@ -280,6 +287,14 @@ advertised value is
 ```
 loss = Σ lost / Σ settled   over the subscriber's last N buckets
 ```
+
+**Buckets are indexed by time**, from the session's start: bucket *k* covers
+`[start + k·30 s, start + (k+1)·30 s)`. The loss clock's tick only advances time. If ticks
+are skipped — a runtime stall, a VM freeze — the elapsed boundaries become buckets with no
+settlements, never one bucket stretched over several periods. So a window of N buckets always
+spans exactly N × 30 s. A measurement gap then shows up as an integrity dip (D5), instead of
+keeping old losses past their window. (PR 1 review, finding 2: the first cut closed one
+bucket per tick, and a stall let a "120 s" window cover 240 s.)
 
 This is literally RFC 8570's "percentage of the total traffic sent over a configurable
 interval". It is the same shape as Cisco's periodic window and Nokia's 12 × 10 s aggregate.
