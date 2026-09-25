@@ -1,0 +1,30 @@
+# z1 (DUT, AS 65040): learns a prefix from the scripted speaker h1 and
+# re-advertises it to z2 through its IPv4-unicast update group. The eBGP
+# advertisement interval is 5 s, so the speaker's back-to-back burst
+# (announce, attribute change, withdraw, control prefix) lands inside ONE
+# flush window of the group's pending-advert cache.
+router:
+  bgp:
+    global:
+      as: 65040
+      router-id: 192.168.40.1
+    timer:
+      adv-interval:
+        ebgp: 5
+    neighbor:
+    # The scripted speaker never listens on 179: passive keeps this peer
+    # in Active so the script's connect is accepted.
+    - remote-address: 192.168.40.2
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65041
+      transport:
+        passive-mode: true
+    - remote-address: 192.168.40.3
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65042

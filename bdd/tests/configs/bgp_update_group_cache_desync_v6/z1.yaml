@@ -1,0 +1,28 @@
+# z1 (DUT, AS 65040): learns an IPv6 prefix from the scripted speaker h1
+# and re-advertises it to z2 through its IPv6-unicast update group
+# (sessions over IPv4; the global IPv6 on each link is the next-hop). The
+# eBGP advertisement interval is 5 s, so the speaker's back-to-back burst
+# lands inside ONE flush window of the group's pending-advert cache.
+router:
+  bgp:
+    global:
+      as: 65040
+      router-id: 192.168.41.1
+    timer:
+      adv-interval:
+        ebgp: 5
+    neighbor:
+    - remote-address: 192.168.41.2
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65041
+      transport:
+        passive-mode: true
+    - remote-address: 192.168.41.3
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65042

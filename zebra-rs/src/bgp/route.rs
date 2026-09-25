@@ -15387,11 +15387,23 @@ impl Peer {
     }
 
     pub fn send_vpnv4(&mut self, nlri: Vpnv4Nlri, attr: Arc<BgpAttr>, timer: bool) {
-        self.cache_vpnv4
-            .entry(attr.clone())
-            .or_default()
-            .insert(nlri.clone());
-        self.cache_vpnv4_rev.insert(nlri, attr);
+        // Evict whatever copy of this route is already queued, on its
+        // label-free identity, before queuing the new one (the `send_evpn`
+        // rule). From the old bucket when the attr changed: left there, a
+        // later withdraw — which purges only the reverse-mapped bucket —
+        // would leave it to be re-announced. And from this same bucket
+        // too: `HashSet::insert` keeps an existing equal element, so a
+        // re-send that changed only the label would otherwise flush the
+        // OLD label (review finding #15).
+        if let Some(old) = self.cache_vpnv4_rev.insert(nlri.clone(), attr.clone())
+            && let Some(set) = self.cache_vpnv4.get_mut(&old)
+        {
+            set.remove(&nlri);
+            if set.is_empty() {
+                self.cache_vpnv4.remove(&old);
+            }
+        }
+        self.cache_vpnv4.entry(attr).or_default().insert(nlri);
         if timer && self.cache_vpnv4_timer.is_none() {
             self.cache_vpnv4_timer = Some(start_adv_timer_vpnv4(self));
         }
@@ -15527,11 +15539,16 @@ impl Peer {
     // VPNv6 advertise cache — mirror of the VPNv4 trio above.
 
     pub fn send_vpnv6(&mut self, nlri: Vpnv6Nlri, attr: Arc<BgpAttr>, timer: bool) {
-        self.cache_vpnv6
-            .entry(attr.clone())
-            .or_default()
-            .insert(nlri.clone());
-        self.cache_vpnv6_rev.insert(nlri, attr);
+        // Evict the queued copy on identity first — see `send_vpnv4`.
+        if let Some(old) = self.cache_vpnv6_rev.insert(nlri.clone(), attr.clone())
+            && let Some(set) = self.cache_vpnv6.get_mut(&old)
+        {
+            set.remove(&nlri);
+            if set.is_empty() {
+                self.cache_vpnv6.remove(&old);
+            }
+        }
+        self.cache_vpnv6.entry(attr).or_default().insert(nlri);
         if timer && self.cache_vpnv6_timer.is_none() {
             self.cache_vpnv6_timer = Some(start_adv_timer_vpnv6(self));
         }
@@ -30388,6 +30405,147 @@ mod stale_sweep_per_family_tests {
         );
         assert!(timers(&peers, id).is_empty());
         assert_eq!(stale_v4vpn(&top, id), 0);
+    }
+}
+
+/// Review finding #15, the per-peer VPN twins of the update-group cache
+/// desync: `send_vpnv4` / `send_vpnv6` inserted the NLRI into the new
+/// attr bucket without evicting it from the old one, so an attr change
+/// followed by a withdraw inside one advertisement interval re-announced
+/// the route at flush; and because the bucket is a `HashSet` keyed on
+/// the label-free VPN identity, re-sending under the same attr with a
+/// NEW label kept the OLD label queued (a transit-label reconcile inside
+/// the window would put the received label behind our next-hop).
+#[cfg(test)]
+mod advert_cache_desync_vpn_tests {
+    use super::*;
+    use std::net::IpAddr;
+    use std::str::FromStr;
+
+    fn peer() -> Peer {
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        Box::leak(Box::new(rx));
+        Peer::new(
+            1,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 9),
+            65001,
+            "10.0.0.2".parse::<IpAddr>().unwrap(),
+            None,
+            tx,
+            crate::context::ProtoContext::default_table_no_rib(),
+        )
+    }
+
+    fn rd() -> RouteDistinguisher {
+        RouteDistinguisher::from_str("65001:1").unwrap()
+    }
+
+    fn attr(med: u32) -> Arc<BgpAttr> {
+        let mut a = BgpAttr::new();
+        a.med = Some(bgp_packet::Med::new(med));
+        Arc::new(a)
+    }
+
+    fn v4(label: u32) -> Vpnv4Nlri {
+        Vpnv4Nlri {
+            label: Label::new(label, 0, true),
+            rd: rd(),
+            nlri: Ipv4Nlri {
+                id: 0,
+                prefix: "10.9.0.0/24".parse().unwrap(),
+            },
+        }
+    }
+
+    fn v6(label: u32) -> Vpnv6Nlri {
+        Vpnv6Nlri {
+            label: Label::new(label, 0, true),
+            rd: rd(),
+            nlri: Ipv6Nlri {
+                id: 0,
+                prefix: "2001:db8:9::/64".parse().unwrap(),
+            },
+        }
+    }
+
+    /// Every queued copy of the NLRI: `(bucket attr, queued label)`.
+    fn queued_v4(peer: &Peer, n: &Vpnv4Nlri) -> Vec<(Arc<BgpAttr>, u32)> {
+        peer.cache_vpnv4
+            .iter()
+            .filter_map(|(a, set)| set.get(n).map(|q| (a.clone(), q.label.label)))
+            .collect()
+    }
+
+    fn queued_v6(peer: &Peer, n: &Vpnv6Nlri) -> Vec<(Arc<BgpAttr>, u32)> {
+        peer.cache_vpnv6
+            .iter()
+            .filter_map(|(a, set)| set.get(n).map(|q| (a.clone(), q.label.label)))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn advert_cache_desync_vpnv4_attr_change_moves_the_nlri_out_of_its_old_bucket() {
+        let mut p = peer();
+        p.send_vpnv4(v4(24), attr(1), false);
+        p.send_vpnv4(v4(24), attr(2), false);
+        assert_eq!(queued_v4(&p, &v4(24)), vec![(attr(2), 24)]);
+        assert_eq!(p.cache_vpnv4.len(), 1, "the emptied old bucket is dropped");
+    }
+
+    #[tokio::test]
+    async fn advert_cache_desync_vpnv4_withdraw_after_an_attr_change_leaves_nothing_queued() {
+        let mut p = peer();
+        p.send_vpnv4(v4(24), attr(1), false);
+        p.send_vpnv4(v4(24), attr(2), false);
+        p.cache_remove_vpnv4(rd(), "10.9.0.0/24".parse().unwrap(), 0);
+        assert!(
+            queued_v4(&p, &v4(24)).is_empty(),
+            "nothing left to re-announce"
+        );
+        assert!(p.cache_vpnv4.is_empty());
+    }
+
+    #[tokio::test]
+    async fn advert_cache_desync_vpnv4_new_label_under_the_same_attr_replaces_the_queued_one() {
+        let mut p = peer();
+        p.send_vpnv4(v4(24), attr(1), false);
+        p.send_vpnv4(v4(1000), attr(1), false);
+        assert_eq!(
+            queued_v4(&p, &v4(0)),
+            vec![(attr(1), 1000)],
+            "the queued copy carries the label of the latest send"
+        );
+    }
+
+    #[tokio::test]
+    async fn advert_cache_desync_vpnv6_attr_change_moves_the_nlri_out_of_its_old_bucket() {
+        let mut p = peer();
+        p.send_vpnv6(v6(24), attr(1), false);
+        p.send_vpnv6(v6(24), attr(2), false);
+        assert_eq!(queued_v6(&p, &v6(24)), vec![(attr(2), 24)]);
+        assert_eq!(p.cache_vpnv6.len(), 1, "the emptied old bucket is dropped");
+    }
+
+    #[tokio::test]
+    async fn advert_cache_desync_vpnv6_withdraw_after_an_attr_change_leaves_nothing_queued() {
+        let mut p = peer();
+        p.send_vpnv6(v6(24), attr(1), false);
+        p.send_vpnv6(v6(24), attr(2), false);
+        p.cache_remove_vpnv6(rd(), "2001:db8:9::/64".parse().unwrap(), 0);
+        assert!(
+            queued_v6(&p, &v6(24)).is_empty(),
+            "nothing left to re-announce"
+        );
+        assert!(p.cache_vpnv6.is_empty());
+    }
+
+    #[tokio::test]
+    async fn advert_cache_desync_vpnv6_new_label_under_the_same_attr_replaces_the_queued_one() {
+        let mut p = peer();
+        p.send_vpnv6(v6(24), attr(1), false);
+        p.send_vpnv6(v6(1000), attr(1), false);
+        assert_eq!(queued_v6(&p, &v6(0)), vec![(attr(1), 1000)]);
     }
 }
 
