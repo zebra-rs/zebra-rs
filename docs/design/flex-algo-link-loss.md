@@ -2,8 +2,9 @@
 
 > **Status:** reviewed (2026-09-25); all six §10 decisions settled, each taking the
 > recommendation. PR 1 (D1) merged as #2414, with its review follow-up #2416; PR 2 (D2–D4, D7,
-> IS-IS) implemented on branch `flex-algo-link-loss-isis`. Where the implementation settled a
-> detail this document left open, the text below says so.
+> IS-IS) merged as #2419. PR 3 is split in two, smallest first: 3a, OSPFv2 (branch
+> `ospf-flex-algo-selection`), then 3b, OSPFv3. Where the implementation settled a detail this
+> document left open, the text below says so.
 > **Parent docs:** [stamp-measured-loss.md](./stamp-measured-loss.md) (the measured loss this
 > consumes), [review sequencing](../reviews/stamp-isis-ospf-2026-09-16.md) (Pattern C, "Flex-Algo
 > link loss"), [flex-algo-roadmap.md](./flex-algo-roadmap.md),
@@ -197,6 +198,15 @@ list. §10 decision 1 asks for this change explicitly, because it alters behavio
 
 The FAEML sub-TLV is itself on the unsupported list until D2–D4 land. So D1 alone already makes
 zebra-rs safe against a Huawei FAD carrying it: zebra-rs stops participating rather than looping.
+
+As built for OSPF (PR 3a, OSPFv2): the selection core is protocol-neutral
+(`crate::flex_algo::selection`), over a `Fad` view each OSPF version converts its wire FADs into.
+OSPF does not merge sub-TLVs across advertisements as IS-IS does: RFC 9350 §5.2 has the receiver
+use "the first occurrence of the TLV", across Router Information LSA instances in ascending
+Instance ID. This router's own definition is a candidate only where it is advertised — in the
+backbone's Router Information LSA, with Segment Routing on — and the SR-Algorithm list and the
+per-algorithm Prefix-SIDs follow the backbone's participation, re-originated whenever it
+changes.
 
 ### D2 — The FAEML sub-TLV: wire format and code point
 
@@ -450,10 +460,19 @@ These are independent of the constraint, and listed so they are not lost:
 - **OSPF runtime FAD changes do not take effect.** `commit_flex_algo_tables`
   (`ospf/inst.rs:1277`) commits the config tables but neither re-originates the Router
   Information / SR-info LSA nor schedules SPF. A FAD edit waits for an unrelated event. It is
-  folded into PR 3.
+  folded into PR 3. *OSPFv2: fixed in PR 3a — a commit that stages flex-algo, affinity-map or SRLG
+  changes re-originates the Router Information, Extended Prefix and Extended Link LSAs and
+  recomputes every area.* The survey missed a sibling: a received area-scoped opaque LSA
+  (Router Information, Extended Link, Extended Prefix) never scheduled SPF either, so a peer's
+  definition, a router joining an algorithm or a link's affinity waited the same way. Fixed for
+  OSPFv2 in PR 3a.
 - **OSPF FAD codec robustness.** In OSPFv2, a malformed *known* FAD sub-TLV ends the sub-TLV loop
   and drops the rest (`ospf-packet/src/parser.rs:1367`). In OSPFv3 it fails the whole FAD
-  (`v3.rs:2305`). IS-IS keeps such a sub-TLV opaque. Fix in PR 3.
+  (`v3.rs:2305`). IS-IS keeps such a sub-TLV opaque. Fix in PR 3. *OSPFv2: fixed in PR 3a — an
+  unreadable known sub-TLV is kept as unknown, one overrunning the definition as trailing bytes
+  (both unsupported, both re-flooded as received), and a missing final padding is tolerated. The
+  shared `FadFlags` also dropped every flag bit but M, so unknown flags were invisible; it now
+  keeps them.*
 - **IS-IS codec comment** (`isis-packet/src/sub/neigh.rs:652`): "The reserved value 0xFFFFFF marks
   the metric as unavailable" is not in RFC 8570. Fixed in PR 2 (it matters to D4).
 - **IS-IS Flex-Algo graphs walk TLV 22 only** (`isis/graph.rs:703`), not the multi-topology

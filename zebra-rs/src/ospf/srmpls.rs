@@ -592,6 +592,7 @@ mod tests {
             calc_type: 0,
             priority: 128,
             subs: Vec::new(),
+            trailing: Vec::new(),
         };
         let lsa = router_info_lsa_build(
             Ipv4Addr::new(10, 0, 0, 1),
