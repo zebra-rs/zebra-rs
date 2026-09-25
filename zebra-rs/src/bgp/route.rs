@@ -5213,10 +5213,16 @@ fn route_advertise_batch_addpath<A: BatchAfi>(
     for ident in peers.established_addpath_idents(afi, safi) {
         let peer = peers.get_mut_by_idx(ident).expect("peer exists");
         // RFC 9494 §4.3: stale routes only go to LLGR peers.
-        if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, afi, safi) {
-            continue;
+        let sent = !llgr_blocks_advertisement(rib.stale, &peer.cap_recv, afi, safi)
+            && A::advertise_addpath(peer, rd, prefix, rib, bgp);
+        // Review finding #17: `rib` replaces the path this peer holds under
+        // the same path-id. When the replacement may not go out — LLGR-stale
+        // toward a non-LLGR peer, refused by the builder (NO_ADVERTISE,
+        // NO_EXPORT, OTC, …), denied by the out-policy, filtered by RTC —
+        // the old path-id must be withdrawn, not left standing.
+        if !sent && A::addpath_held(peer, rd, prefix, rib.local_id) {
+            A::withdraw_addpath(peer, rd, prefix, rib.local_id, bgp);
         }
-        A::advertise_addpath(peer, rd, prefix, rib, bgp);
     }
 }
 
@@ -5246,29 +5252,12 @@ fn route_withdraw_from_addpath(
     } else {
         (Afi::Ip, Safi::Unicast)
     };
-    let afi_safi = AfiSafi::new(afi, safi);
 
     let peer_idents: Vec<usize> = peers.established_addpath_idents(afi, safi);
 
     for ident in peer_idents {
         let peer = peers.get_mut_by_idx(ident).expect("peer exists");
-
-        if let Some(ref rd) = rd {
-            peer.cache_remove_vpnv4(*rd, prefix, removed.local_id);
-        } else {
-            // Group cache cleanup. Idempotent across the peer
-            // iteration: first peer in the group cleans the bucket;
-            // subsequent peers find it gone.
-            let group_id = peer.update_group_id.get(&afi_safi).cloned();
-            if let Some(gid) = group_id
-                && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
-                && let Some(group) = af.group_by_id_mut(&gid)
-            {
-                super::update_group::cache_remove_ipv4(group, prefix, removed.local_id);
-            }
-        }
-        withdraw_ipv4_deferrable(bgp.update_groups, peer, rd, prefix, removed.local_id);
-        peer.adj_out.remove(rd, prefix, removed.local_id);
+        V4Batch::withdraw_addpath(peer, rd, prefix, removed.local_id, bgp);
     }
 }
 
@@ -5799,12 +5788,31 @@ trait BatchAfi {
     /// Advertise one AddPath candidate `rib` (carrying its path-id) to a
     /// single AddPath-Send peer. The peer loop + LLGR gate live in
     /// [`route_advertise_batch_addpath`]; split-horizon is enforced by the
-    /// per-AF `route_update_*`.
+    /// per-AF `route_update_*`. Returns whether the path was advertised —
+    /// `false` when the builder, the out-policy or RTC refused it, so the
+    /// caller can withdraw a path-id the peer still holds.
     fn advertise_addpath(
         peer: &mut Peer,
         rd: Option<RouteDistinguisher>,
         prefix: Self::Prefix,
         rib: &BgpRib,
+        bgp: &mut BgpTop,
+    ) -> bool;
+    /// Whether `peer`'s Adj-RIB-Out holds `(prefix, id)`.
+    fn addpath_held(
+        peer: &Peer,
+        rd: Option<RouteDistinguisher>,
+        prefix: Self::Prefix,
+        id: u32,
+    ) -> bool;
+    /// Withdraw `(prefix, id)` from one AddPath-Send peer: drop any queued
+    /// advertisement of it, send the withdraw under that path-id, and
+    /// remove the Adj-RIB-Out row.
+    fn withdraw_addpath(
+        peer: &mut Peer,
+        rd: Option<RouteDistinguisher>,
+        prefix: Self::Prefix,
+        id: u32,
         bgp: &mut BgpTop,
     );
 }
@@ -5917,10 +5925,10 @@ impl BatchAfi for V4Batch {
         prefix: Ipv4Net,
         rib: &BgpRib,
         bgp: &mut BgpTop,
-    ) {
+    ) -> bool {
         let ctx = peer.sync_ctx(*bgp.router_id, bgp.as_sets_withdraw);
         let Some((nlri, attr)) = route_update_ipv4(&ctx, &prefix, rib, true) else {
-            return;
+            return false;
         };
         // v4-unicast reads the cached snapshot; VPNv4 reads its own per-AFI
         // Output policy from the peer.
@@ -5932,11 +5940,11 @@ impl BatchAfi for V4Batch {
             route_apply_policy_out_at(peer, afi_safi, &nlri, attr, rib.weight, rib.tag)
         };
         let Some(decision) = decision else {
-            return;
+            return false;
         };
         let attr = decision.attr;
         if rd.is_some() && !peer.rtcv4.is_empty() && !rtc_match(&peer.rtcv4, &attr.ecom) {
-            return;
+            return false;
         }
         let attr = bgp.attr_store.intern(attr);
         let mut rib_clone = rib.clone();
@@ -5964,6 +5972,37 @@ impl BatchAfi for V4Batch {
                 );
             }
         }
+        true
+    }
+    fn addpath_held(peer: &Peer, rd: Option<RouteDistinguisher>, prefix: Ipv4Net, id: u32) -> bool {
+        let rows = match rd {
+            Some(rd) => peer.adj_out.v4vpn.get(&rd).and_then(|t| t.0.get(&prefix)),
+            None => peer.adj_out.v4.0.get(&prefix),
+        };
+        rows.is_some_and(|rows| rows.iter().any(|row| row.local_id == id))
+    }
+    fn withdraw_addpath(
+        peer: &mut Peer,
+        rd: Option<RouteDistinguisher>,
+        prefix: Ipv4Net,
+        id: u32,
+        bgp: &mut BgpTop,
+    ) {
+        if let Some(rd) = rd {
+            peer.cache_remove_vpnv4(rd, prefix, id);
+        } else {
+            // Group cache cleanup. Idempotent across a peer loop: the
+            // first member cleans the bucket, later ones find it gone.
+            let afi_safi = AfiSafi::new(Afi::Ip, Safi::Unicast);
+            if let Some(gid) = peer.update_group_id.get(&afi_safi).cloned()
+                && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
+                && let Some(group) = af.group_by_id_mut(&gid)
+            {
+                super::update_group::cache_remove_ipv4(group, prefix, id);
+            }
+        }
+        withdraw_ipv4_deferrable(bgp.update_groups, peer, rd, prefix, id);
+        peer.adj_out.remove(rd, prefix, id);
     }
 }
 
@@ -6128,9 +6167,9 @@ impl BatchAfi for V6Batch {
         prefix: Ipv6Net,
         rib: &BgpRib,
         bgp: &mut BgpTop,
-    ) {
+    ) -> bool {
         let Some((nlri, attr)) = route_update_ipv6(peer, &prefix, rib, bgp, true) else {
-            return;
+            return false;
         };
         // Per-AFI Output policy (v6-unicast or VPNv6), mirroring the
         // non-AddPath path so an AddPath candidate is filtered/rewritten
@@ -6140,13 +6179,13 @@ impl BatchAfi for V6Batch {
         let Some(decision) =
             route_apply_policy_out_v6(peer, afi_safi, &nlri, attr, rib.weight, rib.tag)
         else {
-            return;
+            return false;
         };
         let attr = bgp.attr_store.intern(decision.attr);
         if let Some(rd) = rd {
             // VPNv6 AddPath: RTC then per-AFI out-policy (above).
             if !peer.rtcv6.is_empty() && !rtc_match(&peer.rtcv6, &attr.ecom) {
-                return;
+                return false;
             }
             // Record the advertisement under its path-id: the VPNv6
             // soft-out reconciles `adj_out.v6vpn` at `(prefix, path-id)`,
@@ -6165,6 +6204,7 @@ impl BatchAfi for V6Batch {
                 nlri,
             };
             peer.send_vpnv6(vpnv6_nlri, attr, true);
+            true
         } else {
             // v6-unicast AddPath.
             let group_id = peer.update_group_id.get(&afi_safi).cloned();
@@ -6174,12 +6214,49 @@ impl BatchAfi for V6Batch {
             {
                 super::update_group::send_ipv6(group, nlri, attr, rib.ident, bgp.tx, true);
                 peer.adj_out.v6.add(prefix, rib.clone());
+                true
             } else {
                 tracing::warn!(
                     peer = %peer.address,
                     prefix = %prefix,
                     "IPv6 AddPath advertise: peer Established but not in any update-group; advertise skipped"
                 );
+                false
+            }
+        }
+    }
+    fn addpath_held(peer: &Peer, rd: Option<RouteDistinguisher>, prefix: Ipv6Net, id: u32) -> bool {
+        let rows = match rd {
+            Some(rd) => peer.adj_out.v6vpn.get(&rd).and_then(|t| t.0.get(&prefix)),
+            None => peer.adj_out.v6.0.get(&prefix),
+        };
+        rows.is_some_and(|rows| rows.iter().any(|row| row.local_id == id))
+    }
+    fn withdraw_addpath(
+        peer: &mut Peer,
+        rd: Option<RouteDistinguisher>,
+        prefix: Ipv6Net,
+        id: u32,
+        bgp: &mut BgpTop,
+    ) {
+        match rd {
+            Some(rd) => {
+                peer.cache_remove_vpnv6(rd, prefix, id);
+                route_withdraw_vpnv6(peer, rd, prefix, id);
+                if let Some(table) = peer.adj_out.v6vpn.get_mut(&rd) {
+                    table.remove(prefix, id);
+                }
+            }
+            None => {
+                let afi_safi = AfiSafi::new(Afi::Ip6, Safi::Unicast);
+                if let Some(gid) = peer.update_group_id.get(&afi_safi).cloned()
+                    && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
+                    && let Some(group) = af.group_by_id_mut(&gid)
+                {
+                    super::update_group::cache_remove_ipv6(group, prefix, id);
+                }
+                withdraw_ipv6_deferrable(bgp.update_groups, peer, prefix, id);
+                peer.adj_out.v6.remove(prefix, id);
             }
         }
     }
@@ -7531,43 +7608,69 @@ fn route_soft_out_peer_table(
         (Afi::Ip, Safi::Unicast)
     };
 
-    // Snapshot Loc-RIB selected so the iteration outlives later
-    // mutable borrows of `bgp` (attr_store.intern, send paths).
-    let selected: Vec<(Ipv4Net, BgpRib)> = match rd {
-        Some(rd) => bgp
-            .shard
-            .v4vpn
-            .get(&rd)
-            .map(|t| t.1.iter().map(|(p, r)| (p, r.clone())).collect())
-            .unwrap_or_default(),
-        None => bgp.shard.v4.1.iter().map(|(p, r)| (p, r.clone())).collect(),
+    let Some(add_path) = peers
+        .get_by_idx(peer_idx)
+        .map(|peer| peer.opt.is_add_path_send(afi, safi))
+    else {
+        return;
     };
 
-    // Snapshot what's currently in this peer's Adj-RIB-Out so we can
-    // detect which previously-advertised prefixes need a withdraw.
-    let was_advertised: BTreeSet<Ipv4Net> = {
-        let peer = peers.get_mut_by_idx(peer_idx).expect("peer exists");
-        match rd {
-            Some(rd) => peer
-                .adj_out
-                .v4vpn
-                .get(&rd)
-                .map(|t| t.0.keys().copied().collect())
-                .unwrap_or_default(),
-            None => peer.adj_out.v4.0.keys().copied().collect(),
+    // Snapshot the Loc-RIB so the iteration outlives later mutable borrows
+    // of `bgp` (attr_store.intern, send paths). An AddPath peer holds every
+    // candidate, each under its path-id, so it is re-synced from the full
+    // candidate table (review finding #18) — minus the candidates whose
+    // next-hop is unreachable, as the VPNv6 re-sync does: those are not
+    // eligible (RFC 4271 §9.1.2.1), so skipping them lets the reconcile
+    // below withdraw their path-ids instead of re-announcing a path we no
+    // longer forward on. A plain peer is re-synced from the selected path,
+    // which is already empty while the winner is unreachable.
+    let candidates: Vec<(Ipv4Net, BgpRib)> = {
+        let table = match rd {
+            Some(rd) => bgp.shard.v4vpn.get(&rd),
+            None => Some(&bgp.shard.v4),
+        };
+        match table {
+            Some(t) if add_path => {
+                t.0.iter()
+                    .flat_map(|(prefix, ribs)| {
+                        ribs.iter()
+                            .filter(|rib| rib.nexthop_reachable)
+                            .map(move |rib| (prefix, rib.clone()))
+                    })
+                    .collect()
+            }
+            Some(t) => t.1.iter().map(|(p, r)| (p, r.clone())).collect(),
+            None => Vec::new(),
         }
     };
 
-    let mut newly_advertised: BTreeSet<Ipv4Net> = BTreeSet::new();
+    // What the peer holds now: `(prefix, path-id)` rows for AddPath, the
+    // prefixes (path-id 0) otherwise.
+    let was_advertised: BTreeSet<(Ipv4Net, u32)> = {
+        let peer = peers.get_by_idx(peer_idx).expect("peer exists");
+        let table = match rd {
+            Some(rd) => peer.adj_out.v4vpn.get(&rd),
+            None => Some(&peer.adj_out.v4),
+        };
+        table.map_or_else(BTreeSet::new, |t| {
+            t.0.iter()
+                .flat_map(|(prefix, rows)| {
+                    rows.iter()
+                        .map(move |row| (*prefix, if add_path { row.local_id } else { 0 }))
+                })
+                .collect()
+        })
+    };
+
+    let mut newly_advertised: BTreeSet<(Ipv4Net, u32)> = BTreeSet::new();
     // Soft-out targets a single peer; the per-group cache would
     // fan out to every member. Accumulate IPv4 unicast entries
     // and emit via `send_ipv4_direct` at the end so encoding
     // stays per-attr-batched without touching the group cache.
     let mut ipv4_entries: Vec<(Arc<BgpAttr>, Ipv4Nlri)> = Vec::new();
 
-    for (prefix, rib) in &selected {
+    for (prefix, rib) in &candidates {
         let peer = peers.get_mut_by_idx(peer_idx).expect("peer exists");
-        let add_path = peer.opt.is_add_path_send(afi, safi);
 
         // RFC 9494 §4.3: stale routes only go to LLGR peers. A
         // previously-advertised route that went stale falls out of
@@ -7605,6 +7708,8 @@ fn route_soft_out_peer_table(
         let mut adj = rib.clone();
         adj.attr = attr.clone();
         peer.adj_out.add(rd, nlri.prefix, adj);
+        // `nlri.id` is the row's local id under AddPath, 0 otherwise.
+        newly_advertised.insert((*prefix, nlri.id));
 
         if let Some(rd_val) = rd {
             let vpnv4_nlri = Vpnv4Nlri {
@@ -7616,8 +7721,6 @@ fn route_soft_out_peer_table(
         } else {
             ipv4_entries.push((attr, nlri));
         }
-
-        newly_advertised.insert(*prefix);
     }
 
     // Direct-emit IPv4 unicast batch (no group fan-out). When the
@@ -7640,14 +7743,19 @@ fn route_soft_out_peer_table(
         );
     }
 
-    let to_withdraw: Vec<Ipv4Net> = was_advertised
+    // Withdraw each dropped row under its own path-id: toward an AddPath
+    // peer a path-id-0 withdraw carries no path-id field at all (the peer
+    // reads it as an empty withdraw, or rejects the UPDATE), and removing
+    // path-id 0 from the Adj-RIB-Out is a wildcard that would erase every
+    // row the peer still holds.
+    let to_withdraw: Vec<(Ipv4Net, u32)> = was_advertised
         .difference(&newly_advertised)
         .copied()
         .collect();
-    for prefix in to_withdraw {
+    for (prefix, id) in to_withdraw {
         let peer = peers.get_mut_by_idx(peer_idx).expect("peer exists");
         if let Some(rd) = rd {
-            peer.cache_remove_vpnv4(rd, prefix, 0);
+            peer.cache_remove_vpnv4(rd, prefix, id);
         } else {
             // Drop any not-yet-flushed pending advert of this prefix
             // from the shared update-group cache. The re-advert above
@@ -7666,11 +7774,11 @@ fn route_soft_out_peer_table(
                 && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
                 && let Some(group) = af.group_by_id_mut(&gid)
             {
-                super::update_group::cache_remove_ipv4(group, prefix, 0);
+                super::update_group::cache_remove_ipv4(group, prefix, id);
             }
         }
-        peer.adj_out.remove(rd, prefix, 0);
-        withdraw_ipv4_deferrable(bgp.update_groups, peer, rd, prefix, 0);
+        peer.adj_out.remove(rd, prefix, id);
+        withdraw_ipv4_deferrable(bgp.update_groups, peer, rd, prefix, id);
     }
 }
 
@@ -30992,6 +31100,7 @@ mod addpath_exact_id_tests {
         assert!(held_v4(&peers, c, "10.18.9.0/24").is_empty());
     }
 }
+
 /// `community_suppresses_advertisement` truth table: NO_ADVERTISE
 /// gates every peer type; NO_EXPORT and NO_EXPORT_SUBCONFED gate eBGP
 /// only (no confederation support, so SUBCONFED ≡ NO_EXPORT).
