@@ -494,6 +494,19 @@ pub struct Isis {
     pub sr_flex_algo_locators: BTreeMap<u8, Locator>,
     pub sr_flex_algo_end_sid: BTreeMap<u8, std::net::Ipv6Addr>,
 
+    /// The Flexible Algorithms this router participates in at either
+    /// level (RFC 9350 §5.3). The per-algorithm SRv6 SIDs — End and
+    /// End.X — are node-wide, one registration serving both levels, so
+    /// they stay installed while this router participates anywhere and
+    /// go when it participates nowhere: "it MUST remove any forwarding
+    /// state associated with it". Refreshed on every LSP origination by
+    /// [`Self::reconcile_flex_algo_participation`].
+    pub flex_algo_participating: BTreeSet<u8>,
+    /// `sr_flex_algo_locators` restricted to `flex_algo_participating`:
+    /// the locators End.X SIDs may be installed under. Handed to every
+    /// Hello's End.X reconcile.
+    pub sr_flex_algo_locators_active: BTreeMap<u8, Locator>,
+
     /// Per-fragment seq-number-wrap wait. Keyed by fragment id
     /// (LSPID byte 7). Armed when a fragment's next emission would
     /// hit seq == 0xFFFFFFFF: we push a purge (RemainingLifetime = 0)
@@ -922,6 +935,8 @@ impl Isis {
                 watched_flex_algo_locators: BTreeMap::new(),
                 sr_flex_algo_locators: BTreeMap::new(),
                 sr_flex_algo_end_sid: BTreeMap::new(),
+                flex_algo_participating: BTreeSet::new(),
+                sr_flex_algo_locators_active: BTreeMap::new(),
                 sr_block: None,
                 sr_locator: None,
                 sr_end_sid: None,
@@ -2616,6 +2631,10 @@ impl Isis {
         if !has_level(self.config.is_type(), level) {
             return;
         }
+        // Participation may have changed since the last origination; bring
+        // the per-algorithm SRv6 SIDs in line before the LSP advertising
+        // them is built.
+        self.reconcile_flex_algo_participation();
         let mut top = self.top();
         // lsp_generate returns an empty Vec when origination is
         // suppressed (seq-wrap freeze active). It otherwise returns
@@ -3464,7 +3483,7 @@ impl Isis {
             rib_client: &self.ctx.rib,
             sr_locator: &self.sr_locator,
             watched_locator: &self.watched_locator,
-            sr_flex_algo_locators: &self.sr_flex_algo_locators,
+            sr_flex_algo_locators: &self.sr_flex_algo_locators_active,
             watched_flex_algo_locators: &self.watched_flex_algo_locators,
             elib: &mut self.elib,
             key_chains: &self.key_chains,
@@ -3608,6 +3627,7 @@ impl Isis {
             self.update_flex_algo_end_sid(algo);
             self.watched_flex_algo_locators.remove(&algo);
         }
+        self.refresh_active_flex_algo_locators();
         for (algo, name) in desired_flex {
             self.watched_flex_algo_locators.insert(algo, name);
         }
@@ -3618,11 +3638,16 @@ impl Isis {
     /// locator snapshot. Distinct per-algo locator prefixes mean each
     /// SID has a distinct address, so the RIB registry (keyed by addr)
     /// never collides across algorithms.
+    ///
+    /// Installed only while this router participates in the algorithm
+    /// (RFC 9350 §5.3): a router that stops participating keeps no
+    /// forwarding state for it.
     fn update_flex_algo_end_sid(&mut self, algo: u8) {
         if let Some(prev) = self.sr_flex_algo_end_sid.remove(&algo) {
             let _ = self.ctx.rib.send(rib::Message::SidDel { addr: prev });
         }
-        if let Some(locator) = self.sr_flex_algo_locators.get(&algo)
+        if self.flex_algo_participating.contains(&algo)
+            && let Some(locator) = self.sr_flex_algo_locators.get(&algo)
             && let Some(addr) = locator.node_sid_addr()
             && let Some(loc_name) = self.watched_flex_algo_locators.get(&algo).cloned()
         {
@@ -3653,6 +3678,80 @@ impl Isis {
             };
             let _ = self.ctx.rib.send(rib::Message::SidAdd { sid });
             self.sr_flex_algo_end_sid.insert(algo, addr);
+        }
+    }
+
+    /// The Flexible Algorithms this router participates in at any level it
+    /// runs, from the current LSDB and configuration (RFC 9350 §5.3).
+    fn flex_algo_participation_now(&self) -> BTreeSet<u8> {
+        if self.flex_algo.config.is_empty() {
+            return BTreeSet::new();
+        }
+        let self_sys_id = self.config.net.sys_id();
+        [Level::L1, Level::L2]
+            .into_iter()
+            .filter(|level| has_level(self.config.is_type(), *level))
+            .flat_map(|level| {
+                super::flex_algo::participating(&super::flex_algo::fad_selection(
+                    &self.flex_algo,
+                    &self.affinity_map,
+                    &self.srlg_groups,
+                    self.peer_fad.get(&level),
+                    &self_sys_id,
+                ))
+            })
+            .collect()
+    }
+
+    /// Recompute `sr_flex_algo_locators_active` from the resolved locators
+    /// and the current participation.
+    fn refresh_active_flex_algo_locators(&mut self) {
+        self.sr_flex_algo_locators_active = self
+            .sr_flex_algo_locators
+            .iter()
+            .filter(|(algo, _)| self.flex_algo_participating.contains(algo))
+            .map(|(algo, loc)| (*algo, loc.clone()))
+            .collect();
+    }
+
+    /// Bring the node-wide per-algorithm SRv6 SIDs in line with
+    /// participation (RFC 9350 §5.3). Run on every LSP origination, which
+    /// follows anything that can change participation: a Flex-Algo or
+    /// locator config edit, a peer's definition changing, an is-type
+    /// change. On a change, each affected algorithm's End SID is
+    /// reconciled, and every neighbour's End.X SIDs are reconciled against
+    /// the participating locators — withdrawn for an algorithm this router
+    /// left, installed for one it joined — before the LSP that advertises
+    /// them is built.
+    pub(crate) fn reconcile_flex_algo_participation(&mut self) {
+        let now = self.flex_algo_participation_now();
+        if now == self.flex_algo_participating {
+            return;
+        }
+        let changed: Vec<u8> = now
+            .symmetric_difference(&self.flex_algo_participating)
+            .copied()
+            .collect();
+        self.flex_algo_participating = now;
+        self.refresh_active_flex_algo_locators();
+        for algo in changed {
+            self.update_flex_algo_end_sid(algo);
+        }
+        for link in self.links.values_mut() {
+            let ifname = link.state.name.clone();
+            for level in [Level::L1, Level::L2] {
+                for nbr in link.state.nbrs.get_mut(&level).values_mut() {
+                    nbr.reconcile_endx_sid(
+                        &ifname,
+                        &self.sr_locator,
+                        &self.watched_locator,
+                        &self.sr_flex_algo_locators_active,
+                        &self.watched_flex_algo_locators,
+                        &mut self.elib,
+                        &self.ctx.rib,
+                    );
+                }
+            }
         }
     }
 
@@ -3998,6 +4097,7 @@ impl Isis {
                     self.update_flex_algo_end_sid(algo);
                     touched = true;
                 }
+                self.refresh_active_flex_algo_locators();
                 if !touched {
                     return;
                 }
@@ -4918,5 +5018,78 @@ mod link_mac_tests {
 
         assert!(isis.links.get(&9).is_none());
         assert!(isis.rx.try_recv().is_err());
+    }
+}
+
+#[cfg(test)]
+mod flex_algo_participation_tests {
+    use std::collections::VecDeque;
+
+    use super::commit_and_microloop_gate_tests::fresh_isis;
+    use super::*;
+    use crate::config::{Args, ConfigOp};
+    use crate::rib::Locator;
+
+    fn set(isis: &mut Isis, leaf: &str, algo: &str, value: &str) {
+        let args = Args(VecDeque::from([algo.to_string(), value.to_string()]));
+        isis.flex_algo
+            .exec(
+                format!("/router/isis/flex-algo/{leaf}"),
+                args,
+                ConfigOp::Set,
+            )
+            .unwrap();
+        isis.flex_algo.commit();
+    }
+
+    /// RFC 9350 §5.3: a router that stops participating in an algorithm
+    /// "MUST remove any forwarding state associated with it". The
+    /// per-algorithm End SID is installed only while this router
+    /// participates, withdrawn when its definition turns unsupported (the
+    /// M flag), and reinstalled when it is supported again.
+    #[tokio::test]
+    async fn flex_algo_end_sid_follows_participation() {
+        let mut isis = fresh_isis();
+        let sid: std::net::Ipv6Addr = "2001:db8:b128::".parse().unwrap();
+        set(&mut isis, "advertise-definition", "128", "true");
+        isis.watched_flex_algo_locators
+            .insert(128, "A128".to_string());
+        isis.sr_flex_algo_locators.insert(
+            128,
+            Locator {
+                prefix: Some("2001:db8:b128::/48".parse().unwrap()),
+                behavior: None,
+                flavors: 0,
+                vrf: None,
+                table_id: 0,
+            },
+        );
+
+        // The locator resolves before participation is known: nothing yet.
+        isis.update_flex_algo_end_sid(128);
+        assert!(isis.sr_flex_algo_end_sid.is_empty());
+
+        isis.reconcile_flex_algo_participation();
+        assert_eq!(isis.flex_algo_participating, BTreeSet::from([128]));
+        assert_eq!(isis.sr_flex_algo_end_sid.get(&128), Some(&sid));
+        assert!(isis.sr_flex_algo_locators_active.contains_key(&128));
+
+        // The M flag is unsupported: stop participating, drop the SID and
+        // the locator End.X SIDs are allocated under.
+        set(&mut isis, "prefix-metric", "128", "true");
+        isis.reconcile_flex_algo_participation();
+        assert!(isis.flex_algo_participating.is_empty());
+        assert!(isis.sr_flex_algo_end_sid.is_empty());
+        assert!(isis.sr_flex_algo_locators_active.is_empty());
+
+        // A locator refresh while not participating installs nothing.
+        isis.update_flex_algo_end_sid(128);
+        assert!(isis.sr_flex_algo_end_sid.is_empty());
+
+        set(&mut isis, "prefix-metric", "128", "false");
+        isis.reconcile_flex_algo_participation();
+        assert_eq!(isis.flex_algo_participating, BTreeSet::from([128]));
+        assert_eq!(isis.sr_flex_algo_end_sid.get(&128), Some(&sid));
+        assert!(isis.sr_flex_algo_locators_active.contains_key(&128));
     }
 }

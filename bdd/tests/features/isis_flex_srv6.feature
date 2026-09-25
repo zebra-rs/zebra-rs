@@ -90,6 +90,35 @@ Feature: IS-IS Flexible Algorithm over the SRv6 dataplane
     # The algo-128 locator route to ch is a real IPv6 route in se's RIB.
     Then show command "show ipv6 route" in namespace "se" should contain "2001:db8:b128"
 
+  Scenario: A router that stops participating removes its per-algo SRv6 SIDs
+    Given the test topology exists
+    # ch's algo-129 End SID and End.X SIDs are all allocated from its A129
+    # locator, so each one renders under 2001:db8:b129. The End.X needle
+    # spans the Context, Protocol and Locator columns of one row.
+    Then show command "show segment-routing srv6 sid" in namespace "ch" should eventually contain "2001:db8:b129::  "
+    And show command "show segment-routing srv6 sid" in namespace "ch" should eventually contain "Interface 'ch-se'    isis              A129"
+    And kernel route "2001:db8:b129::" in namespace "ch" should eventually contain "seg6local"
+    # zebra-rs does not implement the prefix metric, so the M flag makes the
+    # definition unsupported and ch stops participating in algo 129. RFC 9350
+    # §5.3: it "MUST remove any forwarding state associated with it" — the
+    # End SID and every End.X SID, in the RIB and in the kernel.
+    When I apply command "set router isis flex-algo 129 prefix-metric true" in namespace "ch"
+    Then show command "show isis flex-algo" in namespace "ch" should eventually contain "not participating: unsupported flag: prefix metric (M)"
+    And show command "show segment-routing srv6 sid" in namespace "ch" should eventually not contain "2001:db8:b129"
+    And kernel route "2001:db8:b129::" in namespace "ch" should eventually be gone
+    # And they stay gone: the End.X reconcile each Hello (every 3 s) runs
+    # against the participating locators only, so it must not bring them back.
+    And I wait 5 seconds
+    And show command "show segment-routing srv6 sid" in namespace "ch" should not contain "2001:db8:b129"
+    # Algorithm 128 is untouched.
+    And show command "show segment-routing srv6 sid" in namespace "ch" should contain "2001:db8:b128::  "
+    And kernel route "2001:db8:b128::" in namespace "ch" should eventually contain "seg6local"
+    # Clearing the flag restores participation and the SIDs.
+    When I apply command "set router isis flex-algo 129 prefix-metric false" in namespace "ch"
+    Then show command "show segment-routing srv6 sid" in namespace "ch" should eventually contain "2001:db8:b129::  "
+    And show command "show segment-routing srv6 sid" in namespace "ch" should eventually contain "Interface 'ch-se'    isis              A129"
+    And kernel route "2001:db8:b129::" in namespace "ch" should eventually contain "seg6local"
+
   Scenario: Teardown SRv6 Flex-Algo topology
     Given the test topology exists
     When I stop zebra-rs in namespace "se"
