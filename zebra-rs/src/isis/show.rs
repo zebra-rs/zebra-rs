@@ -734,6 +734,23 @@ fn render_locator_row(name: &str, locator: Option<&crate::rib::Locator>) -> Stri
 struct GraphJson {
     pub level: String,
     pub nodes: Vec<NodeJson>,
+    /// Flex-Algorithm graphs only: the links the definition's rules left
+    /// out, and why.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pruned: Vec<PrunedLinkJson>,
+}
+
+#[derive(Serialize)]
+struct PrunedLinkJson {
+    pub from: String,
+    pub to: String,
+    pub reason: String,
+    /// The link's advertised loss and the maximum it exceeds, RFC 8570
+    /// units, when pruned for loss.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loss: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_link_loss: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -816,6 +833,12 @@ fn write_graphs_text(
                 }
             }
         }
+        if !graph_data.pruned.is_empty() {
+            writeln!(buf, "\nPruned links:")?;
+            for p in &graph_data.pruned {
+                writeln!(buf, "  {} -> {}: {}", p.from, p.to, p.reason)?;
+            }
+        }
     }
     Ok(())
 }
@@ -869,6 +892,7 @@ fn format_graph(graph: &spf::Graph, level: &str) -> Option<GraphJson> {
         Some(GraphJson {
             level: level.to_string(),
             nodes,
+            pruned: Vec::new(),
         })
     }
 }
@@ -3788,6 +3812,9 @@ struct FlexAlgoLocalJson {
     include_all: Vec<String>,
     exclude_any: Vec<String>,
     srlg_exclude: Vec<String>,
+    /// `exclude-max-link-loss` in RFC 8570 units, as advertised.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exclude_max_link_loss: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -3854,6 +3881,9 @@ struct FadWinnerJson {
     priority: u8,
     metric_type: u8,
     calc_type: u8,
+    /// The definition's Exclude Maximum Link Loss, RFC 8570 units.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_link_loss: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -3884,6 +3914,14 @@ fn flex_algo_selections(isis: &Isis) -> Vec<(Level, BTreeMap<u8, super::flex_alg
         .collect()
 }
 
+/// A definition's Exclude Maximum Link Loss, in RFC 8570 units.
+fn fad_max_link_loss(fad: &isis_packet::IsisSubFlexAlgoDef) -> Option<u32> {
+    fad.subs.iter().find_map(|sub| match sub {
+        isis_packet::FadSubTlv::ExcludeMaxLinkLoss(v) => Some(v.max_loss),
+        _ => None,
+    })
+}
+
 fn show_isis_flex_algo(
     isis: &Isis,
     _args: Args,
@@ -3907,6 +3945,7 @@ fn show_isis_flex_algo(
                 include_all: set_vec(&entry.include_all),
                 exclude_any: set_vec(&entry.exclude_any),
                 srlg_exclude: set_vec(&entry.srlg_exclude),
+                exclude_max_link_loss: entry.exclude_max_link_loss_units(),
             })
             .collect();
 
@@ -3998,6 +4037,7 @@ fn show_isis_flex_algo(
                         priority: w.fad.priority,
                         metric_type: w.fad.metric_type,
                         calc_type: w.fad.calc_type,
+                        max_link_loss: fad_max_link_loss(&w.fad),
                     }),
                     participating,
                     reason,
@@ -4058,9 +4098,17 @@ fn show_isis_flex_algo(
                         } else {
                             ""
                         };
+                        let max_loss = fad_max_link_loss(&w.fad)
+                            .map(|m| {
+                                format!(
+                                    ", max link loss {} ({m})",
+                                    super::flex_algo::LossPercent(m)
+                                )
+                            })
+                            .unwrap_or_default();
                         writeln!(
                             buf,
-                            "  Algo {algo}: definition from {name} ({}{local}), priority {}; {state}",
+                            "  Algo {algo}: definition from {name} ({}{local}), priority {}{max_loss}; {state}",
                             w.originator, w.fad.priority
                         )?;
                     }
@@ -4354,6 +4402,17 @@ fn flex_algo_constraints(entry: &crate::flex_algo::FlexAlgoEntry) -> String {
             );
         }
     }
+    if let (Some(micro), Some(units)) = (
+        entry.exclude_max_link_loss,
+        entry.exclude_max_link_loss_units(),
+    ) {
+        let _ = write!(
+            s,
+            "max-link-loss={}.{:06}%({units}) ",
+            micro / 1_000_000,
+            micro % 1_000_000
+        );
+    }
     if s.is_empty() {
         s.push('-');
     }
@@ -4564,10 +4623,21 @@ fn show_isis_flex_algo_graph(
         Err(msg) => return Ok(msg),
     };
     let mut graphs = Vec::new();
+    let selections = flex_algo_selections(isis);
     for (level, label) in [(Level::L1, "L1"), (Level::L2, "L2")] {
         if let Some(Some(graph)) = isis.graph_flex_algo.get(&level).get(&algo)
-            && let Some(g) = format_graph(graph, &format!("{} algo {}", label, algo))
+            && let Some(mut g) = format_graph(graph, &format!("{} algo {}", label, algo))
         {
+            // The graph holds only the links kept; name the rest, computed
+            // with the definition the graph was built from.
+            if let Some(c) = selections
+                .iter()
+                .find(|(l, _)| *l == level)
+                .and_then(|(_, sel)| sel.get(&algo))
+                .and_then(|sel| sel.participation.constraints())
+            {
+                g.pruned = flex_algo_pruned_links(isis, level, algo, c);
+            }
             graphs.push(g);
         }
     }
@@ -4582,6 +4652,44 @@ fn show_isis_flex_algo_graph(
     }
     write_graphs_text(&mut buf, &graphs)?;
     Ok(buf)
+}
+
+/// The links the algorithm's graph leaves out at `level`, and why.
+fn flex_algo_pruned_links(
+    isis: &Isis,
+    level: Level,
+    algo: u8,
+    constraints: &super::flex_algo::FadConstraints,
+) -> Vec<PrunedLinkJson> {
+    let name = |id: &isis_packet::IsisNeighborId| {
+        let host = hostname_for(isis, &level, &id.sys_id());
+        if id.pseudo_id() != 0 {
+            format!("{host}.{:02x}", id.pseudo_id())
+        } else {
+            host
+        }
+    };
+    super::graph::flex_algo_pruned_edges(
+        isis.lsdb.get(&level),
+        isis.peer_algos.get(&level),
+        algo,
+        constraints,
+    )
+    .into_iter()
+    .map(|e| {
+        let (loss, max_link_loss) = match e.why {
+            super::flex_algo::Pruned::LinkLoss { loss, max } => (Some(loss), Some(max)),
+            super::flex_algo::Pruned::Affinity => (None, None),
+        };
+        PrunedLinkJson {
+            from: name(&e.from),
+            to: name(&e.to),
+            reason: e.why.to_string(),
+            loss,
+            max_link_loss,
+        }
+    })
+    .collect()
 }
 
 /// Per-algorithm equivalent of [`spf_topologies`]: the (label, graph,

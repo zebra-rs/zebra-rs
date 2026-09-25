@@ -18,8 +18,9 @@ pub mod srlg;
 pub use affinity_map::AffinityMap;
 pub use config::{FlexAlgoConfig, sr_algorithms};
 pub use constraint::{
-    AffinityBits, FadConstraints, link_passes_constraints, link_passes_fad, local_link_affinity,
+    AffinityBits, FadConstraints, LinkAttrs, LossPercent, Pruned, link_passes_fad,
+    link_prune_reason, local_link_affinity,
 };
-pub use entry::{FadMetricType, FlexAlgoEntry};
+pub use entry::{FadMetricType, FlexAlgoEntry, check_max_link_loss};
 pub use participation::{Participation, Unsupported};
 pub use srlg::{SrlgGroup, SrlgGroupBuilder};

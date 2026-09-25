@@ -302,6 +302,19 @@ fn config_builder(prefix: &str) -> ConfigBuilder {
             }
             Ok(())
         })
+        .path(&format!("{prefix}/exclude-max-link-loss"))
+        .set(|config, cache, algo, args| {
+            let e = cache_get(config, cache, algo).context(CONFIG_ERR)?;
+            let value = args.string().context(CONFIG_ERR)?;
+            e.exclude_max_link_loss =
+                Some(super::entry::check_max_link_loss(&value).map_err(anyhow::Error::msg)?);
+            Ok(())
+        })
+        .del(|config, cache, algo, _args| {
+            let e = cache_lookup(config, cache, algo).context(CONFIG_ERR)?;
+            e.exclude_max_link_loss = None;
+            Ok(())
+        })
         .path(&format!("{prefix}/fast-reroute/disable"))
         .set(|config, cache, algo, _args| {
             let e = cache_get(config, cache, algo).context(CONFIG_ERR)?;

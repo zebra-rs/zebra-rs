@@ -108,6 +108,7 @@ implementation; the corresponding features track the referenced draft revision.
 | RFC 9479 | IS-IS Application-Specific Link Attributes (ASLA). |
 | RFC 9352 | IS-IS Extensions to Support Segment Routing over the IPv6 Data Plane (SRv6). |
 | RFC 9350 | IGP Flexible Algorithm (Flex-Algo) constraint-based SPF. |
+| draft-ietf-lsr-flex-algo-link-loss | Flex-Algo Exclude Maximum Link Loss — prune links whose advertised loss exceeds the definition's maximum (FAD sub-TLV 252, the draft's provisional type). |
 | RFC 9855 | Topology-Independent Loop-Free Alternate (TI-LFA) fast reroute using Segment Routing. |
 | RFC 9666 | Area Proxy for IS-IS — a Level-1 area presented to the Level-2 backbone as a single proxy node (Proxy LSP, boundary filtering, Area SID). |
 | RFC 9667 | Dynamic Flooding on Dense Graphs — the Area Leader election sub-TLV, as reused by Area Proxy. |

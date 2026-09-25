@@ -648,8 +648,10 @@ impl From<IsisSubDelayVariation> for IsisSubTlv {
 ///
 /// 4-octet payload: byte 0 bit 7 = `A` flag, bits 6..0 reserved;
 /// bytes 1..3 = 24-bit loss expressed in units of 0.000003 %, so
-/// the encoded ceiling 0xFFFFFE represents ~50.331642 %. The
-/// reserved value 0xFFFFFF marks the metric as unavailable.
+/// 0xFFFFFE (2^24 − 2) represents 50.331642 %, the highest loss the
+/// field can express; larger measurements SHOULD be encoded as it.
+/// RFC 8570 gives 0xFFFFFF no special meaning, so it is compared as a
+/// number like any other value.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IsisSubLinkLoss {
     pub anomalous: bool,

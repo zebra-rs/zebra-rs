@@ -241,17 +241,6 @@ pub struct Isis {
     /// the LSDB. Cleared on peer purge.
     pub peer_fad: Levels<BTreeMap<IsisSysId, BTreeMap<u8, isis_packet::IsisSubFlexAlgoDef>>>,
 
-    /// Per-peer per-link affinity bitmaps. Outer key is peer sys-id;
-    /// inner key is the IS-reach neighbor identifier (a 7-byte tuple
-    /// of 6-byte sys-id and 1-byte circuit/pseudo id). Populated
-    /// from IsisSubAsla sub-TLVs on Ext IS-Reach (TLV 22) and MT
-    /// IS-Reach (TLV 222) entries whose SABM byte 0 has the
-    /// Flex-Algorithm X-bit set (RFC 9479 §4.2). Cleared on peer
-    /// purge.
-    pub peer_link_affinity: Levels<
-        BTreeMap<IsisSysId, BTreeMap<isis_packet::IsisNeighborId, isis_packet::ExtAdminGroup>>,
-    >,
-
     /// Per-peer per-algorithm Prefix-SIDs. Outer key is peer sys-id;
     /// inner key is `(algo, prefix)` so SPF can pick the SID for a
     /// resolved (algo, destination prefix) pair in one lookup.
@@ -680,14 +669,6 @@ pub struct IsisTop<'a> {
     pub peer_fad:
         &'a mut Levels<BTreeMap<IsisSysId, BTreeMap<u8, isis_packet::IsisSubFlexAlgoDef>>>,
 
-    /// Per-peer per-link affinity bitmaps (see
-    /// `Isis::peer_link_affinity`). Threaded through IsisTop so the
-    /// LSDB rebuild path can populate it from peer IS-reach ASLA
-    /// sub-TLVs.
-    pub peer_link_affinity: &'a mut Levels<
-        BTreeMap<IsisSysId, BTreeMap<isis_packet::IsisNeighborId, isis_packet::ExtAdminGroup>>,
-    >,
-
     /// Per-peer per-algorithm Prefix-SIDs (see `Isis::peer_algo_sid`).
     /// Threaded through IsisTop so the LSDB rebuild path can populate
     /// it from peer Ext IP-Reach TLVs.
@@ -873,12 +854,6 @@ impl Isis {
                 srv6_end_map: Levels::<BTreeMap<IsisSysId, super::srv6::Srv6EndSidInfo>>::default(),
                 peer_fad: Levels::<
                     BTreeMap<IsisSysId, BTreeMap<u8, isis_packet::IsisSubFlexAlgoDef>>,
-                >::default(),
-                peer_link_affinity: Levels::<
-                    BTreeMap<
-                        IsisSysId,
-                        BTreeMap<isis_packet::IsisNeighborId, isis_packet::ExtAdminGroup>,
-                    >,
                 >::default(),
                 peer_algo_sid: Levels::<
                     BTreeMap<IsisSysId, BTreeMap<(u8, Ipv4Net), isis_packet::SidLabelValue>>,
@@ -3407,7 +3382,6 @@ impl Isis {
             label_map: &mut self.label_map,
             srv6_end_map: &mut self.srv6_end_map,
             peer_fad: &mut self.peer_fad,
-            peer_link_affinity: &mut self.peer_link_affinity,
             peer_algo_sid: &mut self.peer_algo_sid,
             peer_algos: &mut self.peer_algos,
             peer_algo_srv6: &mut self.peer_algo_srv6,
@@ -3482,7 +3456,6 @@ impl Isis {
             label_map: &mut self.label_map,
             srv6_end_map: &mut self.srv6_end_map,
             peer_fad: &mut self.peer_fad,
-            peer_link_affinity: &mut self.peer_link_affinity,
             peer_algo_sid: &mut self.peer_algo_sid,
             peer_algos: &mut self.peer_algos,
             peer_algo_srv6: &mut self.peer_algo_srv6,
@@ -4940,6 +4913,114 @@ mod commit_and_microloop_gate_tests {
 }
 
 #[cfg(test)]
+mod flex_algo_graph_tests {
+    use std::collections::BTreeSet;
+
+    use isis_packet::neigh::IsisSubTlv;
+
+    use super::commit_and_microloop_gate_tests::fresh_isis;
+    use super::*;
+    use crate::isis::flex_algo::FadConstraints;
+    use crate::isis::graph::graph_flex_algo;
+    use crate::isis::link::{IsisLink, LinkConfig, LinkState, LinkTimer};
+    use crate::isis::lsdb::Lsa;
+
+    /// Our router with parallel point-to-point links to one peer, one per
+    /// `(ifindex, loss)`, and our LSP listing their reach entries in
+    /// `entry_order`. The algorithm-128 graph under a 5 % maximum loss:
+    /// our outgoing edges' interfaces.
+    fn surviving_interfaces(links: &[(u32, u32)], entry_order: &[u32]) -> Vec<u32> {
+        let mut isis = fresh_isis();
+        let own = isis.config.net.sys_id();
+        let peer = IsisSysId {
+            id: [0, 0, 0, 0, 0, 9],
+        };
+        let neighbor = IsisNeighborId::from_sys_id(&peer, 0);
+        for &(ifindex, loss) in links {
+            let (ptx, prx) = tokio::sync::mpsc::unbounded_channel();
+            Box::leak(Box::new(prx));
+            let mut link = IsisLink {
+                ifindex,
+                ptx,
+                read_task: tokio::spawn(async {}),
+                flags: netlink_packet_route::link::LinkFlags::empty(),
+                circuit_id: 0,
+                config: LinkConfig::default(),
+                state: LinkState::default(),
+                timer: LinkTimer::default(),
+            };
+            *link.state.adj.get_mut(&Level::L2) = Some((neighbor, None));
+            link.config.te_metric.loss = Some(loss);
+            isis.links.insert(ifindex, link);
+        }
+        let entries = entry_order
+            .iter()
+            .map(|ifindex| {
+                let loss = links.iter().find(|(i, _)| i == ifindex).unwrap().1;
+                IsisTlvExtIsReachEntry {
+                    neighbor_id: neighbor,
+                    metric: isis.links.get(ifindex).unwrap().config.metric(),
+                    subs: vec![IsisSubTlv::Asla(IsisSubAsla {
+                        l_flag: false,
+                        sabm: vec![0x10],
+                        udabm: vec![],
+                        subs: vec![IsisSubTlv::LinkLoss(IsisSubLinkLoss {
+                            anomalous: false,
+                            loss,
+                        })],
+                    })],
+                }
+            })
+            .collect();
+        for (sys, originated, edges) in [(own, true, entries), (peer, false, vec![])] {
+            let lsp = IsisLsp {
+                lsp_id: IsisLspId::new(sys, 0, 0),
+                hold_time: 1200,
+                tlvs: vec![IsisTlv::ExtIsReach(IsisTlvExtIsReach { entries: edges })],
+                ..Default::default()
+            };
+            let mut lsa = Lsa::new(lsp);
+            lsa.originated = originated;
+            isis.lsdb
+                .get_mut(&Level::L2)
+                .map
+                .insert(lsa.lsp.lsp_id, lsa);
+        }
+        isis.peer_algos
+            .get_mut(&Level::L2)
+            .insert(peer, BTreeSet::from([128]));
+        let constraints = FadConstraints {
+            max_link_loss: Some(1_666_667),
+            ..Default::default()
+        };
+        let (graph, source, _) = graph_flex_algo(&mut isis.top(), Level::L2, 128, &constraints);
+        graph[&source.expect("local source")]
+            .olinks
+            .iter()
+            .map(|l| l.link_id)
+            .collect()
+    }
+
+    /// Parallel links share the peer's neighbour ID, so pruning by the
+    /// entry is not enough: the surviving edge must leave by *its own*
+    /// interface. Stamped with its pruned twin's, the algorithm's traffic
+    /// would leave over the lossy link. Whichever order the entries are
+    /// listed in, the clean one pairs with the clean interface; identical
+    /// links both survive, one interface each.
+    #[tokio::test]
+    async fn a_surviving_parallel_edge_keeps_its_own_interface() {
+        let clean_and_lossy = [(7, 0), (8, 3_333_333)];
+        assert_eq!(surviving_interfaces(&clean_and_lossy, &[7, 8]), vec![7]);
+        assert_eq!(surviving_interfaces(&clean_and_lossy, &[8, 7]), vec![7]);
+        let lossy_and_clean = [(7, 3_333_333), (8, 0)];
+        assert_eq!(surviving_interfaces(&lossy_and_clean, &[7, 8]), vec![8]);
+        let mut both = surviving_interfaces(&[(7, 0), (8, 0)], &[7, 8]);
+        both.sort();
+        assert_eq!(both, vec![7, 8]);
+    }
+}
+
+#[cfg(test)]
 mod link_mac_tests {
     use netlink_packet_route::link::LinkFlags;
     use tokio::sync::mpsc;
@@ -5124,6 +5205,7 @@ mod flex_algo_participation_tests {
                     calc_type: 0,
                     priority: 200,
                     subs: vec![],
+                    trailing: Vec::new(),
                 },
             )]),
         );
