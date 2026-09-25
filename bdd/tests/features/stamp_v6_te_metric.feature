@@ -17,9 +17,17 @@ Feature: STAMP link-delay measurement over an IPv6-only IS-IS link
   the measured values appear as "Min/Max Unidirectional Link Delay" in
   both LSDBs.
 
-  OSPF is intentionally absent: OSPFv2 is IPv4-only on the wire and
-  OSPFv3 has no TE-metric origination, so there is nowhere on the OSPF
-  side to publish an IPv6 delay (see docs/design/stamp-ipv6-plan.md §1).
+  OSPFv3 runs on the same link and measures it the same way. OSPFv2 is
+  still absent, and structurally so: it is IPv4-only on the wire, and
+  this link carries no IPv4 at all. OSPFv3's own adjacencies are built
+  on link-locals, which is why it can measure here — the STAMP session
+  key is scoped by ifindex so two `fe80::…` sessions on different links
+  stay distinct.
+
+  Both IGPs subscribe to the one session per link, so this also covers
+  two protocols sharing a measurement whose delay each publishes in its
+  own encoding: IS-IS as RFC 8570 sub-TLV 34, OSPFv3 as the RFC 7471
+  Min/Max delay at OSPFv3 sub-TLV code point 14.
 
   Topology:
 
@@ -68,6 +76,24 @@ Feature: STAMP link-delay measurement over an IPv6-only IS-IS link
   # Pure P2P topology (no bridge): deleting each namespace destroys the
   # veth pair ends it holds, so only the daemons and namespaces need
   # teardown.
+  Scenario: OSPFv3 advertises the same measured delay
+    Given the test topology exists
+    # The measured values ride the E-Router-LSA's ASLA sub-TLV, which
+    # is why the config enables segment-routing: that LSA is only
+    # originated when SR is on, the same coupling OSPFv2 has to its
+    # Extended-Link Opaque LSA.
+    Then show command "show ospfv3 database detail" in namespace "st1" should eventually contain "Min/Max Unidirectional Link Delay"
+    And show command "show ospfv3 database detail" in namespace "st2" should eventually contain "Min/Max Unidirectional Link Delay"
+
+  Scenario: Both IGPs publish the one measurement
+    Given the test topology exists
+    # One STAMP session, two subscribers. Neither protocol's delay can
+    # be a default or a stale zero, and both are reading the same link.
+    Then show command "show stamp session" in namespace "st1" should eventually contain "isis"
+    And show command "show stamp session" in namespace "st1" should eventually contain "ospfv3"
+    And show command "show isis database detail" in namespace "st1" should eventually contain "Min/Max Unidirectional Link Delay"
+    And show command "show ospfv3 database detail" in namespace "st1" should eventually not contain "Min/Max Unidirectional Link Delay: 0/0 usec"
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "st1"

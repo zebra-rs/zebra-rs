@@ -41,6 +41,7 @@ async fn loopback_session_exports_metrics() {
         interval_ms: 50,
         damping_secs: 1,
         dst_port: reflector_port,
+        ..Default::default()
     };
     let (tx, mut rx) = mpsc::unbounded_channel();
 
@@ -106,6 +107,7 @@ async fn loopback_session_v6_exports_metrics() {
         interval_ms: 50,
         damping_secs: 1,
         dst_port: reflector_port,
+        ..Default::default()
     };
     let (tx, mut rx) = mpsc::unbounded_channel();
 

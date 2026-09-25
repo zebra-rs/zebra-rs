@@ -388,6 +388,98 @@ impl UpdatePacket {
         Some(buf.get())
     }
 
+    /// Serialize a BGP-LS (RFC 9552, AFI 16388 / SAFI 71) MP_REACH
+    /// UPDATE carrying the BGP-LS Attribute (type 29) alongside it.
+    /// Drains `updates` so a second call returns `None`.
+    pub fn pop_bgpls(&mut self) -> Option<BytesMut> {
+        let (nhop, updates) = match &self.mp_update {
+            Some(MpReachAttr::LinkState { nhop, updates }) if !updates.is_empty() => {
+                (*nhop, updates.clone())
+            }
+            _ => return None,
+        };
+
+        let mut buf = FixedBuf::new(self.max_packet_size);
+        let header: BytesMut = self.header.clone().into();
+        let _ = buf.put(&header[..]);
+        let _ = buf.put_u16(0u16); // no IPv4 withdraw
+
+        let attr_len_pos = buf.len();
+        let _ = buf.put_u16(0u16); // placeholder
+
+        if let Some(bgp_attr) = &self.bgp_attr {
+            bgp_attr.attr_emit_opt(buf.get_mut(), self.as4);
+        }
+        super::attrs::mp_reach::linkstate_attr_emit(&nhop, &updates, buf.get_mut());
+
+        // `get_mut()` hands out the growable `BytesMut` underneath, so
+        // the emitters above are not capacity-checked. A single object
+        // whose BGP-LS Attribute is larger than the negotiated maximum
+        // cannot be split into a smaller message — batching only helps
+        // multiple NLRIs — so it is dropped rather than framed as an
+        // UPDATE the peer is not allowed to receive (RFC 9552 §5.3).
+        // The queue is drained either way: retrying would just rebuild
+        // the same oversized message forever.
+        let oversize = buf.len() > self.max_packet_size;
+
+        let attr_len: u16 = (buf.len() - attr_len_pos - 2) as u16;
+        let _ = buf.put_u16_at(attr_len_pos, attr_len);
+        let length: u16 = buf.len() as u16;
+        let _ = buf.put_u16_at(16, length);
+
+        if let Some(MpReachAttr::LinkState { updates, .. }) = self.mp_update.as_mut() {
+            updates.clear();
+        }
+        if oversize {
+            return None;
+        }
+        Some(buf.get())
+    }
+
+    /// Serialize a BGP-LS MP_UNREACH (withdraw) UPDATE. Drains
+    /// `withdraws` so a second call returns `None`.
+    pub fn pop_bgpls_withdraw(&mut self) -> Option<BytesMut> {
+        match &self.mp_withdraw {
+            Some(MpUnreachAttr::LinkState { withdraws }) if !withdraws.is_empty() => {}
+            _ => return None,
+        }
+
+        let mut buf = FixedBuf::new(self.max_packet_size);
+        let header: BytesMut = self.header.clone().into();
+        let _ = buf.put(&header[..]);
+        let _ = buf.put_u16(0u16); // no IPv4 withdraw
+
+        let attr_len_pos = buf.len();
+        let _ = buf.put_u16(0u16); // placeholder
+
+        if let Some(mp) = &self.mp_withdraw {
+            mp.attr_emit(buf.get_mut());
+        }
+
+        // `get_mut()` hands out the growable `BytesMut` underneath, so
+        // the emitters above are not capacity-checked. A single object
+        // whose BGP-LS Attribute is larger than the negotiated maximum
+        // cannot be split into a smaller message — batching only helps
+        // multiple NLRIs — so it is dropped rather than framed as an
+        // UPDATE the peer is not allowed to receive (RFC 9552 §5.3).
+        // The queue is drained either way: retrying would just rebuild
+        // the same oversized message forever.
+        let oversize = buf.len() > self.max_packet_size;
+
+        let attr_len: u16 = (buf.len() - attr_len_pos - 2) as u16;
+        let _ = buf.put_u16_at(attr_len_pos, attr_len);
+        let length: u16 = buf.len() as u16;
+        let _ = buf.put_u16_at(16, length);
+
+        if let Some(MpUnreachAttr::LinkState { withdraws }) = self.mp_withdraw.as_mut() {
+            withdraws.clear();
+        }
+        if oversize {
+            return None;
+        }
+        Some(buf.get())
+    }
+
     pub fn pop_vpnv6(&mut self) -> Option<BytesMut> {
         match &self.mp_update {
             Some(MpReachAttr::Vpnv6(vpnv6)) if !vpnv6.updates.is_empty() => {}

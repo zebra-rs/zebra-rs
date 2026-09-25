@@ -25,7 +25,7 @@ use super::ConfigManager;
 /// we log a `warn!` and continue. The daemon stays functional, just
 /// without ND.
 ///
-/// The socket is opened *before* `subscribe_to_rib` so that a socket
+/// The socket is opened *before* the RIB subscription so that a socket
 /// failure doesn't leave a dead `RibRx` receiver queued in RIB's
 /// inbox — RIB would panic on the link-dump send in that case.
 pub fn spawn_nd(config: &ConfigManager) {
@@ -43,7 +43,26 @@ pub fn spawn_nd(config: &ConfigManager) {
             return;
         }
     };
-    let (_rib_client, rib_rx) = config.subscribe_to_rib("nd");
+    // `global_links`, not the default vrf-0 subscription: ND is a
+    // single process-wide instance, so it has to follow interfaces
+    // across VRF boundaries itself rather than being re-spawned per
+    // VRF the way OSPF / IS-IS / BGP are.
+    //
+    // A plain `subscribe_to_rib("nd")` binds to vrf_id 0, and
+    // `Rib::iter_link_subs` only delivers a link event to subscribers
+    // whose `vrf_id` matches the link's VRF (or who asked for
+    // `global_links`). Two consequences, both of which cost the
+    // operator their RAs:
+    //
+    //   * The subscribe-time link dump skips every enslaved
+    //     interface, so `send-advertisements` on a VRF interface
+    //     never resolves its name → ifindex and never starts.
+    //   * RIB reports a live cross-VRF move as
+    //     `api_link_del_vrf(ifindex, old)` + `api_link_add_vrf(link,
+    //     new)`. A vrf-0 subscriber sees only the `LinkDel` half, so
+    //     `interface eth1 vrf blue` released ND's sender and nothing
+    //     ever put it back.
+    let (_rib_client, rib_rx) = config.subscribe_to_rib_global_links("nd");
     let nd = inst::Nd::new(socket, rib_rx);
     config.subscribe("nd", nd.cm.tx.clone());
     config.subscribe_show("nd", nd.show.tx.clone());

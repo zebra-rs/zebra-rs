@@ -1,0 +1,17 @@
+# Phase 2: RA on i1, still in the default VRF. The scenario moves i1
+# into `blue` afterwards with a surgical `set interface i1 vrf blue`
+# rather than a third config file — a config FILE is a declarative
+# whole-config replace, so a partial restatement would delete the RA
+# line we are trying to prove survives.
+vrf:
+- name: blue
+interface:
+- if-name: i1
+  ipv6:
+    router-advertisements:
+      send-advertisements: true
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 1.1.1.1

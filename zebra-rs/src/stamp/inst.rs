@@ -37,7 +37,7 @@ use crate::config::{
 };
 use crate::context::{ProtoContext, Task};
 
-use super::client::{ClientId, ClientReq, ClientReqChannel, StampEvent};
+use super::client::{ClientId, ClientReq, ClientReqChannel, StampEvent, Subscriber};
 use super::network::{
     ReflectRequest, reflector_read, reflector_read_v6, reflector_write, reflector_write_v6,
     sender_read,
@@ -152,7 +152,7 @@ pub struct Stamp {
     /// Inbound client request channel — the IGPs send
     /// [`ClientReq::Subscribe`] / `Unsubscribe` here.
     pub client_req: ClientReqChannel,
-    subscribers: HashMap<SessionKey, BTreeMap<ClientId, UnboundedSender<StampEvent>>>,
+    subscribers: HashMap<SessionKey, BTreeMap<ClientId, Subscriber>>,
     main_tx: UnboundedSender<Message>,
     reflect_tx: UnboundedSender<ReflectRequest>,
     /// Reply queue for the IPv6 reflector write loop; `None` when no
@@ -302,10 +302,15 @@ impl Stamp {
     }
 
     /// Add `client` as a subscriber on `key`, creating the session on
-    /// the first subscriber and retuning it on a params change
-    /// (last-writer-wins, plan D11). The current exported value, if
-    /// any, is mirrored to the new subscriber so a late-joining IGP
-    /// advertises without waiting a full damping period.
+    /// the first subscriber and retuning its *timing* on a params
+    /// change (last-writer-wins, plan D11). `params.anomaly` is not
+    /// shared: it is stored on this subscriber's record, so another
+    /// IGP's thresholds can neither disable nor impose this one's.
+    ///
+    /// The current exported value, if any, is mirrored to the new
+    /// subscriber so a late-joining IGP advertises without waiting a
+    /// full damping period — evaluated against its own bounds, which
+    /// also seeds its hysteresis.
     pub fn subscribe(
         &mut self,
         client: ClientId,
@@ -344,18 +349,34 @@ impl Stamp {
         } else {
             self.update_params(&key, params);
         }
-        if let Some(session) = self.sessions.get(&key)
-            && session.last_export.is_some()
-        {
-            let _ = notifier.send(StampEvent::MetricUpdate {
-                key,
-                snapshot: session.last_export,
-            });
+        let subs = self.subscribers.entry(key).or_default();
+        // Re-subscribe (a config edit) keeps the accumulated
+        // hysteresis but adopts the new bounds; a first subscribe
+        // starts clean.
+        match subs.get_mut(&client) {
+            Some(existing) => {
+                existing.notifier = notifier;
+                existing.thresholds = params.anomaly;
+            }
+            None => {
+                subs.insert(client.clone(), Subscriber::new(notifier, params.anomaly));
+            }
         }
-        self.subscribers
-            .entry(key)
-            .or_default()
-            .insert(client, notifier);
+        let mirrored = self.sessions.get(&key).and_then(|s| s.last_snapshot);
+        if mirrored.is_some()
+            && let Some(sub) = self
+                .subscribers
+                .get_mut(&key)
+                .and_then(|m| m.get_mut(&client))
+        {
+            let snapshot = sub.apply(mirrored);
+            if let Some(snap) = snapshot {
+                sub.last_flags = snap.anomaly;
+            }
+            let _ = sub
+                .notifier
+                .send(StampEvent::MetricUpdate { key, snapshot });
+        }
     }
 
     /// Drop `client`'s subscription on `key`; the last unsubscribe
@@ -581,24 +602,60 @@ impl Stamp {
         session.window.record_delay(delay as u32);
     }
 
-    /// Export timer fired: snapshot the window, run the damping gate,
-    /// fan the update out, start a fresh window.
+    /// Export timer fired: snapshot the window, run the shared value
+    /// filter, then evaluate each subscriber's Anomalous bits against
+    /// its own thresholds and fan out to whoever has something new.
+    ///
+    /// Two gates, because they answer different questions. The damping
+    /// gate asks whether the *values* moved enough to be worth
+    /// re-flooding, and is shared — every subscriber sees the same
+    /// samples. The flag comparison asks whether *this subscriber's*
+    /// advertisement changed, and must be able to fire on its own: a
+    /// link that degrades past the bound and then holds steady crosses
+    /// the value filter once, so a later set or clear would otherwise
+    /// be damped away by the very filter meant to suppress noise.
     fn on_export_tick(&mut self, key: SessionKey) {
         let Some(session) = self.sessions.get_mut(&key) else {
             return;
         };
         let snapshot = session.window.snapshot();
         session.window.reset();
-        if !session.damping.should_export(snapshot) {
+        let values_changed = session.damping.should_export(snapshot);
+        // Raw values, cached every tick — a flag-only export delivers
+        // newer values than the filter's baseline, and a subscriber
+        // that joins afterwards must be seeded from those. Each
+        // subscriber's flags are its own, so none are cached here.
+        session.last_snapshot = snapshot;
+        let Some(subs) = self.subscribers.get_mut(&key) else {
             return;
-        }
-        session.last_export = snapshot;
-        tracing::info!(?key, ?snapshot, "stamp: exporting metric update");
-        if let Some(subs) = self.subscribers.get(&key) {
-            for tx in subs.values() {
-                let _ = tx.send(StampEvent::MetricUpdate { key, snapshot });
+        };
+        for (client, sub) in subs.iter_mut() {
+            let stamped = sub.apply(snapshot);
+            let flags = stamped.map(|s| s.anomaly).unwrap_or_default();
+            if !values_changed && flags == sub.last_flags {
+                continue;
             }
+            sub.last_flags = flags;
+            tracing::info!(
+                ?key,
+                %client,
+                ?stamped,
+                "stamp: exporting metric update"
+            );
+            let _ = sub.notifier.send(StampEvent::MetricUpdate {
+                key,
+                snapshot: stamped,
+            });
         }
+    }
+
+    /// Per-client anomaly policy and current flags on `key`, for
+    /// `show stamp session`.
+    pub(super) fn subscriber_rows(
+        &self,
+        key: &SessionKey,
+    ) -> impl Iterator<Item = (&ClientId, &Subscriber)> {
+        self.subscribers.get(key).into_iter().flatten()
     }
 
     /// A probe hit the reflector socket. Implicit allow-list (plan
@@ -841,7 +898,7 @@ mod tests {
         let ssid = stamp.sessions.get(&key).unwrap().ssid;
         stamp.on_reply_recv(key, reply_for(ssid, t1), t4, false);
         stamp.on_export_tick(key);
-        assert!(stamp.sessions.get(&key).unwrap().last_export.is_some());
+        assert!(stamp.sessions.get(&key).unwrap().last_snapshot.is_some());
 
         let (tx_b, mut rx_b) = mpsc::unbounded_channel();
         stamp.subscribe("ospf".into(), key, SessionParams::default(), tx_b);
@@ -972,7 +1029,285 @@ mod tests {
         assert_eq!(updates.len(), 2, "one export + one clear, got {updates:?}");
         assert!(updates[0].is_some());
         assert!(updates[1].is_none());
-        assert!(stamp.sessions.get(&key).unwrap().last_export.is_none());
+        assert!(stamp.sessions.get(&key).unwrap().last_snapshot.is_none());
+    }
+
+    /// Params carrying an anomaly policy, for the per-subscriber tests.
+    fn params_with_threshold(anomaly_us: Option<u32>) -> SessionParams {
+        SessionParams {
+            anomaly: crate::stamp::anomaly::AnomalyThresholds {
+                anomaly_us,
+                reuse_us: None,
+            },
+            ..Default::default()
+        }
+    }
+
+    /// Two IGPs share one session but configure the anomaly threshold
+    /// separately. Neither may impose its policy on, or disable it
+    /// for, the other — whichever order they subscribe in.
+    #[tokio::test]
+    async fn anomaly_policy_is_per_subscriber() {
+        for isis_first in [true, false] {
+            let mut stamp = fresh_stamp();
+            let key = loopback_key(2);
+            let (isis_tx, mut isis_rx) = mpsc::unbounded_channel();
+            let (ospf_tx, mut ospf_rx) = mpsc::unbounded_channel();
+
+            // IS-IS wants anomalies at 1 us; OSPF configured none.
+            let subs: Vec<(&str, SessionParams, _)> = if isis_first {
+                vec![
+                    ("isis", params_with_threshold(Some(1)), isis_tx),
+                    ("ospf", params_with_threshold(None), ospf_tx),
+                ]
+            } else {
+                vec![
+                    ("ospf", params_with_threshold(None), ospf_tx),
+                    ("isis", params_with_threshold(Some(1)), isis_tx),
+                ]
+            };
+            for (client, params, tx) in subs {
+                stamp.subscribe(client.into(), key, params, tx);
+            }
+
+            let ssid = stamp.sessions.get(&key).unwrap().ssid;
+            let us = |micros: u64| StampTimestamp {
+                seconds: 100,
+                fraction: ((micros << 32) / 1_000_000) as u32,
+            };
+            stamp.on_reply_recv(key, reply_for(ssid, us(0)), us(1000), false);
+            stamp.on_export_tick(key);
+
+            let isis_snap = match isis_rx.try_recv() {
+                Ok(StampEvent::MetricUpdate { snapshot, .. }) => snapshot.expect("value"),
+                other => panic!("isis got {other:?}"),
+            };
+            let ospf_snap = match ospf_rx.try_recv() {
+                Ok(StampEvent::MetricUpdate { snapshot, .. }) => snapshot.expect("value"),
+                other => panic!("ospf got {other:?}"),
+            };
+
+            assert_eq!(
+                (isis_snap.min, isis_snap.max),
+                (ospf_snap.min, ospf_snap.max),
+                "isis_first={isis_first}: the samples are shared"
+            );
+            assert!(
+                isis_snap.anomaly.avg && isis_snap.anomaly.max,
+                "isis_first={isis_first}: IS-IS configured a 1us bound"
+            );
+            assert_eq!(
+                ospf_snap.anomaly,
+                crate::stamp::anomaly::AnomalyFlags::default(),
+                "isis_first={isis_first}: OSPF configured none, so it advertises none"
+            );
+        }
+    }
+
+    /// A flag-only export carries values the numeric filter damped, so
+    /// the cache the next subscriber is seeded from has to advance
+    /// too. Otherwise a late-joining IGP evaluates its bits against a
+    /// stale measurement and advertises a clear bit while its peer
+    /// subscriber is advertising a set one.
+    #[tokio::test]
+    async fn late_subscriber_is_seeded_from_the_current_measurement() {
+        let mut stamp = fresh_stamp();
+        let key = loopback_key(2);
+        let (isis_tx, mut isis_rx) = mpsc::unbounded_channel();
+        let policy = params_with_threshold(Some(1_000));
+        stamp.subscribe("isis".into(), key, policy, isis_tx);
+
+        let ssid = stamp.sessions.get(&key).unwrap().ssid;
+        let us = |micros: u64| StampTimestamp {
+            seconds: 100,
+            fraction: ((micros << 32) / 1_000_000) as u32,
+        };
+        // The reply stamps T2 == T3 == 0, so delay = (T4 - T1) / 2 —
+        // feed twice the delay the window should record.
+        let feed = |stamp: &mut Stamp, delay_us: u64| {
+            stamp.on_reply_recv(key, reply_for(ssid, us(0)), us(delay_us * 2), false);
+        };
+
+        // Just inside the bound: exported, bits clear.
+        feed(&mut stamp, 990);
+        stamp.on_export_tick(key);
+        // Just outside it. The move is 20 us against a 99 us filter
+        // threshold, so the values are damped and only the flag flip
+        // pushes this export out.
+        feed(&mut stamp, 1_010);
+        stamp.on_export_tick(key);
+
+        let mut delivered = Vec::new();
+        while let Ok(StampEvent::MetricUpdate { snapshot, .. }) = isis_rx.try_recv() {
+            delivered.push(snapshot.expect("value"));
+        }
+        assert_eq!(delivered.len(), 2, "first export + the flag flip");
+        assert!(delivered[1].anomaly.avg, "1010us is over the bound");
+
+        // OSPF joins now, with the identical policy. It must see what
+        // IS-IS is advertising, not the pre-crossing sample.
+        let (ospf_tx, mut ospf_rx) = mpsc::unbounded_channel();
+        stamp.subscribe("ospf".into(), key, policy, ospf_tx);
+        let seeded = match ospf_rx.try_recv() {
+            Ok(StampEvent::MetricUpdate { snapshot, .. }) => snapshot.expect("mirrored"),
+            other => panic!("ospf got {other:?}"),
+        };
+        // Exactly what IS-IS last saw, not the pre-crossing sample
+        // the value filter is still using as its baseline.
+        assert_eq!(
+            seeded.avg, delivered[1].avg,
+            "seeded from the current measurement"
+        );
+        assert_ne!(seeded.avg, delivered[0].avg);
+        assert!(
+            seeded.anomaly.avg,
+            "and so it reaches the same verdict as IS-IS"
+        );
+    }
+
+    /// A params-only edit re-subscribes the same client on the same
+    /// key. That must keep its hysteresis: a delay sitting in the band
+    /// between the bounds holds whatever the bit already was, and a
+    /// fresh state would silently resolve that hold to "clear".
+    #[tokio::test]
+    async fn resubscribe_preserves_hysteresis() {
+        let mut stamp = fresh_stamp();
+        let key = loopback_key(2);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let banded = |anomaly, reuse| SessionParams {
+            anomaly: crate::stamp::anomaly::AnomalyThresholds {
+                anomaly_us: Some(anomaly),
+                reuse_us: Some(reuse),
+            },
+            ..Default::default()
+        };
+        stamp.subscribe("isis".into(), key, banded(1_000, 900), tx);
+
+        let ssid = stamp.sessions.get(&key).unwrap().ssid;
+        let us = |micros: u64| StampTimestamp {
+            seconds: 100,
+            fraction: ((micros << 32) / 1_000_000) as u32,
+        };
+        // The reply stamps T2 == T3 == 0, so delay = (T4 - T1) / 2 —
+        // feed twice the delay the window should record.
+        let feed = |stamp: &mut Stamp, delay_us: u64| {
+            stamp.on_reply_recv(key, reply_for(ssid, us(0)), us(delay_us * 2), false);
+        };
+
+        feed(&mut stamp, 1_100); // over the bound: bit sets
+        stamp.on_export_tick(key);
+        feed(&mut stamp, 950); // inside the band: bit holds
+        stamp.on_export_tick(key);
+        while rx.try_recv().is_ok() {}
+
+        // Only the probe interval changes — nothing about the policy.
+        let mut retimed = banded(1_000, 900);
+        retimed.interval_ms = 250;
+        stamp.subscribe("isis".into(), key, retimed, {
+            let (tx2, rx2) = mpsc::unbounded_channel();
+            drop(rx2);
+            tx2
+        });
+
+        feed(&mut stamp, 950);
+        stamp.on_export_tick(key);
+        let flags = stamp
+            .subscribers
+            .get(&key)
+            .unwrap()
+            .get("isis")
+            .unwrap()
+            .last_flags;
+        assert!(
+            flags.avg,
+            "950us is in the hysteresis band; the bit was set and must stay set"
+        );
+    }
+
+    /// Dropping the subscriber that configured a threshold must not
+    /// leave its policy behind on the survivor.
+    #[tokio::test]
+    async fn unsubscribing_does_not_leak_policy() {
+        let mut stamp = fresh_stamp();
+        let key = loopback_key(2);
+        let (isis_tx, _isis_rx) = mpsc::unbounded_channel();
+        let (ospf_tx, mut ospf_rx) = mpsc::unbounded_channel();
+        stamp.subscribe("isis".into(), key, params_with_threshold(Some(1)), isis_tx);
+        stamp.subscribe("ospf".into(), key, params_with_threshold(None), ospf_tx);
+        stamp.unsubscribe("isis", &key);
+
+        let ssid = stamp.sessions.get(&key).unwrap().ssid;
+        let us = |micros: u64| StampTimestamp {
+            seconds: 100,
+            fraction: ((micros << 32) / 1_000_000) as u32,
+        };
+        stamp.on_reply_recv(key, reply_for(ssid, us(0)), us(1000), false);
+        stamp.on_export_tick(key);
+
+        let snap = match ospf_rx.try_recv() {
+            Ok(StampEvent::MetricUpdate { snapshot, .. }) => snapshot.expect("value"),
+            other => panic!("ospf got {other:?}"),
+        };
+        assert_eq!(
+            snap.anomaly,
+            crate::stamp::anomaly::AnomalyFlags::default(),
+            "IS-IS left, its threshold must leave with it"
+        );
+    }
+
+    /// A subscriber's A-bit transition has to escape the shared value
+    /// filter: the values are identical period to period, so damping
+    /// alone would never re-export and the set would never be flooded.
+    #[tokio::test]
+    async fn anomaly_transition_exports_through_damping() {
+        let mut stamp = fresh_stamp();
+        let key = loopback_key(2);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        // Bound above the sample: steady and clear to begin with.
+        stamp.subscribe("isis".into(), key, params_with_threshold(Some(5_000)), tx);
+
+        let ssid = stamp.sessions.get(&key).unwrap().ssid;
+        let us = |micros: u64| StampTimestamp {
+            seconds: 100,
+            fraction: ((micros << 32) / 1_000_000) as u32,
+        };
+        let feed = |stamp: &mut Stamp| {
+            stamp.on_reply_recv(key, reply_for(ssid, us(0)), us(1000), false);
+        };
+
+        feed(&mut stamp);
+        stamp.on_export_tick(key); // first export, bit clear
+        feed(&mut stamp);
+        stamp.on_export_tick(key); // identical window → damped
+
+        // Same measurement, stricter policy: only the bit changes.
+        stamp
+            .subscribers
+            .get_mut(&key)
+            .unwrap()
+            .get_mut("isis")
+            .unwrap()
+            .thresholds = crate::stamp::anomaly::AnomalyThresholds {
+            anomaly_us: Some(1),
+            reuse_us: None,
+        };
+        feed(&mut stamp);
+        stamp.on_export_tick(key);
+
+        let mut updates = Vec::new();
+        while let Ok(StampEvent::MetricUpdate { snapshot, .. }) = rx.try_recv() {
+            updates.push(snapshot);
+        }
+        assert_eq!(
+            updates.len(),
+            2,
+            "first export + the A-bit flip, got {updates:?}"
+        );
+        assert!(!updates[0].unwrap().anomaly.avg);
+        assert!(
+            updates[1].unwrap().anomaly.avg,
+            "the transition must survive the value filter"
+        );
     }
 
     /// Build a Stamp with both reflectors on loopback ephemeral ports.

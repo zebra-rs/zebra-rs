@@ -1,0 +1,52 @@
+# z5 — the partially-upgraded case: the SAME PE with its `role-signaling` leaf
+# back at the default. It keeps its ESI, its port and its preference, so it is
+# still a member of the remote's group — it simply no longer says what its role
+# is, the way an older release or an un-migrated PE would not. The segment is
+# then only PARTLY signalled, and its roles must not be read at all: the silent
+# PE could be the forwarder, so "nobody claims primary" cannot mean "withhold
+# the group".
+vxlan:
+- name: vxlan10
+  vni: 10
+  local-address: 192.168.0.5
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.5
+    afi-safi:
+    - name: evpn
+      advertise-all-vni: true
+      ethernet-segment:
+      - name: es1
+        esi: "00:11:22:33:44:55:66:77:88:99"
+        redundancy-mode: single-active
+        interface: host0
+        df-election:
+          algorithm: preference
+          preference: 50
+    neighbor:
+    - remote-address: 192.168.0.1
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: evpn
+        enabled: true
+    - remote-address: 192.168.0.2
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: evpn
+        enabled: true
+    - remote-address: 192.168.0.3
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: evpn
+        enabled: true
+    - remote-address: 192.168.0.4
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: evpn
+        enabled: true

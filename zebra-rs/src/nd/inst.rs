@@ -198,14 +198,12 @@ impl Nd {
         }
     }
 
+    /// Stamp the arrival time and hand the notification to the engine.
+    /// The dispatch itself lives in [`NdEngine::process_rib_msg`] so it
+    /// can be unit-tested — `Nd` owns a raw ICMPv6 socket and cannot be
+    /// constructed without `CAP_NET_RAW`.
     fn process_rib_msg(&mut self, msg: RibRx) {
-        // Only LinkAdd is interesting at this stage; the engine doesn't
-        // need address or route notifications yet (those land when the
-        // BGP unnumbered hand-off needs to derive the local source
-        // link-local in a follow-up PR).
-        if let RibRx::LinkAdd(link) = msg {
-            self.engine.process_link_add(&link, Instant::now());
-        }
+        self.engine.process_rib_msg(msg, Instant::now());
     }
 
     pub fn process_cm_msg(&mut self, msg: ConfigRequest) {

@@ -13,11 +13,13 @@
 /router/bgp/afi-safi/ethernet-segment/df-election	p-container
 /router/bgp/afi-safi/ethernet-segment/df-election/ac-df	leaf
 /router/bgp/afi-safi/ethernet-segment/df-election/algorithm	leaf
+/router/bgp/afi-safi/ethernet-segment/df-election/dont-preempt	leaf
 /router/bgp/afi-safi/ethernet-segment/df-election/preference	leaf
 /router/bgp/afi-safi/ethernet-segment/df-election/startup-delay	leaf
 /router/bgp/afi-safi/ethernet-segment/esi	leaf
 /router/bgp/afi-safi/ethernet-segment/interface	leaf
 /router/bgp/afi-safi/ethernet-segment/redundancy-mode	leaf
+/router/bgp/afi-safi/ethernet-segment/role-signaling	leaf
 /router/bgp/afi-safi/evi	list keys=id
 /router/bgp/afi-safi/evi/bridge	leaf
 /router/bgp/afi-safi/igmp-mld-proxy	leaf

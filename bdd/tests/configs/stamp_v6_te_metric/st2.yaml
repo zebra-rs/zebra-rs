@@ -24,3 +24,20 @@ router:
           enabled: true
           interval: 100
           damping-period: 2
+  ospfv3:
+    router-id: 10.61.0.2
+    segment-routing:
+      mpls: {}
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+      - if-name: st2-st1
+        enabled: true
+        network-type: point-to-point
+        te-metric:
+          measurement:
+            enabled: true
+            interval: 100
+            damping-period: 2

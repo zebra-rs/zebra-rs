@@ -907,7 +907,13 @@ impl<V: OspfVersion> Ospf<V> {
                 .find(|n| n.state == NfsmState::Full)
                 .and_then(|nbr| V::bfd_addrs(&link.addr, nbr))
                 .and_then(|(local, remote)| match (local, remote) {
-                    (std::net::IpAddr::V4(_), std::net::IpAddr::V4(_)) => Some((
+                    // Same family only — there is nothing to probe with a
+                    // mixed pair. OSPFv2 yields IPv4; OSPFv3 yields the
+                    // IPv6 link-local pair its adjacencies are built on,
+                    // and `ifindex` in the key is what keeps two
+                    // `fe80::…` sessions on different links apart.
+                    (std::net::IpAddr::V4(_), std::net::IpAddr::V4(_))
+                    | (std::net::IpAddr::V6(_), std::net::IpAddr::V6(_)) => Some((
                         crate::stamp::session::SessionKey {
                             local,
                             remote,
@@ -925,10 +931,15 @@ impl<V: OspfVersion> Ospf<V> {
             return false;
         }
         let stale = link.stamp_session;
+        // Unsubscribe only when the subscription really ends or moves
+        // to a different key; a params-only edit re-subscribes in
+        // place so this client's anomaly hysteresis survives it. See
+        // the IS-IS twin for the reasoning.
+        let torn_down = stale.is_some_and(|(key, _)| desired.map(|(k, _)| k) != Some(key));
         let Some(client_tx) = self.stamp_client_tx.as_ref() else {
             return false;
         };
-        if let Some((key, _)) = stale {
+        if torn_down && let Some((key, _)) = stale {
             let _ = client_tx.send(crate::stamp::client::ClientReq::Unsubscribe {
                 client: V::PROTO.to_string(),
                 key,
@@ -948,8 +959,9 @@ impl<V: OspfVersion> Ospf<V> {
         link.stamp_session = desired;
         // A torn-down session's measured values are stale the moment
         // the subscription ends — clear them; static config (if any)
-        // takes back over via `te_metric_effective`.
-        if stale.is_some() && link.measured_te_metric != super::link::LinkTeMetric::default() {
+        // takes back over via `te_metric_effective`. A params-only
+        // edit keeps measuring, so its values stand.
+        if torn_down && link.measured_te_metric != super::link::LinkTeMetric::default() {
             link.measured_te_metric = super::link::LinkTeMetric::default();
             return true;
         }
@@ -977,6 +989,13 @@ impl<V: OspfVersion> Ospf<V> {
                 max_delay: Some(snap.max),
                 delay_variation: Some(snap.variation),
                 loss: None,
+                // Per-value flags: the average drives its own
+                // sub-TLV, the two bounds jointly drive the Min/Max
+                // sub-TLV's single bit. `merged_over` drops whichever
+                // of them the operator pinned.
+                delay_anomalous: snap.anomaly.avg,
+                min_anomalous: snap.anomaly.min,
+                max_anomalous: snap.anomaly.max,
             },
             None => super::link::LinkTeMetric::default(),
         };
@@ -1502,6 +1521,25 @@ impl<V: OspfVersion> Ospf<V> {
     /// `maximum_wait` under sustained churn (`spf-interval`). The
     /// timer clears `spf_timer` and calls `spf_throttle.mark_run()`
     /// when it fires (see the `Message::SpfCalc` handlers).
+    /// Schedule `area_id`'s throttled SPF after a locally originated
+    /// LSA changed something SPF reads.
+    ///
+    /// Installing and flooding a self-originated LSA does not schedule
+    /// SPF — `install_originated` and `flood_self_originated_lsa` both
+    /// stop at the LSDB and the wire. That is harmless while a link's
+    /// own LSAs only carry information for *other* routers, but once
+    /// Flex-Algorithm metric-type 1 costs edges on the delay in our own
+    /// ASLA, a local delay change alters this router's own SPF inputs.
+    /// Without this, the originator keeps the old edge cost until some
+    /// unrelated peer LSA happens to schedule a run, and a delay that
+    /// was withdrawn keeps a link that should have been pruned.
+    pub(crate) fn spf_schedule_area(&mut self, area_id: Ipv4Addr) {
+        let cfg = self.spf_interval;
+        if let Some(area) = self.areas.get_mut(area_id) {
+            Self::ospf_spf_schedule_generic(&self.tx, area, cfg);
+        }
+    }
+
     fn ospf_spf_schedule_generic(
         tx: &UnboundedSender<Message<V>>,
         area: &mut OspfArea<V>,
@@ -3262,8 +3300,16 @@ impl Ospf<Ospfv2> {
         // flush path. Returning `Option` keeps the borrow on `self`
         // confined to this block so the install / flood code below can
         // mutate `self.areas`.
-        let build_inputs = if self.segment_routing == SegmentRoutingMode::Mpls
-            && let Some(link) = self.links.get(&ifindex)
+        // Segment Routing gates the *Adj-SID* contributions, not the
+        // LSA. RFC 8379's Extended-Link Opaque LSA is a general-purpose
+        // carrier, and the RFC 9492 ASLA riding on it — affinity and
+        // the RFC 7471 TE metrics — has nothing to do with SR. Gating
+        // the whole LSA on SR-MPLS meant an operator who configured
+        // link delay and no Segment Routing advertised nothing at all,
+        // silently. The `subs.is_empty()` checks below decide whether
+        // there is anything worth originating.
+        let sr_mpls = self.segment_routing == SegmentRoutingMode::Mpls;
+        let build_inputs = if let Some(link) = self.links.get(&ifindex)
             && link.enabled
             && link.nbrs.values().any(|n| n.state == NfsmState::Full)
             && let Some(addr) =
@@ -3287,10 +3333,11 @@ impl Ospf<Ospfv2> {
                 OspfNetworkType::PointToPoint => {
                     if let Some(nbr) = link.nbrs.values().find(|n| n.state == NfsmState::Full) {
                         let mut subs = Vec::new();
-                        if let Some(adjacency_sid) = link.config.adjacency_sid {
+                        if sr_mpls && let Some(adjacency_sid) = link.config.adjacency_sid {
                             subs.push(super::srmpls::build_p2p_adj_sub(&adjacency_sid));
-                        } else if let Some(label) =
-                            self.lan_adj_sids.get(&(ifindex, nbr.ident.prefix.addr()))
+                        } else if sr_mpls
+                            && let Some(label) =
+                                self.lan_adj_sids.get(&(ifindex, nbr.ident.prefix.addr()))
                         {
                             // Dynamic SRLB Adj-SID fallback — see the
                             // v3 sibling in `e_router_v3_lsa_originate`.
@@ -3321,6 +3368,7 @@ impl Ospf<Ospfv2> {
                         let mut subs: Vec<_> = link
                             .nbrs
                             .values()
+                            .filter(|_| sr_mpls)
                             .filter(|n| n.state == NfsmState::Full)
                             .filter_map(|nbr| {
                                 let label =
@@ -3372,6 +3420,9 @@ impl Ospf<Ospfv2> {
                     .insert_self_originated(lsa, &self.tx, Some(AREA0), &self.tracing);
             }
             self.flood_self_originated_lsa(AREA0, &flood_lsa);
+            // Same reason as the v3 twin: this LSA's ASLA is one of our
+            // own metric-type-1 edge costs.
+            self.spf_schedule_area(AREA0);
         } else {
             let flushed = if let Some(area) = self.areas.get_mut(AREA0) {
                 area.lsdb.flush_lsa(
@@ -3386,6 +3437,9 @@ impl Ospf<Ospfv2> {
             };
             if let Some(lsa) = flushed {
                 self.flood_self_originated_lsa(AREA0, &lsa);
+                // A withdrawn delay prunes the link from a
+                // metric-type-1 topology (RFC 9350 §15).
+                self.spf_schedule_area(AREA0);
             }
         }
     }
@@ -6972,6 +7026,24 @@ impl Ospf<Ospfv2> {
 /// IFSM/NFSM-driven send/receive paths, and drive SPF + RIB
 /// installation. Entered from `spawn_ospfv3` in `crate::config::ospf`.
 impl Ospf<Ospfv3> {
+    /// v3 twin of `Ospf<Ospfv2>::stamp_reconcile_and_originate`: when
+    /// the reconcile cleared measured values, refresh the E-Router-LSA
+    /// so the stale ASLA sub-sub-TLVs are withdrawn.
+    pub(crate) fn stamp_reconcile_and_originate(&mut self, ifindex: u32) {
+        if self.stamp_reconcile_link(ifindex) {
+            self.e_router_v3_lsa_originate(ifindex);
+        }
+    }
+
+    /// A damped STAMP export arrived: store it on the link and refresh
+    /// the E-Router-LSA so the RFC 7471 metrics — and the flex-algo
+    /// metric-type-1 inputs read from them — reflect the measurement.
+    pub(crate) fn process_stamp_event(&mut self, event: crate::stamp::client::StampEvent) {
+        if let Some(ifindex) = self.stamp_apply_metric_update(event) {
+            self.e_router_v3_lsa_originate(ifindex);
+        }
+    }
+
     /// Construct an `Ospf<Ospfv3>` instance.
     ///
     /// Mirrors the shape of `Ospf<Ospfv2>::new` (see above) so the
@@ -10469,6 +10541,11 @@ impl Ospf<Ospfv3> {
                         // threshold (the reconcile reads the now-current
                         // neighbor state, so it covers both 2-Way and Full).
                         self.bfd_reconcile_nbr(index, src);
+                        // Likewise the STAMP measurement session, which is
+                        // gated on a Full neighbor (and tears down the
+                        // moment Full is lost). The v2 twin does this in
+                        // its own `Message::Nfsm` arm.
+                        self.stamp_reconcile_and_originate(index);
                     }
                 }
             }
@@ -10581,6 +10658,13 @@ impl Ospf<Ospfv3> {
                 // configured.
                 self.bfd_reconcile_nbr(ifindex, nbr_router_id);
                 self.reconcile_endx_sid(ifindex, nbr_router_id);
+                // The STAMP session is keyed on the pair of link-local
+                // addresses, so it is a consumer of the old one too.
+                // The adjacency never leaves Full across a renumber, so
+                // the `Message::Nfsm` reconcile does not run: without
+                // this the session keeps probing an address the peer has
+                // deleted, and the measurement silently expires.
+                self.stamp_reconcile_and_originate(ifindex);
                 // The RIB is a consumer too, and was the one missing
                 // here. `collect_v3_nexthops` reads the next hop from
                 // `nbr.ident.prefix`, so every installed route through
@@ -11174,9 +11258,14 @@ impl Ospf<Ospfv3> {
         // Build the (area, link_type, metric, my_iid, peer_iid,
         // peer_rid, subs) tuple if origination is warranted, else
         // fall through to the flush path.
+        // As in the v2 twin, Segment Routing gates the SID contributions
+        // and not the LSA: the Adj-SID push below already tests SR-MPLS
+        // and the End.X push already tests SRv6, so the outer gate only
+        // ever suppressed the RFC 9492 ASLA — affinity and RFC 7471 TE
+        // metrics — for operators who run neither. `subs.is_empty()`
+        // decides whether there is anything worth originating.
         let srv6 = self.srv6_active();
-        let build_inputs = if (self.segment_routing == SegmentRoutingMode::Mpls || srv6)
-            && let Some(link) = self.links.get(&ifindex)
+        let build_inputs = if let Some(link) = self.links.get(&ifindex)
             && link.enabled
             && link.nbrs.values().any(|n| n.state == NfsmState::Full)
         {
@@ -11188,8 +11277,11 @@ impl Ospf<Ospfv3> {
             // admin-group is visible to flex-algo SPF), as long as the
             // adjacency itself is Full — mirrors v2's broadened
             // Ext-Link origination gate.
-            let asla =
-                super::flex_algo::build_link_asla_v3(&link.config.affinity, &self.affinity_map);
+            let asla = super::flex_algo::build_link_asla_v3(
+                &link.config.affinity,
+                &self.affinity_map,
+                link.te_metric_effective().asla_sub_subs_v3(),
+            );
             match link.network_type {
                 OspfNetworkType::PointToPoint => {
                     if let Some(nbr) = link.nbrs.values().find(|n| n.state == NfsmState::Full) {
@@ -11354,6 +11446,9 @@ impl Ospf<Ospfv3> {
                     .install_originated(lsa, &self.tx, Some(area_id), &self.tracing);
             }
             self.flood_self_originated_lsa(area_id, &flood_lsa);
+            // The ASLA we just (re)advertised is a metric-type-1 SPF
+            // input for this router too.
+            self.spf_schedule_area(area_id);
         } else {
             // Walk every area in case the link's area moved between
             // calls -- a stale LSA must be flushed wherever it lives.
@@ -11366,6 +11461,9 @@ impl Ospf<Ospfv3> {
                 };
                 if let Some(lsa) = flushed {
                     self.flood_self_originated_lsa(area_id, &lsa);
+                    // A withdrawn delay prunes the link from a
+                    // metric-type-1 topology (RFC 9350 §15).
+                    self.spf_schedule_area(area_id);
                 }
             }
         }
@@ -12549,6 +12647,9 @@ impl Ospf<Ospfv3> {
                 Some(event) = self.bfd_event_rx.recv() => {
                     self.process_bfd_event(event);
                 }
+                Some(event) = self.stamp_event_rx.recv() => {
+                    self.process_stamp_event(event);
+                }
             }
         }
     }
@@ -12999,13 +13100,11 @@ fn flex_algo_link_affinity(
         };
         let adv_router = lsa.data.h.adv_router;
         for tlv in &el.tlvs {
-            for sub in &tlv.subs {
-                if let ExtLinkSubTlv::Asla(asla) = sub
-                    && asla.is_flex_algo()
-                    && let Some(group) = asla.ext_admin_group()
-                {
-                    map.insert((adv_router, tlv.link_id, tlv.link_data), group.clone());
-                }
+            // Same RFC 9492 §5 selection the delay reader uses — the
+            // two must agree about which advertisements apply, or a
+            // link gets costed from one ASLA and constrained by another.
+            if let Some(group) = super::flex_algo::asla_admin_group_v2(&tlv.subs) {
+                map.insert((adv_router, tlv.link_id, tlv.link_data), group.clone());
             }
         }
     }
@@ -13030,13 +13129,8 @@ fn flex_algo_link_delay(area: &OspfArea) -> BTreeMap<(Ipv4Addr, Ipv4Addr, Ipv4Ad
         };
         let adv_router = lsa.data.h.adv_router;
         for tlv in &el.tlvs {
-            for sub in &tlv.subs {
-                if let ExtLinkSubTlv::Asla(asla) = sub
-                    && asla.is_flex_algo()
-                    && let Some(delay) = asla.min_unidir_delay()
-                {
-                    map.insert((adv_router, tlv.link_id, tlv.link_data), delay);
-                }
+            if let Some(delay) = super::flex_algo::asla_min_delay_v2(&tlv.subs) {
+                map.insert((adv_router, tlv.link_id, tlv.link_data), delay);
             }
         }
     }
@@ -14499,7 +14593,7 @@ fn flex_algo_participants_v3(area: &OspfArea<Ospfv3>, algo: u8) -> BTreeSet<Ipv4
 /// owning router's standard Router-LSA link `interface_id`.
 fn flex_algo_link_affinity_v3(area: &OspfArea<Ospfv3>) -> BTreeMap<(Ipv4Addr, u32), ExtAdminGroup> {
     use crate::ospf::lsdb::OSPF_MAX_AGE;
-    use ospf_packet::{OSPFV3_E_ROUTER_LSA_TYPE, Ospfv3ExtTlv, Ospfv3LsBody, Ospfv3SubTlv};
+    use ospf_packet::{OSPFV3_E_ROUTER_LSA_TYPE, Ospfv3ExtTlv, Ospfv3LsBody};
 
     let mut map = BTreeMap::new();
     for (_, lsa) in area.lsdb.iter_by_raw_type(OSPFV3_E_ROUTER_LSA_TYPE) {
@@ -14514,13 +14608,9 @@ fn flex_algo_link_affinity_v3(area: &OspfArea<Ospfv3>) -> BTreeMap<(Ipv4Addr, u3
             let Ospfv3ExtTlv::RouterLink(rl) = tlv else {
                 continue;
             };
-            for sub in &rl.subs {
-                if let Ospfv3SubTlv::Asla(asla) = sub
-                    && asla.is_flex_algo()
-                    && let Some(group) = asla.ext_admin_group()
-                {
-                    map.insert((adv_router, rl.link.interface_id), group.clone());
-                }
+            // Same selection as the delay reader; see the v2 twin.
+            if let Some(group) = super::flex_algo::asla_admin_group_v3(&rl.subs) {
+                map.insert((adv_router, rl.link.interface_id), group.clone());
             }
         }
     }
@@ -14533,6 +14623,35 @@ fn flex_algo_link_affinity_v3(area: &OspfArea<Ospfv3>) -> BTreeMap<(Ipv4Addr, u3
 /// the FAD constraints in `entry` (RFC 9350 §7), the link's affinity
 /// coming from the E-Router-LSA ASLA join table. Same deferrals as the
 /// v2 `graph_flex_algo` (local FAD config, IGP metric, no SRLG/TI-LFA).
+/// Per-link Min unidirectional delay advertised in the OSPFv3
+/// E-Router-LSA ASLA, keyed by `(advertising router, interface id)` —
+/// the RFC 9350 §5.1 metric-type 1 edge cost. The OSPFv2 twin is
+/// `flex_algo_link_delay`; only the LSA and sub-TLV shapes differ.
+fn flex_algo_link_delay_v3(area: &OspfArea<Ospfv3>) -> BTreeMap<(Ipv4Addr, u32), u32> {
+    use crate::ospf::lsdb::OSPF_MAX_AGE;
+    use ospf_packet::{OSPFV3_E_ROUTER_LSA_TYPE, Ospfv3ExtTlv, Ospfv3LsBody};
+
+    let mut map = BTreeMap::new();
+    for (_, lsa) in area.lsdb.iter_by_raw_type(OSPFV3_E_ROUTER_LSA_TYPE) {
+        if lsa.data.h.ls_age >= OSPF_MAX_AGE {
+            continue;
+        }
+        let Ospfv3LsBody::ERouter(ref body) = lsa.data.body else {
+            continue;
+        };
+        let adv_router = lsa.data.h.advertising_router;
+        for tlv in &body.tlvs {
+            let Ospfv3ExtTlv::RouterLink(rl) = tlv else {
+                continue;
+            };
+            if let Some(delay) = super::flex_algo::asla_min_delay_v3(&rl.subs) {
+                map.insert((adv_router, rl.link.interface_id), delay);
+            }
+        }
+    }
+    map
+}
+
 fn graph_v3_flex_algo(
     top: &mut Ospf<Ospfv3>,
     area_id: Ipv4Addr,
@@ -14553,6 +14672,15 @@ fn graph_v3_flex_algo(
 
     let participants = flex_algo_participants_v3(area, algo);
     let link_affinity = flex_algo_link_affinity_v3(area);
+    // RFC 9350 §5.1 metric-type 1 costs edges on the advertised Min
+    // delay instead of the IGP metric. The join table is built only for
+    // that metric-type — the IGP path never consults it.
+    let use_delay = entry.metric_type == Some(crate::flex_algo::FadMetricType::MinUnidirLinkDelay);
+    let link_delay = if use_delay {
+        flex_algo_link_delay_v3(area)
+    } else {
+        BTreeMap::new()
+    };
 
     // Router-LSAs of participating routers (self always kept — it is
     // the SPF source).
@@ -14606,6 +14734,17 @@ fn graph_v3_flex_algo(
                 if !crate::flex_algo::link_passes_fad(affinity, entry, &top.affinity_map) {
                     continue;
                 }
+                // A link advertising no delay MUST NOT be used by a
+                // metric-type-1 topology (RFC 9350 §15), so it drops out
+                // here rather than falling back to the IGP metric.
+                let cost = if use_delay {
+                    match link_delay.get(&(*adv_router, link.interface_id)) {
+                        Some(d) => *d,
+                        None => continue,
+                    }
+                } else {
+                    link.metric as u32
+                };
                 match link.link_type {
                     Ospfv3RouterLinkType::PointToPoint | Ospfv3RouterLinkType::VirtualLink => {
                         if !participants.contains(&link.neighbor_router_id) {
@@ -14628,7 +14767,7 @@ fn graph_v3_flex_algo(
                         vertex.olinks.push(spf::Link {
                             from: node_id,
                             to: to_id,
-                            cost: link.metric as u32,
+                            cost,
                             link_id: 0,
                         });
                     }
@@ -14651,7 +14790,7 @@ fn graph_v3_flex_algo(
                             vertex.olinks.push(spf::Link {
                                 from: node_id,
                                 to: to_id,
-                                cost: link.metric as u32,
+                                cost,
                                 link_id: 0,
                             });
                         }

@@ -743,9 +743,17 @@ pub fn graph_flex_algo(
                 // Edge cost per the FAD metric-type (RFC 9350 §5.1).
                 // metric-type 1 routes on the link's Min delay: local
                 // links from current config, peer links from the
-                // flex-algo ASLA's Min/Max Link Delay sub-TLV. A link
-                // that advertises no delay is pruned (RFC 9350 §15).
-                // Everything else uses the reach entry's IGP metric.
+                // flex-algo ASLA's Min/Max Link Delay sub-TLV, falling
+                // back to the inline sub-TLV when the peer advertises
+                // no flex-algo ASLA at all. The fallback is for interop:
+                // RFC 9350 §12 scopes flex-algo attributes to the ASLA
+                // with the X-bit set, but an implementation that never
+                // emits ASLA would otherwise have every one of its links
+                // pruned from a metric-type-1 topology. It applies only
+                // when the ASLA supplied nothing, so a peer that does
+                // scope its attributes keeps that scoping.
+                // A link that advertises no delay either way is pruned
+                // (RFC 9350 §15). Everything else uses the IGP metric.
                 let cost = if entry.metric_type == Some(FadMetricType::MinUnidirLinkDelay) {
                     let delay = if source_sys_id == self_sys_id {
                         local_adj_to_ifindex
@@ -753,12 +761,7 @@ pub fn graph_flex_algo(
                             .and_then(|ifx| top.links.get(ifx))
                             .and_then(|link| link.te_metric_effective().min_delay)
                     } else {
-                        entry_reach.subs.iter().find_map(|sub| match sub {
-                            neigh::IsisSubTlv::Asla(asla) => {
-                                super::flex_algo::parse_asla_min_delay(asla)
-                            }
-                            _ => None,
-                        })
+                        super::flex_algo::peer_min_delay(entry_reach)
                     };
                     match delay {
                         Some(d) => d,

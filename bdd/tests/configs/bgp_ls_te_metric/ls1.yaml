@@ -1,0 +1,48 @@
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.71.0.1/32
+- if-name: ls1-ls2
+  ipv4:
+    address: 192.168.71.1/30
+- if-name: ls1-lsc
+  ipv4:
+    address: 192.168.73.1/30
+
+router:
+  isis:
+    net: 49.0071.0000.0000.0001.00
+    hostname: ls1
+    is-type: level-2-only
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+    - if-name: ls1-ls2
+      network-type: point-to-point
+      ipv4:
+        enabled: true
+      te-metric:
+        unidirectional-delay: 1000
+        min-delay: 900
+        max-delay: 1200
+        delay-variation: 50
+        loss: 333
+  bgp:
+    global:
+      as: 65071
+      router-id: 10.71.0.1
+    neighbor:
+    - remote-address: 10.71.0.2
+      remote-as: 65071
+      update-source: 10.71.0.1
+      enabled: true
+      afi-safi:
+      - name: link-state
+        enabled: true
+    - remote-address: 192.168.73.2
+      remote-as: 65072
+      enabled: true
+      afi-safi:
+      - name: link-state
+        enabled: true

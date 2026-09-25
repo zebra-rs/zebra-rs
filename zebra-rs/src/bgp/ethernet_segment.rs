@@ -92,6 +92,93 @@ impl EsRedundancyMode {
     }
 }
 
+/// How a remote PE is told which PE forwards a single-active segment's
+/// known unicast (`docs/design/bgp-evpn-single-active-plan.md` §4).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RoleSignaling {
+    /// Advertise nothing; a remote PE infers the forwarder from which PE
+    /// advertised the segment's MACs (`Bgp::es_sa_primary`). The
+    /// pre-existing behaviour, and the default.
+    #[default]
+    Inferred,
+    /// Advertise the elected role in the Layer-2 Attributes extended
+    /// community of the per-EVI Ethernet A-D (draft-ietf-bess-rfc7432bis
+    /// §7.11.1), so a remote PE reads the forwarder instead of guessing it
+    /// from MAC counts.
+    L2Attr,
+}
+
+impl RoleSignaling {
+    /// Parse the YANG `role-signaling` keyword.
+    pub fn from_keyword(s: &str) -> Self {
+        match s {
+            "l2-attr" => RoleSignaling::L2Attr,
+            _ => RoleSignaling::Inferred,
+        }
+    }
+
+    /// The YANG keyword for this mode.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RoleSignaling::Inferred => "inferred",
+            RoleSignaling::L2Attr => "l2-attr",
+        }
+    }
+
+    /// Whether the role rides the per-EVI A-D.
+    pub fn signals(&self) -> bool {
+        matches!(self, RoleSignaling::L2Attr)
+    }
+}
+
+/// The DF election algorithm a segment advertises and runs (RFC 8584 §2.2
+/// DF Alg values; RFC 9785 adds the two preference-based ones).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DfAlgorithm {
+    /// Alg 0 — RFC 7432 §8.5 service carving (the modulus).
+    Default,
+    /// Alg 1 — RFC 8584 §3 Highest Random Weight.
+    Hrw,
+    /// Alg 2 — RFC 9785 Highest-Preference.
+    Preference,
+    /// Alg 3 — RFC 9785 Lowest-Preference.
+    LowestPreference,
+}
+
+impl DfAlgorithm {
+    /// Parse the YANG `df-election algorithm` keyword; `None` for anything
+    /// else, which leaves the segment on whatever the preference leaf implies.
+    pub fn from_keyword(s: &str) -> Option<Self> {
+        match s {
+            "default" => Some(DfAlgorithm::Default),
+            "hrw" => Some(DfAlgorithm::Hrw),
+            "preference" => Some(DfAlgorithm::Preference),
+            "lowest-preference" => Some(DfAlgorithm::LowestPreference),
+            _ => None,
+        }
+    }
+
+    /// The YANG keyword for this algorithm.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DfAlgorithm::Default => "default",
+            DfAlgorithm::Hrw => "hrw",
+            DfAlgorithm::Preference => "preference",
+            DfAlgorithm::LowestPreference => "lowest-preference",
+        }
+    }
+
+    /// The 5-bit DF Alg value this algorithm puts on the wire.
+    pub fn wire(&self) -> u8 {
+        match self {
+            DfAlgorithm::Default => DfElectionEc::ALG_DEFAULT,
+            DfAlgorithm::Hrw => DfElectionEc::ALG_HRW,
+            DfAlgorithm::Preference => DfElectionEc::ALG_PREF,
+            DfAlgorithm::LowestPreference => DfElectionEc::ALG_PREF_LOWEST,
+        }
+    }
+}
+
 /// A locally-configured Ethernet Segment: an ESI, a redundancy mode, and the
 /// access interface it is bound to. Keyed by an operator-chosen name in
 /// `Bgp::ethernet_segments`. DF state and the per-ES PE membership set are
@@ -104,18 +191,30 @@ pub struct EthernetSegment {
     pub redundancy_mode: EsRedundancyMode,
     /// Access interface bound to this ES (the multihomed CE-facing port).
     pub interface: Option<String>,
-    /// DF Preference (draft-ietf-bess-evpn-pref-df). `Some` switches this
-    /// segment to Alg 2, where the highest preference wins and ties break on
-    /// the lowest address, instead of the RFC 7432 §8.5 carving modulus.
-    /// `None` = service carving (Alg 0), the default.
+    /// DF Preference (RFC 9785 §3). Under a preference-based algorithm this
+    /// is what the segment bids; `None` there means the RFC's mandatory
+    /// default of 32767. With no `df_algorithm` configured at all, `Some`
+    /// still selects Alg 2 on its own — the spelling that shipped before the
+    /// `algorithm` leaf grew its preference arms.
     pub df_preference: Option<u16>,
     /// Advertise the RFC 8584 §2.2 AC-DF (AC-Influenced DF election)
     /// capability on this segment's Type-4.
     pub ac_df: bool,
-    /// Elect with the RFC 8584 §3 Highest Random Weight algorithm (Alg 1)
-    /// instead of service carving; a configured `df_preference` (Alg 2)
-    /// takes precedence.
-    pub hrw: bool,
+    /// The configured DF election algorithm. `None` = not configured, which
+    /// means carving unless `df_preference` is set (see that field).
+    pub df_algorithm: Option<DfAlgorithm>,
+    /// Advertise the RFC 9785 "Don't Preempt" (DP) capability: on a
+    /// preference tie this PE is ranked ahead of one that does **not** set
+    /// the bit. Only meaningful — and only advertised — under a
+    /// preference-based algorithm.
+    ///
+    /// This is the tie-break input alone. It is not RFC 9785 §4.3
+    /// non-revertive operation, which additionally has a recovering PE
+    /// advertise an *operational* `(Pref, DP)` inherited from the incumbent
+    /// DF; without that, two PEs that both set the bit at equal preference
+    /// still fall through to the address comparison, and the lower-address
+    /// one reclaims the role when it comes back.
+    pub dont_preempt: bool,
     /// Seconds to stay out of this segment's DF election after joining it
     /// (IOS-XR `timers peering`, Junos
     /// `designated-forwarder-election-hold-time`, FRR
@@ -127,6 +226,9 @@ pub struct EthernetSegment {
     /// config it derives from, as [`super::vpws::VpwsService`] already does
     /// for its own derived state.
     pub hold_until: Option<Instant>,
+    /// How this segment tells remote PEs which PE forwards its known
+    /// unicast. Default `Inferred` — the pre-existing MAC-count inference.
+    pub role_signaling: RoleSignaling,
     /// RFC 7432 §8.3: this PE's ESI label for the segment under
     /// `encapsulation mpls` — drawn from the dynamic label block
     /// (`Bgp::es_label_reconcile`), advertised in the per-ES A-D's ESI
@@ -177,26 +279,54 @@ impl EthernetSegment {
     }
 
     /// The DF Election extended community this segment advertises on its
-    /// Type-4: Alg 2 with the configured preference when one is set,
-    /// otherwise the default carving algorithm.
+    /// Type-4: the configured algorithm, the preference it bids under a
+    /// preference-based one, and the capability bits.
+    ///
+    /// A preference-based algorithm with no configured value bids RFC 9785
+    /// §3's mandatory default of 32767 rather than 0 — a PE that bid 0 would
+    /// silently rank below every peer that took the default. The DP bit is
+    /// advertised only under those algorithms, since it is defined as a
+    /// preference tie-break.
+    /// **Precedence, and why it is not simply "the explicit leaf wins".**
+    /// Before the `algorithm` leaf had preference arms, its only values were
+    /// `default` and `hrw`, and a `preference` value selected Alg 2 over
+    /// either of them. Configurations spelled that way exist, so they keep
+    /// that meaning: a preference value still beats `algorithm default` and
+    /// `algorithm hrw`. Making the algorithm leaf win instead would change
+    /// what such a PE advertises across an upgrade — and a PE that starts
+    /// advertising Alg 1 to peers still on Alg 2 does not merely differ, it
+    /// breaks the RFC 8584 unanimity check and drops the **whole segment**
+    /// to carving, moving the DF as it goes. The new arms are how an
+    /// operator now says which preference algorithm they mean; `algorithm
+    /// hrw` plus a preference stays the legacy spelling of Alg 2, which
+    /// `show bgp evpn ethernet-segment` calls out rather than leaving to be
+    /// discovered.
     pub fn df_election_ec(&self) -> DfElectionEc {
-        let mut ec = match self.df_preference {
-            Some(pref) => DfElectionEc {
-                df_alg: DfElectionEc::ALG_PREF,
-                bitmap: 0,
-                pref,
-            },
-            None => DfElectionEc {
-                df_alg: if self.hrw {
-                    DfElectionEc::ALG_HRW
-                } else {
-                    DfElectionEc::ALG_DEFAULT
-                },
-                bitmap: 0,
-                pref: 0,
+        let alg = match (self.df_algorithm, self.df_preference) {
+            // The preference arms name the algorithm themselves, so a value
+            // beside them selects between Alg 2 and Alg 3 rather than
+            // overriding anything.
+            (Some(alg @ (DfAlgorithm::Preference | DfAlgorithm::LowestPreference)), _) => {
+                alg.wire()
+            }
+            // Legacy precedence, preserved for configurations written before
+            // those arms existed.
+            (_, Some(_)) => DfElectionEc::ALG_PREF,
+            (Some(alg), None) => alg.wire(),
+            (None, None) => DfElectionEc::ALG_DEFAULT,
+        };
+        let preference_based = DfElectionEc::is_preference_alg(alg);
+        let mut ec = DfElectionEc {
+            df_alg: alg,
+            bitmap: 0,
+            pref: if preference_based {
+                self.df_preference.unwrap_or(DfElectionEc::PREF_DEFAULT)
+            } else {
+                0
             },
         };
         ec.set_ac_df(self.ac_df);
+        ec.set_dont_preempt(preference_based && self.dont_preempt);
         ec
     }
 
@@ -248,24 +378,73 @@ pub fn backup_forwarder(candidates: &[IpAddr], tag: u32) -> Option<IpAddr> {
 }
 
 /// One PE's advertised DF-election parameters, read off its Type-4's DF
-/// Election extended community: `(VTEP, algorithm, preference)`.
-pub type DfCandidate = (IpAddr, u8, u16);
+/// Election extended community: the VTEP, the algorithm, the preference and
+/// the capability bitmap (RFC 9785 DP, RFC 8584 AC-DF).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DfCandidate {
+    /// The PE's Originating Router IP — the Type-4 NLRI key, and the
+    /// identity every PE on the segment ranks by.
+    pub addr: IpAddr,
+    /// DF Alg this PE advertises (RFC 8584 §2.2 / RFC 9785 §3).
+    pub alg: u8,
+    /// Its DF Preference; meaningful under the preference-based algorithms.
+    pub pref: u16,
+    /// Its capability bitmap, kept whole so a bit this version does not act
+    /// on is still visible in `show` rather than dropped at parse time.
+    pub caps: u16,
+}
 
-/// Order two preference-based candidates by who wins
-/// (draft-ietf-bess-evpn-pref-df): the higher preference, and on a tie the
-/// **lower** IP address. Matches FRR's comparison in
-/// `zebra_evpn_es_run_df_election`, so the two agree on a shared segment —
+impl DfCandidate {
+    /// A candidate with no capability bits — the common case in tests and
+    /// for a Type-4 carrying no DF Election EC at all.
+    pub fn new(addr: IpAddr, alg: u8, pref: u16) -> Self {
+        Self {
+            addr,
+            alg,
+            pref,
+            caps: 0,
+        }
+    }
+
+    /// Builder: attach the advertised capability bitmap.
+    pub fn with_caps(mut self, caps: u16) -> Self {
+        self.caps = caps;
+        self
+    }
+
+    /// Whether this PE asked not to be preempted (RFC 9785 §3, D bit).
+    pub fn dont_preempt(&self) -> bool {
+        self.caps & DfElectionEc::CAP_DONT_PREEMPT != 0
+    }
+}
+
+/// Order two preference-based candidates by who wins (RFC 9785 §4.1): the
+/// better preference — highest under Alg 2, `lowest` under Alg 3 — then the
+/// PE that asked not to be preempted, then the **lower** IP address.
+///
+/// The address step matches FRR's comparison in
+/// `zebra_evpn_es_run_df_election`, so the two agree on a shared segment;
 /// disagreement here means two PEs both forward and the CE sees duplicates.
-fn pref_wins(a: &DfCandidate, b: &DfCandidate) -> std::cmp::Ordering {
-    // Higher pref first, then lower IP first.
-    b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0))
+/// The DP step sits between them because RFC 9785 §4.1 orders it that way —
+/// ignoring a peer's bit would rank the segment differently at each end,
+/// which is the same duplicate.
+fn pref_wins(a: &DfCandidate, b: &DfCandidate, lowest: bool) -> std::cmp::Ordering {
+    let by_pref = if lowest {
+        a.pref.cmp(&b.pref)
+    } else {
+        b.pref.cmp(&a.pref)
+    };
+    by_pref
+        // `false < true`, so comparing b to a puts DP=1 first.
+        .then_with(|| b.dont_preempt().cmp(&a.dont_preempt()))
+        .then_with(|| a.addr.cmp(&b.addr))
 }
 
 /// The candidates ordered best-DF-first under preference-based election.
-fn pref_ranked(candidates: &[DfCandidate]) -> Vec<IpAddr> {
+fn pref_ranked(candidates: &[DfCandidate], lowest: bool) -> Vec<IpAddr> {
     let mut ranked = candidates.to_vec();
-    ranked.sort_by(pref_wins);
-    ranked.into_iter().map(|(ip, _, _)| ip).collect()
+    ranked.sort_by(|a, b| pref_wins(a, b, lowest));
+    ranked.into_iter().map(|c| c.addr).collect()
 }
 
 /// CRC-32 (IEEE 802.3 / ISO 3309: polynomial 0x04C11DB7 reflected, initial
@@ -325,7 +504,7 @@ fn hrw_ranked(candidates: &[DfCandidate], esi: &[u8; 10], tag: u32) -> Vec<IpAdd
     let d = hrw_digest(esi, tag);
     let mut ranked: Vec<(u32, IpAddr)> = candidates
         .iter()
-        .map(|(ip, _, _)| (hrw_weight(*ip, d), *ip))
+        .map(|c| (hrw_weight(c.addr, d), c.addr))
         .collect();
     ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
     ranked.dedup_by_key(|(_, ip)| *ip);
@@ -335,8 +514,9 @@ fn hrw_ranked(candidates: &[DfCandidate], esi: &[u8; 10], tag: u32) -> Vec<IpAdd
 /// Elect the Designated Forwarder and its backup for one service instance,
 /// dispatching on the algorithm the segment's PEs agreed on.
 ///
-/// Alg 2 (preference) ranks by preference then address, so the DF is the
-/// winner and the backup is the runner-up. Anything else falls back to
+/// Alg 2 / Alg 3 (RFC 9785 preference) rank by preference, then the DP bit,
+/// then address, so the DF is the winner and the backup is the runner-up.
+/// Anything else falls back to
 /// service carving, where the ordinal is `tag mod N` and the backup is the
 /// next ordinal — the RFC 8584 fallback for a disagreed algorithm, which
 /// [`negotiate_df_alg`] already resolves to Alg 0.
@@ -348,10 +528,11 @@ pub fn elect_forwarders(
     esi: &[u8; 10],
     tag: u32,
 ) -> (Option<IpAddr>, Option<IpAddr>) {
-    let algs: Vec<u8> = candidates.iter().map(|(_, alg, _)| *alg).collect();
-    match negotiate_df_alg(&algs) {
-        DfElectionEc::ALG_PREF => {
-            let ranked = pref_ranked(candidates);
+    let algs: Vec<u8> = candidates.iter().map(|c| c.alg).collect();
+    let alg = negotiate_df_alg(&algs);
+    match alg {
+        DfElectionEc::ALG_PREF | DfElectionEc::ALG_PREF_LOWEST => {
+            let ranked = pref_ranked(candidates, alg == DfElectionEc::ALG_PREF_LOWEST);
             return (ranked.first().copied(), ranked.get(1).copied());
         }
         DfElectionEc::ALG_HRW => {
@@ -360,7 +541,7 @@ pub fn elect_forwarders(
         }
         _ => {}
     }
-    let mut vteps: Vec<IpAddr> = candidates.iter().map(|(ip, _, _)| *ip).collect();
+    let mut vteps: Vec<IpAddr> = candidates.iter().map(|c| c.addr).collect();
     vteps.sort();
     vteps.dedup();
     (
@@ -426,7 +607,7 @@ pub fn vpws_role(
     esi: &[u8; 10],
     service_id: u32,
 ) -> VpwsRole {
-    let on_segment = candidates.iter().any(|(ip, _, _)| *ip == me);
+    let on_segment = candidates.iter().any(|c| c.addr == me);
     if !matches!(mode, EsRedundancyMode::SingleActive) || !on_segment {
         return VpwsRole::Primary;
     }
@@ -460,6 +641,41 @@ pub fn elan_df(
     !holding && elect_forwarders(candidates, esi, vni).0 == Some(me)
 }
 
+/// The role this PE advertises for a single-active segment in one bridge
+/// domain — the P/B bits of the per-EVI Ethernet A-D's Layer-2 Attributes
+/// extended community (draft-ietf-bess-rfc7432bis §7.11.1).
+///
+/// Elected exactly like [`elan_df`], over the same candidates and with the
+/// VNI as the Ethernet Tag, so the bit a remote PE reads and the BUM filter
+/// this PE enforces can never disagree: the DF is Primary, the election's
+/// runner-up is Backup, anyone else is neither.
+///
+/// A PE that is `holding`, or that is not in the candidate set at all (its
+/// own Type-4 not selected yet), advertises **neither** bit. That is the
+/// opposite of [`vpws_role`]'s "stay primary while the segment converges"
+/// fallback, and deliberately so: under single-active a non-DF blocks the
+/// access port in both directions, so attracting unicast to a PE that has
+/// not joined the election is a blackhole, not a duplicate.
+pub fn elan_role(
+    candidates: &[DfCandidate],
+    me: IpAddr,
+    esi: &[u8; 10],
+    vni: u32,
+    holding: bool,
+) -> VpwsRole {
+    if holding || !candidates.iter().any(|c| c.addr == me) {
+        return VpwsRole::NonDesignated;
+    }
+    let (df, backup) = elect_forwarders(candidates, esi, vni);
+    if df == Some(me) {
+        VpwsRole::Primary
+    } else if backup == Some(me) {
+        VpwsRole::Backup
+    } else {
+        VpwsRole::NonDesignated
+    }
+}
+
 /// Order an Ethernet Segment nexthop group's members for the datapath.
 /// `pairs` are `(advertising PE, member)`; the result is sorted by PE then
 /// member so it is stable across recomputes, except that a single-active
@@ -472,14 +688,148 @@ pub fn elan_df(
 pub fn order_es_members(
     mut pairs: Vec<(IpAddr, crate::rib::EsNhgMember)>,
     primary: Option<IpAddr>,
+    backup: Option<IpAddr>,
 ) -> Vec<crate::rib::EsNhgMember> {
     pairs.sort();
-    if let Some(primary) = primary {
-        // Stable: the primary's members keep their own order at the front.
-        let (front, back): (Vec<_>, Vec<_>) = pairs.into_iter().partition(|(pe, _)| *pe == primary);
+    // Applied backup-first then primary-first, so the primary ends up ahead
+    // of the backup however the two were chosen. Each pass is stable, so a
+    // PE contributing several members keeps their relative order.
+    for lead in [backup, primary] {
+        let Some(lead) = lead else {
+            continue;
+        };
+        let (front, back): (Vec<_>, Vec<_>) = pairs.into_iter().partition(|(pe, _)| *pe == lead);
         pairs = front.into_iter().chain(back).collect();
     }
     pairs.into_iter().map(|(_, m)| m).collect()
+}
+
+/// Why a single-active group's forwarder was chosen the way it was —
+/// rendered by `show`, so an operator can tell a signalled answer from a
+/// guess without reading the routes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaSelectReason {
+    /// Exactly one member advertised P=1 (rfc7432bis §7.11.1).
+    Signalled,
+    /// More than one member claimed P=1; the lowest address broke the tie.
+    /// Both PEs believe they forward, which this PE cannot repair — it can
+    /// only avoid installing two forwarding members and say so.
+    Conflict,
+    /// Nobody claimed P=1 but exactly one member advertised B=1, so the
+    /// segment's own runner-up leads.
+    BackupOnly,
+    /// The segment signals, and every member says it is **not** the
+    /// forwarder (P=0/B=0, or an ambiguous set of backups). There is no one
+    /// to forward to, which is a different answer from not knowing: the
+    /// caller must withhold the group rather than fall back to guessing, or
+    /// a PE that explicitly said "do not use me" ends up carrying the
+    /// traffic.
+    NoForwarder,
+    /// No member signals a role at all; the caller falls back to inferring
+    /// the forwarder from which PE advertised the segment's MACs.
+    Unsignalled,
+}
+
+impl SaSelectReason {
+    /// Short display form.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SaSelectReason::Signalled => "signalled",
+            SaSelectReason::Conflict => "conflict",
+            SaSelectReason::BackupOnly => "backup-only",
+            SaSelectReason::NoForwarder => "no forwarder",
+            SaSelectReason::Unsignalled => "inferred",
+        }
+    }
+}
+
+/// The members whose advertised role is malformed — P=1 and B=1 at once,
+/// which rfc7432bis §7.11.1 gives no meaning. They take no part in the
+/// election ([`select_sa_forwarder`] filters them out); this names them so
+/// the caller can say which PE is misbehaving instead of leaving an
+/// unexplained result.
+pub fn invalid_role_members(signals: &[(IpAddr, Option<(bool, bool)>)]) -> Vec<IpAddr> {
+    signals
+        .iter()
+        .filter(|(_, bits)| matches!(bits, Some((true, true))))
+        .map(|(pe, _)| *pe)
+        .collect()
+}
+
+/// The forwarder a remote ingress PE should use for a single-active segment
+/// in one bridge domain, from the roles its members advertise.
+///
+/// `signals` is one entry per **eligible** member — the caller has already
+/// dropped PEs whose per-ES A-D is gone (RFC 7432 §8.2 mass withdraw) or
+/// that have no per-EVI A-D for this bridge domain — as
+/// `(PE, Some((P, B)))`, or `(PE, None)` for a member carrying no Layer-2
+/// Attributes EC.
+///
+/// Returns `(primary, backup, reason)`. `Unsignalled` means the segment's
+/// roles cannot be read — nobody signalled, or only some of them did (see
+/// the unanimity rule below) — and the caller should fall back to its own
+/// inference; every
+/// other reason is an answer. Two PEs claiming P=1 is a segment-level
+/// misconfiguration that no ingress PE can repair — this one at least
+/// installs a single forwarder deterministically (the lowest address) and
+/// names the condition instead of silently forwarding to both.
+pub fn select_sa_forwarder(
+    signals: &[(IpAddr, Option<(bool, bool)>)],
+) -> (Option<IpAddr>, Option<IpAddr>, SaSelectReason) {
+    // **Roles are trusted only when every eligible member signals one.**
+    // A segment where some PEs advertise a role and others do not cannot be
+    // read: the PE saying nothing may be the Designated Forwarder, and then
+    // "no member claims primary" would mean "withhold the group" — turning
+    // the ordinary rollout of enabling `role-signaling` one PE at a time
+    // into an outage on a segment that is forwarding perfectly well. RFC
+    // 8584 §4 treats AC-DF the same way (see [`ac_df_in_effect`]): a
+    // capability that changes how the answer is computed takes effect only
+    // once the whole segment has it.
+    //
+    // The cost is that an explicit P=1 is ignored while any peer is silent,
+    // and inference decides instead — the behaviour that segment had before
+    // anyone was upgraded.
+    if signals.is_empty() || signals.iter().any(|(_, bits)| bits.is_none()) {
+        return (None, None, SaSelectReason::Unsignalled);
+    }
+    // P=1 together with B=1 is not a role, it is a malformed advertisement
+    // (rfc7432bis §7.11.1 gives the two bits disjoint meanings). Counting it
+    // as a primary claim would let a malformed low-address advertisement win
+    // the conflict tie-break against a PE that is correctly elected, so such
+    // a member is excluded from the election entirely — `invalid_roles`
+    // names it for the caller's diagnostic.
+    let mut primaries: Vec<IpAddr> = signals
+        .iter()
+        .filter(|(_, bits)| matches!(bits, Some((true, false))))
+        .map(|(pe, _)| *pe)
+        .collect();
+    let mut backups: Vec<IpAddr> = signals
+        .iter()
+        .filter(|(_, bits)| matches!(bits, Some((false, true))))
+        .map(|(pe, _)| *pe)
+        .collect();
+    primaries.sort();
+    backups.sort();
+    // A single backup is the segment's own runner-up, so it leads when no
+    // primary is present — the alternative is slot 0 by address order, which
+    // is a worse guess, not a safer one.
+    let backup = (backups.len() == 1).then(|| backups[0]);
+    match primaries.len() {
+        0 => match backup {
+            Some(b) => (Some(b), None, SaSelectReason::BackupOnly),
+            // Signalled, and nobody is selectable. Not the same as silence:
+            // falling back to inference here would install the stale MAC
+            // advertiser — or, failing that, the lowest address — as the
+            // forwarder, over the explicit "not me" of every member.
+            None => (None, None, SaSelectReason::NoForwarder),
+        },
+        1 => (Some(primaries[0]), backup, SaSelectReason::Signalled),
+        _ => (
+            Some(primaries[0]),
+            backup.filter(|b| *b != primaries[0]),
+            SaSelectReason::Conflict,
+        ),
+    }
 }
 
 /// RFC 8584 §4 AC-Influenced DF election is in effect on a segment only
@@ -507,7 +857,7 @@ pub fn ac_df_filter(
 ) -> Vec<DfCandidate> {
     candidates
         .iter()
-        .filter(|(ip, _, _)| *ip == me || (live.contains(ip) && ad_evi.contains(ip)))
+        .filter(|c| c.addr == me || (live.contains(&c.addr) && ad_evi.contains(&c.addr)))
         .copied()
         .collect()
 }
@@ -717,7 +1067,7 @@ mod tests {
     /// Carving candidates: every PE advertising Alg 0 with no preference.
     fn carving(ips: &[IpAddr]) -> Vec<DfCandidate> {
         ips.iter()
-            .map(|ip| (*ip, DfElectionEc::ALG_DEFAULT, 0))
+            .map(|ip| DfCandidate::new(*ip, DfElectionEc::ALG_DEFAULT, 0))
             .collect()
     }
 
@@ -725,7 +1075,15 @@ mod tests {
     fn prefs(entries: &[(IpAddr, u16)]) -> Vec<DfCandidate> {
         entries
             .iter()
-            .map(|(ip, p)| (*ip, DfElectionEc::ALG_PREF, *p))
+            .map(|(ip, p)| DfCandidate::new(*ip, DfElectionEc::ALG_PREF, *p))
+            .collect()
+    }
+
+    /// Lowest-Preference (Alg 3) candidates.
+    fn prefs_low(entries: &[(IpAddr, u16)]) -> Vec<DfCandidate> {
+        entries
+            .iter()
+            .map(|(ip, p)| DfCandidate::new(*ip, DfElectionEc::ALG_PREF_LOWEST, *p))
             .collect()
     }
 
@@ -816,7 +1174,7 @@ mod tests {
         // negotiation drops everyone to carving — preference is ignored even
         // though two PEs advertised it.
         let mut cands = prefs(&[(a, 10), (b, 300)]);
-        cands.push((c, DfElectionEc::ALG_DEFAULT, 0));
+        cands.push(DfCandidate::new(c, DfElectionEc::ALG_DEFAULT, 0));
         // Carving on the address-sorted list [a, b, c], tag 1 -> ordinal 1.
         assert_eq!(elect_forwarders(&cands, &ESI_T, 1), (Some(b), Some(c)));
         // Whereas all-Alg-2 would have given b (highest pref) for every tag.
@@ -873,8 +1231,10 @@ mod tests {
         assert_eq!(hrw_digest(&ESI_T, 100), 0x7995_f7c3);
         assert_eq!(hrw_weight(a, 0x7995_f7c3), 712_275_514);
         assert_eq!(hrw_weight(b, 0x7995_f7c3), 2_110_888_649);
-        let cands: Vec<DfCandidate> =
-            vec![(a, DfElectionEc::ALG_HRW, 0), (b, DfElectionEc::ALG_HRW, 0)];
+        let cands: Vec<DfCandidate> = vec![
+            DfCandidate::new(a, DfElectionEc::ALG_HRW, 0),
+            DfCandidate::new(b, DfElectionEc::ALG_HRW, 0),
+        ];
         assert_eq!(elect_forwarders(&cands, &ESI_T, 0), (Some(a), Some(b)));
         assert_eq!(elect_forwarders(&cands, &ESI_T, 100), (Some(b), Some(a)));
         // Order-independent: every PE ranks the same set the same way.
@@ -892,28 +1252,285 @@ mod tests {
     fn hrw_needs_unanimity() {
         let [a, b, _] = pes();
         let mixed: Vec<DfCandidate> = vec![
-            (a, DfElectionEc::ALG_HRW, 0),
-            (b, DfElectionEc::ALG_DEFAULT, 0),
+            DfCandidate::new(a, DfElectionEc::ALG_HRW, 0),
+            DfCandidate::new(b, DfElectionEc::ALG_DEFAULT, 0),
         ];
         assert_eq!(elect_forwarders(&mixed, &ESI_T, 0).0, Some(a));
         assert_eq!(elect_forwarders(&mixed, &ESI_T, 1).0, Some(b));
     }
 
-    /// The election the segment advertises follows the config: HRW when
-    /// asked for, but a preference still wins over it.
+    /// Upgrade safety: every spelling that existed before the `algorithm`
+    /// leaf grew preference arms advertises exactly what it advertised then.
+    /// A PE that changed algorithm across an upgrade would break the RFC
+    /// 8584 unanimity check against its not-yet-upgraded peers and drop the
+    /// whole segment to carving, moving the DF as it went.
     #[test]
-    fn segment_advertises_hrw_when_configured() {
-        let es = EthernetSegment {
-            hrw: true,
+    fn a_preference_value_still_overrides_the_legacy_algorithm_arms() {
+        // `algorithm hrw` alone: Alg 1, unchanged.
+        let hrw = EthernetSegment {
+            df_algorithm: Some(DfAlgorithm::Hrw),
             ..Default::default()
         };
-        assert_eq!(es.df_election_ec().df_alg, DfElectionEc::ALG_HRW);
-        let es = EthernetSegment {
-            hrw: true,
+        assert_eq!(hrw.df_election_ec().df_alg, DfElectionEc::ALG_HRW);
+        // `algorithm hrw` PLUS a preference: Alg 2 carrying that bid — the
+        // pre-upgrade meaning of this combination.
+        let hrw_with_pref = EthernetSegment {
+            df_algorithm: Some(DfAlgorithm::Hrw),
             df_preference: Some(7),
             ..Default::default()
         };
-        assert_eq!(es.df_election_ec().df_alg, DfElectionEc::ALG_PREF);
+        assert_eq!(
+            hrw_with_pref.df_election_ec().df_alg,
+            DfElectionEc::ALG_PREF
+        );
+        assert_eq!(hrw_with_pref.df_election_ec().pref, 7);
+        // Same for the explicit `algorithm default` spelling.
+        let carving_with_pref = EthernetSegment {
+            df_algorithm: Some(DfAlgorithm::Default),
+            df_preference: Some(9),
+            ..Default::default()
+        };
+        assert_eq!(
+            carving_with_pref.df_election_ec().df_alg,
+            DfElectionEc::ALG_PREF
+        );
+        assert_eq!(carving_with_pref.df_election_ec().pref, 9);
+        // Preference alone: Alg 2 with that bid.
+        let bare = EthernetSegment {
+            df_preference: Some(7),
+            ..Default::default()
+        };
+        assert_eq!(bare.df_election_ec().df_alg, DfElectionEc::ALG_PREF);
+        assert_eq!(bare.df_election_ec().pref, 7);
+        // The new arms name the algorithm, so a value beside them selects
+        // between Alg 2 and Alg 3 instead of overriding them.
+        let lowest = EthernetSegment {
+            df_algorithm: Some(DfAlgorithm::LowestPreference),
+            df_preference: Some(100),
+            ..Default::default()
+        };
+        assert_eq!(
+            lowest.df_election_ec().df_alg,
+            DfElectionEc::ALG_PREF_LOWEST
+        );
+        assert_eq!(lowest.df_election_ec().pref, 100);
+        assert_eq!(
+            DfAlgorithm::from_keyword("lowest-preference"),
+            Some(DfAlgorithm::LowestPreference)
+        );
+        assert_eq!(DfAlgorithm::from_keyword("nonsense"), None);
+    }
+
+    /// The DP bit is a tie-break, not non-revertive operation: it ranks a PE
+    /// ahead of one that does not set it, and two PEs that both set it at
+    /// equal preference still fall through to the address — so the
+    /// lower-address PE reclaims the role on recovery. RFC 9785 §4.3
+    /// non-revertive behaviour needs the operational-preference adjustment
+    /// this phase does not implement, and no documentation may read as if it
+    /// did.
+    #[test]
+    fn dont_preempt_does_not_by_itself_make_the_election_non_revertive() {
+        let [a, b, _] = pes();
+        let dp = DfElectionEc::CAP_DONT_PREEMPT;
+        // The incumbent keeps the role only while the returning PE leaves
+        // the bit clear.
+        let one_sided = vec![
+            DfCandidate::new(a, DfElectionEc::ALG_PREF, 32767),
+            DfCandidate::new(b, DfElectionEc::ALG_PREF, 32767).with_caps(dp),
+        ];
+        assert_eq!(elect_forwarders(&one_sided, &ESI_T, 0).0, Some(b));
+        // Both configured the same way — the usual case — and the lower
+        // address takes it back.
+        let both = vec![
+            DfCandidate::new(a, DfElectionEc::ALG_PREF, 32767).with_caps(dp),
+            DfCandidate::new(b, DfElectionEc::ALG_PREF, 32767).with_caps(dp),
+        ];
+        assert_eq!(elect_forwarders(&both, &ESI_T, 0).0, Some(a));
+    }
+
+    /// RFC 9785 §3: a preference-based segment with no configured value bids
+    /// the mandatory default of 32767, not 0 — bidding 0 would rank this PE
+    /// below every peer that took the default. The DP bit rides only under
+    /// those algorithms.
+    #[test]
+    fn preference_defaults_to_the_rfc_9785_midpoint() {
+        let es = EthernetSegment {
+            df_algorithm: Some(DfAlgorithm::Preference),
+            ..Default::default()
+        };
+        let ec = es.df_election_ec();
+        assert_eq!(ec.df_alg, DfElectionEc::ALG_PREF);
+        assert_eq!(ec.pref, DfElectionEc::PREF_DEFAULT);
+        assert!(!ec.dont_preempt());
+
+        let low = EthernetSegment {
+            df_algorithm: Some(DfAlgorithm::LowestPreference),
+            dont_preempt: true,
+            ac_df: true,
+            ..Default::default()
+        };
+        let ec = low.df_election_ec();
+        assert_eq!(ec.df_alg, DfElectionEc::ALG_PREF_LOWEST);
+        assert_eq!(ec.pref, DfElectionEc::PREF_DEFAULT);
+        assert!(ec.dont_preempt() && ec.ac_df());
+
+        // Carving never advertises a preference or the DP bit — the bit is
+        // defined as a preference tie-break, so it would mean nothing on the
+        // wire here. (With a `preference` value this segment would not be
+        // carving at all: see
+        // `a_preference_value_still_overrides_the_legacy_algorithm_arms`.)
+        let carving = EthernetSegment {
+            df_algorithm: Some(DfAlgorithm::Default),
+            dont_preempt: true,
+            ..Default::default()
+        };
+        let ec = carving.df_election_ec();
+        assert_eq!(ec.df_alg, DfElectionEc::ALG_DEFAULT);
+        assert_eq!(ec.pref, 0);
+        assert!(!ec.dont_preempt());
+    }
+
+    /// RFC 9785 §4.1 ranking, in order: preference, then the DP bit, then
+    /// the lowest address. Each step is proven by a case the previous step
+    /// cannot decide, and Alg 3 reverses only the first.
+    #[test]
+    fn preference_ranks_pref_then_dp_then_address() {
+        let [a, b, c] = pes();
+        // Preference beats address order: c bids highest despite the highest
+        // address, and the runner-up (backup DF) is the next best bid.
+        let cands = prefs(&[(a, 100), (b, 200), (c, 300)]);
+        assert_eq!(elect_forwarders(&cands, &ESI_T, 0), (Some(c), Some(b)));
+        // ... for every tag, unlike carving.
+        assert_eq!(elect_forwarders(&cands, &ESI_T, 7).0, Some(c));
+        // Alg 3 reverses the preference comparison alone.
+        let low = prefs_low(&[(a, 100), (b, 200), (c, 300)]);
+        assert_eq!(elect_forwarders(&low, &ESI_T, 0), (Some(a), Some(b)));
+        // Equal preference: the PE asking not to be preempted wins, even
+        // though its address is higher.
+        let tie = vec![
+            DfCandidate::new(a, DfElectionEc::ALG_PREF, 32767),
+            DfCandidate::new(b, DfElectionEc::ALG_PREF, 32767)
+                .with_caps(DfElectionEc::CAP_DONT_PREEMPT),
+        ];
+        assert_eq!(elect_forwarders(&tie, &ESI_T, 0), (Some(b), Some(a)));
+        // Without the bit the same tie falls to the lowest address.
+        let tie = prefs(&[(a, 32767), (b, 32767)]);
+        assert_eq!(elect_forwarders(&tie, &ESI_T, 0), (Some(a), Some(b)));
+        // An unrelated capability (AC-DF) is not a tie-break.
+        let tie = vec![
+            DfCandidate::new(a, DfElectionEc::ALG_PREF, 32767),
+            DfCandidate::new(b, DfElectionEc::ALG_PREF, 32767).with_caps(DfElectionEc::CAP_AC_DF),
+        ];
+        assert_eq!(elect_forwarders(&tie, &ESI_T, 0).0, Some(a));
+        // A segment split between Alg 2 and Alg 3 is a disagreed segment:
+        // RFC 8584 negotiation drops the whole thing to carving, where tag 0
+        // is the lowest address regardless of the bids.
+        let mixed = vec![
+            DfCandidate::new(a, DfElectionEc::ALG_PREF, 100),
+            DfCandidate::new(b, DfElectionEc::ALG_PREF_LOWEST, 300),
+        ];
+        assert_eq!(elect_forwarders(&mixed, &ESI_T, 0).0, Some(a));
+        assert_eq!(elect_forwarders(&mixed, &ESI_T, 1).0, Some(b));
+    }
+
+    /// The E-LAN role advertised on the per-EVI A-D is the same election the
+    /// BUM filter uses, so the bit a remote reads and the filter this PE
+    /// enforces cannot disagree: the DF is Primary, the runner-up is Backup,
+    /// everyone else advertises neither bit.
+    #[test]
+    fn elan_role_tracks_the_same_election_as_the_bum_filter() {
+        let [a, b, c] = pes();
+        let cands = carving(&[a, b, c]);
+        // Carving on tag 0 elects a, so b (ordinal 1) is its backup.
+        assert_eq!(elan_role(&cands, a, &ESI_T, 0, false), VpwsRole::Primary);
+        assert_eq!(elan_role(&cands, b, &ESI_T, 0, false), VpwsRole::Backup);
+        assert_eq!(
+            elan_role(&cands, c, &ESI_T, 0, false),
+            VpwsRole::NonDesignated
+        );
+        // Whoever is Primary here is exactly who `elan_df` lets forward BUM.
+        for (pe, role) in [
+            (a, VpwsRole::Primary),
+            (b, VpwsRole::Backup),
+            (c, VpwsRole::NonDesignated),
+        ] {
+            assert_eq!(
+                elan_df(&cands, pe, &ESI_T, 0, false),
+                role == VpwsRole::Primary
+            );
+        }
+        // A different bridge domain carves differently, and the role follows.
+        assert_eq!(elan_role(&cands, b, &ESI_T, 1, false), VpwsRole::Primary);
+        assert_eq!(elan_role(&cands, c, &ESI_T, 1, false), VpwsRole::Backup);
+        // Preference pins one PE across every bridge domain.
+        let pref = prefs(&[(a, 10), (b, 200), (c, 30)]);
+        for vni in [0, 1, 4242] {
+            assert_eq!(elan_role(&pref, b, &ESI_T, vni, false), VpwsRole::Primary);
+            assert_eq!(elan_role(&pref, c, &ESI_T, vni, false), VpwsRole::Backup);
+            assert_eq!(
+                elan_role(&pref, a, &ESI_T, vni, false),
+                VpwsRole::NonDesignated
+            );
+        }
+    }
+
+    /// A PE that has not joined the election advertises NEITHER bit — the
+    /// opposite of `vpws_role`'s "stay primary while the segment converges"
+    /// fallback. Under single-active a non-DF blocks its access port in both
+    /// directions, so attracting a remote's unicast to a PE that is not
+    /// forwarding is a blackhole, where the VPWS fallback would only risk a
+    /// duplicate.
+    #[test]
+    fn elan_role_is_neither_bit_while_this_pe_is_out_of_the_election() {
+        let [a, b, _] = pes();
+        let cands = carving(&[a, b]);
+        // Holding (startup delay): our Type-4 is suppressed, so we are in
+        // nobody's candidate set and must not be used.
+        assert_eq!(
+            elan_role(&cands, a, &ESI_T, 0, true),
+            VpwsRole::NonDesignated
+        );
+        assert_eq!(
+            vpws_role(EsRedundancyMode::SingleActive, &cands, a, &ESI_T, 0),
+            VpwsRole::Primary
+        );
+        // Not in the candidate set at all (our own Type-4 not selected yet).
+        let others = carving(&[b]);
+        assert_eq!(
+            elan_role(&others, a, &ESI_T, 0, false),
+            VpwsRole::NonDesignated
+        );
+        // An empty segment elects nobody.
+        assert_eq!(elan_role(&[], a, &ESI_T, 0, false), VpwsRole::NonDesignated);
+        // A lone PE is Primary with no backup behind it.
+        let alone = carving(&[a]);
+        assert_eq!(elan_role(&alone, a, &ESI_T, 0, false), VpwsRole::Primary);
+    }
+
+    /// The config keyword round-trips, and only `l2-attr` signals.
+    #[test]
+    fn role_signaling_keyword_round_trip() {
+        assert_eq!(
+            RoleSignaling::from_keyword("l2-attr"),
+            RoleSignaling::L2Attr
+        );
+        assert_eq!(
+            RoleSignaling::from_keyword("inferred"),
+            RoleSignaling::Inferred
+        );
+        assert_eq!(
+            RoleSignaling::from_keyword("nonsense"),
+            RoleSignaling::Inferred
+        );
+        assert_eq!(RoleSignaling::default(), RoleSignaling::Inferred);
+        assert!(RoleSignaling::L2Attr.signals());
+        assert!(!RoleSignaling::Inferred.signals());
+        assert_eq!(RoleSignaling::L2Attr.as_str(), "l2-attr");
+        assert_eq!(RoleSignaling::Inferred.as_str(), "inferred");
+        // The bits the two signalling roles put on the wire.
+        assert_eq!(VpwsRole::Primary.bits(), (true, false));
+        assert_eq!(VpwsRole::Backup.bits(), (false, true));
+        assert_eq!(VpwsRole::NonDesignated.bits(), (false, false));
     }
 
     /// AC-DF is a unanimous capability: any PE without the bit keeps the
@@ -937,9 +1554,9 @@ mod tests {
         use std::collections::BTreeSet;
         let [a, b, c] = pes();
         let cands: Vec<DfCandidate> = vec![
-            (a, DfElectionEc::ALG_DEFAULT, 0),
-            (b, DfElectionEc::ALG_DEFAULT, 0),
-            (c, DfElectionEc::ALG_DEFAULT, 0),
+            DfCandidate::new(a, DfElectionEc::ALG_DEFAULT, 0),
+            DfCandidate::new(b, DfElectionEc::ALG_DEFAULT, 0),
+            DfCandidate::new(c, DfElectionEc::ALG_DEFAULT, 0),
         ];
         // Tag 1 carves to ordinal 1 = b over the full set.
         assert_eq!(elect_forwarders(&cands, &ESI_T, 1).0, Some(b));
@@ -948,7 +1565,7 @@ mod tests {
         let ad_evi: BTreeSet<IpAddr> = [c].into_iter().collect();
         let narrowed = ac_df_filter(&cands, a, &live, &ad_evi);
         assert_eq!(
-            narrowed.iter().map(|(ip, _, _)| *ip).collect::<Vec<_>>(),
+            narrowed.iter().map(|c| c.addr).collect::<Vec<_>>(),
             vec![a, c]
         );
         // Tag 1 now carves to ordinal 1 of [a, c] = c.
@@ -959,14 +1576,215 @@ mod tests {
         let ad_evi: BTreeSet<IpAddr> = [b, c].into_iter().collect();
         let narrowed = ac_df_filter(&cands, a, &live, &ad_evi);
         assert_eq!(
-            narrowed.iter().map(|(ip, _, _)| *ip).collect::<Vec<_>>(),
+            narrowed.iter().map(|c| c.addr).collect::<Vec<_>>(),
             vec![a, b]
         );
         // The local PE is never filtered by its own (originated) routes.
         let narrowed = ac_df_filter(&cands, a, &BTreeSet::new(), &BTreeSet::new());
+        assert_eq!(narrowed.iter().map(|c| c.addr).collect::<Vec<_>>(), vec![a]);
+    }
+
+    /// A remote ingress PE picks the forwarder from the roles the segment's
+    /// PEs advertise: exactly one P=1 is the answer, the lone B=1 is the
+    /// prepared standby, and nobody signalling means fall back to inference.
+    #[test]
+    fn remote_selects_the_signalled_forwarder() {
+        use SaSelectReason::*;
+        let [a, b, c] = pes();
+        let p = Some((true, false));
+        let bk = Some((false, true));
+        let neither = Some((false, false));
+
+        // The ordinary case: one primary, one backup, one neither.
         assert_eq!(
-            narrowed.iter().map(|(ip, _, _)| *ip).collect::<Vec<_>>(),
-            vec![a]
+            select_sa_forwarder(&[(a, p), (b, bk), (c, neither)]),
+            (Some(a), Some(b), Signalled)
+        );
+        // Order of the input does not matter.
+        assert_eq!(
+            select_sa_forwarder(&[(c, neither), (b, bk), (a, p)]),
+            (Some(a), Some(b), Signalled)
+        );
+        // No backup advertised: a primary alone is still an answer.
+        assert_eq!(
+            select_sa_forwarder(&[(a, p), (b, neither)]),
+            (Some(a), None, Signalled)
+        );
+        // Two PEs advertising B=1 is not a usable standby — it is ambiguous,
+        // so no slot-1 preference is expressed.
+        assert_eq!(
+            select_sa_forwarder(&[(a, p), (b, bk), (c, bk)]),
+            (Some(a), None, Signalled)
+        );
+    }
+
+    /// Nobody claiming primary is not the same as nobody signalling: the
+    /// segment's own runner-up leads, because the alternative is slot 0 by
+    /// address order — a worse guess, not a safer one. With no signal at all
+    /// the caller is told to fall back to its MAC-origination inference.
+    #[test]
+    fn remote_falls_back_only_when_nothing_is_signalled() {
+        use SaSelectReason::*;
+        let [a, b, c] = pes();
+        let bk = Some((false, true));
+        let neither = Some((false, false));
+
+        assert_eq!(
+            select_sa_forwarder(&[(a, neither), (b, bk)]),
+            (Some(b), None, BackupOnly)
+        );
+        // Every member signalled, and every one of them said "not me". That
+        // is an ANSWER — there is nobody to forward to — and must not be
+        // reported as silence, or the caller falls back to inference and
+        // installs the stale MAC advertiser (or the lowest address) over an
+        // explicit non-designated role.
+        assert_eq!(
+            select_sa_forwarder(&[(a, neither), (b, neither)]),
+            (None, None, NoForwarder)
+        );
+        // Two PEs claiming backup and nobody claiming primary is the same
+        // state: ambiguous, so nobody leads.
+        assert_eq!(
+            select_sa_forwarder(&[(a, bk), (b, bk), (c, neither)]),
+            (None, None, NoForwarder)
+        );
+        // A PARTIALLY upgraded segment reads as unsignalled, not as "no
+        // forwarder". The silent PE may be the Designated Forwarder — an
+        // older release, or one whose `role-signaling` is still at the
+        // default — and withholding the group because the OTHER PE said
+        // "not me" would blackhole a segment that is forwarding perfectly
+        // well. Enabling the feature one PE at a time is the ordinary
+        // rollout, so it must not be the dangerous path.
+        assert_eq!(
+            select_sa_forwarder(&[(a, neither), (b, None)]),
+            (None, None, Unsignalled)
+        );
+        // No Layer-2 Attributes EC anywhere — a segment whose PEs run
+        // `role-signaling inferred`, or an older release.
+        assert_eq!(
+            select_sa_forwarder(&[(a, None), (b, None), (c, None)]),
+            (None, None, Unsignalled)
+        );
+        assert_eq!(select_sa_forwarder(&[]), (None, None, Unsignalled));
+        // Even an explicit P=1 is not trusted while a peer is silent: that
+        // peer's own view is unknown, and the segment had a working answer
+        // (inference) before anyone was upgraded. Unanimity first, exactly
+        // as RFC 8584 §4 requires for AC-DF.
+        assert_eq!(
+            select_sa_forwarder(&[(a, None), (b, Some((true, false)))]),
+            (None, None, Unsignalled)
+        );
+        // Unanimous again once the last PE is upgraded, and the answer
+        // appears.
+        assert_eq!(
+            select_sa_forwarder(&[(a, neither), (b, Some((true, false)))]),
+            (Some(b), None, Signalled)
+        );
+    }
+
+    /// Two PEs both claiming primary is a segment-level misconfiguration no
+    /// ingress PE can repair. This one installs a single forwarder
+    /// deterministically — the lowest address, so every remote PE picks the
+    /// same one — and reports the condition instead of forwarding to both.
+    #[test]
+    fn remote_tie_breaks_a_double_primary_and_says_so() {
+        use SaSelectReason::*;
+        let [a, b, c] = pes();
+        let p = Some((true, false));
+        assert_eq!(
+            select_sa_forwarder(&[(b, p), (a, p), (c, Some((false, true)))]),
+            (Some(a), Some(c), Conflict)
+        );
+        assert_eq!(Conflict.as_str(), "conflict");
+        assert_eq!(NoForwarder.as_str(), "no forwarder");
+        assert_eq!(Signalled.as_str(), "signalled");
+        assert_eq!(BackupOnly.as_str(), "backup-only");
+        assert_eq!(Unsignalled.as_str(), "inferred");
+    }
+
+    /// P=1 and B=1 together name no role (rfc7432bis §7.11.1 gives the bits
+    /// disjoint meanings), so such a member takes no part in the election.
+    /// Counting it as a primary claim would let a malformed advertisement
+    /// from a LOW address displace a correctly elected primary through the
+    /// conflict tie-break — the misbehaving PE would win.
+    #[test]
+    fn remote_rejects_a_member_claiming_both_bits() {
+        use SaSelectReason::*;
+        let [a, b, c] = pes();
+        let p = Some((true, false));
+        let both = Some((true, true));
+
+        // `a` sorts lowest, so under a tie-break it would win. It must not
+        // even be a candidate: `b`'s valid claim stands alone and the result
+        // is a clean Signalled, not a Conflict.
+        assert_eq!(
+            select_sa_forwarder(&[(a, both), (b, p)]),
+            (Some(b), None, Signalled)
+        );
+        assert_eq!(invalid_role_members(&[(a, both), (b, p)]), vec![a]);
+        // It is not a backup either.
+        assert_eq!(
+            select_sa_forwarder(&[(a, both), (b, p), (c, Some((false, true)))]),
+            (Some(b), Some(c), Signalled)
+        );
+        // A malformed role beside a silent peer is still a partially
+        // signalled segment: unanimity is about the EC being present, and
+        // `b` has none, so inference decides rather than the group being
+        // withheld.
+        assert_eq!(
+            select_sa_forwarder(&[(a, both), (b, None)]),
+            (None, None, Unsignalled)
+        );
+        // With the segment unanimous, the malformed member is simply not
+        // selectable and nobody else claims the role.
+        assert_eq!(
+            select_sa_forwarder(&[(a, both), (b, Some((false, false)))]),
+            (None, None, NoForwarder)
+        );
+        // Genuine double claims are still a conflict, and the malformed one
+        // stays out of it.
+        assert_eq!(
+            select_sa_forwarder(&[(a, both), (b, p), (c, p)]),
+            (Some(b), None, Conflict)
+        );
+        assert!(invalid_role_members(&[(b, p), (c, p)]).is_empty());
+    }
+
+    /// The group is ordered primary, then backup, then the rest — the
+    /// datapath forwards to slot 0 alone under single-active and holds the
+    /// remainder as the pre-installed backup path, so slot 1 must be the PE
+    /// the segment nominated rather than whichever address sorts next.
+    #[test]
+    fn group_orders_primary_then_backup_then_the_rest() {
+        use crate::rib::EsNhgMember;
+        let [a, b, c] = pes();
+        let pairs = vec![
+            (a, EsNhgMember::Vxlan(a)),
+            (b, EsNhgMember::Vxlan(b)),
+            (c, EsNhgMember::Vxlan(c)),
+        ];
+        assert_eq!(
+            order_es_members(pairs.clone(), Some(c), Some(b)),
+            vec![
+                EsNhgMember::Vxlan(c),
+                EsNhgMember::Vxlan(b),
+                EsNhgMember::Vxlan(a)
+            ]
+        );
+        // A backup with no primary still leads.
+        assert_eq!(
+            order_es_members(pairs.clone(), None, Some(c)),
+            vec![
+                EsNhgMember::Vxlan(c),
+                EsNhgMember::Vxlan(a),
+                EsNhgMember::Vxlan(b)
+            ]
+        );
+        // A backup that is no longer a member changes nothing.
+        let survivors: Vec<_> = pairs.into_iter().filter(|(pe, _)| *pe != b).collect();
+        assert_eq!(
+            order_es_members(survivors, Some(c), Some(b)),
+            vec![EsNhgMember::Vxlan(c), EsNhgMember::Vxlan(a)]
         );
     }
 
@@ -983,7 +1801,7 @@ mod tests {
             (b, EsNhgMember::Vxlan(b)),
         ];
         assert_eq!(
-            order_es_members(pairs.clone(), None),
+            order_es_members(pairs.clone(), None, None),
             vec![
                 EsNhgMember::Vxlan(a),
                 EsNhgMember::Vxlan(b),
@@ -991,7 +1809,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            order_es_members(pairs.clone(), Some(b)),
+            order_es_members(pairs.clone(), Some(b), None),
             vec![
                 EsNhgMember::Vxlan(b),
                 EsNhgMember::Vxlan(a),
@@ -1003,7 +1821,7 @@ mod tests {
         // which is the failover.
         let survivors: Vec<_> = pairs.into_iter().filter(|(pe, _)| *pe != b).collect();
         assert_eq!(
-            order_es_members(survivors, Some(b)),
+            order_es_members(survivors, Some(b), None),
             vec![EsNhgMember::Vxlan(a), EsNhgMember::Vxlan(c)]
         );
     }
@@ -1024,7 +1842,7 @@ mod tests {
     #[test]
     fn elan_df_carves_by_vni_and_holds() {
         let [a, b, c] = pes();
-        let cands: Vec<DfCandidate> = vec![(a, 0, 0), (b, 0, 0)];
+        let cands: Vec<DfCandidate> = vec![DfCandidate::new(a, 0, 0), DfCandidate::new(b, 0, 0)];
         // VNI 100 % 2 == 0 → a; VNI 101 % 2 == 1 → b.
         assert!(elan_df(&cands, a, &ESI_T, 100, false));
         assert!(!elan_df(&cands, b, &ESI_T, 100, false));

@@ -254,9 +254,10 @@ on the service instance rather than a fixed ordinal is what spreads
 different E-Lines on one segment across both PEs instead of piling them all
 onto the lowest address.
 
-**Preference-based election** (Alg 2, draft-ietf-bess-evpn-pref-df) replaces
-that hash with an explicit choice — set a preference on the segment and the
-highest bid wins, ties broken by the lowest originating address:
+**Preference-based election** (Alg 2, RFC 9785) replaces that hash with an
+explicit choice — set a preference on the segment and the highest bid wins,
+ties broken by the Don't-Preempt bit and then by the lowest originating
+address:
 
 ```
   ethernet-segment ES1
@@ -264,9 +265,33 @@ highest bid wins, ties broken by the lowest originating address:
    redundancy-mode single-active
    interface ce1
    df-election
+    algorithm preference
     preference 300
+    dont-preempt    # optional: do not hand the role back on a tie
     ac-df           # optional: advertise the AC-Influenced DF capability
 ```
+
+`algorithm lowest-preference` (Alg 3) is the same election with the
+comparison reversed, for a fabric that numbers its PEs the other way round.
+Selecting either algorithm and leaving `preference` unset bids RFC 9785's
+mandatory default of **32767**, the midpoint of the range — not 0, which
+would rank the PE below every peer that took the default.
+
+`dont-preempt` matters only when two PEs bid the same preference: the PE
+carrying the bit ranks ahead of one that does **not** set it, in a comparison
+that runs after the preference and before the originating address. It is a
+tie-break input on **every** PE of the segment, so a peer's bit is honoured
+whether or not this PE sets its own — ignoring it would make the two ends
+rank the segment differently, and both would forward.
+
+That tie-break is all it is today. RFC 9785 §4.3 *non-revertive* operation
+also has a recovering PE advertise an operational preference and DP inherited
+from the incumbent DF, and zebra-rs does not do that yet — so with
+`dont-preempt` on every PE at equal preference, which is how an operator
+would normally configure it, the tie still falls through to the address and
+the lowest-address PE reclaims the role when it returns. To pin the DF
+across a recovery today, give the intended PE the higher `preference` rather
+than relying on the bit.
 
 Preference is per-*segment*, so one PE wins every service instance on it —
 that is the trade against carving, and the reason to use it: the operator
@@ -303,8 +328,12 @@ that PE won or wins. Ask for it with:
 
 The Type-4 then carries `df-election:alg1`, and the same unanimity rule
 applies: any PE still advertising Alg 0 drops the segment back to carving. A
-`preference` on the same segment takes priority over `algorithm hrw` — a
-pinned DF is a stronger statement than a better hash. The weight is the
+`preference` on the same segment still takes priority over `algorithm hrw`
+— a pinned DF is a stronger statement than a better hash, and that is what
+the combination meant before `algorithm` had preference arms, so an upgrade
+does not change what the PE advertises. Beside `algorithm preference` or
+`algorithm lowest-preference` a value selects which of the two bids instead.
+The weight is the
 RFC's formula bit for bit (CRC-32 of the tag and ESI, then the RFC's
 linear-congruential mix, modulo 2^31, ties to the lowest address), so a
 segment shared with Junos `df-election-type mod`/Arista `algorithm hrw`

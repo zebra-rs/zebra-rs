@@ -905,7 +905,20 @@ pub struct Bgp {
     /// The Ethernet Segment nexthop groups last teed to cradle per
     /// `(ESI, EVI)` (`evpn_es_nhg_sync` diffs against it, RFC 7432 §8.4).
     /// `(ESI, EVI)` → `(single_active, ordered members)`.
-    pub es_nhg_sent: BTreeMap<([u8; 10], u32), (bool, Vec<crate::rib::EsNhgMember>)>,
+    pub es_nhg_sent: BTreeMap<([u8; 10], u32), (bool, Vec<crate::rib::EsNhgMember>, bool)>,
+    /// The last diagnostic verdict reported for each single-active group —
+    /// `(reason, members advertising a malformed role)`. Diffed separately
+    /// from `es_nhg_sent` because a conflict can appear without the teed
+    /// member list changing: a second PE claiming primary leaves the lowest
+    /// address at slot 0 either way.
+    #[allow(clippy::type_complexity)]
+    pub es_nhg_diag: BTreeMap<
+        ([u8; 10], u32),
+        (
+            super::ethernet_segment::SaSelectReason,
+            Vec<std::net::IpAddr>,
+        ),
+    >,
     /// Access-side links currently down, by name — maintained from
     /// `RibRx::LinkAdd` (the link's flags), `LinkDown`, `LinkUp` and
     /// `LinkDel`. An Ethernet Segment whose port is here withholds its ES
@@ -1438,6 +1451,7 @@ impl Bgp {
             l2_port_evis: BTreeMap::new(),
             es_df_sent: BTreeMap::new(),
             es_nhg_sent: BTreeMap::new(),
+            es_nhg_diag: BTreeMap::new(),
             links_down: std::collections::BTreeSet::new(),
             local_smet: BTreeMap::new(),
             ethernet_segments: BTreeMap::new(),
@@ -2650,20 +2664,35 @@ impl Bgp {
                 }
             }
             Message::BgpLs { add, withdraw } => {
-                // Locally-produced BGP-LS (IS-IS producer, RFC 9552). Store
-                // into / remove from the `bgp_ls` Loc-RIB as Originated.
-                // Re-advertisement to peers is a later phase; this records
-                // the topology so `show bgp link-state` reflects it.
+                // Locally-produced BGP-LS (IS-IS producer, RFC 9552):
+                // store into / remove from the `bgp_ls` Loc-RIB as
+                // Originated, then advertise the delta to every peer
+                // that negotiated the family.
+                //
+                // The producer already diffs against what it advertised
+                // last, so a message only carries genuine changes —
+                // there is no Adj-RIB-Out here to re-filter them
+                // against, in the same direct-emit shape SR Policy
+                // origination uses.
                 for nlri in &withdraw {
                     super::route::route_bgpls_withdraw_originated(nlri, &mut self.local_rib);
+                    super::route::bgpls_origin_withdraw(self, nlri);
                 }
                 for (nlri, ls_attr) in add {
                     super::route::route_bgpls_originate(
-                        nlri,
+                        nlri.clone(),
                         ls_attr,
                         &mut self.local_rib,
                         &mut self.attr_store,
                     );
+                    // Re-read the interned attribute the Loc-RIB now
+                    // holds, so the wire carries exactly what
+                    // `show bgp link-state` renders.
+                    if let Some(rib) = self.local_rib.bgp_ls.selected.get(&nlri) {
+                        let attr = (*rib.attr).clone();
+                        let weight = rib.weight;
+                        super::route::bgpls_origin_reach(self, &nlri, &attr, weight);
+                    }
                 }
             }
             Message::MupC(ev) => {

@@ -259,6 +259,14 @@ impl Ospf {
             config_ospf_interface_te_measurement_damping_period,
         );
         self.ospf_add(
+            "/area/interface/te-metric/measurement/anomaly-threshold",
+            config_ospf_interface_te_measurement_anomaly_threshold,
+        );
+        self.ospf_add(
+            "/area/interface/te-metric/measurement/reuse-threshold",
+            config_ospf_interface_te_measurement_reuse_threshold,
+        );
+        self.ospf_add(
             "/area/interface/hello-interval",
             config_ospf_interface_hello_interval,
         );
@@ -1547,6 +1555,30 @@ fn config_ospf_interface_te_measurement_damping_period(
     config_ospf_interface_te_measurement(ospf, args, |m, args| {
         let value = args.u32()?;
         m.damping_period_secs = op.is_set().then_some(value);
+        Some(())
+    })
+}
+
+fn config_ospf_interface_te_measurement_anomaly_threshold(
+    ospf: &mut Ospf,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospf_interface_te_measurement(ospf, args, |m, args| {
+        let value = args.u32()?;
+        m.anomaly_threshold_us = op.is_set().then_some(value);
+        Some(())
+    })
+}
+
+fn config_ospf_interface_te_measurement_reuse_threshold(
+    ospf: &mut Ospf,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospf_interface_te_measurement(ospf, args, |m, args| {
+        let value = args.u32()?;
+        m.reuse_threshold_us = op.is_set().then_some(value);
         Some(())
     })
 }

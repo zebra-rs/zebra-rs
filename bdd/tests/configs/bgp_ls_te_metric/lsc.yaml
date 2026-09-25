@@ -1,0 +1,20 @@
+interface:
+- if-name: lsc-ls1
+  ipv4:
+    address: 192.168.73.2/30
+
+router:
+  bgp:
+    global:
+      as: 65072
+      router-id: 10.71.0.3
+    neighbor:
+    - remote-address: 192.168.73.1
+      remote-as: 65071
+      enabled: true
+      # A strict external collector: the feed's AS_PATH must carry ls1's
+      # AS first, which an empty originated path would fail.
+      enforce-first-as: {}
+      afi-safi:
+      - name: link-state
+        enabled: true

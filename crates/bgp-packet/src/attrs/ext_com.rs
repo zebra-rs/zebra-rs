@@ -318,6 +318,42 @@ impl ExtCommunityValue {
         })
     }
 
+    /// Build a Service Carving Time (SCT) Extended Community (RFC 9722
+    /// §2.1): EVPN high-type (0x06) + SCT sub-type (0x0F). Carried on the
+    /// **Ethernet Segment (Type-4)** route — not on the Ethernet A-D — and
+    /// announces the instant at which the advertising PE will run service
+    /// carving, so every PE on the segment carves together instead of each
+    /// one re-electing whenever BGP happened to deliver.
+    ///
+    /// The value is an adapted 64-bit NTP timestamp: 4 octets of NTP seconds
+    /// (prime epoch 1900-01-01 UTC) followed by the **high-order 16 bits**
+    /// of the NTP fraction, which quantizes to ~15.26 µs.
+    pub fn sct(seconds: u32, fraction: u16) -> Self {
+        let mut val = [0u8; 6];
+        val[0..4].copy_from_slice(&seconds.to_be_bytes());
+        val[4..6].copy_from_slice(&fraction.to_be_bytes());
+        ExtCommunityValue {
+            high_type: ExtCommunityType::Evpn as u8,
+            low_type: EVPN_SCT_SUB_TYPE,
+            val,
+        }
+    }
+
+    /// True iff this entry is an EVPN Service Carving Time EC (RFC 9722
+    /// §2.1): EVPN high-type (0x06) + SCT sub-type (0x0F).
+    pub fn is_sct(&self) -> bool {
+        self.high_type == ExtCommunityType::Evpn as u8 && self.low_type == EVPN_SCT_SUB_TYPE
+    }
+
+    /// Decode the Service Carving Time EC (RFC 9722 §2.1). `None` for any
+    /// non-matching EC.
+    pub fn as_sct(&self) -> Option<SctEc> {
+        self.is_sct().then(|| SctEc {
+            seconds: u32::from_be_bytes([self.val[0], self.val[1], self.val[2], self.val[3]]),
+            fraction: u16::from_be_bytes([self.val[4], self.val[5]]),
+        })
+    }
+
     /// Build an EVI-RT Extended Community (RFC 9251 §9.5) from the EVI's
     /// (BD's) Route Target. The EVI-RT carries the same 6-octet RT value
     /// under the EVPN high-type (0x06), with the sub-type selecting the RT
@@ -405,6 +441,10 @@ const EVPN_ROUTER_MAC_SUB_TYPE: u8 = 0x03;
 /// under the EVPN high-type (0x06).
 const EVPN_L2_ATTR_SUB_TYPE: u8 = 0x04;
 
+/// Service Carving Time Extended Community sub-type (RFC 9722 §2.1), carried
+/// under the EVPN high-type (0x06) on the Ethernet Segment (Type-4) route.
+const EVPN_SCT_SUB_TYPE: u8 = 0x0F;
+
 /// Decoded EVPN Layer-2 Attributes Extended Community (RFC 8214 §3.1).
 /// Carried on the per-EVI Ethernet A-D (Type-1) route of a VPWS service to
 /// signal the endpoint role and the attachment circuit's L2 MTU.
@@ -435,6 +475,119 @@ impl L2AttrEc {
 impl From<L2AttrEc> for ExtCommunityValue {
     fn from(a: L2AttrEc) -> Self {
         ExtCommunityValue::l2_attr(a.primary, a.backup, a.control_word, a.mtu)
+    }
+}
+
+/// Decoded EVPN Service Carving Time Extended Community (RFC 9722 §2.1):
+/// the instant the advertising PE will run DF election, as an adapted NTP
+/// timestamp.
+///
+/// Wire layout of the 6-octet value: `seconds` (4, NTP prime epoch
+/// 1900-01-01 UTC) then the **high-order 16 bits** of the NTP fraction. The
+/// low 16 fraction bits are not carried and read back as zero, so the
+/// resolution is 2^-16 s ≈ 15.26 µs — ample for a mechanism whose skew
+/// defaults to 10 ms.
+///
+/// [`Ord`] is **chronological, not the derived wire order** — see the impl.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SctEc {
+    /// Seconds since the NTP prime epoch (1900-01-01 UTC).
+    pub seconds: u32,
+    /// High-order 16 bits of the NTP fraction.
+    pub fraction: u16,
+}
+
+/// Order two carving times by **when they are**, not by their wire bytes.
+///
+/// The derived order would compare the raw 32-bit seconds field, and that
+/// reverses across the 2036-02-07 rollover: a time one second before it
+/// (`seconds` = `u32::MAX`) would sort *after* one second past it
+/// (`seconds` = 1). RFC 9722 §3.1 has a PE take the latest SCT it has been
+/// given, so `.max()` on the derived order would pick the earlier instant at
+/// exactly the moment the distinction matters. Comparing the interpreted
+/// Unix instants keeps `<`, `.max()` and `BTreeMap` all meaning what they
+/// read as.
+///
+/// This is the *decoded* value. [`ExtCommunityValue`] itself keeps its
+/// derived wire-byte ordering, which is what its `BTreeSet` needs.
+impl Ord for SctEc {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.to_unix_micros().cmp(&other.to_unix_micros())
+    }
+}
+
+impl PartialOrd for SctEc {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl SctEc {
+    /// Seconds between the NTP prime epoch (1900-01-01) and the Unix epoch
+    /// (1970-01-01) — 70 years including 17 leap days.
+    pub const NTP_UNIX_OFFSET: u64 = 2_208_988_800;
+
+    /// The Unix time at which NTP era 0 ends and the 32-bit seconds field
+    /// wraps: 2036-02-07T06:28:16Z, i.e. `2^32 - NTP_UNIX_OFFSET`.
+    pub const ERA0_END_UNIX: u64 = (1u64 << 32) - Self::NTP_UNIX_OFFSET;
+
+    /// Build from a Unix timestamp with microsecond precision, truncating
+    /// the fraction to the 16 bits the EC carries.
+    ///
+    /// Times at or after [`ERA0_END_UNIX`](Self::ERA0_END_UNIX) wrap into NTP
+    /// era 1, which is exactly what the wire field does; the reverse
+    /// conversion undoes it (see [`to_unix_micros`](Self::to_unix_micros)).
+    pub fn from_unix_micros(unix_secs: u64, micros: u32) -> Self {
+        let ntp = unix_secs.wrapping_add(Self::NTP_UNIX_OFFSET);
+        // (micros / 1_000_000) * 2^16, rounded down — the same truncation
+        // the 16-bit field forces anyway.
+        let fraction = ((u64::from(micros.min(999_999)) << 16) / 1_000_000) as u16;
+        Self {
+            seconds: ntp as u32,
+            fraction,
+        }
+    }
+
+    /// The Unix timestamp this SCT names, as `(seconds, microseconds)`.
+    ///
+    /// A seconds field below [`NTP_UNIX_OFFSET`](Self::NTP_UNIX_OFFSET)
+    /// cannot be a real time in era 0 — it would be before 1970, decades
+    /// before EVPN — so it is read as **era 1**, i.e. a time after the 2036
+    /// rollover. That is the standard NTP era heuristic and keeps this codec
+    /// correct across the rollover instead of jumping 136 years backwards.
+    pub fn to_unix_micros(&self) -> (u64, u32) {
+        let ntp = u64::from(self.seconds);
+        let secs = if ntp >= Self::NTP_UNIX_OFFSET {
+            ntp - Self::NTP_UNIX_OFFSET
+        } else {
+            ntp + Self::ERA0_END_UNIX
+        };
+        // Reconstruct with the low 16 fraction bits zero, as the RFC says.
+        let micros = ((u64::from(self.fraction) * 1_000_000) >> 16) as u32;
+        (secs, micros)
+    }
+
+    /// Build from a `SystemTime`. Times before the Unix epoch are not
+    /// representable here and clamp to it — a caller handing this a
+    /// pre-1970 carving instant has a broken clock, and a clamped value is
+    /// a rejected (past) SCT downstream rather than a silently valid one.
+    pub fn from_system_time(t: std::time::SystemTime) -> Self {
+        let d = t
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or(std::time::Duration::ZERO);
+        Self::from_unix_micros(d.as_secs(), d.subsec_micros())
+    }
+
+    /// The `SystemTime` this SCT names, via [`to_unix_micros`](Self::to_unix_micros).
+    pub fn to_system_time(&self) -> std::time::SystemTime {
+        let (secs, micros) = self.to_unix_micros();
+        std::time::UNIX_EPOCH + std::time::Duration::new(secs, micros * 1_000)
+    }
+}
+
+impl From<SctEc> for ExtCommunityValue {
+    fn from(s: SctEc) -> Self {
+        ExtCommunityValue::sct(s.seconds, s.fraction)
     }
 }
 
@@ -529,9 +682,10 @@ pub struct DfElectionEc {
     pub df_alg: u8,
     /// Capability Bitmap (16 bits, RFC MSB-0 numbering: Bit 0 = `0x8000`).
     pub bitmap: u16,
-    /// DF Preference, in the last two octets of the value
-    /// (draft-ietf-bess-evpn-pref-df). Only meaningful under
-    /// [`ALG_PREF`](Self::ALG_PREF); zero and ignored otherwise.
+    /// DF Preference, in the last two octets of the value (RFC 9785 §3).
+    /// Only meaningful under [`ALG_PREF`](Self::ALG_PREF) /
+    /// [`ALG_PREF_LOWEST`](Self::ALG_PREF_LOWEST); zero and ignored
+    /// otherwise.
     pub pref: u16,
 }
 
@@ -543,26 +697,99 @@ impl DfElectionEc {
     pub const ALG_DEFAULT: u8 = 0;
     /// DF Alg 1 — Highest Random Weight (HRW, RFC 8584 §3).
     pub const ALG_HRW: u8 = 1;
-    /// DF Alg 2 — Preference-based (draft-ietf-bess-evpn-pref-df). The
-    /// highest [`pref`](Self::pref) wins, ties broken by lowest IP. This is
-    /// what IOS-XR (`service-carving preference-based`), Junos
+    /// DF Alg 2 — Highest-Preference (RFC 9785 §3). The highest
+    /// [`pref`](Self::pref) wins, ties broken by the Don't-Preempt bit and
+    /// then the lowest IP. This is what IOS-XR
+    /// (`service-carving preference-based`), Junos
     /// (`df-election-type preference`), Arista
     /// (`designated-forwarder election algorithm preference`) and FRR
     /// (`evpn mh es-df-pref`) all expose.
     pub const ALG_PREF: u8 = 2;
+    /// DF Alg 3 — Lowest-Preference (RFC 9785 §3): the same ranking with the
+    /// preference comparison reversed, for fabrics that number their PEs the
+    /// other way round. A segment mixing Alg 2 and Alg 3 falls back to the
+    /// default algorithm, which callers get from the usual RFC 8584
+    /// unanimity check over the advertised algorithms.
+    pub const ALG_PREF_LOWEST: u8 = 3;
+
+    /// True for the two preference-based algorithms, the ones for which
+    /// [`pref`](Self::pref) is meaningful on the wire.
+    pub fn is_preference_alg(alg: u8) -> bool {
+        alg == Self::ALG_PREF || alg == Self::ALG_PREF_LOWEST
+    }
 
     /// The preference every implementation defaults to when the algorithm
     /// is selected but no value is configured (FRR
     /// `EVPN_MH_DF_PREF_DEFAULT`).
     pub const PREF_DEFAULT: u16 = 32767;
 
+    /// Bitmap Bit 0 (RFC 9785 §3): the "Don't Preempt" (DP) Capability —
+    /// this PE asks not to be preempted as DF. MSB-0 within the 16-bit
+    /// Bitmap → `0x8000`. It is a **tie-break input**, applied after the
+    /// preference comparison and before the address comparison, so honouring
+    /// a peer's bit is required for the two ends to rank a segment the same
+    /// way.
+    pub const CAP_DONT_PREEMPT: u16 = 0x8000;
+
     /// Bitmap Bit 1 (RFC 8584 §2.2): AC-DF Capability (AC-Influenced DF
     /// election). MSB-0 within the 16-bit Bitmap → `0x4000`.
     pub const CAP_AC_DF: u16 = 0x4000;
 
+    /// Bitmap Bit 3 (RFC 9722 §2.3): the T (Time Synchronization)
+    /// Capability — this PE will carve at the instant its
+    /// [`SctEc`] announces. MSB-0 within the 16-bit Bitmap → `0x1000`.
+    ///
+    /// Synchronized carving is unanimous-or-nothing: if any PE on the
+    /// segment does not signal it, every PE reverts to the RFC 7432 §8.5
+    /// timer. zebra-rs does not advertise this bit yet — the scheduling it
+    /// promises is a later slice of
+    /// `docs/design/bgp-evpn-single-active-plan.md` — but a peer's bit is
+    /// decoded and kept, so the segment's capability set is already visible.
+    pub const CAP_TIME_SYNC: u16 = 0x1000;
+
     /// True when the AC-DF (AC-Influenced DF election) capability bit is set.
     pub fn ac_df(&self) -> bool {
         self.bitmap & Self::CAP_AC_DF != 0
+    }
+
+    /// True when the RFC 9785 "Don't Preempt" capability bit is set.
+    pub fn dont_preempt(&self) -> bool {
+        self.bitmap & Self::CAP_DONT_PREEMPT != 0
+    }
+
+    /// True when the RFC 9722 T (Time Synchronization) capability bit is set.
+    pub fn time_sync(&self) -> bool {
+        self.bitmap & Self::CAP_TIME_SYNC != 0
+    }
+
+    /// Set or clear the T (Time Synchronization) capability bit.
+    pub fn set_time_sync(&mut self, on: bool) {
+        if on {
+            self.bitmap |= Self::CAP_TIME_SYNC;
+        } else {
+            self.bitmap &= !Self::CAP_TIME_SYNC;
+        }
+    }
+
+    /// Builder form of [`set_time_sync`](Self::set_time_sync).
+    pub fn with_time_sync(mut self, on: bool) -> Self {
+        self.set_time_sync(on);
+        self
+    }
+
+    /// Set or clear the "Don't Preempt" capability bit.
+    pub fn set_dont_preempt(&mut self, on: bool) {
+        if on {
+            self.bitmap |= Self::CAP_DONT_PREEMPT;
+        } else {
+            self.bitmap &= !Self::CAP_DONT_PREEMPT;
+        }
+    }
+
+    /// Builder form of [`set_dont_preempt`](Self::set_dont_preempt).
+    pub fn with_dont_preempt(mut self, on: bool) -> Self {
+        self.set_dont_preempt(on);
+        self
     }
 
     /// Set or clear the AC-DF capability bit. RFC 9572 §5.3.1 clears it on the
@@ -719,11 +946,17 @@ impl fmt::Display for ExtCommunityValue {
             // DF Election EC (RFC 8584 §2.2): render the algorithm and append
             // `+ac-df` when the AC-Influenced DF election bit is set.
             write!(f, "df-election:alg{}", df.df_alg)?;
-            if df.df_alg == DfElectionEc::ALG_PREF {
+            if DfElectionEc::is_preference_alg(df.df_alg) {
                 write!(f, ":pref{}", df.pref)?;
             }
             if df.ac_df() {
                 write!(f, "+ac-df")?;
+            }
+            if df.dont_preempt() {
+                write!(f, "+dp")?;
+            }
+            if df.time_sync() {
+                write!(f, "+t")?;
             }
             Ok(())
         } else if let Some(es) = self.as_es_import_rt() {
@@ -741,6 +974,12 @@ impl fmt::Display for ExtCommunityValue {
                 "rmac:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
             )
+        } else if let Some(sct) = self.as_sct() {
+            // Service Carving Time (RFC 9722 §2.1): the Unix instant it
+            // names, to microseconds — the NTP-epoch seconds on their own
+            // read as a meaningless large number.
+            let (secs, micros) = sct.to_unix_micros();
+            write!(f, "sct:{secs}.{micros:06}")
         } else if let Some(es) = self.as_esi_label() {
             // ESI Label EC (RFC 7432 §7.5): redundancy mode + ESI label.
             let mode = if es.single_active {
@@ -1191,6 +1430,250 @@ mod tests {
     }
 
     #[test]
+    fn sct_wire_layout_matches_rfc_9722() {
+        // RFC 9722 §2.1 Figure: high 0x06, sub 0x0F, then 4 octets of NTP
+        // seconds and the high 16 bits of the NTP fraction.
+        // 2026-01-01T00:00:00.5Z = Unix 1767225600 = NTP 3976214400
+        // (1767225600 + 2208988800); half a second is fraction 0x8000.
+        let sct = SctEc::from_unix_micros(1_767_225_600, 500_000);
+        assert_eq!(sct.seconds, 3_976_214_400);
+        assert_eq!(sct.fraction, 0x8000);
+        let ec: ExtCommunityValue = sct.into();
+        assert_eq!(ec.high_type, 0x06);
+        assert_eq!(ec.low_type, 0x0f);
+        assert_eq!(ec.val, [0xed, 0x00, 0x37, 0x80, 0x80, 0x00]);
+        let mut buf = BytesMut::new();
+        ec.encode(&mut buf);
+        assert_eq!(&buf[..], &[0x06, 0x0f, 0xed, 0x00, 0x37, 0x80, 0x80, 0x00]);
+        assert_eq!(ec.as_sct(), Some(sct));
+        assert_eq!(sct.to_unix_micros(), (1_767_225_600, 500_000));
+        // Rendered as the instant it names; the NTP-epoch seconds alone
+        // would read as a meaningless large number.
+        assert_eq!(format!("{ec}"), "sct:1767225600.500000");
+        // Sub-types do not bleed into one another.
+        let df: ExtCommunityValue = DfElectionEc {
+            df_alg: DfElectionEc::ALG_PREF,
+            bitmap: 0,
+            pref: 0,
+        }
+        .into();
+        assert!(df.as_sct().is_none());
+        assert!(ec.as_df_election().is_none());
+        assert!(ec.as_esi_label().is_none());
+    }
+
+    #[test]
+    fn sct_epoch_conversions_and_era_rollover() {
+        // The prime-epoch offset itself: Unix 0 is NTP 2208988800 =
+        // 0x83AA7E80, the constant every NTP implementation carries.
+        let unix_epoch = SctEc::from_unix_micros(0, 0);
+        assert_eq!(unix_epoch.seconds, 2_208_988_800);
+        assert_eq!(unix_epoch.seconds.to_be_bytes(), [0x83, 0xaa, 0x7e, 0x80]);
+        assert_eq!(unix_epoch.to_unix_micros(), (0, 0));
+
+        // NTP era 0 ends at 2036-02-07T06:28:16Z, where the 32-bit seconds
+        // field wraps to 0. A seconds value below the prime-epoch offset
+        // cannot be a real era-0 carving instant (it would predate 1970), so
+        // it reads as era 1 rather than jumping 136 years backwards.
+        assert_eq!(SctEc::ERA0_END_UNIX, 2_085_978_496);
+        let wrapped = SctEc {
+            seconds: 0,
+            fraction: 0,
+        };
+        assert_eq!(wrapped.to_unix_micros(), (SctEc::ERA0_END_UNIX, 0));
+        // One second past the rollover, produced by the encoder and read
+        // back by the decoder, survives the round trip.
+        let after = SctEc::from_unix_micros(SctEc::ERA0_END_UNIX + 1, 0);
+        assert_eq!(after.seconds, 1);
+        assert_eq!(after.to_unix_micros(), (SctEc::ERA0_END_UNIX + 1, 0));
+        // One second before it stays in era 0.
+        let before = SctEc::from_unix_micros(SctEc::ERA0_END_UNIX - 1, 0);
+        assert_eq!(before.seconds, u32::MAX);
+        assert_eq!(before.to_unix_micros(), (SctEc::ERA0_END_UNIX - 1, 0));
+    }
+
+    #[test]
+    fn sct_orders_chronologically_across_the_era_rollover() {
+        // One second either side of the 2036-02-07 rollover. On the wire the
+        // earlier instant has the LARGER seconds field, so the derived order
+        // would rank them backwards — and RFC 9722 §3.1 has a PE take the
+        // latest SCT, so `.max()` would pick the earlier one exactly when it
+        // matters.
+        let before = SctEc::from_unix_micros(SctEc::ERA0_END_UNIX - 1, 0);
+        let after = SctEc::from_unix_micros(SctEc::ERA0_END_UNIX + 1, 0);
+        assert_eq!(before.seconds, u32::MAX);
+        assert_eq!(after.seconds, 1);
+        assert!(
+            before.seconds > after.seconds,
+            "wire order is reversed here"
+        );
+        assert!(before < after);
+        assert!(after > before);
+        assert_eq!([before, after].into_iter().max(), Some(after));
+        assert_eq!([before, after].into_iter().min(), Some(before));
+
+        // The fraction still participates, and only after the seconds.
+        let late_before = SctEc::from_unix_micros(SctEc::ERA0_END_UNIX - 1, 999_999);
+        assert!(late_before < after);
+        assert!(before < late_before);
+
+        // Within one era the obvious thing holds, and the order agrees with
+        // equality (Ord must be consistent with the derived Eq).
+        let t0 = SctEc::from_unix_micros(1_767_225_600, 0);
+        let t1 = SctEc::from_unix_micros(1_767_225_600, 500_000);
+        let t2 = SctEc::from_unix_micros(1_767_225_601, 0);
+        assert!(t0 < t1 && t1 < t2);
+        assert_eq!(t0.cmp(&t0), std::cmp::Ordering::Equal);
+        assert_eq!(t0, SctEc::from_unix_micros(1_767_225_600, 0));
+        assert!(!(t0 < t0) && !(t0 > t0));
+    }
+
+    #[test]
+    fn sct_fraction_quantizes_to_the_carried_16_bits() {
+        // 2^-16 s ≈ 15.26 µs: the low 16 bits of the NTP fraction are not
+        // carried, so anything finer truncates. A 10 ms skew — the RFC 9722
+        // default, and the smallest interval this mechanism cares about —
+        // survives well inside one quantum.
+        let skew = SctEc::from_unix_micros(1_767_225_600, 10_000);
+        let (_, micros) = skew.to_unix_micros();
+        assert!(
+            micros.abs_diff(10_000) <= 16,
+            "10ms skew round-tripped to {micros}µs"
+        );
+        // One quantum, and below it.
+        assert_eq!(
+            SctEc {
+                seconds: 0,
+                fraction: 1
+            }
+            .to_unix_micros()
+            .1,
+            15
+        );
+        assert_eq!(SctEc::from_unix_micros(0, 15).fraction, 0);
+        // A whole second is never carried in the fraction.
+        assert_eq!(SctEc::from_unix_micros(0, 999_999).fraction, 0xffff);
+
+        // SystemTime round trip, to the quantum.
+        let t = std::time::UNIX_EPOCH + std::time::Duration::new(1_767_225_600, 250_000_000);
+        let sct = SctEc::from_system_time(t);
+        assert_eq!(sct.fraction, 0x4000);
+        let back = sct
+            .to_system_time()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("after the epoch");
+        assert_eq!(back.as_secs(), 1_767_225_600);
+        assert!(back.subsec_micros().abs_diff(250_000) <= 16);
+        // A pre-1970 instant clamps to the epoch rather than wrapping into
+        // a far-future era-1 value that would read as a valid SCT.
+        let ancient = std::time::UNIX_EPOCH - std::time::Duration::from_secs(3600);
+        assert_eq!(
+            SctEc::from_system_time(ancient),
+            SctEc::from_unix_micros(0, 0)
+        );
+    }
+
+    #[test]
+    fn df_election_time_sync_is_bitmap_bit_three() {
+        // RFC 9722 §2.3: T (Time Synchronization) is Bitmap Bit 3, MSB-0 —
+        // 0x1000 — and sits alongside the RFC 8584 and RFC 9785 bits without
+        // disturbing them.
+        let ec: ExtCommunityValue = DfElectionEc {
+            df_alg: DfElectionEc::ALG_PREF,
+            bitmap: 0,
+            pref: DfElectionEc::PREF_DEFAULT,
+        }
+        .with_time_sync(true)
+        .into();
+        assert_eq!(ec.val[1..3], [0x10, 0x00]);
+        let back = ec.as_df_election().expect("decodes");
+        assert!(back.time_sync());
+        assert!(!back.ac_df() && !back.dont_preempt());
+        assert_eq!(format!("{ec}"), "df-election:alg2:pref32767+t");
+
+        let all: ExtCommunityValue = DfElectionEc {
+            df_alg: DfElectionEc::ALG_PREF,
+            bitmap: DfElectionEc::CAP_AC_DF,
+            pref: 100,
+        }
+        .with_dont_preempt(true)
+        .with_time_sync(true)
+        .into();
+        assert_eq!(all.val[1..3], [0xd0, 0x00]);
+        assert_eq!(format!("{all}"), "df-election:alg2:pref100+ac-df+dp+t");
+        let back = all.as_df_election().expect("decodes");
+        assert!(back.time_sync() && back.ac_df() && back.dont_preempt());
+        // Clearing T leaves the others alone.
+        let cleared = back.with_time_sync(false);
+        assert!(!cleared.time_sync() && cleared.ac_df() && cleared.dont_preempt());
+    }
+
+    #[test]
+    fn df_election_dont_preempt_is_bitmap_bit_zero() {
+        // RFC 9785 §3 Figure 2: Bitmap Bit 0 = D ("Don't Preempt"), Bit 1 =
+        // A (AC-DF). MSB-0, so D is 0x8000 and the two coexist in val[1..3].
+        let ec: ExtCommunityValue = DfElectionEc {
+            df_alg: DfElectionEc::ALG_PREF,
+            bitmap: 0,
+            pref: DfElectionEc::PREF_DEFAULT,
+        }
+        .with_dont_preempt(true)
+        .into();
+        assert_eq!(ec.val, [0x02, 0x80, 0x00, 0, 0x7f, 0xff]);
+        let back = ec.as_df_election().expect("decodes");
+        assert!(back.dont_preempt());
+        assert!(!back.ac_df());
+
+        let both: ExtCommunityValue = DfElectionEc {
+            df_alg: DfElectionEc::ALG_PREF,
+            bitmap: DfElectionEc::CAP_AC_DF,
+            pref: 0,
+        }
+        .with_dont_preempt(true)
+        .into();
+        assert_eq!(both.val[1..3], [0xc0, 0x00]);
+        let back = both.as_df_election().expect("decodes");
+        assert!(back.dont_preempt() && back.ac_df());
+        // Clearing leaves the other capability alone.
+        let cleared = DfElectionEc {
+            bitmap: back.bitmap,
+            ..back
+        }
+        .with_dont_preempt(false);
+        assert!(!cleared.dont_preempt() && cleared.ac_df());
+    }
+
+    #[test]
+    fn df_election_lowest_preference_is_alg_three() {
+        // RFC 9785 §3: Alg 3 = Lowest-Preference, carried in the same 5-bit
+        // field and with the same Preference offset as Alg 2.
+        let ec: ExtCommunityValue = DfElectionEc {
+            df_alg: DfElectionEc::ALG_PREF_LOWEST,
+            bitmap: 0,
+            pref: 100,
+        }
+        .into();
+        assert_eq!(ec.val, [0x03, 0x00, 0x00, 0, 0x00, 0x64]);
+        let back = ec.as_df_election().expect("decodes");
+        assert_eq!(back.df_alg, DfElectionEc::ALG_PREF_LOWEST);
+        assert_eq!(back.pref, 100);
+        assert!(DfElectionEc::is_preference_alg(back.df_alg));
+        assert!(DfElectionEc::is_preference_alg(DfElectionEc::ALG_PREF));
+        assert!(!DfElectionEc::is_preference_alg(DfElectionEc::ALG_HRW));
+        assert!(!DfElectionEc::is_preference_alg(DfElectionEc::ALG_DEFAULT));
+        // Both preference algorithms render their bid; the DP bit appends.
+        assert_eq!(format!("{ec}"), "df-election:alg3:pref100");
+        let dp: ExtCommunityValue = DfElectionEc {
+            df_alg: DfElectionEc::ALG_PREF,
+            bitmap: 0,
+            pref: DfElectionEc::PREF_DEFAULT,
+        }
+        .with_dont_preempt(true)
+        .into();
+        assert_eq!(format!("{dp}"), "df-election:alg2:pref32767+dp");
+    }
+
+    #[test]
     fn df_election_pref_wire_layout_matches_frr() {
         // draft-ietf-bess-evpn-pref-df: the DF Preference is the LAST two
         // octets of the 8-octet EC, i.e. val[4..6], with val[3] still
@@ -1305,6 +1788,26 @@ mod tests {
         let decoded = parsed.as_df_election().expect("decode");
         assert_eq!(decoded.df_alg, DfElectionEc::ALG_HRW);
         assert!(decoded.ac_df());
+    }
+
+    #[test]
+    fn sct_round_trips_through_parse() {
+        // Through the real 8-octet EC parser, not just the struct
+        // conversion: a peer's SCT must survive the wire path whole,
+        // including the era-1 case where the seconds field is small.
+        for original in [
+            ExtCommunityValue::from(SctEc::from_unix_micros(1_767_225_600, 500_000)),
+            ExtCommunityValue::from(SctEc {
+                seconds: 1,
+                fraction: 0,
+            }),
+        ] {
+            let mut buf = BytesMut::new();
+            original.encode(&mut buf);
+            let (_, parsed) = ExtCommunityValue::parse_be(&buf).expect("parse 8-octet EC");
+            assert_eq!(parsed, original);
+            assert_eq!(parsed.as_sct(), original.as_sct());
+        }
     }
 
     #[test]

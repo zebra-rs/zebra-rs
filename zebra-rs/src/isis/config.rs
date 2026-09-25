@@ -446,6 +446,14 @@ impl Isis {
             link::config_te_measurement_damping_period,
         );
         self.callback_add(
+            "/router/isis/interface/te-metric/measurement/anomaly-threshold",
+            link::config_te_measurement_anomaly_threshold,
+        );
+        self.callback_add(
+            "/router/isis/interface/te-metric/measurement/reuse-threshold",
+            link::config_te_measurement_reuse_threshold,
+        );
+        self.callback_add(
             "/router/isis/interface/ipv4/flex-algo-prefix-sid",
             link::config_ipv4_flex_algo_prefix_sid,
         );

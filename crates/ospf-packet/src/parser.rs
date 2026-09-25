@@ -2264,7 +2264,7 @@ impl OspfAslaSubTlv {
         4 + self.sabm.len() as u16 + self.udabm.len() as u16 + subs
     }
 
-    fn emit_value(&self, buf: &mut BytesMut) {
+    pub(crate) fn emit_value(&self, buf: &mut BytesMut) {
         buf.put_u8(self.sabm.len() as u8);
         buf.put_u8(self.udabm.len() as u8);
         buf.put_u16(0); // reserved
@@ -2292,6 +2292,23 @@ impl OspfAslaSubTlv {
     }
 
     /// Minimum unidirectional link delay (microseconds) from the Min/Max
+    /// RFC 9492 §5: "The value MUST be 0, 4, or 8" for both mask
+    /// lengths, and "if the SABM or UDABM Length is other than 0, 4, or
+    /// 8, the ASLA sub-TLV MUST be ignored by the receiver."
+    ///
+    /// Checked at use rather than at parse so a malformed container
+    /// cannot take the rest of the LSA down with it — its siblings and
+    /// the enclosing TLV stay usable, and the sub-TLV round-trips.
+    pub fn has_valid_masks(&self) -> bool {
+        matches!(self.sabm.len(), 0 | 4 | 8) && matches!(self.udabm.len(), 0 | 4 | 8)
+    }
+
+    /// True when both application masks are zero-length — the RFC 9492
+    /// §5 "any application that has nothing more specific" fallback.
+    pub fn is_any_application(&self) -> bool {
+        self.sabm.is_empty() && self.udabm.is_empty()
+    }
+
     /// Link Delay sub-sub-TLV (RFC 7471 §4.2), if present. This is the
     /// RFC 9350 §6 metric-type 1 (min-unidir-link-delay) input.
     pub fn min_unidir_delay(&self) -> Option<u32> {
@@ -2329,7 +2346,7 @@ impl OspfSubUniLinkDelay {
         ))
     }
 
-    fn emit_value(&self, buf: &mut BytesMut) {
+    pub(crate) fn emit_value(&self, buf: &mut BytesMut) {
         let a = if self.anomalous { 0x8000_0000 } else { 0 };
         buf.put_u32(a | (self.delay & 0x00FF_FFFF));
     }
@@ -2360,7 +2377,7 @@ impl OspfSubMinMaxLinkDelay {
         ))
     }
 
-    fn emit_value(&self, buf: &mut BytesMut) {
+    pub(crate) fn emit_value(&self, buf: &mut BytesMut) {
         let a = if self.anomalous { 0x8000_0000 } else { 0 };
         buf.put_u32(a | (self.min_delay & 0x00FF_FFFF));
         buf.put_u32(self.max_delay & 0x00FF_FFFF);
@@ -2386,7 +2403,7 @@ impl OspfSubDelayVariation {
         ))
     }
 
-    fn emit_value(&self, buf: &mut BytesMut) {
+    pub(crate) fn emit_value(&self, buf: &mut BytesMut) {
         buf.put_u32(self.variation & 0x00FF_FFFF);
     }
 }
@@ -2413,7 +2430,7 @@ impl OspfSubLinkLoss {
         ))
     }
 
-    fn emit_value(&self, buf: &mut BytesMut) {
+    pub(crate) fn emit_value(&self, buf: &mut BytesMut) {
         let a = if self.anomalous { 0x8000_0000 } else { 0 };
         buf.put_u32(a | (self.loss & 0x00FF_FFFF));
     }

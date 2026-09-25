@@ -163,6 +163,14 @@ impl BgpAttr {
         if let Some(v) = &self.tunnel_encap {
             v.attr_emit(buf);
         }
+        // BGP-LS Attribute (RFC 9552 §5, type 29). Its `AttrEmitter`
+        // has existed since the codec phase but had no caller: the
+        // producer stored it in the Loc-RIB and nothing advertised
+        // Link-State to a peer, so an UPDATE carried the NLRIs with no
+        // attributes at all.
+        if let Some(v) = &self.bgp_ls {
+            v.attr_emit(buf);
+        }
         // Unrecognized optional transitive attributes (RFC 4271 §9):
         // re-advertised verbatim with the Partial bit (set when stored).
         for v in &self.unknown {

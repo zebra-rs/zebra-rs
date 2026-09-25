@@ -1,0 +1,67 @@
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.72.0.2/32
+  ipv6:
+    address: 2001:db8:0:ff72::2/128
+- if-name: tm2-tm1
+  ipv4:
+    address: 192.168.72.2/30
+  ipv6:
+    address: 2001:db8:72::2/64
+
+router:
+  isis:
+    net: 49.0072.0000.0000.0002.00
+    hostname: tm2
+    is-type: level-2-only
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+      ipv6:
+        enabled: true
+    - if-name: tm2-tm1
+      network-type: point-to-point
+      ipv4:
+        enabled: true
+      ipv6:
+        enabled: true
+      te-metric:
+        unidirectional-delay: 1000
+        min-delay: 900
+        max-delay: 1200
+        delay-variation: 50
+        loss: 333
+  ospf:
+    router-id: 10.72.0.2
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+      - if-name: tm2-tm1
+        enabled: true
+        network-type: point-to-point
+        te-metric:
+          unidirectional-delay: 2000
+          min-delay: 1800
+          max-delay: 2400
+          delay-variation: 60
+          loss: 666
+  ospfv3:
+    router-id: 10.72.0.2
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+      - if-name: tm2-tm1
+        enabled: true
+        network-type: point-to-point
+        te-metric:
+          unidirectional-delay: 3000
+          min-delay: 2700
+          max-delay: 3600
+          delay-variation: 70
+          loss: 999

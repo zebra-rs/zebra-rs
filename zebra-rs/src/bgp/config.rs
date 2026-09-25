@@ -2285,17 +2285,66 @@ fn config_ethernet_segment_redundancy_mode(
     }
     // Single-active carves one primary per service instance where all-active
     // makes every attached PE primary, so the mode changes the P/B bits the
-    // segment's VPWS services advertise (RFC 8214 §5).
+    // segment's VPWS services advertise (RFC 8214 §5) — and, when the
+    // segment signals its E-LAN role, whether its per-EVI A-Ds carry P/B at
+    // all.
     bgp.vpws_resync_es();
+    // The mode is also what the datapath gate is made of: a single-active
+    // non-DF blocks its access port in both directions, an all-active one
+    // only filters BUM (`Message::EsRole.single_active`). Marking the
+    // segment dirty and draining re-runs the E-LAN DF sync — which re-tees
+    // the gate — and the per-EVI A-D role reconcile together, so what this
+    // PE forwards and what it advertises can never be left describing
+    // different modes. Without it the tee kept the previous mode until some
+    // unrelated BGP event happened to drain: after all-active → single-active
+    // the standby port would still only filter BUM while we advertised
+    // Backup, and after the reverse it would go on blocking both directions
+    // with the P/B bits already gone.
+    if let Some(esi) = esi {
+        super::route::vpws_mark_df_dirty(&mut bgp.local_rib, &esi);
+    }
+    bgp.vpws_df_drain();
+    Some(())
+}
+
+/// `router bgp afi-safi evpn ethernet-segment <name> role-signaling
+/// <inferred|l2-attr>` — whether this single-active segment advertises its
+/// elected role in the per-EVI Ethernet A-D's Layer-2 Attributes EC
+/// (rfc7432bis §7.11.1) or leaves remote PEs to infer the forwarder from
+/// MAC origination. Changing it re-originates the segment's per-EVI A-Ds so
+/// the bits appear or disappear at once.
+fn config_es_role_signaling(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
+        return None;
+    }
+    let name = args.string()?;
+    let mode = if op.is_set() {
+        super::ethernet_segment::RoleSignaling::from_keyword(&args.string()?)
+    } else {
+        super::ethernet_segment::RoleSignaling::default()
+    };
+    let esi = {
+        let es = bgp.ethernet_segments.entry(name).or_default();
+        es.role_signaling = mode;
+        es.esi
+    };
+    // The bits ride routes that are already advertised, so the change is an
+    // in-place re-origination of the segment's per-EVI A-Ds.
+    if esi.is_some() {
+        bgp.evpn_reconcile_ad_evi_roles();
+    }
     Some(())
 }
 
 /// `router bgp afi-safi evpn ethernet-segment <name> df-election preference
-/// <1..65535>` — switch the segment to preference-based DF election (Alg 2,
-/// draft-ietf-bess-evpn-pref-df) and set this PE's preference. Clearing it
-/// reverts to service carving. Either way the Type-4 is re-originated so
-/// peers see the new algorithm, and the VPWS services on the segment
-/// re-elect against it.
+/// <0..65535>` — this PE's bid under a preference-based DF election
+/// (RFC 9785). With no `algorithm` configured, setting it also selects Alg 2;
+/// clearing it then reverts to service carving. Under an explicitly
+/// configured preference algorithm, clearing it falls back to the RFC's
+/// default bid of 32767 rather than leaving the algorithm. Either way the
+/// Type-4 is re-originated so peers see the new bid, and the VPWS services
+/// on the segment re-elect against it.
 fn config_es_df_preference(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let afi_safi: AfiSafi = args.afi_safi()?;
     if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
@@ -2314,9 +2363,17 @@ fn config_es_df_preference(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
 }
 
 /// `router bgp afi-safi evpn ethernet-segment <name> df-election algorithm
-/// <default|hrw>` — elect with RFC 8584 §3 Highest Random Weight (Alg 1)
-/// instead of service carving. A configured preference (Alg 2) still takes
-/// precedence. The Type-4 is re-originated so peers see the algorithm, and
+/// <default|hrw|preference|lowest-preference>` — the DF election algorithm
+/// this segment advertises and runs: RFC 7432 §8.5 service carving (Alg 0),
+/// RFC 8584 §3 Highest Random Weight (Alg 1), or RFC 9785 Highest- /
+/// Lowest-Preference (Alg 2 / Alg 3).
+///
+/// A configured `preference` still overrides the `default` and `hrw` arms,
+/// as it did before this leaf had preference arms — changing that would move
+/// the DF across an upgrade, since a PE advertising Alg 1 to peers still on
+/// Alg 2 fails the RFC 8584 unanimity check and drops the whole segment to
+/// carving. Beside the two preference arms a value simply selects which of
+/// them bids. The Type-4 is re-originated so peers see the algorithm, and
 /// the segment re-elects.
 fn config_es_df_algorithm(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let afi_safi: AfiSafi = args.afi_safi()?;
@@ -2324,9 +2381,34 @@ fn config_es_df_algorithm(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option
         return None;
     }
     let name = args.string()?;
-    let hrw = op.is_set() && args.string()? == "hrw";
+    let alg = if op.is_set() {
+        super::ethernet_segment::DfAlgorithm::from_keyword(&args.string()?)
+    } else {
+        None
+    };
     let es = bgp.ethernet_segments.entry(name).or_default();
-    es.hrw = hrw;
+    es.df_algorithm = alg;
+    es_df_election_changed(bgp);
+    Some(())
+}
+
+/// `router bgp afi-safi evpn ethernet-segment <name> df-election
+/// dont-preempt` — advertise the RFC 9785 §3 "Don't Preempt" (DP)
+/// capability. On a preference tie this PE ranks ahead of one that does not
+/// set the bit. Only advertised under a preference-based algorithm, which is
+/// where the RFC defines it.
+///
+/// The tie-break alone is not RFC 9785 §4.3 non-revertive operation: with
+/// the bit on every PE at equal preference the tie still falls through to
+/// the address, so the lower-address PE reclaims the role on recovery.
+fn config_es_dont_preempt(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
+        return None;
+    }
+    let name = args.string()?;
+    let es = bgp.ethernet_segments.entry(name).or_default();
+    es.dont_preempt = op.is_set();
     es_df_election_changed(bgp);
     Some(())
 }
@@ -5679,6 +5761,10 @@ impl Bgp {
             config_ethernet_segment_interface,
         );
         self.callback_add(
+            "/router/bgp/afi-safi/ethernet-segment/role-signaling",
+            config_es_role_signaling,
+        );
+        self.callback_add(
             "/router/bgp/afi-safi/ethernet-segment/df-election/algorithm",
             config_es_df_algorithm,
         );
@@ -5693,6 +5779,10 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/afi-safi/ethernet-segment/df-election/ac-df",
             config_es_ac_df,
+        );
+        self.callback_add(
+            "/router/bgp/afi-safi/ethernet-segment/df-election/dont-preempt",
+            config_es_dont_preempt,
         );
 
         // EVPN VPWS E-Line services (RFC 8214), under

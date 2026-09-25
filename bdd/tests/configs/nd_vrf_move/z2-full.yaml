@@ -1,0 +1,13 @@
+# z2 only has to hold the far end of the veth up so i1 on z1 keeps
+# IFF_LOWER_UP, and answer with its own RAs so z1's receive counters
+# move. It never enslaves anything.
+interface:
+- if-name: i1
+  ipv6:
+    router-advertisements:
+      send-advertisements: true
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 2.2.2.2

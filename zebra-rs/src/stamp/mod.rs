@@ -8,6 +8,7 @@
 //! (RFC 8570) and OSPFv2 (RFC 7471) link-delay sub-TLVs and
 //! Flex-Algorithm metric-type-1 SPF.
 
+pub mod anomaly;
 pub mod client;
 pub mod damping;
 pub mod inst;

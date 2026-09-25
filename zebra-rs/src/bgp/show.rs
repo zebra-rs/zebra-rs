@@ -2565,6 +2565,13 @@ struct EthernetSegmentJson {
     /// ES routes are withheld and it is DF nowhere (RFC 7432 §8.2).
     port_down: bool,
     df_preference: Option<u16>,
+    /// The DF Election EC this PE actually advertises: the algorithm
+    /// keyword it was configured with (absent = implied by `df_preference`),
+    /// the preference it bids — the RFC 9785 default of 32767 when a
+    /// preference algorithm is selected with no value — and the DP bit.
+    df_algorithm_configured: Option<String>,
+    df_preference_bid: Option<u16>,
+    dont_preempt: bool,
     ac_df: bool,
     /// RFC 8584 §4 AC-Influenced DF election is in effect: every PE on
     /// the segment advertises the capability.
@@ -2579,6 +2586,27 @@ struct EthernetSegmentJson {
     member_vteps: Vec<EsMemberVtepJson>,
     df_algorithm: Option<String>,
     designated_forwarder: Option<String>,
+    /// `inferred` or `l2-attr` (rfc7432bis §7.11.1 role signalling).
+    role_signaling: String,
+    /// The role advertised per bridge domain, when the segment signals one.
+    advertised_roles: Vec<EsAdRoleJson>,
+    /// What the datapath was last told for this segment (`Message::EsRole`).
+    datapath_roles: Vec<EsDatapathRoleJson>,
+}
+
+/// One bridge domain's teed datapath role.
+#[derive(Serialize)]
+struct EsDatapathRoleJson {
+    bd: u32,
+    df: bool,
+    single_active: bool,
+}
+
+/// One bridge domain's advertised role on the per-EVI Ethernet A-D.
+#[derive(Serialize)]
+struct EsAdRoleJson {
+    bd: u32,
+    role: String,
 }
 
 fn show_bgp_evpn_ethernet_segment(
@@ -2600,20 +2628,21 @@ fn show_bgp_evpn_ethernet_segment(
                 let cands = bgp.es_df_candidates(&esi);
                 let (advertising, total) = bgp.es_ac_df_bids(&esi);
                 ac_df_in_effect = super::ethernet_segment::ac_df_in_effect(advertising, total);
-                for (ordinal, (vtep, _, _)) in cands.iter().enumerate() {
+                for (ordinal, cand) in cands.iter().enumerate() {
                     member_vteps.push(EsMemberVtepJson {
                         ordinal,
-                        vtep: vtep.to_string(),
-                        local: *vtep == local,
+                        vtep: cand.addr.to_string(),
+                        local: cand.addr == local,
                     });
                 }
-                let algs: Vec<u8> = cands.iter().map(|(_, a, _)| *a).collect();
+                let algs: Vec<u8> = cands.iter().map(|c| c.alg).collect();
                 let alg = super::ethernet_segment::negotiate_df_alg(&algs);
                 df_algorithm = Some(
                     match alg {
                         bgp_packet::DfElectionEc::ALG_DEFAULT => "service-carving",
                         bgp_packet::DfElectionEc::ALG_HRW => "hrw",
                         bgp_packet::DfElectionEc::ALG_PREF => "preference-based",
+                        bgp_packet::DfElectionEc::ALG_PREF_LOWEST => "preference-based (lowest)",
                         _ => "unsupported (carving fallback)",
                     }
                     .to_string(),
@@ -2629,6 +2658,35 @@ fn show_bgp_evpn_ethernet_segment(
                 interface: es.interface.clone(),
                 port_down: bgp.es_port_down(es),
                 df_preference: es.df_preference,
+                role_signaling: es.role_signaling.as_str().to_string(),
+                advertised_roles: bgp
+                    .es_advertised_roles(es)
+                    .into_iter()
+                    .map(|(bd, role)| EsAdRoleJson {
+                        bd,
+                        role: role.as_str().to_string(),
+                    })
+                    .collect(),
+                datapath_roles: es
+                    .esi
+                    .and_then(|esi| bgp.es_df_sent.get(&esi))
+                    .map(|sent| {
+                        sent.roles
+                            .iter()
+                            .map(|(bd, (df, single_active))| EsDatapathRoleJson {
+                                bd: *bd,
+                                df: *df,
+                                single_active: *single_active,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                df_algorithm_configured: es.df_algorithm.map(|a| a.as_str().to_string()),
+                df_preference_bid: bgp_packet::DfElectionEc::is_preference_alg(
+                    es.df_election_ec().df_alg,
+                )
+                .then(|| es.df_election_ec().pref),
+                dont_preempt: es.df_election_ec().dont_preempt(),
                 ac_df: es.ac_df,
                 ac_df_in_effect,
                 es_import_rt: es.es_import_rt().map(|rt| format_evpn_ecom_value(&rt)),
@@ -2693,36 +2751,88 @@ fn show_bgp_evpn_ethernet_segment(
         // §8.5 service-carving ordinal.
         if let Some(esi) = es.esi {
             let cands = bgp.es_df_candidates(&esi);
-            let vteps: Vec<std::net::IpAddr> = cands.iter().map(|(ip, _, _)| *ip).collect();
-            writeln!(buf, "  Member VTEPs ({}):", vteps.len())?;
-            for (ordinal, (vtep, valg, vpref)) in cands.iter().enumerate() {
-                let tag = if *vtep == local { " (local)" } else { "" };
+            writeln!(buf, "  Member VTEPs ({}):", cands.len())?;
+            for (ordinal, cand) in cands.iter().enumerate() {
+                let tag = if cand.addr == local { " (local)" } else { "" };
                 // Each PE's own bid, so a disagreement is visible per-PE
-                // rather than only as the segment-wide carving fallback.
-                let bid = if *valg == bgp_packet::DfElectionEc::ALG_PREF {
-                    format!(" pref {vpref}")
-                } else {
-                    String::new()
-                };
+                // rather than only as the segment-wide carving fallback —
+                // including the RFC 9785 DP bit, which decides a tie.
+                let mut bid = String::new();
+                if bgp_packet::DfElectionEc::is_preference_alg(cand.alg) {
+                    bid.push_str(&format!(" pref {}", cand.pref));
+                }
+                if cand.dont_preempt() {
+                    bid.push_str(" dp");
+                }
+                let vtep = cand.addr;
                 writeln!(buf, "    [{ordinal}] {vtep}{bid}{tag}")?;
             }
             // RFC 8584 algorithm negotiation, then the elected DF.
-            let algs: Vec<u8> = cands.iter().map(|(_, a, _)| *a).collect();
+            let algs: Vec<u8> = cands.iter().map(|c| c.alg).collect();
             let alg = super::ethernet_segment::negotiate_df_alg(&algs);
+            // What this PE puts on its own Type-4 — the bid a preference
+            // algorithm defaults to 32767, and the capability bits.
+            let bid = es.df_election_ec();
             let alg_name = match alg {
                 bgp_packet::DfElectionEc::ALG_DEFAULT => "service-carving (default)".to_string(),
-                bgp_packet::DfElectionEc::ALG_PREF => {
-                    // Under Alg 2 the local preference is what this PE is
-                    // bidding with, so show it next to the algorithm.
-                    match es.df_preference {
-                        Some(pref) => format!("preference-based (local pref {pref})"),
-                        None => "preference-based".to_string(),
-                    }
+                bgp_packet::DfElectionEc::ALG_PREF | bgp_packet::DfElectionEc::ALG_PREF_LOWEST => {
+                    // Under a preference algorithm the local preference is
+                    // what this PE is bidding with, so show it next to the
+                    // algorithm, with the DP tie-break bit when set.
+                    let lowest = if alg == bgp_packet::DfElectionEc::ALG_PREF_LOWEST {
+                        ", lowest wins"
+                    } else {
+                        ""
+                    };
+                    let dp = if bid.dont_preempt() {
+                        ", dont-preempt"
+                    } else {
+                        ""
+                    };
+                    format!("preference-based (local pref {}{lowest}{dp})", bid.pref)
                 }
                 bgp_packet::DfElectionEc::ALG_HRW => "hrw (RFC 8584 §3)".to_string(),
                 other => format!("alg {other} (unsupported; carving fallback)"),
             };
             writeln!(buf, "  DF algorithm: {alg_name}")?;
+            // The legacy spelling: `algorithm default|hrw` *plus* a
+            // preference value advertises Alg 2, because that is what it
+            // advertised before the algorithm leaf had preference arms and
+            // changing it would move the DF across an upgrade. Name it here
+            // rather than leave an operator to wonder why `algorithm hrw`
+            // shows alg2.
+            if matches!(
+                es.df_algorithm,
+                Some(
+                    super::ethernet_segment::DfAlgorithm::Default
+                        | super::ethernet_segment::DfAlgorithm::Hrw
+                )
+            ) && es.df_preference.is_some()
+            {
+                writeln!(
+                    buf,
+                    "  DF election: `preference` overrides `algorithm {}` here (the spelling \
+                     that predates the preference arms); advertising alg{}",
+                    es.df_algorithm.map(|a| a.as_str()).unwrap_or("default"),
+                    bid.df_alg
+                )?;
+            }
+            // RFC 8584 §2.2 negotiation is unanimous-or-carving, so a PE
+            // advertising something the segment did not settle on is a
+            // degraded state the operator should see named, not infer from
+            // an unexpected DF.
+            if bid.df_alg != alg {
+                let want = es
+                    .df_algorithm
+                    .map(|a| a.as_str().to_string())
+                    .unwrap_or_else(|| format!("alg{}", bid.df_alg));
+                writeln!(
+                    buf,
+                    "  DF election: segment disagrees — this PE advertises {want} (alg{}), \
+                     negotiated alg{alg}",
+                    bid.df_alg
+                )?;
+            }
             // RFC 8584 §4 AC-DF: shown whenever anyone on the segment asks
             // for it, with whether the segment as a whole has it — it takes
             // every PE.
@@ -2747,6 +2857,43 @@ fn show_bgp_evpn_ethernet_segment(
                 let tag = if df == local { " (this node)" } else { "" };
                 writeln!(buf, "  Designated Forwarder (tag 0): {df}{tag}")?;
             }
+            // What the datapath was last told, which is a different
+            // question from what the election currently says: these are the
+            // values behind `Message::EsRole`, and a config edit that failed
+            // to re-tee them would show up here as a mode or a verdict that
+            // no longer matches the lines above.
+            if let Some(sent) = bgp.es_df_sent.get(&esi)
+                && !sent.roles.is_empty()
+            {
+                writeln!(buf, "  Datapath roles (as teed):")?;
+                for (bd, (df, single_active)) in sent.roles.iter() {
+                    writeln!(
+                        buf,
+                        "    bd {bd}: {}, {}",
+                        if *df { "DF" } else { "non-DF" },
+                        if *single_active {
+                            "single-active"
+                        } else {
+                            "all-active"
+                        }
+                    )?;
+                }
+            }
+            // rfc7432bis §7.11.1: what this PE tells remote PEs about who
+            // forwards the segment's known unicast. Shown only when it
+            // signals — an `inferred` segment (the default) has nothing to
+            // say here, and the remote's view of it lives under the teed
+            // groups below.
+            if es.role_signaling.signals() {
+                writeln!(
+                    buf,
+                    "  Role signaling: {} (per-EVI A-D P/B)",
+                    es.role_signaling.as_str()
+                )?;
+                for (bd, role) in bgp.es_advertised_roles(es) {
+                    writeln!(buf, "    bd {bd}: {}", role.as_str())?;
+                }
+            }
         }
     }
     write_es_nhg_groups(&mut buf, bgp)?;
@@ -2767,7 +2914,7 @@ fn write_es_nhg_groups(buf: &mut String, bgp: &Bgp) -> std::fmt::Result {
         buf,
         "Ethernet Segment nexthop groups (teed to the datapath):"
     )?;
-    for ((esi, bd), (single_active, members)) in &bgp.es_nhg_sent {
+    for ((esi, bd), (single_active, members, blocked)) in &bgp.es_nhg_sent {
         let rendered: Vec<String> = members
             .iter()
             .map(|m| match m {
@@ -2776,9 +2923,33 @@ fn write_es_nhg_groups(buf: &mut String, bgp: &Bgp) -> std::fmt::Result {
                 crate::rib::EsNhgMember::Mpls { pe, label } => format!("{pe}/{label}"),
             })
             .collect();
+        // How the primary was chosen: a signalled role, the inference from
+        // MAC origination, or a conflict this PE could only tie-break. The
+        // distinction is the whole of phase 3b — without it "primary
+        // 192.0.2.1" reads the same whether it was told to us or guessed.
+        let why = bgp
+            .es_group_selection(esi, *bd)
+            .map(|r| format!(" ({})", r.as_str()))
+            .unwrap_or_default();
         let esi = bgp_packet::esi_display(esi);
         if *single_active {
-            let (primary, backup) = rendered.split_first().expect("a sent group is non-empty");
+            // A signalled segment where every member declared itself
+            // non-designated is teed as an empty group — nothing to forward
+            // to — and must render as that rather than panicking on a
+            // missing first member.
+            let Some((primary, backup)) = rendered.split_first() else {
+                // Blocked: every PE on the segment advertised a
+                // non-designated role, so the segment's MACs are installed
+                // nowhere — distinct from the group simply being absent,
+                // which would install each toward its advertiser.
+                let state = if *blocked {
+                    "no forwarder (MACs withheld)"
+                } else {
+                    "no forwarder"
+                };
+                writeln!(buf, "  {esi} bd {bd}: single-active, {state}{why}")?;
+                continue;
+            };
             let backup = if backup.is_empty() {
                 String::new()
             } else {
@@ -2786,7 +2957,7 @@ fn write_es_nhg_groups(buf: &mut String, bgp: &Bgp) -> std::fmt::Result {
             };
             writeln!(
                 buf,
-                "  {esi} bd {bd}: single-active primary {primary}{backup}"
+                "  {esi} bd {bd}: single-active primary {primary}{backup}{why}"
             )?;
         } else {
             writeln!(buf, "  {esi} bd {bd}: all-active {}", rendered.join(" "))?;
@@ -5653,15 +5824,67 @@ fn show_bgp_link_state(
                 writeln!(buf, "     attr: {summary}")?;
             }
         }
+        let path = show_bgp_ls_path_attr(&rib.attr);
+        if !path.is_empty() {
+            writeln!(buf, "     path: {path}")?;
+        }
     }
     Ok(buf)
 }
 
+/// The BGP path attributes a Link-State object carries, as distinct
+/// from the BGP-LS Attribute TLVs above.
+///
+/// Worth showing separately: the TLVs describe the *link*, these
+/// describe the *advertisement*, and an operator debugging a feed —
+/// why an object was preferred, what an outbound policy did to it, why
+/// a strict peer rejected it — is asking about these. They were
+/// invisible here until the egress path made them something this
+/// router chooses rather than merely stores.
+fn show_bgp_ls_path_attr(attr: &BgpAttr) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(v) = &attr.origin {
+        parts.push(format!("origin {v}"));
+    }
+    if let Some(v) = &attr.aspath {
+        let path = v.to_string();
+        // An originated object's AS_PATH is empty toward an internal
+        // peer; saying so beats an empty field.
+        parts.push(if path.is_empty() {
+            "as-path empty".to_string()
+        } else {
+            format!("as-path {path}")
+        });
+    }
+    if let Some(v) = &attr.med {
+        parts.push(format!("med {}", v.med));
+    }
+    if let Some(v) = &attr.local_pref {
+        parts.push(format!("local-pref {}", v.local_pref));
+    }
+    if let Some(v) = &attr.com {
+        parts.push(format!("community {v}"));
+    }
+    // The MP_REACH next hop of a received object (RFC 9552 §5.1). A
+    // locally originated row has none until an outbound policy sets
+    // one, so this line is the receiving side of `set next-hop`.
+    match &attr.nexthop {
+        Some(BgpNexthop::Ipv4(addr)) => parts.push(format!("next-hop {addr}")),
+        Some(BgpNexthop::Ipv6(addr)) => parts.push(format!("next-hop {addr}")),
+        _ => {}
+    }
+    parts.join(", ")
+}
+
 /// Compact one-line summary of the high-value BGP-LS Attribute TLVs (RFC
-/// 9552 §4) the IS-IS producer emits: IGP metric (1095, 3-octet), prefix
-/// metric (1155, 4-octet), admin-group (1088, 4-octet hex), TE default
-/// metric (1092, 4-octet). Unknown/other TLVs are summarized by count so
-/// the line stays readable.
+/// 9552 §4, RFC 8571) the IS-IS producer emits: IGP metric (1095,
+/// 3-octet), prefix metric (1155, 4-octet), admin-group (1088, 4-octet
+/// hex), TE default metric (1092, 4-octet), and the measured delay set
+/// (1114/1115/1117) with its Anomalous flag. Unknown/other TLVs are
+/// summarized by count so the line stays readable.
+///
+/// Lengths are checked before slicing: these values arrive from a peer,
+/// and a short TLV must render as "+1 more", not panic.
 fn show_bgp_ls_attr(attr: &BgpLsAttr) -> String {
     fn be(bytes: &[u8]) -> u64 {
         bytes.iter().fold(0u64, |acc, b| (acc << 8) | *b as u64)
@@ -5679,12 +5902,68 @@ fn show_bgp_ls_attr(attr: &BgpLsAttr) -> String {
     if let Some(v) = attr.get(BGPLS_ATTR_ADMIN_GROUP) {
         parts.push(format!("admin-group 0x{:08x}", be(v) as u32));
     }
+    // RFC 8571: A bit in the top bit of octet 0, value in the low 24.
+    let anomalous = |v: &[u8]| if v[0] & 0x80 != 0 { " [A]" } else { "" };
+    if let Some(v) = attr.get(BGPLS_ATTR_UNI_LINK_DELAY)
+        && v.len() == 4
+    {
+        parts.push(format!("delay {}us{}", be(&v[1..4]), anomalous(v)));
+    }
+    if let Some(v) = attr.get(BGPLS_ATTR_MIN_MAX_LINK_DELAY)
+        && v.len() == 8
+    {
+        parts.push(format!(
+            "min/max-delay {}/{}us{}",
+            be(&v[1..4]),
+            be(&v[5..8]),
+            anomalous(v)
+        ));
+    }
+    if let Some(v) = attr.get(BGPLS_ATTR_LINK_LOSS)
+        && v.len() == 4
+    {
+        // RFC 8571 §2.4 units are 0.000003 % per LSB.
+        let pct = be(&v[1..4]) as f64 * 0.000003;
+        parts.push(format!("loss {pct:.6}%{}", anomalous(v)));
+    }
     let known = parts.len();
     let extra = attr.tlvs.len().saturating_sub(known);
     if extra > 0 {
         parts.push(format!("+{extra} more"));
     }
     parts.join(", ")
+}
+
+#[cfg(test)]
+mod bgp_ls_show_tests {
+    use super::*;
+
+    #[test]
+    fn summary_renders_measured_delay_with_the_anomalous_flag() {
+        let mut attr = BgpLsAttr::new();
+        attr.push(BGPLS_ATTR_IGP_METRIC, vec![0, 0, 10]);
+        attr.push(BGPLS_ATTR_UNI_LINK_DELAY, vec![0x80, 0x00, 0x03, 0xe8]);
+        attr.push(
+            BGPLS_ATTR_MIN_MAX_LINK_DELAY,
+            vec![0x00, 0x00, 0x03, 0x84, 0x00, 0x00, 0x04, 0xb0],
+        );
+        let line = show_bgp_ls_attr(&attr);
+        assert!(line.contains("delay 1000us [A]"), "{line}");
+        assert!(line.contains("min/max-delay 900/1200us"), "{line}");
+        assert!(!line.contains("more"), "all TLVs accounted for: {line}");
+    }
+
+    /// These bytes come off the wire. A peer sending a truncated delay
+    /// TLV must fall through to the "+N more" count, not panic on the
+    /// slice.
+    #[test]
+    fn summary_survives_a_short_delay_tlv() {
+        let mut attr = BgpLsAttr::new();
+        attr.push(BGPLS_ATTR_UNI_LINK_DELAY, vec![0x80, 0x00]);
+        attr.push(BGPLS_ATTR_MIN_MAX_LINK_DELAY, vec![]);
+        let line = show_bgp_ls_attr(&attr);
+        assert_eq!(line, "+2 more", "{line}");
+    }
 }
 
 #[cfg(test)]

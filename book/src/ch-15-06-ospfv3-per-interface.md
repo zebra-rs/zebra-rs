@@ -60,5 +60,13 @@ Notes:
   `show ospfv3 interface`; validated by
   `ospfv3_instance_id.feature` (matched and mismatched scenarios).
 
-The v2-only `te-metric` block (RFC 7471 delay/loss attributes and
-the STAMP measurement hook) has no OSPFv3 counterpart yet.
+The `te-metric` block — RFC 7471 delay/loss attributes and the STAMP
+measurement hook — is supported on OSPFv3 as well, with the same leaves
+as OSPFv2. The values are identical on the wire; only the sub-TLV code
+points differ, because OSPFv3 draws them from the Extended-LSA registry
+(13-16) rather than the TE Opaque LSA one (27-30). The attributes ride
+the ASLA of the E-Router-LSA Router-Link TLV, and Segment Routing is not
+required to originate them. Measurement uses the link's IPv6 link-local
+pair, so an IPv6-only link is measurable — which OSPFv2, being IPv4-only
+on the wire, cannot be. See
+[TWAMP / STAMP](ch-09-00-twamp-stamp.md).
