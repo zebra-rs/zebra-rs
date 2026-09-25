@@ -866,7 +866,7 @@ cap. The two reviews agree on every overlapping item.
 - Fix direction: use `selected.first()` (the `.last()` predates the
   multipath extension, when `selected` was a change history).
 
-### 15. P2 CONFIRMED (probe), worse than recorded — advertise-cache forward/reverse desync leaves a phantom route that is never withdrawn
+### 15. P2 CONFIRMED (probe), worse than recorded, FIXED on branch `bgp-advert-cache-desync` — advertise-cache forward/reverse desync leaves a phantom route that is never withdrawn
 
 - `update_group.rs:694-712` (`send_ipv4`) / `1228-1244` (`send_ipv6`)
   still insert the NLRI into the new attr bucket without evicting the old
@@ -881,6 +881,41 @@ cap. The two reviews agree on every overlapping item.
   NLRI.
 - Fix direction: in `send_*`, evict the NLRI from the bucket the reverse
   map points at when the attr differs.
+- Gates (branch `bgp-advert-cache-desync`; every gate compiles on `main`
+  and fails there). Unit, `update_group.rs`:
+  `advert_cache_desync_ipv4_attr_change_moves_the_nlri_out_of_its_old_bucket`
+  and `advert_cache_desync_ipv4_withdraw_after_an_attr_change_leaves_nothing_to_flush`
+  with IPv6 twins (on `main` the NLRI sits in both buckets, and after the
+  withdraw the flush job still carries it). The same class exists in the
+  per-peer VPNv4 / VPNv6 caches (`Peer::send_vpnv4` / `send_vpnv6`), with
+  a second defect there: the bucket is a `HashSet` keyed on the
+  label-free VPN identity, so re-sending under the same attribute with a
+  new label keeps the old label queued. Unit, `advert_cache_desync_vpn_tests`:
+  the attr-change, withdraw-after-change and same-attr-new-label cases for
+  VPNv4 and VPNv6. EVPN (`send_evpn`) already evicts on identity. BDD,
+  `bgp_update_group_cache_desync` and `bgp_update_group_cache_desync_v6`,
+  driven by a new scripted speaker (`tests/scripts/bgp_attr_churn_send.py`):
+  once a warm-up prefix has reached z2, the speaker sends in one write an
+  announce of P (ORIGIN IGP), a re-announce (ORIGIN INCOMPLETE), a
+  withdraw of P and a control prefix Q, all inside the DUT's five-second
+  advertisement interval. On `main` both twins fail: when Q reaches z2
+  (the same flush), P arrives with it under ORIGIN IGP and stays. Without
+  the warm-up the feature passed vacuously: a next-hop the DUT has never
+  tracked starts out unreachable, so the first burst resolved to an empty
+  selection and never reached the cache (a tcpdump of a second burst in
+  the kept topology showed the withdraw of P and, five seconds later, one
+  UPDATE carrying Q and P).
+- FIXED (branch `bgp-advert-cache-desync`), the `send_evpn` rule applied
+  to the other four caches: `send_ipv4` / `send_ipv6` evict the NLRI from
+  the bucket the reverse map names when the attribute changed (dropping
+  that bucket if it empties) before queuing it under the new one, so an
+  NLRI lives in exactly one bucket and `cache_remove_*` purges its only
+  copy. `Peer::send_vpnv4` / `send_vpnv6` evict the queued copy on its
+  label-free identity unconditionally — from the old bucket on an
+  attribute change and from the same bucket otherwise — so a re-send
+  that changed only the label replaces the queued label. On the fix all
+  ten unit gates pass and both BDD twins leave z2 with the control prefix
+  only.
 
 ### 16. P2 CONFIRMED — the IPv6-unicast AddPath event path bypasses outbound policy
 

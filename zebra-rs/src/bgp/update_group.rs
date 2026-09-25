@@ -3103,6 +3103,120 @@ mod tests {
         (id, group)
     }
 
+    // ── Review finding #15: the pending-advert cache's forward map and
+    // reverse map must agree. `send_*` inserted the NLRI into the new
+    // attr bucket without evicting it from the bucket the reverse map
+    // pointed at, and `cache_remove_*` purges only the reverse-mapped
+    // bucket: after A1 → A2 → withdraw inside one MRAI window the flush
+    // re-announced the prefix under A1 while the Adj-RIB-Out no longer
+    // held it, so no later withdraw could ever reach the peer. ──
+
+    fn advert_cache_desync_nlri6(s: &str) -> Ipv6Nlri {
+        Ipv6Nlri {
+            id: 0,
+            prefix: s.parse().unwrap(),
+        }
+    }
+
+    fn advert_cache_desync_tx() -> mpsc::Sender<Message> {
+        let (tx, rx) = mpsc::channel(8);
+        Box::leak(Box::new(rx));
+        tx
+    }
+
+    /// The attr buckets of the IPv4 cache holding `n`.
+    fn buckets_holding_v4(g: &UpdateGroup, n: &Ipv4Nlri) -> Vec<Arc<BgpAttr>> {
+        g.cache_ipv4
+            .iter()
+            .filter(|(_, set)| set.contains_key(n))
+            .map(|(attr, _)| attr.clone())
+            .collect()
+    }
+
+    /// The attr buckets of the IPv6 cache holding `n`.
+    fn buckets_holding_v6(g: &UpdateGroup, n: &Ipv6Nlri) -> Vec<Arc<BgpAttr>> {
+        g.cache_ipv6
+            .iter()
+            .filter(|(_, set)| set.contains_key(n))
+            .map(|(attr, _)| attr.clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn advert_cache_desync_ipv4_attr_change_moves_the_nlri_out_of_its_old_bucket() {
+        let (_, mut g) = test_group(0);
+        let tx = advert_cache_desync_tx();
+        let p = nlri("10.9.0.0/24");
+        send_ipv4(&mut g, p.clone(), test_attr(1), 7, &tx, false);
+        send_ipv4(&mut g, p.clone(), test_attr(2), 7, &tx, false);
+        assert_eq!(
+            buckets_holding_v4(&g, &p),
+            vec![test_attr(2)],
+            "the NLRI lives only in the bucket of its latest attr"
+        );
+        assert_eq!(g.cache_ipv4.len(), 1, "the emptied old bucket is dropped");
+        assert_eq!(g.cache_ipv4_rev.get(&p), Some(&test_attr(2)));
+
+        // The flush therefore announces it once, under the latest attr.
+        let peers = PeerMap::new();
+        let addrs = super::super::interface_addrs::InterfaceAddrs::default();
+        let job = build_flush_job_ipv4(&mut g, &peers, &addrs).expect("one bucket");
+        assert_eq!(job.buckets.len(), 1);
+        assert_eq!(job.buckets[0].0, test_attr(2));
+        assert_eq!(job.buckets[0].1, vec![(p, 7)]);
+    }
+
+    #[tokio::test]
+    async fn advert_cache_desync_ipv4_withdraw_after_an_attr_change_leaves_nothing_to_flush() {
+        let (_, mut g) = test_group(0);
+        let tx = advert_cache_desync_tx();
+        let p = nlri("10.9.0.0/24");
+        send_ipv4(&mut g, p.clone(), test_attr(1), 7, &tx, false);
+        send_ipv4(&mut g, p.clone(), test_attr(2), 7, &tx, false);
+        cache_remove_ipv4(&mut g, p.prefix, 0);
+        assert!(
+            buckets_holding_v4(&g, &p).is_empty(),
+            "no bucket still holds the withdrawn NLRI"
+        );
+        assert!(g.cache_ipv4.is_empty());
+        assert!(g.cache_ipv4_rev.is_empty());
+        let peers = PeerMap::new();
+        let addrs = super::super::interface_addrs::InterfaceAddrs::default();
+        assert!(
+            build_flush_job_ipv4(&mut g, &peers, &addrs).is_none(),
+            "the flush must not re-announce a prefix withdrawn after an attr change"
+        );
+    }
+
+    #[tokio::test]
+    async fn advert_cache_desync_ipv6_attr_change_moves_the_nlri_out_of_its_old_bucket() {
+        let (_, mut g) = test_group(0);
+        let tx = advert_cache_desync_tx();
+        let p = advert_cache_desync_nlri6("2001:db8:9::/64");
+        send_ipv6(&mut g, p.clone(), test_attr(1), 7, &tx, false);
+        send_ipv6(&mut g, p.clone(), test_attr(2), 7, &tx, false);
+        assert_eq!(buckets_holding_v6(&g, &p), vec![test_attr(2)]);
+        assert_eq!(g.cache_ipv6.len(), 1, "the emptied old bucket is dropped");
+        assert_eq!(g.cache_ipv6_rev.get(&p), Some(&test_attr(2)));
+    }
+
+    #[tokio::test]
+    async fn advert_cache_desync_ipv6_withdraw_after_an_attr_change_leaves_nothing_to_flush() {
+        let (_, mut g) = test_group(0);
+        let tx = advert_cache_desync_tx();
+        let p = advert_cache_desync_nlri6("2001:db8:9::/64");
+        send_ipv6(&mut g, p.clone(), test_attr(1), 7, &tx, false);
+        send_ipv6(&mut g, p.clone(), test_attr(2), 7, &tx, false);
+        cache_remove_ipv6(&mut g, p.prefix, 0);
+        assert!(buckets_holding_v6(&g, &p).is_empty());
+        assert!(g.cache_ipv6.is_empty());
+        let peers = PeerMap::new();
+        assert!(
+            build_flush_job_ipv6(&mut g, &peers).is_none(),
+            "the flush must not re-announce a prefix withdrawn after an attr change"
+        );
+    }
+
     fn groups_with(group: UpdateGroup) -> UpdateGroupMap {
         let mut groups = empty_map();
         let af = groups

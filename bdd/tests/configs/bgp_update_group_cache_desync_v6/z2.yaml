@@ -1,0 +1,14 @@
+# z2 (AS 65042): the downstream peer that must not be left holding the
+# churned IPv6 prefix.
+router:
+  bgp:
+    global:
+      as: 65042
+      router-id: 192.168.41.3
+    neighbor:
+    - remote-address: 192.168.41.1
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65040
