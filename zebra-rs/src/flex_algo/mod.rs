@@ -12,10 +12,14 @@ pub mod affinity_map;
 pub mod config;
 pub mod constraint;
 pub mod entry;
+pub mod participation;
 pub mod srlg;
 
 pub use affinity_map::AffinityMap;
 pub use config::{FlexAlgoConfig, sr_algorithms};
-pub use constraint::{AffinityBits, link_passes_fad, local_link_affinity};
+pub use constraint::{
+    AffinityBits, FadConstraints, link_passes_constraints, link_passes_fad, local_link_affinity,
+};
 pub use entry::{FadMetricType, FlexAlgoEntry};
+pub use participation::{Participation, Unsupported};
 pub use srlg::{SrlgGroup, SrlgGroupBuilder};

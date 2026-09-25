@@ -465,13 +465,28 @@ impl TlvEmitter for IsisSubFadIncludeAllAg {
 
 /// FAD Flags sub-TLV (RFC 9350 §6.4). One byte minimum; only the
 /// M-flag (bit 0 of byte 0, "Prefix Metric") is currently defined.
+///
+/// Every other bit is kept, not dropped: "Implementations MUST check all
+/// advertised flag bits in the received IS-IS FADF sub-TLV -- not just
+/// the subset currently defined", because a router that does not support
+/// a flag set in the winning definition must stop participating.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IsisSubFadFlags {
     pub m_flag: bool,
+    /// The rest of byte 0 — every bit but M — as received.
+    #[serde(default)]
+    pub other: u8,
     /// Trailing bytes preserved on parse to round-trip flags defined
     /// after this codec was written.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub trailing: Vec<u8>,
+}
+
+impl IsisSubFadFlags {
+    /// Whether any flag other than M is set: none is defined today.
+    pub fn has_unknown(&self) -> bool {
+        self.other != 0 || self.trailing.iter().any(|b| *b != 0)
+    }
 }
 
 impl ParseBe<IsisSubFadFlags> for IsisSubFadFlags {
@@ -480,8 +495,16 @@ impl ParseBe<IsisSubFadFlags> for IsisSubFadFlags {
         // RFC 9350 §6.4: M-flag is the MSB of byte 0 (bit position 7
         // when bit 0 is LSB).
         let m_flag = (first & 0x80) != 0;
+        let other = first & 0x7f;
         let trailing = input.to_vec();
-        Ok((&[], Self { m_flag, trailing }))
+        Ok((
+            &[],
+            Self {
+                m_flag,
+                other,
+                trailing,
+            },
+        ))
     }
 }
 
@@ -494,7 +517,7 @@ impl TlvEmitter for IsisSubFadFlags {
     }
     fn emit(&self, buf: &mut BytesMut) {
         let first: u8 = if self.m_flag { 0x80 } else { 0x00 };
-        buf.put_u8(first);
+        buf.put_u8(first | (self.other & 0x7f));
         buf.put_slice(&self.trailing);
     }
 }
@@ -812,6 +835,7 @@ mod tests {
                 FadSubTlv::ExcludeAg(IsisSubFadExcludeAg { group: excl }),
                 FadSubTlv::Flags(IsisSubFadFlags {
                     m_flag: true,
+                    other: 0,
                     trailing: vec![],
                 }),
                 FadSubTlv::ExcludeSrlg(IsisSubFadExcludeSrlg {
@@ -850,6 +874,30 @@ mod tests {
         let mut buf = BytesMut::new();
         fad.emit(&mut buf);
         assert_eq!(&buf[..], bytes);
+    }
+
+    /// RFC 9350 §6.4: every advertised flag bit is checked, so every bit
+    /// survives the parse — M, an unknown bit in byte 0, and a byte past
+    /// it — and re-emits as received.
+    #[test]
+    fn fad_flags_keep_every_bit() {
+        for (bytes, m, unknown) in [
+            (&[0x80u8][..], true, false),
+            (&[0x40][..], false, true),
+            (&[0x00, 0x01][..], false, true),
+            (&[0x00, 0x00][..], false, false),
+        ] {
+            let (rest, flags) = IsisSubFadFlags::parse_be(bytes).expect("parse");
+            assert!(rest.is_empty());
+            assert_eq!(
+                (flags.m_flag, flags.has_unknown()),
+                (m, unknown),
+                "{bytes:?}"
+            );
+            let mut buf = BytesMut::new();
+            flags.emit(&mut buf);
+            assert_eq!(&buf[..], bytes);
+        }
     }
 
     #[test]

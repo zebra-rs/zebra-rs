@@ -348,18 +348,19 @@ pub(super) fn rebuild_sys_state(
         s.mt_membership.insert(*sys_id, mt_set);
     }
 
-    // Flex-Algorithm Definitions (RFC 9350 §5.1). Live inside Router
-    // Capability TLV 242, which is fragment-0-only — so the existing
-    // `frag0_cap` lookup above is the right source. Multiple FADs
-    // for distinct algorithms can appear in a single Router
-    // Capability; if a peer (incorrectly) emits two FADs for the
-    // same algo, last-wins via BTreeMap::insert.
-    let mut fad_map: BTreeMap<u8, IsisSubFlexAlgoDef> = BTreeMap::new();
-    if let Some(cap_tlv) = frag0_cap {
-        for fad in lsp_cap_view(cap_tlv).fads {
-            fad_map.insert(fad.flex_algorithm, fad.clone());
-        }
-    }
+    // Flex-Algorithm Definitions (RFC 9350 §5.1). "The IS-IS FAD sub-TLV
+    // MAY be advertised in an LSP of any number", and a router may split
+    // one algorithm's definition over several FAD sub-TLVs, so every
+    // Router Capability TLV in every fragment counts. `merge_fads` applies
+    // §6: invalid sub-TLVs ignored, the first occurrence of each
+    // constraint in the lowest-numbered LSP used.
+    let fads = frags.iter().flat_map(|f| {
+        f.tlvs.iter().flat_map(|t| match t {
+            IsisTlv::RouterCap(cap) => lsp_cap_view(cap).fads,
+            _ => Vec::new(),
+        })
+    });
+    let fad_map = super::flex_algo::merge_fads(fads);
     if fad_map.is_empty() {
         s.peer_fad.remove(sys_id);
     } else {
@@ -607,6 +608,7 @@ pub fn insert_lsp(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>)
     if !key.is_pseudo() && tlvs_changed {
         let self_sys_id = top.up_config.net.sys_id();
         let sys_id = key.sys_id();
+        let fads_before = top.peer_fad.get(&level).get(&sys_id).cloned();
         rebuild_sys_state(
             top.lsdb.get(&level),
             &self_sys_id,
@@ -626,11 +628,38 @@ pub fn insert_lsp(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>)
                 peer_algo_srv6: top.peer_algo_srv6.get_mut(&level),
             },
         );
+        fad_change(
+            top.tx,
+            level,
+            fads_before,
+            top.peer_fad.get(&level).get(&sys_id),
+        );
     }
 
     spf_schedule(top, level);
 
     prev
+}
+
+/// A peer's Flexible Algorithm Definitions changed, so the winning
+/// definition — and with it which algorithms this router participates in —
+/// may have changed (RFC 9350 §5.3). Re-originate our own LSP: its
+/// SR-Algorithm list, per-algorithm locators and SIDs announce exactly
+/// that participation, and a router that stops participating "MUST NOT
+/// announce participation". `lsp_generate` recomputes it; origination is
+/// throttled, and definitions change only when an operator edits one.
+/// Returns whether they changed.
+fn fad_change(
+    tx: &tokio::sync::mpsc::UnboundedSender<Message>,
+    level: Level,
+    before: Option<BTreeMap<u8, IsisSubFlexAlgoDef>>,
+    after: Option<&BTreeMap<u8, IsisSubFlexAlgoDef>>,
+) -> bool {
+    let changed = before.as_ref() != after;
+    if changed {
+        let _ = tx.send(Message::LspOriginate(level, None));
+    }
+    changed
 }
 
 pub fn insert_self_originate(
@@ -704,6 +733,7 @@ pub fn remove_lsp(top: &mut IsisTop, level: Level, key: IsisLspId) {
     // higher fragment the union'd reach maps shrink accordingly.
     let self_sys_id = top.config.net.sys_id();
     let sys_id = key.sys_id();
+    let fads_before = top.peer_fad.get(&level).get(&sys_id).cloned();
     rebuild_sys_state(
         top.lsdb.get(&level),
         &self_sys_id,
@@ -723,6 +753,17 @@ pub fn remove_lsp(top: &mut IsisTop, level: Level, key: IsisLspId) {
             peer_algo_srv6: top.peer_algo_srv6.get_mut(&level),
         },
     );
+    // Expiry is the one LSDB change that does not schedule SPF. When the
+    // expired router's definitions go with it, the winning definition may
+    // change: every algorithm must be recomputed with the new winner.
+    if fad_change(
+        top.tx,
+        level,
+        fads_before,
+        top.peer_fad.get(&level).get(&sys_id),
+    ) {
+        spf_schedule_top(top, level);
+    }
 }
 
 fn lsp_clone_with_seqno_inc(lsp: &IsisLsp) -> IsisLsp {
@@ -1365,6 +1406,86 @@ mod tests {
     /// the algo-0 End SID into `srv6_end_map` and the per-algo locator +
     /// End SID into `peer_algo_srv6[peer][128]`. Dropping the fragment
     /// must clear both.
+    /// RFC 9350 §5.1: a FAD "MAY be advertised in an LSP of any number".
+    /// One carried in fragment 1 is the peer's definition like any other,
+    /// and merges with one in fragment 0 — the lower fragment's constraint
+    /// first.
+    #[test]
+    fn rebuild_reads_fads_from_every_fragment() {
+        use isis_packet::cap::IsisSubTlv as CapSubTlv;
+        use isis_packet::{FadSubTlv, IsisSubFadExcludeAg, IsisTlvRouterCap};
+        let mut lsdb = Lsdb::default();
+        let peer = sys(12);
+        let exclude = |bit| {
+            let mut group = ExtAdminGroup::default();
+            group.set(bit);
+            FadSubTlv::ExcludeAg(IsisSubFadExcludeAg { group })
+        };
+        let cap = |subs: Vec<FadSubTlv>| {
+            IsisTlv::RouterCap(IsisTlvRouterCap {
+                router_id: std::net::Ipv4Addr::UNSPECIFIED,
+                flags: 0.into(),
+                subs: vec![CapSubTlv::FlexAlgoDef(IsisSubFlexAlgoDef {
+                    flex_algorithm: 128,
+                    metric_type: 0,
+                    calc_type: 0,
+                    priority: 200,
+                    subs,
+                })],
+            })
+        };
+        let f0 = frag(peer, 0);
+        let mut f1 = frag(peer, 1);
+        f1.tlvs.push(cap(vec![exclude(3)]));
+        lsdb.map.insert(f0.lsp_id, Lsa::new(f0));
+        lsdb.map.insert(f1.lsp_id, Lsa::new(f1));
+
+        let mut peer_fad: BTreeMap<IsisSysId, BTreeMap<u8, IsisSubFlexAlgoDef>> = BTreeMap::new();
+        rebuild_peer_fad(&lsdb, &peer, &mut peer_fad);
+        assert_eq!(
+            peer_fad[&peer][&128].subs,
+            vec![exclude(3)],
+            "from fragment 1"
+        );
+
+        let mut f0 = frag(peer, 0);
+        f0.tlvs.push(cap(vec![exclude(1)]));
+        lsdb.map.insert(f0.lsp_id, Lsa::new(f0));
+        rebuild_peer_fad(&lsdb, &peer, &mut peer_fad);
+        assert_eq!(
+            peer_fad[&peer][&128].subs,
+            vec![exclude(1)],
+            "fragment 0's exclude is the first occurrence"
+        );
+    }
+
+    /// `rebuild_sys_state` for one peer, keeping only its FADs.
+    fn rebuild_peer_fad(
+        lsdb: &Lsdb,
+        peer: &IsisSysId,
+        peer_fad: &mut BTreeMap<IsisSysId, BTreeMap<u8, IsisSubFlexAlgoDef>>,
+    ) {
+        rebuild_sys_state(
+            lsdb,
+            &sys(0xFF),
+            peer,
+            SysStateRefs {
+                hostname: &mut Hostname::default(),
+                label_map: &mut IsisLabelMap::default(),
+                reach_v4: &mut ReachMapV4::default(),
+                reach_v6: &mut ReachMapV6::default(),
+                mt_membership: &mut BTreeMap::new(),
+                mt2_reach_v6: &mut ReachMapV6::default(),
+                srv6_end_map: &mut BTreeMap::new(),
+                peer_fad,
+                peer_link_affinity: &mut BTreeMap::new(),
+                peer_algo_sid: &mut BTreeMap::new(),
+                peer_algos: &mut BTreeMap::new(),
+                peer_algo_srv6: &mut BTreeMap::new(),
+            },
+        );
+    }
+
     #[test]
     fn rebuild_populates_and_clears_peer_algo_srv6() {
         use isis_packet::prefix::IsisSubTlv as PrefixSubTlv;

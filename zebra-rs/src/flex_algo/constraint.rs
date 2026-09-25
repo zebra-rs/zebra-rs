@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use packet_utils::ExtAdminGroup;
 
-use super::entry::FlexAlgoEntry;
+use super::entry::{FadMetricType, FlexAlgoEntry};
 
 /// Resolves an affinity (admin-group) name to its RFC 7308 bit
 /// position. Implemented by each protocol's affinity-map table
@@ -56,22 +56,44 @@ pub fn link_passes_fad<A: AffinityBits>(
     entry: &FlexAlgoEntry,
     am: &A,
 ) -> bool {
-    let exclude = local_link_affinity(&entry.exclude_any, am);
-    let include_any = local_link_affinity(&entry.include_any, am);
-    let include_all = local_link_affinity(&entry.include_all, am);
+    let constraints = FadConstraints {
+        metric_type: entry.metric_type.unwrap_or(FadMetricType::Igp),
+        exclude_any: local_link_affinity(&entry.exclude_any, am),
+        include_any: local_link_affinity(&entry.include_any, am),
+        include_all: local_link_affinity(&entry.include_all, am),
+    };
+    link_passes_constraints(affinity, &constraints)
+}
 
+/// A Flexible Algorithm Definition resolved to what the path computation
+/// needs: the metric-type and the three admin-group rules as bitmaps. It
+/// is what a *winning* FAD (RFC 9350 §5.3) reduces to once every element
+/// in it is known to be supported, so the computation reads the
+/// definition every participant agreed on, not this router's config.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FadConstraints {
+    pub metric_type: FadMetricType,
+    pub exclude_any: ExtAdminGroup,
+    pub include_any: ExtAdminGroup,
+    pub include_all: ExtAdminGroup,
+}
+
+/// RFC 9350 §13 rules 1, 3 and 4 against a link's admin-group bitmap:
+/// exclude-any, include-any, include-all. `affinity = None` is the empty
+/// bitmap — see [`link_passes_fad`].
+pub fn link_passes_constraints(affinity: Option<&ExtAdminGroup>, c: &FadConstraints) -> bool {
     let empty = ExtAdminGroup::default();
     let bitmap = affinity.unwrap_or(&empty);
 
-    if !ext_admin_group_intersection(&exclude, bitmap).is_empty() {
+    if !ext_admin_group_intersection(&c.exclude_any, bitmap).is_empty() {
         return false;
     }
-    if !include_any.words.iter().all(|w| *w == 0)
-        && ext_admin_group_intersection(&include_any, bitmap).is_empty()
+    if !c.include_any.words.iter().all(|w| *w == 0)
+        && ext_admin_group_intersection(&c.include_any, bitmap).is_empty()
     {
         return false;
     }
-    if !ext_admin_group_contains(bitmap, &include_all) {
+    if !ext_admin_group_contains(bitmap, &c.include_all) {
         return false;
     }
     true

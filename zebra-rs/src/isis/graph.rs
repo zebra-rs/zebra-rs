@@ -9,7 +9,9 @@ use isis_packet::{
 use crate::spf;
 
 use super::config::MtId;
-use super::flex_algo::{FadMetricType, FlexAlgoEntry, link_passes_fad, local_link_affinity};
+use super::flex_algo::{
+    FadConstraints, FadMetricType, link_passes_constraints, local_link_affinity,
+};
 use super::inst::IsisTop;
 use super::level::Level;
 
@@ -609,10 +611,12 @@ fn process_neighbor_link_mt2(
     });
 }
 
-/// Build a per-algorithm SPF graph for Flex-Algo `algo` using `entry`
-/// as the Flexible Algorithm Definition (RFC 9350 §5). The result has
-/// the same shape as `graph()` so existing `spf::spf` consumers work
-/// unchanged.
+/// Build a per-algorithm SPF graph for Flex-Algo `algo`, computed with
+/// `constraints`: the *winning* Flexible Algorithm Definition's (RFC 9350
+/// §5.3), which every participant selects from the same LSDB — never this
+/// router's own configuration, which another router may not share. The
+/// result has the same shape as `graph()` so existing `spf::spf`
+/// consumers work unchanged.
 ///
 /// Filtering vs the legacy graph:
 ///   - **Peer participation gate (§5.2):** vertices from non-self
@@ -622,24 +626,23 @@ fn process_neighbor_link_mt2(
 ///     signal on our side, and SPF is only called for algos in that
 ///     map.
 ///   - **Per-link affinity gate (§6):** every ExtIsReach edge is
-///     filtered through `link_passes_fad`. Our own edges resolve
+///     filtered through `link_passes_constraints`. Our own edges resolve
 ///     local `LinkConfig::affinity` via `affinity_map`; peer edges
 ///     read `peer_link_affinity[source_sys][neighbor_id]`.
-///   - **SRLG exclude:** *not* enforced — peer SRLG state is not yet
-///     cached. `entry.srlg_exclude` is read but produces no effect; a
-///     `tracing::warn` would be reasonable but is left to the
-///     scheduler layer.
 ///   - **Metric type (§5.1):** `MinUnidirLinkDelay` (metric-type 1)
 ///     routes on per-link Min delay — local links from
 ///     `LinkConfig::te_metric.min_delay`, peer links from the Min/Max
 ///     Link Delay sub-TLV in the link's flex-algo ASLA. A link that
-///     advertises no delay is pruned (RFC 9350 §15). IGP (and the
-///     not-yet-supported TeDefault) use the reach entry's IGP metric.
+///     advertises no delay is pruned (RFC 9350 §15). IGP uses the reach
+///     entry's IGP metric.
+///   - Anything the winning definition asks for that this router cannot
+///     compute — SRLG exclusion, TE-default, the M flag — never reaches
+///     here: selection stops participation instead.
 pub fn graph_flex_algo(
     top: &mut IsisTop,
     level: Level,
     algo: u8,
-    entry: &FlexAlgoEntry,
+    constraints: &FadConstraints,
 ) -> (spf::Graph, Option<usize>, BTreeMap<u32, IsisSysId>) {
     let mut graph = spf::Graph::new();
     let mut source_node = None;
@@ -736,25 +739,18 @@ pub fn graph_flex_algo(
                         .and_then(|m| m.get(&entry_reach.neighbor_id))
                 };
 
-                if !link_passes_fad(affinity, entry, top.affinity_map) {
+                if !link_passes_constraints(affinity, constraints) {
                     continue;
                 }
 
                 // Edge cost per the FAD metric-type (RFC 9350 §5.1).
                 // metric-type 1 routes on the link's Min delay: local
-                // links from current config, peer links from the
-                // flex-algo ASLA's Min/Max Link Delay sub-TLV, falling
-                // back to the inline sub-TLV when the peer advertises
-                // no flex-algo ASLA at all. The fallback is for interop:
-                // RFC 9350 §12 scopes flex-algo attributes to the ASLA
-                // with the X-bit set, but an implementation that never
-                // emits ASLA would otherwise have every one of its links
-                // pruned from a metric-type-1 topology. It applies only
-                // when the ASLA supplied nothing, so a peer that does
-                // scope its attributes keeps that scoping.
-                // A link that advertises no delay either way is pruned
-                // (RFC 9350 §15). Everything else uses the IGP metric.
-                let cost = if entry.metric_type == Some(FadMetricType::MinUnidirLinkDelay) {
+                // links from current config, peer links as RFC 9479 §4.2
+                // selects them (`peer_min_delay`) — never a legacy inline
+                // value the applicable ASLA did not point to. A link that
+                // advertises no delay is pruned (RFC 9350 §15).
+                // Everything else uses the IGP metric.
+                let cost = if constraints.metric_type == FadMetricType::MinUnidirLinkDelay {
                     let delay = if source_sys_id == self_sys_id {
                         local_adj_to_ifindex
                             .get(&entry_reach.neighbor_id)
