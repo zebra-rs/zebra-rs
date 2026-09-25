@@ -1,0 +1,13 @@
+# z4 (AS 65100): z1's plain (non-AddPath) iBGP labeled-unicast neighbor.
+router:
+  bgp:
+    global:
+      as: 65100
+      router-id: 192.168.53.4
+    neighbor:
+    - remote-address: 2001:db8:53::1
+      afi-safi:
+      - name: label-v6
+        enabled: true
+      enabled: true
+      remote-as: 65100

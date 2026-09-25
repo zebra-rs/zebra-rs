@@ -1,0 +1,21 @@
+# z3 (AS 65002, router-id 192.168.52.3): originates 10.52.0.1/32 into IPv4
+# labeled-unicast toward z1. Its path reaches z1 after z2's, so it is
+# the newest candidate.
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 192.168.52.3
+    neighbor:
+    - remote-address: 192.168.52.1
+      afi-safi:
+      - name: label-v4
+        enabled: true
+      - name: ipv4
+        enabled: false
+      enabled: true
+      remote-as: 65100
+    afi-safi:
+    - name: label-v4
+      network:
+      - prefix: 10.52.0.1/32

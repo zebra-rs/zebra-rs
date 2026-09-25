@@ -1,0 +1,37 @@
+# z1 (DUT, AS 65100): learns 10.52.0.1/32 over IPv4 labeled-unicast from
+# z2 and z3 (both AS 65002) and relays it to its iBGP neighbor z4. z4
+# comes up last, so all it gets is z1's session-up dump.
+router:
+  bgp:
+    global:
+      as: 65100
+      router-id: 192.168.52.1
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 192.168.52.2
+      afi-safi:
+      - name: label-v4
+        enabled: true
+      - name: ipv4
+        enabled: false
+      enabled: true
+      remote-as: 65002
+    - remote-address: 192.168.52.3
+      afi-safi:
+      - name: label-v4
+        enabled: true
+      - name: ipv4
+        enabled: false
+      enabled: true
+      remote-as: 65002
+    - remote-address: 192.168.52.4
+      afi-safi:
+      - name: label-v4
+        enabled: true
+      - name: ipv4
+        enabled: false
+      enabled: true
+      remote-as: 65100
