@@ -41,5 +41,6 @@ Topology:
 | A 10 percent probe loss is advertised by both IGPs | |
 | Crossing the loss anomaly bound sets the A bit, and recovery clears it | |
 | Probes that all vanish withdraw the loss at once | |
+| Against a stateful reflector, loss is split by direction | |
 | Turning loss off in one IGP leaves the other advertising it | |
 | Teardown topology | |

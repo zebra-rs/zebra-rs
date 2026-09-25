@@ -1429,6 +1429,19 @@ module config {
                      anomaly-threshold are clamped to it. Unset means no
                      hysteresis band: anomaly-threshold both sets and clears.";
                 }
+                leaf reflector {
+                  ext:help "How this router reflects the peer's probes (default stateless)";
+                  type enumeration {
+                    enum stateless;
+                    enum stateful;
+                  }
+                  description
+                    "stateless (the default, RFC 8762 section 4.3): replies copy the
+                     sender's sequence number. stateful: replies carry this router's own
+                     per-peer sequence counter, which lets a peer that declares
+                     'loss peer-reflector stateful' tell forward loss from reverse. On if
+                     any IGP measuring this link sets it.";
+                }
                 container loss {
                   ext:help "Measured link loss (RFC 8570 / RFC 7471 section 4.4)";
                   description
@@ -1522,6 +1535,21 @@ module config {
                       "Loss, in percent, below which the Anomalous bit clears once the
                        loss has stayed below it for a whole loss interval. Defaults to,
                        and is capped at, anomaly-threshold.";
+                  }
+                  leaf peer-reflector {
+                    ext:help "How the peer reflects this router's probes (default stateless)";
+                    type enumeration {
+                      enum stateless;
+                      enum stateful;
+                    }
+                    description
+                      "Declares the peer's reflector mode; it cannot be detected.
+                       stateless (the default): the advertised loss is round-trip, an upper
+                       bound on forward loss. stateful: the peer reflects with its own
+                       sequence counter (a zebra-rs peer with 'measurement reflector
+                       stateful', a Juniper peer with stateful-sequence), losses are split
+                       by direction, and forward loss is advertised. Declaring a stateless
+                       peer stateful makes every loss read as reverse.";
                   }
                 }
               }
@@ -2655,6 +2683,19 @@ module config {
                      anomaly-threshold are clamped to it. Unset means no
                      hysteresis band: anomaly-threshold both sets and clears.";
                 }
+                leaf reflector {
+                  ext:help "How this router reflects the peer's probes (default stateless)";
+                  type enumeration {
+                    enum stateless;
+                    enum stateful;
+                  }
+                  description
+                    "stateless (the default, RFC 8762 section 4.3): replies copy the
+                     sender's sequence number. stateful: replies carry this router's own
+                     per-peer sequence counter, which lets a peer that declares
+                     'loss peer-reflector stateful' tell forward loss from reverse. On if
+                     any IGP measuring this link sets it.";
+                }
                 container loss {
                   ext:help "Measured link loss (RFC 8570 / RFC 7471 section 4.4)";
                   description
@@ -2748,6 +2789,21 @@ module config {
                       "Loss, in percent, below which the Anomalous bit clears once the
                        loss has stayed below it for a whole loss interval. Defaults to,
                        and is capped at, anomaly-threshold.";
+                  }
+                  leaf peer-reflector {
+                    ext:help "How the peer reflects this router's probes (default stateless)";
+                    type enumeration {
+                      enum stateless;
+                      enum stateful;
+                    }
+                    description
+                      "Declares the peer's reflector mode; it cannot be detected.
+                       stateless (the default): the advertised loss is round-trip, an upper
+                       bound on forward loss. stateful: the peer reflects with its own
+                       sequence counter (a zebra-rs peer with 'measurement reflector
+                       stateful', a Juniper peer with stateful-sequence), losses are split
+                       by direction, and forward loss is advertised. Declaring a stateless
+                       peer stateful makes every loss read as reverse.";
                   }
                 }
               }
@@ -4360,6 +4416,19 @@ module config {
                    anomaly-threshold are clamped to it. Unset means no
                    hysteresis band: anomaly-threshold both sets and clears.";
               }
+              leaf reflector {
+                ext:help "How this router reflects the peer's probes (default stateless)";
+                type enumeration {
+                  enum stateless;
+                  enum stateful;
+                }
+                description
+                  "stateless (the default, RFC 8762 section 4.3): replies copy the
+                   sender's sequence number. stateful: replies carry this router's own
+                   per-peer sequence counter, which lets a peer that declares
+                   'loss peer-reflector stateful' tell forward loss from reverse. On if
+                   any IGP measuring this link sets it.";
+              }
               container loss {
                 ext:help "Measured link loss (RFC 8570 / RFC 7471 section 4.4)";
                 description
@@ -4453,6 +4522,21 @@ module config {
                     "Loss, in percent, below which the Anomalous bit clears once the
                      loss has stayed below it for a whole loss interval. Defaults to,
                      and is capped at, anomaly-threshold.";
+                }
+                leaf peer-reflector {
+                  ext:help "How the peer reflects this router's probes (default stateless)";
+                  type enumeration {
+                    enum stateless;
+                    enum stateful;
+                  }
+                  description
+                    "Declares the peer's reflector mode; it cannot be detected.
+                     stateless (the default): the advertised loss is round-trip, an upper
+                     bound on forward loss. stateful: the peer reflects with its own
+                     sequence counter (a zebra-rs peer with 'measurement reflector
+                     stateful', a Juniper peer with stateful-sequence), losses are split
+                     by direction, and forward loss is advertised. Declaring a stateless
+                     peer stateful makes every loss read as reverse.";
                 }
               }
             }

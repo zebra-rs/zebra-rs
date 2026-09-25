@@ -2003,6 +2003,20 @@ pub fn config_te_measurement_loss_reuse_threshold(
     config_te_measurement(isis, args, |m, args| m.set_loss_reuse(args, op.is_set()))
 }
 
+pub fn config_te_measurement_reflector(isis: &mut Isis, args: Args, op: ConfigOp) -> Option<()> {
+    config_te_measurement(isis, args, |m, args| m.set_reflector(args, op.is_set()))
+}
+
+pub fn config_te_measurement_loss_peer_reflector(
+    isis: &mut Isis,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_te_measurement(isis, args, |m, args| {
+        m.set_loss_peer_reflector(args, op.is_set())
+    })
+}
+
 pub fn config_metric(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     let ifname = args.string()?;
     let metric = args.u32()?;

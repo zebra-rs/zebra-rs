@@ -114,9 +114,12 @@ fn session_json(key: &SessionKey, s: &Session) -> StampSessionJson {
     }
 }
 
-/// Probe loss over the default loss window (measured-loss design D4/D5).
-/// Always round-trip for now: splitting it by direction needs a stateful
-/// peer reflector (design D3), which a later change adds.
+/// Probe loss over the default loss window (measured-loss design D4/D5),
+/// round-trip. `forward` / `reverse` / `unresolved` are the session's
+/// classification of `lost` (design D3). They mean something only
+/// against a stateful peer reflector: one that copies the sender's
+/// sequence numbers makes every anchored loss read reverse. Which the
+/// peer is, is each subscriber's `peer-reflector` declaration.
 #[derive(Serialize)]
 struct StampLossJson {
     direction: &'static str,
@@ -125,6 +128,9 @@ struct StampLossJson {
     buckets_wanted: usize,
     settled: u64,
     lost: u64,
+    forward: u64,
+    reverse: u64,
+    unresolved: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     percent: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -160,6 +166,9 @@ fn loss_json(s: &Session) -> StampLossJson {
         buckets_wanted: w.wanted,
         settled: w.settled,
         lost: w.lost,
+        forward: w.forward,
+        reverse: w.reverse,
+        unresolved: w.unresolved(),
         percent: w.percent().map(round6),
         resolution_percent: w.resolution_percent().map(round6),
         integrity_percent: w.integrity_percent(),
@@ -214,10 +223,21 @@ fn subscriber_loss_line(sub: &Subscriber) -> String {
     if !p.enabled {
         return "loss: disabled".to_string();
     }
+    // Against a declared stateful peer the value is forward loss (D3).
+    let view = if p.peer_reflector_stateful {
+        " forward"
+    } else {
+        ""
+    };
     let state = match sub.advertised_loss {
-        Some(a) if a.anomalous => format!("advertised {:.6}% (A)", units_pct(a.value)),
-        Some(a) => format!("advertised {:.6}%", units_pct(a.value)),
+        Some(a) if a.anomalous => format!("advertised {:.6}%{view} (A)", units_pct(a.value)),
+        Some(a) => format!("advertised {:.6}%{view}", units_pct(a.value)),
         None => "not advertised".to_string(),
+    };
+    let peer = if p.peer_reflector_stateful {
+        ", peer-reflector stateful"
+    } else {
+        ""
     };
     let accel = match p.accelerated {
         Some(step) => format!(", accelerated {:.6}%", units_pct(step)),
@@ -231,12 +251,32 @@ fn subscriber_loss_line(sub: &Subscriber) -> String {
         None => String::new(),
     };
     format!(
-        "loss: {state} (interval {}s, threshold {}%, minimum-change {:.6}%{accel}, integrity {}%{anomaly})",
+        "loss: {state} (interval {}s, threshold {}%, minimum-change {:.6}%{accel}, integrity {}%{anomaly}{peer})",
         p.window_buckets as u64 * BUCKET.as_secs(),
         p.threshold_pct,
         units_pct(p.minimum_change),
         p.integrity_pct,
     )
+}
+
+/// For a subscriber that declares its peer's reflector stateful, how its
+/// window's losses split by direction (design D3) — what its forward
+/// value is made of. Unresolved losses count as forward until their gap
+/// closes.
+fn subscriber_direction_line(sub: &Subscriber, s: &Session) -> Option<String> {
+    let p = &sub.loss_policy;
+    if !p.enabled || !p.peer_reflector_stateful {
+        return None;
+    }
+    let w = s.loss.window(p.window_buckets);
+    Some(format!(
+        "direction over {}s: forward {}, reverse {}, unresolved {} of {} probes",
+        w.secs(),
+        w.forward,
+        w.reverse,
+        w.unresolved(),
+        w.settled
+    ))
 }
 
 fn show_stamp(stamp: &Stamp, _args: Args, json: bool) -> Result<String, fmt::Error> {
@@ -328,6 +368,20 @@ fn show_stamp_session(stamp: &Stamp, _args: Args, json: bool) -> Result<String, 
             "        T4 timestamp source: kernel {} userspace {}",
             s.t4_kernel, s.t4_userspace
         )?;
+        // How this router answers the peer's probes (design D3): stateful
+        // while any subscriber asks.
+        let stateful = stamp
+            .subscriber_rows(key)
+            .any(|(_, sub)| sub.reflector_stateful);
+        if stateful {
+            writeln!(
+                buf,
+                "        Reflector: stateful, sequence {}",
+                s.reflector_seq
+            )?;
+        } else {
+            writeln!(buf, "        Reflector: stateless")?;
+        }
         writeln!(buf, "        {}", loss_line(&default_loss_window(s)))?;
         writeln!(
             buf,
@@ -367,6 +421,9 @@ fn show_stamp_session(stamp: &Stamp, _args: Args, json: bool) -> Result<String, 
                 yes_no(sub.last_flags.max)
             )?;
             writeln!(buf, "                {}", subscriber_loss_line(sub))?;
+            if let Some(line) = subscriber_direction_line(sub, s) {
+                writeln!(buf, "                  {}", line)?;
+            }
         }
         if !listed {
             writeln!(buf, "            none")?;
@@ -547,6 +604,8 @@ mod tests {
             wanted: 4,
             settled,
             lost,
+            forward: 0,
+            reverse: 0,
             expected_milli: 120_000,
             silent: 0,
         }
@@ -608,6 +667,66 @@ mod tests {
             subscriber_loss_line(&sub),
             "loss: advertised 0.000000% (interval 120s, threshold 10%, \
              minimum-change 0.999999%, integrity 90%)"
+        );
+        // Design D3: against a declared stateful peer the value is
+        // forward loss, and the line says so.
+        sub.loss_policy.peer_reflector_stateful = true;
+        assert_eq!(
+            subscriber_loss_line(&sub),
+            "loss: advertised 0.000000% forward (interval 120s, threshold 10%, \
+             minimum-change 0.999999%, integrity 90%, peer-reflector stateful)"
+        );
+    }
+
+    /// Design D3: the session says how this router reflects, and a
+    /// subscriber that declares its peer stateful gets its window's
+    /// direction split. Probe 1 is lost on the way out — the reflector
+    /// never counts it — and probe 2's reply is lost: the gap between
+    /// probes 0 and 3 is one forward, one reverse.
+    #[tokio::test]
+    async fn the_session_shows_the_reflector_mode_and_the_direction_split() {
+        use std::time::{Duration, Instant};
+
+        use crate::stamp::loss::LossLedger;
+        use crate::stamp::session::LossPolicy;
+        let mut stamp = fresh_stamp();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let params = SessionParams {
+            reflector_stateful: true,
+            loss: LossPolicy {
+                peer_reflector_stateful: true,
+                window_buckets: 1,
+                ..LossPolicy::default()
+            },
+            ..SessionParams::default()
+        };
+        stamp.subscribe("isis".into(), key(), params, tx);
+        let t0 = Instant::now() - Duration::from_secs(40);
+        let mut l = LossLedger::new(t0);
+        for s in 0..4u32 {
+            l.sent(s, t0 + Duration::from_secs(s.into()));
+        }
+        l.reply(0, 0, t0 + Duration::from_millis(5));
+        l.reply(3, 2, t0 + Duration::from_millis(3_005));
+        l.advance(t0 + Duration::from_secs(33), 1000);
+        stamp.sessions.get_mut(&key()).unwrap().loss = l;
+
+        let detail = show_stamp_session(&stamp, no_args(), false).unwrap();
+        assert!(
+            detail.contains("Reflector: stateful, sequence 0"),
+            "{detail}"
+        );
+        assert!(
+            detail.contains("direction over 30s: forward 1, reverse 1, unresolved 0 of 4 probes"),
+            "{detail}"
+        );
+        let v: serde_json::Value =
+            serde_json::from_str(&show_stamp_session(&stamp, no_args(), true).unwrap()).unwrap();
+        let loss = &v[0]["loss"];
+        assert_eq!(
+            (&loss["forward"], &loss["reverse"], &loss["unresolved"]),
+            (&1.into(), &1.into(), &0.into()),
+            "{v}"
         );
     }
 }

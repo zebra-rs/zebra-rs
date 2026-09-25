@@ -61,6 +61,12 @@ pub struct SessionParams {
     /// setting that decides what an IGP *advertises* is its own, and is
     /// evaluated over the session's shared loss buckets.
     pub loss: LossPolicy,
+    /// This subscriber asks for `reflector stateful`: reflect the peer's
+    /// probes with this router's own sequence counter (measured-loss
+    /// design D3). Wire-visible, so the session reflects statefully if
+    /// **any** current subscriber asks — a second IGP subscribing with
+    /// the default must not turn off what the first configured (D10).
+    pub reflector_stateful: bool,
 }
 
 impl Default for SessionParams {
@@ -71,6 +77,7 @@ impl Default for SessionParams {
             dst_port: stamp_packet::STAMP_UDP_PORT,
             anomaly: AnomalyThresholds::default(),
             loss: LossPolicy::default(),
+            reflector_stateful: false,
         }
     }
 }
@@ -110,6 +117,12 @@ pub struct LossPolicy {
     /// a whole loss interval (D7), in micro-percent. Defaults to, and is
     /// clamped to, the anomaly bound.
     pub reuse_micro_pct: Option<u32>,
+    /// `peer-reflector stateful`: the peer reflects with its own sequence
+    /// counter, so losses can be split by direction and forward loss
+    /// advertised (D3). Declared, not detected — a stateless reflector
+    /// with forward loss and a stateful one with reverse loss send the
+    /// same reply stream. Default `false`: round-trip loss.
+    pub peer_reflector_stateful: bool,
 }
 
 impl LossPolicy {
@@ -147,6 +160,7 @@ impl Default for LossPolicy {
             integrity_pct: DEFAULT_LOSS_INTEGRITY_PCT,
             anomaly_micro_pct: None,
             reuse_micro_pct: None,
+            peer_reflector_stateful: false,
         }
     }
 }
@@ -155,6 +169,16 @@ impl Default for LossPolicy {
 /// truncating.
 pub fn micro_pct_to_units(micro_pct: u64) -> u32 {
     (micro_pct / 3).min(u64::from(u32::MAX)) as u32
+}
+
+/// A reflector mode leaf (`reflector`, `peer-reflector`): whether it
+/// names the stateful mode. YANG restricts it to the two names.
+fn reflector_mode(value: &str) -> Option<bool> {
+    match value {
+        "stateful" => Some(true),
+        "stateless" => Some(false),
+        _ => None,
+    }
 }
 
 /// `loss interval`: whole 30 s buckets only (design D4) — rejected
@@ -243,6 +267,10 @@ pub struct MeasurementConfig {
     pub loss_integrity_pct: Option<u32>,
     pub loss_anomaly_micro_pct: Option<u64>,
     pub loss_reuse_micro_pct: Option<u64>,
+    /// `measurement reflector stateful`.
+    pub reflector_stateful: Option<bool>,
+    /// `loss peer-reflector stateful`.
+    pub loss_peer_reflector_stateful: Option<bool>,
 }
 
 impl MeasurementConfig {
@@ -260,7 +288,22 @@ impl MeasurementConfig {
                 reuse_us: self.reuse_threshold_us,
             },
             loss: self.loss_policy(),
+            reflector_stateful: self.reflector_stateful.unwrap_or(false),
         }
+    }
+
+    /// `measurement reflector stateless | stateful`.
+    pub fn set_reflector(&mut self, args: &mut Args, set: bool) -> Option<()> {
+        let stateful = reflector_mode(&args.string()?)?;
+        self.reflector_stateful = set.then_some(stateful);
+        Some(())
+    }
+
+    /// `loss peer-reflector stateless | stateful`.
+    pub fn set_loss_peer_reflector(&mut self, args: &mut Args, set: bool) -> Option<()> {
+        let stateful = reflector_mode(&args.string()?)?;
+        self.loss_peer_reflector_stateful = set.then_some(stateful);
+        Some(())
     }
 
     /// `loss enabled` (config callback helper, shared by every IGP).
@@ -340,6 +383,7 @@ impl MeasurementConfig {
             // `check_loss_percent` bounds both to 100 %, 10⁸ micro-percent.
             anomaly_micro_pct: self.loss_anomaly_micro_pct.map(|v| v as u32),
             reuse_micro_pct: self.loss_reuse_micro_pct.map(|v| v as u32),
+            peer_reflector_stateful: self.loss_peer_reflector_stateful.unwrap_or(false),
         }
     }
 }
@@ -374,6 +418,11 @@ pub struct Session {
     /// Probes from `key.remote` answered by the implicit reflector —
     /// the per-session half of the reflector counters.
     pub reflected_count: u64,
+    /// The stateful reflector's own sequence counter for this peer's
+    /// probes (RFC 8762 §4.2, measured-loss design D3): one per probe
+    /// received, whether or not the session currently reflects
+    /// statefully — only its use depends on the mode.
+    pub reflector_seq: u32,
     pub window: StatsWindow,
     /// Probe-loss accounting on its own 30 s clock (design D2/D4) —
     /// independent of the delay window above and of `damping_secs`.
@@ -415,6 +464,7 @@ impl Session {
             t4_kernel: 0,
             t4_userspace: 0,
             reflected_count: 0,
+            reflector_seq: 0,
             window: StatsWindow::default(),
             loss: LossLedger::new(Instant::now()),
             damping: Damping::default(),
@@ -543,7 +593,13 @@ mod tests {
         c.set_loss_integrity(&mut args("80"), true).unwrap();
         c.set_loss_anomaly(&mut args("5"), true).unwrap();
         c.set_loss_reuse(&mut args("0.5"), true).unwrap();
+        c.set_loss_peer_reflector(&mut args("stateful"), true)
+            .unwrap();
+        c.set_reflector(&mut args("stateful"), true).unwrap();
+        assert!(c.resolve().reflector_stateful);
+        assert_eq!(c.set_reflector(&mut args("sometimes"), true), None);
         let p = c.loss_policy();
+        assert!(p.peer_reflector_stateful);
         assert!(!p.enabled);
         assert_eq!(p.window_buckets, 1);
         assert_eq!(p.threshold_pct, 15);

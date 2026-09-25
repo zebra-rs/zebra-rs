@@ -2556,6 +2556,19 @@ mod save_config_tests {
         );
         let errors = cm.value_errors(candidate.lines().map(str::to_string));
         assert_eq!(errors, Vec::<String>::new(), "{candidate}");
+
+        // The reflector modes (design D3) are enumerations YANG checks
+        // itself, at `set`.
+        let measurement = "router isis interface eth0 te-metric measurement";
+        for (line, ok) in [
+            (format!("{measurement} reflector stateful"), true),
+            (format!("{measurement} loss peer-reflector stateful"), true),
+            (format!("{measurement} reflector sometimes"), false),
+            (format!("{ospf} peer-reflector stateless"), true),
+        ] {
+            let (code, output, _) = cm.execute(mode, &format!("set {line}"));
+            assert_eq!(code == ExecCode::Show, ok, "`{line}`: {output:?}");
+        }
     }
 
     /// The .deb ships `/etc/zebra-rs/zebra-rs.conf` comment-only, and

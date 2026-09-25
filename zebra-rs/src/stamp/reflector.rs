@@ -1,22 +1,27 @@
-//! Stateless Session-Reflector reply construction (RFC 8762 §4.3).
+//! Session-Reflector reply construction (RFC 8762 §4.2–§4.3).
 //!
 //! [`build_reply`] is deliberately a pure function of the received
 //! probe: it is the executable specification a future XDP reflector
 //! mirrors as an in-place packet rewrite (offload notes §9b R1 — both
 //! base packets are 44 octets, so the reflector fields overwrite the
 //! sender's MBZ region byte-for-byte). Keep it free of session state
-//! and side effects.
+//! and side effects: the one stateful input, the reflector's own
+//! sequence number, is the caller's to supply.
 
 use stamp_packet::{
     BASE_LEN, ReflectorPacket, SenderPacket, StampTimestamp, StampTlv, StampTlvValue,
     TLV_HEADER_LEN,
 };
 
-/// Build the stateless reflection of `probe`.
+/// Build the reflection of `probe`, carrying `seq` as the reflector's
+/// own sequence number.
 ///
-/// Stateless mode (RFC 8762 §4.3): the reflector's own sequence number
-/// is a copy of the sender's, the SSID is echoed, and no per-session
-/// reflector state exists. `rx_ts` is the receive timestamp (T2, taken
+/// Stateless mode (RFC 8762 §4.3), the default: the caller passes the
+/// probe's own sequence number, so the reply carries a copy of the
+/// sender's. Stateful mode (`reflector stateful`, measured-loss design
+/// D3): the caller passes its per-session counter, which lets the
+/// sender tell forward loss from reverse. The Session-Sender sequence
+/// number is copied either way, and the SSID is echoed. `rx_ts` is the receive timestamp (T2, taken
 /// at the socket read); the caller stamps T3 immediately before
 /// transmission — here, since build-to-send is one synchronous path.
 /// `ttl` is the probe's received TTL, copied into the Sender TTL field.
@@ -29,6 +34,7 @@ use stamp_packet::{
 /// were themselves padded by less than one TLV header.
 pub fn build_reply(
     probe: &SenderPacket,
+    seq: u32,
     rx_ts: StampTimestamp,
     ttl: u8,
     req_len: usize,
@@ -40,7 +46,7 @@ pub fn build_reply(
         tlvs.push(StampTlv::new(StampTlvValue::ExtraPadding(vec![0u8; pad])));
     }
     ReflectorPacket {
-        seq: probe.seq,                         // stateless: copy of the sender's
+        seq,
         timestamp: super::timestamp::now_ntp(), // T3
         error_estimate: super::inst::local_error_estimate(),
         ssid: probe.ssid,
@@ -84,13 +90,24 @@ mod tests {
         }
     }
 
+    /// Stateful mode: the caller's counter goes out as the reflector's
+    /// sequence number, and the sender's is still copied into its own
+    /// field — the pair the sender's gap classification reads.
+    #[test]
+    fn a_stateful_reply_carries_the_reflectors_counter() {
+        let p = probe(42, 0x0102);
+        let r = build_reply(&p, 7, rx_ts(), 255, BASE_LEN);
+        assert_eq!(r.seq, 7);
+        assert_eq!(r.sender_seq, 42);
+    }
+
     /// Every sender field lands in its reflector slot (RFC 8762 §4.3):
     /// seq copied twice (stateless), timestamp/error-estimate/ssid/TTL
     /// echoed, T2 = the receive timestamp.
     #[test]
     fn sender_fields_copied() {
         let p = probe(42, 0x0102);
-        let r = build_reply(&p, rx_ts(), 255, BASE_LEN);
+        let r = build_reply(&p, p.seq, rx_ts(), 255, BASE_LEN);
         assert_eq!(r.seq, 42, "stateless mode copies the sender seq");
         assert_eq!(r.sender_seq, 42);
         assert_eq!(r.ssid, 0x0102);
@@ -107,7 +124,7 @@ mod tests {
     fn symmetric_size_padding() {
         let p = probe(1, 1);
         for req_len in [BASE_LEN + 4, BASE_LEN + 20, BASE_LEN + 200] {
-            let r = build_reply(&p, rx_ts(), 255, req_len);
+            let r = build_reply(&p, p.seq, rx_ts(), 255, req_len);
             let mut buf = BytesMut::new();
             r.emit(&mut buf);
             assert_eq!(buf.len(), req_len, "reply length for request {req_len}");
@@ -122,7 +139,7 @@ mod tests {
     fn sub_header_pad_skipped() {
         let p = probe(1, 1);
         for req_len in [BASE_LEN + 1, BASE_LEN + 2, BASE_LEN + 3] {
-            let r = build_reply(&p, rx_ts(), 255, req_len);
+            let r = build_reply(&p, p.seq, rx_ts(), 255, req_len);
             let mut buf = BytesMut::new();
             r.emit(&mut buf);
             assert_eq!(buf.len(), BASE_LEN, "no expressible pad for {req_len}");
