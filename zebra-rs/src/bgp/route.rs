@@ -15387,11 +15387,23 @@ impl Peer {
     }
 
     pub fn send_vpnv4(&mut self, nlri: Vpnv4Nlri, attr: Arc<BgpAttr>, timer: bool) {
-        self.cache_vpnv4
-            .entry(attr.clone())
-            .or_default()
-            .insert(nlri.clone());
-        self.cache_vpnv4_rev.insert(nlri, attr);
+        // Evict whatever copy of this route is already queued, on its
+        // label-free identity, before queuing the new one (the `send_evpn`
+        // rule). From the old bucket when the attr changed: left there, a
+        // later withdraw — which purges only the reverse-mapped bucket —
+        // would leave it to be re-announced. And from this same bucket
+        // too: `HashSet::insert` keeps an existing equal element, so a
+        // re-send that changed only the label would otherwise flush the
+        // OLD label (review finding #15).
+        if let Some(old) = self.cache_vpnv4_rev.insert(nlri.clone(), attr.clone())
+            && let Some(set) = self.cache_vpnv4.get_mut(&old)
+        {
+            set.remove(&nlri);
+            if set.is_empty() {
+                self.cache_vpnv4.remove(&old);
+            }
+        }
+        self.cache_vpnv4.entry(attr).or_default().insert(nlri);
         if timer && self.cache_vpnv4_timer.is_none() {
             self.cache_vpnv4_timer = Some(start_adv_timer_vpnv4(self));
         }
@@ -15527,11 +15539,16 @@ impl Peer {
     // VPNv6 advertise cache — mirror of the VPNv4 trio above.
 
     pub fn send_vpnv6(&mut self, nlri: Vpnv6Nlri, attr: Arc<BgpAttr>, timer: bool) {
-        self.cache_vpnv6
-            .entry(attr.clone())
-            .or_default()
-            .insert(nlri.clone());
-        self.cache_vpnv6_rev.insert(nlri, attr);
+        // Evict the queued copy on identity first — see `send_vpnv4`.
+        if let Some(old) = self.cache_vpnv6_rev.insert(nlri.clone(), attr.clone())
+            && let Some(set) = self.cache_vpnv6.get_mut(&old)
+        {
+            set.remove(&nlri);
+            if set.is_empty() {
+                self.cache_vpnv6.remove(&old);
+            }
+        }
+        self.cache_vpnv6.entry(attr).or_default().insert(nlri);
         if timer && self.cache_vpnv6_timer.is_none() {
             self.cache_vpnv6_timer = Some(start_adv_timer_vpnv6(self));
         }

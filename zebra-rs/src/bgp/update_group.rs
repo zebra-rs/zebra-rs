@@ -943,12 +943,28 @@ pub fn send_ipv4(
     tx: &mpsc::Sender<Message>,
     kick_timer: bool,
 ) {
+    // An NLRI lives in exactly one bucket — the one the reverse map names.
+    // A re-send under a different attr must evict it from the old bucket:
+    // left there, the flush would announce it under both attrs (the peer
+    // keeping whichever arrived last), and a later `cache_remove_ipv4`,
+    // which purges only the reverse-mapped bucket, would leave the old copy
+    // to be re-announced after the withdraw, while the Adj-RIB-Out no
+    // longer holds the prefix and so gates every later withdraw out
+    // (review finding #15).
+    if let Some(old) = group.cache_ipv4_rev.insert(nlri.clone(), attr.clone())
+        && old != attr
+        && let Some(bucket) = group.cache_ipv4.get_mut(&old)
+    {
+        bucket.remove(&nlri);
+        if bucket.is_empty() {
+            group.cache_ipv4.remove(&old);
+        }
+    }
     group
         .cache_ipv4
-        .entry(attr.clone())
+        .entry(attr)
         .or_default()
-        .insert(nlri.clone(), source_ident);
-    group.cache_ipv4_rev.insert(nlri, attr);
+        .insert(nlri, source_ident);
     if kick_timer && group.cache_ipv4_timer.is_none() {
         let secs = group.effective_adv_interval_secs();
         group.cache_ipv4_timer = Some(start_adv_timer_ipv4(tx, &group.id, secs));
@@ -1520,12 +1536,21 @@ pub fn send_ipv6(
     tx: &mpsc::Sender<Message>,
     kick_timer: bool,
 ) {
+    // Evict from the old bucket on an attr change — see `send_ipv4`.
+    if let Some(old) = group.cache_ipv6_rev.insert(nlri.clone(), attr.clone())
+        && old != attr
+        && let Some(bucket) = group.cache_ipv6.get_mut(&old)
+    {
+        bucket.remove(&nlri);
+        if bucket.is_empty() {
+            group.cache_ipv6.remove(&old);
+        }
+    }
     group
         .cache_ipv6
-        .entry(attr.clone())
+        .entry(attr)
         .or_default()
-        .insert(nlri.clone(), source_ident);
-    group.cache_ipv6_rev.insert(nlri, attr);
+        .insert(nlri, source_ident);
     if kick_timer && group.cache_ipv6_timer.is_none() {
         let secs = group.effective_adv_interval_secs();
         group.cache_ipv6_timer = Some(start_adv_timer_ipv6(tx, &group.id, secs));
