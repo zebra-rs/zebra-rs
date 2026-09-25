@@ -354,7 +354,12 @@ pub(super) fn rebuild_sys_state(
     // Router Capability TLV in every fragment counts. `merge_fads` applies
     // §6: invalid sub-TLVs ignored, the first occurrence of each
     // constraint in the lowest-numbered LSP used.
-    let fads = frags.iter().flat_map(|f| {
+    //
+    // A purged fragment (lifetime 0) withdraws its definitions, whatever
+    // it still carries: it lingers in the LSDB for ZeroAgeLifetime so the
+    // purge can flood, and must not keep a withdrawn definition winning
+    // meanwhile.
+    let fads = frags.iter().filter(|f| f.hold_time != 0).flat_map(|f| {
         f.tlvs.iter().flat_map(|t| match t {
             IsisTlv::RouterCap(cap) => lsp_cap_view(cap).fads,
             _ => Vec::new(),
@@ -584,7 +589,7 @@ pub fn insert_lsp(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>)
             );
             return None;
         }
-        lsa.lsp.tlvs != lsp.tlvs
+        sys_state_changed(&lsa.lsp, &lsp)
     } else {
         true
     };
@@ -639,6 +644,15 @@ pub fn insert_lsp(top: &mut LinkTop, level: Level, lsp: IsisLsp, bytes: Vec<u8>)
     spf_schedule(top, level);
 
     prev
+}
+
+/// Whether a newer copy of an LSP changes what the per-system maps are
+/// built from: its TLVs, or whether it is a purge. A purge (lifetime 0)
+/// may still carry the TLVs it withdraws, and the maps must drop them —
+/// Flex-Algorithm Definitions above all, which would otherwise keep
+/// winning for the purge's ZeroAgeLifetime.
+fn sys_state_changed(old: &IsisLsp, new: &IsisLsp) -> bool {
+    old.tlvs != new.tlvs || (old.hold_time == 0) != (new.hold_time == 0)
 }
 
 /// A peer's Flexible Algorithm Definitions changed, so the winning
@@ -851,9 +865,12 @@ mod tests {
         }
     }
 
+    /// A live fragment: a real remaining lifetime, since lifetime 0 is a
+    /// purge.
     fn frag(sys_id: IsisSysId, frag_id: u8) -> IsisLsp {
         IsisLsp {
             lsp_id: IsisLspId::new(sys_id, 0, frag_id),
+            hold_time: 1200,
             ..Default::default()
         }
     }
@@ -1457,6 +1474,42 @@ mod tests {
             vec![exclude(1)],
             "fragment 0's exclude is the first occurrence"
         );
+    }
+
+    /// A purge withdraws the definitions it still carries, and flipping to
+    /// a purge with the TLVs unchanged still counts as a change to rebuild
+    /// on.
+    #[test]
+    fn a_purged_fragment_supplies_no_fad() {
+        use isis_packet::IsisTlvRouterCap;
+        use isis_packet::cap::IsisSubTlv as CapSubTlv;
+        let mut lsdb = Lsdb::default();
+        let peer = sys(12);
+        let mut f0 = frag(peer, 0);
+        f0.tlvs.push(IsisTlv::RouterCap(IsisTlvRouterCap {
+            router_id: std::net::Ipv4Addr::UNSPECIFIED,
+            flags: 0.into(),
+            subs: vec![CapSubTlv::FlexAlgoDef(IsisSubFlexAlgoDef {
+                flex_algorithm: 128,
+                metric_type: 0,
+                calc_type: 0,
+                priority: 200,
+                subs: vec![],
+            })],
+        }));
+        lsdb.map.insert(f0.lsp_id, Lsa::new(f0.clone()));
+        let mut peer_fad: BTreeMap<IsisSysId, BTreeMap<u8, IsisSubFlexAlgoDef>> = BTreeMap::new();
+        rebuild_peer_fad(&lsdb, &peer, &mut peer_fad);
+        assert!(peer_fad.contains_key(&peer));
+
+        let mut purge = f0.clone();
+        purge.hold_time = 0;
+        purge.seq_number += 1;
+        assert!(sys_state_changed(&f0, &purge), "same TLVs, now a purge");
+        assert!(!sys_state_changed(&f0, &f0));
+        lsdb.map.insert(purge.lsp_id, Lsa::new(purge));
+        rebuild_peer_fad(&lsdb, &peer, &mut peer_fad);
+        assert!(!peer_fad.contains_key(&peer), "the purge withdraws it");
     }
 
     /// `rebuild_sys_state` for one peer, keeping only its FADs.
