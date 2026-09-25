@@ -7,18 +7,18 @@ MUP/Flowspec/SR-Policy/RTC where they share the machinery). Reviewed
 against `main` at `2f1e9a09` (2026-09-07). Line numbers are as of that
 commit.
 
-Status (2026-09-25): twelve items are fixed on `main` — #1 (PR #2372,
+Status (2026-09-25): thirteen items are fixed on `main` — #1 (PR #2372,
 merge `3beacbcc`), the listen-range peer-type item found while fixing it
 (PR #2373, `ba327126`), #2 (PR #2375, `308b196a`), #3 (PR #2376,
 `b8fef738`), #4 (PR #2377, `1cc31738`, which also closed the
 signature-knob half of #21 and added the IPv6 outbound soft-out), #5
 (PR #2378, `b2007701`), #6 (PR #2379, `0464828a`, with two review
 follow-ups), #7 (PR #2380, `d7476601`), #8 and with it #13 (PR #2383,
-`d72a06af`, eight review rounds folded in), #9 (PR #2405, `31f7458a`)
-and #15 (PR #2413, `097ce15d`). Each fixed entry ends with its fix note;
-everything else is open. #11 (ORIGINATOR_ID / CLUSTER_LIST from an eBGP
-peer, plus a zero BGP Identifier) is fixed on branch
-`bgp-ebgp-rr-attr-discard`.
+`d72a06af`, eight review rounds folded in), #9 (PR #2405, `31f7458a`),
+#15 (PR #2413, `097ce15d`) and #11 (PR #2415, `3401cb1b`). Each fixed
+entry ends with its fix note; everything else is open. #12
+(enforce-first-as with `local-as`) is fixed on branch
+`bgp-enforce-first-as-local-as`.
 
 Method: one lead read the selection ladder and every egress builder, then
 five independent read-only reviewers each took one dimension (update-group
@@ -791,7 +791,7 @@ cap. The two reviews agree on every overlapping item.
   pick the per-AS MED winner, then compare winners), or at least keep the
   candidate order stable on replace.
 
-### 11. P2 CONFIRMED (probe), worse than recorded, FIXED on branch `bgp-ebgp-rr-attr-discard` — ORIGINATOR_ID / CLUSTER_LIST from an eBGP peer decide ties and are relayed into the AS
+### 11. P2 CONFIRMED (probe), worse than recorded, FIXED in #2415 — ORIGINATOR_ID / CLUSTER_LIST from an eBGP peer decide ties and are relayed into the AS
 
 - `route.rs:2555` `bgp_identifier` prefers `originator_id` with no `typ`
   gate; `4185-4193` only drops when the value is our own router-id; the
@@ -882,7 +882,7 @@ cap. The two reviews agree on every overlapping item.
   `bgp_evpn_srv6_rr`, `bgp_vpnv4_rr_transit_label`,
   `bgp_unknown_attr_transitive` and `bgp_ls_te_metric` stay green.
 
-### 12. P2 CONFIRMED (probe) — `enforce-first-as` with `local-as` (without `no-prepend`) drops every route from the neighbor
+### 12. P2 CONFIRMED (probe), worse than recorded, FIXED on branch `bgp-enforce-first-as-local-as` — `enforce-first-as` with `local-as` (without `no-prepend`) drops every route from the neighbor
 
 - `route.rs:11328-11336` (`route_from_peer`) prepends the substitute AS
   before the per-family dispatch; `4182` then runs
@@ -895,6 +895,53 @@ cap. The two reviews agree on every overlapping item.
   fills, Loc-RIB stays empty, nothing logs.
 - Fix direction: run the first-AS check on the pre-prepend path (or accept
   `substitute` as the first AS when `change_local_as()` is active).
+- Worse than recorded: the check ran in ten places — the shared
+  `inbound_attr_checks` (IPv4 / VPNv4) and eight per-family ingest
+  functions (IPv6 / VPNv6, labeled v4 and v6, EVPN, MUP, Flowspec,
+  SR-Policy, BGP-LS) — all after the prepend, so every family broke.
+  And a failing route was dropped, not treat-as-withdraw as RFC 7606 §7.2
+  asks ("SHOULD also handle routes that violate this check using
+  'treat-as-withdraw'"; FRR returns `BGP_ATTR_PARSE_WITHDRAW`): the
+  failing UPDATE replaces the neighbor's earlier path for the prefix, and
+  that path stayed installed. Per-VRF neighbors are not exposed: they
+  have no `local-as` knob, and neighbor-groups do not carry one.
+- Gates (branch `bgp-enforce-first-as-local-as`; each compiles on `main`
+  and fails there, except the two controls). Unit, route.rs
+  `enforce_first_as_local_as_tests`, all through `route_from_peer`:
+  `local_as_ingress_prepend_does_not_trip_enforce_first_as_v4` / `_v6`
+  (on `main` the Loc-RIB stays empty; fixed, the row keeps the prepend
+  `64999 65001 65009`), `first_as_violation_withdraws_the_previous_path_v4`
+  / `_v6` (on `main` the superseded path stays), controls
+  `enforce_first_as_still_refuses_a_foreign_first_as_under_local_as` and
+  `no_prepend_local_as_accepts_a_correct_first_as`. BDD
+  `bgp_enforce_first_as_local_as` and `_v6`: z1 (DUT) runs
+  enforce-first-as toward z2 (with `local-as 64999`) and toward h3, a
+  scripted speaker (`bgp_attr_inject_send.py`, now able to send a chosen
+  AS_PATH per prefix). On `main` both twins fail two scenarios: z2's
+  route never enters z1's table, and when h3 re-announces its prefix
+  with a foreign first AS (plus a control prefix in the same write) z1
+  keeps the path it replaced. The first version of that scenario had a
+  zebra-rs z3 bind a foreign-AS prepend policy live; it passed on `main`
+  because the live policy change withdraws the prefix before
+  re-announcing it — hence the scripted speaker.
+- FIXED (branch `bgp-enforce-first-as-local-as`): `route_from_peer` runs
+  the check once per UPDATE on the AS_PATH as received, before the
+  `local-as` ingress prepend, and a violation joins the existing
+  `treat_as_withdraw` flag, so every family's reachable NLRI in the
+  UPDATE are withdrawn from the neighbor (logged at warn, naming the
+  neighbor's AS). The ten downstream checks are gone: they would see the
+  prepended path, and so would `route_clean`'s stale replays of
+  Adj-RIB-In rows, which are stored post-prepend. Only RTC and MUP have
+  no withdraw arm in `withdraw_mp_reach`, so a failing UPDATE for them is
+  dropped as before. On the fix the six unit gates pass; moving the check
+  back after the prepend fails the two `local_as_*` gates, and not
+  routing the violation to treat-as-withdraw fails the two withdraw
+  gates and the refusal control. Both BDD twins pass 5/5;
+  `bgp_enforce_first_as`, `bgp_vrf_neighbor_enforce_first_as`,
+  `bgp_local_as`, `bgp_ls_te_metric`, `bgp_ebgp_rr_attr_discard` (+`_v6`,
+  the speaker's default AS_PATH unchanged), the VPNv6 / EVPN LLGR
+  stale-expiry features (`route_clean` replays), `ebgp` and `ibgp` stay
+  green.
 
 ### 13. P2 CONFIRMED, FIXED in #2383 (with #8) — `afi-safi ipv6 next-hop-self|next-hop-unchanged` silently govern VPNv6 rows
 
@@ -1278,6 +1325,24 @@ cap. The two reviews agree on every overlapping item.
   but assert route presence only. Fix: derive `peer_type` in
   `try_dynamic_accept` exactly as `interface_neighbor.rs:188` does; the
   probe becomes the regression test.
+
+### Found while fixing #12 (OPEN) — a route dropped by an inbound loop check leaves the neighbor's previous path installed
+
+- `inbound_attr_checks` returns `None` — and the ingest simply returns —
+  when the AS_PATH contains our AS (`aspath_own_as_loop`), when
+  ORIGINATOR_ID is our router-id or CLUSTER_LIST contains it, and when
+  the RFC 9234 OTC leak rule rejects the route. The UPDATE still replaces
+  the neighbor's earlier path for the prefix (RFC 4271 §3.1: a route is
+  withdrawn by "advertising a replacement route with the same NLRI"), and
+  a replacement that is unusable (RFC 4271 §9.1.2 excludes a path with
+  our own AS) must not leave the old one standing; FRR's `bgp_update`
+  removes the existing path on its `filtered` exit. zebra-rs keeps it.
+- Probe (kept out of tree): announce `10.12.9.0/24` with `65001 65009`,
+  then with `65001 65100 65009` from the same neighbor (our AS 65100):
+  the Loc-RIB still holds `65001 65009`.
+- Fix direction: treat a failed inbound check like a policy deny — remove
+  the neighbor's existing path for each prefix of the UPDATE (the
+  enforce-first-as case now does exactly that via `treat_as_withdraw`).
 
 ### Below the cap (one line each, all read-confirmed)
 

@@ -18,12 +18,15 @@ Flow:
   4. Exit when the peer closes the connection or sends a NOTIFICATION
      (the NOTIFICATION's code/sub-code is printed first).
 
-SPEC is PREFIX or PREFIX=ATTR[+ATTR...], where ATTR is FLAGS:TYPE:VALUE
-with FLAGS and TYPE in hex and VALUE a (possibly empty) hex string. Each
-ATTR is appended verbatim after ORIGIN (IGP) / AS_PATH (LOCAL_AS) /
-NEXT_HOP, so its length octet is whatever VALUE's length is -- a
-malformed attribute is written exactly as given. Example: an
-ORIGINATOR_ID of 192.0.2.1 is 80:09:c0000201.
+SPEC is PREFIX[@ASN,ASN...][=ATTR[+ATTR...]]. The optional @ list is the
+AS_PATH, one AS_SEQUENCE left to right (default: LOCAL_AS alone), so a
+feature can send a path whose first AS is not the speaker's. ATTR is
+FLAGS:TYPE:VALUE with FLAGS and TYPE in hex and VALUE a (possibly empty)
+hex string. Each ATTR is appended verbatim after ORIGIN (IGP) / AS_PATH
+/ NEXT_HOP, so its length octet is whatever VALUE's length is -- a
+malformed attribute is written exactly as given. Examples: an
+ORIGINATOR_ID of 192.0.2.1 is 80:09:c0000201; 10.0.0.0/24@65099,65003
+announces 10.0.0.0/24 with AS_PATH "65099 65003".
 
 AFI 4 uses the traditional NLRI field with a NEXT_HOP attribute; AFI 6
 uses MP_REACH_NLRI (AFI 2, SAFI 1) with NEXTHOP as the global next-hop.
@@ -90,19 +93,24 @@ def attr(flags, type_code, value):
 
 
 def parse_spec(spec):
-    """PREFIX[=FLAGS:TYPE:VALUE[+...]] -> (prefix, raw attribute bytes)."""
-    prefix, _, rest = spec.partition("=")
+    """PREFIX[@ASN,...][=FLAGS:TYPE:VALUE[+...]] ->
+    (prefix, AS_PATH list or None, raw attribute bytes)."""
+    head, _, rest = spec.partition("=")
+    prefix, _, path = head.partition("@")
+    aspath = [int(a) for a in path.split(",")] if path else None
     raw = b""
     for item in filter(None, rest.split("+")):
         flags, type_code, value = item.split(":")
         raw += attr(int(flags, 16), int(type_code, 16), bytes.fromhex(value))
-    return prefix, raw
+    return prefix, aspath, raw
 
 
-def announce(afi, local_as, prefix, nexthop, extra, as4):
+def announce(afi, local_as, prefix, aspath, nexthop, extra, as4):
     attrs = attr(0x40, 1, bytes([ORIGIN_IGP]))
-    fmt = "!BBI" if as4 else "!BBH"
-    attrs += attr(0x40, 2, struct.pack(fmt, 2, 1, local_as))
+    path = aspath or [local_as]
+    fmt = "!" + ("I" if as4 else "H") * len(path)
+    attrs += attr(0x40, 2, struct.pack("!BB", 2, len(path))
+                  + struct.pack(fmt, *path))
     nlri = b""
     if afi == 4:
         attrs += attr(0x40, 3, socket.inet_aton(nexthop))
@@ -151,8 +159,8 @@ def take_trigger(path):
 
 def batch(afi, local_as, nexthop, specs, as4):
     out = b""
-    for prefix, extra in specs:
-        out += announce(afi, local_as, prefix, nexthop, extra, as4)
+    for prefix, aspath, extra in specs:
+        out += announce(afi, local_as, prefix, aspath, nexthop, extra, as4)
     return out
 
 
@@ -177,7 +185,7 @@ def session(dut_ip, local_as, router_id, afi, nexthop, trigger, now, later):
         elif msg_type == MSG_NOTIFICATION:
             raise ConnectionError(f"NOTIFICATION in handshake: {body.hex()}")
     print(f"established (peer as4={peer_as4}); announcing "
-          f"{[p for p, _ in now]}; waiting for {trigger}", flush=True)
+          f"{[p for p, _, _ in now]}; waiting for {trigger}", flush=True)
     sock.sendall(batch(afi, local_as, nexthop, now, peer_as4))
 
     sock.settimeout(1)
@@ -199,7 +207,8 @@ def session(dut_ip, local_as, router_id, afi, nexthop, trigger, now, later):
             sock.sendall(bgp_msg(MSG_KEEPALIVE, b""))
             last_keepalive = time.time()
         if take_trigger(trigger):
-            print(f"trigger: announcing {[p for p, _ in later]}", flush=True)
+            print(f"trigger: announcing {[p for p, _, _ in later]}",
+                  flush=True)
             sock.sendall(batch(afi, local_as, nexthop, later, peer_as4))
 
 
