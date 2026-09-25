@@ -6,9 +6,10 @@ use anyhow::{Result, bail};
 /// FAD Metric-Type (RFC 9350 §5.1, IANA registry). The on-the-wire
 /// byte is identical across IS-IS and OSPF, so the enum and its
 /// `wire()` mapping are protocol-neutral.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum FadMetricType {
-    Igp,                // FAD Metric-Type 0
+    #[default]
+    Igp, // FAD Metric-Type 0
     MinUnidirLinkDelay, // FAD Metric-Type 1 (RFC 8570)
     TeDefault,          // FAD Metric-Type 2 (RFC 5305)
 }
@@ -22,6 +23,18 @@ impl FadMetricType {
             Self::Igp => 0,
             Self::MinUnidirLinkDelay => 1,
             Self::TeDefault => 2,
+        }
+    }
+
+    /// The metric-types this router can compute a path with: IGP and Min
+    /// Unidirectional Link Delay. TE-default (2) is not implemented, so a
+    /// winning FAD asking for it — or for any unknown metric-type — stops
+    /// participation (RFC 9350 §5.3) rather than being computed as IGP.
+    pub fn supported(wire: u8) -> Option<Self> {
+        match wire {
+            0 => Some(Self::Igp),
+            1 => Some(Self::MinUnidirLinkDelay),
+            _ => None,
         }
     }
 }

@@ -21,7 +21,7 @@ use crate::throttle::Throttle;
 use isis_packet::srv6::EncapType;
 
 use super::config::MtId;
-use super::flex_algo::FlexAlgoEntry;
+use super::flex_algo::{FadConstraints, FlexAlgoEntry};
 use super::graph::{LspMap, graph, graph_flex_algo, graph_mt2};
 use super::inst::{Isis, IsisTop, Message};
 use super::level::Level;
@@ -1330,19 +1330,32 @@ pub(super) fn build_spf_input(top: &mut IsisTop, level: Level) -> Option<SpfInpu
         None
     };
 
-    // Per-algorithm graphs (RFC 9350). Entries are cloned out of
-    // `top.flex_algo.config` because `graph_flex_algo` takes
-    // `&mut top` and we'd otherwise hold a read borrow on
-    // `top.flex_algo` across the call.
-    let configured_algos: Vec<(u8, FlexAlgoEntry)> = top
+    // Per-algorithm graphs (RFC 9350), one for each configured algorithm
+    // this router participates in at this level — computed with the
+    // winning definition's constraints (§5.3). An algorithm it does not
+    // participate in gets no graph, so the RIB diff withdraws its routes:
+    // "it MUST remove any forwarding state associated with it". Entries
+    // are cloned out of `top.flex_algo.config` because `graph_flex_algo`
+    // takes `&mut top`.
+    let selection = super::flex_algo::fad_selection(
+        top.flex_algo,
+        top.affinity_map,
+        top.srlg_groups,
+        top.peer_fad.get(&level),
+        &top.config.net.sys_id(),
+    );
+    let configured_algos: Vec<(u8, FlexAlgoEntry, FadConstraints)> = top
         .flex_algo
         .config
         .iter()
-        .map(|(k, v)| (*k, v.clone()))
+        .filter_map(|(algo, entry)| {
+            let constraints = selection.get(algo)?.participation.constraints()?;
+            Some((*algo, entry.clone(), constraints.clone()))
+        })
         .collect();
     let mut flex_algos = Vec::with_capacity(configured_algos.len());
-    for (algo, entry) in &configured_algos {
-        let (algo_graph, algo_source, _) = graph_flex_algo(top, level, *algo, entry);
+    for (algo, entry, constraints) in &configured_algos {
+        let (algo_graph, algo_source, _) = graph_flex_algo(top, level, *algo, constraints);
         flex_algos.push(FlexAlgoInput {
             algo: *algo,
             graph: algo_graph,

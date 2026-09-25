@@ -15,7 +15,10 @@ Feature: IS-IS Flexible Algorithm with affinity-based topology constraints
 
   The FAD (Flex-Algorithm Definition) for both algorithms is originated by
   the Chicago (ch) router; every other router participates without
-  advertising a FAD.
+  advertising a FAD. Every router computes with the winning definition
+  (RFC 9350 §5.3) — the greatest priority, then the greatest System-ID —
+  not its own configuration, and stops participating in an algorithm whose
+  winning definition asks for something it cannot support.
 
   Topology (all links point-to-point; default metric 10):
 
@@ -111,6 +114,45 @@ Feature: IS-IS Flexible Algorithm with affinity-based topology constraints
     # via the ch--ln transatlantic path.
     Then ping from "se" to "10.0.0.4" should succeed
     And ping from "ln" to "10.0.0.1" should succeed
+
+  Scenario: Every router computes with the winning definition
+    Given the test topology exists
+    # se's own configuration excludes [eu, transatlantic] from algo 128, so
+    # computing from local configuration, it can never reach ln or fr.
+    Then show command "show isis flex-algo route algorithm 128" in namespace "se" should not contain "10.0.0.4"
+    # fr now advertises a definition for algo 128 with no constraints, at a
+    # priority above ch's 128. It wins everywhere, se included.
+    When I apply command "set router isis flex-algo 128 advertise-definition true" in namespace "fr"
+    And I apply command "delete router isis flex-algo 128 affinity exclude-any eu" in namespace "fr"
+    And I apply command "delete router isis flex-algo 128 affinity exclude-any transatlantic" in namespace "fr"
+    And I apply command "set router isis flex-algo 128 priority 200" in namespace "fr"
+    Then show command "show isis flex-algo" in namespace "se" should eventually contain "priority 200; participating"
+    And show command "show isis flex-algo route algorithm 128" in namespace "se" should eventually contain "10.0.0.4"
+    And show command "show isis flex-algo route algorithm 128" in namespace "se" should eventually contain "10.0.0.5"
+    # Below ch's priority, fr's definition loses and ch's constraints are
+    # back in force.
+    When I apply command "set router isis flex-algo 128 priority 100" in namespace "fr"
+    Then show command "show isis flex-algo route algorithm 128" in namespace "se" should eventually not contain "10.0.0.4"
+    And show command "show isis flex-algo route algorithm 128" in namespace "se" should contain "10.0.0.3"
+
+  Scenario: A router that cannot support the winning definition stops participating
+    Given the test topology exists
+    # Positive controls: ln participates in algo 129 and routes to fr in it,
+    # and fr announces participation in 128 and 129.
+    Then show command "show isis flex-algo route algorithm 129" in namespace "ln" should contain "10.0.0.5"
+    And show command "show isis flex-algo" in namespace "ln" should contain "): [0, 128, 129]"
+    # ch sets the M flag on algo 129's definition. zebra-rs does not
+    # implement the Flex-Algo prefix metric, so no router can support the
+    # winning definition: each stops participating (RFC 9350 §5.3), withdraws
+    # its algo-129 routes and stops announcing 129.
+    When I apply command "set router isis flex-algo 129 prefix-metric true" in namespace "ch"
+    Then show command "show isis flex-algo" in namespace "ln" should eventually contain "not participating: unsupported flag: prefix metric (M)"
+    And show command "show isis flex-algo route algorithm 129" in namespace "ln" should eventually not contain "10.0.0.5"
+    And show command "show isis flex-algo" in namespace "ln" should eventually contain "): [0, 128]"
+    And show command "show isis flex-algo" in namespace "ln" should eventually not contain "): [0, 128, 129]"
+    # Clearing the flag restores participation.
+    When I apply command "set router isis flex-algo 129 prefix-metric false" in namespace "ch"
+    Then show command "show isis flex-algo route algorithm 129" in namespace "ln" should eventually contain "10.0.0.5"
 
   Scenario: Teardown Flex-Algo topology
     Given the test topology exists

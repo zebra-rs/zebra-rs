@@ -189,29 +189,43 @@ advertisement in the Router Capability TLV, and the router computes a
 per-algorithm SPF for it. Identifiers 0–127 are IANA-reserved;
 user-defined algorithms are 128–255.
 
-zebra-rs computes each algorithm with the **locally configured
-definition**, so every participating router must carry the same,
-complete definition — constraints included. A bare `flex-algo 128` with
-no constraints would participate but compute *unconstrained* paths,
-quietly violating the algorithm's intent. Configure the identical entry
-on every router; that is also what RFC 9350 demands of a consistent
-domain.
+zebra-rs computes each algorithm with the **winning definition**
+(RFC 9350 §5.3), not with its own configuration. Among the definitions
+advertised in the level — this router's own among them, if it has
+`advertise-definition true` — the highest `priority` wins, and a tie goes
+to the highest System-ID. Every router selects from the same LSDB, so
+every router computes with the same definition and builds the same
+topology. The local entry decides only two things: whether this router
+takes part, and what it advertises. A definition configured but not
+advertised is never a candidate.
+
+A router **stops participating** in an algorithm when there is no
+winning definition, or when the winner asks for something zebra-rs
+cannot compute. Today that is a `te-default` metric-type, the M flag
+(`prefix-metric`), an SRLG exclusion (`srlg-exclude`), a calculation
+type other than SPF, or any sub-TLV or flag it does not know. A router
+that stops participating withdraws the algorithm from its SR-Algorithm
+list, stops advertising the algorithm's Prefix-SIDs, SRv6 locator and
+End.X SIDs, and removes the algorithm's routes. `show isis flex-algo`
+says why. This is RFC 9350's rule. The alternative — computing anyway,
+without the constraint — would build a topology the other routers do
+not build, and Flex-Algorithm forwarding would loop.
 
 Leaves under `flex-algo <n>`:
 
 | Leaf | Values / default | Meaning |
 |---|---|---|
-| `advertise-definition` | `true` / `false` (default `false`) | Originate the FAD sub-TLV in Router Capability TLV 242. At least one router per area must advertise — preferably two, for redundancy. Without any advertised FAD in the area, participants must not compute paths for the algorithm. |
-| `metric-type` | `igp` (default), `min-unidir-link-delay`, `te-default` | FAD Metric-Type 0 / 1 / 2. See below. |
-| `priority` | `0-255`, default `128` | FAD advertisement priority (RFC 9350 §5.1). When several routers advertise a FAD for the same algorithm, the highest priority wins. |
-| `prefix-metric` | `true` / `false` (default `false`) | Sets the M-flag in the FAD Flags sub-TLV: path metrics to a prefix include the advertised prefix metric. |
+| `advertise-definition` | `true` / `false` (default `false`) | Originate the FAD sub-TLV in Router Capability TLV 242, making this definition a candidate. At least one router per level must advertise — preferably two, for redundancy. With no advertised FAD in the level, no router participates. |
+| `metric-type` | `igp` (default), `min-unidir-link-delay`, `te-default` | FAD Metric-Type 0 / 1 / 2. See below. `te-default` is advertised but not computed: a winning definition asking for it stops participation. |
+| `priority` | `0-255`, default `128` | FAD advertisement priority (RFC 9350 §5.3). When several routers advertise a FAD for the same algorithm, the highest priority wins; a tie goes to the highest System-ID. |
+| `prefix-metric` | `true` / `false` (default `false`) | Sets the M-flag in the FAD Flags sub-TLV: path metrics to a prefix include the advertised prefix metric. zebra-rs does not implement the Flex-Algorithm prefix metric, so a winning definition with the M flag stops participation. |
 | `dataplane sr-mpls` | `true` / `false` (default `false`) | Install this algorithm's paths as SR-MPLS label entries (per-algo Prefix-SIDs). |
 | `dataplane srv6` | `true` / `false` (default `false`) | Install this algorithm's paths over SRv6 (per-algo locator). |
 | `dataplane ip` | `true` / `false` (default `false`) | Plain-IP forwarding participation flag. |
 | `affinity include-any <name>` | leaf-list | Keep only links carrying **at least one** of these colors. |
 | `affinity include-all <name>` | leaf-list | Keep only links carrying **all** of these colors. |
 | `affinity exclude-any <name>` | leaf-list | Prune every link carrying **any** of these colors. |
-| `srlg-exclude <name>` | leaf-list | FAD Exclude-SRLG sub-TLV (RFC 9350 §6.2), referencing `/srlg/group` names. Advertised in the FAD; **not yet enforced at SPF time** in the current release. |
+| `srlg-exclude <name>` | leaf-list | FAD Exclude-SRLG sub-TLV (RFC 9350 §6.2), referencing `/srlg/group` names. Advertised in the FAD, but per-link SRLGs are not read yet, so the rule cannot be enforced: a winning definition carrying it stops participation. |
 | `fast-reroute disable` | empty leaf | Opt this algorithm out of instance-level TI-LFA. See [TI-LFA interaction](#ti-lfa-interaction). |
 
 **Metric types.** `igp` (Metric-Type 0) routes on the ordinary IS-IS
@@ -300,13 +314,14 @@ Everything here follows from the sections above; violations mostly fail
 1. **Identical `affinity-map` on every router.** The name-to-bit table
    is not advertised; only agreement makes bit 0 mean the same thing
    everywhere.
-2. **Identical, complete `flex-algo` definition on every participating
-   router.** Participation is the entry's existence; the constraints
-   must ride along, because each router computes with its local
-   definition.
+2. **A `flex-algo` entry on every participating router.** Participation
+   is the entry's existence. The constraints that count are the winning
+   definition's, so a participant's own constraints matter only if it
+   advertises them.
 3. **`advertise-definition true` on at least one router, preferably
-   two.** Without an advertised FAD the algorithm is dead in the
-   domain, whatever is configured locally.
+   two, with nothing zebra-rs cannot compute.** Without an advertised
+   FAD, or with a winner asking for `te-default`, the M flag or an SRLG
+   exclusion, no zebra-rs router participates.
 4. **Color both ends of every constrained link.**
 5. **Per-algorithm SID indexes disjoint from algorithm 0 and from each
    other**, all within SRGB range.
@@ -343,8 +358,9 @@ without translation — the property the
 
 ## Verification
 
-`show isis flex-algo` is the summary view — local algorithms, peer
-FADs, and per-peer participation:
+`show isis flex-algo` is the summary view — local algorithms, the
+definition each one is computed with, peer FADs, and per-peer
+participation:
 
 ```
 tk>show isis flex-algo
@@ -353,6 +369,9 @@ Area 49.0000:
 Local Flex-Algorithms:
   Algo  Metric                 Priority Adv FRR       Constraints
   128   igp                    -        no  off       exclude-any=trans-pacific
+
+Level-2 definition selection:
+  Algo 128: definition from sg (0000.0000.0009), priority 128; participating
 
 Level-2:
   Peer FADs:
@@ -364,11 +383,15 @@ Level-2:
     ...
 ```
 
-The healthy signature: every peer lists the algorithm in its
-participation set, and at least one `Peer FADs` entry exists. `Adv no`
-means this router does not originate the FAD itself. Right after
-startup a peer may briefly show `[0]` while its updated LSP is still
-flooding.
+The healthy signature: the selection line says `participating`, and
+every peer lists the algorithm in its participation set. Here `ch` and
+`sg` advertise the same priority, and `sg` wins on the higher System-ID.
+`Adv no` means this router does not originate the FAD itself. A router
+that cannot compute the winner says why, for example
+`Algo 128: definition from sg (0000.0000.0009), priority 128; not
+participating: unsupported flag: prefix metric (M)`, and drops the
+algorithm from its participation set. Right after startup a peer may
+briefly show `[0]` while its updated LSP is still flooding.
 
 Adding the algorithm id narrows the view
 (`show isis flex-algo 128`), and the id is the entry point to every

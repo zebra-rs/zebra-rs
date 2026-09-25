@@ -3832,12 +3832,56 @@ struct FlexAlgoLevelJson {
     peer_srv6_locators: Vec<PeerSrv6LocJson>,
 }
 
+/// The winning definition for one configured algorithm at one level, and
+/// whether this router participates in it (RFC 9350 §5.3).
+#[derive(Serialize)]
+struct FlexAlgoSelectionJson {
+    level: String,
+    algorithm: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    winner: Option<FadWinnerJson>,
+    participating: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+#[derive(Serialize)]
+struct FadWinnerJson {
+    system_id: String,
+    hostname: String,
+    /// This router's own advertised definition.
+    local: bool,
+    priority: u8,
+    metric_type: u8,
+    calc_type: u8,
+}
+
 #[derive(Serialize)]
 struct FlexAlgoViewJson {
     area: String,
     local_algorithms: Vec<FlexAlgoLocalJson>,
     local_srv6_locators: Vec<FlexAlgoSrv6LocatorJson>,
+    selection: Vec<FlexAlgoSelectionJson>,
     levels: Vec<FlexAlgoLevelJson>,
+}
+
+/// Winning-definition selection for every configured algorithm, per level
+/// this router runs (RFC 9350 §5.3).
+fn flex_algo_selections(isis: &Isis) -> Vec<(Level, BTreeMap<u8, super::flex_algo::FadSelection>)> {
+    [Level::L1, Level::L2]
+        .into_iter()
+        .filter(|level| super::ifsm::has_level(isis.config.is_type(), *level))
+        .map(|level| {
+            let selection = super::flex_algo::fad_selection(
+                &isis.flex_algo,
+                &isis.affinity_map,
+                &isis.srlg_groups,
+                isis.peer_fad.get(&level),
+                &isis.config.net.sys_id(),
+            );
+            (level, selection)
+        })
+        .collect()
 }
 
 fn show_isis_flex_algo(
@@ -3936,10 +3980,36 @@ fn show_isis_flex_algo(
             });
         }
 
+        let self_sys_id = isis.config.net.sys_id();
+        let mut selection = Vec::new();
+        for (level, algos) in flex_algo_selections(isis) {
+            for (algo, sel) in algos {
+                let (participating, reason) = match &sel.participation {
+                    super::flex_algo::Participation::Yes(_) => (true, None),
+                    super::flex_algo::Participation::No(why) => (false, Some(why.to_string())),
+                };
+                selection.push(FlexAlgoSelectionJson {
+                    level: level_long(&level),
+                    algorithm: algo,
+                    winner: sel.winner.map(|w| FadWinnerJson {
+                        system_id: w.originator.to_string(),
+                        hostname: hostname_for(isis, &level, &w.originator),
+                        local: w.originator == self_sys_id,
+                        priority: w.fad.priority,
+                        metric_type: w.fad.metric_type,
+                        calc_type: w.fad.calc_type,
+                    }),
+                    participating,
+                    reason,
+                });
+            }
+        }
+
         let view = FlexAlgoViewJson {
             area: format_area_id(&isis.config.net),
             local_algorithms,
             local_srv6_locators,
+            selection,
             levels,
         };
         return Ok(serde_json::to_string_pretty(&view)
@@ -3962,6 +4032,41 @@ fn show_isis_flex_algo(
         )?;
         for (algo, entry) in &isis.flex_algo.config {
             write_flex_algo_row(&mut buf, isis, *algo, entry)?;
+        }
+    }
+
+    // Winning-definition selection (RFC 9350 §5.3): which definition each
+    // configured algorithm is computed with at each level, who advertised
+    // it, and whether this router participates.
+    if !isis.flex_algo.config.is_empty() {
+        let self_sys_id = isis.config.net.sys_id();
+        for (level, algos) in flex_algo_selections(isis) {
+            writeln!(buf)?;
+            writeln!(buf, "{} definition selection:", level_long(&level))?;
+            for (algo, sel) in algos {
+                let state = match &sel.participation {
+                    super::flex_algo::Participation::Yes(_) => "participating".to_string(),
+                    super::flex_algo::Participation::No(why) => {
+                        format!("not participating: {why}")
+                    }
+                };
+                match &sel.winner {
+                    Some(w) => {
+                        let name = hostname_for(isis, &level, &w.originator);
+                        let local = if w.originator == self_sys_id {
+                            ", this router"
+                        } else {
+                            ""
+                        };
+                        writeln!(
+                            buf,
+                            "  Algo {algo}: definition from {name} ({}{local}), priority {}; {state}",
+                            w.originator, w.fad.priority
+                        )?;
+                    }
+                    None => writeln!(buf, "  Algo {algo}: {state}")?,
+                }
+            }
         }
     }
 

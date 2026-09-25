@@ -1,6 +1,7 @@
 # Flex-Algo link-loss constraint — design
 
-> **Status:** proposal (2026-09-25). Open decisions in §10.
+> **Status:** proposal, reviewed (2026-09-25). All six §10 decisions settled: each takes the
+> recommendation. Implementation starts with PR 1 (§8).
 > **Parent docs:** [stamp-measured-loss.md](./stamp-measured-loss.md) (the measured loss this
 > consumes), [review sequencing](../reviews/stamp-isis-ospf-2026-09-16.md) (Pattern C, "Flex-Algo
 > link loss"), [flex-algo-roadmap.md](./flex-algo-roadmap.md),
@@ -391,23 +392,32 @@ sequencing's Pattern C entry.
 
 ## 10. Decisions for the reviewer
 
-The recommendation is listed first in each.
+The recommendation is listed first in each. **All six were decided on 2026-09-25, each taking the
+recommendation.**
 
 1. **Make winning-FAD selection and the unsupported rule a prerequisite (D1, PR 1)**, including
-   the behaviour change on upgrade. Routers stop participating where no FAD is advertised, or
+   the behaviour change on upgrade. **Decided 2026-09-25: yes.** The upgrade note in the release
+   CHANGELOG must list the cases in which a zebra-rs router now stops participating. Routers stop participating where no FAD is advertised, or
    where the winner uses SRLG exclude, the M flag, TE-default or a non-zero calc-type — cases in
    which they currently compute a topology no other router computes. The alternative, the
    constraint on local config alone, is correct only when every router in the level is a
    zebra-rs router configured identically.
-2. **IS-IS code point 252, marked provisional.** The alternative is to wait for an RFC 7370 early
-   allocation, which nobody has requested. The risk is a renumbering release later.
-3. **Defer OSPF's FAEML** until a code point exists and the length question is settled. Huawei,
-   the one implementation, forbids it on OSPF too.
+2. **IS-IS code point 252, marked provisional.** **Decided 2026-09-25: yes.** The alternative is
+   to wait for an RFC 7370 early allocation, which nobody has requested. The risk is a
+   renumbering release later; the constant stays in one place for that.
+3. **Defer OSPF's FAEML** until a code point exists and the length question is settled.
+   **Decided 2026-09-25: yes.** Huawei, the one implementation, forbids it on OSPF too. OSPF
+   still gets D1's selection and unsupported rule (PR 3), so an OSPF FAD carrying the FAEML makes
+   zebra-rs stop participating rather than compute without it.
 4. **Configure the threshold in percent, rounded to nearest RFC unit**, like every other loss
-   setting. The alternative is raw units, as Huawei does.
-5. **Ignore the A bit in pruning.** The draft is silent; comparing the value is deterministic.
+   setting. **Decided 2026-09-25: yes.** The alternative was raw units, as Huawei does; `show`
+   prints both.
+5. **Ignore the A bit in pruning.** **Decided 2026-09-25: yes.** The draft is silent; comparing
+   the value is deterministic.
 6. **Move IS-IS affinity onto the same RFC 9479 attribute reader** as delay and loss, in PR 2's
-   refactor. One selection rule for every Flex-Algo attribute.
+   refactor. **Decided 2026-09-25: yes.** One selection rule for every Flex-Algo attribute. It
+   changes which ASLA IS-IS affinity is read from (zero-length mask fallback, L flag), so PR 2's
+   tests cover affinity sourcing as well as loss.
 
 ## 11. Pre-existing issues found by the survey
 
