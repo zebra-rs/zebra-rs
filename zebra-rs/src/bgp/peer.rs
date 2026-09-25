@@ -2519,6 +2519,37 @@ pub fn fsm_bgp_open(peer: &mut Peer, conn: ConnTag, packet: OpenPacket) -> State
         packet.bgp_id[3],
     );
 
+    // RFC 6286 §2.2 (updating RFC 4271 §6.2): a zero BGP Identifier is
+    // a Bad BGP Identifier. It has to be refused before collision
+    // resolution below, which would otherwise compare it as if it were a
+    // real identifier; accepted, it also became the router-id every
+    // lowest-identifier tie-break prefers. Same connection-tag split as
+    // the AS check above: a collision conn is closed alone, a primary
+    // conn takes the session to Idle.
+    if remote_id.is_unspecified() {
+        tracing::warn!(
+            peer = %peer.display_name(),
+            "bgp: OPEN carries BGP Identifier 0.0.0.0; sending Bad BGP Identifier NOTIFICATION",
+        );
+        if conn == ConnTag::Collision
+            && let Some(collision) = peer.collision.take()
+        {
+            close_collision(
+                collision,
+                NotifyCode::OpenMsgError,
+                OpenError::BadBgpIdentifier.into(),
+            );
+            return peer.state;
+        }
+        peer_send_notification(
+            peer,
+            NotifyCode::OpenMsgError,
+            OpenError::BadBgpIdentifier.into(),
+            Vec::new(),
+        );
+        return State::Idle;
+    }
+
     // RFC 4271 §6.8 collision resolution. If we have both a primary
     // and a collision connection at the moment this OPEN arrives, the
     // peer's BGP Identifier (just learned) tells us which side's

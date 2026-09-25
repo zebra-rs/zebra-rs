@@ -1006,7 +1006,7 @@ mod tests {
         assert_eq!(parsed.ipv4_update.len(), 1);
     }
 
-    /// RFC 7606 §7.6: from an external peer the discard applies whether
+    /// RFC 7606 §7.5: from an external peer the discard applies whether
     /// or not the attribute is well-formed; a 3-octet LOCAL_PREF must not
     /// cost the route or the session.
     #[test]

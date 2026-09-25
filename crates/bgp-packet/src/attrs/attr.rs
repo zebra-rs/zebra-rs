@@ -371,23 +371,31 @@ fn attr_malformation_is_withdraw(attr_type: AttrType) -> bool {
             // length is not a non-zero multiple of 12.
             | AttrType::LargeCom
             | AttrType::PrefixSid
-            // RFC 7606 §7.4: a malformed AS_PATH "SHALL be handled using the
+            // RFC 7606 §7.2: a malformed AS_PATH "SHALL be handled using the
             // approach of 'treat-as-withdraw'". The width mismatch a
             // mis-negotiated AS4 session produces lands here rather than
             // resetting the session.
             | AttrType::AsPath
-            // RFC 7606 §7.5: same for AGGREGATOR (wrong length for the
+            // RFC 7606 §7.7: same for AGGREGATOR (wrong length for the
             // session's negotiated ASN width).
             | AttrType::Aggregator
             // RFC 9234 §5: an OTC attribute whose length is not 4 "SHALL be
             // handled using the approach of 'treat-as-withdraw'".
             | AttrType::Otc
+            // RFC 7606 §7.9 / §7.10: from an internal neighbor, an
+            // ORIGINATOR_ID whose length is not 4 or a CLUSTER_LIST whose
+            // length is not a non-zero multiple of 4 is malformed and
+            // handled by treat-as-withdraw. (From an external neighbor
+            // both are discarded before parsing, so only the internal
+            // side reaches here.)
+            | AttrType::OriginatorId
+            | AttrType::ClusterList
     )
 }
 
 /// Whether a malformed instance of `attr_type` is handled by the RFC 7606
 /// "attribute discard" action: drop just the attribute and keep the UPDATE.
-/// AS4_PATH and AS4_AGGREGATOR use it per RFC 7606 §7.10 / §7.11 — they
+/// AS4_PATH and AS4_AGGREGATOR use it per RFC 6793 §6 — they
 /// only refine AS_PATH / AGGREGATOR, so losing one degrades to the
 /// AS_TRANS view rather than losing the route.
 fn attr_malformation_is_discard(attr_type: AttrType) -> bool {
@@ -459,11 +467,22 @@ pub fn parse_bgp_update_attribute(
             continue;
         }
 
-        // RFC 7606 §7.6: from an external neighbor LOCAL_PREF is
-        // discarded whether or not it is well-formed — a bad length
-        // must not cost the session (the well-formed case is dropped
-        // in the fold below).
-        if attr_type == AttrType::LocalPref && opt.as_ref().is_some_and(|o| o.is_ebgp()) {
+        // Attributes that only carry meaning inside the sender's AS are
+        // dropped from an external neighbor before they are parsed, so
+        // the discard holds whether or not the attribute is well-formed
+        // and a bad length costs neither the route nor the session:
+        // - LOCAL_PREF: RFC 4271 §5.1.5 ("MUST be ignored"), RFC 7606
+        //   §7.5;
+        // - ORIGINATOR_ID / CLUSTER_LIST: RFC 7606 §7.9 / §7.10
+        //   ("attribute discard"). Kept, another AS's reflection state
+        //   decided our tie-break, tripped our own reflection-loop check
+        //   whenever it named one of our router-ids, and rode along to
+        //   every iBGP peer.
+        if matches!(
+            attr_type,
+            AttrType::LocalPref | AttrType::OriginatorId | AttrType::ClusterList
+        ) && opt.as_ref().is_some_and(|o| o.is_ebgp())
+        {
             remaining = new_remaining;
             continue;
         }
@@ -480,7 +499,7 @@ pub fn parse_bgp_update_attribute(
                     continue;
                 }
                 if attr_malformation_is_discard(attr_type) {
-                    // RFC 7606 §7.10 / §7.11: drop just the attribute.
+                    // RFC 6793 §6: drop just the attribute.
                     remaining = new_remaining;
                     continue;
                 }
@@ -1044,7 +1063,7 @@ mod tests {
         );
     }
 
-    /// RFC 7606 §7.10: a malformed AS4_PATH is discarded — the UPDATE
+    /// RFC 6793 §6: a malformed AS4_PATH is discarded — the UPDATE
     /// survives with the placeholder path, no withdraw, no reset.
     #[test]
     fn malformed_as4_path_is_attribute_discard() {
@@ -1061,7 +1080,7 @@ mod tests {
         assert_eq!(flat_asns(&aspath), vec![65001, u32::from(AS_TRANS)]);
     }
 
-    /// RFC 7606 §7.4: a malformed AS_PATH is treat-as-withdraw, not a
+    /// RFC 7606 §7.2: a malformed AS_PATH is treat-as-withdraw, not a
     /// session reset. (The width mismatch of a mis-negotiated AS4
     /// session lands exactly here.)
     #[test]

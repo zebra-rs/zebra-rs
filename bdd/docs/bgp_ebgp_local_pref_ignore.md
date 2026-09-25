@@ -4,7 +4,7 @@
 
 As a network operator
 I want a LOCAL_PREF attribute arriving over an eBGP session to be
-discarded on ingest (RFC 4271 §5.1.5, RFC 7606 §7.6)
+discarded on ingest (RFC 4271 §5.1.5, RFC 7606 §7.5)
 So that an external neighbor — buggy or hostile — cannot steer my AS's
 best-path selection, and the bogus value is never relayed to my iBGP
 peers.
