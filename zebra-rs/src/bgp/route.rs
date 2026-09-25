@@ -14780,12 +14780,23 @@ pub(super) fn route_advertise_to_peers_v6(
             let Some((nlri, attr)) = route_update_ipv6(peer, &prefix, cand, bgp, true) else {
                 continue;
             };
-            let attr = bgp.attr_store.intern(attr);
+            // The per-AFI Output policy, as every other v6 advertise path
+            // applies it (review finding #16: this loop is an AddPath
+            // peer's only route-change path, and skipping the policy
+            // leaked denied prefixes and dropped its set actions). A
+            // denied candidate is left out of `newly`, so the diff below
+            // withdraws it if it was sent before.
+            let Some(decision) =
+                route_apply_policy_out_v6(peer, afi_safi, &nlri, attr, cand.weight, cand.tag)
+            else {
+                continue;
+            };
+            let attr = bgp.attr_store.intern(decision.attr);
             if let Some(gid) = &group_id
                 && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
                 && let Some(group) = af.group_by_id_mut(gid)
             {
-                super::update_group::send_ipv6(group, nlri, attr, cand.ident, bgp.tx, true);
+                super::update_group::send_ipv6(group, nlri, attr.clone(), cand.ident, bgp.tx, true);
             } else {
                 tracing::warn!(
                     peer = %peer.address,
@@ -14794,7 +14805,11 @@ pub(super) fn route_advertise_to_peers_v6(
                 );
                 continue;
             }
-            peer.adj_out.v6.add(prefix, cand.clone());
+            // Record the advertised (post-policy) form, as the VPNv6
+            // AddPath path does.
+            let mut sent = cand.clone();
+            sent.attr = attr;
+            peer.adj_out.v6.add(prefix, sent);
             newly.insert(cand.local_id);
         }
         for id in was {

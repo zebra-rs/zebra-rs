@@ -19,8 +19,8 @@ follow-ups), #7 (PR #2380, `d7476601`), #8 and with it #13 (PR #2383,
 `4ba79217`), the item found while fixing #12 (PR #2418, `6b53ad6a`), #14
 (PR #2420, `49fb77b1`), #20 (PR #2422, `d8f6a0cf`) and #10 with the MED
 knobs (PR #2423, `7852fc15`). Each fixed entry ends with its fix note;
-everything else is open. In progress: #16 (IPv6 AddPath event path
-skipped outbound policy), branch `bgp-v6-addpath-policy-out`.
+everything else is open. #16 (IPv6 AddPath event path skipped outbound
+policy) is fixed on branch `bgp-v6-addpath-policy-out`.
 
 Method: one lead read the selection ladder and every egress builder, then
 five independent read-only reviewers each took one dimension (update-group
@@ -1171,7 +1171,7 @@ cap. The two reviews agree on every overlapping item.
   ten unit gates pass and both BDD twins leave z2 with the control prefix
   only.
 
-### 16. P2 CONFIRMED — the IPv6-unicast AddPath event path bypasses outbound policy
+### 16. P2 CONFIRMED, FIXED on branch `bgp-v6-addpath-policy-out` — the IPv6-unicast AddPath event path bypasses outbound policy
 
 - `route.rs:13253-13290`: `route_update_ipv6` → intern → `send_ipv6`,
   with no `route_apply_policy_out_v6`. Plain members go through
@@ -1202,6 +1202,18 @@ cap. The two reviews agree on every overlapping item.
   fails: z2 holds the denied prefix and neither carries MED 50 (checked
   by hand on the kept topology). Its IPv4 twin `bgp_addpath_policy_out`
   is the control and passes on `main`.
+- FIXED (branch `bgp-v6-addpath-policy-out`): the AddPath loop in
+  `route_advertise_to_peers_v6` runs each candidate through
+  `route_apply_policy_out_v6` after `route_update_ipv6`, as the VPNv6 and
+  labeled-unicast AddPath paths do. A denied candidate stays out of the
+  loop's `newly` set, so the existing Adj-RIB-Out diff withdraws a
+  path-id sent before — the v6-unicast half of #17's withdraw class
+  needs nothing more. The Adj-RIB-Out records the post-policy attribute,
+  as the VPNv6 AddPath path does. On the fix the three gates and the
+  control pass. Both BDD twins pass, and `bgp_addpath_ipv6` / `_ipv4`,
+  `bgp_addpath_group`, `bgp_shard_addpath_v6` / `_v4`,
+  `bgp_vrf_neighbor_add_path`, `bgp_update_group_live_policy_out_v6`,
+  `bgp_v6_route_map` and `bgp_v6_table_map` stay green.
 
 ### 17. P2 CONFIRMED — v4-unicast / VPNv4 / VPNv6 AddPath: a replaced candidate that becomes egress-filtered (or LLGR-stale) is never withdrawn
 
