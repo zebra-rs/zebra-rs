@@ -5660,7 +5660,7 @@ impl Bgp {
                 // rerouted; re-dispatch the VRF import with the fresh
                 // transport. Reuses the VPNv4/v6 dispatch.
                 let selected = self.local_rib.select_best_path_evpn(&rd, &prefix);
-                if let Some(winner) = selected.last()
+                if let Some(winner) = selected.first()
                     && let bgp_packet::EvpnPrefix::IpPrefix { prefix: net, .. } = &prefix
                 {
                     let label = winner.label.map(|l| l.label).unwrap_or(0);
@@ -6123,7 +6123,7 @@ impl Bgp {
                     vrf_registry: &self.vrf_registry,
                 };
                 if let bgp_packet::EvpnPrefix::IpPrefix { prefix: net, .. } = prefix
-                    && let Some(winner) = selected.last()
+                    && let Some(winner) = selected.first()
                 {
                     let label = winner.label.map(|l| l.label).unwrap_or(0);
                     let transport = top

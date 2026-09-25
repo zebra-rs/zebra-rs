@@ -1,0 +1,13 @@
+# z2 (AS 65072): z1's downstream eBGP neighbor.
+router:
+  bgp:
+    global:
+      as: 65072
+      router-id: 192.168.50.4
+    neighbor:
+    - remote-address: 192.168.50.1
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65001
