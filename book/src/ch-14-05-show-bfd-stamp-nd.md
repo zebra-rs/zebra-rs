@@ -114,25 +114,52 @@ See [STAMP](ch-09-00-twamp-stamp.md) for configuration.
 ### `show stamp`
 
 A one-line-per-session summary: the local/remote endpoints, session
-state, sent/received counts, loss percentage, and the last exported
-delay metric (min/avg/max).
+state, sent/received counts, round-trip probe loss, and the last
+exported delay metric (min/avg/max).
 
 ```
 r1> show stamp
-Interface  Local      Remote     State   Sent  Recv  Loss%  Last (min/avg/max)
-eth0       10.0.0.1   10.0.0.2   Active    10     8    20%   42/43/45us (3us)
-eth1       10.0.1.1   10.0.1.2   Idle       0     0     -    -
+Interface  Local      Remote     State   Sent  Recv     Loss%  Last (min/avg/max)
+eth0       10.0.0.1   10.0.0.2   Active   130   129     0.833  42/43/45us (3us)
+eth1       10.0.1.1   10.0.1.2   Idle       0     0         -  -
 ```
 
+`Loss%` is the share of probes lost over the last 120 seconds, counted
+on the session's own 30-second loss clock. A probe counts as lost when no
+reply arrives within 3 seconds (RFC 7680's waiting time). It is
+round-trip loss: a lost probe and a lost reply look the same to the
+sender. While a session is younger than 120 seconds the figure covers
+the 30-second buckets closed so far, and it reads `-` until the first
+one closes.
+
 JSON: an array of session objects (`interface`, `local`, `remote`,
-`state`, `ssid`, counters, `window_*`, and an optional `last_export`
-snapshot with `min`/`avg`/`max`/`variation`).
+`state`, `ssid`, counters, a `loss` object, and an optional
+`last_snapshot` with `min`/`avg`/`max`/`variation`). `loss` carries
+`direction`, `window_secs`, `buckets` / `buckets_wanted`, `settled`,
+`lost`, and, once any probe has settled, `percent`,
+`resolution_percent`, `integrity_percent` and `encoded` (RFC 8570 units
+of 0.000003 %). It also counts `late`, `duplicate` and `unmatched`
+replies.
 
 ### `show stamp session`
 
 The same session data rendered as a detail block per session — SSID,
 probe interval, damping period, uptime, counters, the timestamp source
-(kernel vs. userspace), and the current measurement window.
+(kernel vs. userspace), probe loss, and the last delay sample. The loss
+line has three states:
+
+```
+        Loss (round-trip, 120s window): measuring, first bucket not closed yet
+        Loss (round-trip, 120s window): filling, 2 of 4 buckets; so far 0.000% (0 of 60 probes)
+        Loss (round-trip, 120s window): 0.833% (1 of 120 probes), resolution 0.833%, integrity 100%
+        Loss replies: late 0 duplicate 0 unmatched 0
+```
+
+`resolution` is one probe as a percentage: the smallest loss the window
+can express at the current probe rate. `integrity` is the share of the
+probes the probe interval should have produced that actually settled. A
+*late* reply arrived after its probe had already been counted lost, and
+it stays lost.
 
 JSON: the same array of session objects as `show stamp`.
 

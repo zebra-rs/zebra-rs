@@ -12,6 +12,7 @@ pub mod anomaly;
 pub mod client;
 pub mod damping;
 pub mod inst;
+pub mod loss;
 pub mod network;
 pub mod reflector;
 pub mod sender;

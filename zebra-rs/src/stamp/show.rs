@@ -5,7 +5,7 @@
 //! command takes a trailing `json` flag.
 //!
 //!   * `show stamp`            — one line per session: link, state,
-//!     window counters, last exported snapshot.
+//!     counters, round-trip probe loss, last exported snapshot.
 //!   * `show stamp session`    — per-session detail block.
 //!   * `show stamp statistics` — sender and reflector packet counters.
 
@@ -16,6 +16,7 @@ use serde::Serialize;
 use crate::config::{Args, Builder};
 
 use super::inst::{ShowCallback, Stamp};
+use super::loss::{DEFAULT_WINDOW_BUCKETS, LossWindow};
 use super::session::{Session, SessionKey};
 use super::stats::MetricSnapshot;
 
@@ -84,10 +85,7 @@ struct StampSessionJson {
     /// stamp vs a userspace fallback.
     t4_kernel: u64,
     t4_userspace: u64,
-    window_sent: u32,
-    window_received: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    window_loss_pct: Option<u32>,
+    loss: StampLossJson,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_snapshot: Option<MetricSnapshot>,
     uptime_secs: u64,
@@ -109,12 +107,90 @@ fn session_json(key: &SessionKey, s: &Session) -> StampSessionJson {
         reflected_count: s.reflected_count,
         t4_kernel: s.t4_kernel,
         t4_userspace: s.t4_userspace,
-        window_sent: s.window.sent,
-        window_received: s.window.received,
-        window_loss_pct: s.window.loss_pct(),
+        loss: loss_json(s),
         last_snapshot: s.last_snapshot,
         uptime_secs: s.created.elapsed().as_secs(),
     }
+}
+
+/// Probe loss over the default loss window (measured-loss design D4/D5).
+/// Always round-trip for now: splitting it by direction needs a stateful
+/// peer reflector (design D3), which a later change adds.
+#[derive(Serialize)]
+struct StampLossJson {
+    direction: &'static str,
+    window_secs: u64,
+    buckets: usize,
+    buckets_wanted: usize,
+    settled: u64,
+    lost: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolution_percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    integrity_percent: Option<u32>,
+    /// RFC 8570 §4.4 units (0.000003 %), capped at 2²⁴ − 2.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    encoded: Option<u32>,
+    late: u64,
+    duplicate: u64,
+    unmatched: u64,
+}
+
+/// Six decimals: the RFC's unit is 0.000003 %, so more would be noise.
+fn round6(v: f64) -> f64 {
+    (v * 1e6).round() / 1e6
+}
+
+fn default_loss_window(s: &Session) -> LossWindow {
+    s.loss.window(DEFAULT_WINDOW_BUCKETS)
+}
+
+fn loss_json(s: &Session) -> StampLossJson {
+    let w = default_loss_window(s);
+    StampLossJson {
+        direction: "round-trip",
+        window_secs: w.secs(),
+        buckets: w.buckets,
+        buckets_wanted: w.wanted,
+        settled: w.settled,
+        lost: w.lost,
+        percent: w.percent().map(round6),
+        resolution_percent: w.resolution_percent().map(round6),
+        integrity_percent: w.integrity_percent(),
+        encoded: w.encoded(),
+        late: s.loss.late,
+        duplicate: s.loss.duplicate,
+        unmatched: s.loss.unmatched,
+    }
+}
+
+/// The loss line of `show stamp session`, in the three states a window
+/// can be in: not one bucket closed yet, filling, and full.
+fn loss_line(w: &LossWindow) -> String {
+    let head = format!("Loss (round-trip, {}s window)", w.secs());
+    if w.buckets == 0 {
+        return format!("{head}: measuring, first bucket not closed yet");
+    }
+    let value = match w.percent() {
+        Some(p) => format!("{p:.3}% ({} of {} probes)", w.lost, w.settled),
+        None => "no probes settled".to_string(),
+    };
+    if !w.is_full() {
+        return format!(
+            "{head}: filling, {} of {} buckets; so far {value}",
+            w.buckets, w.wanted
+        );
+    }
+    let mut line = format!("{head}: {value}");
+    if let Some(r) = w.resolution_percent() {
+        let _ = write!(line, ", resolution {r:.3}%");
+    }
+    if let Some(i) = w.integrity_percent() {
+        let _ = write!(line, ", integrity {i}%");
+    }
+    line
 }
 
 fn show_stamp(stamp: &Stamp, _args: Args, json: bool) -> Result<String, fmt::Error> {
@@ -135,18 +211,19 @@ fn show_stamp(stamp: &Stamp, _args: Args, json: bool) -> Result<String, fmt::Err
     }
     writeln!(
         buf,
-        "{:<10} {:<16} {:<16} {:<8} {:>8} {:>8} {:>6}  Last sample (min/avg/max)",
+        "{:<10} {:<16} {:<16} {:<8} {:>8} {:>8} {:>8}  Last sample (min/avg/max)",
         "Interface", "Local", "Remote", "State", "Sent", "Recv", "Loss%"
     )?;
     for (key, s) in stamp.sessions.iter() {
-        let loss = s
-            .window
-            .loss_pct()
-            .map(|p| p.to_string())
+        // Round-trip probe loss over the default window, or over the
+        // buckets closed so far while it fills.
+        let loss = default_loss_window(s)
+            .percent()
+            .map(|p| format!("{p:.3}"))
             .unwrap_or_else(|| "-".to_string());
         writeln!(
             buf,
-            "{:<10} {:<16} {:<16} {:<8} {:>8} {:>8} {:>6}  {}",
+            "{:<10} {:<16} {:<16} {:<8} {:>8} {:>8} {:>8}  {}",
             iface_str(key),
             key.local.to_string(),
             key.remote.to_string(),
@@ -205,10 +282,11 @@ fn show_stamp_session(stamp: &Stamp, _args: Args, json: bool) -> Result<String, 
             "        T4 timestamp source: kernel {} userspace {}",
             s.t4_kernel, s.t4_userspace
         )?;
+        writeln!(buf, "        {}", loss_line(&default_loss_window(s)))?;
         writeln!(
             buf,
-            "        Current window: sent {} received {}",
-            s.window.sent, s.window.received
+            "        Loss replies: late {} duplicate {} unmatched {}",
+            s.loss.late, s.loss.duplicate, s.loss.unmatched
         )?;
         match &s.last_snapshot {
             Some(e) => {
@@ -414,5 +492,39 @@ mod tests {
         let v: serde_json::Value =
             serde_json::from_str(&show_stamp_statistics(&stamp, no_args(), true).unwrap()).unwrap();
         assert_eq!(v["sessions"], 1);
+    }
+
+    fn window(buckets: usize, settled: u64, lost: u64) -> LossWindow {
+        LossWindow {
+            buckets,
+            wanted: 4,
+            settled,
+            lost,
+            expected_milli: 120_000,
+        }
+    }
+
+    #[test]
+    fn loss_line_before_the_first_bucket() {
+        assert_eq!(
+            loss_line(&window(0, 0, 0)),
+            "Loss (round-trip, 120s window): measuring, first bucket not closed yet"
+        );
+    }
+
+    #[test]
+    fn loss_line_while_filling_says_so() {
+        assert_eq!(
+            loss_line(&window(2, 60, 0)),
+            "Loss (round-trip, 120s window): filling, 2 of 4 buckets; so far 0.000% (0 of 60 probes)"
+        );
+    }
+
+    #[test]
+    fn loss_line_when_full_shows_resolution_and_integrity() {
+        assert_eq!(
+            loss_line(&window(4, 120, 1)),
+            "Loss (round-trip, 120s window): 0.833% (1 of 120 probes), resolution 0.833%, integrity 100%"
+        );
     }
 }

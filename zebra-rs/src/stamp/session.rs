@@ -20,6 +20,7 @@ use crate::context::Task;
 
 use super::anomaly::AnomalyThresholds;
 use super::damping::Damping;
+use super::loss::LossLedger;
 use super::stats::{MetricSnapshot, StatsWindow};
 
 /// Identifies one measurement session at this system. `ifindex` is the
@@ -141,6 +142,9 @@ pub struct Session {
     /// the per-session half of the reflector counters.
     pub reflected_count: u64,
     pub window: StatsWindow,
+    /// Probe-loss accounting on its own 30 s clock (design D2/D4) —
+    /// independent of the delay window above and of `damping_secs`.
+    pub loss: LossLedger,
     pub damping: Damping,
     /// The most recent window's values — `None` before the first
     /// window and after any empty one. Updated every export tick,
@@ -179,6 +183,7 @@ impl Session {
             t4_userspace: 0,
             reflected_count: 0,
             window: StatsWindow::default(),
+            loss: LossLedger::new(Instant::now()),
             damping: Damping::default(),
             last_snapshot: None,
             last_rx: None,
