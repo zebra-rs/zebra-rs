@@ -1,0 +1,36 @@
+# z1 (DUT, AS 65001): learns 2001:db8:60:1::/64 from the scripted speaker h1 and
+# sends it to z2 with AddPath and to z3 without (IPv6 unicast over IPv4
+# sessions; the global IPv6 on the link is the next-hop).
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.61.1
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    # The scripted speaker never listens on 179: passive keeps this peer
+    # in Active so the script's connect is accepted.
+    - remote-address: 192.168.61.2
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65071
+      transport:
+        passive-mode: true
+    - remote-address: 192.168.61.3
+      afi-safi:
+      - name: ipv6
+        enabled: true
+        add-path: send-receive
+      enabled: true
+      remote-as: 65072
+    - remote-address: 192.168.61.4
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65073

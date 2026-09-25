@@ -5213,10 +5213,16 @@ fn route_advertise_batch_addpath<A: BatchAfi>(
     for ident in peers.established_addpath_idents(afi, safi) {
         let peer = peers.get_mut_by_idx(ident).expect("peer exists");
         // RFC 9494 §4.3: stale routes only go to LLGR peers.
-        if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, afi, safi) {
-            continue;
+        let sent = !llgr_blocks_advertisement(rib.stale, &peer.cap_recv, afi, safi)
+            && A::advertise_addpath(peer, rd, prefix, rib, bgp);
+        // Review finding #17: `rib` replaces the path this peer holds under
+        // the same path-id. When the replacement may not go out — LLGR-stale
+        // toward a non-LLGR peer, refused by the builder (NO_ADVERTISE,
+        // NO_EXPORT, OTC, …), denied by the out-policy, filtered by RTC —
+        // the old path-id must be withdrawn, not left standing.
+        if !sent && A::addpath_held(peer, rd, prefix, rib.local_id) {
+            A::withdraw_addpath(peer, rd, prefix, rib.local_id, bgp);
         }
-        A::advertise_addpath(peer, rd, prefix, rib, bgp);
     }
 }
 
@@ -5246,29 +5252,12 @@ fn route_withdraw_from_addpath(
     } else {
         (Afi::Ip, Safi::Unicast)
     };
-    let afi_safi = AfiSafi::new(afi, safi);
 
     let peer_idents: Vec<usize> = peers.established_addpath_idents(afi, safi);
 
     for ident in peer_idents {
         let peer = peers.get_mut_by_idx(ident).expect("peer exists");
-
-        if let Some(ref rd) = rd {
-            peer.cache_remove_vpnv4(*rd, prefix, removed.local_id);
-        } else {
-            // Group cache cleanup. Idempotent across the peer
-            // iteration: first peer in the group cleans the bucket;
-            // subsequent peers find it gone.
-            let group_id = peer.update_group_id.get(&afi_safi).cloned();
-            if let Some(gid) = group_id
-                && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
-                && let Some(group) = af.group_by_id_mut(&gid)
-            {
-                super::update_group::cache_remove_ipv4(group, prefix, removed.local_id);
-            }
-        }
-        withdraw_ipv4_deferrable(bgp.update_groups, peer, rd, prefix, removed.local_id);
-        peer.adj_out.remove(rd, prefix, removed.local_id);
+        V4Batch::withdraw_addpath(peer, rd, prefix, removed.local_id, bgp);
     }
 }
 
@@ -5799,12 +5788,31 @@ trait BatchAfi {
     /// Advertise one AddPath candidate `rib` (carrying its path-id) to a
     /// single AddPath-Send peer. The peer loop + LLGR gate live in
     /// [`route_advertise_batch_addpath`]; split-horizon is enforced by the
-    /// per-AF `route_update_*`.
+    /// per-AF `route_update_*`. Returns whether the path was advertised —
+    /// `false` when the builder, the out-policy or RTC refused it, so the
+    /// caller can withdraw a path-id the peer still holds.
     fn advertise_addpath(
         peer: &mut Peer,
         rd: Option<RouteDistinguisher>,
         prefix: Self::Prefix,
         rib: &BgpRib,
+        bgp: &mut BgpTop,
+    ) -> bool;
+    /// Whether `peer`'s Adj-RIB-Out holds `(prefix, id)`.
+    fn addpath_held(
+        peer: &Peer,
+        rd: Option<RouteDistinguisher>,
+        prefix: Self::Prefix,
+        id: u32,
+    ) -> bool;
+    /// Withdraw `(prefix, id)` from one AddPath-Send peer: drop any queued
+    /// advertisement of it, send the withdraw under that path-id, and
+    /// remove the Adj-RIB-Out row.
+    fn withdraw_addpath(
+        peer: &mut Peer,
+        rd: Option<RouteDistinguisher>,
+        prefix: Self::Prefix,
+        id: u32,
         bgp: &mut BgpTop,
     );
 }
@@ -5917,10 +5925,10 @@ impl BatchAfi for V4Batch {
         prefix: Ipv4Net,
         rib: &BgpRib,
         bgp: &mut BgpTop,
-    ) {
+    ) -> bool {
         let ctx = peer.sync_ctx(*bgp.router_id, bgp.as_sets_withdraw);
         let Some((nlri, attr)) = route_update_ipv4(&ctx, &prefix, rib, true) else {
-            return;
+            return false;
         };
         // v4-unicast reads the cached snapshot; VPNv4 reads its own per-AFI
         // Output policy from the peer.
@@ -5932,11 +5940,11 @@ impl BatchAfi for V4Batch {
             route_apply_policy_out_at(peer, afi_safi, &nlri, attr, rib.weight, rib.tag)
         };
         let Some(decision) = decision else {
-            return;
+            return false;
         };
         let attr = decision.attr;
         if rd.is_some() && !peer.rtcv4.is_empty() && !rtc_match(&peer.rtcv4, &attr.ecom) {
-            return;
+            return false;
         }
         let attr = bgp.attr_store.intern(attr);
         let mut rib_clone = rib.clone();
@@ -5964,6 +5972,37 @@ impl BatchAfi for V4Batch {
                 );
             }
         }
+        true
+    }
+    fn addpath_held(peer: &Peer, rd: Option<RouteDistinguisher>, prefix: Ipv4Net, id: u32) -> bool {
+        let rows = match rd {
+            Some(rd) => peer.adj_out.v4vpn.get(&rd).and_then(|t| t.0.get(&prefix)),
+            None => peer.adj_out.v4.0.get(&prefix),
+        };
+        rows.is_some_and(|rows| rows.iter().any(|row| row.local_id == id))
+    }
+    fn withdraw_addpath(
+        peer: &mut Peer,
+        rd: Option<RouteDistinguisher>,
+        prefix: Ipv4Net,
+        id: u32,
+        bgp: &mut BgpTop,
+    ) {
+        if let Some(rd) = rd {
+            peer.cache_remove_vpnv4(rd, prefix, id);
+        } else {
+            // Group cache cleanup. Idempotent across a peer loop: the
+            // first member cleans the bucket, later ones find it gone.
+            let afi_safi = AfiSafi::new(Afi::Ip, Safi::Unicast);
+            if let Some(gid) = peer.update_group_id.get(&afi_safi).cloned()
+                && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
+                && let Some(group) = af.group_by_id_mut(&gid)
+            {
+                super::update_group::cache_remove_ipv4(group, prefix, id);
+            }
+        }
+        withdraw_ipv4_deferrable(bgp.update_groups, peer, rd, prefix, id);
+        peer.adj_out.remove(rd, prefix, id);
     }
 }
 
@@ -6128,9 +6167,9 @@ impl BatchAfi for V6Batch {
         prefix: Ipv6Net,
         rib: &BgpRib,
         bgp: &mut BgpTop,
-    ) {
+    ) -> bool {
         let Some((nlri, attr)) = route_update_ipv6(peer, &prefix, rib, bgp, true) else {
-            return;
+            return false;
         };
         // Per-AFI Output policy (v6-unicast or VPNv6), mirroring the
         // non-AddPath path so an AddPath candidate is filtered/rewritten
@@ -6140,13 +6179,13 @@ impl BatchAfi for V6Batch {
         let Some(decision) =
             route_apply_policy_out_v6(peer, afi_safi, &nlri, attr, rib.weight, rib.tag)
         else {
-            return;
+            return false;
         };
         let attr = bgp.attr_store.intern(decision.attr);
         if let Some(rd) = rd {
             // VPNv6 AddPath: RTC then per-AFI out-policy (above).
             if !peer.rtcv6.is_empty() && !rtc_match(&peer.rtcv6, &attr.ecom) {
-                return;
+                return false;
             }
             // Record the advertisement under its path-id: the VPNv6
             // soft-out reconciles `adj_out.v6vpn` at `(prefix, path-id)`,
@@ -6165,6 +6204,7 @@ impl BatchAfi for V6Batch {
                 nlri,
             };
             peer.send_vpnv6(vpnv6_nlri, attr, true);
+            true
         } else {
             // v6-unicast AddPath.
             let group_id = peer.update_group_id.get(&afi_safi).cloned();
@@ -6174,12 +6214,49 @@ impl BatchAfi for V6Batch {
             {
                 super::update_group::send_ipv6(group, nlri, attr, rib.ident, bgp.tx, true);
                 peer.adj_out.v6.add(prefix, rib.clone());
+                true
             } else {
                 tracing::warn!(
                     peer = %peer.address,
                     prefix = %prefix,
                     "IPv6 AddPath advertise: peer Established but not in any update-group; advertise skipped"
                 );
+                false
+            }
+        }
+    }
+    fn addpath_held(peer: &Peer, rd: Option<RouteDistinguisher>, prefix: Ipv6Net, id: u32) -> bool {
+        let rows = match rd {
+            Some(rd) => peer.adj_out.v6vpn.get(&rd).and_then(|t| t.0.get(&prefix)),
+            None => peer.adj_out.v6.0.get(&prefix),
+        };
+        rows.is_some_and(|rows| rows.iter().any(|row| row.local_id == id))
+    }
+    fn withdraw_addpath(
+        peer: &mut Peer,
+        rd: Option<RouteDistinguisher>,
+        prefix: Ipv6Net,
+        id: u32,
+        bgp: &mut BgpTop,
+    ) {
+        match rd {
+            Some(rd) => {
+                peer.cache_remove_vpnv6(rd, prefix, id);
+                route_withdraw_vpnv6(peer, rd, prefix, id);
+                if let Some(table) = peer.adj_out.v6vpn.get_mut(&rd) {
+                    table.remove(prefix, id);
+                }
+            }
+            None => {
+                let afi_safi = AfiSafi::new(Afi::Ip6, Safi::Unicast);
+                if let Some(gid) = peer.update_group_id.get(&afi_safi).cloned()
+                    && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
+                    && let Some(group) = af.group_by_id_mut(&gid)
+                {
+                    super::update_group::cache_remove_ipv6(group, prefix, id);
+                }
+                withdraw_ipv6_deferrable(bgp.update_groups, peer, prefix, id);
+                peer.adj_out.v6.remove(prefix, id);
             }
         }
     }
@@ -7531,43 +7608,69 @@ fn route_soft_out_peer_table(
         (Afi::Ip, Safi::Unicast)
     };
 
-    // Snapshot Loc-RIB selected so the iteration outlives later
-    // mutable borrows of `bgp` (attr_store.intern, send paths).
-    let selected: Vec<(Ipv4Net, BgpRib)> = match rd {
-        Some(rd) => bgp
-            .shard
-            .v4vpn
-            .get(&rd)
-            .map(|t| t.1.iter().map(|(p, r)| (p, r.clone())).collect())
-            .unwrap_or_default(),
-        None => bgp.shard.v4.1.iter().map(|(p, r)| (p, r.clone())).collect(),
+    let Some(add_path) = peers
+        .get_by_idx(peer_idx)
+        .map(|peer| peer.opt.is_add_path_send(afi, safi))
+    else {
+        return;
     };
 
-    // Snapshot what's currently in this peer's Adj-RIB-Out so we can
-    // detect which previously-advertised prefixes need a withdraw.
-    let was_advertised: BTreeSet<Ipv4Net> = {
-        let peer = peers.get_mut_by_idx(peer_idx).expect("peer exists");
-        match rd {
-            Some(rd) => peer
-                .adj_out
-                .v4vpn
-                .get(&rd)
-                .map(|t| t.0.keys().copied().collect())
-                .unwrap_or_default(),
-            None => peer.adj_out.v4.0.keys().copied().collect(),
+    // Snapshot the Loc-RIB so the iteration outlives later mutable borrows
+    // of `bgp` (attr_store.intern, send paths). An AddPath peer holds every
+    // candidate, each under its path-id, so it is re-synced from the full
+    // candidate table (review finding #18) — minus the candidates whose
+    // next-hop is unreachable, as the VPNv6 re-sync does: those are not
+    // eligible (RFC 4271 §9.1.2.1), so skipping them lets the reconcile
+    // below withdraw their path-ids instead of re-announcing a path we no
+    // longer forward on. A plain peer is re-synced from the selected path,
+    // which is already empty while the winner is unreachable.
+    let candidates: Vec<(Ipv4Net, BgpRib)> = {
+        let table = match rd {
+            Some(rd) => bgp.shard.v4vpn.get(&rd),
+            None => Some(&bgp.shard.v4),
+        };
+        match table {
+            Some(t) if add_path => {
+                t.0.iter()
+                    .flat_map(|(prefix, ribs)| {
+                        ribs.iter()
+                            .filter(|rib| rib.nexthop_reachable)
+                            .map(move |rib| (prefix, rib.clone()))
+                    })
+                    .collect()
+            }
+            Some(t) => t.1.iter().map(|(p, r)| (p, r.clone())).collect(),
+            None => Vec::new(),
         }
     };
 
-    let mut newly_advertised: BTreeSet<Ipv4Net> = BTreeSet::new();
+    // What the peer holds now: `(prefix, path-id)` rows for AddPath, the
+    // prefixes (path-id 0) otherwise.
+    let was_advertised: BTreeSet<(Ipv4Net, u32)> = {
+        let peer = peers.get_by_idx(peer_idx).expect("peer exists");
+        let table = match rd {
+            Some(rd) => peer.adj_out.v4vpn.get(&rd),
+            None => Some(&peer.adj_out.v4),
+        };
+        table.map_or_else(BTreeSet::new, |t| {
+            t.0.iter()
+                .flat_map(|(prefix, rows)| {
+                    rows.iter()
+                        .map(move |row| (*prefix, if add_path { row.local_id } else { 0 }))
+                })
+                .collect()
+        })
+    };
+
+    let mut newly_advertised: BTreeSet<(Ipv4Net, u32)> = BTreeSet::new();
     // Soft-out targets a single peer; the per-group cache would
     // fan out to every member. Accumulate IPv4 unicast entries
     // and emit via `send_ipv4_direct` at the end so encoding
     // stays per-attr-batched without touching the group cache.
     let mut ipv4_entries: Vec<(Arc<BgpAttr>, Ipv4Nlri)> = Vec::new();
 
-    for (prefix, rib) in &selected {
+    for (prefix, rib) in &candidates {
         let peer = peers.get_mut_by_idx(peer_idx).expect("peer exists");
-        let add_path = peer.opt.is_add_path_send(afi, safi);
 
         // RFC 9494 §4.3: stale routes only go to LLGR peers. A
         // previously-advertised route that went stale falls out of
@@ -7605,6 +7708,8 @@ fn route_soft_out_peer_table(
         let mut adj = rib.clone();
         adj.attr = attr.clone();
         peer.adj_out.add(rd, nlri.prefix, adj);
+        // `nlri.id` is the row's local id under AddPath, 0 otherwise.
+        newly_advertised.insert((*prefix, nlri.id));
 
         if let Some(rd_val) = rd {
             let vpnv4_nlri = Vpnv4Nlri {
@@ -7616,8 +7721,6 @@ fn route_soft_out_peer_table(
         } else {
             ipv4_entries.push((attr, nlri));
         }
-
-        newly_advertised.insert(*prefix);
     }
 
     // Direct-emit IPv4 unicast batch (no group fan-out). When the
@@ -7640,14 +7743,19 @@ fn route_soft_out_peer_table(
         );
     }
 
-    let to_withdraw: Vec<Ipv4Net> = was_advertised
+    // Withdraw each dropped row under its own path-id: toward an AddPath
+    // peer a path-id-0 withdraw carries no path-id field at all (the peer
+    // reads it as an empty withdraw, or rejects the UPDATE), and removing
+    // path-id 0 from the Adj-RIB-Out is a wildcard that would erase every
+    // row the peer still holds.
+    let to_withdraw: Vec<(Ipv4Net, u32)> = was_advertised
         .difference(&newly_advertised)
         .copied()
         .collect();
-    for prefix in to_withdraw {
+    for (prefix, id) in to_withdraw {
         let peer = peers.get_mut_by_idx(peer_idx).expect("peer exists");
         if let Some(rd) = rd {
-            peer.cache_remove_vpnv4(rd, prefix, 0);
+            peer.cache_remove_vpnv4(rd, prefix, id);
         } else {
             // Drop any not-yet-flushed pending advert of this prefix
             // from the shared update-group cache. The re-advert above
@@ -7666,11 +7774,11 @@ fn route_soft_out_peer_table(
                 && let Some(af) = bgp.update_groups.get_mut(&afi_safi)
                 && let Some(group) = af.group_by_id_mut(&gid)
             {
-                super::update_group::cache_remove_ipv4(group, prefix, 0);
+                super::update_group::cache_remove_ipv4(group, prefix, id);
             }
         }
-        peer.adj_out.remove(rd, prefix, 0);
-        withdraw_ipv4_deferrable(bgp.update_groups, peer, rd, prefix, 0);
+        peer.adj_out.remove(rd, prefix, id);
+        withdraw_ipv4_deferrable(bgp.update_groups, peer, rd, prefix, id);
     }
 }
 
@@ -30113,6 +30221,883 @@ mod v6_addpath_policy_out_tests {
                 .contains_key(&prefix)
         );
         assert!(queued(&top, &peers, c, prefix).is_empty());
+    }
+}
+
+/// Review findings #17 and #18: AddPath path-ids that must be withdrawn
+/// by their exact id.
+///
+/// #17 — IPv4 unicast / VPNv4 / VPNv6 AddPath: when a candidate that was
+/// advertised is replaced by one the egress refuses (builder `None` —
+/// NO_ADVERTISE / NO_EXPORT, OTC, …; out-policy deny; RTC mismatch) or
+/// that turned LLGR-stale toward a non-LLGR peer, the AddPath loop just
+/// skipped it, so the peer kept the old path under its id forever.
+///
+/// #18 — the IPv4 / VPNv4 soft-out read the best path only and withdrew
+/// with path-id 0: toward an AddPath peer that is an NLRI without its
+/// path-id field (malformed), the non-best ids were never re-evaluated,
+/// and the wildcard `adj_out.remove(.., 0)` erased every row.
+#[cfg(test)]
+mod addpath_exact_id_tests {
+    use super::*;
+    use crate::bgp::peer::State;
+    use crate::policy::{NumericMatch, PolicyAction, PolicyList};
+    use bgp_packet::{BgpPacket, CapMultiProtocol, CommunityValue, Vpnv6Nexthop};
+    use std::net::IpAddr;
+    use std::str::FromStr;
+
+    const ROUTER_ID: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 9);
+    const V4U: AfiSafi = AfiSafi {
+        afi: Afi::Ip,
+        safi: Safi::Unicast,
+    };
+    const VPNV4: AfiSafi = AfiSafi {
+        afi: Afi::Ip,
+        safi: Safi::MplsVpn,
+    };
+    const VPNV6: AfiSafi = AfiSafi {
+        afi: Afi::Ip6,
+        safi: Safi::MplsVpn,
+    };
+
+    type Rx = tokio::sync::mpsc::UnboundedReceiver<bytes::BytesMut>;
+
+    /// Established neighbor with `fams` negotiated both ways and AddPath
+    /// send on `addpath`.
+    fn peer(addr: &str, remote_as: u32, fams: &[AfiSafi], addpath: &[AfiSafi]) -> (Peer, Rx) {
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        Box::leak(Box::new(rx));
+        let mut peer = Peer::new(
+            0,
+            65001,
+            ROUTER_ID,
+            remote_as,
+            addr.parse::<IpAddr>().unwrap(),
+            None,
+            tx,
+            crate::context::ProtoContext::default_table_no_rib(),
+        );
+        peer.state = State::Established;
+        peer.peer_type = if remote_as == 65001 {
+            PeerType::IBGP
+        } else {
+            PeerType::EBGP
+        };
+        peer.remote_id = match addr.parse::<IpAddr>().unwrap() {
+            IpAddr::V4(a) => a,
+            IpAddr::V6(a) => Ipv4Addr::new(10, 0, 0, a.segments()[7] as u8),
+        };
+        for fam in fams {
+            let entry = peer
+                .cap_map
+                .entries
+                .entry(CapMultiProtocol::new(&fam.afi, &fam.safi))
+                .or_default();
+            entry.send = true;
+            entry.recv = true;
+        }
+        for fam in addpath {
+            peer.opt.add_path.entry(*fam).or_default().send = true;
+        }
+        peer.param.local_addr = Some("10.0.0.99:179".parse().unwrap());
+        let (ptx, prx) = tokio::sync::mpsc::unbounded_channel();
+        peer.packet_tx = Some(ptx);
+        (peer, prx)
+    }
+
+    /// Bind `policy` as `fam`'s out-policy. The IPv4-unicast egress reads
+    /// the cached snapshot production rebuilds when a policy resolves, so
+    /// rebuild it here too.
+    fn bind_out(peer: &mut Peer, fam: AfiSafi, policy: PolicyList) {
+        let slot = peer.policy_list_slot(fam, InOut::Output);
+        slot.name = Some("OUT".into());
+        slot.policy_list = Some(policy);
+        peer.rebuild_out_policy();
+    }
+
+    fn deny_all() -> PolicyList {
+        let mut policy = PolicyList::default();
+        policy.entry(10).action = PolicyAction::Deny;
+        policy
+    }
+
+    /// Deny paths whose egress AS_PATH has three or more ASes.
+    fn deny_long_paths() -> PolicyList {
+        let mut policy = PolicyList::default();
+        policy.entry(10).action = PolicyAction::Deny;
+        policy.entry(10).match_as_path_len = Some(NumericMatch::Ge(3));
+        policy.entry(20).action = PolicyAction::Permit;
+        policy
+    }
+
+    /// Deny paths whose egress AS_PATH has two or fewer ASes.
+    fn deny_short_paths() -> PolicyList {
+        let mut policy = PolicyList::default();
+        policy.entry(10).action = PolicyAction::Deny;
+        policy.entry(10).match_as_path_len = Some(NumericMatch::Le(2));
+        policy.entry(20).action = PolicyAction::Permit;
+        policy
+    }
+
+    struct Fx {
+        router_id: Ipv4Addr,
+        ctx: crate::context::ProtoContext,
+        local_rib: LocalRib,
+        shard: crate::bgp::shard::BgpShard,
+        attr_store: crate::bgp::BgpAttrStore,
+        update_groups: crate::bgp::update_group::UpdateGroupMap,
+        interface_addrs: crate::bgp::interface_addrs::InterfaceAddrs,
+        tx: tokio::sync::mpsc::Sender<crate::bgp::inst::Message>,
+    }
+
+    impl Fx {
+        fn new() -> Self {
+            let (tx, rx) = tokio::sync::mpsc::channel(64);
+            Box::leak(Box::new(rx));
+            Self {
+                router_id: ROUTER_ID,
+                ctx: crate::context::ProtoContext::default_table_no_rib(),
+                local_rib: LocalRib::default(),
+                shard: crate::bgp::shard::BgpShard::default(),
+                attr_store: crate::bgp::BgpAttrStore::default(),
+                update_groups: crate::bgp::update_group::empty_map(),
+                interface_addrs: crate::bgp::interface_addrs::InterfaceAddrs::default(),
+                tx,
+            }
+        }
+        fn top(&mut self) -> BgpTop<'_> {
+            BgpTop {
+                router_id: &self.router_id,
+                srv6_ipv6_export: None,
+                local_rib: &mut self.local_rib,
+                shard: &mut self.shard,
+                tx: &self.tx,
+                rib_client: &self.ctx.rib,
+                attr_store: &mut self.attr_store,
+                update_groups: &mut self.update_groups,
+                interface_addrs: &self.interface_addrs,
+                vrf_export: None,
+                color_policy: None,
+                flex_algo_routes: None,
+                flex_algo_srv6_routes: None,
+                vrf_import: None,
+                nexthop_cache: None,
+                vrf_transport_v4: None,
+                vrf_transport_v6: None,
+                central_label_alloc: None,
+                as_sets_withdraw: false,
+            }
+        }
+    }
+
+    fn enroll(fx: &mut Fx, peers: &mut PeerMap, list: Vec<Peer>) -> Vec<usize> {
+        let mut ids = Vec::new();
+        for peer in list {
+            let addr = peer.address;
+            peers.insert(addr, peer);
+            let id = peers.get(&addr).unwrap().ident;
+            peers.membership_enroll(id);
+            crate::bgp::update_group::attach(&mut fx.update_groups, peers, id, ROUTER_ID, false);
+            ids.push(id);
+        }
+        ids
+    }
+
+    fn v4_attr(path: &str, nh: &str, community: Option<u32>) -> BgpAttr {
+        BgpAttr {
+            origin: Some(Origin::Igp),
+            aspath: Some(As4Path::from_str(path).unwrap()),
+            nexthop: Some(BgpNexthop::Ipv4(nh.parse().unwrap())),
+            com: community.map(|c| [c].into_iter().collect()),
+            ..Default::default()
+        }
+    }
+
+    fn announce_v4(top: &mut BgpTop, peers: &mut PeerMap, id: usize, prefix: &str, attr: BgpAttr) {
+        let mut packet = UpdatePacket::new();
+        packet.bgp_attr = Some(attr);
+        packet.ipv4_update.push(Ipv4Nlri {
+            id: 0,
+            prefix: prefix.parse().unwrap(),
+        });
+        route_from_peer(id, packet, top, peers, None);
+    }
+
+    /// The path-ids `ident` holds for `prefix` in its v4-unicast Adj-RIB-Out.
+    fn held_v4(peers: &PeerMap, ident: usize, prefix: &str) -> Vec<u32> {
+        let prefix: Ipv4Net = prefix.parse().unwrap();
+        peers
+            .get_by_idx(ident)
+            .unwrap()
+            .adj_out
+            .v4
+            .0
+            .get(&prefix)
+            .map_or(Vec::new(), |rows| rows.iter().map(|r| r.local_id).collect())
+    }
+
+    fn drain(rx: &mut Rx) -> Vec<bytes::BytesMut> {
+        let mut out = Vec::new();
+        while let Ok(bytes) = rx.try_recv() {
+            out.push(bytes);
+        }
+        out
+    }
+
+    /// Every UPDATE on `rx`, parsed with AddPath receive on `fam`. A
+    /// malformed one (a path-id-0 withdraw toward an AddPath peer) fails
+    /// the parse.
+    fn updates(rx: &mut Rx, fam: AfiSafi) -> Vec<UpdatePacket> {
+        let mut opt = bgp_packet::ParseOption::default();
+        opt.add_path.entry(fam).or_default().recv = true;
+        drain(rx)
+            .iter()
+            .map(|bytes| {
+                let (_, packet) = BgpPacket::parse_packet(bytes, false, Some(opt.clone()))
+                    .expect("every UPDATE toward an AddPath peer parses as AddPath");
+                match packet {
+                    BgpPacket::Update(update) => *update,
+                    other => panic!("not an UPDATE: {other:?}"),
+                }
+            })
+            .collect()
+    }
+
+    // ---------------------------------------------------------------
+    // #17: a replaced candidate the egress refuses is withdrawn by id
+    // ---------------------------------------------------------------
+
+    /// A re-advertises P with NO_ADVERTISE: the builder refuses it, so the
+    /// AddPath peer must lose P's path-id instead of keeping the old path.
+    #[tokio::test]
+    async fn v4_addpath_candidate_that_turns_no_advertise_is_withdrawn() {
+        let mut fx = Fx::new();
+        let mut peers = PeerMap::new();
+        let (a, _ra) = peer("10.0.0.2", 65002, &[V4U], &[]);
+        let (c, _rc) = peer("10.0.0.4", 65004, &[V4U], &[V4U]);
+        let ids = enroll(&mut fx, &mut peers, vec![a, c]);
+        let (a, c) = (ids[0], ids[1]);
+        let mut top = fx.top();
+        announce_v4(
+            &mut top,
+            &mut peers,
+            a,
+            "10.17.1.0/24",
+            v4_attr("65002", "10.0.0.2", None),
+        );
+        assert_eq!(held_v4(&peers, c, "10.17.1.0/24").len(), 1, "sent");
+        let no_adv = CommunityValue::NO_ADVERTISE.value();
+        announce_v4(
+            &mut top,
+            &mut peers,
+            a,
+            "10.17.1.0/24",
+            v4_attr("65002", "10.0.0.2", Some(no_adv)),
+        );
+        assert!(
+            held_v4(&peers, c, "10.17.1.0/24").is_empty(),
+            "the refused replacement withdraws the path-id"
+        );
+    }
+
+    /// C's out-policy denies the replacement (a longer AS_PATH): the old
+    /// path-id must be withdrawn.
+    #[tokio::test]
+    async fn v4_addpath_candidate_the_out_policy_starts_denying_is_withdrawn() {
+        let mut fx = Fx::new();
+        let mut peers = PeerMap::new();
+        let (a, _ra) = peer("10.0.0.2", 65002, &[V4U], &[]);
+        let (mut c, _rc) = peer("10.0.0.4", 65004, &[V4U], &[V4U]);
+        bind_out(&mut c, V4U, deny_long_paths());
+        let ids = enroll(&mut fx, &mut peers, vec![a, c]);
+        let (a, c) = (ids[0], ids[1]);
+        let mut top = fx.top();
+        announce_v4(
+            &mut top,
+            &mut peers,
+            a,
+            "10.17.2.0/24",
+            v4_attr("65002", "10.0.0.2", None),
+        );
+        assert_eq!(
+            held_v4(&peers, c, "10.17.2.0/24").len(),
+            1,
+            "permitted and sent"
+        );
+        announce_v4(
+            &mut top,
+            &mut peers,
+            a,
+            "10.17.2.0/24",
+            v4_attr("65002 65009 65010", "10.0.0.2", None),
+        );
+        assert!(
+            held_v4(&peers, c, "10.17.2.0/24").is_empty(),
+            "the now-denied path-id is withdrawn"
+        );
+    }
+
+    /// A candidate that turned LLGR-stale is not sent to a non-LLGR
+    /// AddPath peer (RFC 9494 §4.3), and the path-id it holds must go.
+    #[tokio::test]
+    async fn v4_addpath_candidate_that_turns_stale_is_withdrawn_from_a_non_llgr_peer() {
+        let mut fx = Fx::new();
+        let mut peers = PeerMap::new();
+        let (a, _ra) = peer("10.0.0.2", 65002, &[V4U], &[]);
+        let (c, _rc) = peer("10.0.0.4", 65004, &[V4U], &[V4U]);
+        let ids = enroll(&mut fx, &mut peers, vec![a, c]);
+        let (a, c) = (ids[0], ids[1]);
+        let mut top = fx.top();
+        announce_v4(
+            &mut top,
+            &mut peers,
+            a,
+            "10.17.3.0/24",
+            v4_attr("65002", "10.0.0.2", None),
+        );
+        assert_eq!(held_v4(&peers, c, "10.17.3.0/24").len(), 1, "sent");
+        let prefix: Ipv4Net = "10.17.3.0/24".parse().unwrap();
+        let mut stale = top.shard.v4.candidates(prefix)[0].clone();
+        stale.stale = true;
+        route_advertise_to_addpath(None, prefix, &stale, a, &mut top, &mut peers);
+        assert!(
+            held_v4(&peers, c, "10.17.3.0/24").is_empty(),
+            "the stale path-id is withdrawn from the non-LLGR peer"
+        );
+    }
+
+    /// Control: an ordinary replacement still replaces the path under the
+    /// same path-id.
+    #[tokio::test]
+    async fn v4_addpath_ordinary_replacement_keeps_the_path_id() {
+        let mut fx = Fx::new();
+        let mut peers = PeerMap::new();
+        let (a, _ra) = peer("10.0.0.2", 65002, &[V4U], &[]);
+        let (c, _rc) = peer("10.0.0.4", 65004, &[V4U], &[V4U]);
+        let ids = enroll(&mut fx, &mut peers, vec![a, c]);
+        let (a, c) = (ids[0], ids[1]);
+        let mut top = fx.top();
+        announce_v4(
+            &mut top,
+            &mut peers,
+            a,
+            "10.17.4.0/24",
+            v4_attr("65002", "10.0.0.2", None),
+        );
+        let before = held_v4(&peers, c, "10.17.4.0/24");
+        announce_v4(
+            &mut top,
+            &mut peers,
+            a,
+            "10.17.4.0/24",
+            v4_attr("65002 65002", "10.0.0.2", None),
+        );
+        assert_eq!(held_v4(&peers, c, "10.17.4.0/24"), before);
+    }
+
+    /// VPNv6 AddPath (`route_advertise_to_peers_vpnv6_addpath`): a
+    /// candidate re-sent with NO_ADVERTISE must withdraw its path-id from
+    /// the AddPath peer (C is iBGP, so the path goes out with its own
+    /// next-hop and label).
+    #[tokio::test]
+    async fn vpnv6_addpath_candidate_that_turns_no_advertise_is_withdrawn() {
+        let mut fx = Fx::new();
+        let mut peers = PeerMap::new();
+        let (a, _ra) = peer("10.0.0.2", 65002, &[VPNV6], &[]);
+        let (c, mut rc) = peer("10.0.0.4", 65001, &[VPNV6], &[VPNV6]);
+        let ids = enroll(&mut fx, &mut peers, vec![a, c]);
+        let (a, c) = (ids[0], ids[1]);
+        let mut top = fx.top();
+        let rd = RouteDistinguisher::from_str("65002:1").unwrap();
+        let prefix: Ipv6Net = "2001:db8:17::/64".parse().unwrap();
+        let nhop = Vpnv6Nexthop {
+            rd,
+            nhop: "2001:db8::2".parse().unwrap(),
+        };
+        let rib = |community: Option<u32>| {
+            let attr = BgpAttr {
+                origin: Some(Origin::Igp),
+                aspath: Some(As4Path::from_str("65002").unwrap()),
+                nexthop: Some(BgpNexthop::Vpnv6(nhop.clone())),
+                com: community.map(|c| [c].into_iter().collect()),
+                ..Default::default()
+            };
+            let mut rib = BgpRib::new(
+                a,
+                Ipv4Addr::new(10, 0, 0, 2),
+                BgpRibType::EBGP,
+                7,
+                0,
+                &attr,
+                Some(Label::new(100, 0, true)),
+                Some(VpnNexthop::V6(nhop.clone())),
+                false,
+            );
+            rib.local_id = 7;
+            rib.nexthop_reachable = true;
+            rib
+        };
+        route_advertise_to_peers_vpnv6_addpath(rd, prefix, &rib(None), &mut top, &mut peers);
+        let held = |peers: &PeerMap| -> Vec<u32> {
+            peers
+                .get_by_idx(c)
+                .unwrap()
+                .adj_out
+                .v6vpn
+                .get(&rd)
+                .and_then(|t| t.0.get(&prefix))
+                .map_or(Vec::new(), |rows| rows.iter().map(|r| r.local_id).collect())
+        };
+        assert_eq!(held(&peers), vec![7], "sent under path-id 7");
+        drain(&mut rc);
+        let no_adv = CommunityValue::NO_ADVERTISE.value();
+        route_advertise_to_peers_vpnv6_addpath(
+            rd,
+            prefix,
+            &rib(Some(no_adv)),
+            &mut top,
+            &mut peers,
+        );
+        assert!(
+            held(&peers).is_empty(),
+            "the refused re-send withdraws path-id 7"
+        );
+        let withdrawn: Vec<(Ipv6Net, u32)> = updates(&mut rc, VPNV6)
+            .into_iter()
+            .filter_map(|u| match u.mp_withdraw {
+                Some(bgp_packet::MpUnreachAttr::Vpnv6(nlris)) => Some(nlris),
+                _ => None,
+            })
+            .flatten()
+            .map(|n| (n.nlri.prefix, n.nlri.id))
+            .collect();
+        assert_eq!(withdrawn, vec![(prefix, 7)], "withdrawn under its path-id");
+    }
+
+    /// VPNv4: two candidates queued for the AddPath peer C, then the first
+    /// is re-sent with NO_ADVERTISE before the flush. Its withdraw must
+    /// cancel its own queued advertisement only: at the flush C gets the
+    /// withdraw of id 7 and the advertisement of id 8, and the refused id
+    /// does not reappear (review of #17).
+    #[tokio::test]
+    async fn vpnv4_refused_candidate_cancels_only_its_own_pending_id() {
+        let mut fx = Fx::new();
+        let mut peers = PeerMap::new();
+        let (a, _ra) = peer("10.0.0.2", 65002, &[VPNV4], &[]);
+        let (c, mut rc) = peer("10.0.0.4", 65001, &[VPNV4], &[VPNV4]);
+        let ids = enroll(&mut fx, &mut peers, vec![a, c]);
+        let (a, c) = (ids[0], ids[1]);
+        let rd: RouteDistinguisher = "65002:1".parse().unwrap();
+        let prefix: Ipv4Net = "10.17.9.0/24".parse().unwrap();
+        let nh = bgp_packet::Vpnv4Nexthop {
+            rd,
+            nhop: "10.0.0.2".parse().unwrap(),
+        };
+        let attr = BgpAttr {
+            nexthop: Some(BgpNexthop::Vpnv4(nh.clone())),
+            ..v4_attr("65002", "10.0.0.2", None)
+        };
+        let mut rib = BgpRib::new(
+            a,
+            "10.0.0.2".parse().unwrap(),
+            BgpRibType::EBGP,
+            7,
+            0,
+            &attr,
+            Some(Label::new(100, 0, true)),
+            Some(VpnNexthop::V4(nh)),
+            false,
+        );
+        rib.local_id = 7;
+        let mut top = fx.top();
+        route_advertise_to_addpath(Some(rd), prefix, &rib, a, &mut top, &mut peers);
+        let mut other = rib.clone();
+        other.local_id = 8;
+        other.remote_id = 8;
+        route_advertise_to_addpath(Some(rd), prefix, &other, a, &mut top, &mut peers);
+        std::sync::Arc::make_mut(&mut rib.attr).com =
+            Some([CommunityValue::NO_ADVERTISE.value()].into_iter().collect());
+        route_advertise_to_addpath(Some(rd), prefix, &rib, a, &mut top, &mut peers);
+        peers.get_mut_by_idx(c).unwrap().flush_vpnv4();
+        let packets = updates(&mut rc, VPNV4);
+        let mut withdrawn = Vec::new();
+        let mut announced = Vec::new();
+        for packet in packets {
+            if let Some(MpUnreachAttr::Vpnv4(rows)) = packet.mp_withdraw {
+                withdrawn.extend(rows.iter().map(|r| r.nlri.id));
+            }
+            if let Some(MpReachAttr::Vpnv4(reach)) = packet.mp_update {
+                announced.extend(reach.updates.iter().map(|r| r.nlri.id));
+            }
+        }
+        assert_eq!(withdrawn, vec![7]);
+        assert_eq!(
+            announced,
+            vec![8],
+            "the denied ID must not reappear at flush"
+        );
+        let held: Vec<_> = peers.get_by_idx(c).unwrap().adj_out.v4vpn[&rd].0[&prefix]
+            .iter()
+            .map(|r| r.local_id)
+            .collect();
+        assert_eq!(held, vec![8]);
+    }
+
+    // ---------------------------------------------------------------
+    // #18: the v4 / VPNv4 soft-out reconciles AddPath rows by path-id
+    // ---------------------------------------------------------------
+
+    /// Two candidates for P, both sent to the AddPath peer C; then C's
+    /// out-policy denies everything and a soft-out runs. Both path-ids
+    /// must be withdrawn under their own ids — every UPDATE must parse as
+    /// AddPath (a path-id-0 withdraw does not) — and C's Adj-RIB-Out must
+    /// end empty.
+    #[tokio::test]
+    async fn v4_soft_out_withdraws_addpath_rows_by_path_id() {
+        let mut fx = Fx::new();
+        let mut peers = PeerMap::new();
+        let (a, _ra) = peer("10.0.0.2", 65002, &[V4U], &[]);
+        let (b, _rb) = peer("10.0.0.3", 65003, &[V4U], &[]);
+        let (c, mut rc) = peer("10.0.0.4", 65004, &[V4U], &[V4U]);
+        let ids = enroll(&mut fx, &mut peers, vec![a, b, c]);
+        let (a, b, c) = (ids[0], ids[1], ids[2]);
+        let mut top = fx.top();
+        announce_v4(
+            &mut top,
+            &mut peers,
+            a,
+            "10.18.1.0/24",
+            v4_attr("65002", "10.0.0.2", None),
+        );
+        announce_v4(
+            &mut top,
+            &mut peers,
+            b,
+            "10.18.1.0/24",
+            v4_attr("65003", "10.0.0.3", None),
+        );
+        let mut sent = held_v4(&peers, c, "10.18.1.0/24");
+        sent.sort();
+        assert_eq!(sent.len(), 2, "both candidates sent");
+        drain(&mut rc);
+        bind_out(peers.get_mut_by_idx(c).unwrap(), V4U, deny_all());
+        route_soft_out_peer(c, &mut top, &mut peers);
+        let mut withdrawn: Vec<u32> = updates(&mut rc, V4U)
+            .iter()
+            .flat_map(|u| u.ipv4_withdraw.iter().map(|n| n.id))
+            .collect();
+        withdrawn.sort();
+        assert_eq!(withdrawn, sent, "each path-id withdrawn under its own id");
+        assert!(held_v4(&peers, c, "10.18.1.0/24").is_empty());
+    }
+
+    /// The soft-out must re-evaluate the non-best path-ids too: C's
+    /// out-policy starts denying B's (longer) path only, so the soft-out
+    /// withdraws B's path-id and keeps A's, the best.
+    #[tokio::test]
+    async fn v4_soft_out_reconciles_non_best_addpath_ids() {
+        let mut fx = Fx::new();
+        let mut peers = PeerMap::new();
+        let (a, _ra) = peer("10.0.0.2", 65002, &[V4U], &[]);
+        let (b, _rb) = peer("10.0.0.3", 65003, &[V4U], &[]);
+        let (c, mut rc) = peer("10.0.0.4", 65004, &[V4U], &[V4U]);
+        let ids = enroll(&mut fx, &mut peers, vec![a, b, c]);
+        let (a, b, c) = (ids[0], ids[1], ids[2]);
+        let mut top = fx.top();
+        announce_v4(
+            &mut top,
+            &mut peers,
+            a,
+            "10.18.2.0/24",
+            v4_attr("65002", "10.0.0.2", None),
+        );
+        announce_v4(
+            &mut top,
+            &mut peers,
+            b,
+            "10.18.2.0/24",
+            v4_attr("65003 65009 65010", "10.0.0.3", None),
+        );
+        let prefix: Ipv4Net = "10.18.2.0/24".parse().unwrap();
+        let id_of = |top: &BgpTop, ident: usize| {
+            top.shard
+                .v4
+                .candidates(prefix)
+                .iter()
+                .find(|r| r.ident == ident)
+                .unwrap()
+                .local_id
+        };
+        let (id_a, id_b) = (id_of(&top, a), id_of(&top, b));
+        assert_eq!(held_v4(&peers, c, "10.18.2.0/24").len(), 2, "both sent");
+        drain(&mut rc);
+        bind_out(peers.get_mut_by_idx(c).unwrap(), V4U, deny_long_paths());
+        route_soft_out_peer(c, &mut top, &mut peers);
+        let withdrawn: Vec<u32> = updates(&mut rc, V4U)
+            .iter()
+            .flat_map(|u| u.ipv4_withdraw.iter().map(|n| n.id))
+            .collect();
+        assert_eq!(withdrawn, vec![id_b], "B's path-id is withdrawn");
+        assert_eq!(
+            held_v4(&peers, c, "10.18.2.0/24"),
+            vec![id_a],
+            "A's path-id stays"
+        );
+    }
+
+    /// The same two paths, but the new policy denies the best path (A's)
+    /// and permits the non-best (B's). The re-sync must re-evaluate B's
+    /// path on its own: a re-sync that reads only the best path never
+    /// reaches B's and withdraws it along with A's.
+    #[tokio::test]
+    async fn v4_soft_out_keeps_the_permitted_non_best_addpath_id() {
+        let mut fx = Fx::new();
+        let mut peers = PeerMap::new();
+        let (a, _ra) = peer("10.0.0.2", 65002, &[V4U], &[]);
+        let (b, _rb) = peer("10.0.0.3", 65003, &[V4U], &[]);
+        let (c, mut rc) = peer("10.0.0.4", 65004, &[V4U], &[V4U]);
+        let ids = enroll(&mut fx, &mut peers, vec![a, b, c]);
+        let (a, b, c) = (ids[0], ids[1], ids[2]);
+        let mut top = fx.top();
+        announce_v4(
+            &mut top,
+            &mut peers,
+            a,
+            "10.18.4.0/24",
+            v4_attr("65002", "10.0.0.2", None),
+        );
+        announce_v4(
+            &mut top,
+            &mut peers,
+            b,
+            "10.18.4.0/24",
+            v4_attr("65003 65009 65010", "10.0.0.3", None),
+        );
+        let prefix: Ipv4Net = "10.18.4.0/24".parse().unwrap();
+        let id_of = |top: &BgpTop, ident: usize| {
+            top.shard
+                .v4
+                .candidates(prefix)
+                .iter()
+                .find(|r| r.ident == ident)
+                .unwrap()
+                .local_id
+        };
+        let (id_a, id_b) = (id_of(&top, a), id_of(&top, b));
+        assert_eq!(top.shard.v4.1.get(&prefix).unwrap().ident, a, "A is best");
+        assert_eq!(held_v4(&peers, c, "10.18.4.0/24").len(), 2, "both sent");
+        drain(&mut rc);
+        bind_out(peers.get_mut_by_idx(c).unwrap(), V4U, deny_short_paths());
+        route_soft_out_peer(c, &mut top, &mut peers);
+        let withdrawn: Vec<u32> = updates(&mut rc, V4U)
+            .iter()
+            .flat_map(|u| u.ipv4_withdraw.iter().map(|n| n.id))
+            .collect();
+        assert_eq!(withdrawn, vec![id_a], "only A's path-id is withdrawn");
+        assert_eq!(
+            held_v4(&peers, c, "10.18.4.0/24"),
+            vec![id_b],
+            "B's path-id stays"
+        );
+    }
+
+    /// VPNv4 twin of the soft-out gate: two VPNv4 candidates held by the
+    /// AddPath peer, a deny-all out-policy, a soft-out — both withdrawn
+    /// under their own ids.
+    #[tokio::test]
+    async fn vpnv4_soft_out_withdraws_addpath_rows_by_path_id() {
+        let mut fx = Fx::new();
+        let mut peers = PeerMap::new();
+        let (a, _ra) = peer("10.0.0.2", 65002, &[VPNV4], &[]);
+        let (b, _rb) = peer("10.0.0.3", 65003, &[VPNV4], &[]);
+        let (c, mut rc) = peer("10.0.0.4", 65001, &[VPNV4], &[VPNV4]);
+        let ids = enroll(&mut fx, &mut peers, vec![a, b, c]);
+        let (a, b, c) = (ids[0], ids[1], ids[2]);
+        let rd = RouteDistinguisher::from_str("65002:1").unwrap();
+        let prefix: Ipv4Net = "10.18.3.0/24".parse().unwrap();
+        let mut sent = Vec::new();
+        for (source, local_id, nh) in [(a, 5u32, "10.0.0.2"), (b, 6u32, "10.0.0.3")] {
+            let vnh = bgp_packet::Vpnv4Nexthop {
+                rd,
+                nhop: nh.parse().unwrap(),
+            };
+            let attr = BgpAttr {
+                origin: Some(Origin::Igp),
+                aspath: Some(As4Path::from_str("65002").unwrap()),
+                nexthop: Some(BgpNexthop::Vpnv4(vnh.clone())),
+                ..Default::default()
+            };
+            let mut rib = BgpRib::new(
+                source,
+                Ipv4Addr::new(10, 0, 0, source as u8 + 2),
+                BgpRibType::EBGP,
+                local_id,
+                0,
+                &attr,
+                Some(Label::new(100 + local_id, 0, true)),
+                Some(VpnNexthop::V4(vnh)),
+                false,
+            );
+            rib.local_id = local_id;
+            rib.nexthop_reachable = true;
+            fx.shard
+                .v4vpn
+                .entry(rd)
+                .or_default()
+                .update(prefix, rib.clone());
+            peers
+                .get_mut_by_idx(c)
+                .unwrap()
+                .adj_out
+                .add(Some(rd), prefix, rib.clone());
+            sent.push(rib.local_id);
+        }
+        let mut top = fx.top();
+        bind_out(peers.get_mut_by_idx(c).unwrap(), VPNV4, deny_all());
+        route_soft_out_peer(c, &mut top, &mut peers);
+        peers.get_mut_by_idx(c).unwrap().flush_vpnv4();
+        let mut withdrawn: Vec<u32> = updates(&mut rc, VPNV4)
+            .into_iter()
+            .filter_map(|u| match u.mp_withdraw {
+                Some(bgp_packet::MpUnreachAttr::Vpnv4(nlris)) => Some(nlris),
+                _ => None,
+            })
+            .flatten()
+            .map(|n| n.nlri.id)
+            .collect();
+        withdrawn.sort();
+        sent.sort();
+        assert_eq!(
+            withdrawn, sent,
+            "each VPNv4 path-id withdrawn under its own id"
+        );
+        assert!(
+            peers
+                .get_by_idx(c)
+                .unwrap()
+                .adj_out
+                .v4vpn
+                .get(&rd)
+                .is_none_or(|t| !t.0.contains_key(&prefix)),
+            "the Adj-RIB-Out ends empty"
+        );
+    }
+
+    /// The VPNv4 re-sync must preserve the reachable ID while removing
+    /// an unreachable sibling, including its pending advertisement.
+    #[tokio::test]
+    async fn review_probe_vpnv4_soft_out_keeps_only_reachable_ids() {
+        let mut fx = Fx::new();
+        let mut peers = PeerMap::new();
+        let (a, _ra) = peer("10.0.0.2", 65002, &[VPNV4], &[]);
+        let (c, mut rc) = peer("10.0.0.4", 65001, &[VPNV4], &[VPNV4]);
+        let ids = enroll(&mut fx, &mut peers, vec![a, c]);
+        let (a, c) = (ids[0], ids[1]);
+        let rd: RouteDistinguisher = "65002:1".parse().unwrap();
+        let prefix: Ipv4Net = "10.18.10.0/24".parse().unwrap();
+        let mut top = fx.top();
+        let mut sent = Vec::new();
+        for id in [7, 8] {
+            let nh = bgp_packet::Vpnv4Nexthop {
+                rd,
+                nhop: format!("10.0.0.{id}").parse().unwrap(),
+            };
+            let attr = BgpAttr {
+                nexthop: Some(BgpNexthop::Vpnv4(nh.clone())),
+                ..v4_attr("65002", "10.0.0.2", None)
+            };
+            let rib = BgpRib::new(
+                a,
+                "10.0.0.2".parse().unwrap(),
+                BgpRibType::EBGP,
+                id,
+                0,
+                &attr,
+                Some(Label::new(100 + id, 0, true)),
+                Some(VpnNexthop::V4(nh)),
+                false,
+            );
+            top.shard.v4vpn.entry(rd).or_default().update(prefix, rib);
+            let rib = top.shard.v4vpn[&rd]
+                .candidates(prefix)
+                .iter()
+                .find(|r| r.remote_id == id)
+                .unwrap()
+                .clone();
+            sent.push(rib.local_id);
+            route_advertise_to_addpath(Some(rd), prefix, &rib, a, &mut top, &mut peers);
+        }
+        let table = top.shard.v4vpn.get_mut(&rd).unwrap();
+        assert!(table.set_nexthop_reachable(prefix, "10.0.0.7".parse().unwrap(), false));
+        assert_eq!(table.select_best_path(prefix)[0].local_id, sent[1]);
+        drain(&mut rc);
+        route_soft_out_peer(c, &mut top, &mut peers);
+        peers.get_mut_by_idx(c).unwrap().flush_vpnv4();
+        let mut reach = Vec::new();
+        let mut withdraw = Vec::new();
+        for packet in updates(&mut rc, VPNV4) {
+            if let Some(MpReachAttr::Vpnv4(rows)) = packet.mp_update {
+                reach.extend(rows.updates.iter().map(|r| r.nlri.id));
+            }
+            if let Some(MpUnreachAttr::Vpnv4(rows)) = packet.mp_withdraw {
+                withdraw.extend(rows.iter().map(|r| r.nlri.id));
+            }
+        }
+        assert_eq!(reach, vec![sent[1]]);
+        assert_eq!(withdraw, vec![sent[0]]);
+        let held: Vec<_> = peers.get_by_idx(c).unwrap().adj_out.v4vpn[&rd].0[&prefix]
+            .iter()
+            .map(|r| r.local_id)
+            .collect();
+        assert_eq!(held, vec![sent[1]]);
+    }
+
+    /// The AddPath peer C holds A's path; A's next-hop then goes
+    /// unreachable, which empties the selection. A soft-out must withdraw
+    /// the path-id, not re-announce a path we no longer forward on (review
+    /// of #18).
+    #[tokio::test]
+    async fn v4_soft_out_withdraws_an_unreachable_addpath_candidate() {
+        let mut fx = Fx::new();
+        let mut peers = PeerMap::new();
+        let (a, _ra) = peer("10.0.0.2", 65002, &[V4U], &[]);
+        let (c, mut rc) = peer("10.0.0.4", 65004, &[V4U], &[V4U]);
+        let ids = enroll(&mut fx, &mut peers, vec![a, c]);
+        let (a, c) = (ids[0], ids[1]);
+        let mut top = fx.top();
+        let prefix: Ipv4Net = "10.18.9.0/24".parse().unwrap();
+        announce_v4(
+            &mut top,
+            &mut peers,
+            a,
+            "10.18.9.0/24",
+            v4_attr("65002", "10.0.0.2", None),
+        );
+        let sent = held_v4(&peers, c, "10.18.9.0/24");
+        assert_eq!(sent.len(), 1);
+        assert!(
+            top.shard
+                .v4
+                .set_nexthop_reachable(prefix, "10.0.0.2".parse().unwrap(), false)
+        );
+        assert!(top.shard.v4.select_best_path(prefix).is_empty());
+        drain(&mut rc);
+        route_soft_out_peer(c, &mut top, &mut peers);
+        let packets = updates(&mut rc, V4U);
+        let reach: Vec<_> = packets
+            .iter()
+            .flat_map(|p| p.ipv4_update.iter().map(|n| n.id))
+            .collect();
+        let withdraw: Vec<_> = packets
+            .iter()
+            .flat_map(|p| p.ipv4_withdraw.iter().map(|n| n.id))
+            .collect();
+        assert_eq!(
+            (reach, withdraw),
+            (Vec::<u32>::new(), sent),
+            "soft-out must withdraw unreachable candidates, not announce them"
+        );
+        assert!(held_v4(&peers, c, "10.18.9.0/24").is_empty());
     }
 }
 

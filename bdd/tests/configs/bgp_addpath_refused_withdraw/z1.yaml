@@ -1,0 +1,35 @@
+# z1 (DUT, AS 65001): learns 10.60.1.0/24 from the scripted speaker h1 and
+# sends it to z2 with AddPath and to z3 without.
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.60.1
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    # The scripted speaker never listens on 179: passive keeps this peer
+    # in Active so the script's connect is accepted.
+    - remote-address: 192.168.60.2
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65071
+      transport:
+        passive-mode: true
+    - remote-address: 192.168.60.3
+      afi-safi:
+      - name: ipv4
+        enabled: true
+        add-path: send-receive
+      enabled: true
+      remote-as: 65072
+    - remote-address: 192.168.60.4
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65073
