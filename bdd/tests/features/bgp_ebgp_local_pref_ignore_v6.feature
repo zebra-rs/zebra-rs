@@ -3,7 +3,7 @@
 Feature: LOCAL_PREF received from an eBGP peer is silently ignored (IPv6)
   As a network operator
   I want a LOCAL_PREF attribute arriving over an eBGP session to be
-  discarded on ingest for IPv6 unicast too (RFC 4271 §5.1.5, RFC 7606 §7.6)
+  discarded on ingest for IPv6 unicast too (RFC 4271 §5.1.5, RFC 7606 §7.5)
   So that an external neighbor cannot steer my AS's IPv6 best-path
   selection, and the bogus value is never relayed to my iBGP peers.
 

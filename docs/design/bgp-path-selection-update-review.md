@@ -7,16 +7,18 @@ MUP/Flowspec/SR-Policy/RTC where they share the machinery). Reviewed
 against `main` at `2f1e9a09` (2026-09-07). Line numbers are as of that
 commit.
 
-Status (2026-09-13): eight items are fixed on `main` — #1 (PR #2372,
+Status (2026-09-25): twelve items are fixed on `main` — #1 (PR #2372,
 merge `3beacbcc`), the listen-range peer-type item found while fixing it
 (PR #2373, `ba327126`), #2 (PR #2375, `308b196a`), #3 (PR #2376,
 `b8fef738`), #4 (PR #2377, `1cc31738`, which also closed the
 signature-knob half of #21 and added the IPv6 outbound soft-out), #5
 (PR #2378, `b2007701`), #6 (PR #2379, `0464828a`, with two review
-follow-ups) and #7 (PR #2380, `d7476601`). Two more are fixed in PR
-#2383 (branch `bgp-vpnv6-transit-label`, eight review rounds folded
-in): #8 and, with it, #13. Each fixed entry ends with its fix note;
-everything else is open. Next: #9 (stale sweep VPNv4-only).
+follow-ups), #7 (PR #2380, `d7476601`), #8 and with it #13 (PR #2383,
+`d72a06af`, eight review rounds folded in), #9 (PR #2405, `31f7458a`)
+and #15 (PR #2413, `097ce15d`). Each fixed entry ends with its fix note;
+everything else is open. #11 (ORIGINATOR_ID / CLUSTER_LIST from an eBGP
+peer, plus a zero BGP Identifier) is fixed on branch
+`bgp-ebgp-rr-attr-discard`.
 
 Method: one lead read the selection ladder and every egress builder, then
 five independent read-only reviewers each took one dimension (update-group
@@ -86,7 +88,7 @@ cap. The two reviews agree on every overlapping item.
   4294967295. It beats every internal path at step 4, is installed, and is
   re-advertised to all iBGP peers carrying that LOCAL_PREF, so the whole AS
   prefers the customer exit. RFC 4271 §5.1.5 says the attribute MUST be
-  ignored on eBGP; RFC 7606 §7.6 says discard.
+  ignored on eBGP; RFC 7606 §7.5 says discard.
 - Probe `probe_b1_ebgp_local_pref_steers_selection`: an eBGP row with
   AS_PATH `65002 65009` and LOCAL_PREF 500 beats an eBGP row with
   AS_PATH `65001`; winner reason `LocalPref`.
@@ -109,7 +111,7 @@ cap. The two reviews agree on every overlapping item.
   the AS4 stamp (`opt.peer_type = peer.peer_type.into()`), and
   `parse_bgp_update_attribute` skips a LOCAL_PREF from an external session
   (`is_ebgp`) before the value parse, so a malformed one is discarded too
-  instead of resetting the session (RFC 7606 §7.6). A parse with no
+  instead of resetting the session (RFC 7606 §7.5). A parse with no
   option keeps the attribute (default session type `Ibgp`); every
   production parse passes the session's option. Every family and the
   Adj-RIB-In see the UPDATE as if the attribute had never been sent;
@@ -118,7 +120,7 @@ cap. The two reviews agree on every overlapping item.
   Both BDD gates pass 7/7 with the fix. Not covered: ORIGINATOR_ID /
   CLUSTER_LIST from eBGP (#11, same parser site), and a malformed
   LOCAL_PREF from an *internal* peer still resets the session where
-  RFC 7606 §7.6 asks for treat-as-withdraw (`attr_malformation_is_withdraw`
+  RFC 7606 §7.5 asks for treat-as-withdraw (`attr_malformation_is_withdraw`
   does not list `LocalPref`).
 
 ### 2. P1 CONFIRMED (probe), FIXED in #2375 — a route learned from a reflector client is never reflected to non-client iBGP peers
@@ -708,7 +710,7 @@ cap. The two reviews agree on every overlapping item.
   AddPath members at all — is #23 and stays open; until it is fixed, a
   soft-out is what brings an AddPath member's VPNv6 rows back in step.
 
-### 9. P1 CONFIRMED, FIXED on branch `bgp-stale-sweep-per-family` — LLGR / PIC stale rows for VPNv6 and EVPN never expire, and any family's EoR flushes the VPNv4 stale set
+### 9. P1 CONFIRMED, FIXED in #2405 — LLGR / PIC stale rows for VPNv6 and EVPN never expire, and any family's EoR flushes the VPNv4 stale set
 
 - `route.rs:12581-12620` `stale_route_withdraw` walks only
   `adj_in.v4vpn` and is the crate's sole stale sweeper; `12574-12579`
@@ -789,23 +791,96 @@ cap. The two reviews agree on every overlapping item.
   pick the per-AS MED winner, then compare winners), or at least keep the
   candidate order stable on replace.
 
-### 11. P2 CONFIRMED (probe) — ORIGINATOR_ID / CLUSTER_LIST from an eBGP peer decide ties and are relayed into the AS
+### 11. P2 CONFIRMED (probe), worse than recorded, FIXED on branch `bgp-ebgp-rr-attr-discard` — ORIGINATOR_ID / CLUSTER_LIST from an eBGP peer decide ties and are relayed into the AS
 
 - `route.rs:2555` `bgp_identifier` prefers `originator_id` with no `typ`
   gate; `4185-4193` only drops when the value is our own router-id; the
   egress stamping (`12897-12915`) is gated on `rib.typ == IBGP`, so an
   eBGP-learned route carries the injected attributes to every iBGP peer.
-  RFC 7606 §7.11/§7.12 say discard on eBGP.
+  RFC 7606 §7.9 (ORIGINATOR_ID) / §7.10 (CLUSTER_LIST) say discard on
+  eBGP ("attribute discard"), well-formed or not.
 - Scenarios: ORIGINATOR_ID 0.0.0.0 wins every (f) tie (probe
   `probe_b4_ebgp_originator_id_wins_tie`); ORIGINATOR_ID = the router-id
   of our internal router R, or CLUSTER_LIST containing it, makes R drop
   the prefix at its own inbound check, a targeted suppression from
-  outside. PLAUSIBLE adjunct: an OPEN with BGP Identifier 0.0.0.0 is
-  accepted (`peer.rs:2478-2483`, `2549`; RFC 6286 §2.2 says NOTIFY) and
-  then wins all (f) ties.
+  outside. PLAUSIBLE adjunct, now CONFIRMED by a unit gate: an OPEN with
+  BGP Identifier 0.0.0.0 is accepted (`peer.rs:2478-2483`, `2549`;
+  RFC 6286 §2.2 says NOTIFY Bad BGP Identifier) and then wins all (f)
+  ties.
+- Worse than recorded: the eBGP border drops the route too when the
+  foreign attribute names its own router-id (the same inbound check, run
+  on the border itself), and a malformed ORIGINATOR_ID / CLUSTER_LIST
+  from any peer is a parse error that closes the session. The close is
+  silent — no NOTIFICATION, `Last reset ... due to TCP connection
+  failed` — because the reader NOTIFYs only for an unrecognized
+  well-known attribute. RFC 7606 §7.9 / §7.10 make the eBGP case an
+  attribute discard and the iBGP case (ORIGINATOR_ID length ≠ 4,
+  CLUSTER_LIST length not a non-zero multiple of 4) treat-as-withdraw.
+  The parser also accepted two malformed shapes as well-formed: a
+  5-octet ORIGINATOR_ID (trailing octet ignored) and an empty
+  CLUSTER_LIST.
 - Fix direction: same site as #1 — `parse_bgp_update_attribute` now
   keys on `ParseOption::peer_type` (#2372), so the eBGP skip only needs
-  two more attribute types.
+  two more attribute types; add both to `attr_malformation_is_withdraw`
+  for the internal side and make the two parsers reject the shapes
+  above; in `fsm_bgp_open`, refuse a zero identifier before collision
+  resolution.
+- Gates (branch `bgp-ebgp-rr-attr-discard`; every gate compiles on
+  `main` and fails there, except the two controls). Unit, `update.rs`:
+  `rr_attrs_from_ebgp_peer_are_discarded` (on `main` both attributes
+  survive), `malformed_rr_attrs_from_ebgp_peer_are_discarded_not_fatal`
+  (3-octet ORIGINATOR_ID, 5-octet CLUSTER_LIST: parse error on `main`),
+  `malformed_rr_attrs_from_ibgp_peer_are_treat_as_withdraw` (3- and
+  5-octet ORIGINATOR_ID, 5-octet and empty CLUSTER_LIST: a parse error or
+  a silent accept on `main`), control `rr_attrs_from_ibgp_peer_are_kept`.
+  Unit, `peer.rs` `bad_bgp_identifier_tests`:
+  `open_with_zero_bgp_identifier_is_refused` (on `main` the session goes
+  to OpenConfirm), `zero_bgp_identifier_on_collision_conn_closes_only_that_conn`
+  (on `main` the zero ID is fed into §6.8 resolution and the parked conn
+  is closed with Cease/7), control
+  `open_with_nonzero_bgp_identifier_proceeds`. BDD,
+  `bgp_ebgp_rr_attr_discard` and `bgp_ebgp_rr_attr_discard_v6`, driven by
+  a new generic scripted speaker (`tests/scripts/bgp_attr_inject_send.py`,
+  raw attribute TLVs per prefix): h1 (eBGP) → z1 (DUT) → z2 (iBGP, not a
+  reflector). On `main` both twins fail three scenarios while the control
+  prefix reaches both routers: the routes whose ORIGINATOR_ID /
+  CLUSTER_LIST name z1 never enter z1's table; the ones naming z2 are
+  relayed with the attributes (`show bgp <prefix>` on z1 prints
+  `Originator: 192.168.44.3` / `Cluster list: 192.0.2.99 192.168.44.3`)
+  and z2 drops them; the malformed pair on the trigger closes h1's
+  session and takes every route h1 announced with it.
+- Adjacent, not changed here: RFC 6286 §2.2 also makes an OPEN from an
+  internal peer carrying our own BGP Identifier a Bad BGP Identifier;
+  `fsm_bgp_open` returns `Idle` for a hold time of 1 or 2 without the
+  Unacceptable Hold Time NOTIFICATION; and every UPDATE parse error other
+  than an unrecognized well-known attribute still closes the session
+  without a NOTIFICATION.
+- FIXED (branch `bgp-ebgp-rr-attr-discard`): the eBGP pre-parse skip in
+  `parse_bgp_update_attribute` now covers `OriginatorId` and
+  `ClusterList` beside `LocalPref`, so from an external neighbor both are
+  dropped before their value is parsed — well-formed or not — and the
+  rest of the UPDATE stands. Both types join
+  `attr_malformation_is_withdraw` for the internal side; `OriginatorId`
+  has its own parser that requires exactly four octets (the `NomBE`
+  derive accepted trailing ones) and `ClusterList` rejects an empty
+  list. `fsm_bgp_open` refuses a zero identifier right after decoding it,
+  before collision resolution: NOTIFICATION OPEN Message Error / Bad BGP
+  Identifier, a primary conn to `Idle`, a parked collision conn closed
+  alone. (No BDD topology runs without a router-id — every BGP config
+  sets one — so none relied on zebra-rs's own 0.0.0.0 OPEN, which it
+  already warns about when sending.) The same pass corrects RFC section
+  citations in the parser and the #1 features: LOCAL_PREF is RFC 7606
+  §7.5 (not §7.6), AS_PATH §7.2, AGGREGATOR §7.7, and the AS4_PATH /
+  AS4_AGGREGATOR attribute discard is RFC 6793 §6. On the fix all seven
+  unit gates pass, each parser change mutation-checked (dropping the
+  eBGP skip, the withdraw listing, the exact ORIGINATOR_ID length or the
+  empty CLUSTER_LIST check each fails a gate). Both BDD twins pass 6/6:
+  z1 accepts the routes naming its own router-id, z2 receives the ones
+  naming its router-id, z1's rows carry neither attribute, and the
+  malformed pair is accepted with the session up. `bgp_ebgp_local_pref_ignore`
+  (+`_v6`), `rr`, `bgp_rr_client_to_nonclient` (+`_v6`), `ibgp`, `ebgp`,
+  `bgp_evpn_srv6_rr`, `bgp_vpnv4_rr_transit_label`,
+  `bgp_unknown_attr_transitive` and `bgp_ls_te_metric` stay green.
 
 ### 12. P2 CONFIRMED (probe) — `enforce-first-as` with `local-as` (without `no-prepend`) drops every route from the neighbor
 
@@ -866,7 +941,7 @@ cap. The two reviews agree on every overlapping item.
 - Fix direction: use `selected.first()` (the `.last()` predates the
   multipath extension, when `selected` was a change history).
 
-### 15. P2 CONFIRMED (probe), worse than recorded, FIXED on branch `bgp-advert-cache-desync` — advertise-cache forward/reverse desync leaves a phantom route that is never withdrawn
+### 15. P2 CONFIRMED (probe), worse than recorded, FIXED in #2413 — advertise-cache forward/reverse desync leaves a phantom route that is never withdrawn
 
 - `update_group.rs:694-712` (`send_ipv4`) / `1228-1244` (`send_ipv6`)
   still insert the NLRI into the new attr bucket without evicting the old

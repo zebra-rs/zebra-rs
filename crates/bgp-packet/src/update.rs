@@ -1006,7 +1006,7 @@ mod tests {
         assert_eq!(parsed.ipv4_update.len(), 1);
     }
 
-    /// RFC 7606 §7.6: from an external peer the discard applies whether
+    /// RFC 7606 §7.5: from an external peer the discard applies whether
     /// or not the attribute is well-formed; a 3-octet LOCAL_PREF must not
     /// cost the route or the session.
     #[test]
@@ -1018,6 +1018,170 @@ mod tests {
         assert_eq!(attr.local_pref, None);
         assert_eq!(parsed.ipv4_update.len(), 1);
         assert!(!parsed.treat_as_withdraw);
+    }
+
+    /// A full UPDATE with ORIGIN / AS_PATH / NEXT_HOP, the raw attribute
+    /// TLVs in `extra` (flags, type, length, value), and the traditional
+    /// NLRI 10.0.0.0/24.
+    fn update_with_extra_attrs(extra: &[u8]) -> Vec<u8> {
+        let mut attrs = vec![0x40u8, 0x01, 0x01, 0x00]; // ORIGIN = IGP
+        // AS_PATH: one AS_SEQUENCE of AS 65001 (4-octet, as4 session).
+        attrs.extend_from_slice(&[0x40, 0x02, 0x06, 0x02, 0x01, 0x00, 0x00, 0xfd, 0xe9]);
+        attrs.extend_from_slice(&[0x40, 0x03, 0x04, 192, 0, 2, 1]); // NEXT_HOP
+        attrs.extend_from_slice(extra);
+        let nlri = [24u8, 10, 0, 0];
+        let mut buf = vec![0xffu8; 16];
+        let total = BGP_HEADER_LEN as usize + 2 + 2 + attrs.len() + nlri.len();
+        buf.extend_from_slice(&(total as u16).to_be_bytes());
+        buf.push(2); // type = UPDATE
+        buf.extend_from_slice(&0u16.to_be_bytes()); // withdrawn routes length
+        buf.extend_from_slice(&(attrs.len() as u16).to_be_bytes());
+        buf.extend_from_slice(&attrs);
+        buf.extend_from_slice(&nlri);
+        buf
+    }
+
+    /// ORIGINATOR_ID (optional non-transitive, type 9) with `value`.
+    fn originator_id_tlv(value: &[u8]) -> Vec<u8> {
+        let mut tlv = vec![0x80u8, 9, value.len() as u8];
+        tlv.extend_from_slice(value);
+        tlv
+    }
+
+    /// CLUSTER_LIST (optional non-transitive, type 10) with `value`.
+    fn cluster_list_tlv(value: &[u8]) -> Vec<u8> {
+        let mut tlv = vec![0x80u8, 10, value.len() as u8];
+        tlv.extend_from_slice(value);
+        tlv
+    }
+
+    /// Well-formed ORIGINATOR_ID 10.0.0.2 + CLUSTER_LIST [10.0.0.9 10.0.0.2].
+    fn well_formed_rr_attrs() -> Vec<u8> {
+        let mut extra = originator_id_tlv(&[10, 0, 0, 2]);
+        extra.extend(cluster_list_tlv(&[10, 0, 0, 9, 10, 0, 0, 2]));
+        extra
+    }
+
+    /// RFC 7606 §7.9 / §7.10: ORIGINATOR_ID and CLUSTER_LIST received from
+    /// an external neighbor "SHALL be discarded using the approach of
+    /// 'attribute discard'". They describe reflection inside the sender's
+    /// AS; kept, they would decide the tie-break against our own peers and
+    /// be relayed into our AS, where a match on a local router-id drops
+    /// the route as a reflection loop.
+    #[test]
+    fn rr_attrs_from_ebgp_peer_are_discarded() {
+        let buf = update_with_extra_attrs(&well_formed_rr_attrs());
+        let (_, parsed) = UpdatePacket::parse_packet(&buf, true, opt_for(BgpPeerType::Ebgp))
+            .expect("must decode");
+        let attr = parsed.bgp_attr.expect("attributes present");
+        assert_eq!(attr.originator_id, None, "eBGP: ORIGINATOR_ID discarded");
+        assert_eq!(attr.cluster_list, None, "eBGP: CLUSTER_LIST discarded");
+        assert!(attr.nexthop.is_some(), "NEXT_HOP intact");
+        assert_eq!(parsed.ipv4_update.len(), 1, "the route itself is accepted");
+        assert!(!parsed.treat_as_withdraw);
+    }
+
+    /// From an internal neighbor they are the reflection state RFC 4456
+    /// defines, and are kept.
+    #[test]
+    fn rr_attrs_from_ibgp_peer_are_kept() {
+        let buf = update_with_extra_attrs(&well_formed_rr_attrs());
+        let (_, parsed) = UpdatePacket::parse_packet(&buf, true, opt_for(BgpPeerType::Ibgp))
+            .expect("must decode");
+        let attr = parsed.bgp_attr.expect("attributes present");
+        assert_eq!(
+            attr.originator_id.map(|o| o.id()),
+            Some("10.0.0.2".parse().unwrap())
+        );
+        assert_eq!(
+            attr.cluster_list.map(|c| c.list),
+            Some(vec![
+                "10.0.0.9".parse().unwrap(),
+                "10.0.0.2".parse().unwrap()
+            ])
+        );
+        assert_eq!(parsed.ipv4_update.len(), 1);
+    }
+
+    /// The external-side discard applies whether or not the attribute is
+    /// well-formed: a 3-octet ORIGINATOR_ID or a 5-octet CLUSTER_LIST from
+    /// an eBGP peer costs neither the route nor the session.
+    #[test]
+    fn malformed_rr_attrs_from_ebgp_peer_are_discarded_not_fatal() {
+        for extra in [
+            originator_id_tlv(&[10, 0, 0]),
+            cluster_list_tlv(&[10, 0, 0, 9, 10]),
+        ] {
+            let buf = update_with_extra_attrs(&extra);
+            let (_, parsed) = UpdatePacket::parse_packet(&buf, true, opt_for(BgpPeerType::Ebgp))
+                .unwrap_or_else(|e| panic!("{extra:02x?}: must decode, got {e:?}"));
+            let attr = parsed.bgp_attr.expect("attributes present");
+            assert_eq!(attr.originator_id, None, "{extra:02x?}");
+            assert_eq!(attr.cluster_list, None, "{extra:02x?}");
+            assert_eq!(parsed.ipv4_update.len(), 1, "{extra:02x?}");
+            assert!(!parsed.treat_as_withdraw, "{extra:02x?}");
+        }
+    }
+
+    /// RFC 7606 §7.9 / §7.10, internal side: an ORIGINATOR_ID whose length
+    /// is not 4, or a CLUSTER_LIST whose length is not a non-zero multiple
+    /// of 4, is malformed and the UPDATE "SHALL be handled using the
+    /// approach of 'treat-as-withdraw'" — not a session reset, and not
+    /// silently accepted (a 5-octet ORIGINATOR_ID or an empty CLUSTER_LIST
+    /// must not parse as if well-formed).
+    #[test]
+    fn malformed_rr_attrs_from_ibgp_peer_are_treat_as_withdraw() {
+        for extra in [
+            originator_id_tlv(&[10, 0, 0]),
+            originator_id_tlv(&[10, 0, 0, 2, 0]),
+            cluster_list_tlv(&[10, 0, 0, 9, 10]),
+            cluster_list_tlv(&[]),
+        ] {
+            let buf = update_with_extra_attrs(&extra);
+            let (_, parsed) = UpdatePacket::parse_packet(&buf, true, opt_for(BgpPeerType::Ibgp))
+                .unwrap_or_else(|e| panic!("{extra:02x?}: must decode, got {e:?}"));
+            assert!(parsed.treat_as_withdraw, "{extra:02x?}: treat-as-withdraw");
+        }
+    }
+
+    /// Review probe for #11: recovering from a malformed RR attribute
+    /// must still decode subsequent IPv6 reach and explicit withdrawals.
+    #[test]
+    fn probe_rr_attr_recovery_preserves_ipv6_nlri() {
+        for rr in [originator_id_tlv(&[10, 0, 0]), cluster_list_tlv(&[])] {
+            let mut extra = rr;
+            // MP_REACH: IPv6 unicast, next-hop 2001:db8::1,
+            // reachable prefix 2001:db8:1::/48.
+            let mut reach = vec![0, 2, 1, 16];
+            reach.extend_from_slice(
+                &"2001:db8::1"
+                    .parse::<std::net::Ipv6Addr>()
+                    .unwrap()
+                    .octets(),
+            );
+            reach.extend_from_slice(&[0, 48, 0x20, 1, 0x0d, 0xb8, 0, 1]);
+            extra.extend_from_slice(&[0x80, 14, reach.len() as u8]);
+            extra.extend_from_slice(&reach);
+            // MP_UNREACH: explicitly withdrawn 2001:db8:2::/48.
+            extra.extend_from_slice(&[0x80, 15, 10, 0, 2, 1, 48, 0x20, 1, 0x0d, 0xb8, 0, 2]);
+            let buf = update_with_extra_attrs(&extra);
+            for peer_type in [BgpPeerType::Ebgp, BgpPeerType::Ibgp] {
+                let (_, parsed) = UpdatePacket::parse_packet(&buf, true, opt_for(peer_type))
+                    .expect("recoverable RR attribute must not hide the remaining NLRIs");
+                assert_eq!(parsed.treat_as_withdraw, peer_type == BgpPeerType::Ibgp);
+                assert_eq!(parsed.ipv4_update.len(), 1);
+                let Some(MpReachAttr::Ipv6 { updates, .. }) = parsed.mp_update else {
+                    panic!("IPv6 reach must survive attribute recovery");
+                };
+                assert_eq!(updates.len(), 1);
+                assert_eq!(updates[0].prefix, "2001:db8:1::/48".parse().unwrap());
+                let Some(MpUnreachAttr::Ipv6Nlri(withdrawals)) = parsed.mp_withdraw else {
+                    panic!("explicit IPv6 withdrawal must survive attribute recovery");
+                };
+                assert_eq!(withdrawals.len(), 1);
+                assert_eq!(withdrawals[0].prefix, "2001:db8:2::/48".parse().unwrap());
+            }
+        }
     }
 
     /// The withdraw-side counterpart: a full UPDATE whose only content is

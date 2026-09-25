@@ -90,7 +90,7 @@ impl ParseBe<As2Path> for As2Path {
     fn parse_be(input: &[u8]) -> IResult<&[u8], As2Path> {
         // Exact consumption: a segment list that stops short of the
         // attribute value leaves trailing octets, which means a segment
-        // failed to parse — a malformed AS_PATH (RFC 7606 §7.4), not a
+        // failed to parse — a malformed AS_PATH (RFC 7606 §7.2), not a
         // shorter one.
         let (input, segs) = parse_nlri_block(input, parse_bgp_attr_as2_segment)?;
         let mut path = As2Path { segs, length: 0 };

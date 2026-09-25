@@ -2519,6 +2519,37 @@ pub fn fsm_bgp_open(peer: &mut Peer, conn: ConnTag, packet: OpenPacket) -> State
         packet.bgp_id[3],
     );
 
+    // RFC 6286 §2.2 (updating RFC 4271 §6.2): a zero BGP Identifier is
+    // a Bad BGP Identifier. It has to be refused before collision
+    // resolution below, which would otherwise compare it as if it were a
+    // real identifier; accepted, it also became the router-id every
+    // lowest-identifier tie-break prefers. Same connection-tag split as
+    // the AS check above: a collision conn is closed alone, a primary
+    // conn takes the session to Idle.
+    if remote_id.is_unspecified() {
+        tracing::warn!(
+            peer = %peer.display_name(),
+            "bgp: OPEN carries BGP Identifier 0.0.0.0; sending Bad BGP Identifier NOTIFICATION",
+        );
+        if conn == ConnTag::Collision
+            && let Some(collision) = peer.collision.take()
+        {
+            close_collision(
+                collision,
+                NotifyCode::OpenMsgError,
+                OpenError::BadBgpIdentifier.into(),
+            );
+            return peer.state;
+        }
+        peer_send_notification(
+            peer,
+            NotifyCode::OpenMsgError,
+            OpenError::BadBgpIdentifier.into(),
+            Vec::new(),
+        );
+        return State::Idle;
+    }
+
     // RFC 4271 §6.8 collision resolution. If we have both a primary
     // and a collision connection at the moment this OPEN arrives, the
     // peer's BGP Identifier (just learned) tells us which side's
@@ -5264,6 +5295,123 @@ mod as4_negotiation_tests {
         let cap = open.bgp_cap.as4.expect("capability forced by 4-byte AS");
         assert_eq!(cap.asn, 4_200_000_001);
         assert!(peer.opt.as4.send);
+    }
+}
+
+#[cfg(test)]
+mod bad_bgp_identifier_tests {
+    use super::*;
+
+    /// eBGP peer (local 65001, remote 65002) in OpenSent on an
+    /// active-role primary conn whose outbound channel the test keeps.
+    fn opensent_peer() -> (Peer, mpsc::UnboundedReceiver<BytesMut>) {
+        let (tx, rx) = mpsc::channel::<Message>(64);
+        Box::leak(Box::new(rx));
+        let mut peer = Peer::new(
+            1,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            65002,
+            "10.0.0.2".parse().unwrap(),
+            None,
+            tx,
+            crate::context::ProtoContext::default_table_no_rib(),
+        );
+        let (packet_tx, packet_rx) = mpsc::unbounded_channel::<BytesMut>();
+        peer.packet_tx = Some(packet_tx);
+        peer.primary_role = Some(Role::Active);
+        peer.primary_conn_id = Some(peer.alloc_conn_id());
+        peer.state = State::OpenSent;
+        let _ = build_open_packet(&mut peer);
+        (peer, packet_rx)
+    }
+
+    fn open_from(bgp_id: Ipv4Addr) -> OpenPacket {
+        let header = BgpHeader::new(BgpType::Open, BGP_HEADER_LEN + 10);
+        let bgp_cap = BgpCap {
+            as4: Some(CapAs4::new(65002)),
+            ..Default::default()
+        };
+        OpenPacket::new(header, 65002, 180, &bgp_id, bgp_cap)
+    }
+
+    /// (code, sub-code) of every NOTIFICATION queued on `rx`.
+    fn notifications(rx: &mut mpsc::UnboundedReceiver<BytesMut>) -> Vec<(u8, u8)> {
+        let mut out = Vec::new();
+        while let Ok(bytes) = rx.try_recv() {
+            if bytes.len() >= BGP_HEADER_LEN as usize + 2
+                && bytes[18] == BgpType::Notification as u8
+            {
+                out.push((bytes[19], bytes[20]));
+            }
+        }
+        out
+    }
+
+    const BAD_BGP_IDENTIFIER: (u8, u8) = (2, 3); // OPEN Message Error / Bad BGP Identifier
+
+    /// RFC 6286 §2.2 (updating RFC 4271 §6.2): an OPEN whose BGP
+    /// Identifier is zero is answered with NOTIFICATION OPEN Message
+    /// Error / Bad BGP Identifier. Accepting it gave the peer's routes a
+    /// router-id of 0.0.0.0 — which wins every lowest-identifier
+    /// tie-break — and resolved connection collisions against a value
+    /// no real speaker holds.
+    #[tokio::test]
+    async fn open_with_zero_bgp_identifier_is_refused() {
+        let (mut peer, mut rx) = opensent_peer();
+        let next = fsm_bgp_open(
+            &mut peer,
+            ConnTag::Primary,
+            open_from(Ipv4Addr::UNSPECIFIED),
+        );
+        assert_eq!(next, State::Idle, "the session must not proceed");
+        assert_eq!(notifications(&mut rx), vec![BAD_BGP_IDENTIFIER]);
+    }
+
+    /// Control: the same peer with a real identifier proceeds.
+    #[tokio::test]
+    async fn open_with_nonzero_bgp_identifier_proceeds() {
+        let (mut peer, mut rx) = opensent_peer();
+        let next = fsm_bgp_open(
+            &mut peer,
+            ConnTag::Primary,
+            open_from(Ipv4Addr::new(2, 2, 2, 2)),
+        );
+        assert_eq!(next, State::OpenConfirm);
+        assert_eq!(peer.remote_id, Ipv4Addr::new(2, 2, 2, 2));
+        assert!(notifications(&mut rx).is_empty());
+    }
+
+    /// On a parked §6.8 collision conn the zero-identifier OPEN costs
+    /// only that conn, the same split the Bad Peer AS check makes: the
+    /// collision is closed with Bad BGP Identifier and the primary is
+    /// left in its state, untouched. (Before the check, the zero ID was
+    /// fed into collision resolution as if it were a real identifier.)
+    #[tokio::test]
+    async fn zero_bgp_identifier_on_collision_conn_closes_only_that_conn() {
+        let (mut peer, mut primary_rx) = opensent_peer();
+        let (packet_tx, mut collision_rx) = mpsc::unbounded_channel::<BytesMut>();
+        let conn_id = peer.alloc_conn_id();
+        peer.collision = Some(CollisionConn {
+            conn_id,
+            packet_tx,
+            reader: Task::spawn(async {}),
+            writer: Task::spawn(async {}),
+            role: Role::Passive,
+            local_addr: None,
+            remote_addr: None,
+        });
+
+        let next = fsm_bgp_open(
+            &mut peer,
+            ConnTag::Collision,
+            open_from(Ipv4Addr::UNSPECIFIED),
+        );
+        assert_eq!(next, State::OpenSent, "the primary keeps its state");
+        assert!(peer.collision.is_none(), "the collision conn is closed");
+        assert!(peer.packet_tx.is_some(), "the primary conn is kept");
+        assert_eq!(notifications(&mut collision_rx), vec![BAD_BGP_IDENTIFIER]);
+        assert!(notifications(&mut primary_rx).is_empty());
     }
 }
 

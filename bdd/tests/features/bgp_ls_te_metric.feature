@@ -215,7 +215,7 @@ Feature: BGP-LS carries the IS-IS TE performance metrics
     # No LOCAL_PREF assertion here, and not for want of trying: the
     # previous scenario sets LOCAL_PREF 300 in the outbound policy, yet
     # a leak is invisible from any conforming collector. lsc discards
-    # LOCAL_PREF from an external peer at parse time (RFC 7606 §7.6,
+    # LOCAL_PREF from an external peer at parse time (RFC 7606 §7.5,
     # crates/bgp-packet/src/attrs/attr.rs) before it can reach a show
     # command, so `should eventually not contain "local-pref"` passes
     # just as happily against a build with the egress strip deleted —

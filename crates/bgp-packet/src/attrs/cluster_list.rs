@@ -23,9 +23,10 @@ impl ClusterList {
 
 impl ParseBe<ClusterList> for ClusterList {
     fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
-        // CLUSTER_LIST is a sequence of 4-octet cluster IDs (RFC 4456); a
-        // payload whose length is not a multiple of 4 is malformed.
-        if !input.len().is_multiple_of(4) {
+        // CLUSTER_LIST is a sequence of 4-octet cluster IDs (RFC 4456).
+        // RFC 7606 §7.10: it "SHALL be considered malformed if its length
+        // is not a non-zero multiple of 4" — an empty list included.
+        if input.is_empty() || !input.len().is_multiple_of(4) {
             return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue)));
         }
         let (input, ids) = many0_complete(be_u32).parse(input)?;

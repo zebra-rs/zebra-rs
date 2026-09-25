@@ -1,0 +1,15 @@
+# z2 (AS 65050): z1's iBGP peer. Its router-id is the one h1 names in
+# ORIGINATOR_ID / CLUSTER_LIST, so a relayed copy of either attribute
+# makes z2 drop the route as a reflection loop (RFC 4456 §8).
+router:
+  bgp:
+    global:
+      as: 65050
+      router-id: 192.168.45.3
+    neighbor:
+    - remote-address: 192.168.45.1
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65050
