@@ -29044,6 +29044,199 @@ mod lu_sync_winner_tests {
     }
 }
 
+/// Review finding #10: MED is compared only between paths from the same
+/// neighboring AS, so the pairwise `is_better` relation is not transitive,
+/// and the linear scan in `select_best_path` picked a winner that depended
+/// on candidate order. `LocalRibTable::update` moves a replaced row to the
+/// tail, so an unchanged re-advertisement reordered the candidates and
+/// could rotate the winner — a new UPDATE to every peer and a FIB change
+/// with nothing having changed. The EVPN, MUP, Flowspec and BGP-LS tables
+/// ran the same scan.
+#[cfg(test)]
+mod med_order_tests {
+    use super::*;
+    use bgp_packet::{EvpnPrefix, Med};
+    use std::str::FromStr;
+
+    /// A{AS 65001, MED 10, BGP Identifier .1}, B{AS 65002, .2},
+    /// C{AS 65001, MED 5, .3}: the review's probe. Deterministic MED
+    /// compares A and C (same neighboring AS: C wins on MED), then C and B
+    /// (different AS: B wins on BGP Identifier). The answer is B in every
+    /// order; the linear scan answered C for [A, B, C] and B for [A, C, B].
+    fn path(name: char) -> BgpRib {
+        let (id, asn, med): (u8, u32, Option<u32>) = match name {
+            'A' => (1, 65001, Some(10)),
+            'B' => (2, 65002, None),
+            'C' => (3, 65001, Some(5)),
+            _ => unreachable!(),
+        };
+        let attr = BgpAttr {
+            origin: Some(Origin::Igp),
+            aspath: Some(As4Path::from_str(&asn.to_string()).unwrap()),
+            med: med.map(Med::new),
+            nexthop: Some(BgpNexthop::Ipv4(Ipv4Addr::new(10, 0, 0, id))),
+            ..Default::default()
+        };
+        let mut rib = BgpRib::new(
+            id as usize,
+            Ipv4Addr::new(10, 0, 0, id),
+            BgpRibType::EBGP,
+            0,
+            0,
+            &attr,
+            None,
+            None,
+            false,
+        );
+        rib.nexthop_reachable = true;
+        rib
+    }
+
+    fn winner(selected: &[BgpRib]) -> char {
+        match selected.first().map(|r| r.ident) {
+            Some(1) => 'A',
+            Some(2) => 'B',
+            Some(3) => 'C',
+            other => panic!("unexpected winner {other:?}"),
+        }
+    }
+
+    const ORDERS: [[char; 3]; 6] = [
+        ['A', 'B', 'C'],
+        ['A', 'C', 'B'],
+        ['B', 'A', 'C'],
+        ['B', 'C', 'A'],
+        ['C', 'A', 'B'],
+        ['C', 'B', 'A'],
+    ];
+
+    #[test]
+    fn med_winner_is_independent_of_candidate_order() {
+        let prefix: Ipv4Net = "10.10.0.0/24".parse().unwrap();
+        let mut winners = Vec::new();
+        for order in ORDERS {
+            let mut table: LocalRibTable<Ipv4Net> = LocalRibTable::default();
+            let mut selected = Vec::new();
+            for name in order {
+                selected = table.update(prefix, path(name)).1;
+            }
+            winners.push((order, winner(&selected)));
+        }
+        assert!(
+            winners.iter().all(|(_, w)| *w == 'B'),
+            "deterministic MED picks B in every order: {winners:?}"
+        );
+    }
+
+    /// Re-feeding each unchanged path in turn moves it to the tail of the
+    /// candidate list; the winner must not move with it (the probe saw it
+    /// cycle 2, 1, 3, 2, 1, 3).
+    #[test]
+    fn unchanged_readvertisement_does_not_rotate_the_winner() {
+        let prefix: Ipv4Net = "10.10.0.0/24".parse().unwrap();
+        let mut table: LocalRibTable<Ipv4Net> = LocalRibTable::default();
+        for name in ['A', 'B', 'C'] {
+            table.update(prefix, path(name));
+        }
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            for name in ['A', 'B', 'C'] {
+                seen.push(winner(&table.update(prefix, path(name)).1));
+            }
+        }
+        assert!(
+            seen.iter().all(|w| *w == 'B'),
+            "an unchanged re-advertisement must not change the winner: {seen:?}"
+        );
+    }
+
+    /// The EVPN table ran the same linear scan over the same comparison.
+    #[test]
+    fn evpn_med_winner_is_independent_of_candidate_order() {
+        let prefix = EvpnPrefix::MacIp {
+            eth_tag: 0,
+            mac: [0x02, 0, 0, 0, 0, 0x10],
+            ip: None,
+        };
+        let mut winners = Vec::new();
+        for order in ORDERS {
+            let mut table = LocalRibEvpnTable::default();
+            let mut selected = Vec::new();
+            for name in order {
+                let mut rib = path(name);
+                rib.attr = std::sync::Arc::new(BgpAttr {
+                    nexthop: Some(BgpNexthop::Evpn(IpAddr::V4(Ipv4Addr::new(
+                        10,
+                        0,
+                        0,
+                        rib.ident as u8,
+                    )))),
+                    ..(*rib.attr).clone()
+                });
+                selected = table.update(prefix.clone(), rib).1;
+            }
+            winners.push((order, winner(&selected)));
+        }
+        assert!(
+            winners.iter().all(|(_, w)| *w == 'B'),
+            "deterministic MED picks B in every order: {winners:?}"
+        );
+    }
+
+    /// `show bgp`'s "Reason:" is the comparison that decided the winner:
+    /// B beat C — the other neighboring AS's winner — on BGP Identifier,
+    /// in every order. (The linear pass recorded whatever its last
+    /// comparison returned, even one the winner took no part in.) With a
+    /// single neighboring AS the deciding comparison is the MED one.
+    #[test]
+    fn winner_reason_is_the_deciding_comparison() {
+        let prefix: Ipv4Net = "10.10.0.0/24".parse().unwrap();
+        for order in ORDERS {
+            let mut table: LocalRibTable<Ipv4Net> = LocalRibTable::default();
+            let mut selected = Vec::new();
+            for name in order {
+                selected = table.update(prefix, path(name)).1;
+            }
+            let reason = selected[0].best_reason;
+            assert!(matches!(reason, Reason::RouterId), "{order:?}: {reason:?}");
+        }
+        let mut table: LocalRibTable<Ipv4Net> = LocalRibTable::default();
+        let mut selected = Vec::new();
+        for name in ['A', 'B', 'C'] {
+            let mut rib = path(name);
+            rib.attr = std::sync::Arc::new(BgpAttr {
+                aspath: Some(As4Path::from_str("65001").unwrap()),
+                ..(*rib.attr).clone()
+            });
+            selected = table.update(prefix, rib).1;
+        }
+        let reason = selected[0].best_reason;
+        assert!(matches!(reason, Reason::Med), "{reason:?}");
+    }
+
+    /// Control: without the cross-AS MED hole (all three from one
+    /// neighboring AS) the ladder is transitive and every order agrees.
+    #[test]
+    fn single_neighbor_as_is_order_independent_already() {
+        let prefix: Ipv4Net = "10.10.0.0/24".parse().unwrap();
+        let mut winners = Vec::new();
+        for order in ORDERS {
+            let mut table: LocalRibTable<Ipv4Net> = LocalRibTable::default();
+            let mut selected = Vec::new();
+            for name in order {
+                let mut rib = path(name);
+                rib.attr = std::sync::Arc::new(BgpAttr {
+                    aspath: Some(As4Path::from_str("65001").unwrap()),
+                    ..(*rib.attr).clone()
+                });
+                selected = table.update(prefix, rib).1;
+            }
+            winners.push(winner(&selected));
+        }
+        assert!(winners.iter().all(|w| *w == winners[0]), "{winners:?}");
+    }
+}
+
 /// `community_suppresses_advertisement` truth table: NO_ADVERTISE
 /// gates every peer type; NO_EXPORT and NO_EXPORT_SUBCONFED gate eBGP
 /// only (no confederation support, so SUBCONFED ≡ NO_EXPORT).

@@ -7,19 +7,19 @@ MUP/Flowspec/SR-Policy/RTC where they share the machinery). Reviewed
 against `main` at `2f1e9a09` (2026-09-07). Line numbers are as of that
 commit.
 
-Status (2026-09-25): sixteen items are fixed on `main` — #1 (PR #2372,
-merge `3beacbcc`), the listen-range peer-type item found while fixing it
-(PR #2373, `ba327126`), #2 (PR #2375, `308b196a`), #3 (PR #2376,
-`b8fef738`), #4 (PR #2377, `1cc31738`, which also closed the
+Status (2026-09-25): seventeen items are fixed on `main` — #1 (PR
+#2372, merge `3beacbcc`), the listen-range peer-type item found while
+fixing it (PR #2373, `ba327126`), #2 (PR #2375, `308b196a`), #3 (PR
+#2376, `b8fef738`), #4 (PR #2377, `1cc31738`, which also closed the
 signature-knob half of #21 and added the IPv6 outbound soft-out), #5
 (PR #2378, `b2007701`), #6 (PR #2379, `0464828a`, with two review
 follow-ups), #7 (PR #2380, `d7476601`), #8 and with it #13 (PR #2383,
 `d72a06af`, eight review rounds folded in), #9 (PR #2405, `31f7458a`),
 #15 (PR #2413, `097ce15d`), #11 (PR #2415, `3401cb1b`), #12 (PR #2417,
-`4ba79217`), the item found while fixing #12 (PR #2418, `6b53ad6a`) and
-#14 (PR #2420, `49fb77b1`). Each fixed entry ends with its fix note;
-everything else is open. #20 (the labeled-unicast session-up dump sent
-the newest candidate) is fixed on branch `bgp-lu-sync-winner`.
+`4ba79217`), the item found while fixing #12 (PR #2418, `6b53ad6a`), #14
+(PR #2420, `49fb77b1`) and #20 (PR #2422, `d8f6a0cf`). Each fixed entry
+ends with its fix note; everything else is open. In progress: #10 (MED order
+dependence), branch `bgp-med-order-independent`.
 
 Method: one lead read the selection ladder and every egress builder, then
 five independent read-only reviewers each took one dimension (update-group
@@ -791,6 +791,25 @@ cap. The two reviews agree on every overlapping item.
 - Fix direction: deterministic MED (group candidates by neighboring AS,
   pick the per-AS MED winner, then compare winners), or at least keep the
   candidate order stable on replace.
+- The same linear scan over the same `is_better` picks the winner in the
+  EVPN, MUP, Flowspec and BGP-LS tables too.
+- Gates (branch `bgp-med-order-independent`; each compiles on `main` and
+  fails there, except the control). Unit, route.rs `med_order_tests`, on
+  the probe's A / B / C: `med_winner_is_independent_of_candidate_order`
+  (all six arrival orders must select B; on `main` they select C, B, C,
+  A, B, A), `unchanged_readvertisement_does_not_rotate_the_winner` (on
+  `main` re-feeding A, B, C unchanged cycles the winner A, B, C),
+  `evpn_med_winner_is_independent_of_candidate_order` (the EVPN table),
+  `winner_reason_is_the_deciding_comparison` (`show bgp`'s "Reason:"
+  must be why the winner beat the runner-up at the deciding stage — the
+  linear pass recorded its last comparison's reason even when the winner
+  took no part in it); control
+  `single_neighbor_as_is_order_independent_already`. BDD
+  `bgp_med_order_independent` and `_v6`: three scripted speakers send
+  one prefix as A (AS 65081, MED 10), B (AS 65082) and C (AS 65081, MED
+  5), each tagged by community, arriving in the order A, B, C; z2 shows
+  z1's choice. On `main` both twins fail both gates: z2 holds C's path,
+  and after h1 re-announces A unchanged it holds A's.
 
 ### 11. P2 CONFIRMED (probe), worse than recorded, FIXED in #2415 — ORIGINATOR_ID / CLUSTER_LIST from an eBGP peer decide ties and are relayed into the AS
 
@@ -1156,7 +1175,7 @@ cap. The two reviews agree on every overlapping item.
 - Fix direction: on an exact RTC add, run a targeted re-sync of the VPN
   tables filtered to the new RT (or the full `route_sync_vpnv4/6`).
 
-### 20. P2 CONFIRMED, FIXED on branch `bgp-lu-sync-winner` — LU session-up sync dumps the most recently updated candidate, not the winner
+### 20. P2 CONFIRMED, FIXED in #2422 — LU session-up sync dumps the most recently updated candidate, not the winner
 
 - `route.rs:15484-15490` and `15535-15541` (`route_sync_labelv4/v6`,
   plain branch): `ribs.last()` over `shard.v4lu.0` / `v6lu.0`, i.e. the
