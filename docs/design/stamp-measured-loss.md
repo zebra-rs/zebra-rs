@@ -1,6 +1,7 @@
 # Measured link loss for STAMP-driven TE metrics — design
 
-> **Status:** proposal, reviewed (2026-09-24). All four §10 decisions settled.
+> **Status:** proposal, reviewed (2026-09-24). All four §10 decisions settled; design
+> review round 1's six findings resolved (§11).
 > **Parent docs:** [stamp-isis-ospf.md](./stamp-isis-ospf.md) (the STAMP → IGP integration
 > this completes), [review sequencing](../reviews/stamp-isis-ospf-2026-09-16.md), step 4 "Measured loss"
 > **Branch:** `stamp-measured-loss`
@@ -188,12 +189,12 @@ Replace the two window counters with per-probe accounting:
 - A probe with no reply after **`LOSS_WAIT` = 3 s** (RFC 7680's *Tmax*) is settled *lost*.
   A reply arriving later is still lost for loss accounting, as RFC 7680 defines. The delay
   path is untouched, so this project changes no delay behaviour.
-- A probe is credited to the export window **in which it settles**, not the one in which it
+- A probe is credited to the loss bucket (D4) **in which it settles**, not the one in which it
   was sent. This removes the boundary skew: every probe is counted exactly once, as
   received or as lost.
 
 `LOSS_WAIT` is a constant, not a knob. It has to exceed any real one-link round-trip time by
-a wide margin and be much shorter than an export window, and 3 s satisfies both at every
+a wide margin and be much shorter than a 30 s loss bucket, and 3 s satisfies both at every
 supported interval. RFC 8570 §5 requires measurement and advertisement intervals to be
 configurable, not the loss waiting time.
 
@@ -210,16 +211,46 @@ loss indistinguishable, because the sender only sees that a reply is missing.
   decision 2.)
 - **`peer-reflector stateful`** (per link, under `loss`): declares that the *peer's*
   reflector keeps its own sequence counter — a zebra-rs peer with `reflector stateful`, or a
-  Juniper peer with `stateful-sequence`. Between two consecutive received replies
-  `(S₁, R₁)` and `(S₂, R₂)`:
-  - forward loss = `(S₂ − S₁) − (R₂ − R₁)`
-  - reverse loss = `(R₂ − R₁) − 1`
-
-  Both use wrapping arithmetic. Probes after the last received reply are unresolved; they
-  settle as round-trip loss if the waiting time expires before another reply arrives. A
-  reflector counter that restarts (the peer rebooted, or its session was re-created) shows up
-  as `R₂ − R₁ > S₂ − S₁` — more reflections than probes, which is impossible — and that
-  interval is counted as round-trip rather than split.
+  Juniper peer with `stateful-sequence`. The split then works as follows (review round 1,
+  finding 1, replaced an earlier rule that subtracted consecutive replies in arrival order —
+  reordering broke it, and it could count a probe twice):
+  - **Direction classifies; it never counts.** Every probe is booked exactly once, at
+    settlement (D2), as received or lost. A lost probe starts *unresolved*. Direction can only
+    move a lost probe from unresolved to *forward* or *reverse*, so
+    `forward + reverse + unresolved = lost` at all times. No probe can appear both as
+    round-trip loss and inside a directional gap.
+  - **Gaps are formed in sender-sequence order, not arrival order.** A gap is a maximal run of
+    lost probes, consecutive in Session-Sender sequence number (serial arithmetic, RFC 1982
+    style), bounded by a received probe `A` below and a received probe `B` above. It closes
+    only when **every member has settled** — `LOSS_WAIT` has passed for the newest. A reply
+    that is merely reordered therefore never forms a gap: `(10,10), (12,12), (11,11)`
+    reports no loss in either direction, because probe 11 is still outstanding when 12's reply
+    arrives, and received by the time it would settle.
+  - **Classification:** with `g` members, `d = serial(R_B − R_A) − 1` probes reached the
+    reflector in between, so `reverse = d` and `forward = g − d`. Only `0 ≤ d ≤ g` is
+    accepted. Anything else — a reflector counter restart (the peer rebooted, its session was
+    re-created, or `reflector stateful` was toggled), forward-path reordering across the gap,
+    a counter that moved backwards — leaves the gap **unresolved**. That can never produce a
+    negative or wrapped count; it falls back to round-trip. A run with no received probe
+    below it, at the start of a session, has no anchor and stays unresolved too.
+  - **Late replies** (after `LOSS_WAIT`) leave the probe lost, as RFC 7680 defines, and are
+    not used as anchors. The reflector still counted that probe, so `d` includes it and the
+    gap classifies it as reverse loss: it reached the peer, and its reply did not come back in
+    time. `show` counts late replies separately. Duplicate replies are ignored.
+  - **Long outages:** a reverse-path burst longer than `LOSS_WAIT` settles its probes as
+    lost/unresolved while it lasts. The gap closes once the first reply after the burst has
+    arrived and the gap's newest member has settled, and `d` then moves them to reverse. A
+    forward-path burst closes with `d = 0`, all forward. Each open gap remembers which
+    buckets its members settled in, so a late classification updates those buckets while
+    they are still in a window (D4). Memory is O(1) per open gap: an anchor, a count and a
+    short per-bucket tally, not one record per probe.
+  - **What is advertised:** a `peer-reflector stateful` subscriber advertises
+    `(forward + unresolved) / settled`. Unresolved counts as forward, the upper bound, in line
+    with decision 2. So an open burst reads high until its gap closes, and never low.
+  - **Limit:** forward-path reordering *within* a gap can shift attribution between the two
+    directions by up to the reordering depth. It never changes the round-trip total. Juniper
+    documents the same limit: its directional drops are "inferred minimum values … not
+    guaranteed to be exact".
 - **The mode is configured, not detected.** A stateless reflector on a link with forward loss
   and a stateful reflector on a link with reverse loss produce *identical* reply streams: in
   both, the sequence numbers stay equal. No amount of observation tells them apart, and
@@ -240,12 +271,14 @@ loss indistinguishable, because the sender only sees that a reply is missing.
 
 ### D4 — Loss is averaged over its own window, the loss interval
 
-Keep a ring of the last *K* export windows' settled counts, where
-`K = loss-interval / damping-period`. The **default loss interval is 120 s**, so K = 4 at the
-default 30 s export period. The advertised value is
+Loss runs on **its own 30 s bucket clock**, independent of the delay export period
+(`damping-period`). 30 s is RFC 8570 §7's default measurement interval. Each session keeps a
+ring of settled counts per bucket, and a subscriber's loss interval covers the last
+`N = loss-interval / 30 s` buckets. The **default loss interval is 120 s**, so N = 4. The
+advertised value is
 
 ```
-loss = Σ lost / Σ settled   over the ring
+loss = Σ lost / Σ settled   over the subscriber's last N buckets
 ```
 
 This is literally RFC 8570's "percentage of the total traffic sent over a configurable
@@ -255,17 +288,26 @@ A rolling *sum* rather than an exponentially weighted average: the sum states ex
 it covers ("loss over the last 120 s"), forgets a burst on a known date, and makes the
 resolution (D5) a plain count. An EWMA never quite forgets and has no sample count to show.
 
-`loss-interval` must be a multiple of the damping period. The configuration layer rejects
-anything else rather than silently rounding it.
+`loss interval` must be a multiple of 30 s (30–3600 s). The configuration layer rejects
+anything else rather than silently rounding it. The constraint sits on the **new** leaf only,
+so it cannot invalidate an existing configuration. Review round 1, finding 2, caught that the
+first version tied loss buckets to `damping-period`, which accepts any value from 1 to
+3600 s: once loss became default-on, an existing `damping-period 7` or `300` would have
+conflicted with the 120 s default and been rejected on upgrade.
+
+Each bucket records the probes settled in it, the lost ones by class (D3), and the number of
+probes the probe interval *then in force* should have produced. So a probe-interval retune
+(D10) leaves the buckets valid, and the integrity check (D5) stays exact across it.
 
 ### D5 — Integrity gate, and resolution shown rather than hidden
 
-- **No measured loss until the ring is full.** A freshly started session advertises static
-  loss if one is configured, and otherwise none. A loss value computed from ten probes is
-  noise in a unit of 0.000003 %.
-- **Window integrity:** the ring must hold at least `integrity` % (default 90) of the
-  probes the configured rate should have produced (`loss-interval / interval`). That catches
-  send failures, a stalled session and interval retunes. The concept is Nokia's
+- **No measured loss until the subscriber's window is full** (N buckets). A freshly started
+  session advertises static loss if one is configured, and otherwise none. A loss value
+  computed from ten probes is noise in a unit of 0.000003 %.
+- **Window integrity:** the window must hold at least `integrity` % (default 90) of the
+  probes its buckets expected — the sum of each bucket's own expected count (D4), not
+  `loss-interval / interval` at today's rate. That catches send failures and a stalled
+  session, and stays exact across an interval retune. The concept is Nokia's
   `window-integrity`.
 - **Resolution is `100 % / Σ settled`**: 0.83 % at the defaults (1 probe/s over 120 s),
   0.083 % at 10 probes/s. That is the smallest loss rate this method can express, and `show`
@@ -277,7 +319,8 @@ anything else rather than silently rounding it.
 ### D6 — Loss has its own advertisement filter, and advertises on the RFC cadence
 
 Delay's filter (`max(previous / 10, 50 µs)`) is in microseconds and cannot be reused, and
-RFC 8570 §5 asks for per-sub-TLV filters anyway. Loss is evaluated at every export tick, but:
+RFC 8570 §5 asks for per-sub-TLV filters anyway. Loss is evaluated at every loss bucket close
+(30 s, D4), for each subscriber, but:
 
 - **Periodic:** re-advertise **at most once per loss interval**, and only when
   `|new − advertised| ≥ max(threshold % × advertised, minimum-change)`. The defaults are
@@ -289,11 +332,12 @@ RFC 8570 §5 asks for per-sub-TLV filters anyway. Loss is evaluated at every exp
   interval. An operator who wants finer loss should raise the probe rate *and* lower the
   minimum change; D5's `show` output makes the relationship visible.
 - **Accelerated** (RFC 8570 §5 SHOULD): an optional `accelerated-threshold`, **unset by
-  default**. When set, a tick where the *latest export window alone* differs from the
-  advertised value by at least that many percentage points advertises immediately, using
-  that window's value — Cisco's probe window. Off by default because the A bit (D7) already
-  gives an immediate signal: a sudden 50 % loss lifts the 120 s average to 12.5 % within one
-  tick, past any sensible anomaly bound, and a flag change always exports at once.
+  default**. When set, a tick where the *latest bucket alone* differs from the advertised value
+  by at least that many percentage points advertises immediately, using that bucket's value —
+  Cisco's probe window. Its A bit is evaluated on that same value (D7). Off by default because
+  the A bit already gives an immediate signal: a sudden 50 % loss lifts the 120 s average to
+  12.5 % within one tick, past any sensible anomaly bound, and a flag change always
+  advertises at once.
 - The zero crossings follow the same rule: `0 → x` and `x → 0` are governed by
   `minimum-change`, since a relative threshold on zero is meaningless.
 
@@ -302,49 +346,86 @@ RFC 8570 §5 asks for per-sub-TLV filters anyway. Loss is evaluated at every exp
 - `anomaly-threshold` / `reuse-threshold` under `loss`, in **percent** (decimal64, 6
   fraction digits, matching the 0.000003 % unit). The pair follows Cisco XR's
   `anomaly-loss upper-bound` / `lower-bound` and Cisco XE's `anomaly-check` bounds.
-- Evaluated on the **rolling value** (D4), the averaged quantity RFC 8570 advertises, by the
-  existing `Anomaly` hysteresis: at or above the anomaly bound sets, below the reuse bound
-  clears, the band in between holds. RFC 8570 §5's "below … for one or more advertisement
-  intervals" is met by the band.
+- **The bit is evaluated on the value it is advertised with** (review round 1, finding 4).
+  At each loss tick a subscriber has exactly one candidate: the rolling window (D4), or the
+  latest bucket when the accelerated condition fires (D6). The existing `Anomaly` hysteresis
+  runs on that candidate — at or above the anomaly bound sets, the band between the bounds
+  holds. RFC 8570 §4.4 sets the bit "when the measured value of this parameter exceeds its
+  configured maximum threshold", and the parameter is the value in the same sub-TLV. So after
+  three clean buckets and one at 10 %, an accelerated advertisement carries 10 % *with* A set
+  against a 5 % bound, although the rolling value is only 2.5 %. The first version evaluated
+  the rolling value regardless, and would have sent 10 % with A clear.
+- **A flag change advertises its candidate with it**, bypassing D6's cadence and value
+  filter. Otherwise a suppressed value could travel with a flag computed from a different
+  one: 4.8 % still advertised, A set because the rolling value just crossed 5 %. Every
+  advertised `(value, A)` pair is therefore one the hysteresis produced from that value.
+  Delay already behaves this way: a flag-only delay export sends the current window's values.
+- **Set at once; clear only after a full loss interval below the reuse bound** (review round
+  1, finding 6). Clearing needs every evaluation to have been below the reuse bound for a
+  continuous elapsed time of at least the subscriber's loss interval (120 s by default). Any
+  evaluation at or above the reuse bound restarts that timer. That, not the band, is what
+  meets RFC 8570 §5's "below … for one or more advertisement intervals". The band
+  establishes no elapsed time, and a rolling value can dip under the reuse bound one 30 s tick
+  after the loss stops. The first version claimed the band sufficed. The existing `Anomaly`
+  gains an optional minimum recovery time.
+  Delay does not need one: its window resets at every export, so each delay evaluation
+  already averages exactly one advertisement interval of that sub-TLV.
 - **Per subscriber**, as for delay: IS-IS and OSPF configure their bounds separately and must
   not overwrite each other (`client::Subscriber`).
 - **Unset means the bit is never set**, the same opt-in stance as delay. Cisco XE's 0.5 % /
   5 % defaults are documented as a starting point, not applied.
-- A flag change exports on its own, bypassing D6's cadence. That is the existing
-  `on_export_tick` rule.
 - `LinkTeMetric` gains `loss_anomalous`. `merged_over` clears it when a static `loss` is
   configured, exactly as it does for the delay flags.
 
 ### D8 — Total silence withdraws; partial loss is advertised
 
-If the ring settled probes but **received none**, the measured loss is **withdrawn**, not
-advertised as 50.33 %. Real 100 % loss on a P2P link also kills the IGP adjacency, so a
-link whose adjacency is up while every probe vanishes has a measurement problem: a
-reflector not running, an ACL, or a policer on the probe DSCP. Advertising the maximum would
-make every Flex-Algo loss constraint in the domain prune a link that is forwarding traffic.
-Liveness belongs to BFD and the IGP hello.
+If a subscriber's window settled probes but **received none**, the measured loss is
+**withdrawn**, not advertised as 50.33 %. Real 100 % loss on a P2P link also kills the IGP
+adjacency, so a link whose adjacency is up while every probe vanishes has a measurement
+problem: a reflector not running, an ACL, or a policer on the probe DSCP. Advertising the
+maximum would make every Flex-Algo loss constraint in the domain prune a link that is
+forwarding traffic. Liveness belongs to BFD and the IGP hello.
 
 This matches delay, whose empty window already withdraws. Any received reply keeps the value
 advertised, capped per D5.
 
 ### D9 — Delay and loss export independently
 
-Today one `Option<MetricSnapshot>` means "all measured values or none". Loss now has a
-different window (120 s vs 30 s), a different gate (D5) and a different withdrawal rule
-(D8). So the export event carries them separately:
+Today one `Option<MetricSnapshot>` means "all measured values or none". Loss now has its own
+clock (D4), its own gates (D5) and its own withdrawal rule (D8), so the event carries the two
+separately. Each event is **the complete state one subscriber should advertise**:
 
 ```rust
 StampEvent::MetricUpdate {
     key,
-    delay: Option<DelaySnapshot>,  // today's MetricSnapshot, renamed
-    loss: Option<LossSnapshot>,    // value, A bit, direction, resolution
+    delay: Option<DelayAdvert>,  // today's stamped MetricSnapshot, renamed
+    loss: Option<LossAdvert>,    // value, A bit, direction, resolution
 }
 ```
 
-Each IGP maps the two independently into `measured_te_metric`. A 30 s window with no *valid*
-delay sample — possible under D2, since a reply with a bad timestamp now counts as received
-— withdraws delay and leaves loss alone. Without this split, IS-IS's
-`None => LinkTeMetric::default()` would wipe a perfectly good loss value.
+- `Some(x)` means "advertise `x`" and `None` means "advertise nothing" — withdraw — for
+  **that field**. There is no third meaning.
+- **A field whose update is suppressed repeats that subscriber's last advertised value.**
+  Delay exports every 30 s when its values move; loss changes at most once per loss interval.
+  So most events carry a new delay and the same loss. Sending the latest loss there would
+  bypass its filter, and sending `None` would withdraw it; repeating the last advertised value
+  does neither.
+- An event is sent to a subscriber when either field differs from what that subscriber was
+  last sent. Filters and flags are per subscriber (D10), so two IGPs on one session can
+  receive different events on the same tick.
+- The IGP overwrites both measured fields from each event. It keeps no merge logic of its
+  own, and a repeated event is harmless.
+- A subscriber that joins a running session is evaluated at once against the current
+  buckets and the cached delay snapshot, so it starts from real state.
+
+Review round 1, finding 3, chose this over a three-state `Unchanged / Withdraw / Value`
+update. The first version had only `Some` and `None`, which left the case of loss being
+suppressed while delay exports undefined. A complete snapshot keeps the IGP side
+stateless, and the "suppressed" case cannot be misread.
+
+A 30 s window with no *valid* delay sample withdraws delay and leaves loss alone. That case
+is possible under D2, since a reply with a bad timestamp now counts as received. Without the
+split, IS-IS's `None => LinkTeMetric::default()` would wipe a perfectly good loss value.
 
 ### D10 — Configuration
 
@@ -356,17 +437,17 @@ te-metric {
   measurement {
     enabled true;                   # existing
     interval 1000;                  # existing: probe interval, ms
-    damping-period 30;              # existing: export window, s
+    damping-period 30;              # existing: delay export window, s
     anomaly-threshold …;            # existing: delay
     reuse-threshold …;              # existing: delay
     reflector stateful;             # new: how THIS router reflects the peer's probes;
                                     #      default stateless (D3)
     loss {                          # new; loss is measured whenever measurement is on
       enabled true;                 # default true; false turns loss off on this link
-      interval 120;                 # loss window, s; multiple of damping-period (D4)
+      interval 120;                 # loss window, s; multiple of 30, 30–3600 (D4)
       threshold 10;                 # periodic relative change, %            (D6)
       minimum-change 1.0;           # periodic absolute change, %-points     (D6)
-      accelerated-threshold 5.0;    # %-points on the latest window; unset = off (D6)
+      accelerated-threshold 5.0;    # %-points on the latest bucket; unset = off (D6)
       anomaly-threshold 5.0;        # %; unset = A bit never set             (D7)
       reuse-threshold 0.5;          # %; unset = no hysteresis band          (D7)
       integrity 90;                 # % of expected probes                   (D5)
@@ -391,8 +472,42 @@ upgrade, and the release notes must say so:
 - A static `loss` leaf still wins over the measured value (`merged_over`).
 
 The existing leaf descriptions are reworded where they now mean something narrower:
-`damping-period` becomes the delay export window, and `measurement`'s help ("Measure this
-link's delay") gains loss.
+`damping-period` becomes the delay export window only (loss has its own clock, D4), and
+`measurement`'s help ("Measure this link's delay") gains loss.
+
+**Who owns each setting.** IS-IS and OSPF measuring the same link share one session: one
+probe stream, one set of loss buckets. Review round 1, finding 5, asked which of the new
+settings belong to the shared session and which to each IGP, and what happens when they
+disagree. The rule: a setting is shared only if it is **wire-visible**. Everything that
+decides what an IGP *advertises* is per subscriber, evaluated over the shared buckets. That is
+how the delay anomaly bounds already work, and for the same reason — a shared value would let
+one IGP's configuration silently change the other's advertisement.
+
+| Setting | Owner | When IS-IS and OSPF disagree |
+|---|---|---|
+| probe `interval`, `damping-period` (existing) | session | last writer wins, as today |
+| `reflector stateful` | session — it changes the packets this router sends | on if **any** current subscriber sets it; recomputed when a subscriber joins, leaves or changes |
+| `loss enabled`, `interval`, `threshold`, `minimum-change`, `accelerated-threshold`, `anomaly-threshold`, `reuse-threshold`, `integrity`, `peer-reflector` | subscriber | no conflict — each IGP gets its own evaluation, and its own event (D9) |
+
+Consequences:
+
+- **Loss accounting always runs** on every session: settlement, buckets, gap
+  classification. It is cheap, and `show stamp` uses it. `loss enabled false` only means
+  that subscriber is sent `loss: None`. IS-IS enabling loss while OSPF disables it on the same
+  link just works, and neither overrides the other.
+- **`reflector stateful` uses "any", not last-writer-wins.** A second IGP subscribing with the
+  default must not silently turn off the stateful reflection the first one configured,
+  breaking the peer's directional loss. Turning it on is backward compatible (§3 item 8), so
+  "any" is the safe resolution. A change of mode breaks the reflector's counter continuity,
+  which the peer's D3 sanity rule absorbs as unresolved gaps.
+- **The ring is as long as the largest current subscriber's `interval`** (at most 120 buckets
+  of 30 s). Two IGPs may use different loss intervals over the same buckets.
+- **`peer-reflector` per subscriber** works because the session classifies gaps regardless;
+  each subscriber advertises the view it declared — round-trip, or forward.
+- **A shared probe-timing retune keeps the buckets.** Each bucket carries its own expected
+  count (D4), so integrity and resolution stay exact across the change. Only a session
+  re-creation (today, a `dst_port` change) clears the buckets, and every subscriber's gates
+  (D5) then re-arm.
 
 ### D11 — Show output
 
@@ -425,16 +540,42 @@ Static loss keeps originating a clear A bit, as delay does today.
     a probe sent just before a tick, whose reply lands just after it, must count as received
     once and never as lost. Also: a reply with a bad timestamp counts as received, a
     duplicate reply is ignored, and a reply after the waiting time stays lost.
-  - D3: the stateful forward/reverse arithmetic, including sequence wrap-around and a
-    reflector counter restart (counted round-trip, never as a huge forward loss); the
-    stateful reflector's per-session counter.
-  - D4: ring rollover.
-  - D5: the integrity gate, the ring-full gate, and the encoding cap.
+  - D3 — the invariant: after every operation, `forward + reverse + unresolved = lost`.
+    Then, each with its expected split:
+    - return-path reordering `(10,10), (12,12), (11,11)`: no loss in either direction, no
+      wrapped value;
+    - forward-path reordering with no loss: no loss;
+    - a reverse-path burst longer than `LOSS_WAIT`: unresolved while it lasts, all reverse
+      once the gap closes;
+    - a forward-path burst longer than `LOSS_WAIT`: all forward;
+    - a late reply: the probe stays lost and is classified reverse;
+    - a reflector counter restart inside a gap: the gap stays unresolved and nothing goes
+      negative;
+    - sender and reflector sequence wrap at 2³²;
+    - a stateless peer misdeclared `peer-reflector stateful`: every loss is classified
+      reverse, which documents the configured-not-detected hazard;
+    - the stateful reflector's per-session counter, and the "any subscriber" resolution.
+  - D4: the loss clock is independent of `damping-period` (for example 7 s and 300 s both
+    work with the 120 s default); ring rollover; a probe-interval retune keeps the buckets.
+  - D5: the integrity gate against per-bucket expected counts, including across a retune; the
+    window-full gate; the encoding cap.
   - D6: the filter truth table, including the zero crossings and the once-per-interval
     cadence.
-  - D7: hysteresis on the rolling value, and per-subscriber bounds.
+  - D7:
+    - three clean buckets then 10 % with acceleration on: advertises 10 % *with* A set against
+      a 5 % bound;
+    - a flag change carries its own candidate value, never a stale one;
+    - A clears only after a full loss interval below the reuse bound, and a single evaluation
+      back above reuse restarts the timer;
+    - per-subscriber bounds.
   - D8: total silence withdraws; one received reply keeps the value advertised.
-  - D9: a delay withdrawal leaves loss in place, and vice versa.
+  - D9:
+    - delay changes every export tick while loss is limited by its cadence: every event
+      carries the same loss value, never `None` and never an unfiltered newer value;
+    - a delay withdrawal leaves loss in place, and vice versa;
+    - a late-joining subscriber starts from the current buckets.
+  - D10: IS-IS with loss enabled and OSPF with it disabled on one session each get their own
+    events; a second subscriber with the default does not turn `reflector stateful` off.
 - **BDD — loss injected deterministically, not randomly.** `tc netem loss` is random, and a
   percentage assertion over 120 probes would be flaky. Drop exactly every *n*-th STAMP
   packet instead: nftables `numgen inc mod 10 == 0` on UDP 862, or iptables
@@ -451,6 +592,8 @@ Static loss keeps originating a clear A bit, as delay does today.
      10 %; with `reflector stateful` on the far end and `peer-reflector stateful` on the near
      end it advertises ≈ 0 %. **This is the scenario that proves D3's direction handling.**
      A variant restarts the far-end session mid-run and checks the counter-restart rule.
+     Another holds a reverse-path drop longer than `LOSS_WAIT`, and checks the advertised
+     value falls back once the gap closes.
   5. **Probes dropped, adjacency up:** the loss sub-TLV is withdrawn, not maxed (D8).
 
   The existing features that enable measurement — `stamp_te_metric`, `stamp_v6_te_metric`,
@@ -461,15 +604,30 @@ Static loss keeps originating a clear A bit, as delay does today.
 
 ## 8. Delivery — smallest PR first
 
-1. **Accounting core:** D2 plus D4/D5 computation, plus `show` (D11). Nothing reaches an IGP,
-   so it is safe to merge alone, and the boundary-skew fix lands first.
-2. **Advertisement:** the D9 event split, D10 configuration, D6 filter and D8 withdrawal,
-   wired into IS-IS, OSPFv2 and OSPFv3. BDD scenarios 1, 2 and 5. **This PR changes what
+1. **Accounting core:**
+   - D2 per-probe settlement;
+   - the independent 30 s loss clock and buckets, with per-bucket expected counts (D4);
+   - the D5 computation;
+   - `show` (D11).
+
+   Nothing reaches an IGP, so it is safe to merge alone, and the boundary-skew fix lands first.
+2. **Advertisement:**
+   - the D9 complete per-subscriber snapshot;
+   - D10 configuration and ownership rules;
+   - the D6 filter and cadence;
+   - D8 withdrawal;
+
+   all wired into IS-IS, OSPFv2 and OSPFv3. BDD scenarios 1, 2 and 5. **This PR changes what
    every measured link advertises** (decision 4), so it carries the CHANGELOG entry that says
    so, and the review of the existing STAMP features listed in §7.
-3. **Anomalous bit:** D7. BDD scenario 3.
-4. **Direction:** D3 — the opt-in stateful reflector (`reflector stateful`) and the
-   sender's `peer-reflector` declaration. BDD scenario 4.
+3. **Anomalous bit:** D7 — the flag evaluated on its own candidate value, and the recovery
+   timer. BDD scenario 3.
+4. **Direction:**
+   - D3 gap classification;
+   - the opt-in stateful reflector (`reflector stateful`, resolved "any");
+   - the sender's `peer-reflector` declaration.
+
+   BDD scenario 4 and its variants.
 
 Then the documentation: the book's TE-metric chapter, the supported-RFC appendix, and
 closing out step 4 of the review sequencing.
@@ -518,6 +676,37 @@ The recommendation is listed first in each.
    decision follows Cisco instead, whose delay profile has no loss switch. The upgrade
    consequences are listed in D10 and must reach the release notes. The loss A bit stays opt-in
    (D7), so default-on loss cannot raise an anomaly by itself.
+
+## 11. Design review round 1 — resolutions (2026-09-24)
+
+Six findings against the reviewed design, all accepted. Each is resolved in the section named;
+the tests that pin them are in §7.
+
+1. **[P1] Directional accounting mishandled reordering and could count a probe twice** → D3.
+   Direction became a classification of already-settled losses
+   (`forward + reverse + unresolved = lost`). Gaps are formed in sender-sequence order and
+   close only once every member has settled. Classification needs `0 ≤ d ≤ g`, or the gap
+   stays unresolved. Late replies stay lost and classify as reverse. Unresolved probes are
+   advertised as forward.
+2. **[P1] Default-on loss would have invalidated existing configurations** → D4. The first
+   version made the loss interval a multiple of `damping-period`, which accepts 1–3600 s. Loss
+   now runs on its own 30 s clock; the multiple-of rule applies only to the new
+   `loss interval` leaf.
+3. **[P2] The export event could not say "unchanged"** → D9. Each event is now the complete
+   state one subscriber should advertise. A suppressed field repeats its last advertised
+   value; `None` only ever means withdraw.
+4. **[P2] An accelerated value could carry an A bit computed from a different value** → D7.
+   The bit is evaluated on the candidate it is advertised with, and a flag change advertises
+   that candidate.
+5. **[P2] Shared-session ownership of the new settings was unspecified** → D10.
+   - Only wire-visible settings are shared. Probe timing keeps last-writer-wins, and
+     `reflector stateful` is on if any subscriber sets it.
+   - Everything that decides an advertisement is per subscriber, over shared buckets.
+   - Buckets survive a probe-timing retune.
+6. **[P2] Hysteresis enforced no recovery duration** → D7. The bit now clears only after a
+   full loss interval continuously below the reuse bound. The band alone was wrongly
+   claimed to meet RFC 8570 §5. Delay is unaffected: each delay evaluation already spans
+   exactly one of its advertisement intervals.
 
 ## Sources
 
