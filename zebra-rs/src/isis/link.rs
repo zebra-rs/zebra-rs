@@ -578,6 +578,9 @@ pub struct LinkTeMetric {
     /// pinned drops out without silencing the other.
     pub min_anomalous: bool,
     pub max_anomalous: bool,
+    /// A bit for sub-TLV 36 (link loss), evaluated on the loss value it
+    /// travels with (measured-loss design D7).
+    pub loss_anomalous: bool,
 }
 
 impl LinkTeMetric {
@@ -589,9 +592,8 @@ impl LinkTeMetric {
     /// The Anomalous flags come from the measurement's threshold
     /// evaluation via [`Self::merged_over`], which clears them for any
     /// field an operator pinned statically. Delay variation (35) has
-    /// no A bit in RFC 8570 §4.3. Link loss (36) has one, but loss is
-    /// never measured today — it can only be static, and static values
-    /// originate clear.
+    /// no A bit in RFC 8570 §4.3. Link loss (36) has one, set only for a
+    /// measured loss: a static value originates it clear.
     pub fn sub_tlvs(&self) -> Vec<NeighSubTlv> {
         let mut subs = Vec::new();
         if let Some(delay) = self.unidirectional_delay {
@@ -614,7 +616,7 @@ impl LinkTeMetric {
         }
         if let Some(loss) = self.loss {
             subs.push(NeighSubTlv::LinkLoss(IsisSubLinkLoss {
-                anomalous: false,
+                anomalous: self.loss_anomalous,
                 loss,
             }));
         }
@@ -641,6 +643,7 @@ impl LinkTeMetric {
             delay_anomalous: self.unidirectional_delay.is_none() && fallback.delay_anomalous,
             min_anomalous: self.min_delay.is_none() && fallback.min_anomalous,
             max_anomalous: self.max_delay.is_none() && fallback.max_anomalous,
+            loss_anomalous: self.loss.is_none() && fallback.loss_anomalous,
         }
     }
 }
@@ -1984,6 +1987,22 @@ pub fn config_te_measurement_loss_integrity(
     })
 }
 
+pub fn config_te_measurement_loss_anomaly_threshold(
+    isis: &mut Isis,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_te_measurement(isis, args, |m, args| m.set_loss_anomaly(args, op.is_set()))
+}
+
+pub fn config_te_measurement_loss_reuse_threshold(
+    isis: &mut Isis,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_te_measurement(isis, args, |m, args| m.set_loss_reuse(args, op.is_set()))
+}
+
 pub fn config_metric(isis: &mut Isis, mut args: Args, op: ConfigOp) -> Option<()> {
     let ifname = args.string()?;
     let metric = args.u32()?;
@@ -3298,7 +3317,7 @@ mod te_metric_tests {
     }
 
     /// A measured anomaly reaches both delay sub-TLVs; delay variation
-    /// has no A bit and loss is static-only, so neither can claim one.
+    /// has no A bit, so it cannot claim one.
     #[test]
     fn measured_anomaly_sets_both_delay_sub_tlvs() {
         let measured = LinkTeMetric {
@@ -3310,6 +3329,7 @@ mod te_metric_tests {
             delay_anomalous: true,
             min_anomalous: true,
             max_anomalous: true,
+            loss_anomalous: false,
         };
         let subs = LinkTeMetric::default().merged_over(&measured).sub_tlvs();
         assert!(
@@ -3319,6 +3339,32 @@ mod te_metric_tests {
         assert!(
             matches!(&subs[1], NeighSubTlv::MinMaxLinkDelay(v) if v.anomalous),
             "sub-TLV 34 carries the bit"
+        );
+    }
+
+    /// Measured-loss design D7: a measured loss anomaly reaches sub-TLV
+    /// 36, and a static `loss` both wins and clears the bit — a pinned
+    /// value is an assertion, not an observation.
+    #[test]
+    fn a_measured_loss_anomaly_reaches_sub_tlv_36_unless_pinned() {
+        let measured = LinkTeMetric {
+            loss: Some(3_333_333),
+            loss_anomalous: true,
+            ..Default::default()
+        };
+        let subs = LinkTeMetric::default().merged_over(&measured).sub_tlvs();
+        assert!(
+            matches!(&subs[..], [NeighSubTlv::LinkLoss(v)] if v.anomalous && v.loss == 3_333_333),
+            "{subs:?}"
+        );
+        let pinned = LinkTeMetric {
+            loss: Some(3),
+            ..Default::default()
+        };
+        let subs = pinned.merged_over(&measured).sub_tlvs();
+        assert!(
+            matches!(&subs[..], [NeighSubTlv::LinkLoss(v)] if !v.anomalous && v.loss == 3),
+            "{subs:?}"
         );
     }
 

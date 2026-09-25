@@ -2600,6 +2600,7 @@ impl Isis {
             delay_anomalous: delay.is_some_and(|d| d.anomaly.avg),
             min_anomalous: delay.is_some_and(|d| d.anomaly.min),
             max_anomalous: delay.is_some_and(|d| d.anomaly.max),
+            loss_anomalous: loss.is_some_and(|l| l.anomalous),
         };
         tracing::info!(
             ifindex = key.ifindex,

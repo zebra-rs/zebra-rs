@@ -2962,6 +2962,44 @@ async fn show_command_contains_within(
     );
 }
 
+/// The negative twin of the step above, with its own deadline: the
+/// needle must be gone within N seconds. For state that takes longer
+/// than the ~60 s `should eventually not contain` polls for — a loss
+/// A bit clearing only after a whole loss interval of recovery.
+#[then(
+    expr = "show command {string} in namespace {string} should not contain {string} within {int} seconds"
+)]
+async fn show_command_not_contains_within(
+    world: &mut World,
+    show_cmd: String,
+    namespace: String,
+    needle: String,
+    seconds: u64,
+) {
+    let scoped = world.ns(&namespace);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+    let last = loop {
+        let out = netns::exec_in_netns(&scoped, "vtyctl", &["show", &show_cmd])
+            .await
+            .expect("Failed to run show command");
+        if !out.contains(&needle) {
+            println!(
+                "✓ '{}' in {} no longer contains '{}' within {}s",
+                show_cmd, scoped, needle, seconds
+            );
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            break out;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    };
+    panic!(
+        "'{}' in {} still contained '{}' after {} seconds\nlast output:\n{}",
+        show_cmd, scoped, needle, seconds, last
+    );
+}
+
 /// Every `Unidirectional Link Loss: <pct>` value in a show output — the
 /// IS-IS (`9.999999%`) and OSPF (`9.999999 %`) renderings alike.
 fn link_loss_values(output: &str) -> Vec<f64> {
