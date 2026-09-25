@@ -499,8 +499,8 @@ pub struct Isis {
     /// End.X — are node-wide, one registration serving both levels, so
     /// they stay installed while this router participates anywhere and
     /// go when it participates nowhere: "it MUST remove any forwarding
-    /// state associated with it". Refreshed on every LSP origination by
-    /// [`Self::reconcile_flex_algo_participation`].
+    /// state associated with it". Refreshed at every commit's end and on
+    /// every LSP origination by [`Self::reconcile_flex_algo_participation`].
     pub flex_algo_participating: BTreeSet<u8>,
     /// `sr_flex_algo_locators` restricted to `flex_algo_participating`:
     /// the locators End.X SIDs may be installed under. Handed to every
@@ -1010,6 +1010,14 @@ impl Isis {
             // reconcile alone would never see the change. Idempotent: a
             // no-op when nothing self-SID-relevant changed.
             update_self_sid_ilm(self);
+            // Reconcile Flex-Algorithm participation, and with it the
+            // per-algorithm SRv6 SIDs, against the just-committed config.
+            // LSP origination reconciles too, but a commit need not
+            // originate at every level that matters: demoting level-1-2
+            // to level-2-only purges L1 and originates nothing at L2, so an
+            // algorithm only L1 supplied a definition for would keep its
+            // SIDs installed until some unrelated origination.
+            self.reconcile_flex_algo_participation();
             // Release the LSP generations parked by the commit gate,
             // through the normal throttle so commit-driven floods keep
             // their pacing. Floors folded while parked are already
@@ -3715,10 +3723,10 @@ impl Isis {
     }
 
     /// Bring the node-wide per-algorithm SRv6 SIDs in line with
-    /// participation (RFC 9350 §5.3). Run on every LSP origination, which
-    /// follows anything that can change participation: a Flex-Algo or
-    /// locator config edit, a peer's definition changing, an is-type
-    /// change. On a change, each affected algorithm's End SID is
+    /// participation (RFC 9350 §5.3). Run at every commit's end, for a
+    /// Flex-Algo, locator or is-type edit, and on every LSP origination,
+    /// which follows a peer's definition changing. On a change, each
+    /// affected algorithm's End SID is
     /// reconciled, and every neighbour's End.X SIDs are reconciled against
     /// the participating locators — withdrawn for an algorithm this router
     /// left, installed for one it joined — before the LSP that advertises
@@ -5091,5 +5099,54 @@ mod flex_algo_participation_tests {
         assert_eq!(isis.flex_algo_participating, BTreeSet::from([128]));
         assert_eq!(isis.sr_flex_algo_end_sid.get(&128), Some(&sid));
         assert!(isis.sr_flex_algo_locators_active.contains_key(&128));
+    }
+
+    /// Demoting level-1-2 to level-2-only purges L1 but originates nothing
+    /// at L2, so the commit's end has to reconcile: an algorithm whose only
+    /// definition came from an L1 peer stops participating, and its End
+    /// SID goes with it.
+    #[tokio::test]
+    async fn leaving_the_level_of_the_only_definition_removes_the_sid() {
+        let mut isis = fresh_isis();
+        // Configured here, but the definition is not advertised: the only
+        // one comes from an L1 peer.
+        set(&mut isis, "priority", "128", "100");
+        let peer = IsisSysId {
+            id: [0, 0, 0, 0, 0, 9],
+        };
+        isis.peer_fad.get_mut(&Level::L1).insert(
+            peer,
+            BTreeMap::from([(
+                128,
+                isis_packet::IsisSubFlexAlgoDef {
+                    flex_algorithm: 128,
+                    metric_type: 0,
+                    calc_type: 0,
+                    priority: 200,
+                    subs: vec![],
+                },
+            )]),
+        );
+        isis.watched_flex_algo_locators
+            .insert(128, "A128".to_string());
+        isis.sr_flex_algo_locators.insert(
+            128,
+            Locator {
+                prefix: Some("2001:db8:b128::/48".parse().unwrap()),
+                behavior: None,
+                flavors: 0,
+                vrf: None,
+                table_id: 0,
+            },
+        );
+        isis.process_cm_msg(ConfigRequest::new(Vec::new(), ConfigOp::CommitEnd));
+        assert_eq!(isis.flex_algo_participating, BTreeSet::from([128]));
+        assert!(isis.sr_flex_algo_end_sid.contains_key(&128));
+
+        isis.config.is_type = Some(IsLevel::L2);
+        isis.process_cm_msg(ConfigRequest::new(Vec::new(), ConfigOp::CommitEnd));
+        assert!(isis.flex_algo_participating.is_empty());
+        assert!(isis.sr_flex_algo_end_sid.is_empty());
+        assert!(isis.sr_flex_algo_locators_active.is_empty());
     }
 }
