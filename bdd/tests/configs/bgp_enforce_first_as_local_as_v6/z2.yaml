@@ -1,0 +1,22 @@
+# z2 (AS 65001): the not-yet-migrated neighbor; it expects z1 as AS 64999.
+# Originates 2001:db8:47:2::/64 with AS_PATH "65001" — a correct first AS.
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.47.2
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 2001:db8:47::1
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 64999
+    afi-safi:
+    - name: ipv6
+      network:
+      - prefix: 2001:db8:47:2::/64

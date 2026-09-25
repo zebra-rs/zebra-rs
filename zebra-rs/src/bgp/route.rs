@@ -27451,6 +27451,385 @@ mod enforce_first_as_tests {
     }
 }
 
+/// Review finding #12: `enforce-first-as` must judge the AS_PATH the
+/// neighbor sent, not the one after our own `local-as` ingress prepend.
+/// `route_from_peer` prepends the substitute AS before the per-family
+/// dispatch, and every family's first-AS check then saw
+/// `[substitute, neighbor, …]` — so `local-as` (without `no-prepend`)
+/// plus `enforce-first-as` dropped every route from the neighbor, with
+/// nothing logged. FRR runs the check before the prepend. RFC 7606 §7.2
+/// also says a route that fails the check "SHOULD" be handled as
+/// treat-as-withdraw; dropping the UPDATE instead left the prefix's
+/// previous path from the same neighbor installed.
+#[cfg(test)]
+mod enforce_first_as_local_as_tests {
+    use super::*;
+    use crate::bgp::peer::{LocalAs, State};
+    use bgp_packet::CapMultiProtocol;
+    use std::net::IpAddr;
+    use std::str::FromStr;
+
+    const REAL_AS: u32 = 65100;
+    const SUBSTITUTE: u32 = 64999;
+    const PEER_AS: u32 = 65001;
+
+    /// Established eBGP neighbor in AS 65001 with `enforce-first-as` on,
+    /// both unicast families negotiated, and the given `local-as`.
+    fn ebgp_peer(local_as: Option<LocalAs>) -> Peer {
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        Box::leak(Box::new(rx));
+        let mut peer = Peer::new(
+            1,
+            REAL_AS,
+            Ipv4Addr::new(10, 255, 0, 1),
+            PEER_AS,
+            "10.0.0.2".parse::<IpAddr>().unwrap(),
+            None,
+            tx,
+            crate::context::ProtoContext::default_table_no_rib(),
+        );
+        peer.state = State::Established;
+        peer.peer_type = PeerType::EBGP;
+        peer.config.enforce_first_as = true;
+        peer.config.local_as = local_as;
+        for (afi, safi) in [(Afi::Ip, Safi::Unicast), (Afi::Ip6, Safi::Unicast)] {
+            let entry = peer
+                .cap_map
+                .entries
+                .entry(CapMultiProtocol::new(&afi, &safi))
+                .or_default();
+            entry.send = true;
+            entry.recv = true;
+        }
+        peer
+    }
+
+    fn local_as(no_prepend: bool) -> Option<LocalAs> {
+        Some(LocalAs {
+            as_number: SUBSTITUTE,
+            no_prepend,
+            replace_as: false,
+            dual_as: false,
+        })
+    }
+
+    struct Fx {
+        router_id: Ipv4Addr,
+        ctx: crate::context::ProtoContext,
+        local_rib: LocalRib,
+        shard: crate::bgp::shard::BgpShard,
+        attr_store: crate::bgp::BgpAttrStore,
+        update_groups: crate::bgp::update_group::UpdateGroupMap,
+        interface_addrs: crate::bgp::interface_addrs::InterfaceAddrs,
+        tx: tokio::sync::mpsc::Sender<crate::bgp::inst::Message>,
+    }
+
+    impl Fx {
+        fn new() -> Self {
+            let (tx, rx) = tokio::sync::mpsc::channel(64);
+            Box::leak(Box::new(rx));
+            Self {
+                router_id: Ipv4Addr::new(10, 255, 0, 1),
+                ctx: crate::context::ProtoContext::default_table_no_rib(),
+                local_rib: LocalRib::default(),
+                shard: crate::bgp::shard::BgpShard::default(),
+                attr_store: crate::bgp::BgpAttrStore::default(),
+                update_groups: crate::bgp::update_group::empty_map(),
+                interface_addrs: crate::bgp::interface_addrs::InterfaceAddrs::default(),
+                tx,
+            }
+        }
+        fn top(&mut self) -> BgpTop<'_> {
+            BgpTop {
+                router_id: &self.router_id,
+                srv6_ipv6_export: None,
+                local_rib: &mut self.local_rib,
+                shard: &mut self.shard,
+                tx: &self.tx,
+                rib_client: &self.ctx.rib,
+                attr_store: &mut self.attr_store,
+                update_groups: &mut self.update_groups,
+                interface_addrs: &self.interface_addrs,
+                vrf_export: None,
+                color_policy: None,
+                flex_algo_routes: None,
+                flex_algo_srv6_routes: None,
+                vrf_import: None,
+                nexthop_cache: None,
+                vrf_transport_v4: None,
+                vrf_transport_v6: None,
+                central_label_alloc: None,
+                as_sets_withdraw: false,
+            }
+        }
+    }
+
+    fn peers_with(peer: Peer) -> (PeerMap, usize) {
+        let mut peers = PeerMap::new();
+        let addr = peer.address;
+        peers.insert(addr, peer);
+        let id = peers.get(&addr).unwrap().ident;
+        peers.membership_enroll(id);
+        (peers, id)
+    }
+
+    fn attr(path: &str) -> BgpAttr {
+        BgpAttr {
+            origin: Some(Origin::Igp),
+            aspath: Some(As4Path::from_str(path).unwrap()),
+            nexthop: Some(BgpNexthop::Ipv4(Ipv4Addr::new(10, 0, 0, 2))),
+            ..Default::default()
+        }
+    }
+
+    fn announce_v4(top: &mut BgpTop, peers: &mut PeerMap, id: usize, prefix: &str, path: &str) {
+        let mut packet = UpdatePacket::new();
+        packet.bgp_attr = Some(attr(path));
+        packet.ipv4_update.push(Ipv4Nlri {
+            id: 0,
+            prefix: prefix.parse().unwrap(),
+        });
+        route_from_peer(id, packet, top, peers, None);
+    }
+
+    fn announce_v6(top: &mut BgpTop, peers: &mut PeerMap, id: usize, prefix: &str, path: &str) {
+        let mut packet = UpdatePacket::new();
+        packet.bgp_attr = Some(attr(path));
+        packet.mp_update = Some(MpReachAttr::Ipv6 {
+            snpa: 0,
+            nhop: IpAddr::V6("2001:db8::2".parse().unwrap()),
+            updates: vec![Ipv6Nlri {
+                id: 0,
+                prefix: prefix.parse().unwrap(),
+            }],
+        });
+        route_from_peer(id, packet, top, peers, None);
+    }
+
+    fn flat(rib: &BgpRib) -> String {
+        rib.attr
+            .aspath
+            .as_ref()
+            .map(|p| {
+                p.segs
+                    .iter()
+                    .flat_map(|seg| seg.asn.iter())
+                    .map(|asn| asn.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_default()
+    }
+
+    /// The AS_PATHs of the Loc-RIB candidates for a v4 prefix.
+    fn v4_paths(top: &BgpTop, prefix: &str) -> Vec<String> {
+        let prefix: Ipv4Net = prefix.parse().unwrap();
+        top.shard.v4.candidates(prefix).iter().map(flat).collect()
+    }
+
+    fn v6_paths(top: &BgpTop, prefix: &str) -> Vec<String> {
+        let prefix: Ipv6Net = prefix.parse().unwrap();
+        top.shard.v6.candidates(prefix).iter().map(flat).collect()
+    }
+
+    /// The neighbor sent `65001 65009` — a correct first AS. Our ingress
+    /// prepend makes it `64999 65001 65009`; the route must be accepted
+    /// and keep that prepend.
+    #[tokio::test]
+    async fn local_as_ingress_prepend_does_not_trip_enforce_first_as_v4() {
+        let mut fx = Fx::new();
+        let (mut peers, id) = peers_with(ebgp_peer(local_as(false)));
+        let mut top = fx.top();
+        announce_v4(&mut top, &mut peers, id, "10.12.1.0/24", "65001 65009");
+        assert_eq!(
+            v4_paths(&top, "10.12.1.0/24"),
+            vec!["64999 65001 65009".to_string()],
+            "accepted, with the local-as prepend"
+        );
+    }
+
+    /// The IPv6-unicast twin: MP_REACH families run their own first-AS
+    /// check (`route_ipv6_update`), which saw the same prepended path.
+    #[tokio::test]
+    async fn local_as_ingress_prepend_does_not_trip_enforce_first_as_v6() {
+        let mut fx = Fx::new();
+        let (mut peers, id) = peers_with(ebgp_peer(local_as(false)));
+        let mut top = fx.top();
+        announce_v6(
+            &mut top,
+            &mut peers,
+            id,
+            "2001:db8:12:1::/64",
+            "65001 65009",
+        );
+        assert_eq!(
+            v6_paths(&top, "2001:db8:12:1::/64"),
+            vec!["64999 65001 65009".to_string()],
+            "accepted, with the local-as prepend"
+        );
+    }
+
+    /// Control: the check is still enforced under `local-as` — a path
+    /// whose first AS is not the neighbor's is refused.
+    #[tokio::test]
+    async fn enforce_first_as_still_refuses_a_foreign_first_as_under_local_as() {
+        let mut fx = Fx::new();
+        let (mut peers, id) = peers_with(ebgp_peer(local_as(false)));
+        let mut top = fx.top();
+        announce_v4(&mut top, &mut peers, id, "10.12.2.0/24", "65099 65001");
+        announce_v6(
+            &mut top,
+            &mut peers,
+            id,
+            "2001:db8:12:2::/64",
+            "65099 65001",
+        );
+        assert!(v4_paths(&top, "10.12.2.0/24").is_empty());
+        assert!(v6_paths(&top, "2001:db8:12:2::/64").is_empty());
+    }
+
+    /// Control: with `no-prepend` there is no prepend to trip over.
+    #[tokio::test]
+    async fn no_prepend_local_as_accepts_a_correct_first_as() {
+        let mut fx = Fx::new();
+        let (mut peers, id) = peers_with(ebgp_peer(local_as(true)));
+        let mut top = fx.top();
+        announce_v4(&mut top, &mut peers, id, "10.12.3.0/24", "65001 65009");
+        assert_eq!(
+            v4_paths(&top, "10.12.3.0/24"),
+            vec!["65001 65009".to_string()]
+        );
+    }
+
+    /// Review probe: with local-as active, a rejected mixed-family UPDATE
+    /// withdraws only its AddPath IDs and still honors explicit withdrawals.
+    #[tokio::test]
+    async fn probe_first_as_mixed_update_preserves_other_path_ids() {
+        let mut fx = Fx::new();
+        let (mut peers, id) = peers_with(ebgp_peer(local_as(false)));
+        let mut top = fx.top();
+        let prefix4: Ipv4Net = "10.12.5.0/24".parse().unwrap();
+        let prefix6: Ipv6Net = "2001:db8:12:5::/64".parse().unwrap();
+        let packet_for = |path_id, path: &str| {
+            let mut packet = UpdatePacket::new();
+            packet.bgp_attr = Some(attr(path));
+            packet.ipv4_update.push(Ipv4Nlri {
+                id: path_id,
+                prefix: prefix4,
+            });
+            packet.mp_update = Some(MpReachAttr::Ipv6 {
+                snpa: 0,
+                nhop: "2001:db8::2".parse().unwrap(),
+                updates: vec![Ipv6Nlri {
+                    id: path_id,
+                    prefix: prefix6,
+                }],
+            });
+            packet
+        };
+        for path_id in [7, 8] {
+            route_from_peer(
+                id,
+                packet_for(path_id, "65001 65009"),
+                &mut top,
+                &mut peers,
+                None,
+            );
+        }
+        assert_eq!(top.shard.v4.candidates(prefix4).len(), 2);
+        assert_eq!(top.shard.v6.candidates(prefix6).len(), 2);
+        announce_v4(&mut top, &mut peers, id, "10.12.6.0/24", "65001 65009");
+        announce_v6(
+            &mut top,
+            &mut peers,
+            id,
+            "2001:db8:12:6::/64",
+            "65001 65009",
+        );
+
+        // Naming our substitute AS first must not bypass enforcement.
+        let mut bad = packet_for(7, "64999 65001");
+        bad.ipv4_withdraw.push(Ipv4Nlri {
+            id: 0,
+            prefix: "10.12.6.0/24".parse().unwrap(),
+        });
+        bad.mp_withdraw = Some(MpUnreachAttr::Ipv6Nlri(vec![Ipv6Nlri {
+            id: 0,
+            prefix: "2001:db8:12:6::/64".parse().unwrap(),
+        }]));
+        route_from_peer(id, bad, &mut top, &mut peers, None);
+
+        let ids4: Vec<_> = top
+            .shard
+            .v4
+            .candidates(prefix4)
+            .iter()
+            .map(|r| r.remote_id)
+            .collect();
+        let ids6: Vec<_> = top
+            .shard
+            .v6
+            .candidates(prefix6)
+            .iter()
+            .map(|r| r.remote_id)
+            .collect();
+        assert_eq!(ids4, vec![8]);
+        assert_eq!(ids6, vec![8]);
+        assert!(v4_paths(&top, "10.12.6.0/24").is_empty());
+        assert!(v6_paths(&top, "2001:db8:12:6::/64").is_empty());
+        assert_eq!(peers.get_by_idx(id).unwrap().state, State::Established);
+    }
+
+    /// RFC 7606 §7.2: a route that fails the first-AS check is
+    /// treat-as-withdraw. The neighbor's earlier, valid path for the same
+    /// prefix is replaced by the failing UPDATE, so it must go — dropping
+    /// the UPDATE left the superseded path installed.
+    #[tokio::test]
+    async fn first_as_violation_withdraws_the_previous_path_v4() {
+        let mut fx = Fx::new();
+        let (mut peers, id) = peers_with(ebgp_peer(None));
+        let mut top = fx.top();
+        announce_v4(&mut top, &mut peers, id, "10.12.4.0/24", "65001 65009");
+        assert_eq!(v4_paths(&top, "10.12.4.0/24").len(), 1, "valid path in");
+        announce_v4(&mut top, &mut peers, id, "10.12.4.0/24", "65099 65001");
+        assert!(
+            v4_paths(&top, "10.12.4.0/24").is_empty(),
+            "the failing UPDATE withdraws the prefix"
+        );
+    }
+
+    /// The IPv6-unicast twin of the treat-as-withdraw gate.
+    #[tokio::test]
+    async fn first_as_violation_withdraws_the_previous_path_v6() {
+        let mut fx = Fx::new();
+        let (mut peers, id) = peers_with(ebgp_peer(None));
+        let mut top = fx.top();
+        announce_v6(
+            &mut top,
+            &mut peers,
+            id,
+            "2001:db8:12:4::/64",
+            "65001 65009",
+        );
+        assert_eq!(
+            v6_paths(&top, "2001:db8:12:4::/64").len(),
+            1,
+            "valid path in"
+        );
+        announce_v6(
+            &mut top,
+            &mut peers,
+            id,
+            "2001:db8:12:4::/64",
+            "65099 65001",
+        );
+        assert!(
+            v6_paths(&top, "2001:db8:12:4::/64").is_empty(),
+            "the failing UPDATE withdraws the prefix"
+        );
+    }
+}
+
 /// `community_suppresses_advertisement` truth table: NO_ADVERTISE
 /// gates every peer type; NO_EXPORT and NO_EXPORT_SUBCONFED gate eBGP
 /// only (no confederation support, so SUBCONFED ≡ NO_EXPORT).

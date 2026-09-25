@@ -1,0 +1,36 @@
+# z1 (DUT, AS 65100; IPv6 unicast over IPv6 sessions): enforce-first-as
+# toward both eBGP neighbors.
+# - z2 (AS 65001) still expects z1's pre-migration AS 64999, so z1 runs
+#   bare `local-as 64999` toward it: z1 prepends 64999 to every route it
+#   receives from z2. The first-AS check must judge the path z2 SENT.
+# - h3 (AS 65003, a scripted speaker) is the neighbor without local-as:
+#   enforce-first-as alone. It never listens on 179, so z1 is passive
+#   toward it.
+router:
+  bgp:
+    global:
+      as: 65100
+      router-id: 192.168.47.1
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 2001:db8:47::2
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65001
+      local-as:
+      - as-number: 64999
+      enforce-first-as: {}
+    - remote-address: 2001:db8:47::3
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65003
+      enforce-first-as: {}
+      transport:
+        passive-mode: true
