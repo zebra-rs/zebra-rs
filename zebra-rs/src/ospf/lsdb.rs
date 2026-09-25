@@ -598,14 +598,24 @@ impl Lsdb<Ospfv2> {
         }
     }
 
-    /// Remove an LSA whose hold timer fired, and what was derived from it:
+    /// Remove an LSA whose hold timer fired, if it has expired (see
+    /// [`Lsdb::remove_expired_by_raw_key`]), and what was derived from it:
     /// an expiring Router Information LSA can take its router's SRGB with
-    /// it, and SPF must stop resolving Prefix-SIDs against that.
-    pub fn expire_lsa(&mut self, ls_type: OspfLsType, ls_id: Ipv4Addr, adv_router: Ipv4Addr) {
-        self.tables.remove(&v2_lsa_key(ls_type, ls_id, adv_router));
+    /// it, and SPF must stop resolving Prefix-SIDs against that. Returns
+    /// whether it was removed.
+    pub fn expire_lsa(
+        &mut self,
+        ls_type: OspfLsType,
+        ls_id: Ipv4Addr,
+        adv_router: Ipv4Addr,
+    ) -> bool {
+        if !self.remove_expired_by_raw_key(v2_lsa_key(ls_type, ls_id, adv_router)) {
+            return false;
+        }
         if ls_type == OspfLsType::OpaqueAreaLocal {
             self.label_map_resync(adv_router);
         }
+        true
     }
 
     /// Rebuild `label_map[adv_router]` from the router's Router Information

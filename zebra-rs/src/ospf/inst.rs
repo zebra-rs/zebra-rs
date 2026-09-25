@@ -4570,15 +4570,18 @@ impl Ospf<Ospfv2> {
                 };
                 lsdb.refresh_lsa_by_raw_key(key, &self.tx, area_id)
             };
-            if let Some(lsa) = refreshed
-                && let Some(area_id) = area_id
-            {
-                self.flood_self_originated_lsa(area_id, &lsa);
+            // An AS-scoped LSA — a Type-5 AS-External — floods to every
+            // non-stub area. Refreshed but kept local, it aged out at
+            // every neighbour an hour after it was last flooded.
+            match (refreshed, area_id) {
+                (Some(lsa), Some(area_id)) => self.flood_self_originated_lsa(area_id, &lsa),
+                (Some(lsa), None) => self.flood_lsa_through_as(&lsa, None),
+                (None, _) => {}
             }
             return;
         }
 
-        {
+        let removed = {
             let lsdb = if let Some(area_id) = area_id {
                 let Some(area) = self.areas.get_mut(area_id) else {
                     return;
@@ -4597,13 +4600,16 @@ impl Ospf<Ospfv2> {
                         ls_id,
                         adv_router
                     );
-                    lsdb.expire_lsa(ls_type, ls_id, adv_router);
+                    // A timer message still in flight for an instance
+                    // replaced since finds the fresh copy young, and
+                    // leaves it — as OSPFv3 does.
+                    lsdb.expire_lsa(ls_type, ls_id, adv_router)
                 }
                 _ => unreachable!(),
             }
-        }
+        };
 
-        if ev == LsdbEvent::HoldTimerExpire {
+        if removed {
             match ls_type {
                 // Area-scoped opaque LSAs feed SPF as they do on arrival
                 // (see `ospf_flood`): an expiring Router Information LSA
@@ -17981,6 +17987,72 @@ mod v3_lsa_aging_tests {
         assert_eq!(former.h.ls_seq_number, seq, "a former identity ages out");
         assert_eq!(former.h.ls_age, 1700);
     }
+
+    /// OSPFv3 already floods its refreshed AS-scoped LSAs, as v2 now does;
+    /// this keeps it so.
+    #[tokio::test]
+    async fn our_refreshed_as_external_lsa_is_flooded() {
+        let mut top = fresh_ospf_v3();
+        top.router_id = rid(1);
+        let (send_tx, send_rx) = mpsc::unbounded_channel();
+        Box::leak(Box::new(send_rx));
+        top.v3_send_tx = Some(send_tx);
+        let mut link = OspfLink::from(
+            top.tx.clone(),
+            crate::rib::Link::from(crate::fib::message::FibLink {
+                index: 7,
+                name: "probe7".into(),
+                mtu: 1500,
+                ..Default::default()
+            }),
+            top.sock.clone(),
+            top.router_id,
+            top.ptx.clone(),
+        );
+        link.enabled = true;
+        link.addr.push(super::super::addr::OspfAddr {
+            prefix: "fe80::1/64".parse().unwrap(),
+            secondary: false,
+        });
+        let mut nbr = Neighbor::new(
+            top.tx.clone(),
+            7,
+            "fe80::2/64".parse().unwrap(),
+            &rid(2),
+            40,
+            top.ptx.clone(),
+        );
+        nbr.state = NfsmState::Full;
+        link.nbrs.insert(rid(2), nbr);
+        top.links.insert(7, link);
+        top.areas.fetch(AREA0).links.insert(7);
+        let prefix: ipnet::Ipv6Net = "2001:db8:99::/64".parse().unwrap();
+        top.as_external_lsa_originate_for_prefix_v3(prefix, 20, true);
+        let key = (
+            ospf_packet::OSPFV3_AS_EXTERNAL_LSA_TYPE,
+            nssa_v3_ls_id(&prefix),
+            rid(1),
+        );
+        let seq = top.lsdb_as.lookup_by_raw_key(key).unwrap().h.ls_seq_number;
+        fn rxmt(top: &mut Ospf<Ospfv3>) -> &mut BTreeMap<OspfLsaKey, ospf_packet::Ospfv3Lsa> {
+            &mut top
+                .links
+                .get_mut(&7)
+                .unwrap()
+                .nbrs
+                .values_mut()
+                .next()
+                .unwrap()
+                .ls_rxmt
+        }
+        assert!(rxmt(&mut top).contains_key(&key), "flooded at origination");
+        rxmt(&mut top).clear();
+
+        top.process_msg(Message::Lsdb(LsdbEvent::RefreshTimerExpire, None, key))
+            .await;
+        let flooded = rxmt(&mut top).get(&key).map(|lsa| lsa.h.ls_seq_number);
+        assert_eq!(flooded, Some(seq + 1), "the refresh never left this router");
+    }
 }
 
 #[cfg(test)]
@@ -18051,6 +18123,128 @@ mod v2_lsa_aging_tests {
             lsdb.label_map.get(&rid(4)).is_none(),
             "withdrawn: not restored"
         );
+    }
+
+    /// A hold timer fires for a flushed copy, and the instance its owner
+    /// re-originated arrives before the timer's message is handled. The
+    /// message must leave the fresh instance — and the SRGB it carries —
+    /// alone, and recompute nothing. An instance that has expired goes.
+    #[tokio::test]
+    async fn a_timer_for_a_replaced_instance_leaves_it() {
+        let mut top = fresh_ospf();
+        top.router_id = rid(1);
+        let tx = top.tx.clone();
+        let tracing = top.tracing.clone();
+        let ls_id = Ipv4Addr::from((OpaqueLsaType::ROUTER_INFO as u32) << 24);
+        let key =
+            |router| super::super::lsdb::v2_lsa_key(OspfLsType::OpaqueAreaLocal, ls_id, router);
+        let lsdb = &mut top.areas.get_mut(AREA0).unwrap().lsdb;
+        lsdb.insert_received(
+            router_info(rid(2), 0, true, OSPF_MAX_AGE),
+            &tx,
+            Some(AREA0),
+            &tracing,
+        );
+        let mut fresh = router_info(rid(2), 0, true, 0);
+        fresh.h.ls_seq_number += 1;
+        fresh.update();
+        let seq = fresh.h.ls_seq_number;
+        lsdb.insert_received(fresh, &tx, Some(AREA0), &tracing);
+        lsdb.insert_received(
+            router_info(rid(3), 0, true, OSPF_MAX_AGE),
+            &tx,
+            Some(AREA0),
+            &tracing,
+        );
+
+        top.process_msg(Message::Lsdb(
+            LsdbEvent::HoldTimerExpire,
+            Some(AREA0),
+            key(rid(2)),
+        ))
+        .await;
+        let lsdb = &top.areas.get(AREA0).unwrap().lsdb;
+        let kept = lsdb.lookup_by_raw_key(key(rid(2)));
+        assert_eq!(
+            kept.map(|lsa| lsa.h.ls_seq_number),
+            Some(seq),
+            "the fresh instance was removed"
+        );
+        assert!(lsdb.label_map.get(&rid(2)).is_some());
+        assert!(top.areas.get(AREA0).unwrap().spf_timer.is_none());
+        assert!(
+            std::iter::from_fn(|| top.rx.try_recv().ok())
+                .all(|msg| !matches!(msg, Message::SpfSchedule(_)))
+        );
+
+        top.process_msg(Message::Lsdb(
+            LsdbEvent::HoldTimerExpire,
+            Some(AREA0),
+            key(rid(3)),
+        ))
+        .await;
+        let lsdb = &top.areas.get(AREA0).unwrap().lsdb;
+        assert!(
+            lsdb.lookup_by_raw_key(key(rid(3))).is_none(),
+            "expired: gone"
+        );
+        assert!(top.areas.get(AREA0).unwrap().spf_timer.is_some());
+    }
+
+    /// Our AS-External LSA, refreshed at LSRefreshTime, is flooded like any
+    /// other: kept local, it aged out at every neighbour an hour after it
+    /// was last flooded, and its routes with it.
+    #[tokio::test]
+    async fn our_refreshed_as_external_lsa_is_flooded() {
+        let mut top = fresh_ospf();
+        top.router_id = rid(1);
+        let mut link = OspfLink::from(
+            top.tx.clone(),
+            crate::rib::Link::from(crate::fib::message::FibLink {
+                index: 7,
+                name: "probe7".into(),
+                mtu: 1500,
+                ..Default::default()
+            }),
+            top.sock.clone(),
+            top.router_id,
+            top.ptx.clone(),
+        );
+        link.enabled = true;
+        let mut nbr = Neighbor::new(
+            top.tx.clone(),
+            7,
+            "192.0.2.2/24".parse().unwrap(),
+            &rid(2),
+            40,
+            top.ptx.clone(),
+        );
+        nbr.state = NfsmState::Full;
+        link.nbrs.insert(Ipv4Addr::new(192, 0, 2, 2), nbr);
+        top.links.insert(7, link);
+        top.areas.fetch(AREA0).links.insert(7);
+        let prefix: Ipv4Net = "198.51.100.0/24".parse().unwrap();
+        top.as_external_lsa_originate_for_prefix(prefix, 20, true);
+        let key = super::super::lsdb::v2_lsa_key(OspfLsType::AsExternal, prefix.network(), rid(1));
+        let seq = top.lsdb_as.lookup_by_raw_key(key).unwrap().h.ls_seq_number;
+        fn rxmt(top: &mut Ospf) -> &mut BTreeMap<OspfLsaKey, OspfLsa> {
+            &mut top
+                .links
+                .get_mut(&7)
+                .unwrap()
+                .nbrs
+                .values_mut()
+                .next()
+                .unwrap()
+                .ls_rxmt
+        }
+        assert!(rxmt(&mut top).contains_key(&key), "flooded at origination");
+        rxmt(&mut top).clear();
+
+        top.process_msg(Message::Lsdb(LsdbEvent::RefreshTimerExpire, None, key))
+            .await;
+        let flooded = rxmt(&mut top).get(&key).map(|lsa| lsa.h.ls_seq_number);
+        assert_eq!(flooded, Some(seq + 1), "the refresh never left this router");
     }
 }
 
@@ -18294,18 +18488,21 @@ mod flex_algo_selection_tests {
     /// definitions with it. If it held the winner, participation and the
     /// algorithm's forwarding state must be recomputed at once, as on any
     /// other change, not left until an unrelated event runs SPF.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn an_expiring_definition_schedules_spf() {
         let mut top = fresh_ospf();
         top.router_id = rid(1);
         top.segment_routing = super::super::srmpls::SegmentRoutingMode::Mpls;
         top.flex_algo.config.insert(128, Default::default());
-        let lsa = super::super::srmpls::router_info_lsa_build(
+        let mut lsa = super::super::srmpls::router_info_lsa_build(
             rid(2),
             false,
             vec![Algo::Spf, Algo::FlexAlgo(128)],
             vec![fad(128, 200)],
         );
+        // A second from MaxAge: its owner stopped refreshing it.
+        lsa.h.ls_age = OSPF_MAX_AGE - 1;
+        lsa.update();
         let key = super::super::lsdb::v2_lsa_key(lsa.h.ls_type, lsa.h.ls_id, rid(2));
         top.areas
             .get_mut(AREA0)
@@ -18316,6 +18513,7 @@ mod flex_algo_selection_tests {
         assert!(top.flex_algo_advertised_in(AREA0).contains(&128));
         assert!(top.areas.get(AREA0).unwrap().spf_timer.is_none());
 
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
         top.process_lsdb(LsdbEvent::HoldTimerExpire, Some(AREA0), key);
         assert!(flex_algo_selection(&top, AREA0)[&128].winner.is_none());
         let mut scheduled = top.areas.get(AREA0).unwrap().spf_timer.is_some();
