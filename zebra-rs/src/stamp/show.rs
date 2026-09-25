@@ -15,8 +15,9 @@ use serde::Serialize;
 
 use crate::config::{Args, Builder};
 
+use super::client::Subscriber;
 use super::inst::{ShowCallback, Stamp};
-use super::loss::{DEFAULT_WINDOW_BUCKETS, LossWindow};
+use super::loss::{BUCKET, DEFAULT_WINDOW_BUCKETS, LossWindow};
 use super::session::{Session, SessionKey};
 use super::stats::MetricSnapshot;
 
@@ -133,6 +134,9 @@ struct StampLossJson {
     /// RFC 8570 §4.4 units (0.000003 %), capped at 2²⁴ − 2.
     #[serde(skip_serializing_if = "Option::is_none")]
     encoded: Option<u32>,
+    /// Buckets with probes but not one reply: measurement gaps, left
+    /// out of `settled` and `lost` (measured-loss design D8).
+    silent_buckets: usize,
     late: u64,
     duplicate: u64,
     unmatched: u64,
@@ -160,6 +164,7 @@ fn loss_json(s: &Session) -> StampLossJson {
         resolution_percent: w.resolution_percent().map(round6),
         integrity_percent: w.integrity_percent(),
         encoded: w.encoded(),
+        silent_buckets: w.silent,
         late: s.loss.late,
         duplicate: s.loss.duplicate,
         unmatched: s.loss.unmatched,
@@ -190,7 +195,40 @@ fn loss_line(w: &LossWindow) -> String {
     if let Some(i) = w.integrity_percent() {
         let _ = write!(line, ", integrity {i}%");
     }
+    if w.silent > 0 {
+        let _ = write!(line, ", {} silent", w.silent);
+    }
     line
+}
+
+/// RFC 8570 loss units (0.000003 % each) as a percentage.
+fn units_pct(units: u32) -> f64 {
+    f64::from(units) * 0.000003
+}
+
+/// One subscriber's loss policy and what it currently advertises — per
+/// subscriber because every setting that decides an advertisement is
+/// the IGP's own (measured-loss design D10).
+fn subscriber_loss_line(sub: &Subscriber) -> String {
+    let p = &sub.loss_policy;
+    if !p.enabled {
+        return "loss: disabled".to_string();
+    }
+    let state = match sub.advertised_loss {
+        Some(a) => format!("advertised {:.6}%", units_pct(a.value)),
+        None => "not advertised".to_string(),
+    };
+    let accel = match p.accelerated {
+        Some(step) => format!(", accelerated {:.6}%", units_pct(step)),
+        None => String::new(),
+    };
+    format!(
+        "loss: {state} (interval {}s, threshold {}%, minimum-change {:.6}%{accel}, integrity {}%)",
+        p.window_buckets as u64 * BUCKET.as_secs(),
+        p.threshold_pct,
+        units_pct(p.minimum_change),
+        p.integrity_pct,
+    )
 }
 
 fn show_stamp(stamp: &Stamp, _args: Args, json: bool) -> Result<String, fmt::Error> {
@@ -320,6 +358,7 @@ fn show_stamp_session(stamp: &Stamp, _args: Args, json: bool) -> Result<String, 
                 yes_no(sub.last_flags.min),
                 yes_no(sub.last_flags.max)
             )?;
+            writeln!(buf, "                {}", subscriber_loss_line(sub))?;
         }
         if !listed {
             writeln!(buf, "            none")?;
@@ -501,6 +540,7 @@ mod tests {
             settled,
             lost,
             expected_milli: 120_000,
+            silent: 0,
         }
     }
 

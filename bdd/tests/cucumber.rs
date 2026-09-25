@@ -2811,6 +2811,228 @@ async fn drop_unicast_isis_egress(world: &mut World, interface: String, namespac
     );
 }
 
+/// Install (or replace) the STAMP probe drop in `scoped`: an nftables
+/// input rule on UDP 862 — the Session-Reflector port, so it catches the
+/// *peer's* probes to this node and nothing else (this node's own replies
+/// come back to an ephemeral port). `every` = N drops exactly every Nth
+/// probe with `numgen inc mod N`, which is deterministic where netem's
+/// random loss would make a percentage assertion flaky; `None` drops
+/// them all. Measured-loss design §7.
+async fn stamp_probe_drop(scoped: &str, every: Option<u32>) {
+    let _ = netns::exec_in_netns(scoped, "nft", &["delete", "table", "inet", "stamp_loss"]).await;
+    let chain: &[&str] = &[
+        "add",
+        "chain",
+        "inet",
+        "stamp_loss",
+        "input",
+        "{",
+        "type",
+        "filter",
+        "hook",
+        "input",
+        "priority",
+        "0",
+        ";",
+        "}",
+    ];
+    let modulus = every.map(|n| n.to_string());
+    let mut rule: Vec<&str> = vec![
+        "add",
+        "rule",
+        "inet",
+        "stamp_loss",
+        "input",
+        "udp",
+        "dport",
+        "862",
+    ];
+    if let Some(m) = &modulus {
+        rule.extend(["numgen", "inc", "mod", m.as_str(), "==", "0"]);
+    }
+    rule.extend(["counter", "drop"]);
+    for args in [&["add", "table", "inet", "stamp_loss"][..], chain, &rule] {
+        netns::exec_in_netns(scoped, "nft", args)
+            .await
+            .unwrap_or_else(|e| panic!("nft {:?} failed in {}: {}", args, scoped, e));
+    }
+}
+
+#[when(expr = "I drop every {int}th STAMP probe arriving in namespace {string}")]
+async fn drop_every_nth_stamp_probe(world: &mut World, every: u32, namespace: String) {
+    assert!(
+        every >= 2,
+        "use \"I drop all STAMP probes\" to drop every probe"
+    );
+    let scoped = world.ns(&namespace);
+    stamp_probe_drop(&scoped, Some(every)).await;
+    println!(
+        "✓ Every {}th STAMP probe arriving in {} is dropped",
+        every, scoped
+    );
+}
+
+#[when(expr = "I drop all STAMP probes arriving in namespace {string}")]
+async fn drop_all_stamp_probes(world: &mut World, namespace: String) {
+    let scoped = world.ns(&namespace);
+    stamp_probe_drop(&scoped, None).await;
+    println!("✓ All STAMP probes arriving in {} are dropped", scoped);
+}
+
+#[when(expr = "I stop dropping STAMP probes in namespace {string}")]
+async fn stop_dropping_stamp_probes(world: &mut World, namespace: String) {
+    let scoped = world.ns(&namespace);
+    netns::exec_in_netns(&scoped, "nft", &["delete", "table", "inet", "stamp_loss"])
+        .await
+        .unwrap_or_else(|e| panic!("nft delete table failed in {}: {}", scoped, e));
+    println!(
+        "✓ STAMP probes arriving in {} are no longer dropped",
+        scoped
+    );
+}
+
+/// `show command … should contain …` with an explicit deadline. The
+/// generic "eventually" steps poll a fixed 60 times; this one is for a
+/// scenario whose point *is* the deadline — something must happen within
+/// N seconds, not merely at some point.
+#[then(
+    expr = "show command {string} in namespace {string} should contain {string} within {int} seconds"
+)]
+async fn show_command_contains_within(
+    world: &mut World,
+    show_cmd: String,
+    namespace: String,
+    needle: String,
+    seconds: u64,
+) {
+    let scoped = world.ns(&namespace);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+    let last = loop {
+        let out = netns::exec_in_netns(&scoped, "vtyctl", &["show", &show_cmd])
+            .await
+            .expect("Failed to run show command");
+        if out.contains(&needle) {
+            println!(
+                "✓ '{}' in {} contains '{}' within {}s",
+                show_cmd, scoped, needle, seconds
+            );
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            break out;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    };
+    panic!(
+        "'{}' in {} did not contain '{}' within {} seconds\nlast output:\n{}",
+        show_cmd, scoped, needle, seconds, last
+    );
+}
+
+/// Every `Unidirectional Link Loss: <pct>` value in a show output — the
+/// IS-IS (`9.999999%`) and OSPF (`9.999999 %`) renderings alike.
+fn link_loss_values(output: &str) -> Vec<f64> {
+    const LABEL: &str = "Unidirectional Link Loss: ";
+    output
+        .match_indices(LABEL)
+        .filter_map(|(i, _)| {
+            let rest = &output[i + LABEL.len()..];
+            let end = rest
+                .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+                .unwrap_or(rest.len());
+            rest[..end].parse().ok()
+        })
+        .collect()
+}
+
+/// Measured loss is a ratio of probe counts, so the exact advertised
+/// value moves with where 30 s bucket boundaries fall. Assert a range
+/// instead of a string: at least one advertised link loss must fall in
+/// `[low, high]`.
+#[then(
+    expr = "show command {string} in namespace {string} should eventually show link loss between {float} and {float} percent"
+)]
+async fn show_link_loss_between(
+    world: &mut World,
+    show_cmd: String,
+    namespace: String,
+    low: f64,
+    high: f64,
+) {
+    let scoped = world.ns(&namespace);
+    let mut last = String::new();
+    for i in 0..60 {
+        last = netns::exec_in_netns(&scoped, "vtyctl", &["show", &show_cmd])
+            .await
+            .expect("Failed to run show command");
+        if link_loss_values(&last)
+            .iter()
+            .any(|v| (low..=high).contains(v))
+        {
+            println!(
+                "✓ '{}' in {} shows link loss in [{}, {}]",
+                show_cmd, scoped, low, high
+            );
+            return;
+        }
+        if i < 59 {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    }
+    panic!(
+        "'{}' in {} never showed link loss in [{}, {}]; values {:?}\nlast output:\n{}",
+        show_cmd,
+        scoped,
+        low,
+        high,
+        link_loss_values(&last),
+        last
+    );
+}
+
+/// Negative sibling: eventually *no* advertised link loss falls in
+/// `[low, high]` — for a withdrawal, or a value that must not appear.
+#[then(
+    expr = "show command {string} in namespace {string} should eventually show no link loss between {float} and {float} percent"
+)]
+async fn show_no_link_loss_between(
+    world: &mut World,
+    show_cmd: String,
+    namespace: String,
+    low: f64,
+    high: f64,
+) {
+    let scoped = world.ns(&namespace);
+    let mut last = String::new();
+    for i in 0..60 {
+        last = netns::exec_in_netns(&scoped, "vtyctl", &["show", &show_cmd])
+            .await
+            .expect("Failed to run show command");
+        if !link_loss_values(&last)
+            .iter()
+            .any(|v| (low..=high).contains(v))
+        {
+            println!(
+                "✓ '{}' in {} shows no link loss in [{}, {}]",
+                show_cmd, scoped, low, high
+            );
+            return;
+        }
+        if i < 59 {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    }
+    panic!(
+        "'{}' in {} still showed link loss in [{}, {}]; values {:?}\nlast output:\n{}",
+        show_cmd,
+        scoped,
+        low,
+        high,
+        link_loss_values(&last),
+        last
+    );
+}
+
 /// Whether an IS-IS adjacency at `level` (1/2) on `interface` in `scoped`
 /// has reached the Up state. Reads `show isis neighbor -j`, a flat array of
 /// `{system_id, interface, level, state, ...}`. Matching by (interface,

@@ -184,6 +184,87 @@ Defaults (`interval` 1000 ms, `damping-period` 30 s) match the
 periodic-advertisement cadence of IOS-XR / SR-OS; the lab values above
 (100 ms / 2 s) converge in seconds.
 
+### Measured loss (`te-metric measurement loss`)
+
+The same session also measures **probe loss**, and the IGP advertises
+it as the unidirectional link-loss sub-TLV (IS-IS 36, OSPFv2 30,
+OSPFv3 16). This is **on by default wherever `measurement` is
+enabled**, as on Cisco IOS XR. That means an upgrade adds a loss
+sub-TLV to every measured link: 0 % on a clean link, about 120 seconds
+after its session comes up. Turn it off per link with
+`loss { enabled false; }`.
+
+How it is measured:
+
+- **Every probe is settled once**, by its sequence number: received when
+  its reply is read within 3 seconds (RFC 7680's waiting time), lost
+  otherwise. A reply that arrives later still counts as lost. A reply
+  whose timestamps are rejected as a delay sample still counts as
+  received — a clock fault is not packet loss.
+- **Round-trip.** The implicit reflector copies the sender's sequence
+  number, so a lost probe and a lost reply look the same, and the
+  advertised value is round-trip loss — an upper bound on the forward
+  loss the sub-TLV describes.
+- **Averaged over the loss interval** (default 120 s), counted in
+  30-second buckets on the session's own clock, independent of
+  `damping-period`. The smallest step the value can take is one probe:
+  0.83 % at the default 1 s probe interval over 120 s, 0.083 % at 100 ms.
+
+```
+te-metric {
+  measurement {
+    enabled true;
+    loss {
+      enabled true;                 # default true
+      interval 120;                 # seconds, a multiple of 30 (30..3600)
+      threshold 10;                 # re-advertise on a change of this % of the value…
+      minimum-change 1.0;           # …and of at least this many percentage points
+      accelerated-threshold 5.0;    # optional: advertise at once when the latest
+                                    #   30 s differs by this many points (default off)
+      integrity 90;                 # % of expected probes a window needs
+    }
+  }
+}
+```
+
+When a value is advertised:
+
+- **Not until a full, trustworthy window.** The window must be complete,
+  and at least `integrity` % of the probes the probe interval should have
+  produced must have settled. Before that, a static `te-metric loss` is
+  advertised if one is configured, and nothing otherwise.
+- **The first value goes out at once.** After that, a change is
+  re-advertised at most once per loss interval, and only when it is at
+  least `max(threshold % × advertised value, minimum-change)`. The
+  default minimum change of 1.0 point is larger than one probe's worth at
+  the default rate, so a single stray lost probe does not re-flood the
+  LSP. To see finer loss, raise the probe rate *and* lower
+  `minimum-change` together.
+- **Silence withdraws, and is not counted as loss.** If a whole 30-second
+  bucket goes by with probes sent but not one reply while the adjacency
+  is up, the loss is withdrawn at once, not advertised as the
+  50.331642 % maximum. That is a measurement problem — a reflector not
+  running, an ACL, a policer on the probe DSCP — and advertising the
+  maximum would make every Flex-Algo loss constraint prune a link that
+  is forwarding traffic. Silent buckets are also left out of the window
+  as gaps, so once replies return, nothing is advertised until the
+  window has refilled with real measurements. (A bucket needs at least
+  10 probes to count as silent; at slow probe rates, all of a few probes
+  being lost is ordinary loss.)
+- **A static `te-metric loss` always wins** over the measured value.
+
+The loss settings belong to each IGP. IS-IS and OSPF measuring the same
+link share one session and one set of buckets, but each applies its own
+`loss` settings: turning loss off in IS-IS leaves OSPF advertising it.
+`show stamp session` lists each IGP's policy and what it currently
+advertises:
+
+```
+        Subscribers:
+            isis: anomaly-threshold none, Anomalous: avg no, min no, max no
+                loss: advertised 0.000000% (interval 120s, threshold 10%, minimum-change 1.000000%, integrity 90%)
+```
+
 ## Wire encoding
 
 ### IS-IS (RFC 8570)

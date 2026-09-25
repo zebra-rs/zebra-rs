@@ -454,6 +454,30 @@ impl Isis {
             link::config_te_measurement_reuse_threshold,
         );
         self.callback_add(
+            "/router/isis/interface/te-metric/measurement/loss/enabled",
+            link::config_te_measurement_loss_enabled,
+        );
+        self.callback_add(
+            "/router/isis/interface/te-metric/measurement/loss/interval",
+            link::config_te_measurement_loss_interval,
+        );
+        self.callback_add(
+            "/router/isis/interface/te-metric/measurement/loss/threshold",
+            link::config_te_measurement_loss_threshold,
+        );
+        self.callback_add(
+            "/router/isis/interface/te-metric/measurement/loss/minimum-change",
+            link::config_te_measurement_loss_minimum_change,
+        );
+        self.callback_add(
+            "/router/isis/interface/te-metric/measurement/loss/accelerated-threshold",
+            link::config_te_measurement_loss_accelerated_threshold,
+        );
+        self.callback_add(
+            "/router/isis/interface/te-metric/measurement/loss/integrity",
+            link::config_te_measurement_loss_integrity,
+        );
+        self.callback_add(
             "/router/isis/interface/ipv4/flex-algo-prefix-sid",
             link::config_ipv4_flex_algo_prefix_sid,
         );

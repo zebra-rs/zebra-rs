@@ -10,9 +10,9 @@
 //!   * the **export** timer fires every `damping_secs` →
 //!     [`Message::ExportTick`] → the event loop snapshots the stats
 //!     window, runs the damping gate, and fans `MetricUpdate`s out;
-//!   * the **loss** timer fires every [`BUCKET`] →
-//!     [`Message::LossTick`] → the event loop closes the session's
-//!     current loss bucket.
+//!   * the **loss** timer fires every [`BUCKET`], [`LOSS_WAIT`] after
+//!     each bucket boundary → [`Message::LossTick`] → the event loop
+//!     evaluates the bucket that has just become final.
 //!
 //! [`ProberCmd::Retune`] re-arms the probe and export timers — the
 //! runtime path for a `Subscribe` carrying changed params (shared
@@ -29,7 +29,7 @@ use tokio::time::{Instant, interval_at};
 use crate::context::Task;
 
 use super::inst::Message;
-use super::loss::BUCKET;
+use super::loss::{BUCKET, LOSS_WAIT};
 use super::session::{SessionKey, SessionParams};
 
 /// Commands the event loop sends to a session's prober task.
@@ -59,7 +59,9 @@ pub async fn session_prober(
     event_tx: UnboundedSender<Message>,
 ) {
     let (mut probe, mut export) = arm(params);
-    let mut loss = interval_at(Instant::now() + BUCKET, BUCKET);
+    // Offset by the loss wait: a bucket is final LOSS_WAIT after it
+    // ends, so each tick lands just as the previous bucket becomes final.
+    let mut loss = interval_at(Instant::now() + BUCKET + LOSS_WAIT, BUCKET);
     loss.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
@@ -146,9 +148,10 @@ mod tests {
     }
 
     /// The loss clock is not re-armed by a retune (measured-loss design
-    /// D4): the first bucket still closes 30 s after the prober started,
-    /// not 30 s after the retune. Re-arming it would move every bucket
-    /// boundary each time an IGP's probe interval changed.
+    /// D4): the first tick still fires 33 s after the prober started —
+    /// the first bucket's end plus the loss wait — not 33 s after the
+    /// retune. Re-arming it would move every bucket boundary each time an
+    /// IGP's probe interval changed.
     #[tokio::test(start_paused = true)]
     async fn retune_leaves_the_loss_clock_alone() {
         let params = SessionParams {
@@ -167,12 +170,19 @@ mod tests {
                 ..params
             }))
             .unwrap();
+        let mut loss_ticks = || {
+            std::iter::from_fn(|| event_rx.try_recv().ok())
+                .filter(|m| matches!(m, Message::LossTick { .. }))
+                .count()
+        };
         tokio::time::sleep(Duration::from_secs(11)).await; // t = 31 s
-
-        let loss_ticks = std::iter::from_fn(|| event_rx.try_recv().ok())
-            .filter(|m| matches!(m, Message::LossTick { .. }))
-            .count();
-        assert_eq!(loss_ticks, 1, "the first bucket closes at 30 s");
+        assert_eq!(
+            loss_ticks(),
+            0,
+            "not at the bucket boundary: bucket 0 is not final until 33 s"
+        );
+        tokio::time::sleep(Duration::from_secs(3)).await; // t = 34 s
+        assert_eq!(loss_ticks(), 1, "the first tick fires at 33 s");
         task.abort();
     }
 

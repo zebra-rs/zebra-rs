@@ -243,9 +243,8 @@ impl Ospf {
             "/area/interface/te-metric/loss",
             config_ospf_interface_te_loss,
         );
-        // STAMP measurement block — v2 only (this `callback_build` is
-        // `impl Ospf<Ospfv2>`; `config_v3.rs` registers nothing here,
-        // so the v3 instance never enables measurement).
+        // STAMP measurement block (OSPFv2; `config_v3.rs` registers the
+        // same leaves for OSPFv3).
         self.ospf_add(
             "/area/interface/te-metric/measurement/enabled",
             config_ospf_interface_te_measurement_enable,
@@ -265,6 +264,30 @@ impl Ospf {
         self.ospf_add(
             "/area/interface/te-metric/measurement/reuse-threshold",
             config_ospf_interface_te_measurement_reuse_threshold,
+        );
+        self.ospf_add(
+            "/area/interface/te-metric/measurement/loss/enabled",
+            config_ospf_interface_te_measurement_loss_enabled,
+        );
+        self.ospf_add(
+            "/area/interface/te-metric/measurement/loss/interval",
+            config_ospf_interface_te_measurement_loss_interval,
+        );
+        self.ospf_add(
+            "/area/interface/te-metric/measurement/loss/threshold",
+            config_ospf_interface_te_measurement_loss_threshold,
+        );
+        self.ospf_add(
+            "/area/interface/te-metric/measurement/loss/minimum-change",
+            config_ospf_interface_te_measurement_loss_minimum_change,
+        );
+        self.ospf_add(
+            "/area/interface/te-metric/measurement/loss/accelerated-threshold",
+            config_ospf_interface_te_measurement_loss_accelerated_threshold,
+        );
+        self.ospf_add(
+            "/area/interface/te-metric/measurement/loss/integrity",
+            config_ospf_interface_te_measurement_loss_integrity,
         );
         self.ospf_add(
             "/area/interface/hello-interval",
@@ -1580,6 +1603,67 @@ fn config_ospf_interface_te_measurement_reuse_threshold(
         let value = args.u32()?;
         m.reuse_threshold_us = op.is_set().then_some(value);
         Some(())
+    })
+}
+
+// `te-metric/measurement/loss/*` — measured-loss policy (design D10).
+fn config_ospf_interface_te_measurement_loss_enabled(
+    ospf: &mut Ospf,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospf_interface_te_measurement(ospf, args, |m, args| {
+        m.set_loss_enabled(args, op.is_set())
+    })
+}
+
+fn config_ospf_interface_te_measurement_loss_interval(
+    ospf: &mut Ospf,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospf_interface_te_measurement(ospf, args, |m, args| {
+        m.set_loss_interval(args, op.is_set())
+    })
+}
+
+fn config_ospf_interface_te_measurement_loss_threshold(
+    ospf: &mut Ospf,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospf_interface_te_measurement(ospf, args, |m, args| {
+        m.set_loss_threshold(args, op.is_set())
+    })
+}
+
+fn config_ospf_interface_te_measurement_loss_minimum_change(
+    ospf: &mut Ospf,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospf_interface_te_measurement(ospf, args, |m, args| {
+        m.set_loss_minimum_change(args, op.is_set())
+    })
+}
+
+fn config_ospf_interface_te_measurement_loss_accelerated_threshold(
+    ospf: &mut Ospf,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospf_interface_te_measurement(ospf, args, |m, args| {
+        m.set_loss_accelerated(args, op.is_set())
+    })
+}
+
+fn config_ospf_interface_te_measurement_loss_integrity(
+    ospf: &mut Ospf,
+    args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    config_ospf_interface_te_measurement(ospf, args, |m, args| {
+        m.set_loss_integrity(args, op.is_set())
     })
 }
 
