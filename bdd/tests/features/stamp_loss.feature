@@ -57,6 +57,22 @@ Feature: Measured link loss advertised by IS-IS and OSPF
     And show command "show isis database detail" in namespace "sl2" should eventually show link loss between 0.0 and 1.0 percent
     And show command "show ospf database detail" in namespace "sl2" should eventually show link loss between 0.0 and 1.0 percent
 
+  Scenario: A loss setting STAMP would refuse fails the commit
+    Given the test topology exists
+    # PR 2 review: YANG cannot express the 30 s step or bound a decimal64,
+    # and a protocol's callback cannot reject a value, so a refused value
+    # used to reach the running config while STAMP kept its previous
+    # setting. The commit now checks these leaves before dispatch.
+    Then applying command "set router isis interface sl1-sl2 te-metric measurement loss interval 45" in namespace "sl1" should be rejected with "must be a multiple of 30 seconds"
+    And applying command "set router ospf area 0.0.0.0 interface sl1-sl2 te-metric measurement loss minimum-change 100.5" in namespace "sl1" should be rejected with "0 to 100 percent"
+    And applying command "set router isis interface sl1-sl2 te-metric measurement loss accelerated-threshold 1.0000001" in namespace "sl1" should be rejected with "at most 6 decimal places"
+    # The positive control shows the leaves render in this form, so the
+    # "not contain" checks after it cannot pass vacuously.
+    And show command "show running-config formal" in namespace "sl1" should contain "te-metric measurement loss interval 30"
+    And show command "show running-config formal" in namespace "sl1" should not contain "loss interval 45"
+    And show command "show running-config formal" in namespace "sl1" should not contain "minimum-change"
+    And show command "show running-config formal" in namespace "sl1" should not contain "accelerated-threshold"
+
   Scenario: A 10 percent probe loss is advertised by both IGPs
     Given the test topology exists
     # Dropping every 10th probe sl1 sends to sl2 is 10 % round-trip loss

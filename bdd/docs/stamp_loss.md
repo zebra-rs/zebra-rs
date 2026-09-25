@@ -37,6 +37,7 @@ Topology:
 |----------|--------|
 | Build the measured topology | |
 | Loss is advertised by default on a clean link | |
+| A loss setting STAMP would refuse fails the commit | |
 | A 10 percent probe loss is advertised by both IGPs | |
 | Probes that all vanish withdraw the loss at once | |
 | Turning loss off in one IGP leaves the other advertising it | |

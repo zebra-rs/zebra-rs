@@ -3,6 +3,7 @@ use crate::config::api::{ClearTxResponse, DeployResponse, DisplayTxRequest, Disp
 use super::api::{CompletionResponse, ConfigOp, ExecuteResponse, Message};
 use super::bfd::{despawn_bfd, spawn_bfd};
 use super::bgp::{despawn_bgp, spawn_bgp};
+use super::check;
 use super::commands::Mode;
 use super::commands::{configure_mode_create, exec_mode_create, prettify_json};
 use super::configs::{carbon_copy, delete, set};
@@ -14,7 +15,7 @@ use super::nd::spawn_nd;
 use super::ospf::{despawn_ospf, despawn_ospfv3, spawn_ospf, spawn_ospfv3};
 use super::parse::State;
 use super::parse::parse;
-use super::paths::{path_try_trim, paths_str};
+use super::paths::{path_from_command, path_try_trim, paths_str};
 use super::pim::{despawn_pim, spawn_pim};
 use super::stamp::{despawn_stamp, spawn_stamp};
 use super::subscribe::{ConfigSubscriber, path_has_prefix, pb as config_pb};
@@ -662,6 +663,25 @@ impl ConfigManager {
         });
     }
 
+    /// Every line among `lines` (config lines without `set`) whose
+    /// leaf value fails its [`check::value_check`], as commit errors.
+    fn value_errors(&self, lines: impl Iterator<Item = String>) -> Vec<String> {
+        let mut errors = Vec::new();
+        for line in lines {
+            let Some(paths) = self.paths(line.clone()) else {
+                continue;
+            };
+            let (path, args) = path_from_command(&paths);
+            if let Some(check) = check::value_check(&path)
+                && let Some(value) = args.0.back()
+                && let Err(e) = check(value)
+            {
+                errors.push(format!("'{line}': {e}"));
+            }
+        }
+        errors
+    }
+
     fn paths(&self, input: String) -> Option<Vec<CommandPath>> {
         let mode = self.modes.get("configure")?;
         let state = State::new();
@@ -700,6 +720,18 @@ impl ConfigManager {
         let diff = trim_first_line(&mut diff);
 
         let remove_first_char = |s: &str| -> String { s.chars().skip(1).collect() };
+
+        // Values the schema cannot constrain, on the lines this commit
+        // sets — before anything is dispatched, since a protocol's
+        // callback cannot reject one (see `config::check`).
+        let errors = self.value_errors(
+            diff.lines()
+                .filter_map(|l| l.strip_prefix('+'))
+                .map(str::to_string),
+        );
+        if !errors.is_empty() {
+            return Err(anyhow::anyhow!(errors.join("\n")));
+        }
 
         let mut ospf = false;
         let mut ospfv3 = false;
@@ -1131,14 +1163,15 @@ impl ConfigManager {
                 );
             }
         }
-        // A schema-validation failure (mandatory / `ext:non-empty`) rejects
-        // the whole startup commit — nothing is dispatched. Log it loudly so
-        // a config file the operator hand-edited into an invalid state (e.g.
-        // a bare `router isis afi-safi ipv4`) is diagnosable, rather than the
+        // A validation failure (mandatory / `ext:non-empty`, or a leaf
+        // value failing `config::check`) rejects the whole startup commit —
+        // nothing is dispatched. Log it loudly so a config file the
+        // operator hand-edited into an invalid state (e.g. a bare
+        // `router isis afi-safi ipv4`) is diagnosable, rather than the
         // daemon silently coming up with no config.
         if let Err(e) = self.commit_config() {
             tracing::error!(
-                "startup config {} rejected by schema validation: {}",
+                "startup config {} rejected by commit validation: {}",
                 self.config_path.display(),
                 e
             );
@@ -1453,11 +1486,11 @@ impl ConfigManager {
                         return;
                     }
                 }
-                // Schema validation (mandatory / `ext:non-empty`) runs
-                // inside `commit_config` and returns Err *before* any
-                // dispatch. Surface it instead of swallowing it, and revert
-                // the candidate so the rejected lines don't linger into the
-                // next apply.
+                // Commit validation (mandatory / `ext:non-empty`, and the
+                // `config::check` leaf values) runs inside `commit_config`
+                // and returns Err *before* any dispatch. Surface it instead
+                // of swallowing it, and revert the candidate so the
+                // rejected lines don't linger into the next apply.
                 if let Err(e) = self.commit_config() {
                     self.store.discard();
                     let resp = DeployResponse {
@@ -2462,6 +2495,63 @@ mod save_config_tests {
         assert_eq!(config_format_type(&formal), ConfigFormat::SetDelete);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// Review of measured-loss PR 2: a value the schema lets through
+    /// but the protocol refuses — a loss interval that is not whole 30 s
+    /// buckets, a loss percentage over 100 or finer than 6 decimal
+    /// places — must fail the commit. Before, it reached the running
+    /// config while STAMP kept its previous setting, because a callback
+    /// cannot reject. Driven through `set` + `commit`, as every client
+    /// drives it.
+    #[test]
+    fn a_loss_value_the_schema_cannot_bound_fails_the_commit() {
+        let path = temp_path("loss-value-check");
+        let cm = manager_with_config(&path);
+        let mode = cm.modes.get("configure").expect("configure mode");
+        let isis = "router isis interface eth0 te-metric measurement loss";
+        let ospf = "router ospf area 0.0.0.0 interface eth0 te-metric measurement loss";
+        let ospfv3 = "router ospfv3 area 0.0.0.0 interface eth0 te-metric measurement loss";
+        let step = "must be a multiple of 30 seconds";
+        let percent = "must be 0 to 100 percent, with at most 6 decimal places";
+        for (line, reason) in [
+            (format!("{isis} interval 45"), step),
+            (format!("{ospf} interval 45"), step),
+            (format!("{ospfv3} interval 3590"), step),
+            (format!("{isis} minimum-change 100.5"), percent),
+            (format!("{ospf} minimum-change 1.0000001"), percent),
+            (format!("{ospfv3} accelerated-threshold 101"), percent),
+        ] {
+            let (code, output, _) = cm.execute(mode, &format!("set {line}"));
+            assert_eq!(code, ExecCode::Show, "schema accepts `{line}`: {output:?}");
+            let err = cm.commit_config().expect_err(&line).to_string();
+            assert_eq!(err, format!("'{line}': {reason}"));
+            let mut running = String::new();
+            cm.store.running.borrow().list(&mut running);
+            assert_eq!(running, "", "`{line}` must not reach the running config");
+            cm.store.discard();
+        }
+
+        // In range, the same leaves pass. (Checked without committing:
+        // a commit would spawn the IGPs.)
+        let valid = [
+            format!("{isis} interval 60"),
+            format!("{ospf} interval 3600"),
+            format!("{ospfv3} minimum-change 0.000003"),
+            format!("{isis} accelerated-threshold 100"),
+        ];
+        for line in &valid {
+            let (code, output, _) = cm.execute(mode, &format!("set {line}"));
+            assert_eq!(code, ExecCode::Show, "set rejected: {output:?}");
+        }
+        let mut candidate = String::new();
+        cm.store.candidate.borrow().list(&mut candidate);
+        assert!(
+            valid.iter().all(|l| candidate.lines().any(|c| c == l)),
+            "{candidate}"
+        );
+        let errors = cm.value_errors(candidate.lines().map(str::to_string));
+        assert_eq!(errors, Vec::<String>::new(), "{candidate}");
     }
 
     /// The .deb ships `/etc/zebra-rs/zebra-rs.conf` comment-only, and

@@ -308,7 +308,13 @@ it covers ("loss over the last 120 s"), forgets a burst on a known date, and mak
 resolution (D5) a plain count. An EWMA never quite forgets and has no sample count to show.
 
 `loss interval` must be a multiple of 30 s (30–3600 s). The configuration layer rejects
-anything else rather than silently rounding it. The constraint sits on the **new** leaf only,
+anything else rather than silently rounding it: the commit fails and names the line. YANG
+cannot express a step, and a protocol's config callback cannot reject a value once the commit
+is dispatched, so the config manager checks the leaf before dispatch (`config::check`).
+The two decimal64 percentages (`minimum-change`, `accelerated-threshold`) are checked the same
+way, because libyang enforces neither a decimal64 range nor `fraction-digits`: 0–100 %, at
+most six decimal places. PR 2 review, finding 1: a rejected value used to reach the running
+config while STAMP kept its previous setting. The constraint sits on the **new** leaf only,
 so it cannot invalidate an existing configuration. Review round 1, finding 2, caught that the
 first version tied loss buckets to `damping-period`, which accepts any value from 1 to
 3600 s: once loss became default-on, an existing `damping-period 7` or `300` would have
@@ -342,7 +348,18 @@ RFC 8570 §5 asks for per-sub-TLV filters anyway. Loss is evaluated at every los
 (30 s, D4), for each subscriber, but:
 
 - **Periodic:** re-advertise **at most once per loss interval**, and only when
-  `|new − advertised| ≥ max(threshold % × advertised, minimum-change)`. The defaults are
+  `|new − advertised| ≥ max(threshold % × advertised, minimum-change)`. The interval is
+  **real time elapsed** since the advertisement, not a count of buckets finalised since (PR 2
+  review, finding 2). A subscriber seeded between ticks (a late-joining IGP, a config edit)
+  is advertised at once, and the next tick may finalise a bucket a second later; counting
+  buckets, that re-advertised at once. Every decision is timed by the real clock at the
+  moment it is made, a tick's included. The first fix timed a tick on the 30 s grid, the
+  instant its bucket became final. A second review found that backdated the cooldown when
+  the event loop ran a tick late: a tick due at 123 s, run at 152 s, let the 153 s tick
+  re-advertise one second later. Real ticks are not exactly 30 s apart either, so the
+  comparison allows `CADENCE_SLACK` (1 s). Without it, a tick run a few milliseconds sooner
+  after its predecessor would push roughly every other periodic update out by a whole tick.
+  A re-advertisement can therefore come at most 1 s short of the interval, never sooner. The defaults are
   `threshold` **10 %** (zebra-rs delay and Juniper delay; Cisco XE uses 15 %) and
   `minimum-change` **1.0 percentage point** (settled in review, §10 decision 1).
 - Why 1.0 and not Cisco XE's 0.2: Cisco XE counts real traffic, so its resolution is fine.

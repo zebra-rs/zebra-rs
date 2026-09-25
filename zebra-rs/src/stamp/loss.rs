@@ -47,6 +47,16 @@ pub const LOSS_WAIT: Duration = Duration::from_secs(3);
 /// interval.
 pub const BUCKET: Duration = Duration::from_secs(30);
 
+/// How much earlier than a full loss interval a periodic
+/// re-advertisement may go out (design D6). The cadence is judged by the
+/// real clock, and two loss ticks run 30 s apart on the grid but not
+/// exactly 30 s apart in real time: each runs when the event loop gets
+/// to it. Without this allowance, a tick run a few milliseconds sooner
+/// after its predecessor than the one before would push roughly every
+/// other periodic update out by a whole tick. It is far above timer
+/// jitter and far below a bucket.
+pub const CADENCE_SLACK: Duration = Duration::from_secs(1);
+
 /// Closed buckets kept: the longest loss interval a subscriber may
 /// configure (3600 s) divided by [`BUCKET`].
 pub const MAX_BUCKETS: usize = 120;
@@ -163,10 +173,17 @@ impl LossLedger {
         (at.saturating_duration_since(self.epoch).as_nanos() / BUCKET.as_nanos()) as u64
     }
 
-    /// How many buckets are final. Advances by one per 30 s; the
-    /// advertisement cadence counts in it.
+    /// How many buckets are final. Advances by one per 30 s.
+    #[cfg(test)]
     pub fn final_index(&self) -> u64 {
         self.final_index
+    }
+
+    /// When the latest final bucket became final: LOSS_WAIT after it
+    /// ended — the loss tick's place on the 30 s grid.
+    #[cfg(test)]
+    pub fn final_at(&self) -> Instant {
+        self.epoch + Duration::from_secs(BUCKET.as_secs() * self.final_index) + LOSS_WAIT
     }
 
     fn open_index(&self) -> u64 {
@@ -471,10 +488,11 @@ fn trusted(w: &LossWindow, integrity_pct: u32) -> Option<u32> {
     w.encoded()
 }
 
-/// Decide one subscriber's loss advertisement at a loss tick — design
-/// D5 (gates), D6 (filter and cadence) and D8 (silence). `advertised`
-/// is what it currently advertises, and `advertised_at` the open-bucket
-/// index when that was decided.
+/// Decide one subscriber's loss advertisement — design D5 (gates), D6
+/// (filter and cadence) and D8 (silence). `advertised` is what it
+/// currently advertises, `advertised_at` when that was decided, and
+/// `now` when this decision is made — both by the real clock, whether
+/// on a loss tick or when a subscription is seeded between ticks.
 ///
 /// - Disabled, or no trustworthy window: withdraw anything advertised.
 /// - Nothing advertised yet: advertise at once. The RFC 8570 §6 cadence
@@ -485,12 +503,18 @@ fn trusted(w: &LossWindow, integrity_pct: u32) -> Option<u32> {
 /// - Periodic: at most once per loss interval, and only for a change of
 ///   at least `max(threshold % × advertised, minimum-change)`. The
 ///   minimum change governs the zero crossings, where a relative
-///   threshold means nothing.
+///   threshold means nothing. The interval is real time elapsed since
+///   the advertisement, less [`CADENCE_SLACK`] for tick jitter. It is
+///   not a count of buckets finalised since, nor the time a bucket
+///   became final: a value seeded between ticks, or advertised by a
+///   tick the event loop ran late, can be followed by the next tick a
+///   second later.
 pub fn evaluate(
     policy: &super::session::LossPolicy,
     ledger: &LossLedger,
     advertised: Option<LossAdvert>,
-    advertised_at: Option<u64>,
+    advertised_at: Option<Instant>,
+    now: Instant,
 ) -> LossDecision {
     let withdraw = if advertised.is_some() {
         LossDecision::Withdraw
@@ -528,8 +552,9 @@ pub fn evaluate(
     {
         return set(latest);
     }
+    let interval = Duration::from_secs(BUCKET.as_secs() * policy.window_buckets as u64);
     let due = advertised_at
-        .is_none_or(|at| ledger.final_index().saturating_sub(at) >= policy.window_buckets as u64);
+        .is_none_or(|at| now.saturating_duration_since(at) + CADENCE_SLACK >= interval);
     let need = (u64::from(current.value) * u64::from(policy.threshold_pct) / 100)
         .max(u64::from(policy.minimum_change));
     if due && value != current.value && u64::from(value.abs_diff(current.value)) >= need {
@@ -803,6 +828,18 @@ mod tests {
         })
     }
 
+    /// `evaluate` at the loss tick that finalised `l`'s latest bucket,
+    /// the value having been advertised `ago` buckets' time before it.
+    fn eval(
+        p: &LossPolicy,
+        l: &LossLedger,
+        advertised: Option<LossAdvert>,
+        ago: Option<u32>,
+    ) -> LossDecision {
+        let now = l.final_at();
+        evaluate(p, l, advertised, ago.map(|n| now - BUCKET * n), now)
+    }
+
     const CLEAN: (u32, u32) = (30, 0);
     const TEN_PCT: (u32, u32) = (30, 3);
 
@@ -810,8 +847,8 @@ mod tests {
     fn nothing_is_advertised_until_the_window_is_full() {
         let p = LossPolicy::default();
         let l = ledger(&[CLEAN, CLEAN, CLEAN]);
-        assert_eq!(evaluate(&p, &l, None, None), LossDecision::Keep);
-        assert_eq!(evaluate(&p, &l, advert(0), Some(0)), LossDecision::Withdraw);
+        assert_eq!(eval(&p, &l, None, None), LossDecision::Keep);
+        assert_eq!(eval(&p, &l, advert(0), Some(3)), LossDecision::Withdraw);
     }
 
     /// Nothing advertised yet: the first trustworthy value goes out at
@@ -820,20 +857,20 @@ mod tests {
     fn a_full_trusted_window_is_advertised_at_once() {
         let p = LossPolicy::default();
         let l = ledger(&[TEN_PCT; 4]);
-        assert_eq!(evaluate(&p, &l, None, None), set(encode_loss(12, 120)));
+        assert_eq!(eval(&p, &l, None, None), set(encode_loss(12, 120)));
     }
 
     #[test]
     fn a_window_below_the_integrity_threshold_is_not_trusted() {
         let p = LossPolicy::default(); // 90 %
         let l = ledger(&[(26, 0); 4]); // 86 %
-        assert_eq!(evaluate(&p, &l, None, None), LossDecision::Keep);
-        assert_eq!(evaluate(&p, &l, advert(0), Some(0)), LossDecision::Withdraw);
+        assert_eq!(eval(&p, &l, None, None), LossDecision::Keep);
+        assert_eq!(eval(&p, &l, advert(0), Some(4)), LossDecision::Withdraw);
         let lenient = LossPolicy {
             integrity_pct: 80,
             ..p
         };
-        assert_eq!(evaluate(&lenient, &l, None, None), set(0));
+        assert_eq!(eval(&lenient, &l, None, None), set(0));
     }
 
     /// Design D8: every probe vanished is a measurement problem, not
@@ -843,9 +880,9 @@ mod tests {
     fn total_silence_withdraws_rather_than_advertising_the_cap() {
         let p = LossPolicy::default();
         let l = ledger(&[(30, 30); 4]);
-        assert_eq!(evaluate(&p, &l, None, None), LossDecision::Keep);
+        assert_eq!(eval(&p, &l, None, None), LossDecision::Keep);
         assert_eq!(
-            evaluate(&p, &l, advert(encode_loss(1, 120)), Some(0)),
+            eval(&p, &l, advert(encode_loss(1, 120)), Some(4)),
             LossDecision::Withdraw
         );
         // Silent buckets are gaps, not loss: one reply in the latest
@@ -853,7 +890,7 @@ mod tests {
         // They lower integrity to 25 %, so nothing is advertised.
         let l = ledger(&[(30, 30), (30, 30), (30, 30), (30, 29)]);
         assert_eq!(l.window(4).silent, 3);
-        assert_eq!(evaluate(&p, &l, None, None), LossDecision::Keep);
+        assert_eq!(eval(&p, &l, None, None), LossDecision::Keep);
     }
 
     /// Review of PR 2's BDD run: a reflector outage must be withdrawn as
@@ -870,10 +907,10 @@ mod tests {
         let l = ledger(&[CLEAN, CLEAN, CLEAN, (30, 30)]);
         assert_eq!(l.window(4).integrity_percent(), Some(75));
         assert_eq!(
-            evaluate(&lenient, &l, advert(0), Some(0)),
+            eval(&lenient, &l, advert(0), Some(4)),
             LossDecision::Withdraw
         );
-        assert_eq!(evaluate(&lenient, &l, None, None), LossDecision::Keep);
+        assert_eq!(eval(&lenient, &l, None, None), LossDecision::Keep);
     }
 
     /// The other side of the outage: once replies return, the silent
@@ -890,14 +927,14 @@ mod tests {
         let w = l.window(4);
         assert_eq!((w.settled, w.lost, w.silent), (30, 0, 3));
         assert_eq!(
-            evaluate(&LossPolicy::default(), &l, None, None),
+            eval(&LossPolicy::default(), &l, None, None),
             LossDecision::Keep
         );
         let lenient = LossPolicy {
             integrity_pct: 20,
             ..LossPolicy::default()
         };
-        assert_eq!(evaluate(&lenient, &l, None, None), set(0));
+        assert_eq!(eval(&lenient, &l, None, None), set(0));
     }
 
     /// A thin bucket is never called silent: at a slow probe rate, every
@@ -918,12 +955,13 @@ mod tests {
             ..LossPolicy::default()
         };
         let l = ledger(&[CLEAN; 4]);
-        assert_eq!(evaluate(&p, &l, None, None), LossDecision::Keep);
-        assert_eq!(evaluate(&p, &l, advert(0), Some(4)), LossDecision::Withdraw);
+        assert_eq!(eval(&p, &l, None, None), LossDecision::Keep);
+        assert_eq!(eval(&p, &l, advert(0), Some(0)), LossDecision::Withdraw);
     }
 
     /// RFC 8570 §6: a change is re-advertised at most once per loss
-    /// interval. Advertised at bucket 6, the change waits until 10.
+    /// interval, 120 s by default. Two ticks after the advertisement it
+    /// waits; four ticks is the interval.
     #[test]
     fn a_change_waits_for_the_interval() {
         let p = LossPolicy::default();
@@ -931,10 +969,86 @@ mod tests {
             CLEAN, CLEAN, CLEAN, CLEAN, TEN_PCT, TEN_PCT, TEN_PCT, TEN_PCT,
         ]);
         assert_eq!(l.final_index(), 8);
-        assert_eq!(evaluate(&p, &l, advert(0), Some(6)), LossDecision::Keep);
+        assert_eq!(eval(&p, &l, advert(0), Some(2)), LossDecision::Keep);
+        assert_eq!(eval(&p, &l, advert(0), Some(4)), set(encode_loss(12, 120)));
+    }
+
+    /// The cadence is real time, and ticks do not run exactly 30 s
+    /// apart: a tick run 5 ms sooner after the advertising one than the
+    /// grid spacing still counts as an interval later. Anything sooner
+    /// than the slack allows does not.
+    #[test]
+    fn the_cadence_absorbs_tick_jitter_and_nothing_more() {
+        let p = LossPolicy::default();
+        let l = ledger(&[
+            CLEAN, CLEAN, CLEAN, CLEAN, TEN_PCT, TEN_PCT, TEN_PCT, TEN_PCT,
+        ]);
+        let now = l.final_at();
+        let ago = |d: Duration| Some(now - d);
+        let interval = Duration::from_secs(120);
+        let jittered = interval - Duration::from_millis(5);
         assert_eq!(
-            evaluate(&p, &l, advert(0), Some(4)),
+            evaluate(&p, &l, advert(0), ago(jittered), now),
             set(encode_loss(12, 120))
+        );
+        assert_eq!(
+            evaluate(&p, &l, advert(0), ago(interval - CADENCE_SLACK), now),
+            set(encode_loss(12, 120))
+        );
+        let too_soon = interval - CADENCE_SLACK - Duration::from_millis(1);
+        assert_eq!(
+            evaluate(&p, &l, advert(0), ago(too_soon), now),
+            LossDecision::Keep
+        );
+    }
+
+    /// Review of PR 2: the cadence is time since the advertisement, not
+    /// buckets finalised since. A value advertised at 152 s — by a
+    /// subscriber joining between ticks, or by the 123 s tick run late —
+    /// is the bucket final then, 10 %. The tick at 153 s finalises a
+    /// 20 % bucket one second later; counting buckets, or timing the
+    /// first advertisement at 123 s when its bucket became final, that
+    /// one was "an interval later" and went out at once. It waits until
+    /// 183 s.
+    #[test]
+    fn a_value_seeded_between_ticks_waits_a_full_interval() {
+        let p = LossPolicy {
+            window_buckets: 1,
+            ..LossPolicy::default()
+        };
+        let t0 = Instant::now();
+        let mut l = LossLedger::new(t0);
+        let mut seq = 0;
+        for (b, lost) in [3, 3, 3, 3, 6, 6].into_iter().enumerate() {
+            for i in 0..30 {
+                let sent = at(t0, b as u64 * 30_000 + i * 1000);
+                l.sent(seq, sent);
+                if i >= lost {
+                    l.reply(seq, sent + Duration::from_millis(5));
+                }
+                seq += 1;
+            }
+        }
+        let (ten, twenty) = (encode_loss(3, 30), encode_loss(6, 30));
+
+        let joined = at(t0, 152_000);
+        l.advance(joined, 1000);
+        assert_eq!(l.final_index(), 4);
+        assert_eq!(evaluate(&p, &l, None, None, joined), set(ten));
+
+        l.advance(at(t0, 153_000), 1000);
+        assert_eq!(l.final_at(), at(t0, 153_000));
+        assert_eq!(l.window(1).encoded(), Some(twenty));
+        assert_eq!(
+            evaluate(&p, &l, advert(ten), Some(joined), l.final_at()),
+            LossDecision::Keep,
+            "one second after the last advertisement"
+        );
+
+        l.advance(at(t0, 183_000), 1000);
+        assert_eq!(
+            evaluate(&p, &l, advert(ten), Some(joined), l.final_at()),
+            set(twenty)
         );
     }
 
@@ -946,11 +1060,11 @@ mod tests {
         let ten = encode_loss(12, 120);
         // 13 of 120 = 10.83 %: 0.83 points, under the minimum change.
         let l = ledger(&[(30, 4), TEN_PCT, TEN_PCT, TEN_PCT]);
-        assert_eq!(evaluate(&p, &l, advert(ten), Some(0)), LossDecision::Keep);
+        assert_eq!(eval(&p, &l, advert(ten), Some(4)), LossDecision::Keep);
         // 15 of 120 = 12.5 %: 2.5 points.
         let l = ledger(&[(30, 6), TEN_PCT, TEN_PCT, TEN_PCT]);
         assert_eq!(
-            evaluate(&p, &l, advert(ten), Some(0)),
+            eval(&p, &l, advert(ten), Some(4)),
             set(encode_loss(15, 120))
         );
     }
@@ -962,16 +1076,13 @@ mod tests {
     fn the_minimum_change_governs_the_zero_crossings() {
         let p = LossPolicy::default();
         let one = ledger(&[(30, 1), CLEAN, CLEAN, CLEAN]);
-        assert_eq!(evaluate(&p, &one, advert(0), Some(0)), LossDecision::Keep);
+        assert_eq!(eval(&p, &one, advert(0), Some(4)), LossDecision::Keep);
         let two = ledger(&[(30, 2), CLEAN, CLEAN, CLEAN]);
-        assert_eq!(
-            evaluate(&p, &two, advert(0), Some(0)),
-            set(encode_loss(2, 120))
-        );
+        assert_eq!(eval(&p, &two, advert(0), Some(4)), set(encode_loss(2, 120)));
         // And back to zero from 1.67 %: over the minimum change.
         let clean = ledger(&[CLEAN; 4]);
         assert_eq!(
-            evaluate(&p, &clean, advert(encode_loss(2, 120)), Some(0)),
+            eval(&p, &clean, advert(encode_loss(2, 120)), Some(4)),
             set(0)
         );
     }
@@ -983,22 +1094,19 @@ mod tests {
     fn acceleration_advertises_the_latest_bucket_early() {
         let l = ledger(&[CLEAN, CLEAN, CLEAN, CLEAN, CLEAN, CLEAN, CLEAN, TEN_PCT]);
         let plain = LossPolicy::default();
-        assert_eq!(evaluate(&plain, &l, advert(0), Some(6)), LossDecision::Keep);
+        assert_eq!(eval(&plain, &l, advert(0), Some(2)), LossDecision::Keep);
         let accel = LossPolicy {
             accelerated: Some(micro_pct_to_units(5_000_000)),
             ..plain
         };
         assert_eq!(
-            evaluate(&accel, &l, advert(0), Some(6)),
+            eval(&accel, &l, advert(0), Some(2)),
             set(encode_loss(3, 30)),
             "the latest bucket's 10 %, not the rolling 2.5 %"
         );
         // Under the step: no early advertisement.
         let small = ledger(&[CLEAN, CLEAN, CLEAN, CLEAN, CLEAN, CLEAN, CLEAN, (30, 1)]);
-        assert_eq!(
-            evaluate(&accel, &small, advert(0), Some(6)),
-            LossDecision::Keep
-        );
+        assert_eq!(eval(&accel, &small, advert(0), Some(2)), LossDecision::Keep);
     }
 
     #[test]

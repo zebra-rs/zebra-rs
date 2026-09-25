@@ -227,6 +227,10 @@ te-metric {
 }
 ```
 
+The commit rejects a loss `interval` that is not a multiple of 30, and a
+`minimum-change` or `accelerated-threshold` over 100 or with more than six
+decimal places, naming the offending line. Nothing is rounded.
+
 When a value is advertised:
 
 - **Not until a full, trustworthy window.** The window must be complete,
@@ -234,8 +238,9 @@ When a value is advertised:
   produced must have settled. Before that, a static `te-metric loss` is
   advertised if one is configured, and nothing otherwise.
 - **The first value goes out at once.** After that, a change is
-  re-advertised at most once per loss interval, and only when it is at
-  least `max(threshold % × advertised value, minimum-change)`. The
+  re-advertised at most once per loss interval (measured from the last
+  advertisement), and only when it is at least
+  `max(threshold % × advertised value, minimum-change)`. The
   default minimum change of 1.0 point is larger than one probe's worth at
   the default rate, so a single stray lost probe does not re-flood the
   LSP. To see finer loss, raise the probe rate *and* lower

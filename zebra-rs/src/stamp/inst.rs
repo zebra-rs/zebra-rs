@@ -399,13 +399,18 @@ impl Stamp {
             changed = true;
         }
         if let Some(session) = session {
+            // Timed by the real clock: the next tick may finalise a
+            // bucket a second from now, and must not count as an
+            // interval after this advertisement.
+            let now = std::time::Instant::now();
             let decision = loss::evaluate(
                 &sub.loss_policy,
                 &session.loss,
                 sub.advertised_loss,
                 sub.loss_advertised_at,
+                now,
             );
-            changed |= sub.apply_loss(decision, session.loss.final_index());
+            changed |= sub.apply_loss(decision, now);
         }
         if changed {
             sub.send(key);
@@ -670,15 +675,21 @@ impl Stamp {
         let Some(subs) = self.subscribers.get_mut(&key) else {
             return;
         };
-        let index = session.loss.final_index();
+        // Timed by the real clock, when this tick actually runs, not
+        // when its bucket became final: a tick the event loop ran late
+        // would otherwise backdate the cooldown and let the next tick
+        // re-advertise at once. Tick jitter is absorbed by
+        // `loss::CADENCE_SLACK`.
+        let now = std::time::Instant::now();
         for (client, sub) in subs.iter_mut() {
             let decision = loss::evaluate(
                 &sub.loss_policy,
                 &session.loss,
                 sub.advertised_loss,
                 sub.loss_advertised_at,
+                now,
             );
-            if sub.apply_loss(decision, index) {
+            if sub.apply_loss(decision, now) {
                 tracing::info!(
                     ?key,
                     %client,
@@ -1210,8 +1221,8 @@ mod tests {
     /// Replace `key`'s loss ledger with one whose buckets saw these
     /// `(probes, lost)` counts at 1 s — backdated so the next loss tick
     /// makes exactly those buckets final (each is final 3 s after it
-    /// ends).
-    fn fill_loss(stamp: &mut Stamp, key: SessionKey, buckets: &[(u32, u32)]) {
+    /// ends). Returns the ledger's epoch.
+    fn fill_loss(stamp: &mut Stamp, key: SessionKey, buckets: &[(u32, u32)]) -> std::time::Instant {
         use crate::stamp::loss::LossLedger;
         let now = std::time::Instant::now();
         let epoch = now - Duration::from_secs(buckets.len() as u64 * 30 + 4);
@@ -1228,6 +1239,7 @@ mod tests {
             }
         }
         stamp.sessions.get_mut(&key).unwrap().loss = l;
+        epoch
     }
 
     fn drain(rx: &mut mpsc::UnboundedReceiver<StampEvent>) -> Vec<StampEvent> {
@@ -1359,6 +1371,93 @@ mod tests {
         assert_eq!(
             drain(&mut late_rx).iter().map(loss_of).collect::<Vec<_>>(),
             [Some(0)]
+        );
+    }
+
+    /// Review of PR 2, reproduced end to end: OSPF joins a running
+    /// session 152 s in, with a 30 s loss interval, and is seeded 10 %
+    /// from the bucket final then. The tick finalising the next bucket
+    /// (20 %) comes a moment later. Counting buckets, that was a whole
+    /// interval and 20 % went straight out; it must wait 30 s. IS-IS,
+    /// which had nothing advertised, gets its first value at once.
+    #[tokio::test]
+    async fn a_subscriber_seeded_between_ticks_waits_a_full_interval() {
+        use crate::stamp::loss::encode_loss;
+        let mut stamp = fresh_stamp();
+        let key = loopback_key(2);
+        let params = SessionParams {
+            loss: crate::stamp::session::LossPolicy {
+                window_buckets: 1,
+                ..Default::default()
+            },
+            ..SessionParams::default()
+        };
+        let (isis_tx, mut isis_rx) = mpsc::unbounded_channel();
+        stamp.subscribe("isis".into(), key, params, isis_tx);
+        let epoch = fill_loss(
+            &mut stamp,
+            key,
+            &[(30, 3), (30, 3), (30, 3), (30, 3), (30, 6)],
+        );
+        let ledger = &mut stamp.sessions.get_mut(&key).unwrap().loss;
+        ledger.advance(epoch + Duration::from_secs(152), 1000);
+        assert_eq!(ledger.final_index(), 4);
+        let (ten, twenty) = (encode_loss(3, 30), encode_loss(6, 30));
+
+        let (ospf_tx, mut ospf_rx) = mpsc::unbounded_channel();
+        stamp.subscribe("ospf".into(), key, params, ospf_tx);
+        assert_eq!(
+            drain(&mut ospf_rx).iter().map(loss_of).collect::<Vec<_>>(),
+            [Some(ten)]
+        );
+
+        stamp.on_loss_tick(key);
+        let session = stamp.sessions.get(&key).unwrap();
+        assert_eq!(session.loss.final_index(), 5);
+        assert_eq!(
+            drain(&mut ospf_rx).iter().map(loss_of).collect::<Vec<_>>(),
+            [],
+            "20 % must wait a full interval after the seeded 10 %"
+        );
+        assert_eq!(
+            drain(&mut isis_rx).iter().map(loss_of).collect::<Vec<_>>(),
+            [Some(twenty)]
+        );
+    }
+
+    /// A delayed loss tick must start the advertisement cooldown when
+    /// it actually sends. Backdating it to the bucket's finalisation
+    /// time permits the next periodic update less than an interval later.
+    /// Retained review probe for PR 2's elapsed-time cadence contract.
+    #[tokio::test]
+    async fn a_delayed_loss_tick_records_actual_advertisement_time() {
+        let mut stamp = fresh_stamp();
+        let key = loopback_key(2);
+        let params = SessionParams {
+            loss: crate::stamp::session::LossPolicy {
+                window_buckets: 1,
+                ..Default::default()
+            },
+            ..SessionParams::default()
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        stamp.subscribe("isis".into(), key, params, tx);
+        // The helper backdates the ledger by 34 s: its first bucket
+        // became final about one second before this tick is processed.
+        fill_loss(&mut stamp, key, &[(30, 3)]);
+        let before_send = std::time::Instant::now();
+        stamp.on_loss_tick(key);
+        assert_eq!(
+            drain(&mut rx).iter().map(loss_of).collect::<Vec<_>>(),
+            [Some(crate::stamp::loss::encode_loss(3, 30))]
+        );
+        let advertised_at = stamp.subscribers[&key]["isis"]
+            .loss_advertised_at
+            .expect("the first value was advertised");
+        assert!(
+            advertised_at >= before_send,
+            "cooldown was backdated by {:?} before the advertisement",
+            before_send.saturating_duration_since(advertised_at)
         );
     }
 

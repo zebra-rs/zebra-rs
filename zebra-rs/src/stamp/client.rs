@@ -19,6 +19,8 @@
 //! therefore kept per subscriber in [`Subscriber`], alongside that
 //! subscriber's hysteresis state.
 
+use std::time::Instant;
+
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use super::anomaly::{AnomalyFlags, AnomalyThresholds, DelayAnomaly};
@@ -115,9 +117,10 @@ pub struct Subscriber {
     /// complete state of every event (design D9).
     pub advertised_delay: Option<MetricSnapshot>,
     pub advertised_loss: Option<LossAdvert>,
-    /// The open loss-bucket index when `advertised_loss` was decided,
-    /// for the once-per-interval cadence (design D6).
-    pub loss_advertised_at: Option<u64>,
+    /// When `advertised_loss` was decided, for the once-per-interval
+    /// cadence (design D6) — see [`super::loss::evaluate`] for which
+    /// clock a decision is timed by.
+    pub loss_advertised_at: Option<Instant>,
 }
 
 impl Subscriber {
@@ -147,13 +150,13 @@ impl Subscriber {
         });
     }
 
-    /// Adopt a loss decision made at open-bucket `index`. Returns
-    /// whether the advertised loss changed — the caller then sends.
-    pub fn apply_loss(&mut self, decision: LossDecision, index: u64) -> bool {
+    /// Adopt a loss decision made at `now`. Returns whether the
+    /// advertised loss changed — the caller then sends.
+    pub fn apply_loss(&mut self, decision: LossDecision, now: Instant) -> bool {
         match decision {
             LossDecision::Keep => false,
             LossDecision::Set(advert) => {
-                self.loss_advertised_at = Some(index);
+                self.loss_advertised_at = Some(now);
                 let changed = self.advertised_loss != Some(advert);
                 self.advertised_loss = Some(advert);
                 changed

@@ -907,6 +907,39 @@ async fn apply_config_command(world: &mut World, command: String, namespace: Str
     );
 }
 
+/// The daemon must refuse a config line: `vtyctl apply -c` echoes the
+/// line, then prints `error reply: <why>` (and still exits 0), and the
+/// reply must carry `reason`. A refused line is discarded, so it never reaches the
+/// running config — assert that separately against a positive control.
+#[then(expr = "applying command {string} in namespace {string} should be rejected with {string}")]
+async fn apply_config_command_rejected(
+    world: &mut World,
+    command: String,
+    namespace: String,
+    reason: String,
+) {
+    let scoped = world.ns(&namespace);
+
+    let stdout = netns::exec_in_netns(&scoped, "vtyctl", &["apply", "-c", &command])
+        .await
+        .expect("Failed to run vtyctl apply");
+
+    let trimmed = stdout.trim();
+    assert!(
+        trimmed.contains("error reply:") && trimmed.contains(&reason),
+        "vtyctl apply should have rejected '{}' in namespace {} with '{}', got: {}",
+        command,
+        scoped,
+        reason,
+        trimmed
+    );
+
+    println!(
+        "✓ Rejected '{}' in namespace {} ({})",
+        command, scoped, trimmed
+    );
+}
+
 #[when(expr = "I wait {int} seconds for BGP to operate")]
 async fn wait_for_bgp(_world: &mut World, seconds: u64) {
     tokio::time::sleep(tokio::time::Duration::from_secs(seconds)).await;

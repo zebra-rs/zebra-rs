@@ -132,6 +132,32 @@ pub fn micro_pct_to_units(micro_pct: u64) -> u32 {
     (micro_pct / 3).min(u64::from(u32::MAX)) as u32
 }
 
+/// `loss interval`: whole 30 s buckets only (design D4) — rejected
+/// rather than rounded, so what is configured is what runs. YANG has no
+/// step constraint, so the config manager also runs this at commit
+/// (`config::check`); the setter applies the same rule.
+pub fn check_loss_interval(value: &str) -> Result<u32, String> {
+    let secs: u32 = value
+        .parse()
+        .map_err(|_| format!("'{value}' is not a number of seconds"))?;
+    if secs == 0 || u64::from(secs) % BUCKET.as_secs() != 0 {
+        return Err(format!(
+            "must be a multiple of {} seconds",
+            BUCKET.as_secs()
+        ));
+    }
+    Ok(secs)
+}
+
+/// A loss percentage leaf (`minimum-change`, `accelerated-threshold`)
+/// in micro-percent. libyang enforces neither a decimal64 range nor
+/// `fraction-digits`, so, like [`check_loss_interval`], this runs at
+/// commit as well as in the setter.
+pub fn check_loss_percent(value: &str) -> Result<u64, String> {
+    parse_percent_micro(value)
+        .ok_or_else(|| "must be 0 to 100 percent, with at most 6 decimal places".to_string())
+}
+
 /// Parse a percentage given as a YANG decimal64 string — `1`, `0.5`,
 /// `12.345678` — into micro-percent, exactly (no floating point). At
 /// most six fraction digits, the precision of the RFC unit; 0–100 %.
@@ -217,14 +243,14 @@ impl MeasurementConfig {
         Some(())
     }
 
-    /// `loss interval`: whole 30 s buckets only (design D4). Rejected
-    /// rather than rounded, so what is configured is what runs.
+    /// `loss interval`, whole 30 s buckets ([`check_loss_interval`]).
     pub fn set_loss_interval(&mut self, args: &mut Args, set: bool) -> Option<()> {
-        let value = args.u32()?;
-        if set && (value == 0 || u64::from(value) % BUCKET.as_secs() != 0) {
-            return None;
-        }
-        self.loss_interval_secs = set.then_some(value);
+        let value = args.string()?;
+        self.loss_interval_secs = if set {
+            Some(check_loss_interval(&value).ok()?)
+        } else {
+            None
+        };
         Some(())
     }
 
@@ -237,14 +263,14 @@ impl MeasurementConfig {
 
     /// `loss minimum-change`, percentage points (YANG decimal64).
     pub fn set_loss_minimum_change(&mut self, args: &mut Args, set: bool) -> Option<()> {
-        let value = parse_percent_micro(&args.string()?)?;
+        let value = check_loss_percent(&args.string()?).ok()?;
         self.loss_minimum_change_micro_pct = set.then_some(value);
         Some(())
     }
 
     /// `loss accelerated-threshold`, percentage points (YANG decimal64).
     pub fn set_loss_accelerated(&mut self, args: &mut Args, set: bool) -> Option<()> {
-        let value = parse_percent_micro(&args.string()?)?;
+        let value = check_loss_percent(&args.string()?).ok()?;
         self.loss_accelerated_micro_pct = set.then_some(value);
         Some(())
     }
