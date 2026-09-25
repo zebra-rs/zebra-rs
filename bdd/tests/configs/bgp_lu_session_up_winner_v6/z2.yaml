@@ -1,0 +1,18 @@
+# z2 (AS 65002, router-id 192.168.53.2): originates 2001:db8:52::1/128 into IPv6
+# labeled-unicast toward z1. Its lower router-id makes its path z1's best.
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 192.168.53.2
+    neighbor:
+    - remote-address: 2001:db8:53::1
+      afi-safi:
+      - name: label-v6
+        enabled: true
+      enabled: true
+      remote-as: 65100
+    afi-safi:
+    - name: label-v6
+      network:
+      - prefix: 2001:db8:52::1/128

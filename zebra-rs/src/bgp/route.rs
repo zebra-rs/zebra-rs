@@ -28680,6 +28680,348 @@ mod fanout_winner_tests {
     }
 }
 
+/// Review finding #20: the labeled-unicast session-up dump
+/// (`route_sync_labelv4` / `route_sync_labelv6`) sent a plain neighbor
+/// `ribs.last()` over the CANDIDATE list — the row replaced or added most
+/// recently — instead of the winner. A peer that came up after a worse
+/// path was refreshed received that path and its label until the next
+/// event for the prefix. The unicast and VPN dumps read the selected map.
+#[cfg(test)]
+mod lu_sync_winner_tests {
+    use super::*;
+    use crate::bgp::peer::State;
+    use bgp_packet::{CapMultiProtocol, Labelv4Nlri, Labelv6Nlri};
+    use std::net::IpAddr;
+    use std::str::FromStr;
+
+    const LOCAL_AS: u32 = 65001;
+    const ROUTER_ID: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 9);
+
+    fn peer(addr: &str, remote_as: u32, afi: Afi, remote_id: Ipv4Addr) -> Peer {
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        Box::leak(Box::new(rx));
+        let mut peer = Peer::new(
+            0,
+            LOCAL_AS,
+            ROUTER_ID,
+            remote_as,
+            addr.parse::<IpAddr>().unwrap(),
+            None,
+            tx,
+            crate::context::ProtoContext::default_table_no_rib(),
+        );
+        peer.state = State::Established;
+        peer.peer_type = if remote_as == LOCAL_AS {
+            PeerType::IBGP
+        } else {
+            PeerType::EBGP
+        };
+        peer.remote_id = remote_id;
+        let entry = peer
+            .cap_map
+            .entries
+            .entry(CapMultiProtocol::new(&afi, &Safi::MplsLabel))
+            .or_default();
+        entry.send = true;
+        entry.recv = true;
+        let (ptx, prx) = tokio::sync::mpsc::unbounded_channel();
+        Box::leak(Box::new(prx));
+        peer.packet_tx = Some(ptx);
+        peer
+    }
+
+    struct Fx {
+        router_id: Ipv4Addr,
+        ctx: crate::context::ProtoContext,
+        local_rib: LocalRib,
+        shard: crate::bgp::shard::BgpShard,
+        attr_store: crate::bgp::BgpAttrStore,
+        update_groups: crate::bgp::update_group::UpdateGroupMap,
+        interface_addrs: crate::bgp::interface_addrs::InterfaceAddrs,
+        tx: tokio::sync::mpsc::Sender<crate::bgp::inst::Message>,
+    }
+
+    impl Fx {
+        fn new() -> Self {
+            let (tx, rx) = tokio::sync::mpsc::channel(64);
+            Box::leak(Box::new(rx));
+            Self {
+                router_id: ROUTER_ID,
+                ctx: crate::context::ProtoContext::default_table_no_rib(),
+                local_rib: LocalRib::default(),
+                shard: crate::bgp::shard::BgpShard::default(),
+                attr_store: crate::bgp::BgpAttrStore::default(),
+                update_groups: crate::bgp::update_group::empty_map(),
+                interface_addrs: crate::bgp::interface_addrs::InterfaceAddrs::default(),
+                tx,
+            }
+        }
+        fn top(&mut self) -> BgpTop<'_> {
+            BgpTop {
+                router_id: &self.router_id,
+                srv6_ipv6_export: None,
+                local_rib: &mut self.local_rib,
+                shard: &mut self.shard,
+                tx: &self.tx,
+                rib_client: &self.ctx.rib,
+                attr_store: &mut self.attr_store,
+                update_groups: &mut self.update_groups,
+                interface_addrs: &self.interface_addrs,
+                vrf_export: None,
+                color_policy: None,
+                flex_algo_routes: None,
+                flex_algo_srv6_routes: None,
+                vrf_import: None,
+                nexthop_cache: None,
+                vrf_transport_v4: None,
+                vrf_transport_v6: None,
+                central_label_alloc: None,
+                as_sets_withdraw: false,
+            }
+        }
+    }
+
+    /// The plain iBGP neighbor that comes up after the paths are in. Kept
+    /// out of the PeerMap (so the event-driven fan-out never reaches it)
+    /// with an ident no PeerMap slot uses, so split horizon never mistakes
+    /// it for a source.
+    fn late_peer(addr: &str, afi: Afi) -> Peer {
+        let mut c = peer(addr, LOCAL_AS, afi, Ipv4Addr::new(10, 0, 0, 4));
+        c.ident = 99;
+        c
+    }
+
+    fn enroll(peers: &mut PeerMap, list: Vec<Peer>) -> Vec<usize> {
+        let mut ids = Vec::new();
+        for peer in list {
+            let addr = peer.address;
+            peers.insert(addr, peer);
+            let id = peers.get(&addr).unwrap().ident;
+            peers.membership_enroll(id);
+            ids.push(id);
+        }
+        ids
+    }
+
+    fn attr(nexthop: IpAddr, tag: u32) -> BgpAttr {
+        BgpAttr {
+            origin: Some(Origin::Igp),
+            aspath: Some(As4Path::from_str("65002").unwrap()),
+            nexthop: Some(match nexthop {
+                IpAddr::V4(a) => BgpNexthop::Ipv4(a),
+                IpAddr::V6(a) => BgpNexthop::Ipv6(a),
+            }),
+            com: Some([(65002 << 16) | tag].into_iter().collect()),
+            ..Default::default()
+        }
+    }
+
+    fn tag(rib: &BgpRib) -> u32 {
+        rib.attr
+            .com
+            .as_ref()
+            .and_then(|c| c.0.first().copied())
+            .map(|v| v & 0xffff)
+            .unwrap_or(0)
+    }
+
+    fn announce_v4lu(top: &mut BgpTop, peers: &mut PeerMap, id: usize, nh: &str, tag: u32) {
+        let mut packet = UpdatePacket::new();
+        packet.bgp_attr = Some(attr(nh.parse().unwrap(), tag));
+        packet.mp_update = Some(MpReachAttr::Labelv4 {
+            snpa: 0,
+            nhop: nh.parse().unwrap(),
+            updates: vec![Labelv4Nlri {
+                label: Label::new(16000 + tag, 0, true),
+                nlri: Ipv4Nlri {
+                    id: 0,
+                    prefix: "10.20.0.1/32".parse().unwrap(),
+                },
+            }],
+        });
+        route_from_peer(id, packet, top, peers, None);
+    }
+
+    fn announce_v6lu(top: &mut BgpTop, peers: &mut PeerMap, id: usize, nh: &str, tag: u32) {
+        let mut packet = UpdatePacket::new();
+        packet.bgp_attr = Some(attr(nh.parse().unwrap(), tag));
+        packet.mp_update = Some(MpReachAttr::Labelv6 {
+            snpa: 0,
+            nhop: nh.parse().unwrap(),
+            updates: vec![Labelv6Nlri {
+                label: Label::new(16000 + tag, 0, true),
+                nlri: Ipv6Nlri {
+                    id: 0,
+                    prefix: "2001:db8:20::1/128".parse().unwrap(),
+                },
+            }],
+        });
+        route_from_peer(id, packet, top, peers, None);
+    }
+
+    /// A (lower BGP Identifier) wins; B's path arrives after it, so B's row
+    /// is the candidate list's tail. C, a plain iBGP neighbor that comes up
+    /// afterwards, must be dumped A's path.
+    #[tokio::test]
+    async fn session_up_dump_sends_the_winner_not_the_newest_candidate_v4() {
+        let mut fx = Fx::new();
+        let mut peers = PeerMap::new();
+        let ids = enroll(
+            &mut peers,
+            vec![
+                peer("10.0.0.2", 65002, Afi::Ip, Ipv4Addr::new(10, 0, 0, 2)),
+                peer("10.0.0.3", 65002, Afi::Ip, Ipv4Addr::new(10, 0, 0, 3)),
+            ],
+        );
+        let (a, b) = (ids[0], ids[1]);
+        let mut top = fx.top();
+        announce_v4lu(&mut top, &mut peers, a, "10.0.0.2", 2);
+        announce_v4lu(&mut top, &mut peers, b, "10.0.0.3", 3);
+
+        let prefix: Ipv4Net = "10.20.0.1/32".parse().unwrap();
+        let winner = top.shard.v4lu.1.get(&prefix).expect("selected").clone();
+        let newest = top.shard.v4lu.candidates(prefix).last().unwrap().clone();
+        assert_ne!(winner.ident, newest.ident, "the tail is not the winner");
+
+        let mut c = late_peer("10.0.0.4", Afi::Ip);
+        route_sync_labelv4(&mut c, &mut top);
+        let rows = &c.adj_out.v4lu.0[&prefix];
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            (rows[0].ident, tag(&rows[0])),
+            (winner.ident, tag(&winner)),
+            "C was dumped the winner"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_up_dump_sends_the_winner_not_the_newest_candidate_v6() {
+        let mut fx = Fx::new();
+        let mut peers = PeerMap::new();
+        let ids = enroll(
+            &mut peers,
+            vec![
+                peer("2001:db8::2", 65002, Afi::Ip6, Ipv4Addr::new(10, 0, 0, 2)),
+                peer("2001:db8::3", 65002, Afi::Ip6, Ipv4Addr::new(10, 0, 0, 3)),
+            ],
+        );
+        let (a, b) = (ids[0], ids[1]);
+        let mut top = fx.top();
+        announce_v6lu(&mut top, &mut peers, a, "2001:db8::2", 2);
+        announce_v6lu(&mut top, &mut peers, b, "2001:db8::3", 3);
+
+        let prefix: Ipv6Net = "2001:db8:20::1/128".parse().unwrap();
+        let winner = top.shard.v6lu.1.get(&prefix).expect("selected").clone();
+        let newest = top.shard.v6lu.candidates(prefix).last().unwrap().clone();
+        assert_ne!(winner.ident, newest.ident, "the tail is not the winner");
+
+        let mut c = late_peer("2001:db8::4", Afi::Ip6);
+        route_sync_labelv6(&mut c, &mut top);
+        let rows = &c.adj_out.v6lu.0[&prefix];
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            (rows[0].ident, tag(&rows[0])),
+            (winner.ident, tag(&winner)),
+            "C was dumped the winner"
+        );
+    }
+
+    /// Review probe: candidates can remain while NHT leaves no selected
+    /// path. Plain sync must send nothing until a next-hop recovers.
+    #[tokio::test]
+    async fn probe_lu_sync_skips_unreachable_candidates_and_resumes_after_recovery() {
+        for afi in [Afi::Ip, Afi::Ip6] {
+            let mut fx = Fx::new();
+            let mut peers = PeerMap::new();
+            let nh: IpAddr = if afi == Afi::Ip {
+                "10.0.0.2".parse().unwrap()
+            } else {
+                "2001:db8::2".parse().unwrap()
+            };
+            let ids = enroll(
+                &mut peers,
+                vec![peer(
+                    &nh.to_string(),
+                    65002,
+                    afi,
+                    Ipv4Addr::new(10, 0, 0, 2),
+                )],
+            );
+            let mut top = fx.top();
+            let p4: Ipv4Net = "10.20.0.1/32".parse().unwrap();
+            let p6: Ipv6Net = "2001:db8:20::1/128".parse().unwrap();
+            if afi == Afi::Ip {
+                announce_v4lu(&mut top, &mut peers, ids[0], &nh.to_string(), 2);
+                assert!(top.shard.v4lu.set_nexthop_reachable(p4, nh, false));
+                assert!(top.shard.select_best_path_v4lu(p4).is_empty());
+                assert_eq!(top.shard.v4lu.candidates(p4).len(), 1);
+            } else {
+                announce_v6lu(&mut top, &mut peers, ids[0], &nh.to_string(), 2);
+                assert!(top.shard.v6lu.set_nexthop_reachable(p6, nh, false));
+                assert!(top.shard.select_best_path_v6lu(p6).is_empty());
+                assert_eq!(top.shard.v6lu.candidates(p6).len(), 1);
+            }
+            let mut c = late_peer("10.0.0.4", afi);
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            c.packet_tx = Some(tx);
+            if afi == Afi::Ip {
+                route_sync_labelv4(&mut c, &mut top);
+                assert!(c.adj_out.v4lu.0.is_empty());
+            } else {
+                route_sync_labelv6(&mut c, &mut top);
+                assert!(c.adj_out.v6lu.0.is_empty());
+            }
+            assert!(
+                rx.try_recv().is_err(),
+                "no UPDATE for an unreachable candidate"
+            );
+
+            if afi == Afi::Ip {
+                assert!(top.shard.v4lu.set_nexthop_reachable(p4, nh, true));
+                assert_eq!(top.shard.select_best_path_v4lu(p4).len(), 1);
+                route_sync_labelv4(&mut c, &mut top);
+                let sent = &c.adj_out.v4lu.0[&p4][0];
+                assert_eq!(sent.ident, ids[0]);
+                assert_eq!(sent.label.unwrap().label, 16002);
+            } else {
+                assert!(top.shard.v6lu.set_nexthop_reachable(p6, nh, true));
+                assert_eq!(top.shard.select_best_path_v6lu(p6).len(), 1);
+                route_sync_labelv6(&mut c, &mut top);
+                let sent = &c.adj_out.v6lu.0[&p6][0];
+                assert_eq!(sent.ident, ids[0]);
+                assert_eq!(sent.label.unwrap().label, 16002);
+            }
+            assert!(rx.try_recv().is_ok(), "recovered route is advertised");
+            assert!(rx.try_recv().is_err(), "exactly one UPDATE is sent");
+        }
+    }
+
+    /// Control: when the winner is also the newest candidate, the dump is
+    /// right either way.
+    #[tokio::test]
+    async fn session_up_dump_when_the_winner_is_the_newest_candidate() {
+        let mut fx = Fx::new();
+        let mut peers = PeerMap::new();
+        let ids = enroll(
+            &mut peers,
+            vec![
+                peer("10.0.0.2", 65002, Afi::Ip, Ipv4Addr::new(10, 0, 0, 2)),
+                peer("10.0.0.3", 65002, Afi::Ip, Ipv4Addr::new(10, 0, 0, 3)),
+            ],
+        );
+        let (a, b) = (ids[0], ids[1]);
+        let mut top = fx.top();
+        announce_v4lu(&mut top, &mut peers, b, "10.0.0.3", 3);
+        announce_v4lu(&mut top, &mut peers, a, "10.0.0.2", 2);
+        let prefix: Ipv4Net = "10.20.0.1/32".parse().unwrap();
+        let winner = top.shard.v4lu.1.get(&prefix).expect("selected").clone();
+        let mut c = late_peer("10.0.0.4", Afi::Ip);
+        route_sync_labelv4(&mut c, &mut top);
+        let rows = &c.adj_out.v4lu.0[&prefix];
+        assert_eq!((rows[0].ident, tag(&rows[0])), (winner.ident, tag(&winner)));
+    }
+}
+
 /// `community_suppresses_advertisement` truth table: NO_ADVERTISE
 /// gates every peer type; NO_EXPORT and NO_EXPORT_SUBCONFED gate eBGP
 /// only (no confederation support, so SUBCONFED ≡ NO_EXPORT).

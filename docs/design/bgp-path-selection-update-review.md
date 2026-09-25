@@ -7,7 +7,7 @@ MUP/Flowspec/SR-Policy/RTC where they share the machinery). Reviewed
 against `main` at `2f1e9a09` (2026-09-07). Line numbers are as of that
 commit.
 
-Status (2026-09-25): fifteen items are fixed on `main` — #1 (PR #2372,
+Status (2026-09-25): sixteen items are fixed on `main` — #1 (PR #2372,
 merge `3beacbcc`), the listen-range peer-type item found while fixing it
 (PR #2373, `ba327126`), #2 (PR #2375, `308b196a`), #3 (PR #2376,
 `b8fef738`), #4 (PR #2377, `1cc31738`, which also closed the
@@ -16,10 +16,11 @@ signature-knob half of #21 and added the IPv6 outbound soft-out), #5
 follow-ups), #7 (PR #2380, `d7476601`), #8 and with it #13 (PR #2383,
 `d72a06af`, eight review rounds folded in), #9 (PR #2405, `31f7458a`),
 #15 (PR #2413, `097ce15d`), #11 (PR #2415, `3401cb1b`), #12 (PR #2417,
-`4ba79217`) and the item found while fixing #12 (PR #2418, `6b53ad6a`).
-Each fixed entry ends with its fix note; everything else is open. #14
-(the plain fan-out advertised a multipath member) is fixed on branch
-`bgp-fanout-advertises-winner`.
+`4ba79217`), the item found while fixing #12 (PR #2418, `6b53ad6a`) and
+#14 (PR #2420, `49fb77b1`). Each fixed entry ends with its fix note;
+everything else is open. In progress: #20 (the labeled-unicast
+session-up dump sent the newest candidate), branch
+`bgp-lu-sync-winner`.
 
 Method: one lead read the selection ladder and every egress builder, then
 five independent read-only reviewers each took one dimension (update-group
@@ -970,7 +971,7 @@ cap. The two reviews agree on every overlapping item.
   `vpnv6_transit_label_tests`, plus the `signature_fields_each_distinguish`
   rows.
 
-### 14. P2 CONFIRMED (probe), FIXED on branch `bgp-fanout-advertises-winner` — with `maximum-paths > 1` the plain fan-out advertises a multipath member, not the winner
+### 14. P2 CONFIRMED (probe), FIXED in #2420 — with `maximum-paths > 1` the plain fan-out advertises a multipath member, not the winner
 
 - `select_best_path` pushes the winner first (`route.rs:2211`) and the
   ECMP members after it (`2266`); every plain fan-out takes
@@ -1167,6 +1168,22 @@ cap. The two reviews agree on every overlapping item.
   PE2's path and label until the next event for L, when `same_advertised`
   differs and corrects it.
 - Fix direction: read `shard.v4lu.1` / `v6lu.1` in the plain branch.
+- The unicast and VPN dumps (`route_sync_ipv4` / `_ipv6` / `_vpnv4` /
+  `_vpnv6`) read the selected map `.1` in their plain branch; only the
+  two labeled-unicast dumps read the candidate list.
+- Gates (branch `bgp-lu-sync-winner`; each compiles on `main` and fails
+  there, except the control). Unit, route.rs `lu_sync_winner_tests`: two
+  eBGP paths through `route_from_peer`, the winner (lower BGP
+  Identifier) first and the worse one last, then `route_sync_labelv4` /
+  `_labelv6` toward a fresh plain iBGP neighbor —
+  `session_up_dump_sends_the_winner_not_the_newest_candidate_v4` / `_v6`
+  (on `main` the dump carries the newest candidate); control
+  `session_up_dump_when_the_winner_is_the_newest_candidate`. BDD
+  `bgp_lu_session_up_winner` and `_v6`: z2 and z3 originate one labeled
+  loopback, z2's path is z1's best and z3's arrives second; z4, a plain
+  iBGP labeled-unicast neighbor, starts afterwards. On `main` both twins
+  fail: z4 holds z3's path (next-hop 192.168.52.3 / 2001:db8:53::3) and
+  keeps it, since nothing changes for the prefix afterwards.
 
 ### 21. P2 CONFIRMED — more signature-bearing knobs change on a live Established peer without detach/attach
 
