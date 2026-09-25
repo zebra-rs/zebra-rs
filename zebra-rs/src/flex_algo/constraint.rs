@@ -2,7 +2,9 @@ use std::collections::BTreeSet;
 
 use packet_utils::ExtAdminGroup;
 
-use super::entry::{FadMetricType, FlexAlgoEntry};
+use super::entry::FadMetricType;
+#[cfg(test)]
+use super::entry::FlexAlgoEntry;
 
 /// Resolves an affinity (admin-group) name to its RFC 7308 bit
 /// position. Implemented by each protocol's affinity-map table
@@ -33,6 +35,11 @@ pub fn local_link_affinity<A: AffinityBits>(affinity: &BTreeSet<String>, am: &A)
 /// against `affinity`. Returns true when the link is admissible for
 /// the algorithm's SPF graph.
 ///
+/// Tests only: this router's configured definition is not what it
+/// computes with. The path computation applies the winning definition's
+/// constraints (RFC 9350 §5.3) through [`link_prune_reason`]; the tests
+/// below exercise those rules through this entry-shaped front.
+///
 /// `affinity = None` means the source did not advertise an admin-group
 /// bitmap for this neighbor — treated as the empty bitmap (every bit
 /// = 0). That's the right default for peers that simply haven't
@@ -51,6 +58,7 @@ pub fn local_link_affinity<A: AffinityBits>(affinity: &BTreeSet<String>, am: &A)
 /// Name resolution failures (a constraint name not in `am`) are
 /// silently dropped — the wire form would not have carried that bit
 /// anyway.
+#[cfg(test)]
 pub fn link_passes_fad<A: AffinityBits>(
     affinity: Option<&ExtAdminGroup>,
     entry: &FlexAlgoEntry,
@@ -92,8 +100,8 @@ pub struct FadConstraints {
 /// advertisement; for this router's own, what it advertises.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LinkAttrs {
-    /// The Extended Admin Group; `None` is the empty bitmap — see
-    /// [`link_passes_fad`].
+    /// The Extended Admin Group; `None` is the empty bitmap, which fails a
+    /// non-empty include-any or include-all and passes any exclude-any.
     pub affinity: Option<ExtAdminGroup>,
     /// Unidirectional link loss (RFC 8570 §4.4) in its raw 24-bit units;
     /// `None` when none is advertised.
@@ -173,6 +181,7 @@ pub fn link_prune_reason(link: &LinkAttrs, c: &FadConstraints) -> Option<Pruned>
 
 /// Whether a link stays in the algorithm's topology — see
 /// [`link_prune_reason`].
+#[cfg(test)]
 pub fn link_passes_constraints(link: &LinkAttrs, c: &FadConstraints) -> bool {
     link_prune_reason(link, c).is_none()
 }

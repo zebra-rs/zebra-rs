@@ -1706,6 +1706,9 @@ struct Ospfv3FlexAlgoJson {
     spf_status: String,
     spf_nodes: Vec<Ospfv3FlexAlgoSpfNodeJson>,
     routes: Vec<Ospfv3FlexAlgoRouteJson>,
+    /// Per area: the winning definition (RFC 9350 §5.3) and whether this
+    /// router participates.
+    selection: Vec<super::show::FlexAlgoSelectionJson>,
 }
 
 fn show_ospfv3_flex_algo(
@@ -1731,6 +1734,11 @@ fn show_ospfv3_flex_algo(
         return render_or(json, &algos, buf);
     }
 
+    let selections: super::show::FlexAlgoSelections = top
+        .areas
+        .iter()
+        .map(|(area_id, _)| (*area_id, super::inst::flex_algo_selection_v3(top, *area_id)))
+        .collect();
     for (algo, entry) in &top.flex_algo.config {
         writeln!(buf, "Flex-Algorithm {algo}")?;
         let metric = metric_name(entry.metric_type.unwrap_or(FadMetricType::Igp));
@@ -1741,6 +1749,7 @@ fn show_ospfv3_flex_algo(
             "  Advertise-Definition: {}",
             entry.advertise_definition.unwrap_or(false)
         )?;
+        super::show::flex_algo_selection_text(&mut buf, &selections, *algo, top.router_id)?;
         if !entry.include_any.is_empty() {
             writeln!(buf, "  Affinity Include-Any: {}", names(&entry.include_any))?;
         }
@@ -1840,6 +1849,7 @@ fn show_ospfv3_flex_algo(
             spf_status: spf_status.to_string(),
             spf_nodes,
             routes,
+            selection: super::show::flex_algo_selection_json(&selections, *algo, top.router_id),
         });
     }
     render_or(json, &algos, buf)

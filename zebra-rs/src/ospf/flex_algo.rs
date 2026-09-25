@@ -45,6 +45,33 @@ pub fn fad_view(fad: &RouterInfoTlvFad) -> Fad {
     }
 }
 
+/// An OSPFv3 definition as the protocol-neutral selection reads it — the
+/// v3 twin of [`fad_view`].
+pub fn fad_view_v3(fad: &Ospfv3FadTlv) -> Fad {
+    Fad {
+        algo: fad.flex_algorithm,
+        metric_type: fad.metric_type,
+        calc_type: fad.calc_type,
+        priority: fad.priority,
+        subs: fad
+            .subs
+            .iter()
+            .map(|sub| match sub {
+                Ospfv3FadSubTlv::ExcludeAg(g) => FadSub::ExcludeAny(g.clone()),
+                Ospfv3FadSubTlv::IncludeAnyAg(g) => FadSub::IncludeAny(g.clone()),
+                Ospfv3FadSubTlv::IncludeAllAg(g) => FadSub::IncludeAll(g.clone()),
+                Ospfv3FadSubTlv::Flags(f) => FadSub::Flags {
+                    prefix_metric: f.m_flag,
+                    unknown: f.has_unknown(),
+                },
+                Ospfv3FadSubTlv::ExcludeSrlg(s) => FadSub::ExcludeSrlg(s.srlgs.clone()),
+                Ospfv3FadSubTlv::Unknown { typ, .. } => FadSub::Unknown(*typ),
+            })
+            .collect(),
+        truncated: !fad.trailing.is_empty(),
+    }
+}
+
 /// Build the OSPF FAD TLVs (RFC 9350 §6.1) this router originates
 /// inside the Router Information Opaque LSA — one `RouterInfoTlvFad`
 /// per `FlexAlgoConfig.config` entry with `advertise_definition ==
@@ -184,6 +211,7 @@ pub fn build_fad_v3(
             calc_type: 0, // Only SPF defined today (RFC 9350 §5.1).
             priority,
             subs,
+            trailing: Vec::new(),
         });
     }
     out
@@ -385,6 +413,55 @@ mod tests {
             trailing: vec![0, 1, 0, 8],
         };
         let view = fad_view(&fad);
+        assert_eq!(
+            (view.algo, view.metric_type, view.calc_type, view.priority),
+            (130, 1, 0, 77)
+        );
+        assert_eq!(
+            view.subs,
+            vec![
+                FadSub::ExcludeAny(g.clone()),
+                FadSub::IncludeAny(g.clone()),
+                FadSub::IncludeAll(g),
+                FadSub::Flags {
+                    prefix_metric: false,
+                    unknown: true,
+                },
+                FadSub::ExcludeSrlg(vec![9]),
+                FadSub::Unknown(1),
+            ]
+        );
+        assert!(view.truncated);
+    }
+
+    /// The v3 twin: the same reading of an OSPFv3 definition.
+    #[test]
+    fn fad_view_v3_keeps_what_selection_needs() {
+        let mut g = ExtAdminGroup::default();
+        g.set(5);
+        let fad = Ospfv3FadTlv {
+            flex_algorithm: 130,
+            metric_type: 1,
+            calc_type: 0,
+            priority: 77,
+            subs: vec![
+                Ospfv3FadSubTlv::ExcludeAg(g.clone()),
+                Ospfv3FadSubTlv::IncludeAnyAg(g.clone()),
+                Ospfv3FadSubTlv::IncludeAllAg(g.clone()),
+                Ospfv3FadSubTlv::Flags(FadFlags {
+                    m_flag: false,
+                    other: 0x01,
+                    trailing: Vec::new(),
+                }),
+                Ospfv3FadSubTlv::ExcludeSrlg(FadSrlg { srlgs: vec![9] }),
+                Ospfv3FadSubTlv::Unknown {
+                    typ: 1,
+                    value: vec![0; 6],
+                },
+            ],
+            trailing: vec![0, 1, 0, 8],
+        };
+        let view = fad_view_v3(&fad);
         assert_eq!(
             (view.algo, view.metric_type, view.calc_type, view.priority),
             (130, 1, 0, 77)

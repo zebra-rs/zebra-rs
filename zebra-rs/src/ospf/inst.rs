@@ -233,17 +233,19 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// per-algo Prefix-SID labels install into `ilm6` (a follow-up), but
     /// per-algo IPv6 does not reach the FIB.
     pub rib6_flex_algo: BTreeMap<u8, PrefixMap<ipnet::Ipv6Net, SpfRouteV3>>,
-    /// The Flexible Algorithms the SR-Algorithm list in our last
-    /// originated Router Information LSA announces: the ones this router
-    /// participates in (RFC 9350 §5.3). A change of participation — a
-    /// definition appearing, changing or going — re-originates it.
-    pub flex_algo_advertised: BTreeSet<u8>,
-    /// Per link, the participation its Extended Prefix LSA's
-    /// per-algorithm Prefix-SIDs were last built from, whichever path
-    /// originated it. Kept apart from `flex_algo_advertised`, and per
-    /// link: the Router Information LSA and a single link's Extended
-    /// Prefix LSA are each refreshed on paths of their own (a
-    /// graceful-restart abort, an interface change), and one that ran
+    /// Per area, the Flexible Algorithms the SR-Algorithm list in our
+    /// last originated SR capabilities there announces: the ones this
+    /// router participates in there (RFC 9350 §5.3). A change of
+    /// participation — a definition appearing, changing or going —
+    /// re-originates it. OSPFv2 announces them in the backbone's Router
+    /// Information LSA only; OSPFv3 in each area's SR-info E-Router-LSA.
+    pub flex_algo_advertised: BTreeMap<Ipv4Addr, BTreeSet<u8>>,
+    /// Per link, the participation its Extended Prefix LSA's (OSPFv3: its
+    /// E-Intra-Area-Prefix-LSA's) per-algorithm Prefix-SIDs were last
+    /// built from, whichever path originated it. Kept apart from
+    /// `flex_algo_advertised`, and per link: the SR capabilities and a
+    /// single link's prefix LSA are each refreshed on paths of their own
+    /// (a graceful-restart abort, an interface change), and one that ran
     /// between a change of participation and the next SPF must not leave a
     /// withdrawn algorithm's Prefix-SID advertised.
     pub flex_algo_prefix_sids_built: BTreeMap<u32, BTreeSet<u8>>,
@@ -1284,6 +1286,14 @@ impl<V: OspfVersion> Ospf<V> {
         }
     }
 
+    /// The Flexible Algorithms our last SR capabilities in `area_id`
+    /// announced (see `flex_algo_advertised`): none, until they are first
+    /// originated there.
+    pub fn flex_algo_advertised_in(&self, area_id: Ipv4Addr) -> &BTreeSet<u8> {
+        static NONE: BTreeSet<u8> = BTreeSet::new();
+        self.flex_algo_advertised.get(&area_id).unwrap_or(&NONE)
+    }
+
     /// Apply the staged flex-algo / affinity-map / SRLG tables at the
     /// end of a commit cycle. Returns whether any of them had changes
     /// staged, for the caller to re-advertise what they feed.
@@ -1806,7 +1816,7 @@ impl Ospf<Ospfv2> {
             spf_flex_algo: BTreeMap::new(),
             rib_flex_algo: BTreeMap::new(),
             rib6_flex_algo: BTreeMap::new(),
-            flex_algo_advertised: BTreeSet::new(),
+            flex_algo_advertised: BTreeMap::new(),
             flex_algo_prefix_sids_built: BTreeMap::new(),
             rib: PrefixMap::new(),
             rib_areas: BTreeMap::new(),
@@ -3255,7 +3265,7 @@ impl Ospf<Ospfv2> {
     /// router learns, without which a router advertising no definition of
     /// its own would never announce participation at all.
     fn flex_algo_reconcile(&mut self, participating: &BTreeSet<u8>) {
-        if *participating != self.flex_algo_advertised {
+        if self.flex_algo_advertised_in(AREA0) != participating {
             self.router_info_lsa_originate();
         }
         let stale: Vec<u32> = self
@@ -3308,7 +3318,8 @@ impl Ospf<Ospfv2> {
         // (RFC 9350 §5.3).
         let participating =
             crate::flex_algo::selection::participating(&flex_algo_selection(self, AREA0));
-        self.flex_algo_advertised = participating.clone();
+        self.flex_algo_advertised
+            .insert(AREA0, participating.clone());
         if self.segment_routing == SegmentRoutingMode::Mpls {
             let gr_capable = self.restarting.is_some();
             let algos = crate::flex_algo::sr_algorithms_for(&participating);
@@ -7261,7 +7272,7 @@ impl Ospf<Ospfv3> {
             spf_flex_algo: BTreeMap::new(),
             rib_flex_algo: BTreeMap::new(),
             rib6_flex_algo: BTreeMap::new(),
-            flex_algo_advertised: BTreeSet::new(),
+            flex_algo_advertised: BTreeMap::new(),
             flex_algo_prefix_sids_built: BTreeMap::new(),
             rib: PrefixMap::new(),
             rib_areas: BTreeMap::new(),
@@ -7368,7 +7379,9 @@ impl Ospf<Ospfv3> {
         }
         if msg.op == ConfigOp::CommitEnd {
             self.vrf_commit_end();
-            let _ = self.commit_flex_algo_tables();
+            if self.commit_flex_algo_tables() {
+                self.flex_algo_readvertise_v3();
+            }
             // Release the hellos parked during the commit, now that the
             // Router-ID (and everything else in the transaction) is
             // final. Re-sent as messages with `in_commit` already
@@ -11346,10 +11359,35 @@ impl Ospf<Ospfv3> {
             self.router_id,
         );
 
+        // Per-algorithm Prefix-SIDs only for the algorithms this router
+        // participates in, in the link's area (RFC 9350 §5.3).
+        let participating = match self.links.get(&ifindex).map(|link| link.area) {
+            Some(area_id) => {
+                let participating = crate::flex_algo::selection::participating(
+                    &flex_algo_selection_v3(self, area_id),
+                );
+                self.flex_algo_prefix_sids_built
+                    .insert(ifindex, participating.clone());
+                participating
+            }
+            None => BTreeSet::new(),
+        };
+        let algo_sids: BTreeMap<u8, super::link::PrefixSid> = self
+            .links
+            .get(&ifindex)
+            .map(|link| {
+                link.config
+                    .flex_algo_prefix_sids
+                    .iter()
+                    .filter(|(algo, _)| participating.contains(algo))
+                    .map(|(algo, sid)| (*algo, *sid))
+                    .collect()
+            })
+            .unwrap_or_default();
         let build_inputs = if self.segment_routing == SegmentRoutingMode::Mpls
             && let Some(link) = self.links.get(&ifindex)
             && link.enabled
-            && (link.config.prefix_sid.is_some() || !link.config.flex_algo_prefix_sids.is_empty())
+            && (link.config.prefix_sid.is_some() || !algo_sids.is_empty())
             && let Some(addr) = link.addr.iter().find(|a| {
                 // The SID's host prefix must be a routable global —
                 // skip fe80 (advertised via Link-LSAs) and ::1: the
@@ -11371,23 +11409,17 @@ impl Ospf<Ospfv3> {
             } else {
                 link.output_cost as u16
             };
-            Some((
-                link.area,
-                link.config.prefix_sid,
-                link.config.flex_algo_prefix_sids.clone(),
-                host,
-                metric,
-            ))
+            Some((link.area, link.config.prefix_sid, host, metric))
         } else {
             None
         };
 
-        if let Some((area_id, prefix_sid, flex_algo_sids, host, metric)) = build_inputs {
+        if let Some((area_id, prefix_sid, host, metric)) = build_inputs {
             let mut lsa = super::srmpls::ext_intra_area_prefix_v3_lsa_build(
                 self.router_id,
                 host,
                 prefix_sid.as_ref(),
-                &flex_algo_sids,
+                &algo_sids,
                 link_state_id,
                 metric,
             );
@@ -11665,6 +11697,51 @@ impl Ospf<Ospfv3> {
         }
     }
 
+    /// The OSPFv3 twin of `Ospf<Ospfv2>::flex_algo_reconcile`, per area:
+    /// bring the SR advertisements in `area_id` in line with Flexible
+    /// Algorithm participation there (RFC 9350 §5.3) when it has changed
+    /// since they were built — the SR-info E-Router-LSA's SR-Algorithm
+    /// list, and the per-algorithm Prefix-SIDs in the area's links'
+    /// E-Intra-Area-Prefix-LSAs. Called for every SPF run of the area.
+    fn flex_algo_reconcile_v3(&mut self, area_id: Ipv4Addr, participating: &BTreeSet<u8>) {
+        if self.flex_algo_advertised_in(area_id) != participating {
+            self.e_router_v3_sr_info_lsa_originate(area_id);
+        }
+        let stale: Vec<u32> = self
+            .links
+            .iter()
+            .filter(|(ifindex, link)| {
+                link.area == area_id
+                    && self.flex_algo_prefix_sids_built.get(*ifindex) != Some(participating)
+            })
+            .map(|(ifindex, _)| *ifindex)
+            .collect();
+        for ifindex in stale {
+            self.ext_intra_area_prefix_v3_lsa_originate(ifindex);
+        }
+    }
+
+    /// The OSPFv3 twin of `Ospf<Ospfv2>::flex_algo_readvertise`:
+    /// re-advertise everything a committed flex-algo, affinity-map or
+    /// SRLG change feeds — each area's definitions and SR-Algorithm list,
+    /// the per-algorithm Prefix-SIDs, the link affinities — and recompute
+    /// every area. Without this a definition edit waited for an unrelated
+    /// event to reach the wire or SPF.
+    fn flex_algo_readvertise_v3(&mut self) {
+        let area_ids: Vec<Ipv4Addr> = self.areas.iter().map(|(id, _)| *id).collect();
+        for area_id in &area_ids {
+            self.e_router_v3_sr_info_lsa_originate(*area_id);
+        }
+        let ifindexes: Vec<u32> = self.links.keys().copied().collect();
+        for ifindex in ifindexes {
+            self.ext_intra_area_prefix_v3_lsa_originate(ifindex);
+            self.e_router_v3_lsa_originate(ifindex);
+        }
+        for area_id in area_ids {
+            self.spf_schedule_area(area_id);
+        }
+    }
+
     /// Originate (or flush) the per-area E-Router-LSA carrying the
     /// RFC 8666 §3 SR capability TLVs (SR-Algorithm, SID/Label Range
     /// = SRGB, SR Local Block = SRLB) for the given area.
@@ -11683,11 +11760,20 @@ impl Ospf<Ospfv3> {
 
         let key: super::lsdb::OspfLsaKey = (OSPFV3_E_ROUTER_LSA_TYPE, SR_INFO_LSID, self.router_id);
 
+        // The SR-Algorithm list announces the Flexible Algorithms this
+        // router participates in here, not every one it is configured
+        // for: one whose winning definition it cannot support it "MUST NOT
+        // announce" (RFC 9350 §5.3).
+        let participating =
+            crate::flex_algo::selection::participating(&flex_algo_selection_v3(self, area_id));
+        self.flex_algo_advertised
+            .insert(area_id, participating.clone());
+
         let srv6 = self.srv6_active();
         if (self.segment_routing == SegmentRoutingMode::Mpls || srv6)
             && self.areas.get(area_id).is_some()
         {
-            let algos = crate::flex_algo::sr_algorithms(&self.flex_algo);
+            let algos = crate::flex_algo::sr_algorithms_for(&participating);
             let fads = super::flex_algo::build_fad_v3(
                 &self.flex_algo,
                 &self.affinity_map,
@@ -14822,6 +14908,73 @@ fn graph_v3(top: &mut Ospf<Ospfv3>, area_id: Ipv4Addr) -> (spf::Graph, Option<us
     (graph, source_node)
 }
 
+/// Every other router's Flexible Algorithm Definitions in `area`, from
+/// its E-Router-LSAs — where zebra-rs's OSPFv3 carries its SR
+/// capabilities — one per algorithm: the first occurrence across them, in
+/// ascending Link State ID (as RFC 9350 §5.2 orders Router Information
+/// instances). MaxAge LSAs are gone.
+fn flex_algo_peer_fads_v3(
+    area: &OspfArea<Ospfv3>,
+    self_id: Ipv4Addr,
+) -> BTreeMap<Ipv4Addr, BTreeMap<u8, crate::flex_algo::selection::Fad>> {
+    use crate::ospf::lsdb::OSPF_MAX_AGE;
+    use ospf_packet::{OSPFV3_E_ROUTER_LSA_TYPE, Ospfv3ExtTlv, Ospfv3LsBody};
+
+    let mut by_router: BTreeMap<Ipv4Addr, Vec<(u32, crate::flex_algo::selection::Fad)>> =
+        BTreeMap::new();
+    for ((ls_id, adv_router), lsa) in area.lsdb.iter_by_raw_type(OSPFV3_E_ROUTER_LSA_TYPE) {
+        if adv_router == self_id || lsa.data.h.ls_age >= OSPF_MAX_AGE {
+            continue;
+        }
+        let Ospfv3LsBody::ERouter(ref body) = lsa.data.body else {
+            continue;
+        };
+        let fads = by_router.entry(adv_router).or_default();
+        for tlv in &body.tlvs {
+            if let Ospfv3ExtTlv::Fad(fad) = tlv {
+                fads.push((ls_id, super::flex_algo::fad_view_v3(fad)));
+            }
+        }
+    }
+    by_router
+        .into_iter()
+        .map(|(router, mut fads)| {
+            fads.sort_by_key(|(ls_id, _)| *ls_id);
+            let fads = fads.into_iter().map(|(_, fad)| fad);
+            (router, crate::flex_algo::selection::first_fads(fads))
+        })
+        .collect()
+}
+
+/// The OSPFv3 twin of [`flex_algo_selection`]: winning-definition
+/// selection (RFC 9350 §5.3) for every configured algorithm in
+/// `area_id`, from every other router's definitions there and this
+/// router's own where it advertises them — in the area's SR-info
+/// E-Router-LSA, originated while SR-MPLS or SRv6 is on.
+pub(crate) fn flex_algo_selection_v3(
+    top: &Ospf<Ospfv3>,
+    area_id: Ipv4Addr,
+) -> BTreeMap<u8, crate::flex_algo::selection::FadSelection<Ipv4Addr>> {
+    use super::srmpls::SegmentRoutingMode;
+    let Some(area) = top.areas.get(area_id) else {
+        return BTreeMap::new();
+    };
+    let peers = flex_algo_peer_fads_v3(area, top.router_id);
+    let own = if top.segment_routing == SegmentRoutingMode::Mpls || top.srv6_active() {
+        let fads =
+            super::flex_algo::build_fad_v3(&top.flex_algo, &top.affinity_map, &top.srlg_groups);
+        crate::flex_algo::selection::first_fads(fads.iter().map(super::flex_algo::fad_view_v3))
+    } else {
+        BTreeMap::new()
+    };
+    crate::flex_algo::selection::fad_selection(
+        top.flex_algo.config.keys().copied(),
+        &peers,
+        &own,
+        top.router_id,
+    )
+}
+
 /// OSPFv3 analog of `flex_algo_participants`: the set of routers that
 /// advertise participation in `algo` via the SR-Algorithm TLV in their
 /// E-Router-LSA (the per-router SR-info LSA at `SR_INFO_LSID`).
@@ -14922,7 +15075,7 @@ fn graph_v3_flex_algo(
     top: &mut Ospf<Ospfv3>,
     area_id: Ipv4Addr,
     algo: u8,
-    entry: &crate::flex_algo::FlexAlgoEntry,
+    constraints: &crate::flex_algo::FadConstraints,
 ) -> (spf::Graph, Option<usize>) {
     use crate::ospf::lsdb::OSPF_MAX_AGE;
     use ospf_packet::{
@@ -14941,7 +15094,7 @@ fn graph_v3_flex_algo(
     // RFC 9350 §5.1 metric-type 1 costs edges on the advertised Min
     // delay instead of the IGP metric. The join table is built only for
     // that metric-type — the IGP path never consults it.
-    let use_delay = entry.metric_type == Some(crate::flex_algo::FadMetricType::MinUnidirLinkDelay);
+    let use_delay = constraints.metric_type == crate::flex_algo::FadMetricType::MinUnidirLinkDelay;
     let link_delay = if use_delay {
         flex_algo_link_delay_v3(area)
     } else {
@@ -14996,8 +15149,13 @@ fn graph_v3_flex_algo(
                 // link with no advertised ASLA resolves to `None` =
                 // empty bitmap (rejected by include-any, passed by
                 // exclude-only), per RFC 9350 §7.
-                let affinity = link_affinity.get(&(*adv_router, link.interface_id));
-                if !crate::flex_algo::link_passes_fad(affinity, entry, &top.affinity_map) {
+                let attrs = crate::flex_algo::LinkAttrs {
+                    affinity: link_affinity
+                        .get(&(*adv_router, link.interface_id))
+                        .cloned(),
+                    loss: None,
+                };
+                if crate::flex_algo::link_prune_reason(&attrs, constraints).is_some() {
                     continue;
                 }
                 // A link advertising no delay MUST NOT be used by a
@@ -15097,19 +15255,24 @@ fn build_v3_spf_input(top: &mut Ospf<Ospfv3>, area_id: Ipv4Addr) -> Option<SpfIn
     let (graph, source_node) = graph_v3(top, area_id);
     let source = source_node?;
 
-    // Snapshot the configured algos so the per-algo graph build can
-    // take `&mut top` without holding a borrow on `top.flex_algo`
-    // (mirrors v2's `build_spf_input`).
-    let algos: Vec<(u8, crate::flex_algo::FlexAlgoEntry)> = top
-        .flex_algo
-        .config
+    // One graph per configured algorithm this router participates in
+    // here, computed with the winning definition's constraints (RFC 9350
+    // §5.3). An algorithm it does not participate in gets no graph, so
+    // the RIB and label diffs withdraw its routes: "it MUST remove any
+    // forwarding state associated with it".
+    let selection = flex_algo_selection_v3(top, area_id);
+    top.flex_algo_reconcile_v3(
+        area_id,
+        &crate::flex_algo::selection::participating(&selection),
+    );
+    let algos: Vec<(u8, crate::flex_algo::FadConstraints)> = selection
         .iter()
-        .map(|(algo, entry)| (*algo, entry.clone()))
+        .filter_map(|(algo, sel)| Some((*algo, sel.participation.constraints()?.clone())))
         .collect();
     let flex_algos = algos
         .iter()
-        .map(|(algo, entry)| {
-            let (graph, source) = graph_v3_flex_algo(top, area_id, *algo, entry);
+        .map(|(algo, constraints)| {
+            let (graph, source) = graph_v3_flex_algo(top, area_id, *algo, constraints);
             FlexAlgoSpfInput {
                 algo: *algo,
                 graph,
@@ -17489,7 +17652,7 @@ mod test_support {
             spf_flex_algo: BTreeMap::new(),
             rib_flex_algo: BTreeMap::new(),
             rib6_flex_algo: BTreeMap::new(),
-            flex_algo_advertised: BTreeSet::new(),
+            flex_algo_advertised: BTreeMap::new(),
             flex_algo_prefix_sids_built: BTreeMap::new(),
             rib: PrefixMap::new(),
             rib_areas: BTreeMap::new(),
@@ -18032,7 +18195,7 @@ mod flex_algo_selection_tests {
             }
             let input = build_spf_input(&mut top, AREA0).expect("own router LSA");
             assert!(input.flex_algos.is_empty());
-            assert!(!top.flex_algo_advertised.contains(&128));
+            assert!(!top.flex_algo_advertised_in(AREA0).contains(&128));
             let prefix = top.areas.get(AREA0).unwrap().lsdb.lookup_by_id(
                 OspfLsType::OpaqueAreaLocal,
                 prefix_id,
@@ -18098,7 +18261,10 @@ mod flex_algo_selection_tests {
             top.ext_prefix_lsa_originate(7);
             let input = build_spf_input(&mut top, AREA0).expect("own router LSA");
             assert_eq!(!input.flex_algos.is_empty(), participates);
-            assert_eq!(top.flex_algo_advertised.contains(&128), participates);
+            assert_eq!(
+                top.flex_algo_advertised_in(AREA0).contains(&128),
+                participates
+            );
             for ifindex in [7, 8] {
                 let id = Ipv4Addr::from(((OpaqueLsaType::EXT_PREFIX as u32) << 24) | ifindex);
                 let advertised = top
@@ -18147,7 +18313,7 @@ mod flex_algo_selection_tests {
             .lsdb
             .install_lsa(lsa, &top.tx, Some(AREA0), &top.tracing);
         top.router_info_lsa_originate();
-        assert!(top.flex_algo_advertised.contains(&128));
+        assert!(top.flex_algo_advertised_in(AREA0).contains(&128));
         assert!(top.areas.get(AREA0).unwrap().spf_timer.is_none());
 
         top.process_lsdb(LsdbEvent::HoldTimerExpire, Some(AREA0), key);
@@ -18160,6 +18326,298 @@ mod flex_algo_selection_tests {
             scheduled,
             "the winning definition expired, and nothing recomputes"
         );
+    }
+}
+
+#[cfg(test)]
+mod v3_flex_algo_selection_tests {
+    use super::test_support::fresh_ospf_v3;
+    use super::*;
+    use crate::config::{Args, ConfigOp, ConfigRequest};
+    use crate::ospf::lsdb::OSPF_MAX_AGE;
+    use ospf_packet::{
+        OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE, OSPFV3_E_ROUTER_LSA_TYPE, Ospfv3ExtTlv, Ospfv3FadTlv,
+        Ospfv3LsBody,
+    };
+
+    const AREA1: Ipv4Addr = Ipv4Addr::new(0, 0, 0, 1);
+
+    fn rid(n: u8) -> Ipv4Addr {
+        Ipv4Addr::new(10, 0, 0, n)
+    }
+
+    fn fad(algo: u8, priority: u8, calc_type: u8) -> Ospfv3FadTlv {
+        Ospfv3FadTlv {
+            flex_algorithm: algo,
+            metric_type: 0,
+            calc_type,
+            priority,
+            subs: Vec::new(),
+            trailing: Vec::new(),
+        }
+    }
+
+    /// Install `router`'s E-Router-LSA `ls_id` in `area_id`, carrying `fads`.
+    fn install_e_router(
+        top: &mut Ospf<Ospfv3>,
+        area_id: Ipv4Addr,
+        router: Ipv4Addr,
+        ls_id: u32,
+        fads: Vec<Ospfv3FadTlv>,
+        age: u16,
+    ) {
+        let mut lsa = super::super::srmpls::e_router_v3_sr_info_lsa_build(
+            router,
+            vec![Algo::Spf],
+            fads,
+            false,
+        );
+        lsa.h.link_state_id = ls_id;
+        lsa.h.ls_age = age;
+        lsa.update();
+        let tx = top.tx.clone();
+        let tracing = top.tracing.clone();
+        top.areas
+            .fetch(area_id)
+            .lsdb
+            .install_lsa(lsa, &tx, Some(area_id), &tracing);
+    }
+
+    /// An enabled interface `ifindex` in `area_id` with a global address
+    /// and an algorithm-128 Prefix-SID.
+    fn add_link(top: &mut Ospf<Ospfv3>, ifindex: u32, area_id: Ipv4Addr) {
+        let mut link = OspfLink::from(
+            top.tx.clone(),
+            crate::rib::Link::from(crate::fib::message::FibLink {
+                index: ifindex,
+                name: format!("probe{ifindex}"),
+                mtu: 1500,
+                ..Default::default()
+            }),
+            top.sock.clone(),
+            top.router_id,
+            top.ptx.clone(),
+        );
+        link.enabled = true;
+        // Both, as enabling an interface in an area sets them.
+        link.area = area_id;
+        link.area_id = area_id;
+        link.addr.push(super::super::addr::OspfAddr {
+            prefix: format!("2001:db8::{ifindex}/128").parse().unwrap(),
+            secondary: false,
+        });
+        link.config
+            .flex_algo_prefix_sids
+            .insert(128, super::super::link::PrefixSid::Index(ifindex + 128));
+        top.links.insert(ifindex, link);
+        top.areas.fetch(area_id).links.insert(ifindex);
+    }
+
+    /// A router participating in algorithm 128, running SR-MPLS.
+    fn sr_router() -> Ospf<Ospfv3> {
+        let mut top = fresh_ospf_v3();
+        top.router_id = rid(1);
+        top.segment_routing = super::super::srmpls::SegmentRoutingMode::Mpls;
+        top.flex_algo.config.insert(128, Default::default());
+        top
+    }
+
+    /// The SR-Algorithm list of our SR-info E-Router-LSA in `area_id`.
+    fn announced(top: &Ospf<Ospfv3>, area_id: Ipv4Addr) -> Vec<Algo> {
+        let key = (
+            OSPFV3_E_ROUTER_LSA_TYPE,
+            super::super::srmpls::SR_INFO_LSID,
+            top.router_id,
+        );
+        let lsa = top.areas.get(area_id).unwrap().lsdb.lookup_by_raw_key(key);
+        let Some(Ospfv3LsBody::ERouter(body)) = lsa.map(|lsa| &lsa.body) else {
+            return Vec::new();
+        };
+        body.tlvs
+            .iter()
+            .find_map(|tlv| match tlv {
+                Ospfv3ExtTlv::SrAlgorithm(a) => Some(a.algos.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    /// Whether interface `ifindex`'s E-Intra-Area-Prefix-LSA is advertised.
+    fn prefix_advertised(top: &Ospf<Ospfv3>, area_id: Ipv4Addr, ifindex: u32) -> bool {
+        let key = (OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE, ifindex, top.router_id);
+        top.areas
+            .get(area_id)
+            .unwrap()
+            .lsdb
+            .lookup_by_raw_key(key)
+            .is_some_and(|lsa| lsa.h.ls_age < OSPF_MAX_AGE)
+    }
+
+    /// Each other router's definitions come from its E-Router-LSAs, the
+    /// first occurrence across them in ascending Link State ID, whichever
+    /// order they were installed in. A MaxAge LSA's are gone, and this
+    /// router's own are not a peer's.
+    #[tokio::test]
+    async fn peer_definitions_are_read_from_e_router_lsas() {
+        let mut top = sr_router();
+        install_e_router(&mut top, AREA0, rid(2), 1, vec![fad(128, 100, 0)], 0);
+        install_e_router(
+            &mut top,
+            AREA0,
+            rid(2),
+            0,
+            vec![fad(128, 200, 0), fad(129, 50, 0)],
+            0,
+        );
+        install_e_router(
+            &mut top,
+            AREA0,
+            rid(3),
+            0,
+            vec![fad(128, 250, 0)],
+            OSPF_MAX_AGE,
+        );
+        install_e_router(&mut top, AREA0, rid(1), 0, vec![fad(128, 255, 0)], 0);
+
+        let peers = flex_algo_peer_fads_v3(top.areas.get(AREA0).unwrap(), rid(1));
+        assert_eq!(peers.keys().copied().collect::<Vec<_>>(), vec![rid(2)]);
+        assert_eq!(peers[&rid(2)][&128].priority, 200, "LS-ID 0 comes first");
+        assert_eq!(peers[&rid(2)][&129].priority, 50);
+    }
+
+    /// This router's own definition is a candidate where it advertises it:
+    /// in the SR-info E-Router-LSA, originated while Segment Routing is on.
+    #[tokio::test]
+    async fn the_own_definition_counts_where_it_is_advertised() {
+        let mut top = sr_router();
+        top.flex_algo.config.insert(
+            128,
+            crate::flex_algo::FlexAlgoEntry {
+                advertise_definition: Some(true),
+                priority: Some(100),
+                ..Default::default()
+            },
+        );
+        let winner = flex_algo_selection_v3(&top, AREA0)[&128].winner.clone();
+        assert_eq!(winner.map(|w| w.originator), Some(rid(1)));
+
+        top.segment_routing = super::super::srmpls::SegmentRoutingMode::None;
+        assert!(flex_algo_selection_v3(&top, AREA0)[&128].winner.is_none());
+    }
+
+    /// Participation is decided in each area from that area's definitions,
+    /// and announced there: the SR-Algorithm list of the area's SR-info
+    /// LSA, the per-algorithm Prefix-SIDs of its interfaces, and the
+    /// algorithm's topology.
+    #[tokio::test]
+    async fn participation_is_decided_in_each_area() {
+        let mut top = sr_router();
+        add_link(&mut top, 7, AREA0);
+        add_link(&mut top, 8, AREA1);
+        top.router_lsa_originate();
+        for area_id in [AREA0, AREA1] {
+            top.e_router_v3_sr_info_lsa_originate(area_id);
+            assert_eq!(
+                announced(&top, area_id),
+                vec![Algo::Spf],
+                "no definition yet"
+            );
+        }
+        install_e_router(&mut top, AREA0, rid(2), 0, vec![fad(128, 200, 0)], 0);
+        install_e_router(&mut top, AREA1, rid(3), 0, vec![fad(128, 200, 1)], 0);
+
+        for (area_id, ifindex, participates) in [(AREA0, 7, true), (AREA1, 8, false)] {
+            let input = build_v3_spf_input(&mut top, area_id).expect("own router LSA");
+            assert_eq!(!input.flex_algos.is_empty(), participates, "area {area_id}");
+            assert_eq!(
+                top.flex_algo_advertised_in(area_id).contains(&128),
+                participates
+            );
+            let algos = if participates {
+                vec![Algo::Spf, Algo::FlexAlgo(128)]
+            } else {
+                vec![Algo::Spf]
+            };
+            assert_eq!(announced(&top, area_id), algos, "area {area_id}");
+            assert_eq!(prefix_advertised(&top, area_id, ifindex), participates);
+        }
+
+        // With nothing changed, another run of either area's SPF
+        // re-originates nothing, in its own area or the other.
+        let sequences = |top: &Ospf<Ospfv3>| {
+            let sr_info = super::super::srmpls::SR_INFO_LSID;
+            [
+                (AREA0, (OSPFV3_E_ROUTER_LSA_TYPE, sr_info, rid(1))),
+                (AREA1, (OSPFV3_E_ROUTER_LSA_TYPE, sr_info, rid(1))),
+                (AREA0, (OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE, 7, rid(1))),
+            ]
+            .map(|(area_id, key)| {
+                let lsdb = &top.areas.get(area_id).unwrap().lsdb;
+                lsdb.lookup_by_raw_key(key).map(|lsa| lsa.h.ls_seq_number)
+            })
+        };
+        let before = sequences(&top);
+        for area_id in [AREA1, AREA0] {
+            build_v3_spf_input(&mut top, area_id).expect("own router LSA");
+        }
+        assert_eq!(sequences(&top), before);
+    }
+
+    /// Refreshing one interface's E-Intra-Area-Prefix-LSA before SPF must
+    /// not swallow another interface's pending withdrawal — participation
+    /// is tracked per link — and both get their Prefix-SIDs back when a
+    /// supported definition returns.
+    #[tokio::test]
+    async fn a_single_link_refresh_does_not_hide_another_links_withdrawal() {
+        let mut top = sr_router();
+        add_link(&mut top, 7, AREA0);
+        add_link(&mut top, 8, AREA0);
+        top.router_lsa_originate();
+        for (calc_type, participates) in [(0, true), (1, false), (0, true)] {
+            install_e_router(
+                &mut top,
+                AREA0,
+                rid(2),
+                0,
+                vec![fad(128, 200, calc_type)],
+                0,
+            );
+            // An independent interface update occurs before the scheduled SPF.
+            top.ext_intra_area_prefix_v3_lsa_originate(7);
+            let input = build_v3_spf_input(&mut top, AREA0).expect("own router LSA");
+            assert_eq!(!input.flex_algos.is_empty(), participates);
+            for ifindex in [7, 8] {
+                assert_eq!(
+                    prefix_advertised(&top, AREA0, ifindex),
+                    participates,
+                    "interface {ifindex}, calc type {calc_type}"
+                );
+            }
+            let mut ilm = BTreeMap::new();
+            add_self_prefix_sids_to_ilm_v3(&top, &mut ilm);
+            for ifindex in [7, 8] {
+                assert_eq!(
+                    ilm.contains_key(&(super::super::srmpls::SRGB_START + 128 + ifindex)),
+                    participates
+                );
+            }
+        }
+    }
+
+    /// A committed definition reaches the wire at once: advertising one
+    /// makes this router's own the winner, announced with participation.
+    #[tokio::test]
+    async fn a_committed_definition_is_advertised_at_once() {
+        let mut top = sr_router();
+        add_link(&mut top, 7, AREA0);
+        assert!(announced(&top, AREA0).is_empty());
+        let _ = top.flex_algo.exec(
+            "/router/ospfv3/flex-algo/advertise-definition".into(),
+            Args(["128", "true"].iter().map(|s| s.to_string()).collect()),
+            ConfigOp::Set,
+        );
+        top.process_cm_msg(ConfigRequest::new(Vec::new(), ConfigOp::CommitEnd));
+        assert!(announced(&top, AREA0).contains(&Algo::FlexAlgo(128)));
     }
 }
 

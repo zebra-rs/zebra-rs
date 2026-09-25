@@ -1919,7 +1919,7 @@ struct FlexAlgoJson {
 }
 
 #[derive(Serialize)]
-struct FlexAlgoSelectionJson {
+pub(super) struct FlexAlgoSelectionJson {
     area: String,
     winner: Option<FadWinnerJson>,
     participating: bool,
@@ -1928,7 +1928,7 @@ struct FlexAlgoSelectionJson {
 }
 
 #[derive(Serialize)]
-struct FadWinnerJson {
+pub(super) struct FadWinnerJson {
     router_id: String,
     /// This router's own advertised definition.
     local: bool,
@@ -1937,18 +1937,83 @@ struct FadWinnerJson {
     calc_type: u8,
 }
 
-/// Winning-definition selection per area for every configured algorithm:
-/// `(area, algo) → selection`.
-fn flex_algo_selections(
-    ospf: &Ospf,
-) -> Vec<(
+/// Per area, the winning-definition selection for every configured
+/// algorithm: `(area, algo → selection)`.
+pub(super) type FlexAlgoSelections = Vec<(
     Ipv4Addr,
     std::collections::BTreeMap<u8, crate::flex_algo::selection::FadSelection<Ipv4Addr>>,
-)> {
+)>;
+
+/// Winning-definition selection per area for every configured algorithm.
+fn flex_algo_selections(ospf: &Ospf) -> FlexAlgoSelections {
     ospf.areas
         .iter()
         .map(|(area_id, _)| (*area_id, super::inst::flex_algo_selection(ospf, *area_id)))
         .collect()
+}
+
+/// `algo`'s selection in each area, for `show ... flex-algo json`.
+pub(super) fn flex_algo_selection_json(
+    selections: &FlexAlgoSelections,
+    algo: u8,
+    router_id: Ipv4Addr,
+) -> Vec<FlexAlgoSelectionJson> {
+    selections
+        .iter()
+        .filter_map(|(area, sel)| {
+            let sel = sel.get(&algo)?;
+            let (participating, reason) = participation_state(&sel.participation);
+            Some(FlexAlgoSelectionJson {
+                area: area.to_string(),
+                winner: sel.winner.as_ref().map(|w| FadWinnerJson {
+                    router_id: w.originator.to_string(),
+                    local: w.originator == router_id,
+                    priority: w.fad.priority,
+                    metric_type: w.fad.metric_type,
+                    calc_type: w.fad.calc_type,
+                }),
+                participating,
+                reason,
+            })
+        })
+        .collect()
+}
+
+/// The definition `algo` is computed with in each area (RFC 9350 §5.3),
+/// who advertised it, and whether this router participates — one line
+/// per area, for `show ... flex-algo`.
+pub(super) fn flex_algo_selection_text(
+    buf: &mut String,
+    selections: &FlexAlgoSelections,
+    algo: u8,
+    router_id: Ipv4Addr,
+) -> std::fmt::Result {
+    use std::fmt::Write;
+    for (area, sel) in selections {
+        let Some(sel) = sel.get(&algo) else {
+            continue;
+        };
+        let state = match participation_state(&sel.participation) {
+            (true, _) => "participating".to_string(),
+            (false, why) => format!("not participating: {}", why.unwrap_or_default()),
+        };
+        match &sel.winner {
+            Some(w) => {
+                let local = if w.originator == router_id {
+                    ", this router"
+                } else {
+                    ""
+                };
+                writeln!(
+                    buf,
+                    "  Area {area}: definition from {}{local}, priority {}; {state}",
+                    w.originator, w.fad.priority
+                )?;
+            }
+            None => writeln!(buf, "  Area {area}: {state}")?,
+        }
+    }
+    Ok(())
 }
 
 /// `participating`, or `not participating: <why>`.
@@ -1977,25 +2042,7 @@ fn show_ospf_flex_algo(
     if json {
         let mut algos = Vec::new();
         for (algo, entry) in &ospf.flex_algo.config {
-            let selection = selections
-                .iter()
-                .filter_map(|(area, sel)| {
-                    let sel = sel.get(algo)?;
-                    let (participating, reason) = participation_state(&sel.participation);
-                    Some(FlexAlgoSelectionJson {
-                        area: area.to_string(),
-                        winner: sel.winner.as_ref().map(|w| FadWinnerJson {
-                            router_id: w.originator.to_string(),
-                            local: w.originator == ospf.router_id,
-                            priority: w.fad.priority,
-                            metric_type: w.fad.metric_type,
-                            calc_type: w.fad.calc_type,
-                        }),
-                        participating,
-                        reason,
-                    })
-                })
-                .collect();
+            let selection = flex_algo_selection_json(&selections, *algo, ospf.router_id);
             let set_vec =
                 |s: &std::collections::BTreeSet<String>| s.iter().cloned().collect::<Vec<_>>();
             let (spf_reachable_nodes, spf_status) = match ospf.spf_flex_algo.get(algo) {
@@ -2056,33 +2103,7 @@ fn show_ospf_flex_algo(
             "  Advertise-Definition: {}",
             entry.advertise_definition.unwrap_or(false)
         )?;
-        // The definition this algorithm is computed with in each area
-        // (RFC 9350 §5.3), who advertised it, and whether this router
-        // participates.
-        for (area, sel) in &selections {
-            let Some(sel) = sel.get(algo) else {
-                continue;
-            };
-            let state = match participation_state(&sel.participation) {
-                (true, _) => "participating".to_string(),
-                (false, why) => format!("not participating: {}", why.unwrap_or_default()),
-            };
-            match &sel.winner {
-                Some(w) => {
-                    let local = if w.originator == ospf.router_id {
-                        ", this router"
-                    } else {
-                        ""
-                    };
-                    writeln!(
-                        buf,
-                        "  Area {area}: definition from {}{local}, priority {}; {state}",
-                        w.originator, w.fad.priority
-                    )?;
-                }
-                None => writeln!(buf, "  Area {area}: {state}")?,
-            }
-        }
+        flex_algo_selection_text(&mut buf, &selections, *algo, ospf.router_id)?;
         if !entry.include_any.is_empty() {
             writeln!(buf, "  Affinity Include-Any: {}", names(&entry.include_any))?;
         }

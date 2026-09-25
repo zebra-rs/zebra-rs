@@ -97,6 +97,35 @@ per-interface `flex-algo-prefix-sid` list (algo 128..255), and link
 affinities from the `affinity` leaf-list on participating
 interfaces. `metric-type` selects `igp`,
 `min-unidir-link-delay`, or `te-default`; `priority` (default 128)
-orders competing FAD advertisements. State is visible under
-`show ospfv3 flex-algo`. The definition shape is identical to
-OSPFv2's — only the carrier LSA differs.
+orders competing FAD advertisements. The definition shape is identical
+to OSPFv2's — only the carrier LSA differs.
+
+**What a router computes with is the winning definition**, selected in
+each area as OSPFv2 does (RFC 9350 §5.3; see
+[OSPF Segment Routing](ch-08-09-ospf-segment-routing.md#flexible-algorithm)):
+the highest `priority` among the definitions advertised in the area,
+then the highest Router ID. This router's own definition is a candidate
+in every area it advertises it in — its SR-info E-Router-LSA, originated
+while SR-MPLS or SRv6 is on. Participation is decided per area: in an
+area whose winner it cannot support, or where no definition is
+advertised, the router drops the algorithm from that area's SR-Algorithm
+list, stops advertising the algorithm's Prefix-SIDs on the area's
+interfaces, and computes no topology for it there. Definition edits take
+effect at commit.
+
+`show ospfv3 flex-algo` shows, for each algorithm and area, the
+definition it is computed with and whether this router participates:
+
+```
+Flex-Algorithm 128
+  Metric-Type: igp
+  Priority: 100
+  Advertise-Definition: true
+  Area 0.0.0.0: definition from 10.0.0.2, priority 200; participating
+```
+
+zebra-rs carries OSPFv3 SR capabilities — the SR-Algorithm list, SRGB,
+SRLB and definitions — in an E-Router-LSA, not the OSPFv3 Router
+Information LSA (RFC 7770) that RFC 8666 and RFC 9350 specify, so OSPFv3
+Segment Routing and Flexible Algorithm interoperate between zebra-rs
+routers only.

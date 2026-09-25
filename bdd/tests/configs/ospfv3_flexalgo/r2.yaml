@@ -1,0 +1,54 @@
+# r2 — advertises algorithm 128 at priority 200, excluding blue: the r1-r2
+# link. Every router computes with this one.
+affinity-map:
+  affinity:
+  - name: blue
+    bit-position: 0
+  - name: red
+    bit-position: 1
+
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::2/128
+- if-name: r2-r1
+  ipv6:
+    address: 2001:db8:12::2/64
+- if-name: r2-r3
+  ipv6:
+    address: 2001:db8:23::2/64
+
+router:
+  ospfv3:
+    router-id: 10.0.0.2
+    segment-routing:
+      mpls: {}
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+        prefix-sid:
+          index: 2
+        flex-algo-prefix-sid:
+        - algo: 128
+          index: 1282
+      - if-name: r2-r1
+        enabled: true
+        network-type: point-to-point
+        cost: 10
+        affinity:
+        - blue
+      - if-name: r2-r3
+        enabled: true
+        network-type: point-to-point
+        cost: 10
+    flex-algo:
+    - algo: 128
+      advertise-definition: true
+      priority: 200
+      dataplane:
+        sr-mpls: true
+      affinity:
+        exclude-any:
+        - blue
