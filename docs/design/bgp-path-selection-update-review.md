@@ -17,8 +17,8 @@ follow-ups), #7 (PR #2380, `d7476601`), #8 and with it #13 (PR #2383,
 `d72a06af`, eight review rounds folded in), #9 (PR #2405, `31f7458a`),
 #15 (PR #2413, `097ce15d`), #11 (PR #2415, `3401cb1b`), #12 (PR #2417,
 `4ba79217`) and the item found while fixing #12 (PR #2418, `6b53ad6a`).
-Each fixed entry ends with its fix note; everything else is open. In
-progress: #14 (the plain fan-out advertised a multipath member), branch
+Each fixed entry ends with its fix note; everything else is open. #14
+(the plain fan-out advertised a multipath member) is fixed on branch
 `bgp-fanout-advertises-winner`.
 
 Method: one lead read the selection ladder and every egress builder, then
@@ -970,7 +970,7 @@ cap. The two reviews agree on every overlapping item.
   `vpnv6_transit_label_tests`, plus the `signature_fields_each_distinguish`
   rows.
 
-### 14. P2 CONFIRMED (probe) — with `maximum-paths > 1` the plain fan-out advertises a multipath member, not the winner
+### 14. P2 CONFIRMED (probe), FIXED on branch `bgp-fanout-advertises-winner` — with `maximum-paths > 1` the plain fan-out advertises a multipath member, not the winner
 
 - `select_best_path` pushes the winner first (`route.rs:2211`) and the
   ECMP members after it (`2266`); every plain fan-out takes
@@ -1014,6 +1014,20 @@ cap. The two reviews agree on every overlapping item.
   AS, different next-hops) announce one prefix tagged 65071:2 and
   65071:3; z1 installs both under `maximum-paths 2` with h1 best (lower
   BGP Identifier). On `main` both twins fail: z2 holds 65071:3.
+- FIXED (branch `bgp-fanout-advertises-winner`): every reader of a
+  selection result takes the first entry — `route_advertise_batch`, the
+  parallel precompute, `fan_advertise_to_groups` / `fan_advertise_to_pets`
+  (the env-gated gate-on engines), `route_advertise_labeled`, and, for
+  consistency, the single-path EVPN / MUP / Flowspec fan-outs, the EVPN
+  export and the two EVPN Type-5 NHT re-imports in `inst.rs`. On the fix
+  the five unit gates pass; reverting the batch fan-out fails the v4 /
+  v6 gates, reverting the precompute fails its gate, reverting the
+  labeled-unicast fan-out fails the v4lu gate. Both BDD twins pass;
+  `bgp_multipath`, `bgp_unnumbered_multipath`, `bgp_lu_rr_transit_label`,
+  `bgp_lu_addpath_resend`, `bgp_update_group_source_withdraw` (+`_v6`),
+  `bgp_update_group_live_policy_out`, `bgp_evpn_srv6_type5`,
+  `bgp_vrf_evpn_type5`, `l3vpn_bgp_v4` / `_v6`, `bgp_mup_e2e` and the
+  basic eBGP / route-reflector features stay green.
 
 ### 15. P2 CONFIRMED (probe), worse than recorded, FIXED in #2413 — advertise-cache forward/reverse desync leaves a phantom route that is never withdrawn
 

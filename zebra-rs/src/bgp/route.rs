@@ -4509,7 +4509,7 @@ fn precompute_ipv4_advertise_outcomes(
                 if job.rd.is_some() {
                     return memo;
                 }
-                let Some(best) = job.selected.last() else {
+                let Some(best) = job.selected.first() else {
                     return memo;
                 };
                 for (gid, (members, add_path)) in groups.iter() {
@@ -5303,7 +5303,7 @@ pub(super) fn fib_pending_release_v4(
 /// as an `Advertise`, or a `Withdraw` when the prefix is gone. Non-best
 /// AddPath candidates (`route_advertise_batch_addpath`) are a follow-on.
 fn fan_advertise_to_pets(prefix: Ipv4Net, selected: &[BgpRib], peers: &PeerMap) {
-    let new_best = selected.last();
+    let new_best = selected.first();
     for ident in peers.established_plain_idents(Afi::Ip, Safi::Unicast) {
         let Some(peer) = peers.get_by_idx(ident) else {
             continue;
@@ -5336,7 +5336,7 @@ fn fan_advertise_to_groups(
     peers: &PeerMap,
 ) {
     let afi_safi = AfiSafi::new(Afi::Ip, Safi::Unicast);
-    let new_best = selected.last();
+    let new_best = selected.first();
     let mut seen: std::collections::BTreeSet<super::update_group::UpdateGroupId> =
         std::collections::BTreeSet::new();
     for ident in peers.established_plain_idents(Afi::Ip, Safi::Unicast) {
@@ -5983,7 +5983,11 @@ fn route_advertise_batch<A: BatchAfi>(
     peers: &mut PeerMap,
     mut memo: BTreeMap<super::update_group::UpdateGroupId, AdvertiseOutcome<A::Nlri>>,
 ) {
-    let new_best = selected.last();
+    // `select_best_path` returns the winner first and any multipath
+    // members after it; a plain neighbor is sent the winner. (Every plain
+    // fan-out used to take `.last()` — from when `selected` was a change
+    // history — so with `maximum-paths > 1` it advertised an ECMP member.)
+    let new_best = selected.first();
     let (afi, safi) = A::afi_safi(rd);
     let afi_safi = AfiSafi::new(afi, safi);
     let peer_idents: Vec<usize> = peers.established_plain_idents(afi, safi);
@@ -6979,7 +6983,7 @@ pub fn route_advertise_evpn_to_peers(
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
 ) {
-    let Some(new_best) = selected.last() else {
+    let Some(new_best) = selected.first() else {
         return;
     };
 
@@ -9415,8 +9419,9 @@ fn route_evpn_export_selected(
         return;
     }
 
-    // Extract best path (last entry in selected vector)
-    let best = &selected[selected.len() - 1];
+    // The winner is the first entry (`select_best_path` puts any
+    // multipath members after it).
+    let best = &selected[0];
 
     match prefix {
         EvpnPrefix::MacIp { mac, .. } => {
@@ -10644,7 +10649,7 @@ pub fn route_advertise_mup_to_peers(
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
 ) {
-    let Some(new_best) = selected.last() else {
+    let Some(new_best) = selected.first() else {
         return;
     };
     let afi = prefix.afi();
@@ -12199,7 +12204,7 @@ fn route_flowspec_propagate(
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
 ) {
-    let Some(best) = selected.last() else {
+    let Some(best) = selected.first() else {
         route_withdraw_flowspec_to_peers(afi, nlri, peers);
         return;
     };
@@ -15118,7 +15123,7 @@ fn route_advertise_labeled<A: LabeledAfi>(
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
 ) {
-    let new_best = selected.last();
+    let new_best = selected.first();
     let (afi, safi) = (A::AFI, Safi::MplsLabel);
 
     // Non-AddPath members: best-path only.
@@ -25425,7 +25430,7 @@ mod tests {
         // the selected clone (what mup_advertise_one receives) carries it.
         let mut locrib = super::LocalRibMupTable::default();
         let (_, selected, _) = locrib.update(prefix.clone(), rib);
-        let best = selected.last().expect("path selected");
+        let best = selected.first().expect("path selected");
         assert!(best.local_id >= 1);
 
         // Advertise: the Adj-RIB-Out entry must be re-keyed to the
