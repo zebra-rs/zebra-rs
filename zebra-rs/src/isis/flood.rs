@@ -219,7 +219,7 @@ pub fn srm_advertise(top: &mut LinkTop, level: Level, ifindex: u32) {
                     Packet::Bytes(buf),
                     ifindex,
                     level,
-                    top.dest(level),
+                    top.dest(),
                 ));
             }
         }

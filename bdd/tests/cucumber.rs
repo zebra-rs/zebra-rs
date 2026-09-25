@@ -2338,23 +2338,14 @@ async fn isis_database_not_has_lsp_from(
     );
 }
 
-/// Extract the IS-IS Hello frames from a classic-format pcap byte
-/// stream as `(on-wire length, Ethernet length/type field)` pairs. The
-/// length is what tcpdump records: Ethernet header included, FCS not.
-/// IIH frames are picked out of the capture by hand: 14-byte Ethernet
-/// header, 3-byte LLC `FE FE 03`, ISO discriminator 0x83, then PDU type
-/// (low 5 bits of byte 21) in {15, 16, 17} for L1-LAN / L2-LAN / P2P
-/// IIH. Doing the discrimination here lets the BPF filter side stay
-/// coarse (LLC bytes plus discriminator), so LSP / CSNP / PSNP frames in
-/// the same capture are simply skipped, not miscounted.
-///
-/// The length/type field comes along because it is load-bearing for
-/// interop: an LLC payload of 1500 bytes or less states its own length
-/// there, while a longer one must carry the jumbo LLC EtherType 0x8870
-/// instead (IEEE 802.1AC-2016/Cor 1-2018) — a raw length above 1500 is
-/// read as a nonsense EtherType and dropped by peers that classify
-/// ingress frames that way.
-fn pcap_iih_frames(bytes: &[u8]) -> Vec<(usize, u16)> {
+/// Every IS-IS frame in a classic-format pcap byte stream, as
+/// `(on-wire length, frame bytes)`. The length is what tcpdump records:
+/// Ethernet header included, FCS not. Frames are picked out by hand:
+/// 14-byte Ethernet header, 3-byte LLC `FE FE 03`, ISO discriminator
+/// 0x83; the PDU type is then the low 5 bits of byte 21 (see
+/// `isis_pdu_type`). Doing the discrimination here lets the BPF filter
+/// side stay coarse (LLC bytes plus discriminator).
+fn pcap_isis_frames(bytes: &[u8]) -> Vec<(usize, Vec<u8>)> {
     if bytes.len() < 24 {
         return Vec::new();
     }
@@ -2386,11 +2377,34 @@ fn pcap_iih_frames(bytes: &[u8]) -> Vec<(usize, u16)> {
         if frame.len() < 22 || frame[14..17] != [0xFE, 0xFE, 0x03] || frame[17] != 0x83 {
             continue;
         }
-        if matches!(frame[21] & 0x1f, 15..=17) {
-            frames.push((orig, u16::from_be_bytes([frame[12], frame[13]])));
-        }
+        frames.push((orig, frame.to_vec()));
     }
     frames
+}
+
+/// IS-IS PDU type of a frame from `pcap_isis_frames`: 15/16/17 are the
+/// L1-LAN / L2-LAN / P2P IIH, 18/20 the L1/L2 LSP, 24/25 the L1/L2 CSNP,
+/// 26/27 the L1/L2 PSNP.
+fn isis_pdu_type(frame: &[u8]) -> u8 {
+    frame[21] & 0x1f
+}
+
+/// The IS-IS Hello frames from a classic-format pcap byte stream, as
+/// `(on-wire length, Ethernet length/type field)` pairs. LSP / CSNP /
+/// PSNP frames in the same capture are simply skipped, not miscounted.
+///
+/// The length/type field comes along because it is load-bearing for
+/// interop: an LLC payload of 1500 bytes or less states its own length
+/// there, while a longer one must carry the jumbo LLC EtherType 0x8870
+/// instead (IEEE 802.1AC-2016/Cor 1-2018) — a raw length above 1500 is
+/// read as a nonsense EtherType and dropped by peers that classify
+/// ingress frames that way.
+fn pcap_iih_frames(bytes: &[u8]) -> Vec<(usize, u16)> {
+    pcap_isis_frames(bytes)
+        .into_iter()
+        .filter(|(_, frame)| matches!(isis_pdu_type(frame), 15..=17))
+        .map(|(orig, frame)| (orig, u16::from_be_bytes([frame[12], frame[13]])))
+        .collect()
 }
 
 /// Capture IS-IS frames *sent* on `interface` in `scoped` (`-Q out`, so
@@ -2616,6 +2630,184 @@ async fn isis_hellos_should_carry_802_3_length(
         scoped,
         frames[0].1,
         expected
+    );
+}
+
+/// Where the background capture of IS-IS frames sent on `interface` lands.
+fn isis_out_capture_path(scoped: &str, interface: &str) -> String {
+    format!("/tmp/{}_{}_isis_out.pcap", scoped, interface)
+}
+
+/// Start capturing, in the background, every IS-IS frame *sent* on
+/// `interface` in `namespace`, for a later
+/// `... should all be addressed to AllISs` step to read. Unlike the
+/// synchronous IIH capture this has to be running before the adjacency
+/// forms: the LSP exchange and its PSNP acknowledgements happen once, at
+/// adjacency Up, and only periodic CSNPs follow. tcpdump is bounded by
+/// `timeout` because namespace deletion does not kill it; `-U` flushes
+/// per packet so the file is readable while it still runs.
+#[when(expr = "I start capturing IS-IS frames sent on interface {string} in namespace {string}")]
+async fn start_isis_out_capture(world: &mut World, interface: String, namespace: String) {
+    let scoped = world.ns(&namespace);
+    let pcap = isis_out_capture_path(&scoped, &interface);
+    let _ = netns::exec_in_netns(&scoped, "rm", &["-f", &pcap]).await;
+    let _child = netns::spawn_in_netns(
+        &scoped,
+        "timeout",
+        &[
+            "60",
+            "tcpdump",
+            "-i",
+            &interface,
+            "-Q",
+            "out",
+            "-Z",
+            "root",
+            "-U",
+            "-w",
+            &pcap,
+            "ether[14:2] = 0xfefe and ether[16] = 3 and ether[17] = 0x83",
+        ],
+    )
+    .await
+    .unwrap_or_else(|e| {
+        panic!(
+            "Failed to start tcpdump on {} in {}: {}",
+            interface, scoped, e
+        )
+    });
+    // Let tcpdump open the socket before the steps that make traffic.
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    println!(
+        "✓ Capturing IS-IS frames sent on {} in {}",
+        interface, scoped
+    );
+}
+
+/// Assert that the LSPs, CSNPs and PSNPs captured by
+/// `I start capturing IS-IS frames sent on interface ...` were all sent
+/// to AllISs (09:00:2b:00:00:05), which is what a point-to-point circuit
+/// uses for every PDU (RFC 5309). Unicasting them to the neighbour's MAC
+/// works against a Linux peer but not against a hardware NOS that traps
+/// IS-IS to its CPU by group DMAC: there the adjacency comes Up on the
+/// multicast Hellos while every LSP and SNP is dropped. Waits (up to
+/// 30 s) until each of the three PDU kinds has been captured, so a
+/// missing send path fails here rather than passing vacuously.
+#[then(
+    expr = "IS-IS LSPs, CSNPs and PSNPs sent on interface {string} in namespace {string} should all be addressed to AllISs"
+)]
+async fn isis_lsp_snp_should_go_to_allis(world: &mut World, interface: String, namespace: String) {
+    const ALL_ISS: [u8; 6] = [0x09, 0x00, 0x2b, 0x00, 0x00, 0x05];
+    let scoped = world.ns(&namespace);
+    let pcap = isis_out_capture_path(&scoped, &interface);
+    let mut frames = Vec::new();
+    for _ in 0..30 {
+        // The dump file is root-owned; make it readable for the harness user.
+        let _ = netns::exec_in_netns(&scoped, "chmod", &["644", &pcap]).await;
+        let bytes = fs::read(&pcap).unwrap_or_else(|e| {
+            panic!("no capture file {} ({}): was the capture started?", pcap, e)
+        });
+        frames = pcap_isis_frames(&bytes)
+            .into_iter()
+            .map(|(_, frame)| (isis_pdu_type(&frame), frame))
+            .filter(|(pdu_type, _)| *pdu_type >= 18)
+            .collect::<Vec<_>>();
+        let seen = |types: &[u8]| frames.iter().any(|(t, _)| types.contains(t));
+        if seen(&[18, 20]) && seen(&[24, 25]) && seen(&[26, 27]) {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    }
+    let summary = frames
+        .iter()
+        .map(|(t, frame)| format!("type {} -> {:02x?}", t, &frame[0..6]))
+        .collect::<Vec<_>>();
+    for (kind, types) in [("LSP", [18, 20]), ("CSNP", [24, 25]), ("PSNP", [26, 27])] {
+        assert!(
+            frames.iter().any(|(t, _)| types.contains(t)),
+            "no {} captured leaving {} in {}; captured: {:?}",
+            kind,
+            interface,
+            scoped,
+            summary
+        );
+    }
+    assert!(
+        frames.iter().all(|(_, frame)| frame[0..6] == ALL_ISS),
+        "IS-IS PDUs leaving {} in {} were not all addressed to AllISs 09:00:2b:00:00:05: {:?}",
+        interface,
+        scoped,
+        summary
+    );
+    println!(
+        "✓ {} LSP/CSNP/PSNP frames leaving {} in {} all addressed to AllISs",
+        frames.len(),
+        interface,
+        scoped
+    );
+}
+
+/// Model a peer that only accepts IS-IS frames sent to a group MAC — how
+/// a hardware NOS behaves when its IS-IS CPU trap matches the AllISs /
+/// AllL1ISs / AllL2ISs DMACs and a unicast IS-IS frame, not being IP,
+/// dies in the forwarding plane. An nftables rule drops every IS-IS
+/// frame (LLC `FE FE 03` + discriminator 0x83) whose destination MAC has
+/// the group bit clear.
+///
+/// The drop sits on the SENDER's egress, not the receiver's ingress,
+/// because zebra-rs's IS-IS socket is bound to ETH_P_ALL: Linux hands a
+/// received frame to ETH_P_ALL packet sockets before the tc and netdev
+/// ingress hooks run, so an ingress drop would never hide it. On egress,
+/// an AF_PACKET send goes through `dev_queue_xmit`, which runs the netdev
+/// egress hook before the frame reaches the wire.
+#[when(expr = "I drop unicast IS-IS frames leaving interface {string} in namespace {string}")]
+async fn drop_unicast_isis_egress(world: &mut World, interface: String, namespace: String) {
+    let scoped = world.ns(&namespace);
+    let commands: [&[&str]; 3] = [
+        &["add", "table", "netdev", "isis_trap"],
+        &[
+            "add",
+            "chain",
+            "netdev",
+            "isis_trap",
+            "unicast",
+            "{",
+            "type",
+            "filter",
+            "hook",
+            "egress",
+            "device",
+            &interface,
+            "priority",
+            "0",
+            ";",
+            "}",
+        ],
+        &[
+            "add",
+            "rule",
+            "netdev",
+            "isis_trap",
+            "unicast",
+            "@ll,0,8",
+            "&",
+            "0x01",
+            "==",
+            "0x00",
+            "@ll,112,32",
+            "0xfefe0383",
+            "counter",
+            "drop",
+        ],
+    ];
+    for args in commands {
+        netns::exec_in_netns(&scoped, "nft", args)
+            .await
+            .unwrap_or_else(|e| panic!("nft {:?} failed in {}: {}", args, scoped, e));
+    }
+    println!(
+        "✓ Unicast IS-IS frames leaving {} in {} are dropped",
+        interface, scoped
     );
 }
 

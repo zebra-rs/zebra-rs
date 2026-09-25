@@ -1070,7 +1070,7 @@ fn csnp_send_pdu(link: &mut LinkTop, level: Level, pdu: IsisCsnp) {
         outgoing,
         link.ifindex,
         level,
-        link.dest(level),
+        link.dest(),
     ));
 }
 
@@ -1314,7 +1314,7 @@ pub fn psnp_send_pdu(link: &mut LinkTop, level: Level, pdu: IsisPsnp) {
         outgoing,
         link.ifindex,
         level,
-        link.dest(level),
+        link.dest(),
     ));
 }
 

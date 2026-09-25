@@ -355,6 +355,12 @@ isis_topology_output:
 	mkdir -p allure-results
 	$(CUCUMBER) -- --concurrency=1 --tags "@isis_topology_output"
 
+# P2P circuits send LSPs/CSNPs/PSNPs to AllISs, not the neighbour's MAC:
+# hardware NOSes that trap IS-IS by group DMAC drop unicast IS-IS frames.
+isis_p2p_allis:
+	mkdir -p allure-results
+	$(CUCUMBER) -- --concurrency=1 --tags "@isis_p2p_allis"
+
 # Run all BFD tests.
 bfd:
 	rm -rf allure-results
