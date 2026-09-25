@@ -1,0 +1,41 @@
+# z1 (DUT, AS 65001): two equal-cost eBGP paths for one prefix, from h1
+# and h2 (both AS 65071, scripted), installed together under
+# `maximum-paths 2`; z2 is the downstream neighbor that must be sent the
+# winner.
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.50.1
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    # The scripted speakers never listen on 179: passive keeps these peers
+    # in Active so the scripts' connects are accepted.
+    - remote-address: 192.168.50.2
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65071
+      transport:
+        passive-mode: true
+    - remote-address: 192.168.50.3
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65071
+      transport:
+        passive-mode: true
+    - remote-address: 192.168.50.4
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65072
+    afi-safi:
+    - name: ipv4
+      maximum-paths: 2

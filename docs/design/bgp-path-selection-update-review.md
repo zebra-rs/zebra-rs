@@ -7,7 +7,7 @@ MUP/Flowspec/SR-Policy/RTC where they share the machinery). Reviewed
 against `main` at `2f1e9a09` (2026-09-07). Line numbers are as of that
 commit.
 
-Status (2026-09-25): fourteen items are fixed on `main` — #1 (PR #2372,
+Status (2026-09-25): fifteen items are fixed on `main` — #1 (PR #2372,
 merge `3beacbcc`), the listen-range peer-type item found while fixing it
 (PR #2373, `ba327126`), #2 (PR #2375, `308b196a`), #3 (PR #2376,
 `b8fef738`), #4 (PR #2377, `1cc31738`, which also closed the
@@ -15,11 +15,11 @@ signature-knob half of #21 and added the IPv6 outbound soft-out), #5
 (PR #2378, `b2007701`), #6 (PR #2379, `0464828a`, with two review
 follow-ups), #7 (PR #2380, `d7476601`), #8 and with it #13 (PR #2383,
 `d72a06af`, eight review rounds folded in), #9 (PR #2405, `31f7458a`),
-#15 (PR #2413, `097ce15d`), #11 (PR #2415, `3401cb1b`) and #12 (PR
-#2417, `4ba79217`). Each fixed entry ends with its fix note; everything
-else is open. The item found while fixing #12 (a route rejected by an
-inbound loop check kept the neighbor's previous path) is fixed on branch
-`bgp-inbound-drop-implicit-withdraw`.
+#15 (PR #2413, `097ce15d`), #11 (PR #2415, `3401cb1b`), #12 (PR #2417,
+`4ba79217`) and the item found while fixing #12 (PR #2418, `6b53ad6a`).
+Each fixed entry ends with its fix note; everything else is open. In
+progress: #14 (the plain fan-out advertised a multipath member), branch
+`bgp-fanout-advertises-winner`.
 
 Method: one lead read the selection ladder and every egress builder, then
 five independent read-only reviewers each took one dimension (update-group
@@ -988,6 +988,32 @@ cap. The two reviews agree on every overlapping item.
   wire disagree. `bgp_multipath.feature` asserts the FIB only.
 - Fix direction: use `selected.first()` (the `.last()` predates the
   multipath extension, when `selected` was a change history).
+- Only the unicast, labeled-unicast and VPN tables build a multi-path
+  selection (winner first); EVPN, MUP, Flowspec and BGP-LS select one
+  path, so `.last()` there only read the same entry a second way. The
+  `multipath_resync` half needs no change of its own: the winner does not
+  depend on `maximum-paths`, so once the fan-out sends the winner a
+  runtime change has nothing to re-advertise to plain neighbors.
+- Gates (branch `bgp-fanout-advertises-winner`; each compiles on `main`
+  and fails there, except the control). Unit, route.rs
+  `fanout_winner_tests`, through `route_from_peer` with `maximum-paths 2`
+  and two tying eBGP paths tagged by community:
+  `plain_fanout_advertises_the_winner_not_a_multipath_member_v4` / `_v6`
+  (the observer's update-group queued the member's attribute on `main`),
+  `precomputed_fanout_advertises_the_winner_not_a_multipath_member_v4`
+  (an out-policy bound on the observer routes the ingest through
+  `precompute_ipv4_advertise_outcomes`, which picked its own "best"),
+  `plain_fanout_advertises_the_winner_not_a_multipath_member_v4lu` (the
+  labeled-unicast fan-out), control `single_path_fanout_advertises_the_winner`.
+  The unicast gates read the group's queued attribute, not the
+  observer's Adj-RIB-Out: the batch advertise records rows with
+  `AdjRibTable::add`, so a best-path flip can leave the superseded row
+  beside the new one (the below-the-cap item "Found while fixing #5"),
+  which makes the Adj-RIB-Out unable to say what was sent. BDD
+  `bgp_multipath_advertise_winner` and `_v6`: h1 and h2 (scripted, same
+  AS, different next-hops) announce one prefix tagged 65071:2 and
+  65071:3; z1 installs both under `maximum-paths 2` with h1 best (lower
+  BGP Identifier). On `main` both twins fail: z2 holds 65071:3.
 
 ### 15. P2 CONFIRMED (probe), worse than recorded, FIXED in #2413 — advertise-cache forward/reverse desync leaves a phantom route that is never withdrawn
 
@@ -1327,7 +1353,7 @@ cap. The two reviews agree on every overlapping item.
   `try_dynamic_accept` exactly as `interface_neighbor.rs:188` does; the
   probe becomes the regression test.
 
-### Found while fixing #12 (FIXED on branch `bgp-inbound-drop-implicit-withdraw`) — a route dropped by an inbound loop check leaves the neighbor's previous path installed
+### Found while fixing #12 (FIXED in #2418) — a route dropped by an inbound loop check leaves the neighbor's previous path installed
 
 - `inbound_attr_checks` returns `None` — and the ingest simply returns —
   when the AS_PATH contains our AS (`aspath_own_as_loop`), when
