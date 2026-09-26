@@ -385,6 +385,12 @@ pub enum ShardOut {
         /// release a next-hop another path still needs. Computed by the
         /// shard (it owns the Loc-RIB) since main can't see the table.
         survivor_nexthops: BTreeSet<IpAddr>,
+        /// The candidates whose next-hop reachability a
+        /// [`ShardMsg::NexthopReachableBatchV4`] just flipped, as they now
+        /// are (empty otherwise). AddPath peers hold every candidate, so
+        /// main re-runs the AddPath advertise for each (review finding
+        /// #23) and refreshes its read replica.
+        nexthop_flipped: Vec<BgpRib>,
     },
 
     /// IPv6 / VPNv6 counterpart of [`Self::BestPathV4`].
@@ -502,6 +508,7 @@ mod tests {
             replaced: vec![],
             added: None,
             survivor_nexthops: BTreeSet::new(),
+            nexthop_flipped: Vec::new(),
         };
         let ShardOut::BestPathV4 { selected, .. } = out else {
             panic!("expected BestPathV4");

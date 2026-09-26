@@ -1,0 +1,13 @@
+# z3 (AS 65093): z1's plain (non-AddPath) neighbor — the control.
+router:
+  bgp:
+    global:
+      as: 65093
+      router-id: 192.168.65.4
+    neighbor:
+    - remote-address: 192.168.65.1
+      afi-safi:
+      - name: ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65001

@@ -4768,6 +4768,9 @@ struct Ipv4AdvertiseJob {
     selected: Vec<BgpRib>,
     added: Option<BgpRib>,
     replaced: Vec<BgpRib>,
+    /// Candidates whose next-hop reachability just flipped (the N>1 NHT
+    /// re-evaluation) — re-run through the AddPath advertise.
+    nexthop_flipped: Vec<BgpRib>,
 }
 
 /// The post-policy half of `route_ipv4_update`: with the inbound
@@ -4958,6 +4961,7 @@ fn route_ipv4_update_decided(
             selected,
             added,
             replaced,
+            nexthop_flipped: Vec::new(),
         });
     }
     jobs
@@ -4980,6 +4984,7 @@ fn apply_ipv4_advertise_job(
         selected,
         added,
         replaced,
+        nexthop_flipped,
     } = job;
     // `suppress-fib-pending`: this is the ingest-reduce's advertise sink
     // — the path every ordinary v4 UPDATE takes at N=1 and N>1 — and it
@@ -4991,6 +4996,12 @@ fn apply_ipv4_advertise_job(
     if rd.is_none() {
         let installable = fib_installable_v4(bgp, prefix, &selected);
         if fib_pending_hold(bgp, IpNet::V4(prefix), &selected, installable) {
+            // A withdraw is never held: a candidate whose next-hop just
+            // went unreachable leaves the AddPath peers now (review finding
+            // #23); a recovered one waits for the release.
+            for rib in nexthop_flipped.iter().filter(|r| !r.nexthop_reachable) {
+                route_advertise_to_addpath(rd, prefix, rib, source_ident, bgp, peers);
+            }
             return;
         }
     }
@@ -5031,6 +5042,10 @@ fn apply_ipv4_advertise_job(
                 route_withdraw_from_addpath(rd, prefix, removed, source_ident, bgp, peers);
             }
         }
+    }
+    // Review finding #23: the N>1 twin of `route_addpath_nexthop_flip`.
+    for rib in &nexthop_flipped {
+        route_advertise_to_addpath(rd, prefix, rib, source_ident, bgp, peers);
     }
 }
 
@@ -5118,11 +5133,15 @@ fn mirror_v4_delta(bgp: &mut BgpTop, out: &ShardOut) {
         selected,
         replaced,
         added,
+        nexthop_flipped,
         ..
     } = out
     {
         bgp.shard
             .mirror_v4(prefix.prefix, added.as_ref(), replaced, selected.first());
+        // A next-hop flip changes candidates in place; the AddPath dump
+        // reads their reachability from the mirror.
+        bgp.shard.mirror_v4_refresh(prefix.prefix, nexthop_flipped);
     }
 }
 
@@ -5142,6 +5161,7 @@ fn reduce_bestpath_v4_nht_fib(
         replaced,
         added,
         survivor_nexthops,
+        nexthop_flipped,
     } = out
     else {
         return None;
@@ -5179,6 +5199,7 @@ fn reduce_bestpath_v4_nht_fib(
             selected,
             added,
             replaced,
+            nexthop_flipped,
         },
     ))
 }
@@ -5212,14 +5233,19 @@ fn route_advertise_batch_addpath<A: BatchAfi>(
     let (afi, safi) = A::afi_safi(rd);
     for ident in peers.established_addpath_idents(afi, safi) {
         let peer = peers.get_mut_by_idx(ident).expect("peer exists");
-        // RFC 9494 §4.3: stale routes only go to LLGR peers.
-        let sent = !llgr_blocks_advertisement(rib.stale, &peer.cap_recv, afi, safi)
+        // RFC 4271 §9.1.2.1: a path whose next-hop does not resolve is not
+        // eligible — plain peers never see it, since the selection leaves
+        // it out (review finding #23). RFC 9494 §4.3: stale routes only go
+        // to LLGR peers.
+        let sent = rib.nexthop_reachable
+            && !llgr_blocks_advertisement(rib.stale, &peer.cap_recv, afi, safi)
             && A::advertise_addpath(peer, rd, prefix, rib, bgp);
         // Review finding #17: `rib` replaces the path this peer holds under
-        // the same path-id. When the replacement may not go out — LLGR-stale
-        // toward a non-LLGR peer, refused by the builder (NO_ADVERTISE,
-        // NO_EXPORT, OTC, …), denied by the out-policy, filtered by RTC —
-        // the old path-id must be withdrawn, not left standing.
+        // the same path-id. When the replacement may not go out — its
+        // next-hop unreachable, LLGR-stale toward a non-LLGR peer, refused
+        // by the builder (NO_ADVERTISE, NO_EXPORT, OTC, …), denied by the
+        // out-policy, filtered by RTC — the old path-id must be withdrawn,
+        // not left standing.
         if !sent && A::addpath_held(peer, rd, prefix, rib.local_id) {
             A::withdraw_addpath(peer, rd, prefix, rib.local_id, bgp);
         }
@@ -5237,6 +5263,66 @@ fn route_advertise_to_addpath(
     peers: &mut PeerMap,
 ) {
     route_advertise_batch_addpath::<V4Batch>(rd, prefix, rib, bgp, peers);
+}
+
+/// The candidates at `prefix` whose tracked next-hop is `nh`.
+fn candidates_tracking<P: Prefix + Copy>(
+    table: Option<&LocalRibTable<P>>,
+    prefix: P,
+    nh: IpAddr,
+) -> Vec<BgpRib> {
+    table.map_or_else(Vec::new, |t| {
+        t.candidates(prefix)
+            .iter()
+            .filter(|rib| super::nht::nht_target(&rib.attr) == Some(nh))
+            .cloned()
+            .collect()
+    })
+}
+
+/// Review finding #23: `nh`'s reachability flipped, and with it every
+/// IPv4-unicast / VPNv4 candidate at `prefix` that tracks it. The plain
+/// fan-out follows the new selection; AddPath-Send peers hold each
+/// candidate under its own path-id, so re-run the AddPath advertise for
+/// the flipped ones — it sends a path whose next-hop resolves again and
+/// withdraws the path-id of one whose next-hop no longer does.
+///
+/// `suppress-fib-pending`: the plain fan-out that ran just before may have
+/// armed a hold on the prefix. While it is live, a recovered path waits for
+/// the forwarding plane like any other advertisement —
+/// [`fib_pending_release_v4`] sends it — but a withdraw still goes out now.
+pub(super) fn route_addpath_nexthop_flip(
+    rd: Option<RouteDistinguisher>,
+    prefix: Ipv4Net,
+    nh: IpAddr,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+) {
+    let table = match rd {
+        Some(rd) => bgp.shard.v4vpn.get(&rd),
+        None => Some(&bgp.shard.v4),
+    };
+    let flipped = candidates_tracking(table, prefix, nh);
+    let held = rd.is_none() && fib_pending_blocks_sync(bgp.local_rib, IpNet::V4(prefix));
+    for rib in flipped {
+        if held && rib.nexthop_reachable {
+            continue;
+        }
+        route_advertise_batch_addpath::<V4Batch>(rd, prefix, &rib, bgp, peers);
+    }
+}
+
+/// VPNv6 twin of [`route_addpath_nexthop_flip`].
+pub(super) fn route_addpath_nexthop_flip_vpnv6(
+    rd: RouteDistinguisher,
+    prefix: Ipv6Net,
+    nh: IpAddr,
+    bgp: &mut BgpTop,
+    peers: &mut PeerMap,
+) {
+    for rib in candidates_tracking(bgp.shard.v6vpn.get(&rd), prefix, nh) {
+        route_advertise_batch_addpath::<V6Batch>(Some(rd), prefix, &rib, bgp, peers);
+    }
 }
 
 fn route_withdraw_from_addpath(
@@ -5484,12 +5570,14 @@ pub(super) fn route_advertise_to_peers(
 }
 
 /// Advertise a released (formerly FIB-pending) v4 prefix: the full
-/// selected set through the normal fan, plus each member to the
-/// ADD-PATH peers — the same pair of fans `apply_ipv4_advertise_job`
-/// would have run had the advertisement not been held. Releasing less
-/// than was held (the winner alone, or the plain fan without ADD-PATH)
-/// would leave peers missing ECMP alternatives until unrelated churn
-/// re-ran selection.
+/// selected set through the normal fan, plus every candidate to the
+/// ADD-PATH peers. Releasing less than was held (the winner alone, or the
+/// plain fan without ADD-PATH) would leave peers missing ECMP alternatives
+/// until unrelated churn re-ran selection. The held AddPath advertisement
+/// can be a non-best path — one whose next-hop resolved again, held by
+/// [`route_addpath_nexthop_flip`] (review finding #23) — so the ADD-PATH
+/// peers get every candidate, not the selection; an unreachable one goes
+/// through the same call and is withdrawn if a peer holds it.
 pub(super) fn fib_pending_release_v4(
     bgp: &mut BgpTop,
     peers: &mut PeerMap,
@@ -5497,7 +5585,8 @@ pub(super) fn fib_pending_release_v4(
     selected: &[BgpRib],
 ) {
     route_advertise_to_peers(None, prefix, selected, 0, bgp, peers);
-    for rib in selected {
+    let candidates = bgp.shard.v4.candidates(prefix).to_vec();
+    for rib in &candidates {
         route_advertise_to_addpath(None, prefix, rib, 0, bgp, peers);
     }
 }
@@ -7822,7 +7911,11 @@ fn route_soft_out_peer_table_v6(peer_idx: usize, bgp: &mut BgpTop, peers: &mut P
             .v6
             .0
             .iter()
-            .flat_map(|(prefix, ribs)| ribs.iter().map(move |rib| (prefix, rib.clone())))
+            .flat_map(|(prefix, ribs)| {
+                ribs.iter()
+                    .filter(|rib| rib.nexthop_reachable)
+                    .map(move |rib| (prefix, rib.clone()))
+            })
             .collect()
     } else {
         bgp.shard.v6.1.iter().map(|(p, r)| (p, r.clone())).collect()
@@ -14834,6 +14927,10 @@ pub(super) fn route_advertise_to_peers_v6(
     // Same gate as the v4 twin — see `fib_pending_hold`.
     let installable = fib_installable_v6(bgp, prefix, selected);
     if fib_pending_hold(bgp, IpNet::V6(prefix), selected, installable) {
+        // A withdraw is never held: the release re-runs this whole fan-out,
+        // but an AddPath path-id whose path is gone or whose next-hop no
+        // longer resolves must not wait for it (review of finding #23).
+        route_withdraw_ineligible_addpath_v6(prefix, bgp, peers);
         return;
     }
     // Plain (non-AddPath) members go through the generic memo path shared
@@ -14862,10 +14959,24 @@ pub(super) fn route_advertise_to_peers_v6(
     let addpath_idents = peers.established_addpath_idents(afi, safi);
     // Only clone the candidate list when there is an AddPath audience —
     // the common best-path-only fan-out must not pay a per-route clone.
+    // A candidate whose next-hop does not resolve is left out (review
+    // finding #23), so the diff below withdraws its path-id; the NHT
+    // re-evaluation re-runs this loop when the next-hop flips.
     let all_cands: Vec<BgpRib> = if addpath_idents.is_empty() {
         Vec::new()
     } else {
-        bgp.shard.v6.0.get(&prefix).cloned().unwrap_or_default()
+        bgp.shard
+            .v6
+            .0
+            .get(&prefix)
+            .map(|cands| {
+                cands
+                    .iter()
+                    .filter(|c| c.nexthop_reachable)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
     };
     for ident in addpath_idents {
         let peer = peers.get_mut_by_idx(ident).expect("peer exists");
@@ -14932,6 +15043,40 @@ pub(super) fn route_advertise_to_peers_v6(
             }
             withdraw_ipv6_deferrable(bgp.update_groups, peer, prefix, id);
             peer.adj_out.v6.remove(prefix, id);
+        }
+    }
+}
+
+/// The withdraw half of a held IPv6-unicast fan-out: every path-id an
+/// AddPath-Send peer holds for `prefix` whose candidate is gone or whose
+/// next-hop does not resolve is withdrawn now. Advertisements, and the
+/// withdraws the out-policy or the builder would decide, wait for the
+/// release, which re-runs the full diff.
+fn route_withdraw_ineligible_addpath_v6(prefix: Ipv6Net, bgp: &mut BgpTop, peers: &mut PeerMap) {
+    let eligible: BTreeSet<u32> = bgp
+        .shard
+        .v6
+        .candidates(prefix)
+        .iter()
+        .filter(|c| c.nexthop_reachable)
+        .map(|c| c.local_id)
+        .collect();
+    for ident in peers.established_addpath_idents(Afi::Ip6, Safi::Unicast) {
+        let peer = peers.get_mut_by_idx(ident).expect("peer exists");
+        let stale: Vec<u32> = peer
+            .adj_out
+            .v6
+            .0
+            .get(&prefix)
+            .map(|rows| {
+                rows.iter()
+                    .map(|r| r.local_id)
+                    .filter(|id| !eligible.contains(id))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for id in stale {
+            V6Batch::withdraw_addpath(peer, None, prefix, id, bgp);
         }
     }
 }
@@ -15531,11 +15676,17 @@ fn route_advertise_labeled<A: LabeledAfi>(
     // iterating `selected` would only ever advertise the best path and
     // silently drop every non-best AddPath candidate on the event-driven
     // path (the v6-unicast advertise carried the same latent bug).
+    // A candidate whose next-hop does not resolve is left out (review
+    // finding #23), so the diff below withdraws its path-id; the NHT
+    // re-evaluation re-runs this loop when the next-hop flips.
     let addpath_idents = peers.established_addpath_idents(afi, safi);
-    let all_cands = if addpath_idents.is_empty() {
+    let all_cands: Vec<BgpRib> = if addpath_idents.is_empty() {
         Vec::new()
     } else {
         A::all_cands(bgp, &prefix)
+            .into_iter()
+            .filter(|c| c.nexthop_reachable)
+            .collect()
     };
     for ident in addpath_idents {
         let peer = peers.get_mut_by_idx(ident).expect("peer exists");
@@ -16691,7 +16842,11 @@ pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut BgpTop) {
             .v4
             .0
             .iter()
-            .flat_map(|(prefix, ribs)| ribs.iter().map(move |rib| (prefix, rib.clone())))
+            .flat_map(|(prefix, ribs)| {
+                ribs.iter()
+                    .filter(|rib| rib.nexthop_reachable)
+                    .map(move |rib| (prefix, rib.clone()))
+            })
             .collect()
     } else {
         bgp.shard
@@ -16778,7 +16933,11 @@ pub fn route_sync_ipv6(peer: &mut Peer, bgp: &mut BgpTop) {
             .v6
             .0
             .iter()
-            .flat_map(|(prefix, ribs)| ribs.iter().map(move |rib| (prefix, rib.clone())))
+            .flat_map(|(prefix, ribs)| {
+                ribs.iter()
+                    .filter(|rib| rib.nexthop_reachable)
+                    .map(move |rib| (prefix, rib.clone()))
+            })
             .collect()
     } else {
         bgp.shard
@@ -16848,7 +17007,11 @@ pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut BgpTop) {
                 let routes: Vec<(Ipv4Net, BgpRib)> = table
                     .0
                     .iter()
-                    .flat_map(|(prefix, ribs)| ribs.iter().map(move |rib| (prefix, rib.clone())))
+                    .flat_map(|(prefix, ribs)| {
+                        ribs.iter()
+                            .filter(|rib| rib.nexthop_reachable)
+                            .map(move |rib| (prefix, rib.clone()))
+                    })
                     .collect();
                 (*rd, routes)
             })
@@ -16934,7 +17097,11 @@ pub fn route_sync_vpnv6(peer: &mut Peer, bgp: &mut BgpTop) {
                 let routes: Vec<(Ipv6Net, BgpRib)> = table
                     .0
                     .iter()
-                    .flat_map(|(prefix, ribs)| ribs.iter().map(move |rib| (prefix, rib.clone())))
+                    .flat_map(|(prefix, ribs)| {
+                        ribs.iter()
+                            .filter(|rib| rib.nexthop_reachable)
+                            .map(move |rib| (prefix, rib.clone()))
+                    })
                     .collect();
                 (*rd, routes)
             })
@@ -17214,7 +17381,11 @@ pub fn route_sync_labelv4(peer: &mut Peer, bgp: &mut BgpTop) {
             .v4lu
             .0
             .iter()
-            .flat_map(|(prefix, ribs)| ribs.iter().map(move |rib| (prefix, rib.clone())))
+            .flat_map(|(prefix, ribs)| {
+                ribs.iter()
+                    .filter(|rib| rib.nexthop_reachable)
+                    .map(move |rib| (prefix, rib.clone()))
+            })
             .collect()
     } else {
         bgp.shard
@@ -17279,7 +17450,11 @@ pub fn route_sync_labelv6(peer: &mut Peer, bgp: &mut BgpTop) {
             .v6lu
             .0
             .iter()
-            .flat_map(|(prefix, ribs)| ribs.iter().map(move |rib| (prefix, rib.clone())))
+            .flat_map(|(prefix, ribs)| {
+                ribs.iter()
+                    .filter(|rib| rib.nexthop_reachable)
+                    .map(move |rib| (prefix, rib.clone()))
+            })
             .collect()
     } else {
         bgp.shard

@@ -7,7 +7,7 @@ MUP/Flowspec/SR-Policy/RTC where they share the machinery). Reviewed
 against `main` at `2f1e9a09` (2026-09-07). Line numbers are as of that
 commit.
 
-Status (2026-09-25): nineteen items are fixed on `main` — #1 (PR
+Status (2026-09-25): twenty-one items are fixed on `main` — #1 (PR
 #2372, merge `3beacbcc`), the listen-range peer-type item found while
 fixing it (PR #2373, `ba327126`), #2 (PR #2375, `308b196a`), #3 (PR
 #2376, `b8fef738`), #4 (PR #2377, `1cc31738`, which also closed the
@@ -18,10 +18,10 @@ follow-ups), #7 (PR #2380, `d7476601`), #8 and with it #13 (PR #2383,
 #15 (PR #2413, `097ce15d`), #11 (PR #2415, `3401cb1b`), #12 (PR #2417,
 `4ba79217`), the item found while fixing #12 (PR #2418, `6b53ad6a`), #14
 (PR #2420, `49fb77b1`), #20 (PR #2422, `d8f6a0cf`), #10 with the MED
-knobs (PR #2423, `7852fc15`) and #16 (PR #2425, `6d4446b1`). Each fixed
-entry ends with its fix note; everything else is open. #17 and #18
-(AddPath path-ids withdrawn by their exact id) are fixed on branch
-`bgp-addpath-exact-id-withdraw`, not yet merged.
+knobs (PR #2423, `7852fc15`), #16 (PR #2425, `6d4446b1`) and #17 with
+#18 (PR #2426, `9d4e2589`). Each fixed entry ends with its fix note;
+everything else is open. In progress: #23 (AddPath neighbors and
+next-hop reachability), branch `bgp-addpath-nht`.
 
 Method: one lead read the selection ladder and every egress builder, then
 five independent read-only reviewers each took one dimension (update-group
@@ -1216,7 +1216,7 @@ cap. The two reviews agree on every overlapping item.
   `bgp_vrf_neighbor_add_path`, `bgp_update_group_live_policy_out_v6`,
   `bgp_v6_route_map` and `bgp_v6_table_map` stay green.
 
-### 17. P2 CONFIRMED, FIXED on branch `bgp-addpath-exact-id-withdraw` — v4-unicast / VPNv4 / VPNv6 AddPath: a replaced candidate that becomes egress-filtered (or LLGR-stale) is never withdrawn
+### 17. P2 CONFIRMED, FIXED in #2426 — v4-unicast / VPNv4 / VPNv6 AddPath: a replaced candidate that becomes egress-filtered (or LLGR-stale) is never withdrawn
 
 - `route.rs:4716-4726` (`apply_ipv4_advertise_job`): `Some(added)` →
   advertise only; `replaced` is withdrawn only when `added.is_none()`.
@@ -1271,7 +1271,7 @@ cap. The two reviews agree on every overlapping item.
   id and the other id's advertisement only (fails on `main`, passes on
   the fix).
 
-### 18. P2 CONFIRMED, FIXED on branch `bgp-addpath-exact-id-withdraw` — v4/VPNv4 soft-out toward an AddPath peer emits path-id-0 withdraws and never reconciles non-best ids
+### 18. P2 CONFIRMED, FIXED in #2426 — v4/VPNv4 soft-out toward an AddPath peer emits path-id-0 withdraws and never reconciles non-best ids
 
 - `route_soft_out_peer_table` (`route.rs:6858-6870`) reads `.1`
   (best-only); its withdraw loop (`6980-7008`) uses id 0:
@@ -1439,7 +1439,7 @@ cap. The two reviews agree on every overlapping item.
 - Fix direction: use `ORIGINATED_PEER` as the no-source sentinel at the
   call sites.
 
-### 23. P2 CONFIRMED — NHT flips never reach AddPath peers, and next-hop-unreachable candidates are advertised to them
+### 23. P2 CONFIRMED, FIXED on branch `bgp-addpath-nht` — NHT flips never reach AddPath peers, and next-hop-unreachable candidates are advertised to them
 
 - N=1: `inst.rs:5813-5821` / `5858-5866` / `5906-5912` call only the
   best-path fans (`route_advertise_to_peers` / `_vpnv6`), never
@@ -1463,6 +1463,102 @@ cap. The two reviews agree on every overlapping item.
   IPv4 / VPNv4 (#18) skip unreachable candidates; the IPv6-unicast
   soft-out, every family's AddPath session-up dump and the event path do
   not yet.
+- Per family on `main`: the NHT re-evaluation (`Bgp::nht_reeval_dep`)
+  runs only the plain fan-out for IPv4 unicast, VPNv4 and VPNv6, so an
+  AddPath neighbor is never told of a flip. For IPv6 unicast and
+  labeled unicast it re-runs the AddPath diff loop, but that loop walks
+  every candidate, so an unreachable path is sent again rather than
+  withdrawn. At N>1 the shard's re-evaluation (`reeval_nexthop_v4`)
+  reports `added: None, replaced: []`, so the reduce sends AddPath
+  neighbors nothing. The IPv4 / VPNv4 / VPNv6 event path
+  (`route_advertise_batch_addpath`) sends a candidate whose next-hop has
+  not resolved yet, so a first-contact path reaches an AddPath neighbor
+  before a plain one.
+- Gates (branch `bgp-addpath-nht`; each compiles on `main` and fails
+  there, except the control). Unit, `addpath_nht_review_tests.rs` (a
+  child of `inst.rs`; every flip goes through `Bgp::nht_handle_update`,
+  the entry a RIB next-hop reply takes):
+  `v4_next_hop_loss_withdraws_the_addpath_path_id_and_recovery_restores_it`
+  (end to end through `route_from_peer`: on `main` the AddPath neighbor
+  keeps A's path-id after the loss),
+  `v4_addpath_neighbor_is_not_sent_a_path_whose_next_hop_is_unresolved`
+  (on `main` it is sent at once, while the plain neighbor waits),
+  `next_hop_loss_withdraws_the_addpath_path_id_in_every_family` (IPv6,
+  VPNv4, VPNv6, labeled IPv4: each keeps A's path-id on `main`),
+  `addpath_session_up_dumps_skip_a_path_whose_next_hop_is_unreachable`
+  (IPv4, IPv6, VPNv4, VPNv6, labeled IPv4: each dump sends it on
+  `main`), `v6_soft_out_withdraws_an_unreachable_addpath_path`; control
+  `v4_plain_neighbor_follows_the_next_hop_flip`. BDD `bgp_addpath_nht`,
+  `bgp_addpath_nht_v6` and `bgp_shard_addpath_nht` (4 shards): h1
+  announces a prefix with a third-party next-hop that z1 resolves through
+  a static route; deleting the route makes it unreachable. On `main` the
+  plain neighbor z3 loses the prefix and the AddPath neighbor z2 keeps
+  it, in all three.
+- FIXED (branch `bgp-addpath-nht`): an AddPath neighbor is sent a path
+  only while its next-hop resolves, and follows the flips.
+  `route_advertise_batch_addpath` (IPv4 unicast, VPNv4, VPNv6) treats a
+  candidate whose next-hop does not resolve like one the egress refuses,
+  so #17's withdraw removes its path-id if the neighbor holds it. On a
+  flip, `Bgp::nht_reeval_dep` re-runs that advertise for the candidates
+  that track the flipped next-hop (`route_addpath_nexthop_flip`,
+  `route_addpath_nexthop_flip_vpnv6`), only when a flag actually changed,
+  so the MED-knob recompute, which re-runs the same path, re-sends
+  nothing. At N>1 the shard's `reeval_nexthop_v4` reports those
+  candidates in a new `ShardOut::BestPathV4::nexthop_flipped`; the reduce
+  runs the same advertise for each and refreshes its read replica in
+  place (`mirror_v4_refresh`), which the session-up dump reads. The
+  IPv6-unicast and labeled-unicast AddPath loops, every family's AddPath
+  session-up dump and the IPv6 soft-out leave unreachable candidates out.
+  A first-contact path now reaches an AddPath neighbor when its next-hop
+  resolves, as it reaches a plain one. Left out: the environment-gated
+  group-task and per-peer egress engines (their soft-outs and AddPath
+  fans still take every candidate), and EVPN, whose best path does not
+  depend on next-hop reachability. Unit: the gates and the control pass
+  (the family loops also cover labeled IPv6, and check the path-id comes
+  back when the next-hop resolves again); shard tests
+  `nexthop_reeval_reports_the_flipped_candidates` and
+  `mirror_v4_refresh_replaces_the_row_in_place`. Each part of the fix
+  undone on its own fails its own gate: the reachability gate or the
+  flip re-run (the IPv4 end-to-end gates and VPNv4), the IPv6 or labeled
+  loop filter (IPv6, labeled IPv4), each dump's filter (that family), the
+  IPv6 soft-out filter, the shard report. All three BDD features pass,
+  and `bgp_addpath_ipv4` / `_ipv6`, `bgp_addpath_group`,
+  `bgp_addpath_policy_out` / `_refused_withdraw` / `_soft_out` (each with
+  its `_v6`), `bgp_shard_addpath_v4` / `_v6` / `_vpnv4` / `_vpnv6` /
+  `_lu4` / `_lu6`, `bgp_vrf_neighbor_add_path`, `bgp_lu_addpath_resend`
+  (and `_v6`), `bgp_evpn_addpath_flip`, `bgp_vpnv6_llgr_stale_expiry`,
+  `bgp_evpn_llgr_stale_expiry`, `bgp_srv6_nht`, `static_srv6_nht`, the
+  VPNv4 / VPNv6 / labeled-unicast RR transit-label features,
+  `bgp_interas_option_b` / `_c`, `bgp_update_group_live_policy_out` (and
+  `_v6`) and `bgp_med_knobs` stay green.
+- Review follow-up: the IPv4 flip re-run advertised a recovered path
+  while the plain fan-out's `suppress-fib-pending` hold was live. While a
+  hold is live it now sends only the withdrawals; the recovered path goes
+  out with the release, which now sends the AddPath neighbors every
+  candidate instead of the selection (before, a held non-best path never
+  reached them). At N>1 the reduce's hold branch still sends the flipped
+  withdrawals. Gates `v4_resolved_path_waits_for_the_fib_ack_toward_addpath_neighbors_too`,
+  `v4_non_best_recovery_waits_for_the_fib_ack_and_its_loss_does_not` and
+  `v4_sharded_flip_under_suppress_fib_pending_withdraws_now_and_releases_later`
+  (hold, then the ack's release), and
+  `v4_sharded_non_best_flip_reaches_addpath_neighbors_and_the_late_dump`
+  (N>1 through main's reduce and read replica); each fails on `main`.
+- Second review follow-up: on IPv6 the held fan-out returned before the
+  AddPath diff, so a non-best path whose next-hop went away kept its
+  path-id at the AddPath neighbor until the ack or the timeout. The held
+  fan-out now first withdraws every path-id an AddPath peer holds whose
+  candidate is gone or unreachable (`route_withdraw_ineligible_addpath_v6`);
+  the release re-runs the full diff as before. Gate
+  `v6_next_hop_loss_withdraws_without_waiting_for_the_fib_ack` (fails on
+  `main` and without the withdraw), and
+  `shared_next_hop_flip_withdraws_and_restores_every_path_id_in_every_family`
+  (several paths behind one next-hop, a loss that empties the selection,
+  a late neighbor joining meanwhile; fails on `main`).
+  Found while fixing and left out (pre-existing): under
+  `suppress-fib-pending` the IPv4 advertise job is held whole, so when one
+  path of several is withdrawn by its source, the AddPath withdraw of that
+  path is skipped, and the release, which walks the current candidates,
+  never sends it.
 
 ### 24. P2 CONFIRMED — a `route-target import` change is silently ineffective; export re-tag skips sibling re-import and RTC-skipped peers
 

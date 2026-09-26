@@ -6024,9 +6024,13 @@ impl Bgp {
         // v4-unicast deps are batched per shard by the caller
         // (`nht_handle_update`), so here `dep` is always sync-shard-owned
         // (v6 / LU / VPN / EVPN / SR-Policy) at N>1, or any dep at N=1.
+        // `flipped`: some candidate's reachability changed — the AddPath
+        // re-run below is for those (a re-eval that flips nothing, as the
+        // MED-knob recompute's, re-sends nothing to AddPath peers).
+        let mut flipped = false;
         let selected = match &dep {
             NhtDep::V4(p) => {
-                self.shard.v4.set_nexthop_reachable(*p, nh, reachable);
+                flipped = self.shard.v4.set_nexthop_reachable(*p, nh, reachable);
                 self.shard.v4.select_best_path(*p)
             }
             NhtDep::V6(p) => {
@@ -6042,7 +6046,8 @@ impl Bgp {
                 self.shard.v6lu.select_best_path(*p)
             }
             NhtDep::V4vpn(rd, p) => {
-                self.shard
+                flipped = self
+                    .shard
                     .v4vpn
                     .entry(*rd)
                     .or_default()
@@ -6050,7 +6055,8 @@ impl Bgp {
                 self.shard.select_best_path_vpn(rd, *p)
             }
             NhtDep::V6vpn(rd, p) => {
-                self.shard
+                flipped = self
+                    .shard
                     .v6vpn
                     .entry(*rd)
                     .or_default()
@@ -6104,6 +6110,17 @@ impl Bgp {
                     &mut top,
                     &mut self.peers,
                 );
+                // Review finding #23: AddPath peers hold every candidate;
+                // the plain fan-out above does not reach them.
+                if flipped {
+                    super::route::route_addpath_nexthop_flip(
+                        None,
+                        *p,
+                        nh,
+                        &mut top,
+                        &mut self.peers,
+                    );
+                }
             }
             NhtDep::V6(p) => {
                 super::route::fib_install_v6(&top, *p, &selected);
@@ -6149,6 +6166,15 @@ impl Bgp {
                     &mut top,
                     &mut self.peers,
                 );
+                if flipped {
+                    super::route::route_addpath_nexthop_flip(
+                        Some(*rd),
+                        *p,
+                        nh,
+                        &mut top,
+                        &mut self.peers,
+                    );
+                }
                 // Register-then-gate: an imported VPNv4 route only
                 // becomes (or stops being) best-path here, after the PE
                 // next-hop resolves asynchronously. (Re-)dispatch the
@@ -6204,6 +6230,15 @@ impl Bgp {
                     &mut top,
                     &mut self.peers,
                 );
+                if flipped {
+                    super::route::route_addpath_nexthop_flip_vpnv6(
+                        *rd,
+                        *p,
+                        nh,
+                        &mut top,
+                        &mut self.peers,
+                    );
+                }
                 // VPNv6 counterpart of the V4vpn arm: (re-)dispatch the
                 // VRF import with the resolved transport once the PE
                 // next-hop resolves, or withdraw on PE failure.
@@ -8546,3 +8581,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "addpath_nht_review_tests.rs"]
+mod addpath_nht_review_tests;
