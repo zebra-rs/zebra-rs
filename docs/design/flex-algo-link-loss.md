@@ -2,9 +2,9 @@
 
 > **Status:** reviewed (2026-09-25); all six §10 decisions settled, each taking the
 > recommendation. PR 1 (D1) merged as #2414, with its review follow-up #2416; PR 2 (D2–D4, D7,
-> IS-IS) merged as #2419. PR 3 is split in two, smallest first: 3a, OSPFv2 (branch
-> `ospf-flex-algo-selection`), then 3b, OSPFv3. Where the implementation settled a detail this
-> document left open, the text below says so.
+> IS-IS) merged as #2419. PR 3 is split in two, smallest first: 3a, OSPFv2, merged as #2424;
+> then 3b, OSPFv3, which first needed OSPFv3 LSA ageing fixed (branch `ospfv3-lsa-aging`). Where
+> the implementation settled a detail this document left open, the text below says so.
 > **Parent docs:** [stamp-measured-loss.md](./stamp-measured-loss.md) (the measured loss this
 > consumes), [review sequencing](../reviews/stamp-isis-ospf-2026-09-16.md) (Pattern C, "Flex-Algo
 > link loss"), [flex-algo-roadmap.md](./flex-algo-roadmap.md),
@@ -207,6 +207,14 @@ Instance ID. This router's own definition is a candidate only where it is advert
 backbone's Router Information LSA, with Segment Routing on — and the SR-Algorithm list and the
 per-algorithm Prefix-SIDs follow the backbone's participation, re-originated whenever it
 changes.
+
+As built for OSPFv3 (PR 3b): zebra-rs's OSPFv3 carries its SR capabilities, definitions
+included, in an E-Router-LSA (Link State ID 0), not the OSPFv3 Router Information LSA; moving
+them is a separate change (decided 2026-09-25). Definitions are read from every other router's
+E-Router-LSAs, first occurrence in ascending Link State ID. OSPFv3 originates SR capabilities in
+every area, so selection and participation are per area: this router's own definition is a
+candidate in each area while SR-MPLS or SRv6 is on, and each area's SR-Algorithm list and its
+interfaces' per-algorithm Prefix-SIDs follow that area's participation.
 
 ### D2 — The FAEML sub-TLV: wire format and code point
 
@@ -462,7 +470,8 @@ These are independent of the constraint, and listed so they are not lost:
   Information / SR-info LSA nor schedules SPF. A FAD edit waits for an unrelated event. It is
   folded into PR 3. *OSPFv2: fixed in PR 3a — a commit that stages flex-algo, affinity-map or SRLG
   changes re-originates the Router Information, Extended Prefix and Extended Link LSAs and
-  recomputes every area.* The survey missed a sibling: a received area-scoped opaque LSA
+  recomputes every area. OSPFv3: fixed in PR 3b, re-originating each area's SR-info
+  E-Router-LSA and every interface's E-Intra-Area-Prefix and E-Router-LSA.* The survey missed a sibling: a received area-scoped opaque LSA
   (Router Information, Extended Link, Extended Prefix) never scheduled SPF either, so a peer's
   definition, a router joining an algorithm or a link's affinity waited the same way. Fixed for
   OSPFv2 in PR 3a.
@@ -472,7 +481,8 @@ These are independent of the constraint, and listed so they are not lost:
   unreadable known sub-TLV is kept as unknown, one overrunning the definition as trailing bytes
   (both unsupported, both re-flooded as received), and a missing final padding is tolerated. The
   shared `FadFlags` also dropped every flag bit but M, so unknown flags were invisible; it now
-  keeps them.*
+  keeps them. OSPFv3: the same in PR 3b; a FAD overrunning its sub-TLVs no longer fails the
+  E-Router-LSA carrying it.*
 - **IS-IS codec comment** (`isis-packet/src/sub/neigh.rs:652`): "The reserved value 0xFFFFFF marks
   the metric as unavailable" is not in RFC 8570. Fixed in PR 2 (it matters to D4).
 - **IS-IS Flex-Algo graphs walk TLV 22 only** (`isis/graph.rs:703`), not the multi-topology

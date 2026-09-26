@@ -287,12 +287,6 @@ impl<V: OspfVersion> Lsdb<V> {
             .map(|((_, id, adv), lsa)| ((*id, *adv), lsa))
     }
 
-    /// Drop the LSA at the given key. Key-only operation — no
-    /// header field access, so trivially generic.
-    pub fn remove_lsa(&mut self, ls_type: OspfLsType, ls_id: Ipv4Addr, adv_router: Ipv4Addr) {
-        self.tables.remove(&v2_lsa_key(ls_type, ls_id, adv_router));
-    }
-
     /// Flush an LSA by setting its age to MaxAge and returning a
     /// clone for re-flooding. The refresh timer is cancelled, and
     /// a new hold timer is set. Now generic — header mutation goes
@@ -469,27 +463,48 @@ impl<V: OspfVersion> Lsdb<V> {
     /// Re-originate an existing LSA with a bumped sequence number.
     /// Drops it back at age 0, runs the version-specific
     /// `update_lsa` to refresh length / checksum, and resets the
-    /// hold / refresh timers. Now generic.
-    pub fn refresh_lsa(
+    /// hold / refresh timers. Returns the refreshed LSA, for flooding.
+    ///
+    /// A withdrawn LSA is left alone. Flushing cancels the refresh
+    /// timer, but not a refresh it had already queued, which would bring
+    /// the advertisement back.
+    pub fn refresh_lsa_by_raw_key(
         &mut self,
-        ls_type: OspfLsType,
-        ls_id: Ipv4Addr,
-        adv_router: Ipv4Addr,
+        lsa_key: OspfLsaKey,
         tx: &UnboundedSender<Message<V>>,
         area_id: Option<Ipv4Addr>,
-    ) {
-        let lsa_key: OspfLsaKey = v2_lsa_key(ls_type, ls_id, adv_router);
-        if let Some(old_lsa) = self.tables.get(&lsa_key) {
-            let mut new_data = old_lsa.data.clone();
-            let h = V::lsa_header_mut(&mut new_data);
-            V::set_ls_seq_number(h, V::ls_seq_number(h) + 1);
-            V::set_ls_age(h, 0);
-            V::update_lsa(&mut new_data);
-            let mut lsa = Lsa::<V>::new(new_data);
-            lsa.originated = true;
-            lsa.hold_timer = Some(hold_timer(tx, area_id, lsa_key, 0));
-            lsa.refresh_timer = Some(refresh_timer(tx, area_id, lsa_key));
-            self.tables.insert(lsa_key, lsa);
+    ) -> Option<V::Lsa> {
+        let old_lsa = self.tables.get(&lsa_key)?;
+        if V::ls_age(old_lsa.header()) >= OSPF_MAX_AGE {
+            return None;
+        }
+        let mut new_data = old_lsa.data.clone();
+        let h = V::lsa_header_mut(&mut new_data);
+        V::set_ls_seq_number(h, V::ls_seq_number(h) + 1);
+        V::set_ls_age(h, 0);
+        V::update_lsa(&mut new_data);
+        let mut lsa = Lsa::<V>::new(new_data.clone());
+        lsa.originated = true;
+        lsa.hold_timer = Some(hold_timer(tx, area_id, lsa_key, 0));
+        lsa.refresh_timer = Some(refresh_timer(tx, area_id, lsa_key));
+        self.tables.insert(lsa_key, lsa);
+        Some(new_data)
+    }
+
+    /// Remove the LSA at `lsa_key` if its age has reached MaxAge — its hold
+    /// timer fired. A timer message still in flight for an instance
+    /// replaced since finds the fresh copy young, and leaves it. Returns
+    /// whether it was removed.
+    pub fn remove_expired_by_raw_key(&mut self, lsa_key: OspfLsaKey) -> bool {
+        if self
+            .tables
+            .get(&lsa_key)
+            .is_some_and(|lsa| lsa.current_age() >= OSPF_MAX_AGE)
+        {
+            self.tables.remove(&lsa_key);
+            true
+        } else {
+            false
         }
     }
 
@@ -572,25 +587,7 @@ impl Lsdb<Ospfv2> {
                 self.label_map.remove(&lsa.h.adv_router);
                 return;
             }
-            let mut global = None;
-            let mut local = None;
-            for tlv in &ri.tlvs {
-                match tlv {
-                    RouterInfoTlv::SidLabelRnage(r) => {
-                        if let SidLabelTlv::Label(start) = r.sid_label {
-                            global = Some(LabelBlock::new(start, r.range));
-                        }
-                    }
-                    RouterInfoTlv::LocalBlock(lb) => {
-                        if let SidLabelTlv::Label(start) = lb.sid_label {
-                            local = Some(LabelBlock::new(start, lb.range));
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            if let Some(global) = global {
-                let label_config = LabelConfig { global, local };
+            if let Some(label_config) = router_info_label_config(&ri.tlvs) {
                 self.label_map.insert(lsa.h.adv_router, label_config);
             }
         }
@@ -600,6 +597,73 @@ impl Lsdb<Ospfv2> {
             }
         }
     }
+
+    /// Remove an LSA whose hold timer fired, if it has expired (see
+    /// [`Lsdb::remove_expired_by_raw_key`]), and what was derived from it:
+    /// an expiring Router Information LSA can take its router's SRGB with
+    /// it, and SPF must stop resolving Prefix-SIDs against that. Returns
+    /// whether it was removed.
+    pub fn expire_lsa(
+        &mut self,
+        ls_type: OspfLsType,
+        ls_id: Ipv4Addr,
+        adv_router: Ipv4Addr,
+    ) -> bool {
+        if !self.remove_expired_by_raw_key(v2_lsa_key(ls_type, ls_id, adv_router)) {
+            return false;
+        }
+        if ls_type == OspfLsType::OpaqueAreaLocal {
+            self.label_map_resync(adv_router);
+        }
+        true
+    }
+
+    /// Rebuild `label_map[adv_router]` from the router's Router Information
+    /// LSAs still in the LSDB.
+    fn label_map_resync(&mut self, adv_router: Ipv4Addr) {
+        let label_config = self
+            .tables
+            .iter()
+            .filter(|((ls_type, _, adv), lsa)| {
+                *ls_type == u8::from(OspfLsType::OpaqueAreaLocal) as u16
+                    && *adv == adv_router
+                    && lsa.current_age() < OSPF_MAX_AGE
+            })
+            .find_map(|(_, lsa)| match lsa.data.lsp {
+                OspfLsp::OpaqueAreaRouterInfo(ref ri) => router_info_label_config(&ri.tlvs),
+                _ => None,
+            });
+        match label_config {
+            Some(label_config) => self.label_map.insert(adv_router, label_config),
+            None => self.label_map.remove(&adv_router),
+        };
+    }
+}
+
+/// The SRGB and SRLB a Router Information LSA carries (RFC 8665 §3.2,
+/// §3.3). A router without an SRGB has no Prefix-SID labels to resolve.
+fn router_info_label_config(tlvs: &[RouterInfoTlv]) -> Option<LabelConfig> {
+    let mut global = None;
+    let mut local = None;
+    for tlv in tlvs {
+        match tlv {
+            RouterInfoTlv::SidLabelRnage(r) => {
+                if let SidLabelTlv::Label(start) = r.sid_label {
+                    global = Some(LabelBlock::new(start, r.range));
+                }
+            }
+            RouterInfoTlv::LocalBlock(lb) => {
+                if let SidLabelTlv::Label(start) = lb.sid_label {
+                    local = Some(LabelBlock::new(start, lb.range));
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(LabelConfig {
+        global: global?,
+        local,
+    })
 }
 
 impl Lsdb<super::version::Ospfv3> {
@@ -635,24 +699,7 @@ impl Lsdb<super::version::Ospfv3> {
         let Ospfv3LsBody::ERouter(ref body) = lsa.body else {
             return;
         };
-
-        let mut global = None;
-        let mut local = None;
-        for tlv in &body.tlvs {
-            match tlv {
-                Ospfv3ExtTlv::SidLabelRange(r) => {
-                    if let SidLabelTlv::Label(start) = r.sid_label {
-                        global = Some(LabelBlock::new(start, r.range));
-                    }
-                }
-                Ospfv3ExtTlv::SrLocalBlock(lb) => {
-                    if let SidLabelTlv::Label(start) = lb.sid_label {
-                        local = Some(LabelBlock::new(start, lb.range));
-                    }
-                }
-                _ => {}
-            }
-        }
+        let (global, local) = e_router_label_blocks(&body.tlvs);
 
         // Only react when this LSA actually carried SR capability
         // TLVs. The same advertising router emits multiple
@@ -674,4 +721,67 @@ impl Lsdb<super::version::Ospfv3> {
                 .insert(lsa.h.advertising_router, label_config);
         }
     }
+
+    /// Remove `lsa_key` if it has expired (see
+    /// [`Lsdb::remove_expired_by_raw_key`]), and what was derived from
+    /// it: an expiring E-Router-LSA can take its router's SRGB with it,
+    /// and SPF must stop resolving Prefix-SIDs against that. Returns
+    /// whether it was removed.
+    pub fn expire_lsa_v3(&mut self, lsa_key: OspfLsaKey) -> bool {
+        if !self.remove_expired_by_raw_key(lsa_key) {
+            return false;
+        }
+        let (ls_type, _, adv_router) = lsa_key;
+        if ls_type == OSPFV3_E_ROUTER_LSA_TYPE {
+            self.label_map_resync_v3(adv_router);
+        }
+        true
+    }
+
+    /// Rebuild `label_map[adv_router]` from the router's E-Router-LSAs
+    /// still in the LSDB — the one that left need not have been the one
+    /// carrying the SRGB.
+    fn label_map_resync_v3(&mut self, adv_router: Ipv4Addr) {
+        let label_config = self
+            .tables
+            .iter()
+            .filter(|((ls_type, _, adv), lsa)| {
+                *ls_type == OSPFV3_E_ROUTER_LSA_TYPE
+                    && *adv == adv_router
+                    && lsa.current_age() < OSPF_MAX_AGE
+            })
+            .find_map(|(_, lsa)| match lsa.data.body {
+                Ospfv3LsBody::ERouter(ref body) => match e_router_label_blocks(&body.tlvs) {
+                    (Some(global), local) => Some(LabelConfig { global, local }),
+                    (None, _) => None,
+                },
+                _ => None,
+            });
+        match label_config {
+            Some(label_config) => self.label_map.insert(adv_router, label_config),
+            None => self.label_map.remove(&adv_router),
+        };
+    }
+}
+
+/// The SRGB and SRLB an E-Router-LSA carries (RFC 8666 §3.2, §3.3).
+fn e_router_label_blocks(tlvs: &[Ospfv3ExtTlv]) -> (Option<LabelBlock>, Option<LabelBlock>) {
+    let mut global = None;
+    let mut local = None;
+    for tlv in tlvs {
+        match tlv {
+            Ospfv3ExtTlv::SidLabelRange(r) => {
+                if let SidLabelTlv::Label(start) = r.sid_label {
+                    global = Some(LabelBlock::new(start, r.range));
+                }
+            }
+            Ospfv3ExtTlv::SrLocalBlock(lb) => {
+                if let SidLabelTlv::Label(start) = lb.sid_label {
+                    local = Some(LabelBlock::new(start, lb.range));
+                }
+            }
+            _ => {}
+        }
+    }
+    (global, local)
 }

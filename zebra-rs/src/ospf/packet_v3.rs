@@ -711,14 +711,14 @@ pub(super) fn ospfv3_db_desc_resend(oi: &OspfInterface<Ospfv3>, nbr: &Neighbor<O
 /// Bits 14:13 are the scope: 00 = link-local, 01 = area, 10 = AS,
 /// 11 = reserved. Decode the scope for LSDB routing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Ospfv3LsaScope {
+pub(super) enum Ospfv3LsaScope {
     Link,
     Area,
     As,
     Reserved,
 }
 
-fn ospfv3_ls_type_scope(ls_type: u16) -> Ospfv3LsaScope {
+pub(super) fn ospfv3_ls_type_scope(ls_type: u16) -> Ospfv3LsaScope {
     match (ls_type >> 13) & 0x3 {
         0 => Ospfv3LsaScope::Link,
         1 => Ospfv3LsaScope::Area,
