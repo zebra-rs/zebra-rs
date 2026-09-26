@@ -6374,6 +6374,17 @@ impl Ospf<Ospfv2> {
             self.nssa_default_lsa_originate(area_id);
             self.nssa_redist_connected_resync(area_id);
         }
+        // Segment Routing's LSAs went with the flush too — the Router
+        // Information LSA (the SRGB peers resolve Prefix-SIDs against)
+        // and each interface's Extended Prefix and Extended Link LSAs —
+        // and nothing re-originated them: every Prefix-SID of this router
+        // left the network until SR was toggled.
+        self.router_info_lsa_originate();
+        let ifindexes: Vec<u32> = self.links.keys().copied().collect();
+        for ifindex in ifindexes {
+            self.ext_prefix_lsa_originate(ifindex);
+            self.ext_link_lsa_originate(ifindex);
+        }
     }
 
     /// Flush (pre-age to MaxAge + re-flood) every LSA we originated
@@ -6728,6 +6739,12 @@ impl Ospf<Ospfv2> {
                     link.area_type = area_type;
                 }
                 self.router_lsa_originate();
+                // The interface's Prefix-SID. Enable is a queued message,
+                // so `segment-routing mpls` later in the same commit can
+                // run first, find the interface not yet enabled, and
+                // originate nothing for it — and nothing else would. The
+                // originator gates on the SR mode itself.
+                self.ext_prefix_lsa_originate(ifindex);
                 let _ = self.tx.send(Message::Ifsm(ifindex, IfsmEvent::InterfaceUp));
                 // Adding a link to an area may turn this router into
                 // an ABR (gained interface in a 2nd area). Resync
@@ -7731,6 +7748,15 @@ impl Ospf<Ospfv3> {
         for area_id in nssa_areas {
             self.nssa_default_lsa_originate(area_id);
             self.nssa_redist_connected_resync_v3(area_id);
+        }
+        // Segment Routing's LSAs, as in the v2 sibling: each area's
+        // SR-info E-Router-LSA (the SRGB) and SRv6 Locator LSA, and each
+        // interface's Prefix-SID and Adj-SID LSAs.
+        self.srv6_originate_all_areas();
+        let ifindexes: Vec<u32> = self.links.keys().copied().collect();
+        for ifindex in ifindexes {
+            self.ext_intra_area_prefix_v3_lsa_originate(ifindex);
+            self.e_router_v3_lsa_originate(ifindex);
         }
     }
 
@@ -10628,6 +10654,7 @@ impl Ospf<Ospfv3> {
                 // Router-LSA key off the operator's choice.
                 link.network_type = link.config_network_type();
                 let area = self.areas.fetch(area_id);
+                let first_in_area = area.links.is_empty();
                 area.links.insert(ifindex);
                 let area_type = area.area_type;
                 if let Some(link) = self.links.get_mut(&ifindex) {
@@ -10636,6 +10663,19 @@ impl Ospf<Ospfv3> {
                 self.router_lsa_originate();
                 self.router_intra_area_prefix_lsa_originate(area_id);
                 self.link_lsa_originate(ifindex);
+                // Segment Routing, as in the v2 arm: Enable is a queued
+                // message, so `segment-routing mpls` (or an SRv6 locator
+                // resolving) can run first, find the interface not yet
+                // enabled — and a new area not yet created — and originate
+                // nothing for them. Originate the interface's Prefix-SID
+                // and, with an area's first interface, the area's SR
+                // capabilities and SRv6 locator. Each originator gates on
+                // the SR mode itself.
+                self.ext_intra_area_prefix_v3_lsa_originate(ifindex);
+                if first_in_area {
+                    self.e_router_v3_sr_info_lsa_originate(area_id);
+                    self.srv6_locator_lsa_originate(area_id);
+                }
                 let _ = self.tx.send(Message::Ifsm(ifindex, IfsmEvent::InterfaceUp));
                 // ABR status may have flipped (gained interface
                 // in a 2nd area) — resync NSSA translator state
@@ -19283,5 +19323,336 @@ mod v3_prefix_wire_tests {
         assert_eq!(host, addr.octets().to_vec());
         let none = Ospf::<Ospfv3>::ospfv3_masked_prefix_bytes(0, &addr.octets());
         assert!(none.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod sr_origination_tests {
+    //! Segment Routing LSAs must follow the configuration whichever way a
+    //! commit interleaves with the messages it queues, and survive a
+    //! Router-ID change. Every step goes through the real config callbacks.
+    use super::test_support::{fresh_ospf, fresh_ospf_v3};
+    use super::*;
+    use crate::config::{Args, ConfigOp};
+    use crate::ospf::lsdb::OSPF_MAX_AGE;
+
+    const AREA1: Ipv4Addr = Ipv4Addr::new(0, 0, 0, 1);
+
+    fn cfg<V: OspfVersion>(top: &mut Ospf<V>, path: &str, vals: &[&str]) {
+        let f = *top.callbacks.get(path).unwrap();
+        f(
+            top,
+            Args(vals.iter().map(|s| s.to_string()).collect()),
+            ConfigOp::Set,
+        );
+    }
+
+    /// Handle the Enable messages the callbacks queued.
+    async fn run_enables_v3(top: &mut Ospf<Ospfv3>, queued: &mut Vec<Message<Ospfv3>>) {
+        for msg in queued.drain(..) {
+            if matches!(msg, Message::Enable(..)) {
+                top.process_msg(msg).await;
+            }
+        }
+    }
+
+    async fn run_enables_v2(top: &mut Ospf, queued: &mut Vec<Message>) {
+        for msg in queued.drain(..) {
+            if matches!(msg, Message::Enable(..)) {
+                top.process_msg(msg).await;
+            }
+        }
+    }
+
+    fn queued<V: OspfVersion>(top: &mut Ospf<V>) -> Vec<Message<V>> {
+        std::iter::from_fn(|| top.rx.try_recv().ok()).collect()
+    }
+
+    fn loopback<V: OspfVersion>(top: &mut Ospf<V>, addr: V::Prefix)
+    where
+        V::Prefix: Default,
+    {
+        let mut link = OspfLink::from(
+            top.tx.clone(),
+            crate::rib::Link::from(crate::fib::message::FibLink {
+                index: 1,
+                name: "lo".into(),
+                mtu: 65536,
+                ..Default::default()
+            }),
+            top.sock.clone(),
+            top.router_id,
+            top.ptx.clone(),
+        );
+        link.addr.push(super::super::addr::OspfAddr {
+            prefix: addr,
+            secondary: false,
+        });
+        top.links.insert(1, link);
+    }
+
+    /// A point-to-point interface 2 with a Full neighbour and a configured
+    /// Adjacency-SID, enabled in the backbone.
+    fn p2p_with_full_neighbour<V: OspfVersion>(top: &mut Ospf<V>, addr: V::Prefix, nbr: V::Prefix)
+    where
+        V::Prefix: Default,
+        V::DbDesc: Default,
+    {
+        let mut link = OspfLink::from(
+            top.tx.clone(),
+            crate::rib::Link::from(crate::fib::message::FibLink {
+                index: 2,
+                name: "eth2".into(),
+                mtu: 1500,
+                ..Default::default()
+            }),
+            top.sock.clone(),
+            top.router_id,
+            top.ptx.clone(),
+        );
+        link.enabled = true;
+        link.network_type = super::super::link::OspfNetworkType::PointToPoint;
+        link.config.adjacency_sid = Some(super::super::link::AdjacencySid::Absolute(15500));
+        link.addr.push(super::super::addr::OspfAddr {
+            prefix: addr,
+            secondary: false,
+        });
+        let mut neighbour = Neighbor::new(
+            top.tx.clone(),
+            2,
+            nbr,
+            &Ipv4Addr::new(10, 0, 0, 2),
+            40,
+            top.ptx.clone(),
+        );
+        neighbour.state = NfsmState::Full;
+        link.nbrs.insert(Ipv4Addr::new(10, 0, 0, 2), neighbour);
+        top.links.insert(2, link);
+        top.areas.fetch(AREA0).links.insert(2);
+    }
+
+    fn live<V: OspfVersion>(top: &Ospf<V>, area_id: Ipv4Addr, key: OspfLsaKey) -> bool {
+        top.areas
+            .get(area_id)
+            .and_then(|area| area.lsdb.tables.get(&key))
+            .is_some_and(|lsa| V::ls_age(lsa.header()) < OSPF_MAX_AGE)
+    }
+
+    fn v3_prefix_sid(router: Ipv4Addr) -> OspfLsaKey {
+        (ospf_packet::OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE, 1, router)
+    }
+
+    fn v3_sr_info(router: Ipv4Addr) -> OspfLsaKey {
+        (
+            ospf_packet::OSPFV3_E_ROUTER_LSA_TYPE,
+            super::super::srmpls::SR_INFO_LSID,
+            router,
+        )
+    }
+
+    fn v2_prefix_sid(router: Ipv4Addr) -> OspfLsaKey {
+        let id = Ipv4Addr::from(((OpaqueLsaType::EXT_PREFIX as u32) << 24) | 1);
+        super::super::lsdb::v2_lsa_key(OspfLsType::OpaqueAreaLocal, id, router)
+    }
+
+    fn v3_adj_sid(router: Ipv4Addr) -> OspfLsaKey {
+        (ospf_packet::OSPFV3_E_ROUTER_LSA_TYPE, 2, router)
+    }
+
+    fn v2_adj_sid(router: Ipv4Addr) -> OspfLsaKey {
+        let id = Ipv4Addr::from(((OpaqueLsaType::EXT_LINK as u32) << 24) | 2);
+        super::super::lsdb::v2_lsa_key(OspfLsType::OpaqueAreaLocal, id, router)
+    }
+
+    fn v2_router_info(router: Ipv4Addr) -> OspfLsaKey {
+        let id = Ipv4Addr::from((OpaqueLsaType::ROUTER_INFO as u32) << 24);
+        super::super::lsdb::v2_lsa_key(OspfLsType::OpaqueAreaLocal, id, router)
+    }
+
+    /// A commit enabling an interface, giving it a Prefix-SID and turning
+    /// on SR-MPLS, in the order `show running-config formal` lists them.
+    /// Enabling the interface only queues a message, and the
+    /// `segment-routing mpls` callback can run before it is handled; the
+    /// Prefix-SID must be advertised either way (it used not to be, and
+    /// peers never installed the label).
+    #[tokio::test]
+    async fn a_prefix_sid_is_advertised_whichever_way_the_commit_interleaves() {
+        let rid = Ipv4Addr::new(10, 0, 0, 8);
+        for enable_first in [true, false] {
+            let mut top = fresh_ospf_v3();
+            top.callback_build();
+            loopback(&mut top, "2001:db8::8/128".parse().unwrap());
+            cfg(
+                &mut top,
+                "/router/ospfv3/area/interface/enabled",
+                &["0.0.0.0", "lo", "true"],
+            );
+            cfg(
+                &mut top,
+                "/router/ospfv3/area/interface/prefix-sid/index",
+                &["0.0.0.0", "lo", "800"],
+            );
+            let mut pending = queued(&mut top);
+            if enable_first {
+                run_enables_v3(&mut top, &mut pending).await;
+            }
+            cfg(&mut top, "/router/ospfv3/router-id", &["10.0.0.8"]);
+            cfg(&mut top, "/router/ospfv3/segment-routing/mpls", &[]);
+            run_enables_v3(&mut top, &mut pending).await;
+            assert!(
+                live(&top, AREA0, v3_prefix_sid(rid)),
+                "v3, Enable first: {enable_first}"
+            );
+
+            let mut top = fresh_ospf();
+            top.callback_build();
+            loopback(&mut top, "10.255.0.8/32".parse().unwrap());
+            cfg(
+                &mut top,
+                "/router/ospf/area/interface/enabled",
+                &["0.0.0.0", "lo", "true"],
+            );
+            cfg(
+                &mut top,
+                "/router/ospf/area/interface/prefix-sid/index",
+                &["0.0.0.0", "lo", "800"],
+            );
+            let mut pending = queued(&mut top);
+            if enable_first {
+                run_enables_v2(&mut top, &mut pending).await;
+            }
+            cfg(&mut top, "/router/ospf/router-id", &["10.0.0.8"]);
+            cfg(&mut top, "/router/ospf/segment-routing/mpls", &[]);
+            run_enables_v2(&mut top, &mut pending).await;
+            assert!(
+                live(&top, AREA0, v2_prefix_sid(rid)),
+                "v2, Enable first: {enable_first}"
+            );
+        }
+    }
+
+    /// OSPFv3 advertises its SR capabilities in every area. An area the
+    /// commit creates — by enabling its first interface — does not exist
+    /// yet when `segment-routing mpls` runs first; it gets them anyway.
+    #[tokio::test]
+    async fn an_area_created_after_segment_routing_gets_the_sr_capabilities() {
+        let rid = Ipv4Addr::new(10, 0, 0, 8);
+        let mut top = fresh_ospf_v3();
+        top.callback_build();
+        loopback(&mut top, "2001:db8::8/128".parse().unwrap());
+        cfg(&mut top, "/router/ospfv3/router-id", &["10.0.0.8"]);
+        cfg(
+            &mut top,
+            "/router/ospfv3/area/interface/enabled",
+            &["0.0.0.1", "lo", "true"],
+        );
+        let mut pending = queued(&mut top);
+        cfg(&mut top, "/router/ospfv3/segment-routing/mpls", &[]);
+        assert!(top.areas.get(AREA1).is_none(), "not created yet");
+        run_enables_v3(&mut top, &mut pending).await;
+        assert!(live(&top, AREA1, v3_sr_info(rid)));
+
+        // The same for SRv6: the locator resolves before the area exists.
+        let mut top = fresh_ospf_v3();
+        top.callback_build();
+        loopback(&mut top, "2001:db8::8/128".parse().unwrap());
+        cfg(&mut top, "/router/ospfv3/router-id", &["10.0.0.8"]);
+        cfg(
+            &mut top,
+            "/router/ospfv3/area/interface/enabled",
+            &["0.0.0.1", "lo", "true"],
+        );
+        let mut pending = queued(&mut top);
+        top.watched_locator = Some("LOC1".into());
+        top.process_sr_rx(crate::rib::RibSrRx::Locator {
+            name: "LOC1".into(),
+            locator: Some(crate::rib::Locator {
+                prefix: Some("fcbb:bbbb:8::/48".parse().unwrap()),
+                behavior: None,
+                flavors: 0,
+                vrf: None,
+                table_id: 0,
+            }),
+        });
+        run_enables_v3(&mut top, &mut pending).await;
+        let locator = (
+            ospf_packet::OSPFV3_SRV6_LOCATOR_LSA_TYPE,
+            super::super::srv6::SRV6_LOCATOR_LSID,
+            rid,
+        );
+        assert!(live(&top, AREA1, locator), "SRv6 Locator LSA");
+        assert!(live(&top, AREA1, v3_sr_info(rid)), "SRv6 capabilities");
+    }
+
+    /// Everything SR advertises is advertised under the Router-ID. A
+    /// Router-ID change flushes it all, and the SR LSAs were never
+    /// re-originated under the new identity: the SRGB and every Prefix-SID
+    /// of this router left the network until SR was toggled.
+    #[tokio::test]
+    async fn sr_advertisements_follow_a_router_id_change() {
+        let (old, new) = (Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 9));
+
+        let mut top = fresh_ospf_v3();
+        top.callback_build();
+        loopback(&mut top, "2001:db8::8/128".parse().unwrap());
+        cfg(&mut top, "/router/ospfv3/router-id", &["10.0.0.1"]);
+        cfg(
+            &mut top,
+            "/router/ospfv3/area/interface/enabled",
+            &["0.0.0.0", "lo", "true"],
+        );
+        cfg(
+            &mut top,
+            "/router/ospfv3/area/interface/prefix-sid/index",
+            &["0.0.0.0", "lo", "800"],
+        );
+        let mut pending = queued(&mut top);
+        run_enables_v3(&mut top, &mut pending).await;
+        p2p_with_full_neighbour(
+            &mut top,
+            "fe80::1/64".parse().unwrap(),
+            "fe80::2/64".parse().unwrap(),
+        );
+        cfg(&mut top, "/router/ospfv3/segment-routing/mpls", &[]);
+        assert!(live(&top, AREA0, v3_sr_info(old)) && live(&top, AREA0, v3_prefix_sid(old)));
+        assert!(live(&top, AREA0, v3_adj_sid(old)));
+        cfg(&mut top, "/router/ospfv3/router-id", &["10.0.0.9"]);
+        assert!(live(&top, AREA0, v3_sr_info(new)), "v3 SR-info");
+        assert!(live(&top, AREA0, v3_prefix_sid(new)), "v3 Prefix-SID");
+        assert!(live(&top, AREA0, v3_adj_sid(new)), "v3 Adj-SID");
+        assert!(!live(&top, AREA0, v3_sr_info(old)) && !live(&top, AREA0, v3_prefix_sid(old)));
+
+        let mut top = fresh_ospf();
+        top.callback_build();
+        loopback(&mut top, "10.255.0.8/32".parse().unwrap());
+        cfg(&mut top, "/router/ospf/router-id", &["10.0.0.1"]);
+        cfg(
+            &mut top,
+            "/router/ospf/area/interface/enabled",
+            &["0.0.0.0", "lo", "true"],
+        );
+        cfg(
+            &mut top,
+            "/router/ospf/area/interface/prefix-sid/index",
+            &["0.0.0.0", "lo", "800"],
+        );
+        let mut pending = queued(&mut top);
+        run_enables_v2(&mut top, &mut pending).await;
+        p2p_with_full_neighbour(
+            &mut top,
+            "192.0.2.1/30".parse().unwrap(),
+            "192.0.2.2/30".parse().unwrap(),
+        );
+        cfg(&mut top, "/router/ospf/segment-routing/mpls", &[]);
+        assert!(live(&top, AREA0, v2_router_info(old)) && live(&top, AREA0, v2_prefix_sid(old)));
+        assert!(live(&top, AREA0, v2_adj_sid(old)));
+        cfg(&mut top, "/router/ospf/router-id", &["10.0.0.9"]);
+        assert!(
+            live(&top, AREA0, v2_router_info(new)),
+            "v2 Router Information"
+        );
+        assert!(live(&top, AREA0, v2_prefix_sid(new)), "v2 Prefix-SID");
+        assert!(live(&top, AREA0, v2_adj_sid(new)), "v2 Adj-SID");
+        assert!(!live(&top, AREA0, v2_router_info(old)) && !live(&top, AREA0, v2_prefix_sid(old)));
     }
 }
