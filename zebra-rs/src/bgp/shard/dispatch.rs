@@ -294,6 +294,24 @@ impl BgpShard {
         }
     }
 
+    /// Replace mirrored candidates in place with `rows` (matched by source
+    /// peer and path-id) — the N>1 read replica's half of a next-hop flip,
+    /// which changes a candidate's reachability without adding or removing
+    /// it. The AddPath session-up dump reads that flag (review finding #23).
+    pub fn mirror_v4_refresh(&mut self, prefix: Ipv4Net, rows: &[BgpRib]) {
+        let Some(cands) = self.v4.0.get_mut(&prefix) else {
+            return;
+        };
+        for row in rows {
+            if let Some(c) = cands
+                .iter_mut()
+                .find(|c| c.ident == row.ident && c.remote_id == row.remote_id)
+            {
+                *c = row.clone();
+            }
+        }
+    }
+
     /// Expand a [`ShardMsg::RouteBatchV4`] into per-NLRI table ops. The
     /// shared attribute is cloned per prefix here — on the worker thread,
     /// in parallel across shards — instead of per prefix on the main task.
@@ -492,6 +510,7 @@ impl BgpShard {
             replaced,
             added: Some(added),
             survivor_nexthops,
+            nexthop_flipped: Vec::new(),
         }]
     }
 
@@ -540,6 +559,7 @@ impl BgpShard {
             replaced,
             added: Some(added),
             survivor_nexthops,
+            nexthop_flipped: Vec::new(),
         }]
     }
 
@@ -572,6 +592,7 @@ impl BgpShard {
             replaced: extra_replaced,
             added: None,
             survivor_nexthops,
+            nexthop_flipped: Vec::new(),
         }
     }
 
@@ -587,9 +608,22 @@ impl BgpShard {
         nh: std::net::IpAddr,
         reachable: bool,
     ) -> ShardOut {
-        self.v4.set_nexthop_reachable(nlri.prefix, nh, reachable);
+        let flipped = self.v4.set_nexthop_reachable(nlri.prefix, nh, reachable);
         let selected = self.select_best_path(nlri.prefix);
         let survivor_nexthops = self.candidate_nexthops_v4(None, nlri.prefix);
+        // The candidates that track `nh`, now flipped: main re-runs the
+        // AddPath advertise for them (review finding #23). None when the
+        // flag was already `reachable` (a recompute, not a flip).
+        let nexthop_flipped = if flipped {
+            self.v4
+                .candidates(nlri.prefix)
+                .iter()
+                .filter(|rib| super::super::nht::nht_target(&rib.attr) == Some(nh))
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
         ShardOut::BestPathV4 {
             ident: 0,
             rd: None,
@@ -598,6 +632,7 @@ impl BgpShard {
             replaced: Vec::new(),
             added: None,
             survivor_nexthops,
+            nexthop_flipped,
         }
     }
 
@@ -1038,6 +1073,7 @@ impl BgpShard {
                             replaced,
                             added: Some(added),
                             survivor_nexthops,
+                            nexthop_flipped: Vec::new(),
                         });
                     }
                 }
@@ -1534,6 +1570,59 @@ mod tests {
             }
             _ => panic!("expected one BestPathV4, got {out:?}"),
         }
+    }
+
+    /// Review finding #23: the N>1 next-hop re-evaluation must report the
+    /// candidates it flipped — AddPath peers hold every candidate, and the
+    /// selection alone does not tell main which path-ids to withdraw or
+    /// re-send. A re-evaluation that flips nothing reports none.
+    #[test]
+    fn nexthop_reeval_reports_the_flipped_candidates() {
+        let mut shard = BgpShard::default();
+        shard.handle(update_v4(1, "10.0.0.0/24", "192.0.2.1", true), None);
+        shard.handle(update_v4(2, "10.0.0.0/24", "192.0.2.2", true), None);
+        let nh: std::net::IpAddr = "192.0.2.1".parse().unwrap();
+        let reeval = |shard: &mut BgpShard, reachable: bool| {
+            let out = shard.handle(
+                ShardMsg::NexthopReachableBatchV4 {
+                    nlris: vec![v4("10.0.0.0/24")],
+                    nh,
+                    reachable,
+                },
+                None,
+            );
+            match out.as_slice() {
+                [
+                    ShardOut::BestPathV4 {
+                        nexthop_flipped, ..
+                    },
+                ] => nexthop_flipped
+                    .iter()
+                    .map(|r| (r.ident, r.nexthop_reachable))
+                    .collect::<Vec<_>>(),
+                _ => panic!("expected one BestPathV4, got {out:?}"),
+            }
+        };
+        assert_eq!(reeval(&mut shard, false), vec![(1, false)]);
+        assert_eq!(reeval(&mut shard, false), vec![], "nothing flipped");
+        assert_eq!(reeval(&mut shard, true), vec![(1, true)]);
+    }
+
+    /// The read replica refreshes a flipped candidate in place.
+    #[test]
+    fn mirror_v4_refresh_replaces_the_row_in_place() {
+        let mut mirror = BgpShard::default();
+        let mut pool = BgpShard::default();
+        pool.handle(update_v4(1, "10.0.0.0/24", "192.0.2.1", true), None);
+        let prefix: Ipv4Net = "10.0.0.0/24".parse().unwrap();
+        let row = pool.v4.candidates(prefix)[0].clone();
+        mirror.mirror_v4(prefix, Some(&row), &[], Some(&row));
+        let mut flipped = row.clone();
+        flipped.nexthop_reachable = false;
+        mirror.mirror_v4_refresh(prefix, &[flipped]);
+        let cands = mirror.v4.candidates(prefix);
+        assert_eq!(cands.len(), 1);
+        assert!(!cands[0].nexthop_reachable);
     }
 
     #[test]
