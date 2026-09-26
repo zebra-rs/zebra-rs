@@ -1,0 +1,43 @@
+# z1 (DUT, AS 65001): learns 10.66.1.0/24 from the scripted speaker h1
+# with the third-party next-hop 10.66.99.2, which resolves through the
+# static route below; sends it to z2 with AddPath and to z3 without
+# (deleting the static route makes the next-hop unreachable).
+router:
+  static:
+    ipv4:
+      route:
+      - prefix: 10.66.99.0/24
+        nexthop:
+        - address: 192.168.66.2
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.66.1
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    # The scripted speaker never listens on 179: passive keeps this peer
+    # in Active so the script's connect is accepted.
+    - remote-address: 192.168.66.2
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65091
+      transport:
+        passive-mode: true
+    - remote-address: 192.168.66.3
+      afi-safi:
+      - name: ipv4
+        enabled: true
+        add-path: send-receive
+      enabled: true
+      remote-as: 65092
+    - remote-address: 192.168.66.4
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65093
