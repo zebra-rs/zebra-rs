@@ -4615,9 +4615,11 @@ impl Ospf<Ospfv2> {
                 // (see `ospf_flood`): an expiring Router Information LSA
                 // takes its Flexible Algorithm definitions and participation
                 // with it, and its winner's forwarding state must go too.
+                // An NSSA Type-7's route goes with it, as on arrival.
                 OspfLsType::Router
                 | OspfLsType::Network
                 | OspfLsType::Summary
+                | OspfLsType::NssaAsExternal
                 | OspfLsType::OpaqueAreaLocal => {
                     if let Some(area_id) = area_id
                         && let Some(area) = self.areas.get_mut(area_id)
@@ -4630,6 +4632,20 @@ impl Ospf<Ospfv2> {
                     let _ = self.tx.send(Message::SpfSchedule(None));
                 }
                 _ => {}
+            }
+            // RFC 3101 §3, as on arrival: a Type-7 that ages out — its
+            // ASBR vanished without flushing it — must take its translated
+            // Type-5 with it, or this translator advertises the route to
+            // the whole domain for good; an expiring Router-LSA can change
+            // the translator election.
+            if matches!(ls_type, OspfLsType::NssaAsExternal | OspfLsType::Router)
+                && let Some(area_id) = area_id
+                && self
+                    .areas
+                    .get(area_id)
+                    .is_some_and(|area| area.area_type.is_nssa())
+            {
+                let _ = self.tx.send(Message::NssaTranslateResync(area_id));
             }
         }
     }
@@ -10152,6 +10168,19 @@ impl Ospf<Ospfv3> {
                         .is_some_and(|area| area.lsdb.expire_lsa_v3(key))
                 {
                     self.spf_schedule_area(area_id);
+                    // RFC 3101 §3, as on arrival: an NSSA-LSA that ages out
+                    // must take its translated AS-External-LSA with it, and
+                    // an expiring Router-LSA can change the translator
+                    // election.
+                    use ospf_packet::{OSPFV3_NSSA_LSA_TYPE, OSPFV3_ROUTER_LSA_TYPE};
+                    if matches!(ls_type, OSPFV3_NSSA_LSA_TYPE | OSPFV3_ROUTER_LSA_TYPE)
+                        && self
+                            .areas
+                            .get(area_id)
+                            .is_some_and(|area| area.area_type.is_nssa())
+                    {
+                        let _ = self.tx.send(Message::NssaTranslateResync(area_id));
+                    }
                 }
             }
             Ospfv3LsaScope::As => {
@@ -18053,6 +18082,98 @@ mod v3_lsa_aging_tests {
         let flooded = rxmt(&mut top).get(&key).map(|lsa| lsa.h.ls_seq_number);
         assert_eq!(flooded, Some(seq + 1), "the refresh never left this router");
     }
+
+    /// The OSPFv3 twin: an NSSA-LSA that ages out takes its route and
+    /// its translated AS-External-LSA with it.
+    #[tokio::test(start_paused = true)]
+    async fn an_expired_nssa_lsa_takes_its_translation_with_it() {
+        use ospf_packet::{
+            OSPFV3_AS_EXTERNAL_LSA_TYPE, OSPFV3_NSSA_LSA_TYPE, Ospfv3AsExternalLsa, Ospfv3LsBody,
+            Ospfv3LsaHeader, Ospfv3PrefixOptions,
+        };
+        let mut top = fresh_ospf_v3();
+        top.router_id = rid(1);
+        let nssa = Ipv4Addr::new(0, 0, 0, 1);
+        // An NSSA border router, translating: an interface in the
+        // backbone and one in the NSSA.
+        for (ifindex, area_id) in [(7, AREA0), (8, nssa)] {
+            top.areas.fetch(area_id).links.insert(ifindex);
+        }
+        top.areas.fetch(nssa).area_type = super::super::area::AreaType {
+            kind: super::super::area::AreaTypeKind::Nssa,
+            nssa_translator_role: super::super::area::NssaTranslatorRole::Always,
+            ..Default::default()
+        };
+        let mut type7 = ospf_packet::Ospfv3Lsa {
+            h: Ospfv3LsaHeader {
+                ls_age: OSPF_MAX_AGE - 1,
+                ls_type: OSPFV3_NSSA_LSA_TYPE,
+                link_state_id: 1,
+                advertising_router: rid(2),
+                ls_seq_number: 0x8000_0001,
+                ls_checksum: 0,
+                length: 0,
+            },
+            body: Ospfv3LsBody::Nssa(Ospfv3AsExternalLsa {
+                flags: 0,
+                metric: 20,
+                prefix_length: 64,
+                // P: translate me
+                prefix_options: Ospfv3PrefixOptions::new().with_p(true),
+                referenced_ls_type: 0,
+                address_prefix: vec![0x20, 0x01, 0x0d, 0xb8, 0x00, 0x99, 0x00, 0x00],
+                forwarding_address: None,
+                external_route_tag: None,
+                referenced_link_state_id: None,
+            }),
+            raw: None,
+        };
+        type7.update();
+        let tx = top.tx.clone();
+        let tracing = top.tracing.clone();
+        top.areas
+            .fetch(nssa)
+            .lsdb
+            .install_lsa(type7, &tx, Some(nssa), &tracing);
+        top.nssa_translate_resync(nssa);
+        let type5 = (OSPFV3_AS_EXTERNAL_LSA_TYPE, 1, rid(1));
+        assert!(
+            top.lsdb_as
+                .lookup_by_raw_key(type5)
+                .is_some_and(|lsa| lsa.h.ls_age < OSPF_MAX_AGE),
+            "translated"
+        );
+
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        let type7 = (OSPFV3_NSSA_LSA_TYPE, 1, rid(2));
+        top.process_msg(Message::Lsdb(LsdbEvent::HoldTimerExpire, Some(nssa), type7))
+            .await;
+        assert!(
+            top.areas
+                .get(nssa)
+                .unwrap()
+                .lsdb
+                .lookup_by_raw_key(type7)
+                .is_none()
+        );
+        let queued: Vec<_> = std::iter::from_fn(|| top.rx.try_recv().ok()).collect();
+        let recomputes = top.areas.get(nssa).unwrap().spf_timer.is_some()
+            || queued
+                .iter()
+                .any(|msg| matches!(msg, Message::SpfSchedule(_)));
+        assert!(recomputes, "its route stays");
+        for msg in queued {
+            if matches!(msg, Message::NssaTranslateResync(_)) {
+                top.process_msg(msg).await;
+            }
+        }
+        assert!(
+            top.lsdb_as
+                .lookup_by_raw_key(type5)
+                .is_none_or(|lsa| lsa.h.ls_age >= OSPF_MAX_AGE),
+            "the translation outlived its NSSA-LSA"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -18245,6 +18366,84 @@ mod v2_lsa_aging_tests {
             .await;
         let flooded = rxmt(&mut top).get(&key).map(|lsa| lsa.h.ls_seq_number);
         assert_eq!(flooded, Some(seq + 1), "the refresh never left this router");
+    }
+
+    /// An NSSA Type-7 that ages out — its ASBR vanished without flushing
+    /// it — goes as its flush would: the area recomputes, and the
+    /// translator withdraws the AS-External LSA it made from it. Left, that
+    /// carried the route to the whole domain for good.
+    #[tokio::test(start_paused = true)]
+    async fn an_expired_type7_takes_its_translation_with_it() {
+        let mut top = fresh_ospf();
+        top.router_id = rid(1);
+        let nssa = Ipv4Addr::new(0, 0, 0, 1);
+        // An NSSA border router, translating: an interface in the
+        // backbone and one in the NSSA.
+        for (ifindex, area_id) in [(7, AREA0), (8, nssa)] {
+            top.areas.fetch(area_id).links.insert(ifindex);
+        }
+        top.areas.fetch(nssa).area_type = super::super::area::AreaType {
+            kind: super::super::area::AreaTypeKind::Nssa,
+            nssa_translator_role: super::super::area::NssaTranslatorRole::Always,
+            ..Default::default()
+        };
+        let ls_id = Ipv4Addr::new(198, 51, 100, 0);
+        let mut header = OspfLsaHeader::new(OspfLsType::NssaAsExternal, ls_id, rid(2));
+        header.options = 0x08; // P: translate me
+        header.ls_age = OSPF_MAX_AGE - 1;
+        let body = ospf_packet::NssaAsExternalLsa {
+            netmask: Ipv4Addr::new(255, 255, 255, 0),
+            ext_and_tos: 0x80,
+            metric: 20,
+            forwarding_address: Ipv4Addr::new(192, 0, 2, 2),
+            external_route_tag: 0,
+            tos_list: Vec::new(),
+        };
+        let mut type7 = OspfLsa::from(header, OspfLsp::NssaAsExternal(body));
+        type7.update();
+        let tx = top.tx.clone();
+        let tracing = top.tracing.clone();
+        top.areas
+            .fetch(nssa)
+            .lsdb
+            .install_lsa(type7, &tx, Some(nssa), &tracing);
+        top.nssa_translate_resync(nssa);
+        let type5 = super::super::lsdb::v2_lsa_key(OspfLsType::AsExternal, ls_id, rid(1));
+        assert!(
+            top.lsdb_as
+                .lookup_by_raw_key(type5)
+                .is_some_and(|lsa| lsa.h.ls_age < OSPF_MAX_AGE),
+            "translated"
+        );
+
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        let type7 = super::super::lsdb::v2_lsa_key(OspfLsType::NssaAsExternal, ls_id, rid(2));
+        top.process_msg(Message::Lsdb(LsdbEvent::HoldTimerExpire, Some(nssa), type7))
+            .await;
+        assert!(
+            top.areas
+                .get(nssa)
+                .unwrap()
+                .lsdb
+                .lookup_by_raw_key(type7)
+                .is_none()
+        );
+        assert!(
+            top.areas.get(nssa).unwrap().spf_timer.is_some(),
+            "its route stays"
+        );
+        let queued: Vec<_> = std::iter::from_fn(|| top.rx.try_recv().ok()).collect();
+        for msg in queued {
+            if matches!(msg, Message::NssaTranslateResync(_)) {
+                top.process_msg(msg).await;
+            }
+        }
+        assert!(
+            top.lsdb_as
+                .lookup_by_raw_key(type5)
+                .is_none_or(|lsa| lsa.h.ls_age >= OSPF_MAX_AGE),
+            "the translation outlived its Type-7"
+        );
     }
 }
 
