@@ -1,0 +1,23 @@
+# b1: Router-ID starts 1.1.1.1 — OSPFv2 SR-MPLS, loopback Prefix-SID index 11 (label 16011).
+interface:
+- if-name: lo
+  ipv4:
+    address: 192.168.11.1/32
+- if-name: b1-b2
+  ipv4:
+    address: 10.0.12.1/30
+router:
+  ospf:
+    router-id: 1.1.1.1
+    segment-routing:
+      mpls: {}
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+        prefix-sid:
+          index: 11
+      - if-name: b1-b2
+        enabled: true
+        network-type: point-to-point

@@ -1,0 +1,23 @@
+# b2: the observer — OSPFv2 SR-MPLS, loopback Prefix-SID index 12 (label 16012).
+interface:
+- if-name: lo
+  ipv4:
+    address: 192.168.11.2/32
+- if-name: b2-b1
+  ipv4:
+    address: 10.0.12.2/30
+router:
+  ospf:
+    router-id: 2.2.2.2
+    segment-routing:
+      mpls: {}
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+        prefix-sid:
+          index: 12
+      - if-name: b2-b1
+        enabled: true
+        network-type: point-to-point
