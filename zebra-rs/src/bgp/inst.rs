@@ -477,6 +477,17 @@ pub(crate) fn import_targets(
         .collect()
 }
 
+/// Review finding #24: whether a route with `attr`'s RTs was imported under
+/// the `old` import RTs and is under the `new` ones.
+fn import_rt_matches(
+    old: &std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
+    new: &std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
+    attr: &bgp_packet::BgpAttr,
+) -> (bool, bool) {
+    let route_rts = route_rts_from_ecom(&attr.ecom);
+    (!old.is_disjoint(&route_rts), !new.is_disjoint(&route_rts))
+}
+
 /// VPNv6 counterpart of [`import_targets`].
 pub(crate) fn import_targets_v6(
     vrf_index: &BTreeMap<String, RibKnownVrf>,
@@ -4054,6 +4065,264 @@ impl Bgp {
         }
     }
 
+    /// Review finding #24: VRF `vrf`'s IPv4 import RTs changed from `old`.
+    /// Import RTs are otherwise read only when a route arrives, so re-run
+    /// the import over the routes already held — the selected VPNv4 routes
+    /// and the selected received EVPN Type-5 IPv4 routes, which import
+    /// through the same RTs. The VRF holds one imported path per `(RD,
+    /// prefix)`, whichever table it came from, so reconcile per key: import
+    /// each path the new RTs match and the old did not; when none does but a
+    /// path stopped matching, re-import one that still matches, since the
+    /// one that stopped may be the one held; withdraw the key only when
+    /// nothing matches any more — a withdraw for one table's route must not
+    /// erase the other table's that still matches. A VPNv4 route
+    /// `vrf` originated itself is skipped, as the local leak skips it; so is
+    /// our own Type-5, left to the local leak as on the ingest path.
+    fn reimport_vrf_v4(
+        &self,
+        vrf: &str,
+        old: &std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
+    ) {
+        let (Some(known), Some(handle)) =
+            (self.rib_known_vrfs.get(vrf), self.vrf_registry.get(vrf))
+        else {
+            return;
+        };
+        let new = &known.import_rts_v4;
+        let own_rd = self.vrfs.get(vrf).and_then(|c| c.rd);
+        let mut by_key: BTreeMap<
+            (bgp_packet::RouteDistinguisher, ipnet::Ipv4Net),
+            Vec<&super::route::BgpRib>,
+        > = BTreeMap::new();
+        for (rd, table) in &self.shard.v4vpn {
+            for (prefix, winner) in table.1.iter() {
+                if winner.ident == super::route::ORIGINATED_PEER && Some(*rd) == own_rd {
+                    continue;
+                }
+                by_key.entry((*rd, prefix)).or_default().push(winner);
+            }
+        }
+        for (rd, table) in &self.local_rib.evpn {
+            for (prefix, winner) in &table.selected {
+                if let bgp_packet::EvpnPrefix::IpPrefix {
+                    prefix: ipnet::IpNet::V4(p),
+                    ..
+                } = prefix
+                    && winner.typ != super::route::BgpRibType::Originated
+                {
+                    by_key.entry((*rd, *p)).or_default().push(winner);
+                }
+            }
+        }
+        for ((rd, prefix), winners) in by_key {
+            let (mut newly, mut still) = (Vec::new(), Vec::new());
+            let (mut before, mut lost) = (false, false);
+            for winner in winners {
+                let (was, now) = import_rt_matches(old, new, &winner.attr);
+                before |= was;
+                lost |= was && !now;
+                match (was, now) {
+                    (false, true) => newly.push(winner),
+                    (true, true) => still.push(winner),
+                    _ => {}
+                }
+            }
+            if newly.is_empty() && still.is_empty() {
+                if before {
+                    let _ = handle
+                        .inbox
+                        .send(super::vrf::msg::BgpVrfMsg::WithdrawImport { rd, prefix });
+                }
+                continue;
+            }
+            // The VRF holds whichever path it was sent last: send each path
+            // the new RTs newly match; when none does but a path stopped
+            // matching — it may be the one held — send one that still does.
+            let sends = if !newly.is_empty() {
+                newly
+            } else if lost {
+                still.into_iter().take(1).collect()
+            } else {
+                Vec::new()
+            };
+            for winner in sends {
+                let (label, transport) = self.import_label_transport(winner);
+                let _ = handle.inbox.send(super::vrf::msg::BgpVrfMsg::ImportV4 {
+                    rd,
+                    prefix,
+                    attr: (*winner.attr).clone(),
+                    label,
+                    transport,
+                });
+            }
+        }
+    }
+
+    /// VPNv6 / EVPN Type-5 IPv6 twin of [`Self::reimport_vrf_v4`].
+    fn reimport_vrf_v6(
+        &self,
+        vrf: &str,
+        old: &std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
+    ) {
+        let (Some(known), Some(handle)) =
+            (self.rib_known_vrfs.get(vrf), self.vrf_registry.get(vrf))
+        else {
+            return;
+        };
+        let new = &known.import_rts_v6;
+        let own_rd = self.vrfs.get(vrf).and_then(|c| c.rd);
+        let mut by_key: BTreeMap<
+            (bgp_packet::RouteDistinguisher, ipnet::Ipv6Net),
+            Vec<&super::route::BgpRib>,
+        > = BTreeMap::new();
+        for (rd, table) in &self.shard.v6vpn {
+            for (prefix, winner) in table.1.iter() {
+                if winner.ident == super::route::ORIGINATED_PEER && Some(*rd) == own_rd {
+                    continue;
+                }
+                by_key.entry((*rd, prefix)).or_default().push(winner);
+            }
+        }
+        for (rd, table) in &self.local_rib.evpn {
+            for (prefix, winner) in &table.selected {
+                if let bgp_packet::EvpnPrefix::IpPrefix {
+                    prefix: ipnet::IpNet::V6(p),
+                    ..
+                } = prefix
+                    && winner.typ != super::route::BgpRibType::Originated
+                {
+                    by_key.entry((*rd, *p)).or_default().push(winner);
+                }
+            }
+        }
+        for ((rd, prefix), winners) in by_key {
+            let (mut newly, mut still) = (Vec::new(), Vec::new());
+            let (mut before, mut lost) = (false, false);
+            for winner in winners {
+                let (was, now) = import_rt_matches(old, new, &winner.attr);
+                before |= was;
+                lost |= was && !now;
+                match (was, now) {
+                    (false, true) => newly.push(winner),
+                    (true, true) => still.push(winner),
+                    _ => {}
+                }
+            }
+            if newly.is_empty() && still.is_empty() {
+                if before {
+                    let _ = handle
+                        .inbox
+                        .send(super::vrf::msg::BgpVrfMsg::WithdrawImportV6 { rd, prefix });
+                }
+                continue;
+            }
+            // The VRF holds whichever path it was sent last: send each path
+            // the new RTs newly match; when none does but a path stopped
+            // matching — it may be the one held — send one that still does.
+            let sends = if !newly.is_empty() {
+                newly
+            } else if lost {
+                still.into_iter().take(1).collect()
+            } else {
+                Vec::new()
+            };
+            for winner in sends {
+                let (label, transport) = self.import_label_transport(winner);
+                let _ = handle.inbox.send(super::vrf::msg::BgpVrfMsg::ImportV6 {
+                    rd,
+                    prefix,
+                    attr: (*winner.attr).clone(),
+                    label,
+                    transport,
+                });
+            }
+        }
+    }
+
+    /// The service label and resolved transport a VRF import of `winner`
+    /// carries: a route a local VRF originated leaks with neither, as the
+    /// Export path sends it; a received one carries its label and its
+    /// next-hop's transport, as the ingest import does.
+    fn import_label_transport(
+        &self,
+        winner: &super::route::BgpRib,
+    ) -> (u32, Vec<crate::rib::nht::ResolvedNexthop>) {
+        if winner.ident == super::route::ORIGINATED_PEER {
+            return (0, Vec::new());
+        }
+        let label = winner.label.map(|l| l.label).unwrap_or(0);
+        let transport = super::nht::nht_target(&winner.attr)
+            .map(|nh| self.nexthop_cache.transport_for(0, nh).to_vec())
+            .unwrap_or_default();
+        (label, transport)
+    }
+
+    /// Review finding #24: VRF `vrf`'s own row `(rd, prefix)` was re-tagged
+    /// from `old` to `new`. Re-run the local leak: a sibling VRF the old
+    /// RTs selected and the new do not withdraws the row; every VRF the new
+    /// RTs select imports it (a refresh for one that already had it). `vrf`
+    /// itself is skipped, as on the Export path.
+    fn releak_retagged_v4(
+        &self,
+        vrf: &str,
+        rd: bgp_packet::RouteDistinguisher,
+        prefix: ipnet::Ipv4Net,
+        old: &bgp_packet::BgpAttr,
+        new: &bgp_packet::BgpAttr,
+    ) {
+        let before = import_targets(&self.rib_known_vrfs, &old.ecom, Some(vrf));
+        let after = import_targets(&self.rib_known_vrfs, &new.ecom, Some(vrf));
+        for name in before.iter().filter(|n| !after.contains(n)) {
+            if let Some(handle) = self.vrf_registry.get(name) {
+                let _ = handle
+                    .inbox
+                    .send(super::vrf::msg::BgpVrfMsg::WithdrawImport { rd, prefix });
+            }
+        }
+        for name in &after {
+            if let Some(handle) = self.vrf_registry.get(name) {
+                let _ = handle.inbox.send(super::vrf::msg::BgpVrfMsg::ImportV4 {
+                    rd,
+                    prefix,
+                    attr: new.clone(),
+                    label: 0,
+                    transport: Vec::new(),
+                });
+            }
+        }
+    }
+
+    /// VPNv6 twin of [`Self::releak_retagged_v4`].
+    fn releak_retagged_v6(
+        &self,
+        vrf: &str,
+        rd: bgp_packet::RouteDistinguisher,
+        prefix: ipnet::Ipv6Net,
+        old: &bgp_packet::BgpAttr,
+        new: &bgp_packet::BgpAttr,
+    ) {
+        let before = import_targets_v6(&self.rib_known_vrfs, &old.ecom, Some(vrf));
+        let after = import_targets_v6(&self.rib_known_vrfs, &new.ecom, Some(vrf));
+        for name in before.iter().filter(|n| !after.contains(n)) {
+            if let Some(handle) = self.vrf_registry.get(name) {
+                let _ = handle
+                    .inbox
+                    .send(super::vrf::msg::BgpVrfMsg::WithdrawImportV6 { rd, prefix });
+            }
+        }
+        for name in &after {
+            if let Some(handle) = self.vrf_registry.get(name) {
+                let _ = handle.inbox.send(super::vrf::msg::BgpVrfMsg::ImportV6 {
+                    rd,
+                    prefix,
+                    attr: new.clone(),
+                    label: 0,
+                    transport: Vec::new(),
+                });
+            }
+        }
+    }
+
     /// Re-tag and re-advertise a VRF's locally-originated VPNv4 routes
     /// with the current export route-targets. Called when a VRF's RT
     /// policy is (re-)learned: the per-VRF route export can race ahead of
@@ -4102,6 +4371,7 @@ impl Bgp {
             .unwrap_or(false);
         let mut type5_work: Vec<(ipnet::Ipv4Net, bgp_packet::BgpAttr, u32)> = Vec::new();
         for (prefix, mut rib) in rows {
+            let old_attr = rib.attr.clone();
             let mut attr = (*rib.attr).clone();
             // Strip existing Route-Target ecoms (RFC 4360 sub-type 0x02)
             // so a genuine RT change replaces; the race case has none.
@@ -4120,7 +4390,10 @@ impl Bgp {
                     rib.label.map(|l| l.label).unwrap_or(0),
                 ));
             }
-            let (_, selected, _) = self.shard.update(Some(rd), prefix, rib);
+            self.releak_retagged_v4(vrf, rd, prefix, &old_attr, &rib.attr);
+            let mut addpath_rib = rib.clone();
+            let (_, selected, local_id) = self.shard.update(Some(rd), prefix, rib);
+            addpath_rib.local_id = local_id;
             let mut top = super::peer::BgpTop {
                 router_id: &self.router_id,
                 srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
@@ -4146,6 +4419,16 @@ impl Bgp {
                 Some(rd),
                 prefix,
                 &selected,
+                super::route::ORIGINATED_PEER,
+                &mut top,
+                &mut self.peers,
+            );
+            // AddPath peers are not in the plain fan-out: send them the
+            // re-tagged row too (review finding #24).
+            super::route::route_advertise_to_addpath(
+                Some(rd),
+                prefix,
+                &addpath_rib,
                 super::route::ORIGINATED_PEER,
                 &mut top,
                 &mut self.peers,
@@ -4210,6 +4493,7 @@ impl Bgp {
             .unwrap_or(false);
         let mut type5_work: Vec<(ipnet::Ipv6Net, bgp_packet::BgpAttr, u32)> = Vec::new();
         for (prefix, mut rib) in rows {
+            let old_attr = rib.attr.clone();
             let mut attr = (*rib.attr).clone();
             // Strip existing Route-Target ecoms (RFC 4360 sub-type 0x02)
             // so a genuine RT change replaces; the race case has none.
@@ -4228,7 +4512,10 @@ impl Bgp {
                     rib.label.map(|l| l.label).unwrap_or(0),
                 ));
             }
-            let (_, selected, _) = self.shard.update_v6vpn(rd, prefix, rib);
+            self.releak_retagged_v6(vrf, rd, prefix, &old_attr, &rib.attr);
+            let mut addpath_rib = rib.clone();
+            let (_, selected, local_id) = self.shard.update_v6vpn(rd, prefix, rib);
+            addpath_rib.local_id = local_id;
             let mut top = super::peer::BgpTop {
                 router_id: &self.router_id,
                 srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
@@ -4254,6 +4541,14 @@ impl Bgp {
                 rd,
                 prefix,
                 &selected,
+                &mut top,
+                &mut self.peers,
+            );
+            // AddPath peers are not in the plain fan-out (review finding #24).
+            super::route::route_advertise_to_peers_vpnv6_addpath(
+                rd,
+                prefix,
+                &addpath_rib,
                 &mut top,
                 &mut self.peers,
             );
@@ -4725,6 +5020,10 @@ impl Bgp {
                     .map(|c| c.inter_as_hybrid)
                     .unwrap_or(false);
                 let entry = self.rib_known_vrfs.entry(name.clone()).or_default();
+                let old_import_v4 =
+                    (entry.import_rts_v4 != ipv4_import_rts).then(|| entry.import_rts_v4.clone());
+                let old_import_v6 =
+                    (entry.import_rts_v6 != ipv6_import_rts).then(|| entry.import_rts_v6.clone());
                 let export_v4_changed = entry.export_rts_v4 != ipv4_export_rts;
                 let export_v6_changed = entry.export_rts_v6 != ipv6_export_rts;
                 let export_mup_changed = entry.mup_export_rts != mup_export_rts;
@@ -4746,6 +5045,15 @@ impl Bgp {
                 }
                 if export_v6_changed {
                     self.retag_vrf_exports_v6(&name);
+                }
+                // Import RTs are read when a route arrives; a change must
+                // also re-run the import over the routes already held
+                // (review finding #24).
+                if let Some(old) = old_import_v4 {
+                    self.reimport_vrf_v4(&name, &old);
+                }
+                if let Some(old) = old_import_v6 {
+                    self.reimport_vrf_v6(&name, &old);
                 }
                 // Re-stamp the VRF's originated MUP routes with the new
                 // export RTs (same race the v4/v6 retag above closes, plus
@@ -8585,3 +8893,7 @@ mod tests {
 #[cfg(test)]
 #[path = "addpath_nht_review_tests.rs"]
 mod addpath_nht_review_tests;
+
+#[cfg(test)]
+#[path = "vrf_rt_change_review_tests.rs"]
+mod vrf_rt_change_review_tests;

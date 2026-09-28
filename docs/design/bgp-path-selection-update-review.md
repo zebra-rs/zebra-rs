@@ -1560,7 +1560,7 @@ cap. The two reviews agree on every overlapping item.
   path is skipped, and the release, which walks the current candidates,
   never sends it.
 
-### 24. P2 CONFIRMED — a `route-target import` change is silently ineffective; export re-tag skips sibling re-import and RTC-skipped peers
+### 24. P2 CONFIRMED, FIXED on branch `bgp-rt-import` — a `route-target import` change is silently ineffective; export re-tag skips sibling re-import and RTC-skipped peers
 
 - `inst.rs:4662-4683` (`RibRx::VrfRouteTargets`) assigns the import RT
   sets and re-tags only when an export set changed; import RTs are read
@@ -1581,6 +1581,84 @@ cap. The two reviews agree on every overlapping item.
   VPN tables for that VRF (add and withdraw); on an export-RT change,
   re-dispatch the re-tagged rows through the import path and withdraw the
   RTC-filtered peers' stale rows.
+- Gates (branch `bgp-rt-import`; each compiles on `main` and fails
+  there, except the control). Unit, `vrf_rt_change_review_tests.rs` (a
+  child of `inst.rs`; RT changes go through `Bgp::process_rib_msg`, and
+  each VRF task is a registered inbox the test reads):
+  `vpnv4_import_rt_change_imports_and_withdraws_held_routes` and its
+  `vpnv6_` twin (on `main` the VRF is told nothing either way),
+  `vpnv4_export_rt_change_moves_the_route_between_sibling_vrfs` and its
+  `vpnv6_` twin (on `main` the VRF that loses the RT keeps the route and
+  the one that gains it is not sent it),
+  `vpnv4_rtc_member_is_withdrawn_a_route_that_leaves_its_rts` and its
+  `vpnv6_` twin (on `main` the RTC member keeps the old advertisement);
+  control `import_rt_change_does_not_import_a_vrfs_own_route`. BDD
+  `bgp_vrf_rt_change` (one PE, four VRFs leaking locally by RT): the setup
+  control passes on `main`, then adding an import RT to blue does not
+  import red's route, and changing gold's export RT does not reach green.
+  Its IPv6 twin fails on `main` already at setup: blue never imports
+  gold's route, which suggests the export reached the VPNv6 table before
+  blue's RTs landed — the same gap at startup.
+- Also gated: the export re-tag re-advertised to plain VPN peers only
+  (`route_advertise_to_peers` / `_vpnv6`), so an AddPath VPN peer kept the
+  old RTs — `vpnv4_export_rt_change_re_tags_the_route_toward_addpath_neighbors`
+  and its `vpnv6_` twin fail on `main`.
+- FIXED (branch `bgp-rt-import`): an import-RT change on a VRF re-runs the
+  import over the selected VPNv4 / VPNv6 routes for that VRF alone
+  (`reimport_vrf_v4` / `_v6`): a route the new RTs match and the old did
+  not is imported, with its label and its next-hop's transport as the
+  ingest import sends them (none for a local VRF's own route, as the local
+  leak sends it); a route the old matched and the new do not is withdrawn;
+  the VRF's own routes are skipped. An export-RT re-tag re-runs the local
+  leak for each re-tagged row (`releak_retagged_v4` / `_v6`): the sibling
+  VRFs the old RTs selected and the new do not withdraw it, the ones the
+  new RTs select import it; the re-tagged row also goes to the AddPath
+  peers. An RTC member the route's RTs no longer reach is withdrawn the
+  route if it holds it (`V4Batch::advertise` / `V6Batch::advertise` call
+  their `withdraw`); AddPath peers already were, since #17. On the fix the
+  eight gates and the control pass; each part undone on its own fails its
+  own gate (import re-run v4 / v6, the own-route skip, the re-leak v4 / v6,
+  the AddPath re-tag v4 / v6, the RTC withdraw v4 / v6). Both BDD
+  features pass; the IPv6 twin's setup, which failed on `main`, passes on
+  the fix too (3/3), consistent with the startup race above. The VRF /
+  L3VPN / inter-AS / VPN features (`bgp_adv_interval_zero_vrf`,
+  `bgp_evpn_srv6_type5`, `bgp_interas_option_a` / `_ab` / `_b` / `_c`,
+  `bgp_mup_vrf_import`, `bgp_shard_addpath_vpnv4` / `_vpnv6`,
+  `bgp_shard_sync_vpnv4` / `_vpnv6`, `bgp_vpnv4_rr_transit_label`,
+  `bgp_vpnv6_rr_transit_label`, `bgp_vpnv6_transit_label_at_receive`,
+  `bgp_vrf_dual_home`, `bgp_vrf_evpn_type5`, `bgp_vrf_neighbor_add_path`,
+  `bgp_vrf_redistribute`, `bgp_vrf_self_network`, `bgp_vrf_show`,
+  `bgp_vrf_vpnv4_export` / `_vpnv6_export`, `l3vpn_bgp_v4` / `_v6`,
+  `l3vpn_dual_ce`, `l3vpn_static_v4` / `_v6`, `l3vpn_ospf_v4`) stay green.
+- Review follow-up: received EVPN Type-5 routes import through the same
+  IPv4 / IPv6 import RTs, but their selected paths live in
+  `local_rib.evpn`, which the re-import did not walk — an added RT missed a
+  held Type-5 route and a removed one left it imported. `reimport_vrf_v4` /
+  `_v6` now also replay the selected received Type-5 routes of that family,
+  skipping our own (typ `Originated`), which the ingest path leaves to the
+  local leak too. Gates `type5_v4_import_rt_added_imports_the_held_route`,
+  `type5_v4_import_rt_removed_withdraws_the_held_route` and their `type5_v6_`
+  twins (each fails on `main` and without the Type-5 pass); control
+  `import_rt_change_leaves_our_own_type5_to_the_local_leak` (fails without
+  the `Originated` skip).
+- Second review follow-up: a VPN route and a received Type-5 route can
+  share `(RD, prefix)` — the key the VRF holds one imported path under,
+  whichever table it came from — with different RTs. Switching the import
+  RT from the Type-5 route's to the VPN route's replayed the VPN import and
+  then the Type-5 withdraw for the same key, which erased the import. The
+  re-import now collects both tables' paths per key: it imports each path
+  the new RTs newly match and withdraws the key only when nothing matches
+  any more. Gates `v4_rt_switch_from_type5_to_vpn_leaves_the_vpn_route_imported`
+  and its `v6_` twin (the VRF's messages applied in order must leave it
+  holding the VPN route; they fail on `main`, where the VRF keeps the
+  Type-5 route, and with a withdraw whenever the old RTs matched).
+- Third review follow-up: when both paths matched before and the Type-5
+  route was imported last, removing only its RT left the VRF holding it —
+  the VPN route's match did not change, so nothing was sent. Per key, when
+  no path newly matches but one stopped matching, the re-import now sends
+  a path that still matches (the one that stopped may be the one held).
+  Gates `v4_rt_removal_switches_to_the_vpn_route_that_still_matches` and its
+  `v6_` twin (fail on `main` and without that fallback).
 
 ### 25. P2 CONFIRMED (knob-gated) — with `peer-sharding` at N=1 the session-up dump is never recorded in the PET's Adj-RIB-Out, so every dump-learned prefix is unwithdrawable
 

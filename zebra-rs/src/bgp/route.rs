@@ -5254,7 +5254,7 @@ fn route_advertise_batch_addpath<A: BatchAfi>(
 
 /// Advertise one added/changed IPv4-unicast or VPNv4 AddPath path. Thin
 /// wrapper over [`route_advertise_batch_addpath`].
-fn route_advertise_to_addpath(
+pub(super) fn route_advertise_to_addpath(
     rd: Option<RouteDistinguisher>,
     prefix: Ipv4Net,
     rib: &BgpRib,
@@ -5940,7 +5940,11 @@ impl BatchAfi for V4Batch {
         let (afi, safi) = Self::afi_safi(rd);
         let afi_safi = AfiSafi::new(afi, safi);
         if rd.is_some() && !peer.rtcv4.is_empty() && !rtc_match(&peer.rtcv4, &attr.ecom) {
-            // RTC: per-peer; skip without withdrawing.
+            // RT Constraint (RFC 4684): the peer is a member of none of the
+            // route's RTs. A route whose RTs left its membership must be
+            // withdrawn, not left standing (review finding #24); `withdraw`
+            // sends nothing when the peer does not hold the prefix.
+            Self::withdraw(peer, rd, prefix, new_best, bgp);
             return;
         }
         let attr = bgp.attr_store.intern(attr);
@@ -6155,7 +6159,8 @@ impl BatchAfi for V6Batch {
         let (afi, safi) = Self::afi_safi(rd);
         let afi_safi = AfiSafi::new(afi, safi);
         if rd.is_some() && !peer.rtcv6.is_empty() && !rtc_match(&peer.rtcv6, &attr.ecom) {
-            // RTC: per-peer; skip without withdrawing.
+            // RT Constraint: see `V4Batch::advertise` (review finding #24).
+            Self::withdraw(peer, rd, prefix, new_best, bgp);
             return;
         }
         let attr = bgp.attr_store.intern(attr);
