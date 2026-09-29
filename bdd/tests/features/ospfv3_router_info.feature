@@ -25,6 +25,9 @@ Feature: OSPFv3 advertises its Segment Routing capabilities in the Router Inform
     And I apply config "r1.yaml" to namespace "r1"
     And I apply config "r2.yaml" to namespace "r2"
     Then show command "show ospfv3 neighbor" in namespace "r2" should eventually contain "Full"
+    # r1's own Router Information LSA reaches r2 — originated before the
+    # adjacency, it arrives only if the database summary lists it.
+    And show command "show ospfv3 database" in namespace "r2" should eventually contain "Router-Info-LSA          0                1.1.1.1"
     And show command "show ospfv3 database detail" in namespace "r2" should eventually contain "Type: 0xa00c (Router-Info-LSA)"
     And show command "show ospfv3 database detail" in namespace "r2" should eventually contain "Router Capabilities:"
     And show command "show ospfv3 database detail" in namespace "r2" should eventually contain "Segment Routing Global Range TLV:"
