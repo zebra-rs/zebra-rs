@@ -9023,3 +9023,7 @@ mod rtc_mid_session_review_tests;
 #[cfg(test)]
 #[path = "router_id_change_review_tests.rs"]
 mod router_id_change_review_tests;
+
+#[cfg(test)]
+#[path = "pet_sync_review_tests.rs"]
+mod pet_sync_review_tests;

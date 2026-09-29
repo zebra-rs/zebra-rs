@@ -1,0 +1,16 @@
+# z3 (AS 65003): z2's early peer.
+router:
+  bgp:
+    global:
+      as: 65003
+      router-id: 10.0.25.3
+    timer:
+      adv-interval:
+        ebgp: 1
+    neighbor:
+    - remote-address: 10.0.25.2
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65002

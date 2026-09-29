@@ -1,0 +1,16 @@
+# z4 (AS 65004): z2's late peer, started after z1's routes exist.
+router:
+  bgp:
+    global:
+      as: 65004
+      router-id: 10.0.25.4
+    timer:
+      adv-interval:
+        ebgp: 1
+    neighbor:
+    - remote-address: 10.0.25.2
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65002
