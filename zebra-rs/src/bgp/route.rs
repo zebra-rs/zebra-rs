@@ -17004,6 +17004,7 @@ pub(super) fn route_sync_v4_chunk(peer: &mut Peer, bgp: &mut BgpTop, chunk: usiz
             };
             rib.attr = bgp.attr_store.intern(decision.attr);
             let arc_attr = rib.attr.clone();
+            record_sync_row_in_engine(peer, bgp.update_groups, nlri.prefix, &rib);
             // Register in adj_out and dedup: if the concurrent
             // event-driven path already advertised this exact interned
             // attr, `add` returns it and we skip the resend. Interning
@@ -17033,9 +17034,71 @@ pub(super) fn route_sync_v4_chunk(peer: &mut Peer, bgp: &mut BgpTop, chunk: usiz
     done
 }
 
+/// Record a row the session-up dump sent `peer` (already on the wire, so
+/// record only) in the egress engine that sends its later IPv4-unicast
+/// withdraws: its update group's engine when that runs, else its per-peer
+/// egress task. That engine sends a withdraw only for a row it holds, so an
+/// unrecorded dump row could never be withdrawn (review finding #25). The
+/// N>1 `DumpV4` records the same way; an engine exists only while its gate
+/// is on, and the group engine takes precedence, as on the advertise path.
+fn record_sync_row_in_engine(
+    peer: &Peer,
+    update_groups: &super::update_group::UpdateGroupMap,
+    prefix: Ipv4Net,
+    rib: &BgpRib,
+) {
+    let v4 = AfiSafi::new(Afi::Ip, Safi::Unicast);
+    let group_task = peer
+        .update_group_id
+        .get(&v4)
+        .and_then(|gid| update_groups.get(&v4)?.group_by_id(gid))
+        .and_then(|group| group.task.as_ref());
+    if let Some(task) = group_task {
+        task.send(super::group_egress::GroupEgressDeltaV4::RecordAdjOut {
+            prefix,
+            rib: rib.clone(),
+        });
+    } else if let Some(pet) = peer.pet.as_ref() {
+        let _ = pet
+            .delta_tx
+            .send(super::peer_egress::EgressDeltaV4::RecordAdjOut {
+                prefix,
+                rib: rib.clone(),
+            });
+    }
+}
+
+/// Record the rows the session-up dump put in `peer`'s own IPv4-unicast
+/// Adj-RIB-Out in the egress engine of the update group the peer has just
+/// joined. The FSM runs the dump (`route_sync`) before the peer joins its
+/// group, so the dump could not reach that engine, which sends the peer's
+/// later withdraws (review follow-up on #25). The chunked and the N>1 dumps
+/// run after the join and record as they go; for them this finds nothing.
+pub(super) fn record_session_up_dump_in_group_engine(
+    peer: &Peer,
+    update_groups: &super::update_group::UpdateGroupMap,
+) {
+    let v4 = AfiSafi::new(Afi::Ip, Safi::Unicast);
+    let Some(task) = peer
+        .update_group_id
+        .get(&v4)
+        .and_then(|gid| update_groups.get(&v4)?.group_by_id(gid))
+        .and_then(|group| group.task.as_ref())
+    else {
+        return;
+    };
+    for (prefix, rows) in peer.adj_out.v4.0.iter() {
+        for rib in rows {
+            task.send(super::group_egress::GroupEgressDeltaV4::RecordAdjOut {
+                prefix: *prefix,
+                rib: rib.clone(),
+            });
+        }
+    }
+}
+
 pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut BgpTop) {
     let add_path = peer.opt.is_add_path_send(Afi::Ip, Safi::Unicast);
-    let v4_afi_safi = AfiSafi::new(Afi::Ip, Safi::Unicast);
 
     // Collect all routes first to avoid borrow checker issues
     let routes: Vec<(Ipv4Net, BgpRib)> = if add_path {
@@ -17083,24 +17146,11 @@ pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut BgpTop) {
             continue;
         };
 
-        // Register to AdjOut.
+        // Register to AdjOut — the peer's, and the egress engine's that
+        // sends its later withdraws.
         rib.attr = bgp.attr_store.intern(decision.attr);
         let arc_attr = rib.attr.clone();
-        // Group-task migration: also record the synced route into the
-        // group adj_out (without re-sending — the direct dump below delivers
-        // the bytes) so a late member that is the first of its group stays
-        // withdrawable by the group's later withdraws.
-        if super::group_egress::egress_group_task_enabled()
-            && let Some(gid) = peer.update_group_id.get(&v4_afi_safi).cloned()
-            && let Some(af) = bgp.update_groups.get(&v4_afi_safi)
-            && let Some(group) = af.group_by_id(&gid)
-            && let Some(task) = group.task.as_ref()
-        {
-            task.send(super::group_egress::GroupEgressDeltaV4::RecordAdjOut {
-                prefix: nlri.prefix,
-                rib: rib.clone(),
-            });
-        }
+        record_sync_row_in_engine(peer, bgp.update_groups, nlri.prefix, &rib);
         peer.adj_out.add(None, nlri.prefix, rib);
 
         entries.push((arc_attr, nlri));

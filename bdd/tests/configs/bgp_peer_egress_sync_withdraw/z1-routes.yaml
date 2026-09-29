@@ -1,0 +1,21 @@
+# z1 (AS 65001): originates the two routes.
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.0.25.1
+    timer:
+      adv-interval:
+        ebgp: 1
+    neighbor:
+    - remote-address: 10.0.25.2
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65002
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.25.10.0/24
+      - prefix: 10.25.11.0/24

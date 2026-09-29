@@ -1,0 +1,16 @@
+# z1 (AS 65001): eBGP to z2, no routes (applied again to withdraw them).
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.0.25.1
+    timer:
+      adv-interval:
+        ebgp: 1
+    neighbor:
+    - remote-address: 10.0.25.2
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65002

@@ -2301,6 +2301,11 @@ pub fn fsm(
                 *bgp_ref.router_id,
                 bgp_ref.as_sets_withdraw,
             );
+            // The session-up dump ran above, before the peer had a group:
+            // record what it sent in the group's egress engine now.
+            if let Some(peer) = peer_map.get_by_idx(id) {
+                super::route::record_session_up_dump_in_group_engine(peer, bgp_ref.update_groups);
+            }
         }
         peer_map.debug_verify_membership();
     }

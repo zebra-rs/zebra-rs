@@ -1,0 +1,34 @@
+# z2 (DUT, AS 65002): the per-peer egress task from config, no RIB
+# sharding (N=1); eBGP to z1 (origin), z3 (early) and z4 (late).
+router:
+  bgp:
+    # Logs the per-peer egress task's enablement, which the feature checks.
+    tracing:
+      sharding: null
+    global:
+      as: 65002
+      router-id: 10.0.25.2
+    sharding:
+      peer-sharding: true
+    timer:
+      adv-interval:
+        ebgp: 1
+    neighbor:
+    - remote-address: 10.0.25.1
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65001
+    - remote-address: 10.0.25.3
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65003
+    - remote-address: 10.0.25.4
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65004

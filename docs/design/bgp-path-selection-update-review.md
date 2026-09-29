@@ -23,9 +23,10 @@ knobs (PR #2423, `7852fc15`), #16 (PR #2425, `6d4446b1`), #17 with #18
 `969279a0`, three review rounds folded in), with a follow-up to #23
 (AddPath withdraws held by `suppress-fib-pending`, PR #2433, `b5c4c210`),
 #19 (PR #2436, `17b906bc`, one review round folded in) and #21's
-`bgp router-id` item (PR #2438, `ae20d01f`, one review round folded in).
-Each fixed entry ends with its fix note; everything else is open. In
-progress: #22, branch `bgp-group-engine-slot0`.
+`bgp router-id` item (PR #2438, `ae20d01f`, one review round folded in)
+and #22 (PR #2440, `02633546`, one review round folded in). Each fixed
+entry ends with its fix note; everything else is open. In progress: #25,
+branch `bgp-pet-sync-adj-out`.
 
 Method: one lead read the selection ladder and every egress builder, then
 five independent read-only reviewers each took one dimension (update-group
@@ -1574,7 +1575,7 @@ cap. The two reviews agree on every overlapping item.
     and interface down, `clear bgp`, the VRF task's own — share the
     full-queue loss.
 
-### 22. P2 CONFIRMED (env-gated), FIXED on branch `bgp-group-engine-slot0` — gate-on group engine skips peer slot 0 on every NHT-, FIB-release- and import-driven withdraw
+### 22. P2 CONFIRMED (env-gated), FIXED in #2440 — gate-on group engine skips peer slot 0 on every NHT-, FIB-release- and import-driven withdraw
 
 - Sources that pass a literal `0` as the split-horizon source:
   `shard/dispatch.rs:581-597` (`reeval_nexthop_v4`, `ident: 0`) →
@@ -1623,7 +1624,7 @@ cap. The two reviews agree on every overlapping item.
   the fix: `a_sole_member_whose_path_becomes_best_is_withdrawn_the_route_it_held`
   (with no other member, the early return left the previous best at the
   source member).
-- FIXED (branch `bgp-group-engine-slot0`, the engine in `group_egress.rs`):
+- FIXED (#2440, the engine in `group_egress.rs`):
   - A withdraw leaves out the member whose paths the removed Adj-RIB-Out
     rows all were — read off the rows — and reaches every other member.
     `GroupEgressDeltaV4::Withdraw` no longer carries a source, and
@@ -1641,7 +1642,7 @@ cap. The two reviews agree on every overlapping item.
     `bgp_group_egress_nht_withdraw` passes, and `bgp_egress_group_task`,
     `bgp_egress_group_sharded`, `bgp_addpath_group`, `bgp_addpath_nht` and
     `bgp_update_group_source_withdraw` stay green.
-- Review round (FIXED on the branch; the reviewer's probe is now the gate
+- Review round (FIXED in #2440; the reviewer's probe is now the gate
   `a_best_moving_between_members_with_the_same_update_reaches_the_previous_source`,
   with a third member that already holds the UPDATE):
   - P2: when the best moved from member 1's path to member 2's and built
@@ -1908,7 +1909,7 @@ cap. The two reviews agree on every overlapping item.
   Gates `v4_rt_removal_switches_to_the_vpn_route_that_still_matches` and its
   `v6_` twin (fail on `main` and without that fallback).
 
-### 25. P2 CONFIRMED (knob-gated) — with `peer-sharding` at N=1 the session-up dump is never recorded in the PET's Adj-RIB-Out, so every dump-learned prefix is unwithdrawable
+### 25. P2 CONFIRMED (knob-gated), FIXED on branch `bgp-pet-sync-adj-out` — with `peer-sharding` at N=1 the session-up dump is never recorded in the PET's Adj-RIB-Out, so every dump-learned prefix is unwithdrawable
 
 - `peer.rs:2193-2198` spawns the PET and then runs `route_sync`;
   `route_sync_ipv4` (`route.rs:15024-15040`) sends `RecordAdjOut` to the
@@ -1926,6 +1927,54 @@ cap. The two reviews agree on every overlapping item.
   withdrawable.
 - Fix direction: send the PET a `RecordAdjOut` per dumped prefix (or have
   the PET perform the dump).
+- Re-read on `main`: still so. `route_sync_ipv4` records the group engine
+  (at gate-on) and the peer's own Adj-RIB-Out, never the PET; the chunked
+  dump (`route_sync_v4_chunk`) records neither engine — at gate-on group
+  that is the same hole for the group engine. With the PET the missing rows
+  also hide the dumped routes from `advertised-routes` / PfxSnt and from the
+  PET's soft-out re-evaluation (a dumped route an out-policy change now
+  denies is never withdrawn either).
+- Gates (branch `bgp-pet-sync-adj-out`; each compiles on `main` and fails
+  there, except the control). Unit, `pet_sync_review_tests.rs` (a child of
+  `inst.rs`; the peer's PET is a real spawn, read back through
+  `DumpAdjOut`): `the_session_up_dump_records_its_routes_in_the_peer_egress_task`,
+  `a_route_from_the_session_up_dump_is_withdrawn_through_the_peer_egress_task`,
+  `the_chunked_session_up_dump_records_its_routes_in_the_peer_egress_task`,
+  `the_chunked_session_up_dump_records_its_routes_in_the_group_engine`;
+  control `without_an_egress_engine_the_dump_is_recorded_on_the_peer`. BDD
+  `bgp_peer_egress_sync_withdraw` (z2 runs `peer-sharding true` at N=1; z3
+  comes up before z1's routes, z4 after): on `main` z2's
+  `advertised-routes` for z4 lists neither route and z4 keeps them after z1
+  withdraws them, while z3 loses them. IPv4 only — the PET's family.
+- FIXED (branch `bgp-pet-sync-adj-out`): both N=1 dumps
+  (`route_sync_ipv4` and the chunked `route_sync_v4_chunk`) record each row
+  they send in the egress engine that sends the peer's later withdraws
+  (`record_sync_row_in_engine`): its update group's engine when that runs,
+  else its PET — the precedence of the advertise path and of the N>1
+  `DumpV4`, keyed on the engine's presence (it exists only while its gate
+  is on). The peer's own Adj-RIB-Out is recorded as before. Verified: the
+  5 unit tests pass and each of four mutations (no record in either dump,
+  PET only, group engine only) fails its own gates; workspace clippy and
+  the full unit suite stay green. BDD `bgp_peer_egress_sync_withdraw`
+  passes, and `bgp_peer_egress_v4`, `bgp_peer_task_config_knob`,
+  `bgp_network_origin_shard_pet`, `bgp_egress_group_task`,
+  `bgp_egress_group_sharded`, `bgp_group_egress_nht_withdraw`,
+  `bgp_shard_v4_sync` and `bgp_update_group_source_withdraw` stay green.
+- Review round (FIXED on the branch; the reviewer's probe is now the gate
+  `the_session_up_dump_is_recorded_in_the_group_engine_the_peer_joins`,
+  which drives the real Established transition in a child test process with
+  the group engine's gate on, and also checks the group's withdraw reaches
+  the peer):
+  - P2: the FSM runs the session-up dump (`route_sync`) before the peer
+    joins its update group (`update_group::attach`), so the one-shot dump
+    found no group engine to record into — the first member of a new group
+    kept every route it learned from the dump. (The group recording the
+    dump had before this branch had the same blind spot.) Right after the
+    join, `record_session_up_dump_in_group_engine` records the rows the
+    dump put in the peer's own Adj-RIB-Out in the group's engine; the
+    chunked and N>1 dumps run after the join and have recorded nothing yet
+    at that point. Without the call the gate fails; clippy, the full unit
+    suite and eight PET / group / session BDD features stay green.
 
 ### 26. P3 CONFIRMED — VRF-imported rows tie-break on our router-id and RD registration order
 
