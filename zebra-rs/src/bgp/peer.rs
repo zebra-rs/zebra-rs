@@ -1221,8 +1221,27 @@ pub struct Peer {
     /// every (v4-unicast) `SyncCtx`, so the per-route egress evaluation
     /// (and later a shard worker) reads the policy without a deep clone.
     pub out_policy: Arc<super::policy::OutPolicy>,
+    /// The exact Route Targets of the peer's RTC membership (RFC 4684).
     pub rtcv4: BTreeSet<ExtCommunityValue>,
     pub rtcv6: BTreeSet<ExtCommunityValue>,
+    /// The exact memberships as received, `(RT, origin AS)`: two NLRIs may
+    /// name one RT from different origin ASes, and the RT stays in
+    /// `rtcv4` / `rtcv6` until the last of them is withdrawn.
+    pub rtcv4_origins: BTreeSet<(ExtCommunityValue, u32)>,
+    pub rtcv6_origins: BTreeSet<(ExtCommunityValue, u32)>,
+    /// The peer's memberships broader than one exact Route Target — the
+    /// default ("send me everything", prefix length 0) or a partial prefix —
+    /// keyed by `(prefix length, origin AS, RT bits)` so a withdraw removes
+    /// the right one. While any is held the peer is sent every VPN route of
+    /// the family: a partial prefix is widened, since over-advertising only
+    /// costs bandwidth while under-advertising blackholes VPN routes.
+    pub rtcv4_broad: BTreeSet<(u8, u32, ExtCommunityValue)>,
+    pub rtcv6_broad: BTreeSet<(u8, u32, ExtCommunityValue)>,
+    /// Whether the peer has sent any RTC membership this session. Until it
+    /// has, it declared no constraint and is sent every VPN route; once it
+    /// has, an empty membership selects nothing (review finding #19).
+    pub rtcv4_seen: bool,
+    pub rtcv6_seen: bool,
     pub eor: BTreeMap<AfiSafi, bool>,
     pub reflector_client: bool,
     pub instant: Option<Instant>,
@@ -1405,6 +1424,12 @@ impl Peer {
             out_policy: Arc::new(super::policy::OutPolicy::default()),
             rtcv4: BTreeSet::default(),
             rtcv6: BTreeSet::default(),
+            rtcv4_origins: BTreeSet::default(),
+            rtcv6_origins: BTreeSet::default(),
+            rtcv4_broad: BTreeSet::default(),
+            rtcv6_broad: BTreeSet::default(),
+            rtcv4_seen: false,
+            rtcv6_seen: false,
             eor: BTreeMap::default(),
             reflector_client: false,
             instant: None,

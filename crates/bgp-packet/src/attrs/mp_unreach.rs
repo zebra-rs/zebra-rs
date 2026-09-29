@@ -108,8 +108,20 @@ impl MpUnreachAttr {
             MpUnreachAttr::Ipv6Eor => {
                 ipv6_unreach_attr_emit(&[], buf);
             }
+            MpUnreachAttr::Rtcv4(withdraw) => {
+                let attr = Rtcv4Unreach {
+                    withdraw: withdraw.clone(),
+                };
+                attr.attr_emit(buf);
+            }
             MpUnreachAttr::Rtcv4Eor => {
                 let attr = Rtcv4Unreach { withdraw: vec![] };
+                attr.attr_emit(buf);
+            }
+            MpUnreachAttr::Rtcv6(withdraw) => {
+                let attr = Rtcv6Unreach {
+                    withdraw: withdraw.clone(),
+                };
                 attr.attr_emit(buf);
             }
             MpUnreachAttr::Rtcv6Eor => {
@@ -145,9 +157,6 @@ impl MpUnreachAttr {
             }
             MpUnreachAttr::LinkState { withdraws } => {
                 linkstate_unreach_attr_emit(withdraws, buf);
-            }
-            _ => {
-                //
             }
         }
     }

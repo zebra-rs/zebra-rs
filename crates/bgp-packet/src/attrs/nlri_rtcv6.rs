@@ -138,8 +138,8 @@ impl AttrEmitter for Rtcv6Unreach {
         // replaces wrote only the 8-octet Route Target, omitting the prefix
         // length and origin AS that `Rtcv6::parse_nlri` reads back — a receiver
         // would have read the RT's first octet as the prefix length and
-        // rejected it. Dormant so far: `mp_unreach.rs` only ever builds this
-        // with an empty `withdraw` (the End-of-RIB marker).
+        // rejected it. `MpUnreachAttr::Rtcv6` emits through it: a PE withdraws
+        // a membership its VRFs no longer import.
         for withdraw in self.withdraw.iter() {
             emit_rtc_membership(buf, withdraw.id, withdraw.plen, withdraw.asn, &withdraw.rt);
         }
