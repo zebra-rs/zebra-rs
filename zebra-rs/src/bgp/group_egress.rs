@@ -355,6 +355,10 @@ impl Engine {
 }
 
 #[cfg(test)]
+#[path = "group_egress_review_tests.rs"]
+mod review_tests;
+
+#[cfg(test)]
 mod tests {
     use super::super::route::BgpRibType;
     use super::*;

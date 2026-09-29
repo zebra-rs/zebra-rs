@@ -1,0 +1,13 @@
+# z4 (AS 65094): one of z1's plain neighbors.
+router:
+  bgp:
+    global:
+      as: 65094
+      router-id: 192.168.65.4
+    neighbor:
+    - remote-address: 192.168.65.1
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65001
