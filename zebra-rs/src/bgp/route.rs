@@ -20957,8 +20957,13 @@ impl Bgp {
                     .get(&(esi, vni))
                     .map(|m| m.iter().map(|(pe, bits)| (*pe, *bits)).collect())
                     .unwrap_or_default();
+                // §4.3: the incumbent settles a conflict. Reading it from
+                // the stored view is the whole reason that view exists —
+                // the routes say who claims the role, not who we were
+                // already using.
+                let incumbent = self.es_remote.get(&(esi, vni)).and_then(|bd| bd.active);
                 let (primary, backup, reason) =
-                    super::ethernet_segment::select_sa_forwarder(&signals);
+                    super::ethernet_segment::select_sa_forwarder(&signals, incumbent);
                 reasons.insert((esi, vni), reason);
                 invalid.insert(
                     (esi, vni),
@@ -20990,11 +20995,68 @@ impl Bgp {
             // segment nobody ever advertised.
             let blocked = reasons.get(&(esi, vni))
                 == Some(&super::ethernet_segment::SaSelectReason::NoForwarder);
-            let members = if blocked {
+            // Order the group BEFORE recording the view, because what the
+            // view must name is what the datapath is actually given. Under
+            // single-active the datapath forwards to slot 0 alone, so the
+            // leading PE is the effective forwarder even where selection
+            // named nobody — an unsignalled segment with no MAC to infer
+            // from still programs the lowest address, and recording `None`
+            // there would both misreport the forwarder and let slot 0 change
+            // without the generation moving.
+            let ordered = super::ethernet_segment::order_es_members(pairs, primary, backup);
+            let members: Vec<crate::rib::EsNhgMember> = if blocked {
                 Vec::new()
             } else {
-                super::ethernet_segment::order_es_members(pairs, primary, backup)
+                ordered.iter().map(|(_, m)| *m).collect()
             };
+            // The derived view behind this group: who contributed, what
+            // each of them said, and how many copies of it we hold. Rebuilt
+            // from the routes every sync — the only thing carried forward
+            // is the incumbent and the generation.
+            if single_active {
+                let (effective, effective_backup) = if blocked {
+                    (None, None)
+                } else {
+                    let mut pes = ordered.iter().map(|(pe, _)| *pe);
+                    let lead = pes.next();
+                    // Slot 1 is the pre-installed standby; skip any further
+                    // member the leader contributed.
+                    (lead, pes.find(|pe| Some(*pe) != lead))
+                };
+                let view_members = signals
+                    .get(&(esi, vni))
+                    .map(|m| {
+                        m.iter()
+                            .map(|(pe, role)| {
+                                (
+                                    *pe,
+                                    super::ethernet_segment::EsRemoteMember {
+                                        pe: *pe,
+                                        role: *role,
+                                        ad_es_live: true,
+                                        paths: self.es_member_paths(&esi, vni, *pe),
+                                    },
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let generation = self
+                    .es_gen
+                    .entry((esi, vni))
+                    .or_default()
+                    .observe(effective);
+                self.es_remote.insert(
+                    (esi, vni),
+                    super::ethernet_segment::EsRemoteBd {
+                        members: view_members,
+                        active: effective,
+                        backup: effective_backup,
+                        reason: reasons.get(&(esi, vni)).copied(),
+                        generation,
+                    },
+                );
+            }
             groups.insert((esi, vni), (single_active, members, blocked));
         }
         let mut out: Vec<crate::rib::Message> = Vec::new();
@@ -21012,6 +21074,22 @@ impl Bgp {
         // everything absent from `reasons` covers that as well as the groups
         // that vanished outright.
         self.es_nhg_diag.retain(|k, _| reasons.contains_key(k));
+        // A group that disappears, or whose segment goes all-active for a
+        // moment, is a torn-down programming episode: whatever comes back is
+        // a new one even if it names the same forwarder, or a barrier could
+        // accept a completion owed to the teeing before the gap.
+        let interrupted: Vec<([u8; 10], u32)> = self
+            .es_remote
+            .keys()
+            .filter(|k| !reasons.contains_key(*k))
+            .copied()
+            .collect();
+        for key in interrupted {
+            if let Some(state) = self.es_gen.get_mut(&key) {
+                state.interrupt();
+            }
+        }
+        self.es_remote.retain(|k, _| reasons.contains_key(k));
         for (esi, bd) in gone {
             self.es_nhg_sent.remove(&(esi, bd));
             out.push(crate::rib::Message::EsNhg {
@@ -21039,15 +21117,40 @@ impl Bgp {
             }
             self.es_nhg_diag.insert((*esi, *bd), diag);
             match reason {
-                super::ethernet_segment::SaSelectReason::Conflict => {
+                super::ethernet_segment::SaSelectReason::ConflictIncumbent => {
                     tracing::warn!(
                         proto = "bgp",
                         category = "evpn",
                         esi = %bgp_packet::esi_display(esi),
                         bd,
+                        forwarder = %self
+                            .es_remote
+                            .get(&(*esi, *bd))
+                            .and_then(|r| r.active)
+                            .map(|pe| pe.to_string())
+                            .unwrap_or_else(|| "none".to_string()),
                         "bgp: more than one PE advertises primary for this single-active \
-                         segment; forwarding to the lowest address. Both of them believe \
-                         they forward — check the segment's DF election configuration",
+                         segment; KEEPING the PE already in use rather than moving an \
+                         established flow. Both of them believe they forward — check the \
+                         segment's DF election configuration",
+                    );
+                }
+                super::ethernet_segment::SaSelectReason::ConflictTieBreak => {
+                    tracing::warn!(
+                        proto = "bgp",
+                        category = "evpn",
+                        esi = %bgp_packet::esi_display(esi),
+                        bd,
+                        forwarder = %self
+                            .es_remote
+                            .get(&(*esi, *bd))
+                            .and_then(|r| r.active)
+                            .map(|pe| pe.to_string())
+                            .unwrap_or_else(|| "none".to_string()),
+                        "bgp: more than one PE advertises primary for this single-active \
+                         segment; none of them is the PE we were using, so the LOWEST \
+                         ADDRESS takes it. Both of them believe they forward — check the \
+                         segment's DF election configuration",
                     );
                 }
                 super::ethernet_segment::SaSelectReason::NoForwarder => {
@@ -21093,51 +21196,66 @@ impl Bgp {
         }
     }
 
-    /// How the forwarder of the single-active group `(esi, bd)` was chosen,
-    /// recomputed for `show` from the same inputs `evpn_es_nhg_sync` used.
+    /// Every copy of `pe`'s per-EVI A-D for `(esi, bd)` that we hold —
+    /// which session it arrived on, under which RD, its ADD-PATH id and
+    /// whether best-path selection chose it.
     ///
-    /// The sync collects every group's signals in one pass; this answers for
-    /// one group, which is what a show command needs. Eligibility matches:
-    /// a PE whose per-ES A-D is gone is not a member, however its per-EVI
-    /// A-D still reads.
+    /// Two route reflectors reflecting one PE's route land here as two
+    /// entries under a single `(RD, prefix)` key. That is also why §4.4
+    /// needs no contribution counting of its own: best-path selection keeps
+    /// the prefix alive while any copy survives, and this makes that
+    /// visible instead of mysterious.
+    fn es_member_paths(
+        &self,
+        esi: &[u8; 10],
+        bd: u32,
+        pe: IpAddr,
+    ) -> Vec<super::ethernet_segment::EsRemotePath> {
+        let mut out = Vec::new();
+        for (rd, table) in self.local_rib.evpn.iter() {
+            let prefix = EvpnPrefix::EthernetAd {
+                esi: *esi,
+                eth_tag: 0,
+            };
+            let Some(cands) = table.cands.get(&prefix) else {
+                continue;
+            };
+            for rib in cands.iter() {
+                if rib.typ == BgpRibType::Originated {
+                    continue;
+                }
+                if rib.attr.nexthop != Some(BgpNexthop::Evpn(pe))
+                    || extract_vni_from_attr(&rib.attr) != Some(bd)
+                {
+                    continue;
+                }
+                out.push(super::ethernet_segment::EsRemotePath {
+                    peer: rib.router_id,
+                    rd: rd.to_string(),
+                    path_id: rib.remote_id,
+                    stale: rib.stale,
+                    best: rib.best_path,
+                });
+            }
+        }
+        out.sort_by(|a, b| (a.peer, &a.rd, a.path_id).cmp(&(b.peer, &b.rd, b.path_id)));
+        out
+    }
+
+    /// How the forwarder of the single-active group `(esi, bd)` was chosen,
+    /// as recorded when it was chosen.
+    ///
+    /// This must NOT recompute the selection: by the time `show` runs, the
+    /// stored `active` is the answer, so feeding it back as the incumbent
+    /// makes every conflict look like "incumbent kept" — including the ones
+    /// the lowest-address tie-break decided. Reading the stored reason is
+    /// also the only version that cannot drift from what was teed.
     pub fn es_group_selection(
         &self,
         esi: &[u8; 10],
         bd: u32,
     ) -> Option<super::ethernet_segment::SaSelectReason> {
-        let live = vpws_es_live_pes(&self.local_rib, esi);
-        let mut signals: BTreeMap<IpAddr, Option<(bool, bool)>> = BTreeMap::new();
-        for table in self.local_rib.evpn.values() {
-            for (prefix, rib) in table.selected.iter() {
-                let EvpnPrefix::EthernetAd { esi: e, eth_tag } = prefix else {
-                    continue;
-                };
-                if e != esi || *eth_tag != 0 || rib.typ == BgpRibType::Originated {
-                    continue;
-                }
-                if extract_vni_from_attr(&rib.attr) != Some(bd) {
-                    continue;
-                }
-                let Some(BgpNexthop::Evpn(originator)) = rib.attr.nexthop else {
-                    continue;
-                };
-                if !live.contains(&originator) {
-                    continue;
-                }
-                let role = rib
-                    .attr
-                    .ecom
-                    .as_ref()
-                    .and_then(|ec| ec.0.iter().find_map(|v| v.as_l2_attr()))
-                    .map(|a| (a.primary, a.backup));
-                signals.insert(originator, role);
-            }
-        }
-        if signals.is_empty() {
-            return None;
-        }
-        let signals: Vec<(IpAddr, Option<(bool, bool)>)> = signals.into_iter().collect();
-        Some(super::ethernet_segment::select_sa_forwarder(&signals).2)
+        self.es_remote.get(&(*esi, bd)).and_then(|r| r.reason)
     }
 
     /// The primary of a single-active segment's group for `vni` (RFC 7432
@@ -26297,6 +26415,10 @@ mod table_map_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "es_remote_review_tests.rs"]
+mod es_remote_review_tests;
 
 #[cfg(test)]
 mod tests {

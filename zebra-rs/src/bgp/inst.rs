@@ -923,6 +923,19 @@ pub struct Bgp {
     /// member list changing: a second PE claiming primary leaves the lowest
     /// address at slot 0 either way.
     #[allow(clippy::type_complexity)]
+    /// The derived per-`(ESI, bridge domain)` view behind each single-active
+    /// group: who contributed, what each advertised, how many copies of it
+    /// we hold, and — carried forward rather than derived — the incumbent
+    /// and a generation. See `docs/design/bgp-evpn-single-active-plan.md`
+    /// §4.3.
+    pub es_remote: BTreeMap<([u8; 10], u32), super::ethernet_segment::EsRemoteBd>,
+    /// Forwarder-move counter per `(ESI, bridge domain)`, kept apart from
+    /// `es_remote` so it survives the derived view being dropped — a group
+    /// that momentarily disappears, or goes all-active and comes back, must
+    /// not restart at zero. A number that can be reused is no use to the
+    /// completion barrier this exists for. Bounded by the distinct segments
+    /// and bridge domains this node has seen.
+    pub es_gen: BTreeMap<([u8; 10], u32), super::ethernet_segment::EsGenState>,
     pub es_nhg_diag: BTreeMap<
         ([u8; 10], u32),
         (
@@ -1475,6 +1488,8 @@ impl Bgp {
             l2_port_evis: BTreeMap::new(),
             es_df_sent: BTreeMap::new(),
             es_nhg_sent: BTreeMap::new(),
+            es_remote: BTreeMap::new(),
+            es_gen: BTreeMap::new(),
             es_nhg_diag: BTreeMap::new(),
             links_down: std::collections::BTreeSet::new(),
             local_smet: BTreeMap::new(),

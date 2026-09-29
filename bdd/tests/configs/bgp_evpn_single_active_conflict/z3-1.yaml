@@ -1,0 +1,28 @@
+# z3 — the remote ingress PE. On no segment, so it cannot re-run the election
+# and must read the roles; it is also the only node that sees BOTH segment PEs
+# throughout, which is what lets it observe them disagreeing.
+vxlan:
+- name: vxlan10
+  vni: 10
+  local-address: 192.168.0.3
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.3
+    afi-safi:
+    - name: evpn
+      advertise-all-vni: true
+    neighbor:
+    - remote-address: 192.168.0.1
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: evpn
+        enabled: true
+    - remote-address: 192.168.0.2
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: evpn
+        enabled: true

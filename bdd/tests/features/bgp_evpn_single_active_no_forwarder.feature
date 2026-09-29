@@ -95,6 +95,9 @@ Feature: EVPN single-active — a segment with no forwarder withholds its MACs
     And I apply config "z4-high.yaml" to namespace "z4"
     Then show command "show bgp evpn ethernet-segment" in namespace "z1" should eventually contain "bd 10: non-designated"
     And show command "show bgp evpn ethernet-segment" in namespace "z3" should eventually contain "single-active, no forwarder (MACs withheld)"
+    # A group with no forwarder is where "who said what" matters most, so
+    # the per-member detail is rendered for it too rather than skipped.
+    And show command "show bgp evpn ethernet-segment" in namespace "z3" should contain "role -"
     # The Type-2 is STILL THERE and still valid — that is the whole point.
     # Nothing about the MAC route changed; only the role did.
     And show command "show bgp evpn" in namespace "z3" should contain "aa:bb:cc:dd:ee:01"

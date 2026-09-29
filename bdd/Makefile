@@ -665,6 +665,10 @@ bgp_evpn_single_active_no_forwarder:
 	mkdir -p allure-results
 	$(CUCUMBER) -- --concurrency=1 --tags "@bgp_evpn_single_active_no_forwarder"
 
+bgp_evpn_single_active_conflict:
+	mkdir -p allure-results
+	$(CUCUMBER) -- --concurrency=1 --tags "@bgp_evpn_single_active_conflict"
+
 bgp_vrf_evpn_type5:
 	mkdir -p allure-results
 	$(CUCUMBER) -- --concurrency=1 --tags "@bgp_vrf_evpn_type5"
