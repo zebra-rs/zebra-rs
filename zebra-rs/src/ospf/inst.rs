@@ -19776,6 +19776,70 @@ mod v3_router_information_origination_tests {
 }
 
 #[cfg(test)]
+mod v3_database_detail_tests {
+    use super::test_support::fresh_ospf_v3;
+    use super::*;
+    use crate::ospf::lsdb::OSPF_MAX_AGE;
+    use ospf_packet::{Ospfv3LsBody, Ospfv3Lsa, Ospfv3LsaHeader};
+
+    fn lsa(ls_type: u16, age: u16) -> Ospfv3Lsa {
+        let mut lsa = Ospfv3Lsa::from(
+            Ospfv3LsaHeader {
+                ls_age: age,
+                ls_type,
+                link_state_id: 0,
+                advertising_router: Ipv4Addr::new(10, 0, 0, 2),
+                ls_seq_number: 0x8000_0001,
+                ls_checksum: 0,
+                length: 0,
+            },
+            Ospfv3LsBody::Unknown(vec![0; 4]),
+        );
+        lsa.update();
+        lsa
+    }
+
+    /// `show ospfv3 database detail` shows every LSA the area database
+    /// holds: the NSSA-LSA, which its fixed list of types left out, and a
+    /// type this router makes no use of, under its LS type in hex. The
+    /// usual types keep their order, NSSA-LSAs after the inter-area ones;
+    /// MaxAge LSAs stay hidden.
+    #[tokio::test]
+    async fn database_detail_shows_every_lsa_type() {
+        let mut top = fresh_ospf_v3();
+        top.router_id = Ipv4Addr::new(10, 0, 0, 1);
+        let tx = top.tx.clone();
+        let tracing = top.tracing.clone();
+        let lsdb = &mut top.areas.fetch(AREA0).lsdb;
+        for (ls_type, age) in [
+            (0xA0FF, 1),
+            (ospf_packet::OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE, 1),
+            (ospf_packet::OSPFV3_NSSA_LSA_TYPE, 1),
+            (ospf_packet::OSPFV3_ROUTER_LSA_TYPE, 1),
+            (ospf_packet::OSPFV3_INTER_AREA_PREFIX_LSA_TYPE, OSPF_MAX_AGE),
+        ] {
+            lsdb.install_lsa(lsa(ls_type, age), &tx, Some(AREA0), &tracing);
+        }
+
+        let args = crate::config::Args(Default::default());
+        let out = super::super::show_v3::show_ospfv3_database_detail(&top, args, false).unwrap();
+        let at = |heading: &str| {
+            out.find(heading)
+                .unwrap_or_else(|| panic!("no {heading:?} in:\n{out}"))
+        };
+        let router = at("Router-LSA (Area 0.0.0.0)");
+        let nssa = at("NSSA-LSA (Area 0.0.0.0)");
+        let intra = at("Intra-Area-Prefix-LSA (Area 0.0.0.0)");
+        let unknown = at("LS Type 0xa0ff (Area 0.0.0.0)");
+        assert!(router < nssa && nssa < intra && intra < unknown, "{out}");
+        assert!(
+            !out.contains("Inter-Area-Prefix-LSA (Area"),
+            "MaxAge shown:\n{out}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod multi_area_tests {
     use super::{RouteType, SpfRoute, rib_insert};
     use ipnet::Ipv4Net;
