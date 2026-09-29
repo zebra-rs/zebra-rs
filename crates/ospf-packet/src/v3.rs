@@ -2938,6 +2938,23 @@ impl Ospfv3Lsa {
         }
     }
 
+    /// Set the LS Age, in the cached wire bytes too: emit replays those
+    /// for a received or checkpoint-restored LSA, so a flush that set
+    /// only the header would put the live instance back on the wire
+    /// instead of its withdrawal. The LS Age is outside the Fletcher
+    /// checksum (RFC 5340 §A.4.2.1, as RFC 2328 §12.1.7), so the bytes
+    /// stay valid: the same instance, aged.
+    pub fn set_age(&mut self, age: u16) {
+        self.h.ls_age = age;
+        if let Some(raw) = self.raw.as_mut()
+            && raw.len() >= 2
+        {
+            let mut bytes = BytesMut::from(raw.as_ref());
+            bytes[..2].copy_from_slice(&age.to_be_bytes());
+            *raw = bytes.freeze();
+        }
+    }
+
     /// Recompute `length` and `ls_checksum` after the caller
     /// mutated header fields (`ls_age` / `ls_seq_number`) or the
     /// body — for instance during LSA refresh or flush.

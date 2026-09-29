@@ -539,6 +539,23 @@ impl OspfLsa {
         Self { h, lsp, raw: None }
     }
 
+    /// Set the LS Age, in the cached wire bytes too: emit replays those
+    /// for a received or checkpoint-restored LSA, so a flush that set
+    /// only the header would put the live instance back on the wire
+    /// instead of its withdrawal. The LS Age is outside the Fletcher
+    /// checksum (RFC 2328 §12.1.7), so the bytes stay valid: the same
+    /// instance, aged.
+    pub fn set_age(&mut self, age: u16) {
+        self.h.ls_age = age;
+        if let Some(raw) = self.raw.as_mut()
+            && raw.len() >= 2
+        {
+            let mut bytes = BytesMut::from(raw.as_ref());
+            bytes[..2].copy_from_slice(&age.to_be_bytes());
+            *raw = bytes.freeze();
+        }
+    }
+
     /// Decode a complete OSPFv2 LSA (20-octet header + body) from
     /// raw bytes. Returns `None` if the bytes don't parse. Public
     /// wrapper so consumers (e.g. the graceful-restart checkpoint

@@ -300,6 +300,26 @@ pub fn ospf_ls_retransmit_delete<V: OspfVersion>(nbr: &mut Neighbor<V>, lsa: &V:
     }
 }
 
+/// Take the LSA an acknowledgement `ack` is for off `nbr`'s
+/// retransmission list — only if it is for the same instance (RFC 2328
+/// §13.7, compared as §13.1 does). Sequence number and checksum alone are
+/// not that: a withdrawal (MaxAge) keeps both from the live instance it
+/// replaces, and a neighbour acknowledging the live copy it has just
+/// installed must not cancel the withdrawal queued behind it. It may have
+/// discarded that one under MinLSArrival, and nothing would resend it.
+pub fn ospf_ls_retransmit_ack<V: OspfVersion>(nbr: &mut Neighbor<V>, ack: &V::LsaHeader) {
+    let key: OspfLsaKey = (V::ls_type(ack), V::ls_id(ack), V::adv_router(ack));
+    if let Some(rxmt) = nbr.ls_rxmt.get(&key) {
+        let h = V::lsa_header(rxmt);
+        if V::lsa_more_recent(h, V::ls_age(h), ack, V::ls_age(ack)) == 0 {
+            nbr.ls_rxmt.remove(&key);
+        }
+    }
+    if nbr.ls_rxmt.is_empty() {
+        nbr.timer.ls_rxmt = None;
+    }
+}
+
 pub fn ospf_ls_retransmit_lookup<'a, V: OspfVersion>(
     nbr: &'a Neighbor<V>,
     lsa: &V::Lsa,
@@ -393,6 +413,49 @@ mod tests {
             }),
             raw: None,
         }
+    }
+
+    /// An acknowledgement of the live copy leaves the withdrawal queued
+    /// behind it (RFC 2328 §13.7, §13.1): the withdrawal keeps the live
+    /// instance's sequence number and checksum, but at MaxAge it is a
+    /// newer instance. Cancelling it lost the withdrawal whenever the
+    /// neighbour had discarded it under MinLSArrival — the neighbour kept
+    /// a prefix the router no longer had, for an hour. An acknowledgement
+    /// of the same instance still takes it off; one of an older instance
+    /// does not.
+    #[tokio::test]
+    async fn only_an_ack_of_the_same_instance_clears_the_retransmission() {
+        use crate::ospf::lsdb::OSPF_MAX_AGE;
+
+        let mut nbr = v3_nbr();
+        ospf_ls_retransmit_add::<Ospfv3>(&mut nbr, &v3_lsa(5, OSPF_MAX_AGE), 5);
+        ospf_ls_retransmit_ack::<Ospfv3>(&mut nbr, &v3_header(5, 1));
+        assert_eq!(
+            nbr.ls_rxmt.len(),
+            1,
+            "v3: the live copy's ack kept the withdrawal"
+        );
+        ospf_ls_retransmit_ack::<Ospfv3>(&mut nbr, &v3_header(5, OSPF_MAX_AGE));
+        assert!(nbr.ls_rxmt.is_empty(), "v3: the withdrawal's own ack");
+        ospf_ls_retransmit_add::<Ospfv3>(&mut nbr, &v3_lsa(6, 3), 5);
+        ospf_ls_retransmit_ack::<Ospfv3>(&mut nbr, &v3_header(5, 3));
+        assert_eq!(nbr.ls_rxmt.len(), 1, "v3: an older instance's ack");
+        ospf_ls_retransmit_ack::<Ospfv3>(&mut nbr, &v3_header(6, 4));
+        assert!(
+            nbr.ls_rxmt.is_empty(),
+            "v3: the same live instance, a second older"
+        );
+
+        let mut nbr = v2_nbr();
+        ospf_ls_retransmit_add::<Ospfv2>(&mut nbr, &v2_lsa(5, OSPF_MAX_AGE), 5);
+        ospf_ls_retransmit_ack::<Ospfv2>(&mut nbr, &v2_header(5, 1));
+        assert_eq!(
+            nbr.ls_rxmt.len(),
+            1,
+            "v2: the live copy's ack kept the withdrawal"
+        );
+        ospf_ls_retransmit_ack::<Ospfv2>(&mut nbr, &v2_header(5, OSPF_MAX_AGE));
+        assert!(nbr.ls_rxmt.is_empty(), "v2: the withdrawal's own ack");
     }
 
     // Not on the request list at all: nothing to reconcile, flood it.

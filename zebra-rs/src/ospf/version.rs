@@ -166,9 +166,14 @@ pub trait OspfVersion: 'static + Send + Sync + Copy + Clone + PartialEq + Eq {
     /// LS Age in seconds. 16-bit in both versions.
     fn ls_age(h: &Self::LsaHeader) -> u16;
 
-    /// Set the LS Age in the header. Hold-timer expiry, flushing,
-    /// and refresh all need this.
+    /// Set the LS Age in the header. Refresh needs this; it then
+    /// re-encodes the LSA, dropping any cached wire bytes.
     fn set_ls_age(h: &mut Self::LsaHeader, age: u16);
+
+    /// Set the LS Age of a whole LSA, in its cached wire bytes as well as
+    /// its header: flushing an LSA kept as received must put MaxAge on
+    /// the wire.
+    fn set_lsa_age(lsa: &mut Self::Lsa, age: u16);
 
     /// LS Sequence Number. Same field name and 32-bit width in
     /// both versions (RFC 2328 §A.4.1 / RFC 5340 §A.4.2.1).
@@ -430,6 +435,9 @@ impl OspfVersion for Ospfv2 {
     fn set_ls_age(h: &mut OspfLsaHeader, age: u16) {
         h.ls_age = age;
     }
+    fn set_lsa_age(lsa: &mut OspfLsa, age: u16) {
+        lsa.set_age(age);
+    }
     fn ls_seq_number(h: &OspfLsaHeader) -> u32 {
         h.ls_seq_number
     }
@@ -578,6 +586,9 @@ impl OspfVersion for Ospfv3 {
     }
     fn set_ls_age(h: &mut Ospfv3LsaHeader, age: u16) {
         h.ls_age = age;
+    }
+    fn set_lsa_age(lsa: &mut Ospfv3Lsa, age: u16) {
+        lsa.set_age(age);
     }
     fn ls_seq_number(h: &Ospfv3LsaHeader) -> u32 {
         h.ls_seq_number
