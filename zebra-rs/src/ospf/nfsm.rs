@@ -416,33 +416,44 @@ pub fn ospfv3_populate_initial_db_summary(
 }
 
 /// The LSAs an OSPFv3 initial Database Description summary lists
-/// (RFC 5340 §4.2.2, inheriting RFC 2328 §10.8): the whole area
-/// database, and the AS database where AS-scope LSAs flood. That is
-/// whatever their LS type — one this router makes no use of still floods
-/// by its scope (§4.5.1). Listing the types instead left out each one
-/// added since: the RFC 8362 E-LSAs, then the SRv6 Locator LSA, then the
-/// Router Information LSA. Each is usually originated before any
-/// adjacency, so a neighbour that formed one later never learned it.
-/// Type-7 NSSA-LSAs belong in an NSSA only (RFC 3101 §2.5); MaxAge LSAs
-/// are left to `ospf_db_summary_add_table`. Link-scope LSAs live in the
-/// link database and are not summarised: their neighbours on the link
-/// already have them.
+/// (RFC 5340 §4.2.2, inheriting RFC 2328 §10.8): every area-scope LSA in
+/// the area database, and every AS-scope LSA in the AS database where
+/// AS-scope LSAs flood — whatever their LS type, as the scope bits give
+/// it: one this router makes no use of still floods by its scope
+/// (§4.5.1). Listing the types instead left out each one added since: the
+/// RFC 8362 E-LSAs, then the SRv6 Locator LSA, then the Router Information
+/// LSA. Each is usually originated before any adjacency, so a neighbour
+/// that formed one later never learned it. Selecting by scope, not by
+/// database, keeps out the link-scope Grace-LSAs this router files in the
+/// area database while it restarts: a neighbour rejects a summary listing
+/// them, and the adjacency never leaves ExStart. Type-7 NSSA-LSAs belong
+/// in an NSSA only (RFC 3101 §2.5); MaxAge LSAs are left to
+/// `ospf_db_summary_add_table`.
 fn ospfv3_db_summary_lsas<'a>(
     lsdb: &'a super::lsdb::Lsdb<Ospfv3>,
     lsdb_as: &'a super::lsdb::Lsdb<Ospfv3>,
     area_type: super::area::AreaType,
 ) -> impl Iterator<Item = &'a super::lsdb::Lsa<Ospfv3>> {
+    use super::packet_v3::{Ospfv3LsaScope, ospfv3_ls_type_scope};
     use ospf_packet::OSPFV3_NSSA_LSA_TYPE;
 
+    let scoped = |scope: Ospfv3LsaScope| {
+        move |((ls_type, _, _), _): &(&super::lsdb::OspfLsaKey, &super::lsdb::Lsa<Ospfv3>)| {
+            ospfv3_ls_type_scope(*ls_type) == scope
+        }
+    };
     let area = lsdb
         .tables
         .iter()
+        .filter(scoped(Ospfv3LsaScope::Area))
         .filter(move |((ls_type, _, _), _)| *ls_type != OSPFV3_NSSA_LSA_TYPE || area_type.is_nssa())
         .map(|(_, lsa)| lsa);
     let external = lsdb_as
         .tables
-        .values()
-        .filter(move |_| area_type.accepts_as_external());
+        .iter()
+        .filter(scoped(Ospfv3LsaScope::As))
+        .filter(move |_| area_type.accepts_as_external())
+        .map(|(_, lsa)| lsa);
     area.chain(external)
 }
 
@@ -700,6 +711,9 @@ mod db_summary_tests {
     const UNKNOWN_AREA: u16 = 0xA0FF;
     const AS_EXTERNAL: u16 = 0x4005;
     const AS_ROUTER_INFO: u16 = 0xC00C;
+    /// Link scope; this router files its own in the area database while
+    /// it restarts.
+    const GRACE: u16 = 0x000B;
 
     fn lsa(ls_type: u16) -> Ospfv3Lsa {
         let mut lsa = Ospfv3Lsa::from(
@@ -722,7 +736,8 @@ mod db_summary_tests {
     /// its type — the Router Information LSA among them, which it used to
     /// leave out, so a neighbour never learned one originated before the
     /// adjacency — and every AS-scope LSA where they flood. Type-7 LSAs
-    /// only in an NSSA.
+    /// only in an NSSA; never a link-scope Grace-LSA, though this router
+    /// files its own in the area database.
     #[tokio::test]
     async fn the_summary_lists_every_lsa_in_scope() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -730,7 +745,7 @@ mod db_summary_tests {
         let mut area = Lsdb::<Ospfv3>::new();
         let mut external = Lsdb::<Ospfv3>::new();
         let area_id = Some(Ipv4Addr::UNSPECIFIED);
-        for ls_type in [ROUTER, ROUTER_INFO, E_ROUTER, UNKNOWN_AREA, NSSA] {
+        for ls_type in [ROUTER, ROUTER_INFO, E_ROUTER, UNKNOWN_AREA, NSSA, GRACE] {
             area.install_lsa(lsa(ls_type), &tx, area_id, &tracing);
         }
         for ls_type in [AS_EXTERNAL, AS_ROUTER_INFO] {
