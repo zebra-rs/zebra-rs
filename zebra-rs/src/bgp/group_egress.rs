@@ -50,8 +50,9 @@ pub fn egress_group_task_enabled() -> bool {
 /// One egress operation the `attach`/`detach` (and, later, the reduce)
 /// machinery forwards to a group's task. `AddMember` carries the member's
 /// `SyncCtx` (its packet sink and the shared egress identity) so the engine can
-/// build and fan, plus the group's `add_path` flag. `Advertise` and `Withdraw`
-/// carry the path's `source_ident` for split-horizon.
+/// build and fan, plus the group's `add_path` flag. The split-horizon source
+/// is the engine's to derive: an `Advertise` row's `ident`, a `Withdraw`'s
+/// withdrawn Adj-RIB-Out row's.
 #[derive(Debug)]
 pub enum GroupEgressDeltaV4 {
     AddMember {
@@ -77,12 +78,13 @@ pub enum GroupEgressDeltaV4 {
         prefix: Ipv4Net,
         rib: BgpRib,
     },
-    /// `prefix` is gone; `source_ident` is the withdrawing peer (excluded from
-    /// the fan — it never received the advertisement under split-horizon).
+    /// `prefix` (path `id` under AddPath, else the whole prefix) is gone.
+    /// The member left out is the one whose path the withdrawn row was — it
+    /// never received it (split-horizon); the engine reads it off its
+    /// Adj-RIB-Out (review finding #22).
     Withdraw {
         prefix: Ipv4Net,
         id: u32,
-        source_ident: usize,
     },
     /// A `show … advertised-routes` request at gate-on: reply with the group's
     /// whole `adj_out` (the caller filters split-horizon per queried peer and
@@ -218,11 +220,7 @@ impl Engine {
             }
             GroupEgressDeltaV4::Advertise { prefix, rib } => self.advertise(prefix, rib),
             GroupEgressDeltaV4::RecordAdjOut { prefix, rib } => self.record_adj_out(prefix, rib),
-            GroupEgressDeltaV4::Withdraw {
-                prefix,
-                id,
-                source_ident,
-            } => self.withdraw(prefix, id, source_ident),
+            GroupEgressDeltaV4::Withdraw { prefix, id } => self.withdraw(prefix, id),
             GroupEgressDeltaV4::DumpAdjOut { reply } => {
                 let entries = self
                     .adj_out
@@ -262,6 +260,7 @@ impl Engine {
     fn advertise(&mut self, prefix: Ipv4Net, mut rib: BgpRib) {
         // Split-horizon target is the path's own source peer.
         let source = rib.ident;
+        let id = if self.add_path { rib.local_id } else { 0 };
         // Build with a NON-source member's ctx: `route_update_ipv4` drops the
         // advertise when `ctx.ident == rib.ident`, so the source member's ctx
         // would wrongly collapse the whole group advertise into a withdraw.
@@ -275,7 +274,9 @@ impl Engine {
         else {
             // Nobody is eligible to receive this route. Do not create a
             // phantom Adj-RIB-Out row: a later session join receives the
-            // current Loc-RIB through its direct initial dump.
+            // current Loc-RIB through its direct initial dump. What was
+            // advertised before still goes — the source member held it.
+            self.withdraw(prefix, id);
             return;
         };
         let built = super::route::route_update_ipv4(&ctx, &prefix, &rib, self.add_path).and_then(
@@ -285,17 +286,39 @@ impl Engine {
             },
         );
         let Some((nlri, decision)) = built else {
-            self.withdraw(prefix, if self.add_path { rib.local_id } else { 0 }, source);
+            self.withdraw(prefix, id);
             return;
         };
         let arc = self.attr_store.intern(decision.attr);
         rib.attr = arc.clone();
         let prev = self.adj_out.record_out(prefix, rib, self.add_path);
+        // The source member is skipped below (split-horizon), but it holds
+        // the previous best, another source's path we sent it: withdraw
+        // that from it, as the per-peer path does (review finding #22). An
+        // AddPath row replaces the same path, from the same source.
+        if !self.add_path
+            && prev.as_ref().is_some_and(|p| p.ident != source)
+            && let Some(ctx) = self.members.get(&source)
+            && let Some(bytes) = self.withdraw_update(prefix, 0)
+        {
+            ctx.send_packet(bytes);
+        }
+        let prev_source = prev.as_ref().map(|p| p.ident);
         let already_sent = prev.is_some_and(|p| Arc::ptr_eq(&p.attr, &arc));
         if !already_sent {
             let bytes_list =
                 encode_ipv4_update(&arc, &[nlri], ctx.max_packet_size(), ctx.as4, None);
-            self.fan(&bytes_list, source);
+            self.fan(&bytes_list, Some(source));
+        } else if let Some(old) = prev_source
+            && old != source
+            && let Some(member) = self.members.get(&old)
+        {
+            // The UPDATE every member holds is unchanged, but its path moved
+            // off the member it was kept from (split-horizon): that member
+            // lacks it and is sent it now (review follow-up on #22).
+            for bytes in encode_ipv4_update(&arc, &[nlri], ctx.max_packet_size(), ctx.as4, None) {
+                member.send_packet(bytes);
+            }
         }
     }
 
@@ -310,41 +333,60 @@ impl Engine {
     }
 
     /// Drop a path from `adj_out` and, if it had been advertised, fan one
-    /// MP_UNREACH to every member except `source_ident`. `id == 0` is the
-    /// non-AddPath / whole-prefix withdraw (the wire carries id 0); `id != 0`
-    /// is an AddPath per-path withdraw — remove just that path (`adj_out` keys
-    /// by the Out local-id), leaving the prefix's other paths advertised.
-    fn withdraw(&mut self, prefix: Ipv4Net, id: u32, source_ident: usize) {
-        let removed = if id == 0 {
-            self.adj_out.0.remove(&prefix).is_some()
+    /// withdraw to every member it was sent to. `id == 0` is the non-AddPath
+    /// / whole-prefix withdraw (the wire carries id 0); `id != 0` is an
+    /// AddPath per-path withdraw — remove just that path (`adj_out` keys by
+    /// the Out local-id), leaving the prefix's other paths advertised.
+    ///
+    /// The member left out is the one whose paths the removed rows all were
+    /// (split-horizon kept them from it), read off the rows rather than
+    /// named by the caller: the next-hop, FIB-release and VRF-import callers
+    /// have no source and named the first neighbor's index, which kept that
+    /// neighbor on every route they withdrew (review finding #22).
+    fn withdraw(&mut self, prefix: Ipv4Net, id: u32) {
+        let removed: Vec<BgpRib> = if id == 0 {
+            self.adj_out.0.remove(&prefix).unwrap_or_default()
         } else {
-            self.adj_out.remove(prefix, id).is_some()
+            self.adj_out.remove(prefix, id).into_iter().collect()
         };
-        if removed {
-            let max = self
-                .members
-                .values()
-                .next()
-                .map(|c| c.max_packet_size())
-                .unwrap_or(4096);
-            let mut update = UpdatePacket::with_max_packet_size(max);
-            update.ipv4_withdraw.push(Ipv4Nlri { id, prefix });
-            // One withdrawn prefix cannot overflow a length field, but encode
-            // through the checked path anyway so no emit site can put a frame on
-            // the wire whose header contradicts its body.
-            match update.try_emit() {
-                Ok(bytes) => self.fan(&[bytes], source_ident),
-                Err(e) => tracing::warn!("dropping IPv4 withdraw for {}: {}", prefix, e),
+        let Some(first) = removed.first().map(|r| r.ident) else {
+            return;
+        };
+        let skip = removed.iter().all(|r| r.ident == first).then_some(first);
+        if let Some(bytes) = self.withdraw_update(prefix, id) {
+            self.fan(&[bytes], skip);
+        }
+    }
+
+    /// One withdraw of `prefix` (path `id`), encoded.
+    fn withdraw_update(&self, prefix: Ipv4Net, id: u32) -> Option<BytesMut> {
+        let max = self
+            .members
+            .values()
+            .next()
+            .map(|c| c.max_packet_size())
+            .unwrap_or(4096);
+        let mut update = UpdatePacket::with_max_packet_size(max);
+        update.ipv4_withdraw.push(Ipv4Nlri { id, prefix });
+        // One withdrawn prefix cannot overflow a length field, but encode
+        // through the checked path anyway so no emit site can put a frame on
+        // the wire whose header contradicts its body.
+        match update.try_emit() {
+            Ok(bytes) => Some(bytes),
+            Err(e) => {
+                tracing::warn!("dropping IPv4 withdraw for {}: {}", prefix, e);
+                None
             }
         }
     }
 
-    /// Fan pre-encoded UPDATE bytes to every member except the path's source.
-    /// The encode happened once; this is a cheap per-member buffer clone +
-    /// enqueue (the per-member backpressure rides each ctx's `send_packet`).
-    fn fan(&self, bytes_list: &[BytesMut], source_ident: usize) {
+    /// Fan pre-encoded UPDATE bytes to every member but `skip` (the path's
+    /// source, split-horizon). The encode happened once; this is a cheap
+    /// per-member buffer clone + enqueue (the per-member backpressure rides
+    /// each ctx's `send_packet`).
+    fn fan(&self, bytes_list: &[BytesMut], skip: Option<usize>) {
         for (ident, ctx) in &self.members {
-            if *ident == source_ident {
+            if Some(*ident) == skip {
                 continue;
             }
             for buf in bytes_list {
@@ -480,7 +522,6 @@ mod tests {
         engine.handle(GroupEgressDeltaV4::Withdraw {
             prefix: "10.10.10.0/24".parse().unwrap(),
             id: 0,
-            source_ident: 99,
         });
         assert!(rx1.try_recv().is_ok(), "member 1 receives the withdraw");
         assert!(rx2.try_recv().is_ok(), "member 2 receives the withdraw");
@@ -562,7 +603,6 @@ mod tests {
         engine.handle(GroupEgressDeltaV4::Withdraw {
             prefix: "10.10.10.0/24".parse().unwrap(),
             id: 0,
-            source_ident: 99,
         });
         assert!(
             rx1.try_recv().is_ok(),

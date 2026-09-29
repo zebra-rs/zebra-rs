@@ -5027,15 +5027,8 @@ fn apply_ipv4_advertise_job(
     // the per-peer PET below (they are alternative egress models). VPNv4
     // (`rd = Some`) stays on the update-group path.
     if rd.is_none() && super::group_egress::egress_group_task_enabled() {
-        fan_advertise_to_groups(prefix, &selected, source_ident, bgp.update_groups, peers);
-        fan_addpath_to_groups(
-            prefix,
-            &added,
-            &replaced,
-            source_ident,
-            bgp.update_groups,
-            peers,
-        );
+        fan_advertise_to_groups(prefix, &selected, bgp.update_groups, peers);
+        fan_addpath_to_groups(prefix, &added, &replaced, bgp.update_groups, peers);
         return;
     }
     // A2 ⑥ (gate-on): the v4-unicast event-driven advertise runs in the
@@ -5586,7 +5579,7 @@ pub(super) fn route_advertise_to_peers(
     // peer-down path's sink; gating it (not only `apply_ipv4_advertise_job`)
     // is what makes peer-down coherent at gate-on. Precedes the PET gate.
     if rd.is_none() && super::group_egress::egress_group_task_enabled() {
-        fan_advertise_to_groups(prefix, selected, source_peer, bgp.update_groups, peers);
+        fan_advertise_to_groups(prefix, selected, bgp.update_groups, peers);
         return;
     }
     // A2 ⑥ (gate-on): the v4-unicast event-driven advertise runs in the
@@ -5660,12 +5653,11 @@ fn fan_advertise_to_pets(prefix: Ipv4Net, selected: &[BgpRib], peers: &PeerMap) 
 /// per-update-group egress tasks: **one** delta per group (deduped across the
 /// established members), keyed by `peer.update_group_id`. An empty `selected`
 /// is a withdraw (the path is gone). The per-member split-horizon is the
-/// engine's job (it excludes `rib.ident` from the fan), so the source need
-/// only ride the withdraw — the advertise carries its source in `rib`.
+/// engine's job: an advertise excludes `rib.ident`, a withdraw the source of
+/// the row it withdraws, so no caller names a source (review finding #22).
 fn fan_advertise_to_groups(
     prefix: Ipv4Net,
     selected: &[BgpRib],
-    source_ident: usize,
     update_groups: &super::update_group::UpdateGroupMap,
     peers: &PeerMap,
 ) {
@@ -5698,11 +5690,7 @@ fn fan_advertise_to_groups(
                 prefix,
                 rib: best.clone(),
             }),
-            None => task.send(super::group_egress::GroupEgressDeltaV4::Withdraw {
-                prefix,
-                id: 0,
-                source_ident,
-            }),
+            None => task.send(super::group_egress::GroupEgressDeltaV4::Withdraw { prefix, id: 0 }),
         }
     }
 }
@@ -5721,7 +5709,6 @@ fn fan_addpath_to_groups(
     prefix: Ipv4Net,
     added: &Option<BgpRib>,
     replaced: &[BgpRib],
-    source_ident: usize,
     update_groups: &super::update_group::UpdateGroupMap,
     peers: &PeerMap,
 ) {
@@ -5770,7 +5757,6 @@ fn fan_addpath_to_groups(
                     task.send(super::group_egress::GroupEgressDeltaV4::Withdraw {
                         prefix,
                         id: removed.local_id,
-                        source_ident,
                     });
                 }
             }

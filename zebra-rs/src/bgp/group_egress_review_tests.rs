@@ -123,7 +123,6 @@ fn a_withdraw_reaches_the_member_in_slot_0() {
     engine.handle(GroupEgressDeltaV4::Withdraw {
         prefix: prefix(),
         id: 0,
-        source_ident: 0,
     });
     assert_eq!(sent(&mut rx0), (vec![], vec![P.to_string()]));
     assert_eq!(sent(&mut rx1), (vec![], vec![P.to_string()]));
@@ -145,7 +144,6 @@ fn an_addpath_withdraw_reaches_the_member_in_slot_0() {
     engine.handle(GroupEgressDeltaV4::Withdraw {
         prefix: prefix(),
         id: 11,
-        source_ident: 0,
     });
     assert_eq!(sent_with(&mut rx0, true), (vec![], vec![P.to_string()]));
 }
@@ -169,7 +167,6 @@ fn a_withdraw_skips_only_the_member_whose_path_it_was() {
     engine.handle(GroupEgressDeltaV4::Withdraw {
         prefix: prefix(),
         id: 0,
-        source_ident: 0,
     });
     assert_eq!(sent(&mut rx0), (vec![], vec![P.to_string()]));
     assert_eq!(sent(&mut rx1), (vec![], vec![]), "never sent the route");
