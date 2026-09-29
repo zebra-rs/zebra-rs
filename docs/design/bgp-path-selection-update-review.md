@@ -21,10 +21,10 @@ follow-ups), #7 (PR #2380, `d7476601`), #8 and with it #13 (PR #2383,
 knobs (PR #2423, `7852fc15`), #16 (PR #2425, `6d4446b1`), #17 with #18
 (PR #2426, `9d4e2589`), #23 (PR #2429, `74d4500d`) and #24 (PR #2432,
 `969279a0`, three review rounds folded in), with a follow-up to #23
-(AddPath withdraws held by `suppress-fib-pending`, PR #2433, `b5c4c210`).
-Each fixed entry ends with its fix note; everything else is open. In
-progress: #19 (RTC membership learned mid-session), branch
-`bgp-rtc-mid-session`.
+(AddPath withdraws held by `suppress-fib-pending`, PR #2433, `b5c4c210`),
+and #19 (PR #2436, `17b906bc`, one review round folded in). Each fixed
+entry ends with its fix note; everything else is open. In progress: the
+`bgp router-id` item left open in #21, branch `bgp-live-signature-knobs`.
 
 Method: one lead read the selection ladder and every egress builder, then
 five independent read-only reviewers each took one dimension (update-group
@@ -1341,7 +1341,7 @@ cap. The two reviews agree on every overlapping item.
   `_v6`), `bgp_route_map_match`, `bgp_vpnv4_rr_transit_label`,
   `bgp_evpn_addpath_flip` and `bgp_lu_addpath_resend` stay green.
 
-### 19. P2 CONFIRMED, FIXED on branch `bgp-rtc-mid-session` — RTC membership learned mid-session never triggers an advertisement
+### 19. P2 CONFIRMED, FIXED in #2436 — RTC membership learned mid-session never triggers an advertisement
 
 - `route.rs:8122` / `8133` (`route_ipv{4,6}_rtc_update`) only insert
   into `peer.rtcv4/6`; `route_rtcv4_sync` (`8143`) runs only on an
@@ -1384,7 +1384,7 @@ cap. The two reviews agree on every overlapping item.
   RR never learns the PE's new RT — and a removed RT is never withdrawn,
   which meets the recorded receive-side gap (RTC MP_UNREACH is ignored,
   `bgp-code-review-findings.md`).
-- FIXED (branch `bgp-rtc-mid-session`, the whole RTC mid-session story):
+- FIXED (#2436, the whole RTC mid-session story):
   - Representation: a peer's membership is its exact RTs, its broad
     memberships (the default or a partial prefix, `rtcv4_broad` /
     `rtcv6_broad`, keyed so a withdraw removes the right one) and whether it
@@ -1481,7 +1481,7 @@ cap. The two reviews agree on every overlapping item.
   `bgp_shard_lu`, `bgp_shard_sync_labelv6` and `bgp_shard_sync_lu` stay
   green.
 
-### 21. P2 CONFIRMED — more signature-bearing knobs change on a live Established peer without detach/attach
+### 21. P2 CONFIRMED, FIXED (the knobs in #2377, the router-id on branch `bgp-live-signature-knobs`) — more signature-bearing knobs change on a live Established peer without detach/attach
 
 - Beyond the recorded as-override / remove-private-as (rr-client is
   closed: #2375 bounces the session on that knob):
@@ -1506,7 +1506,72 @@ cap. The two reviews agree on every overlapping item.
   such change re-forms the peer's groups and re-syncs it within the
   commit.
   The `bgp router-id` item (ORIGINATOR_ID / CLUSTER_LIST and the gate-on
-  `SyncCtx.router_id`) is not a signature field and stays open.
+  `SyncCtx.router_id`) is not a signature field and stayed open (FIXED
+  below).
+- The `bgp router-id` item, re-read: ORIGINATOR_ID is stamped from the
+  source peer's identifier, so ours reaches the wire only as the cluster-id
+  in CLUSTER_LIST. The wider hole is that a neighbor knows our identifier
+  only from our OPEN, and `set_router_id` left every session up ("the next
+  OPEN picks up the new one") while our inbound loop check moved to the new
+  one: a route of ours an RR reflects back carries the old identifier as
+  ORIGINATOR_ID and passes; a route we reflected earlier carries the old
+  cluster-id, which the check no longer recognises; the gate-on engines
+  keep the old identifier in each member's `SyncCtx` (the PET's from its
+  spawn, a group engine member's from `AddMember`). FRR, IOS and Junos
+  reset every session on a router-id change.
+- Found while gating: the per-VRF tasks capture the effective router-id at
+  spawn and are respawned when it changes — at `CommitEnd` only
+  (`compute_vrf_respawn`). A RIB-derived router-id (`system router-id`, or
+  the automatic pick) arrives outside any commit, so a VRF on the global
+  router-id keeps the old one until the next commit, whatever it changes,
+  respawns it and bounces its CE sessions.
+- Gates (branch `bgp-live-signature-knobs`; each compiles on `main` and
+  fails there, except the controls). Unit, `router_id_change_review_tests.rs`
+  (a child of `inst.rs`; router-id changes arrive as the config callback
+  applies them and as `RibRx::RouterIdUpdate`, a reset is a session that
+  left the state it was in, VRF tasks are real spawns at `CommitEnd`): `a_configured_router_id_change_bounces_every_session_that_sent_an_open`
+  (OpenSent / OpenConfirm / Established, not Idle / Connect / Active),
+  `a_rib_router_id_change_bounces_the_sessions` (and deleting the configured
+  one, falling back), `a_rib_router_id_change_respawns_the_vrfs_on_the_global_router_id`
+  (a VRF with its own router-id keeps running),
+  `a_commit_after_a_rib_router_id_change_respawns_nothing`; controls
+  `a_change_that_leaves_the_effective_router_id_bounces_nothing`,
+  `a_configured_router_id_change_respawns_the_vrf_at_commit_end`. BDD
+  `bgp_router_id_change` and its `_v6` twin (over an IPv6 session): z1
+  moves from `system router-id` to a changed one, to a configured
+  `router bgp global router-id`, and back; on `main` z1 reports each new
+  `local router ID` while z2 keeps `remote router ID 192.168.31.1`.
+- FIXED (branch `bgp-live-signature-knobs`):
+  - `set_router_id` resets every global session that has sent an OPEN
+    carrying the old identifier (OpenSent, OpenConfirm, Established),
+    running `Event::Stop` through `process_msg` itself rather than the
+    bounded event queue; Idle / Connect / Active sessions send the new one
+    in their first OPEN. The neighbor learns the new identifier, the routes
+    are re-advertised with the new cluster-id, and the gate-on engines
+    re-capture `SyncCtx` when the session is back (the PET is spawned at
+    Established, a group engine member re-added on attach). An
+    Established session's reset reads "Router ID changed"
+    (`PeerDownReason::RouterIdChange`) in `show bgp neighbor`. Without a
+    configured router-id, a change of the RIB's automatic pick resets the
+    sessions too, as in FRR.
+  - A router-id change outside a commit respawns at once each VRF task
+    whose effective router-id (its own, else the global one) changed
+    (`respawn_vrfs_on_router_id`, through the commit diff's despawn / spawn
+    path, now `replace_vrf_tasks`); inside a commit (`commit_open`,
+    `CommitStart` to `CommitEnd`) `CommitEnd` still does it once, with the
+    whole transaction applied.
+- Review round (FIXED on the branch; the reviewer's probe is now the gate
+  `a_router_id_change_resets_the_session_with_the_event_queue_full`):
+  - P2: the resets were queued with `try_send(Event::Stop)` and a failure
+    ignored, so with the bounded event queue full a session stayed up on
+    the old identifier with nothing to retry it. They are now run through
+    `process_msg` directly, the path a queued `Event::Stop` takes (the
+    dynamic-neighbor cleanup included). A revert to the queued form fails
+    the three reset gates.
+  - Not fixed here: the other resets queued the same way — the
+    per-neighbor config bounces (`config.rs`, `neighbor_group.rs`), BFD
+    and interface down, `clear bgp`, the VRF task's own — share the
+    full-queue loss.
 
 ### 22. P2 CONFIRMED (env-gated) — gate-on group engine skips peer slot 0 on every NHT-, FIB-release- and import-driven withdraw
 

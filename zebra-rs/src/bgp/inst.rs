@@ -8954,3 +8954,7 @@ mod vrf_rt_change_review_tests;
 #[cfg(test)]
 #[path = "rtc_mid_session_review_tests.rs"]
 mod rtc_mid_session_review_tests;
+
+#[cfg(test)]
+#[path = "router_id_change_review_tests.rs"]
+mod router_id_change_review_tests;
