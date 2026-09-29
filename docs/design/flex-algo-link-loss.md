@@ -210,7 +210,8 @@ changes.
 
 As built for OSPFv3 (PR 3b): zebra-rs's OSPFv3 carries its SR capabilities, definitions
 included, in an E-Router-LSA (Link State ID 0), not the OSPFv3 Router Information LSA; moving
-them is a separate change (decided 2026-09-25). Definitions are read from every other router's
+them is a separate change (decided 2026-09-25), since made:
+[ospfv3-router-information-lsa.md](./ospfv3-router-information-lsa.md). Definitions are read from every other router's
 E-Router-LSAs, first occurrence in ascending Link State ID. OSPFv3 originates SR capabilities in
 every area, so selection and participation are per area: this router's own definition is a
 candidate in each area while SR-MPLS or SRv6 is on, and each area's SR-Algorithm list and its

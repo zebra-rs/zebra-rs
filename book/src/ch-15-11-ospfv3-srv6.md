@@ -45,7 +45,8 @@ router ospfv3 {
 
 ## What gets advertised
 
-- An **SRv6 Capabilities TLV** in the SR-info E-Router-LSA.
+- An **SRv6 Capabilities TLV** (RFC 9513 §2) in the Router Information
+  LSA.
 - An **SRv6-Locator-LSA** (LS type `0xA02A`) carrying the locator
   prefix with an **End SID** sub-TLV — behavior `uN` (End with
   NEXT-C-SID) for a uSID locator, plain `End` for classic — plus

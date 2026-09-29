@@ -54,29 +54,30 @@ and shared by both versions.
 
 | Object | OSPFv2 | OSPFv3 |
 |--------|--------|--------|
-| FAD TLV | RI Opaque LSA, type 16 | E-Router-LSA, top-level TLV 16 |
+| FAD TLV | RI Opaque LSA, type 16 | Router Information LSA (0xA00C), type 16 |
 | ASLA sub-TLV | Ext-Link Opaque LSA, sub-TLV 10 | Router-Link TLV, sub-TLV 11 |
 | Extended Admin Group | sub-sub-TLV 20 | sub-sub-TLV 21 |
-| SR-Algorithm | RI Opaque LSA, type 8 | E-Router-LSA SR-info |
+| SR-Algorithm | RI Opaque LSA, type 8 | Router Information LSA, type 8 |
 | Per-algo Prefix-SID | Ext-Prefix Opaque LSA | E-Intra-Area-Prefix-LSA |
 | SABM Flex-Algo X-bit | `0x10` | `0x10` |
 
 The SABM/UDABM length must be 0/4/8 octets in OSPF (RFC 9492), unlike
 IS-IS's 1-octet form. The OSPFv2 FAD/ASLA ride **separate** Opaque LSAs;
-the OSPFv3 FAD rides the per-router SR-info E-Router-LSA and the ASLA
+the OSPFv3 FAD rides the per-area Router Information LSA and the ASLA
 rides each per-link E-Router-LSA Router-Link TLV (so the per-algo SPF
 joins affinity to a Router-LSA link by `(adv_router, interface_id)`,
 whereas v2 keys the join by `(adv_router, link_id, link_data)`).
 
-## OSPFv3 SR baseline caveat
+## OSPFv3 SR baseline (resolved)
 
-zebra-rs's OSPFv3 SR-MPLS uses a **non-standard** baseline: SR
-capabilities (SR-Algorithm, SRGB, SRLB) and the FAD ride an E-Router-LSA
+zebra-rs's OSPFv3 SR-MPLS used a **non-standard** baseline: SR
+capabilities (SR-Algorithm, SRGB, SRLB) and the FAD rode an E-Router-LSA
 at a reserved Link State ID (`SR_INFO_LSID`) rather than the RFC 8666
-Router Information arrangement. The flex-algo work was layered on this
-existing baseline (per an explicit decision), so OSPFv3 flex-algo interop
-with other vendors is not expected without aligning the SR baseline
-first. OSPFv2 follows the standard RI/Ext-Link/Ext-Prefix Opaque LSAs.
+Router Information arrangement, and the flex-algo work was layered on it.
+The baseline is now aligned: they ride the OSPFv3 Router Information LSA,
+and the former E-Router-LSA is still read from older zebra-rs routers
+([ospfv3-router-information-lsa.md](./ospfv3-router-information-lsa.md)).
+OSPFv2 follows the standard RI/Ext-Link/Ext-Prefix Opaque LSAs.
 
 ## Phase-by-phase (all merged)
 

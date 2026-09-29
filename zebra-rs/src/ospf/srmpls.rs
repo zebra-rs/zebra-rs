@@ -104,9 +104,8 @@ pub const ROUTER_INFO_V3_INSTANCE: u32 = 0;
 /// Build the OSPFv3 Router Information LSA (RFC 7770), area scope, with
 /// this router's Segment Routing capabilities as RFC 8666 §4 places them:
 /// the TLVs of [`router_info_lsa_build`], then SRv6 Capabilities (RFC 9513
-/// §2) when `srv6` is set. It is the standard carrier for what
-/// [`e_router_v3_sr_info_lsa_build`] carries in zebra-rs's former
-/// encoding, which older zebra-rs routers still read.
+/// §2) when `srv6` is set. zebra-rs carried the same TLVs on an SR-info
+/// E-Router-LSA (`SR_INFO_LSID`) before.
 pub fn router_info_v3_lsa_build(
     router_id: Ipv4Addr,
     gr_capable: bool,
@@ -323,30 +322,22 @@ pub fn e_router_v3_lsa_build(
     lsa
 }
 
-/// Build an OSPFv3 E-Router-LSA carrying only the RFC 8666 §3 SR
-/// capability TLVs (SR-Algorithm, SID/Label Range = SRGB, SR Local
-/// Block = SRLB) and no Router-Link TLV. One per area; peers read it
-/// to translate Index-form SIDs we advertise into absolute labels.
-///
-/// `link_state_id` is reserved as `SR_INFO_LSID` so it cannot collide
-/// with the per-link LSAs (whose LS-ID is the interface ifindex, ≥ 1
-/// on Linux). RFC 5340 §3.4 treats the Link State ID as router-local
-/// per LS-Type, so we own the namespace.
-///
-/// The SRGB / SRLB are advertised as absolute Label blocks (the V/L
-/// equivalent in the Sub-TLV length discriminator), matching how
-/// `srmpls.rs` already pins the local pool to hardcoded constants.
-/// When configurable SRGB / SRLB land, the builder will read the
-/// configured range here.
+/// The Link State ID of the SR-info E-Router-LSA: an E-Router-LSA with no
+/// Router-Link TLV, carrying the SR capability TLVs (SR-Algorithm,
+/// SID/Label Range = SRGB, SR Local Block = SRLB, Flexible Algorithm
+/// Definitions, SRv6 Capabilities), one per area. zebra-rs carried its
+/// SR capabilities there before the Router Information LSA. It no
+/// longer sends one, but still reads older routers' and flushes its own
+/// (docs/design/ospfv3-router-information-lsa.md, D5). LS-ID 0 cannot
+/// collide with the per-link LSAs, whose LS-ID is the interface ifindex
+/// (≥ 1 on Linux).
 pub const SR_INFO_LSID: u32 = 0;
 
-/// `algos` lists every algorithm this router participates in (regular
-/// SPF + configured flex-algos), advertised in the SR-Algorithm TLV
-/// (RFC 8666 §3.1). `fads` carries the Flexible Algorithm Definitions
-/// (RFC 9350 §7.1) this router originates — one `Ospfv3ExtTlv::Fad`
-/// each, appended after the SR capability TLVs in the same per-router
-/// E-Router-LSA (the v3 home of the FAD, mirroring how the v2 FAD rides
-/// the Router Information Opaque LSA).
+/// Build the SR-info E-Router-LSA an older zebra-rs router sends; tests
+/// use it to stand in for one. `algos` is its SR-Algorithm list, `fads`
+/// its Flexible Algorithm Definitions, appended after the SR capability
+/// TLVs; `srv6` adds the SRv6 Capabilities TLV.
+#[cfg(test)]
 pub fn e_router_v3_sr_info_lsa_build(
     router_id: Ipv4Addr,
     algos: Vec<Algo>,

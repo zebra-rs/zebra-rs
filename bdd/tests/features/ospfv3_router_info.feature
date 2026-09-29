@@ -5,9 +5,9 @@ Feature: OSPFv3 advertises its Segment Routing capabilities in the Router Inform
   Information LSA (LS type 0xA00C). zebra-rs sent them only on an
   E-Router-LSA, which no other implementation reads, so a standard router
   learned no SRGB from zebra-rs and installed none of its Prefix-SIDs. It
-  now sends the Router Information LSA, and the former carrier alongside for
-  zebra-rs routers from before. A neighbour reads a router's capabilities
-  from its Router Information LSA whenever it sends one.
+  now sends the Router Information LSA instead. A neighbour reads a router's
+  capabilities from its Router Information LSA whenever it sends one, and
+  still reads the former carrier from an older zebra-rs router.
 
   r1 and r2 run SR-MPLS over one point-to-point link, with the default SRGB
   (16000). r1's loopback Prefix-SID is index 1 (label 16001), and r1 defines
@@ -35,6 +35,9 @@ Feature: OSPFv3 advertises its Segment Routing capabilities in the Router Inform
     # r1's SRGB now comes from its Router Information LSA alone.
     And show command "show ospfv3 segment-routing" in namespace "r2" should eventually contain "SR-Node: 1.1.1.1    Area: 0.0.0.0    SRGB: [16000/18000]"
     And show command "show mpls ilm" in namespace "r2" should eventually contain "16001"
+    # The former carrier, an SR-info E-Router-LSA, is no longer sent: only
+    # its rendering prints "SR-Algorithm TLV:".
+    And show command "show ospfv3 database detail" in namespace "r2" should eventually not contain "SR-Algorithm TLV:"
 
   Scenario: Teardown
     Given the test topology exists

@@ -16,11 +16,11 @@ SR sub-TLV class the consumer crates currently model:
 
 | Capability                | v2 (RFC 7684 + RFC 8665) | v3 (RFC 8362 + RFC 8666) |
 | ---                       | ---                      | ---                      |
-| Router Information / SR-info advertise | Opaque RI LSA (type 4)  | E-Router-LSA SR-info TLVs (LS-ID 0) |
+| Router Information advertise | Opaque RI LSA (type 4)  | Router Information LSA (0xA00C, RFC 7770) |
 | Prefix-SID originate      | OpaqueAreaExtPrefix      | E-Intra-Area-Prefix-LSA  |
-| Adj-SID originate (P2P)   | OpaqueAreaExtLink + AdjSid | E-Router-LSA Router-Link TLV + AdjSid |
-| LAN-Adj-SID originate     | OpaqueAreaExtLink + LanAdjSid | E-Router-LSA Router-Link TLV + LanAdjSid |
-| Remote SRGB / SRLB ingest | `Lsdb::update_lsa`       | `Lsdb::update_lsa_v3`    |
+| Adj-SID originate (P2P)   | OpaqueAreaExtLink + AdjSid | E-Router-LSA Router-Link TLV + AdjSid (sub-TLV 5) |
+| LAN-Adj-SID originate     | OpaqueAreaExtLink + LanAdjSid | E-Router-LSA Router-Link TLV + LanAdjSid (sub-TLV 6) |
+| Remote SRGB / SRLB ingest | `Lsdb::update_lsa`       | `Lsdb<Ospfv3>::sr_capabilities` |
 | Remote Prefix-SID populate to RIB | `add_prefix_sids`        | `add_prefix_sids_v3`     |
 | Self Prefix-SID pop ILM   | `add_self_prefix_sids_to_ilm` | `add_self_prefix_sids_to_ilm_v3` |
 | Self Adj-SID / LAN-Adj-SID pop ILM | `add_self_adj_sids_to_ilm`    | `add_self_adj_sids_to_ilm_v3` |
@@ -67,40 +67,36 @@ IS-IS has YANG knobs for these; OSPF does not yet. Both v2's
 the constants directly. Configurable SRGB / SRLB is the natural next
 step (mirror the IS-IS shape).
 
-### v3 SR-info LSA placement is by convention, not by RFC fiat
-`SR_INFO_LSID = 0` reserves LS-ID 0 for the SR-info-only
-E-Router-LSA. Per-link E-Router-LSAs key by `ifindex` (Linux ifindex
-≥ 1, so no collision). Foreign implementations may put the same TLVs
-on any E-Router-LSA — our ingest path (`Lsdb<Ospfv3>::update_lsa_v3`)
-scans every E-Router-LSA from a peer, so that interop works. Our
-originator only ever emits the dedicated LS-ID 0 LSA.
-
-### `OSPFV3_SUB_TLV_SID_LABEL = 5`
-The inner SID/Label sub-TLV type number nested inside SID/Label
-Range / SR Local Block TLVs is a best-effort reading of the IANA
-"OSPFv3 Extended-LSA Sub-TLVs" registry. Verify against a real peer
-if FRR interop matters; round-trip self-tests pass.
+### v3 SR capabilities: the Router Information LSA (resolved)
+The v3 SR capabilities rode an SR-info E-Router-LSA (LS-ID 0, "by
+convention, not by RFC fiat"), with the SID/Label sub-TLV inside the
+SRGB/SRLB as type 5, and Adj-SID / LAN Adj-SID sub-TLVs as 6 / 7. They
+now follow RFC 8666: the Router Information LSA (0xA00C, instance 0)
+with the shared RI TLVs (SID/Label sub-TLV type 1), and Adj-SID sub-TLVs
+5 / 6. The former encodings are still read from older zebra-rs routers
+for one release (`Lsdb<Ospfv3>::sr_capabilities`, which prefers a
+router's Router Information LSA). See
+[ospfv3-router-information-lsa.md](./ospfv3-router-information-lsa.md).
 
 ### `Eq` on `Ospfv3ELsaBody`
 Body only derives `PartialEq` because `Ospfv3SubTlv::Unknown` carries
 `Vec<u8>`. Anything that wants hashable / Ord-eq LSA bodies will need
 to either skip Unknown or wrap it.
 
-### Self-originated v3 SR-info ingest
-`Lsdb<Ospfv3>::update_lsa_v3` only fires on the
-`packet_v3::insert_received_v3` path (i.e., from-peer flooding).
-Self-originated LSAs go through `install_originated` directly, so
-`label_map[self.router_id]` stays empty. The v3 show path reads
-local SRGB/SRLB from the `srmpls.rs` constants and is fine; if a
-future feature wants a uniform `label_map`-keyed lookup, add a call
-to `update_lsa_v3` from `e_router_v3_sr_info_lsa_originate` before
-`install_originated`.
+### Self-originated v3 SR capabilities ingest
+`label_map` is kept by `Lsdb<Ospfv3>::insert_received_v3`, the
+from-peer flooding path. Self-originated LSAs go through
+`install_originated` directly, so `label_map[self.router_id]` stays
+empty. The v3 show path reads local SRGB/SRLB from the `srmpls.rs`
+constants and is fine; if a future feature wants a uniform
+`label_map`-keyed lookup, resync it from `router_info_v3_lsa_originate`
+after `install_originated`.
 
-### `SpfRouteV3.sid` resolution depends on peer SR-info LSA arrival
+### `SpfRouteV3.sid` resolution depends on the peer's SR capabilities arriving
 `add_prefix_sids_v3` skips remote prefixes whose `adv_router` has no
 `label_map` entry yet. Index-form Prefix-SIDs that arrive before the
-peer's SR-info LSA stay unresolved until SPF re-runs after the
-SR-info LSA arrives. SPF re-runs on any LSDB change in the same area,
+peer's Router Information LSA stay unresolved until SPF re-runs after
+it arrives. SPF re-runs on any LSDB change in the same area,
 so this self-heals — but a packet capture during convergence can show
 the gap.
 

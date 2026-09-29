@@ -37,11 +37,11 @@ verbatim, because the FIB/RIB layers are shared:
 
 In-house conventions carried over:
 
-- zebra-rs has no standalone Router Information LSA for v3; RI-style
-  TLVs (SR-Algorithm, SID/Label Range, SRLB, FAD) ride a dedicated
-  E-Router-LSA instance (`SR_INFO_LSID`). The SRv6 Capabilities TLV
-  (type 20 — collision-free with the in-house Ext-TLV numbers) joins
-  that LSA rather than introducing an RI LSA.
+- *(Superseded.)* The RI TLVs (SR-Algorithm, SID/Label Range, SRLB,
+  FAD) and the SRv6 Capabilities TLV (type 20) rode a dedicated
+  E-Router-LSA instance (`SR_INFO_LSID`). They now ride the RFC 7770
+  Router Information LSA, as RFC 9513 §2 specifies for SRv6
+  Capabilities ([ospfv3-router-information-lsa.md](./ospfv3-router-information-lsa.md)).
 - Endpoint behaviors stay raw `u16` in the codec (the IANA "SRv6
   Endpoint Behaviors" registry is protocol-neutral); the daemon maps
   them through `isis_packet::Behavior`, which already models the full
