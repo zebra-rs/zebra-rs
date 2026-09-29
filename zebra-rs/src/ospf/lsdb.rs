@@ -452,6 +452,31 @@ impl<V: OspfVersion> Lsdb<V> {
         self.tables.insert(lsa_key, lsa);
     }
 
+    /// Install one of this router's own LSAs restored from a graceful-restart
+    /// checkpoint, unless the database already holds an instance at least
+    /// as recent (RFC 2328 §13.1): a neighbour may have sent a newer copy
+    /// since the restart, which the restarting router keeps (RFC 3623
+    /// §2.2). Replacing it with the older checkpointed copy would make the
+    /// flush that ends the restart withdraw an instance peers reject.
+    /// Returns whether it was installed.
+    pub fn install_restored(
+        &mut self,
+        lsa_data: V::Lsa,
+        tx: &UnboundedSender<Message<V>>,
+        area_id: Option<Ipv4Addr>,
+        tracing: &OspfTracing,
+    ) -> bool {
+        let h = V::lsa_header(&lsa_data);
+        let key: OspfLsaKey = (V::ls_type(h), V::ls_id(h), V::adv_router(h));
+        if let Some(current) = self.tables.get(&key)
+            && V::lsa_more_recent(h, V::ls_age(h), current.header(), current.current_age()) <= 0
+        {
+            return false;
+        }
+        self.install_originated(lsa_data, tx, area_id, tracing);
+        true
+    }
+
     /// Return the install timestamp of an LSA, if present.
     /// Used by `ospf_ls_upd_proc` / `ospfv3_ls_upd_proc` step 5(a)
     /// to enforce MinLSArrival (RFC 2328 §13 / RFC 5340 §4.5).
@@ -596,7 +621,7 @@ impl Lsdb<Ospfv2> {
         use OspfLsType::*;
         match ospf_lsa.h.ls_type {
             Router | Network | Summary | SummaryAsbr | AsExternal | NssaAsExternal
-            | OpaqueAreaLocal => {
+            | OpaqueLinkLocal | OpaqueAreaLocal => {
                 // v2-specific Fletcher checksum + length recompute,
                 // then dispatch through the generic install path.
                 ospf_lsa.update();

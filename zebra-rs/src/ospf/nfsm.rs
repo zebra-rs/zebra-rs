@@ -390,9 +390,9 @@ pub fn ospfv2_populate_initial_db_summary(
 /// `lsa_flood_scope` gives each LS type's scope — the v3 twin is
 /// [`ospfv3_db_summary_lsas`]. It listed a fixed set of types, which left
 /// out the AS-scope Opaque LSA (type 11): a neighbour whose adjacency
-/// formed after one arrived never learned it. Selecting by scope, not by
-/// database, keeps out the link-scope Grace-LSAs this router files in the
-/// area database while it restarts. Type-7 NSSA-LSAs belong in an NSSA
+/// formed after one arrived never learned it. Link-scope LSAs live in
+/// each interface's own database (RFC 5250 §3.1), and selecting by scope
+/// keeps out any found here. Type-7 NSSA-LSAs belong in an NSSA
 /// only (RFC 3101 §2.5); Opaque LSAs only to an Opaque-capable neighbour
 /// (`opaque`, RFC 5250 §2.1); MaxAge LSAs are left to
 /// `ospf_db_summary_add_table`.
@@ -443,10 +443,11 @@ pub fn ospfv3_populate_initial_db_summary(
 /// (§4.5.1). Listing the types instead left out each one added since: the
 /// RFC 8362 E-LSAs, then the SRv6 Locator LSA, then the Router Information
 /// LSA. Each is usually originated before any adjacency, so a neighbour
-/// that formed one later never learned it. Selecting by scope, not by
-/// database, keeps out the link-scope Grace-LSAs this router files in the
-/// area database while it restarts: a neighbour rejects a summary listing
-/// them, and the adjacency never leaves ExStart. Type-7 NSSA-LSAs belong
+/// that formed one later never learned it. Link-scope LSAs live in each
+/// interface's own database (RFC 5340 §4.1.2), and selecting by scope
+/// keeps out any found here: this router's own Grace-LSAs, when they were
+/// filed in the area database, made a neighbour reject the summary, and
+/// the adjacency never left ExStart. Type-7 NSSA-LSAs belong
 /// in an NSSA only (RFC 3101 §2.5); MaxAge LSAs are left to
 /// `ospf_db_summary_add_table`.
 fn ospfv3_db_summary_lsas<'a>(
@@ -731,8 +732,7 @@ mod db_summary_tests {
     const UNKNOWN_AREA: u16 = 0xA0FF;
     const AS_EXTERNAL: u16 = 0x4005;
     const AS_ROUTER_INFO: u16 = 0xC00C;
-    /// Link scope; this router files its own in the area database while
-    /// it restarts.
+    /// Link scope, so never listed from the area database.
     const GRACE: u16 = 0x000B;
 
     fn lsa(ls_type: u16) -> Ospfv3Lsa {
@@ -756,8 +756,8 @@ mod db_summary_tests {
     /// its type — the Router Information LSA among them, which it used to
     /// leave out, so a neighbour never learned one originated before the
     /// adjacency — and every AS-scope LSA where they flood. Type-7 LSAs
-    /// only in an NSSA; never a link-scope Grace-LSA, though this router
-    /// files its own in the area database.
+    /// only in an NSSA; never a link-scope Grace-LSA, even one found in the
+    /// area database.
     #[tokio::test]
     async fn the_summary_lists_every_lsa_in_scope() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -794,8 +794,7 @@ mod db_summary_tests {
     /// flood, every AS-scope one — the AS-scope Opaque LSA (type 11) among
     /// them, which its fixed list of types left out. Opaque LSAs go only
     /// to an Opaque-capable neighbour, Type-7 only in an NSSA, never a
-    /// link-scope Grace-LSA (type 9), though this router files its own in
-    /// the area database.
+    /// link-scope Grace-LSA (type 9), even one found in the area database.
     #[tokio::test]
     async fn the_v2_summary_lists_every_lsa_in_scope() {
         use super::super::version::Ospfv2;

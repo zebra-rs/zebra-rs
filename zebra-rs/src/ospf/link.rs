@@ -546,11 +546,10 @@ pub struct OspfLink<V: OspfVersion = Ospfv2> {
     /// this router (RFC 5340 §3.2 only requires per-router
     /// uniqueness).
     pub interface_id: u32,
-    /// Per-link LSDB (RFC 5340 §A.4.9). Holds link-scope LSAs —
-    /// `Link-LSAs` — that the v3 standard restricts to flooding
-    /// only on the segment they were originated on. Empty on v2
-    /// (no link-scope LSA types exist in RFC 2328) but the field
-    /// stays generic for shape simplicity.
+    /// Per-link LSDB: the link-scope LSAs that flood only on this
+    /// segment, received or originated here — OSPFv3's Link-LSAs and
+    /// Grace-LSAs (RFC 5340 §4.1.2), OSPFv2's type-9 Opaque LSAs such
+    /// as the Grace-LSA (RFC 5250 §3.1).
     pub lsdb: super::lsdb::Lsdb<V>,
     /// Last STAMP measurement exported for this link (all fields
     /// `None` when no measurement is active or the last export was a

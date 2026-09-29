@@ -30,6 +30,29 @@ pub fn lsa_flood_scope(ls_type: OspfLsType) -> FloodScope {
     }
 }
 
+/// The database an LSA of `ls_type` belongs in, seen from this interface:
+/// the interface's own for a link-scope LSA, which RFC 5250 §3.1 keeps with
+/// the interface it came in on; the AS's for AS scope; the area's otherwise.
+pub fn scope_lsdb<'a>(oi: &'a OspfInterface, ls_type: OspfLsType) -> &'a super::lsdb::Lsdb {
+    match lsa_flood_scope(ls_type) {
+        FloodScope::As => &*oi.lsdb_as,
+        FloodScope::Link => &*oi.link_lsdb,
+        _ => &*oi.lsdb,
+    }
+}
+
+/// [`scope_lsdb`], mutably.
+pub fn scope_lsdb_mut<'a>(
+    oi: &'a mut OspfInterface,
+    ls_type: OspfLsType,
+) -> &'a mut super::lsdb::Lsdb {
+    match lsa_flood_scope(ls_type) {
+        FloodScope::As => &mut *oi.lsdb_as,
+        FloodScope::Link => &mut *oi.link_lsdb,
+        _ => &mut *oi.lsdb,
+    }
+}
+
 pub fn ospf_ls_request_isempty<V: super::version::OspfVersion>(nbr: &Neighbor<V>) -> bool {
     nbr.ls_req.is_empty()
 }
@@ -177,17 +200,14 @@ pub fn ospf_flood(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) {
     // delayed Ack, the peer would prune its retransmit list, and
     // the genuinely-newer LSA would never come around again.
     let scope = lsa_flood_scope(lsa.h.ls_type);
-    let lsdb = match scope {
-        FloodScope::As => &mut *oi.lsdb_as,
-        _ => &mut *oi.lsdb,
-    };
 
     // RFC 2328: Install into LSDB first, then flood.
     let area_id = match scope {
         FloodScope::As => None,
         _ => Some(oi.area_id),
     };
-    lsdb.insert_received(lsa.clone(), oi.tx, area_id, oi.tracing);
+    let (tx, tracing) = (oi.tx, oi.tracing);
+    scope_lsdb_mut(oi, lsa.h.ls_type).insert_received(lsa.clone(), tx, area_id, tracing);
     // Area-scoped opaque LSAs feed SPF too: Router Information carries
     // the Flexible Algorithm definitions and each router's SR-Algorithm
     // participation, Extended Link the per-link affinity and delay the
