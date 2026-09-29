@@ -622,11 +622,12 @@ fn process_neighbor_link_mt2(
 ///     judged each by its own advertisement, as every other router
 ///     judges them.
 ///   - **Metric type (§5.1):** `MinUnidirLinkDelay` (metric-type 1)
-///     routes on per-link Min delay — local links from
-///     `LinkConfig::te_metric.min_delay`, peer links from the Min/Max
-///     Link Delay sub-TLV in the link's flex-algo ASLA. A link that
-///     advertises no delay is pruned (RFC 9350 §15). IGP uses the reach
-///     entry's IGP metric.
+///     routes on per-link Min delay, from the Min/Max Link Delay sub-TLV
+///     each link's reach entry advertises in its flex-algo ASLA — ours
+///     included, like affinity and loss, so this router costs its own
+///     links as every other router costs them. A link that advertises
+///     no delay is pruned (RFC 9350 §15). IGP uses the reach entry's IGP
+///     metric.
 ///   - Anything the winning definition asks for that this router cannot
 ///     compute — SRLG exclusion, TE-default, the M flag — never reaches
 ///     here: selection stops participation instead.
@@ -639,7 +640,6 @@ pub fn graph_flex_algo(
     let mut graph = spf::Graph::new();
     let mut source_node = None;
     let mut adjacency_sids = BTreeMap::new();
-    let self_sys_id = top.config.net.sys_id();
 
     // First pass: clone every LSP we plan to walk. Mirrors `graph()`
     // so the borrow of `top.lsdb` releases before we start mutating
@@ -689,7 +689,6 @@ pub fn graph_flex_algo(
     for (neighbor_id, is_originated, lsp) in nodes_to_process.iter() {
         let node_id = top.lsp_map.get_mut(&level).get(neighbor_id);
         let own_router_lsp = *is_originated && !lsp.lsp_id.is_pseudo();
-        let source_sys_id = neighbor_id.sys_id();
 
         let mut position = 0;
         for tlv in &lsp.tlvs {
@@ -714,21 +713,19 @@ pub fn graph_flex_algo(
                 }
 
                 // Edge cost per the FAD metric-type (RFC 9350 §5.1).
-                // metric-type 1 routes on the link's Min delay: local
-                // links from current config, peer links as RFC 9479 §4.2
-                // selects them (`peer_min_delay`) — never a legacy inline
-                // value the applicable ASLA did not point to. A link that
-                // advertises no delay is pruned (RFC 9350 §15).
+                // metric-type 1 routes on the link's Min delay, as RFC 9479
+                // §4.2 selects it from what the link advertises — never a
+                // legacy inline value the applicable ASLA did not point to.
+                // Our own links too: costed from the interface's current
+                // delay, a link whose delay we do not advertise — a Min
+                // configured without a Max, one changed since our LSP was
+                // flooded — stayed in our topology at a cost no other
+                // router saw, or at all where every other router pruned
+                // it, and routers computing one algorithm differently loop.
+                // A link that advertises no delay is pruned (RFC 9350 §15).
                 // Everything else uses the IGP metric.
                 let cost = if constraints.metric_type == FadMetricType::MinUnidirLinkDelay {
-                    let delay = if source_sys_id == self_sys_id {
-                        own_ifx
-                            .and_then(|ifx| top.links.get(&ifx))
-                            .and_then(|link| link.te_metric_effective().min_delay)
-                    } else {
-                        super::flex_algo::peer_min_delay(entry_reach)
-                    };
-                    match delay {
+                    match super::flex_algo::peer_min_delay(entry_reach) {
                         Some(d) => d,
                         None => continue,
                     }
