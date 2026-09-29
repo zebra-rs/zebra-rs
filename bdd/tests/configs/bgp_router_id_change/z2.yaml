@@ -1,0 +1,10 @@
+# z2 (AS 65000): fixed router-id; reads z1's identifier off its OPEN.
+router:
+  bgp:
+    global:
+      as: 65000
+      router-id: 192.168.31.2
+    neighbor:
+    - remote-address: 10.0.31.1
+      remote-as: 65000
+      enabled: true

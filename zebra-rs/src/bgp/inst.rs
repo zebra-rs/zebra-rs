@@ -1153,6 +1153,12 @@ pub struct Bgp {
     /// [`super::vrf::spawn_bgp_vrf`] and
     /// [`super::vrf::despawn_bgp_vrf`].
     pub vrfs: BTreeMap<String, super::vrf_config::BgpVrfConfig>,
+    /// Between a transaction's `CommitStart` and its `CommitEnd`. A
+    /// router-id change inside one leaves the VRF respawn to `CommitEnd`;
+    /// one outside respawns them at once (review finding #21). A task
+    /// spawned mid-transaction misses its `CommitStart`, which is harmless:
+    /// no VRF task runs before the first `CommitEnd`.
+    commit_open: bool,
     /// Candidate snapshot captured at `CommitStart`. At `CommitEnd`, an
     /// existing VRF whose spawn-time structure differs is safely despawned
     /// and spawned again.
@@ -1516,6 +1522,7 @@ impl Bgp {
             group_keychain_watch_next: 0,
             interface_neighbors: super::interface_neighbor::empty_map(),
             vrfs: BTreeMap::new(),
+            commit_open: false,
             vrf_commit_baseline: BTreeMap::new(),
             vrf_neighbor_group_commit_baseline: BTreeMap::new(),
             vrf_registry: BTreeMap::new(),
@@ -2180,8 +2187,11 @@ impl Bgp {
     /// precedence (configured wins). Don't call this with a raw input
     /// value from either source; update the source field and refresh.
     ///
-    /// Existing established sessions keep using the value they sent
-    /// at OPEN; the next OPEN (after a reset) picks up the new one.
+    /// A neighbor knows us by the identifier in our OPEN, and our inbound
+    /// loop checks (ORIGINATOR_ID, CLUSTER_LIST) move to the new one at
+    /// once, so every session that has sent an OPEN is reset to send
+    /// another, as FRR, IOS and Junos do (review finding #21); the VRF
+    /// tasks on the global router-id are respawned for the same reason.
     pub fn set_router_id(&mut self, router_id: Ipv4Addr) {
         if self.router_id == router_id {
             return;
@@ -2243,8 +2253,30 @@ impl Bgp {
         }
 
         self.router_id = router_id;
+        let mut resets = Vec::new();
         for (_, peer) in self.peers.iter_mut_all() {
             peer.router_id = router_id;
+            // Every session that sent an OPEN carrying the old identifier.
+            if matches!(
+                peer.state,
+                super::peer::State::OpenSent
+                    | super::peer::State::OpenConfirm
+                    | super::peer::State::Established
+            ) {
+                if peer.state == super::peer::State::Established {
+                    peer.down_reason = Some(super::peer::PeerDownReason::RouterIdChange);
+                }
+                resets.push(peer.ident);
+            }
+        }
+        // Reset them here, as a queued `Event::Stop` would: the bounded
+        // event queue may be full, and a lost reset leaves the neighbor on
+        // the old identifier (review follow-up on #21).
+        for ident in resets {
+            self.process_msg(Message::Event(ident, super::peer::Event::Stop));
+        }
+        if !self.commit_open {
+            self.respawn_vrfs_on_router_id();
         }
 
         // Re-originate under the new router-id so the cache contents
@@ -2890,7 +2922,14 @@ impl Bgp {
         // registers fresh peers/show routing from final config.
         to_despawn.extend(to_respawn.iter().cloned());
         to_spawn.extend(to_respawn);
+        self.replace_vrf_tasks(to_despawn, to_spawn);
+    }
 
+    /// Tear down the VRF tasks `to_despawn` names, then spawn the ones
+    /// `to_spawn` names from the current config — a name in both is a
+    /// respawn. The commit diff and a router-id change outside a commit
+    /// ([`Self::respawn_vrfs_on_router_id`]) both come through here.
+    fn replace_vrf_tasks(&mut self, to_despawn: Vec<String>, to_spawn: Vec<String>) {
         for name in to_despawn {
             if let Some(handle) = self.vrf_registry.remove(&name) {
                 super::vrf::despawn_bgp_vrf(&name, &handle, &self.rib_subscriber, &self.policy_tx);
@@ -2992,6 +3031,30 @@ impl Bgp {
         // Originate / withdraw config-driven MUP DSD segment routes now the
         // VRF set (and its SIDs / kernel context) may have changed.
         self.reconcile_mup_segment();
+    }
+
+    /// Review finding #21: respawn every running VRF task whose effective
+    /// router-id — its own `router-id`, else the global one — is no longer
+    /// the one it was spawned with. A router-id change inside a commit is
+    /// left to `CommitEnd` (`compute_vrf_respawn`), which sees the rest of
+    /// the transaction; one outside a commit (RIB-derived: `system
+    /// router-id`, or the automatic pick) comes here, or the VRFs kept the
+    /// old router-id until the next commit, whatever it changed, respawned
+    /// them.
+    fn respawn_vrfs_on_router_id(&mut self) {
+        let stale: Vec<String> = self
+            .vrf_registry
+            .iter()
+            .filter(|(name, handle)| {
+                self.vrfs
+                    .get(*name)
+                    .is_some_and(|cfg| handle.router_id != cfg.router_id.unwrap_or(self.router_id))
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        if !stale.is_empty() {
+            self.replace_vrf_tasks(stale.clone(), stale);
+        }
     }
 
     /// Apply per-neighbor config changes incrementally to every VRF that
@@ -3439,6 +3502,7 @@ impl Bgp {
     pub fn process_cm_msg(&mut self, msg: ConfigRequest) {
         match msg.op {
             ConfigOp::CommitStart => {
+                self.commit_open = true;
                 self.vrf_commit_baseline.clone_from(&self.vrfs);
                 self.vrf_neighbor_group_commit_baseline
                     .clone_from(&self.neighbor_groups);
@@ -3466,6 +3530,7 @@ impl Bgp {
                 self.apply_vrf_commit_diff();
                 self.vrf_commit_baseline.clear();
                 self.vrf_neighbor_group_commit_baseline.clear();
+                self.commit_open = false;
                 self.apply_mup_c_commit_diff();
                 // Peer-derived: whether any VPNv4 / Labeled-Unicast peer is
                 // sent routes with the next-hop rewritten to us (Option B /
@@ -8954,3 +9019,7 @@ mod vrf_rt_change_review_tests;
 #[cfg(test)]
 #[path = "rtc_mid_session_review_tests.rs"]
 mod rtc_mid_session_review_tests;
+
+#[cfg(test)]
+#[path = "router_id_change_review_tests.rs"]
+mod router_id_change_review_tests;

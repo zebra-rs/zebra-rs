@@ -189,6 +189,9 @@ pub enum PeerDownReason {
     AdminReset,
     /// A neighbor knob change bounced the session.
     ConfigChange,
+    /// Our BGP router-id changed: the session is reset so the neighbor
+    /// learns the new identifier from our next OPEN.
+    RouterIdChange,
     /// The FSM left Established on an event with no self-evident cause.
     Unknown,
 }
@@ -204,6 +207,7 @@ impl PeerDownReason {
             Self::UpdateError => "Update error",
             Self::AdminReset => "Admin. reset",
             Self::ConfigChange => "Config change",
+            Self::RouterIdChange => "Router ID changed",
             Self::Unknown => "Unknown",
         }
     }
