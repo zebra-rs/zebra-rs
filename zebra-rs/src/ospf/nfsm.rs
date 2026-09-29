@@ -402,75 +402,48 @@ pub fn ospfv2_populate_initial_db_summary(
     }
 }
 
-/// v3 NFSM helper invoked from `Ospfv3::populate_initial_db_summary`.
-/// RFC 5340 §4.2.2 inheriting RFC 2328 §10.8: walk every area-scope
-/// LSA type and the AS-scope AS-External-LSA (only in Normal areas);
-/// push each non-MaxAge header into `nbr.db_sum`. Link-scope LSAs
-/// (Link-LSA, type 0x0008) are intentionally excluded — RFC 5340
-/// §4.2.2 says Link-LSAs MUST NOT be included in DBDs because they
-/// only have link scope and are already known to peers on the
-/// segment.
+/// v3 NFSM helper invoked from `Ospfv3::populate_initial_db_summary`:
+/// push the header of every LSA [`ospfv3_db_summary_lsas`] lists into
+/// `nbr.db_sum`.
 pub fn ospfv3_populate_initial_db_summary(
     oi: &mut OspfInterface<Ospfv3>,
     nbr: &mut Neighbor<Ospfv3>,
 ) {
-    use ospf_packet::{
-        OSPFV3_AS_EXTERNAL_LSA_TYPE, OSPFV3_E_INTER_AREA_PREFIX_LSA_TYPE,
-        OSPFV3_E_INTER_AREA_ROUTER_LSA_TYPE, OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE,
-        OSPFV3_E_NETWORK_LSA_TYPE, OSPFV3_E_ROUTER_LSA_TYPE, OSPFV3_INTER_AREA_PREFIX_LSA_TYPE,
-        OSPFV3_INTER_AREA_ROUTER_LSA_TYPE, OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE,
-        OSPFV3_NETWORK_LSA_TYPE, OSPFV3_NSSA_LSA_TYPE, OSPFV3_ROUTER_LSA_TYPE,
-    };
+    ospf_db_summary_add_table(
+        nbr,
+        ospfv3_db_summary_lsas(oi.lsdb, oi.lsdb_as, oi.area_type),
+    );
+}
 
-    for ls_type in [
-        OSPFV3_ROUTER_LSA_TYPE,
-        OSPFV3_NETWORK_LSA_TYPE,
-        OSPFV3_INTER_AREA_PREFIX_LSA_TYPE,
-        OSPFV3_INTER_AREA_ROUTER_LSA_TYPE,
-        OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE,
-        // RFC 8362 E-LSAs share the area flooding scope (S=01) and are
-        // first-class LSDB members, so they belong in the initial DBD
-        // summary like any other area-scope type. Omitting them meant a
-        // neighbor that adjacencied AFTER our E-LSAs were originated
-        // (e.g. SR-MPLS configured before the link came up) never
-        // learned the E-Router-LSA / E-Intra-Area-Prefix-LSA carrying
-        // the RFC 8666 SR SIDs — remote Prefix-SIDs silently failed to
-        // resolve even though live flooding of the same LSAs worked.
-        OSPFV3_E_ROUTER_LSA_TYPE,
-        OSPFV3_E_NETWORK_LSA_TYPE,
-        OSPFV3_E_INTER_AREA_PREFIX_LSA_TYPE,
-        OSPFV3_E_INTER_AREA_ROUTER_LSA_TYPE,
-        OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE,
-        // RFC 9513 SRv6 Locator LSA — same area scope, same rule, same
-        // failure mode as the E-LSAs above: it is originated at
-        // configuration time, usually BEFORE any adjacency exists, so
-        // the initial DBD summary is the only path that carries it to
-        // a neighbor that adjacencies later.
-        ospf_packet::OSPFV3_SRV6_LOCATOR_LSA_TYPE,
-    ] {
-        ospf_db_summary_add_table(nbr, oi.lsdb.iter_by_raw_type(ls_type).map(|(_, lsa)| lsa));
-    }
+/// The LSAs an OSPFv3 initial Database Description summary lists
+/// (RFC 5340 §4.2.2, inheriting RFC 2328 §10.8): the whole area
+/// database, and the AS database where AS-scope LSAs flood. That is
+/// whatever their LS type — one this router makes no use of still floods
+/// by its scope (§4.5.1). Listing the types instead left out each one
+/// added since: the RFC 8362 E-LSAs, then the SRv6 Locator LSA, then the
+/// Router Information LSA. Each is usually originated before any
+/// adjacency, so a neighbour that formed one later never learned it.
+/// Type-7 NSSA-LSAs belong in an NSSA only (RFC 3101 §2.5); MaxAge LSAs
+/// are left to `ospf_db_summary_add_table`. Link-scope LSAs live in the
+/// link database and are not summarised: their neighbours on the link
+/// already have them.
+fn ospfv3_db_summary_lsas<'a>(
+    lsdb: &'a super::lsdb::Lsdb<Ospfv3>,
+    lsdb_as: &'a super::lsdb::Lsdb<Ospfv3>,
+    area_type: super::area::AreaType,
+) -> impl Iterator<Item = &'a super::lsdb::Lsa<Ospfv3>> {
+    use ospf_packet::OSPFV3_NSSA_LSA_TYPE;
 
-    // RFC 3101 §2.5 (inherited by v3): Type-7 NSSA-LSAs flood with
-    // area scope inside an NSSA, so they belong in the per-area DBD
-    // summary — but only when this area is NSSA.
-    if oi.area_type.is_nssa() {
-        ospf_db_summary_add_table(
-            nbr,
-            oi.lsdb
-                .iter_by_raw_type(OSPFV3_NSSA_LSA_TYPE)
-                .map(|(_, lsa)| lsa),
-        );
-    }
-
-    if oi.area_type.accepts_as_external() {
-        ospf_db_summary_add_table(
-            nbr,
-            oi.lsdb_as
-                .iter_by_raw_type(OSPFV3_AS_EXTERNAL_LSA_TYPE)
-                .map(|(_, lsa)| lsa),
-        );
-    }
+    let area = lsdb
+        .tables
+        .iter()
+        .filter(move |((ls_type, _, _), _)| *ls_type != OSPFV3_NSSA_LSA_TYPE || area_type.is_nssa())
+        .map(|(_, lsa)| lsa);
+    let external = lsdb_as
+        .tables
+        .values()
+        .filter(move |_| area_type.accepts_as_external());
+    area.chain(external)
 }
 
 pub fn ospf_nfsm_negotiation_done<V: OspfVersion>(
@@ -703,5 +676,82 @@ pub fn ospf_nfsm_check_nbr_loading<V: OspfVersion>(nbr: &mut Neighbor<V>) {
         }
     } else if nbr.ls_req_last.is_none() {
         // ospf_ls_req_event(nbr);
+    }
+}
+
+#[cfg(test)]
+mod db_summary_tests {
+    use std::collections::BTreeSet;
+    use std::net::Ipv4Addr;
+
+    use ospf_packet::{Ospfv3LsBody, Ospfv3Lsa, Ospfv3LsaHeader};
+
+    use super::super::area::{AreaType, AreaTypeKind};
+    use super::super::lsdb::Lsdb;
+    use super::super::tracing::OspfTracing;
+    use super::super::version::Ospfv3;
+    use super::ospfv3_db_summary_lsas;
+
+    const ROUTER: u16 = 0x2001;
+    const NSSA: u16 = 0x2007;
+    const ROUTER_INFO: u16 = 0xA00C;
+    const E_ROUTER: u16 = 0xA021;
+    /// An area-scope type this router has no use for (U bit set).
+    const UNKNOWN_AREA: u16 = 0xA0FF;
+    const AS_EXTERNAL: u16 = 0x4005;
+    const AS_ROUTER_INFO: u16 = 0xC00C;
+
+    fn lsa(ls_type: u16) -> Ospfv3Lsa {
+        let mut lsa = Ospfv3Lsa::from(
+            Ospfv3LsaHeader {
+                ls_age: 1,
+                ls_type,
+                link_state_id: 0,
+                advertising_router: Ipv4Addr::new(10, 0, 0, 1),
+                ls_seq_number: 0x8000_0001,
+                ls_checksum: 0,
+                length: 0,
+            },
+            Ospfv3LsBody::Unknown(vec![0; 4]),
+        );
+        lsa.update();
+        lsa
+    }
+
+    /// The initial database summary lists every area-scope LSA, whatever
+    /// its type — the Router Information LSA among them, which it used to
+    /// leave out, so a neighbour never learned one originated before the
+    /// adjacency — and every AS-scope LSA where they flood. Type-7 LSAs
+    /// only in an NSSA.
+    #[tokio::test]
+    async fn the_summary_lists_every_lsa_in_scope() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let tracing = OspfTracing::default();
+        let mut area = Lsdb::<Ospfv3>::new();
+        let mut external = Lsdb::<Ospfv3>::new();
+        let area_id = Some(Ipv4Addr::UNSPECIFIED);
+        for ls_type in [ROUTER, ROUTER_INFO, E_ROUTER, UNKNOWN_AREA, NSSA] {
+            area.install_lsa(lsa(ls_type), &tx, area_id, &tracing);
+        }
+        for ls_type in [AS_EXTERNAL, AS_ROUTER_INFO] {
+            external.install_lsa(lsa(ls_type), &tx, None, &tracing);
+        }
+
+        let listed = |kind| {
+            let area_type = AreaType {
+                kind,
+                ..Default::default()
+            };
+            ospfv3_db_summary_lsas(&area, &external, area_type)
+                .map(|lsa| lsa.data.h.ls_type)
+                .collect::<BTreeSet<u16>>()
+        };
+        let area_scope = [ROUTER, ROUTER_INFO, E_ROUTER, UNKNOWN_AREA];
+        let expected = |types: &[u16]| types.iter().copied().collect::<BTreeSet<u16>>();
+        let normal = [&area_scope[..], &[AS_EXTERNAL, AS_ROUTER_INFO]].concat();
+        assert_eq!(listed(AreaTypeKind::Normal), expected(&normal));
+        let nssa = [&area_scope[..], &[NSSA]].concat();
+        assert_eq!(listed(AreaTypeKind::Nssa), expected(&nssa));
+        assert_eq!(listed(AreaTypeKind::Stub), expected(&area_scope));
     }
 }
