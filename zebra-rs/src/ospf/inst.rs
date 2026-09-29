@@ -19840,6 +19840,128 @@ mod v3_database_detail_tests {
 }
 
 #[cfg(test)]
+mod v2_router_information_label_tests {
+    use super::test_support::fresh_ospf;
+    use super::*;
+    use crate::ospf::lsdb::OSPF_MAX_AGE;
+    use crate::spf::label_block::{LabelBlock, LabelConfig};
+
+    fn rid(n: u8) -> Ipv4Addr {
+        Ipv4Addr::new(10, 0, 0, n)
+    }
+
+    fn srgb(start: u32, range: u32) -> RouterInfoTlv {
+        RouterInfoTlv::SidLabelRnage(RouterInfoTlvSidLabelRange {
+            range,
+            sid_label: SidLabelTlv::Label(start),
+        })
+    }
+
+    fn srlb(start: u32, range: u32) -> RouterInfoTlv {
+        RouterInfoTlv::LocalBlock(RouterInfoTlvLocalBlock {
+            range,
+            sid_label: SidLabelTlv::Label(start),
+        })
+    }
+
+    fn algos() -> RouterInfoTlv {
+        RouterInfoTlv::Algo(RouterInfoTlvAlgo {
+            algos: vec![Algo::Spf],
+        })
+    }
+
+    fn labels(global: (u32, u32), local: Option<(u32, u32)>) -> LabelConfig {
+        LabelConfig {
+            global: LabelBlock::new(global.0, global.1),
+            local: local.map(|(start, range)| LabelBlock::new(start, range)),
+        }
+    }
+
+    /// `router`'s Router Information LSA, instance `instance`, at `age`.
+    fn router_info(router: Ipv4Addr, instance: u32, tlvs: Vec<RouterInfoTlv>, age: u16) -> OspfLsa {
+        let ls_id = Ipv4Addr::from(((OpaqueLsaType::ROUTER_INFO as u32) << 24) | instance);
+        let mut h = OspfLsaHeader::new(OspfLsType::OpaqueAreaLocal, ls_id, router);
+        h.ls_age = age;
+        let mut lsa = OspfLsa::from(h, OspfLsp::OpaqueAreaRouterInfo(RouterInfoLsa { tlvs }));
+        lsa.update();
+        lsa
+    }
+
+    fn receive(top: &mut Ospf, lsa: OspfLsa) {
+        let tx = top.tx.clone();
+        let tracing = top.tracing.clone();
+        top.areas
+            .fetch(AREA0)
+            .lsdb
+            .insert_received(lsa, &tx, Some(AREA0), &tracing);
+    }
+
+    fn cached(top: &Ospf, router: Ipv4Addr) -> Option<LabelConfig> {
+        top.areas
+            .get(AREA0)
+            .unwrap()
+            .lsdb
+            .label_map
+            .get(&router)
+            .cloned()
+    }
+
+    /// OSPFv2 reads a router's SRGB and SRLB as OSPFv3 does: its Router
+    /// Information instances in ascending Opaque ID, whichever order they
+    /// arrive in; the first SID/Label Range and, apart from it, the first
+    /// SR Local Block. RFC 8665 §3.2 lays several SRGB ranges end to end,
+    /// so the first range resolves the lowest indices; the last, which
+    /// OSPFv2 used to keep, resolved every index against the wrong range.
+    #[tokio::test]
+    async fn the_first_ranges_are_read() {
+        let mut top = fresh_ospf();
+        let instance_1 = vec![srgb(30000, 500), srlb(35000, 100), srlb(36000, 100)];
+        let instance_0 = vec![algos(), srgb(20000, 1000), srgb(25000, 500)];
+        receive(&mut top, router_info(rid(2), 1, instance_1, 0));
+        receive(&mut top, router_info(rid(2), 0, instance_0, 0));
+        assert_eq!(
+            cached(&top, rid(2)),
+            Some(labels((20000, 1000), Some((35000, 100))))
+        );
+    }
+
+    /// The cache follows the instances out. Withdrawing one instance
+    /// leaves the SRGB another still carries — it used to empty the cache —
+    /// and withdrawing or replacing the instance that carried it falls back
+    /// to the next.
+    #[tokio::test]
+    async fn the_labels_follow_the_instances_out() {
+        let mut top = fresh_ospf();
+        for router in [rid(3), rid(4), rid(5)] {
+            receive(&mut top, router_info(router, 0, vec![srgb(20000, 1000)], 0));
+            receive(&mut top, router_info(router, 1, vec![srgb(30000, 500)], 0));
+        }
+        let first = Some(labels((20000, 1000), None));
+        let second = Some(labels((30000, 500), None));
+        for router in [rid(3), rid(4), rid(5)] {
+            assert_eq!(cached(&top, router), first, "{router}");
+        }
+
+        receive(
+            &mut top,
+            router_info(rid(3), 1, vec![srgb(30000, 500)], OSPF_MAX_AGE),
+        );
+        receive(
+            &mut top,
+            router_info(rid(4), 0, vec![srgb(20000, 1000)], OSPF_MAX_AGE),
+        );
+        let mut replaced = router_info(rid(5), 0, vec![algos()], 0);
+        replaced.h.ls_seq_number += 1;
+        replaced.update();
+        receive(&mut top, replaced);
+
+        assert_eq!(cached(&top, rid(3)), first, "another instance withdrawn");
+        assert_eq!(cached(&top, rid(4)), second, "its instance withdrawn");
+        assert_eq!(cached(&top, rid(5)), second, "its instance replaced");
+    }
+}
+
+#[cfg(test)]
 mod multi_area_tests {
     use super::{RouteType, SpfRoute, rib_insert};
     use ipnet::Ipv4Net;

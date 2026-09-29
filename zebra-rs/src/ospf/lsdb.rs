@@ -575,28 +575,28 @@ impl Lsdb<Ospfv2> {
         area_id: Option<Ipv4Addr>,
         tracing: &OspfTracing,
     ) {
-        // v2-specific SR-MPLS / Opaque ExtPrefix ingestion (label
-        // map + reach map). Stays v2-only because OspfLsp variants
-        // are v2 codec types with no v3 analogue.
-        self.update_lsa(&ospf_lsa);
-        // Generic key construction + hold timer + insertion.
-        self.install_lsa(ospf_lsa, tx, area_id, tracing);
-    }
-
-    pub fn update_lsa(&mut self, lsa: &OspfLsa) {
-        if let OspfLsp::OpaqueAreaRouterInfo(ref ri) = lsa.lsp {
-            if lsa.h.ls_age == OSPF_MAX_AGE {
-                self.label_map.remove(&lsa.h.adv_router);
-                return;
-            }
-            if let Some(label_config) = router_info_label_config(&ri.tlvs) {
-                self.label_map.insert(lsa.h.adv_router, label_config);
-            }
-        }
-        if let OspfLsp::OpaqueAreaExtPrefix(ref lsp) = lsa.lsp {
+        // Extended Prefix LSA ingestion (reach map). Stays v2-only because
+        // OspfLsp variants are v2 codec types with no v3 analogue.
+        if let OspfLsp::OpaqueAreaExtPrefix(ref lsp) = ospf_lsa.lsp {
             for tlv in lsp.tlvs.iter() {
                 self.reach_map.insert(tlv.prefix, tlv.subs.clone());
             }
+        }
+        // A Router Information LSA arriving — or one replaced, perhaps by
+        // its withdrawal — can change the router's SRGB and SRLB, which are
+        // read from all its instances once this one is installed.
+        let adv_router = ospf_lsa.h.adv_router;
+        let key = v2_lsa_key(ospf_lsa.h.ls_type, ospf_lsa.h.ls_id, adv_router);
+        let is_router_info = |lsp: &OspfLsp| matches!(lsp, OspfLsp::OpaqueAreaRouterInfo(_));
+        let resync = is_router_info(&ospf_lsa.lsp)
+            || self
+                .tables
+                .get(&key)
+                .is_some_and(|old| is_router_info(&old.data.lsp));
+        // Generic key construction + hold timer + insertion.
+        self.install_lsa(ospf_lsa, tx, area_id, tracing);
+        if resync {
+            self.label_map_resync(adv_router);
         }
     }
 
@@ -621,9 +621,20 @@ impl Lsdb<Ospfv2> {
     }
 
     /// Rebuild `label_map[adv_router]` from the router's Router Information
-    /// LSAs still in the LSDB.
+    /// LSAs still in the LSDB, read as OSPFv3 reads them
+    /// (`Lsdb<Ospfv3>::sr_capabilities`): instances in ascending Opaque ID,
+    /// the first SID/Label Range TLV as the SRGB and, apart from it, the
+    /// first SR Local Block TLV as the SRLB (RFC 8665 §3.2, §3.3). zebra-rs
+    /// models one range of each. RFC 8665 §3.2 lays several SRGB ranges end
+    /// to end, index 0 at the start of the first, so the first range
+    /// resolves the lowest indices correctly; the last, which this used to
+    /// keep, resolved every index against the wrong range.
     fn label_map_resync(&mut self, adv_router: Ipv4Addr) {
-        let label_config = self
+        let mut global = None;
+        let mut local = None;
+        // The table is ordered by (type, Link State ID, router), so the
+        // router's instances come in ascending Opaque ID.
+        let router_info = self
             .tables
             .iter()
             .filter(|((ls_type, _, adv), lsa)| {
@@ -631,41 +642,34 @@ impl Lsdb<Ospfv2> {
                     && *adv == adv_router
                     && lsa.current_age() < OSPF_MAX_AGE
             })
-            .find_map(|(_, lsa)| match lsa.data.lsp {
-                OspfLsp::OpaqueAreaRouterInfo(ref ri) => router_info_label_config(&ri.tlvs),
+            .filter_map(|(_, lsa)| match lsa.data.lsp {
+                OspfLsp::OpaqueAreaRouterInfo(ref ri) => Some(ri),
                 _ => None,
             });
-        match label_config {
-            Some(label_config) => self.label_map.insert(adv_router, label_config),
+        for ri in router_info {
+            for tlv in &ri.tlvs {
+                match tlv {
+                    RouterInfoTlv::SidLabelRnage(r) if global.is_none() => {
+                        if let SidLabelTlv::Label(start) = r.sid_label {
+                            global = Some(LabelBlock::new(start, r.range));
+                        }
+                    }
+                    RouterInfoTlv::LocalBlock(lb) if local.is_none() => {
+                        if let SidLabelTlv::Label(start) = lb.sid_label {
+                            local = Some(LabelBlock::new(start, lb.range));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        match global {
+            Some(global) => self
+                .label_map
+                .insert(adv_router, LabelConfig { global, local }),
             None => self.label_map.remove(&adv_router),
         };
     }
-}
-
-/// The SRGB and SRLB a Router Information LSA carries (RFC 8665 §3.2,
-/// §3.3). A router without an SRGB has no Prefix-SID labels to resolve.
-fn router_info_label_config(tlvs: &[RouterInfoTlv]) -> Option<LabelConfig> {
-    let mut global = None;
-    let mut local = None;
-    for tlv in tlvs {
-        match tlv {
-            RouterInfoTlv::SidLabelRnage(r) => {
-                if let SidLabelTlv::Label(start) = r.sid_label {
-                    global = Some(LabelBlock::new(start, r.range));
-                }
-            }
-            RouterInfoTlv::LocalBlock(lb) => {
-                if let SidLabelTlv::Label(start) = lb.sid_label {
-                    local = Some(LabelBlock::new(start, lb.range));
-                }
-            }
-            _ => {}
-        }
-    }
-    Some(LabelConfig {
-        global: global?,
-        local,
-    })
 }
 
 impl Lsdb<super::version::Ospfv3> {
