@@ -3,7 +3,8 @@
 > **Status:** reviewed (2026-09-29); all five §8 decisions settled, each taking the
 > recommendation: phased over two releases, the legacy carrier dual-originated for one release
 > with no knob, PR 1 first, the interop peer chosen later, OSPFv2's capability bits.
-> **Progress:** PR 1 (D1) merged as #2434. PR 2 (D2) on branch `ospfv3-sr-read-ri`.
+> **Progress:** PR 1 (D1) merged as #2434, PR 2 (D2) as #2435. PR 3 (D3) on branch
+> `ospfv3-sr-originate-ri`.
 > **Parent docs:** [ospf-sr-mpls-status.md](./ospf-sr-mpls-status.md) (records the current carrier
 > as "placement by convention, not by RFC fiat"), [ospfv3-srv6-plan.md](./ospfv3-srv6-plan.md),
 > [flex-algo-link-loss.md](./flex-algo-link-loss.md) (PR 3b chose to stay on the current carrier
@@ -201,6 +202,12 @@ RI LSA is shown in full.
   6. SRv6 Capabilities (20), when SRv6 is active.
 - **The legacy carrier during transition:** it is originated alongside, unchanged, so older
   zebra-rs routers keep reading this router (D5).
+- **As built:** `sr_capabilities_v3_originate` reads Flexible Algorithm participation once and
+  originates both carriers from it, so they never disagree; every former trigger calls it, and so
+  does the self-originated echo of either LSA. The FAD TLVs come from the OSPFv2 builder, whose RI
+  FAD type the registry shares. Like OSPFv2, staging, aborting or completing a graceful restart
+  re-originates it, so the restart-capable bit is current; an RI LSA is not topology-affecting, so
+  a helper does not exit on it.
 
 After PR 3, standard routers learn zebra-rs's SRGB, algorithms and definitions, and zebra-rs learns
 theirs.

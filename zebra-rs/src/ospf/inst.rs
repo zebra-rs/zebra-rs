@@ -238,7 +238,8 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// router participates in there (RFC 9350 §5.3). A change of
     /// participation — a definition appearing, changing or going —
     /// re-originates it. OSPFv2 announces them in the backbone's Router
-    /// Information LSA only; OSPFv3 in each area's SR-info E-Router-LSA.
+    /// Information LSA only; OSPFv3 in each area's Router Information LSA
+    /// and SR-info E-Router-LSA alike.
     pub flex_algo_advertised: BTreeMap<Ipv4Addr, BTreeSet<u8>>,
     /// Per link, the participation its Extended Prefix LSA's (OSPFv3: its
     /// E-Intra-Area-Prefix-LSA's) per-algorithm Prefix-SIDs were last
@@ -7749,8 +7750,8 @@ impl Ospf<Ospfv3> {
             self.nssa_default_lsa_originate(area_id);
             self.nssa_redist_connected_resync_v3(area_id);
         }
-        // Segment Routing's LSAs, as in the v2 sibling: each area's
-        // SR-info E-Router-LSA (the SRGB) and SRv6 Locator LSA, and each
+        // Segment Routing's LSAs, as in the v2 sibling: each area's SR
+        // capabilities (the SRGB) and SRv6 Locator LSA, and each
         // interface's Prefix-SID and Adj-SID LSAs.
         self.srv6_originate_all_areas();
         let ifindexes: Vec<u32> = self.links.keys().copied().collect();
@@ -9589,9 +9590,9 @@ impl Ospf<Ospfv3> {
     /// Stage a v3 graceful restart: flood Grace-LSAs on every enabled
     /// interface, arm the auto-abort timer, and snapshot the
     /// Full-neighbor count for the post-reboot exit check. v3 sibling
-    /// of `gr_restart_begin`; unlike v2 there is no Router-Info
-    /// gr_capable bit to advertise — the Grace-LSA is the sole entry
-    /// trigger (which FRR also accepts).
+    /// of `gr_restart_begin`. As there, the Router Information LSA —
+    /// originated while Segment Routing is on — says restart-capable;
+    /// the Grace-LSA is the entry trigger (which FRR also accepts).
     pub fn gr_restart_begin_v3(
         &mut self,
         grace_period: u32,
@@ -9640,6 +9641,9 @@ impl Ospf<Ospfv3> {
             expected_full_count,
             current_full_count: 0,
         });
+
+        // As in v2: the Router Information LSA now says restart-capable.
+        self.sr_capabilities_v3_originate_all();
 
         tracing::info!(
             "[GR Restart v3] staged: grace={}s, reason={:?}, {} Grace LSA(s) emitted",
@@ -9713,7 +9717,8 @@ impl Ospf<Ospfv3> {
         for ifindex in &ifindices {
             self.flush_grace_lsa_v3(*ifindex);
         }
-        tracing::info!("[GR Restart v3] aborted; Grace LSAs flushed");
+        self.sr_capabilities_v3_originate_all();
+        tracing::info!("[GR Restart v3] aborted; Grace LSAs flushed, restart-capable cleared");
     }
 
     /// Exit-restart success — fired once `current_full_count`
@@ -9753,6 +9758,8 @@ impl Ospf<Ospfv3> {
             self.network_lsa_originate_now(*ifindex);
             self.ext_intra_area_prefix_v3_lsa_originate(*ifindex);
         }
+        // The Router Information LSA's restart-capable bit clears.
+        self.sr_capabilities_v3_originate_all();
 
         tracing::info!("[GR Restart v3] exit-restart success; LSAs re-originated at seq+1");
     }
@@ -10673,7 +10680,7 @@ impl Ospf<Ospfv3> {
                 // the SR mode itself.
                 self.ext_intra_area_prefix_v3_lsa_originate(ifindex);
                 if first_in_area {
-                    self.e_router_v3_sr_info_lsa_originate(area_id);
+                    self.sr_capabilities_v3_originate(area_id);
                     self.srv6_locator_lsa_originate(area_id);
                 }
                 let _ = self.tx.send(Message::Ifsm(ifindex, IfsmEvent::InterfaceUp));
@@ -11068,11 +11075,18 @@ impl Ospf<Ospfv3> {
                         // E-Router-LSA (RFC 8362 §3.1) — two callers:
                         //   * SR-Info (ls_id == SR_INFO_LSID == 0):
                         //     per-area aggregate via
-                        //     `e_router_v3_sr_info_lsa_originate`.
+                        //     `sr_capabilities_v3_originate`.
                         //   * Per-link Adj-SID (ls_id == ifindex):
                         //     `e_router_v3_lsa_originate(ifindex)`.
                         t if t == OSPFV3_E_ROUTER_LSA_TYPE && ls_id == SR_INFO_LSID => {
-                            self.e_router_v3_sr_info_lsa_originate(area)
+                            self.sr_capabilities_v3_originate(area)
+                        }
+                        // Router Information LSA (RFC 7770), the
+                        // standard carrier of the same capabilities.
+                        t if t == ospf_packet::OSPFV3_ROUTER_INFO_LSA_TYPE
+                            && ls_id == super::srmpls::ROUTER_INFO_V3_INSTANCE =>
+                        {
+                            self.sr_capabilities_v3_originate(area)
                         }
                         // SRv6 Locator LSA (RFC 9513) — single
                         // instance, ls_id == SRV6_LOCATOR_LSID.
@@ -11775,12 +11789,12 @@ impl Ospf<Ospfv3> {
     /// The OSPFv3 twin of `Ospf<Ospfv2>::flex_algo_reconcile`, per area:
     /// bring the SR advertisements in `area_id` in line with Flexible
     /// Algorithm participation there (RFC 9350 §5.3) when it has changed
-    /// since they were built — the SR-info E-Router-LSA's SR-Algorithm
-    /// list, and the per-algorithm Prefix-SIDs in the area's links'
+    /// since they were built — the SR-Algorithm list of its SR
+    /// capabilities, and the per-algorithm Prefix-SIDs in the area's links'
     /// E-Intra-Area-Prefix-LSAs. Called for every SPF run of the area.
     fn flex_algo_reconcile_v3(&mut self, area_id: Ipv4Addr, participating: &BTreeSet<u8>) {
         if self.flex_algo_advertised_in(area_id) != participating {
-            self.e_router_v3_sr_info_lsa_originate(area_id);
+            self.sr_capabilities_v3_originate(area_id);
         }
         let stale: Vec<u32> = self
             .links
@@ -11805,7 +11819,7 @@ impl Ospf<Ospfv3> {
     fn flex_algo_readvertise_v3(&mut self) {
         let area_ids: Vec<Ipv4Addr> = self.areas.iter().map(|(id, _)| *id).collect();
         for area_id in &area_ids {
-            self.e_router_v3_sr_info_lsa_originate(*area_id);
+            self.sr_capabilities_v3_originate(*area_id);
         }
         let ifindexes: Vec<u32> = self.links.keys().copied().collect();
         for ifindex in ifindexes {
@@ -11817,24 +11831,13 @@ impl Ospf<Ospfv3> {
         }
     }
 
-    /// Originate (or flush) the per-area E-Router-LSA carrying the
-    /// RFC 8666 §3 SR capability TLVs (SR-Algorithm, SID/Label Range
-    /// = SRGB, SR Local Block = SRLB) for the given area.
-    ///
-    /// Uses `SR_INFO_LSID` (= 0) as the per-LSA key so it never
-    /// collides with per-link E-Router-LSAs (which key by ifindex
-    /// ≥ 1 on Linux). Originates when `segment_routing == Mpls`;
-    /// flushes (MaxAge) otherwise. Re-origination on subsequent
-    /// calls bumps the sequence number based on the LSDB's prior
-    /// copy, matching the convention `e_router_v3_lsa_originate`
-    /// already uses for per-link LSAs.
-    pub fn e_router_v3_sr_info_lsa_originate(&mut self, area_id: Ipv4Addr) {
-        use ospf_packet::OSPFV3_E_ROUTER_LSA_TYPE;
-
-        use super::srmpls::{SR_INFO_LSID, SegmentRoutingMode};
-
-        let key: super::lsdb::OspfLsaKey = (OSPFV3_E_ROUTER_LSA_TYPE, SR_INFO_LSID, self.router_id);
-
+    /// Originate (or flush) this router's Segment Routing capabilities in
+    /// `area_id`, in both carriers: the RFC 7770 Router Information LSA,
+    /// where RFC 8666 §4 puts them, and the SR-info E-Router-LSA, where
+    /// zebra-rs routers from before that read them (design D3, D5). Both
+    /// are built from one reading of Flexible Algorithm participation
+    /// here, which [`Self::flex_algo_advertised_in`] then reports.
+    pub fn sr_capabilities_v3_originate(&mut self, area_id: Ipv4Addr) {
         // The SR-Algorithm list announces the Flexible Algorithms this
         // router participates in here, not every one it is configured
         // for: one whose winning definition it cannot support it "MUST NOT
@@ -11843,37 +11846,100 @@ impl Ospf<Ospfv3> {
             crate::flex_algo::selection::participating(&flex_algo_selection_v3(self, area_id));
         self.flex_algo_advertised
             .insert(area_id, participating.clone());
+        self.e_router_v3_sr_info_lsa_originate(area_id, &participating);
+        self.router_info_v3_lsa_originate(area_id, &participating);
+    }
 
-        let srv6 = self.srv6_active();
-        if (self.segment_routing == SegmentRoutingMode::Mpls || srv6)
+    /// [`Self::sr_capabilities_v3_originate`] in every area.
+    fn sr_capabilities_v3_originate_all(&mut self) {
+        let area_ids: Vec<Ipv4Addr> = self.areas.iter().map(|(id, _)| *id).collect();
+        for area_id in area_ids {
+            self.sr_capabilities_v3_originate(area_id);
+        }
+    }
+
+    /// Whether this router advertises SR capabilities in `area_id`: while
+    /// SR-MPLS or SRv6 is on.
+    fn sr_capabilities_advertised_in(&self, area_id: Ipv4Addr) -> bool {
+        use super::srmpls::SegmentRoutingMode;
+        (self.segment_routing == SegmentRoutingMode::Mpls || self.srv6_active())
             && self.areas.get(area_id).is_some()
-        {
-            let algos = crate::flex_algo::sr_algorithms_for(&participating);
+    }
+
+    /// Originate the per-area E-Router-LSA carrying the SR capability
+    /// TLVs zebra-rs used before the Router Information LSA (SR-Algorithm,
+    /// SID/Label Range = SRGB, SR Local Block = SRLB, Flexible Algorithm
+    /// Definitions, SRv6 Capabilities), or flush it.
+    ///
+    /// Uses `SR_INFO_LSID` (= 0) as the per-LSA key so it never
+    /// collides with per-link E-Router-LSAs (which key by ifindex
+    /// ≥ 1 on Linux).
+    fn e_router_v3_sr_info_lsa_originate(
+        &mut self,
+        area_id: Ipv4Addr,
+        participating: &BTreeSet<u8>,
+    ) {
+        use ospf_packet::OSPFV3_E_ROUTER_LSA_TYPE;
+
+        use super::srmpls::SR_INFO_LSID;
+
+        let key: super::lsdb::OspfLsaKey = (OSPFV3_E_ROUTER_LSA_TYPE, SR_INFO_LSID, self.router_id);
+        let lsa = self.sr_capabilities_advertised_in(area_id).then(|| {
+            let algos = crate::flex_algo::sr_algorithms_for(participating);
             let fads = super::flex_algo::build_fad_v3(
                 &self.flex_algo,
                 &self.affinity_map,
                 &self.srlg_groups,
             );
-            let mut lsa =
-                super::srmpls::e_router_v3_sr_info_lsa_build(self.router_id, algos, fads, srv6);
+            super::srmpls::e_router_v3_sr_info_lsa_build(
+                self.router_id,
+                algos,
+                fads,
+                self.srv6_active(),
+            )
+        });
+        self.sr_capability_lsa_install(area_id, key, lsa);
+    }
 
-            if let Some(area) = self.areas.get(area_id)
-                && let Some(prev_seq) = area
-                    .lsdb
-                    .lookup_by_raw_key(key)
-                    .map(|prev| prev.h.ls_seq_number)
-            {
-                lsa.h.ls_seq_number = seq_max(lsa.h.ls_seq_number, prev_seq.saturating_add(1));
-            }
-            lsa.update();
+    /// Originate this router's OSPFv3 Router Information LSA in `area_id`
+    /// (RFC 7770), instance 0, carrying its SR capabilities, or flush it.
+    /// Its Router Informational Capabilities are the OSPFv2 builder's:
+    /// graceful-restart helper, TE, and restart-capable while a restart is
+    /// staged.
+    fn router_info_v3_lsa_originate(&mut self, area_id: Ipv4Addr, participating: &BTreeSet<u8>) {
+        use ospf_packet::OSPFV3_ROUTER_INFO_LSA_TYPE;
 
-            let flood_lsa = lsa.clone();
-            if let Some(area) = self.areas.get_mut(area_id) {
-                area.lsdb
-                    .install_originated(lsa, &self.tx, Some(area_id), &self.tracing);
-            }
-            self.flood_self_originated_lsa(area_id, &flood_lsa);
-        } else {
+        use super::srmpls::ROUTER_INFO_V3_INSTANCE;
+
+        let key: super::lsdb::OspfLsaKey = (
+            OSPFV3_ROUTER_INFO_LSA_TYPE,
+            ROUTER_INFO_V3_INSTANCE,
+            self.router_id,
+        );
+        let lsa = self.sr_capabilities_advertised_in(area_id).then(|| {
+            let algos = crate::flex_algo::sr_algorithms_for(participating);
+            let fads =
+                super::flex_algo::build_fad(&self.flex_algo, &self.affinity_map, &self.srlg_groups);
+            super::srmpls::router_info_v3_lsa_build(
+                self.router_id,
+                self.restarting.is_some(),
+                algos,
+                fads,
+                self.srv6_active(),
+            )
+        });
+        self.sr_capability_lsa_install(area_id, key, lsa);
+    }
+
+    /// Install and flood `lsa` as this router's LSA `key` in `area_id`,
+    /// past any copy the LSDB holds; or, given none, flush that copy.
+    fn sr_capability_lsa_install(
+        &mut self,
+        area_id: Ipv4Addr,
+        key: super::lsdb::OspfLsaKey,
+        lsa: Option<ospf_packet::Ospfv3Lsa>,
+    ) {
+        let Some(mut lsa) = lsa else {
             let flushed = if let Some(area) = self.areas.get_mut(area_id) {
                 area.lsdb.flush_lsa_by_raw_key(key, &self.tx, Some(area_id))
             } else {
@@ -11882,7 +11948,24 @@ impl Ospf<Ospfv3> {
             if let Some(lsa) = flushed {
                 self.flood_self_originated_lsa(area_id, &lsa);
             }
+            return;
+        };
+        if let Some(area) = self.areas.get(area_id)
+            && let Some(prev_seq) = area
+                .lsdb
+                .lookup_by_raw_key(key)
+                .map(|prev| prev.h.ls_seq_number)
+        {
+            lsa.h.ls_seq_number = seq_max(lsa.h.ls_seq_number, prev_seq.saturating_add(1));
         }
+        lsa.update();
+
+        let flood_lsa = lsa.clone();
+        if let Some(area) = self.areas.get_mut(area_id) {
+            area.lsdb
+                .install_originated(lsa, &self.tx, Some(area_id), &self.tracing);
+        }
+        self.flood_self_originated_lsa(area_id, &flood_lsa);
     }
 
     /// SRv6 is active once the watched locator resolved with a prefix
@@ -11955,7 +12038,7 @@ impl Ospf<Ospfv3> {
         let area_ids: Vec<Ipv4Addr> = self.areas.iter().map(|(id, _)| *id).collect();
         for id in area_ids {
             self.srv6_locator_lsa_originate(id);
-            self.e_router_v3_sr_info_lsa_originate(id);
+            self.sr_capabilities_v3_originate(id);
         }
     }
 
@@ -12007,7 +12090,7 @@ impl Ospf<Ospfv3> {
 
     /// Originate (locator resolved) or flush (not) the SRv6 Locator
     /// LSA in `area_id` — the same keyed install/flush shape as
-    /// `e_router_v3_sr_info_lsa_originate`.
+    /// `sr_capability_lsa_install`.
     pub fn srv6_locator_lsa_originate(&mut self, area_id: Ipv4Addr) {
         use ospf_packet::OSPFV3_SRV6_LOCATOR_LSA_TYPE;
 
@@ -18925,7 +19008,7 @@ mod v3_flex_algo_selection_tests {
         add_link(&mut top, 8, AREA1);
         top.router_lsa_originate();
         for area_id in [AREA0, AREA1] {
-            top.e_router_v3_sr_info_lsa_originate(area_id);
+            top.sr_capabilities_v3_originate(area_id);
             assert_eq!(
                 announced(&top, area_id),
                 vec![Algo::Spf],
@@ -19364,6 +19447,279 @@ mod v3_router_information_read_tests {
 }
 
 #[cfg(test)]
+mod v3_router_information_origination_tests {
+    use super::super::lsdb::{LsdbEvent, OSPF_MAX_AGE, OspfLsaKey, SrCarrier};
+    use super::super::srmpls::{
+        ROUTER_INFO_V3_INSTANCE, SR_INFO_LSID, SRGB_RANGE, SRGB_START, SRLB_RANGE, SRLB_START,
+        SegmentRoutingMode,
+    };
+    use super::test_support::fresh_ospf_v3;
+    use super::*;
+    use crate::spf::label_block::{LabelBlock, LabelConfig};
+    use ospf_packet::{
+        OSPFV3_E_ROUTER_LSA_TYPE, OSPFV3_ROUTER_INFO_LSA_TYPE, Ospfv3ExtTlv, Ospfv3LsBody,
+        Ospfv3Lsa, RouterInfoTlv, SidLabelTlv,
+    };
+
+    fn rid(n: u8) -> Ipv4Addr {
+        Ipv4Addr::new(10, 0, 0, n)
+    }
+
+    fn router_info_key(router: Ipv4Addr) -> OspfLsaKey {
+        (OSPFV3_ROUTER_INFO_LSA_TYPE, ROUTER_INFO_V3_INSTANCE, router)
+    }
+
+    fn e_router_key(router: Ipv4Addr) -> OspfLsaKey {
+        (OSPFV3_E_ROUTER_LSA_TYPE, SR_INFO_LSID, router)
+    }
+
+    /// A router running SR-MPLS that defines algorithm 128 at priority 100,
+    /// and so participates in it.
+    fn sr_router() -> Ospf<Ospfv3> {
+        let mut top = fresh_ospf_v3();
+        top.router_id = rid(1);
+        top.segment_routing = SegmentRoutingMode::Mpls;
+        top.flex_algo.config.insert(
+            128,
+            crate::flex_algo::FlexAlgoEntry {
+                advertise_definition: Some(true),
+                priority: Some(100),
+                ..Default::default()
+            },
+        );
+        top
+    }
+
+    fn ours(top: &Ospf<Ospfv3>, key: OspfLsaKey) -> Ospfv3Lsa {
+        top.areas
+            .get(AREA0)
+            .unwrap()
+            .lsdb
+            .lookup_by_raw_key(key)
+            .expect("originated")
+            .clone()
+    }
+
+    fn router_info_tlvs(top: &Ospf<Ospfv3>) -> Vec<RouterInfoTlv> {
+        let Ospfv3LsBody::RouterInfo(ri) = ours(top, router_info_key(top.router_id)).body else {
+            panic!("expected a Router Information body");
+        };
+        ri.tlvs
+    }
+
+    fn restart_capable(top: &Ospf<Ospfv3>) -> bool {
+        match router_info_tlvs(top).first() {
+            Some(RouterInfoTlv::RouterInfo(cap)) => cap.caps.gr_capable(),
+            other => panic!("the Capabilities TLV must come first, not {other:?}"),
+        }
+    }
+
+    /// The Router Information LSA is area-scoped instance 0 and carries the
+    /// SR capabilities in the order RFC 7770 §2.4 needs, the Router
+    /// Informational Capabilities first. The former carrier is sent
+    /// alongside, announcing the same algorithms.
+    #[tokio::test]
+    async fn the_router_information_lsa_carries_the_sr_capabilities() {
+        let mut top = sr_router();
+        top.sr_capabilities_v3_originate(AREA0);
+
+        let lsa = ours(&top, router_info_key(rid(1)));
+        assert_eq!(lsa.h.ls_type, 0xA00C, "U bit, area scope, function code 12");
+        assert_eq!(lsa.h.link_state_id, 0);
+        let spf_and_128 = vec![Algo::Spf, Algo::FlexAlgo(128)];
+        match &router_info_tlvs(&top)[..] {
+            [
+                RouterInfoTlv::RouterInfo(cap),
+                RouterInfoTlv::Algo(algo),
+                RouterInfoTlv::SidLabelRnage(srgb),
+                RouterInfoTlv::LocalBlock(srlb),
+                RouterInfoTlv::Fad(fad),
+            ] => {
+                assert!(cap.caps.gr_helper() && cap.caps.te() && !cap.caps.gr_capable());
+                assert_eq!(algo.algos, spf_and_128);
+                assert_eq!(srgb.sid_label, SidLabelTlv::Label(SRGB_START));
+                assert_eq!(srgb.range, SRGB_RANGE);
+                assert_eq!(srlb.sid_label, SidLabelTlv::Label(SRLB_START));
+                assert_eq!(srlb.range, SRLB_RANGE);
+                assert_eq!((fad.flex_algorithm, fad.priority), (128, 100));
+            }
+            other => panic!("unexpected TLVs: {other:?}"),
+        }
+
+        let Ospfv3LsBody::ERouter(e) = ours(&top, e_router_key(rid(1))).body else {
+            panic!("expected the former carrier");
+        };
+        let former_algos = e.tlvs.iter().find_map(|tlv| match tlv {
+            Ospfv3ExtTlv::SrAlgorithm(a) => Some(a.algos.clone()),
+            _ => None,
+        });
+        assert_eq!(former_algos, Some(spf_and_128));
+    }
+
+    /// A peer reads from the wire what this router sends: its SRGB, SRLB,
+    /// algorithms and definition, from the Router Information LSA.
+    #[tokio::test]
+    async fn a_peer_reads_the_capabilities_sent() {
+        let mut top = sr_router();
+        top.sr_capabilities_v3_originate(AREA0);
+
+        let mut peer = fresh_ospf_v3();
+        peer.router_id = rid(2);
+        let tx = peer.tx.clone();
+        let tracing = peer.tracing.clone();
+        for key in [e_router_key(rid(1)), router_info_key(rid(1))] {
+            let mut wire = bytes::BytesMut::new();
+            ours(&top, key).emit(&mut wire);
+            let lsa = Ospfv3Lsa::decode(&wire).expect("decodes");
+            peer.areas
+                .fetch(AREA0)
+                .lsdb
+                .insert_received_v3(lsa, &tx, Some(AREA0), &tracing);
+        }
+
+        let lsdb = &peer.areas.get(AREA0).unwrap().lsdb;
+        let caps = &lsdb.sr_capabilities()[&rid(1)];
+        assert_eq!(caps.carrier, SrCarrier::RouterInfo);
+        assert_eq!(caps.algos, Some(vec![Algo::Spf, Algo::FlexAlgo(128)]));
+        assert_eq!(caps.fads[&128].priority, 100);
+        let labels = LabelConfig {
+            global: LabelBlock::new(SRGB_START, SRGB_RANGE),
+            local: Some(LabelBlock::new(SRLB_START, SRLB_RANGE)),
+        };
+        assert_eq!(lsdb.label_map.get(&rid(1)), Some(&labels));
+    }
+
+    /// SRv6 Capabilities ride the Router Information LSA, last, while SRv6
+    /// is active; with neither SR-MPLS nor SRv6 on, both carriers are
+    /// withdrawn.
+    #[tokio::test]
+    async fn the_capabilities_follow_segment_routing() {
+        let mut top = sr_router();
+        top.segment_routing = SegmentRoutingMode::None;
+        top.sr_locator = Some(crate::rib::Locator {
+            prefix: Some("fcbb:bbbb:1::/48".parse().unwrap()),
+            behavior: None,
+            flavors: 0,
+            vrf: None,
+            table_id: 0,
+        });
+        top.sr_capabilities_v3_originate(AREA0);
+        assert!(matches!(
+            router_info_tlvs(&top).last(),
+            Some(RouterInfoTlv::Srv6Capabilities(_))
+        ));
+
+        top.segment_routing = SegmentRoutingMode::Mpls;
+        top.sr_locator = None;
+        top.sr_capabilities_v3_originate(AREA0);
+        assert!(
+            !router_info_tlvs(&top)
+                .iter()
+                .any(|tlv| matches!(tlv, RouterInfoTlv::Srv6Capabilities(_)))
+        );
+
+        top.segment_routing = SegmentRoutingMode::None;
+        top.sr_capabilities_v3_originate(AREA0);
+        for key in [router_info_key(rid(1)), e_router_key(rid(1))] {
+            assert_eq!(ours(&top, key).h.ls_age, OSPF_MAX_AGE, "{key:?} withdrawn");
+        }
+    }
+
+    /// As in OSPFv2, the Router Information LSA says restart-capable while a
+    /// graceful restart is staged, and stops when it is aborted or ends.
+    #[tokio::test]
+    async fn a_staged_restart_is_announced() {
+        let mut top = sr_router();
+        top.sr_capabilities_v3_originate(AREA0);
+        assert!(!restart_capable(&top));
+
+        assert!(top.gr_restart_begin_v3(120, ospf_packet::GraceRestartReason::SoftwareRestart));
+        assert!(restart_capable(&top), "staged");
+        top.gr_restart_abort_v3();
+        assert!(!restart_capable(&top), "aborted");
+
+        assert!(top.gr_restart_begin_v3(120, ospf_packet::GraceRestartReason::SoftwareRestart));
+        assert!(restart_capable(&top), "staged again");
+        top.gr_restart_exit_success_v3();
+        assert!(!restart_capable(&top), "restart over");
+    }
+
+    /// RFC 2328 §13.4: a neighbour floods back this router's own Router
+    /// Information LSA at a higher sequence number — one from before a
+    /// restart, say. It is re-originated past it; with Segment Routing off
+    /// by then, flushed.
+    #[tokio::test]
+    async fn an_echoed_router_information_lsa_is_reoriginated() {
+        let mut top = sr_router();
+        top.sr_capabilities_v3_originate(AREA0);
+        let key = router_info_key(rid(1));
+
+        for sr_on in [true, false] {
+            if !sr_on {
+                top.segment_routing = SegmentRoutingMode::None;
+            }
+            let mut echoed = ours(&top, key);
+            echoed.h.ls_age = 0;
+            echoed.h.ls_seq_number += 0x10;
+            echoed.update();
+            let echoed_seq = echoed.h.ls_seq_number;
+            let tx = top.tx.clone();
+            let tracing = top.tracing.clone();
+            top.areas
+                .fetch(AREA0)
+                .lsdb
+                .insert_received_v3(echoed, &tx, Some(AREA0), &tracing);
+            top.process_msg(Message::Lsdb(
+                LsdbEvent::SelfOriginatedReceived,
+                Some(AREA0),
+                key,
+            ))
+            .await;
+
+            let now = ours(&top, key);
+            assert_eq!(now.h.ls_age == OSPF_MAX_AGE, !sr_on, "SR on: {sr_on}");
+            if sr_on {
+                assert!(now.h.ls_seq_number > echoed_seq, "re-originated past it");
+            }
+        }
+    }
+
+    /// The Router Information LSA is refreshed while advertised, and a
+    /// refresh already queued when Segment Routing goes off does not
+    /// revive it.
+    #[tokio::test]
+    async fn a_refresh_does_not_revive_a_withdrawn_router_information_lsa() {
+        let mut top = sr_router();
+        top.sr_capabilities_v3_originate(AREA0);
+        let key = router_info_key(rid(1));
+        let before = ours(&top, key).h.ls_seq_number;
+        top.process_msg(Message::Lsdb(
+            LsdbEvent::RefreshTimerExpire,
+            Some(AREA0),
+            key,
+        ))
+        .await;
+        let refreshed = ours(&top, key);
+        assert_eq!(refreshed.h.ls_seq_number, before + 1);
+        assert!(refreshed.h.ls_age < OSPF_MAX_AGE);
+
+        top.segment_routing = SegmentRoutingMode::None;
+        top.sr_capabilities_v3_originate(AREA0);
+        let withdrawn = ours(&top, key);
+        assert_eq!(withdrawn.h.ls_age, OSPF_MAX_AGE);
+        top.process_msg(Message::Lsdb(
+            LsdbEvent::RefreshTimerExpire,
+            Some(AREA0),
+            key,
+        ))
+        .await;
+        let after = ours(&top, key);
+        assert_eq!(after.h.ls_age, OSPF_MAX_AGE);
+        assert_eq!(after.h.ls_seq_number, withdrawn.h.ls_seq_number);
+    }
+}
+
+#[cfg(test)]
 mod multi_area_tests {
     use super::{RouteType, SpfRoute, rib_insert};
     use ipnet::Ipv4Net;
@@ -19755,6 +20111,14 @@ mod sr_origination_tests {
         )
     }
 
+    fn v3_router_info(router: Ipv4Addr) -> OspfLsaKey {
+        (
+            ospf_packet::OSPFV3_ROUTER_INFO_LSA_TYPE,
+            super::super::srmpls::ROUTER_INFO_V3_INSTANCE,
+            router,
+        )
+    }
+
     fn v2_prefix_sid(router: Ipv4Addr) -> OspfLsaKey {
         let id = Ipv4Addr::from(((OpaqueLsaType::EXT_PREFIX as u32) << 24) | 1);
         super::super::lsdb::v2_lsa_key(OspfLsType::OpaqueAreaLocal, id, router)
@@ -19856,6 +20220,7 @@ mod sr_origination_tests {
         assert!(top.areas.get(AREA1).is_none(), "not created yet");
         run_enables_v3(&mut top, &mut pending).await;
         assert!(live(&top, AREA1, v3_sr_info(rid)));
+        assert!(live(&top, AREA1, v3_router_info(rid)));
 
         // The same for SRv6: the locator resolves before the area exists.
         let mut top = fresh_ospf_v3();
@@ -19887,6 +20252,7 @@ mod sr_origination_tests {
         );
         assert!(live(&top, AREA1, locator), "SRv6 Locator LSA");
         assert!(live(&top, AREA1, v3_sr_info(rid)), "SRv6 capabilities");
+        assert!(live(&top, AREA1, v3_router_info(rid)), "SRv6 capabilities");
     }
 
     /// Everything SR advertises is advertised under the Router-ID. A
@@ -19923,6 +20289,11 @@ mod sr_origination_tests {
         assert!(live(&top, AREA0, v3_adj_sid(old)));
         cfg(&mut top, "/router/ospfv3/router-id", &["10.0.0.9"]);
         assert!(live(&top, AREA0, v3_sr_info(new)), "v3 SR-info");
+        assert!(
+            live(&top, AREA0, v3_router_info(new)),
+            "v3 Router Information"
+        );
+        assert!(!live(&top, AREA0, v3_router_info(old)));
         assert!(live(&top, AREA0, v3_prefix_sid(new)), "v3 Prefix-SID");
         assert!(live(&top, AREA0, v3_adj_sid(new)), "v3 Adj-SID");
         assert!(!live(&top, AREA0, v3_sr_info(old)) && !live(&top, AREA0, v3_prefix_sid(old)));

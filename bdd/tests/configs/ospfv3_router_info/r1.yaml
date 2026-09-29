@@ -1,0 +1,30 @@
+# r1: OSPFv3 SR-MPLS, loopback Prefix-SID index 1 (label 16001); defines
+# and participates in Flex-Algo 128.
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: r1-r2
+  ipv6:
+    address: 2001:db8:12::1/64
+router:
+  ospfv3:
+    router-id: 1.1.1.1
+    segment-routing:
+      mpls: {}
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+        prefix-sid:
+          index: 1
+      - if-name: r1-r2
+        enabled: true
+        network-type: point-to-point
+    flex-algo:
+    - algo: 128
+      advertise-definition: true
+      priority: 100
+      dataplane:
+        sr-mpls: true
