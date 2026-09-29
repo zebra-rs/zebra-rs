@@ -1,0 +1,47 @@
+# pe1 (AS 65000): four VRFs on one PE, leaking locally by route-target.
+# red exports 10.24.1.0/24 with RT 65000:200 (nobody imports it at first);
+# gold exports 10.24.9.0/24 with RT 65000:100, which blue imports; green
+# imports 65000:300 (nobody exports it at first).
+vrf:
+- name: red
+  ipv4:
+    route-target:
+      export:
+      - 65000:200
+- name: gold
+  ipv4:
+    route-target:
+      export:
+      - 65000:100
+- name: blue
+  ipv4:
+    route-target:
+      import:
+      - 65000:100
+- name: green
+  ipv4:
+    route-target:
+      import:
+      - 65000:300
+router:
+  bgp:
+    global:
+      as: 65000
+      router-id: 1.1.1.1
+    vrf:
+    - name: red
+      rd: 65000:1
+      afi-safi:
+        ipv4:
+          network:
+          - prefix: 10.24.1.0/24
+    - name: gold
+      rd: 65000:3
+      afi-safi:
+        ipv4:
+          network:
+          - prefix: 10.24.9.0/24
+    - name: blue
+      rd: 65000:2
+    - name: green
+      rd: 65000:4

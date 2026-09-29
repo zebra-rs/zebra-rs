@@ -8585,3 +8585,7 @@ mod tests {
 #[cfg(test)]
 #[path = "addpath_nht_review_tests.rs"]
 mod addpath_nht_review_tests;
+
+#[cfg(test)]
+#[path = "vrf_rt_change_review_tests.rs"]
+mod vrf_rt_change_review_tests;
