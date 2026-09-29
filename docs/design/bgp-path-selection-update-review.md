@@ -22,9 +22,10 @@ knobs (PR #2423, `7852fc15`), #16 (PR #2425, `6d4446b1`), #17 with #18
 (PR #2426, `9d4e2589`), #23 (PR #2429, `74d4500d`) and #24 (PR #2432,
 `969279a0`, three review rounds folded in), with a follow-up to #23
 (AddPath withdraws held by `suppress-fib-pending`, PR #2433, `b5c4c210`),
-and #19 (PR #2436, `17b906bc`, one review round folded in). Each fixed
-entry ends with its fix note; everything else is open. In progress: the
-`bgp router-id` item left open in #21, branch `bgp-live-signature-knobs`.
+#19 (PR #2436, `17b906bc`, one review round folded in) and #21's
+`bgp router-id` item (PR #2438, `ae20d01f`, one review round folded in).
+Each fixed entry ends with its fix note; everything else is open. In
+progress: #22, branch `bgp-group-engine-slot0`.
 
 Method: one lead read the selection ladder and every egress builder, then
 five independent read-only reviewers each took one dimension (update-group
@@ -1481,7 +1482,7 @@ cap. The two reviews agree on every overlapping item.
   `bgp_shard_lu`, `bgp_shard_sync_labelv6` and `bgp_shard_sync_lu` stay
   green.
 
-### 21. P2 CONFIRMED, FIXED (the knobs in #2377, the router-id on branch `bgp-live-signature-knobs`) — more signature-bearing knobs change on a live Established peer without detach/attach
+### 21. P2 CONFIRMED, FIXED (the knobs in #2377, the router-id in #2438) — more signature-bearing knobs change on a live Established peer without detach/attach
 
 - Beyond the recorded as-override / remove-private-as (rr-client is
   closed: #2375 bounces the session on that knob):
@@ -1541,7 +1542,7 @@ cap. The two reviews agree on every overlapping item.
   moves from `system router-id` to a changed one, to a configured
   `router bgp global router-id`, and back; on `main` z1 reports each new
   `local router ID` while z2 keeps `remote router ID 192.168.31.1`.
-- FIXED (branch `bgp-live-signature-knobs`):
+- FIXED (#2438):
   - `set_router_id` resets every global session that has sent an OPEN
     carrying the old identifier (OpenSent, OpenConfirm, Established),
     running `Event::Stop` through `process_msg` itself rather than the
@@ -1560,7 +1561,7 @@ cap. The two reviews agree on every overlapping item.
     path, now `replace_vrf_tasks`); inside a commit (`commit_open`,
     `CommitStart` to `CommitEnd`) `CommitEnd` still does it once, with the
     whole transaction applied.
-- Review round (FIXED on the branch; the reviewer's probe is now the gate
+- Review round (FIXED in #2438; the reviewer's probe is now the gate
   `a_router_id_change_resets_the_session_with_the_event_queue_full`):
   - P2: the resets were queued with `try_send(Event::Stop)` and a failure
     ignored, so with the bounded event queue full a session stayed up on
@@ -1573,7 +1574,7 @@ cap. The two reviews agree on every overlapping item.
     and interface down, `clear bgp`, the VRF task's own — share the
     full-queue loss.
 
-### 22. P2 CONFIRMED (env-gated) — gate-on group engine skips peer slot 0 on every NHT-, FIB-release- and import-driven withdraw
+### 22. P2 CONFIRMED (env-gated), FIXED on branch `bgp-group-engine-slot0` — gate-on group engine skips peer slot 0 on every NHT-, FIB-release- and import-driven withdraw
 
 - Sources that pass a literal `0` as the split-horizon source:
   `shard/dispatch.rs:581-597` (`reeval_nexthop_v4`, `ident: 0`) →
@@ -1592,6 +1593,66 @@ cap. The two reviews agree on every overlapping item.
   withdraw at the CE.
 - Fix direction: use `ORIGINATED_PEER` as the no-source sentinel at the
   call sites.
+- Re-read: the member a withdraw must skip is the one whose path the
+  withdrawn Adj-RIB-Out row was (it never received it), and the engine
+  holds that row — so the engine can derive the exclusion itself instead of
+  trusting every caller (the sentinel fix would leave each future call site
+  to get it right).
+- Found while gating (the same engine, the advertise side): when a member's
+  own path becomes the best, `advertise` fans it to the others and skips the
+  member (split horizon), but the member still holds the previous best we
+  sent it — nothing withdraws it; the gate-off path (`V4Batch`, one outcome
+  per peer) sends that member a withdraw. The same when the new best builds
+  the UPDATE already sent (the dedup sends nothing at all), and when the
+  build filters the new best: that withdraw skipped the new path's source,
+  which held the previous best.
+- Gates (branch `bgp-group-engine-slot0`; each compiles on `main` and fails
+  there, except the control). Unit, `group_egress_review_tests.rs` (a child
+  of `group_egress.rs`, driving the engine through its deltas with members
+  that carry their own `PeerMap` index): `a_withdraw_reaches_the_member_in_slot_0`
+  and its AddPath twin `an_addpath_withdraw_reaches_the_member_in_slot_0`,
+  `a_withdraw_skips_only_the_member_whose_path_it_was`; the advertise side
+  `the_member_whose_path_becomes_best_is_withdrawn_the_route_it_held`,
+  `a_new_best_that_builds_the_same_update_still_withdraws_its_source_member`,
+  `a_filtered_best_path_withdraws_the_previous_route_from_its_source_member`;
+  control `the_member_whose_path_stops_being_best_is_sent_the_new_best`. BDD
+  `bgp_group_egress_nht_withdraw` (z1 runs the engine; its first configured
+  neighbor z3 and its third z4 share a group; a scripted speaker's route
+  loses its next-hop): on `main` z4 is withdrawn the route and z3 keeps it.
+  IPv4 only — the engine's family. One more advertise-side gate came with
+  the fix: `a_sole_member_whose_path_becomes_best_is_withdrawn_the_route_it_held`
+  (with no other member, the early return left the previous best at the
+  source member).
+- FIXED (branch `bgp-group-engine-slot0`, the engine in `group_egress.rs`):
+  - A withdraw leaves out the member whose paths the removed Adj-RIB-Out
+    rows all were — read off the rows — and reaches every other member.
+    `GroupEgressDeltaV4::Withdraw` no longer carries a source, and
+    `fan_advertise_to_groups` / `fan_addpath_to_groups` no longer take one,
+    so no caller can name the wrong member again.
+  - An advertise whose new best is a member's own path withdraws the
+    previous best from that member when it was another source's path —
+    also when the new best builds the UPDATE already sent, when the build
+    filters it (that withdraw now derives its exclusion from the removed
+    row), and when no other member is left to send it to.
+  - Verified: the 8 unit gates and the 10 existing engine tests pass; each
+    of five mutations (skip slot 0, skip nobody, no source-member withdraw,
+    that withdraw only when sending, no withdraw on the early return) fails
+    its own gates; workspace clippy and the full unit suite stay green. BDD
+    `bgp_group_egress_nht_withdraw` passes, and `bgp_egress_group_task`,
+    `bgp_egress_group_sharded`, `bgp_addpath_group`, `bgp_addpath_nht` and
+    `bgp_update_group_source_withdraw` stay green.
+- Review round (FIXED on the branch; the reviewer's probe is now the gate
+  `a_best_moving_between_members_with_the_same_update_reaches_the_previous_source`,
+  with a third member that already holds the UPDATE):
+  - P2: when the best moved from member 1's path to member 2's and built
+    the same UPDATE, the dedup sent nothing — but member 1, kept from the
+    UPDATE while the path was its own, lacked it until further churn. The
+    dedup now sends the unchanged UPDATE to the previous path's source
+    member when that is no longer the source. Control
+    `an_unchanged_re_advertise_of_a_members_own_path_sends_it_nothing`
+    kills the mutant that sends it to an unchanged source (its own path).
+    Each of three mutations fails its gates; clippy, the full unit suite
+    and the four group-engine BDD features stay green.
 
 ### 23. P2 CONFIRMED, FIXED in #2429 — NHT flips never reach AddPath peers, and next-hop-unreachable candidates are advertised to them
 

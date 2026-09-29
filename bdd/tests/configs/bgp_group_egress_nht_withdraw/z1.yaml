@@ -1,0 +1,46 @@
+# z1 (DUT, AS 65001, run with the group egress engine): learns
+# 10.65.1.0/24 from the scripted speaker h1 with the third-party next-hop
+# 10.65.99.2, which resolves through the static route below (deleting it
+# makes the next-hop unreachable). The neighbors are listed in address
+# order, so z3 takes the first peer index.
+router:
+  static:
+    ipv4:
+      route:
+      - prefix: 10.65.99.0/24
+        nexthop:
+        - address: 192.168.65.3
+  bgp:
+    # Logs the group egress task's spawn, which the feature checks.
+    tracing:
+      sharding: null
+    global:
+      as: 65001
+      router-id: 192.168.65.1
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 192.168.65.2
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65093
+    # The scripted speaker never listens on 179: passive keeps this peer
+    # in Active so the script's connect is accepted.
+    - remote-address: 192.168.65.3
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65091
+      transport:
+        passive-mode: true
+    - remote-address: 192.168.65.4
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65094
