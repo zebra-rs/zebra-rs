@@ -209,8 +209,8 @@ impl AttrEmitter for Rtcv4Unreach {
         // replaces wrote only the 8-octet Route Target — mislabelled "RD" —
         // omitting the prefix length and origin AS that `Rtcv4::parse_nlri`
         // reads back, so a receiver would have read the RT's first octet as the
-        // prefix length and rejected it. Dormant so far: `mp_unreach.rs` only
-        // ever builds this with an empty `withdraw` (the End-of-RIB marker).
+        // prefix length and rejected it. `MpUnreachAttr::Rtcv4` emits through
+        // it: a PE withdraws a membership its VRFs no longer import.
         for withdraw in self.withdraw.iter() {
             emit_rtc_membership(buf, withdraw.id, withdraw.plen, withdraw.asn, &withdraw.rt);
         }

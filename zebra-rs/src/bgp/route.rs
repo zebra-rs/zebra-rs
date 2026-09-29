@@ -14,7 +14,7 @@ use crate::rib::tracing::fib_l2_fdb;
 use crate::rib::{self, MacAddr, api::FdbEntry};
 use crate::{bgp_adj_in_trace, bgp_adj_out_trace};
 
-use super::adj_rib::{AdjRib, Out};
+use super::adj_rib::{AdjRib, AdjRibTable, Out};
 use super::cap::CapAfiMap;
 use super::peer::{AllowAsIn, BgpTop, Peer, PeerType};
 use super::peer_map::PeerMap;
@@ -5220,6 +5220,30 @@ fn reduce_bestpath_v4_nht_fib(
     ))
 }
 
+/// Whether RTC membership filters a route with `ecom` out: the peer holds
+/// no broad membership, and it has declared a constraint — sent a
+/// membership this session, or holds an exact RT — that none of the route's
+/// RTs meets. A peer that never sent one is sent everything; one whose
+/// membership was withdrawn to nothing is sent nothing (review finding #19).
+fn rtc_blocks(
+    exact: &BTreeSet<ExtCommunityValue>,
+    broad: &BTreeSet<(u8, u32, ExtCommunityValue)>,
+    seen: bool,
+    ecom: &Option<ExtCommunity>,
+) -> bool {
+    broad.is_empty() && (seen || !exact.is_empty()) && !rtc_match(exact, ecom)
+}
+
+/// [`rtc_blocks`] for `peer`'s IPv4 RTC membership (VPNv4).
+fn rtc_blocks_v4(peer: &Peer, ecom: &Option<ExtCommunity>) -> bool {
+    rtc_blocks(&peer.rtcv4, &peer.rtcv4_broad, peer.rtcv4_seen, ecom)
+}
+
+/// [`rtc_blocks`] for `peer`'s IPv6 RTC membership (VPNv6).
+fn rtc_blocks_v6(peer: &Peer, ecom: &Option<ExtCommunity>) -> bool {
+    rtc_blocks(&peer.rtcv6, &peer.rtcv6_broad, peer.rtcv6_seen, ecom)
+}
+
 fn rtc_match(rtc: &BTreeSet<ExtCommunityValue>, ecom: &Option<ExtCommunity>) -> bool {
     if let Some(ecom) = ecom {
         // Extended community value in RIB.
@@ -5955,7 +5979,7 @@ impl BatchAfi for V4Batch {
     ) {
         let (afi, safi) = Self::afi_safi(rd);
         let afi_safi = AfiSafi::new(afi, safi);
-        if rd.is_some() && !peer.rtcv4.is_empty() && !rtc_match(&peer.rtcv4, &attr.ecom) {
+        if rd.is_some() && rtc_blocks_v4(peer, &attr.ecom) {
             // RT Constraint (RFC 4684): the peer is a member of none of the
             // route's RTs. A route whose RTs left its membership must be
             // withdrawn, not left standing (review finding #24); `withdraw`
@@ -6052,7 +6076,7 @@ impl BatchAfi for V4Batch {
             return false;
         };
         let attr = decision.attr;
-        if rd.is_some() && !peer.rtcv4.is_empty() && !rtc_match(&peer.rtcv4, &attr.ecom) {
+        if rd.is_some() && rtc_blocks_v4(peer, &attr.ecom) {
             return false;
         }
         let attr = bgp.attr_store.intern(attr);
@@ -6174,20 +6198,21 @@ impl BatchAfi for V6Batch {
     ) {
         let (afi, safi) = Self::afi_safi(rd);
         let afi_safi = AfiSafi::new(afi, safi);
-        if rd.is_some() && !peer.rtcv6.is_empty() && !rtc_match(&peer.rtcv6, &attr.ecom) {
+        if rd.is_some() && rtc_blocks_v6(peer, &attr.ecom) {
             // RT Constraint: see `V4Batch::advertise` (review finding #24).
             Self::withdraw(peer, rd, prefix, new_best, bgp);
             return;
         }
         let attr = bgp.attr_store.intern(attr);
         if let Some(rd) = rd {
-            // VPNv6: store best.clone() under the RD; send via send_vpnv6.
+            // VPNv6: record the row under the RD with the attributes sent,
+            // as every other VPN writer does — the RTC reconcile reads the
+            // sent RTs off it, which an outbound policy may have rewritten
+            // (review follow-up on #19); send via send_vpnv6.
             if let Some(best) = new_best {
-                peer.adj_out
-                    .v6vpn
-                    .entry(rd)
-                    .or_default()
-                    .add(prefix, best.clone());
+                let mut rib = best.clone();
+                rib.attr = attr.clone();
+                peer.adj_out.v6vpn.entry(rd).or_default().add(prefix, rib);
             }
             let vpnv6_nlri = Vpnv6Nlri {
                 // Our transit label behind our next-hop, the received label
@@ -6294,7 +6319,7 @@ impl BatchAfi for V6Batch {
         let attr = bgp.attr_store.intern(decision.attr);
         if let Some(rd) = rd {
             // VPNv6 AddPath: RTC then per-AFI out-policy (above).
-            if !peer.rtcv6.is_empty() && !rtc_match(&peer.rtcv6, &attr.ecom) {
+            if rtc_blocks_v6(peer, &attr.ecom) {
                 return false;
             }
             // Record the advertisement under its path-id: the VPNv6
@@ -7674,7 +7699,7 @@ fn route_soft_out_peer_table_v6vpn(
         };
         let attr = decision.attr;
         // RTC: per-peer route-target constraint.
-        if !peer.rtcv6.is_empty() && !rtc_match(&peer.rtcv6, &attr.ecom) {
+        if rtc_blocks_v6(peer, &attr.ecom) {
             continue;
         }
         // Our transit label behind our next-hop, the received label behind
@@ -7810,7 +7835,7 @@ fn route_soft_out_peer_table(
             continue;
         };
         let attr = decision.attr;
-        if rd.is_some() && !peer.rtcv4.is_empty() && !rtc_match(&peer.rtcv4, &attr.ecom) {
+        if rd.is_some() && rtc_blocks_v4(peer, &attr.ecom) {
             continue;
         }
 
@@ -9140,53 +9165,196 @@ pub fn route_labelv6_withdraw(
     route_advertise_to_peers_labelv6(nlri.prefix, &selected, bgp, peers);
 }
 
-/// Record one RTC membership advertised by `peer_id`.
+/// Record one RTC membership advertised by `peer_id`; returns whether the
+/// peer's membership changed.
 ///
-/// Only a fully specified 96-bit prefix names an exact Route Target, and only
-/// those go in the set. The RFC 4684 §3.2 default membership (prefix length 0)
-/// asks for *every* RT, and a partial prefix constrains a range that
-/// `rtc_match`'s exact-equality set cannot express. Adding nothing for either
-/// leaves `peer.rtcv4` empty, which every filter site reads as "this peer
-/// declared no RT constraint" and advertises everything — the behaviour the
-/// default membership asks for, and the safe direction for a partial one: RTC
-/// is an optimisation, so over-advertising only costs bandwidth while
-/// under-advertising blackholes VPN routes.
-///
-/// Known gap: a peer that mixes an exact RT with a default or partial
-/// membership is still filtered to just the exact one, because "wants
-/// everything" has no representation separate from "said nothing". No
-/// implementation sends that combination, and expressing it would need a
-/// distinct flag threaded through all seven filter sites.
-pub fn route_ipv4_rtc_update(peer_id: usize, rtcv4: &Rtcv4, peers: &mut PeerMap) {
+/// A fully specified 96-bit prefix names an exact Route Target: the RT goes
+/// in `peer.rtcv4`, and `(RT, origin AS)` in `peer.rtcv4_origins`, since
+/// another origin AS may name the same RT. The RFC 4684 §3.2 default membership (prefix length 0)
+/// asks for every RT, and a partial prefix constrains a range that
+/// `rtc_match`'s exact-equality set cannot express: both go in
+/// `peer.rtcv4_broad`, and while that holds anything the peer is sent every
+/// VPNv4 route — what the default asks for, and the safe direction for a
+/// partial one. The first membership of the session changes the membership
+/// by itself: until it, the peer declared no constraint and was sent every
+/// route (see [`rtc_blocks_v4`]).
+pub fn route_ipv4_rtc_update(peer_id: usize, rtcv4: &Rtcv4, peers: &mut PeerMap) -> bool {
     let Some(peer) = peers.get_mut_by_idx(peer_id) else {
-        return;
+        return false;
     };
-    if !rtcv4.is_exact() {
-        return;
+    let first = !std::mem::replace(&mut peer.rtcv4_seen, true);
+    let added = if rtcv4.is_exact() {
+        peer.rtcv4_origins.insert((rtcv4.rt.clone(), rtcv4.asn));
+        peer.rtcv4.insert(rtcv4.rt.clone())
+    } else {
+        peer.rtcv4_broad
+            .insert((rtcv4.plen, rtcv4.asn, rtcv4.rt.clone()))
+    };
+    first || added
+}
+
+/// Remove one RTC membership `peer_id` withdrew (RTC MP_UNREACH); returns
+/// whether the peer's membership changed (review finding #19).
+pub fn route_ipv4_rtc_withdraw(peer_id: usize, rtcv4: &Rtcv4, peers: &mut PeerMap) -> bool {
+    let Some(peer) = peers.get_mut_by_idx(peer_id) else {
+        return false;
+    };
+    if rtcv4.is_exact() {
+        rtc_exact_withdraw(
+            &mut peer.rtcv4,
+            &mut peer.rtcv4_origins,
+            &rtcv4.rt,
+            rtcv4.asn,
+        )
+    } else {
+        peer.rtcv4_broad
+            .remove(&(rtcv4.plen, rtcv4.asn, rtcv4.rt.clone()))
     }
-    peer.rtcv4.insert(rtcv4.rt.clone());
+}
+
+/// Drop the exact membership `(rt, asn)`; the RT leaves `exact` only with
+/// the last origin AS naming it. Returns whether `exact` changed.
+fn rtc_exact_withdraw(
+    exact: &mut BTreeSet<ExtCommunityValue>,
+    origins: &mut BTreeSet<(ExtCommunityValue, u32)>,
+    rt: &ExtCommunityValue,
+    asn: u32,
+) -> bool {
+    if !origins.remove(&(rt.clone(), asn)) {
+        return false;
+    }
+    let named = origins
+        .range((rt.clone(), u32::MIN)..=(rt.clone(), u32::MAX))
+        .next()
+        .is_some();
+    !named && exact.remove(rt)
 }
 
 /// IPv6 counterpart of [`route_ipv4_rtc_update`]; same membership semantics.
-pub fn route_ipv6_rtc_update(peer_id: usize, rtcv6: &Rtcv6, peers: &mut PeerMap) {
+pub fn route_ipv6_rtc_update(peer_id: usize, rtcv6: &Rtcv6, peers: &mut PeerMap) -> bool {
     let Some(peer) = peers.get_mut_by_idx(peer_id) else {
-        return;
+        return false;
     };
-    if !rtcv6.is_exact() {
-        return;
-    }
-    peer.rtcv6.insert(rtcv6.rt.clone());
+    let first = !std::mem::replace(&mut peer.rtcv6_seen, true);
+    let added = if rtcv6.is_exact() {
+        peer.rtcv6_origins.insert((rtcv6.rt.clone(), rtcv6.asn));
+        peer.rtcv6.insert(rtcv6.rt.clone())
+    } else {
+        peer.rtcv6_broad
+            .insert((rtcv6.plen, rtcv6.asn, rtcv6.rt.clone()))
+    };
+    first || added
 }
 
+/// IPv6 counterpart of [`route_ipv4_rtc_withdraw`].
+pub fn route_ipv6_rtc_withdraw(peer_id: usize, rtcv6: &Rtcv6, peers: &mut PeerMap) -> bool {
+    let Some(peer) = peers.get_mut_by_idx(peer_id) else {
+        return false;
+    };
+    if rtcv6.is_exact() {
+        rtc_exact_withdraw(
+            &mut peer.rtcv6,
+            &mut peer.rtcv6_origins,
+            &rtcv6.rt,
+            rtcv6.asn,
+        )
+    } else {
+        peer.rtcv6_broad
+            .remove(&(rtcv6.plen, rtcv6.asn, rtcv6.rt.clone()))
+    }
+}
+
+/// The peer's IPv4 RTC End-of-RIB: run the session-up VPNv4 dump that
+/// waited for it.
 pub fn route_rtcv4_sync(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
     let Some(peer) = peers.get_mut_by_idx(peer_id) else {
         return;
     };
-    let key = AfiSafi::new(Afi::Ip, Safi::Rtc);
-    if peer.eor.contains_key(&key) {
+    if peer.eor.remove(&AfiSafi::new(Afi::Ip, Safi::Rtc)).is_some() {
         route_sync_vpnv4(peer, bgp);
     }
-    peer.eor.clear();
+}
+
+/// The peer's IPv6 RTC End-of-RIB: run the session-up VPNv6 dump that
+/// waited for it, as the VPNv4 one does (review finding #19).
+pub fn route_rtcv6_sync(peer_id: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
+    let Some(peer) = peers.get_mut_by_idx(peer_id) else {
+        return;
+    };
+    if peer
+        .eor
+        .remove(&AfiSafi::new(Afi::Ip6, Safi::Rtc))
+        .is_some()
+    {
+        route_sync_vpnv6(peer, bgp);
+    }
+}
+
+/// Review finding #19: `peer_idx`'s IPv4 RTC membership changed. Bring its
+/// VPNv4 Adj-RIB-Out in line with the new membership: withdraw each held
+/// route the membership no longer selects, then send each selected route it
+/// does not hold (the session-up dump, for the missing rows). While the
+/// session-up dump still waits for the peer's RTC End-of-RIB nothing is
+/// sent: that dump applies the membership.
+fn route_rtc_reconcile_vpnv4(peer_idx: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
+    let Some(peer) = peers.get_mut_by_idx(peer_idx) else {
+        return;
+    };
+    if peer.eor.contains_key(&AfiSafi::new(Afi::Ip, Safi::Rtc)) {
+        return;
+    }
+    let add_path = peer.opt.is_add_path_send(Afi::Ip, Safi::MplsVpn);
+    let unselected: Vec<(RouteDistinguisher, Ipv4Net, u32)> = peer
+        .adj_out
+        .v4vpn
+        .iter()
+        .flat_map(|(rd, t)| {
+            t.0.iter()
+                .flat_map(move |(prefix, rows)| rows.iter().map(move |r| (*rd, *prefix, r)))
+        })
+        .filter(|(_, _, row)| rtc_blocks_v4(peer, &row.attr.ecom))
+        .map(|(rd, prefix, row)| (rd, prefix, row.local_id))
+        .collect();
+    for (rd, prefix, id) in unselected {
+        if add_path {
+            V4Batch::withdraw_addpath(peer, Some(rd), prefix, id, bgp);
+        } else {
+            V4Batch::withdraw(peer, Some(rd), prefix, None, bgp);
+        }
+    }
+    vpnv4_dump(peer, bgp, true);
+    peer.flush_vpnv4();
+}
+
+/// VPNv6 twin of [`route_rtc_reconcile_vpnv4`].
+fn route_rtc_reconcile_vpnv6(peer_idx: usize, bgp: &mut BgpTop, peers: &mut PeerMap) {
+    let Some(peer) = peers.get_mut_by_idx(peer_idx) else {
+        return;
+    };
+    if peer.eor.contains_key(&AfiSafi::new(Afi::Ip6, Safi::Rtc)) {
+        return;
+    }
+    let add_path = peer.opt.is_add_path_send(Afi::Ip6, Safi::MplsVpn);
+    let unselected: Vec<(RouteDistinguisher, Ipv6Net, u32)> = peer
+        .adj_out
+        .v6vpn
+        .iter()
+        .flat_map(|(rd, t)| {
+            t.0.iter()
+                .flat_map(move |(prefix, rows)| rows.iter().map(move |r| (*rd, *prefix, r)))
+        })
+        .filter(|(_, _, row)| rtc_blocks_v6(peer, &row.attr.ecom))
+        .map(|(rd, prefix, row)| (rd, prefix, row.local_id))
+        .collect();
+    for (rd, prefix, id) in unselected {
+        if add_path {
+            V6Batch::withdraw_addpath(peer, Some(rd), prefix, id, bgp);
+        } else {
+            V6Batch::withdraw(peer, Some(rd), prefix, None, bgp);
+        }
+    }
+    vpnv6_dump(peer, bgp, true);
+    peer.flush_vpnv6();
 }
 
 /// Extract VNI from Route Distinguisher
@@ -13022,13 +13190,21 @@ pub fn route_from_peer(
                     }
                 }
                 MpReachAttr::Rtcv4(nlri) => {
+                    let mut changed = false;
                     for update in nlri.updates.iter() {
-                        route_ipv4_rtc_update(peer_id, update, peers);
+                        changed |= route_ipv4_rtc_update(peer_id, update, peers);
+                    }
+                    if changed {
+                        route_rtc_reconcile_vpnv4(peer_id, bgp, peers);
                     }
                 }
                 MpReachAttr::Rtcv6(nlri) => {
+                    let mut changed = false;
                     for update in nlri.updates.iter() {
-                        route_ipv6_rtc_update(peer_id, update, peers);
+                        changed |= route_ipv6_rtc_update(peer_id, update, peers);
+                    }
+                    if changed {
+                        route_rtc_reconcile_vpnv6(peer_id, bgp, peers);
                     }
                 }
                 MpReachAttr::Evpn {
@@ -13222,15 +13398,30 @@ pub fn route_from_peer(
                 eor_stale_expire(peer_id, afi_safi, bgp, peers);
             }
             MpUnreachAttr::Rtcv4Eor => {
-                // If peer's EoR is true.
                 route_rtcv4_sync(peer_id, bgp, peers);
             }
             MpUnreachAttr::Rtcv6Eor => {
-                // The peer's VPNv6 import-RT membership (collected in
-                // `peer.rtcv6` from the preceding MP_REACH) now gates our
-                // event-driven VPNv6 advertise. There is no VPNv6
-                // sync-on-establish replay to trigger here (unlike the
-                // VPNv4 path), so the EoR is purely informational.
+                route_rtcv6_sync(peer_id, bgp, peers);
+            }
+            // A withdrawn RTC membership (review finding #19): the routes it
+            // selected must leave the peer.
+            MpUnreachAttr::Rtcv4(withdrawals) => {
+                let mut changed = false;
+                for withdraw in withdrawals.iter() {
+                    changed |= route_ipv4_rtc_withdraw(peer_id, withdraw, peers);
+                }
+                if changed {
+                    route_rtc_reconcile_vpnv4(peer_id, bgp, peers);
+                }
+            }
+            MpUnreachAttr::Rtcv6(withdrawals) => {
+                let mut changed = false;
+                for withdraw in withdrawals.iter() {
+                    changed |= route_ipv6_rtc_withdraw(peer_id, withdraw, peers);
+                }
+                if changed {
+                    route_rtc_reconcile_vpnv6(peer_id, bgp, peers);
+                }
             }
             MpUnreachAttr::Evpn(withdrawals) => {
                 for route in withdrawals.iter() {
@@ -13323,9 +13514,6 @@ pub fn route_from_peer(
             MpUnreachAttr::Labelv6Eor => {
                 let afi_safi = AfiSafi::new(Afi::Ip6, Safi::MplsLabel);
                 eor_stale_expire(peer_id, afi_safi, bgp, peers);
-            }
-            _ => {
-                //
             }
         }
     }
@@ -14027,6 +14215,12 @@ pub fn route_clean(
     // IPv4 / IPv6 RTC.
     peer.rtcv4.clear();
     peer.rtcv6.clear();
+    peer.rtcv4_origins.clear();
+    peer.rtcv6_origins.clear();
+    peer.rtcv4_broad.clear();
+    peer.rtcv6_broad.clear();
+    peer.rtcv4_seen = false;
+    peer.rtcv6_seen = false;
     peer.eor.clear();
 
     // Drop the peer's sharded-family Adj-RIB-In slice once every
@@ -17017,6 +17211,32 @@ pub fn route_sync_ipv6(peer: &mut Peer, bgp: &mut BgpTop) {
 }
 
 pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut BgpTop) {
+    vpnv4_dump(peer, bgp, false);
+    peer.flush_vpnv4();
+
+    // Send End-of-RIB marker for IPv4 VPN
+    send_eor_vpnv4_unicast(peer);
+}
+
+/// Whether the Adj-RIB-Out `table` holds `prefix` — under path-id `id` for
+/// an AddPath peer.
+fn vpn_row_held<P: Ord>(
+    table: Option<&AdjRibTable<Out, P>>,
+    prefix: &P,
+    id: u32,
+    add_path: bool,
+) -> bool {
+    table
+        .and_then(|t| t.0.get(prefix))
+        .is_some_and(|rows| !add_path || rows.iter().any(|r| r.local_id == id))
+}
+
+/// Send `peer` its VPNv4 routes — every selected route, or every reachable
+/// candidate toward an AddPath peer — through the build, out-policy and RTC
+/// checks, recording each in its Adj-RIB-Out. `missing_only` skips a row
+/// the peer already holds: an RTC membership change re-runs the dump for
+/// what the new membership adds (review finding #19).
+fn vpnv4_dump(peer: &mut Peer, bgp: &mut BgpTop, missing_only: bool) {
     let add_path = peer.opt.is_add_path_send(Afi::Ip, Safi::MplsVpn);
 
     // Collect all VPNv4 routes first to avoid borrow checker issues
@@ -17055,6 +17275,11 @@ pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut BgpTop) {
     // Advertise all best paths to the peer
     for (rd, routes) in all_routes {
         for (prefix, mut rib) in routes {
+            if missing_only
+                && vpn_row_held(peer.adj_out.v4vpn.get(&rd), &prefix, rib.local_id, add_path)
+            {
+                continue;
+            }
             // RFC 9494 §4.3: stale routes only go to LLGR peers.
             if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, Afi::Ip, Safi::MplsVpn) {
                 continue;
@@ -17079,7 +17304,7 @@ pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut BgpTop) {
             let attr = decision.attr;
 
             // RTC
-            if !peer.rtcv4.is_empty() && !rtc_match(&peer.rtcv4, &attr.ecom) {
+            if rtc_blocks_v4(peer, &attr.ecom) {
                 continue;
             }
 
@@ -17095,11 +17320,6 @@ pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut BgpTop) {
             peer.send_vpnv4(vpnv4_nlri, arc_attr, false);
         }
     }
-
-    peer.flush_vpnv4();
-
-    // Send End-of-RIB marker for IPv4 VPN
-    send_eor_vpnv4_unicast(peer);
 }
 
 /// VPNv6 counterpart of [`route_sync_vpnv4`]: dump the VPNv6 Loc-RIB to a
@@ -17108,6 +17328,13 @@ pub fn route_sync_vpnv4(peer: &mut Peer, bgp: &mut BgpTop) {
 /// imported needs this catch-up (the v6 twin of the VPNv4 sync that was
 /// previously missing).
 pub fn route_sync_vpnv6(peer: &mut Peer, bgp: &mut BgpTop) {
+    vpnv6_dump(peer, bgp, false);
+    peer.flush_vpnv6();
+    send_eor_vpnv6_vpn(peer);
+}
+
+/// VPNv6 twin of [`vpnv4_dump`].
+fn vpnv6_dump(peer: &mut Peer, bgp: &mut BgpTop, missing_only: bool) {
     let add_path = peer.opt.is_add_path_send(Afi::Ip6, Safi::MplsVpn);
 
     let all_routes: Vec<(RouteDistinguisher, Vec<(Ipv6Net, BgpRib)>)> = if add_path {
@@ -17144,6 +17371,11 @@ pub fn route_sync_vpnv6(peer: &mut Peer, bgp: &mut BgpTop) {
 
     for (rd, routes) in all_routes {
         for (prefix, mut rib) in routes {
+            if missing_only
+                && vpn_row_held(peer.adj_out.v6vpn.get(&rd), &prefix, rib.local_id, add_path)
+            {
+                continue;
+            }
             // RFC 9494 §4.3: stale routes only go to LLGR peers.
             if llgr_blocks_advertisement(rib.stale, &peer.cap_recv, Afi::Ip6, Safi::MplsVpn) {
                 continue;
@@ -17163,7 +17395,7 @@ pub fn route_sync_vpnv6(peer: &mut Peer, bgp: &mut BgpTop) {
             };
             let attr = decision.attr;
             // RTC: per-peer route-target constraint.
-            if !peer.rtcv6.is_empty() && !rtc_match(&peer.rtcv6, &attr.ecom) {
+            if rtc_blocks_v6(peer, &attr.ecom) {
                 continue;
             }
             let label = vpnv6_service_label(&rib, &attr);
@@ -17174,9 +17406,6 @@ pub fn route_sync_vpnv6(peer: &mut Peer, bgp: &mut BgpTop) {
             peer.send_vpnv6(vpnv6_nlri, arc_attr, false);
         }
     }
-
-    peer.flush_vpnv6();
-    send_eor_vpnv6_vpn(peer);
 }
 
 // Send End-of-RIB marker for IPv6 VPN.
@@ -17244,6 +17473,100 @@ fn send_rtcv4_membership(peer: &mut Peer, bgp: &BgpTop) {
         updates,
     }));
     peer.send_update(update);
+}
+
+/// Review finding #19: our RTC membership for the IPv4 (`v6` false) or
+/// IPv6 family changed from `before` to `after` — the union of the local
+/// VRFs' import RTs, empty meaning the default ("send me everything").
+/// Tell `peer`: announce what `after` adds, then withdraw what it drops,
+/// so the peer never holds an empty membership in between, which selects
+/// nothing. Moving to or from the default announces or withdraws the
+/// zero-length default NLRI.
+pub(super) fn send_rtc_membership_change(
+    peer: &mut Peer,
+    v6: bool,
+    before: &BTreeSet<RouteDistinguisher>,
+    after: &BTreeSet<RouteDistinguisher>,
+) {
+    // `None` is the default membership.
+    let side = |from: &BTreeSet<RouteDistinguisher>, to: &BTreeSet<RouteDistinguisher>| {
+        if to.is_empty() {
+            if from.is_empty() { vec![] } else { vec![None] }
+        } else {
+            to.difference(from).map(|rt| Some(*rt)).collect::<Vec<_>>()
+        }
+    };
+    let announce = side(before, after);
+    let withdraw = side(after, before);
+    let value = |rt: RouteDistinguisher| {
+        let mut val: ExtCommunityValue = rt.into();
+        val.low_type = 0x02;
+        val
+    };
+    let local_as = peer.local_as;
+    if !announce.is_empty() {
+        let mut update = peer.update_packet();
+        let mut attrs = BgpAttr::new();
+        if peer.is_ibgp() {
+            attrs.local_pref = Some(LocalPref::default());
+        }
+        update.bgp_attr = Some(attrs);
+        update.mp_update = Some(if v6 {
+            MpReachAttr::Rtcv6(Rtcv6Reach {
+                snpa: 0,
+                nhop: IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+                updates: announce
+                    .iter()
+                    .map(|m| {
+                        m.map_or_else(Rtcv6::default_membership, |rt| {
+                            Rtcv6::new(local_as, value(rt))
+                        })
+                    })
+                    .collect(),
+            })
+        } else {
+            MpReachAttr::Rtcv4(Rtcv4Reach {
+                snpa: 0,
+                nhop: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                updates: announce
+                    .iter()
+                    .map(|m| {
+                        m.map_or_else(Rtcv4::default_membership, |rt| {
+                            Rtcv4::new(local_as, value(rt))
+                        })
+                    })
+                    .collect(),
+            })
+        });
+        peer.send_update(update);
+    }
+    if !withdraw.is_empty() {
+        let mut update = peer.update_packet();
+        update.mp_withdraw = Some(if v6 {
+            MpUnreachAttr::Rtcv6(
+                withdraw
+                    .iter()
+                    .map(|m| {
+                        m.map_or_else(Rtcv6::default_membership, |rt| {
+                            Rtcv6::new(local_as, value(rt))
+                        })
+                    })
+                    .collect(),
+            )
+        } else {
+            MpUnreachAttr::Rtcv4(
+                withdraw
+                    .iter()
+                    .map(|m| {
+                        m.map_or_else(Rtcv4::default_membership, |rt| {
+                            Rtcv4::new(local_as, value(rt))
+                        })
+                    })
+                    .collect(),
+            )
+        });
+        peer.send_update(update);
+    }
 }
 
 // Send End-of-RIB marker for RTCv4.
@@ -17539,12 +17862,13 @@ pub fn route_sync(peer: &mut Peer, bgp: &mut BgpTop, v4_via_pool: bool) {
         send_rtcv4_membership(peer, bgp);
         send_eor_rtcv4_unicast(peer);
     }
-    // IPv6 RTC: advertise our VPNv6 import-RT membership so the peer
-    // constrains the VPNv6 routes it sends us. Unlike VPNv4 there is no
-    // VPNv6 sync-on-establish to defer (VPNv6 is advertised event-driven
-    // only), so the membership exchange stands alone — the peer's own
-    // membership we learn here gates our event-driven VPNv6 advertise.
+    // IPv6 RTC: the same for VPNv6 — advertise our VPNv6 import-RT
+    // membership, and defer our VPNv6 dump until the peer has sent us its
+    // own (review finding #19: the dump ran at once, before the peer's
+    // membership could constrain it).
     if peer.is_afi_safi(Afi::Ip6, Safi::Rtc) {
+        let key = AfiSafi::new(Afi::Ip6, Safi::Rtc);
+        peer.eor.insert(key, true);
         send_rtcv6_membership(peer, bgp);
         send_eor_rtcv6_unicast(peer);
     }
@@ -17577,7 +17901,10 @@ pub fn route_sync(peer: &mut Peer, bgp: &mut BgpTop, v4_via_pool: bool) {
         }
     }
     if peer.is_afi_safi(Afi::Ip6, Safi::MplsVpn) {
-        route_sync_vpnv6(peer, bgp);
+        let key = AfiSafi::new(Afi::Ip6, Safi::Rtc);
+        if !peer.eor.contains_key(&key) {
+            route_sync_vpnv6(peer, bgp);
+        }
     }
     if peer.is_afi_safi(Afi::L2vpn, Safi::Evpn) {
         route_sync_evpn(peer, bgp);

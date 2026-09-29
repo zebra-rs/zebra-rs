@@ -4239,6 +4239,54 @@ impl Bgp {
         }
     }
 
+    /// Our RTC membership (RFC 4684), IPv4 and IPv6: the union of the local
+    /// VRFs' import RTs per family, empty meaning the default.
+    fn local_rtc_membership(
+        &self,
+    ) -> (
+        std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
+        std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
+    ) {
+        let mut v4 = std::collections::BTreeSet::new();
+        let mut v6 = std::collections::BTreeSet::new();
+        for vrf in self.rib_known_vrfs.values() {
+            v4.extend(vrf.import_rts_v4.iter().copied());
+            v6.extend(vrf.import_rts_v6.iter().copied());
+        }
+        (v4, v6)
+    }
+
+    /// Review finding #19: a local VRF change may have changed our RTC
+    /// membership from `before`. The membership was advertised only at
+    /// session-up, so tell every Established RTC neighbor what changed.
+    fn rtc_membership_changed(
+        &mut self,
+        before: (
+            std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
+            std::collections::BTreeSet<bgp_packet::RouteDistinguisher>,
+        ),
+    ) {
+        let after = self.local_rtc_membership();
+        if after == before {
+            return;
+        }
+        for ident in self.peers.idents() {
+            let Some(peer) = self.peers.get_mut_by_idx(ident) else {
+                continue;
+            };
+            if peer.state != super::peer::State::Established {
+                continue;
+            }
+            if before.0 != after.0 && peer.is_afi_safi(bgp_packet::Afi::Ip, bgp_packet::Safi::Rtc) {
+                super::route::send_rtc_membership_change(peer, false, &before.0, &after.0);
+            }
+            if before.1 != after.1 && peer.is_afi_safi(bgp_packet::Afi::Ip6, bgp_packet::Safi::Rtc)
+            {
+                super::route::send_rtc_membership_change(peer, true, &before.1, &after.1);
+            }
+        }
+    }
+
     /// The service label and resolved transport a VRF import of `winner`
     /// carries: a route a local VRF originated leaks with neither, as the
     /// Export path sends it; a received one carries its label and its
@@ -4988,7 +5036,9 @@ impl Bgp {
                 self.maybe_respawn_vrf_with_kernel_ctx(&name);
             }
             RibRx::VrfDel { name } => {
+                let membership = self.local_rtc_membership();
                 self.rib_known_vrfs.remove(&name);
+                self.rtc_membership_changed(membership);
                 // No despawn here — the VRF could come back, and the
                 // per-VRF task carries the YANG intent. If the
                 // operator subsequently deletes the BGP VRF block,
@@ -5019,6 +5069,7 @@ impl Bgp {
                     .get(&name)
                     .map(|c| c.inter_as_hybrid)
                     .unwrap_or(false);
+                let membership = self.local_rtc_membership();
                 let entry = self.rib_known_vrfs.entry(name.clone()).or_default();
                 let old_import_v4 =
                     (entry.import_rts_v4 != ipv4_import_rts).then(|| entry.import_rts_v4.clone());
@@ -5055,6 +5106,8 @@ impl Bgp {
                 if let Some(old) = old_import_v6 {
                     self.reimport_vrf_v6(&name, &old);
                 }
+                // Our RTC membership is the union of the import RTs.
+                self.rtc_membership_changed(membership);
                 // Re-stamp the VRF's originated MUP routes with the new
                 // export RTs (same race the v4/v6 retag above closes, plus
                 // a later `set ... mup route-target export` commit). The
@@ -8897,3 +8950,7 @@ mod addpath_nht_review_tests;
 #[cfg(test)]
 #[path = "vrf_rt_change_review_tests.rs"]
 mod vrf_rt_change_review_tests;
+
+#[cfg(test)]
+#[path = "rtc_mid_session_review_tests.rs"]
+mod rtc_mid_session_review_tests;
