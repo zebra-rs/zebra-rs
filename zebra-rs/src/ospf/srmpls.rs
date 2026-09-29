@@ -33,6 +33,29 @@ pub fn router_info_lsa_build(
     algos: Vec<Algo>,
     fads: Vec<RouterInfoTlvFad>,
 ) -> OspfLsa {
+    let ri_lsa = RouterInfoLsa {
+        tlvs: router_info_tlvs(gr_capable, algos, fads),
+    };
+
+    // Opaque Area LSA: ls_id encodes opaque type (4=RouterInfo) in first byte,
+    // opaque ID (0) in remaining 3 bytes.
+    let ls_id = Ipv4Addr::from((OpaqueLsaType::ROUTER_INFO as u32) << 24);
+    let mut lsah = OspfLsaHeader::new(OspfLsType::OpaqueAreaLocal, ls_id, router_id);
+    lsah.options = 0x42; // O-bit (Opaque capable) + E-bit.
+
+    let mut lsa = OspfLsa::from(lsah, OspfLsp::OpaqueAreaRouterInfo(ri_lsa));
+    lsa.update();
+    lsa
+}
+
+/// The Router Information TLVs both OSPF versions advertise for Segment
+/// Routing, in the order RFC 7770 §2.4 needs: the Router Informational
+/// Capabilities TLV first.
+fn router_info_tlvs(
+    gr_capable: bool,
+    algos: Vec<Algo>,
+    fads: Vec<RouterInfoTlvFad>,
+) -> Vec<RouterInfoTlv> {
     let mut tlvs = Vec::new();
 
     // Router Capabilities TLV (type 1, RFC 7770 §2.1):
@@ -69,16 +92,47 @@ pub fn router_info_lsa_build(
     for fad in fads {
         tlvs.push(RouterInfoTlv::Fad(fad));
     }
+    tlvs
+}
 
-    let ri_lsa = RouterInfoLsa { tlvs };
+/// The Link State ID — the Instance ID (RFC 7770 §2.2) — of the OSPFv3
+/// Router Information LSA zebra-rs originates. The Router Informational
+/// Capabilities TLV it carries first may only appear in instance 0
+/// (§2.4).
+pub const ROUTER_INFO_V3_INSTANCE: u32 = 0;
 
-    // Opaque Area LSA: ls_id encodes opaque type (4=RouterInfo) in first byte,
-    // opaque ID (0) in remaining 3 bytes.
-    let ls_id = Ipv4Addr::from((OpaqueLsaType::ROUTER_INFO as u32) << 24);
-    let mut lsah = OspfLsaHeader::new(OspfLsType::OpaqueAreaLocal, ls_id, router_id);
-    lsah.options = 0x42; // O-bit (Opaque capable) + E-bit.
-
-    let mut lsa = OspfLsa::from(lsah, OspfLsp::OpaqueAreaRouterInfo(ri_lsa));
+/// Build the OSPFv3 Router Information LSA (RFC 7770), area scope, with
+/// this router's Segment Routing capabilities as RFC 8666 §4 places them:
+/// the TLVs of [`router_info_lsa_build`], then SRv6 Capabilities (RFC 9513
+/// §2) when `srv6` is set. It is the standard carrier for what
+/// [`e_router_v3_sr_info_lsa_build`] carries in zebra-rs's former
+/// encoding, which older zebra-rs routers still read.
+pub fn router_info_v3_lsa_build(
+    router_id: Ipv4Addr,
+    gr_capable: bool,
+    algos: Vec<Algo>,
+    fads: Vec<RouterInfoTlvFad>,
+    srv6: bool,
+) -> Ospfv3Lsa {
+    let mut tlvs = router_info_tlvs(gr_capable, algos, fads);
+    if srv6 {
+        // No O-flag support, no sub-TLVs.
+        tlvs.push(RouterInfoTlv::Srv6Capabilities(
+            RouterInfoTlvSrv6Cap::default(),
+        ));
+    }
+    let mut lsa = Ospfv3Lsa::from(
+        Ospfv3LsaHeader {
+            ls_age: 0,
+            ls_type: OSPFV3_ROUTER_INFO_LSA_TYPE,
+            link_state_id: ROUTER_INFO_V3_INSTANCE,
+            advertising_router: router_id,
+            ls_seq_number: 0x8000_0001,
+            ls_checksum: 0,
+            length: 0,
+        },
+        Ospfv3LsBody::RouterInfo(RouterInfoLsa { tlvs }),
+    );
     lsa.update();
     lsa
 }
