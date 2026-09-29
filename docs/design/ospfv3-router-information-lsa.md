@@ -3,8 +3,11 @@
 > **Status:** reviewed (2026-09-29); all five §8 decisions settled, each taking the
 > recommendation: phased over two releases, the legacy carrier dual-originated for one release
 > with no knob, PR 1 first, the interop peer chosen later, OSPFv2's capability bits.
-> **Progress:** PR 1 (D1) merged as #2434, PR 2 (D2) as #2435, PR 3 (D3) as #2437. PR 4 (D4) on
-> branch `ospfv3-sr-adj-sid-codepoints`.
+> **Progress:** PR 1 (D1) merged as #2434, PR 2 (D2) as #2435, PR 3 (D3) as #2437. #2439 fixed the
+> OSPFv3 database summary, which never listed a Router Information LSA, so a neighbour whose
+> adjacency formed after it was originated never learned it; the former carrier hid that until
+> PR 5. PR 4 (D4) on branch `ospfv3-sr-adj-sid-codepoints`, PR 5 (D5) on
+> `ospfv3-sr-retire-e-router-carrier`.
 > **Parent docs:** [ospf-sr-mpls-status.md](./ospf-sr-mpls-status.md) (records the current carrier
 > as "placement by convention, not by RFC fiat"), [ospfv3-srv6-plan.md](./ospfv3-srv6-plan.md),
 > [flex-algo-link-loss.md](./flex-algo-link-loss.md) (PR 3b chose to stay on the current carrier
@@ -231,6 +234,12 @@ The ordering makes every step compatible with the one before:
 So the upgrade rule is: every OSPFv3 SR router runs release N before any runs N+1. PR 5 stops
 originating the legacy carrier (flushing it once) and keeps reading it for one more release, so a
 router upgraded straight from before N to N+1 still reads peers that were on N.
+
+As built (PR 5): `sr_capabilities_v3_originate` flushes this router's SR-info E-Router-LSA
+instead of originating it, and only while the LSDB holds a live copy: one replayed from a
+graceful-restart checkpoint, or one a neighbour floods back after a restart (the self-originated
+echo arm). The reader (D2) and its fallback stay. The legacy builder is kept for tests, which use
+it to stand in for an older router.
 
 ### D6 — Show and BDD
 
