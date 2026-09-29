@@ -291,8 +291,8 @@ impl<V: OspfVersion> Lsdb<V> {
 
     /// Flush an LSA by setting its age to MaxAge and returning a
     /// clone for re-flooding. The refresh timer is cancelled, and
-    /// a new hold timer is set. Now generic — header mutation goes
-    /// through `V::lsa_header_mut` + `V::set_ls_age`.
+    /// a new hold timer is set. The age goes through `V::set_lsa_age`,
+    /// so an LSA kept as received also leaves at MaxAge.
     pub fn flush_lsa(
         &mut self,
         ls_type: OspfLsType,
@@ -303,7 +303,7 @@ impl<V: OspfVersion> Lsdb<V> {
     ) -> Option<V::Lsa> {
         let lsa_key: OspfLsaKey = v2_lsa_key(ls_type, ls_id, adv_router);
         if let Some(lsa) = self.tables.get_mut(&lsa_key) {
-            V::set_ls_age(V::lsa_header_mut(&mut lsa.data), OSPF_MAX_AGE);
+            V::set_lsa_age(&mut lsa.data, OSPF_MAX_AGE);
             lsa.birth_time = tokio::time::Instant::now();
             lsa.refresh_timer = None;
             lsa.hold_timer = Some(hold_timer(tx, area_id, lsa_key, OSPF_MAX_AGE));
@@ -346,7 +346,7 @@ impl<V: OspfVersion> Lsdb<V> {
         area_id: Option<Ipv4Addr>,
     ) -> Option<V::Lsa> {
         if let Some(lsa) = self.tables.get_mut(&key) {
-            V::set_ls_age(V::lsa_header_mut(&mut lsa.data), OSPF_MAX_AGE);
+            V::set_lsa_age(&mut lsa.data, OSPF_MAX_AGE);
             lsa.birth_time = tokio::time::Instant::now();
             lsa.refresh_timer = None;
             lsa.hold_timer = Some(hold_timer(tx, area_id, key, OSPF_MAX_AGE));
@@ -941,4 +941,109 @@ fn e_router_label_blocks(tlvs: &[Ospfv3ExtTlv]) -> (Option<LabelBlock>, Option<L
         }
     }
     (global, local)
+}
+
+#[cfg(test)]
+mod flush_tests {
+    use std::net::Ipv4Addr;
+
+    use bytes::BytesMut;
+    use ospf_packet::*;
+
+    use super::super::tracing::OspfTracing;
+    use super::super::version::{Ospfv2, Ospfv3};
+    use super::{Lsdb, OSPF_MAX_AGE, v2_lsa_key};
+
+    const ADV: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
+
+    /// An OSPFv2 Router-LSA as received: the LS Update parser keeps its
+    /// bytes, which emit replays.
+    fn received_v2() -> OspfLsa {
+        let mut lsa = OspfLsa::from(
+            OspfLsaHeader::new(OspfLsType::Router, ADV, ADV),
+            OspfLsp::Router(RouterLsa {
+                flags: 0,
+                links: vec![],
+            }),
+        );
+        lsa.update();
+        let mut wire = BytesMut::new();
+        lsa.h.emit(&mut wire);
+        lsa.emit_lsp(&mut wire);
+        let mut received = OspfLsa::decode(&wire).expect("decodes");
+        received.raw = Some(wire.freeze());
+        received
+    }
+
+    /// An OSPFv3 LSA as received or restored from a checkpoint.
+    fn received_v3() -> Ospfv3Lsa {
+        let mut lsa = Ospfv3Lsa::from(
+            Ospfv3LsaHeader {
+                ls_age: 7,
+                ls_type: OSPFV3_E_ROUTER_LSA_TYPE,
+                link_state_id: 0,
+                advertising_router: ADV,
+                ls_seq_number: 0x8000_0001,
+                ls_checksum: 0,
+                length: 0,
+            },
+            Ospfv3LsBody::Unknown(vec![0, 9, 0, 4, 0, 0, 0, 0]),
+        );
+        lsa.update();
+        let mut wire = BytesMut::new();
+        lsa.emit(&mut wire);
+        Ospfv3Lsa::decode(&wire).expect("decodes")
+    }
+
+    /// Flushing an LSA the database keeps as received puts MaxAge on the
+    /// wire. It used to replay the received bytes, age and all, so the
+    /// neighbours were sent the live instance instead of its withdrawal:
+    /// a former identity's LSAs, a retired carrier restored from a
+    /// checkpoint, anything flushed in the form it arrived in.
+    #[tokio::test]
+    async fn a_flush_puts_max_age_on_the_wire() {
+        let tracing = OspfTracing::default();
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut lsdb = Lsdb::<Ospfv2>::new();
+        let lsa = received_v2();
+        assert!(lsa.raw.is_some());
+        lsdb.install_lsa(lsa, &tx, None, &tracing);
+        let flushed = lsdb
+            .flush_lsa(OspfLsType::Router, ADV, ADV, &tx, None)
+            .expect("flushed");
+        // What emit replays for it.
+        let wire = flushed.raw.clone().expect("kept as received");
+        let on_wire = OspfLsa::decode(&wire).expect("decodes");
+        assert_eq!(on_wire.h.ls_age, OSPF_MAX_AGE, "v2");
+        assert!(on_wire.verify_checksum(), "v2 checksum");
+        let key = v2_lsa_key(OspfLsType::Router, ADV, ADV);
+        assert!(lsdb.tables.contains_key(&key));
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut lsdb = Lsdb::<Ospfv3>::new();
+        let lsa = received_v3();
+        assert!(lsa.raw.is_some());
+        let key = (OSPFV3_E_ROUTER_LSA_TYPE, 0, ADV);
+        lsdb.install_lsa(lsa, &tx, None, &tracing);
+        let flushed = lsdb.flush_lsa_by_raw_key(key, &tx, None).expect("flushed");
+        let mut wire = BytesMut::new();
+        flushed.emit(&mut wire);
+        let on_wire = Ospfv3Lsa::decode(&wire).expect("decodes");
+        assert_eq!(on_wire.h.ls_age, OSPF_MAX_AGE, "v3");
+        let mut expected = received_v3();
+        expected.set_age(OSPF_MAX_AGE);
+        let mut expected_wire = BytesMut::new();
+        expected.emit(&mut expected_wire);
+        assert_eq!(wire, expected_wire, "v3: the same instance, aged");
+        assert_eq!(
+            &wire[2..],
+            &{
+                let mut w = BytesMut::new();
+                received_v3().emit(&mut w);
+                w
+            }[2..],
+            "v3: only the age changes"
+        );
+    }
 }
