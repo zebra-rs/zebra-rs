@@ -880,3 +880,204 @@ async fn v6_soft_out_withdraws_an_unreachable_addpath_path() {
         "the soft-out withdraws the unreachable path"
     );
 }
+
+// -------------------------------------------------------------------------
+// #23 follow-up: a withdraw that travels as an advertise job is not held
+// by `suppress-fib-pending`
+// -------------------------------------------------------------------------
+
+/// N>1 under `suppress-fib-pending`: B's source withdraws it while A
+/// remains. The withdraw reaches main as an advertise job (`added: None`,
+/// `replaced: [B]`), and re-installing A arms a hold. The held job
+/// returned before `route_withdraw_from_addpath`, and the release walks
+/// the current candidates only, so C kept B's path-id for good.
+#[tokio::test]
+async fn v4_sharded_withdraw_under_suppress_fib_pending_reaches_addpath_neighbors_now() {
+    use crate::bgp::route::route_apply_bestpath_v4_batch;
+    use crate::bgp::shard::{BgpShard, ShardMsg};
+    let fam = Fam::V4;
+    let (mut bgp, a, b, c) = fam.topology();
+    bgp.local_rib.suppress_fib_pending = true;
+    let id_a = fam.install(&mut bgp, 1, a, true);
+    let id_b = fam.install(&mut bgp, 2, b, true);
+    let prefix: Ipv4Net = fam.prefix().parse().unwrap();
+    let mut worker = BgpShard::default();
+    for rib in bgp.shard.v4.candidates(prefix) {
+        worker.v4.update(prefix, rib.clone());
+    }
+    fam.dump(&mut bgp, c);
+    assert_eq!(fam.held(&bgp, c), vec![id_a, id_b]);
+
+    let outs = worker.handle(
+        ShardMsg::WithdrawV4 {
+            ident: b,
+            rd: None,
+            nlri: Ipv4Nlri { id: 0, prefix },
+            rib_in: false,
+        },
+        None,
+    );
+    {
+        let (mut top, peers) = split(&mut bgp);
+        route_apply_bestpath_v4_batch(&mut top, peers, outs);
+    }
+    assert!(
+        crate::bgp::route::fib_pending_blocks_sync(&bgp.local_rib, fam.prefix().parse().unwrap()),
+        "re-installing A armed a hold"
+    );
+    assert_eq!(
+        fam.held(&bgp, c),
+        vec![id_a],
+        "B's path-id is withdrawn without waiting for the ack"
+    );
+    fib_ack(&mut bgp, fam.prefix());
+    assert_eq!(
+        fam.held(&bgp, c),
+        vec![id_a],
+        "the release does not bring B back"
+    );
+}
+
+/// N=1 under `suppress-fib-pending`: B is re-announced and inbound policy
+/// now denies it, which removes B's path through the same advertise job.
+/// C must lose B's path-id at once — the held job skipped it.
+#[tokio::test]
+async fn v4_inbound_deny_under_suppress_fib_pending_reaches_addpath_neighbors_now() {
+    use crate::policy::{PolicyAction, PolicyList};
+    let mut bgp = fresh_bgp();
+    bgp.local_rib.suppress_fib_pending = true;
+    let (a, _ra) = add_peer(&mut bgp, "10.0.0.2", 65002, &[V4U], &[]);
+    let (b, _rb) = add_peer(&mut bgp, "10.0.0.3", 65003, &[V4U], &[]);
+    let (c, _rc) = add_peer(&mut bgp, "10.0.0.4", 65001, &[V4U], &[V4U]);
+    announce_v4(&mut bgp, a, "10.23.6.0/24", "65002", "10.0.0.2");
+    announce_v4(&mut bgp, b, "10.23.6.0/24", "65003 65009", "10.0.0.3");
+    resolve(&mut bgp, "10.0.0.2", true);
+    resolve(&mut bgp, "10.0.0.3", true);
+    fib_ack(&mut bgp, "10.23.6.0/24");
+    let (id_a, id_b) = v4_ids(&bgp, "10.23.6.0/24", a, b);
+    let mut both = vec![id_a, id_b];
+    both.sort();
+    assert_eq!(held_v4(&bgp, c, "10.23.6.0/24"), both);
+
+    let mut deny = PolicyList::default();
+    deny.entry(10).action = PolicyAction::Deny;
+    let slot = bgp
+        .peers
+        .get_mut_by_idx(b)
+        .unwrap()
+        .policy_list_slot(V4U, InOut::Input);
+    slot.name = Some("IN".into());
+    slot.policy_list = Some(deny);
+    // The IPv4-unicast ingress evaluates inbound policy in the shard, from
+    // the snapshot a policy resolve replicates.
+    bgp.shard_replace_in_policy(b);
+    announce_v4(&mut bgp, b, "10.23.6.0/24", "65003 65009", "10.0.0.3");
+    let p: Ipv4Net = "10.23.6.0/24".parse().unwrap();
+    assert!(
+        bgp.shard.v4.candidates(p).iter().all(|r| r.ident != b),
+        "the inbound policy removed B's path"
+    );
+    assert!(
+        crate::bgp::route::fib_pending_blocks_sync(&bgp.local_rib, "10.23.6.0/24".parse().unwrap()),
+        "re-installing A armed a hold"
+    );
+    assert_eq!(
+        held_v4(&bgp, c, "10.23.6.0/24"),
+        vec![id_a],
+        "B's path-id is withdrawn without waiting for the ack"
+    );
+}
+
+/// Control: at N=1 a wire withdraw of B takes `route_ipv4_withdraw`, which
+/// sends the AddPath withdraw outside the held fan-out — C loses B's
+/// path-id at once already.
+#[tokio::test]
+async fn v4_wire_withdraw_under_suppress_fib_pending_reaches_addpath_neighbors_now() {
+    let mut bgp = fresh_bgp();
+    bgp.local_rib.suppress_fib_pending = true;
+    let (a, _ra) = add_peer(&mut bgp, "10.0.0.2", 65002, &[V4U], &[]);
+    let (b, _rb) = add_peer(&mut bgp, "10.0.0.3", 65003, &[V4U], &[]);
+    let (c, _rc) = add_peer(&mut bgp, "10.0.0.4", 65001, &[V4U], &[V4U]);
+    announce_v4(&mut bgp, a, "10.23.5.0/24", "65002", "10.0.0.2");
+    announce_v4(&mut bgp, b, "10.23.5.0/24", "65003 65009", "10.0.0.3");
+    resolve(&mut bgp, "10.0.0.2", true);
+    resolve(&mut bgp, "10.0.0.3", true);
+    fib_ack(&mut bgp, "10.23.5.0/24");
+    let (id_a, _id_b) = v4_ids(&bgp, "10.23.5.0/24", a, b);
+
+    let mut packet = UpdatePacket::new();
+    packet.ipv4_withdraw.push(Ipv4Nlri {
+        id: 0,
+        prefix: "10.23.5.0/24".parse().unwrap(),
+    });
+    {
+        let (mut top, peers) = split(&mut bgp);
+        route_from_peer(b, packet, &mut top, peers, None);
+    }
+    assert!(
+        crate::bgp::route::fib_pending_blocks_sync(&bgp.local_rib, "10.23.5.0/24".parse().unwrap()),
+        "re-installing A armed a hold"
+    );
+    assert_eq!(held_v4(&bgp, c, "10.23.5.0/24"), vec![id_a]);
+}
+
+/// N=1 under `suppress-fib-pending`: B is re-announced with a next-hop
+/// that has not resolved yet. The replacement keeps B's path-id and is not
+/// eligible, so C must lose that path-id now — the held job left it until
+/// the release.
+#[tokio::test]
+async fn v4_unresolved_replacement_under_suppress_fib_pending_is_withdrawn_now() {
+    let mut bgp = fresh_bgp();
+    bgp.local_rib.suppress_fib_pending = true;
+    let (a, _ra) = add_peer(&mut bgp, "10.0.0.2", 65002, &[V4U], &[]);
+    let (b, _rb) = add_peer(&mut bgp, "10.0.0.3", 65003, &[V4U], &[]);
+    let (c, mut rc) = add_peer(&mut bgp, "10.0.0.4", 65001, &[V4U], &[V4U]);
+    announce_v4(&mut bgp, a, "10.23.4.0/24", "65002", "10.0.0.2");
+    announce_v4(&mut bgp, b, "10.23.4.0/24", "65003 65009", "10.0.0.3");
+    resolve(&mut bgp, "10.0.0.2", true);
+    resolve(&mut bgp, "10.0.0.3", true);
+    fib_ack(&mut bgp, "10.23.4.0/24");
+    let (id_a, id_b) = v4_ids(&bgp, "10.23.4.0/24", a, b);
+    let mut both = vec![id_a, id_b];
+    both.sort();
+    assert_eq!(held_v4(&bgp, c, "10.23.4.0/24"), both);
+    let _ = withdrawn_v4(&mut rc);
+
+    announce_v4(&mut bgp, b, "10.23.4.0/24", "65003 65009", "10.0.0.30");
+    assert!(
+        crate::bgp::route::fib_pending_blocks_sync(&bgp.local_rib, "10.23.4.0/24".parse().unwrap()),
+        "re-installing A armed a hold"
+    );
+    assert_eq!(
+        held_v4(&bgp, c, "10.23.4.0/24"),
+        vec![id_a],
+        "B's path-id is withdrawn without waiting for the ack"
+    );
+    assert_eq!(
+        withdrawn_v4(&mut rc),
+        vec![id_b],
+        "exact ID reaches the writer now"
+    );
+    resolve(&mut bgp, "10.0.0.30", true);
+    assert_eq!(
+        held_v4(&bgp, c, "10.23.4.0/24"),
+        vec![id_a],
+        "the resolved replacement must still wait for FIB confirmation"
+    );
+    fib_ack(&mut bgp, "10.23.4.0/24");
+    assert_eq!(
+        held_v4(&bgp, c, "10.23.4.0/24"),
+        both,
+        "release restores the replacement under its original ID"
+    );
+    let prefix: Ipv4Net = "10.23.4.0/24".parse().unwrap();
+    let row = bgp.peers.get_by_idx(c).unwrap().adj_out.v4.0[&prefix]
+        .iter()
+        .find(|r| r.local_id == id_b)
+        .unwrap();
+    assert_eq!(
+        crate::bgp::nht::nht_target(&row.attr),
+        Some("10.0.0.30".parse().unwrap()),
+        "release advertises the new next-hop, not the withdrawn one"
+    );
+}

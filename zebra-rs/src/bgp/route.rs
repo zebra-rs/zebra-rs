@@ -4996,9 +4996,25 @@ fn apply_ipv4_advertise_job(
     if rd.is_none() {
         let installable = fib_installable_v4(bgp, prefix, &selected);
         if fib_pending_hold(bgp, IpNet::V4(prefix), &selected, installable) {
-            // A withdraw is never held: a candidate whose next-hop just
-            // went unreachable leaves the AddPath peers now (review finding
-            // #23); a recovered one waits for the release.
+            // A withdraw is never held (the knob's contract, see
+            // `fib_pending_hold`), so the AddPath half of the job still
+            // withdraws now: a path removed from the Loc-RIB (a withdraw at
+            // N>1, an update the inbound policy denies), an added path whose
+            // next-hop does not resolve, a candidate whose next-hop just went
+            // unreachable (review finding #23). The release walks the
+            // current candidates, so a removed path skipped here would never
+            // be withdrawn. Advertisements wait for the release.
+            match &added {
+                None => {
+                    for removed in &replaced {
+                        route_withdraw_from_addpath(rd, prefix, removed, source_ident, bgp, peers);
+                    }
+                }
+                Some(added) if !added.nexthop_reachable => {
+                    route_advertise_to_addpath(rd, prefix, added, source_ident, bgp, peers);
+                }
+                Some(_) => {}
+            }
             for rib in nexthop_flipped.iter().filter(|r| !r.nexthop_reachable) {
                 route_advertise_to_addpath(rd, prefix, rib, source_ident, bgp, peers);
             }

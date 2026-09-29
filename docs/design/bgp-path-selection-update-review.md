@@ -7,7 +7,7 @@ MUP/Flowspec/SR-Policy/RTC where they share the machinery). Reviewed
 against `main` at `2f1e9a09` (2026-09-07). Line numbers are as of that
 commit.
 
-Status (2026-09-25): twenty-one items are fixed on `main` — #1 (PR
+Status (2026-09-29): twenty-three items are fixed on `main` — #1 (PR
 #2372, merge `3beacbcc`), the listen-range peer-type item found while
 fixing it (PR #2373, `ba327126`), #2 (PR #2375, `308b196a`), #3 (PR
 #2376, `b8fef738`), #4 (PR #2377, `1cc31738`, which also closed the
@@ -18,10 +18,12 @@ follow-ups), #7 (PR #2380, `d7476601`), #8 and with it #13 (PR #2383,
 #15 (PR #2413, `097ce15d`), #11 (PR #2415, `3401cb1b`), #12 (PR #2417,
 `4ba79217`), the item found while fixing #12 (PR #2418, `6b53ad6a`), #14
 (PR #2420, `49fb77b1`), #20 (PR #2422, `d8f6a0cf`), #10 with the MED
-knobs (PR #2423, `7852fc15`), #16 (PR #2425, `6d4446b1`) and #17 with
-#18 (PR #2426, `9d4e2589`). Each fixed entry ends with its fix note;
-everything else is open. In progress: #23 (AddPath neighbors and
-next-hop reachability), branch `bgp-addpath-nht`.
+knobs (PR #2423, `7852fc15`), #16 (PR #2425, `6d4446b1`), #17 with #18
+(PR #2426, `9d4e2589`), #23 (PR #2429, `74d4500d`) and #24 (PR #2432,
+`969279a0`, three review rounds folded in). Each fixed entry ends with its
+fix note; everything else is open. In progress: a follow-up to #23 (AddPath
+withdraws held by `suppress-fib-pending`), branch
+`bgp-addpath-nht-followups`.
 
 Method: one lead read the selection ladder and every egress builder, then
 five independent read-only reviewers each took one dimension (update-group
@@ -1439,7 +1441,7 @@ cap. The two reviews agree on every overlapping item.
 - Fix direction: use `ORIGINATED_PEER` as the no-source sentinel at the
   call sites.
 
-### 23. P2 CONFIRMED, FIXED on branch `bgp-addpath-nht` — NHT flips never reach AddPath peers, and next-hop-unreachable candidates are advertised to them
+### 23. P2 CONFIRMED, FIXED in #2429 — NHT flips never reach AddPath peers, and next-hop-unreachable candidates are advertised to them
 
 - N=1: `inst.rs:5813-5821` / `5858-5866` / `5906-5912` call only the
   best-path fans (`route_advertise_to_peers` / `_vpnv6`), never
@@ -1559,8 +1561,41 @@ cap. The two reviews agree on every overlapping item.
   path of several is withdrawn by its source, the AddPath withdraw of that
   path is skipped, and the release, which walks the current candidates,
   never sends it.
+- Follow-up (branch `bgp-addpath-nht-followups`): the held-job gap above
+  is narrower than first recorded. A wire withdraw at N=1 takes
+  `route_ipv4_withdraw`, which sends the AddPath withdraw outside the held
+  fan-out; the gap is a removal that travels as an advertise job — every
+  withdraw at N>1 (through the pool reduce) and, at N=1, an update the
+  inbound policy now denies. It contradicts the knob's own contract
+  ("Withdrawals are NEVER suppressed", zebra-bgp-suppress-fib-pending.yang).
+  Gates in `addpath_nht_review_tests.rs`:
+  `v4_sharded_withdraw_under_suppress_fib_pending_reaches_addpath_neighbors_now`
+  and `v4_inbound_deny_under_suppress_fib_pending_reaches_addpath_neighbors_now`
+  (each confirms the hold is armed, then fails on `main`: the AddPath
+  neighbor keeps the removed path-id, and the release never withdraws it);
+  control `v4_wire_withdraw_under_suppress_fib_pending_reaches_addpath_neighbors_now`.
+  No BDD gate: the knob needs a forwarding plane that acknowledges
+  installs (the FPM tee to fpmsyncd), so under BDD every hold would only
+  ride out the 30 s timeout. Also gated:
+  `v4_unresolved_replacement_under_suppress_fib_pending_is_withdrawn_now`
+  (B re-announced with a next-hop that has not resolved: the replacement
+  keeps B's path-id and is not eligible; on `main` the neighbor keeps it
+  until the release).
+  FIXED (branch `bgp-addpath-nht-followups`): the held branch of
+  `apply_ipv4_advertise_job` still runs the AddPath withdraws — each
+  `replaced` path when nothing was added, an added path whose next-hop
+  does not resolve, and (as before) a candidate whose next-hop just went
+  unreachable. Advertisements still wait for the release. On the fix the
+  three gates and the control pass; dropping the removed-path withdraw
+  fails the N>1 and inbound-deny gates, dropping the unresolved-added one
+  fails its gate. Left as assessed: the env-gated group-task engine (no
+  reachability check; the NHT re-run and the FIB release reach its
+  AddPath peers through the update-group path, not the task, whose own
+  Adj-RIB-Out never sees them) goes with #22 / #32; EVPN needs nothing
+  here, since its selection ignores next-hop reachability for every route
+  type, so plain and AddPath neighbors already agree.
 
-### 24. P2 CONFIRMED, FIXED on branch `bgp-rt-import` — a `route-target import` change is silently ineffective; export re-tag skips sibling re-import and RTC-skipped peers
+### 24. P2 CONFIRMED, FIXED in #2432 — a `route-target import` change is silently ineffective; export re-tag skips sibling re-import and RTC-skipped peers
 
 - `inst.rs:4662-4683` (`RibRx::VrfRouteTargets`) assigns the import RT
   sets and re-tags only when an export set changed; import RTs are read
