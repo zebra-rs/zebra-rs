@@ -1477,7 +1477,9 @@ fn write_timer_remaining(
     Ok(())
 }
 
-fn show_router_info_detail(
+/// The TLVs of a Router Information LSA — OSPFv2's opaque one or
+/// OSPFv3's (RFC 7770), which share the TLV registry.
+pub(super) fn show_router_info_detail(
     out: &mut String,
     ri: &RouterInfoLsa,
 ) -> std::result::Result<(), std::fmt::Error> {
@@ -1503,9 +1505,10 @@ fn show_router_info_detail(
                 writeln!(out, "  Segment Routing Algorithm TLV:")?;
                 for algo in &algo_tlv.algos {
                     let algo_name = match algo {
-                        Algo::Spf => "SPF",
-                        Algo::StrictSpf => "Strict SPF",
-                        _ => "Unknown",
+                        Algo::Spf => "SPF".to_string(),
+                        Algo::StrictSpf => "Strict SPF".to_string(),
+                        Algo::FlexAlgo(n) => format!("Flex-Algo {n}"),
+                        Algo::Unknown(n) => format!("Unknown {n}"),
                     };
                     writeln!(out, "    Algorithm {}: {}", u8::from(*algo), algo_name)?;
                 }
@@ -1560,6 +1563,9 @@ fn show_router_info_detail(
                         OspfFadSubTlv::Unknown(_) => {}
                     }
                 }
+            }
+            RouterInfoTlv::Srv6Capabilities(cap) => {
+                writeln!(out, "  SRv6 Capabilities TLV: Flags: 0x{:04x}", cap.flags)?;
             }
             RouterInfoTlv::Unknown(_) => {}
         }
