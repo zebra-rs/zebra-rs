@@ -1,0 +1,49 @@
+# ce — advertises algorithm 128, computed on the minimum unidirectional
+# link delay. Its link to n1 has a Min delay configured but no Max, so the
+# Min/Max Link Delay sub-TLV (which needs both) is not advertised for it.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.1/32
+- if-name: ce-n1
+  ipv4:
+    address: 192.168.70.1/30
+- if-name: ce-n2
+  ipv4:
+    address: 192.168.70.5/30
+
+router:
+  isis:
+    net: 49.0070.0000.0000.0001.00
+    hostname: ce
+    is-type: level-2-only
+    segment-routing: mpls
+    te-router-id: 10.0.0.1
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+        prefix-sid:
+          index: 1
+        flex-algo-prefix-sid:
+        - algo: 128
+          index: 11
+    - if-name: ce-n1
+      network-type: point-to-point
+      ipv4:
+        enabled: true
+      te-metric:
+        min-delay: 100
+    - if-name: ce-n2
+      network-type: point-to-point
+      ipv4:
+        enabled: true
+      te-metric:
+        min-delay: 300
+        max-delay: 400
+    flex-algo:
+    - algo: 128
+      advertise-definition: true
+      metric-type: min-unidir-link-delay
+      dataplane:
+        sr-mpls: true

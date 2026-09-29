@@ -89,8 +89,9 @@ fn peer_link_attr<T>(
         .find_map(pick)
 }
 
-/// The Min delay to cost a peer's link at for metric-type 1, or `None`
-/// when the link must be pruned (RFC 9350 §15).
+/// The Min delay to cost a link at for metric-type 1 — any router's, this
+/// one's included, from what the link advertises — or `None` when the link
+/// must be pruned (RFC 9350 §15).
 pub fn peer_min_delay(entry: &IsisTlvExtIsReachEntry) -> Option<u32> {
     peer_link_attr(entry, |sub| match sub {
         NeighSubTlv::MinMaxLinkDelay(d) => Some(d.min_delay),

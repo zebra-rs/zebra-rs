@@ -5161,6 +5161,112 @@ mod flex_algo_graph_tests {
         both.sort();
         assert_eq!(both, vec![7, 8]);
     }
+
+    /// Our router with one point-to-point link (ifindex 7) to a peer, its
+    /// delay configured as `configured` (Min, Max) and advertised in our
+    /// LSP as `advertised` (a Min/Max pair, or none). Our edges in the
+    /// algorithm-128 graph under a metric-type-1 definition, as
+    /// `(interface, cost)`.
+    fn own_delay_edges(
+        configured: (Option<u32>, Option<u32>),
+        advertised: Option<u32>,
+    ) -> Vec<(u32, u32)> {
+        let mut isis = fresh_isis();
+        let own = isis.config.net.sys_id();
+        let peer = IsisSysId {
+            id: [0, 0, 0, 0, 0, 9],
+        };
+        let neighbor = IsisNeighborId::from_sys_id(&peer, 0);
+        let (ptx, prx) = tokio::sync::mpsc::unbounded_channel();
+        Box::leak(Box::new(prx));
+        let mut link = IsisLink {
+            ifindex: 7,
+            ptx,
+            read_task: tokio::spawn(async {}),
+            flags: netlink_packet_route::link::LinkFlags::empty(),
+            circuit_id: 0,
+            config: LinkConfig::default(),
+            state: LinkState::default(),
+            timer: LinkTimer::default(),
+        };
+        *link.state.adj.get_mut(&Level::L2) = Some((neighbor, None));
+        (
+            link.config.te_metric.min_delay,
+            link.config.te_metric.max_delay,
+        ) = configured;
+        let metric = link.config.metric();
+        isis.links.insert(7, link);
+        let delay = advertised.map(|min| {
+            IsisSubTlv::MinMaxLinkDelay(IsisSubMinMaxLinkDelay {
+                anomalous: false,
+                min_delay: min,
+                max_delay: min + 100,
+            })
+        });
+        let entry = IsisTlvExtIsReachEntry {
+            neighbor_id: neighbor,
+            metric,
+            subs: vec![IsisSubTlv::Asla(IsisSubAsla {
+                l_flag: false,
+                sabm: vec![0x10],
+                udabm: vec![],
+                subs: delay.into_iter().collect(),
+            })],
+        };
+        for (sys, originated, edges) in [(own, true, vec![entry]), (peer, false, vec![])] {
+            let lsp = IsisLsp {
+                lsp_id: IsisLspId::new(sys, 0, 0),
+                hold_time: 1200,
+                tlvs: vec![IsisTlv::ExtIsReach(IsisTlvExtIsReach { entries: edges })],
+                ..Default::default()
+            };
+            let mut lsa = Lsa::new(lsp);
+            lsa.originated = originated;
+            isis.lsdb
+                .get_mut(&Level::L2)
+                .map
+                .insert(lsa.lsp.lsp_id, lsa);
+        }
+        isis.peer_algos
+            .get_mut(&Level::L2)
+            .insert(peer, BTreeSet::from([128]));
+        let constraints = FadConstraints {
+            metric_type: crate::flex_algo::FadMetricType::MinUnidirLinkDelay,
+            ..Default::default()
+        };
+        let (graph, source, _) = graph_flex_algo(&mut isis.top(), Level::L2, 128, &constraints);
+        graph[&source.expect("local source")]
+            .olinks
+            .iter()
+            .map(|l| (l.link_id, l.cost))
+            .collect()
+    }
+
+    /// A metric-type-1 topology costs this router's links as every other
+    /// router does: from the delay each advertises. A Min delay configured
+    /// without a Max is not advertised (the Min/Max sub-TLV needs both), so
+    /// every router prunes the link (RFC 9350 §15) — this one used to keep
+    /// it at the configured Min. A delay changed since our LSP was flooded
+    /// costs what was advertised until the new one is. Either way this
+    /// router computed a topology no other router had, and routers
+    /// computing one algorithm differently loop.
+    #[tokio::test]
+    async fn our_edges_cost_the_delay_we_advertise() {
+        assert_eq!(
+            own_delay_edges((Some(500), None), None),
+            vec![],
+            "min only: pruned"
+        );
+        assert_eq!(
+            own_delay_edges((Some(900), Some(1200)), Some(700)),
+            vec![(7, 700)],
+            "not yet re-flooded: the advertised delay"
+        );
+        assert_eq!(
+            own_delay_edges((Some(700), Some(900)), Some(700)),
+            vec![(7, 700)]
+        );
+    }
 }
 
 #[cfg(test)]
