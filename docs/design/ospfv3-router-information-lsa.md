@@ -1,6 +1,8 @@
 # OSPFv3 Segment Routing on the standard encodings — design
 
-> **Status:** draft for review (2026-09-29). Decisions for the reviewer in §8.
+> **Status:** reviewed (2026-09-29); all five §8 decisions settled, each taking the
+> recommendation: phased over two releases, the legacy carrier dual-originated for one release
+> with no knob, PR 1 first, the interop peer chosen later, OSPFv2's capability bits.
 > **Parent docs:** [ospf-sr-mpls-status.md](./ospf-sr-mpls-status.md) (records the current carrier
 > as "placement by convention, not by RFC fiat"), [ospfv3-srv6-plan.md](./ospfv3-srv6-plan.md),
 > [flex-algo-link-loss.md](./flex-algo-link-loss.md) (PR 3b chose to stay on the current carrier
@@ -268,6 +270,8 @@ router upgraded straight from before N to N+1 still reads peers that were on N.
   legacy LSAs plus the E-LSAs it needs.
 
 ## 8. Decisions for the reviewer
+
+*All five settled on 2026-09-29, each as recommended.*
 
 1. **Phased or flag day.** Phased (release N: PRs 1–3; N+1: PRs 4–5) keeps a rolling upgrade
    working. A flag day is one release, but mixed old/new routers break mid-upgrade (D5).
