@@ -112,6 +112,12 @@ fn ls_type_name(ls_type: u16) -> &'static str {
         OSPFV3_E_AS_EXTERNAL_LSA_TYPE => "E-AS-External-LSA",
         OSPFV3_E_LINK_LSA_TYPE => "E-Link-LSA",
         OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE => "E-Intra-Area-Prefix-LSA",
+        // Function code 12 at any flooding scope (RFC 7770 §2.2).
+        t if t & ospf_packet::OSPFV3_LSA_FUNCTION_CODE_MASK
+            == ospf_packet::OSPFV3_ROUTER_INFO_FUNCTION_CODE =>
+        {
+            "Router-Info-LSA"
+        }
         _ => "Unknown",
     }
 }
@@ -1046,6 +1052,9 @@ fn write_lsa_detail(
         }
         Ospfv3LsBody::Srv6Locator(b) => {
             write_srv6_locator_body(out, b)?;
+        }
+        Ospfv3LsBody::RouterInfo(b) => {
+            super::show::show_router_info_detail(out, b)?;
         }
         Ospfv3LsBody::Unknown(bytes) => {
             writeln!(out, "  (Unrecognized LSA body, {} bytes)", bytes.len())?;
@@ -2361,6 +2370,10 @@ mod tests {
             "Intra-Area-Prefix-LSA"
         );
         assert_eq!(ls_type_name(OSPFV3_GRACE_LSA_TYPE), "Grace-LSA");
+        // Router Information (RFC 7770) at link, area and AS scope.
+        for ls_type in [0x800C, 0xA00C, 0xC00C] {
+            assert_eq!(ls_type_name(ls_type), "Router-Info-LSA", "{ls_type:#06x}");
+        }
         assert_eq!(ls_type_name(OSPFV3_E_ROUTER_LSA_TYPE), "E-Router-LSA");
         assert_eq!(
             ls_type_name(OSPFV3_SRV6_LOCATOR_LSA_TYPE),

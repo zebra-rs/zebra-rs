@@ -47,6 +47,7 @@ use packet_utils::{ParseBe, many0_complete};
 
 use crate::parser::{
     GraceLsa, OspfSubDelayVariation, OspfSubLinkLoss, OspfSubMinMaxLinkDelay, OspfSubUniLinkDelay,
+    RouterInfoLsa,
 };
 
 use super::parser::{AdjSidFlags, PrefixSidFlags};
@@ -1623,10 +1624,47 @@ pub const OSPFV3_EXT_TLV_LOCAL_BLOCK: u16 = 11;
 /// Prefix-SID Sub-TLV (RFC 8666 §5) carried inside an
 /// Intra-Area-Prefix TLV or Inter-Area-Prefix TLV.
 pub const OSPFV3_SUB_TLV_PREFIX_SID: u16 = 4;
-/// Adj-SID Sub-TLV (RFC 8666 §6.1) carried inside a Router-Link TLV.
-pub const OSPFV3_SUB_TLV_ADJ_SID: u16 = 6;
-/// LAN-Adj-SID Sub-TLV (RFC 8666 §6.2) carried inside a Router-Link TLV.
-pub const OSPFV3_SUB_TLV_LAN_ADJ_SID: u16 = 7;
+/// Adj-SID Sub-TLV (RFC 8666 §7.1) carried inside a Router-Link TLV.
+pub const OSPFV3_SUB_TLV_ADJ_SID: u16 = 5;
+/// LAN Adj-SID Sub-TLV (RFC 8666 §7.2) carried inside a Router-Link TLV.
+pub const OSPFV3_SUB_TLV_LAN_ADJ_SID: u16 = 6;
+/// The Adj-SID code point zebra-rs used to send, before it followed
+/// RFC 8666 (see [`AdjSidCodePoint`]).
+pub const OSPFV3_SUB_TLV_ADJ_SID_LEGACY: u16 = 6;
+/// The LAN Adj-SID code point zebra-rs used to send.
+pub const OSPFV3_SUB_TLV_LAN_ADJ_SID_LEGACY: u16 = 7;
+
+/// Which code points an Adj-SID or LAN Adj-SID sub-TLV travels under.
+/// RFC 8666 assigns 5 and 6; zebra-rs sent 6 and 7, which a standard
+/// router reads as a malformed LAN Adj-SID and a SID/Label sub-TLV. The
+/// two layouts differ in length — an Adj-SID's value is 7 or 8 octets, a
+/// LAN Adj-SID's 11 or 12 with the neighbor's Router ID — so a receiver
+/// tells them apart and reads both. A received sub-TLV keeps the code
+/// point it came with, so re-encoding it reproduces what was received.
+/// (docs/design/ospfv3-router-information-lsa.md, D1 and D4.)
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum AdjSidCodePoint {
+    /// What zebra-rs sends until every router reads the standard ones.
+    #[default]
+    Legacy,
+    Rfc8666,
+}
+
+impl AdjSidCodePoint {
+    fn adj_sid(self) -> u16 {
+        match self {
+            Self::Legacy => OSPFV3_SUB_TLV_ADJ_SID_LEGACY,
+            Self::Rfc8666 => OSPFV3_SUB_TLV_ADJ_SID,
+        }
+    }
+
+    fn lan_adj_sid(self) -> u16 {
+        match self {
+            Self::Legacy => OSPFV3_SUB_TLV_LAN_ADJ_SID_LEGACY,
+            Self::Rfc8666 => OSPFV3_SUB_TLV_LAN_ADJ_SID,
+        }
+    }
+}
 /// Application-Specific Link Attributes (ASLA) Sub-TLV (RFC 9492)
 /// carried inside a Router-Link TLV. For Flex-Algorithm it holds the
 /// per-link Extended Admin Group with the SABM X-bit set.
@@ -1718,6 +1756,7 @@ pub struct Ospfv3AdjSidSubTlv {
     pub flags: AdjSidFlags,
     pub weight: u8,
     pub sid: SidLabelTlv,
+    pub code_point: AdjSidCodePoint,
 }
 
 impl Ospfv3AdjSidSubTlv {
@@ -1744,6 +1783,7 @@ impl Ospfv3AdjSidSubTlv {
                 flags: flags.into(),
                 weight,
                 sid,
+                code_point: AdjSidCodePoint::default(),
             },
         ))
     }
@@ -1760,6 +1800,7 @@ pub struct Ospfv3LanAdjSidSubTlv {
     pub weight: u8,
     pub neighbor_router_id: Ipv4Addr,
     pub sid: SidLabelTlv,
+    pub code_point: AdjSidCodePoint,
 }
 
 impl Ospfv3LanAdjSidSubTlv {
@@ -1789,6 +1830,7 @@ impl Ospfv3LanAdjSidSubTlv {
                 weight,
                 neighbor_router_id,
                 sid,
+                code_point: AdjSidCodePoint::default(),
             },
         ))
     }
@@ -1834,8 +1876,8 @@ impl Ospfv3SubTlv {
     fn emit(&self, buf: &mut BytesMut) {
         let (typ, value_len) = match self {
             Ospfv3SubTlv::PrefixSid(s) => (OSPFV3_SUB_TLV_PREFIX_SID, s.value_len()),
-            Ospfv3SubTlv::AdjSid(s) => (OSPFV3_SUB_TLV_ADJ_SID, s.value_len()),
-            Ospfv3SubTlv::LanAdjSid(s) => (OSPFV3_SUB_TLV_LAN_ADJ_SID, s.value_len()),
+            Ospfv3SubTlv::AdjSid(s) => (s.code_point.adj_sid(), s.value_len()),
+            Ospfv3SubTlv::LanAdjSid(s) => (s.code_point.lan_adj_sid(), s.value_len()),
             Ospfv3SubTlv::Asla(s) => (OSPFV3_SUB_TLV_ASLA, s.value_len() as u16),
             Ospfv3SubTlv::Srv6EndXSid(s) => (OSPFV3_SUB_TLV_SRV6_ENDX_SID, s.value_len()),
             Ospfv3SubTlv::Srv6LanEndXSid(s) => (OSPFV3_SUB_TLV_SRV6_LAN_ENDX_SID, s.value_len()),
@@ -1866,40 +1908,48 @@ impl Ospfv3SubTlv {
         let (input, len) = be_u16(input)?;
         let len = len as usize;
         let (input, value) = take(len)(input)?;
-        let parsed = match typ {
-            OSPFV3_SUB_TLV_PREFIX_SID => {
-                let (_, s) = Ospfv3PrefixSidSubTlv::parse_be(value)?;
-                Ospfv3SubTlv::PrefixSid(s)
-            }
-            OSPFV3_SUB_TLV_ADJ_SID => {
-                let (_, s) = Ospfv3AdjSidSubTlv::parse_be(value)?;
-                Ospfv3SubTlv::AdjSid(s)
-            }
-            OSPFV3_SUB_TLV_LAN_ADJ_SID => {
-                let (_, s) = Ospfv3LanAdjSidSubTlv::parse_be(value)?;
-                Ospfv3SubTlv::LanAdjSid(s)
-            }
-            OSPFV3_SUB_TLV_ASLA => {
-                let (_, s) = Ospfv3AslaSubTlv::parse_be(value)?;
-                Ospfv3SubTlv::Asla(s)
-            }
-            OSPFV3_SUB_TLV_SRV6_ENDX_SID => {
-                let (_, s) = Ospfv3Srv6EndXSidSubTlv::parse_be(value)?;
-                Ospfv3SubTlv::Srv6EndXSid(s)
-            }
-            OSPFV3_SUB_TLV_SRV6_LAN_ENDX_SID => {
-                let (_, s) = Ospfv3Srv6LanEndXSidSubTlv::parse_be(value)?;
-                Ospfv3SubTlv::Srv6LanEndXSid(s)
-            }
-            OSPFV3_SUB_TLV_SRV6_SID_STRUCTURE => {
-                let (_, s) = Ospfv3Srv6SidStructure::parse_be(value)?;
-                Ospfv3SubTlv::Srv6SidStructure(s)
-            }
-            _ => Ospfv3SubTlv::Unknown {
-                typ,
-                value: value.to_vec(),
-            },
+        // Adj-SID and LAN Adj-SID are told apart by length as well as code
+        // point, so both RFC 8666's (5, 6) and zebra-rs's former (6, 7) read
+        // right (`AdjSidCodePoint`). A known sub-TLV whose value cannot be
+        // read — a standard LAN Adj-SID used to fail zebra-rs's Adj-SID
+        // parser, and with it the whole LS Update — is kept as unknown: it
+        // re-floods as received and nothing computes with it.
+        let adj = |code_point| {
+            Ospfv3AdjSidSubTlv::parse_be(value)
+                .ok()
+                .map(|(_, s)| Ospfv3SubTlv::AdjSid(Ospfv3AdjSidSubTlv { code_point, ..s }))
         };
+        let lan = |code_point| {
+            Ospfv3LanAdjSidSubTlv::parse_be(value)
+                .ok()
+                .map(|(_, s)| Ospfv3SubTlv::LanAdjSid(Ospfv3LanAdjSidSubTlv { code_point, ..s }))
+        };
+        let known = match (typ, len) {
+            (OSPFV3_SUB_TLV_PREFIX_SID, _) => Ospfv3PrefixSidSubTlv::parse_be(value)
+                .ok()
+                .map(|(_, s)| Ospfv3SubTlv::PrefixSid(s)),
+            (OSPFV3_SUB_TLV_ADJ_SID, 7 | 8) => adj(AdjSidCodePoint::Rfc8666),
+            (OSPFV3_SUB_TLV_ADJ_SID_LEGACY, 7 | 8) => adj(AdjSidCodePoint::Legacy),
+            (OSPFV3_SUB_TLV_LAN_ADJ_SID, 11 | 12) => lan(AdjSidCodePoint::Rfc8666),
+            (OSPFV3_SUB_TLV_LAN_ADJ_SID_LEGACY, 11 | 12) => lan(AdjSidCodePoint::Legacy),
+            (OSPFV3_SUB_TLV_ASLA, _) => Ospfv3AslaSubTlv::parse_be(value)
+                .ok()
+                .map(|(_, s)| Ospfv3SubTlv::Asla(s)),
+            (OSPFV3_SUB_TLV_SRV6_ENDX_SID, _) => Ospfv3Srv6EndXSidSubTlv::parse_be(value)
+                .ok()
+                .map(|(_, s)| Ospfv3SubTlv::Srv6EndXSid(s)),
+            (OSPFV3_SUB_TLV_SRV6_LAN_ENDX_SID, _) => Ospfv3Srv6LanEndXSidSubTlv::parse_be(value)
+                .ok()
+                .map(|(_, s)| Ospfv3SubTlv::Srv6LanEndXSid(s)),
+            (OSPFV3_SUB_TLV_SRV6_SID_STRUCTURE, _) => Ospfv3Srv6SidStructure::parse_be(value)
+                .ok()
+                .map(|(_, s)| Ospfv3SubTlv::Srv6SidStructure(s)),
+            _ => None,
+        };
+        let parsed = known.unwrap_or_else(|| Ospfv3SubTlv::Unknown {
+            typ,
+            value: value.to_vec(),
+        });
         let padded = (len + 3) & !3;
         let (input, _) = take(padded - len)(input)?;
         Ok((input, parsed))
@@ -2583,40 +2633,37 @@ impl Ospfv3ExtTlv {
         let (input, len) = be_u16(input)?;
         let len = len as usize;
         let (input, value) = take(len)(input)?;
-        let parsed = match typ {
-            OSPFV3_EXT_TLV_ROUTER_LINK => {
-                let (_, t) = Ospfv3RouterLinkTlv::parse_be(value)?;
-                Ospfv3ExtTlv::RouterLink(t)
-            }
-            OSPFV3_EXT_TLV_INTRA_AREA_PREFIX => {
-                let (_, t) = Ospfv3IntraAreaPrefixTlv::parse_be(value)?;
-                Ospfv3ExtTlv::IntraAreaPrefix(t)
-            }
-            OSPFV3_EXT_TLV_SR_ALGORITHM => {
-                let (_, t) = Ospfv3SrAlgorithmTlv::parse_be(value)?;
-                Ospfv3ExtTlv::SrAlgorithm(t)
-            }
-            OSPFV3_EXT_TLV_SID_LABEL_RANGE => {
-                let (_, t) = Ospfv3SidLabelRangeTlv::parse_be(value)?;
-                Ospfv3ExtTlv::SidLabelRange(t)
-            }
-            OSPFV3_EXT_TLV_LOCAL_BLOCK => {
-                let (_, t) = Ospfv3SrLocalBlockTlv::parse_be(value)?;
-                Ospfv3ExtTlv::SrLocalBlock(t)
-            }
-            OSPFV3_EXT_TLV_FAD => {
-                let (_, t) = Ospfv3FadTlv::parse_be(value)?;
-                Ospfv3ExtTlv::Fad(t)
-            }
-            OSPFV3_EXT_TLV_SRV6_CAPABILITIES => {
-                let (_, t) = Ospfv3Srv6CapabilitiesTlv::parse_be(value)?;
-                Ospfv3ExtTlv::Srv6Capabilities(t)
-            }
-            _ => Ospfv3ExtTlv::Unknown {
-                typ,
-                value: value.to_vec(),
-            },
+        // A known TLV whose value cannot be read is kept as unknown, bytes
+        // and all, as a sub-TLV is: it re-floods as received, nothing
+        // computes with it, and it does not cost the rest of the LSA.
+        let known = match typ {
+            OSPFV3_EXT_TLV_ROUTER_LINK => Ospfv3RouterLinkTlv::parse_be(value)
+                .ok()
+                .map(|(_, t)| Ospfv3ExtTlv::RouterLink(t)),
+            OSPFV3_EXT_TLV_INTRA_AREA_PREFIX => Ospfv3IntraAreaPrefixTlv::parse_be(value)
+                .ok()
+                .map(|(_, t)| Ospfv3ExtTlv::IntraAreaPrefix(t)),
+            OSPFV3_EXT_TLV_SR_ALGORITHM => Ospfv3SrAlgorithmTlv::parse_be(value)
+                .ok()
+                .map(|(_, t)| Ospfv3ExtTlv::SrAlgorithm(t)),
+            OSPFV3_EXT_TLV_SID_LABEL_RANGE => Ospfv3SidLabelRangeTlv::parse_be(value)
+                .ok()
+                .map(|(_, t)| Ospfv3ExtTlv::SidLabelRange(t)),
+            OSPFV3_EXT_TLV_LOCAL_BLOCK => Ospfv3SrLocalBlockTlv::parse_be(value)
+                .ok()
+                .map(|(_, t)| Ospfv3ExtTlv::SrLocalBlock(t)),
+            OSPFV3_EXT_TLV_FAD => Ospfv3FadTlv::parse_be(value)
+                .ok()
+                .map(|(_, t)| Ospfv3ExtTlv::Fad(t)),
+            OSPFV3_EXT_TLV_SRV6_CAPABILITIES => Ospfv3Srv6CapabilitiesTlv::parse_be(value)
+                .ok()
+                .map(|(_, t)| Ospfv3ExtTlv::Srv6Capabilities(t)),
+            _ => None,
         };
+        let parsed = known.unwrap_or_else(|| Ospfv3ExtTlv::Unknown {
+            typ,
+            value: value.to_vec(),
+        });
         // Skip pad to next 4-byte boundary.
         let padded = (len + 3) & !3;
         let (input, _) = take(padded - len)(input)?;
@@ -2688,6 +2735,10 @@ pub enum Ospfv3LsBody {
     /// Own top-level TLV namespace (the "OSPFv3 SRv6 Locator LSA
     /// TLVs" registry), not the Extended-LSA TLV space.
     Srv6Locator(Ospfv3Srv6LocatorLsa),
+    /// RFC 7770 §2.2 Router Information LSA — function code 12, at any
+    /// flooding scope; its Link State ID is the Instance ID. Its TLVs are
+    /// the OSPF Router Information TLVs, shared with OSPFv2.
+    RouterInfo(RouterInfoLsa),
     /// Unrecognised LS Type — bytes preserved verbatim.
     Unknown(Vec<u8>),
 }
@@ -2712,6 +2763,7 @@ impl Ospfv3LsBody {
             | Ospfv3LsBody::ELink(b)
             | Ospfv3LsBody::EIntraAreaPrefix(b) => b.emit(buf),
             Ospfv3LsBody::Srv6Locator(b) => b.emit(buf),
+            Ospfv3LsBody::RouterInfo(b) => b.emit(buf),
             Ospfv3LsBody::Unknown(bytes) => buf.put_slice(bytes),
         }
     }
@@ -2790,6 +2842,18 @@ impl Ospfv3LsBody {
             OSPFV3_SRV6_LOCATOR_LSA_TYPE => {
                 let (rest, b) = Ospfv3Srv6LocatorLsa::parse_be(input)?;
                 Ok((rest, Ospfv3LsBody::Srv6Locator(b)))
+            }
+            t if t & OSPFV3_LSA_FUNCTION_CODE_MASK == OSPFV3_ROUTER_INFO_FUNCTION_CODE => {
+                let (rest, b) = RouterInfoLsa::parse_be(input)?;
+                // A TLV that overruns the LSA stops the TLV stream short;
+                // the bytes it leaves could not re-flood as received.
+                if !rest.is_empty() {
+                    return Err(nom::Err::Error(nom::error::make_error(
+                        rest,
+                        nom::error::ErrorKind::Verify,
+                    )));
+                }
+                Ok((rest, Ospfv3LsBody::RouterInfo(b)))
             }
             _ => Ok((&[][..], Ospfv3LsBody::Unknown(input.to_vec()))),
         }
@@ -2905,7 +2969,11 @@ impl ParseBe<Ospfv3Lsa> for Ospfv3Lsa {
         // header; the body lives in the remaining bytes.
         let body_len = (h.length as usize).saturating_sub(OSPFV3_LSA_HEADER_LEN as usize);
         let (input, body_bytes) = nom::bytes::complete::take(body_len)(input)?;
-        let (_, body) = Ospfv3LsBody::parse_be(body_bytes, h.ls_type)?;
+        // A body that cannot be read is kept opaque — installed and flooded
+        // as received, never computed with — rather than failing the LS
+        // Update and every other LSA it carries.
+        let body = Ospfv3LsBody::parse_be(body_bytes, h.ls_type)
+            .map_or_else(|_| Ospfv3LsBody::Unknown(body_bytes.to_vec()), |(_, b)| b);
         Ok((input, Ospfv3Lsa::from(h, body)))
     }
 }
@@ -2998,6 +3066,16 @@ impl ParseBe<Ospfv3LsAck> for Ospfv3LsAck {
 /// SRv6 Locator LSA (RFC 9513 §7): U-bit set (flood even when
 /// unrecognised), area scope, LSA function code 42.
 pub const OSPFV3_SRV6_LOCATOR_LSA_TYPE: u16 = 0xA02A;
+
+/// The function code in an LS type: its low 13 bits, below the U, S2 and
+/// S1 bits (RFC 5340 §A.4.2.1).
+pub const OSPFV3_LSA_FUNCTION_CODE_MASK: u16 = 0x1FFF;
+/// Router Information LSA function code (RFC 7770 §2.2).
+pub const OSPFV3_ROUTER_INFO_FUNCTION_CODE: u16 = 12;
+/// Area-scoped Router Information LSA: U bit, area scope, function code
+/// 12 — where SR capabilities belong (RFC 8666 §4, RFC 9350 §5.2,
+/// RFC 9513 §2).
+pub const OSPFV3_ROUTER_INFO_LSA_TYPE: u16 = 0xA00C;
 
 /// SRv6 Capabilities TLV (RFC 9513 §2) — RI TLV type 20, carried in
 /// this implementation's SR-info E-Router-LSA (see `Ospfv3ExtTlv`).
@@ -3652,6 +3730,7 @@ mod tests {
             flags: AdjSidFlags::new().with_v_flag(true).with_l_flag(true),
             weight: 200,
             sid: SidLabelTlv::Label(15003),
+            code_point: AdjSidCodePoint::Legacy,
         };
         let mut buf = BytesMut::new();
         tlv.emit(&mut buf);
@@ -3670,6 +3749,7 @@ mod tests {
             weight: 100,
             neighbor_router_id: "10.0.0.2".parse().unwrap(),
             sid: SidLabelTlv::Label(15100),
+            code_point: AdjSidCodePoint::Legacy,
         };
         let mut buf = BytesMut::new();
         tlv.emit(&mut buf);
@@ -5059,12 +5139,14 @@ mod tests {
             flags: AdjSidFlags::new().with_v_flag(true).with_l_flag(true),
             weight: 0,
             sid: SidLabelTlv::Label(15001),
+            code_point: AdjSidCodePoint::Legacy,
         });
         let lan_adj = Ospfv3SubTlv::LanAdjSid(Ospfv3LanAdjSidSubTlv {
             flags: AdjSidFlags::new().with_v_flag(true).with_l_flag(true),
             weight: 0,
             neighbor_router_id: Ipv4Addr::new(10, 0, 0, 2),
             sid: SidLabelTlv::Label(15002),
+            code_point: AdjSidCodePoint::Legacy,
         });
 
         let link = Ospfv3RouterLsaLink::new(
@@ -5699,5 +5781,298 @@ mod tests {
         let (rest, parsed) = Ospfv3Srv6LocatorLsaTlv::parse_be(&buf).unwrap();
         assert!(rest.is_empty());
         assert_eq!(parsed, tlv);
+    }
+}
+
+#[cfg(test)]
+mod standard_encoding_tests {
+    //! RFC 8666 / RFC 7770 encodings, and the decoder's tolerance for
+    //! what it cannot read (docs/design/ospfv3-router-information-lsa.md,
+    //! D1).
+    use super::*;
+    use crate::parser::{
+        RouterCapability, RouterInfoTlv, RouterInfoTlvAlgo, RouterInfoTlvCap, RouterInfoTlvFad,
+        RouterInfoTlvLocalBlock, RouterInfoTlvSidLabelRange, RouterInfoTlvSrv6Cap,
+    };
+
+    fn lsa(ls_type: u16, link_state_id: u32, body: Ospfv3LsBody) -> Vec<u8> {
+        let mut lsa = Ospfv3Lsa {
+            h: Ospfv3LsaHeader {
+                ls_age: 1,
+                ls_type,
+                link_state_id,
+                advertising_router: Ipv4Addr::new(10, 0, 0, 1),
+                ls_seq_number: 0x8000_0001,
+                ls_checksum: 0,
+                length: 0,
+            },
+            body,
+            raw: None,
+        };
+        lsa.update();
+        let mut buf = BytesMut::new();
+        lsa.emit(&mut buf);
+        buf.to_vec()
+    }
+
+    /// An E-Router-LSA whose one Router-Link TLV carries `subs`, each
+    /// given as raw (type, value) so the bytes are exactly the wire's.
+    fn e_router(subs: &[(u16, &[u8])]) -> Vec<u8> {
+        let subs = subs
+            .iter()
+            .map(|(typ, value)| Ospfv3SubTlv::Unknown {
+                typ: *typ,
+                value: value.to_vec(),
+            })
+            .collect();
+        let link = Ospfv3RouterLsaLink::new(
+            Ospfv3RouterLinkType::PointToPoint,
+            10,
+            7,
+            8,
+            Ipv4Addr::new(10, 0, 0, 2),
+        );
+        lsa(
+            OSPFV3_E_ROUTER_LSA_TYPE,
+            7,
+            Ospfv3LsBody::ERouter(Ospfv3ELsaBody {
+                tlvs: vec![Ospfv3ExtTlv::RouterLink(Ospfv3RouterLinkTlv { link, subs })],
+            }),
+        )
+    }
+
+    /// Parse `wire` and check that re-encoding the parsed LSA reproduces it.
+    fn round_trip(wire: &[u8]) -> Ospfv3Lsa {
+        let (rest, parsed) = Ospfv3Lsa::parse_be(wire).expect("parse");
+        assert!(rest.is_empty());
+        assert!(parsed.raw.is_none(), "re-encoded, not replayed");
+        let mut buf = BytesMut::new();
+        parsed.emit(&mut buf);
+        assert_eq!(&buf[..], wire, "re-encodes as received");
+        parsed
+    }
+
+    fn router_link_subs(lsa: &Ospfv3Lsa) -> &[Ospfv3SubTlv] {
+        let Ospfv3LsBody::ERouter(body) = &lsa.body else {
+            panic!("expected an E-Router-LSA body, got {:?}", lsa.body);
+        };
+        let Ospfv3ExtTlv::RouterLink(rl) = &body.tlvs[0] else {
+            panic!("expected a Router-Link TLV");
+        };
+        &rl.subs
+    }
+
+    // RFC 8666 §7.1 / §7.2 values: flags V|L, weight 0, reserved,
+    // [neighbor Router ID,] 3-octet label.
+    const ADJ: &[u8] = &[0x60, 0, 0, 0, 0x00, 0x3a, 0x99];
+    const LAN_ADJ: &[u8] = &[0x60, 0, 0, 0, 10, 0, 0, 2, 0x00, 0x3a, 0x9a];
+
+    /// A standard router's Adj-SID (5) and LAN Adj-SID (6) read as what
+    /// they are. The LAN Adj-SID used to hit zebra-rs's Adj-SID parser,
+    /// fail on its length, and take the LS Update carrying it down.
+    #[test]
+    fn standard_adj_sids_are_read() {
+        let lsa = round_trip(&e_router(&[(5, ADJ), (6, LAN_ADJ)]));
+        match router_link_subs(&lsa) {
+            [Ospfv3SubTlv::AdjSid(adj), Ospfv3SubTlv::LanAdjSid(lan)] => {
+                assert_eq!(adj.code_point, AdjSidCodePoint::Rfc8666);
+                assert_eq!(adj.sid, SidLabelTlv::Label(15001));
+                assert!(adj.flags.v_flag() && adj.flags.l_flag());
+                assert_eq!(lan.code_point, AdjSidCodePoint::Rfc8666);
+                assert_eq!(lan.neighbor_router_id, Ipv4Addr::new(10, 0, 0, 2));
+                assert_eq!(lan.sid, SidLabelTlv::Label(15002));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// zebra-rs's former code points (6, 7) still read the same, so a
+    /// router not yet upgraded keeps its Adj-SIDs.
+    #[test]
+    fn former_adj_sid_code_points_are_read() {
+        let lsa = round_trip(&e_router(&[(6, ADJ), (7, LAN_ADJ)]));
+        match router_link_subs(&lsa) {
+            [Ospfv3SubTlv::AdjSid(adj), Ospfv3SubTlv::LanAdjSid(lan)] => {
+                assert_eq!(adj.code_point, AdjSidCodePoint::Legacy);
+                assert_eq!(adj.sid, SidLabelTlv::Label(15001));
+                assert_eq!(lan.code_point, AdjSidCodePoint::Legacy);
+                assert_eq!(lan.sid, SidLabelTlv::Label(15002));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A known sub-TLV whose value cannot be read is kept, bytes and all,
+    /// and the sub-TLVs after it still read.
+    #[test]
+    fn an_unreadable_sub_tlv_is_kept() {
+        let odd = [0x60, 0, 0, 0, 0, 0, 0, 0, 0];
+        let lsa = round_trip(&e_router(&[(5, &odd), (7, &[0x60, 0, 0]), (5, ADJ)]));
+        match router_link_subs(&lsa) {
+            [
+                Ospfv3SubTlv::Unknown { typ: 5, value: a },
+                Ospfv3SubTlv::Unknown { typ: 7, value: b },
+                Ospfv3SubTlv::AdjSid(adj),
+            ] => {
+                assert_eq!((a.len(), b.len()), (9, 3));
+                assert_eq!(adj.sid, SidLabelTlv::Label(15001));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A top-level TLV that cannot be read — a Router-Link TLV whose
+    /// sub-TLV runs past its end — is kept as unknown; the LSA stays an
+    /// E-Router-LSA and its other TLVs still read.
+    #[test]
+    fn an_unreadable_tlv_is_kept() {
+        let link = Ospfv3RouterLsaLink::new(
+            Ospfv3RouterLinkType::PointToPoint,
+            10,
+            7,
+            8,
+            Ipv4Addr::new(10, 0, 0, 2),
+        );
+        let mut good = BytesMut::new();
+        Ospfv3ExtTlv::RouterLink(Ospfv3RouterLinkTlv {
+            link: link.clone(),
+            subs: vec![Ospfv3SubTlv::Unknown {
+                typ: 5,
+                value: ADJ.to_vec(),
+            }],
+        })
+        .emit(&mut good);
+        let mut bad_value = BytesMut::new();
+        link.emit(&mut bad_value);
+        bad_value.extend_from_slice(&[0, 5, 0, 40, 0, 0, 0, 0]); // sub-TLV claims 40 octets
+        let mut body = BytesMut::new();
+        Ospfv3ExtTlv::Unknown {
+            typ: OSPFV3_EXT_TLV_ROUTER_LINK,
+            value: bad_value.to_vec(),
+        }
+        .emit(&mut body);
+        body.extend_from_slice(&good);
+        let wire = lsa(
+            OSPFV3_E_ROUTER_LSA_TYPE,
+            7,
+            Ospfv3LsBody::Unknown(body.to_vec()),
+        );
+        let parsed = round_trip(&wire);
+        let Ospfv3LsBody::ERouter(body) = &parsed.body else {
+            panic!("the LSA stays readable, got {:?}", parsed.body);
+        };
+        match &body.tlvs[..] {
+            [
+                Ospfv3ExtTlv::Unknown { typ: 1, .. },
+                Ospfv3ExtTlv::RouterLink(rl),
+            ] => {
+                assert!(matches!(&rl.subs[..], [Ospfv3SubTlv::AdjSid(_)]));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// An LSA whose body cannot be read — here a TLV claiming more bytes
+    /// than the LSA has — is kept opaque rather than failing the LS
+    /// Update: every other LSA in the update still arrives.
+    #[test]
+    fn an_unreadable_lsa_does_not_cost_the_update() {
+        let broken = lsa(
+            OSPFV3_E_ROUTER_LSA_TYPE,
+            9,
+            Ospfv3LsBody::Unknown(vec![0, 1, 0, 200, 1, 2, 3, 4]),
+        );
+        let fine = e_router(&[(5, ADJ)]);
+        let parsed = round_trip(&broken);
+        assert!(matches!(parsed.body, Ospfv3LsBody::Unknown(_)));
+
+        let mut update = vec![0, 0, 0, 2];
+        update.extend_from_slice(&broken);
+        update.extend_from_slice(&fine);
+        let (_, lsu) = Ospfv3LsUpdate::parse_be(&update).expect("the update survives");
+        assert_eq!(lsu.lsas.len(), 2);
+        assert!(matches!(lsu.lsas[0].body, Ospfv3LsBody::Unknown(_)));
+        assert!(matches!(
+            router_link_subs(&lsu.lsas[1]),
+            [Ospfv3SubTlv::AdjSid(_)]
+        ));
+    }
+
+    /// The OSPFv3 Router Information LSA (RFC 7770): function code 12,
+    /// area scope 0xA00C, its TLVs those of the OSPF RI registry — the
+    /// capabilities first, SR-Algorithm 8, SID/Label Range 9 with its
+    /// SID/Label sub-TLV as type 1 (RFC 8665 §3.2), SRLB 14, FAD 16, SRv6
+    /// Capabilities 20 (RFC 9513 §2) — byte for byte.
+    #[test]
+    fn router_information_lsa_is_encoded_as_specified() {
+        let ri = RouterInfoLsa {
+            tlvs: vec![
+                RouterInfoTlv::RouterInfo(RouterInfoTlvCap {
+                    caps: RouterCapability::new().with_gr_helper(true),
+                }),
+                RouterInfoTlv::Algo(RouterInfoTlvAlgo {
+                    algos: vec![Algo::Spf, Algo::FlexAlgo(128)],
+                }),
+                RouterInfoTlv::SidLabelRnage(RouterInfoTlvSidLabelRange {
+                    range: 8000,
+                    sid_label: SidLabelTlv::Label(16000),
+                }),
+                RouterInfoTlv::LocalBlock(RouterInfoTlvLocalBlock {
+                    range: 1000,
+                    sid_label: SidLabelTlv::Label(15000),
+                }),
+                RouterInfoTlv::Fad(RouterInfoTlvFad {
+                    flex_algorithm: 128,
+                    metric_type: 0,
+                    calc_type: 0,
+                    priority: 128,
+                    subs: Vec::new(),
+                    trailing: Vec::new(),
+                }),
+                RouterInfoTlv::Srv6Capabilities(RouterInfoTlvSrv6Cap {
+                    flags: 0,
+                    subs: Vec::new(),
+                }),
+            ],
+        };
+        let wire = lsa(
+            OSPFV3_ROUTER_INFO_LSA_TYPE,
+            0,
+            Ospfv3LsBody::RouterInfo(ri.clone()),
+        );
+        #[rustfmt::skip]
+        let body: &[u8] = &[
+            0, 1, 0, 4, 0x40, 0, 0, 0,                                 // capabilities: GR helper (bit 1)
+            0, 8, 0, 2, 0, 128, 0, 0,                                  // SR-Algorithm: SPF, 128
+            0, 9, 0, 11, 0x00, 0x1f, 0x40, 0, 0, 1, 0, 3, 0x00, 0x3e, 0x80, 0, // SRGB 8000 @ 16000
+            0, 14, 0, 11, 0x00, 0x03, 0xe8, 0, 0, 1, 0, 3, 0x00, 0x3a, 0x98, 0, // SRLB 1000 @ 15000
+            0, 16, 0, 4, 128, 0, 0, 128,                               // FAD 128
+            0, 20, 0, 4, 0, 0, 0, 0,                                   // SRv6 Capabilities
+        ];
+        assert_eq!(&wire[..2], &[0, 1], "LS age");
+        assert_eq!(
+            &wire[2..4],
+            &[0xa0, 0x0c],
+            "U bit, area scope, function code 12"
+        );
+        assert_eq!(&wire[OSPFV3_LSA_HEADER_LEN as usize..], body);
+        let parsed = round_trip(&wire);
+        let Ospfv3LsBody::RouterInfo(back) = parsed.body else {
+            panic!("expected a Router Information body");
+        };
+        assert_eq!(back.tlvs, ri.tlvs);
+    }
+
+    /// A Router Information LSA whose last TLV runs past its end is kept
+    /// opaque, not truncated: re-flooded, it must be what was received.
+    #[test]
+    fn an_overrunning_router_information_lsa_is_kept_opaque() {
+        let wire = lsa(
+            OSPFV3_ROUTER_INFO_LSA_TYPE,
+            0,
+            Ospfv3LsBody::Unknown(vec![0, 8, 0, 1, 0, 0, 0, 0, 0, 8, 0, 40, 0, 0, 0, 0]),
+        );
+        let parsed = round_trip(&wire);
+        assert!(matches!(parsed.body, Ospfv3LsBody::Unknown(_)));
     }
 }

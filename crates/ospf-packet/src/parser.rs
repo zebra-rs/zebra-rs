@@ -1068,6 +1068,8 @@ pub enum RouterInfoTlvType {
     LocalBlock = 14,
     // RFC 9350 §6.1 Flexible Algorithm Definition TLV.
     Fad = 16,
+    // RFC 9513 §2 SRv6 Capabilities TLV (OSPFv3 only).
+    Srv6Cap = 20,
     Unknown(u16),
 }
 
@@ -1080,6 +1082,7 @@ impl From<u16> for RouterInfoTlvType {
             9 => SidLabelRange,
             14 => LocalBlock,
             16 => Fad,
+            20 => Srv6Cap,
             x => Unknown(x),
         }
     }
@@ -1098,6 +1101,8 @@ pub enum RouterInfoTlv {
     LocalBlock(RouterInfoTlvLocalBlock),
     #[nom(Selector = "RouterInfoTlvType::Fad")]
     Fad(RouterInfoTlvFad),
+    #[nom(Selector = "RouterInfoTlvType::Srv6Cap")]
+    Srv6Capabilities(RouterInfoTlvSrv6Cap),
     #[nom(Selector = "_")]
     Unknown(RouterInfoTlvUnknown),
 }
@@ -1175,6 +1180,29 @@ impl RouterInfoTlvLocalBlock {
     }
 }
 
+// RFC 9513 §2. SRv6 Capabilities TLV: flags, a reserved word, then
+// optional sub-TLVs, none of which zebra-rs reads — kept as bytes so the
+// TLV re-emits as received.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct RouterInfoTlvSrv6Cap {
+    pub flags: u16,
+    pub subs: Vec<u8>,
+}
+
+impl RouterInfoTlvSrv6Cap {
+    pub fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
+        let (input, flags) = be_u16(input)?;
+        let (input, _reserved) = be_u16(input)?;
+        Ok((
+            &[],
+            Self {
+                flags,
+                subs: input.to_vec(),
+            },
+        ))
+    }
+}
+
 #[derive(Debug, Default, NomBE, Clone, PartialEq)]
 pub struct RouterInfoTlvUnknown {
     pub typ: u16,
@@ -1193,14 +1221,20 @@ impl RouterInfoTlv {
         // carry the whole value slice, so re-emit reproduces the wire bytes.
         // The derived `Self::parse_be` would instead misread type/len from the
         // first four value octets — mirror the ExtPrefix / ExtLink / ASLA
-        // sub-TLV Unknown arms, which already build it correctly.
-        let val = match typ {
-            RouterInfoTlvType::Unknown(_) => RouterInfoTlv::Unknown(RouterInfoTlvUnknown {
+        // sub-TLV Unknown arms, which already build it correctly. A known
+        // TLV whose value cannot be read is kept the same way: it re-floods
+        // as received, nothing computes with it, and it does not cost the
+        // rest of the LSA.
+        let unknown = || {
+            RouterInfoTlv::Unknown(RouterInfoTlvUnknown {
                 typ: tl.typ,
                 len: tl.len,
                 values: tlv.to_vec(),
-            }),
-            _ => Self::parse_be(tlv, typ)?.1,
+            })
+        };
+        let val = match typ {
+            RouterInfoTlvType::Unknown(_) => unknown(),
+            _ => Self::parse_be(tlv, typ).map_or_else(|_| unknown(), |(_, val)| val),
         };
         // Skip padding to 4-byte alignment.
         let padded = (len + 3) & !3;
@@ -1252,6 +1286,7 @@ impl RouterInfoTlv {
             RouterInfoTlv::SidLabelRnage(r) => 4 + ospf_sid_label_len(&r.sid_label),
             RouterInfoTlv::LocalBlock(r) => 4 + ospf_sid_label_len(&r.sid_label),
             RouterInfoTlv::Fad(f) => f.value_len(),
+            RouterInfoTlv::Srv6Capabilities(c) => 4 + c.subs.len() as u16,
             RouterInfoTlv::Unknown(u) => u.len,
         }
     }
@@ -1263,6 +1298,7 @@ impl RouterInfoTlv {
             RouterInfoTlv::SidLabelRnage(_) => 9,
             RouterInfoTlv::LocalBlock(_) => 14,
             RouterInfoTlv::Fad(_) => 16,
+            RouterInfoTlv::Srv6Capabilities(_) => 20,
             RouterInfoTlv::Unknown(u) => u.typ,
         }
     }
@@ -1293,6 +1329,11 @@ impl RouterInfoTlv {
             }
             RouterInfoTlv::Fad(f) => {
                 f.emit_value(buf);
+            }
+            RouterInfoTlv::Srv6Capabilities(c) => {
+                buf.put_u16(c.flags);
+                buf.put_u16(0); // reserved
+                buf.put_slice(&c.subs);
             }
             RouterInfoTlv::Unknown(u) => {
                 buf.put(&u.values[..]);
@@ -3387,5 +3428,39 @@ mod tests {
         assert!(rest.is_empty());
         assert!(unpadded.trailing.is_empty());
         assert!(matches!(&unpadded.subs[..], [OspfFadSubTlv::Flags(f)] if f.m_flag));
+    }
+
+    /// A known Router Information TLV whose value cannot be read — an SRGB
+    /// whose SID/Label is 5 octets — is kept as unknown, bytes and all, and
+    /// the TLVs after it still read. The SRv6 Capabilities TLV (RFC 9513
+    /// §2), sub-TLVs included, re-emits as received.
+    #[test]
+    fn router_information_keeps_what_it_cannot_read() {
+        #[rustfmt::skip]
+        let wire: &[u8] = &[
+            0, 9, 0, 13, 0, 0, 100, 0, 0, 1, 0, 5, 1, 2, 3, 4, 5, 0, 0, 0, // SRGB, bad SID/Label
+            0, 8, 0, 1, 0, 0, 0, 0,                                        // SR-Algorithm: SPF
+            0, 20, 0, 8, 0x80, 0, 0, 0, 0xde, 0xad, 0xbe, 0xef,            // SRv6 Capabilities
+        ];
+        let (rest, ri) = RouterInfoLsa::parse_be(wire).expect("parse");
+        assert!(rest.is_empty());
+        match &ri.tlvs[..] {
+            [
+                RouterInfoTlv::Unknown(u),
+                RouterInfoTlv::Algo(a),
+                RouterInfoTlv::Srv6Capabilities(c),
+            ] => {
+                assert_eq!((u.typ, u.len), (9, 13));
+                assert_eq!(a.algos, vec![Algo::Spf]);
+                assert_eq!(
+                    (c.flags, c.subs.clone()),
+                    (0x8000, vec![0xde, 0xad, 0xbe, 0xef])
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        let mut buf = BytesMut::new();
+        ri.emit(&mut buf);
+        assert_eq!(&buf[..], wire, "re-emits as received");
     }
 }

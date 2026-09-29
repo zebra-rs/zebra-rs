@@ -355,6 +355,9 @@ pub fn build_v3_p2p_adj_sub(adjacency_sid: &AdjacencySid) -> Ospfv3SubTlv {
         flags,
         weight: 0,
         sid,
+        // Sent under zebra-rs's former code point until every router reads
+        // RFC 8666's (docs/design/ospfv3-router-information-lsa.md, D4).
+        code_point: AdjSidCodePoint::Legacy,
     })
 }
 
@@ -369,6 +372,8 @@ pub fn build_v3_lan_adj_sub(neighbor_router_id: Ipv4Addr, label: u32) -> Ospfv3S
         weight: 0,
         neighbor_router_id,
         sid: SidLabelTlv::Label(label),
+        // As `build_v3_p2p_adj_sub`.
+        code_point: AdjSidCodePoint::Legacy,
     })
 }
 
