@@ -8897,3 +8897,7 @@ mod addpath_nht_review_tests;
 #[cfg(test)]
 #[path = "vrf_rt_change_review_tests.rs"]
 mod vrf_rt_change_review_tests;
+
+#[cfg(test)]
+#[path = "rtc_mid_session_review_tests.rs"]
+mod rtc_mid_session_review_tests;

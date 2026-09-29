@@ -20,10 +20,11 @@ follow-ups), #7 (PR #2380, `d7476601`), #8 and with it #13 (PR #2383,
 (PR #2420, `49fb77b1`), #20 (PR #2422, `d8f6a0cf`), #10 with the MED
 knobs (PR #2423, `7852fc15`), #16 (PR #2425, `6d4446b1`), #17 with #18
 (PR #2426, `9d4e2589`), #23 (PR #2429, `74d4500d`) and #24 (PR #2432,
-`969279a0`, three review rounds folded in). Each fixed entry ends with its
-fix note; everything else is open. In progress: a follow-up to #23 (AddPath
-withdraws held by `suppress-fib-pending`), branch
-`bgp-addpath-nht-followups`.
+`969279a0`, three review rounds folded in), with a follow-up to #23
+(AddPath withdraws held by `suppress-fib-pending`, PR #2433, `b5c4c210`).
+Each fixed entry ends with its fix note; everything else is open. In
+progress: #19 (RTC membership learned mid-session), branch
+`bgp-rtc-mid-session`.
 
 Method: one lead read the selection ladder and every egress builder, then
 five independent read-only reviewers each took one dimension (update-group
@@ -1340,7 +1341,7 @@ cap. The two reviews agree on every overlapping item.
   `_v6`), `bgp_route_map_match`, `bgp_vpnv4_rr_transit_label`,
   `bgp_evpn_addpath_flip` and `bgp_lu_addpath_resend` stay green.
 
-### 19. P2 CONFIRMED — RTC membership learned mid-session never triggers an advertisement
+### 19. P2 CONFIRMED, FIXED on branch `bgp-rtc-mid-session` — RTC membership learned mid-session never triggers an advertisement
 
 - `route.rs:8122` / `8133` (`route_ipv{4,6}_rtc_update`) only insert
   into `peer.rtcv4/6`; `route_rtcv4_sync` (`8143`) runs only on an
@@ -1354,6 +1355,92 @@ cap. The two reviews agree on every overlapping item.
   (`6670`, `10031`).
 - Fix direction: on an exact RTC add, run a targeted re-sync of the VPN
   tables filtered to the new RT (or the full `route_sync_vpnv4/6`).
+- Gates (branch `bgp-rtc-mid-session`; each compiles on `main` and fails
+  there, except the control). Scope widened with the user to the whole RTC
+  mid-session story — both sides, both directions. Unit,
+  `rtc_mid_session_review_tests.rs` (a child of `inst.rs`; membership
+  arrives as RTC MP_REACH / MP_UNREACH through `route_from_peer`, a
+  PE-side change as `RibRx::VrfRouteTargets` / `VrfDel` through
+  `Bgp::process_rib_msg`): receiving side —
+  `vpnv4_rtc_membership_added_mid_session_sends_the_routes_it_selects` and
+  its `vpnv6_` twin, `vpnv4_rtc_membership_withdrawn_withdraws_the_routes_it_selected`
+  and its `vpnv6_` twin, `vpnv4_last_rtc_membership_withdrawn_withdraws_every_route`,
+  `rtc_default_membership_sends_every_route_until_it_is_withdrawn` (on
+  `main` the default was ignored, so a peer mixing it with an exact RT got
+  that RT's routes only), `vpnv6_session_up_dump_waits_for_the_rtc_eor`;
+  sending side — `vrf_import_rt_change_announces_and_withdraws_rtcv4_membership`
+  and its `rtcv6` twin, `rtc_membership_moves_between_the_default_and_exact_rts`,
+  `vrf_deleted_withdraws_the_rtc_membership_only_it_needed`; control
+  `rtc_membership_before_the_rtc_eor_waits_for_the_session_up_dump`. BDD
+  `bgp_rtc_mid_session` (z1 exports a route per RT, z2 imports one over
+  iBGP VPNv4 + RTC, then adds and removes an import RT): on `main` z2 never
+  gets the added RT's route. Its IPv6 twin (over an IPv6 session; VPNv6
+  needs an IPv6 next-hop) fails on `main` at setup — the VPNv6 dump sends
+  z2 the route its membership does not select — and at the removal.
+- Found while gating (not yet recorded elsewhere): a zebra-rs PE advertises
+  its RTC membership only at session-up (`send_rtcv4_membership` /
+  `send_rtcv6_membership` from `route_sync`); a VRF import-RT change
+  mid-session sends no membership update, so in an all-zebra-rs network the
+  RR never learns the PE's new RT — and a removed RT is never withdrawn,
+  which meets the recorded receive-side gap (RTC MP_UNREACH is ignored,
+  `bgp-code-review-findings.md`).
+- FIXED (branch `bgp-rtc-mid-session`, the whole RTC mid-session story):
+  - Representation: a peer's membership is its exact RTs, its broad
+    memberships (the default or a partial prefix, `rtcv4_broad` /
+    `rtcv6_broad`, keyed so a withdraw removes the right one) and whether it
+    sent any this session (`rtcv4_seen` / `rtcv6_seen`). `rtc_blocks_v4` /
+    `_v6` filters a route out only when the peer holds no broad membership
+    and has declared a constraint none of the route's RTs meets; all eight
+    filter sites use it. A peer that never sent a membership is still sent
+    everything; one whose membership was withdrawn to nothing is sent
+    nothing; a default mixed with an exact RT now sends everything (the
+    "known gap" the old comment recorded).
+  - Receiving: an RTC MP_REACH or MP_UNREACH that changes the membership
+    runs `route_rtc_reconcile_vpnv4` / `_v6` once per UPDATE: withdraw each
+    held route the membership no longer selects, then the session-up dump
+    for the rows the peer does not hold (`vpnv4_dump` / `vpnv6_dump` with
+    `missing_only`). Nothing is sent while the session-up dump still waits
+    for the peer's RTC End-of-RIB. The VPNv6 dump now waits for it as the
+    VPNv4 one does (`route_rtcv6_sync`), and each End-of-RIB clears only
+    its own family's wait.
+  - Sending: a VRF import-RT change or a VRF deleted from the kernel that
+    changes our membership (the union of import RTs per family) is sent to
+    every Established RTC neighbor (`send_rtc_membership_change`): what is
+    added is announced first, then what is dropped withdrawn, so a neighbor
+    never holds an empty membership in between; moving to or from the
+    default announces or withdraws the zero-length default NLRI.
+    `bgp-packet` now emits an RTC MP_UNREACH carrying NLRI (it emitted
+    nothing for one).
+  - Verified: the 12 unit gates pass, and each of ten mutations (no
+    reconcile on a v4 / v6 add, no v4 / v6 withdraw, no `seen` flag, no
+    broad set, no VPNv6 deferral, no `missing_only`, no PE side, withdraw
+    before announce) fails its own gates. BDD `bgp_rtc_mid_session` and
+    `_v6` pass; with the receiving side's v4 withdraw disabled the v4 twin
+    fails at the removal step (its negative assertion is live).
+    `bgp_vrf_rt_change` (`_v6`), `bgp_shard_addpath_vpnv4` / `v6`,
+    `bgp_shard_sync_vpnv4` / `v6`, `bgp_vpnv4` / `v6_rr_transit_label`,
+    `bgp_interas_option_ab` / `b` / `c`, `l3vpn_bgp_v4` / `v6`,
+    `bgp_vrf_vpnv4` / `v6_export`, `bgp_adv_interval_zero_v6`,
+    `bgp_vpnv6_transit_label_at_receive`, `bgp_addpath_soft_out`,
+    `bgp_vpnv6_llgr_stale_expiry` and `bgp_peer_down_cleanup` stay green.
+- Review round (both FIXED on the branch; the reviewer's three probes are
+  now named gates in `rtc_mid_session_review_tests.rs`):
+  - P2: the exact membership was keyed by the RT alone, but two NLRIs may
+    name one RT from different origin ASes; withdrawing either dropped the
+    RT and withdrew the VPN routes the other still selected. The exact
+    NLRIs are now kept as `(RT, origin AS)` in `rtcv4_origins` /
+    `rtcv6_origins`, and the RT leaves `rtcv4` / `rtcv6` with the last of
+    them. Gates `vpnv4_rtc_withdraw_keeps_an_rt_another_origin_as_names`
+    and its `vpnv6_` twin.
+  - P2: the plain VPNv6 live advertise (`V6Batch::advertise`) recorded its
+    Adj-RIB-Out row with the attributes before the outbound policy, so
+    after a policy rewrote RT A to RT B, withdrawing membership B while
+    holding A left the route standing — the reconcile read RT A off the
+    row. The row now carries the attributes sent, as every other VPN
+    writer's does. Gate `vpnv6_rtc_withdraw_reads_the_rt_the_policy_sent`,
+    with a passing VPNv4 control.
+  - Each fix reverted alone fails exactly its gates; workspace clippy and
+    the full unit suite stay green.
 
 ### 20. P2 CONFIRMED, FIXED in #2422 — LU session-up sync dumps the most recently updated candidate, not the winner
 
@@ -1561,7 +1648,7 @@ cap. The two reviews agree on every overlapping item.
   path of several is withdrawn by its source, the AddPath withdraw of that
   path is skipped, and the release, which walks the current candidates,
   never sends it.
-- Follow-up (branch `bgp-addpath-nht-followups`): the held-job gap above
+- Follow-up (FIXED in #2433): the held-job gap above
   is narrower than first recorded. A wire withdraw at N=1 takes
   `route_ipv4_withdraw`, which sends the AddPath withdraw outside the held
   fan-out; the gap is a removal that travels as an advertise job — every

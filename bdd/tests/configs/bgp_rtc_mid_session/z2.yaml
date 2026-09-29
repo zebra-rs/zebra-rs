@@ -1,0 +1,29 @@
+# z2 (PE, AS 65000): VRF blue imports RT 65000:100, so its rtcv4
+# membership toward z1 is 65000:100.
+vrf:
+- name: blue
+  ipv4:
+    route-target:
+      import:
+      - 65000:100
+router:
+  bgp:
+    global:
+      as: 65000
+      router-id: 192.168.67.2
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 192.168.67.1
+      remote-as: 65000
+      enabled: true
+      afi-safi:
+      - name: vpnv4
+        enabled: true
+      - name: rtcv4
+        enabled: true
+    vrf:
+    - name: blue
+      rd: 65000:2
