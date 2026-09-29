@@ -3,9 +3,11 @@ use std::{collections::BTreeMap, net::Ipv4Addr};
 use ospf_packet::*;
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::flex_algo::selection::{Fad, first_fads};
 use crate::spf::label_block::{LabelBlock, LabelConfig, LabelMap};
 
 use super::ReachMap;
+use super::flex_algo::{fad_view, fad_view_v3};
 use super::inst::Message;
 use super::tracing::OspfTracing;
 use super::version::{OspfVersion, Ospfv2};
@@ -667,10 +669,11 @@ fn router_info_label_config(tlvs: &[RouterInfoTlv]) -> Option<LabelConfig> {
 }
 
 impl Lsdb<super::version::Ospfv3> {
-    /// v3 sibling of `Lsdb<Ospfv2>::insert_received`. Calls
-    /// [`update_lsa_v3`] for SR-info ingest, then hands off to the
-    /// generic install path. Used by the v3 flooding code in
-    /// `packet_v3.rs` instead of bare `install_lsa`.
+    /// v3 sibling of `Lsdb<Ospfv2>::insert_received`: installs the LSA,
+    /// then refreshes `label_map[adv_router]` when the LSA carries SR
+    /// capabilities or replaces one that did. Used by the v3 flooding
+    /// code in `packet_v3.rs` and by graceful-restart replay instead of
+    /// bare `install_lsa`.
     pub fn insert_received_v3(
         &mut self,
         ospf_lsa: Ospfv3Lsa,
@@ -678,89 +681,243 @@ impl Lsdb<super::version::Ospfv3> {
         area_id: Option<Ipv4Addr>,
         tracing: &OspfTracing,
     ) {
-        self.update_lsa_v3(&ospf_lsa);
+        let h = &ospf_lsa.h;
+        let adv_router = h.advertising_router;
+        let key = (h.ls_type, h.link_state_id, adv_router);
+        let resync = carries_sr_capabilities(&ospf_lsa)
+            || self
+                .tables
+                .get(&key)
+                .is_some_and(|old| carries_sr_capabilities(&old.data));
         self.install_lsa(ospf_lsa, tx, area_id, tracing);
-    }
-
-    /// Scan an inbound v3 LSA for RFC 8666 §3 SR capability TLVs
-    /// (SID/Label Range = SRGB, SR Local Block = SRLB) and update
-    /// `label_map[adv_router]` accordingly. MaxAge LSAs evict the
-    /// entry. Mirrors the v2 path's `update_lsa` for OpaqueAreaRouterInfo.
-    ///
-    /// Any E-Router-LSA can carry these top-level TLVs per RFC 8362
-    /// §3.2 nesting; we don't gate on the LS-ID convention zebra-rs
-    /// uses for its own SR-info LSA (`SR_INFO_LSID = 0`) because
-    /// foreign implementations may place the TLVs on a different
-    /// LS-ID — only the presence of the TLVs matters.
-    pub fn update_lsa_v3(&mut self, lsa: &Ospfv3Lsa) {
-        if lsa.h.ls_type != OSPFV3_E_ROUTER_LSA_TYPE {
-            return;
-        }
-        let Ospfv3LsBody::ERouter(ref body) = lsa.body else {
-            return;
-        };
-        let (global, local) = e_router_label_blocks(&body.tlvs);
-
-        // Only react when this LSA actually carried SR capability
-        // TLVs. The same advertising router emits multiple
-        // E-Router-LSAs (one per link, plus one SR-info), and the
-        // per-link ones must not evict the SR-info-derived
-        // `label_map` entry.
-        if global.is_none() && local.is_none() {
-            return;
-        }
-
-        if lsa.h.ls_age == OSPF_MAX_AGE {
-            self.label_map.remove(&lsa.h.advertising_router);
-            return;
-        }
-
-        if let Some(global) = global {
-            let label_config = LabelConfig { global, local };
-            self.label_map
-                .insert(lsa.h.advertising_router, label_config);
+        if resync {
+            self.label_map_resync_v3(adv_router);
         }
     }
 
     /// Remove `lsa_key` if it has expired (see
     /// [`Lsdb::remove_expired_by_raw_key`]), and what was derived from
-    /// it: an expiring E-Router-LSA can take its router's SRGB with it,
-    /// and SPF must stop resolving Prefix-SIDs against that. Returns
-    /// whether it was removed.
+    /// it: an expiring Router Information LSA or E-Router-LSA can take
+    /// its router's SRGB with it, and SPF must stop resolving Prefix-SIDs
+    /// against that. Returns whether it was removed.
     pub fn expire_lsa_v3(&mut self, lsa_key: OspfLsaKey) -> bool {
         if !self.remove_expired_by_raw_key(lsa_key) {
             return false;
         }
         let (ls_type, _, adv_router) = lsa_key;
-        if ls_type == OSPFV3_E_ROUTER_LSA_TYPE {
+        if ls_type == OSPFV3_E_ROUTER_LSA_TYPE || ls_type == OSPFV3_ROUTER_INFO_LSA_TYPE {
             self.label_map_resync_v3(adv_router);
         }
         true
     }
 
-    /// Rebuild `label_map[adv_router]` from the router's E-Router-LSAs
-    /// still in the LSDB — the one that left need not have been the one
-    /// carrying the SRGB.
+    /// Rebuild `label_map[adv_router]` from the router's SR capabilities
+    /// as the LSDB now holds them — the LSA that arrived or left need not
+    /// have been the one carrying the SRGB.
     fn label_map_resync_v3(&mut self, adv_router: Ipv4Addr) {
         let label_config = self
-            .tables
-            .iter()
-            .filter(|((ls_type, _, adv), lsa)| {
-                *ls_type == OSPFV3_E_ROUTER_LSA_TYPE
-                    && *adv == adv_router
-                    && lsa.current_age() < OSPF_MAX_AGE
-            })
-            .find_map(|(_, lsa)| match lsa.data.body {
-                Ospfv3LsBody::ERouter(ref body) => match e_router_label_blocks(&body.tlvs) {
-                    (Some(global), local) => Some(LabelConfig { global, local }),
-                    (None, _) => None,
-                },
-                _ => None,
+            .sr_capabilities_where(|router| router == adv_router)
+            .remove(&adv_router)
+            .and_then(|caps| {
+                Some(LabelConfig {
+                    global: caps.srgb?,
+                    local: caps.srlb,
+                })
             });
         match label_config {
             Some(label_config) => self.label_map.insert(adv_router, label_config),
             None => self.label_map.remove(&adv_router),
         };
+    }
+
+    /// Every router's Segment Routing capabilities in this area.
+    pub fn sr_capabilities(&self) -> BTreeMap<Ipv4Addr, SrCapabilities> {
+        self.sr_capabilities_where(|_| true)
+    }
+
+    /// The Segment Routing capabilities of the routers `want` selects.
+    ///
+    /// A router is read from its area-scoped Router Information LSAs
+    /// (RFC 8666 §4) if any of them carries an SR capability, and
+    /// otherwise from zebra-rs's former carrier, TLVs on its
+    /// E-Router-LSAs — never from a mixture, so a network part-way
+    /// through an upgrade computes consistently. Either way, instances
+    /// are read in ascending Link State ID and each TLV's first
+    /// occurrence counts (RFC 7770 §3, RFC 8665 §3.1, RFC 9350 §5.2).
+    /// LSAs that have reached MaxAge are gone.
+    fn sr_capabilities_where(
+        &self,
+        want: impl Fn(Ipv4Addr) -> bool,
+    ) -> BTreeMap<Ipv4Addr, SrCapabilities> {
+        // The table is ordered by (type, Link State ID, router), so each
+        // router's instances come in ascending Link State ID.
+        let want = &want;
+        let live = |ls_type: u16| {
+            self.tables
+                .iter()
+                .filter(move |((t, _, adv), lsa)| {
+                    *t == ls_type && want(*adv) && lsa.current_age() < OSPF_MAX_AGE
+                })
+                .map(|((_, _, adv), lsa)| (*adv, &lsa.data.body))
+        };
+
+        let mut out: BTreeMap<Ipv4Addr, SrCapabilities> = BTreeMap::new();
+        let mut fads: BTreeMap<Ipv4Addr, Vec<Fad>> = BTreeMap::new();
+        for (adv, body) in live(OSPFV3_ROUTER_INFO_LSA_TYPE) {
+            let Ospfv3LsBody::RouterInfo(ri) = body else {
+                continue;
+            };
+            for tlv in &ri.tlvs {
+                let caps = || SrCapabilities::new(SrCarrier::RouterInfo);
+                match tlv {
+                    RouterInfoTlv::Algo(a) => {
+                        let caps = out.entry(adv).or_insert_with(caps);
+                        caps.algos.get_or_insert_with(|| a.algos.clone());
+                    }
+                    RouterInfoTlv::SidLabelRnage(r) => {
+                        let caps = out.entry(adv).or_insert_with(caps);
+                        if caps.srgb.is_none()
+                            && let SidLabelTlv::Label(start) = r.sid_label
+                        {
+                            caps.srgb = Some(LabelBlock::new(start, r.range));
+                        }
+                    }
+                    RouterInfoTlv::LocalBlock(lb) => {
+                        let caps = out.entry(adv).or_insert_with(caps);
+                        if caps.srlb.is_none()
+                            && let SidLabelTlv::Label(start) = lb.sid_label
+                        {
+                            caps.srlb = Some(LabelBlock::new(start, lb.range));
+                        }
+                    }
+                    RouterInfoTlv::Fad(fad) => {
+                        out.entry(adv).or_insert_with(caps);
+                        fads.entry(adv).or_default().push(fad_view(fad));
+                    }
+                    RouterInfoTlv::Srv6Capabilities(_) => {
+                        out.entry(adv).or_insert_with(caps);
+                    }
+                    RouterInfoTlv::RouterInfo(_) | RouterInfoTlv::Unknown(_) => {}
+                }
+            }
+        }
+
+        // Routers that advertise none of it in a Router Information LSA,
+        // read from the former carrier as before: the SRGB and SRLB of
+        // their first E-Router-LSA with an SRGB.
+        for (adv, body) in live(OSPFV3_E_ROUTER_LSA_TYPE) {
+            if out
+                .get(&adv)
+                .is_some_and(|c| c.carrier == SrCarrier::RouterInfo)
+            {
+                continue;
+            }
+            let Ospfv3LsBody::ERouter(e) = body else {
+                continue;
+            };
+            let blocks = e_router_label_blocks(&e.tlvs);
+            for tlv in &e.tlvs {
+                let caps = || SrCapabilities::new(SrCarrier::ERouter);
+                match tlv {
+                    Ospfv3ExtTlv::SrAlgorithm(a) => {
+                        let caps = out.entry(adv).or_insert_with(caps);
+                        caps.algos.get_or_insert_with(|| a.algos.clone());
+                    }
+                    Ospfv3ExtTlv::SidLabelRange(_) | Ospfv3ExtTlv::SrLocalBlock(_) => {
+                        let caps = out.entry(adv).or_insert_with(caps);
+                        if caps.srgb.is_none()
+                            && let (Some(global), local) = blocks.clone()
+                        {
+                            caps.srgb = Some(global);
+                            caps.srlb = local;
+                        }
+                    }
+                    Ospfv3ExtTlv::Fad(fad) => {
+                        out.entry(adv).or_insert_with(caps);
+                        fads.entry(adv).or_default().push(fad_view_v3(fad));
+                    }
+                    Ospfv3ExtTlv::Srv6Capabilities(_) => {
+                        out.entry(adv).or_insert_with(caps);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        for (adv, fads) in fads {
+            if let Some(caps) = out.get_mut(&adv) {
+                caps.fads = first_fads(fads);
+            }
+        }
+        out
+    }
+}
+
+/// Where a router's OSPFv3 Segment Routing capabilities were read from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SrCarrier {
+    /// Its area-scoped Router Information LSAs (RFC 7770), as RFC 8666 §4
+    /// specifies.
+    RouterInfo,
+    /// zebra-rs's former carrier: the same TLVs on its E-Router-LSAs.
+    ERouter,
+}
+
+/// The Segment Routing capabilities one router advertises in an area.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SrCapabilities {
+    pub carrier: SrCarrier,
+    /// The algorithms it supports: the SR-Algorithm TLV (RFC 8665 §3.1).
+    pub algos: Option<Vec<Algo>>,
+    /// Its SRGB, the first SID/Label Range TLV (RFC 8665 §3.2).
+    pub srgb: Option<LabelBlock>,
+    /// Its SRLB, the first SR Local Block TLV (RFC 8665 §3.3).
+    pub srlb: Option<LabelBlock>,
+    /// Its Flexible Algorithm Definitions, one per algorithm (RFC 9350
+    /// §5.2).
+    pub fads: BTreeMap<u8, Fad>,
+}
+
+impl SrCapabilities {
+    fn new(carrier: SrCarrier) -> Self {
+        Self {
+            carrier,
+            algos: None,
+            srgb: None,
+            srlb: None,
+            fads: BTreeMap::new(),
+        }
+    }
+}
+
+/// Whether an LSA carries SR capabilities: a Router Information LSA
+/// with any SR TLV, or an E-Router-LSA with any of the TLVs zebra-rs
+/// formerly carried there.
+fn carries_sr_capabilities(lsa: &Ospfv3Lsa) -> bool {
+    match &lsa.body {
+        Ospfv3LsBody::RouterInfo(ri) if lsa.h.ls_type == OSPFV3_ROUTER_INFO_LSA_TYPE => {
+            ri.tlvs.iter().any(|tlv| {
+                matches!(
+                    tlv,
+                    RouterInfoTlv::Algo(_)
+                        | RouterInfoTlv::SidLabelRnage(_)
+                        | RouterInfoTlv::LocalBlock(_)
+                        | RouterInfoTlv::Fad(_)
+                        | RouterInfoTlv::Srv6Capabilities(_)
+                )
+            })
+        }
+        Ospfv3LsBody::ERouter(e) => e.tlvs.iter().any(|tlv| {
+            matches!(
+                tlv,
+                Ospfv3ExtTlv::SrAlgorithm(_)
+                    | Ospfv3ExtTlv::SidLabelRange(_)
+                    | Ospfv3ExtTlv::SrLocalBlock(_)
+                    | Ospfv3ExtTlv::Fad(_)
+                    | Ospfv3ExtTlv::Srv6Capabilities(_)
+            )
+        }),
+        _ => false,
     }
 }
 

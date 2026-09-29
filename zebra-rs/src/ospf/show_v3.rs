@@ -781,7 +781,7 @@ fn show_ospfv3_database(
 /// groups by LS-Type, and prints the full body of every non-MaxAge
 /// LSA. JSON output reuses the summary shape (header-only) for now —
 /// per-body JSON serializers belong to a follow-up.
-fn show_ospfv3_database_detail(
+pub(super) fn show_ospfv3_database_detail(
     top: &Ospf<Ospfv3>,
     args: Args,
     json: bool,
@@ -808,6 +808,8 @@ fn show_ospfv3_database_detail(
         ospf_packet::OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE,
         // RFC 9513 SRv6 Locator LSA — area scope, own function code.
         ospf_packet::OSPFV3_SRV6_LOCATOR_LSA_TYPE,
+        // RFC 7770 Router Information LSA, where SR capabilities ride.
+        ospf_packet::OSPFV3_ROUTER_INFO_LSA_TYPE,
     ];
 
     for (area_id, area) in top.areas.iter() {
@@ -836,6 +838,8 @@ fn show_ospfv3_database_detail(
     const AS_TYPES: &[u16] = &[
         OSPFV3_AS_EXTERNAL_LSA_TYPE,
         ospf_packet::OSPFV3_E_AS_EXTERNAL_LSA_TYPE,
+        // Router Information LSA, AS scope (RFC 7770 §2.2).
+        0xC000 | ospf_packet::OSPFV3_ROUTER_INFO_FUNCTION_CODE,
     ];
 
     for &ls_type in AS_TYPES {
@@ -858,6 +862,8 @@ fn show_ospfv3_database_detail(
         OSPFV3_LINK_LSA_TYPE,
         ospf_packet::OSPFV3_GRACE_LSA_TYPE,
         ospf_packet::OSPFV3_E_LINK_LSA_TYPE,
+        // Router Information LSA, link scope (RFC 7770 §2.2).
+        0x8000 | ospf_packet::OSPFV3_ROUTER_INFO_FUNCTION_CODE,
     ];
 
     for link in top.links.values() {
@@ -1960,10 +1966,10 @@ struct Ospfv3SrRemoteRouterJson {
     advertising_router: String,
     area: String,
     /// Peer's SRGB block as `[start/end]`, formatted from the
-    /// `Ospfv3` LSDB's `label_map` (populated by the SR-info ingest
-    /// path -- see `Lsdb<Ospfv3>::update_lsa_v3`). `None` when the
-    /// peer's SR-info LSA has not arrived yet or carried no
-    /// SID/Label Range TLV; in that case Index-form Prefix-SIDs are
+    /// `Ospfv3` LSDB's `label_map` (kept by
+    /// `Lsdb<Ospfv3>::insert_received_v3`). `None` when the peer's SR
+    /// capabilities have not arrived yet or carried no SID/Label Range
+    /// TLV; in that case Index-form Prefix-SIDs are
     /// not resolved into absolute labels and `label_op` stays empty.
     srgb: Option<String>,
     srlb: Option<String>,
@@ -2083,8 +2089,8 @@ fn show_ospfv3_segment_routing(
     // forwarding will actually use; the resolved label comes from
     // `SpfRouteV3.sid` populated by `add_prefix_sids_v3` -- single
     // source of truth shared with the install path. Per-router SRGB
-    // / SRLB metadata comes from the LSDB's `label_map`, populated
-    // by `Lsdb<Ospfv3>::update_lsa_v3`.
+    // / SRLB metadata comes from the LSDB's `label_map`, kept by
+    // `Lsdb<Ospfv3>::insert_received_v3`.
     let remote_routers = collect_remote_routers(top);
 
     let summary = Ospfv3SegmentRoutingJson {
@@ -2236,8 +2242,8 @@ fn collect_remote_routers(top: &Ospf<Ospfv3>) -> Vec<Ospfv3SrRemoteRouterJson> {
             };
 
             // Resolve peer's SRGB / SRLB from the LSDB's label_map.
-            // Populated by `Lsdb<Ospfv3>::update_lsa_v3` when the
-            // peer's SR-info E-Router-LSA arrives. Same key used by
+            // Kept by `Lsdb<Ospfv3>::insert_received_v3` as the peer's
+            // SR capabilities arrive. Same key used by
             // `add_prefix_sids_v3` for Index→Label resolution.
             let key = (*area_id, advertising);
             srgb_lookup.entry(key).or_insert_with(|| {

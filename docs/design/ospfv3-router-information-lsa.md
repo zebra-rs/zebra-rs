@@ -3,6 +3,7 @@
 > **Status:** reviewed (2026-09-29); all five §8 decisions settled, each taking the
 > recommendation: phased over two releases, the legacy carrier dual-originated for one release
 > with no knob, PR 1 first, the interop peer chosen later, OSPFv2's capability bits.
+> **Progress:** PR 1 (D1) merged as #2434. PR 2 (D2) on branch `ospfv3-sr-read-ri`.
 > **Parent docs:** [ospf-sr-mpls-status.md](./ospf-sr-mpls-status.md) (records the current carrier
 > as "placement by convention, not by RFC fiat"), [ospfv3-srv6-plan.md](./ospfv3-srv6-plan.md),
 > [flex-algo-link-loss.md](./flex-algo-link-loss.md) (PR 3b chose to stay on the current carrier
@@ -159,20 +160,29 @@ MaxAge ones excluded:
 - **SR-Algorithm:** the first occurrence (RFC 8665 §3.1). This covers participation, and SRv6
   algorithm support.
 - **SRGB and SRLB:** the first SID/Label Range TLV and the first SRLB TLV, in that order. zebra-rs
-  models one range of each (as OSPFv2 does today), so a second range is ignored (§7).
+  models one range of each, so a second range is ignored (§7). (OSPFv2 today keeps the last one
+  it reads, not the first; aligning it is a separate change.)
 - **FAD:** per algorithm, the first occurrence and the smallest Instance ID (RFC 9350 §5.2), into
   the protocol-neutral selection as today (`fad_view` over the shared RI FAD type).
-- **SRv6 Capabilities:** the first occurrence.
+- **SRv6 Capabilities:** counts as an SR capability for source precedence below. Nothing computes
+  with its flags yet.
 
 **Source precedence.** A router that advertises any of these in an RI LSA is read from its RI LSAs
-alone. A router that does not — an older zebra-rs — is read from the legacy E-Router carrier,
-exactly as today. So no router is ever read from a mixture, and a network mid-upgrade computes
-consistently.
+alone. A router that does not — an older zebra-rs — is read from the legacy E-Router carrier as
+today: the SRGB and SRLB of its first E-Router-LSA with an SRGB, and each other TLV's first
+occurrence in ascending Link State ID. (zebra-rs sends them in one E-Router-LSA, LS-ID 0.) So no
+router is ever read from a mixture, and a network mid-upgrade computes consistently. An RI LSA
+with no SR TLV in it — only the Capabilities TLV, say — does not count.
 
 **Derived state.** The SRGB/SRLB cache (`label_map`) is fed and resynced from the RI LSA on
 arrival, flush and expiry, with the same rules #2427/#2428 gave the legacy carrier. Flex-Algo
-participation and definitions read through the same precedence. Receipt already schedules SPF for
-every area-scoped LSA, and expiry does too.
+participation and definitions read through the same precedence
+(`Lsdb<Ospfv3>::sr_capabilities`). Receipt already schedules SPF for every area-scoped LSA, and
+expiry does too.
+
+**Show.** PR 1 decoded the RI LSA and taught `show ospfv3 database detail` to render it, but that
+view walks fixed lists of LS types, which lacked all three RI types. PR 2 adds them, so a received
+RI LSA is shown in full.
 
 ### D3 — Originate the RI LSA (PR 3)
 

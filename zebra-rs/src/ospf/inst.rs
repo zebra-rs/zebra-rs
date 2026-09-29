@@ -14983,41 +14983,20 @@ fn graph_v3(top: &mut Ospf<Ospfv3>, area_id: Ipv4Addr) -> (spf::Graph, Option<us
     (graph, source_node)
 }
 
-/// Every other router's Flexible Algorithm Definitions in `area`, from
-/// its E-Router-LSAs — where zebra-rs's OSPFv3 carries its SR
-/// capabilities — one per algorithm: the first occurrence across them, in
-/// ascending Link State ID (as RFC 9350 §5.2 orders Router Information
-/// instances). MaxAge LSAs are gone.
+/// Every other router's Flexible Algorithm Definitions in `area`, one per
+/// algorithm, read as [`Lsdb::sr_capabilities`] reads them: from its
+/// Router Information LSAs, or zebra-rs's former E-Router-LSA carrier.
+///
+/// [`Lsdb::sr_capabilities`]: super::lsdb::Lsdb::sr_capabilities
 fn flex_algo_peer_fads_v3(
     area: &OspfArea<Ospfv3>,
     self_id: Ipv4Addr,
 ) -> BTreeMap<Ipv4Addr, BTreeMap<u8, crate::flex_algo::selection::Fad>> {
-    use crate::ospf::lsdb::OSPF_MAX_AGE;
-    use ospf_packet::{OSPFV3_E_ROUTER_LSA_TYPE, Ospfv3ExtTlv, Ospfv3LsBody};
-
-    let mut by_router: BTreeMap<Ipv4Addr, Vec<(u32, crate::flex_algo::selection::Fad)>> =
-        BTreeMap::new();
-    for ((ls_id, adv_router), lsa) in area.lsdb.iter_by_raw_type(OSPFV3_E_ROUTER_LSA_TYPE) {
-        if adv_router == self_id || lsa.data.h.ls_age >= OSPF_MAX_AGE {
-            continue;
-        }
-        let Ospfv3LsBody::ERouter(ref body) = lsa.data.body else {
-            continue;
-        };
-        let fads = by_router.entry(adv_router).or_default();
-        for tlv in &body.tlvs {
-            if let Ospfv3ExtTlv::Fad(fad) = tlv {
-                fads.push((ls_id, super::flex_algo::fad_view_v3(fad)));
-            }
-        }
-    }
-    by_router
+    area.lsdb
+        .sr_capabilities()
         .into_iter()
-        .map(|(router, mut fads)| {
-            fads.sort_by_key(|(ls_id, _)| *ls_id);
-            let fads = fads.into_iter().map(|(_, fad)| fad);
-            (router, crate::flex_algo::selection::first_fads(fads))
-        })
+        .filter(|(router, _)| *router != self_id)
+        .map(|(router, caps)| (router, caps.fads))
         .collect()
 }
 
@@ -15050,29 +15029,22 @@ pub(crate) fn flex_algo_selection_v3(
     )
 }
 
-/// OSPFv3 analog of `flex_algo_participants`: the set of routers that
-/// advertise participation in `algo` via the SR-Algorithm TLV in their
-/// E-Router-LSA (the per-router SR-info LSA at `SR_INFO_LSID`).
+/// OSPFv3 analog of `flex_algo_participants`: the routers in `area`
+/// whose SR-Algorithm TLV lists `algo`, read as
+/// [`Lsdb::sr_capabilities`] reads it.
+///
+/// [`Lsdb::sr_capabilities`]: super::lsdb::Lsdb::sr_capabilities
 fn flex_algo_participants_v3(area: &OspfArea<Ospfv3>, algo: u8) -> BTreeSet<Ipv4Addr> {
-    use crate::ospf::lsdb::OSPF_MAX_AGE;
-    use ospf_packet::{OSPFV3_E_ROUTER_LSA_TYPE, Ospfv3ExtTlv, Ospfv3LsBody};
-
-    let mut set = BTreeSet::new();
-    for (_, lsa) in area.lsdb.iter_by_raw_type(OSPFV3_E_ROUTER_LSA_TYPE) {
-        if lsa.data.h.ls_age >= OSPF_MAX_AGE {
-            continue;
-        }
-        let Ospfv3LsBody::ERouter(ref body) = lsa.data.body else {
-            continue;
-        };
-        let participates = body.tlvs.iter().any(|tlv| {
-            matches!(tlv, Ospfv3ExtTlv::SrAlgorithm(a) if a.algos.contains(&Algo::FlexAlgo(algo)))
-        });
-        if participates {
-            set.insert(lsa.data.h.advertising_router);
-        }
-    }
-    set
+    area.lsdb
+        .sr_capabilities()
+        .into_iter()
+        .filter(|(_, caps)| {
+            caps.algos
+                .as_ref()
+                .is_some_and(|algos| algos.contains(&Algo::FlexAlgo(algo)))
+        })
+        .map(|(router, _)| router)
+        .collect()
 }
 
 /// OSPFv3 analog of `flex_algo_link_affinity`: per-link affinity
@@ -19055,6 +19027,339 @@ mod v3_flex_algo_selection_tests {
         );
         top.process_cm_msg(ConfigRequest::new(Vec::new(), ConfigOp::CommitEnd));
         assert!(announced(&top, AREA0).contains(&Algo::FlexAlgo(128)));
+    }
+}
+
+#[cfg(test)]
+mod v3_router_information_read_tests {
+    use super::super::lsdb::{LsdbEvent, OSPF_MAX_AGE, SrCarrier};
+    use super::super::srmpls::{
+        SRGB_RANGE, SRGB_START, SRLB_RANGE, SRLB_START, e_router_v3_sr_info_lsa_build,
+    };
+    use super::test_support::fresh_ospf_v3;
+    use super::*;
+    use crate::spf::label_block::{LabelBlock, LabelConfig};
+    use ospf_packet::{
+        OSPFV3_ROUTER_INFO_LSA_TYPE, Ospfv3FadTlv, Ospfv3LsBody, Ospfv3Lsa, Ospfv3LsaHeader,
+        RouterInfoLsa, RouterInfoTlv, RouterInfoTlvAlgo, RouterInfoTlvCap, RouterInfoTlvFad,
+        RouterInfoTlvLocalBlock, RouterInfoTlvSidLabelRange, RouterInfoTlvSrv6Cap, SidLabelTlv,
+    };
+
+    fn rid(n: u8) -> Ipv4Addr {
+        Ipv4Addr::new(10, 0, 0, n)
+    }
+
+    fn algos(algos: &[Algo]) -> RouterInfoTlv {
+        RouterInfoTlv::Algo(RouterInfoTlvAlgo {
+            algos: algos.to_vec(),
+        })
+    }
+
+    fn srgb(start: u32, range: u32) -> RouterInfoTlv {
+        RouterInfoTlv::SidLabelRnage(RouterInfoTlvSidLabelRange {
+            range,
+            sid_label: SidLabelTlv::Label(start),
+        })
+    }
+
+    fn srlb(start: u32, range: u32) -> RouterInfoTlv {
+        RouterInfoTlv::LocalBlock(RouterInfoTlvLocalBlock {
+            range,
+            sid_label: SidLabelTlv::Label(start),
+        })
+    }
+
+    fn fad(algo: u8, priority: u8) -> RouterInfoTlv {
+        RouterInfoTlv::Fad(RouterInfoTlvFad {
+            flex_algorithm: algo,
+            metric_type: 0,
+            calc_type: 0,
+            priority,
+            subs: Vec::new(),
+            trailing: Vec::new(),
+        })
+    }
+
+    fn labels(global: (u32, u32), local: Option<(u32, u32)>) -> LabelConfig {
+        LabelConfig {
+            global: LabelBlock::new(global.0, global.1),
+            local: local.map(|(start, range)| LabelBlock::new(start, range)),
+        }
+    }
+
+    /// `router`'s area-scoped Router Information LSA, instance `instance`.
+    fn router_info(
+        router: Ipv4Addr,
+        instance: u32,
+        tlvs: Vec<RouterInfoTlv>,
+        age: u16,
+    ) -> Ospfv3Lsa {
+        let mut lsa = Ospfv3Lsa::from(
+            Ospfv3LsaHeader {
+                ls_age: age,
+                ls_type: OSPFV3_ROUTER_INFO_LSA_TYPE,
+                link_state_id: instance,
+                advertising_router: router,
+                ls_seq_number: 0x8000_0001,
+                ls_checksum: 0,
+                length: 0,
+            },
+            Ospfv3LsBody::RouterInfo(RouterInfoLsa { tlvs }),
+        );
+        lsa.update();
+        lsa
+    }
+
+    /// `router`'s SR-info E-Router-LSA, zebra-rs's former carrier, with the
+    /// default SRGB and SRLB, participating in algorithm 128 and defining
+    /// it at priority 250.
+    fn former_carrier(router: Ipv4Addr, age: u16) -> Ospfv3Lsa {
+        let fad = Ospfv3FadTlv {
+            flex_algorithm: 128,
+            metric_type: 0,
+            calc_type: 0,
+            priority: 250,
+            subs: Vec::new(),
+            trailing: Vec::new(),
+        };
+        let mut lsa = e_router_v3_sr_info_lsa_build(
+            router,
+            vec![Algo::Spf, Algo::FlexAlgo(128)],
+            vec![fad],
+            false,
+        );
+        lsa.h.ls_age = age;
+        lsa.update();
+        lsa
+    }
+
+    const FORMER_LABELS: (u32, u32) = (SRGB_START, SRGB_RANGE);
+    const FORMER_LOCAL: (u32, u32) = (SRLB_START, SRLB_RANGE);
+
+    fn receive(top: &mut Ospf<Ospfv3>, lsa: Ospfv3Lsa) {
+        let tx = top.tx.clone();
+        let tracing = top.tracing.clone();
+        top.areas
+            .fetch(AREA0)
+            .lsdb
+            .insert_received_v3(lsa, &tx, Some(AREA0), &tracing);
+    }
+
+    fn router() -> Ospf<Ospfv3> {
+        let mut top = fresh_ospf_v3();
+        top.router_id = rid(1);
+        top
+    }
+
+    /// A router's SR capabilities are read from its Router Information
+    /// LSAs as a standard router lays them out: spread over instances,
+    /// each TLV's first occurrence in ascending Instance ID counting,
+    /// whichever order the instances arrive in. The SRGB is the first
+    /// SID/Label Range; a second range is not modelled.
+    #[tokio::test]
+    async fn capabilities_are_read_from_router_information_lsas() {
+        let mut top = router();
+        let spf = || algos(&[Algo::Spf]);
+        let instance_0 = vec![
+            RouterInfoTlv::RouterInfo(RouterInfoTlvCap::default()),
+            srgb(20000, 1000),
+            srgb(30000, 500),
+            srlb(15000, 100),
+            srlb(35000, 100),
+            fad(128, 200),
+            fad(129, 50),
+        ];
+        let instance_1 = vec![algos(&[Algo::Spf, Algo::FlexAlgo(128)]), fad(128, 100)];
+        receive(&mut top, router_info(rid(2), 2, vec![spf()], 0));
+        receive(&mut top, router_info(rid(2), 1, instance_1, 0));
+        receive(&mut top, router_info(rid(2), 0, instance_0, 0));
+        receive(&mut top, router_info(rid(3), 0, vec![fad(130, 10)], 0));
+
+        let area = top.areas.get(AREA0).unwrap();
+        assert_eq!(
+            area.lsdb.label_map.get(&rid(2)),
+            Some(&labels((20000, 1000), Some((15000, 100))))
+        );
+        let caps = &area.lsdb.sr_capabilities()[&rid(2)];
+        assert_eq!(caps.carrier, SrCarrier::RouterInfo);
+        assert_eq!(caps.algos, Some(vec![Algo::Spf, Algo::FlexAlgo(128)]));
+        assert!(flex_algo_participants_v3(area, 128).contains(&rid(2)));
+        let peers = flex_algo_peer_fads_v3(area, rid(1));
+        assert_eq!(peers[&rid(2)][&128].priority, 200, "instance 0 comes first");
+        assert_eq!(peers[&rid(2)][&129].priority, 50);
+        assert_eq!(peers[&rid(3)][&130].priority, 10, "a definition alone");
+    }
+
+    /// A router is read from one carrier, never a mixture: from its Router
+    /// Information LSAs if they carry any SR capability, whatever it still
+    /// sends the former way and whichever arrived first; otherwise from
+    /// the former carrier, as before. A Router Information LSA with no SR
+    /// capability in it does not count.
+    #[tokio::test]
+    async fn a_router_is_read_from_one_carrier() {
+        let mut top = router();
+        let standard = vec![algos(&[Algo::Spf]), srgb(20000, 1000)];
+        receive(&mut top, router_info(rid(2), 0, standard, 0));
+        receive(&mut top, former_carrier(rid(2), 0));
+        receive(&mut top, former_carrier(rid(3), 0));
+        receive(&mut top, former_carrier(rid(4), 0));
+        let no_sr = vec![RouterInfoTlv::RouterInfo(RouterInfoTlvCap::default())];
+        receive(&mut top, router_info(rid(4), 0, no_sr, 0));
+        receive(&mut top, former_carrier(rid(5), 0));
+        let srv6 = RouterInfoTlv::Srv6Capabilities(RouterInfoTlvSrv6Cap::default());
+        receive(&mut top, router_info(rid(5), 0, vec![srv6], 0));
+
+        let area = top.areas.get(AREA0).unwrap();
+        let caps = area.lsdb.sr_capabilities();
+        let participants = flex_algo_participants_v3(area, 128);
+        let peers = flex_algo_peer_fads_v3(area, rid(1));
+
+        assert_eq!(caps[&rid(2)].carrier, SrCarrier::RouterInfo);
+        assert_eq!(
+            area.lsdb.label_map.get(&rid(2)),
+            Some(&labels((20000, 1000), None)),
+            "no SRLB is taken from the former carrier"
+        );
+        assert!(!participants.contains(&rid(2)));
+        assert!(peers.get(&rid(2)).is_none_or(|fads| fads.is_empty()));
+
+        // SRv6 alone is an SR capability too: no SRGB, no algorithm 128.
+        assert_eq!(caps[&rid(5)].carrier, SrCarrier::RouterInfo);
+        assert_eq!(area.lsdb.label_map.get(&rid(5)), None);
+        assert!(!participants.contains(&rid(5)));
+
+        for router in [rid(3), rid(4)] {
+            assert_eq!(caps[&router].carrier, SrCarrier::ERouter, "{router}");
+            assert_eq!(
+                area.lsdb.label_map.get(&router),
+                Some(&labels(FORMER_LABELS, Some(FORMER_LOCAL))),
+                "{router}"
+            );
+            assert!(participants.contains(&router), "{router}");
+            assert_eq!(peers[&router][&128].priority, 250, "{router}");
+        }
+    }
+
+    /// The label cache follows the Router Information LSA out: when it
+    /// expires, is flushed or is replaced by one without SR capabilities,
+    /// the router is read from the former carrier if it still sends that,
+    /// and has no SRGB if not.
+    #[tokio::test(start_paused = true)]
+    async fn the_label_cache_follows_a_router_information_lsa_out() {
+        let mut top = router();
+        let standard = |start| vec![srgb(start, 1000)];
+        receive(&mut top, former_carrier(rid(2), 0));
+        receive(
+            &mut top,
+            router_info(rid(2), 0, standard(20000), OSPF_MAX_AGE - 1),
+        );
+        receive(
+            &mut top,
+            router_info(rid(3), 0, standard(21000), OSPF_MAX_AGE - 1),
+        );
+        receive(&mut top, former_carrier(rid(4), 0));
+        receive(&mut top, router_info(rid(4), 0, standard(22000), 0));
+        receive(&mut top, former_carrier(rid(5), 0));
+        receive(&mut top, router_info(rid(5), 0, standard(23000), 0));
+        {
+            let lsdb = &top.areas.get(AREA0).unwrap().lsdb;
+            let received = [(2, 20000), (3, 21000), (4, 22000), (5, 23000)];
+            for (router, start) in received.map(|(n, start)| (rid(n), start)) {
+                let expected = labels((start, 1000), None);
+                assert_eq!(lsdb.label_map.get(&router), Some(&expected), "{router}");
+            }
+        }
+
+        receive(
+            &mut top,
+            router_info(rid(4), 0, standard(22000), OSPF_MAX_AGE),
+        );
+        let mut no_sr = router_info(
+            rid(5),
+            0,
+            vec![RouterInfoTlv::RouterInfo(Default::default())],
+            0,
+        );
+        no_sr.h.ls_seq_number += 1;
+        no_sr.update();
+        receive(&mut top, no_sr);
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        for router in [rid(2), rid(3)] {
+            let key = (OSPFV3_ROUTER_INFO_LSA_TYPE, 0, router);
+            top.process_msg(Message::Lsdb(LsdbEvent::HoldTimerExpire, Some(AREA0), key))
+                .await;
+            let lsdb = &top.areas.get(AREA0).unwrap().lsdb;
+            assert!(lsdb.lookup_by_raw_key(key).is_none(), "{router} expired");
+        }
+
+        let lsdb = &top.areas.get(AREA0).unwrap().lsdb;
+        let former = labels(FORMER_LABELS, Some(FORMER_LOCAL));
+        assert_eq!(lsdb.label_map.get(&rid(2)), Some(&former), "expired");
+        assert_eq!(lsdb.label_map.get(&rid(3)), None, "expired, nothing else");
+        assert_eq!(lsdb.label_map.get(&rid(4)), Some(&former), "flushed");
+        assert_eq!(lsdb.label_map.get(&rid(5)), Some(&former), "replaced");
+    }
+
+    /// `show ospfv3 database detail` shows a received Router Information
+    /// LSA and what it carries.
+    #[tokio::test]
+    async fn database_detail_shows_router_information() {
+        let mut top = router();
+        let tlvs = vec![algos(&[Algo::Spf, Algo::FlexAlgo(128)]), srgb(20000, 1000)];
+        receive(&mut top, router_info(rid(2), 0, tlvs, 0));
+        let args = crate::config::Args(Default::default());
+        let out = super::super::show_v3::show_ospfv3_database_detail(&top, args, false).unwrap();
+        assert!(out.contains("Router-Info-LSA (Area 0.0.0.0)"), "{out}");
+        assert!(out.contains("Algorithm 128: Flex-Algo 128"), "{out}");
+        assert!(out.contains("SID Label = 20000"), "{out}");
+    }
+
+    /// Withdrawing one Router Information instance leaves the others
+    /// authoritative: the former carrier returns only when the last
+    /// instance with SR capabilities goes.
+    #[tokio::test]
+    async fn withdrawing_one_instance_leaves_the_rest_authoritative() {
+        let mut top = router();
+        receive(&mut top, former_carrier(rid(2), 0));
+        let first = || {
+            vec![
+                srgb(20000, 1000),
+                algos(&[Algo::FlexAlgo(128)]),
+                fad(128, 200),
+            ]
+        };
+        let second = || vec![algos(&[Algo::Spf]), fad(128, 100)];
+        receive(&mut top, router_info(rid(2), 0, first(), 0));
+        receive(&mut top, router_info(rid(2), 1, second(), 0));
+        receive(&mut top, router_info(rid(2), 0, first(), OSPF_MAX_AGE));
+
+        let area = top.areas.get(AREA0).unwrap();
+        assert_eq!(
+            area.lsdb.sr_capabilities()[&rid(2)].carrier,
+            SrCarrier::RouterInfo
+        );
+        assert!(area.lsdb.label_map.get(&rid(2)).is_none());
+        assert!(!flex_algo_participants_v3(area, 128).contains(&rid(2)));
+        assert_eq!(
+            flex_algo_peer_fads_v3(area, rid(1))[&rid(2)][&128].priority,
+            100
+        );
+
+        receive(&mut top, router_info(rid(2), 1, second(), OSPF_MAX_AGE));
+        let area = top.areas.get(AREA0).unwrap();
+        assert_eq!(
+            area.lsdb.sr_capabilities()[&rid(2)].carrier,
+            SrCarrier::ERouter
+        );
+        assert_eq!(
+            area.lsdb.label_map.get(&rid(2)),
+            Some(&labels(FORMER_LABELS, Some(FORMER_LOCAL)))
+        );
+        assert!(flex_algo_participants_v3(area, 128).contains(&rid(2)));
+        assert_eq!(
+            flex_algo_peer_fads_v3(area, rid(1))[&rid(2)][&128].priority,
+            250
+        );
     }
 }
 
