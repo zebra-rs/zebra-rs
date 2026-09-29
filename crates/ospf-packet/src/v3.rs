@@ -2768,6 +2768,17 @@ impl Ospfv3LsBody {
         }
     }
 
+    /// Parse a body of the given LS Type, keeping one that cannot be
+    /// read opaque — installed and flooded as received, never computed
+    /// with — rather than failing the LS Update and every other LSA it
+    /// carries. Receive and the graceful-restart checkpoint replay both
+    /// read bodies through here, so a checkpoint restores exactly the
+    /// database that was received.
+    pub fn parse_or_opaque(input: &[u8], ls_type: u16) -> Ospfv3LsBody {
+        Self::parse_be(input, ls_type)
+            .map_or_else(|_| Ospfv3LsBody::Unknown(input.to_vec()), |(_, b)| b)
+    }
+
     /// Parse a body of the given LS Type from `input`. The caller is
     /// responsible for slicing `input` to exactly the body's wire
     /// length (typically `header.length - OSPFV3_LSA_HEADER_LEN`);
@@ -2910,7 +2921,7 @@ impl Ospfv3Lsa {
         if total < hdr || bytes.len() < total {
             return None;
         }
-        let (_, body) = Ospfv3LsBody::parse_be(&bytes[hdr..total], h.ls_type).ok()?;
+        let body = Ospfv3LsBody::parse_or_opaque(&bytes[hdr..total], h.ls_type);
         Some(Self {
             h,
             body,
@@ -2969,11 +2980,7 @@ impl ParseBe<Ospfv3Lsa> for Ospfv3Lsa {
         // header; the body lives in the remaining bytes.
         let body_len = (h.length as usize).saturating_sub(OSPFV3_LSA_HEADER_LEN as usize);
         let (input, body_bytes) = nom::bytes::complete::take(body_len)(input)?;
-        // A body that cannot be read is kept opaque — installed and flooded
-        // as received, never computed with — rather than failing the LS
-        // Update and every other LSA it carries.
-        let body = Ospfv3LsBody::parse_be(body_bytes, h.ls_type)
-            .map_or_else(|_| Ospfv3LsBody::Unknown(body_bytes.to_vec()), |(_, b)| b);
+        let body = Ospfv3LsBody::parse_or_opaque(body_bytes, h.ls_type);
         Ok((input, Ospfv3Lsa::from(h, body)))
     }
 }
@@ -6074,5 +6081,42 @@ mod standard_encoding_tests {
         );
         let parsed = round_trip(&wire);
         assert!(matches!(parsed.body, Ospfv3LsBody::Unknown(_)));
+    }
+
+    /// An LSA kept opaque on receive is restored from a graceful-restart
+    /// checkpoint too, still opaque and byte for byte: replay must not
+    /// rebuild a smaller database than the one received.
+    #[test]
+    fn a_checkpoint_restores_an_opaque_lsa() {
+        let wire = lsa(
+            OSPFV3_ROUTER_INFO_LSA_TYPE,
+            0,
+            Ospfv3LsBody::Unknown(vec![0, 8, 0, 40, 0, 0, 0, 0]),
+        );
+        let mut update = vec![0, 0, 0, 1];
+        update.extend_from_slice(&wire);
+        let (_, received) = Ospfv3LsUpdate::parse_be(&update).expect("receive accepts opaque LSA");
+        let mut checkpoint = BytesMut::new();
+        received.lsas[0].emit(&mut checkpoint);
+        assert_eq!(&checkpoint[..], &wire[..]);
+        let restored = Ospfv3Lsa::decode(&checkpoint)
+            .expect("checkpoint must restore every LSA accepted on receive");
+        assert!(matches!(restored.body, Ospfv3LsBody::Unknown(_)));
+        let mut replay = BytesMut::new();
+        restored.emit(&mut replay);
+        assert_eq!(replay, checkpoint);
+    }
+
+    /// Keeping unreadable bodies does not extend to a checkpoint entry
+    /// shorter than its own header's length: that is still refused.
+    #[test]
+    fn a_checkpoint_refuses_a_truncated_lsa() {
+        let wire = lsa(
+            OSPFV3_ROUTER_INFO_LSA_TYPE,
+            0,
+            Ospfv3LsBody::Unknown(vec![0, 8, 0, 4, 0, 128, 0, 0]),
+        );
+        assert!(Ospfv3Lsa::decode(&wire).is_some());
+        assert!(Ospfv3Lsa::decode(&wire[..wire.len() - 1]).is_none());
     }
 }
