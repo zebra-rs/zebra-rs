@@ -409,9 +409,9 @@ pub fn build_v3_p2p_adj_sub(adjacency_sid: &AdjacencySid) -> Ospfv3SubTlv {
         flags,
         weight: 0,
         sid,
-        // Sent under zebra-rs's former code point until every router reads
-        // RFC 8666's (docs/design/ospfv3-router-information-lsa.md, D4).
-        code_point: AdjSidCodePoint::Legacy,
+        // RFC 8666's code point, which every zebra-rs router reads since
+        // #2434 (docs/design/ospfv3-router-information-lsa.md, D4).
+        code_point: AdjSidCodePoint::Rfc8666,
     })
 }
 
@@ -427,7 +427,7 @@ pub fn build_v3_lan_adj_sub(neighbor_router_id: Ipv4Addr, label: u32) -> Ospfv3S
         neighbor_router_id,
         sid: SidLabelTlv::Label(label),
         // As `build_v3_p2p_adj_sub`.
-        code_point: AdjSidCodePoint::Legacy,
+        code_point: AdjSidCodePoint::Rfc8666,
     })
 }
 
@@ -522,6 +522,58 @@ pub fn ext_intra_area_prefix_v3_lsa_build(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// zebra-rs sends its Adj-SID and LAN Adj-SID under RFC 8666's code
+    /// points, 5 and 6 (§7.1, §7.2), where it used to send 6 and 7: a
+    /// standard router read those as a malformed LAN Adj-SID and a
+    /// SID/Label sub-TLV. A receiver reads them back as the standard ones.
+    #[test]
+    fn adj_sids_are_sent_under_the_rfc8666_code_points() {
+        use bytes::BytesMut;
+
+        let subs = vec![
+            build_v3_p2p_adj_sub(&AdjacencySid::Absolute(15003)),
+            build_v3_lan_adj_sub(Ipv4Addr::new(10, 0, 0, 3), 15100),
+        ];
+        let lsa = e_router_v3_lsa_build(
+            Ipv4Addr::new(10, 0, 0, 1),
+            Ospfv3RouterLinkType::PointToPoint,
+            10,
+            2,
+            3,
+            Ipv4Addr::new(10, 0, 0, 2),
+            subs,
+            2,
+        );
+        let mut wire = BytesMut::new();
+        lsa.emit(&mut wire);
+        let has = |header: [u8; 4]| wire.windows(4).any(|w| w == header);
+        // Type, then length: a 3-octet label makes 7 and 11 octets.
+        assert!(has([0, 5, 0, 7]), "Adj-SID as sub-TLV 5");
+        assert!(has([0, 6, 0, 11]), "LAN Adj-SID as sub-TLV 6");
+        assert!(
+            !has([0, 6, 0, 7]) && !has([0, 7, 0, 11]),
+            "former code points"
+        );
+
+        let back = Ospfv3Lsa::decode(&wire).expect("decodes");
+        let Ospfv3LsBody::ERouter(body) = back.body else {
+            panic!("expected an E-Router-LSA");
+        };
+        let Some(Ospfv3ExtTlv::RouterLink(link)) = body.tlvs.first() else {
+            panic!("expected a Router-Link TLV");
+        };
+        let code_points: Vec<_> = link
+            .subs
+            .iter()
+            .filter_map(|sub| match sub {
+                Ospfv3SubTlv::AdjSid(a) => Some(a.code_point),
+                Ospfv3SubTlv::LanAdjSid(l) => Some(l.code_point),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(code_points, vec![AdjSidCodePoint::Rfc8666; 2]);
+    }
 
     /// Wire roundtrip of the RFC 8666 §5 E-Intra-Area-Prefix-LSA: the
     /// receiver must reconstruct the exact prefix bytes the originator

@@ -1635,18 +1635,19 @@ pub const OSPFV3_SUB_TLV_ADJ_SID_LEGACY: u16 = 6;
 pub const OSPFV3_SUB_TLV_LAN_ADJ_SID_LEGACY: u16 = 7;
 
 /// Which code points an Adj-SID or LAN Adj-SID sub-TLV travels under.
-/// RFC 8666 assigns 5 and 6; zebra-rs sent 6 and 7, which a standard
-/// router reads as a malformed LAN Adj-SID and a SID/Label sub-TLV. The
-/// two layouts differ in length — an Adj-SID's value is 7 or 8 octets, a
-/// LAN Adj-SID's 11 or 12 with the neighbor's Router ID — so a receiver
-/// tells them apart and reads both. A received sub-TLV keeps the code
-/// point it came with, so re-encoding it reproduces what was received.
-/// (docs/design/ospfv3-router-information-lsa.md, D1 and D4.)
+/// RFC 8666 assigns 5 and 6; zebra-rs used to send 6 and 7, which a
+/// standard router reads as a malformed LAN Adj-SID and a SID/Label
+/// sub-TLV. The two layouts differ in length — an Adj-SID's value is 7 or
+/// 8 octets, a LAN Adj-SID's 11 or 12 with the neighbor's Router ID — so a
+/// receiver tells them apart and reads both. A received sub-TLV keeps the
+/// code point it came with, so re-encoding it reproduces what was
+/// received. (docs/design/ospfv3-router-information-lsa.md, D1 and D4.)
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum AdjSidCodePoint {
-    /// What zebra-rs sends until every router reads the standard ones.
-    #[default]
+    /// zebra-rs's former code points, still read from older routers.
     Legacy,
+    /// RFC 8666's, which zebra-rs sends.
+    #[default]
     Rfc8666,
 }
 
@@ -3754,7 +3755,7 @@ mod tests {
             flags: AdjSidFlags::new().with_v_flag(true).with_l_flag(true),
             weight: 200,
             sid: SidLabelTlv::Label(15003),
-            code_point: AdjSidCodePoint::Legacy,
+            code_point: AdjSidCodePoint::Rfc8666,
         };
         let mut buf = BytesMut::new();
         tlv.emit(&mut buf);
@@ -3773,7 +3774,7 @@ mod tests {
             weight: 100,
             neighbor_router_id: "10.0.0.2".parse().unwrap(),
             sid: SidLabelTlv::Label(15100),
-            code_point: AdjSidCodePoint::Legacy,
+            code_point: AdjSidCodePoint::Rfc8666,
         };
         let mut buf = BytesMut::new();
         tlv.emit(&mut buf);

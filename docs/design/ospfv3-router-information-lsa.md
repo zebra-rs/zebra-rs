@@ -3,8 +3,8 @@
 > **Status:** reviewed (2026-09-29); all five §8 decisions settled, each taking the
 > recommendation: phased over two releases, the legacy carrier dual-originated for one release
 > with no knob, PR 1 first, the interop peer chosen later, OSPFv2's capability bits.
-> **Progress:** PR 1 (D1) merged as #2434, PR 2 (D2) as #2435. PR 3 (D3) on branch
-> `ospfv3-sr-originate-ri`.
+> **Progress:** PR 1 (D1) merged as #2434, PR 2 (D2) as #2435, PR 3 (D3) as #2437. PR 4 (D4) on
+> branch `ospfv3-sr-adj-sid-codepoints`.
 > **Parent docs:** [ospf-sr-mpls-status.md](./ospf-sr-mpls-status.md) (records the current carrier
 > as "placement by convention, not by RFC fiat"), [ospfv3-srv6-plan.md](./ospfv3-srv6-plan.md),
 > [flex-algo-link-loss.md](./flex-algo-link-loss.md) (PR 3b chose to stay on the current carrier
