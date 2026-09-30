@@ -297,3 +297,83 @@ async fn blocked_interval_advances_generation_when_same_forwarder_returns() {
     bgp.evpn_es_nhg_sync();
     assert_eq!(bgp.es_remote[&(ESI, BD)].generation, before + 2);
 }
+
+#[tokio::test]
+async fn conflict_keeps_the_effective_inferred_incumbent() {
+    let mut bgp = fresh_bgp();
+    // No MACs or role signal: ordering alone puts the higher PE in slot 0.
+    add_member(&mut bgp, 2, true, true);
+    set_member_role(&mut bgp, 2, None);
+    bgp.evpn_es_nhg_sync();
+    let before = bgp.es_remote[&(ESI, BD)].generation;
+    assert_eq!(bgp.es_remote[&(ESI, BD)].active, Some(pe(2)));
+    // The lower PE appears while both advertise P. The stored effective
+    // forwarder must now participate in conflict resolution.
+    add_member(&mut bgp, 1, true, true);
+    set_member_role(&mut bgp, 2, Some((true, false)));
+    bgp.evpn_es_nhg_sync();
+    let view = &bgp.es_remote[&(ESI, BD)];
+    assert_eq!(view.active, Some(pe(2)));
+    assert_eq!(view.backup, Some(pe(1)));
+    assert_eq!(view.reason, Some(SaSelectReason::ConflictIncumbent));
+    assert_eq!(view.generation, before);
+    assert_eq!(
+        bgp.es_nhg_sent[&(ESI, BD)].1,
+        vec![
+            crate::rib::EsNhgMember::Vxlan(pe(2)),
+            crate::rib::EsNhgMember::Vxlan(pe(1)),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn repeated_drains_do_not_recount_an_interruption() {
+    let mut bgp = fresh_bgp();
+    add_member(&mut bgp, 1, true, true);
+    bgp.evpn_es_nhg_sync();
+    let before = bgp.es_remote[&(ESI, BD)].generation;
+    bgp.local_rib.evpn.clear();
+    for _ in 0..3 {
+        bgp.evpn_es_nhg_sync();
+        assert!(!bgp.es_remote.contains_key(&(ESI, BD)));
+    }
+    add_member(&mut bgp, 1, true, true);
+    for _ in 0..3 {
+        bgp.evpn_es_nhg_sync();
+        assert_eq!(bgp.es_remote[&(ESI, BD)].generation, before + 1);
+        assert_eq!(bgp.es_remote[&(ESI, BD)].active, Some(pe(1)));
+    }
+}
+
+#[tokio::test]
+async fn provenance_only_changes_do_not_move_the_forwarder_or_generation() {
+    let mut bgp = fresh_bgp();
+    add_member(&mut bgp, 1, true, true);
+    add_member(&mut bgp, 2, true, false);
+    bgp.evpn_es_nhg_sync();
+    let before = bgp.es_remote[&(ESI, BD)].clone();
+    let group = bgp.es_nhg_sent[&(ESI, BD)].clone();
+    let prefix = EvpnPrefix::EthernetAd {
+        esi: ESI,
+        eth_tag: 0,
+    };
+    let mut copy = bgp.local_rib.evpn[&rd(1)].selected[&prefix].clone();
+    copy.ident = 99;
+    copy.router_id = Ipv4Addr::new(10, 0, 0, 99);
+    copy.remote_id = 42;
+    copy.stale = true;
+    bgp.local_rib.update_evpn(rd(1), prefix.clone(), copy);
+    bgp.evpn_es_nhg_sync();
+    let view = &bgp.es_remote[&(ESI, BD)];
+    assert_eq!(view.members[&pe(1)].paths.len(), 2);
+    assert_eq!(view.active, before.active);
+    assert_eq!(view.backup, before.backup);
+    assert_eq!(view.generation, before.generation);
+    assert_eq!(bgp.es_nhg_sent[&(ESI, BD)], group);
+    // Withdrawing only the non-best copy changes provenance, not forwarding.
+    bgp.local_rib.remove_evpn(rd(1), &prefix, 42, 99);
+    bgp.local_rib.select_best_path_evpn(&rd(1), &prefix);
+    bgp.evpn_es_nhg_sync();
+    assert_eq!(bgp.es_remote[&(ESI, BD)], before);
+    assert_eq!(bgp.es_nhg_sent[&(ESI, BD)], group);
+}
