@@ -169,3 +169,131 @@ async fn provenance_keeps_both_rr_copies_and_the_survivor() {
     assert_eq!(member.paths[0].path_id, 42);
     assert_eq!(bgp.es_remote[&(ESI, BD)].active, Some(pe(1)));
 }
+
+#[tokio::test]
+async fn returning_same_forwarder_gets_a_new_generation_after_withdrawal() {
+    let mut bgp = fresh_bgp();
+    add_member(&mut bgp, 1, true, true);
+    bgp.evpn_es_nhg_sync();
+    let before = bgp.es_remote[&(ESI, BD)].generation;
+    // Withdraw every route through the Loc-RIB API, then drain once.
+    for eth_tag in [0, MAX_ET] {
+        let prefix = EvpnPrefix::EthernetAd { esi: ESI, eth_tag };
+        bgp.local_rib.remove_evpn(rd(1), &prefix, 0, 1);
+        bgp.local_rib.select_best_path_evpn(&rd(1), &prefix);
+    }
+    bgp.evpn_es_nhg_sync();
+    assert!(!bgp.es_nhg_sent.contains_key(&(ESI, BD)));
+    add_member(&mut bgp, 1, true, true);
+    bgp.evpn_es_nhg_sync();
+    assert_eq!(bgp.es_remote[&(ESI, BD)].active, Some(pe(1)));
+    assert!(
+        bgp.es_remote[&(ESI, BD)].generation > before,
+        "withdrawal and restoration must not reuse generation {before}, even for the same PE"
+    );
+}
+
+#[tokio::test]
+async fn returning_same_forwarder_gets_a_new_generation_after_all_active() {
+    let mut bgp = fresh_bgp();
+    add_member(&mut bgp, 1, true, true);
+    add_member(&mut bgp, 2, true, false);
+    bgp.evpn_es_nhg_sync();
+    let before = bgp.es_remote[&(ESI, BD)].generation;
+    add_member(&mut bgp, 1, false, true);
+    add_member(&mut bgp, 2, false, false);
+    bgp.evpn_es_nhg_sync();
+    assert!(!bgp.es_nhg_sent[&(ESI, BD)].0);
+    assert!(!bgp.es_remote.contains_key(&(ESI, BD)));
+    add_member(&mut bgp, 1, true, true);
+    add_member(&mut bgp, 2, true, false);
+    bgp.evpn_es_nhg_sync();
+    assert_eq!(bgp.es_remote[&(ESI, BD)].active, Some(pe(1)));
+    assert!(
+        bgp.es_remote[&(ESI, BD)].generation > before,
+        "restoring single-active forwarding must supersede generation {before}"
+    );
+}
+
+fn set_member_role(bgp: &mut Bgp, n: u8, role: Option<(bool, bool)>) {
+    let prefix = EvpnPrefix::EthernetAd {
+        esi: ESI,
+        eth_tag: 0,
+    };
+    let mut rib = bgp.local_rib.evpn[&rd(n)].selected[&prefix].clone();
+    let mut attr = (*rib.attr).clone();
+    let ec = attr.ecom.as_mut().unwrap();
+    ec.0.retain(|value| !value.is_l2_attr());
+    if let Some((p, b)) = role {
+        ec.0.insert(ExtCommunityValue::l2_attr(p, b, false, 0));
+    }
+    rib.attr = Arc::new(attr);
+    bgp.local_rib.update_evpn(rd(n), prefix, rib);
+}
+
+#[tokio::test]
+async fn inferred_state_records_the_programmed_slot_zero_without_macs() {
+    let mut bgp = fresh_bgp();
+    add_member(&mut bgp, 1, true, true);
+    set_member_role(&mut bgp, 1, None);
+    bgp.evpn_es_nhg_sync();
+    let group = &bgp.es_nhg_sent[&(ESI, BD)];
+    assert!(group.0 && !group.2);
+    assert_eq!(group.1[0], crate::rib::EsNhgMember::Vxlan(pe(1)));
+    assert_eq!(
+        bgp.es_remote[&(ESI, BD)].reason,
+        Some(SaSelectReason::Unsignalled)
+    );
+    assert_eq!(
+        bgp.es_remote[&(ESI, BD)].active,
+        Some(pe(1)),
+        "active must describe the PE actually installed in slot zero"
+    );
+}
+
+#[tokio::test]
+async fn inferred_slot_zero_move_advances_generation_without_macs() {
+    let mut bgp = fresh_bgp();
+    for n in [1, 2] {
+        add_member(&mut bgp, n, true, true);
+        set_member_role(&mut bgp, n, None);
+    }
+    bgp.evpn_es_nhg_sync();
+    assert_eq!(
+        bgp.es_nhg_sent[&(ESI, BD)].1[0],
+        crate::rib::EsNhgMember::Vxlan(pe(1))
+    );
+    let before = bgp.es_remote[&(ESI, BD)].generation;
+    // Mass withdrawal removes PE 1; PE 2 is still eligible and unsignalled.
+    let prefix = EvpnPrefix::EthernetAd {
+        esi: ESI,
+        eth_tag: MAX_ET,
+    };
+    bgp.local_rib.remove_evpn(rd(1), &prefix, 0, 1);
+    bgp.local_rib.select_best_path_evpn(&rd(1), &prefix);
+    bgp.evpn_es_nhg_sync();
+    assert_eq!(
+        bgp.es_nhg_sent[&(ESI, BD)].1[0],
+        crate::rib::EsNhgMember::Vxlan(pe(2))
+    );
+    assert!(
+        bgp.es_remote[&(ESI, BD)].generation > before,
+        "a real slot-zero move must advance the generation under inference too"
+    );
+}
+
+#[tokio::test]
+async fn blocked_interval_advances_generation_when_same_forwarder_returns() {
+    let mut bgp = fresh_bgp();
+    add_member(&mut bgp, 1, true, true);
+    bgp.evpn_es_nhg_sync();
+    let before = bgp.es_remote[&(ESI, BD)].generation;
+    set_member_role(&mut bgp, 1, Some((false, false)));
+    bgp.evpn_es_nhg_sync();
+    assert!(bgp.es_nhg_sent[&(ESI, BD)].2);
+    assert_eq!(bgp.es_remote[&(ESI, BD)].active, None);
+    assert_eq!(bgp.es_remote[&(ESI, BD)].generation, before + 1);
+    set_member_role(&mut bgp, 1, Some((true, false)));
+    bgp.evpn_es_nhg_sync();
+    assert_eq!(bgp.es_remote[&(ESI, BD)].generation, before + 2);
+}

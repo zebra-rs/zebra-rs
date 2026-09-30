@@ -676,7 +676,10 @@ pub fn elan_role(
     }
 }
 
-/// Order an Ethernet Segment nexthop group's members for the datapath.
+/// Order an Ethernet Segment nexthop group's members for the datapath,
+/// returning the `(PE, member)` pairs so the caller can see WHICH PE ends up
+/// leading — under single-active the datapath forwards to slot 0 alone, so
+/// that PE is the effective forwarder whether or not selection named one.
 /// `pairs` are `(advertising PE, member)`; the result is sorted by PE then
 /// member so it is stable across recomputes, except that a single-active
 /// segment's `primary` — the Designated Forwarder, the PE the segment's
@@ -689,7 +692,7 @@ pub fn order_es_members(
     mut pairs: Vec<(IpAddr, crate::rib::EsNhgMember)>,
     primary: Option<IpAddr>,
     backup: Option<IpAddr>,
-) -> Vec<crate::rib::EsNhgMember> {
+) -> Vec<(IpAddr, crate::rib::EsNhgMember)> {
     pairs.sort();
     // Applied backup-first then primary-first, so the primary ends up ahead
     // of the backup however the two were chosen. Each pass is stable, so a
@@ -701,7 +704,7 @@ pub fn order_es_members(
         let (front, back): (Vec<_>, Vec<_>) = pairs.into_iter().partition(|(pe, _)| *pe == lead);
         pairs = front.into_iter().chain(back).collect();
     }
-    pairs.into_iter().map(|(_, m)| m).collect()
+    pairs
 }
 
 /// Why a single-active group's forwarder was chosen the way it was —
@@ -769,18 +772,32 @@ pub struct EsGenState {
     pub last: Option<std::net::IpAddr>,
     /// Whether `last` has ever been written.
     pub recorded: bool,
+    /// The group was torn down (absent, or the segment went all-active)
+    /// since `last` was recorded, so the next answer is a NEW programming
+    /// episode even if it names the same forwarder. A barrier keyed on the
+    /// generation has to be able to tell a completion of this teeing from a
+    /// completion of the one before the gap.
+    pub interrupted: bool,
 }
 
 impl EsGenState {
     /// Record `primary` as the current answer, advancing the generation if it
     /// differs from the last one recorded. Returns the generation to publish.
     pub fn observe(&mut self, primary: Option<std::net::IpAddr>) -> u64 {
-        if self.recorded && self.last != primary {
+        if self.recorded && (self.interrupted || self.last != primary) {
             self.generation += 1;
         }
         self.last = primary;
         self.recorded = true;
+        self.interrupted = false;
         self.generation
+    }
+
+    /// The group has gone away — record that whatever comes back is a fresh
+    /// episode. `A → absent → A` must not hand the second teeing the number
+    /// the first one used.
+    pub fn interrupt(&mut self) {
+        self.interrupted = true;
     }
 }
 
@@ -1180,6 +1197,12 @@ mod tests {
         // A lone PE is the DF with nobody behind it.
         assert_eq!(backup_forwarder(&[a], 0), None);
         assert_eq!(backup_forwarder(&[], 0), None);
+    }
+
+    /// The member list alone, for the ordering tests — `order_es_members`
+    /// hands back pairs so production code can read the leading PE.
+    fn members_of(pairs: Vec<(IpAddr, crate::rib::EsNhgMember)>) -> Vec<crate::rib::EsNhgMember> {
+        pairs.into_iter().map(|(_, m)| m).collect()
     }
 
     /// Carving candidates: every PE advertising Alg 0 with no preference.
@@ -1939,7 +1962,7 @@ mod tests {
             (c, EsNhgMember::Vxlan(c)),
         ];
         assert_eq!(
-            order_es_members(pairs.clone(), Some(c), Some(b)),
+            members_of(order_es_members(pairs.clone(), Some(c), Some(b))),
             vec![
                 EsNhgMember::Vxlan(c),
                 EsNhgMember::Vxlan(b),
@@ -1948,7 +1971,7 @@ mod tests {
         );
         // A backup with no primary still leads.
         assert_eq!(
-            order_es_members(pairs.clone(), None, Some(c)),
+            members_of(order_es_members(pairs.clone(), None, Some(c))),
             vec![
                 EsNhgMember::Vxlan(c),
                 EsNhgMember::Vxlan(a),
@@ -1958,7 +1981,7 @@ mod tests {
         // A backup that is no longer a member changes nothing.
         let survivors: Vec<_> = pairs.into_iter().filter(|(pe, _)| *pe != b).collect();
         assert_eq!(
-            order_es_members(survivors, Some(c), Some(b)),
+            members_of(order_es_members(survivors, Some(c), Some(b))),
             vec![EsNhgMember::Vxlan(c), EsNhgMember::Vxlan(a)]
         );
     }
@@ -1976,7 +1999,7 @@ mod tests {
             (b, EsNhgMember::Vxlan(b)),
         ];
         assert_eq!(
-            order_es_members(pairs.clone(), None, None),
+            members_of(order_es_members(pairs.clone(), None, None)),
             vec![
                 EsNhgMember::Vxlan(a),
                 EsNhgMember::Vxlan(b),
@@ -1984,7 +2007,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            order_es_members(pairs.clone(), Some(b), None),
+            members_of(order_es_members(pairs.clone(), Some(b), None)),
             vec![
                 EsNhgMember::Vxlan(b),
                 EsNhgMember::Vxlan(a),
@@ -1996,7 +2019,7 @@ mod tests {
         // which is the failover.
         let survivors: Vec<_> = pairs.into_iter().filter(|(pe, _)| *pe != b).collect();
         assert_eq!(
-            order_es_members(survivors, Some(b), None),
+            members_of(order_es_members(survivors, Some(b), None)),
             vec![EsNhgMember::Vxlan(a), EsNhgMember::Vxlan(c)]
         );
     }

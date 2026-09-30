@@ -20993,20 +20993,37 @@ impl Bgp {
             // member sorts first. It is kept as an entry (not dropped) so
             // the state is visible in `show` instead of looking like a
             // segment nobody ever advertised.
+            let blocked = reasons.get(&(esi, vni))
+                == Some(&super::ethernet_segment::SaSelectReason::NoForwarder);
+            // Order the group BEFORE recording the view, because what the
+            // view must name is what the datapath is actually given. Under
+            // single-active the datapath forwards to slot 0 alone, so the
+            // leading PE is the effective forwarder even where selection
+            // named nobody — an unsignalled segment with no MAC to infer
+            // from still programs the lowest address, and recording `None`
+            // there would both misreport the forwarder and let slot 0 change
+            // without the generation moving.
+            let ordered = super::ethernet_segment::order_es_members(pairs, primary, backup);
+            let members: Vec<crate::rib::EsNhgMember> = if blocked {
+                Vec::new()
+            } else {
+                ordered.iter().map(|(_, m)| *m).collect()
+            };
             // The derived view behind this group: who contributed, what
             // each of them said, and how many copies of it we hold. Rebuilt
             // from the routes every sync — the only thing carried forward
             // is the incumbent and the generation.
             if single_active {
-                // The counter and the answer it names both live in
-                // `es_gen`, NOT in the derived view. The view is dropped
-                // whenever the group is absent or the segment is all-active
-                // for a moment, so comparing against it would let a
-                // returning group hand a DIFFERENT forwarder a number that
-                // has already been used — and a reusable number is no use to
-                // the completion barrier this exists for.
-                let generation = self.es_gen.entry((esi, vni)).or_default().observe(primary);
-                let members = signals
+                let (effective, effective_backup) = if blocked {
+                    (None, None)
+                } else {
+                    let mut pes = ordered.iter().map(|(pe, _)| *pe);
+                    let lead = pes.next();
+                    // Slot 1 is the pre-installed standby; skip any further
+                    // member the leader contributed.
+                    (lead, pes.find(|pe| Some(*pe) != lead))
+                };
+                let view_members = signals
                     .get(&(esi, vni))
                     .map(|m| {
                         m.iter()
@@ -21024,24 +21041,22 @@ impl Bgp {
                             .collect()
                     })
                     .unwrap_or_default();
+                let generation = self
+                    .es_gen
+                    .entry((esi, vni))
+                    .or_default()
+                    .observe(effective);
                 self.es_remote.insert(
                     (esi, vni),
                     super::ethernet_segment::EsRemoteBd {
-                        members,
-                        active: primary,
-                        backup,
+                        members: view_members,
+                        active: effective,
+                        backup: effective_backup,
                         reason: reasons.get(&(esi, vni)).copied(),
                         generation,
                     },
                 );
             }
-            let blocked = reasons.get(&(esi, vni))
-                == Some(&super::ethernet_segment::SaSelectReason::NoForwarder);
-            let members = if blocked {
-                Vec::new()
-            } else {
-                super::ethernet_segment::order_es_members(pairs, primary, backup)
-            };
             groups.insert((esi, vni), (single_active, members, blocked));
         }
         let mut out: Vec<crate::rib::Message> = Vec::new();
@@ -21059,6 +21074,21 @@ impl Bgp {
         // everything absent from `reasons` covers that as well as the groups
         // that vanished outright.
         self.es_nhg_diag.retain(|k, _| reasons.contains_key(k));
+        // A group that disappears, or whose segment goes all-active for a
+        // moment, is a torn-down programming episode: whatever comes back is
+        // a new one even if it names the same forwarder, or a barrier could
+        // accept a completion owed to the teeing before the gap.
+        let interrupted: Vec<([u8; 10], u32)> = self
+            .es_remote
+            .keys()
+            .filter(|k| !reasons.contains_key(*k))
+            .copied()
+            .collect();
+        for key in interrupted {
+            if let Some(state) = self.es_gen.get_mut(&key) {
+                state.interrupt();
+            }
+        }
         self.es_remote.retain(|k, _| reasons.contains_key(k));
         for (esi, bd) in gone {
             self.es_nhg_sent.remove(&(esi, bd));
