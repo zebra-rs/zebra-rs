@@ -25,6 +25,14 @@ pub struct RibEntry {
     /// agent reports back.
     pub offloaded: bool,
     pub valid: bool,
+    /// A route an earlier run of zebra-rs left in the kernel, found by
+    /// the startup dump (a graceful restart or a crash stopped it without
+    /// withdrawing it). It keeps its protocol's `rtype`, so the protocol's
+    /// own route for the prefix replaces it, but it is already in the
+    /// kernel and is never programmed: it is no `is_protocol` route. It
+    /// leaves the kernel by `FibHandle::route_del_leftover`, when
+    /// replaced, outranked or swept (`Message::SweepStale`).
+    pub stale: bool,
     pub distance: u8,
     pub metric: u32,
     pub nexthop: Nexthop,
@@ -51,6 +59,7 @@ impl RibEntry {
             fib: false,
             offloaded: false,
             valid: false,
+            stale: false,
             distance: 0,
             metric: 0,
             nexthop: Nexthop::default(),
@@ -75,7 +84,7 @@ impl RibEntry {
         matches!(
             self.rtype,
             RibType::Static | RibType::Ospf | RibType::Isis | RibType::Bgp
-        )
+        ) && !self.stale
     }
 
     pub fn is_fib(&self) -> bool {

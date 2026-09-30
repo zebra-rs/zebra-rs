@@ -123,6 +123,9 @@ pub trait OspfVersion: 'static + Send + Sync + Copy + Clone + PartialEq + Eq {
     /// show-channel key.
     const PROTO: &'static str;
 
+    /// Whether this version routes IPv6 (OSPFv3), not IPv4 (OSPFv2).
+    const IPV6: bool;
+
     /// Spawn a per-VRF instance of this version and return its handle.
     /// Dispatches the version-specific `Ospf::<Self>::new` + serve
     /// (the generic per-VRF code can't name the concrete constructor);
@@ -419,6 +422,7 @@ impl OspfVersion for Ospfv2 {
         std::net::IpAddr::V4(prefix.addr())
     }
     const PROTO: &'static str = "ospf";
+    const IPV6: bool = false;
 
     fn spawn_vrf(
         name: &str,
@@ -607,6 +611,7 @@ impl OspfVersion for Ospfv3 {
         std::net::IpAddr::V6(prefix.addr())
     }
     const PROTO: &'static str = "ospfv3";
+    const IPV6: bool = true;
 
     fn spawn_vrf(
         name: &str,

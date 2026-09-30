@@ -171,7 +171,7 @@ async fn route_dump(
     };
     let mut routes = handle.route().get(route).execute();
     while let Some(msg) = routes.try_next().await? {
-        let route = route_from_msg_with(msg, nexthops);
+        let route = route_from_msg_with(msg, nexthops, true);
         if let Some(route) = route {
             let msg = FibMessage::NewRoute(route);
             rib.process_fib_msg(msg).await;

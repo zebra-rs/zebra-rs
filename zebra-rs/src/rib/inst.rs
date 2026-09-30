@@ -735,6 +735,15 @@ pub enum Message {
     ProtoCleanup {
         proto: String,
     },
+    /// Withdraw what is left of the routes of `rtype` an earlier run of
+    /// zebra-rs left in the kernel (`RibEntry::stale`) — in the sender's
+    /// table, IPv6 when `v6`, else IPv4. The protocol sends it once its
+    /// own routes are in: those replaced the leftovers they cover, and
+    /// the rest lead nowhere now (RFC 3623 §2.3 (4)).
+    SweepStale {
+        rtype: RibType,
+        v6: bool,
+    },
 }
 
 impl Message {
@@ -2490,6 +2499,57 @@ impl Rib {
         }
     }
 
+    /// Withdraw the stale entries of `rtype` left in `table_id`
+    /// ([`Message::SweepStale`]): each leaves the kernel as it leaves the
+    /// RIB (`FibHandle::route_del_leftover`). A protocol's own route for a
+    /// prefix replaced its leftover already, so what is found is only
+    /// what it no longer has.
+    async fn sweep_stale(&mut self, rtype: RibType, v6: bool, table_id: u32) {
+        let stale = |entries: &RibEntries| entries.iter().any(|e| e.rtype == rtype && e.stale);
+        let main = table_id == RT_TABLE_MAIN;
+        if v6 {
+            let table = if main {
+                Some(&self.table_v6)
+            } else {
+                self.vrf_tables.get(&table_id).map(|t| &t.table_v6)
+            };
+            let prefixes: Vec<Ipv6Net> = table
+                .into_iter()
+                .flat_map(|table| table.iter())
+                .filter_map(|(prefix, entries)| stale(entries).then_some(prefix))
+                .collect();
+            for prefix in prefixes {
+                if main {
+                    self.ipv6_route_del(&prefix, RibEntry::new(rtype), table_id)
+                        .await;
+                } else {
+                    self.ipv6_route_del_vrf(table_id, &prefix, RibEntry::new(rtype))
+                        .await;
+                }
+            }
+        } else {
+            let table = if main {
+                Some(&self.table)
+            } else {
+                self.vrf_tables.get(&table_id).map(|t| &t.table)
+            };
+            let prefixes: Vec<Ipv4Net> = table
+                .into_iter()
+                .flat_map(|table| table.iter())
+                .filter_map(|(prefix, entries)| stale(entries).then_some(prefix))
+                .collect();
+            for prefix in prefixes {
+                if main {
+                    self.ipv4_route_del(&prefix, RibEntry::new(rtype), table_id)
+                        .await;
+                } else {
+                    self.ipv4_route_del_vrf(table_id, &prefix, RibEntry::new(rtype))
+                        .await;
+                }
+            }
+        }
+    }
+
     async fn proto_cleanup(&mut self, proto: String) {
         // Reclaim any dynamic label blocks the protocol held — done
         // before the rtype gate so it covers every requester.
@@ -3863,6 +3923,9 @@ impl Rib {
             Message::ProtoCleanup { proto } => {
                 self.proto_cleanup(proto).await;
             }
+            Message::SweepStale { rtype, v6 } => {
+                self.sweep_stale(rtype, v6, table_id).await;
+            }
             Message::MacAdd {
                 vni,
                 mac,
@@ -4431,7 +4494,18 @@ impl Rib {
                 self.router_id_update();
             }
             FibMessage::NewRoute(route) => {
-                if let IpNet::V4(prefix) = route.prefix {
+                // IPv6 routes come only as an earlier run's leftovers.
+                if let IpNet::V6(prefix) = route.prefix
+                    && route.entry.stale
+                {
+                    if route.table_id == RT_TABLE_MAIN {
+                        self.ipv6_route_add(&prefix, route.entry, RT_TABLE_MAIN)
+                            .await;
+                    } else if self.vrf_tables.contains_key(&route.table_id) {
+                        self.ipv6_route_add_vrf(route.table_id, &prefix, route.entry)
+                            .await;
+                    }
+                } else if let IpNet::V4(prefix) = route.prefix {
                     if route.table_id == RT_TABLE_MAIN {
                         self.ipv4_route_add(&prefix, route.entry, RT_TABLE_MAIN)
                             .await;
