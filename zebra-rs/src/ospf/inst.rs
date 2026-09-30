@@ -739,6 +739,22 @@ mod interface_config_path_tests {
 // the v2-shaped tx channel) and produce `OspfInterface<V>` /
 // `&Neighbor<V>` values typed by `V`.
 impl<V: OspfVersion> Ospf<V> {
+    /// Whether a MaxAge LSA must stay in the database for now (RFC 2328
+    /// §14): it leaves only once no neighbour's retransmission list holds
+    /// it and no neighbour is in Exchange or Loading. Removed earlier, its
+    /// withdrawal still goes out — each list keeps a copy — but a
+    /// neighbour in database exchange could offer back an older, live copy,
+    /// and with nothing newer held it would be installed and flooded again.
+    fn max_age_removal_waits(&self, key: super::lsdb::OspfLsaKey) -> bool {
+        self.links
+            .values()
+            .flat_map(|link| link.nbrs.values())
+            .any(|nbr| {
+                nbr.ls_rxmt.contains_key(&key)
+                    || matches!(nbr.state, NfsmState::Exchange | NfsmState::Loading)
+            })
+    }
+
     /// Reconcile one neighbor's BFD subscription against the interface
     /// config and the neighbor's current NFSM state. Idempotent and
     /// order-independent: the desired (key, params) pair is compared to
@@ -4580,6 +4596,21 @@ impl Ospf<Ospfv2> {
                 (None, _) => {}
             }
             return;
+        }
+
+        // RFC 2328 §14: not while a neighbour still awaits it.
+        if self.max_age_removal_waits(key) {
+            let tx = self.tx.clone();
+            let held = match area_id {
+                Some(area_id) => self
+                    .areas
+                    .get_mut(area_id)
+                    .is_some_and(|area| area.lsdb.hold_max_age(key, &tx, Some(area_id))),
+                None => self.lsdb_as.hold_max_age(key, &tx, None),
+            };
+            if held {
+                return;
+            }
         }
 
         let removed = {
@@ -10192,6 +10223,30 @@ impl Ospf<Ospfv3> {
     fn lsa_expire_v3(&mut self, area_id: Option<Ipv4Addr>, key: super::lsdb::OspfLsaKey) {
         use super::packet_v3::{Ospfv3LsaScope, ospfv3_ls_type_scope};
         let (ls_type, _, _) = key;
+        // RFC 2328 §14, as for v2: not while a neighbour still awaits it.
+        if self.max_age_removal_waits(key) {
+            let tx = self.tx.clone();
+            let held = match ospfv3_ls_type_scope(ls_type) {
+                Ospfv3LsaScope::Area => area_id.is_some_and(|area_id| {
+                    self.areas
+                        .get_mut(area_id)
+                        .is_some_and(|area| area.lsdb.hold_max_age(key, &tx, Some(area_id)))
+                }),
+                Ospfv3LsaScope::As => self.lsdb_as.hold_max_age(key, &tx, None),
+                // Every link that holds it, not only the first.
+                Ospfv3LsaScope::Link => {
+                    let mut held = false;
+                    for link in self.links.values_mut() {
+                        held |= link.lsdb.hold_max_age(key, &tx, area_id);
+                    }
+                    held
+                }
+                Ospfv3LsaScope::Reserved => false,
+            };
+            if held {
+                return;
+            }
+        }
         match ospfv3_ls_type_scope(ls_type) {
             Ospfv3LsaScope::Area => {
                 if let Some(area_id) = area_id
@@ -19958,6 +20013,180 @@ mod v2_router_information_label_tests {
         assert_eq!(cached(&top, rid(3)), first, "another instance withdrawn");
         assert_eq!(cached(&top, rid(4)), second, "its instance withdrawn");
         assert_eq!(cached(&top, rid(5)), second, "its instance replaced");
+    }
+}
+
+#[cfg(test)]
+mod max_age_removal_tests {
+    use super::super::lsdb::{LsdbEvent, OSPF_MAX_AGE, OspfLsaKey, v2_lsa_key};
+    use super::test_support::{fresh_ospf, fresh_ospf_v3};
+    use super::*;
+
+    const PEER: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 2);
+
+    /// Interface 2 in the backbone, with one neighbour in `state`.
+    fn neighbour<V: OspfVersion>(top: &mut Ospf<V>, state: NfsmState)
+    where
+        V::Prefix: Default,
+        V::DbDesc: Default,
+    {
+        let mut link = OspfLink::from(
+            top.tx.clone(),
+            crate::rib::Link::from(crate::fib::message::FibLink {
+                index: 2,
+                name: "eth2".into(),
+                mtu: 1500,
+                ..Default::default()
+            }),
+            top.sock.clone(),
+            top.router_id,
+            top.ptx.clone(),
+        );
+        link.enabled = true;
+        let mut nbr = Neighbor::new(
+            top.tx.clone(),
+            2,
+            V::Prefix::default(),
+            &PEER,
+            40,
+            top.ptx.clone(),
+        );
+        nbr.state = state;
+        link.nbrs.insert(PEER, nbr);
+        top.links.insert(2, link);
+        top.areas.fetch(AREA0).links.insert(2);
+    }
+
+    fn peer<V: OspfVersion>(top: &mut Ospf<V>) -> &mut Neighbor<V> {
+        top.links.get_mut(&2).unwrap().nbrs.get_mut(&PEER).unwrap()
+    }
+
+    fn held<V: OspfVersion>(top: &Ospf<V>, key: OspfLsaKey) -> bool {
+        top.areas.get(AREA0).unwrap().lsdb.tables.contains_key(&key)
+    }
+
+    /// Whether the hold timer for `key` fires within a second.
+    async fn rearmed<V: OspfVersion>(top: &mut Ospf<V>, key: OspfLsaKey) -> bool {
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        std::iter::from_fn(|| top.rx.try_recv().ok())
+            .any(|msg| matches!(msg, Message::Lsdb(LsdbEvent::HoldTimerExpire, _, k) if k == key))
+    }
+
+    /// Let the hold timer armed at install fire, and drop its message: a
+    /// later one can only come from a re-armed timer.
+    async fn settle<V: OspfVersion>(top: &mut Ospf<V>, key: OspfLsaKey) {
+        assert!(rearmed(top, key).await, "armed at install");
+    }
+
+    /// RFC 2328 §14: a MaxAge LSA leaves the database only once no
+    /// neighbour's retransmission list holds it and no neighbour is in
+    /// Exchange or Loading — until then its hold timer is re-armed. It used
+    /// to go a second after the flush, and a neighbour in database exchange
+    /// could offer back an older, live copy to be installed and flooded
+    /// again. Both versions.
+    #[tokio::test(start_paused = true)]
+    async fn a_max_age_lsa_waits_for_its_neighbours() {
+        // OSPFv3.
+        let mut top = fresh_ospf_v3();
+        top.router_id = Ipv4Addr::new(10, 0, 0, 1);
+        neighbour(&mut top, NfsmState::Full);
+        let mut lsa = ospf_packet::Ospfv3Lsa::from(
+            ospf_packet::Ospfv3LsaHeader {
+                ls_age: OSPF_MAX_AGE,
+                ls_type: ospf_packet::OSPFV3_E_ROUTER_LSA_TYPE,
+                link_state_id: 7,
+                advertising_router: PEER,
+                ls_seq_number: 0x8000_0003,
+                ls_checksum: 0,
+                length: 0,
+            },
+            ospf_packet::Ospfv3LsBody::Unknown(vec![0; 4]),
+        );
+        lsa.update();
+        let key = (ospf_packet::OSPFV3_E_ROUTER_LSA_TYPE, 7, PEER);
+        let (tx, tracing) = (top.tx.clone(), top.tracing.clone());
+        top.areas
+            .fetch(AREA0)
+            .lsdb
+            .install_lsa(lsa.clone(), &tx, Some(AREA0), &tracing);
+        peer(&mut top).ls_rxmt.insert(key, lsa);
+        settle(&mut top, key).await;
+        let expire = || Message::Lsdb(LsdbEvent::HoldTimerExpire, Some(AREA0), key);
+
+        top.process_msg(expire()).await;
+        assert!(held(&top, key), "v3: on a retransmission list");
+        assert!(rearmed(&mut top, key).await, "v3: looked at again");
+        peer(&mut top).ls_rxmt.clear();
+        peer(&mut top).state = NfsmState::Exchange;
+        top.process_msg(expire()).await;
+        assert!(held(&top, key), "v3: a neighbour in Exchange");
+        peer(&mut top).state = NfsmState::Full;
+        top.process_msg(expire()).await;
+        assert!(!held(&top, key), "v3: nothing awaits it");
+
+        // A link-scope LSA, kept in the interface's own database.
+        let mut lsa = ospf_packet::Ospfv3Lsa::from(
+            ospf_packet::Ospfv3LsaHeader {
+                ls_age: OSPF_MAX_AGE,
+                ls_type: ospf_packet::OSPFV3_LINK_LSA_TYPE,
+                link_state_id: 7,
+                advertising_router: PEER,
+                ls_seq_number: 0x8000_0003,
+                ls_checksum: 0,
+                length: 0,
+            },
+            ospf_packet::Ospfv3LsBody::Unknown(vec![0; 4]),
+        );
+        lsa.update();
+        let key = (ospf_packet::OSPFV3_LINK_LSA_TYPE, 7, PEER);
+        let on_link = |top: &Ospf<Ospfv3>| top.links[&2].lsdb.tables.contains_key(&key);
+        top.links
+            .get_mut(&2)
+            .unwrap()
+            .lsdb
+            .install_lsa(lsa.clone(), &tx, Some(AREA0), &tracing);
+        peer(&mut top).ls_rxmt.insert(key, lsa);
+        settle(&mut top, key).await;
+        let expire = || Message::Lsdb(LsdbEvent::HoldTimerExpire, Some(AREA0), key);
+
+        top.process_msg(expire()).await;
+        assert!(on_link(&top), "v3 link scope: on a retransmission list");
+        assert!(
+            rearmed(&mut top, key).await,
+            "v3 link scope: looked at again"
+        );
+        peer(&mut top).ls_rxmt.clear();
+        top.process_msg(expire()).await;
+        assert!(!on_link(&top), "v3 link scope: nothing awaits it");
+
+        // OSPFv2.
+        let mut top = fresh_ospf();
+        neighbour(&mut top, NfsmState::Loading);
+        let mut h = OspfLsaHeader::new(OspfLsType::Router, PEER, PEER);
+        h.ls_age = OSPF_MAX_AGE;
+        let mut lsa = OspfLsa::from(
+            h,
+            OspfLsp::Router(RouterLsa {
+                flags: 0,
+                links: vec![],
+            }),
+        );
+        lsa.update();
+        let key = v2_lsa_key(OspfLsType::Router, PEER, PEER);
+        let (tx, tracing) = (top.tx.clone(), top.tracing.clone());
+        top.areas
+            .fetch(AREA0)
+            .lsdb
+            .install_lsa(lsa, &tx, Some(AREA0), &tracing);
+        settle(&mut top, key).await;
+        let expire = || Message::Lsdb(LsdbEvent::HoldTimerExpire, Some(AREA0), key);
+
+        top.process_msg(expire()).await;
+        assert!(held(&top, key), "v2: a neighbour in Loading");
+        assert!(rearmed(&mut top, key).await, "v2: looked at again");
+        peer(&mut top).state = NfsmState::Full;
+        top.process_msg(expire()).await;
+        assert!(!held(&top, key), "v2: nothing awaits it");
     }
 }
 

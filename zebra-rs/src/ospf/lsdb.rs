@@ -493,6 +493,25 @@ impl<V: OspfVersion> Lsdb<V> {
         Some(new_data)
     }
 
+    /// Keep the LSA at `lsa_key` a while longer when it has reached MaxAge:
+    /// re-arm its hold timer, to look again in a second. RFC 2328 §14 lets a
+    /// MaxAge LSA leave the database only once no neighbour still awaits
+    /// it (see `Ospf::max_age_removal_waits`). Returns whether it held one.
+    pub fn hold_max_age(
+        &mut self,
+        lsa_key: OspfLsaKey,
+        tx: &UnboundedSender<Message<V>>,
+        area_id: Option<Ipv4Addr>,
+    ) -> bool {
+        match self.tables.get_mut(&lsa_key) {
+            Some(lsa) if lsa.current_age() >= OSPF_MAX_AGE => {
+                lsa.hold_timer = Some(hold_timer(tx, area_id, lsa_key, OSPF_MAX_AGE));
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Remove the LSA at `lsa_key` if its age has reached MaxAge — its hold
     /// timer fired. A timer message still in flight for an instance
     /// replaced since finds the fresh copy young, and leaves it. Returns
