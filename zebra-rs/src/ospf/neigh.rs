@@ -58,8 +58,8 @@ impl Default for GracefulRestartConfig {
 /// Exit paths (RFC 3623 §3.2):
 ///   - Grace-period expiry — `expire_timer` fires
 ///     `Message::GrHelperExpire`.
-///   - Topology change — `gr_helper_check_exit` runs on every LSA
-///     flooded through the area; see `lsdb_snapshot`.
+///   - Topology change — `Message::LsaChanged`, sent when an install
+///     changes an LSA's contents (RFC 2328 §13.2).
 ///
 /// `reason`, `grace_period`, `entered_at` are populated for the
 /// `show ospf graceful-restart` output (`show.rs`).
@@ -79,21 +79,6 @@ pub struct HelperState {
     /// `Drop` is the consumer.
     #[allow(dead_code)]
     pub expire_timer: Option<Timer>,
-    /// RFC 3623 §3.2 pre-restart LSDB snapshot — for every LSA in
-    /// the helper's area whose `adv_router` is the restarting
-    /// router, we record the `(ls_seq_number, ls_checksum)` tuple
-    /// observed at the moment we entered helper. On each new LSA
-    /// install (via `flood_lsa_through_area`) we compare:
-    ///
-    ///   - A topology-affecting LSA from the restarter whose
-    ///     tuple differs from the snapshot → exit helper.
-    ///   - A topology-affecting LSA from any non-restarter →
-    ///     exit helper (some other router's adjacency / prefix
-    ///     changed in the area).
-    ///
-    /// Non-topology-affecting LSAs (Opaque, AS-External, etc.) are
-    /// ignored.
-    pub lsdb_snapshot: BTreeMap<OspfLsaKey, (u32, u16)>,
     /// How long ago, in seconds, the restart was requested when we
     /// entered: the Grace-LSA's age (RFC 3623 §A). The grace period runs
     /// from the request, not from our entry.
