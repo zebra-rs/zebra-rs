@@ -4114,6 +4114,10 @@ impl Ospf<Ospfv2> {
                     .lsdb
                     .iter_by_type(OspfLsType::Router)
                     .filter_map(|(_, lsa)| {
+                        // A withdrawn ABR takes no part.
+                        if lsa.data.h.ls_age >= crate::ospf::lsdb::OSPF_MAX_AGE {
+                            return None;
+                        }
                         let OspfLsp::Router(ref body) = lsa.data.lsp else {
                             return None;
                         };
@@ -9995,6 +9999,10 @@ impl Ospf<Ospfv3> {
                     .lsdb
                     .iter_by_raw_type(OSPFV3_ROUTER_LSA_TYPE)
                     .filter_map(|(_, lsa)| {
+                        // A withdrawn ABR takes no part.
+                        if lsa.data.h.ls_age >= crate::ospf::lsdb::OSPF_MAX_AGE {
+                            return None;
+                        }
                         let Ospfv3LsBody::Router(ref body) = lsa.data.body else {
                             return None;
                         };
@@ -14352,6 +14360,12 @@ fn build_rib_from_spf(
                         // Transit Network: look up Network-LSA to get the
                         // network prefix (link_id = dr's interface ip).
                         for ((_ls_id, _adv), nlsa) in area.lsdb.iter_by_type(OspfLsType::Network) {
+                            // A MaxAge Network-LSA is kept only until the
+                            // neighbours acknowledge it: its network is
+                            // gone (RFC 2328 §14).
+                            if nlsa.data.h.ls_age >= crate::ospf::lsdb::OSPF_MAX_AGE {
+                                continue;
+                            }
                             if let OspfLsp::Network(ref net) = nlsa.data.lsp
                                 && nlsa.data.h.ls_id == link.link_id
                             {
@@ -15709,6 +15723,24 @@ fn build_rib6_from_spf(
         let Some(ref_vertex) = top.lsp_map.lookup(body.referenced_advertising_router) else {
             continue;
         };
+
+        // Prefixes on a transit network come with its Network-LSA (RFC
+        // 5340 §4.8.1: the network must be in the tree). One at MaxAge is
+        // kept only until the neighbours acknowledge it: the network is
+        // gone, as OSPFv2's transit routes treat it.
+        if ref_vertex != source
+            && body.referenced_ls_type == OSPFV3_NETWORK_LSA_TYPE
+            && !area
+                .lsdb
+                .lookup_by_raw_key((
+                    OSPFV3_NETWORK_LSA_TYPE,
+                    body.referenced_link_state_id,
+                    body.referenced_advertising_router,
+                ))
+                .is_some_and(|network| network.h.ls_age < OSPF_MAX_AGE)
+        {
+            continue;
+        }
 
         // Common path: referenced router is some other vertex. Pull
         // the SPF path and nexthops once for all prefixes in this LSA.
@@ -20143,6 +20175,258 @@ mod max_age_removal_tests {
     use super::*;
 
     const PEER: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 2);
+
+    /// A MaxAge Network-LSA supplies no transit route, even while the
+    /// router that advertised it stays reachable by another path: it is
+    /// kept only until the neighbours acknowledge it, and its network is
+    /// gone. OSPFv2 reads the segment's prefix from the Network-LSA
+    /// itself; OSPFv3 from an Intra-Area-Prefix-LSA that refers to it,
+    /// which needs the network in the tree (RFC 5340 §4.8.1). The SPF
+    /// result is supplied, to isolate the RIB's use of the LSA.
+    #[tokio::test(start_paused = true)]
+    async fn a_max_age_network_lsa_supplies_no_transit_prefix() {
+        use ospf_packet::{
+            OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE, OSPFV3_NETWORK_LSA_TYPE, Ospfv3IntraAreaPrefix,
+            Ospfv3IntraAreaPrefixLsa, Ospfv3LsBody, Ospfv3PrefixOptions,
+        };
+
+        // OSPFv2.
+        let mut top = fresh_ospf();
+        neighbour(&mut top, NfsmState::Loading);
+        let prefix: Ipv4Net = "192.0.2.0/24".parse().unwrap();
+        let dr: Ipv4Addr = "192.0.2.1".parse().unwrap();
+        let mut transit = RouterLsaLink::new(prefix, 10);
+        transit.link_type = OspfLinkType::Transit;
+        transit.link_id = dr;
+        let mut router = OspfLsa::from(
+            OspfLsaHeader::new(OspfLsType::Router, PEER, PEER),
+            OspfLsp::Router(RouterLsa {
+                flags: 0,
+                links: vec![transit],
+            }),
+        );
+        router.update();
+        let mut network = OspfLsa::from(
+            OspfLsaHeader::new(OspfLsType::Network, dr, PEER),
+            OspfLsp::Network(NetworkLsa {
+                netmask: prefix.netmask(),
+                attached_routers: vec![PEER],
+            }),
+        );
+        network.update();
+        network.set_age(OSPF_MAX_AGE - 1);
+        let key = v2_lsa_key(OspfLsType::Network, dr, PEER);
+        let (tx, tracing) = (top.tx.clone(), top.tracing.clone());
+        let db = &mut top.areas.fetch(AREA0).lsdb;
+        db.install_lsa(router, &tx, Some(AREA0), &tracing);
+        db.install_lsa(network, &tx, Some(AREA0), &tracing);
+        let node = top.lsp_map.get(PEER);
+        let mut path = spf::Path::new(node);
+        path.cost = 10;
+        let paths = BTreeMap::from([(node, path)]);
+        let rib = |top: &Ospf| build_rib_from_spf(top, AREA0, usize::MAX, &paths, &BTreeMap::new());
+        assert!(rib(&top).get(&prefix).is_some(), "v2: live");
+        settle(&mut top, key).await;
+        top.process_msg(Message::Lsdb(LsdbEvent::HoldTimerExpire, Some(AREA0), key))
+            .await;
+        assert!(held(&top, key), "v2: kept for a neighbour in Loading");
+        assert!(rib(&top).get(&prefix).is_none(), "v2: at MaxAge");
+
+        // OSPFv3.
+        let mut top = fresh_ospf_v3();
+        top.router_id = Ipv4Addr::new(10, 0, 0, 1);
+        neighbour(&mut top, NfsmState::Full);
+        peer(&mut top).ident.prefix = "fe80::2/64".parse().unwrap();
+        let prefix: ipnet::Ipv6Net = "2001:db8:7::/64".parse().unwrap();
+        let network = (OSPFV3_NETWORK_LSA_TYPE, 5, PEER);
+        let mut iap = v3_lsa((OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE, 1, PEER), 0);
+        iap.body = Ospfv3LsBody::IntraAreaPrefix(Ospfv3IntraAreaPrefixLsa {
+            referenced_ls_type: OSPFV3_NETWORK_LSA_TYPE,
+            referenced_link_state_id: 5,
+            referenced_advertising_router: PEER,
+            prefixes: vec![Ospfv3IntraAreaPrefix {
+                prefix_length: 64,
+                prefix_options: Ospfv3PrefixOptions::default(),
+                metric: 0,
+                address_prefix: prefix.addr().octets()[..8].to_vec(),
+            }],
+        });
+        iap.update();
+        let (tx, tracing) = (top.tx.clone(), top.tracing.clone());
+        let db = &mut top.areas.fetch(AREA0).lsdb;
+        db.install_lsa(v3_lsa(network, 0), &tx, Some(AREA0), &tracing);
+        db.install_lsa(iap, &tx, Some(AREA0), &tracing);
+        let node = top.lsp_map.get(PEER);
+        let mut path = spf::Path::new(node);
+        path.cost = 10;
+        path.first_hop_links.insert((node, 0));
+        let paths = BTreeMap::from([(node, path)]);
+        let rib = |top: &Ospf<Ospfv3>| {
+            build_rib6_from_spf(top, AREA0, usize::MAX, &paths, &BTreeMap::new())
+        };
+        assert!(rib(&top).get(&prefix).is_some(), "v3: live");
+        top.areas
+            .fetch(AREA0)
+            .lsdb
+            .flush_lsa_by_raw_key(network, &tx, Some(AREA0));
+        assert!(rib(&top).get(&prefix).is_none(), "v3: at MaxAge");
+        top.areas.fetch(AREA0).lsdb.tables.remove(&network);
+        assert!(rib(&top).get(&prefix).is_none(), "v3: gone");
+    }
+
+    /// A hold timer still queued for a withdrawal that a fresh instance
+    /// has since replaced neither ages out nor removes the fresh one, with
+    /// or without a neighbour still loading. Both versions.
+    #[tokio::test(start_paused = true)]
+    async fn a_stale_hold_timer_leaves_a_fresh_replacement() {
+        // OSPFv3.
+        let mut top = fresh_ospf_v3();
+        neighbour(&mut top, NfsmState::Loading);
+        let key = (ospf_packet::OSPFV3_ROUTER_LSA_TYPE, 7, PEER);
+        let (tx, tracing) = (top.tx.clone(), top.tracing.clone());
+        top.areas.fetch(AREA0).lsdb.install_lsa(
+            v3_lsa(key, OSPF_MAX_AGE),
+            &tx,
+            Some(AREA0),
+            &tracing,
+        );
+        settle(&mut top, key).await;
+        top.process_msg(Message::Lsdb(LsdbEvent::HoldTimerExpire, Some(AREA0), key))
+            .await;
+        assert!(held(&top, key), "v3: held");
+        assert!(rearmed(&mut top, key).await, "v3: held");
+        let mut replacement = v3_lsa(key, 0);
+        replacement.h.ls_seq_number += 1;
+        replacement.update();
+        let seq = replacement.h.ls_seq_number;
+        top.areas
+            .fetch(AREA0)
+            .lsdb
+            .install_lsa(replacement, &tx, Some(AREA0), &tracing);
+        for state in [NfsmState::Loading, NfsmState::Full] {
+            peer(&mut top).state = state;
+            top.process_msg(Message::Lsdb(LsdbEvent::HoldTimerExpire, Some(AREA0), key))
+                .await;
+            let current = &top.areas.get(AREA0).unwrap().lsdb.tables[&key];
+            assert_eq!(current.data.h.ls_age, 0, "v3: {state:?}");
+            assert_eq!(current.data.h.ls_seq_number, seq, "v3: {state:?}");
+            assert!(current.hold_remaining().unwrap() > 1, "v3: {state:?}");
+        }
+
+        // OSPFv2.
+        let mut top = fresh_ospf();
+        neighbour(&mut top, NfsmState::Loading);
+        let router = |age: u16, seq: u32| {
+            let mut h = OspfLsaHeader::new(OspfLsType::Router, PEER, PEER);
+            h.ls_age = age;
+            h.ls_seq_number = seq;
+            let mut lsa = OspfLsa::from(
+                h,
+                OspfLsp::Router(RouterLsa {
+                    flags: 0,
+                    links: vec![],
+                }),
+            );
+            lsa.update();
+            lsa
+        };
+        let key = v2_lsa_key(OspfLsType::Router, PEER, PEER);
+        let (tx, tracing) = (top.tx.clone(), top.tracing.clone());
+        top.areas.fetch(AREA0).lsdb.install_lsa(
+            router(OSPF_MAX_AGE, 0x8000_0003),
+            &tx,
+            Some(AREA0),
+            &tracing,
+        );
+        settle(&mut top, key).await;
+        top.process_msg(Message::Lsdb(LsdbEvent::HoldTimerExpire, Some(AREA0), key))
+            .await;
+        assert!(held(&top, key), "v2: held");
+        assert!(rearmed(&mut top, key).await, "v2: held");
+        top.areas
+            .fetch(AREA0)
+            .lsdb
+            .install_lsa(router(0, 0x8000_0004), &tx, Some(AREA0), &tracing);
+        for state in [NfsmState::Loading, NfsmState::Full] {
+            peer(&mut top).state = state;
+            top.process_msg(Message::Lsdb(LsdbEvent::HoldTimerExpire, Some(AREA0), key))
+                .await;
+            let current = &top.areas.get(AREA0).unwrap().lsdb.tables[&key];
+            assert_eq!(current.data.h.ls_age, 0, "v2: {state:?}");
+            assert_eq!(current.data.h.ls_seq_number, 0x8000_0004, "v2: {state:?}");
+            assert!(current.hold_remaining().unwrap() > 1, "v2: {state:?}");
+        }
+    }
+
+    /// A withdrawn ABR takes no part in the NSSA translator election (RFC
+    /// 3101 §3.1): its MaxAge Router-LSA is kept only until the neighbours
+    /// acknowledge it. Held, it stopped this router translating. Both
+    /// versions.
+    #[tokio::test]
+    async fn a_withdrawn_abr_takes_no_part_in_the_translator_election() {
+        use super::super::area::{AreaType, AreaTypeKind, NssaTranslatorRole};
+        let nssa = Ipv4Addr::new(0, 0, 0, 1);
+        let higher = Ipv4Addr::new(10, 0, 0, 9);
+        let candidate = || AreaType {
+            kind: AreaTypeKind::Nssa,
+            nssa_translator_role: NssaTranslatorRole::Candidate,
+            ..Default::default()
+        };
+
+        // OSPFv3.
+        let mut top = fresh_ospf_v3();
+        top.router_id = Ipv4Addr::new(10, 0, 0, 1);
+        for (ifindex, area_id) in [(7, AREA0), (8, nssa)] {
+            top.areas.fetch(area_id).links.insert(ifindex);
+        }
+        top.areas.fetch(nssa).area_type = candidate();
+        let key = (ospf_packet::OSPFV3_ROUTER_LSA_TYPE, 0, higher);
+        let mut abr = v3_lsa(key, 0);
+        abr.body = ospf_packet::Ospfv3LsBody::Router(ospf_packet::Ospfv3RouterLsa {
+            flags: ospf_packet::OSPFV3_ROUTER_LSA_FLAG_B,
+            ..Default::default()
+        });
+        abr.update();
+        let (tx, tracing) = (top.tx.clone(), top.tracing.clone());
+        top.areas
+            .fetch(nssa)
+            .lsdb
+            .install_lsa(abr, &tx, Some(nssa), &tracing);
+        assert!(!top.is_nssa_translator_for(nssa), "v3: the higher ABR");
+        top.areas
+            .fetch(nssa)
+            .lsdb
+            .flush_lsa_by_raw_key(key, &tx, Some(nssa));
+        assert!(top.is_nssa_translator_for(nssa), "v3: withdrawn");
+
+        // OSPFv2.
+        let mut top = fresh_ospf();
+        top.router_id = Ipv4Addr::new(10, 0, 0, 1);
+        for (ifindex, area_id) in [(7, AREA0), (8, nssa)] {
+            top.areas.fetch(area_id).links.insert(ifindex);
+        }
+        top.areas.fetch(nssa).area_type = candidate();
+        let mut abr = OspfLsa::from(
+            OspfLsaHeader::new(OspfLsType::Router, higher, higher),
+            OspfLsp::Router(RouterLsa {
+                flags: 0x0001,
+                links: vec![],
+            }),
+        );
+        abr.update();
+        let key = v2_lsa_key(OspfLsType::Router, higher, higher);
+        let (tx, tracing) = (top.tx.clone(), top.tracing.clone());
+        top.areas
+            .fetch(nssa)
+            .lsdb
+            .install_lsa(abr, &tx, Some(nssa), &tracing);
+        assert!(!top.is_nssa_translator_for(nssa), "v2: the higher ABR");
+        top.areas
+            .fetch(nssa)
+            .lsdb
+            .flush_lsa_by_raw_key(key, &tx, Some(nssa));
+        assert!(top.is_nssa_translator_for(nssa), "v2: withdrawn");
+    }
 
     /// RFC 2328 §14: an LSA whose age reaches MaxAge on its own is flushed
     /// as a withdrawal is (§14.1). It stops counting at once — its SRGB
