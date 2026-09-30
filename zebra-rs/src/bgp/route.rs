@@ -20998,19 +20998,14 @@ impl Bgp {
             // from the routes every sync — the only thing carried forward
             // is the incumbent and the generation.
             if single_active {
-                let prev = self.es_remote.get(&(esi, vni));
-                let prev_active = prev.and_then(|r| r.active);
-                // The counter lives in `es_gen`, NOT in the derived view:
-                // the view is dropped whenever the group is absent or the
-                // segment is all-active for a moment, and re-deriving it
-                // must not restart the count. A number that can be reused
-                // is no use to a completion barrier, which is the only
-                // reason this exists.
-                let generation = self.es_gen.entry((esi, vni)).or_insert(0);
-                if prev.is_some() && prev_active != primary {
-                    *generation += 1;
-                }
-                let generation = *generation;
+                // The counter and the answer it names both live in
+                // `es_gen`, NOT in the derived view. The view is dropped
+                // whenever the group is absent or the segment is all-active
+                // for a moment, so comparing against it would let a
+                // returning group hand a DIFFERENT forwarder a number that
+                // has already been used — and a reusable number is no use to
+                // the completion barrier this exists for.
+                let generation = self.es_gen.entry((esi, vni)).or_default().observe(primary);
                 let members = signals
                     .get(&(esi, vni))
                     .map(|m| {
@@ -21218,51 +21213,19 @@ impl Bgp {
     }
 
     /// How the forwarder of the single-active group `(esi, bd)` was chosen,
-    /// recomputed for `show` from the same inputs `evpn_es_nhg_sync` used.
+    /// as recorded when it was chosen.
     ///
-    /// The sync collects every group's signals in one pass; this answers for
-    /// one group, which is what a show command needs. Eligibility matches:
-    /// a PE whose per-ES A-D is gone is not a member, however its per-EVI
-    /// A-D still reads.
+    /// This must NOT recompute the selection: by the time `show` runs, the
+    /// stored `active` is the answer, so feeding it back as the incumbent
+    /// makes every conflict look like "incumbent kept" — including the ones
+    /// the lowest-address tie-break decided. Reading the stored reason is
+    /// also the only version that cannot drift from what was teed.
     pub fn es_group_selection(
         &self,
         esi: &[u8; 10],
         bd: u32,
     ) -> Option<super::ethernet_segment::SaSelectReason> {
-        let live = vpws_es_live_pes(&self.local_rib, esi);
-        let mut signals: BTreeMap<IpAddr, Option<(bool, bool)>> = BTreeMap::new();
-        for table in self.local_rib.evpn.values() {
-            for (prefix, rib) in table.selected.iter() {
-                let EvpnPrefix::EthernetAd { esi: e, eth_tag } = prefix else {
-                    continue;
-                };
-                if e != esi || *eth_tag != 0 || rib.typ == BgpRibType::Originated {
-                    continue;
-                }
-                if extract_vni_from_attr(&rib.attr) != Some(bd) {
-                    continue;
-                }
-                let Some(BgpNexthop::Evpn(originator)) = rib.attr.nexthop else {
-                    continue;
-                };
-                if !live.contains(&originator) {
-                    continue;
-                }
-                let role = rib
-                    .attr
-                    .ecom
-                    .as_ref()
-                    .and_then(|ec| ec.0.iter().find_map(|v| v.as_l2_attr()))
-                    .map(|a| (a.primary, a.backup));
-                signals.insert(originator, role);
-            }
-        }
-        if signals.is_empty() {
-            return None;
-        }
-        let signals: Vec<(IpAddr, Option<(bool, bool)>)> = signals.into_iter().collect();
-        let incumbent = self.es_remote.get(&(*esi, bd)).and_then(|r| r.active);
-        Some(super::ethernet_segment::select_sa_forwarder(&signals, incumbent).2)
+        self.es_remote.get(&(*esi, bd)).and_then(|r| r.reason)
     }
 
     /// The primary of a single-active segment's group for `vni` (RFC 7432
@@ -26422,6 +26385,10 @@ mod table_map_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "es_remote_review_tests.rs"]
+mod es_remote_review_tests;
 
 #[cfg(test)]
 mod tests {

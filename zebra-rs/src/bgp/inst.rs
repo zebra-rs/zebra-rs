@@ -935,7 +935,7 @@ pub struct Bgp {
     /// not restart at zero. A number that can be reused is no use to the
     /// completion barrier this exists for. Bounded by the distinct segments
     /// and bridge domains this node has seen.
-    pub es_gen: BTreeMap<([u8; 10], u32), u64>,
+    pub es_gen: BTreeMap<([u8; 10], u32), super::ethernet_segment::EsGenState>,
     pub es_nhg_diag: BTreeMap<
         ([u8; 10], u32),
         (

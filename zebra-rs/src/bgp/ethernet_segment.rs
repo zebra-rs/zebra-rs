@@ -751,6 +751,39 @@ impl SaSelectReason {
     }
 }
 
+/// The forwarder-move counter for one `(ESI, bridge domain)`, and the answer
+/// it names.
+///
+/// Kept apart from [`EsRemoteBd`] because that view is dropped whenever the
+/// group is absent or the segment is momentarily all-active — and the count
+/// must survive those, or a returning group restarts at a number that has
+/// already been used. `last` is compared against the new answer rather than
+/// against the dropped view, which is what makes the counter advance across
+/// a disappearance; `recorded` distinguishes "no forwarder yet" from "the
+/// first time we looked", so the very first answer is generation 0 and every
+/// change after it — including a change *to* no forwarder — advances.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EsGenState {
+    pub generation: u64,
+    /// The forwarder this generation names; `None` = no forwarder.
+    pub last: Option<std::net::IpAddr>,
+    /// Whether `last` has ever been written.
+    pub recorded: bool,
+}
+
+impl EsGenState {
+    /// Record `primary` as the current answer, advancing the generation if it
+    /// differs from the last one recorded. Returns the generation to publish.
+    pub fn observe(&mut self, primary: Option<std::net::IpAddr>) -> u64 {
+        if self.recorded && self.last != primary {
+            self.generation += 1;
+        }
+        self.last = primary;
+        self.recorded = true;
+        self.generation
+    }
+}
+
 /// One contributing copy of a member's per-EVI A-D, for `show`. Two route
 /// reflectors reflecting the same PE's route produce two of these under one
 /// `(RD, prefix)` key, and best-path selection picks between them — so a
