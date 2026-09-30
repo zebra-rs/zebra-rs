@@ -4468,6 +4468,9 @@ impl Rib {
             FibMessage::DelNexthop(id) => {
                 self.fib_nexthop_removed(id);
             }
+            FibMessage::KernelNexthop(nexthop) => {
+                self.nmap.reserve(nexthop.id);
+            }
             FibMessage::NewNeighbor(nbr) => {
                 // Tee resolved ARP/ND to the cradle eBPF data plane — its
                 // MPLS egress rewrite resolves next-hop MACs from this state.
@@ -6125,5 +6128,42 @@ mod mac_entry_tests {
         let mut second = MacEntry::new(Some(b), Some(ESI_A), 0, 0);
         second.absorb(Some(a), Some(ESI_A), 0, 0);
         assert_eq!(first.installed_dest(), second.installed_dest());
+    }
+}
+
+#[cfg(test)]
+mod kernel_nexthop_tests {
+    use super::*;
+    use crate::fib::FibNexthop;
+    use crate::rib::NexthopUni;
+
+    /// A next-hop object the kernel held at startup keeps its id: the
+    /// groups this run makes are numbered above it. An earlier run's
+    /// routes still forward through such objects, and `NLM_F_REPLACE` on
+    /// the same id would have re-pointed them at ours.
+    #[tokio::test]
+    async fn a_kernel_nexthop_keeps_its_id() {
+        let mut rib = Rib::new(false).expect("rib");
+        let nexthop = FibNexthop {
+            id: 40,
+            ours: true,
+            gateway: Some("192.0.2.2".parse().unwrap()),
+            ifindex: Some(3),
+            group: vec![],
+        };
+        rib.process_fib_msg(FibMessage::KernelNexthop(nexthop))
+            .await;
+        let uni = NexthopUni {
+            addr: "192.0.2.3".parse().unwrap(),
+            ..Default::default()
+        };
+        let gid = rib
+            .nmap
+            .fetch_uni(&uni, RT_TABLE_MAIN)
+            .map(|group| group.gid());
+        assert!(
+            gid.is_some_and(|gid| gid > 40),
+            "above the kernel's: {gid:?}"
+        );
     }
 }

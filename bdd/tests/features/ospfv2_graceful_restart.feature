@@ -126,6 +126,10 @@ Feature: OSPFv2 graceful restart keeps forwarding through a daemon restart
     # running out its grace period.
     And show command "show ospf graceful-restart" in namespace "a" should eventually contain "(no active helpers)"
     And daemon log in namespace "b" should eventually contain "exit-restart success"
+    # The restarted daemon found the next-hop objects its predecessor left
+    # in the kernel, which its routes still forward through, and kept
+    # their ids for them.
+    And daemon log in namespace "b" should eventually contain "of an earlier run found"
 
   Scenario: Teardown topology
     # Separate scenario so cleanup still runs when a step above fails

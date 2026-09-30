@@ -114,6 +114,24 @@ pub struct FibRoute {
     pub table_id: u32,
 }
 
+/// A next-hop object the kernel already held at startup
+/// (`RTM_GETNEXTHOP` dump), such as one an earlier run of zebra-rs left
+/// behind when it stopped without withdrawing its routes: a graceful
+/// restart, or a crash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FibNexthop {
+    /// `NHA_ID`.
+    pub id: u32,
+    /// Made by zebra-rs (`RTPROT_ZEBRA`), as ours are.
+    pub ours: bool,
+    /// `NHA_GATEWAY`.
+    pub gateway: Option<std::net::IpAddr>,
+    /// `NHA_OIF`.
+    pub ifindex: Option<u32>,
+    /// `NHA_GROUP`: the member objects, for a group.
+    pub group: Vec<u32>,
+}
+
 /// One row from the kernel's neighbor table — covers IPv4 ARP, IPv6
 /// NDP, and bridge FDB. The `family` field tells the consumer which
 /// of those it is:
@@ -190,6 +208,10 @@ pub enum FibMessage {
     /// delete); drives `NexthopMap` reconciliation so the group gets
     /// reinstalled.
     DelNexthop(u32),
+    /// A next-hop object the kernel already held at startup. Its id is
+    /// never reused for an object of ours: `NLM_F_REPLACE` would re-point
+    /// every route still forwarding through it.
+    KernelNexthop(FibNexthop),
     NewNeighbor(FibNeighbor),
     DelNeighbor(FibNeighbor),
     /// Bridge multicast database entry from kernel IGMP/MLD snooping
