@@ -673,9 +673,20 @@ fn ospf_lsa_lookup<'a>(
     ls_id: Ipv4Addr,
     adv_router: Ipv4Addr,
 ) -> Option<&'a OspfLsa> {
+    ospf_lsa_entry(oi, ls_type, ls_id, adv_router).map(|entry| &entry.data)
+}
+
+/// The database entry for an LSA, from the database its scope gives it
+/// ([`super::flood::scope_lsdb`]); it knows the LSA's current age.
+fn ospf_lsa_entry<'a>(
+    oi: &'a OspfInterface,
+    ls_type: OspfLsType,
+    ls_id: Ipv4Addr,
+    adv_router: Ipv4Addr,
+) -> Option<&'a super::lsdb::Lsa> {
     match lsa_flood_scope(ls_type) {
         FloodScope::Unknown => None,
-        _ => super::flood::scope_lsdb(oi, ls_type).lookup_by_id(ls_type, ls_id, adv_router),
+        _ => super::flood::scope_lsdb(oi, ls_type).lookup_lsa(ls_type, ls_id, adv_router),
     }
 }
 
@@ -695,11 +706,12 @@ fn ospf_db_desc_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, dd: &OspfDbDesc
         // a stale copy in place until the originator's next refresh,
         // up to LSRefreshTime later.
         //
-        // Both sides are compared on their stored `ls_age`: the age
-        // tiebreak only runs when sequence number and checksum are
-        // identical, and identical instances need no request either
-        // way. The case that matters is a MaxAge advertisement over a
-        // live copy, which this still catches.
+        // Our copy is compared at the age it was installed with, the
+        // neighbor's at the age it advertised: the age tiebreak only
+        // runs when sequence number and checksum are identical, and
+        // identical instances need no request either way. The case that
+        // matters is a MaxAge advertisement over a live copy, which this
+        // still catches.
         let need = match ospf_lsa_lookup(oi, lsah.ls_type, lsah.ls_id, lsah.adv_router) {
             None => true,
             Some(current) => {
@@ -1003,10 +1015,11 @@ pub fn ospf_ls_req_recv(
     let mut lsas = Vec::new();
     for req in ls_req.reqs.iter() {
         let ls_type = OspfLsType::from(req.ls_type as u8);
-        let find = ospf_lsa_lookup(oi, ls_type, req.ls_id, req.adv_router);
+        let find = ospf_lsa_entry(oi, ls_type, req.ls_id, req.adv_router);
         match find {
+            // At its current age, not the age it was installed with.
             Some(lsa) => {
-                lsas.push(lsa.clone());
+                lsas.push(lsa.sent_copy(oi.transmit_delay));
             }
             None => {
                 // LSA not found in LSDB -> BadLSReq.
@@ -1318,6 +1331,12 @@ fn ospf_ls_upd_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) -
         current.h.ls_seq_number,
         current.h.ls_checksum,
         current_age,
+    );
+    // Our copy, at its current age (RFC 2328 §14).
+    let current = super::lsdb::aged_for_send::<super::version::Ospfv2>(
+        &current,
+        current_age,
+        oi.transmit_delay,
     );
     ospf_ls_upd_send(oi, nbr, vec![current]);
     {

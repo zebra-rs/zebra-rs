@@ -155,6 +155,23 @@ impl<V: OspfVersion> Lsa<V> {
         age.min(OSPF_MAX_AGE)
     }
 
+    /// This database copy as it goes out now on an interface whose
+    /// transmit delay is `delay`: at its current age, not the age it was
+    /// installed with (RFC 2328 §14), raised by the delay
+    /// ([`aged_for_send`]).
+    pub fn sent_copy(&self, delay: u16) -> V::Lsa {
+        aged_for_send::<V>(&self.data, self.current_age(), delay)
+    }
+
+    /// Whether `other` is the same origination as this database copy: the
+    /// same sequence number and checksum. Their ages may differ — this copy
+    /// may even have reached MaxAge since `other` was taken from it.
+    pub fn same_origination(&self, other: &V::Lsa) -> bool {
+        let (mine, theirs) = (self.header(), V::lsa_header(other));
+        V::ls_seq_number(mine) == V::ls_seq_number(theirs)
+            && V::ls_checksum(mine) == V::ls_checksum(theirs)
+    }
+
     /// Seconds remaining on the actual hold `Timer` — read directly
     /// from the tokio timer so the show output reflects whatever the
     /// timer was actually set to, not a derived expectation. Returns
@@ -214,6 +231,16 @@ fn lsdb_timer<V: OspfVersion>(
             let _ = tx.send(msg);
         }
     })
+}
+
+/// A copy of `lsa`, now `age` seconds old, to send out an interface whose
+/// transmit delay is `delay`: its age raised by the delay, never past
+/// MaxAge (RFC 2328 §13.3, §14 — InfTransDelay). The age lies outside the
+/// checksum, so nothing else changes.
+pub fn aged_for_send<V: OspfVersion>(lsa: &V::Lsa, age: u16, delay: u16) -> V::Lsa {
+    let mut copy = lsa.clone();
+    V::set_lsa_age(&mut copy, age.saturating_add(delay).min(OSPF_MAX_AGE));
+    copy
 }
 
 fn hold_timer<V: OspfVersion>(

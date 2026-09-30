@@ -611,6 +611,9 @@ pub struct OspfInterface<'a, V: OspfVersion = Ospfv2> {
     pub exchange_loading_count: usize,
     pub mtu_ignore: bool,
     pub retransmit_interval: u16,
+    /// The link's `transmit-delay` (RFC 2328 §C.3 InfTransDelay): added to
+    /// the age of every LSA sent on it.
+    pub transmit_delay: u16,
     /// Snapshot of the parent link's resolved network type. The NFSM
     /// keys off this to decide 2-Way -> ExStart on P2P links without
     /// gating on DR/BDR.
@@ -760,6 +763,34 @@ impl<V: OspfVersion> Ospf<V> {
                 nbr.ls_rxmt.contains_key(&key)
                     || matches!(nbr.state, NfsmState::Exchange | NfsmState::Loading)
             })
+    }
+
+    /// An LSA on a retransmission list for `ifindex`, as it goes out again
+    /// now. The list stands for the database copy (RFC 2328 §13.6), so the
+    /// database's copy of the same origination goes at its current age —
+    /// MaxAge, if it has reached it — raised by the interface's transmit
+    /// delay; it used to go at the age it was queued with. One the database
+    /// no longer holds goes as it was queued.
+    fn retransmit_copy(&self, ifindex: u32, lsa: &V::Lsa) -> V::Lsa {
+        let Some(link) = self.links.get(&ifindex) else {
+            return lsa.clone();
+        };
+        let h = V::lsa_header(lsa);
+        let key = (V::ls_type(h), V::ls_id(h), V::adv_router(h));
+        let db = link
+            .lsdb
+            .tables
+            .get(&key)
+            .or_else(|| {
+                self.areas
+                    .get(link.area)
+                    .and_then(|area| area.lsdb.tables.get(&key))
+            })
+            .or_else(|| self.lsdb_as.tables.get(&key));
+        match db {
+            Some(db) if db.same_origination(lsa) => db.sent_copy(link.transmit_delay()),
+            _ => lsa.clone(),
+        }
     }
 
     /// Reconcile one neighbor's BFD subscription against the interface
@@ -1344,6 +1375,7 @@ impl<V: OspfVersion> Ospf<V> {
         self.links.get_mut(&ifindex).and_then(|link| {
             let link_area = link.area;
             let retransmit_interval = link.retransmit_interval();
+            let transmit_delay = link.transmit_delay();
             let auth_mode = link.auth_mode();
             let auth_key = link.config.auth_key;
             let crypto_key = link.resolve_active_send_key(&self.key_chains, chrono::Utc::now());
@@ -1367,6 +1399,7 @@ impl<V: OspfVersion> Ospf<V> {
                             exchange_loading_count,
                             mtu_ignore: link.config.mtu_ignore,
                             retransmit_interval,
+                            transmit_delay,
                             network_type: link.network_type,
                             auth_mode,
                             auth_key,
@@ -6238,6 +6271,9 @@ impl Ospf<Ospfv2> {
         };
         let area_id = link.area;
         let retransmit_interval = link.retransmit_interval();
+        // RFC 2328 §13.3: the copy sent here is aged by the link's
+        // transmit delay (InfTransDelay); it used to go unaged.
+        let sent = super::lsdb::aged_for_send::<Ospfv2>(lsa, lsa.h.ls_age, link.transmit_delay());
         let link_state = link.state;
         let auth_mode = link.auth_mode();
         let auth_key = link.config.auth_key;
@@ -6290,10 +6326,10 @@ impl Ospf<Ospfv2> {
             }
 
             // RFC 2328 Section 13.3 Step 1(d): Add LSA to retransmit list.
-            super::flood::ospf_ls_retransmit_add(nbr, lsa, retransmit_interval);
+            super::flood::ospf_ls_retransmit_add(nbr, &sent, retransmit_interval);
 
             let ls_upd = OspfLsUpdate {
-                lsas: vec![lsa.clone()],
+                lsas: vec![sent.clone()],
             };
             let mut packet =
                 Ospfv2Packet::new(&self.router_id, &area_id, Ospfv2Payload::LsUpdate(ls_upd));
@@ -6343,6 +6379,14 @@ impl Ospf<Ospfv2> {
 
     /// Handle retransmit timer firing for a neighbor.
     fn process_retransmit(&mut self, ifindex: u32, addr: Ipv4Addr) {
+        let lsas: Vec<OspfLsa> = match self.links.get(&ifindex).and_then(|l| l.nbrs.get(&addr)) {
+            Some(nbr) => nbr
+                .ls_rxmt
+                .values()
+                .map(|lsa| self.retransmit_copy(ifindex, lsa))
+                .collect(),
+            None => return,
+        };
         let now = chrono::Utc::now();
         let chains = &self.key_chains;
         let Some(link) = self.links.get_mut(&ifindex) else {
@@ -6361,7 +6405,6 @@ impl Ospf<Ospfv2> {
             nbr.timer.ls_rxmt = None;
             return;
         }
-        let lsas: Vec<OspfLsa> = nbr.ls_rxmt.values().cloned().collect();
         ospf_packet_trace!(
             self.tracing,
             LsUpdate,
@@ -6370,6 +6413,7 @@ impl Ospf<Ospfv2> {
             lsas.len(),
             addr
         );
+        super::flood::ospf_ls_retransmit_resent(nbr, &lsas);
         let ls_upd = OspfLsUpdate { lsas };
         let mut packet =
             Ospfv2Packet::new(&self.router_id, &area_id, Ospfv2Payload::LsUpdate(ls_upd));
@@ -10797,6 +10841,9 @@ impl Ospf<Ospfv3> {
             return;
         };
         let retransmit_interval = link.retransmit_interval();
+        // RFC 2328 §13.3, as OSPFv2's: the copy sent here is aged by the
+        // link's transmit delay (InfTransDelay); it used to go unaged.
+        let sent = super::lsdb::aged_for_send::<Ospfv3>(lsa, lsa.h.ls_age, link.transmit_delay());
         // Auth send state captured before the neighbor loop (it
         // borrows `link` immutably; the per-packet seq comes from
         // the `md5_seq` atomic field directly). RFC 7166: a flood
@@ -10835,10 +10882,10 @@ impl Ospf<Ospfv3> {
             // neighbor's retransmit list so the per-neighbor
             // retransmit timer can resend it until we get an
             // ack.
-            super::flood::ospf_ls_retransmit_add(nbr, lsa, retransmit_interval);
+            super::flood::ospf_ls_retransmit_add(nbr, &sent, retransmit_interval);
 
             let ls_upd = Ospfv3LsUpdate {
-                lsas: vec![lsa.clone()],
+                lsas: vec![sent.clone()],
             };
             let mut packet = Ospfv3Packet::new(
                 &self.router_id,
@@ -10896,6 +10943,19 @@ impl Ospf<Ospfv3> {
     fn process_retransmit(&mut self, ifindex: u32, router_id: Ipv4Addr) {
         use ospf_packet::{Ospfv3LsUpdate, Ospfv3Packet, Ospfv3Payload};
 
+        let lsas: Vec<ospf_packet::Ospfv3Lsa> = match self
+            .links
+            .get(&ifindex)
+            .and_then(|l| l.nbrs.get(&router_id))
+        {
+            Some(nbr) => nbr
+                .ls_rxmt
+                .values()
+                .map(|lsa| self.retransmit_copy(ifindex, lsa))
+                .collect(),
+            None => return,
+        };
+
         let Some(tx) = self.v3_send_tx.as_ref().cloned() else {
             return;
         };
@@ -10924,7 +10984,6 @@ impl Ospf<Ospfv3> {
             return;
         }
 
-        let lsas: Vec<ospf_packet::Ospfv3Lsa> = nbr.ls_rxmt.values().cloned().collect();
         ospf_packet_trace!(
             self.tracing,
             LsUpdate,
@@ -10933,6 +10992,7 @@ impl Ospf<Ospfv3> {
             lsas.len(),
             router_id
         );
+        super::flood::ospf_ls_retransmit_resent(nbr, &lsas);
         let dest = nbr.ident.prefix.addr();
         let ls_upd = Ospfv3LsUpdate { lsas };
         let mut packet = Ospfv3Packet::new(
@@ -21112,21 +21172,21 @@ mod link_scope_tests {
         Ospfv3LsBody, Ospfv3Lsa, Ospfv3LsaHeader,
     };
 
-    const ME: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
+    pub(super) const ME: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
     /// The neighbour an LSA comes from, on eth2.
-    const S: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 2);
+    pub(super) const S: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 2);
     /// Another neighbour on eth2.
-    const O: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 3);
+    pub(super) const O: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 3);
     /// A neighbour on eth3.
-    const P: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 4);
-    const REASON: GraceRestartReason = GraceRestartReason::SoftwareRestart;
+    pub(super) const P: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 4);
+    pub(super) const REASON: GraceRestartReason = GraceRestartReason::SoftwareRestart;
 
-    fn grace_id() -> Ipv4Addr {
+    pub(super) fn grace_id() -> Ipv4Addr {
         Ipv4Addr::from((OpaqueLsaType::GRACE as u32) << 24)
     }
 
     /// A packet channel whose receiver lives on, so sends succeed.
-    fn live<T>() -> UnboundedSender<T> {
+    pub(super) fn live<T>() -> UnboundedSender<T> {
         let (tx, rx) = mpsc::unbounded_channel();
         Box::leak(Box::new(rx));
         tx
@@ -21160,7 +21220,7 @@ mod link_scope_tests {
     /// Two interfaces in the backbone: eth2 (192.0.2.1) with neighbours S
     /// (192.0.2.2) and O (192.0.2.3), eth3 (198.51.100.1) with P
     /// (198.51.100.4). All Full; v2 keys neighbours by address.
-    fn v2_top() -> Ospf {
+    pub(super) fn v2_top() -> Ospf {
         let mut top = fresh_ospf();
         top.router_id = ME;
         for (ifindex, addr, nbrs) in [
@@ -21186,7 +21246,7 @@ mod link_scope_tests {
 
     /// The OSPFv3 twin of `v2_top`: neighbours keyed by Router ID, with
     /// link-local addresses, and a channel to send on.
-    fn v3_top() -> Ospf<Ospfv3> {
+    pub(super) fn v3_top() -> Ospf<Ospfv3> {
         let mut top = fresh_ospf_v3();
         top.router_id = ME;
         top.v3_send_tx = Some(live());
@@ -21205,7 +21265,7 @@ mod link_scope_tests {
         top
     }
 
-    fn v2_addr(rid: Ipv4Addr) -> Ipv4Addr {
+    pub(super) fn v2_addr(rid: Ipv4Addr) -> Ipv4Addr {
         match rid {
             S => "192.0.2.2".parse().unwrap(),
             O => "192.0.2.3".parse().unwrap(),
@@ -21213,16 +21273,20 @@ mod link_scope_tests {
         }
     }
 
-    fn v3_ll(rid: Ipv4Addr) -> Ipv6Addr {
+    pub(super) fn v3_ll(rid: Ipv4Addr) -> Ipv6Addr {
         format!("fe80::{}", rid.octets()[3]).parse().unwrap()
     }
 
     /// Neighbour `rid`'s retransmission list on `ifindex`.
-    fn v2_rxmt(top: &Ospf, ifindex: u32, rid: Ipv4Addr) -> &BTreeMap<OspfLsaKey, OspfLsa> {
+    pub(super) fn v2_rxmt(
+        top: &Ospf,
+        ifindex: u32,
+        rid: Ipv4Addr,
+    ) -> &BTreeMap<OspfLsaKey, OspfLsa> {
         &top.links[&ifindex].nbrs[&v2_addr(rid)].ls_rxmt
     }
 
-    fn v3_rxmt(
+    pub(super) fn v3_rxmt(
         top: &Ospf<Ospfv3>,
         ifindex: u32,
         rid: Ipv4Addr,
@@ -21249,7 +21313,13 @@ mod link_scope_tests {
         lsa
     }
 
-    fn v3_lsa(ls_type: u16, link_state_id: u32, adv: Ipv4Addr, age: u16, seq: u32) -> Ospfv3Lsa {
+    pub(super) fn v3_lsa(
+        ls_type: u16,
+        link_state_id: u32,
+        adv: Ipv4Addr,
+        age: u16,
+        seq: u32,
+    ) -> Ospfv3Lsa {
         let mut lsa = Ospfv3Lsa::from(
             Ospfv3LsaHeader {
                 ls_age: age,
@@ -21268,7 +21338,7 @@ mod link_scope_tests {
 
     /// Deliver `lsa` in an LS Update from neighbour `from` on `ifindex`,
     /// then run the floods it queued.
-    async fn v2_receive(top: &mut Ospf, ifindex: u32, from: Ipv4Addr, lsa: OspfLsa) {
+    pub(super) async fn v2_receive(top: &mut Ospf, ifindex: u32, from: Ipv4Addr, lsa: OspfLsa) {
         let src = v2_addr(from);
         let packet = Ospfv2Packet::new(
             &from,
@@ -21287,7 +21357,12 @@ mod link_scope_tests {
         }
     }
 
-    async fn v3_receive(top: &mut Ospf<Ospfv3>, ifindex: u32, from: Ipv4Addr, lsa: Ospfv3Lsa) {
+    pub(super) async fn v3_receive(
+        top: &mut Ospf<Ospfv3>,
+        ifindex: u32,
+        from: Ipv4Addr,
+        lsa: Ospfv3Lsa,
+    ) {
         let src = v3_ll(from);
         let packet = ospf_packet::Ospfv3Packet::new(
             &from,
@@ -21961,6 +22036,377 @@ mod link_scope_tests {
             }
             assert!(after.restored_link_lsas.is_empty(), "v3: the restart ended");
         }
+    }
+}
+
+#[cfg(test)]
+mod send_age_tests {
+    //! Every LSA goes out at its current age, raised by the transmit delay
+    //! of the interface it leaves by (RFC 2328 §13.3, §14): flooded,
+    //! retransmitted, asked for, or sent back as the newer copy. Database
+    //! Description headers carry the current age too, and a MaxAge LSA goes
+    //! on a new neighbour's retransmission list rather than its summary
+    //! (§10.3). Both versions sent the age an LSA was installed with.
+
+    use super::super::lsdb::{OSPF_MAX_AGE, OspfLsaKey, v2_lsa_key};
+    use super::link_scope_tests::{
+        O, P, S, v2_addr, v2_receive, v2_top, v3_ll, v3_lsa, v3_receive, v3_top,
+    };
+    use super::*;
+    use ospf_packet::OSPFV3_ROUTER_LSA_TYPE;
+
+    /// eth2's transmit delay; eth3 keeps the default, 1 second.
+    const DELAY: u16 = 3;
+    /// Where the LSAs come from: a router beyond the neighbours.
+    const FAR: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 9);
+
+    fn v2_router(age: u16, seq: u32) -> OspfLsa {
+        let mut h = OspfLsaHeader::new(OspfLsType::Router, FAR, FAR);
+        h.ls_age = age;
+        h.ls_seq_number = seq;
+        let mut lsa = OspfLsa::from(
+            h,
+            OspfLsp::Router(RouterLsa {
+                flags: 0,
+                links: vec![],
+            }),
+        );
+        lsa.update();
+        lsa
+    }
+
+    fn v2_key() -> OspfLsaKey {
+        v2_lsa_key(OspfLsType::Router, FAR, FAR)
+    }
+
+    fn v3_key() -> OspfLsaKey {
+        (OSPFV3_ROUTER_LSA_TYPE, 0, FAR)
+    }
+
+    /// Keep neighbour `rid`'s packets on `ifindex` here.
+    fn v2_capture(top: &mut Ospf, ifindex: u32, rid: Ipv4Addr) -> UnboundedReceiver<Message> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        top.links
+            .get_mut(&ifindex)
+            .unwrap()
+            .nbrs
+            .get_mut(&v2_addr(rid))
+            .unwrap()
+            .ptx = tx;
+        rx
+    }
+
+    /// The ages of the LSAs sent in LS Updates on `rx`.
+    fn v2_sent(rx: &mut UnboundedReceiver<Message>) -> Vec<u16> {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|msg| match msg {
+                Message::Send(packet, ..) => match packet.payload {
+                    Ospfv2Payload::LsUpdate(update) => Some(update.lsas),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .flatten()
+            .map(|lsa| lsa.h.ls_age)
+            .collect()
+    }
+
+    /// Keep every OSPFv3 packet here.
+    fn v3_capture(
+        top: &mut Ospf<Ospfv3>,
+    ) -> UnboundedReceiver<super::super::network_v6::Ospfv3Send> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        top.v3_send_tx = Some(tx);
+        rx
+    }
+
+    /// Everything sent so far.
+    fn v3_drain(
+        rx: &mut UnboundedReceiver<super::super::network_v6::Ospfv3Send>,
+    ) -> Vec<super::super::network_v6::Ospfv3Send> {
+        std::iter::from_fn(|| rx.try_recv().ok()).collect()
+    }
+
+    /// The ages of the LSAs in `sent` LS Updates to neighbour `rid`.
+    fn v3_sent(sent: &[super::super::network_v6::Ospfv3Send], rid: Ipv4Addr) -> Vec<u16> {
+        let dest = v3_ll(rid);
+        sent.iter()
+            .filter(|item| item.dest == Some(dest))
+            .filter_map(|item| match &item.packet.payload {
+                ospf_packet::Ospfv3Payload::LsUpdate(update) => Some(update.lsas.iter()),
+                _ => None,
+            })
+            .flatten()
+            .map(|lsa| lsa.h.ls_age)
+            .collect()
+    }
+
+    /// An LSA installed at age 10 and held 100 seconds goes out on eth2 at
+    /// 113: asked for by O, retransmitted to O from a copy queued at age
+    /// 10, and sent back to S, which offered an older instance. O's
+    /// Database Description summary lists it at 110.
+    #[tokio::test(start_paused = true)]
+    async fn an_lsa_goes_out_at_its_current_age() {
+        let expected = 10 + 100 + DELAY;
+
+        // OSPFv2.
+        let mut top = v2_top();
+        top.links.get_mut(&2).unwrap().config.transmit_delay = Some(DELAY);
+        let (tx, tracing) = (top.tx.clone(), top.tracing.clone());
+        top.areas.fetch(AREA0).lsdb.install_lsa(
+            v2_router(10, 0x8000_0005),
+            &tx,
+            Some(AREA0),
+            &tracing,
+        );
+        tokio::time::advance(std::time::Duration::from_secs(100)).await;
+        let (mut to_o, mut to_s) = (v2_capture(&mut top, 2, O), v2_capture(&mut top, 2, S));
+
+        let request = Ospfv2Packet::new(
+            &O,
+            &AREA0,
+            Ospfv2Payload::LsRequest(OspfLsRequest {
+                reqs: vec![OspfLsRequestEntry {
+                    ls_type: 1,
+                    ls_id: FAR,
+                    adv_router: FAR,
+                }],
+            }),
+        );
+        {
+            let src = v2_addr(O);
+            let (mut oi, nbr) = top.ospf_interface(2, &src).unwrap();
+            super::super::packet::ospf_ls_req_recv(&mut oi, nbr, &request, &src);
+        }
+        assert_eq!(v2_sent(&mut to_o), vec![expected], "v2: asked for");
+
+        let nbr = top
+            .links
+            .get_mut(&2)
+            .unwrap()
+            .nbrs
+            .get_mut(&v2_addr(O))
+            .unwrap();
+        nbr.ls_rxmt.insert(v2_key(), v2_router(10, 0x8000_0005));
+        top.process_msg(Message::Retransmit(2, v2_addr(O))).await;
+        assert_eq!(v2_sent(&mut to_o), vec![expected], "v2: retransmitted");
+
+        v2_receive(&mut top, 2, S, v2_router(1, 0x8000_0003)).await;
+        assert_eq!(v2_sent(&mut to_s), vec![expected], "v2: the newer copy");
+
+        let src = v2_addr(O);
+        let (mut oi, nbr) = top.ospf_interface(2, &src).unwrap();
+        nbr.db_sum.clear();
+        super::super::nfsm::ospfv2_populate_initial_db_summary(&mut oi, nbr);
+        let summarised = nbr.db_sum.iter().find(|h| h.ls_type == OspfLsType::Router);
+        assert_eq!(summarised.map(|h| h.ls_age), Some(110), "v2: summarised");
+
+        // OSPFv3.
+        let mut top = v3_top();
+        top.links.get_mut(&2).unwrap().config.transmit_delay = Some(DELAY);
+        let (tx, tracing) = (top.tx.clone(), top.tracing.clone());
+        top.areas.fetch(AREA0).lsdb.install_lsa(
+            v3_lsa(OSPFV3_ROUTER_LSA_TYPE, 0, FAR, 10, 0x8000_0005),
+            &tx,
+            Some(AREA0),
+            &tracing,
+        );
+        tokio::time::advance(std::time::Duration::from_secs(100)).await;
+        let mut sent = v3_capture(&mut top);
+
+        let request = ospf_packet::Ospfv3Packet::new(
+            &O,
+            &AREA0,
+            0,
+            ospf_packet::Ospfv3Payload::LsRequest(ospf_packet::Ospfv3LsRequest {
+                reqs: vec![ospf_packet::Ospfv3LsRequestEntry {
+                    reserved: 0,
+                    ls_type: OSPFV3_ROUTER_LSA_TYPE,
+                    link_state_id: 0,
+                    advertising_router: FAR,
+                }],
+            }),
+        );
+        {
+            let (mut oi, nbr) = top.ospf_interface(2, &O).unwrap();
+            super::super::packet_v3::ospfv3_ls_req_recv(&mut oi, nbr, &request, &v3_ll(O));
+        }
+        assert_eq!(
+            v3_sent(&v3_drain(&mut sent), O),
+            vec![expected],
+            "v3: asked for"
+        );
+
+        let nbr = top.links.get_mut(&2).unwrap().nbrs.get_mut(&O).unwrap();
+        nbr.ls_rxmt.insert(
+            v3_key(),
+            v3_lsa(OSPFV3_ROUTER_LSA_TYPE, 0, FAR, 10, 0x8000_0005),
+        );
+        top.process_msg(Message::Retransmit(2, O)).await;
+        assert_eq!(
+            v3_sent(&v3_drain(&mut sent), O),
+            vec![expected],
+            "v3: retransmitted"
+        );
+
+        v3_receive(
+            &mut top,
+            2,
+            S,
+            v3_lsa(OSPFV3_ROUTER_LSA_TYPE, 0, FAR, 1, 0x8000_0003),
+        )
+        .await;
+        assert_eq!(
+            v3_sent(&v3_drain(&mut sent), S),
+            vec![expected],
+            "v3: the newer copy"
+        );
+
+        let (mut oi, nbr) = top.ospf_interface(2, &O).unwrap();
+        nbr.db_sum.clear();
+        super::super::nfsm::ospfv3_populate_initial_db_summary(&mut oi, nbr);
+        let summarised = nbr
+            .db_sum
+            .iter()
+            .find(|h| h.ls_type == OSPFV3_ROUTER_LSA_TYPE);
+        assert_eq!(summarised.map(|h| h.ls_age), Some(110), "v3: summarised");
+    }
+
+    /// A flooded LSA is aged by the transmit delay of each interface it
+    /// leaves by: received from S at age 20, it reaches O on eth2 (delay 3)
+    /// at 23 and P on eth3 (delay 1) at 21. The retransmission list keeps
+    /// what was sent.
+    #[tokio::test(start_paused = true)]
+    async fn a_flooded_lsa_is_aged_by_each_links_delay() {
+        // OSPFv2.
+        let mut top = v2_top();
+        top.links.get_mut(&2).unwrap().config.transmit_delay = Some(DELAY);
+        let (mut to_o, mut to_p) = (v2_capture(&mut top, 2, O), v2_capture(&mut top, 3, P));
+        v2_receive(&mut top, 2, S, v2_router(20, 0x8000_0001)).await;
+        assert_eq!(v2_sent(&mut to_o), vec![20 + DELAY], "v2: eth2");
+        assert_eq!(v2_sent(&mut to_p), vec![21], "v2: eth3");
+        let queued = &top.links[&2].nbrs[&v2_addr(O)].ls_rxmt[&v2_key()];
+        assert_eq!(queued.h.ls_age, 20 + DELAY, "v2: as sent");
+
+        // OSPFv3.
+        let mut top = v3_top();
+        top.links.get_mut(&2).unwrap().config.transmit_delay = Some(DELAY);
+        let mut sent = v3_capture(&mut top);
+        v3_receive(
+            &mut top,
+            2,
+            S,
+            v3_lsa(OSPFV3_ROUTER_LSA_TYPE, 0, FAR, 20, 0x8000_0001),
+        )
+        .await;
+        let sent = v3_drain(&mut sent);
+        assert_eq!(v3_sent(&sent, O), vec![20 + DELAY], "v3: eth2");
+        assert_eq!(v3_sent(&sent, P), vec![21], "v3: eth3");
+        let queued = &top.links[&2].nbrs[&O].ls_rxmt[&v3_key()];
+        assert_eq!(queued.h.ls_age, 20 + DELAY, "v3: as sent");
+    }
+
+    /// A retransmission goes out at the current age, and the list keeps it
+    /// so, so that its acknowledgment still matches (RFC 2328 §13.7 via
+    /// §13.1). Left at the age first queued, the list differed from the
+    /// acknowledged age by more than MaxAgeDiff after 15 minutes of
+    /// retries: the acknowledgment was taken for another instance, and the
+    /// LSA was retransmitted for good. From a review probe. Both versions.
+    #[tokio::test(start_paused = true)]
+    async fn an_aged_retransmission_is_acknowledged() {
+        // OSPFv2.
+        let mut top = v2_top();
+        let lsa = v2_router(10, 0x8000_0005);
+        let (tx, tracing) = (top.tx.clone(), top.tracing.clone());
+        top.areas
+            .fetch(AREA0)
+            .lsdb
+            .install_lsa(lsa.clone(), &tx, Some(AREA0), &tracing);
+        top.flood_lsa_through_link(2, &lsa, None);
+        tokio::time::advance(std::time::Duration::from_secs(901)).await;
+        let mut to_o = v2_capture(&mut top, 2, O);
+        top.process_retransmit(2, v2_addr(O));
+        let mut ack = lsa.h.clone();
+        ack.ls_age = v2_sent(&mut to_o)[0];
+        let nbr = top
+            .links
+            .get_mut(&2)
+            .unwrap()
+            .nbrs
+            .get_mut(&v2_addr(O))
+            .unwrap();
+        super::super::flood::ospf_ls_retransmit_ack(nbr, &ack);
+        assert!(nbr.ls_rxmt.is_empty(), "v2: acknowledged");
+
+        // OSPFv3.
+        let mut top = v3_top();
+        let lsa = v3_lsa(OSPFV3_ROUTER_LSA_TYPE, 0, FAR, 10, 0x8000_0005);
+        let (tx, tracing) = (top.tx.clone(), top.tracing.clone());
+        top.areas
+            .fetch(AREA0)
+            .lsdb
+            .install_lsa(lsa.clone(), &tx, Some(AREA0), &tracing);
+        top.flood_lsa_through_link(2, &lsa, None);
+        tokio::time::advance(std::time::Duration::from_secs(901)).await;
+        let mut sent = v3_capture(&mut top);
+        top.process_retransmit(2, O);
+        let mut ack = lsa.h.clone();
+        ack.ls_age = v3_sent(&v3_drain(&mut sent), O)[0];
+        let nbr = top.links.get_mut(&2).unwrap().nbrs.get_mut(&O).unwrap();
+        super::super::flood::ospf_ls_retransmit_ack(nbr, &ack);
+        assert!(nbr.ls_rxmt.is_empty(), "v3: acknowledged");
+    }
+
+    /// A MaxAge LSA goes on a new neighbour's retransmission list, not its
+    /// Database Description summary (RFC 2328 §10.3), so the withdrawal
+    /// reaches it. It used to be left out, and a neighbour holding a live
+    /// copy kept it.
+    #[tokio::test]
+    async fn a_max_age_lsa_is_queued_not_summarised() {
+        // OSPFv2.
+        let mut top = v2_top();
+        let (tx, tracing) = (top.tx.clone(), top.tracing.clone());
+        top.areas.fetch(AREA0).lsdb.install_lsa(
+            v2_router(OSPF_MAX_AGE, 0x8000_0005),
+            &tx,
+            Some(AREA0),
+            &tracing,
+        );
+        let src = v2_addr(O);
+        let (mut oi, nbr) = top.ospf_interface(2, &src).unwrap();
+        super::super::nfsm::ospfv2_populate_initial_db_summary(&mut oi, nbr);
+        assert!(
+            nbr.db_sum.iter().all(|h| h.ls_type != OspfLsType::Router),
+            "v2"
+        );
+        assert_eq!(
+            nbr.ls_rxmt.get(&v2_key()).map(|lsa| lsa.h.ls_age),
+            Some(OSPF_MAX_AGE),
+            "v2: queued"
+        );
+
+        // OSPFv3.
+        let mut top = v3_top();
+        let (tx, tracing) = (top.tx.clone(), top.tracing.clone());
+        top.areas.fetch(AREA0).lsdb.install_lsa(
+            v3_lsa(OSPFV3_ROUTER_LSA_TYPE, 0, FAR, OSPF_MAX_AGE, 0x8000_0005),
+            &tx,
+            Some(AREA0),
+            &tracing,
+        );
+        let (mut oi, nbr) = top.ospf_interface(2, &O).unwrap();
+        super::super::nfsm::ospfv3_populate_initial_db_summary(&mut oi, nbr);
+        assert!(
+            nbr.db_sum
+                .iter()
+                .all(|h| h.ls_type != OSPFV3_ROUTER_LSA_TYPE),
+            "v3"
+        );
+        assert_eq!(
+            nbr.ls_rxmt.get(&v3_key()).map(|lsa| lsa.h.ls_age),
+            Some(OSPF_MAX_AGE),
+            "v3: queued"
+        );
     }
 }
 

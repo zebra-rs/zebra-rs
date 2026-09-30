@@ -327,6 +327,20 @@ pub fn ospf_ls_retransmit_delete<V: OspfVersion>(nbr: &mut Neighbor<V>, lsa: &V:
 /// replaces, and a neighbour acknowledging the live copy it has just
 /// installed must not cancel the withdrawal queued behind it. It may have
 /// discarded that one under MinLSArrival, and nothing would resend it.
+/// Keep on `nbr`'s retransmission list the copies just resent to it,
+/// replacing what was queued. Each goes out at its current age, and its
+/// acknowledgment is matched against the list by RFC 2328 §13.1 (§13.7):
+/// the age queued long ago would, after MaxAgeDiff seconds of retries,
+/// make a valid acknowledgment look like another instance, and the LSA
+/// would be retransmitted for good.
+pub fn ospf_ls_retransmit_resent<V: OspfVersion>(nbr: &mut Neighbor<V>, sent: &[V::Lsa]) {
+    for lsa in sent {
+        let h = V::lsa_header(lsa);
+        let key: OspfLsaKey = (V::ls_type(h), V::ls_id(h), V::adv_router(h));
+        nbr.ls_rxmt.insert(key, lsa.clone());
+    }
+}
+
 pub fn ospf_ls_retransmit_ack<V: OspfVersion>(nbr: &mut Neighbor<V>, ack: &V::LsaHeader) {
     let key: OspfLsaKey = (V::ls_type(ack), V::ls_id(ack), V::adv_router(ack));
     if let Some(rxmt) = nbr.ls_rxmt.get(&key) {

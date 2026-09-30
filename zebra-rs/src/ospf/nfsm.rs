@@ -351,16 +351,25 @@ pub fn ospf_db_summary_add<V: OspfVersion>(nbr: &mut Neighbor<V>, lsa: &V::Lsa) 
     nbr.db_sum.push(V::lsa_header(lsa).clone());
 }
 
+/// Build a neighbour's initial Database Description summary from `lsas`
+/// (RFC 2328 §10.3). Each header goes at the LSA's current age, not the
+/// age it was installed with. A MaxAge LSA goes on the neighbour's
+/// retransmission list instead of the summary, so the withdrawal reaches
+/// it; it used to be left out altogether, and a neighbour that still held
+/// a live copy kept it.
 pub(super) fn ospf_db_summary_add_table<'a, V: OspfVersion>(
     nbr: &mut Neighbor<V>,
     lsas: impl Iterator<Item = &'a super::lsdb::Lsa<V>>,
+    retransmit_interval: u16,
 ) {
     use super::lsdb::OSPF_MAX_AGE;
     for lsa in lsas {
-        if V::ls_age(V::lsa_header(&lsa.data)) >= OSPF_MAX_AGE {
+        let current = lsa.sent_copy(0);
+        if lsa.current_age() >= OSPF_MAX_AGE {
+            super::flood::ospf_ls_retransmit_add(nbr, &current, retransmit_interval);
             continue;
         }
-        ospf_db_summary_add(nbr, &lsa.data);
+        ospf_db_summary_add(nbr, &current);
     }
 }
 
@@ -381,6 +390,7 @@ pub fn ospfv2_populate_initial_db_summary(
     ospf_db_summary_add_table(
         nbr,
         ospfv2_db_summary_lsas(oi.lsdb, oi.lsdb_as, oi.link_lsdb, oi.area_type, opaque),
+        oi.retransmit_interval,
     );
 }
 
@@ -398,7 +408,7 @@ pub fn ospfv2_populate_initial_db_summary(
 /// used to be left out altogether. Type-7 NSSA-LSAs belong in an NSSA
 /// only (RFC 3101 §2.5); Opaque LSAs only to an Opaque-capable neighbour
 /// (`opaque`, RFC 5250 §2.1); MaxAge LSAs are left to
-/// `ospf_db_summary_add_table`.
+/// `ospf_db_summary_add_table`, which queues them for retransmission.
 fn ospfv2_db_summary_lsas<'a>(
     lsdb: &'a super::lsdb::Lsdb<Ospfv2>,
     lsdb_as: &'a super::lsdb::Lsdb<Ospfv2>,
@@ -442,6 +452,7 @@ pub fn ospfv3_populate_initial_db_summary(
     ospf_db_summary_add_table(
         nbr,
         ospfv3_db_summary_lsas(oi.lsdb, oi.lsdb_as, oi.link_lsdb, oi.area_type),
+        oi.retransmit_interval,
     );
 }
 
@@ -463,7 +474,7 @@ pub fn ospfv3_populate_initial_db_summary(
 /// were filed in the area database, made a neighbour reject the summary,
 /// and the adjacency never left ExStart. Type-7 NSSA-LSAs belong in an
 /// NSSA only (RFC 3101 §2.5); MaxAge LSAs are left to
-/// `ospf_db_summary_add_table`.
+/// `ospf_db_summary_add_table`, which queues them for retransmission.
 fn ospfv3_db_summary_lsas<'a>(
     lsdb: &'a super::lsdb::Lsdb<Ospfv3>,
     lsdb_as: &'a super::lsdb::Lsdb<Ospfv3>,
