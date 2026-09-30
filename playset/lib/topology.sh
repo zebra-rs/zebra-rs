@@ -45,6 +45,13 @@ playset_up() {
     playset_cleanup_logs
     playset_create_namespaces
     playset_create_links
+    # Optional per-lab step between the links and the daemons, for link
+    # properties a daemon must already see when it starts (isis-te-metric
+    # puts its netem delays here). A lab defines playset_after_links in
+    # its up.sh before calling playset_up.
+    if declare -F playset_after_links >/dev/null; then
+        playset_after_links
+    fi
     playset_start_daemons
     # Nothing left in the bring-up waits on this, but the labs that add
     # steps after `playset_up` (kernel forwarding off, ethtool, ND warm-up

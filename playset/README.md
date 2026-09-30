@@ -231,6 +231,22 @@ bring up only one at a time.
 | [interas-option-c](interas-option-c/README.md) | Option C — the ASBRs exchange only labeled PE loopbacks (BGP-LU) and hold zero VPN state; the PEs peer VPNv4 directly over a multihop eBGP session, and a three-label stack (SR transport, BGP-LU, VPN) rides from PE to PE — two labels crossing the boundary, completing the 0/1/2-label arc across A/B/C |
 | [interas-option-c-rr](interas-option-c-rr/README.md) | Option C, RR-based — Cisco's reference design: each AS adds a route reflector, the RRs exchange VPNv4 over a multihop eBGP session with `next-hop-unchanged`, and the PEs peer only with their local RR. Same data plane as the direct-PE lab; the RRs hold every VPN route and forward none of the traffic |
 
+## IS-IS Flexible Algorithm on a global backbone
+
+Three labs on one eleven-node IS-IS SR-MPLS backbone spanning the US, Europe
+and Asia-Pacific. Each runs algorithm 0 and a Flexible Algorithm 128
+(RFC 9350) side by side over the same links; they differ in what algorithm
+128 is constrained by.
+
+| playset | algorithm 128 |
+|:--|:--|
+| [isis-flexalgo](isis-flexalgo/README.md) | Affinity: the trans-Pacific links are coloured and excluded, so US–Asia traffic goes the long way round through Europe. Per-algorithm RIB, SPF, graph and ILM, a TTL-traced ping over the constrained path, and per-algorithm TI-LFA |
+| [isis-te-metric](isis-te-metric/README.md) | Latency: every link gets a realistic propagation delay (netem), STAMP (RFC 8762) measures it, IS-IS advertises it (RFC 8570), and algorithm 128 routes on the minimum delay. A ping 24 ms faster per round trip, re-routing when a link slows down, the Anomalous bit, static overrides, and measured loss as a FAD constraint |
+| [isis-flexalgo-ai](isis-flexalgo-ai/README.md) | None yet: the backbone without any Flex-Algorithm configuration, as the starting point for an AI assistant to design and deploy one over MCP |
+
+> **One at a time**: these three labs use the same namespace names (`se`,
+> `sj`, `ch`, … `tk`), so bring up only one of them at once.
+
 ## Directory layout
 
 ```
