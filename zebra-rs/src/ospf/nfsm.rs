@@ -380,7 +380,7 @@ pub fn ospfv2_populate_initial_db_summary(
     let opaque = nbr.dd.recv.options.o();
     ospf_db_summary_add_table(
         nbr,
-        ospfv2_db_summary_lsas(oi.lsdb, oi.lsdb_as, oi.area_type, opaque),
+        ospfv2_db_summary_lsas(oi.lsdb, oi.lsdb_as, oi.link_lsdb, oi.area_type, opaque),
     );
 }
 
@@ -390,15 +390,19 @@ pub fn ospfv2_populate_initial_db_summary(
 /// `lsa_flood_scope` gives each LS type's scope — the v3 twin is
 /// [`ospfv3_db_summary_lsas`]. It listed a fixed set of types, which left
 /// out the AS-scope Opaque LSA (type 11): a neighbour whose adjacency
-/// formed after one arrived never learned it. Link-scope LSAs live in
-/// each interface's own database (RFC 5250 §3.1), and selecting by scope
-/// keeps out any found here. Type-7 NSSA-LSAs belong in an NSSA
+/// formed after one arrived never learned it. Type-9 Opaque LSAs are
+/// listed from the database of the neighbour's interface (`link_lsdb`)
+/// alone, and only there (RFC 5250 §3.2: omitted where "the interface
+/// associated with the neighbor is not the interface associated with the
+/// Opaque LSA"); selecting by scope keeps out any found elsewhere. They
+/// used to be left out altogether. Type-7 NSSA-LSAs belong in an NSSA
 /// only (RFC 3101 §2.5); Opaque LSAs only to an Opaque-capable neighbour
 /// (`opaque`, RFC 5250 §2.1); MaxAge LSAs are left to
 /// `ospf_db_summary_add_table`.
 fn ospfv2_db_summary_lsas<'a>(
     lsdb: &'a super::lsdb::Lsdb<Ospfv2>,
     lsdb_as: &'a super::lsdb::Lsdb<Ospfv2>,
+    link_lsdb: &'a super::lsdb::Lsdb<Ospfv2>,
     area_type: super::area::AreaType,
     opaque: bool,
 ) -> impl Iterator<Item = &'a super::lsdb::Lsa<Ospfv2>> {
@@ -406,9 +410,15 @@ fn ospfv2_db_summary_lsas<'a>(
 
     let listed = move |ls_type: OspfLsType| match ls_type {
         OspfLsType::NssaAsExternal => area_type.is_nssa(),
-        OspfLsType::OpaqueAreaLocal | OspfLsType::OpaqueAsWide => opaque,
+        OspfLsType::OpaqueLinkLocal | OspfLsType::OpaqueAreaLocal | OspfLsType::OpaqueAsWide => {
+            opaque
+        }
         _ => true,
     };
+    let link = link_lsdb
+        .tables
+        .values()
+        .filter(move |lsa| listed(lsa.data.h.ls_type));
     let area = lsdb.tables.values().filter(move |lsa| {
         let ls_type = lsa.data.h.ls_type;
         matches!(lsa_flood_scope(ls_type), FloodScope::Area) && listed(ls_type)
@@ -419,7 +429,7 @@ fn ospfv2_db_summary_lsas<'a>(
             && matches!(lsa_flood_scope(ls_type), FloodScope::As)
             && listed(ls_type)
     });
-    area.chain(external)
+    area.chain(link).chain(external)
 }
 
 /// v3 NFSM helper invoked from `Ospfv3::populate_initial_db_summary`:
@@ -431,7 +441,7 @@ pub fn ospfv3_populate_initial_db_summary(
 ) {
     ospf_db_summary_add_table(
         nbr,
-        ospfv3_db_summary_lsas(oi.lsdb, oi.lsdb_as, oi.area_type),
+        ospfv3_db_summary_lsas(oi.lsdb, oi.lsdb_as, oi.link_lsdb, oi.area_type),
     );
 }
 
@@ -443,16 +453,21 @@ pub fn ospfv3_populate_initial_db_summary(
 /// (§4.5.1). Listing the types instead left out each one added since: the
 /// RFC 8362 E-LSAs, then the SRv6 Locator LSA, then the Router Information
 /// LSA. Each is usually originated before any adjacency, so a neighbour
-/// that formed one later never learned it. Link-scope LSAs live in each
-/// interface's own database (RFC 5340 §4.1.2), and selecting by scope
-/// keeps out any found here: this router's own Grace-LSAs, when they were
-/// filed in the area database, made a neighbour reject the summary, and
-/// the adjacency never left ExStart. Type-7 NSSA-LSAs belong
-/// in an NSSA only (RFC 3101 §2.5); MaxAge LSAs are left to
+/// that formed one later never learned it. Link-scope LSAs — the
+/// Link-LSAs and Grace-LSAs of the segment — are listed from the database
+/// of the neighbour's interface (`link_lsdb`, RFC 5340 §4.1.2) alone, as
+/// OSPFv2's type-9 are. They used to be left out altogether, so a router
+/// adjacent only to the DR never learned the Link-LSA of a third router
+/// that had flooded it before the adjacency formed. Selecting by scope
+/// keeps out any found elsewhere: this router's own Grace-LSAs, when they
+/// were filed in the area database, made a neighbour reject the summary,
+/// and the adjacency never left ExStart. Type-7 NSSA-LSAs belong in an
+/// NSSA only (RFC 3101 §2.5); MaxAge LSAs are left to
 /// `ospf_db_summary_add_table`.
 fn ospfv3_db_summary_lsas<'a>(
     lsdb: &'a super::lsdb::Lsdb<Ospfv3>,
     lsdb_as: &'a super::lsdb::Lsdb<Ospfv3>,
+    link_lsdb: &'a super::lsdb::Lsdb<Ospfv3>,
     area_type: super::area::AreaType,
 ) -> impl Iterator<Item = &'a super::lsdb::Lsa<Ospfv3>> {
     use super::packet_v3::{Ospfv3LsaScope, ospfv3_ls_type_scope};
@@ -475,7 +490,8 @@ fn ospfv3_db_summary_lsas<'a>(
         .filter(scoped(Ospfv3LsaScope::As))
         .filter(move |_| area_type.accepts_as_external())
         .map(|(_, lsa)| lsa);
-    area.chain(external)
+    let link = link_lsdb.tables.values();
+    area.chain(link).chain(external)
 }
 
 pub fn ospf_nfsm_negotiation_done<V: OspfVersion>(
@@ -732,8 +748,11 @@ mod db_summary_tests {
     const UNKNOWN_AREA: u16 = 0xA0FF;
     const AS_EXTERNAL: u16 = 0x4005;
     const AS_ROUTER_INFO: u16 = 0xC00C;
-    /// Link scope, so never listed from the area database.
+    /// Link scope: listed only from the interface's database.
     const GRACE: u16 = 0x000B;
+    const LINK: u16 = 0x0008;
+    /// A link-scope type this router has no use for (U bit set).
+    const UNKNOWN_LINK: u16 = 0x80FF;
 
     fn lsa(ls_type: u16) -> Ospfv3Lsa {
         let mut lsa = Ospfv3Lsa::from(
@@ -755,15 +774,18 @@ mod db_summary_tests {
     /// The initial database summary lists every area-scope LSA, whatever
     /// its type — the Router Information LSA among them, which it used to
     /// leave out, so a neighbour never learned one originated before the
-    /// adjacency — and every AS-scope LSA where they flood. Type-7 LSAs
-    /// only in an NSSA; never a link-scope Grace-LSA, even one found in the
-    /// area database.
+    /// adjacency — every AS-scope LSA where they flood, and every
+    /// link-scope LSA of the neighbour's interface, which it used to leave
+    /// out too. Type-7 LSAs only in an NSSA; never a link-scope LSA found
+    /// outside the interface's database. Rows are (LS type, Link State ID):
+    /// the area database's Grace-LSA has ID 0, the interface's ID 5.
     #[tokio::test]
     async fn the_summary_lists_every_lsa_in_scope() {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let tracing = OspfTracing::default();
         let mut area = Lsdb::<Ospfv3>::new();
         let mut external = Lsdb::<Ospfv3>::new();
+        let mut link = Lsdb::<Ospfv3>::new();
         let area_id = Some(Ipv4Addr::UNSPECIFIED);
         for ls_type in [ROUTER, ROUTER_INFO, E_ROUTER, UNKNOWN_AREA, NSSA, GRACE] {
             area.install_lsa(lsa(ls_type), &tx, area_id, &tracing);
@@ -771,18 +793,31 @@ mod db_summary_tests {
         for ls_type in [AS_EXTERNAL, AS_ROUTER_INFO] {
             external.install_lsa(lsa(ls_type), &tx, None, &tracing);
         }
+        for ls_type in [LINK, GRACE, UNKNOWN_LINK] {
+            let mut lsa = lsa(ls_type);
+            lsa.h.link_state_id = 5;
+            lsa.update();
+            link.install_lsa(lsa, &tx, area_id, &tracing);
+        }
 
         let listed = |kind| {
             let area_type = AreaType {
                 kind,
                 ..Default::default()
             };
-            ospfv3_db_summary_lsas(&area, &external, area_type)
-                .map(|lsa| lsa.data.h.ls_type)
-                .collect::<BTreeSet<u16>>()
+            ospfv3_db_summary_lsas(&area, &external, &link, area_type)
+                .map(|lsa| (lsa.data.h.ls_type, lsa.data.h.link_state_id))
+                .collect::<BTreeSet<(u16, u32)>>()
         };
         let area_scope = [ROUTER, ROUTER_INFO, E_ROUTER, UNKNOWN_AREA];
-        let expected = |types: &[u16]| types.iter().copied().collect::<BTreeSet<u16>>();
+        let link_scope = [(LINK, 5), (GRACE, 5), (UNKNOWN_LINK, 5)];
+        let expected = |types: &[u16]| {
+            types
+                .iter()
+                .map(|t| (*t, 0))
+                .chain(link_scope)
+                .collect::<BTreeSet<(u16, u32)>>()
+        };
         let normal = [&area_scope[..], &[AS_EXTERNAL, AS_ROUTER_INFO]].concat();
         assert_eq!(listed(AreaTypeKind::Normal), expected(&normal));
         let nssa = [&area_scope[..], &[NSSA]].concat();
@@ -790,11 +825,14 @@ mod db_summary_tests {
         assert_eq!(listed(AreaTypeKind::Stub), expected(&area_scope));
     }
 
-    /// The OSPFv2 summary lists every area-scope LSA and, where they
-    /// flood, every AS-scope one — the AS-scope Opaque LSA (type 11) among
-    /// them, which its fixed list of types left out. Opaque LSAs go only
-    /// to an Opaque-capable neighbour, Type-7 only in an NSSA, never a
-    /// link-scope Grace-LSA (type 9), even one found in the area database.
+    /// The OSPFv2 summary lists every area-scope LSA, where they flood
+    /// every AS-scope one — the AS-scope Opaque LSA (type 11) among them,
+    /// which its fixed list of types left out — and the type-9 Opaque LSAs
+    /// of the neighbour's interface, which it left out altogether (RFC 5250
+    /// §3.2). Opaque LSAs go only to an Opaque-capable neighbour, Type-7
+    /// only in an NSSA, and a type-9 LSA found outside the interface's
+    /// database never. Rows are (LS type, Link State ID): the area
+    /// database's type 9 has ID 10.0.0.9, the interface's 10.0.0.8.
     #[tokio::test]
     async fn the_v2_summary_lists_every_lsa_in_scope() {
         use super::super::version::Ospfv2;
@@ -802,13 +840,11 @@ mod db_summary_tests {
         use OspfLsType::*;
         use ospf_packet::{OspfLsType, OspfLsa, OspfLsaHeader, OspfLsp, RouterLsa};
 
+        const AREA_ID: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 9);
+        const LINK_ID: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 8);
         let lsa = |ls_type: OspfLsType| {
             let mut lsa = OspfLsa::from(
-                OspfLsaHeader::new(
-                    ls_type,
-                    Ipv4Addr::new(10, 0, 0, 9),
-                    Ipv4Addr::new(10, 0, 0, 1),
-                ),
+                OspfLsaHeader::new(ls_type, AREA_ID, Ipv4Addr::new(10, 0, 0, 1)),
                 OspfLsp::Router(RouterLsa {
                     flags: 0,
                     links: vec![],
@@ -821,6 +857,7 @@ mod db_summary_tests {
         let tracing = OspfTracing::default();
         let mut area = Lsdb::<Ospfv2>::new();
         let mut external = Lsdb::<Ospfv2>::new();
+        let mut link = Lsdb::<Ospfv2>::new();
         for ls_type in [
             Router,
             Network,
@@ -834,18 +871,33 @@ mod db_summary_tests {
         for ls_type in [AsExternal, OpaqueAsWide] {
             external.install_lsa(lsa(ls_type), &tx, None, &tracing);
         }
+        let mut grace = lsa(OpaqueLinkLocal);
+        grace.h.ls_id = LINK_ID;
+        grace.update();
+        link.install_lsa(grace, &tx, Some(Ipv4Addr::UNSPECIFIED), &tracing);
 
         let listed = |kind, opaque| {
             let area_type = AreaType {
                 kind,
                 ..Default::default()
             };
-            ospfv2_db_summary_lsas(&area, &external, area_type, opaque)
-                .map(|lsa| u8::from(lsa.data.h.ls_type))
-                .collect::<BTreeSet<u8>>()
+            ospfv2_db_summary_lsas(&area, &external, &link, area_type, opaque)
+                .map(|lsa| (u8::from(lsa.data.h.ls_type), lsa.data.h.ls_id))
+                .collect::<BTreeSet<(u8, Ipv4Addr)>>()
         };
-        let set =
-            |types: &[OspfLsType]| types.iter().map(|t| u8::from(*t)).collect::<BTreeSet<u8>>();
+        let set = |types: &[OspfLsType]| {
+            types
+                .iter()
+                .map(|t| {
+                    let id = if *t == OpaqueLinkLocal {
+                        LINK_ID
+                    } else {
+                        AREA_ID
+                    };
+                    (u8::from(*t), id)
+                })
+                .collect::<BTreeSet<(u8, Ipv4Addr)>>()
+        };
         assert_eq!(
             listed(AreaTypeKind::Normal, true),
             set(&[
@@ -853,6 +905,7 @@ mod db_summary_tests {
                 Network,
                 Summary,
                 OpaqueAreaLocal,
+                OpaqueLinkLocal,
                 AsExternal,
                 OpaqueAsWide
             ])
@@ -863,7 +916,14 @@ mod db_summary_tests {
         );
         assert_eq!(
             listed(AreaTypeKind::Nssa, true),
-            set(&[Router, Network, Summary, NssaAsExternal, OpaqueAreaLocal])
+            set(&[
+                Router,
+                Network,
+                Summary,
+                NssaAsExternal,
+                OpaqueAreaLocal,
+                OpaqueLinkLocal
+            ])
         );
         assert_eq!(
             listed(AreaTypeKind::Stub, false),

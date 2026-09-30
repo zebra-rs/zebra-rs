@@ -21753,6 +21753,62 @@ mod link_scope_tests {
         }
     }
 
+    /// A neighbour's initial Database Description summary offers the
+    /// link-scope LSAs of its own interface, and no other interface's (RFC
+    /// 5250 §3.2; RFC 5340 §4.1.2). Both versions left them out, so a
+    /// router adjacent only to the DR never learned a Link-LSA flooded
+    /// before its adjacency formed.
+    #[tokio::test]
+    async fn a_neighbour_is_offered_its_interfaces_link_scope_lsas() {
+        // OSPFv2: a type-9 LSA from S on eth2, one from P on eth3.
+        let mut top = v2_top();
+        let (tx, tracing) = (top.tx.clone(), top.tracing.clone());
+        for (ifindex, adv) in [(2, S), (3, P)] {
+            top.links.get_mut(&ifindex).unwrap().lsdb.install_lsa(
+                v2_grace(adv, v2_addr(adv), 1, 0x8000_0001),
+                &tx,
+                Some(AREA0),
+                &tracing,
+            );
+        }
+        for (ifindex, nbr, offered) in [(2, O, S), (3, P, P)] {
+            let src = v2_addr(nbr);
+            let (mut oi, nbr) = top.ospf_interface(ifindex, &src).unwrap();
+            nbr.dd.recv.options.set_o(true);
+            super::super::nfsm::ospfv2_populate_initial_db_summary(&mut oi, nbr);
+            let link_scope: Vec<Ipv4Addr> = nbr
+                .db_sum
+                .iter()
+                .filter(|h| h.ls_type == OspfLsType::OpaqueLinkLocal)
+                .map(|h| h.adv_router)
+                .collect();
+            assert_eq!(link_scope, vec![offered], "v2: eth{ifindex}");
+        }
+
+        // OSPFv3: a Link-LSA from S on eth2, one from P on eth3.
+        let mut top = v3_top();
+        let (tx, tracing) = (top.tx.clone(), top.tracing.clone());
+        for (ifindex, adv) in [(2, S), (3, P)] {
+            top.links.get_mut(&ifindex).unwrap().lsdb.install_lsa(
+                v3_lsa(OSPFV3_LINK_LSA_TYPE, 7, adv, 1, 0x8000_0001),
+                &tx,
+                Some(AREA0),
+                &tracing,
+            );
+        }
+        for (ifindex, nbr, offered) in [(2, O, S), (3, P, P)] {
+            let (mut oi, nbr) = top.ospf_interface(ifindex, &nbr).unwrap();
+            super::super::nfsm::ospfv3_populate_initial_db_summary(&mut oi, nbr);
+            let link_scope: Vec<Ipv4Addr> = nbr
+                .db_sum
+                .iter()
+                .filter(|h| h.ls_type == OSPFV3_LINK_LSA_TYPE)
+                .map(|h| h.advertising_router)
+                .collect();
+            assert_eq!(link_scope, vec![offered], "v3: eth{ifindex}");
+        }
+    }
+
     fn restarting() -> RestartingState {
         RestartingState {
             grace_period: 120,
