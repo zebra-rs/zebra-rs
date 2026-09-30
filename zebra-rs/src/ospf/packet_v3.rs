@@ -1185,16 +1185,7 @@ pub fn ospfv3_ls_ack_recv(
     );
 
     for h in ls_ack.lsa_headers.iter() {
-        let key: super::lsdb::OspfLsaKey = (h.ls_type, h.link_state_id, h.advertising_router);
-        if let Some(rxmt_lsa) = nbr.ls_rxmt.get(&key)
-            && rxmt_lsa.h.ls_seq_number == h.ls_seq_number
-            && rxmt_lsa.h.ls_checksum == h.ls_checksum
-        {
-            nbr.ls_rxmt.remove(&key);
-        }
-    }
-    if nbr.ls_rxmt.is_empty() {
-        nbr.timer.ls_rxmt = None;
+        super::flood::ospf_ls_retransmit_ack::<Ospfv3>(nbr, h);
     }
 }
 

@@ -1533,16 +1533,7 @@ pub fn ospf_ls_ack_recv(
 
     // Remove acknowledged LSAs from retransmit list.
     for lsah in ls_ack.lsa_headers.iter() {
-        let key = super::lsdb::v2_lsa_key(lsah.ls_type, lsah.ls_id, lsah.adv_router);
-        if let Some(rxmt_lsa) = nbr.ls_rxmt.get(&key)
-            && rxmt_lsa.h.ls_seq_number == lsah.ls_seq_number
-            && rxmt_lsa.h.ls_checksum == lsah.ls_checksum
-        {
-            nbr.ls_rxmt.remove(&key);
-        }
-    }
-    if nbr.ls_rxmt.is_empty() {
-        nbr.timer.ls_rxmt = None;
+        super::flood::ospf_ls_retransmit_ack::<super::version::Ospfv2>(nbr, lsah);
     }
 }
 
