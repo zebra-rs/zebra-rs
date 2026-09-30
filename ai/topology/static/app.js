@@ -1,9 +1,10 @@
 // zebra-rs Traffic Path Visualizer — Frontend (3D Globe)
 //
 // Ported from the Graphiant topology viewer. Data comes from the local
-// backend, which queries each router over MCP (vtyctl mcp). There is no
-// TE telemetry here — the lab carries connectivity, IGP metrics, and
-// per-algorithm SPF paths, so that is what the globe shows.
+// backend, which queries each router over MCP (vtyctl mcp): connectivity,
+// IGP metrics, per-algorithm SPF paths and — where the lab advertises
+// them, as playset/isis-te-metric does — each link's TE performance
+// metrics (RFC 8570 delay, jitter and loss, measured by STAMP).
 //
 // The frontend also runs from a static snapshot (`zebra-topology
 // snapshot`): data/manifest.js sets window.ZEBRA_SNAPSHOT, and every
@@ -433,7 +434,9 @@ function renderTopology(data, paths, focusKey) {
         for (let i = 0; i < hops.length - 1; i++) {
             const a = nodeMap[hops[i]];
             const b = nodeMap[hops[i + 1]];
-            const cost = edgeCost[hops[i] + '|' + hops[i + 1]];
+            const seg = segmentFor(path, hops[i], hops[i + 1]);
+            const cost = seg && seg.cost != null ? seg.cost : edgeCost[hops[i] + '|' + hops[i + 1]];
+            const te = seg && seg.te;
             allArcs.push({
                 base: false,
                 startLat: a.lat, startLng: a.lng,
@@ -443,7 +446,12 @@ function renderTopology(data, paths, focusKey) {
                 tooltip: `<b>${escapeHtml(hops[i])} → ${escapeHtml(hops[i + 1])}</b><br>` +
                     `Path ${idx + 1}: ${escapeHtml(title)}<br>` +
                     `Algorithm ${currentAlgorithm}, path cost ${path.cost}` +
-                    (cost != null ? `<br>link metric ${cost}` : '')
+                    (cost != null ? `<br>link metric ${cost}` : '') +
+                    (te && te.min_delay != null
+                        ? `<br>delay ${fmtDelay(te.min_delay)} min, ${fmtDelay(te.delay)} avg` +
+                          (te.delay_anomalous ? ' (anomalous)' : '')
+                        : '') +
+                    (te && te.loss != null ? `<br>loss ${fmtLoss(te.loss)}` : '')
             });
         }
 
@@ -550,6 +558,40 @@ function focusCamera(points) {
     map.pointOfView({ lat, lng, altitude }, 800);
 }
 
+// --- TE metrics ---
+//
+// Each path hop's link carries the TE performance metrics its advertising
+// end floods (RFC 8570), as the backend's `segments[].te`: delays and
+// jitter in microseconds, loss in units of 0.000003 %. A link that
+// advertises none has no `te`, and a lab without TE shows no TE columns.
+
+const LOSS_UNIT_PERCENT = 0.000003;
+
+function fmtDelay(us) {
+    return us == null ? '—' : `${(us / 1000).toFixed(2)} ms`;
+}
+
+function fmtLoss(raw) {
+    return raw == null ? '—' : `${(raw * LOSS_UNIT_PERCENT).toFixed(3)} %`;
+}
+
+// The segment for the directed link from → to, or null (an older backend
+// or snapshot sends no segments).
+function segmentFor(path, from, to) {
+    return (path.segments || []).find(s => s.from === from && s.to === to) || null;
+}
+
+function pathHasTe(path) {
+    return (path.segments || []).some(s => s.te);
+}
+
+// A TE cell: the value, flagged when the link set the Anomalous (A) bit.
+function teCell(text, anomalous) {
+    return anomalous
+        ? `<td class="metric te-anomalous" title="Anomalous (A) bit set">${escapeHtml(text)} ⚠</td>`
+        : `<td class="metric">${escapeHtml(text)}</td>`;
+}
+
 // --- Path detail table ---
 
 function populatePathDetail(idx) {
@@ -558,8 +600,10 @@ function populatePathDetail(idx) {
     const entry = renderedPaths.find(p => p.idx === idx);
     if (!entry) return;
     const path = entry.path;
+    const hasTe = pathHasTe(path);
 
     panel.style.display = '';
+    panel.classList.toggle('with-te', hasTe);
 
     const titleEl = panel.querySelector('.path-detail-title');
     if (titleEl) {
@@ -567,29 +611,81 @@ function populatePathDetail(idx) {
             escapeHtml(`Path ${idx + 1}: ${path.hops[0]} → ${path.destination}`);
     }
 
+    // The path's delay is the sum of its links' Min delays — what a
+    // metric-type-1 Flex-Algorithm minimizes. Only a sum over every link.
+    let pathDelay = null;
+    if (hasTe) {
+        const mins = (path.segments || []).map(s => s.te && s.te.min_delay);
+        if (mins.length > 0 && mins.every(d => d != null)) {
+            pathDelay = mins.reduce((a, b) => a + b, 0);
+        }
+    }
+
     const subEl = document.getElementById('pathDetailSub');
     if (subEl) {
         const iface = path.interface ? `egress ${path.interface} · ` : '';
-        subEl.textContent = `algorithm ${currentAlgorithm} · ${iface}total cost ${path.cost} · ${path.hops.length - 1} hop(s)`;
+        subEl.textContent = `algorithm ${currentAlgorithm} · ${iface}total cost ${path.cost} · ` +
+            `${path.hops.length - 1} hop(s)` +
+            (pathDelay != null ? ` · path delay ${fmtDelay(pathDelay)}` : '');
+    }
+
+    const headRow = panel.querySelector('thead tr');
+    if (headRow) {
+        headRow.innerHTML = '<th>Hop</th><th>Node</th><th>Region</th>' +
+            '<th>Link metric</th><th>Cumulative</th>' +
+            (hasTe
+                ? '<th title="Min unidirectional link delay (RFC 8570)">Min delay</th>' +
+                  '<th title="Average unidirectional link delay">Avg delay</th>' +
+                  '<th title="Unidirectional delay variation">Jitter</th>' +
+                  '<th title="Unidirectional link loss">Loss</th>' +
+                  '<th title="Sum of Min delays so far">Cum. delay</th>'
+                : '');
     }
 
     const tbody = panel.querySelector('tbody');
     tbody.innerHTML = '';
 
     let cumulative = 0;
+    let cumDelay = 0;
+    let delayKnown = true;
     path.hops.forEach((name, i) => {
         const node = currentNodeMap[name];
         const fullName = node ? node.fullName : name;
         const region = node ? node.region : '—';
 
         let link = '—';
+        let te = null;
         if (i > 0) {
-            const cost = currentEdgeCost[path.hops[i - 1] + '|' + name];
+            const seg = segmentFor(path, path.hops[i - 1], name);
+            te = seg && seg.te;
+            const cost = seg && seg.cost != null
+                ? seg.cost
+                : currentEdgeCost[path.hops[i - 1] + '|' + name];
             if (cost != null) {
                 cumulative += cost;
                 link = String(cost);
             } else {
                 link = '?';
+            }
+            if (te && te.min_delay != null) {
+                cumDelay += te.min_delay;
+            } else {
+                delayKnown = false;
+            }
+        }
+
+        let teCells = '';
+        if (hasTe) {
+            if (i === 0) {
+                teCells = '<td class="metric">—</td>'.repeat(4) + `<td class="metric">${fmtDelay(0)}</td>`;
+            } else {
+                const t = te || {};
+                teCells =
+                    teCell(fmtDelay(t.min_delay), t.delay_anomalous) +
+                    teCell(fmtDelay(t.delay), t.delay_anomalous) +
+                    teCell(fmtDelay(t.delay_variation), false) +
+                    teCell(fmtLoss(t.loss), t.loss_anomalous) +
+                    `<td class="metric">${delayKnown ? fmtDelay(cumDelay) : '?'}</td>`;
             }
         }
 
@@ -600,6 +696,7 @@ function populatePathDetail(idx) {
             <td>${escapeHtml(region)}</td>
             <td class="metric">${escapeHtml(link)}</td>
             <td class="metric">${i === 0 ? '0' : String(cumulative)}</td>
+            ${teCells}
         `;
         tbody.appendChild(tr);
     });

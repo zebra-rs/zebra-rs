@@ -250,3 +250,13 @@ html.bare .status-bar {
     text-align: right;
     font-variant-numeric: tabular-nums;
 }
+
+/* Five more columns when the path's links advertise TE metrics. */
+.path-detail.with-te {
+    max-width: 1040px;
+}
+
+.path-detail-table td.te-anomalous {
+    color: #c0392b;
+    font-weight: 600;
+}

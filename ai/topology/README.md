@@ -7,9 +7,14 @@ an algorithm, and watch the SPF paths arc across the globe — algorithm 0
 crosses the Pacific directly, algorithm 128 (`exclude-any: trans-pacific`)
 sends the same traffic the long way round through Asia and Europe.
 
-There is no TE telemetry (latency/jitter/loss) in this lab; the viewer shows
-what the routers actually know: connectivity, IGP metrics, and per-algorithm
-SPF paths.
+The viewer shows what the routers actually know: connectivity, IGP metrics,
+and per-algorithm SPF paths — and, where the links advertise them, their
+TE performance metrics. Point it at
+[`playset/isis-te-metric`](../../playset/isis-te-metric) — the same eleven
+routers, with STAMP measuring each link's delay and loss and algorithm 128
+routing on the lowest latency — and the path detail table gains per-hop
+delay, jitter and loss columns and a cumulative path delay. In a lab without
+TE metrics, such as `isis-flexalgo`, those columns simply do not appear.
 
 ## How it gets its data — MCP only
 
@@ -30,8 +35,16 @@ ones):
 | tool                 | arguments            | backs                       |
 |----------------------|----------------------|-----------------------------|
 | `get-isis-flex-algo` | —                    | the Algorithm dropdown      |
-| `get-isis-graph`     | `level`, `algorithm` | connectivity arcs           |
+| `get-isis-graph`     | `level`, `algorithm` | connectivity arcs; each directed link's cost and TE metrics |
 | `get-isis-spf`       | `algorithm`          | the colored path arcs       |
+
+`get-isis-graph` attaches to every link the TE metrics its *advertising*
+router floods (RFC 8570): `te.delay`, `min_delay`, `max_delay` and
+`delay_variation` in microseconds, `loss` in units of 0.000003 %, and
+`delay_anomalous` / `loss_anomalous` for the Anomalous bit. They are
+directional — a hop's values are what the router at its near end measured —
+so the backend joins each SPF path with the graph's directed links rather
+than its undirected connectivity edges.
 
 Router locations come from the playset's
 [`ontology.json`](../../playset/isis-flexalgo/ontology.json) (name, city,
@@ -57,6 +70,10 @@ open http://localhost:8080
 The globe needs internet access in the browser (three.js, globe.gl and the
 earth textures load from unpkg.com, integrity-pinned).
 
+For the TE view, bring up `playset/isis-te-metric` in step 1 instead. It
+uses the same router names and cities, so the default `--ontology` works
+for both labs (they share namespace names too, so run one at a time).
+
 ### Things to try
 
 * Source `tk`, destination `se`: flip Algorithm between `0` and `128` and
@@ -69,6 +86,36 @@ earth textures load from unpkg.com, integrity-pinned).
   the world. `... set fr-sg up` and Refresh to heal it.
 * Click a path arc (or its legend chip) for the hop-by-hop table with link
   and cumulative metrics.
+
+With `playset/isis-te-metric` up instead:
+
+* Source `at`, destination `sg`, and click the path. Algorithm 0 goes
+  `at → va → fr → sg` — three hops, **path delay 134.08 ms**. Switch to
+  algorithm 128 (`metric: min delay`) and it goes
+  `at → da → sj → tk → sg` — four hops, but 121.22 ms. The table shows
+  each hop's measured Min and average delay, jitter and loss, and the
+  delay accumulating along the path:
+
+  ```
+  Hop  Node             Link metric  Cumulative  Min delay  Avg delay  Jitter   Loss     Cum. delay
+  0    at — Atlanta     —            0           —          —          —        —        0.00 ms
+  1    da — Dallas      11025        11025       11.03 ms   11.47 ms   0.49 ms  0.000 %  11.03 ms
+  2    sj — San Jose    20056        31081       20.06 ms   20.35 ms   0.29 ms  0.000 %  31.08 ms
+  3    tk — Tokyo       55052        86133       55.05 ms   55.49 ms   0.43 ms  0.000 %  86.13 ms
+  4    sg — Singapore   35092        121225      35.09 ms   35.69 ms   0.70 ms  0.000 %  121.22 ms
+  ```
+
+  In algorithm 128 the link metric *is* the Min delay in microseconds —
+  that is what the algorithm sums.
+* Slow a link down —
+  `sudo ip netns exec sj tc qdisc change dev sj-tk root netem delay 120ms`
+  and the same on `tk-sj` — wait a few seconds for the measurement to
+  flood, and Refresh: algorithm 128 re-routes around it while algorithm 0
+  does not move.
+* Set an anomaly threshold on a link
+  (`set router isis interface sj-tk te-metric measurement anomaly-threshold 1000`
+  on `sj`) and Refresh: the hop's delays turn red with a ⚠ — the link
+  raised the RFC 8570 Anomalous bit.
 
 ### Globe designs
 
@@ -136,15 +183,19 @@ relative-path, so any subdirectory works.
 
 * `GET /api/routers` — the ontology with coordinates.
 * `GET /api/algorithms?source=<rtr>` — algorithm 0 plus every
-  Flex-Algorithm the source runs, labeled with its constraints.
+  Flex-Algorithm the source runs, labeled with its metric type (when not
+  the IGP metric) and its constraints.
 * `GET /api/topology?source=<rtr>&algorithm=<0|128-255>&destination=<rtr|__all__>`
   — nodes (with `active` = present in the IS-IS graph), undirected
   connectivity edges of *that algorithm's* graph, and the SPF paths as
-  complete hop lists with cost and egress interface.
+  complete hop lists with cost and egress interface. Each path also
+  carries `segments`, one per hop — `from`, `to`, the directed link's
+  `cost`, and its `te` metrics when the link advertises them.
 
 ## Provenance
 
 Ported from the Graphiant `graphiant-topology` viewer (Go + globe.gl,
 driven by the Graphiant NaaS assurance API). This version swaps the data
-plane for MCP against local zebra-rs routers and drops the TE-specific UI
-(time slider, latency/jitter/loss columns) that has no data source here.
+plane for MCP against local zebra-rs routers. The latency/jitter/loss
+columns come back when the links advertise RFC 8570 TE metrics; the time
+slider stays dropped, since the routers hold only the current measurement.
