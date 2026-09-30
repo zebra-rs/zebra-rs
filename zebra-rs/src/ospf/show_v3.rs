@@ -795,11 +795,15 @@ pub(super) fn show_ospfv3_database_detail(
     writeln!(out, "       OSPFv3 Router with ID ({})", top.router_id)?;
     writeln!(out)?;
 
+    // Each database's LS types in the usual order first; any other type it
+    // holds follows (see `write_lsdb_detail`).
     const AREA_TYPES: &[u16] = &[
         OSPFV3_ROUTER_LSA_TYPE,
         OSPFV3_NETWORK_LSA_TYPE,
         OSPFV3_INTER_AREA_PREFIX_LSA_TYPE,
         OSPFV3_INTER_AREA_ROUTER_LSA_TYPE,
+        // RFC 3101 / RFC 5340 §A.4.8 Type-7, in an NSSA.
+        ospf_packet::OSPFV3_NSSA_LSA_TYPE,
         OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE,
         ospf_packet::OSPFV3_E_ROUTER_LSA_TYPE,
         ospf_packet::OSPFV3_E_NETWORK_LSA_TYPE,
@@ -811,28 +815,9 @@ pub(super) fn show_ospfv3_database_detail(
         // RFC 7770 Router Information LSA, where SR capabilities ride.
         ospf_packet::OSPFV3_ROUTER_INFO_LSA_TYPE,
     ];
-
     for (area_id, area) in top.areas.iter() {
-        for &ls_type in AREA_TYPES {
-            let mut section_printed = false;
-            for ((ls_id, adv_router), lsa) in area.lsdb.iter_by_raw_type(ls_type) {
-                if lsa.data.h.ls_age >= OSPF_MAX_AGE {
-                    continue;
-                }
-                if !section_printed {
-                    writeln!(
-                        out,
-                        "                {} (Area {})",
-                        ls_type_name(ls_type),
-                        area_id
-                    )?;
-                    writeln!(out)?;
-                    section_printed = true;
-                }
-                write_lsa_detail(&mut out, lsa, ls_id, adv_router)?;
-                writeln!(out)?;
-            }
-        }
+        let scope = format!("Area {area_id}");
+        write_lsdb_detail(&mut out, &area.lsdb, AREA_TYPES, &scope)?;
     }
 
     const AS_TYPES: &[u16] = &[
@@ -841,22 +826,7 @@ pub(super) fn show_ospfv3_database_detail(
         // Router Information LSA, AS scope (RFC 7770 §2.2).
         0xC000 | ospf_packet::OSPFV3_ROUTER_INFO_FUNCTION_CODE,
     ];
-
-    for &ls_type in AS_TYPES {
-        let mut section_printed = false;
-        for ((ls_id, adv_router), lsa) in top.lsdb_as.iter_by_raw_type(ls_type) {
-            if lsa.data.h.ls_age >= OSPF_MAX_AGE {
-                continue;
-            }
-            if !section_printed {
-                writeln!(out, "                {} (AS-Scope)", ls_type_name(ls_type))?;
-                writeln!(out)?;
-                section_printed = true;
-            }
-            write_lsa_detail(&mut out, lsa, ls_id, adv_router)?;
-            writeln!(out)?;
-        }
-    }
+    write_lsdb_detail(&mut out, &top.lsdb_as, AS_TYPES, "AS-Scope")?;
 
     const LINK_TYPES: &[u16] = &[
         OSPFV3_LINK_LSA_TYPE,
@@ -865,31 +835,51 @@ pub(super) fn show_ospfv3_database_detail(
         // Router Information LSA, link scope (RFC 7770 §2.2).
         0x8000 | ospf_packet::OSPFV3_ROUTER_INFO_FUNCTION_CODE,
     ];
-
     for link in top.links.values() {
-        for &ls_type in LINK_TYPES {
-            let mut section_printed = false;
-            for ((ls_id, adv_router), lsa) in link.lsdb.iter_by_raw_type(ls_type) {
-                if lsa.data.h.ls_age >= OSPF_MAX_AGE {
-                    continue;
-                }
-                if !section_printed {
-                    writeln!(
-                        out,
-                        "                {} (Interface {})",
-                        ls_type_name(ls_type),
-                        link.name
-                    )?;
-                    writeln!(out)?;
-                    section_printed = true;
-                }
-                write_lsa_detail(&mut out, lsa, ls_id, adv_router)?;
-                writeln!(out)?;
-            }
-        }
+        let scope = format!("Interface {}", link.name);
+        write_lsdb_detail(&mut out, &link.lsdb, LINK_TYPES, &scope)?;
     }
 
     Ok(out)
+}
+
+/// Print the non-MaxAge LSAs of `lsdb`, grouped by LS type under a
+/// "<type> (<scope>)" heading: the types in `order` first, in that order,
+/// then every other type the database holds, ascending. A fixed list of
+/// types alone left out each one added since — the NSSA-LSA, and before it
+/// the Router Information LSA — and hid any type this router makes no use
+/// of, although it stores and floods it.
+fn write_lsdb_detail(
+    out: &mut String,
+    lsdb: &super::lsdb::Lsdb<Ospfv3>,
+    order: &[u16],
+    scope: &str,
+) -> Result<(), std::fmt::Error> {
+    let held: std::collections::BTreeSet<u16> = lsdb.tables.keys().map(|(t, _, _)| *t).collect();
+    let types = order
+        .iter()
+        .copied()
+        .chain(held.into_iter().filter(|t| !order.contains(t)));
+    for ls_type in types {
+        let mut section_printed = false;
+        for ((ls_id, adv_router), lsa) in lsdb.iter_by_raw_type(ls_type) {
+            if lsa.data.h.ls_age >= OSPF_MAX_AGE {
+                continue;
+            }
+            if !section_printed {
+                let name = match ls_type_name(ls_type) {
+                    "Unknown" => format!("LS Type 0x{ls_type:04x}"),
+                    name => name.to_string(),
+                };
+                writeln!(out, "                {name} ({scope})")?;
+                writeln!(out)?;
+                section_printed = true;
+            }
+            write_lsa_detail(out, lsa, ls_id, adv_router)?;
+            writeln!(out)?;
+        }
+    }
+    Ok(())
 }
 
 fn write_lsa_detail(
