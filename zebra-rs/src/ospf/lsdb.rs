@@ -512,6 +512,25 @@ impl<V: OspfVersion> Lsdb<V> {
         }
     }
 
+    /// Flush an LSA whose age reached MaxAge on its own, as a premature
+    /// aging flushes one (RFC 2328 §14, §14.1): its age becomes MaxAge, so
+    /// nothing uses it any more, and a copy comes back to reflood. Its hold
+    /// timer re-arms, and its removal then waits for the neighbours
+    /// ([`Lsdb::hold_max_age`]). None when it is absent, still young, or
+    /// already at MaxAge.
+    pub fn age_out(
+        &mut self,
+        key: OspfLsaKey,
+        tx: &UnboundedSender<Message<V>>,
+        area_id: Option<Ipv4Addr>,
+    ) -> Option<V::Lsa> {
+        let lsa = self.tables.get(&key)?;
+        if lsa.current_age() < OSPF_MAX_AGE || V::ls_age(lsa.header()) >= OSPF_MAX_AGE {
+            return None;
+        }
+        self.flush_lsa_by_raw_key(key, tx, area_id)
+    }
+
     /// Remove the LSA at `lsa_key` if its age has reached MaxAge — its hold
     /// timer fired. A timer message still in flight for an instance
     /// replaced since finds the fresh copy young, and leaves it. Returns
@@ -639,6 +658,25 @@ impl Lsdb<Ospfv2> {
         true
     }
 
+    /// Age out an LSA that reached MaxAge on its own ([`Lsdb::age_out`]),
+    /// and drop what was derived from it, as [`Lsdb::expire_lsa`] does on
+    /// removal: the LSA stays for the neighbours, but its SRGB goes now.
+    /// Returns the MaxAge copy to reflood.
+    pub fn age_out_lsa(
+        &mut self,
+        ls_type: OspfLsType,
+        ls_id: Ipv4Addr,
+        adv_router: Ipv4Addr,
+        tx: &UnboundedSender<Message<Ospfv2>>,
+        area_id: Option<Ipv4Addr>,
+    ) -> Option<OspfLsa> {
+        let lsa = self.age_out(v2_lsa_key(ls_type, ls_id, adv_router), tx, area_id)?;
+        if ls_type == OspfLsType::OpaqueAreaLocal {
+            self.label_map_resync(adv_router);
+        }
+        Some(lsa)
+    }
+
     /// Rebuild `label_map[adv_router]` from the router's Router Information
     /// LSAs still in the LSDB, read as OSPFv3 reads them
     /// (`Lsdb<Ospfv3>::sr_capabilities`): instances in ascending Opaque ID,
@@ -732,6 +770,24 @@ impl Lsdb<super::version::Ospfv3> {
             self.label_map_resync_v3(adv_router);
         }
         true
+    }
+
+    /// Age out an LSA that reached MaxAge on its own ([`Lsdb::age_out`]),
+    /// and drop what was derived from it, as [`Lsdb::expire_lsa_v3`] does
+    /// on removal: the LSA stays for the neighbours, but its SRGB goes now.
+    /// Returns the MaxAge copy to reflood.
+    pub fn age_out_v3(
+        &mut self,
+        lsa_key: OspfLsaKey,
+        tx: &UnboundedSender<Message<super::version::Ospfv3>>,
+        area_id: Option<Ipv4Addr>,
+    ) -> Option<ospf_packet::Ospfv3Lsa> {
+        let lsa = self.age_out(lsa_key, tx, area_id)?;
+        let (ls_type, _, adv_router) = lsa_key;
+        if ls_type == OSPFV3_E_ROUTER_LSA_TYPE || ls_type == OSPFV3_ROUTER_INFO_LSA_TYPE {
+            self.label_map_resync_v3(adv_router);
+        }
+        Some(lsa)
     }
 
     /// Rebuild `label_map[adv_router]` from the router's SR capabilities

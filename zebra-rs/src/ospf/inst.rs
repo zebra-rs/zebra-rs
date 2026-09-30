@@ -4598,6 +4598,34 @@ impl Ospf<Ospfv2> {
             return;
         }
 
+        // RFC 2328 §14: an LSA whose age reached MaxAge on its own leaves as
+        // a withdrawal does (§14.1). At MaxAge nothing uses it any more, and
+        // it is reflooded; its removal then waits, below, for the neighbours.
+        let tx = self.tx.clone();
+        let aged_out = match area_id {
+            Some(area_id) => self.areas.get_mut(area_id).and_then(|area| {
+                area.lsdb
+                    .age_out_lsa(ls_type, ls_id, adv_router, &tx, Some(area_id))
+            }),
+            None => self
+                .lsdb_as
+                .age_out_lsa(ls_type, ls_id, adv_router, &tx, None),
+        };
+        if let Some(lsa) = aged_out {
+            use super::flood::{FloodScope, lsa_flood_scope};
+            self.lsa_withdrawn(area_id, ls_type);
+            match (lsa_flood_scope(ls_type), area_id) {
+                (FloodScope::Area, Some(area_id)) => {
+                    self.flood_lsa_through_area(area_id, &lsa, None)
+                }
+                (FloodScope::As, _) => self.flood_lsa_through_as(&lsa, None),
+                // A link-scope LSA is filed in the area database without
+                // its interface, so there is nowhere to reflood it.
+                _ => {}
+            }
+            return;
+        }
+
         // RFC 2328 §14: not while a neighbour still awaits it.
         if self.max_age_removal_waits(key) {
             let tx = self.tx.clone();
@@ -4642,43 +4670,50 @@ impl Ospf<Ospfv2> {
         };
 
         if removed {
-            match ls_type {
-                // Area-scoped opaque LSAs feed SPF as they do on arrival
-                // (see `ospf_flood`): an expiring Router Information LSA
-                // takes its Flexible Algorithm definitions and participation
-                // with it, and its winner's forwarding state must go too.
-                // An NSSA Type-7's route goes with it, as on arrival.
-                OspfLsType::Router
-                | OspfLsType::Network
-                | OspfLsType::Summary
-                | OspfLsType::NssaAsExternal
-                | OspfLsType::OpaqueAreaLocal => {
-                    if let Some(area_id) = area_id
-                        && let Some(area) = self.areas.get_mut(area_id)
-                    {
-                        Self::ospf_spf_schedule(&self.tx, area, self.spf_interval);
-                    }
+            self.lsa_withdrawn(area_id, ls_type);
+        }
+    }
+
+    /// What follows an LSA's leaving — removed, or aged out to MaxAge — as
+    /// its arrival would: SPF for the types that feed it, and NSSA
+    /// translation.
+    fn lsa_withdrawn(&mut self, area_id: Option<Ipv4Addr>, ls_type: OspfLsType) {
+        match ls_type {
+            // Area-scoped opaque LSAs feed SPF as they do on arrival
+            // (see `ospf_flood`): an expiring Router Information LSA
+            // takes its Flexible Algorithm definitions and participation
+            // with it, and its winner's forwarding state must go too.
+            // An NSSA Type-7's route goes with it, as on arrival.
+            OspfLsType::Router
+            | OspfLsType::Network
+            | OspfLsType::Summary
+            | OspfLsType::NssaAsExternal
+            | OspfLsType::OpaqueAreaLocal => {
+                if let Some(area_id) = area_id
+                    && let Some(area) = self.areas.get_mut(area_id)
+                {
+                    Self::ospf_spf_schedule(&self.tx, area, self.spf_interval);
                 }
-                OspfLsType::AsExternal => {
-                    // AS-scoped; reschedule SPF on every area.
-                    let _ = self.tx.send(Message::SpfSchedule(None));
-                }
-                _ => {}
             }
-            // RFC 3101 §3, as on arrival: a Type-7 that ages out — its
-            // ASBR vanished without flushing it — must take its translated
-            // Type-5 with it, or this translator advertises the route to
-            // the whole domain for good; an expiring Router-LSA can change
-            // the translator election.
-            if matches!(ls_type, OspfLsType::NssaAsExternal | OspfLsType::Router)
-                && let Some(area_id) = area_id
-                && self
-                    .areas
-                    .get(area_id)
-                    .is_some_and(|area| area.area_type.is_nssa())
-            {
-                let _ = self.tx.send(Message::NssaTranslateResync(area_id));
+            OspfLsType::AsExternal => {
+                // AS-scoped; reschedule SPF on every area.
+                let _ = self.tx.send(Message::SpfSchedule(None));
             }
+            _ => {}
+        }
+        // RFC 3101 §3, as on arrival: a Type-7 that ages out — its
+        // ASBR vanished without flushing it — must take its translated
+        // Type-5 with it, or this translator advertises the route to
+        // the whole domain for good; an expiring Router-LSA can change
+        // the translator election.
+        if matches!(ls_type, OspfLsType::NssaAsExternal | OspfLsType::Router)
+            && let Some(area_id) = area_id
+            && self
+                .areas
+                .get(area_id)
+                .is_some_and(|area| area.area_type.is_nssa())
+        {
+            let _ = self.tx.send(Message::NssaTranslateResync(area_id));
         }
     }
 
@@ -10214,15 +10249,20 @@ impl Ospf<Ospfv3> {
         }
     }
 
-    /// An LSA whose age reached MaxAge leaves the LSDB, and what it
-    /// described leaves the routing computation (RFC 2328 §14, as RFC 5340
-    /// keeps it) — the v3 twin of v2's `HoldTimerExpire` handling. v3 used
-    /// to drop the event, so a router that vanished without flushing left
-    /// its LSAs, its routes and its Segment Routing state in place for
-    /// good.
+    /// An LSA whose age reached MaxAge leaves the routing computation, is
+    /// reflooded at MaxAge, and leaves the LSDB once no neighbour awaits it
+    /// (RFC 2328 §14, as RFC 5340 keeps it) — the v3 twin of v2's
+    /// `HoldTimerExpire` handling. v3 used to drop the event, so a router
+    /// that vanished without flushing left its LSAs, its routes and its
+    /// Segment Routing state in place for good.
     fn lsa_expire_v3(&mut self, area_id: Option<Ipv4Addr>, key: super::lsdb::OspfLsaKey) {
         use super::packet_v3::{Ospfv3LsaScope, ospfv3_ls_type_scope};
         let (ls_type, _, _) = key;
+        // RFC 2328 §14, as for v2: an LSA whose age reached MaxAge on its own
+        // leaves as a withdrawal does (§14.1), reflooded at MaxAge.
+        if self.age_out_v3(area_id, key) {
+            return;
+        }
         // RFC 2328 §14, as for v2: not while a neighbour still awaits it.
         if self.max_age_removal_waits(key) {
             let tx = self.tx.clone();
@@ -10255,20 +10295,7 @@ impl Ospf<Ospfv3> {
                         .get_mut(area_id)
                         .is_some_and(|area| area.lsdb.expire_lsa_v3(key))
                 {
-                    self.spf_schedule_area(area_id);
-                    // RFC 3101 §3, as on arrival: an NSSA-LSA that ages out
-                    // must take its translated AS-External-LSA with it, and
-                    // an expiring Router-LSA can change the translator
-                    // election.
-                    use ospf_packet::{OSPFV3_NSSA_LSA_TYPE, OSPFV3_ROUTER_LSA_TYPE};
-                    if matches!(ls_type, OSPFV3_NSSA_LSA_TYPE | OSPFV3_ROUTER_LSA_TYPE)
-                        && self
-                            .areas
-                            .get(area_id)
-                            .is_some_and(|area| area.area_type.is_nssa())
-                    {
-                        let _ = self.tx.send(Message::NssaTranslateResync(area_id));
-                    }
+                    self.area_lsa_withdrawn_v3(area_id, ls_type);
                 }
             }
             Ospfv3LsaScope::As => {
@@ -10293,6 +10320,80 @@ impl Ospf<Ospfv3> {
                 }
             }
             Ospfv3LsaScope::Reserved => {}
+        }
+    }
+
+    /// Flush an LSA that reached MaxAge on its own, in its own scope:
+    /// what depended on it goes now, as on its removal, and the MaxAge copy
+    /// is reflooded as a new LSA would be (RFC 2328 §13.3) — through the
+    /// area, the AS, or the interface that holds it. Returns whether it
+    /// aged one out.
+    fn age_out_v3(&mut self, area_id: Option<Ipv4Addr>, key: super::lsdb::OspfLsaKey) -> bool {
+        use super::packet_v3::{Ospfv3LsaScope, ospfv3_ls_type_scope};
+        let (ls_type, _, _) = key;
+        let tx = self.tx.clone();
+        match ospfv3_ls_type_scope(ls_type) {
+            Ospfv3LsaScope::Area => {
+                let Some(area_id) = area_id else {
+                    return false;
+                };
+                let Some(lsa) = self
+                    .areas
+                    .get_mut(area_id)
+                    .and_then(|area| area.lsdb.age_out_v3(key, &tx, Some(area_id)))
+                else {
+                    return false;
+                };
+                self.area_lsa_withdrawn_v3(area_id, ls_type);
+                self.flood_lsa_through_area(area_id, &lsa, None);
+                true
+            }
+            Ospfv3LsaScope::As => {
+                let Some(lsa) = self.lsdb_as.age_out_v3(key, &tx, None) else {
+                    return false;
+                };
+                let _ = self.tx.send(Message::SpfSchedule(None));
+                self.flood_lsa_through_as_v3(&lsa, None);
+                true
+            }
+            Ospfv3LsaScope::Link => {
+                let ifindexes: Vec<u32> = self.links.keys().copied().collect();
+                let mut aged = false;
+                for ifindex in ifindexes {
+                    let Some(lsa) = self
+                        .links
+                        .get_mut(&ifindex)
+                        .and_then(|link| link.lsdb.age_out_v3(key, &tx, area_id))
+                    else {
+                        continue;
+                    };
+                    if ls_type == ospf_packet::OSPFV3_LINK_LSA_TYPE {
+                        let _ = self.tx.send(Message::LinkLsaInstalled(ifindex));
+                    }
+                    self.flood_link_scope_lsa(ifindex, &lsa);
+                    aged = true;
+                }
+                aged
+            }
+            Ospfv3LsaScope::Reserved => false,
+        }
+    }
+
+    /// What follows an area-scope LSA's leaving — removed, or aged out to
+    /// MaxAge — as its arrival would: the area's SPF, and NSSA translation
+    /// (RFC 3101 §3): an NSSA-LSA that goes must take its translated
+    /// AS-External-LSA with it, and a Router-LSA can change the translator
+    /// election.
+    fn area_lsa_withdrawn_v3(&mut self, area_id: Ipv4Addr, ls_type: u16) {
+        use ospf_packet::{OSPFV3_NSSA_LSA_TYPE, OSPFV3_ROUTER_LSA_TYPE};
+        self.spf_schedule_area(area_id);
+        if matches!(ls_type, OSPFV3_NSSA_LSA_TYPE | OSPFV3_ROUTER_LSA_TYPE)
+            && self
+                .areas
+                .get(area_id)
+                .is_some_and(|area| area.area_type.is_nssa())
+        {
+            let _ = self.tx.send(Message::NssaTranslateResync(area_id));
         }
     }
 
@@ -12198,6 +12299,10 @@ impl Ospf<Ospfv3> {
         let nbr = link.nbrs.get(&nbr_router_id)?;
         let key: super::lsdb::OspfLsaKey = (OSPFV3_LINK_LSA_TYPE, nbr.interface_id, nbr_router_id);
         let lsa = link.lsdb.lookup_by_raw_key(key)?;
+        // A MaxAge copy is kept only until the neighbours acknowledge it.
+        if lsa.h.ls_age >= super::lsdb::OSPF_MAX_AGE {
+            return None;
+        }
         let Ospfv3LsBody::Link(body) = &lsa.body else {
             return None;
         };
@@ -12785,7 +12890,8 @@ impl Ospf<Ospfv3> {
             .lsdb
             .iter_by_raw_type(ospf_packet::OSPFV3_LINK_LSA_TYPE)
         {
-            if !full_rids.contains(&adv) {
+            // A MaxAge copy is kept only until the neighbours acknowledge it.
+            if !full_rids.contains(&adv) || entry.data.h.ls_age >= super::lsdb::OSPF_MAX_AGE {
                 continue;
             }
             let ospf_packet::Ospfv3LsBody::Link(body) = &entry.data.body else {
@@ -18077,7 +18183,11 @@ mod v3_lsa_aging_tests {
             top.process_msg(Message::Lsdb(LsdbEvent::HoldTimerExpire, Some(AREA0), key))
                 .await;
             let lsdb = &top.areas.get(AREA0).unwrap().lsdb;
-            assert!(lsdb.lookup_by_raw_key(key).is_none());
+            assert!(
+                lsdb.lookup_by_raw_key(key)
+                    .is_some_and(|lsa| lsa.h.ls_age == OSPF_MAX_AGE),
+                "aged out, and kept for the neighbours"
+            );
         }
         let lsdb = &top.areas.get(AREA0).unwrap().lsdb;
         assert!(
@@ -18297,7 +18407,8 @@ mod v3_lsa_aging_tests {
                 .unwrap()
                 .lsdb
                 .lookup_by_raw_key(type7)
-                .is_none()
+                .is_some_and(|lsa| lsa.h.ls_age == OSPF_MAX_AGE),
+            "aged out, and kept for the neighbours"
         );
         let queued: Vec<_> = std::iter::from_fn(|| top.rx.try_recv().ok()).collect();
         let recomputes = top.areas.get(nssa).unwrap().spf_timer.is_some()
@@ -18378,7 +18489,11 @@ mod v2_lsa_aging_tests {
             top.process_msg(Message::Lsdb(LsdbEvent::HoldTimerExpire, Some(AREA0), key))
                 .await;
             let lsdb = &top.areas.get(AREA0).unwrap().lsdb;
-            assert!(lsdb.lookup_by_raw_key(key).is_none());
+            assert!(
+                lsdb.lookup_by_raw_key(key)
+                    .is_some_and(|lsa| lsa.h.ls_age == OSPF_MAX_AGE),
+                "aged out, and kept for the neighbours"
+            );
         }
         let lsdb = &top.areas.get(AREA0).unwrap().lsdb;
         assert!(lsdb.label_map.get(&rid(2)).is_none());
@@ -18569,7 +18684,8 @@ mod v2_lsa_aging_tests {
                 .unwrap()
                 .lsdb
                 .lookup_by_raw_key(type7)
-                .is_none()
+                .is_some_and(|lsa| lsa.h.ls_age == OSPF_MAX_AGE),
+            "aged out, and kept for the neighbours"
         );
         assert!(
             top.areas.get(nssa).unwrap().spf_timer.is_some(),
@@ -19421,7 +19537,11 @@ mod v3_router_information_read_tests {
             top.process_msg(Message::Lsdb(LsdbEvent::HoldTimerExpire, Some(AREA0), key))
                 .await;
             let lsdb = &top.areas.get(AREA0).unwrap().lsdb;
-            assert!(lsdb.lookup_by_raw_key(key).is_none(), "{router} expired");
+            assert!(
+                lsdb.lookup_by_raw_key(key)
+                    .is_some_and(|lsa| lsa.h.ls_age == OSPF_MAX_AGE),
+                "{router} aged out, and kept for the neighbours"
+            );
         }
 
         let lsdb = &top.areas.get(AREA0).unwrap().lsdb;
@@ -20023,6 +20143,317 @@ mod max_age_removal_tests {
     use super::*;
 
     const PEER: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 2);
+
+    /// RFC 2328 §14: an LSA whose age reaches MaxAge on its own is flushed
+    /// as a withdrawal is (§14.1). It stops counting at once — its SRGB
+    /// leaves the label cache and SPF runs without it — and it is reflooded
+    /// at MaxAge. It stays only for the neighbours: here one in Loading,
+    /// whose retransmission list then holds it. It used to stay with the
+    /// age it was installed with, so SPF went on using it, and its SRGB
+    /// stayed usable, until the neighbours let it go. Both versions.
+    #[tokio::test(start_paused = true)]
+    async fn an_aged_out_lsa_stops_counting_and_is_reflooded() {
+        // OSPFv3.
+        let mut top = fresh_ospf_v3();
+        top.router_id = Ipv4Addr::new(10, 0, 0, 1);
+        neighbour(&mut top, NfsmState::Loading);
+        v3_flooding(&mut top);
+        let mut lsa = super::super::srmpls::router_info_v3_lsa_build(
+            PEER,
+            false,
+            vec![Algo::Spf],
+            Vec::new(),
+            false,
+        );
+        lsa.set_age(OSPF_MAX_AGE - 1);
+        let key = (lsa.h.ls_type, lsa.h.link_state_id, PEER);
+        let (tx, tracing) = (top.tx.clone(), top.tracing.clone());
+        top.areas
+            .fetch(AREA0)
+            .lsdb
+            .insert_received_v3(lsa, &tx, Some(AREA0), &tracing);
+        assert!(labels(&top), "v3: its SRGB");
+        settle(&mut top, key).await;
+        let expire = || Message::Lsdb(LsdbEvent::HoldTimerExpire, Some(AREA0), key);
+
+        top.process_msg(expire()).await;
+        let lsdb = &top.areas.get(AREA0).unwrap().lsdb;
+        assert!(
+            lsdb.lookup_by_raw_key(key)
+                .is_some_and(|lsa| lsa.h.ls_age == OSPF_MAX_AGE),
+            "v3: kept, at MaxAge"
+        );
+        assert!(!labels(&top), "v3: its SRGB went with it");
+        assert!(spf_scheduled(&mut top), "v3: SPF runs without it");
+        assert!(reflooded(&mut top, key), "v3: reflooded");
+        peer(&mut top).state = NfsmState::Full;
+        top.process_msg(expire()).await;
+        assert!(held(&top, key), "v3: until acknowledged");
+        peer(&mut top).ls_rxmt.clear();
+        top.process_msg(expire()).await;
+        assert!(!held(&top, key), "v3: then gone");
+
+        // OSPFv2.
+        let mut top = fresh_ospf();
+        neighbour(&mut top, NfsmState::Loading);
+        let mut lsa =
+            super::super::srmpls::router_info_lsa_build(PEER, false, vec![Algo::Spf], Vec::new());
+        lsa.h.ls_age = OSPF_MAX_AGE - 1;
+        lsa.update();
+        let key = v2_lsa_key(OspfLsType::OpaqueAreaLocal, lsa.h.ls_id, PEER);
+        let (tx, tracing) = (top.tx.clone(), top.tracing.clone());
+        top.areas
+            .fetch(AREA0)
+            .lsdb
+            .insert_received(lsa, &tx, Some(AREA0), &tracing);
+        assert!(labels(&top), "v2: its SRGB");
+        settle(&mut top, key).await;
+        let expire = || Message::Lsdb(LsdbEvent::HoldTimerExpire, Some(AREA0), key);
+
+        top.process_msg(expire()).await;
+        let lsdb = &top.areas.get(AREA0).unwrap().lsdb;
+        assert!(
+            lsdb.lookup_by_raw_key(key)
+                .is_some_and(|lsa| lsa.h.ls_age == OSPF_MAX_AGE),
+            "v2: kept, at MaxAge"
+        );
+        assert!(!labels(&top), "v2: its SRGB went with it");
+        assert!(spf_scheduled(&mut top), "v2: SPF runs without it");
+        assert!(reflooded(&mut top, key), "v2: reflooded");
+        peer(&mut top).state = NfsmState::Full;
+        top.process_msg(expire()).await;
+        assert!(held(&top, key), "v2: until acknowledged");
+        peer(&mut top).ls_rxmt.clear();
+        top.process_msg(expire()).await;
+        assert!(!held(&top, key), "v2: then gone");
+    }
+
+    /// An aged-out LSA is reflooded in its own scope: an AS-scope one
+    /// through the AS, and SPF runs in every area; in OSPFv3 a link-scope
+    /// one on the interface that holds it, whose Link-LSA is looked at
+    /// again. Both versions for the AS scope.
+    #[tokio::test(start_paused = true)]
+    async fn an_aged_out_lsa_is_reflooded_in_its_scope() {
+        use ospf_packet::{OSPFV3_AS_EXTERNAL_LSA_TYPE, OSPFV3_LINK_LSA_TYPE};
+
+        // OSPFv3, AS scope.
+        let mut top = fresh_ospf_v3();
+        top.router_id = Ipv4Addr::new(10, 0, 0, 1);
+        neighbour(&mut top, NfsmState::Full);
+        v3_flooding(&mut top);
+        let (tx, tracing) = (top.tx.clone(), top.tracing.clone());
+        let key = (OSPFV3_AS_EXTERNAL_LSA_TYPE, 7, PEER);
+        top.lsdb_as
+            .install_lsa(v3_lsa(key, OSPF_MAX_AGE - 1), &tx, None, &tracing);
+        settle(&mut top, key).await;
+        top.process_msg(Message::Lsdb(LsdbEvent::HoldTimerExpire, None, key))
+            .await;
+        assert!(
+            top.lsdb_as
+                .lookup_by_raw_key(key)
+                .is_some_and(|lsa| lsa.h.ls_age == OSPF_MAX_AGE),
+            "v3 AS scope: kept, at MaxAge"
+        );
+        assert!(
+            queued(&mut top, |msg| matches!(msg, Message::SpfSchedule(None))),
+            "v3 AS scope: SPF"
+        );
+        assert!(reflooded(&mut top, key), "v3 AS scope: reflooded");
+
+        // OSPFv3, link scope.
+        let key = (OSPFV3_LINK_LSA_TYPE, 7, PEER);
+        top.links.get_mut(&2).unwrap().lsdb.install_lsa(
+            v3_lsa(key, OSPF_MAX_AGE - 1),
+            &tx,
+            Some(AREA0),
+            &tracing,
+        );
+        settle(&mut top, key).await;
+        top.process_msg(Message::Lsdb(LsdbEvent::HoldTimerExpire, Some(AREA0), key))
+            .await;
+        assert!(
+            top.links[&2]
+                .lsdb
+                .lookup_by_raw_key(key)
+                .is_some_and(|lsa| lsa.h.ls_age == OSPF_MAX_AGE),
+            "v3 link scope: kept, at MaxAge"
+        );
+        assert!(
+            queued(&mut top, |msg| matches!(msg, Message::LinkLsaInstalled(2))),
+            "v3 link scope: its Link-LSA looked at again"
+        );
+        assert!(reflooded(&mut top, key), "v3 link scope: reflooded");
+
+        // OSPFv2, AS scope.
+        let mut top = fresh_ospf();
+        neighbour(&mut top, NfsmState::Full);
+        let prefix = Ipv4Addr::new(192, 0, 2, 0);
+        let mut h = OspfLsaHeader::new(OspfLsType::AsExternal, prefix, PEER);
+        h.ls_age = OSPF_MAX_AGE - 1;
+        let mut lsa = OspfLsa::from(
+            h,
+            OspfLsp::AsExternal(AsExternalLsa {
+                netmask: Ipv4Addr::new(255, 255, 255, 0),
+                ext_and_resvd: 0,
+                metric: 20,
+                forwarding_address: Ipv4Addr::UNSPECIFIED,
+                external_route_tag: 0,
+                tos_list: Vec::new(),
+            }),
+        );
+        lsa.update();
+        let key = v2_lsa_key(OspfLsType::AsExternal, prefix, PEER);
+        let (tx, tracing) = (top.tx.clone(), top.tracing.clone());
+        top.lsdb_as.install_lsa(lsa, &tx, None, &tracing);
+        settle(&mut top, key).await;
+        top.process_msg(Message::Lsdb(LsdbEvent::HoldTimerExpire, None, key))
+            .await;
+        assert!(
+            top.lsdb_as
+                .lookup_by_raw_key(key)
+                .is_some_and(|lsa| lsa.h.ls_age == OSPF_MAX_AGE),
+            "v2 AS scope: kept, at MaxAge"
+        );
+        assert!(
+            queued(&mut top, |msg| matches!(msg, Message::SpfSchedule(None))),
+            "v2 AS scope: SPF"
+        );
+        assert!(reflooded(&mut top, key), "v2 AS scope: reflooded");
+    }
+
+    /// A Link-LSA at MaxAge is kept only until the neighbours acknowledge
+    /// it, and nothing reads it meanwhile: not the neighbour's global
+    /// address for its End.X nexthop, nor, on the DR, its prefixes for the
+    /// segment's Intra-Area-Prefix-LSA. OSPFv2 has no Link-LSA.
+    #[tokio::test(start_paused = true)]
+    async fn a_max_age_link_lsa_is_not_read() {
+        use ospf_packet::{
+            OSPFV3_LINK_LSA_TYPE, Ospfv3LinkLsa, Ospfv3LinkLsaPrefix, Ospfv3LsBody,
+            Ospfv3PrefixOptions,
+        };
+
+        let mut top = fresh_ospf_v3();
+        top.router_id = Ipv4Addr::new(10, 0, 0, 1);
+        neighbour(&mut top, NfsmState::Full);
+        let link = top.links.get_mut(&2).unwrap();
+        link.network_type = OspfNetworkType::Broadcast;
+        link.ident.d_router = Ipv4Addr::new(10, 0, 0, 1);
+        link.nbrs.get_mut(&PEER).unwrap().interface_id = 7;
+        let global: Ipv6Addr = "2001:db8::2".parse().unwrap();
+        let mut la = Ospfv3PrefixOptions::default();
+        la.set_la(true);
+        let body = Ospfv3LinkLsa {
+            link_local_address: "fe80::2".parse().unwrap(),
+            prefixes: vec![
+                Ospfv3LinkLsaPrefix {
+                    prefix_length: 128,
+                    prefix_options: la,
+                    address_prefix: global.octets().to_vec(),
+                },
+                Ospfv3LinkLsaPrefix {
+                    prefix_length: 64,
+                    prefix_options: Ospfv3PrefixOptions::default(),
+                    address_prefix: "2001:db8:5::".parse::<Ipv6Addr>().unwrap().octets()[..8]
+                        .to_vec(),
+                },
+            ],
+            ..Default::default()
+        };
+        let key = (OSPFV3_LINK_LSA_TYPE, 7, PEER);
+        let mut lsa = v3_lsa(key, 0);
+        lsa.body = Ospfv3LsBody::Link(body);
+        lsa.update();
+        let (tx, tracing) = (top.tx.clone(), top.tracing.clone());
+        top.links
+            .get_mut(&2)
+            .unwrap()
+            .lsdb
+            .install_lsa(lsa, &tx, Some(AREA0), &tracing);
+        let aggregated = |top: &Ospf<Ospfv3>| {
+            top.build_network_intra_area_prefix_lsa(2)
+                .is_some_and(|lsa| match lsa.body {
+                    Ospfv3LsBody::IntraAreaPrefix(body) => {
+                        body.prefixes.iter().any(|p| p.prefix_length == 64)
+                    }
+                    _ => false,
+                })
+        };
+        assert_eq!(top.neighbor_global_nh6(2, PEER), Some(global), "live");
+        assert!(aggregated(&top), "live");
+
+        top.links
+            .get_mut(&2)
+            .unwrap()
+            .lsdb
+            .flush_lsa_by_raw_key(key, &tx, Some(AREA0));
+        assert_eq!(top.neighbor_global_nh6(2, PEER), None, "at MaxAge");
+        assert!(!aggregated(&top), "at MaxAge");
+    }
+
+    /// `key`'s LSA at `age`, with an opaque body.
+    fn v3_lsa(key: OspfLsaKey, age: u16) -> ospf_packet::Ospfv3Lsa {
+        let (ls_type, link_state_id, advertising_router) = key;
+        let mut lsa = ospf_packet::Ospfv3Lsa::from(
+            ospf_packet::Ospfv3LsaHeader {
+                ls_age: age,
+                ls_type,
+                link_state_id,
+                advertising_router,
+                ls_seq_number: 0x8000_0003,
+                ls_checksum: 0,
+                length: 0,
+            },
+            ospf_packet::Ospfv3LsBody::Unknown(vec![0; 4]),
+        );
+        lsa.update();
+        lsa
+    }
+
+    /// Let OSPFv3 flood from interface 2: a channel to send on, and a
+    /// link-local address to send from.
+    fn v3_flooding(top: &mut Ospf<Ospfv3>) {
+        let (send_tx, send_rx) = mpsc::unbounded_channel();
+        Box::leak(Box::new(send_rx));
+        top.v3_send_tx = Some(send_tx);
+        top.links
+            .get_mut(&2)
+            .unwrap()
+            .addr
+            .push(super::super::addr::OspfAddr {
+                prefix: "fe80::1/64".parse().unwrap(),
+                secondary: false,
+            });
+    }
+
+    /// Whether the neighbour's retransmission list holds the MaxAge copy
+    /// of `key`: it was flooded to it.
+    fn reflooded<V: OspfVersion>(top: &mut Ospf<V>, key: OspfLsaKey) -> bool {
+        peer(top)
+            .ls_rxmt
+            .get(&key)
+            .is_some_and(|lsa| V::ls_age(V::lsa_header(lsa)) == OSPF_MAX_AGE)
+    }
+
+    /// Whether the backbone's label cache holds the neighbour's SRGB.
+    fn labels<V: OspfVersion>(top: &Ospf<V>) -> bool {
+        top.areas
+            .get(AREA0)
+            .unwrap()
+            .lsdb
+            .label_map
+            .get(&PEER)
+            .is_some()
+    }
+
+    /// Whether the backbone's SPF is scheduled.
+    fn spf_scheduled<V: OspfVersion>(top: &mut Ospf<V>) -> bool {
+        top.areas.get_mut(AREA0).unwrap().spf_timer.take().is_some()
+    }
+
+    /// Whether a queued message matches `want`; drains the queue.
+    fn queued<V: OspfVersion>(top: &mut Ospf<V>, want: impl Fn(&Message<V>) -> bool) -> bool {
+        std::iter::from_fn(|| top.rx.try_recv().ok()).any(|msg| want(&msg))
+    }
 
     /// Interface 2 in the backbone, with one neighbour in `state`.
     fn neighbour<V: OspfVersion>(top: &mut Ospf<V>, state: NfsmState)
