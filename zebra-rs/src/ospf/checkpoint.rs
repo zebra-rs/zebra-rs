@@ -180,6 +180,25 @@ impl From<AreaTypeKindSerde> for AreaTypeKind {
     }
 }
 
+/// This router's own Grace-LSAs, of LS type `grace`, on the interfaces in
+/// `area_id`. They live in each interface's database, but the checkpoint
+/// keeps them in their area's list, as it did when they lived in the area
+/// database, so the format is unchanged. The restore sets them aside until
+/// their interface claims them. The router's other link-scope LSAs, its
+/// OSPFv3 Link-LSAs, are rebuilt when the interface comes up.
+fn own_grace_lsas<V: super::version::OspfVersion>(
+    ospf: &Ospf<V>,
+    area_id: Ipv4Addr,
+    grace: u16,
+) -> impl Iterator<Item = (&OspfLsaKey, &super::lsdb::Lsa<V>)> {
+    let router_id = ospf.router_id;
+    ospf.links
+        .values()
+        .filter(move |link| link.area == area_id)
+        .flat_map(|link| link.lsdb.tables.iter())
+        .filter(move |((ls_type, _, adv_router), _)| *ls_type == grace && *adv_router == router_id)
+}
+
 impl OspfCheckpoint {
     /// Build a checkpoint from the current OSPFv2 instance state.
     /// Does not write to disk — call [`Self::write_to_path`].
@@ -192,6 +211,11 @@ impl OspfCheckpoint {
                     .lsdb
                     .tables
                     .iter()
+                    .chain(own_grace_lsas(
+                        ospf,
+                        *area_id,
+                        u8::from(ospf_packet::OspfLsType::OpaqueLinkLocal).into(),
+                    ))
                     .map(|(key, lsa)| {
                         let mut buf = BytesMut::new();
                         lsa.data.h.emit(&mut buf);
@@ -269,6 +293,11 @@ impl OspfCheckpoint {
                     .lsdb
                     .tables
                     .iter()
+                    .chain(own_grace_lsas(
+                        ospf,
+                        *area_id,
+                        ospf_packet::OSPFV3_GRACE_LSA_TYPE,
+                    ))
                     .map(|(key, lsa)| {
                         let mut buf = BytesMut::new();
                         lsa.data.emit(&mut buf);

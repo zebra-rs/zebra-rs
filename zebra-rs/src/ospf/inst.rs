@@ -404,6 +404,13 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// restart; `None` in steady state. While `Some`, the
     /// originated Router-Info LSA carries `gr_capable=true`.
     pub restarting: Option<super::neigh::RestartingState>,
+    /// This router's own link-scope LSAs — its Grace-LSAs — restored from
+    /// a graceful-restart checkpoint, each with its area. They belong in
+    /// an interface's database (RFC 5250 §3.1, RFC 5340 §4.1.2), but the
+    /// checkpoint is replayed before any interface exists: each waits here
+    /// until its interface re-originates or flushes it. Cleared when the
+    /// restart ends.
+    pub restored_link_lsas: Vec<(Ipv4Addr, V::Lsa)>,
     /// Snapshot of `/key-chains/key-chain <name>` entries the policy
     /// actor has pushed to this OSPF instance via `PolicyRx::KeyChain`
     /// notifications. The canonical map lives in `policy::Policy`;
@@ -644,10 +651,10 @@ pub struct OspfInterface<'a, V: OspfVersion = Ospfv2> {
     /// instead). Populated by `Ospf<Ospfv3>::ospf_interface` from
     /// `self.v3_send_tx`.
     pub v3_send_tx: Option<&'a UnboundedSender<super::network_v6::Ospfv3Send>>,
-    /// Per-link LSDB (RFC 5340 §A.4.9). Holds link-scope LSAs that
-    /// flood only on the segment they originated on. Always
-    /// borrowed from `OspfLink::lsdb`; on v2 it's empty (no
-    /// link-scope LSA types in RFC 2328).
+    /// Per-link LSDB. Holds the link-scope LSAs that flood only on
+    /// this segment: OSPFv3's Link-LSAs and Grace-LSAs (RFC 5340
+    /// §4.1.2), OSPFv2's type-9 Opaque LSAs (RFC 5250 §3.1). Always
+    /// borrowed from `OspfLink::lsdb`.
     pub link_lsdb: &'a mut Lsdb<V>,
 }
 
@@ -1842,6 +1849,7 @@ impl Ospf<Ospfv2> {
             ilm6: BTreeMap::new(),
             local_pool: None,
             lan_adj_sids: BTreeMap::new(),
+            restored_link_lsas: Vec::new(),
             rib6: PrefixMap::new(),
             rib6_areas: BTreeMap::new(),
             range_discards: BTreeSet::new(),
@@ -4530,6 +4538,16 @@ impl Ospf<Ospfv2> {
             "LSDB event"
         );
 
+        // A link-scope LSA lives in its interface's database, not the
+        // area's (RFC 5250 §3.1).
+        if matches!(
+            super::flood::lsa_flood_scope(ls_type),
+            super::flood::FloodScope::Link
+        ) {
+            self.link_lsdb_event(ev, area_id, key);
+            return;
+        }
+
         // Handle SelfOriginatedReceived before borrowing lsdb, since
         // re-origination needs full &mut self access.
         if ev == LsdbEvent::SelfOriginatedReceived {
@@ -4623,8 +4641,8 @@ impl Ospf<Ospfv2> {
                     self.flood_lsa_through_area(area_id, &lsa, None)
                 }
                 (FloodScope::As, _) => self.flood_lsa_through_as(&lsa, None),
-                // A link-scope LSA is filed in the area database without
-                // its interface, so there is nowhere to reflood it.
+                // A link-scope LSA never gets here: `link_lsdb_event`
+                // refloods it on its interface.
                 _ => {}
             }
             return;
@@ -4718,6 +4736,91 @@ impl Ospf<Ospfv2> {
                 .is_some_and(|area| area.area_type.is_nssa())
         {
             let _ = self.tx.send(Message::NssaTranslateResync(area_id));
+        }
+    }
+
+    /// An LSDB event for a link-scope LSA (type 9), which lives in the
+    /// database of the interface it belongs to (RFC 5250 §3.1). The event
+    /// does not say which interface, so every one holding `key` is looked
+    /// at, as OSPFv3 does.
+    ///
+    /// - Refresh: one of ours is refreshed and flooded on its interface.
+    /// - Expiry: it ages out to MaxAge and is reflooded on its interface
+    ///   (RFC 2328 §14), then leaves once no neighbour awaits it.
+    /// - A copy of one of ours, received: it is flushed on its interface
+    ///   (§13.4), unless a graceful restart is under way. The restarting
+    ///   router leaves its own LSAs alone (RFC 3623 §2.2), and exiting the
+    ///   restart flushes the Grace-LSA.
+    fn link_lsdb_event(&mut self, ev: LsdbEvent, area_id: Option<Ipv4Addr>, key: OspfLsaKey) {
+        let tx = self.tx.clone();
+        let ifindexes: Vec<u32> = self
+            .links
+            .iter()
+            .filter(|(_, link)| link.lsdb.tables.contains_key(&key))
+            .map(|(ifindex, _)| *ifindex)
+            .collect();
+        let (_, _, adv_router) = key;
+        match ev {
+            LsdbEvent::RefreshTimerExpire => {
+                if adv_router != self.router_id {
+                    return;
+                }
+                for ifindex in ifindexes {
+                    let refreshed = self
+                        .links
+                        .get_mut(&ifindex)
+                        .and_then(|link| link.lsdb.refresh_lsa_by_raw_key(key, &tx, area_id));
+                    if let Some(lsa) = refreshed {
+                        self.flood_lsa_through_link(ifindex, &lsa, None);
+                    }
+                }
+            }
+            LsdbEvent::SelfOriginatedReceived => {
+                if adv_router == self.router_id && self.restarting.is_some() {
+                    return;
+                }
+                for ifindex in ifindexes {
+                    let flushed = self
+                        .links
+                        .get_mut(&ifindex)
+                        .and_then(|link| link.lsdb.flush_lsa_by_raw_key(key, &tx, area_id));
+                    if let Some(lsa) = flushed {
+                        self.flood_lsa_through_link(ifindex, &lsa, None);
+                    }
+                }
+            }
+            LsdbEvent::HoldTimerExpire => {
+                let mut aged = false;
+                for &ifindex in &ifindexes {
+                    let aged_out = self
+                        .links
+                        .get_mut(&ifindex)
+                        .and_then(|link| link.lsdb.age_out(key, &tx, area_id));
+                    if let Some(lsa) = aged_out {
+                        self.flood_lsa_through_link(ifindex, &lsa, None);
+                        aged = true;
+                    }
+                }
+                if aged {
+                    return;
+                }
+                if self.max_age_removal_waits(key) {
+                    let mut held = false;
+                    for ifindex in &ifindexes {
+                        if let Some(link) = self.links.get_mut(ifindex) {
+                            held |= link.lsdb.hold_max_age(key, &tx, area_id);
+                        }
+                    }
+                    if held {
+                        return;
+                    }
+                }
+                for ifindex in &ifindexes {
+                    if let Some(link) = self.links.get_mut(ifindex) {
+                        link.lsdb.remove_expired_by_raw_key(key);
+                    }
+                }
+            }
         }
     }
 
@@ -5672,6 +5775,51 @@ impl Ospf<Ospfv2> {
         self.restarting.is_some()
     }
 
+    /// Replay a checkpoint's areas into their databases (see
+    /// `gr_restart_load_checkpoint`); this router's own link-scope LSAs
+    /// wait in `restored_link_lsas` for their interfaces. Returns how many
+    /// LSAs were restored.
+    fn gr_restart_replay_areas(&mut self, areas: &[super::checkpoint::AreaCheckpoint]) -> usize {
+        let mut total_lsas = 0usize;
+        for area_cp in areas {
+            let area = self.areas.fetch(area_cp.area_id);
+            area.area_type.kind = area_cp.area_type_kind.into();
+            for snap in &area_cp.lsas {
+                let Some(lsa) = ospf_packet::OspfLsa::decode(&snap.body) else {
+                    tracing::warn!(
+                        "[GR Restart] failed to decode checkpointed LSA key={:?}, skipping",
+                        snap.key
+                    );
+                    continue;
+                };
+                // Our Grace-LSAs wait for their interfaces.
+                if matches!(
+                    super::flood::lsa_flood_scope(lsa.h.ls_type),
+                    super::flood::FloodScope::Link
+                ) {
+                    if snap.self_originated {
+                        self.restored_link_lsas.push((area_cp.area_id, lsa));
+                        total_lsas += 1;
+                    }
+                    continue;
+                }
+                if snap.self_originated {
+                    area.lsdb.insert_self_originated(
+                        lsa,
+                        &self.tx,
+                        Some(area_cp.area_id),
+                        &self.tracing,
+                    );
+                } else {
+                    area.lsdb
+                        .insert_received(lsa, &self.tx, Some(area_cp.area_id), &self.tracing);
+                }
+                total_lsas += 1;
+            }
+        }
+        total_lsas
+    }
+
     /// Replay an on-disk checkpoint into a freshly constructed
     /// `Ospf<Ospfv2>` instance.
     ///
@@ -5736,32 +5884,7 @@ impl Ospf<Ospfv2> {
 
         // Replay: router-id, areas + their LSDBs, lan_adj_sids.
         self.router_id = cp.router_id;
-        let mut total_lsas = 0usize;
-        for area_cp in &cp.areas {
-            let area = self.areas.fetch(area_cp.area_id);
-            area.area_type.kind = area_cp.area_type_kind.into();
-            for snap in &area_cp.lsas {
-                let Some(lsa) = ospf_packet::OspfLsa::decode(&snap.body) else {
-                    tracing::warn!(
-                        "[GR Restart] failed to decode checkpointed LSA key={:?}, skipping",
-                        snap.key
-                    );
-                    continue;
-                };
-                if snap.self_originated {
-                    area.lsdb.insert_self_originated(
-                        lsa,
-                        &self.tx,
-                        Some(area_cp.area_id),
-                        &self.tracing,
-                    );
-                } else {
-                    area.lsdb
-                        .insert_received(lsa, &self.tx, Some(area_cp.area_id), &self.tracing);
-                }
-                total_lsas += 1;
-            }
-        }
+        let total_lsas = self.gr_restart_replay_areas(&cp.areas);
         for ((ifindex, addr), label) in &cp.lan_adj_sids {
             self.lan_adj_sids.insert((*ifindex, *addr), *label);
         }
@@ -5827,6 +5950,8 @@ impl Ospf<Ospfv2> {
         for ifindex in &ifindices {
             self.flush_grace_lsa(*ifindex);
         }
+        // Restored Grace-LSAs whose interface never came back.
+        self.restored_link_lsas.clear();
 
         self.router_info_lsa_originate();
         tracing::info!("[GR Restart] aborted; Grace LSAs flushed, gr_capable cleared");
@@ -5864,6 +5989,8 @@ impl Ospf<Ospfv2> {
         for ifindex in &ifindices {
             self.flush_grace_lsa(*ifindex);
         }
+        // Restored Grace-LSAs whose interface never came back.
+        self.restored_link_lsas.clear();
 
         // Re-originate at seq+1 for every topology-affecting
         // self LSA. `router_lsa_originate` covers Router-LSA;
@@ -5967,6 +6094,7 @@ impl Ospf<Ospfv2> {
     ) -> bool {
         use ospf_packet::{GraceLsa, GraceTlv, OpaqueLsaType, OspfLsType, OspfLsaHeader, OspfLsp};
 
+        self.claim_restored_link_lsas(ifindex);
         let Some(link) = self.links.get(&ifindex) else {
             return false;
         };
@@ -5991,26 +6119,52 @@ impl Ospf<Ospfv2> {
 
         // Preserve seq number across re-stages.
         let area_id = link.area;
-        if let Some(area) = self.areas.get(area_id)
-            && let Some(existing) =
-                area.lsdb
-                    .lookup_by_id(OspfLsType::OpaqueLinkLocal, ls_id, self.router_id)
+        if let Some(existing) =
+            link.lsdb
+                .lookup_by_id(OspfLsType::OpaqueLinkLocal, ls_id, self.router_id)
         {
             h.ls_seq_number = seq_max(h.ls_seq_number, existing.h.ls_seq_number.saturating_add(1));
         }
         let mut lsa = OspfLsa::from(h, OspfLsp::OpaqueLinkLocalGrace(body));
         lsa.update();
 
-        // Install into the area LSDB (v2's link-local LSAs live
-        // there for lookup purposes) and emit on this interface
-        // alone.
+        // Kept with its interface (RFC 5250 §3.1) and flooded on it
+        // alone. Every interface's Grace-LSA has the same key, so the
+        // area database, where it used to go, could hold only one.
         let flood_copy = lsa.clone();
-        if let Some(area) = self.areas.get_mut(area_id) {
-            area.lsdb
+        if let Some(link) = self.links.get_mut(&ifindex) {
+            link.lsdb
                 .insert_self_originated(lsa, &self.tx, Some(area_id), &self.tracing);
         }
-        self.flood_link_scope_lsa_v2(ifindex, &flood_copy);
+        self.flood_lsa_through_link(ifindex, &flood_copy, None);
         true
+    }
+
+    /// Move this router's restored link-scope LSAs that belong to
+    /// `ifindex` into its database (see `restored_link_lsas`). A Grace-LSA
+    /// names its interface by address (RFC 3623 §A.2).
+    fn claim_restored_link_lsas(&mut self, ifindex: u32) {
+        use ospf_packet::GraceTlv;
+        let Some(link) = self.links.get(&ifindex) else {
+            return;
+        };
+        let addrs: Vec<Ipv4Addr> = link.addr.iter().map(|a| a.prefix.addr()).collect();
+        let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.restored_link_lsas)
+            .into_iter()
+            .partition(|(_, lsa)| match &lsa.lsp {
+                OspfLsp::OpaqueLinkLocalGrace(body) => body
+                    .tlvs
+                    .iter()
+                    .any(|tlv| matches!(tlv, GraceTlv::IpInterfaceAddress(a) if addrs.contains(a))),
+                _ => false,
+            });
+        self.restored_link_lsas = rest;
+        if let Some(link) = self.links.get_mut(&ifindex) {
+            for (area_id, lsa) in mine {
+                link.lsdb
+                    .install_restored(lsa, &self.tx, Some(area_id), &self.tracing);
+            }
+        }
     }
 
     /// Pre-age a previously-originated Grace LSA to MaxAge and
@@ -6020,54 +6174,22 @@ impl Ospf<Ospfv2> {
         use ospf_packet::{OpaqueLsaType, OspfLsType};
 
         let ls_id = Ipv4Addr::from((OpaqueLsaType::GRACE as u32) << 24);
-        let Some(link) = self.links.get(&ifindex) else {
-            return;
-        };
-        let area_id = link.area;
-        let flushed = if let Some(area) = self.areas.get_mut(area_id) {
-            area.lsdb.flush_lsa(
-                OspfLsType::OpaqueLinkLocal,
-                ls_id,
-                self.router_id,
-                &self.tx,
-                Some(area_id),
-            )
-        } else {
-            None
-        };
-        if let Some(lsa) = flushed {
-            self.flood_link_scope_lsa_v2(ifindex, &lsa);
-        }
-    }
-
-    /// Emit `lsa` to every Exchange-or-later neighbor on
-    /// `ifindex`, bypassing the area-wide fanout. Used for
-    /// link-local-scope LSAs (Grace) that must not cross the
-    /// segment they were originated on.
-    fn flood_link_scope_lsa_v2(&mut self, ifindex: u32, lsa: &OspfLsa) {
-        let now = chrono::Utc::now();
-        let chains = self.key_chains.clone();
+        self.claim_restored_link_lsas(ifindex);
+        let router_id = self.router_id;
+        let tx = self.tx.clone();
         let Some(link) = self.links.get_mut(&ifindex) else {
             return;
         };
-        let area = link.area;
-        let ctx = link.auth_send_ctx(&chains, now);
-        for nbr in link.nbrs.values_mut() {
-            if nbr.state < NfsmState::Exchange {
-                continue;
-            }
-            let ls_upd = OspfLsUpdate {
-                lsas: vec![lsa.clone()],
-            };
-            let mut packet =
-                Ospfv2Packet::new(&self.router_id, &area, Ospfv2Payload::LsUpdate(ls_upd));
-            super::packet::apply_link_auth(&mut packet, &ctx);
-            let _ = nbr.ptx.send(Message::Send(
-                packet,
-                nbr.ifindex,
-                Some(nbr.ident.prefix.addr()),
-                None,
-            ));
+        let area_id = link.area;
+        let flushed = link.lsdb.flush_lsa(
+            OspfLsType::OpaqueLinkLocal,
+            ls_id,
+            router_id,
+            &tx,
+            Some(area_id),
+        );
+        if let Some(lsa) = flushed {
+            self.flood_lsa_through_link(ifindex, &lsa, None);
         }
     }
 
@@ -6093,93 +6215,108 @@ impl Ospf<Ospfv2> {
             return;
         };
         let link_indices: Vec<u32> = area.links.iter().copied().collect();
-        let now = chrono::Utc::now();
         for ifindex in link_indices {
-            let chains = &self.key_chains;
-            let Some(link) = self.links.get_mut(&ifindex) else {
-                continue;
-            };
-            let retransmit_interval = link.retransmit_interval();
-            let link_state = link.state;
-            let auth_mode = link.auth_mode();
-            let auth_key = link.config.auth_key;
-            let crypto_key = link.resolve_active_send_key(chains, now);
-            let md5_seq_cell = &link.md5_seq;
+            self.flood_lsa_through_link(ifindex, lsa, source);
+        }
+    }
 
-            // RFC 2328 Section 13.3 Step 2-4: DR/BDR flooding decision.
-            let is_source_iface = source.is_some_and(|(src_if, _)| src_if == ifindex);
+    /// RFC 2328 §13.3 on one interface: send `lsa` to each eligible
+    /// neighbor on `ifindex`, and add it to their retransmission lists. The
+    /// area flood runs this on every interface in the area; a link-scope
+    /// LSA (RFC 5250 §3.1) goes through it on its own interface only.
+    /// `source` is the neighbor it came from, `None` when originated here.
+    fn flood_lsa_through_link(
+        &mut self,
+        ifindex: u32,
+        lsa: &OspfLsa,
+        source: Option<(u32, Ipv4Addr)>,
+    ) {
+        let now = chrono::Utc::now();
+        let chains = &self.key_chains;
+        let Some(link) = self.links.get_mut(&ifindex) else {
+            return;
+        };
+        let area_id = link.area;
+        let retransmit_interval = link.retransmit_interval();
+        let link_state = link.state;
+        let auth_mode = link.auth_mode();
+        let auth_key = link.config.auth_key;
+        let crypto_key = link.resolve_active_send_key(chains, now);
+        let md5_seq_cell = &link.md5_seq;
 
-            // RFC 2328 Section 13.3 Step 3: If interface state is Backup and
-            // LSA was received on this interface, do not flood back out.
-            if is_source_iface && link_state == IfsmState::Backup {
+        // RFC 2328 Section 13.3 Step 2-4: DR/BDR flooding decision.
+        let is_source_iface = source.is_some_and(|(src_if, _)| src_if == ifindex);
+
+        // RFC 2328 Section 13.3 Step 3: If interface state is Backup and
+        // LSA was received on this interface, do not flood back out.
+        if is_source_iface && link_state == IfsmState::Backup {
+            return;
+        }
+
+        // RFC 2328 Section 13.3 Step 4: For broadcast/NBMA interfaces in
+        // state DROther, only flood if we received from DR or BDR.
+        if is_source_iface
+            && link_state == IfsmState::DROther
+            && let Some((_, src_addr)) = source
+        {
+            let dr = link.ident.d_router;
+            let bdr = link.ident.bd_router;
+            if src_addr != dr && src_addr != bdr {
+                return;
+            }
+        }
+
+        for nbr in link.nbrs.values_mut() {
+            // RFC 2328 Section 13.3 Step 1(a): Skip neighbors below Exchange.
+            if nbr.state < NfsmState::Exchange {
                 continue;
             }
 
-            // RFC 2328 Section 13.3 Step 4: For broadcast/NBMA interfaces in
-            // state DROther, only flood if we received from DR or BDR.
-            if is_source_iface
-                && link_state == IfsmState::DROther
-                && let Some((_, src_addr)) = source
+            // RFC 2328 Section 13.3 Step 1(b): reconcile against
+            // the instance this neighbor advertised. A neighbor
+            // that already holds this LSA doesn't need our copy.
+            if super::flood::ospf_flood_reconcile_ls_req(nbr, lsa)
+                == super::flood::FloodTarget::Skip
             {
-                let dr = link.ident.d_router;
-                let bdr = link.ident.bd_router;
-                if src_addr != dr && src_addr != bdr {
-                    continue;
-                }
+                continue;
             }
 
-            for nbr in link.nbrs.values_mut() {
-                // RFC 2328 Section 13.3 Step 1(a): Skip neighbors below Exchange.
-                if nbr.state < NfsmState::Exchange {
-                    continue;
-                }
-
-                // RFC 2328 Section 13.3 Step 1(b): reconcile against
-                // the instance this neighbor advertised. A neighbor
-                // that already holds this LSA doesn't need our copy.
-                if super::flood::ospf_flood_reconcile_ls_req(nbr, lsa)
-                    == super::flood::FloodTarget::Skip
-                {
-                    continue;
-                }
-
-                // RFC 2328 Section 13.3 Step 1(c): Skip the source neighbor.
-                if let Some((src_ifindex, src_addr)) = source
-                    && nbr.ifindex == src_ifindex
-                    && nbr.ident.prefix.addr() == src_addr
-                {
-                    continue;
-                }
-
-                // RFC 2328 Section 13.3 Step 1(d): Add LSA to retransmit list.
-                super::flood::ospf_ls_retransmit_add(nbr, lsa, retransmit_interval);
-
-                let ls_upd = OspfLsUpdate {
-                    lsas: vec![lsa.clone()],
-                };
-                let mut packet =
-                    Ospfv2Packet::new(&self.router_id, &area_id, Ospfv2Payload::LsUpdate(ls_upd));
-                apply_link_auth(
-                    &mut packet,
-                    &build_auth_ctx(auth_mode, auth_key, crypto_key.clone(), md5_seq_cell),
-                );
-                ospf_packet_trace!(
-                    self.tracing,
-                    LsUpdate,
-                    Send,
-                    "[Flood] Sending LSA type={:?} id={} adv={} to nbr={}",
-                    lsa.h.ls_type,
-                    lsa.h.ls_id,
-                    lsa.h.adv_router,
-                    nbr.ident.prefix.addr()
-                );
-                let _ = nbr.ptx.send(Message::Send(
-                    packet,
-                    nbr.ifindex,
-                    Some(nbr.ident.prefix.addr()),
-                    None,
-                ));
+            // RFC 2328 Section 13.3 Step 1(c): Skip the source neighbor.
+            if let Some((src_ifindex, src_addr)) = source
+                && nbr.ifindex == src_ifindex
+                && nbr.ident.prefix.addr() == src_addr
+            {
+                continue;
             }
+
+            // RFC 2328 Section 13.3 Step 1(d): Add LSA to retransmit list.
+            super::flood::ospf_ls_retransmit_add(nbr, lsa, retransmit_interval);
+
+            let ls_upd = OspfLsUpdate {
+                lsas: vec![lsa.clone()],
+            };
+            let mut packet =
+                Ospfv2Packet::new(&self.router_id, &area_id, Ospfv2Payload::LsUpdate(ls_upd));
+            apply_link_auth(
+                &mut packet,
+                &build_auth_ctx(auth_mode, auth_key, crypto_key.clone(), md5_seq_cell),
+            );
+            ospf_packet_trace!(
+                self.tracing,
+                LsUpdate,
+                Send,
+                "[Flood] Sending LSA type={:?} id={} adv={} to nbr={}",
+                lsa.h.ls_type,
+                lsa.h.ls_id,
+                lsa.h.adv_router,
+                nbr.ident.prefix.addr()
+            );
+            let _ = nbr.ptx.send(Message::Send(
+                packet,
+                nbr.ifindex,
+                Some(nbr.ident.prefix.addr()),
+                None,
+            ));
         }
     }
 
@@ -6529,7 +6666,7 @@ impl Ospf<Ospfv2> {
                     None
                 };
                 if let Some(lsa) = flushed {
-                    self.flood_link_scope_lsa_v2(ifindex, &lsa);
+                    self.flood_lsa_through_link(ifindex, &lsa, None);
                 }
             }
         }
@@ -6966,7 +7103,17 @@ impl Ospf<Ospfv2> {
                 self.process_lsdb(ev, area_id, key);
             }
             Message::Flood(area_id, lsa, source_ifindex, source_nbr_addr) => {
-                self.flood_lsa_through_area(area_id, &lsa, Some((source_ifindex, source_nbr_addr)));
+                let source = Some((source_ifindex, source_nbr_addr));
+                // RFC 5250 §3.1: a link-scope LSA goes back out only on
+                // the interface it came in on.
+                if matches!(
+                    super::flood::lsa_flood_scope(lsa.h.ls_type),
+                    super::flood::FloodScope::Link
+                ) {
+                    self.flood_lsa_through_link(source_ifindex, &lsa, source);
+                } else {
+                    self.flood_lsa_through_area(area_id, &lsa, source);
+                }
             }
             Message::FloodAs(lsa, source_ifindex, source_nbr_addr) => {
                 self.flood_lsa_through_as(&lsa, Some((source_ifindex, source_nbr_addr)));
@@ -7391,6 +7538,7 @@ impl Ospf<Ospfv3> {
             ilm6: BTreeMap::new(),
             local_pool: None,
             lan_adj_sids: BTreeMap::new(),
+            restored_link_lsas: Vec::new(),
             rib6: PrefixMap::new(),
             rib6_areas: BTreeMap::new(),
             range_discards: BTreeSet::new(),
@@ -7898,7 +8046,7 @@ impl Ospf<Ospfv3> {
                     None
                 };
                 if let Some(lsa) = flushed {
-                    self.flood_link_scope_lsa(ifindex, &lsa);
+                    self.flood_lsa_through_link(ifindex, &lsa, None);
                 }
             }
         }
@@ -9582,6 +9730,7 @@ impl Ospf<Ospfv3> {
             GraceLsa, GraceTlv, OSPFV3_GRACE_LSA_TYPE, Ospfv3LsBody, Ospfv3LsaHeader,
         };
 
+        self.claim_restored_link_lsas(ifindex);
         let Some(link) = self.links.get(&ifindex) else {
             return false;
         };
@@ -9612,9 +9761,10 @@ impl Ospf<Ospfv3> {
             raw: None,
         };
 
+        // Kept with its interface (RFC 5340 §4.1.2), as a peer's is.
         let key: super::lsdb::OspfLsaKey = (OSPFV3_GRACE_LSA_TYPE, link_state_id, self.router_id);
-        let flood_lsa = if let Some(area) = self.areas.get_mut(area_id) {
-            if let Some(existing) = area.lsdb.lookup_by_raw_key(key) {
+        let flood_lsa = if let Some(link) = self.links.get_mut(&ifindex) {
+            if let Some(existing) = link.lsdb.lookup_by_raw_key(key) {
                 lsa.h.ls_seq_number = seq_max(
                     lsa.h.ls_seq_number,
                     existing.h.ls_seq_number.saturating_add(1),
@@ -9622,17 +9772,37 @@ impl Ospf<Ospfv3> {
             }
             lsa.update();
             let flood_lsa = lsa.clone();
-            area.lsdb
+            link.lsdb
                 .install_originated(lsa, &self.tx, Some(area_id), &self.tracing);
             Some(flood_lsa)
         } else {
             None
         };
         if let Some(lsa) = flood_lsa {
-            self.flood_link_scope_lsa(ifindex, &lsa);
+            self.flood_lsa_through_link(ifindex, &lsa, None);
             true
         } else {
             false
+        }
+    }
+
+    /// Move this router's restored link-scope LSAs that belong to
+    /// `ifindex` into its database (see `restored_link_lsas`), as OSPFv2
+    /// does. A v3 Grace-LSA is keyed by its interface ID.
+    fn claim_restored_link_lsas(&mut self, ifindex: u32) {
+        let Some(link) = self.links.get(&ifindex) else {
+            return;
+        };
+        let interface_id = link.interface_id;
+        let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.restored_link_lsas)
+            .into_iter()
+            .partition(|(_, lsa)| lsa.h.link_state_id == interface_id);
+        self.restored_link_lsas = rest;
+        if let Some(link) = self.links.get_mut(&ifindex) {
+            for (area_id, lsa) in mine {
+                link.lsdb
+                    .install_restored(lsa, &self.tx, Some(area_id), &self.tracing);
+            }
         }
     }
 
@@ -9641,19 +9811,18 @@ impl Ospf<Ospfv3> {
     fn flush_grace_lsa_v3(&mut self, ifindex: u32) {
         use ospf_packet::OSPFV3_GRACE_LSA_TYPE;
 
-        let Some(link) = self.links.get(&ifindex) else {
+        self.claim_restored_link_lsas(ifindex);
+
+        let router_id = self.router_id;
+        let tx = self.tx.clone();
+        let Some(link) = self.links.get_mut(&ifindex) else {
             return;
         };
         let area_id = link.area;
-        let key: super::lsdb::OspfLsaKey =
-            (OSPFV3_GRACE_LSA_TYPE, link.interface_id, self.router_id);
-        let flushed = if let Some(area) = self.areas.get_mut(area_id) {
-            area.lsdb.flush_lsa_by_raw_key(key, &self.tx, Some(area_id))
-        } else {
-            None
-        };
+        let key: super::lsdb::OspfLsaKey = (OSPFV3_GRACE_LSA_TYPE, link.interface_id, router_id);
+        let flushed = link.lsdb.flush_lsa_by_raw_key(key, &tx, Some(area_id));
         if let Some(lsa) = flushed {
-            self.flood_link_scope_lsa(ifindex, &lsa);
+            self.flood_lsa_through_link(ifindex, &lsa, None);
         }
     }
 
@@ -9787,6 +9956,8 @@ impl Ospf<Ospfv3> {
         for ifindex in &ifindices {
             self.flush_grace_lsa_v3(*ifindex);
         }
+        // Restored Grace-LSAs whose interface never came back.
+        self.restored_link_lsas.clear();
         self.sr_capabilities_v3_originate_all();
         tracing::info!("[GR Restart v3] aborted; Grace LSAs flushed, restart-capable cleared");
     }
@@ -9812,6 +9983,8 @@ impl Ospf<Ospfv3> {
         for ifindex in &ifindices {
             self.flush_grace_lsa_v3(*ifindex);
         }
+        // Restored Grace-LSAs whose interface never came back.
+        self.restored_link_lsas.clear();
 
         // Re-originate at seq+1. Router-LSA covers topology; the
         // per-area Intra-Area-Prefix and per-link Link/Network/
@@ -9855,6 +10028,59 @@ impl Ospf<Ospfv3> {
         }
     }
 
+    /// Replay a checkpoint's areas into their databases, as OSPFv2's
+    /// `gr_restart_replay_areas` does; this router's own Grace-LSAs wait
+    /// in `restored_link_lsas` for their interfaces. Returns how many LSAs
+    /// were restored.
+    fn gr_restart_replay_areas(&mut self, areas: &[super::checkpoint::AreaCheckpoint]) -> usize {
+        let mut total_lsas = 0usize;
+        for area_cp in areas {
+            let area = self.areas.fetch(area_cp.area_id);
+            area.area_type.kind = area_cp.area_type_kind.into();
+            for snap in &area_cp.lsas {
+                let Some(lsa) = ospf_packet::Ospfv3Lsa::decode(&snap.body) else {
+                    tracing::warn!(
+                        "[GR Restart v3] failed to decode checkpointed LSA key={:?}, skipping",
+                        snap.key
+                    );
+                    continue;
+                };
+                // Our Grace-LSAs wait for their interfaces, as in OSPFv2.
+                // Our Link-LSAs are rebuilt when an interface comes up.
+                if matches!(
+                    super::packet_v3::ospfv3_ls_type_scope(lsa.h.ls_type),
+                    super::packet_v3::Ospfv3LsaScope::Link
+                ) {
+                    if snap.self_originated && lsa.h.ls_type == ospf_packet::OSPFV3_GRACE_LSA_TYPE {
+                        self.restored_link_lsas.push((area_cp.area_id, lsa));
+                        total_lsas += 1;
+                    }
+                    continue;
+                }
+                if snap.self_originated {
+                    // The decoded LSA carries its exact wire bytes in
+                    // `raw`, so the re-flood matches helpers' snapshot
+                    // verbatim; install_originated arms hold/refresh.
+                    area.lsdb.install_originated(
+                        lsa,
+                        &self.tx,
+                        Some(area_cp.area_id),
+                        &self.tracing,
+                    );
+                } else {
+                    area.lsdb.insert_received_v3(
+                        lsa,
+                        &self.tx,
+                        Some(area_cp.area_id),
+                        &self.tracing,
+                    );
+                }
+                total_lsas += 1;
+            }
+        }
+        total_lsas
+    }
+
     /// Restart-aware boot: replay a fresh v3 checkpoint (router-id +
     /// per-area LSDBs restored byte-identical) and enter restart mode
     /// for the remaining grace window. v3 sibling of
@@ -9896,39 +10122,7 @@ impl Ospf<Ospfv3> {
         }
 
         self.router_id = cp.router_id;
-        let mut total_lsas = 0usize;
-        for area_cp in &cp.areas {
-            let area = self.areas.fetch(area_cp.area_id);
-            area.area_type.kind = area_cp.area_type_kind.into();
-            for snap in &area_cp.lsas {
-                let Some(lsa) = ospf_packet::Ospfv3Lsa::decode(&snap.body) else {
-                    tracing::warn!(
-                        "[GR Restart v3] failed to decode checkpointed LSA key={:?}, skipping",
-                        snap.key
-                    );
-                    continue;
-                };
-                if snap.self_originated {
-                    // The decoded LSA carries its exact wire bytes in
-                    // `raw`, so the re-flood matches helpers' snapshot
-                    // verbatim; install_originated arms hold/refresh.
-                    area.lsdb.install_originated(
-                        lsa,
-                        &self.tx,
-                        Some(area_cp.area_id),
-                        &self.tracing,
-                    );
-                } else {
-                    area.lsdb.insert_received_v3(
-                        lsa,
-                        &self.tx,
-                        Some(area_cp.area_id),
-                        &self.tracing,
-                    );
-                }
-                total_lsas += 1;
-            }
-        }
+        let total_lsas = self.gr_restart_replay_areas(&cp.areas);
 
         let remaining = max_age.saturating_sub(age);
         let remaining_secs = remaining.as_secs().max(1);
@@ -10253,7 +10447,22 @@ impl Ospf<Ospfv3> {
             Ospfv3LsaScope::Link if ls_type == ospf_packet::OSPFV3_LINK_LSA_TYPE => {
                 self.link_lsa_originate(ls_id);
             }
-            Ospfv3LsaScope::Link | Ospfv3LsaScope::Reserved => {}
+            // Any other link-scope LSA of ours (the Grace-LSA) is refreshed
+            // on the interface that holds it, as OSPFv2's type 9 is.
+            Ospfv3LsaScope::Link => {
+                let tx = self.tx.clone();
+                let ifindexes: Vec<u32> = self.links.keys().copied().collect();
+                for ifindex in ifindexes {
+                    let refreshed = self
+                        .links
+                        .get_mut(&ifindex)
+                        .and_then(|link| link.lsdb.refresh_lsa_by_raw_key(key, &tx, area_id));
+                    if let Some(lsa) = refreshed {
+                        self.flood_lsa_through_link(ifindex, &lsa, None);
+                    }
+                }
+            }
+            Ospfv3LsaScope::Reserved => {}
         }
     }
 
@@ -10378,7 +10587,7 @@ impl Ospf<Ospfv3> {
                     if ls_type == ospf_packet::OSPFV3_LINK_LSA_TYPE {
                         let _ = self.tx.send(Message::LinkLsaInstalled(ifindex));
                     }
-                    self.flood_link_scope_lsa(ifindex, &lsa);
+                    self.flood_lsa_through_link(ifindex, &lsa, None);
                     aged = true;
                 }
                 aged
@@ -10546,8 +10755,6 @@ impl Ospf<Ospfv3> {
         lsa: &ospf_packet::Ospfv3Lsa,
         source: Option<(u32, std::net::Ipv6Addr)>,
     ) {
-        use ospf_packet::{Ospfv3LsUpdate, Ospfv3Packet, Ospfv3Payload};
-
         // RFC 5187 §3.2 — every LSA flooded here was just installed
         // in the area LSDB, so this is the v3 choke point for the
         // topology-change helper exit (mirror of v2's hook in
@@ -10556,91 +10763,107 @@ impl Ospf<Ospfv3> {
         // we'd otherwise loop over.
         self.gr_helper_check_exit(area_id, lsa);
 
-        let Some(tx) = self.v3_send_tx.as_ref().cloned() else {
-            return;
-        };
         let Some(area) = self.areas.get(area_id) else {
             return;
         };
         let link_indices: Vec<u32> = area.links.iter().copied().collect();
-
         for ifindex in link_indices {
-            let Some(link) = self.links.get_mut(&ifindex) else {
+            self.flood_lsa_through_link(ifindex, lsa, source);
+        }
+    }
+
+    /// RFC 2328 §13.3 on one interface, as OSPFv2's: send `lsa` to each
+    /// eligible neighbor on `ifindex`, and add it to their retransmission
+    /// lists. The area flood runs this on every interface in the area; a
+    /// link-scope LSA (RFC 5340 §4.5.2) goes through it on its own
+    /// interface only. `source` is the neighbor it came from, `None` when
+    /// originated here.
+    fn flood_lsa_through_link(
+        &mut self,
+        ifindex: u32,
+        lsa: &ospf_packet::Ospfv3Lsa,
+        source: Option<(u32, std::net::Ipv6Addr)>,
+    ) {
+        use ospf_packet::{Ospfv3LsUpdate, Ospfv3Packet, Ospfv3Payload};
+
+        let Some(tx) = self.v3_send_tx.as_ref().cloned() else {
+            return;
+        };
+        let Some(link) = self.links.get_mut(&ifindex) else {
+            return;
+        };
+        let area_id = link.area;
+        let Some(src) = super::addr::stable_link_local(&link.addr) else {
+            return;
+        };
+        let retransmit_interval = link.retransmit_interval();
+        // Auth send state captured before the neighbor loop (it
+        // borrows `link` immutably; the per-packet seq comes from
+        // the `md5_seq` atomic field directly). RFC 7166: a flood
+        // LSU needs the trailer just like any other packet — the
+        // earlier gap here left authenticated adjacencies unable
+        // to converge re-originated LSAs.
+        let auth_mode = link.auth_mode();
+        let v3_instance_id = link.v3_instance_id();
+        let auth_simple_key = link.config.auth_key;
+        let auth_crypto_key = link.resolve_active_send_key(&self.key_chains, chrono::Utc::now());
+
+        for nbr in link.nbrs.values_mut() {
+            // RFC 2328 §13.3 step 1(a).
+            if nbr.state < NfsmState::Exchange {
                 continue;
-            };
-            let Some(src) = super::addr::stable_link_local(&link.addr) else {
+            }
+
+            // RFC 2328 §13.3 step 1(b): reconcile against the
+            // instance this neighbor advertised. A neighbor that
+            // already holds this LSA doesn't need our copy.
+            if super::flood::ospf_flood_reconcile_ls_req(nbr, lsa)
+                == super::flood::FloodTarget::Skip
+            {
                 continue;
+            }
+
+            // RFC 2328 §13.3 step 1(c): skip the source neighbor.
+            if let Some((src_if, src_v6)) = source
+                && ifindex == src_if
+                && nbr.ident.prefix.addr() == src_v6
+            {
+                continue;
+            }
+
+            // RFC 2328 §13.3 step 1(d): track the LSA on this
+            // neighbor's retransmit list so the per-neighbor
+            // retransmit timer can resend it until we get an
+            // ack.
+            super::flood::ospf_ls_retransmit_add(nbr, lsa, retransmit_interval);
+
+            let ls_upd = Ospfv3LsUpdate {
+                lsas: vec![lsa.clone()],
             };
-            let retransmit_interval = link.retransmit_interval();
-            // Auth send state captured before the neighbor loop (it
-            // borrows `link` immutably; the per-packet seq comes from
-            // the `md5_seq` atomic field directly). RFC 7166: a flood
-            // LSU needs the trailer just like any other packet — the
-            // earlier gap here left authenticated adjacencies unable
-            // to converge re-originated LSAs.
-            let auth_mode = link.auth_mode();
-            let v3_instance_id = link.v3_instance_id();
-            let auth_simple_key = link.config.auth_key;
-            let auth_crypto_key =
-                link.resolve_active_send_key(&self.key_chains, chrono::Utc::now());
-
-            for nbr in link.nbrs.values_mut() {
-                // RFC 2328 §13.3 step 1(a).
-                if nbr.state < NfsmState::Exchange {
-                    continue;
-                }
-
-                // RFC 2328 §13.3 step 1(b): reconcile against the
-                // instance this neighbor advertised. A neighbor that
-                // already holds this LSA doesn't need our copy.
-                if super::flood::ospf_flood_reconcile_ls_req(nbr, lsa)
-                    == super::flood::FloodTarget::Skip
-                {
-                    continue;
-                }
-
-                // RFC 2328 §13.3 step 1(c): skip the source neighbor.
-                if let Some((src_if, src_v6)) = source
-                    && ifindex == src_if
-                    && nbr.ident.prefix.addr() == src_v6
-                {
-                    continue;
-                }
-
-                // RFC 2328 §13.3 step 1(d): track the LSA on this
-                // neighbor's retransmit list so the per-neighbor
-                // retransmit timer can resend it until we get an
-                // ack.
-                super::flood::ospf_ls_retransmit_add(nbr, lsa, retransmit_interval);
-
-                let ls_upd = Ospfv3LsUpdate {
-                    lsas: vec![lsa.clone()],
-                };
-                let mut packet = Ospfv3Packet::new(
-                    &self.router_id,
-                    &area_id,
-                    v3_instance_id,
-                    Ospfv3Payload::LsUpdate(ls_upd),
-                );
-                let dst = nbr.ident.prefix.addr();
-                let ctx = super::packet::AuthSendCtx {
-                    mode: auth_mode,
-                    simple_key: auth_simple_key,
-                    crypto_key: auth_crypto_key.clone(),
-                    md5_seq: link
-                        .md5_seq
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-                };
-                super::packet_v3::apply_v3_auth_trailer(&mut packet, &ctx, &src, &dst);
-                let item = super::network_v6::Ospfv3Send {
-                    packet,
-                    ifindex,
-                    dest: Some(dst),
-                    src,
-                };
-                if let Err(e) = tx.send(item) {
-                    tracing::warn!("[v3 Flood] channel send failed: {}", e);
-                }
+            let mut packet = Ospfv3Packet::new(
+                &self.router_id,
+                &area_id,
+                v3_instance_id,
+                Ospfv3Payload::LsUpdate(ls_upd),
+            );
+            let dst = nbr.ident.prefix.addr();
+            let ctx = super::packet::AuthSendCtx {
+                mode: auth_mode,
+                simple_key: auth_simple_key,
+                crypto_key: auth_crypto_key.clone(),
+                md5_seq: link
+                    .md5_seq
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            };
+            super::packet_v3::apply_v3_auth_trailer(&mut packet, &ctx, &src, &dst);
+            let item = super::network_v6::Ospfv3Send {
+                packet,
+                ifindex,
+                dest: Some(dst),
+                src,
+            };
+            if let Err(e) = tx.send(item) {
+                tracing::warn!("[v3 Flood] channel send failed: {}", e);
             }
         }
     }
@@ -11065,8 +11288,18 @@ impl Ospf<Ospfv3> {
             Message::Flood(area_id, lsa, source_ifindex, source_nbr_addr) => {
                 // RFC 2328 §13.3: flood the LSA to every other
                 // Exchange-or-later neighbor in the area, exempting
-                // the (ifindex, router-id) pair we received it from.
-                self.flood_lsa_through_area(area_id, &lsa, Some((source_ifindex, source_nbr_addr)));
+                // the (ifindex, router-id) pair we received it from. A
+                // link-scope LSA goes back out only on the interface it
+                // came in on (RFC 5340 §4.5.2), as OSPFv2's does.
+                let source = Some((source_ifindex, source_nbr_addr));
+                if matches!(
+                    super::packet_v3::ospfv3_ls_type_scope(lsa.h.ls_type),
+                    super::packet_v3::Ospfv3LsaScope::Link
+                ) {
+                    self.flood_lsa_through_link(source_ifindex, &lsa, source);
+                } else {
+                    self.flood_lsa_through_area(area_id, &lsa, source);
+                }
             }
             Message::Retransmit(ifindex, router_id) => {
                 self.process_retransmit(ifindex, router_id);
@@ -11177,6 +11410,33 @@ impl Ospf<Ospfv3> {
                 if ev == super::lsdb::LsdbEvent::SelfOriginatedReceived {
                     let (ls_type, ls_id, adv_router) = key;
                     let area = area_id.unwrap_or(AREA0);
+                    // A link-scope LSA lives in its interface's database
+                    // (RFC 5340 §4.1.2). Our Link-LSA is rebuilt below; any
+                    // other of ours, or one of a former identity, is
+                    // flushed on its interface — unless a graceful restart
+                    // is under way (RFC 3623 §2.2) — as OSPFv2's
+                    // `link_lsdb_event` does.
+                    if matches!(
+                        super::packet_v3::ospfv3_ls_type_scope(ls_type),
+                        super::packet_v3::Ospfv3LsaScope::Link
+                    ) && !(adv_router == self.router_id && ls_type == OSPFV3_LINK_LSA_TYPE)
+                    {
+                        if adv_router == self.router_id && self.restarting.is_some() {
+                            return;
+                        }
+                        let tx = self.tx.clone();
+                        let ifindexes: Vec<u32> = self.links.keys().copied().collect();
+                        for ifindex in ifindexes {
+                            let flushed = self
+                                .links
+                                .get_mut(&ifindex)
+                                .and_then(|link| link.lsdb.flush_lsa_by_raw_key(key, &tx, area_id));
+                            if let Some(lsa) = flushed {
+                                self.flood_lsa_through_link(ifindex, &lsa, None);
+                            }
+                        }
+                        return;
+                    }
                     // A FORMER identity — see the v2 twin in
                     // `process_self_originated_lsa`: nothing
                     // re-originates under it, so flush the echoed
@@ -11378,7 +11638,7 @@ impl Ospf<Ospfv3> {
     /// - Lookup / install go into `OspfLink::lsdb` (not the area
     ///   LSDB), since RFC 5340 §4.5.2 forbids Link-LSAs from
     ///   leaving the segment.
-    /// - Flooding uses `flood_link_scope_lsa(ifindex, lsa)`, which
+    /// - Flooding uses `flood_lsa_through_link(ifindex, lsa, None)`, which
     ///   walks only the neighbors on this one link.
     ///
     /// Returns silently if `build_link_lsa(ifindex)` declines (the
@@ -11414,7 +11674,7 @@ impl Ospf<Ospfv3> {
             link.lsdb
                 .install_originated(lsa, &self.tx, None, &self.tracing);
         }
-        self.flood_link_scope_lsa(ifindex, &flood_lsa);
+        self.flood_lsa_through_link(ifindex, &flood_lsa, None);
     }
 
     /// Flush every Link-LSA we originated on `ifindex` (RFC 2328
@@ -11450,78 +11710,7 @@ impl Ospf<Ospfv3> {
             }
         }
         for lsa in flushed {
-            self.flood_link_scope_lsa(ifindex, &lsa);
-        }
-    }
-
-    /// Flood a link-scope LSA to every Exchange-or-later neighbor
-    /// on the originating link only. Counterpart to
-    /// `flood_self_originated_lsa` which walks the whole area;
-    /// RFC 5340 §4.5.2 bounds link-scope flooding to the segment.
-    ///
-    /// Per RFC 2328 §13.3 step 1(d), every LSA sent to a neighbor
-    /// is added to that neighbor's retransmit list so the
-    /// retransmit timer can resend it until acknowledged. Same
-    /// shape as `flood_lsa_through_area`'s bookkeeping.
-    fn flood_link_scope_lsa(&mut self, ifindex: u32, lsa: &ospf_packet::Ospfv3Lsa) {
-        use ospf_packet::{Ospfv3LsUpdate, Ospfv3Packet, Ospfv3Payload};
-
-        let Some(tx) = self.v3_send_tx.as_ref().cloned() else {
-            return;
-        };
-        let Some(link) = self.links.get_mut(&ifindex) else {
-            return;
-        };
-        let area_id = link.area;
-        let Some(src) = super::addr::stable_link_local(&link.addr) else {
-            return;
-        };
-        let retransmit_interval = link.retransmit_interval();
-        let v3_instance_id = link.v3_instance_id();
-        // Auth send state captured before the neighbor loop (see
-        // `flood_lsa_through_area`).
-        let auth_mode = link.auth_mode();
-        let auth_simple_key = link.config.auth_key;
-        let auth_crypto_key = link.resolve_active_send_key(&self.key_chains, chrono::Utc::now());
-
-        for nbr in link.nbrs.values_mut() {
-            if nbr.state < NfsmState::Exchange {
-                continue;
-            }
-
-            // RFC 2328 §13.3 step 1(d): track the LSA on this
-            // neighbor's retransmit list so the per-neighbor
-            // retransmit timer can resend it until we get an ack.
-            super::flood::ospf_ls_retransmit_add(nbr, lsa, retransmit_interval);
-
-            let ls_upd = Ospfv3LsUpdate {
-                lsas: vec![lsa.clone()],
-            };
-            let mut packet = Ospfv3Packet::new(
-                &self.router_id,
-                &area_id,
-                v3_instance_id,
-                Ospfv3Payload::LsUpdate(ls_upd),
-            );
-            let dst = nbr.ident.prefix.addr();
-            let ctx = super::packet::AuthSendCtx {
-                mode: auth_mode,
-                simple_key: auth_simple_key,
-                crypto_key: auth_crypto_key.clone(),
-                md5_seq: link
-                    .md5_seq
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            };
-            super::packet_v3::apply_v3_auth_trailer(&mut packet, &ctx, &src, &dst);
-            let item = super::network_v6::Ospfv3Send {
-                packet,
-                ifindex,
-                dest: Some(dst),
-                src,
-            };
-            if let Err(e) = tx.send(item) {
-                tracing::warn!("[v3 Link-LSA Flood] channel send failed: {}", e);
-            }
+            self.flood_lsa_through_link(ifindex, &lsa, None);
         }
     }
 
@@ -17977,6 +18166,7 @@ mod test_support {
             ilm6: BTreeMap::new(),
             local_pool: None,
             lan_adj_sids: BTreeMap::new(),
+            restored_link_lsas: Vec::new(),
             rib6: PrefixMap::new(),
             rib6_areas: BTreeMap::new(),
             range_discards: BTreeSet::new(),
@@ -20902,6 +21092,819 @@ mod max_age_removal_tests {
         peer(&mut top).state = NfsmState::Full;
         top.process_msg(expire()).await;
         assert!(!held(&top, key), "v2: nothing awaits it");
+    }
+}
+
+#[cfg(test)]
+mod link_scope_tests {
+    //! Link-scope LSAs live in the database of their interface and flood on
+    //! it alone (RFC 5250 §3.1, RFC 5340 §4.1.2 and §4.5.2), in both
+    //! versions: a neighbour's, received, and this router's own Grace-LSAs.
+
+    use super::super::addr::OspfAddr;
+    use super::super::checkpoint::OspfCheckpoint;
+    use super::super::lsdb::{LsdbEvent, OSPF_MAX_AGE, OspfLsaKey, v2_lsa_key};
+    use super::super::neigh::RestartingState;
+    use super::test_support::{fresh_ospf, fresh_ospf_v3};
+    use super::*;
+    use ospf_packet::{
+        GraceLsa, GraceRestartReason, GraceTlv, OSPFV3_GRACE_LSA_TYPE, OSPFV3_LINK_LSA_TYPE,
+        Ospfv3LsBody, Ospfv3Lsa, Ospfv3LsaHeader,
+    };
+
+    const ME: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 1);
+    /// The neighbour an LSA comes from, on eth2.
+    const S: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 2);
+    /// Another neighbour on eth2.
+    const O: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 3);
+    /// A neighbour on eth3.
+    const P: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 4);
+    const REASON: GraceRestartReason = GraceRestartReason::SoftwareRestart;
+
+    fn grace_id() -> Ipv4Addr {
+        Ipv4Addr::from((OpaqueLsaType::GRACE as u32) << 24)
+    }
+
+    /// A packet channel whose receiver lives on, so sends succeed.
+    fn live<T>() -> UnboundedSender<T> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        Box::leak(Box::new(rx));
+        tx
+    }
+
+    fn link<V: OspfVersion>(top: &Ospf<V>, ifindex: u32, addr: &str) -> OspfLink<V>
+    where
+        V::Prefix: Default + std::str::FromStr,
+        <V::Prefix as std::str::FromStr>::Err: std::fmt::Debug,
+    {
+        let mut link = OspfLink::from(
+            top.tx.clone(),
+            crate::rib::Link::from(crate::fib::message::FibLink {
+                index: ifindex,
+                name: format!("eth{ifindex}"),
+                mtu: 1500,
+                ..Default::default()
+            }),
+            top.sock.clone(),
+            top.router_id,
+            top.ptx.clone(),
+        );
+        link.enabled = true;
+        link.addr.push(OspfAddr {
+            prefix: addr.parse().unwrap(),
+            secondary: false,
+        });
+        link
+    }
+
+    /// Two interfaces in the backbone: eth2 (192.0.2.1) with neighbours S
+    /// (192.0.2.2) and O (192.0.2.3), eth3 (198.51.100.1) with P
+    /// (198.51.100.4). All Full; v2 keys neighbours by address.
+    fn v2_top() -> Ospf {
+        let mut top = fresh_ospf();
+        top.router_id = ME;
+        for (ifindex, addr, nbrs) in [
+            (
+                2,
+                "192.0.2.1/24",
+                vec![(S, "192.0.2.2/24"), (O, "192.0.2.3/24")],
+            ),
+            (3, "198.51.100.1/24", vec![(P, "198.51.100.4/24")]),
+        ] {
+            let mut link = link(&top, ifindex, addr);
+            for (rid, prefix) in nbrs {
+                let prefix: Ipv4Net = prefix.parse().unwrap();
+                let mut nbr = Neighbor::new(top.tx.clone(), ifindex, prefix, &rid, 40, live());
+                nbr.state = NfsmState::Full;
+                link.nbrs.insert(prefix.addr(), nbr);
+            }
+            top.links.insert(ifindex, link);
+            top.areas.fetch(AREA0).links.insert(ifindex);
+        }
+        top
+    }
+
+    /// The OSPFv3 twin of `v2_top`: neighbours keyed by Router ID, with
+    /// link-local addresses, and a channel to send on.
+    fn v3_top() -> Ospf<Ospfv3> {
+        let mut top = fresh_ospf_v3();
+        top.router_id = ME;
+        top.v3_send_tx = Some(live());
+        for (ifindex, nbrs) in [(2, vec![S, O]), (3, vec![P])] {
+            let mut link = link(&top, ifindex, &format!("fe80::{ifindex}:1/64"));
+            for rid in nbrs {
+                let prefix: ipnet::Ipv6Net =
+                    format!("fe80::{}/64", rid.octets()[3]).parse().unwrap();
+                let mut nbr = Neighbor::new(top.tx.clone(), ifindex, prefix, &rid, 40, live());
+                nbr.state = NfsmState::Full;
+                link.nbrs.insert(rid, nbr);
+            }
+            top.links.insert(ifindex, link);
+            top.areas.fetch(AREA0).links.insert(ifindex);
+        }
+        top
+    }
+
+    fn v2_addr(rid: Ipv4Addr) -> Ipv4Addr {
+        match rid {
+            S => "192.0.2.2".parse().unwrap(),
+            O => "192.0.2.3".parse().unwrap(),
+            _ => "198.51.100.4".parse().unwrap(),
+        }
+    }
+
+    fn v3_ll(rid: Ipv4Addr) -> Ipv6Addr {
+        format!("fe80::{}", rid.octets()[3]).parse().unwrap()
+    }
+
+    /// Neighbour `rid`'s retransmission list on `ifindex`.
+    fn v2_rxmt(top: &Ospf, ifindex: u32, rid: Ipv4Addr) -> &BTreeMap<OspfLsaKey, OspfLsa> {
+        &top.links[&ifindex].nbrs[&v2_addr(rid)].ls_rxmt
+    }
+
+    fn v3_rxmt(
+        top: &Ospf<Ospfv3>,
+        ifindex: u32,
+        rid: Ipv4Addr,
+    ) -> &BTreeMap<OspfLsaKey, Ospfv3Lsa> {
+        &top.links[&ifindex].nbrs[&rid].ls_rxmt
+    }
+
+    fn v2_grace(adv: Ipv4Addr, if_addr: Ipv4Addr, age: u16, seq: u32) -> OspfLsa {
+        let mut h = OspfLsaHeader::new(OspfLsType::OpaqueLinkLocal, grace_id(), adv);
+        h.ls_age = age;
+        h.ls_seq_number = seq;
+        h.options = 0x42;
+        let mut lsa = OspfLsa::from(
+            h,
+            OspfLsp::OpaqueLinkLocalGrace(GraceLsa {
+                tlvs: vec![
+                    GraceTlv::GracePeriod(120),
+                    GraceTlv::Reason(REASON),
+                    GraceTlv::IpInterfaceAddress(if_addr),
+                ],
+            }),
+        );
+        lsa.update();
+        lsa
+    }
+
+    fn v3_lsa(ls_type: u16, link_state_id: u32, adv: Ipv4Addr, age: u16, seq: u32) -> Ospfv3Lsa {
+        let mut lsa = Ospfv3Lsa::from(
+            Ospfv3LsaHeader {
+                ls_age: age,
+                ls_type,
+                link_state_id,
+                advertising_router: adv,
+                ls_seq_number: seq,
+                ls_checksum: 0,
+                length: 0,
+            },
+            Ospfv3LsBody::Unknown(vec![0; 4]),
+        );
+        lsa.update();
+        lsa
+    }
+
+    /// Deliver `lsa` in an LS Update from neighbour `from` on `ifindex`,
+    /// then run the floods it queued.
+    async fn v2_receive(top: &mut Ospf, ifindex: u32, from: Ipv4Addr, lsa: OspfLsa) {
+        let src = v2_addr(from);
+        let packet = Ospfv2Packet::new(
+            &from,
+            &AREA0,
+            Ospfv2Payload::LsUpdate(OspfLsUpdate { lsas: vec![lsa] }),
+        );
+        {
+            let (mut oi, nbr) = top.ospf_interface(ifindex, &src).unwrap();
+            super::super::packet::ospf_ls_upd_recv(&mut oi, nbr, &packet, &src);
+        }
+        let queued: Vec<_> = std::iter::from_fn(|| top.rx.try_recv().ok()).collect();
+        for msg in queued {
+            if matches!(msg, Message::Flood(..) | Message::FloodAs(..)) {
+                top.process_msg(msg).await;
+            }
+        }
+    }
+
+    async fn v3_receive(top: &mut Ospf<Ospfv3>, ifindex: u32, from: Ipv4Addr, lsa: Ospfv3Lsa) {
+        let src = v3_ll(from);
+        let packet = ospf_packet::Ospfv3Packet::new(
+            &from,
+            &AREA0,
+            0,
+            ospf_packet::Ospfv3Payload::LsUpdate(ospf_packet::Ospfv3LsUpdate { lsas: vec![lsa] }),
+        );
+        {
+            let (mut oi, nbr) = top.ospf_interface(ifindex, &from).unwrap();
+            super::super::packet_v3::ospfv3_ls_upd_recv(&mut oi, nbr, &packet, &src);
+        }
+        let queued: Vec<_> = std::iter::from_fn(|| top.rx.try_recv().ok()).collect();
+        for msg in queued {
+            if matches!(msg, Message::Flood(..) | Message::FloodAs(..)) {
+                top.process_msg(msg).await;
+            }
+        }
+    }
+
+    /// Let the hold timer armed at install fire, and drop its message.
+    async fn settle<V: OspfVersion>(top: &mut Ospf<V>) {
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        while top.rx.try_recv().is_ok() {}
+    }
+
+    /// A neighbour's link-scope LSA is kept with the interface it came in
+    /// on and flooded back out there alone: to the other neighbours on it,
+    /// not to its sender, and not beyond (RFC 5250 §3.1, RFC 5340 §4.5.2).
+    /// OSPFv2 filed it in the area database and flooded it through the
+    /// whole area; OSPFv3 did not flood it at all, so a DR never relayed
+    /// one. A second copy is a duplicate. An area-scope LSA is the control.
+    #[tokio::test]
+    async fn a_received_link_scope_lsa_stays_on_its_interface() {
+        // OSPFv2.
+        let mut top = v2_top();
+        let grace = v2_grace(S, v2_addr(S), 1, 0x8000_0001);
+        let key = v2_lsa_key(OspfLsType::OpaqueLinkLocal, grace_id(), S);
+        v2_receive(&mut top, 2, S, grace.clone()).await;
+        assert!(top.links[&2].lsdb.tables.contains_key(&key), "v2: on eth2");
+        assert!(
+            !top.areas.get(AREA0).unwrap().lsdb.tables.contains_key(&key),
+            "v2: not in the area database"
+        );
+        assert!(v2_rxmt(&top, 2, O).contains_key(&key), "v2: to O on eth2");
+        assert!(!v2_rxmt(&top, 2, S).contains_key(&key), "v2: not back to S");
+        assert!(
+            !v2_rxmt(&top, 3, P).contains_key(&key),
+            "v2: not to P on eth3"
+        );
+        top.links
+            .get_mut(&2)
+            .unwrap()
+            .nbrs
+            .get_mut(&v2_addr(O))
+            .unwrap()
+            .ls_rxmt
+            .clear();
+        v2_receive(&mut top, 2, S, grace).await;
+        assert!(!v2_rxmt(&top, 2, O).contains_key(&key), "v2: a duplicate");
+        let mut router = OspfLsa::from(
+            OspfLsaHeader::new(OspfLsType::Router, S, S),
+            OspfLsp::Router(RouterLsa {
+                flags: 0,
+                links: vec![],
+            }),
+        );
+        router.update();
+        v2_receive(&mut top, 2, S, router).await;
+        let router_key = v2_lsa_key(OspfLsType::Router, S, S);
+        assert!(
+            v2_rxmt(&top, 3, P).contains_key(&router_key),
+            "v2: area scope, to P"
+        );
+
+        // OSPFv3.
+        let mut top = v3_top();
+        let link_lsa = v3_lsa(OSPFV3_LINK_LSA_TYPE, 7, S, 1, 0x8000_0001);
+        let key = (OSPFV3_LINK_LSA_TYPE, 7, S);
+        v3_receive(&mut top, 2, S, link_lsa.clone()).await;
+        assert!(top.links[&2].lsdb.tables.contains_key(&key), "v3: on eth2");
+        assert!(v3_rxmt(&top, 2, O).contains_key(&key), "v3: to O on eth2");
+        assert!(!v3_rxmt(&top, 2, S).contains_key(&key), "v3: not back to S");
+        assert!(
+            !v3_rxmt(&top, 3, P).contains_key(&key),
+            "v3: not to P on eth3"
+        );
+        top.links
+            .get_mut(&2)
+            .unwrap()
+            .nbrs
+            .get_mut(&O)
+            .unwrap()
+            .ls_rxmt
+            .clear();
+        v3_receive(&mut top, 2, S, link_lsa).await;
+        assert!(!v3_rxmt(&top, 2, O).contains_key(&key), "v3: a duplicate");
+        let router_key = (ospf_packet::OSPFV3_ROUTER_LSA_TYPE, 0, S);
+        v3_receive(
+            &mut top,
+            2,
+            S,
+            v3_lsa(ospf_packet::OSPFV3_ROUTER_LSA_TYPE, 0, S, 1, 0x8000_0001),
+        )
+        .await;
+        assert!(
+            v3_rxmt(&top, 3, P).contains_key(&router_key),
+            "v3: area scope, to P"
+        );
+    }
+
+    /// OSPFv2 answers an LS Request for a link-scope LSA from the database
+    /// of the interface it was asked on. It used to find none, and declared
+    /// the request bad.
+    #[tokio::test]
+    async fn a_link_scope_lsa_is_served_on_request() {
+        let mut top = v2_top();
+        let grace = v2_grace(S, v2_addr(S), 1, 0x8000_0001);
+        v2_receive(&mut top, 2, S, grace).await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        top.links
+            .get_mut(&2)
+            .unwrap()
+            .nbrs
+            .get_mut(&v2_addr(O))
+            .unwrap()
+            .ptx = tx;
+        let packet = Ospfv2Packet::new(
+            &O,
+            &AREA0,
+            Ospfv2Payload::LsRequest(OspfLsRequest {
+                reqs: vec![OspfLsRequestEntry {
+                    ls_type: 9,
+                    ls_id: grace_id(),
+                    adv_router: S,
+                }],
+            }),
+        );
+        {
+            let src = v2_addr(O);
+            let (mut oi, nbr) = top.ospf_interface(2, &src).unwrap();
+            super::super::packet::ospf_ls_req_recv(&mut oi, nbr, &packet, &src);
+        }
+        let served = std::iter::from_fn(|| rx.try_recv().ok()).any(|msg| {
+            matches!(msg, Message::Send(packet, ..)
+                if matches!(&packet.payload, Ospfv2Payload::LsUpdate(upd)
+                    if upd.lsas.iter().any(|lsa| lsa.h.ls_type == OspfLsType::OpaqueLinkLocal)))
+        });
+        assert!(served);
+    }
+
+    /// This router's Grace-LSAs live each in its interface's database and
+    /// are flooded there, with retransmission, and flushed there when the
+    /// restart is abandoned. OSPFv2 never installed its Grace-LSA at all,
+    /// so its flush found nothing; every interface's copy has the same key,
+    /// which the area database could hold only once. OSPFv3 filed its own
+    /// in the area database.
+    #[tokio::test]
+    async fn our_grace_lsas_live_with_their_interfaces() {
+        // OSPFv2.
+        let mut top = v2_top();
+        assert!(top.gr_restart_begin(120, REASON));
+        let key = v2_lsa_key(OspfLsType::OpaqueLinkLocal, grace_id(), ME);
+        for (ifindex, addr, nbr) in [(2, "192.0.2.1", S), (3, "198.51.100.1", P)] {
+            let lsa = &top.links[&ifindex].lsdb.tables[&key].data;
+            let names_it = matches!(&lsa.lsp, OspfLsp::OpaqueLinkLocalGrace(body)
+                if body.tlvs.contains(&GraceTlv::IpInterfaceAddress(addr.parse().unwrap())));
+            assert!(names_it, "v2: eth{ifindex}'s own");
+            assert!(
+                v2_rxmt(&top, ifindex, nbr).contains_key(&key),
+                "v2: flooded on eth{ifindex}"
+            );
+        }
+        assert!(!top.areas.get(AREA0).unwrap().lsdb.tables.contains_key(&key));
+        top.gr_restart_abort();
+        for (ifindex, nbr) in [(2, S), (3, P)] {
+            assert_eq!(
+                top.links[&ifindex].lsdb.tables[&key].data.h.ls_age,
+                OSPF_MAX_AGE
+            );
+            assert_eq!(
+                v2_rxmt(&top, ifindex, nbr)[&key].h.ls_age,
+                OSPF_MAX_AGE,
+                "v2: flushed"
+            );
+        }
+
+        // OSPFv3.
+        let mut top = v3_top();
+        assert!(top.gr_restart_begin_v3(120, REASON));
+        for (ifindex, nbr) in [(2, S), (3, P)] {
+            let key = (OSPFV3_GRACE_LSA_TYPE, ifindex, ME);
+            assert!(
+                top.links[&ifindex].lsdb.tables.contains_key(&key),
+                "v3: on eth{ifindex}"
+            );
+            assert!(
+                v3_rxmt(&top, ifindex, nbr).contains_key(&key),
+                "v3: flooded on eth{ifindex}"
+            );
+            assert!(!top.areas.get(AREA0).unwrap().lsdb.tables.contains_key(&key));
+        }
+        top.gr_restart_abort_v3();
+        for (ifindex, nbr) in [(2, S), (3, P)] {
+            let key = (OSPFV3_GRACE_LSA_TYPE, ifindex, ME);
+            assert_eq!(
+                top.links[&ifindex].lsdb.tables[&key].data.h.ls_age,
+                OSPF_MAX_AGE
+            );
+            assert_eq!(
+                v3_rxmt(&top, ifindex, nbr)[&key].h.ls_age,
+                OSPF_MAX_AGE,
+                "v3: flushed"
+            );
+        }
+    }
+
+    /// A neighbour's link-scope LSA that ages out is reflooded at MaxAge on
+    /// its interface alone, then leaves once acknowledged (RFC 2328 §14).
+    /// OSPFv2 used to age it out of the area database without a reflood.
+    #[tokio::test(start_paused = true)]
+    async fn a_link_scope_lsa_ages_out_on_its_interface() {
+        // OSPFv2.
+        let mut top = v2_top();
+        let key = v2_lsa_key(OspfLsType::OpaqueLinkLocal, grace_id(), S);
+        let (tx, tracing) = (top.tx.clone(), top.tracing.clone());
+        top.links.get_mut(&2).unwrap().lsdb.install_lsa(
+            v2_grace(S, v2_addr(S), OSPF_MAX_AGE - 1, 0x8000_0001),
+            &tx,
+            Some(AREA0),
+            &tracing,
+        );
+        settle(&mut top).await;
+        let expire = || Message::Lsdb(LsdbEvent::HoldTimerExpire, Some(AREA0), key);
+        top.process_msg(expire()).await;
+        assert_eq!(top.links[&2].lsdb.tables[&key].data.h.ls_age, OSPF_MAX_AGE);
+        assert_eq!(
+            v2_rxmt(&top, 2, O)[&key].h.ls_age,
+            OSPF_MAX_AGE,
+            "v2: reflooded"
+        );
+        assert!(!v2_rxmt(&top, 3, P).contains_key(&key), "v2: on eth2 only");
+        top.process_msg(expire()).await;
+        assert!(
+            top.links[&2].lsdb.tables.contains_key(&key),
+            "v2: kept until acknowledged"
+        );
+        for nbr in top.links.get_mut(&2).unwrap().nbrs.values_mut() {
+            nbr.ls_rxmt.clear();
+        }
+        top.process_msg(expire()).await;
+        assert!(
+            !top.links[&2].lsdb.tables.contains_key(&key),
+            "v2: then gone"
+        );
+
+        // OSPFv3.
+        let mut top = v3_top();
+        let key = (OSPFV3_LINK_LSA_TYPE, 7, S);
+        let (tx, tracing) = (top.tx.clone(), top.tracing.clone());
+        top.links.get_mut(&2).unwrap().lsdb.install_lsa(
+            v3_lsa(OSPFV3_LINK_LSA_TYPE, 7, S, OSPF_MAX_AGE - 1, 0x8000_0001),
+            &tx,
+            Some(AREA0),
+            &tracing,
+        );
+        settle(&mut top).await;
+        let expire = || Message::Lsdb(LsdbEvent::HoldTimerExpire, Some(AREA0), key);
+        top.process_msg(expire()).await;
+        assert_eq!(top.links[&2].lsdb.tables[&key].data.h.ls_age, OSPF_MAX_AGE);
+        assert_eq!(
+            v3_rxmt(&top, 2, O)[&key].h.ls_age,
+            OSPF_MAX_AGE,
+            "v3: reflooded"
+        );
+        assert!(!v3_rxmt(&top, 3, P).contains_key(&key), "v3: on eth2 only");
+        top.process_msg(expire()).await;
+        assert!(
+            top.links[&2].lsdb.tables.contains_key(&key),
+            "v3: kept until acknowledged"
+        );
+        for nbr in top.links.get_mut(&2).unwrap().nbrs.values_mut() {
+            nbr.ls_rxmt.clear();
+        }
+        top.process_msg(expire()).await;
+        assert!(
+            !top.links[&2].lsdb.tables.contains_key(&key),
+            "v3: then gone"
+        );
+    }
+
+    /// This router's Grace-LSA is refreshed on its interface at
+    /// LSRefreshTime (RFC 2328 §12.4), and flooded there. OSPFv3 refreshed
+    /// only its Link-LSAs.
+    #[tokio::test]
+    async fn our_grace_lsa_is_refreshed_on_its_interface() {
+        // OSPFv2: every interface's copy has the same key.
+        let mut top = v2_top();
+        assert!(top.gr_restart_begin(120, REASON));
+        let key = v2_lsa_key(OspfLsType::OpaqueLinkLocal, grace_id(), ME);
+        let seq = top.links[&2].lsdb.tables[&key].data.h.ls_seq_number;
+        top.process_msg(Message::Lsdb(
+            LsdbEvent::RefreshTimerExpire,
+            Some(AREA0),
+            key,
+        ))
+        .await;
+        for (ifindex, nbr) in [(2, S), (3, P)] {
+            assert_eq!(
+                top.links[&ifindex].lsdb.tables[&key].data.h.ls_seq_number,
+                seq + 1
+            );
+            assert_eq!(
+                v2_rxmt(&top, ifindex, nbr)[&key].h.ls_seq_number,
+                seq + 1,
+                "v2"
+            );
+        }
+
+        // OSPFv3.
+        let mut top = v3_top();
+        assert!(top.gr_restart_begin_v3(120, REASON));
+        let key = (OSPFV3_GRACE_LSA_TYPE, 2, ME);
+        let seq = top.links[&2].lsdb.tables[&key].data.h.ls_seq_number;
+        top.process_msg(Message::Lsdb(
+            LsdbEvent::RefreshTimerExpire,
+            Some(AREA0),
+            key,
+        ))
+        .await;
+        assert_eq!(
+            top.links[&2].lsdb.tables[&key].data.h.ls_seq_number,
+            seq + 1
+        );
+        assert_eq!(v3_rxmt(&top, 2, S)[&key].h.ls_seq_number, seq + 1, "v3");
+    }
+
+    /// A copy of this router's own Grace-LSA, received, is flushed on its
+    /// interface (RFC 2328 §13.4) — unless a graceful restart is under way:
+    /// the restarting router leaves its own LSAs alone (RFC 3623 §2.2), and
+    /// exiting flushes the Grace-LSA. OSPFv2 looked for it in the area
+    /// database, and OSPFv3 left it alone.
+    #[tokio::test]
+    async fn a_received_copy_of_our_grace_lsa_is_flushed_unless_restarting() {
+        // OSPFv2.
+        let mut top = v2_top();
+        let key = v2_lsa_key(OspfLsType::OpaqueLinkLocal, grace_id(), ME);
+        let echo = || v2_grace(ME, "192.0.2.1".parse().unwrap(), 1, 0x8000_0005);
+        let (tx, tracing) = (top.tx.clone(), top.tracing.clone());
+        let event = || Message::Lsdb(LsdbEvent::SelfOriginatedReceived, Some(AREA0), key);
+        top.links
+            .get_mut(&2)
+            .unwrap()
+            .lsdb
+            .install_lsa(echo(), &tx, Some(AREA0), &tracing);
+        top.restarting = Some(restarting());
+        top.process_msg(event()).await;
+        assert_eq!(
+            top.links[&2].lsdb.tables[&key].data.h.ls_age, 1,
+            "v2: restarting"
+        );
+        top.restarting = None;
+        top.process_msg(event()).await;
+        assert_eq!(
+            top.links[&2].lsdb.tables[&key].data.h.ls_age, OSPF_MAX_AGE,
+            "v2"
+        );
+        assert_eq!(
+            v2_rxmt(&top, 2, S)[&key].h.ls_age,
+            OSPF_MAX_AGE,
+            "v2: flooded"
+        );
+
+        // OSPFv3.
+        let mut top = v3_top();
+        let key = (OSPFV3_GRACE_LSA_TYPE, 2, ME);
+        let (tx, tracing) = (top.tx.clone(), top.tracing.clone());
+        let event = || Message::Lsdb(LsdbEvent::SelfOriginatedReceived, Some(AREA0), key);
+        top.links.get_mut(&2).unwrap().lsdb.install_lsa(
+            v3_lsa(OSPFV3_GRACE_LSA_TYPE, 2, ME, 1, 0x8000_0005),
+            &tx,
+            Some(AREA0),
+            &tracing,
+        );
+        top.restarting = Some(restarting());
+        top.process_msg(event()).await;
+        assert_eq!(
+            top.links[&2].lsdb.tables[&key].data.h.ls_age, 1,
+            "v3: restarting"
+        );
+        top.restarting = None;
+        top.process_msg(event()).await;
+        assert_eq!(
+            top.links[&2].lsdb.tables[&key].data.h.ls_age, OSPF_MAX_AGE,
+            "v3"
+        );
+        assert_eq!(
+            v3_rxmt(&top, 2, S)[&key].h.ls_age,
+            OSPF_MAX_AGE,
+            "v3: flooded"
+        );
+    }
+
+    /// The claim keeps whichever copy of our Grace-LSA is more recent (RFC
+    /// 2328 §13.1). A neighbour may send back a newer copy during the
+    /// restart, which the restarting router keeps (RFC 3623 §2.2). The
+    /// checkpointed copy used to overwrite it, so the flush that ends the
+    /// restart withdrew an instance peers reject. An older copy gives way
+    /// to the checkpointed one. Both versions.
+    #[tokio::test]
+    async fn the_claim_keeps_the_newer_grace_lsa() {
+        // OSPFv2. Staged twice, so the checkpointed copy is not the first.
+        let mut before = v2_top();
+        assert!(before.gr_restart_begin(120, REASON));
+        before.gr_restart_abort();
+        assert!(before.gr_restart_begin(120, REASON));
+        let key = v2_lsa_key(OspfLsType::OpaqueLinkLocal, grace_id(), ME);
+        let seq = before.links[&2].lsdb.tables[&key].data.h.ls_seq_number;
+        let cp = OspfCheckpoint::from_instance(&before, 120, 1);
+        for (held, flushed) in [(seq + 3, seq + 3), (seq - 1, seq)] {
+            let mut after = v2_top();
+            after.gr_restart_replay_areas(&cp.areas);
+            let (tx, tracing) = (after.tx.clone(), after.tracing.clone());
+            after.links.get_mut(&2).unwrap().lsdb.install_lsa(
+                v2_grace(ME, "192.0.2.1".parse().unwrap(), 1, held),
+                &tx,
+                Some(AREA0),
+                &tracing,
+            );
+            after.flush_grace_lsa(2);
+            let lsa = &after.links[&2].lsdb.tables[&key].data;
+            assert_eq!(
+                (lsa.h.ls_age, lsa.h.ls_seq_number),
+                (OSPF_MAX_AGE, flushed),
+                "v2: holding {held:#x}"
+            );
+        }
+
+        // OSPFv3.
+        let mut before = v3_top();
+        assert!(before.gr_restart_begin_v3(120, REASON));
+        before.gr_restart_abort_v3();
+        assert!(before.gr_restart_begin_v3(120, REASON));
+        let key = (OSPFV3_GRACE_LSA_TYPE, 2, ME);
+        let seq = before.links[&2].lsdb.tables[&key].data.h.ls_seq_number;
+        let cp = OspfCheckpoint::from_instance_v3(&before, 120, 1);
+        for (held, flushed) in [(seq + 3, seq + 3), (seq - 1, seq)] {
+            let mut after = v3_top();
+            after.gr_restart_replay_areas(&cp.areas);
+            let (tx, tracing) = (after.tx.clone(), after.tracing.clone());
+            after.links.get_mut(&2).unwrap().lsdb.install_lsa(
+                v3_lsa(OSPFV3_GRACE_LSA_TYPE, 2, ME, 1, held),
+                &tx,
+                Some(AREA0),
+                &tracing,
+            );
+            after.flush_grace_lsa_v3(2);
+            let lsa = &after.links[&2].lsdb.tables[&key].data;
+            assert_eq!(
+                (lsa.h.ls_age, lsa.h.ls_seq_number),
+                (OSPF_MAX_AGE, flushed),
+                "v3: holding {held:#x}"
+            );
+        }
+    }
+
+    fn restarting() -> RestartingState {
+        RestartingState {
+            grace_period: 120,
+            reason: REASON,
+            entered_at: tokio::time::Instant::now(),
+            abort_timer: None,
+            expected_full_count: 0,
+            current_full_count: 0,
+        }
+    }
+
+    /// A graceful-restart checkpoint keeps this router's Grace-LSAs — and
+    /// no other link-scope LSA of its — in their area's list, as before, so
+    /// its format is unchanged. The restore sets them aside until their
+    /// interface claims one, by address in OSPFv2 and by interface ID in
+    /// OSPFv3, and the flush that ends the restart withdraws that very
+    /// instance. What is left unclaimed goes when the restart ends.
+    #[tokio::test]
+    async fn restored_grace_lsas_wait_for_their_interfaces() {
+        // OSPFv2.
+        let mut before = v2_top();
+        assert!(before.gr_restart_begin(120, REASON));
+        let key = v2_lsa_key(OspfLsType::OpaqueLinkLocal, grace_id(), ME);
+        let seq = before.links[&2].lsdb.tables[&key].data.h.ls_seq_number;
+        let cp = OspfCheckpoint::from_instance(&before, 120, 1);
+        let graces = cp
+            .areas
+            .iter()
+            .flat_map(|area| &area.lsas)
+            .filter(|snap| snap.key == key);
+        assert_eq!(graces.count(), 2, "v2: one per interface");
+        // Whether the restart succeeds or is abandoned.
+        for exit in [false, true] {
+            let mut after = v2_top();
+            after.gr_restart_replay_areas(&cp.areas);
+            assert_eq!(after.restored_link_lsas.len(), 2, "v2: set aside");
+            assert!(
+                !after
+                    .areas
+                    .get(AREA0)
+                    .unwrap()
+                    .lsdb
+                    .tables
+                    .contains_key(&key)
+            );
+            after.flush_grace_lsa(2);
+            let flushed = &after.links[&2].lsdb.tables[&key].data;
+            assert_eq!(
+                (flushed.h.ls_age, flushed.h.ls_seq_number),
+                (OSPF_MAX_AGE, seq),
+                "v2"
+            );
+            assert!(matches!(&flushed.lsp, OspfLsp::OpaqueLinkLocalGrace(body)
+                if body.tlvs.contains(&GraceTlv::IpInterfaceAddress("192.0.2.1".parse().unwrap()))));
+            assert_eq!(
+                v2_rxmt(&after, 2, S)[&key].h.ls_age,
+                OSPF_MAX_AGE,
+                "v2: flooded"
+            );
+            assert_eq!(after.restored_link_lsas.len(), 1, "v2: eth3's still waits");
+            // eth3 never comes back, so nothing claims its Grace-LSA.
+            after.links.get_mut(&3).unwrap().enabled = false;
+            after.restarting = Some(restarting());
+            if exit {
+                after.gr_restart_exit_success();
+            } else {
+                after.gr_restart_abort();
+            }
+            assert!(after.restored_link_lsas.is_empty(), "v2: the restart ended");
+        }
+
+        // OSPFv3.
+        let mut before = v3_top();
+        assert!(before.gr_restart_begin_v3(120, REASON));
+        let (tx, tracing) = (before.tx.clone(), before.tracing.clone());
+        before.links.get_mut(&2).unwrap().lsdb.install_originated(
+            v3_lsa(OSPFV3_LINK_LSA_TYPE, 2, ME, 1, 0x8000_0001),
+            &tx,
+            Some(AREA0),
+            &tracing,
+        );
+        let key = (OSPFV3_GRACE_LSA_TYPE, 2, ME);
+        let seq = before.links[&2].lsdb.tables[&key].data.h.ls_seq_number;
+        let cp = OspfCheckpoint::from_instance_v3(&before, 120, 1);
+        let kept: Vec<OspfLsaKey> = cp
+            .areas
+            .iter()
+            .flat_map(|area| &area.lsas)
+            .map(|snap| snap.key)
+            .filter(|(ls_type, _, _)| {
+                matches!(
+                    super::super::packet_v3::ospfv3_ls_type_scope(*ls_type),
+                    super::super::packet_v3::Ospfv3LsaScope::Link
+                )
+            })
+            .collect();
+        assert_eq!(
+            kept,
+            vec![
+                (OSPFV3_GRACE_LSA_TYPE, 2, ME),
+                (OSPFV3_GRACE_LSA_TYPE, 3, ME)
+            ],
+            "v3"
+        );
+        // One of our Link-LSAs, as a checkpoint might carry: it is rebuilt
+        // when its interface comes up, not restored.
+        let mut cp = cp;
+        let stale = v3_lsa(OSPFV3_LINK_LSA_TYPE, 2, ME, 1, 0x8000_0001);
+        cp.areas[0]
+            .lsas
+            .push(super::super::checkpoint::LsaSnapshot {
+                key: (OSPFV3_LINK_LSA_TYPE, 2, ME),
+                ls_seq_number: stale.h.ls_seq_number,
+                ls_checksum: stale.h.ls_checksum,
+                body: {
+                    let mut buf = bytes::BytesMut::new();
+                    stale.emit(&mut buf);
+                    buf.to_vec()
+                },
+                self_originated: true,
+            });
+        for exit in [false, true] {
+            let mut after = v3_top();
+            after.gr_restart_replay_areas(&cp.areas);
+            assert_eq!(
+                after.restored_link_lsas.len(),
+                2,
+                "v3: its Grace-LSAs set aside"
+            );
+            after.flush_grace_lsa_v3(2);
+            let flushed = &after.links[&2].lsdb.tables[&key].data;
+            assert_eq!(
+                (flushed.h.ls_age, flushed.h.ls_seq_number),
+                (OSPF_MAX_AGE, seq),
+                "v3"
+            );
+            assert_eq!(
+                v3_rxmt(&after, 2, S)[&key].h.ls_age,
+                OSPF_MAX_AGE,
+                "v3: flooded"
+            );
+            assert_eq!(after.restored_link_lsas.len(), 1, "v3: eth3's still waits");
+            // eth3 never comes back, so nothing claims its Grace-LSA.
+            after.links.get_mut(&3).unwrap().enabled = false;
+            after.restarting = Some(restarting());
+            if exit {
+                after.gr_restart_exit_success_v3();
+            } else {
+                after.gr_restart_abort_v3();
+            }
+            assert!(after.restored_link_lsas.is_empty(), "v3: the restart ended");
+        }
     }
 }
 

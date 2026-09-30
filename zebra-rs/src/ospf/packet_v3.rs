@@ -1549,12 +1549,15 @@ fn ospfv3_ls_upd_proc(
         gr_maybe_enter_helper_v3(oi, nbr, lsa);
 
         // RFC 2328 §13.3: re-flood the LSA to every other
-        // Exchange-or-later neighbor in the area, exempting the
-        // source we got it from. Link-scope LSAs are NOT re-flooded
-        // across the area (§4.5.2 bounds them to the segment), but
-        // they're still installed on the link's per-link LSDB by
-        // the install path above.
-        if matches!(scope, Ospfv3LsaScope::Area | Ospfv3LsaScope::As) {
+        // Exchange-or-later neighbor, exempting the source we got it
+        // from. A link-scope LSA goes back out on this interface alone
+        // (RFC 5340 §4.5.2): the DR relays one to the routers on the
+        // segment that are adjacent only to it. It used not to be
+        // re-flooded at all.
+        if matches!(
+            scope,
+            Ospfv3LsaScope::Area | Ospfv3LsaScope::As | Ospfv3LsaScope::Link
+        ) {
             let _ = oi
                 .tx
                 .send(Message::Flood(area_id, lsa.clone(), nbr.ifindex, *src));

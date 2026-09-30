@@ -674,9 +674,8 @@ fn ospf_lsa_lookup<'a>(
     adv_router: Ipv4Addr,
 ) -> Option<&'a OspfLsa> {
     match lsa_flood_scope(ls_type) {
-        FloodScope::Area => oi.lsdb.lookup_by_id(ls_type, ls_id, adv_router),
-        FloodScope::As => oi.lsdb_as.lookup_by_id(ls_type, ls_id, adv_router),
-        _ => None,
+        FloodScope::Unknown => None,
+        _ => super::flood::scope_lsdb(oi, ls_type).lookup_by_id(ls_type, ls_id, adv_router),
     }
 }
 
@@ -1128,10 +1127,7 @@ fn ospf_ls_upd_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) -
     // (AsExternal, OpaqueAsWide) read the AS LSDB instead of the
     // area LSDB.
     let (current, current_age, current_install_time, current_last_flood_out, ret) = {
-        let lsdb_ref = match lsa_flood_scope(lsa.h.ls_type) {
-            FloodScope::As => &*oi.lsdb_as,
-            _ => &*oi.lsdb,
-        };
+        let lsdb_ref = super::flood::scope_lsdb(oi, lsa.h.ls_type);
         let db_lsa = lsdb_ref.lookup_lsa(lsa.h.ls_type, lsa.h.ls_id, lsa.h.adv_router);
         match db_lsa {
             None => (None, 0u16, None, None, 1i32), // No current copy: received is "newer".
@@ -1325,10 +1321,7 @@ fn ospf_ls_upd_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) -
     );
     ospf_ls_upd_send(oi, nbr, vec![current]);
     {
-        let lsdb_mut = match lsa_flood_scope(lsa.h.ls_type) {
-            FloodScope::As => &mut *oi.lsdb_as,
-            _ => &mut *oi.lsdb,
-        };
+        let lsdb_mut = super::flood::scope_lsdb_mut(oi, lsa.h.ls_type);
         if let Some(db) = lsdb_mut.lookup_lsa_mut(lsa.h.ls_type, lsa.h.ls_id, lsa.h.adv_router) {
             db.last_flood_out = Some(tokio::time::Instant::now());
         }
