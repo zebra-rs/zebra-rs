@@ -96,8 +96,11 @@ Feature: OSPFv3 graceful restart keeps forwarding through a daemon restart
     And show command "show ospfv3 neighbor" in namespace "a" should eventually contain "Full"
     And show command "show ospfv3 route" in namespace "a" should eventually contain "2001:db8::2/128"
     And ping from "a" to "2001:db8::2" should eventually succeed
-    # The restart is over, and a has left helper mode.
+    # The restart is over, and a has left helper mode. b ended it itself,
+    # once each adjacency the checkpoint recorded was Full again, not by
+    # running out its grace period.
     And show command "show ospfv3 graceful-restart" in namespace "a" should eventually contain "(no active helpers)"
+    And daemon log in namespace "b" should eventually contain "exit-restart success"
 
   Scenario: Teardown topology
     # Separate scenario so cleanup still runs when a step above fails
