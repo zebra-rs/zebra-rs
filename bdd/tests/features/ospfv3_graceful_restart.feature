@@ -41,9 +41,12 @@ Feature: OSPFv3 graceful restart keeps forwarding through a daemon restart
     And show command "show ospfv3 graceful-restart" in namespace "a" should contain "SoftwareRestart"
     And show command "show ospfv3 neighbor" in namespace "a" should contain "Full"
 
+    # Abort: the flushed Grace-LSA ends a's help (RFC 3623 §3.2), and the
+    # adjacency stays. It used to extend the help instead.
     When I run "clear ospfv3 graceful-restart abort" in namespace "b"
     And I wait 3 seconds
     Then show command "show ospfv3 graceful-restart" in namespace "b" should not contain "Restart staged"
+    And show command "show ospfv3 graceful-restart" in namespace "a" should eventually contain "(no active helpers)"
     And show command "show ospfv3 neighbor" in namespace "a" should eventually contain "Full"
     And ping from "a" to "2001:db8::2" should eventually succeed
 
@@ -93,6 +96,8 @@ Feature: OSPFv3 graceful restart keeps forwarding through a daemon restart
     And show command "show ospfv3 neighbor" in namespace "a" should eventually contain "Full"
     And show command "show ospfv3 route" in namespace "a" should eventually contain "2001:db8::2/128"
     And ping from "a" to "2001:db8::2" should eventually succeed
+    # The restart is over, and a has left helper mode.
+    And show command "show ospfv3 graceful-restart" in namespace "a" should eventually contain "(no active helpers)"
 
   Scenario: Teardown topology
     # Separate scenario so cleanup still runs when a step above fails

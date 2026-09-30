@@ -2823,13 +2823,12 @@ fn show_ospf_graceful_restart(
                 let Some(helper) = nbr.gr_helper.as_ref() else {
                     continue;
                 };
-                let elapsed = helper.entered_at.elapsed().as_secs() as u32;
                 helpers.push(GrHelperJson {
                     neighbor_id: nbr.ident.router_id.to_string(),
                     ifindex: *ifindex,
                     restart_reason: format!("{:?}", helper.reason),
                     grace_period_secs: helper.grace_period,
-                    remaining_secs: helper.grace_period.saturating_sub(elapsed),
+                    remaining_secs: helper.remaining_secs(),
                 });
             }
         }
@@ -2882,8 +2881,7 @@ fn show_ospf_graceful_restart(
                 continue;
             };
             any = true;
-            let elapsed = helper.entered_at.elapsed().as_secs() as u32;
-            let remaining = helper.grace_period.saturating_sub(elapsed);
+            let remaining = helper.remaining_secs();
             writeln!(
                 buf,
                 "{:<15} {:<10} {:<22} {:<14} {:<10}",
