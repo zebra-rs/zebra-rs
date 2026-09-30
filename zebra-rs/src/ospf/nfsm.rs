@@ -364,42 +364,62 @@ pub(super) fn ospf_db_summary_add_table<'a, V: OspfVersion>(
     }
 }
 
-/// v2 NFSM helper invoked from `Ospfv2::populate_initial_db_summary`.
-/// RFC 2328 §10.8: walk every LSA type that belongs in the initial
-/// DBD summary and push its header into `nbr.db_sum`. The list of
-/// types is v2-specific (v3 uses a different LSA-type taxonomy);
-/// the v3 equivalent lives in `ospfv3_populate_initial_db_summary`.
+/// v2 NFSM helper invoked from `Ospfv2::populate_initial_db_summary`:
+/// push the header of every LSA [`ospfv2_db_summary_lsas`] lists into
+/// `nbr.db_sum`.
 pub fn ospfv2_populate_initial_db_summary(
     oi: &mut OspfInterface<Ospfv2>,
     nbr: &mut Neighbor<Ospfv2>,
 ) {
-    ospf_db_summary_add_table(nbr, oi.lsdb.values_by_type(OspfLsType::Router));
-    ospf_db_summary_add_table(nbr, oi.lsdb.values_by_type(OspfLsType::Network));
-    ospf_db_summary_add_table(nbr, oi.lsdb.values_by_type(OspfLsType::Summary));
-    ospf_db_summary_add_table(nbr, oi.lsdb.values_by_type(OspfLsType::SummaryAsbr));
+    // RFC 5250 §2.1: Opaque LSAs MUST NOT be flooded to a neighbor that
+    // did not advertise Opaque capability (the O-bit in the DD options).
+    // Listing them in the initial DD summary to a non-Opaque peer makes
+    // the peer reject the DBD (it marks our reply as malformed and bounces
+    // back to ExStart) — a persistent ExStart loop with SeqNumberMismatch
+    // on both sides.
+    let opaque = nbr.dd.recv.options.o();
+    ospf_db_summary_add_table(
+        nbr,
+        ospfv2_db_summary_lsas(oi.lsdb, oi.lsdb_as, oi.area_type, opaque),
+    );
+}
 
-    // RFC 5250 §2.1: Opaque LSAs MUST NOT be flooded to a neighbor
-    // that did not advertise Opaque capability (the O-bit in the DD
-    // options). Including type-10 LSA headers in our initial DD
-    // summary to a non-Opaque peer makes the peer reject the DBD
-    // (peer marks our reply as malformed and bounces back to
-    // ExStart), which manifests as a persistent ExStart loop with
-    // SeqNumberMismatch on both sides.
-    if nbr.dd.recv.options.o() {
-        ospf_db_summary_add_table(nbr, oi.lsdb.values_by_type(OspfLsType::OpaqueAreaLocal));
-    }
+/// The LSAs an OSPFv2 initial Database Description summary lists
+/// (RFC 2328 §10.8): every area-scope LSA in the area database, and every
+/// AS-scope LSA in the AS database where AS-scope LSAs flood, as
+/// `lsa_flood_scope` gives each LS type's scope — the v3 twin is
+/// [`ospfv3_db_summary_lsas`]. It listed a fixed set of types, which left
+/// out the AS-scope Opaque LSA (type 11): a neighbour whose adjacency
+/// formed after one arrived never learned it. Selecting by scope, not by
+/// database, keeps out the link-scope Grace-LSAs this router files in the
+/// area database while it restarts. Type-7 NSSA-LSAs belong in an NSSA
+/// only (RFC 3101 §2.5); Opaque LSAs only to an Opaque-capable neighbour
+/// (`opaque`, RFC 5250 §2.1); MaxAge LSAs are left to
+/// `ospf_db_summary_add_table`.
+fn ospfv2_db_summary_lsas<'a>(
+    lsdb: &'a super::lsdb::Lsdb<Ospfv2>,
+    lsdb_as: &'a super::lsdb::Lsdb<Ospfv2>,
+    area_type: super::area::AreaType,
+    opaque: bool,
+) -> impl Iterator<Item = &'a super::lsdb::Lsa<Ospfv2>> {
+    use super::flood::{FloodScope, lsa_flood_scope};
 
-    // RFC 3101 §2.5: Type-7 NSSA-AS-External LSAs flood with area
-    // scope inside an NSSA, so they belong in the per-area DBD
-    // summary — but only when this area is NSSA.
-    if oi.area_type.is_nssa() {
-        ospf_db_summary_add_table(nbr, oi.lsdb.values_by_type(OspfLsType::NssaAsExternal));
-    }
-
-    // AS-scope LSAs included only for non-stub / non-NSSA areas.
-    if oi.area_type.accepts_as_external() {
-        ospf_db_summary_add_table(nbr, oi.lsdb_as.values_by_type(OspfLsType::AsExternal));
-    }
+    let listed = move |ls_type: OspfLsType| match ls_type {
+        OspfLsType::NssaAsExternal => area_type.is_nssa(),
+        OspfLsType::OpaqueAreaLocal | OspfLsType::OpaqueAsWide => opaque,
+        _ => true,
+    };
+    let area = lsdb.tables.values().filter(move |lsa| {
+        let ls_type = lsa.data.h.ls_type;
+        matches!(lsa_flood_scope(ls_type), FloodScope::Area) && listed(ls_type)
+    });
+    let external = lsdb_as.tables.values().filter(move |lsa| {
+        let ls_type = lsa.data.h.ls_type;
+        area_type.accepts_as_external()
+            && matches!(lsa_flood_scope(ls_type), FloodScope::As)
+            && listed(ls_type)
+    });
+    area.chain(external)
 }
 
 /// v3 NFSM helper invoked from `Ospfv3::populate_initial_db_summary`:
@@ -768,5 +788,87 @@ mod db_summary_tests {
         let nssa = [&area_scope[..], &[NSSA]].concat();
         assert_eq!(listed(AreaTypeKind::Nssa), expected(&nssa));
         assert_eq!(listed(AreaTypeKind::Stub), expected(&area_scope));
+    }
+
+    /// The OSPFv2 summary lists every area-scope LSA and, where they
+    /// flood, every AS-scope one — the AS-scope Opaque LSA (type 11) among
+    /// them, which its fixed list of types left out. Opaque LSAs go only
+    /// to an Opaque-capable neighbour, Type-7 only in an NSSA, never a
+    /// link-scope Grace-LSA (type 9), though this router files its own in
+    /// the area database.
+    #[tokio::test]
+    async fn the_v2_summary_lists_every_lsa_in_scope() {
+        use super::super::version::Ospfv2;
+        use super::ospfv2_db_summary_lsas;
+        use OspfLsType::*;
+        use ospf_packet::{OspfLsType, OspfLsa, OspfLsaHeader, OspfLsp, RouterLsa};
+
+        let lsa = |ls_type: OspfLsType| {
+            let mut lsa = OspfLsa::from(
+                OspfLsaHeader::new(
+                    ls_type,
+                    Ipv4Addr::new(10, 0, 0, 9),
+                    Ipv4Addr::new(10, 0, 0, 1),
+                ),
+                OspfLsp::Router(RouterLsa {
+                    flags: 0,
+                    links: vec![],
+                }),
+            );
+            lsa.update();
+            lsa
+        };
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let tracing = OspfTracing::default();
+        let mut area = Lsdb::<Ospfv2>::new();
+        let mut external = Lsdb::<Ospfv2>::new();
+        for ls_type in [
+            Router,
+            Network,
+            Summary,
+            NssaAsExternal,
+            OpaqueAreaLocal,
+            OpaqueLinkLocal,
+        ] {
+            area.install_lsa(lsa(ls_type), &tx, Some(Ipv4Addr::UNSPECIFIED), &tracing);
+        }
+        for ls_type in [AsExternal, OpaqueAsWide] {
+            external.install_lsa(lsa(ls_type), &tx, None, &tracing);
+        }
+
+        let listed = |kind, opaque| {
+            let area_type = AreaType {
+                kind,
+                ..Default::default()
+            };
+            ospfv2_db_summary_lsas(&area, &external, area_type, opaque)
+                .map(|lsa| u8::from(lsa.data.h.ls_type))
+                .collect::<BTreeSet<u8>>()
+        };
+        let set =
+            |types: &[OspfLsType]| types.iter().map(|t| u8::from(*t)).collect::<BTreeSet<u8>>();
+        assert_eq!(
+            listed(AreaTypeKind::Normal, true),
+            set(&[
+                Router,
+                Network,
+                Summary,
+                OpaqueAreaLocal,
+                AsExternal,
+                OpaqueAsWide
+            ])
+        );
+        assert_eq!(
+            listed(AreaTypeKind::Normal, false),
+            set(&[Router, Network, Summary, AsExternal])
+        );
+        assert_eq!(
+            listed(AreaTypeKind::Nssa, true),
+            set(&[Router, Network, Summary, NssaAsExternal, OpaqueAreaLocal])
+        );
+        assert_eq!(
+            listed(AreaTypeKind::Stub, false),
+            set(&[Router, Network, Summary])
+        );
     }
 }
