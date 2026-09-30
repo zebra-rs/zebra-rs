@@ -1,0 +1,67 @@
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.4/32
+- if-name: da-sj
+  ipv4:
+    address: 192.168.4.2/24
+- if-name: da-ch
+  ipv4:
+    address: 192.168.7.2/24
+- if-name: da-at
+  ipv4:
+    address: 192.168.10.1/24
+system:
+  hostname: da
+router:
+  isis:
+    net: 49.0000.0000.0000.0004.00
+    hostname: da
+    is-type: level-2-only
+    segment-routing:
+      mpls: {}
+    te-router-id: 10.0.0.4
+    flex-algo:
+    - algo: 128
+      metric-type: min-unidir-link-delay
+      dataplane:
+        sr-mpls: true
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+        prefix-sid:
+          index: 400
+        flex-algo-prefix-sid:
+        - algo: 128
+          index: 2400
+    - if-name: da-sj
+      network-type: point-to-point
+      ipv4:
+        enabled: true
+      metric: 10
+      te-metric:
+        measurement:
+          enabled: true
+          interval: 100
+          damping-period: 5
+    - if-name: da-ch
+      network-type: point-to-point
+      ipv4:
+        enabled: true
+      metric: 10
+      te-metric:
+        measurement:
+          enabled: true
+          interval: 100
+          damping-period: 5
+    - if-name: da-at
+      network-type: point-to-point
+      ipv4:
+        enabled: true
+      metric: 10
+      te-metric:
+        measurement:
+          enabled: true
+          interval: 100
+          damping-period: 5
