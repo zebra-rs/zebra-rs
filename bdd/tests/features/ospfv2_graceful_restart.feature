@@ -121,8 +121,11 @@ Feature: OSPFv2 graceful restart keeps forwarding through a daemon restart
     # neighbor-state check by a beat.
     And show command "show ospf route" in namespace "a" should eventually contain "10.0.0.2/32"
     And ping from "a" to "10.0.0.2" should eventually succeed
-    # The restart is over, and a has left helper mode.
+    # The restart is over, and a has left helper mode. b ended it itself,
+    # once each adjacency the checkpoint recorded was Full again, not by
+    # running out its grace period.
     And show command "show ospf graceful-restart" in namespace "a" should eventually contain "(no active helpers)"
+    And daemon log in namespace "b" should eventually contain "exit-restart success"
 
   Scenario: Teardown topology
     # Separate scenario so cleanup still runs when a step above fails

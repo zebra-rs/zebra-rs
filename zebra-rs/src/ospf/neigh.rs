@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Display;
 use std::net::Ipv4Addr;
 
@@ -144,11 +144,15 @@ pub struct RestartingState {
     /// side. Zero when the staging happened mid-flight without a
     /// checkpoint (`begin` without `commit`).
     pub expected_full_count: usize,
-    /// Number of adjacencies Full at the last one's return to Full,
-    /// set in `process_neighbor_state_change` and checked against
-    /// `expected_full_count` to decide when to declare exit-restart
-    /// success. A neighbour flapping counts once.
+    /// How many of `adjacencies` were Full again at the last return of
+    /// one to Full, set in `process_neighbor_state_change`.
     pub current_full_count: usize,
+    /// The adjacencies the restart must re-establish (RFC 3623 §2.2), as
+    /// `(ifindex, neighbour Router ID)`: those Full when it was staged,
+    /// or that the checkpoint records as Full. The restart is over once
+    /// each is Full again. A neighbour coming back twice counts once, and
+    /// one adjacent only since stands in for none of them.
+    pub adjacencies: BTreeSet<(u32, Ipv4Addr)>,
 }
 
 /// Per-neighbor protocol state.
