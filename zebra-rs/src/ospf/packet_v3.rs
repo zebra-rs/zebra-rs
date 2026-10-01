@@ -742,13 +742,25 @@ fn ospfv3_lsa_lookup_raw<'a>(
     link_state_id: u32,
     advertising_router: std::net::Ipv4Addr,
 ) -> Option<&'a Ospfv3Lsa> {
+    ospfv3_lsa_entry(oi, ls_type, link_state_id, advertising_router).map(|entry| &entry.data)
+}
+
+/// The database entry behind [`ospfv3_lsa_lookup_raw`]; it knows the
+/// LSA's current age.
+fn ospfv3_lsa_entry<'a>(
+    oi: &'a OspfInterface<Ospfv3>,
+    ls_type: u16,
+    link_state_id: u32,
+    advertising_router: std::net::Ipv4Addr,
+) -> Option<&'a super::lsdb::Lsa<Ospfv3>> {
     let key: super::lsdb::OspfLsaKey = (ls_type, link_state_id, advertising_router);
-    match ospfv3_ls_type_scope(ls_type) {
-        Ospfv3LsaScope::Area => oi.lsdb.lookup_by_raw_key(key),
-        Ospfv3LsaScope::As => oi.lsdb_as.lookup_by_raw_key(key),
-        Ospfv3LsaScope::Link => oi.link_lsdb.lookup_by_raw_key(key),
-        Ospfv3LsaScope::Reserved => None,
-    }
+    let lsdb = match ospfv3_ls_type_scope(ls_type) {
+        Ospfv3LsaScope::Area => &*oi.lsdb,
+        Ospfv3LsaScope::As => &*oi.lsdb_as,
+        Ospfv3LsaScope::Link => &*oi.link_lsdb,
+        Ospfv3LsaScope::Reserved => return None,
+    };
+    lsdb.tables.get(&key)
 }
 
 /// Convenience wrapper that takes an `Ospfv3LsaHeader`. Used by
@@ -774,8 +786,8 @@ fn ospfv3_db_desc_proc(
     // DBD, request the LSA when we hold no copy, or when the
     // advertised instance is more recent than ours — testing only for
     // absence leaves a stale copy in place until the originator's
-    // next refresh. See the v2 twin for why comparing the stored ages
-    // is sufficient here.
+    // next refresh. See the v2 twin for why comparing our copy at the
+    // age it was installed with is sufficient here.
     let mut added = false;
     for h in dd.lsa_headers.iter() {
         let need = match ospfv3_lsa_lookup(oi, h) {
@@ -1089,8 +1101,9 @@ pub fn ospfv3_ls_req_recv(
 
     let mut lsas: Vec<Ospfv3Lsa> = Vec::new();
     for req in ls_req.reqs.iter() {
-        match ospfv3_lsa_lookup_raw(oi, req.ls_type, req.link_state_id, req.advertising_router) {
-            Some(lsa) => lsas.push(lsa.clone()),
+        match ospfv3_lsa_entry(oi, req.ls_type, req.link_state_id, req.advertising_router) {
+            // At its current age, not the age it was installed with.
+            Some(lsa) => lsas.push(lsa.sent_copy(oi.transmit_delay)),
             None => {
                 ospf_pdu_trace!(
                     oi.tracing,
@@ -1626,14 +1639,11 @@ fn ospfv3_ls_upd_proc(
         return LsaProcessResult::DiscardNoAck;
     }
 
-    let lsdb_ref = match scope {
-        Ospfv3LsaScope::As => &*oi.lsdb_as,
-        Ospfv3LsaScope::Link => &*oi.link_lsdb,
-        _ => &*oi.lsdb,
-    };
-    if let Some(db_lsa) = lsdb_ref.lookup_by_raw_key(key) {
-        let cloned = db_lsa.clone();
-        ospfv3_ls_upd_send(oi, nbr, vec![cloned]);
+    // Our copy, at its current age (RFC 2328 §14), as OSPFv2's.
+    let (ls_type, link_state_id, advertising_router) = key;
+    if let Some(db_lsa) = ospfv3_lsa_entry(oi, ls_type, link_state_id, advertising_router) {
+        let sent = db_lsa.sent_copy(oi.transmit_delay);
+        ospfv3_ls_upd_send(oi, nbr, vec![sent]);
     }
     LsaProcessResult::DbCopyNewer
 }
