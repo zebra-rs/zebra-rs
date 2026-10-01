@@ -1159,6 +1159,10 @@ pub struct Peer {
     /// in OpenSent/OpenConfirm; cleared (one way or the other) when the
     /// first OPEN on either connection lets us pick the winner.
     pub collision: Option<CollisionConn>,
+    /// The primary conn whose KEEPALIVE arrived in OpenConfirm while the
+    /// parked conn could still win §6.8 (`fsm_bgp_keepalive`). That
+    /// conn's death completes the handshake on it (`collision_closed`).
+    pub held_keepalive: Option<ConnId>,
     pub tx: mpsc::Sender<Message>,
     /// Priority-lane sender ([`super::Bgp`]'s `ptx`) for the keepalive
     /// and hold timer events, so they are serviced ahead of an ingest
@@ -1412,6 +1416,7 @@ impl Peer {
             primary_conn_id: None,
             conn_id_next: 0,
             collision: None,
+            held_keepalive: None,
             cap_send: BgpCap::default(),
             cap_recv: BgpCap::default(),
             cap_map: CapAfiMap::new(),
@@ -2126,6 +2131,18 @@ pub fn fsm_next_state(peer: &mut Peer, event: Event) -> (State, FsmEffect) {
             None => (peer.state, FsmEffect::None),
         },
         Event::UpdateMsg(packet) => {
+            // UPDATEs come from an Established remote only, and it
+            // cannot be Established on a parked conn whose OPEN we have
+            // not answered. One that arrives while a KEEPALIVE is held
+            // shows the remote Established on the primary: it refused
+            // the parked conn, or is about to. Complete the handshake
+            // so the UPDATE is not lost.
+            if peer.state == State::OpenConfirm && take_held_keepalive(peer) {
+                if let Some(collision) = peer.collision.take() {
+                    close_collision(collision, NotifyCode::Cease, 7); // ConnectionCollisionResolution
+                }
+                peer.state = State::Established;
+            }
             // UpdateMsg carries no ConnId (unlike the other wire
             // events), so `resolve_conn` can't screen it. Now that a
             // priority-lane teardown can precede queued UPDATEs, gate
@@ -2421,6 +2438,25 @@ fn close_collision(collision: CollisionConn, code: NotifyCode, sub_code: u8) {
     writer.detach();
 }
 
+/// Whether the current primary conn's KEEPALIVE was held
+/// (`fsm_bgp_keepalive`). Clears the hold either way.
+fn take_held_keepalive(peer: &mut Peer) -> bool {
+    peer.held_keepalive
+        .take()
+        .is_some_and(|id| peer.primary_conn_id == Some(id))
+}
+
+/// The parked conn is gone without winning §6.8, and the primary
+/// carries the session. A KEEPALIVE held while the parked conn could
+/// still win completes the handshake now.
+fn collision_closed(peer: &mut Peer) -> State {
+    if peer.state == State::OpenConfirm && take_held_keepalive(peer) {
+        State::Established
+    } else {
+        peer.state
+    }
+}
+
 /// Tear down the primary connection in place (send NOTIFICATION
 /// first, then release the reader/writer/packet_tx triple — the
 /// writer is detached, not aborted, so the NOTIFICATION drains onto
@@ -2497,7 +2533,7 @@ pub fn fsm_bgp_open(peer: &mut Peer, conn: ConnTag, packet: OpenPacket) -> State
                 NotifyCode::OpenMsgError,
                 OpenError::BadPeerAS.into(),
             );
-            return peer.state;
+            return collision_closed(peer);
         }
         peer_send_notification(
             peer,
@@ -2527,7 +2563,7 @@ pub fn fsm_bgp_open(peer: &mut Peer, conn: ConnTag, packet: OpenPacket) -> State
                 NotifyCode::OpenMsgError,
                 OpenError::RoleMismatch.into(),
             );
-            return peer.state;
+            return collision_closed(peer);
         }
         peer_send_notification(
             peer,
@@ -2573,7 +2609,7 @@ pub fn fsm_bgp_open(peer: &mut Peer, conn: ConnTag, packet: OpenPacket) -> State
                 NotifyCode::OpenMsgError,
                 OpenError::BadBgpIdentifier.into(),
             );
-            return peer.state;
+            return collision_closed(peer);
         }
         peer_send_notification(
             peer,
@@ -2612,7 +2648,8 @@ pub fn fsm_bgp_open(peer: &mut Peer, conn: ConnTag, packet: OpenPacket) -> State
                     // OpenConfirm, keep the parked conn — its OPEN, if
                     // one comes, resolves the collision below on the
                     // `ConnTag::Collision` arm, and its death just frees
-                    // the slot.
+                    // the slot. Until one of them happens a KEEPALIVE on
+                    // this conn is held (`fsm_bgp_keepalive`).
                     peer.collision = Some(collision);
                 }
                 ConnTag::Collision => {
@@ -2628,7 +2665,7 @@ pub fn fsm_bgp_open(peer: &mut Peer, conn: ConnTag, packet: OpenPacket) -> State
                     // sat Established on the same connection until its
                     // hold timer expired.
                     close_collision(collision, NotifyCode::Cease, 7); // ConnectionCollisionResolution
-                    return peer.state;
+                    return collision_closed(peer);
                 }
             }
         } else {
@@ -2732,7 +2769,7 @@ pub fn fsm_bgp_notification(peer: &mut Peer, conn: ConnTag, packet: Notification
         && let Some(collision) = peer.collision.take()
     {
         drop(collision);
-        return peer.state;
+        return collision_closed(peer);
     }
     // NOTIFICATION on the primary closes that connection. With a §6.8
     // conn still parked, the session continues on it in OpenSent (its
@@ -2760,10 +2797,32 @@ pub fn fsm_bgp_keepalive(peer: &mut Peer, conn: ConnTag) -> State {
     }
     timer::refresh_hold_timer(peer);
     match peer.state {
+        // A conn still parked here sent its OPEN, which has not arrived
+        // yet. If that conn wins §6.8, the remote resolves the collision
+        // in its favor once our OPEN on it arrives there, and closes
+        // this conn. Going Established here closed the winner instead:
+        // each side closed the conn the other kept, and both reset. Two
+        // peers that dial each other at once do this whenever each
+        // takes the other's dial before its own, and one side's
+        // KEEPALIVE overtakes the other's OPEN. Hold the KEEPALIVE until
+        // the parked conn's OPEN resolves the collision
+        // (`fsm_bgp_open`), or its death leaves this conn
+        // (`collision_closed`).
+        State::OpenConfirm
+            if peer.collision.as_ref().is_some_and(|collision| {
+                collision.role
+                    == collision_winner(
+                        peer.local_identifier.unwrap_or(peer.router_id),
+                        peer.remote_id,
+                    )
+            }) =>
+        {
+            peer.held_keepalive = peer.primary_conn_id;
+            State::OpenConfirm
+        }
         // RFC 4271 §8.2.2: KEEPALIVE in OpenConfirm completes the
         // handshake and moves us to Established. A conn still parked
-        // from a deferred §6.8 resolution collides with an Established
-        // session, which §6.8 settles in the session's favor.
+        // here is the §6.8 loser, which §6.8 closes.
         State::OpenConfirm | State::Established => {
             if let Some(collision) = peer.collision.take() {
                 close_collision(collision, NotifyCode::Cease, 7); // ConnectionCollisionResolution
@@ -2970,7 +3029,7 @@ pub fn fsm_conn_fail(peer: &mut Peer, conn: ConnTag) -> State {
         if let Some(collision) = peer.collision.take() {
             drop(collision);
         }
-        return peer.state;
+        return collision_closed(peer);
     }
     // Primary conn failed. If a §6.8 conn is parked, fall back to it
     // instead of tearing the session down: promote it to primary and
@@ -4969,21 +5028,163 @@ mod fsm_idle_hold_tests {
         );
     }
 
-    /// Reaching Established with a conn still parked from a deferral
-    /// closes it (§6.8: a collision with an Established session is
-    /// settled in the session's favor) — nothing stays parked forever.
+    /// A KEEPALIVE on the primary while the parked conn, the §6.8
+    /// winner, has yet to deliver its OPEN is held: the session stays in
+    /// OpenConfirm and the parked conn stays. Going Established here
+    /// closed the winner, while the remote, holding both conns, resolved
+    /// the collision for it and closed this one: both reset. That is
+    /// `bgp_router_id_change_v6`'s "due to NOTIFICATION received". Both
+    /// sides of a collision: our dial losing to the remote's (lower
+    /// identifier), and the remote's dial, taken while we dialled,
+    /// losing to ours (higher identifier).
     #[tokio::test]
-    async fn established_closes_a_still_parked_collision() {
+    async fn a_keepalive_waits_for_a_parked_winner() {
+        for (remote_id, primary_role) in [
+            (Ipv4Addr::new(10, 0, 0, 2), Role::Active),
+            (Ipv4Addr::new(1, 1, 1, 1), Role::Passive),
+        ] {
+            let (mut peer, primary_id, collision_id) = peer_with_collision();
+            peer.primary_role = Some(primary_role);
+            peer.collision.as_mut().unwrap().role = match primary_role {
+                Role::Active => Role::Passive,
+                Role::Passive => Role::Active,
+            };
+            peer.state = fsm_bgp_open(&mut peer, ConnTag::Primary, open_with_id(remote_id));
+            assert_eq!(peer.state, State::OpenConfirm, "{remote_id}: deferred");
+            let (next, _) = fsm_next_state(&mut peer, Event::KeepAliveMsg(primary_id));
+            assert_eq!(next, State::OpenConfirm, "{remote_id}");
+            assert_eq!(
+                peer.collision.as_ref().map(|c| c.conn_id),
+                Some(collision_id),
+                "{remote_id}: the winner stays parked"
+            );
+            assert_eq!(peer.primary_conn_id, Some(primary_id));
+        }
+    }
+
+    /// After a held KEEPALIVE the session goes to the parked winner,
+    /// whichever reaches us first of its OPEN and the remote's Cease on
+    /// the primary.
+    #[tokio::test]
+    async fn a_held_keepalive_leaves_the_session_to_the_parked_winner() {
+        let open = || open_with_id(Ipv4Addr::new(10, 0, 0, 2));
+        let cease = || NotificationPacket::new(NotifyCode::Cease, 7, Vec::new());
+        for cease_first in [false, true] {
+            let (mut peer, primary_id, collision_id) = peer_with_collision();
+            peer.state = fsm_bgp_open(&mut peer, ConnTag::Primary, open());
+            peer.state = fsm_next_state(&mut peer, Event::KeepAliveMsg(primary_id)).0;
+            if cease_first {
+                peer.state = fsm_next_state(&mut peer, Event::NotifMsg(primary_id, cease())).0;
+                assert_eq!(peer.state, State::OpenSent, "falls back to the winner");
+            }
+            peer.state = fsm_next_state(&mut peer, Event::BGPOpen(collision_id, open())).0;
+            assert_eq!(peer.state, State::OpenConfirm, "cease_first={cease_first}");
+            assert_eq!(peer.primary_conn_id, Some(collision_id));
+            // The remote's Cease on the closed conn, if still to come,
+            // is from a conn that no longer counts.
+            peer.state = fsm_next_state(&mut peer, Event::NotifMsg(primary_id, cease())).0;
+            peer.state = fsm_next_state(&mut peer, Event::KeepAliveMsg(collision_id)).0;
+            assert_eq!(peer.state, State::Established, "cease_first={cease_first}");
+            assert_eq!(peer.primary_conn_id, Some(collision_id));
+        }
+    }
+
+    /// The parked winner dies instead (the remote had aborted that dial,
+    /// refused it from Established, or its OPEN is refused here): the
+    /// held KEEPALIVE completes the handshake on the primary at once,
+    /// without waiting a keepalive interval for the remote's next one.
+    #[tokio::test]
+    async fn the_parked_winners_death_completes_a_held_keepalive() {
+        for death in ["closed", "refused", "bad OPEN"] {
+            let (mut peer, primary_id, collision_id) = peer_with_collision();
+            peer.state = fsm_bgp_open(
+                &mut peer,
+                ConnTag::Primary,
+                open_with_id(Ipv4Addr::new(10, 0, 0, 2)),
+            );
+            peer.state = fsm_next_state(&mut peer, Event::KeepAliveMsg(primary_id)).0;
+            let event = match death {
+                "closed" => Event::ConnFail(collision_id),
+                "refused" => {
+                    let cease = NotificationPacket::new(NotifyCode::Cease, 7, Vec::new());
+                    Event::NotifMsg(collision_id, cease)
+                }
+                _ => {
+                    let header = BgpHeader::new(BgpType::Open, BGP_HEADER_LEN + 10);
+                    let id = Ipv4Addr::new(10, 0, 0, 2);
+                    Event::BGPOpen(
+                        collision_id,
+                        OpenPacket::new(header, 65003, 180, &id, BgpCap::default()),
+                    )
+                }
+            };
+            let (next, _) = fsm_next_state(&mut peer, event);
+            assert_eq!(next, State::Established, "{death}");
+            assert!(peer.collision.is_none());
+            assert_eq!(peer.primary_conn_id, Some(primary_id));
+        }
+    }
+
+    /// A hold belongs to the conn whose KEEPALIVE it holds. Once the
+    /// winner has taken the session, the death of a conn parked later
+    /// does not complete a handshake the remote has not confirmed on it.
+    #[tokio::test]
+    async fn a_hold_belongs_to_its_conn() {
+        let open = || open_with_id(Ipv4Addr::new(10, 0, 0, 2));
+        let (mut peer, primary_id, collision_id) = peer_with_collision();
+        peer.state = fsm_bgp_open(&mut peer, ConnTag::Primary, open());
+        peer.state = fsm_next_state(&mut peer, Event::KeepAliveMsg(primary_id)).0;
+        peer.state = fsm_next_state(&mut peer, Event::BGPOpen(collision_id, open())).0;
+        assert_eq!(peer.primary_conn_id, Some(collision_id));
+        let late_id = peer.alloc_conn_id();
+        peer.collision = Some(test_collision_conn(late_id));
+        let (next, _) = fsm_next_state(&mut peer, Event::ConnFail(late_id));
+        assert_eq!(next, State::OpenConfirm);
+    }
+
+    /// An UPDATE while a KEEPALIVE is held shows the remote Established
+    /// on the primary: it cannot be on the parked conn, whose OPEN we
+    /// have not answered. The handshake completes and the UPDATE is
+    /// processed, where it used to be dropped as from a session not up.
+    /// With no KEEPALIVE held an UPDATE in OpenConfirm is still dropped.
+    #[tokio::test]
+    async fn an_update_completes_a_held_keepalive() {
         let (mut peer, primary_id, _collision_id) = peer_with_collision();
         peer.state = fsm_bgp_open(
             &mut peer,
             ConnTag::Primary,
             open_with_id(Ipv4Addr::new(10, 0, 0, 2)),
         );
+        let (next, effect) = fsm_next_state(&mut peer, Event::UpdateMsg(UpdatePacket::new()));
+        assert_eq!(next, State::OpenConfirm, "nothing held yet");
+        assert!(matches!(effect, FsmEffect::None));
+
+        peer.state = fsm_next_state(&mut peer, Event::KeepAliveMsg(primary_id)).0;
+        let (next, effect) = fsm_next_state(&mut peer, Event::UpdateMsg(UpdatePacket::new()));
+        assert_eq!(next, State::Established);
+        assert!(matches!(effect, FsmEffect::RouteUpdate(_)));
+        assert!(peer.collision.is_none());
+        assert_eq!(peer.primary_conn_id, Some(primary_id));
+    }
+
+    /// A conn parked after our handshake reached OpenConfirm that loses
+    /// §6.8 holds nothing: the KEEPALIVE completes the handshake and the
+    /// loser is closed, as before.
+    #[tokio::test]
+    async fn a_parked_loser_does_not_hold_the_keepalive() {
+        let (mut peer, primary_id, _collision_id) = peer_with_collision();
+        let crossed = peer.collision.take();
+        // Our dial wins against the lower remote identifier.
+        peer.state = fsm_bgp_open(
+            &mut peer,
+            ConnTag::Primary,
+            open_with_id(Ipv4Addr::new(1, 1, 1, 1)),
+        );
+        assert_eq!(peer.state, State::OpenConfirm);
+        peer.collision = crossed;
         let (next, _) = fsm_next_state(&mut peer, Event::KeepAliveMsg(primary_id));
         assert_eq!(next, State::Established);
         assert!(peer.collision.is_none());
-        assert_eq!(peer.primary_conn_id, Some(primary_id));
     }
 
     /// When our dial is the §6.8 winner the pre-OPEN parked conn is the
