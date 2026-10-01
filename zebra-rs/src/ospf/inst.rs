@@ -848,6 +848,31 @@ impl<V: OspfVersion> Ospf<V> {
         });
     }
 
+    /// Arm the sweep as this router's restart ends: it waits for the
+    /// first SPF since, in every area (`sweep_area_done`). A run still in
+    /// flight is not that SPF: it computed on the restart's database, and
+    /// the new calculation the exit asks for (RFC 3623 §2.3 (3)) runs
+    /// after it (`spf_pending`).
+    fn sweep_after_restart(&mut self) {
+        self.sweep_areas = Some(self.areas.iter().map(|(id, _)| *id).collect());
+        for (_, area) in self.areas.iter_mut() {
+            area.spf_predates_exit = area.spf_inflight;
+        }
+    }
+
+    /// Whether the SPF run just finished in `area_id` began after this
+    /// router's restart ended. One begun before computed on the restart's
+    /// database: its results are dropped, as they would have been had it
+    /// finished in time, and the new calculation the exit asks for runs
+    /// after it. Installing them withdrew routes the restart had not yet
+    /// relearned, before that calculation could put them back.
+    fn spf_current(&mut self, area_id: Ipv4Addr) -> bool {
+        !self
+            .areas
+            .get_mut(area_id)
+            .is_some_and(|area| std::mem::take(&mut area.spf_predates_exit))
+    }
+
     /// The first SPF since this router's restart ended has run in
     /// `area_id`, or found nothing to compute. Once it has in every area,
     /// this router's routes are in, and the earlier run's are swept.
@@ -944,6 +969,84 @@ impl<V: OspfVersion> Ospf<V> {
             };
             self.gr_helper_exit(ifindex, router_id, reason);
         }
+    }
+
+    /// Whether the LSA just installed at `key` in `area_id` is
+    /// inconsistent with this router's pre-restart Router-LSAs (RFC 3623
+    /// §2.2 (2)), which ends its restart. Router Y's Router-LSA that no
+    /// longer links to this router, though ours links to Y, shows Y not
+    /// helping, and so does the Network-LSA of a transit network ours is
+    /// on that no longer lists this router. Forwarding through Y as
+    /// before the restart is no longer safe. One being flushed lists
+    /// nothing. While restarting, this router's Router-LSAs in the
+    /// database are its pre-restart ones: it originates none.
+    fn restart_inconsistent(&self, area_id: Option<Ipv4Addr>, key: OspfLsaKey) -> bool {
+        let me = self.router_id;
+        if self.restarting.is_none() || key.2 == me {
+            return false;
+        }
+        let Some(area) = area_id.and_then(|area_id| self.areas.get(area_id)) else {
+            return false;
+        };
+        let Some(lsa) = area.lsdb.tables.get(&key) else {
+            return false;
+        };
+        let live = lsa.current_age() < super::lsdb::OSPF_MAX_AGE;
+        let mut ours = area
+            .lsdb
+            .tables
+            .iter()
+            .filter(|(key, _)| key.2 == me)
+            .filter_map(|(_, lsa)| V::router_lsa_adjacency(&lsa.data));
+        let inconsistent = if let Some(theirs) = V::router_lsa_adjacency(&lsa.data) {
+            !(live && theirs.routers.contains(&me))
+                && ours.any(|adjacency| adjacency.routers.contains(&key.2))
+        } else if let Some(attached) = V::network_lsa_attached(&lsa.data) {
+            !(live && attached.contains(&me))
+                && ours.any(|adjacency| {
+                    adjacency
+                        .networks
+                        .iter()
+                        .any(|(id, dr)| *id == key.1 && dr.is_none_or(|dr| dr == key.2))
+                })
+        } else {
+            false
+        };
+        if inconsistent {
+            tracing::info!(
+                "[GR Restart] LSA {:?} from {} is inconsistent with our pre-restart Router-LSA; ending the restart",
+                key,
+                key.2
+            );
+        }
+        inconsistent
+    }
+
+    /// This router's Network-LSAs that no enabled interface it is DR on
+    /// backs (`backed`: area and Link State ID): left from a DR role lost,
+    /// or an interface disabled, while it was restarting, when their
+    /// flush was held back (RFC 3623 §2.2). Flushed as the restart ends
+    /// (§2.3 (5)).
+    fn unbacked_network_lsas(
+        &self,
+        network_type: u16,
+        backed: &BTreeSet<(Ipv4Addr, u32)>,
+    ) -> Vec<(Ipv4Addr, OspfLsaKey)> {
+        self.areas
+            .iter()
+            .flat_map(|(area_id, area)| {
+                area.lsdb
+                    .tables
+                    .iter()
+                    .filter(move |(key, lsa)| {
+                        key.0 == network_type
+                            && key.2 == self.router_id
+                            && !backed.contains(&(*area_id, key.1))
+                            && lsa.current_age() < super::lsdb::OSPF_MAX_AGE
+                    })
+                    .map(move |(key, _)| (*area_id, *key))
+            })
+            .collect()
     }
 
     /// A Grace-LSA installed on `ifindex`, from whichever neighbour
@@ -1096,12 +1199,13 @@ impl<V: OspfVersion> Ospf<V> {
         let lapsed = nbr.gr_helper.as_ref().is_some_and(|helper| helper.lapsed);
         // Kept from the request that began the help: a renewal comes from
         // the restarter after it restarted, when its Hellos declare no DR.
-        let declared = nbr
-            .gr_helper
-            .as_ref()
-            .map_or((nbr.ident.d_router, nbr.ident.bd_router), |helper| {
-                helper.declared
-            });
+        let (declared, priority) = match nbr.gr_helper.as_ref() {
+            Some(helper) => (helper.declared, helper.priority),
+            None => (
+                (nbr.ident.d_router, nbr.ident.bd_router),
+                nbr.ident.priority,
+            ),
+        };
         nbr.gr_helper = Some(HelperState {
             reason: request.reason,
             grace_period,
@@ -1110,6 +1214,7 @@ impl<V: OspfVersion> Ospf<V> {
             requested_ago,
             lapsed,
             declared,
+            priority,
         });
         tracing::info!(
             "[GR Helper] {} for nbr {} on ifindex={} (grace={}s, reason={:?})",
@@ -6129,9 +6234,10 @@ impl Ospf<Ospfv2> {
     ///
     /// Called from `Ospf::new()` after the default-construction.
     /// If `/var/lib/zebra-rs/checkpoint/ospf.cbor` (or the
-    /// `ZEBRA_OSPF_CHECKPOINT_DIR` override) is present AND fresh
-    /// (within `1.5 × grace_period_secs` of `written_at` per the
-    /// locked design), the daemon comes up in restarting mode:
+    /// `ZEBRA_OSPF_CHECKPOINT_DIR` override) is present AND its
+    /// restart's grace period is not over yet (counting the part used
+    /// before the write, `grace_used_ms`), the daemon comes up in
+    /// restarting mode:
     ///
     ///   - `self.router_id` restored from the checkpoint.
     ///   - Each area's LSDB pre-populated from the saved LSA
@@ -6141,8 +6247,8 @@ impl Ospf<Ospfv2> {
     ///   - `lan_adj_sids` restored so SR-MPLS labels stay stable.
     ///   - `self.restarting = Some(...)` so origination methods
     ///     short-circuit and the show output reflects the mode.
-    ///   - Auto-abort timer armed for the remaining grace
-    ///     window; the exit-restart path will replace it once
+    ///   - Auto-abort timer armed for what is left of the grace
+    ///     period; the exit-restart path will replace it once
     ///     adjacencies recover.
     ///
     /// The checkpoint file is deleted immediately after a
@@ -6150,13 +6256,16 @@ impl Ospf<Ospfv2> {
     /// same stale state. Re-checkpointing is the next restart's
     /// responsibility (5d's commit handler).
     fn gr_restart_load_checkpoint(&mut self) {
-        use super::checkpoint::{OspfCheckpoint, default_path};
+        self.gr_restart_load_checkpoint_from(&super::checkpoint::default_path("ospf"));
+    }
+
+    fn gr_restart_load_checkpoint_from(&mut self, path: &std::path::Path) {
+        use super::checkpoint::OspfCheckpoint;
         use super::neigh::RestartingState;
         use crate::context::{Timer, TimerType};
         use std::time::{Duration, SystemTime};
 
-        let path = default_path("ospf");
-        let cp = match OspfCheckpoint::read_from_path(&path) {
+        let cp = match OspfCheckpoint::read_from_path(path) {
             Ok(cp) => cp,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
             Err(e) => {
@@ -6169,20 +6278,24 @@ impl Ospf<Ospfv2> {
             }
         };
 
-        // Freshness: written_at must be within 1.5x grace_period
-        // ago, per the locked design (wall clock + slack).
-        let max_age = Duration::from_secs((cp.grace_period_secs as u64).saturating_mul(3) / 2);
-        let age = SystemTime::now()
-            .duration_since(cp.written_at)
-            .unwrap_or(Duration::ZERO);
-        if age > max_age {
+        // The grace period runs from the restart's start, when the
+        // Grace-LSAs went out (RFC 3623 §3.1), not from the checkpoint's
+        // write; the helpers stop helping once it is over, and a restart
+        // must be over by then too (§2.2 (3)). The restart used to run
+        // on to 1.5 times the grace period from the write.
+        let grace = Duration::from_secs(cp.grace_period_secs.into());
+        let used = Duration::from_millis(cp.grace_used_ms)
+            + SystemTime::now()
+                .duration_since(cp.written_at)
+                .unwrap_or(Duration::ZERO);
+        if used >= grace {
             tracing::warn!(
-                "[GR Restart] checkpoint at {} stale (age {:?} > {:?}), cold-starting",
+                "[GR Restart] checkpoint at {} past its grace period ({:?} of {:?}), cold-starting",
                 path.display(),
-                age,
-                max_age
+                used,
+                grace
             );
-            let _ = OspfCheckpoint::delete(&path);
+            let _ = OspfCheckpoint::delete(path);
             return;
         }
 
@@ -6193,12 +6306,14 @@ impl Ospf<Ospfv2> {
             self.lan_adj_sids.insert((*ifindex, *addr), *label);
         }
 
-        // Restarting state — entered_at is the original checkpoint
-        // write time so the freshness slack on this side matches
-        // the helpers' grace-period view of when we went down.
-        let remaining = max_age.saturating_sub(age);
-        let remaining_secs = remaining.as_secs().max(1);
-        let entered_at = tokio::time::Instant::now() - age;
+        // Restarting state, from when the restart started: the abort
+        // timer fires when its grace period is over, rounded up so that
+        // `RestartingState::expired` holds by then.
+        let remaining = grace - used;
+        let remaining_secs = remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0);
+        let entered_at = tokio::time::Instant::now()
+            .checked_sub(used)
+            .unwrap_or_else(tokio::time::Instant::now);
         let tx = self.tx.clone();
         let abort_timer = Timer::new(remaining_secs, TimerType::Once, move || {
             let tx = tx.clone();
@@ -6231,7 +6346,7 @@ impl Ospf<Ospfv2> {
         // Delete the on-disk file immediately. The next restart's
         // commit handler writes a fresh one; replaying a stale
         // file on a second boot would propagate the wrong LSDB.
-        let _ = OspfCheckpoint::delete(&path);
+        let _ = OspfCheckpoint::delete(path);
 
         tracing::info!(
             "[GR Restart] restored from checkpoint at {}: router-id={}, {} area(s), {} LSA(s), grace remaining ~{:?}",
@@ -6321,9 +6436,30 @@ impl Ospf<Ospfv2> {
             }
             self.ext_link_lsa_originate(*ifindex);
         }
+        // And ours from an interface disabled while restarting, which the
+        // loop above does not visit.
+        let backed = self
+            .links
+            .values()
+            .filter(|link| link.enabled && link.state == IfsmState::DR)
+            .filter_map(|link| {
+                super::addr::primary_addr(&link.addr)
+                    .map(|addr| (link.area, u32::from(addr.prefix.addr())))
+            })
+            .collect();
+        let network = u8::from(OspfLsType::Network).into();
+        for (area_id, key) in self.unbacked_network_lsas(network, &backed) {
+            let flushed = self
+                .areas
+                .get_mut(area_id)
+                .and_then(|area| area.lsdb.flush_lsa_by_raw_key(key, &self.tx, Some(area_id)));
+            if let Some(lsa) = flushed {
+                self.flood_self_originated_lsa(area_id, &lsa);
+            }
+        }
         // Router-Info refresh clears the gr_capable bit.
         self.router_info_lsa_originate();
-        self.sweep_areas = Some(self.areas.iter().map(|(id, _)| *id).collect());
+        self.sweep_after_restart();
         let _ = self.tx.send(Message::SpfSchedule(None));
         true
     }
@@ -7513,9 +7649,11 @@ impl Ospf<Ospfv2> {
             }
             Message::SpfDone(output) => {
                 let area_id = output.area_id;
-                apply_spf_result(self, *output);
-                if !self.in_restart() {
-                    self.sweep_area_done(area_id);
+                if self.spf_current(area_id) {
+                    apply_spf_result(self, *output);
+                    if !self.in_restart() {
+                        self.sweep_area_done(area_id);
+                    }
                 }
                 if let Some(area) = self.areas.get_mut(area_id) {
                     area.spf_inflight = false;
@@ -7537,6 +7675,9 @@ impl Ospf<Ospfv2> {
             }
             Message::LsaChanged(area_id, key) => {
                 self.gr_helper_topology_change(area_id, key);
+                if self.restart_inconsistent(area_id, key) {
+                    self.gr_restart_abort();
+                }
             }
             Message::GrRestartAbort => {
                 // Only if this restart's grace period is over: the timer of
@@ -10354,9 +10495,27 @@ impl Ospf<Ospfv3> {
             self.network_lsa_originate_now(*ifindex);
             self.ext_intra_area_prefix_v3_lsa_originate(*ifindex);
         }
+        // Ours from a DR role lost, or an interface disabled, while
+        // restarting, when their flush was held back, as OSPFv2's.
+        let backed = self
+            .links
+            .values()
+            .filter(|link| link.enabled && link.state == IfsmState::DR)
+            .map(|link| (link.area, link.interface_id))
+            .collect();
+        let network = ospf_packet::OSPFV3_NETWORK_LSA_TYPE;
+        for (area_id, key) in self.unbacked_network_lsas(network, &backed) {
+            let flushed = self
+                .areas
+                .get_mut(area_id)
+                .and_then(|area| area.lsdb.flush_lsa_by_raw_key(key, &self.tx, Some(area_id)));
+            if let Some(lsa) = flushed {
+                self.flood_self_originated_lsa(area_id, &lsa);
+            }
+        }
         // The Router Information LSA's restart-capable bit clears.
         self.sr_capabilities_v3_originate_all();
-        self.sweep_areas = Some(self.areas.iter().map(|(id, _)| *id).collect());
+        self.sweep_after_restart();
         let _ = self.tx.send(Message::SpfSchedule(None));
         true
     }
@@ -10441,13 +10600,16 @@ impl Ospf<Ospfv3> {
     /// `gr_restart_load_checkpoint`; `lan_adj_sids` has no v3
     /// counterpart (SRv6 End.X SIDs re-reconcile per adjacency).
     fn gr_restart_load_checkpoint_v3(&mut self) {
-        use super::checkpoint::{OspfCheckpoint, default_path};
+        self.gr_restart_load_checkpoint_v3_from(&super::checkpoint::default_path("ospfv3"));
+    }
+
+    fn gr_restart_load_checkpoint_v3_from(&mut self, path: &std::path::Path) {
+        use super::checkpoint::OspfCheckpoint;
         use super::neigh::RestartingState;
         use crate::context::{Timer, TimerType};
         use std::time::{Duration, SystemTime};
 
-        let path = default_path("ospfv3");
-        let cp = match OspfCheckpoint::read_from_path(&path) {
+        let cp = match OspfCheckpoint::read_from_path(path) {
             Ok(cp) => cp,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
             Err(e) => {
@@ -10460,27 +10622,31 @@ impl Ospf<Ospfv3> {
             }
         };
 
-        let max_age = Duration::from_secs((cp.grace_period_secs as u64).saturating_mul(3) / 2);
-        let age = SystemTime::now()
-            .duration_since(cp.written_at)
-            .unwrap_or(Duration::ZERO);
-        if age > max_age {
+        // As OSPFv2's: the restart ends when its grace period does.
+        let grace = Duration::from_secs(cp.grace_period_secs.into());
+        let used = Duration::from_millis(cp.grace_used_ms)
+            + SystemTime::now()
+                .duration_since(cp.written_at)
+                .unwrap_or(Duration::ZERO);
+        if used >= grace {
             tracing::warn!(
-                "[GR Restart v3] checkpoint at {} stale (age {:?} > {:?}), cold-starting",
+                "[GR Restart v3] checkpoint at {} past its grace period ({:?} of {:?}), cold-starting",
                 path.display(),
-                age,
-                max_age
+                used,
+                grace
             );
-            let _ = OspfCheckpoint::delete(&path);
+            let _ = OspfCheckpoint::delete(path);
             return;
         }
 
         self.router_id = cp.router_id;
         let total_lsas = self.gr_restart_replay_areas(&cp.areas);
 
-        let remaining = max_age.saturating_sub(age);
-        let remaining_secs = remaining.as_secs().max(1);
-        let entered_at = tokio::time::Instant::now() - age;
+        let remaining = grace - used;
+        let remaining_secs = remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0);
+        let entered_at = tokio::time::Instant::now()
+            .checked_sub(used)
+            .unwrap_or_else(tokio::time::Instant::now);
         let tx = self.tx.clone();
         let abort_timer = Timer::new(remaining_secs, TimerType::Once, move || {
             let tx = tx.clone();
@@ -10508,7 +10674,7 @@ impl Ospf<Ospfv3> {
             adjacencies,
         });
 
-        let _ = OspfCheckpoint::delete(&path);
+        let _ = OspfCheckpoint::delete(path);
 
         tracing::info!(
             "[GR Restart v3] restored from checkpoint at {}: router-id={}, {} area(s), {} LSA(s), grace remaining ~{:?}",
@@ -11550,9 +11716,11 @@ impl Ospf<Ospfv3> {
             }
             Message::SpfDone(output) => {
                 let area_id = output.area_id;
-                apply_v3_spf_result(self, *output);
-                if !self.in_restart() {
-                    self.sweep_area_done(area_id);
+                if self.spf_current(area_id) {
+                    apply_v3_spf_result(self, *output);
+                    if !self.in_restart() {
+                        self.sweep_area_done(area_id);
+                    }
                 }
                 if let Some(area) = self.areas.get_mut(area_id) {
                     area.spf_inflight = false;
@@ -11850,6 +12018,9 @@ impl Ospf<Ospfv3> {
             }
             Message::LsaChanged(area_id, key) => {
                 self.gr_helper_topology_change(area_id, key);
+                if self.restart_inconsistent(area_id, key) {
+                    self.gr_restart_abort_v3();
+                }
             }
             Message::GrRestartAbort => {
                 // As OSPFv2's: only if this restart's grace period is over.
@@ -13259,6 +13430,12 @@ impl Ospf<Ospfv3> {
     pub fn network_lsa_flush(&mut self, ifindex: u32, area_id: Ipv4Addr) {
         use ospf_packet::OSPFV3_NETWORK_LSA_TYPE;
 
+        // As OSPFv2's: a restarting router changes none of its LSAs (RFC
+        // 3623 §2.2), and this one could end the help of the segment's
+        // neighbours. The restart's exit flushes it.
+        if self.in_restart() {
+            return;
+        }
         let Some(link) = self.links.get(&ifindex) else {
             return;
         };
@@ -23830,8 +24007,10 @@ mod gr_helper_tests {
     /// A restarting DR stays DR while helped (RFC 3623 §3). Its first
     /// Hellos after restarting declare no DR, nor list this router, and
     /// the election used to promote the BDR, O; a renewal then keeps the
-    /// declarations the help began with. Once the help ends the DR is
-    /// recalculated (§3.2), from S's own declarations.
+    /// declarations the help began with. Its priority stays too: here
+    /// its Hellos advertise 0 until its configuration is back, and the
+    /// election used to drop it before looking at its declarations. Once
+    /// the help ends the DR is recalculated (§3.2), from S's own Hellos.
     #[tokio::test(start_paused = true)]
     async fn a_helper_keeps_a_restarting_dr() {
         use super::super::ifsm::ospf_ifsm;
@@ -23850,6 +24029,7 @@ mod gr_helper_tests {
         let link = top.links.get_mut(&2).unwrap();
         let nbr = link.nbrs.get_mut(&s).unwrap();
         (nbr.ident.d_router, nbr.ident.bd_router) = (Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED);
+        nbr.ident.priority = 0;
         nbr.state = NfsmState::Exchange;
         // A renewal now, with no DR declared, keeps the declarations the
         // help began with.
@@ -23883,6 +24063,7 @@ mod gr_helper_tests {
         let link = top.links.get_mut(&2).unwrap();
         let nbr = link.nbrs.get_mut(&S).unwrap();
         (nbr.ident.d_router, nbr.ident.bd_router) = (Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED);
+        nbr.ident.priority = 0;
         nbr.state = NfsmState::Exchange;
         later().await;
         v3_receive(&mut top, 2, S, v3_grace(1, 0x8000_0002)).await;
@@ -23948,6 +24129,390 @@ mod gr_helper_tests {
         assert!(!swept(&mut rx, true), "v3: area 1 to come");
         top.process_msg(Message::SpfCalc(AREA1)).await;
         assert!(swept(&mut rx, true), "v3: every area");
+    }
+
+    /// An SPF begun while this router was restarting computed on the
+    /// restart's database. Finishing after the restart has ended, it is
+    /// not the calculation the exit asks for (RFC 3623 §2.3 (3)); that
+    /// one is queued behind it. Its results are dropped. It used to count
+    /// for the sweep, so the earlier run's routes could go before this
+    /// router's own were in. Installed, its results withdrew a route the
+    /// restart had not relearned, here 203.0.113.0/24 or 2001:db8::/64,
+    /// before the exit's calculation could put it back.
+    #[tokio::test(start_paused = true)]
+    async fn an_spf_begun_while_restarting_is_dropped() {
+        use crate::rib::client::{ProtoId, RibClient};
+        // (Withdrawn, swept.)
+        let rib_seen = |rx: &mut mpsc::UnboundedReceiver<crate::rib::client::RibInbound>| {
+            let msgs: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+                .map(|env| env.msg)
+                .collect();
+            (
+                msgs.iter().any(|msg| {
+                    matches!(
+                        msg,
+                        rib::Message::Ipv4Del { .. } | rib::Message::Ipv6Del { .. }
+                    )
+                }),
+                msgs.iter()
+                    .any(|msg| matches!(msg, rib::Message::SweepStale { .. })),
+            )
+        };
+
+        // OSPFv2.
+        let mut top = v2_top();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        top.ctx.rib = RibClient::new(tx, ProtoId::from_raw(1));
+        top.rib.insert(
+            "203.0.113.0/24".parse().unwrap(),
+            SpfRoute {
+                metric: 10,
+                path_type: RouteType::IntraArea,
+                nhops: BTreeMap::new(),
+                sid: None,
+                prefix_sid: None,
+                dest_vertex: None,
+                backup_as_primary: false,
+            },
+        );
+        top.restarting = Some(restarting(&[(2, S)]));
+        top.areas.get_mut(AREA0).unwrap().spf_inflight = true;
+        top.gr_restart_abort();
+        // The exit's calculation, behind the run in flight.
+        top.process_msg(Message::SpfCalc(AREA0)).await;
+        top.process_msg(Message::SpfDone(Box::new(spf_without_routes())))
+            .await;
+        assert_eq!(
+            rib_seen(&mut rx),
+            (false, false),
+            "v2: not by the run begun while restarting"
+        );
+        let calc = |msg: &Message<_>| matches!(msg, Message::SpfCalc(id) if *id == AREA0);
+        let next = queued(&mut top, calc)
+            .pop()
+            .expect("v2: the exit's follows");
+        top.process_msg(next).await;
+        top.process_msg(Message::SpfDone(Box::new(spf_without_routes())))
+            .await;
+        assert_eq!(rib_seen(&mut rx), (true, true), "v2: by the exit's");
+
+        // OSPFv3.
+        let mut top = v3_top();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        top.ctx.rib = RibClient::new(tx, ProtoId::from_raw(1));
+        top.rib6.insert(
+            "2001:db8::/64".parse().unwrap(),
+            SpfRouteV3 {
+                metric: 10,
+                path_type: RouteType::IntraArea,
+                nhops: BTreeMap::new(),
+                sid: None,
+                prefix_sid: None,
+                dest_vertex: None,
+                backup_as_primary: false,
+            },
+        );
+        top.restarting = Some(restarting(&[(2, S)]));
+        top.areas.get_mut(AREA0).unwrap().spf_inflight = true;
+        top.gr_restart_abort_v3();
+        top.process_msg(Message::SpfCalc(AREA0)).await;
+        top.process_msg(Message::SpfDone(Box::new(spf_without_routes())))
+            .await;
+        assert_eq!(
+            rib_seen(&mut rx),
+            (false, false),
+            "v3: not by the run begun while restarting"
+        );
+        let calc = |msg: &Message<_>| matches!(msg, Message::SpfCalc(id) if *id == AREA0);
+        let next = queued(&mut top, calc)
+            .pop()
+            .expect("v3: the exit's follows");
+        top.process_msg(next).await;
+        top.process_msg(Message::SpfDone(Box::new(spf_without_routes())))
+            .await;
+        assert_eq!(rib_seen(&mut rx), (true, true), "v3: by the exit's");
+    }
+
+    /// A restart restored from a checkpoint ends when its grace period
+    /// does (RFC 3623 §2.2 (3)), as the helpers count it (§3.1): from the
+    /// restart's start, so the part used before the checkpoint was
+    /// written counts. Here 100 of 120 seconds, which leaves 20. The
+    /// restart used to run on to 1.5 times the grace period from the
+    /// write, the helpers long gone. One loaded after its grace period
+    /// is over is no restart at all.
+    #[tokio::test(start_paused = true)]
+    async fn a_restored_restart_ends_with_its_grace_period() {
+        use super::super::checkpoint::OspfCheckpoint;
+        let dir = std::env::temp_dir().join(format!(
+            "zebra-rs-ospf-grace-deadline-{}",
+            std::process::id()
+        ));
+        let path = dir.join("checkpoint.cbor");
+        let used_ms = |secs: u32| u64::from(secs) * 1000;
+        /// The grace-period timeouts queued, once the timers due have run.
+        async fn aborted<V: OspfVersion>(top: &mut Ospf<V>) -> usize {
+            for _ in 0..10 {
+                tokio::task::yield_now().await;
+            }
+            queued(top, |msg| matches!(msg, Message::GrRestartAbort)).len()
+        }
+
+        // OSPFv2.
+        let mut top = v2_top();
+        let mut cp = OspfCheckpoint::from_instance(&top, GRACE, 1);
+        cp.grace_used_ms = used_ms(GRACE - 20);
+        cp.write_to_path(&path).unwrap();
+        top.gr_restart_load_checkpoint_from(&path);
+        assert!(top.in_restart(), "v2: 20 seconds left");
+        tokio::time::sleep(std::time::Duration::from_secs(19)).await;
+        assert_eq!(aborted(&mut top).await, 0, "v2: not yet");
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        assert_eq!(aborted(&mut top).await, 1, "v2: over");
+        top.process_msg(Message::GrRestartAbort).await;
+        assert!(!top.in_restart(), "v2: ended");
+        let mut top = v2_top();
+        let mut cp = OspfCheckpoint::from_instance(&top, GRACE, 1);
+        cp.grace_used_ms = used_ms(GRACE);
+        cp.write_to_path(&path).unwrap();
+        top.gr_restart_load_checkpoint_from(&path);
+        assert!(!top.in_restart(), "v2: already over");
+
+        // OSPFv3.
+        let mut top = v3_top();
+        let mut cp = OspfCheckpoint::from_instance_v3(&top, GRACE, 1);
+        cp.grace_used_ms = used_ms(GRACE - 20);
+        cp.write_to_path(&path).unwrap();
+        top.gr_restart_load_checkpoint_v3_from(&path);
+        assert!(top.in_restart(), "v3: 20 seconds left");
+        tokio::time::sleep(std::time::Duration::from_secs(19)).await;
+        assert_eq!(aborted(&mut top).await, 0, "v3: not yet");
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        assert_eq!(aborted(&mut top).await, 1, "v3: over");
+        top.process_msg(Message::GrRestartAbort).await;
+        assert!(!top.in_restart(), "v3: ended");
+        let mut top = v3_top();
+        let mut cp = OspfCheckpoint::from_instance_v3(&top, GRACE, 1);
+        cp.grace_used_ms = used_ms(GRACE);
+        cp.write_to_path(&path).unwrap();
+        top.gr_restart_load_checkpoint_v3_from(&path);
+        assert!(!top.in_restart(), "v3: already over");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The checkpoint records how much of the grace period the restart had
+    /// used when it was written: the restart is staged before it is
+    /// committed.
+    #[tokio::test(start_paused = true)]
+    async fn a_checkpoint_records_the_grace_period_used() {
+        use super::super::checkpoint::OspfCheckpoint;
+        let mut top = v2_top();
+        assert!(top.gr_restart_begin(GRACE, GraceRestartReason::SoftwareRestart));
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        let cp = OspfCheckpoint::from_instance(&top, GRACE, 1);
+        assert_eq!(cp.grace_used_ms / 1000, 30, "v2");
+        let mut top = v3_top();
+        assert!(top.gr_restart_begin_v3(GRACE, GraceRestartReason::SoftwareRestart));
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        let cp = OspfCheckpoint::from_instance_v3(&top, GRACE, 1);
+        assert_eq!(cp.grace_used_ms / 1000, 30, "v3");
+    }
+
+    /// This router's pre-restart Router-LSA, as it has it while
+    /// restarting (it originates none): a point-to-point link to S, and a
+    /// transit link to the network O is DR on.
+    fn v2_pre_restart(top: &mut Ospf) {
+        let mut lsa = v2_router(ME, 0, 0x8000_0005);
+        let link = |link_id, link_type| RouterLsaLink {
+            link_id,
+            link_data: Ipv4Addr::new(192, 0, 2, 1),
+            link_type,
+            num_tos: 0,
+            tos_0_metric: 10,
+            toses: vec![],
+        };
+        lsa.lsp = OspfLsp::Router(RouterLsa {
+            flags: 0,
+            links: vec![
+                link(S, OspfLinkType::P2p),
+                link(v2_addr(O), OspfLinkType::Transit),
+            ],
+        });
+        lsa.update();
+        let tx = top.tx.clone();
+        let area = top.areas.get_mut(AREA0).unwrap();
+        area.lsdb
+            .install_originated(lsa, &tx, Some(AREA0), &top.tracing);
+    }
+
+    /// The OSPFv3 twin of `v2_pre_restart`: O's network is its Interface
+    /// ID 9.
+    fn v3_pre_restart(top: &mut Ospf<Ospfv3>) {
+        use ospf_packet::{Ospfv3RouterLinkType, Ospfv3RouterLsaLink};
+        let mut lsa = v3_router(ME, 0, 0x8000_0005);
+        let ospf_packet::Ospfv3LsBody::Router(ref mut body) = lsa.body else {
+            unreachable!();
+        };
+        body.links = vec![
+            Ospfv3RouterLsaLink::new(Ospfv3RouterLinkType::PointToPoint, 10, 2, 7, S),
+            Ospfv3RouterLsaLink::new(Ospfv3RouterLinkType::Transit, 10, 2, 9, O),
+        ];
+        lsa.update();
+        let tx = top.tx.clone();
+        let area = top.areas.get_mut(AREA0).unwrap();
+        area.lsdb
+            .install_originated(lsa, &tx, Some(AREA0), &top.tracing);
+    }
+
+    /// O's OSPFv2 Network-LSA for the network it is DR on, listing
+    /// `attached`.
+    fn v2_network(attached: Vec<Ipv4Addr>, seq: u32) -> OspfLsa {
+        let mut h = OspfLsaHeader::new(OspfLsType::Network, v2_addr(O), O);
+        h.ls_seq_number = seq;
+        let body = NetworkLsa {
+            netmask: Ipv4Addr::new(255, 255, 255, 0),
+            attached_routers: attached,
+        };
+        let mut lsa = OspfLsa::from(h, OspfLsp::Network(body));
+        lsa.update();
+        lsa
+    }
+
+    /// `dr`'s OSPFv3 Network-LSA for its interface 9, listing `attached`.
+    fn v3_network(dr: Ipv4Addr, attached: Vec<Ipv4Addr>, seq: u32) -> Ospfv3Lsa {
+        use ospf_packet::{OSPFV3_NETWORK_LSA_TYPE, Ospfv3NetworkLsa, Ospfv3Options};
+        let mut lsa = super::link_scope_tests::v3_lsa(OSPFV3_NETWORK_LSA_TYPE, 9, dr, 0, seq);
+        lsa.body = ospf_packet::Ospfv3LsBody::Network(Ospfv3NetworkLsa {
+            options: Ospfv3Options::default(),
+            attached_routers: attached,
+        });
+        lsa.update();
+        lsa
+    }
+
+    /// An LSA inconsistent with this router's pre-restart Router-LSA ends
+    /// its restart (RFC 3623 §2.2 (2)). S's Router-LSA no longer links back
+    /// over the point-to-point link ours lists S on, or O's Network-LSA no
+    /// longer lists this router on the network ours is on: S, or O, no
+    /// longer helps. The restart went on, forwarding through it as before.
+    /// A consistent one, linking back or listing this router, does not end
+    /// it.
+    #[tokio::test(start_paused = true)]
+    async fn an_inconsistent_lsa_ends_the_restart() {
+        use ospf_packet::{Ospfv3RouterLinkType, Ospfv3RouterLsaLink};
+        let adjacencies = [(2, S), (2, O)];
+
+        // OSPFv2: S's Router-LSA.
+        let mut top = v2_top();
+        v2_pre_restart(&mut top);
+        top.restarting = Some(restarting(&adjacencies));
+        let mut back = v2_router(S, 0, 0x8000_0002);
+        if let OspfLsp::Router(ref mut body) = back.lsp {
+            body.links.push(RouterLsaLink {
+                link_id: ME,
+                link_data: v2_addr(S),
+                link_type: OspfLinkType::P2p,
+                num_tos: 0,
+                tos_0_metric: 10,
+                toses: vec![],
+            });
+        }
+        back.update();
+        v2_receive(&mut top, 2, S, back).await;
+        assert!(top.in_restart(), "v2: S links back");
+        later().await;
+        v2_receive(&mut top, 2, S, v2_router(S, 0, 0x8000_0003)).await;
+        assert!(!top.in_restart(), "v2: S does not");
+        // O's Network-LSA.
+        let mut top = v2_top();
+        v2_pre_restart(&mut top);
+        top.restarting = Some(restarting(&adjacencies));
+        v2_receive(&mut top, 2, O, v2_network(vec![O, ME], 0x8000_0002)).await;
+        assert!(top.in_restart(), "v2: O lists us");
+        later().await;
+        v2_receive(&mut top, 2, O, v2_network(vec![O, S], 0x8000_0003)).await;
+        assert!(!top.in_restart(), "v2: O does not");
+
+        // OSPFv3: S's Router-LSA.
+        let mut top = v3_top();
+        v3_pre_restart(&mut top);
+        top.restarting = Some(restarting(&adjacencies));
+        let mut back = v3_router(S, 0, 0x8000_0002);
+        if let ospf_packet::Ospfv3LsBody::Router(ref mut body) = back.body {
+            body.links.push(Ospfv3RouterLsaLink::new(
+                Ospfv3RouterLinkType::PointToPoint,
+                10,
+                7,
+                2,
+                ME,
+            ));
+        }
+        back.update();
+        v3_receive(&mut top, 2, S, back).await;
+        assert!(top.in_restart(), "v3: S links back");
+        later().await;
+        v3_receive(&mut top, 2, S, v3_router(S, 0, 0x8000_0003)).await;
+        assert!(!top.in_restart(), "v3: S does not");
+        // O's Network-LSA.
+        let mut top = v3_top();
+        v3_pre_restart(&mut top);
+        top.restarting = Some(restarting(&adjacencies));
+        v3_receive(&mut top, 2, O, v3_network(O, vec![O, ME], 0x8000_0002)).await;
+        assert!(top.in_restart(), "v3: O lists us");
+        // S's interface 9 is another network: ours names O's.
+        v3_receive(&mut top, 2, S, v3_network(S, vec![S, O], 0x8000_0002)).await;
+        assert!(top.in_restart(), "v3: another network");
+        later().await;
+        v3_receive(&mut top, 2, O, v3_network(O, vec![O, S], 0x8000_0003)).await;
+        assert!(!top.in_restart(), "v3: O does not");
+    }
+
+    /// A Network-LSA of ours from an interface disabled while restarting,
+    /// when its flush was held back (RFC 3623 §2.2), is flushed as the
+    /// restart ends (§2.3 (5)). The exit visited enabled interfaces only,
+    /// and in OSPFv2 it outlived the restart. OSPFv3 flushed it at once,
+    /// while restarting; it now holds the flush as OSPFv2 does.
+    #[tokio::test(start_paused = true)]
+    async fn the_exit_flushes_the_network_lsa_of_an_interface_disabled_while_restarting() {
+        // OSPFv2.
+        let mut top = v2_top();
+        let addr = Ipv4Addr::new(192, 0, 2, 1);
+        let link = top.links.get_mut(&2).unwrap();
+        link.state = IfsmState::DR;
+        link.ident.d_router = addr;
+        top.update_network_lsa_by_interface_now(2);
+        let key = super::super::lsdb::v2_lsa_key(OspfLsType::Network, addr, ME);
+        let live = |top: &Ospf| {
+            top.areas.get(AREA0).unwrap().lsdb.tables[&key].current_age() < OSPF_MAX_AGE
+        };
+        assert!(live(&top), "v2: originated");
+        top.restarting = Some(restarting(&[(2, S)]));
+        let link = top.links.get_mut(&2).unwrap();
+        link.state = IfsmState::Down;
+        link.enabled = false;
+        top.network_lsa_flush(2, AREA0);
+        assert!(live(&top), "v2: held while restarting");
+        top.gr_restart_abort();
+        assert!(!live(&top), "v2: flushed at the exit");
+
+        // OSPFv3.
+        let mut top = v3_top();
+        let link = top.links.get_mut(&2).unwrap();
+        link.state = IfsmState::DR;
+        link.ident.d_router = ME;
+        let key = (ospf_packet::OSPFV3_NETWORK_LSA_TYPE, link.interface_id, ME);
+        top.network_lsa_originate_now(2);
+        let live = |top: &Ospf<Ospfv3>| {
+            top.areas.get(AREA0).unwrap().lsdb.tables[&key].current_age() < OSPF_MAX_AGE
+        };
+        assert!(live(&top), "v3: originated");
+        top.restarting = Some(restarting(&[(2, S)]));
+        let link = top.links.get_mut(&2).unwrap();
+        link.state = IfsmState::Down;
+        link.enabled = false;
+        top.network_lsa_flush(2, AREA0);
+        assert!(live(&top), "v3: held while restarting");
+        top.gr_restart_abort_v3();
+        assert!(!live(&top), "v3: flushed at the exit");
     }
 
     /// The grace period runs from the restart request, which the

@@ -224,16 +224,18 @@ fn ospf_dr_election_init<V: OspfVersion>(oi: &OspfLink<V>) -> Vec<Identity<V>> {
         .values()
         .filter(|nbr| nbr.state >= NfsmState::TwoWay || nbr.gr_helper.is_some())
         .filter(|nbr| !nbr.ident.router_id.is_unspecified())
-        .filter(|nbr| nbr.ident.priority != 0)
         .map(|nbr| {
             // RFC 3623 §3: a restarter being helped keeps the DR and BDR it
-            // declared before it restarted, and so its place in them.
+            // declared before it restarted, and so its place in them, and
+            // the priority it had then, which makes it eligible for them.
             let mut ident = nbr.ident;
             if let Some(helper) = &nbr.gr_helper {
                 (ident.d_router, ident.bd_router) = helper.declared;
+                ident.priority = helper.priority;
             }
             ident
         })
+        .filter(|ident| ident.priority != 0)
         .collect();
 
     if oi.flags.hello_sent() && !oi.ident.router_id.is_unspecified() && oi.ident.priority != 0 {

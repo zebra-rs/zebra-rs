@@ -65,13 +65,20 @@ pub fn default_path(proto: &str) -> PathBuf {
 pub struct OspfCheckpoint {
     /// See [`CHECKPOINT_FORMAT_VERSION`].
     pub format_version: u32,
-    /// Wall-clock timestamp at write. Treated as stale when older
-    /// than `1.5 × grace_period_secs` (RFC 3623 §2 freshness rule).
+    /// Wall-clock timestamp at write.
     pub written_at: SystemTime,
+    /// How much of the grace period the restart had used when this was
+    /// written, in milliseconds: it runs from the restart's start, when
+    /// the Grace-LSAs went out (RFC 3623 §3.1), and the restart is staged
+    /// before it is committed. With `written_at` it dates the end of the
+    /// grace period; a checkpoint loaded after that cold-starts. 0 in a
+    /// checkpoint from before this field.
+    #[serde(default)]
+    pub grace_used_ms: u64,
     /// Grace period the restarter requested (seconds). Echoed
-    /// here so the freshness window is self-contained — the
-    /// startup path doesn't need to consult YANG config to know
-    /// how long the checkpoint is valid.
+    /// here so the checkpoint is self-contained — the startup
+    /// path doesn't need to consult YANG config to know how long
+    /// the restart may last.
     pub grace_period_secs: u32,
     /// Restart reason (RFC 3623 §A.1 type-2 sub-TLV value).
     /// Carried through to the Grace LSAs re-flooded on startup.
@@ -198,6 +205,13 @@ fn own_grace_lsas<V: super::version::OspfVersion>(
         .filter(move |((ls_type, _, adv_router), _)| *ls_type == grace && *adv_router == router_id)
 }
 
+/// How much of its grace period the restart has used (`grace_used_ms`).
+fn grace_used_ms(restarting: Option<&super::neigh::RestartingState>) -> u64 {
+    restarting.map_or(0, |state| {
+        u64::try_from(state.entered_at.elapsed().as_millis()).unwrap_or(u64::MAX)
+    })
+}
+
 impl OspfCheckpoint {
     /// Build a checkpoint from the current OSPFv2 instance state.
     /// Does not write to disk — call [`Self::write_to_path`].
@@ -264,6 +278,7 @@ impl OspfCheckpoint {
         Self {
             format_version: CHECKPOINT_FORMAT_VERSION,
             written_at: SystemTime::now(),
+            grace_used_ms: grace_used_ms(ospf.restarting.as_ref()),
             grace_period_secs,
             restart_reason,
             router_id: ospf.router_id,
@@ -343,6 +358,7 @@ impl OspfCheckpoint {
         Self {
             format_version: CHECKPOINT_FORMAT_VERSION,
             written_at: SystemTime::now(),
+            grace_used_ms: grace_used_ms(ospf.restarting.as_ref()),
             grace_period_secs,
             restart_reason,
             router_id: ospf.router_id,
@@ -429,6 +445,7 @@ mod tests {
         let cp = OspfCheckpoint {
             format_version: CHECKPOINT_FORMAT_VERSION,
             written_at: SystemTime::UNIX_EPOCH,
+            grace_used_ms: 0,
             grace_period_secs: 120,
             restart_reason: 1,
             router_id: Ipv4Addr::new(10, 0, 0, 1),
@@ -468,6 +485,7 @@ mod tests {
         let cp = OspfCheckpoint {
             format_version: CHECKPOINT_FORMAT_VERSION,
             written_at: SystemTime::UNIX_EPOCH,
+            grace_used_ms: 0,
             grace_period_secs: 60,
             restart_reason: 1,
             router_id: Ipv4Addr::new(1, 1, 1, 1),

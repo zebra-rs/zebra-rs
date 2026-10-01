@@ -95,6 +95,11 @@ pub struct HelperState {
     /// a restarting DR stays DR (RFC 3623 §3): its first Hellos after
     /// restarting declare neither, and used to hand its role to the BDR.
     pub declared: (Ipv4Addr, Ipv4Addr),
+    /// The neighbour's Router Priority when the help began, kept for DR
+    /// election for the same reason: a restarter may advertise another
+    /// until its configuration is back, and at 0 it would drop out of the
+    /// election and leave its role to the BDR all the same.
+    pub priority: u8,
 }
 
 impl HelperState {
@@ -158,6 +163,17 @@ pub struct RestartingState {
     /// each is Full again. A neighbour coming back twice counts once, and
     /// one adjacent only since stands in for none of them.
     pub adjacencies: BTreeSet<(u32, Ipv4Addr)>,
+}
+
+/// What a Router-LSA says its router is adjacent to (RFC 2328 §A.4.2,
+/// RFC 5340 §A.4.3): the routers at the far end of its point-to-point and
+/// virtual links, and the transit networks it is on, each by its
+/// Network-LSA's Link State ID and, where the link names it (OSPFv3's
+/// does), the DR's Router ID.
+#[derive(Debug, Default)]
+pub struct RouterLsaAdjacency {
+    pub routers: Vec<Ipv4Addr>,
+    pub networks: Vec<(u32, Option<Ipv4Addr>)>,
 }
 
 impl RestartingState {
