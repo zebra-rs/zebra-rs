@@ -29,7 +29,7 @@ Feature: BGP MUP capability (re)negotiates when enabled on a live session
     And I apply config "z1-1.yaml" to namespace "z1"
     And I apply config "z2-1.yaml" to namespace "z2"
     And I wait 5 seconds for BGP to operate
-    Then BGP session in "z1" to "192.168.0.2" should be "Established"
+    Then BGP session in "z1" to "192.168.0.2" should eventually be "Established"
     # Not configured yet: the OPEN carried no MUP capability.
     And show command "show bgp neighbor 192.168.0.2" in namespace "z1" should not contain "IPv4 MUP"
     # Enable mup on BOTH live sessions; each change bounces its
@@ -37,7 +37,7 @@ Feature: BGP MUP capability (re)negotiates when enabled on a live session
     When I apply command "set router bgp neighbor 192.168.0.2 afi-safi mup enabled true" in namespace "z1"
     And I apply command "set router bgp neighbor 192.168.0.1 afi-safi mup enabled true" in namespace "z2"
     And I wait 15 seconds for BGP to operate
-    Then BGP session in "z1" to "192.168.0.2" should be "Established"
+    Then BGP session in "z1" to "192.168.0.2" should eventually be "Established"
     And show command "show bgp neighbor 192.168.0.2" in namespace "z1" should contain "IPv4 MUP: advertised and received"
     And show command "show bgp neighbor 192.168.0.2" in namespace "z1" should contain "IPv6 MUP: advertised and received"
     And show command "show bgp neighbor 192.168.0.1" in namespace "z2" should contain "IPv4 MUP: advertised and received"

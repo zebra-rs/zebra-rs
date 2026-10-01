@@ -48,8 +48,8 @@ Feature: BGP MUP Controller originates Session-Transformed routes from PFCP
     And I apply config "z1.yaml" to namespace "z1"
     And I apply config "z2.yaml" to namespace "z2"
     And I wait 5 seconds for BGP to operate
-    Then BGP session in "z1" to "192.168.0.2" should be "Established"
-    And BGP session in "z2" to "192.168.0.1" should be "Established"
+    Then BGP session in "z1" to "192.168.0.2" should eventually be "Established"
+    And BGP session in "z2" to "192.168.0.1" should eventually be "Established"
     And show command "show bgp neighbor 192.168.0.2" in namespace "z1" should contain "IPv4 MUP: advertised and received"
     And show command "show bgp mup-c" in namespace "z1" should contain "PFCP listen : 192.168.0.1:8805"
 

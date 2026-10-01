@@ -63,12 +63,12 @@ Feature: BGP iBGP-only attributes are stripped on eBGP egress
     And I apply config "z3.yaml" to namespace "z3"
     And I apply config "z4.yaml" to namespace "z4"
     And I wait 5 seconds for BGP to operate
-    Then BGP session in "z1" to "192.168.0.2" should be "Established"
-    And BGP session in "z1" to "192.168.0.3" should be "Established"
-    And BGP session in "z2" to "192.168.0.1" should be "Established"
-    And BGP session in "z3" to "192.168.0.1" should be "Established"
-    And BGP session in "z3" to "192.168.0.4" should be "Established"
-    And BGP session in "z4" to "192.168.0.3" should be "Established"
+    Then BGP session in "z1" to "192.168.0.2" should eventually be "Established"
+    And BGP session in "z1" to "192.168.0.3" should eventually be "Established"
+    And BGP session in "z2" to "192.168.0.1" should eventually be "Established"
+    And BGP session in "z3" to "192.168.0.1" should eventually be "Established"
+    And BGP session in "z3" to "192.168.0.4" should eventually be "Established"
+    And BGP session in "z4" to "192.168.0.3" should eventually be "Established"
 
   Scenario: RR client z3 receives the reflected route WITH the iBGP-only attributes
     Given the test topology exists

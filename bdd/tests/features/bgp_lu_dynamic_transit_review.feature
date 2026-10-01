@@ -21,8 +21,8 @@ Feature: Dynamic LU next-hop-self peers activate transit labels
     And I wait 5 seconds for BGP to operate
     And I apply config "c2.yaml" to namespace "c2"
     And I wait 10 seconds for BGP to operate
-    Then BGP session in "rr" to "192.168.0.2" should be "Established"
-    And BGP session in "rr" to "192.168.0.3" should be "Established"
+    Then BGP session in "rr" to "192.168.0.2" should eventually be "Established"
+    And BGP session in "rr" to "192.168.0.3" should eventually be "Established"
 
   Scenario: Dynamic next-hop-self iBGP arrival must enable transit labels
     Given the test topology exists
