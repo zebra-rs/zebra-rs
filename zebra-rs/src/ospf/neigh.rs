@@ -95,6 +95,11 @@ pub struct HelperState {
     /// a restarting DR stays DR (RFC 3623 §3): its first Hellos after
     /// restarting declare neither, and used to hand its role to the BDR.
     pub declared: (Ipv4Addr, Ipv4Addr),
+    /// The neighbour's Router Priority when the help began, kept for DR
+    /// election for the same reason: a restarter may advertise another
+    /// until its configuration is back, and at 0 it would drop out of the
+    /// election and leave its role to the BDR all the same.
+    pub priority: u8,
 }
 
 impl HelperState {

@@ -848,6 +848,30 @@ impl<V: OspfVersion> Ospf<V> {
         });
     }
 
+    /// Arm the sweep as this router's restart ends: it waits for the
+    /// first SPF since, in every area (`sweep_area_done`). A run still in
+    /// flight is not that SPF: it computed on the restart's database, and
+    /// the new calculation the exit asks for (RFC 3623 §2.3 (3)) runs
+    /// after it (`spf_pending`).
+    fn sweep_after_restart(&mut self) {
+        self.sweep_areas = Some(self.areas.iter().map(|(id, _)| *id).collect());
+        for (_, area) in self.areas.iter_mut() {
+            area.spf_predates_exit = area.spf_inflight;
+        }
+    }
+
+    /// An SPF run has finished in `area_id`. It counts toward the sweep if
+    /// it began after this router's restart ended.
+    fn sweep_spf_done(&mut self, area_id: Ipv4Addr) {
+        let predates_exit = self
+            .areas
+            .get_mut(area_id)
+            .is_some_and(|area| std::mem::take(&mut area.spf_predates_exit));
+        if self.restarting.is_none() && !predates_exit {
+            self.sweep_area_done(area_id);
+        }
+    }
+
     /// The first SPF since this router's restart ended has run in
     /// `area_id`, or found nothing to compute. Once it has in every area,
     /// this router's routes are in, and the earlier run's are swept.
@@ -1096,12 +1120,13 @@ impl<V: OspfVersion> Ospf<V> {
         let lapsed = nbr.gr_helper.as_ref().is_some_and(|helper| helper.lapsed);
         // Kept from the request that began the help: a renewal comes from
         // the restarter after it restarted, when its Hellos declare no DR.
-        let declared = nbr
-            .gr_helper
-            .as_ref()
-            .map_or((nbr.ident.d_router, nbr.ident.bd_router), |helper| {
-                helper.declared
-            });
+        let (declared, priority) = match nbr.gr_helper.as_ref() {
+            Some(helper) => (helper.declared, helper.priority),
+            None => (
+                (nbr.ident.d_router, nbr.ident.bd_router),
+                nbr.ident.priority,
+            ),
+        };
         nbr.gr_helper = Some(HelperState {
             reason: request.reason,
             grace_period,
@@ -1110,6 +1135,7 @@ impl<V: OspfVersion> Ospf<V> {
             requested_ago,
             lapsed,
             declared,
+            priority,
         });
         tracing::info!(
             "[GR Helper] {} for nbr {} on ifindex={} (grace={}s, reason={:?})",
@@ -6323,7 +6349,7 @@ impl Ospf<Ospfv2> {
         }
         // Router-Info refresh clears the gr_capable bit.
         self.router_info_lsa_originate();
-        self.sweep_areas = Some(self.areas.iter().map(|(id, _)| *id).collect());
+        self.sweep_after_restart();
         let _ = self.tx.send(Message::SpfSchedule(None));
         true
     }
@@ -7514,9 +7540,7 @@ impl Ospf<Ospfv2> {
             Message::SpfDone(output) => {
                 let area_id = output.area_id;
                 apply_spf_result(self, *output);
-                if !self.in_restart() {
-                    self.sweep_area_done(area_id);
-                }
+                self.sweep_spf_done(area_id);
                 if let Some(area) = self.areas.get_mut(area_id) {
                     area.spf_inflight = false;
                     if std::mem::take(&mut area.spf_pending) {
@@ -10356,7 +10380,7 @@ impl Ospf<Ospfv3> {
         }
         // The Router Information LSA's restart-capable bit clears.
         self.sr_capabilities_v3_originate_all();
-        self.sweep_areas = Some(self.areas.iter().map(|(id, _)| *id).collect());
+        self.sweep_after_restart();
         let _ = self.tx.send(Message::SpfSchedule(None));
         true
     }
@@ -11551,9 +11575,7 @@ impl Ospf<Ospfv3> {
             Message::SpfDone(output) => {
                 let area_id = output.area_id;
                 apply_v3_spf_result(self, *output);
-                if !self.in_restart() {
-                    self.sweep_area_done(area_id);
-                }
+                self.sweep_spf_done(area_id);
                 if let Some(area) = self.areas.get_mut(area_id) {
                     area.spf_inflight = false;
                     if std::mem::take(&mut area.spf_pending) {
@@ -23830,8 +23852,10 @@ mod gr_helper_tests {
     /// A restarting DR stays DR while helped (RFC 3623 §3). Its first
     /// Hellos after restarting declare no DR, nor list this router, and
     /// the election used to promote the BDR, O; a renewal then keeps the
-    /// declarations the help began with. Once the help ends the DR is
-    /// recalculated (§3.2), from S's own declarations.
+    /// declarations the help began with. Its priority stays too: here
+    /// its Hellos advertise 0 until its configuration is back, and the
+    /// election used to drop it before looking at its declarations. Once
+    /// the help ends the DR is recalculated (§3.2), from S's own Hellos.
     #[tokio::test(start_paused = true)]
     async fn a_helper_keeps_a_restarting_dr() {
         use super::super::ifsm::ospf_ifsm;
@@ -23850,6 +23874,7 @@ mod gr_helper_tests {
         let link = top.links.get_mut(&2).unwrap();
         let nbr = link.nbrs.get_mut(&s).unwrap();
         (nbr.ident.d_router, nbr.ident.bd_router) = (Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED);
+        nbr.ident.priority = 0;
         nbr.state = NfsmState::Exchange;
         // A renewal now, with no DR declared, keeps the declarations the
         // help began with.
@@ -23883,6 +23908,7 @@ mod gr_helper_tests {
         let link = top.links.get_mut(&2).unwrap();
         let nbr = link.nbrs.get_mut(&S).unwrap();
         (nbr.ident.d_router, nbr.ident.bd_router) = (Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED);
+        nbr.ident.priority = 0;
         nbr.state = NfsmState::Exchange;
         later().await;
         v3_receive(&mut top, 2, S, v3_grace(1, 0x8000_0002)).await;
@@ -23948,6 +23974,63 @@ mod gr_helper_tests {
         assert!(!swept(&mut rx, true), "v3: area 1 to come");
         top.process_msg(Message::SpfCalc(AREA1)).await;
         assert!(swept(&mut rx, true), "v3: every area");
+    }
+
+    /// An SPF begun while this router was restarting computed on the
+    /// restart's database. Finishing after the restart has ended, it is
+    /// not the calculation the exit asks for (RFC 3623 §2.3 (3)); that
+    /// one is queued behind it, and the sweep waits for it. It used to
+    /// count, so the earlier run's routes could go before this router's
+    /// own were in.
+    #[tokio::test(start_paused = true)]
+    async fn an_spf_begun_while_restarting_does_not_sweep() {
+        use crate::rib::client::{ProtoId, RibClient};
+        let swept = |rx: &mut mpsc::UnboundedReceiver<_>| {
+            std::iter::from_fn(|| rx.try_recv().ok()).any(|env: crate::rib::client::RibInbound| {
+                matches!(env.msg, rib::Message::SweepStale { .. })
+            })
+        };
+
+        // OSPFv2.
+        let mut top = v2_top();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        top.ctx.rib = RibClient::new(tx, ProtoId::from_raw(1));
+        top.restarting = Some(restarting(&[(2, S)]));
+        top.areas.get_mut(AREA0).unwrap().spf_inflight = true;
+        top.gr_restart_abort();
+        // The exit's calculation, behind the run in flight.
+        top.process_msg(Message::SpfCalc(AREA0)).await;
+        top.process_msg(Message::SpfDone(Box::new(spf_without_routes())))
+            .await;
+        assert!(!swept(&mut rx), "v2: not by the run begun while restarting");
+        let calc = |msg: &Message<_>| matches!(msg, Message::SpfCalc(id) if *id == AREA0);
+        let next = queued(&mut top, calc)
+            .pop()
+            .expect("v2: the exit's follows");
+        top.process_msg(next).await;
+        top.process_msg(Message::SpfDone(Box::new(spf_without_routes())))
+            .await;
+        assert!(swept(&mut rx), "v2: by the exit's");
+
+        // OSPFv3.
+        let mut top = v3_top();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        top.ctx.rib = RibClient::new(tx, ProtoId::from_raw(1));
+        top.restarting = Some(restarting(&[(2, S)]));
+        top.areas.get_mut(AREA0).unwrap().spf_inflight = true;
+        top.gr_restart_abort_v3();
+        top.process_msg(Message::SpfCalc(AREA0)).await;
+        top.process_msg(Message::SpfDone(Box::new(spf_without_routes())))
+            .await;
+        assert!(!swept(&mut rx), "v3: not by the run begun while restarting");
+        let calc = |msg: &Message<_>| matches!(msg, Message::SpfCalc(id) if *id == AREA0);
+        let next = queued(&mut top, calc)
+            .pop()
+            .expect("v3: the exit's follows");
+        top.process_msg(next).await;
+        top.process_msg(Message::SpfDone(Box::new(spf_without_routes())))
+            .await;
+        assert!(swept(&mut rx), "v3: by the exit's");
     }
 
     /// The grace period runs from the restart request, which the

@@ -197,6 +197,10 @@ impl<V: OspfVersion> OspfAreaMap<V> {
     pub fn iter(&self) -> impl Iterator<Item = (&Ipv4Addr, &OspfArea<V>)> {
         self.0.iter()
     }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&Ipv4Addr, &mut OspfArea<V>)> {
+        self.0.iter_mut()
+    }
 }
 
 impl<V: OspfVersion> Default for OspfAreaMap<V> {
@@ -234,6 +238,10 @@ pub struct OspfArea<V: OspfVersion = Ospfv2> {
     // SPF; the completion path re-fires exactly one follow-up.
     pub spf_inflight: bool,
     pub spf_pending: bool,
+    /// The run in flight began before this router's graceful restart
+    /// ended, so it computed on the restart's database: its completion is
+    /// not the SPF the stale-route sweep waits for (`sweep_spf_done`).
+    pub spf_predates_exit: bool,
 
     /// Per-area redistribute config (NSSA Type-7 source toggles).
     /// Only consulted when `area_type` is NSSA; storage is
@@ -356,6 +364,7 @@ impl<V: OspfVersion> OspfArea<V> {
             spf_throttle: crate::throttle::Throttle::default(),
             spf_inflight: false,
             spf_pending: false,
+            spf_predates_exit: false,
             redistribute: AreaRedistribute::default(),
             redist_connected_originated: BTreeSet::new(),
             redist_connected_originated_v6: BTreeSet::new(),
