@@ -133,7 +133,12 @@ Feature: OSPFv3 graceful restart keeps forwarding through a daemon restart
     When I execute "ip addr del 2001:db8:1::1/128 dev lo" in namespace "a"
     And I start zebra-rs in namespace "b"
     And I apply config "b.yaml" to namespace "b"
-    Then daemon log in namespace "b" should eventually contain "exit-restart success"
+    # a's withdrawal is a topology change that ends its help (§3.2). Its
+    # Router-LSA then lists no link back to b until they are adjacent
+    # again, and b, receiving it, ends its restart as inconsistent (§2.2
+    # (2)) unless the adjacency came back first. The restart ends either
+    # way, and its end does the sweep.
+    Then daemon log in namespace "b" should eventually contain "LSAs re-originated at seq+1"
     And kernel route "2001:db8:1::1/128" in namespace "b" should eventually be gone
     And kernel route "2001:db8::1/128" in namespace "b" should eventually contain "proto ospf"
 
