@@ -260,6 +260,10 @@ pub trait OspfVersion: 'static + Send + Sync + Copy + Clone + PartialEq + Eq {
     where
         Self: Sized;
 
+    /// What `lsa` asks of a helper, if it is a Grace-LSA (RFC 3623 §A,
+    /// RFC 5187 §2).
+    fn grace_request(lsa: &Self::Lsa) -> Option<super::neigh::GraceRequest>;
+
     /// Build the (local, remote) IP addresses for a single-hop BFD
     /// session to `nbr` on this interface, or `None` if one can't be
     /// formed. v2: the interface's primary IPv4 and the neighbor's
@@ -472,6 +476,21 @@ impl OspfVersion for Ospfv2 {
     fn nbr_addr(ident: &crate::ospf::Identity<Ospfv2>) -> Ipv4Addr {
         ident.prefix.addr()
     }
+    fn grace_request(lsa: &OspfLsa) -> Option<super::neigh::GraceRequest> {
+        let ospf_packet::OspfLsp::OpaqueLinkLocalGrace(ref body) = lsa.lsp else {
+            return None;
+        };
+        Some(super::neigh::GraceRequest {
+            grace_period: body.grace_period(),
+            reason: body
+                .reason()
+                .unwrap_or(ospf_packet::GraceRestartReason::Unknown),
+            if_addr: body.tlvs.iter().find_map(|tlv| match tlv {
+                ospf_packet::GraceTlv::IpInterfaceAddress(addr) => Some(*addr),
+                _ => None,
+            }),
+        })
+    }
 
     fn bfd_addrs(
         addrs: &[crate::ospf::addr::OspfAddr<Ospfv2>],
@@ -622,6 +641,21 @@ impl OspfVersion for Ospfv3 {
     }
     fn nbr_addr(ident: &crate::ospf::Identity<Ospfv3>) -> Ipv4Addr {
         ident.router_id
+    }
+    fn grace_request(lsa: &Ospfv3Lsa) -> Option<super::neigh::GraceRequest> {
+        if lsa.h.ls_type != ospf_packet::OSPFV3_GRACE_LSA_TYPE {
+            return None;
+        }
+        let ospf_packet::Ospfv3LsBody::Grace(ref body) = lsa.body else {
+            return None;
+        };
+        Some(super::neigh::GraceRequest {
+            grace_period: body.grace_period(),
+            reason: body
+                .reason()
+                .unwrap_or(ospf_packet::GraceRestartReason::Unknown),
+            if_addr: None,
+        })
     }
 
     fn bfd_addrs(

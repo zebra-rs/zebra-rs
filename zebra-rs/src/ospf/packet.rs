@@ -15,9 +15,15 @@ use crate::{
 
 use super::{
     FloodScope, Identity, IfsmEvent, IfsmState, Message, Neighbor, NfsmEvent, NfsmState, OspfLink,
-    inst::OspfInterface, link::OspfAuthMode, lsa_flood_scope, lsdb::OSPF_MAX_AGE,
-    lsdb::OSPF_MAX_AGE_DIFF, lsdb::OSPF_MAX_LSA_SEQ, ospf_flood, ospf_flood_self_originated_lsa,
-    ospf_is_self_originated, ospf_ls_request_lookup, tracing::OspfTracing,
+    inst::OspfInterface,
+    link::OspfAuthMode,
+    lsa_flood_scope,
+    lsdb::OSPF_MAX_AGE,
+    lsdb::OSPF_MAX_AGE_DIFF,
+    lsdb::OSPF_MAX_LSA_SEQ,
+    ospf_flood, ospf_flood_self_originated_lsa, ospf_is_self_originated, ospf_ls_request_lookup,
+    tracing::OspfTracing,
+    version::{OspfVersion, Ospfv2},
 };
 
 /// Resolved authentication state for a single outbound packet.
@@ -1215,11 +1221,13 @@ fn ospf_ls_upd_proc(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) -
         );
         ospf_flood(oi, nbr, lsa);
 
-        // RFC 3623 §3.1: a Grace LSA from a Full neighbor advertising
-        // its own router-id is the trigger to enter helper mode. Run
-        // this check after flooding so the LSA itself still propagates
-        // (RFC 3623 §A.3).
-        gr_maybe_enter_helper(oi, nbr, lsa);
+        // RFC 3623 §3.1, §3.2 (1): a Grace-LSA starts, renews or ends the
+        // help for the router that advertised it, whoever delivered it —
+        // the DR relays one on a LAN. After flooding, so the LSA itself
+        // still propagates (§A.3).
+        if Ospfv2::grace_request(lsa).is_some() {
+            let _ = oi.tx.send(Message::GraceLsa(nbr.ifindex, lsa.clone()));
+        }
 
         // RFC 2328 Section 13.4: Self-originated LSA check.
         if ospf_is_self_originated(oi, lsa) {
@@ -1388,144 +1396,6 @@ pub fn ospf_ls_upd_validate_proc(
     // LoadingDone here — mirrors the v3 handler's end-of-packet
     // check. No-op unless the neighbor is Loading with an empty list.
     super::nfsm::ospf_nfsm_check_nbr_loading(nbr);
-}
-
-/// RFC 3623 §3.1 helper-entry gate. Called from `ospf_ls_upd_proc`
-/// after a newer LSA is flooded — if that LSA is a Grace LSA
-/// advertised by the sender (a Full neighbor), set the per-neighbor
-/// `gr_helper` state and arm the grace-period expiry timer.
-///
-/// Minimum-viable check: the sender must be Full, the LSA's
-/// advertising-router must match the neighbor (i.e. the neighbor
-/// is announcing its own restart), and the grace period must be
-/// within [1, `MAX_GRACE_PERIOD_SECS`].
-fn gr_maybe_enter_helper(oi: &mut OspfInterface, nbr: &mut Neighbor, lsa: &OspfLsa) {
-    use std::collections::BTreeMap;
-
-    use super::neigh::HelperState;
-    use crate::context::{Timer, TimerType};
-
-    if lsa.h.ls_type != OspfLsType::OpaqueLinkLocal {
-        return;
-    }
-    let OspfLsp::OpaqueLinkLocalGrace(ref body) = lsa.lsp else {
-        return;
-    };
-    // RFC 3623 §3.2 (1): a flushed Grace-LSA ends the restart, whoever
-    // delivered it — the DR relays one on a LAN. It used to be taken for
-    // a new request, and extended the help instead.
-    if lsa.h.ls_age >= super::lsdb::OSPF_MAX_AGE {
-        let _ = oi
-            .tx
-            .send(Message::GrHelperGraceFlushed(nbr.ifindex, lsa.h.adv_router));
-        return;
-    }
-    if lsa.h.adv_router != nbr.ident.router_id {
-        return;
-    }
-    if !oi.gr_config.helper_enabled {
-        tracing::warn!(
-            "[GR Helper] reject Grace LSA from nbr {} (helper-enabled is false)",
-            nbr.ident.router_id
-        );
-        return;
-    }
-    if nbr.state != NfsmState::Full {
-        tracing::warn!(
-            "[GR Helper] reject Grace LSA from non-Full nbr {} (state={:?})",
-            nbr.ident.router_id,
-            nbr.state
-        );
-        return;
-    }
-    let max_grace = oi.gr_config.max_grace_period;
-    let grace_period = match body.grace_period() {
-        Some(p) if p > 0 && p <= max_grace => p,
-        Some(p) => {
-            tracing::warn!(
-                "[GR Helper] reject Grace LSA from nbr {} (grace={}s out of [1, {}])",
-                nbr.ident.router_id,
-                p,
-                max_grace
-            );
-            return;
-        }
-        None => {
-            tracing::warn!(
-                "[GR Helper] reject Grace LSA from nbr {} (no GracePeriod TLV)",
-                nbr.ident.router_id
-            );
-            return;
-        }
-    };
-    let reason = body.reason().unwrap_or(GraceRestartReason::Unknown);
-
-    // RFC 3623 §3.1: the grace period runs from the request, which the
-    // Grace-LSA's age dates (§A); one already over is no help. The timer
-    // used to run the whole period from our entry.
-    let requested_ago = u32::from(lsa.h.ls_age);
-    let Some(remaining) = grace_period
-        .checked_sub(requested_ago)
-        .filter(|remaining| *remaining > 0)
-    else {
-        tracing::warn!(
-            "[GR Helper] reject Grace LSA from nbr {} (requested {}s ago, grace {}s)",
-            nbr.ident.router_id,
-            requested_ago,
-            grace_period
-        );
-        return;
-    };
-    let ifindex = nbr.ifindex;
-    let router_id = nbr.ident.router_id;
-    let tx = oi.tx.clone();
-    // Taken before the timer starts: `HelperState::expired` must hold by
-    // the time it fires.
-    let entered_at = tokio::time::Instant::now();
-    let expire_timer = Timer::new(remaining as u64, TimerType::Once, move || {
-        let tx = tx.clone();
-        async move {
-            let _ = tx.send(Message::GrHelperExpire(ifindex, router_id));
-        }
-    });
-
-    // RFC 3623 §3.2 — snapshot the restarter's LSAs in the area
-    // LSDB at the moment we enter helper. `gr_helper_check_exit`
-    // diffs newly-installed LSAs against these (seq, checksum)
-    // tuples to distinguish quiescent self-refresh from a real
-    // post-restart re-origination.
-    let mut lsdb_snapshot = BTreeMap::new();
-    for (key, lsa) in oi.lsdb.tables.iter() {
-        if lsa.data.h.adv_router == router_id {
-            lsdb_snapshot.insert(*key, (lsa.data.h.ls_seq_number, lsa.data.h.ls_checksum));
-        }
-    }
-
-    let previously_helping = nbr.gr_helper.is_some();
-    // A renewed request keeps a dead interval the neighbour has already
-    // let lapse: only a Hello clears it.
-    let lapsed = nbr.gr_helper.as_ref().is_some_and(|helper| helper.lapsed);
-    nbr.gr_helper = Some(HelperState {
-        reason,
-        grace_period,
-        entered_at,
-        expire_timer: Some(expire_timer),
-        lsdb_snapshot,
-        requested_ago,
-        lapsed,
-    });
-    tracing::info!(
-        "[GR Helper] {} for nbr {} on ifindex={} (grace={}s, reason={:?})",
-        if previously_helping {
-            "extend"
-        } else {
-            "enter"
-        },
-        router_id,
-        ifindex,
-        grace_period,
-        reason
-    );
 }
 
 #[ospf_packet_handler(LsUpdate, Recv)]

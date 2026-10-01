@@ -121,6 +121,18 @@ impl HelperState {
     }
 }
 
+/// What a Grace-LSA asks of a helper (RFC 3623 §A, RFC 5187 §2).
+#[derive(Debug, Clone, Copy)]
+pub struct GraceRequest {
+    /// The grace period, if the Grace-LSA carries one.
+    pub grace_period: Option<u32>,
+    /// The restart reason; `Unknown` if the Grace-LSA carries none.
+    pub reason: ospf_packet::GraceRestartReason,
+    /// OSPFv2's IP interface address: the restarter's address on the
+    /// segment, which names it on a broadcast or NBMA network.
+    pub if_addr: Option<Ipv4Addr>,
+}
+
 /// Graceful-restart restarter bookkeeping (RFC 3623 §2).
 /// Populated by `clear ip ospf graceful-restart begin` while the
 /// restarter prepares to exit; absent the rest of the time.

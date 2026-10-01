@@ -2626,7 +2626,7 @@ fn config_ospf_sr_mpls(ospf: &mut Ospf, _args: Args, op: ConfigOp) -> Option<()>
 }
 
 /// `router ospf / graceful-restart / helper-enabled`. Toggles
-/// whether `gr_maybe_enter_helper` accepts inbound Grace LSAs.
+/// whether `gr_helper_grace` accepts inbound Grace LSAs.
 /// On disable, existing helpers are left intact — they'll exit on
 /// grace-period expiry or topology change as normal.
 fn config_ospf_gr_helper_enabled(ospf: &mut Ospf, mut args: Args, op: ConfigOp) -> Option<()> {
