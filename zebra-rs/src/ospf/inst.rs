@@ -404,6 +404,11 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// restart; `None` in steady state. While `Some`, the
     /// originated Router-Info LSA carries `gr_capable=true`.
     pub restarting: Option<super::neigh::RestartingState>,
+    /// The areas whose first SPF since this router's restart ended is
+    /// still to run. Once it has run in each, this router's routes are
+    /// in, and what is left of the earlier run's is swept
+    /// (`sweep_area_done`).
+    pub sweep_areas: Option<BTreeSet<Ipv4Addr>>,
     /// This router's own link-scope LSAs — its Grace-LSAs — restored from
     /// a graceful-restart checkpoint, each with its area. They belong in
     /// an interface's database (RFC 5250 §3.1, RFC 5340 §4.1.2), but the
@@ -829,6 +834,32 @@ impl<V: OspfVersion> Ospf<V> {
                     .map(move |nbr| (*ifindex, nbr.ident.router_id))
             })
             .collect()
+    }
+
+    /// Withdraw what is left of the routes an earlier run of zebra-rs left
+    /// in the kernel for this instance (RFC 3623 §2.3 (4)): those its own
+    /// routes have not replaced. After a start without a restart they are
+    /// withdrawn at once, as a crash left them; after a restart, once its
+    /// routes are in (`sweep_area_done`).
+    fn sweep_stale(&self) {
+        let _ = self.ctx.rib.send(rib::Message::SweepStale {
+            rtype: rib::RibType::Ospf,
+            v6: V::IPV6,
+        });
+    }
+
+    /// The first SPF since this router's restart ended has run in
+    /// `area_id`, or found nothing to compute. Once it has in every area,
+    /// this router's routes are in, and the earlier run's are swept.
+    fn sweep_area_done(&mut self, area_id: Ipv4Addr) {
+        let Some(areas) = self.sweep_areas.as_mut() else {
+            return;
+        };
+        areas.remove(&area_id);
+        if areas.is_empty() {
+            self.sweep_areas = None;
+            self.sweep_stale();
+        }
     }
 
     /// How many of the adjacencies this router's restart must re-establish
@@ -2250,6 +2281,7 @@ impl Ospf<Ospfv2> {
             stub_router_startup_active: false,
             stub_router_startup_timer: None,
             lsa_gen: std::collections::HashMap::new(),
+            sweep_areas: None,
             restarting: None,
             key_chains: BTreeMap::new(),
             policy_tx,
@@ -2303,6 +2335,9 @@ impl Ospf<Ospfv2> {
         // restore the default instance's state.
         if ospf.proto_label == "ospf" {
             ospf.gr_restart_load_checkpoint();
+        }
+        if ospf.restarting.is_none() {
+            ospf.sweep_stale();
         }
 
         ospf.tracing.proto = Ospfv2::PROTO;
@@ -6288,6 +6323,7 @@ impl Ospf<Ospfv2> {
         }
         // Router-Info refresh clears the gr_capable bit.
         self.router_info_lsa_originate();
+        self.sweep_areas = Some(self.areas.iter().map(|(id, _)| *id).collect());
         let _ = self.tx.send(Message::SpfSchedule(None));
         true
     }
@@ -7438,6 +7474,8 @@ impl Ospf<Ospfv2> {
             }
             Message::SpfCalc(area_id) => {
                 let Some(area) = self.areas.get_mut(area_id) else {
+                    // An area gone since has no SPF left to wait for.
+                    self.sweep_area_done(area_id);
                     return;
                 };
                 if area.spf_inflight {
@@ -7455,6 +7493,7 @@ impl Ospf<Ospfv2> {
                 // main task — reads the LSDB and is cheap. If there
                 // is no source node yet, there is nothing to compute.
                 let Some(input) = build_spf_input(self, area_id) else {
+                    self.sweep_area_done(area_id);
                     return;
                 };
                 if let Some(area) = self.areas.get_mut(area_id) {
@@ -7475,6 +7514,9 @@ impl Ospf<Ospfv2> {
             Message::SpfDone(output) => {
                 let area_id = output.area_id;
                 apply_spf_result(self, *output);
+                if !self.in_restart() {
+                    self.sweep_area_done(area_id);
+                }
                 if let Some(area) = self.areas.get_mut(area_id) {
                     area.spf_inflight = false;
                     if std::mem::take(&mut area.spf_pending) {
@@ -7873,6 +7915,7 @@ impl Ospf<Ospfv3> {
             stub_router_startup_active: false,
             stub_router_startup_timer: None,
             lsa_gen: std::collections::HashMap::new(),
+            sweep_areas: None,
             restarting: None,
             key_chains: BTreeMap::new(),
             policy_tx,
@@ -7925,6 +7968,9 @@ impl Ospf<Ospfv3> {
         // need the same default-instance guard the v2 path uses).
         if ospf.proto_label == "ospfv3" {
             ospf.gr_restart_load_checkpoint_v3();
+        }
+        if ospf.restarting.is_none() {
+            ospf.sweep_stale();
         }
 
         ospf
@@ -10310,6 +10356,7 @@ impl Ospf<Ospfv3> {
         }
         // The Router Information LSA's restart-capable bit clears.
         self.sr_capabilities_v3_originate_all();
+        self.sweep_areas = Some(self.areas.iter().map(|(id, _)| *id).collect());
         let _ = self.tx.send(Message::SpfSchedule(None));
         true
     }
@@ -11465,6 +11512,8 @@ impl Ospf<Ospfv3> {
             }
             Message::SpfCalc(area_id) => {
                 let Some(area) = self.areas.get_mut(area_id) else {
+                    // An area gone since has no SPF left to wait for.
+                    self.sweep_area_done(area_id);
                     return;
                 };
                 if area.spf_inflight {
@@ -11481,6 +11530,7 @@ impl Ospf<Ospfv3> {
                 // Build the SPF input on the main task; if there is
                 // no source Router-LSA yet there is nothing to do.
                 let Some(input) = build_v3_spf_input(self, area_id) else {
+                    self.sweep_area_done(area_id);
                     return;
                 };
                 if let Some(area) = self.areas.get_mut(area_id) {
@@ -11501,6 +11551,9 @@ impl Ospf<Ospfv3> {
             Message::SpfDone(output) => {
                 let area_id = output.area_id;
                 apply_v3_spf_result(self, *output);
+                if !self.in_restart() {
+                    self.sweep_area_done(area_id);
+                }
                 if let Some(area) = self.areas.get_mut(area_id) {
                     area.spf_inflight = false;
                     if std::mem::take(&mut area.spf_pending) {
@@ -18422,6 +18475,7 @@ mod test_support {
             stub_router_startup_active: false,
             stub_router_startup_timer: None,
             lsa_gen: std::collections::HashMap::new(),
+            sweep_areas: None,
             restarting: None,
             key_chains: BTreeMap::new(),
             policy_tx,
@@ -23848,6 +23902,52 @@ mod gr_helper_tests {
             top.process_msg(msg).await;
         }
         assert_eq!(top.links[&2].ident.d_router, O, "v3: then O");
+    }
+
+    /// When this router's restart ends, what is left of the earlier run's
+    /// routes is swept once the SPF has run in every area (RFC 3623 §2.3
+    /// (4)): this router's own routes are in by then, and replaced the
+    /// leftovers they cover. Not before: here area 1 has yet to run. An
+    /// area with nothing to compute counts as run. OSPFv2 sweeps IPv4,
+    /// OSPFv3 IPv6.
+    #[tokio::test(start_paused = true)]
+    async fn a_restart_sweeps_the_earlier_runs_routes_once_its_own_are_in() {
+        use crate::rib::client::{ProtoId, RibClient};
+        const AREA1: Ipv4Addr = Ipv4Addr::new(0, 0, 0, 1);
+        let swept = |rx: &mut mpsc::UnboundedReceiver<_>, v6: bool| {
+            std::iter::from_fn(|| rx.try_recv().ok()).any(|env: crate::rib::client::RibInbound| {
+                matches!(
+                    env.msg,
+                    rib::Message::SweepStale { rtype: rib::RibType::Ospf, v6: sent } if sent == v6
+                )
+            })
+        };
+
+        // OSPFv2.
+        let mut top = v2_top();
+        top.areas.fetch(AREA1);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        top.ctx.rib = RibClient::new(tx, ProtoId::from_raw(1));
+        top.restarting = Some(restarting(&[(2, S)]));
+        top.gr_restart_abort();
+        top.process_msg(Message::SpfDone(Box::new(spf_without_routes())))
+            .await;
+        assert!(!swept(&mut rx, false), "v2: area 1 to come");
+        top.process_msg(Message::SpfCalc(AREA1)).await;
+        assert!(swept(&mut rx, false), "v2: every area");
+
+        // OSPFv3.
+        let mut top = v3_top();
+        top.areas.fetch(AREA1);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        top.ctx.rib = RibClient::new(tx, ProtoId::from_raw(1));
+        top.restarting = Some(restarting(&[(2, S)]));
+        top.gr_restart_abort_v3();
+        top.process_msg(Message::SpfDone(Box::new(spf_without_routes())))
+            .await;
+        assert!(!swept(&mut rx, true), "v3: area 1 to come");
+        top.process_msg(Message::SpfCalc(AREA1)).await;
+        assert!(swept(&mut rx, true), "v3: every area");
     }
 
     /// The grace period runs from the restart request, which the

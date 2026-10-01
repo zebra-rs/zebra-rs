@@ -1560,6 +1560,52 @@ impl FibHandle {
         }
     }
 
+    /// Delete a route an earlier run of zebra-rs left in the kernel
+    /// (`RibEntry::stale`), matched on its destination, table, protocol
+    /// and priority alone. It may forward through a next-hop object, and
+    /// the kernel refuses a delete that names a gateway or interface for
+    /// such a route; the object's id is the earlier run's, not ours.
+    pub async fn route_del_leftover(&self, prefix: IpNet, entry: &RibEntry, table_id: u32) {
+        let mut msg = RouteMessage::default();
+        let dst = match prefix {
+            IpNet::V4(prefix) => {
+                msg.header.address_family = AddressFamily::Inet;
+                RouteAddress::Inet(prefix.addr())
+            }
+            IpNet::V6(prefix) => {
+                msg.header.address_family = AddressFamily::Inet6;
+                RouteAddress::Inet6(prefix.addr())
+            }
+        };
+        msg.header.destination_prefix_length = prefix.prefix_len();
+        set_route_table(&mut msg, table_id);
+        msg.header.protocol = match entry.rtype {
+            RibType::Static => RouteProtocol::Static,
+            RibType::Bgp => RouteProtocol::Bgp,
+            RibType::Ospf => RouteProtocol::Ospf,
+            RibType::Isis => RouteProtocol::Isis,
+            _ => RouteProtocol::Static,
+        };
+        msg.header.scope = RouteScope::Universe;
+        msg.header.kind = RouteType::Unicast;
+        msg.attributes.push(RouteAttribute::Destination(dst));
+        msg.attributes.push(RouteAttribute::Priority(entry.metric));
+
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::DelRoute(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+        let mut response = self.handle.clone().request(req).unwrap();
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload
+                && e.code.is_some()
+            {
+                tracing::info!(
+                    "DelRoute (an earlier run's) error: {prefix} {e} table={table_id} metric={}",
+                    entry.metric,
+                );
+            }
+        }
+    }
+
     pub async fn route_ipv4_del(&self, prefix: &Ipv4Net, entry: &RibEntry, table_id: u32) {
         if (entry.is_protocol() || matches!(entry.rtype, RibType::Connected))
             && let Some(cradle) = &self.cradle
@@ -4636,13 +4682,11 @@ pub fn nexthop_from_msg(msg: &NexthopMessage) -> Option<FibNexthop> {
 /// The next hop a route forwarding through kernel next-hop object `id`
 /// has, as `nexthops` (the startup dump) describe it: a gateway, or a
 /// group's member gateways. None for an object not found, or one without
-/// an IPv4 gateway (a blackhole, an interface route).
+/// a gateway (a blackhole, an interface route).
 fn nexthop_of_object(id: u32, nexthops: &BTreeMap<u32, FibNexthop>) -> Option<Nexthop> {
     let uni = |id: &u32| {
         let nexthop = nexthops.get(id)?;
-        let addr @ std::net::IpAddr::V4(_) = nexthop.gateway? else {
-            return None;
-        };
+        let addr = nexthop.gateway?;
         Some(NexthopUni {
             addr,
             ifindex_origin: nexthop.ifindex,
@@ -4663,17 +4707,22 @@ fn nexthop_of_object(id: u32, nexthops: &BTreeMap<u32, FibNexthop>) -> Option<Ne
 }
 
 pub fn route_from_msg(msg: RouteMessage) -> Option<FibRoute> {
-    route_from_msg_with(msg, &BTreeMap::new())
+    route_from_msg_with(msg, &BTreeMap::new(), false)
 }
 
-/// [`route_from_msg`] for a route the startup dump found: one naming a
-/// kernel next-hop object (`RTA_NH_ID`) gets that object's gateway, from
-/// `nexthops`. It used to come in with no next hop at all.
+/// [`route_from_msg`] for a route the startup dump found (`dump`): one
+/// naming a kernel next-hop object (`RTA_NH_ID`) gets that object's
+/// gateway, from `nexthops`; it used to come in with no next hop at all.
+/// One of OSPF's (`RTPROT_OSPF`) was left by an earlier run of zebra-rs,
+/// and comes in as a stale OSPF entry (`RibEntry::stale`), IPv6 too; it
+/// used to come in as a kernel route, which outranked OSPF's own.
 pub fn route_from_msg_with(
     msg: RouteMessage,
     nexthops: &BTreeMap<u32, FibNexthop>,
+    dump: bool,
 ) -> Option<FibRoute> {
     let mut builder = RouteBuilder::new();
+    let leftover = dump && msg.header.protocol == RouteProtocol::Ospf;
 
     if msg.header.scope == RouteScope::Host {
         return None;
@@ -4686,6 +4735,9 @@ pub fn route_from_msg_with(
     }
     if msg.header.scope == RouteScope::Link {
         builder = builder.rtype(RibType::Connected);
+    }
+    if leftover {
+        builder = builder.rtype(RibType::Ospf);
     }
     if msg.header.destination_prefix_length == 0 && msg.header.address_family == AddressFamily::Inet
     {
@@ -4735,17 +4787,28 @@ pub fn route_from_msg_with(
                 };
                 builder = builder.nexthop(Nexthop::Uni(uni));
             }
+            RouteAttribute::Gateway(RouteAddress::Inet6(n)) => {
+                let uni = NexthopUni {
+                    addr: std::net::IpAddr::V6(n),
+                    ..Default::default()
+                };
+                builder = builder.nexthop(Nexthop::Uni(uni));
+            }
             RouteAttribute::MultiPath(e) => {
                 let mut multi = NexthopMulti::default();
                 for nhop in e.iter() {
                     for attr in nhop.attributes.iter() {
-                        if let RouteAttribute::Gateway(RouteAddress::Inet(n)) = attr {
-                            let uni = NexthopUni {
-                                addr: std::net::IpAddr::V4(*n),
-                                ..Default::default()
-                            };
-                            multi.nexthops.push(uni);
-                        }
+                        let addr = match attr {
+                            RouteAttribute::Gateway(RouteAddress::Inet(n)) => IpAddr::V4(*n),
+                            RouteAttribute::Gateway(RouteAddress::Inet6(n)) => IpAddr::V6(*n),
+                            _ => continue,
+                        };
+                        multi.nexthops.push(NexthopUni {
+                            addr,
+                            ifindex_origin: (nhop.interface_index != 0)
+                                .then_some(nhop.interface_index),
+                            ..Default::default()
+                        });
                     }
                 }
                 builder = builder.nexthop(Nexthop::Multi(multi));
@@ -4762,11 +4825,17 @@ pub fn route_from_msg_with(
             }
         }
     }
-    if !builder.is_ipv4() {
+    // IPv6 routes are not mirrored into the RIB, but for OSPFv3's
+    // leftovers, which OSPFv3 replaces or the sweep withdraws.
+    if !builder.is_ipv4() && !leftover {
         return None;
     }
 
-    let (prefix, entry) = builder.build();
+    let (prefix, mut entry) = builder.build();
+    if leftover {
+        entry.stale = true;
+        entry.distance = 110;
+    }
 
     let msg = FibRoute {
         prefix,
@@ -5305,7 +5374,7 @@ mod tests {
                     Ipv4Addr::new(203, 0, 113, 0),
                 )));
             msg.attributes.push(RouteAttribute::Nhid(nhid));
-            route_from_msg_with(msg, &nexthops)
+            route_from_msg_with(msg, &nexthops, true)
                 .expect("a route")
                 .entry
                 .nexthop
@@ -5323,5 +5392,81 @@ mod tests {
             other => panic!("the group's gateways: {other:?}"),
         }
         assert_eq!(route(5), Nexthop::default(), "not dumped");
+    }
+
+    /// A route of OSPF's (`RTPROT_OSPF`) the startup dump finds was left
+    /// by an earlier run of zebra-rs: it comes in as a stale OSPF entry,
+    /// at OSPF's distance, IPv6 too, which OSPF's own routes replace. It
+    /// used to come in as a kernel route, which outranked them. A route
+    /// learned later, or another protocol's IPv6 one, stays as it was.
+    #[test]
+    fn an_earlier_runs_ospf_route_comes_in_stale() {
+        let route = |dst: IpAddr, gw: IpAddr, protocol, dump| {
+            let mut msg = RouteMessage::default();
+            let (family, dst, gw) = match (dst, gw) {
+                (IpAddr::V4(dst), IpAddr::V4(gw)) => (
+                    AddressFamily::Inet,
+                    RouteAddress::Inet(dst),
+                    RouteAddress::Inet(gw),
+                ),
+                (IpAddr::V6(dst), IpAddr::V6(gw)) => (
+                    AddressFamily::Inet6,
+                    RouteAddress::Inet6(dst),
+                    RouteAddress::Inet6(gw),
+                ),
+                _ => unreachable!(),
+            };
+            msg.header.address_family = family;
+            msg.header.destination_prefix_length = if dst_is_v6(&dst) { 64 } else { 24 };
+            msg.header.kind = RouteType::Unicast;
+            msg.header.scope = RouteScope::Universe;
+            msg.header.protocol = protocol;
+            msg.header.table = RouteHeader::RT_TABLE_MAIN;
+            msg.attributes.push(RouteAttribute::Destination(dst));
+            msg.attributes.push(RouteAttribute::Gateway(gw));
+            msg.attributes.push(RouteAttribute::Priority(20));
+            route_from_msg_with(msg, &BTreeMap::new(), dump)
+        };
+        fn dst_is_v6(dst: &RouteAddress) -> bool {
+            matches!(dst, RouteAddress::Inet6(_))
+        }
+        let v4 = (
+            IpAddr::V4(Ipv4Addr::new(203, 0, 113, 0)),
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2)),
+        );
+        let v6 = (
+            IpAddr::V6("2001:db8:1::".parse().unwrap()),
+            IpAddr::V6("fe80::2".parse().unwrap()),
+        );
+
+        let entry = route(v4.0, v4.1, RouteProtocol::Ospf, true)
+            .expect("v4")
+            .entry;
+        assert_eq!(
+            (entry.rtype, entry.stale, entry.distance),
+            (RibType::Ospf, true, 110)
+        );
+        assert!(!entry.is_protocol(), "never programmed");
+
+        let stale = route(v6.0, v6.1, RouteProtocol::Ospf, true).expect("v6");
+        assert_eq!(stale.prefix, "2001:db8:1::/64".parse::<IpNet>().unwrap());
+        assert!(stale.entry.stale, "v6 stale");
+        match stale.entry.nexthop {
+            Nexthop::Uni(uni) => assert_eq!(uni.addr, v6.1, "v6 gateway"),
+            other => panic!("a gateway: {other:?}"),
+        }
+
+        let live = route(v4.0, v4.1, RouteProtocol::Ospf, false)
+            .expect("live")
+            .entry;
+        assert_eq!(
+            (live.rtype, live.stale),
+            (RibType::Kernel, false),
+            "not the dump's"
+        );
+        assert!(
+            route(v6.0, v6.1, RouteProtocol::Kernel, true).is_none(),
+            "v6 kernel"
+        );
     }
 }

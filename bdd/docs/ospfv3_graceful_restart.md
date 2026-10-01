@@ -28,4 +28,6 @@ defensively so an aborted run can never poison a later start.
 |----------|--------|
 | Grace-LSA from a staged restart drives helper entry; abort recovers | |
 | Committed restart survives past the dead interval and resumes from the checkpoint | |
+| A route withdrawn while the restarter is down is swept when its restart ends | |
+| After a crash, the routes an earlier run left are swept at start | |
 | Teardown topology | |

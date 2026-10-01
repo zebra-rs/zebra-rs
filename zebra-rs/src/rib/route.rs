@@ -1691,6 +1691,15 @@ async fn ipv4_entry_selection(
     table_id: u32,
     ifdown: bool,
 ) -> bool {
+    // An earlier run's route the protocol's own replaced, or the sweep
+    // withdrew: out of the kernel, before the new one goes in.
+    if let Some(replace) = &replace
+        && replace.stale
+        && !ifdown
+    {
+        fib.route_del_leftover((*prefix).into(), replace, table_id)
+            .await;
+    }
     if let Some(mut replace) = replace
         && replace.is_protocol()
     {
@@ -1726,7 +1735,11 @@ async fn ipv4_entry_selection(
     if let Some(prev) = prev {
         let prev = entries.get_mut(prev).unwrap();
         prev.set_selected(false);
-        if !ifdown {
+        if !ifdown && prev.stale {
+            // An earlier run's route, outranked: out of the kernel.
+            fib.route_del_leftover((*prefix).into(), prev, table_id)
+                .await;
+        } else if !ifdown {
             fib.route_ipv4_del(prefix, prev, table_id).await;
         }
         prev.set_fib(false);
@@ -2353,6 +2366,13 @@ async fn ipv6_entry_selection(
         }
     }
 
+    // As the v4 twin: an earlier run's route, replaced or swept.
+    if let Some(replace) = &replace
+        && replace.stale
+    {
+        fib.route_del_leftover((*prefix).into(), replace, table_id)
+            .await;
+    }
     if let Some(mut replace) = replace
         && replace.is_protocol()
     {
@@ -2405,7 +2425,12 @@ async fn ipv6_entry_selection(
         let prev = entries.get_mut(prev).unwrap();
         prev.set_selected(false);
 
-        fib.route_ipv6_del(prefix, prev, table_id).await;
+        if prev.stale {
+            fib.route_del_leftover((*prefix).into(), prev, table_id)
+                .await;
+        } else {
+            fib.route_ipv6_del(prefix, prev, table_id).await;
+        }
         prev.set_fib(false);
     }
     let mut retry = false;

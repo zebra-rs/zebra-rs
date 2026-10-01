@@ -106,6 +106,64 @@ Feature: OSPFv3 graceful restart keeps forwarding through a daemon restart
     # their ids for them.
     And daemon log in namespace "b" should eventually contain "of an earlier run found"
 
+  Scenario: A route withdrawn while the restarter is down is swept when its restart ends
+    # RFC 3623 §2.3 (4): the forwarding entries installed before the
+    # restart that are no longer valid are removed when it ends. b goes
+    # down for a graceful restart, leaving its routes in the kernel; a
+    # withdraws 2001:db8:1::1/128 meanwhile. The restarted b replaces the routes it
+    # still has with its own and sweeps the rest.
+    Given a clean test environment
+    When I create namespace "a"
+    And I create namespace "b"
+    And I execute "rm -f /var/lib/zebra-rs/checkpoint/ospfv3.cbor" in namespace "a"
+    And I connect namespace "a" interface "ethb" to namespace "b" interface "etha"
+    And I start zebra-rs in namespace "a"
+    And I start zebra-rs in namespace "b"
+    And I apply config "a.yaml" to namespace "a"
+    And I apply config "b.yaml" to namespace "b"
+    And I execute "ip addr add 2001:db8:1::1/128 dev lo" in namespace "a"
+    Then show command "show ospfv3 neighbor" in namespace "b" should eventually contain "Full"
+    And kernel route "2001:db8:1::1/128" in namespace "b" should eventually contain "proto ospf"
+    And kernel route "2001:db8::1/128" in namespace "b" should eventually contain "proto ospf"
+
+    When I run "clear ospfv3 graceful-restart begin" in namespace "b"
+    And I run "clear ospfv3 graceful-restart commit" in namespace "b"
+    And I wait 3 seconds
+    Then kernel route "2001:db8:1::1/128" in namespace "b" should eventually contain "proto ospf"
+    When I execute "ip addr del 2001:db8:1::1/128 dev lo" in namespace "a"
+    And I start zebra-rs in namespace "b"
+    And I apply config "b.yaml" to namespace "b"
+    Then daemon log in namespace "b" should eventually contain "exit-restart success"
+    And kernel route "2001:db8:1::1/128" in namespace "b" should eventually be gone
+    And kernel route "2001:db8::1/128" in namespace "b" should eventually contain "proto ospf"
+
+  Scenario: After a crash, the routes an earlier run left are swept at start
+    # A crash (SIGKILL) leaves b's routes in the kernel too. With no
+    # restart to wait for, b sweeps them at start; those still valid come
+    # back once OSPF has converged.
+    Given a clean test environment
+    When I create namespace "a"
+    And I create namespace "b"
+    And I execute "rm -f /var/lib/zebra-rs/checkpoint/ospfv3.cbor" in namespace "a"
+    And I connect namespace "a" interface "ethb" to namespace "b" interface "etha"
+    And I start zebra-rs in namespace "a"
+    And I start zebra-rs in namespace "b"
+    And I apply config "a.yaml" to namespace "a"
+    And I apply config "b.yaml" to namespace "b"
+    And I execute "ip addr add 2001:db8:1::1/128 dev lo" in namespace "a"
+    Then show command "show ospfv3 neighbor" in namespace "b" should eventually contain "Full"
+    And kernel route "2001:db8:1::1/128" in namespace "b" should eventually contain "proto ospf"
+    And kernel route "2001:db8::1/128" in namespace "b" should eventually contain "proto ospf"
+
+    When I stop zebra-rs in namespace "b"
+    Then kernel route "2001:db8:1::1/128" in namespace "b" should eventually contain "proto ospf"
+    When I execute "ip addr del 2001:db8:1::1/128 dev lo" in namespace "a"
+    And I start zebra-rs in namespace "b"
+    And I apply config "b.yaml" to namespace "b"
+    Then kernel route "2001:db8:1::1/128" in namespace "b" should eventually be gone
+    And show command "show ospfv3 neighbor" in namespace "b" should eventually contain "Full"
+    And kernel route "2001:db8::1/128" in namespace "b" should eventually contain "proto ospf"
+
   Scenario: Teardown topology
     # Separate scenario so cleanup still runs when a step above fails
     # (a failed step skips the rest of its own scenario only). The
