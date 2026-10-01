@@ -765,6 +765,70 @@ impl<V: OspfVersion> Ospf<V> {
             })
     }
 
+    /// Leave RFC 3623 helper mode for the neighbour with Router ID
+    /// `router_id` on `ifindex`, for `reason` (§3.2): the grace period ran
+    /// out, the restarter flushed its Grace-LSA, or the topology changed.
+    ///
+    /// The adjacency stays. While helping, this router keeps its neighbour
+    /// state machine and its LSAs current — it freezes neither — so there
+    /// is nothing stale to re-originate, and a restarter that came back
+    /// keeps its adjacency. Leaving used to take every neighbour down,
+    /// which flapped the adjacency even after a successful restart. Only a
+    /// neighbour whose Hellos stopped for a dead interval while it was
+    /// helped goes down now, as its inactivity timer would have taken it.
+    ///
+    /// The neighbour is found by its Router ID. OSPFv2 keys neighbours by
+    /// interface address, so looking one up by Router ID found none unless
+    /// the two were equal, and an OSPFv2 helper never left helper mode.
+    fn gr_helper_exit(&mut self, ifindex: u32, router_id: Ipv4Addr, reason: &str) {
+        let Some(link) = self.links.get_mut(&ifindex) else {
+            return;
+        };
+        let Some((key, nbr)) = link
+            .nbrs
+            .iter_mut()
+            .find(|(_, nbr)| nbr.ident.router_id == router_id)
+        else {
+            return;
+        };
+        let Some(helper) = nbr.gr_helper.take() else {
+            return;
+        };
+        tracing::info!(
+            "[GR Helper] exit for nbr {} on ifindex={} (reason: {})",
+            router_id,
+            ifindex,
+            reason
+        );
+        if helper.lapsed {
+            let _ = self.tx.send(Message::Nfsm(
+                ifindex,
+                *key,
+                super::nfsm::NfsmEvent::InactivityTimer,
+            ));
+        }
+    }
+
+    /// The grace period's end (RFC 3623 §3.2 (2)). Its timer's event can
+    /// already be queued when a renewed request replaces the timer, so it
+    /// ends only a help whose own grace period is over. It used to end the
+    /// renewed help too.
+    fn gr_helper_expire(&mut self, ifindex: u32, router_id: Ipv4Addr) {
+        let over = self
+            .links
+            .get(&ifindex)
+            .and_then(|link| {
+                link.nbrs
+                    .values()
+                    .find(|nbr| nbr.ident.router_id == router_id)
+            })
+            .and_then(|nbr| nbr.gr_helper.as_ref())
+            .is_some_and(super::neigh::HelperState::expired);
+        if over {
+            self.gr_helper_exit(ifindex, router_id, "grace period expired");
+        }
+    }
+
     /// An LSA on a retransmission list for `ifindex`, as it goes out again
     /// now. The list stands for the database copy (RFC 2328 §13.6), so the
     /// database's copy of the same origination goes at its current age —
@@ -5592,39 +5656,6 @@ impl Ospf<Ospfv2> {
         }
     }
 
-    /// Grace-period expiry handler (RFC 3623 §3.2 bullet 1).
-    fn gr_helper_expire(&mut self, ifindex: u32, router_id: Ipv4Addr) {
-        self.gr_helper_exit(ifindex, router_id, "grace period expired");
-    }
-
-    /// Shared helper-exit path. Clears `nbr.gr_helper` and re-fires
-    /// the inactivity-timer event so the normal
-    /// `ospf_nfsm_kill_nbr` path runs — by now the neighbor really
-    /// should be gone (or about to re-adjacency-form fresh).
-    /// `reason` is a free-form string for the tracing log.
-    fn gr_helper_exit(&mut self, ifindex: u32, router_id: Ipv4Addr, reason: &str) {
-        let Some(link) = self.links.get_mut(&ifindex) else {
-            return;
-        };
-        let Some(nbr) = link.nbrs.get_mut(&router_id) else {
-            return;
-        };
-        if nbr.gr_helper.take().is_none() {
-            return;
-        }
-        tracing::info!(
-            "[GR Helper] exit for nbr {} on ifindex={} (reason: {})",
-            router_id,
-            ifindex,
-            reason
-        );
-        let _ = self.tx.send(Message::Nfsm(
-            ifindex,
-            router_id,
-            super::nfsm::NfsmEvent::InactivityTimer,
-        ));
-    }
-
     /// RFC 3623 §3.2 bullets 2-3 — topology-change exit. Called
     /// from `flood_lsa_through_area` after `ospf_flood` has just
     /// installed `lsa` into the area LSDB. For every helper-mode
@@ -7242,6 +7273,9 @@ impl Ospf<Ospfv2> {
             }
             Message::GrHelperExpire(ifindex, router_id) => {
                 self.gr_helper_expire(ifindex, router_id);
+            }
+            Message::GrHelperGraceFlushed(ifindex, router_id) => {
+                self.gr_helper_exit(ifindex, router_id, "Grace-LSA flushed");
             }
             Message::GrRestartAbort => {
                 tracing::info!(
@@ -10752,29 +10786,7 @@ impl Ospf<Ospfv3> {
             }
         }
         for (ifindex, router_id, reason) in exits {
-            // v3 reuses v2's gr_helper_exit body verbatim — clear
-            // helper state, fire `InactivityTimer` event so the
-            // shared NFSM kill path runs.
-            let Some(link) = self.links.get_mut(&ifindex) else {
-                continue;
-            };
-            let Some(nbr) = link.nbrs.get_mut(&router_id) else {
-                continue;
-            };
-            if nbr.gr_helper.take().is_none() {
-                continue;
-            }
-            tracing::info!(
-                "[GR Helper v3] exit for nbr {} on ifindex={} (reason: {})",
-                router_id,
-                ifindex,
-                reason
-            );
-            let _ = self.tx.send(Message::Nfsm(
-                ifindex,
-                router_id,
-                super::nfsm::NfsmEvent::InactivityTimer,
-            ));
+            self.gr_helper_exit(ifindex, router_id, reason);
         }
     }
 
@@ -11624,6 +11636,9 @@ impl Ospf<Ospfv3> {
             Message::GrHelperExpire(ifindex, router_id) => {
                 self.gr_helper_expire(ifindex, router_id);
             }
+            Message::GrHelperGraceFlushed(ifindex, router_id) => {
+                self.gr_helper_exit(ifindex, router_id, "Grace-LSA flushed");
+            }
             Message::GrRestartAbort => {
                 tracing::info!("[GR Restart v3] abort message received");
                 self.gr_restart_abort_v3();
@@ -11663,31 +11678,6 @@ impl Ospf<Ospfv3> {
                 );
             }
         }
-    }
-
-    /// v3 mirror of `Ospf<Ospfv2>::gr_helper_expire`. Same body —
-    /// clear `gr_helper` and re-fire `InactivityTimer` so the
-    /// shared NFSM kill path runs.
-    fn gr_helper_expire(&mut self, ifindex: u32, router_id: Ipv4Addr) {
-        let Some(link) = self.links.get_mut(&ifindex) else {
-            return;
-        };
-        let Some(nbr) = link.nbrs.get_mut(&router_id) else {
-            return;
-        };
-        if nbr.gr_helper.take().is_none() {
-            return;
-        }
-        tracing::info!(
-            "[GR Helper v3] grace-period expired for nbr {} on ifindex={}, killing neighbor",
-            router_id,
-            ifindex
-        );
-        let _ = self.tx.send(Message::Nfsm(
-            ifindex,
-            router_id,
-            super::nfsm::NfsmEvent::InactivityTimer,
-        ));
     }
 
     /// Originate this router's Link-LSA for `ifindex` into the
@@ -13643,9 +13633,13 @@ pub enum Message<V: OspfVersion = Ospfv2> {
     SpfDone(Box<SpfOutput>),
     /// Graceful-restart helper-mode grace-period expiry for
     /// `(ifindex, nbr_router_id)`. RFC 3623 §3.2 bullet 1 — the
-    /// restarter exceeded its grace window. Exit helper and let the
-    /// normal `InactivityTimer` path tear the neighbor down.
+    /// restarter exceeded its grace window. Leave helper mode (see
+    /// `gr_helper_exit`).
     GrHelperExpire(u32, Ipv4Addr),
+    /// `(ifindex, restarter_router_id)`. RFC 3623 §3.2 (1) — the
+    /// restarter flushed its Grace-LSA: the restart is over, so leave
+    /// helper mode.
+    GrHelperGraceFlushed(u32, Ipv4Addr),
     /// Graceful-restart restarter-mode auto-abort. Fired when the
     /// staging timer set by `gr_restart_begin` expires without an
     /// operator-driven commit. Drives the same path as
@@ -21351,7 +21345,10 @@ mod link_scope_tests {
         }
         let queued: Vec<_> = std::iter::from_fn(|| top.rx.try_recv().ok()).collect();
         for msg in queued {
-            if matches!(msg, Message::Flood(..) | Message::FloodAs(..)) {
+            if matches!(
+                msg,
+                Message::Flood(..) | Message::FloodAs(..) | Message::GrHelperGraceFlushed(..)
+            ) {
                 top.process_msg(msg).await;
             }
         }
@@ -21376,7 +21373,10 @@ mod link_scope_tests {
         }
         let queued: Vec<_> = std::iter::from_fn(|| top.rx.try_recv().ok()).collect();
         for msg in queued {
-            if matches!(msg, Message::Flood(..) | Message::FloodAs(..)) {
+            if matches!(
+                msg,
+                Message::Flood(..) | Message::FloodAs(..) | Message::GrHelperGraceFlushed(..)
+            ) {
                 top.process_msg(msg).await;
             }
         }
@@ -22406,6 +22406,292 @@ mod send_age_tests {
             nbr.ls_rxmt.get(&v3_key()).map(|lsa| lsa.h.ls_age),
             Some(OSPF_MAX_AGE),
             "v3: queued"
+        );
+    }
+}
+
+#[cfg(test)]
+mod gr_helper_tests {
+    //! RFC 3623 helper mode, in both versions: how a restart the helper
+    //! is helping through ends, and what becomes of the adjacency.
+
+    use super::super::lsdb::OSPF_MAX_AGE;
+    use super::link_scope_tests::{O, S, v2_addr, v2_receive, v2_top, v3_receive, v3_top};
+    use super::*;
+    use ospf_packet::{GraceLsa, GraceRestartReason, GraceTlv, OSPFV3_GRACE_LSA_TYPE};
+
+    /// The grace period S asks for.
+    const GRACE: u32 = 120;
+
+    fn v2_grace(age: u16, seq: u32) -> OspfLsa {
+        let mut h = OspfLsaHeader::new(
+            OspfLsType::OpaqueLinkLocal,
+            Ipv4Addr::from((OpaqueLsaType::GRACE as u32) << 24),
+            S,
+        );
+        h.ls_age = age;
+        h.ls_seq_number = seq;
+        h.options = 0x42;
+        let mut lsa = OspfLsa::from(
+            h,
+            OspfLsp::OpaqueLinkLocalGrace(GraceLsa {
+                tlvs: vec![
+                    GraceTlv::GracePeriod(GRACE),
+                    GraceTlv::Reason(GraceRestartReason::SoftwareRestart),
+                    GraceTlv::IpInterfaceAddress(v2_addr(S)),
+                ],
+            }),
+        );
+        lsa.update();
+        lsa
+    }
+
+    fn v3_grace(age: u16, seq: u32) -> ospf_packet::Ospfv3Lsa {
+        let mut lsa = ospf_packet::Ospfv3Lsa::from(
+            ospf_packet::Ospfv3LsaHeader {
+                ls_age: age,
+                ls_type: OSPFV3_GRACE_LSA_TYPE,
+                link_state_id: 5,
+                advertising_router: S,
+                ls_seq_number: seq,
+                ls_checksum: 0,
+                length: 0,
+            },
+            ospf_packet::Ospfv3LsBody::Grace(GraceLsa {
+                tlvs: vec![
+                    GraceTlv::GracePeriod(GRACE),
+                    GraceTlv::Reason(GraceRestartReason::SoftwareRestart),
+                ],
+            }),
+        );
+        lsa.update();
+        lsa
+    }
+
+    fn v2_s(top: &Ospf) -> Option<&Neighbor> {
+        top.links[&2].nbrs.get(&v2_addr(S))
+    }
+
+    fn v3_s(top: &Ospf<Ospfv3>) -> Option<&Neighbor<Ospfv3>> {
+        top.links[&2].nbrs.get(&S)
+    }
+
+    /// Wait out MinLSArrival (RFC 2328 §13 (5a)), so the next copy of the
+    /// same LSA is not discarded.
+    async fn later() {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+
+    /// Whether `msg` ends the help for S when its grace period is over.
+    fn expired<V: OspfVersion>(msg: &Message<V>) -> bool {
+        matches!(msg, Message::GrHelperExpire(2, rid) if *rid == S)
+    }
+
+    /// The age of a Grace-LSA with a second of S's grace period left.
+    const LAST: u16 = GRACE as u16 - 1;
+
+    /// The grace-period timer's event for S, once it has fired.
+    async fn expiry<V: OspfVersion>(top: &mut Ospf<V>) -> Message<V> {
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        std::iter::from_fn(|| top.rx.try_recv().ok())
+            .find(expired)
+            .expect("the grace-period timer fired")
+    }
+
+    /// Wait out the grace period of a request made at age `LAST`; its end.
+    async fn run_out<V: OspfVersion>() -> Message<V> {
+        later().await;
+        Message::GrHelperExpire(2, S)
+    }
+
+    /// Whether a queued message would take S down.
+    fn kills_s<V: OspfVersion>(top: &mut Ospf<V>, key: Ipv4Addr) -> bool {
+        std::iter::from_fn(|| top.rx.try_recv().ok()).any(|msg| {
+            matches!(msg, Message::Nfsm(2, k, super::super::nfsm::NfsmEvent::InactivityTimer) if k == key)
+        })
+    }
+
+    /// A flushed Grace-LSA ends the help (RFC 3623 §3.2 (1)), here relayed
+    /// by O, as the DR would on a LAN. It was taken for a new request and
+    /// extended the help. S's adjacency stays.
+    #[tokio::test(start_paused = true)]
+    async fn a_flushed_grace_lsa_ends_the_help() {
+        // OSPFv2.
+        let mut top = v2_top();
+        v2_receive(&mut top, 2, S, v2_grace(1, 0x8000_0001)).await;
+        assert!(v2_s(&top).unwrap().gr_helper.is_some(), "v2: helping");
+        later().await;
+        v2_receive(&mut top, 2, O, v2_grace(OSPF_MAX_AGE, 0x8000_0001)).await;
+        let s = v2_s(&top).unwrap();
+        assert!(s.gr_helper.is_none(), "v2: the help ends");
+        assert_eq!(s.state, NfsmState::Full, "v2: the adjacency stays");
+
+        // OSPFv3.
+        let mut top = v3_top();
+        v3_receive(&mut top, 2, S, v3_grace(1, 0x8000_0001)).await;
+        assert!(v3_s(&top).unwrap().gr_helper.is_some(), "v3: helping");
+        later().await;
+        v3_receive(&mut top, 2, O, v3_grace(OSPF_MAX_AGE, 0x8000_0001)).await;
+        let s = v3_s(&top).unwrap();
+        assert!(s.gr_helper.is_none(), "v3: the help ends");
+        assert_eq!(s.state, NfsmState::Full, "v3: the adjacency stays");
+    }
+
+    /// The grace period runs from the restart request, which the
+    /// Grace-LSA's age dates (RFC 3623 §3.1): one 100 seconds old leaves 20
+    /// of S's 120, and the help ends then. One already older than its
+    /// grace period starts none. The timer used to run the whole period
+    /// from the helper's entry.
+    #[tokio::test(start_paused = true)]
+    async fn the_grace_period_runs_from_the_request() {
+        // OSPFv2.
+        let mut top = v2_top();
+        v2_receive(&mut top, 2, S, v2_grace(100, 0x8000_0001)).await;
+        let helper = v2_s(&top).unwrap().gr_helper.as_ref().unwrap();
+        assert_eq!(helper.remaining_secs(), 20, "v2: 20 seconds left");
+        tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+        let msg = expiry(&mut top).await;
+        top.process_msg(msg).await;
+        assert!(
+            v2_s(&top).unwrap().gr_helper.is_none(),
+            "v2: over after 20 seconds"
+        );
+        let mut top = v2_top();
+        v2_receive(&mut top, 2, S, v2_grace(GRACE as u16, 0x8000_0001)).await;
+        assert!(v2_s(&top).unwrap().gr_helper.is_none(), "v2: already over");
+
+        // OSPFv3.
+        let mut top = v3_top();
+        v3_receive(&mut top, 2, S, v3_grace(100, 0x8000_0001)).await;
+        let helper = v3_s(&top).unwrap().gr_helper.as_ref().unwrap();
+        assert_eq!(helper.remaining_secs(), 20, "v3: 20 seconds left");
+        tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+        let msg = expiry(&mut top).await;
+        top.process_msg(msg).await;
+        assert!(
+            v3_s(&top).unwrap().gr_helper.is_none(),
+            "v3: over after 20 seconds"
+        );
+        let mut top = v3_top();
+        v3_receive(&mut top, 2, S, v3_grace(GRACE as u16, 0x8000_0001)).await;
+        assert!(v3_s(&top).unwrap().gr_helper.is_none(), "v3: already over");
+    }
+
+    /// The grace-period timer's event can already be queued when a renewed
+    /// request replaces the timer. It ends only a help whose own grace
+    /// period is over; it used to end the renewed help too.
+    #[tokio::test(start_paused = true)]
+    async fn a_queued_expiry_spares_a_renewed_help() {
+        // OSPFv2.
+        let mut top = v2_top();
+        v2_receive(&mut top, 2, S, v2_grace(LAST, 0x8000_0001)).await;
+        later().await;
+        let old = expiry(&mut top).await;
+        v2_receive(&mut top, 2, S, v2_grace(1, 0x8000_0002)).await;
+        top.process_msg(old).await;
+        let helper = v2_s(&top).unwrap().gr_helper.as_ref();
+        assert_eq!(
+            helper.map(|helper| helper.remaining_secs()),
+            Some(GRACE - 1),
+            "v2: still helping"
+        );
+
+        // OSPFv3.
+        let mut top = v3_top();
+        v3_receive(&mut top, 2, S, v3_grace(LAST, 0x8000_0001)).await;
+        later().await;
+        let old = expiry(&mut top).await;
+        v3_receive(&mut top, 2, S, v3_grace(1, 0x8000_0002)).await;
+        top.process_msg(old).await;
+        let helper = v3_s(&top).unwrap().gr_helper.as_ref();
+        assert_eq!(
+            helper.map(|helper| helper.remaining_secs()),
+            Some(GRACE - 1),
+            "v3: still helping"
+        );
+    }
+
+    /// Leaving helper mode keeps the adjacency of a neighbour still
+    /// heard from; one whose Hellos stopped for a dead interval while it
+    /// was helped goes down, as its inactivity timer would have taken it,
+    /// and only a Hello since clears that — a renewed request does not.
+    /// Leaving used to take every neighbour down — and in OSPFv2, which
+    /// keys neighbours by interface address, never happened at all: the
+    /// neighbour was looked up by Router ID.
+    #[tokio::test(start_paused = true)]
+    async fn leaving_helper_mode_keeps_a_live_neighbour() {
+        use super::super::nfsm::NfsmEvent::{HelloReceived, InactivityTimer};
+
+        // OSPFv2: S's Router ID is not its interface address.
+        let key = v2_addr(S);
+        let mut top = v2_top();
+        v2_receive(&mut top, 2, S, v2_grace(LAST, 0x8000_0001)).await;
+        top.process_msg(run_out().await).await;
+        assert!(v2_s(&top).unwrap().gr_helper.is_none(), "v2: the help ends");
+        assert!(!kills_s(&mut top, key), "v2: heard from, S stays");
+
+        later().await;
+        v2_receive(&mut top, 2, S, v2_grace(LAST, 0x8000_0002)).await;
+        top.process_msg(Message::Nfsm(2, key, InactivityTimer))
+            .await;
+        assert!(v2_s(&top).is_some(), "v2: held while helping");
+        top.process_msg(Message::Nfsm(2, key, HelloReceived)).await;
+        top.process_msg(run_out().await).await;
+        assert!(!kills_s(&mut top, key), "v2: a Hello since, S stays");
+
+        later().await;
+        v2_receive(&mut top, 2, S, v2_grace(LAST, 0x8000_0003)).await;
+        top.process_msg(Message::Nfsm(2, key, InactivityTimer))
+            .await;
+        top.process_msg(run_out().await).await;
+        assert!(kills_s(&mut top, key), "v2: silent, S goes down");
+
+        // A renewed request keeps the lapse: only a Hello clears it.
+        later().await;
+        v2_receive(&mut top, 2, S, v2_grace(1, 0x8000_0004)).await;
+        top.process_msg(Message::Nfsm(2, key, InactivityTimer))
+            .await;
+        later().await;
+        v2_receive(&mut top, 2, S, v2_grace(LAST, 0x8000_0005)).await;
+        top.process_msg(run_out().await).await;
+        assert!(
+            kills_s(&mut top, key),
+            "v2: renewed, still silent, S goes down"
+        );
+
+        // OSPFv3.
+        let mut top = v3_top();
+        v3_receive(&mut top, 2, S, v3_grace(LAST, 0x8000_0001)).await;
+        top.process_msg(run_out().await).await;
+        assert!(v3_s(&top).unwrap().gr_helper.is_none(), "v3: the help ends");
+        assert!(!kills_s(&mut top, S), "v3: heard from, S stays");
+
+        later().await;
+        v3_receive(&mut top, 2, S, v3_grace(LAST, 0x8000_0002)).await;
+        top.process_msg(Message::Nfsm(2, S, InactivityTimer)).await;
+        assert!(v3_s(&top).is_some(), "v3: held while helping");
+        top.process_msg(Message::Nfsm(2, S, HelloReceived)).await;
+        top.process_msg(run_out().await).await;
+        assert!(!kills_s(&mut top, S), "v3: a Hello since, S stays");
+
+        later().await;
+        v3_receive(&mut top, 2, S, v3_grace(LAST, 0x8000_0003)).await;
+        top.process_msg(Message::Nfsm(2, S, InactivityTimer)).await;
+        top.process_msg(run_out().await).await;
+        assert!(kills_s(&mut top, S), "v3: silent, S goes down");
+
+        // A renewed request keeps the lapse: only a Hello clears it.
+        later().await;
+        v3_receive(&mut top, 2, S, v3_grace(1, 0x8000_0004)).await;
+        top.process_msg(Message::Nfsm(2, S, InactivityTimer)).await;
+        later().await;
+        v3_receive(&mut top, 2, S, v3_grace(LAST, 0x8000_0005)).await;
+        top.process_msg(run_out().await).await;
+        assert!(
+            kills_s(&mut top, S),
+            "v3: renewed, still silent, S goes down"
         );
     }
 }

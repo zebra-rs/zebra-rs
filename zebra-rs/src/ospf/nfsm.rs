@@ -313,6 +313,10 @@ pub fn ospf_nfsm_hello_received<V: OspfVersion>(
 ) -> Option<NfsmState> {
     // Start or Restart Inactivity Timer.
     nbr.timer.inactivity = Some(ospf_inactivity_timer(nbr));
+    // A neighbour being helped through a restart is heard from again.
+    if let Some(helper) = nbr.gr_helper.as_mut() {
+        helper.lapsed = false;
+    }
 
     None
 }
@@ -619,11 +623,12 @@ pub fn ospf_nfsm_inactivity_timer<V: OspfVersion>(
     // kill. Rearm the inactivity timer so we keep ticking; the
     // grace-period expiry timer (`Message::GrHelperExpire`) is the
     // bound that actually exits helper mode.
-    if nbr.gr_helper.is_some() {
+    if let Some(helper) = nbr.gr_helper.as_mut() {
         tracing::info!(
             "[GR Helper] suppress inactivity-timer kill for nbr {} (still helping)",
             nbr.ident.router_id
         );
+        helper.lapsed = true;
         nbr.timer.inactivity = Some(ospf_inactivity_timer(nbr));
         return None;
     }

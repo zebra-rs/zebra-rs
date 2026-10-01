@@ -94,6 +94,31 @@ pub struct HelperState {
     /// Non-topology-affecting LSAs (Opaque, AS-External, etc.) are
     /// ignored.
     pub lsdb_snapshot: BTreeMap<OspfLsaKey, (u32, u16)>,
+    /// How long ago, in seconds, the restart was requested when we
+    /// entered: the Grace-LSA's age (RFC 3623 §A). The grace period runs
+    /// from the request, not from our entry.
+    pub requested_ago: u32,
+    /// Whether the neighbour's Hellos stopped for a dead interval while it
+    /// was being helped: its inactivity timer fired and was held off. The
+    /// next Hello clears it. Leaving helper mode takes such a neighbour
+    /// down, as the timer would have.
+    pub lapsed: bool,
+}
+
+impl HelperState {
+    /// Seconds left of the grace period.
+    pub fn remaining_secs(&self) -> u32 {
+        let elapsed = self.entered_at.elapsed().as_secs() as u32;
+        self.grace_period
+            .saturating_sub(self.requested_ago.saturating_add(elapsed))
+    }
+
+    /// Whether the grace period is over. `entered_at` is taken before the
+    /// expiry timer starts, so the timer never fires before this holds.
+    pub fn expired(&self) -> bool {
+        let left = self.grace_period.saturating_sub(self.requested_ago);
+        self.entered_at.elapsed() >= std::time::Duration::from_secs(left.into())
+    }
 }
 
 /// Graceful-restart restarter bookkeeping (RFC 3623 §2).

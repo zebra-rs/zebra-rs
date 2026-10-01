@@ -57,12 +57,14 @@ Feature: OSPFv2 graceful restart keeps forwarding through a daemon restart
     # The held adjacency stays Full while helping.
     And show command "show ospf neighbor" in namespace "a" should contain "Full"
 
-    # Abort: b flushes its Grace-LSAs and resumes normal operation.
+    # Abort: b flushes its Grace-LSAs and resumes normal operation. The
+    # flushed Grace-LSA ends a's help (RFC 3623 §3.2), and the adjacency
+    # stays: a helper that never left helper mode used to keep b listed
+    # here for good.
     When I run "clear ospf graceful-restart abort" in namespace "b"
     And I wait 3 seconds
     Then show command "show ospf graceful-restart" in namespace "b" should not contain "Restart staged"
-    # Adjacency settles back to Full (the helper-exit path re-forms it
-    # from scratch, like a dead-timer expiry, so allow a re-exchange).
+    And show command "show ospf graceful-restart" in namespace "a" should eventually contain "(no active helpers)"
     And show command "show ospf neighbor" in namespace "a" should eventually contain "Full"
     And ping from "a" to "10.0.0.2" should eventually succeed
 
@@ -119,6 +121,8 @@ Feature: OSPFv2 graceful restart keeps forwarding through a daemon restart
     # neighbor-state check by a beat.
     And show command "show ospf route" in namespace "a" should eventually contain "10.0.0.2/32"
     And ping from "a" to "10.0.0.2" should eventually succeed
+    # The restart is over, and a has left helper mode.
+    And show command "show ospf graceful-restart" in namespace "a" should eventually contain "(no active helpers)"
 
   Scenario: Teardown topology
     # Separate scenario so cleanup still runs when a step above fails

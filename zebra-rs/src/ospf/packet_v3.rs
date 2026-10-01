@@ -1299,6 +1299,16 @@ fn gr_maybe_enter_helper_v3(
     let Ospfv3LsBody::Grace(ref body) = lsa.body else {
         return;
     };
+    // RFC 3623 §3.2 (1): a flushed Grace-LSA ends the restart, whoever
+    // delivered it — the DR relays one on a LAN. It used to be taken for
+    // a new request, and extended the help instead.
+    if lsa.h.ls_age >= super::lsdb::OSPF_MAX_AGE {
+        let _ = oi.tx.send(Message::GrHelperGraceFlushed(
+            nbr.ifindex,
+            lsa.h.advertising_router,
+        ));
+        return;
+    }
     if lsa.h.advertising_router != nbr.ident.router_id {
         return;
     }
@@ -1339,10 +1349,29 @@ fn gr_maybe_enter_helper_v3(
     };
     let reason = body.reason().unwrap_or(GraceRestartReason::Unknown);
 
+    // RFC 3623 §3.1: the grace period runs from the request, which the
+    // Grace-LSA's age dates (§A); one already over is no help. The timer
+    // used to run the whole period from our entry.
+    let requested_ago = u32::from(lsa.h.ls_age);
+    let Some(remaining) = grace_period
+        .checked_sub(requested_ago)
+        .filter(|remaining| *remaining > 0)
+    else {
+        tracing::warn!(
+            "[GR Helper v3] reject Grace LSA from nbr {} (requested {}s ago, grace {}s)",
+            nbr.ident.router_id,
+            requested_ago,
+            grace_period
+        );
+        return;
+    };
     let ifindex = nbr.ifindex;
     let router_id = nbr.ident.router_id;
     let tx = oi.tx.clone();
-    let expire_timer = Timer::new(grace_period as u64, TimerType::Once, move || {
+    // Taken before the timer starts: `HelperState::expired` must hold by
+    // the time it fires.
+    let entered_at = tokio::time::Instant::now();
+    let expire_timer = Timer::new(remaining as u64, TimerType::Once, move || {
         let tx = tx.clone();
         async move {
             let _ = tx.send(Message::GrHelperExpire(ifindex, router_id));
@@ -1361,12 +1390,17 @@ fn gr_maybe_enter_helper_v3(
     }
 
     let previously_helping = nbr.gr_helper.is_some();
+    // A renewed request keeps a dead interval the neighbour has already
+    // let lapse: only a Hello clears it.
+    let lapsed = nbr.gr_helper.as_ref().is_some_and(|helper| helper.lapsed);
     nbr.gr_helper = Some(HelperState {
         reason,
         grace_period,
-        entered_at: tokio::time::Instant::now(),
+        entered_at,
         expire_timer: Some(expire_timer),
         lsdb_snapshot,
+        requested_ago,
+        lapsed,
     });
     tracing::info!(
         "[GR Helper v3] {} for nbr {} on ifindex={} (grace={}s, reason={:?})",
