@@ -165,6 +165,17 @@ pub struct RestartingState {
     pub adjacencies: BTreeSet<(u32, Ipv4Addr)>,
 }
 
+/// What a Router-LSA says its router is adjacent to (RFC 2328 §A.4.2,
+/// RFC 5340 §A.4.3): the routers at the far end of its point-to-point and
+/// virtual links, and the transit networks it is on, each by its
+/// Network-LSA's Link State ID and, where the link names it (OSPFv3's
+/// does), the DR's Router ID.
+#[derive(Debug, Default)]
+pub struct RouterLsaAdjacency {
+    pub routers: Vec<Ipv4Addr>,
+    pub networks: Vec<(u32, Option<Ipv4Addr>)>,
+}
+
 impl RestartingState {
     /// Whether the grace period is over. `entered_at` is taken before the
     /// abort timer starts, so the timer never fires before this holds.

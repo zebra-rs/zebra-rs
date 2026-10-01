@@ -267,6 +267,13 @@ pub trait OspfVersion: 'static + Send + Sync + Copy + Clone + PartialEq + Eq {
     /// RFC 5187 §2).
     fn grace_request(lsa: &Self::Lsa) -> Option<super::neigh::GraceRequest>;
 
+    /// What a Router-LSA says its router is adjacent to, if `lsa` is one.
+    fn router_lsa_adjacency(lsa: &Self::Lsa) -> Option<super::neigh::RouterLsaAdjacency>;
+
+    /// The routers a Network-LSA lists as attached, if `lsa` is one (RFC
+    /// 2328 §A.4.3, RFC 5340 §A.4.4).
+    fn network_lsa_attached(lsa: &Self::Lsa) -> Option<&[Ipv4Addr]>;
+
     /// The LSA as it goes on the wire: its header, then its body.
     fn lsa_bytes(lsa: &Self::Lsa) -> bytes::BytesMut;
 
@@ -517,6 +524,31 @@ impl OspfVersion for Ospfv2 {
             Router | Network | Summary | SummaryAsbr | AsExternal | NssaAsExternal
         )
     }
+    fn router_lsa_adjacency(lsa: &OspfLsa) -> Option<super::neigh::RouterLsaAdjacency> {
+        use ospf_packet::OspfLinkType;
+        let ospf_packet::OspfLsp::Router(ref body) = lsa.lsp else {
+            return None;
+        };
+        let mut adjacency = super::neigh::RouterLsaAdjacency::default();
+        for link in &body.links {
+            match link.link_type {
+                OspfLinkType::P2p | OspfLinkType::VirtualLink => {
+                    adjacency.routers.push(link.link_id);
+                }
+                // A transit link names the DR's interface address, the
+                // Network-LSA's Link State ID; not the DR.
+                OspfLinkType::Transit => adjacency.networks.push((link.link_id.into(), None)),
+                OspfLinkType::Stub => {}
+            }
+        }
+        Some(adjacency)
+    }
+    fn network_lsa_attached(lsa: &OspfLsa) -> Option<&[Ipv4Addr]> {
+        let ospf_packet::OspfLsp::Network(ref body) = lsa.lsp else {
+            return None;
+        };
+        Some(&body.attached_routers)
+    }
     fn grace_request(lsa: &OspfLsa) -> Option<super::neigh::GraceRequest> {
         let ospf_packet::OspfLsp::OpaqueLinkLocalGrace(ref body) = lsa.lsp else {
             return None;
@@ -708,6 +740,32 @@ impl OspfVersion for Ospfv3 {
                 | OSPFV3_NSSA_LSA_TYPE
                 | OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE
         )
+    }
+    fn router_lsa_adjacency(lsa: &Ospfv3Lsa) -> Option<super::neigh::RouterLsaAdjacency> {
+        use ospf_packet::Ospfv3RouterLinkType;
+        let ospf_packet::Ospfv3LsBody::Router(ref body) = lsa.body else {
+            return None;
+        };
+        let mut adjacency = super::neigh::RouterLsaAdjacency::default();
+        for link in &body.links {
+            match link.link_type {
+                Ospfv3RouterLinkType::PointToPoint | Ospfv3RouterLinkType::VirtualLink => {
+                    adjacency.routers.push(link.neighbor_router_id);
+                }
+                // The DR's Interface ID and Router ID: the Network-LSA's
+                // Link State ID and Advertising Router.
+                Ospfv3RouterLinkType::Transit => adjacency
+                    .networks
+                    .push((link.neighbor_interface_id, Some(link.neighbor_router_id))),
+            }
+        }
+        Some(adjacency)
+    }
+    fn network_lsa_attached(lsa: &Ospfv3Lsa) -> Option<&[Ipv4Addr]> {
+        let ospf_packet::Ospfv3LsBody::Network(ref body) = lsa.body else {
+            return None;
+        };
+        Some(&body.attached_routers)
     }
     fn grace_request(lsa: &Ospfv3Lsa) -> Option<super::neigh::GraceRequest> {
         if lsa.h.ls_type != ospf_packet::OSPFV3_GRACE_LSA_TYPE {

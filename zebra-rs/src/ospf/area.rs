@@ -239,8 +239,9 @@ pub struct OspfArea<V: OspfVersion = Ospfv2> {
     pub spf_inflight: bool,
     pub spf_pending: bool,
     /// The run in flight began before this router's graceful restart
-    /// ended, so it computed on the restart's database: its completion is
-    /// not the SPF the stale-route sweep waits for (`sweep_spf_done`).
+    /// ended, so it computed on the restart's database: its results are
+    /// dropped, and the stale-route sweep waits for the next run
+    /// (`spf_current`).
     pub spf_predates_exit: bool,
 
     /// Per-area redistribute config (NSSA Type-7 source toggles).
