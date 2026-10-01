@@ -3282,11 +3282,9 @@ pub fn peer_start_writer(
             // yet the writer drains them too — clamp at 0 rather than
             // wrap. The pair (send +1 / write −1) keeps the gauge a
             // real-time count of queued route UPDATEs.
-            egress_depth
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
-                    Some(v.saturating_sub(1))
-                })
-                .ok();
+            egress_depth.update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                v.saturating_sub(1)
+            });
             if delay > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
             }

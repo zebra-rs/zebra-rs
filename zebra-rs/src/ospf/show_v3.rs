@@ -2239,7 +2239,7 @@ fn collect_remote_routers(top: &Ospf<Ospfv3>) -> Vec<Ospfv3SrRemoteRouterJson> {
             srgb_lookup.entry(key).or_insert_with(|| {
                 if let Some(cfg) = area.lsdb.label_map.get(&advertising) {
                     let srgb = fmt_block(&cfg.global);
-                    let srlb = cfg.local.as_ref().map(&fmt_block);
+                    let srlb = cfg.local.as_ref().map(fmt_block);
                     (Some(srgb), srlb)
                 } else {
                     (None, None)
