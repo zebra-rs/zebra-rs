@@ -1,23 +1,33 @@
+use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use anyhow::Result;
 use futures::stream::{StreamExt, TryStreamExt};
 use netlink_packet_core::{NLM_F_DUMP, NLM_F_REQUEST, NetlinkPayload};
 use netlink_packet_route::mdb::{MdbHeader, MdbMessage};
+use netlink_packet_route::nexthop::NexthopMessage;
 use netlink_packet_route::{AddressFamily, RouteNetlinkMessage};
 use rtnetlink::{IpVersion, RouteMessageBuilder};
 
-use crate::{fib::FibMessage, rib::Rib};
+use crate::{
+    fib::{FibMessage, FibNexthop},
+    rib::Rib,
+};
 
 use super::{
-    addr_from_msg, link_from_msg, mdb_entries_from_msg, neighbor_from_msg, route_from_msg,
+    addr_from_msg, link_from_msg, mdb_entries_from_msg, neighbor_from_msg, nexthop_from_msg,
+    route_from_msg_with,
 };
 
 pub async fn fib_dump(rib: &mut Rib) -> Result<()> {
     link_dump(rib, rib.fib_handle.handle.clone()).await?;
     address_dump(rib, rib.fib_handle.handle.clone()).await?;
-    route_dump(rib, rib.fib_handle.handle.clone(), IpVersion::V4).await?;
-    route_dump(rib, rib.fib_handle.handle.clone(), IpVersion::V6).await?;
+    // Next-hop objects before routes: a route may name one instead of a
+    // gateway, and the RIB must reserve their ids before anything of ours
+    // is installed.
+    let nexthops = nexthop_dump(rib, rib.fib_handle.handle.clone()).await;
+    route_dump(rib, rib.fib_handle.handle.clone(), IpVersion::V4, &nexthops).await?;
+    route_dump(rib, rib.fib_handle.handle.clone(), IpVersion::V6, &nexthops).await?;
     // Neighbor tables: ARP (AF_INET), NDP (AF_INET6), and bridge FDB
     // (AF_BRIDGE). Without these, neighbor entries that existed before
     // zebra-rs started are invisible — only post-start RTM_NEWNEIGH
@@ -110,14 +120,58 @@ async fn address_dump(rib: &mut Rib, handle: rtnetlink::Handle) -> Result<()> {
     Ok(())
 }
 
-async fn route_dump(rib: &mut Rib, handle: rtnetlink::Handle, ip_version: IpVersion) -> Result<()> {
+/// Dump the kernel's next-hop objects (`RTM_GETNEXTHOP`) and report each
+/// to the RIB, which never reuses their ids. An earlier run of zebra-rs
+/// that stopped without withdrawing its routes (a graceful restart, a
+/// crash) left its own behind, and its routes still forward through
+/// them. Best-effort: a kernel without next-hop objects returns nothing,
+/// or an error we log.
+async fn nexthop_dump(rib: &mut Rib, mut handle: rtnetlink::Handle) -> BTreeMap<u32, FibNexthop> {
+    let mut nexthops = BTreeMap::new();
+    let mut req = netlink_packet_core::NetlinkMessage::from(RouteNetlinkMessage::GetNexthop(
+        NexthopMessage::default(),
+    ));
+    req.header.flags = NLM_F_REQUEST | NLM_F_DUMP;
+    req.finalize();
+
+    let mut resp = match handle.request(req) {
+        Ok(resp) => resp,
+        Err(e) => {
+            tracing::warn!("fib: RTM_GETNEXTHOP dump request failed ({e}); skipping");
+            return nexthops;
+        }
+    };
+    while let Some(msg) = resp.next().await {
+        if let NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewNexthop(m)) = msg.payload
+            && let Some(nexthop) = nexthop_from_msg(&m)
+        {
+            nexthops.insert(nexthop.id, nexthop.clone());
+            rib.process_fib_msg(FibMessage::KernelNexthop(nexthop))
+                .await;
+        }
+    }
+    let ours = nexthops.values().filter(|nexthop| nexthop.ours).count();
+    if ours > 0 {
+        tracing::info!(
+            "fib: {ours} next-hop object(s) of an earlier run found; their ids are kept"
+        );
+    }
+    nexthops
+}
+
+async fn route_dump(
+    rib: &mut Rib,
+    handle: rtnetlink::Handle,
+    ip_version: IpVersion,
+    nexthops: &BTreeMap<u32, FibNexthop>,
+) -> Result<()> {
     let route = match ip_version {
         IpVersion::V4 => RouteMessageBuilder::<Ipv4Addr>::new().build(),
         IpVersion::V6 => RouteMessageBuilder::<Ipv6Addr>::new().build(),
     };
     let mut routes = handle.route().get(route).execute();
     while let Some(msg) = routes.try_next().await? {
-        let route = route_from_msg(msg);
+        let route = route_from_msg_with(msg, nexthops);
         if let Some(route) = route {
             let msg = FibMessage::NewRoute(route);
             rib.process_fib_msg(msg).await;

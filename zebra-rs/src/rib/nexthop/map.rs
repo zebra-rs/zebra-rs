@@ -89,6 +89,18 @@ impl NexthopMap {
         self.groups.len()
     }
 
+    /// Never hand out `id`, a kernel next-hop object that exists already.
+    /// Groups are installed with `NLM_F_REPLACE`, so one of ours given
+    /// that id would take the object over, and every route still
+    /// forwarding through it — an earlier run's, say — would follow ours.
+    /// Ids are handed out in order, so it is enough to start above it.
+    pub fn reserve(&mut self, id: u32) {
+        let id = id as usize;
+        if self.groups.len() <= id {
+            self.groups.resize_with(id + 1, || None);
+        }
+    }
+
     pub fn fetch_uni(&mut self, uni: &NexthopUni, table_id: u32) -> Option<&mut Group> {
         if let Some(&gid) = self.map.get(&(table_id, uni.addr)) {
             let entry = self.groups.get_mut(gid)?;
@@ -646,5 +658,26 @@ mod tests {
         assert_eq!(nmap.seg6local.len(), 1);
         assert!(nmap.map.is_empty());
         assert!(nmap.seg6.is_empty());
+    }
+
+    /// A reserved id — a kernel next-hop object that exists already — is
+    /// never handed out: groups are made above it. Reserving one below
+    /// those already handed out changes nothing.
+    #[test]
+    fn a_reserved_id_is_not_handed_out() {
+        let mut nmap = NexthopMap::default();
+        nmap.reserve(5);
+        let uni = |last| NexthopUni {
+            addr: IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, last)),
+            ..Default::default()
+        };
+        let gid = nmap.fetch_uni(&uni(2), 254).map(|group| group.gid());
+        assert_eq!(gid, Some(6), "above the reserved id");
+        nmap.reserve(3);
+        let gid = nmap.fetch_uni(&uni(3), 254).map(|group| group.gid());
+        assert_eq!(gid, Some(7), "the next one");
+        nmap.reserve(8);
+        let gid = nmap.fetch_uni(&uni(4), 254).map(|group| group.gid());
+        assert_eq!(gid, Some(9), "not the one reserved next");
     }
 }

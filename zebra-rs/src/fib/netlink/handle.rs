@@ -33,7 +33,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::fib::cradle::CradleFib;
 use crate::fib::fpm::{FpmFib, RouteOp, encode_route};
-use crate::fib::{FibAddr, FibLink, FibMdbEntry, FibMessage, FibNeighbor, FibRoute};
+use crate::fib::{FibAddr, FibLink, FibMdbEntry, FibMessage, FibNeighbor, FibNexthop, FibRoute};
 use crate::rib::entry::RibEntry;
 use crate::rib::inst::{IlmEntry, IlmType};
 use crate::rib::tracing::{fib_l2_fdb, fib_l2_mdb, fib_l2_vxlan, fib_nexthop, fib_route, fib_srv6};
@@ -4605,7 +4605,74 @@ impl RouteBuilder {
     }
 }
 
+/// Translate a kernel next-hop object (`RTM_NEWNEXTHOP`, as a dump
+/// returns it) into a [`FibNexthop`]. None without an id.
+pub fn nexthop_from_msg(msg: &NexthopMessage) -> Option<FibNexthop> {
+    let mut nexthop = FibNexthop {
+        id: nexthop_id_from_msg(msg)?,
+        ours: msg.header.protocol == RouteProtocol::Zebra,
+        gateway: None,
+        ifindex: None,
+        group: Vec::new(),
+    };
+    for attr in &msg.attributes {
+        match attr {
+            NexthopAttribute::Gateway(RouteAddress::Inet(addr)) => {
+                nexthop.gateway = Some(std::net::IpAddr::V4(*addr));
+            }
+            NexthopAttribute::Gateway(RouteAddress::Inet6(addr)) => {
+                nexthop.gateway = Some(std::net::IpAddr::V6(*addr));
+            }
+            NexthopAttribute::Oif(ifindex) => nexthop.ifindex = Some(*ifindex),
+            NexthopAttribute::Group(members) => {
+                nexthop.group = members.iter().map(|member| member.id).collect();
+            }
+            _ => {}
+        }
+    }
+    Some(nexthop)
+}
+
+/// The next hop a route forwarding through kernel next-hop object `id`
+/// has, as `nexthops` (the startup dump) describe it: a gateway, or a
+/// group's member gateways. None for an object not found, or one without
+/// an IPv4 gateway (a blackhole, an interface route).
+fn nexthop_of_object(id: u32, nexthops: &BTreeMap<u32, FibNexthop>) -> Option<Nexthop> {
+    let uni = |id: &u32| {
+        let nexthop = nexthops.get(id)?;
+        let addr @ std::net::IpAddr::V4(_) = nexthop.gateway? else {
+            return None;
+        };
+        Some(NexthopUni {
+            addr,
+            ifindex_origin: nexthop.ifindex,
+            ..Default::default()
+        })
+    };
+    let nexthop = nexthops.get(&id)?;
+    if nexthop.group.is_empty() {
+        return uni(&id).map(Nexthop::Uni);
+    }
+    let nexthops: Vec<NexthopUni> = nexthop.group.iter().filter_map(uni).collect();
+    (!nexthops.is_empty()).then(|| {
+        Nexthop::Multi(NexthopMulti {
+            nexthops,
+            ..Default::default()
+        })
+    })
+}
+
 pub fn route_from_msg(msg: RouteMessage) -> Option<FibRoute> {
+    route_from_msg_with(msg, &BTreeMap::new())
+}
+
+/// [`route_from_msg`] for a route the startup dump found: one naming a
+/// kernel next-hop object (`RTA_NH_ID`) gets that object's gateway, from
+/// `nexthops`. It used to come in with no next hop at all.
+pub fn route_from_msg_with(
+    msg: RouteMessage,
+    nexthops: &BTreeMap<u32, FibNexthop>,
+) -> Option<FibRoute> {
     let mut builder = RouteBuilder::new();
 
     if msg.header.scope == RouteScope::Host {
@@ -4648,6 +4715,18 @@ pub fn route_from_msg(msg: RouteMessage) -> Option<FibRoute> {
             }
             RouteAttribute::Oif(ifindex) => {
                 builder = builder.oif(ifindex);
+            }
+            RouteAttribute::Nhid(id) => {
+                if let Some(nexthop) = nexthop_of_object(id, nexthops) {
+                    // `build` takes a single next hop's interface from the
+                    // route's, which a route through an object leaves to it.
+                    if let Nexthop::Uni(uni) = &nexthop
+                        && let Some(ifindex) = uni.ifindex_origin
+                    {
+                        builder = builder.oif(ifindex);
+                    }
+                    builder = builder.nexthop(nexthop);
+                }
             }
             RouteAttribute::Gateway(RouteAddress::Inet(n)) => {
                 let uni = NexthopUni {
@@ -5145,5 +5224,104 @@ mod tests {
         let link = link_from_msg(msg);
         assert_eq!(link.parent, None);
         assert_eq!(link.vlan_id, None);
+    }
+
+    fn nexthop_msg(protocol: RouteProtocol, attributes: Vec<NexthopAttribute>) -> NexthopMessage {
+        let mut msg = NexthopMessage::default();
+        msg.header.protocol = protocol;
+        msg.attributes = attributes;
+        msg
+    }
+
+    /// A next-hop object as the startup dump returns it: its id, gateway,
+    /// interface and group members, and whether zebra-rs made it
+    /// (`RTPROT_ZEBRA`). One without an id is none.
+    #[test]
+    fn nexthop_from_msg_reads_an_object() {
+        let gw = Ipv4Addr::new(192, 0, 2, 2);
+        let msg = nexthop_msg(
+            RouteProtocol::Zebra,
+            vec![
+                NexthopAttribute::Id(7),
+                NexthopAttribute::Gateway(RouteAddress::Inet(gw)),
+                NexthopAttribute::Oif(3),
+            ],
+        );
+        let nexthop = nexthop_from_msg(&msg).expect("an object");
+        assert_eq!(nexthop.id, 7);
+        assert!(nexthop.ours, "RTPROT_ZEBRA");
+        assert_eq!(nexthop.gateway, Some(IpAddr::V4(gw)));
+        assert_eq!(nexthop.ifindex, Some(3));
+        assert!(nexthop.group.is_empty());
+
+        let members = [7, 8].map(|id| NexthopGroup {
+            id,
+            ..Default::default()
+        });
+        let msg = nexthop_msg(
+            RouteProtocol::Kernel,
+            vec![
+                NexthopAttribute::Id(9),
+                NexthopAttribute::Group(members.to_vec()),
+            ],
+        );
+        let group = nexthop_from_msg(&msg).expect("a group");
+        assert!(!group.ours, "another's");
+        assert_eq!(group.group, vec![7, 8]);
+
+        let msg = nexthop_msg(RouteProtocol::Zebra, vec![NexthopAttribute::Oif(3)]);
+        assert!(nexthop_from_msg(&msg).is_none(), "no id");
+    }
+
+    /// A route the startup dump finds forwarding through a kernel next-hop
+    /// object gets that object's gateway, or its group members' gateways.
+    /// It used to come in with no next hop. An object not dumped gives it
+    /// none.
+    #[test]
+    fn a_dumped_route_gets_its_objects_gateway() {
+        let gw = |last| Ipv4Addr::new(192, 0, 2, last);
+        let object = |id, gateway: Option<Ipv4Addr>, group: Vec<u32>| FibNexthop {
+            id,
+            ours: true,
+            gateway: gateway.map(IpAddr::V4),
+            ifindex: Some(3),
+            group,
+        };
+        let nexthops = BTreeMap::from([
+            (7, object(7, Some(gw(2)), vec![])),
+            (8, object(8, Some(gw(3)), vec![])),
+            (9, object(9, None, vec![7, 8])),
+        ]);
+        let route = |nhid| {
+            let mut msg = RouteMessage::default();
+            msg.header.address_family = AddressFamily::Inet;
+            msg.header.destination_prefix_length = 24;
+            msg.header.kind = RouteType::Unicast;
+            msg.header.scope = RouteScope::Universe;
+            msg.header.protocol = RouteProtocol::Ospf;
+            msg.header.table = RouteHeader::RT_TABLE_MAIN;
+            msg.attributes
+                .push(RouteAttribute::Destination(RouteAddress::Inet(
+                    Ipv4Addr::new(203, 0, 113, 0),
+                )));
+            msg.attributes.push(RouteAttribute::Nhid(nhid));
+            route_from_msg_with(msg, &nexthops)
+                .expect("a route")
+                .entry
+                .nexthop
+        };
+        let gateway = |uni: &NexthopUni| (uni.addr, uni.ifindex_origin);
+        match route(7) {
+            Nexthop::Uni(uni) => assert_eq!(gateway(&uni), (IpAddr::V4(gw(2)), Some(3))),
+            other => panic!("one gateway: {other:?}"),
+        }
+        match route(9) {
+            Nexthop::Multi(multi) => assert_eq!(
+                multi.nexthops.iter().map(gateway).collect::<Vec<_>>(),
+                vec![(IpAddr::V4(gw(2)), Some(3)), (IpAddr::V4(gw(3)), Some(3))]
+            ),
+            other => panic!("the group's gateways: {other:?}"),
+        }
+        assert_eq!(route(5), Nexthop::default(), "not dumped");
     }
 }
