@@ -327,6 +327,7 @@ pub fn update_timers(peer: &mut Peer) {
             // peer is back in Idle — drop it so its reader/writer
             // tasks cancel and the FD is released.
             peer.collision = None;
+            peer.held_keepalive = None;
         }
         Connect => {
             // The ConnectRetryTimer keeps running while we dial (RFC
