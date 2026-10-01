@@ -4,9 +4,11 @@
 //! - `/api/routers`    — the ontology (no MCP).
 //! - `/api/algorithms` — `get-isis-flex-algo` → algorithm choices.
 //! - `/api/topology`   — `get-isis-graph` + `get-isis-spf` → nodes,
-//!   connectivity edges, and hop-by-hop paths from the source router.
+//!   connectivity edges, and hop-by-hop paths from the source router,
+//!   each hop carrying the link's metric and, where the link advertises
+//!   them, its TE performance metrics (RFC 8570 delay, jitter, loss).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
 use serde_json::{Value, json};
@@ -62,7 +64,8 @@ impl App {
 
         let active = graph_node_names(&graph);
         let edges = graph_edges(&graph);
-        let paths = spf_paths(&spf, source, destination);
+        let links = directed_links(&graph);
+        let paths = spf_paths(&spf, source, destination, &links);
 
         // Every ontology router, marked active when the graph knows it —
         // plus any graph node the ontology does not know (no coordinates,
@@ -109,6 +112,15 @@ fn algorithm_choices(flex: &Value) -> Vec<Value> {
             continue;
         };
         let mut constraints = Vec::new();
+        // The IGP metric is the default and goes unsaid; a delay or TE
+        // metric is what makes the algorithm's paths differ, so say it.
+        if let Some(metric) = entry
+            .get("metric_type")
+            .and_then(Value::as_str)
+            .and_then(metric_type_label)
+        {
+            constraints.push(format!("metric: {metric}"));
+        }
         for key in ["exclude_any", "include_any", "include_all"] {
             if let Some(list) = entry.get(key).and_then(Value::as_array)
                 && !list.is_empty()
@@ -125,6 +137,18 @@ fn algorithm_choices(flex: &Value) -> Vec<Value> {
         choices.push(json!({ "algo": algo, "label": label }));
     }
     choices
+}
+
+/// A readable name for a FAD metric-type as `get-isis-flex-algo` reports
+/// it (`igp`, `minunidirlinkdelay`, `tedefault`; dashes tolerated), or
+/// `None` for the IGP default.
+fn metric_type_label(metric_type: &str) -> Option<String> {
+    match metric_type.replace('-', "").as_str() {
+        "igp" => None,
+        "minunidirlinkdelay" => Some("min delay".to_string()),
+        "tedefault" => Some("TE default".to_string()),
+        other => Some(other.to_string()),
+    }
 }
 
 /// All node names present in a `get-isis-graph` result (any level).
@@ -192,11 +216,87 @@ fn graph_edges(graph: &Value) -> Vec<Value> {
     edges
 }
 
+/// One directed link of the graph: its cost in this algorithm and the TE
+/// metrics its advertising end floods, if any.
+struct DirectedLink {
+    cost: u64,
+    te: Option<Value>,
+}
+
+/// Every directed link of a `get-isis-graph` result, keyed by (from, to).
+/// Direction matters here, unlike [`graph_edges`]: a link's delay, jitter
+/// and loss are what its *advertising* end measured, so the two directions
+/// of one link can differ. Of parallel links the cheapest is kept — the
+/// one SPF walks.
+fn directed_links(graph: &Value) -> BTreeMap<(String, String), DirectedLink> {
+    let mut links: BTreeMap<(String, String), DirectedLink> = BTreeMap::new();
+    for level in graph.as_array().into_iter().flatten() {
+        for node in level
+            .get("nodes")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(from) = node.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            for link in node
+                .get("olinks")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let Some(to) = link.get("name").and_then(Value::as_str) else {
+                    continue;
+                };
+                let cost = link.get("cost").and_then(Value::as_u64).unwrap_or(0);
+                let key = (from.to_string(), to.to_string());
+                if links.get(&key).is_some_and(|l| l.cost <= cost) {
+                    continue;
+                }
+                links.insert(
+                    key,
+                    DirectedLink {
+                        cost,
+                        te: link.get("te").cloned(),
+                    },
+                );
+            }
+        }
+    }
+    links
+}
+
+/// The per-hop view of a path: each consecutive pair of hops with that
+/// directed link's cost and TE metrics. A hop pair the graph does not
+/// know (it changed between the two MCP calls) keeps a null cost.
+fn path_segments(hops: &[String], links: &BTreeMap<(String, String), DirectedLink>) -> Vec<Value> {
+    hops.windows(2)
+        .map(|pair| {
+            let link = links.get(&(pair[0].clone(), pair[1].clone()));
+            let mut segment = json!({
+                "from": pair[0],
+                "to": pair[1],
+                "cost": link.map(|l| l.cost),
+            });
+            if let Some(te) = link.and_then(|l| l.te.clone()) {
+                segment["te"] = te;
+            }
+            segment
+        })
+        .collect()
+}
+
 /// Hop-by-hop paths from a `get-isis-spf` result. The daemon's path
 /// vertex lists start at the first hop, so the source is prepended to
 /// make each path a complete node walk. Paths are deduplicated across
 /// topologies (e.g. MT0 and MT2 computing the identical path).
-fn spf_paths(spf: &Value, source: &str, destination: Option<&str>) -> Vec<Value> {
+fn spf_paths(
+    spf: &Value,
+    source: &str,
+    destination: Option<&str>,
+    links: &BTreeMap<(String, String), DirectedLink>,
+) -> Vec<Value> {
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut paths = Vec::new();
     let Some(topologies) = spf.get("topologies").and_then(Value::as_object) else {
@@ -250,6 +350,7 @@ fn spf_paths(spf: &Value, source: &str, destination: Option<&str>) -> Vec<Value>
                     "index": paths.len(),
                     "destination": dest_name,
                     "cost": cost,
+                    "segments": path_segments(&hops, links),
                     "hops": hops,
                     "interface": interface,
                 }));
@@ -387,7 +488,7 @@ mod tests {
 
     #[test]
     fn paths_prepend_source_skip_self_and_dedup() {
-        let paths = spf_paths(&spf_fixture(), "tk", None);
+        let paths = spf_paths(&spf_fixture(), "tk", None, &BTreeMap::new());
         // 1 path to se + 1 to da (the duplicate ECMP entry dedups).
         assert_eq!(paths.len(), 2);
         let se = &paths[0];
@@ -405,9 +506,92 @@ mod tests {
 
     #[test]
     fn paths_filter_by_destination() {
-        let paths = spf_paths(&spf_fixture(), "tk", Some("da"));
+        let paths = spf_paths(&spf_fixture(), "tk", Some("da"), &BTreeMap::new());
         assert_eq!(paths.len(), 1);
         assert_eq!(paths[0]["destination"], "da");
+    }
+
+    /// A metric-type-1 graph slice: costs are Min delays, and each olink
+    /// carries the TE metrics its advertising end floods — `tk -> sg` and
+    /// `sg -> tk` measured differently, and a parallel `tk -> sg` link.
+    fn te_graph_fixture() -> Value {
+        json!([
+            {
+                "level": "L2 algo 128",
+                "nodes": [
+                    {
+                        "id": 0,
+                        "name": "tk",
+                        "sys_id": "0000.0000.0011",
+                        "olinks": [
+                            {"id": 1, "name": "sg", "cost": 90000,
+                             "te": {"min_delay": 90000}},
+                            {"id": 1, "name": "sg", "cost": 35035,
+                             "te": {"delay": 35673, "min_delay": 35035,
+                                    "max_delay": 37338, "delay_variation": 675}},
+                        ],
+                        "ilinks": [],
+                    },
+                    {
+                        "id": 1,
+                        "name": "sg",
+                        "sys_id": "0000.0000.0009",
+                        "olinks": [
+                            {"id": 0, "name": "tk", "cost": 35071,
+                             "te": {"min_delay": 35071, "loss": 1000000,
+                                    "loss_anomalous": true}},
+                            {"id": 2, "name": "fr", "cost": 80067},
+                        ],
+                        "ilinks": [],
+                    },
+                ],
+            }
+        ])
+    }
+
+    #[test]
+    fn directed_links_keep_each_direction_and_the_cheapest_parallel() {
+        let links = directed_links(&te_graph_fixture());
+        let tk_sg = &links[&("tk".to_string(), "sg".to_string())];
+        assert_eq!(tk_sg.cost, 35035, "the parallel link SPF walks");
+        assert_eq!(tk_sg.te.as_ref().unwrap()["delay_variation"], 675);
+        let sg_tk = &links[&("sg".to_string(), "tk".to_string())];
+        assert_eq!(
+            sg_tk.te.as_ref().unwrap()["loss"],
+            1000000,
+            "the reverse direction's own TE"
+        );
+        assert!(links[&("sg".to_string(), "fr".to_string())].te.is_none());
+    }
+
+    #[test]
+    fn paths_carry_per_hop_segments_with_te() {
+        let spf = json!({
+            "topologies": {
+                "L2 (algorithm 128)": {
+                    "destinations": [{
+                        "name": "fr",
+                        "cost": 115112,
+                        "nexthops": [{"name": "sg", "interface": "tk-sg"}],
+                        "paths": [[{"name": "sg"}, {"name": "fr"}, {"name": "ln"}]],
+                    }],
+                },
+            },
+        });
+        let links = directed_links(&te_graph_fixture());
+        let paths = spf_paths(&spf, "tk", None, &links);
+        let segments = paths[0]["segments"].as_array().unwrap();
+        assert_eq!(segments.len(), 3);
+        assert_eq!(segments[0]["from"], "tk");
+        assert_eq!(segments[0]["to"], "sg");
+        assert_eq!(segments[0]["cost"], 35035);
+        assert_eq!(segments[0]["te"]["min_delay"], 35035);
+        // A link without TE carries its cost and no `te`.
+        assert_eq!(segments[1]["cost"], 80067);
+        assert!(segments[1].get("te").is_none());
+        // A hop pair the graph does not know keeps a null cost.
+        assert_eq!(segments[2]["from"], "fr");
+        assert!(segments[2]["cost"].is_null());
     }
 
     #[test]
@@ -434,5 +618,23 @@ mod tests {
 
         // No flex-algo configured still offers algorithm 0.
         assert_eq!(algorithm_choices(&json!({})).len(), 1);
+    }
+
+    #[test]
+    fn algorithm_choices_name_a_delay_metric() {
+        let flex = json!({
+            "local_algorithms": [
+                {"algorithm": 128, "metric_type": "minunidirlinkdelay",
+                 "exclude_any": [], "include_any": [], "include_all": []},
+                {"algorithm": 129, "metric_type": "min-unidir-link-delay",
+                 "exclude_any": ["trans-pacific"]},
+            ],
+        });
+        let choices = algorithm_choices(&flex);
+        assert_eq!(choices[1]["label"], "128 — metric: min delay");
+        assert_eq!(
+            choices[2]["label"],
+            "129 — metric: min delay; exclude-any: trans-pacific"
+        );
     }
 }

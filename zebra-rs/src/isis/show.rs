@@ -1,7 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
-use isis_packet::{IsisSysId, IsisTlv, IsisTlvExtIpReachEntry, IsisTlvIpv6ReachEntry, Nsap};
+use isis_packet::neigh::IsisSubTlv as NeighSubTlv;
+use isis_packet::{
+    IsisNeighborId, IsisSysId, IsisTlv, IsisTlvExtIpReachEntry, IsisTlvExtIsReachEntry,
+    IsisTlvIpv6ReachEntry, Nsap,
+};
 use prefix_trie::PrefixMap;
 use serde::Serialize;
 
@@ -767,6 +771,127 @@ struct LinkJson {
     pub id: usize,
     pub name: String,
     pub cost: u32,
+    /// The TE performance metrics the link's advertising end floods
+    /// (RFC 8570), when it floods any. JSON only; the text graph keeps
+    /// its one-line-per-link shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub te: Option<LinkTeJson>,
+}
+
+/// One directed link's advertised TE performance metrics. Delays are in
+/// microseconds; `loss` is in RFC 8570 units of 0.000003 %, like
+/// [`PrunedLinkJson::loss`]. Read as [`flex_algo::displayed_link_attr`]
+/// reads them: the Flex-Algorithm ASLA where the link has one, the legacy
+/// inline copy otherwise.
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+struct LinkTeJson {
+    /// Average unidirectional delay (sub-TLV 33).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delay: Option<u32>,
+    /// Min/Max unidirectional delay (sub-TLV 34); `min_delay` is what a
+    /// metric-type-1 Flex-Algorithm costs the link at.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_delay: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_delay: Option<u32>,
+    /// Unidirectional delay variation (sub-TLV 35).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delay_variation: Option<u32>,
+    /// Unidirectional link loss (sub-TLV 36).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loss: Option<u32>,
+    /// The Anomalous (A) bit on either delay sub-TLV.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub delay_anomalous: bool,
+    /// The Anomalous (A) bit on the loss sub-TLV.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub loss_anomalous: bool,
+}
+
+impl LinkTeJson {
+    /// The TE metrics one reach entry advertises, or `None` when it
+    /// advertises none of them.
+    fn from_entry(entry: &IsisTlvExtIsReachEntry) -> Option<Self> {
+        use super::flex_algo::displayed_link_attr as attr;
+        let avg = attr(entry, |sub| match sub {
+            NeighSubTlv::UniLinkDelay(d) => Some((d.delay, d.anomalous)),
+            _ => None,
+        });
+        let min_max = attr(entry, |sub| match sub {
+            NeighSubTlv::MinMaxLinkDelay(d) => Some((d.min_delay, d.max_delay, d.anomalous)),
+            _ => None,
+        });
+        let variation = attr(entry, |sub| match sub {
+            NeighSubTlv::DelayVariation(d) => Some(d.variation),
+            _ => None,
+        });
+        let loss = attr(entry, |sub| match sub {
+            NeighSubTlv::LinkLoss(l) => Some((l.loss, l.anomalous)),
+            _ => None,
+        });
+        let te = LinkTeJson {
+            delay: avg.map(|(delay, _)| delay),
+            min_delay: min_max.map(|(min, _, _)| min),
+            max_delay: min_max.map(|(_, max, _)| max),
+            delay_variation: variation,
+            loss: loss.map(|(loss, _)| loss),
+            delay_anomalous: avg.is_some_and(|(_, a)| a) || min_max.is_some_and(|(_, _, a)| a),
+            loss_anomalous: loss.is_some_and(|(_, a)| a),
+        };
+        (te != Self::default()).then_some(te)
+    }
+}
+
+/// Every directed link's advertised TE metrics at one level, so the graph
+/// JSON can attach them to its edges. Keyed by (advertising router or
+/// pseudonode, neighbour); parallel links keep one entry each, in
+/// advertisement order, with the IGP metric that lets an edge be matched
+/// back to its own advertisement.
+struct LinkTeIndex<'a> {
+    map: &'a super::graph::LspMap,
+    links: BTreeMap<(IsisNeighborId, IsisNeighborId), Vec<(u32, LinkTeJson)>>,
+}
+
+impl<'a> LinkTeIndex<'a> {
+    fn new(isis: &'a Isis, level: Level) -> Self {
+        let mut links: BTreeMap<_, Vec<_>> = BTreeMap::new();
+        for (_, lsa) in isis.lsdb.get(&level).iter() {
+            let from = lsa.lsp.lsp_id.neighbor_id();
+            for tlv in &lsa.lsp.tlvs {
+                let IsisTlv::ExtIsReach(ext_reach) = tlv else {
+                    continue;
+                };
+                for entry in &ext_reach.entries {
+                    if let Some(te) = LinkTeJson::from_entry(entry) {
+                        links
+                            .entry((from, entry.neighbor_id))
+                            .or_default()
+                            .push((entry.metric, te));
+                    }
+                }
+            }
+        }
+        LinkTeIndex {
+            map: isis.lsp_map.get(&level),
+            links,
+        }
+    }
+
+    /// The TE metrics of the graph edge `from` → `to` costing `cost`. An
+    /// edge's cost is its IGP metric, or its Min delay in a metric-type-1
+    /// graph, which is how one of several parallel links is told apart.
+    fn get(&self, from: usize, to: usize, cost: u32) -> Option<LinkTeJson> {
+        let key = (
+            *self.map.resolve_neighbor(from)?,
+            *self.map.resolve_neighbor(to)?,
+        );
+        let parallel = self.links.get(&key)?;
+        parallel
+            .iter()
+            .find(|(metric, te)| *metric == cost || te.min_delay == Some(cost))
+            .or_else(|| parallel.first())
+            .map(|(_, te)| te.clone())
+    }
 }
 
 fn show_isis_graph(
@@ -778,14 +903,22 @@ fn show_isis_graph(
 
     // Process Level 1 graph
     if let Some(graph) = isis.graph.get(&Level::L1)
-        && let Some(graph_json) = format_graph(graph, "L1")
+        && let Some(graph_json) = format_graph(
+            graph,
+            "L1",
+            json.then(|| LinkTeIndex::new(isis, Level::L1)).as_ref(),
+        )
     {
         graphs.push(graph_json);
     }
 
     // Process Level 2 graph
     if let Some(graph) = isis.graph.get(&Level::L2)
-        && let Some(graph_json) = format_graph(graph, "L2")
+        && let Some(graph_json) = format_graph(
+            graph,
+            "L2",
+            json.then(|| LinkTeIndex::new(isis, Level::L2)).as_ref(),
+        )
     {
         graphs.push(graph_json);
     }
@@ -843,8 +976,9 @@ fn write_graphs_text(
     Ok(())
 }
 
-// Helper function to format a graph into the JSON structure
-fn format_graph(graph: &spf::Graph, level: &str) -> Option<GraphJson> {
+// Helper function to format a graph into the JSON structure. `te`, when
+// given, attaches each directed link's advertised TE metrics.
+fn format_graph(graph: &spf::Graph, level: &str, te: Option<&LinkTeIndex>) -> Option<GraphJson> {
     let mut nodes = Vec::new();
 
     // Collect all nodes with their links
@@ -859,6 +993,7 @@ fn format_graph(graph: &spf::Graph, level: &str) -> Option<GraphJson> {
                     id: link.to,
                     name: to_node.name.clone(),
                     cost: link.cost,
+                    te: te.and_then(|t| t.get(*id, link.to, link.cost)),
                 });
             }
         }
@@ -873,6 +1008,7 @@ fn format_graph(graph: &spf::Graph, level: &str) -> Option<GraphJson> {
                     id: link.from,
                     name: from_node.name.clone(),
                     cost: link.cost,
+                    te: te.and_then(|t| t.get(link.from, *id, link.cost)),
                 });
             }
         }
@@ -4626,7 +4762,11 @@ fn show_isis_flex_algo_graph(
     let selections = flex_algo_selections(isis);
     for (level, label) in [(Level::L1, "L1"), (Level::L2, "L2")] {
         if let Some(Some(graph)) = isis.graph_flex_algo.get(&level).get(&algo)
-            && let Some(mut g) = format_graph(graph, &format!("{} algo {}", label, algo))
+            && let Some(mut g) = format_graph(
+                graph,
+                &format!("{} algo {}", label, algo),
+                json.then(|| LinkTeIndex::new(isis, level)).as_ref(),
+            )
         {
             // The graph holds only the links kept; name the rest, computed
             // with the definition the graph was built from.

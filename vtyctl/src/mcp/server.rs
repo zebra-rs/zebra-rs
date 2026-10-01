@@ -354,7 +354,7 @@ impl ZmcpServer {
                 },
                 {
                     "name": "get-isis-graph",
-                    "description": "Get IS-IS topology graph data for network visualization and analysis. Without 'algorithm' this is the unpruned LSDB graph; with a Flex-Algorithm number (128-255) it is that algorithm's constraint-pruned graph.",
+                    "description": "Get IS-IS topology graph data for network visualization and analysis. Without 'algorithm' this is the unpruned LSDB graph; with a Flex-Algorithm number (128-255) it is that algorithm's constraint-pruned graph. Each link whose advertising router floods TE performance metrics (RFC 8570) carries them in 'te': delay, min_delay, max_delay and delay_variation in microseconds, loss in units of 0.000003 %, and delay_anomalous / loss_anomalous for the Anomalous bit.",
                     "inputSchema": {
                         "type": "object",
                         "properties": {

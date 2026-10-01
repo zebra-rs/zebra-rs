@@ -89,6 +89,21 @@ fn peer_link_attr<T>(
         .find_map(pick)
 }
 
+/// A link attribute for display rather than for path computation: what
+/// Flex-Algorithm reads ([`peer_link_attr`]), or — on a link with no
+/// applicable ASLA at all — the legacy inline copy, so a plain TE
+/// deployment still shows its values. Never feed this to SPF; that is
+/// exactly the fallback `peer_link_attr` refuses.
+pub fn displayed_link_attr<T>(
+    entry: &IsisTlvExtIsReachEntry,
+    pick: impl Fn(&NeighSubTlv) -> Option<T>,
+) -> Option<T> {
+    if applicable_aslas(entry).is_empty() {
+        return entry.subs.iter().find_map(pick);
+    }
+    peer_link_attr(entry, pick)
+}
+
 /// The Min delay to cost a link at for metric-type 1 — any router's, this
 /// one's included, from what the link advertises — or `None` when the link
 /// must be pruned (RFC 9350 §15).
@@ -811,6 +826,52 @@ mod tests {
         let rsvp_te = vec![0x80];
         let entry = reach_entry(vec![asla(rsvp_te, false, vec![min_max(900)]), min_max(700)]);
         assert_eq!(peer_min_delay(&entry), None);
+    }
+
+    fn displayed_min_delay(entry: &IsisTlvExtIsReachEntry) -> Option<u32> {
+        displayed_link_attr(entry, |sub| match sub {
+            NeighSubTlv::MinMaxLinkDelay(d) => Some(d.min_delay),
+            _ => None,
+        })
+    }
+
+    /// Display shows what Flex-Algorithm reads when the link has an
+    /// applicable ASLA — the same value the metric-type-1 SPF costs it at.
+    #[test]
+    fn displayed_link_attr_reads_the_flex_algo_asla() {
+        let entry = reach_entry(vec![
+            min_max(700),
+            asla(vec![SABM_FLEX_ALGO], false, vec![min_max(900)]),
+        ]);
+        assert_eq!(displayed_min_delay(&entry), Some(900));
+    }
+
+    /// Without any applicable ASLA — a plain TE link, or one whose only ASLA
+    /// is scoped to another application — display falls back to the legacy
+    /// inline value that `peer_link_attr` refuses to use for SPF.
+    #[test]
+    fn displayed_link_attr_falls_back_to_legacy_without_an_applicable_asla() {
+        let plain = reach_entry(vec![min_max(700)]);
+        assert_eq!(displayed_min_delay(&plain), Some(700));
+        assert_eq!(peer_min_delay(&plain), None);
+
+        let rsvp_te = reach_entry(vec![
+            asla(vec![0x80], false, vec![min_max(900)]),
+            min_max(700),
+        ]);
+        assert_eq!(displayed_min_delay(&rsvp_te), Some(700));
+    }
+
+    /// An applicable ASLA without the attribute is still authoritative:
+    /// the link advertised none for Flex-Algorithm, and display must not
+    /// contradict the pruning that follows from it.
+    #[test]
+    fn displayed_link_attr_does_not_mix_an_applicable_asla_with_legacy() {
+        let entry = reach_entry(vec![
+            min_max(700),
+            asla(vec![SABM_FLEX_ALGO], false, vec![]),
+        ]);
+        assert_eq!(displayed_min_delay(&entry), None);
     }
 
     /// An applicable, L-clear ASLA that carries no Min/Max delay means
