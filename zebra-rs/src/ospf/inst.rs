@@ -812,6 +812,17 @@ impl<V: OspfVersion> Ospf<V> {
     /// While it was helped, this router's LSAs listed it as fully adjacent
     /// whatever its state (RFC 3623 §3.1); leaving helper mode
     /// re-originates them (§3.2).
+    /// How many adjacencies are Full, across every interface: what a
+    /// restart counts at its start, and again at each adjacency's return
+    /// to decide it is over.
+    fn full_adjacencies(&self) -> usize {
+        self.links
+            .values()
+            .flat_map(|link| link.nbrs.values())
+            .filter(|nbr| nbr.state == super::NfsmState::Full)
+            .count()
+    }
+
     fn gr_helper_left(&self, ifindex: u32, key: Ipv4Addr) -> Option<super::NfsmState> {
         let nbr = self
             .links
@@ -5741,14 +5752,16 @@ impl Ospf<Ospfv2> {
         // `ext_link_lsa_originate` flushes when no Full neighbor remains.
         self.ext_link_lsa_originate(ifindex);
 
-        // Count Full transitions during restart. When we've
-        // recovered as many adjacencies as the checkpoint expected,
-        // exit-restart fires.
+        // RFC 3623 §2.3 (1): the restart is over once the adjacencies it
+        // had are back — once as many are Full as the checkpoint
+        // counted. It used to tally transitions to Full, so one
+        // neighbour coming back twice stood in for two.
+        let full = self.full_adjacencies();
         if new_state == NfsmState::Full
             && old_state != NfsmState::Full
             && let Some(state) = self.restarting.as_mut()
         {
-            state.current_full_count = state.current_full_count.saturating_add(1);
+            state.current_full_count = full;
             if state.current_full_count >= state.expected_full_count
                 && state.expected_full_count > 0
             {
@@ -5912,12 +5925,7 @@ impl Ospf<Ospfv2> {
         // commit handler will store the same number into the
         // checkpoint so the post-reboot exit path knows when to
         // declare success.
-        let expected_full_count = self
-            .links
-            .values()
-            .flat_map(|link| link.nbrs.values())
-            .filter(|nbr| nbr.state == NfsmState::Full)
-            .count();
+        let expected_full_count = self.full_adjacencies();
         self.restarting = Some(RestartingState {
             grace_period,
             reason,
@@ -6119,45 +6127,38 @@ impl Ospf<Ospfv2> {
         );
     }
 
+    /// Abort the restart: staged and never committed, or timed out.
+    /// It ends as a successful one does ([`Self::gr_restart_exit`]).
     pub fn gr_restart_abort(&mut self) {
-        if self.restarting.take().is_none() {
-            return;
+        if self.gr_restart_exit() {
+            tracing::info!("[GR Restart] aborted; LSAs re-originated at seq+1");
         }
-
-        let ifindices: Vec<u32> = self
-            .links
-            .iter()
-            .filter(|(_, link)| link.enabled)
-            .map(|(ifindex, _)| *ifindex)
-            .collect();
-        for ifindex in &ifindices {
-            self.flush_grace_lsa(*ifindex);
-        }
-        // Restored Grace-LSAs whose interface never came back.
-        self.restored_link_lsas.clear();
-
-        self.router_info_lsa_originate();
-        tracing::info!("[GR Restart] aborted; Grace LSAs flushed, gr_capable cleared");
     }
 
     /// Exit-restart success. Fired by
     /// `process_neighbor_state_change` once
-    /// `current_full_count >= expected_full_count`.
-    ///
-    /// Clears `self.restarting` (which unblocks the
-    /// `in_restart()` gates on `router_lsa_originate` /
-    /// `update_network_lsa_by_interface` / `network_lsa_flush`),
-    /// re-originates the topology-affecting self-LSAs at
-    /// `seq+1` so helpers see the restart cleanly conclude,
-    /// flushes our Grace LSAs (MaxAge re-flood) so helpers
-    /// drop helper mode, and clears `gr_capable` from the
-    /// Router-Info LSA via `router_info_lsa_originate`.
+    /// `current_full_count >= expected_full_count`; see
+    /// [`Self::gr_restart_exit`].
     ///
     /// Idempotent — no-op when called outside restart mode
     /// (e.g. if `GrRestartAbort` already ran first).
     pub fn gr_restart_exit_success(&mut self) {
+        if self.gr_restart_exit() {
+            tracing::info!("[GR Restart] exit-restart success; LSAs re-originated at seq+1");
+        }
+    }
+
+    /// Leave graceful restart, whether it succeeded or not (RFC 3623
+    /// §2.3): flush the Grace-LSAs, re-originate this router's LSAs,
+    /// and rerun the routing calculation, installing its results. While
+    /// restarting, originations were held back and SPF results left
+    /// unapplied, so this reconciles both with the network as it is now.
+    /// An abort used to flush the Grace-LSAs only, leaving every change
+    /// held back meanwhile unadvertised and unrouted. Returns whether a
+    /// restart was on.
+    fn gr_restart_exit(&mut self) -> bool {
         if self.restarting.take().is_none() {
-            return;
+            return false;
         }
 
         let ifindices: Vec<u32> = self
@@ -6186,13 +6187,21 @@ impl Ospf<Ospfv2> {
         // MinLSInterval throttle via the `_now` originators.
         self.router_lsa_originate_now(None);
         for ifindex in &ifindices {
-            self.update_network_lsa_by_interface_now(*ifindex);
+            // Only the DR originates the segment's Network-LSA; this
+            // used to originate one on every interface.
+            let dr = self
+                .links
+                .get(ifindex)
+                .is_some_and(|link| link.state == IfsmState::DR);
+            if dr {
+                self.update_network_lsa_by_interface_now(*ifindex);
+            }
             self.ext_link_lsa_originate(*ifindex);
         }
         // Router-Info refresh clears the gr_capable bit.
         self.router_info_lsa_originate();
-
-        tracing::info!("[GR Restart] exit-restart success; LSAs re-originated at seq+1");
+        let _ = self.tx.send(Message::SpfSchedule(None));
+        true
     }
 
     /// Commit a staged graceful restart (RFC 3623 §2):
@@ -10063,12 +10072,7 @@ impl Ospf<Ospfv3> {
             }
         });
 
-        let expected_full_count = self
-            .links
-            .values()
-            .flat_map(|link| link.nbrs.values())
-            .filter(|nbr| nbr.state == NfsmState::Full)
-            .count();
+        let expected_full_count = self.full_adjacencies();
         self.restarting = Some(RestartingState {
             grace_period,
             reason,
@@ -10139,24 +10143,12 @@ impl Ospf<Ospfv3> {
 
     /// Abort a staged v3 restart: flush the Grace-LSAs and resume
     /// normal operation. v3 sibling of `gr_restart_abort`.
+    /// Abort the restart, as OSPFv2's: it ends as a successful one does
+    /// ([`Self::gr_restart_exit_v3`]).
     pub fn gr_restart_abort_v3(&mut self) {
-        if self.restarting.take().is_none() {
-            return;
+        if self.gr_restart_exit_v3() {
+            tracing::info!("[GR Restart v3] aborted; LSAs re-originated at seq+1");
         }
-
-        let ifindices: Vec<u32> = self
-            .links
-            .iter()
-            .filter(|(_, link)| link.enabled)
-            .map(|(ifindex, _)| *ifindex)
-            .collect();
-        for ifindex in &ifindices {
-            self.flush_grace_lsa_v3(*ifindex);
-        }
-        // Restored Grace-LSAs whose interface never came back.
-        self.restored_link_lsas.clear();
-        self.sr_capabilities_v3_originate_all();
-        tracing::info!("[GR Restart v3] aborted; Grace LSAs flushed, restart-capable cleared");
     }
 
     /// Exit-restart success — fired once `current_full_count`
@@ -10166,8 +10158,19 @@ impl Ospf<Ospfv3> {
     /// restart conclude cleanly. v3 sibling of
     /// `gr_restart_exit_success`.
     pub fn gr_restart_exit_success_v3(&mut self) {
+        if self.gr_restart_exit_v3() {
+            tracing::info!("[GR Restart v3] exit-restart success; LSAs re-originated at seq+1");
+        }
+    }
+
+    /// Leave graceful restart, whether it succeeded or not (RFC 3623
+    /// §2.3), as OSPFv2's `gr_restart_exit`: flush the Grace-LSAs,
+    /// re-originate this router's LSAs, and rerun the routing
+    /// calculation, installing its results. An abort used to flush the
+    /// Grace-LSAs only. Returns whether a restart was on.
+    fn gr_restart_exit_v3(&mut self) -> bool {
         if self.restarting.take().is_none() {
-            return;
+            return false;
         }
 
         let ifindices: Vec<u32> = self
@@ -10200,8 +10203,8 @@ impl Ospf<Ospfv3> {
         }
         // The Router Information LSA's restart-capable bit clears.
         self.sr_capabilities_v3_originate_all();
-
-        tracing::info!("[GR Restart v3] exit-restart success; LSAs re-originated at seq+1");
+        let _ = self.tx.send(Message::SpfSchedule(None));
+        true
     }
 
     /// Debug helper mirroring the v2 `checkpoint_write_debug`.
@@ -12900,14 +12903,15 @@ impl Ospf<Ospfv3> {
             new_state
         );
 
-        // GR exit-restart: count fresh Full transitions against the
-        // checkpointed expectation; once every pre-restart adjacency
-        // is back, conclude the restart (v3 sibling of the v2 hook).
+        // RFC 3623 §2.3 (1), as OSPFv2's: the restart is over once as
+        // many adjacencies are Full as the checkpoint counted — not after
+        // as many transitions to Full.
+        let full = self.full_adjacencies();
         if new_state == NfsmState::Full
             && old_state != NfsmState::Full
             && let Some(state) = self.restarting.as_mut()
         {
-            state.current_full_count = state.current_full_count.saturating_add(1);
+            state.current_full_count = full;
             if state.current_full_count >= state.expected_full_count
                 && state.expected_full_count > 0
             {
@@ -15933,7 +15937,10 @@ fn apply_v3_spf_result(top: &mut Ospf<Ospfv3>, output: SpfOutput) {
     top.rib6_areas.insert(area_id, area_rib);
     top.spf_results.insert(area_id, spf_result.clone());
     let merged = merge_area_ribs6(top);
-    apply_routing_updates_v3(top, merged);
+    // RFC 3623 §2.2, as OSPFv2's: no route installed while restarting.
+    if !top.in_restart() {
+        apply_routing_updates_v3(top, merged);
+    }
 
     top.spf_result = Some(spf_result);
     top.graph = Some(graph);
@@ -17259,7 +17266,13 @@ fn apply_spf_result(top: &mut Ospf, output: SpfOutput) {
         .collect();
 
     let merged = merge_area_ribs(top);
-    apply_routing_updates(top, merged);
+    // RFC 3623 §2.2: a restarting router computes its routes but keeps
+    // forwarding as it was, until `gr_restart_exit` reruns the
+    // calculation and installs them. Installing here withdrew the routes
+    // whose LSAs the restart had not relearned yet.
+    if !top.in_restart() {
+        apply_routing_updates(top, merged);
+    }
 
     // ABR: (re)originate / refresh / flush Type-3 Summary LSAs from the
     // freshly merged per-area routing tables. Diff-gated and does not
@@ -23073,6 +23086,207 @@ mod gr_helper_tests {
         assert!(vl, "the virtual link");
         let transit = top.router_lsa_build(AREA1);
         assert_ne!(transit.flags & 0x04, 0, "the V-bit");
+    }
+
+    /// A restart of this router that expects `adjacencies` back.
+    fn restarting(adjacencies: usize) -> super::super::neigh::RestartingState {
+        super::super::neigh::RestartingState {
+            grace_period: GRACE,
+            reason: GraceRestartReason::SoftwareRestart,
+            entered_at: tokio::time::Instant::now(),
+            abort_timer: None,
+            expected_full_count: adjacencies,
+            current_full_count: 0,
+        }
+    }
+
+    /// Whether a queued message ends this router's restart.
+    fn restart_over<V: OspfVersion>(top: &mut Ospf<V>) -> bool {
+        std::iter::from_fn(|| top.rx.try_recv().ok())
+            .any(|msg| matches!(msg, Message::GrRestartExitSuccess))
+    }
+
+    /// This router's restart is over once as many adjacencies are Full as
+    /// it had before (RFC 3623 §2.3 (1)): here S and O. S coming back
+    /// twice is not enough; O's return is. It used to count transitions
+    /// to Full, so S's second return ended it.
+    #[tokio::test(start_paused = true)]
+    async fn a_restart_ends_when_its_adjacencies_are_back() {
+        use NfsmState::{ExStart, Full};
+
+        // OSPFv2.
+        let mut top = v2_top();
+        top.links.get_mut(&3).unwrap().nbrs.clear();
+        for nbr in top.links.values_mut().flat_map(|l| l.nbrs.values_mut()) {
+            nbr.state = ExStart;
+        }
+        top.restarting = Some(restarting(2));
+        for (rid, state) in [(S, Full), (S, ExStart), (S, Full), (O, Full)] {
+            let over = restart_over(&mut top);
+            assert!(!over, "v2: not before {rid} is {state:?}");
+            let nbr = top.links.get_mut(&2).unwrap().nbrs.get_mut(&v2_addr(rid));
+            let nbr = nbr.unwrap();
+            let old = std::mem::replace(&mut nbr.state, state);
+            top.process_neighbor_state_change(2, v2_addr(rid), old, state);
+        }
+        assert!(restart_over(&mut top), "v2: S and O are back");
+
+        // OSPFv3.
+        let mut top = v3_top();
+        top.links.get_mut(&3).unwrap().nbrs.clear();
+        for nbr in top.links.values_mut().flat_map(|l| l.nbrs.values_mut()) {
+            nbr.state = ExStart;
+        }
+        top.restarting = Some(restarting(2));
+        for (rid, state) in [(S, Full), (S, ExStart), (S, Full), (O, Full)] {
+            let over = restart_over(&mut top);
+            assert!(!over, "v3: not before {rid} is {state:?}");
+            let nbr = top.links.get_mut(&2).unwrap().nbrs.get_mut(&rid).unwrap();
+            let old = std::mem::replace(&mut nbr.state, state);
+            top.process_neighbor_state_change(2, rid, old, state);
+        }
+        assert!(restart_over(&mut top), "v3: S and O are back");
+    }
+
+    /// An abort ends this router's restart as a success does (RFC 3623
+    /// §2.3): its LSAs are re-originated for the network as it is now,
+    /// and the routing calculation reruns. While restarting, S's
+    /// adjacency died and the Router-LSA kept it; the abort used to leave
+    /// it there. Nor does an interface where this router is not DR get a
+    /// Network-LSA; the exit used to originate one on every interface.
+    #[tokio::test(start_paused = true)]
+    async fn an_aborted_restart_catches_up() {
+        use super::super::lsdb::v2_lsa_key;
+        use super::super::nfsm::NfsmEvent::InactivityTimer;
+        use ospf_packet::{OSPFV3_NETWORK_LSA_TYPE, OSPFV3_ROUTER_LSA_TYPE};
+
+        // OSPFv2.
+        let mut top = v2_top();
+        top.links.get_mut(&2).unwrap().network_type = OspfNetworkType::PointToPoint;
+        top.router_lsa_originate_now(None);
+        let ours = v2_lsa_key(OspfLsType::Router, ME, ME);
+        assert!(v2_names(&in_lsdb(&top, ours), S), "v2: S");
+        top.restarting = Some(restarting(2));
+        let msg = Message::Nfsm(2, v2_addr(S), InactivityTimer);
+        top.process_msg(msg).await;
+        assert!(v2_names(&in_lsdb(&top, ours), S), "v2: held back");
+        let _ = queued(&mut top, |_| false);
+        top.gr_restart_abort();
+        assert!(!v2_names(&in_lsdb(&top, ours), S), "v2: S withdrawn");
+        assert!(!queued(&mut top, spf_rerun).is_empty(), "v2: SPF reruns");
+        let network = v2_lsa_key(OspfLsType::Network, Ipv4Addr::new(198, 51, 100, 1), ME);
+        let area = top.areas.get(AREA0).unwrap();
+        assert!(
+            area.lsdb.lookup_by_raw_key(network).is_none(),
+            "v2: not DR, no Network-LSA"
+        );
+
+        // OSPFv3.
+        let mut top = v3_top();
+        top.links.get_mut(&2).unwrap().network_type = OspfNetworkType::PointToPoint;
+        top.router_lsa_originate_now();
+        let ours = (OSPFV3_ROUTER_LSA_TYPE, 0, ME);
+        assert!(v3_names(&in_lsdb(&top, ours), S), "v3: S");
+        top.restarting = Some(restarting(2));
+        top.process_msg(Message::Nfsm(2, S, InactivityTimer)).await;
+        assert!(v3_names(&in_lsdb(&top, ours), S), "v3: held back");
+        let _ = queued(&mut top, |_| false);
+        top.gr_restart_abort_v3();
+        assert!(!v3_names(&in_lsdb(&top, ours), S), "v3: S withdrawn");
+        assert!(!queued(&mut top, spf_rerun).is_empty(), "v3: SPF reruns");
+        let interface_id = top.links[&3].interface_id;
+        let network = (OSPFV3_NETWORK_LSA_TYPE, interface_id, ME);
+        let area = top.areas.get(AREA0).unwrap();
+        assert!(
+            area.lsdb.lookup_by_raw_key(network).is_none(),
+            "v3: not DR, no Network-LSA"
+        );
+    }
+
+    /// Whether `msg` reruns SPF in every area.
+    fn spf_rerun<V: OspfVersion>(msg: &Message<V>) -> bool {
+        matches!(msg, Message::SpfSchedule(None))
+    }
+
+    /// An SPF result that no longer has a route.
+    fn spf_without_routes() -> SpfOutput {
+        SpfOutput {
+            area_id: AREA0,
+            graph: spf::Graph::new(),
+            source: 0,
+            spf_result: BTreeMap::new(),
+            tilfa_result: BTreeMap::new(),
+            tilfa_stats: None,
+            duration: Duration::ZERO,
+            last: Instant::now(),
+            flex_algos: vec![],
+        }
+    }
+
+    /// A restarting router keeps forwarding as it was (RFC 3623 §2.2): a
+    /// route calculation while it restarts withdraws nothing, though its
+    /// database may not have every LSA back yet. It used to withdraw
+    /// every route it no longer found. The same calculation once the
+    /// restart is over does.
+    #[tokio::test(start_paused = true)]
+    async fn a_restart_keeps_forwarding() {
+        use crate::rib::client::{ProtoId, RibClient};
+        let route = || SpfRoute {
+            metric: 10,
+            path_type: RouteType::IntraArea,
+            nhops: BTreeMap::new(),
+            sid: None,
+            prefix_sid: None,
+            dest_vertex: None,
+            backup_as_primary: false,
+        };
+
+        // OSPFv2.
+        let mut top = v2_top();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        top.ctx.rib = RibClient::new(tx, ProtoId::from_raw(1));
+        top.rib.insert("203.0.113.0/24".parse().unwrap(), route());
+        let mut withdrawn = || {
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .any(|env| matches!(env.msg, rib::Message::Ipv4Del { .. }))
+        };
+        top.restarting = Some(restarting(2));
+        top.process_msg(Message::SpfDone(Box::new(spf_without_routes())))
+            .await;
+        assert!(!withdrawn(), "v2: kept while restarting");
+        top.restarting = None;
+        top.process_msg(Message::SpfDone(Box::new(spf_without_routes())))
+            .await;
+        assert!(withdrawn(), "v2: withdrawn after");
+
+        // OSPFv3.
+        let mut top = v3_top();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        top.ctx.rib = RibClient::new(tx, ProtoId::from_raw(1));
+        top.rib6.insert(
+            "2001:db8::/64".parse().unwrap(),
+            SpfRouteV3 {
+                metric: 10,
+                path_type: RouteType::IntraArea,
+                nhops: BTreeMap::new(),
+                sid: None,
+                prefix_sid: None,
+                dest_vertex: None,
+                backup_as_primary: false,
+            },
+        );
+        let mut withdrawn = || {
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .any(|env| matches!(env.msg, rib::Message::Ipv6Del { .. }))
+        };
+        top.restarting = Some(restarting(2));
+        top.process_msg(Message::SpfDone(Box::new(spf_without_routes())))
+            .await;
+        assert!(!withdrawn(), "v3: kept while restarting");
+        top.restarting = None;
+        top.process_msg(Message::SpfDone(Box::new(spf_without_routes())))
+            .await;
+        assert!(withdrawn(), "v3: withdrawn after");
     }
 
     /// The grace period runs from the restart request, which the

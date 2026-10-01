@@ -144,11 +144,10 @@ pub struct RestartingState {
     /// side. Zero when the staging happened mid-flight without a
     /// checkpoint (`begin` without `commit`).
     pub expected_full_count: usize,
-    /// Number of neighbors that have transitioned back to Full
-    /// since restart began. Incremented in
-    /// `process_neighbor_state_change`; checked against
-    /// `expected_full_count` to decide when to declare
-    /// exit-restart success.
+    /// Number of adjacencies Full at the last one's return to Full,
+    /// set in `process_neighbor_state_change` and checked against
+    /// `expected_full_count` to decide when to declare exit-restart
+    /// success. A neighbour flapping counts once.
     pub current_full_count: usize,
 }
 
