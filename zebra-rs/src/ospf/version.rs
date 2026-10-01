@@ -264,6 +264,20 @@ pub trait OspfVersion: 'static + Send + Sync + Copy + Clone + PartialEq + Eq {
     /// RFC 5187 §2).
     fn grace_request(lsa: &Self::Lsa) -> Option<super::neigh::GraceRequest>;
 
+    /// The LSA as it goes on the wire: its header, then its body.
+    fn lsa_bytes(lsa: &Self::Lsa) -> bytes::BytesMut;
+
+    /// The Options field of an LSA header (RFC 2328 §A.4.1). An OSPFv3
+    /// header has none (RFC 5340 §A.4.2.1): its LSAs carry theirs in the
+    /// body.
+    fn header_options(h: &Self::LsaHeader) -> u8;
+
+    /// Whether a change to an LSA of `ls_type` is a topology change to a
+    /// graceful-restart helper (RFC 3623 §3.2 (3)): an LSA the routing
+    /// table is computed from — types 1–5 and 7 in OSPFv2, and their
+    /// OSPFv3 counterparts with the Intra-Area-Prefix-LSA.
+    fn helper_topology_type(ls_type: u16) -> bool;
+
     /// Build the (local, remote) IP addresses for a single-hop BFD
     /// session to `nbr` on this interface, or `None` if one can't be
     /// formed. v2: the interface's primary IPv4 and the neighbor's
@@ -476,6 +490,29 @@ impl OspfVersion for Ospfv2 {
     fn nbr_addr(ident: &crate::ospf::Identity<Ospfv2>) -> Ipv4Addr {
         ident.prefix.addr()
     }
+    fn lsa_bytes(lsa: &OspfLsa) -> bytes::BytesMut {
+        // As `OspfLsa`'s `Emit` does: the bytes it arrived in, if any.
+        if let Some(raw) = lsa.raw.as_ref() {
+            return bytes::BytesMut::from(raw.as_ref());
+        }
+        let mut buf = bytes::BytesMut::new();
+        lsa.h.emit(&mut buf);
+        lsa.emit_lsp(&mut buf);
+        buf
+    }
+    fn header_options(h: &OspfLsaHeader) -> u8 {
+        h.options
+    }
+    fn helper_topology_type(ls_type: u16) -> bool {
+        use ospf_packet::OspfLsType::*;
+        let Ok(ls_type) = u8::try_from(ls_type) else {
+            return false;
+        };
+        matches!(
+            ospf_packet::OspfLsType::from(ls_type),
+            Router | Network | Summary | SummaryAsbr | AsExternal | NssaAsExternal
+        )
+    }
     fn grace_request(lsa: &OspfLsa) -> Option<super::neigh::GraceRequest> {
         let ospf_packet::OspfLsp::OpaqueLinkLocalGrace(ref body) = lsa.lsp else {
             return None;
@@ -641,6 +678,31 @@ impl OspfVersion for Ospfv3 {
     }
     fn nbr_addr(ident: &crate::ospf::Identity<Ospfv3>) -> Ipv4Addr {
         ident.router_id
+    }
+    fn lsa_bytes(lsa: &Ospfv3Lsa) -> bytes::BytesMut {
+        let mut buf = bytes::BytesMut::new();
+        lsa.emit(&mut buf);
+        buf
+    }
+    fn header_options(_h: &Ospfv3LsaHeader) -> u8 {
+        0
+    }
+    fn helper_topology_type(ls_type: u16) -> bool {
+        use ospf_packet::{
+            OSPFV3_AS_EXTERNAL_LSA_TYPE, OSPFV3_INTER_AREA_PREFIX_LSA_TYPE,
+            OSPFV3_INTER_AREA_ROUTER_LSA_TYPE, OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE,
+            OSPFV3_NETWORK_LSA_TYPE, OSPFV3_NSSA_LSA_TYPE, OSPFV3_ROUTER_LSA_TYPE,
+        };
+        matches!(
+            ls_type,
+            OSPFV3_ROUTER_LSA_TYPE
+                | OSPFV3_NETWORK_LSA_TYPE
+                | OSPFV3_INTER_AREA_PREFIX_LSA_TYPE
+                | OSPFV3_INTER_AREA_ROUTER_LSA_TYPE
+                | OSPFV3_AS_EXTERNAL_LSA_TYPE
+                | OSPFV3_NSSA_LSA_TYPE
+                | OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE
+        )
     }
     fn grace_request(lsa: &Ospfv3Lsa) -> Option<super::neigh::GraceRequest> {
         if lsa.h.ls_type != ospf_packet::OSPFV3_GRACE_LSA_TYPE {

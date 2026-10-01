@@ -1,10 +1,9 @@
 //! On-disk graceful-restart checkpoint for OSPFv2.
 //!
 //! Per RFC 3623 §2 the restarter must, on coming back up, restore
-//! enough state to re-flood its self-originated LSAs at the same
-//! `(seq, checksum)` the helpers snapshotted at restart entry —
-//! otherwise the helpers' [`gr_helper_check_exit`] trips the
-//! restarter-LSA-changed condition and tears down the restart.
+//! enough state to re-flood its self-originated LSAs unchanged —
+//! otherwise a helper takes the change for a topology change
+//! (§3.2 (3)) and tears down the restart.
 //!
 //! Format choices:
 //!

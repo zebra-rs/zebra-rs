@@ -825,6 +825,48 @@ impl<V: OspfVersion> Ospf<V> {
         }
     }
 
+    /// A topology change for the helpers (RFC 3623 §3.2 (3)): installing
+    /// the LSA at `key` in `area_id`'s database, or the AS's when `None`,
+    /// changed its contents (RFC 2328 §13.2). It ends the help for every
+    /// restarter it would be flooded to: those in that area, or, for an
+    /// AS-scope LSA, those in any area but a stub or NSSA. The help used to
+    /// end on any new instance of an area LSA, a refresh that changed
+    /// nothing included, and never on an AS-external LSA. With
+    /// `helper-strict-lsa-checking` off, only a change to the restarter's
+    /// own LSAs ends it.
+    fn gr_helper_topology_change(&mut self, area_id: Option<Ipv4Addr>, key: OspfLsaKey) {
+        let strict = self.gr_config.helper_strict_lsa_checking;
+        let adv_router = key.2;
+        let reaches = |link: &OspfLink<V>| match area_id {
+            Some(area_id) => link.area == area_id,
+            None => self
+                .areas
+                .get(link.area)
+                .is_some_and(|area| area.area_type.accepts_as_external()),
+        };
+        let exits: Vec<(u32, Ipv4Addr)> = self
+            .links
+            .iter()
+            .filter(|(_, link)| reaches(link))
+            .flat_map(|(ifindex, link)| {
+                link.nbrs
+                    .values()
+                    .filter(|nbr| {
+                        nbr.gr_helper.is_some() && (strict || nbr.ident.router_id == adv_router)
+                    })
+                    .map(move |nbr| (*ifindex, nbr.ident.router_id))
+            })
+            .collect();
+        for (ifindex, router_id) in exits {
+            let reason = if router_id == adv_router {
+                "restarter LSA changed"
+            } else {
+                "topology change"
+            };
+            self.gr_helper_exit(ifindex, router_id, reason);
+        }
+    }
+
     /// A Grace-LSA installed on `ifindex`, from whichever neighbour
     /// delivered it (RFC 3623 §3.1, §3.2 (1); RFC 5187). It asks this
     /// router to help the router that advertised it through a restart,
@@ -864,24 +906,6 @@ impl<V: OspfVersion> Ospf<V> {
         else {
             return;
         };
-
-        // RFC 3623 §3.2: the restarter's LSAs as they were at entry;
-        // `gr_helper_check_exit` diffs later installs against them.
-        let lsdb_snapshot: BTreeMap<_, _> = self
-            .areas
-            .get(link.area)
-            .map(|area| {
-                area.lsdb
-                    .tables
-                    .iter()
-                    .filter_map(|(key, lsa)| {
-                        let h = V::lsa_header(&lsa.data);
-                        (V::adv_router(h) == restarter)
-                            .then(|| (*key, (V::ls_seq_number(h), V::ls_checksum(h))))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
 
         let gr_config = self.gr_config;
         let tx = self.tx.clone();
@@ -962,7 +986,6 @@ impl<V: OspfVersion> Ospf<V> {
             grace_period,
             entered_at,
             expire_timer: Some(expire_timer),
-            lsdb_snapshot,
             requested_ago,
             lapsed,
         });
@@ -2613,10 +2636,10 @@ impl Ospf<Ospfv2> {
 
     fn router_lsa_originate_with_min_seq(&mut self, min_seq: Option<u32>) {
         // While restarting, the checkpoint-loaded Router-LSA must
-        // stay verbatim (helpers snapshotted its seq+checksum).
-        // Fresh re-origination here would clobber it and trip
-        // `gr_helper_check_exit`. Skip; the exit-restart path
-        // re-originates at seq+1 once we declare the restart
+        // stay verbatim: a restarting router originates none of its
+        // own LSAs (RFC 3623 §2.2), and a helper takes a changed one
+        // for a topology change (§3.2 (3)). Skip; the exit-restart
+        // path re-originates at seq+1 once we declare the restart
         // complete.
         if self.in_restart() {
             return;
@@ -5806,75 +5829,6 @@ impl Ospf<Ospfv2> {
         }
     }
 
-    /// RFC 3623 §3.2 bullets 2-3 — topology-change exit. Called
-    /// from `flood_lsa_through_area` after `ospf_flood` has just
-    /// installed `lsa` into the area LSDB. For every helper-mode
-    /// neighbor in this area, decide whether the install warrants
-    /// exit:
-    ///
-    ///   - If `lsa.adv_router != restarter`: any topology-affecting
-    ///     LSA represents a change to the area outside the
-    ///     restarter, so exit.
-    ///   - If `lsa.adv_router == restarter`: compare against the
-    ///     `(seq, checksum)` we snapshotted at helper entry. Exact
-    ///     match → quiescent re-flood (no exit). Differs → the
-    ///     restarter's content / sequence changed (restart finished
-    ///     or content drifted), so exit.
-    ///
-    /// Non-topology-affecting LSAs (Opaque, AS-External, Link-LSA)
-    /// are ignored — they don't change intra-area routing.
-    fn gr_helper_check_exit(&mut self, area_id: Ipv4Addr, lsa: &OspfLsa) {
-        let topology_affecting = matches!(
-            lsa.h.ls_type,
-            OspfLsType::Router
-                | OspfLsType::Network
-                | OspfLsType::Summary
-                | OspfLsType::SummaryAsbr
-        );
-        if !topology_affecting {
-            return;
-        }
-        let key = super::lsdb::v2_lsa_key(lsa.h.ls_type, lsa.h.ls_id, lsa.h.adv_router);
-
-        let Some(area) = self.areas.get(area_id) else {
-            return;
-        };
-        let link_indices: Vec<u32> = area.links.iter().copied().collect();
-
-        let mut exits: Vec<(u32, Ipv4Addr, &'static str)> = Vec::new();
-        for ifindex in link_indices {
-            let Some(link) = self.links.get(&ifindex) else {
-                continue;
-            };
-            for nbr in link.nbrs.values() {
-                let Some(helper) = nbr.gr_helper.as_ref() else {
-                    continue;
-                };
-                let exit_reason = if lsa.h.adv_router == nbr.ident.router_id {
-                    match helper.lsdb_snapshot.get(&key) {
-                        Some(&(seq, csum))
-                            if seq == lsa.h.ls_seq_number && csum == lsa.h.ls_checksum =>
-                        {
-                            // Identical re-flood — quiescent.
-                            continue;
-                        }
-                        _ => "restarter LSA changed from snapshot",
-                    }
-                } else if self.gr_config.helper_strict_lsa_checking {
-                    "non-restarter topology change in area"
-                } else {
-                    // Strict-LSA-checking disabled — ignore non-restarter
-                    // topology changes per `helper-strict-lsa-checking false`.
-                    continue;
-                };
-                exits.push((ifindex, nbr.ident.router_id, exit_reason));
-            }
-        }
-        for (ifindex, router_id, reason) in exits {
-            self.gr_helper_exit(ifindex, router_id, reason);
-        }
-    }
-
     /// Check if we are currently the DR for the network identified by ls_id.
     fn is_dr_for_network_lsa(&self, ls_id: Ipv4Addr) -> bool {
         for link in self.links.values() {
@@ -6418,13 +6372,6 @@ impl Ospf<Ospfv2> {
         lsa: &OspfLsa,
         source: Option<(u32, Ipv4Addr)>,
     ) {
-        // RFC 3623 §3.2 bullets 2-3 — every LSA that reaches the
-        // flood-out path was just installed in the area LSDB, so
-        // this is the choke point for the topology-change exit
-        // check. Runs before the fanout iteration so a helper exit
-        // can deconstruct any state we'd otherwise loop over.
-        self.gr_helper_check_exit(area_id, lsa);
-
         let Some(area) = self.areas.get(area_id) else {
             return;
         };
@@ -7426,6 +7373,9 @@ impl Ospf<Ospfv2> {
             }
             Message::GraceLsa(ifindex, lsa) => {
                 self.gr_helper_grace(ifindex, &lsa);
+            }
+            Message::LsaChanged(area_id, key) => {
+                self.gr_helper_topology_change(area_id, key);
             }
             Message::GrRestartAbort => {
                 tracing::info!(
@@ -10862,84 +10812,7 @@ impl Ospf<Ospfv3> {
 
     /// Flood a v3 LSA through `area_id`, optionally exempting the
     /// source neighbor that fed it to us (RFC 2328 §13.3 Step 1c).
-    /// RFC 5187 §3.2 bullets 2-3 — v3 mirror of
-    /// `Ospf<Ospfv2>::gr_helper_check_exit`. Called from
-    /// `flood_lsa_through_area` after each area-LSA install. For
-    /// each helper-mode neighbor in the area, decide whether the
-    /// install warrants exit:
     ///
-    ///   - `advertising_router != restarter`: any topology-affecting
-    ///     LSA is an exit trigger when `helper_strict_lsa_checking`.
-    ///     When that knob is off (relaxed mode), non-restarter
-    ///     LSAs are ignored.
-    ///   - `advertising_router == restarter`: compare against the
-    ///     `(seq, checksum)` we snapshotted at helper entry. Exact
-    ///     match → quiescent re-flood (no exit). Differs → exit.
-    ///
-    /// Topology-affecting v3 LS Types: Router (0x2001), Network
-    /// (0x2002), Inter-Area-Prefix (0x2003), Inter-Area-Router
-    /// (0x2004), Intra-Area-Prefix (0x2009). All other LSAs (Link,
-    /// AS-External, Grace, the RFC 8362 E-LSAs) are ignored
-    /// because they don't change intra-area routing.
-    fn gr_helper_check_exit(&mut self, area_id: Ipv4Addr, lsa: &ospf_packet::Ospfv3Lsa) {
-        use ospf_packet::{
-            OSPFV3_INTER_AREA_PREFIX_LSA_TYPE, OSPFV3_INTER_AREA_ROUTER_LSA_TYPE,
-            OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE, OSPFV3_NETWORK_LSA_TYPE, OSPFV3_ROUTER_LSA_TYPE,
-        };
-
-        let topology_affecting = matches!(
-            lsa.h.ls_type,
-            OSPFV3_ROUTER_LSA_TYPE
-                | OSPFV3_NETWORK_LSA_TYPE
-                | OSPFV3_INTER_AREA_PREFIX_LSA_TYPE
-                | OSPFV3_INTER_AREA_ROUTER_LSA_TYPE
-                | OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE
-        );
-        if !topology_affecting {
-            return;
-        }
-        // v3 LSDB key shape: `(ls_type: u16, link_state_id: u32,
-        // advertising_router: Ipv4Addr)`. No conversion needed —
-        // these fields are already in their key-native form.
-        let key: super::lsdb::OspfLsaKey =
-            (lsa.h.ls_type, lsa.h.link_state_id, lsa.h.advertising_router);
-
-        let Some(area) = self.areas.get(area_id) else {
-            return;
-        };
-        let link_indices: Vec<u32> = area.links.iter().copied().collect();
-
-        let mut exits: Vec<(u32, Ipv4Addr, &'static str)> = Vec::new();
-        for ifindex in link_indices {
-            let Some(link) = self.links.get(&ifindex) else {
-                continue;
-            };
-            for nbr in link.nbrs.values() {
-                let Some(helper) = nbr.gr_helper.as_ref() else {
-                    continue;
-                };
-                let exit_reason = if lsa.h.advertising_router == nbr.ident.router_id {
-                    match helper.lsdb_snapshot.get(&key) {
-                        Some(&(seq, csum))
-                            if seq == lsa.h.ls_seq_number && csum == lsa.h.ls_checksum =>
-                        {
-                            continue;
-                        }
-                        _ => "restarter LSA changed from snapshot",
-                    }
-                } else if self.gr_config.helper_strict_lsa_checking {
-                    "non-restarter topology change in area"
-                } else {
-                    continue;
-                };
-                exits.push((ifindex, nbr.ident.router_id, exit_reason));
-            }
-        }
-        for (ifindex, router_id, reason) in exits {
-            self.gr_helper_exit(ifindex, router_id, reason);
-        }
-    }
-
     /// Mirrors v2's `flood_lsa_through_area`.
     ///
     /// `source = None` is the self-origination path: every
@@ -10961,14 +10834,6 @@ impl Ospf<Ospfv3> {
         lsa: &ospf_packet::Ospfv3Lsa,
         source: Option<(u32, std::net::Ipv6Addr)>,
     ) {
-        // RFC 5187 §3.2 — every LSA flooded here was just installed
-        // in the area LSDB, so this is the v3 choke point for the
-        // topology-change helper exit (mirror of v2's hook in
-        // `Ospf<Ospfv2>::flood_lsa_through_area`). Runs before the
-        // fanout iteration so an exit can deconstruct any state
-        // we'd otherwise loop over.
-        self.gr_helper_check_exit(area_id, lsa);
-
         let Some(area) = self.areas.get(area_id) else {
             return;
         };
@@ -11788,6 +11653,9 @@ impl Ospf<Ospfv3> {
             }
             Message::GraceLsa(ifindex, lsa) => {
                 self.gr_helper_grace(ifindex, &lsa);
+            }
+            Message::LsaChanged(area_id, key) => {
+                self.gr_helper_topology_change(area_id, key);
             }
             Message::GrRestartAbort => {
                 tracing::info!("[GR Restart v3] abort message received");
@@ -13791,6 +13659,11 @@ pub enum Message<V: OspfVersion = Ospfv2> {
     /// help for the router that advertised it (RFC 3623 §3.1, §3.2 (1));
     /// see `gr_helper_grace`.
     GraceLsa(u32, V::Lsa),
+    /// `(area_id, key)`: installing the LSA at `key` changed its contents
+    /// (RFC 2328 §13.2) — new, altered or flushed — in `area_id`'s
+    /// database, or the AS's when `None`. A topology change to a
+    /// graceful-restart helper; see `gr_helper_topology_change`.
+    LsaChanged(Option<Ipv4Addr>, super::lsdb::OspfLsaKey),
     /// Graceful-restart restarter-mode auto-abort. Fired when the
     /// staging timer set by `gr_restart_begin` expires without an
     /// operator-driven commit. Drives the same path as
@@ -21498,7 +21371,10 @@ mod link_scope_tests {
         for msg in queued {
             if matches!(
                 msg,
-                Message::Flood(..) | Message::FloodAs(..) | Message::GraceLsa(..)
+                Message::Flood(..)
+                    | Message::FloodAs(..)
+                    | Message::GraceLsa(..)
+                    | Message::LsaChanged(..)
             ) {
                 top.process_msg(msg).await;
             }
@@ -21526,7 +21402,10 @@ mod link_scope_tests {
         for msg in queued {
             if matches!(
                 msg,
-                Message::Flood(..) | Message::FloodAs(..) | Message::GraceLsa(..)
+                Message::Flood(..)
+                    | Message::FloodAs(..)
+                    | Message::GraceLsa(..)
+                    | Message::LsaChanged(..)
             ) {
                 top.process_msg(msg).await;
             }
@@ -22652,6 +22531,67 @@ mod gr_helper_tests {
             .any(|nbr| nbr.gr_helper.is_some())
     }
 
+    /// `adv`'s OSPFv2 Router-LSA.
+    fn v2_router(adv: Ipv4Addr, flags: u16, seq: u32) -> OspfLsa {
+        let mut h = OspfLsaHeader::new(OspfLsType::Router, adv, adv);
+        h.ls_seq_number = seq;
+        let body = RouterLsa {
+            flags,
+            links: vec![],
+        };
+        let mut lsa = OspfLsa::from(h, OspfLsp::Router(body));
+        lsa.update();
+        lsa
+    }
+
+    /// `adv`'s OSPFv3 Router-LSA.
+    fn v3_router(adv: Ipv4Addr, flags: u8, seq: u32) -> Ospfv3Lsa {
+        use ospf_packet::{OSPFV3_ROUTER_LSA_TYPE, Ospfv3LsBody, Ospfv3Options, Ospfv3RouterLsa};
+        let mut lsa = super::link_scope_tests::v3_lsa(OSPFV3_ROUTER_LSA_TYPE, 0, adv, 0, seq);
+        let body = Ospfv3RouterLsa::new(flags, Ospfv3Options::default(), vec![]);
+        lsa.body = Ospfv3LsBody::Router(body);
+        lsa.update();
+        lsa
+    }
+
+    /// An OSPFv2 AS-external LSA from `adv`.
+    fn v2_external(adv: Ipv4Addr) -> OspfLsa {
+        let h = OspfLsaHeader::new(OspfLsType::AsExternal, Ipv4Addr::new(203, 0, 113, 0), adv);
+        let body = AsExternalLsa {
+            netmask: Ipv4Addr::new(255, 255, 255, 0),
+            ext_and_resvd: 0,
+            metric: 20,
+            forwarding_address: Ipv4Addr::UNSPECIFIED,
+            external_route_tag: 0,
+            tos_list: vec![],
+        };
+        let mut lsa = OspfLsa::from(h, OspfLsp::AsExternal(body));
+        lsa.update();
+        lsa
+    }
+
+    /// An OSPFv3 AS-external LSA from `adv`.
+    fn v3_external(adv: Ipv4Addr) -> Ospfv3Lsa {
+        use ospf_packet::{
+            OSPFV3_AS_EXTERNAL_LSA_TYPE, Ospfv3AsExternalLsa, Ospfv3LsBody, Ospfv3PrefixOptions,
+        };
+        let mut lsa =
+            super::link_scope_tests::v3_lsa(OSPFV3_AS_EXTERNAL_LSA_TYPE, 1, adv, 0, 0x8000_0001);
+        lsa.body = Ospfv3LsBody::AsExternal(Ospfv3AsExternalLsa {
+            flags: 0,
+            metric: 20,
+            prefix_length: 64,
+            prefix_options: Ospfv3PrefixOptions::default(),
+            referenced_ls_type: 0,
+            address_prefix: vec![0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0],
+            forwarding_address: None,
+            external_route_tag: None,
+            referenced_link_state_id: None,
+        });
+        lsa.update();
+        lsa
+    }
+
     /// Wait out MinLSArrival (RFC 2328 §13 (5a)), so the next copy of the
     /// same LSA is not discarded.
     async fn later() {
@@ -22771,6 +22711,84 @@ mod gr_helper_tests {
         s.unwrap().state = NfsmState::ExStart;
         v3_receive(&mut top, 2, O, v3_grace(1, 0x8000_0001)).await;
         assert!(!helping(&top), "v3: S is not Full");
+    }
+
+    /// A change of an LSA's contents ends the help for the restarters it
+    /// would be flooded to (RFC 3623 §3.2 (3)); an install that changes
+    /// nothing does not (RFC 2328 §13.2). A refresh used to end it, and an
+    /// AS-external LSA never did. A change reaches the restarters in its
+    /// area, or, for an AS-scope LSA, in any area but a stub or NSSA. With
+    /// strict LSA checking off, only the restarter's own LSAs count.
+    #[tokio::test(start_paused = true)]
+    async fn a_topology_change_ends_the_help() {
+        use super::super::area::AreaTypeKind;
+        use super::super::lsdb::v2_lsa_key;
+        use ospf_packet::OSPFV3_ROUTER_LSA_TYPE;
+        const AREA1: Ipv4Addr = Ipv4Addr::new(0, 0, 0, 1);
+
+        // OSPFv2: a refresh, then a change.
+        let mut top = v2_top();
+        v2_receive(&mut top, 2, O, v2_router(O, 0, 0x8000_0001)).await;
+        v2_receive(&mut top, 2, S, v2_grace(1, 0x8000_0001)).await;
+        later().await;
+        v2_receive(&mut top, 2, O, v2_router(O, 0, 0x8000_0002)).await;
+        assert!(helping(&top), "v2: a refresh");
+        later().await;
+        v2_receive(&mut top, 2, O, v2_router(O, 1, 0x8000_0003)).await;
+        assert!(!helping(&top), "v2: a change");
+
+        let mut top = v2_top();
+        v2_receive(&mut top, 2, S, v2_grace(1, 0x8000_0001)).await;
+        v2_receive(&mut top, 2, O, v2_external(O)).await;
+        assert!(!helping(&top), "v2: an AS-external LSA");
+
+        // Where a change reaches.
+        let mut top = v2_top();
+        v2_receive(&mut top, 2, S, v2_grace(1, 0x8000_0001)).await;
+        let o = v2_lsa_key(OspfLsType::Router, O, O);
+        top.process_msg(Message::LsaChanged(Some(AREA1), o)).await;
+        assert!(helping(&top), "v2: another area");
+        top.areas.get_mut(AREA0).unwrap().area_type.kind = AreaTypeKind::Stub;
+        top.process_msg(Message::LsaChanged(None, o)).await;
+        assert!(helping(&top), "v2: AS scope, a stub area");
+        top.gr_config.helper_strict_lsa_checking = false;
+        top.process_msg(Message::LsaChanged(Some(AREA0), o)).await;
+        assert!(helping(&top), "v2: not strict, O's");
+        let s = v2_lsa_key(OspfLsType::Router, S, S);
+        top.process_msg(Message::LsaChanged(Some(AREA0), s)).await;
+        assert!(!helping(&top), "v2: not strict, S's own");
+
+        // OSPFv3: a refresh, then a change.
+        let mut top = v3_top();
+        v3_receive(&mut top, 2, O, v3_router(O, 0, 0x8000_0001)).await;
+        v3_receive(&mut top, 2, S, v3_grace(1, 0x8000_0001)).await;
+        later().await;
+        v3_receive(&mut top, 2, O, v3_router(O, 0, 0x8000_0002)).await;
+        assert!(helping(&top), "v3: a refresh");
+        later().await;
+        v3_receive(&mut top, 2, O, v3_router(O, 1, 0x8000_0003)).await;
+        assert!(!helping(&top), "v3: a change");
+
+        let mut top = v3_top();
+        v3_receive(&mut top, 2, S, v3_grace(1, 0x8000_0001)).await;
+        v3_receive(&mut top, 2, O, v3_external(O)).await;
+        assert!(!helping(&top), "v3: an AS-external LSA");
+
+        // Where a change reaches.
+        let mut top = v3_top();
+        v3_receive(&mut top, 2, S, v3_grace(1, 0x8000_0001)).await;
+        let o = (OSPFV3_ROUTER_LSA_TYPE, 0, O);
+        top.process_msg(Message::LsaChanged(Some(AREA1), o)).await;
+        assert!(helping(&top), "v3: another area");
+        top.areas.get_mut(AREA0).unwrap().area_type.kind = AreaTypeKind::Stub;
+        top.process_msg(Message::LsaChanged(None, o)).await;
+        assert!(helping(&top), "v3: AS scope, a stub area");
+        top.gr_config.helper_strict_lsa_checking = false;
+        top.process_msg(Message::LsaChanged(Some(AREA0), o)).await;
+        assert!(helping(&top), "v3: not strict, O's");
+        let s = (OSPFV3_ROUTER_LSA_TYPE, 0, S);
+        top.process_msg(Message::LsaChanged(Some(AREA0), s)).await;
+        assert!(!helping(&top), "v3: not strict, S's own");
     }
 
     /// The grace period runs from the restart request, which the
