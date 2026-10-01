@@ -125,6 +125,12 @@ pub struct Lsa<V: OspfVersion = Ospfv2> {
     pub last_flood_out: Option<tokio::time::Instant>,
     pub hold_timer: Option<Timer>,
     pub refresh_timer: Option<Timer>,
+    /// Whether installing this instance changed the LSA's contents (RFC
+    /// 2328 §13.2), as [`Lsdb::note_change`] found: new, altered or
+    /// flushed, and of a type the routing table is computed from. A
+    /// graceful-restart helper turns a restarter away while such an LSA
+    /// waits on its retransmission list (RFC 3623 §3.1 (2)).
+    pub changed: bool,
 }
 
 impl<V: OspfVersion> Lsa<V> {
@@ -138,6 +144,7 @@ impl<V: OspfVersion> Lsa<V> {
             last_flood_out: None,
             hold_timer: None,
             refresh_timer: None,
+            changed: false,
         }
     }
 
@@ -292,9 +299,9 @@ impl<V: OspfVersion> Lsdb<V> {
         new: &V::Lsa,
         tx: &UnboundedSender<Message<V>>,
         area_id: Option<Ipv4Addr>,
-    ) {
+    ) -> bool {
         if !V::helper_topology_type(key.0) {
-            return;
+            return false;
         }
         let changed = self
             .tables
@@ -303,6 +310,7 @@ impl<V: OspfVersion> Lsdb<V> {
         if changed {
             let _ = tx.send(Message::LsaChanged(area_id, key));
         }
+        changed
     }
 
     /// Install `lsa` at `key`, first telling the instance whether it
@@ -310,11 +318,11 @@ impl<V: OspfVersion> Lsdb<V> {
     fn put(
         &mut self,
         key: OspfLsaKey,
-        lsa: Lsa<V>,
+        mut lsa: Lsa<V>,
         tx: &UnboundedSender<Message<V>>,
         area_id: Option<Ipv4Addr>,
     ) {
-        self.note_change(key, &lsa.data, tx, area_id);
+        lsa.changed = self.note_change(key, &lsa.data, tx, area_id);
         self.tables.insert(key, lsa);
     }
 
@@ -415,9 +423,10 @@ impl<V: OspfVersion> Lsdb<V> {
     ) -> Option<V::Lsa> {
         let mut flushed = self.tables.get(&key)?.data.clone();
         V::set_lsa_age(&mut flushed, OSPF_MAX_AGE);
-        self.note_change(key, &flushed, tx, area_id);
+        let changed = self.note_change(key, &flushed, tx, area_id);
         let lsa = self.tables.get_mut(&key)?;
         lsa.data = flushed;
+        lsa.changed = changed;
         lsa.birth_time = tokio::time::Instant::now();
         lsa.refresh_timer = None;
         lsa.hold_timer = Some(hold_timer(tx, area_id, key, OSPF_MAX_AGE));
@@ -1313,7 +1322,7 @@ mod change_tests {
     /// its contents, and only that: a new LSA, a new body or options, a
     /// flush, a return from MaxAge. A refresh, received or our own,
     /// changes nothing, and nor does any LSA outside the topology, such as
-    /// a Grace-LSA.
+    /// a Grace-LSA. The entry records which it was (`Lsa::changed`).
     #[tokio::test]
     async fn an_install_reports_a_change_of_contents() {
         let tracing = OspfTracing::default();
@@ -1326,20 +1335,28 @@ mod change_tests {
         assert!(received.raw.is_some());
         lsdb.install_lsa(received, &tx, AREA, &tracing);
         assert_eq!(changes(&mut rx), [key], "v2: new");
+        assert!(lsdb.tables[&key].changed, "v2: new, marked");
         lsdb.install_lsa(v2_router(0, 0x8000_0002, 0x02), &tx, AREA, &tracing);
         assert_eq!(changes(&mut rx), [], "v2: a refresh");
+        assert!(!lsdb.tables[&key].changed, "v2: a refresh, not marked");
         lsdb.install_lsa(v2_router(1, 0x8000_0003, 0x02), &tx, AREA, &tracing);
         assert_eq!(changes(&mut rx), [key], "v2: a new body");
+        assert!(lsdb.tables[&key].changed, "v2: a new body, marked");
         lsdb.install_lsa(v2_router(1, 0x8000_0004, 0x42), &tx, AREA, &tracing);
         assert_eq!(changes(&mut rx), [key], "v2: new options");
+        assert!(lsdb.tables[&key].changed, "v2: new options, marked");
         lsdb.refresh_lsa_by_raw_key(key, &tx, AREA);
         assert_eq!(changes(&mut rx), [], "v2: our refresh");
+        assert!(!lsdb.tables[&key].changed, "v2: our refresh, not marked");
         lsdb.flush_lsa_by_raw_key(key, &tx, AREA);
         assert_eq!(changes(&mut rx), [key], "v2: flushed");
+        assert!(lsdb.tables[&key].changed, "v2: flushed, marked");
         lsdb.refresh_lsa_with_seq(OspfLsType::Router, ADV, ADV, 0x8000_0009, &tx, AREA);
         assert_eq!(changes(&mut rx), [key], "v2: back from MaxAge");
+        assert!(lsdb.tables[&key].changed, "v2: back from MaxAge, marked");
         lsdb.install_originated(v2_router(0, 0x8000_000b, 0x42), &tx, AREA, &tracing);
         assert_eq!(changes(&mut rx), [key], "v2: ours, a new body");
+        assert!(lsdb.tables[&key].changed, "v2: ours, a new body, marked");
         let mut lsa = OspfLsa::from(
             OspfLsaHeader::new(OspfLsType::OpaqueLinkLocal, Ipv4Addr::new(3, 0, 0, 0), ADV),
             OspfLsp::OpaqueLinkLocalGrace(grace()),
@@ -1356,16 +1373,25 @@ mod change_tests {
         assert!(received.raw.is_some());
         lsdb.install_lsa(received, &tx, AREA, &tracing);
         assert_eq!(changes(&mut rx), [key], "v3: new");
+        assert!(lsdb.tables[&key].changed, "v3: new, marked");
         lsdb.install_lsa(v3_router(0, 0x8000_0002), &tx, AREA, &tracing);
         assert_eq!(changes(&mut rx), [], "v3: a refresh");
+        assert!(!lsdb.tables[&key].changed, "v3: a refresh, not marked");
         lsdb.install_lsa(v3_router(1, 0x8000_0003), &tx, AREA, &tracing);
         assert_eq!(changes(&mut rx), [key], "v3: a new body");
+        assert!(lsdb.tables[&key].changed, "v3: a new body, marked");
         lsdb.refresh_lsa_by_raw_key(key, &tx, AREA);
         assert_eq!(changes(&mut rx), [], "v3: our refresh");
+        assert!(!lsdb.tables[&key].changed, "v3: our refresh, not marked");
         lsdb.flush_lsa_by_raw_key(key, &tx, AREA);
         assert_eq!(changes(&mut rx), [key], "v3: flushed");
+        assert!(lsdb.tables[&key].changed, "v3: flushed, marked");
         lsdb.install_originated(v3_router(0, 0x8000_000b), &tx, AREA, &tracing);
         assert_eq!(changes(&mut rx), [key], "v3: ours, back from MaxAge");
+        assert!(
+            lsdb.tables[&key].changed,
+            "v3: ours, back from MaxAge, marked"
+        );
         let mut lsa = Ospfv3Lsa::from(
             Ospfv3LsaHeader {
                 ls_age: 0,

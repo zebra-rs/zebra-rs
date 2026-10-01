@@ -198,6 +198,7 @@ pub fn ospf_nfsm_reset_nbr<V: super::version::OspfVersion>(nbr: &mut Neighbor<V>
 
     // Clear Retransmit list.
     nbr.ls_rxmt.clear();
+    nbr.ls_rxmt_changed.clear();
 
     // Clear last sent DD copy so a fresh DD is built next time.
     nbr.dd.sent = None;
@@ -370,7 +371,7 @@ pub(super) fn ospf_db_summary_add_table<'a, V: OspfVersion>(
     for lsa in lsas {
         let current = lsa.sent_copy(0);
         if lsa.current_age() >= OSPF_MAX_AGE {
-            super::flood::ospf_ls_retransmit_add(nbr, &current, retransmit_interval);
+            super::flood::ospf_ls_retransmit_add(nbr, &current, retransmit_interval, lsa.changed);
             continue;
         }
         ospf_db_summary_add(nbr, &current);

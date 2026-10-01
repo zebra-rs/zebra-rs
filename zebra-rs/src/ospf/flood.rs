@@ -300,13 +300,20 @@ pub fn ospf_retransmit_timer<V: OspfVersion>(nbr: &Neighbor<V>, retransmit_inter
     })
 }
 
+/// Queue `lsa` on `nbr`'s retransmission list; `changed` when its install
+/// changed the LSA's contents (`Lsa::changed`), which marks it until the
+/// neighbour acknowledges (`Neighbor::ls_rxmt_changed`).
 pub fn ospf_ls_retransmit_add<V: OspfVersion>(
     nbr: &mut Neighbor<V>,
     lsa: &V::Lsa,
     retransmit_interval: u16,
+    changed: bool,
 ) {
     let key: OspfLsaKey = lsa_to_key::<V>(lsa);
     nbr.ls_rxmt.insert(key, lsa.clone());
+    if changed {
+        nbr.ls_rxmt_changed.insert(key);
+    }
     if nbr.timer.ls_rxmt.is_none() {
         nbr.timer.ls_rxmt = Some(ospf_retransmit_timer(nbr, retransmit_interval));
     }
@@ -315,6 +322,7 @@ pub fn ospf_ls_retransmit_add<V: OspfVersion>(
 pub fn ospf_ls_retransmit_delete<V: OspfVersion>(nbr: &mut Neighbor<V>, lsa: &V::Lsa) {
     let key: OspfLsaKey = lsa_to_key::<V>(lsa);
     nbr.ls_rxmt.remove(&key);
+    nbr.ls_rxmt_changed.remove(&key);
     if nbr.ls_rxmt.is_empty() {
         nbr.timer.ls_rxmt = None;
     }
@@ -347,6 +355,7 @@ pub fn ospf_ls_retransmit_ack<V: OspfVersion>(nbr: &mut Neighbor<V>, ack: &V::Ls
         let h = V::lsa_header(rxmt);
         if V::lsa_more_recent(h, V::ls_age(h), ack, V::ls_age(ack)) == 0 {
             nbr.ls_rxmt.remove(&key);
+            nbr.ls_rxmt_changed.remove(&key);
         }
     }
     if nbr.ls_rxmt.is_empty() {
@@ -462,7 +471,7 @@ mod tests {
         use crate::ospf::lsdb::OSPF_MAX_AGE;
 
         let mut nbr = v3_nbr();
-        ospf_ls_retransmit_add::<Ospfv3>(&mut nbr, &v3_lsa(5, OSPF_MAX_AGE), 5);
+        ospf_ls_retransmit_add::<Ospfv3>(&mut nbr, &v3_lsa(5, OSPF_MAX_AGE), 5, false);
         ospf_ls_retransmit_ack::<Ospfv3>(&mut nbr, &v3_header(5, 1));
         assert_eq!(
             nbr.ls_rxmt.len(),
@@ -471,7 +480,7 @@ mod tests {
         );
         ospf_ls_retransmit_ack::<Ospfv3>(&mut nbr, &v3_header(5, OSPF_MAX_AGE));
         assert!(nbr.ls_rxmt.is_empty(), "v3: the withdrawal's own ack");
-        ospf_ls_retransmit_add::<Ospfv3>(&mut nbr, &v3_lsa(6, 3), 5);
+        ospf_ls_retransmit_add::<Ospfv3>(&mut nbr, &v3_lsa(6, 3), 5, false);
         ospf_ls_retransmit_ack::<Ospfv3>(&mut nbr, &v3_header(5, 3));
         assert_eq!(nbr.ls_rxmt.len(), 1, "v3: an older instance's ack");
         ospf_ls_retransmit_ack::<Ospfv3>(&mut nbr, &v3_header(6, 4));
@@ -481,7 +490,7 @@ mod tests {
         );
 
         let mut nbr = v2_nbr();
-        ospf_ls_retransmit_add::<Ospfv2>(&mut nbr, &v2_lsa(5, OSPF_MAX_AGE), 5);
+        ospf_ls_retransmit_add::<Ospfv2>(&mut nbr, &v2_lsa(5, OSPF_MAX_AGE), 5, false);
         ospf_ls_retransmit_ack::<Ospfv2>(&mut nbr, &v2_header(5, 1));
         assert_eq!(
             nbr.ls_rxmt.len(),

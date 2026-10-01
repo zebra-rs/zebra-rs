@@ -90,6 +90,11 @@ pub struct HelperState {
     /// next Hello clears it. Leaving helper mode takes such a neighbour
     /// down, as the timer would have.
     pub lapsed: bool,
+    /// The neighbour's DR and BDR as its Hellos declared them when the
+    /// help began. DR election keeps using them while the help lasts, so
+    /// a restarting DR stays DR (RFC 3623 §3): its first Hellos after
+    /// restarting declare neither, and used to hand its role to the BDR.
+    pub declared: (Ipv4Addr, Ipv4Addr),
 }
 
 impl HelperState {
@@ -155,6 +160,14 @@ pub struct RestartingState {
     pub adjacencies: BTreeSet<(u32, Ipv4Addr)>,
 }
 
+impl RestartingState {
+    /// Whether the grace period is over. `entered_at` is taken before the
+    /// abort timer starts, so the timer never fires before this holds.
+    pub fn expired(&self) -> bool {
+        self.entered_at.elapsed() >= std::time::Duration::from_secs(self.grace_period.into())
+    }
+}
+
 /// Per-neighbor protocol state.
 ///
 /// Parameterized over `V: OspfVersion` so the wire-type-carrying
@@ -203,6 +216,13 @@ pub struct Neighbor<V: OspfVersion = Ospfv2> {
     pub ls_req: Vec<V::LsaHeader>,
     pub ls_req_last: Option<V::LsRequest>,
     pub ls_rxmt: BTreeMap<OspfLsaKey, V::Lsa>,
+    /// The LSAs on `ls_rxmt` that bring the neighbour a change of contents
+    /// (RFC 2328 §13.2) it has not acknowledged. The mark outlives a
+    /// refresh queued in its place, since the neighbour has had neither,
+    /// and goes with the neighbour's acknowledgment. A graceful-restart
+    /// helper turns a restarter away while any is pending (RFC 3623 §3.1
+    /// (2)).
+    pub ls_rxmt_changed: BTreeSet<OspfLsaKey>,
     pub uptime: Instant,
     /// RouterDeadInterval (seconds) governing this neighbor's
     /// inactivity timer — captured from the interface at creation.
@@ -320,6 +340,7 @@ where
             ls_req: vec![],
             ls_req_last: None,
             ls_rxmt: BTreeMap::new(),
+            ls_rxmt_changed: BTreeSet::new(),
             uptime: Instant::now(),
             dead_interval,
             last_progressive: None,

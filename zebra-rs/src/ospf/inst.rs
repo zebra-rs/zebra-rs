@@ -804,6 +804,11 @@ impl<V: OspfVersion> Ospf<V> {
             ));
         }
         let _ = self.tx.send(Message::GrHelperLeft(ifindex, *key));
+        // RFC 3623 §3.2: the DR is recalculated, now from the neighbour's
+        // own declarations.
+        let _ = self
+            .tx
+            .send(Message::Ifsm(ifindex, IfsmEvent::NeighborChange));
     }
 
     /// The state to advertise, now that the help has ended, the neighbour
@@ -949,6 +954,18 @@ impl<V: OspfVersion> Ospf<V> {
         else {
             return;
         };
+        // RFC 3623 §3.1 (2): a change to the topology must not be waiting
+        // to reach the restarter — no LSA on its retransmission list that
+        // brings it a change of contents (types 1-5 and 7) it has not
+        // acknowledged, rather than a refresh. `helper-strict-lsa-checking`
+        // off waives it, as it does the topology-change exit.
+        let pending = self.gr_config.helper_strict_lsa_checking
+            && link.nbrs.get(&key).is_some_and(|nbr| {
+                nbr.ls_rxmt_changed
+                    .iter()
+                    .any(|k| nbr.ls_rxmt.contains_key(k))
+            });
+        let restarting = self.restarting.is_some();
 
         let gr_config = self.gr_config;
         let tx = self.tx.clone();
@@ -970,11 +987,29 @@ impl<V: OspfVersion> Ospf<V> {
         // Grace-LSA from one already helped renews the help whatever its
         // state, as while it re-synchronises. Such a renewal used to be
         // rejected, and the help kept its old deadline.
-        if nbr.state != super::NfsmState::Full && nbr.gr_helper.is_none() {
+        let renewal = nbr.gr_helper.is_some();
+        if nbr.state != super::NfsmState::Full && !renewal {
             tracing::warn!(
                 "[GR Helper] reject Grace LSA from non-Full nbr {} (state={:?})",
                 restarter,
                 nbr.state
+            );
+            return;
+        }
+        // RFC 3623 §3.1 (5): a router restarting itself helps no one new.
+        // It used to.
+        if restarting && !renewal {
+            tracing::warn!(
+                "[GR Helper] reject Grace LSA from nbr {} (restarting ourselves)",
+                restarter
+            );
+            return;
+        }
+        // §3.1 (2), found above. It was never checked.
+        if pending && !renewal {
+            tracing::warn!(
+                "[GR Helper] reject Grace LSA from nbr {} (a topology change is still on its retransmission list)",
+                restarter
             );
             return;
         }
@@ -1028,6 +1063,14 @@ impl<V: OspfVersion> Ospf<V> {
         // A renewed request keeps a dead interval the neighbour has already
         // let lapse: only a Hello clears it.
         let lapsed = nbr.gr_helper.as_ref().is_some_and(|helper| helper.lapsed);
+        // Kept from the request that began the help: a renewal comes from
+        // the restarter after it restarted, when its Hellos declare no DR.
+        let declared = nbr
+            .gr_helper
+            .as_ref()
+            .map_or((nbr.ident.d_router, nbr.ident.bd_router), |helper| {
+                helper.declared
+            });
         nbr.gr_helper = Some(HelperState {
             reason: request.reason,
             grace_period,
@@ -1035,6 +1078,7 @@ impl<V: OspfVersion> Ospf<V> {
             expire_timer: Some(expire_timer),
             requested_ago,
             lapsed,
+            declared,
         });
         tracing::info!(
             "[GR Helper] {} for nbr {} on ifindex={} (grace={}s, reason={:?})",
@@ -1062,8 +1106,17 @@ impl<V: OspfVersion> Ospf<V> {
         };
         let h = V::lsa_header(lsa);
         let key = (V::ls_type(h), V::ls_id(h), V::adv_router(h));
-        let db = link
-            .lsdb
+        match self.db_copy(ifindex, key) {
+            Some(db) if db.same_origination(lsa) => db.sent_copy(link.transmit_delay()),
+            _ => lsa.clone(),
+        }
+    }
+
+    /// The database's copy of the LSA at `key`, as seen from `ifindex`:
+    /// the interface's link-scope LSAs, its area's, then the AS's.
+    fn db_copy(&self, ifindex: u32, key: OspfLsaKey) -> Option<&super::lsdb::Lsa<V>> {
+        let link = self.links.get(&ifindex)?;
+        link.lsdb
             .tables
             .get(&key)
             .or_else(|| {
@@ -1071,11 +1124,17 @@ impl<V: OspfVersion> Ospf<V> {
                     .get(link.area)
                     .and_then(|area| area.lsdb.tables.get(&key))
             })
-            .or_else(|| self.lsdb_as.tables.get(&key));
-        match db {
-            Some(db) if db.same_origination(lsa) => db.sent_copy(link.transmit_delay()),
-            _ => lsa.clone(),
-        }
+            .or_else(|| self.lsdb_as.tables.get(&key))
+    }
+
+    /// Whether this router's restart is over: every adjacency it must
+    /// re-establish is Full again (RFC 3623 §2.2). A restart with none
+    /// recorded is not; its grace period ends it.
+    fn restart_complete(&self) -> bool {
+        self.restarting.as_ref().is_some_and(|state| {
+            !state.adjacencies.is_empty()
+                && self.restart_adjacencies_back() == state.adjacencies.len()
+        })
     }
 
     /// Reconcile one neighbor's BFD subscription against the interface
@@ -5929,6 +5988,9 @@ impl Ospf<Ospfv2> {
             }
         }
 
+        // Taken before the abort timer starts: `RestartingState::expired`
+        // must hold by the time it fires.
+        let entered_at = tokio::time::Instant::now();
         let tx = self.tx.clone();
         let abort_timer = Timer::new(grace_period as u64, TimerType::Once, move || {
             let tx = tx.clone();
@@ -5944,7 +6006,7 @@ impl Ospf<Ospfv2> {
         self.restarting = Some(RestartingState {
             grace_period,
             reason,
-            entered_at: tokio::time::Instant::now(),
+            entered_at,
             abort_timer: Some(abort_timer),
             expected_full_count: adjacencies.len(),
             current_full_count: 0,
@@ -6101,6 +6163,7 @@ impl Ospf<Ospfv2> {
         // the helpers' grace-period view of when we went down.
         let remaining = max_age.saturating_sub(age);
         let remaining_secs = remaining.as_secs().max(1);
+        let entered_at = tokio::time::Instant::now() - age;
         let tx = self.tx.clone();
         let abort_timer = Timer::new(remaining_secs, TimerType::Once, move || {
             let tx = tx.clone();
@@ -6108,7 +6171,6 @@ impl Ospf<Ospfv2> {
                 let _ = tx.send(Message::GrRestartAbort);
             }
         });
-        let entered_at = tokio::time::Instant::now() - age;
         // The adjacencies the checkpoint records as Full: the restart is
         // over once each is Full again.
         let adjacencies = cp
@@ -6442,6 +6504,8 @@ impl Ospf<Ospfv2> {
         lsa: &OspfLsa,
         source: Option<(u32, Ipv4Addr)>,
     ) {
+        let key = super::lsdb::v2_lsa_key(lsa.h.ls_type, lsa.h.ls_id, lsa.h.adv_router);
+        let changed = self.db_copy(ifindex, key).is_some_and(|db| db.changed);
         let now = chrono::Utc::now();
         let chains = &self.key_chains;
         let Some(link) = self.links.get_mut(&ifindex) else {
@@ -6504,7 +6568,7 @@ impl Ospf<Ospfv2> {
             }
 
             // RFC 2328 Section 13.3 Step 1(d): Add LSA to retransmit list.
-            super::flood::ospf_ls_retransmit_add(nbr, &sent, retransmit_interval);
+            super::flood::ospf_ls_retransmit_add(nbr, &sent, retransmit_interval, changed);
 
             let ls_upd = OspfLsUpdate {
                 lsas: vec![sent.clone()],
@@ -7433,17 +7497,30 @@ impl Ospf<Ospfv2> {
                 self.gr_helper_topology_change(area_id, key);
             }
             Message::GrRestartAbort => {
-                tracing::info!(
-                    "[GR Restart] auto-abort timer fired (no commit within grace period)"
-                );
-                self.gr_restart_abort();
+                // Only if this restart's grace period is over: the timer of
+                // one aborted since may already have queued this, and it
+                // used to abort the restart begun after.
+                let expired = self
+                    .restarting
+                    .as_ref()
+                    .is_some_and(super::neigh::RestartingState::expired);
+                if expired {
+                    tracing::info!(
+                        "[GR Restart] auto-abort timer fired (no commit within grace period)"
+                    );
+                    self.gr_restart_abort();
+                }
             }
             Message::GrRestartExit => {
                 tracing::info!("[GR Restart] drain complete; exiting process");
                 std::process::exit(0);
             }
             Message::GrRestartExitSuccess => {
-                self.gr_restart_exit_success();
+                // Only if the restart it reports on is over: one that
+                // ended since, and another begun, may still be waiting.
+                if self.restart_complete() {
+                    self.gr_restart_exit_success();
+                }
             }
             Message::NssaTranslateResync(area_id) => {
                 self.nssa_translate_resync(area_id);
@@ -10090,6 +10167,9 @@ impl Ospf<Ospfv3> {
             }
         }
 
+        // Taken before the abort timer starts: `RestartingState::expired`
+        // must hold by the time it fires.
+        let entered_at = tokio::time::Instant::now();
         let tx = self.tx.clone();
         let abort_timer = Timer::new(grace_period as u64, TimerType::Once, move || {
             let tx = tx.clone();
@@ -10102,7 +10182,7 @@ impl Ospf<Ospfv3> {
         self.restarting = Some(RestartingState {
             grace_period,
             reason,
-            entered_at: tokio::time::Instant::now(),
+            entered_at,
             abort_timer: Some(abort_timer),
             expected_full_count: adjacencies.len(),
             current_full_count: 0,
@@ -10353,6 +10433,7 @@ impl Ospf<Ospfv3> {
 
         let remaining = max_age.saturating_sub(age);
         let remaining_secs = remaining.as_secs().max(1);
+        let entered_at = tokio::time::Instant::now() - age;
         let tx = self.tx.clone();
         let abort_timer = Timer::new(remaining_secs, TimerType::Once, move || {
             let tx = tx.clone();
@@ -10360,7 +10441,6 @@ impl Ospf<Ospfv3> {
                 let _ = tx.send(Message::GrRestartAbort);
             }
         });
-        let entered_at = tokio::time::Instant::now() - age;
         let adjacencies = cp
             .links
             .iter()
@@ -10914,6 +10994,8 @@ impl Ospf<Ospfv3> {
         let Some(tx) = self.v3_send_tx.as_ref().cloned() else {
             return;
         };
+        let key = (lsa.h.ls_type, lsa.h.link_state_id, lsa.h.advertising_router);
+        let changed = self.db_copy(ifindex, key).is_some_and(|db| db.changed);
         let Some(link) = self.links.get_mut(&ifindex) else {
             return;
         };
@@ -10963,7 +11045,7 @@ impl Ospf<Ospfv3> {
             // neighbor's retransmit list so the per-neighbor
             // retransmit timer can resend it until we get an
             // ack.
-            super::flood::ospf_ls_retransmit_add(nbr, &sent, retransmit_interval);
+            super::flood::ospf_ls_retransmit_add(nbr, &sent, retransmit_interval, changed);
 
             let ls_upd = Ospfv3LsUpdate {
                 lsas: vec![sent.clone()],
@@ -11717,15 +11799,25 @@ impl Ospf<Ospfv3> {
                 self.gr_helper_topology_change(area_id, key);
             }
             Message::GrRestartAbort => {
-                tracing::info!("[GR Restart v3] abort message received");
-                self.gr_restart_abort_v3();
+                // As OSPFv2's: only if this restart's grace period is over.
+                let expired = self
+                    .restarting
+                    .as_ref()
+                    .is_some_and(super::neigh::RestartingState::expired);
+                if expired {
+                    tracing::info!("[GR Restart v3] abort message received");
+                    self.gr_restart_abort_v3();
+                }
             }
             Message::GrRestartExit => {
                 tracing::info!("[GR Restart v3] drain complete; exiting process");
                 std::process::exit(0);
             }
             Message::GrRestartExitSuccess => {
-                self.gr_restart_exit_success_v3();
+                // As OSPFv2's: only if the restart it reports on is over.
+                if self.restart_complete() {
+                    self.gr_restart_exit_success_v3();
+                }
             }
             Message::NssaTranslateResync(area_id) => {
                 self.nssa_translate_resync(area_id);
@@ -22585,6 +22677,21 @@ mod gr_helper_tests {
         lsa
     }
 
+    /// The neighbour at `key` on link 2 acknowledges every LSA sent to it
+    /// (RFC 2328 §13.7).
+    fn acknowledged<V: OspfVersion>(top: &mut Ospf<V>, key: Ipv4Addr) {
+        let nbr = top.links.get_mut(&2).unwrap().nbrs.get_mut(&key).unwrap();
+        let acks: Vec<_> = nbr
+            .ls_rxmt
+            .values()
+            .map(|lsa| V::lsa_header(lsa).clone())
+            .collect();
+        for ack in &acks {
+            super::super::flood::ospf_ls_retransmit_ack(nbr, ack);
+        }
+        assert!(nbr.ls_rxmt.is_empty(), "every LSA acknowledged");
+    }
+
     /// Whether any neighbour on link 2 is being helped.
     fn helping<V: OspfVersion>(top: &Ospf<V>) -> bool {
         top.links[&2]
@@ -22788,9 +22895,11 @@ mod gr_helper_tests {
         use ospf_packet::OSPFV3_ROUTER_LSA_TYPE;
         const AREA1: Ipv4Addr = Ipv4Addr::new(0, 0, 0, 1);
 
-        // OSPFv2: a refresh, then a change.
+        // OSPFv2: a refresh, then a change. S has acknowledged O's
+        // Router-LSA before asking (RFC 3623 §3.1 (2)).
         let mut top = v2_top();
         v2_receive(&mut top, 2, O, v2_router(O, 0, 0x8000_0001)).await;
+        acknowledged(&mut top, v2_addr(S));
         v2_receive(&mut top, 2, S, v2_grace(1, 0x8000_0001)).await;
         later().await;
         v2_receive(&mut top, 2, O, v2_router(O, 0, 0x8000_0002)).await;
@@ -22823,6 +22932,7 @@ mod gr_helper_tests {
         // OSPFv3: a refresh, then a change.
         let mut top = v3_top();
         v3_receive(&mut top, 2, O, v3_router(O, 0, 0x8000_0001)).await;
+        acknowledged(&mut top, S);
         v3_receive(&mut top, 2, S, v3_grace(1, 0x8000_0001)).await;
         later().await;
         v3_receive(&mut top, 2, O, v3_router(O, 0, 0x8000_0002)).await;
@@ -23433,6 +23543,311 @@ mod gr_helper_tests {
             top.links[&2].nbrs[&O].gr_helper.is_none(),
             "v3: O is not Full"
         );
+    }
+
+    /// A restarter with a change to the topology still on its
+    /// retransmission list gets no help (RFC 3623 §3.1 (2)): here O's new
+    /// AS-external LSA, which S has not acknowledged. It used to be
+    /// helped. Once S acknowledges it, or with strict LSA checking off, it
+    /// is. A refresh waiting there does not stand in the way.
+    #[tokio::test(start_paused = true)]
+    async fn a_pending_change_turns_a_restarter_away() {
+        // OSPFv2.
+        let mut top = v2_top();
+        v2_receive(&mut top, 2, O, v2_external(O)).await;
+        v2_receive(&mut top, 2, S, v2_grace(1, 0x8000_0001)).await;
+        assert!(!helping(&top), "v2: a change pending");
+        acknowledged(&mut top, v2_addr(S));
+        later().await;
+        v2_receive(&mut top, 2, S, v2_grace(1, 0x8000_0002)).await;
+        assert!(helping(&top), "v2: acknowledged");
+
+        // A refresh queued before S acknowledged the change keeps it
+        // pending: S has had neither.
+        let mut top = v2_top();
+        let mut lsa = v2_external(O);
+        v2_receive(&mut top, 2, O, lsa.clone()).await;
+        later().await;
+        lsa.h.ls_seq_number += 1;
+        lsa.update();
+        v2_receive(&mut top, 2, O, lsa).await;
+        v2_receive(&mut top, 2, S, v2_grace(1, 0x8000_0001)).await;
+        assert!(!helping(&top), "v2: refreshed, still unacknowledged");
+
+        let mut top = v2_top();
+        top.gr_config.helper_strict_lsa_checking = false;
+        v2_receive(&mut top, 2, O, v2_external(O)).await;
+        v2_receive(&mut top, 2, S, v2_grace(1, 0x8000_0001)).await;
+        assert!(helping(&top), "v2: not strict");
+
+        let mut top = v2_top();
+        v2_receive(&mut top, 2, O, v2_router(O, 0, 0x8000_0001)).await;
+        acknowledged(&mut top, v2_addr(S));
+        later().await;
+        v2_receive(&mut top, 2, O, v2_router(O, 0, 0x8000_0002)).await;
+        v2_receive(&mut top, 2, S, v2_grace(1, 0x8000_0001)).await;
+        assert!(helping(&top), "v2: only a refresh pending");
+
+        // OSPFv3.
+        let mut top = v3_top();
+        v3_receive(&mut top, 2, O, v3_external(O)).await;
+        v3_receive(&mut top, 2, S, v3_grace(1, 0x8000_0001)).await;
+        assert!(!helping(&top), "v3: a change pending");
+        acknowledged(&mut top, S);
+        later().await;
+        v3_receive(&mut top, 2, S, v3_grace(1, 0x8000_0002)).await;
+        assert!(helping(&top), "v3: acknowledged");
+
+        // A refresh queued before S acknowledged the change keeps it
+        // pending: S has had neither.
+        let mut top = v3_top();
+        let mut lsa = v3_external(O);
+        v3_receive(&mut top, 2, O, lsa.clone()).await;
+        later().await;
+        lsa.h.ls_seq_number += 1;
+        lsa.update();
+        v3_receive(&mut top, 2, O, lsa).await;
+        v3_receive(&mut top, 2, S, v3_grace(1, 0x8000_0001)).await;
+        assert!(!helping(&top), "v3: refreshed, still unacknowledged");
+
+        let mut top = v3_top();
+        top.gr_config.helper_strict_lsa_checking = false;
+        v3_receive(&mut top, 2, O, v3_external(O)).await;
+        v3_receive(&mut top, 2, S, v3_grace(1, 0x8000_0001)).await;
+        assert!(helping(&top), "v3: not strict");
+
+        let mut top = v3_top();
+        v3_receive(&mut top, 2, O, v3_router(O, 0, 0x8000_0001)).await;
+        acknowledged(&mut top, S);
+        later().await;
+        v3_receive(&mut top, 2, O, v3_router(O, 0, 0x8000_0002)).await;
+        v3_receive(&mut top, 2, S, v3_grace(1, 0x8000_0001)).await;
+        assert!(helping(&top), "v3: only a refresh pending");
+    }
+
+    /// A router restarting itself starts no new help (RFC 3623 §3.1 (5));
+    /// it used to. A restarter it was already helping still renews.
+    #[tokio::test(start_paused = true)]
+    async fn a_restarting_router_helps_no_one_new() {
+        // OSPFv2.
+        let mut top = v2_top();
+        assert!(top.gr_restart_begin(GRACE, GraceRestartReason::SoftwareRestart));
+        v2_receive(&mut top, 2, S, v2_grace(1, 0x8000_0001)).await;
+        assert!(!helping(&top), "v2: restarting");
+        let mut top = v2_top();
+        v2_receive(&mut top, 2, S, v2_grace(100, 0x8000_0001)).await;
+        assert!(top.gr_restart_begin(GRACE, GraceRestartReason::SoftwareRestart));
+        later().await;
+        v2_receive(&mut top, 2, S, v2_grace(1, 0x8000_0002)).await;
+        let helper = v2_s(&top).unwrap().gr_helper.as_ref();
+        assert_eq!(helper.map(|h| h.requested_ago), Some(1), "v2: renewed");
+
+        // OSPFv3.
+        let mut top = v3_top();
+        assert!(top.gr_restart_begin_v3(GRACE, GraceRestartReason::SoftwareRestart));
+        v3_receive(&mut top, 2, S, v3_grace(1, 0x8000_0001)).await;
+        assert!(!helping(&top), "v3: restarting");
+        let mut top = v3_top();
+        v3_receive(&mut top, 2, S, v3_grace(100, 0x8000_0001)).await;
+        assert!(top.gr_restart_begin_v3(GRACE, GraceRestartReason::SoftwareRestart));
+        later().await;
+        v3_receive(&mut top, 2, S, v3_grace(1, 0x8000_0002)).await;
+        let helper = v3_s(&top).unwrap().gr_helper.as_ref();
+        assert_eq!(helper.map(|h| h.requested_ago), Some(1), "v3: renewed");
+    }
+
+    /// The event that reports a restart over ends one only if it is over
+    /// when handled. One sent for a restart aborted since, and handled
+    /// once another has begun, used to end that one with O still to come
+    /// back. It ends it once O is back.
+    #[tokio::test(start_paused = true)]
+    async fn a_stale_success_leaves_a_new_restart() {
+        use NfsmState::{ExStart, Full};
+        let success = |msg: &Message<_>| matches!(msg, Message::GrRestartExitSuccess);
+
+        // OSPFv2: S and O are Full, so the restart is over at once.
+        let mut top = v2_top();
+        assert!(top.gr_restart_begin(GRACE, GraceRestartReason::SoftwareRestart));
+        top.process_neighbor_state_change(2, v2_addr(S), ExStart, Full);
+        let old = queued(&mut top, success).pop().expect("v2: over");
+        top.gr_restart_abort();
+        assert!(top.gr_restart_begin(GRACE, GraceRestartReason::SoftwareRestart));
+        let o = top.links.get_mut(&2).unwrap().nbrs.get_mut(&v2_addr(O));
+        o.unwrap().state = ExStart;
+        top.process_msg(old).await;
+        assert!(top.in_restart(), "v2: O still to come back");
+        let o = top.links.get_mut(&2).unwrap().nbrs.get_mut(&v2_addr(O));
+        o.unwrap().state = Full;
+        top.process_neighbor_state_change(2, v2_addr(O), ExStart, Full);
+        let now = queued(&mut top, success).pop().expect("v2: over now");
+        top.process_msg(now).await;
+        assert!(!top.in_restart(), "v2: O is back");
+
+        // OSPFv3.
+        let success = |msg: &Message<_>| matches!(msg, Message::GrRestartExitSuccess);
+        let mut top = v3_top();
+        assert!(top.gr_restart_begin_v3(GRACE, GraceRestartReason::SoftwareRestart));
+        top.process_neighbor_state_change(2, S, ExStart, Full);
+        let old = queued(&mut top, success).pop().expect("v3: over");
+        top.gr_restart_abort_v3();
+        assert!(top.gr_restart_begin_v3(GRACE, GraceRestartReason::SoftwareRestart));
+        top.links
+            .get_mut(&2)
+            .unwrap()
+            .nbrs
+            .get_mut(&O)
+            .unwrap()
+            .state = ExStart;
+        top.process_msg(old).await;
+        assert!(top.in_restart(), "v3: O still to come back");
+        top.links
+            .get_mut(&2)
+            .unwrap()
+            .nbrs
+            .get_mut(&O)
+            .unwrap()
+            .state = Full;
+        top.process_neighbor_state_change(2, O, ExStart, Full);
+        let now = queued(&mut top, success).pop().expect("v3: over now");
+        top.process_msg(now).await;
+        assert!(!top.in_restart(), "v3: O is back");
+
+        // Nor does one end a restart with no adjacency recorded to wait
+        // for: its grace period does.
+        let mut top = v2_top();
+        top.restarting = Some(restarting(&[]));
+        top.process_msg(Message::GrRestartExitSuccess).await;
+        assert!(top.in_restart(), "v2: nothing recorded");
+        let mut top = v3_top();
+        top.restarting = Some(restarting(&[]));
+        top.process_msg(Message::GrRestartExitSuccess).await;
+        assert!(top.in_restart(), "v3: nothing recorded");
+    }
+
+    /// The timer that aborts a restart at the end of its grace period can
+    /// already have queued its event when that restart is aborted and
+    /// another begun. The event ends only a restart whose own grace period
+    /// is over; it used to abort the new one. The new one's own timer ends
+    /// it.
+    #[tokio::test(start_paused = true)]
+    async fn a_stale_abort_leaves_a_new_restart() {
+        let abort = |msg: &Message<_>| matches!(msg, Message::GrRestartAbort);
+
+        // OSPFv2.
+        let mut top = v2_top();
+        assert!(top.gr_restart_begin(1, GraceRestartReason::SoftwareRestart));
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let old = queued(&mut top, abort).pop().expect("v2: timed out");
+        top.gr_restart_abort();
+        assert!(top.gr_restart_begin(GRACE, GraceRestartReason::SoftwareRestart));
+        top.process_msg(old).await;
+        assert!(top.in_restart(), "v2: not this restart's");
+        tokio::time::sleep(std::time::Duration::from_secs(GRACE.into())).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        let now = queued(&mut top, abort)
+            .pop()
+            .expect("v2: this one timed out");
+        top.process_msg(now).await;
+        assert!(!top.in_restart(), "v2: its own");
+
+        // OSPFv3.
+        let abort = |msg: &Message<_>| matches!(msg, Message::GrRestartAbort);
+        let mut top = v3_top();
+        assert!(top.gr_restart_begin_v3(1, GraceRestartReason::SoftwareRestart));
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let old = queued(&mut top, abort).pop().expect("v3: timed out");
+        top.gr_restart_abort_v3();
+        assert!(top.gr_restart_begin_v3(GRACE, GraceRestartReason::SoftwareRestart));
+        top.process_msg(old).await;
+        assert!(top.in_restart(), "v3: not this restart's");
+        tokio::time::sleep(std::time::Duration::from_secs(GRACE.into())).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        let now = queued(&mut top, abort)
+            .pop()
+            .expect("v3: this one timed out");
+        top.process_msg(now).await;
+        assert!(!top.in_restart(), "v3: its own");
+    }
+
+    /// A restarting DR stays DR while helped (RFC 3623 §3). Its first
+    /// Hellos after restarting declare no DR, nor list this router, and
+    /// the election used to promote the BDR, O; a renewal then keeps the
+    /// declarations the help began with. Once the help ends the DR is
+    /// recalculated (§3.2), from S's own declarations.
+    #[tokio::test(start_paused = true)]
+    async fn a_helper_keeps_a_restarting_dr() {
+        use super::super::ifsm::ospf_ifsm;
+
+        // OSPFv2.
+        let (s, o) = (v2_addr(S), v2_addr(O));
+        let mut top = v2_top();
+        let link = top.links.get_mut(&2).unwrap();
+        (link.ident.d_router, link.ident.bd_router) = (s, o);
+        link.state = IfsmState::DROther;
+        for nbr in link.nbrs.values_mut() {
+            (nbr.ident.d_router, nbr.ident.bd_router) = (s, o);
+            nbr.ident.priority = 1;
+        }
+        v2_receive(&mut top, 2, S, v2_grace(1, 0x8000_0001)).await;
+        let link = top.links.get_mut(&2).unwrap();
+        let nbr = link.nbrs.get_mut(&s).unwrap();
+        (nbr.ident.d_router, nbr.ident.bd_router) = (Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED);
+        nbr.state = NfsmState::Exchange;
+        // A renewal now, with no DR declared, keeps the declarations the
+        // help began with.
+        later().await;
+        v2_receive(&mut top, 2, S, v2_grace(1, 0x8000_0002)).await;
+        let helper = v2_s(&top).unwrap().gr_helper.as_ref();
+        assert_eq!(helper.map(|h| h.requested_ago), Some(1), "v2: renewed");
+        let link = top.links.get_mut(&2).unwrap();
+        link.nbrs.get_mut(&s).unwrap().state = NfsmState::Init;
+        ospf_ifsm(link, IfsmEvent::NeighborChange);
+        assert_eq!(link.ident.d_router, s, "v2: S stays DR");
+        later().await;
+        v2_receive(&mut top, 2, O, v2_grace(OSPF_MAX_AGE, 0x8000_0002)).await;
+        assert!(!helping(&top), "v2: the help ends");
+        let rerun = |msg: &Message<_>| matches!(msg, Message::Ifsm(2, IfsmEvent::NeighborChange));
+        for msg in queued(&mut top, rerun) {
+            top.process_msg(msg).await;
+        }
+        assert_eq!(top.links[&2].ident.d_router, o, "v2: then O");
+
+        // OSPFv3.
+        let mut top = v3_top();
+        let link = top.links.get_mut(&2).unwrap();
+        (link.ident.d_router, link.ident.bd_router) = (S, O);
+        link.state = IfsmState::DROther;
+        for nbr in link.nbrs.values_mut() {
+            (nbr.ident.d_router, nbr.ident.bd_router) = (S, O);
+            nbr.ident.priority = 1;
+        }
+        v3_receive(&mut top, 2, S, v3_grace(1, 0x8000_0001)).await;
+        let link = top.links.get_mut(&2).unwrap();
+        let nbr = link.nbrs.get_mut(&S).unwrap();
+        (nbr.ident.d_router, nbr.ident.bd_router) = (Ipv4Addr::UNSPECIFIED, Ipv4Addr::UNSPECIFIED);
+        nbr.state = NfsmState::Exchange;
+        later().await;
+        v3_receive(&mut top, 2, S, v3_grace(1, 0x8000_0002)).await;
+        let helper = v3_s(&top).unwrap().gr_helper.as_ref();
+        assert_eq!(helper.map(|h| h.requested_ago), Some(1), "v3: renewed");
+        let link = top.links.get_mut(&2).unwrap();
+        link.nbrs.get_mut(&S).unwrap().state = NfsmState::Init;
+        ospf_ifsm(link, IfsmEvent::NeighborChange);
+        assert_eq!(link.ident.d_router, S, "v3: S stays DR");
+        later().await;
+        let mut flushed = v3_grace(OSPF_MAX_AGE, 0x8000_0002);
+        flushed.update();
+        v3_receive(&mut top, 2, O, flushed).await;
+        assert!(!helping(&top), "v3: the help ends");
+        let rerun = |msg: &Message<_>| matches!(msg, Message::Ifsm(2, IfsmEvent::NeighborChange));
+        for msg in queued(&mut top, rerun) {
+            top.process_msg(msg).await;
+        }
+        assert_eq!(top.links[&2].ident.d_router, O, "v3: then O");
     }
 
     /// The grace period runs from the restart request, which the
