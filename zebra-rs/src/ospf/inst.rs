@@ -803,6 +803,25 @@ impl<V: OspfVersion> Ospf<V> {
                 super::nfsm::NfsmEvent::InactivityTimer,
             ));
         }
+        let _ = self.tx.send(Message::GrHelperLeft(ifindex, *key));
+    }
+
+    /// The state to advertise, now that the help has ended, the neighbour
+    /// at `key` on `ifindex` in: its own, or Down if it is gone. None while
+    /// it is still advertised as fully adjacent — Full, or helped again.
+    /// While it was helped, this router's LSAs listed it as fully adjacent
+    /// whatever its state (RFC 3623 §3.1); leaving helper mode
+    /// re-originates them (§3.2).
+    fn gr_helper_left(&self, ifindex: u32, key: Ipv4Addr) -> Option<super::NfsmState> {
+        let nbr = self
+            .links
+            .get(&ifindex)
+            .and_then(|link| link.nbrs.get(&key));
+        match nbr {
+            Some(nbr) if nbr.advertised_full() => None,
+            Some(nbr) => Some(nbr.state),
+            None => Some(super::NfsmState::Down),
+        }
     }
 
     /// The grace period's end (RFC 3623 §3.2 (2)). Its timer's event can
@@ -2397,7 +2416,7 @@ impl Ospf<Ospfv2> {
             return true;
         }
         if let Some(dr_nbr) = link.nbrs.get(&link.ident.d_router) {
-            return dr_nbr.state == NfsmState::Full;
+            return dr_nbr.advertised_full();
         }
         false
     }
@@ -2406,13 +2425,10 @@ impl Ospf<Ospfv2> {
     /// state.
     ///
     /// GR-helper invariant (RFC 3623 §3.1): adjacencies to neighbors
-    /// in helper mode must keep appearing in this LSA exactly as
-    /// they did when the link was Full. The inactivity-timer
-    /// suppression in `ospf_nfsm_inactivity_timer` keeps `nbr.state`
-    /// stuck at `Full` while we're helping, so the `state ==
-    /// NfsmState::Full` filters below honour the invariant
-    /// implicitly — do not switch them to a tighter "still receiving
-    /// Hellos" check without re-establishing equivalence here.
+    /// in helper mode keep appearing in this LSA exactly as they did
+    /// when the link was Full, while the restarter re-synchronises its
+    /// database too: the filters below ask `Neighbor::advertised_full`,
+    /// not the neighbour state, which leaves Full for ExStart then.
     /// Build the Router-LSA this router originates into `area_id`.
     /// RFC 2328 §12.4.1: a router that belongs to several areas
     /// originates a separate Router-LSA into each, listing only the
@@ -2449,7 +2465,7 @@ impl Ospf<Ospfv2> {
         // what marks the area transit-capable for §16.3.
         let vl_full_through_area = self.links.values().any(|l| {
             l.vl.as_ref().is_some_and(|vl| vl.transit_area == area_id)
-                && l.nbrs.values().any(|n| n.state == NfsmState::Full)
+                && l.nbrs.values().any(|n| n.advertised_full())
         });
         if vl_full_through_area {
             router_lsa.flags |= 0x0004;
@@ -2493,7 +2509,7 @@ impl Ospf<Ospfv2> {
             // §12.4.1.1 gives a VL no associated network.
             if let Some(vl) = &link.vl {
                 for nbr in link.nbrs.values() {
-                    if nbr.state != NfsmState::Full {
+                    if !nbr.advertised_full() {
                         continue;
                     }
                     router_lsa.links.push(RouterLsaLink {
@@ -2540,7 +2556,7 @@ impl Ospf<Ospfv2> {
                     }
                     if Some(addr.prefix) == primary_prefix {
                         for nbr in link.nbrs.values() {
-                            if nbr.state != NfsmState::Full {
+                            if !nbr.advertised_full() {
                                 continue;
                             }
                             router_lsa.links.push(RouterLsaLink {
@@ -5490,12 +5506,11 @@ impl Ospf<Ospfv2> {
     /// GR-helper invariant (RFC 3623 §3.1): when we are DR and a
     /// neighbor on this segment is in helper mode, that neighbor
     /// must continue appearing in the `attached_routers` list, and
-    /// the segment's `full_nbr_count` must continue counting it.
-    /// The inactivity-timer suppression keeps `nbr.state` at `Full`
-    /// throughout helper, so the `state == Full` filter below
-    /// honours both invariants implicitly; in particular the
-    /// `full_nbr_count == 0` branch (which would flush the
-    /// Network-LSA per RFC 2328 §14.1) does not fire while a
+    /// the segment's `full_nbr_count` must continue counting it,
+    /// while it re-synchronises its database too. Both ask
+    /// `Neighbor::advertised_full`, not the neighbour state; in
+    /// particular the `full_nbr_count == 0` branch (which would flush
+    /// the Network-LSA per RFC 2328 §14.1) does not fire while a
     /// helper-mode neighbor remains.
     fn update_network_lsa_by_interface(&mut self, ifindex: u32) {
         if self.in_restart() {
@@ -5543,7 +5558,7 @@ impl Ospf<Ospfv2> {
             let mut attached_routers = Vec::with_capacity(link.nbrs.len() + 1);
             attached_routers.push(self.router_id);
             for nbr in link.nbrs.values() {
-                if nbr.state == NfsmState::Full {
+                if nbr.advertised_full() {
                     attached_routers.push(nbr.ident.router_id);
                 }
             }
@@ -5553,7 +5568,7 @@ impl Ospf<Ospfv2> {
             link.full_nbr_count = link
                 .nbrs
                 .values()
-                .filter(|nbr| nbr.state == NfsmState::Full)
+                .filter(|nbr| nbr.advertised_full())
                 .count();
 
             (
@@ -5676,7 +5691,7 @@ impl Ospf<Ospfv2> {
             link.full_nbr_count = link
                 .nbrs
                 .values()
-                .filter(|nbr| nbr.state == NfsmState::Full)
+                .filter(|nbr| nbr.advertised_full())
                 .count();
             link.state
         };
@@ -7374,6 +7389,11 @@ impl Ospf<Ospfv2> {
             Message::GraceLsa(ifindex, lsa) => {
                 self.gr_helper_grace(ifindex, &lsa);
             }
+            Message::GrHelperLeft(ifindex, key) => {
+                if let Some(state) = self.gr_helper_left(ifindex, key) {
+                    self.process_neighbor_state_change(ifindex, key, NfsmState::Full, state);
+                }
+            }
             Message::LsaChanged(area_id, key) => {
                 self.gr_helper_topology_change(area_id, key);
             }
@@ -8343,11 +8363,10 @@ impl Ospf<Ospfv3> {
             // and `build_rib6_from_spf` ECMP-merges them — the route
             // ends up with the directly-attached path *and* a
             // redundant via-peer path at the same cost.
-            let transit_with_adjacencies =
-                matches!(
-                    link.network_type,
-                    OspfNetworkType::Broadcast | OspfNetworkType::NBMA
-                ) && link.nbrs.values().any(|n| n.state == NfsmState::Full);
+            let transit_with_adjacencies = matches!(
+                link.network_type,
+                OspfNetworkType::Broadcast | OspfNetworkType::NBMA
+            ) && link.nbrs.values().any(|n| n.advertised_full());
             if transit_with_adjacencies {
                 continue;
             }
@@ -8583,7 +8602,7 @@ impl Ospf<Ospfv3> {
         attached_routers.extend(
             link.nbrs
                 .values()
-                .filter(|n| n.state == NfsmState::Full)
+                .filter(|n| n.advertised_full())
                 .map(|n| n.ident.router_id),
         );
 
@@ -8655,7 +8674,7 @@ impl Ospf<Ospfv3> {
             // doesn't carry a half-built reference.
             if link.is_pointopoint() {
                 for nbr in link.nbrs.values() {
-                    if nbr.state != NfsmState::Full {
+                    if !nbr.advertised_full() {
                         continue;
                     }
                     links.push(Ospfv3RouterLsaLink::point_to_point(
@@ -8686,7 +8705,7 @@ impl Ospf<Ospfv3> {
                     // Only emit when at least one neighbor reached
                     // Full so the matching Network-LSA actually
                     // exists in the LSDB to back-link against.
-                    let has_full_nbr = link.nbrs.values().any(|n| n.state == NfsmState::Full);
+                    let has_full_nbr = link.nbrs.values().any(|n| n.advertised_full());
                     if has_full_nbr {
                         links.push(Ospfv3RouterLsaLink::transit_network(
                             cost,
@@ -8696,7 +8715,7 @@ impl Ospf<Ospfv3> {
                         ));
                     }
                 } else if let Some(dr_nbr) = link.nbrs.get(&dr_router_id)
-                    && dr_nbr.state == NfsmState::Full
+                    && dr_nbr.advertised_full()
                 {
                     links.push(Ospfv3RouterLsaLink::transit_network(
                         cost,
@@ -11654,6 +11673,11 @@ impl Ospf<Ospfv3> {
             Message::GraceLsa(ifindex, lsa) => {
                 self.gr_helper_grace(ifindex, &lsa);
             }
+            Message::GrHelperLeft(ifindex, key) => {
+                if let Some(state) = self.gr_helper_left(ifindex, key) {
+                    self.process_neighbor_state_change(ifindex, key, NfsmState::Full, state);
+                }
+            }
             Message::LsaChanged(area_id, key) => {
                 self.gr_helper_topology_change(area_id, key);
             }
@@ -12860,7 +12884,7 @@ impl Ospf<Ospfv3> {
             link.full_nbr_count = link
                 .nbrs
                 .values()
-                .filter(|nbr| nbr.state == NfsmState::Full)
+                .filter(|nbr| nbr.advertised_full())
                 .count();
             (link.state, link.area)
         };
@@ -13002,11 +13026,7 @@ impl Ospf<Ospfv3> {
         let area_id = link.area;
         let interface_id = link.interface_id;
         let is_dr = link.ident.d_router == self.router_id;
-        let full_nbr_count = link
-            .nbrs
-            .values()
-            .filter(|n| n.state == NfsmState::Full)
-            .count();
+        let full_nbr_count = link.nbrs.values().filter(|n| n.advertised_full()).count();
 
         let key: super::lsdb::OspfLsaKey = (OSPFV3_NETWORK_LSA_TYPE, interface_id, self.router_id);
 
@@ -13228,11 +13248,7 @@ impl Ospf<Ospfv3> {
         let area_id = link.area;
         let interface_id = link.interface_id;
         let is_dr = link.ident.d_router == self.router_id;
-        let full_nbr_count = link
-            .nbrs
-            .values()
-            .filter(|n| n.state == NfsmState::Full)
-            .count();
+        let full_nbr_count = link.nbrs.values().filter(|n| n.advertised_full()).count();
 
         let key: super::lsdb::OspfLsaKey = (
             OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE,
@@ -13659,6 +13675,9 @@ pub enum Message<V: OspfVersion = Ospfv2> {
     /// help for the router that advertised it (RFC 3623 §3.1, §3.2 (1));
     /// see `gr_helper_grace`.
     GraceLsa(u32, V::Lsa),
+    /// `(ifindex, nbr_key)`: the help for this neighbour ended. The LSAs
+    /// listed it as fully adjacent until now; see `gr_helper_left`.
+    GrHelperLeft(u32, Ipv4Addr),
     /// `(area_id, key)`: installing the LSA at `key` changed its contents
     /// (RFC 2328 §13.2) — new, altered or flushed — in `area_id`'s
     /// database, or the AS's when `None`. A topology change to a
@@ -22446,7 +22465,7 @@ mod gr_helper_tests {
     //! is helping through ends, and what becomes of the adjacency.
 
     use super::super::lsdb::OSPF_MAX_AGE;
-    use super::link_scope_tests::{O, S, v2_addr, v2_receive, v2_top, v3_receive, v3_top};
+    use super::link_scope_tests::{ME, O, P, S, v2_addr, v2_receive, v2_top, v3_receive, v3_top};
     use super::*;
     use ospf_packet::{GraceLsa, GraceRestartReason, GraceTlv, OSPFV3_GRACE_LSA_TYPE};
 
@@ -22789,6 +22808,271 @@ mod gr_helper_tests {
         let s = (OSPFV3_ROUTER_LSA_TYPE, 0, S);
         top.process_msg(Message::LsaChanged(Some(AREA0), s)).await;
         assert!(!helping(&top), "v3: not strict, S's own");
+    }
+
+    /// Whether `lsa`, an OSPFv2 Router-LSA, has a link to `rid`.
+    fn v2_names(lsa: &OspfLsa, rid: Ipv4Addr) -> bool {
+        matches!(&lsa.lsp, OspfLsp::Router(body) if body.links.iter().any(|l| l.link_id == rid))
+    }
+
+    /// Whether `lsa`, an OSPFv3 Router-LSA, has a link to `rid`.
+    fn v3_names(lsa: &Ospfv3Lsa, rid: Ipv4Addr) -> bool {
+        matches!(
+            &lsa.body,
+            ospf_packet::Ospfv3LsBody::Router(body)
+                if body.links.iter().any(|l| l.neighbor_router_id == rid)
+        )
+    }
+
+    /// The LSA at `key` in area 0's database.
+    fn in_lsdb<V: OspfVersion>(top: &Ospf<V>, key: super::super::lsdb::OspfLsaKey) -> V::Lsa {
+        let area = top.areas.get(AREA0).unwrap();
+        area.lsdb
+            .lookup_by_raw_key(key)
+            .expect("in the database")
+            .clone()
+    }
+
+    /// The queued messages `want` picks, the rest dropped.
+    fn queued<V: OspfVersion>(
+        top: &mut Ospf<V>,
+        want: impl Fn(&Message<V>) -> bool,
+    ) -> Vec<Message<V>> {
+        std::iter::from_fn(|| top.rx.try_recv().ok())
+            .filter(|msg| want(msg))
+            .collect()
+    }
+
+    /// Wait out MinLSInterval (RFC 2328 §12.4), so a deferred
+    /// origination comes due.
+    async fn min_ls_interval() {
+        tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+    }
+
+    /// A restarter re-synchronising its database with this router's help
+    /// stays fully adjacent in this router's LSAs (RFC 3623 §3.1): in its
+    /// Router-LSA and, as DR, its Network-LSA. Its state leaves Full for
+    /// ExStart then, and it used to drop out, a topology change for every
+    /// other router. A neighbour not being helped still drops out. When
+    /// the help ends with the restarter still re-synchronising, this
+    /// router's LSAs are re-originated without it (§3.2).
+    #[tokio::test(start_paused = true)]
+    async fn a_restarter_stays_adjacent_while_it_resynchronises() {
+        use super::super::lsdb::v2_lsa_key;
+        use super::super::nfsm::NfsmEvent::SeqNumberMismatch;
+        use ospf_packet::{OSPFV3_ROUTER_LSA_TYPE, Ospfv3LsBody};
+
+        // OSPFv2, point-to-point: the Router-LSA.
+        let mut top = v2_top();
+        top.links.get_mut(&2).unwrap().network_type = OspfNetworkType::PointToPoint;
+        v2_receive(&mut top, 2, S, v2_grace(1, 0x8000_0001)).await;
+        for rid in [S, O] {
+            let msg = Message::Nfsm(2, v2_addr(rid), SeqNumberMismatch);
+            top.process_msg(msg).await;
+        }
+        let built = top.router_lsa_build(AREA0);
+        assert!(built.links.iter().any(|l| l.link_id == S), "v2: S, helped");
+        assert!(!built.links.iter().any(|l| l.link_id == O), "v2: not O");
+        let ours = v2_lsa_key(OspfLsType::Router, ME, ME);
+        assert!(v2_names(&in_lsdb(&top, ours), S), "v2: S originated");
+        // Let the re-originations the re-syncs deferred come due first.
+        min_ls_interval().await;
+        for msg in queued(&mut top, |msg| matches!(msg, Message::LsaGenFire(..))) {
+            top.process_msg(msg).await;
+        }
+        assert!(v2_names(&in_lsdb(&top, ours), S), "v2: S still originated");
+
+        // The help ends with S still in ExStart.
+        later().await;
+        v2_receive(&mut top, 2, O, v2_grace(OSPF_MAX_AGE, 0x8000_0001)).await;
+        assert!(!helping(&top), "v2: the help ends");
+        for msg in queued(&mut top, |msg| matches!(msg, Message::GrHelperLeft(..))) {
+            top.process_msg(msg).await;
+        }
+        min_ls_interval().await;
+        for msg in queued(&mut top, |msg| matches!(msg, Message::LsaGenFire(..))) {
+            top.process_msg(msg).await;
+        }
+        assert!(!v2_names(&in_lsdb(&top, ours), S), "v2: S withdrawn");
+
+        // OSPFv2, broadcast, as DR: the Network-LSA.
+        let mut top = v2_top();
+        v2_receive(&mut top, 2, S, v2_grace(1, 0x8000_0001)).await;
+        let msg = Message::Nfsm(2, v2_addr(S), SeqNumberMismatch);
+        top.process_msg(msg).await;
+        top.update_network_lsa_by_interface_now(2);
+        let network = v2_lsa_key(OspfLsType::Network, Ipv4Addr::new(192, 0, 2, 1), ME);
+        let OspfLsp::Network(body) = in_lsdb(&top, network).lsp else {
+            panic!("v2: a Network-LSA");
+        };
+        assert!(body.attached_routers.contains(&S), "v2: S attached");
+
+        // OSPFv3, point-to-point: the Router-LSA.
+        let mut top = v3_top();
+        top.links.get_mut(&2).unwrap().network_type = OspfNetworkType::PointToPoint;
+        v3_receive(&mut top, 2, S, v3_grace(1, 0x8000_0001)).await;
+        for rid in [S, O] {
+            let msg = Message::Nfsm(2, rid, SeqNumberMismatch);
+            top.process_msg(msg).await;
+        }
+        let built = top.build_router_lsa(AREA0);
+        assert!(v3_names(&built, S), "v3: S, helped");
+        assert!(!v3_names(&built, O), "v3: not O");
+        let ours = (OSPFV3_ROUTER_LSA_TYPE, 0, ME);
+        assert!(v3_names(&in_lsdb(&top, ours), S), "v3: S originated");
+        // Let the re-originations the re-syncs deferred come due first.
+        min_ls_interval().await;
+        for msg in queued(&mut top, |msg| matches!(msg, Message::LsaGenFire(..))) {
+            top.process_msg(msg).await;
+        }
+        assert!(v3_names(&in_lsdb(&top, ours), S), "v3: S still originated");
+
+        // The help ends with S still in ExStart.
+        later().await;
+        v3_receive(&mut top, 2, O, v3_grace(OSPF_MAX_AGE, 0x8000_0001)).await;
+        assert!(!helping(&top), "v3: the help ends");
+        for msg in queued(&mut top, |msg| matches!(msg, Message::GrHelperLeft(..))) {
+            top.process_msg(msg).await;
+        }
+        min_ls_interval().await;
+        for msg in queued(&mut top, |msg| matches!(msg, Message::LsaGenFire(..))) {
+            top.process_msg(msg).await;
+        }
+        assert!(!v3_names(&in_lsdb(&top, ours), S), "v3: S withdrawn");
+
+        // OSPFv3, broadcast, as DR: the Network-LSA.
+        let mut top = v3_top();
+        top.links.get_mut(&2).unwrap().ident.d_router = ME;
+        v3_receive(&mut top, 2, S, v3_grace(1, 0x8000_0001)).await;
+        top.process_msg(Message::Nfsm(2, S, SeqNumberMismatch))
+            .await;
+        let network = top.build_network_lsa(2).expect("v3: a Network-LSA");
+        let Ospfv3LsBody::Network(body) = network.body else {
+            panic!("v3: a Network-LSA body");
+        };
+        assert!(body.attached_routers.contains(&S), "v3: S attached");
+    }
+
+    /// On a LAN where S, being helped, is this router's only neighbour
+    /// and re-synchronises, S stays fully adjacent (RFC 3623 §3.1). With
+    /// this router DR, its Router-LSA keeps the transit link, and its
+    /// Network-LSA stays and lists S. It used to be flushed, the segment
+    /// having no Full neighbour left. With S DR, the transit link to S's
+    /// network stays.
+    #[tokio::test(start_paused = true)]
+    async fn a_restarter_on_a_lan_stays_adjacent() {
+        use super::super::lsdb::{OSPF_MAX_AGE, v2_lsa_key};
+        use super::super::nfsm::NfsmEvent::SeqNumberMismatch;
+        use ospf_packet::{
+            OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE, OSPFV3_NETWORK_LSA_TYPE, Ospfv3LsBody,
+        };
+
+        // OSPFv2.
+        let me = Ipv4Addr::new(192, 0, 2, 1);
+        for dr in [me, v2_addr(S)] {
+            let mut top = v2_top();
+            let link = top.links.get_mut(&2).unwrap();
+            link.nbrs.remove(&v2_addr(O));
+            link.ident.prefix = "192.0.2.1/24".parse().unwrap();
+            link.ident.d_router = dr;
+            link.state = if dr == me {
+                IfsmState::DR
+            } else {
+                IfsmState::DROther
+            };
+            v2_receive(&mut top, 2, S, v2_grace(1, 0x8000_0001)).await;
+            let msg = Message::Nfsm(2, v2_addr(S), SeqNumberMismatch);
+            top.process_msg(msg).await;
+            let built = top.router_lsa_build(AREA0);
+            let transit = built
+                .links
+                .iter()
+                .any(|l| l.link_type == OspfLinkType::Transit && l.link_id == dr);
+            assert!(transit, "v2: the transit link, DR {dr}");
+            if dr == me {
+                let key = v2_lsa_key(OspfLsType::Network, me, ME);
+                let network = in_lsdb(&top, key);
+                assert!(network.h.ls_age < OSPF_MAX_AGE, "v2: not flushed");
+                let OspfLsp::Network(body) = network.lsp else {
+                    panic!("v2: a Network-LSA");
+                };
+                assert!(body.attached_routers.contains(&S), "v2: S attached");
+            }
+        }
+
+        // OSPFv3.
+        for dr in [ME, S] {
+            let mut top = v3_top();
+            let link = top.links.get_mut(&2).unwrap();
+            link.nbrs.remove(&O);
+            link.addr.push(OspfAddr {
+                prefix: "2001:db8:2::1/64".parse().unwrap(),
+                secondary: false,
+            });
+            link.ident.d_router = dr;
+            link.state = if dr == ME {
+                IfsmState::DR
+            } else {
+                IfsmState::DROther
+            };
+            let interface_id = link.interface_id;
+            v3_receive(&mut top, 2, S, v3_grace(1, 0x8000_0001)).await;
+            top.process_msg(Message::Nfsm(2, S, SeqNumberMismatch))
+                .await;
+            let built = top.build_router_lsa(AREA0);
+            assert!(v3_names(&built, dr), "v3: the transit link, DR {dr}");
+            let segment = |lsa: Option<Ospfv3Lsa>| {
+                lsa.is_some_and(|lsa| {
+                    matches!(lsa.body, Ospfv3LsBody::IntraAreaPrefix(body)
+                        if body.prefixes.iter().any(|p| p.address_prefix.starts_with(&[0x20, 1, 0x0d, 0xb8, 0, 2])))
+                })
+            };
+            let own = top.build_router_intra_area_prefix_lsa(AREA0);
+            assert!(!segment(own), "v3: the segment is transit, DR {dr}");
+            if dr == ME {
+                let key = (OSPFV3_NETWORK_LSA_TYPE, interface_id, ME);
+                let network = in_lsdb(&top, key);
+                assert!(network.h.ls_age < OSPF_MAX_AGE, "v3: not flushed");
+                let Ospfv3LsBody::Network(body) = network.body else {
+                    panic!("v3: a Network-LSA");
+                };
+                assert!(body.attached_routers.contains(&S), "v3: S attached");
+                let key = (OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE, interface_id, ME);
+                let prefixes = in_lsdb(&top, key);
+                assert!(prefixes.h.ls_age < OSPF_MAX_AGE, "v3: its prefixes");
+            }
+        }
+    }
+
+    /// Over a virtual link, a restarter re-synchronising with this
+    /// router's help keeps its VirtualLink entry in the backbone
+    /// Router-LSA, and the transit area's Router-LSA keeps the V-bit
+    /// (RFC 3623 §3.1; RFC 2328 §12.4.1.1, §12.4.2).
+    #[tokio::test(start_paused = true)]
+    async fn a_restarter_over_a_virtual_link_stays_adjacent() {
+        use super::super::link::VirtualLinkState;
+        use super::super::nfsm::NfsmEvent::SeqNumberMismatch;
+        const AREA1: Ipv4Addr = Ipv4Addr::new(0, 0, 0, 1);
+
+        let mut top = v2_top();
+        top.links.get_mut(&3).unwrap().vl = Some(VirtualLinkState {
+            transit_area: AREA1,
+            peer_router_id: P,
+            peer_addr: v2_addr(P),
+            first_hop_addr: v2_addr(P),
+            first_hop_ifindex: 3,
+        });
+        v2_receive(&mut top, 3, P, v2_grace_naming(P, v2_addr(P))).await;
+        let msg = Message::Nfsm(3, v2_addr(P), SeqNumberMismatch);
+        top.process_msg(msg).await;
+        let backbone = top.router_lsa_build(AREA0);
+        let vl = backbone
+            .links
+            .iter()
+            .any(|l| l.link_type == OspfLinkType::VirtualLink && l.link_id == P);
+        assert!(vl, "the virtual link");
+        let transit = top.router_lsa_build(AREA1);
+        assert_ne!(transit.flags & 0x04, 0, "the V-bit");
     }
 
     /// The grace period runs from the restart request, which the

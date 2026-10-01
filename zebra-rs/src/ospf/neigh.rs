@@ -53,7 +53,9 @@ impl Default for GracefulRestartConfig {
 /// when we accept a Grace LSA from this neighbor; absent the rest
 /// of the time. While `Some`, the inactivity timer is suppressed
 /// (`ospf_nfsm_inactivity_timer` rearms instead of killing) so the
-/// neighbor's adjacency stays Full across the restart window.
+/// adjacency survives the restart window, and this router's LSAs keep
+/// listing the neighbor as fully adjacent even while it
+/// re-synchronises its database (`Neighbor::advertised_full`).
 ///
 /// Exit paths (RFC 3623 §3.2):
 ///   - Grace-period expiry — `expire_timer` fires
@@ -332,6 +334,14 @@ where
 }
 
 impl<V: OspfVersion> Neighbor<V> {
+    /// Whether this router's LSAs list the neighbour as fully adjacent:
+    /// it is Full, or it is restarting with this router's help, which
+    /// keeps it listed while its adjacency re-synchronises (RFC 3623
+    /// §3.1).
+    pub fn advertised_full(&self) -> bool {
+        self.state == NfsmState::Full || self.gr_helper.is_some()
+    }
+
     pub fn is_pointopoint(&self) -> bool {
         // Return true is parent interface is one of following:
         // PointToPoint
