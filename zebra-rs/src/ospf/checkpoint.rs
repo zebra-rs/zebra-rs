@@ -245,6 +245,57 @@ fn link_neighbors<V: super::version::OspfVersion>(
     neighbors
 }
 
+/// An LSA at its age now, not the age it arrived with: the checkpoint
+/// restored one younger than its copies elsewhere, and kept it the longer.
+fn aged_now<L: Clone>(lsa: &L, age: u16, set_age: fn(&mut L, u16)) -> L {
+    let mut lsa = lsa.clone();
+    set_age(&mut lsa, age);
+    lsa
+}
+
+/// `links` with one more for each interface a staged restart must
+/// re-establish adjacencies on but none of them records: deleted, or
+/// disabled, since the restart began. Its adjacencies were dropped, and
+/// the restored restart did not wait for them. Only the adjacencies are
+/// read back.
+fn with_gone_links<V: super::version::OspfVersion>(
+    ospf: &Ospf<V>,
+    mut links: Vec<LinkCheckpoint>,
+) -> Vec<LinkCheckpoint> {
+    let Some(state) = ospf.restarting.as_ref() else {
+        return links;
+    };
+    for (ifindex, router_id) in &state.adjacencies {
+        if !links.iter().any(|link| link.ifindex == *ifindex) {
+            links.push(LinkCheckpoint {
+                ifindex: *ifindex,
+                area_id: ospf
+                    .links
+                    .get(ifindex)
+                    .map_or(Ipv4Addr::UNSPECIFIED, |link| link.area),
+                ifname: ospf
+                    .links
+                    .get(ifindex)
+                    .map(|link| link.name.clone())
+                    .unwrap_or_default(),
+                neighbors: Vec::new(),
+            });
+        }
+        let link = links
+            .iter_mut()
+            .find(|link| link.ifindex == *ifindex)
+            .expect("just added");
+        if !link.neighbors.iter().any(|n| n.router_id == *router_id) {
+            link.neighbors.push(NeighborCheckpoint {
+                router_id: *router_id,
+                interface_addr: Ipv4Addr::UNSPECIFIED,
+                was_full: true,
+            });
+        }
+    }
+    links
+}
+
 /// How much of its grace period the restart has used (`grace_used_ms`).
 fn grace_used_ms(restarting: Option<&super::neigh::RestartingState>) -> u64 {
     restarting.map_or(0, |state| {
@@ -271,8 +322,10 @@ impl OspfCheckpoint {
                     ))
                     .map(|(key, lsa)| {
                         let mut buf = BytesMut::new();
-                        lsa.data.h.emit(&mut buf);
-                        lsa.data.emit_lsp(&mut buf);
+                        let data =
+                            aged_now(&lsa.data, lsa.current_age(), ospf_packet::OspfLsa::set_age);
+                        data.h.emit(&mut buf);
+                        data.emit_lsp(&mut buf);
                         LsaSnapshot {
                             key: *key,
                             ls_seq_number: lsa.data.h.ls_seq_number,
@@ -303,7 +356,8 @@ impl OspfCheckpoint {
                     neighbors,
                 }
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let links = with_gone_links(ospf, links);
 
         let lan_adj_sids = ospf.lan_adj_sids.iter().map(|(k, v)| (*k, *v)).collect();
 
@@ -346,7 +400,12 @@ impl OspfCheckpoint {
                     ))
                     .map(|(key, lsa)| {
                         let mut buf = BytesMut::new();
-                        lsa.data.emit(&mut buf);
+                        let data = aged_now(
+                            &lsa.data,
+                            lsa.current_age(),
+                            ospf_packet::Ospfv3Lsa::set_age,
+                        );
+                        data.emit(&mut buf);
                         LsaSnapshot {
                             key: *key,
                             ls_seq_number: lsa.data.h.ls_seq_number,
@@ -377,7 +436,8 @@ impl OspfCheckpoint {
                     neighbors,
                 }
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let links = with_gone_links(ospf, links);
 
         Self {
             format_version: CHECKPOINT_FORMAT_VERSION,

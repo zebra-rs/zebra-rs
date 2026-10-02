@@ -412,6 +412,12 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// The committed restart whose drain is pending (`gr_restart_commit`);
     /// an abort cancels it.
     pub gr_commit: Option<super::neigh::GrCommit>,
+    /// Our LSAs, area- or AS-scope, that a restart holds as they are (RFC
+    /// 3623 §2 (1)): received back while restarting, or restored from its
+    /// checkpoint. Each with its database (`None` for the AS's) and its
+    /// sequence number then. The exit deals with those still as they were
+    /// (§2.3 (5), `relearned_unchanged`).
+    pub restart_relearned: BTreeMap<(Option<Ipv4Addr>, OspfLsaKey), u32>,
     /// This router's own link-scope LSAs — its Grace-LSAs — restored from
     /// a graceful-restart checkpoint, each with its area. They belong in
     /// an interface's database (RFC 5250 §3.1, RFC 5340 §4.1.2), but the
@@ -861,6 +867,42 @@ impl<V: OspfVersion> Ospf<V> {
         for (_, area) in self.areas.iter_mut() {
             area.spf_predates_exit = area.spf_inflight;
         }
+    }
+
+    /// Hold our LSA at `key`, in `area_id`'s database or the AS's, as
+    /// the restart found it (RFC 3623 §2 (1)): it is neither re-originated
+    /// nor flushed while restarting; the exit deals with it.
+    fn hold_relearned(&mut self, area_id: Option<Ipv4Addr>, key: OspfLsaKey) {
+        let lsdb = match area_id {
+            Some(area_id) => self.areas.get(area_id).map(|area| &area.lsdb),
+            None => Some(&self.lsdb_as),
+        };
+        if let Some(lsa) = lsdb.and_then(|lsdb| lsdb.tables.get(&key)) {
+            let seq = V::ls_seq_number(V::lsa_header(&lsa.data));
+            self.restart_relearned.insert((area_id, key), seq);
+        }
+    }
+
+    /// The LSAs the restart held (`hold_relearned`) that are still as it
+    /// held them: neither re-originated nor flushed since. Taken at the
+    /// exit, which handles each as received now (RFC 2328 §13.4): one
+    /// still ours is re-originated, the rest flushed (RFC 3623 §2.3 (5)).
+    fn relearned_unchanged(&mut self) -> Vec<(Option<Ipv4Addr>, OspfLsaKey)> {
+        let held = std::mem::take(&mut self.restart_relearned);
+        held.into_iter()
+            .filter(|((area_id, key), seq)| {
+                let lsdb = match area_id {
+                    Some(area_id) => self.areas.get(*area_id).map(|area| &area.lsdb),
+                    None => Some(&self.lsdb_as),
+                };
+                lsdb.and_then(|lsdb| lsdb.tables.get(key))
+                    .is_some_and(|lsa| {
+                        lsa.current_age() < super::lsdb::OSPF_MAX_AGE
+                            && V::ls_seq_number(V::lsa_header(&lsa.data)) == *seq
+                    })
+            })
+            .map(|(held, _)| held)
+            .collect()
     }
 
     /// Whether the SPF run just finished in `area_id` began after this
@@ -2436,6 +2478,7 @@ impl Ospf<Ospfv2> {
             lsa_gen: std::collections::HashMap::new(),
             sweep_areas: None,
             gr_commit: None,
+            restart_relearned: BTreeMap::new(),
             restarting: None,
             key_chains: BTreeMap::new(),
             policy_tx,
@@ -5133,6 +5176,23 @@ impl Ospf<Ospfv2> {
         // Handle SelfOriginatedReceived before borrowing lsdb, since
         // re-origination needs full &mut self access.
         if ev == LsdbEvent::SelfOriginatedReceived {
+            // An AS-scope LSA is in the AS's database, whatever interface
+            // brought it: the receive path names that interface's area, and
+            // our Type-5s were looked up in the area's, not found, and
+            // never handled.
+            let area_id = match super::flood::lsa_flood_scope(ls_type) {
+                super::flood::FloodScope::As => None,
+                _ => area_id,
+            };
+            // RFC 3623 §2 (1): a restarting router neither modifies nor
+            // flushes a received LSA of its own, but accepts it as valid
+            // until its exit. Our Type-5s, gone from the redistribution
+            // sets a boot empties, were flushed here, and helpers ended
+            // their help.
+            if self.restarting.is_some() && adv_router == self.router_id {
+                self.hold_relearned(area_id, key);
+                return;
+            }
             self.process_self_originated_lsa(area_id, ls_type, ls_id, adv_router);
             return;
         }
@@ -5608,9 +5668,10 @@ impl Ospf<Ospfv2> {
                         .and_then(|plen| Ipv4Net::new(ls_id, plen).ok())
                         .map(|p| p.trunc())
                 };
-                if network
-                    .is_some_and(|p| self.redist_originated.values().any(|set| set.contains(&p)))
-                {
+                if network.is_some_and(|p| {
+                    self.redist_originated.values().any(|set| set.contains(&p))
+                        || (p.prefix_len() == 0 && self.default_originated)
+                }) {
                     ospf_event_trace!(
                         self.tracing,
                         Lsdb,
@@ -6257,13 +6318,25 @@ impl Ospf<Ospfv2> {
     /// `gr_restart_load_checkpoint`); this router's own link-scope LSAs
     /// wait in `restored_link_lsas` for their interfaces. Returns how many
     /// LSAs were restored.
+    #[cfg(test)]
     fn gr_restart_replay_areas(&mut self, areas: &[super::checkpoint::AreaCheckpoint]) -> usize {
+        self.gr_restart_replay_areas_aged(areas, 0)
+    }
+
+    /// [`Self::gr_restart_replay_areas`], each LSA `aged` seconds older:
+    /// the time since the checkpoint was written. An LSA ages while this
+    /// router is down, as its copies elsewhere do.
+    fn gr_restart_replay_areas_aged(
+        &mut self,
+        areas: &[super::checkpoint::AreaCheckpoint],
+        aged: u16,
+    ) -> usize {
         let mut total_lsas = 0usize;
         for area_cp in areas {
             let area = self.areas.fetch(area_cp.area_id);
             area.area_type.kind = area_cp.area_type_kind.into();
             for snap in &area_cp.lsas {
-                let Some(lsa) = ospf_packet::OspfLsa::decode(&snap.body) else {
+                let Some(mut lsa) = ospf_packet::OspfLsa::decode(&snap.body) else {
                     tracing::warn!(
                         "[GR Restart] failed to decode checkpointed LSA key={:?}, skipping",
                         snap.key
@@ -6281,7 +6354,16 @@ impl Ospf<Ospfv2> {
                     }
                     continue;
                 }
+                lsa.set_age(
+                    lsa.h
+                        .ls_age
+                        .saturating_add(aged)
+                        .min(super::lsdb::OSPF_MAX_AGE),
+                );
                 if snap.self_originated {
+                    // Held until the exit, as one received back (§2 (1)).
+                    self.restart_relearned
+                        .insert((Some(area_cp.area_id), snap.key), lsa.h.ls_seq_number);
                     area.lsdb.insert_self_originated(
                         lsa,
                         &self.tx,
@@ -6353,10 +6435,11 @@ impl Ospf<Ospfv2> {
         // must be over by then too (§2.2 (3)). The restart used to run
         // on to 1.5 times the grace period from the write.
         let grace = Duration::from_secs(cp.grace_period_secs.into());
-        let used = Duration::from_millis(cp.grace_used_ms)
-            + SystemTime::now()
-                .duration_since(cp.written_at)
-                .unwrap_or(Duration::ZERO);
+        let down = SystemTime::now()
+            .duration_since(cp.written_at)
+            .unwrap_or(Duration::ZERO);
+        let used = Duration::from_millis(cp.grace_used_ms) + down;
+        let since_write = u16::try_from(down.as_secs()).unwrap_or(u16::MAX);
         if used >= grace {
             tracing::warn!(
                 "[GR Restart] checkpoint at {} past its grace period ({:?} of {:?}), cold-starting",
@@ -6370,7 +6453,7 @@ impl Ospf<Ospfv2> {
 
         // Replay: router-id, areas + their LSDBs, lan_adj_sids.
         self.router_id = cp.router_id;
-        let total_lsas = self.gr_restart_replay_areas(&cp.areas);
+        let total_lsas = self.gr_restart_replay_areas_aged(&cp.areas, since_write);
         for ((ifindex, addr), label) in &cp.lan_adj_sids {
             self.lan_adj_sids.insert((*ifindex, *addr), *label);
         }
@@ -6431,6 +6514,11 @@ impl Ospf<Ospfv2> {
     /// every area: install their results, held back until then
     /// (`apply_spf_result`), and sweep the earlier run's routes.
     fn exit_area_done(&mut self, area_id: Ipv4Addr) {
+        // A restart begun since: nothing installed, nothing swept (§2.2);
+        // its own exit reruns every area.
+        if self.restarting.is_some() {
+            return;
+        }
         if self.sweep_area_done(area_id) {
             let merged = merge_area_ribs(self);
             apply_routing_updates(self, merged);
@@ -6552,6 +6640,12 @@ impl Ospf<Ospfv2> {
         self.nssa_translate_resync_all();
         self.as_external_redist_resync_all();
         self.default_originate_resync();
+        // Our LSAs held while restarting, as received now (§2.3 (5)): those
+        // still ours are re-originated, the rest flushed.
+        for (area_id, key) in self.relearned_unchanged() {
+            let (ls_type, ls_id, adv_router) = v2_lsa_key_unpack(key);
+            self.process_self_originated_lsa(area_id, ls_type, ls_id, adv_router);
+        }
         self.sweep_after_restart();
         let _ = self.tx.send(Message::SpfSchedule(None));
         true
@@ -8168,6 +8262,7 @@ impl Ospf<Ospfv3> {
             lsa_gen: std::collections::HashMap::new(),
             sweep_areas: None,
             gr_commit: None,
+            restart_relearned: BTreeMap::new(),
             restarting: None,
             key_chains: BTreeMap::new(),
             policy_tx,
@@ -10662,14 +10757,229 @@ impl Ospf<Ospfv3> {
         self.nssa_translate_resync_all();
         self.as_external_redist_resync_all_v3();
         self.default_originate_resync_v3();
+        // Our LSAs held while restarting, as OSPFv2's.
+        for (area_id, key) in self.relearned_unchanged() {
+            self.self_originated_received_v3(area_id, key);
+        }
         self.sweep_after_restart();
         let _ = self.tx.send(Message::SpfSchedule(None));
         true
     }
 
+    /// A self-originated LSA received from a neighbour (RFC 2328 §13.4),
+    /// OSPFv3's `process_self_originated_lsa`.
+    fn self_originated_received_v3(&mut self, area_id: Option<Ipv4Addr>, key: OspfLsaKey) {
+        // RFC 2328 §13.4: a peer flooded our own LSA back to
+        // us at a higher sequence number (typical post-restart
+        // scenario). Re-originate at an even higher seq so
+        // we own the LSA again. Currently handles the wired
+        // self-origination paths (Router-LSA, Network-LSA,
+        // Intra-Area-Prefix-LSA, NSSA-LSA default, translated
+        // AS-External); other LSA types fall through.
+        use ospf_packet::{
+            OSPFV3_AS_EXTERNAL_LSA_TYPE, OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE,
+            OSPFV3_E_ROUTER_LSA_TYPE, OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE, OSPFV3_LINK_LSA_TYPE,
+            OSPFV3_NETWORK_LSA_TYPE, OSPFV3_NSSA_LSA_TYPE, OSPFV3_ROUTER_LSA_TYPE,
+        };
+
+        use super::srmpls::SR_INFO_LSID;
+        let (ls_type, ls_id, adv_router) = key;
+        let area = area_id.unwrap_or(AREA0);
+        // An AS-scope LSA is in the AS's database, as OSPFv2's.
+        let area_id = match super::packet_v3::ospfv3_ls_type_scope(ls_type) {
+            super::packet_v3::Ospfv3LsaScope::As => None,
+            _ => area_id,
+        };
+        // A link-scope LSA lives in its interface's database
+        // (RFC 5340 §4.1.2). Our Link-LSA is rebuilt below; any
+        // other of ours, or one of a former identity, is
+        // flushed on its interface — unless a graceful restart
+        // is under way (RFC 3623 §2.2) — as OSPFv2's
+        // `link_lsdb_event` does.
+        if matches!(
+            super::packet_v3::ospfv3_ls_type_scope(ls_type),
+            super::packet_v3::Ospfv3LsaScope::Link
+        ) && !(adv_router == self.router_id && ls_type == OSPFV3_LINK_LSA_TYPE)
+        {
+            if adv_router == self.router_id && self.restarting.is_some() {
+                return;
+            }
+            let tx = self.tx.clone();
+            let ifindexes: Vec<u32> = self.links.keys().copied().collect();
+            for ifindex in ifindexes {
+                let flushed = self
+                    .links
+                    .get_mut(&ifindex)
+                    .and_then(|link| link.lsdb.flush_lsa_by_raw_key(key, &tx, area_id));
+                if let Some(lsa) = flushed {
+                    self.flood_lsa_through_link(ifindex, &lsa, None);
+                }
+            }
+            return;
+        }
+        // RFC 3623 §2 (1), as OSPFv2's: held while restarting.
+        if self.restarting.is_some() && adv_router == self.router_id {
+            self.hold_relearned(area_id, key);
+            return;
+        }
+        // A FORMER identity — see the v2 twin in
+        // `process_self_originated_lsa`: nothing
+        // re-originates under it, so flush the echoed
+        // instance instead of rebuilding it.
+        if adv_router != self.router_id {
+            ospf_event_trace!(
+                self.tracing,
+                Lsdb,
+                "[Self-Originated] Flushing former-identity v3 LSA type={:#06x} id={} adv={}",
+                ls_type,
+                ls_id,
+                adv_router
+            );
+            let flushed = {
+                let lsdb = if let Some(area_id) = area_id {
+                    match self.areas.get_mut(area_id) {
+                        Some(area) => &mut area.lsdb,
+                        None => return,
+                    }
+                } else {
+                    &mut self.lsdb_as
+                };
+                lsdb.flush_lsa_by_raw_key(key, &self.tx, area_id)
+            };
+            if let Some(lsa) = flushed {
+                match area_id {
+                    Some(area_id) => self.flood_self_originated_lsa(area_id, &lsa),
+                    None => self.flood_lsa_through_as_v3(&lsa, None),
+                }
+            }
+            return;
+        }
+        match ls_type {
+            t if t == OSPFV3_ROUTER_LSA_TYPE => self.router_lsa_originate(),
+            t if t == OSPFV3_NETWORK_LSA_TYPE => self.network_lsa_originate(ls_id),
+            // Link-LSA (RFC 5340 §A.4.9): link-scoped,
+            // keyed by ifindex. Originator lives at
+            // `link_lsa_originate(ifindex)` — `interface_id
+            // = link.index` so passing `ls_id` directly
+            // is correct.
+            t if t == OSPFV3_LINK_LSA_TYPE => self.link_lsa_originate(ls_id),
+            // Intra-Area-Prefix-LSA (RFC 5340 §A.4.10)
+            // has two distinct origin paths:
+            //   * Router-referenced (ls_id == 0): one
+            //     per area, drives `router_intra_area_
+            //     prefix_lsa_originate`.
+            //   * Network-referenced (ls_id == DR
+            //     interface_id): one per broadcast
+            //     segment we're DR for, drives
+            //     `network_intra_area_prefix_lsa_
+            //     originate(ifindex)`.
+            // The originate paths key on those exact
+            // ls_id values, so the dispatch matches.
+            t if t == OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE && ls_id == 0 => {
+                self.router_intra_area_prefix_lsa_originate(area)
+            }
+            t if t == OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE => {
+                self.network_intra_area_prefix_lsa_originate(ls_id)
+            }
+            // E-Router-LSA (RFC 8362 §3.1) — two kinds:
+            //   * SR-Info (ls_id == SR_INFO_LSID == 0): the
+            //     former SR capabilities carrier, no longer
+            //     sent; `sr_capabilities_v3_originate`
+            //     flushes it. (The per-link arm would too —
+            //     there is no interface 0 — but not by
+            //     intent.)
+            //   * Per-link Adj-SID (ls_id == ifindex):
+            //     `e_router_v3_lsa_originate(ifindex)`.
+            t if t == OSPFV3_E_ROUTER_LSA_TYPE && ls_id == SR_INFO_LSID => {
+                self.sr_capabilities_v3_originate(area)
+            }
+            // Router Information LSA (RFC 7770), the
+            // standard carrier of the same capabilities.
+            t if t == ospf_packet::OSPFV3_ROUTER_INFO_LSA_TYPE
+                && ls_id == super::srmpls::ROUTER_INFO_V3_INSTANCE =>
+            {
+                self.sr_capabilities_v3_originate(area)
+            }
+            // SRv6 Locator LSA (RFC 9513) — single
+            // instance, ls_id == SRV6_LOCATOR_LSID.
+            t if t == ospf_packet::OSPFV3_SRV6_LOCATOR_LSA_TYPE => {
+                self.srv6_locator_lsa_originate(area)
+            }
+            t if t == OSPFV3_E_ROUTER_LSA_TYPE => self.e_router_v3_lsa_originate(ls_id),
+            // E-Intra-Area-Prefix-LSA (RFC 8362 §3.7 /
+            // RFC 8666 §5) carries the per-link
+            // Prefix-SID; ls_id == ifindex.
+            t if t == OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE => {
+                self.ext_intra_area_prefix_v3_lsa_originate(ls_id)
+            }
+            // Only the default NSSA-LSA (link_state_id
+            // == 0) is self-originated today. Other
+            // ls-ids will land here once redistribute
+            // is wired on v3; for now they're treated
+            // as no-owner and the generic flush path
+            // handles them.
+            t if t == OSPFV3_NSSA_LSA_TYPE && ls_id == 0 => self.nssa_default_lsa_originate(area),
+            // A redistributed one, else none of ours: flushed, as
+            // OSPFv2's. It used to stay.
+            t if t == OSPFV3_NSSA_LSA_TYPE => {
+                let redistributed = self.areas.get(area).is_some_and(|a| {
+                    a.redist_connected_originated_v6
+                        .iter()
+                        .any(|p| nssa_v3_ls_id(p) == ls_id)
+                });
+                if redistributed {
+                    self.nssa_redist_connected_resync_v3(area);
+                } else {
+                    let flushed = self
+                        .areas
+                        .get_mut(area)
+                        .and_then(|a| a.lsdb.flush_lsa_by_raw_key(key, &self.tx, Some(area)));
+                    if let Some(lsa) = flushed {
+                        self.flood_self_originated_lsa(area, &lsa);
+                    }
+                }
+            }
+            // Translated Type-5 (RFC 3101 §3.2). If
+            // `ls_id` matches an entry in any NSSA
+            // area's `nssa_translated`, re-translate
+            // (the resync bumps seq#); otherwise it's
+            // a stray Type-5 we don't own — fall
+            // through to flush.
+            t if t == OSPFV3_AS_EXTERNAL_LSA_TYPE => {
+                // Redistributed (the default route among them),
+                // translated, or none of ours: flushed, as OSPFv2's. It
+                // used to stay, a route advertised that was gone.
+                let redistributed = self
+                    .redist_originated_v6
+                    .values()
+                    .any(|set| set.iter().any(|p| nssa_v3_ls_id(p) == ls_id))
+                    || (ls_id == 0 && self.default_originated_v6);
+                let owning_area = self
+                    .areas
+                    .iter()
+                    .find(|(_, a)| a.nssa_translated.contains(&Ipv4Addr::from(ls_id)))
+                    .map(|(&id, _)| id);
+                if redistributed {
+                    self.as_external_redist_resync_all_v3();
+                    self.default_originate_resync_v3();
+                } else if let Some(a) = owning_area {
+                    self.nssa_translate_resync(a);
+                } else if let Some(lsa) = self.lsdb_as.flush_lsa_by_raw_key(key, &self.tx, None) {
+                    self.flood_lsa_through_as_v3(&lsa, None);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// The calculation since the restart ended has run in `area_id`, as
     /// OSPFv2's `exit_area_done`.
     fn exit_area_done(&mut self, area_id: Ipv4Addr) {
+        // A restart begun since: nothing installed, nothing swept (§2.2);
+        // its own exit reruns every area.
+        if self.restarting.is_some() {
+            return;
+        }
         if self.sweep_area_done(area_id) {
             let merged = merge_area_ribs6(self);
             apply_routing_updates_v3(self, merged);
@@ -10702,13 +11012,25 @@ impl Ospf<Ospfv3> {
     /// `gr_restart_replay_areas` does; this router's own Grace-LSAs wait
     /// in `restored_link_lsas` for their interfaces. Returns how many LSAs
     /// were restored.
+    #[cfg(test)]
     fn gr_restart_replay_areas(&mut self, areas: &[super::checkpoint::AreaCheckpoint]) -> usize {
+        self.gr_restart_replay_areas_aged(areas, 0)
+    }
+
+    /// [`Self::gr_restart_replay_areas`], each LSA `aged` seconds older:
+    /// the time since the checkpoint was written. An LSA ages while this
+    /// router is down, as its copies elsewhere do.
+    fn gr_restart_replay_areas_aged(
+        &mut self,
+        areas: &[super::checkpoint::AreaCheckpoint],
+        aged: u16,
+    ) -> usize {
         let mut total_lsas = 0usize;
         for area_cp in areas {
             let area = self.areas.fetch(area_cp.area_id);
             area.area_type.kind = area_cp.area_type_kind.into();
             for snap in &area_cp.lsas {
-                let Some(lsa) = ospf_packet::Ospfv3Lsa::decode(&snap.body) else {
+                let Some(mut lsa) = ospf_packet::Ospfv3Lsa::decode(&snap.body) else {
                     tracing::warn!(
                         "[GR Restart v3] failed to decode checkpointed LSA key={:?}, skipping",
                         snap.key
@@ -10727,7 +11049,16 @@ impl Ospf<Ospfv3> {
                     }
                     continue;
                 }
+                lsa.set_age(
+                    lsa.h
+                        .ls_age
+                        .saturating_add(aged)
+                        .min(super::lsdb::OSPF_MAX_AGE),
+                );
                 if snap.self_originated {
+                    // Held until the exit, as OSPFv2's.
+                    self.restart_relearned
+                        .insert((Some(area_cp.area_id), snap.key), lsa.h.ls_seq_number);
                     // The decoded LSA carries its exact wire bytes in
                     // `raw`, so the re-flood matches helpers' snapshot
                     // verbatim; install_originated arms hold/refresh.
@@ -10781,10 +11112,11 @@ impl Ospf<Ospfv3> {
 
         // As OSPFv2's: the restart ends when its grace period does.
         let grace = Duration::from_secs(cp.grace_period_secs.into());
-        let used = Duration::from_millis(cp.grace_used_ms)
-            + SystemTime::now()
-                .duration_since(cp.written_at)
-                .unwrap_or(Duration::ZERO);
+        let down = SystemTime::now()
+            .duration_since(cp.written_at)
+            .unwrap_or(Duration::ZERO);
+        let used = Duration::from_millis(cp.grace_used_ms) + down;
+        let since_write = u16::try_from(down.as_secs()).unwrap_or(u16::MAX);
         if used >= grace {
             tracing::warn!(
                 "[GR Restart v3] checkpoint at {} past its grace period ({:?} of {:?}), cold-starting",
@@ -10797,7 +11129,7 @@ impl Ospf<Ospfv3> {
         }
 
         self.router_id = cp.router_id;
-        let total_lsas = self.gr_restart_replay_areas(&cp.areas);
+        let total_lsas = self.gr_restart_replay_areas_aged(&cp.areas, since_write);
 
         let remaining = grace - used;
         let remaining_secs = remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0);
@@ -12004,168 +12336,8 @@ impl Ospf<Ospfv3> {
                     area = ?area_id,
                     "LSDB event"
                 );
-                // RFC 2328 §13.4: a peer flooded our own LSA back to
-                // us at a higher sequence number (typical post-restart
-                // scenario). Re-originate at an even higher seq so
-                // we own the LSA again. Currently handles the wired
-                // self-origination paths (Router-LSA, Network-LSA,
-                // Intra-Area-Prefix-LSA, NSSA-LSA default, translated
-                // AS-External); other LSA types fall through.
-                use ospf_packet::{
-                    OSPFV3_AS_EXTERNAL_LSA_TYPE, OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE,
-                    OSPFV3_E_ROUTER_LSA_TYPE, OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE,
-                    OSPFV3_LINK_LSA_TYPE, OSPFV3_NETWORK_LSA_TYPE, OSPFV3_NSSA_LSA_TYPE,
-                    OSPFV3_ROUTER_LSA_TYPE,
-                };
-
-                use super::srmpls::SR_INFO_LSID;
                 if ev == super::lsdb::LsdbEvent::SelfOriginatedReceived {
-                    let (ls_type, ls_id, adv_router) = key;
-                    let area = area_id.unwrap_or(AREA0);
-                    // A link-scope LSA lives in its interface's database
-                    // (RFC 5340 §4.1.2). Our Link-LSA is rebuilt below; any
-                    // other of ours, or one of a former identity, is
-                    // flushed on its interface — unless a graceful restart
-                    // is under way (RFC 3623 §2.2) — as OSPFv2's
-                    // `link_lsdb_event` does.
-                    if matches!(
-                        super::packet_v3::ospfv3_ls_type_scope(ls_type),
-                        super::packet_v3::Ospfv3LsaScope::Link
-                    ) && !(adv_router == self.router_id && ls_type == OSPFV3_LINK_LSA_TYPE)
-                    {
-                        if adv_router == self.router_id && self.restarting.is_some() {
-                            return;
-                        }
-                        let tx = self.tx.clone();
-                        let ifindexes: Vec<u32> = self.links.keys().copied().collect();
-                        for ifindex in ifindexes {
-                            let flushed = self
-                                .links
-                                .get_mut(&ifindex)
-                                .and_then(|link| link.lsdb.flush_lsa_by_raw_key(key, &tx, area_id));
-                            if let Some(lsa) = flushed {
-                                self.flood_lsa_through_link(ifindex, &lsa, None);
-                            }
-                        }
-                        return;
-                    }
-                    // A FORMER identity — see the v2 twin in
-                    // `process_self_originated_lsa`: nothing
-                    // re-originates under it, so flush the echoed
-                    // instance instead of rebuilding it.
-                    if adv_router != self.router_id {
-                        ospf_event_trace!(
-                            self.tracing,
-                            Lsdb,
-                            "[Self-Originated] Flushing former-identity v3 LSA type={:#06x} id={} adv={}",
-                            ls_type,
-                            ls_id,
-                            adv_router
-                        );
-                        let flushed = {
-                            let lsdb = if let Some(area_id) = area_id {
-                                match self.areas.get_mut(area_id) {
-                                    Some(area) => &mut area.lsdb,
-                                    None => return,
-                                }
-                            } else {
-                                &mut self.lsdb_as
-                            };
-                            lsdb.flush_lsa_by_raw_key(key, &self.tx, area_id)
-                        };
-                        if let Some(lsa) = flushed {
-                            match area_id {
-                                Some(area_id) => self.flood_self_originated_lsa(area_id, &lsa),
-                                None => self.flood_lsa_through_as_v3(&lsa, None),
-                            }
-                        }
-                        return;
-                    }
-                    match ls_type {
-                        t if t == OSPFV3_ROUTER_LSA_TYPE => self.router_lsa_originate(),
-                        t if t == OSPFV3_NETWORK_LSA_TYPE => self.network_lsa_originate(ls_id),
-                        // Link-LSA (RFC 5340 §A.4.9): link-scoped,
-                        // keyed by ifindex. Originator lives at
-                        // `link_lsa_originate(ifindex)` — `interface_id
-                        // = link.index` so passing `ls_id` directly
-                        // is correct.
-                        t if t == OSPFV3_LINK_LSA_TYPE => self.link_lsa_originate(ls_id),
-                        // Intra-Area-Prefix-LSA (RFC 5340 §A.4.10)
-                        // has two distinct origin paths:
-                        //   * Router-referenced (ls_id == 0): one
-                        //     per area, drives `router_intra_area_
-                        //     prefix_lsa_originate`.
-                        //   * Network-referenced (ls_id == DR
-                        //     interface_id): one per broadcast
-                        //     segment we're DR for, drives
-                        //     `network_intra_area_prefix_lsa_
-                        //     originate(ifindex)`.
-                        // The originate paths key on those exact
-                        // ls_id values, so the dispatch matches.
-                        t if t == OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE && ls_id == 0 => {
-                            self.router_intra_area_prefix_lsa_originate(area)
-                        }
-                        t if t == OSPFV3_INTRA_AREA_PREFIX_LSA_TYPE => {
-                            self.network_intra_area_prefix_lsa_originate(ls_id)
-                        }
-                        // E-Router-LSA (RFC 8362 §3.1) — two kinds:
-                        //   * SR-Info (ls_id == SR_INFO_LSID == 0): the
-                        //     former SR capabilities carrier, no longer
-                        //     sent; `sr_capabilities_v3_originate`
-                        //     flushes it. (The per-link arm would too —
-                        //     there is no interface 0 — but not by
-                        //     intent.)
-                        //   * Per-link Adj-SID (ls_id == ifindex):
-                        //     `e_router_v3_lsa_originate(ifindex)`.
-                        t if t == OSPFV3_E_ROUTER_LSA_TYPE && ls_id == SR_INFO_LSID => {
-                            self.sr_capabilities_v3_originate(area)
-                        }
-                        // Router Information LSA (RFC 7770), the
-                        // standard carrier of the same capabilities.
-                        t if t == ospf_packet::OSPFV3_ROUTER_INFO_LSA_TYPE
-                            && ls_id == super::srmpls::ROUTER_INFO_V3_INSTANCE =>
-                        {
-                            self.sr_capabilities_v3_originate(area)
-                        }
-                        // SRv6 Locator LSA (RFC 9513) — single
-                        // instance, ls_id == SRV6_LOCATOR_LSID.
-                        t if t == ospf_packet::OSPFV3_SRV6_LOCATOR_LSA_TYPE => {
-                            self.srv6_locator_lsa_originate(area)
-                        }
-                        t if t == OSPFV3_E_ROUTER_LSA_TYPE => self.e_router_v3_lsa_originate(ls_id),
-                        // E-Intra-Area-Prefix-LSA (RFC 8362 §3.7 /
-                        // RFC 8666 §5) carries the per-link
-                        // Prefix-SID; ls_id == ifindex.
-                        t if t == OSPFV3_E_INTRA_AREA_PREFIX_LSA_TYPE => {
-                            self.ext_intra_area_prefix_v3_lsa_originate(ls_id)
-                        }
-                        // Only the default NSSA-LSA (link_state_id
-                        // == 0) is self-originated today. Other
-                        // ls-ids will land here once redistribute
-                        // is wired on v3; for now they're treated
-                        // as no-owner and the generic flush path
-                        // handles them.
-                        t if t == OSPFV3_NSSA_LSA_TYPE && ls_id == 0 => {
-                            self.nssa_default_lsa_originate(area)
-                        }
-                        // Translated Type-5 (RFC 3101 §3.2). If
-                        // `ls_id` matches an entry in any NSSA
-                        // area's `nssa_translated`, re-translate
-                        // (the resync bumps seq#); otherwise it's
-                        // a stray Type-5 we don't own — fall
-                        // through to flush.
-                        t if t == OSPFV3_AS_EXTERNAL_LSA_TYPE => {
-                            let owning_area = self
-                                .areas
-                                .iter()
-                                .find(|(_, a)| a.nssa_translated.contains(&Ipv4Addr::from(ls_id)))
-                                .map(|(&id, _)| id);
-                            if let Some(a) = owning_area {
-                                self.nssa_translate_resync(a);
-                            }
-                        }
-                        _ => {}
-                    }
+                    self.self_originated_received_v3(area_id, key);
                 }
                 match ev {
                     super::lsdb::LsdbEvent::RefreshTimerExpire => self.lsa_refresh_v3(area_id, key),
@@ -18828,6 +19000,7 @@ mod test_support {
             lsa_gen: std::collections::HashMap::new(),
             sweep_areas: None,
             gr_commit: None,
+            restart_relearned: BTreeMap::new(),
             restarting: None,
             key_chains: BTreeMap::new(),
             policy_tx,
@@ -24945,6 +25118,385 @@ mod gr_helper_tests {
         assert_eq!(live(&top), (false, true, true), "v3: held while restarting");
         top.gr_restart_abort_v3();
         assert_eq!(live(&top), (true, false, false), "v3: in line at the exit");
+    }
+
+    /// A self-originated LSA event as the receive path sends it: with the
+    /// receiving interface's area, whatever the LSA's scope.
+    fn self_originated<V: OspfVersion>(key: OspfLsaKey) -> Message<V> {
+        Message::Lsdb(
+            super::super::lsdb::LsdbEvent::SelfOriginatedReceived,
+            Some(AREA0),
+            key,
+        )
+    }
+
+    /// Whether the LSA at `key` in `lsdb` is live (not flushed).
+    fn live_in<V: OspfVersion>(lsdb: &super::super::lsdb::Lsdb<V>, key: OspfLsaKey) -> bool {
+        lsdb.tables
+            .get(&key)
+            .is_some_and(|lsa| lsa.current_age() < OSPF_MAX_AGE)
+    }
+
+    /// RFC 2328 §13.4: a Type-5 of ours received back is flushed unless we
+    /// still originate it; our default route counts. In OSPFv2 the event
+    /// named the receiving interface's area, the LSA was looked up there,
+    /// not found, and never handled. OSPFv3 flushed none, and took its
+    /// default route for no one's.
+    #[tokio::test(start_paused = true)]
+    async fn a_received_type5_of_ours_is_flushed_unless_still_ours() {
+        use super::super::area::DefaultOriginate;
+        let always = DefaultOriginate {
+            always: true,
+            ..Default::default()
+        };
+
+        // OSPFv2.
+        let mut top = v2_top();
+        let gone: Ipv4Net = "203.0.113.0/24".parse().unwrap();
+        top.as_external_lsa_originate_for_prefix(gone, 20, true);
+        top.default_originate = Some(always);
+        top.default_originate_resync();
+        let ext =
+            |p: Ipv4Net| super::super::lsdb::v2_lsa_key(OspfLsType::AsExternal, p.network(), ME);
+        let default: Ipv4Net = "0.0.0.0/0".parse().unwrap();
+        top.process_msg(self_originated(ext(gone))).await;
+        top.process_msg(self_originated(ext(default))).await;
+        assert!(
+            !live_in(&top.lsdb_as, ext(gone)),
+            "v2: none of ours, flushed"
+        );
+        assert!(live_in(&top.lsdb_as, ext(default)), "v2: our default stays");
+
+        // OSPFv3.
+        let mut top = v3_top();
+        let gone: ipnet::Ipv6Net = "2001:db8::/64".parse().unwrap();
+        top.as_external_lsa_originate_for_prefix_v3(gone, 20, true);
+        top.default_originate = Some(always);
+        top.default_originate_resync_v3();
+        let ext = |p: &ipnet::Ipv6Net| {
+            (
+                ospf_packet::OSPFV3_AS_EXTERNAL_LSA_TYPE,
+                nssa_v3_ls_id(p),
+                ME,
+            )
+        };
+        let default: ipnet::Ipv6Net = "::/0".parse().unwrap();
+        top.process_msg(self_originated(ext(&gone))).await;
+        top.process_msg(self_originated(ext(&default))).await;
+        assert!(
+            !live_in(&top.lsdb_as, ext(&gone)),
+            "v3: none of ours, flushed"
+        );
+        assert!(
+            live_in(&top.lsdb_as, ext(&default)),
+            "v3: our default stays"
+        );
+    }
+
+    /// An OSPFv3 Type-7 of ours received back that nothing originates is
+    /// flushed, as in OSPFv2. Only the default one was handled.
+    #[tokio::test(start_paused = true)]
+    async fn an_ospfv3_type7_of_ours_without_an_owner_is_flushed() {
+        use super::super::area::AreaTypeKind;
+        const AREA1: Ipv4Addr = Ipv4Addr::new(0, 0, 0, 1);
+        let mut top = v3_top();
+        top.areas.fetch(AREA1).area_type.kind = AreaTypeKind::Nssa;
+        let gone: ipnet::Ipv6Net = "2001:db8:7::/64".parse().unwrap();
+        top.nssa_lsa_originate_for_prefix_v3(AREA1, gone, 20, true, None);
+        let key = (ospf_packet::OSPFV3_NSSA_LSA_TYPE, nssa_v3_ls_id(&gone), ME);
+        top.process_msg(Message::Lsdb(
+            super::super::lsdb::LsdbEvent::SelfOriginatedReceived,
+            Some(AREA1),
+            key,
+        ))
+        .await;
+        assert!(!live_in(&top.areas.get(AREA1).unwrap().lsdb, key));
+    }
+
+    /// A restarting router accepts a received LSA of its own as valid
+    /// (RFC 3623 §2 (1)): our Type-5 received back stays while restarting,
+    /// though nothing originates it since the boot. The exit deals with it
+    /// (§2.3 (5)): nothing does, and it is flushed. It was flushed at once,
+    /// mid-restart (OSPFv2), or never (OSPFv3).
+    #[tokio::test(start_paused = true)]
+    async fn our_lsas_received_while_restarting_wait_for_the_exit() {
+        // OSPFv2.
+        let mut top = v2_top();
+        top.restarting = Some(restarting(&[(2, S)]));
+        let lsa = v2_external(ME);
+        let key = super::super::lsdb::v2_lsa_key(OspfLsType::AsExternal, lsa.h.ls_id, ME);
+        v2_receive(&mut top, 2, S, lsa).await;
+        top.process_msg(self_originated(key)).await;
+        assert!(live_in(&top.lsdb_as, key), "v2: held while restarting");
+        top.gr_restart_abort();
+        assert!(!live_in(&top.lsdb_as, key), "v2: flushed at the exit");
+
+        // OSPFv3.
+        let mut top = v3_top();
+        top.restarting = Some(restarting(&[(2, S)]));
+        let lsa = v3_external(ME);
+        let key = (lsa.h.ls_type, lsa.h.link_state_id, ME);
+        v3_receive(&mut top, 2, S, lsa).await;
+        top.process_msg(self_originated(key)).await;
+        assert!(live_in(&top.lsdb_as, key), "v3: held while restarting");
+        top.gr_restart_abort_v3();
+        assert!(!live_in(&top.lsdb_as, key), "v3: flushed at the exit");
+    }
+
+    /// The exit handles a held LSA only if it is still as held: one the
+    /// exit re-originated already is not handled again. A redistributed
+    /// Type-5 ends one sequence number up, not two.
+    #[tokio::test(start_paused = true)]
+    async fn the_exit_leaves_a_held_lsa_it_re_originated() {
+        use super::super::area::RedistEntry;
+        use crate::rib::{RibSubType, RibType, RouteEntryV4, RouteEntryV6};
+        let seq =
+            |lsdb: &super::super::lsdb::Lsdb<Ospfv2>, key| lsdb.tables[&key].data.h.ls_seq_number;
+
+        // OSPFv2.
+        let mut top = v2_top();
+        let prefix: Ipv4Net = "203.0.113.0/24".parse().unwrap();
+        top.redist.insert(RibType::Static, RedistEntry::default());
+        top.redist_v4.insert(
+            (RibType::Static, prefix),
+            RouteEntryV4 {
+                prefix,
+                nexthop: Ipv4Addr::UNSPECIFIED,
+                subtype: RibSubType::Default,
+                metric: 0,
+                tag: 0,
+                ifindex: 0,
+            },
+        );
+        top.as_external_lsa_originate_for_prefix(prefix, 20, true);
+        let key = super::super::lsdb::v2_lsa_key(OspfLsType::AsExternal, prefix.network(), ME);
+        let held = seq(&top.lsdb_as, key);
+        top.restarting = Some(restarting(&[(2, S)]));
+        top.process_msg(self_originated(key)).await;
+        top.gr_restart_abort();
+        assert_eq!(seq(&top.lsdb_as, key), held + 1, "v2");
+
+        // OSPFv3.
+        let mut top = v3_top();
+        let prefix: ipnet::Ipv6Net = "2001:db8::/64".parse().unwrap();
+        top.redist.insert(RibType::Static, RedistEntry::default());
+        top.redist_v6.insert(
+            (RibType::Static, prefix),
+            RouteEntryV6 {
+                prefix,
+                nexthop: std::net::Ipv6Addr::UNSPECIFIED,
+                subtype: RibSubType::Default,
+                metric: 0,
+                tag: 0,
+                ifindex: 0,
+            },
+        );
+        top.as_external_lsa_originate_for_prefix_v3(prefix, 20, true);
+        let key = (
+            ospf_packet::OSPFV3_AS_EXTERNAL_LSA_TYPE,
+            nssa_v3_ls_id(&prefix),
+            ME,
+        );
+        let seq3 = |top: &Ospf<Ospfv3>| top.lsdb_as.tables[&key].data.h.ls_seq_number;
+        let held = seq3(&top);
+        top.restarting = Some(restarting(&[(2, S)]));
+        top.process_msg(self_originated(key)).await;
+        top.gr_restart_abort_v3();
+        assert_eq!(seq3(&top), held + 1, "v3");
+    }
+
+    /// The checkpoint records the adjacencies a staged restart must
+    /// re-establish on an interface deleted, or disabled, since it began.
+    /// The interface's link went missing from it, and with it those
+    /// adjacencies: the restored restart did not wait for them.
+    #[tokio::test(start_paused = true)]
+    async fn a_checkpoint_keeps_the_adjacencies_of_a_gone_interface() {
+        use super::super::checkpoint::OspfCheckpoint;
+        let full = |cp: &OspfCheckpoint, ifindex: u32, rid: Ipv4Addr| {
+            cp.links.iter().any(|link| {
+                link.ifindex == ifindex
+                    && link
+                        .neighbors
+                        .iter()
+                        .any(|nbr| nbr.router_id == rid && nbr.was_full)
+            })
+        };
+
+        // OSPFv2.
+        let mut top = v2_top();
+        assert!(top.gr_restart_begin(GRACE, GraceRestartReason::SoftwareRestart));
+        top.link_del(2);
+        top.links.get_mut(&3).unwrap().enabled = false;
+        let cp = OspfCheckpoint::from_instance(&top, GRACE, 1);
+        assert!(full(&cp, 2, S) && full(&cp, 2, O), "v2: deleted");
+        assert!(full(&cp, 3, P), "v2: disabled");
+
+        // OSPFv3.
+        let mut top = v3_top();
+        assert!(top.gr_restart_begin_v3(GRACE, GraceRestartReason::SoftwareRestart));
+        top.link_del(2);
+        top.links.get_mut(&3).unwrap().enabled = false;
+        let cp = OspfCheckpoint::from_instance_v3(&top, GRACE, 1);
+        assert!(full(&cp, 2, S) && full(&cp, 2, O), "v3: deleted");
+        assert!(full(&cp, 3, P), "v3: disabled");
+    }
+
+    /// While a new restart is on, an area left over from the last exit's
+    /// calculations, here one with nothing to compute, installs and sweeps
+    /// nothing (RFC 3623 §2.2): it swept the forwarding the new restart
+    /// keeps. That restart's own exit reruns every area.
+    #[tokio::test(start_paused = true)]
+    async fn a_new_restart_holds_the_last_exits_areas() {
+        use crate::rib::client::{ProtoId, RibClient};
+        const AREA1: Ipv4Addr = Ipv4Addr::new(0, 0, 0, 1);
+        let swept = |rx: &mut mpsc::UnboundedReceiver<crate::rib::client::RibInbound>| {
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .any(|env| matches!(env.msg, rib::Message::SweepStale { .. }))
+        };
+
+        // OSPFv2.
+        let mut top = v2_top();
+        top.areas.fetch(AREA1);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        top.ctx.rib = RibClient::new(tx, ProtoId::from_raw(1));
+        top.restarting = Some(restarting(&[(2, S)]));
+        top.gr_restart_abort();
+        top.process_msg(Message::SpfDone(Box::new(spf_without_routes())))
+            .await;
+        top.restarting = Some(restarting(&[(2, S)]));
+        top.process_msg(Message::SpfCalc(AREA1)).await;
+        assert!(!swept(&mut rx), "v2: not while restarting");
+        top.gr_restart_abort();
+        top.process_msg(Message::SpfCalc(AREA1)).await;
+        top.process_msg(Message::SpfDone(Box::new(spf_without_routes())))
+            .await;
+        assert!(swept(&mut rx), "v2: by that restart's exit");
+
+        // OSPFv3.
+        let mut top = v3_top();
+        top.areas.fetch(AREA1);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        top.ctx.rib = RibClient::new(tx, ProtoId::from_raw(1));
+        top.restarting = Some(restarting(&[(2, S)]));
+        top.gr_restart_abort_v3();
+        top.process_msg(Message::SpfDone(Box::new(spf_without_routes())))
+            .await;
+        top.restarting = Some(restarting(&[(2, S)]));
+        top.process_msg(Message::SpfCalc(AREA1)).await;
+        assert!(!swept(&mut rx), "v3: not while restarting");
+        top.gr_restart_abort_v3();
+        top.process_msg(Message::SpfCalc(AREA1)).await;
+        top.process_msg(Message::SpfDone(Box::new(spf_without_routes())))
+            .await;
+        assert!(swept(&mut rx), "v3: by that restart's exit");
+    }
+
+    /// A checkpoint keeps each LSA at its age when written, not the age it
+    /// arrived with, and the restored LSA ages by the time since: the
+    /// router was down, and its copies elsewhere aged. Here 100 seconds
+    /// old on arrival, 60 later written, restored 30 after that: 190. It
+    /// came back at 100.
+    #[tokio::test(start_paused = true)]
+    async fn a_checkpointed_lsa_keeps_its_age() {
+        use super::super::checkpoint::OspfCheckpoint;
+        let dir = std::env::temp_dir().join(format!(
+            "zebra-rs-ospf-checkpoint-age-{}",
+            std::process::id()
+        ));
+        let path = dir.join("checkpoint.cbor");
+        let ago = |secs| std::time::SystemTime::now() - std::time::Duration::from_secs(secs);
+
+        // OSPFv2.
+        let mut top = v2_top();
+        let mut lsa = v2_router(S, 0, 0x8000_0001);
+        lsa.h.ls_age = 100;
+        v2_receive(&mut top, 2, S, lsa).await;
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        let key = super::super::lsdb::v2_lsa_key(OspfLsType::Router, S, S);
+        let mut cp = OspfCheckpoint::from_instance(&top, GRACE, 1);
+        cp.written_at = ago(30);
+        cp.write_to_path(&path).unwrap();
+        let mut top = v2_top();
+        top.gr_restart_load_checkpoint_from(&path);
+        let age = top.areas.get(AREA0).unwrap().lsdb.tables[&key].current_age();
+        assert!((190..=191).contains(&age), "v2: {age}");
+
+        // OSPFv3.
+        let mut top = v3_top();
+        let mut lsa = v3_router(S, 0, 0x8000_0001);
+        lsa.h.ls_age = 100;
+        v3_receive(&mut top, 2, S, lsa).await;
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        let key = (ospf_packet::OSPFV3_ROUTER_LSA_TYPE, 0, S);
+        let mut cp = OspfCheckpoint::from_instance_v3(&top, GRACE, 1);
+        cp.written_at = ago(30);
+        cp.write_to_path(&path).unwrap();
+        let mut top = v3_top();
+        top.gr_restart_load_checkpoint_v3_from(&path);
+        let age = top.areas.get(AREA0).unwrap().lsdb.tables[&key].current_age();
+        assert!((190..=191).contains(&age), "v3: {age}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An LSA of ours restored from the checkpoint is held as one received
+    /// back (RFC 3623 §2 (1)), and the exit deals with it: here a Type-7
+    /// that nothing originates since the boot is flushed (§2.3 (5)). It
+    /// stayed, refreshed.
+    #[tokio::test(start_paused = true)]
+    async fn the_exit_deals_with_our_restored_lsas() {
+        use super::super::area::AreaTypeKind;
+        use super::super::checkpoint::OspfCheckpoint;
+        const AREA1: Ipv4Addr = Ipv4Addr::new(0, 0, 0, 1);
+        let dir =
+            std::env::temp_dir().join(format!("zebra-rs-ospf-restored-lsa-{}", std::process::id()));
+        let path = dir.join("checkpoint.cbor");
+
+        // OSPFv2.
+        let mut top = v2_top();
+        top.areas.fetch(AREA1).area_type.kind = AreaTypeKind::Nssa;
+        let gone: Ipv4Net = "203.0.113.0/24".parse().unwrap();
+        top.nssa_lsa_originate_for_prefix(AREA1, gone, 20, true, Ipv4Addr::UNSPECIFIED);
+        let key = super::super::lsdb::v2_lsa_key(OspfLsType::NssaAsExternal, gone.network(), ME);
+        assert!(top.gr_restart_begin(GRACE, GraceRestartReason::SoftwareRestart));
+        OspfCheckpoint::from_instance(&top, GRACE, 1)
+            .write_to_path(&path)
+            .unwrap();
+        let mut top = v2_top();
+        top.gr_restart_load_checkpoint_from(&path);
+        assert!(top.in_restart(), "v2: restored");
+        assert!(
+            live_in(&top.areas.get(AREA1).unwrap().lsdb, key),
+            "v2: held"
+        );
+        top.gr_restart_abort();
+        assert!(
+            !live_in(&top.areas.get(AREA1).unwrap().lsdb, key),
+            "v2: flushed"
+        );
+
+        // OSPFv3.
+        let mut top = v3_top();
+        top.areas.fetch(AREA1).area_type.kind = AreaTypeKind::Nssa;
+        let gone: ipnet::Ipv6Net = "2001:db8:7::/64".parse().unwrap();
+        top.nssa_lsa_originate_for_prefix_v3(AREA1, gone, 20, true, None);
+        let key = (ospf_packet::OSPFV3_NSSA_LSA_TYPE, nssa_v3_ls_id(&gone), ME);
+        assert!(top.gr_restart_begin_v3(GRACE, GraceRestartReason::SoftwareRestart));
+        OspfCheckpoint::from_instance_v3(&top, GRACE, 1)
+            .write_to_path(&path)
+            .unwrap();
+        let mut top = v3_top();
+        top.gr_restart_load_checkpoint_v3_from(&path);
+        assert!(top.in_restart(), "v3: restored");
+        assert!(
+            live_in(&top.areas.get(AREA1).unwrap().lsdb, key),
+            "v3: held"
+        );
+        top.gr_restart_abort_v3();
+        assert!(
+            !live_in(&top.areas.get(AREA1).unwrap().lsdb, key),
+            "v3: flushed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// An abort cancels a committed restart: its drain no longer ends the
