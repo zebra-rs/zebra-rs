@@ -210,8 +210,10 @@ pub fn ospf_nfsm_reset_nbr<V: super::version::OspfVersion>(nbr: &mut Neighbor<V>
     // Clear last sent DD copy so a fresh DD is built next time.
     nbr.dd.sent = None;
 
-    // Clear timers.
-    nbr.timer.inactivity = None;
+    // Clear timers, but not the inactivity timer: Hellos keep it, and a
+    // reset that is no kill (RFC 2328 §10.3: SeqNumberMismatch, BadLSReq,
+    // 1-WayReceived, AdjOk) leaves it running; a kill removes the
+    // neighbour. A neighbour reset so, then silent, was never taken down.
     nbr.timer.db_desc = None;
     nbr.timer.db_desc_free = None;
     nbr.timer.ls_upd = None;

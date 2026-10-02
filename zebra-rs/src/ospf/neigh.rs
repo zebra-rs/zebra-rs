@@ -95,6 +95,10 @@ pub struct HelperState {
     /// a restarting DR stays DR (RFC 3623 §3): its first Hellos after
     /// restarting declare neither, and used to hand its role to the BDR.
     pub declared: (Ipv4Addr, Ipv4Addr),
+    /// Whether the neighbour's BFD session went down while it was helped
+    /// and has not come back up. Kept (RFC 5882 §4.3.2); leaving helper
+    /// mode takes the neighbour down, as BFD would have.
+    pub bfd_down: bool,
     /// The neighbour's Router Priority when the help began, kept for DR
     /// election for the same reason: a restarter may advertise another
     /// until its configuration is back, and at 0 it would drop out of the
