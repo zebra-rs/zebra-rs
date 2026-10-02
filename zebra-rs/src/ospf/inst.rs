@@ -804,20 +804,26 @@ impl<V: OspfVersion> Ospf<V> {
         let Some(helper) = nbr.gr_helper.take() else {
             return;
         };
+        let key = *key;
         tracing::info!(
             "[GR Helper] exit for nbr {} on ifindex={} (reason: {})",
             router_id,
             ifindex,
             reason
         );
+        // Its BFD session went down while it was helped and is down still
+        // (RFC 5882 §4.3.2): it goes now, as BFD would have taken it.
+        if helper.bfd_down {
+            self.bfd_kill(ifindex, key);
+        }
         if helper.lapsed {
             let _ = self.tx.send(Message::Nfsm(
                 ifindex,
-                *key,
+                key,
                 super::nfsm::NfsmEvent::InactivityTimer,
             ));
         }
-        let _ = self.tx.send(Message::GrHelperLeft(ifindex, *key));
+        let _ = self.tx.send(Message::GrHelperLeft(ifindex, key));
         // RFC 3623 §3.2: the DR is recalculated, now from the neighbour's
         // own declarations.
         let _ = self
@@ -866,6 +872,46 @@ impl<V: OspfVersion> Ospf<V> {
         self.sweep_areas = Some(self.areas.iter().map(|(id, _)| *id).collect());
         for (_, area) in self.areas.iter_mut() {
             area.spf_predates_exit = area.spf_inflight;
+        }
+    }
+
+    /// A neighbour killed outright (`KillNbr`: `clear ospf neighbor`, a
+    /// replaced Router ID, its BFD session down) is helped no more: the
+    /// help would hold it, as it holds one whose Hellos stopped. An
+    /// operator's clear of a helped neighbour did nothing.
+    fn end_help_for_kill(&mut self, ifindex: u32, key: Ipv4Addr) {
+        if let Some(nbr) = self
+            .links
+            .get_mut(&ifindex)
+            .and_then(|link| link.nbrs.get_mut(&key))
+            && nbr.gr_helper.take().is_some()
+        {
+            tracing::info!(
+                "[GR Helper] exit for nbr {} on ifindex={} (reason: neighbor killed)",
+                nbr.ident.router_id,
+                ifindex
+            );
+        }
+    }
+
+    /// RFC 3623 §2 (3): a restarting router that was the DR on a segment
+    /// elects itself DR again. It knows it was from a Hello, received while
+    /// the interface waits, that lists it as DR: it declares itself DR as
+    /// the wait ends, and the election keeps it. A helper kept us DR (§3),
+    /// but our own election made the BDR DR.
+    fn reclaim_dr(&mut self, ifindex: u32) {
+        if self.restarting.is_none() {
+            return;
+        }
+        let Some(link) = self.links.get_mut(&ifindex) else {
+            return;
+        };
+        if link.state != IfsmState::Waiting {
+            return;
+        }
+        let me = V::ident_dr_id(&link.ident);
+        if link.nbrs.values().any(|nbr| nbr.ident.d_router == me) {
+            link.ident.d_router = me;
         }
     }
 
@@ -1287,6 +1333,8 @@ impl<V: OspfVersion> Ospf<V> {
         // A renewed request keeps a dead interval the neighbour has already
         // let lapse: only a Hello clears it.
         let lapsed = nbr.gr_helper.as_ref().is_some_and(|helper| helper.lapsed);
+        // And a BFD session down: only its coming back up clears it.
+        let bfd_down = nbr.gr_helper.as_ref().is_some_and(|helper| helper.bfd_down);
         // Kept from the request that began the help: a renewal comes from
         // the restarter after it restarted, when its Hellos declare no DR.
         let (declared, priority) = match nbr.gr_helper.as_ref() {
@@ -1305,6 +1353,7 @@ impl<V: OspfVersion> Ospf<V> {
             lapsed,
             declared,
             priority,
+            bfd_down,
         });
         tracing::info!(
             "[GR Helper] {} for nbr {} on ifindex={} (grace={}s, reason={:?})",
@@ -1669,16 +1718,36 @@ impl<V: OspfVersion> Ospf<V> {
             diag = %change.diag,
             "bfd session state change",
         );
-        if change.from == change.to || change.to != bfd_packet::State::Down {
+        if change.from == change.to {
+            return;
+        }
+        if change.to == bfd_packet::State::Up {
+            // Back up while its neighbour is helped: nothing left for the
+            // help's end to do.
+            if let Some(helper) = self
+                .links
+                .get_mut(&key.ifindex)
+                .and_then(|link| {
+                    link.nbrs
+                        .values_mut()
+                        .find(|nbr| nbr.bfd_session_key == Some(key))
+                })
+                .and_then(|nbr| nbr.gr_helper.as_mut())
+            {
+                helper.bfd_down = false;
+            }
+            return;
+        }
+        if change.to != bfd_packet::State::Down {
             return;
         }
 
         let ifindex = key.ifindex;
-        let Some((nbr_addr, protect_addr)) = self.links.get(&ifindex).and_then(|link| {
+        let Some(nbr_addr) = self.links.get(&ifindex).and_then(|link| {
             link.nbrs
                 .iter()
                 .find(|(_, n)| n.bfd_session_key == Some(key))
-                .map(|(addr, n)| (*addr, V::prefix_ip(&n.ident.prefix)))
+                .map(|(addr, _)| *addr)
         }) else {
             tracing::debug!(
                 ?key,
@@ -1687,6 +1756,31 @@ impl<V: OspfVersion> Ospf<V> {
             );
             return;
         };
+        // RFC 5882 §4.3.2: our BFD shares fate with the control plane (it
+        // sends the C bit clear), so a session that fails while its
+        // neighbour restarts gracefully most likely failed with the
+        // restart, and the restart is not aborted. The adjacency and the
+        // session stay, the session to come back up with the restarter;
+        // the subscription used to be dropped, for good while the
+        // neighbour stayed Full, and traffic switched to the repair paths,
+        // away from a restarter still forwarding. Still down when the help
+        // ends, the neighbour goes then (`gr_helper_exit`).
+        if let Some(helper) = self
+            .links
+            .get_mut(&ifindex)
+            .and_then(|link| link.nbrs.get_mut(&nbr_addr))
+            .and_then(|nbr| nbr.gr_helper.as_mut())
+        {
+            helper.bfd_down = true;
+            tracing::info!(
+                ?key,
+                ifindex,
+                diag = %change.diag,
+                "{}: bfd-down for a neighbor being helped; kept (RFC 5882 §4.3.2)",
+                V::PROTO,
+            );
+            return;
+        }
         tracing::warn!(
             ?key,
             ifindex,
@@ -1694,10 +1788,26 @@ impl<V: OspfVersion> Ospf<V> {
             "{}: tearing down adjacency on bfd-down (RFC 5882 §5)",
             V::PROTO,
         );
+        self.bfd_kill(ifindex, nbr_addr);
+    }
 
+    /// Tear the adjacency of the neighbour at `nbr_addr` on `ifindex` down
+    /// for its BFD session down: drop the subscription, switch its
+    /// protected routes to their repairs, and kill it (`KillNbr`).
+    fn bfd_kill(&mut self, ifindex: u32, nbr_addr: Ipv4Addr) {
+        let Some((key, protect_addr)) = self
+            .links
+            .get(&ifindex)
+            .and_then(|link| link.nbrs.get(&nbr_addr))
+            .map(|n| (n.bfd_session_key, V::prefix_ip(&n.ident.prefix)))
+        else {
+            return;
+        };
         // Drop the subscription (clear tracked key + unsubscribe), then
         // drive the neighbor down via the dead-timer event.
-        if let Some(client_tx) = self.bfd_client_tx.as_ref() {
+        if let Some(key) = key
+            && let Some(client_tx) = self.bfd_client_tx.as_ref()
+        {
             let _ = client_tx.send(crate::bfd::inst::ClientReq::Unsubscribe {
                 client: V::PROTO.to_string(),
                 key,
@@ -5201,6 +5311,17 @@ impl Ospf<Ospfv2> {
         // a dedicated originator exists (Router / Network LSA). Otherwise
         // fall back to cloning the old body and bumping the sequence number.
         if ev == LsdbEvent::RefreshTimerExpire {
+            // RFC 3623 §2 (1): a restarting router originates no LSA of types
+            // 1–5 and 7, a refresh included. One due is held as found, and
+            // the exit deals with it. Refresh timers armed before the
+            // restart re-originated them.
+            if self.restarting.is_some()
+                && adv_router == self.router_id
+                && <super::version::Ospfv2 as OspfVersion>::helper_topology_type(key.0)
+            {
+                self.hold_relearned(area_id, key);
+                return;
+            }
             ospf_event_trace!(
                 self.tracing,
                 Lsdb,
@@ -6343,6 +6464,12 @@ impl Ospf<Ospfv2> {
                     );
                     continue;
                 };
+                lsa.set_age(
+                    lsa.h
+                        .ls_age
+                        .saturating_add(aged)
+                        .min(super::lsdb::OSPF_MAX_AGE),
+                );
                 // Our Grace-LSAs wait for their interfaces.
                 if matches!(
                     super::flood::lsa_flood_scope(lsa.h.ls_type),
@@ -6354,12 +6481,6 @@ impl Ospf<Ospfv2> {
                     }
                     continue;
                 }
-                lsa.set_age(
-                    lsa.h
-                        .ls_age
-                        .saturating_add(aged)
-                        .min(super::lsdb::OSPF_MAX_AGE),
-                );
                 if snap.self_originated {
                     // Held until the exit, as one received back (§2 (1)).
                     self.restart_relearned
@@ -7650,6 +7771,9 @@ impl Ospf<Ospfv2> {
                 // (election yield, network-type change, etc.) and
                 // pollutes peers' LSDBs until MaxAge.
                 let prev = self.links.get(&index).map(|l| (l.state, l.area_id));
+                if matches!(ev, IfsmEvent::WaitTimer | IfsmEvent::BackupSeen) {
+                    self.reclaim_dr(index);
+                }
                 let Some(link) = self.links.get_mut(&index) else {
                     return;
                 };
@@ -7687,6 +7811,9 @@ impl Ospf<Ospfv2> {
             Message::Nfsm(index, src, ev) => {
                 if self.inactivity_stale(index, src, ev) {
                     return;
+                }
+                if ev == NfsmEvent::KillNbr {
+                    self.end_help_for_kill(index, src);
                 }
                 let old_state = self
                     .links
@@ -11037,6 +11164,12 @@ impl Ospf<Ospfv3> {
                     );
                     continue;
                 };
+                lsa.set_age(
+                    lsa.h
+                        .ls_age
+                        .saturating_add(aged)
+                        .min(super::lsdb::OSPF_MAX_AGE),
+                );
                 // Our Grace-LSAs wait for their interfaces, as in OSPFv2.
                 // Our Link-LSAs are rebuilt when an interface comes up.
                 if matches!(
@@ -11049,12 +11182,6 @@ impl Ospf<Ospfv3> {
                     }
                     continue;
                 }
-                lsa.set_age(
-                    lsa.h
-                        .ls_age
-                        .saturating_add(aged)
-                        .min(super::lsdb::OSPF_MAX_AGE),
-                );
                 if snap.self_originated {
                     // Held until the exit, as OSPFv2's.
                     self.restart_relearned
@@ -11441,6 +11568,11 @@ impl Ospf<Ospfv3> {
         use super::packet_v3::{Ospfv3LsaScope, ospfv3_ls_type_scope};
         let (ls_type, ls_id, adv_router) = key;
         if adv_router != self.router_id {
+            return;
+        }
+        // RFC 3623 §2 (1), as OSPFv2's: held while restarting.
+        if self.restarting.is_some() && Ospfv3::helper_topology_type(ls_type) {
+            self.hold_relearned(area_id, key);
             return;
         }
         match ospfv3_ls_type_scope(ls_type) {
@@ -12046,6 +12178,9 @@ impl Ospf<Ospfv3> {
                 // dangle referencing the now-MaxAged Network-LSA's
                 // (ls_id, adv_router) until natural MaxAge).
                 let prev = self.links.get(&index).map(|l| (l.state, l.area_id));
+                if matches!(ev, IfsmEvent::WaitTimer | IfsmEvent::BackupSeen) {
+                    self.reclaim_dr(index);
+                }
                 let Some(link) = self.links.get_mut(&index) else {
                     return;
                 };
@@ -12104,6 +12239,9 @@ impl Ospf<Ospfv3> {
             Message::Nfsm(index, src, ev) => {
                 if self.inactivity_stale(index, src, ev) {
                     return;
+                }
+                if ev == NfsmEvent::KillNbr {
+                    self.end_help_for_kill(index, src);
                 }
                 let old_state = self
                     .links
@@ -25497,6 +25635,332 @@ mod gr_helper_tests {
             "v3: flushed"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `clear ospf neighbor` takes a helped neighbour down too: a kill
+    /// ends the help (`end_help_for_kill`). The help held it, as it holds
+    /// one whose Hellos stopped, and the clear did nothing.
+    #[tokio::test(start_paused = true)]
+    async fn a_clear_ends_the_help() {
+        use super::super::nfsm::NfsmEvent::KillNbr;
+        let kill = |msg: &Message<_>| matches!(msg, Message::Nfsm(2, _, KillNbr));
+
+        // OSPFv2.
+        let mut top = v2_top();
+        v2_receive(&mut top, 2, S, v2_grace(1, 0x8000_0001)).await;
+        assert!(helping(&top), "v2: helping");
+        top.clear_neighbor(Some(S));
+        for msg in queued(&mut top, kill) {
+            top.process_msg(msg).await;
+        }
+        assert!(v2_s(&top).is_none(), "v2: cleared");
+
+        // OSPFv3.
+        let mut top = v3_top();
+        v3_receive(&mut top, 2, S, v3_grace(1, 0x8000_0001)).await;
+        assert!(helping(&top), "v3: helping");
+        top.clear_neighbor(Some(S));
+        let kill = |msg: &Message<_>| matches!(msg, Message::Nfsm(2, _, KillNbr));
+        for msg in queued(&mut top, kill) {
+            top.process_msg(msg).await;
+        }
+        assert!(v3_s(&top).is_none(), "v3: cleared");
+    }
+
+    /// A helped neighbour's BFD session going down keeps the adjacency and
+    /// the session (RFC 5882 §4.3.2: our BFD shares fate with the control
+    /// plane, so it most likely went down with the restart). The neighbour
+    /// goes when the help ends, if the session is still down then. Back up
+    /// before that, it stays. The subscription used to be dropped, for good
+    /// while the neighbour stayed Full.
+    #[tokio::test(start_paused = true)]
+    async fn bfd_down_waits_for_the_help_to_end() {
+        use super::super::nfsm::NfsmEvent::KillNbr;
+        use crate::bfd::inst::BfdEvent;
+        use crate::bfd::session::{SessionKey, StateChange};
+        let change = |key, from, to| BfdEvent::StateChange {
+            key,
+            change: StateChange {
+                from,
+                to,
+                diag: bfd_packet::Diag::ControlDetectionTimeExpired,
+            },
+        };
+        let (up, down) = (bfd_packet::State::Up, bfd_packet::State::Down);
+        for back_up in [false, true] {
+            // OSPFv2.
+            let mut top = v2_top();
+            v2_receive(&mut top, 2, S, v2_grace(1, 0x8000_0001)).await;
+            let key = SessionKey {
+                local: "192.0.2.1".parse().unwrap(),
+                remote: v2_addr(S).into(),
+                ifindex: 2,
+                multihop: false,
+            };
+            let nbr = top.links.get_mut(&2).unwrap().nbrs.get_mut(&v2_addr(S));
+            nbr.unwrap().bfd_session_key = Some(key);
+            top.process_bfd_event(change(key, up, down));
+            let kill = |msg: &Message<_>| matches!(msg, Message::Nfsm(2, _, KillNbr));
+            assert!(queued(&mut top, kill).is_empty(), "v2: kept while helped");
+            assert_eq!(
+                v2_s(&top).unwrap().bfd_session_key,
+                Some(key),
+                "v2: session kept"
+            );
+            // A renewed request keeps it.
+            later().await;
+            v2_receive(&mut top, 2, S, v2_grace(1, 0x8000_0002)).await;
+            if back_up {
+                top.process_bfd_event(change(key, down, up));
+            }
+            top.gr_helper_exit(2, S, "test");
+            for msg in queued(&mut top, kill) {
+                top.process_msg(msg).await;
+            }
+            assert_eq!(v2_s(&top).is_some(), back_up, "v2, back up {back_up}");
+
+            // OSPFv3.
+            let mut top = v3_top();
+            v3_receive(&mut top, 2, S, v3_grace(1, 0x8000_0001)).await;
+            let key = SessionKey {
+                local: "fe80::2:1".parse().unwrap(),
+                remote: super::link_scope_tests::v3_ll(S).into(),
+                ifindex: 2,
+                multihop: false,
+            };
+            top.links
+                .get_mut(&2)
+                .unwrap()
+                .nbrs
+                .get_mut(&S)
+                .unwrap()
+                .bfd_session_key = Some(key);
+            top.process_bfd_event(change(key, up, down));
+            let kill = |msg: &Message<_>| matches!(msg, Message::Nfsm(2, _, KillNbr));
+            assert!(queued(&mut top, kill).is_empty(), "v3: kept while helped");
+            assert_eq!(
+                v3_s(&top).unwrap().bfd_session_key,
+                Some(key),
+                "v3: session kept"
+            );
+            // A renewed request keeps it.
+            later().await;
+            v3_receive(&mut top, 2, S, v3_grace(1, 0x8000_0002)).await;
+            if back_up {
+                top.process_bfd_event(change(key, down, up));
+            }
+            top.gr_helper_exit(2, S, "test");
+            for msg in queued(&mut top, kill) {
+                top.process_msg(msg).await;
+            }
+            assert_eq!(v3_s(&top).is_some(), back_up, "v3, back up {back_up}");
+        }
+    }
+
+    /// RFC 3623 §2 (3): a restarting router that was the DR elects itself DR
+    /// again when, as its interface waits, a Hello lists it as DR. O, the
+    /// BDR, lists us. We elected O. Not restarting, O it is; and only as
+    /// the interface waits.
+    #[tokio::test(start_paused = true)]
+    async fn a_restarting_dr_elects_itself_again() {
+        // Not waiting: a Hello listing us as DR changes nothing.
+        let mut top = v2_top();
+        top.restarting = Some(restarting(&[(2, S)]));
+        let link = top.links.get_mut(&2).unwrap();
+        link.state = IfsmState::DROther;
+        link.ident.prefix = "192.0.2.1/24".parse().unwrap();
+        for nbr in link.nbrs.values_mut() {
+            nbr.ident.d_router = "192.0.2.1".parse().unwrap();
+        }
+        top.process_msg(Message::Ifsm(2, IfsmEvent::BackupSeen))
+            .await;
+        assert!(top.links[&2].ident.d_router.is_unspecified(), "not waiting");
+
+        for restarting_now in [true, false] {
+            // OSPFv2.
+            let me: Ipv4Addr = "192.0.2.1".parse().unwrap();
+            let mut top = v2_top();
+            if restarting_now {
+                top.restarting = Some(restarting(&[(2, S)]));
+            }
+            let link = top.links.get_mut(&2).unwrap();
+            link.state = IfsmState::Waiting;
+            link.ident.prefix = "192.0.2.1/24".parse().unwrap();
+            link.ident.priority = 1;
+            link.flags.set_hello_sent(true);
+            for nbr in link.nbrs.values_mut() {
+                nbr.state = NfsmState::TwoWay;
+            }
+            let hello = Ospfv2Packet::new(
+                &O,
+                &AREA0,
+                Ospfv2Payload::Hello(ospf_packet::OspfHello {
+                    netmask: "255.255.255.0".parse().unwrap(),
+                    hello_interval: 10,
+                    options: 0x42u8.into(),
+                    priority: 1,
+                    router_dead_interval: 40,
+                    d_router: me,
+                    bd_router: v2_addr(O),
+                    neighbors: vec![ME],
+                }),
+            );
+            super::super::packet::ospf_hello_recv(&ME, link, &hello, &v2_addr(O), &top.tracing);
+            top.process_msg(Message::Ifsm(2, IfsmEvent::WaitTimer))
+                .await;
+            let dr = if restarting_now { me } else { v2_addr(O) };
+            assert_eq!(
+                top.links[&2].ident.d_router, dr,
+                "v2, restarting {restarting_now}"
+            );
+
+            // OSPFv3.
+            let mut top = v3_top();
+            if restarting_now {
+                top.restarting = Some(restarting(&[(2, S)]));
+            }
+            let link = top.links.get_mut(&2).unwrap();
+            link.state = IfsmState::Waiting;
+            link.ident.priority = 1;
+            link.flags.set_hello_sent(true);
+            for nbr in link.nbrs.values_mut() {
+                nbr.state = NfsmState::TwoWay;
+            }
+            let mut options = ospf_packet::Ospfv3Options::default();
+            options.set_e(true);
+            let hello = ospf_packet::Ospfv3Packet::new(
+                &O,
+                &AREA0,
+                0,
+                ospf_packet::Ospfv3Payload::Hello(ospf_packet::Ospfv3Hello {
+                    interface_id: 3,
+                    priority: 1,
+                    options,
+                    hello_interval: 10,
+                    router_dead_interval: 40,
+                    d_router: ME,
+                    bd_router: O,
+                    neighbors: vec![ME],
+                }),
+            );
+            let src = super::link_scope_tests::v3_ll(O);
+            super::super::packet_v3::ospfv3_hello_recv(&ME, link, &hello, &src, &top.tracing);
+            top.process_msg(Message::Ifsm(2, IfsmEvent::WaitTimer))
+                .await;
+            let dr = if restarting_now { ME } else { O };
+            assert_eq!(
+                top.links[&2].ident.d_router, dr,
+                "v3, restarting {restarting_now}"
+            );
+        }
+    }
+
+    /// A neighbour reset back to ExStart (RFC 2328 §10.3: SeqNumberMismatch,
+    /// BadLSReq) keeps its dead timer: only Hellos keep it, and only a kill
+    /// stops it. The reset stopped it, and a neighbour silent since was
+    /// never taken down.
+    #[tokio::test(start_paused = true)]
+    async fn a_neighbour_reset_keeps_its_dead_timer() {
+        use super::super::nfsm::NfsmEvent::{BadLSReq, HelloReceived, SeqNumberMismatch};
+        for reset in [SeqNumberMismatch, BadLSReq] {
+            let mut top = v2_top();
+            top.process_msg(Message::Nfsm(2, v2_addr(S), HelloReceived))
+                .await;
+            top.process_msg(Message::Nfsm(2, v2_addr(S), reset)).await;
+            let nbr = v2_s(&top).unwrap();
+            assert!(nbr.timer.inactivity.is_some(), "v2: {reset}");
+
+            let mut top = v3_top();
+            top.process_msg(Message::Nfsm(2, S, HelloReceived)).await;
+            top.process_msg(Message::Nfsm(2, S, reset)).await;
+            let nbr = v3_s(&top).unwrap();
+            assert!(nbr.timer.inactivity.is_some(), "v3: {reset}");
+        }
+    }
+
+    /// RFC 3623 §2 (1): a restarting router originates no LSA of types 1–5
+    /// and 7, a refresh included. The refresh timer of our Type-5, armed
+    /// before the restart, leaves it as it was, and the exit deals with
+    /// it: nothing originates it, and it is flushed. The timer
+    /// re-originated it mid-restart.
+    #[tokio::test(start_paused = true)]
+    async fn a_refresh_due_while_restarting_waits_for_the_exit() {
+        use super::super::lsdb::LsdbEvent::RefreshTimerExpire;
+        let refresh = std::time::Duration::from_secs(1801);
+
+        // OSPFv2.
+        let mut top = v2_top();
+        let lsa = v2_external(ME);
+        let key = super::super::lsdb::v2_lsa_key(OspfLsType::AsExternal, lsa.h.ls_id, ME);
+        let seq = lsa.h.ls_seq_number;
+        let tx = top.tx.clone();
+        top.lsdb_as.install_originated(lsa, &tx, None, &top.tracing);
+        top.restarting = Some(restarting(&[(2, S)]));
+        tokio::time::sleep(refresh).await;
+        let due = |msg: &Message<_>| matches!(msg, Message::Lsdb(RefreshTimerExpire, None, _));
+        for msg in queued(&mut top, due) {
+            top.process_msg(msg).await;
+        }
+        let lsa = &top.lsdb_as.tables[&key];
+        assert_eq!(lsa.data.h.ls_seq_number, seq, "v2: not refreshed");
+        top.gr_restart_abort();
+        assert!(!live_in(&top.lsdb_as, key), "v2: flushed at the exit");
+
+        // OSPFv3.
+        let mut top = v3_top();
+        let lsa = v3_external(ME);
+        let key = (lsa.h.ls_type, lsa.h.link_state_id, ME);
+        let seq = lsa.h.ls_seq_number;
+        let tx = top.tx.clone();
+        top.lsdb_as.install_originated(lsa, &tx, None, &top.tracing);
+        top.restarting = Some(restarting(&[(2, S)]));
+        tokio::time::sleep(refresh).await;
+        let due = |msg: &Message<_>| matches!(msg, Message::Lsdb(RefreshTimerExpire, None, _));
+        for msg in queued(&mut top, due) {
+            top.process_msg(msg).await;
+        }
+        let lsa = &top.lsdb_as.tables[&key];
+        assert_eq!(lsa.data.h.ls_seq_number, seq, "v3: not refreshed");
+        top.gr_restart_abort_v3();
+        assert!(!live_in(&top.lsdb_as, key), "v3: flushed at the exit");
+    }
+
+    /// Our Grace-LSAs restored from the checkpoint age by the downtime, as
+    /// the other LSAs do.
+    #[tokio::test(start_paused = true)]
+    async fn restored_grace_lsas_age_by_the_downtime() {
+        use super::super::checkpoint::OspfCheckpoint;
+        let mut top = v2_top();
+        assert!(top.gr_restart_begin(GRACE, GraceRestartReason::SoftwareRestart));
+        tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+        let cp = OspfCheckpoint::from_instance(&top, GRACE, 1);
+        let mut top = v2_top();
+        top.gr_restart_replay_areas_aged(&cp.areas, 10);
+        let ages: Vec<u16> = top
+            .restored_link_lsas
+            .iter()
+            .map(|(_, l)| l.h.ls_age)
+            .collect();
+        assert!(
+            !ages.is_empty() && ages.iter().all(|age| *age == 30),
+            "v2: {ages:?}"
+        );
+
+        let mut top = v3_top();
+        assert!(top.gr_restart_begin_v3(GRACE, GraceRestartReason::SoftwareRestart));
+        tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+        let cp = OspfCheckpoint::from_instance_v3(&top, GRACE, 1);
+        let mut top = v3_top();
+        top.gr_restart_replay_areas_aged(&cp.areas, 10);
+        let ages: Vec<u16> = top
+            .restored_link_lsas
+            .iter()
+            .map(|(_, l)| l.h.ls_age)
+            .collect();
+        assert!(
+            !ages.is_empty() && ages.iter().all(|age| *age == 30),
+            "v3: {ages:?}"
+        );
     }
 
     /// An abort cancels a committed restart: its drain no longer ends the
