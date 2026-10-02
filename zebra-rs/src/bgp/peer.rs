@@ -2964,7 +2964,11 @@ pub fn fsm_connected(peer: &mut Peer, role: Role, stream: TcpStream) -> State {
     }
     apply_session_ttl(peer, &stream);
     record_session_mss(peer, &stream);
-    peer.task.connect = None;
+    // This is our dial, done; an inbound one leaves ours in flight (see
+    // `handle_peer_connection`).
+    if role == Role::Active {
+        peer.task.connect = None;
+    }
     let conn_id = peer.alloc_conn_id();
     let (packet_tx, packet_rx) = mpsc::unbounded_channel::<BytesMut>();
     peer.packet_tx = Some(packet_tx);
@@ -3905,8 +3909,13 @@ pub(super) fn handle_peer_connection(
                 None
             }
             State::Connect => {
-                // Cancel connect task.
-                peer.task.connect = None;
+                // Our own dial stays in flight: the remote may have taken
+                // it already. Cancelling it dropped a connection the
+                // remote was establishing on. When both sides took the
+                // other's dial while dialling, each killed the one the
+                // other had kept, and both redialled after the idle hold.
+                // If it completes, it is parked as the §6.8 collision
+                // conn (`Event::Connected` in OpenSent).
                 peer.state = fsm_connected(peer, Role::Passive, stream);
                 None
             }
@@ -4907,8 +4916,12 @@ mod fsm_idle_hold_tests {
     }
 
     /// While the dial is still in flight (Connect), an inbound connect
-    /// wins immediately: the pending dial is cancelled and the inbound
-    /// carries the session.
+    /// carries the session at once, and the dial goes on: the remote may
+    /// have taken it already. Cancelling it dropped the connection the
+    /// remote kept, and when both sides took the other's dial while
+    /// dialling, both sessions died for an idle hold. Completing, the
+    /// dial is parked as the collision conn
+    /// (`dial_completing_after_accept_parks_as_collision`).
     #[tokio::test]
     async fn inbound_connection_while_dialing_is_promoted() {
         let mut peer = test_peer(false);
@@ -4928,10 +4941,7 @@ mod fsm_idle_hold_tests {
         assert!(leftover.is_none());
         let peer = peers.get(&addr).unwrap();
         assert_eq!(peer.state, State::OpenSent);
-        assert!(
-            peer.task.connect.is_none(),
-            "the pending dial must be cancelled"
-        );
+        assert!(peer.task.connect.is_some(), "the pending dial goes on");
         assert_eq!(peer.primary_role, Some(Role::Passive));
     }
 
