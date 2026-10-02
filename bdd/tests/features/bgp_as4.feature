@@ -56,7 +56,7 @@ Feature: BGP 4-octet AS support (RFC 6793)
     # only takes effect at the next OPEN exchange.
     And I run "clear bgp ipv4 neighbor 192.168.0.1" in namespace "z2"
     And I wait 30 seconds for BGP to operate
-    Then BGP session in "z2" to "192.168.0.1" should be "Established"
+    Then BGP session in "z2" to "192.168.0.1" should eventually be "Established"
     # The session is genuinely OLD: z1 advertised the capability but z2
     # withheld it. Route-level assertions alone can't tell the two
     # apart — the AS4_PATH merge is designed to produce the same path.

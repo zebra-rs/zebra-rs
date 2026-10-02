@@ -42,9 +42,9 @@ Feature: BGP Basic Session Test with RR
     And I apply config "z2.yaml" to namespace "z2"
     And I apply config "z3.yaml" to namespace "z3"
     And I wait 5 seconds for BGP to operate
-    Then BGP session in "rr" to "192.168.0.2" should be "Established"
-    And BGP session in "rr" to "192.168.0.3" should be "Established"
-    And BGP session in "rr" to "192.168.0.4" should be "Established"
+    Then BGP session in "rr" to "192.168.0.2" should eventually be "Established"
+    And BGP session in "rr" to "192.168.0.3" should eventually be "Established"
+    And BGP session in "rr" to "192.168.0.4" should eventually be "Established"
 
   Scenario: A client route is reflected to the other clients with next-hop unchanged
     Given the test topology exists

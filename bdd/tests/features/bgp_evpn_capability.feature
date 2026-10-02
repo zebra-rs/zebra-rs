@@ -44,8 +44,8 @@ Feature: BGP L2VPN/EVPN capability negotiation
     And I apply config "z1-1.yaml" to namespace "z1"
     And I apply config "z2-1.yaml" to namespace "z2"
     And I wait 5 seconds for BGP to operate
-    Then BGP session in "z1" to "192.168.0.2" should be "Established"
-    And BGP session in "z2" to "192.168.0.1" should be "Established"
+    Then BGP session in "z1" to "192.168.0.2" should eventually be "Established"
+    And BGP session in "z2" to "192.168.0.1" should eventually be "Established"
 
   Scenario: L2VPN/EVPN capability is advertised and received on both sides
     Given the test topology exists

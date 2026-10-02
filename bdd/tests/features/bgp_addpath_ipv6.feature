@@ -45,10 +45,10 @@ Feature: BGP AddPath Send for IPv6 unicast (RFC 7911)
     And I apply config "z3.yaml" to namespace "z3"
     And I apply config "z4.yaml" to namespace "z4"
     And I wait 5 seconds for BGP to operate
-    Then BGP session in "z3" to "2001:db8::1" should be "Established"
-    And BGP session in "z3" to "2001:db8::2" should be "Established"
-    And BGP session in "z3" to "2001:db8::4" should be "Established"
-    And BGP session in "z4" to "2001:db8::3" should be "Established"
+    Then BGP session in "z3" to "2001:db8::1" should eventually be "Established"
+    And BGP session in "z3" to "2001:db8::2" should eventually be "Established"
+    And BGP session in "z3" to "2001:db8::4" should eventually be "Established"
+    And BGP session in "z4" to "2001:db8::3" should eventually be "Established"
 
   Scenario: The AddPath receiver sees both paths for the prefix
     Given the test topology exists

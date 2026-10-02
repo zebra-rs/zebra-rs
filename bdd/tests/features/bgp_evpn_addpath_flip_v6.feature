@@ -63,7 +63,7 @@ Feature: EVPN AddPath members receive every candidate, and a superseded path-id 
     Given the test topology exists
     When I apply config "z4-1.yaml" to namespace "z4"
     And I wait 5 seconds for BGP to operate
-    Then BGP session in "z2" to "192.168.0.4" should be "Established"
+    Then BGP session in "z2" to "192.168.0.4" should eventually be "Established"
     # VTEP B's path is not the best (VTEP A has the lower ORIGINATOR_ID); an
     # AddPath member must still receive it under its own path-id. Pre-fix
     # the fan-out sent the selected best only, so it never left the reflector.

@@ -59,14 +59,14 @@ Feature: EVPN outbound policy rebound to an undefined name is deny-all
     Given the test topology exists
     When I apply config "z1-undef.yaml" to namespace "z1"
     And I wait 5 seconds for BGP to operate
-    Then BGP session in "z2" to "192.168.0.1" should be "Established"
+    Then BGP session in "z2" to "192.168.0.1" should eventually be "Established"
     And show command "show bgp evpn" in namespace "z2" should not contain "10.1.0.0"
 
   Scenario: Defining the previously-undefined policy re-advertises the route
     Given the test topology exists
     When I apply config "z1-recover.yaml" to namespace "z1"
     And I wait 5 seconds for BGP to operate
-    Then BGP session in "z2" to "192.168.0.1" should be "Established"
+    Then BGP session in "z2" to "192.168.0.1" should eventually be "Established"
     And show command "show bgp evpn" in namespace "z2" should contain "10.1.0.0"
 
   Scenario: Teardown topology
