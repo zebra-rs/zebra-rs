@@ -165,6 +165,17 @@ pub struct RestartingState {
     pub adjacencies: BTreeSet<(u32, Ipv4Addr)>,
 }
 
+/// A committed graceful restart whose drain is pending: the process exits
+/// when it ends (`Message::GrRestartExit`).
+#[derive(Debug)]
+pub struct GrCommit {
+    /// When the drain ends.
+    pub drain_due: tokio::time::Instant,
+    /// The checkpoint the commit wrote, deleted if the restart is aborted
+    /// first: the next boot must not replay it.
+    pub checkpoint: std::path::PathBuf,
+}
+
 /// What a Router-LSA says its router is adjacent to (RFC 2328 §A.4.2,
 /// RFC 5340 §A.4.3): the routers at the far end of its point-to-point and
 /// virtual links, and the transit networks it is on, each by its
@@ -211,6 +222,9 @@ impl RestartingState {
 pub struct Neighbor<V: OspfVersion = Ospfv2> {
     pub ifindex: u32,
     pub ident: Identity<V>,
+    /// When its last Hello was processed (`HelloReceived`): an inactivity
+    /// expiry is real only a dead interval after it.
+    pub heard_at: Option<tokio::time::Instant>,
     pub state: NfsmState,
     pub ostate: NfsmState,
     pub timer: NeighborTimer,
@@ -359,6 +373,7 @@ where
             ls_rxmt_changed: BTreeSet::new(),
             uptime: Instant::now(),
             dead_interval,
+            heard_at: None,
             last_progressive: None,
             last_regressive: None,
             last_regressive_reason: None,

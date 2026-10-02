@@ -306,11 +306,20 @@ mod tests {
     use crate::bfd::socket::{bfd_socket_ipv4, bfd_socket_ipv6};
     use crate::context::ProtoContext;
 
-    fn loopback_recv_socket() -> (Arc<AsyncFd<Socket>>, u16) {
+    /// A receive socket on a loopback address of its own, 127.0.53.N.
+    /// `bfd_socket_ipv4` sets SO_REUSEADDR, and the kernel then hands a
+    /// port-0 bind a port another such socket holds: two tests running at
+    /// once, both on 127.0.0.1, could share one, and the later-bound
+    /// socket took every datagram for both. The earlier one timed out
+    /// (`loopback_recv_one_packet`, "recv timed out").
+    fn loopback_recv_socket() -> (Arc<AsyncFd<Socket>>, SocketAddrV4) {
+        static NEXT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1);
+        let host = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let ctx = ProtoContext::default_table_no_rib();
-        let sock = bfd_socket_ipv4(&ctx, SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let port = sock.local_addr().unwrap().as_socket_ipv4().unwrap().port();
-        (Arc::new(AsyncFd::new(sock).unwrap()), port)
+        let addr = Ipv4Addr::new(127, 0, 53, host);
+        let sock = bfd_socket_ipv4(&ctx, SocketAddrV4::new(addr, 0)).unwrap();
+        let bound = sock.local_addr().unwrap().as_socket_ipv4().unwrap();
+        (Arc::new(AsyncFd::new(sock).unwrap()), bound)
     }
 
     fn loopback_recv_socket_v6() -> (Arc<AsyncFd<Socket>>, u16) {
@@ -339,7 +348,7 @@ mod tests {
         sock.send_to(buf, &SockAddr::from(dst)).unwrap();
     }
 
-    fn send_raw(buf: &[u8], dst_port: u16, ttl: u32) {
+    fn send_raw(buf: &[u8], dst: SocketAddrV4, ttl: u32) {
         let sock = Socket::new(
             socket2::Domain::IPV4,
             socket2::Type::DGRAM,
@@ -349,7 +358,6 @@ mod tests {
         sock.set_ttl_v4(ttl).unwrap();
         sock.bind(&SockAddr::from(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)))
             .unwrap();
-        let dst = SocketAddrV4::new(Ipv4Addr::LOCALHOST, dst_port);
         sock.send_to(buf, &SockAddr::from(dst)).unwrap();
     }
 
@@ -358,7 +366,7 @@ mod tests {
     /// recv path delivers a parsed [`Message::Recv`].
     #[tokio::test]
     async fn loopback_recv_one_packet() {
-        let (sock, port) = loopback_recv_socket();
+        let (sock, dst) = loopback_recv_socket();
         let (tx, mut rx) = mpsc::unbounded_channel();
         let read_handle = tokio::spawn(async move { read_packet(sock, tx, false).await });
 
@@ -369,7 +377,7 @@ mod tests {
         };
         let mut wire = BytesMut::new();
         packet.emit(&mut wire);
-        send_raw(&wire, port, 255);
+        send_raw(&wire, dst, 255);
 
         let got = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
             .await
@@ -393,7 +401,7 @@ mod tests {
     /// TTL up for the demux layer to accept or drop.
     #[tokio::test]
     async fn low_ttl_forwarded_for_demux_check() {
-        let (sock, port) = loopback_recv_socket();
+        let (sock, dst) = loopback_recv_socket();
         let (tx, mut rx) = mpsc::unbounded_channel();
         let read_handle = tokio::spawn(async move { read_packet(sock, tx, false).await });
 
@@ -404,7 +412,7 @@ mod tests {
         };
         let mut wire = BytesMut::new();
         packet.emit(&mut wire);
-        send_raw(&wire, port, 1);
+        send_raw(&wire, dst, 1);
 
         let got = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
             .await
@@ -461,7 +469,7 @@ mod tests {
     /// validation; no event reaches the channel.
     #[tokio::test]
     async fn parse_error_dropped() {
-        let (sock, port) = loopback_recv_socket();
+        let (sock, dst) = loopback_recv_socket();
         let (tx, mut rx) = mpsc::unbounded_channel();
         let read_handle = tokio::spawn(async move { read_packet(sock, tx, false).await });
 
@@ -472,7 +480,7 @@ mod tests {
         wire[2] = 3; // detect mult
         wire[3] = 24; // length
         // my_disc bytes 4..8 left zero on purpose.
-        send_raw(&wire, port, 255);
+        send_raw(&wire, dst, 255);
 
         let timed = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await;
         assert!(timed.is_err(), "malformed packet must be dropped");

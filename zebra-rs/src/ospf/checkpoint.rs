@@ -205,6 +205,97 @@ fn own_grace_lsas<V: super::version::OspfVersion>(
         .filter(move |((ls_type, _, adv_router), _)| *ls_type == grace && *adv_router == router_id)
 }
 
+/// The neighbours a link's checkpoint records (`nbrs` keys as the
+/// interface address). While a restart is staged, a neighbour is recorded
+/// as Full if the restart must re-establish its adjacency
+/// (`RestartingState::adjacencies`), not if it is Full now: one that left
+/// Full between the restart's begin and its commit was dropped, and the
+/// restored restart did not wait for it. One that has left the link is
+/// recorded by its Router ID.
+fn link_neighbors<V: super::version::OspfVersion>(
+    restarting: Option<&super::neigh::RestartingState>,
+    ifindex: u32,
+    link: &super::link::OspfLink<V>,
+) -> Vec<NeighborCheckpoint> {
+    let mut neighbors: Vec<NeighborCheckpoint> = link
+        .nbrs
+        .iter()
+        .map(|(key, nbr)| NeighborCheckpoint {
+            router_id: nbr.ident.router_id,
+            interface_addr: *key,
+            was_full: match restarting {
+                Some(state) => state.adjacencies.contains(&(ifindex, nbr.ident.router_id)),
+                None => nbr.state == super::nfsm::NfsmState::Full,
+            },
+        })
+        .collect();
+    for (_, router_id) in restarting
+        .iter()
+        .flat_map(|state| state.adjacencies.iter())
+        .filter(|(on, _)| *on == ifindex)
+    {
+        if !neighbors.iter().any(|n| n.router_id == *router_id) {
+            neighbors.push(NeighborCheckpoint {
+                router_id: *router_id,
+                interface_addr: Ipv4Addr::UNSPECIFIED,
+                was_full: true,
+            });
+        }
+    }
+    neighbors
+}
+
+/// An LSA at its age now, not the age it arrived with: the checkpoint
+/// restored one younger than its copies elsewhere, and kept it the longer.
+fn aged_now<L: Clone>(lsa: &L, age: u16, set_age: fn(&mut L, u16)) -> L {
+    let mut lsa = lsa.clone();
+    set_age(&mut lsa, age);
+    lsa
+}
+
+/// `links` with one more for each interface a staged restart must
+/// re-establish adjacencies on but none of them records: deleted, or
+/// disabled, since the restart began. Its adjacencies were dropped, and
+/// the restored restart did not wait for them. Only the adjacencies are
+/// read back.
+fn with_gone_links<V: super::version::OspfVersion>(
+    ospf: &Ospf<V>,
+    mut links: Vec<LinkCheckpoint>,
+) -> Vec<LinkCheckpoint> {
+    let Some(state) = ospf.restarting.as_ref() else {
+        return links;
+    };
+    for (ifindex, router_id) in &state.adjacencies {
+        if !links.iter().any(|link| link.ifindex == *ifindex) {
+            links.push(LinkCheckpoint {
+                ifindex: *ifindex,
+                area_id: ospf
+                    .links
+                    .get(ifindex)
+                    .map_or(Ipv4Addr::UNSPECIFIED, |link| link.area),
+                ifname: ospf
+                    .links
+                    .get(ifindex)
+                    .map(|link| link.name.clone())
+                    .unwrap_or_default(),
+                neighbors: Vec::new(),
+            });
+        }
+        let link = links
+            .iter_mut()
+            .find(|link| link.ifindex == *ifindex)
+            .expect("just added");
+        if !link.neighbors.iter().any(|n| n.router_id == *router_id) {
+            link.neighbors.push(NeighborCheckpoint {
+                router_id: *router_id,
+                interface_addr: Ipv4Addr::UNSPECIFIED,
+                was_full: true,
+            });
+        }
+    }
+    links
+}
+
 /// How much of its grace period the restart has used (`grace_used_ms`).
 fn grace_used_ms(restarting: Option<&super::neigh::RestartingState>) -> u64 {
     restarting.map_or(0, |state| {
@@ -231,8 +322,10 @@ impl OspfCheckpoint {
                     ))
                     .map(|(key, lsa)| {
                         let mut buf = BytesMut::new();
-                        lsa.data.h.emit(&mut buf);
-                        lsa.data.emit_lsp(&mut buf);
+                        let data =
+                            aged_now(&lsa.data, lsa.current_age(), ospf_packet::OspfLsa::set_age);
+                        data.h.emit(&mut buf);
+                        data.emit_lsp(&mut buf);
                         LsaSnapshot {
                             key: *key,
                             ls_seq_number: lsa.data.h.ls_seq_number,
@@ -255,15 +348,7 @@ impl OspfCheckpoint {
             .iter()
             .filter(|(_, link)| link.enabled)
             .map(|(ifindex, link)| {
-                let neighbors = link
-                    .nbrs
-                    .iter()
-                    .map(|(addr, nbr)| NeighborCheckpoint {
-                        router_id: nbr.ident.router_id,
-                        interface_addr: *addr,
-                        was_full: nbr.state == super::nfsm::NfsmState::Full,
-                    })
-                    .collect();
+                let neighbors = link_neighbors(ospf.restarting.as_ref(), *ifindex, link);
                 LinkCheckpoint {
                     ifindex: *ifindex,
                     area_id: link.area,
@@ -271,7 +356,8 @@ impl OspfCheckpoint {
                     neighbors,
                 }
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let links = with_gone_links(ospf, links);
 
         let lan_adj_sids = ospf.lan_adj_sids.iter().map(|(k, v)| (*k, *v)).collect();
 
@@ -314,7 +400,12 @@ impl OspfCheckpoint {
                     ))
                     .map(|(key, lsa)| {
                         let mut buf = BytesMut::new();
-                        lsa.data.emit(&mut buf);
+                        let data = aged_now(
+                            &lsa.data,
+                            lsa.current_age(),
+                            ospf_packet::Ospfv3Lsa::set_age,
+                        );
+                        data.emit(&mut buf);
                         LsaSnapshot {
                             key: *key,
                             ls_seq_number: lsa.data.h.ls_seq_number,
@@ -337,15 +428,7 @@ impl OspfCheckpoint {
             .iter()
             .filter(|(_, link)| link.enabled)
             .map(|(ifindex, link)| {
-                let neighbors = link
-                    .nbrs
-                    .iter()
-                    .map(|(router_id, nbr)| NeighborCheckpoint {
-                        router_id: nbr.ident.router_id,
-                        interface_addr: *router_id,
-                        was_full: nbr.state == super::nfsm::NfsmState::Full,
-                    })
-                    .collect();
+                let neighbors = link_neighbors(ospf.restarting.as_ref(), *ifindex, link);
                 LinkCheckpoint {
                     ifindex: *ifindex,
                     area_id: link.area,
@@ -353,7 +436,8 @@ impl OspfCheckpoint {
                     neighbors,
                 }
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let links = with_gone_links(ospf, links);
 
         Self {
             format_version: CHECKPOINT_FORMAT_VERSION,

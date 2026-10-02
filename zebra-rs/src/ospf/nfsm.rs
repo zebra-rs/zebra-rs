@@ -48,9 +48,9 @@ impl Display for NfsmState {
 /// Neighbor state machine event — RFC 2328 §10.2.
 ///
 /// **Shared across OSPFv2 and OSPFv3.** Same as `NfsmState`, the v3
-/// RFC reuses the v2 event taxonomy verbatim. `KillNbr` and
-/// `LLDown` from the RFC are folded into normal transition handling
-/// where applicable; `Start` (NBMA-only) is omitted.
+/// RFC reuses the v2 event taxonomy verbatim. `LLDown` from the RFC
+/// is folded into normal transition handling where applicable;
+/// `Start` (NBMA-only) is omitted.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum NfsmEvent {
     HelloReceived,
@@ -62,7 +62,13 @@ pub enum NfsmEvent {
     AdjOk,
     SeqNumberMismatch,
     OneWayReceived,
+    /// A dead interval passed without a Hello. Dropped if one has been
+    /// heard since (`inactivity_stale`).
     InactivityTimer,
+    /// Communication with the neighbour is impossible (RFC 2328 §10.2):
+    /// BFD down, `clear ospf neighbor`, a Router ID replaced. The
+    /// inactivity timer's kill, at once.
+    KillNbr,
 }
 
 impl Display for NfsmEvent {
@@ -79,6 +85,7 @@ impl Display for NfsmEvent {
             SeqNumberMismatch => "SeqNumberMismatch",
             OneWayReceived => "OneWayReceived",
             InactivityTimer => "InactivityTimer",
+            KillNbr => "KillNbr",
         };
         write!(f, "{event}")
     }
@@ -106,7 +113,7 @@ impl NfsmState {
                 AdjOk => (ospf_nfsm_ignore, Some(Down)),
                 SeqNumberMismatch => (ospf_nfsm_ignore, Some(Down)),
                 OneWayReceived => (ospf_nfsm_ignore, Some(Down)),
-                InactivityTimer => (ospf_nfsm_inactivity_timer, Some(Down)),
+                InactivityTimer | KillNbr => (ospf_nfsm_inactivity_timer, Some(Down)),
             },
             Init => match ev {
                 HelloReceived => (ospf_nfsm_hello_received, Some(Init)),
@@ -118,7 +125,7 @@ impl NfsmState {
                 AdjOk => (ospf_nfsm_ignore, Some(Init)),
                 SeqNumberMismatch => (ospf_nfsm_ignore, Some(Init)),
                 OneWayReceived => (ospf_nfsm_ignore, Some(Init)),
-                InactivityTimer => (ospf_nfsm_inactivity_timer, Some(Down)),
+                InactivityTimer | KillNbr => (ospf_nfsm_inactivity_timer, Some(Down)),
             },
             TwoWay => match ev {
                 HelloReceived => (ospf_nfsm_hello_received, Some(TwoWay)),
@@ -130,7 +137,7 @@ impl NfsmState {
                 AdjOk => (ospf_nfsm_adj_ok, None),
                 SeqNumberMismatch => (ospf_nfsm_ignore, Some(TwoWay)),
                 OneWayReceived => (ospf_nfsm_oneway_received, Some(Init)),
-                InactivityTimer => (ospf_nfsm_inactivity_timer, Some(Down)),
+                InactivityTimer | KillNbr => (ospf_nfsm_inactivity_timer, Some(Down)),
             },
             ExStart => match ev {
                 HelloReceived => (ospf_nfsm_hello_received, Some(ExStart)),
@@ -142,7 +149,7 @@ impl NfsmState {
                 AdjOk => (ospf_nfsm_adj_ok, None),
                 SeqNumberMismatch => (ospf_nfsm_ignore, Some(ExStart)),
                 OneWayReceived => (ospf_nfsm_oneway_received, Some(Init)),
-                InactivityTimer => (ospf_nfsm_inactivity_timer, Some(Down)),
+                InactivityTimer | KillNbr => (ospf_nfsm_inactivity_timer, Some(Down)),
             },
             Exchange => match ev {
                 HelloReceived => (ospf_nfsm_hello_received, Some(Exchange)),
@@ -154,7 +161,7 @@ impl NfsmState {
                 AdjOk => (ospf_nfsm_adj_ok, None),
                 SeqNumberMismatch => (ospf_nfsm_seq_number_mismatch, Some(ExStart)),
                 OneWayReceived => (ospf_nfsm_oneway_received, Some(Init)),
-                InactivityTimer => (ospf_nfsm_inactivity_timer, Some(Down)),
+                InactivityTimer | KillNbr => (ospf_nfsm_inactivity_timer, Some(Down)),
             },
             Loading => match ev {
                 HelloReceived => (ospf_nfsm_hello_received, Some(Loading)),
@@ -166,7 +173,7 @@ impl NfsmState {
                 AdjOk => (ospf_nfsm_adj_ok, None),
                 SeqNumberMismatch => (ospf_nfsm_seq_number_mismatch, Some(ExStart)),
                 OneWayReceived => (ospf_nfsm_oneway_received, Some(Init)),
-                InactivityTimer => (ospf_nfsm_inactivity_timer, Some(Down)),
+                InactivityTimer | KillNbr => (ospf_nfsm_inactivity_timer, Some(Down)),
             },
             Full => match ev {
                 HelloReceived => (ospf_nfsm_hello_received, Some(Full)),
@@ -178,7 +185,7 @@ impl NfsmState {
                 AdjOk => (ospf_nfsm_adj_ok, None),
                 SeqNumberMismatch => (ospf_nfsm_seq_number_mismatch, Some(ExStart)),
                 OneWayReceived => (ospf_nfsm_oneway_received, Some(Init)),
-                InactivityTimer => (ospf_nfsm_inactivity_timer, Some(Down)),
+                InactivityTimer | KillNbr => (ospf_nfsm_inactivity_timer, Some(Down)),
             },
         }
     }
@@ -314,6 +321,7 @@ pub fn ospf_nfsm_hello_received<V: OspfVersion>(
 ) -> Option<NfsmState> {
     // Start or Restart Inactivity Timer.
     nbr.timer.inactivity = Some(ospf_inactivity_timer(nbr));
+    nbr.heard_at = Some(tokio::time::Instant::now());
     // A neighbour being helped through a restart is heard from again.
     if let Some(helper) = nbr.gr_helper.as_mut() {
         helper.lapsed = false;
@@ -706,9 +714,9 @@ pub fn ospf_nfsm<V: OspfVersion>(
     // FSM-provided next state.
     let next_state = fsm_func(link, nbr, oident).or(fsm_next_state);
 
-    // When event is InactivityTimer, the neighbor is being removed. Skip
-    // state change and timer set — the caller will delete it.
-    if matches!(event, NfsmEvent::InactivityTimer) {
+    // When event is InactivityTimer or KillNbr, the neighbor is being
+    // removed. Skip state change and timer set — the caller will delete it.
+    if matches!(event, NfsmEvent::InactivityTimer | NfsmEvent::KillNbr) {
         return;
     }
 
