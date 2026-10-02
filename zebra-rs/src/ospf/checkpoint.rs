@@ -205,6 +205,46 @@ fn own_grace_lsas<V: super::version::OspfVersion>(
         .filter(move |((ls_type, _, adv_router), _)| *ls_type == grace && *adv_router == router_id)
 }
 
+/// The neighbours a link's checkpoint records (`nbrs` keys as the
+/// interface address). While a restart is staged, a neighbour is recorded
+/// as Full if the restart must re-establish its adjacency
+/// (`RestartingState::adjacencies`), not if it is Full now: one that left
+/// Full between the restart's begin and its commit was dropped, and the
+/// restored restart did not wait for it. One that has left the link is
+/// recorded by its Router ID.
+fn link_neighbors<V: super::version::OspfVersion>(
+    restarting: Option<&super::neigh::RestartingState>,
+    ifindex: u32,
+    link: &super::link::OspfLink<V>,
+) -> Vec<NeighborCheckpoint> {
+    let mut neighbors: Vec<NeighborCheckpoint> = link
+        .nbrs
+        .iter()
+        .map(|(key, nbr)| NeighborCheckpoint {
+            router_id: nbr.ident.router_id,
+            interface_addr: *key,
+            was_full: match restarting {
+                Some(state) => state.adjacencies.contains(&(ifindex, nbr.ident.router_id)),
+                None => nbr.state == super::nfsm::NfsmState::Full,
+            },
+        })
+        .collect();
+    for (_, router_id) in restarting
+        .iter()
+        .flat_map(|state| state.adjacencies.iter())
+        .filter(|(on, _)| *on == ifindex)
+    {
+        if !neighbors.iter().any(|n| n.router_id == *router_id) {
+            neighbors.push(NeighborCheckpoint {
+                router_id: *router_id,
+                interface_addr: Ipv4Addr::UNSPECIFIED,
+                was_full: true,
+            });
+        }
+    }
+    neighbors
+}
+
 /// How much of its grace period the restart has used (`grace_used_ms`).
 fn grace_used_ms(restarting: Option<&super::neigh::RestartingState>) -> u64 {
     restarting.map_or(0, |state| {
@@ -255,15 +295,7 @@ impl OspfCheckpoint {
             .iter()
             .filter(|(_, link)| link.enabled)
             .map(|(ifindex, link)| {
-                let neighbors = link
-                    .nbrs
-                    .iter()
-                    .map(|(addr, nbr)| NeighborCheckpoint {
-                        router_id: nbr.ident.router_id,
-                        interface_addr: *addr,
-                        was_full: nbr.state == super::nfsm::NfsmState::Full,
-                    })
-                    .collect();
+                let neighbors = link_neighbors(ospf.restarting.as_ref(), *ifindex, link);
                 LinkCheckpoint {
                     ifindex: *ifindex,
                     area_id: link.area,
@@ -337,15 +369,7 @@ impl OspfCheckpoint {
             .iter()
             .filter(|(_, link)| link.enabled)
             .map(|(ifindex, link)| {
-                let neighbors = link
-                    .nbrs
-                    .iter()
-                    .map(|(router_id, nbr)| NeighborCheckpoint {
-                        router_id: nbr.ident.router_id,
-                        interface_addr: *router_id,
-                        was_full: nbr.state == super::nfsm::NfsmState::Full,
-                    })
-                    .collect();
+                let neighbors = link_neighbors(ospf.restarting.as_ref(), *ifindex, link);
                 LinkCheckpoint {
                     ifindex: *ifindex,
                     area_id: link.area,

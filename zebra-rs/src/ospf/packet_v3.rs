@@ -437,9 +437,7 @@ pub fn ospfv3_hello_recv(
         })
         .collect();
     for rid in stale {
-        let _ = oi
-            .tx
-            .send(Message::Nfsm(oi.index, rid, NfsmEvent::InactivityTimer));
+        let _ = oi.tx.send(Message::Nfsm(oi.index, rid, NfsmEvent::KillNbr));
     }
 
     // Neighbor key in `oi.nbrs` is Ipv4Addr in both versions; v3
