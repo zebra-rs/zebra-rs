@@ -838,14 +838,28 @@ impl<V: OspfVersion> Ospf<V> {
     /// whatever its state (RFC 3623 §3.1); leaving helper mode
     /// re-originates them (§3.2).
     /// The Full adjacencies, across every interface, as `(ifindex,
-    /// neighbour Router ID)`: what a restart staged now must re-establish.
+    /// neighbour Router ID)`.
     fn full_adjacencies(&self) -> BTreeSet<(u32, Ipv4Addr)> {
+        self.adjacencies_where(|nbr| nbr.state == super::NfsmState::Full)
+    }
+
+    /// The adjacencies our LSAs advertise (`Neighbor::advertised_full`):
+    /// the Full ones, and those we help, which are advertised fully
+    /// adjacent whatever their state (RFC 3623 §3.1). What a restart staged
+    /// now must re-establish: they are in its pre-restart Router-LSA. A
+    /// helped neighbour re-synchronizing was left out, and the restart
+    /// could end without it.
+    fn advertised_adjacencies(&self) -> BTreeSet<(u32, Ipv4Addr)> {
+        self.adjacencies_where(Neighbor::advertised_full)
+    }
+
+    fn adjacencies_where(&self, want: impl Fn(&Neighbor<V>) -> bool) -> BTreeSet<(u32, Ipv4Addr)> {
         self.links
             .iter()
             .flat_map(|(ifindex, link)| {
                 link.nbrs
                     .values()
-                    .filter(|nbr| nbr.state == super::NfsmState::Full)
+                    .filter(|nbr| want(nbr))
                     .map(move |nbr| (*ifindex, nbr.ident.router_id))
             })
             .collect()
@@ -878,7 +892,10 @@ impl<V: OspfVersion> Ospf<V> {
     /// A neighbour killed outright (`KillNbr`: `clear ospf neighbor`, a
     /// replaced Router ID, its BFD session down) is helped no more: the
     /// help would hold it, as it holds one whose Hellos stopped. An
-    /// operator's clear of a helped neighbour did nothing.
+    /// operator's clear of a helped neighbour did nothing. As any end of
+    /// the help, this one reconciles our LSAs (`GrHelperLeft`): the help
+    /// advertised the neighbour fully adjacent, whatever its state, and
+    /// the kill of one not Full changed nothing they listed.
     fn end_help_for_kill(&mut self, ifindex: u32, key: Ipv4Addr) {
         if let Some(nbr) = self
             .links
@@ -891,6 +908,7 @@ impl<V: OspfVersion> Ospf<V> {
                 nbr.ident.router_id,
                 ifindex
             );
+            let _ = self.tx.send(Message::GrHelperLeft(ifindex, key));
         }
     }
 
@@ -1515,6 +1533,15 @@ impl<V: OspfVersion> Ospf<V> {
             .get_mut(&ifindex)
             .and_then(|l| l.nbrs.get_mut(&nbr_addr))
         {
+            // A failure deferred while helping (`HelperState::bfd_down`)
+            // was the old session's; with it gone, or replaced, it is no
+            // longer one to act on. It took the neighbour down at the
+            // help's end after BFD was disabled.
+            if desired != current
+                && let Some(helper) = nbr.gr_helper.as_mut()
+            {
+                helper.bfd_down = false;
+            }
             nbr.bfd_session_key = desired;
             nbr.bfd_session_params = desired_params;
         }
@@ -6390,10 +6417,10 @@ impl Ospf<Ospfv2> {
             }
         });
 
-        // The adjacencies Full at staging time, which the restart must
-        // re-establish. The commit handler records the same neighbours in
-        // the checkpoint, for the post-reboot exit path.
-        let adjacencies = self.full_adjacencies();
+        // The adjacencies our LSAs advertise at staging time, which the
+        // restart must re-establish. The commit handler records the same
+        // neighbours in the checkpoint, for the post-reboot exit path.
+        let adjacencies = self.advertised_adjacencies();
         self.restarting = Some(RestartingState {
             grace_period,
             reason,
@@ -10713,7 +10740,8 @@ impl Ospf<Ospfv3> {
             }
         });
 
-        let adjacencies = self.full_adjacencies();
+        // As OSPFv2's: the adjacencies our LSAs advertise.
+        let adjacencies = self.advertised_adjacencies();
         self.restarting = Some(RestartingState {
             grace_period,
             reason,
@@ -25960,6 +25988,184 @@ mod gr_helper_tests {
         assert!(
             !ages.is_empty() && ages.iter().all(|age| *age == 30),
             "v3: {ages:?}"
+        );
+    }
+
+    /// Clearing a helped neighbour that is re-synchronizing (ExStart)
+    /// withdraws its link from our Router-LSA: the help advertised it
+    /// fully adjacent, and ending the help by the kill reconciles that
+    /// (`GrHelperLeft`). The neighbour went, its link stayed.
+    #[tokio::test(start_paused = true)]
+    async fn a_cleared_helped_neighbour_leaves_our_router_lsa() {
+        use super::super::nfsm::NfsmEvent::SeqNumberMismatch;
+
+        // OSPFv2.
+        let mut top = v2_top();
+        top.min_ls_interval_ms = 0;
+        let link = top.links.get_mut(&2).unwrap();
+        link.network_type = OspfNetworkType::PointToPoint;
+        link.state = IfsmState::PointToPoint;
+        top.router_lsa_originate_now(None);
+        acknowledged(&mut top, v2_addr(S));
+        v2_receive(&mut top, 2, S, v2_grace(1, 0x8000_0001)).await;
+        top.process_msg(Message::Nfsm(2, v2_addr(S), SeqNumberMismatch))
+            .await;
+        let key = super::super::lsdb::v2_lsa_key(OspfLsType::Router, ME, ME);
+        let lists_s = |top: &Ospf| {
+            matches!(&top.areas.get(AREA0).unwrap().lsdb.tables[&key].data.lsp,
+                OspfLsp::Router(r) if r.links.iter().any(|l| l.link_id == S))
+        };
+        assert!(lists_s(&top), "v2: helped, listed");
+        top.clear_neighbor(Some(S));
+        while let Ok(msg) = top.rx.try_recv() {
+            if matches!(
+                msg,
+                Message::Nfsm(..)
+                    | Message::GrHelperLeft(..)
+                    | Message::Ifsm(..)
+                    | Message::LsaGenFire(..)
+            ) {
+                top.process_msg(msg).await;
+            }
+        }
+        assert!(v2_s(&top).is_none() && !lists_s(&top), "v2: cleared, gone");
+
+        // OSPFv3.
+        let mut top = v3_top();
+        top.min_ls_interval_ms = 0;
+        let link = top.links.get_mut(&2).unwrap();
+        link.network_type = OspfNetworkType::PointToPoint;
+        link.state = IfsmState::PointToPoint;
+        top.router_lsa_originate_now();
+        acknowledged(&mut top, S);
+        v3_receive(&mut top, 2, S, v3_grace(1, 0x8000_0001)).await;
+        top.process_msg(Message::Nfsm(2, S, SeqNumberMismatch))
+            .await;
+        let key = (ospf_packet::OSPFV3_ROUTER_LSA_TYPE, 0, ME);
+        let lists_s = |top: &Ospf<Ospfv3>| {
+            matches!(&top.areas.get(AREA0).unwrap().lsdb.tables[&key].data.body,
+                ospf_packet::Ospfv3LsBody::Router(r)
+                    if r.links.iter().any(|l| l.neighbor_router_id == S))
+        };
+        assert!(lists_s(&top), "v3: helped, listed");
+        top.clear_neighbor(Some(S));
+        while let Ok(msg) = top.rx.try_recv() {
+            if matches!(
+                msg,
+                Message::Nfsm(..)
+                    | Message::GrHelperLeft(..)
+                    | Message::Ifsm(..)
+                    | Message::LsaGenFire(..)
+            ) {
+                top.process_msg(msg).await;
+            }
+        }
+        assert!(v3_s(&top).is_none() && !lists_s(&top), "v3: cleared, gone");
+    }
+
+    /// A BFD failure deferred by the help (`HelperState::bfd_down`) is the
+    /// session's: disabling BFD drops it with the subscription, and the
+    /// help's end leaves the neighbour be. It took the neighbour down.
+    #[tokio::test(start_paused = true)]
+    async fn disabling_bfd_drops_a_failure_the_help_deferred() {
+        use super::super::nfsm::NfsmEvent::KillNbr;
+        use crate::bfd::inst::BfdEvent;
+        use crate::bfd::session::{SessionKey, StateChange};
+        let down = |key| BfdEvent::StateChange {
+            key,
+            change: StateChange {
+                from: bfd_packet::State::Up,
+                to: bfd_packet::State::Down,
+                diag: bfd_packet::Diag::ControlDetectionTimeExpired,
+            },
+        };
+
+        // OSPFv2; BFD is off in the fixture, so a reconcile unsubscribes.
+        let mut top = v2_top();
+        top.bfd_client_tx = Some(super::link_scope_tests::live());
+        v2_receive(&mut top, 2, S, v2_grace(1, 0x8000_0001)).await;
+        let key = SessionKey {
+            local: "192.0.2.1".parse().unwrap(),
+            remote: v2_addr(S).into(),
+            ifindex: 2,
+            multihop: false,
+        };
+        let nbr = top.links.get_mut(&2).unwrap().nbrs.get_mut(&v2_addr(S));
+        nbr.unwrap().bfd_session_key = Some(key);
+        top.process_bfd_event(down(key));
+        top.bfd_reconcile_nbr(2, v2_addr(S));
+        let helper = v2_s(&top).unwrap().gr_helper.as_ref().unwrap();
+        assert!(!helper.bfd_down, "v2: dropped with the subscription");
+        top.gr_helper_exit(2, S, "test");
+        let kill = |msg: &Message<_>| matches!(msg, Message::Nfsm(2, _, KillNbr));
+        for msg in queued(&mut top, kill) {
+            top.process_msg(msg).await;
+        }
+        assert!(v2_s(&top).is_some(), "v2: kept");
+
+        // OSPFv3.
+        let mut top = v3_top();
+        top.bfd_client_tx = Some(super::link_scope_tests::live());
+        v3_receive(&mut top, 2, S, v3_grace(1, 0x8000_0001)).await;
+        let key = SessionKey {
+            local: "fe80::2:1".parse().unwrap(),
+            remote: super::link_scope_tests::v3_ll(S).into(),
+            ifindex: 2,
+            multihop: false,
+        };
+        top.links
+            .get_mut(&2)
+            .unwrap()
+            .nbrs
+            .get_mut(&S)
+            .unwrap()
+            .bfd_session_key = Some(key);
+        top.process_bfd_event(down(key));
+        top.bfd_reconcile_nbr(2, S);
+        let helper = v3_s(&top).unwrap().gr_helper.as_ref().unwrap();
+        assert!(!helper.bfd_down, "v3: dropped with the subscription");
+        top.gr_helper_exit(2, S, "test");
+        let kill = |msg: &Message<_>| matches!(msg, Message::Nfsm(2, _, KillNbr));
+        for msg in queued(&mut top, kill) {
+            top.process_msg(msg).await;
+        }
+        assert!(v3_s(&top).is_some(), "v3: kept");
+    }
+
+    /// A restart staged while we help S, which is re-synchronizing
+    /// (ExStart), must re-establish S's adjacency: our Router-LSA lists it
+    /// (RFC 3623 §3.1), so the pre-restart one does. Only Full adjacencies
+    /// were staged. S counts as back only once it is Full.
+    #[tokio::test(start_paused = true)]
+    async fn a_restart_waits_for_an_adjacency_we_help() {
+        use super::super::nfsm::NfsmEvent::SeqNumberMismatch;
+
+        // OSPFv2.
+        let mut top = v2_top();
+        v2_receive(&mut top, 2, S, v2_grace(1, 0x8000_0001)).await;
+        top.process_msg(Message::Nfsm(2, v2_addr(S), SeqNumberMismatch))
+            .await;
+        assert!(top.gr_restart_begin(GRACE, GraceRestartReason::SoftwareRestart));
+        let staged = &top.restarting.as_ref().unwrap().adjacencies;
+        assert!(staged.contains(&(2, S)), "v2: staged");
+        assert_eq!(
+            top.restart_adjacencies_back(),
+            2,
+            "v2: O and P back, S not yet"
+        );
+
+        // OSPFv3.
+        let mut top = v3_top();
+        v3_receive(&mut top, 2, S, v3_grace(1, 0x8000_0001)).await;
+        top.process_msg(Message::Nfsm(2, S, SeqNumberMismatch))
+            .await;
+        assert!(top.gr_restart_begin_v3(GRACE, GraceRestartReason::SoftwareRestart));
+        let staged = &top.restarting.as_ref().unwrap().adjacencies;
+        assert!(staged.contains(&(2, S)), "v3: staged");
+        assert_eq!(
+            top.restart_adjacencies_back(),
+            2,
+            "v3: O and P back, S not yet"
         );
     }
 
