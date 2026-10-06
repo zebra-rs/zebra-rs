@@ -51,6 +51,10 @@ assets = [
   ["target/release/zebra-rs",                    "usr/bin/",                        "755"],
   ["target/release/vtyhelper",                   "usr/bin/",                        "755"],
   ["target/release/vtyctl",                      "usr/bin/",                        "755"],
+  # 3D path visualizer for the isis-flexalgo / isis-te-metric playsets
+  # (ai/topology). The web frontend is compiled in; it finds /usr/bin/vtyctl
+  # as its sibling and falls back to the playset ontology installed below.
+  ["target/release/zebra-topology",              "usr/bin/",                        "755"],
   ["target/release/vtypam",                      "usr/sbin/",                       "755"],
   ["../vty/vty",                                 "usr/bin/vty",                     "755"],
   ["../etc/pam.d/zebra-rs.example",              "etc/pam.d/zebra-rs.example",      "644"],

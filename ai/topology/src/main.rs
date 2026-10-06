@@ -16,7 +16,7 @@ mod snapshot;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -42,10 +42,17 @@ const STYLE_CSS: &str = include_str!("../static/style.css");
 /// `data/` files a snapshot export writes in its place.
 const LIVE_MANIFEST_JS: &str = "window.ZEBRA_SNAPSHOT = null;\n";
 
+/// The ontology `--ontology` defaults to, relative to a repository
+/// checkout's root.
+const ONTOLOGY_IN_CHECKOUT: &str = "playset/isis-flexalgo/ontology.json";
+
+/// The same file as the zebra-rs package installs it.
+const ONTOLOGY_INSTALLED: &str = "/usr/share/zebra-rs/playset/isis-flexalgo/ontology.json";
+
 #[derive(Parser)]
 #[command(
     name = "zebra-topology",
-    about = "3D traffic path visualizer for the isis-flexalgo playset (MCP-backed)"
+    about = "3D traffic path visualizer for the isis-flexalgo and isis-te-metric playsets (MCP-backed)"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -56,12 +63,11 @@ struct Cli {
     port: u16,
 
     /// Path to the playset ontology (router names, cities, regions).
-    #[arg(
-        long,
-        global = true,
-        default_value = "playset/isis-flexalgo/ontology.json"
-    )]
-    ontology: PathBuf,
+    /// Defaults to playset/isis-flexalgo/ontology.json in the current
+    /// directory (a repository checkout), then the copy the zebra-rs
+    /// package installs under /usr/share/zebra-rs/playset/.
+    #[arg(long, global = true)]
+    ontology: Option<PathBuf>,
 
     /// vtyctl binary providing `vtyctl mcp`. Defaults to $VTYCTL_BIN,
     /// then a vtyctl next to this executable, then target/debug/vtyctl,
@@ -128,11 +134,34 @@ fn resolve_vtyctl(explicit: Option<String>) -> String {
     "vtyctl".to_string()
 }
 
+/// Resolve the ontology: an explicit `--ontology`, else the playset's copy
+/// in this checkout, else the one the zebra-rs package installs. With
+/// neither present the checkout path is returned, so the load error names
+/// the file a checkout run expects.
+fn resolve_ontology(explicit: Option<PathBuf>) -> PathBuf {
+    resolve_ontology_from(
+        explicit,
+        Path::new(ONTOLOGY_IN_CHECKOUT),
+        Path::new(ONTOLOGY_INSTALLED),
+    )
+}
+
+fn resolve_ontology_from(explicit: Option<PathBuf>, checkout: &Path, installed: &Path) -> PathBuf {
+    if let Some(path) = explicit {
+        return path;
+    }
+    if !checkout.is_file() && installed.is_file() {
+        return installed.to_path_buf();
+    }
+    checkout.to_path_buf()
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let routers = ontology::load(&cli.ontology)?;
+    let ontology_path = resolve_ontology(cli.ontology);
+    let routers = ontology::load(&ontology_path)?;
     let vtyctl = resolve_vtyctl(cli.vtyctl);
     let app = Arc::new(App {
         routers,
@@ -145,7 +174,7 @@ async fn main() -> Result<()> {
 
     println!(
         "  ontology : {} ({} routers)",
-        cli.ontology.display(),
+        ontology_path.display(),
         app.routers.len()
     );
     println!("  vtyctl   : {vtyctl}");
@@ -308,5 +337,58 @@ async fn api_topology(req: &Request<Incoming>, app: &App) -> Response<Full<Bytes
     match app.api_topology(source, algorithm, destination).await {
         Ok(v) => json_ok(v),
         Err(e) => json_error(StatusCode::BAD_GATEWAY, &format!("{e:#}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A scratch directory holding whichever of the two candidate files a
+    /// test wants to exist.
+    fn candidates(name: &str, checkout: bool, installed: bool) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "zebra-topology-ontology-{}-{}",
+            name,
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (c, i) = (dir.join("checkout.json"), dir.join("installed.json"));
+        for (path, present) in [(&c, checkout), (&i, installed)] {
+            if present {
+                std::fs::write(path, "[]").unwrap();
+            } else {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+        (c, i)
+    }
+
+    #[test]
+    fn explicit_ontology_wins() {
+        let (c, i) = candidates("explicit", true, true);
+        let explicit = PathBuf::from("/somewhere/else.json");
+        assert_eq!(
+            resolve_ontology_from(Some(explicit.clone()), &c, &i),
+            explicit
+        );
+    }
+
+    #[test]
+    fn checkout_copy_is_preferred_to_the_installed_one() {
+        let (c, i) = candidates("checkout", true, true);
+        assert_eq!(resolve_ontology_from(None, &c, &i), c);
+    }
+
+    #[test]
+    fn installed_copy_serves_a_run_outside_a_checkout() {
+        let (c, i) = candidates("installed", false, true);
+        assert_eq!(resolve_ontology_from(None, &c, &i), i);
+    }
+
+    #[test]
+    fn with_neither_the_error_names_the_checkout_path() {
+        let (c, i) = candidates("neither", false, false);
+        assert_eq!(resolve_ontology_from(None, &c, &i), c);
     }
 }

@@ -74,6 +74,20 @@ For the TE view, bring up `playset/isis-te-metric` in step 1 instead. It
 uses the same router names and cities, so the default `--ontology` works
 for both labs (they share namespace names too, so run one at a time).
 
+### From the zebra-rs package
+
+The `zebra-rs` Debian package ships the viewer as `/usr/bin/zebra-topology`,
+next to `vtyctl`, and the playsets under `/usr/share/zebra-rs/playset/`. No
+checkout or build is needed:
+
+```shell
+cd /usr/share/zebra-rs/playset/isis-te-metric && sudo ./up.sh
+sudo zebra-topology
+```
+
+Run outside a checkout, the viewer finds the installed
+`/usr/share/zebra-rs/playset/isis-flexalgo/ontology.json` on its own.
+
 ### Things to try
 
 * Source `tk`, destination `se`: flip Algorithm between `0` and `128` and
@@ -138,7 +152,7 @@ reload and travels with a shared link.
 | flag         | default                                | meaning                        |
 |--------------|----------------------------------------|--------------------------------|
 | `--port`     | `8080`                                 | HTTP listen port (serve mode)  |
-| `--ontology` | `playset/isis-flexalgo/ontology.json`  | router ontology                |
+| `--ontology` | `playset/isis-flexalgo/ontology.json`, else the installed `/usr/share/zebra-rs/playset/…` copy | router ontology |
 | `--vtyctl`   | auto (sibling → `target/debug` → PATH) | vtyctl binary for `vtyctl mcp` |
 | `--mcp-host` | `unix:zebra-rs/vty`                    | daemon endpoint inside each ns |
 | `--timeout`  | `15`                                   | per-MCP-call timeout (seconds) |
