@@ -7,10 +7,14 @@ BASH_VERSION  := 5.3
 BASH_TARBALL  := bash-$(BASH_VERSION).tar.gz
 # Tried in order. ftp.gnu.org alone took every Stable Release build job
 # down with it when it stopped answering (2026-08-27); ftpmirror.gnu.org
-# redirects to a live GNU mirror. The SHA-256 check below is what makes
-# any source trustworthy, not the host.
+# redirects to a live GNU mirror — but it is GNU infrastructure too, and on
+# 2026-10-06 both stopped answering at once, failing every package build.
+# The last two are independent GNU mirrors on other networks. The SHA-256
+# check below is what makes any source trustworthy, not the host.
 BASH_URLS     := https://ftp.gnu.org/gnu/bash/$(BASH_TARBALL) \
-                 https://ftpmirror.gnu.org/gnu/bash/$(BASH_TARBALL)
+                 https://ftpmirror.gnu.org/gnu/bash/$(BASH_TARBALL) \
+                 https://mirrors.kernel.org/gnu/bash/$(BASH_TARBALL) \
+                 https://mirrors.ocf.berkeley.edu/gnu/bash/$(BASH_TARBALL)
 BASH_SHA256   := 0d5cd86965f869a26cf64f4b71be7b96f90a3ba8b3d74e27e8e9d9d5550f31ba
 
 CACHE_DIR     ?= $(HOME)/.cache/zebra-rs
