@@ -11,6 +11,199 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit them,
 # changelog-gen.sh defaults to distribution "unstable" and urgency "medium".
 
+- semver: 26.10.1
+  date: 2026-10-06T18:00:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### Upgrade notes
+        * OSPFv3 Segment Routing: upgrade every zebra-rs router running
+          OSPFv3 SR together. This release sends its SR capabilities
+          only in the standard Router Information LSA and its Adj-SIDs
+          under RFC 8666's code points. A router on v26.9.2 or earlier
+          finds no SR capabilities from it, and drops every LS Update
+          that carries a standard LAN Adj-SID
+        * Links measured by STAMP now advertise their link loss by
+          default (IS-IS, OSPFv2, OSPFv3 and BGP-LS) once the first
+          loss window is trusted: 0 % on a clean link. `te-metric
+          measurement loss enabled false` turns it off per link
+        * BGP best-path selection is deterministic-MED, as FRR's
+          default is: where MED is in play, the best path can differ
+          from the one an earlier release chose
+        * IS-IS and OSPF compute each Flexible Algorithm with the
+          winning definition (RFC 9350 §5.3), no longer with their own
+          configuration; a router configured differently now follows
+          the winner
+    - note: |
+        ### OSPFv3 Segment Routing on the standard encodings
+        * SR capabilities (SR-Algorithm, SRGB, SRLB, Flex-Algo
+          definitions, SRv6 capabilities) are originated in the
+          RFC 7770 Router Information LSA and read from it, falling
+          back per router to the former E-Router-LSA carrier, which is
+          no longer sent
+        * Adj-SIDs and LAN Adj-SIDs are sent as sub-TLVs 5 and 6
+          (RFC 8666), and both encodings are read. A standard LAN
+          Adj-SID used to fail the whole LS Update, retransmitted
+          forever, and standard routers could not use zebra-rs's
+          adjacency segments for TI-LFA
+        * An LSA body that cannot be decoded is kept and re-flooded
+          as received instead of dropping the LS Update carrying it
+        * OSPFv2 reads a neighbor's SRGB and SRLB from the first
+          range, as RFC 8665 lays them out, instead of the last
+        * Both versions keep their SR LSAs when an interface is
+          enabled in the same commit as `segment-routing mpls`, and
+          across a Router-ID change; the Prefix-SID LSA used to go
+          missing with every peer's label for it
+        * `show ospfv3 database detail` shows every LSA type, NSSA
+          and Router Information LSAs included
+    - note: |
+        ### OSPF graceful restart (RFC 3623), both versions
+        * Helper: OSPFv2 helpers leave helper mode on grace-period
+          expiry or a topology change (the neighbor was looked up by
+          the wrong key); a DROther helps a restarter whose Grace-LSA
+          the DR relays; a refresh no longer ends the help, only a
+          change of LSA contents does; the restarter stays fully
+          adjacent in the helper's Router-LSA and Network-LSA; entry
+          checks the retransmission list (§3.1); `clear ospf
+          neighbor` ends the help
+        * Restarter: forwarding stays as it was until the restart
+          ends; the exit waits for the adjacencies it had before and
+          for every area's calculation; our own LSAs received back
+          and redistribution are held until the exit; a former DR
+          reclaims its role
+        * Routes an earlier run left in the kernel, after a graceful
+          restart or a crash, are no longer taken for kernel routes
+          that outrank OSPF's own; they are swept after the first
+          calculation since the exit (§2.3)
+        * Kernel next-hop objects left by an earlier run keep their
+          ids, so a new next-hop group no longer takes one over and
+          re-points the earlier run's routes
+    - note: |
+        ### OSPF LSA ageing and flooding, both versions
+        * LSAs are sent at their current age plus the interface's
+          transmit-delay (RFC 2328 §14), which was configurable but
+          unused; a dead router's LSA could circulate for good
+        * A MaxAge LSA is kept until no neighbor awaits it, and an LSA
+          that ages out is re-flooded and stops being used at once.
+          An acknowledgement of the live copy no longer cancels a
+          withdrawal, and flushing an LSA kept as received puts
+          MaxAge on the wire
+        * OSPFv3 refreshes its own LSAs and removes expired ones:
+          they flapped hourly against standard neighbors, and a
+          vanished router's LSAs stayed. OSPFv2 floods its refreshed
+          AS-External LSAs, which neighbors aged out after an hour
+        * An expiring NSSA LSA takes its route and its translated
+          AS-External LSA with it
+        * OSPFv2 keeps a received type-9 Opaque LSA, such as a
+          Grace-LSA, with its interface instead of flooding it
+          area-wide (RFC 5250 §3.1)
+        * The initial Database Description summary lists every area-
+          and AS-scope LSA, and the interface's link-scope LSAs. The
+          OSPFv3 Router Information LSA, OSPFv2 type-11 Opaque LSAs,
+          Link-LSAs and Grace-LSAs used to miss a neighbor whose
+          adjacency formed after they were originated
+    - note: |
+        ### Flexible Algorithm
+        * IS-IS, OSPFv2 and OSPFv3 compute each algorithm with the
+          winning definition (greatest priority, then System-ID or
+          Router ID) and participate only when they support it. Each
+          router used to compute with its own configuration, so
+          routers configured differently could loop
+        * IS-IS `flex-algo exclude-max-link-loss` prunes links whose
+          advertised loss exceeds the definition's maximum
+          (draft-ietf-lsr-flex-algo-link-loss, provisional sub-TLV 252)
+        * IS-IS costs its own links for a delay-metric algorithm from
+          the delay it advertises, as every other router does
+        * IS-IS parallel links to one neighbor, point-to-point or two
+          NICs on one LAN, each forward through their own interface;
+          equal-cost parallels install both next-hops instead of one
+        * IS-IS withdraws a purged definition at once, leaving an
+          algorithm withdraws its SRv6 End and End.X SIDs, and
+          participation is reconciled at commit end
+    - note: |
+        ### STAMP: measured link loss
+        * Probe loss is counted by sequence number (RFC 7680's 3 s
+          waiting time) and advertised as the link-loss TE metric:
+          IS-IS sub-TLV 36, OSPFv2 30, OSPFv3 16, and BGP-LS 1117.
+          `show stamp` reports it; `te-metric measurement loss` sets
+          the window `interval`
+        * The Anomalous bit on link loss, with `anomaly-threshold` and
+          `reuse-threshold` in percent; never set unless configured
+        * Against a stateful reflector (`measurement reflector
+          stateful` on the peer, `loss peer-reflector stateful` here)
+          the forward loss is advertised instead of the round trip
+        * Invalid loss settings are rejected at commit instead of
+          reaching the running configuration unapplied
+    - note: |
+        ### BGP: sessions, path selection and inbound checks
+        * Best-path selection compares MED within each neighboring AS
+          first (RFC 4271 §9.1.2.2), so the winner no longer depends
+          on candidate order. New knobs: `router bgp bestpath
+          always-compare-med` and `bestpath med missing-as-worst`
+        * With `maximum-paths` above 1, neighbors are sent the best
+          path, not the last multipath member; a late labeled-unicast
+          neighbor is dumped the selected path, not the newest one
+        * ORIGINATOR_ID and CLUSTER_LIST from an eBGP peer are
+          discarded, a malformed one from iBGP is treat-as-withdraw
+          (RFC 7606), and a zero BGP Identifier is refused
+        * A route rejected by an inbound loop check or an OTC leak
+          rule withdraws the neighbor's earlier path; it stayed
+          installed, a forwarding loop when the neighbor re-routed
+          through us
+        * `enforce-first-as` judges the AS_PATH the neighbor sent,
+          before the `local-as` prepend, and a failing route is
+          treat-as-withdraw
+        * A router-id change resets every session that sent an OPEN
+          with the old identifier, and respawns the VRFs whose
+          router-id changed
+        * Simultaneous dials (§6.8): a KEEPALIVE is held and a losing
+          connection kept while the winner's OPEN is pending, and our
+          own dial continues when the remote's arrives first. Both
+          ends used to close the connection the other kept and reset,
+          most often after a router-id change
+    - note: |
+        ### BGP: updates, AddPath, VPN and EVPN
+        * Route-target changes apply to the routes already held: an
+          import-RT change re-runs the VRF's import, an export-RT
+          change re-runs the local leak, and RTC membership that
+          changes mid-session withdraws and sends the VPN routes it
+          affects, both ways
+        * AddPath: a refused, denied or unreachable candidate is
+          withdrawn by its exact path-id; a path is sent only while
+          its next-hop resolves, following the flips; the IPv6
+          route-change path applies the outbound policy; withdraws no
+          longer wait for `suppress-fib-pending`
+        * Update groups: a withdraw reaches every member the route was
+          sent to, including routes from a session-up dump, and a
+          prefix re-queued under a new attribute or VPN label leaves
+          its old advertise-cache bucket (it was re-announced after a
+          withdraw)
+        * Graceful-restart stale routes are swept per family: VPNv6
+          and EVPN stale sets now expire, and an IPv4-unicast
+          End-of-RIB no longer empties the VPNv4 one
+        * EVPN single-active: each segment remembers its forwarder and
+          the rule that chose it, shown under each group by `show bgp
+          evpn ethernet-segment`
+    - note: |
+        ### Tools, packaging and build
+        * The zebra-rs package ships the `zebra-topology` 3D path
+          viewer as `/usr/bin/zebra-topology`; it finds the installed
+          playset ontology on its own. Its path detail view shows each
+          hop's TE metrics (Min and average delay, jitter, loss) and
+          the cumulative path delay where the links advertise them
+        * New playset `isis-te-metric`: the eleven-router Flex-Algo
+          backbone with emulated fiber delays, STAMP measuring every
+          link, and algorithm 128 routing on minimum delay
+        * The vty build falls back to the kernel.org and OCF GNU
+          mirrors for the bash source when both GNU hosts are down
+        * Builds clean under Rust 1.99; BDD waits for BGP sessions to
+          come up instead of checking them once after a fixed 5 s
+        * Design documents: the Flex-Algo link-loss constraint and the
+          OSPFv3 Router Information LSA; measured-loss documentation
+          completed
+
 - semver: 26.9.2
   date: 2026-09-24T18:00:00+09:00
   distribution: unstable
