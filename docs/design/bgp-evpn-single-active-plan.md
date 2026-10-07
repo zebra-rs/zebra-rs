@@ -619,7 +619,7 @@ Not in phase 1, by design: the non-revertive operational preference
 | **3a** ✅ | **Origination**: `role-signaling l2-attr`, the elected role on the E-LAN per-EVI A-D, `show` | **Done** — see the status note below |
 | **3b** ✅ | **Consumption**: `evpn_es_nhg_sync()` selects on the signalled role, `es_sa_primary()` retained as the fallback, conflict + reason in `show` | **Done** — see the status note below |
 | **3c** ✅ | The stored `EsRemoteBd` with provenance, the incumbent rule and a generation | **Done** — see the status note below |
-| **4** | **RFC 9722 behaviour**: staged vs applied verdicts, `EsCarveDue` timer, skew, `fast-recovery` config, exclusivity with `startup-delay`, fallbacks | Unit with an injected clock: SCT accept/reject bounds, skew ordering, T=0 fallback, superseding SCT. BDD: joining PE does not become DF before its SCT; incumbent steps down first |
+| **4** ✅ | **RFC 9722 behaviour**: staged vs applied verdicts, `EsCarveDue` timer, skew, `fast-recovery` config, exclusivity with `startup-delay`, fallbacks | **Done** — see the status note below |
 | **5** | **Datapath proof (cradle)**: primary switch on a P/B change alone, with the old DF's Type-2s still in the table; both traffic directions on the standby stay blocked | cradle BDD twin of `cradle_evpn_mh_sa_zebra` driven by a role change instead of a port-down; `l2_drop_nondf` / `l2_es_nhg` counters as the discriminator |
 | **6** | **Docs + interop**: update `bgp-evpn-support-status.md` and the ES design doc, book chapter, CHANGELOG at the release cut; run interop-lab phases P1/P4 against FRR for the preference/DP tie-break | Lab report in `bgp-evpn-mh-frr-interop-report.md` |
 
@@ -792,6 +792,39 @@ have each other's Type-4. An absolute value is therefore an assertion about
 convergence ordering, i.e. a race. Those assertions are gone; what the
 scenarios care about (whether the forwarder moved) is covered deterministically
 by the `primary` assertions. The feature was then run three times to confirm.
+
+**Status: phase 4 is implemented** on `evpn-fast-recovery`. `df-election
+fast-recovery` (presence, with `peering-time` default 3 s and `skew` default
+10 ms, mutually exclusive with `startup-delay` by a YANG `must`) gates the
+whole mechanism: the T capability is advertised only when configured, because
+advertising it promises carving at the announced instant and the promise has
+to ship with the scheduling. A joining segment announces `now + peering-time`
+on its Type-4; a carve merely *honoured* is not re-advertised, or
+announcements become indistinguishable from their echoes and "latest wins"
+ratchets on reflections. Peers' instants ride `DfCandidate.sct`;
+`t_sync_in_effect` requires unanimity; an instant already past or beyond our
+own peering window is rejected and recorded for `show`.
+`evpn_es_df_sync` programs the role it already programmed until that bridge
+domain's moment (`staged_role`), with wake-ups at `SCT − skew` and `SCT`.
+
+**Three bugs the tests found, in increasing order of severity.** The
+integration tests caught that retiring a carve depended on the wall clock
+having passed the instant, so the announcement — which stays on the peer's
+Type-4 — could be re-adopted on clock jitter and park the roles again;
+announcements are now honoured once (`es_carve_done`). The end-to-end feature
+caught the real one: **`es_arm_carve_timers` was called only where this PE
+announces**, so a carve adopted from a peer had no wake-up and its hold ended
+only when some unrelated ES event drained. The PE that adopts is the one
+stepping down, so the outgoing DF would hold its role while the incoming one
+took it — two DFs on a single-active segment, worse than not synchronizing.
+Neither the unit tests nor the "hold starts" scenario could see it; it took
+asserting that the hold **ends by itself**.
+
+**A test-design rule worth keeping:** when a mutation fails a scenario you
+predicted would pass, the test is telling you about its own timing
+assumptions. Twice in this phase an assertion passed only because unrelated
+steps happened to wait long enough — the generation values in 3c, and "the
+announcement is spent" here.
 
 Phases 1–2 are pure codec/config and can land in any order. Phase 3 is the
 one that changes forwarding decisions on a remote PE; it is the one to gate
