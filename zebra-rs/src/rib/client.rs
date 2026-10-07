@@ -14,7 +14,7 @@
 //! The `proto_id` is deliberately opaque: protocol modules never
 //! inspect, compare, serialise, or branch on it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -195,8 +195,8 @@ impl RibClient {
 
 /// One subscriber's entry in `ClientRegistry`.
 ///
-/// - `proto` is used by [`ClientRegistry::find_by_proto`] (the
-///   reverse lookup `proto_cleanup` runs) and by the redistribute
+/// - `proto` is used by [`ClientRegistry::retire`] (what
+///   `proto_cleanup` runs) and by the redistribute
 ///   delta path, which matches `filters[proto]` against this row.
 /// - `rib_rx_tx` is the outbound sender every push path (link / addr
 ///   / router-id / FDB / VXLAN broadcasts; redistribute delta) walks
@@ -233,6 +233,10 @@ pub struct Subscriber {
 pub struct ClientRegistry {
     subscribers: BTreeMap<ProtoId, Subscriber>,
     next_proto_id: u32,
+    /// Ids of protocol instances that have been cleaned up (`retire`).
+    /// Ids are never reused, so an envelope carrying one of these comes
+    /// from an instance that is gone.
+    retired: BTreeSet<ProtoId>,
 }
 
 impl ClientRegistry {
@@ -273,23 +277,13 @@ impl ClientRegistry {
     }
 
     /// Return the VRF id this subscriber is bound to, or `0` if the
-    /// id is unknown. Returning `0` (default-VRF) for unknown ids is
-    /// deliberately fail-safe: an envelope from a ghost subscriber
-    /// installs into the global table rather than panicking on a
-    /// stale `ProtoId` that arrived after `unregister`.
+    /// id is unknown. An id is unknown before its `Subscribe` is
+    /// handled, which can come after its first envelope (they ride
+    /// different channels), so `0` (default-VRF) keeps that envelope.
+    /// An envelope from a cleaned-up instance never gets here
+    /// (`is_retired`).
     pub fn vrf_id_for(&self, id: ProtoId) -> u32 {
         self.subscribers.get(&id).map(|s| s.vrf_id).unwrap_or(0)
-    }
-
-    /// Reverse `proto` → `ProtoId` lookup. Used by `proto_cleanup`
-    /// to drop the registry row by name. Iterates because the
-    /// registry is keyed by id; subscriber counts stay small (a
-    /// handful), so the linear scan is cheap.
-    pub fn find_by_proto(&self, proto: &str) -> Option<ProtoId> {
-        self.subscribers
-            .iter()
-            .find(|(_, sub)| sub.proto == proto)
-            .map(|(id, _)| *id)
     }
 
     /// Reverse `proto` → `Subscriber` lookup. Steady-state delta
@@ -329,11 +323,29 @@ impl ClientRegistry {
             .map(|(id, s)| (*id, s))
     }
 
-    /// Remove a subscriber. Returns the removed entry so callers can
-    /// clean up parallel maps keyed by the protocol name (e.g.
-    /// `Rib::redist_filters`).
-    pub fn unregister(&mut self, id: ProtoId) -> Option<Subscriber> {
-        self.subscribers.remove(&id)
+    /// Retire every instance registered as `proto`: unregister it and
+    /// remember its id, so envelopes it sent before it stopped that are
+    /// still queued get dropped (`is_retired`). Envelopes ride a
+    /// different channel from the cleanup; one handled after the cleanup
+    /// would re-install a route or SID of the stopped instance, and
+    /// nothing would ever remove it.
+    pub fn retire(&mut self, proto: &str) {
+        let ids: Vec<ProtoId> = self
+            .subscribers
+            .iter()
+            .filter(|(_, sub)| sub.proto == proto)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in ids {
+            self.subscribers.remove(&id);
+            self.retired.insert(id);
+        }
+    }
+
+    /// Whether `id` belongs to an instance that has been cleaned up
+    /// (`retire`).
+    pub fn is_retired(&self, id: ProtoId) -> bool {
+        self.retired.contains(&id)
     }
 
     #[cfg(test)]
@@ -381,41 +393,22 @@ mod tests {
         // collision test below.
     }
 
+    /// `retire` takes every instance registered under the name, and
+    /// only those, and marks their ids.
     #[test]
-    fn unregister_removes_row_and_returns_subscriber() {
+    fn retire_takes_every_instance_of_the_protocol() {
         let mut reg = ClientRegistry::new();
-        let (tx, _rx) = unbounded_channel();
-        let id = ProtoId::from_raw(3);
-
-        reg.register_with_id(id, "bgp", tx, 0, false);
-        assert!(reg.contains(id));
-
-        let sub = reg.unregister(id).expect("subscriber present");
-        assert_eq!(sub.proto, "bgp");
-        assert!(!reg.contains(id));
-    }
-
-    #[test]
-    fn unregister_of_unknown_id_is_noop() {
-        let mut reg = ClientRegistry::new();
-        let (tx, _rx) = unbounded_channel();
-        let real = ProtoId::from_raw(0);
-        reg.register_with_id(real, "bgp", tx, 0, false);
-        assert!(reg.unregister(ProtoId::from_raw(999)).is_none());
-        assert!(reg.contains(real));
-    }
-
-    #[test]
-    fn find_by_proto_returns_matching_id() {
-        let mut reg = ClientRegistry::new();
-        let (tx_a, _rx_a) = unbounded_channel();
-        let (tx_b, _rx_b) = unbounded_channel();
-        reg.register_with_id(ProtoId::from_raw(0), "bgp", tx_a, 0, false);
-        reg.register_with_id(ProtoId::from_raw(1), "ospf", tx_b, 0, false);
-
-        assert_eq!(reg.find_by_proto("bgp"), Some(ProtoId::from_raw(0)));
-        assert_eq!(reg.find_by_proto("ospf"), Some(ProtoId::from_raw(1)));
-        assert_eq!(reg.find_by_proto("isis"), None);
+        for (id, proto) in [(3, "bgp"), (4, "bgp"), (5, "isis")] {
+            let (tx, _rx) = unbounded_channel();
+            reg.register_with_id(ProtoId::from_raw(id), proto, tx, 0, false);
+        }
+        reg.retire("bgp");
+        for id in [3, 4] {
+            let id = ProtoId::from_raw(id);
+            assert!(!reg.contains(id) && reg.is_retired(id), "{id}");
+        }
+        let isis = ProtoId::from_raw(5);
+        assert!(reg.contains(isis) && !reg.is_retired(isis));
     }
 
     #[test]

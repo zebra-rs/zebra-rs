@@ -2635,9 +2635,7 @@ impl Rib {
     /// watchers without touching the FIB. Used by
     /// `proto_cleanup` after withdrawing routes.
     fn proto_unregister(&mut self, proto: &str) {
-        if let Some(proto_id) = self.client_registry.find_by_proto(proto) {
-            self.client_registry.unregister(proto_id);
-        }
+        self.client_registry.retire(proto);
         self.redist_filters.remove(proto);
         self.redist_default_watch.remove(proto);
         self.redist_table_watch.retain(|_, protos| {
@@ -5558,22 +5556,7 @@ impl Rib {
                     self.process_msg(msg, RT_TABLE_MAIN).await;
                 }
                 Some(env) = self.inbound_rx.recv() => {
-                    // Look up the sender's VRF binding from
-                    // `client_registry` and translate to the kernel
-                    // `rtm_table` id. `vrf_id == 0` is default-VRF
-                    // (= `RT_TABLE_MAIN`); a non-zero value flows
-                    // straight through as the kernel table id —
-                    // that's what `VrfIdAllocator` hands out and what
-                    // `vrf_tables` is keyed by.
-                    let vrf_id = self.client_registry.vrf_id_for(env.from);
-                    let table_id = if vrf_id == 0 { RT_TABLE_MAIN } else { vrf_id };
-                    tracing::trace!(
-                        from = %env.from,
-                        vrf_id,
-                        table_id,
-                        "rib: inbound envelope",
-                    );
-                    self.process_msg(env.msg, table_id).await;
+                    self.process_inbound(env).await;
                 }
                 Some(msg) = self.fib.rx.recv() => {
                     // Overrun is intercepted here rather than inside
@@ -5594,6 +5577,34 @@ impl Rib {
                 }
             }
         }
+    }
+}
+
+impl Rib {
+    /// Handle an envelope from a protocol instance. An envelope from an
+    /// instance that has been cleaned up is dropped
+    /// (`ClientRegistry::is_retired`): it was sent before the instance
+    /// stopped and was still queued when the cleanup ran on the other
+    /// channel.
+    async fn process_inbound(&mut self, env: crate::rib::client::RibInbound) {
+        if self.client_registry.is_retired(env.from) {
+            tracing::debug!(from = %env.from, "rib: dropping an envelope from a retired instance");
+            return;
+        }
+        // Look up the sender's VRF binding from `client_registry` and
+        // translate to the kernel `rtm_table` id. `vrf_id == 0` is
+        // default-VRF (= `RT_TABLE_MAIN`); a non-zero value flows
+        // straight through as the kernel table id — that's what
+        // `VrfIdAllocator` hands out and what `vrf_tables` is keyed by.
+        let vrf_id = self.client_registry.vrf_id_for(env.from);
+        let table_id = if vrf_id == 0 { RT_TABLE_MAIN } else { vrf_id };
+        tracing::trace!(
+            from = %env.from,
+            vrf_id,
+            table_id,
+            "rib: inbound envelope",
+        );
+        self.process_msg(env.msg, table_id).await;
     }
 }
 
@@ -6307,5 +6318,39 @@ mod proto_cleanup_sid_tests {
 
         rib.proto_cleanup("ospfv3".to_string()).await;
         assert_eq!(owners(&rib), ["isis"], "ospfv3's released");
+    }
+
+    /// A protocol's envelopes ride a different channel from its cleanup,
+    /// so one it sent before it stopped can be handled after the cleanup.
+    /// Such an envelope is dropped. Here it is a `SidAdd` from BGP's
+    /// instance, which would re-install the SID the cleanup had just
+    /// released, and nothing would remove it again. An envelope from an
+    /// instance that has not subscribed yet is still handled.
+    #[tokio::test]
+    async fn a_cleaned_up_instance_installs_nothing_more() {
+        use crate::rib::client::{ProtoId, RibInbound};
+        let mut rib = Rib::new(false).expect("rib");
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let bgp = ProtoId::from_raw(90);
+        rib.client_registry
+            .register_with_id(bgp, "bgp", tx, 0, false);
+        rib.proto_cleanup("bgp".to_string()).await;
+        let queued = RibInbound {
+            from: bgp,
+            msg: Message::SidAdd {
+                sid: sid("fcbb:bbbb:1:40::", "bgp"),
+            },
+        };
+        rib.process_inbound(queued).await;
+        assert!(rib.sids.is_empty(), "dropped");
+
+        let new = RibInbound {
+            from: ProtoId::from_raw(91),
+            msg: Message::SidAdd {
+                sid: sid("fcbb:bbbb:1:40::", "bgp"),
+            },
+        };
+        rib.process_inbound(new).await;
+        assert_eq!(rib.sids.len(), 1, "not yet subscribed, handled");
     }
 }
