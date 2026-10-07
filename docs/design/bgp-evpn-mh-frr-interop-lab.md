@@ -12,8 +12,10 @@ Status: **plan — not yet executed.** The result goes into
 
 ## 1. The question
 
-zebra-rs v26.10.1 with cradle-rs v1.1.1 implements EVPN multihoming end to
-end (DF election with carving / HRW / preference / lowest-preference /
+zebra-rs **main at or after `ac6811fb`** (v26.10.1 plus #2475 — the release
+tag `v26.10.1`, `3ef7c884`, was cut the day before fast recovery merged and
+has no `fast-recovery` schema; everything else below is in the tag) with
+cradle-rs v1.1.1 implements EVPN multihoming end to end (DF election with carving / HRW / preference / lowest-preference /
 Don't-Preempt / AC-DF, non-DF and split-horizon filters, aliasing and mass
 withdraw, LAG ports, single-active with a backup path, role signalling on
 the per-EVI A-D and synchronized carving). Every proof so far is zebra-rs
@@ -172,15 +174,21 @@ Checks:
   session flap; PE-A's tee sends `SetEsRole{df:false}` (cradle
   `l2_drop_nondf` starts counting on BUM toward the CE).
 * Tie (equal preference): both pick the lower VTEP (192.0.2.1).
-* **Don't-Preempt tie-break** (the check this phase exists for): equal
-  preference on both sides, then `dont-preempt` on PE-A only. RFC 9785
-  ranks the PE *with* the bit above the one without, so zebra-rs moves the
-  DF to PE-A; FRR has no knob for the bit and may ignore it in the
-  comparison, in which case the two disagree and the segment has two DFs
-  or none. Read FRR's chosen DF (`show evpn es detail`) rather than
-  inferring it, and capture the Type-4 to confirm the bitmap is on the
-  wire as `0x8000`. If they disagree, the recommendation is to leave
-  `dont-preempt` unset on mixed segments, and the book says so.
+* **Don't-Preempt tie-break** (the check this phase exists for). The setup
+  has to be built so that DP and the address rule **choose different
+  winners**, or the case cannot fail: PE-A is 192.0.2.1 and would win the
+  lowest-address tie-break anyway, so `dont-preempt` on PE-A passes whether
+  FRR honours the bit or ignores it. Renumber PE-A's VTEP to
+  **192.0.2.12** for this sub-case — `vtep-source` and therefore the Type-4
+  Originating IP, which is what the tie-break reads — leave the preferences
+  equal, and set `dont-preempt` on PE-A only. RFC 9785 then ranks PE-A
+  (bit set, higher address) above PE-B, while the address rule alone ranks
+  PE-B first. zebra-rs must elect PE-A; if FRR elects itself, it is
+  ignoring the bit and the segment has two DFs. Read FRR's chosen DF from
+  `show evpn es detail` rather than inferring it from traffic, and capture
+  PE-A's Type-4 to confirm the bitmap is on the wire as `0x8000`. If they
+  disagree, the recommendation is to leave `dont-preempt` unset on mixed
+  segments, and the book says so.
 * **Lowest-preference** (Alg 3) on PE-A against FRR's Alg 2: unanimity
   fails and zebra-rs drops to carving, naming the disagreement —
   `DF election: segment disagrees — this PE advertises lowest-preference

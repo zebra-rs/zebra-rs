@@ -528,6 +528,24 @@ Recovery can still lose traffic for as long as that update takes; putting SCT
 on the Type-1 to close that gap would be a protocol extension and is out of
 scope. Say so in the release notes rather than claiming zero loss.
 
+It also does not reach **VPWS**. `staged_role` is consulted only in the
+E-LAN role loop of `evpn_es_df_sync`; `vpws_elect_role` recomputes an
+E-Line's RFC 8214 §5 role from the election directly, with no carving
+deadline. A segment carrying both still advertises the capability and the
+instant, so its peers' E-LAN roles are held correctly, but the E-Line's own
+changeover is not synchronized. Deferring it means routing the VPWS role
+through the same staging — a small change, but it needs its own proof that
+a held VPWS role cannot strand a service whose peer has already moved, so
+it is deliberately not in phase 4. Documented in ch-02-38 and ch-02-45
+rather than left for an operator to discover.
+
+And it assumes **synchronized clocks**: the instant is absolute wall-clock
+time (RFC 9722 §2), so a clock offset larger than `skew` reorders the
+step-down and step-up and produces exactly the overlap the skew exists to
+prevent. The `peering-time` bound does not catch an offset of a second or
+two. NTP/PTP is a prerequisite, and `skew` must be sized to the expected
+clock error plus the programming delay — said in the book chapter.
+
 ## 6. Configuration surface
 
 ```

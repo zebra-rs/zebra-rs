@@ -127,12 +127,22 @@ carves at that instant:
 
 - `peering-time` (default 3 s) is how far ahead the instant is announced, and
   also bounds what this PE will wait for: an announcement further ahead than
-  this is rejected, so a peer with a skewed clock cannot park the election.
-  Raise it where BGP propagation is slow.
+  this is rejected, so a peer whose clock is grossly wrong cannot park the
+  election. Raise it where BGP propagation is slow.
 - `skew` (default 10 ms) is how far **ahead** of the instant the outgoing
-  forwarder steps down. The incoming one steps up at the instant itself. The
-  asymmetry guarantees they never overlap, and pays a skew-long gap for it —
-  on a bridged segment that is the right trade.
+  forwarder steps down. The incoming one steps up at the instant itself, so
+  the two never overlap and a skew-long gap is paid instead — on a bridged
+  segment that is the right trade.
+- **The instant is an absolute wall-clock time, so the PEs need synchronized
+  clocks** (RFC 9722 §2). Run NTP — or PTP — on every PE of the segment and
+  let it converge before relying on this. The ordering above survives a
+  clock offset only up to `skew`: a PE whose clock is slow by more than that
+  reaches `SCT − skew` later in real time than the incoming PE reaches
+  `SCT`, and the two forward at once, which is the duplicate this feature
+  exists to prevent. The `peering-time` bound does not catch it — an offset
+  of a second or two is well inside the window and is accepted. Size `skew`
+  to cover the clock error you actually expect plus the time to program the
+  data path, not the 10 ms default, if the PEs are not tightly synchronized.
 - Like the role signal, it takes effect only once **every** PE on the segment
   advertises the capability. A PE that did not would carve on its own timer
   while the others waited, which opens a longer gap than not synchronizing.
@@ -168,6 +178,11 @@ re-points every MAC in one update. See `docs/design/bgp-evpn-multihoming-datapla
   holding two segments can still be DF for one and non-DF for the other; it is
   not a substitute for the above.
 - **ARP/ND synchronization** on the standby PE.
+- **Synchronized carving for E-Lines.** `fast-recovery` holds the E-LAN
+  roles to the announced instant; a VPWS service on the same segment
+  recomputes its RFC 8214 §5 role as soon as the election moves. The
+  capability and the carving time are still advertised, so the segment's
+  other PEs behave, but the E-Line's own changeover is not synchronized.
 - **Interoperability with other implementations is untested.** Everything here
   is proven zebra-rs against zebra-rs. The wire agreement on the DP tie-break
   and the P/B semantics is the open risk — see
