@@ -1,6 +1,8 @@
 # EVPN multihoming interop lab: zebra-rs + cradle-rs against FRR
 
-*Lab plan, drafted 2026-08-28. Companion to
+*Lab plan, drafted 2026-08-28, extended 2026-10-07 for single-active
+(RFC 9785 Don't-Preempt, rfc7432bis role signalling, RFC 9722 synchronized
+carving). Companion to
 `bgp-evpn-multihoming-dataplane.md` (the analysis of the ENOG91 FRR EVPN-MH
 talk) and `bgp-evpn-ethernet-segment.md` (what zebra-rs implements).
 Status: **plan — not yet executed.** The result goes into
@@ -10,10 +12,12 @@ Status: **plan — not yet executed.** The result goes into
 
 ## 1. The question
 
-zebra-rs v26.8.5 with cradle-rs v1.1.0 implements EVPN multihoming end to
-end (DF election with carving / HRW / preference / AC-DF, non-DF and
-split-horizon filters, aliasing and mass withdraw, LAG ports, single-active
-with a backup path). Every proof so far is zebra-rs against zebra-rs. The
+zebra-rs v26.10.1 with cradle-rs v1.1.1 implements EVPN multihoming end to
+end (DF election with carving / HRW / preference / lowest-preference /
+Don't-Preempt / AC-DF, non-DF and split-horizon filters, aliasing and mass
+withdraw, LAG ports, single-active with a backup path, role signalling on
+the per-EVI A-D and synchronized carving). Every proof so far is zebra-rs
+against zebra-rs. The
 one thing a same-vendor lab cannot show is whether the *wire* is right —
 that a PE running FRR reads our Type-1/2/3/4 routes the way RFC 7432 and
 RFC 8584 intend, and that we read FRR's.
@@ -50,6 +54,11 @@ none), and performance.
 | DF election, preference (Alg 2) | yes, `evpn mh es-df-pref` | yes, `df-election preference` | both Alg 2 → agree; the supported way to share a segment |
 | DF election, HRW (Alg 1) | no | yes | zebra-rs falls back to carving; FRR unknown — measure |
 | AC-DF capability bit | unknown | advertised + honoured when unanimous | observe FRR's bitmap; expect *not in effect* |
+| DF election, lowest-preference (Alg 3) | no | yes, `df-election algorithm lowest-preference` | mixed Alg 2 / Alg 3 → unanimity fails, zebra-rs falls back to Alg 0 — **do not mix; measure what FRR does** |
+| Don't-Preempt bit (RFC 9785, bitmap bit 0) | unknown — `es-df-pref` exists, the DP bit is not configurable | advertised on `dont-preempt`, honoured as the tie-break above the lowest address | at equal preference the tie-break must agree, or the two PEs pick different DFs — **the single most load-bearing check in P1** |
+| Role signalling (rfc7432bis L2-Attr P/B on the per-EVI A-D) | no | optional, `role-signaling l2-attr`; trusted only when unanimous | FRR silent → zebra-rs falls back to inference, which is the designed outcome; confirm FRR does not reject the EC |
+| Synchronized carving (RFC 9722 SCT + T capability) | no | optional, `df-election fast-recovery` | FRR does not advertise T → off for the whole segment; confirm FRR ignores an unknown EC on the Type-4 rather than treating the route as malformed |
+| Port-active (RFC 9786) | no | no | out of scope |
 | non-DF BUM filter | control plane only | enforced (cradle) | FRR non-DF: CE gets duplicates (**expected FRR gap**); zebra-rs non-DF: exactly one copy |
 | split horizon / local bias | control plane only | enforced (cradle `VTEP_ES`) | BUM DF→FRR non-DF re-floods to the CE (**expected FRR gap**); FRR DF→zebra-rs: dropped, `l2_drop_sph` |
 | aliasing + mass withdraw | yes — kernel FDB `nhid` groups | yes — ES nexthop groups | both directions should converge; measure the withdraw-to-reroute time |
@@ -155,13 +164,27 @@ Both sides on **preference** (Alg 2): PE-A `preference 100`, PE-B
 `es-df-pref 50`.
 
 Checks:
-* PE-A `show bgp evpn ethernet-segment`: `DF algorithm: preference-based`,
+* PE-A `show bgp evpn ethernet-segment`: `DF algorithm: preference-based
+  (local pref 100)`,
   `Designated Forwarder (tag 0): 192.0.2.1 (this node)`; PE-B `show evpn
   es detail`: DF = 192.0.2.1 for VNI 100 (`show evpn es-evi`). Both agree.
 * Swap the preferences (PE-B 200): both move the DF to PE-B without any
   session flap; PE-A's tee sends `SetEsRole{df:false}` (cradle
   `l2_drop_nondf` starts counting on BUM toward the CE).
 * Tie (equal preference): both pick the lower VTEP (192.0.2.1).
+* **Don't-Preempt tie-break** (the check this phase exists for): equal
+  preference on both sides, then `dont-preempt` on PE-A only. RFC 9785
+  ranks the PE *with* the bit above the one without, so zebra-rs moves the
+  DF to PE-A; FRR has no knob for the bit and may ignore it in the
+  comparison, in which case the two disagree and the segment has two DFs
+  or none. Read FRR's chosen DF (`show evpn es detail`) rather than
+  inferring it, and capture the Type-4 to confirm the bitmap is on the
+  wire as `0x8000`. If they disagree, the recommendation is to leave
+  `dont-preempt` unset on mixed segments, and the book says so.
+* **Lowest-preference** (Alg 3) on PE-A against FRR's Alg 2: unanimity
+  fails and zebra-rs drops to carving, naming the disagreement —
+  `DF election: segment disagrees — this PE advertises lowest-preference
+  (alg3), negotiated alg0`. Record FRR's behaviour.
 * Startup delay: restart PE-B's bgpd with `evpn mh startup-delay 30` — PE-A
   must keep the DF role until FRR's Type-4 appears, then re-elect; and the
   mirror image with zebra-rs `startup-delay 30`.
@@ -234,6 +257,22 @@ how, so the docs and the book can say it precisely.
   keeps treating the segment as all-active — its non-DF still forwards
   to the CE and its remote still aliases. Confirm; confirm nothing on the
   FRR side crashes or logs the route as bad.
+* **Role signalling**: PE-A `role-signaling l2-attr`, so its per-EVI A-D
+  carries the L2-Attributes EC with P or B set. Three things to establish:
+  that FRR accepts the route (it parses the same EC for VPWS, but an ELAN
+  A-D carrying it is new), that FRR does not act on the bits, and that
+  PE-A — seeing no role from FRR — reports `inferred` rather than
+  `signalled` for the segment. The last one is the designed fallback, not
+  a divergence; it is listed here because a lab that saw `signalled` on a
+  mixed segment would have found a real unanimity bug.
+* **Fast recovery**: PE-A `df-election fast-recovery`. Its Type-4 carries
+  the SCT EC and the T bit. Confirm FRR accepts the Type-4 with an
+  unrecognized EC and does not drop or treat-as-withdraw the route, and
+  that PE-A reports fast recovery `advertised, not in effect (1 of 2 PEs
+  advertise it)` and keeps carving on its own. A pcap of PE-A's Type-4 is
+  the evidence that the EC is well-formed; FRR's acceptance of it is the
+  only thing the lab can prove about RFC 9722 until a second
+  implementation exists.
 * **AC-DF** (if FRR sets the bit in P1): take a VLAN sub-interface AC down
   on PE-B and see whether FRR withdraws only the per-EVI A-D.
 * **RR in the middle** (optional): an FRR route reflector between the
@@ -241,7 +280,8 @@ how, so the docs and the book can say it precisely.
   members.
 
 Recommendation expected to come out of this phase: *on a mixed segment,
-configure preference-based election on both sides; never mix
+configure preference-based election (Alg 2) on both sides, leave
+`dont-preempt`, `role-signaling` and `fast-recovery` unset, and never mix
 single-active with FRR.*
 
 ### P5 — LACP MC-LAG (optional, last)

@@ -21,7 +21,32 @@ Read this first if you're touching
 
 Branch: `evpn-es-foundation-*` (per-phase).
 
-## Status (2026-07-01) — CONTROL PLANE COMPLETE (Phases 1–5 merged)
+## Status (2026-10-07) — superseded for everything after Phase 5
+
+This document is the **design and phasing record for Phases 0–5** — the
+Type-1/Type-4 codec, ESI configuration, ES discovery, service-carving DF
+election and per-ES A-D. All of that merged (#1634, #1635, #1636, #1638,
+#1702) and the phase table below is accurate for it.
+
+Everything built **after** Phase 5 is specified elsewhere, and where those
+documents disagree with the text below, they win:
+
+| What | Where | State |
+| ---- | ----- | ----- |
+| Data plane (Phase 6 here) — non-DF BUM filter, split-horizon / local bias, ES nexthop groups, aliasing + mass withdraw, LAG ports | `bgp-evpn-multihoming-dataplane.md` | **done, cradle-only**; the kernel backend stays single-homed |
+| Per-EVI A-D, HRW (Alg 1), AC-DF, DF hold / `startup-delay` | same | **done** — the three "MISSING" rows below are all closed |
+| Preference-based election (RFC 9785), role signalling on the per-EVI A-D (rfc7432bis L2 Attributes P/B), synchronized carving (RFC 9722) | `bgp-evpn-single-active-plan.md` | **done** (phases 1–4) |
+| Operator-facing configuration | `book/src/ch-02-45-bgp-evpn-single-active.md` | — |
+| Wire compatibility with other implementations | `bgp-evpn-mh-frr-interop-lab.md` | **not executed** |
+
+Still open from this document's own deferrals: an `Esi` newtype with
+ESI-Type (0–5) modelling (manual Type-0 only), **EVPN import-RT filtering**
+(ES membership is still derived by scanning the Loc-RIB for the ES-Import
+RT rather than gated on import), and **EVI-RT Type 3** (IPv6, 20-octet EC).
+
+<details>
+<summary>The Phase 0–5 status as written on 2026-07-01 — kept for the phase
+table and the deferral list; its three "MISSING" rows are now stale</summary>
 
 The full EVPN-multihoming **control plane** is on `main`: ESI config,
 Type-4 ES discovery, DF election (service-carving), and Type-1 per-ES A-D
@@ -60,6 +85,8 @@ is scanned, not import-gated); **per-EVI A-D** for aliasing (needs
 EVI-to-ES mapping); **HRW** DF algorithm (Alg 1); the **3 s DF hold timer**;
 **EVI-RT Type 3** (IPv6, 20-octet EC). All feed Phase 6 or are independent
 follow-ups.
+
+</details>
 
 ## RFC surface
 

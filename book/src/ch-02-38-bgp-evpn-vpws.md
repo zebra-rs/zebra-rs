@@ -273,6 +273,13 @@ address:
 
 `algorithm lowest-preference` (Alg 3) is the same election with the
 comparison reversed, for a fabric that numbers its PEs the other way round.
+
+Everything in this section is the same election an E-LAN segment runs, and
+[EVPN Single-Active Multihoming](ch-02-45-bgp-evpn-single-active.md) covers
+it from that side — including the two things an E-Line does not need:
+`role-signaling`, because a VPWS Type-1 already carries P/B natively
+(RFC 8214 §5), and `df-election fast-recovery`, which synchronizes *when*
+the whole segment carves and therefore applies to its E-Lines too.
 Selecting either algorithm and leaving `preference` unset bids RFC 9785's
 mandatory default of **32767**, the midpoint of the range — not 0, which
 would rank the PE below every peer that took the default.

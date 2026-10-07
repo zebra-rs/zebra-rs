@@ -620,8 +620,8 @@ Not in phase 1, by design: the non-revertive operational preference
 | **3b** ✅ | **Consumption**: `evpn_es_nhg_sync()` selects on the signalled role, `es_sa_primary()` retained as the fallback, conflict + reason in `show` | **Done** — see the status note below |
 | **3c** ✅ | The stored `EsRemoteBd` with provenance, the incumbent rule and a generation | **Done** — see the status note below |
 | **4** ✅ | **RFC 9722 behaviour**: staged vs applied verdicts, `EsCarveDue` timer, skew, `fast-recovery` config, exclusivity with `startup-delay`, fallbacks | **Done** — see the status note below |
-| **5** | **Datapath proof (cradle)**: primary switch on a P/B change alone, with the old DF's Type-2s still in the table; both traffic directions on the standby stay blocked | cradle BDD twin of `cradle_evpn_mh_sa_zebra` driven by a role change instead of a port-down; `l2_drop_nondf` / `l2_es_nhg` counters as the discriminator |
-| **6** | **Docs + interop**: update `bgp-evpn-support-status.md` and the ES design doc, book chapter, CHANGELOG at the release cut; run interop-lab phases P1/P4 against FRR for the preference/DP tie-break | Lab report in `bgp-evpn-mh-frr-interop-report.md` |
+| **5** ✅ | **Datapath proof (cradle)**: primary switch on a P/B change alone, with the old DF's Type-2s still in the table; both traffic directions on the standby stay blocked | **Done** — cradle #199 (`aa6203e`), `cradle_evpn_mh_sa_role_zebra`; see the status note below |
+| **6** 🔶 | **Docs + interop**: update `bgp-evpn-support-status.md` and the ES design doc, book chapter, CHANGELOG at the release cut; run interop-lab phases P1/P4 against FRR for the preference/DP tie-break | **Docs done**; the lab is **not executed** — report owed in `bgp-evpn-mh-frr-interop-report.md` |
 
 **Status: phase 2 is implemented** on `evpn-sct-codec`. `ExtCommunityValue::
 sct()/is_sct()/as_sct()` and `SctEc { seconds, fraction }` carry the RFC 9722
@@ -825,6 +825,33 @@ predicted would pass, the test is telling you about its own timing
 assumptions. Twice in this phase an assertion passed only because unrelated
 steps happened to wait long enough — the generation values in 3c, and "the
 announcement is spent" here.
+
+**Status: phase 5 is implemented** as cradle-rs #199 (merged `aa6203e`),
+`bdd/tests/features/cradle_evpn_mh_sa_role_zebra.feature` — the datapath twin
+of `cradle_evpn_mh_sa_zebra` whose stimulus is a **role change alone**. The
+three PEs keep every link up and every Type-2 in place; only PE-3's
+`df-election preference` differs between `pe3.yaml` and `pe3-pref.yaml` (one
+line, 100 → 300), so the forwarder moves because the election's answer moved
+and nothing else did. CE-to-CE ping proves the new forwarder carries traffic,
+`l2_es_nhg` that it is the group's slot 0, and `l2_drop_sa` that the
+stepped-down PE blocks **both** directions on its access port while its own
+MAC routes are still in the table. The old DF's stale Type-2s are exactly
+what makes this a proof rather than a restatement of phase 3b: before the
+role signal, that table is what a remote PE would have followed.
+
+**Status: phase 6 — docs done, interop lab not executed.** The multihoming
+rows of `bgp-evpn-support-status.md` carry single-active as a row of its own
+(election surface, provenance, blocked groups, fast recovery), the Phase 0–5
+record in `bgp-evpn-ethernet-segment.md` now says plainly what supersedes it,
+`book/src/ch-02-45-bgp-evpn-single-active.md` is the operator-facing chapter
+(it did not exist; the DF knobs were documented only inside the VPWS
+chapter), and `bgp-evpn-mh-frr-interop-lab.md` gained the four wire elements
+this arc added — the DP bit, Alg 3, L2-Attr P/B on an E-LAN A-D, and the SCT
+EC with the T bit — in its §2 matrix, P1 and P4, with the DP tie-break named
+as the check P1 exists for. What remains is **running** it: about three lab
+days against stock FRR, which no amount of same-vendor BDD substitutes for.
+Until then every claim in this plan is proven zebra-rs against zebra-rs, and
+the book says so.
 
 Phases 1–2 are pure codec/config and can land in any order. Phase 3 is the
 one that changes forwarding decisions on a remote PE; it is the one to gate
