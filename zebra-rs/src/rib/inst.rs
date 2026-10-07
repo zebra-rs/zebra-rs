@@ -3946,6 +3946,12 @@ impl Rib {
                 global_links,
             } => {
                 self.subscribe(proto_id, tx, proto, vrf_id, global_links);
+                // What the instance sent before its Subscribe was handled
+                // was held (`process_inbound`); handle it now, in order. A
+                // failed subscription retired the id, so it is dropped.
+                for env in self.client_registry.take_deferred(proto_id) {
+                    Box::pin(self.process_inbound(env)).await;
+                }
             }
             Message::ProtoCleanup { proto } => {
                 self.proto_cleanup(proto).await;
@@ -5596,10 +5602,16 @@ impl Rib {
     /// instance that has been cleaned up is dropped
     /// (`ClientRegistry::is_retired`): it was sent before the instance
     /// stopped and was still queued when the cleanup ran on the other
-    /// channel.
+    /// channel. One from an instance whose `Subscribe`, also on the
+    /// other channel, isn't handled yet is held until it is
+    /// (`ClientRegistry::defer`).
     async fn process_inbound(&mut self, env: crate::rib::client::RibInbound) {
         if self.client_registry.is_retired(env.from) {
             tracing::debug!(from = %env.from, "rib: dropping an envelope from a retired instance");
+            return;
+        }
+        if !self.client_registry.contains(env.from) {
+            self.client_registry.defer(env);
             return;
         }
         // Look up the sender's VRF binding from `client_registry` and
@@ -6335,8 +6347,7 @@ mod proto_cleanup_sid_tests {
     /// so one it sent before it stopped can be handled after the cleanup.
     /// Such an envelope is dropped. Here it is a `SidAdd` from BGP's
     /// instance, which would re-install the SID the cleanup had just
-    /// released, and nothing would remove it again. An envelope from an
-    /// instance that has not subscribed yet is still handled.
+    /// released, and nothing would remove it again.
     #[tokio::test]
     async fn a_cleaned_up_instance_installs_nothing_more() {
         use crate::rib::client::{ProtoId, RibInbound};
@@ -6354,15 +6365,39 @@ mod proto_cleanup_sid_tests {
         };
         rib.process_inbound(queued).await;
         assert!(rib.sids.is_empty(), "dropped");
+    }
 
-        let new = RibInbound {
-            from: ProtoId::from_raw(91),
+    /// A respawned instance's `Subscribe` is queued behind its
+    /// predecessor's cleanup, while its installs ride the other
+    /// channel and can be handled first. The cleanup matches by name,
+    /// so it would release the new instance's SID; the install is held
+    /// until the `Subscribe` is handled, after the cleanup.
+    #[tokio::test]
+    async fn a_predecessors_cleanup_spares_the_respawned_instance() {
+        use crate::rib::client::{ProtoId, RibInbound};
+        let mut rib = Rib::new(false).expect("rib");
+        let (old_tx, _old_rx) = tokio::sync::mpsc::unbounded_channel();
+        rib.subscribe(ProtoId::from_raw(96), old_tx, "bgp".to_string(), 0, false);
+        let new = ProtoId::from_raw(97);
+        let install = RibInbound {
+            from: new,
             msg: Message::SidAdd {
                 sid: sid("fcbb:bbbb:1:40::", "bgp"),
             },
         };
-        rib.process_inbound(new).await;
-        assert_eq!(rib.sids.len(), 1, "not yet subscribed, handled");
+        rib.process_inbound(install).await;
+        assert!(rib.sids.is_empty(), "held");
+        rib.proto_cleanup("bgp".to_string()).await;
+        let (new_tx, _new_rx) = tokio::sync::mpsc::unbounded_channel();
+        let subscribe = Message::Subscribe {
+            proto_id: new,
+            tx: new_tx,
+            proto: "bgp".to_string(),
+            vrf_id: 0,
+            global_links: false,
+        };
+        rib.process_msg(subscribe, RT_TABLE_MAIN).await;
+        assert_eq!(rib.sids.len(), 1, "installed once subscribed");
     }
 
     /// An instance can stop before RIB handles its `Subscribe`. It is

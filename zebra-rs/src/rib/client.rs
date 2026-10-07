@@ -237,6 +237,9 @@ pub struct ClientRegistry {
     /// Ids are never reused, so an envelope carrying one of these comes
     /// from an instance that is gone.
     retired: BTreeSet<ProtoId>,
+    /// Envelopes from instances not registered yet, in arrival order
+    /// (`defer`).
+    deferred: BTreeMap<ProtoId, Vec<RibInbound>>,
 }
 
 impl ClientRegistry {
@@ -277,10 +280,9 @@ impl ClientRegistry {
     }
 
     /// Return the VRF id this subscriber is bound to, or `0` if the
-    /// id is unknown. An id is unknown before its `Subscribe` is
-    /// handled, which can come after its first envelope (they ride
-    /// different channels), so `0` (default-VRF) keeps that envelope.
-    /// An envelope from a cleaned-up instance never gets here
+    /// id is unknown. The inbound dispatcher asks only for registered
+    /// ids: an envelope from an instance not registered yet is held
+    /// (`defer`), and one from a cleaned-up instance is dropped
     /// (`is_retired`).
     pub fn vrf_id_for(&self, id: ProtoId) -> u32 {
         self.subscribers.get(&id).map(|s| s.vrf_id).unwrap_or(0)
@@ -355,9 +357,26 @@ impl ClientRegistry {
         self.retired.contains(&id)
     }
 
-    #[cfg(test)]
-    fn contains(&self, id: ProtoId) -> bool {
+    /// Whether `id` is registered.
+    pub fn contains(&self, id: ProtoId) -> bool {
         self.subscribers.contains_key(&id)
+    }
+
+    /// Hold an envelope from an instance not registered yet, until its
+    /// `Subscribe` is handled (`take_deferred`). The `Subscribe` rides
+    /// the other channel, so the instance's first envelopes can arrive
+    /// before it. Handled then, they would go to the wrong table (the
+    /// instance's VRF isn't known yet), and a respawned instance's
+    /// installs would precede its predecessor's cleanup, which is
+    /// queued ahead of the `Subscribe` and matches by name, so it
+    /// would take them out.
+    pub fn defer(&mut self, env: RibInbound) {
+        self.deferred.entry(env.from).or_default().push(env);
+    }
+
+    /// Take what `id` sent before it registered, in arrival order.
+    pub fn take_deferred(&mut self, id: ProtoId) -> Vec<RibInbound> {
+        self.deferred.remove(&id).unwrap_or_default()
     }
 
     #[cfg(test)]
@@ -398,6 +417,32 @@ mod tests {
         assert_eq!(reg.len(), 1);
         // next_proto_id is private but is exercised indirectly by the
         // collision test below.
+    }
+
+    /// `take_deferred` hands back what one id sent, in arrival order,
+    /// once.
+    #[test]
+    fn deferred_envelopes_come_back_per_id_in_order() {
+        let mut reg = ClientRegistry::new();
+        for (id, addr) in [(8, "fc00::1"), (9, "fc00::2"), (8, "fc00::3")] {
+            reg.defer(RibInbound {
+                from: ProtoId::from_raw(id),
+                msg: Message::SidDel {
+                    addr: addr.parse().unwrap(),
+                },
+            });
+        }
+        let addrs: Vec<String> = reg
+            .take_deferred(ProtoId::from_raw(8))
+            .into_iter()
+            .map(|env| match env.msg {
+                Message::SidDel { addr } => addr.to_string(),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(addrs, ["fc00::1", "fc00::3"]);
+        assert!(reg.take_deferred(ProtoId::from_raw(8)).is_empty());
+        assert_eq!(reg.take_deferred(ProtoId::from_raw(9)).len(), 1);
     }
 
     /// `retire` takes every instance registered under the name, and
