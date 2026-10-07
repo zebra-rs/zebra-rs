@@ -21869,7 +21869,14 @@ impl Bgp {
             .chain(self.es_carve.get(esi).filter(|c| c.own).map(|c| c.wire));
         let mut best: Option<(Instant, bgp_packet::SctEc)> = None;
         let mut reject = None;
+        let done = self.es_carve_done.get(esi).copied();
         for wire in announced {
+            // Honoured once. The announcement stays on the peer's Type-4
+            // after its instant has passed, and re-adopting it would hold the
+            // segment's roles for an instant everyone has already carved at.
+            if done == Some(wire) {
+                continue;
+            }
             match self.es_carve_from_wire(esi, wire, peering) {
                 Ok(at) => {
                     if best.is_none_or(|(_, w)| wire > w) {
@@ -22015,6 +22022,7 @@ impl Bgp {
         // the PEs that are stepping down.
         if at == carve.sct {
             self.es_carve.remove(&esi);
+            self.es_carve_done.insert(esi, carve.wire);
         }
         vpws_mark_df_dirty(&mut self.local_rib, &esi);
         self.vpws_df_drain();
@@ -26675,6 +26683,10 @@ mod table_map_tests {
 #[cfg(test)]
 #[path = "es_remote_review_tests.rs"]
 mod es_remote_review_tests;
+
+#[cfg(test)]
+#[path = "es_carve_tests.rs"]
+mod es_carve_tests;
 
 #[cfg(test)]
 mod tests {

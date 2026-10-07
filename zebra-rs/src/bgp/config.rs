@@ -2414,6 +2414,7 @@ fn config_es_fast_recovery(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
         && let Some(esi) = esi
     {
         bgp.es_carve.remove(&esi);
+        bgp.es_carve_done.remove(&esi);
         bgp.es_sct_reject.remove(&esi);
     }
     // The capability rides the Type-4, and the pending-carve state feeds the

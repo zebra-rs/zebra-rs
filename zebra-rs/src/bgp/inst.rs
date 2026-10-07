@@ -947,6 +947,12 @@ pub struct Bgp {
     /// RFC 9722: the carving instant each segment is currently waiting for.
     /// Present only while one is pending; dropped once it has passed.
     pub es_carve: BTreeMap<[u8; 10], super::ethernet_segment::EsCarve>,
+    /// The announcement a segment has already carved at. An instant is
+    /// honoured once: without this, retiring a carve would depend on the wall
+    /// clock having passed the announced time, and clock jitter either side of
+    /// it could re-adopt the same announcement and park the segment's roles
+    /// again.
+    pub es_carve_done: BTreeMap<[u8; 10], bgp_packet::SctEc>,
     /// The last carving instant a segment rejected, for `show` — a rejected
     /// SCT is not an error to retry, it just means that segment carved
     /// immediately, and an operator needs to be able to see that it did.
@@ -1506,6 +1512,7 @@ impl Bgp {
             es_remote: BTreeMap::new(),
             es_gen: BTreeMap::new(),
             es_carve: BTreeMap::new(),
+            es_carve_done: BTreeMap::new(),
             es_sct_reject: BTreeMap::new(),
             es_nhg_diag: BTreeMap::new(),
             links_down: std::collections::BTreeSet::new(),
