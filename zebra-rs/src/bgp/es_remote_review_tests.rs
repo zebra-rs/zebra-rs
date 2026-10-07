@@ -259,6 +259,33 @@ async fn docs_review_mixed_segment_requires_a_remote_observer() {
     );
 }
 
+/// A locally attached PE still reports provenance for its one remote
+/// single-active member. The mixed-FRR case above has no provenance
+/// because the remaining member is all-active, not because it is alone.
+#[tokio::test]
+async fn docs_review_one_remote_sa_member_still_has_provenance() {
+    let mut bgp = fresh_bgp();
+    add_member(&mut bgp, 1, true, true);
+    for eth_tag in [MAX_ET, 0] {
+        let prefix = EvpnPrefix::EthernetAd { esi: ESI, eth_tag };
+        let mut rib = bgp.local_rib.evpn[&rd(1)].selected[&prefix].clone();
+        rib.typ = BgpRibType::Originated;
+        bgp.local_rib.update_evpn(rd(1), prefix, rib);
+    }
+    add_member(&mut bgp, 2, true, true);
+    for (role, reason) in [
+        (Some((true, false)), SaSelectReason::Signalled),
+        (Some((false, true)), SaSelectReason::BackupOnly),
+        (None, SaSelectReason::Unsignalled),
+    ] {
+        set_member_role(&mut bgp, 2, role);
+        bgp.evpn_es_nhg_sync();
+        assert!(bgp.es_nhg_sent[&(ESI, BD)].0);
+        assert_eq!(bgp.es_remote[&(ESI, BD)].members.len(), 1);
+        assert_eq!(bgp.es_group_selection(&ESI, BD), Some(reason));
+    }
+}
+
 /// An invalid member is excluded from selection; it does not block the
 /// entire segment when another member advertises a valid primary.
 #[tokio::test]
