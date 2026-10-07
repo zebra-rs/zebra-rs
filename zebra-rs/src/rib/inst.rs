@@ -2555,6 +2555,24 @@ impl Rib {
         // before the rtype gate so it covers every requester.
         self.label_manager.release_all(&proto);
 
+        // And its SRv6 SIDs, before the route walk below would take
+        // their RIB rows out from under `sid_uninstall`. A protocol
+        // releases its own SIDs as it handles its config deletes, but a
+        // despawn aborts its task right after queueing them
+        // (`despawn_bgp` and siblings), so one that had not handled them
+        // yet never sent the `SidDel`. The SID stayed in the table, and
+        // in the kernel, for good: `isis_sr_switchover`'s rollback to
+        // SR-MPLS found BGP's End.DT6 still there.
+        let sids: Vec<Ipv6Addr> = self
+            .sids
+            .iter()
+            .filter(|(_, sid)| sid.owner.proto == proto)
+            .map(|(addr, _)| *addr)
+            .collect();
+        for addr in sids {
+            self.sid_uninstall(addr).await;
+        }
+
         let rtype = match proto.as_str() {
             "bgp" => RibType::Bgp,
             "isis" => RibType::Isis,
@@ -6239,5 +6257,55 @@ mod kernel_nexthop_tests {
             gid.is_some_and(|gid| gid > 40),
             "above the kernel's: {gid:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod proto_cleanup_sid_tests {
+    use super::*;
+
+    fn sid(addr: &str, proto: &str) -> Sid {
+        Sid {
+            addr: addr.parse().unwrap(),
+            behavior: SidBehavior::EndDT6,
+            context: SidContext::None,
+            owner: SidOwner::new(proto, 0),
+            locator: "LOC1".to_string(),
+            allocation_type: crate::rib::SidAllocationType::Dynamic,
+            ifindex: 0,
+            nh6: None,
+            structure: None,
+            table_id: 0,
+            segs: Vec::new(),
+            flavors: 0,
+        }
+    }
+
+    /// A protocol's cleanup releases the SRv6 SIDs it held, and only
+    /// those. A despawned protocol's task is aborted right after its
+    /// config deletes are queued, so its own `SidDel` may never go out:
+    /// its SIDs stayed for good. `ospfv3`'s cleanup has no route type to
+    /// walk, and releases its SIDs all the same.
+    #[tokio::test]
+    async fn a_protocols_cleanup_releases_its_sids() {
+        let mut rib = Rib::new(false).expect("rib");
+        for (addr, proto) in [
+            ("fcbb:bbbb:1:40::", "bgp"),
+            ("fcbb:bbbb:1:41::", "bgp"),
+            ("fcbb:bbbb:1:e000::", "isis"),
+            ("fcbb:bbbb:1:e001::", "ospfv3"),
+        ] {
+            rib.sid_install(sid(addr, proto)).await;
+        }
+        let owners = |rib: &Rib| -> Vec<String> {
+            rib.sids.values().map(|s| s.owner.proto.clone()).collect()
+        };
+        assert_eq!(owners(&rib).len(), 4, "installed");
+
+        rib.proto_cleanup("bgp".to_string()).await;
+        assert_eq!(owners(&rib), ["isis", "ospfv3"], "bgp's released");
+
+        rib.proto_cleanup("ospfv3".to_string()).await;
+        assert_eq!(owners(&rib), ["isis"], "ospfv3's released");
     }
 }
