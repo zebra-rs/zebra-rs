@@ -21888,13 +21888,21 @@ impl Bgp {
         }
         match best {
             Some((sct, wire)) => {
-                let own = self
-                    .es_carve
-                    .get(esi)
-                    .is_some_and(|c| c.own && c.wire == wire);
+                let prev = self.es_carve.get(esi).copied();
+                let own = prev.is_some_and(|c| c.own && c.wire == wire);
                 self.es_carve
                     .insert(*esi, super::ethernet_segment::EsCarve { sct, wire, own });
                 self.es_sct_reject.remove(esi);
+                // Arm the wake-ups for an announcement not armed before. A
+                // carve adopted from a PEER needs them as much as one we
+                // announced — more, in fact: the PE stepping down is usually
+                // the one that did not announce, and without a timer its hold
+                // would end only when some unrelated ES event happened to
+                // drain. Keyed on the wire value, so re-deriving the same
+                // announcement does not stack more timers.
+                if prev.map(|c| c.wire) != Some(wire) {
+                    self.es_arm_carve_timers(*esi, sct, skew);
+                }
                 Some((sct, skew))
             }
             None => {
