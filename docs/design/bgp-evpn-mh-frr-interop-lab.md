@@ -268,11 +268,20 @@ how, so the docs and the book can say it precisely.
 * **Role signalling**: PE-A `role-signaling l2-attr`, so its per-EVI A-D
   carries the L2-Attributes EC with P or B set. Three things to establish:
   that FRR accepts the route (it parses the same EC for VPWS, but an ELAN
-  A-D carrying it is new), that FRR does not act on the bits, and that
-  PE-A — seeing no role from FRR — reports `inferred` rather than
-  `signalled` for the segment. The last one is the designed fallback, not
-  a divergence; it is listed here because a lab that saw `signalled` on a
-  mixed segment would have found a real unanimity bug.
+  A-D carrying it is new), that FRR does not act on the bits, and that a
+  zebra-rs PE seeing only PE-A's signal falls back to `inferred` rather
+  than trusting it — the designed unanimity fallback, listed here because
+  a lab that read `signalled` on a mixed segment would have found a real
+  bug.
+
+  **Read that last one on PE-C, not on PE-A.** A group is built from the
+  *other* members' per-EVI A-Ds, so on PE-A the only member left is FRR's,
+  and FRR advertises no single-active ESI-label EC: PE-A therefore shows an
+  **all-active** group for the segment with no provenance at all, which is
+  correct and proves nothing about the fallback. PE-C receives both
+  members' A-Ds — PE-A's with the ESI-label EC and the L2-Attr bits, FRR's
+  with neither — so it is the only PE in this topology whose group is
+  single-active and carries a reason. Expect `(inferred)` there.
 * **Fast recovery**: PE-A `df-election fast-recovery`. Its Type-4 carries
   the SCT EC and the T bit. Confirm FRR accepts the Type-4 with an
   unrecognized EC and does not drop or treat-as-withdraw the route, and

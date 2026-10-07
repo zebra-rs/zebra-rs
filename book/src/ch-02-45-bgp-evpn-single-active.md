@@ -92,7 +92,11 @@ Three things worth knowing before enabling it:
 
 On the receiving side, `show bgp evpn ethernet-segment` names how each
 forwarder was chosen — `signalled`, `inferred`, `backup-only`, `no forwarder`,
-or a conflict — and lists every copy of each member's route:
+or a conflict — and lists every copy of each member's route. Read it on a PE
+that is *not* on the segment: a group is built from the **other** members'
+advertisements, so a segment's own PEs each see a group with themselves left
+out, and on a two-PE segment that leaves one member and no decision to
+report.
 
 ```
 Ethernet Segment nexthop groups (teed to the datapath):

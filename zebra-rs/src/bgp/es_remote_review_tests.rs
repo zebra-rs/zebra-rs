@@ -231,6 +231,51 @@ fn set_member_role(bgp: &mut Bgp, n: u8, role: Option<(bool, bool)>) {
     bgp.local_rib.update_evpn(rd(n), prefix, rib);
 }
 
+/// PR #2476 P4 observes PE-A, whose own single-active A-D is originated.
+/// Only a remote observer sees both that signal and FRR's silent member.
+#[tokio::test]
+async fn docs_review_mixed_segment_requires_a_remote_observer() {
+    let mut bgp = fresh_bgp();
+    add_member(&mut bgp, 1, true, true);
+    add_member(&mut bgp, 2, false, false);
+    set_member_role(&mut bgp, 2, None);
+    for eth_tag in [MAX_ET, 0] {
+        let prefix = EvpnPrefix::EthernetAd { esi: ESI, eth_tag };
+        let mut rib = bgp.local_rib.evpn[&rd(1)].selected[&prefix].clone();
+        rib.typ = BgpRibType::Originated;
+        bgp.local_rib.update_evpn(rd(1), prefix, rib);
+    }
+    bgp.evpn_es_nhg_sync();
+    assert!(!bgp.es_nhg_sent[&(ESI, BD)].0);
+    assert_eq!(bgp.es_group_selection(&ESI, BD), None);
+
+    // The remote PE-C receives PE-A's routes instead of originating them.
+    add_member(&mut bgp, 1, true, true);
+    bgp.evpn_es_nhg_sync();
+    assert!(bgp.es_nhg_sent[&(ESI, BD)].0);
+    assert_eq!(
+        bgp.es_group_selection(&ESI, BD),
+        Some(SaSelectReason::Unsignalled)
+    );
+}
+
+/// An invalid member is excluded from selection; it does not block the
+/// entire segment when another member advertises a valid primary.
+#[tokio::test]
+async fn docs_review_invalid_member_does_not_withhold_valid_primary() {
+    let mut bgp = fresh_bgp();
+    add_member(&mut bgp, 1, true, true);
+    add_member(&mut bgp, 2, true, true);
+    set_member_role(&mut bgp, 1, Some((true, true)));
+    bgp.evpn_es_nhg_sync();
+    assert_eq!(bgp.es_remote[&(ESI, BD)].active, Some(pe(2)));
+    assert_eq!(
+        bgp.es_group_selection(&ESI, BD),
+        Some(SaSelectReason::Signalled)
+    );
+    assert!(!bgp.es_nhg_sent[&(ESI, BD)].2);
+}
+
 #[tokio::test]
 async fn inferred_state_records_the_programmed_slot_zero_without_macs() {
     let mut bgp = fresh_bgp();
