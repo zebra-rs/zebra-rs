@@ -337,9 +337,16 @@ impl ClientRegistry {
             .map(|(id, _)| *id)
             .collect();
         for id in ids {
-            self.subscribers.remove(&id);
-            self.retired.insert(id);
+            self.retire_id(id);
         }
+    }
+
+    /// Retire one instance by id, registered or not: one whose
+    /// subscription failed (its receiver was already gone) was never
+    /// registered, so `retire` by name can't find it.
+    pub fn retire_id(&mut self, id: ProtoId) {
+        self.subscribers.remove(&id);
+        self.retired.insert(id);
     }
 
     /// Whether `id` belongs to an instance that has been cleaned up
@@ -409,6 +416,10 @@ mod tests {
         }
         let isis = ProtoId::from_raw(5);
         assert!(reg.contains(isis) && !reg.is_retired(isis));
+        // One never registered (its subscription failed) is retired by id.
+        let failed = ProtoId::from_raw(6);
+        reg.retire_id(failed);
+        assert!(reg.is_retired(failed));
     }
 
     #[test]

@@ -2291,8 +2291,8 @@ impl Rib {
     /// [`crate::config::ConfigManager::subscribe_to_rib`] before this
     /// runs; we record the row in `client_registry`, which is the
     /// sole source of truth for both inbound dispatch and the
-    /// outbound push paths. The initial-state dump and the trailing
-    /// `EoR` are unchanged.
+    /// outbound push paths, after the initial-state dump and the
+    /// trailing `EoR` (`send_subscribe_dump`).
     pub fn subscribe(
         &mut self,
         proto_id: ProtoId,
@@ -2303,11 +2303,12 @@ impl Rib {
     ) {
         // A subscriber may have dropped its receiver before this
         // handler ran (e.g. its constructor failed after the
-        // `Message::Subscribe` was already queued). Every dump send
-        // below is therefore best-effort: on the first `SendError` we
-        // bail out without registering the subscriber, so we don't
-        // panic and don't leave a dead entry in `client_registry`.
-        if tx.is_closed() {
+        // `Message::Subscribe` was already queued, or it was despawned).
+        // It is then not registered, so we don't leave a dead entry in
+        // `client_registry`, and its id is retired instead: its client
+        // can have installs queued on the inbound channel, and its
+        // cleanup (`proto_cleanup`) retires only registered ids.
+        if tx.is_closed() || !self.send_subscribe_dump(&tx, vrf_id, global_links) {
             // Benign during startup churn: a per-VRF task that respawns
             // (table_id / SID fill in) drops its earlier subscribe before
             // this handler delivers the dump. Gated with the task
@@ -2317,8 +2318,31 @@ impl Rib {
                     "rib: subscriber '{proto}' dropped before subscribe could deliver dump; skipping"
                 );
             }
+            self.client_registry.retire_id(proto_id);
             return;
         }
+        self.client_registry
+            .register_with_id(proto_id, &proto, tx, vrf_id, global_links);
+        // Redistribute registrations ride the inbound channel while this
+        // Subscribe rides the message channel, and `event_loop`'s
+        // `select!` gives the two no relative order. A RedistAdd /
+        // RedistTableAdd / RedistDefaultAdd processed before this row
+        // landed found no subscriber and its walk-and-replay was dropped
+        // — permanently, because routes already in the store never
+        // re-fire as deltas. Replay whatever the recorded filters and
+        // watches imply now that the row exists.
+        self.replay_pending_redist(&proto);
+    }
+
+    /// Send a new subscriber its initial-state dump and the trailing
+    /// `EoR`. Every send is best-effort: returns `false` at the first
+    /// `SendError` (the receiver is gone) rather than panicking.
+    fn send_subscribe_dump(
+        &self,
+        tx: &UnboundedSender<RibRx>,
+        vrf_id: u32,
+        global_links: bool,
+    ) -> bool {
         // Link dump. Match the steady-state dispatcher: an ordinary
         // subscriber sees only links in its own VRF, while an explicit
         // `global_links` subscriber sees every VRF. Sending every link here
@@ -2332,18 +2356,18 @@ impl Rib {
             }
             let msg = RibRx::LinkAdd(link.clone());
             if tx.send(msg).is_err() {
-                return;
+                return false;
             }
             for addr in link.addr4.iter() {
                 let msg = RibRx::AddrAdd(addr.clone());
                 if tx.send(msg).is_err() {
-                    return;
+                    return false;
                 }
             }
             for addr in link.addr6.iter() {
                 let msg = RibRx::AddrAdd(addr.clone());
                 if tx.send(msg).is_err() {
-                    return;
+                    return false;
                 }
             }
         }
@@ -2410,7 +2434,7 @@ impl Rib {
         if !replay_router_id.is_unspecified() {
             let msg = RibRx::RouterIdUpdate(replay_router_id);
             if tx.send(msg).is_err() {
-                return;
+                return false;
             }
         }
         // VRF dump — only for default-VRF subscribers (BGP). A
@@ -2426,7 +2450,7 @@ impl Rib {
                     ifindex: vrf.ifindex,
                 };
                 if tx.send(msg).is_err() {
-                    return;
+                    return false;
                 }
                 // RT snapshot follows the VrfAdd. The receiver
                 // can already key off `name` because the replay
@@ -2441,24 +2465,11 @@ impl Rib {
                     mup_export_rts: vrf.mup_export_rts.clone(),
                 };
                 if tx.send(rt_msg).is_err() {
-                    return;
+                    return false;
                 }
             }
         }
-        if tx.send(RibRx::EoR).is_err() {
-            return;
-        }
-        self.client_registry
-            .register_with_id(proto_id, &proto, tx, vrf_id, global_links);
-        // Redistribute registrations ride the inbound channel while this
-        // Subscribe rides the message channel, and `event_loop`'s
-        // `select!` gives the two no relative order. A RedistAdd /
-        // RedistTableAdd / RedistDefaultAdd processed before this row
-        // landed found no subscriber and its walk-and-replay was dropped
-        // — permanently, because routes already in the store never
-        // re-fire as deltas. Replay whatever the recorded filters and
-        // watches imply now that the row exists.
-        self.replay_pending_redist(&proto);
+        tx.send(RibRx::EoR).is_ok()
     }
 
     /// Replay every redistribute walk this protocol's recorded
@@ -6352,5 +6363,29 @@ mod proto_cleanup_sid_tests {
         };
         rib.process_inbound(new).await;
         assert_eq!(rib.sids.len(), 1, "not yet subscribed, handled");
+    }
+
+    /// An instance can stop before RIB handles its `Subscribe`. It is
+    /// then never registered, so its cleanup, which retires by name,
+    /// can't find it (and a respawned per-VRF task's first instance
+    /// gets no cleanup at all). The failed subscription itself retires
+    /// the id, and an install the instance queued before it stopped is
+    /// dropped.
+    #[tokio::test]
+    async fn an_instance_gone_before_its_subscribe_installs_nothing() {
+        use crate::rib::client::{ProtoId, RibInbound};
+        let mut rib = Rib::new(false).expect("rib");
+        let bgp = ProtoId::from_raw(93);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        drop(rx);
+        rib.subscribe(bgp, tx, "bgp".to_string(), 0, false);
+        let queued = RibInbound {
+            from: bgp,
+            msg: Message::SidAdd {
+                sid: sid("fcbb:bbbb:1:40::", "bgp"),
+            },
+        };
+        rib.process_inbound(queued).await;
+        assert!(rib.sids.is_empty(), "dropped");
     }
 }
