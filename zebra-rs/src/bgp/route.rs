@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bgp_packet::*;
 use bytes::BytesMut;
@@ -20020,10 +20020,16 @@ impl Bgp {
                 bitmap: 0,
                 pref: 0,
             });
-        attr.ecom = Some(ExtCommunity::from([
-            ExtCommunityValue::es_import_rt(&esi),
-            df.into(),
-        ]));
+        let mut ecom = ExtCommunity::from([ExtCommunityValue::es_import_rt(&esi), df.into()]);
+        // RFC 9722 §2.1: while this PE is waiting on an instant it announced
+        // itself, that instant rides the Type-4 so the segment's other PEs
+        // carve with it. A carve we are only *honouring* (a peer announced it)
+        // is not re-advertised — echoing it back would make a segment's
+        // announcements indistinguishable from their echoes.
+        if let Some(carve) = self.es_carve.get(&esi).filter(|c| c.own) {
+            ecom.0.insert(carve.wire.into());
+        }
+        attr.ecom = Some(ecom);
         attr.nexthop = Some(BgpNexthop::Evpn(vtep_local));
         let mut rib = BgpRib::new(
             ORIGINATED_PEER,
@@ -21337,12 +21343,36 @@ impl Bgp {
             ),
         > = BTreeMap::new();
         let mpls = self.evpn_encap.is_mpls();
+        // One reading of the clock for the whole recompute, so every bridge
+        // domain in a pass is staged against the same instant.
+        let now = Instant::now();
+        // RFC 9722 §3.1: resolve each segment's governing carving instant
+        // first. This updates the pending-carve state, so it cannot run inside
+        // the borrow of `ethernet_segments` below.
+        let configured: Vec<[u8; 10]> = self
+            .ethernet_segments
+            .values()
+            .filter(|es| es.fast_recovery)
+            .filter_map(|es| es.esi)
+            .collect();
+        let mut carves: BTreeMap<[u8; 10], (Instant, Duration)> = BTreeMap::new();
+        for esi in configured {
+            let cands = self.es_df_candidates(&esi);
+            if let Some(carve) = self.es_adopt_carve(&esi, &cands) {
+                carves.insert(esi, carve);
+            }
+        }
         let mut bum_labels: BTreeMap<u32, BTreeMap<IpAddr, u32>> = BTreeMap::new();
         for es in self.ethernet_segments.values() {
             let (Some(esi), Some(port)) = (es.esi, es.interface.clone()) else {
                 continue;
             };
             let cands = self.es_df_candidates(&esi);
+            // Resolved above: `Some` only where the whole segment signals T
+            // and an announced instant is one we will wait for. Otherwise the
+            // segment carves immediately, exactly as it did before anyone
+            // asked for synchronization.
+            let carve = carves.get(&esi).copied();
             // The segment's other PEs — cradle's split-horizon list (RFC
             // 8365 §8.3.1). A Type-4's Originating IP is the PE's
             // `evpn_local_source`, so it matches the overlay source only
@@ -21385,10 +21415,29 @@ impl Bgp {
                     } else {
                         &cands
                     };
-                    roles.insert(
-                        vni,
-                        (elan_df(bd_cands, me, &esi, vni, holding), single_active),
-                    );
+                    let desired = elan_df(bd_cands, me, &esi, vni, holding);
+                    // While a carve is pending, keep programming the role we
+                    // already programmed until this bridge domain's moment
+                    // comes — that holding is the whole mechanism: every PE
+                    // on the segment changes at one announced instant rather
+                    // than whenever BGP happened to deliver.
+                    let role = match carve {
+                        Some((sct, skew)) => {
+                            match self.es_df_sent.get(&esi).and_then(|s| s.roles.get(&vni)) {
+                                Some((applied, _)) => super::ethernet_segment::staged_role(
+                                    *applied,
+                                    desired,
+                                    super::ethernet_segment::carve_apply_at(sct, skew, *applied),
+                                    now,
+                                ),
+                                // Nothing programmed yet: there is no role to
+                                // hold, so there is nothing to synchronize.
+                                None => desired,
+                            }
+                        }
+                        None => desired,
+                    };
+                    roles.insert(vni, (role, single_active));
                 }
             }
             // RFC 7432 §8.3 (MPLS): our ESI label for decap, and toward
@@ -21517,6 +21566,19 @@ impl Bgp {
         // is what makes the hold safe. `es_hold_leave` re-originates.
         if self.es_holding(&esi) {
             return;
+        }
+        // RFC 9722 §3.1: a segment that is (re)joining announces the instant
+        // it will carve at. "Joining" is precisely the case where our own
+        // Type-4 is not yet in the candidate set — which is true here on a
+        // genuine join and false on the re-originations that a router-id or
+        // config edit triggers, so this does not re-announce on every edit
+        // and park the segment's roles again.
+        if !self
+            .es_df_candidates(&esi)
+            .iter()
+            .any(|c| c.addr == vtep_local)
+        {
+            self.es_arm_carve(esi);
         }
         self.evpn_originate_ethernet_seg(esi, vtep_local);
         self.evpn_originate_ethernet_ad_es(esi, vtep_local, single_active);
@@ -21773,6 +21835,191 @@ impl Bgp {
         );
     }
 
+    /// The carving instant governing `esi` right now, with the segment's skew
+    /// — `None` when the segment is not synchronizing, which is every segment
+    /// that has not been configured for it.
+    ///
+    /// Recomputed from the candidates each sync rather than kept as the source
+    /// of truth: the routes say what the segment announced, and
+    /// `es_carve_from_wire` keeps the monotonic deadline stable for an
+    /// announcement we are already waiting on. A rejected instant is recorded
+    /// for `show` and otherwise ignored.
+    fn es_adopt_carve(
+        &mut self,
+        esi: &[u8; 10],
+        cands: &[super::ethernet_segment::DfCandidate],
+    ) -> Option<(Instant, Duration)> {
+        let es = self
+            .ethernet_segments
+            .values()
+            .find(|es| es.esi.as_ref() == Some(esi) && es.fast_recovery)?;
+        let (peering, skew) = (es.peering_time().as_secs() as u16, es.skew());
+        if !super::ethernet_segment::t_sync_in_effect(cands) {
+            // One PE on the segment does not synchronize, so none of them may
+            // (RFC 9722 §2.3) — holding roles for an instant the others will
+            // ignore opens a longer gap than not synchronizing at all.
+            self.es_carve.remove(esi);
+            return None;
+        }
+        // Our own pending announcement counts alongside the peers': it is on
+        // the wire for them too.
+        let announced = cands
+            .iter()
+            .filter_map(|c| c.sct)
+            .chain(self.es_carve.get(esi).filter(|c| c.own).map(|c| c.wire));
+        let mut best: Option<(Instant, bgp_packet::SctEc)> = None;
+        let mut reject = None;
+        for wire in announced {
+            match self.es_carve_from_wire(esi, wire, peering) {
+                Ok(at) => {
+                    if best.is_none_or(|(_, w)| wire > w) {
+                        best = Some((at, wire));
+                    }
+                }
+                Err(why) => reject = Some(why),
+            }
+        }
+        match best {
+            Some((sct, wire)) => {
+                let own = self
+                    .es_carve
+                    .get(esi)
+                    .is_some_and(|c| c.own && c.wire == wire);
+                self.es_carve
+                    .insert(*esi, super::ethernet_segment::EsCarve { sct, wire, own });
+                self.es_sct_reject.remove(esi);
+                Some((sct, skew))
+            }
+            None => {
+                self.es_carve.remove(esi);
+                if let Some(why) = reject {
+                    self.es_sct_reject.insert(*esi, why);
+                }
+                None
+            }
+        }
+    }
+
+    /// Translate a wire carving instant into monotonic terms, or say why it
+    /// is not one we will wait for (RFC 9722 §3.1). Keeps the `Instant` of a
+    /// carve we are already waiting on, so re-deriving the same announcement
+    /// cannot drift the deadline a timer was armed for.
+    fn es_carve_from_wire(
+        &self,
+        esi: &[u8; 10],
+        wire: bgp_packet::SctEc,
+        peering_time: u16,
+    ) -> Result<Instant, super::ethernet_segment::SctReject> {
+        if let Some(existing) = self.es_carve.get(esi).filter(|c| c.wire == wire) {
+            return Ok(existing.sct);
+        }
+        let (secs, micros) = wire.to_unix_micros();
+        let sct_us = u128::from(secs) * 1_000_000 + u128::from(micros);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let now_us = u128::from(now.as_secs()) * 1_000_000 + u128::from(now.subsec_micros());
+        super::ethernet_segment::sct_acceptable(sct_us, now_us, peering_time)?;
+        // Wall clock decides whether the instant is usable; the timer runs on
+        // the monotonic clock, so the remaining interval is what crosses over.
+        let ahead = Duration::from_micros((sct_us - now_us) as u64);
+        Ok(Instant::now() + ahead)
+    }
+
+    /// Announce a carving instant for `esi` and hold this PE's role changes
+    /// until it (RFC 9722 §3.1). Called where the segment (re)joins, which is
+    /// the moment the RFC's peering timer exists to cover.
+    ///
+    /// `fast-recovery` is mutually exclusive with `startup-delay`: the hold
+    /// withholds the Type-4 an announcement must ride on, so a segment cannot
+    /// sensibly do both.
+    pub fn es_arm_carve(&mut self, esi: [u8; 10]) {
+        let Some(es) = self
+            .ethernet_segments
+            .values()
+            .find(|es| es.esi == Some(esi) && es.fast_recovery)
+        else {
+            return;
+        };
+        let (peering, skew) = (es.peering_time(), es.skew());
+        let sct = Instant::now() + peering;
+        let wire = bgp_packet::SctEc::from_system_time(std::time::SystemTime::now() + peering);
+        self.es_carve.insert(
+            esi,
+            super::ethernet_segment::EsCarve {
+                sct,
+                wire,
+                own: true,
+            },
+        );
+        self.es_arm_carve_timers(esi, sct, skew);
+        tracing::info!(
+            proto = "bgp",
+            category = "evpn",
+            esi = %bgp_packet::esi_display(&esi),
+            peering_secs = peering.as_secs(),
+            skew_ms = skew.as_millis(),
+            "bgp: announced a service carving time; holding role changes until it",
+        );
+    }
+
+    /// One wake-up at the skew-adjusted lead and one at the instant itself —
+    /// the outgoing Designated Forwarder steps down at the first, the incoming
+    /// one steps up at the second. Both carry the deadline they were armed
+    /// for so a superseded carve's timers are ignored rather than acted on.
+    fn es_arm_carve_timers(&self, esi: [u8; 10], sct: Instant, skew: Duration) {
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!(
+                proto = "bgp",
+                category = "evpn",
+                esi = %bgp_packet::esi_display(&esi),
+                "bgp: no runtime to time the service carve; roles will move on the next \
+                 ES event instead of at the announced instant",
+            );
+            return;
+        };
+        for at in [
+            super::ethernet_segment::carve_apply_at(sct, skew, true),
+            sct,
+        ] {
+            let tx = self.tx.clone();
+            handle.spawn(async move {
+                tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await;
+                let _ = tx.send(super::inst::Message::EsCarveDue { esi, at }).await;
+            });
+        }
+    }
+
+    /// Wake-up for [`super::inst::Message::EsCarveDue`]: a carving instant, or
+    /// its skew-adjusted lead, has arrived. Re-runs the segment's election so
+    /// the verdicts that were being held now apply.
+    ///
+    /// A wake-up whose deadline belongs to no current carve is discarded — a
+    /// later announcement supersedes an earlier one, and carving against the
+    /// old instant would undo the synchronization this exists for.
+    pub fn es_carve_due(&mut self, esi: [u8; 10], at: Instant) {
+        let Some(carve) = self.es_carve.get(&esi).copied() else {
+            return;
+        };
+        let skew = self
+            .ethernet_segments
+            .values()
+            .find(|es| es.esi == Some(esi))
+            .map(|es| es.skew())
+            .unwrap_or_else(|| Duration::from_millis(10));
+        let lead = super::ethernet_segment::carve_apply_at(carve.sct, skew, true);
+        if at != lead && at != carve.sct {
+            return;
+        }
+        // The later deadline retires the carve; the earlier one only releases
+        // the PEs that are stepping down.
+        if at == carve.sct {
+            self.es_carve.remove(&esi);
+        }
+        vpws_mark_df_dirty(&mut self.local_rib, &esi);
+        self.vpws_df_drain();
+    }
+
     /// Wake-up for [`super::inst::Message::EsHoldExpired`]. The deadline is
     /// the identity of the hold, so a timer that does not match the segment's
     /// current one is stale — the hold was cleared, or the segment was
@@ -21867,8 +22114,17 @@ impl Bgp {
                     // of them, `show` renders the rest, and a future
                     // capability needs no re-plumbing.
                     let caps = df.map(|d| d.bitmap).unwrap_or(0);
+                    // RFC 9722 §2.1: the announced carving instant, read off
+                    // the same Type-4 as the capability that makes it binding.
+                    let sct = rib
+                        .attr
+                        .ecom
+                        .as_ref()
+                        .and_then(|ec| ec.0.iter().find_map(|v| v.as_sct()));
                     cands.push(
-                        super::ethernet_segment::DfCandidate::new(*orig, alg, pref).with_caps(caps),
+                        super::ethernet_segment::DfCandidate::new(*orig, alg, pref)
+                            .with_caps(caps)
+                            .with_sct(sct),
                     );
                 }
             }

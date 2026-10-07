@@ -2393,6 +2393,77 @@ fn config_es_df_algorithm(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option
 }
 
 /// `router bgp afi-safi evpn ethernet-segment <name> df-election
+/// fast-recovery` — RFC 9722 synchronized service carving: the Type-4 carries
+/// the T capability, a join announces the instant it will carve at, and role
+/// changes governed by an announced instant are held until it.
+///
+/// Turning it off drops any pending announcement, so the segment goes back to
+/// carving as soon as its election moves.
+fn config_es_fast_recovery(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
+        return None;
+    }
+    let name = args.string()?;
+    let esi = {
+        let es = bgp.ethernet_segments.entry(name).or_default();
+        es.fast_recovery = op.is_set();
+        es.esi
+    };
+    if !op.is_set()
+        && let Some(esi) = esi
+    {
+        bgp.es_carve.remove(&esi);
+        bgp.es_sct_reject.remove(&esi);
+    }
+    // The capability rides the Type-4, and the pending-carve state feeds the
+    // DF sync, so both have to be republished.
+    es_df_election_changed(bgp);
+    Some(())
+}
+
+/// `router bgp afi-safi evpn ethernet-segment <name> df-election
+/// fast-recovery peering-time <1..60>` — seconds between announcing a carving
+/// instant and carving at it, and the window inside which a peer's
+/// announcement is accepted.
+fn config_es_peering_time(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
+        return None;
+    }
+    let name = args.string()?;
+    let secs = if op.is_set() {
+        Some(args.u32()? as u16)
+    } else {
+        None
+    };
+    let es = bgp.ethernet_segments.entry(name).or_default();
+    es.peering_time = secs;
+    es_df_election_changed(bgp);
+    Some(())
+}
+
+/// `router bgp afi-safi evpn ethernet-segment <name> df-election
+/// fast-recovery skew <1..1000>` — milliseconds by which an outgoing
+/// Designated Forwarder steps down ahead of the announced instant.
+fn config_es_skew(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
+        return None;
+    }
+    let name = args.string()?;
+    let ms = if op.is_set() {
+        Some(args.u32()? as u16)
+    } else {
+        None
+    };
+    let es = bgp.ethernet_segments.entry(name).or_default();
+    es.skew_ms = ms;
+    es_df_election_changed(bgp);
+    Some(())
+}
+
+/// `router bgp afi-safi evpn ethernet-segment <name> df-election
 /// dont-preempt` — advertise the RFC 9785 §3 "Don't Preempt" (DP)
 /// capability. On a preference tie this PE ranks ahead of one that does not
 /// set the bit. Only advertised under a preference-based algorithm, which is
@@ -5827,6 +5898,18 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/afi-safi/ethernet-segment/df-election/dont-preempt",
             config_es_dont_preempt,
+        );
+        self.callback_add(
+            "/router/bgp/afi-safi/ethernet-segment/df-election/fast-recovery",
+            config_es_fast_recovery,
+        );
+        self.callback_add(
+            "/router/bgp/afi-safi/ethernet-segment/df-election/fast-recovery/peering-time",
+            config_es_peering_time,
+        );
+        self.callback_add(
+            "/router/bgp/afi-safi/ethernet-segment/df-election/fast-recovery/skew",
+            config_es_skew,
         );
 
         // EVPN VPWS E-Line services (RFC 8214), under

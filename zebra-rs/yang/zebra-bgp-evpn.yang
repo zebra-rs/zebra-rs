@@ -393,6 +393,72 @@ module zebra-bgp-evpn {
              `designated-forwarder election algorithm preference` and FRR
              `evpn mh es-df-pref`.";
         }
+        container fast-recovery {
+          presence "RFC 9722 synchronized service carving";
+          ext:help "Carve at an announced instant instead of on a local timer";
+          must "not(../startup-delay)" {
+            error-message
+              "fast-recovery and startup-delay are mutually exclusive: the
+               startup delay withholds the Type-4 that a carving time has to
+               be advertised on.";
+          }
+          description
+            "RFC 9722 Fast Recovery. Without it, a PE joining a segment waits
+             out a local timer and then carves, while the PEs already on the
+             segment re-carve the moment its routes arrive — so the two ends
+             move at different times, and a single-active segment spends that
+             difference with either no Designated Forwarder or two of them.
+             One drops frames, the other duplicates them and can loop.
+
+             With it, a joining PE advertises the instant at which it will
+             carve — a Service Carving Time extended community on its Type-4 —
+             and every PE on the segment carves at that one instant instead of
+             whenever BGP happened to deliver. The segment must agree: the
+             capability is advertised in the DF Election extended community
+             and synchronized carving takes effect only once **every** PE on
+             the segment signals it, exactly as AC-DF does. A PE that does not
+             would carve on its own timer while the others waited, which is
+             worse than not synchronizing at all.
+
+             Mutually exclusive with `startup-delay`, which withholds the
+             Type-4 an announcement must ride on.";
+          leaf peering-time {
+            ext:help "Seconds between announcing a carving time and carving at it";
+            type uint16 {
+              range "1..60";
+            }
+            default 3;
+            description
+              "Seconds between announcing the carving instant and carving at
+               it — RFC 7432 §8.5 step 2's peering timer, whose default of 3
+               seconds RFC 9722 keeps. Larger values are worth having where
+               BGP propagation is slow: an instant that arrives after it has
+               passed is discarded, and that segment carves immediately.
+
+               It also bounds what this PE will wait for: an announcement
+               further ahead than this interval is rejected, so a peer with a
+               skewed clock cannot park the election arbitrarily far out.";
+          }
+          leaf skew {
+            ext:help "Milliseconds the outgoing DF steps down before the carving time";
+            type uint16 {
+              range "1..1000";
+            }
+            default 10;
+            description
+              "Milliseconds by which a PE **losing** the Designated Forwarder
+               role steps down ahead of the announced instant; a PE gaining
+               the role steps up at the instant itself (RFC 9722 §3.1).
+
+               The asymmetry is deliberate: it guarantees the two never
+               overlap, and pays for that with a skew-long window in which the
+               bridge domain has no forwarder. On a bridged segment that is
+               the right trade — a gap drops frames for that window, an
+               overlap duplicates them and can loop. Raise it where
+               forwarding-state programming is slow, but keep it well inside
+               `peering-time`.";
+          }
+        }
         leaf dont-preempt {
           ext:help "Advertise the RFC 9785 Don't Preempt capability";
           type empty;

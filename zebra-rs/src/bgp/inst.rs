@@ -142,6 +142,14 @@ pub enum Message {
         name: String,
         until: std::time::Instant,
     },
+    /// RFC 9722: a segment's carving instant (or its skew-adjusted lead) has
+    /// arrived. `at` is the deadline this wake-up was armed for — the identity
+    /// of the carve, so a wake-up for one that has since been superseded by a
+    /// later announcement is discarded rather than carving against it.
+    EsCarveDue {
+        esi: [u8; 10],
+        at: std::time::Instant,
+    },
 }
 
 pub type Callback = fn(&mut Bgp, Args, ConfigOp) -> Option<()>;
@@ -936,6 +944,13 @@ pub struct Bgp {
     /// completion barrier this exists for. Bounded by the distinct segments
     /// and bridge domains this node has seen.
     pub es_gen: BTreeMap<([u8; 10], u32), super::ethernet_segment::EsGenState>,
+    /// RFC 9722: the carving instant each segment is currently waiting for.
+    /// Present only while one is pending; dropped once it has passed.
+    pub es_carve: BTreeMap<[u8; 10], super::ethernet_segment::EsCarve>,
+    /// The last carving instant a segment rejected, for `show` — a rejected
+    /// SCT is not an error to retry, it just means that segment carved
+    /// immediately, and an operator needs to be able to see that it did.
+    pub es_sct_reject: BTreeMap<[u8; 10], super::ethernet_segment::SctReject>,
     pub es_nhg_diag: BTreeMap<
         ([u8; 10], u32),
         (
@@ -1490,6 +1505,8 @@ impl Bgp {
             es_nhg_sent: BTreeMap::new(),
             es_remote: BTreeMap::new(),
             es_gen: BTreeMap::new(),
+            es_carve: BTreeMap::new(),
+            es_sct_reject: BTreeMap::new(),
             es_nhg_diag: BTreeMap::new(),
             links_down: std::collections::BTreeSet::new(),
             local_smet: BTreeMap::new(),
@@ -2805,6 +2822,9 @@ impl Bgp {
             }
             Message::EsHoldExpired { name, until } => {
                 self.es_hold_expired(&name, until);
+            }
+            Message::EsCarveDue { esi, at } => {
+                self.es_carve_due(esi, at);
             }
         }
     }

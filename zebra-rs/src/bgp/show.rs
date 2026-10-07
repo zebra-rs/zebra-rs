@@ -2857,6 +2857,67 @@ fn show_bgp_evpn_ethernet_segment(
                 let tag = if df == local { " (this node)" } else { "" };
                 writeln!(buf, "  Designated Forwarder (tag 0): {df}{tag}")?;
             }
+            // RFC 9722: the capability has to be unanimous before any PE
+            // may hold a role for an announced instant, so show both what
+            // this PE asks for and whether the segment as a whole has it —
+            // the same shape as the AC-DF line above, for the same reason.
+            if es.fast_recovery
+                || cands
+                    .iter()
+                    .any(|c| c.caps & bgp_packet::DfElectionEc::CAP_TIME_SYNC != 0)
+            {
+                let advertising = cands
+                    .iter()
+                    .filter(|c| c.caps & bgp_packet::DfElectionEc::CAP_TIME_SYNC != 0)
+                    .count();
+                let state = if super::ethernet_segment::t_sync_in_effect(&cands) {
+                    "in effect"
+                } else {
+                    "not in effect"
+                };
+                writeln!(
+                    buf,
+                    "  Fast recovery: {}, {state} ({advertising} of {} PEs advertise it)",
+                    if es.fast_recovery {
+                        "advertised"
+                    } else {
+                        "not advertised"
+                    },
+                    cands.len()
+                )?;
+                if es.fast_recovery {
+                    writeln!(
+                        buf,
+                        "    peering-time {}s, skew {}ms",
+                        es.peering_time().as_secs(),
+                        es.skew().as_millis()
+                    )?;
+                }
+                // A pending carve is why roles may be sitting on their old
+                // values; without this line that looks like a stuck election.
+                if let Some(carve) = bgp.es_carve.get(&esi) {
+                    let (secs, micros) = carve.wire.to_unix_micros();
+                    let left = carve
+                        .sct
+                        .saturating_duration_since(std::time::Instant::now());
+                    writeln!(
+                        buf,
+                        "    carving at {secs}.{micros:06} ({} ms away, {}), roles held until then",
+                        left.as_millis(),
+                        if carve.own { "ours" } else { "a peer's" }
+                    )?;
+                }
+                // A rejected announcement is not an error to retry: that
+                // segment carved immediately, and an operator has to be able
+                // to see that it did.
+                if let Some(why) = bgp.es_sct_reject.get(&esi) {
+                    writeln!(
+                        buf,
+                        "    last carving time rejected: {} (carved immediately)",
+                        why.as_str()
+                    )?;
+                }
+            }
             // What the datapath was last told, which is a different
             // question from what the election currently says: these are the
             // values behind `Message::EsRole`, and a config edit that failed
