@@ -36395,7 +36395,7 @@ mod update_group_next_hop_knob_tests {
 mod bgpls_review_tests;
 
 #[cfg(test)]
-mod ovn_type5_tests {
+mod vxlan_type5_tests {
     use super::*;
 
     #[test]

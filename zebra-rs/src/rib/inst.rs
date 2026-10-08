@@ -381,7 +381,7 @@ pub enum Message {
     },
     EvpnMacAdd(crate::rib::evpn::MacRoute),
     EvpnMacDel(crate::rib::evpn::MacRouteKey),
-    OvnRouteExchange(bool),
+    KernelRouteExchange(bool),
     /// A remote PE joined/left a VNI's BUM flood set (EVPN Type-3 with an
     /// SRv6 `End.DT2M` SID, RFC 9252 §6.4) — teed to cradle as a BUM
     /// replication slot (per-copy MAC-in-SRv6 encap in the flood list).
@@ -3971,8 +3971,8 @@ impl Rib {
             Message::SweepStale { rtype, v6 } => {
                 self.sweep_stale(rtype, v6, table_id).await;
             }
-            Message::OvnRouteExchange(enabled) => {
-                self.fib_handle.ovn_route_exchange = enabled;
+            Message::KernelRouteExchange(enabled) => {
+                self.fib_handle.kernel_route_exchange = enabled;
             }
             Message::EvpnMacAdd(route) => {
                 let key = route.key;
@@ -6049,13 +6049,14 @@ mod local_device_mac_tests {
     #[tokio::test]
     async fn evpn_kernel_routes_survive_startup_before_vrf_adoption() {
         let mut rib = Rib::new(false).unwrap();
-        let mut vrf = link(9, "ovnvrf100", None, None);
+        let mut vrf = link(9, "tenant100", None, None);
         vrf.vrf_table = Some(100);
         rib.links.insert(9, vrf);
         for prefix in ["10.20.0.0/24", "2001:db8:20::/64"] {
             let prefix: IpNet = prefix.parse().unwrap();
             let mut entry = RibEntry::new(RibType::Kernel);
             entry.nexthop = Nexthop::Blackhole(1000);
+            entry.metric = 1000;
             entry.set_valid(true);
             let route = crate::fib::FibRoute {
                 prefix,
@@ -6074,6 +6075,20 @@ mod local_device_mac_tests {
                 IpNet::V6(p) => assert!(table.table_v6.get(&p).is_some()),
             }
             rib.process_fib_msg(FibMessage::DelRoute(route)).await;
+            let table = rib.vrf_tables.get(&100).unwrap();
+            match prefix {
+                IpNet::V4(p) => {
+                    assert!(table.table.get(&p).is_none_or(|entries| entries.is_empty()))
+                }
+                IpNet::V6(p) => {
+                    assert!(
+                        table
+                            .table_v6
+                            .get(&p)
+                            .is_none_or(|entries| entries.is_empty())
+                    )
+                }
+            }
         }
     }
 
@@ -6095,6 +6110,7 @@ mod local_device_mac_tests {
             vrf_table: None,
             bridge: vni.is_none() && master.is_none(),
             vxlan_local: None,
+            vxlan_metadata: None,
             parent: None,
             vlan_id: None,
             mtu_error: None,

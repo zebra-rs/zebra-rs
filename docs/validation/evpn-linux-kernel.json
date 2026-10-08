@@ -1,0 +1,164 @@
+{
+  "binary_sha256": "8c9b073aeb5862feac6a39b0f27424365c259eea80067aef87bbebcd36827a89",
+  "checks": [
+    {
+      "name": "v1 EVPN established",
+      "passed": true
+    },
+    {
+      "name": "v2 EVPN established",
+      "passed": true
+    },
+    {
+      "name": "v1 Type-2 -4 neighbor",
+      "passed": true
+    },
+    {
+      "name": "l1 switched -4",
+      "passed": true
+    },
+    {
+      "name": "v1 Type-2 -6 neighbor",
+      "passed": true
+    },
+    {
+      "name": "l1 switched -6",
+      "passed": true
+    },
+    {
+      "name": "v1 preserved VTEP",
+      "passed": true
+    },
+    {
+      "name": "v1 Type-3 IMET",
+      "passed": true
+    },
+    {
+      "name": "v1 mapped IPv6 RMAC adjacency",
+      "passed": true
+    },
+    {
+      "name": "v1 Type-5 10.20.2.0/24",
+      "passed": true
+    },
+    {
+      "name": "v1 Type-5 2001:db8:20:2::/64",
+      "passed": true
+    },
+    {
+      "name": "v1 Type-5 10.30.2.0/24",
+      "passed": true
+    },
+    {
+      "name": "v1 Type-5 2001:db8:30:2::/64",
+      "passed": true
+    },
+    {
+      "name": "r1 routed -4",
+      "passed": true
+    },
+    {
+      "name": "r1 routed -6",
+      "passed": true
+    },
+    {
+      "name": "v2 Type-2 -4 neighbor",
+      "passed": true
+    },
+    {
+      "name": "l2 switched -4",
+      "passed": true
+    },
+    {
+      "name": "v2 Type-2 -6 neighbor",
+      "passed": true
+    },
+    {
+      "name": "l2 switched -6",
+      "passed": true
+    },
+    {
+      "name": "v2 preserved VTEP",
+      "passed": true
+    },
+    {
+      "name": "v2 Type-3 IMET",
+      "passed": true
+    },
+    {
+      "name": "v2 mapped IPv6 RMAC adjacency",
+      "passed": true
+    },
+    {
+      "name": "v2 Type-5 10.20.1.0/24",
+      "passed": true
+    },
+    {
+      "name": "v2 Type-5 2001:db8:20:1::/64",
+      "passed": true
+    },
+    {
+      "name": "v2 Type-5 10.30.1.0/24",
+      "passed": true
+    },
+    {
+      "name": "v2 Type-5 2001:db8:30:1::/64",
+      "passed": true
+    },
+    {
+      "name": "r2 routed -4",
+      "passed": true
+    },
+    {
+      "name": "r2 routed -6",
+      "passed": true
+    },
+    {
+      "name": "Type-2 IPv4 withdrawal",
+      "passed": true
+    },
+    {
+      "name": "Type-2 IPv6 survives IPv4 withdrawal",
+      "passed": true
+    },
+    {
+      "name": "Type-2 MAC survives IPv4 withdrawal",
+      "passed": true
+    },
+    {
+      "name": "Static blackhole Type-5 withdrawal",
+      "passed": true
+    },
+    {
+      "name": "Other Type-5 retains RMAC adjacency",
+      "passed": true
+    },
+    {
+      "name": "Type-5 withdrawal 10.20.1.0/24",
+      "passed": true
+    },
+    {
+      "name": "Type-5 withdrawal 2001:db8:20:1::/64",
+      "passed": true
+    },
+    {
+      "name": "Final Type-5 withdrawal",
+      "passed": true
+    },
+    {
+      "name": "Unused RMAC neighbor cleanup -4",
+      "passed": true
+    },
+    {
+      "name": "Unused RMAC neighbor cleanup -6",
+      "passed": true
+    }
+  ],
+  "dataplane": "Linux bridge/VXLAN/VRF",
+  "dependencies": [
+    "iproute2",
+    "zebra-rs",
+    "vtyctl"
+  ],
+  "passed": true
+}

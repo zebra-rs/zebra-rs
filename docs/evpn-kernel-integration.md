@@ -1,0 +1,107 @@
+# EVPN integration with Linux bridge, VXLAN and VRF
+
+zebra-rs exchanges EVPN state through the standard Linux Netlink interface.
+It can adopt existing VRF, bridge and fixed-VNI VXLAN devices, regardless of
+which tool created them. Remote Type-2 MAC/IP bindings populate bridge FDB
+and neighbor tables. Type-5 prefixes populate tenant VRF routes and the
+L3-VNI bridge adjacency. Device discovery uses kernel attributes rather
+than device names, and route ingestion has no application-specific
+protocol-number requirement.
+
+This interface is intended for Linux EVPN forwarding and applications that
+consume kernel state. OVN is one such consumer; its integration lab is
+additional evidence, not a prerequisite for using the feature.
+
+## Configuration
+
+Enable bridge-based kernel route installation before establishing EVPN sessions:
+
+```text
+set router bgp global as 65000
+set router bgp global router-id 192.0.2.11
+set router bgp afi-safi evpn advertise-all-vni true
+set router bgp afi-safi evpn kernel-route-exchange true
+set router bgp neighbor 172.31.11.1 enabled true
+set router bgp neighbor 172.31.11.1 remote-as 65000
+set router bgp neighbor 172.31.11.1 afi-safi evpn enabled true
+
+set router bgp vrf tenant100 rd 65000:2000
+set vrf tenant100 ipv4 route-target import 65000:2000
+set vrf tenant100 ipv4 route-target export 65000:2000
+set vrf tenant100 ipv6 route-target import 65000:2000
+set vrf tenant100 ipv6 route-target export 65000:2000
+set router bgp vrf tenant100 encapsulation vxlan
+set router bgp vrf tenant100 evpn l3vni 2000
+set router bgp vrf tenant100 evpn router-mac 02:00:00:00:20:01
+set router bgp vrf tenant100 evpn advertise-ipv4 true
+set router bgp vrf tenant100 evpn advertise-ipv6 true
+set router bgp vrf tenant100 afi-safi ipv4 redistribute kernel
+set router bgp vrf tenant100 afi-safi ipv6 redistribute kernel
+```
+
+Here the operator has already created `tenant100` (table 100), an L3-VNI bridge with VNI
+2000, and the L2-VNI bridge(s). Do not configure zebra-rs to recreate their
+VXLAN endpoints. For Linux forwarding, the devices must use UDP 4789.
+Applications consuming kernel state may instead use devices as mirrors
+of a separate dataplane; remote FDB entries still carry UDP 4789.
+
+`redistribute kernel` exports kernel routes from the selected VRF, including
+static or externally installed blackhole prefixes, independent of their
+originating protocol number. Imported protocol-BGP routes are excluded from kernel ingestion, including
+on startup, so they cannot feed back into this redistribution source. The
+source is per VRF and exports all eligible kernel prefixes in that VRF;
+this configuration does not provide a route-protocol policy filter.
+
+## Kernel contract
+
+* Local Type-2 advertisements correlate eligible local FDB rows with ARP/NDP.
+  MAC-only, IPv4 and IPv6 bindings have separate NLRI keys and lifetimes.
+  `EXT_LEARNED` state is never re-advertised as local state.
+* Remote Type-2 bindings install `EXT_LEARNED` / `NOARP` neighbors on the
+  owning bridge, plus the remote MAC/VTEP FDB. Withdrawing one binding keeps
+  the MAC when another NLRI still references it. Neighbor deletion checks
+  ownership before removing an entry replaced by a local neighbor.
+* The existing Type-3 path provides remote VTEP flood membership. Locally
+  originated routes preserve the selected VTEP independently of the BGP
+  session's source interface address.
+* Imported Type-5 routes use the remote VTEP as gateway on the L3-VNI bridge,
+  with RMAC FDB and neighbor state. IPv6 prefixes use an IPv4-mapped gateway
+  and `onlink`, with corresponding IPv4 and mapped-IPv6 RMAC neighbors.
+  Linux normalizes IPv6 metric zero to 1024. RMAC state remains
+  until the last imported prefix using it is withdrawn.
+* Adopted fixed-VNI VXLAN ports retain their normal bridge encapsulation.
+  VLAN-to-VNI tunnel mapping is applied only to metadata-mode VXLAN.
+  Flat fixed-VNI bridges are supported; VLAN-aware fixed-VNI bridges have
+  not been qualified by this change.
+* Kernel-only underlay routes can resolve VTEP reachability. Protocol routes
+  take precedence over their kernel shadows to retain transport metadata.
+  VRF kernel routes observed before config adoption survive startup replay.
+
+Bridge-based Type-5 installation is opt-in and currently targets a unicast VXLAN
+nexthop with an IPv4 VTEP. Inner IPv4 and IPv6 are supported. Changing the
+mode while routes are active does not replay those routes; configure it at
+startup. Existing route installation remains the default when the option
+is disabled. Validation does not qualify 500k routes, EVPN mobility,
+multihoming or prefix ECMP.
+
+## Validation
+
+```bash
+cargo fmt --all -- --check
+cargo test --workspace --exclude bdd
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+The self-contained [Linux namespace test](../tests/evpn-linux-kernel/README.md)
+uses two zebra-rs speakers and Linux forwarding to check Type-2/3/5
+exchange, IPv4/IPv6 switching and routing, ordinary static-blackhole
+redistribution, binding withdrawal and shared-adjacency cleanup. It requires
+no external routing software or application consuming kernel state.
+[Recorded results](validation/evpn-linux-kernel.md): 38/38 checks.
+
+The external OVN comparison lab uses two Kind hosts, two Arista cEOS leaves,
+L2 VNI 1000 and L3 VNI 2000. Its acceptance checks cover Type-2/3/5 exchange,
+IPv4/IPv6 kernel and OVN Southbound state, bidirectional switching/routing,
+VXLAN packet captures, access-link withdrawal/restore, routed-subnet
+withdrawal/restore, and routing-speaker restart. Functional results and their
+scope are recorded in `docs/validation/ovn-ceos-kind.md`.

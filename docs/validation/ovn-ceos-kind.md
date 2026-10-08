@@ -43,8 +43,14 @@ launcher is maintained in the companion OVN workspace under
 `tutorial/ovn-zebra-kind`; reproducing it requires a licensed cEOS image.
 
 For the routing configuration and kernel contract, see
-[Native OVN EVPN route exchange](../ovn-route-exchange.md).
+[EVPN Linux kernel integration](../evpn-kernel-integration.md).
 
 [The synthetic scale report](ovn-kernel-scale-1000-dual.json) measures the
 kernel-to-OVN path. Its entries bypass BGP, so it does not benchmark the
 speaker's BGP throughput or route capacity.
+
+This report covers the initial prototype before the configuration was renamed
+to `kernel-route-exchange` and kernel blackhole ingestion was generalized.
+The recorded hashes identify that tested implementation; they do not claim
+a later revision was tested in this topology. OVN is an integration consumer,
+not a dependency of the Linux EVPN implementation.

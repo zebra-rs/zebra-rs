@@ -1978,7 +1978,7 @@ fn config_network(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     Some(())
 }
 
-fn config_ovn_route_exchange(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+fn config_kernel_route_exchange(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let afi_safi: AfiSafi = args.afi_safi()?;
     if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
         return None;
@@ -1987,7 +1987,7 @@ fn config_ovn_route_exchange(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opt
     let _ = bgp
         .ctx
         .rib
-        .send(crate::rib::Message::OvnRouteExchange(enabled));
+        .send(crate::rib::Message::KernelRouteExchange(enabled));
     Some(())
 }
 
@@ -5859,8 +5859,8 @@ impl Bgp {
         );
 
         self.callback_add(
-            "/router/bgp/afi-safi/ovn-route-exchange",
-            config_ovn_route_exchange,
+            "/router/bgp/afi-safi/kernel-route-exchange",
+            config_kernel_route_exchange,
         );
 
         // EVPN overlay encapsulation (RFC 9252) under
@@ -9010,6 +9010,7 @@ mod neighbor_group_wiring_tests {
             vrf_table: None,
             bridge: false,
             vxlan_local: None,
+            vxlan_metadata: None,
             parent: None,
             vlan_id: None,
             mtu_error: None,
@@ -11250,6 +11251,7 @@ mod es_linkadd_resync_tests {
             vrf_table: None,
             bridge: false,
             vxlan_local: None,
+            vxlan_metadata: None,
             parent: None,
             vlan_id: None,
             mtu_error: None,

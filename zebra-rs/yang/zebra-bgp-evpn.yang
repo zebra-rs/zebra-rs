@@ -64,14 +64,16 @@ module zebra-bgp-evpn {
       "Per-AFI/SAFI EVPN extensions on the global afi-safi list. Only
        meaningful when the list entry's name is `bt:evpn` —
        harmless and ignored on other AFI/SAFIs.";
-    leaf ovn-route-exchange {
-      ext:help "Use OVN shared-kernel VXLAN route exchange";
+    leaf kernel-route-exchange {
+      ext:help "Install EVPN prefixes through Linux L3-VNI bridges";
       type boolean;
       default false;
       description
         "Import VXLAN Type-5 routes through the adopted L3-VNI bridge,
-         using the remote VTEP and router MAC. OVN consumes this kernel
-         state and forwards traffic through OVS. Configure this before
+         using the remote VTEP and router MAC. The Linux bridge, VXLAN
+         FDB and neighbor tables describe the overlay adjacency. This
+         supports kernel forwarding and consumers of kernel state.
+         Configure this before
          establishing EVPN sessions; changing it with active routes is
          not supported.";
     }

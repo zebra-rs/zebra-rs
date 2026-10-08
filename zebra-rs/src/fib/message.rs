@@ -49,6 +49,8 @@ pub struct FibLink {
     /// per RFC 8365 §5.1.3 (egress PE = local VTEP). None on
     /// non-VXLAN links and on VXLANs configured without a local IP.
     pub vxlan_local: Option<std::net::IpAddr>,
+    /// Collect-metadata VXLAN mode. None when link-info was omitted.
+    pub vxlan_metadata: Option<bool>,
     /// Kernel routing table from `IFLA_VRF_TABLE`
     /// (`LinkInfo::Data(InfoData::Vrf(InfoVrf::TableId(_)))`) on VRF
     /// master devices. None for every other link type. Lets an

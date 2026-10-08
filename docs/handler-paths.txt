@@ -26,10 +26,10 @@
 /router/bgp/afi-safi/evi
 /router/bgp/afi-safi/evi/bridge
 /router/bgp/afi-safi/igmp-mld-proxy
+/router/bgp/afi-safi/kernel-route-exchange
 /router/bgp/afi-safi/maximum-paths
 /router/bgp/afi-safi/maximum-paths-ibgp
 /router/bgp/afi-safi/network
-/router/bgp/afi-safi/ovn-route-exchange
 /router/bgp/afi-safi/pruned-flood-list/broadcast-multicast
 /router/bgp/afi-safi/pruned-flood-list/unknown-unicast
 /router/bgp/afi-safi/redistribute/connected

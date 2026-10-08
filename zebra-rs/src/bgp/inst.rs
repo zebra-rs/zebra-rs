@@ -7001,7 +7001,7 @@ impl Bgp {
     }
 
     /// Map a RIB route type to the `BgpRedistSource` it redistributes as,
-    /// or `None` for RIB types BGP doesn't redistribute (e.g. Kernel,
+    /// or `None` for RIB types BGP doesn't redistribute (e.g. BGP,
     /// Bgp itself).
     fn redist_source(rtype: crate::rib::RibType) -> Option<crate::bgp::config::BgpRedistSource> {
         use crate::bgp::config::BgpRedistSource;
