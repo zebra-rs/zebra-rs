@@ -249,20 +249,22 @@ fn resolve_v6_inner(
 }
 
 /// Pick the covering route NHT should recurse through. Kernel/DHCP
-/// shadows of zebra-installed routes are skipped — they carry no MPLS
-/// metadata and would otherwise hide the protocol path's label stack.
+/// shadows of zebra-installed routes must not hide protocol transport
+/// metadata. Prefer a protocol route, but accept a kernel-only underlay
+/// route (for example an operator-installed VTEP route).
 fn nht_best_entry(entries: &RibEntries) -> Option<&crate::rib::entry::RibEntry> {
     entries
         .iter()
         .filter(|e| {
-            e.is_valid()
-                && e.rtype != RibType::Kernel
-                && e.rtype != RibType::Dhcp
-                && entry_resolvable(e)
+            entry_resolvable(e)
+                || (e.is_valid()
+                    && matches!(e.rtype, RibType::Kernel | RibType::Dhcp)
+                    && !entry_unis(&e.nexthop).is_empty())
         })
         .min_by(|a, b| {
-            a.distance
-                .cmp(&b.distance)
+            matches!(a.rtype, RibType::Kernel | RibType::Dhcp)
+                .cmp(&matches!(b.rtype, RibType::Kernel | RibType::Dhcp))
+                .then(a.distance.cmp(&b.distance))
                 .then(a.metric.cmp(&b.metric))
                 .then(a.rtype.u8().cmp(&b.rtype.u8()))
         })
@@ -474,6 +476,22 @@ mod tests {
         let r = resolve_v4(&t, "9.9.9.9".parse().unwrap());
         assert!(!r.reachable);
         assert!(r.nexthops.is_empty());
+    }
+
+    #[test]
+    fn evpn_kernel_only_underlay_resolves() {
+        let mut table = PrefixMap::new();
+        table.insert(
+            "192.0.2.0/24".parse().unwrap(),
+            vec![kernel_shadow("172.31.11.1".parse().unwrap(), 11)],
+        );
+        let resolution = resolve_v4(&table, "192.0.2.2".parse().unwrap());
+        assert!(resolution.reachable);
+        assert_eq!(
+            resolution.nexthops[0].addr,
+            "172.31.11.1".parse::<IpAddr>().unwrap()
+        );
+        assert_eq!(resolution.nexthops[0].ifindex, 11);
     }
 
     #[test]

@@ -1754,6 +1754,24 @@ pub fn config_vrf_afi_ipv4_redistribute(bgp: &mut Bgp, mut args: Args, op: Confi
 }
 
 /// `set router bgp vrf <NAME> afi-safi ipv4 redistribute connected`.
+pub fn config_vrf_afi_ipv4_redistribute_kernel(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    vrf_redist_set(bgp, name, RedistAfi::Ipv4, BgpRedistSource::Kernel, op)
+}
+
+pub fn config_vrf_afi_ipv6_redistribute_kernel(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+) -> Option<()> {
+    let name = args.string()?;
+    vrf_redist_set(bgp, name, RedistAfi::Ipv6, BgpRedistSource::Kernel, op)
+}
+
 pub fn config_vrf_afi_ipv4_redistribute_connected(
     bgp: &mut Bgp,
     mut args: Args,

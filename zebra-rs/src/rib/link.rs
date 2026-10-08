@@ -1117,6 +1117,13 @@ impl Rib {
         // would land on `Link::vni` but never reach `vni_ifindex_map`,
         // and `mac_add` would silently skip every install.
         let now_vni: Option<u32> = self.links.get(&ifindex).and_then(|l| l.vni);
+        if let Some(vni) = now_vni {
+            if let Some(bridge) = self.links.get(&ifindex).and_then(|l| l.master) {
+                self.fib_handle.vni_bridge_map.insert(vni, bridge);
+            } else {
+                self.fib_handle.vni_bridge_map.remove(&vni);
+            }
+        }
         if prev_vni != now_vni
             && let Some(new) = now_vni
         {

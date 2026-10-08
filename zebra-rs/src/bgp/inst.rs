@@ -902,7 +902,7 @@ pub struct Bgp {
     /// entry on the false→true transition (and withdraw on true→false),
     /// so origination becomes deterministic regardless of which
     /// channel wins the boot race.
-    pub local_fdb: BTreeMap<(u32, MacAddr), FdbEntry>,
+    pub local_fdb: BTreeMap<(u32, MacAddr, Option<std::net::IpAddr>), FdbEntry>,
     /// Local VXLAN VTEP shadow keyed by VNI, value = local VTEP IP
     /// (the VXLAN device's `IFLA_VXLAN_LOCAL` / `LOCAL6`). Populated
     /// from `RibRx::VxlanAdd`, removed on `RibRx::VxlanDel`. Drives
@@ -4966,11 +4966,12 @@ impl Bgp {
             RibRx::FdbAdd(entry) => {
                 // Cache durably so we can replay on `advertise_all_vni`
                 // false→true transitions — see `local_fdb` doc.
-                self.local_fdb.insert((entry.vni, entry.mac), entry.clone());
+                self.local_fdb
+                    .insert((entry.vni, entry.mac, entry.ip), entry.clone());
                 self.evpn_originate_macip(&entry);
             }
             RibRx::FdbDel(entry) => {
-                self.local_fdb.remove(&(entry.vni, entry.mac));
+                self.local_fdb.remove(&(entry.vni, entry.mac, entry.ip));
                 self.evpn_withdraw_macip(&entry);
             }
             RibRx::VxlanAdd { vni, vtep_local } => {
@@ -7005,6 +7006,7 @@ impl Bgp {
     fn redist_source(rtype: crate::rib::RibType) -> Option<crate::bgp::config::BgpRedistSource> {
         use crate::bgp::config::BgpRedistSource;
         match rtype {
+            crate::rib::RibType::Kernel => Some(BgpRedistSource::Kernel),
             crate::rib::RibType::Connected => Some(BgpRedistSource::Connected),
             crate::rib::RibType::Static => Some(BgpRedistSource::Static),
             crate::rib::RibType::Isis => Some(BgpRedistSource::Isis),

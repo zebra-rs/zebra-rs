@@ -146,6 +146,8 @@ pub struct EvpnMac {
     pub esi: [u8; 10],
     pub ether_tag: u32,
     pub mac: [u8; 6],
+    /// Optional IPv4/IPv6 binding, part of the Type-2 route key.
+    pub ip: Option<IpAddr>,
     pub vni: u32,
 }
 
@@ -508,10 +510,7 @@ impl EvpnPrefix {
                 EvpnPrefix::MacIp {
                     eth_tag: m.ether_tag,
                     mac: m.mac,
-                    // The current Type 2 parser (parse_nlri above) reads
-                    // and discards the IP component. Once the parser is
-                    // updated to preserve it, populate this field.
-                    ip: None,
+                    ip: m.ip,
                 },
             ),
             EvpnRoute::Multicast(m) => (
@@ -836,12 +835,20 @@ impl ParseNlri<EvpnRoute> for EvpnRoute {
                     IP6_LEN_BITS => 16,
                     _ => return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue))),
                 };
-                // The address itself is not modelled by `EvpnMac` yet; validate
-                // its length and step over exactly that many octets.
-                let (input, _ip) = take(ip_size).parse(input)?;
+                let (input, raw_ip) = take(ip_size).parse(input)?;
+                let ip = match ip_size {
+                    4 => Some(IpAddr::V4(Ipv4Addr::from(
+                        <[u8; 4]>::try_from(raw_ip).unwrap(),
+                    ))),
+                    16 => Some(IpAddr::V6(Ipv6Addr::from(
+                        <[u8; 16]>::try_from(raw_ip).unwrap(),
+                    ))),
+                    _ => None,
+                };
                 let (input, vni) = be_u24(input)?;
 
                 let mut evpn = EvpnMac {
+                    ip,
                     id,
                     rd,
                     esi,
@@ -1186,11 +1193,7 @@ impl EvpnRoute {
                 payload.put_u8(48);
                 // MAC Address (6 octets).
                 payload.put(&m.mac[..]);
-                // IP Address Length (1 octet). MAC-only Type-2 routes
-                // emit length 0 with no following IP — operator-side
-                // MAC+IP support is a follow-up that will set 32 (IPv4)
-                // or 128 (IPv6) and emit the address.
-                payload.put_u8(0);
+                emit_len_prefixed_ip(&mut payload, m.ip);
                 // MPLS Label1 / VNI (3 octets, big-endian, low 24
                 // bits of the u32). RFC 8365 §5.1.3.
                 let vni_bytes = m.vni.to_be_bytes();
@@ -1846,6 +1849,7 @@ mod evpn_emit_tests {
     #[test]
     fn macip_nlri_emit_macros_only() {
         let mac = EvpnMac {
+            ip: None,
             id: 0,
             rd: rd_type1_ip(Ipv4Addr::new(192, 0, 2, 1), 100),
             esi: [0; 10],
@@ -1875,6 +1879,7 @@ mod evpn_emit_tests {
     #[test]
     fn macip_nlri_emit_addpath() {
         let mac = EvpnMac {
+            ip: None,
             id: 7,
             rd: rd_type1_ip(Ipv4Addr::new(10, 0, 0, 1), 50),
             esi: [0; 10],
@@ -2020,8 +2025,46 @@ mod evpn_emit_tests {
     /// an MP_REACH-style NLRI stream. The parser must recover the
     /// same RD, eth-tag, MAC, and VNI we emitted.
     #[test]
+    fn macip_dual_stack_roundtrip_and_distinct_keys() {
+        let mut keys = std::collections::BTreeSet::new();
+        for ip in [
+            None,
+            Some("10.10.0.101".parse().unwrap()),
+            Some("2001:db8:10::101".parse().unwrap()),
+        ] {
+            for id in [0, 42] {
+                let route = EvpnRoute::Mac(EvpnMac {
+                    id,
+                    rd: rd_type1_ip(Ipv4Addr::new(192, 0, 2, 11), 1000),
+                    esi: [0; 10],
+                    ether_tag: 0,
+                    mac: [2, 0, 0, 0, 1, 1],
+                    ip,
+                    vni: 1000,
+                });
+                let mut wire = BytesMut::new();
+                route.nlri_emit(&mut wire);
+                let (remaining, parsed) = EvpnRoute::parse_nlri(&wire, id != 0).unwrap();
+                assert!(remaining.is_empty());
+                assert_eq!(parsed, route);
+                let (_, prefix) = EvpnPrefix::from_route(&parsed);
+                assert!(
+                    matches!(prefix, EvpnPrefix::MacIp { ip: parsed_ip, .. } if parsed_ip == ip)
+                );
+                keys.insert(prefix);
+            }
+        }
+        assert_eq!(
+            keys.len(),
+            3,
+            "MAC-only, ARP and NDP must be independent NLRIs"
+        );
+    }
+
+    #[test]
     fn macip_emit_then_parse_roundtrip() {
         let original = EvpnMac {
+            ip: None,
             id: 0,
             rd: rd_type1_ip(Ipv4Addr::new(192, 168, 0, 1), 200),
             esi: [0; 10],
@@ -2053,6 +2096,7 @@ mod evpn_emit_tests {
     #[test]
     fn macip_emit_then_parse_roundtrip_for_withdraw_path() {
         let original = EvpnMac {
+            ip: None,
             id: 0,
             rd: rd_type1_ip(Ipv4Addr::new(192, 0, 2, 1), 100),
             esi: [0; 10],

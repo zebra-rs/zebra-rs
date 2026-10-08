@@ -165,6 +165,7 @@ pub fn evpn_mac_esi_field_structure() {
     rd.val = [0, 1, 0, 0, 0, 100];
 
     let mac_route = EvpnMac {
+        ip: None,
         id: 0,
         rd,
         esi: test_esi,

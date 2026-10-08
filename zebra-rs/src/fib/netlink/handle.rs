@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::fd::AsRawFd;
 
-use futures::stream::StreamExt;
+use futures::stream::{StreamExt, TryStreamExt};
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use netlink_packet_core::{
     NLM_F_ACK, NLM_F_APPEND, NLM_F_CREATE, NLM_F_EXCL, NLM_F_REPLACE, NLM_F_REQUEST,
@@ -363,9 +363,13 @@ fn kernel_supports_nhid() -> bool {
 pub struct FibHandle {
     pub handle: rtnetlink::Handle,
     pub use_nhid: bool,
+    /// Install VXLAN Type-5 routes using OVN's shared-kernel contract.
+    pub ovn_route_exchange: bool,
+    ovn_routes: std::sync::Mutex<BTreeMap<(u32, IpNet), crate::rib::VxlanL3Encap>>,
     /// VNI to VXLAN interface index mapping
     /// Used to resolve VNI to the correct VXLAN device for FDB operations
     pub vni_ifindex_map: BTreeMap<u32, u32>,
+    pub vni_bridge_map: BTreeMap<u32, u32>,
     /// Kernel routing-table id → VRF *device ifindex*.
     ///
     /// Needed because FPM's table field is not a table id: the SONiC
@@ -642,7 +646,10 @@ impl FibHandle {
         Ok(Self {
             handle,
             use_nhid,
+            ovn_route_exchange: false,
+            ovn_routes: std::sync::Mutex::new(BTreeMap::new()),
             vni_ifindex_map: BTreeMap::new(),
+            vni_bridge_map: BTreeMap::new(),
             vrf_ifindex_map: BTreeMap::new(),
             cradle: CradleFib::from_env(),
             fpm: FpmFib::from_env(rib_tx),
@@ -1106,6 +1113,14 @@ impl FibHandle {
         nexthop: &Nexthop,
         table_id: u32,
     ) -> bool {
+        if self.ovn_route_exchange
+            && let Nexthop::Uni(uni) = nexthop
+            && let Some(encap) = uni.vxlan
+        {
+            return self
+                .ovn_route(IpNet::V4(*prefix), table_id, uni.metric, encap, true)
+                .await;
+        }
         let mut msg = RouteMessage::default();
         msg.header.address_family = AddressFamily::Inet;
         msg.header.destination_prefix_length = prefix.prefix_len();
@@ -1452,6 +1467,14 @@ impl FibHandle {
         nexthop: &Nexthop,
         table_id: u32,
     ) {
+        if self.ovn_route_exchange
+            && let Nexthop::Uni(uni) = nexthop
+            && let Some(encap) = uni.vxlan
+        {
+            self.ovn_route(IpNet::V4(*prefix), table_id, uni.metric, encap, false)
+                .await;
+            return;
+        }
         if !entry.is_protocol() {
             return;
         }
@@ -1652,6 +1675,14 @@ impl FibHandle {
         nexthop: &Nexthop,
         table_id: u32,
     ) -> bool {
+        if self.ovn_route_exchange
+            && let Nexthop::Uni(uni) = nexthop
+            && let Some(encap) = uni.vxlan
+        {
+            return self
+                .ovn_route(IpNet::V6(*prefix), table_id, uni.metric, encap, true)
+                .await;
+        }
         if fib_route() {
             tracing::info!(
                 "[IPv6 route_add_uni] prefix={} prefixlen={} rtype={:?} use_nhid={}",
@@ -2040,6 +2071,14 @@ impl FibHandle {
         nexthop: &Nexthop,
         table_id: u32,
     ) {
+        if self.ovn_route_exchange
+            && let Nexthop::Uni(uni) = nexthop
+            && let Some(encap) = uni.vxlan
+        {
+            self.ovn_route(IpNet::V6(*prefix), table_id, uni.metric, encap, false)
+                .await;
+            return;
+        }
         if !entry.is_protocol() {
             return;
         }
@@ -3903,6 +3942,211 @@ impl FibHandle {
             tracing::info!("[FIB] Unregistered VXLAN VNI {}", vni);
         }
         self.vni_ifindex_map.remove(&vni);
+        self.vni_bridge_map.remove(&vni);
+    }
+
+    /// OVN imports Type-5 prefixes from its tenant kernel table, resolving
+    /// the next hop through RMAC neighbor/FDB state on the L3-VNI bridge.
+    async fn ovn_route(
+        &self,
+        prefix: IpNet,
+        table_id: u32,
+        metric: u32,
+        encap: crate::rib::VxlanL3Encap,
+        add: bool,
+    ) -> bool {
+        // Linux normalizes an IPv6 metric of zero to its default, 1024.
+        // Use the same concrete priority for install and withdrawal.
+        let metric = if matches!(prefix, IpNet::V6(_)) && metric == 0 {
+            1024
+        } else {
+            metric
+        };
+        use netlink_packet_route::route::RouteFlags;
+        let Some(bridge) = self.evpn_bridge(encap.l3vni).await else {
+            tracing::warn!("OVN Type-5 {prefix}: no bridge for L3 VNI {}", encap.l3vni);
+            return false;
+        };
+        let mac = MacAddr::from(encap.remote_rmac);
+        if add {
+            self.mac_add(
+                encap.l3vni,
+                &mac,
+                Some(encap.remote_vtep.into()),
+                0,
+                0,
+                None,
+                None,
+                None,
+            )
+            .await;
+            self.evpn_neighbor(encap.l3vni, encap.remote_vtep.into(), mac, true)
+                .await;
+        }
+        let mut msg = RouteMessage::default();
+        msg.header.address_family = match prefix {
+            IpNet::V4(_) => AddressFamily::Inet,
+            IpNet::V6(_) => AddressFamily::Inet6,
+        };
+        msg.header.destination_prefix_length = prefix.prefix_len();
+        msg.header.protocol = RouteProtocol::Bgp;
+        msg.header.scope = RouteScope::Universe;
+        msg.header.kind = RouteType::Unicast;
+        msg.header.flags = RouteFlags::Onlink;
+        set_route_table(&mut msg, table_id);
+        let (dst, gateway) = match prefix {
+            IpNet::V4(prefix) => (
+                RouteAddress::Inet(prefix.addr()),
+                RouteAddress::Inet(encap.remote_vtep),
+            ),
+            IpNet::V6(prefix) => (
+                RouteAddress::Inet6(prefix.addr()),
+                RouteAddress::Inet6(encap.remote_vtep.to_ipv6_mapped()),
+            ),
+        };
+        msg.attributes.extend([
+            RouteAttribute::Destination(dst),
+            RouteAttribute::Gateway(gateway),
+            RouteAttribute::Oif(bridge),
+            RouteAttribute::Priority(metric),
+        ]);
+        let mut request = NetlinkMessage::from(if add {
+            RouteNetlinkMessage::NewRoute(msg)
+        } else {
+            RouteNetlinkMessage::DelRoute(msg)
+        });
+        request.header.flags =
+            NLM_F_REQUEST | NLM_F_ACK | if add { NLM_F_CREATE | NLM_F_REPLACE } else { 0 };
+        let Ok(mut response) = self.handle.clone().request(request) else {
+            return false;
+        };
+        let mut success = true;
+        while let Some(response) = response.next().await {
+            if let NetlinkPayload::Error(err) = response.payload {
+                tracing::warn!("OVN Type-5 {prefix} in table {table_id}: {err}");
+                success = false;
+            }
+        }
+        if success {
+            let unused = {
+                let mut routes = self.ovn_routes.lock().unwrap();
+                let previous = if add {
+                    routes.insert((table_id, prefix), encap)
+                } else {
+                    routes.remove(&(table_id, prefix))
+                };
+                previous.filter(|old| {
+                    !routes.values().any(|route| {
+                        route.l3vni == old.l3vni
+                            && route.remote_vtep == old.remote_vtep
+                            && route.remote_rmac == old.remote_rmac
+                    })
+                })
+            };
+            if let Some(old) = unused {
+                let mac = MacAddr::from(old.remote_rmac);
+                self.evpn_neighbor(old.l3vni, old.remote_vtep.into(), mac, false)
+                    .await;
+                // Several VTEPs can share an RMAC. Remove its FDB only when
+                // no remaining route references that MAC in this VNI.
+                let used =
+                    self.ovn_routes.lock().unwrap().values().any(|route| {
+                        route.l3vni == old.l3vni && route.remote_rmac == old.remote_rmac
+                    });
+                if !used {
+                    self.mac_del(old.l3vni, &mac).await;
+                }
+            }
+        }
+        success
+    }
+
+    /// Resolve the bridge owning an adopted fixed-VNI VXLAN device.
+    pub async fn evpn_bridge(&self, vni: u32) -> Option<u32> {
+        if let Some(bridge) = self.vni_bridge_map.get(&vni) {
+            return Some(*bridge);
+        }
+        let index = *self.vni_ifindex_map.get(&vni)?;
+        let mut links = self.handle.link().get().match_index(index).execute();
+        while let Ok(Some(link)) = links.try_next().await {
+            for attr in link.attributes {
+                if let LinkAttribute::Controller(master) = attr {
+                    return Some(master);
+                }
+            }
+        }
+        None
+    }
+
+    /// Remote MAC/IP bindings are externally learned, non-aging neighbors
+    /// on the bridge. On withdrawal protect a binding since replaced locally.
+    pub async fn evpn_neighbor(&self, vni: u32, ip: IpAddr, mac: MacAddr, add: bool) {
+        use netlink_packet_route::neighbour::{NeighbourFlags, NeighbourState};
+        let Some(ifindex) = self.evpn_bridge(vni).await else {
+            return;
+        };
+        let dst = match ip {
+            IpAddr::V4(a) => NeighbourAddress::Inet(a),
+            IpAddr::V6(a) => NeighbourAddress::Inet6(a),
+        };
+        if !add {
+            // A point lookup keeps withdrawals independent of table size.
+            let mut query = NeighbourMessage::default();
+            query.header.family = match ip {
+                IpAddr::V4(_) => AddressFamily::Inet,
+                IpAddr::V6(_) => AddressFamily::Inet6,
+            };
+            query.header.ifindex = ifindex;
+            query
+                .attributes
+                .push(NeighbourAttribute::Destination(dst.clone()));
+            let mut request = NetlinkMessage::from(RouteNetlinkMessage::GetNeighbour(query));
+            request.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+            let Ok(mut response) = self.handle.clone().request(request) else {
+                return;
+            };
+            let mut owned = false;
+            while let Some(response) = response.next().await {
+                if let NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewNeighbour(row)) =
+                    response.payload
+                    && row.header.flags.contains(NeighbourFlags::ExtLearned)
+                    && row
+                        .attributes
+                        .contains(&NeighbourAttribute::LinkLocalAddress(mac.octets().to_vec()))
+                {
+                    owned = true;
+                }
+            }
+            if !owned {
+                return;
+            }
+        }
+        let mut msg = NeighbourMessage::default();
+        msg.header.family = match ip {
+            IpAddr::V4(_) => AddressFamily::Inet,
+            IpAddr::V6(_) => AddressFamily::Inet6,
+        };
+        msg.header.ifindex = ifindex;
+        msg.header.state = NeighbourState::Noarp;
+        msg.header.flags = NeighbourFlags::ExtLearned;
+        msg.attributes.push(NeighbourAttribute::Destination(dst));
+        msg.attributes
+            .push(NeighbourAttribute::LinkLocalAddress(mac.octets().to_vec()));
+        let mut request = NetlinkMessage::from(if add {
+            RouteNetlinkMessage::NewNeighbour(msg)
+        } else {
+            RouteNetlinkMessage::DelNeighbour(msg)
+        });
+        request.header.flags =
+            NLM_F_REQUEST | NLM_F_ACK | if add { NLM_F_CREATE | NLM_F_REPLACE } else { 0 };
+        let Ok(mut response) = self.handle.clone().request(request) else {
+            return;
+        };
+        while let Some(response) = response.next().await {
+            if let NetlinkPayload::Error(err) = response.payload {
+                tracing::warn!("EVPN neighbor {ip} on bridge {ifindex}: {err}");
+            }
+        }
     }
 
     /// Add EVPN remote MAC to the bridge / VXLAN FDB.
@@ -4642,13 +4886,6 @@ impl RouteBuilder {
         self.entry.metric = metric;
         self
     }
-
-    pub fn is_ipv4(&self) -> bool {
-        let Some(prefix) = &self.prefix else {
-            return false;
-        };
-        matches!(prefix, IpNet::V4(_))
-    }
 }
 
 /// Translate a kernel next-hop object (`RTM_NEWNEXTHOP`, as a dump
@@ -4727,8 +4964,17 @@ pub fn route_from_msg_with(
     if msg.header.scope == RouteScope::Host {
         return None;
     }
-    if msg.header.kind != RouteType::Unicast {
+    // Imported BGP routes are our output, never a redistribution source.
+    if msg.header.protocol == RouteProtocol::Bgp {
         return None;
+    }
+    let ovn_blackhole =
+        msg.header.kind == RouteType::BlackHole && msg.header.protocol == RouteProtocol::Other(84);
+    if msg.header.kind != RouteType::Unicast && !ovn_blackhole {
+        return None;
+    }
+    if ovn_blackhole {
+        builder = builder.nexthop(Nexthop::Blackhole(0));
     }
     if msg.header.protocol == RouteProtocol::Dhcp {
         builder = builder.rtype(RibType::Dhcp);
@@ -4743,6 +4989,12 @@ pub fn route_from_msg_with(
     {
         let prefix = Ipv4Net::new(Ipv4Addr::UNSPECIFIED, 0).unwrap();
         builder = builder.ipv4_prefix(prefix);
+    }
+
+    if msg.header.destination_prefix_length == 0
+        && msg.header.address_family == AddressFamily::Inet6
+    {
+        builder = builder.ipv6_prefix(Ipv6Net::new(Ipv6Addr::UNSPECIFIED, 0).unwrap());
     }
 
     // `rtm_table` is a single byte; ids > 255 arrive as
@@ -4825,11 +5077,7 @@ pub fn route_from_msg_with(
             }
         }
     }
-    // IPv6 routes are not mirrored into the RIB, but for OSPFv3's
-    // leftovers, which OSPFv3 replaces or the sweep withdraws.
-    if !builder.is_ipv4() && !leftover {
-        return None;
-    }
+    builder.prefix?;
 
     let (prefix, mut entry) = builder.build();
     if leftover {
@@ -5070,6 +5318,50 @@ mod tests {
     // mpath, members {2, 7}) that the unfixed library dropped with
     // "failed to decode packet ... type 104". If this fails, the dep
     // regressed and reconciliation is silently broken again.
+    #[test]
+    fn evpn_ovn_kernel_blackholes_and_bgp_feedback_filter() {
+        for (family, prefix, destination) in [
+            (
+                AddressFamily::Inet,
+                "10.20.0.0/24",
+                RouteAddress::Inet("10.20.0.0".parse().unwrap()),
+            ),
+            (
+                AddressFamily::Inet6,
+                "2001:db8:20::/64",
+                RouteAddress::Inet6("2001:db8:20::".parse().unwrap()),
+            ),
+        ] {
+            let prefix: IpNet = prefix.parse().unwrap();
+            let mut msg = RouteMessage::default();
+            msg.header.address_family = family;
+            msg.header.destination_prefix_length = prefix.prefix_len();
+            msg.header.kind = RouteType::BlackHole;
+            msg.header.protocol = RouteProtocol::Other(84);
+            set_route_table(&mut msg, 100);
+            msg.attributes
+                .push(RouteAttribute::Destination(destination));
+            let route = route_from_msg(msg.clone()).unwrap();
+            assert_eq!(route.prefix, prefix);
+            assert_eq!(route.table_id, 100);
+            assert_eq!(route.entry.rtype, RibType::Kernel);
+            assert!(matches!(route.entry.nexthop, Nexthop::Blackhole(_)));
+            msg.header.protocol = RouteProtocol::Static;
+            assert!(
+                route_from_msg(msg.clone()).is_none(),
+                "unrelated blackholes stay excluded"
+            );
+            msg.header.protocol = RouteProtocol::Bgp;
+            msg.header.kind = RouteType::Unicast;
+            for dump in [true, false] {
+                assert!(
+                    route_from_msg_with(msg.clone(), &BTreeMap::new(), dump).is_none(),
+                    "BGP output must not feed back as kernel input"
+                );
+            }
+        }
+    }
+
     #[test]
     fn decodes_rtm_newnexthop_group() {
         let bytes: &[u8] = &[
@@ -5465,8 +5757,8 @@ mod tests {
             "not the dump's"
         );
         assert!(
-            route(v6.0, v6.1, RouteProtocol::Kernel, true).is_none(),
-            "v6 kernel"
+            route(v6.0, v6.1, RouteProtocol::Kernel, true).is_some(),
+            "IPv6 kernel routes are redistribution sources"
         );
     }
 }

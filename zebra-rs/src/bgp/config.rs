@@ -1978,6 +1978,19 @@ fn config_network(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     Some(())
 }
 
+fn config_ovn_route_exchange(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
+        return None;
+    }
+    let enabled = if op.is_set() { args.boolean()? } else { false };
+    let _ = bgp
+        .ctx
+        .rib
+        .send(crate::rib::Message::OvnRouteExchange(enabled));
+    Some(())
+}
+
 fn config_advertise_all_vni(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let afi_safi: AfiSafi = args.afi_safi()?;
     // The leaf only carries meaning for evpn; ignore on other
@@ -3138,6 +3151,7 @@ fn config_evpn_bum_tunnel_type(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> O
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BgpRedistSource {
+    Kernel,
     Connected,
     Static,
     Isis,
@@ -3202,6 +3216,7 @@ fn wire_afi(afi_safi: &bgp_packet::AfiSafi) -> crate::rib::RedistAfi {
 
 fn wire_rtype(src: BgpRedistSource) -> crate::rib::RibType {
     match src {
+        BgpRedistSource::Kernel => crate::rib::RibType::Kernel,
         BgpRedistSource::Connected => crate::rib::RibType::Connected,
         BgpRedistSource::Static => crate::rib::RibType::Static,
         BgpRedistSource::Isis => crate::rib::RibType::Isis,
@@ -5588,6 +5603,10 @@ impl Bgp {
             super::vrf_config::config_vrf_afi_ipv4_redistribute,
         );
         self.callback_add(
+            "/router/bgp/vrf/afi-safi/ipv4/redistribute/kernel",
+            super::vrf_config::config_vrf_afi_ipv4_redistribute_kernel,
+        );
+        self.callback_add(
             "/router/bgp/vrf/afi-safi/ipv4/redistribute/connected",
             super::vrf_config::config_vrf_afi_ipv4_redistribute_connected,
         );
@@ -5614,6 +5633,10 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/vrf/afi-safi/ipv6/redistribute",
             super::vrf_config::config_vrf_afi_ipv6_redistribute,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/afi-safi/ipv6/redistribute/kernel",
+            super::vrf_config::config_vrf_afi_ipv6_redistribute_kernel,
         );
         self.callback_add(
             "/router/bgp/vrf/afi-safi/ipv6/redistribute/connected",
@@ -5833,6 +5856,11 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/afi-safi/advertise-all-vni",
             config_advertise_all_vni,
+        );
+
+        self.callback_add(
+            "/router/bgp/afi-safi/ovn-route-exchange",
+            config_ovn_route_exchange,
         );
 
         // EVPN overlay encapsulation (RFC 9252) under
@@ -11188,6 +11216,7 @@ mod es_linkadd_resync_tests {
         )
         .unwrap();
         let entry = FdbEntry {
+            ip: None,
             vni: 10,
             mac: MacAddr::from_str("aa:bb:cc:dd:ee:01").unwrap(),
             ifindex: 7,
@@ -11195,7 +11224,8 @@ mod es_linkadd_resync_tests {
             flags: 0,
             vxlan_local: None,
         };
-        bgp.local_fdb.insert((entry.vni, entry.mac), entry.clone());
+        bgp.local_fdb
+            .insert((entry.vni, entry.mac, entry.ip), entry.clone());
         bgp.evpn_originate_macip(&entry);
         assert_eq!(
             selected_esi(&bgp),

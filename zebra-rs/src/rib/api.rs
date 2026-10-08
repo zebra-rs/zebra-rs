@@ -64,6 +64,7 @@ pub struct FlexAlgoSrv6Route {
 pub struct FdbEntry {
     pub vni: u32,
     pub mac: MacAddr,
+    pub ip: Option<IpAddr>,
     pub ifindex: u32,
     pub bridge_ifindex: u32,
     pub flags: u8,

@@ -29,6 +29,7 @@
 /router/bgp/afi-safi/maximum-paths	leaf
 /router/bgp/afi-safi/maximum-paths-ibgp	leaf
 /router/bgp/afi-safi/network	list keys=prefix
+/router/bgp/afi-safi/ovn-route-exchange	leaf
 /router/bgp/afi-safi/pruned-flood-list	container
 /router/bgp/afi-safi/pruned-flood-list/broadcast-multicast	leaf
 /router/bgp/afi-safi/pruned-flood-list/unknown-unicast	leaf
@@ -320,6 +321,7 @@
 /router/bgp/vrf/afi-safi/ipv4/redistribute	p-container
 /router/bgp/vrf/afi-safi/ipv4/redistribute/connected	p-container
 /router/bgp/vrf/afi-safi/ipv4/redistribute/isis	p-container
+/router/bgp/vrf/afi-safi/ipv4/redistribute/kernel	p-container
 /router/bgp/vrf/afi-safi/ipv4/redistribute/ospf	p-container
 /router/bgp/vrf/afi-safi/ipv4/redistribute/static	p-container
 /router/bgp/vrf/afi-safi/ipv6	p-container
@@ -327,6 +329,7 @@
 /router/bgp/vrf/afi-safi/ipv6/redistribute	p-container
 /router/bgp/vrf/afi-safi/ipv6/redistribute/connected	p-container
 /router/bgp/vrf/afi-safi/ipv6/redistribute/isis	p-container
+/router/bgp/vrf/afi-safi/ipv6/redistribute/kernel	p-container
 /router/bgp/vrf/afi-safi/ipv6/redistribute/ospf	p-container
 /router/bgp/vrf/afi-safi/ipv6/redistribute/static	p-container
 /router/bgp/vrf/afi-safi/mup	container

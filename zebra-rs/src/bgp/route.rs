@@ -855,8 +855,8 @@ fn select_fib_entry_v4(
 ) -> Option<rib::entry::RibEntry> {
     // EVPN/VXLAN symmetric IRB: an imported Type-5 carrying a Router's-MAC EC
     // installs a VXLAN L3 encap entry toward the remote VTEP with the L3VNI.
-    if let Some(entry) = vxlan_vpn_entry(best, transport) {
-        return Some(entry);
+    if best.vxlan_vtep.is_some() {
+        return vxlan_vpn_entry(best, transport);
     }
     // SRv6 L3VPN: an imported route carrying an SRv6 L3 Service SID
     // installs an H.Encap entry toward that SID instead of an MPLS
@@ -1220,8 +1220,8 @@ fn select_fib_entry_v6(
     nht_transport: Option<&[rib::nht::ResolvedNexthop]>,
 ) -> Option<rib::entry::RibEntry> {
     // EVPN/VXLAN symmetric IRB (v6 inner over an IPv4 VXLAN underlay).
-    if let Some(entry) = vxlan_vpn_entry(best, transport) {
-        return Some(entry);
+    if best.vxlan_vtep.is_some() {
+        return vxlan_vpn_entry(best, transport);
     }
     // SRv6 L3VPN (VPNv6 over an SRv6 underlay) — see `select_fib_entry_v4`,
     // including the family-aware SID pick (a v6 destination must not be
@@ -6452,7 +6452,9 @@ fn route_advertise_batch<A: BatchAfi>(
 
 /// Whether EVPN egress must replace the received next-hop with self.
 ///
-/// Locally originated routes always use this speaker as their next-hop.
+/// Locally originated routes retain an explicitly selected VTEP. The BGP
+/// session's local address can be a different underlay interface address.
+/// Only originations without a usable VTEP need a self-address fallback.
 /// Forwarded eBGP routes do so by default, unless the per-neighbor
 /// `afi-safi evpn next-hop-unchanged` knob asks to retain the originating
 /// VTEP — an EVPN transit speaker is not a tunnel endpoint.
@@ -6460,8 +6462,13 @@ fn evpn_should_rewrite_nexthop(
     peer_is_ebgp: bool,
     rib_is_originated: bool,
     next_hop_unchanged: bool,
+    has_originated_vtep: bool,
 ) -> bool {
-    rib_is_originated || (peer_is_ebgp && !next_hop_unchanged)
+    if rib_is_originated {
+        !has_originated_vtep
+    } else {
+        peer_is_ebgp && !next_hop_unchanged
+    }
 }
 
 /// Per-peer EVPN advertise builder. Mirrors `route_update_ipv4`:
@@ -6541,9 +6548,10 @@ pub fn route_update_evpn(
             esi: *esi,
             orig: *orig,
         }),
-        EvpnPrefix::MacIp { eth_tag, mac, .. } => {
+        EvpnPrefix::MacIp { eth_tag, mac, ip } => {
             let vni = macip_service_field(rib);
             EvpnRoute::Mac(EvpnMac {
+                ip: *ip,
                 id,
                 rd: *rd,
                 esi: rib.esi.unwrap_or([0; 10]),
@@ -6670,6 +6678,7 @@ pub fn route_update_evpn(
         peer.is_ebgp(),
         rib.is_originated(),
         peer.next_hop_unchanged(Afi::L2vpn, Safi::Evpn),
+        matches!(attrs.nexthop, Some(BgpNexthop::Evpn(addr)) if !addr.is_unspecified()),
     ) {
         let nexthop: IpAddr = if let Some(ref local_addr) = peer.param.local_addr {
             local_addr.ip()
@@ -6720,32 +6729,42 @@ mod evpn_nexthop_tests {
 
     #[test]
     fn plain_ebgp_forwarded_route_rewrites_to_self() {
-        assert!(evpn_should_rewrite_nexthop(true, false, false));
+        assert!(evpn_should_rewrite_nexthop(true, false, false, true));
     }
 
     #[test]
     fn next_hop_unchanged_preserves_forwarded_evpn_vtep() {
-        assert!(!evpn_should_rewrite_nexthop(true, false, true));
+        assert!(!evpn_should_rewrite_nexthop(true, false, true, true));
     }
 
     #[test]
-    fn locally_originated_route_always_rewrites_to_self() {
-        assert!(evpn_should_rewrite_nexthop(true, true, true));
+    fn locally_originated_route_without_vtep_falls_back_to_self() {
+        assert!(evpn_should_rewrite_nexthop(true, true, true, false));
+        assert!(evpn_should_rewrite_nexthop(false, true, false, false));
+    }
+
+    #[test]
+    fn locally_originated_route_preserves_vtep() {
+        for ebgp in [false, true] {
+            for unchanged in [false, true] {
+                assert!(!evpn_should_rewrite_nexthop(ebgp, true, unchanged, true));
+            }
+        }
     }
 
     #[test]
     fn ibgp_forwarded_route_preserves_next_hop() {
-        assert!(!evpn_should_rewrite_nexthop(false, false, false));
+        assert!(!evpn_should_rewrite_nexthop(false, false, false, true));
     }
 
     #[test]
     fn locally_originated_route_rewrites_on_ibgp_too() {
-        assert!(evpn_should_rewrite_nexthop(false, true, false));
+        assert!(evpn_should_rewrite_nexthop(false, true, false, false));
     }
 
     #[test]
     fn next_hop_unchanged_is_a_no_op_on_ibgp() {
-        assert!(!evpn_should_rewrite_nexthop(false, false, true));
+        assert!(!evpn_should_rewrite_nexthop(false, false, true, true));
     }
 }
 
@@ -7042,13 +7061,11 @@ mod evpn_nexthop_wiring_tests {
         );
     }
 
-    /// A locally-originated route rewrites to self even when the peer
-    /// carries `next-hop-unchanged` — the knob only shields *forwarded*
-    /// routes, and the originator is the route's only valid tunnel
-    /// endpoint. The rib deliberately carries a foreign next-hop so a
-    /// wrongly-skipped rewrite would show up as the preserved VTEP.
+    /// The selected local VTEP is independent of the BGP transport address.
+    /// Preserve it on both iBGP and eBGP for every locally originated
+    /// service route. A missing or unspecified VTEP still falls back to self.
     #[tokio::test]
-    async fn locally_originated_route_still_rewrites_with_knob_set() {
+    async fn locally_originated_evpn_preserves_vtep_across_families_and_route_types() {
         let router_id = SPINE;
         let ctx = crate::context::ProtoContext::default_table_no_rib();
         let mut local_rib = LocalRib::default();
@@ -7060,11 +7077,21 @@ mod evpn_nexthop_wiring_tests {
         Box::leak(Box::new(rx));
 
         let rd = RouteDistinguisher::default();
-        let prefix = EvpnPrefix::MacIp {
-            eth_tag: 0,
-            mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x11],
-            ip: None,
-        };
+        let prefixes = [
+            EvpnPrefix::MacIp {
+                eth_tag: 0,
+                mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x11],
+                ip: None,
+            },
+            EvpnPrefix::InclusiveMulticast {
+                eth_tag: 0,
+                orig: IpAddr::V4(VTEP),
+            },
+            EvpnPrefix::IpPrefix {
+                eth_tag: 0,
+                prefix: "203.0.113.0/24".parse().unwrap(),
+            },
+        ];
         let mut rib = forwarded_macip_rib();
         rib.typ = BgpRibType::Originated;
 
@@ -7079,14 +7106,36 @@ mod evpn_nexthop_wiring_tests {
             &tx,
         );
 
-        let mut peer = ebgp_peer(true);
-        let (_, attrs) =
-            route_update_evpn(&mut peer, &rd, &prefix, &rib, &mut top, false).expect("advertise");
-        assert_eq!(
-            attrs.nexthop,
-            Some(BgpNexthop::Evpn(IpAddr::V4(SPINE))),
-            "origination must keep rewriting to self even with next-hop-unchanged"
-        );
+        for prefix in &prefixes {
+            for peer_type in [PeerType::IBGP, PeerType::EBGP] {
+                for unchanged in [false, true] {
+                    for vtep in [
+                        Some(IpAddr::V4(VTEP)),
+                        Some("2001:db8::11".parse().unwrap()),
+                        None,
+                        Some(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
+                        Some(IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)),
+                    ] {
+                        let mut attr = (*rib.attr).clone();
+                        attr.nexthop = vtep.map(BgpNexthop::Evpn);
+                        rib.attr = std::sync::Arc::new(attr);
+                        let mut peer = ebgp_peer(unchanged);
+                        peer.peer_type = peer_type;
+                        let (_, attrs) =
+                            route_update_evpn(&mut peer, &rd, prefix, &rib, &mut top, false)
+                                .expect("advertise");
+                        let expected = vtep
+                            .filter(|addr| !addr.is_unspecified())
+                            .unwrap_or(IpAddr::V4(SPINE));
+                        assert_eq!(
+                            attrs.nexthop,
+                            Some(BgpNexthop::Evpn(expected)),
+                            "{prefix:?}, {peer_type:?}, unchanged={unchanged}, vtep={vtep:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -7095,7 +7144,7 @@ mod evpn_nexthop_wiring_tests {
 /// one-NLRI MP_UNREACH UPDATE. The receiver removes the route from
 /// its adj-RIB-in and re-runs best-path; an empty selection at the
 /// peer triggers `route_evpn_export_selected` which sends
-/// `Message::MacDel` / `MdbDel` and the kernel FDB row goes away.
+/// `Message::EvpnMacDel` / `MdbDel` and the kernel FDB row goes away.
 fn route_withdraw_evpn(peer: &mut Peer, route: EvpnRoute) {
     let mut update = peer.update_packet();
     update.mp_withdraw = Some(MpUnreachAttr::Evpn(vec![route]));
@@ -7228,12 +7277,13 @@ fn evpn_route_from_prefix(rd: &RouteDistinguisher, prefix: &EvpnPrefix, id: u32)
             esi: *esi,
             orig: *orig,
         }),
-        EvpnPrefix::MacIp { eth_tag, mac, .. } => {
+        EvpnPrefix::MacIp { eth_tag, mac, ip } => {
             // RD type 1 (IPv4 + 2-byte assigned-number) is the form
             // we emit at origination — the assigned-number bytes
             // [4..6] carry the low 16 bits of the VNI.
             let vni = u16::from_be_bytes([rd.val[4], rd.val[5]]) as u32;
             EvpnRoute::Mac(EvpnMac {
+                ip: *ip,
                 id,
                 rd: *rd,
                 esi: [0; 10],
@@ -9890,7 +9940,7 @@ fn route_evpn_export_selected(
             return;
         };
         match prefix {
-            EvpnPrefix::MacIp { mac, .. } => {
+            EvpnPrefix::MacIp { mac, ip, .. } => {
                 // Match the announce-side filter: never installed
                 // multicast MAC entries → nothing to delete.
                 let mac_addr = MacAddr::from(*mac);
@@ -9898,7 +9948,9 @@ fn route_evpn_export_selected(
                     return;
                 }
                 if let Some(vni) = extract_vni_from_attr(&wd.attr) {
-                    let msg = rib::Message::MacDel { vni, mac: mac_addr };
+                    let msg = rib::Message::EvpnMacDel(rib::evpn::MacRouteKey::new(
+                        *rd, vni, mac_addr, *ip,
+                    ));
                     let _ = bgp.rib_client.send(msg);
                 } else {
                     eprintln!(
@@ -10016,7 +10068,7 @@ fn route_evpn_export_selected(
     let best = &selected[0];
 
     match prefix {
-        EvpnPrefix::MacIp { mac, .. } => {
+        EvpnPrefix::MacIp { mac, ip, .. } => {
             // Defensive: the local FDB->BGP origination path skips
             // multicast MACs in `fdb_entry_from_neighbor`, but a peer
             // running different software may still have advertised
@@ -10041,9 +10093,8 @@ fn route_evpn_export_selected(
                 if seq > *remote {
                     *remote = seq;
                 }
-                let msg = rib::Message::MacAdd {
-                    vni,
-                    mac: mac_addr,
+                let msg = rib::Message::EvpnMacAdd(rib::evpn::MacRoute {
+                    key: rib::evpn::MacRouteKey::new(*rd, vni, mac_addr, *ip),
                     tunnel_endpoint: extract_tunnel_endpoint(best),
                     flags: extract_flags_from_attr(&best.attr),
                     seq: extract_mac_mobility_seq(&best.attr),
@@ -10062,7 +10113,7 @@ fn route_evpn_export_selected(
                     local_port: best
                         .esi
                         .and_then(|esi| bgp.local_rib.own_es.get(&esi).cloned()),
-                };
+                });
                 let _ = bgp.rib_client.send(msg);
             } else {
                 eprintln!(
@@ -14253,9 +14304,10 @@ fn build_evpn_route(
             esi: *esi,
             orig: *orig,
         })),
-        EvpnPrefix::MacIp { eth_tag, mac, .. } => {
+        EvpnPrefix::MacIp { eth_tag, mac, ip } => {
             let vni = macip_service_field(rib);
             Some(EvpnRoute::Mac(EvpnMac {
+                ip: *ip,
                 id: rib.remote_id,
                 rd: *rd,
                 esi: rib.esi.unwrap_or([0; 10]),
@@ -19347,7 +19399,7 @@ impl Bgp {
         let prefix = EvpnPrefix::MacIp {
             eth_tag: 0,
             mac: entry.mac.octets(),
-            ip: None,
+            ip: entry.ip,
         };
 
         // Build the BGP attributes for this origination. RFC 8365
@@ -19505,7 +19557,7 @@ impl Bgp {
         let prefix = EvpnPrefix::MacIp {
             eth_tag: 0,
             mac: entry.mac.octets(),
-            ip: None,
+            ip: entry.ip,
         };
         let _ = self.local_rib.remove_evpn(rd, &prefix, 0, ORIGINATED_PEER);
         // `remove_evpn` only edits `cands`; the per-prefix `selected`
@@ -19515,7 +19567,7 @@ impl Bgp {
         // stays visible in `show` and orphan RDs accumulate after
         // every router-id change. Don't route the result through
         // `route_evpn_export_selected` — that path triggers kernel
-        // FDB del via `MacDel`, which is appropriate for received
+        // FDB del via `EvpnMacDel`, which is appropriate for received
         // EVPN routes but wrong for locally-originated ones (the
         // kernel row is the operator's local MAC, not something we
         // installed via mac_add).
@@ -23125,6 +23177,7 @@ mod evpn_addpath_fanout_tests {
     /// path-id on the wire (0 from a non-AddPath client).
     fn mac_route(id: u32) -> EvpnRoute {
         EvpnRoute::Mac(bgp_packet::EvpnMac {
+            ip: None,
             id,
             rd: rd(),
             esi: [0; 10],
@@ -26002,6 +26055,7 @@ mod policy_apply_tests {
 
     fn evpn_mac(vni: u32) -> EvpnRoute {
         EvpnRoute::Mac(EvpnMac {
+            ip: None,
             id: 0,
             rd: RouteDistinguisher::new(RouteDistinguisherType::IP),
             esi: [0; 10],
@@ -36339,3 +36393,30 @@ mod update_group_next_hop_knob_tests {
 #[cfg(test)]
 #[path = "bgpls_review_tests.rs"]
 mod bgpls_review_tests;
+
+#[cfg(test)]
+mod ovn_type5_tests {
+    use super::*;
+
+    #[test]
+    fn evpn_unresolved_type5_never_falls_back_to_self() {
+        let mut attr = BgpAttr::new();
+        attr.nexthop = Some(BgpNexthop::Ipv4("192.0.2.11".parse().unwrap()));
+        let mut route = BgpRib::new(
+            ORIGINATED_PEER,
+            Ipv4Addr::UNSPECIFIED,
+            BgpRibType::Originated,
+            0,
+            0,
+            &attr,
+            None,
+            None,
+            false,
+        );
+        route.vxlan_vtep = Some("192.0.2.2".parse().unwrap());
+        for transport in [None, Some(&[][..])] {
+            assert!(select_fib_entry_v4(&route, transport, None).is_none());
+            assert!(select_fib_entry_v6(&route, transport, None).is_none());
+        }
+    }
+}

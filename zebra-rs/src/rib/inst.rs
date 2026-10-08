@@ -379,32 +379,9 @@ pub enum Message {
         ifname: String,
         bridge: Option<String>,
     },
-    MacAdd {
-        vni: u32,
-        mac: MacAddr,
-        tunnel_endpoint: Option<IpAddr>,
-        flags: u8,
-        seq: u32,
-        esi: Option<[u8; 10]>,
-        /// EVPN-over-SRv6 (RFC 9252): the remote PE's L2 service SID this
-        /// MAC sits behind — End.DT2U for a unicast MAC, End.DT2M for the
-        /// all-ones BUM sentinel. `Some` selects the cradle L2 tee over the
-        /// kernel VXLAN FDB.
-        srv6_sid: Option<std::net::Ipv6Addr>,
-        /// EVPN-over-MPLS (RFC 7432): the remote PE's EVI service label,
-        /// imposed on frames toward this MAC under the transport LSP that
-        /// reaches `tunnel_endpoint`. `Some` selects the cradle L2 tee — the
-        /// kernel has no MPLS-to-bridge data path.
-        mpls_label: Option<u32>,
-        /// EVPN multihoming: the MAC's segment is one THIS node is attached
-        /// to, and this is our access port on it — reach the MAC over that
-        /// port, not the overlay (RFC 7432 §8.4; cradle `AddFdbLocal`).
-        local_port: Option<String>,
-    },
-    MacDel {
-        vni: u32,
-        mac: MacAddr,
-    },
+    EvpnMacAdd(crate::rib::evpn::MacRoute),
+    EvpnMacDel(crate::rib::evpn::MacRouteKey),
+    OvnRouteExchange(bool),
     /// A remote PE joined/left a VNI's BUM flood set (EVPN Type-3 with an
     /// SRv6 `End.DT2M` SID, RFC 9252 §6.4) — teed to cradle as a BUM
     /// replication slot (per-copy MAC-in-SRv6 encap in the flood list).
@@ -1227,6 +1204,11 @@ pub struct Rib {
     /// label for service routes carrying a Color extcomm.
     pub flex_algo_routes: BTreeMap<u8, PrefixMap<Ipv4Net, crate::rib::api::FlexAlgoRoute>>,
     pub mac_table: BTreeMap<(u32, MacAddr), MacEntry>,
+    pub evpn_mac_routes: BTreeMap<crate::rib::evpn::MacRouteKey, crate::rib::evpn::MacRoute>,
+    pub local_bindings: BTreeMap<(MacAddr, u32, Option<IpAddr>), FdbEntry>,
+    /// Index only local rows; remote route churn must not scan every neighbor.
+    pub local_neighbors: BTreeMap<MacAddr, BTreeMap<NeighborKey, FibNeighbor>>,
+    pub evpn_ip_refs: BTreeMap<(u32, IpAddr), usize>,
     /// EVPN multihoming: the `(ESI, VNI)` pairs BGP currently has a
     /// non-empty nexthop group for (`Message::EsNhg`). A MAC on such a
     /// segment installs through the group (RFC 7432 §8.4 aliasing); the
@@ -1429,6 +1411,10 @@ impl Rib {
             ilm: BTreeMap::new(),
             flex_algo_routes: BTreeMap::new(),
             mac_table: BTreeMap::new(),
+            evpn_mac_routes: BTreeMap::new(),
+            local_bindings: BTreeMap::new(),
+            local_neighbors: BTreeMap::new(),
+            evpn_ip_refs: BTreeMap::new(),
             es_groups: BTreeSet::new(),
             es_blocked: BTreeSet::new(),
             vtep_table: std::collections::BTreeSet::new(),
@@ -1694,21 +1680,75 @@ impl Rib {
     /// flows through `evpn_originate_macip` whose `update_evpn` is
     /// idempotent (matches on `(ident, remote_id)`), so a benign
     /// re-fire on already-known entries doesn't multiply the route.
-    pub fn rescan_fdb_for_bridge(&self, bridge_ifindex: u32) {
-        // One predicate for every path that turns a kernel row into a
-        // Type-2 candidate — the event path, the subscribe replay and
-        // this rescan — so a row is publishable everywhere or nowhere.
-        for nbr in self.neighbors.values() {
-            if let Some(entry) = fdb_entry_from_neighbor(self, nbr)
-                && entry.bridge_ifindex == bridge_ifindex
+    pub fn rescan_fdb_for_bridge(&mut self, _bridge_ifindex: u32) {
+        let macs: Vec<_> = self.local_neighbors.keys().copied().collect();
+        for mac in macs {
+            self.reconcile_local_mac(mac);
+        }
+    }
+
+    fn cache_neighbor(&mut self, nbr: FibNeighbor, add: bool) -> Option<FibNeighbor> {
+        use netlink_packet_route::neighbour::NeighbourFlags;
+        let key = neighbor_key(&nbr)?;
+        let previous = self.neighbors.remove(&key);
+        if let Some(mac) = previous.as_ref().and_then(|row| row.lladdr)
+            && let Some(rows) = self.local_neighbors.get_mut(&mac)
+        {
+            rows.remove(&key);
+            if rows.is_empty() {
+                self.local_neighbors.remove(&mac);
+            }
+        }
+        if add {
+            if !nbr.flags.contains(NeighbourFlags::ExtLearned)
+                && let Some(mac) = nbr.lladdr
             {
+                self.local_neighbors
+                    .entry(mac)
+                    .or_default()
+                    .insert(key.clone(), nbr.clone());
+            }
+            self.neighbors.insert(key, nbr);
+        }
+        previous
+    }
+
+    fn reconcile_local_mac(&mut self, mac: MacAddr) {
+        let desired: BTreeMap<_, _> = self
+            .local_neighbors
+            .get(&mac)
+            .into_iter()
+            .flat_map(|rows| rows.values())
+            .filter_map(|row| fdb_entry_from_neighbor(self, row))
+            .map(|entry| ((entry.mac, entry.vni, entry.ip), entry))
+            .collect();
+        let lo = (mac, 0, None);
+        let hi = (
+            mac,
+            u32::MAX,
+            Some(std::net::Ipv6Addr::from(u128::MAX).into()),
+        );
+        let old: Vec<_> = self
+            .local_bindings
+            .range(lo..=hi)
+            .map(|(key, value)| (*key, value.clone()))
+            .collect();
+        for (key, entry) in old {
+            if desired.get(&key) != Some(&entry) {
+                self.api_fdb_del(&entry);
+                self.local_bindings.remove(&key);
+            }
+        }
+        for (key, entry) in desired {
+            if self.local_bindings.get(&key) != Some(&entry) {
                 self.api_fdb_add(&entry);
+                self.local_bindings.insert(key, entry);
             }
         }
     }
 
     /// See [`local_device_mac_bridge`].
-    fn local_device_mac_bridge(&self, vni: u32, mac: MacAddr) -> Option<u32> {
+    pub(super) fn local_device_mac_bridge(&self, vni: u32, mac: MacAddr) -> Option<u32> {
         local_device_mac_bridge(&self.links, &self.neighbors, vni, mac)
     }
 
@@ -2384,13 +2424,8 @@ impl Rib {
         // typical cold-start order is fib_dump (populates
         // `self.neighbors`) → BGP subscribe (this fn), so every
         // entry needs an explicit replay here.
-        for (key, nbr) in self.neighbors.iter() {
-            if !matches!(key, NeighborKey::Bridge { .. }) {
-                continue;
-            }
-            if let Some(entry) = fdb_entry_from_neighbor(self, nbr) {
-                let _ = tx.send(RibRx::FdbAdd(entry));
-            }
+        for entry in self.local_bindings.values() {
+            let _ = tx.send(RibRx::FdbAdd(entry.clone()));
         }
         // Router-id replay: default-VRF subscribers get the global
         // effective value; per-VRF subscribers (registered under
@@ -3326,7 +3361,7 @@ impl Rib {
                 // the same `table_id` the kernel uses. The
                 // per-`ProtoId` dispatcher writes routes here when a
                 // VRF-attached protocol installs.
-                self.vrf_tables.insert(table_id, VrfRibTables::new());
+                self.vrf_tables.entry(table_id).or_default();
                 // A locator may bind this VRF by name (End.T/uT). If it
                 // was configured before the VRF existed its snapshot holds
                 // table 0 — resolve it now and re-notify the IGPs.
@@ -3860,6 +3895,16 @@ impl Rib {
                 for (vni, mac) in macs {
                     self.fib_handle.mac_del(vni, &mac).await;
                 }
+                let bindings: Vec<_> = self.evpn_mac_routes.keys().copied().collect();
+                for key in bindings {
+                    if let Some(ip) = key.ip {
+                        self.fib_handle
+                            .evpn_neighbor(key.vni, ip, key.mac, false)
+                            .await;
+                    }
+                }
+                self.evpn_mac_routes.clear();
+                self.evpn_ip_refs.clear();
                 self.mac_table.clear();
                 let vteps: Vec<(u32, IpAddr)> = self.vtep_table.iter().copied().collect();
                 for (vni, group) in vteps {
@@ -3926,32 +3971,34 @@ impl Rib {
             Message::SweepStale { rtype, v6 } => {
                 self.sweep_stale(rtype, v6, table_id).await;
             }
-            Message::MacAdd {
-                vni,
-                mac,
-                tunnel_endpoint,
-                flags,
-                seq,
-                esi,
-                srv6_sid,
-                mpls_label,
-                local_port,
-            } => {
-                self.mac_add(
-                    vni,
-                    mac,
-                    tunnel_endpoint,
-                    flags,
-                    seq,
-                    esi,
-                    srv6_sid,
-                    mpls_label,
-                    local_port,
-                )
-                .await;
+            Message::OvnRouteExchange(enabled) => {
+                self.fib_handle.ovn_route_exchange = enabled;
             }
-            Message::MacDel { vni, mac } => {
-                self.mac_del(vni, mac).await;
+            Message::EvpnMacAdd(route) => {
+                let key = route.key;
+                let previous = self.evpn_mac_routes.insert(key, route);
+                if previous.is_none()
+                    && let Some(ip) = key.ip
+                {
+                    *self.evpn_ip_refs.entry((key.vni, ip)).or_default() += 1;
+                }
+                self.reconcile_evpn_mac(key.vni, key.mac).await;
+            }
+            Message::EvpnMacDel(key) => {
+                if self.evpn_mac_routes.remove(&key).is_some() {
+                    self.reconcile_evpn_mac(key.vni, key.mac).await;
+                    if let Some(ip) = key.ip
+                        && let Some(refs) = self.evpn_ip_refs.get_mut(&(key.vni, ip))
+                    {
+                        *refs -= 1;
+                        if *refs == 0 {
+                            self.evpn_ip_refs.remove(&(key.vni, ip));
+                            self.fib_handle
+                                .evpn_neighbor(key.vni, ip, key.mac, false)
+                                .await;
+                        }
+                    }
+                }
             }
             Message::CradleFdbLearn { vni, mac, ifindex } => {
                 self.cradle_fdb_learn(vni, mac, ifindex);
@@ -4494,10 +4541,17 @@ impl Rib {
                 self.router_id_update();
             }
             FibMessage::NewRoute(route) => {
-                // IPv6 routes come only as an earlier run's leftovers.
-                if let IpNet::V6(prefix) = route.prefix
-                    && route.entry.stale
+                // The startup route dump precedes config-driven VRF adoption.
+                // Preserve routes for a kernel VRF already seen in the link
+                // dump, so later adoption and redistribution can replay them.
+                if self
+                    .links
+                    .values()
+                    .any(|link| link.vrf_table == Some(route.table_id))
                 {
+                    self.vrf_tables.entry(route.table_id).or_default();
+                }
+                if let IpNet::V6(prefix) = route.prefix {
                     if route.table_id == RT_TABLE_MAIN {
                         self.ipv6_route_add(&prefix, route.entry, RT_TABLE_MAIN)
                             .await;
@@ -4524,6 +4578,16 @@ impl Rib {
                 }
             }
             FibMessage::DelRoute(route) => {
+                if let IpNet::V6(prefix) = route.prefix {
+                    if route.table_id == RT_TABLE_MAIN {
+                        self.ipv6_route_del(&prefix, route.entry, RT_TABLE_MAIN)
+                            .await;
+                    } else if self.vrf_tables.contains_key(&route.table_id) {
+                        self.ipv6_route_del_vrf(route.table_id, &prefix, route.entry)
+                            .await;
+                    }
+                    return;
+                }
                 if let IpNet::V4(prefix) = route.prefix {
                     if route.table_id == RT_TABLE_MAIN {
                         self.ipv4_route_del(&prefix, route.entry, RT_TABLE_MAIN)
@@ -4553,46 +4617,36 @@ impl Rib {
                         .cradle_neighbor_add(dst, nbr.ifindex, mac.octets())
                         .await;
                 }
-                let fdb_entry = fdb_entry_from_neighbor(self, &nbr);
-                let prev = neighbor_key(&nbr).and_then(|key| self.neighbors.insert(key, nbr));
-                // A row that no longer qualifies withdraws whatever its
-                // previous shape originated. The kernel updates a row in
-                // place when the operator makes a learned MAC a device's
-                // own (`bridge fdb replace ... permanent`), so without
-                // this the Type-2 would outlive the station it described.
-                let withdrawn = match (&fdb_entry, prev) {
-                    (None, Some(old)) => fdb_entry_from_neighbor(self, &old),
-                    _ => None,
-                };
-                // When the cradle eBPF tee owns the data plane, cradle's
-                // WatchFdb is the single source of truth for bridge-domain
-                // MAC learning. The kernel bridge FDB (e.g. br100/vxlan100)
-                // does not forward here, so its stale/racy NEWNEIGH events
-                // would conflict with the cradle learn/age stream and thrash
-                // EVPN Type-2 origination on MAC mobility (RFC 7432 §7.7).
-                // Suppress the kernel feed while the tee is active.
+                let mac = nbr.lladdr;
+                let local = !nbr
+                    .flags
+                    .contains(netlink_packet_route::neighbour::NeighbourFlags::ExtLearned);
+                let previous = self.cache_neighbor(nbr, true);
                 if self.cradle_fdb_watch.is_none() {
-                    if let Some(entry) = withdrawn {
-                        self.api_fdb_del(&entry);
+                    if let Some(old) = previous
+                        && !old
+                            .flags
+                            .contains(netlink_packet_route::neighbour::NeighbourFlags::ExtLearned)
+                        && let Some(old_mac) = old.lladdr
+                    {
+                        self.reconcile_local_mac(old_mac);
                     }
-                    if let Some(entry) = fdb_entry {
-                        self.api_fdb_add(&entry);
+                    if local && let Some(mac) = mac {
+                        self.reconcile_local_mac(mac);
                     }
                 }
             }
             FibMessage::DelNeighbor(nbr) => {
-                let fdb_entry = fdb_entry_from_neighbor(self, &nbr);
-                if let Some(key) = neighbor_key(&nbr) {
-                    self.neighbors.remove(&key);
-                }
-                if let Some(entry) = fdb_entry {
-                    // See NewNeighbor: cradle's WatchFdb owns bridge MAC
-                    // learning/aging when the tee is active; ignore the kernel
-                    // bridge FDB feed so a stale DELNEIGH can't withdraw a
-                    // cradle-originated Type-2 out from under a live station.
-                    if self.cradle_fdb_watch.is_none() {
-                        self.api_fdb_del(&entry);
-                    }
+                let previous = self.cache_neighbor(nbr.clone(), false);
+                if self.cradle_fdb_watch.is_none()
+                    && !previous
+                        .as_ref()
+                        .unwrap_or(&nbr)
+                        .flags
+                        .contains(netlink_packet_route::neighbour::NeighbourFlags::ExtLearned)
+                    && let Some(mac) = previous.as_ref().and_then(|row| row.lladdr).or(nbr.lladdr)
+                {
+                    self.reconcile_local_mac(mac);
                 }
             }
             FibMessage::NewMdb(entry) => {
@@ -5061,6 +5115,7 @@ impl Rib {
             .find(|link| link.vni == Some(vni))
             .and_then(|link| link.vxlan_local);
         let entry = FdbEntry {
+            ip: None,
             vni,
             mac,
             ifindex,
@@ -5084,6 +5139,7 @@ impl Rib {
             .find(|link| link.vni == Some(vni))
             .and_then(|link| link.vxlan_local);
         let entry = FdbEntry {
+            ip: None,
             vni,
             mac,
             ifindex: 0,
@@ -5231,7 +5287,7 @@ impl Rib {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn mac_add(
+    pub(super) async fn mac_add(
         &mut self,
         vni: u32,
         mac: MacAddr,
@@ -5392,7 +5448,7 @@ impl Rib {
         }
     }
 
-    async fn mac_del(&mut self, vni: u32, mac: MacAddr) {
+    pub(super) async fn mac_del(&mut self, vni: u32, mac: MacAddr) {
         self.mac_table.remove(&(vni, mac));
         // A delete keyed on the VXLAN port removes whatever row holds the
         // address there — including the kernel's own local row once an
@@ -5652,6 +5708,42 @@ fn is_seg6local_entry(entry: &RibEntry) -> bool {
 /// don't.
 fn fdb_entry_from_neighbor(rib: &Rib, nbr: &FibNeighbor) -> Option<FdbEntry> {
     use netlink_packet_route::AddressFamily;
+    use netlink_packet_route::neighbour::{NeighbourFlags, NeighbourState};
+    if nbr.flags.contains(NeighbourFlags::ExtLearned) {
+        return None;
+    }
+    if matches!(nbr.family, AddressFamily::Inet | AddressFamily::Inet6) {
+        let ip = nbr.dst?;
+        let mac = nbr.lladdr?;
+        if ip.is_unspecified()
+            || ip.is_multicast()
+            || matches!(ip, IpAddr::V6(addr) if addr.is_unicast_link_local())
+            || matches!(
+                nbr.state,
+                NeighbourState::None | NeighbourState::Incomplete | NeighbourState::Failed
+            )
+        {
+            return None;
+        }
+        let bridge = if rib.vni_for_bridge(nbr.ifindex).is_some() {
+            nbr.ifindex
+        } else {
+            rib.links.get(&nbr.ifindex)?.master?
+        };
+        for row in rib
+            .neighbors
+            .values()
+            .filter(|row| row.family == AddressFamily::Bridge && row.lladdr == Some(mac))
+        {
+            if let Some(mut entry) = fdb_entry_from_neighbor(rib, row)
+                && entry.bridge_ifindex == bridge
+            {
+                entry.ip = Some(ip);
+                return Some(entry);
+            }
+        }
+        return None;
+    }
     if nbr.family != AddressFamily::Bridge {
         return None;
     }
@@ -5700,6 +5792,7 @@ fn fdb_entry_from_neighbor(rib: &Rib, nbr: &FibNeighbor) -> Option<FdbEntry> {
     let vni = rib.vni_for_bridge(bridge_ifindex)?;
     let vxlan_local = rib.vxlan_local_for_bridge(bridge_ifindex);
     Some(FdbEntry {
+        ip: None,
         vni,
         mac,
         ifindex: nbr.ifindex,
@@ -5854,6 +5947,135 @@ mod local_device_mac_tests {
     const HOST0: u32 = 5;
     const BR20: u32 = 6;
     const VXLAN20: u32 = 7;
+
+    #[tokio::test]
+    async fn evpn_local_dual_stack_binding_order_and_withdrawal() {
+        for fdb_first in [true, false] {
+            let mut rib = Rib::new(false).unwrap();
+            rib.links = tables().0;
+            let mac = mac("aa:bb:cc:dd:ee:01");
+            let fdb = row(HOST0, "aa:bb:cc:dd:ee:01", None, NeighbourState::Noarp);
+            let ipv4 = FibNeighbor {
+                family: AddressFamily::Inet,
+                ifindex: BR10,
+                dst: Some("10.10.0.101".parse().unwrap()),
+                lladdr: Some(mac),
+                state: NeighbourState::Noarp,
+                ..Default::default()
+            };
+            let ipv6 = FibNeighbor {
+                family: AddressFamily::Inet6,
+                dst: Some("2001:db8:10::101".parse().unwrap()),
+                ..ipv4.clone()
+            };
+            let rows = if fdb_first {
+                vec![fdb.clone(), ipv4.clone(), ipv6.clone()]
+            } else {
+                vec![ipv4.clone(), ipv6.clone(), fdb.clone()]
+            };
+            for row in rows {
+                rib.process_fib_msg(FibMessage::NewNeighbor(row)).await;
+            }
+            assert_eq!(rib.local_bindings.len(), 3);
+            rib.process_fib_msg(FibMessage::NewNeighbor(ipv6.clone()))
+                .await;
+            assert_eq!(
+                rib.local_bindings.len(),
+                3,
+                "duplicate notification is idempotent"
+            );
+            rib.process_fib_msg(FibMessage::DelNeighbor(ipv4.clone()))
+                .await;
+            assert_eq!(rib.local_bindings.len(), 2);
+            assert!(rib.local_bindings.contains_key(&(mac, 10, ipv6.dst)));
+            let remote = FibNeighbor {
+                flags: NeighbourFlags::ExtLearned,
+                ..ipv4
+            };
+            rib.process_fib_msg(FibMessage::NewNeighbor(remote)).await;
+            assert_eq!(
+                rib.local_bindings.len(),
+                2,
+                "remote neighbors are not exported"
+            );
+            rib.process_fib_msg(FibMessage::DelNeighbor(fdb)).await;
+            assert!(
+                rib.local_bindings.is_empty(),
+                "without local FDB ownership no IP may be exported"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn evpn_remote_bindings_have_independent_lifetimes() {
+        use crate::rib::evpn::{MacRoute, MacRouteKey};
+        let mut rib = Rib::new(false).unwrap();
+        let mac = mac("aa:bb:cc:dd:ee:01");
+        let rd = "65000:10".parse().unwrap();
+        let ips = [
+            None,
+            Some("10.10.0.101".parse().unwrap()),
+            Some("2001:db8:10::101".parse().unwrap()),
+        ];
+        for ip in ips {
+            rib.process_msg(
+                Message::EvpnMacAdd(MacRoute {
+                    key: MacRouteKey::new(rd, 10, mac, ip),
+                    tunnel_endpoint: Some("192.0.2.1".parse().unwrap()),
+                    flags: 0,
+                    seq: 0,
+                    esi: None,
+                    srv6_sid: None,
+                    mpls_label: None,
+                    local_port: None,
+                }),
+                RT_TABLE_MAIN,
+            )
+            .await;
+        }
+        assert_eq!(rib.evpn_mac_routes.len(), 3);
+        for (remaining, ip) in [(2, ips[1]), (1, ips[0]), (0, ips[2])] {
+            rib.process_msg(
+                Message::EvpnMacDel(MacRouteKey::new(rd, 10, mac, ip)),
+                RT_TABLE_MAIN,
+            )
+            .await;
+            assert_eq!(rib.evpn_mac_routes.len(), remaining);
+            assert_eq!(rib.mac_table.contains_key(&(10, mac)), remaining != 0);
+        }
+        assert!(rib.evpn_ip_refs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn evpn_kernel_routes_survive_startup_before_vrf_adoption() {
+        let mut rib = Rib::new(false).unwrap();
+        let mut vrf = link(9, "ovnvrf100", None, None);
+        vrf.vrf_table = Some(100);
+        rib.links.insert(9, vrf);
+        for prefix in ["10.20.0.0/24", "2001:db8:20::/64"] {
+            let prefix: IpNet = prefix.parse().unwrap();
+            let mut entry = RibEntry::new(RibType::Kernel);
+            entry.nexthop = Nexthop::Blackhole(1000);
+            entry.set_valid(true);
+            let route = crate::fib::FibRoute {
+                prefix,
+                entry,
+                table_id: 100,
+            };
+            rib.process_fib_msg(FibMessage::NewRoute(crate::fib::FibRoute {
+                prefix: route.prefix,
+                entry: route.entry.clone(),
+                table_id: route.table_id,
+            }))
+            .await;
+            let table = rib.vrf_tables.get(&100).unwrap();
+            match prefix {
+                IpNet::V4(p) => assert!(table.table.get(&p).is_some()),
+                IpNet::V6(p) => assert!(table.table_v6.get(&p).is_some()),
+            }
+            rib.process_fib_msg(FibMessage::DelRoute(route)).await;
+        }
+    }
 
     fn link(index: u32, name: &str, master: Option<u32>, vni: Option<u32>) -> Link {
         Link {
