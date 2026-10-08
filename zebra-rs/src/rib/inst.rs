@@ -1208,7 +1208,9 @@ pub struct Rib {
     pub local_bindings: BTreeMap<(MacAddr, u32, Option<IpAddr>), FdbEntry>,
     /// Index only local rows; remote route churn must not scan every neighbor.
     pub local_neighbors: BTreeMap<MacAddr, BTreeMap<NeighborKey, FibNeighbor>>,
-    pub evpn_ip_refs: BTreeMap<(u32, IpAddr), usize>,
+    /// Remote Type-2 routes binding each `(vni, ip)`, across MACs. One
+    /// kernel neighbor exists per IP; it follows the winning binding.
+    pub evpn_ip_refs: BTreeMap<(u32, IpAddr), BTreeSet<crate::rib::evpn::MacRouteKey>>,
     /// EVPN multihoming: the `(ESI, VNI)` pairs BGP currently has a
     /// non-empty nexthop group for (`Message::EsNhg`). A MAC on such a
     /// segment installs through the group (RFC 7432 §8.4 aliasing); the
@@ -1680,8 +1682,21 @@ impl Rib {
     /// flows through `evpn_originate_macip` whose `update_evpn` is
     /// idempotent (matches on `(ident, remote_id)`), so a benign
     /// re-fire on already-known entries doesn't multiply the route.
-    pub fn rescan_fdb_for_bridge(&mut self, _bridge_ifindex: u32) {
-        let macs: Vec<_> = self.local_neighbors.keys().copied().collect();
+    pub fn rescan_fdb_for_bridge(&mut self, bridge_ifindex: u32) {
+        let on_bridge = |row: &FibNeighbor| {
+            row.master == Some(bridge_ifindex)
+                || row.ifindex == bridge_ifindex
+                || self
+                    .links
+                    .get(&row.ifindex)
+                    .is_some_and(|link| link.master == Some(bridge_ifindex))
+        };
+        let macs: Vec<_> = self
+            .local_neighbors
+            .iter()
+            .filter(|(_, rows)| rows.values().any(on_bridge))
+            .map(|(mac, _)| *mac)
+            .collect();
         for mac in macs {
             self.reconcile_local_mac(mac);
         }
@@ -1733,8 +1748,11 @@ impl Rib {
             .range(lo..=hi)
             .map(|(key, value)| (*key, value.clone()))
             .collect();
+        // A binding that only changed (a port move, new flags) is
+        // re-announced by the add below, which BGP treats as an implicit
+        // update. Withdrawing it first would flap the Type-2 at every peer.
         for (key, entry) in old {
-            if desired.get(&key) != Some(&entry) {
+            if !desired.contains_key(&key) {
                 self.api_fdb_del(&entry);
                 self.local_bindings.remove(&key);
             }
@@ -3895,6 +3913,9 @@ impl Rib {
                 for (vni, mac) in macs {
                     self.fib_handle.mac_del(vni, &mac).await;
                 }
+                // Bridge Type-5 routes keep their RMAC FDB entries and VTEP
+                // neighbors outside `mac_table`; release them too.
+                self.fib_handle.evpn_prefix_cleanup().await;
                 let bindings: Vec<_> = self.evpn_mac_routes.keys().copied().collect();
                 for key in bindings {
                     if let Some(ip) = key.ip {
@@ -3976,13 +3997,23 @@ impl Rib {
             }
             Message::EvpnMacAdd(route) => {
                 let key = route.key;
-                let previous = self.evpn_mac_routes.insert(key, route);
-                if previous.is_none()
-                    && let Some(ip) = key.ip
-                {
-                    *self.evpn_ip_refs.entry((key.vni, ip)).or_default() += 1;
+                self.evpn_mac_routes.insert(key, route);
+                if let Some(ip) = key.ip {
+                    self.evpn_ip_refs
+                        .entry((key.vni, ip))
+                        .or_default()
+                        .insert(key);
                 }
                 self.reconcile_evpn_mac(key.vni, key.mac).await;
+                // Only an IP bound to several MACs can have been pointed
+                // at the losing one by the reconcile above.
+                if let Some(ip) = key.ip
+                    && self.evpn_ip_refs[&(key.vni, ip)]
+                        .iter()
+                        .any(|other| other.mac != key.mac)
+                {
+                    self.reassert_evpn_ip(key.vni, ip).await;
+                }
             }
             Message::EvpnMacDel(key) => {
                 if self.evpn_mac_routes.remove(&key).is_some() {
@@ -3990,12 +4021,17 @@ impl Rib {
                     if let Some(ip) = key.ip
                         && let Some(refs) = self.evpn_ip_refs.get_mut(&(key.vni, ip))
                     {
-                        *refs -= 1;
-                        if *refs == 0 {
+                        refs.remove(&key);
+                        if refs.is_empty() {
                             self.evpn_ip_refs.remove(&(key.vni, ip));
                             self.fib_handle
                                 .evpn_neighbor(key.vni, ip, key.mac, false)
                                 .await;
+                        } else {
+                            // Another MAC may still bind this IP: point the
+                            // neighbor back at it instead of leaving it on
+                            // the withdrawn MAC.
+                            self.reassert_evpn_ip(key.vni, ip).await;
                         }
                     }
                 }
@@ -5731,9 +5767,11 @@ fn fdb_entry_from_neighbor(rib: &Rib, nbr: &FibNeighbor) -> Option<FdbEntry> {
             rib.links.get(&nbr.ifindex)?.master?
         };
         for row in rib
-            .neighbors
-            .values()
-            .filter(|row| row.family == AddressFamily::Bridge && row.lladdr == Some(mac))
+            .local_neighbors
+            .get(&mac)
+            .into_iter()
+            .flat_map(|rows| rows.values())
+            .filter(|row| row.family == AddressFamily::Bridge)
         {
             if let Some(mut entry) = fdb_entry_from_neighbor(rib, row)
                 && entry.bridge_ifindex == bridge
@@ -6043,6 +6081,47 @@ mod local_device_mac_tests {
             assert_eq!(rib.evpn_mac_routes.len(), remaining);
             assert_eq!(rib.mac_table.contains_key(&(10, mac)), remaining != 0);
         }
+        assert!(rib.evpn_ip_refs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn evpn_ip_bound_to_two_macs_tracks_each_binding() {
+        use crate::rib::evpn::{MacRoute, MacRouteKey};
+        let mut rib = Rib::new(false).unwrap();
+        let rd = "65000:10".parse().unwrap();
+        let ip: IpAddr = "10.10.0.101".parse().unwrap();
+        let (m1, m2) = (mac("aa:bb:cc:dd:ee:01"), mac("aa:bb:cc:dd:ee:02"));
+        for (mac, seq) in [(m2, 0), (m1, 1)] {
+            rib.process_msg(
+                Message::EvpnMacAdd(MacRoute {
+                    key: MacRouteKey::new(rd, 10, mac, Some(ip)),
+                    tunnel_endpoint: Some("192.0.2.1".parse().unwrap()),
+                    flags: 0,
+                    seq,
+                    esi: None,
+                    srv6_sid: None,
+                    mpls_label: None,
+                    local_port: None,
+                }),
+                RT_TABLE_MAIN,
+            )
+            .await;
+        }
+        assert_eq!(rib.evpn_ip_refs[&(10, ip)].len(), 2);
+        // Withdrawing the newer binding leaves the IP owned by the other
+        // MAC, not dangling on the withdrawn one.
+        rib.process_msg(
+            Message::EvpnMacDel(MacRouteKey::new(rd, 10, m1, Some(ip))),
+            RT_TABLE_MAIN,
+        )
+        .await;
+        let owners: Vec<_> = rib.evpn_ip_refs[&(10, ip)].iter().map(|k| k.mac).collect();
+        assert_eq!(owners, vec![m2]);
+        rib.process_msg(
+            Message::EvpnMacDel(MacRouteKey::new(rd, 10, m2, Some(ip))),
+            RT_TABLE_MAIN,
+        )
+        .await;
         assert!(rib.evpn_ip_refs.is_empty());
     }
 

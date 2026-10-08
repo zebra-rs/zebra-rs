@@ -47,8 +47,12 @@ of a separate dataplane; remote FDB entries still carry UDP 4789.
 
 `redistribute kernel` exports kernel routes from the selected VRF, including
 static or externally installed blackhole prefixes, independent of their
-originating protocol number. Imported protocol-BGP routes are excluded from kernel ingestion, including
-on startup, so they cannot feed back into this redistribution source. The
+originating protocol number. Protocol-BGP routes in VRF tables (imported
+routes) are excluded from kernel ingestion, including on startup, so they
+cannot feed back into this redistribution source. Main-table protocol-BGP
+routes stay visible, because another daemon may own the underlay. IPv6
+interface prefix routes (`proto kernel`) and link-local prefixes are not
+ingested; connected routes come from the interface addresses. The
 source is per VRF and exports all eligible kernel prefixes in that VRF;
 this configuration does not provide a route-protocol policy filter.
 
@@ -63,7 +67,9 @@ this configuration does not provide a route-protocol policy filter.
   ownership before removing an entry replaced by a local neighbor.
 * The existing Type-3 path provides remote VTEP flood membership. Locally
   originated routes preserve the selected VTEP independently of the BGP
-  session's source interface address.
+  session's source interface address. A next hop that is only the router-id
+  fallback (no VXLAN local address and no `vtep-source`) is still rewritten
+  to the session's local address.
 * Imported Type-5 routes use the remote VTEP as gateway on the L3-VNI bridge,
   with RMAC FDB and neighbor state. IPv6 prefixes use an IPv4-mapped gateway
   and `onlink`, with corresponding IPv4 and mapped-IPv6 RMAC neighbors.
@@ -73,7 +79,8 @@ this configuration does not provide a route-protocol policy filter.
   VLAN-to-VNI tunnel mapping is applied only to metadata-mode VXLAN.
   Flat fixed-VNI bridges are supported; VLAN-aware fixed-VNI bridges have
   not been qualified by this change.
-* Kernel-only underlay routes can resolve VTEP reachability. Protocol routes
+* Kernel-only underlay routes can resolve VTEP reachability, except through a
+  default route. Protocol routes
   take precedence over their kernel shadows to retain transport metadata.
   VRF kernel routes observed before config adoption survive startup replay.
 

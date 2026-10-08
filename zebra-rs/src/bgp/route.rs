@@ -6471,6 +6471,18 @@ fn evpn_should_rewrite_nexthop(
     }
 }
 
+/// Whether an originated EVPN route carries a VTEP selected for it, rather
+/// than the `evpn_local_source` router-id fallback. Originations without a
+/// VXLAN device or `vtep-source` (MPLS, ES/IMET, deviceless VNIs) fill the
+/// next hop with the router-id. That placeholder must still be rewritten to
+/// the session's local address, as it was before VTEPs were preserved.
+fn evpn_originated_vtep_selected(nexthop: Option<&BgpNexthop>, router_id: Ipv4Addr) -> bool {
+    match nexthop {
+        Some(BgpNexthop::Evpn(addr)) => !addr.is_unspecified() && *addr != IpAddr::V4(router_id),
+        _ => false,
+    }
+}
+
 /// Per-peer EVPN advertise builder. Mirrors `route_update_ipv4`:
 /// applies split-horizon, the iBGP-iBGP / route-reflector filter,
 /// and fixes up AS_PATH / NEXT_HOP / LOCAL_PREF for the outgoing
@@ -6678,7 +6690,7 @@ pub fn route_update_evpn(
         peer.is_ebgp(),
         rib.is_originated(),
         peer.next_hop_unchanged(Afi::L2vpn, Safi::Evpn),
-        matches!(attrs.nexthop, Some(BgpNexthop::Evpn(addr)) if !addr.is_unspecified()),
+        evpn_originated_vtep_selected(attrs.nexthop.as_ref(), *bgp.router_id),
     ) {
         let nexthop: IpAddr = if let Some(ref local_addr) = peer.param.local_addr {
             local_addr.ip()
@@ -6725,7 +6737,8 @@ pub fn route_update_evpn(
 
 #[cfg(test)]
 mod evpn_nexthop_tests {
-    use super::evpn_should_rewrite_nexthop;
+    use super::{BgpNexthop, evpn_originated_vtep_selected, evpn_should_rewrite_nexthop};
+    use std::net::{IpAddr, Ipv4Addr};
 
     #[test]
     fn plain_ebgp_forwarded_route_rewrites_to_self() {
@@ -6750,6 +6763,29 @@ mod evpn_nexthop_tests {
                 assert!(!evpn_should_rewrite_nexthop(ebgp, true, unchanged, true));
             }
         }
+    }
+
+    #[test]
+    fn router_id_fallback_is_not_a_selected_vtep() {
+        let rid = Ipv4Addr::new(10, 0, 0, 1);
+        let evpn = |addr: IpAddr| BgpNexthop::Evpn(addr);
+        assert!(!evpn_originated_vtep_selected(None, rid));
+        assert!(!evpn_originated_vtep_selected(
+            Some(&evpn(IpAddr::V4(rid))),
+            rid
+        ));
+        assert!(!evpn_originated_vtep_selected(
+            Some(&evpn(IpAddr::V4(Ipv4Addr::UNSPECIFIED))),
+            rid
+        ));
+        assert!(evpn_originated_vtep_selected(
+            Some(&evpn(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 11)))),
+            rid
+        ));
+        assert!(evpn_originated_vtep_selected(
+            Some(&evpn("2001:db8::11".parse().unwrap())),
+            rid
+        ));
     }
 
     #[test]

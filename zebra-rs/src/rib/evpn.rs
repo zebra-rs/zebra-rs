@@ -43,6 +43,32 @@ pub struct MacRoute {
 }
 
 impl Rib {
+    /// Point the kernel neighbor for `(vni, ip)` at the winning remote
+    /// binding (highest mobility sequence). Called after a binding for the
+    /// IP is added or withdrawn, so an IP that moved between MACs follows
+    /// the live route rather than the last one processed.
+    pub(super) async fn reassert_evpn_ip(&mut self, vni: u32, ip: IpAddr) {
+        let Some(keys) = self.evpn_ip_refs.get(&(vni, ip)) else {
+            return;
+        };
+        let Some(winner) = keys
+            .iter()
+            .filter_map(|key| self.evpn_mac_routes.get(key))
+            .max_by_key(|route| route.seq)
+        else {
+            return;
+        };
+        if winner.srv6_sid.is_some()
+            || winner.mpls_label.is_some()
+            || self.fib_handle.cradle_active()
+            || self.local_device_mac_bridge(vni, winner.key.mac).is_some()
+        {
+            return;
+        }
+        let mac = winner.key.mac;
+        self.fib_handle.evpn_neighbor(vni, ip, mac, true).await;
+    }
+
     pub(super) async fn reconcile_evpn_mac(&mut self, vni: u32, mac: MacAddr) {
         let lo = MacRouteKey {
             vni,

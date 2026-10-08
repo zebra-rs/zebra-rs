@@ -365,7 +365,10 @@ pub struct FibHandle {
     pub use_nhid: bool,
     /// Install VXLAN Type-5 routes through their Linux L3-VNI bridges.
     pub kernel_route_exchange: bool,
-    evpn_prefix_routes: std::sync::Mutex<BTreeMap<(u32, IpNet), crate::rib::VxlanL3Encap>>,
+    /// Installed bridge Type-5 routes, `(table, prefix)` → encap and the
+    /// kernel priority they were installed with. Owns the RMAC FDB entry
+    /// and VTEP neighbors each adjacency shares across prefixes.
+    evpn_prefix_routes: std::sync::Mutex<BTreeMap<(u32, IpNet), (crate::rib::VxlanL3Encap, u32)>>,
     /// VNI to VXLAN interface index mapping
     /// Used to resolve VNI to the correct VXLAN device for FDB operations
     pub vni_ifindex_map: BTreeMap<u32, u32>,
@@ -1469,11 +1472,12 @@ impl FibHandle {
         nexthop: &Nexthop,
         table_id: u32,
     ) {
-        if self.kernel_route_exchange
-            && let Nexthop::Uni(uni) = nexthop
-            && let Some(encap) = uni.vxlan
+        // Follow what was installed, not the knob: it may have been
+        // toggled since, and the bridge route only matches this path.
+        if matches!(nexthop, Nexthop::Uni(uni) if uni.vxlan.is_some())
+            && let Some((encap, metric)) = self.evpn_prefix_tracked(table_id, IpNet::V4(*prefix))
         {
-            self.evpn_prefix_route(IpNet::V4(*prefix), table_id, uni.metric, encap, false)
+            self.evpn_prefix_route(IpNet::V4(*prefix), table_id, metric, encap, false)
                 .await;
             return;
         }
@@ -2073,11 +2077,12 @@ impl FibHandle {
         nexthop: &Nexthop,
         table_id: u32,
     ) {
-        if self.kernel_route_exchange
-            && let Nexthop::Uni(uni) = nexthop
-            && let Some(encap) = uni.vxlan
+        // Follow what was installed, not the knob: it may have been
+        // toggled since, and the bridge route only matches this path.
+        if matches!(nexthop, Nexthop::Uni(uni) if uni.vxlan.is_some())
+            && let Some((encap, metric)) = self.evpn_prefix_tracked(table_id, IpNet::V6(*prefix))
         {
-            self.evpn_prefix_route(IpNet::V6(*prefix), table_id, uni.metric, encap, false)
+            self.evpn_prefix_route(IpNet::V6(*prefix), table_id, metric, encap, false)
                 .await;
             return;
         }
@@ -3948,6 +3953,36 @@ impl FibHandle {
         self.vni_metadata_map.remove(&vni);
     }
 
+    /// The encap and priority a bridge Type-5 route was installed with.
+    fn evpn_prefix_tracked(
+        &self,
+        table_id: u32,
+        prefix: IpNet,
+    ) -> Option<(crate::rib::VxlanL3Encap, u32)> {
+        self.evpn_prefix_routes
+            .lock()
+            .unwrap()
+            .get(&(table_id, prefix))
+            .copied()
+    }
+
+    /// Withdraw every bridge Type-5 route and its RMAC adjacency. These do
+    /// not ride on next-hop objects, so nothing else removes them when the
+    /// daemon stops, and the adjacency lives on operator-owned devices.
+    pub async fn evpn_prefix_cleanup(&self) {
+        let routes: Vec<_> = self
+            .evpn_prefix_routes
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(&key, &value)| (key, value))
+            .collect();
+        for ((table_id, prefix), (encap, metric)) in routes {
+            self.evpn_prefix_route(prefix, table_id, metric, encap, false)
+                .await;
+        }
+    }
+
     /// Install Type-5 prefixes in the tenant kernel table, resolving the
     /// next hop through RMAC neighbor/FDB state on the L3-VNI bridge.
     async fn evpn_prefix_route(
@@ -3968,10 +4003,25 @@ impl FibHandle {
         use netlink_packet_route::route::RouteFlags;
         let Some(bridge) = self.evpn_bridge(encap.l3vni).await else {
             tracing::warn!("EVPN Type-5 {prefix}: no bridge for L3 VNI {}", encap.l3vni);
+            if !add {
+                self.evpn_prefix_routes
+                    .lock()
+                    .unwrap()
+                    .remove(&(table_id, prefix));
+            }
             return false;
         };
+        // Install the adjacency only for its first prefix; every other
+        // prefix behind the same (L3 VNI, VTEP, RMAC) reuses it.
+        let shared = add
+            && self
+                .evpn_prefix_routes
+                .lock()
+                .unwrap()
+                .values()
+                .any(|(route, _)| same_evpn_adjacency(route, &encap));
         let mac = MacAddr::from(encap.remote_rmac);
-        if add {
+        if add && !shared {
             self.mac_add(
                 encap.l3vni,
                 &mac,
@@ -4030,57 +4080,70 @@ impl FibHandle {
         });
         request.header.flags =
             NLM_F_REQUEST | NLM_F_ACK | if add { NLM_F_CREATE | NLM_F_REPLACE } else { 0 };
-        let Ok(mut response) = self.handle.clone().request(request) else {
-            return false;
-        };
-        let mut success = true;
-        while let Some(response) = response.next().await {
-            if let NetlinkPayload::Error(err) = response.payload {
-                tracing::warn!("EVPN Type-5 {prefix} in table {table_id}: {err}");
-                success = false;
-            }
-        }
-        if success {
-            let unused = {
-                let mut routes = self.evpn_prefix_routes.lock().unwrap();
-                let previous = if add {
-                    routes.insert((table_id, prefix), encap)
-                } else {
-                    routes.remove(&(table_id, prefix))
-                };
-                previous.filter(|old| {
-                    !routes.values().any(|route| {
-                        route.l3vni == old.l3vni
-                            && route.remote_vtep == old.remote_vtep
-                            && route.remote_rmac == old.remote_rmac
-                    })
-                })
-            };
-            if let Some(old) = unused {
-                let mac = MacAddr::from(old.remote_rmac);
-                self.evpn_neighbor(old.l3vni, old.remote_vtep.into(), mac, false)
-                    .await;
-                self.evpn_neighbor(
-                    old.l3vni,
-                    old.remote_vtep.to_ipv6_mapped().into(),
-                    mac,
-                    false,
-                )
-                .await;
-                // Several VTEPs can share an RMAC. Remove its FDB only when
-                // no remaining route references that MAC in this VNI.
-                let used = self
-                    .evpn_prefix_routes
-                    .lock()
-                    .unwrap()
-                    .values()
-                    .any(|route| route.l3vni == old.l3vni && route.remote_rmac == old.remote_rmac);
-                if !used {
-                    self.mac_del(old.l3vni, &mac).await;
+        let mut success = false;
+        if let Ok(mut response) = self.handle.clone().request(request) {
+            success = true;
+            while let Some(response) = response.next().await {
+                if let NetlinkPayload::Error(err) = response.payload {
+                    tracing::warn!("EVPN Type-5 {prefix} in table {table_id}: {err}");
+                    success = false;
                 }
             }
         }
+        // A failed add leaves any previous route in place, so the map keeps
+        // it. A delete always forgets the route: a failed one means the
+        // kernel no longer has it (the table was flushed or an operator
+        // removed it), and keeping the entry would pin the adjacency.
+        let mut release = Vec::new();
+        {
+            let mut routes = self.evpn_prefix_routes.lock().unwrap();
+            if add && success {
+                release.extend(routes.insert((table_id, prefix), (encap, metric)));
+            } else if !add {
+                release.extend(routes.remove(&(table_id, prefix)));
+            }
+        }
+        if add && !success {
+            // Drop the adjacency installed above if nothing else uses it.
+            release.push((encap, metric));
+        }
+        for (old, _) in release {
+            self.evpn_adjacency_release(&old).await;
+        }
         success
+    }
+
+    /// Remove an RMAC adjacency once no tracked Type-5 route uses it.
+    async fn evpn_adjacency_release(&self, old: &crate::rib::VxlanL3Encap) {
+        let (adjacency_used, rmac_used) = {
+            let routes = self.evpn_prefix_routes.lock().unwrap();
+            (
+                routes
+                    .values()
+                    .any(|(route, _)| same_evpn_adjacency(route, old)),
+                routes.values().any(|(route, _)| {
+                    route.l3vni == old.l3vni && route.remote_rmac == old.remote_rmac
+                }),
+            )
+        };
+        if adjacency_used {
+            return;
+        }
+        let mac = MacAddr::from(old.remote_rmac);
+        self.evpn_neighbor(old.l3vni, old.remote_vtep.into(), mac, false)
+            .await;
+        self.evpn_neighbor(
+            old.l3vni,
+            old.remote_vtep.to_ipv6_mapped().into(),
+            mac,
+            false,
+        )
+        .await;
+        // Several VTEPs can share an RMAC. Remove its FDB only when no
+        // remaining route references that MAC in this VNI.
+        if !rmac_used {
+            self.mac_del(old.l3vni, &mac).await;
+        }
     }
 
     /// Resolve the bridge owning an adopted fixed-VNI VXLAN device.
@@ -4927,6 +4990,11 @@ impl RouteBuilder {
     }
 }
 
+/// Whether two Type-5 encaps resolve through the same RMAC adjacency.
+fn same_evpn_adjacency(a: &crate::rib::VxlanL3Encap, b: &crate::rib::VxlanL3Encap) -> bool {
+    a.l3vni == b.l3vni && a.remote_vtep == b.remote_vtep && a.remote_rmac == b.remote_rmac
+}
+
 /// Translate a kernel next-hop object (`RTM_NEWNEXTHOP`, as a dump
 /// returns it) into a [`FibNexthop`]. None without an id.
 pub fn nexthop_from_msg(msg: &NexthopMessage) -> Option<FibNexthop> {
@@ -5003,9 +5071,17 @@ pub fn route_from_msg_with(
     if msg.header.scope == RouteScope::Host {
         return None;
     }
-    // Imported BGP routes are our output, never a redistribution source.
-    if msg.header.protocol == RouteProtocol::Bgp {
-        return None;
+    let protocol = msg.header.protocol;
+    if msg.header.address_family == AddressFamily::Inet6 && !leftover {
+        // IPv6 interface prefix routes (fe80::/64 included) are scope
+        // universe, so the Link-scope test below does not catch them. The
+        // RIB already derives connected routes from the addresses. An
+        // RTPROT_ISIS route can only be an earlier run's leftover, which
+        // must not come back as a distance-0 kernel route that outranks
+        // the fresh IS-IS route.
+        if matches!(protocol, RouteProtocol::Kernel | RouteProtocol::Isis) {
+            return None;
+        }
     }
     // Discard prefixes can be redistributed just like unicast prefixes.
     // Their originating protocol does not identify a particular consumer.
@@ -5117,7 +5193,16 @@ pub fn route_from_msg_with(
             }
         }
     }
-    builder.prefix?;
+    // BGP routes in a VRF table are our own EVPN/VPN imports: never
+    // redistribute them back. Main-table BGP routes can belong to another
+    // daemon, such as an underlay bgpd, so NHT and redistribution keep them.
+    if protocol == RouteProtocol::Bgp && table_id != RouteHeader::RT_TABLE_MAIN as u32 {
+        return None;
+    }
+    match builder.prefix? {
+        IpNet::V6(v6) if v6.addr().is_unicast_link_local() => return None,
+        _ => {}
+    }
 
     let (prefix, mut entry) = builder.build();
     if leftover {
@@ -5402,6 +5487,47 @@ mod tests {
                     "BGP output must not feed back as kernel input"
                 );
             }
+            // Another daemon's main-table BGP route (an underlay bgpd)
+            // stays visible to NHT.
+            let mut main = msg.clone();
+            set_route_table(&mut main, RouteHeader::RT_TABLE_MAIN as u32);
+            let route = route_from_msg(main).expect("main-table BGP route");
+            assert_eq!(route.entry.rtype, RibType::Kernel);
+        }
+    }
+
+    #[test]
+    fn ipv6_prefix_link_local_and_isis_leftover_routes_not_mirrored() {
+        let v6_route = |dest: &str, len: u8, protocol: RouteProtocol| {
+            let mut msg = RouteMessage::default();
+            msg.header.address_family = AddressFamily::Inet6;
+            msg.header.destination_prefix_length = len;
+            msg.header.kind = RouteType::Unicast;
+            msg.header.protocol = protocol;
+            set_route_table(&mut msg, RouteHeader::RT_TABLE_MAIN as u32);
+            msg.attributes
+                .push(RouteAttribute::Destination(RouteAddress::Inet6(
+                    dest.parse().unwrap(),
+                )));
+            msg.attributes.push(RouteAttribute::Oif(3));
+            msg
+        };
+        for dump in [true, false] {
+            for msg in [
+                v6_route("2001:db8:1::", 64, RouteProtocol::Kernel),
+                v6_route("fe80::", 64, RouteProtocol::Kernel),
+                v6_route("fe80::", 64, RouteProtocol::Boot),
+                v6_route("2001:db8:2::", 64, RouteProtocol::Isis),
+            ] {
+                assert!(route_from_msg_with(msg, &BTreeMap::new(), dump).is_none());
+            }
+            let route = route_from_msg_with(
+                v6_route("2001:db8:3::", 64, RouteProtocol::Boot),
+                &BTreeMap::new(),
+                dump,
+            )
+            .expect("operator IPv6 route");
+            assert_eq!(route.entry.rtype, RibType::Kernel);
         }
     }
 
@@ -5825,8 +5951,12 @@ mod tests {
             "not the dump's"
         );
         assert!(
-            route(v6.0, v6.1, RouteProtocol::Kernel, true).is_some(),
-            "IPv6 kernel routes are redistribution sources"
+            route(v6.0, v6.1, RouteProtocol::Kernel, true).is_none(),
+            "v6 RTPROT_KERNEL routes are interface prefix routes, already connected"
+        );
+        assert!(
+            route(v6.0, v6.1, RouteProtocol::Boot, true).is_some(),
+            "operator IPv6 routes are redistribution sources"
         );
     }
 }
