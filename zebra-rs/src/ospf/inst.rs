@@ -276,10 +276,10 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// matching `SpfRouteV3`. Populated by `apply_routing_updates_v3`
     /// from the v3 SR-MPLS RIB; empty on v2 instances.
     pub ilm6: BTreeMap<u32, SpfIlmV3>,
-    /// First-fit Adjacency-SID label allocator backed by the local SRLB
-    /// (`srmpls::SRLB_START` .. `SRLB_START + SRLB_RANGE - 1`). Created
-    /// when `segment-routing mpls` is enabled, dropped when it's
-    /// disabled. Each Full adjacency claims one label from the pool on
+    /// First-fit Adjacency-SID label allocator over the SRLB of the
+    /// watched SR block (`sr_block`). Created once SR-MPLS is on and the
+    /// block has arrived, rebuilt when the SRLB moves, dropped when SR-MPLS
+    /// is disabled. Each Full adjacency claims one label from the pool on
     /// transition into Full and releases it on regression; the
     /// `(ifindex, neighbor_router_id) -> label` mapping is held in
     /// `lan_adj_sids` below so origination and ILM install can read it.
@@ -332,6 +332,13 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     pub srv6_locator_name: Option<String>,
     pub watched_locator: Option<String>,
     pub sr_locator: Option<crate::rib::Locator>,
+    /// The RIB SR block watched while SR-MPLS is on (`default`, as for
+    /// IS-IS), and its latest snapshot: the SRGB and SRLB this router
+    /// advertises and derives its own SID labels from. `None` until the
+    /// RIB answers the watch; with no block no SR-MPLS ranges or labels
+    /// are advertised or installed.
+    pub watched_block: Option<String>,
+    pub sr_block: Option<crate::rib::Block>,
     pub sr_end_sid: Option<std::net::Ipv6Addr>,
     /// ELIB function pool for End.X allocation — shared allocator
     /// implementation with IS-IS (RFC 9352 reserves the same upper
@@ -763,6 +770,108 @@ mod interface_config_path_tests {
 // the v2-shaped tx channel) and produce `OspfInterface<V>` /
 // `&Neighbor<V>` values typed by `V`.
 impl<V: OspfVersion> Ospf<V> {
+    /// Align the RIB SR-block watch with the SR-MPLS mode: watch
+    /// `default` while SR-MPLS is on, as IS-IS does. The RIB answers a
+    /// watch at once with the block, which `process_sr_rx` applies.
+    pub fn reconcile_block_watch(&mut self) {
+        use super::srmpls::SegmentRoutingMode;
+        let desired = (self.segment_routing == SegmentRoutingMode::Mpls)
+            .then(|| crate::rib::DEFAULT_BLOCK_NAME.to_string());
+        if desired == self.watched_block {
+            return;
+        }
+        if let Some(prev) = self.watched_block.take() {
+            let _ = self.ctx.rib.send(rib::Message::SrBlockUnwatch {
+                proto: self.proto_label.clone(),
+                name: prev,
+            });
+            self.sr_block = None;
+        }
+        if let Some(next) = desired {
+            let _ = self.ctx.rib.send(rib::Message::SrBlockWatch {
+                proto: self.proto_label.clone(),
+                name: next.clone(),
+            });
+            self.watched_block = Some(next);
+        }
+    }
+
+    /// The watched SR block while SR-MPLS is on: the SRGB and SRLB this
+    /// router advertises. `None` with SR-MPLS off (SRv6 alone advertises
+    /// no MPLS ranges) or before the block arrives.
+    pub fn sr_mpls_block(&self) -> Option<&crate::rib::Block> {
+        use super::srmpls::SegmentRoutingMode;
+        if self.segment_routing != SegmentRoutingMode::Mpls {
+            return None;
+        }
+        self.sr_block.as_ref()
+    }
+
+    /// The SRGB of the watched block, when SR-MPLS is on and the block
+    /// has one: what this router derives its own Prefix-SID labels from.
+    pub fn srgb(&self) -> Option<&crate::spf::label_block::LabelBlock> {
+        self.sr_mpls_block()
+            .and_then(|b| b.global.as_ref())
+            .filter(|g| g.last().is_some())
+    }
+
+    /// The SRLB of the watched block, likewise.
+    pub fn srlb(&self) -> Option<&crate::spf::label_block::LabelBlock> {
+        self.sr_mpls_block()
+            .and_then(|b| b.local.as_ref())
+            .filter(|l| l.last().is_some())
+    }
+
+    /// Bring the Adjacency-SID labels in line with SR-MPLS and the
+    /// watched SRLB. `full` lists the Full adjacencies, keyed as in
+    /// `lan_adj_sids`.
+    ///
+    /// SR-MPLS off: no pool, no labels. On, with the block's SRLB: a pool
+    /// over it, rebuilt when the SRLB moved (every dynamic Adj-SID is then
+    /// drawn again from the new one), and a label for each Full adjacency
+    /// that has none. A block without an SRLB drops the pool and labels.
+    /// Before the block first arrives nothing changes, so labels already
+    /// held (a graceful restart's) are kept until then.
+    pub(super) fn reconcile_adj_sid_labels(&mut self, full: Vec<(u32, Ipv4Addr)>) {
+        use super::srmpls::SegmentRoutingMode;
+        if self.segment_routing != SegmentRoutingMode::Mpls {
+            self.local_pool = None;
+            self.lan_adj_sids.clear();
+            return;
+        }
+        let Some(block) = self.sr_block.as_ref() else {
+            return;
+        };
+        let Some((first, last)) = block
+            .local
+            .as_ref()
+            .and_then(|lb| Some((lb.start, lb.last()?)))
+        else {
+            self.local_pool = None;
+            self.lan_adj_sids.clear();
+            return;
+        };
+        let current = self.local_pool.as_ref().map(|p| p.range());
+        if current != Some((first, last)) {
+            if current.is_some() {
+                // Release the old SRLB's labels before drawing from the new.
+                self.local_pool = None;
+                self.lan_adj_sids.clear();
+            }
+            self.local_pool = Some(self.rib_subscriber.local_labels().pool(first, last));
+        }
+        for key in full {
+            if self.lan_adj_sids.contains_key(&key) {
+                continue;
+            }
+            if let Some(pool) = self.local_pool.as_mut()
+                && let Some(label) = pool.allocate()
+            {
+                self.lan_adj_sids.insert(key, label);
+            }
+        }
+    }
+
     /// Whether a MaxAge LSA must stay in the database for now (RFC 2328
     /// §14): it leaves only once no neighbour's retransmission list holds
     /// it and no neighbour is in Exchange or Loading. Removed earlier, its
@@ -2549,10 +2658,14 @@ impl Ospf<Ospfv2> {
 
         let (tx, rx) = mpsc::unbounded_channel();
         let (ptx, prx) = mpsc::unbounded_channel();
-        // v2 never watches SRv6 locators; the channel exists only
-        // because the field is shared with v3. Dropping the tx makes
-        // it permanently silent (and the v2 loop never polls it).
-        let (_sr_tx, sr_rx) = mpsc::unbounded_channel();
+        // SR snapshot subscription: v2 watches the RIB's SR block (its
+        // SRGB and SRLB) while SR-MPLS is on, never an SRv6 locator.
+        // Keyed by the instance's proto label, as for v3.
+        let (sr_tx, sr_rx) = mpsc::unbounded_channel();
+        let _ = ctx.rib.send(crate::rib::Message::SrSubscribe {
+            proto: proto_label.clone(),
+            tx: sr_tx,
+        });
         let mut ospf = Self {
             tx,
             rx,
@@ -2601,6 +2714,8 @@ impl Ospf<Ospfv2> {
             segment_routing: super::srmpls::SegmentRoutingMode::default(),
             srv6_locator_name: None,
             watched_locator: None,
+            watched_block: None,
+            sr_block: None,
             sr_locator: None,
             sr_end_sid: None,
             elib: crate::isis::srv6::ElibPool::new(),
@@ -4096,8 +4211,13 @@ impl Ospf<Ospfv2> {
             let algos = crate::flex_algo::sr_algorithms_for(&participating);
             let fads =
                 super::flex_algo::build_fad(&self.flex_algo, &self.affinity_map, &self.srlg_groups);
-            let mut lsa =
-                super::srmpls::router_info_lsa_build(self.router_id, gr_capable, algos, fads);
+            let mut lsa = super::srmpls::router_info_lsa_build(
+                self.router_id,
+                gr_capable,
+                algos,
+                fads,
+                self.sr_mpls_block(),
+            );
 
             // Preserve sequence number if re-originating.
             if let Some(area) = self.areas.get(AREA0)
@@ -8195,6 +8315,9 @@ impl Ospf<Ospfv2> {
                 Some(msg) = self.show.rx.recv() => {
                     self.process_show_msg(msg).await;
                 }
+                Some(msg) = self.sr_rx.recv() => {
+                    self.process_sr_rx(msg);
+                }
                 Some(msg) = self.policy_rx.recv() => {
                     self.process_policy_msg(msg);
                 }
@@ -8205,6 +8328,23 @@ impl Ospf<Ospfv2> {
                     self.process_stamp_event(event);
                 }
             }
+        }
+    }
+
+    /// SR snapshot from the RIB (`SrSubscribe` channel). OSPFv2 watches
+    /// only the SR block: an update moves its SRGB and SRLB, and with them
+    /// the Router Information LSA, the Adj-SID labels and the own SID
+    /// labels. It never watches an SRv6 locator.
+    pub fn process_sr_rx(&mut self, msg: crate::rib::RibSrRx) {
+        match msg {
+            crate::rib::RibSrRx::Block { name, block } => {
+                if self.watched_block.as_deref() != Some(name.as_str()) {
+                    return;
+                }
+                self.sr_block = block;
+                super::config::sr_mpls_refresh(self);
+            }
+            crate::rib::RibSrRx::Locator { .. } => {}
         }
     }
 
@@ -8402,6 +8542,8 @@ impl Ospf<Ospfv3> {
             segment_routing: super::srmpls::SegmentRoutingMode::default(),
             srv6_locator_name: None,
             watched_locator: None,
+            watched_block: None,
+            sr_block: None,
             sr_locator: None,
             sr_end_sid: None,
             elib: crate::isis::srv6::ElibPool::new(),
@@ -13227,6 +13369,7 @@ impl Ospf<Ospfv3> {
                 algos,
                 fads,
                 self.srv6_active(),
+                self.sr_mpls_block(),
             )
         });
         self.sr_capability_lsa_install(area_id, key, lsa);
@@ -13326,9 +13469,16 @@ impl Ospf<Ospfv3> {
                 self.sweep_endx_sids();
                 self.srv6_originate_all_areas();
             }
-            // OSPF's SRGB / SRLB are fixed constants today; no block
-            // watches are registered, so nothing arrives here.
-            crate::rib::RibSrRx::Block { .. } => {}
+            // The watched SR block: its SRGB and SRLB, which the SR
+            // capabilities, the Adj-SID labels and the own SID labels
+            // follow.
+            crate::rib::RibSrRx::Block { name, block } => {
+                if self.watched_block.as_deref() != Some(name.as_str()) {
+                    return;
+                }
+                self.sr_block = block;
+                super::config_v3::sr_mpls_refresh_v3(self);
+            }
         }
     }
 
@@ -18598,8 +18748,11 @@ fn build_ilm_from_rib6(rib: &PrefixMap<ipnet::Ipv6Net, SpfRouteV3>) -> BTreeMap<
 /// owning interface; since the via address is one of our own
 /// interface addresses, the inner packet is delivered locally.
 fn add_self_prefix_sids_to_ilm(top: &Ospf, ilm: &mut BTreeMap<u32, SpfIlm>) {
-    use super::srmpls::SRGB_START;
     use crate::ospf::lsdb::OSPF_MAX_AGE;
+
+    // Index-form SIDs resolve against this router's own SRGB, the
+    // watched block's; without one only Label-form SIDs have a label.
+    let srgb_start = top.srgb().map(|g| g.start);
 
     for (area_id, area) in top.areas.iter() {
         let area_id = *area_id;
@@ -18626,11 +18779,13 @@ fn add_self_prefix_sids_to_ilm(top: &Ospf, ilm: &mut BTreeMap<u32, SpfIlm>) {
                         continue;
                     };
                     let (label, pfx_index) = match ps.sid {
-                        SidLabelTlv::Label(v) => (v, v.saturating_sub(SRGB_START)),
-                        SidLabelTlv::Index(idx) => match SRGB_START.checked_add(idx) {
-                            Some(v) => (v, idx),
-                            None => continue,
-                        },
+                        SidLabelTlv::Label(v) => (v, srgb_start.map_or(0, |s| v.saturating_sub(s))),
+                        SidLabelTlv::Index(idx) => {
+                            match srgb_start.and_then(|s| s.checked_add(idx)) {
+                                Some(v) => (v, idx),
+                                None => continue,
+                            }
+                        }
                     };
                     let mut nhops = BTreeMap::new();
                     nhops.insert(
@@ -18677,8 +18832,11 @@ fn add_self_prefix_sids_to_ilm_v3(top: &Ospf<Ospfv3>, ilm: &mut BTreeMap<u32, Sp
         ospfv3_prefix_wire_len,
     };
 
-    use super::srmpls::SRGB_START;
     use crate::ospf::lsdb::OSPF_MAX_AGE;
+
+    // Index-form SIDs resolve against this router's own SRGB, the
+    // watched block's; without one only Label-form SIDs have a label.
+    let srgb_start = top.srgb().map(|g| g.start);
 
     for (area_id, area) in top.areas.iter() {
         let area_id = *area_id;
@@ -18735,11 +18893,13 @@ fn add_self_prefix_sids_to_ilm_v3(top: &Ospf<Ospfv3>, ilm: &mut BTreeMap<u32, Sp
                         continue;
                     };
                     let (label, pfx_index) = match ps.sid {
-                        SidLabelTlv::Label(v) => (v, v.saturating_sub(SRGB_START)),
-                        SidLabelTlv::Index(idx) => match SRGB_START.checked_add(idx) {
-                            Some(v) => (v, idx),
-                            None => continue,
-                        },
+                        SidLabelTlv::Label(v) => (v, srgb_start.map_or(0, |s| v.saturating_sub(s))),
+                        SidLabelTlv::Index(idx) => {
+                            match srgb_start.and_then(|s| s.checked_add(idx)) {
+                                Some(v) => (v, idx),
+                                None => continue,
+                            }
+                        }
                     };
                     let mut nhops = BTreeMap::new();
                     nhops.insert(
@@ -18791,8 +18951,11 @@ fn add_self_adj_sids_to_ilm_v3(top: &Ospf<Ospfv3>, ilm: &mut BTreeMap<u32, SpfIl
         OSPFV3_E_ROUTER_LSA_TYPE, Ospfv3ExtTlv, Ospfv3LsBody, Ospfv3RouterLinkType, Ospfv3SubTlv,
     };
 
-    use super::srmpls::SRGB_START;
     use crate::ospf::lsdb::OSPF_MAX_AGE;
+
+    // Index-form SIDs resolve against this router's own SRGB, the
+    // watched block's; without one only Label-form SIDs have a label.
+    let srgb_start = top.srgb().map(|g| g.start);
 
     // Resolve `(link, neighbor_router_id)` -> `(ifindex, link-local v6 addr)`.
     // Returns `None` when the named neighbor has aged out of `link.nbrs`
@@ -18871,11 +19034,15 @@ fn add_self_adj_sids_to_ilm_v3(top: &Ospf<Ospfv3>, ilm: &mut BTreeMap<u32, SpfIl
                                 continue;
                             };
                             let (label, adj_index) = match adj.sid {
-                                SidLabelTlv::Label(v) => (v, v.saturating_sub(SRGB_START)),
-                                SidLabelTlv::Index(idx) => match SRGB_START.checked_add(idx) {
-                                    Some(v) => (v, idx),
-                                    None => continue,
-                                },
+                                SidLabelTlv::Label(v) => {
+                                    (v, srgb_start.map_or(0, |s| v.saturating_sub(s)))
+                                }
+                                SidLabelTlv::Index(idx) => {
+                                    match srgb_start.and_then(|s| s.checked_add(idx)) {
+                                        Some(v) => (v, idx),
+                                        None => continue,
+                                    }
+                                }
                             };
                             install(ilm, label, adj_index, ifindex, nbr_addr);
                             break;
@@ -18892,11 +19059,15 @@ fn add_self_adj_sids_to_ilm_v3(top: &Ospf<Ospfv3>, ilm: &mut BTreeMap<u32, SpfIl
                                 continue;
                             };
                             let (label, adj_index) = match lan.sid {
-                                SidLabelTlv::Label(v) => (v, v.saturating_sub(SRGB_START)),
-                                SidLabelTlv::Index(idx) => match SRGB_START.checked_add(idx) {
-                                    Some(v) => (v, idx),
-                                    None => continue,
-                                },
+                                SidLabelTlv::Label(v) => {
+                                    (v, srgb_start.map_or(0, |s| v.saturating_sub(s)))
+                                }
+                                SidLabelTlv::Index(idx) => {
+                                    match srgb_start.and_then(|s| s.checked_add(idx)) {
+                                        Some(v) => (v, idx),
+                                        None => continue,
+                                    }
+                                }
                             };
                             install(ilm, label, adj_index, ifindex, nbr_addr);
                         }
@@ -18930,8 +19101,11 @@ fn add_self_adj_sids_to_ilm_v3(top: &Ospf<Ospfv3>, ilm: &mut BTreeMap<u32, SpfIl
 ///     the neighbor's router-id in its `neighbor_id` field, which
 ///     is resolved the same way.
 fn add_self_adj_sids_to_ilm(top: &Ospf, ilm: &mut BTreeMap<u32, SpfIlm>) {
-    use super::srmpls::SRGB_START;
     use crate::ospf::lsdb::OSPF_MAX_AGE;
+
+    // Index-form SIDs resolve against this router's own SRGB, the
+    // watched block's; without one only Label-form SIDs have a label.
+    let srgb_start = top.srgb().map(|g| g.start);
 
     // Resolve (link, neighbor_router_id) -> (link.index, nbr_addr).
     // Returns None when either side is missing -- the LSA may name a
@@ -19003,11 +19177,15 @@ fn add_self_adj_sids_to_ilm(top: &Ospf, ilm: &mut BTreeMap<u32, SpfIlm>) {
                                 continue;
                             };
                             let (label, adj_index) = match adj.sid {
-                                SidLabelTlv::Label(v) => (v, v.saturating_sub(SRGB_START)),
-                                SidLabelTlv::Index(idx) => match SRGB_START.checked_add(idx) {
-                                    Some(v) => (v, idx),
-                                    None => continue,
-                                },
+                                SidLabelTlv::Label(v) => {
+                                    (v, srgb_start.map_or(0, |s| v.saturating_sub(s)))
+                                }
+                                SidLabelTlv::Index(idx) => {
+                                    match srgb_start.and_then(|s| s.checked_add(idx)) {
+                                        Some(v) => (v, idx),
+                                        None => continue,
+                                    }
+                                }
                             };
                             install(ilm, label, adj_index, ifindex, nbr_addr, tlv.link_id);
                             break;
@@ -19025,11 +19203,15 @@ fn add_self_adj_sids_to_ilm(top: &Ospf, ilm: &mut BTreeMap<u32, SpfIlm>) {
                                 continue;
                             };
                             let (label, adj_index) = match lan.sid {
-                                SidLabelTlv::Label(v) => (v, v.saturating_sub(SRGB_START)),
-                                SidLabelTlv::Index(idx) => match SRGB_START.checked_add(idx) {
-                                    Some(v) => (v, idx),
-                                    None => continue,
-                                },
+                                SidLabelTlv::Label(v) => {
+                                    (v, srgb_start.map_or(0, |s| v.saturating_sub(s)))
+                                }
+                                SidLabelTlv::Index(idx) => {
+                                    match srgb_start.and_then(|s| s.checked_add(idx)) {
+                                        Some(v) => (v, idx),
+                                        None => continue,
+                                    }
+                                }
                             };
                             install(ilm, label, adj_index, ifindex, nbr_addr, lan.neighbor_id);
                         }
@@ -19074,6 +19256,16 @@ fn apply_routing_updates(top: &mut Ospf, rib: PrefixMap<Ipv4Net, SpfRoute>) {
     diff_apply(&top.ctx.rib, &diff);
 
     top.rib = rib;
+}
+
+/// The SRGB start of the RIB's default block, which a test instance reads
+/// (see `test_support::fresh`).
+#[cfg(test)]
+fn default_srgb_start() -> u32 {
+    crate::rib::Block::default_block()
+        .global
+        .map(|g| g.start)
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -19152,6 +19344,9 @@ mod test_support {
             segment_routing: crate::ospf::srmpls::SegmentRoutingMode::default(),
             srv6_locator_name: None,
             watched_locator: None,
+            watched_block: None,
+            // What the RIB answers an SR-MPLS block watch with.
+            sr_block: Some(crate::rib::Block::default_block()),
             sr_locator: None,
             sr_end_sid: None,
             elib: crate::isis::srv6::ElibPool::new(),
@@ -19645,8 +19840,13 @@ mod v2_lsa_aging_tests {
     /// `router`'s Router Information LSA instance `instance` at `age`,
     /// with or without its SRGB and SRLB.
     fn router_info(router: Ipv4Addr, instance: u32, srgb: bool, age: u16) -> OspfLsa {
-        let mut lsa =
-            super::super::srmpls::router_info_lsa_build(router, false, vec![Algo::Spf], Vec::new());
+        let mut lsa = super::super::srmpls::router_info_lsa_build(
+            router,
+            false,
+            vec![Algo::Spf],
+            Vec::new(),
+            Some(&crate::rib::Block::default_block()),
+        );
         lsa.h.ls_id = Ipv4Addr::from(((OpaqueLsaType::ROUTER_INFO as u32) << 24) | instance);
         if !srgb && let OspfLsp::OpaqueAreaRouterInfo(ref mut ri) = lsa.lsp {
             ri.tlvs.retain(|tlv| {
@@ -19939,8 +20139,13 @@ mod flex_algo_selection_tests {
         fads: Vec<RouterInfoTlvFad>,
         age: u16,
     ) {
-        let mut lsa =
-            super::super::srmpls::router_info_lsa_build(router, false, vec![Algo::Spf], fads);
+        let mut lsa = super::super::srmpls::router_info_lsa_build(
+            router,
+            false,
+            vec![Algo::Spf],
+            fads,
+            Some(&crate::rib::Block::default_block()),
+        );
         lsa.h.ls_id = Ipv4Addr::from(((OpaqueLsaType::ROUTER_INFO as u32) << 24) | instance);
         lsa.h.ls_age = age;
         lsa.update();
@@ -20061,7 +20266,7 @@ mod flex_algo_selection_tests {
             );
             let mut ilm = BTreeMap::new();
             add_self_prefix_sids_to_ilm(&top, &mut ilm);
-            assert!(!ilm.contains_key(&(super::super::srmpls::SRGB_START + 128)));
+            assert!(!ilm.contains_key(&(default_srgb_start() + 128)));
         }
     }
 
@@ -20137,7 +20342,7 @@ mod flex_algo_selection_tests {
             add_self_prefix_sids_to_ilm(&top, &mut ilm);
             for ifindex in [7, 8] {
                 assert_eq!(
-                    ilm.contains_key(&(super::super::srmpls::SRGB_START + 128 + ifindex)),
+                    ilm.contains_key(&(default_srgb_start() + 128 + ifindex)),
                     participates
                 );
             }
@@ -20159,6 +20364,7 @@ mod flex_algo_selection_tests {
             false,
             vec![Algo::Spf, Algo::FlexAlgo(128)],
             vec![fad(128, 200)],
+            Some(&crate::rib::Block::default_block()),
         );
         // A second from MaxAge: its owner stopped refreshing it.
         lsa.h.ls_age = OSPF_MAX_AGE - 1;
@@ -20456,7 +20662,7 @@ mod v3_flex_algo_selection_tests {
             add_self_prefix_sids_to_ilm_v3(&top, &mut ilm);
             for ifindex in [7, 8] {
                 assert_eq!(
-                    ilm.contains_key(&(super::super::srmpls::SRGB_START + 128 + ifindex)),
+                    ilm.contains_key(&(default_srgb_start() + 128 + ifindex)),
                     participates
                 );
             }
@@ -20483,9 +20689,7 @@ mod v3_flex_algo_selection_tests {
 #[cfg(test)]
 mod v3_router_information_read_tests {
     use super::super::lsdb::{LsdbEvent, OSPF_MAX_AGE, SrCarrier};
-    use super::super::srmpls::{
-        SRGB_RANGE, SRGB_START, SRLB_RANGE, SRLB_START, e_router_v3_sr_info_lsa_build,
-    };
+    use super::super::srmpls::{FORMER_SRGB, FORMER_SRLB, e_router_v3_sr_info_lsa_build};
     use super::test_support::fresh_ospf_v3;
     use super::*;
     use crate::spf::label_block::{LabelBlock, LabelConfig};
@@ -20583,8 +20787,8 @@ mod v3_router_information_read_tests {
         lsa
     }
 
-    const FORMER_LABELS: (u32, u32) = (SRGB_START, SRGB_RANGE);
-    const FORMER_LOCAL: (u32, u32) = (SRLB_START, SRLB_RANGE);
+    const FORMER_LABELS: (u32, u32) = FORMER_SRGB;
+    const FORMER_LOCAL: (u32, u32) = FORMER_SRLB;
 
     fn receive(top: &mut Ospf<Ospfv3>, lsa: Ospfv3Lsa) {
         let tx = top.tx.clone();
@@ -20821,12 +21025,11 @@ mod v3_router_information_read_tests {
 mod v3_router_information_origination_tests {
     use super::super::lsdb::{LsdbEvent, OSPF_MAX_AGE, OspfLsaKey, SrCarrier};
     use super::super::srmpls::{
-        ROUTER_INFO_V3_INSTANCE, SR_INFO_LSID, SRGB_RANGE, SRGB_START, SRLB_RANGE, SRLB_START,
-        SegmentRoutingMode, e_router_v3_sr_info_lsa_build,
+        ROUTER_INFO_V3_INSTANCE, SR_INFO_LSID, SegmentRoutingMode, e_router_v3_sr_info_lsa_build,
     };
     use super::test_support::fresh_ospf_v3;
     use super::*;
-    use crate::spf::label_block::{LabelBlock, LabelConfig};
+    use crate::spf::label_block::LabelConfig;
     use ospf_packet::{
         OSPFV3_E_ROUTER_LSA_TYPE, OSPFV3_ROUTER_INFO_LSA_TYPE, Ospfv3LsBody, Ospfv3Lsa,
         RouterInfoTlv, SidLabelTlv,
@@ -20906,12 +21109,15 @@ mod v3_router_information_origination_tests {
                 RouterInfoTlv::LocalBlock(srlb),
                 RouterInfoTlv::Fad(fad),
             ] => {
+                // The SRGB and SRLB of the block the router reads.
+                let block = crate::rib::Block::default_block();
+                let (global, local) = (block.global.unwrap(), block.local.unwrap());
                 assert!(cap.caps.gr_helper() && cap.caps.te() && !cap.caps.gr_capable());
                 assert_eq!(algo.algos, spf_and_128);
-                assert_eq!(srgb.sid_label, SidLabelTlv::Label(SRGB_START));
-                assert_eq!(srgb.range, SRGB_RANGE);
-                assert_eq!(srlb.sid_label, SidLabelTlv::Label(SRLB_START));
-                assert_eq!(srlb.range, SRLB_RANGE);
+                assert_eq!(srgb.sid_label, SidLabelTlv::Label(global.start));
+                assert_eq!(srgb.range, global.end - global.start);
+                assert_eq!(srlb.sid_label, SidLabelTlv::Label(local.start));
+                assert_eq!(srlb.range, local.end - local.start);
                 assert_eq!((fad.flex_algorithm, fad.priority), (128, 100));
             }
             other => panic!("unexpected TLVs: {other:?}"),
@@ -20945,9 +21151,10 @@ mod v3_router_information_origination_tests {
         assert_eq!(caps.carrier, SrCarrier::RouterInfo);
         assert_eq!(caps.algos, Some(vec![Algo::Spf, Algo::FlexAlgo(128)]));
         assert_eq!(caps.fads[&128].priority, 100);
+        let block = crate::rib::Block::default_block();
         let labels = LabelConfig {
-            global: LabelBlock::new(SRGB_START, SRGB_RANGE),
-            local: Some(LabelBlock::new(SRLB_START, SRLB_RANGE)),
+            global: block.global.unwrap(),
+            local: block.local,
         };
         assert_eq!(lsdb.label_map.get(&rid(1)), Some(&labels));
     }
@@ -21618,6 +21825,7 @@ mod max_age_removal_tests {
             vec![Algo::Spf],
             Vec::new(),
             false,
+            Some(&crate::rib::Block::default_block()),
         );
         lsa.set_age(OSPF_MAX_AGE - 1);
         let key = (lsa.h.ls_type, lsa.h.link_state_id, PEER);
@@ -21650,8 +21858,13 @@ mod max_age_removal_tests {
         // OSPFv2.
         let mut top = fresh_ospf();
         neighbour(&mut top, NfsmState::Loading);
-        let mut lsa =
-            super::super::srmpls::router_info_lsa_build(PEER, false, vec![Algo::Spf], Vec::new());
+        let mut lsa = super::super::srmpls::router_info_lsa_build(
+            PEER,
+            false,
+            vec![Algo::Spf],
+            Vec::new(),
+            Some(&crate::rib::Block::default_block()),
+        );
         lsa.h.ls_age = OSPF_MAX_AGE - 1;
         lsa.update();
         let key = v2_lsa_key(OspfLsType::OpaqueAreaLocal, lsa.h.ls_id, PEER);
@@ -27153,5 +27366,319 @@ mod sr_origination_tests {
         assert!(live(&top, AREA0, v2_prefix_sid(new)), "v2 Prefix-SID");
         assert!(live(&top, AREA0, v2_adj_sid(new)), "v2 Adj-SID");
         assert!(!live(&top, AREA0, v2_router_info(old)) && !live(&top, AREA0, v2_prefix_sid(old)));
+    }
+}
+
+#[cfg(test)]
+mod sr_block_tests {
+    use super::super::srmpls::SegmentRoutingMode;
+    use super::test_support::{fresh_ospf, fresh_ospf_v3};
+    use super::*;
+    use crate::rib::{Block, RibSrRx};
+    use crate::spf::label_block::LabelBlock;
+
+    const A: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 2);
+
+    fn block(global: (u32, u32), local: (u32, u32)) -> Block {
+        Block {
+            global: Some(LabelBlock::new(global.0, global.1)),
+            local: Some(LabelBlock::new(local.0, local.1)),
+        }
+    }
+
+    /// Turn SR-MPLS on the way the config handler does, and have the RIB
+    /// answer the watch with `block`.
+    fn sr_on_with(top: &mut Ospf, block: Block) {
+        top.segment_routing = SegmentRoutingMode::Mpls;
+        top.reconcile_block_watch();
+        top.process_sr_rx(RibSrRx::Block {
+            name: crate::rib::DEFAULT_BLOCK_NAME.to_string(),
+            block: Some(block),
+        });
+    }
+
+    /// (SRGB, SRLB) as `(start, range)` in RI TLVs.
+    fn ranges(tlvs: &[RouterInfoTlv]) -> (Option<(u32, u32)>, Option<(u32, u32)>) {
+        let label = |sid: &SidLabelTlv| match sid {
+            SidLabelTlv::Label(v) => *v,
+            SidLabelTlv::Index(v) => *v,
+        };
+        let srgb = tlvs.iter().find_map(|tlv| match tlv {
+            RouterInfoTlv::SidLabelRnage(r) => Some((label(&r.sid_label), r.range)),
+            _ => None,
+        });
+        let srlb = tlvs.iter().find_map(|tlv| match tlv {
+            RouterInfoTlv::LocalBlock(r) => Some((label(&r.sid_label), r.range)),
+            _ => None,
+        });
+        (srgb, srlb)
+    }
+
+    /// The SRGB and SRLB of this OSPFv2 router's Router Information LSA.
+    fn v2_ranges(top: &Ospf) -> (Option<(u32, u32)>, Option<(u32, u32)>) {
+        let ls_id = Ipv4Addr::from((OpaqueLsaType::ROUTER_INFO as u32) << 24);
+        let lsa = top.areas.get(AREA0).unwrap().lsdb.lookup_by_id(
+            OspfLsType::OpaqueAreaLocal,
+            ls_id,
+            top.router_id,
+        );
+        match lsa.map(|lsa| &lsa.lsp) {
+            Some(OspfLsp::OpaqueAreaRouterInfo(ri)) => ranges(&ri.tlvs),
+            _ => (None, None),
+        }
+    }
+
+    #[tokio::test]
+    async fn sr_mpls_watches_the_default_block_and_unwatches_when_off() {
+        let mut top = fresh_ospf();
+        top.segment_routing = SegmentRoutingMode::Mpls;
+        top.reconcile_block_watch();
+        assert_eq!(top.watched_block.as_deref(), Some("default"));
+        top.segment_routing = SegmentRoutingMode::None;
+        top.reconcile_block_watch();
+        assert_eq!(top.watched_block, None);
+        assert!(top.sr_block.is_none(), "the snapshot goes with the watch");
+    }
+
+    #[tokio::test]
+    async fn ospfv2_advertises_the_watched_blocks_srgb_and_srlb() {
+        let mut top = fresh_ospf();
+        top.router_id = Ipv4Addr::new(1, 1, 1, 1);
+        top.areas.fetch(AREA0);
+        sr_on_with(&mut top, block((20000, 1000), (30000, 100)));
+        assert_eq!(v2_ranges(&top), (Some((20000, 1000)), Some((30000, 100))));
+        // A block of another name is not ours.
+        top.process_sr_rx(RibSrRx::Block {
+            name: "other".to_string(),
+            block: Some(block((40000, 10), (50000, 10))),
+        });
+        assert_eq!(v2_ranges(&top), (Some((20000, 1000)), Some((30000, 100))));
+        // The block moves: the LSA follows.
+        top.process_sr_rx(RibSrRx::Block {
+            name: "default".to_string(),
+            block: Some(block((16000, 8000), (15000, 1000))),
+        });
+        assert_eq!(v2_ranges(&top), (Some((16000, 8000)), Some((15000, 1000))));
+    }
+
+    #[tokio::test]
+    async fn ospfv3_advertises_the_watched_blocks_srgb_and_srlb() {
+        let mut top = fresh_ospf_v3();
+        top.router_id = Ipv4Addr::new(1, 1, 1, 1);
+        top.areas.fetch(AREA0);
+        top.segment_routing = SegmentRoutingMode::Mpls;
+        top.reconcile_block_watch();
+        top.process_sr_rx(RibSrRx::Block {
+            name: "default".to_string(),
+            block: Some(block((20000, 1000), (30000, 100))),
+        });
+        let key = (
+            ospf_packet::OSPFV3_ROUTER_INFO_LSA_TYPE,
+            super::super::srmpls::ROUTER_INFO_V3_INSTANCE,
+            top.router_id,
+        );
+        let lsa = top.areas.get(AREA0).unwrap().lsdb.lookup_by_raw_key(key);
+        let Some(Ospfv3LsBody::RouterInfo(ri)) = lsa.map(|lsa| &lsa.body) else {
+            panic!("no Router Information LSA");
+        };
+        assert_eq!(ranges(&ri.tlvs), (Some((20000, 1000)), Some((30000, 100))));
+    }
+
+    #[tokio::test]
+    async fn without_a_block_no_ranges_are_advertised() {
+        let mut top = fresh_ospf();
+        top.router_id = Ipv4Addr::new(1, 1, 1, 1);
+        top.areas.fetch(AREA0);
+        top.sr_block = None;
+        top.segment_routing = SegmentRoutingMode::Mpls;
+        top.router_info_lsa_originate();
+        assert_eq!(v2_ranges(&top), (None, None));
+    }
+
+    #[tokio::test]
+    async fn adj_sid_labels_follow_the_srlb() {
+        let mut top = fresh_ospf();
+        sr_on_with(&mut top, block((16000, 8000), (30000, 100)));
+        assert_eq!(
+            top.local_pool.as_ref().map(|p| p.range()),
+            Some((30000, 30099))
+        );
+        top.reconcile_adj_sid_labels(vec![(7, A)]);
+        assert_eq!(top.lan_adj_sids.get(&(7, A)), Some(&30000));
+
+        // The SRLB moves: the pool is rebuilt over it and the adjacency
+        // gets a label from it.
+        top.process_sr_rx(RibSrRx::Block {
+            name: "default".to_string(),
+            block: Some(block((16000, 8000), (31000, 100))),
+        });
+        assert_eq!(
+            top.local_pool.as_ref().map(|p| p.range()),
+            Some((31000, 31099))
+        );
+        top.reconcile_adj_sid_labels(vec![(7, A)]);
+        assert_eq!(top.lan_adj_sids.get(&(7, A)), Some(&31000));
+        // The old SRLB's label went back to the node's shared set.
+        let mut other = top.rib_subscriber.local_labels().pool(30000, 30000);
+        assert_eq!(other.allocate(), Some(30000));
+
+        // SR-MPLS off: no pool, no labels.
+        top.segment_routing = SegmentRoutingMode::None;
+        top.reconcile_adj_sid_labels(vec![(7, A)]);
+        assert!(top.local_pool.is_none() && top.lan_adj_sids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn labels_held_before_the_block_arrives_are_kept() {
+        let mut top = fresh_ospf();
+        top.sr_block = None;
+        top.segment_routing = SegmentRoutingMode::Mpls;
+        // A graceful restart restored this one.
+        top.lan_adj_sids.insert((7, A), 15005);
+        top.reconcile_adj_sid_labels(vec![(7, A)]);
+        assert_eq!(top.lan_adj_sids.get(&(7, A)), Some(&15005));
+        assert!(top.local_pool.is_none());
+        // The block arrives: a pool over its SRLB; the label stays.
+        top.reconcile_block_watch();
+        top.process_sr_rx(RibSrRx::Block {
+            name: "default".to_string(),
+            block: Some(Block::default_block()),
+        });
+        assert_eq!(
+            top.local_pool.as_ref().map(|p| p.range()),
+            Some((15000, 15999))
+        );
+        assert_eq!(top.lan_adj_sids.get(&(7, A)), Some(&15005));
+    }
+
+    #[tokio::test]
+    async fn own_prefix_sid_labels_follow_the_srgb() {
+        let mut top = fresh_ospf();
+        top.router_id = Ipv4Addr::new(1, 1, 1, 1);
+        top.areas.fetch(AREA0);
+        let mut link = OspfLink::from(
+            top.tx.clone(),
+            crate::rib::Link::from(crate::fib::message::FibLink {
+                index: 7,
+                name: "sr7".to_string(),
+                mtu: 1500,
+                ..Default::default()
+            }),
+            top.sock.clone(),
+            top.router_id,
+            top.ptx.clone(),
+        );
+        link.enabled = true;
+        link.addr.push(super::super::addr::OspfAddr {
+            prefix: "192.0.2.7/32".parse().unwrap(),
+            secondary: false,
+        });
+        link.config.prefix_sid = Some(super::super::link::PrefixSid::Index(5));
+        top.links.insert(7, link);
+        top.areas.get_mut(AREA0).unwrap().links.insert(7);
+        top.router_lsa_originate();
+
+        let own = |top: &Ospf| {
+            let mut ilm = BTreeMap::new();
+            add_self_prefix_sids_to_ilm(top, &mut ilm);
+            ilm.keys().copied().collect::<Vec<u32>>()
+        };
+        sr_on_with(&mut top, Block::default_block());
+        assert_eq!(own(&top), vec![16005]);
+        top.process_sr_rx(RibSrRx::Block {
+            name: "default".to_string(),
+            block: Some(block((20000, 1000), (15000, 1000))),
+        });
+        assert_eq!(own(&top), vec![20005]);
+    }
+
+    /// A block can be configured empty (`start 0 range 0`), and an empty
+    /// range is no range: nothing is advertised, no Adj-SID pool is built,
+    /// and `show` prints `-` rather than subtracting past zero.
+    #[tokio::test]
+    async fn an_empty_block_counts_as_none() {
+        let mut top = fresh_ospf_v3();
+        top.router_id = Ipv4Addr::new(1, 1, 1, 1);
+        top.areas.fetch(AREA0);
+        top.show_build();
+        top.segment_routing = SegmentRoutingMode::Mpls;
+        top.reconcile_block_watch();
+        top.process_sr_rx(RibSrRx::Block {
+            name: "default".to_string(),
+            block: Some(block((0, 0), (0, 0))),
+        });
+        assert!(top.srgb().is_none() && top.srlb().is_none());
+        assert!(top.local_pool.is_none());
+        let key = (
+            ospf_packet::OSPFV3_ROUTER_INFO_LSA_TYPE,
+            super::super::srmpls::ROUTER_INFO_V3_INSTANCE,
+            top.router_id,
+        );
+        let lsa = top.areas.get(AREA0).unwrap().lsdb.lookup_by_raw_key(key);
+        let Some(Ospfv3LsBody::RouterInfo(ri)) = lsa.map(|lsa| &lsa.body) else {
+            panic!("no Router Information LSA");
+        };
+        assert_eq!(ranges(&ri.tlvs), (None, None));
+        let show = top.show_cb["/show/ospfv3/segment-routing"];
+        let text = show(&top, Args(Default::default()), false).expect("text");
+        assert!(text.contains("Local SRGB: -   SRLB: -"), "{text}");
+        show(&top, Args(Default::default()), true).expect("json");
+    }
+
+    /// A peer can advertise a range of 0; `show ospf segment-routing`
+    /// prints it as empty brackets rather than subtracting past zero.
+    #[tokio::test]
+    async fn ospfv2_show_takes_a_peers_empty_ranges() {
+        let mut top = fresh_ospf();
+        top.router_id = Ipv4Addr::new(1, 1, 1, 1);
+        top.areas.fetch(AREA0);
+        top.show_build();
+        top.segment_routing = SegmentRoutingMode::Mpls;
+        let peer = Ipv4Addr::new(2, 2, 2, 2);
+        let mut lsa = super::super::srmpls::router_info_lsa_build(
+            peer,
+            false,
+            vec![Algo::Spf],
+            Vec::new(),
+            Some(&Block::default_block()),
+        );
+        if let OspfLsp::OpaqueAreaRouterInfo(ref mut ri) = lsa.lsp {
+            for tlv in ri.tlvs.iter_mut() {
+                match tlv {
+                    RouterInfoTlv::SidLabelRnage(r) => {
+                        r.sid_label = SidLabelTlv::Label(0);
+                        r.range = 0;
+                    }
+                    RouterInfoTlv::LocalBlock(r) => {
+                        r.sid_label = SidLabelTlv::Label(0);
+                        r.range = 0;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        lsa.update();
+        let (tx, tracing) = (top.tx.clone(), top.tracing.clone());
+        top.areas
+            .get_mut(AREA0)
+            .unwrap()
+            .lsdb
+            .insert_received(lsa, &tx, Some(AREA0), &tracing);
+        let known = top
+            .areas
+            .get(AREA0)
+            .unwrap()
+            .lsdb
+            .label_map
+            .get(&peer)
+            .cloned();
+        assert!(known.is_some(), "the peer's ranges are in the label map");
+        let show = top.show_cb["/show/ospf/segment-routing"];
+        let text = show(&top, Args(Default::default()), false).expect("text");
+        assert!(
+            text.contains("SR-Node: 2.2.2.2    SRGB: []    SRLB: []"),
+            "{text}"
+        );
+        show(&top, Args(Default::default()), true).expect("json");
     }
 }

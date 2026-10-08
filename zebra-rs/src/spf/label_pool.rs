@@ -41,6 +41,11 @@ pub struct LocalLabelPool {
 }
 
 impl LocalLabelPool {
+    /// The pool's labels, `(first, last)`.
+    pub fn range(&self) -> (u32, u32) {
+        (self.begin, self.end)
+    }
+
     pub fn allocate(&mut self) -> Option<u32> {
         let mut used = self.used.lock();
         let label = (self.begin..=self.end).find(|label| !used.contains(label))?;

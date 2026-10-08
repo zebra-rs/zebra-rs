@@ -33,9 +33,12 @@ router ospfv3 {
 | `area/<id>/interface/<n>/prefix-sid/index` \| `absolute` | uint32 | Prefix-SID for the interface's prefix (RFC 8666 §5); index and absolute are mutually exclusive. |
 | `area/<id>/interface/<n>/adjacency-sid/index` \| `absolute` | uint32 | Staged configuration; dynamic Adj-SIDs are allocated automatically from the SRLB for every adjacency (RFC 8666 §6.2). |
 
-The label blocks come from the global `segment-routing block`
-definitions (SRGB default 16000+, SRLB default 15000+), shared with
-IS-IS and OSPFv2.
+The label blocks are the `default` entry of the global
+`segment-routing block` (SRGB 16000..23999 and SRLB 15000..15999 unless
+configured), the same block IS-IS and OSPFv2 read. A change to it is
+followed at once: the Router Information LSA is re-originated, the own
+Prefix-SID labels move with the SRGB, and the dynamic Adj-SIDs are drawn
+again from a moved SRLB.
 
 ## TI-LFA
 

@@ -2070,52 +2070,38 @@ fn config_ospfv3_srv6_locator(ospf: &mut Ospf<Ospfv3>, mut args: Args, op: Confi
 }
 
 fn config_ospfv3_sr_mpls(ospf: &mut Ospf<Ospfv3>, _args: Args, op: ConfigOp) -> Option<()> {
-    use super::srmpls::{SRLB_RANGE, SRLB_START, SegmentRoutingMode};
+    use super::srmpls::SegmentRoutingMode;
     ospf.segment_routing = if op.is_set() {
         SegmentRoutingMode::Mpls
     } else {
         SegmentRoutingMode::None
     };
+    // Watch the RIB's SR block while SR-MPLS is on. The RIB answers at
+    // once, and the answer refreshes again with the block's SRGB/SRLB.
+    ospf.reconcile_block_watch();
+    sr_mpls_refresh_v3(ospf);
+    Some(())
+}
 
-    // Manage the per-instance Adjacency-SID label pool alongside the
-    // mode toggle. The pool is bounded by the SRLB
-    // (`srmpls::SRLB_START`..`+ SRLB_RANGE - 1`); on enable, sweep
-    // current Full neighbors and allocate labels for any not yet in
-    // `lan_adj_sids` so an SR-MPLS enable after adjacencies have
-    // already settled still produces the LAN Adj-SID LSAs.
-    if op.is_set() {
-        if ospf.local_pool.is_none() {
-            ospf.local_pool = Some(
-                ospf.rib_subscriber
-                    .local_labels()
-                    .pool(SRLB_START, SRLB_START + SRLB_RANGE - 1),
-            );
-        }
-        let pending: Vec<(u32, std::net::Ipv4Addr)> = ospf
-            .links
-            .iter()
-            .flat_map(|(ifindex, link)| {
-                link.nbrs.iter().filter_map(move |(nbr_key, nbr)| {
-                    if nbr.state == super::nfsm::NfsmState::Full {
-                        Some((*ifindex, *nbr_key))
-                    } else {
-                        None
-                    }
-                })
+/// Bring OSPFv3's SR-MPLS state in line with the mode and the watched SR
+/// block: the Adjacency-SID labels (drawn from the block's SRLB), the
+/// E-Intra-Area-Prefix and per-link E-Router LSAs, each area's SR
+/// capabilities (SRGB, SRLB), and every area's RIB and ILM. Run when
+/// SR-MPLS is toggled and on every update of the block.
+pub(super) fn sr_mpls_refresh_v3(ospf: &mut Ospf<Ospfv3>) {
+    // Every Full adjacency gets an Adjacency-SID label, including those
+    // that were already Full when SR-MPLS came on (or before the block
+    // arrived), so the LAN Adj-SID LSAs cover them.
+    let full: Vec<(u32, std::net::Ipv4Addr)> = ospf
+        .links
+        .iter()
+        .flat_map(|(ifindex, link)| {
+            link.nbrs.iter().filter_map(move |(nbr_key, nbr)| {
+                (nbr.state == super::nfsm::NfsmState::Full).then_some((*ifindex, *nbr_key))
             })
-            .filter(|key| !ospf.lan_adj_sids.contains_key(key))
-            .collect();
-        for key in pending {
-            if let Some(pool) = ospf.local_pool.as_mut()
-                && let Some(label) = pool.allocate()
-            {
-                ospf.lan_adj_sids.insert(key, label);
-            }
-        }
-    } else {
-        ospf.local_pool = None;
-        ospf.lan_adj_sids.clear();
-    }
+        })
+        .collect();
+    ospf.reconcile_adj_sid_labels(full);
 
     // Re-originate / flush E-Intra-Area-Prefix-LSAs for every link
     // with a Prefix-SID. The originator gates on the mode, so on
@@ -2158,6 +2144,4 @@ fn config_ospfv3_sr_mpls(ospf: &mut Ospf<Ospfv3>, _args: Args, op: ConfigOp) -> 
     for area_id in area_ids {
         let _ = ospf.tx.send(Message::SpfCalc(area_id));
     }
-
-    Some(())
 }

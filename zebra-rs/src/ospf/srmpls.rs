@@ -13,13 +13,14 @@ pub enum SegmentRoutingMode {
     Mpls,
 }
 
-/// Default SRGB (Segment Routing Global Block).
-pub(super) const SRGB_START: u32 = 16000;
-pub(super) const SRGB_RANGE: u32 = 2001;
+/// The SRGB (start, range) zebra-rs advertised before OSPF read the RIB's
+/// SR block. Tests use it to stand in for such a router.
+#[cfg(test)]
+pub(super) const FORMER_SRGB: (u32, u32) = (16000, 2001);
 
-/// Default SRLB (Segment Routing Local Block).
-pub(super) const SRLB_START: u32 = 15000;
-pub(super) const SRLB_RANGE: u32 = 1000;
+/// The SRLB (start, range) such a router advertised.
+#[cfg(test)]
+pub(super) const FORMER_SRLB: (u32, u32) = (15000, 1000);
 
 /// Build a Router Information Opaque LSA for SR-MPLS.
 ///
@@ -27,14 +28,18 @@ pub(super) const SRLB_RANGE: u32 = 1000;
 /// restarting-router capability (RFC 3623 / RFC 7770 §2.1 bit 5).
 /// Set to `true` while `Ospf::restarting.is_some()` so helpers
 /// see us as a planned-restart originator; clear otherwise.
+///
+/// `block` is the RIB SR block this router reads (`default`); its SRGB
+/// and SRLB are advertised. Without one, neither range is.
 pub fn router_info_lsa_build(
     router_id: Ipv4Addr,
     gr_capable: bool,
     algos: Vec<Algo>,
     fads: Vec<RouterInfoTlvFad>,
+    block: Option<&crate::rib::Block>,
 ) -> OspfLsa {
     let ri_lsa = RouterInfoLsa {
-        tlvs: router_info_tlvs(gr_capable, algos, fads),
+        tlvs: router_info_tlvs(gr_capable, algos, fads, block),
     };
 
     // Opaque Area LSA: ls_id encodes opaque type (4=RouterInfo) in first byte,
@@ -55,6 +60,7 @@ fn router_info_tlvs(
     gr_capable: bool,
     algos: Vec<Algo>,
     fads: Vec<RouterInfoTlvFad>,
+    block: Option<&crate::rib::Block>,
 ) -> Vec<RouterInfoTlv> {
     let mut tlvs = Vec::new();
 
@@ -75,17 +81,27 @@ fn router_info_tlvs(
     // §5.3). The caller passes `flex_algo::sr_algorithms_for`.
     tlvs.push(RouterInfoTlv::Algo(RouterInfoTlvAlgo { algos }));
 
-    // SID/Label Range TLV (type 9): Global block.
-    tlvs.push(RouterInfoTlv::SidLabelRnage(RouterInfoTlvSidLabelRange {
-        range: SRGB_RANGE,
-        sid_label: SidLabelTlv::Label(SRGB_START),
-    }));
+    // SID/Label Range TLV (type 9): the SRGB.
+    if let Some(srgb) = block
+        .and_then(|b| b.global.as_ref())
+        .filter(|g| g.last().is_some())
+    {
+        tlvs.push(RouterInfoTlv::SidLabelRnage(RouterInfoTlvSidLabelRange {
+            range: srgb.end - srgb.start,
+            sid_label: SidLabelTlv::Label(srgb.start),
+        }));
+    }
 
-    // SR Local Block TLV (type 14): Local block.
-    tlvs.push(RouterInfoTlv::LocalBlock(RouterInfoTlvLocalBlock {
-        range: SRLB_RANGE,
-        sid_label: SidLabelTlv::Label(SRLB_START),
-    }));
+    // SR Local Block TLV (type 14): the SRLB.
+    if let Some(srlb) = block
+        .and_then(|b| b.local.as_ref())
+        .filter(|l| l.last().is_some())
+    {
+        tlvs.push(RouterInfoTlv::LocalBlock(RouterInfoTlvLocalBlock {
+            range: srlb.end - srlb.start,
+            sid_label: SidLabelTlv::Label(srlb.start),
+        }));
+    }
 
     // Flexible Algorithm Definition TLVs (type 16, RFC 9350 §6.1): one
     // per algo this router originates a FAD for (advertise-definition).
@@ -112,8 +128,9 @@ pub fn router_info_v3_lsa_build(
     algos: Vec<Algo>,
     fads: Vec<RouterInfoTlvFad>,
     srv6: bool,
+    block: Option<&crate::rib::Block>,
 ) -> Ospfv3Lsa {
-    let mut tlvs = router_info_tlvs(gr_capable, algos, fads);
+    let mut tlvs = router_info_tlvs(gr_capable, algos, fads, block);
     if srv6 {
         // No O-flag support, no sub-TLVs.
         tlvs.push(RouterInfoTlv::Srv6Capabilities(
@@ -346,12 +363,12 @@ pub fn e_router_v3_sr_info_lsa_build(
 ) -> Ospfv3Lsa {
     let sr_algo = Ospfv3ExtTlv::SrAlgorithm(Ospfv3SrAlgorithmTlv { algos });
     let sid_range = Ospfv3ExtTlv::SidLabelRange(Ospfv3SidLabelRangeTlv {
-        range: SRGB_RANGE,
-        sid_label: SidLabelTlv::Label(SRGB_START),
+        range: FORMER_SRGB.1,
+        sid_label: SidLabelTlv::Label(FORMER_SRGB.0),
     });
     let local_block = Ospfv3ExtTlv::SrLocalBlock(Ospfv3SrLocalBlockTlv {
-        range: SRLB_RANGE,
-        sid_label: SidLabelTlv::Label(SRLB_START),
+        range: FORMER_SRLB.1,
+        sid_label: SidLabelTlv::Label(FORMER_SRLB.0),
     });
 
     let mut tlvs = vec![sr_algo, sid_range, local_block];
@@ -632,7 +649,13 @@ mod tests {
     /// and GR-helper (bit 4) set; GR-capable (bit 5) clear.
     #[test]
     fn router_info_lsa_steady_state_caps() {
-        let lsa = router_info_lsa_build(Ipv4Addr::new(10, 0, 0, 1), false, vec![Algo::Spf], vec![]);
+        let lsa = router_info_lsa_build(
+            Ipv4Addr::new(10, 0, 0, 1),
+            false,
+            vec![Algo::Spf],
+            vec![],
+            None,
+        );
         let cap = extract_caps(&lsa);
         assert!(cap.te(), "TE bit must be set");
         assert!(cap.gr_helper(), "GR helper bit must be set");
@@ -648,7 +671,13 @@ mod tests {
     /// to helpers.
     #[test]
     fn router_info_lsa_restarting_sets_gr_capable() {
-        let lsa = router_info_lsa_build(Ipv4Addr::new(10, 0, 0, 1), true, vec![Algo::Spf], vec![]);
+        let lsa = router_info_lsa_build(
+            Ipv4Addr::new(10, 0, 0, 1),
+            true,
+            vec![Algo::Spf],
+            vec![],
+            None,
+        );
         let cap = extract_caps(&lsa);
         assert!(cap.te(), "TE bit must remain set");
         assert!(cap.gr_helper(), "GR helper bit must remain set");
@@ -667,6 +696,7 @@ mod tests {
             false,
             vec![Algo::Spf, Algo::FlexAlgo(128), Algo::FlexAlgo(200)],
             vec![],
+            None,
         );
         let OspfLsp::OpaqueAreaRouterInfo(ri) = &lsa.lsp else {
             panic!("expected RouterInfo opaque LSA");
@@ -701,6 +731,7 @@ mod tests {
             false,
             vec![Algo::Spf, Algo::FlexAlgo(128)],
             vec![fad.clone()],
+            None,
         );
         let OspfLsp::OpaqueAreaRouterInfo(ri) = &lsa.lsp else {
             panic!("expected RouterInfo opaque LSA");

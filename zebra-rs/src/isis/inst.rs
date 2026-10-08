@@ -5493,9 +5493,8 @@ mod local_label_tests {
 
     /// IS-IS draws its Adjacency-SID and Mirror Context labels from the
     /// node's shared set, as OSPF does. Its own pool over the block's
-    /// SRLB (15000..15099) handed out 15000 while an OSPF instance, whose
-    /// SRLB starts at 15000 too, held it. What IS-IS holds goes back when
-    /// it stops.
+    /// SRLB handed out 15000 while an OSPF instance, whose SRLB starts at
+    /// 15000 too, held it. What IS-IS holds goes back when it stops.
     #[tokio::test]
     async fn isis_skips_a_label_another_instance_holds() {
         let mut isis = fresh_isis();

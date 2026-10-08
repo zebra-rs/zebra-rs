@@ -1,6 +1,6 @@
 # MPLS Label Allocation — the RIB as the Label Authority
 
-Status: **design; phase 1 implemented** (2026-10-08, `rib/label_space.rs`). Supersedes the ad-hoc split
+Status: **design; phases 1 and 2 implemented** (2026-10-08: `rib/label_space.rs`; OSPF reads the `default` block). Supersedes the ad-hoc split
 between the RIB `LabelManager`, the node-shared `LocalLabels` set
 (#2479, #2480) and the hard-coded OSPF SR constants.
 
@@ -583,6 +583,15 @@ with phases 3 to 5. Allocation is lowest-first-fit, so a released block's
 space is reused by the next request that fits in it, not only by one of the
 same size. A new SR block over labels already handed out is logged; refusing
 it at commit is phase 6.
+
+Phase 2 makes OSPFv2 and OSPFv3 SR-block clients like IS-IS: each watches
+`default` while SR-MPLS is on (`reconcile_block_watch`), and a block update
+re-runs one per-version refresh (`sr_mpls_refresh`, `sr_mpls_refresh_v3`)
+that the SR-MPLS config toggle runs too. Until the block arrives, no SRGB
+or SRLB is advertised and Index-form SIDs get no label; Adj-SID labels
+already held (a graceful restart's) are kept. OSPF already follows an SRLB
+move here, rebuilding its pool and drawing every dynamic Adj-SID again
+(§6.1); IS-IS does so from phase 3.
 Phase 2 changes OSPF's advertised SRGB. No phase changes Adjacency-SID
 labels by itself; from phase 3, a configured Adj-SID on a dynamically held
 label moves that holder. Phase 5 is the largest, through the VPN, LU, EVPN

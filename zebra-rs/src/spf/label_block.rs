@@ -13,6 +13,13 @@ impl LabelBlock {
             end: start + range,
         }
     }
+
+    /// The block's last label, or `None` when it is empty. A block can be
+    /// configured (`start 0 range 0`) or advertised (range 0) empty, and an
+    /// empty range is no range at all.
+    pub fn last(&self) -> Option<u32> {
+        (self.start < self.end).then(|| self.end - 1)
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Clone)]
