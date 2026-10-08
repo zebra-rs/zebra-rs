@@ -1,0 +1,43 @@
+# r2: OSPFv2 and OSPFv3 side by side over one dual-stack link, both
+# SR-MPLS. Loopback Prefix-SIDs: OSPFv2 index 12 (label 16012),
+# OSPFv3 index 2 (label 16002).
+interface:
+- if-name: lo
+  ipv4:
+    address: 192.168.1.2/32
+  ipv6:
+    address: 2001:db8::2/128
+- if-name: r2-r1
+  ipv4:
+    address: 10.0.12.2/30
+  ipv6:
+    address: 2001:db8:12::2/64
+router:
+  ospf:
+    router-id: 2.2.2.2
+    segment-routing:
+      mpls: {}
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+        prefix-sid:
+          index: 12
+      - if-name: r2-r1
+        enabled: true
+        network-type: point-to-point
+  ospfv3:
+    router-id: 2.2.2.2
+    segment-routing:
+      mpls: {}
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+        prefix-sid:
+          index: 2
+      - if-name: r2-r1
+        enabled: true
+        network-type: point-to-point

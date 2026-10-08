@@ -2584,10 +2584,18 @@ impl Rib {
             self.sid_uninstall(addr).await;
         }
 
-        let rtype = match proto.as_str() {
-            "bgp" => RibType::Bgp,
-            "isis" => RibType::Isis,
-            "ospf" => RibType::Ospf,
+        // The rtype of the protocol's main-table routes and ILM entries,
+        // and the families it installs them in. OSPFv2 and OSPFv3 both
+        // install `RibType::Ospf`: v2 only IPv4 routes and ILM entries
+        // with IPv4 gateways, v3 only IPv6 ones (the split `SweepStale`
+        // keys on too). "ospf" used to walk both families, taking out
+        // OSPFv3's routes as well, and "ospfv3" had no rtype here, so
+        // its own routes stayed for good.
+        let (rtype, v4, v6) = match proto.as_str() {
+            "bgp" => (RibType::Bgp, true, true),
+            "isis" => (RibType::Isis, true, true),
+            "ospf" => (RibType::Ospf, true, false),
+            "ospfv3" => (RibType::Ospf, false, true),
             // Protocols with no main-table rtype (e.g. a per-VRF
             // instance like `"isis:vrf:<name>"`, whose routes live in
             // `vrf_tables` and are reclaimed by `VrfDel`) still need
@@ -2598,11 +2606,13 @@ impl Rib {
             }
         };
 
+        let in_family = |is_v6: bool| if is_v6 { v6 } else { v4 };
+
         let v4_prefixes: Vec<Ipv4Net> = self
             .table
             .iter()
             .filter_map(|(prefix, entries)| {
-                entries.iter().any(|e| e.rtype == rtype).then_some(prefix)
+                (v4 && entries.iter().any(|e| e.rtype == rtype)).then_some(prefix)
             })
             .collect();
         for prefix in v4_prefixes {
@@ -2614,7 +2624,7 @@ impl Rib {
             .table_v6
             .iter()
             .filter_map(|(prefix, entries)| {
-                entries.iter().any(|e| e.rtype == rtype).then_some(prefix)
+                (v6 && entries.iter().any(|e| e.rtype == rtype)).then_some(prefix)
             })
             .collect();
         for prefix in v6_prefixes {
@@ -2631,7 +2641,7 @@ impl Rib {
             .flat_map(|(label, entries)| {
                 entries
                     .iter()
-                    .filter(|e| e.rtype == rtype)
+                    .filter(|e| e.rtype == rtype && in_family(ilm_gateways_v6(e)))
                     .map(move |e| (*label, e.clone()))
             })
             .collect();
@@ -5631,6 +5641,17 @@ impl Rib {
     }
 }
 
+/// Whether an ILM entry forwards to IPv6 gateways. Tells OSPFv3's
+/// entries from OSPFv2's at cleanup: both carry `RibType::Ospf`, and
+/// each version's gateways are of its own family.
+fn ilm_gateways_v6(entry: &IlmEntry) -> bool {
+    match &entry.nexthop {
+        Nexthop::Uni(uni) => uni.addr.is_ipv6(),
+        Nexthop::Multi(multi) => multi.nexthops.iter().any(|uni| uni.addr.is_ipv6()),
+        _ => false,
+    }
+}
+
 /// Build a `RibEntry` for an allocated SID. The shape mirrors what
 /// the FIB install path would dump back from the kernel: rtype Isis
 /// (IS-IS is the only allocator today; broaden when OSPF / BGP
@@ -6422,5 +6443,110 @@ mod proto_cleanup_sid_tests {
         };
         rib.process_inbound(queued).await;
         assert!(rib.sids.is_empty(), "dropped");
+    }
+}
+
+#[cfg(test)]
+mod proto_cleanup_ospf_tests {
+    use super::*;
+    use crate::rib::NexthopMulti;
+
+    /// An OSPF route of the shape of an `area range` discard.
+    fn discard() -> RibEntry {
+        let mut rib = RibEntry::new(RibType::Ospf);
+        rib.distance = 110;
+        rib.nexthop = Nexthop::Blackhole(10);
+        rib
+    }
+
+    /// An OSPF ILM entry swapping toward `gateways` (ECMP when several).
+    fn ilm(label: u32, gateways: &[&str]) -> IlmEntry {
+        let mut unis: Vec<NexthopUni> = gateways
+            .iter()
+            .map(|gateway| NexthopUni {
+                addr: gateway.parse().unwrap(),
+                mpls_label: vec![label],
+                ..Default::default()
+            })
+            .collect();
+        let nexthop = if unis.len() == 1 {
+            Nexthop::Uni(unis.remove(0))
+        } else {
+            Nexthop::Multi(NexthopMulti {
+                nexthops: unis,
+                ..Default::default()
+            })
+        };
+        IlmEntry {
+            ilm_type: IlmType::Node(1),
+            nexthop,
+            ..IlmEntry::new(RibType::Ospf)
+        }
+    }
+
+    const V4: &str = "10.10.0.0/16";
+    const V6: &str = "2001:db8:10::/48";
+
+    /// A RIB holding an OSPFv2 route and ILM entry (IPv4, label 16001)
+    /// and an OSPFv3 route and ILM entry (IPv6, label 16002).
+    async fn both_versions() -> Rib {
+        let mut rib = Rib::new(false).expect("rib");
+        for msg in [
+            Message::Ipv4Add {
+                prefix: V4.parse().unwrap(),
+                rib: discard(),
+            },
+            Message::Ipv6Add {
+                prefix: V6.parse().unwrap(),
+                rib: discard(),
+            },
+            Message::IlmAdd {
+                label: 16001,
+                ilm: ilm(16001, &["10.0.0.2"]),
+            },
+            Message::IlmAdd {
+                label: 16002,
+                ilm: ilm(16002, &["fe80::2", "fe80::3"]),
+            },
+        ] {
+            rib.process_msg(msg, RT_TABLE_MAIN).await;
+        }
+        rib
+    }
+
+    /// Whether the main tables hold the OSPF route for `V4` and `V6`,
+    /// and the labels with an OSPF ILM entry.
+    fn ospf(rib: &Rib) -> (bool, bool, Vec<u32>) {
+        let is_ospf = |entries: &RibEntries| entries.iter().any(|e| e.rtype == RibType::Ospf);
+        let labels = rib
+            .ilm
+            .iter()
+            .filter(|(_, entries)| entries.iter().any(|e| e.rtype == RibType::Ospf))
+            .map(|(label, _)| *label)
+            .collect();
+        (
+            rib.table.get(&V4.parse().unwrap()).is_some_and(is_ospf),
+            rib.table_v6.get(&V6.parse().unwrap()).is_some_and(is_ospf),
+            labels,
+        )
+    }
+
+    /// OSPFv2 and OSPFv3 both install `RibType::Ospf`, v2 in IPv4 and v3
+    /// in IPv6. Each version's cleanup withdraws its own routes and ILM
+    /// entries, and leaves the other's, whichever goes first.
+    #[tokio::test]
+    async fn an_ospf_versions_cleanup_takes_only_its_own() {
+        let mut rib = both_versions().await;
+        assert_eq!(ospf(&rib), (true, true, vec![16001, 16002]));
+        rib.proto_cleanup("ospf".to_string()).await;
+        assert_eq!(ospf(&rib), (false, true, vec![16002]), "v2's, v3's left");
+        rib.proto_cleanup("ospfv3".to_string()).await;
+        assert_eq!(ospf(&rib), (false, false, vec![]), "v3's");
+
+        let mut rib = both_versions().await;
+        rib.proto_cleanup("ospfv3".to_string()).await;
+        assert_eq!(ospf(&rib), (true, false, vec![16001]), "v3's, v2's left");
+        rib.proto_cleanup("ospf".to_string()).await;
+        assert_eq!(ospf(&rib), (false, false, vec![]), "v2's");
     }
 }
