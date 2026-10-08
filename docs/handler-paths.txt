@@ -14,6 +14,9 @@
 /router/bgp/afi-safi/ethernet-segment/df-election/ac-df
 /router/bgp/afi-safi/ethernet-segment/df-election/algorithm
 /router/bgp/afi-safi/ethernet-segment/df-election/dont-preempt
+/router/bgp/afi-safi/ethernet-segment/df-election/fast-recovery
+/router/bgp/afi-safi/ethernet-segment/df-election/fast-recovery/peering-time
+/router/bgp/afi-safi/ethernet-segment/df-election/fast-recovery/skew
 /router/bgp/afi-safi/ethernet-segment/df-election/preference
 /router/bgp/afi-safi/ethernet-segment/df-election/startup-delay
 /router/bgp/afi-safi/ethernet-segment/esi

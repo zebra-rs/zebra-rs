@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
-use bgp_packet::{DfElectionEc, ExtCommunityValue};
+use bgp_packet::{DfElectionEc, ExtCommunityValue, SctEc};
 
 use super::vpws::{EsBinding, bind_es};
 
@@ -229,6 +229,18 @@ pub struct EthernetSegment {
     /// How this segment tells remote PEs which PE forwards its known
     /// unicast. Default `Inferred` — the pre-existing MAC-count inference.
     pub role_signaling: RoleSignaling,
+    /// RFC 9722 synchronized service carving is configured on this segment:
+    /// the Type-4 carries the T capability, a join announces a Service
+    /// Carving Time, and role changes governed by an announced instant are
+    /// held until it. Mutually exclusive with `startup_delay`, which
+    /// *withholds* the very Type-4 an SCT would ride on.
+    pub fast_recovery: bool,
+    /// Seconds between announcing a carving instant and carving at it (RFC
+    /// 7432 §8.5 step 2's peering timer). `None` = the RFC's 3 s.
+    pub peering_time: Option<u16>,
+    /// Milliseconds by which an outgoing Designated Forwarder steps down
+    /// before the announced instant. `None` = RFC 9722's 10 ms.
+    pub skew_ms: Option<u16>,
     /// RFC 7432 §8.3: this PE's ESI label for the segment under
     /// `encapsulation mpls` — drawn from the dynamic label block
     /// (`Bgp::es_label_reconcile`), advertised in the per-ES A-D's ESI
@@ -327,7 +339,23 @@ impl EthernetSegment {
         };
         ec.set_ac_df(self.ac_df);
         ec.set_dont_preempt(preference_based && self.dont_preempt);
+        // RFC 9722 §2.3: advertising T promises that this PE carves at the
+        // announced instant. It is set only when `fast-recovery` is
+        // configured, because the promise is exactly what the scheduling
+        // implements — claiming it without deferring would make every peer on
+        // the segment wait for an instant we then ignored.
+        ec.set_time_sync(self.fast_recovery);
         ec
+    }
+
+    /// The peering interval this segment announces and honours.
+    pub fn peering_time(&self) -> Duration {
+        Duration::from_secs(u64::from(self.peering_time.unwrap_or(3)))
+    }
+
+    /// The step-down lead time for an outgoing Designated Forwarder.
+    pub fn skew(&self) -> Duration {
+        Duration::from_millis(u64::from(self.skew_ms.unwrap_or(10)))
     }
 
     /// Auto-derive the ES-Import Route Target (RFC 7432 §7.6) from the ESI —
@@ -392,6 +420,10 @@ pub struct DfCandidate {
     /// Its capability bitmap, kept whole so a bit this version does not act
     /// on is still visible in `show` rather than dropped at parse time.
     pub caps: u16,
+    /// The Service Carving Time it announced, if any (RFC 9722 §2.1). Read
+    /// off the same Type-4 as the rest of this, so the segment's announced
+    /// instants and the capability that makes them binding arrive together.
+    pub sct: Option<SctEc>,
 }
 
 impl DfCandidate {
@@ -403,7 +435,14 @@ impl DfCandidate {
             alg,
             pref,
             caps: 0,
+            sct: None,
         }
+    }
+
+    /// Builder: attach the announced carving instant.
+    pub fn with_sct(mut self, sct: Option<SctEc>) -> Self {
+        self.sct = sct;
+        self
     }
 
     /// Builder: attach the advertised capability bitmap.
@@ -964,6 +1003,107 @@ pub fn select_sa_forwarder(
             };
             (Some(chosen), backup.filter(|b| *b != chosen), reason)
         }
+    }
+}
+
+/// A carving instant this PE is waiting for on one segment.
+///
+/// `sct` is the announced instant translated into monotonic terms once and
+/// then kept, so a re-derivation cannot drift the deadline a timer was armed
+/// for; `wire` is what was advertised or received, which is what `show`
+/// renders and what identifies "the same instant" across syncs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EsCarve {
+    pub sct: Instant,
+    pub wire: SctEc,
+    /// This PE announced it (a join), rather than honouring a peer's.
+    pub own: bool,
+}
+
+/// RFC 9722 §2.3: synchronized service carving is in effect on a segment only
+/// when **every** PE on it advertises the T (Time Synchronization) capability.
+/// One PE that does not would carve on its own RFC 7432 timer while the others
+/// waited for an announced instant — which is worse than nobody synchronizing,
+/// because the gap it opens is unbounded rather than one timer long. Same
+/// unanimity shape as [`ac_df_in_effect`], and for the same reason.
+pub fn t_sync_in_effect(candidates: &[DfCandidate]) -> bool {
+    !candidates.is_empty()
+        && candidates
+            .iter()
+            .all(|c| c.caps & DfElectionEc::CAP_TIME_SYNC != 0)
+}
+
+/// Why a received Service Carving Time was not usable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SctReject {
+    /// The instant has already passed — a clock skewed backwards, or a route
+    /// that sat in a queue longer than the peering interval.
+    InThePast,
+    /// Further out than our own peering interval, so either the peer's
+    /// interval is much larger than ours or its clock is ahead. Waiting for it
+    /// would hold this PE out of the election for an interval we never agreed
+    /// to.
+    TooFarAhead,
+}
+
+impl SctReject {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SctReject::InThePast => "in the past",
+            SctReject::TooFarAhead => "further ahead than the peering interval",
+        }
+    }
+}
+
+/// Whether a received carving instant is one we will wait for (RFC 9722 §3.1
+/// fallbacks), in whole microseconds since the Unix epoch on both sides.
+///
+/// Accepting blindly would let a peer with a broken clock park this segment's
+/// election arbitrarily far out, so the window is bounded by the interval this
+/// PE itself uses. A rejected SCT is not an error to retry — the segment
+/// simply falls back to carving immediately, which is what it did before
+/// anyone asked for synchronization.
+pub fn sct_acceptable(sct_us: u128, now_us: u128, peering_time_secs: u16) -> Result<(), SctReject> {
+    if sct_us <= now_us {
+        return Err(SctReject::InThePast);
+    }
+    let window_us = u128::from(peering_time_secs) * 1_000_000;
+    if sct_us - now_us > window_us {
+        return Err(SctReject::TooFarAhead);
+    }
+    Ok(())
+}
+
+/// When a PE applies a role change that a carving instant governs (RFC 9722
+/// §3.1 skew).
+///
+/// A PE **losing** the Designated Forwarder role steps down `skew` before the
+/// announced instant; a PE **gaining** it steps up exactly at the instant. The
+/// asymmetry is deliberate and one-directional: it guarantees the two never
+/// overlap, at the cost of a `skew`-long window with no forwarder. On a
+/// bridged segment that is the right trade — a gap drops frames, an overlap
+/// duplicates them and can loop.
+pub fn carve_apply_at(sct: Instant, skew: Duration, applied_df: bool) -> Instant {
+    if applied_df {
+        sct.checked_sub(skew).unwrap_or(sct)
+    } else {
+        sct
+    }
+}
+
+/// The role to program right now for one bridge domain while a carve is
+/// pending: the new verdict once its moment has come, the role already
+/// programmed until then.
+///
+/// Returning the **applied** role rather than the desired one is the whole
+/// mechanism — every PE on the segment holds what it has until the announced
+/// instant, so they change together instead of whenever BGP happened to
+/// deliver. A verdict that is not a change needs no deadline at all.
+pub fn staged_role(applied: bool, desired: bool, apply_at: Instant, now: Instant) -> bool {
+    if applied == desired || now >= apply_at {
+        desired
+    } else {
+        applied
     }
 }
 
@@ -1672,6 +1812,101 @@ mod tests {
         assert_eq!(VpwsRole::Primary.bits(), (true, false));
         assert_eq!(VpwsRole::Backup.bits(), (false, true));
         assert_eq!(VpwsRole::NonDesignated.bits(), (false, false));
+    }
+
+    /// RFC 9722 §2.3: synchronized carving needs every PE to advertise T.
+    /// One PE without it would carve on its own timer while the others waited
+    /// for an announced instant, opening an unbounded gap rather than a
+    /// one-timer one — so the whole segment reverts to timers instead.
+    #[test]
+    fn t_sync_needs_every_pe_on_the_segment() {
+        let [a, b, _] = pes();
+        let t = DfElectionEc::CAP_TIME_SYNC;
+        let with = |pe, caps| DfCandidate::new(pe, DfElectionEc::ALG_DEFAULT, 0).with_caps(caps);
+
+        assert!(t_sync_in_effect(&[with(a, t), with(b, t)]));
+        assert!(!t_sync_in_effect(&[with(a, t), with(b, 0)]));
+        assert!(!t_sync_in_effect(&[with(a, 0), with(b, 0)]));
+        // An empty segment synchronizes nothing.
+        assert!(!t_sync_in_effect(&[]));
+        // Another capability in the bitmap is not this one.
+        assert!(!t_sync_in_effect(&[with(a, DfElectionEc::CAP_AC_DF)]));
+        assert!(t_sync_in_effect(&[with(
+            a,
+            DfElectionEc::CAP_AC_DF | DfElectionEc::CAP_DONT_PREEMPT | t
+        )]));
+    }
+
+    /// A carving instant is only honoured inside our own peering window: a
+    /// peer with a broken clock must not be able to park the election
+    /// arbitrarily far out, and an instant already gone is not something to
+    /// wait for.
+    #[test]
+    fn sct_is_accepted_only_inside_the_peering_window() {
+        let now = 1_767_225_600_000_000u128;
+        // Comfortably inside a 3 s window.
+        assert_eq!(sct_acceptable(now + 1_500_000, now, 3), Ok(()));
+        // The boundary itself is inside it; one microsecond past is not.
+        assert_eq!(sct_acceptable(now + 3_000_000, now, 3), Ok(()));
+        assert_eq!(
+            sct_acceptable(now + 3_000_001, now, 3),
+            Err(SctReject::TooFarAhead)
+        );
+        // Now, and before now, are both already gone.
+        assert_eq!(sct_acceptable(now, now, 3), Err(SctReject::InThePast));
+        assert_eq!(sct_acceptable(now - 1, now, 3), Err(SctReject::InThePast));
+        // A larger local interval widens the window, and a zero one accepts
+        // nothing — no underflow either way.
+        assert_eq!(sct_acceptable(now + 9_000_000, now, 10), Ok(()));
+        assert_eq!(sct_acceptable(now + 1, now, 0), Err(SctReject::TooFarAhead));
+        assert_eq!(SctReject::InThePast.as_str(), "in the past");
+    }
+
+    /// The skew is one-directional (RFC 9722 §3.1): the PE giving up the role
+    /// goes first, the PE taking it goes at the instant. So the two never
+    /// overlap, and the cost is a skew-long gap — right for a bridged segment,
+    /// where an overlap duplicates frames and can loop.
+    #[test]
+    fn the_skew_makes_the_outgoing_df_step_down_first() {
+        let sct = Instant::now() + Duration::from_secs(3);
+        let skew = Duration::from_millis(10);
+
+        // Losing the role: earlier by exactly the skew.
+        assert_eq!(carve_apply_at(sct, skew, true), sct - skew);
+        // Gaining it: at the instant.
+        assert_eq!(carve_apply_at(sct, skew, false), sct);
+        // Ordering is what matters, and it holds.
+        assert!(carve_apply_at(sct, skew, true) < carve_apply_at(sct, skew, false));
+        // A skew longer than the time remaining puts the deadline in the
+        // past, which reads as "its moment has come" rather than panicking.
+        // Config validation keeps `skew` well inside the peering interval, so
+        // this is belt-and-braces — but it must degrade to applying at once,
+        // not to a subtraction that wraps.
+        let soon = Instant::now();
+        let past = carve_apply_at(soon, Duration::from_secs(86_400), true);
+        assert!(past <= soon);
+        assert!(!staged_role(true, false, past, soon));
+    }
+
+    /// While a carve is pending every PE holds the role it already programmed,
+    /// which is how they change together instead of whenever BGP delivered.
+    /// A verdict that is not a change needs no deadline.
+    #[test]
+    fn a_pending_carve_holds_the_programmed_role_until_its_moment() {
+        let now = Instant::now();
+        let later = now + Duration::from_secs(1);
+
+        // Change, deadline not yet: hold what is programmed.
+        assert!(staged_role(true, false, later, now));
+        assert!(!staged_role(false, true, later, now));
+        // Deadline reached (and passed): apply the verdict.
+        assert!(!staged_role(true, false, now, now));
+        assert!(staged_role(false, true, now, now));
+        assert!(!staged_role(true, false, now - Duration::from_secs(1), now));
+        // Not a change: the deadline is irrelevant, so a pending carve never
+        // holds a role that was not moving anyway.
+        assert!(staged_role(true, true, later, now));
+        assert!(!staged_role(false, false, later, now));
     }
 
     /// AC-DF is a unanimous capability: any PE without the bit keeps the
