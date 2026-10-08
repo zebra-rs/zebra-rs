@@ -873,9 +873,11 @@ impl Rib {
         };
         let prev = self.ilm_installed(label);
         let entries = self.ilm.entry(label).or_default();
-        // One candidate per protocol: drop this protocol's previous
-        // entry before pushing the new one (mirrors `rib_replace`).
-        entries.retain(|e| e.rtype != ilm.rtype);
+        // One candidate per protocol instance: drop this owner's previous
+        // entry before pushing the new one (mirrors `rib_replace`). Keyed
+        // by owner as well as rtype: OSPFv2 and OSPFv3 both install as
+        // `Ospf`, and one must not replace the other's candidate.
+        entries.retain(|e| !(e.rtype == ilm.rtype && e.owner == ilm.owner));
         entries.push(ilm);
         self.ilm_select_sync(label, prev).await;
     }
@@ -883,9 +885,19 @@ impl Rib {
     pub async fn ilm_del(&mut self, label: u32, ilm: IlmEntry) {
         let prev = self.ilm_installed(label);
         if let Some(entries) = self.ilm.get_mut(&label) {
-            entries.retain(|e| e.rtype != ilm.rtype);
+            // Only this owner's candidate: a stale withdrawal from one
+            // instance must not remove another's entry at the label.
+            entries.retain(|e| !(e.rtype == ilm.rtype && e.owner == ilm.owner));
             if entries.is_empty() {
                 self.ilm.remove(&label);
+            }
+        }
+        // The owner's entry is gone, so a label its pool gave back, and
+        // whose release the RIB has handled, is free.
+        if let Some(owner) = ilm.owner {
+            let freed = self.label_space.lock().entry_withdrawn(owner, label);
+            if freed {
+                self.notify_starved();
             }
         }
         self.ilm_select_sync(label, prev).await;
@@ -2326,8 +2338,8 @@ fn rib_next(ribs: &RibEntries) -> Option<usize> {
 
 /// Pick the winning ILM candidate, mirroring `rib_next` for the IP
 /// table: lowest admin distance, then lowest metric, then protocol
-/// order as a stable final tie-break. Returns the index into
-/// `entries`, or `None` when empty.
+/// order, then owner (the older subscription) as a stable final
+/// tie-break. Returns the index into `entries`, or `None` when empty.
 fn ilm_next(entries: &[IlmEntry]) -> Option<usize> {
     entries
         .iter()
@@ -2337,6 +2349,7 @@ fn ilm_next(entries: &[IlmEntry]) -> Option<usize> {
                 .cmp(&b.distance)
                 .then(a.metric.cmp(&b.metric))
                 .then(a.rtype.u8().cmp(&b.rtype.u8()))
+                .then(a.owner.cmp(&b.owner))
         })
         .map(|(i, _)| i)
 }

@@ -1841,6 +1841,9 @@ impl Isis {
     pub fn process_rib_msg(&mut self, msg: RibRx) {
         // println!("RIB Message {:?}", msg);
         match msg {
+            // Labels were freed after the pool found none: give the
+            // adjacencies and Mirror Context entries without one a label.
+            RibRx::LocalLabelsFreed => self.refresh_local_labels(),
             RibRx::LinkAdd(link) => {
                 self.link_add(link);
             }
@@ -3514,10 +3517,11 @@ impl Isis {
     ///
     /// - SR-MPLS off, no block, or a block without a (non-empty) SRLB: no
     ///   pool, and no labels held from one.
-    /// - A new or moved SRLB: a pool over it. A moved SRLB's pool replaces
-    ///   the old one, which gives every label it held back, so the cached
-    ///   copies go too: the Adjacency-SIDs and Mirror Context labels are
-    ///   all drawn again from the new SRLB.
+    /// - A new SRLB: a pool over it. A changed one: the pool moves with it
+    ///   (`retarget`). The labels still inside the new SRLB stay; those
+    ///   outside go back, so their cached copies go too, and those
+    ///   Adjacency-SIDs and Mirror Context labels are drawn again from the
+    ///   new SRLB.
     /// - Then every neighbour address without a label gets one.
     ///   `nbr_hello_interpret` only labels an address the first time it
     ///   sees it, so an adjacency that came up before there was a pool (SR
@@ -3534,14 +3538,30 @@ impl Isis {
             .and_then(|lb| Some((lb.start, lb.last()?)))
             .filter(|_| self.config.sr_mpls_enabled);
         let current = self.local_pool.as_ref().map(|p| p.range());
-        if current != srlb {
-            if current.is_some() {
+        match (current, srlb) {
+            (Some(_), None) => {
                 self.local_pool = None;
-                self.forget_local_labels();
+                self.forget_local_labels(None);
             }
-            if let Some((first, last)) = srlb {
-                self.local_pool = Some(self.rib_subscriber.label_space().pool(first, last));
+            (None, Some((first, last))) => {
+                self.local_pool = Some(self.rib_subscriber.label_space().pool_for(
+                    first,
+                    last,
+                    &self.ctx.rib,
+                ));
             }
+            // The SRLB changed: keep the labels still inside it; those
+            // that went are drawn again below (Mirror Context labels by
+            // `update_mirror_labels`).
+            (Some(range), Some((first, last))) if range != (first, last) => {
+                let gone = self
+                    .local_pool
+                    .as_mut()
+                    .map(|pool| pool.retarget(first, last))
+                    .unwrap_or_default();
+                self.forget_local_labels(Some(&gone));
+            }
+            _ => {}
         }
         let Some(pool) = self.local_pool.as_mut() else {
             return;
@@ -3559,20 +3579,35 @@ impl Isis {
         }
     }
 
-    /// Forget every label held from the local pool: the neighbours'
-    /// Adjacency-SID labels and the Mirror Context labels. For when the
-    /// pool goes, which gives them all back.
-    fn forget_local_labels(&mut self) {
+    /// Forget labels held from the local pool, the neighbours'
+    /// Adjacency-SID labels and the Mirror Context labels: those in `only`,
+    /// which the pool gave back, or every one when the pool goes.
+    fn forget_local_labels(&mut self, only: Option<&[u32]>) {
+        let gone = |label: u32| only.is_none_or(|labels| labels.contains(&label));
         for link in self.links.values_mut() {
             for level in [Level::L1, Level::L2] {
                 for nbr in link.state.nbrs.get_mut(&level).values_mut() {
                     for addr in nbr.addr4.values_mut() {
-                        addr.label = None;
+                        if addr.label.is_some_and(gone) {
+                            addr.label = None;
+                        }
                     }
                 }
             }
         }
-        self.mirror_labels.clear();
+        self.mirror_labels.retain(|_, label| !gone(*label));
+    }
+
+    /// Reconcile the local labels and re-flood: the pool, the
+    /// Adjacency-SID and Mirror Context labels, their ILM decaps, and
+    /// the LSPs that carry them. Run on a block update and when labels
+    /// were freed after the pool found none.
+    fn refresh_local_labels(&mut self) {
+        self.reconcile_local_pool();
+        self.update_mirror_labels();
+        self.update_mirror_context_labels();
+        let _ = self.tx.send(Message::LspOriginate(Level::L1, None));
+        let _ = self.tx.send(Message::LspOriginate(Level::L2, None));
     }
 
     /// Mirror of `reconcile_block_watch` for the SRv6 locator name(s).
@@ -4063,13 +4098,10 @@ impl Isis {
                 // Pool depends on `sr_block.local`; a fresh snapshot can
                 // unlock pool creation (first-time arrival) or drop it
                 // (block went away on the RIB side).
-                self.reconcile_local_pool();
-                // The SRLB pool just (dis)appeared — (de)allocate Mirror
-                // Context labels and re-flood so the Binding TLVs match.
-                self.update_mirror_labels();
-                self.update_mirror_context_labels();
-                let _ = self.tx.send(Message::LspOriginate(Level::L1, None));
-                let _ = self.tx.send(Message::LspOriginate(Level::L2, None));
+                // The SRLB pool may have appeared, moved or gone:
+                // reconcile the labels and re-flood so the Binding TLVs
+                // match.
+                self.refresh_local_labels();
             }
             RibSrRx::Locator { name, locator } => {
                 // A single locator name may back the base (algo-0)
@@ -5538,7 +5570,13 @@ mod local_label_tests {
         let label = isis.local_pool.as_mut().and_then(|pool| pool.allocate());
         assert_eq!(label, Some(15001));
 
+        // What IS-IS held goes back once the RIB has seen its ILM entries
+        // go (its cleanup), not before.
+        let owner = isis.ctx.rib.proto_id();
+        let space = isis.rib_subscriber.label_space().clone();
         drop(isis);
+        assert_eq!(ospf.allocate(), Some(15002));
+        space.lock().free_releasing_of(&[owner]);
         assert_eq!(ospf.allocate(), Some(15001));
     }
 
@@ -5627,11 +5665,47 @@ mod local_label_tests {
             isis.mirror_labels.is_empty(),
             "update_mirror_labels draws them again"
         );
+        // The old SRLB's labels go back once the RIB has seen IS-IS's ILM
+        // entries at them go, not before.
         let mut other = isis.rib_subscriber.label_space().pool(15000, 15001);
+        assert_eq!(other.allocate(), None);
+        let owner = isis.ctx.rib.proto_id();
+        isis.rib_subscriber
+            .label_space()
+            .lock()
+            .free_releasing_of(&[owner]);
         assert_eq!(
             (other.allocate(), other.allocate()),
             (Some(15000), Some(15001))
         );
+    }
+
+    /// An overlapping SRLB change keeps the labels still inside the new
+    /// SRLB: shrinking 15000..15001 to 15000 keeps the adjacency's 15000.
+    /// Drawing it again would race its own release and fail.
+    #[tokio::test]
+    async fn an_overlapping_srlb_change_keeps_the_label() {
+        let mut isis = fresh_isis();
+        with_neighbour(&mut isis);
+        sr_on(&mut isis, (15000, 2));
+        assert_eq!(adj_label(&isis), Some(15000));
+        sr_on(&mut isis, (15000, 1));
+        assert_eq!(adj_label(&isis), Some(15000));
+    }
+
+    /// Labels freed after the pool found none: the adjacency without one
+    /// gets it.
+    #[tokio::test]
+    async fn freed_labels_reach_an_adjacency_without_one() {
+        let mut isis = fresh_isis();
+        with_neighbour(&mut isis);
+        let mut other = isis.rib_subscriber.label_space().pool(15000, 15000);
+        assert_eq!(other.allocate(), Some(15000));
+        sr_on(&mut isis, (15000, 1));
+        assert_eq!(adj_label(&isis), None, "the only label is taken");
+        other.release(15000);
+        isis.process_rib_msg(RibRx::LocalLabelsFreed);
+        assert_eq!(adj_label(&isis), Some(15000));
     }
 
     /// SR-MPLS off: no pool, and no labels held from one.

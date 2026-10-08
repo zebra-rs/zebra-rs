@@ -789,27 +789,36 @@ fn make_ilm_entry(label: u32, ilm: &SpfIlm) -> IlmEntry {
 }
 
 pub fn diff_ilm_apply(rib_client: &crate::rib::client::RibClient, diff: &DiffIlmResult) {
-    // Delete.
+    // Always withdraw a label that left the table: the RIB removes this
+    // instance's entry by label, rtype and owner, so the IlmDel is a no-op
+    // when nothing is installed. Guarding it on `!nhops.is_empty()` leaked
+    // the entry whenever the label's last nexthop had gone first (a link
+    // failure leaves the Adjacency-SID in our LSP with no neighbour for a
+    // while): the change to empty nexthops sent nothing, and the removal
+    // of the empty entry sent nothing either. OSPF's `diff_ilm_apply` and
+    // the route `diff_apply` above withdraw the same way.
     for (label, ilm) in diff.only_curr.iter() {
-        if !ilm.nhops.is_empty() {
-            let ilm_entry = make_ilm_entry(*label, ilm);
-            let msg = rib::Message::IlmDel {
-                label: *label,
-                ilm: ilm_entry,
-            };
-            rib_client.send(msg).unwrap();
-        }
+        let msg = rib::Message::IlmDel {
+            label: *label,
+            ilm: make_ilm_entry(*label, ilm),
+        };
+        rib_client.send(msg).unwrap();
     }
-    // Add (changed).
+    // Changed: replace, or withdraw once no nexthop is left.
     for (label, _, ilm) in diff.different.iter() {
-        if !ilm.nhops.is_empty() {
-            let ilm_entry = make_ilm_entry(*label, ilm);
-            let msg = rib::Message::IlmAdd {
+        let ilm_entry = make_ilm_entry(*label, ilm);
+        let msg = if ilm.nhops.is_empty() {
+            rib::Message::IlmDel {
                 label: *label,
                 ilm: ilm_entry,
-            };
-            rib_client.send(msg).unwrap();
-        }
+            }
+        } else {
+            rib::Message::IlmAdd {
+                label: *label,
+                ilm: ilm_entry,
+            }
+        };
+        rib_client.send(msg).unwrap();
     }
     // Add (new).
     for (label, ilm) in diff.only_next.iter() {
@@ -3000,6 +3009,69 @@ mod tests {
             }
         }
         (dels, adds)
+    }
+
+    /// The ILM entries `diff_ilm_apply` sends for `curr` → `next`, as
+    /// (is_add, label).
+    fn run_diff_ilm_apply(
+        curr: &BTreeMap<u32, SpfIlm>,
+        next: &BTreeMap<u32, SpfIlm>,
+    ) -> Vec<(bool, u32)> {
+        use crate::rib::client::{ProtoId, RibClient};
+
+        let diff = spf::table_diff(
+            curr.iter().map(|(&k, v)| (k, v)),
+            next.iter().map(|(&k, v)| (k, v)),
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let client = RibClient::new(tx, ProtoId::from_raw(1));
+        diff_ilm_apply(&client, &diff);
+        drop(client);
+        let mut out = vec![];
+        while let Ok(env) = rx.try_recv() {
+            match env.msg {
+                crate::rib::Message::IlmAdd { label, .. } => out.push((true, label)),
+                crate::rib::Message::IlmDel { label, .. } => out.push((false, label)),
+                _ => panic!("unexpected message variant"),
+            }
+        }
+        out
+    }
+
+    fn adj_ilm(nhop: Option<Ipv4Addr>) -> SpfIlm {
+        let mut nhops = BTreeMap::new();
+        if let Some(addr) = nhop {
+            nhops.insert(
+                addr,
+                SpfNexthop::<V4> {
+                    ifindex: 7,
+                    adjacency: true,
+                    sys_id: None,
+                    backup: None,
+                },
+            );
+        }
+        SpfIlm {
+            nhops,
+            ilm_type: IlmType::Adjacency(0),
+            no_php: false,
+        }
+    }
+
+    /// An Adjacency-SID whose neighbour went first (its nexthops emptied)
+    /// and then left the table must be withdrawn. Guarding the deletes on
+    /// `!nhops.is_empty()` sent nothing at either step and left the entry
+    /// installed for good; it hid while the same label was reused.
+    #[test]
+    fn diff_ilm_apply_withdraws_an_entry_whose_nexthops_went_first() {
+        let up: BTreeMap<u32, SpfIlm> =
+            BTreeMap::from([(15000, adj_ilm(Some("192.168.0.2".parse().unwrap())))]);
+        let empty: BTreeMap<u32, SpfIlm> = BTreeMap::from([(15000, adj_ilm(None))]);
+        let gone: BTreeMap<u32, SpfIlm> = BTreeMap::new();
+        assert_eq!(run_diff_ilm_apply(&up, &empty), vec![(false, 15000)]);
+        assert_eq!(run_diff_ilm_apply(&empty, &gone), vec![(false, 15000)]);
+        assert_eq!(run_diff_ilm_apply(&gone, &empty), vec![]);
+        assert_eq!(run_diff_ilm_apply(&empty, &up), vec![(true, 15000)]);
     }
 
     #[test]

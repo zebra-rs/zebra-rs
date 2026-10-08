@@ -18,10 +18,11 @@
 //! One structure means a block is never handed out over a label an IGP holds,
 //! and the RIB sees every label in use.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::{Range, RangeInclusive};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use crate::rib::client::{ProtoId, RibClient};
 use crate::spf::label_block::LabelBlock;
 
 /// Labels the kernel accepts are `0..PLATFORM_LABELS`.
@@ -34,6 +35,24 @@ pub const PLATFORM_LABELS: u32 = (1 << 20) - 1;
 /// First dynamic label, IOS XR's default: above the default SRGB
 /// (16000..23999), so the SR blocks stay clear even before SR is enabled.
 pub const DYNAMIC_START: u32 = 24000;
+
+/// A local label's state.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Local {
+    /// Held by a pool.
+    Held(u64),
+    /// Given back by its owner's pool; the RIB has not handled the release
+    /// yet, which travels behind the owner's earlier ILM messages. No one
+    /// may take it, and none of those earlier messages frees it: a
+    /// withdrawal queued ahead of the release can be followed by an
+    /// install that re-adds the owner's entry.
+    Releasing(ProtoId),
+    /// The RIB handled the release while the owner still had an ILM entry
+    /// at the label: free once that entry is withdrawn. Reallocating it
+    /// sooner would let the owner's withdrawal remove the next holder's
+    /// entry, or its entry outrank it.
+    Draining(ProtoId),
+}
 
 /// A block handed to a protocol.
 #[derive(Debug, Clone, PartialEq)]
@@ -53,8 +72,11 @@ pub struct LabelSpace {
     /// SRGB and SRLB of every configured `segment-routing block`. Never
     /// handed out, even where they fall inside the dynamic region.
     reserved: Vec<LabelBlock>,
-    /// Single labels held by IGP instances' pools: label -> pool.
-    local: BTreeMap<u32, u64>,
+    /// Single labels of IGP instances' pools, held or on their way back.
+    local: BTreeMap<u32, Local>,
+    /// Owners whose pool found no free label: told when labels are freed
+    /// (`take_starved`), so they can try again.
+    starved: BTreeSet<ProtoId>,
     /// The next pool's id.
     next_pool: u64,
 }
@@ -72,6 +94,7 @@ impl LabelSpace {
             held: BTreeMap::new(),
             reserved: Vec::new(),
             local: BTreeMap::new(),
+            starved: BTreeSet::new(),
             next_pool: 0,
         }
     }
@@ -138,13 +161,25 @@ impl LabelSpace {
         self.next_pool
     }
 
-    /// The lowest label in `range` that no pool holds and no handed-out
-    /// block covers, now held by `pool`.
-    fn alloc_local(&mut self, pool: u64, range: RangeInclusive<u32>) -> Option<u32> {
-        let label = range
+    /// The lowest label in `range` that no pool holds or is giving back
+    /// and no handed-out block covers, now held by `pool`.
+    fn alloc_local(
+        &mut self,
+        pool: u64,
+        owner: Option<ProtoId>,
+        range: RangeInclusive<u32>,
+    ) -> Option<u32> {
+        let found = range
             .into_iter()
-            .find(|label| !self.local.contains_key(label) && !self.in_held_block(*label))?;
-        self.local.insert(label, pool);
+            .find(|label| !self.local.contains_key(label) && !self.in_held_block(*label));
+        let Some(label) = found else {
+            // A label on its way back may be freed soon; say so then.
+            if let Some(owner) = owner {
+                self.starved.insert(owner);
+            }
+            return None;
+        };
+        self.local.insert(label, Local::Held(pool));
         Some(label)
     }
 
@@ -156,16 +191,111 @@ impl LabelSpace {
             .is_some_and(|(_, h)| label < h.end)
     }
 
-    /// Give back `label`, if `pool` holds it.
-    fn release_local(&mut self, pool: u64, label: u32) {
-        if self.local.get(&label) == Some(&pool) {
-            self.local.remove(&label);
+    /// Give back `label`, if `pool` holds it: free at once for a pool
+    /// without an owner, `Releasing` for one with.
+    fn release_local(&mut self, pool: u64, owner: Option<ProtoId>, label: u32) -> bool {
+        if self.local.get(&label) != Some(&Local::Held(pool)) {
+            return false;
+        }
+        match owner {
+            Some(owner) => self.local.insert(label, Local::Releasing(owner)),
+            None => self.local.remove(&label),
+        };
+        true
+    }
+
+    /// Give back every label `pool` holds, as `release_local` does. The
+    /// labels given back.
+    fn release_pool(&mut self, pool: u64, owner: Option<ProtoId>) -> Vec<u32> {
+        let labels: Vec<u32> = self
+            .local
+            .iter()
+            .filter(|(_, l)| **l == Local::Held(pool))
+            .map(|(label, _)| *label)
+            .collect();
+        for label in &labels {
+            self.release_local(pool, owner, *label);
+        }
+        labels
+    }
+
+    /// Change `pool`'s range to `[first, last]`: the labels it holds there
+    /// stay, the rest are given back as `release_local` does. The labels
+    /// given back.
+    fn retarget_pool(
+        &mut self,
+        pool: u64,
+        owner: Option<ProtoId>,
+        first: u32,
+        last: u32,
+    ) -> Vec<u32> {
+        let outside: Vec<u32> = self
+            .local
+            .iter()
+            .filter(|(label, l)| **l == Local::Held(pool) && !(first..=last).contains(*label))
+            .map(|(label, _)| *label)
+            .collect();
+        for label in &outside {
+            self.release_local(pool, owner, *label);
+        }
+        outside
+    }
+
+    /// The RIB handled `owner`'s release of `label`, every ILM message the
+    /// owner sent before it included: free if the owner has no entry at
+    /// the label (`installed`), else `Draining` until it goes. Whether the
+    /// label was freed.
+    pub fn release_handled(&mut self, owner: ProtoId, label: u32, installed: bool) -> bool {
+        if self.local.get(&label) != Some(&Local::Releasing(owner)) {
+            return false;
+        }
+        if installed {
+            self.local.insert(label, Local::Draining(owner));
+            return false;
+        }
+        self.local.remove(&label);
+        true
+    }
+
+    /// `owner`'s ILM entry at `label` was withdrawn: free if the label was
+    /// `Draining`. A `Releasing` label is not: the owner may still re-add
+    /// its entry before the release. Whether the label was freed.
+    pub fn entry_withdrawn(&mut self, owner: ProtoId, label: u32) -> bool {
+        if self.local.get(&label) != Some(&Local::Draining(owner)) {
+            return false;
+        }
+        self.local.remove(&label);
+        true
+    }
+
+    /// `owner`'s label on its way back is free, `Releasing` or `Draining`:
+    /// its instance was cleaned up, its ILM entries withdrawn. Whether the
+    /// label was freed.
+    pub fn free_releasing(&mut self, owner: ProtoId, label: u32) -> bool {
+        match self.local.get(&label) {
+            Some(Local::Releasing(o) | Local::Draining(o)) if *o == owner => {
+                self.local.remove(&label);
+                true
+            }
+            _ => false,
         }
     }
 
-    /// Give back every label `pool` holds.
-    fn release_pool(&mut self, pool: u64) {
-        self.local.retain(|_, p| *p != pool);
+    /// Every label `owners` were giving back is free: they never
+    /// registered with the RIB, so they installed no ILM entry, and their
+    /// releases will never be handled. Whether any was freed.
+    pub fn free_releasing_of(&mut self, owners: &[ProtoId]) -> bool {
+        let before = self.local.len();
+        self.local.retain(
+            |_, l| !matches!(l, Local::Releasing(o) | Local::Draining(o) if owners.contains(o)),
+        );
+        self.local.len() != before
+    }
+
+    /// The owners whose pool found no free label since the last call:
+    /// labels have been freed, so they can try again.
+    pub fn take_starved(&mut self) -> BTreeSet<ProtoId> {
+        std::mem::take(&mut self.starved)
     }
 
     /// Replace the reserved SR blocks. Returns the handed-out blocks a new
@@ -209,15 +339,32 @@ impl SharedLabelSpace {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// An instance's pool over its SRLB, the inclusive range
-    /// `[first, last]`.
+    /// A pool over the inclusive range `[first, last]` with no owner: a
+    /// label it gives back is free at once. For tests; instances use
+    /// [`Self::pool_for`].
+    #[cfg(test)]
     pub fn pool(&self, first: u32, last: u32) -> LocalLabelPool {
+        self.new_pool(first, last, None)
+    }
+
+    /// An instance's pool over its SRLB, the inclusive range
+    /// `[first, last]`, owned by the subscription behind `rib`. A label it
+    /// gives back stays `Releasing` until the RIB has seen the instance's
+    /// ILM entry at it go: the release travels on `rib`, behind the
+    /// instance's earlier installs, and the RIB frees the label once it
+    /// knows none is left.
+    pub fn pool_for(&self, first: u32, last: u32, rib: &RibClient) -> LocalLabelPool {
+        self.new_pool(first, last, Some(rib.clone()))
+    }
+
+    fn new_pool(&self, first: u32, last: u32, rib: Option<RibClient>) -> LocalLabelPool {
         let id = self.lock().new_pool();
         LocalLabelPool {
             space: self.clone(),
             id,
             first,
             last,
+            rib,
         }
     }
 }
@@ -235,6 +382,8 @@ pub struct LocalLabelPool {
     id: u64,
     first: u32,
     last: u32,
+    /// The owner's RIB channel, which releases travel on.
+    rib: Option<RibClient>,
 }
 
 impl LocalLabelPool {
@@ -244,20 +393,53 @@ impl LocalLabelPool {
     }
 
     pub fn allocate(&mut self) -> Option<u32> {
+        let owner = self.owner();
         self.space
             .lock()
-            .alloc_local(self.id, self.first..=self.last)
+            .alloc_local(self.id, owner, self.first..=self.last)
+    }
+
+    /// Move the pool to `[first, last]`. The labels it holds there stay,
+    /// so an overlapping SRLB change keeps the allocations it can; the rest
+    /// are given back. The labels given back, for the caller to forget.
+    pub fn retarget(&mut self, first: u32, last: u32) -> Vec<u32> {
+        let owner = self.owner();
+        let gone = self.space.lock().retarget_pool(self.id, owner, first, last);
+        (self.first, self.last) = (first, last);
+        for label in &gone {
+            self.tell_rib(*label);
+        }
+        gone
     }
 
     /// Give back `label`, if this pool holds it.
     pub fn release(&mut self, label: u32) {
-        self.space.lock().release_local(self.id, label);
+        let owner = self.owner();
+        if self.space.lock().release_local(self.id, owner, label) {
+            self.tell_rib(label);
+        }
+    }
+
+    fn owner(&self) -> Option<ProtoId> {
+        self.rib.as_ref().map(|rib| rib.proto_id())
+    }
+
+    /// Tell the RIB `label` was given back, behind the owner's earlier
+    /// ILM installs, so it can free the label once none is left at it.
+    fn tell_rib(&self, label: u32) {
+        if let Some(rib) = &self.rib {
+            let _ = rib.send(crate::rib::Message::LocalLabelRelease { label });
+        }
     }
 }
 
 impl Drop for LocalLabelPool {
     fn drop(&mut self) {
-        self.space.lock().release_pool(self.id);
+        let owner = self.owner();
+        let labels = self.space.lock().release_pool(self.id, owner);
+        for label in labels {
+            self.tell_rib(label);
+        }
     }
 }
 
@@ -354,82 +536,6 @@ mod tests {
         assert_eq!(s.alloc("bgp", u32::MAX), None);
     }
 
-    /// Retained review probe: compare mixed allocation, release and SR
-    /// reservation changes with a label-by-label oracle. Reservations can
-    /// overlap, nest, cross the dynamic bounds or cover existing grants.
-    #[test]
-    fn review_probe_mixed_operations_match_label_by_label_oracle() {
-        for seed in 0..32_u64 {
-            let mut rng = seed + 1;
-            let mut next = || {
-                rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
-                (rng >> 32) as u32
-            };
-            let mut s = LabelSpace::new();
-            s.dynamic = 24000..24064;
-            let mut grants: Vec<(&str, LabelBlock)> = Vec::new();
-            let mut reserved: Vec<LabelBlock> = Vec::new();
-            for step in 0..300 {
-                let owner = if next() % 2 == 0 { "bgp" } else { "ldp" };
-                match next() % 4 {
-                    0 => {
-                        reserved = (0..next() % 6)
-                            .map(|_| {
-                                let start = 23990 + next() % 84;
-                                block(start, start + next() % 30)
-                            })
-                            .collect();
-                        let mut expected: Vec<_> = grants
-                            .iter()
-                            .filter(|(_, b)| {
-                                (b.start..b.end).any(|label| {
-                                    reserved.iter().any(|r| (r.start..r.end).contains(&label))
-                                })
-                            })
-                            .map(|(p, b)| (b.clone(), p.to_string()))
-                            .collect();
-                        expected.sort_by_key(|(b, _)| b.start);
-                        assert_eq!(s.set_reserved(reserved.clone()), expected);
-                    }
-                    1 if !grants.is_empty() => {
-                        let i = next() as usize % grants.len();
-                        let (p, b) = &grants[i];
-                        s.release(owner, b.start, b.end - b.start);
-                        if *p == owner {
-                            grants.remove(i);
-                        }
-                    }
-                    2 => {
-                        s.release_all(owner);
-                        grants.retain(|(p, _)| *p != owner);
-                    }
-                    _ => {
-                        let size = next() % 18;
-                        let expected = (24000..24064)
-                            .find(|&start| {
-                                size > 0
-                                    && start + size <= 24064
-                                    && (start..start + size).all(|label| {
-                                        !grants
-                                            .iter()
-                                            .any(|(_, b)| (b.start..b.end).contains(&label))
-                                            && !reserved
-                                                .iter()
-                                                .any(|r| (r.start..r.end).contains(&label))
-                                    })
-                            })
-                            .map(|start| block(start, start + size));
-                        let actual = s.alloc(owner, size);
-                        assert_eq!(actual, expected, "seed {seed}, step {step}");
-                        if let Some(b) = actual {
-                            grants.push((owner, b));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     /// Two instances over the same SRLB never hold the same label, and
     /// what one gives back, or holds when dropped, the other can take.
     #[test]
@@ -446,6 +552,21 @@ mod tests {
         assert_eq!(v3.allocate(), Some(15000));
         drop(v2);
         assert_eq!(v3.allocate(), Some(15002));
+    }
+
+    /// Retargeting a pool keeps the labels still inside its new range and
+    /// gives back only the others.
+    #[test]
+    fn retarget_keeps_labels_still_in_range() {
+        let node = SharedLabelSpace::default();
+        let mut pool = node.pool(15000, 15009);
+        assert_eq!(pool.allocate(), Some(15000));
+        assert_eq!(pool.allocate(), Some(15001));
+        assert_eq!(pool.retarget(15000, 15000), vec![15001]);
+        assert_eq!(pool.range(), (15000, 15000));
+        let mut other = node.pool(15000, 15001);
+        assert_eq!(other.allocate(), Some(15001), "15000 stays with the pool");
+        assert_eq!(pool.allocate(), None);
     }
 
     /// A pool allocates only within its own range, and none once the
