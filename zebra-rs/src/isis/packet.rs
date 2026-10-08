@@ -155,7 +155,7 @@ use super::ifsm::{dis_schedule, has_level};
 use super::link::{LinkTop, NetworkType};
 use super::lsdb;
 use super::lsp::{Packet, PacketMessage};
-use crate::spf::label_pool::LocalLabelPool;
+use crate::rib::label_space::LocalLabelPool;
 
 /// RFC 5306 §3.2(b) helper-election predicate. P2P circuits always
 /// fire the CSNP+SRM kick. On a LAN we only fire when we beat every

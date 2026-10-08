@@ -1318,10 +1318,11 @@ pub struct Rib {
     /// and re-resolved on global-table route changes.
     pub nht: super::nht::NhtRegistry,
 
-    /// The dynamic MPLS label space: hands out non-overlapping label
-    /// blocks to protocols (BGP today) from 24000 up, clear of every
-    /// configured SR block.
-    pub label_space: super::label_space::LabelSpace,
+    /// The node's MPLS label space, shared with every IGP instance's
+    /// local-label pool (`RibSubscriber::label_space`): hands out
+    /// non-overlapping label blocks to protocols (BGP today) from 24000
+    /// up, clear of every configured SR block and every local label.
+    pub label_space: super::label_space::SharedLabelSpace,
     pub nmap: NexthopMap,
     /// Effective global Router ID — what subscribers receive via
     /// `RibRx::RouterIdUpdate` and what the subscribe-time replay
@@ -1467,7 +1468,7 @@ impl Rib {
             block_watch: BTreeMap::new(),
             locator_watch: BTreeMap::new(),
             nht: super::nht::NhtRegistry::default(),
-            label_space: super::label_space::LabelSpace::new(),
+            label_space: Default::default(),
             nmap: NexthopMap::default(),
             router_id: Ipv4Addr::UNSPECIFIED,
             router_id_config: None,
@@ -1546,7 +1547,7 @@ impl Rib {
     /// pool gets no reply (the requester degrades to label-less); a
     /// missing subscriber returns the block rather than stranding it.
     fn label_block_request(&mut self, proto: String, size: u32) {
-        let Some(block) = self.label_space.alloc(&proto, size) else {
+        let Some(block) = self.label_space.lock().alloc(&proto, size) else {
             tracing::warn!(%proto, size, "label block request: dynamic pool exhausted");
             return;
         };
@@ -1554,7 +1555,7 @@ impl Rib {
         if let Some(sub) = self.client_registry.subscriber_for_proto(&proto) {
             let _ = sub.rib_rx_tx.send(RibRx::LabelBlock { start, size });
         } else {
-            self.label_space.release(&proto, start, size);
+            self.label_space.lock().release(&proto, start, size);
         }
     }
 
@@ -1569,7 +1570,8 @@ impl Rib {
             .values()
             .flat_map(|b| [b.global.clone(), b.local.clone()])
             .flatten();
-        for (held, proto) in self.label_space.set_reserved(blocks) {
+        let overlaps = self.label_space.lock().set_reserved(blocks);
+        for (held, proto) in overlaps {
             tracing::warn!(
                 %proto,
                 first = held.start,
@@ -2588,7 +2590,7 @@ impl Rib {
     async fn proto_cleanup(&mut self, proto: String) {
         // Reclaim any dynamic label blocks the protocol held — done
         // before the rtype gate so it covers every requester.
-        self.label_space.release_all(&proto);
+        self.label_space.lock().release_all(&proto);
 
         // And its SRv6 SIDs, before the route walk below would take
         // their RIB rows out from under `sid_uninstall`. A protocol
@@ -3202,7 +3204,7 @@ impl Rib {
                 self.label_block_request(proto, size);
             }
             Message::LabelBlockRelease { proto, start, size } => {
-                self.label_space.release(&proto, start, size);
+                self.label_space.lock().release(&proto, start, size);
             }
             Message::IlmAdd { label, ilm } => {
                 self.ilm_add(label, ilm).await;

@@ -9,9 +9,18 @@
 //!
 //! Blocks are owned by the requesting protocol's name, as before; ownership
 //! by subscription is a later phase.
+//!
+//! Phase 3: the IGPs' local labels, their dynamic Adjacency-SIDs and IS-IS's
+//! Mirror Context labels, come from here too, one label at a time through
+//! each instance's [`LocalLabelPool`] over its SRLB. The structure is shared
+//! ([`SharedLabelSpace`]): the RIB hands out blocks through it, and a
+//! protocol task allocates a label inline without a round trip to the RIB.
+//! One structure means a block is never handed out over a label an IGP holds,
+//! and the RIB sees every label in use.
 
 use std::collections::BTreeMap;
-use std::ops::Range;
+use std::ops::{Range, RangeInclusive};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crate::spf::label_block::LabelBlock;
 
@@ -44,6 +53,10 @@ pub struct LabelSpace {
     /// SRGB and SRLB of every configured `segment-routing block`. Never
     /// handed out, even where they fall inside the dynamic region.
     reserved: Vec<LabelBlock>,
+    /// Single labels held by IGP instances' pools: label -> pool.
+    local: BTreeMap<u32, u64>,
+    /// The next pool's id.
+    next_pool: u64,
 }
 
 impl Default for LabelSpace {
@@ -58,6 +71,8 @@ impl LabelSpace {
             dynamic: DYNAMIC_START..PLATFORM_LABELS,
             held: BTreeMap::new(),
             reserved: Vec::new(),
+            local: BTreeMap::new(),
+            next_pool: 0,
         }
     }
 
@@ -74,6 +89,7 @@ impl LabelSpace {
             .iter()
             .map(|(start, h)| (*start, h.end))
             .chain(self.reserved.iter().map(|b| (b.start, b.end)))
+            .chain(self.local.keys().map(|l| (*l, l + 1)))
             .collect();
         taken.sort_unstable();
         let mut start = self.dynamic.start;
@@ -116,6 +132,42 @@ impl LabelSpace {
         self.held.retain(|_, h| h.proto != proto);
     }
 
+    /// A new pool's id, for [`LocalLabelPool`].
+    fn new_pool(&mut self) -> u64 {
+        self.next_pool += 1;
+        self.next_pool
+    }
+
+    /// The lowest label in `range` that no pool holds and no handed-out
+    /// block covers, now held by `pool`.
+    fn alloc_local(&mut self, pool: u64, range: RangeInclusive<u32>) -> Option<u32> {
+        let label = range
+            .into_iter()
+            .find(|label| !self.local.contains_key(label) && !self.in_held_block(*label))?;
+        self.local.insert(label, pool);
+        Some(label)
+    }
+
+    /// Whether a handed-out block covers `label`.
+    fn in_held_block(&self, label: u32) -> bool {
+        self.held
+            .range(..=label)
+            .next_back()
+            .is_some_and(|(_, h)| label < h.end)
+    }
+
+    /// Give back `label`, if `pool` holds it.
+    fn release_local(&mut self, pool: u64, label: u32) {
+        if self.local.get(&label) == Some(&pool) {
+            self.local.remove(&label);
+        }
+    }
+
+    /// Give back every label `pool` holds.
+    fn release_pool(&mut self, pool: u64) {
+        self.local.retain(|_, p| *p != pool);
+    }
+
     /// Replace the reserved SR blocks. Returns the handed-out blocks a new
     /// reservation overlaps, with their owners: they stay in use until
     /// released, and the caller says so.
@@ -141,6 +193,71 @@ impl LabelSpace {
                 )
             })
             .collect()
+    }
+}
+
+/// The label space, shared: the RIB hands out blocks through it, and every
+/// IGP instance's [`LocalLabelPool`] draws single labels from it. Cloning
+/// shares it.
+#[derive(Clone, Debug, Default)]
+pub struct SharedLabelSpace(Arc<Mutex<LabelSpace>>);
+
+impl SharedLabelSpace {
+    pub fn lock(&self) -> MutexGuard<'_, LabelSpace> {
+        // A panic while holding the lock leaves the map consistent (every
+        // method updates it in one step), so carry on with it.
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// An instance's pool over its SRLB, the inclusive range
+    /// `[first, last]`.
+    pub fn pool(&self, first: u32, last: u32) -> LocalLabelPool {
+        let id = self.lock().new_pool();
+        LocalLabelPool {
+            space: self.clone(),
+            id,
+            first,
+            last,
+        }
+    }
+}
+
+/// One IGP instance's local labels (its dynamic Adjacency-SIDs, and IS-IS's
+/// Mirror Context labels), drawn one at a time from the node's
+/// [`SharedLabelSpace`]: the lowest label of its range that no instance
+/// holds and no block covers. The node has one MPLS label table, which
+/// forwards a label one way only, so no two instances may hold one label.
+/// What a pool holds goes back when it is dropped, as the instance stops,
+/// disables SR-MPLS, or moves to another SRLB.
+#[derive(Debug)]
+pub struct LocalLabelPool {
+    space: SharedLabelSpace,
+    id: u64,
+    first: u32,
+    last: u32,
+}
+
+impl LocalLabelPool {
+    /// The pool's labels, `(first, last)`.
+    pub fn range(&self) -> (u32, u32) {
+        (self.first, self.last)
+    }
+
+    pub fn allocate(&mut self) -> Option<u32> {
+        self.space
+            .lock()
+            .alloc_local(self.id, self.first..=self.last)
+    }
+
+    /// Give back `label`, if this pool holds it.
+    pub fn release(&mut self, label: u32) {
+        self.space.lock().release_local(self.id, label);
+    }
+}
+
+impl Drop for LocalLabelPool {
+    fn drop(&mut self) {
+        self.space.lock().release_pool(self.id);
     }
 }
 
@@ -311,5 +428,52 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Two instances over the same SRLB never hold the same label, and
+    /// what one gives back, or holds when dropped, the other can take.
+    #[test]
+    fn instances_share_the_local_labels() {
+        let node = SharedLabelSpace::default();
+        let mut v2 = node.pool(15000, 15999);
+        let mut v3 = node.pool(15000, 15999);
+        assert_eq!(v2.allocate(), Some(15000));
+        assert_eq!(v3.allocate(), Some(15001));
+        assert_eq!(v2.allocate(), Some(15002));
+        v3.release(15000); // not v3's: a no-op
+        assert_eq!(v3.allocate(), Some(15003));
+        v2.release(15000);
+        assert_eq!(v3.allocate(), Some(15000));
+        drop(v2);
+        assert_eq!(v3.allocate(), Some(15002));
+    }
+
+    /// A pool allocates only within its own range, and none once the
+    /// range is taken.
+    #[test]
+    fn a_pool_stays_in_its_range() {
+        let node = SharedLabelSpace::default();
+        let mut wide = node.pool(15000, 15001);
+        let mut narrow = node.pool(15001, 15001);
+        assert_eq!(narrow.allocate(), Some(15001));
+        assert_eq!(wide.allocate(), Some(15000));
+        assert_eq!(wide.allocate(), None);
+        assert_eq!(narrow.allocate(), None);
+    }
+
+    /// Blocks and local labels come from one structure: a block is never
+    /// handed out over a label a pool holds, nor a label inside a block.
+    #[test]
+    fn blocks_and_local_labels_never_overlap() {
+        let node = SharedLabelSpace::default();
+        // A pool over part of the dynamic region (an SRLB configured there
+        // and not yet reserved, say).
+        let mut pool = node.pool(24000, 24009);
+        assert_eq!(pool.allocate(), Some(24000));
+        assert_eq!(node.lock().alloc("bgp", 16), Some(block(24001, 24017)));
+        // The pool steps over the block.
+        assert_eq!(pool.allocate(), None, "24001..24009 lie in bgp's block");
+        node.lock().release_all("bgp");
+        assert_eq!(pool.allocate(), Some(24001));
     }
 }

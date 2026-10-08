@@ -1,6 +1,6 @@
 # MPLS Label Allocation — the RIB as the Label Authority
 
-Status: **design; phases 1 and 2 implemented** (2026-10-08: `rib/label_space.rs`; OSPF reads the `default` block). Supersedes the ad-hoc split
+Status: **design; phases 1, 2 and 3a implemented** (2026-10-08: `rib/label_space.rs`; OSPF reads the `default` block; the IGPs' local labels come from the RIB's label space). Supersedes the ad-hoc split
 between the RIB `LabelManager`, the node-shared `LocalLabels` set
 (#2479, #2480) and the hard-coded OSPF SR constants.
 
@@ -592,6 +592,22 @@ or SRLB is advertised and Index-form SIDs get no label; Adj-SID labels
 already held (a graceful restart's) are kept. OSPF already follows an SRLB
 move here, rebuilding its pool and drawing every dynamic Adj-SID again
 (§6.1); IS-IS does so from phase 3.
+
+Phase 3 lands in two parts. 3a retires `LocalLabels`: the RIB's
+`LabelSpace` becomes a `SharedLabelSpace` (`Arc<Mutex<LabelSpace>>`),
+created by the RIB and handed through `ConfigManager` to every protocol as
+`RibSubscriber::label_space()`. An IGP instance's `LocalLabelPool` over its
+SRLB draws single labels from it, inline, and gives them back when dropped;
+labels are owned by pool, and `ProtoId` ownership (§4) is still to come.
+One structure means a dynamic block is never handed out over a label an IGP
+holds, nor an IGP label inside a handed-out block. IS-IS's
+`reconcile_local_pool` now matches OSPF's: it rebuilds the pool when the
+SRLB moves (every Adjacency-SID and Mirror Context label is drawn again),
+and gives every neighbour address without a label one. Before, an adjacency
+that came up while there was no pool (SR-MPLS enabled later, or the block
+late) never got an Adjacency-SID, because `nbr_hello_interpret` labels an
+address only the first time it sees it. 3b, configured Adj-SIDs and
+Binding-SIDs claiming their label from a dynamic holder (§5.1), follows.
 Phase 2 changes OSPF's advertised SRGB. No phase changes Adjacency-SID
 labels by itself; from phase 3, a configured Adj-SID on a dynamically held
 label moves that holder. Phase 5 is the largest, through the VPN, LU, EVPN
