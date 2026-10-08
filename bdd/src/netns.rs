@@ -416,6 +416,14 @@ pub async fn spawn_in_netns_env(
         assignments.push(format!(
             "ZEBRA_OSPF_CHECKPOINT_DIR=/tmp/zebra-rs-ckpt/{netns}"
         ));
+        // Name the cradle engine outright. Otherwise zebra-rs prefers
+        // `$HOME/.zebra/bin/cradle`, and under sudo that is root's: a stale
+        // dev copy there replaced the packaged engine for every BDD daemon
+        // without a trace. See `toolchain::cradle_bin`.
+        assignments.push(format!(
+            "ZEBRA_CRADLE_BIN={}",
+            toolchain::cradle_bin().display()
+        ));
     }
     assignments.extend(env.iter().map(|(k, v)| format!("{k}={v}")));
 
