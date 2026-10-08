@@ -254,9 +254,9 @@ pub enum Message {
         vrf_id: u32,
     },
     /// Reserve a dynamic MPLS label block of `size` labels for `proto`
-    /// from the central [`super::label_manager::LabelManager`]. The RIB
-    /// replies synchronously with a `RibRx::LabelBlock`. Used by BGP for
-    /// L3VPN per-VRF labels (LDP / others later).
+    /// from the RIB's [`super::label_space::LabelSpace`]. The RIB replies
+    /// synchronously with a `RibRx::LabelBlock`. Used by BGP for its
+    /// per-VRF, per-EVI, ESI, VPWS and transit labels.
     LabelBlockRequest {
         proto: String,
         size: u32,
@@ -1318,9 +1318,10 @@ pub struct Rib {
     /// and re-resolved on global-table route changes.
     pub nht: super::nht::NhtRegistry,
 
-    /// Central dynamic MPLS label-block manager. Hands out non-
-    /// overlapping label blocks to protocols (BGP L3VPN today).
-    pub label_manager: super::label_manager::LabelManager,
+    /// The dynamic MPLS label space: hands out non-overlapping label
+    /// blocks to protocols (BGP today) from 24000 up, clear of every
+    /// configured SR block.
+    pub label_space: super::label_space::LabelSpace,
     pub nmap: NexthopMap,
     /// Effective global Router ID — what subscribers receive via
     /// `RibRx::RouterIdUpdate` and what the subscribe-time replay
@@ -1466,7 +1467,7 @@ impl Rib {
             block_watch: BTreeMap::new(),
             locator_watch: BTreeMap::new(),
             nht: super::nht::NhtRegistry::default(),
-            label_manager: super::label_manager::LabelManager::new(),
+            label_space: super::label_space::LabelSpace::new(),
             nmap: NexthopMap::default(),
             router_id: Ipv4Addr::UNSPECIFIED,
             router_id_config: None,
@@ -1478,6 +1479,7 @@ impl Rib {
             overrun_resync_last: None,
         };
         rib.show_build();
+        rib.reserve_sr_blocks();
         Ok(rib)
     }
 
@@ -1544,7 +1546,7 @@ impl Rib {
     /// pool gets no reply (the requester degrades to label-less); a
     /// missing subscriber returns the block rather than stranding it.
     fn label_block_request(&mut self, proto: String, size: u32) {
-        let Some(block) = self.label_manager.alloc(&proto, size) else {
+        let Some(block) = self.label_space.alloc(&proto, size) else {
             tracing::warn!(%proto, size, "label block request: dynamic pool exhausted");
             return;
         };
@@ -1552,7 +1554,29 @@ impl Rib {
         if let Some(sub) = self.client_registry.subscriber_for_proto(&proto) {
             let _ = sub.rib_rx_tx.send(RibRx::LabelBlock { start, size });
         } else {
-            self.label_manager.release(&proto, start, size);
+            self.label_space.release(&proto, start, size);
+        }
+    }
+
+    /// Keep the dynamic label space clear of every configured SR block,
+    /// the SRGB and SRLB of each. Called at startup and on every block
+    /// change. A block already handed out that a new SR block overlaps
+    /// stays in use until its owner releases it; say so, since the two
+    /// will collide in the label table.
+    fn reserve_sr_blocks(&mut self) {
+        let blocks = self
+            .blocks
+            .values()
+            .flat_map(|b| [b.global.clone(), b.local.clone()])
+            .flatten();
+        for (held, proto) in self.label_space.set_reserved(blocks) {
+            tracing::warn!(
+                %proto,
+                first = held.start,
+                last = held.end - 1,
+                "segment-routing block overlaps dynamic labels already handed out; \
+                 they stay in use until released"
+            );
         }
     }
 
@@ -2564,7 +2588,7 @@ impl Rib {
     async fn proto_cleanup(&mut self, proto: String) {
         // Reclaim any dynamic label blocks the protocol held — done
         // before the rtype gate so it covers every requester.
-        self.label_manager.release_all(&proto);
+        self.label_space.release_all(&proto);
 
         // And its SRv6 SIDs, before the route walk below would take
         // their RIB rows out from under `sid_uninstall`. A protocol
@@ -3178,7 +3202,7 @@ impl Rib {
                 self.label_block_request(proto, size);
             }
             Message::LabelBlockRelease { proto, start, size } => {
-                self.label_manager.release(&proto, start, size);
+                self.label_space.release(&proto, start, size);
             }
             Message::IlmAdd { label, ilm } => {
                 self.ilm_add(label, ilm).await;
@@ -3752,6 +3776,7 @@ impl Rib {
             Message::BlockAdd { name, config } => {
                 let block = config.to_block();
                 self.blocks.insert(name.clone(), block);
+                self.reserve_sr_blocks();
                 self.notify_block_watchers(&name);
             }
             Message::BlockDel { name } => {
@@ -3763,6 +3788,7 @@ impl Rib {
                     self.blocks
                         .insert(DEFAULT_BLOCK_NAME.to_string(), Block::default_block());
                 }
+                self.reserve_sr_blocks();
                 self.notify_block_watchers(&name);
             }
             Message::LocatorAdd { name, config } => {
@@ -6548,5 +6574,78 @@ mod proto_cleanup_ospf_tests {
         assert_eq!(ospf(&rib), (true, false, vec![16001]), "v3's, v2's left");
         rib.proto_cleanup("ospf".to_string()).await;
         assert_eq!(ospf(&rib), (false, false, vec![]), "v2's");
+    }
+}
+
+#[cfg(test)]
+mod label_space_tests {
+    use super::*;
+    use crate::rib::client::ProtoId;
+    use tokio::sync::mpsc::UnboundedReceiver;
+
+    fn subscribe_bgp(rib: &mut Rib, id: u32) -> UnboundedReceiver<RibRx> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        rib.subscribe(ProtoId::from_raw(id), tx, "bgp".to_string(), 0, false);
+        rx
+    }
+
+    /// Ask for a block for "bgp" and return the reply, skipping the
+    /// subscribe-time dump.
+    async fn request(
+        rib: &mut Rib,
+        rx: &mut UnboundedReceiver<RibRx>,
+        size: u32,
+    ) -> Option<(u32, u32)> {
+        let msg = Message::LabelBlockRequest {
+            proto: "bgp".to_string(),
+            size,
+        };
+        rib.process_msg(msg, RT_TABLE_MAIN).await;
+        while let Ok(reply) = rx.try_recv() {
+            if let RibRx::LabelBlock { start, size } = reply {
+                return Some((start, size));
+            }
+        }
+        None
+    }
+
+    #[tokio::test]
+    async fn bgp_label_blocks_come_from_24000_up() {
+        let mut rib = Rib::new(false).expect("rib");
+        let mut rx = subscribe_bgp(&mut rib, 1);
+        assert_eq!(request(&mut rib, &mut rx, 1024).await, Some((24000, 1024)));
+        assert_eq!(request(&mut rib, &mut rx, 1024).await, Some((25024, 1024)));
+    }
+
+    #[tokio::test]
+    async fn a_configured_sr_block_is_stepped_around_until_deleted() {
+        let mut rib = Rib::new(false).expect("rib");
+        let mut rx = subscribe_bgp(&mut rib, 1);
+        let config = BlockConfig {
+            global_start: Some(24500),
+            global_range: Some(1000),
+            ..Default::default()
+        };
+        let add = Message::BlockAdd {
+            name: "core".to_string(),
+            config,
+        };
+        rib.process_msg(add, RT_TABLE_MAIN).await;
+        assert_eq!(request(&mut rib, &mut rx, 1024).await, Some((25500, 1024)));
+        let del = Message::BlockDel {
+            name: "core".to_string(),
+        };
+        rib.process_msg(del, RT_TABLE_MAIN).await;
+        assert_eq!(request(&mut rib, &mut rx, 1024).await, Some((24000, 1024)));
+    }
+
+    #[tokio::test]
+    async fn cleanup_returns_a_protocols_blocks() {
+        let mut rib = Rib::new(false).expect("rib");
+        let mut rx = subscribe_bgp(&mut rib, 1);
+        assert_eq!(request(&mut rib, &mut rx, 1024).await, Some((24000, 1024)));
+        rib.proto_cleanup("bgp".to_string()).await;
+        let mut rx = subscribe_bgp(&mut rib, 2);
+        assert_eq!(request(&mut rib, &mut rx, 1024).await, Some((24000, 1024)));
     }
 }

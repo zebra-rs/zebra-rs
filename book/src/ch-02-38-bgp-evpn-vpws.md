@@ -485,8 +485,8 @@ labels:
 ```
 
 ```
-  Local Label: 16
-  Remote PE: 2.2.2.2 (label 16) (via 2.2.2.2)
+  Local Label: 24000
+  Remote PE: 2.2.2.2 (label 24000) (via 2.2.2.2)
 ```
 
 A multihomed service adds its segment and elected role. `(from ce1)` marks a

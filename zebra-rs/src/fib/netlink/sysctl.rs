@@ -27,6 +27,9 @@ const CTLNAMES: &[(&str, &str)] = &[
     // in Active. The accept dispatcher then routes the connection to the
     // owning VRF task by source IP. Mirrors FRR's `bgp_vrf` enablement.
     ("net.ipv4.tcp_l3mdev_accept", "1"),
+    // The kernel's ceiling: it caps the sysctl at 2^20 - 1, and an ILM's
+    // label must be below it, so 1048574 is the last usable label. The
+    // dynamic label space ends there (`rib::label_space::PLATFORM_LABELS`).
     ("net.mpls.platform_labels", "1048575"),
 ];
 
@@ -86,4 +89,19 @@ pub fn sysctl_seg6_enable(ifname: &String) -> anyhow::Result<()> {
 
 pub fn sysctl_keep_addr_on_down(ifname: &String) -> anyhow::Result<()> {
     sysctl_set(&format!("net.ipv6.conf.{}.keep_addr_on_down", ifname), "1")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CTLNAMES;
+    use crate::rib::label_space::PLATFORM_LABELS;
+
+    #[test]
+    fn platform_labels_matches_the_label_space() {
+        let value = CTLNAMES
+            .iter()
+            .find(|(name, _)| *name == "net.mpls.platform_labels")
+            .map(|(_, value)| *value);
+        assert_eq!(value, Some(PLATFORM_LABELS.to_string().as_str()));
+    }
 }

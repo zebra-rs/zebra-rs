@@ -1,6 +1,6 @@
 # MPLS Label Allocation — the RIB as the Label Authority
 
-Status: **design, not started** (2026-10-08). Supersedes the ad-hoc split
+Status: **design; phase 1 implemented** (2026-10-08, `rib/label_space.rs`). Supersedes the ad-hoc split
 between the RIB `LabelManager`, the node-shared `LocalLabels` set
 (#2479, #2480) and the hard-coded OSPF SR constants.
 
@@ -184,7 +184,7 @@ Defaults, all reserved in one RIB-owned structure:
 | 16–14999 | static | operator | `mpls label` static bindings; never handed out dynamically. Static bindings may use any label outside the SRLB, SRGB and dynamic range (§7); this is what that leaves by default |
 | 15000–15999 | SRLB | RIB `LabelSpace` per label, or the operator explicitly | dynamic Adj-SIDs of every IGP and address family, IS-IS Mirror Context labels; configured Adj-SIDs (`adjacency-sid absolute`) and explicit Binding-SIDs; default block SRLB grows from 100 to **1000** |
 | 16000–23999 | SRGB | nobody (base + index) | Prefix-SIDs of every IGP and address family |
-| 24000–1048575 | dynamic | RIB `LabelSpace` in chunks | BGP labels, dynamic Binding-SIDs (later) |
+| 24000–1048574 | dynamic | RIB `LabelSpace` in chunks | BGP labels, dynamic Binding-SIDs (later) |
 
 Rules:
 
@@ -196,10 +196,15 @@ Rules:
 - The dynamic range is configurable (new YANG, §8) and always skips every
   configured block and static binding, even when they fall inside it.
 - The upper bound is the kernel's: `net.mpls.platform_labels = N` admits
-  labels `0..N-1`. Today the sysctl is 1048575 (`fib/netlink/sysctl.rs:30`)
-  while `DYNAMIC_END` is 0x100000 (`label_manager.rs:28`), so the last label
-  the pool can hand out is one the kernel rejects. Set the sysctl to
-  1048576 and derive the dynamic end from it.
+  labels `0..N-1`, and the kernel caps N at 2^20 − 1 (`label_limit` in
+  `net/mpls/af_mpls.c`; writing 1048576 fails with EINVAL, checked in a
+  scratch namespace). So with the sysctl at its maximum, 1048575
+  (`fib/netlink/sysctl.rs`), the last usable label is **1048574**, and the
+  last 20-bit label, 1048575, can never be installed (`ip -f mpls route add
+  1048575` fails with "Label >= configured maximum in platform_labels").
+  The former `LabelManager` could hand it out (its end was 0x100000); the
+  dynamic region now ends at 1048574 (`label_space::PLATFORM_LABELS`, which
+  a test ties to the sysctl).
 
 ## 4. The RIB `LabelSpace`
 
@@ -562,7 +567,7 @@ Each phase is one PR, smallest and most urgent first.
 
 | # | Phase | Fixes |
 | - | ----- | ----- |
-| 1 | `LabelSpace` in the RIB serving today's `LabelBlockRequest` from 24000, skipping every configured block; `platform_labels` 1048576 | BGP growing into the SR blocks; the off-by-one |
+| 1 | `LabelSpace` in the RIB serving today's `LabelBlockRequest` from 24000, skipping every configured block; the dynamic region ends at 1048574, the kernel's last usable label | BGP growing into the SR blocks; the off-by-one |
 | 2 | OSPFv2/v3 read the `default` block and follow its changes (§6.1); default SRLB 1000; OSPFv2 `show` end | two sources of truth for SR ranges; OSPF ignoring a block change |
 | 3 | IGP dynamic Adj-SIDs and Mirror Context labels per label from the `LabelSpace` SRLB region; configured Adj-SIDs and Binding-SIDs claimed there, moving a dynamic holder (§5.1); an SRLB change moves every dynamic Adj-SID (§6.1); `LocalLabels` retired | RIB blind to local labels; a dynamic Adj-SID could take a configured label; IS-IS Adj-SIDs left in the old SRLB after a change |
 | 4 | ILM candidates keyed by owner; `Releasing` and `Revoking` complete only once the RIB withdraws the owner's ILMs; old Prefix-SID ILMs held through an SRGB change (§6.1) | reuse races; OSPFv2/v3 overwrite at one label; forwarding gap on an SRGB change |
@@ -571,7 +576,13 @@ Each phase is one PR, smallest and most urgent first.
 | 7 | AF_MPLS dump at startup, `Stale` labels, sweep; IGP graceful restart re-reserves its checkpointed Adj-SIDs | EEXIST after a crash; OSPF GR replay not reserving `lan_adj_sids` |
 
 Phase 1 alone removes the live overlap hazard without touching BGP's
-allocation flow; it is also the one that moves BGP labels to 24000+.
+allocation flow; it is also the one that moves BGP labels to 24000+. It
+keeps `LabelSpace` inside the RIB task, owned by protocol name as the old
+`LabelManager` was; the shared handles and `ProtoId` ownership of §4 come
+with phases 3 to 5. Allocation is lowest-first-fit, so a released block's
+space is reused by the next request that fits in it, not only by one of the
+same size. A new SR block over labels already handed out is logged; refusing
+it at commit is phase 6.
 Phase 2 changes OSPF's advertised SRGB. No phase changes Adjacency-SID
 labels by itself; from phase 3, a configured Adj-SID on a dynamically held
 label moves that holder. Phase 5 is the largest, through the VPN, LU, EVPN
