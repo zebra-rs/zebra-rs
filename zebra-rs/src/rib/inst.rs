@@ -2291,8 +2291,8 @@ impl Rib {
     /// [`crate::config::ConfigManager::subscribe_to_rib`] before this
     /// runs; we record the row in `client_registry`, which is the
     /// sole source of truth for both inbound dispatch and the
-    /// outbound push paths. The initial-state dump and the trailing
-    /// `EoR` are unchanged.
+    /// outbound push paths, after the initial-state dump and the
+    /// trailing `EoR` (`send_subscribe_dump`).
     pub fn subscribe(
         &mut self,
         proto_id: ProtoId,
@@ -2303,11 +2303,12 @@ impl Rib {
     ) {
         // A subscriber may have dropped its receiver before this
         // handler ran (e.g. its constructor failed after the
-        // `Message::Subscribe` was already queued). Every dump send
-        // below is therefore best-effort: on the first `SendError` we
-        // bail out without registering the subscriber, so we don't
-        // panic and don't leave a dead entry in `client_registry`.
-        if tx.is_closed() {
+        // `Message::Subscribe` was already queued, or it was despawned).
+        // It is then not registered, so we don't leave a dead entry in
+        // `client_registry`, and its id is retired instead: its client
+        // can have installs queued on the inbound channel, and its
+        // cleanup (`proto_cleanup`) retires only registered ids.
+        if tx.is_closed() || !self.send_subscribe_dump(&tx, vrf_id, global_links) {
             // Benign during startup churn: a per-VRF task that respawns
             // (table_id / SID fill in) drops its earlier subscribe before
             // this handler delivers the dump. Gated with the task
@@ -2317,8 +2318,31 @@ impl Rib {
                     "rib: subscriber '{proto}' dropped before subscribe could deliver dump; skipping"
                 );
             }
+            self.client_registry.retire_id(proto_id);
             return;
         }
+        self.client_registry
+            .register_with_id(proto_id, &proto, tx, vrf_id, global_links);
+        // Redistribute registrations ride the inbound channel while this
+        // Subscribe rides the message channel, and `event_loop`'s
+        // `select!` gives the two no relative order. A RedistAdd /
+        // RedistTableAdd / RedistDefaultAdd processed before this row
+        // landed found no subscriber and its walk-and-replay was dropped
+        // — permanently, because routes already in the store never
+        // re-fire as deltas. Replay whatever the recorded filters and
+        // watches imply now that the row exists.
+        self.replay_pending_redist(&proto);
+    }
+
+    /// Send a new subscriber its initial-state dump and the trailing
+    /// `EoR`. Every send is best-effort: returns `false` at the first
+    /// `SendError` (the receiver is gone) rather than panicking.
+    fn send_subscribe_dump(
+        &self,
+        tx: &UnboundedSender<RibRx>,
+        vrf_id: u32,
+        global_links: bool,
+    ) -> bool {
         // Link dump. Match the steady-state dispatcher: an ordinary
         // subscriber sees only links in its own VRF, while an explicit
         // `global_links` subscriber sees every VRF. Sending every link here
@@ -2332,18 +2356,18 @@ impl Rib {
             }
             let msg = RibRx::LinkAdd(link.clone());
             if tx.send(msg).is_err() {
-                return;
+                return false;
             }
             for addr in link.addr4.iter() {
                 let msg = RibRx::AddrAdd(addr.clone());
                 if tx.send(msg).is_err() {
-                    return;
+                    return false;
                 }
             }
             for addr in link.addr6.iter() {
                 let msg = RibRx::AddrAdd(addr.clone());
                 if tx.send(msg).is_err() {
-                    return;
+                    return false;
                 }
             }
         }
@@ -2410,7 +2434,7 @@ impl Rib {
         if !replay_router_id.is_unspecified() {
             let msg = RibRx::RouterIdUpdate(replay_router_id);
             if tx.send(msg).is_err() {
-                return;
+                return false;
             }
         }
         // VRF dump — only for default-VRF subscribers (BGP). A
@@ -2426,7 +2450,7 @@ impl Rib {
                     ifindex: vrf.ifindex,
                 };
                 if tx.send(msg).is_err() {
-                    return;
+                    return false;
                 }
                 // RT snapshot follows the VrfAdd. The receiver
                 // can already key off `name` because the replay
@@ -2441,24 +2465,11 @@ impl Rib {
                     mup_export_rts: vrf.mup_export_rts.clone(),
                 };
                 if tx.send(rt_msg).is_err() {
-                    return;
+                    return false;
                 }
             }
         }
-        if tx.send(RibRx::EoR).is_err() {
-            return;
-        }
-        self.client_registry
-            .register_with_id(proto_id, &proto, tx, vrf_id, global_links);
-        // Redistribute registrations ride the inbound channel while this
-        // Subscribe rides the message channel, and `event_loop`'s
-        // `select!` gives the two no relative order. A RedistAdd /
-        // RedistTableAdd / RedistDefaultAdd processed before this row
-        // landed found no subscriber and its walk-and-replay was dropped
-        // — permanently, because routes already in the store never
-        // re-fire as deltas. Replay whatever the recorded filters and
-        // watches imply now that the row exists.
-        self.replay_pending_redist(&proto);
+        tx.send(RibRx::EoR).is_ok()
     }
 
     /// Replay every redistribute walk this protocol's recorded
@@ -2555,10 +2566,36 @@ impl Rib {
         // before the rtype gate so it covers every requester.
         self.label_manager.release_all(&proto);
 
-        let rtype = match proto.as_str() {
-            "bgp" => RibType::Bgp,
-            "isis" => RibType::Isis,
-            "ospf" => RibType::Ospf,
+        // And its SRv6 SIDs, before the route walk below would take
+        // their RIB rows out from under `sid_uninstall`. A protocol
+        // releases its own SIDs as it handles its config deletes, but a
+        // despawn aborts its task right after queueing them
+        // (`despawn_bgp` and siblings), so one that had not handled them
+        // yet never sent the `SidDel`. The SID stayed in the table, and
+        // in the kernel, for good: `isis_sr_switchover`'s rollback to
+        // SR-MPLS found BGP's End.DT6 still there.
+        let sids: Vec<Ipv6Addr> = self
+            .sids
+            .iter()
+            .filter(|(_, sid)| sid.owner.proto == proto)
+            .map(|(addr, _)| *addr)
+            .collect();
+        for addr in sids {
+            self.sid_uninstall(addr).await;
+        }
+
+        // The rtype of the protocol's main-table routes and ILM entries,
+        // and the families it installs them in. OSPFv2 and OSPFv3 both
+        // install `RibType::Ospf`: v2 only IPv4 routes and ILM entries
+        // with IPv4 gateways, v3 only IPv6 ones (the split `SweepStale`
+        // keys on too). "ospf" used to walk both families, taking out
+        // OSPFv3's routes as well, and "ospfv3" had no rtype here, so
+        // its own routes stayed for good.
+        let (rtype, v4, v6) = match proto.as_str() {
+            "bgp" => (RibType::Bgp, true, true),
+            "isis" => (RibType::Isis, true, true),
+            "ospf" => (RibType::Ospf, true, false),
+            "ospfv3" => (RibType::Ospf, false, true),
             // Protocols with no main-table rtype (e.g. a per-VRF
             // instance like `"isis:vrf:<name>"`, whose routes live in
             // `vrf_tables` and are reclaimed by `VrfDel`) still need
@@ -2569,11 +2606,13 @@ impl Rib {
             }
         };
 
+        let in_family = |is_v6: bool| if is_v6 { v6 } else { v4 };
+
         let v4_prefixes: Vec<Ipv4Net> = self
             .table
             .iter()
             .filter_map(|(prefix, entries)| {
-                entries.iter().any(|e| e.rtype == rtype).then_some(prefix)
+                (v4 && entries.iter().any(|e| e.rtype == rtype)).then_some(prefix)
             })
             .collect();
         for prefix in v4_prefixes {
@@ -2585,7 +2624,7 @@ impl Rib {
             .table_v6
             .iter()
             .filter_map(|(prefix, entries)| {
-                entries.iter().any(|e| e.rtype == rtype).then_some(prefix)
+                (v6 && entries.iter().any(|e| e.rtype == rtype)).then_some(prefix)
             })
             .collect();
         for prefix in v6_prefixes {
@@ -2602,7 +2641,7 @@ impl Rib {
             .flat_map(|(label, entries)| {
                 entries
                     .iter()
-                    .filter(|e| e.rtype == rtype)
+                    .filter(|e| e.rtype == rtype && in_family(ilm_gateways_v6(e)))
                     .map(move |e| (*label, e.clone()))
             })
             .collect();
@@ -2617,9 +2656,7 @@ impl Rib {
     /// watchers without touching the FIB. Used by
     /// `proto_cleanup` after withdrawing routes.
     fn proto_unregister(&mut self, proto: &str) {
-        if let Some(proto_id) = self.client_registry.find_by_proto(proto) {
-            self.client_registry.unregister(proto_id);
-        }
+        self.client_registry.retire(proto);
         self.redist_filters.remove(proto);
         self.redist_default_watch.remove(proto);
         self.redist_table_watch.retain(|_, protos| {
@@ -3919,6 +3956,12 @@ impl Rib {
                 global_links,
             } => {
                 self.subscribe(proto_id, tx, proto, vrf_id, global_links);
+                // What the instance sent before its Subscribe was handled
+                // was held (`process_inbound`); handle it now, in order. A
+                // failed subscription retired the id, so it is dropped.
+                for env in self.client_registry.take_deferred(proto_id) {
+                    Box::pin(self.process_inbound(env)).await;
+                }
             }
             Message::ProtoCleanup { proto } => {
                 self.proto_cleanup(proto).await;
@@ -5540,22 +5583,7 @@ impl Rib {
                     self.process_msg(msg, RT_TABLE_MAIN).await;
                 }
                 Some(env) = self.inbound_rx.recv() => {
-                    // Look up the sender's VRF binding from
-                    // `client_registry` and translate to the kernel
-                    // `rtm_table` id. `vrf_id == 0` is default-VRF
-                    // (= `RT_TABLE_MAIN`); a non-zero value flows
-                    // straight through as the kernel table id —
-                    // that's what `VrfIdAllocator` hands out and what
-                    // `vrf_tables` is keyed by.
-                    let vrf_id = self.client_registry.vrf_id_for(env.from);
-                    let table_id = if vrf_id == 0 { RT_TABLE_MAIN } else { vrf_id };
-                    tracing::trace!(
-                        from = %env.from,
-                        vrf_id,
-                        table_id,
-                        "rib: inbound envelope",
-                    );
-                    self.process_msg(env.msg, table_id).await;
+                    self.process_inbound(env).await;
                 }
                 Some(msg) = self.fib.rx.recv() => {
                     // Overrun is intercepted here rather than inside
@@ -5576,6 +5604,51 @@ impl Rib {
                 }
             }
         }
+    }
+}
+
+impl Rib {
+    /// Handle an envelope from a protocol instance. An envelope from an
+    /// instance that has been cleaned up is dropped
+    /// (`ClientRegistry::is_retired`): it was sent before the instance
+    /// stopped and was still queued when the cleanup ran on the other
+    /// channel. One from an instance whose `Subscribe`, also on the
+    /// other channel, isn't handled yet is held until it is
+    /// (`ClientRegistry::defer`).
+    async fn process_inbound(&mut self, env: crate::rib::client::RibInbound) {
+        if self.client_registry.is_retired(env.from) {
+            tracing::debug!(from = %env.from, "rib: dropping an envelope from a retired instance");
+            return;
+        }
+        if !self.client_registry.contains(env.from) {
+            self.client_registry.defer(env);
+            return;
+        }
+        // Look up the sender's VRF binding from `client_registry` and
+        // translate to the kernel `rtm_table` id. `vrf_id == 0` is
+        // default-VRF (= `RT_TABLE_MAIN`); a non-zero value flows
+        // straight through as the kernel table id — that's what
+        // `VrfIdAllocator` hands out and what `vrf_tables` is keyed by.
+        let vrf_id = self.client_registry.vrf_id_for(env.from);
+        let table_id = if vrf_id == 0 { RT_TABLE_MAIN } else { vrf_id };
+        tracing::trace!(
+            from = %env.from,
+            vrf_id,
+            table_id,
+            "rib: inbound envelope",
+        );
+        self.process_msg(env.msg, table_id).await;
+    }
+}
+
+/// Whether an ILM entry forwards to IPv6 gateways. Tells OSPFv3's
+/// entries from OSPFv2's at cleanup: both carry `RibType::Ospf`, and
+/// each version's gateways are of its own family.
+fn ilm_gateways_v6(entry: &IlmEntry) -> bool {
+    match &entry.nexthop {
+        Nexthop::Uni(uni) => uni.addr.is_ipv6(),
+        Nexthop::Multi(multi) => multi.nexthops.iter().any(|uni| uni.addr.is_ipv6()),
+        _ => false,
     }
 }
 
@@ -6239,5 +6312,241 @@ mod kernel_nexthop_tests {
             gid.is_some_and(|gid| gid > 40),
             "above the kernel's: {gid:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod proto_cleanup_sid_tests {
+    use super::*;
+
+    fn sid(addr: &str, proto: &str) -> Sid {
+        Sid {
+            addr: addr.parse().unwrap(),
+            behavior: SidBehavior::EndDT6,
+            context: SidContext::None,
+            owner: SidOwner::new(proto, 0),
+            locator: "LOC1".to_string(),
+            allocation_type: crate::rib::SidAllocationType::Dynamic,
+            ifindex: 0,
+            nh6: None,
+            structure: None,
+            table_id: 0,
+            segs: Vec::new(),
+            flavors: 0,
+        }
+    }
+
+    /// A protocol's cleanup releases the SRv6 SIDs it held, and only
+    /// those. A despawned protocol's task is aborted right after its
+    /// config deletes are queued, so its own `SidDel` may never go out:
+    /// its SIDs stayed for good. `ospfv3`'s cleanup has no route type to
+    /// walk, and releases its SIDs all the same.
+    #[tokio::test]
+    async fn a_protocols_cleanup_releases_its_sids() {
+        let mut rib = Rib::new(false).expect("rib");
+        for (addr, proto) in [
+            ("fcbb:bbbb:1:40::", "bgp"),
+            ("fcbb:bbbb:1:41::", "bgp"),
+            ("fcbb:bbbb:1:e000::", "isis"),
+            ("fcbb:bbbb:1:e001::", "ospfv3"),
+        ] {
+            rib.sid_install(sid(addr, proto)).await;
+        }
+        let owners = |rib: &Rib| -> Vec<String> {
+            rib.sids.values().map(|s| s.owner.proto.clone()).collect()
+        };
+        assert_eq!(owners(&rib).len(), 4, "installed");
+
+        rib.proto_cleanup("bgp".to_string()).await;
+        assert_eq!(owners(&rib), ["isis", "ospfv3"], "bgp's released");
+
+        rib.proto_cleanup("ospfv3".to_string()).await;
+        assert_eq!(owners(&rib), ["isis"], "ospfv3's released");
+    }
+
+    /// A protocol's envelopes ride a different channel from its cleanup,
+    /// so one it sent before it stopped can be handled after the cleanup.
+    /// Such an envelope is dropped. Here it is a `SidAdd` from BGP's
+    /// instance, which would re-install the SID the cleanup had just
+    /// released, and nothing would remove it again.
+    #[tokio::test]
+    async fn a_cleaned_up_instance_installs_nothing_more() {
+        use crate::rib::client::{ProtoId, RibInbound};
+        let mut rib = Rib::new(false).expect("rib");
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let bgp = ProtoId::from_raw(90);
+        rib.client_registry
+            .register_with_id(bgp, "bgp", tx, 0, false);
+        rib.proto_cleanup("bgp".to_string()).await;
+        let queued = RibInbound {
+            from: bgp,
+            msg: Message::SidAdd {
+                sid: sid("fcbb:bbbb:1:40::", "bgp"),
+            },
+        };
+        rib.process_inbound(queued).await;
+        assert!(rib.sids.is_empty(), "dropped");
+    }
+
+    /// A respawned instance's `Subscribe` is queued behind its
+    /// predecessor's cleanup, while its installs ride the other
+    /// channel and can be handled first. The cleanup matches by name,
+    /// so it would release the new instance's SID; the install is held
+    /// until the `Subscribe` is handled, after the cleanup.
+    #[tokio::test]
+    async fn a_predecessors_cleanup_spares_the_respawned_instance() {
+        use crate::rib::client::{ProtoId, RibInbound};
+        let mut rib = Rib::new(false).expect("rib");
+        let (old_tx, _old_rx) = tokio::sync::mpsc::unbounded_channel();
+        rib.subscribe(ProtoId::from_raw(96), old_tx, "bgp".to_string(), 0, false);
+        let new = ProtoId::from_raw(97);
+        let install = RibInbound {
+            from: new,
+            msg: Message::SidAdd {
+                sid: sid("fcbb:bbbb:1:40::", "bgp"),
+            },
+        };
+        rib.process_inbound(install).await;
+        assert!(rib.sids.is_empty(), "held");
+        rib.proto_cleanup("bgp".to_string()).await;
+        let (new_tx, _new_rx) = tokio::sync::mpsc::unbounded_channel();
+        let subscribe = Message::Subscribe {
+            proto_id: new,
+            tx: new_tx,
+            proto: "bgp".to_string(),
+            vrf_id: 0,
+            global_links: false,
+        };
+        rib.process_msg(subscribe, RT_TABLE_MAIN).await;
+        assert_eq!(rib.sids.len(), 1, "installed once subscribed");
+    }
+
+    /// An instance can stop before RIB handles its `Subscribe`. It is
+    /// then never registered, so its cleanup, which retires by name,
+    /// can't find it (and a respawned per-VRF task's first instance
+    /// gets no cleanup at all). The failed subscription itself retires
+    /// the id, and an install the instance queued before it stopped is
+    /// dropped.
+    #[tokio::test]
+    async fn an_instance_gone_before_its_subscribe_installs_nothing() {
+        use crate::rib::client::{ProtoId, RibInbound};
+        let mut rib = Rib::new(false).expect("rib");
+        let bgp = ProtoId::from_raw(93);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        drop(rx);
+        rib.subscribe(bgp, tx, "bgp".to_string(), 0, false);
+        let queued = RibInbound {
+            from: bgp,
+            msg: Message::SidAdd {
+                sid: sid("fcbb:bbbb:1:40::", "bgp"),
+            },
+        };
+        rib.process_inbound(queued).await;
+        assert!(rib.sids.is_empty(), "dropped");
+    }
+}
+
+#[cfg(test)]
+mod proto_cleanup_ospf_tests {
+    use super::*;
+    use crate::rib::NexthopMulti;
+
+    /// An OSPF route of the shape of an `area range` discard.
+    fn discard() -> RibEntry {
+        let mut rib = RibEntry::new(RibType::Ospf);
+        rib.distance = 110;
+        rib.nexthop = Nexthop::Blackhole(10);
+        rib
+    }
+
+    /// An OSPF ILM entry swapping toward `gateways` (ECMP when several).
+    fn ilm(label: u32, gateways: &[&str]) -> IlmEntry {
+        let mut unis: Vec<NexthopUni> = gateways
+            .iter()
+            .map(|gateway| NexthopUni {
+                addr: gateway.parse().unwrap(),
+                mpls_label: vec![label],
+                ..Default::default()
+            })
+            .collect();
+        let nexthop = if unis.len() == 1 {
+            Nexthop::Uni(unis.remove(0))
+        } else {
+            Nexthop::Multi(NexthopMulti {
+                nexthops: unis,
+                ..Default::default()
+            })
+        };
+        IlmEntry {
+            ilm_type: IlmType::Node(1),
+            nexthop,
+            ..IlmEntry::new(RibType::Ospf)
+        }
+    }
+
+    const V4: &str = "10.10.0.0/16";
+    const V6: &str = "2001:db8:10::/48";
+
+    /// A RIB holding an OSPFv2 route and ILM entry (IPv4, label 16001)
+    /// and an OSPFv3 route and ILM entry (IPv6, label 16002).
+    async fn both_versions() -> Rib {
+        let mut rib = Rib::new(false).expect("rib");
+        for msg in [
+            Message::Ipv4Add {
+                prefix: V4.parse().unwrap(),
+                rib: discard(),
+            },
+            Message::Ipv6Add {
+                prefix: V6.parse().unwrap(),
+                rib: discard(),
+            },
+            Message::IlmAdd {
+                label: 16001,
+                ilm: ilm(16001, &["10.0.0.2"]),
+            },
+            Message::IlmAdd {
+                label: 16002,
+                ilm: ilm(16002, &["fe80::2", "fe80::3"]),
+            },
+        ] {
+            rib.process_msg(msg, RT_TABLE_MAIN).await;
+        }
+        rib
+    }
+
+    /// Whether the main tables hold the OSPF route for `V4` and `V6`,
+    /// and the labels with an OSPF ILM entry.
+    fn ospf(rib: &Rib) -> (bool, bool, Vec<u32>) {
+        let is_ospf = |entries: &RibEntries| entries.iter().any(|e| e.rtype == RibType::Ospf);
+        let labels = rib
+            .ilm
+            .iter()
+            .filter(|(_, entries)| entries.iter().any(|e| e.rtype == RibType::Ospf))
+            .map(|(label, _)| *label)
+            .collect();
+        (
+            rib.table.get(&V4.parse().unwrap()).is_some_and(is_ospf),
+            rib.table_v6.get(&V6.parse().unwrap()).is_some_and(is_ospf),
+            labels,
+        )
+    }
+
+    /// OSPFv2 and OSPFv3 both install `RibType::Ospf`, v2 in IPv4 and v3
+    /// in IPv6. Each version's cleanup withdraws its own routes and ILM
+    /// entries, and leaves the other's, whichever goes first.
+    #[tokio::test]
+    async fn an_ospf_versions_cleanup_takes_only_its_own() {
+        let mut rib = both_versions().await;
+        assert_eq!(ospf(&rib), (true, true, vec![16001, 16002]));
+        rib.proto_cleanup("ospf".to_string()).await;
+        assert_eq!(ospf(&rib), (false, true, vec![16002]), "v2's, v3's left");
+        rib.proto_cleanup("ospfv3".to_string()).await;
+        assert_eq!(ospf(&rib), (false, false, vec![]), "v3's");
+
+        let mut rib = both_versions().await;
+        rib.proto_cleanup("ospfv3".to_string()).await;
+        assert_eq!(ospf(&rib), (true, false, vec![16001]), "v3's, v2's left");
+        rib.proto_cleanup("ospf".to_string()).await;
+        assert_eq!(ospf(&rib), (false, false, vec![]), "v2's");
     }
 }
