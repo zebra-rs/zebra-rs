@@ -1,65 +1,13 @@
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use bit_vec::BitVec;
-
-/// First-fit allocator for an inclusive label range `[begin, end]`.
-///
-/// Backs the per-instance Adjacency-SID label allocator for both IS-IS
-/// and OSPF SR-MPLS: each Full adjacency claims one label out of the
-/// SRLB on transition into Full and releases it on regression. Freed
-/// indices land in `free_list` so the next allocation reuses the
-/// lowest-numbered slot — keeps labels visually close to `begin`
-/// even after churn.
-pub struct LabelPool {
-    begin: usize,
-    end: Option<usize>,
-    allocated: BitVec,     // Uses 1 bit per entry instead of Option<bool>
-    free_list: Vec<usize>, // List of freed indices
-}
-
-impl LabelPool {
-    pub fn new(begin: usize, end: Option<usize>) -> Self {
-        Self {
-            begin,
-            end,
-            allocated: BitVec::new(),
-            free_list: Vec::new(),
-        }
-    }
-
-    pub fn allocate(&mut self) -> Option<usize> {
-        if let Some(index) = self.free_list.pop() {
-            self.allocated.set(index, true);
-            return Some(index + self.begin);
-        }
-
-        if let Some(end) = self.end
-            && self.begin + self.allocated.len() > end
-        {
-            return None;
-        }
-
-        let new_label = self.allocated.len();
-        self.allocated.push(true); // Mark as used
-        Some(new_label + self.begin)
-    }
-
-    pub fn release(&mut self, label: usize) {
-        let index = label.saturating_sub(self.begin);
-        if index < self.allocated.len() && self.allocated[index] {
-            self.allocated.set(index, false); // Mark as free
-            self.free_list.push(index);
-        }
-    }
-}
-
-/// The node's local labels in use: the Adjacency-SID labels every
-/// protocol instance holds. The node has one MPLS label table, and two
-/// instances allocating from overlapping SRLBs on their own (OSPFv2 and
-/// OSPFv3 both start at 15000) handed out the same label for different
-/// adjacencies, of which the ILM kept one. Each instance draws from this
-/// shared set through its [`LocalLabelPool`].
+/// The node's local labels in use: the Adjacency-SID (and IS-IS Mirror
+/// Context) labels every protocol instance holds. The node has one MPLS
+/// label table, which forwards a label one way only, and instances
+/// allocating from overlapping SRLBs on their own (OSPFv2, OSPFv3 and
+/// IS-IS all start at 15000) handed out the same label for different
+/// adjacencies. Each instance draws from this shared set through its
+/// [`LocalLabelPool`].
 #[derive(Clone, Debug, Default)]
 pub struct LocalLabels(Arc<Mutex<BTreeSet<u32>>>);
 

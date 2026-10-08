@@ -49,7 +49,7 @@ use super::{
     Hostname, IfsmEvent, Lsdb, LsdbEvent, NfsmEvent, NfsmState, csnp_send, srm_set_for_all_lsp,
 };
 use super::{Level, Levels, process_packet};
-use crate::spf::label_pool::LabelPool;
+use crate::spf::label_pool::LocalLabelPool;
 use crate::throttle::Throttle;
 
 pub type Callback = fn(&mut Isis, Args, ConfigOp) -> Option<()>;
@@ -368,7 +368,10 @@ pub struct Isis {
     /// Pseudonode generations parked by `in_commit`; flushed through
     /// `schedule_dis_originate` at `CommitEnd`.
     pub pending_dis_gen: Levels<BTreeSet<IsisNeighborId>>,
-    pub local_pool: Option<LabelPool>,
+    /// Adjacency-SID and Mirror Context labels, over the SRLB, drawn
+    /// from the node's shared set (`RibSubscriber::local_labels`) so an
+    /// OSPF instance with an overlapping SRLB never holds the same one.
+    pub local_pool: Option<LocalLabelPool>,
     pub graph: Levels<Option<spf::Graph>>,
     pub spf_result: Levels<Option<BTreeMap<usize, spf::Path>>>,
     pub tilfa_result: Levels<Option<BTreeMap<usize, Vec<spf::RepairPath>>>>,
@@ -3520,13 +3523,14 @@ impl Isis {
         match (self.config.sr_mpls_enabled, srlb) {
             (true, Some(srlb)) => {
                 if self.local_pool.is_none() {
-                    // LabelBlock is half-open `[start, end)`; LabelPool's
+                    // LabelBlock is half-open `[start, end)`; a pool's
                     // `end` is inclusive (last allocable label), hence
                     // the `- 1`.
-                    self.local_pool = Some(LabelPool::new(
-                        srlb.start as usize,
-                        Some(srlb.end.saturating_sub(1) as usize),
-                    ));
+                    self.local_pool = Some(
+                        self.rib_subscriber
+                            .local_labels()
+                            .pool(srlb.start, srlb.end.saturating_sub(1)),
+                    );
                 }
             }
             _ => {
@@ -3938,7 +3942,7 @@ impl Isis {
             if let Some(label) = self.mirror_labels.remove(&key)
                 && let Some(pool) = self.local_pool.as_mut()
             {
-                pool.release(label as usize);
+                pool.release(label);
             }
         }
         // Allocate for newly-desired entries (keeps existing allocations).
@@ -3949,7 +3953,7 @@ impl Isis {
             if let Some(pool) = self.local_pool.as_mut()
                 && let Some(label) = pool.allocate()
             {
-                self.mirror_labels.insert(key, label as u32);
+                self.mirror_labels.insert(key, label);
             }
         }
     }
@@ -5479,5 +5483,32 @@ mod flex_algo_participation_tests {
         assert!(isis.flex_algo_participating.is_empty());
         assert!(isis.sr_flex_algo_end_sid.is_empty());
         assert!(isis.sr_flex_algo_locators_active.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod local_label_tests {
+    use super::commit_and_microloop_gate_tests::fresh_isis;
+    use super::*;
+
+    /// IS-IS draws its Adjacency-SID and Mirror Context labels from the
+    /// node's shared set, as OSPF does. Its own pool over the block's
+    /// SRLB (15000..15099) handed out 15000 while an OSPF instance, whose
+    /// SRLB starts at 15000 too, held it. What IS-IS holds goes back when
+    /// it stops.
+    #[tokio::test]
+    async fn isis_skips_a_label_another_instance_holds() {
+        let mut isis = fresh_isis();
+        let mut ospf = isis.rib_subscriber.local_labels().pool(15000, 15999);
+        assert_eq!(ospf.allocate(), Some(15000));
+
+        isis.sr_block = Some(Block::default_block());
+        isis.config.sr_mpls_enabled = true;
+        isis.reconcile_local_pool();
+        let label = isis.local_pool.as_mut().and_then(|pool| pool.allocate());
+        assert_eq!(label, Some(15001));
+
+        drop(isis);
+        assert_eq!(ospf.allocate(), Some(15001));
     }
 }

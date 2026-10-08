@@ -155,7 +155,7 @@ use super::ifsm::{dis_schedule, has_level};
 use super::link::{LinkTop, NetworkType};
 use super::lsdb;
 use super::lsp::{Packet, PacketMessage};
-use crate::spf::label_pool::LabelPool;
+use crate::spf::label_pool::LocalLabelPool;
 
 /// RFC 5306 §3.2(b) helper-election predicate. P2P circuits always
 /// fire the CSNP+SRM kick. On a LAN we only fire when we beat every
@@ -227,7 +227,7 @@ pub fn nbr_hello_interpret(
     tlvs: &[IsisTlv],
     mac: Option<MacAddr>,
     sys_id: IsisSysId,
-    local_pool: &mut Option<LabelPool>,
+    local_pool: &mut Option<LocalLabelPool>,
 ) -> (bool, bool, HelperEdge) {
     let mut has_mac = false;
     let mut has_my_sys_id = false;
@@ -312,7 +312,7 @@ pub fn nbr_hello_interpret(
             if let Some(label) = value.label
                 && let Some(local_pool) = local_pool
             {
-                local_pool.release(label as usize);
+                local_pool.release(label);
             }
         }
         keep
@@ -320,10 +320,7 @@ pub fn nbr_hello_interpret(
     for &key in addr4.keys() {
         if let std::collections::btree_map::Entry::Vacant(e) = nbr.addr4.entry(key) {
             // Fix borrow checker.
-            let label = local_pool
-                .as_mut()
-                .and_then(|pool| pool.allocate())
-                .map(|label| label as u32);
+            let label = local_pool.as_mut().and_then(|pool| pool.allocate());
             e.insert(NeighborAddr4::new(key, label));
         }
     }

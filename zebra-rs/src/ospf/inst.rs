@@ -284,8 +284,9 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// `(ifindex, neighbor_router_id) -> label` mapping is held in
     /// `lan_adj_sids` below so origination and ILM install can read it.
     /// The labels come from the node's shared set
-    /// (`RibSubscriber::local_labels`), so the other OSPF version, with
-    /// the same SRLB, never holds the same one.
+    /// (`RibSubscriber::local_labels`), so no other instance over an
+    /// overlapping SRLB, the other OSPF version or IS-IS, holds the same
+    /// one.
     pub local_pool: Option<crate::spf::label_pool::LocalLabelPool>,
     /// Per-adjacency Adjacency-SID label map. Keyed by
     /// `(ifindex, neighbor_interface_addr)`; the value is the absolute

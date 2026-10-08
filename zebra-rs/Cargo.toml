@@ -184,7 +184,6 @@ bitfield-struct = "0.13"
 rand = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
 hostname = "0.4"
-bit-vec = "0.9"
 audit = "0.7.3"
 daemonize = "0.5"
 hex = "0.4.3"
