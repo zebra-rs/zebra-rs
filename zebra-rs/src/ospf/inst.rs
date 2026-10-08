@@ -283,7 +283,10 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// transition into Full and releases it on regression; the
     /// `(ifindex, neighbor_router_id) -> label` mapping is held in
     /// `lan_adj_sids` below so origination and ILM install can read it.
-    pub local_pool: Option<crate::spf::label_pool::LabelPool>,
+    /// The labels come from the node's shared set
+    /// (`RibSubscriber::local_labels`), so the other OSPF version, with
+    /// the same SRLB, never holds the same one.
+    pub local_pool: Option<crate::spf::label_pool::LocalLabelPool>,
     /// Per-adjacency Adjacency-SID label map. Keyed by
     /// `(ifindex, neighbor_interface_addr)`; the value is the absolute
     /// label allocated from `local_pool` on the corresponding NFSM
@@ -6223,12 +6226,12 @@ impl Ospf<Ospfv2> {
             && let Some(pool) = self.local_pool.as_mut()
             && let Some(label) = pool.allocate()
         {
-            self.lan_adj_sids.insert((ifindex, nbr_addr), label as u32);
+            self.lan_adj_sids.insert((ifindex, nbr_addr), label);
         } else if old_state == NfsmState::Full
             && let Some(label) = self.lan_adj_sids.remove(&(ifindex, nbr_addr))
             && let Some(pool) = self.local_pool.as_mut()
         {
-            pool.release(label as usize);
+            pool.release(label);
         }
 
         // Router-LSA must be re-originated whenever Full adjacency count changes.
@@ -13788,12 +13791,12 @@ impl Ospf<Ospfv3> {
             && let Some(pool) = self.local_pool.as_mut()
             && let Some(label) = pool.allocate()
         {
-            self.lan_adj_sids.insert((ifindex, nbr_addr), label as u32);
+            self.lan_adj_sids.insert((ifindex, nbr_addr), label);
         } else if old_state == NfsmState::Full
             && let Some(label) = self.lan_adj_sids.remove(&(ifindex, nbr_addr))
             && let Some(pool) = self.local_pool.as_mut()
         {
-            pool.release(label as usize);
+            pool.release(label);
         }
 
         self.router_lsa_originate();
@@ -26987,6 +26990,38 @@ mod sr_origination_tests {
                 "v2, Enable first: {enable_first}"
             );
         }
+    }
+
+    /// OSPFv2 and OSPFv3 on one node draw their Adjacency-SID labels from
+    /// the node's shared set. Each used to allocate from its own pool over
+    /// the same SRLB, so both handed out 15000 and up, and the ILM, one
+    /// OSPF entry per label, kept only one version's. A label goes back
+    /// when its instance stops.
+    #[tokio::test]
+    async fn ospf_versions_never_hold_the_same_adj_sid_label() {
+        use super::link_scope_tests::{v2_top, v3_top};
+        let mut v2 = v2_top();
+        let mut v3 = v3_top();
+        v3.rib_subscriber = v2.rib_subscriber.clone();
+        v2.callback_build();
+        v3.callback_build();
+        // Enabling SR-MPLS allocates for every Full adjacency: S, O and P.
+        cfg(&mut v2, "/router/ospf/segment-routing/mpls", &[]);
+        cfg(&mut v3, "/router/ospfv3/segment-routing/mpls", &[]);
+        let held = |v2: &[u32], v3: &[u32]| {
+            let labels: BTreeSet<u32> = v2.iter().chain(v3).copied().collect();
+            (v2.len(), v3.len(), labels.len())
+        };
+        let v2_labels: Vec<u32> = v2.lan_adj_sids.values().copied().collect();
+        let v3_labels: Vec<u32> = v3.lan_adj_sids.values().copied().collect();
+        assert_eq!(held(&v2_labels, &v3_labels), (3, 3, 6), "all distinct");
+
+        drop(v2);
+        let label = v3.local_pool.as_mut().and_then(|pool| pool.allocate());
+        assert!(
+            label.is_some_and(|label| v2_labels.contains(&label)),
+            "{label:?}"
+        );
     }
 
     /// OSPFv3 advertises its SR capabilities in every area. An area the

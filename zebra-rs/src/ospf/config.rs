@@ -2537,7 +2537,6 @@ fn config_ospf_fast_reroute_backup_as_primary(
 
 fn config_ospf_sr_mpls(ospf: &mut Ospf, _args: Args, op: ConfigOp) -> Option<()> {
     use super::srmpls::{SRLB_RANGE, SRLB_START, SegmentRoutingMode};
-    use crate::spf::label_pool::LabelPool;
     ospf.segment_routing = if op.is_set() {
         SegmentRoutingMode::Mpls
     } else {
@@ -2551,10 +2550,11 @@ fn config_ospf_sr_mpls(ospf: &mut Ospf, _args: Args, op: ConfigOp) -> Option<()>
     // simply hand out fresh labels without colliding with stale ones.
     if op.is_set() {
         if ospf.local_pool.is_none() {
-            ospf.local_pool = Some(LabelPool::new(
-                SRLB_START as usize,
-                Some((SRLB_START + SRLB_RANGE - 1) as usize),
-            ));
+            ospf.local_pool = Some(
+                ospf.rib_subscriber
+                    .local_labels()
+                    .pool(SRLB_START, SRLB_START + SRLB_RANGE - 1),
+            );
         }
         // Sweep existing Full neighbors and allocate labels for any
         // that don't have one. Necessary when SR-MPLS is enabled after
@@ -2580,7 +2580,7 @@ fn config_ospf_sr_mpls(ospf: &mut Ospf, _args: Args, op: ConfigOp) -> Option<()>
             if let Some(pool) = ospf.local_pool.as_mut()
                 && let Some(label) = pool.allocate()
             {
-                ospf.lan_adj_sids.insert(key, label as u32);
+                ospf.lan_adj_sids.insert(key, label);
             }
         }
     } else {

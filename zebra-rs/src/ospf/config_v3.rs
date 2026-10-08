@@ -2071,7 +2071,6 @@ fn config_ospfv3_srv6_locator(ospf: &mut Ospf<Ospfv3>, mut args: Args, op: Confi
 
 fn config_ospfv3_sr_mpls(ospf: &mut Ospf<Ospfv3>, _args: Args, op: ConfigOp) -> Option<()> {
     use super::srmpls::{SRLB_RANGE, SRLB_START, SegmentRoutingMode};
-    use crate::spf::label_pool::LabelPool;
     ospf.segment_routing = if op.is_set() {
         SegmentRoutingMode::Mpls
     } else {
@@ -2086,10 +2085,11 @@ fn config_ospfv3_sr_mpls(ospf: &mut Ospf<Ospfv3>, _args: Args, op: ConfigOp) -> 
     // already settled still produces the LAN Adj-SID LSAs.
     if op.is_set() {
         if ospf.local_pool.is_none() {
-            ospf.local_pool = Some(LabelPool::new(
-                SRLB_START as usize,
-                Some((SRLB_START + SRLB_RANGE - 1) as usize),
-            ));
+            ospf.local_pool = Some(
+                ospf.rib_subscriber
+                    .local_labels()
+                    .pool(SRLB_START, SRLB_START + SRLB_RANGE - 1),
+            );
         }
         let pending: Vec<(u32, std::net::Ipv4Addr)> = ospf
             .links
@@ -2109,7 +2109,7 @@ fn config_ospfv3_sr_mpls(ospf: &mut Ospf<Ospfv3>, _args: Args, op: ConfigOp) -> 
             if let Some(pool) = ospf.local_pool.as_mut()
                 && let Some(label) = pool.allocate()
             {
-                ospf.lan_adj_sids.insert(key, label as u32);
+                ospf.lan_adj_sids.insert(key, label);
             }
         }
     } else {

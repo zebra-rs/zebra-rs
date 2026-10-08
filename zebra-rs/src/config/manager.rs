@@ -73,6 +73,7 @@ pub struct RibSubscriber {
     rib_tx: UnboundedSender<crate::rib::Message>,
     rib_inbound_tx: UnboundedSender<crate::rib::client::RibInbound>,
     next_proto_id: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    local_labels: crate::spf::label_pool::LocalLabels,
 }
 
 impl RibSubscriber {
@@ -88,7 +89,14 @@ impl RibSubscriber {
             rib_tx,
             rib_inbound_tx,
             next_proto_id,
+            local_labels: Default::default(),
         }
+    }
+
+    /// The node's local labels, which every instance's Adjacency-SID
+    /// pool draws from (`LocalLabels::pool`).
+    pub fn local_labels(&self) -> &crate::spf::label_pool::LocalLabels {
+        &self.local_labels
     }
 
     /// Mint a `RibClient` and `RibRx` for `proto` bound to
@@ -269,6 +277,10 @@ pub struct ConfigManager {
     /// call `fetch_add` from a tokio task without re-entering
     /// `ConfigManager` (which is `!Send`).
     pub next_proto_id: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    /// The node's local (SRLB) labels in use, shared by every protocol
+    /// instance's Adjacency-SID pool so no two hand out the same label.
+    /// Reaches the instances through [`RibSubscriber::local_labels`].
+    pub local_labels: crate::spf::label_pool::LocalLabels,
     pub policy_tx: UnboundedSender<crate::policy::Message>,
     /// Sender side of the BFD client-request channel. Populated by
     /// [`super::bfd::spawn_bfd`], which a consumer protocol (BGP / OSPF /
@@ -406,6 +418,7 @@ impl ConfigManager {
             rib_tx,
             rib_inbound_tx,
             next_proto_id: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            local_labels: Default::default(),
             policy_tx,
             bfd_client_tx: RefCell::new(None),
             stamp_client_tx: RefCell::new(None),
@@ -462,6 +475,7 @@ impl ConfigManager {
             rib_tx: self.rib_tx.clone(),
             rib_inbound_tx: self.rib_inbound_tx.clone(),
             next_proto_id: std::sync::Arc::clone(&self.next_proto_id),
+            local_labels: self.local_labels.clone(),
         }
     }
 
