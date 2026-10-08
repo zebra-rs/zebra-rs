@@ -190,7 +190,9 @@ implementation; the corresponding features track the referenced draft revision.
 | RFC 8365 | A Network Virtualization Overlay Solution Using EVPN (EVPN over VXLAN). |
 | RFC 9136 | IP Prefix Advertisement in EVPN (Type-5 routes). |
 | RFC 8584 | Framework for EVPN Designated Forwarder (DF) Election Extensibility. |
-| RFC 9785 | Preference-Based EVPN DF Election (Alg 2 / Alg 3, the Don't-Preempt capability) — `df-election algorithm preference`. |
+| RFC 9785 | Preference-Based EVPN DF Election (Alg 2 / Alg 3, the Don't-Preempt capability) — `df-election algorithm preference`. Non-revertive operation (§4.3) is not implemented. |
+| RFC 9722 | Fast Recovery for EVPN DF Election — the Service Carving Time extended community and the T capability, so a whole segment carves at one announced instant: `df-election fast-recovery`. |
+| draft-ietf-bess-rfc7432bis | EVPN base specification, revised — the Layer-2 Attributes control flags (§7.11.1) used to signal the elected single-active role on an E-LAN per-EVI A-D: `role-signaling l2-attr`. The draft does not specify the ingress procedure, so ours is off by default. |
 | RFC 8214 | Virtual Private Wire Service (VPWS) Support in EVPN (E-Line services). |
 | RFC 9251 | IGMP and MLD Proxy for EVPN (selective multicast). |
 | RFC 9574 | Optimized Ingress Replication Solution for EVPN. |
