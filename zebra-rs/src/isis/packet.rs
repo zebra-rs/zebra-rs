@@ -137,14 +137,18 @@ fn bfd_nfsm_dispatch(
     let _ = link.tx.send(Message::BfdSubscribe(desired));
 }
 
-/// Kick the STAMP measurement reconcile on any NFSM transition that
-/// crosses the Up boundary — the session's existence is gated on an Up
-/// adjacency (the remote address comes from it, and probing a
-/// non-adjacent peer is pointless). The reconcile itself
+/// Kick the STAMP measurement reconcile on every IIH from an Up
+/// adjacency, and on the one that takes it out of Up. The session is
+/// gated on an Up adjacency (probing a non-adjacent peer is pointless)
+/// *and* an address pair, whose remote half comes from the IIH's
+/// Interface Address TLV — which can arrive after the adjacency does:
+/// an IIH sent before its sender learned its own address carries none,
+/// so firing on the Up edge alone left the link unmeasured for the life
+/// of the adjacency. The reconcile itself
 /// (`Isis::stamp_reconcile_link`) diffs desired-vs-tracked, so firing
-/// it is cheap and needs no enable gate here.
+/// it per IIH is cheap and needs no enable gate here.
 fn stamp_nfsm_dispatch(link: &super::link::LinkTop<'_>, was_up: bool, state: NfsmState) {
-    if was_up != (state == NfsmState::Up) {
+    if was_up || state == NfsmState::Up {
         let _ = link.tx.send(Message::StampReconcile(link.ifindex));
     }
 }
