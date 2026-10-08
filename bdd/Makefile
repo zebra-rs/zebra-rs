@@ -54,7 +54,7 @@ unstage:
 all:
 	rm -rf allure-results
 	mkdir -p allure-results
-	$(CUCUMBER) -- --concurrency=16
+	$(CUCUMBER) -- --concurrency=32
 
 ibgp:
 	mkdir -p allure-results
