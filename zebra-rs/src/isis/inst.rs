@@ -4312,8 +4312,10 @@ pub enum Message {
     /// session by sending `ClientReq::Unsubscribe`.
     BfdUnsubscribe(crate::bfd::session::SessionKey),
     /// Something that can flip this interface's STAMP measurement
-    /// session changed at runtime (an NFSM transition to/from Up,
-    /// adjacency teardown). The handler re-runs
+    /// session changed at runtime (an IIH from an Up adjacency, which
+    /// may carry the peer's address for the first time; an NFSM
+    /// transition out of Up; adjacency teardown; an interface address
+    /// change). The handler re-runs
     /// [`Isis::stamp_reconcile_link`]; config-driven changes go
     /// through the `CommitEnd` `stamp_reconcile_all` instead.
     StampReconcile(u32),
@@ -5719,5 +5721,173 @@ mod local_label_tests {
         isis.reconcile_local_pool();
         assert!(isis.local_pool.is_none());
         assert_eq!(adj_label(&isis), None);
+    }
+}
+
+#[cfg(test)]
+mod stamp_wiring_tests {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    use isis_packet::{IsLevel, IsisP2pHello, IsisTlvIpv4IfAddr, IsisTlvP2p3Way};
+    use tokio::sync::mpsc;
+
+    use super::bfd_wiring_tests::{test_config_tx, test_ctx, test_rib_subscriber};
+    use super::*;
+    use crate::isis::link::{IsisLink, LinkConfig, LinkState, LinkTimer, LinkV4Addr, NetworkType};
+    use crate::rib::link::LinkAddr;
+    use crate::stamp::client::ClientReq;
+
+    const LOCAL: Ipv4Addr = Ipv4Addr::new(192, 168, 70, 1);
+    const REMOTE: Ipv4Addr = Ipv4Addr::new(192, 168, 70, 2);
+    const PEER: IsisSysId = IsisSysId {
+        id: [0, 0, 0, 0, 0, 9],
+    };
+
+    fn fresh_isis_with_stamp() -> (Isis, mpsc::UnboundedReceiver<ClientReq>) {
+        let (ctx, rib_rx) = test_ctx();
+        let (stamp_client_tx, stamp_client_rx) = mpsc::unbounded_channel();
+        let (policy_tx, policy_rx) = mpsc::unbounded_channel();
+        Box::leak(Box::new(policy_rx));
+        let isis = Isis::new(
+            ctx,
+            rib_rx,
+            None,
+            Some(stamp_client_tx),
+            None,
+            policy_tx,
+            "isis".to_string(),
+            test_rib_subscriber(),
+            test_config_tx(),
+        );
+        (isis, stamp_client_rx)
+    }
+
+    /// A socket-free Level-2 point-to-point link on ifindex 7 with
+    /// measurement enabled, holding `local` if it has learned it yet.
+    fn measured_link(isis: &mut Isis, local: Option<Ipv4Addr>) {
+        let (ptx, prx) = mpsc::unbounded_channel();
+        Box::leak(Box::new(prx));
+        let mut link = IsisLink {
+            ifindex: 7,
+            ptx,
+            read_task: tokio::spawn(async {}),
+            flags: netlink_packet_route::link::LinkFlags::empty(),
+            circuit_id: 1,
+            config: LinkConfig::default(),
+            state: LinkState::default(),
+            timer: LinkTimer::default(),
+        };
+        link.config.enable.v4 = true;
+        link.config.network_type = Some(NetworkType::P2p);
+        link.config.te_metric_measurement.enable = Some(true);
+        link.state.set_level(IsLevel::L2);
+        if let Some(addr) = local {
+            link.state.v4addr.push(LinkV4Addr {
+                prefix: Ipv4Net::new(addr, 30).unwrap(),
+                secondary: false,
+            });
+        }
+        isis.links.insert(7, link);
+    }
+
+    /// A P2P IIH from `PEER` that lists us — the adjacency is Up once it
+    /// is in — carrying `remote` as its Interface Address, if any.
+    fn hello(isis: &Isis, remote: Option<Ipv4Addr>) -> IsisP2pHello {
+        let mut tlvs = vec![
+            IsisTlvP2p3Way {
+                state: NfsmState::Init.into(),
+                circuit_id: Some(1),
+                neighbor_id: Some(isis.config.net.sys_id()),
+                neighbor_circuit_id: Some(1),
+            }
+            .into(),
+        ];
+        if let Some(addr) = remote {
+            tlvs.push(IsisTlvIpv4IfAddr { addrs: vec![addr] }.into());
+        }
+        IsisP2pHello {
+            circuit_type: IsLevel::L2,
+            source_id: PEER,
+            hold_time: 30,
+            pdu_len: 0,
+            circuit_id: 1,
+            tlvs,
+        }
+    }
+
+    /// Run the STAMP reconciles queued so far; the rest is not under
+    /// test.
+    fn run_reconciles(isis: &mut Isis) {
+        while let Ok(msg) = isis.rx.try_recv() {
+            if let Message::StampReconcile(ifindex) = msg {
+                isis.stamp_reconcile_link(ifindex);
+            }
+        }
+    }
+
+    /// Deliver `hello(remote)` on link 7 and run the reconciles it
+    /// queued.
+    fn receive(isis: &mut Isis, remote: Option<Ipv4Addr>) {
+        let pdu = hello(isis, remote);
+        let mut top = isis.link_top(7).expect("link 7");
+        crate::isis::packet::hello_p2p_recv(&mut top, pdu, None);
+        run_reconciles(isis);
+    }
+
+    fn peer_up(isis: &Isis) -> bool {
+        isis.links.get(&7).is_some_and(|link| {
+            link.state
+                .nbrs
+                .get(&Level::L2)
+                .get(&PEER)
+                .is_some_and(|nbr| nbr.state == NfsmState::Up)
+        })
+    }
+
+    /// The (local, remote) pair STAMP was asked to measure, if it was.
+    fn subscribed(rx: &mut mpsc::UnboundedReceiver<ClientReq>) -> Option<(IpAddr, IpAddr)> {
+        match rx.try_recv() {
+            Ok(ClientReq::Subscribe { key, .. }) => Some((key.local, key.remote)),
+            Ok(other) => panic!("expected a Subscribe, got {other:?}"),
+            Err(_) => None,
+        }
+    }
+
+    /// The peer's IIHs carry its address only from after the adjacency
+    /// came up (it had not learned the address when it sent the one that
+    /// completed the handshake). The first IIH that carries it starts
+    /// the measurement session.
+    #[tokio::test]
+    async fn the_peer_address_arriving_after_up_starts_the_session() {
+        let (mut isis, mut stamp) = fresh_isis_with_stamp();
+        measured_link(&mut isis, Some(LOCAL));
+        receive(&mut isis, None);
+        assert!(peer_up(&isis));
+        assert_eq!(subscribed(&mut stamp), None, "no remote address yet");
+        receive(&mut isis, Some(REMOTE));
+        assert_eq!(subscribed(&mut stamp), Some((LOCAL.into(), REMOTE.into())));
+        receive(&mut isis, Some(REMOTE));
+        assert_eq!(
+            subscribed(&mut stamp),
+            None,
+            "one subscription, not one per IIH"
+        );
+    }
+
+    /// Our own address arrives after the adjacency came up.
+    #[tokio::test]
+    async fn the_local_address_arriving_after_up_starts_the_session() {
+        let (mut isis, mut stamp) = fresh_isis_with_stamp();
+        measured_link(&mut isis, None);
+        receive(&mut isis, Some(REMOTE));
+        assert!(peer_up(&isis));
+        assert_eq!(subscribed(&mut stamp), None, "no local address yet");
+        isis.addr_add(LinkAddr {
+            addr: IpNet::V4(Ipv4Net::new(LOCAL, 30).unwrap()),
+            ifindex: 7,
+            ..Default::default()
+        });
+        run_reconciles(&mut isis);
+        assert_eq!(subscribed(&mut stamp), Some((LOCAL.into(), REMOTE.into())));
     }
 }

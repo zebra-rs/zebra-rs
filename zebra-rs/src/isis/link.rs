@@ -1395,6 +1395,10 @@ impl Isis {
             let _ = self.tx.send(msg);
             let _ = self.tx.send(Message::LspOriginate(Level::L1, None));
             let _ = self.tx.send(Message::LspOriginate(Level::L2, None));
+            // A measurement session needs our address as well as an Up
+            // adjacency; one learned (or lost) after the adjacency came
+            // up re-keys it now rather than at the peer's next IIH.
+            let _ = self.tx.send(Message::StampReconcile(addr.ifindex));
         }
     }
 }
