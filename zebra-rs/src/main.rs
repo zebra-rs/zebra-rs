@@ -267,6 +267,7 @@ async fn run(arg: Arg) -> anyhow::Result<()> {
         rib.tx.clone(),
         rib.inbound_tx.clone(),
         policy.tx.clone(),
+        rib.label_space.clone(),
     )?;
 
     config.subscribe("rib", rib.cm.tx.clone());

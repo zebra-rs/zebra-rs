@@ -137,14 +137,18 @@ fn bfd_nfsm_dispatch(
     let _ = link.tx.send(Message::BfdSubscribe(desired));
 }
 
-/// Kick the STAMP measurement reconcile on any NFSM transition that
-/// crosses the Up boundary — the session's existence is gated on an Up
-/// adjacency (the remote address comes from it, and probing a
-/// non-adjacent peer is pointless). The reconcile itself
+/// Kick the STAMP measurement reconcile on every IIH from an Up
+/// adjacency, and on the one that takes it out of Up. The session is
+/// gated on an Up adjacency (probing a non-adjacent peer is pointless)
+/// *and* an address pair, whose remote half comes from the IIH's
+/// Interface Address TLV — which can arrive after the adjacency does:
+/// an IIH sent before its sender learned its own address carries none,
+/// so firing on the Up edge alone left the link unmeasured for the life
+/// of the adjacency. The reconcile itself
 /// (`Isis::stamp_reconcile_link`) diffs desired-vs-tracked, so firing
-/// it is cheap and needs no enable gate here.
+/// it per IIH is cheap and needs no enable gate here.
 fn stamp_nfsm_dispatch(link: &super::link::LinkTop<'_>, was_up: bool, state: NfsmState) {
-    if was_up != (state == NfsmState::Up) {
+    if was_up || state == NfsmState::Up {
         let _ = link.tx.send(Message::StampReconcile(link.ifindex));
     }
 }
@@ -155,7 +159,7 @@ use super::ifsm::{dis_schedule, has_level};
 use super::link::{LinkTop, NetworkType};
 use super::lsdb;
 use super::lsp::{Packet, PacketMessage};
-use crate::spf::label_pool::LabelPool;
+use crate::rib::label_space::LocalLabelPool;
 
 /// RFC 5306 §3.2(b) helper-election predicate. P2P circuits always
 /// fire the CSNP+SRM kick. On a LAN we only fire when we beat every
@@ -227,7 +231,7 @@ pub fn nbr_hello_interpret(
     tlvs: &[IsisTlv],
     mac: Option<MacAddr>,
     sys_id: IsisSysId,
-    local_pool: &mut Option<LabelPool>,
+    local_pool: &mut Option<LocalLabelPool>,
 ) -> (bool, bool, HelperEdge) {
     let mut has_mac = false;
     let mut has_my_sys_id = false;
@@ -312,7 +316,7 @@ pub fn nbr_hello_interpret(
             if let Some(label) = value.label
                 && let Some(local_pool) = local_pool
             {
-                local_pool.release(label as usize);
+                local_pool.release(label);
             }
         }
         keep
@@ -320,10 +324,7 @@ pub fn nbr_hello_interpret(
     for &key in addr4.keys() {
         if let std::collections::btree_map::Entry::Vacant(e) = nbr.addr4.entry(key) {
             // Fix borrow checker.
-            let label = local_pool
-                .as_mut()
-                .and_then(|pool| pool.allocate())
-                .map(|label| label as u32);
+            let label = local_pool.as_mut().and_then(|pool| pool.allocate());
             e.insert(NeighborAddr4::new(key, label));
         }
     }

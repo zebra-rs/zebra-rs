@@ -1,0 +1,44 @@
+# r3 — starts on the default SRGB (16000, 8000 labels): its OSPFv2
+# Prefix-SID index 3 is label 16003, its OSPFv3 index 13 label 16013.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.3/32
+  ipv6:
+    address: 2001:db8::3/128
+- if-name: r3-r2
+  ipv4:
+    address: 10.0.23.3/24
+  ipv6:
+    address: 2001:db8:23::3/64
+system:
+  hostname: r3
+router:
+  ospf:
+    router-id: 10.0.0.3
+    segment-routing:
+      mpls: {}
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+        prefix-sid:
+          index: 3
+      - if-name: r3-r2
+        enabled: true
+        network-type: point-to-point
+  ospfv3:
+    router-id: 10.0.0.3
+    segment-routing:
+      mpls: {}
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+        prefix-sid:
+          index: 13
+      - if-name: r3-r2
+        enabled: true
+        network-type: point-to-point

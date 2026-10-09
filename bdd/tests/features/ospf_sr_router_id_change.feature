@@ -32,9 +32,9 @@ Feature: Segment Routing survives an OSPF Router-ID change
     And I apply config "b1.yaml" to namespace "b1"
     And I apply config "b2.yaml" to namespace "b2"
     And I wait 15 seconds
-    Then show command "show ospfv3 segment-routing" in namespace "a2" should eventually contain "SR-Node: 1.1.1.1    Area: 0.0.0.0    SRGB: [16000/18000]"
+    Then show command "show ospfv3 segment-routing" in namespace "a2" should eventually contain "SR-Node: 1.1.1.1    Area: 0.0.0.0    SRGB: [16000/23999]"
     And show command "show mpls ilm" in namespace "a2" should eventually contain "16001"
-    And show command "show ospf segment-routing" in namespace "b2" should eventually contain "SR-Node: 1.1.1.1    SRGB: [16000/"
+    And show command "show ospf segment-routing" in namespace "b2" should eventually contain "SR-Node: 1.1.1.1    SRGB: [16000/23999]"
     And show command "show mpls ilm" in namespace "b2" should eventually contain "16011"
 
   Scenario: OSPFv3 advertises its SR capabilities and Prefix-SID under the new Router-ID
@@ -43,14 +43,14 @@ Feature: Segment Routing survives an OSPF Router-ID change
     # The old identity's LSAs are flushed, so the Prefix-SID is learned
     # afresh — with its SRGB — under the new one.
     Then show command "show ospfv3 database" in namespace "a2" should eventually not contain "1.1.1.1"
-    And show command "show ospfv3 segment-routing" in namespace "a2" should eventually contain "SR-Node: 9.9.9.9    Area: 0.0.0.0    SRGB: [16000/18000]"
+    And show command "show ospfv3 segment-routing" in namespace "a2" should eventually contain "SR-Node: 9.9.9.9    Area: 0.0.0.0    SRGB: [16000/23999]"
     And show command "show mpls ilm" in namespace "a2" should eventually contain "16001"
 
   Scenario: OSPFv2 advertises its SR capabilities and Prefix-SID under the new Router-ID
     Given the test topology exists
     When I apply command "set router ospf router-id 9.9.9.9" in namespace "b1"
     Then show command "show ospf database" in namespace "b2" should eventually not contain "1.1.1.1"
-    And show command "show ospf segment-routing" in namespace "b2" should eventually contain "SR-Node: 9.9.9.9    SRGB: [16000/"
+    And show command "show ospf segment-routing" in namespace "b2" should eventually contain "SR-Node: 9.9.9.9    SRGB: [16000/23999]"
     And show command "show mpls ilm" in namespace "b2" should eventually contain "16011"
 
   Scenario: Teardown

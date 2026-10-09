@@ -52,7 +52,7 @@ pub mod resolve;
 
 pub mod nht;
 
-pub mod label_manager;
+pub mod label_space;
 
 pub mod router_id;
 

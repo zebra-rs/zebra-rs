@@ -335,6 +335,9 @@ pub enum RibRx {
         start: u32,
         size: u32,
     },
+    /// Local labels were freed after this instance's pool found none:
+    /// reconcile its local labels again (`LabelSpace::take_starved`).
+    LocalLabelsFreed,
 }
 
 impl Rib {

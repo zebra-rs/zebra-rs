@@ -73,6 +73,7 @@ pub struct RibSubscriber {
     rib_tx: UnboundedSender<crate::rib::Message>,
     rib_inbound_tx: UnboundedSender<crate::rib::client::RibInbound>,
     next_proto_id: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    label_space: crate::rib::label_space::SharedLabelSpace,
 }
 
 impl RibSubscriber {
@@ -88,7 +89,15 @@ impl RibSubscriber {
             rib_tx,
             rib_inbound_tx,
             next_proto_id,
+            label_space: Default::default(),
         }
+    }
+
+    /// The node's MPLS label space, the RIB's, which every IGP instance's
+    /// Adjacency-SID pool draws its local labels from
+    /// (`SharedLabelSpace::pool`).
+    pub fn label_space(&self) -> &crate::rib::label_space::SharedLabelSpace {
+        &self.label_space
     }
 
     /// Mint a `RibClient` and `RibRx` for `proto` bound to
@@ -269,6 +278,11 @@ pub struct ConfigManager {
     /// call `fetch_add` from a tokio task without re-entering
     /// `ConfigManager` (which is `!Send`).
     pub next_proto_id: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    /// The node's MPLS label space, shared with the RIB: every protocol
+    /// instance's Adjacency-SID pool draws from it, so no two hand out the
+    /// same label and no block is handed out over one. Reaches the
+    /// instances through [`RibSubscriber::label_space`].
+    pub label_space: crate::rib::label_space::SharedLabelSpace,
     pub policy_tx: UnboundedSender<crate::policy::Message>,
     /// Sender side of the BFD client-request channel. Populated by
     /// [`super::bfd::spawn_bfd`], which a consumer protocol (BGP / OSPF /
@@ -364,6 +378,7 @@ impl ConfigManager {
         rib_tx: UnboundedSender<crate::rib::Message>,
         rib_inbound_tx: UnboundedSender<crate::rib::client::RibInbound>,
         policy_tx: UnboundedSender<crate::policy::Message>,
+        label_space: crate::rib::label_space::SharedLabelSpace,
     ) -> anyhow::Result<Self> {
         // Configuration file search order when `--config-file` is not given:
         //   1. `~/.zebra-rs/zebra-rs.conf`, if it exists
@@ -406,6 +421,7 @@ impl ConfigManager {
             rib_tx,
             rib_inbound_tx,
             next_proto_id: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            label_space,
             policy_tx,
             bfd_client_tx: RefCell::new(None),
             stamp_client_tx: RefCell::new(None),
@@ -462,6 +478,7 @@ impl ConfigManager {
             rib_tx: self.rib_tx.clone(),
             rib_inbound_tx: self.rib_inbound_tx.clone(),
             next_proto_id: std::sync::Arc::clone(&self.next_proto_id),
+            label_space: self.label_space.clone(),
         }
     }
 
@@ -2268,6 +2285,7 @@ mod startup_load_tests {
             rib_tx,
             rib_inbound_tx,
             policy_tx,
+            Default::default(),
         )
         .expect("manager builds");
 
@@ -2344,6 +2362,7 @@ mod save_config_tests {
             rib_tx,
             rib_inbound_tx,
             policy_tx,
+            Default::default(),
         )
         .expect("manager builds")
     }
@@ -2717,6 +2736,7 @@ mod uncommitted_predicate_tests {
             rib_tx,
             rib_inbound_tx,
             policy_tx,
+            Default::default(),
         )
         .expect("manager builds")
     }

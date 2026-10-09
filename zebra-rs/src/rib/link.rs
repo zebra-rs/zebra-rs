@@ -1124,6 +1124,14 @@ impl Rib {
         // would land on `Link::vni` but never reach `vni_ifindex_map`,
         // and `mac_add` would silently skip every install.
         let now_vni: Option<u32> = self.links.get(&ifindex).and_then(|l| l.vni);
+        // Register the device first: reasserting an L3 VNI's Type-5 state
+        // installs its RMAC FDB entries on it, and a VXLAN first seen
+        // already up and enslaved gets no later up transition to retry.
+        if prev_vni != now_vni
+            && let Some(new) = now_vni
+        {
+            self.fib_handle.register_vxlan_ifindex(new, ifindex);
+        }
         if let Some(vni) = now_vni {
             let metadata = self.links.get(&ifindex).and_then(|l| l.vxlan_metadata) == Some(true);
             self.fib_handle.vni_metadata_map.insert(vni, metadata);
@@ -1141,34 +1149,32 @@ impl Rib {
         }
         if prev_vni != now_vni
             && let Some(new) = now_vni
+            && let Some(local) = self.links.get(&ifindex).and_then(|l| l.vxlan_local)
         {
-            self.fib_handle.register_vxlan_ifindex(new, ifindex);
-            if let Some(local) = self.links.get(&ifindex).and_then(|l| l.vxlan_local) {
-                self.api_vxlan_add(new, local);
-                let name = self
-                    .links
-                    .get(&ifindex)
-                    .map(|l| l.name.clone())
-                    .unwrap_or_default();
-                // Tee the VNI binding + local VTEP source to the cradle eBPF
-                // data plane (VXLAN only; an SRv6 device's IPv6-local is a
-                // no-op there). A device the operator bound to a tenant VRF
-                // is an EVPN symmetric-IRB L3VNI — route the inner IP in
-                // that VRF with a router-MAC rewrite; a plain device is an
-                // L2VNI (bridge domain).
-                if let Some((vrf_table_id, rmac)) = self.vxlan_l3_binding(&name) {
-                    self.fib_handle
-                        .cradle_vni_register_l3(new, local, vrf_table_id, rmac)
-                        .await;
-                } else if self.vxlan.get(&name).is_none_or(|v| v.vrf.is_none()) {
-                    // Plain L2VNI: no tenant-VRF binding configured.
-                    self.fib_handle.cradle_vni_register(new, local).await;
-                }
-                // else: configured as an L3VNI but the VRF isn't resolved
-                // yet (config-order race). Don't register it as an L2VNI;
-                // the VrfAdd handler re-tees the L3 binding when the VRF
-                // appears.
+            self.api_vxlan_add(new, local);
+            let name = self
+                .links
+                .get(&ifindex)
+                .map(|l| l.name.clone())
+                .unwrap_or_default();
+            // Tee the VNI binding + local VTEP source to the cradle eBPF
+            // data plane (VXLAN only; an SRv6 device's IPv6-local is a
+            // no-op there). A device the operator bound to a tenant VRF
+            // is an EVPN symmetric-IRB L3VNI — route the inner IP in
+            // that VRF with a router-MAC rewrite; a plain device is an
+            // L2VNI (bridge domain).
+            if let Some((vrf_table_id, rmac)) = self.vxlan_l3_binding(&name) {
+                self.fib_handle
+                    .cradle_vni_register_l3(new, local, vrf_table_id, rmac)
+                    .await;
+            } else if self.vxlan.get(&name).is_none_or(|v| v.vrf.is_none()) {
+                // Plain L2VNI: no tenant-VRF binding configured.
+                self.fib_handle.cradle_vni_register(new, local).await;
             }
+            // else: configured as an L3VNI but the VRF isn't resolved
+            // yet (config-order race). Don't register it as an L2VNI;
+            // the VrfAdd handler re-tees the L3 binding when the VRF
+            // appears.
         }
 
         // Did this link just gain (or change) its EVPN bridge

@@ -14,12 +14,13 @@ use crate::rib::{
 };
 
 use crate::config::{DisplayRequest, ShowChannel};
-use crate::context::{Task, Timer};
+use crate::context::{Task, Timer, TimerType};
 use crate::isis::tracing::IsisTracing;
 use crate::isis::{ifsm, lsdb};
 use crate::rib::api::RibRx;
 use crate::rib::{self, MacAddr};
 use crate::spf;
+use crate::spf::ilm_hold::IlmHold;
 use crate::{
     config::{
         Args, CommandPath, ConfigChannel, ConfigOp, ConfigRequest, RibSubscriber,
@@ -49,7 +50,7 @@ use super::{
     Hostname, IfsmEvent, Lsdb, LsdbEvent, NfsmEvent, NfsmState, csnp_send, srm_set_for_all_lsp,
 };
 use super::{Level, Levels, process_packet};
-use crate::spf::label_pool::LabelPool;
+use crate::rib::label_space::LocalLabelPool;
 use crate::throttle::Throttle;
 
 pub type Callback = fn(&mut Isis, Args, ConfigOp) -> Option<()>;
@@ -294,6 +295,13 @@ pub struct Isis {
     /// `rib::update_self_sid_ilm` diffs the desired set against this
     /// after each SPF publish and reconciles the kernel LFIB.
     pub self_sid_ilm: BTreeMap<u32, SpfIlm>,
+    /// The old labels of moved Prefix-SIDs, still forwarding
+    /// (`spf::ilm_hold`): per level for `ilm`, and for `self_sid_ilm`.
+    pub ilm_hold: Levels<IlmHold>,
+    pub self_sid_hold: IlmHold,
+    /// Fires [`Message::IlmHoldExpire`] when the first held label is due,
+    /// with that instant; kept by [`Isis::rearm_ilm_hold`].
+    pub ilm_hold_timer: Option<(tokio::time::Instant, Timer)>,
     pub hostname: Levels<Hostname>,
     pub spf_timer: Levels<Option<Timer>>,
     pub spf_throttle: Levels<Throttle>,
@@ -368,7 +376,10 @@ pub struct Isis {
     /// Pseudonode generations parked by `in_commit`; flushed through
     /// `schedule_dis_originate` at `CommitEnd`.
     pub pending_dis_gen: Levels<BTreeSet<IsisNeighborId>>,
-    pub local_pool: Option<LabelPool>,
+    /// Adjacency-SID and Mirror Context labels, over the SRLB, drawn
+    /// from the node's label space (`RibSubscriber::label_space`) so an
+    /// OSPF instance with an overlapping SRLB never holds the same one.
+    pub local_pool: Option<LocalLabelPool>,
     pub graph: Levels<Option<spf::Graph>>,
     pub spf_result: Levels<Option<BTreeMap<usize, spf::Path>>>,
     pub tilfa_result: Levels<Option<BTreeMap<usize, Vec<spf::RepairPath>>>>,
@@ -692,6 +703,7 @@ pub struct IsisTop<'a> {
     pub retained_locators: &'a mut Levels<BTreeMap<Ipv6Net, RetainEntry>>,
     pub egress_protect_registered: &'a mut BTreeMap<Ipv6Net, (std::net::Ipv6Addr, IsisSysId)>,
     pub ilm: &'a mut Levels<BTreeMap<u32, SpfIlm>>,
+    pub ilm_hold: &'a mut Levels<IlmHold>,
     pub rib_client: &'a crate::rib::client::RibClient,
     pub hostname: &'a mut Levels<Hostname>,
     pub spf_timer: &'a mut Levels<Option<Timer>>,
@@ -868,6 +880,9 @@ impl Isis {
                 egress_protect_registered: BTreeMap::new(),
                 ilm: Levels::<BTreeMap<u32, SpfIlm>>::default(),
                 self_sid_ilm: BTreeMap::new(),
+                ilm_hold: Levels::<IlmHold>::default(),
+                self_sid_hold: IlmHold::default(),
+                ilm_hold_timer: None,
                 hostname: Levels::<Hostname>::default(),
                 spf_timer: Levels::<Option<Timer>>::default(),
                 spf_throttle: Levels::<Throttle>::default(),
@@ -1838,6 +1853,9 @@ impl Isis {
     pub fn process_rib_msg(&mut self, msg: RibRx) {
         // println!("RIB Message {:?}", msg);
         match msg {
+            // Labels were freed after the pool found none: give the
+            // adjacencies and Mirror Context entries without one a label.
+            RibRx::LocalLabelsFreed => self.refresh_local_labels(),
             RibRx::LinkAdd(link) => {
                 self.link_add(link);
             }
@@ -2287,6 +2305,10 @@ impl Isis {
             }
             Message::StampReconcile(ifindex) => {
                 self.stamp_reconcile_link(ifindex);
+            }
+            Message::IlmHoldExpire => {
+                self.ilm_hold_timer = None;
+                super::rib::ilm_hold_expire(self);
             }
             Message::GrRestartExit => {
                 // Drain window elapsed. The supervisor (systemd /
@@ -3117,7 +3139,38 @@ impl Isis {
                     self.process_policy_msg(msg);
                 }
             }
+            self.rearm_ilm_hold();
         }
+    }
+
+    /// Keep one timer on the first held Prefix-SID label to run out
+    /// (`spf::ilm_hold`). Run after every event: SPF, a commit or a
+    /// block update can each start a hold, and an expiry ends one.
+    fn rearm_ilm_hold(&mut self) {
+        let due = [
+            self.ilm_hold.l1.due(),
+            self.ilm_hold.l2.due(),
+            self.self_sid_hold.due(),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        if self.ilm_hold_timer.as_ref().map(|(at, _)| *at) == due {
+            return;
+        }
+        self.ilm_hold_timer = due.map(|at| {
+            let wait = at
+                .saturating_duration_since(tokio::time::Instant::now())
+                .max(std::time::Duration::from_millis(1));
+            let tx = self.tx.clone();
+            let timer = Timer::new_dur(wait, TimerType::Once, move || {
+                let tx = tx.clone();
+                async move {
+                    let _ = tx.send(Message::IlmHoldExpire);
+                }
+            });
+            (at, timer)
+        });
     }
 
     /// Handle a `PolicyRx` push from the policy actor. Today we only
@@ -3391,6 +3444,7 @@ impl Isis {
             retained_locators: &mut self.retained_locators,
             egress_protect_registered: &mut self.egress_protect_registered,
             ilm: &mut self.ilm,
+            ilm_hold: &mut self.ilm_hold,
             rib_client: &self.ctx.rib,
             hostname: &mut self.hostname,
             spf_timer: &mut self.spf_timer,
@@ -3505,39 +3559,103 @@ impl Isis {
         }
     }
 
-    /// Reconcile `local_pool` against the current SR-MPLS gate and the
-    /// watched block's SRLB. Creates the pool when SR-MPLS is enabled
-    /// and the RIB has handed us an SRLB; drops it otherwise.
+    /// Reconcile `local_pool`, and the labels drawn from it, against the
+    /// SR-MPLS gate and the watched block's SRLB, as OSPF does
+    /// (`reconcile_adj_sid_labels`):
     ///
-    /// Idempotent: a pool that already exists is kept (alloc/release
-    /// state stays intact) even if the SRLB snapshot is re-delivered
-    /// with the same bounds. A change in SRLB bounds while SR-MPLS
-    /// stays enabled is not reflected — operators changing the block
-    /// mid-life is a follow-up concern and would invalidate every
-    /// adjacency-SID label already handed out.
+    /// - SR-MPLS off, no block, or a block without a (non-empty) SRLB: no
+    ///   pool, and no labels held from one.
+    /// - A new SRLB: a pool over it. A changed one: the pool moves with it
+    ///   (`retarget`). The labels still inside the new SRLB stay; those
+    ///   outside go back, so their cached copies go too, and those
+    ///   Adjacency-SIDs and Mirror Context labels are drawn again from the
+    ///   new SRLB.
+    /// - Then every neighbour address without a label gets one.
+    ///   `nbr_hello_interpret` only labels an address the first time it
+    ///   sees it, so an adjacency that came up before there was a pool (SR
+    ///   enabled later, or before the block arrived) would otherwise never
+    ///   get an Adjacency-SID.
+    ///
+    /// Mirror Context labels are re-drawn by `update_mirror_labels`, which
+    /// the callers run next.
     pub fn reconcile_local_pool(&mut self) {
-        let srlb = self.sr_block.as_ref().and_then(|b| b.local.as_ref());
-        match (self.config.sr_mpls_enabled, srlb) {
-            (true, Some(srlb)) => {
-                if self.local_pool.is_none() {
-                    // LabelBlock is half-open `[start, end)`; LabelPool's
-                    // `end` is inclusive (last allocable label), hence
-                    // the `- 1`.
-                    self.local_pool = Some(LabelPool::new(
-                        srlb.start as usize,
-                        Some(srlb.end.saturating_sub(1) as usize),
-                    ));
+        let srlb = self
+            .sr_block
+            .as_ref()
+            .and_then(|b| b.local.as_ref())
+            .and_then(|lb| Some((lb.start, lb.last()?)))
+            .filter(|_| self.config.sr_mpls_enabled);
+        let current = self.local_pool.as_ref().map(|p| p.range());
+        match (current, srlb) {
+            (Some(_), None) => {
+                self.local_pool = None;
+                self.forget_local_labels(None);
+            }
+            (None, Some((first, last))) => {
+                self.local_pool = Some(self.rib_subscriber.label_space().pool_for(
+                    first,
+                    last,
+                    &self.ctx.rib,
+                ));
+            }
+            // The SRLB changed: keep the labels still inside it; those
+            // that went are drawn again below (Mirror Context labels by
+            // `update_mirror_labels`).
+            (Some(range), Some((first, last))) if range != (first, last) => {
+                let gone = self
+                    .local_pool
+                    .as_mut()
+                    .map(|pool| pool.retarget(first, last))
+                    .unwrap_or_default();
+                self.forget_local_labels(Some(&gone));
+            }
+            _ => {}
+        }
+        let Some(pool) = self.local_pool.as_mut() else {
+            return;
+        };
+        for link in self.links.values_mut() {
+            for level in [Level::L1, Level::L2] {
+                for nbr in link.state.nbrs.get_mut(&level).values_mut() {
+                    for addr in nbr.addr4.values_mut() {
+                        if addr.label.is_none() {
+                            addr.label = pool.allocate();
+                        }
+                    }
                 }
             }
-            _ => {
-                // Drop the pool. Any labels still cached on neighbor
-                // addr4 entries become orphaned but stop short of
-                // producing fresh MPLS installs — `nbr_hello_interpret`
-                // and `lsp_generate` both gate on `local_pool` /
-                // `value.label` being present.
-                self.local_pool = None;
+        }
+    }
+
+    /// Forget labels held from the local pool, the neighbours'
+    /// Adjacency-SID labels and the Mirror Context labels: those in `only`,
+    /// which the pool gave back, or every one when the pool goes.
+    fn forget_local_labels(&mut self, only: Option<&[u32]>) {
+        let gone = |label: u32| only.is_none_or(|labels| labels.contains(&label));
+        for link in self.links.values_mut() {
+            for level in [Level::L1, Level::L2] {
+                for nbr in link.state.nbrs.get_mut(&level).values_mut() {
+                    for addr in nbr.addr4.values_mut() {
+                        if addr.label.is_some_and(gone) {
+                            addr.label = None;
+                        }
+                    }
+                }
             }
         }
+        self.mirror_labels.retain(|_, label| !gone(*label));
+    }
+
+    /// Reconcile the local labels and re-flood: the pool, the
+    /// Adjacency-SID and Mirror Context labels, their ILM decaps, and
+    /// the LSPs that carry them. Run on a block update and when labels
+    /// were freed after the pool found none.
+    fn refresh_local_labels(&mut self) {
+        self.reconcile_local_pool();
+        self.update_mirror_labels();
+        self.update_mirror_context_labels();
+        let _ = self.tx.send(Message::LspOriginate(Level::L1, None));
+        let _ = self.tx.send(Message::LspOriginate(Level::L2, None));
     }
 
     /// Mirror of `reconcile_block_watch` for the SRv6 locator name(s).
@@ -3938,7 +4056,7 @@ impl Isis {
             if let Some(label) = self.mirror_labels.remove(&key)
                 && let Some(pool) = self.local_pool.as_mut()
             {
-                pool.release(label as usize);
+                pool.release(label);
             }
         }
         // Allocate for newly-desired entries (keeps existing allocations).
@@ -3949,7 +4067,7 @@ impl Isis {
             if let Some(pool) = self.local_pool.as_mut()
                 && let Some(label) = pool.allocate()
             {
-                self.mirror_labels.insert(key, label as u32);
+                self.mirror_labels.insert(key, label);
             }
         }
     }
@@ -4028,13 +4146,10 @@ impl Isis {
                 // Pool depends on `sr_block.local`; a fresh snapshot can
                 // unlock pool creation (first-time arrival) or drop it
                 // (block went away on the RIB side).
-                self.reconcile_local_pool();
-                // The SRLB pool just (dis)appeared — (de)allocate Mirror
-                // Context labels and re-flood so the Binding TLVs match.
-                self.update_mirror_labels();
-                self.update_mirror_context_labels();
-                let _ = self.tx.send(Message::LspOriginate(Level::L1, None));
-                let _ = self.tx.send(Message::LspOriginate(Level::L2, None));
+                // The SRLB pool may have appeared, moved or gone:
+                // reconcile the labels and re-flood so the Binding TLVs
+                // match.
+                self.refresh_local_labels();
             }
             RibSrRx::Locator { name, locator } => {
                 // A single locator name may back the base (algo-0)
@@ -4128,6 +4243,9 @@ pub enum Message {
     Ifsm(IfsmEvent, u32, Option<Level>),
     Recv(IsisPacket, u32, Option<MacAddr>),
     Lsdb(LsdbEvent, Level, IsisLspId),
+    /// The first held Prefix-SID label ran out (`spf::ilm_hold`); the
+    /// handler withdraws what is due.
+    IlmHoldExpire,
     /// `gr_restart_commit` armed a `Timer::once_ms` for the drain
     /// window. When it fires, this message tells the dispatcher to
     /// run `std::process::exit(0)`. The supervisor (systemd /
@@ -4245,8 +4363,10 @@ pub enum Message {
     /// session by sending `ClientReq::Unsubscribe`.
     BfdUnsubscribe(crate::bfd::session::SessionKey),
     /// Something that can flip this interface's STAMP measurement
-    /// session changed at runtime (an NFSM transition to/from Up,
-    /// adjacency teardown). The handler re-runs
+    /// session changed at runtime (an IIH from an Up adjacency, which
+    /// may carry the peer's address for the first time; an NFSM
+    /// transition out of Up; adjacency teardown; an interface address
+    /// change). The handler re-runs
     /// [`Isis::stamp_reconcile_link`]; config-driven changes go
     /// through the `CommitEnd` `stamp_reconcile_all` instead.
     StampReconcile(u32),
@@ -4264,6 +4384,7 @@ impl Display for Message {
             Message::Recv(isis_packet, _, _mac_addr) => {
                 write!(f, "[Message::Recv({})]", isis_packet.pdu_type)
             }
+            Message::IlmHoldExpire => write!(f, "[Message::IlmHoldExpire]"),
             Message::Ifsm(ifsm_event, _, _level) => write!(f, "[Message::Ifsm({:?})]", ifsm_event),
             Message::Nfsm(nfsm_event, _, _isis_sys_id, _level) => {
                 write!(f, "[Message::Nfsm({:?})]", nfsm_event)
@@ -4329,6 +4450,114 @@ impl Display for Message {
                 write!(f, "[Message::EgressRetentionExpire {locator} {level}]")
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod sid_move_hold_tests {
+    use isis_packet::SidLabelValue;
+    use netlink_packet_route::link::LinkFlags;
+    use tokio::sync::mpsc;
+
+    use super::commit_and_microloop_gate_tests::fresh_isis;
+    use super::*;
+    use crate::isis::link::{IsisLink, LinkConfig, LinkState, LinkTimer, LinkV4Addr};
+    use crate::spf::ilm_hold::SID_MOVE_HOLD;
+    use crate::spf::label_block::LabelBlock;
+
+    /// An instance with SR-MPLS on, a loopback 10.0.0.1/32 on ifindex 1
+    /// with Prefix-SID index 1, and the RIB messages it sends.
+    fn with_loopback() -> (Isis, mpsc::UnboundedReceiver<rib::client::RibInbound>) {
+        let mut isis = fresh_isis();
+        let (tx, rx) = mpsc::unbounded_channel();
+        isis.ctx.rib = rib::client::RibClient::new(tx, rib::client::ProtoId::from_raw(9));
+        isis.config.sr_mpls_enabled = true;
+        let (ptx, prx) = mpsc::unbounded_channel();
+        Box::leak(Box::new(prx));
+        let mut link = IsisLink {
+            ifindex: 1,
+            ptx,
+            read_task: tokio::spawn(async {}),
+            flags: LinkFlags::Loopback,
+            circuit_id: 0,
+            config: LinkConfig::default(),
+            state: LinkState::default(),
+            timer: LinkTimer::default(),
+        };
+        link.config.enable.v4 = true;
+        link.config.prefix_sid = Some(SidLabelValue::Index(1));
+        link.state.v4addr.push(LinkV4Addr {
+            prefix: "10.0.0.1/32".parse().unwrap(),
+            secondary: false,
+        });
+        isis.links.insert(1, link);
+        (isis, rx)
+    }
+
+    fn srgb(isis: &mut Isis, start: u32) {
+        isis.sr_block = Some(Block {
+            global: Some(LabelBlock::new(start, 8000)),
+            ..Block::default_block()
+        });
+    }
+
+    /// The ILM updates sent so far: (installed, label).
+    fn sent(rx: &mut mpsc::UnboundedReceiver<rib::client::RibInbound>) -> Vec<(bool, u32)> {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|envelope| match envelope.msg {
+                rib::Message::IlmAdd { label, .. } => Some((true, label)),
+                rib::Message::IlmDel { label, .. } => Some((false, label)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// An SRGB change moves our Prefix-SID: the new label is installed at
+    /// once, and the old one keeps delivering until the hold runs out,
+    /// when the timer the instance armed withdraws it.
+    #[tokio::test(start_paused = true)]
+    async fn an_srgb_change_keeps_the_old_label_for_the_hold() {
+        let (mut isis, mut rx) = with_loopback();
+        srgb(&mut isis, 16000);
+        update_self_sid_ilm(&mut isis);
+        assert_eq!(sent(&mut rx), vec![(true, 16001)]);
+
+        srgb(&mut isis, 17000);
+        update_self_sid_ilm(&mut isis);
+        assert_eq!(sent(&mut rx), vec![(true, 17001)], "16001 still delivers");
+        isis.rearm_ilm_hold();
+        // Let the timer task start: its countdown begins when it first runs.
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(SID_MOVE_HOLD - std::time::Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(isis.rx.try_recv().is_err(), "not due yet");
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        let msg = isis.rx.try_recv().expect("the hold timer fired");
+        assert!(matches!(msg, Message::IlmHoldExpire));
+        isis.process_msg(msg);
+        assert_eq!(sent(&mut rx), vec![(false, 16001)]);
+        assert!(isis.self_sid_ilm.contains_key(&17001));
+        isis.rearm_ilm_hold();
+        assert!(isis.ilm_hold_timer.is_none(), "nothing left to hold");
+    }
+
+    /// With SR-MPLS turned off the SID is gone, not moved: both labels go
+    /// at once.
+    #[tokio::test(start_paused = true)]
+    async fn sr_mpls_off_withdraws_a_held_label_at_once() {
+        let (mut isis, mut rx) = with_loopback();
+        srgb(&mut isis, 16000);
+        update_self_sid_ilm(&mut isis);
+        srgb(&mut isis, 17000);
+        update_self_sid_ilm(&mut isis);
+        let _ = sent(&mut rx);
+        isis.config.sr_mpls_enabled = false;
+        update_self_sid_ilm(&mut isis);
+        let mut withdrawn = sent(&mut rx);
+        withdrawn.sort();
+        assert_eq!(withdrawn, vec![(false, 16001), (false, 17001)]);
     }
 }
 
@@ -5479,5 +5708,346 @@ mod flex_algo_participation_tests {
         assert!(isis.flex_algo_participating.is_empty());
         assert!(isis.sr_flex_algo_end_sid.is_empty());
         assert!(isis.sr_flex_algo_locators_active.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod local_label_tests {
+    use super::commit_and_microloop_gate_tests::fresh_isis;
+    use super::*;
+
+    /// IS-IS draws its Adjacency-SID and Mirror Context labels from the
+    /// node's shared set, as OSPF does. Its own pool over the block's
+    /// SRLB handed out 15000 while an OSPF instance, whose SRLB starts at
+    /// 15000 too, held it. What IS-IS holds goes back when it stops.
+    #[tokio::test]
+    async fn isis_skips_a_label_another_instance_holds() {
+        let mut isis = fresh_isis();
+        let mut ospf = isis.rib_subscriber.label_space().pool(15000, 15999);
+        assert_eq!(ospf.allocate(), Some(15000));
+
+        isis.sr_block = Some(Block::default_block());
+        isis.config.sr_mpls_enabled = true;
+        isis.reconcile_local_pool();
+        let label = isis.local_pool.as_mut().and_then(|pool| pool.allocate());
+        assert_eq!(label, Some(15001));
+
+        // What IS-IS held goes back once the RIB has seen its ILM entries
+        // go (its cleanup), not before.
+        let owner = isis.ctx.rib.proto_id();
+        let space = isis.rib_subscriber.label_space().clone();
+        drop(isis);
+        assert_eq!(ospf.allocate(), Some(15002));
+        space.lock().free_releasing_of(&[owner]);
+        assert_eq!(ospf.allocate(), Some(15001));
+    }
+
+    const A: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 2);
+    const PEER: IsisSysId = IsisSysId {
+        id: [0, 0, 0, 0, 0, 9],
+    };
+
+    /// A socket-free link on ifindex 7 with one Level-2 neighbour whose
+    /// address `A` has no label yet.
+    fn with_neighbour(isis: &mut Isis) {
+        use crate::isis::link::{IsisLink, LinkConfig, LinkState, LinkTimer, NetworkType};
+        let (ptx, prx) = tokio::sync::mpsc::unbounded_channel();
+        Box::leak(Box::new(prx));
+        let mut link = IsisLink {
+            ifindex: 7,
+            ptx,
+            read_task: tokio::spawn(async {}),
+            flags: netlink_packet_route::link::LinkFlags::empty(),
+            circuit_id: 0,
+            config: LinkConfig::default(),
+            state: LinkState::default(),
+            timer: LinkTimer::default(),
+        };
+        let mut nbr =
+            crate::isis::neigh::Neighbor::new(isis.tx.clone(), 7, NetworkType::Lan, PEER, None);
+        nbr.addr4
+            .insert(A, crate::isis::packet::NeighborAddr4::new(A, None));
+        link.state.nbrs.get_mut(&Level::L2).insert(PEER, nbr);
+        isis.links.insert(7, link);
+    }
+
+    fn adj_label(isis: &Isis) -> Option<u32> {
+        isis.links
+            .get(&7)?
+            .state
+            .nbrs
+            .get(&Level::L2)
+            .get(&PEER)?
+            .addr4
+            .get(&A)?
+            .label
+    }
+
+    fn sr_on(isis: &mut Isis, srlb: (u32, u32)) {
+        isis.sr_block = Some(Block {
+            local: Some(crate::spf::label_block::LabelBlock::new(srlb.0, srlb.1)),
+            ..Block::default_block()
+        });
+        isis.config.sr_mpls_enabled = true;
+        isis.reconcile_local_pool();
+    }
+
+    /// An adjacency already up when the pool appears (SR-MPLS enabled
+    /// later, or the block late) gets its Adjacency-SID label then.
+    /// `nbr_hello_interpret` labels an address only the first time it
+    /// sees it, so without the sweep it never would.
+    #[tokio::test]
+    async fn an_adjacency_up_before_the_pool_gets_a_label() {
+        let mut isis = fresh_isis();
+        with_neighbour(&mut isis);
+        assert_eq!(adj_label(&isis), None);
+        sr_on(&mut isis, (15000, 1000));
+        assert_eq!(adj_label(&isis), Some(15000));
+    }
+
+    /// The SRLB moves: the pool is rebuilt over the new one, every label
+    /// is drawn again from it, and the old SRLB's labels go back.
+    #[tokio::test]
+    async fn an_srlb_move_draws_every_label_again() {
+        let mut isis = fresh_isis();
+        with_neighbour(&mut isis);
+        sr_on(&mut isis, (15000, 1000));
+        let mirror = isis.local_pool.as_mut().and_then(|p| p.allocate()).unwrap();
+        isis.mirror_labels
+            .insert("fc00:0:9::/48".parse().unwrap(), mirror);
+        assert_eq!((adj_label(&isis), mirror), (Some(15000), 15001));
+
+        sr_on(&mut isis, (30000, 100));
+        assert_eq!(
+            isis.local_pool.as_ref().map(|p| p.range()),
+            Some((30000, 30099))
+        );
+        assert_eq!(adj_label(&isis), Some(30000));
+        assert!(
+            isis.mirror_labels.is_empty(),
+            "update_mirror_labels draws them again"
+        );
+        // The old SRLB's labels go back once the RIB has seen IS-IS's ILM
+        // entries at them go, not before.
+        let mut other = isis.rib_subscriber.label_space().pool(15000, 15001);
+        assert_eq!(other.allocate(), None);
+        let owner = isis.ctx.rib.proto_id();
+        isis.rib_subscriber
+            .label_space()
+            .lock()
+            .free_releasing_of(&[owner]);
+        assert_eq!(
+            (other.allocate(), other.allocate()),
+            (Some(15000), Some(15001))
+        );
+    }
+
+    /// An overlapping SRLB change keeps the labels still inside the new
+    /// SRLB: shrinking 15000..15001 to 15000 keeps the adjacency's 15000.
+    /// Drawing it again would race its own release and fail.
+    #[tokio::test]
+    async fn an_overlapping_srlb_change_keeps_the_label() {
+        let mut isis = fresh_isis();
+        with_neighbour(&mut isis);
+        sr_on(&mut isis, (15000, 2));
+        assert_eq!(adj_label(&isis), Some(15000));
+        sr_on(&mut isis, (15000, 1));
+        assert_eq!(adj_label(&isis), Some(15000));
+    }
+
+    /// Labels freed after the pool found none: the adjacency without one
+    /// gets it.
+    #[tokio::test]
+    async fn freed_labels_reach_an_adjacency_without_one() {
+        let mut isis = fresh_isis();
+        with_neighbour(&mut isis);
+        let mut other = isis.rib_subscriber.label_space().pool(15000, 15000);
+        assert_eq!(other.allocate(), Some(15000));
+        sr_on(&mut isis, (15000, 1));
+        assert_eq!(adj_label(&isis), None, "the only label is taken");
+        other.release(15000);
+        isis.process_rib_msg(RibRx::LocalLabelsFreed);
+        assert_eq!(adj_label(&isis), Some(15000));
+    }
+
+    /// SR-MPLS off: no pool, and no labels held from one.
+    #[tokio::test]
+    async fn sr_mpls_off_forgets_the_labels() {
+        let mut isis = fresh_isis();
+        with_neighbour(&mut isis);
+        sr_on(&mut isis, (15000, 1000));
+        assert_eq!(adj_label(&isis), Some(15000));
+        isis.config.sr_mpls_enabled = false;
+        isis.reconcile_local_pool();
+        assert!(isis.local_pool.is_none());
+        assert_eq!(adj_label(&isis), None);
+    }
+}
+
+#[cfg(test)]
+mod stamp_wiring_tests {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    use isis_packet::{IsLevel, IsisP2pHello, IsisTlvIpv4IfAddr, IsisTlvP2p3Way};
+    use tokio::sync::mpsc;
+
+    use super::bfd_wiring_tests::{test_config_tx, test_ctx, test_rib_subscriber};
+    use super::*;
+    use crate::isis::link::{IsisLink, LinkConfig, LinkState, LinkTimer, LinkV4Addr, NetworkType};
+    use crate::rib::link::LinkAddr;
+    use crate::stamp::client::ClientReq;
+
+    const LOCAL: Ipv4Addr = Ipv4Addr::new(192, 168, 70, 1);
+    const REMOTE: Ipv4Addr = Ipv4Addr::new(192, 168, 70, 2);
+    const PEER: IsisSysId = IsisSysId {
+        id: [0, 0, 0, 0, 0, 9],
+    };
+
+    fn fresh_isis_with_stamp() -> (Isis, mpsc::UnboundedReceiver<ClientReq>) {
+        let (ctx, rib_rx) = test_ctx();
+        let (stamp_client_tx, stamp_client_rx) = mpsc::unbounded_channel();
+        let (policy_tx, policy_rx) = mpsc::unbounded_channel();
+        Box::leak(Box::new(policy_rx));
+        let isis = Isis::new(
+            ctx,
+            rib_rx,
+            None,
+            Some(stamp_client_tx),
+            None,
+            policy_tx,
+            "isis".to_string(),
+            test_rib_subscriber(),
+            test_config_tx(),
+        );
+        (isis, stamp_client_rx)
+    }
+
+    /// A socket-free Level-2 point-to-point link on ifindex 7 with
+    /// measurement enabled, holding `local` if it has learned it yet.
+    fn measured_link(isis: &mut Isis, local: Option<Ipv4Addr>) {
+        let (ptx, prx) = mpsc::unbounded_channel();
+        Box::leak(Box::new(prx));
+        let mut link = IsisLink {
+            ifindex: 7,
+            ptx,
+            read_task: tokio::spawn(async {}),
+            flags: netlink_packet_route::link::LinkFlags::empty(),
+            circuit_id: 1,
+            config: LinkConfig::default(),
+            state: LinkState::default(),
+            timer: LinkTimer::default(),
+        };
+        link.config.enable.v4 = true;
+        link.config.network_type = Some(NetworkType::P2p);
+        link.config.te_metric_measurement.enable = Some(true);
+        link.state.set_level(IsLevel::L2);
+        if let Some(addr) = local {
+            link.state.v4addr.push(LinkV4Addr {
+                prefix: Ipv4Net::new(addr, 30).unwrap(),
+                secondary: false,
+            });
+        }
+        isis.links.insert(7, link);
+    }
+
+    /// A P2P IIH from `PEER` that lists us — the adjacency is Up once it
+    /// is in — carrying `remote` as its Interface Address, if any.
+    fn hello(isis: &Isis, remote: Option<Ipv4Addr>) -> IsisP2pHello {
+        let mut tlvs = vec![
+            IsisTlvP2p3Way {
+                state: NfsmState::Init.into(),
+                circuit_id: Some(1),
+                neighbor_id: Some(isis.config.net.sys_id()),
+                neighbor_circuit_id: Some(1),
+            }
+            .into(),
+        ];
+        if let Some(addr) = remote {
+            tlvs.push(IsisTlvIpv4IfAddr { addrs: vec![addr] }.into());
+        }
+        IsisP2pHello {
+            circuit_type: IsLevel::L2,
+            source_id: PEER,
+            hold_time: 30,
+            pdu_len: 0,
+            circuit_id: 1,
+            tlvs,
+        }
+    }
+
+    /// Run the STAMP reconciles queued so far; the rest is not under
+    /// test.
+    fn run_reconciles(isis: &mut Isis) {
+        while let Ok(msg) = isis.rx.try_recv() {
+            if let Message::StampReconcile(ifindex) = msg {
+                isis.stamp_reconcile_link(ifindex);
+            }
+        }
+    }
+
+    /// Deliver `hello(remote)` on link 7 and run the reconciles it
+    /// queued.
+    fn receive(isis: &mut Isis, remote: Option<Ipv4Addr>) {
+        let pdu = hello(isis, remote);
+        let mut top = isis.link_top(7).expect("link 7");
+        crate::isis::packet::hello_p2p_recv(&mut top, pdu, None);
+        run_reconciles(isis);
+    }
+
+    fn peer_up(isis: &Isis) -> bool {
+        isis.links.get(&7).is_some_and(|link| {
+            link.state
+                .nbrs
+                .get(&Level::L2)
+                .get(&PEER)
+                .is_some_and(|nbr| nbr.state == NfsmState::Up)
+        })
+    }
+
+    /// The (local, remote) pair STAMP was asked to measure, if it was.
+    fn subscribed(rx: &mut mpsc::UnboundedReceiver<ClientReq>) -> Option<(IpAddr, IpAddr)> {
+        match rx.try_recv() {
+            Ok(ClientReq::Subscribe { key, .. }) => Some((key.local, key.remote)),
+            Ok(other) => panic!("expected a Subscribe, got {other:?}"),
+            Err(_) => None,
+        }
+    }
+
+    /// The peer's IIHs carry its address only from after the adjacency
+    /// came up (it had not learned the address when it sent the one that
+    /// completed the handshake). The first IIH that carries it starts
+    /// the measurement session.
+    #[tokio::test]
+    async fn the_peer_address_arriving_after_up_starts_the_session() {
+        let (mut isis, mut stamp) = fresh_isis_with_stamp();
+        measured_link(&mut isis, Some(LOCAL));
+        receive(&mut isis, None);
+        assert!(peer_up(&isis));
+        assert_eq!(subscribed(&mut stamp), None, "no remote address yet");
+        receive(&mut isis, Some(REMOTE));
+        assert_eq!(subscribed(&mut stamp), Some((LOCAL.into(), REMOTE.into())));
+        receive(&mut isis, Some(REMOTE));
+        assert_eq!(
+            subscribed(&mut stamp),
+            None,
+            "one subscription, not one per IIH"
+        );
+    }
+
+    /// Our own address arrives after the adjacency came up.
+    #[tokio::test]
+    async fn the_local_address_arriving_after_up_starts_the_session() {
+        let (mut isis, mut stamp) = fresh_isis_with_stamp();
+        measured_link(&mut isis, None);
+        receive(&mut isis, Some(REMOTE));
+        assert!(peer_up(&isis));
+        assert_eq!(subscribed(&mut stamp), None, "no local address yet");
+        isis.addr_add(LinkAddr {
+            addr: IpNet::V4(Ipv4Net::new(LOCAL, 30).unwrap()),
+            ifindex: 7,
+            ..Default::default()
+        });
+        run_reconciles(&mut isis);
+        assert_eq!(subscribed(&mut stamp), Some((LOCAL.into(), REMOTE.into())));
     }
 }

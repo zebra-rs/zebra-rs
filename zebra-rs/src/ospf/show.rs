@@ -2250,7 +2250,7 @@ struct SrPrefixSidJson {
 struct SrNodeJson {
     router_id: String,
     srgb_start: u32,
-    srgb_end: u32,
+    srgb_end: Option<u32>,
     srlb_start: Option<u32>,
     srlb_end: Option<u32>,
     algorithms: String,
@@ -2285,8 +2285,10 @@ fn show_ospf_segment_routing(
                     })
                     .unwrap_or_default();
                 let srgb = &label_config.global;
+                // Inclusive ends, as the text output and OSPFv3 print them.
+                // A peer can advertise a range of 0: no last label then.
                 let (srlb_start, srlb_end) = match &label_config.local {
-                    Some(lb) => (Some(lb.start), Some(lb.end)),
+                    Some(lb) => (Some(lb.start), lb.last()),
                     None => (None, None),
                 };
                 let mut prefix_sids = Vec::new();
@@ -2330,7 +2332,7 @@ fn show_ospf_segment_routing(
                 nodes.push(SrNodeJson {
                     router_id: router_id.to_string(),
                     srgb_start: srgb.start,
-                    srgb_end: srgb.end,
+                    srgb_end: srgb.last(),
                     srlb_start,
                     srlb_end,
                     algorithms,
@@ -2374,16 +2376,25 @@ fn show_ospf_segment_routing(
                 .unwrap_or_default();
 
             let srgb = &label_config.global;
+            // Inclusive ends; a range of 0 (a peer can advertise one) shows
+            // as empty brackets.
+            let range = |b: &crate::spf::label_block::LabelBlock| match b.last() {
+                Some(last) => format!("[{}/{}]", b.start, last),
+                None => "[]".to_string(),
+            };
             let srlb_str = if let Some(ref lb) = label_config.local {
-                format!("    SRLB: [{}/{}]", lb.start, lb.end - 1)
+                format!("    SRLB: {}", range(lb))
             } else {
                 String::new()
             };
 
             writeln!(
                 buf,
-                "SR-Node: {}    SRGB: [{}/{}]{}    Algo.(s): {}",
-                router_id, srgb.start, srgb.end, srlb_str, algo_str
+                "SR-Node: {}    SRGB: {}{}    Algo.(s): {}",
+                router_id,
+                range(srgb),
+                srlb_str,
+                algo_str
             )?;
 
             writeln!(buf)?;

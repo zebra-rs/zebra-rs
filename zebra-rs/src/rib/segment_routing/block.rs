@@ -31,11 +31,13 @@ pub const DEFAULT_BLOCK_NAME: &str = "default";
 const DEFAULT_GLOBAL_START: u32 = 16000;
 const DEFAULT_GLOBAL_RANGE: u32 = 8000;
 const DEFAULT_LOCAL_START: u32 = 15000;
-const DEFAULT_LOCAL_RANGE: u32 = 100;
+/// 15000..15999, IOS XR's and FRR's default SRLB: room for the dynamic
+/// Adjacency-SIDs of every IGP on the node, which all draw from it.
+const DEFAULT_LOCAL_RANGE: u32 = 1000;
 
 impl Block {
     /// The default block — seeded into `Rib::blocks` at startup and re-seeded
-    /// after a delete of the same name. SRGB 16000..23999 + SRLB 15000..15099.
+    /// after a delete of the same name. SRGB 16000..23999 + SRLB 15000..15999.
     pub fn default_block() -> Self {
         Self {
             global: Some(LabelBlock::new(DEFAULT_GLOBAL_START, DEFAULT_GLOBAL_RANGE)),

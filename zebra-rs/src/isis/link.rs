@@ -34,7 +34,7 @@ use super::socket::isis_socket;
 use super::srmpls::IsisLabelMap;
 use super::tracing::IsisTracing;
 use super::{Hostname, IfsmEvent, Isis, Level, Levels, Lsdb, Message};
-use crate::spf::label_pool::LabelPool;
+use crate::rib::label_space::LocalLabelPool;
 
 #[derive(Debug, Default)]
 pub struct LinkTimer {
@@ -226,7 +226,7 @@ pub struct LinkTop<'a> {
     pub circuit_id: u8,
     pub state: &'a mut LinkState,
     pub timer: &'a mut LinkTimer,
-    pub local_pool: &'a mut Option<LabelPool>,
+    pub local_pool: &'a mut Option<LocalLabelPool>,
     pub hostname: &'a mut Levels<Hostname>,
     pub reach_map: &'a mut Levels<Afis<ReachMapV4>>,
     pub reach_map_v6: &'a mut Levels<ReachMapV6>,
@@ -1284,7 +1284,7 @@ impl Isis {
                     if let Some(local_pool) = self.local_pool.as_mut() {
                         for value in nbr.addr4.values_mut() {
                             if let Some(label) = value.label.take() {
-                                local_pool.release(label as usize);
+                                local_pool.release(label);
                             }
                         }
                     }
@@ -1395,6 +1395,10 @@ impl Isis {
             let _ = self.tx.send(msg);
             let _ = self.tx.send(Message::LspOriginate(Level::L1, None));
             let _ = self.tx.send(Message::LspOriginate(Level::L2, None));
+            // A measurement session needs our address as well as an Up
+            // adjacency; one learned (or lost) after the adjacency came
+            // up re-keys it now rather than at the peer's next IIH.
+            let _ = self.tx.send(Message::StampReconcile(addr.ifindex));
         }
     }
 }

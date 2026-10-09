@@ -75,9 +75,10 @@ drawn from the raw 20-bit space — they come from a **dynamic label
 block** the RIB's label manager reserves for BGP:
 
 * The block lives in a band **above the SR-MPLS ranges** (the default
-  SRGB is `16000..23999` and SRLB `15000..15099`). The dynamic pool
-  starts at label **100000**, so a per-VRF label can never collide with
-  an IS-IS / OSPF prefix-SID or adjacency-SID in the kernel MPLS table.
+  SRGB is `16000..23999` and SRLB `15000..15999`). The dynamic pool
+  starts at label **24000** and steps around any `segment-routing block`
+  configured inside it, so a per-VRF label can never collide with an
+  IS-IS / OSPF prefix-SID or adjacency-SID in the kernel MPLS table.
 * BGP requests a block from the RIB at startup. If a VRF is configured
   before the block is granted it spawns label-less and is reconciled —
   given a real label and re-advertised — the moment the block arrives.
