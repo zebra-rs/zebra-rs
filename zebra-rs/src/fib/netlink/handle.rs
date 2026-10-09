@@ -1297,7 +1297,7 @@ impl FibHandle {
             }
         }
 
-        self.note_install(&msg);
+        let replaced = self.leftover_key(&msg);
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
         // Upsert (`NLM_F_REPLACE`), not `NLM_F_EXCL`: the kernel keys a
         // route on (table, dst, priority), NOT on its nexthop — a
@@ -1337,6 +1337,9 @@ impl FibHandle {
                     );
                 }
             }
+        }
+        if ok {
+            self.note_installed(replaced);
         }
         ok
     }
@@ -1490,9 +1493,7 @@ impl FibHandle {
             )));
         msg.attributes.push(RouteAttribute::Priority(metric));
 
-        if add {
-            self.note_install(&msg);
-        }
+        let replaced = if add { self.leftover_key(&msg) } else { None };
         let inner = if add {
             RouteNetlinkMessage::NewRoute(msg)
         } else {
@@ -1529,6 +1530,9 @@ impl FibHandle {
                     );
                 }
             }
+        }
+        if ok {
+            self.note_installed(replaced);
         }
         ok
     }
@@ -1821,7 +1825,7 @@ impl FibHandle {
             }
             msg.attributes.push(RouteAttribute::Priority(uni.metric));
 
-            self.note_install(&msg);
+            let replaced = self.leftover_key(&msg);
             let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
             req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
             let mut ok = true;
@@ -1833,6 +1837,9 @@ impl FibHandle {
                         "NewRoute seg6local install error: prefix={prefix} action={action:?} err={e}"
                     );
                 }
+            }
+            if ok {
+                self.note_installed(replaced);
             }
             return ok;
         }
@@ -1975,7 +1982,7 @@ impl FibHandle {
             );
         }
 
-        self.note_install(&msg);
+        let replaced = self.leftover_key(&msg);
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
         // Upsert (`NLM_F_REPLACE`) — see the v4 sibling: a re-resolved
         // route keeps its (table, dst, priority) key but changes its
@@ -2010,6 +2017,9 @@ impl FibHandle {
                     );
                 }
             }
+        }
+        if ok {
+            self.note_installed(replaced);
         }
         ok
     }
@@ -2094,9 +2104,7 @@ impl FibHandle {
             )));
         msg.attributes.push(RouteAttribute::Priority(metric));
 
-        if add {
-            self.note_install(&msg);
-        }
+        let replaced = if add { self.leftover_key(&msg) } else { None };
         let inner = if add {
             RouteNetlinkMessage::NewRoute(msg)
         } else {
@@ -2131,6 +2139,9 @@ impl FibHandle {
                     );
                 }
             }
+        }
+        if ok {
+            self.note_installed(replaced);
         }
         ok
     }
@@ -2721,12 +2732,14 @@ impl FibHandle {
             );
         }
 
-        self.note_install(&msg);
+        let replaced = self.leftover_key(&msg);
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
         req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
+        let mut ok = true;
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(m) = response.next().await {
             if let NetlinkPayload::Error(e) = m.payload {
+                ok = false;
                 // warn level so kernel rejections show up without
                 // requiring `system tracing fib srv6` — silent failures
                 // here are how a misshaped seg6local install slips through.
@@ -2746,6 +2759,9 @@ impl FibHandle {
                     e
                 );
             }
+        }
+        if ok {
+            self.note_installed(replaced);
         }
     }
 
@@ -2796,12 +2812,14 @@ impl FibHandle {
             }
         }
 
-        self.note_install(&msg);
+        let replaced = self.leftover_key(&msg);
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
         req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
+        let mut ok = true;
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(m) = response.next().await {
             if let NetlinkPayload::Error(e) = m.payload {
+                ok = false;
                 tracing::warn!(
                     "mirror redirect install error: sid={} mirror_sid={} nh6={} ifindex={} err={}",
                     sid_prefix.addr(),
@@ -2811,6 +2829,9 @@ impl FibHandle {
                     e
                 );
             }
+        }
+        if ok {
+            self.note_installed(replaced);
         }
     }
 
@@ -2917,12 +2938,14 @@ impl FibHandle {
         msg.attributes.push(encap);
         msg.attributes.push(encap_type);
 
-        self.note_install(&msg);
+        let replaced = self.leftover_key(&msg);
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
         req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
+        let mut ok = true;
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(m) = response.next().await {
             if let NetlinkPayload::Error(e) = m.payload {
+                ok = false;
                 tracing::warn!(
                     "NewRoute mirror-context install error: prefix={} context_table={} \
                      vrf_table={} ifindex={} err={}",
@@ -2933,6 +2956,9 @@ impl FibHandle {
                     e
                 );
             }
+        }
+        if ok {
+            self.note_installed(replaced);
         }
     }
 
@@ -4159,16 +4185,27 @@ impl FibHandle {
             .map(|(encap, _)| encap.l3vni)
     }
 
-    /// Remember a route this run installs at an SRv6 leftover's key, so the
-    /// leftover sweep keeps it. Whatever its encapsulation: a plain route
-    /// (SRv6 disabled across the restart, say) replaces the leftover at the
-    /// same `(table, prefix, priority)`, and deleting the key would delete
-    /// it. Called with the message before every route install. The startup
-    /// dump records the leftovers before any install, in the same task.
-    fn note_install(&self, msg: &RouteMessage) {
-        if let Some((key, _, _)) = route_key(msg)
-            && self.srv6_leftovers.lock().unwrap().contains_key(&key)
-        {
+    /// The SRv6 leftover's key a route install would replace, if any:
+    /// taken from the message before it is sent, and recorded by
+    /// `note_installed` once the kernel accepts the route. Whatever the
+    /// route's encapsulation: a plain route (SRv6 disabled across the
+    /// restart, say) replaces the leftover at the same `(table, prefix,
+    /// priority)`, and deleting the key would delete it. The startup dump
+    /// records the leftovers before any install, in the same task.
+    fn leftover_key(&self, msg: &RouteMessage) -> Option<(u32, IpNet, u32)> {
+        let (key, _, _) = route_key(msg)?;
+        self.srv6_leftovers
+            .lock()
+            .unwrap()
+            .contains_key(&key)
+            .then_some(key)
+    }
+
+    /// The kernel accepted a route at an SRv6 leftover's key: the leftover
+    /// sweep keeps that key. A rejected install left the leftover in
+    /// place, so it stays a leftover.
+    fn note_installed(&self, key: Option<(u32, IpNet, u32)>) {
+        if let Some(key) = key {
             self.srv6_installed.lock().unwrap().insert(key);
         }
     }
@@ -4293,9 +4330,7 @@ impl FibHandle {
             RouteAttribute::Oif(bridge),
             RouteAttribute::Priority(metric),
         ]);
-        if add {
-            self.note_install(&msg);
-        }
+        let replaced = if add { self.leftover_key(&msg) } else { None };
         let mut request = NetlinkMessage::from(if add {
             RouteNetlinkMessage::NewRoute(msg)
         } else {
@@ -4312,6 +4347,9 @@ impl FibHandle {
                     success = false;
                 }
             }
+        }
+        if success {
+            self.note_installed(replaced);
         }
         success
     }

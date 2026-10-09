@@ -1159,3 +1159,64 @@ async fn sweep_keeps_routes_that_replaced_srv6_leftovers() {
     );
     ip(&["link", "del", "srv6r0"]);
 }
+
+/// An earlier run's SRv6 route whose replacement the kernel rejected (its
+/// gateway is unreachable) is still the leftover, and the sweep removes it.
+#[tokio::test]
+#[ignore = "requires root in an isolated network namespace"]
+async fn sweep_removes_an_srv6_leftover_whose_replacement_failed() {
+    require_netns();
+    ip(&["link", "add", "srv6f0", "type", "dummy"]);
+    ip(&["link", "set", "srv6f0", "up"]);
+    ip(&[
+        "-6",
+        "addr",
+        "add",
+        "2001:db8:d::1/64",
+        "dev",
+        "srv6f0",
+        "nodad",
+    ]);
+    ip(&[
+        "-6",
+        "route",
+        "add",
+        "2001:db8:45::/64",
+        "encap",
+        "seg6",
+        "mode",
+        "encap",
+        "segs",
+        "2001:db8:d::2",
+        "dev",
+        "srv6f0",
+        "proto",
+        "isis",
+    ]);
+    let mut rib = Rib::new(false).unwrap();
+    crate::fib::fib_dump(&mut rib).await.unwrap();
+    rib.fib_handle.use_nhid = false;
+    let ifindex = rib
+        .links
+        .values()
+        .find(|link| link.name == "srv6f0")
+        .unwrap()
+        .index;
+    let mut unreachable = RibEntry::new(RibType::Isis);
+    unreachable.nexthop = Nexthop::Uni(NexthopUni {
+        addr: "2001:db8:ffff::2".parse().unwrap(),
+        ifindex_origin: Some(ifindex),
+        ..Default::default()
+    });
+    let prefix: Ipv6Net = "2001:db8:45::/64".parse().unwrap();
+    assert!(
+        !rib.fib_handle
+            .route_ipv6_add(&prefix, &unreachable, RT_TABLE_MAIN)
+            .await
+    );
+    let route = || ip(&["-6", "route", "show", "exact", "2001:db8:45::/64"]);
+    assert!(route().contains("encap"), "the leftover is still there");
+    rib.sweep_leftovers().await;
+    assert!(route().trim().is_empty(), "and the sweep removed it");
+    ip(&["link", "del", "srv6f0"]);
+}
