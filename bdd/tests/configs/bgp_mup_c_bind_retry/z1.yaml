@@ -1,0 +1,45 @@
+# z1 — MUP Controller (MUP-C) listening for PFCP on 192.168.0.1:8805, an
+# address its interface does not have when this config is committed: the
+# namespace starts with 192.168.0.11/24 only. The VRF `mobile-up` binds
+# Network Instance `core` to a Type-2 ST route, so a PFCP session in it
+# originates an ST2 once the listener is up.
+segment-routing:
+  locator:
+  - name: LOC1
+    prefix: fcbb:bb01::/48
+    behavior: usid
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.11
+    segment-routing:
+      srv6:
+        locator: LOC1
+        ipv6-unicast: {}
+    vrf:
+    - name: mobile-up
+      rd: "65000:100"
+      afi-safi:
+        mup:
+          segment:
+          - type: direct
+            mup-ext-comm: "1:2"
+          route:
+          - type: st2
+            network-instance: core
+            mup-ext-comm: "1:2"
+    mup-c:
+      enabled: true
+      controller-address: fcbb:bb01::1
+      pfcp:
+        listen-address: 192.168.0.1
+        port: 8805
+      srv6:
+        locator: LOC1
+vrf:
+- name: mobile-up
+  mup:
+    route-target:
+      export:
+      - "65000:200"
