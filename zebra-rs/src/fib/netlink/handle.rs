@@ -457,6 +457,25 @@ type CradleMember = (
     Option<crate::fib::cradle::Leaf>,
 );
 
+/// The single overlay adjacency of a bridge Type-5 next hop: a VXLAN leg,
+/// or underlay ECMP whose legs all carry the same VTEP, L3 VNI and router
+/// MAC (the underlay supplies the paths; the bridge route needs one
+/// adjacency). Different overlay adjacencies are not collapsed.
+fn evpn_overlay(nexthop: &Nexthop) -> Option<(crate::rib::VxlanL3Encap, u32)> {
+    match nexthop {
+        Nexthop::Uni(uni) => uni.vxlan.map(|encap| (encap, uni.metric)),
+        Nexthop::Multi(multi) => {
+            let encap = multi.nexthops.first()?.vxlan?;
+            multi
+                .nexthops
+                .iter()
+                .all(|uni| uni.vxlan == Some(encap))
+                .then_some((encap, multi.metric))
+        }
+        _ => None,
+    }
+}
+
 /// Extract a nexthop's cradle-tee members. The gateway is passed as the raw
 /// `IpAddr` (v4 for plain/MPLS legs, v6 for the SRv6 underlay), plus the MPLS
 /// out-label stack and the SRv6 segment list + encap mode. (Protect/backup
@@ -1172,11 +1191,10 @@ impl FibHandle {
         table_id: u32,
     ) -> bool {
         if self.kernel_route_exchange
-            && let Nexthop::Uni(uni) = nexthop
-            && let Some(encap) = uni.vxlan
+            && let Some((encap, metric)) = evpn_overlay(nexthop)
         {
             return self
-                .evpn_prefix_route(IpNet::V4(*prefix), table_id, uni.metric, encap, true)
+                .evpn_prefix_route(IpNet::V4(*prefix), table_id, metric, encap, true)
                 .await;
         }
         let mut msg = RouteMessage::default();
@@ -1519,7 +1537,7 @@ impl FibHandle {
     ) {
         // Follow what was installed, not the knob: it may have been
         // toggled since, and the bridge route only matches this path.
-        if matches!(nexthop, Nexthop::Uni(uni) if uni.vxlan.is_some())
+        if evpn_overlay(nexthop).is_some()
             && let Some((encap, metric)) = self.evpn_prefix_tracked(table_id, IpNet::V4(*prefix))
         {
             self.evpn_prefix_route(IpNet::V4(*prefix), table_id, metric, encap, false)
@@ -1729,11 +1747,10 @@ impl FibHandle {
         table_id: u32,
     ) -> bool {
         if self.kernel_route_exchange
-            && let Nexthop::Uni(uni) = nexthop
-            && let Some(encap) = uni.vxlan
+            && let Some((encap, metric)) = evpn_overlay(nexthop)
         {
             return self
-                .evpn_prefix_route(IpNet::V6(*prefix), table_id, uni.metric, encap, true)
+                .evpn_prefix_route(IpNet::V6(*prefix), table_id, metric, encap, true)
                 .await;
         }
         if fib_route() {
@@ -2119,7 +2136,7 @@ impl FibHandle {
     ) {
         // Follow what was installed, not the knob: it may have been
         // toggled since, and the bridge route only matches this path.
-        if matches!(nexthop, Nexthop::Uni(uni) if uni.vxlan.is_some())
+        if evpn_overlay(nexthop).is_some()
             && let Some((encap, metric)) = self.evpn_prefix_tracked(table_id, IpNet::V6(*prefix))
         {
             self.evpn_prefix_route(IpNet::V6(*prefix), table_id, metric, encap, false)
@@ -6391,6 +6408,29 @@ mod tests {
             leftover_rtype(route_protocol(RibType::Static), main),
             Some((RibType::Static, 1))
         );
+    }
+
+    #[test]
+    fn overlay_collapse_requires_identical_adjacencies() {
+        let encap = crate::rib::VxlanL3Encap {
+            remote_vtep: "192.0.2.1".parse().unwrap(),
+            l3vni: 2000,
+            remote_rmac: [2; 6],
+        };
+        let mut multi = crate::rib::NexthopMulti::default();
+        for addr in ["fe80::1", "fe80::2"] {
+            let mut uni = NexthopUni::new(addr.parse().unwrap(), 0, vec![]);
+            uni.vxlan = Some(encap);
+            multi.nexthops.push(uni);
+        }
+        assert_eq!(
+            evpn_overlay(&Nexthop::Multi(multi.clone())),
+            Some((encap, 0))
+        );
+        multi.nexthops[1].vxlan.as_mut().unwrap().remote_vtep = "192.0.2.2".parse().unwrap();
+        assert!(evpn_overlay(&Nexthop::Multi(multi.clone())).is_none());
+        multi.nexthops[1].vxlan = None;
+        assert!(evpn_overlay(&Nexthop::Multi(multi)).is_none());
     }
 
     #[test]
