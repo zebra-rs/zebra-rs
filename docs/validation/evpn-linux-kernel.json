@@ -1,5 +1,5 @@
 {
-  "binary_sha256": "411bcea56bab17aed5180b5d17f43e1e0dc469c377923351f461426f8d1b86ff",
+  "binary_sha256": "564f4b8ee80b9ca034426e0e7e57bc5c895d6a317d7feb9394563a95599df410",
   "checks": [
     {
       "name": "v1 EVPN established",
@@ -319,6 +319,42 @@
     },
     {
       "name": "Move to br2000: routed -6",
+      "passed": true
+    },
+    {
+      "name": "Mobility: station local on v2",
+      "passed": true
+    },
+    {
+      "name": "Mobility: station local on v2 (stable)",
+      "passed": true
+    },
+    {
+      "name": "Mobility: station remote on v1",
+      "passed": true
+    },
+    {
+      "name": "Mobility: station remote on v1 (stable)",
+      "passed": true
+    },
+    {
+      "name": "Mobility back: station local on v1",
+      "passed": true
+    },
+    {
+      "name": "Mobility back: station local on v1 (stable)",
+      "passed": true
+    },
+    {
+      "name": "Mobility back: station remote on v2",
+      "passed": true
+    },
+    {
+      "name": "Mobility back: station remote on v2 (stable)",
+      "passed": true
+    },
+    {
+      "name": "Mobility back: l2 reaches the station",
       "passed": true
     },
     {

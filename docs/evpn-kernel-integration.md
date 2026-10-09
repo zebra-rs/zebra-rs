@@ -95,6 +95,15 @@ configured is not removed.
 * Received Type-2 routes may carry the optional Label2 (the L3VNI under
   symmetric IRB, RFC 9135). It is accepted and re-advertised unchanged;
   zebra-rs does not yet originate it or install Type-2 host routes in VRFs.
+* A remote MAC/IP route for a MAC learned locally is installed only if it
+  outranks this speaker's own route, in FRR's order: a sticky MAC wins, a
+  shared non-zero Ethernet Segment keeps the local path, then the higher
+  MAC Mobility sequence number, then the lower VTEP address (RFC 7432
+  §7.7, §15). A route it does not outrank is removed from the kernel
+  state rather than overwriting the local FDB row, and is installed again
+  if the local route is withdrawn. Sticky, default-gateway and router flags
+  are read from the RFC 7432 MAC Mobility, Default Gateway and RFC 9161 ND
+  communities.
 * Remote Type-2 bindings install `EXT_LEARNED` / `NOARP` neighbors on the
   owning bridge, plus the remote MAC/VTEP FDB. Withdrawing one binding keeps
   the MAC when another NLRI still references it. Neighbor deletion checks

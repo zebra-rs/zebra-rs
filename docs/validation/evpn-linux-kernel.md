@@ -1,7 +1,7 @@
 # EVPN Linux kernel forwarding validation
 
 The [standalone namespace test](../../tests/evpn-linux-kernel/README.md)
-passed **116/116 checks** on 2026-10-09. Two zebra-rs speakers exchanged
+passed **125/125 checks** on 2026-10-09. Two zebra-rs speakers exchanged
 EVPN Type-2/3/5 state and forwarded tenant traffic through Linux bridge,
 VXLAN and VRF devices. No OVN, OVS, FRR, cEOS or containers participated.
 
@@ -28,7 +28,10 @@ adopted. Floating statics (two priorities each) check that a removed
 one leaves no priority behind and a changed backup priority replaces the
 old one. A binary built without leftover handling fails exactly the
 eight leftover checks; one handling only a single priority per leftover
-fails the four floating-static checks. The
+fails the four floating-static checks. A MAC mobility scenario moves a station
+behind the other speaker and back and checks both sides settle and stay
+settled; a build that installs a remote route over a local MAC regardless
+of sequence number fails to keep the returned station local. The
 [JSON report](evpn-linux-kernel.json) records each check and the tested
 binary's SHA-256.
 

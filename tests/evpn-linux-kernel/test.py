@@ -286,6 +286,52 @@ def main():
             for link in ['dbr2000', 'dbr2000b', 'br2000b']:
                 ns('v2', 'ip', 'link', 'del', link)
 
+            # MAC mobility (RFC 7432 §7.7): l1's station moves behind v2 and
+            # back. Each side must end with the station local where it is and
+            # remote (toward the other VTEP) where it is not, and stay so:
+            # a route the station's new PE outranks must not be reinstalled
+            # when the old PE withdraws its MAC and MAC/IP routes one by one.
+            station, station_ip = '02:00:00:10:00:01', '10.10.0.101'
+
+            def fdb(v):
+                return [line for line in ns(v, 'bridge', 'fdb', 'show', 'br', 'br1000').stdout.splitlines()
+                        if line.startswith(station)]
+
+            def local_on(v):
+                rows = fdb(v)
+                return any(' dev access ' in r for r in rows) and not any(' dev vx1000 ' in r and 'master' in r for r in rows)
+
+            def remote_on(v, peer):
+                return any(' dev vx1000 ' in r and f'dst 198.51.100.{peer}' in r for r in fdb(v))
+
+            def settle(name, check, seconds=8):
+                expect(name, check)
+                deadline = time.monotonic() + seconds
+                while time.monotonic() < deadline:
+                    if not check():
+                        checks.append({'name': name + ' (stable)', 'passed': False})
+                        raise RuntimeError('unstable: ' + name)
+                    time.sleep(0.5)
+                checks.append({'name': name + ' (stable)', 'passed': True})
+                print('PASS:', name, '(stable)', flush=True)
+
+            l2_mac = ns('l2', 'cat', '/sys/class/net/eth0/address').stdout.strip()
+            ns('l1', 'ip', 'link', 'set', 'eth0', 'down')
+            ns('l2', 'ip', 'link', 'set', 'eth0', 'address', station)
+            ns('l2', 'ip', 'address', 'add', station_ip + '/24', 'dev', 'eth0')
+            ns('l2', 'ping', '-c', '2', '-W', '1', '-I', station_ip, '10.10.0.2', check=False)
+            settle('Mobility: station local on v2', lambda: local_on('v2'))
+            settle('Mobility: station remote on v1', lambda: remote_on('v1', 2))
+            # Back to l1.
+            ns('l2', 'ip', 'address', 'del', station_ip + '/24', 'dev', 'eth0')
+            ns('l2', 'ip', 'link', 'set', 'eth0', 'address', l2_mac)
+            ns('l1', 'ip', 'link', 'set', 'eth0', 'up')
+            ns('l1', 'ping', '-c', '2', '-W', '1', '10.10.0.1', check=False)
+            settle('Mobility back: station local on v1', lambda: local_on('v1'), seconds=12)
+            settle('Mobility back: station remote on v2', lambda: remote_on('v2', 1))
+            expect('Mobility back: l2 reaches the station', lambda:
+                   ns('l2', 'ping', '-c', '1', '-W', '1', station_ip, check=False).returncode == 0)
+
             # A crash leaves routes behind. On restart, each owner's route
             # replaces its leftover; the rest are swept after the grace
             # period; operator routes stay; a pre-RTPROT_ZEBRA static is

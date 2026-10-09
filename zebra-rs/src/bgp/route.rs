@@ -9981,6 +9981,57 @@ pub(crate) fn attr_vxlan_vtep(attr: &BgpAttr) -> Option<Ipv4Addr> {
     }
 }
 
+/// Whether this speaker's own MAC/IP path beats a remote one for the same
+/// MAC, in the order FRR's `bgp_path_info_cmp` applies to EVPN paths:
+/// a sticky MAC wins (RFC 7432 §15.2), the local path wins on a shared
+/// non-zero Ethernet Segment, then the higher MAC Mobility sequence number
+/// (RFC 7432 §7.7), then the lower next-hop (VTEP) address (§15.1).
+pub(super) fn evpn_local_path_wins(local: &BgpRib, remote: &BgpRib) -> bool {
+    const STICKY: u8 = 0x01;
+    let local_sticky = extract_flags_from_attr(&local.attr) & STICKY != 0;
+    let remote_sticky = extract_flags_from_attr(&remote.attr) & STICKY != 0;
+    if local_sticky != remote_sticky {
+        return local_sticky;
+    }
+    let esi = |rib: &BgpRib| rib.esi.filter(|esi| *esi != [0; 10]);
+    if esi(local).is_some() && esi(local) == esi(remote) {
+        return true;
+    }
+    let local_seq = extract_mac_mobility_seq(&local.attr);
+    let remote_seq = extract_mac_mobility_seq(&remote.attr);
+    if local_seq != remote_seq {
+        return local_seq > remote_seq;
+    }
+    match (
+        extract_tunnel_endpoint(local),
+        extract_tunnel_endpoint(remote),
+    ) {
+        (Some(local), Some(remote)) => local < remote,
+        _ => false,
+    }
+}
+
+/// This speaker's own selected MAC/IP route for `mac` in `vni`, if it
+/// originates one. Every binding of a MAC carries the same mobility
+/// sequence number, so any of them stands for the MAC.
+fn evpn_local_mac_route(
+    local_rib: &LocalRib,
+    router_id: Ipv4Addr,
+    vni: u32,
+    mac: [u8; 6],
+) -> Option<&BgpRib> {
+    let rd = rd_from_router_id_vni(router_id, vni)?;
+    local_rib
+        .evpn
+        .get(&rd)?
+        .selected
+        .iter()
+        .find_map(|(prefix, rib)| {
+            (matches!(prefix, EvpnPrefix::MacIp { mac: m, .. } if *m == mac) && rib.is_originated())
+                .then_some(rib)
+        })
+}
+
 fn extract_tunnel_endpoint(rib: &BgpRib) -> Option<IpAddr> {
     match rib.attr.nexthop.as_ref()? {
         BgpNexthop::Evpn(addr) => Some(*addr),
@@ -10167,6 +10218,25 @@ fn route_evpn_export_selected(
                     .or_insert(0);
                 if seq > *remote {
                     *remote = seq;
+                }
+                // A MAC this speaker has learned locally is installed from
+                // the remote route only if that route beats our own (RFC 7432
+                // §7.7, §15). Otherwise drop any binding installed earlier:
+                // overwriting the local FDB row would black-hole the host and
+                // withdraw our Type-2. FRR settles this in best path between
+                // the local and remote paths, and zebra re-checks the
+                // sequence number (`zebra_evpn_mac_is_bgp_seq_ok`).
+                if !best.is_originated()
+                    && let Some(local) =
+                        evpn_local_mac_route(bgp.local_rib, *bgp.router_id, vni, *mac)
+                    && evpn_local_path_wins(local, best)
+                {
+                    let _ =
+                        bgp.rib_client
+                            .send(rib::Message::EvpnMacDel(rib::evpn::MacRouteKey::new(
+                                *rd, vni, mac_addr, *ip,
+                            )));
+                    return;
                 }
                 let msg = rib::Message::EvpnMacAdd(rib::evpn::MacRoute {
                     key: rib::evpn::MacRouteKey::new(*rd, vni, mac_addr, *ip),
@@ -19438,8 +19508,8 @@ impl Bgp {
     ///
     /// Hardcodes (per RFC 8365 single-homed VLAN-Based service):
     ///   - Ethernet Tag = 0 (one bridge per VNI)
-    ///   - IP component absent (MAC-only Type-2; MAC+IP needs ARP/NDP
-    ///     correlation, follow-up).
+    ///   - IP component from the entry: MAC-only, or one IPv4/IPv6 binding
+    ///     the RIB correlated from FDB and ARP/NDP state.
     ///   - RD = `<router-id>:<VNI>` (Type-1, IPv4 + 2-byte). VNIs
     ///     above 65535 are skipped — Type-0 ASN-format RD support
     ///     for big VNIs is a follow-up.
@@ -19618,6 +19688,58 @@ impl Bgp {
         if !selected.is_empty() {
             route_advertise_evpn_to_peers(rd, prefix, &selected, &mut bgp_ref, &mut self.peers);
         }
+        self.evpn_reconcile_remote_mac(entry.vni, entry.mac.octets());
+    }
+
+    /// Re-run the local-versus-remote decision for every remote MAC/IP
+    /// route of `mac` in `vni` after our own route for it changed: a remote
+    /// binding our new route beats leaves the RIB, and one we stopped
+    /// competing with is installed.
+    pub(super) fn evpn_reconcile_remote_mac(&mut self, vni: u32, mac: [u8; 6]) {
+        let remote: Vec<(RouteDistinguisher, EvpnPrefix, BgpRib)> = self
+            .local_rib
+            .evpn
+            .iter()
+            .flat_map(|(rd, table)| {
+                table
+                    .selected
+                    .iter()
+                    .map(move |(prefix, rib)| (*rd, prefix, rib))
+            })
+            .filter(|(_, prefix, rib)| {
+                matches!(prefix, EvpnPrefix::MacIp { mac: m, .. } if *m == mac)
+                    && !rib.is_originated()
+                    && extract_vni_from_attr(&rib.attr) == Some(vni)
+            })
+            .map(|(rd, prefix, rib)| (rd, prefix.clone(), rib.clone()))
+            .collect();
+        if remote.is_empty() {
+            return;
+        }
+        let mut bgp_ref = BgpTop {
+            router_id: &self.router_id,
+            srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
+            local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
+            tx: &self.tx,
+            rib_client: &self.ctx.rib,
+            attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
+            vrf_export: None,
+            color_policy: Some(&self.color_policy),
+            flex_algo_routes: Some(&self.flex_algo_routes),
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
+            vrf_import: None,
+            nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+            central_label_alloc: None,
+            as_sets_withdraw: self.as_sets_withdraw,
+        };
+        for (rd, prefix, rib) in remote {
+            route_evpn_export_selected(&rd, &prefix, &[rib], None, &mut bgp_ref);
+        }
     }
 
     /// Inverse of `evpn_originate_macip`. No-op when
@@ -19662,6 +19784,8 @@ impl Bgp {
         // receive path does, keying `EvpnPrefix::MacIp` on the same four
         // fields and carrying the ESI on the path.
         route_withdraw_evpn_to_peers(rd, prefix, &mut self.peers);
+        // A remote route for this MAC may have been held back by our own.
+        self.evpn_reconcile_remote_mac(entry.vni, entry.mac.octets());
     }
 
     /// The ESI to stamp on a Type-2 originated from `entry`: that of the
