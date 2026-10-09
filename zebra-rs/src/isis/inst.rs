@@ -14,12 +14,13 @@ use crate::rib::{
 };
 
 use crate::config::{DisplayRequest, ShowChannel};
-use crate::context::{Task, Timer};
+use crate::context::{Task, Timer, TimerType};
 use crate::isis::tracing::IsisTracing;
 use crate::isis::{ifsm, lsdb};
 use crate::rib::api::RibRx;
 use crate::rib::{self, MacAddr};
 use crate::spf;
+use crate::spf::ilm_hold::IlmHold;
 use crate::{
     config::{
         Args, CommandPath, ConfigChannel, ConfigOp, ConfigRequest, RibSubscriber,
@@ -294,6 +295,13 @@ pub struct Isis {
     /// `rib::update_self_sid_ilm` diffs the desired set against this
     /// after each SPF publish and reconciles the kernel LFIB.
     pub self_sid_ilm: BTreeMap<u32, SpfIlm>,
+    /// The old labels of moved Prefix-SIDs, still forwarding
+    /// (`spf::ilm_hold`): per level for `ilm`, and for `self_sid_ilm`.
+    pub ilm_hold: Levels<IlmHold>,
+    pub self_sid_hold: IlmHold,
+    /// Fires [`Message::IlmHoldExpire`] when the first held label is due,
+    /// with that instant; kept by [`Isis::rearm_ilm_hold`].
+    pub ilm_hold_timer: Option<(tokio::time::Instant, Timer)>,
     pub hostname: Levels<Hostname>,
     pub spf_timer: Levels<Option<Timer>>,
     pub spf_throttle: Levels<Throttle>,
@@ -695,6 +703,7 @@ pub struct IsisTop<'a> {
     pub retained_locators: &'a mut Levels<BTreeMap<Ipv6Net, RetainEntry>>,
     pub egress_protect_registered: &'a mut BTreeMap<Ipv6Net, (std::net::Ipv6Addr, IsisSysId)>,
     pub ilm: &'a mut Levels<BTreeMap<u32, SpfIlm>>,
+    pub ilm_hold: &'a mut Levels<IlmHold>,
     pub rib_client: &'a crate::rib::client::RibClient,
     pub hostname: &'a mut Levels<Hostname>,
     pub spf_timer: &'a mut Levels<Option<Timer>>,
@@ -871,6 +880,9 @@ impl Isis {
                 egress_protect_registered: BTreeMap::new(),
                 ilm: Levels::<BTreeMap<u32, SpfIlm>>::default(),
                 self_sid_ilm: BTreeMap::new(),
+                ilm_hold: Levels::<IlmHold>::default(),
+                self_sid_hold: IlmHold::default(),
+                ilm_hold_timer: None,
                 hostname: Levels::<Hostname>::default(),
                 spf_timer: Levels::<Option<Timer>>::default(),
                 spf_throttle: Levels::<Throttle>::default(),
@@ -2294,6 +2306,10 @@ impl Isis {
             Message::StampReconcile(ifindex) => {
                 self.stamp_reconcile_link(ifindex);
             }
+            Message::IlmHoldExpire => {
+                self.ilm_hold_timer = None;
+                super::rib::ilm_hold_expire(self);
+            }
             Message::GrRestartExit => {
                 // Drain window elapsed. The supervisor (systemd /
                 // operator) is trusted to restart us. Kernel routes
@@ -3123,7 +3139,38 @@ impl Isis {
                     self.process_policy_msg(msg);
                 }
             }
+            self.rearm_ilm_hold();
         }
+    }
+
+    /// Keep one timer on the first held Prefix-SID label to run out
+    /// (`spf::ilm_hold`). Run after every event: SPF, a commit or a
+    /// block update can each start a hold, and an expiry ends one.
+    fn rearm_ilm_hold(&mut self) {
+        let due = [
+            self.ilm_hold.l1.due(),
+            self.ilm_hold.l2.due(),
+            self.self_sid_hold.due(),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        if self.ilm_hold_timer.as_ref().map(|(at, _)| *at) == due {
+            return;
+        }
+        self.ilm_hold_timer = due.map(|at| {
+            let wait = at
+                .saturating_duration_since(tokio::time::Instant::now())
+                .max(std::time::Duration::from_millis(1));
+            let tx = self.tx.clone();
+            let timer = Timer::new_dur(wait, TimerType::Once, move || {
+                let tx = tx.clone();
+                async move {
+                    let _ = tx.send(Message::IlmHoldExpire);
+                }
+            });
+            (at, timer)
+        });
     }
 
     /// Handle a `PolicyRx` push from the policy actor. Today we only
@@ -3397,6 +3444,7 @@ impl Isis {
             retained_locators: &mut self.retained_locators,
             egress_protect_registered: &mut self.egress_protect_registered,
             ilm: &mut self.ilm,
+            ilm_hold: &mut self.ilm_hold,
             rib_client: &self.ctx.rib,
             hostname: &mut self.hostname,
             spf_timer: &mut self.spf_timer,
@@ -4195,6 +4243,9 @@ pub enum Message {
     Ifsm(IfsmEvent, u32, Option<Level>),
     Recv(IsisPacket, u32, Option<MacAddr>),
     Lsdb(LsdbEvent, Level, IsisLspId),
+    /// The first held Prefix-SID label ran out (`spf::ilm_hold`); the
+    /// handler withdraws what is due.
+    IlmHoldExpire,
     /// `gr_restart_commit` armed a `Timer::once_ms` for the drain
     /// window. When it fires, this message tells the dispatcher to
     /// run `std::process::exit(0)`. The supervisor (systemd /
@@ -4333,6 +4384,7 @@ impl Display for Message {
             Message::Recv(isis_packet, _, _mac_addr) => {
                 write!(f, "[Message::Recv({})]", isis_packet.pdu_type)
             }
+            Message::IlmHoldExpire => write!(f, "[Message::IlmHoldExpire]"),
             Message::Ifsm(ifsm_event, _, _level) => write!(f, "[Message::Ifsm({:?})]", ifsm_event),
             Message::Nfsm(nfsm_event, _, _isis_sys_id, _level) => {
                 write!(f, "[Message::Nfsm({:?})]", nfsm_event)
@@ -4398,6 +4450,114 @@ impl Display for Message {
                 write!(f, "[Message::EgressRetentionExpire {locator} {level}]")
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod sid_move_hold_tests {
+    use isis_packet::SidLabelValue;
+    use netlink_packet_route::link::LinkFlags;
+    use tokio::sync::mpsc;
+
+    use super::commit_and_microloop_gate_tests::fresh_isis;
+    use super::*;
+    use crate::isis::link::{IsisLink, LinkConfig, LinkState, LinkTimer, LinkV4Addr};
+    use crate::spf::ilm_hold::SID_MOVE_HOLD;
+    use crate::spf::label_block::LabelBlock;
+
+    /// An instance with SR-MPLS on, a loopback 10.0.0.1/32 on ifindex 1
+    /// with Prefix-SID index 1, and the RIB messages it sends.
+    fn with_loopback() -> (Isis, mpsc::UnboundedReceiver<rib::client::RibInbound>) {
+        let mut isis = fresh_isis();
+        let (tx, rx) = mpsc::unbounded_channel();
+        isis.ctx.rib = rib::client::RibClient::new(tx, rib::client::ProtoId::from_raw(9));
+        isis.config.sr_mpls_enabled = true;
+        let (ptx, prx) = mpsc::unbounded_channel();
+        Box::leak(Box::new(prx));
+        let mut link = IsisLink {
+            ifindex: 1,
+            ptx,
+            read_task: tokio::spawn(async {}),
+            flags: LinkFlags::Loopback,
+            circuit_id: 0,
+            config: LinkConfig::default(),
+            state: LinkState::default(),
+            timer: LinkTimer::default(),
+        };
+        link.config.enable.v4 = true;
+        link.config.prefix_sid = Some(SidLabelValue::Index(1));
+        link.state.v4addr.push(LinkV4Addr {
+            prefix: "10.0.0.1/32".parse().unwrap(),
+            secondary: false,
+        });
+        isis.links.insert(1, link);
+        (isis, rx)
+    }
+
+    fn srgb(isis: &mut Isis, start: u32) {
+        isis.sr_block = Some(Block {
+            global: Some(LabelBlock::new(start, 8000)),
+            ..Block::default_block()
+        });
+    }
+
+    /// The ILM updates sent so far: (installed, label).
+    fn sent(rx: &mut mpsc::UnboundedReceiver<rib::client::RibInbound>) -> Vec<(bool, u32)> {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|envelope| match envelope.msg {
+                rib::Message::IlmAdd { label, .. } => Some((true, label)),
+                rib::Message::IlmDel { label, .. } => Some((false, label)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// An SRGB change moves our Prefix-SID: the new label is installed at
+    /// once, and the old one keeps delivering until the hold runs out,
+    /// when the timer the instance armed withdraws it.
+    #[tokio::test(start_paused = true)]
+    async fn an_srgb_change_keeps_the_old_label_for_the_hold() {
+        let (mut isis, mut rx) = with_loopback();
+        srgb(&mut isis, 16000);
+        update_self_sid_ilm(&mut isis);
+        assert_eq!(sent(&mut rx), vec![(true, 16001)]);
+
+        srgb(&mut isis, 17000);
+        update_self_sid_ilm(&mut isis);
+        assert_eq!(sent(&mut rx), vec![(true, 17001)], "16001 still delivers");
+        isis.rearm_ilm_hold();
+        // Let the timer task start: its countdown begins when it first runs.
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(SID_MOVE_HOLD - std::time::Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(isis.rx.try_recv().is_err(), "not due yet");
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        let msg = isis.rx.try_recv().expect("the hold timer fired");
+        assert!(matches!(msg, Message::IlmHoldExpire));
+        isis.process_msg(msg);
+        assert_eq!(sent(&mut rx), vec![(false, 16001)]);
+        assert!(isis.self_sid_ilm.contains_key(&17001));
+        isis.rearm_ilm_hold();
+        assert!(isis.ilm_hold_timer.is_none(), "nothing left to hold");
+    }
+
+    /// With SR-MPLS turned off the SID is gone, not moved: both labels go
+    /// at once.
+    #[tokio::test(start_paused = true)]
+    async fn sr_mpls_off_withdraws_a_held_label_at_once() {
+        let (mut isis, mut rx) = with_loopback();
+        srgb(&mut isis, 16000);
+        update_self_sid_ilm(&mut isis);
+        srgb(&mut isis, 17000);
+        update_self_sid_ilm(&mut isis);
+        let _ = sent(&mut rx);
+        isis.config.sr_mpls_enabled = false;
+        update_self_sid_ilm(&mut isis);
+        let mut withdrawn = sent(&mut rx);
+        withdrawn.sort();
+        assert_eq!(withdrawn, vec![(false, 16001), (false, 17001)]);
     }
 }
 

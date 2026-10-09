@@ -1,6 +1,6 @@
 # MPLS Label Allocation — the RIB as the Label Authority
 
-Status: **design; phases 1, 2, 3a and 4a implemented** (2026-10-08: `rib/label_space.rs`; OSPF reads the `default` block; the IGPs' local labels come from the RIB's label space; ILM candidates keyed by owner). Supersedes the ad-hoc split
+Status: **design; phases 1, 2, 3a, 4a and 4b implemented** (2026-10-08: `rib/label_space.rs`; OSPF reads the `default` block; the IGPs' local labels come from the RIB's label space; ILM candidates keyed by owner; a moved Prefix-SID's old label held). Supersedes the ad-hoc split
 between the RIB `LabelManager`, the node-shared `LocalLabels` set
 (#2479, #2480) and the hard-coded OSPF SR constants.
 
@@ -491,10 +491,25 @@ An accepted change is applied without a forwarding gap on this node:
 
 - **SRGB.** Each IGP installs its Prefix-SID ILMs at the new labels (new
   start + index) and re-advertises its SR capabilities. The old ILMs stay
-  as `Releasing` for a hold time, so neighbours still sending the old
-  labels keep forwarding until they process the new advertisement; then
-  the old region is freed. Where the old and new ranges overlap, the new
-  entry replaces the old at once.
+  for a hold time, so neighbours still sending the old labels keep
+  forwarding until they process the new advertisement; then the old
+  region is freed. Where the old and new ranges overlap, the new entry
+  replaces the old at once.
+
+  Today a Prefix-SID's label is its *originator's* SRGB start + index
+  (§1, last bullet), so a change moves the labels of the changed router's
+  prefixes on every router, not only on that router. Every router
+  therefore holds: whenever a Prefix-SID's ILM moves to a new label, the
+  old label stays for the hold (phase 4b). That covers an upstream still
+  sending the old label to a router that has moved. It does not cover the
+  reverse: an upstream that has moved sends the new label to a downstream
+  that has not installed it yet, and that is dropped for as long as the
+  two routers' processing of the new advertisement differs, typically
+  under a few seconds. RFC 8660 labels remove that window, since then
+  only the changed router's incoming labels move and its neighbours
+  switch only once it advertises them. Delaying the switch (impose the
+  old label for a while after a move) would close it without RFC 8660,
+  at the cost of touching route publication and TI-LFA repair labels.
 - **SRLB.** Each dynamic Adj-SID and Mirror Context label gets a new label
   in the new SRLB, is re-advertised, and its old label goes through
   `Releasing`, as on any release (§4).
@@ -638,8 +653,29 @@ Phase 4 lands in two parts. 4a keys ILM candidates by owner and adds
   whose nexthops had emptied first (a link failure leaves the Adjacency-SID
   in the LSP with no neighbour), so it leaked; reusing the same label used
   to hide that. It now withdraws as OSPF's does.
-- 4b, keeping the old Prefix-SID ILMs through an SRGB change (§6.1),
-  follows.
+
+4b keeps a moved Prefix-SID's old label forwarding through an SRGB change
+(§6.1):
+- Every IGP ILM entry says which Prefix-SID it forwards for (`fec`: the
+  prefix and its algorithm; none for an Adjacency-SID). When a table is
+  rebuilt, `spf::ilm_hold::IlmHold` keeps each label whose Prefix-SID now
+  sits at another label for `SID_MOVE_HOLD` (60 s), carrying that
+  Prefix-SID's current entry, so the old label follows the new path. The
+  held label stays in the table, so the usual diff neither withdraws it
+  nor needs to know about holds. A held label goes at once if its
+  Prefix-SID goes away or a new entry takes the label.
+- IS-IS holds its per-level tables and its own (self-SID) entries; OSPFv2
+  and OSPFv3 hold theirs. Each instance keeps one timer on the first held
+  label to run out, re-armed after every event.
+- The RIB keeps an SRGB that a block change drops reserved for the same
+  hold, and after it until the last ILM entry in it is withdrawn, so
+  dynamic blocks are not handed out over held labels. A timer alone is not
+  enough: an IGP starts its hold only once the block update and its SPF
+  reach it, so its old labels outlive a timer the RIB started at the
+  change. The withdrawal is the confirmation.
+- What is not covered: the window where an upstream already sends the
+  new label to a router that has not installed it (§6.1).
+
 Phase 2 changes OSPF's advertised SRGB. No phase changes Adjacency-SID
 labels by itself; from phase 3, a configured Adj-SID on a dynamically held
 label moves that holder. Phase 5 is the largest, through the VPN, LU, EVPN

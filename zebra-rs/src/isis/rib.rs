@@ -14,6 +14,7 @@ use crate::rib::inst::{IlmEntry, IlmType};
 use crate::rib::link_ext::LinkFlagsExt;
 use crate::rib::{self, Nexthop, NexthopMulti, NexthopUni, RibSubType, RibType};
 use crate::spf;
+use crate::spf::ilm_hold::{SidFec, SidIlm};
 use crate::throttle::Throttle;
 // EncapType: TI-LFA repairs route through `tilfa::build_repair_path_srv6`,
 // but the Mirror SID egress-protection backup builds an H.Encaps repair
@@ -832,7 +833,7 @@ pub fn diff_ilm_apply(rib_client: &crate::rib::client::RibClient, diff: &DiffIlm
         }
     }
 }
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SpfIlm {
     pub nhops: BTreeMap<Ipv4Addr, SpfNexthop<V4>>,
     pub ilm_type: IlmType,
@@ -843,6 +844,16 @@ pub struct SpfIlm {
     /// origin advertised P; adjacency-SID and self-SID ILMs leave it
     /// false (PHP / local-pop semantics are unchanged).
     pub no_php: bool,
+    /// The Prefix-SID this entry forwards for, so a move to another
+    /// label is recognised and the old one held (`spf::ilm_hold`).
+    /// `None` for an Adjacency-SID.
+    pub fec: Option<SidFec>,
+}
+
+impl SidIlm for SpfIlm {
+    fn fec(&self) -> Option<SidFec> {
+        self.fec
+    }
 }
 
 /// Build ILM table with adjacency labels from SIDs
@@ -890,6 +901,7 @@ fn build_adjacency_ilm(
             ilm_type: IlmType::Adjacency(adj_index),
             // Adjacency-SID semantics are unaffected by the prefix no-PHP flag.
             no_php: false,
+            fec: None,
         };
         ilm.insert(label, spf_ilm);
     }
@@ -1136,8 +1148,12 @@ fn apply_routing_updates(
     spf_self_lsp_generation: u64,
     rib: PrefixMap<Ipv4Net, SpfRoute<V4>>,
     rib_v6: PrefixMap<Ipv6Net, SpfRoute<V6>>,
-    ilm: BTreeMap<u32, SpfIlm>,
+    mut ilm: BTreeMap<u32, SpfIlm>,
 ) {
+    // A Prefix-SID that moved keeps its old label for a while.
+    top.ilm_hold
+        .get_mut(&level)
+        .apply(top.ilm.get(&level), &mut ilm, tokio::time::Instant::now());
     // Update MPLS ILM
     if top.config.distribute.rib {
         let diff = spf::table_diff(
@@ -2035,7 +2051,7 @@ pub(super) fn apply_spf_result(top: &mut IsisTop, output: SpfOutput) {
         let algo_rib = match (mpls_on, algo_source, algo_spf.as_ref()) {
             (true, Some(src), Some(spf_res)) => {
                 let r = build_rib_from_flex_algo(top, level, algo, src, spf_res, &algo_tilfa);
-                mpls_route(&r, &mut ilm, srgb);
+                mpls_route(&r, algo, &mut ilm, srgb);
                 r
             }
             _ => PrefixMap::<Ipv4Net, SpfRoute<V4>>::new(),
@@ -2094,7 +2110,7 @@ pub(super) fn apply_spf_result(top: &mut IsisTop, output: SpfOutput) {
 
     *top.spf_result.get_mut(&level) = Some(spf_result);
     *top.tilfa_result.get_mut(&level) = Some(tilfa_result);
-    mpls_route(&rib, &mut ilm, srgb);
+    mpls_route(&rib, 0, &mut ilm, srgb);
     // SR-MPLS forwarding gates the whole MPLS LFIB. Prefix-SID labels
     // resolve from peers' advertisements (`label_map` / reach-map),
     // independent of our own SR state, so without this an SPF pass after
@@ -2524,15 +2540,14 @@ pub(super) fn update_self_sid_ilm(isis: &mut Isis) {
             // The local delivery nexthop is the loopback's own routable
             // IPv4 address — primary preferred; skip the 127.0.0.0/8
             // literal range.
-            let Some(addr) =
+            let Some(local) =
                 v4_primary_where(&link.state.v4addr, |e| !e.prefix.addr().is_loopback())
-                    .map(|e| e.prefix.addr())
             else {
                 continue;
             };
             let mut nhops = BTreeMap::new();
             nhops.insert(
-                addr,
+                local.prefix.addr(),
                 SpfNexthop::<V4> {
                     ifindex,
                     adjacency: true,
@@ -2548,6 +2563,10 @@ pub(super) fn update_self_sid_ilm(isis: &mut Isis) {
                     // Self-SID ILM is always a local pop; no-PHP is about
                     // the penultimate hop, not the owner.
                     no_php: false,
+                    fec: Some(SidFec {
+                        algo: 0,
+                        prefix: IpNet::V4(local.prefix.trunc()),
+                    }),
                 },
             );
         }
@@ -2561,7 +2580,7 @@ pub(super) fn update_self_sid_ilm(isis: &mut Isis) {
     if isis.config.sr_mpls_enabled
         && isis.config.area_proxy
         && super::area_proxy::has_outside_circuit(isis)
-        && let Some((_prefix, index)) = isis.area_proxy.area_sid
+        && let Some((prefix, index)) = isis.area_proxy.area_sid
         && let Some(global) = isis.sr_block.as_ref().and_then(|b| b.global.as_ref())
         && index < global.end - global.start
     {
@@ -2592,11 +2611,22 @@ pub(super) fn update_self_sid_ilm(isis: &mut Isis) {
                     nhops,
                     ilm_type: IlmType::Node(index),
                     no_php: false,
+                    fec: Some(SidFec {
+                        algo: 0,
+                        prefix: IpNet::V4(prefix),
+                    }),
                 },
             );
         }
     }
 
+    // An SRGB change moves these labels: the old ones keep delivering
+    // until neighbours use the new.
+    isis.self_sid_hold.apply(
+        &isis.self_sid_ilm,
+        &mut desired,
+        tokio::time::Instant::now(),
+    );
     let diff = spf::table_diff(
         isis.self_sid_ilm.iter().map(|(&k, v)| (k, v)),
         desired.iter().map(|(&k, v)| (k, v)),
@@ -2605,12 +2635,41 @@ pub(super) fn update_self_sid_ilm(isis: &mut Isis) {
     isis.self_sid_ilm = desired;
 }
 
+/// A held Prefix-SID label ran out (`spf::ilm_hold`): withdraw the old
+/// labels that are due, keep the rest. Fired by `Isis::rearm_ilm_hold`'s
+/// timer; SPF and the self-SID reconcile fold the hold in on their own.
+pub(super) fn ilm_hold_expire(isis: &mut Isis) {
+    let now = tokio::time::Instant::now();
+    for level in [Level::L1, Level::L2] {
+        let next = isis
+            .ilm_hold
+            .get_mut(&level)
+            .refresh(isis.ilm.get(&level), now);
+        if isis.config.distribute.rib {
+            let diff = spf::table_diff(
+                isis.ilm.get(&level).iter().map(|(&k, v)| (k, v)),
+                next.iter().map(|(&k, v)| (k, v)),
+            );
+            diff_ilm_apply(&isis.ctx.rib, &diff);
+        }
+        *isis.ilm.get_mut(&level) = next;
+    }
+    let next = isis.self_sid_hold.refresh(&isis.self_sid_ilm, now);
+    let diff = spf::table_diff(
+        isis.self_sid_ilm.iter().map(|(&k, v)| (k, v)),
+        next.iter().map(|(&k, v)| (k, v)),
+    );
+    diff_ilm_apply(&isis.ctx.rib, &diff);
+    isis.self_sid_ilm = next;
+}
+
 pub fn mpls_route(
     rib: &PrefixMap<Ipv4Net, SpfRoute<V4>>,
+    algo: u8,
     ilm: &mut BTreeMap<u32, SpfIlm>,
     srgb: Option<&crate::spf::label_block::LabelBlock>,
 ) {
-    for (_prefix, route) in rib.iter() {
+    for (prefix, route) in rib.iter() {
         if let Some(sid) = route.sid {
             // Prefix-SID labels live inside our own SRGB; the Node
             // index is the label's offset from `global.start`. Labels
@@ -2628,6 +2687,10 @@ pub fn mpls_route(
                 // Carry the destination's no-PHP request so the
                 // penultimate-hop ILM swaps instead of popping.
                 no_php: route.no_php,
+                fec: Some(SidFec {
+                    algo,
+                    prefix: IpNet::V4(prefix),
+                }),
             };
             ilm.insert(sid, spf_ilm);
         }
@@ -3055,6 +3118,7 @@ mod tests {
             nhops,
             ilm_type: IlmType::Adjacency(0),
             no_php: false,
+            fec: None,
         }
     }
 
@@ -3429,6 +3493,7 @@ mod tests {
             nhops,
             ilm_type: IlmType::Node(7),
             no_php,
+            fec: None,
         };
         let entry = make_ilm_entry(label, &ilm);
         let rib::Nexthop::Uni(uni) = &entry.nexthop else {

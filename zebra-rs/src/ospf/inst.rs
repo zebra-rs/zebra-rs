@@ -23,6 +23,7 @@ use crate::rib::api::RibRx;
 use crate::rib::inst::{IlmEntry, IlmType};
 use crate::rib::link::LinkAddr;
 use crate::rib::{self, Link, LinkFlagsExt, Nexthop, NexthopMulti, NexthopUni, RibType};
+use crate::spf::ilm_hold::{IlmHold, SidFec, SidIlm};
 use crate::spf::label_block::LabelConfig;
 use crate::{
     config::{
@@ -276,6 +277,13 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// matching `SpfRouteV3`. Populated by `apply_routing_updates_v3`
     /// from the v3 SR-MPLS RIB; empty on v2 instances.
     pub ilm6: BTreeMap<u32, SpfIlmV3>,
+    /// The old labels of moved Prefix-SIDs in `ilm` / `ilm6`, still
+    /// forwarding (`spf::ilm_hold`).
+    pub ilm_hold: IlmHold,
+    pub ilm6_hold: IlmHold,
+    /// Fires [`Message::IlmHoldExpire`] when the first held label is due,
+    /// with that instant; kept by [`Ospf::rearm_ilm_hold`].
+    pub ilm_hold_timer: Option<(tokio::time::Instant, Timer)>,
     /// First-fit Adjacency-SID label allocator over the SRLB of the
     /// watched SR block (`sr_block`). Created once SR-MPLS is on and the
     /// block has arrived, rebuilt when the SRLB moves, dropped when SR-MPLS
@@ -770,6 +778,32 @@ mod interface_config_path_tests {
 // the v2-shaped tx channel) and produce `OspfInterface<V>` /
 // `&Neighbor<V>` values typed by `V`.
 impl<V: OspfVersion> Ospf<V> {
+    /// Keep one timer on the first held Prefix-SID label to run out
+    /// (`spf::ilm_hold`). Run after every event: SPF or a block update can
+    /// start a hold, and an expiry ends one.
+    fn rearm_ilm_hold(&mut self) {
+        let due = [self.ilm_hold.due(), self.ilm6_hold.due()]
+            .into_iter()
+            .flatten()
+            .min();
+        if self.ilm_hold_timer.as_ref().map(|(at, _)| *at) == due {
+            return;
+        }
+        self.ilm_hold_timer = due.map(|at| {
+            let wait = at
+                .saturating_duration_since(tokio::time::Instant::now())
+                .max(std::time::Duration::from_millis(1));
+            let tx = self.tx.clone();
+            let timer = Timer::new_dur(wait, TimerType::Once, move || {
+                let tx = tx.clone();
+                async move {
+                    let _ = tx.send(Message::IlmHoldExpire);
+                }
+            });
+            (at, timer)
+        });
+    }
+
     /// Align the RIB SR-block watch with the SR-MPLS mode: watch
     /// `default` while SR-MPLS is on, as IS-IS does. The RIB answers a
     /// watch at once with the block, which `process_sr_rx` applies.
@@ -2710,6 +2744,9 @@ impl Ospf<Ospfv2> {
             spf_results: BTreeMap::new(),
             ilm: BTreeMap::new(),
             ilm6: BTreeMap::new(),
+            ilm_hold: IlmHold::default(),
+            ilm6_hold: IlmHold::default(),
+            ilm_hold_timer: None,
             local_pool: None,
             lan_adj_sids: BTreeMap::new(),
             restored_link_lsas: Vec::new(),
@@ -7862,6 +7899,10 @@ impl Ospf<Ospfv2> {
 
     async fn process_msg(&mut self, msg: Message) {
         match msg {
+            Message::IlmHoldExpire => {
+                self.ilm_hold_timer = None;
+                ilm_hold_expire(self);
+            }
             Message::Enable(ifindex, area_id) => {
                 let Some(link) = self.links.get_mut(&ifindex) else {
                     return;
@@ -8338,6 +8379,7 @@ impl Ospf<Ospfv2> {
                     self.process_stamp_event(event);
                 }
             }
+            self.rearm_ilm_hold();
         }
     }
 
@@ -8541,6 +8583,9 @@ impl Ospf<Ospfv3> {
             spf_results: BTreeMap::new(),
             ilm: BTreeMap::new(),
             ilm6: BTreeMap::new(),
+            ilm_hold: IlmHold::default(),
+            ilm6_hold: IlmHold::default(),
+            ilm_hold_timer: None,
             local_pool: None,
             lan_adj_sids: BTreeMap::new(),
             restored_link_lsas: Vec::new(),
@@ -12285,6 +12330,10 @@ impl Ospf<Ospfv3> {
     /// for now so traffic that arrives early doesn't panic.
     pub async fn process_msg(&mut self, msg: Message<Ospfv3>) {
         match msg {
+            Message::IlmHoldExpire => {
+                self.ilm_hold_timer = None;
+                ilm_hold_expire_v3(self);
+            }
             Message::Enable(ifindex, area_id) => {
                 let Some(link) = self.links.get_mut(&ifindex) else {
                     return;
@@ -14556,6 +14605,7 @@ impl Ospf<Ospfv3> {
                     self.process_stamp_event(event);
                 }
             }
+            self.rearm_ilm_hold();
         }
     }
 
@@ -14622,6 +14672,9 @@ pub enum Message<V: OspfVersion = Ospfv2> {
     Ifsm(u32, IfsmEvent),
     Nfsm(u32, Ipv4Addr, NfsmEvent),
     HelloTimer(u32),
+    /// The first held Prefix-SID label ran out (`spf::ilm_hold`); the
+    /// handler withdraws what is due.
+    IlmHoldExpire,
     /// Packet received off the wire. v2 carries
     /// `(Ospfv2Packet, src_addr, dst_group, ifindex, ifaddr)` where
     /// every address is `Ipv4Addr`; v3 will use `Ipv6Addr` for
@@ -15337,10 +15390,20 @@ pub struct SpfRoute {
 /// One entry in the SR-MPLS LFIB shadow held on `Ospf::ilm`.
 /// Mirrors the IS-IS `SpfIlm` shape so `mpls_route()` and
 /// `make_ilm_entry()` can stay structurally parallel.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SpfIlm {
     pub nhops: BTreeMap<Ipv4Addr, SpfNexthop>,
     pub ilm_type: IlmType,
+    /// The Prefix-SID this entry forwards for, so a move to another
+    /// label is recognised and the old one held (`spf::ilm_hold`).
+    /// `None` for an Adjacency-SID.
+    pub fec: Option<SidFec>,
+}
+
+impl SidIlm for SpfIlm {
+    fn fec(&self) -> Option<SidFec> {
+        self.fec
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -15418,10 +15481,18 @@ pub struct SpfNexthopV3 {
 /// LFIB shadow -- but the nexthop set is keyed by IPv6 link-local
 /// (matching `SpfRouteV3::nhops`) so kernel installs go out with v6
 /// `Via` and the right outgoing interface.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SpfIlmV3 {
     pub nhops: BTreeMap<std::net::Ipv6Addr, SpfNexthopV3>,
     pub ilm_type: IlmType,
+    /// As [`SpfIlm::fec`].
+    pub fec: Option<SidFec>,
+}
+
+impl SidIlm for SpfIlmV3 {
+    fn fec(&self) -> Option<SidFec> {
+        self.fec
+    }
 }
 
 fn rib_insert(rib: &mut PrefixMap<Ipv4Net, SpfRoute>, prefix: Ipv4Net, route: SpfRoute) {
@@ -17967,7 +18038,7 @@ fn apply_routing_updates_v3(
     // the kernel MPLS table tracks our SR-MPLS state. Self-Prefix-SID
     // pop and self-Adj-SID / LAN-Adj-SID pop entries are layered in
     // here, mirroring the v2 ordering.
-    let mut new_ilm = build_ilm_from_rib6(&new_rib);
+    let mut new_ilm = build_ilm_from_rib6(&new_rib, 0);
     // Per-Flexible-Algorithm Prefix-SID labels (RFC 9350 §7). The label
     // space is shared with algo-0 (Prefix-SIDs are globally unique), so
     // the per-algo entries coexist in the single ILM map and install
@@ -17975,13 +18046,16 @@ fn apply_routing_updates_v3(
     // below. Per-algo IPv6 stays in-memory; only the labels forward,
     // mirroring v2 / IS-IS. `top.rib6_flex_algo` was populated by
     // `apply_v3_spf_result` before this call.
-    for algo_rib in top.rib6_flex_algo.values() {
-        for (label, spf_ilm) in build_ilm_from_rib6(algo_rib) {
+    for (algo, algo_rib) in top.rib6_flex_algo.iter() {
+        for (label, spf_ilm) in build_ilm_from_rib6(algo_rib, *algo) {
             new_ilm.insert(label, spf_ilm);
         }
     }
     add_self_prefix_sids_to_ilm_v3(top, &mut new_ilm);
     add_self_adj_sids_to_ilm_v3(top, &mut new_ilm);
+    // A Prefix-SID that moved keeps its old label for a while.
+    top.ilm6_hold
+        .apply(&top.ilm6, &mut new_ilm, tokio::time::Instant::now());
     let ilm_diff = spf::table_diff(
         top.ilm6.iter().map(|(&k, v)| (k, v)),
         new_ilm.iter().map(|(&k, v)| (k, v)),
@@ -18612,9 +18686,9 @@ pub fn diff_ilm_apply(rib_client: &crate::rib::client::RibClient, diff: &DiffIlm
 /// on `IlmType::Node` is only used by show-side rendering; it is
 /// derived from the route's `prefix_sid` so an Index-form SID
 /// renders symmetrically with its on-the-wire value.
-fn build_ilm_from_rib(rib: &PrefixMap<Ipv4Net, SpfRoute>) -> BTreeMap<u32, SpfIlm> {
+fn build_ilm_from_rib(rib: &PrefixMap<Ipv4Net, SpfRoute>, algo: u8) -> BTreeMap<u32, SpfIlm> {
     let mut ilm = BTreeMap::new();
-    for (_prefix, route) in rib.iter() {
+    for (prefix, route) in rib.iter() {
         let Some(label) = route.sid else {
             continue;
         };
@@ -18631,6 +18705,10 @@ fn build_ilm_from_rib(rib: &PrefixMap<Ipv4Net, SpfRoute>) -> BTreeMap<u32, SpfIl
             SpfIlm {
                 nhops: route.nhops.clone(),
                 ilm_type: IlmType::Node(pfx_index),
+                fec: Some(SidFec {
+                    algo,
+                    prefix: IpNet::V4(prefix),
+                }),
             },
         );
     }
@@ -18720,9 +18798,12 @@ pub fn diff_ilm_apply_v6(rib_client: &crate::rib::client::RibClient, diff: &Diff
 /// only used by show-side rendering; derived from `prefix_sid` so
 /// an Index-form SID renders symmetrically with its on-the-wire
 /// value.
-fn build_ilm_from_rib6(rib: &PrefixMap<ipnet::Ipv6Net, SpfRouteV3>) -> BTreeMap<u32, SpfIlmV3> {
+fn build_ilm_from_rib6(
+    rib: &PrefixMap<ipnet::Ipv6Net, SpfRouteV3>,
+    algo: u8,
+) -> BTreeMap<u32, SpfIlmV3> {
     let mut ilm = BTreeMap::new();
-    for (_prefix, route) in rib.iter() {
+    for (prefix, route) in rib.iter() {
         let Some(label) = route.sid else {
             continue;
         };
@@ -18739,6 +18820,10 @@ fn build_ilm_from_rib6(rib: &PrefixMap<ipnet::Ipv6Net, SpfRouteV3>) -> BTreeMap<
             SpfIlmV3 {
                 nhops: route.nhops.clone(),
                 ilm_type: IlmType::Node(pfx_index),
+                fec: Some(SidFec {
+                    algo,
+                    prefix: IpNet::V6(prefix),
+                }),
             },
         );
     }
@@ -18815,6 +18900,10 @@ fn add_self_prefix_sids_to_ilm(top: &Ospf, ilm: &mut BTreeMap<u32, SpfIlm>) {
                         SpfIlm {
                             nhops,
                             ilm_type: IlmType::Node(pfx_index),
+                            fec: Some(SidFec {
+                                algo: ps.algo.into(),
+                                prefix: IpNet::V4(tlv.prefix.trunc()),
+                            }),
                         },
                     );
                     break;
@@ -18928,6 +19017,10 @@ fn add_self_prefix_sids_to_ilm_v3(top: &Ospf<Ospfv3>, ilm: &mut BTreeMap<u32, Sp
                         SpfIlmV3 {
                             nhops,
                             ilm_type: IlmType::Node(pfx_index),
+                            fec: Some(SidFec {
+                                algo: ps.algo.into(),
+                                prefix: IpNet::V6(prefix),
+                            }),
                         },
                     );
                     break;
@@ -19009,6 +19102,7 @@ fn add_self_adj_sids_to_ilm_v3(top: &Ospf<Ospfv3>, ilm: &mut BTreeMap<u32, SpfIl
             SpfIlmV3 {
                 nhops,
                 ilm_type: IlmType::Adjacency(adj_index),
+                fec: None,
             },
         );
     }
@@ -19159,6 +19253,7 @@ fn add_self_adj_sids_to_ilm(top: &Ospf, ilm: &mut BTreeMap<u32, SpfIlm>) {
             SpfIlm {
                 nhops,
                 ilm_type: IlmType::Adjacency(adj_index),
+                fec: None,
             },
         );
     }
@@ -19236,25 +19331,54 @@ fn add_self_adj_sids_to_ilm(top: &Ospf, ilm: &mut BTreeMap<u32, SpfIlm>) {
     }
 }
 
+/// A held Prefix-SID label ran out (`spf::ilm_hold`): withdraw the old
+/// labels that are due, keep the rest. Fired by `Ospf::rearm_ilm_hold`'s
+/// timer; SPF folds the hold in on its own.
+fn ilm_hold_expire(top: &mut Ospf) {
+    let ilm = top.ilm_hold.refresh(&top.ilm, tokio::time::Instant::now());
+    let ilm_diff = spf::table_diff(
+        top.ilm.iter().map(|(&k, v)| (k, v)),
+        ilm.iter().map(|(&k, v)| (k, v)),
+    );
+    diff_ilm_apply(&top.ctx.rib, &ilm_diff);
+    top.ilm = ilm;
+}
+
+/// v3 sibling of [`ilm_hold_expire`], over `ilm6`.
+fn ilm_hold_expire_v3(top: &mut Ospf<Ospfv3>) {
+    let ilm = top
+        .ilm6_hold
+        .refresh(&top.ilm6, tokio::time::Instant::now());
+    let ilm_diff = spf::table_diff(
+        top.ilm6.iter().map(|(&k, v)| (k, v)),
+        ilm.iter().map(|(&k, v)| (k, v)),
+    );
+    diff_ilm_apply_v6(&top.ctx.rib, &ilm_diff);
+    top.ilm6 = ilm;
+}
+
 /// Apply routing updates to RIB subsystem
 fn apply_routing_updates(top: &mut Ospf, rib: PrefixMap<Ipv4Net, SpfRoute>) {
     // Build the SR-MPLS LFIB from labeled routes in the freshly
     // computed RIB, then diff against the previous snapshot so the
     // RIB subsystem sees only the IlmAdd / IlmDel deltas.
-    let mut ilm = build_ilm_from_rib(&rib);
+    let mut ilm = build_ilm_from_rib(&rib, 0);
     // Per-Flexible-Algorithm Prefix-SID labels (RFC 9350 §7). The
     // label space is shared with algo-0 (Prefix-SIDs are globally
     // unique), so the per-algo entries coexist in the single ILM map
     // and install into the kernel MPLS LFIB alongside algo-0 via the
     // same diff below. Per-algo IPv4 stays in-memory; only the labels
     // forward, mirroring IS-IS.
-    for algo_rib in top.rib_flex_algo.values() {
-        for (label, spf_ilm) in build_ilm_from_rib(algo_rib) {
+    for (algo, algo_rib) in top.rib_flex_algo.iter() {
+        for (label, spf_ilm) in build_ilm_from_rib(algo_rib, *algo) {
             ilm.insert(label, spf_ilm);
         }
     }
     add_self_prefix_sids_to_ilm(top, &mut ilm);
     add_self_adj_sids_to_ilm(top, &mut ilm);
+    // A Prefix-SID that moved keeps its old label for a while.
+    top.ilm_hold
+        .apply(&top.ilm, &mut ilm, tokio::time::Instant::now());
     let ilm_diff = spf::table_diff(
         top.ilm.iter().map(|(&k, v)| (k, v)),
         ilm.iter().map(|(&k, v)| (k, v)),
@@ -19346,6 +19470,9 @@ mod test_support {
             spf_results: BTreeMap::new(),
             ilm: BTreeMap::new(),
             ilm6: BTreeMap::new(),
+            ilm_hold: IlmHold::default(),
+            ilm6_hold: IlmHold::default(),
+            ilm_hold_timer: None,
             local_pool: None,
             lan_adj_sids: BTreeMap::new(),
             restored_link_lsas: Vec::new(),
@@ -19431,6 +19558,142 @@ mod test_support {
     /// A v3 test instance.
     pub(super) fn fresh_ospf_v3() -> Ospf<Ospfv3> {
         fresh(socket2::Domain::IPV6)
+    }
+}
+
+#[cfg(test)]
+mod sid_move_hold_tests {
+    use tokio::sync::mpsc;
+
+    use super::test_support::{fresh_ospf, fresh_ospf_v3};
+    use super::*;
+    use crate::spf::ilm_hold::SID_MOVE_HOLD;
+    use crate::spf::label_block::LabelBlock;
+
+    /// The originator's SRGB, as its Router Information LSA gave it.
+    fn srgb(start: u32) -> LabelConfig {
+        LabelConfig {
+            global: LabelBlock::new(start, 8000),
+            local: None,
+        }
+    }
+
+    /// The RIB messages a test instance sends from now on.
+    fn capture(
+        rib: &mut rib::client::RibClient,
+    ) -> mpsc::UnboundedReceiver<rib::client::RibInbound> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        *rib = rib::client::RibClient::new(tx, rib::client::ProtoId::from_raw(9));
+        rx
+    }
+
+    /// The ILM updates sent so far: (installed, label).
+    fn sent(rx: &mut mpsc::UnboundedReceiver<rib::client::RibInbound>) -> Vec<(bool, u32)> {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|envelope| match envelope.msg {
+                rib::Message::IlmAdd { label, .. } => Some((true, label)),
+                rib::Message::IlmDel { label, .. } => Some((false, label)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 10.0.0.2/32 with Prefix-SID index 2 under an SRGB from `start`, via
+    /// 192.168.0.2 (not the penultimate hop, so it swaps).
+    fn rib_v2(start: u32) -> PrefixMap<Ipv4Net, SpfRoute> {
+        let mut rib = PrefixMap::new();
+        rib.insert(
+            "10.0.0.2/32".parse().unwrap(),
+            SpfRoute {
+                metric: 20,
+                path_type: RouteType::IntraArea,
+                nhops: BTreeMap::from([(
+                    "192.168.0.2".parse().unwrap(),
+                    SpfNexthop {
+                        ifindex: 2,
+                        adjacency: false,
+                        router_id: None,
+                        backup: None,
+                    },
+                )]),
+                sid: Some(start + 2),
+                prefix_sid: Some((SidLabelValue::Index(2), srgb(start))),
+                dest_vertex: None,
+                backup_as_primary: false,
+            },
+        );
+        rib
+    }
+
+    fn rib_v3(start: u32) -> PrefixMap<ipnet::Ipv6Net, SpfRouteV3> {
+        let mut rib = PrefixMap::new();
+        rib.insert(
+            "2001:db8::2/128".parse().unwrap(),
+            SpfRouteV3 {
+                metric: 20,
+                path_type: RouteType::IntraArea,
+                nhops: BTreeMap::from([(
+                    "fe80::2".parse().unwrap(),
+                    SpfNexthopV3 {
+                        ifindex: 2,
+                        adjacency: false,
+                        backup: None,
+                    },
+                )]),
+                sid: Some(start + 2),
+                prefix_sid: Some((SidLabelValue::Index(2), srgb(start))),
+                dest_vertex: None,
+                backup_as_primary: false,
+            },
+        );
+        rib
+    }
+
+    /// The originator moved its SRGB: the new label is installed, and
+    /// the old one keeps forwarding until the hold runs out.
+    #[tokio::test(start_paused = true)]
+    async fn v2_a_moved_prefix_sid_keeps_the_old_label_for_the_hold() {
+        let mut ospf = fresh_ospf();
+        let mut rx = capture(&mut ospf.ctx.rib);
+        apply_routing_updates(&mut ospf, rib_v2(16000));
+        assert_eq!(sent(&mut rx), vec![(true, 16002)]);
+        apply_routing_updates(&mut ospf, rib_v2(17000));
+        assert_eq!(sent(&mut rx), vec![(true, 17002)], "16002 still forwards");
+
+        tokio::time::advance(SID_MOVE_HOLD).await;
+        ospf.process_msg(Message::IlmHoldExpire).await;
+        assert_eq!(sent(&mut rx), vec![(false, 16002)]);
+        assert_eq!(ospf.ilm.keys().collect::<Vec<_>>(), vec![&17002]);
+    }
+
+    /// v3 holds the same way, over `ilm6`.
+    #[tokio::test(start_paused = true)]
+    async fn v3_a_moved_prefix_sid_keeps_the_old_label_for_the_hold() {
+        let mut ospf = fresh_ospf_v3();
+        let mut rx = capture(&mut ospf.ctx.rib);
+        apply_routing_updates_v3(&mut ospf, rib_v3(16000));
+        assert_eq!(sent(&mut rx), vec![(true, 16002)]);
+        apply_routing_updates_v3(&mut ospf, rib_v3(17000));
+        assert_eq!(sent(&mut rx), vec![(true, 17002)], "16002 still forwards");
+
+        tokio::time::advance(SID_MOVE_HOLD).await;
+        ospf.process_msg(Message::IlmHoldExpire).await;
+        assert_eq!(sent(&mut rx), vec![(false, 16002)]);
+        assert_eq!(ospf.ilm6.keys().collect::<Vec<_>>(), vec![&17002]);
+    }
+
+    /// A prefix that goes away takes its held label with it.
+    #[tokio::test(start_paused = true)]
+    async fn v2_a_vanished_prefix_withdraws_both_labels() {
+        let mut ospf = fresh_ospf();
+        let mut rx = capture(&mut ospf.ctx.rib);
+        apply_routing_updates(&mut ospf, rib_v2(16000));
+        apply_routing_updates(&mut ospf, rib_v2(17000));
+        let _ = sent(&mut rx);
+        apply_routing_updates(&mut ospf, PrefixMap::new());
+        let mut withdrawn = sent(&mut rx);
+        withdrawn.sort();
+        assert_eq!(withdrawn, vec![(false, 16002), (false, 17002)]);
     }
 }
 

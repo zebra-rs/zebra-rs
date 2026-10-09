@@ -1,0 +1,55 @@
+# r3 with its SRGB moved to 18000 (4000 labels, clear of the dynamic
+# labels from 24000): label 16003 becomes 18003 and 16013 becomes 18013.
+# A whole config, so the block's start and range land in one commit; the
+# SRLB is restated unchanged.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.3/32
+  ipv6:
+    address: 2001:db8::3/128
+- if-name: r3-r2
+  ipv4:
+    address: 10.0.23.3/24
+  ipv6:
+    address: 2001:db8:23::3/64
+system:
+  hostname: r3
+segment-routing:
+  block:
+  - name: default
+    global:
+      start: 18000
+      range: 4000
+    local:
+      start: 15000
+      range: 1000
+router:
+  ospf:
+    router-id: 10.0.0.3
+    segment-routing:
+      mpls: {}
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+        prefix-sid:
+          index: 3
+      - if-name: r3-r2
+        enabled: true
+        network-type: point-to-point
+  ospfv3:
+    router-id: 10.0.0.3
+    segment-routing:
+      mpls: {}
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+        prefix-sid:
+          index: 13
+      - if-name: r3-r2
+        enabled: true
+        network-type: point-to-point

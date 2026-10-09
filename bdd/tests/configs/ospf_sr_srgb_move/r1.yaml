@@ -1,0 +1,45 @@
+# r1 — the far end of the chain: its ILMs swap r3's Prefix-SID labels
+# toward r2, so it holds the old and the new labels while r3's SRGB move
+# settles.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.1/32
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: r1-r2
+  ipv4:
+    address: 10.0.12.1/24
+  ipv6:
+    address: 2001:db8:12::1/64
+system:
+  hostname: r1
+router:
+  ospf:
+    router-id: 10.0.0.1
+    segment-routing:
+      mpls: {}
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+        prefix-sid:
+          index: 1
+      - if-name: r1-r2
+        enabled: true
+        network-type: point-to-point
+  ospfv3:
+    router-id: 10.0.0.1
+    segment-routing:
+      mpls: {}
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+        prefix-sid:
+          index: 11
+      - if-name: r1-r2
+        enabled: true
+        network-type: point-to-point

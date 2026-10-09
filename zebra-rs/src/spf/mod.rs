@@ -7,5 +7,6 @@ pub use tilfa_par::*;
 pub mod diff;
 pub use diff::*;
 
+pub mod ilm_hold;
 pub mod label_block;
 pub mod srv6;

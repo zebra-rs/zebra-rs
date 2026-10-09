@@ -993,6 +993,16 @@ impl Rib {
             entries.retain(|e| !(e.rtype == ilm.rtype && e.owner == ilm.owner));
             if entries.is_empty() {
                 self.ilm.remove(&label);
+                // The last entry in a retired SRGB whose hold is over may
+                // be all that kept the SRGB reserved.
+                let now = tokio::time::Instant::now();
+                if self
+                    .retired_srgbs
+                    .iter()
+                    .any(|(b, until)| *until <= now && (b.start..b.end).contains(&label))
+                {
+                    self.reserve_sr_blocks();
+                }
             }
         }
         // The owner's entry is gone, so a label its pool gave back, and
