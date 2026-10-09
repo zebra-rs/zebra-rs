@@ -50,6 +50,12 @@ const STAGE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/.stage");
 /// that and make resolution differ from machine to machine.
 const SYSTEM_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
+/// Where the cradle-rs package installs the engine.
+const PACKAGED_CRADLE: &str = "/usr/bin/cradle";
+
+/// The cradle-rs release zebra-rs pins (the top-level `cradle-version`).
+const CRADLE_PIN: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../cradle-version"));
+
 /// A resolved staging prefix: binaries under `bin/`, schemas under
 /// `share/zebra-rs/yang/`, mirroring the `/usr` layout `make install`
 /// writes.
@@ -125,11 +131,32 @@ fn check(root: PathBuf, what: &str) -> Prefix {
     prefix
 }
 
-/// One-line description of the resolved toolchain, printed in the run
-/// header. A run that fails for a stale-binary reason should be able to
-/// prove it from its own log.
+/// The cradle engine every zebra-rs daemon of this run spawns, passed to
+/// each one as `ZEBRA_CRADLE_BIN`.
+///
+/// Left to itself zebra-rs looks for `$ZEBRA_CRADLE_BIN`, then
+/// `$HOME/.zebra/bin/cradle`, then `/usr/bin/cradle` (`resolve_bin` in
+/// zebra-rs/src/cradle/supervisor.rs). Under `sudo` HOME is /root, so a
+/// forgotten dev copy at `/root/.zebra/bin/cradle` replaces the packaged
+/// engine for every daemon in every worktree, silently: one did, for two
+/// months, running cradle 0.9.9 against a 1.1.x pin. Passing the variable
+/// takes the home directory out of the lookup.
+///
+/// The invoking environment's `$ZEBRA_CRADLE_BIN` wins, to test a cradle-rs
+/// build; otherwise the packaged engine.
+pub fn cradle_bin() -> &'static Path {
+    static BIN: OnceLock<PathBuf> = OnceLock::new();
+    BIN.get_or_init(|| match std::env::var("ZEBRA_CRADLE_BIN") {
+        Ok(raw) if !raw.trim().is_empty() => PathBuf::from(raw.trim()),
+        _ => PathBuf::from(PACKAGED_CRADLE),
+    })
+}
+
+/// Description of the resolved toolchain, printed in the run header. A run
+/// that fails for a stale-binary reason should be able to prove it from its
+/// own log.
 pub fn describe() -> String {
-    match prefix() {
+    let zebra = match prefix() {
         Some(p) => {
             let zebra = p.bin_dir().join("zebra-rs");
             let size = std::fs::metadata(&zebra).map(|m| m.len()).unwrap_or(0);
@@ -141,6 +168,37 @@ pub fn describe() -> String {
         None => "toolchain: host-global (/usr/bin, /usr/share/zebra-rs/yang) \
                  — run `make -C bdd stage` to isolate this worktree"
             .to_string(),
+    };
+    let bin = cradle_bin();
+    let version = std::process::Command::new(bin)
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string());
+    format!(
+        "{zebra}\n{}",
+        cradle_line(bin, version.as_deref(), CRADLE_PIN.trim())
+    )
+}
+
+/// The run header's cradle line, from the engine's `--version` output
+/// (`cradle X.Y.Z`, or `None` when it would not run) and the pinned release.
+fn cradle_line(bin: &Path, version: Option<&str>, pin: &str) -> String {
+    let Some(version) = version else {
+        return format!(
+            "cradle: {} does not run — features that start the engine will fail",
+            bin.display()
+        );
+    };
+    let release = version.strip_prefix("cradle ").unwrap_or(version);
+    if release == pin {
+        format!("cradle: {} ({version})", bin.display())
+    } else {
+        format!(
+            "cradle: {} ({version}) — WARNING: zebra-rs pins {pin} (`cradle-version`)",
+            bin.display()
+        )
     }
 }
 
@@ -157,6 +215,29 @@ mod tests {
         assert_eq!(
             p.yang_dir(),
             PathBuf::from("/w/bdd/.stage/share/zebra-rs/yang")
+        );
+    }
+
+    #[test]
+    fn cradle_line_names_the_engine_and_flags_a_pin_mismatch() {
+        let bin = Path::new("/usr/bin/cradle");
+        assert_eq!(
+            cradle_line(bin, Some("cradle 1.1.3"), "1.1.3"),
+            "cradle: /usr/bin/cradle (cradle 1.1.3)"
+        );
+        assert_eq!(
+            cradle_line(bin, Some("cradle 0.9.9"), "1.1.3"),
+            "cradle: /usr/bin/cradle (cradle 0.9.9) — WARNING: zebra-rs pins 1.1.3 (`cradle-version`)"
+        );
+        assert!(cradle_line(bin, None, "1.1.3").contains("does not run"));
+    }
+
+    #[test]
+    fn the_pin_is_a_release_number() {
+        let pin = CRADLE_PIN.trim();
+        assert!(
+            !pin.is_empty() && pin.split('.').all(|n| n.parse::<u32>().is_ok()),
+            "cradle-version should hold X.Y.Z, got {pin:?}"
         );
     }
 
