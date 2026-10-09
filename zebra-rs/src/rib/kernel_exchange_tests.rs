@@ -814,3 +814,81 @@ async fn kernel_multipath_changes_track_the_kernel() {
     );
     ip(&["link", "del", "mpath0"]);
 }
+
+/// SRv6 routes an earlier run left are never mirrored into the RIB (their
+/// owners reinstall them in place), so the leftover sweep removes those
+/// this run has not reinstalled: a reinstalled SID stays, an unconfigured
+/// one goes, and an operator's SRv6 route is not ours to touch.
+#[tokio::test]
+#[ignore = "requires root in an isolated network namespace"]
+async fn sweep_removes_srv6_leftovers_nothing_reinstalled() {
+    require_netns();
+    ip(&["link", "add", "srv6l0", "type", "dummy"]);
+    ip(&["link", "set", "srv6l0", "up"]);
+    ip(&[
+        "-6",
+        "addr",
+        "add",
+        "2001:db8:f::1/64",
+        "dev",
+        "srv6l0",
+        "nodad",
+    ]);
+    for (sid, protocol) in [
+        ("fc00:0:1::/128", "isis"),
+        ("fc00:0:2::/128", "isis"),
+        ("fc00:0:3::/128", "zebra"),
+        ("fc00:0:4::/128", "static"),
+    ] {
+        ip(&[
+            "-6",
+            "route",
+            "add",
+            sid,
+            "encap",
+            "seg6local",
+            "action",
+            "End",
+            "dev",
+            "srv6l0",
+            "proto",
+            protocol,
+        ]);
+    }
+    let mut rib = Rib::new(false).unwrap();
+    crate::fib::fib_dump(&mut rib).await.unwrap();
+    // None of them became a RIB route.
+    for sid in ["fc00:0:1::/128", "fc00:0:2::/128", "fc00:0:3::/128"] {
+        let prefix: Ipv6Net = sid.parse().unwrap();
+        assert!(
+            rib.table_v6.get(&prefix).is_none_or(|e| e.is_empty()),
+            "{sid}"
+        );
+    }
+    // This run reinstalls fc00:0:1:: through a real install path (an
+    // egress-protection redirect of the same SID, replaced in place).
+    let ifindex = rib
+        .links
+        .values()
+        .find(|link| link.name == "srv6l0")
+        .unwrap()
+        .index;
+    rib.fib_handle
+        .route_sid_redirect_install(
+            &"fc00:0:1::/128".parse().unwrap(),
+            "fc00:0:9::".parse().unwrap(),
+            "2001:db8:f::2".parse().unwrap(),
+            ifindex,
+        )
+        .await;
+    rib.sweep_leftovers().await;
+    let present = |sid: &str| !ip(&["-6", "route", "show", "exact", sid]).trim().is_empty();
+    assert!(present("fc00:0:1::/128"), "reinstalled this run: kept");
+    assert!(
+        !present("fc00:0:2::/128"),
+        "an earlier run's, not reinstalled: removed"
+    );
+    assert!(!present("fc00:0:3::/128"), "RTPROT_ZEBRA leftover: removed");
+    assert!(present("fc00:0:4::/128"), "an operator's: kept");
+    ip(&["link", "del", "srv6l0"]);
+}

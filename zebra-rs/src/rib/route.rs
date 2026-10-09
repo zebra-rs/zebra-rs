@@ -126,9 +126,10 @@ impl Rib {
     }
 
     /// Withdraw every leftover from an earlier run that its owner has not
-    /// replaced by now: statics, IS-IS, and VRF BGP. OSPF sweeps its own
-    /// once it has converged (graceful restart, RFC 3623). Afterwards an
-    /// `RTPROT_STATIC` route is only ever an operator's.
+    /// replaced by now: statics, IS-IS, and VRF BGP, plus SRv6 routes under
+    /// any of our protocols that nothing reinstalled. OSPF sweeps its own
+    /// RIB leftovers once it has converged (graceful restart, RFC 3623).
+    /// Afterwards an `RTPROT_STATIC` route is only ever an operator's.
     pub(super) async fn sweep_leftovers(&mut self) {
         let tables: Vec<u32> = std::iter::once(RT_TABLE_MAIN)
             .chain(self.vrf_tables.keys().copied())
@@ -141,6 +142,10 @@ impl Rib {
             }
         }
         self.legacy_statics.clear();
+        let srv6 = self.fib_handle.sweep_srv6_leftovers().await;
+        if srv6 > 0 {
+            tracing::info!("removed {srv6} SRv6 route(s) an earlier run left");
+        }
     }
 
     /// A kernel event for a route this RIB already installed must not

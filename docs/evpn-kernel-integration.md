@@ -87,8 +87,8 @@ upgrading, such a route is adopted when the static configuration
 installs the same route (table, prefix and priority), and otherwise left
 as an operator route. SRv6 routes (`seg6`/`seg6local` encapsulation)
 under zebra-rs's protocol numbers are never ingested: their owners
-reinstall them in place, and an earlier run's that is no longer
-configured is not removed.
+reinstall them in place. An earlier run's that this run has not
+reinstalled by the end of the grace period is removed.
 
 ## Kernel contract
 

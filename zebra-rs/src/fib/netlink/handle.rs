@@ -410,6 +410,14 @@ pub struct FibHandle {
     /// The bridge each L3 VNI's Type-5 state was installed on, so a move
     /// to another bridge can remove what was left on the old one.
     evpn_l3vni_bridge: std::sync::Mutex<BTreeMap<u32, u32>>,
+    /// SRv6 routes under our protocols an earlier run left, found by the
+    /// startup dump: `(table, prefix, priority)` → protocol. They are never
+    /// mirrored into the RIB (their owners reinstall them in place), so the
+    /// leftover sweep removes those nothing reinstalled
+    /// (`sweep_srv6_leftovers`).
+    srv6_leftovers: std::sync::Mutex<BTreeMap<(u32, IpNet, u32), RouteProtocol>>,
+    /// Every SRv6 route this run installed, by the same key.
+    srv6_installed: std::sync::Mutex<BTreeSet<(u32, IpNet, u32)>>,
     /// VNI to VXLAN interface index mapping
     /// Used to resolve VNI to the correct VXLAN device for FDB operations
     pub vni_ifindex_map: BTreeMap<u32, u32>,
@@ -695,6 +703,8 @@ impl FibHandle {
             evpn_prefix_routes: std::sync::Mutex::new(BTreeMap::new()),
             evpn_rmac_vtep: std::sync::Mutex::new(BTreeMap::new()),
             evpn_l3vni_bridge: std::sync::Mutex::new(BTreeMap::new()),
+            srv6_leftovers: std::sync::Mutex::new(BTreeMap::new()),
+            srv6_installed: std::sync::Mutex::new(BTreeSet::new()),
             vni_ifindex_map: BTreeMap::new(),
             vni_bridge_map: BTreeMap::new(),
             vni_metadata_map: BTreeMap::new(),
@@ -1267,6 +1277,7 @@ impl FibHandle {
             }
         }
 
+        self.note_srv6_install(&msg);
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
         // Upsert (`NLM_F_REPLACE`), not `NLM_F_EXCL`: the kernel keys a
         // route on (table, dst, priority), NOT on its nexthop — a
@@ -1788,6 +1799,7 @@ impl FibHandle {
             }
             msg.attributes.push(RouteAttribute::Priority(uni.metric));
 
+            self.note_srv6_install(&msg);
             let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
             req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
             let mut ok = true;
@@ -1941,6 +1953,7 @@ impl FibHandle {
             );
         }
 
+        self.note_srv6_install(&msg);
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
         // Upsert (`NLM_F_REPLACE`) — see the v4 sibling: a re-resolved
         // route keeps its (table, dst, priority) key but changes its
@@ -2683,6 +2696,7 @@ impl FibHandle {
             );
         }
 
+        self.note_srv6_install(&msg);
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
         req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
         let mut response = self.handle.clone().request(req).unwrap();
@@ -2757,6 +2771,7 @@ impl FibHandle {
             }
         }
 
+        self.note_srv6_install(&msg);
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
         req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
         let mut response = self.handle.clone().request(req).unwrap();
@@ -2877,6 +2892,7 @@ impl FibHandle {
         msg.attributes.push(encap);
         msg.attributes.push(encap_type);
 
+        self.note_srv6_install(&msg);
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
         req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
         let mut response = self.handle.clone().request(req).unwrap();
@@ -4128,6 +4144,66 @@ impl FibHandle {
             .map(|(encap, _)| encap.l3vni)
     }
 
+    /// Remember an SRv6 route this run installs, so the leftover sweep
+    /// keeps it. Called with the message before every route install that
+    /// can carry an SRv6 encapsulation.
+    fn note_srv6_install(&self, msg: &RouteMessage) {
+        if let Some((key, _)) = srv6_route_key(msg) {
+            self.srv6_installed.lock().unwrap().insert(key);
+        }
+    }
+
+    /// Startup dump: record an SRv6 route under our protocols as a
+    /// leftover candidate.
+    pub fn note_srv6_leftover(&self, msg: &RouteMessage) {
+        if let Some((key, protocol)) = srv6_route_key(msg) {
+            self.srv6_leftovers.lock().unwrap().insert(key, protocol);
+        }
+    }
+
+    /// Remove the SRv6 routes an earlier run left that this run has not
+    /// reinstalled by now. Returns how many were removed.
+    pub async fn sweep_srv6_leftovers(&self) -> usize {
+        let leftovers = std::mem::take(&mut *self.srv6_leftovers.lock().unwrap());
+        let stale: Vec<_> = {
+            let installed = self.srv6_installed.lock().unwrap();
+            leftovers
+                .into_iter()
+                .filter(|(key, _)| !installed.contains(key))
+                .collect()
+        };
+        for ((table_id, prefix, priority), protocol) in &stale {
+            let mut msg = RouteMessage::default();
+            msg.header.address_family = match prefix {
+                IpNet::V4(_) => AddressFamily::Inet,
+                IpNet::V6(_) => AddressFamily::Inet6,
+            };
+            msg.header.destination_prefix_length = prefix.prefix_len();
+            msg.header.protocol = *protocol;
+            msg.header.scope = RouteScope::Universe;
+            msg.header.kind = RouteType::Unicast;
+            set_route_table(&mut msg, *table_id);
+            msg.attributes
+                .push(RouteAttribute::Destination(match prefix {
+                    IpNet::V4(p) => RouteAddress::Inet(p.addr()),
+                    IpNet::V6(p) => RouteAddress::Inet6(p.addr()),
+                }));
+            msg.attributes.push(RouteAttribute::Priority(*priority));
+            let mut req = NetlinkMessage::from(RouteNetlinkMessage::DelRoute(msg));
+            req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+            if let Ok(mut response) = self.handle.clone().request(req) {
+                while let Some(msg) = response.next().await {
+                    if let NetlinkPayload::Error(e) = msg.payload {
+                        tracing::info!(
+                            "SRv6 leftover {prefix} table={table_id} metric={priority}: {e}"
+                        );
+                    }
+                }
+            }
+        }
+        stale.len()
+    }
+
     /// Reinstall one desired bridge Type-5 route.
     pub async fn evpn_prefix_reinstall(&self, table_id: u32, prefix: IpNet) {
         let Some((encap, metric)) = self.evpn_prefix_tracked(table_id, prefix) else {
@@ -5224,6 +5300,71 @@ impl RouteBuilder {
     }
 }
 
+/// `(table, prefix, priority)` and protocol of an SRv6 route (`seg6` or
+/// `seg6local` encapsulation) under one of zebra-rs's protocol numbers: the
+/// routes `route_from_msg_with` never mirrors. The priority is the one the
+/// kernel reports: an IPv6 route installed without one reads as 1024.
+fn srv6_route_key(msg: &RouteMessage) -> Option<((u32, IpNet, u32), RouteProtocol)> {
+    let protocol = msg.header.protocol;
+    if !matches!(
+        protocol,
+        RouteProtocol::Ospf | RouteProtocol::Isis | RouteProtocol::Bgp | RouteProtocol::Zebra
+    ) {
+        return None;
+    }
+    let mut table_id = msg.header.table as u32;
+    let mut metric = 0;
+    let mut dst = None;
+    let mut srv6 = false;
+    for attr in &msg.attributes {
+        match attr {
+            RouteAttribute::Table(t) => table_id = *t,
+            RouteAttribute::Priority(p) => metric = *p,
+            RouteAttribute::Destination(RouteAddress::Inet(a)) => dst = Some(IpAddr::V4(*a)),
+            RouteAttribute::Destination(RouteAddress::Inet6(a)) => dst = Some(IpAddr::V6(*a)),
+            RouteAttribute::EncapType(RouteLwEnCapType::Seg6 | RouteLwEnCapType::Seg6Local) => {
+                srv6 = true
+            }
+            _ => {}
+        }
+    }
+    if !srv6 {
+        return None;
+    }
+    let len = msg.header.destination_prefix_length;
+    let prefix = match msg.header.address_family {
+        AddressFamily::Inet => IpNet::V4(
+            Ipv4Net::new(
+                match dst {
+                    Some(IpAddr::V4(a)) => a,
+                    None => Ipv4Addr::UNSPECIFIED,
+                    _ => return None,
+                },
+                len,
+            )
+            .ok()?,
+        ),
+        AddressFamily::Inet6 => {
+            if metric == 0 {
+                metric = 1024;
+            }
+            IpNet::V6(
+                Ipv6Net::new(
+                    match dst {
+                        Some(IpAddr::V6(a)) => a,
+                        None => Ipv6Addr::UNSPECIFIED,
+                        _ => return None,
+                    },
+                    len,
+                )
+                .ok()?,
+            )
+        }
+        _ => return None,
+    };
+    Some(((table_id, prefix, metric), protocol))
+}
+
 /// `(table, prefix, priority)` of a protocol-BGP unicast route in a VRF
 /// table: the shape of a bridge Type-5 route. IPv6 priority 0 reads as
 /// Linux's 1024, matching what `evpn_prefix_route` records.
@@ -6003,6 +6144,79 @@ mod tests {
             },
             2000
         ));
+    }
+
+    /// The SRv6 leftover key: only seg6/seg6local routes under our
+    /// protocols, with the priority the kernel reports (IPv6 none -> 1024),
+    /// so a startup candidate and a fresh install of the same route match.
+    #[test]
+    fn srv6_route_key_matches_our_srv6_routes() {
+        let msg = |protocol, encap: Option<RouteLwEnCapType>, priority: Option<u32>, table| {
+            let mut msg = RouteMessage::default();
+            msg.header.address_family = AddressFamily::Inet6;
+            msg.header.destination_prefix_length = 128;
+            msg.header.kind = RouteType::Unicast;
+            msg.header.protocol = protocol;
+            set_route_table(&mut msg, table);
+            msg.attributes
+                .push(RouteAttribute::Destination(RouteAddress::Inet6(
+                    "fc00:0:1::".parse().unwrap(),
+                )));
+            if let Some(priority) = priority {
+                msg.attributes.push(RouteAttribute::Priority(priority));
+            }
+            if let Some(encap) = encap {
+                msg.attributes.push(RouteAttribute::EncapType(encap));
+            }
+            msg
+        };
+        let main = RouteHeader::RT_TABLE_MAIN as u32;
+        let sid: IpNet = "fc00:0:1::/128".parse().unwrap();
+        // An install without a priority and the dumped route (1024) agree.
+        let installed = srv6_route_key(&msg(
+            RouteProtocol::Isis,
+            Some(RouteLwEnCapType::Seg6Local),
+            None,
+            main,
+        ));
+        let dumped = srv6_route_key(&msg(
+            RouteProtocol::Isis,
+            Some(RouteLwEnCapType::Seg6Local),
+            Some(1024),
+            main,
+        ));
+        assert_eq!(installed, Some(((main, sid, 1024), RouteProtocol::Isis)));
+        assert_eq!(installed, dumped);
+        // H.Encaps routes and context tables count; the table rides in RTA_TABLE.
+        assert_eq!(
+            srv6_route_key(&msg(
+                RouteProtocol::Zebra,
+                Some(RouteLwEnCapType::Seg6),
+                Some(5),
+                1000
+            )),
+            Some(((1000, sid, 5), RouteProtocol::Zebra))
+        );
+        // Not ours, or not SRv6: no key.
+        assert!(
+            srv6_route_key(&msg(
+                RouteProtocol::Static,
+                Some(RouteLwEnCapType::Seg6Local),
+                None,
+                main
+            ))
+            .is_none()
+        );
+        assert!(srv6_route_key(&msg(RouteProtocol::Isis, None, None, main)).is_none());
+        assert!(
+            srv6_route_key(&msg(
+                RouteProtocol::Isis,
+                Some(RouteLwEnCapType::Mpls),
+                None,
+                main
+            ))
+            .is_none()
+        );
     }
 
     #[test]

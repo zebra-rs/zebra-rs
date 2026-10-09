@@ -67,7 +67,8 @@ cargo test -p zebra-rs kernel_exchange_tests
 Additional tests check actual static-route retention, shared-IP neighbor
 ownership during unrelated MAC/IP updates and withdrawals, and cleanup of
 every leftover priority during sweeps and floating-static replacement,
-and multipath kernel routes changing one next hop at a time (IPv6
+removal of SRv6 leftovers nothing reinstalled (keeping reinstalled and
+operator SIDs), and multipath kernel routes changing one next hop at a time (IPv6
 next-hop deletion, IPv4 append, replace and delete) through the real
 Netlink notifications.
 The leftover tests cover unicast, ECMP, blackhole and mixed paths in
