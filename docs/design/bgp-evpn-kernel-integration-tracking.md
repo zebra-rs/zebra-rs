@@ -22,8 +22,8 @@ Validation: [`docs/validation/evpn-linux-kernel.md`](../validation/evpn-linux-ke
 | **Multihoming dataplane** | 🔶 cradle-only by decision; kernel single-homed | No change. The local-vs-remote rule keeps the local path on a shared non-zero ES, consistent with the single-homed kernel backend | — |
 | **IPv6 underlay transport** | ✅ Kernel | Bridge Type-5 path supports IPv4 VTEPs only (IPv6 prefixes over an IPv4 VTEP use the mapped gateway) | #2477 (limit) |
 | **IGMP/MLD proxy / SMET** | ✅ incl. per-VTEP MDB | No change. The `bgp_evpn_smet` BDD per-VTEP assertion needs iproute2 ≥ 6.5 (see the SMET plan); it fails on 6.1 hosts while the kernel entry is correct | — |
-| **ARP suppression** | ❌ Open | **Candidate, unverified.** `neigh_suppress` was already set on VXLAN bridge ports; #2477 now installs remote MAC/IP bindings as neighbors on the bridge, which is what kernel ARP/ND suppression answers from. Needs a namespace check before changing the row | #2477 (prerequisite) |
-| **Datapath BDD** | ✅ cradle + kernel playsets | New self-contained Linux namespace test (two zebra-rs speakers, no cradle/FRR/containers): 125 checks incl. kernel-state recovery, crash-and-restart, MAC mobility; root-only kernel tests via `tests/evpn-linux-kernel/run-kernel-tests.sh` | #2477, #2488 |
+| **ARP suppression** | ❌ Open | ✅ Kernel. `neigh_suppress` was already set on VXLAN bridge ports; #2477 installs remote MAC/IP bindings as neighbors on the bridge, which kernel ARP/ND suppression answers from. The namespace test resolves a remote host's IPv4 and IPv6 address and checks no ARP request or neighbor solicitation enters the overlay; with `neigh_suppress` off both are flooded. Matrix row updated | #2477, #2488 (verification) |
+| **Datapath BDD** | ✅ cradle + kernel playsets | New self-contained Linux namespace test (two zebra-rs speakers, no cradle/FRR/containers): 129 checks incl. ARP/ND suppression, kernel-state recovery, crash-and-restart, MAC mobility; root-only kernel tests via `tests/evpn-linux-kernel/run-kernel-tests.sh` | #2477, #2488 |
 
 ## Work outside the matrix (RIB / kernel exchange)
 
@@ -43,7 +43,6 @@ Validation: [`docs/validation/evpn-linux-kernel.md`](../validation/evpn-linux-ke
 |---|---|---|
 | **Type-2 symmetric IRB** | L2 unicast / L3 | Originate Label2 = L3VNI, the VRF's route targets and the Router's-MAC EC on MAC/IP routes whose L2VNI bridge is in a VRF with an L3VNI; import received ones as `/32` and `/128` host routes in the VRF (bridge Type-5 path), and into the VRF BGP table as FRR does. The matrix's "Symmetric IRB" covers Type-5 only |
 | **Duplicate address detection** | MAC mobility | FRR's `dup-addr-detection` (moves within a window → freeze) |
-| **ARP suppression verification** | ARP suppression | Namespace check that kernel suppression answers from the installed bindings; then update the row |
 | **Type-2 write amplification** | — | Each Type-2 change rewrites the MAC's kernel entries and re-checks each IP; measure at ~1k MACs |
 | **IPv6 VTEPs on the bridge Type-5 path** | IPv6 underlay | Not qualified |
 | **VLAN-aware fixed-VNI bridges** | L2 unicast | Not qualified |
@@ -53,7 +52,7 @@ Validation: [`docs/validation/evpn-linux-kernel.md`](../validation/evpn-linux-ke
 ## Validation snapshot
 
 * `cargo test --workspace --exclude bdd` and `--features lua`: pass.
-* Root-only kernel tests: 6/6. Linux namespace test: 125/125.
+* Root-only kernel tests: 6/6. Linux namespace test: 129/129.
 * BDD (all features): the only failure attributable to this work
   (`bgp_evpn_local_mac`) is fixed in #2488; the others fail identically on
   `main` on the test host (no cradle engine, iproute2 6.1) or are

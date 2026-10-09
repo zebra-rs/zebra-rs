@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -203,6 +204,34 @@ def main():
                 for af, address in [('-4', f'10.20.{peer}.10'), ('-6', f'2001:db8:20:{peer}::10')]:
                     expect(f'r{i} routed {af}', lambda i=i, af=af, address=address:
                            ns('r'+str(i), 'ping', af, '-c', '1', '-W', '1', address, check=False).returncode == 0)
+
+            # ARP/ND suppression: with neigh_suppress on the VXLAN port and
+            # the remote MAC/IP binding installed as a neighbor on the
+            # bridge, v1 answers l1's ARP request and IPv6 neighbor
+            # solicitation for l2 itself; neither enters the overlay.
+            if shutil.which('tcpdump'):
+                capture = Path(directory) / 'suppress.txt'
+                with capture.open('w') as out:
+                    tcpdump = subprocess.Popen(
+                        ['ip', 'netns', 'exec', tag + '-v1', 'timeout', '6', 'tcpdump',
+                         '-nli', 'vx1000', 'arp or icmp6'],
+                        stdout=out, stderr=subprocess.DEVNULL)
+                    time.sleep(1)
+                    ns('l1', 'ip', 'neighbor', 'flush', 'dev', 'eth0')
+                    resolved = {af: ns('l1', 'ping', af, '-c', '1', '-W', '2', address,
+                                       check=False).returncode == 0
+                                for af, address in [('-4', '10.10.0.102'), ('-6', '2001:db8:10::102')]}
+                    tcpdump.wait()
+                frames = capture.read_text()
+                for af, address in [('-4', '10.10.0.102'), ('-6', '2001:db8:10::102')]:
+                    expect(f'ARP/ND suppression {af}: l1 resolves l2', lambda af=af: resolved[af], timeout=1)
+                expect('ARP suppression: no ARP request for l2 enters the overlay', lambda:
+                       'who-has 10.10.0.102' not in frames, timeout=1)
+                expect('ND suppression: no neighbor solicitation for l2 enters the overlay', lambda:
+                       'who has 2001:db8:10::102' not in frames, timeout=1)
+            else:
+                checks.append({'name': 'ARP/ND suppression', 'passed': True, 'skipped': 'no tcpdump'})
+                print('SKIP: ARP/ND suppression (no tcpdump)', flush=True)
 
             # The kernel drops bridge Type-5 state on its own: admin-down
             # deletes the routes (IPv4 without a notification), carrier loss

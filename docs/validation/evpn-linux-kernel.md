@@ -1,7 +1,7 @@
 # EVPN Linux kernel forwarding validation
 
 The [standalone namespace test](../../tests/evpn-linux-kernel/README.md)
-passed **125/125 checks** on 2026-10-09. Two zebra-rs speakers exchanged
+passed **129/129 checks** on 2026-10-09. Two zebra-rs speakers exchanged
 EVPN Type-2/3/5 state and forwarded tenant traffic through Linux bridge,
 VXLAN and VRF devices. No OVN, OVS, FRR, cEOS or containers participated.
 
@@ -9,7 +9,10 @@ Coverage includes IPv4/IPv6 switching and routing in both directions,
 VTEPs distinct from BGP transport addresses, kernel-only underlay routes,
 Type-2 IPv4 withdrawal with MAC/IPv6 survival, static-blackhole Type-5
 redistribution from startup VRF state, prefix withdrawal and final cleanup
-of both IPv4 and mapped-IPv6 RMAC neighbors. Recovery checks remove
+of both IPv4 and mapped-IPv6 RMAC neighbors. ARP/ND suppression checks
+resolve a remote host's IPv4 and IPv6 address and require no ARP request
+or neighbor solicitation to enter the overlay (with `neigh_suppress` off,
+both are flooded and the checks fail). Recovery checks remove
 bridge Type-5 state in the kernel five ways (L3-VNI bridge admin flap,
 VXLAN carrier flap, neighbor/FDB flush, VXLAN detach and re-attach,
 external route deletion) and require routes, RMAC neighbors and FDB, and

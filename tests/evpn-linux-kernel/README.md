@@ -21,7 +21,10 @@ The script checks dual-stack Type-2 neighbor installation and switching,
 Type-5 VRF route installation and routing, redistribution of ordinary
 static blackholes present before startup, IPv4 binding withdrawal with
 IPv6/MAC survival, and prefix withdrawal with shared RMAC survival.
-It also removes bridge Type-5 state behind the daemon (L3-VNI bridge
+It checks ARP/ND suppression: a host resolving a remote host's address is
+answered by its own speaker, and no ARP request or neighbor solicitation
+enters the VXLAN overlay (needs `tcpdump`; skipped and recorded without
+it). It also removes bridge Type-5 state behind the daemon (L3-VNI bridge
 admin flap, VXLAN carrier flap, neighbor/FDB flush, VXLAN detach and
 re-attach, external route deletion) and checks that routes, RMAC adjacency
 and routing recover. It moves the L3-VNI VXLAN to a second bridge and

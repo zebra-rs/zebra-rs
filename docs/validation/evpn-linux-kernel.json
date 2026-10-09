@@ -1,5 +1,5 @@
 {
-  "binary_sha256": "ea3a4ea35cef8ffef3d4d19b032a12ca759654202dd8935346d21580f46dcf8d",
+  "binary_sha256": "ef841bc94510f17934fed6302d7b42cdb25d7a17c9d8bb7b4d6bc70ccb9617c4",
   "checks": [
     {
       "name": "v1 EVPN established",
@@ -111,6 +111,22 @@
     },
     {
       "name": "r2 routed -6",
+      "passed": true
+    },
+    {
+      "name": "ARP/ND suppression -4: l1 resolves l2",
+      "passed": true
+    },
+    {
+      "name": "ARP/ND suppression -6: l1 resolves l2",
+      "passed": true
+    },
+    {
+      "name": "ARP suppression: no ARP request for l2 enters the overlay",
+      "passed": true
+    },
+    {
+      "name": "ND suppression: no neighbor solicitation for l2 enters the overlay",
       "passed": true
     },
     {

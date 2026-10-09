@@ -1,6 +1,6 @@
 # EVPN Support Status by Encapsulation
 
-Status as of 2026-10-07.
+Status as of 2026-10-09.
 
 A framing fact that applies to all three encapsulations: the EVPN control
 plane (route types 1–6 and 9–11, ESI multihoming with DF election, MAC
@@ -41,7 +41,7 @@ route exchange, MAC/IP mobility) is tracked against this matrix in
 | **Assisted Replication (RFC 9574)** | ✅ Control plane; AR-LEAF/RNVE forward natively. ❌ AR-REPLICATOR data plane deferred | ✅ Control plane (shared) | ✅ Control plane (shared) |
 | **BUM segmentation (RFC 9572, Types 9/10/11)** | ✅ Control plane complete (RBR/ASBR, DF, S-PMSI) | ✅ + SR-P2MP tree offload wiring | ✅ Control plane (shared) |
 | **P2MP replication tree** | — (head-end IR model) | ✅ RFC 9524 End.Replicate incl. Bud (zebra #1923 + cradle #131) | ❌ MPLS-P2MP forwarder not built |
-| **ARP suppression** | ❌ Open | ❌ Open | ❌ Open |
+| **ARP suppression** | ✅ Kernel: `neigh_suppress` on the VXLAN port answers ARP/ND from remote MAC/IP bindings installed as bridge neighbors (#2477; verified by the Linux namespace test). ❌ cradle | ❌ Open | ❌ Open |
 | **Datapath BDD (CE-to-CE ping, zebra-driven)** | ✅ `cradle_evpn_vxlan_zebra*`, `cradle_vpws_vxlan_zebra`, v6-underlay twins `cradle_evpn_vxlan6_zebra` + `cradle_vpws_vxlan6_zebra` + kernel playsets | ✅ `cradle_evpn_srv6_zebra*`, `cradle_vpws_zebra` — deepest coverage | ✅ `cradle_evpn_mpls_zebra`, `cradle_vpws_mpls_zebra` (IS-IS SR-MPLS transport + pure-P transit), v6-PE twins `cradle_evpn_mpls6_zebra` + `cradle_vpws_mpls6_zebra` + P-transit `cradle_evpn_mpls6_zebra_transit` |
 
 **Legend**: ✅ supported · ❌ not yet · — not applicable. "Control plane
