@@ -114,6 +114,13 @@ pub enum Message {
         label: u32,
         ilm: IlmEntry,
     },
+    /// An IGP instance's local-label pool gave `label` back. Sent on the
+    /// instance's own channel, behind its ILM installs, so the RIB judges
+    /// it against them: the label is free at once if the instance has no
+    /// ILM entry at it, else once that entry is withdrawn.
+    LocalLabelRelease {
+        label: u32,
+    },
     /// IS-IS publishes a per-algorithm IPv4 route snapshot. RIB
     /// shadows it in `flex_algo_routes` and re-broadcasts via
     /// `RibRx::FlexAlgoRouteAdd`. No FIB install — per-algo IPv4
@@ -864,6 +871,12 @@ pub struct IlmEntry {
     /// nexthop-less pop so the data plane's chained-pop path
     /// continues into the label(s)/IP underneath.
     pub local_pop: bool,
+    /// The subscription that installed this candidate, stamped by
+    /// `Rib::process_inbound` from its envelope; `None` for the RIB's own
+    /// (static label bindings). Candidates are keyed by owner as well as
+    /// `rtype`, so one instance's withdrawal never removes another's:
+    /// OSPFv2 and OSPFv3 both install as `RibType::Ospf`.
+    pub owner: Option<crate::rib::client::ProtoId>,
 }
 
 impl IlmEntry {
@@ -877,6 +890,7 @@ impl IlmEntry {
             metric: 0,
             selected: false,
             local_pop: false,
+            owner: None,
         }
     }
 }
@@ -2345,6 +2359,15 @@ impl Rib {
                 );
             }
             self.client_registry.retire_id(proto_id);
+            // It never registered, so everything it sent was deferred and
+            // will never be handled: it installed no ILM entry, and a
+            // release its pool sent is lost with the rest. What it was
+            // giving back is free.
+            self.client_registry.take_deferred(proto_id);
+            let freed = self.label_space.lock().free_releasing_of(&[proto_id]);
+            if freed {
+                self.notify_starved();
+            }
             return;
         }
         self.client_registry
@@ -2591,6 +2614,8 @@ impl Rib {
         // Reclaim any dynamic label blocks the protocol held — done
         // before the rtype gate so it covers every requester.
         self.label_space.lock().release_all(&proto);
+        // Its blocks' labels may be what a local pool was missing.
+        self.notify_starved();
 
         // And its SRv6 SIDs, before the route walk below would take
         // their RIB rows out from under `sid_uninstall`. A protocol
@@ -2661,16 +2686,26 @@ impl Rib {
         // Withdraw this protocol's contribution to every label it owns
         // a candidate at. `ilm_del` re-selects, so a label shared with
         // another protocol simply falls back to the surviving entry.
+        // Only the instances being cleaned up: an entry owned by another
+        // subscription (a replacement already registered) stays.
+        let owners = self.client_registry.ids_for(&proto);
         let targets: Vec<(u32, IlmEntry)> = self
             .ilm
             .iter()
             .flat_map(|(label, entries)| {
                 entries
                     .iter()
-                    .filter(|e| e.rtype == rtype && in_family(ilm_gateways_v6(e)))
+                    .filter(|e| {
+                        e.rtype == rtype
+                            && in_family(ilm_gateways_v6(e))
+                            && e.owner.is_none_or(|o| owners.contains(&o))
+                    })
                     .map(move |e| (*label, e.clone()))
             })
             .collect();
+        // `ilm_del` also frees what their pools were giving back at these
+        // labels; a release that arrives after this cleanup frees the rest
+        // (`process_inbound`).
         for (label, entry) in targets {
             self.ilm_del(label, entry).await;
         }
@@ -3205,10 +3240,15 @@ impl Rib {
             }
             Message::LabelBlockRelease { proto, start, size } => {
                 self.label_space.lock().release(&proto, start, size);
+                // The block's labels may be what a local pool was missing
+                // (an SRLB configured over it).
+                self.notify_starved();
             }
             Message::IlmAdd { label, ilm } => {
                 self.ilm_add(label, ilm).await;
             }
+            // Handled by `process_inbound`, which knows the sender.
+            Message::LocalLabelRelease { .. } => {}
             Message::IlmDel { label, ilm } => {
                 self.ilm_del(label, ilm).await;
             }
@@ -5645,6 +5685,16 @@ impl Rib {
     /// (`ClientRegistry::defer`).
     async fn process_inbound(&mut self, env: crate::rib::client::RibInbound) {
         if self.client_registry.is_retired(env.from) {
+            // A pool that outlived its instance's cleanup gives its labels
+            // back: the cleanup withdrew the instance's ILM entries, so
+            // they are free.
+            if let Message::LocalLabelRelease { label } = env.msg {
+                let freed = self.label_space.lock().free_releasing(env.from, label);
+                if freed {
+                    self.notify_starved();
+                }
+                return;
+            }
             tracing::debug!(from = %env.from, "rib: dropping an envelope from a retired instance");
             return;
         }
@@ -5665,7 +5715,48 @@ impl Rib {
             table_id,
             "rib: inbound envelope",
         );
-        self.process_msg(env.msg, table_id).await;
+        let mut msg = env.msg;
+        match &mut msg {
+            // The owner comes from the envelope, never from the sender's
+            // own claim.
+            Message::IlmAdd { ilm, .. } | Message::IlmDel { ilm, .. } => {
+                ilm.owner = Some(env.from);
+            }
+            Message::LocalLabelRelease { label } => {
+                self.local_label_release(env.from, *label);
+                return;
+            }
+            _ => {}
+        }
+        self.process_msg(msg, table_id).await;
+    }
+
+    /// `owner`'s pool gave `label` back. Every ILM message the owner sent
+    /// before has been handled, so if it has no entry at the label now the
+    /// label is free; otherwise it is `Draining` until `ilm_del`.
+    fn local_label_release(&mut self, owner: crate::rib::client::ProtoId, label: u32) {
+        let installed = self
+            .ilm
+            .get(&label)
+            .is_some_and(|entries| entries.iter().any(|e| e.owner == Some(owner)));
+        let freed = self
+            .label_space
+            .lock()
+            .release_handled(owner, label, installed);
+        if freed {
+            self.notify_starved();
+        }
+    }
+
+    /// Local labels were freed: tell every instance whose pool found none
+    /// since, so it can try again.
+    pub(super) fn notify_starved(&mut self) {
+        let starved = self.label_space.lock().take_starved();
+        for id in starved {
+            if let Some(sub) = self.client_registry.subscriber(id) {
+                let _ = sub.rib_rx_tx.send(RibRx::LocalLabelsFreed);
+            }
+        }
     }
 }
 
@@ -6649,5 +6740,267 @@ mod label_space_tests {
         rib.proto_cleanup("bgp".to_string()).await;
         let mut rx = subscribe_bgp(&mut rib, 2);
         assert_eq!(request(&mut rib, &mut rx, 1024).await, Some((24000, 1024)));
+    }
+}
+
+#[cfg(test)]
+mod ilm_owner_tests {
+    use super::*;
+    use crate::rib::client::{ProtoId, RibClient};
+
+    /// An OSPF ILM entry at `label`, forwarding to `gateway`.
+    fn ilm(label: u32, gateway: &str) -> IlmEntry {
+        IlmEntry {
+            ilm_type: IlmType::Adjacency(1),
+            nexthop: Nexthop::Uni(NexthopUni {
+                addr: gateway.parse().unwrap(),
+                mpls_label: vec![label],
+                ..Default::default()
+            }),
+            ..IlmEntry::new(RibType::Ospf)
+        }
+    }
+
+    /// A subscribed OSPF instance's RIB channel.
+    fn instance(rib: &mut Rib, id: u32, proto: &str) -> RibClient {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        Box::leak(Box::new(rx));
+        let id = ProtoId::from_raw(id);
+        rib.subscribe(id, tx, proto.to_string(), 0, false);
+        RibClient::new(rib.inbound_tx.clone(), id)
+    }
+
+    /// Handle every envelope the instances have sent.
+    async fn drain(rib: &mut Rib) {
+        while let Ok(env) = rib.inbound_rx.try_recv() {
+            rib.process_inbound(env).await;
+        }
+    }
+
+    fn owners(rib: &Rib, label: u32) -> Vec<Option<ProtoId>> {
+        rib.ilm
+            .get(&label)
+            .map(|entries| entries.iter().map(|e| e.owner).collect())
+            .unwrap_or_default()
+    }
+
+    /// OSPFv2 and OSPFv3 both install as `RibType::Ospf`. A stale
+    /// withdrawal from one used to remove the other's entry at the label;
+    /// now each owner's candidate is its own.
+    #[tokio::test]
+    async fn a_withdrawal_removes_only_its_owners_entry() {
+        let mut rib = Rib::new(false).expect("rib");
+        let v2 = instance(&mut rib, 1, "ospf");
+        let v3 = instance(&mut rib, 2, "ospfv3");
+        v2.send(Message::IlmAdd {
+            label: 15003,
+            ilm: ilm(15003, "10.0.0.2"),
+        })
+        .unwrap();
+        v3.send(Message::IlmAdd {
+            label: 15003,
+            ilm: ilm(15003, "fe80::2"),
+        })
+        .unwrap();
+        drain(&mut rib).await;
+        let (a, b) = (Some(v2.proto_id()), Some(v3.proto_id()));
+        assert_eq!(
+            owners(&rib, 15003),
+            vec![a, b],
+            "the envelope stamps the owner"
+        );
+        v2.send(Message::IlmDel {
+            label: 15003,
+            ilm: ilm(15003, "10.0.0.2"),
+        })
+        .unwrap();
+        drain(&mut rib).await;
+        assert_eq!(owners(&rib, 15003), vec![b]);
+        assert!(rib.ilm[&15003][0].selected, "OSPFv3's entry is installed");
+    }
+
+    /// A label an instance gave back stays out of reach while its ILM
+    /// entry is still installed, and is free once the entry goes; one it
+    /// never installed is free at once.
+    #[tokio::test]
+    async fn a_released_label_waits_for_its_owners_entry_to_go() {
+        let mut rib = Rib::new(false).expect("rib");
+        let v2 = instance(&mut rib, 1, "ospf");
+        let mut pool = rib.label_space.pool_for(15000, 15009, &v2);
+        let mut other = rib.label_space.pool(15000, 15009);
+        assert_eq!(pool.allocate(), Some(15000));
+        assert_eq!(pool.allocate(), Some(15001));
+        v2.send(Message::IlmAdd {
+            label: 15000,
+            ilm: ilm(15000, "10.0.0.2"),
+        })
+        .unwrap();
+        pool.release(15000);
+        pool.release(15001);
+        drain(&mut rib).await;
+        // 15001 was never installed: free. 15000 still is: Releasing.
+        assert_eq!(other.allocate(), Some(15001));
+        assert_eq!(other.allocate(), Some(15002));
+        v2.send(Message::IlmDel {
+            label: 15000,
+            ilm: ilm(15000, "10.0.0.2"),
+        })
+        .unwrap();
+        drain(&mut rib).await;
+        assert_eq!(other.allocate(), Some(15000));
+    }
+
+    /// An instance's cleanup withdraws its entries; what its pool was
+    /// giving back is free once its release, queued behind its earlier
+    /// messages, is handled, even though the instance is gone by then.
+    #[tokio::test]
+    async fn cleanup_frees_what_an_instance_was_giving_back() {
+        let mut rib = Rib::new(false).expect("rib");
+        let v2 = instance(&mut rib, 1, "ospf");
+        let mut pool = rib.label_space.pool_for(15000, 15009, &v2);
+        assert_eq!(pool.allocate(), Some(15000));
+        v2.send(Message::IlmAdd {
+            label: 15000,
+            ilm: ilm(15000, "10.0.0.2"),
+        })
+        .unwrap();
+        drain(&mut rib).await;
+        // The instance stops: its pool is dropped, its release queued.
+        drop(pool);
+        rib.proto_cleanup("ospf".to_string()).await;
+        assert!(!rib.ilm.contains_key(&15000));
+        let mut other = rib.label_space.pool(15000, 15009);
+        assert_eq!(other.allocate(), Some(15001), "its release is still queued");
+        drain(&mut rib).await;
+        assert_eq!(other.allocate(), Some(15000));
+    }
+
+    /// A withdrawal queued ahead of the pool's release must not free the
+    /// label: an install queued between them re-adds the owner's entry.
+    /// Only the release, handled after both, decides.
+    #[tokio::test]
+    async fn a_queued_withdrawal_cannot_free_a_label_ahead_of_its_release() {
+        let mut rib = Rib::new(false).expect("rib");
+        let v2 = instance(&mut rib, 1, "ospf");
+        let mut pool = rib.label_space.pool_for(15000, 15000, &v2);
+        let mut other = rib.label_space.pool(15000, 15000);
+        assert_eq!(pool.allocate(), Some(15000));
+        v2.send(Message::IlmAdd {
+            label: 15000,
+            ilm: ilm(15000, "10.0.0.2"),
+        })
+        .unwrap();
+        drain(&mut rib).await;
+        v2.send(Message::IlmDel {
+            label: 15000,
+            ilm: ilm(15000, "10.0.0.2"),
+        })
+        .unwrap();
+        v2.send(Message::IlmAdd {
+            label: 15000,
+            ilm: ilm(15000, "10.0.0.3"),
+        })
+        .unwrap();
+        drop(pool);
+        let withdrawal = rib.inbound_rx.try_recv().unwrap();
+        rib.process_inbound(withdrawal).await;
+        assert_eq!(other.allocate(), None, "an install is queued behind it");
+        drain(&mut rib).await;
+        assert_eq!(other.allocate(), None, "the re-added entry is installed");
+        v2.send(Message::IlmDel {
+            label: 15000,
+            ilm: ilm(15000, "10.0.0.3"),
+        })
+        .unwrap();
+        drain(&mut rib).await;
+        assert_eq!(other.allocate(), Some(15000));
+    }
+
+    /// An instance whose pool found no free label is told when one is
+    /// freed, so it can try again.
+    #[tokio::test]
+    async fn a_starved_instance_is_told_when_labels_are_freed() {
+        let mut rib = Rib::new(false).expect("rib");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let id = ProtoId::from_raw(1);
+        rib.subscribe(id, tx, "isis".to_string(), 0, false);
+        let isis = RibClient::new(rib.inbound_tx.clone(), id);
+        while rx.try_recv().is_ok() {}
+        let mut pool = rib.label_space.pool_for(15000, 15000, &isis);
+        assert_eq!(pool.allocate(), Some(15000));
+        isis.send(Message::IlmAdd {
+            label: 15000,
+            ilm: ilm(15000, "10.0.0.2"),
+        })
+        .unwrap();
+        pool.release(15000);
+        assert_eq!(pool.allocate(), None, "15000 is on its way back");
+        drain(&mut rib).await;
+        assert!(rx.try_recv().is_err(), "nothing freed yet");
+        isis.send(Message::IlmDel {
+            label: 15000,
+            ilm: ilm(15000, "10.0.0.2"),
+        })
+        .unwrap();
+        drain(&mut rib).await;
+        assert!(matches!(rx.try_recv(), Ok(RibRx::LocalLabelsFreed)));
+        assert_eq!(pool.allocate(), Some(15000));
+    }
+
+    /// Returning a dynamic block frees its labels for local pools too (an
+    /// SRLB configured over a block BGP holds): an IGP pool that found
+    /// none is told, by the release and by the protocol's cleanup.
+    #[tokio::test]
+    async fn a_returned_block_wakes_a_starved_pool() {
+        let mut rib = Rib::new(false).expect("rib");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let id = ProtoId::from_raw(1);
+        rib.subscribe(id, tx, "isis".to_string(), 0, false);
+        while rx.try_recv().is_ok() {}
+        let isis = RibClient::new(rib.inbound_tx.clone(), id);
+        for cleanup in [false, true] {
+            let block = rib.label_space.lock().alloc("bgp", 16).unwrap();
+            let mut pool = rib.label_space.pool_for(block.start, block.end - 1, &isis);
+            assert_eq!(pool.allocate(), None, "the block covers the pool");
+            if cleanup {
+                rib.proto_cleanup("bgp".to_string()).await;
+            } else {
+                let msg = Message::LabelBlockRelease {
+                    proto: "bgp".to_string(),
+                    start: block.start,
+                    size: 16,
+                };
+                rib.process_msg(msg, RT_TABLE_MAIN).await;
+            }
+            assert!(
+                matches!(rx.try_recv(), Ok(RibRx::LocalLabelsFreed)),
+                "cleanup: {cleanup}"
+            );
+            assert_eq!(pool.allocate(), Some(block.start));
+        }
+    }
+
+    /// An instance whose subscription fails never registers, so the RIB
+    /// never handles what it sent, its pool's release included. It
+    /// installed no ILM entry either, so what it was giving back is free.
+    #[tokio::test]
+    async fn a_failed_subscription_frees_what_its_pool_gave_back() {
+        let mut rib = Rib::new(false).expect("rib");
+        let id = ProtoId::from_raw(7);
+        let client = RibClient::new(rib.inbound_tx.clone(), id);
+        let mut pool = rib.label_space.pool_for(15000, 15009, &client);
+        assert_eq!(pool.allocate(), Some(15000));
+        drop(pool);
+        drain(&mut rib).await; // deferred: not registered yet
+        let mut other = rib.label_space.pool(15000, 15009);
+        assert_eq!(
+            other.allocate(),
+            Some(15001),
+            "15000 is still on its way back"
+        );
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        drop(rx);
+        rib.subscribe(id, tx, "ospf".to_string(), 0, false);
+        assert_eq!(other.allocate(), Some(15000));
     }
 }

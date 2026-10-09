@@ -1,6 +1,6 @@
 # MPLS Label Allocation — the RIB as the Label Authority
 
-Status: **design; phases 1, 2 and 3a implemented** (2026-10-08: `rib/label_space.rs`; OSPF reads the `default` block; the IGPs' local labels come from the RIB's label space). Supersedes the ad-hoc split
+Status: **design; phases 1, 2, 3a and 4a implemented** (2026-10-08: `rib/label_space.rs`; OSPF reads the `default` block; the IGPs' local labels come from the RIB's label space; ILM candidates keyed by owner). Supersedes the ad-hoc split
 between the RIB `LabelManager`, the node-shared `LocalLabels` set
 (#2479, #2480) and the hard-coded OSPF SR constants.
 
@@ -607,7 +607,39 @@ and gives every neighbour address without a label one. Before, an adjacency
 that came up while there was no pool (SR-MPLS enabled later, or the block
 late) never got an Adjacency-SID, because `nbr_hello_interpret` labels an
 address only the first time it sees it. 3b, configured Adj-SIDs and
-Binding-SIDs claiming their label from a dynamic holder (§5.1), follows.
+Binding-SIDs claiming their label from a dynamic holder (§5.1), comes after
+phase 4a: moving a label between OSPFv2 and OSPFv3 is only safe once their
+ILM candidates are told apart.
+
+Phase 4 lands in two parts. 4a keys ILM candidates by owner and adds
+`Releasing`:
+- `IlmEntry::owner` is the subscription that installed the candidate,
+  stamped by `Rib::process_inbound` from the envelope (`None` for the RIB's
+  own static bindings). `ilm_add` and `ilm_del` match on (rtype, owner), so
+  a stale withdrawal from one instance never removes another's entry at the
+  label, OSPFv2's and OSPFv3's included (both `RibType::Ospf`).
+  `proto_cleanup` withdraws only the cleaned-up instances' entries.
+- An instance's pool (`SharedLabelSpace::pool_for`, owned by its
+  `RibClient`) gives a label back as `Releasing`, and sends
+  `Message::LocalLabelRelease` on the instance's own channel, behind its ILM
+  messages. Only that release decides: a withdrawal queued ahead of it may
+  be followed by an install that re-adds the entry. When the RIB handles the
+  release the label is free if the instance has no entry at it, else
+  `Draining` until `ilm_del` withdraws that entry. A release from an
+  instance already cleaned up frees the label; one whose subscription
+  failed never registered, installed nothing, and has its labels freed with
+  its deferred envelopes.
+- An SRLB change moves a pool (`LocalLabelPool::retarget`) instead of
+  replacing it: labels still inside the new SRLB stay, so growing or
+  shrinking it no longer changes every Adjacency-SID. An owner whose pool
+  found no free label (one may be `Releasing`) is told when labels are
+  freed (`RibRx::LocalLabelsFreed`) and reconciles its labels again.
+- Found on the way: IS-IS's `diff_ilm_apply` sent no `IlmDel` for an entry
+  whose nexthops had emptied first (a link failure leaves the Adjacency-SID
+  in the LSP with no neighbour), so it leaked; reusing the same label used
+  to hide that. It now withdraws as OSPF's does.
+- 4b, keeping the old Prefix-SID ILMs through an SRGB change (§6.1),
+  follows.
 Phase 2 changes OSPF's advertised SRGB. No phase changes Adjacency-SID
 labels by itself; from phase 3, a configured Adj-SID on a dynamically held
 label moves that holder. Phase 5 is the largest, through the VPN, LU, EVPN

@@ -142,6 +142,11 @@ impl RibClient {
     /// kernel programming is elided. Withdrawals (`*Del`) are *not*
     /// dropped, so flipping the flag on lets any later route churn clean
     /// stale entries out of the FIB.
+    /// The subscription this client speaks for.
+    pub fn proto_id(&self) -> ProtoId {
+        self.proto_id
+    }
+
     pub fn send(&self, msg: Message) -> Result<(), SendError<RibInbound>> {
         if msg.is_fib_install() && self.suppress_install.load(Ordering::Relaxed) {
             return Ok(());
@@ -293,6 +298,11 @@ impl ClientRegistry {
     /// `filters[proto]` and resolve the matching subscriber row
     /// through here. Returns `None` if no subscriber has registered
     /// under `proto`.
+    /// The registered instance `id`.
+    pub fn subscriber(&self, id: ProtoId) -> Option<&Subscriber> {
+        self.subscribers.get(&id)
+    }
+
     pub fn subscriber_for_proto(&self, proto: &str) -> Option<&Subscriber> {
         self.subscribers.values().find(|s| s.proto == proto)
     }
@@ -331,6 +341,15 @@ impl ClientRegistry {
     /// different channel from the cleanup; one handled after the cleanup
     /// would re-install a route or SID of the stopped instance, and
     /// nothing would ever remove it.
+    /// The registered instances of `proto`.
+    pub fn ids_for(&self, proto: &str) -> Vec<ProtoId> {
+        self.subscribers
+            .iter()
+            .filter(|(_, sub)| sub.proto == proto)
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
     pub fn retire(&mut self, proto: &str) {
         let ids: Vec<ProtoId> = self
             .subscribers

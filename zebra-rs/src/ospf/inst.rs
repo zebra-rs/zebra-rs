@@ -827,9 +827,9 @@ impl<V: OspfVersion> Ospf<V> {
     /// `lan_adj_sids`.
     ///
     /// SR-MPLS off: no pool, no labels. On, with the block's SRLB: a pool
-    /// over it, rebuilt when the SRLB moved (every dynamic Adj-SID is then
-    /// drawn again from the new one), and a label for each Full adjacency
-    /// that has none. A block without an SRLB drops the pool and labels.
+    /// over it, moved with the SRLB (`retarget`: the labels still inside
+    /// the new SRLB stay, the others are drawn again), and a label for each
+    /// Full adjacency that has none. A block without an SRLB drops the pool and labels.
     /// Before the block first arrives nothing changes, so labels already
     /// held (a graceful restart's) are kept until then.
     pub(super) fn reconcile_adj_sid_labels(&mut self, full: Vec<(u32, Ipv4Addr)>) {
@@ -851,14 +851,21 @@ impl<V: OspfVersion> Ospf<V> {
             self.lan_adj_sids.clear();
             return;
         };
-        let current = self.local_pool.as_ref().map(|p| p.range());
-        if current != Some((first, last)) {
-            if current.is_some() {
-                // Release the old SRLB's labels before drawing from the new.
-                self.local_pool = None;
-                self.lan_adj_sids.clear();
+        match self.local_pool.as_mut() {
+            None => {
+                self.local_pool = Some(self.rib_subscriber.label_space().pool_for(
+                    first,
+                    last,
+                    &self.ctx.rib,
+                ));
             }
-            self.local_pool = Some(self.rib_subscriber.label_space().pool(first, last));
+            // The SRLB changed: keep the labels still inside it; the
+            // adjacencies whose label went are given another below.
+            Some(pool) if pool.range() != (first, last) => {
+                let gone = pool.retarget(first, last);
+                self.lan_adj_sids.retain(|_, label| !gone.contains(label));
+            }
+            Some(_) => {}
         }
         for key in full {
             if self.lan_adj_sids.contains_key(&key) {
@@ -8217,6 +8224,9 @@ impl Ospf<Ospfv2> {
 
     fn process_rib_msg(&mut self, msg: RibRx) {
         match msg {
+            // Labels were freed after the Adj-SID pool found none: give
+            // the adjacencies still without a label one.
+            RibRx::LocalLabelsFreed => super::config::sr_mpls_refresh(self),
             RibRx::RouterIdUpdate(router_id) => {
                 // Remember the RIB-derived value and refresh: a
                 // configured `router-id` keeps winning (this push
@@ -8757,6 +8767,9 @@ impl Ospf<Ospfv3> {
     /// router-LSA re-origination) is a follow-up PR.
     fn process_rib_msg(&mut self, msg: RibRx) {
         match msg {
+            // Labels were freed after the Adj-SID pool found none: give
+            // the adjacencies still without a label one.
+            RibRx::LocalLabelsFreed => super::config_v3::sr_mpls_refresh_v3(self),
             // RIB-derived router-id (`system router-id` config or
             // the automatic pick from interface IPv4 addresses).
             // Mirrors the v2 arm: store and refresh, so a configured
@@ -27230,7 +27243,19 @@ mod sr_origination_tests {
         let v3_labels: Vec<u32> = v3.lan_adj_sids.values().copied().collect();
         assert_eq!(held(&v2_labels, &v3_labels), (3, 3, 6), "all distinct");
 
+        // v2's labels come back once the RIB has seen its ILM entries go
+        // (its cleanup), not before.
+        let owner = v2.ctx.rib.proto_id();
         drop(v2);
+        let label = v3.local_pool.as_mut().and_then(|pool| pool.allocate());
+        assert!(
+            label.is_some_and(|label| !v2_labels.contains(&label)),
+            "{label:?}"
+        );
+        v3.rib_subscriber
+            .label_space()
+            .lock()
+            .free_releasing_of(&[owner]);
         let label = v3.local_pool.as_mut().and_then(|pool| pool.allocate());
         assert!(
             label.is_some_and(|label| v2_labels.contains(&label)),
@@ -27518,14 +27543,54 @@ mod sr_block_tests {
         );
         top.reconcile_adj_sid_labels(vec![(7, A)]);
         assert_eq!(top.lan_adj_sids.get(&(7, A)), Some(&31000));
-        // The old SRLB's label went back to the node's shared set.
+        // The old SRLB's label goes back to the node's label space once
+        // the RIB has seen this instance's ILM entry at it go.
         let mut other = top.rib_subscriber.label_space().pool(30000, 30000);
+        assert_eq!(other.allocate(), None);
+        let owner = top.ctx.rib.proto_id();
+        top.rib_subscriber
+            .label_space()
+            .lock()
+            .free_releasing_of(&[owner]);
         assert_eq!(other.allocate(), Some(30000));
 
         // SR-MPLS off: no pool, no labels.
         top.segment_routing = SegmentRoutingMode::None;
         top.reconcile_adj_sid_labels(vec![(7, A)]);
         assert!(top.local_pool.is_none() && top.lan_adj_sids.is_empty());
+    }
+
+    /// An overlapping SRLB change keeps the labels still inside the new
+    /// SRLB, and labels freed after the pool found none reach the
+    /// adjacencies without one.
+    #[tokio::test]
+    async fn an_overlapping_srlb_change_keeps_the_label() {
+        let mut top = fresh_ospf();
+        sr_on_with(&mut top, block((16000, 8000), (30000, 2)));
+        top.reconcile_adj_sid_labels(vec![(7, A)]);
+        assert_eq!(top.lan_adj_sids.get(&(7, A)), Some(&30000));
+        top.process_sr_rx(RibSrRx::Block {
+            name: "default".to_string(),
+            block: Some(block((16000, 8000), (30000, 1))),
+        });
+        top.reconcile_adj_sid_labels(vec![(7, A)]);
+        assert_eq!(top.lan_adj_sids.get(&(7, A)), Some(&30000));
+
+        // Another adjacency finds the one label taken, then freed.
+        const B: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 3);
+        top.reconcile_adj_sid_labels(vec![(7, A), (8, B)]);
+        assert_eq!(top.lan_adj_sids.get(&(8, B)), None);
+        top.lan_adj_sids.remove(&(7, A));
+        if let Some(pool) = top.local_pool.as_mut() {
+            pool.release(30000);
+        }
+        let owner = top.ctx.rib.proto_id();
+        top.rib_subscriber
+            .label_space()
+            .lock()
+            .free_releasing(owner, 30000);
+        top.reconcile_adj_sid_labels(vec![(8, B)]);
+        assert_eq!(top.lan_adj_sids.get(&(8, B)), Some(&30000));
     }
 
     #[tokio::test]
