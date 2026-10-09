@@ -7321,6 +7321,19 @@ pub(super) fn macip_service_field(rib: &BgpRib) -> u32 {
         .unwrap_or(0)
 }
 
+/// The L2 VNI a received Type-2 installs into. VXLAN carries it in Label1
+/// (RFC 8365 §5.1.3); a symmetric-IRB route also carries the L3 service's
+/// route target, which can sort first, so the route target alone may name
+/// the wrong bridge. MPLS/SRv6 keep their RT-derived local service mapping.
+fn macip_kernel_vni(rib: &BgpRib) -> Option<u32> {
+    if encap_ec_tunnel_type(&rib.attr) == Some(8) {
+        let vni = macip_service_field(rib);
+        (vni != 0).then_some(vni)
+    } else {
+        extract_vni_from_attr(&rib.attr)
+    }
+}
+
 /// The RFC 7911 path-id carried on an EVPN NLRI — 0 for a non-AddPath
 /// advertisement, which is also the whole-prefix sentinel the Adj-RIB-Out
 /// and the advertise cache use.
@@ -10102,7 +10115,7 @@ fn route_evpn_export_selected(
                 if mac_addr.is_multicast() {
                     return;
                 }
-                if let Some(vni) = extract_vni_from_attr(&wd.attr) {
+                if let Some(vni) = macip_kernel_vni(wd) {
                     let msg = rib::Message::EvpnMacDel(rib::evpn::MacRouteKey::new(
                         *rd, vni, mac_addr, *ip,
                     ));
@@ -10234,8 +10247,9 @@ fn route_evpn_export_selected(
             if mac_addr.is_multicast() {
                 return;
             }
-            // RFC 8365: VNI must come from Route Target extended community
-            if let Some(vni) = extract_vni_from_attr(&best.attr) {
+            // A VXLAN Type-2 names its L2 VNI in Label1; its first route
+            // target may instead be an associated L3 service's.
+            if let Some(vni) = macip_kernel_vni(best) {
                 // RFC 7432 §7.7: remember the highest remote sequence per
                 // (vni, mac) — if this station later appears locally, our
                 // Type-2 must carry max_remote + 1.
@@ -19772,7 +19786,7 @@ impl Bgp {
                 matches!(prefix, EvpnPrefix::MacIp { mac: m, ip: i, .. }
                     if *m == mac || (ip.is_some() && *i == ip))
                     && !rib.is_originated()
-                    && extract_vni_from_attr(&rib.attr) == Some(vni)
+                    && macip_kernel_vni(rib) == Some(vni)
             })
             .map(|(rd, prefix, rib)| (rd, prefix.clone(), rib.clone()))
             .collect();
@@ -25057,6 +25071,37 @@ mod macip_service_field_tests {
     #[test]
     fn zero_label_is_not_a_service_id() {
         assert_eq!(macip_service_field(&rib_with(Some(0), Some(100))), 100);
+    }
+
+    #[test]
+    fn vxlan_two_label_route_uses_l2_vni_and_preserves_l3_label() {
+        // The L3 route target sorts before the L2 one: taking the first
+        // installs into the wrong bridge. Label1 is authoritative for VXLAN.
+        let mut rib = rib_with(Some(10100), Some(10200));
+        let mut attr = (*rib.attr).clone();
+        attr.ecom = Some(ExtCommunity::from([
+            evpn_encap_vxlan(),
+            evpn_route_target(65000, 10200),
+            evpn_route_target(65200, 10100),
+        ]));
+        rib.attr = Arc::new(attr);
+        rib.evpn_label2 = Some(10200);
+        assert_eq!(macip_kernel_vni(&rib), Some(10100));
+        let prefix = EvpnPrefix::MacIp {
+            eth_tag: 0,
+            mac: [2, 0, 0, 0, 0, 1],
+            ip: Some("2001:db8::1".parse().unwrap()),
+        };
+        let EvpnRoute::Mac(route) =
+            build_evpn_route(&RouteDistinguisher::default(), &prefix, &rib).unwrap()
+        else {
+            panic!("Type-2 required")
+        };
+        assert_eq!(route.vni, 10100);
+        assert_eq!(route.label2, Some(10200));
+        // MPLS keeps mapping service labels to the local RT-derived EVI.
+        let mpls = rib_with(Some(16), Some(100));
+        assert_eq!(macip_kernel_vni(&mpls), Some(100));
     }
 
     /// Neither source: 0, the same value the pre-refactor code emitted.

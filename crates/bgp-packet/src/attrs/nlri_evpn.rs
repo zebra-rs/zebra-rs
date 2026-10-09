@@ -2048,6 +2048,36 @@ mod evpn_emit_tests {
     /// append the L3VNI as Label2. It must parse, not fail the trailing
     /// octet check, and re-emit byte-for-byte. A partial label is still
     /// malformed.
+    /// IPv4 and IPv6 Type-2 NLRIs captured from Arista cEOS with symmetric
+    /// IRB (Label1 = L2 VNI 10100, Label2 = L3 VNI 10200). Before Label2
+    /// support these reset the BGP session.
+    #[test]
+    fn captured_ceos_two_label_routes_roundtrip() {
+        let fixtures: &[&[u8]] = &[
+            &[
+                2, 40, 0, 1, 10, 255, 0, 21, 0, 100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 48,
+                2, 238, 0, 0, 16, 1, 32, 10, 10, 0, 100, 0, 39, 116, 0, 39, 216,
+            ],
+            &[
+                2, 52, 0, 1, 10, 255, 0, 21, 0, 100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 48,
+                2, 238, 0, 0, 16, 1, 128, 32, 1, 13, 184, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0,
+                39, 116, 0, 39, 216,
+            ],
+        ];
+        for wire in fixtures {
+            let (rest, route) = EvpnRoute::parse_nlri(wire, false).unwrap();
+            assert!(rest.is_empty());
+            let EvpnRoute::Mac(mac) = &route else {
+                panic!("Type-2 route required");
+            };
+            assert_eq!(mac.vni, 10100);
+            assert_eq!(mac.label2, Some(10200));
+            let mut emitted = BytesMut::new();
+            route.nlri_emit(&mut emitted);
+            assert_eq!(&emitted[..], *wire);
+        }
+    }
+
     #[test]
     fn macip_label2_parses_and_roundtrips() {
         let mut body = Vec::new();
