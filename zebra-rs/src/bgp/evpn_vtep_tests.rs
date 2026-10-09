@@ -1,7 +1,7 @@
 //! EVPN egress wiring that unit tests of the helpers cannot catch: a
-//! received Type-2 Label2 surviving reflection, and originated routes
-//! with a router-id next hop being re-sent when the router-id gains or
-//! loses VTEP status.
+//! received Type-2 Label2 surviving reflection, originated routes with a
+//! router-id next hop being re-sent when the router-id gains or loses VTEP
+//! status, and the EVPN flag communities.
 //!
 //! `cargo test -p zebra-rs evpn_vtep_tests`
 
@@ -239,4 +239,45 @@ async fn reflected_macip_keeps_label2() {
     assert_eq!(reflected.len(), 1, "the client route is reflected");
     assert_eq!(reflected[0].label2, Some(2000));
     assert_eq!(reflected[0].vni, 1000);
+}
+
+/// RFC 7432 §7.7/§7.8 and RFC 9161 encodings: sticky is the "S" bit of
+/// the MAC Mobility community, default gateway an opaque 0x03/0x0d
+/// community, router the "R" bit of the EVPN ND community. The mobility
+/// sequence number does not depend on the flags.
+#[test]
+fn evpn_flag_communities_follow_the_rfc_encodings() {
+    let ec = |high_type, low_type, flags: u8| {
+        let mut val = [0u8; 6];
+        val[0] = flags;
+        ExtCommunityValue {
+            high_type,
+            low_type,
+            val,
+        }
+    };
+    let flags = |values: Vec<ExtCommunityValue>| {
+        let mut attr = BgpAttr::new();
+        attr.ecom = Some(ExtCommunity(values.into_iter().collect()));
+        extract_flags_from_attr(&attr)
+    };
+    let mut sticky = evpn_mac_mobility(7);
+    sticky.val[0] = 0x01;
+    assert_eq!(flags(vec![sticky.clone()]), 0x01);
+    let mut attr = BgpAttr::new();
+    attr.ecom = Some(ExtCommunity(vec![sticky].into_iter().collect()));
+    assert_eq!(extract_mac_mobility_seq(&attr), 7);
+    assert_eq!(flags(vec![evpn_mac_mobility(7)]), 0);
+    assert_eq!(flags(vec![ec(0x03, 0x0d, 0)]), 0x02);
+    assert_eq!(flags(vec![ec(0x06, 0x08, 0x01)]), 0x04);
+    assert_eq!(flags(vec![ec(0x06, 0x08, 0x02)]), 0, "override, not router");
+    // The types this used to read are not EVPN flags.
+    assert_eq!(
+        flags(vec![
+            ec(0x09, 0x00, 0),
+            ec(0x09, 0x01, 0),
+            ec(0x09, 0x03, 0)
+        ]),
+        0
+    );
 }

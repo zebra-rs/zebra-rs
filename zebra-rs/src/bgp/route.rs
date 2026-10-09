@@ -9578,20 +9578,16 @@ fn extract_flags_from_attr(attr: &BgpAttr) -> u8 {
 
     if let Some(ecom) = &attr.ecom {
         for ec in &ecom.0 {
-            // Check for Sticky MAC (Type 0x09, Sub-type 0x00)
-            if ec.high_type == 0x09 && ec.low_type == 0x00 {
-                // Sticky MAC flag
-                flags |= 0x01;
-            }
-            // Check for Gateway MAC (Type 0x09, Sub-type 0x01)
-            if ec.high_type == 0x09 && ec.low_type == 0x01 {
-                // Gateway MAC flag
-                flags |= 0x02;
-            }
-            // Check for Router flag (Type 0x09, Sub-type 0x03)
-            if ec.high_type == 0x09 && ec.low_type == 0x03 {
-                // Router flag
-                flags |= 0x04;
+            match (ec.high_type, ec.low_type) {
+                // MAC Mobility (RFC 7432 §7.7): the flags octet's low bit
+                // is "S", a sticky/static MAC.
+                (0x06, 0x00) if ec.val[0] & 0x01 != 0 => flags |= 0x01,
+                // Default Gateway (RFC 7432 §7.8): opaque, sub-type 0x0d.
+                (0x03, 0x0d) => flags |= 0x02,
+                // EVPN ND (RFC 9161): the flags octet's low bit is "R",
+                // a router.
+                (0x06, 0x08) if ec.val[0] & 0x01 != 0 => flags |= 0x04,
+                _ => {}
             }
         }
     }
