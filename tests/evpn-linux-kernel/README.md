@@ -32,6 +32,8 @@ advertisements while it is down, and restarts it with a short
 the rest (a removed static, a withdrawn Type-5) are swept, an operator
 `proto static` route survives, and a pre-`RTPROT_ZEBRA` copy of a
 configured static is adopted.
+Floating static routes exercise removal of both priorities and replacement
+of the old backup priority in IPv4 and IPv6.
 Real pings traverse the Linux VXLAN dataplane.
 
 Build the binaries and run from the repository root on Linux with
@@ -59,8 +61,11 @@ priorities in IPv4, IPv6 and VRF tables:
 cargo test -p zebra-rs kernel_exchange_tests
 ```
 
-Two additional tests check actual static-route retention and shared-IP
-neighbor ownership during unrelated MAC/IP updates and withdrawals. They
+Additional tests check actual static-route retention, shared-IP neighbor
+ownership during unrelated MAC/IP updates and withdrawals, and cleanup of
+every leftover priority during sweeps and floating-static replacement.
+The leftover tests cover unicast, ECMP, blackhole and mixed paths in
+IPv4, IPv6, main and VRF tables. They
 are ignored by ordinary cargo runs because they need root in an isolated
 named network namespace. Run them from the repository root:
 

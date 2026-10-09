@@ -75,7 +75,9 @@ crash, or a stop without cleanup) are found at startup by protocol:
 stays in place and keeps forwarding until its owner's fresh route
 replaces it; whatever is not replaced is removed
 `--leftover-sweep-time` seconds after startup (default 120; OSPF sweeps
-its own once it has converged). Main-table `proto bgp` routes are never
+its own once it has converged). Cleanup removes every leftover priority,
+including floating backups and ECMP or blackhole paths, during both
+replacement and sweeping. Main-table `proto bgp` routes are never
 claimed, because another daemon may own them. Before this release
 zebra-rs installed statics as `proto static`: on the first start after
 upgrading, such a route is adopted when the static configuration

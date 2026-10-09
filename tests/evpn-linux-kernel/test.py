@@ -100,6 +100,7 @@ def main():
                 ns(v, 'sysctl', '-qw', 'net.ipv4.ip_forward=1',
                    'net.ipv6.conf.all.forwarding=1', 'net.ipv4.conf.all.rp_filter=0')
                 ns(v, 'ip', 'address', 'add', f'192.0.2.{i}/24', 'dev', 'underlay')
+                ns(v, 'ip', '-6', 'address', 'add', f'2001:db8:ff::{i}/64', 'dev', 'underlay', 'nodad')
                 ns(v, 'ip', 'address', 'add', f'198.51.100.{i}/32', 'dev', 'lo')
                 ns(v, 'ip', 'route', 'add', f'198.51.100.{3-i}/32',
                    'via', f'192.0.2.{3-i}', 'proto', 'static')
@@ -160,6 +161,14 @@ def main():
                     lines += ['set router static ipv4 route 10.99.1.0/24 nexthop blackhole',
                               'set router static ipv4 route 10.99.2.0/24 nexthop blackhole',
                               'set router static ipv6 route 2001:db8:99:1::/64 nexthop blackhole']
+                    for af, prefixes, gateways in [
+                        ('ipv4', ['10.99.3.0/24', '10.99.4.0/24'], ['192.0.2.1', '192.0.2.3']),
+                        ('ipv6', ['2001:db8:99:3::/64', '2001:db8:99:4::/64'],
+                         ['2001:db8:ff::1', '2001:db8:ff::3']),
+                    ]:
+                        for prefix in prefixes:
+                            for gateway, metric in zip(gateways, [100, 200]):
+                                lines.append(f'set router static {af} route {prefix} nexthop {gateway} metric {metric}')
                 config = directory / (v + '.conf')
                 config.write_text('\n'.join(lines) + '\n')
                 configs[v] = lines
@@ -283,6 +292,13 @@ def main():
             # adopted by the same configured static.
             def protocols(node, prefix):
                 return [r.get('protocol') for r in main_route(node, prefix)]
+            def priorities(prefix):
+                return sorted(r.get('metric', 0) for r in main_route('v2', prefix))
+            removed_floating = ['10.99.3.0/24', '2001:db8:99:3::/64']
+            changed_floating = ['10.99.4.0/24', '2001:db8:99:4::/64']
+            for prefix in removed_floating + changed_floating:
+                expect(f'Floating static {prefix} installs both priorities', lambda prefix=prefix:
+                       priorities(prefix) == [100, 200])
             for prefix in ['10.99.1.0/24', '10.99.2.0/24', '2001:db8:99:1::/64']:
                 expect(f'Static {prefix} installs as proto zebra', lambda prefix=prefix:
                        protocols('v2', prefix) == ['zebra'])
@@ -292,7 +308,10 @@ def main():
             processes[1].wait()
             ns('v1', 'ip', 'route', 'del', 'blackhole', '10.31.1.0/24', 'table', '100', 'proto', 'static')
             ns('v2', 'ip', 'route', 'add', 'blackhole', '10.97.0.0/24', 'proto', 'static')
-            restart = [line for line in configs['v2'] if '10.99.2.0/24' not in line]
+            removed = ['10.99.2.0/24', *removed_floating]
+            restart = [line.replace('metric 200', 'metric 300')
+                       if any(prefix in line for prefix in changed_floating) else line
+                       for line in configs['v2'] if not any(prefix in line for prefix in removed)]
             restart.append('set router static ipv4 route 10.97.0.0/24 nexthop blackhole')
             config = Path(directory) / 'v2-restart.conf'
             config.write_text('\n'.join(restart) + '\n')
@@ -303,6 +322,12 @@ def main():
                    not main_route('v2', '10.99.2.0/24'), timeout=45)
             expect('Restart: VRF BGP leftover swept', lambda:
                    not route('v2', '10.31.1.0/24'), timeout=45)
+            for prefix in removed_floating:
+                expect(f'Restart: every floating leftover priority swept {prefix}', lambda prefix=prefix:
+                       not main_route('v2', prefix), timeout=45)
+            for prefix in changed_floating:
+                expect(f'Restart: floating backup replaced {prefix}', lambda prefix=prefix:
+                       priorities(prefix) == [100, 300])
             for prefix in ['10.99.1.0/24', '2001:db8:99:1::/64']:
                 expect(f'Restart: configured static {prefix} kept', lambda prefix=prefix:
                        protocols('v2', prefix) == ['zebra'])

@@ -1646,19 +1646,27 @@ impl FibHandle {
             RouteType::Unicast
         };
         msg.attributes.push(RouteAttribute::Destination(dst));
-        msg.attributes.push(RouteAttribute::Priority(entry.metric));
 
-        let mut req = NetlinkMessage::from(RouteNetlinkMessage::DelRoute(msg));
-        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
-        let mut response = self.handle.clone().request(req).unwrap();
-        while let Some(msg) = response.next().await {
-            if let NetlinkPayload::Error(e) = msg.payload
-                && e.code.is_some()
-            {
-                tracing::info!(
-                    "DelRoute (an earlier run's) error: {prefix} {e} table={table_id} metric={}",
-                    entry.metric,
-                );
+        // A floating/protected route can represent several kernel priorities.
+        // Delete every path before sweeping it or installing its replacement.
+        let mut priorities =
+            crate::rib::route::kernel_priorities(entry, matches!(prefix, IpNet::V6(_)));
+        priorities.sort_unstable();
+        priorities.dedup();
+        for priority in priorities {
+            let mut msg = msg.clone();
+            msg.attributes.push(RouteAttribute::Priority(priority));
+            let mut req = NetlinkMessage::from(RouteNetlinkMessage::DelRoute(msg));
+            req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+            let mut response = self.handle.clone().request(req).unwrap();
+            while let Some(msg) = response.next().await {
+                if let NetlinkPayload::Error(e) = msg.payload
+                    && e.code.is_some()
+                {
+                    tracing::info!(
+                        "DelRoute (an earlier run's) error: {prefix} {e} table={table_id} metric={priority}",
+                    );
+                }
             }
         }
     }
@@ -5165,6 +5173,13 @@ impl RouteBuilder {
                 uni.ifindex_origin = (self.entry.ifindex != 0).then_some(self.entry.ifindex);
                 uni.metric = self.entry.metric;
             }
+            Nexthop::Multi(multi) => {
+                // An ECMP route has one kernel priority shared by its legs.
+                multi.metric = self.entry.metric;
+                for uni in &mut multi.nexthops {
+                    uni.metric = self.entry.metric;
+                }
+            }
             Nexthop::Blackhole(metric) => {
                 // System-route withdrawal matches the next-hop metric.
                 // In particular, Linux supplies metric 1024 for IPv6
@@ -6597,6 +6612,7 @@ mod tests {
                     Ipv4Addr::new(203, 0, 113, 0),
                 )));
             msg.attributes.push(RouteAttribute::Nhid(nhid));
+            msg.attributes.push(RouteAttribute::Priority(42));
             route_from_msg_with(msg, &nexthops, true)
                 .expect("a route")
                 .entry
@@ -6608,10 +6624,14 @@ mod tests {
             other => panic!("one gateway: {other:?}"),
         }
         match route(9) {
-            Nexthop::Multi(multi) => assert_eq!(
-                multi.nexthops.iter().map(gateway).collect::<Vec<_>>(),
-                vec![(IpAddr::V4(gw(2)), Some(3)), (IpAddr::V4(gw(3)), Some(3))]
-            ),
+            Nexthop::Multi(multi) => {
+                assert_eq!(multi.metric, 42, "retain the ECMP route's priority");
+                assert!(multi.nexthops.iter().all(|uni| uni.metric == 42));
+                assert_eq!(
+                    multi.nexthops.iter().map(gateway).collect::<Vec<_>>(),
+                    vec![(IpAddr::V4(gw(2)), Some(3)), (IpAddr::V4(gw(3)), Some(3))]
+                );
+            }
             other => panic!("the group's gateways: {other:?}"),
         }
         assert_eq!(route(5), Nexthop::default(), "not dumped");

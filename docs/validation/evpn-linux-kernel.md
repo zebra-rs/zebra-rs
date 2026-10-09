@@ -1,7 +1,7 @@
 # EVPN Linux kernel forwarding validation
 
 The [standalone namespace test](../../tests/evpn-linux-kernel/README.md)
-passed **108/108 checks** on 2026-10-09. Two zebra-rs speakers exchanged
+passed **116/116 checks** on 2026-10-09. Two zebra-rs speakers exchanged
 EVPN Type-2/3/5 state and forwarded tenant traffic through Linux bridge,
 VXLAN and VRF devices. No OVN, OVS, FRR, cEOS or containers participated.
 
@@ -24,8 +24,11 @@ configuration and the peer's advertisements while it is down, and
 restarts it: leftovers its fresh routes replace are kept, a removed
 static and a withdrawn Type-5 are swept, an operator `proto static`
 route survives, and a pre-`RTPROT_ZEBRA` copy of a configured static is
-adopted. A binary built without leftover handling fails exactly those
-eight leftover checks. The
+adopted. Floating statics (two priorities each) check that a removed
+one leaves no priority behind and a changed backup priority replaces the
+old one. A binary built without leftover handling fails exactly the
+eight leftover checks; one handling only a single priority per leftover
+fails the four floating-static checks. The
 [JSON report](evpn-linux-kernel.json) records each check and the tested
 binary's SHA-256.
 

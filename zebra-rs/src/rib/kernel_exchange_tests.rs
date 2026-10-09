@@ -389,3 +389,239 @@ async fn legacy_proto_static_route_is_adopted_only_by_the_same_static() {
         assert!(rib.legacy_statics.is_empty());
     }
 }
+
+async fn check_leftover_priorities(replace: bool) {
+    require_netns();
+    ip(&["link", "add", "leftvrf", "type", "vrf", "table", "100"]);
+    ip(&["link", "set", "leftvrf", "up"]);
+    for (dev, table, v4, v6) in [
+        (
+            "leftmain",
+            RT_TABLE_MAIN,
+            "192.0.2.2/24",
+            "2001:db8:10::2/64",
+        ),
+        ("lefttenant", 100, "198.51.100.2/24", "2001:db8:20::2/64"),
+    ] {
+        ip(&["link", "add", dev, "type", "dummy"]);
+        if table != RT_TABLE_MAIN {
+            ip(&["link", "set", dev, "master", "leftvrf"]);
+        }
+        ip(&["link", "set", dev, "up"]);
+        ip(&["addr", "add", v4, "dev", dev]);
+        ip(&["-6", "addr", "add", v6, "dev", dev, "nodad"]);
+    }
+
+    let mut cases = Vec::new();
+    for table in [RT_TABLE_MAIN, 100] {
+        let table_arg = table.to_string();
+        for family in ["-4", "-6"] {
+            let (dev, gateways) = match (table, family) {
+                (RT_TABLE_MAIN, "-4") => ("leftmain", ["192.0.2.1", "192.0.2.3"]),
+                (RT_TABLE_MAIN, _) => ("leftmain", ["2001:db8:10::1", "2001:db8:10::3"]),
+                (_, "-4") => ("lefttenant", ["198.51.100.1", "198.51.100.3"]),
+                _ => ("lefttenant", ["2001:db8:20::1", "2001:db8:20::3"]),
+            };
+            for kinds in [
+                ["unicast", "unicast"],
+                ["ecmp", "ecmp"],
+                ["blackhole", "blackhole"],
+                ["unicast", "blackhole"],
+                ["blackhole", "ecmp"],
+                ["ecmp", "unicast"],
+            ] {
+                let serial = cases.len() + 1;
+                let prefix = if family == "-4" {
+                    format!("10.240.{serial}.0/24")
+                } else {
+                    format!("2001:db8:240:{serial:x}::/64")
+                };
+                for (index, kind) in kinds.into_iter().enumerate() {
+                    let priority = ["100", "200"][index];
+                    let mut args = vec![family, "route", "add"];
+                    if kind == "blackhole" {
+                        args.push("blackhole");
+                    }
+                    args.extend([
+                        &prefix, "table", &table_arg, "proto", "zebra", "metric", priority,
+                    ]);
+                    match kind {
+                        "unicast" => args.extend(["via", gateways[index], "dev", dev]),
+                        "ecmp" => {
+                            for gateway in gateways {
+                                args.extend(["nexthop", "via", gateway, "dev", dev, "weight", "1"]);
+                            }
+                        }
+                        _ => {}
+                    }
+                    ip(&args);
+                }
+                cases.push((table, family, prefix, gateways));
+            }
+        }
+    }
+    // An operator's route must not be swept along with our leftovers.
+    ip(&[
+        "route",
+        "add",
+        "blackhole",
+        "10.241.0.0/24",
+        "proto",
+        "static",
+    ]);
+    let mut rib = Rib::new(false).unwrap();
+    crate::fib::fib_dump(&mut rib).await.unwrap();
+    rib.process_msg(
+        Message::VrfAdd {
+            name: "leftvrf".into(),
+        },
+        RT_TABLE_MAIN,
+    )
+    .await;
+    // Address ingestion queues connected-route updates for the event loop.
+    // Replay them before installing statics, especially IPv6 whose kernel
+    // prefix routes are intentionally excluded from the route dump.
+    while let Ok(msg) = rib.rx.try_recv() {
+        rib.process_msg(msg, RT_TABLE_MAIN).await;
+    }
+    for (table, _, prefix, _) in &cases {
+        let prefix: IpNet = prefix.parse().unwrap();
+        let rows = entries(&rib, prefix, *table);
+        assert_eq!(
+            rows.len(),
+            2,
+            "startup must retain both priorities for {prefix}"
+        );
+        assert!(rows.iter().all(|entry| entry.stale));
+    }
+
+    if replace {
+        for (table, _, prefix, gateways) in &cases {
+            let prefix: IpNet = prefix.parse().unwrap();
+            let mut entry = RibEntry::new(RibType::Static);
+            entry.distance = 1;
+            entry.metric = 100;
+            entry.nexthop = Nexthop::List(crate::rib::NexthopList {
+                nexthops: gateways
+                    .iter()
+                    .zip([100, 300])
+                    .map(|(gateway, metric)| {
+                        let addr = gateway.parse().unwrap();
+                        crate::rib::NexthopMember::Uni(crate::rib::NexthopUni {
+                            addr,
+                            addr_origin: Some(addr),
+                            metric,
+                            weight: 1,
+                            ..Default::default()
+                        })
+                    })
+                    .collect(),
+            });
+            match prefix {
+                IpNet::V4(prefix) if *table == RT_TABLE_MAIN => {
+                    rib.ipv4_route_add(&prefix, entry, *table).await
+                }
+                IpNet::V6(prefix) if *table == RT_TABLE_MAIN => {
+                    rib.ipv6_route_add(&prefix, entry, *table).await
+                }
+                IpNet::V4(prefix) => rib.ipv4_route_add_vrf(*table, &prefix, entry).await,
+                IpNet::V6(prefix) => rib.ipv6_route_add_vrf(*table, &prefix, entry).await,
+            }
+            let owner = entries(&rib, prefix, *table);
+            assert!(
+                owner[0].selected && owner[0].fib,
+                "replacement did not install {prefix}: {owner:?}"
+            );
+        }
+    } else {
+        // Also exercise deletion of the list form of a floating leftover.
+        // Keep other cases separate so mixed and ECMP kinds retain coverage.
+        for (table, _, prefix, _) in cases.iter().step_by(6) {
+            let prefix: IpNet = prefix.parse().unwrap();
+            let rows = entries(&rib, prefix, *table);
+            let mut merged = rows[0].clone();
+            merged.nexthop = Nexthop::List(crate::rib::NexthopList {
+                nexthops: rows
+                    .iter()
+                    .map(|entry| match &entry.nexthop {
+                        Nexthop::Uni(uni) => crate::rib::NexthopMember::Uni(uni.clone()),
+                        other => panic!("expected floating unicast paths, got {other:?}"),
+                    })
+                    .collect(),
+            });
+            insert(&mut rib, prefix, *table, merged);
+        }
+    }
+    // Fresh replacements survive the subsequent sweep.
+    rib.sweep_leftovers().await;
+    for (table, family, prefix, _) in cases {
+        let table_arg = table.to_string();
+        let output = ip(&[
+            family, "-j", "route", "show", "table", &table_arg, "exact", &prefix,
+        ]);
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&output).unwrap();
+        let mut metrics: Vec<_> = rows
+            .iter()
+            .map(|row| row["metric"].as_u64().unwrap())
+            .collect();
+        metrics.sort_unstable();
+        let expected = if replace { vec![100, 300] } else { vec![] };
+        assert_eq!(metrics, expected, "{prefix} table {table}: {output}");
+        let prefix: IpNet = prefix.parse().unwrap();
+        let entries = entries(&rib, prefix, table);
+        if replace {
+            assert_eq!(entries.len(), 1);
+            assert!(!entries[0].stale && entries[0].fib && entries[0].selected);
+            let withdrawal = RibEntry::new(RibType::Static);
+            match prefix {
+                IpNet::V4(prefix) if table == RT_TABLE_MAIN => {
+                    rib.ipv4_route_del(&prefix, withdrawal, table).await;
+                }
+                IpNet::V6(prefix) if table == RT_TABLE_MAIN => {
+                    rib.ipv6_route_del(&prefix, withdrawal, table).await;
+                }
+                IpNet::V4(prefix) => rib.ipv4_route_del_vrf(table, &prefix, withdrawal).await,
+                IpNet::V6(prefix) => rib.ipv6_route_del_vrf(table, &prefix, withdrawal).await,
+            }
+            assert!(
+                ip(&[
+                    family,
+                    "route",
+                    "show",
+                    "table",
+                    &table_arg,
+                    "exact",
+                    &prefix.to_string()
+                ])
+                .trim()
+                .is_empty()
+            );
+        } else {
+            assert!(entries.is_empty());
+        }
+    }
+    assert!(ip(&["route", "show", "exact", "10.241.0.0/24"]).contains("proto static"));
+    ip(&[
+        "route",
+        "del",
+        "blackhole",
+        "10.241.0.0/24",
+        "proto",
+        "static",
+    ]);
+    for dev in ["leftmain", "lefttenant", "leftvrf"] {
+        ip(&["link", "del", dev]);
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires root in an isolated network namespace"]
+async fn sweep_removes_every_leftover_priority_and_route_type() {
+    check_leftover_priorities(false).await;
+}
+
+#[tokio::test]
+#[ignore = "requires root in an isolated network namespace"]
+async fn fresh_floating_static_replaces_every_leftover_priority() {
+    check_leftover_priorities(true).await;
+}
