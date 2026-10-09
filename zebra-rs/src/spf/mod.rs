@@ -9,5 +9,3 @@ pub use diff::*;
 
 pub mod label_block;
 pub mod srv6;
-
-pub mod label_pool;

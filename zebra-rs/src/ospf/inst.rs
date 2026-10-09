@@ -284,10 +284,10 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// `(ifindex, neighbor_router_id) -> label` mapping is held in
     /// `lan_adj_sids` below so origination and ILM install can read it.
     /// The labels come from the node's shared set
-    /// (`RibSubscriber::local_labels`), so no other instance over an
+    /// (`RibSubscriber::label_space`), so no other instance over an
     /// overlapping SRLB, the other OSPF version or IS-IS, holds the same
     /// one.
-    pub local_pool: Option<crate::spf::label_pool::LocalLabelPool>,
+    pub local_pool: Option<crate::rib::label_space::LocalLabelPool>,
     /// Per-adjacency Adjacency-SID label map. Keyed by
     /// `(ifindex, neighbor_interface_addr)`; the value is the absolute
     /// label allocated from `local_pool` on the corresponding NFSM
@@ -858,7 +858,7 @@ impl<V: OspfVersion> Ospf<V> {
                 self.local_pool = None;
                 self.lan_adj_sids.clear();
             }
-            self.local_pool = Some(self.rib_subscriber.local_labels().pool(first, last));
+            self.local_pool = Some(self.rib_subscriber.label_space().pool(first, last));
         }
         for key in full {
             if self.lan_adj_sids.contains_key(&key) {
@@ -27519,7 +27519,7 @@ mod sr_block_tests {
         top.reconcile_adj_sid_labels(vec![(7, A)]);
         assert_eq!(top.lan_adj_sids.get(&(7, A)), Some(&31000));
         // The old SRLB's label went back to the node's shared set.
-        let mut other = top.rib_subscriber.local_labels().pool(30000, 30000);
+        let mut other = top.rib_subscriber.label_space().pool(30000, 30000);
         assert_eq!(other.allocate(), Some(30000));
 
         // SR-MPLS off: no pool, no labels.
