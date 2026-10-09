@@ -26,7 +26,21 @@ def main():
     parser.add_argument('--vtyctl', type=Path, default=REPO / 'target/debug/vtyctl')
     parser.add_argument('--yang', type=Path, default=REPO / 'zebra-rs/yang')
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--ipv6-vtep', action='store_true',
+                        help='use IPv6 VTEPs over an IPv6 underlay')
     args = parser.parse_args()
+
+    def vtep(i):
+        return f'2001:db8:100::{i}' if args.ipv6_vtep else f'198.51.100.{i}'
+
+    def rmac_gateways(i):
+        # The RMAC neighbors a bridge Type-5 route through VTEP i needs.
+        if args.ipv6_vtep:
+            return [('-6', vtep(i))]
+        return [('-4', vtep(i)), ('-6', f'::ffff:{vtep(i)}')]
+
+    def v6_adjacency(i):
+        return rmac_gateways(i)[-1][1]
     if os.geteuid() != 0:
         parser.error('run with sudo; this creates and removes isolated network namespaces')
     tag = 'ek' + uuid.uuid4().hex[:6]
@@ -35,6 +49,7 @@ def main():
     logs = []
     checks = []
     report = {'binary_sha256': hashlib.sha256(args.zebra.read_bytes()).hexdigest(),
+              'vtep_family': 'IPv6' if args.ipv6_vtep else 'IPv4',
               'checks': checks, 'dataplane': 'Linux bridge/VXLAN/VRF',
               'dependencies': ['iproute2', 'zebra-rs', 'vtyctl']}
 
@@ -102,9 +117,15 @@ def main():
                    'net.ipv6.conf.all.forwarding=1', 'net.ipv4.conf.all.rp_filter=0')
                 ns(v, 'ip', 'address', 'add', f'192.0.2.{i}/24', 'dev', 'underlay')
                 ns(v, 'ip', '-6', 'address', 'add', f'2001:db8:ff::{i}/64', 'dev', 'underlay', 'nodad')
-                ns(v, 'ip', 'address', 'add', f'198.51.100.{i}/32', 'dev', 'lo')
-                ns(v, 'ip', 'route', 'add', f'198.51.100.{3-i}/32',
-                   'via', f'192.0.2.{3-i}', 'proto', 'static')
+                if args.ipv6_vtep:
+                    ns(v, 'ip', '-6', 'address', 'add', vtep(i) + '/128', 'dev', 'lo')
+                    ns(v, 'ip', '-6', 'address', 'add', f'2001:db8:101::{i}/64', 'dev', 'underlay', 'nodad')
+                    ns(v, 'ip', '-6', 'route', 'add', vtep(3-i) + '/128',
+                       'via', f'2001:db8:101::{3-i}', 'proto', 'static')
+                else:
+                    ns(v, 'ip', 'address', 'add', vtep(i) + '/32', 'dev', 'lo')
+                    ns(v, 'ip', 'route', 'add', vtep(3-i) + '/32',
+                       'via', f'192.0.2.{3-i}', 'proto', 'static')
                 ns(v, 'ip', 'link', 'add', 'tenant100', 'type', 'vrf', 'table', '100')
                 ns(v, 'ip', 'link', 'set', 'tenant100', 'up')
                 for vni in [1000, 2000]:
@@ -115,7 +136,7 @@ def main():
                         ns(v, 'ip', 'link', 'set', bridge, 'master', 'tenant100')
                     ns(v, 'ip', 'link', 'set', bridge, 'up')
                     ns(v, 'ip', 'link', 'add', vxlan, 'type', 'vxlan', 'id', str(vni),
-                       'local', f'198.51.100.{i}', 'dstport', '4789', 'nolearning')
+                       'local', vtep(i), 'dstport', '4789', 'nolearning')
                     ns(v, 'ip', 'link', 'set', vxlan, 'master', bridge)
                     ns(v, 'ip', 'link', 'set', vxlan, 'up')
                 ns(v, 'ip', 'link', 'set', 'access', 'master', 'br1000')
@@ -191,12 +212,12 @@ def main():
                     expect(f'l{i} switched {af}', lambda i=i, af=af, address=address:
                            ns('l'+str(i), 'ping', af, '-c', '1', '-W', '1', address, check=False).returncode == 0)
                 expect(f'{v} preserved VTEP', lambda v=v, peer=peer:
-                       f'dst 198.51.100.{peer}' in ns(v, 'bridge', 'fdb', 'show', 'dev', 'vx1000').stdout)
+                       f'dst {vtep(peer)}' in ns(v, 'bridge', 'fdb', 'show', 'dev', 'vx1000').stdout)
                 expect(f'{v} Type-3 IMET', lambda v=v, peer=peer:
-                       f'[3]:[0]:[32]:[198.51.100.{peer}]' in show(v, 'show bgp evpn'))
+                       f'[3]:[0]:[{128 if args.ipv6_vtep else 32}]:[{vtep(peer)}]' in show(v, 'show bgp evpn'))
                 expect(f'{v} mapped IPv6 RMAC adjacency', lambda v=v, peer=peer:
                        'extern_learn' in ns(v, 'ip', '-6', 'neighbor', 'show',
-                                           f'::ffff:198.51.100.{peer}', 'dev', 'br2000').stdout)
+                                           v6_adjacency(peer), 'dev', 'br2000').stdout)
                 for prefix in [f'10.20.{peer}.0/24', f'2001:db8:20:{peer}::/64',
                                f'10.30.{peer}.0/24', f'2001:db8:30:{peer}::/64']:
                     expect(f'{v} Type-5 {prefix}', lambda v=v, prefix=prefix:
@@ -242,12 +263,12 @@ def main():
                     expect(f'{name}: Type-5 {prefix}', lambda prefix=prefix:
                            any(r.get('dev') == 'br2000' and r.get('protocol') == 'bgp'
                                for r in route('v2', prefix)))
-                for af, gateway in [('-4', '198.51.100.1'), ('-6', '::ffff:198.51.100.1')]:
+                for af, gateway in rmac_gateways(1):
                     expect(f'{name}: RMAC neighbor {af}', lambda af=af, gateway=gateway:
                            'extern_learn' in ns('v2', 'ip', af, 'neighbor', 'show',
                                                gateway, 'dev', 'br2000').stdout)
                 expect(f'{name}: RMAC FDB', lambda:
-                       'dst 198.51.100.1' in ns('v2', 'bridge', 'fdb', 'show', 'dev', 'vx2000').stdout)
+                       f'dst {vtep(1)}' in ns('v2', 'bridge', 'fdb', 'show', 'dev', 'vx2000').stdout)
                 for af, address in [('-4', '10.20.1.10'), ('-6', '2001:db8:20:1::10')]:
                     expect(f'{name}: routed {af}', lambda af=af, address=address:
                            ns('r2', 'ping', af, '-c', '1', '-W', '1', address,
@@ -302,7 +323,7 @@ def main():
                     expect(f'Move to {new}: Type-5 {prefix}', lambda prefix=prefix, new=new:
                            any(r.get('dev') == new and r.get('protocol') == 'bgp'
                                for r in route('v2', prefix)))
-                for af, gateway in [('-4', '198.51.100.1'), ('-6', '::ffff:198.51.100.1')]:
+                for af, gateway in rmac_gateways(1):
                     expect(f'Move to {new}: RMAC neighbor {af}', lambda af=af, gateway=gateway, new=new:
                            'extern_learn' in ns('v2', 'ip', af, 'neighbor', 'show',
                                                gateway, 'dev', new).stdout)
@@ -331,7 +352,7 @@ def main():
                 return any(' dev access ' in r for r in rows) and not any(' dev vx1000 ' in r and 'master' in r for r in rows)
 
             def remote_on(v, peer):
-                return any(' dev vx1000 ' in r and f'dst 198.51.100.{peer}' in r for r in fdb(v))
+                return any(' dev vx1000 ' in r and f'dst {vtep(peer)}' in r for r in fdb(v))
 
             def settle(name, check, seconds=8):
                 expect(name, check)
@@ -430,7 +451,7 @@ def main():
             ns('v1', 'ip', '-6', 'route', 'del', 'blackhole', '2001:db8:30:1::/64',
                'table', '100', 'proto', 'static')
             expect('Final Type-5 withdrawal', lambda: not route('v2', '2001:db8:30:1::/64'))
-            for af, gateway in [('-4', '198.51.100.1'), ('-6', '::ffff:198.51.100.1')]:
+            for af, gateway in rmac_gateways(1):
                 expect(f'Unused RMAC neighbor cleanup {af}', lambda af=af, gateway=gateway:
                        not ns('v2', 'ip', af, 'neighbor', 'show', gateway, 'dev', 'br2000').stdout)
             report['passed'] = True

@@ -48,10 +48,16 @@ Run the standalone test from the repository root:
 ```bash
 cargo build -p zebra-rs -p vtyctl
 sudo python3 tests/evpn-linux-kernel/test.py --output /tmp/evpn-kernel-results.json
+sudo python3 tests/evpn-linux-kernel/test.py --ipv6-vtep --output /tmp/evpn-kernel-ipv6-results.json
 ```
 
-The test uses flat fixed-VNI bridges and IPv4 VTEPs. It does not qualify
-VLAN-aware fixed-VNI bridges, IPv6 VTEPs, mobility, multihoming,
-prefix ECMP or 500k-route capacity. The
+With `--ipv6-vtep` (IPv6 VTEPs over an IPv6 underlay) the same test passed
+**118/118 checks** ([JSON report](evpn-linux-kernel-ipv6.json)); an IPv6
+VTEP needs one RMAC neighbor instead of two, hence fewer checks. A build
+without IPv6 VTEP support on the bridge Type-5 path installs no Type-5
+route in that mode.
+
+The test uses flat fixed-VNI bridges. It does not qualify VLAN-aware
+fixed-VNI bridges, multihoming, prefix ECMP or 500k-route capacity. The
 [OVN/cEOS report](ovn-ceos-kind.md) describes earlier prototype validation,
 with its own hashes and configuration; it is separate evidence.

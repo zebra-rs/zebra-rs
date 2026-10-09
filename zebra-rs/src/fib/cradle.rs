@@ -37,7 +37,7 @@ pub const MPLS_OP_POP_L2: u32 = 3;
 /// router MAC)`. `Some` on a member marks it a VXLAN-encapsulated nexthop
 /// (the underlay adjacency rides in the leg's `gateway`/`oif`); mutually
 /// exclusive with `segs`/`labels`.
-pub type VxlanLeg = (std::net::Ipv4Addr, u32, [u8; 6]);
+pub type VxlanLeg = (std::net::IpAddr, u32, [u8; 6]);
 
 /// A teed nexthop leaf: `(link gateway, oif, MPLS out-labels, SRv6 segment
 /// list, SRv6 encap mode, VXLAN L3 encap)`. A non-empty `segs` makes it an
@@ -878,7 +878,12 @@ impl CradleFib {
                 Some(IpAddr::V4(a)) => Some(*a),
                 _ => None,
             };
-            return self.vxlan_nexthop_id(gw4, *oif, *vtep, *l3vni, *rmac).await;
+            let IpAddr::V4(vtep) = *vtep else {
+                anyhow::bail!(
+                    "IPv6 VXLAN VTEPs need the Linux kernel EVPN path; cradle does not support them"
+                );
+            };
+            return self.vxlan_nexthop_id(gw4, *oif, vtep, *l3vni, *rmac).await;
         }
         if !segs.is_empty() {
             let gw6 = match gw {

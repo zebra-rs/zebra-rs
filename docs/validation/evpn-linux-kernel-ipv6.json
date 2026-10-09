@@ -1,6 +1,6 @@
 {
   "binary_sha256": "dd84c8e4a9083ff405e2a8bbd58783f025bf8c5b165e419a154970d2276d2204",
-  "vtep_family": "IPv4",
+  "vtep_family": "IPv6",
   "checks": [
     {
       "name": "v1 EVPN established",
@@ -143,10 +143,6 @@
       "passed": true
     },
     {
-      "name": "Bridge admin flap: RMAC neighbor -4",
-      "passed": true
-    },
-    {
       "name": "Bridge admin flap: RMAC neighbor -6",
       "passed": true
     },
@@ -168,10 +164,6 @@
     },
     {
       "name": "VXLAN carrier flap: Type-5 2001:db8:20:1::/64",
-      "passed": true
-    },
-    {
-      "name": "VXLAN carrier flap: RMAC neighbor -4",
       "passed": true
     },
     {
@@ -199,10 +191,6 @@
       "passed": true
     },
     {
-      "name": "Neighbor and FDB flush: RMAC neighbor -4",
-      "passed": true
-    },
-    {
       "name": "Neighbor and FDB flush: RMAC neighbor -6",
       "passed": true
     },
@@ -224,10 +212,6 @@
     },
     {
       "name": "VXLAN re-attach: Type-5 2001:db8:20:1::/64",
-      "passed": true
-    },
-    {
-      "name": "VXLAN re-attach: RMAC neighbor -4",
       "passed": true
     },
     {
@@ -255,10 +239,6 @@
       "passed": true
     },
     {
-      "name": "External route delete: RMAC neighbor -4",
-      "passed": true
-    },
-    {
       "name": "External route delete: RMAC neighbor -6",
       "passed": true
     },
@@ -283,14 +263,6 @@
       "passed": true
     },
     {
-      "name": "Move to br2000b: RMAC neighbor -4",
-      "passed": true
-    },
-    {
-      "name": "Move to br2000b: none left on br2000 -4",
-      "passed": true
-    },
-    {
       "name": "Move to br2000b: RMAC neighbor -6",
       "passed": true
     },
@@ -312,14 +284,6 @@
     },
     {
       "name": "Move to br2000: Type-5 2001:db8:20:1::/64",
-      "passed": true
-    },
-    {
-      "name": "Move to br2000: RMAC neighbor -4",
-      "passed": true
-    },
-    {
-      "name": "Move to br2000: none left on br2000b -4",
       "passed": true
     },
     {
@@ -419,10 +383,6 @@
       "passed": true
     },
     {
-      "name": "Restart: RMAC neighbor -4",
-      "passed": true
-    },
-    {
       "name": "Restart: RMAC neighbor -6",
       "passed": true
     },
@@ -508,10 +468,6 @@
     },
     {
       "name": "Final Type-5 withdrawal",
-      "passed": true
-    },
-    {
-      "name": "Unused RMAC neighbor cleanup -4",
       "passed": true
     },
     {

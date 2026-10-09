@@ -66,7 +66,7 @@ pub struct NexthopUni {
 /// EVPN symmetric-IRB VXLAN L3 encapsulation carried on a [`NexthopUni`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct VxlanL3Encap {
-    pub remote_vtep: Ipv4Addr,
+    pub remote_vtep: IpAddr,
     pub l3vni: u32,
     pub remote_rmac: [u8; 6],
 }

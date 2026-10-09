@@ -406,7 +406,7 @@ pub struct FibHandle {
     /// The VTEP each `(L3 VNI, RMAC)` FDB entry currently points at.
     /// Several VTEPs can advertise one RMAC; the FDB holds only one, so a
     /// withdrawal of that VTEP must re-point it at a remaining one.
-    evpn_rmac_vtep: std::sync::Mutex<BTreeMap<(u32, [u8; 6]), Ipv4Addr>>,
+    evpn_rmac_vtep: std::sync::Mutex<BTreeMap<(u32, [u8; 6]), IpAddr>>,
     /// The bridge each L3 VNI's Type-5 state was installed on, so a move
     /// to another bridge can remove what was left on the old one.
     evpn_l3vni_bridge: std::sync::Mutex<BTreeMap<u32, u32>>,
@@ -4072,18 +4072,9 @@ impl FibHandle {
         if add && !shared {
             self.evpn_rmac_install(encap.l3vni, encap.remote_rmac, encap.remote_vtep)
                 .await;
-            self.evpn_neighbor(encap.l3vni, encap.remote_vtep.into(), mac, true)
-                .await;
-            // IPv6 routes name the mapped VTEP as their gateway. Linux
-            // resolves that in the IPv6 neighbor table, independently of
-            // the IPv4 adjacency used by IPv4 routes on the same bridge.
-            self.evpn_neighbor(
-                encap.l3vni,
-                encap.remote_vtep.to_ipv6_mapped().into(),
-                mac,
-                true,
-            )
-            .await;
+            for gateway in vtep_gateways(encap.remote_vtep) {
+                self.evpn_neighbor(encap.l3vni, gateway, mac, true).await;
+            }
         }
         let success = self
             .evpn_prefix_route_send(prefix, table_id, metric, &encap, bridge, add)
@@ -4140,10 +4131,9 @@ impl FibHandle {
         };
         for (vtep, rmac) in adjacencies {
             let mac = MacAddr::from(rmac);
-            self.evpn_neighbor_on(old_bridge, vtep.into(), mac, false)
-                .await;
-            self.evpn_neighbor_on(old_bridge, vtep.to_ipv6_mapped().into(), mac, false)
-                .await;
+            for gateway in vtep_gateways(vtep) {
+                self.evpn_neighbor_on(old_bridge, gateway, mac, false).await;
+            }
         }
     }
 
@@ -4256,19 +4246,25 @@ impl FibHandle {
         msg.header.kind = RouteType::Unicast;
         msg.header.flags = RouteFlags::Onlink;
         set_route_table(&mut msg, table_id);
-        let (dst, gateway) = match prefix {
-            IpNet::V4(prefix) => (
-                RouteAddress::Inet(prefix.addr()),
-                RouteAddress::Inet(encap.remote_vtep),
-            ),
-            IpNet::V6(prefix) => (
-                RouteAddress::Inet6(prefix.addr()),
-                RouteAddress::Inet6(encap.remote_vtep.to_ipv6_mapped()),
-            ),
+        let dst = match prefix {
+            IpNet::V4(prefix) => RouteAddress::Inet(prefix.addr()),
+            IpNet::V6(prefix) => RouteAddress::Inet6(prefix.addr()),
+        };
+        // The gateway is the VTEP itself, resolved through the RMAC
+        // neighbor on the bridge: an IPv4 VTEP serves IPv6 prefixes as its
+        // IPv4-mapped address; an IPv6 VTEP serves IPv4 prefixes as an IPv6
+        // `via` (RFC 5549 style).
+        let gateway = match (prefix, encap.remote_vtep) {
+            (IpNet::V4(_), IpAddr::V4(vtep)) => RouteAttribute::Gateway(RouteAddress::Inet(vtep)),
+            (IpNet::V4(_), IpAddr::V6(vtep)) => RouteAttribute::Via(RouteVia::Inet6(vtep)),
+            (IpNet::V6(_), IpAddr::V4(vtep)) => {
+                RouteAttribute::Gateway(RouteAddress::Inet6(vtep.to_ipv6_mapped()))
+            }
+            (IpNet::V6(_), IpAddr::V6(vtep)) => RouteAttribute::Gateway(RouteAddress::Inet6(vtep)),
         };
         msg.attributes.extend([
             RouteAttribute::Destination(dst),
-            RouteAttribute::Gateway(gateway),
+            gateway,
             RouteAttribute::Oif(bridge),
             RouteAttribute::Priority(metric),
         ]);
@@ -4321,9 +4317,9 @@ impl FibHandle {
         }
         for (vtep, rmac) in &plan.adjacencies {
             let mac = MacAddr::from(*rmac);
-            self.evpn_neighbor(l3vni, (*vtep).into(), mac, true).await;
-            self.evpn_neighbor(l3vni, vtep.to_ipv6_mapped().into(), mac, true)
-                .await;
+            for gateway in vtep_gateways(*vtep) {
+                self.evpn_neighbor(l3vni, gateway, mac, true).await;
+            }
         }
         if routes {
             for ((table_id, prefix), (encap, metric)) in &plan.routes {
@@ -4387,15 +4383,9 @@ impl FibHandle {
             return;
         }
         let mac = MacAddr::from(old.remote_rmac);
-        self.evpn_neighbor(old.l3vni, old.remote_vtep.into(), mac, false)
-            .await;
-        self.evpn_neighbor(
-            old.l3vni,
-            old.remote_vtep.to_ipv6_mapped().into(),
-            mac,
-            false,
-        )
-        .await;
+        for gateway in vtep_gateways(old.remote_vtep) {
+            self.evpn_neighbor(old.l3vni, gateway, mac, false).await;
+        }
         // Several VTEPs can share an RMAC; see `evpn_rmac_after_release`.
         let key = (old.l3vni, old.remote_rmac);
         let current = self.evpn_rmac_vtep.lock().unwrap().get(&key).copied();
@@ -4429,12 +4419,12 @@ impl FibHandle {
     /// failed write leaves the previous entry in place, so the previous
     /// record stays too; otherwise a later release could trust a VTEP the
     /// kernel never pointed at and leave the entry on a withdrawn one.
-    async fn evpn_rmac_install(&self, l3vni: u32, rmac: [u8; 6], vtep: Ipv4Addr) {
+    async fn evpn_rmac_install(&self, l3vni: u32, rmac: [u8; 6], vtep: IpAddr) {
         let installed = self
             .mac_add(
                 l3vni,
                 &MacAddr::from(rmac),
-                Some(vtep.into()),
+                Some(vtep),
                 0,
                 0,
                 None,
@@ -5443,15 +5433,15 @@ fn bgp_vrf_route_key(msg: &RouteMessage) -> Option<(u32, IpNet, u32)> {
 struct EvpnReassertPlan {
     /// RMAC → the VTEP its FDB entry should point at: the recorded one
     /// while a tracked route still uses it, else the lowest user.
-    rmacs: BTreeMap<[u8; 6], Ipv4Addr>,
+    rmacs: BTreeMap<[u8; 6], IpAddr>,
     /// `(VTEP, RMAC)` neighbor adjacencies.
-    adjacencies: BTreeSet<(Ipv4Addr, [u8; 6])>,
+    adjacencies: BTreeSet<(IpAddr, [u8; 6])>,
     routes: Vec<((u32, IpNet), (crate::rib::VxlanL3Encap, u32))>,
 }
 
 fn evpn_reassert_plan(
     tracked: &BTreeMap<(u32, IpNet), (crate::rib::VxlanL3Encap, u32)>,
-    recorded: &BTreeMap<(u32, [u8; 6]), Ipv4Addr>,
+    recorded: &BTreeMap<(u32, [u8; 6]), IpAddr>,
     l3vni: u32,
 ) -> EvpnReassertPlan {
     let mut plan = EvpnReassertPlan::default();
@@ -5495,10 +5485,9 @@ fn evpn_tracked_adjacency_row<'a>(
             && encap.remote_rmac == mac
             && match nbr.family {
                 AddressFamily::Bridge => true,
-                _ => nbr.dst.is_some_and(|dst| {
-                    dst == IpAddr::V4(encap.remote_vtep)
-                        || dst == IpAddr::V6(encap.remote_vtep.to_ipv6_mapped())
-                }),
+                _ => nbr
+                    .dst
+                    .is_some_and(|dst| vtep_gateways(encap.remote_vtep).contains(&dst)),
             }
     })
 }
@@ -5510,7 +5499,7 @@ enum RmacAction {
     /// It still points at a VTEP in use.
     Keep,
     /// It pointed at the released VTEP; another VTEP still uses the RMAC.
-    Repoint(Ipv4Addr),
+    Repoint(IpAddr),
     /// No remaining route uses the RMAC in this VNI.
     Remove,
 }
@@ -5522,7 +5511,7 @@ enum RmacAction {
 fn evpn_rmac_after_release<'a>(
     remaining: impl Iterator<Item = &'a crate::rib::VxlanL3Encap>,
     old: &crate::rib::VxlanL3Encap,
-    current: Option<Ipv4Addr>,
+    current: Option<IpAddr>,
 ) -> RmacAction {
     let next = remaining
         .filter(|route| route.l3vni == old.l3vni && route.remote_rmac == old.remote_rmac)
@@ -5532,6 +5521,17 @@ fn evpn_rmac_after_release<'a>(
         None => RmacAction::Remove,
         Some(_) if current.is_some_and(|vtep| vtep != old.remote_vtep) => RmacAction::Keep,
         Some(vtep) => RmacAction::Repoint(vtep),
+    }
+}
+
+/// The gateway addresses a bridge Type-5 route through `vtep` resolves in
+/// the bridge's neighbor tables, each needing an RMAC neighbor: an IPv4 VTEP
+/// and its IPv4-mapped IPv6 form (the gateway of IPv6 prefixes), or an IPv6
+/// VTEP alone (the gateway of both families).
+fn vtep_gateways(vtep: IpAddr) -> Vec<IpAddr> {
+    match vtep {
+        IpAddr::V4(v4) => vec![IpAddr::V4(v4), IpAddr::V6(v4.to_ipv6_mapped())],
+        IpAddr::V6(_) => vec![vtep],
     }
 }
 
@@ -6115,7 +6115,7 @@ mod tests {
         let rmac = [2, 0, 0, 0, 0x20, 1];
         let vtep: Ipv4Addr = "192.0.2.1".parse().unwrap();
         let tracked = [crate::rib::VxlanL3Encap {
-            remote_vtep: vtep,
+            remote_vtep: vtep.into(),
             l3vni: 2000,
             remote_rmac: rmac,
         }];
@@ -6408,6 +6408,42 @@ mod tests {
             leftover_rtype(route_protocol(RibType::Static), main),
             Some((RibType::Static, 1))
         );
+    }
+
+    /// An IPv4 VTEP needs RMAC neighbors for itself and its IPv4-mapped
+    /// form (the IPv6 prefixes' gateway); an IPv6 VTEP serves both families.
+    /// The deleted-row match follows the same set.
+    #[test]
+    fn vtep_gateways_follow_the_vtep_family() {
+        let v4: IpAddr = "192.0.2.1".parse().unwrap();
+        let v6: IpAddr = "2001:db8:100::1".parse().unwrap();
+        assert_eq!(
+            vtep_gateways(v4),
+            vec![v4, "::ffff:192.0.2.1".parse::<IpAddr>().unwrap()]
+        );
+        assert_eq!(vtep_gateways(v6), vec![v6]);
+        let rmac = [2, 0, 0, 0, 0x20, 1];
+        let tracked = [crate::rib::VxlanL3Encap {
+            remote_vtep: v6,
+            l3vni: 2000,
+            remote_rmac: rmac,
+        }];
+        let row = |dst: &str| crate::fib::FibNeighbor {
+            family: AddressFamily::Inet6,
+            dst: Some(dst.parse().unwrap()),
+            lladdr: Some(MacAddr::from(rmac)),
+            ..Default::default()
+        };
+        assert!(evpn_tracked_adjacency_row(
+            tracked.iter(),
+            2000,
+            &row("2001:db8:100::1")
+        ));
+        assert!(!evpn_tracked_adjacency_row(
+            tracked.iter(),
+            2000,
+            &row("::ffff:192.0.2.1")
+        ));
     }
 
     #[test]

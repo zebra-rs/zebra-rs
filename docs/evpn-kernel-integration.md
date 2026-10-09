@@ -124,8 +124,13 @@ reinstalled by the end of the grace period is removed.
   address and no `vtep-source`) is still rewritten to the session's local
   address.
 * Imported Type-5 routes use the remote VTEP as gateway on the L3-VNI bridge,
-  with RMAC FDB and neighbor state. IPv6 prefixes use an IPv4-mapped gateway
-  and `onlink`, with corresponding IPv4 and mapped-IPv6 RMAC neighbors.
+  with RMAC FDB and neighbor state, for IPv4 and IPv6 VTEPs. With an IPv4
+  VTEP, IPv6 prefixes use its IPv4-mapped address as gateway, with IPv4 and
+  mapped-IPv6 RMAC neighbors. With an IPv6 VTEP, IPv6 prefixes use it as
+  gateway and IPv4 prefixes use it as an IPv6 `via`, with one IPv6 RMAC
+  neighbor. Routes use `onlink`. Underlay ECMP toward one VTEP (same VTEP,
+  L3 VNI and RMAC on every path) installs one bridge adjacency; different
+  overlay adjacencies are not collapsed. cradle rejects IPv6 VTEPs.
   Linux normalizes IPv6 metric zero to 1024. RMAC state remains
   until the last imported prefix using it is withdrawn. The bridge FDB
   holds one destination per MAC, so when several VTEPs advertise the same
@@ -150,12 +155,15 @@ reinstalled by the end of the grace period is removed.
   take precedence over their kernel shadows to retain transport metadata.
   VRF kernel routes observed before config adoption survive startup replay.
 
-Bridge-based Type-5 installation is opt-in and currently targets a unicast VXLAN
-nexthop with an IPv4 VTEP. Inner IPv4 and IPv6 are supported. Changing the
+Bridge-based Type-5 installation is opt-in and supports IPv4 and IPv6 VTEPs
+with inner IPv4 and IPv6. Changing the
 mode while routes are active does not replay those routes; configure it at
 startup. Existing route installation remains the default when the option
-is disabled. Validation does not qualify 500k routes, EVPN mobility,
-multihoming or prefix ECMP.
+is disabled. Validation does not qualify 500k routes, multihoming or
+prefix ECMP. A received VXLAN Type-2 installs into the L2 VNI its Label1
+names (RFC 8365); its first route target may be an associated L3
+service's. NHT resolves VTEPs through a plain eBGP underlay route once its
+next hops sit on interfaces.
 
 ## Validation
 

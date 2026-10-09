@@ -6,7 +6,8 @@ container runtime, or Python packages beyond the standard library.
 
 Each speaker adopts two operator-created fixed-VNI VXLAN devices: VNI 1000
 for switching and VNI 2000 for routing in `tenant100` (table 100). The
-IPv4 VTEPs (`198.51.100.1/2`) differ from BGP transport addresses
+IPv4 VTEPs (`198.51.100.1/2`), or IPv6 VTEPs (`2001:db8:100::1/2`) over an
+IPv6 underlay with `--ipv6-vtep`, differ from BGP transport addresses
 (`192.0.2.1/2`). Static underlay routes provide VTEP reachability.
 The feature is enabled with:
 
@@ -48,16 +49,17 @@ iproute2, ping, and network namespace privileges:
 ```bash
 cargo build -p zebra-rs -p vtyctl
 sudo python3 tests/evpn-linux-kernel/test.py --output /tmp/evpn-kernel-results.json
+sudo python3 tests/evpn-linux-kernel/test.py --ipv6-vtep --output /tmp/evpn-kernel-ipv6-results.json
 ```
 
 The script generates unique namespace names and cleans them up, including
 its routing processes, after success or failure. Failures produce route,
 neighbor, FDB, EVPN RIB and daemon log diagnostics in the JSON report.
 
-This covers flat bridges with fixed-VNI VXLAN and IPv4 VTEPs. Existing
-zebra-created metadata-mode VXLAN playsets remain separate compatibility
-coverage. This test does not qualify VLAN-aware fixed-VNI bridges,
-IPv6 VTEPs, multihoming, mobility, prefix ECMP, or route capacity.
+This covers flat bridges with fixed-VNI VXLAN and IPv4 or IPv6 VTEPs.
+Existing zebra-created metadata-mode VXLAN playsets remain separate
+compatibility coverage. This test does not qualify VLAN-aware fixed-VNI
+bridges, multihoming, prefix ECMP, or route capacity.
 
 Kernel exchange regression tests cover self-generated route notifications,
 external route eligibility, and blackhole/unicast replacement at multiple

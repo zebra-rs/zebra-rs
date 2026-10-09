@@ -716,7 +716,7 @@ pub(crate) fn build_srv6_vpn_fib_entry(
 /// VTEP/L3VNI/RMAC ride the `NexthopUni.vxlan` field. Structural twin of
 /// `build_srv6_vpn_fib_entry`.
 pub(crate) fn build_vxlan_vpn_fib_entry(
-    vtep: std::net::Ipv4Addr,
+    vtep: std::net::IpAddr,
     l3vni: u32,
     rmac: [u8; 6],
     transport: &[rib::nht::ResolvedNexthop],
@@ -759,7 +759,7 @@ pub(crate) fn build_vxlan_vpn_fib_entry(
 /// route carrying a Router's-MAC EC and an EVPN (VTEP) next-hop — only
 /// symmetric-IRB routes carry the RMAC EC, so this is mutually exclusive
 /// with the SRv6-SID and MPLS-label paths. Family-agnostic (the inner may
-/// be v4 or v6; the outer VTEP is always IPv4).
+/// be v4 or v6; the outer VTEP may be IPv4 or IPv6).
 fn vxlan_vpn_entry(
     best: &BgpRib,
     transport: Option<&[rib::nht::ResolvedNexthop]>,
@@ -1992,7 +1992,7 @@ pub struct BgpRib {
     /// next-hop before that next-hop is rewritten to self. The VRF FIB
     /// install (`vxlan_vpn_entry`) reads it to build the VXLAN L3 encap's
     /// outer destination. `None` on every non-VXLAN-IRB row.
-    pub vxlan_vtep: Option<Ipv4Addr>,
+    pub vxlan_vtep: Option<IpAddr>,
     /// Type-2 MPLS Label2 as received (RFC 7432 §7.2; the L3VNI under
     /// symmetric IRB, RFC 9135). Re-emitted unchanged when the route is
     /// advertised onward. `None` on originated and non-Type-2 rows.
@@ -9990,14 +9990,14 @@ pub(crate) fn extract_router_mac_from_attr(attr: &BgpAttr) -> Option<[u8; 6]> {
 
 /// The remote VTEP of an EVPN symmetric-IRB (VXLAN) Type-5: present only
 /// when `attr` carries a Router's-MAC extended community AND an EVPN
-/// next-hop holding an IPv4 VTEP. The VRF import captures this before it
+/// next-hop holding an IPv4 or IPv6 VTEP. The VRF import captures this before it
 /// rewrites the next-hop to self, so the FIB install (`vxlan_vpn_entry`)
 /// can build the VXLAN L3 encap toward the right outer destination. `None`
 /// for a plain VPN route (no VXLAN encap).
-pub(crate) fn attr_vxlan_vtep(attr: &BgpAttr) -> Option<Ipv4Addr> {
+pub(crate) fn attr_vxlan_vtep(attr: &BgpAttr) -> Option<IpAddr> {
     extract_router_mac_from_attr(attr)?;
     match attr.nexthop {
-        Some(BgpNexthop::Evpn(IpAddr::V4(vtep))) => Some(vtep),
+        Some(BgpNexthop::Evpn(vtep)) => Some(vtep),
         _ => None,
     }
 }
@@ -19940,7 +19940,7 @@ impl Bgp {
         mut attr: BgpAttr,
         label: u32,
         srv6_nexthop: Option<std::net::Ipv6Addr>,
-        vxlan: Option<(Ipv4Addr, [u8; 6])>,
+        vxlan: Option<(IpAddr, [u8; 6])>,
     ) {
         let prefix = EvpnPrefix::IpPrefix {
             eth_tag: 0,
@@ -19951,8 +19951,11 @@ impl Bgp {
         // NLRI. Otherwise SRv6 (v6 SID nexthop) or MPLS/VXLAN-L2 (router-id).
         let nexthop = match (vxlan, srv6_nexthop) {
             (Some((vtep, rmac)), _) => {
+                // RFC 8365 §5.1.2.4: the VXLAN Encapsulation EC, so a
+                // receiver selects the VXLAN data plane.
+                attr_add_ecom(&mut attr, evpn_encap_vxlan());
                 attr_add_ecom(&mut attr, ExtCommunityValue::router_mac(rmac));
-                IpAddr::V4(vtep)
+                vtep
             }
             (None, Some(v6)) => IpAddr::V6(v6),
             (None, None) => self.evpn_local_source(),
@@ -36782,6 +36785,42 @@ mod bgpls_review_tests;
 #[cfg(test)]
 mod vxlan_type5_tests {
     use super::*;
+
+    #[test]
+    fn imported_type5_preserves_both_vtep_families() {
+        for vtep in ["192.0.2.2", "2001:db8::2"] {
+            let vtep = vtep.parse::<IpAddr>().unwrap();
+            let mut attr = BgpAttr::new();
+            attr.nexthop = Some(BgpNexthop::Evpn(vtep));
+            assert_eq!(attr_vxlan_vtep(&attr), None, "RMAC is required");
+            attr_add_ecom(&mut attr, ExtCommunityValue::router_mac([2; 6]));
+            assert_eq!(attr_vxlan_vtep(&attr), Some(vtep));
+            attr.nexthop = Some(BgpNexthop::Ipv4("192.0.2.11".parse().unwrap()));
+            assert_eq!(attr_vxlan_vtep(&attr), None, "EVPN next hop is required");
+        }
+    }
+
+    #[test]
+    fn both_vtep_families_survive_underlay_ecmp() {
+        let paths = ["fe80::1", "fe80::2"].map(|addr| rib::nht::ResolvedNexthop {
+            addr: addr.parse().unwrap(),
+            ifindex: 7,
+            labels: vec![],
+            segs: vec![],
+            seg_encap: None,
+        });
+        for vtep in ["192.0.2.2", "2001:db8::2"] {
+            let vtep = vtep.parse::<IpAddr>().unwrap();
+            let entry = build_vxlan_vpn_fib_entry(vtep, 2000, [2; 6], &paths).unwrap();
+            let rib::Nexthop::Multi(multi) = entry.nexthop else {
+                panic!("expected ECMP");
+            };
+            assert_eq!(multi.nexthops.len(), 2);
+            for path in multi.nexthops {
+                assert_eq!(path.vxlan.unwrap().remote_vtep, vtep);
+            }
+        }
+    }
 
     #[test]
     fn evpn_unresolved_type5_never_falls_back_to_self() {
