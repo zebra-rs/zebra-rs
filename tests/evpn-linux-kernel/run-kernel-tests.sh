@@ -13,13 +13,19 @@ filter=${1:-}
 cd "$(git rev-parse --show-toplevel)"
 
 echo "building zebra-rs tests..." >&2
-binary=$(cargo test -p zebra-rs --no-run --message-format=json 2>/dev/null |
-    python3 -I -c 'import json, sys
-for line in sys.stdin:
+build=$(mktemp)
+if ! cargo test -p zebra-rs --no-run --message-format=json >"$build"; then
+    rm -f "$build"
+    echo "building the zebra-rs tests failed" >&2
+    exit 1
+fi
+binary=$(python3 -I -c 'import json, sys
+for line in open(sys.argv[1]):
     row = json.loads(line)
     if row.get("executable") and row.get("profile", {}).get("test"):
         print(row["executable"])
-        break')
+        break' "$build")
+rm -f "$build"
 if [[ -z "$binary" ]]; then
     echo "could not locate the zebra-rs test binary" >&2
     exit 1
