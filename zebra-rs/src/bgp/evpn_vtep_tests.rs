@@ -1,15 +1,19 @@
 //! EVPN egress wiring that unit tests of the helpers cannot catch: a
-//! received Type-2 Label2 surviving reflection.
+//! received Type-2 Label2 surviving reflection, and originated routes
+//! with a router-id next hop being re-sent when the router-id gains or
+//! loses VTEP status.
 //!
 //! `cargo test -p zebra-rs evpn_vtep_tests`
 
 use super::*;
 use crate::bgp::peer::State;
+use crate::rib::api::RibRx;
 use tokio::sync::mpsc;
 
 const RID: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
 /// Our address on the eBGP session: a link address, not the VTEP.
 const LINK: Ipv4Addr = Ipv4Addr::new(10, 1, 1, 0);
+const ESI: [u8; 10] = [0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99];
 
 fn fresh_bgp() -> Bgp {
     let (rib_tx, _) = mpsc::unbounded_channel();
@@ -92,6 +96,83 @@ fn sent(
         }
     }
     out
+}
+
+/// An originated Ethernet Segment route whose next hop is the router-id
+/// fallback, as `evpn_local_source` fills it with no VTEP configured.
+fn originate_es_route(bgp: &mut Bgp) -> (RouteDistinguisher, EvpnPrefix) {
+    let rd = rd_from_router_id_vni(RID, 0).unwrap();
+    let prefix = EvpnPrefix::EthernetSeg {
+        esi: ESI,
+        orig: IpAddr::V4(RID),
+    };
+    let mut attr = BgpAttr::new();
+    attr.nexthop = Some(BgpNexthop::Evpn(IpAddr::V4(RID)));
+    let rib = BgpRib::new(
+        ORIGINATED_PEER,
+        Ipv4Addr::UNSPECIFIED,
+        BgpRibType::Originated,
+        0,
+        32768,
+        &attr,
+        None,
+        None,
+        false,
+    );
+    let _ = bgp.local_rib.update_evpn(rd, prefix.clone(), rib);
+    (rd, prefix)
+}
+
+fn nexthops_for(sent: &[(EvpnRoute, IpAddr)], prefix: &EvpnPrefix) -> Vec<IpAddr> {
+    sent.iter()
+        .filter(|(route, _)| EvpnPrefix::from_route(route).1 == *prefix)
+        .map(|(_, nhop)| *nhop)
+        .collect()
+}
+
+/// Loopback = router-id = VTEP. A route advertised before the router-id was
+/// known to be a VTEP went out with the session address; once a VXLAN
+/// device names the router-id as its `local`, that route must be re-sent
+/// with the VTEP. Deleting the device reverses it.
+#[tokio::test]
+async fn router_id_becoming_a_vtep_resends_originated_routes() {
+    let mut bgp = fresh_bgp();
+    let (ident, mut rx) = peer(&mut bgp, "10.1.1.1", true);
+    let (_, prefix) = originate_es_route(&mut bgp);
+
+    bgp.process_rib_msg(RibRx::VxlanAdd {
+        vni: 200,
+        vtep_local: IpAddr::V4(RID),
+    });
+    assert!(bgp.local_rib.evpn_vteps.contains(&IpAddr::V4(RID)));
+    assert_eq!(
+        nexthops_for(&sent(&mut bgp, ident, &mut rx), &prefix),
+        vec![IpAddr::V4(RID)],
+        "re-sent with the router-id VTEP"
+    );
+
+    bgp.process_rib_msg(RibRx::VxlanDel { vni: 200 });
+    assert!(bgp.local_rib.evpn_vteps.is_empty());
+    assert_eq!(
+        nexthops_for(&sent(&mut bgp, ident, &mut rx), &prefix),
+        vec![IpAddr::V4(LINK)],
+        "the router-id is a placeholder again: rewritten to the session address"
+    );
+}
+
+/// A VTEP other than the router-id never changes how a router-id next hop
+/// is treated, so it must not cause a re-send.
+#[tokio::test]
+async fn unrelated_vtep_change_sends_nothing() {
+    let mut bgp = fresh_bgp();
+    let (ident, mut rx) = peer(&mut bgp, "10.1.1.1", true);
+    let (_, prefix) = originate_es_route(&mut bgp);
+
+    bgp.process_rib_msg(RibRx::VxlanAdd {
+        vni: 200,
+        vtep_local: "192.0.2.99".parse().unwrap(),
+    });
+    assert!(nexthops_for(&sent(&mut bgp, ident, &mut rx), &prefix).is_empty());
 }
 
 /// RFC 7432 §7.2 / RFC 9135: a symmetric-IRB Type-2 carries the L3VNI as

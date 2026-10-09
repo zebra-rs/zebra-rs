@@ -2074,6 +2074,7 @@ fn config_evpn_vtep_source(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
         bgp.evpn_withdraw_es_routes(*esi, old_source);
     }
     bgp.evpn_vtep_source = source;
+    bgp.evpn_vteps_sync();
     if bgp.advertise_all_vni {
         let entries: Vec<FdbEntry> = bgp.local_fdb.values().cloned().collect();
         for entry in entries {
@@ -11177,6 +11178,22 @@ mod es_linkadd_resync_tests {
             None,
             tokio::sync::mpsc::channel(1).0,
         )
+    }
+
+    /// `vtep-source` is one of the inputs to `LocalRib::evpn_vteps`; setting
+    /// and deleting it must keep the set current, or a router-id VTEP would
+    /// still be rewritten to the session address (or kept after removal).
+    #[tokio::test]
+    async fn vtep_source_updates_evpn_vteps() {
+        let mut bgp = fresh_bgp();
+        let rid = std::net::Ipv4Addr::new(192, 0, 2, 1);
+        bgp.router_id = rid;
+        config_evpn_vtep_source(&mut bgp, arg_words(&["evpn", "192.0.2.1"]), ConfigOp::Set)
+            .expect("set vtep-source");
+        assert!(bgp.local_rib.evpn_vteps.contains(&IpAddr::V4(rid)));
+        config_evpn_vtep_source(&mut bgp, arg_words(&["evpn"]), ConfigOp::Delete)
+            .expect("delete vtep-source");
+        assert!(bgp.local_rib.evpn_vteps.is_empty());
     }
 
     /// The ESI on the originated Type-2's selected Loc-RIB path.

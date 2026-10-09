@@ -4976,6 +4976,7 @@ impl Bgp {
             }
             RibRx::VxlanAdd { vni, vtep_local } => {
                 self.local_vxlans.insert(vni, vtep_local);
+                self.evpn_vteps_sync();
                 self.evpn_originate_imet(vni, vtep_local);
                 // Re-originate any MAC learned before this VXLAN device was
                 // observed: cradle's WatchFdb replays already-learned CE MACs
@@ -5036,6 +5037,7 @@ impl Bgp {
                 if let Some(vtep_local) = self.local_vxlans.remove(&vni) {
                     self.evpn_withdraw_imet(vni, vtep_local);
                 }
+                self.evpn_vteps_sync();
                 // The removed L2VNI may have been the owner a parked VPWS
                 // service was waiting on.
                 self.vpws_retry_conflicts();

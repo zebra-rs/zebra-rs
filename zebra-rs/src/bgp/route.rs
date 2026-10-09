@@ -3726,6 +3726,12 @@ pub struct LocalRib {
     /// The sequence number on our own current Type-2 origination per
     /// `(vni, mac)`, for monotonicity across re-advertisements.
     pub evpn_local_mac_seq: std::collections::BTreeMap<(u32, MacAddr), u32>,
+    /// Addresses explicitly selected as this speaker's VTEP: every local
+    /// VXLAN device's `local` and the configured `vtep-source`. An
+    /// originated EVPN next hop in this set is kept on egress even when it
+    /// equals the router-id (loopback = router-id = VTEP is the common
+    /// fabric design). Maintained by `Bgp::evpn_vteps_sync`.
+    pub evpn_vteps: std::collections::BTreeSet<IpAddr>,
 
     /// EVPN VPWS (RFC 8214) services + their allocated `End.DX2` SIDs.
     /// Lives here — like `sr_policy_local` — so both the config callbacks
@@ -6480,10 +6486,19 @@ fn evpn_should_rewrite_nexthop(
 /// than the `evpn_local_source` router-id fallback. Originations without a
 /// VXLAN device or `vtep-source` (MPLS, ES/IMET, deviceless VNIs) fill the
 /// next hop with the router-id. That placeholder must still be rewritten to
-/// the session's local address, as it was before VTEPs were preserved.
-fn evpn_originated_vtep_selected(nexthop: Option<&BgpNexthop>, router_id: Ipv4Addr) -> bool {
+/// the session's local address, as it was before VTEPs were preserved. A
+/// router-id that is also a VXLAN `local` or the `vtep-source` (`vteps`) is
+/// a real VTEP and is kept, as FRR keeps any non-zero EVPN next hop.
+fn evpn_originated_vtep_selected(
+    nexthop: Option<&BgpNexthop>,
+    router_id: Ipv4Addr,
+    vteps: &std::collections::BTreeSet<IpAddr>,
+) -> bool {
     match nexthop {
-        Some(BgpNexthop::Evpn(addr)) => !addr.is_unspecified() && *addr != IpAddr::V4(router_id),
+        // The router-id is only a placeholder when it is not also a VTEP.
+        Some(BgpNexthop::Evpn(addr)) => {
+            !addr.is_unspecified() && (*addr != IpAddr::V4(router_id) || vteps.contains(addr))
+        }
         _ => false,
     }
 }
@@ -6696,7 +6711,11 @@ pub fn route_update_evpn(
         peer.is_ebgp(),
         rib.is_originated(),
         peer.next_hop_unchanged(Afi::L2vpn, Safi::Evpn),
-        evpn_originated_vtep_selected(attrs.nexthop.as_ref(), *bgp.router_id),
+        evpn_originated_vtep_selected(
+            attrs.nexthop.as_ref(),
+            *bgp.router_id,
+            &bgp.local_rib.evpn_vteps,
+        ),
     ) {
         let nexthop: IpAddr = if let Some(ref local_addr) = peer.param.local_addr {
             local_addr.ip()
@@ -6774,24 +6793,41 @@ mod evpn_nexthop_tests {
     #[test]
     fn router_id_fallback_is_not_a_selected_vtep() {
         let rid = Ipv4Addr::new(10, 0, 0, 1);
+        let none = std::collections::BTreeSet::new();
         let evpn = |addr: IpAddr| BgpNexthop::Evpn(addr);
-        assert!(!evpn_originated_vtep_selected(None, rid));
+        assert!(!evpn_originated_vtep_selected(None, rid, &none));
         assert!(!evpn_originated_vtep_selected(
             Some(&evpn(IpAddr::V4(rid))),
-            rid
+            rid,
+            &none
         ));
         assert!(!evpn_originated_vtep_selected(
             Some(&evpn(IpAddr::V4(Ipv4Addr::UNSPECIFIED))),
-            rid
+            rid,
+            &none
         ));
         assert!(evpn_originated_vtep_selected(
             Some(&evpn(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 11)))),
-            rid
+            rid,
+            &none
         ));
         assert!(evpn_originated_vtep_selected(
             Some(&evpn("2001:db8::11".parse().unwrap())),
-            rid
+            rid,
+            &none
         ));
+    }
+
+    /// Loopback = router-id = VTEP is the usual fabric design. With eBGP
+    /// over link addresses, rewriting that next hop to the session address
+    /// would advertise a link IP as the tunnel endpoint. FRR keeps any
+    /// non-zero EVPN next hop; a router-id that is a real VTEP is kept too.
+    #[test]
+    fn router_id_that_is_a_vtep_is_selected() {
+        let rid = Ipv4Addr::new(10, 0, 0, 1);
+        let vteps = std::collections::BTreeSet::from([IpAddr::V4(rid)]);
+        let nexthop = BgpNexthop::Evpn(IpAddr::V4(rid));
+        assert!(evpn_originated_vtep_selected(Some(&nexthop), rid, &vteps));
     }
 
     #[test]
@@ -20423,6 +20459,76 @@ impl Bgp {
     /// election's "me"), or a v6 source would break self-matching.
     pub(crate) fn evpn_local_source(&self) -> IpAddr {
         self.evpn_vtep_source.unwrap_or(IpAddr::V4(self.router_id))
+    }
+
+    /// Refresh `LocalRib::evpn_vteps` after `local_vxlans` or
+    /// `evpn_vtep_source` changes.
+    ///
+    /// The set only changes egress for a next hop equal to the router-id:
+    /// any other originated next hop is kept regardless. When the router-id
+    /// gains or loses VTEP status, re-send the originated routes carrying
+    /// it, so peers do not keep a next hop chosen under the old status
+    /// (e.g. Ethernet Segment routes advertised before the first VXLAN
+    /// device whose `local` is the router-id appeared).
+    pub(crate) fn evpn_vteps_sync(&mut self) {
+        let vteps: std::collections::BTreeSet<IpAddr> = self
+            .local_vxlans
+            .values()
+            .copied()
+            .chain(self.evpn_vtep_source)
+            .collect();
+        let rid = IpAddr::V4(self.router_id);
+        let flipped = vteps.contains(&rid) != self.local_rib.evpn_vteps.contains(&rid);
+        self.local_rib.evpn_vteps = vteps;
+        if flipped {
+            self.evpn_readvertise_router_id_nexthop();
+        }
+    }
+
+    /// Re-send every selected, locally originated EVPN route whose next hop
+    /// is the router-id. See [`Self::evpn_vteps_sync`].
+    fn evpn_readvertise_router_id_nexthop(&mut self) {
+        let rid = BgpNexthop::Evpn(IpAddr::V4(self.router_id));
+        let routes: Vec<(RouteDistinguisher, EvpnPrefix, BgpRib)> = self
+            .local_rib
+            .evpn
+            .iter()
+            .flat_map(|(rd, table)| {
+                table
+                    .selected
+                    .iter()
+                    .map(move |(prefix, rib)| (*rd, prefix, rib))
+            })
+            .filter(|(_, _, rib)| rib.is_originated() && rib.attr.nexthop.as_ref() == Some(&rid))
+            .map(|(rd, prefix, rib)| (rd, prefix.clone(), rib.clone()))
+            .collect();
+        if routes.is_empty() {
+            return;
+        }
+        let mut bgp_ref = BgpTop {
+            router_id: &self.router_id,
+            srv6_ipv6_export: self.srv6_ipv6_export.as_ref(),
+            local_rib: &mut self.local_rib,
+            shard: &mut self.shard,
+            tx: &self.tx,
+            rib_client: &self.ctx.rib,
+            attr_store: &mut self.attr_store,
+            update_groups: &mut self.update_groups,
+            interface_addrs: &self.interface_addrs,
+            vrf_export: None,
+            color_policy: Some(&self.color_policy),
+            flex_algo_routes: Some(&self.flex_algo_routes),
+            flex_algo_srv6_routes: Some(&self.flex_algo_srv6_routes),
+            vrf_import: None,
+            nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+            central_label_alloc: None,
+            as_sets_withdraw: self.as_sets_withdraw,
+        };
+        for (rd, prefix, rib) in routes {
+            route_advertise_evpn_to_peers(rd, prefix, &[rib], &mut bgp_ref, &mut self.peers);
+        }
     }
 
     /// Re-reconcile per-EVI A-D for every configured Ethernet Segment's

@@ -70,9 +70,10 @@ this configuration does not provide a route-protocol policy filter.
   ownership before removing an entry replaced by a local neighbor.
 * The existing Type-3 path provides remote VTEP flood membership. Locally
   originated routes preserve the selected VTEP independently of the BGP
-  session's source interface address. A next hop that is only the router-id
-  fallback (no VXLAN local address and no `vtep-source`) is still rewritten
-  to the session's local address.
+  session's source interface address, including a VTEP equal to the
+  router-id. A next hop that is only the router-id fallback (no VXLAN local
+  address and no `vtep-source`) is still rewritten to the session's local
+  address.
 * Imported Type-5 routes use the remote VTEP as gateway on the L3-VNI bridge,
   with RMAC FDB and neighbor state. IPv6 prefixes use an IPv4-mapped gateway
   and `onlink`, with corresponding IPv4 and mapped-IPv6 RMAC neighbors.
