@@ -113,6 +113,10 @@ pub struct FibRoute {
     /// install. Kept separately from the distance-0 kernel RIB entry so
     /// the RIB can recognize echoes of its own installed routes.
     pub kernel_protocol: Option<crate::rib::RibType>,
+    /// An `RTPROT_STATIC` route found by the startup dump: an operator's
+    /// route, or a static an earlier zebra-rs installed under that number.
+    /// See `Rib::legacy_statics`.
+    pub legacy_static: bool,
     /// Kernel routing-table id the route belongs to (`rtm_table`, or
     /// the `RTA_TABLE` attribute for ids > 255). `RT_TABLE_MAIN` (254)
     /// for the default table; a VRF's table id otherwise. Lets the RIB

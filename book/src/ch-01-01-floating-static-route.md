@@ -90,8 +90,8 @@ metric:
 
 ```
 $ ip route show
-default via 192.168.1.254 dev eth0 proto static metric 100
-default via 10.0.0.254 dev eth1 proto static metric 200
+default via 192.168.1.254 dev eth0 proto zebra metric 100
+default via 10.0.0.254 dev eth1 proto zebra metric 200
 ```
 
 The kernel forwards along the lowest-metric route, so traffic uses the

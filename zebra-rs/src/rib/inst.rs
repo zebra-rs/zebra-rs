@@ -721,6 +721,10 @@ pub enum Message {
         rtype: RibType,
         v6: bool,
     },
+    /// The startup grace period ended: withdraw the leftovers of an
+    /// earlier run (statics, IS-IS, VRF BGP) no protocol has replaced.
+    /// Sent once by the event loop, `leftover_sweep_time` after the dump.
+    SweepLeftovers,
 }
 
 impl Message {
@@ -1211,6 +1215,14 @@ pub struct Rib {
     /// Remote Type-2 routes binding each `(vni, ip)`, across MACs. One
     /// kernel neighbor exists per IP; it follows the winning binding.
     pub evpn_ip_refs: BTreeMap<(u32, IpAddr), BTreeSet<crate::rib::evpn::MacRouteKey>>,
+    /// `RTPROT_STATIC` routes the startup dump found, `(table, prefix,
+    /// priority)`: each may be a static an earlier zebra-rs installed
+    /// under that number. Adopted when the static config installs the
+    /// same route (`adopt_legacy_static`); cleared by the leftover sweep.
+    pub legacy_statics: BTreeSet<(u32, IpNet, u32)>,
+    /// How long after startup leftovers from an earlier run that no
+    /// protocol has replaced are swept (`--leftover-sweep-time`).
+    pub leftover_sweep_time: std::time::Duration,
     /// EVPN multihoming: the `(ESI, VNI)` pairs BGP currently has a
     /// non-empty nexthop group for (`Message::EsNhg`). A MAC on such a
     /// segment installs through the group (RFC 7432 §8.4 aliasing); the
@@ -1417,6 +1429,8 @@ impl Rib {
             local_bindings: BTreeMap::new(),
             local_neighbors: BTreeMap::new(),
             evpn_ip_refs: BTreeMap::new(),
+            legacy_statics: BTreeSet::new(),
+            leftover_sweep_time: std::time::Duration::from_secs(120),
             es_groups: BTreeSet::new(),
             es_blocked: BTreeSet::new(),
             vtep_table: std::collections::BTreeSet::new(),
@@ -2557,7 +2571,7 @@ impl Rib {
     /// RIB (`FibHandle::route_del_leftover`). A protocol's own route for a
     /// prefix replaced its leftover already, so what is found is only
     /// what it no longer has.
-    async fn sweep_stale(&mut self, rtype: RibType, v6: bool, table_id: u32) {
+    pub(super) async fn sweep_stale(&mut self, rtype: RibType, v6: bool, table_id: u32) {
         let stale = |entries: &RibEntries| entries.iter().any(|e| e.rtype == rtype && e.stale);
         let main = table_id == RT_TABLE_MAIN;
         if v6 {
@@ -3996,6 +4010,9 @@ impl Rib {
             Message::SweepStale { rtype, v6 } => {
                 self.sweep_stale(rtype, v6, table_id).await;
             }
+            Message::SweepLeftovers => {
+                self.sweep_leftovers().await;
+            }
             Message::KernelRouteExchange(enabled) => {
                 self.fib_handle.kernel_route_exchange = enabled;
             }
@@ -4574,6 +4591,10 @@ impl Rib {
             FibMessage::NewRoute(route) => {
                 if self.is_kernel_route_echo(&route) {
                     return;
+                }
+                if route.legacy_static {
+                    self.legacy_statics
+                        .insert((route.table_id, route.prefix, route.entry.metric));
                 }
                 // The startup route dump precedes config-driven VRF adoption.
                 // Preserve routes for a kernel VRF already seen in the link
@@ -5643,6 +5664,16 @@ impl Rib {
         if let Err(_err) = fib_dump(self).await {
             // warn!("FIB dump error {}", err);
         }
+        // Leftovers of an earlier run (a crash, or a stop without cleanup)
+        // stay in place while the protocols reinstall: each protocol's own
+        // route replaces its leftover. Sweep the rest after a grace period,
+        // as FRR does after its `-K` window.
+        let tx = self.tx.clone();
+        let grace = self.leftover_sweep_time;
+        tokio::spawn(async move {
+            tokio::time::sleep(grace).await;
+            let _ = tx.send(Message::SweepLeftovers);
+        });
 
         // The fib_dump above populated `self.links`; we can now decide
         // whether sr0 already exists or needs to be created.
@@ -6171,13 +6202,15 @@ mod local_device_mac_tests {
             let route = crate::fib::FibRoute {
                 prefix,
                 entry,
-                kernel_protocol: Some(RibType::Static),
+                kernel_protocol: None,
+                legacy_static: false,
                 table_id: 100,
             };
             rib.process_fib_msg(FibMessage::NewRoute(crate::fib::FibRoute {
                 prefix: route.prefix,
                 entry: route.entry.clone(),
                 kernel_protocol: route.kernel_protocol,
+                legacy_static: route.legacy_static,
                 table_id: route.table_id,
             }))
             .await;

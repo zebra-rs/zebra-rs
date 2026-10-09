@@ -273,7 +273,7 @@ The static (distance 1) displaces the BGP service route (200) and
 resolves recursively just fine — but the covering route to
 `2001:db8::8` is a *plain* IS-IS route (SRv6 encapsulates only where a
 SID says so), so there is no transport to inherit. The kernel gets a
-bare `via fe80::… proto static`, the packet leaves `s` unencapsulated,
+bare `via fe80::… proto zebra`, the packet leaves `s` unencapsulated,
 and it dies one hop in — the core routes only links, loopbacks, and
 locators:
 
@@ -304,7 +304,7 @@ d>show ipv6 route
 S  *> fcbb:bbbb:8:e064::/128 [1/0] is directly connected, sr0, seg6local End.DT6, 00:00:03
 
 d>ip -6 route show fcbb:bbbb:8:e064::/128
-fcbb:bbbb:8:e064::  encap seg6local action End.DT6 table main dev sr0 proto static metric 1024 pref medium
+fcbb:bbbb:8:e064::  encap seg6local action End.DT6 table main dev sr0 proto zebra metric 1024 pref medium
 ```
 
 Ingress side: steer the prefix into that SID with an explicit segment
@@ -318,7 +318,7 @@ s>show ipv6 route
 S  *> 2001:db8:200::/64 [1/0] via seg6 [fcbb:bbbb:8:e064::], s-n1, 00:00:03
 
 s>ip -6 route show 2001:db8:200::/64
-2001:db8:200::/64 nhid 11  encap seg6 mode encap segs 1 [ fcbb:bbbb:8:e064:: ] via fcbb:bbbb:8:e064:: dev s-n1 proto static metric 1024 onlink pref medium
+2001:db8:200::/64 nhid 11  encap seg6 mode encap segs 1 [ fcbb:bbbb:8:e064:: ] via fcbb:bbbb:8:e064:: dev s-n1 proto zebra metric 1024 onlink pref medium
 ```
 
 The edge-to-edge ping now works over the purely static path, and a
@@ -366,7 +366,7 @@ S  *> 3001:db8::2/128 [1/0] via 2001:db8:200::100 (recursive), 00:00:03
                             via seg6 [fcbb:bbbb:8:40::], s-n1
 
 s>ip -6 route show 3001:db8::2
-3001:db8::2 nhid 10  encap seg6 mode encap segs 1 [ fcbb:bbbb:8:40:: ] via fcbb:bbbb:8:: dev s-n1 proto static metric 1024 onlink pref medium
+3001:db8::2 nhid 10  encap seg6 mode encap segs 1 [ fcbb:bbbb:8:40:: ] via fcbb:bbbb:8:: dev s-n1 proto zebra metric 1024 onlink pref medium
 
 s>ip -6 route show 2001:db8:200::/64
 2001:db8:200::/64 nhid 10  encap seg6 mode encap segs 1 [ fcbb:bbbb:8:40:: ] via fcbb:bbbb:8:: dev s-n1 proto bgp metric 1024 onlink pref medium

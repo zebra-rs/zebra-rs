@@ -48,9 +48,9 @@ of a separate dataplane; remote FDB entries still carry UDP 4789.
 `redistribute kernel` exports kernel routes from the selected VRF, including
 static or externally installed blackhole prefixes, independent of their
 originating protocol number. Protocol-BGP routes in VRF tables (imported
-routes) are excluded from kernel ingestion, including on startup, so they
-cannot feed back into this redistribution source. Main-table protocol-BGP
-routes stay visible, because another daemon may own the underlay. IPv6
+routes) are excluded from kernel ingestion, so they cannot feed back into
+this redistribution source. Main-table protocol-BGP routes stay visible,
+because another daemon may own the underlay. IPv6
 interface prefix routes (`proto kernel`) and link-local prefixes are not
 ingested; connected routes come from the interface addresses. The
 source is per VRF and exports all eligible kernel prefixes in that VRF;
@@ -61,6 +61,24 @@ IGP output cannot displace its owning route as a distance-0 kernel entry.
 External static routes remain eligible. Kernel routes at different
 priorities are retained independently; replacing a blackhole with a
 unicast route, or the reverse, updates the selected route and redistribution.
+
+zebra-rs installs its static routes as `proto zebra` (`RTPROT_ZEBRA`,
+11), so they are distinguishable from operator `proto static` routes,
+which are always kernel routes. Routes left by an earlier zebra-rs run (a
+crash, or a stop without cleanup) are found at startup by protocol:
+`proto zebra`, IS-IS and OSPF in any table, and BGP in VRF tables. Each
+stays in place and keeps forwarding until its owner's fresh route
+replaces it; whatever is not replaced is removed
+`--leftover-sweep-time` seconds after startup (default 120; OSPF sweeps
+its own once it has converged). Main-table `proto bgp` routes are never
+claimed, because another daemon may own them. Before this release
+zebra-rs installed statics as `proto static`: on the first start after
+upgrading, such a route is adopted when the static configuration
+installs the same route (table, prefix and priority), and otherwise left
+as an operator route. SRv6 routes (`seg6`/`seg6local` encapsulation)
+under zebra-rs's protocol numbers are never ingested: their owners
+reinstall them in place, and an earlier run's that is no longer
+configured is not removed.
 
 ## Kernel contract
 

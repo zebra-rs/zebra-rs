@@ -93,6 +93,56 @@ pub fn addr_recover_decide(state: &mut AddrRecoveryState, now: Instant) -> Recov
 }
 
 impl Rib {
+    /// Upgrade path: zebra-rs once installed statics as `RTPROT_STATIC`.
+    /// When the static config installs a route the startup dump found in
+    /// that form (same table, prefix and priority), the kernel route is
+    /// that earlier static: drop its kernel entry, so the static's install
+    /// takes it over in place (`NLM_F_REPLACE`) as `RTPROT_ZEBRA`. Only
+    /// until the leftover sweep; after that such a route is an operator's.
+    pub(super) fn adopt_legacy_static(&mut self, table_id: u32, prefix: IpNet, entry: &RibEntry) {
+        if entry.rtype != RibType::Static || self.legacy_statics.is_empty() {
+            return;
+        }
+        for priority in kernel_priorities(entry, matches!(prefix, IpNet::V6(_))) {
+            if !self.legacy_statics.remove(&(table_id, prefix, priority)) {
+                continue;
+            }
+            let entries = match prefix {
+                IpNet::V4(p) if table_id == RT_TABLE_MAIN => self.table.get_mut(&p),
+                IpNet::V6(p) if table_id == RT_TABLE_MAIN => self.table_v6.get_mut(&p),
+                IpNet::V4(p) => self
+                    .vrf_tables
+                    .get_mut(&table_id)
+                    .and_then(|t| t.table.get_mut(&p)),
+                IpNet::V6(p) => self
+                    .vrf_tables
+                    .get_mut(&table_id)
+                    .and_then(|t| t.table_v6.get_mut(&p)),
+            };
+            if let Some(entries) = entries {
+                entries.retain(|e| !(e.rtype == RibType::Kernel && e.metric == priority));
+            }
+        }
+    }
+
+    /// Withdraw every leftover from an earlier run that its owner has not
+    /// replaced by now: statics, IS-IS, and VRF BGP. OSPF sweeps its own
+    /// once it has converged (graceful restart, RFC 3623). Afterwards an
+    /// `RTPROT_STATIC` route is only ever an operator's.
+    pub(super) async fn sweep_leftovers(&mut self) {
+        let tables: Vec<u32> = std::iter::once(RT_TABLE_MAIN)
+            .chain(self.vrf_tables.keys().copied())
+            .collect();
+        for table_id in tables {
+            for rtype in [RibType::Static, RibType::Isis, RibType::Bgp] {
+                for v6 in [false, true] {
+                    self.sweep_stale(rtype, v6, table_id).await;
+                }
+            }
+        }
+        self.legacy_statics.clear();
+    }
+
     /// A kernel event for a route this RIB already installed must not
     /// become a distance-0 competitor to its owning protocol. External
     /// routes using the same protocol number remain eligible when their
@@ -618,6 +668,7 @@ impl Rib {
             .get(&table_id)
             .and_then(|t| selected_v4(&t.table, prefix))
             .cloned();
+        self.adopt_legacy_static(table_id, (*prefix).into(), &entry);
         let replace = {
             let Some(t) = self.vrf_tables.get_mut(&table_id) else {
                 tracing::warn!(
@@ -704,6 +755,7 @@ impl Rib {
             .get(&table_id)
             .and_then(|t| selected_v6(&t.table_v6, prefix))
             .cloned();
+        self.adopt_legacy_static(table_id, (*prefix).into(), &entry);
         let replace = {
             let Some(t) = self.vrf_tables.get_mut(&table_id) else {
                 tracing::warn!(
@@ -844,6 +896,7 @@ impl Rib {
 
     pub async fn ipv4_route_add(&mut self, prefix: &Ipv4Net, mut entry: RibEntry, table_id: u32) {
         let before = selected_v4(&self.table, prefix).cloned();
+        self.adopt_legacy_static(table_id, (*prefix).into(), &entry);
         if entry.is_protocol() {
             let mut replace = rib_replace(&mut self.table, prefix, entry.rtype);
             rib_resolve_nexthop(&mut entry, &self.table, &mut self.nmap, table_id);
@@ -1010,6 +1063,7 @@ impl Rib {
         }
 
         let before = selected_v6(&self.table_v6, prefix).cloned();
+        self.adopt_legacy_static(table_id, (*prefix).into(), &entry);
         if entry.is_protocol() {
             let mut replace = rib_replace_v6(&mut self.table_v6, prefix, entry.rtype);
             rib_resolve_nexthop_v6(&mut entry, &self.table_v6, &mut self.nmap, table_id);
@@ -2202,6 +2256,28 @@ fn rib_rtype_ifindex(entries: &[RibEntry], rtype: RibType, ifindex: u32) -> Opti
 fn rib_add(table: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, entry: RibEntry) {
     let entries = table.entry(*prefix).or_default();
     entries.push(entry);
+}
+
+/// The kernel priorities `entry` is installed with: its next hop's
+/// metric, as each install path sets `RTA_PRIORITY`. Linux reports an
+/// IPv6 priority of 0 as 1024.
+pub(super) fn kernel_priorities(entry: &RibEntry, v6: bool) -> Vec<u32> {
+    let mut metrics = match &entry.nexthop {
+        Nexthop::Uni(uni) => vec![uni.metric],
+        Nexthop::Multi(multi) => vec![multi.metric],
+        Nexthop::List(list) => list.nexthops.iter().map(|m| m.metric()).collect(),
+        Nexthop::Protect(protect) => vec![protect.primary.metric(), protect.backup.metric()],
+        Nexthop::Blackhole(metric) => vec![*metric],
+        Nexthop::Link(_) => vec![entry.metric],
+    };
+    if v6 {
+        for metric in &mut metrics {
+            if *metric == 0 {
+                *metric = 1024;
+            }
+        }
+    }
+    metrics
 }
 
 /// Kernel routes at different priorities coexist, including discard

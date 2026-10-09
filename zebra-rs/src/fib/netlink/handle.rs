@@ -246,6 +246,38 @@ fn set_route_table(msg: &mut RouteMessage, table_id: u32) {
 /// a different protocol than the install returns ESRCH and the
 /// seg6local route leaks in the FIB (an OSPFv3 SID uninstall did
 /// exactly that while this was hard-coded to Isis on the delete side).
+/// The RIB type and distance of a route an earlier run of zebra-rs left
+/// in the kernel, found by the startup dump: one under a protocol number
+/// only zebra-rs installs routes with. It enters the RIB stale, under its
+/// owner's type, so the owner's own route replaces it; the rest are swept
+/// (`Message::SweepStale`, `Message::SweepLeftovers`). Main-table BGP is
+/// not ours to claim: another daemon may own it (an underlay bgpd).
+pub(crate) fn leftover_rtype(protocol: RouteProtocol, table_id: u32) -> Option<(RibType, u8)> {
+    match protocol {
+        RouteProtocol::Ospf => Some((RibType::Ospf, 110)),
+        RouteProtocol::Isis => Some((RibType::Isis, 115)),
+        RouteProtocol::Zebra => Some((RibType::Static, 1)),
+        RouteProtocol::Bgp if table_id != RouteHeader::RT_TABLE_MAIN as u32 => {
+            Some((RibType::Bgp, 200))
+        }
+        _ => None,
+    }
+}
+
+/// The `rtm_protocol` zebra-rs installs a route of `rtype` with. Static
+/// routes use `RTPROT_ZEBRA` (11), not `RTPROT_STATIC` (4): the latter is
+/// what `ip route add` gives an operator's route, so a startup dump could
+/// not tell a zebra-rs leftover from one. Kept in step with
+/// [`leftover_rtype`].
+pub(crate) fn route_protocol(rtype: RibType) -> RouteProtocol {
+    match rtype {
+        RibType::Bgp => RouteProtocol::Bgp,
+        RibType::Ospf => RouteProtocol::Ospf,
+        RibType::Isis => RouteProtocol::Isis,
+        _ => RouteProtocol::Zebra,
+    }
+}
+
 fn sid_route_protocol(sid: &crate::rib::Sid) -> RouteProtocol {
     match sid.owner.rib_type() {
         crate::rib::RibType::Ospf => RouteProtocol::Ospf,
@@ -1142,13 +1174,7 @@ impl FibHandle {
         msg.header.destination_prefix_length = prefix.prefix_len();
 
         set_route_table(&mut msg, table_id);
-        msg.header.protocol = match entry.rtype {
-            RibType::Static => RouteProtocol::Static,
-            RibType::Bgp => RouteProtocol::Bgp,
-            RibType::Ospf => RouteProtocol::Ospf,
-            RibType::Isis => RouteProtocol::Isis,
-            _ => RouteProtocol::Static,
-        };
+        msg.header.protocol = route_protocol(entry.rtype);
 
         msg.header.scope = RouteScope::Universe;
         msg.header.kind = RouteType::Unicast;
@@ -1424,13 +1450,7 @@ impl FibHandle {
         msg.header.address_family = AddressFamily::Inet;
         msg.header.destination_prefix_length = prefix.prefix_len();
         set_route_table(&mut msg, table_id);
-        msg.header.protocol = match entry.rtype {
-            RibType::Static => RouteProtocol::Static,
-            RibType::Bgp => RouteProtocol::Bgp,
-            RibType::Ospf => RouteProtocol::Ospf,
-            RibType::Isis => RouteProtocol::Isis,
-            _ => RouteProtocol::Static,
-        };
+        msg.header.protocol = route_protocol(entry.rtype);
         msg.header.scope = RouteScope::Universe;
         msg.header.kind = RouteType::BlackHole;
         msg.attributes
@@ -1445,8 +1465,11 @@ impl FibHandle {
             RouteNetlinkMessage::DelRoute(msg)
         };
         let mut req = NetlinkMessage::from(inner);
+        // Replace like the unicast installs: a same-priority route already
+        // there (an earlier run's, or a pre-RTPROT_ZEBRA static being
+        // adopted) is taken over in place rather than failing with EEXIST.
         req.header.flags = if add {
-            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE
         } else {
             NLM_F_REQUEST | NLM_F_ACK
         };
@@ -1500,13 +1523,7 @@ impl FibHandle {
         msg.header.destination_prefix_length = prefix.prefix_len();
 
         set_route_table(&mut msg, table_id);
-        msg.header.protocol = match entry.rtype {
-            RibType::Static => RouteProtocol::Static,
-            RibType::Bgp => RouteProtocol::Bgp,
-            RibType::Ospf => RouteProtocol::Ospf,
-            RibType::Isis => RouteProtocol::Isis,
-            _ => RouteProtocol::Static,
-        };
+        msg.header.protocol = route_protocol(entry.rtype);
         msg.header.scope = RouteScope::Universe;
         msg.header.kind = RouteType::Unicast;
 
@@ -1619,15 +1636,15 @@ impl FibHandle {
         };
         msg.header.destination_prefix_length = prefix.prefix_len();
         set_route_table(&mut msg, table_id);
-        msg.header.protocol = match entry.rtype {
-            RibType::Static => RouteProtocol::Static,
-            RibType::Bgp => RouteProtocol::Bgp,
-            RibType::Ospf => RouteProtocol::Ospf,
-            RibType::Isis => RouteProtocol::Isis,
-            _ => RouteProtocol::Static,
-        };
+        msg.header.protocol = route_protocol(entry.rtype);
         msg.header.scope = RouteScope::Universe;
-        msg.header.kind = RouteType::Unicast;
+        // IPv4 matches the route type on delete: a leftover discard route
+        // is only removed by a blackhole delete.
+        msg.header.kind = if matches!(entry.nexthop, Nexthop::Blackhole(_)) {
+            RouteType::BlackHole
+        } else {
+            RouteType::Unicast
+        };
         msg.attributes.push(RouteAttribute::Destination(dst));
         msg.attributes.push(RouteAttribute::Priority(entry.metric));
 
@@ -1715,13 +1732,7 @@ impl FibHandle {
         msg.header.destination_prefix_length = prefix.prefix_len();
 
         set_route_table(&mut msg, table_id);
-        msg.header.protocol = match entry.rtype {
-            RibType::Static => RouteProtocol::Static,
-            RibType::Bgp => RouteProtocol::Bgp,
-            RibType::Ospf => RouteProtocol::Ospf,
-            RibType::Isis => RouteProtocol::Isis,
-            _ => RouteProtocol::Static,
-        };
+        msg.header.protocol = route_protocol(entry.rtype);
 
         msg.header.scope = RouteScope::Universe;
         msg.header.kind = RouteType::Unicast;
@@ -2031,13 +2042,7 @@ impl FibHandle {
         msg.header.address_family = AddressFamily::Inet6;
         msg.header.destination_prefix_length = prefix.prefix_len();
         set_route_table(&mut msg, table_id);
-        msg.header.protocol = match entry.rtype {
-            RibType::Static => RouteProtocol::Static,
-            RibType::Bgp => RouteProtocol::Bgp,
-            RibType::Ospf => RouteProtocol::Ospf,
-            RibType::Isis => RouteProtocol::Isis,
-            _ => RouteProtocol::Static,
-        };
+        msg.header.protocol = route_protocol(entry.rtype);
         msg.header.scope = RouteScope::Universe;
         msg.header.kind = RouteType::BlackHole;
         msg.attributes
@@ -2052,8 +2057,11 @@ impl FibHandle {
             RouteNetlinkMessage::DelRoute(msg)
         };
         let mut req = NetlinkMessage::from(inner);
+        // Replace like the unicast installs: a same-priority route already
+        // there (an earlier run's, or a pre-RTPROT_ZEBRA static being
+        // adopted) is taken over in place rather than failing with EEXIST.
         req.header.flags = if add {
-            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE
         } else {
             NLM_F_REQUEST | NLM_F_ACK
         };
@@ -2106,13 +2114,7 @@ impl FibHandle {
         msg.header.destination_prefix_length = prefix.prefix_len();
 
         set_route_table(&mut msg, table_id);
-        msg.header.protocol = match entry.rtype {
-            RibType::Static => RouteProtocol::Static,
-            RibType::Bgp => RouteProtocol::Bgp,
-            RibType::Ospf => RouteProtocol::Ospf,
-            RibType::Isis => RouteProtocol::Isis,
-            _ => RouteProtocol::Static,
-        };
+        msg.header.protocol = route_protocol(entry.rtype);
         msg.header.scope = RouteScope::Universe;
         msg.header.kind = RouteType::Unicast;
 
@@ -3739,13 +3741,7 @@ impl FibHandle {
         msg.header.destination_prefix_length = 20;
 
         msg.header.table = RouteHeader::RT_TABLE_MAIN;
-        msg.header.protocol = match ilm.rtype {
-            RibType::Static => RouteProtocol::Static,
-            RibType::Bgp => RouteProtocol::Bgp,
-            RibType::Ospf => RouteProtocol::Ospf,
-            RibType::Isis => RouteProtocol::Isis,
-            _ => RouteProtocol::Static,
-        };
+        msg.header.protocol = route_protocol(ilm.rtype);
 
         msg.header.scope = RouteScope::Universe;
         msg.header.kind = RouteType::Unicast;
@@ -3901,13 +3897,7 @@ impl FibHandle {
         msg.header.destination_prefix_length = 20;
 
         msg.header.table = RouteHeader::RT_TABLE_MAIN;
-        msg.header.protocol = match ilm.rtype {
-            RibType::Static => RouteProtocol::Static,
-            RibType::Bgp => RouteProtocol::Bgp,
-            RibType::Ospf => RouteProtocol::Ospf,
-            RibType::Isis => RouteProtocol::Isis,
-            _ => RouteProtocol::Static,
-        };
+        msg.header.protocol = route_protocol(ilm.rtype);
 
         msg.header.scope = RouteScope::Universe;
         msg.header.kind = RouteType::Unicast;
@@ -5448,23 +5438,30 @@ pub fn route_from_msg_with(
     dump: bool,
 ) -> Option<FibRoute> {
     let mut builder = RouteBuilder::new();
-    let leftover = dump && msg.header.protocol == RouteProtocol::Ospf;
 
     if msg.header.scope == RouteScope::Host {
         return None;
     }
     let protocol = msg.header.protocol;
+    // `rtm_table` is a single byte; ids > 255 arrive as
+    // `RT_TABLE_UNSPEC` in the header with the real id in `RTA_TABLE`.
+    // Read it up front: ownership of a leftover depends on the table.
+    let mut table_id = msg.header.table as u32;
+    let mut srv6 = false;
+    for attr in &msg.attributes {
+        match attr {
+            RouteAttribute::Table(t) => table_id = *t,
+            RouteAttribute::EncapType(RouteLwEnCapType::Seg6 | RouteLwEnCapType::Seg6Local) => {
+                srv6 = true
+            }
+            _ => {}
+        }
+    }
     // SRv6 routes under our protocols (local SIDs, mirror contexts, SID
     // redirects, H.Encaps routes) are reinstalled in place by their owner,
     // and most have no RIB route that could replace a leftover entry. A
     // sweep would then delete the live route by its prefix. Never mirror
     // them, as kernel routes or as leftovers.
-    let srv6 = msg.attributes.iter().any(|attr| {
-        matches!(
-            attr,
-            RouteAttribute::EncapType(RouteLwEnCapType::Seg6 | RouteLwEnCapType::Seg6Local)
-        )
-    });
     if srv6
         && matches!(
             protocol,
@@ -5473,7 +5470,12 @@ pub fn route_from_msg_with(
     {
         return None;
     }
-    if msg.header.address_family == AddressFamily::Inet6 && !leftover {
+    let leftover = if dump {
+        leftover_rtype(protocol, table_id)
+    } else {
+        None
+    };
+    if msg.header.address_family == AddressFamily::Inet6 && leftover.is_none() {
         // IPv6 interface prefix routes (fe80::/64 included) are scope
         // universe, so the Link-scope test below does not catch them. The
         // RIB already derives connected routes from the addresses. An
@@ -5499,8 +5501,8 @@ pub fn route_from_msg_with(
     if msg.header.scope == RouteScope::Link {
         builder = builder.rtype(RibType::Connected);
     }
-    if leftover {
-        builder = builder.rtype(RibType::Ospf);
+    if let Some((rtype, _)) = leftover {
+        builder = builder.rtype(rtype);
     }
     if msg.header.destination_prefix_length == 0 && msg.header.address_family == AddressFamily::Inet
     {
@@ -5513,10 +5515,6 @@ pub fn route_from_msg_with(
     {
         builder = builder.ipv6_prefix(Ipv6Net::new(Ipv6Addr::UNSPECIFIED, 0).unwrap());
     }
-
-    // `rtm_table` is a single byte; ids > 255 arrive as
-    // `RT_TABLE_UNSPEC` in the header with the real id in `RTA_TABLE`.
-    let mut table_id = msg.header.table as u32;
 
     for attr in msg.attributes.into_iter() {
         match attr {
@@ -5595,9 +5593,13 @@ pub fn route_from_msg_with(
         }
     }
     // BGP routes in a VRF table are our own EVPN/VPN imports: never
-    // redistribute them back. Main-table BGP routes can belong to another
-    // daemon, such as an underlay bgpd, so NHT and redistribution keep them.
-    if protocol == RouteProtocol::Bgp && table_id != RouteHeader::RT_TABLE_MAIN as u32 {
+    // redistribute them back (an earlier run's come in as leftovers).
+    // Main-table BGP routes can belong to another daemon, such as an
+    // underlay bgpd, so NHT and redistribution keep them.
+    if protocol == RouteProtocol::Bgp
+        && table_id != RouteHeader::RT_TABLE_MAIN as u32
+        && leftover.is_none()
+    {
         return None;
     }
     match builder.prefix? {
@@ -5606,21 +5608,27 @@ pub fn route_from_msg_with(
     }
 
     let (prefix, mut entry) = builder.build();
-    if leftover {
+    if let Some((_, distance)) = leftover {
         entry.stale = true;
-        entry.distance = 110;
+        entry.distance = distance;
     }
 
     let msg = FibRoute {
         prefix,
         entry,
+        // The RIB type zebra-rs installs this protocol for (see
+        // `route_protocol`). `RTPROT_STATIC` is an operator's route.
         kernel_protocol: match protocol {
-            RouteProtocol::Static => Some(RibType::Static),
+            RouteProtocol::Zebra => Some(RibType::Static),
             RouteProtocol::Ospf => Some(RibType::Ospf),
             RouteProtocol::Isis => Some(RibType::Isis),
             RouteProtocol::Bgp => Some(RibType::Bgp),
             _ => None,
         },
+        // Before zebra-rs used `RTPROT_ZEBRA` for statics, it installed
+        // them as `RTPROT_STATIC`. One found at startup may be such a
+        // route, adopted if the static config installs the same route.
+        legacy_static: dump && protocol == RouteProtocol::Static,
         table_id,
     };
 
@@ -6085,6 +6093,70 @@ mod tests {
         }
     }
 
+    /// Startup ownership: which kernel routes are an earlier zebra-rs
+    /// run's leftovers (stale, under their owner's type), which are an
+    /// operator's, and which are never mirrored at all.
+    #[test]
+    fn startup_dump_classifies_leftovers_by_protocol_and_table() {
+        let route = |protocol, table, blackhole: bool| {
+            let mut msg = RouteMessage::default();
+            msg.header.address_family = AddressFamily::Inet6;
+            msg.header.destination_prefix_length = 64;
+            msg.header.kind = if blackhole {
+                RouteType::BlackHole
+            } else {
+                RouteType::Unicast
+            };
+            msg.header.protocol = protocol;
+            set_route_table(&mut msg, table);
+            msg.attributes
+                .push(RouteAttribute::Destination(RouteAddress::Inet6(
+                    "2001:db8:99::".parse().unwrap(),
+                )));
+            msg.attributes.push(RouteAttribute::Priority(1024));
+            if !blackhole {
+                msg.attributes.push(RouteAttribute::Oif(3));
+            }
+            msg
+        };
+        let main = RouteHeader::RT_TABLE_MAIN as u32;
+        let dump = |msg| route_from_msg_with(msg, &BTreeMap::new(), true);
+        // Ours, in any table: stale under the owner's type and distance.
+        for (protocol, table, rtype, distance) in [
+            (RouteProtocol::Zebra, main, RibType::Static, 1),
+            (RouteProtocol::Zebra, 100, RibType::Static, 1),
+            (RouteProtocol::Isis, main, RibType::Isis, 115),
+            (RouteProtocol::Ospf, main, RibType::Ospf, 110),
+            (RouteProtocol::Bgp, 100, RibType::Bgp, 200),
+        ] {
+            let route = dump(route(protocol, table, true)).unwrap();
+            assert_eq!((route.entry.rtype, route.entry.distance), (rtype, distance));
+            assert!(route.entry.stale, "{protocol:?} in table {table}");
+            assert!(matches!(route.entry.nexthop, Nexthop::Blackhole(_)));
+            assert!(!route.legacy_static);
+        }
+        // Main-table BGP may be another daemon's: a kernel route.
+        let bgp = dump(route(RouteProtocol::Bgp, main, false)).unwrap();
+        assert_eq!(bgp.entry.rtype, RibType::Kernel);
+        assert!(!bgp.entry.stale);
+        // `proto static` is an operator's; at startup it may also be a
+        // pre-RTPROT_ZEBRA static to adopt.
+        let operator = dump(route(RouteProtocol::Static, main, true)).unwrap();
+        assert_eq!(operator.entry.rtype, RibType::Kernel);
+        assert!(operator.legacy_static && !operator.entry.stale);
+        assert!(
+            !route_from_msg(route(RouteProtocol::Static, main, true))
+                .unwrap()
+                .legacy_static
+        );
+        // Statics install as RTPROT_ZEBRA, so the dump can recognize them.
+        assert_eq!(route_protocol(RibType::Static), RouteProtocol::Zebra);
+        assert_eq!(
+            leftover_rtype(route_protocol(RibType::Static), main),
+            Some((RibType::Static, 1))
+        );
+    }
+
     #[test]
     fn kernel_blackholes_and_bgp_feedback_filter() {
         for (family, prefix, destination) in [
@@ -6129,12 +6201,16 @@ mod tests {
             }
             msg.header.protocol = RouteProtocol::Bgp;
             msg.header.kind = RouteType::Unicast;
-            for dump in [true, false] {
-                assert!(
-                    route_from_msg_with(msg.clone(), &BTreeMap::new(), dump).is_none(),
-                    "BGP output must not feed back as kernel input"
-                );
-            }
+            assert!(
+                route_from_msg(msg.clone()).is_none(),
+                "BGP output must not feed back as kernel input"
+            );
+            // At startup it is an earlier run's: a stale BGP leftover the
+            // fresh import replaces, never a kernel route.
+            let leftover =
+                route_from_msg_with(msg.clone(), &BTreeMap::new(), true).expect("VRF BGP leftover");
+            assert_eq!(leftover.entry.rtype, RibType::Bgp);
+            assert!(leftover.entry.stale);
             // Another daemon's main-table BGP route (an underlay bgpd)
             // stays visible to NHT.
             let mut main = msg.clone();
@@ -6165,9 +6241,22 @@ mod tests {
                 v6_route("2001:db8:1::", 64, RouteProtocol::Kernel),
                 v6_route("fe80::", 64, RouteProtocol::Kernel),
                 v6_route("fe80::", 64, RouteProtocol::Boot),
-                v6_route("2001:db8:2::", 64, RouteProtocol::Isis),
             ] {
                 assert!(route_from_msg_with(msg, &BTreeMap::new(), dump).is_none());
+            }
+            // An IS-IS route is ours: a stale leftover at startup, and never
+            // a distance-0 kernel route that would outrank the fresh one.
+            let isis = route_from_msg_with(
+                v6_route("2001:db8:2::", 64, RouteProtocol::Isis),
+                &BTreeMap::new(),
+                dump,
+            );
+            if dump {
+                let isis = isis.expect("IS-IS leftover");
+                assert_eq!(isis.entry.rtype, RibType::Isis);
+                assert!(isis.entry.stale);
+            } else {
+                assert!(isis.is_none());
             }
             let route = route_from_msg_with(
                 v6_route("2001:db8:3::", 64, RouteProtocol::Boot),

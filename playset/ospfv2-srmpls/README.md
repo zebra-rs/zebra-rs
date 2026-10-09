@@ -183,7 +183,7 @@ S  *> 172.16.1.0/24 [1/0] via 10.0.0.8 (recursive), 00:00:30
                           via 192.168.0.2, s-n1, label 16800
 
 s>ip route show 172.16.1.0/24
-172.16.1.0/24 nhid 8  encap mpls  16800 via 192.168.0.2 dev s-n1 proto static onlink
+172.16.1.0/24 nhid 8  encap mpls  16800 via 192.168.0.2 dev s-n1 proto zebra onlink
 ```
 
 One `encap mpls 16800` push, inherited from the covering route, is why
@@ -207,7 +207,7 @@ s>show ip route
 S  *> 172.16.1.0/24 [1/0] via 192.168.0.2, s-n1, label 200, 00:00:03
 
 s>ip route show 172.16.1.0/24
-172.16.1.0/24 nhid 12  encap mpls  200 via 192.168.0.2 dev s-n1 proto static onlink
+172.16.1.0/24 nhid 12  encap mpls  200 via 192.168.0.2 dev s-n1 proto zebra onlink
 ```
 
 Label 200 means nothing to anyone yet — give it meaning on the transit
@@ -228,7 +228,7 @@ n1>show mpls ilm
 ...
 
 n1>ip -f mpls route show
-200 via inet 192.168.2.2 dev n1-d proto static
+200 via inet 192.168.2.2 dev n1-d proto zebra
 ...
 ```
 

@@ -1,5 +1,5 @@
 {
-  "binary_sha256": "b1c516a98c99fb8c0ab0007fd707a265757a09bbc974fe0f6b9e922a4db4bded",
+  "binary_sha256": "ee7b8097c06ced72ce650f0e01a639af3e4d334d7e3a48ee9f52aff7b0063802",
   "checks": [
     {
       "name": "v1 EVPN established",
@@ -319,6 +319,78 @@
     },
     {
       "name": "Move to br2000: routed -6",
+      "passed": true
+    },
+    {
+      "name": "Static 10.99.1.0/24 installs as proto zebra",
+      "passed": true
+    },
+    {
+      "name": "Static 10.99.2.0/24 installs as proto zebra",
+      "passed": true
+    },
+    {
+      "name": "Static 2001:db8:99:1::/64 installs as proto zebra",
+      "passed": true
+    },
+    {
+      "name": "v2 Type-5 10.31.1.0/24",
+      "passed": true
+    },
+    {
+      "name": "Restart: v2 EVPN established",
+      "passed": true
+    },
+    {
+      "name": "Restart: Type-5 10.20.1.0/24",
+      "passed": true
+    },
+    {
+      "name": "Restart: Type-5 2001:db8:20:1::/64",
+      "passed": true
+    },
+    {
+      "name": "Restart: RMAC neighbor -4",
+      "passed": true
+    },
+    {
+      "name": "Restart: RMAC neighbor -6",
+      "passed": true
+    },
+    {
+      "name": "Restart: RMAC FDB",
+      "passed": true
+    },
+    {
+      "name": "Restart: routed -4",
+      "passed": true
+    },
+    {
+      "name": "Restart: routed -6",
+      "passed": true
+    },
+    {
+      "name": "Restart: unreplaced static leftover swept",
+      "passed": true
+    },
+    {
+      "name": "Restart: VRF BGP leftover swept",
+      "passed": true
+    },
+    {
+      "name": "Restart: configured static 10.99.1.0/24 kept",
+      "passed": true
+    },
+    {
+      "name": "Restart: configured static 2001:db8:99:1::/64 kept",
+      "passed": true
+    },
+    {
+      "name": "Restart: operator proto static kept",
+      "passed": true
+    },
+    {
+      "name": "Restart: legacy proto static adopted",
       "passed": true
     },
     {

@@ -108,7 +108,7 @@ d>show ipv6 route
 S  *> fcbb:bbbb:8:e064::/128 [1/0] is directly connected, sr0, seg6local End.DT6, 00:01:58
 
 d$ ip -6 route show | grep e064
-fcbb:bbbb:8:e064::  encap seg6local action End.DT6 table main dev sr0 proto static metric 1024 pref medium
+fcbb:bbbb:8:e064::  encap seg6local action End.DT6 table main dev sr0 proto zebra metric 1024 pref medium
 ```
 
 Packets arriving for this SID are decapsulated and the inner IPv6
@@ -134,7 +134,7 @@ The kernel route carries the H.Encap:
 
 ```
 s$ ip -6 route show | grep 2001:db8:200
-2001:db8:200::/64 nhid 14  encap seg6 mode encap segs 1 [ fcbb:bbbb:8:e064:: ] via fcbb:bbbb:8:e064:: dev s-n1 proto static metric 1024 onlink pref medium
+2001:db8:200::/64 nhid 14  encap seg6 mode encap segs 1 [ fcbb:bbbb:8:e064:: ] via fcbb:bbbb:8:e064:: dev s-n1 proto zebra metric 1024 onlink pref medium
 ```
 
 Note the `via fcbb:bbbb:8:e064:: dev s-n1`: the *first segment* is
@@ -193,7 +193,7 @@ S  *> 3001:db8::1/128 [1/0] via 2001:db8:cafe::1 (recursive), 00:00:03
                             via seg6 [fcbb:bbbb:1:40::], i1
 
 z3$ ip -6 route show 3001:db8::1
-3001:db8::1 nhid 2  encap seg6 mode encap segs 1 [ fcbb:bbbb:1:40:: ] via fcbb:bbbb:1:: dev i1 proto static metric 1024 onlink pref medium
+3001:db8::1 nhid 2  encap seg6 mode encap segs 1 [ fcbb:bbbb:1:40:: ] via fcbb:bbbb:1:: dev i1 proto zebra metric 1024 onlink pref medium
 ```
 
 The kernel nexthop is shared with the covering BGP route (same

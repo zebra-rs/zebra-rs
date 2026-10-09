@@ -26,6 +26,12 @@ admin flap, VXLAN carrier flap, neighbor/FDB flush, VXLAN detach and
 re-attach, external route deletion) and checks that routes, RMAC adjacency
 and routing recover. It moves the L3-VNI VXLAN to a second bridge and
 back, checking that no RMAC neighbors remain on the bridge it left.
+Finally it kills one speaker, changes its configuration and the peer's
+advertisements while it is down, and restarts it with a short
+`--leftover-sweep-time`. Leftovers its fresh routes replace are kept,
+the rest (a removed static, a withdrawn Type-5) are swept, an operator
+`proto static` route survives, and a pre-`RTPROT_ZEBRA` copy of a
+configured static is adopted.
 Real pings traverse the Linux VXLAN dataplane.
 
 Build the binaries and run from the repository root on Linux with

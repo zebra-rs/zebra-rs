@@ -89,7 +89,7 @@ async fn installed_protocol_route_echoes_do_not_enter_kernel_rib() {
         let prefix: IpNet = prefix.parse().unwrap();
         for table_id in [RT_TABLE_MAIN, 100] {
             for (protocol, rtype, blackhole, metric) in [
-                (RouteProtocol::Static, RibType::Static, true, 0),
+                (RouteProtocol::Zebra, RibType::Static, true, 0),
                 (RouteProtocol::Ospf, RibType::Ospf, false, 10),
                 (RouteProtocol::Bgp, RibType::Bgp, false, 20),
             ] {
@@ -134,7 +134,7 @@ async fn installed_protocol_route_echoes_do_not_enter_kernel_rib() {
 async fn external_protocol_routes_and_startup_leftovers_are_not_echoes() {
     let mut rib = Rib::new(false).unwrap();
     let prefix: IpNet = "203.0.113.0/24".parse().unwrap();
-    let event = kernel_route(prefix, RouteProtocol::Static, true, 10, RT_TABLE_MAIN);
+    let event = kernel_route(prefix, RouteProtocol::Zebra, true, 10, RT_TABLE_MAIN);
     assert!(!rib.is_kernel_route_echo(&event));
     let mut owner = RibEntry::new(RibType::Static);
     owner.nexthop = Nexthop::Blackhole(10);
@@ -148,14 +148,12 @@ async fn external_protocol_routes_and_startup_leftovers_are_not_echoes() {
     assert!(rib.is_kernel_route_echo(&event));
     assert!(!rib.is_kernel_route_echo(&kernel_route(
         prefix,
-        RouteProtocol::Static,
+        RouteProtocol::Zebra,
         true,
         20,
         RT_TABLE_MAIN,
     )));
-    assert!(
-        !rib.is_kernel_route_echo(&kernel_route(prefix, RouteProtocol::Static, true, 10, 100,))
-    );
+    assert!(!rib.is_kernel_route_echo(&kernel_route(prefix, RouteProtocol::Zebra, true, 10, 100,)));
     owner.stale = true;
     insert(&mut rib, prefix, RT_TABLE_MAIN, owner);
     assert!(!rib.is_kernel_route_echo(&event));
@@ -236,7 +234,7 @@ async fn static_blackhole_echo_keeps_real_kernel_route() {
     );
     rib.process_fib_msg(FibMessage::NewRoute(kernel_route(
         IpNet::V4(prefix),
-        RouteProtocol::Static,
+        RouteProtocol::Zebra,
         true,
         0,
         RT_TABLE_MAIN,
@@ -350,5 +348,44 @@ async fn unrelated_mac_bindings_preserve_real_shared_ip_neighbors() {
         )
         .await;
         assert!(neighbor().trim().is_empty(), "{}", neighbor());
+    }
+}
+
+/// Upgrade path: a static an earlier zebra-rs installed as `RTPROT_STATIC`
+/// is adopted when the static config installs the same route; any other
+/// `proto static` route stays an operator's kernel route.
+#[tokio::test]
+async fn legacy_proto_static_route_is_adopted_only_by_the_same_static() {
+    for prefix in ["203.0.113.0/24", "2001:db8:abcd::/64"] {
+        let prefix: IpNet = prefix.parse().unwrap();
+        let mut rib = Rib::new(false).unwrap();
+        let priority = if matches!(prefix, IpNet::V6(_)) {
+            1024
+        } else {
+            0
+        };
+        let mut legacy = RibEntry::new(RibType::Kernel);
+        legacy.metric = priority;
+        legacy.nexthop = Nexthop::Blackhole(priority);
+        insert(&mut rib, prefix, RT_TABLE_MAIN, legacy);
+        rib.legacy_statics.insert((RT_TABLE_MAIN, prefix, priority));
+
+        let mut config = RibEntry::new(RibType::Static);
+        config.nexthop = Nexthop::Blackhole(0);
+        // Another table, or another priority, is a different route.
+        rib.adopt_legacy_static(100, prefix, &config);
+        let mut other = config.clone();
+        other.nexthop = Nexthop::Blackhole(20);
+        rib.adopt_legacy_static(RT_TABLE_MAIN, prefix, &other);
+        assert_eq!(entries(&rib, prefix, RT_TABLE_MAIN).len(), 1);
+        // Not a static: never adopts.
+        let mut ospf = config.clone();
+        ospf.rtype = RibType::Ospf;
+        rib.adopt_legacy_static(RT_TABLE_MAIN, prefix, &ospf);
+        assert_eq!(entries(&rib, prefix, RT_TABLE_MAIN).len(), 1);
+
+        rib.adopt_legacy_static(RT_TABLE_MAIN, prefix, &config);
+        assert!(entries(&rib, prefix, RT_TABLE_MAIN).is_empty());
+        assert!(rib.legacy_statics.is_empty());
     }
 }

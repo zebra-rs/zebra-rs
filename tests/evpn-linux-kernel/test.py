@@ -72,6 +72,18 @@ def main():
         return json.loads(ns(node, 'ip', family, '-j', 'route', 'show',
                              'table', '100', 'exact', prefix).stdout)
 
+    def main_route(node, prefix):
+        family = '-6' if ':' in prefix else '-4'
+        return json.loads(ns(node, 'ip', family, '-j', 'route', 'show',
+                             'exact', prefix).stdout)
+
+    def start(v, config, log, *extra):
+        return subprocess.Popen(['ip', 'netns', 'exec', tag + '-' + v,
+                                 str(args.zebra), '--yang-path', str(args.yang),
+                                 '--config-file', str(config), *extra],
+                                stdout=log, stderr=log)
+
+    configs = {}
     try:
         with tempfile.TemporaryDirectory(prefix=tag + '-') as directory:
             directory = Path(directory)
@@ -120,6 +132,12 @@ def main():
                 # Generic static discard routes, present before daemon startup.
                 ns(v, 'ip', 'route', 'add', 'blackhole', f'10.30.{i}.0/24', 'table', '100', 'proto', 'static')
                 ns(v, 'ip', '-6', 'route', 'add', 'blackhole', f'2001:db8:30:{i}::/64', 'table', '100', 'proto', 'static')
+                if i == 1:
+                    # Withdrawn while v2 is down, to leave v2 a VRF BGP leftover.
+                    ns(v, 'ip', 'route', 'add', 'blackhole', '10.31.1.0/24', 'table', '100', 'proto', 'static')
+                else:
+                    # An operator's main-table route: never a zebra-rs leftover.
+                    ns(v, 'ip', 'route', 'add', 'blackhole', '10.98.0.0/24', 'proto', 'static')
                 lines = [f'set system hostname {v}', 'set router bgp global as 65000',
                          f'set router bgp global router-id 192.0.2.{i}',
                          'set router bgp afi-safi evpn advertise-all-vni true',
@@ -138,13 +156,16 @@ def main():
                               f'set router bgp vrf tenant100 afi-safi {af} redistribute kernel']
                 lines += [f'set router bgp vrf tenant100 afi-safi ipv4 network 10.20.{i}.0/24',
                           f'set router bgp vrf tenant100 afi-safi ipv6 network 2001:db8:20:{i}::/64']
+                if i == 2:
+                    lines += ['set router static ipv4 route 10.99.1.0/24 nexthop blackhole',
+                              'set router static ipv4 route 10.99.2.0/24 nexthop blackhole',
+                              'set router static ipv6 route 2001:db8:99:1::/64 nexthop blackhole']
                 config = directory / (v + '.conf')
                 config.write_text('\n'.join(lines) + '\n')
+                configs[v] = lines
                 log = (directory / (v + '.log')).open('w+')
                 logs.append((v, log))
-                processes.append(subprocess.Popen(['ip', 'netns', 'exec', tag + '-' + v,
-                                                   str(args.zebra), '--yang-path', str(args.yang),
-                                                   '--config-file', str(config)], stdout=log, stderr=log))
+                processes.append(start(v, config, log))
 
             for i in [1, 2]:
                 v = 'v' + str(i)
@@ -255,6 +276,40 @@ def main():
                               check=False).returncode == 0)
             for link in ['dbr2000', 'dbr2000b', 'br2000b']:
                 ns('v2', 'ip', 'link', 'del', link)
+
+            # A crash leaves routes behind. On restart, each owner's route
+            # replaces its leftover; the rest are swept after the grace
+            # period; operator routes stay; a pre-RTPROT_ZEBRA static is
+            # adopted by the same configured static.
+            def protocols(node, prefix):
+                return [r.get('protocol') for r in main_route(node, prefix)]
+            for prefix in ['10.99.1.0/24', '10.99.2.0/24', '2001:db8:99:1::/64']:
+                expect(f'Static {prefix} installs as proto zebra', lambda prefix=prefix:
+                       protocols('v2', prefix) == ['zebra'])
+            expect('v2 Type-5 10.31.1.0/24', lambda:
+                   any(r.get('dev') == 'br2000' for r in route('v2', '10.31.1.0/24')))
+            processes[1].kill()
+            processes[1].wait()
+            ns('v1', 'ip', 'route', 'del', 'blackhole', '10.31.1.0/24', 'table', '100', 'proto', 'static')
+            ns('v2', 'ip', 'route', 'add', 'blackhole', '10.97.0.0/24', 'proto', 'static')
+            restart = [line for line in configs['v2'] if '10.99.2.0/24' not in line]
+            restart.append('set router static ipv4 route 10.97.0.0/24 nexthop blackhole')
+            config = Path(directory) / 'v2-restart.conf'
+            config.write_text('\n'.join(restart) + '\n')
+            processes[1] = start('v2', config, logs[1][1], '--leftover-sweep-time', '8')
+            expect('Restart: v2 EVPN established', lambda: 'Estab' in show('v2', 'show bgp summary'))
+            type5_restored('Restart')
+            expect('Restart: unreplaced static leftover swept', lambda:
+                   not main_route('v2', '10.99.2.0/24'), timeout=45)
+            expect('Restart: VRF BGP leftover swept', lambda:
+                   not route('v2', '10.31.1.0/24'), timeout=45)
+            for prefix in ['10.99.1.0/24', '2001:db8:99:1::/64']:
+                expect(f'Restart: configured static {prefix} kept', lambda prefix=prefix:
+                       protocols('v2', prefix) == ['zebra'])
+            expect('Restart: operator proto static kept', lambda:
+                   protocols('v2', '10.98.0.0/24') == ['static'])
+            expect('Restart: legacy proto static adopted', lambda:
+                   protocols('v2', '10.97.0.0/24') == ['zebra'])
 
             # Removing one NLRI must retain the other bindings and their MAC.
             ns('v1', 'ip', '-4', 'neighbor', 'del', '10.10.0.101', 'dev', 'br1000')

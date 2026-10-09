@@ -69,7 +69,7 @@ Feature: Static route inherits SRv6 segments from its covering route
     # The kernel forwards the static prefix with the inherited H.Encap.
     And kernel route "3001:db8::1" in namespace "z3" should eventually contain "encap seg6"
     And kernel route "3001:db8::1" in namespace "z3" should eventually contain "fcbb:bbbb:1:40::"
-    And kernel route "3001:db8::1" in namespace "z3" should eventually contain "proto static"
+    And kernel route "3001:db8::1" in namespace "z3" should eventually contain "proto zebra"
     # End-to-end: z2 cannot route the inner destination, so a reply
     # from h1 proves the packet crossed the core inside the inherited
     # SRv6 encapsulation and was decapsulated by z1's End.DT6 SID.

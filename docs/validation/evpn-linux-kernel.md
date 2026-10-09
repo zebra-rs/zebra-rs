@@ -1,7 +1,7 @@
 # EVPN Linux kernel forwarding validation
 
 The [standalone namespace test](../../tests/evpn-linux-kernel/README.md)
-passed **90/90 checks** on 2026-10-09. Two zebra-rs speakers exchanged
+passed **108/108 checks** on 2026-10-09. Two zebra-rs speakers exchanged
 EVPN Type-2/3/5 state and forwarded tenant traffic through Linux bridge,
 VXLAN and VRF devices. No OVN, OVS, FRR, cEOS or containers participated.
 
@@ -18,7 +18,14 @@ second bridge and back; both bridges keep carrier through a dummy port,
 so only zebra-rs can remove the RMAC neighbors left on the old one. With
 the link and neighbor recovery hooks disabled, nothing recovers after the
 first (admin flap) scenario; with only route-deletion recovery and
-bridge-move cleanup disabled, exactly those eight checks fail. The
+bridge-move cleanup disabled, exactly those eight checks fail. A
+crash-and-restart scenario kills one speaker with SIGKILL, changes its
+configuration and the peer's advertisements while it is down, and
+restarts it: leftovers its fresh routes replace are kept, a removed
+static and a withdrawn Type-5 are swept, an operator `proto static`
+route survives, and a pre-`RTPROT_ZEBRA` copy of a configured static is
+adopted. A binary built without leftover handling fails exactly those
+eight leftover checks. The
 [JSON report](evpn-linux-kernel.json) records each check and the tested
 binary's SHA-256.
 
