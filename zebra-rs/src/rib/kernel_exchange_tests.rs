@@ -625,3 +625,123 @@ async fn sweep_removes_every_leftover_priority_and_route_type() {
 async fn fresh_floating_static_replaces_every_leftover_priority() {
     check_leftover_priorities(true).await;
 }
+
+/// A bridge Type-5 install that failed (no L3-VNI bridge yet) is kept as
+/// desired state, to be installed once the bridge appears. Its BGP
+/// withdrawal must cancel that, though the route was never installed.
+#[tokio::test]
+async fn a_withdrawn_type5_route_whose_install_failed_is_not_recovered() {
+    for prefix in ["198.51.100.0/24", "2001:db8:5::/64"] {
+        let prefix: IpNet = prefix.parse().unwrap();
+        let mut rib = Rib::new(false).unwrap();
+        rib.fib_handle.kernel_route_exchange = true;
+        let mut entry = RibEntry::new(RibType::Bgp);
+        entry.valid = true;
+        entry.selected = true;
+        entry.nexthop = Nexthop::Uni(NexthopUni {
+            addr: "192.0.2.2".parse().unwrap(),
+            vxlan: Some(crate::rib::VxlanL3Encap {
+                remote_vtep: "192.0.2.2".parse().unwrap(),
+                l3vni: 3000,
+                remote_rmac: [2, 0, 0, 0, 0, 3],
+            }),
+            ..Default::default()
+        });
+        entry.fib = match prefix {
+            IpNet::V4(p) => rib.fib_handle.route_ipv4_add(&p, &entry, 100).await,
+            IpNet::V6(p) => rib.fib_handle.route_ipv6_add(&p, &entry, 100).await,
+        };
+        assert!(!entry.fib, "no bridge for the L3 VNI yet");
+        let metric = if matches!(prefix, IpNet::V6(_)) {
+            1024
+        } else {
+            0
+        };
+        assert_eq!(
+            rib.fib_handle.evpn_prefix_deleted(100, prefix, metric),
+            Some(3000),
+            "the failed install is kept for recovery"
+        );
+        insert(&mut rib, prefix, 100, entry);
+        match prefix {
+            IpNet::V4(p) => {
+                rib.ipv4_route_del_vrf(100, &p, RibEntry::new(RibType::Bgp))
+                    .await
+            }
+            IpNet::V6(p) => {
+                rib.ipv6_route_del_vrf(100, &p, RibEntry::new(RibType::Bgp))
+                    .await
+            }
+        }
+        assert_eq!(
+            rib.fib_handle.evpn_prefix_deleted(100, prefix, metric),
+            None,
+            "{prefix} was withdrawn: nothing is left to recover"
+        );
+    }
+}
+
+/// A VXLAN device first seen already up and enslaved (moved into the
+/// namespace, say) after Type-5 routes for its L3 VNI arrived: there is
+/// no later up transition, so the first reconciliation must already
+/// install the RMAC on it.
+#[tokio::test]
+#[ignore = "requires root in an isolated network namespace"]
+async fn a_vxlan_first_seen_up_and_enslaved_gets_its_rmac() {
+    use futures::TryStreamExt;
+    require_netns();
+    ip(&["link", "add", "brfirst", "type", "bridge"]);
+    ip(&["link", "set", "brfirst", "up"]);
+    ip(&[
+        "link",
+        "add",
+        "vxfirst",
+        "type",
+        "vxlan",
+        "id",
+        "3000",
+        "local",
+        "192.0.2.1",
+        "dstport",
+        "4789",
+        "nolearning",
+    ]);
+    ip(&["link", "set", "vxfirst", "master", "brfirst"]);
+    ip(&["link", "set", "vxfirst", "up"]);
+    let mut rib = Rib::new(false).unwrap();
+    rib.fib_handle.kernel_route_exchange = true;
+    let prefix = "198.51.100.0/24".parse().unwrap();
+    let mut entry = RibEntry::new(RibType::Bgp);
+    entry.nexthop = Nexthop::Uni(NexthopUni {
+        addr: "192.0.2.3".parse().unwrap(),
+        vxlan: Some(crate::rib::VxlanL3Encap {
+            remote_vtep: "192.0.2.3".parse().unwrap(),
+            l3vni: 3000,
+            remote_rmac: [2, 0, 0, 0, 0, 3],
+        }),
+        ..Default::default()
+    });
+    assert!(!rib.fib_handle.route_ipv4_add(&prefix, &entry, 100).await);
+    for name in ["brfirst", "vxfirst"] {
+        let mut links = rib
+            .fib_handle
+            .handle
+            .link()
+            .get()
+            .match_name(name.into())
+            .execute();
+        let link = links.try_next().await.unwrap().unwrap();
+        rib.link_add(crate::fib::netlink::link_from_msg(link)).await;
+    }
+    let out = std::process::Command::new("bridge")
+        .args(["fdb", "show", "dev", "vxfirst"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .contains("02:00:00:00:00:03 dst 192.0.2.3"),
+        "the RMAC is installed on the first reconciliation"
+    );
+}

@@ -4128,6 +4128,18 @@ impl FibHandle {
             .map(|(encap, _)| encap.l3vni)
     }
 
+    /// Withdraw the bridge Type-5 state tracked for `(table_id, prefix)`
+    /// for a route the kernel never accepted. A failed add is still desired
+    /// state (`evpn_l3vni_reassert` installs it once the bridge is up), so
+    /// the RIB's withdrawal must cancel it although nothing was installed.
+    pub async fn evpn_prefix_withdraw(&self, table_id: u32, prefix: IpNet) {
+        let Some((encap, metric)) = self.evpn_prefix_tracked(table_id, prefix) else {
+            return;
+        };
+        self.evpn_prefix_route(prefix, table_id, metric, encap, false)
+            .await;
+    }
+
     /// Reinstall one desired bridge Type-5 route.
     pub async fn evpn_prefix_reinstall(&self, table_id: u32, prefix: IpNet) {
         let Some((encap, metric)) = self.evpn_prefix_tracked(table_id, prefix) else {
