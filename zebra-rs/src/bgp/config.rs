@@ -1978,6 +1978,19 @@ fn config_network(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     Some(())
 }
 
+fn config_kernel_route_exchange(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
+        return None;
+    }
+    let enabled = if op.is_set() { args.boolean()? } else { false };
+    let _ = bgp
+        .ctx
+        .rib
+        .send(crate::rib::Message::KernelRouteExchange(enabled));
+    Some(())
+}
+
 fn config_advertise_all_vni(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let afi_safi: AfiSafi = args.afi_safi()?;
     // The leaf only carries meaning for evpn; ignore on other
@@ -2061,6 +2074,7 @@ fn config_evpn_vtep_source(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
         bgp.evpn_withdraw_es_routes(*esi, old_source);
     }
     bgp.evpn_vtep_source = source;
+    bgp.evpn_vteps_sync();
     if bgp.advertise_all_vni {
         let entries: Vec<FdbEntry> = bgp.local_fdb.values().cloned().collect();
         for entry in entries {
@@ -3138,6 +3152,7 @@ fn config_evpn_bum_tunnel_type(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> O
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BgpRedistSource {
+    Kernel,
     Connected,
     Static,
     Isis,
@@ -3202,6 +3217,7 @@ fn wire_afi(afi_safi: &bgp_packet::AfiSafi) -> crate::rib::RedistAfi {
 
 fn wire_rtype(src: BgpRedistSource) -> crate::rib::RibType {
     match src {
+        BgpRedistSource::Kernel => crate::rib::RibType::Kernel,
         BgpRedistSource::Connected => crate::rib::RibType::Connected,
         BgpRedistSource::Static => crate::rib::RibType::Static,
         BgpRedistSource::Isis => crate::rib::RibType::Isis,
@@ -5588,6 +5604,10 @@ impl Bgp {
             super::vrf_config::config_vrf_afi_ipv4_redistribute,
         );
         self.callback_add(
+            "/router/bgp/vrf/afi-safi/ipv4/redistribute/kernel",
+            super::vrf_config::config_vrf_afi_ipv4_redistribute_kernel,
+        );
+        self.callback_add(
             "/router/bgp/vrf/afi-safi/ipv4/redistribute/connected",
             super::vrf_config::config_vrf_afi_ipv4_redistribute_connected,
         );
@@ -5614,6 +5634,10 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/vrf/afi-safi/ipv6/redistribute",
             super::vrf_config::config_vrf_afi_ipv6_redistribute,
+        );
+        self.callback_add(
+            "/router/bgp/vrf/afi-safi/ipv6/redistribute/kernel",
+            super::vrf_config::config_vrf_afi_ipv6_redistribute_kernel,
         );
         self.callback_add(
             "/router/bgp/vrf/afi-safi/ipv6/redistribute/connected",
@@ -5833,6 +5857,11 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/afi-safi/advertise-all-vni",
             config_advertise_all_vni,
+        );
+
+        self.callback_add(
+            "/router/bgp/afi-safi/kernel-route-exchange",
+            config_kernel_route_exchange,
         );
 
         // EVPN overlay encapsulation (RFC 9252) under
@@ -8982,6 +9011,7 @@ mod neighbor_group_wiring_tests {
             vrf_table: None,
             bridge: false,
             vxlan_local: None,
+            vxlan_metadata: None,
             parent: None,
             vlan_id: None,
             mtu_error: None,
@@ -11150,6 +11180,22 @@ mod es_linkadd_resync_tests {
         )
     }
 
+    /// `vtep-source` is one of the inputs to `LocalRib::evpn_vteps`; setting
+    /// and deleting it must keep the set current, or a router-id VTEP would
+    /// still be rewritten to the session address (or kept after removal).
+    #[tokio::test]
+    async fn vtep_source_updates_evpn_vteps() {
+        let mut bgp = fresh_bgp();
+        let rid = std::net::Ipv4Addr::new(192, 0, 2, 1);
+        bgp.router_id = rid;
+        config_evpn_vtep_source(&mut bgp, arg_words(&["evpn", "192.0.2.1"]), ConfigOp::Set)
+            .expect("set vtep-source");
+        assert!(bgp.local_rib.evpn_vteps.contains(&IpAddr::V4(rid)));
+        config_evpn_vtep_source(&mut bgp, arg_words(&["evpn"]), ConfigOp::Delete)
+            .expect("delete vtep-source");
+        assert!(bgp.local_rib.evpn_vteps.is_empty());
+    }
+
     /// The ESI on the originated Type-2's selected Loc-RIB path.
     fn selected_esi(bgp: &Bgp) -> Option<[u8; 10]> {
         let rd = RouteDistinguisher::from_str("10.0.0.1:10").unwrap();
@@ -11188,6 +11234,7 @@ mod es_linkadd_resync_tests {
         )
         .unwrap();
         let entry = FdbEntry {
+            ip: None,
             vni: 10,
             mac: MacAddr::from_str("aa:bb:cc:dd:ee:01").unwrap(),
             ifindex: 7,
@@ -11195,7 +11242,8 @@ mod es_linkadd_resync_tests {
             flags: 0,
             vxlan_local: None,
         };
-        bgp.local_fdb.insert((entry.vni, entry.mac), entry.clone());
+        bgp.local_fdb
+            .insert((entry.vni, entry.mac, entry.ip), entry.clone());
         bgp.evpn_originate_macip(&entry);
         assert_eq!(
             selected_esi(&bgp),
@@ -11220,6 +11268,7 @@ mod es_linkadd_resync_tests {
             vrf_table: None,
             bridge: false,
             vxlan_local: None,
+            vxlan_metadata: None,
             parent: None,
             vlan_id: None,
             mtu_error: None,

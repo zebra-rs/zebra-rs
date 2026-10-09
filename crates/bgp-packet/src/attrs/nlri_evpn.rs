@@ -146,7 +146,13 @@ pub struct EvpnMac {
     pub esi: [u8; 10],
     pub ether_tag: u32,
     pub mac: [u8; 6],
+    /// Optional IPv4/IPv6 binding, part of the Type-2 route key.
+    pub ip: Option<IpAddr>,
     pub vni: u32,
+    /// Optional MPLS Label2 (RFC 7432 §7.2). Symmetric IRB carries the
+    /// L3VNI here (RFC 9135 §5.1); kept so a reflected route is re-emitted
+    /// exactly as received.
+    pub label2: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -508,10 +514,7 @@ impl EvpnPrefix {
                 EvpnPrefix::MacIp {
                     eth_tag: m.ether_tag,
                     mac: m.mac,
-                    // The current Type 2 parser (parse_nlri above) reads
-                    // and discards the IP component. Once the parser is
-                    // updated to preserve it, populate this field.
-                    ip: None,
+                    ip: m.ip,
                 },
             ),
             EvpnRoute::Multicast(m) => (
@@ -836,12 +839,30 @@ impl ParseNlri<EvpnRoute> for EvpnRoute {
                     IP6_LEN_BITS => 16,
                     _ => return Err(nom::Err::Error(make_error(input, ErrorKind::LengthValue))),
                 };
-                // The address itself is not modelled by `EvpnMac` yet; validate
-                // its length and step over exactly that many octets.
-                let (input, _ip) = take(ip_size).parse(input)?;
+                let (input, raw_ip) = take(ip_size).parse(input)?;
+                let ip = match ip_size {
+                    4 => Some(IpAddr::V4(Ipv4Addr::from(
+                        <[u8; 4]>::try_from(raw_ip).unwrap(),
+                    ))),
+                    16 => Some(IpAddr::V6(Ipv6Addr::from(
+                        <[u8; 16]>::try_from(raw_ip).unwrap(),
+                    ))),
+                    _ => None,
+                };
                 let (input, vni) = be_u24(input)?;
+                // RFC 7432 §7.2: an optional second label follows. Only an
+                // exact 3-octet remainder is a label; anything else is
+                // rejected by the trailing-octet check below.
+                let (input, label2) = if input.len() == 3 {
+                    let (input, label2) = be_u24(input)?;
+                    (input, Some(label2))
+                } else {
+                    (input, None)
+                };
 
                 let mut evpn = EvpnMac {
+                    label2,
+                    ip,
                     id,
                     rd,
                     esi,
@@ -1186,15 +1207,15 @@ impl EvpnRoute {
                 payload.put_u8(48);
                 // MAC Address (6 octets).
                 payload.put(&m.mac[..]);
-                // IP Address Length (1 octet). MAC-only Type-2 routes
-                // emit length 0 with no following IP — operator-side
-                // MAC+IP support is a follow-up that will set 32 (IPv4)
-                // or 128 (IPv6) and emit the address.
-                payload.put_u8(0);
+                emit_len_prefixed_ip(&mut payload, m.ip);
                 // MPLS Label1 / VNI (3 octets, big-endian, low 24
                 // bits of the u32). RFC 8365 §5.1.3.
                 let vni_bytes = m.vni.to_be_bytes();
                 payload.put(&vni_bytes[1..4]);
+                // Optional Label2 (RFC 7432 §7.2), e.g. the L3VNI.
+                if let Some(label2) = m.label2 {
+                    payload.put(&label2.to_be_bytes()[1..4]);
+                }
                 buf.put_u8(2); // Route Type 2 — MAC/IP Advertisement.
                 buf.put_u8(payload.len() as u8);
                 buf.put(&payload[..]);
@@ -1846,6 +1867,8 @@ mod evpn_emit_tests {
     #[test]
     fn macip_nlri_emit_macros_only() {
         let mac = EvpnMac {
+            label2: None,
+            ip: None,
             id: 0,
             rd: rd_type1_ip(Ipv4Addr::new(192, 0, 2, 1), 100),
             esi: [0; 10],
@@ -1875,6 +1898,8 @@ mod evpn_emit_tests {
     #[test]
     fn macip_nlri_emit_addpath() {
         let mac = EvpnMac {
+            label2: None,
+            ip: None,
             id: 7,
             rd: rd_type1_ip(Ipv4Addr::new(10, 0, 0, 1), 50),
             esi: [0; 10],
@@ -2019,9 +2044,91 @@ mod evpn_emit_tests {
     /// Round-trip: emit a Type-2 route, then parse the bytes back as
     /// an MP_REACH-style NLRI stream. The parser must recover the
     /// same RD, eth-tag, MAC, and VNI we emitted.
+    /// RFC 7432 §7.2 / RFC 9135: symmetric-IRB MAC/IP routes (FRR, EOS)
+    /// append the L3VNI as Label2. It must parse, not fail the trailing
+    /// octet check, and re-emit byte-for-byte. A partial label is still
+    /// malformed.
+    #[test]
+    fn macip_label2_parses_and_roundtrips() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0x00, 0x01, 192, 0, 2, 11, 0x03, 0xe8]); // RD
+        body.extend_from_slice(&[0u8; 10]); // ESI
+        body.extend_from_slice(&0u32.to_be_bytes()); // Ethernet tag
+        body.push(48);
+        body.extend_from_slice(&[2, 0, 0, 0, 1, 1]); // MAC
+        body.push(32);
+        body.extend_from_slice(&[10, 10, 0, 101]); // IP
+        body.extend_from_slice(&[0x00, 0x03, 0xe8]); // L2VNI 1000
+        body.extend_from_slice(&[0x00, 0x07, 0xd0]); // L3VNI 2000
+        let mut wire = vec![2u8, body.len() as u8];
+        wire.extend_from_slice(&body);
+
+        let (rest, route) = EvpnRoute::parse_nlri(&wire, false).expect("label2 parses");
+        assert!(rest.is_empty());
+        let EvpnRoute::Mac(m) = &route else {
+            panic!("expected Type-2");
+        };
+        assert_eq!(m.vni, 1000);
+        assert_eq!(m.label2, Some(2000));
+        assert_eq!(m.ip, Some("10.10.0.101".parse().unwrap()));
+
+        let mut emitted = BytesMut::new();
+        route.nlri_emit(&mut emitted);
+        assert_eq!(&emitted[..], &wire[..], "label2 must re-emit unchanged");
+
+        // One or two stray octets are not a label.
+        for extra in [1usize, 2] {
+            let mut body = body[..body.len() - 3].to_vec();
+            body.extend(std::iter::repeat_n(0u8, extra));
+            let mut wire = vec![2u8, body.len() as u8];
+            wire.extend_from_slice(&body);
+            assert!(EvpnRoute::parse_nlri(&wire, false).is_err());
+        }
+    }
+
+    #[test]
+    fn macip_dual_stack_roundtrip_and_distinct_keys() {
+        let mut keys = std::collections::BTreeSet::new();
+        for ip in [
+            None,
+            Some("10.10.0.101".parse().unwrap()),
+            Some("2001:db8:10::101".parse().unwrap()),
+        ] {
+            for id in [0, 42] {
+                let route = EvpnRoute::Mac(EvpnMac {
+                    label2: None,
+                    id,
+                    rd: rd_type1_ip(Ipv4Addr::new(192, 0, 2, 11), 1000),
+                    esi: [0; 10],
+                    ether_tag: 0,
+                    mac: [2, 0, 0, 0, 1, 1],
+                    ip,
+                    vni: 1000,
+                });
+                let mut wire = BytesMut::new();
+                route.nlri_emit(&mut wire);
+                let (remaining, parsed) = EvpnRoute::parse_nlri(&wire, id != 0).unwrap();
+                assert!(remaining.is_empty());
+                assert_eq!(parsed, route);
+                let (_, prefix) = EvpnPrefix::from_route(&parsed);
+                assert!(
+                    matches!(prefix, EvpnPrefix::MacIp { ip: parsed_ip, .. } if parsed_ip == ip)
+                );
+                keys.insert(prefix);
+            }
+        }
+        assert_eq!(
+            keys.len(),
+            3,
+            "MAC-only, ARP and NDP must be independent NLRIs"
+        );
+    }
+
     #[test]
     fn macip_emit_then_parse_roundtrip() {
         let original = EvpnMac {
+            label2: None,
+            ip: None,
             id: 0,
             rd: rd_type1_ip(Ipv4Addr::new(192, 168, 0, 1), 200),
             esi: [0; 10],
@@ -2053,6 +2160,8 @@ mod evpn_emit_tests {
     #[test]
     fn macip_emit_then_parse_roundtrip_for_withdraw_path() {
         let original = EvpnMac {
+            label2: None,
+            ip: None,
             id: 0,
             rd: rd_type1_ip(Ipv4Addr::new(192, 0, 2, 1), 100),
             esi: [0; 10],

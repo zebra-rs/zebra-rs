@@ -26,6 +26,7 @@
 /router/bgp/afi-safi/evi
 /router/bgp/afi-safi/evi/bridge
 /router/bgp/afi-safi/igmp-mld-proxy
+/router/bgp/afi-safi/kernel-route-exchange
 /router/bgp/afi-safi/maximum-paths
 /router/bgp/afi-safi/maximum-paths-ibgp
 /router/bgp/afi-safi/network
@@ -230,6 +231,7 @@
 /router/bgp/vrf/afi-safi/ipv4/redistribute
 /router/bgp/vrf/afi-safi/ipv4/redistribute/connected
 /router/bgp/vrf/afi-safi/ipv4/redistribute/isis
+/router/bgp/vrf/afi-safi/ipv4/redistribute/kernel
 /router/bgp/vrf/afi-safi/ipv4/redistribute/ospf
 /router/bgp/vrf/afi-safi/ipv4/redistribute/static
 /router/bgp/vrf/afi-safi/ipv6
@@ -237,6 +239,7 @@
 /router/bgp/vrf/afi-safi/ipv6/redistribute
 /router/bgp/vrf/afi-safi/ipv6/redistribute/connected
 /router/bgp/vrf/afi-safi/ipv6/redistribute/isis
+/router/bgp/vrf/afi-safi/ipv6/redistribute/kernel
 /router/bgp/vrf/afi-safi/ipv6/redistribute/ospf
 /router/bgp/vrf/afi-safi/ipv6/redistribute/static
 /router/bgp/vrf/afi-safi/mup/dataplane

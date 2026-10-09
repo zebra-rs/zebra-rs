@@ -902,7 +902,7 @@ pub struct Bgp {
     /// entry on the false→true transition (and withdraw on true→false),
     /// so origination becomes deterministic regardless of which
     /// channel wins the boot race.
-    pub local_fdb: BTreeMap<(u32, MacAddr), FdbEntry>,
+    pub local_fdb: BTreeMap<(u32, MacAddr, Option<std::net::IpAddr>), FdbEntry>,
     /// Local VXLAN VTEP shadow keyed by VNI, value = local VTEP IP
     /// (the VXLAN device's `IFLA_VXLAN_LOCAL` / `LOCAL6`). Populated
     /// from `RibRx::VxlanAdd`, removed on `RibRx::VxlanDel`. Drives
@@ -4966,15 +4966,17 @@ impl Bgp {
             RibRx::FdbAdd(entry) => {
                 // Cache durably so we can replay on `advertise_all_vni`
                 // false→true transitions — see `local_fdb` doc.
-                self.local_fdb.insert((entry.vni, entry.mac), entry.clone());
+                self.local_fdb
+                    .insert((entry.vni, entry.mac, entry.ip), entry.clone());
                 self.evpn_originate_macip(&entry);
             }
             RibRx::FdbDel(entry) => {
-                self.local_fdb.remove(&(entry.vni, entry.mac));
+                self.local_fdb.remove(&(entry.vni, entry.mac, entry.ip));
                 self.evpn_withdraw_macip(&entry);
             }
             RibRx::VxlanAdd { vni, vtep_local } => {
                 self.local_vxlans.insert(vni, vtep_local);
+                self.evpn_vteps_sync();
                 self.evpn_originate_imet(vni, vtep_local);
                 // Re-originate any MAC learned before this VXLAN device was
                 // observed: cradle's WatchFdb replays already-learned CE MACs
@@ -5035,6 +5037,7 @@ impl Bgp {
                 if let Some(vtep_local) = self.local_vxlans.remove(&vni) {
                     self.evpn_withdraw_imet(vni, vtep_local);
                 }
+                self.evpn_vteps_sync();
                 // The removed L2VNI may have been the owner a parked VPWS
                 // service was waiting on.
                 self.vpws_retry_conflicts();
@@ -7000,11 +7003,12 @@ impl Bgp {
     }
 
     /// Map a RIB route type to the `BgpRedistSource` it redistributes as,
-    /// or `None` for RIB types BGP doesn't redistribute (e.g. Kernel,
+    /// or `None` for RIB types BGP doesn't redistribute (e.g. BGP,
     /// Bgp itself).
     fn redist_source(rtype: crate::rib::RibType) -> Option<crate::bgp::config::BgpRedistSource> {
         use crate::bgp::config::BgpRedistSource;
         match rtype {
+            crate::rib::RibType::Kernel => Some(BgpRedistSource::Kernel),
             crate::rib::RibType::Connected => Some(BgpRedistSource::Connected),
             crate::rib::RibType::Static => Some(BgpRedistSource::Static),
             crate::rib::RibType::Isis => Some(BgpRedistSource::Isis),
@@ -7800,6 +7804,7 @@ impl Bgp {
                 };
 
                 let rib = super::route::BgpRib {
+                    evpn_label2: None,
                     remote_id: 0,
                     local_id: 0,
                     attr: interned,
@@ -8007,6 +8012,7 @@ impl Bgp {
                 };
 
                 let rib = super::route::BgpRib {
+                    evpn_label2: None,
                     remote_id: 0,
                     local_id: 0,
                     attr: interned,

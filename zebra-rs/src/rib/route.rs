@@ -93,6 +93,111 @@ pub fn addr_recover_decide(state: &mut AddrRecoveryState, now: Instant) -> Recov
 }
 
 impl Rib {
+    /// Upgrade path: zebra-rs once installed statics as `RTPROT_STATIC`.
+    /// When the static config installs a route the startup dump found in
+    /// that form (same table, prefix and priority), the kernel route is
+    /// that earlier static: drop its kernel entry, so the static's install
+    /// takes it over in place (`NLM_F_REPLACE`) as `RTPROT_ZEBRA`. Only
+    /// until the leftover sweep; after that such a route is an operator's.
+    pub(super) fn adopt_legacy_static(&mut self, table_id: u32, prefix: IpNet, entry: &RibEntry) {
+        if entry.rtype != RibType::Static || self.legacy_statics.is_empty() {
+            return;
+        }
+        for priority in kernel_priorities(entry, matches!(prefix, IpNet::V6(_))) {
+            if !self.legacy_statics.remove(&(table_id, prefix, priority)) {
+                continue;
+            }
+            let entries = match prefix {
+                IpNet::V4(p) if table_id == RT_TABLE_MAIN => self.table.get_mut(&p),
+                IpNet::V6(p) if table_id == RT_TABLE_MAIN => self.table_v6.get_mut(&p),
+                IpNet::V4(p) => self
+                    .vrf_tables
+                    .get_mut(&table_id)
+                    .and_then(|t| t.table.get_mut(&p)),
+                IpNet::V6(p) => self
+                    .vrf_tables
+                    .get_mut(&table_id)
+                    .and_then(|t| t.table_v6.get_mut(&p)),
+            };
+            if let Some(entries) = entries {
+                entries.retain(|e| !(e.rtype == RibType::Kernel && e.metric == priority));
+            }
+        }
+    }
+
+    /// Withdraw every leftover from an earlier run that its owner has not
+    /// replaced by now: statics, IS-IS, and VRF BGP. OSPF sweeps its own
+    /// once it has converged (graceful restart, RFC 3623). Afterwards an
+    /// `RTPROT_STATIC` route is only ever an operator's.
+    pub(super) async fn sweep_leftovers(&mut self) {
+        let tables: Vec<u32> = std::iter::once(RT_TABLE_MAIN)
+            .chain(self.vrf_tables.keys().copied())
+            .collect();
+        for table_id in tables {
+            for rtype in [RibType::Static, RibType::Isis, RibType::Bgp] {
+                for v6 in [false, true] {
+                    self.sweep_stale(rtype, v6, table_id).await;
+                }
+            }
+        }
+        self.legacy_statics.clear();
+    }
+
+    /// A kernel event for a route this RIB already installed must not
+    /// become a distance-0 competitor to its owning protocol. External
+    /// routes using the same protocol number remain eligible when their
+    /// prefix, table or priority differs, or no installed owner exists.
+    pub(super) fn is_kernel_route_echo(&self, route: &crate::fib::FibRoute) -> bool {
+        if !matches!(route.entry.rtype, RibType::Kernel | RibType::Dhcp) {
+            return false;
+        }
+        let Some(protocol) = route.kernel_protocol else {
+            return false;
+        };
+        let entries = match route.prefix {
+            IpNet::V4(prefix) if route.table_id == RT_TABLE_MAIN => self.table.get(&prefix),
+            IpNet::V6(prefix) if route.table_id == RT_TABLE_MAIN => self.table_v6.get(&prefix),
+            IpNet::V4(prefix) => self
+                .vrf_tables
+                .get(&route.table_id)
+                .and_then(|table| table.table.get(&prefix)),
+            IpNet::V6(prefix) => self
+                .vrf_tables
+                .get(&route.table_id)
+                .and_then(|table| table.table_v6.get(&prefix)),
+        };
+        let priority_matches = |metric| {
+            let metric = if matches!(route.prefix, IpNet::V6(_)) && metric == 0 {
+                1024
+            } else {
+                metric
+            };
+            metric == route.entry.metric
+        };
+        entries.is_some_and(|entries| {
+            entries.iter().any(|entry| {
+                entry.rtype == protocol
+                    && entry.is_protocol()
+                    && entry.is_selected()
+                    && entry.is_fib()
+                    && match &entry.nexthop {
+                        Nexthop::Uni(uni) => priority_matches(uni.metric),
+                        Nexthop::Multi(multi) => priority_matches(multi.metric),
+                        Nexthop::List(list) => list
+                            .nexthops
+                            .iter()
+                            .any(|member| priority_matches(member.metric())),
+                        Nexthop::Protect(protect) => {
+                            priority_matches(protect.primary.metric())
+                                || priority_matches(protect.backup.metric())
+                        }
+                        Nexthop::Blackhole(metric) => priority_matches(*metric),
+                        Nexthop::Link(_) => priority_matches(entry.metric),
+                    }
+            })
+        })
+    }
+
     /// Push a configured address back to the kernel. Used by both
     /// `link_up` (when the kernel dropped a configured address while
     /// the link was down) and the kernel-driven DelAddr recovery
@@ -563,6 +668,7 @@ impl Rib {
             .get(&table_id)
             .and_then(|t| selected_v4(&t.table, prefix))
             .cloned();
+        self.adopt_legacy_static(table_id, (*prefix).into(), &entry);
         let replace = {
             let Some(t) = self.vrf_tables.get_mut(&table_id) else {
                 tracing::warn!(
@@ -573,13 +679,13 @@ impl Rib {
                 return;
             };
             if entry.is_protocol() {
-                let mut replace = rib_replace(&mut t.table, prefix, entry.rtype);
+                let replace = rib_replace(&mut t.table, prefix, entry.rtype);
                 rib_resolve_nexthop(&mut entry, &t.table, &mut self.nmap, table_id);
                 rib_add(&mut t.table, prefix, entry);
-                replace.pop()
+                replace
             } else {
                 rib_add_system(&mut t.table, prefix, entry);
-                None
+                Vec::new()
             }
         };
         self.vrf_rib_selection(table_id, prefix, replace).await;
@@ -613,9 +719,9 @@ impl Rib {
                 return;
             };
             if entry.is_protocol() {
-                rib_replace(&mut t.table, prefix, entry.rtype).pop()
+                rib_replace(&mut t.table, prefix, entry.rtype)
             } else {
-                rib_replace_system(&mut t.table, prefix, entry).pop()
+                rib_replace_system(&mut t.table, prefix, entry)
             }
         };
         self.vrf_rib_selection(table_id, prefix, replace).await;
@@ -649,6 +755,7 @@ impl Rib {
             .get(&table_id)
             .and_then(|t| selected_v6(&t.table_v6, prefix))
             .cloned();
+        self.adopt_legacy_static(table_id, (*prefix).into(), &entry);
         let replace = {
             let Some(t) = self.vrf_tables.get_mut(&table_id) else {
                 tracing::warn!(
@@ -659,13 +766,13 @@ impl Rib {
                 return;
             };
             if entry.is_protocol() {
-                let mut replace = rib_replace_v6(&mut t.table_v6, prefix, entry.rtype);
+                let replace = rib_replace_v6(&mut t.table_v6, prefix, entry.rtype);
                 rib_resolve_nexthop_v6(&mut entry, &t.table_v6, &mut self.nmap, table_id);
                 rib_add_v6(&mut t.table_v6, prefix, entry);
-                replace.pop()
+                replace
             } else {
                 rib_add_system_v6(&mut t.table_v6, prefix, entry);
-                None
+                Vec::new()
             }
         };
         self.vrf_rib_selection_v6(table_id, prefix, replace).await;
@@ -699,9 +806,9 @@ impl Rib {
                 return;
             };
             if entry.is_protocol() {
-                rib_replace_v6(&mut t.table_v6, prefix, entry.rtype).pop()
+                rib_replace_v6(&mut t.table_v6, prefix, entry.rtype)
             } else {
-                rib_replace_system_v6(&mut t.table_v6, prefix, entry).pop()
+                rib_replace_system_v6(&mut t.table_v6, prefix, entry)
             }
         };
         self.vrf_rib_selection_v6(table_id, prefix, replace).await;
@@ -727,12 +834,7 @@ impl Rib {
     /// Best-path selection + FIB reconcile for one VRF prefix. Mirrors
     /// [`Self::rib_selection`] but on `vrf_tables[table_id]`, passing
     /// `table_id` so the install/withdraw targets the kernel VRF table.
-    async fn vrf_rib_selection(
-        &mut self,
-        table_id: u32,
-        prefix: &Ipv4Net,
-        replace: Option<RibEntry>,
-    ) {
+    async fn vrf_rib_selection(&mut self, table_id: u32, prefix: &Ipv4Net, replace: Vec<RibEntry>) {
         let retry = {
             let Some(t) = self.vrf_tables.get_mut(&table_id) else {
                 return;
@@ -763,7 +865,7 @@ impl Rib {
         &mut self,
         table_id: u32,
         prefix: &Ipv6Net,
-        replace: Option<RibEntry>,
+        replace: Vec<RibEntry>,
     ) {
         let retry = {
             let Some(t) = self.vrf_tables.get_mut(&table_id) else {
@@ -789,14 +891,15 @@ impl Rib {
 
     pub async fn ipv4_route_add(&mut self, prefix: &Ipv4Net, mut entry: RibEntry, table_id: u32) {
         let before = selected_v4(&self.table, prefix).cloned();
+        self.adopt_legacy_static(table_id, (*prefix).into(), &entry);
         if entry.is_protocol() {
-            let mut replace = rib_replace(&mut self.table, prefix, entry.rtype);
+            let replace = rib_replace(&mut self.table, prefix, entry.rtype);
             rib_resolve_nexthop(&mut entry, &self.table, &mut self.nmap, table_id);
             rib_add(&mut self.table, prefix, entry);
-            self.rib_selection(prefix, replace.pop(), table_id).await;
+            self.rib_selection(prefix, replace, table_id).await;
         } else {
             rib_add_system(&mut self.table, prefix, entry);
-            self.rib_selection(prefix, None, table_id).await;
+            self.rib_selection(prefix, Vec::new(), table_id).await;
         }
         let after = selected_v4(&self.table, prefix).cloned();
         super::redist::notify_v4_delta(
@@ -818,12 +921,12 @@ impl Rib {
     pub async fn ipv4_route_del(&mut self, prefix: &Ipv4Net, entry: RibEntry, table_id: u32) {
         let before = selected_v4(&self.table, prefix).cloned();
         if entry.is_protocol() {
-            let mut replace = rib_replace(&mut self.table, prefix, entry.rtype);
-            self.rib_selection(prefix, replace.pop(), table_id).await;
+            let replace = rib_replace(&mut self.table, prefix, entry.rtype);
+            self.rib_selection(prefix, replace, table_id).await;
         } else {
             // println!("System route remove");
-            let mut replace = rib_replace_system(&mut self.table, prefix, entry);
-            self.rib_selection(prefix, replace.pop(), table_id).await;
+            let replace = rib_replace_system(&mut self.table, prefix, entry);
+            self.rib_selection(prefix, replace, table_id).await;
         }
         let after = selected_v4(&self.table, prefix).cloned();
         super::redist::notify_v4_delta(
@@ -967,8 +1070,9 @@ impl Rib {
         }
 
         let before = selected_v6(&self.table_v6, prefix).cloned();
+        self.adopt_legacy_static(table_id, (*prefix).into(), &entry);
         if entry.is_protocol() {
-            let mut replace = rib_replace_v6(&mut self.table_v6, prefix, entry.rtype);
+            let replace = rib_replace_v6(&mut self.table_v6, prefix, entry.rtype);
             rib_resolve_nexthop_v6(&mut entry, &self.table_v6, &mut self.nmap, table_id);
             if rib_route() {
                 println!(
@@ -978,10 +1082,10 @@ impl Rib {
                 );
             }
             rib_add_v6(&mut self.table_v6, prefix, entry);
-            self.rib_selection_v6(prefix, replace.pop(), table_id).await;
+            self.rib_selection_v6(prefix, replace, table_id).await;
         } else {
             rib_add_system_v6(&mut self.table_v6, prefix, entry);
-            self.rib_selection_v6(prefix, None, table_id).await;
+            self.rib_selection_v6(prefix, Vec::new(), table_id).await;
         }
         let after = selected_v6(&self.table_v6, prefix).cloned();
         super::redist::notify_v6_delta(
@@ -1003,12 +1107,12 @@ impl Rib {
     pub async fn ipv6_route_del(&mut self, prefix: &Ipv6Net, entry: RibEntry, table_id: u32) {
         let before = selected_v6(&self.table_v6, prefix).cloned();
         if entry.is_protocol() {
-            let mut replace = rib_replace_v6(&mut self.table_v6, prefix, entry.rtype);
-            self.rib_selection_v6(prefix, replace.pop(), table_id).await;
+            let replace = rib_replace_v6(&mut self.table_v6, prefix, entry.rtype);
+            self.rib_selection_v6(prefix, replace, table_id).await;
         } else {
             // println!("IPv6 System route remove");
-            let mut replace = rib_replace_system_v6(&mut self.table_v6, prefix, entry);
-            self.rib_selection_v6(prefix, replace.pop(), table_id).await;
+            let replace = rib_replace_system_v6(&mut self.table_v6, prefix, entry);
+            self.rib_selection_v6(prefix, replace, table_id).await;
         }
         let after = selected_v6(&self.table_v6, prefix).cloned();
         super::redist::notify_v6_delta(
@@ -1407,12 +1511,7 @@ impl Rib {
         }
     }
 
-    pub async fn rib_selection(
-        &mut self,
-        prefix: &Ipv4Net,
-        replace: Option<RibEntry>,
-        table_id: u32,
-    ) {
+    pub async fn rib_selection(&mut self, prefix: &Ipv4Net, replace: Vec<RibEntry>, table_id: u32) {
         let Some(entries) = self.table.get_mut(prefix) else {
             return;
         };
@@ -1434,7 +1533,7 @@ impl Rib {
     pub async fn rib_selection_v6(
         &mut self,
         prefix: &Ipv6Net,
-        replace: Option<RibEntry>,
+        replace: Vec<RibEntry>,
         table_id: u32,
     ) {
         let Some(entries) = self.table_v6.get_mut(prefix) else {
@@ -1671,7 +1770,7 @@ async fn ipv4_route_sync_inner(
             .then(|| entries.iter().find(|e| e.is_selected()).cloned())
             .flatten();
         ipv4_entry_resolve(entries, nmap, ifdown);
-        retry |= ipv4_entry_selection(&p, entries, None, nmap, fib, table_id, ifdown).await;
+        retry |= ipv4_entry_selection(&p, entries, Vec::new(), nmap, fib, table_id, ifdown).await;
         if collect {
             let after = entries.iter().find(|e| e.is_selected()).cloned();
             if super::redist::selected_changed_v4(&p, before.as_ref(), after.as_ref()) {
@@ -1697,7 +1796,7 @@ fn ipv4_entry_resolve(entries: &mut RibEntries, nmap: &NexthopMap, ifdown: bool)
 async fn ipv4_entry_selection(
     prefix: &Ipv4Net,
     entries: &mut RibEntries,
-    replace: Option<RibEntry>,
+    replace: Vec<RibEntry>,
     nmap: &mut NexthopMap,
     fib: &FibHandle,
     table_id: u32,
@@ -1705,20 +1804,17 @@ async fn ipv4_entry_selection(
 ) -> bool {
     // An earlier run's route the protocol's own replaced, or the sweep
     // withdrew: out of the kernel, before the new one goes in.
-    if let Some(replace) = &replace
-        && replace.stale
-        && !ifdown
-    {
-        fib.route_del_leftover((*prefix).into(), replace, table_id)
-            .await;
-    }
-    if let Some(mut replace) = replace
-        && replace.is_protocol()
-    {
-        if replace.is_fib() {
-            fib.route_ipv4_del(prefix, &replace, table_id).await;
+    for mut replace in replace {
+        if replace.stale && !ifdown {
+            fib.route_del_leftover((*prefix).into(), &replace, table_id)
+                .await;
         }
-        replace.nexthop_unsync(nmap, fib).await;
+        if replace.is_protocol() {
+            if replace.is_fib() {
+                fib.route_ipv4_del(prefix, &replace, table_id).await;
+            }
+            replace.nexthop_unsync(nmap, fib).await;
+        }
     }
     // Selected.
     let prev = rib_prev(entries);
@@ -1745,16 +1841,21 @@ async fn ipv4_entry_selection(
         return false;
     }
     if let Some(prev) = prev {
+        // Dump order must not withdraw a backup while both candidates
+        // are leftovers waiting for their owners to converge.
+        let keep_leftover = entries[prev].stale && next.is_some_and(|i| entries[i].stale);
         let prev = entries.get_mut(prev).unwrap();
         prev.set_selected(false);
-        if !ifdown && prev.stale {
-            // An earlier run's route, outranked: out of the kernel.
-            fib.route_del_leftover((*prefix).into(), prev, table_id)
-                .await;
-        } else if !ifdown {
-            fib.route_ipv4_del(prefix, prev, table_id).await;
+        if !keep_leftover {
+            if !ifdown && prev.stale {
+                // An earlier run's route, outranked: out of the kernel.
+                fib.route_del_leftover((*prefix).into(), prev, table_id)
+                    .await;
+            } else if !ifdown {
+                fib.route_ipv4_del(prefix, prev, table_id).await;
+            }
+            prev.set_fib(false);
         }
-        prev.set_fib(false);
     }
     let mut retry = false;
     if let Some(next) = next {
@@ -2161,8 +2262,60 @@ fn rib_add(table: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, entry: 
     entries.push(entry);
 }
 
+/// The kernel priorities `entry` is installed with: its next hop's
+/// metric, as each install path sets `RTA_PRIORITY`. Linux reports an
+/// IPv6 priority of 0 as 1024.
+pub(crate) fn kernel_priorities(entry: &RibEntry, v6: bool) -> Vec<u32> {
+    let mut metrics = match &entry.nexthop {
+        Nexthop::Uni(uni) => vec![uni.metric],
+        Nexthop::Multi(multi) => vec![multi.metric],
+        Nexthop::List(list) => list.nexthops.iter().map(|m| m.metric()).collect(),
+        Nexthop::Protect(protect) => vec![protect.primary.metric(), protect.backup.metric()],
+        Nexthop::Blackhole(metric) => vec![*metric],
+        Nexthop::Link(_) => vec![entry.metric],
+    };
+    if v6 {
+        for metric in &mut metrics {
+            if *metric == 0 {
+                *metric = 1024;
+            }
+        }
+    }
+    metrics
+}
+
+/// Kernel routes and startup leftovers at different priorities coexist,
+/// including discard and ECMP routes which cannot all fit in a unicast list.
+/// Preserve each leftover's priority and kind for sweep and replacement.
+/// An RTM_NEWROUTE replaces the complete entry at the same priority:
+/// Linux does not send a delete when its route type changes.
+fn rib_add_kernel(entries: &mut RibEntries, mut entry: RibEntry) {
+    if let Some(existing) = entries
+        .iter_mut()
+        .find(|existing| existing.rtype == entry.rtype && existing.metric == entry.metric)
+    {
+        entry.selected = existing.selected;
+        entry.fib = existing.fib;
+        *existing = entry;
+    } else {
+        entries.push(entry);
+    }
+}
+
+fn rib_replace_kernel(entries: &mut RibEntries, entry: &RibEntry) -> Vec<RibEntry> {
+    entries
+        .iter()
+        .position(|existing| existing.rtype == entry.rtype && existing.metric == entry.metric)
+        .map(|index| vec![entries.remove(index)])
+        .unwrap_or_default()
+}
+
 fn rib_add_system(table: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, entry: RibEntry) {
     let entries = table.entry(*prefix).or_default();
+    if entry.stale || matches!(entry.rtype, RibType::Kernel | RibType::Dhcp) {
+        rib_add_kernel(entries, entry);
+        return;
+    }
     let index = if entry.is_connected() {
         // For connected routes, check both type and interface index
         rib_rtype_ifindex(entries, entry.rtype, entry.ifindex)
@@ -2225,6 +2378,9 @@ fn rib_replace_system(
     entry: RibEntry,
 ) -> Vec<RibEntry> {
     let entries = table.entry(*prefix).or_default();
+    if entry.stale || matches!(entry.rtype, RibType::Kernel | RibType::Dhcp) {
+        return rib_replace_kernel(entries, &entry);
+    }
     let index = if entry.is_connected() {
         // Connected entries are keyed by (type, ifindex) — mirror
         // rib_add_system, so a shared-prefix entry on another interface
@@ -2359,7 +2515,7 @@ fn ilm_next(entries: &[IlmEntry]) -> Option<usize> {
 async fn ipv6_entry_selection(
     prefix: &Ipv6Net,
     entries: &mut RibEntries,
-    replace: Option<RibEntry>,
+    replace: Vec<RibEntry>,
     nmap: &mut NexthopMap,
     fib: &FibHandle,
     table_id: u32,
@@ -2369,7 +2525,7 @@ async fn ipv6_entry_selection(
             "[ipv6_entry_selection] prefix={} entries={} replace={}",
             prefix,
             entries.len(),
-            replace.is_some(),
+            !replace.is_empty(),
         );
         for (i, e) in entries.iter().enumerate() {
             println!(
@@ -2380,19 +2536,17 @@ async fn ipv6_entry_selection(
     }
 
     // As the v4 twin: an earlier run's route, replaced or swept.
-    if let Some(replace) = &replace
-        && replace.stale
-    {
-        fib.route_del_leftover((*prefix).into(), replace, table_id)
-            .await;
-    }
-    if let Some(mut replace) = replace
-        && replace.is_protocol()
-    {
-        if replace.is_fib() {
-            fib.route_ipv6_del(prefix, &replace, table_id).await;
+    for mut replace in replace {
+        if replace.stale {
+            fib.route_del_leftover((*prefix).into(), &replace, table_id)
+                .await;
         }
-        replace.nexthop_unsync(nmap, fib).await;
+        if replace.is_protocol() {
+            if replace.is_fib() {
+                fib.route_ipv6_del(prefix, &replace, table_id).await;
+            }
+            replace.nexthop_unsync(nmap, fib).await;
+        }
     }
 
     // Link-local prefixes (fe80::/10) are link-scoped: every interface
@@ -2435,16 +2589,19 @@ async fn ipv6_entry_selection(
         return false;
     }
     if let Some(prev) = prev {
+        let keep_leftover = entries[prev].stale && next.is_some_and(|i| entries[i].stale);
         let prev = entries.get_mut(prev).unwrap();
         prev.set_selected(false);
 
-        if prev.stale {
-            fib.route_del_leftover((*prefix).into(), prev, table_id)
-                .await;
-        } else {
-            fib.route_ipv6_del(prefix, prev, table_id).await;
+        if !keep_leftover {
+            if prev.stale {
+                fib.route_del_leftover((*prefix).into(), prev, table_id)
+                    .await;
+            } else {
+                fib.route_ipv6_del(prefix, prev, table_id).await;
+            }
+            prev.set_fib(false);
         }
-        prev.set_fib(false);
     }
     let mut retry = false;
     if let Some(next) = next {
@@ -2481,6 +2638,10 @@ fn rib_add_system_v6(
     entry: RibEntry,
 ) {
     let entries = table.entry(*prefix).or_default();
+    if entry.stale || matches!(entry.rtype, RibType::Kernel | RibType::Dhcp) {
+        rib_add_kernel(entries, entry);
+        return;
+    }
     let index = if entry.is_connected() {
         // For connected routes, check both type and interface index
         rib_rtype_ifindex(entries, entry.rtype, entry.ifindex)
@@ -2543,6 +2704,9 @@ fn rib_replace_system_v6(
     entry: RibEntry,
 ) -> Vec<RibEntry> {
     let entries = table.entry(*prefix).or_default();
+    if entry.stale || matches!(entry.rtype, RibType::Kernel | RibType::Dhcp) {
+        return rib_replace_kernel(entries, &entry);
+    }
     let index = if entry.is_connected() {
         // Connected entries are keyed by (type, ifindex) — mirror
         // rib_add_system_v6, so a shared-prefix entry on another
@@ -2662,7 +2826,7 @@ async fn ipv6_route_sync_inner(
             .then(|| entries.iter().find(|e| e.is_selected()).cloned())
             .flatten();
         ipv6_entry_resolve(entries, nmap);
-        retry |= ipv6_entry_selection(&p, entries, None, nmap, fib, table_id).await;
+        retry |= ipv6_entry_selection(&p, entries, Vec::new(), nmap, fib, table_id).await;
         if collect {
             let after = entries.iter().find(|e| e.is_selected()).cloned();
             if super::redist::selected_changed_v6(&p, before.as_ref(), after.as_ref()) {
@@ -2929,6 +3093,62 @@ mod tests {
         RecoveryDecision, SuppressReason, addr_recover_decide,
     };
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn startup_leftovers_preserve_each_priority_and_kind() {
+        use super::*;
+        let v4: Ipv4Net = "203.0.113.0/24".parse().unwrap();
+        let v6: Ipv6Net = "2001:db8:abcd::/64".parse().unwrap();
+        for rtype in [RibType::Static, RibType::Ospf, RibType::Isis, RibType::Bgp] {
+            for backup in [
+                Nexthop::Uni(NexthopUni {
+                    metric: 200,
+                    ..Default::default()
+                }),
+                Nexthop::Multi(NexthopMulti {
+                    metric: 200,
+                    ..Default::default()
+                }),
+                Nexthop::Blackhole(200),
+            ] {
+                let mut primary = RibEntry::new(rtype);
+                primary.stale = true;
+                primary.metric = 100;
+                primary.nexthop = Nexthop::Uni(NexthopUni {
+                    metric: 100,
+                    ..Default::default()
+                });
+                let mut secondary = primary.clone();
+                secondary.metric = 200;
+                secondary.nexthop = backup.clone();
+                let mut table = PrefixMap::new();
+                let mut table_v6 = PrefixMap::new();
+                for entry in [secondary, primary.clone()] {
+                    rib_add_system(&mut table, &v4, entry.clone());
+                    rib_add_system_v6(&mut table_v6, &v6, entry);
+                }
+                // A duplicate at the same priority must update its kind
+                // without discarding the other priority.
+                primary.nexthop = Nexthop::Blackhole(100);
+                rib_add_system(&mut table, &v4, primary.clone());
+                rib_add_system_v6(&mut table_v6, &v6, primary);
+                for entries in [table.get(&v4).unwrap(), table_v6.get(&v6).unwrap()] {
+                    assert_eq!(entries.len(), 2, "{rtype:?} {backup:?}");
+                    assert!(entries.iter().all(|entry| entry.stale));
+                    assert_eq!(entries[0].metric, 200);
+                    assert_eq!(
+                        std::mem::discriminant(&entries[0].nexthop),
+                        std::mem::discriminant(&backup)
+                    );
+                    assert!(matches!(entries[1].nexthop, Nexthop::Blackhole(100)));
+                }
+                assert_eq!(rib_replace(&mut table, &v4, rtype).len(), 2);
+                assert_eq!(rib_replace_v6(&mut table_v6, &v6, rtype).len(), 2);
+                assert!(table.get(&v4).unwrap().is_empty());
+                assert!(table_v6.get(&v6).unwrap().is_empty());
+            }
+        }
+    }
 
     #[test]
     fn ilm_next_picks_lowest_distance() {

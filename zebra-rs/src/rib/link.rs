@@ -59,6 +59,9 @@ pub struct Link {
     /// on VXLAN links. Used as the BGP MP_REACH nexthop for EVPN
     /// advertisements per RFC 8365 §5.1.3.
     pub vxlan_local: Option<std::net::IpAddr>,
+    /// Metadata-mode VXLAN requires VLAN-to-VNI tunnel mapping; fixed-VNI does not.
+    #[serde(skip)]
+    pub vxlan_metadata: Option<bool>,
     /// Kernel routing table from `IFLA_VRF_TABLE` on VRF master
     /// devices; `None` for every other link type. Lets an all-VRF
     /// consumer (the cradle port reconcile) resolve a slave's
@@ -107,6 +110,7 @@ impl Link {
             master: link.master,
             vni: link.vni,
             vxlan_local: link.vxlan_local,
+            vxlan_metadata: link.vxlan_metadata,
             vrf_table: link.vrf_table,
             bridge: link.bridge,
             parent: link.parent,
@@ -922,6 +926,9 @@ impl Rib {
             // FDB resolution gets the right bridge.
             link.master = fib_link.master;
             link.vni = fib_link.vni;
+            if fib_link.vxlan_metadata.is_some() {
+                link.vxlan_metadata = fib_link.vxlan_metadata;
+            }
             // Parent ifindex / VLAN id: adopt-if-present, never clear.
             // A partial RTM_NEWLINK (e.g. the enslave notification, see
             // the VXLAN refill comment above) omits `IFLA_LINKINFO`
@@ -1117,6 +1124,21 @@ impl Rib {
         // would land on `Link::vni` but never reach `vni_ifindex_map`,
         // and `mac_add` would silently skip every install.
         let now_vni: Option<u32> = self.links.get(&ifindex).and_then(|l| l.vni);
+        if let Some(vni) = now_vni {
+            let metadata = self.links.get(&ifindex).and_then(|l| l.vxlan_metadata) == Some(true);
+            self.fib_handle.vni_metadata_map.insert(vni, metadata);
+            if let Some(bridge) = self.links.get(&ifindex).and_then(|l| l.master) {
+                let prev = self.fib_handle.vni_bridge_map.insert(vni, bridge);
+                // Joining a bridge (including a detach/re-attach, which
+                // flushed the port's FDB) needs the bridge Type-5 state of
+                // an L3 VNI reinstalled on that bridge.
+                if prev != Some(bridge) {
+                    self.fib_handle.evpn_l3vni_reassert(vni, true).await;
+                }
+            } else {
+                self.fib_handle.vni_bridge_map.remove(&vni);
+            }
+        }
         if prev_vni != now_vni
             && let Some(new) = now_vni
         {
@@ -1161,13 +1183,14 @@ impl Rib {
         if let Some(bridge) = now_evpn_bridge
             && prev_evpn_bridge != Some(bridge)
         {
-            // The VXLAN just joined a bridge: apply the EVPN bridge-slave
-            // defaults on its port (`neigh_suppress on`, `learning off`,
-            // `vlan_tunnel on`), and wire the single-VXLAN-device kernel
-            // datapath (bridge vlan_filtering + the VLAN 1 -> VNI tunnel
-            // mapping) so bridged traffic actually encapsulates.
-            self.fib_handle.vxlan_bridge_port_defaults(ifindex).await;
-            if let Some(vni) = now_vni {
+            // Both modes use EVPN learning/suppression defaults. Only
+            // collect-metadata VXLAN needs VLAN-to-VNI tunnel mapping.
+            // Applying that mapping to a fixed-VNI port breaks its ingress.
+            let metadata = self.links.get(&ifindex).and_then(|l| l.vxlan_metadata) == Some(true);
+            self.fib_handle
+                .vxlan_bridge_port_defaults(ifindex, metadata)
+                .await;
+            if metadata && let Some(vni) = now_vni {
                 self.fib_handle
                     .vxlan_svd_datapath(ifindex, bridge, vni)
                     .await;
@@ -2068,6 +2091,7 @@ mod tests {
             vrf_table: None,
             bridge: false,
             vxlan_local: None,
+            vxlan_metadata: None,
             parent: None,
             vlan_id: None,
             mtu_error: None,
@@ -2439,6 +2463,7 @@ mod l2_port_evi_tests {
             master,
             vni,
             vxlan_local: None,
+            vxlan_metadata: None,
             vrf_table: None,
             bridge: master.is_none(),
             parent: None,

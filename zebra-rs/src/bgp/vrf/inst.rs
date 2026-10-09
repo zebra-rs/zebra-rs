@@ -775,6 +775,7 @@ fn redist_remote_id(rtype: crate::rib::RibType) -> u32 {
 /// subscription filters on.
 pub(super) fn redist_source_rtype(source: BgpRedistSource) -> crate::rib::RibType {
     match source {
+        BgpRedistSource::Kernel => crate::rib::RibType::Kernel,
         BgpRedistSource::Connected => crate::rib::RibType::Connected,
         BgpRedistSource::Static => crate::rib::RibType::Static,
         BgpRedistSource::Isis => crate::rib::RibType::Isis,
@@ -2375,6 +2376,7 @@ impl BgpVrf {
         };
 
         let rib = super::super::route::BgpRib {
+            evpn_label2: None,
             remote_id: import_id,
             local_id: 0,
             attr: interned,
@@ -2644,6 +2646,7 @@ impl BgpVrf {
         };
 
         let rib = super::super::route::BgpRib {
+            evpn_label2: None,
             remote_id: import_id,
             local_id: 0,
             attr: interned,
@@ -3201,6 +3204,7 @@ impl BgpVrf {
         attr: std::sync::Arc<bgp_packet::BgpAttr>,
     ) -> super::super::route::BgpRib {
         super::super::route::BgpRib {
+            evpn_label2: None,
             remote_id: 0,
             local_id: 0,
             attr,

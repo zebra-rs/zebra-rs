@@ -1,0 +1,40 @@
+{
+  "layer": "synthetic Linux FDB/ARP -> OVN -> OVS",
+  "count": 1000,
+  "dual_stack": true,
+  "converged": true,
+  "cleanup_errors": [],
+  "base_table_flows": {
+    "111": 5,
+    "112": 7,
+    "113": 5
+  },
+  "expected_minimum_flow_delta": 4000,
+  "before": {
+    "rss_kib": {
+      "ovs-vswitchd": 19988,
+      "ovn-controller": 14608,
+      "zebra-rs": 75264
+    },
+    "kernel_memory_note": "Process RSS excludes kernel FDB/neighbors and OVS datapath allocations."
+  },
+  "injection_seconds": 0.44,
+  "flow_delta": 11004,
+  "table_flow_delta": {
+    "111": 1000,
+    "112": 1001,
+    "113": 2000
+  },
+  "total_install_seconds": 1.52,
+  "loaded": {
+    "rss_kib": {
+      "ovs-vswitchd": 28328,
+      "ovn-controller": 25876,
+      "zebra-rs": 75780
+    },
+    "kernel_memory_note": "Process RSS excludes kernel FDB/neighbors and OVS datapath allocations."
+  },
+  "cleanup_seconds": 0.41,
+  "remaining_flow_delta": 0,
+  "cleaned": true
+}

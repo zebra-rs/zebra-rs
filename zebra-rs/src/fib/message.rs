@@ -49,6 +49,8 @@ pub struct FibLink {
     /// per RFC 8365 §5.1.3 (egress PE = local VTEP). None on
     /// non-VXLAN links and on VXLANs configured without a local IP.
     pub vxlan_local: Option<std::net::IpAddr>,
+    /// Collect-metadata VXLAN mode. None when link-info was omitted.
+    pub vxlan_metadata: Option<bool>,
     /// Kernel routing table from `IFLA_VRF_TABLE`
     /// (`LinkInfo::Data(InfoData::Vrf(InfoVrf::TableId(_)))`) on VRF
     /// master devices. None for every other link type. Lets an
@@ -107,6 +109,14 @@ impl FibAddr {
 pub struct FibRoute {
     pub prefix: IpNet,
     pub entry: RibEntry,
+    /// Protocol reported by the kernel, when it maps to a protocol we
+    /// install. Kept separately from the distance-0 kernel RIB entry so
+    /// the RIB can recognize echoes of its own installed routes.
+    pub kernel_protocol: Option<crate::rib::RibType>,
+    /// An `RTPROT_STATIC` route found by the startup dump: an operator's
+    /// route, or a static an earlier zebra-rs installed under that number.
+    /// See `Rib::legacy_statics`.
+    pub legacy_static: bool,
     /// Kernel routing-table id the route belongs to (`rtm_table`, or
     /// the `RTA_TABLE` attribute for ids > 255). `RT_TABLE_MAIN` (254)
     /// for the default table; a VRF's table id otherwise. Lets the RIB
@@ -194,6 +204,14 @@ pub struct RouteOffload {
 
 #[derive(Debug)]
 pub enum FibMessage {
+    /// A protocol-BGP route left a VRF table. Not a RIB route (our own
+    /// VRF BGP routes are never fed back); see
+    /// `FibHandle::evpn_prefix_deleted`.
+    EvpnRouteDeleted {
+        table_id: u32,
+        prefix: ipnet::IpNet,
+        metric: u32,
+    },
     NewLink(FibLink),
     DelLink(FibLink),
     NewAddr(FibAddr),

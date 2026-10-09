@@ -97,6 +97,13 @@ struct Arg {
 
     #[arg(
         long,
+        help = "Seconds after startup to remove routes an earlier run left in the kernel that no protocol has reinstalled",
+        default_value_t = 120
+    )]
+    leftover_sweep_time: u64,
+
+    #[arg(
+        long,
         help = "VTY gRPC listen address. Forms: unix:NAME (Linux abstract socket), unix:/PATH (filesystem socket) or tcp:HOST:PORT",
         default_value = "unix:zebra-rs/vty"
     )]
@@ -248,7 +255,8 @@ async fn run(arg: Arg) -> anyhow::Result<()> {
         tracing::warn!("failed to raise file descriptor limit: {}", e);
     }
 
-    let rib = Rib::new(arg.no_nhid)?;
+    let mut rib = Rib::new(arg.no_nhid)?;
+    rib.leftover_sweep_time = std::time::Duration::from_secs(arg.leftover_sweep_time);
 
     let policy = Policy::new();
 

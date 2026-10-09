@@ -1,0 +1,476 @@
+{
+  "binary_sha256": "411bcea56bab17aed5180b5d17f43e1e0dc469c377923351f461426f8d1b86ff",
+  "checks": [
+    {
+      "name": "v1 EVPN established",
+      "passed": true
+    },
+    {
+      "name": "v2 EVPN established",
+      "passed": true
+    },
+    {
+      "name": "v1 Type-2 -4 neighbor",
+      "passed": true
+    },
+    {
+      "name": "l1 switched -4",
+      "passed": true
+    },
+    {
+      "name": "v1 Type-2 -6 neighbor",
+      "passed": true
+    },
+    {
+      "name": "l1 switched -6",
+      "passed": true
+    },
+    {
+      "name": "v1 preserved VTEP",
+      "passed": true
+    },
+    {
+      "name": "v1 Type-3 IMET",
+      "passed": true
+    },
+    {
+      "name": "v1 mapped IPv6 RMAC adjacency",
+      "passed": true
+    },
+    {
+      "name": "v1 Type-5 10.20.2.0/24",
+      "passed": true
+    },
+    {
+      "name": "v1 Type-5 2001:db8:20:2::/64",
+      "passed": true
+    },
+    {
+      "name": "v1 Type-5 10.30.2.0/24",
+      "passed": true
+    },
+    {
+      "name": "v1 Type-5 2001:db8:30:2::/64",
+      "passed": true
+    },
+    {
+      "name": "r1 routed -4",
+      "passed": true
+    },
+    {
+      "name": "r1 routed -6",
+      "passed": true
+    },
+    {
+      "name": "v2 Type-2 -4 neighbor",
+      "passed": true
+    },
+    {
+      "name": "l2 switched -4",
+      "passed": true
+    },
+    {
+      "name": "v2 Type-2 -6 neighbor",
+      "passed": true
+    },
+    {
+      "name": "l2 switched -6",
+      "passed": true
+    },
+    {
+      "name": "v2 preserved VTEP",
+      "passed": true
+    },
+    {
+      "name": "v2 Type-3 IMET",
+      "passed": true
+    },
+    {
+      "name": "v2 mapped IPv6 RMAC adjacency",
+      "passed": true
+    },
+    {
+      "name": "v2 Type-5 10.20.1.0/24",
+      "passed": true
+    },
+    {
+      "name": "v2 Type-5 2001:db8:20:1::/64",
+      "passed": true
+    },
+    {
+      "name": "v2 Type-5 10.30.1.0/24",
+      "passed": true
+    },
+    {
+      "name": "v2 Type-5 2001:db8:30:1::/64",
+      "passed": true
+    },
+    {
+      "name": "r2 routed -4",
+      "passed": true
+    },
+    {
+      "name": "r2 routed -6",
+      "passed": true
+    },
+    {
+      "name": "Bridge admin-down removes the IPv4 Type-5 route",
+      "passed": true
+    },
+    {
+      "name": "Bridge admin flap: Type-5 10.20.1.0/24",
+      "passed": true
+    },
+    {
+      "name": "Bridge admin flap: Type-5 2001:db8:20:1::/64",
+      "passed": true
+    },
+    {
+      "name": "Bridge admin flap: RMAC neighbor -4",
+      "passed": true
+    },
+    {
+      "name": "Bridge admin flap: RMAC neighbor -6",
+      "passed": true
+    },
+    {
+      "name": "Bridge admin flap: RMAC FDB",
+      "passed": true
+    },
+    {
+      "name": "Bridge admin flap: routed -4",
+      "passed": true
+    },
+    {
+      "name": "Bridge admin flap: routed -6",
+      "passed": true
+    },
+    {
+      "name": "VXLAN carrier flap: Type-5 10.20.1.0/24",
+      "passed": true
+    },
+    {
+      "name": "VXLAN carrier flap: Type-5 2001:db8:20:1::/64",
+      "passed": true
+    },
+    {
+      "name": "VXLAN carrier flap: RMAC neighbor -4",
+      "passed": true
+    },
+    {
+      "name": "VXLAN carrier flap: RMAC neighbor -6",
+      "passed": true
+    },
+    {
+      "name": "VXLAN carrier flap: RMAC FDB",
+      "passed": true
+    },
+    {
+      "name": "VXLAN carrier flap: routed -4",
+      "passed": true
+    },
+    {
+      "name": "VXLAN carrier flap: routed -6",
+      "passed": true
+    },
+    {
+      "name": "Neighbor and FDB flush: Type-5 10.20.1.0/24",
+      "passed": true
+    },
+    {
+      "name": "Neighbor and FDB flush: Type-5 2001:db8:20:1::/64",
+      "passed": true
+    },
+    {
+      "name": "Neighbor and FDB flush: RMAC neighbor -4",
+      "passed": true
+    },
+    {
+      "name": "Neighbor and FDB flush: RMAC neighbor -6",
+      "passed": true
+    },
+    {
+      "name": "Neighbor and FDB flush: RMAC FDB",
+      "passed": true
+    },
+    {
+      "name": "Neighbor and FDB flush: routed -4",
+      "passed": true
+    },
+    {
+      "name": "Neighbor and FDB flush: routed -6",
+      "passed": true
+    },
+    {
+      "name": "VXLAN re-attach: Type-5 10.20.1.0/24",
+      "passed": true
+    },
+    {
+      "name": "VXLAN re-attach: Type-5 2001:db8:20:1::/64",
+      "passed": true
+    },
+    {
+      "name": "VXLAN re-attach: RMAC neighbor -4",
+      "passed": true
+    },
+    {
+      "name": "VXLAN re-attach: RMAC neighbor -6",
+      "passed": true
+    },
+    {
+      "name": "VXLAN re-attach: RMAC FDB",
+      "passed": true
+    },
+    {
+      "name": "VXLAN re-attach: routed -4",
+      "passed": true
+    },
+    {
+      "name": "VXLAN re-attach: routed -6",
+      "passed": true
+    },
+    {
+      "name": "External route delete: Type-5 10.20.1.0/24",
+      "passed": true
+    },
+    {
+      "name": "External route delete: Type-5 2001:db8:20:1::/64",
+      "passed": true
+    },
+    {
+      "name": "External route delete: RMAC neighbor -4",
+      "passed": true
+    },
+    {
+      "name": "External route delete: RMAC neighbor -6",
+      "passed": true
+    },
+    {
+      "name": "External route delete: RMAC FDB",
+      "passed": true
+    },
+    {
+      "name": "External route delete: routed -4",
+      "passed": true
+    },
+    {
+      "name": "External route delete: routed -6",
+      "passed": true
+    },
+    {
+      "name": "Move to br2000b: Type-5 10.20.1.0/24",
+      "passed": true
+    },
+    {
+      "name": "Move to br2000b: Type-5 2001:db8:20:1::/64",
+      "passed": true
+    },
+    {
+      "name": "Move to br2000b: RMAC neighbor -4",
+      "passed": true
+    },
+    {
+      "name": "Move to br2000b: none left on br2000 -4",
+      "passed": true
+    },
+    {
+      "name": "Move to br2000b: RMAC neighbor -6",
+      "passed": true
+    },
+    {
+      "name": "Move to br2000b: none left on br2000 -6",
+      "passed": true
+    },
+    {
+      "name": "Move to br2000b: routed -4",
+      "passed": true
+    },
+    {
+      "name": "Move to br2000b: routed -6",
+      "passed": true
+    },
+    {
+      "name": "Move to br2000: Type-5 10.20.1.0/24",
+      "passed": true
+    },
+    {
+      "name": "Move to br2000: Type-5 2001:db8:20:1::/64",
+      "passed": true
+    },
+    {
+      "name": "Move to br2000: RMAC neighbor -4",
+      "passed": true
+    },
+    {
+      "name": "Move to br2000: none left on br2000b -4",
+      "passed": true
+    },
+    {
+      "name": "Move to br2000: RMAC neighbor -6",
+      "passed": true
+    },
+    {
+      "name": "Move to br2000: none left on br2000b -6",
+      "passed": true
+    },
+    {
+      "name": "Move to br2000: routed -4",
+      "passed": true
+    },
+    {
+      "name": "Move to br2000: routed -6",
+      "passed": true
+    },
+    {
+      "name": "Floating static 10.99.3.0/24 installs both priorities",
+      "passed": true
+    },
+    {
+      "name": "Floating static 2001:db8:99:3::/64 installs both priorities",
+      "passed": true
+    },
+    {
+      "name": "Floating static 10.99.4.0/24 installs both priorities",
+      "passed": true
+    },
+    {
+      "name": "Floating static 2001:db8:99:4::/64 installs both priorities",
+      "passed": true
+    },
+    {
+      "name": "Static 10.99.1.0/24 installs as proto zebra",
+      "passed": true
+    },
+    {
+      "name": "Static 10.99.2.0/24 installs as proto zebra",
+      "passed": true
+    },
+    {
+      "name": "Static 2001:db8:99:1::/64 installs as proto zebra",
+      "passed": true
+    },
+    {
+      "name": "v2 Type-5 10.31.1.0/24",
+      "passed": true
+    },
+    {
+      "name": "Restart: v2 EVPN established",
+      "passed": true
+    },
+    {
+      "name": "Restart: Type-5 10.20.1.0/24",
+      "passed": true
+    },
+    {
+      "name": "Restart: Type-5 2001:db8:20:1::/64",
+      "passed": true
+    },
+    {
+      "name": "Restart: RMAC neighbor -4",
+      "passed": true
+    },
+    {
+      "name": "Restart: RMAC neighbor -6",
+      "passed": true
+    },
+    {
+      "name": "Restart: RMAC FDB",
+      "passed": true
+    },
+    {
+      "name": "Restart: routed -4",
+      "passed": true
+    },
+    {
+      "name": "Restart: routed -6",
+      "passed": true
+    },
+    {
+      "name": "Restart: unreplaced static leftover swept",
+      "passed": true
+    },
+    {
+      "name": "Restart: VRF BGP leftover swept",
+      "passed": true
+    },
+    {
+      "name": "Restart: every floating leftover priority swept 10.99.3.0/24",
+      "passed": true
+    },
+    {
+      "name": "Restart: every floating leftover priority swept 2001:db8:99:3::/64",
+      "passed": true
+    },
+    {
+      "name": "Restart: floating backup replaced 10.99.4.0/24",
+      "passed": true
+    },
+    {
+      "name": "Restart: floating backup replaced 2001:db8:99:4::/64",
+      "passed": true
+    },
+    {
+      "name": "Restart: configured static 10.99.1.0/24 kept",
+      "passed": true
+    },
+    {
+      "name": "Restart: configured static 2001:db8:99:1::/64 kept",
+      "passed": true
+    },
+    {
+      "name": "Restart: operator proto static kept",
+      "passed": true
+    },
+    {
+      "name": "Restart: legacy proto static adopted",
+      "passed": true
+    },
+    {
+      "name": "Type-2 IPv4 withdrawal",
+      "passed": true
+    },
+    {
+      "name": "Type-2 IPv6 survives IPv4 withdrawal",
+      "passed": true
+    },
+    {
+      "name": "Type-2 MAC survives IPv4 withdrawal",
+      "passed": true
+    },
+    {
+      "name": "Static blackhole Type-5 withdrawal",
+      "passed": true
+    },
+    {
+      "name": "Other Type-5 retains RMAC adjacency",
+      "passed": true
+    },
+    {
+      "name": "Type-5 withdrawal 10.20.1.0/24",
+      "passed": true
+    },
+    {
+      "name": "Type-5 withdrawal 2001:db8:20:1::/64",
+      "passed": true
+    },
+    {
+      "name": "Final Type-5 withdrawal",
+      "passed": true
+    },
+    {
+      "name": "Unused RMAC neighbor cleanup -4",
+      "passed": true
+    },
+    {
+      "name": "Unused RMAC neighbor cleanup -6",
+      "passed": true
+    }
+  ],
+  "dataplane": "Linux bridge/VXLAN/VRF",
+  "dependencies": [
+    "iproute2",
+    "zebra-rs",
+    "vtyctl"
+  ],
+  "passed": true
+}

@@ -1,0 +1,301 @@
+{
+  "backend": "zebra",
+  "build": {
+    "source": "zebra-rs checkout, branch ovn-native-evpn",
+    "revision": "1f9343d8803e06603d02246b40db5cb171de488c",
+    "dirty": true,
+    "image": "ovn-zebra-lab:26.09.0",
+    "patch_sha256": "8e554f0b3251a144194bb6174c65bb1e5fdb8a4cec7d093b8c7370d008375ed8",
+    "image_id": "sha256:0c567e134cf18813f85c1bd4a280a4d7aca1bb29e317d2907209c0207fb447ea",
+    "binary_sha256": "55150119056a7d2c2ada87a48e47a67635863b193b5cf08bc131cebcecd2df4c"
+  },
+  "ceos": "ceos:4.36.2F",
+  "tests": [
+    {
+      "name": "bgp-session-hv1",
+      "status": "PASS",
+      "seconds": 1.074,
+      "error": ""
+    },
+    {
+      "name": "type3-vtep-import-hv1",
+      "status": "PASS",
+      "seconds": 0.03,
+      "error": ""
+    },
+    {
+      "name": "bgp-session-hv2",
+      "status": "PASS",
+      "seconds": 3.159,
+      "error": ""
+    },
+    {
+      "name": "type3-vtep-import-hv2",
+      "status": "PASS",
+      "seconds": 0.03,
+      "error": ""
+    },
+    {
+      "name": "external-binding-seed-ipv4",
+      "status": "PASS",
+      "seconds": 0.157,
+      "error": ""
+    },
+    {
+      "name": "external-binding-seed-ipv6",
+      "status": "PASS",
+      "seconds": 0.168,
+      "error": ""
+    },
+    {
+      "name": "type2-ipv4-export",
+      "status": "PASS",
+      "seconds": 0.127,
+      "error": ""
+    },
+    {
+      "name": "type2-ipv4-kernel-neighbor-hv1",
+      "status": "PASS",
+      "seconds": 0.032,
+      "error": ""
+    },
+    {
+      "name": "type2-ipv4-kernel-neighbor-hv2",
+      "status": "PASS",
+      "seconds": 0.029,
+      "error": ""
+    },
+    {
+      "name": "type2-ipv4-forwarding-out",
+      "status": "PASS",
+      "seconds": 1.033,
+      "error": ""
+    },
+    {
+      "name": "type2-ipv4-forwarding-in",
+      "status": "PASS",
+      "seconds": 1.04,
+      "error": ""
+    },
+    {
+      "name": "type2-ipv6-export",
+      "status": "PASS",
+      "seconds": 0.109,
+      "error": ""
+    },
+    {
+      "name": "type2-ipv6-kernel-neighbor-hv1",
+      "status": "PASS",
+      "seconds": 0.031,
+      "error": ""
+    },
+    {
+      "name": "type2-ipv6-kernel-neighbor-hv2",
+      "status": "PASS",
+      "seconds": 0.029,
+      "error": ""
+    },
+    {
+      "name": "type2-ipv6-forwarding-out",
+      "status": "PASS",
+      "seconds": 1.032,
+      "error": ""
+    },
+    {
+      "name": "type2-ipv6-forwarding-in",
+      "status": "PASS",
+      "seconds": 1.034,
+      "error": ""
+    },
+    {
+      "name": "type5-ipv4-export",
+      "status": "PASS",
+      "seconds": 0.108,
+      "error": ""
+    },
+    {
+      "name": "type5-ipv4-kernel-route",
+      "status": "PASS",
+      "seconds": 0.031,
+      "error": ""
+    },
+    {
+      "name": "type5-ipv4-sb-learned-route",
+      "status": "PASS",
+      "seconds": 0.044,
+      "error": ""
+    },
+    {
+      "name": "type5-ipv4-forwarding-out",
+      "status": "PASS",
+      "seconds": 1.033,
+      "error": ""
+    },
+    {
+      "name": "type5-ipv4-forwarding-in",
+      "status": "PASS",
+      "seconds": 1.036,
+      "error": ""
+    },
+    {
+      "name": "type5-ipv6-export",
+      "status": "PASS",
+      "seconds": 0.116,
+      "error": ""
+    },
+    {
+      "name": "type5-ipv6-kernel-route",
+      "status": "PASS",
+      "seconds": 0.033,
+      "error": ""
+    },
+    {
+      "name": "type5-ipv6-sb-learned-route",
+      "status": "PASS",
+      "seconds": 0.043,
+      "error": ""
+    },
+    {
+      "name": "type5-ipv6-forwarding-out",
+      "status": "PASS",
+      "seconds": 1.032,
+      "error": ""
+    },
+    {
+      "name": "type5-ipv6-forwarding-in",
+      "status": "PASS",
+      "seconds": 1.036,
+      "error": ""
+    },
+    {
+      "name": "ovn-dual-stack-2001:db8:10::102",
+      "status": "PASS",
+      "seconds": 1.037,
+      "error": ""
+    },
+    {
+      "name": "ovn-dual-stack-2001:db8:20::10",
+      "status": "PASS",
+      "seconds": 1.034,
+      "error": ""
+    },
+    {
+      "name": "kernel-import-mac",
+      "status": "PASS",
+      "seconds": 0.036,
+      "error": ""
+    },
+    {
+      "name": "wire-vni1000-ipv4",
+      "status": "PASS",
+      "seconds": 0.0,
+      "error": ""
+    },
+    {
+      "name": "wire-vni1000-ipv6",
+      "status": "PASS",
+      "seconds": 0.0,
+      "error": ""
+    },
+    {
+      "name": "wire-vni2000-ipv4",
+      "status": "PASS",
+      "seconds": 0.0,
+      "error": ""
+    },
+    {
+      "name": "wire-vni2000-ipv6",
+      "status": "PASS",
+      "seconds": 0.0,
+      "error": ""
+    },
+    {
+      "name": "type2-ipv4-withdraw",
+      "status": "PASS",
+      "seconds": 0.033,
+      "error": ""
+    },
+    {
+      "name": "type2-ipv6-withdraw",
+      "status": "PASS",
+      "seconds": 0.031,
+      "error": ""
+    },
+    {
+      "name": "type2-ipv4-restore",
+      "status": "PASS",
+      "seconds": 0.03,
+      "error": ""
+    },
+    {
+      "name": "type2-ipv6-restore",
+      "status": "PASS",
+      "seconds": 0.028,
+      "error": ""
+    },
+    {
+      "name": "type5-ipv4-withdraw",
+      "status": "PASS",
+      "seconds": 0.051,
+      "error": ""
+    },
+    {
+      "name": "type5-ipv6-withdraw",
+      "status": "PASS",
+      "seconds": 0.047,
+      "error": ""
+    },
+    {
+      "name": "type5-ipv4-restore",
+      "status": "PASS",
+      "seconds": 1.099,
+      "error": ""
+    },
+    {
+      "name": "type5-ipv6-restore",
+      "status": "PASS",
+      "seconds": 0.046,
+      "error": ""
+    },
+    {
+      "name": "speaker-restart-session-recovery",
+      "status": "PASS",
+      "seconds": 6.268,
+      "error": ""
+    },
+    {
+      "name": "speaker-restart-local-mac-replay",
+      "status": "PASS",
+      "seconds": 0.035,
+      "error": ""
+    },
+    {
+      "name": "speaker-restart-ipv4-neighbor-recovery",
+      "status": "PASS",
+      "seconds": 0.032,
+      "error": ""
+    },
+    {
+      "name": "speaker-restart-ipv6-neighbor-recovery",
+      "status": "PASS",
+      "seconds": 0.03,
+      "error": ""
+    },
+    {
+      "name": "speaker-restart-ipv4-type5-forwarding",
+      "status": "PASS",
+      "seconds": 1.033,
+      "error": ""
+    },
+    {
+      "name": "speaker-restart-ipv6-type5-forwarding",
+      "status": "PASS",
+      "seconds": 1.036,
+      "error": ""
+    }
+  ],
+  "ovn": "26.09.0",
+  "ovs": "3.7.90",
+  "kernel": "7.0.0-1013-aws",
+  "scope": "Functional end-to-end validation; no 500k BGP capacity claim."
+}

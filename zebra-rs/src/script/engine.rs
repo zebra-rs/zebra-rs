@@ -1028,6 +1028,8 @@ mod tests {
         "#,
         );
         let mac = EvpnRoute::Mac(EvpnMac {
+            label2: None,
+            ip: None,
             id: 0,
             rd: "65000:1".parse::<RouteDistinguisher>().unwrap(),
             esi: [0; 10],
@@ -1077,6 +1079,8 @@ mod tests {
         "#,
         );
         let mac = EvpnRoute::Mac(EvpnMac {
+            label2: None,
+            ip: None,
             id: 0,
             rd: "65000:1".parse::<RouteDistinguisher>().unwrap(),
             esi: [0; 10],
@@ -1146,6 +1150,8 @@ mod tests {
         "#,
         );
         let mac = EvpnRoute::Mac(EvpnMac {
+            label2: None,
+            ip: None,
             id: 0,
             rd: "65000:1".parse::<RouteDistinguisher>().unwrap(),
             esi: [0; 10],
@@ -1182,6 +1188,8 @@ mod tests {
         let _g = install_one("gbp_example", EXAMPLE);
 
         let mac = EvpnRoute::Mac(EvpnMac {
+            label2: None,
+            ip: None,
             id: 0,
             rd: "65000:1".parse::<RouteDistinguisher>().unwrap(),
             esi: [0; 10],
@@ -1255,6 +1263,8 @@ mod tests {
         }
 
         let mac = EvpnRoute::Mac(EvpnMac {
+            label2: None,
+            ip: None,
             id: 0,
             rd: "65000:1".parse::<RouteDistinguisher>().unwrap(),
             esi: [0; 10],

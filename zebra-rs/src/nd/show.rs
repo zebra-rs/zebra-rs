@@ -681,6 +681,7 @@ mod tests {
             vrf_table: None,
             bridge: false,
             vxlan_local: None,
+            vxlan_metadata: None,
             parent: None,
             vlan_id: None,
             mtu_error: None,

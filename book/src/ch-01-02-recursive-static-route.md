@@ -44,8 +44,8 @@ resolved adjacency:
 
 ```
 $ ip route show
-10.1.1.1 via 10.0.0.254 dev eth0 proto static
-172.16.0.0/16 via 10.0.0.254 dev eth0 proto static
+10.1.1.1 via 10.0.0.254 dev eth0 proto zebra
+172.16.0.0/16 via 10.0.0.254 dev eth0 proto zebra
 ```
 
 The resolving route does not have to be another static route — a
