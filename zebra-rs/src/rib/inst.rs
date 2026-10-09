@@ -12,7 +12,7 @@ use super::{
 
 use crate::config::{Args, path_from_command};
 use crate::config::{ConfigChannel, ConfigOp, ConfigRequest, DisplayRequest, ShowChannel};
-use crate::context::Timer;
+use crate::context::{Timer, TimerType};
 use crate::fib::sysctl::sysctl_enable;
 use crate::fib::{FibChannel, FibHandle, FibMessage, FibNeighbor};
 use crate::fib::{fib_dump, fib_resync};
@@ -20,6 +20,8 @@ use crate::rib::route::{
     AddrRecoveryState, ipv4_nexthop_sync, ipv6_nexthop_sync, nexthop_orphan_gc,
 };
 use crate::rib::{Bridge, RibEntries};
+use crate::spf::ilm_hold::SID_MOVE_HOLD;
+use crate::spf::label_block::LabelBlock;
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use prefix_trie::PrefixMap;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -615,6 +617,9 @@ pub enum Message {
         tx: oneshot::Sender<()>,
     },
     Resolve,
+    /// A retired SRGB's hold ran out: reserve the SR blocks again
+    /// without it.
+    ReserveSrBlocks,
     /// Register a subscriber. Sent by
     /// [`crate::config::ConfigManager::subscribe_to_rib`] right after
     /// it has allocated a `ProtoId` and built the matching
@@ -1356,6 +1361,16 @@ pub struct Rib {
     /// schedule_rib_sync(), cleared by the Message::Resolve handler.
     pub rib_sync_timer: Option<Timer>,
 
+    /// The SRGBs `reserve_sr_blocks` reserved last, to tell which one a
+    /// block change drops.
+    pub reserved_srgbs: Vec<LabelBlock>,
+    /// SRGBs no block holds any more, still reserved until the IGPs' old
+    /// Prefix-SID labels in them stop forwarding (`spf::ilm_hold`).
+    pub retired_srgbs: Vec<(LabelBlock, tokio::time::Instant)>,
+    /// Fires [`Message::ReserveSrBlocks`] when the first retired SRGB is
+    /// due.
+    pub retired_srgb_timer: Option<Timer>,
+
     /// Debounce interval (seconds) before a queued FIB modification triggers
     /// nexthop resolution. Configurable so an operator can tune for their
     /// convergence vs. churn trade-off; default 1s matches the typical
@@ -1490,6 +1505,9 @@ impl Rib {
             router_id_config: None,
             hostname_config: None,
             rib_sync_timer: None,
+            reserved_srgbs: Vec::new(),
+            retired_srgbs: Vec::new(),
+            retired_srgb_timer: None,
             rib_sync_interval: DEFAULT_RIB_SYNC_INTERVAL_SEC,
             sr0_owned: false,
             addr_recovery: BTreeMap::new(),
@@ -1580,12 +1598,54 @@ impl Rib {
     /// change. A block already handed out that a new SR block overlaps
     /// stays in use until its owner releases it; say so, since the two
     /// will collide in the label table.
-    fn reserve_sr_blocks(&mut self) {
+    ///
+    /// An SRGB that a change drops stays reserved while its Prefix-SID
+    /// labels may still forward: for `SID_MOVE_HOLD`, and after that
+    /// until the last ILM entry in it is withdrawn. An IGP starts its own
+    /// hold (`spf::ilm_hold`) only once the block update and SPF reach it,
+    /// so its old labels outlive a timer started here; the withdrawal is
+    /// what says they are gone (`ilm_del` calls back in for it).
+    pub(super) fn reserve_sr_blocks(&mut self) {
+        let now = tokio::time::Instant::now();
+        let srgbs: Vec<LabelBlock> = self
+            .blocks
+            .values()
+            .filter_map(|b| b.global.clone())
+            .collect();
+        for old in std::mem::take(&mut self.reserved_srgbs) {
+            if !srgbs.contains(&old) {
+                self.retired_srgbs.push((old, now + SID_MOVE_HOLD));
+            }
+        }
+        let ilm = &self.ilm;
+        self.retired_srgbs.retain(|(block, until)| {
+            *until > now || ilm.range(block.start..block.end).next().is_some()
+        });
+        self.reserved_srgbs = srgbs;
+        self.retired_srgb_timer = self
+            .retired_srgbs
+            .iter()
+            .map(|(_, until)| *until)
+            .filter(|until| *until > now)
+            .min()
+            .map(|at| {
+                let wait = at
+                    .saturating_duration_since(now)
+                    .max(std::time::Duration::from_millis(1));
+                let tx = self.tx.clone();
+                Timer::new_dur(wait, TimerType::Once, move || {
+                    let tx = tx.clone();
+                    async move {
+                        let _ = tx.send(Message::ReserveSrBlocks);
+                    }
+                })
+            });
         let blocks = self
             .blocks
             .values()
             .flat_map(|b| [b.global.clone(), b.local.clone()])
-            .flatten();
+            .flatten()
+            .chain(self.retired_srgbs.iter().map(|(block, _)| block.clone()));
         let overlaps = self.label_space.lock().set_reserved(blocks);
         for (held, proto) in overlaps {
             tracing::warn!(
@@ -4084,6 +4144,10 @@ impl Rib {
             Message::LinkDown { ifindex } => {
                 // println!("LinkDown {}", ifindex);
                 self.link_down(ifindex).await;
+            }
+            Message::ReserveSrBlocks => {
+                self.retired_srgb_timer = None;
+                self.reserve_sr_blocks();
             }
             Message::Resolve => {
                 // Drop the timer so the next FIB modification can arm a fresh
@@ -7093,7 +7157,9 @@ mod label_space_tests {
         assert_eq!(request(&mut rib, &mut rx, 1024).await, Some((25024, 1024)));
     }
 
-    #[tokio::test]
+    /// A deleted block's SRGB stays reserved for the Prefix-SID move hold
+    /// (`srgb_hold_tests`); nothing is installed in it, so it is free after.
+    #[tokio::test(start_paused = true)]
     async fn a_configured_sr_block_is_stepped_around_until_deleted() {
         let mut rib = Rib::new(false).expect("rib");
         let mut rx = subscribe_bgp(&mut rib, 1);
@@ -7112,6 +7178,10 @@ mod label_space_tests {
             name: "core".to_string(),
         };
         rib.process_msg(del, RT_TABLE_MAIN).await;
+        assert_eq!(request(&mut rib, &mut rx, 1024).await, Some((26524, 1024)));
+        tokio::time::advance(crate::spf::ilm_hold::SID_MOVE_HOLD).await;
+        rib.process_msg(Message::ReserveSrBlocks, RT_TABLE_MAIN)
+            .await;
         assert_eq!(request(&mut rib, &mut rx, 1024).await, Some((24000, 1024)));
     }
 
@@ -7123,6 +7193,88 @@ mod label_space_tests {
         rib.proto_cleanup("bgp".to_string()).await;
         let mut rx = subscribe_bgp(&mut rib, 2);
         assert_eq!(request(&mut rib, &mut rx, 1024).await, Some((24000, 1024)));
+    }
+}
+
+#[cfg(test)]
+mod srgb_hold_tests {
+    use super::*;
+    use crate::spf::ilm_hold::SID_MOVE_HOLD;
+
+    fn srgb_at(start: u32) -> Message {
+        Message::BlockAdd {
+            name: DEFAULT_BLOCK_NAME.to_string(),
+            config: BlockConfig {
+                delete: false,
+                global_start: Some(start),
+                global_range: Some(8000),
+                local_start: Some(15000),
+                local_range: Some(1000),
+            },
+        }
+    }
+
+    /// An SRGB a change drops stays reserved while the IGPs' old
+    /// Prefix-SID labels in it keep forwarding, then is free again.
+    #[tokio::test(start_paused = true)]
+    async fn a_dropped_srgb_stays_reserved_for_the_hold() {
+        let mut rib = Rib::new(false).expect("rib");
+        // SRGBs inside the dynamic region, where blocks are handed out.
+        rib.process_msg(srgb_at(30000), RT_TABLE_MAIN).await;
+        rib.process_msg(srgb_at(40000), RT_TABLE_MAIN).await;
+        let below = rib.label_space.lock().alloc("bgp", 6000).unwrap();
+        assert_eq!(below.start, 24000);
+        let next = rib.label_space.lock().alloc("bgp", 16).unwrap();
+        assert_eq!(next.start, 38000, "30000..38000 is still held");
+        assert!(rib.retired_srgb_timer.is_some());
+
+        tokio::time::advance(SID_MOVE_HOLD).await;
+        rib.process_msg(Message::ReserveSrBlocks, RT_TABLE_MAIN)
+            .await;
+        let freed = rib.label_space.lock().alloc("bgp", 16).unwrap();
+        assert_eq!(freed.start, 30000);
+        assert!(rib.retired_srgb_timer.is_none());
+    }
+
+    /// Moving back to a retired SRGB keeps it reserved past the old hold:
+    /// it is configured again.
+    #[tokio::test(start_paused = true)]
+    async fn a_retired_srgb_configured_again_stays_reserved() {
+        let mut rib = Rib::new(false).expect("rib");
+        rib.process_msg(srgb_at(30000), RT_TABLE_MAIN).await;
+        rib.process_msg(srgb_at(40000), RT_TABLE_MAIN).await;
+        rib.process_msg(srgb_at(30000), RT_TABLE_MAIN).await;
+        tokio::time::advance(SID_MOVE_HOLD).await;
+        rib.process_msg(Message::ReserveSrBlocks, RT_TABLE_MAIN)
+            .await;
+        rib.label_space.lock().alloc("bgp", 6000).unwrap();
+        let next = rib.label_space.lock().alloc("bgp", 16).unwrap();
+        assert_eq!(next.start, 38000, "30000..38000 is the SRGB again");
+    }
+
+    /// The hold alone does not free a retired SRGB: an IGP starts its own
+    /// hold once the update reaches it, so its old label can outlive the
+    /// RIB's timer. Withdrawing the last entry in it frees the SRGB.
+    #[tokio::test(start_paused = true)]
+    async fn a_retired_srgb_waits_for_its_last_ilm_entry() {
+        let mut rib = Rib::new(false).expect("rib");
+        rib.process_msg(srgb_at(30000), RT_TABLE_MAIN).await;
+        let mut held = IlmEntry::new(RibType::Isis);
+        held.owner = Some(crate::rib::client::ProtoId::from_raw(5));
+        held.ilm_type = IlmType::Node(1);
+        rib.ilm_add(30001, held.clone()).await;
+        rib.process_msg(srgb_at(40000), RT_TABLE_MAIN).await;
+
+        tokio::time::advance(SID_MOVE_HOLD).await;
+        rib.process_msg(Message::ReserveSrBlocks, RT_TABLE_MAIN)
+            .await;
+        rib.label_space.lock().alloc("bgp", 6000).unwrap();
+        let next = rib.label_space.lock().alloc("bgp", 16).unwrap();
+        assert_eq!(next.start, 38000, "30001 is still installed");
+
+        rib.ilm_del(30001, held).await;
+        let freed = rib.label_space.lock().alloc("bgp", 16).unwrap();
+        assert_eq!(freed.start, 30000);
     }
 }
 

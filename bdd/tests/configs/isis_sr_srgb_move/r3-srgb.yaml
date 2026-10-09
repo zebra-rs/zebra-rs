@@ -1,0 +1,39 @@
+# r3 with its SRGB moved to 18000 (4000 labels, clear of the dynamic
+# labels from 24000): Prefix-SID index 3 becomes label 18003. A whole
+# config, so the block's start and range land in one commit; the SRLB is
+# restated unchanged.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.3/32
+- if-name: r3-r2
+  ipv4:
+    address: 10.0.23.3/24
+system:
+  hostname: r3
+segment-routing:
+  block:
+  - name: default
+    global:
+      start: 18000
+      range: 4000
+    local:
+      start: 15000
+      range: 1000
+router:
+  isis:
+    net: 49.0000.0000.0000.0003.00
+    hostname: r3
+    is-type: level-2-only
+    segment-routing:
+      mpls: {}
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+        prefix-sid:
+          index: 3
+    - if-name: r3-r2
+      network-type: point-to-point
+      ipv4:
+        enabled: true

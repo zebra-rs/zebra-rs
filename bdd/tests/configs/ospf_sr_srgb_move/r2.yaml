@@ -1,0 +1,54 @@
+# r2 — r3's penultimate hop.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.2/32
+  ipv6:
+    address: 2001:db8::2/128
+- if-name: r2-r1
+  ipv4:
+    address: 10.0.12.2/24
+  ipv6:
+    address: 2001:db8:12::2/64
+- if-name: r2-r3
+  ipv4:
+    address: 10.0.23.2/24
+  ipv6:
+    address: 2001:db8:23::2/64
+system:
+  hostname: r2
+router:
+  ospf:
+    router-id: 10.0.0.2
+    segment-routing:
+      mpls: {}
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+        prefix-sid:
+          index: 2
+      - if-name: r2-r1
+        enabled: true
+        network-type: point-to-point
+      - if-name: r2-r3
+        enabled: true
+        network-type: point-to-point
+  ospfv3:
+    router-id: 10.0.0.2
+    segment-routing:
+      mpls: {}
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+        prefix-sid:
+          index: 12
+      - if-name: r2-r1
+        enabled: true
+        network-type: point-to-point
+      - if-name: r2-r3
+        enabled: true
+        network-type: point-to-point

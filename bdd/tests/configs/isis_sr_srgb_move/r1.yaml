@@ -1,0 +1,29 @@
+# r1 — the far end of the chain. Its ILM swaps r3's Prefix-SID label
+# toward r2, so it holds both the old and the new label while r3's SRGB
+# move settles.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.1/32
+- if-name: r1-r2
+  ipv4:
+    address: 10.0.12.1/24
+system:
+  hostname: r1
+router:
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    hostname: r1
+    is-type: level-2-only
+    segment-routing:
+      mpls: {}
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+        prefix-sid:
+          index: 1
+    - if-name: r1-r2
+      network-type: point-to-point
+      ipv4:
+        enabled: true
