@@ -456,6 +456,23 @@ impl LabelSpace {
         !labels.is_empty()
     }
 
+    /// Every handed-out block and its owner, for the commit checks on a
+    /// new segment-routing block (`config::label_check`).
+    pub fn held_blocks(&self) -> Vec<(LabelBlock, String)> {
+        self.held
+            .iter()
+            .map(|(start, h)| {
+                (
+                    LabelBlock {
+                        start: *start,
+                        end: h.end,
+                    },
+                    h.proto.clone(),
+                )
+            })
+            .collect()
+    }
+
     /// The owners whose pool found no free label since the last call:
     /// labels have been freed, so they can try again.
     pub fn take_starved(&mut self) -> BTreeSet<ProtoId> {

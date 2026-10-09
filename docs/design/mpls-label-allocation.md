@@ -555,6 +555,21 @@ never collide, and no discrepancy state or `clear` command is needed.
 - Dynamic range: inside the label space, not overlapping the reserved
   region.
 
+The checks (phase 6a, `config::label_check`) run in
+`ConfigManager::commit`, after the mandatory-node and leaf-value checks and
+before anything is dispatched, so a refused commit changes nothing. They
+read the whole candidate and the label blocks the RIB's `LabelSpace` has
+handed out at that moment, but refuse a commit only for a violation the
+running config does not already have. A violation an earlier release let
+in therefore does not block every later commit, while a change that
+creates one, a block moved over an untouched static binding say, is still
+refused. The startup config is checked the same way but only warned
+about: refusing it would leave the router unconfigured, and a config an
+earlier release accepted can fail a check added since. The IGPs keep their
+interim handling for that case (§10, phase 3b). The Binding-SID checks
+come with phase 3c, which claims them, and the dynamic range ones with
+phase 6c, which makes it configurable.
+
 ## 8. Configuration and show
 
 - Existing: `segment-routing block default global {start, range}` /
@@ -603,8 +618,8 @@ keeps `LabelSpace` inside the RIB task, owned by protocol name as the old
 `LabelManager` was; the shared handles and `ProtoId` ownership of §4 come
 with phases 3 to 5. Allocation is lowest-first-fit, so a released block's
 space is reused by the next request that fits in it, not only by one of the
-same size. A new SR block over labels already handed out is logged; refusing
-it at commit is phase 6.
+same size. A new SR block over labels already handed out is logged; phase
+6a refuses it at commit.
 
 Phase 2 makes OSPFv2 and OSPFv3 SR-block clients like IS-IS: each watches
 `default` while SR-MPLS is on (`reconcile_block_watch`), and a block update
@@ -705,7 +720,8 @@ label with precedence over dynamic ones (§5.1):
   adjacency keeps its dynamic label.
 - `unclaim`, a dropped pool, or an SRLB change that leaves the label
   outside gives a claimed label back through `Releasing`, like any other.
-- Until commit validation rejects them (phase 6):
+- Commit validation (phase 6a) refuses both of the following, but a
+  startup config is only warned about (§7), so OSPF still handles them:
   - a configured label outside the SRLB is advertised unclaimed, as before,
     with a warning;
   - of two configured SIDs on one label, the first keeps it and the other is
@@ -716,6 +732,11 @@ label with precedence over dynamic ones (§5.1):
   revoked label as OSPF does: another label for the adjacency or Mirror
   Context, then the release.
 - Binding-SIDs are phase 3c (§5.1).
+
+Phase 6 lands in three parts. 6a is commit validation (§7), with the
+Binding-SID checks left to 3c. 6b adds `show mpls label range` and `show
+mpls label table` (§8). 6c makes the dynamic range configurable (`mpls
+label-range dynamic`) and checks it.
 
 Phase 2 changes OSPF's advertised SRGB. No phase changes Adjacency-SID
 labels by itself; from phase 3, a configured Adj-SID on a dynamically held

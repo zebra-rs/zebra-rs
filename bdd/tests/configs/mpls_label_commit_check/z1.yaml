@@ -1,0 +1,34 @@
+# z1 — OSPFv2 with SR-MPLS over the default segment-routing block at its
+# canonical ranges (SRGB 16000-23999, SRLB 15000-15999): a Prefix-SID
+# index 100 on lo, and a configured Adjacency-SID 15000 on vz1ns. The
+# static MPLS binding is added by a command, after this file.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.1/32
+segment-routing:
+  block:
+  - name: default
+    global:
+      start: 16000
+      range: 8000
+    local:
+      start: 15000
+      range: 1000
+router:
+  ospf:
+    router-id: 10.0.0.1
+    segment-routing:
+      mpls: {}
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+        prefix-sid:
+          index: 100
+      - if-name: vz1ns
+        enabled: true
+        network-type: point-to-point
+        adjacency-sid:
+          absolute: 15000

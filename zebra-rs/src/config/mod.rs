@@ -45,6 +45,7 @@ mod files;
 mod ip;
 mod isis;
 mod json;
+mod label_check;
 mod mac;
 mod nd;
 mod nsap;
