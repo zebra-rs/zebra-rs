@@ -78,7 +78,11 @@ this configuration does not provide a route-protocol policy filter.
   with RMAC FDB and neighbor state. IPv6 prefixes use an IPv4-mapped gateway
   and `onlink`, with corresponding IPv4 and mapped-IPv6 RMAC neighbors.
   Linux normalizes IPv6 metric zero to 1024. RMAC state remains
-  until the last imported prefix using it is withdrawn.
+  until the last imported prefix using it is withdrawn. The bridge FDB
+  holds one destination per MAC, so when several VTEPs advertise the same
+  RMAC in an L3 VNI, traffic for all of their prefixes goes to one of them
+  (FRR has the same limitation). When that VTEP is withdrawn, the entry
+  moves to a remaining one. Give each VTEP a distinct RMAC.
 * Adopted fixed-VNI VXLAN ports retain their normal bridge encapsulation.
   VLAN-to-VNI tunnel mapping is applied only to metadata-mode VXLAN.
   Flat fixed-VNI bridges are supported; VLAN-aware fixed-VNI bridges have

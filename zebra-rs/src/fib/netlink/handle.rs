@@ -369,6 +369,10 @@ pub struct FibHandle {
     /// kernel priority they were installed with. Owns the RMAC FDB entry
     /// and VTEP neighbors each adjacency shares across prefixes.
     evpn_prefix_routes: std::sync::Mutex<BTreeMap<(u32, IpNet), (crate::rib::VxlanL3Encap, u32)>>,
+    /// The VTEP each `(L3 VNI, RMAC)` FDB entry currently points at.
+    /// Several VTEPs can advertise one RMAC; the FDB holds only one, so a
+    /// withdrawal of that VTEP must re-point it at a remaining one.
+    evpn_rmac_vtep: std::sync::Mutex<BTreeMap<(u32, [u8; 6]), Ipv4Addr>>,
     /// VNI to VXLAN interface index mapping
     /// Used to resolve VNI to the correct VXLAN device for FDB operations
     pub vni_ifindex_map: BTreeMap<u32, u32>,
@@ -652,6 +656,7 @@ impl FibHandle {
             use_nhid,
             kernel_route_exchange: false,
             evpn_prefix_routes: std::sync::Mutex::new(BTreeMap::new()),
+            evpn_rmac_vtep: std::sync::Mutex::new(BTreeMap::new()),
             vni_ifindex_map: BTreeMap::new(),
             vni_bridge_map: BTreeMap::new(),
             vni_metadata_map: BTreeMap::new(),
@@ -4022,17 +4027,8 @@ impl FibHandle {
                 .any(|(route, _)| same_evpn_adjacency(route, &encap));
         let mac = MacAddr::from(encap.remote_rmac);
         if add && !shared {
-            self.mac_add(
-                encap.l3vni,
-                &mac,
-                Some(encap.remote_vtep.into()),
-                0,
-                0,
-                None,
-                None,
-                None,
-            )
-            .await;
+            self.evpn_rmac_install(encap.l3vni, encap.remote_rmac, encap.remote_vtep)
+                .await;
             self.evpn_neighbor(encap.l3vni, encap.remote_vtep.into(), mac, true)
                 .await;
             // IPv6 routes name the mapped VTEP as their gateway. Linux
@@ -4115,17 +4111,12 @@ impl FibHandle {
 
     /// Remove an RMAC adjacency once no tracked Type-5 route uses it.
     async fn evpn_adjacency_release(&self, old: &crate::rib::VxlanL3Encap) {
-        let (adjacency_used, rmac_used) = {
-            let routes = self.evpn_prefix_routes.lock().unwrap();
-            (
-                routes
-                    .values()
-                    .any(|(route, _)| same_evpn_adjacency(route, old)),
-                routes.values().any(|(route, _)| {
-                    route.l3vni == old.l3vni && route.remote_rmac == old.remote_rmac
-                }),
-            )
-        };
+        let adjacency_used = self
+            .evpn_prefix_routes
+            .lock()
+            .unwrap()
+            .values()
+            .any(|(route, _)| same_evpn_adjacency(route, old));
         if adjacency_used {
             return;
         }
@@ -4139,10 +4130,48 @@ impl FibHandle {
             false,
         )
         .await;
-        // Several VTEPs can share an RMAC. Remove its FDB only when no
-        // remaining route references that MAC in this VNI.
-        if !rmac_used {
-            self.mac_del(old.l3vni, &mac).await;
+        // Several VTEPs can share an RMAC; see `evpn_rmac_after_release`.
+        let key = (old.l3vni, old.remote_rmac);
+        let current = self.evpn_rmac_vtep.lock().unwrap().get(&key).copied();
+        let action = {
+            let routes = self.evpn_prefix_routes.lock().unwrap();
+            evpn_rmac_after_release(routes.values().map(|(route, _)| route), old, current)
+        };
+        match action {
+            RmacAction::Keep => {}
+            RmacAction::Repoint(vtep) => {
+                self.evpn_rmac_install(old.l3vni, old.remote_rmac, vtep)
+                    .await;
+            }
+            RmacAction::Remove => {
+                self.evpn_rmac_vtep.lock().unwrap().remove(&key);
+                self.mac_del(old.l3vni, &mac).await;
+            }
+        }
+    }
+
+    /// Point the `(l3vni, rmac)` FDB entry at `vtep` and remember it. A
+    /// failed write leaves the previous entry in place, so the previous
+    /// record stays too; otherwise a later release could trust a VTEP the
+    /// kernel never pointed at and leave the entry on a withdrawn one.
+    async fn evpn_rmac_install(&self, l3vni: u32, rmac: [u8; 6], vtep: Ipv4Addr) {
+        let installed = self
+            .mac_add(
+                l3vni,
+                &MacAddr::from(rmac),
+                Some(vtep.into()),
+                0,
+                0,
+                None,
+                None,
+                None,
+            )
+            .await;
+        if installed {
+            self.evpn_rmac_vtep
+                .lock()
+                .unwrap()
+                .insert((l3vni, rmac), vtep);
         }
     }
 
@@ -4257,6 +4286,9 @@ impl FibHandle {
     /// from BGP. Both are required and FRR programs both. The third
     /// VLAN-tagged variant FRR sometimes adds is only needed when the
     /// bridge is `vlan_filtering 1`; not implemented here yet.
+    ///
+    /// Returns whether both kernel FDB writes succeeded (`false` with no
+    /// VXLAN device for `vni`). The cradle paths hand off and return `true`.
     #[allow(clippy::too_many_arguments)]
     pub async fn mac_add(
         &self,
@@ -4268,7 +4300,7 @@ impl FibHandle {
         esi: Option<[u8; 10]>,
         srv6_sid: Option<std::net::Ipv6Addr>,
         mpls_label: Option<u32>,
-    ) {
+    ) -> bool {
         // EVPN over SRv6 (RFC 9252): the MAC sits behind a remote L2 service
         // SID (End.DT2U; the all-ones BUM sentinel behind End.DT2M). The
         // cradle eBPF tee is the L2 data plane — there is no kernel VXLAN
@@ -4277,7 +4309,7 @@ impl FibHandle {
             if let Some(cradle) = &self.cradle {
                 cradle.fdb_add(vni, mac.octets(), sid).await;
             }
-            return;
+            return true;
         }
         // EVPN over MPLS (RFC 7432): the MAC sits behind a remote PE, reached
         // by imposing that PE's EVI service label under the transport LSP.
@@ -4289,7 +4321,7 @@ impl FibHandle {
             if let (Some(cradle), Some(pe)) = (&self.cradle, tunnel_endpoint) {
                 cradle.fdb_add_mpls(vni, mac.octets(), pe, label).await;
             }
-            return;
+            return true;
         }
         // EVPN over VXLAN + cradle: the MAC sits behind a remote VTEP of
         // either address family, and the eBPF datapath is the forwarder —
@@ -4300,7 +4332,7 @@ impl FibHandle {
             && let Some(vtep) = tunnel_endpoint
         {
             cradle.fdb_add_vxlan(vni, mac.octets(), vtep).await;
-            return;
+            return true;
         }
         let Some(&vxlan_ifindex) = self.vni_ifindex_map.get(&vni) else {
             if fib_l2_fdb() {
@@ -4310,7 +4342,7 @@ impl FibHandle {
                     mac
                 );
             }
-            return;
+            return false;
         };
 
         if fib_l2_fdb() {
@@ -4335,22 +4367,23 @@ impl FibHandle {
         const NUD_REACHABLE: u16 = 0x02;
         const NUD_PERMANENT: u16 = 0x80;
 
-        self.fdb_neigh_send(
-            vxlan_ifindex,
-            mac,
-            NTF_MASTER | NTF_EXT_LEARNED,
-            NUD_REACHABLE,
-            None,
-            None,
-            self.vni_metadata_map
-                .get(&vni)
-                .copied()
-                .unwrap_or(false)
-                .then_some(EVPN_SVD_VLAN),
-            FdbOp::Upsert,
-            "mac_add(master)",
-        )
-        .await;
+        let master_ok = self
+            .fdb_neigh_send(
+                vxlan_ifindex,
+                mac,
+                NTF_MASTER | NTF_EXT_LEARNED,
+                NUD_REACHABLE,
+                None,
+                None,
+                self.vni_metadata_map
+                    .get(&vni)
+                    .copied()
+                    .unwrap_or(false)
+                    .then_some(EVPN_SVD_VLAN),
+                FdbOp::Upsert,
+                "mac_add(master)",
+            )
+            .await;
 
         // Entry 2 — VXLAN self FDB. Carries the encap target and VNI.
         let mut self_flags: u8 = NTF_SELF | NTF_EXT_LEARNED;
@@ -4358,18 +4391,19 @@ impl FibHandle {
             // BGP signaled MAC mobility "sticky" (RFC 7432 §10.6).
             self_flags |= NTF_STICKY;
         }
-        self.fdb_neigh_send(
-            vxlan_ifindex,
-            mac,
-            self_flags,
-            NUD_PERMANENT,
-            Some(vni),
-            tunnel_endpoint,
-            None,
-            FdbOp::Upsert,
-            "mac_add(self)",
-        )
-        .await;
+        let self_ok = self
+            .fdb_neigh_send(
+                vxlan_ifindex,
+                mac,
+                self_flags,
+                NUD_PERMANENT,
+                Some(vni),
+                tunnel_endpoint,
+                None,
+                FdbOp::Upsert,
+                "mac_add(self)",
+            )
+            .await;
 
         // ESI received and stored. Kernel multi-homing via NDA_NH_ID
         // will be wired when ECMP nexthop groups are supported.
@@ -4379,6 +4413,7 @@ impl FibHandle {
         {
             tracing::info!("mac_add: ESI type {} for MAC {}", esi_val[0], mac);
         }
+        master_ok && self_ok
     }
 
     /// Build and send a single AF_BRIDGE FDB neighbour message.
@@ -4401,7 +4436,7 @@ impl FibHandle {
         vlan: Option<u16>,
         op: FdbOp,
         log_label: &str,
-    ) {
+    ) -> bool {
         use netlink_packet_route::RouteNetlinkMessage;
         use netlink_packet_route::neighbour::{
             NeighbourAddress, NeighbourAttribute, NeighbourFlags, NeighbourMessage, NeighbourState,
@@ -4457,8 +4492,12 @@ impl FibHandle {
         };
 
         let mut response = self.handle.clone().request(req).unwrap();
+        // ACKs are not forwarded (netlink-proto `forward_ack` is off), so
+        // any error payload is a failure.
+        let mut ok = true;
         while let Some(rsp) = response.next().await {
             if let NetlinkPayload::Error(e) = rsp.payload {
+                ok = false;
                 tracing::info!(
                     "{}: netlink error mac {} ifindex {} flags 0x{:02x}: {}",
                     log_label,
@@ -4469,6 +4508,7 @@ impl FibHandle {
                 );
             }
         }
+        ok
     }
 
     /// Install (`add`) or remove (`!add`) a selective EVPN multicast
@@ -4990,6 +5030,38 @@ impl RouteBuilder {
     }
 }
 
+/// What to do with an `(L3 VNI, RMAC)` FDB entry once the adjacency `old`
+/// is released.
+#[derive(Debug, PartialEq, Eq)]
+enum RmacAction {
+    /// It still points at a VTEP in use.
+    Keep,
+    /// It pointed at the released VTEP; another VTEP still uses the RMAC.
+    Repoint(Ipv4Addr),
+    /// No remaining route uses the RMAC in this VNI.
+    Remove,
+}
+
+/// Several VTEPs can advertise one RMAC, but the FDB holds a single
+/// destination. Remove the entry with its last user; if it pointed at the
+/// released VTEP, re-point it at a remaining one (the lowest, for
+/// determinism), as FRR's `zl3vni_remote_rmac_del` does.
+fn evpn_rmac_after_release<'a>(
+    remaining: impl Iterator<Item = &'a crate::rib::VxlanL3Encap>,
+    old: &crate::rib::VxlanL3Encap,
+    current: Option<Ipv4Addr>,
+) -> RmacAction {
+    let next = remaining
+        .filter(|route| route.l3vni == old.l3vni && route.remote_rmac == old.remote_rmac)
+        .map(|route| route.remote_vtep)
+        .min();
+    match next {
+        None => RmacAction::Remove,
+        Some(_) if current.is_some_and(|vtep| vtep != old.remote_vtep) => RmacAction::Keep,
+        Some(vtep) => RmacAction::Repoint(vtep),
+    }
+}
+
 /// Whether two Type-5 encaps resolve through the same RMAC adjacency.
 fn same_evpn_adjacency(a: &crate::rib::VxlanL3Encap, b: &crate::rib::VxlanL3Encap) -> bool {
     a.l3vni == b.l3vni && a.remote_vtep == b.remote_vtep && a.remote_rmac == b.remote_rmac
@@ -5436,6 +5508,33 @@ pub(crate) fn mdb_entries_from_msg(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn evpn_shared_rmac_follows_remaining_vtep() {
+        let encap = |vtep: &str| crate::rib::VxlanL3Encap {
+            remote_vtep: vtep.parse().unwrap(),
+            l3vni: 2000,
+            remote_rmac: [2, 0, 0, 0, 0x20, 1],
+        };
+        let (a, b, c) = (encap("192.0.2.1"), encap("192.0.2.2"), encap("192.0.2.3"));
+        let other_vni = crate::rib::VxlanL3Encap { l3vni: 3000, ..a };
+        // The FDB points at the released VTEP: move it to a remaining one.
+        assert_eq!(
+            evpn_rmac_after_release([&c, &b].into_iter(), &a, Some(a.remote_vtep)),
+            RmacAction::Repoint(b.remote_vtep)
+        );
+        // It points at a VTEP still in use: leave it.
+        assert_eq!(
+            evpn_rmac_after_release([&b].into_iter(), &a, Some(b.remote_vtep)),
+            RmacAction::Keep
+        );
+        // Last user of the RMAC in this VNI: remove it. Another VNI's use
+        // of the same RMAC does not keep it.
+        assert_eq!(
+            evpn_rmac_after_release([&other_vni].into_iter(), &a, Some(a.remote_vtep)),
+            RmacAction::Remove
+        );
+    }
 
     #[test]
     fn kernel_blackholes_and_bgp_feedback_filter() {
