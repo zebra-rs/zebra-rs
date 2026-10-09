@@ -1072,3 +1072,90 @@ async fn a_withdrawn_ecmp_type5_route_whose_install_failed_is_not_recovered() {
         );
     }
 }
+
+/// An earlier run's SRv6 routes that this run replaced in place, at the
+/// same table, prefix and priority, with a plain route (SRv6 disabled
+/// across the restart, say) or a blackhole: the leftover sweep keeps the
+/// replacements.
+#[tokio::test]
+#[ignore = "requires root in an isolated network namespace"]
+async fn sweep_keeps_routes_that_replaced_srv6_leftovers() {
+    require_netns();
+    ip(&["link", "add", "srv6r0", "type", "dummy"]);
+    ip(&["link", "set", "srv6r0", "up"]);
+    ip(&[
+        "-6",
+        "addr",
+        "add",
+        "2001:db8:e::1/64",
+        "dev",
+        "srv6r0",
+        "nodad",
+    ]);
+    for prefix in ["2001:db8:43::/64", "2001:db8:44::/64"] {
+        ip(&[
+            "-6",
+            "route",
+            "add",
+            prefix,
+            "encap",
+            "seg6",
+            "mode",
+            "encap",
+            "segs",
+            "2001:db8:e::2",
+            "dev",
+            "srv6r0",
+            "proto",
+            "isis",
+        ]);
+    }
+    let mut rib = Rib::new(false).unwrap();
+    crate::fib::fib_dump(&mut rib).await.unwrap();
+    rib.fib_handle.use_nhid = false;
+    let ifindex = rib
+        .links
+        .values()
+        .find(|link| link.name == "srv6r0")
+        .unwrap()
+        .index;
+    let mut plain = RibEntry::new(RibType::Isis);
+    plain.nexthop = Nexthop::Uni(NexthopUni {
+        addr: "2001:db8:e::2".parse().unwrap(),
+        ifindex_origin: Some(ifindex),
+        ..Default::default()
+    });
+    let plain_prefix: Ipv6Net = "2001:db8:43::/64".parse().unwrap();
+    let blackhole_prefix: Ipv6Net = "2001:db8:44::/64".parse().unwrap();
+    assert!(
+        rib.fib_handle
+            .route_ipv6_add(&plain_prefix, &plain, RT_TABLE_MAIN)
+            .await
+    );
+    assert!(
+        rib.fib_handle
+            .route_ipv6_blackhole(
+                &blackhole_prefix,
+                &RibEntry::new(RibType::Isis),
+                1024,
+                RT_TABLE_MAIN,
+                true
+            )
+            .await
+    );
+    let route = |prefix: &str| ip(&["-6", "route", "show", "exact", prefix]);
+    assert!(
+        !route("2001:db8:43::/64").contains("encap"),
+        "replaced in place"
+    );
+    rib.sweep_leftovers().await;
+    assert!(
+        route("2001:db8:43::/64").contains("via 2001:db8:e::2"),
+        "the plain replacement stays"
+    );
+    assert!(
+        route("2001:db8:44::/64").contains("blackhole"),
+        "the blackhole replacement stays"
+    );
+    ip(&["link", "del", "srv6r0"]);
+}
