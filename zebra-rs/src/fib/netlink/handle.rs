@@ -5454,6 +5454,25 @@ pub fn route_from_msg_with(
         return None;
     }
     let protocol = msg.header.protocol;
+    // SRv6 routes under our protocols (local SIDs, mirror contexts, SID
+    // redirects, H.Encaps routes) are reinstalled in place by their owner,
+    // and most have no RIB route that could replace a leftover entry. A
+    // sweep would then delete the live route by its prefix. Never mirror
+    // them, as kernel routes or as leftovers.
+    let srv6 = msg.attributes.iter().any(|attr| {
+        matches!(
+            attr,
+            RouteAttribute::EncapType(RouteLwEnCapType::Seg6 | RouteLwEnCapType::Seg6Local)
+        )
+    });
+    if srv6
+        && matches!(
+            protocol,
+            RouteProtocol::Ospf | RouteProtocol::Isis | RouteProtocol::Bgp | RouteProtocol::Zebra
+        )
+    {
+        return None;
+    }
     if msg.header.address_family == AddressFamily::Inet6 && !leftover {
         // IPv6 interface prefix routes (fe80::/64 included) are scope
         // universe, so the Link-scope test below does not catch them. The
@@ -6020,6 +6039,50 @@ mod tests {
             ))
             .is_none()
         );
+    }
+
+    /// SRv6 routes zebra-rs installs (local SIDs, mirror contexts, SID
+    /// redirects, H.Encaps routes) are reinstalled in place by their owner,
+    /// most without a RIB route, so mirroring one would let a leftover
+    /// sweep delete the live route. They are never mirrored; an operator's
+    /// SRv6 route still is.
+    #[test]
+    fn srv6_routes_under_our_protocols_are_never_mirrored() {
+        let route = |protocol, encap| {
+            let mut msg = RouteMessage::default();
+            msg.header.address_family = AddressFamily::Inet6;
+            msg.header.destination_prefix_length = 64;
+            msg.header.kind = RouteType::Unicast;
+            msg.header.protocol = protocol;
+            set_route_table(&mut msg, RouteHeader::RT_TABLE_MAIN as u32);
+            msg.attributes
+                .push(RouteAttribute::Destination(RouteAddress::Inet6(
+                    "2001:db8:99::".parse().unwrap(),
+                )));
+            msg.attributes.push(RouteAttribute::Priority(1024));
+            msg.attributes.push(RouteAttribute::EncapType(encap));
+            msg
+        };
+        for encap in [RouteLwEnCapType::Seg6, RouteLwEnCapType::Seg6Local] {
+            for protocol in [
+                RouteProtocol::Ospf,
+                RouteProtocol::Isis,
+                RouteProtocol::Bgp,
+                RouteProtocol::Zebra,
+            ] {
+                for at_startup in [true, false] {
+                    assert!(
+                        route_from_msg_with(route(protocol, encap), &BTreeMap::new(), at_startup)
+                            .is_none(),
+                        "{protocol:?} {encap:?}"
+                    );
+                }
+            }
+            assert!(
+                route_from_msg_with(route(RouteProtocol::Static, encap), &BTreeMap::new(), true)
+                    .is_some()
+            );
+        }
     }
 
     #[test]
