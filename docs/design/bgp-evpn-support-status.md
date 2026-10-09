@@ -19,6 +19,10 @@ Linux bridge has no dataplane for the two filters (see
 tc/eBPF workarounds required to fake them there. A multihomed ES therefore
 requires `system ebpf enabled`.
 
+Kernel VXLAN integration (dual-stack Type-2, bridge-based Type-5, kernel
+route exchange, MAC/IP mobility) is tracked against this matrix in
+[`bgp-evpn-kernel-integration-tracking.md`](bgp-evpn-kernel-integration-tracking.md).
+
 ## Feature Matrix
 
 | Feature | EVPN/VXLAN | EVPN/SRv6 | EVPN/MPLS |
