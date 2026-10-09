@@ -1012,3 +1012,63 @@ async fn a_vxlan_first_seen_up_and_enslaved_gets_its_rmac() {
         "the RMAC is installed on the first reconciliation"
     );
 }
+
+/// The ECMP form: a Type-5 route over underlay ECMP whose legs share one
+/// VTEP, L3 VNI and router MAC is one bridge route, and its BGP withdrawal
+/// cancels a failed install the same way.
+#[tokio::test]
+async fn a_withdrawn_ecmp_type5_route_whose_install_failed_is_not_recovered() {
+    for prefix in ["198.51.100.0/24", "2001:db8:5::/64"] {
+        let prefix: IpNet = prefix.parse().unwrap();
+        let mut rib = Rib::new(false).unwrap();
+        rib.fib_handle.kernel_route_exchange = true;
+        let encap = crate::rib::VxlanL3Encap {
+            remote_vtep: "192.0.2.2".parse().unwrap(),
+            l3vni: 3000,
+            remote_rmac: [2, 0, 0, 0, 0, 3],
+        };
+        let leg = |addr: &str| NexthopUni {
+            addr: addr.parse().unwrap(),
+            vxlan: Some(encap),
+            ..Default::default()
+        };
+        let mut entry = RibEntry::new(RibType::Bgp);
+        entry.valid = true;
+        entry.selected = true;
+        entry.nexthop = Nexthop::Multi(crate::rib::NexthopMulti {
+            nexthops: vec![leg("192.0.2.2"), leg("192.0.2.3")],
+            ..Default::default()
+        });
+        entry.fib = match prefix {
+            IpNet::V4(p) => rib.fib_handle.route_ipv4_add(&p, &entry, 100).await,
+            IpNet::V6(p) => rib.fib_handle.route_ipv6_add(&p, &entry, 100).await,
+        };
+        assert!(!entry.fib, "no bridge for the L3 VNI yet");
+        let metric = if matches!(prefix, IpNet::V6(_)) {
+            1024
+        } else {
+            0
+        };
+        assert_eq!(
+            rib.fib_handle.evpn_prefix_deleted(100, prefix, metric),
+            Some(3000),
+            "the failed ECMP install is kept for recovery"
+        );
+        insert(&mut rib, prefix, 100, entry);
+        match prefix {
+            IpNet::V4(p) => {
+                rib.ipv4_route_del_vrf(100, &p, RibEntry::new(RibType::Bgp))
+                    .await
+            }
+            IpNet::V6(p) => {
+                rib.ipv6_route_del_vrf(100, &p, RibEntry::new(RibType::Bgp))
+                    .await
+            }
+        }
+        assert_eq!(
+            rib.fib_handle.evpn_prefix_deleted(100, prefix, metric),
+            None,
+            "{prefix} was withdrawn: nothing is left to recover"
+        );
+    }
+}

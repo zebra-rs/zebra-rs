@@ -1903,10 +1903,12 @@ async fn ipv4_entry_selection(
     retry
 }
 
-/// An EVPN Type-5 route installed through its L3-VNI bridge: the FIB
-/// tracks it as desired state even when the kernel rejected it.
+/// An EVPN Type-5 route installed through its L3-VNI bridge: one VXLAN
+/// next hop, or underlay ECMP whose legs share one overlay adjacency
+/// (`evpn_overlay`). The FIB tracks it as desired state even when the
+/// kernel rejected it.
 fn is_bridge_type5(entry: &RibEntry) -> bool {
-    matches!(&entry.nexthop, Nexthop::Uni(uni) if uni.vxlan.is_some())
+    crate::fib::netlink::handle::evpn_overlay(&entry.nexthop).is_some()
 }
 
 /// Drop our "installed" belief for an entry's nexthop so the next

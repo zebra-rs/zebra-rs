@@ -461,7 +461,7 @@ type CradleMember = (
 /// or underlay ECMP whose legs all carry the same VTEP, L3 VNI and router
 /// MAC (the underlay supplies the paths; the bridge route needs one
 /// adjacency). Different overlay adjacencies are not collapsed.
-fn evpn_overlay(nexthop: &Nexthop) -> Option<(crate::rib::VxlanL3Encap, u32)> {
+pub(crate) fn evpn_overlay(nexthop: &Nexthop) -> Option<(crate::rib::VxlanL3Encap, u32)> {
     match nexthop {
         Nexthop::Uni(uni) => uni.vxlan.map(|encap| (encap, uni.metric)),
         Nexthop::Multi(multi) => {
