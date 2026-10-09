@@ -1,6 +1,6 @@
 # MPLS Label Allocation — the RIB as the Label Authority
 
-Status: **design; phases 1, 2, 3a, 4a and 4b implemented** (2026-10-08: `rib/label_space.rs`; OSPF reads the `default` block; the IGPs' local labels come from the RIB's label space; ILM candidates keyed by owner; a moved Prefix-SID's old label held). Supersedes the ad-hoc split
+Status: **design; phases 1, 2, 3a, 3b, 4a and 4b implemented** (2026-10-08: `rib/label_space.rs`; OSPF reads the `default` block; the IGPs' local labels come from the RIB's label space; configured Adjacency-SIDs claim their SRLB label; ILM candidates keyed by owner; a moved Prefix-SID's old label held). Supersedes the ad-hoc split
 between the RIB `LabelManager`, the node-shared `LocalLabels` set
 (#2479, #2480) and the hard-coded OSPF SR constants.
 
@@ -332,6 +332,13 @@ ownership is what an operator wants to see in `show mpls label table`.
 
   Index-form Adj-SIDs (`adjacency-sid index`) derive their label from the
   SRGB, like a Prefix-SID, and claim nothing in the SRLB.
+
+  Binding-SIDs are not claimed yet (phase 3c). A local SR Policy's
+  `binding-sid-label` is only advertised, over BGP (SAFI 73); the ILM for
+  it is installed by the headend that receives the policy
+  (`MplsIlmAction`), at a label its originator chose. So there is no
+  commit at which to claim it: the headend's claim on a received label is
+  what 3c designs.
 - **Moving a dynamic holder.** The steps run in this order, so a label never
   points at two adjacencies:
   1. The label becomes `Revoking { from, to }`, and no dynamic allocation
@@ -621,10 +628,10 @@ SRLB moves (every Adjacency-SID and Mirror Context label is drawn again),
 and gives every neighbour address without a label one. Before, an adjacency
 that came up while there was no pool (SR-MPLS enabled later, or the block
 late) never got an Adjacency-SID, because `nbr_hello_interpret` labels an
-address only the first time it sees it. 3b, configured Adj-SIDs and
-Binding-SIDs claiming their label from a dynamic holder (§5.1), comes after
-phase 4a: moving a label between OSPFv2 and OSPFv3 is only safe once their
-ILM candidates are told apart.
+address only the first time it sees it. 3b, configured Adjacency-SIDs
+claiming their label from a dynamic holder (§5.1), came after phase 4:
+moving a label between OSPFv2 and OSPFv3 is only safe once their ILM
+candidates are told apart.
 
 Phase 4 lands in two parts. 4a keys ILM candidates by owner and adds
 `Releasing`:
@@ -675,6 +682,40 @@ Phase 4 lands in two parts. 4a keys ILM candidates by owner and adds
   change. The withdrawal is the confirmation.
 - What is not covered: the window where an upstream already sends the
   new label to a router that has not installed it (§6.1).
+
+3b gives configured absolute Adjacency-SIDs (OSPFv2 and OSPFv3) their SRLB
+label with precedence over dynamic ones (§5.1):
+- An instance claims each configured label through its pool
+  (`LocalLabelPool::claim`). A free label is the claimant's at once
+  (`Local::Claimed`); so is one the claimant's own dynamic Adj-SID holds,
+  and that Adj-SID is given another label.
+- A label another instance holds dynamically, or that is on its way back,
+  waits. The holder is told (`RibRx::LabelRevoked`, which the claimant
+  asks the RIB to send with `Message::LocalLabelClaimed`). It gives its SID
+  another label and releases this one like any other (§4). Once the RIB
+  frees it, the label goes to the claimant (`RibRx::LabelGranted`), not
+  back to the pool. `Revoking` is therefore not a state of its own: it is a
+  held or releasing label with a waiting claim.
+- A grant is only a prompt. It can be stale: the claim it answered may
+  have been dropped and a new one made, which waits again while another
+  instance holds the label. So the claimant takes the grant only if its
+  pool holds the claim now (`LocalLabelPool::holds_claim`); the new
+  claim's own grant follows.
+- While a claim waits, the configured SID is not advertised, and the
+  adjacency keeps its dynamic label.
+- `unclaim`, a dropped pool, or an SRLB change that leaves the label
+  outside gives a claimed label back through `Releasing`, like any other.
+- Until commit validation rejects them (phase 6):
+  - a configured label outside the SRLB is advertised unclaimed, as before,
+    with a warning;
+  - of two configured SIDs on one label, the first keeps it and the other is
+    not advertised, also with a warning. Two links of one instance with the
+    same label count as two SIDs; the one that had it keeps it, else the
+    lowest ifindex.
+- IS-IS has no configured Adjacency-SID, so it claims nothing. It gives up a
+  revoked label as OSPF does: another label for the adjacency or Mirror
+  Context, then the release.
+- Binding-SIDs are phase 3c (§5.1).
 
 Phase 2 changes OSPF's advertised SRGB. No phase changes Adjacency-SID
 labels by itself; from phase 3, a configured Adj-SID on a dynamically held

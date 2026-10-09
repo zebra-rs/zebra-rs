@@ -2348,9 +2348,9 @@ fn config_ospf_interface_adjacency_sid_index(
     } else {
         link.config.adjacency_sid = None;
     }
-    let ifindex = link.index;
-
-    ospf.ext_link_lsa_originate(ifindex);
+    // Claiming (or dropping) a configured label can move another
+    // link's dynamic Adj-SID: reconcile and re-originate them all.
+    sr_mpls_refresh(ospf);
 
     Some(())
 }
@@ -2370,9 +2370,9 @@ fn config_ospf_interface_adjacency_sid_absolute(
     } else {
         link.config.adjacency_sid = None;
     }
-    let ifindex = link.index;
-
-    ospf.ext_link_lsa_originate(ifindex);
+    // Claiming (or dropping) a configured label can move another
+    // link's dynamic Adj-SID: reconcile and re-originate them all.
+    sr_mpls_refresh(ospf);
 
     Some(())
 }

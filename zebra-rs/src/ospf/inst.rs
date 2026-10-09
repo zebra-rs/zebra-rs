@@ -310,6 +310,17 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// IS-IS-parity automatic allocation), and the matching local ILM
     /// install. Cleared when SR-MPLS is disabled.
     pub lan_adj_sids: BTreeMap<(u32, Ipv4Addr), u32>,
+    /// The claim on each configured absolute Adjacency-SID's label, and
+    /// the link it is for (`reconcile_adj_sid_claims`). A `Pending` or
+    /// `Refused` one is not advertised, nor the label on another link
+    /// configured with it: those adjacencies keep their dynamic labels.
+    pub adj_sid_claims: BTreeMap<u32, AdjSidClaim>,
+    /// Links configured with a label another link of this instance has,
+    /// as (label, ifindex): logged once each.
+    pub adj_sid_dups: BTreeSet<(u32, u32)>,
+    /// Dynamic Adj-SIDs that gave their label up to a configured SID, with
+    /// that label: logged with their new label once they have it.
+    pub adj_sid_moves: Vec<((u32, Ipv4Addr), u32)>,
     /// v3 IPv6 RIB shadow. Populated by
     /// `apply_routing_updates_v3` after each SPF run; diffed
     /// against the next computation so we only emit
@@ -871,6 +882,7 @@ impl<V: OspfVersion> Ospf<V> {
         if self.segment_routing != SegmentRoutingMode::Mpls {
             self.local_pool = None;
             self.lan_adj_sids.clear();
+            self.adj_sid_claims.clear();
             return;
         }
         let Some(block) = self.sr_block.as_ref() else {
@@ -883,6 +895,7 @@ impl<V: OspfVersion> Ospf<V> {
         else {
             self.local_pool = None;
             self.lan_adj_sids.clear();
+            self.adj_sid_claims.clear();
             return;
         };
         match self.local_pool.as_mut() {
@@ -901,6 +914,8 @@ impl<V: OspfVersion> Ospf<V> {
             }
             Some(_) => {}
         }
+        // Configured SIDs first: one may take a label a dynamic SID had.
+        self.reconcile_adj_sid_claims();
         for key in full {
             if self.lan_adj_sids.contains_key(&key) {
                 continue;
@@ -909,6 +924,190 @@ impl<V: OspfVersion> Ospf<V> {
                 && let Some(label) = pool.allocate()
             {
                 self.lan_adj_sids.insert(key, label);
+            }
+        }
+        for ((ifindex, neighbor), old) in std::mem::take(&mut self.adj_sid_moves) {
+            match self.lan_adj_sids.get(&(ifindex, neighbor)) {
+                Some(new) => tracing::info!(
+                    ifindex, %neighbor, old, new,
+                    "ospf: Adj-SID moved off a label a configured Adj-SID claimed"
+                ),
+                None => tracing::warn!(
+                    ifindex, %neighbor, old,
+                    "ospf: Adj-SID gave its label to a configured Adj-SID and got no other"
+                ),
+            }
+        }
+    }
+
+    /// Claim the label of every configured absolute Adjacency-SID
+    /// (docs/design/mpls-label-allocation.md §5.1): a configured SID takes
+    /// precedence over a dynamic one. Run on every local-label reconcile,
+    /// so a claim refused or left outside the SRLB is tried again, one the
+    /// SRLB no longer covers is dropped, and one no longer configured is
+    /// given back.
+    ///
+    /// Until commit validation (phase 6) rejects them, a label outside the
+    /// SRLB is advertised unclaimed as before, and of two configured SIDs
+    /// on one label the first keeps it; both are logged.
+    fn reconcile_adj_sid_claims(&mut self) {
+        use crate::rib::label_space::Claim;
+        let Some(pool) = self.local_pool.as_mut() else {
+            self.adj_sid_claims.clear();
+            return;
+        };
+        let (first, last) = pool.range();
+        // Each label and the links configured with it, lowest ifindex first.
+        let mut wanted: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+        for (ifindex, link) in &self.links {
+            if let Some(super::link::AdjacencySid::Absolute(label)) = link.config.adjacency_sid {
+                wanted.entry(label).or_default().push(*ifindex);
+            }
+        }
+        let gone: Vec<u32> = self
+            .adj_sid_claims
+            .keys()
+            .filter(|label| !wanted.contains_key(label))
+            .copied()
+            .collect();
+        for label in gone {
+            if let Some(claim) = self.adj_sid_claims.remove(&label)
+                && matches!(claim.state, Claim::Granted | Claim::Pending)
+            {
+                pool.unclaim(label);
+            }
+        }
+        let mut dups = BTreeSet::new();
+        for (label, links) in wanted {
+            let prev = self.adj_sid_claims.get(&label).copied();
+            // The link that has the label keeps it while it wants it.
+            let link = prev
+                .map(|claim| claim.link)
+                .filter(|link| links.contains(link))
+                .unwrap_or(links[0]);
+            dups.extend(links.iter().filter(|l| **l != link).map(|l| (label, *l)));
+            let state = match prev.map(|claim| claim.state) {
+                Some(Claim::Granted | Claim::Pending) if (first..=last).contains(&label) => {
+                    self.adj_sid_claims.insert(
+                        label,
+                        AdjSidClaim {
+                            link,
+                            ..prev.unwrap()
+                        },
+                    );
+                    continue;
+                }
+                Some(Claim::Granted | Claim::Pending) => {
+                    pool.unclaim(label);
+                    Claim::Outside
+                }
+                _ => pool.claim(label),
+            };
+            self.adj_sid_claims
+                .insert(label, AdjSidClaim { link, state });
+            if Some(state) == prev.map(|claim| claim.state) {
+                continue;
+            }
+            match state {
+                Claim::Granted => {
+                    tracing::info!(label, link, "ospf: configured Adj-SID has its label");
+                    // One of this instance's dynamic Adj-SIDs had it: it
+                    // gets another label.
+                    let moved: Vec<(u32, Ipv4Addr)> = self
+                        .lan_adj_sids
+                        .iter()
+                        .filter(|(_, l)| **l == label)
+                        .map(|(key, _)| *key)
+                        .collect();
+                    for key in moved {
+                        self.lan_adj_sids.remove(&key);
+                        self.adj_sid_moves.push((key, label));
+                    }
+                }
+                Claim::Pending => tracing::info!(
+                    label,
+                    link,
+                    "ospf: configured Adj-SID waits for its label to be moved off a dynamic Adj-SID"
+                ),
+                Claim::Refused => tracing::warn!(
+                    label,
+                    link,
+                    "ospf: configured Adj-SID's label is another configured SID's; not advertised"
+                ),
+                Claim::Outside => tracing::warn!(
+                    label,
+                    link,
+                    first,
+                    last,
+                    "ospf: configured Adj-SID's label is outside the SRLB; advertised unclaimed"
+                ),
+            }
+        }
+        for (label, link) in dups.difference(&self.adj_sid_dups) {
+            tracing::warn!(
+                label,
+                link,
+                "ospf: configured Adj-SID's label is configured on another link too; not advertised here"
+            );
+        }
+        self.adj_sid_dups = dups;
+    }
+
+    /// A configured SID elsewhere claimed `label`: this instance's dynamic
+    /// Adj-SIDs on it give it up (the next local-label reconcile gives them
+    /// another), and it goes back.
+    pub(super) fn revoke_local_label(&mut self, label: u32) {
+        let moved: Vec<(u32, Ipv4Addr)> = self
+            .lan_adj_sids
+            .iter()
+            .filter(|(_, l)| **l == label)
+            .map(|(key, _)| *key)
+            .collect();
+        for key in moved {
+            self.lan_adj_sids.remove(&key);
+            self.adj_sid_moves.push((key, label));
+        }
+        if let Some(pool) = self.local_pool.as_mut() {
+            pool.release(label);
+        }
+    }
+
+    /// This instance now has `label`, which it claimed for a configured
+    /// Adj-SID. The grant may be stale: the claim it answered was dropped
+    /// and a new one made, which waits again. Only the label space knows,
+    /// so the claim stands granted only if the pool holds it now; the new
+    /// claim's own grant follows.
+    pub(super) fn local_label_granted(&mut self, label: u32) {
+        use crate::rib::label_space::Claim;
+        if let Some(claim) = self.adj_sid_claims.get_mut(&label)
+            && claim.state == Claim::Pending
+            && self
+                .local_pool
+                .as_ref()
+                .is_some_and(|pool| pool.holds_claim(label))
+        {
+            claim.state = Claim::Granted;
+            tracing::info!(
+                label,
+                link = claim.link,
+                "ospf: configured Adj-SID has its label"
+            );
+        }
+    }
+
+    /// Whether link `ifindex`'s configured Adjacency-SID is advertised. An
+    /// absolute one waits for its label while the claim is pending, and
+    /// gives way to another configured SID, this instance's on another
+    /// link or another instance's; the adjacency keeps its dynamic label
+    /// then.
+    pub(super) fn adj_sid_advertised(&self, ifindex: u32, sid: &super::link::AdjacencySid) -> bool {
+        use crate::rib::label_space::Claim;
+        match sid {
+            super::link::AdjacencySid::Index(_) => true,
+            super::link::AdjacencySid::Absolute(label) => {
+                self.adj_sid_claims.get(label).is_none_or(|claim| {
+                    claim.link == ifindex && matches!(claim.state, Claim::Granted | Claim::Outside)
+                })
             }
         }
     }
@@ -2749,6 +2948,9 @@ impl Ospf<Ospfv2> {
             ilm_hold_timer: None,
             local_pool: None,
             lan_adj_sids: BTreeMap::new(),
+            adj_sid_claims: BTreeMap::new(),
+            adj_sid_dups: BTreeSet::new(),
+            adj_sid_moves: Vec::new(),
             restored_link_lsas: Vec::new(),
             rib6: PrefixMap::new(),
             rib6_areas: BTreeMap::new(),
@@ -4363,7 +4565,10 @@ impl Ospf<Ospfv2> {
                 OspfNetworkType::PointToPoint => {
                     if let Some(nbr) = link.nbrs.values().find(|n| n.state == NfsmState::Full) {
                         let mut subs = Vec::new();
-                        if sr_mpls && let Some(adjacency_sid) = link.config.adjacency_sid {
+                        if sr_mpls
+                            && let Some(adjacency_sid) = link.config.adjacency_sid
+                            && self.adj_sid_advertised(ifindex, &adjacency_sid)
+                        {
                             subs.push(super::srmpls::build_p2p_adj_sub(&adjacency_sid));
                         } else if sr_mpls
                             && let Some(label) =
@@ -8268,6 +8473,14 @@ impl Ospf<Ospfv2> {
             // Labels were freed after the Adj-SID pool found none: give
             // the adjacencies still without a label one.
             RibRx::LocalLabelsFreed => super::config::sr_mpls_refresh(self),
+            RibRx::LabelRevoked { label } => {
+                self.revoke_local_label(label);
+                super::config::sr_mpls_refresh(self);
+            }
+            RibRx::LabelGranted { label } => {
+                self.local_label_granted(label);
+                super::config::sr_mpls_refresh(self);
+            }
             RibRx::RouterIdUpdate(router_id) => {
                 // Remember the RIB-derived value and refresh: a
                 // configured `router-id` keeps winning (this push
@@ -8588,6 +8801,9 @@ impl Ospf<Ospfv3> {
             ilm_hold_timer: None,
             local_pool: None,
             lan_adj_sids: BTreeMap::new(),
+            adj_sid_claims: BTreeMap::new(),
+            adj_sid_dups: BTreeSet::new(),
+            adj_sid_moves: Vec::new(),
             restored_link_lsas: Vec::new(),
             rib6: PrefixMap::new(),
             rib6_areas: BTreeMap::new(),
@@ -8815,6 +9031,14 @@ impl Ospf<Ospfv3> {
             // Labels were freed after the Adj-SID pool found none: give
             // the adjacencies still without a label one.
             RibRx::LocalLabelsFreed => super::config_v3::sr_mpls_refresh_v3(self),
+            RibRx::LabelRevoked { label } => {
+                self.revoke_local_label(label);
+                super::config_v3::sr_mpls_refresh_v3(self);
+            }
+            RibRx::LabelGranted { label } => {
+                self.local_label_granted(label);
+                super::config_v3::sr_mpls_refresh_v3(self);
+            }
             // RIB-derived router-id (`system router-id` config or
             // the automatic pick from interface IPv4 addresses).
             // Mirrors the v2 arm: store and refresh, so a configured
@@ -13119,7 +13343,9 @@ impl Ospf<Ospfv3> {
                     if let Some(nbr) = link.nbrs.values().find(|n| n.state == NfsmState::Full) {
                         let mut subs = Vec::new();
                         if self.segment_routing == SegmentRoutingMode::Mpls {
-                            if let Some(adjacency_sid) = link.config.adjacency_sid {
+                            if let Some(adjacency_sid) = link.config.adjacency_sid
+                                && self.adj_sid_advertised(ifindex, &adjacency_sid)
+                            {
                                 subs.push(super::srmpls::build_v3_p2p_adj_sub(&adjacency_sid));
                             } else if let Some(label) =
                                 self.lan_adj_sids.get(&(ifindex, nbr.ident.router_id))
@@ -15385,6 +15611,14 @@ pub struct SpfRoute {
     /// and without this field a toggle-then-recompute would diff clean
     /// and never reach the RIB. Mirrors IS-IS's `SpfRoute`.
     pub backup_as_primary: bool,
+}
+
+/// A configured absolute Adjacency-SID's claim on its label: the link it
+/// is for, and how the claim stands.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AdjSidClaim {
+    pub link: u32,
+    pub state: crate::rib::label_space::Claim,
 }
 
 /// One entry in the SR-MPLS LFIB shadow held on `Ospf::ilm`.
@@ -19475,6 +19709,9 @@ mod test_support {
             ilm_hold_timer: None,
             local_pool: None,
             lan_adj_sids: BTreeMap::new(),
+            adj_sid_claims: BTreeMap::new(),
+            adj_sid_dups: BTreeSet::new(),
+            adj_sid_moves: Vec::new(),
             restored_link_lsas: Vec::new(),
             rib6: PrefixMap::new(),
             rib6_areas: BTreeMap::new(),
@@ -27654,6 +27891,272 @@ mod sr_origination_tests {
         assert!(live(&top, AREA0, v2_prefix_sid(new)), "v2 Prefix-SID");
         assert!(live(&top, AREA0, v2_adj_sid(new)), "v2 Adj-SID");
         assert!(!live(&top, AREA0, v2_router_info(old)) && !live(&top, AREA0, v2_prefix_sid(old)));
+    }
+}
+
+#[cfg(test)]
+mod adj_sid_claim_tests {
+    use tokio::sync::mpsc;
+
+    use super::super::link::AdjacencySid;
+    use super::super::srmpls::SegmentRoutingMode;
+    use super::test_support::{fresh_ospf, fresh_ospf_v3};
+    use super::*;
+    use crate::rib::client::{ProtoId, RibClient, RibInbound};
+    use crate::rib::label_space::Claim;
+
+    const A: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 2);
+    const B: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 3);
+
+    /// SR-MPLS on, over the default block (SRLB 15000..15999), with the
+    /// local-label messages the instance sends to the RIB.
+    fn sr_on<V: OspfVersion>(top: &mut Ospf<V>) -> mpsc::UnboundedReceiver<RibInbound> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        top.ctx.rib = RibClient::new(tx, ProtoId::from_raw(7));
+        top.segment_routing = SegmentRoutingMode::Mpls;
+        top.sr_block = Some(crate::rib::Block::default_block());
+        rx
+    }
+
+    /// A socket-free link `ifindex`, with `label` as its configured
+    /// absolute Adjacency-SID.
+    fn link<V: OspfVersion>(top: &mut Ospf<V>, ifindex: u32, label: Option<u32>)
+    where
+        V::Prefix: Default,
+    {
+        let mut link = OspfLink::from(
+            top.tx.clone(),
+            crate::rib::Link::from(crate::fib::message::FibLink {
+                index: ifindex,
+                name: format!("eth{ifindex}"),
+                mtu: 1500,
+                ..Default::default()
+            }),
+            top.sock.clone(),
+            top.router_id,
+            top.ptx.clone(),
+        );
+        link.config.adjacency_sid = label.map(AdjacencySid::Absolute);
+        top.links.insert(ifindex, link);
+    }
+
+    fn claim<V: OspfVersion>(top: &Ospf<V>, label: u32) -> Option<AdjSidClaim> {
+        top.adj_sid_claims.get(&label).copied()
+    }
+
+    /// The local-label messages sent so far: (claimed?, released label).
+    fn sent(rx: &mut mpsc::UnboundedReceiver<RibInbound>) -> Vec<Option<u32>> {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|env| match env.msg {
+                rib::Message::LocalLabelClaimed => Some(None),
+                rib::Message::LocalLabelRelease { label } => Some(Some(label)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A free label is the configured Adj-SID's, advertised; dynamic
+    /// Adj-SIDs skip it.
+    #[tokio::test]
+    async fn a_configured_adj_sid_takes_a_free_label() {
+        let mut top = fresh_ospf();
+        let _rx = sr_on(&mut top);
+        link(&mut top, 1, Some(15000));
+        top.reconcile_adj_sid_labels(vec![(2, A)]);
+        assert_eq!(
+            claim(&top, 15000),
+            Some(AdjSidClaim {
+                link: 1,
+                state: Claim::Granted
+            })
+        );
+        assert!(top.adj_sid_advertised(1, &AdjacencySid::Absolute(15000)));
+        assert_eq!(top.lan_adj_sids.get(&(2, A)), Some(&15001));
+    }
+
+    /// The instance's own dynamic Adj-SID on the label gets another one.
+    #[tokio::test]
+    async fn its_own_dynamic_adj_sid_moves_off_the_label() {
+        let mut top = fresh_ospf();
+        let mut rx = sr_on(&mut top);
+        link(&mut top, 1, None);
+        link(&mut top, 2, None);
+        top.reconcile_adj_sid_labels(vec![(1, A), (2, B)]);
+        assert_eq!(top.lan_adj_sids.get(&(1, A)), Some(&15000));
+        top.links.get_mut(&2).unwrap().config.adjacency_sid = Some(AdjacencySid::Absolute(15000));
+        top.reconcile_adj_sid_labels(vec![(1, A), (2, B)]);
+        assert_eq!(claim(&top, 15000).map(|c| c.state), Some(Claim::Granted));
+        assert_eq!(top.lan_adj_sids.get(&(1, A)), Some(&15002));
+        assert!(top.adj_sid_moves.is_empty(), "logged");
+        assert_eq!(
+            sent(&mut rx),
+            Vec::<Option<u32>>::new(),
+            "nothing went back"
+        );
+    }
+
+    /// Another instance's dynamic Adj-SID has the label: the configured
+    /// one waits, unadvertised, until that instance lets the label go.
+    #[tokio::test]
+    async fn another_instances_label_is_advertised_once_granted() {
+        let mut top = fresh_ospf();
+        let mut rx = sr_on(&mut top);
+        let space = top.rib_subscriber.label_space().clone();
+        let (otx, _orx) = mpsc::unbounded_channel();
+        let other = RibClient::new(otx, ProtoId::from_raw(99));
+        let mut holder = space.pool_for(15000, 15999, &other);
+        assert_eq!(holder.allocate(), Some(15000));
+
+        link(&mut top, 1, Some(15000));
+        top.reconcile_adj_sid_labels(vec![]);
+        assert_eq!(claim(&top, 15000).map(|c| c.state), Some(Claim::Pending));
+        assert!(!top.adj_sid_advertised(1, &AdjacencySid::Absolute(15000)));
+        assert_eq!(
+            sent(&mut rx),
+            vec![None],
+            "the RIB is asked to tell the holder"
+        );
+        assert_eq!(
+            space.lock().take_revoked(),
+            vec![(ProtoId::from_raw(99), 15000)]
+        );
+
+        holder.release(15000);
+        space
+            .lock()
+            .release_handled(ProtoId::from_raw(99), 15000, false);
+        assert_eq!(
+            space.lock().take_granted(),
+            vec![(ProtoId::from_raw(7), 15000)]
+        );
+        top.process_rib_msg(RibRx::LabelGranted { label: 15000 });
+        assert_eq!(claim(&top, 15000).map(|c| c.state), Some(Claim::Granted));
+        assert!(top.adj_sid_advertised(1, &AdjacencySid::Absolute(15000)));
+    }
+
+    /// Two links of the instance configured with one label: the first
+    /// keeps it, the other is not advertised.
+    #[tokio::test]
+    async fn the_first_link_keeps_a_label_configured_twice() {
+        let mut top = fresh_ospf();
+        let _rx = sr_on(&mut top);
+        link(&mut top, 1, Some(15000));
+        link(&mut top, 2, Some(15000));
+        top.reconcile_adj_sid_labels(vec![]);
+        assert!(top.adj_sid_advertised(1, &AdjacencySid::Absolute(15000)));
+        assert!(!top.adj_sid_advertised(2, &AdjacencySid::Absolute(15000)));
+        // The first link drops it: the second has it.
+        top.links.get_mut(&1).unwrap().config.adjacency_sid = None;
+        top.reconcile_adj_sid_labels(vec![]);
+        assert!(top.adj_sid_advertised(2, &AdjacencySid::Absolute(15000)));
+    }
+
+    /// A label outside the SRLB is advertised unclaimed, as before.
+    #[tokio::test]
+    async fn a_label_outside_the_srlb_is_advertised_unclaimed() {
+        let mut top = fresh_ospf();
+        let _rx = sr_on(&mut top);
+        link(&mut top, 1, Some(20000));
+        top.reconcile_adj_sid_labels(vec![]);
+        assert_eq!(claim(&top, 20000).map(|c| c.state), Some(Claim::Outside));
+        assert!(top.adj_sid_advertised(1, &AdjacencySid::Absolute(20000)));
+        assert_eq!(
+            top.rib_subscriber
+                .label_space()
+                .pool(20000, 20000)
+                .allocate(),
+            Some(20000),
+            "not claimed"
+        );
+    }
+
+    /// Dropping the configuration gives the label back through the RIB.
+    #[tokio::test]
+    async fn dropping_the_configuration_gives_the_label_back() {
+        let mut top = fresh_ospf();
+        let mut rx = sr_on(&mut top);
+        link(&mut top, 1, Some(15500));
+        top.reconcile_adj_sid_labels(vec![]);
+        top.links.get_mut(&1).unwrap().config.adjacency_sid = None;
+        top.reconcile_adj_sid_labels(vec![]);
+        assert_eq!(claim(&top, 15500), None);
+        assert_eq!(sent(&mut rx), vec![Some(15500)]);
+    }
+
+    /// A configured SID elsewhere claimed a dynamic Adj-SID's label: the
+    /// Adj-SID moves, and the label goes back. For v2 and v3.
+    #[tokio::test]
+    async fn a_revoked_label_moves_the_dynamic_adj_sid() {
+        let mut top = fresh_ospf();
+        let mut rx = sr_on(&mut top);
+        top.reconcile_adj_sid_labels(vec![(1, A)]);
+        assert_eq!(top.lan_adj_sids.get(&(1, A)), Some(&15000));
+        top.revoke_local_label(15000);
+        top.reconcile_adj_sid_labels(vec![(1, A)]);
+        assert_eq!(top.lan_adj_sids.get(&(1, A)), Some(&15001));
+        assert_eq!(sent(&mut rx), vec![Some(15000)]);
+
+        let mut v3 = fresh_ospf_v3();
+        let mut rx = sr_on(&mut v3);
+        v3.reconcile_adj_sid_labels(vec![(1, A)]);
+        let held = *v3.lan_adj_sids.get(&(1, A)).unwrap();
+        v3.process_rib_msg(RibRx::LabelRevoked { label: held });
+        assert_eq!(sent(&mut rx), vec![Some(held)]);
+        assert!(!v3.lan_adj_sids.values().any(|l| *l == held));
+    }
+
+    /// A grant can be stale: the claim it answered was dropped and a new
+    /// one made, which waits while another instance holds the label again.
+    /// The stale grant leaves it waiting; the new claim's grant is taken.
+    async fn a_stale_grant_is_ignored<V: OspfVersion>(mut top: Ospf<V>)
+    where
+        V::Prefix: Default,
+    {
+        let _rx = sr_on(&mut top);
+        let space = top.rib_subscriber.label_space().clone();
+        let (otx, _orx) = mpsc::unbounded_channel();
+        let other = ProtoId::from_raw(99);
+        let mut holder = space.pool_for(15000, 15999, &RibClient::new(otx, other));
+        let me = ProtoId::from_raw(7);
+        let configure = |top: &mut Ospf<V>, label: Option<u32>| {
+            top.links.get_mut(&1).unwrap().config.adjacency_sid = label.map(AdjacencySid::Absolute);
+            top.reconcile_adj_sid_labels(vec![]);
+        };
+
+        assert_eq!(holder.allocate(), Some(15000));
+        link(&mut top, 1, Some(15000));
+        top.reconcile_adj_sid_labels(vec![]);
+        holder.release(15000);
+        space.lock().release_handled(other, 15000, false);
+        let stale = space.lock().take_granted();
+        assert_eq!(stale, vec![(me, 15000)], "granted, not yet received");
+
+        // Dropped and made again while the other instance took 15000 back.
+        configure(&mut top, None);
+        space.lock().release_handled(me, 15000, false);
+        assert_eq!(holder.allocate(), Some(15000));
+        configure(&mut top, Some(15000));
+        assert_eq!(claim(&top, 15000).map(|c| c.state), Some(Claim::Pending));
+
+        top.local_label_granted(15000);
+        assert_eq!(claim(&top, 15000).map(|c| c.state), Some(Claim::Pending));
+        assert!(!top.adj_sid_advertised(1, &AdjacencySid::Absolute(15000)));
+
+        holder.release(15000);
+        space.lock().release_handled(other, 15000, false);
+        assert_eq!(space.lock().take_granted(), vec![(me, 15000)]);
+        top.local_label_granted(15000);
+        assert!(top.adj_sid_advertised(1, &AdjacencySid::Absolute(15000)));
+    }
+
+    #[tokio::test]
+    async fn a_stale_grant_is_ignored_v2() {
+        a_stale_grant_is_ignored(fresh_ospf()).await;
+    }
+
+    #[tokio::test]
+    async fn a_stale_grant_is_ignored_v3() {
+        a_stale_grant_is_ignored(fresh_ospf_v3()).await;
     }
 }
 

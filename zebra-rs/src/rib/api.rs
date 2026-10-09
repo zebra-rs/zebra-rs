@@ -338,6 +338,16 @@ pub enum RibRx {
     /// Local labels were freed after this instance's pool found none:
     /// reconcile its local labels again (`LabelSpace::take_starved`).
     LocalLabelsFreed,
+    /// A configured SID claimed `label`, which this instance holds for a
+    /// dynamic SID: give the SID another label and let this one go.
+    LabelRevoked {
+        label: u32,
+    },
+    /// This instance now has `label`, which it claimed for a configured
+    /// SID: advertise and install it.
+    LabelGranted {
+        label: u32,
+    },
 }
 
 impl Rib {

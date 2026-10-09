@@ -1,0 +1,43 @@
+# r1 adds OSPFv2 with a configured Adjacency-SID on 15000, the label
+# IS-IS's adjacency holds. A whole config, so IS-IS's part is unchanged.
+interface:
+- if-name: lo
+  ipv4:
+    address: 192.168.1.1/32
+- if-name: r1-r2
+  ipv4:
+    address: 10.0.12.1/30
+router:
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    hostname: r1
+    is-type: level-2-only
+    segment-routing:
+      mpls: {}
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+        prefix-sid:
+          index: 21
+    - if-name: r1-r2
+      circuit-type: level-2-only
+      network-type: point-to-point
+      ipv4:
+        enabled: true
+  ospf:
+    router-id: 1.1.1.1
+    segment-routing:
+      mpls: {}
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+        prefix-sid:
+          index: 11
+      - if-name: r1-r2
+        enabled: true
+        network-type: point-to-point
+        adjacency-sid:
+          absolute: 15000
