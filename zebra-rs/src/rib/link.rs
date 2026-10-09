@@ -1128,7 +1128,13 @@ impl Rib {
             let metadata = self.links.get(&ifindex).and_then(|l| l.vxlan_metadata) == Some(true);
             self.fib_handle.vni_metadata_map.insert(vni, metadata);
             if let Some(bridge) = self.links.get(&ifindex).and_then(|l| l.master) {
-                self.fib_handle.vni_bridge_map.insert(vni, bridge);
+                let prev = self.fib_handle.vni_bridge_map.insert(vni, bridge);
+                // Joining a bridge (including a detach/re-attach, which
+                // flushed the port's FDB) needs the bridge Type-5 state of
+                // an L3 VNI reinstalled on that bridge.
+                if prev != Some(bridge) {
+                    self.fib_handle.evpn_l3vni_reassert(vni, true).await;
+                }
             } else {
                 self.fib_handle.vni_bridge_map.remove(&vni);
             }

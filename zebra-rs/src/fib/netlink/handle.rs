@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::fd::AsRawFd;
 
@@ -365,14 +365,19 @@ pub struct FibHandle {
     pub use_nhid: bool,
     /// Install VXLAN Type-5 routes through their Linux L3-VNI bridges.
     pub kernel_route_exchange: bool,
-    /// Installed bridge Type-5 routes, `(table, prefix)` → encap and the
-    /// kernel priority they were installed with. Owns the RMAC FDB entry
-    /// and VTEP neighbors each adjacency shares across prefixes.
+    /// Desired bridge Type-5 routes, `(table, prefix)` → encap and kernel
+    /// priority. Owns the RMAC FDB entry and VTEP neighbors each adjacency
+    /// shares across prefixes. A route stays here even if the kernel
+    /// rejected it (e.g. the bridge was down), so `evpn_l3vni_reassert`
+    /// can install it once the bridge recovers.
     evpn_prefix_routes: std::sync::Mutex<BTreeMap<(u32, IpNet), (crate::rib::VxlanL3Encap, u32)>>,
     /// The VTEP each `(L3 VNI, RMAC)` FDB entry currently points at.
     /// Several VTEPs can advertise one RMAC; the FDB holds only one, so a
     /// withdrawal of that VTEP must re-point it at a remaining one.
     evpn_rmac_vtep: std::sync::Mutex<BTreeMap<(u32, [u8; 6]), Ipv4Addr>>,
+    /// The bridge each L3 VNI's Type-5 state was installed on, so a move
+    /// to another bridge can remove what was left on the old one.
+    evpn_l3vni_bridge: std::sync::Mutex<BTreeMap<u32, u32>>,
     /// VNI to VXLAN interface index mapping
     /// Used to resolve VNI to the correct VXLAN device for FDB operations
     pub vni_ifindex_map: BTreeMap<u32, u32>,
@@ -657,6 +662,7 @@ impl FibHandle {
             kernel_route_exchange: false,
             evpn_prefix_routes: std::sync::Mutex::new(BTreeMap::new()),
             evpn_rmac_vtep: std::sync::Mutex::new(BTreeMap::new()),
+            evpn_l3vni_bridge: std::sync::Mutex::new(BTreeMap::new()),
             vni_ifindex_map: BTreeMap::new(),
             vni_bridge_map: BTreeMap::new(),
             vni_metadata_map: BTreeMap::new(),
@@ -4005,14 +4011,20 @@ impl FibHandle {
         } else {
             metric
         };
-        use netlink_packet_route::route::RouteFlags;
         let Some(bridge) = self.evpn_bridge(encap.l3vni).await else {
             tracing::warn!("EVPN Type-5 {prefix}: no bridge for L3 VNI {}", encap.l3vni);
-            if !add {
-                self.evpn_prefix_routes
-                    .lock()
-                    .unwrap()
-                    .remove(&(table_id, prefix));
+            // Desired state either way: an add is installed when the
+            // L3-VNI VXLAN joins a bridge (`evpn_l3vni_reassert`).
+            let release = {
+                let mut routes = self.evpn_prefix_routes.lock().unwrap();
+                if add {
+                    routes.insert((table_id, prefix), (encap, metric))
+                } else {
+                    routes.remove(&(table_id, prefix))
+                }
+            };
+            if let Some((old, _)) = release {
+                self.evpn_adjacency_release(&old).await;
             }
             return false;
         };
@@ -4042,6 +4054,106 @@ impl FibHandle {
             )
             .await;
         }
+        let success = self
+            .evpn_prefix_route_send(prefix, table_id, metric, &encap, bridge, add)
+            .await;
+        // The map is desired state. An add is recorded even when the kernel
+        // rejected it: the usual cause is a down bridge (an onlink route
+        // needs its device up), and `evpn_l3vni_reassert` installs it on
+        // link up. A delete always forgets the route: a failed one means
+        // the kernel no longer has it, and keeping the entry would pin the
+        // adjacency.
+        let release = {
+            let mut routes = self.evpn_prefix_routes.lock().unwrap();
+            if add {
+                routes.insert((table_id, prefix), (encap, metric))
+            } else {
+                routes.remove(&(table_id, prefix))
+            }
+        };
+        if let Some((old, old_metric)) = release {
+            // The kernel keys a route by its priority too, so an add with a
+            // new metric created a second route; remove the old one.
+            if add && old_metric != metric {
+                self.evpn_prefix_route_send(prefix, table_id, old_metric, &old, bridge, false)
+                    .await;
+            }
+            self.evpn_adjacency_release(&old).await;
+        }
+        if add && let Some(old_bridge) = self.evpn_note_bridge(encap.l3vni, bridge) {
+            // The L3 VNI moved bridges without the link hook seeing it.
+            self.evpn_bridge_moved(encap.l3vni, old_bridge).await;
+            self.evpn_l3vni_reassert(encap.l3vni, true).await;
+        }
+        success
+    }
+
+    /// Record `bridge` as the one holding `l3vni`'s Type-5 state. Returns
+    /// the previous bridge when it differs.
+    fn evpn_note_bridge(&self, l3vni: u32, bridge: u32) -> Option<u32> {
+        self.evpn_l3vni_bridge
+            .lock()
+            .unwrap()
+            .insert(l3vni, bridge)
+            .filter(|old| *old != bridge)
+    }
+
+    /// `l3vni`'s state moved off `old_bridge`: remove the VTEP neighbors
+    /// left there. Routes need no cleanup; reinstalling them replaces the
+    /// same kernel keys with the new device.
+    async fn evpn_bridge_moved(&self, l3vni: u32, old_bridge: u32) {
+        let adjacencies = {
+            let tracked = self.evpn_prefix_routes.lock().unwrap();
+            let recorded = self.evpn_rmac_vtep.lock().unwrap();
+            evpn_reassert_plan(&tracked, &recorded, l3vni).adjacencies
+        };
+        for (vtep, rmac) in adjacencies {
+            let mac = MacAddr::from(rmac);
+            self.evpn_neighbor_on(old_bridge, vtep.into(), mac, false)
+                .await;
+            self.evpn_neighbor_on(old_bridge, vtep.to_ipv6_mapped().into(), mac, false)
+                .await;
+        }
+    }
+
+    /// The kernel deleted the bridge Type-5 route `(table_id, prefix)` at
+    /// priority `metric`. Returns its L3 VNI when it is still desired with
+    /// that priority, i.e. someone other than us removed it. Our own
+    /// withdrawals and metric changes update the map before the
+    /// notification is processed, so they never match.
+    pub fn evpn_prefix_deleted(&self, table_id: u32, prefix: IpNet, metric: u32) -> Option<u32> {
+        self.evpn_prefix_routes
+            .lock()
+            .unwrap()
+            .get(&(table_id, prefix))
+            .filter(|(_, tracked)| *tracked == metric)
+            .map(|(encap, _)| encap.l3vni)
+    }
+
+    /// Reinstall one desired bridge Type-5 route.
+    pub async fn evpn_prefix_reinstall(&self, table_id: u32, prefix: IpNet) {
+        let Some((encap, metric)) = self.evpn_prefix_tracked(table_id, prefix) else {
+            return;
+        };
+        let Some(bridge) = self.evpn_bridge(encap.l3vni).await else {
+            return;
+        };
+        self.evpn_prefix_route_send(prefix, table_id, metric, &encap, bridge, true)
+            .await;
+    }
+
+    /// Send the bridge Type-5 route itself: `prefix` via the remote VTEP
+    /// (IPv4-mapped for IPv6) onlink on the L3-VNI `bridge`.
+    async fn evpn_prefix_route_send(
+        &self,
+        prefix: IpNet,
+        table_id: u32,
+        metric: u32,
+        encap: &crate::rib::VxlanL3Encap,
+        bridge: u32,
+        add: bool,
+    ) -> bool {
+        use netlink_packet_route::route::RouteFlags;
         let mut msg = RouteMessage::default();
         msg.header.address_family = match prefix {
             IpNet::V4(_) => AddressFamily::Inet,
@@ -4086,27 +4198,90 @@ impl FibHandle {
                 }
             }
         }
-        // A failed add leaves any previous route in place, so the map keeps
-        // it. A delete always forgets the route: a failed one means the
-        // kernel no longer has it (the table was flushed or an operator
-        // removed it), and keeping the entry would pin the adjacency.
-        let mut release = Vec::new();
-        {
-            let mut routes = self.evpn_prefix_routes.lock().unwrap();
-            if add && success {
-                release.extend(routes.insert((table_id, prefix), (encap, metric)));
-            } else if !add {
-                release.extend(routes.remove(&(table_id, prefix)));
+        success
+    }
+
+    /// Reinstall the tracked Type-5 state of `l3vni` after the kernel
+    /// dropped some of it: the RMAC FDB entries and VTEP neighbors, and
+    /// with `routes` the routes too. Every write is an idempotent replace.
+    ///
+    /// Linux removes these without telling us in a usable way: admin-down
+    /// deletes IPv4 routes through the device with no `RTM_DELROUTE`,
+    /// carrier loss flushes neighbors (NOARP included), and detaching the
+    /// VXLAN port from its bridge flushes its FDB. FRR re-installs on L3VNI
+    /// oper-up for the same reason.
+    pub async fn evpn_l3vni_reassert(&self, l3vni: u32, routes: bool) {
+        let plan = {
+            let tracked = self.evpn_prefix_routes.lock().unwrap();
+            let recorded = self.evpn_rmac_vtep.lock().unwrap();
+            evpn_reassert_plan(&tracked, &recorded, l3vni)
+        };
+        if plan.routes.is_empty() {
+            return;
+        }
+        let Some(bridge) = self.evpn_bridge(l3vni).await else {
+            return;
+        };
+        if let Some(old_bridge) = self.evpn_note_bridge(l3vni, bridge) {
+            self.evpn_bridge_moved(l3vni, old_bridge).await;
+        }
+        for (rmac, vtep) in &plan.rmacs {
+            self.evpn_rmac_install(l3vni, *rmac, *vtep).await;
+        }
+        for (vtep, rmac) in &plan.adjacencies {
+            let mac = MacAddr::from(*rmac);
+            self.evpn_neighbor(l3vni, (*vtep).into(), mac, true).await;
+            self.evpn_neighbor(l3vni, vtep.to_ipv6_mapped().into(), mac, true)
+                .await;
+        }
+        if routes {
+            for ((table_id, prefix), (encap, metric)) in &plan.routes {
+                self.evpn_prefix_route_send(*prefix, *table_id, *metric, encap, bridge, true)
+                    .await;
             }
         }
-        if add && !success {
-            // Drop the adjacency installed above if nothing else uses it.
-            release.push((encap, metric));
+    }
+
+    /// The L3 VNIs with tracked Type-5 state whose bridge or VXLAN device
+    /// is `ifindex`.
+    fn evpn_l3vnis_on(&self, ifindex: u32) -> Vec<u32> {
+        let tracked: BTreeSet<u32> = self
+            .evpn_prefix_routes
+            .lock()
+            .unwrap()
+            .values()
+            .map(|(encap, _)| encap.l3vni)
+            .collect();
+        tracked
+            .into_iter()
+            .filter(|vni| {
+                self.vni_bridge_map.get(vni) == Some(&ifindex)
+                    || self.vni_ifindex_map.get(vni) == Some(&ifindex)
+            })
+            .collect()
+    }
+
+    /// `ifindex` came up: reinstall every L3 VNI it carries.
+    pub async fn evpn_link_up(&self, ifindex: u32) {
+        for l3vni in self.evpn_l3vnis_on(ifindex) {
+            self.evpn_l3vni_reassert(l3vni, true).await;
         }
-        for (old, _) in release {
-            self.evpn_adjacency_release(&old).await;
+    }
+
+    /// The kernel deleted a neighbor or FDB row. If it was an RMAC entry
+    /// or VTEP neighbor a tracked route still needs, put the adjacency
+    /// back. Our own releases forget the state before deleting it, so they
+    /// never match here.
+    pub async fn evpn_neighbor_deleted(&self, nbr: &crate::fib::FibNeighbor) {
+        for l3vni in self.evpn_l3vnis_on(nbr.ifindex) {
+            let owned = {
+                let tracked = self.evpn_prefix_routes.lock().unwrap();
+                evpn_tracked_adjacency_row(tracked.values().map(|(encap, _)| encap), l3vni, nbr)
+            };
+            if owned {
+                self.evpn_l3vni_reassert(l3vni, false).await;
+            }
         }
-        success
     }
 
     /// Remove an RMAC adjacency once no tracked Type-5 route uses it.
@@ -4147,6 +4322,15 @@ impl FibHandle {
                 self.evpn_rmac_vtep.lock().unwrap().remove(&key);
                 self.mac_del(old.l3vni, &mac).await;
             }
+        }
+        let l3vni_used = self
+            .evpn_prefix_routes
+            .lock()
+            .unwrap()
+            .values()
+            .any(|(route, _)| route.l3vni == old.l3vni);
+        if !l3vni_used {
+            self.evpn_l3vni_bridge.lock().unwrap().remove(&old.l3vni);
         }
     }
 
@@ -4195,10 +4379,15 @@ impl FibHandle {
     /// Remote MAC/IP bindings are externally learned, non-aging neighbors
     /// on the bridge. On withdrawal protect a binding since replaced locally.
     pub async fn evpn_neighbor(&self, vni: u32, ip: IpAddr, mac: MacAddr, add: bool) {
-        use netlink_packet_route::neighbour::{NeighbourFlags, NeighbourState};
         let Some(ifindex) = self.evpn_bridge(vni).await else {
             return;
         };
+        self.evpn_neighbor_on(ifindex, ip, mac, add).await;
+    }
+
+    /// [`Self::evpn_neighbor`] on an explicit bridge.
+    async fn evpn_neighbor_on(&self, ifindex: u32, ip: IpAddr, mac: MacAddr, add: bool) {
+        use netlink_packet_route::neighbour::{NeighbourFlags, NeighbourState};
         let dst = match ip {
             IpAddr::V4(a) => NeighbourAddress::Inet(a),
             IpAddr::V6(a) => NeighbourAddress::Inet6(a),
@@ -5030,6 +5219,127 @@ impl RouteBuilder {
     }
 }
 
+/// `(table, prefix, priority)` of a protocol-BGP unicast route in a VRF
+/// table: the shape of a bridge Type-5 route. IPv6 priority 0 reads as
+/// Linux's 1024, matching what `evpn_prefix_route` records.
+fn bgp_vrf_route_key(msg: &RouteMessage) -> Option<(u32, IpNet, u32)> {
+    if msg.header.protocol != RouteProtocol::Bgp || msg.header.kind != RouteType::Unicast {
+        return None;
+    }
+    let mut table_id = msg.header.table as u32;
+    let mut metric = 0;
+    let mut dst = None;
+    for attr in &msg.attributes {
+        match attr {
+            RouteAttribute::Table(t) => table_id = *t,
+            RouteAttribute::Priority(p) => metric = *p,
+            RouteAttribute::Destination(RouteAddress::Inet(a)) => dst = Some(IpAddr::V4(*a)),
+            RouteAttribute::Destination(RouteAddress::Inet6(a)) => dst = Some(IpAddr::V6(*a)),
+            _ => {}
+        }
+    }
+    if table_id == RouteHeader::RT_TABLE_MAIN as u32 {
+        return None;
+    }
+    let len = msg.header.destination_prefix_length;
+    let prefix = match (msg.header.address_family, dst) {
+        (AddressFamily::Inet, dst) => IpNet::V4(
+            Ipv4Net::new(
+                match dst {
+                    Some(IpAddr::V4(a)) => a,
+                    None => Ipv4Addr::UNSPECIFIED,
+                    _ => return None,
+                },
+                len,
+            )
+            .ok()?,
+        ),
+        (AddressFamily::Inet6, dst) => {
+            if metric == 0 {
+                metric = 1024;
+            }
+            IpNet::V6(
+                Ipv6Net::new(
+                    match dst {
+                        Some(IpAddr::V6(a)) => a,
+                        None => Ipv6Addr::UNSPECIFIED,
+                        _ => return None,
+                    },
+                    len,
+                )
+                .ok()?,
+            )
+        }
+        _ => return None,
+    };
+    Some((table_id, prefix, metric))
+}
+
+/// What `evpn_l3vni_reassert` reinstalls for one L3 VNI.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct EvpnReassertPlan {
+    /// RMAC → the VTEP its FDB entry should point at: the recorded one
+    /// while a tracked route still uses it, else the lowest user.
+    rmacs: BTreeMap<[u8; 6], Ipv4Addr>,
+    /// `(VTEP, RMAC)` neighbor adjacencies.
+    adjacencies: BTreeSet<(Ipv4Addr, [u8; 6])>,
+    routes: Vec<((u32, IpNet), (crate::rib::VxlanL3Encap, u32))>,
+}
+
+fn evpn_reassert_plan(
+    tracked: &BTreeMap<(u32, IpNet), (crate::rib::VxlanL3Encap, u32)>,
+    recorded: &BTreeMap<(u32, [u8; 6]), Ipv4Addr>,
+    l3vni: u32,
+) -> EvpnReassertPlan {
+    let mut plan = EvpnReassertPlan::default();
+    for (key, (encap, metric)) in tracked {
+        if encap.l3vni != l3vni {
+            continue;
+        }
+        plan.routes.push((*key, (*encap, *metric)));
+        plan.adjacencies
+            .insert((encap.remote_vtep, encap.remote_rmac));
+    }
+    for (vtep, rmac) in &plan.adjacencies {
+        let current = recorded.get(&(l3vni, *rmac)).copied();
+        let users = plan.adjacencies.iter().filter(|(_, mac)| mac == rmac);
+        let keep = current.filter(|cur| users.clone().any(|(v, _)| v == cur));
+        plan.rmacs
+            .entry(*rmac)
+            .and_modify(|chosen| {
+                if keep.is_none() && *vtep < *chosen {
+                    *chosen = *vtep;
+                }
+            })
+            .or_insert(keep.unwrap_or(*vtep));
+    }
+    plan
+}
+
+/// Whether a deleted kernel row is state a tracked route in `l3vni` needs:
+/// an RMAC FDB row, or a VTEP neighbor (IPv4 or IPv4-mapped IPv6) whose
+/// MAC is that adjacency's RMAC.
+fn evpn_tracked_adjacency_row<'a>(
+    mut tracked: impl Iterator<Item = &'a crate::rib::VxlanL3Encap>,
+    l3vni: u32,
+    nbr: &crate::fib::FibNeighbor,
+) -> bool {
+    let Some(mac) = nbr.lladdr.map(|m| m.octets()) else {
+        return false;
+    };
+    tracked.any(|encap| {
+        encap.l3vni == l3vni
+            && encap.remote_rmac == mac
+            && match nbr.family {
+                AddressFamily::Bridge => true,
+                _ => nbr.dst.is_some_and(|dst| {
+                    dst == IpAddr::V4(encap.remote_vtep)
+                        || dst == IpAddr::V6(encap.remote_vtep.to_ipv6_mapped())
+                }),
+            }
+    })
+}
+
 /// What to do with an `(L3 VNI, RMAC)` FDB entry once the adjacency `old`
 /// is released.
 #[derive(Debug, PartialEq, Eq)]
@@ -5380,6 +5690,16 @@ fn process_msg(msg: NetlinkMessage<RouteNetlinkMessage>, tx: UnboundedSender<Fib
                 }
             }
             RouteNetlinkMessage::DelRoute(msg) => {
+                // Our own VRF BGP routes are filtered out of the RIB feed
+                // below, but a deletion by someone else must still reach
+                // the bridge Type-5 owner so it can reinstall the route.
+                if let Some((table_id, prefix, metric)) = bgp_vrf_route_key(&msg) {
+                    let _ = tx.send(FibMessage::EvpnRouteDeleted {
+                        table_id,
+                        prefix,
+                        metric,
+                    });
+                }
                 if let Some(route) = route_from_msg(msg) {
                     let _ = tx.send(FibMessage::DelRoute(route));
                 }
@@ -5533,6 +5853,165 @@ mod tests {
         assert_eq!(
             evpn_rmac_after_release([&other_vni].into_iter(), &a, Some(a.remote_vtep)),
             RmacAction::Remove
+        );
+    }
+
+    #[test]
+    fn evpn_reassert_plan_covers_every_tracked_piece() {
+        let rmac = [2, 0, 0, 0, 0x20, 1];
+        let encap = |vtep: &str, l3vni: u32| crate::rib::VxlanL3Encap {
+            remote_vtep: vtep.parse().unwrap(),
+            l3vni,
+            remote_rmac: rmac,
+        };
+        let (a, b) = (encap("192.0.2.1", 2000), encap("192.0.2.2", 2000));
+        let mut tracked = BTreeMap::new();
+        tracked.insert((100, "10.20.1.0/24".parse().unwrap()), (a, 0));
+        tracked.insert((100, "2001:db8:20:1::/64".parse().unwrap()), (a, 1024));
+        tracked.insert((100, "10.20.2.0/24".parse().unwrap()), (b, 0));
+        tracked.insert(
+            (300, "10.30.0.0/24".parse().unwrap()),
+            (encap("192.0.2.1", 3000), 0),
+        );
+
+        // The FDB follows its recorded VTEP while that VTEP is still used.
+        let recorded = BTreeMap::from([((2000, rmac), b.remote_vtep)]);
+        let plan = evpn_reassert_plan(&tracked, &recorded, 2000);
+        assert_eq!(plan.routes.len(), 3, "only this L3 VNI's routes");
+        assert_eq!(
+            plan.adjacencies,
+            BTreeSet::from([(a.remote_vtep, rmac), (b.remote_vtep, rmac)])
+        );
+        assert_eq!(plan.rmacs, BTreeMap::from([(rmac, b.remote_vtep)]));
+
+        // No usable record: the lowest VTEP using the RMAC.
+        let stale = BTreeMap::from([((2000, rmac), "192.0.2.9".parse().unwrap())]);
+        let plan = evpn_reassert_plan(&tracked, &stale, 2000);
+        assert_eq!(plan.rmacs, BTreeMap::from([(rmac, a.remote_vtep)]));
+
+        assert_eq!(
+            evpn_reassert_plan(&tracked, &BTreeMap::new(), 9999),
+            EvpnReassertPlan::default()
+        );
+    }
+
+    #[test]
+    fn evpn_deleted_row_matches_only_tracked_adjacencies() {
+        use crate::fib::FibNeighbor;
+        let rmac = [2, 0, 0, 0, 0x20, 1];
+        let vtep: Ipv4Addr = "192.0.2.1".parse().unwrap();
+        let tracked = [crate::rib::VxlanL3Encap {
+            remote_vtep: vtep,
+            l3vni: 2000,
+            remote_rmac: rmac,
+        }];
+        let row = |family, dst: Option<IpAddr>, mac: [u8; 6]| FibNeighbor {
+            family,
+            dst,
+            lladdr: Some(MacAddr::from(mac)),
+            ..Default::default()
+        };
+        let other_mac = [2, 0, 0, 0, 0x99, 1];
+        let owned =
+            |nbr: &FibNeighbor, l3vni| evpn_tracked_adjacency_row(tracked.iter(), l3vni, nbr);
+        // The RMAC FDB row and both VTEP neighbors are ours.
+        assert!(owned(&row(AddressFamily::Bridge, None, rmac), 2000));
+        assert!(owned(
+            &row(AddressFamily::Inet, Some(vtep.into()), rmac),
+            2000
+        ));
+        assert!(owned(
+            &row(
+                AddressFamily::Inet6,
+                Some(vtep.to_ipv6_mapped().into()),
+                rmac
+            ),
+            2000
+        ));
+        // A neighbor for a VTEP we released, another MAC, or another VNI
+        // is not.
+        assert!(!owned(
+            &row(
+                AddressFamily::Inet,
+                Some("192.0.2.2".parse().unwrap()),
+                rmac
+            ),
+            2000
+        ));
+        assert!(!owned(&row(AddressFamily::Bridge, None, other_mac), 2000));
+        assert!(!owned(&row(AddressFamily::Bridge, None, rmac), 3000));
+        assert!(!owned(
+            &FibNeighbor {
+                lladdr: None,
+                ..row(AddressFamily::Bridge, None, rmac)
+            },
+            2000
+        ));
+    }
+
+    #[test]
+    fn bgp_vrf_route_key_matches_bridge_type5_routes_only() {
+        let msg = |family, dst: RouteAddress, len, table, protocol, priority: Option<u32>| {
+            let mut msg = RouteMessage::default();
+            msg.header.address_family = family;
+            msg.header.destination_prefix_length = len;
+            msg.header.kind = RouteType::Unicast;
+            msg.header.protocol = protocol;
+            set_route_table(&mut msg, table);
+            msg.attributes.push(RouteAttribute::Destination(dst));
+            if let Some(priority) = priority {
+                msg.attributes.push(RouteAttribute::Priority(priority));
+            }
+            msg
+        };
+        let v4 = RouteAddress::Inet("10.20.1.0".parse().unwrap());
+        let v6 = RouteAddress::Inet6("2001:db8:20:1::".parse().unwrap());
+        // IPv4 metric 0 carries no RTA_PRIORITY.
+        assert_eq!(
+            bgp_vrf_route_key(&msg(
+                AddressFamily::Inet,
+                v4.clone(),
+                24,
+                100,
+                RouteProtocol::Bgp,
+                None
+            )),
+            Some((100, "10.20.1.0/24".parse().unwrap(), 0))
+        );
+        // A table id above 255 rides in RTA_TABLE.
+        assert_eq!(
+            bgp_vrf_route_key(&msg(
+                AddressFamily::Inet6,
+                v6.clone(),
+                64,
+                1000,
+                RouteProtocol::Bgp,
+                Some(1024)
+            )),
+            Some((1000, "2001:db8:20:1::/64".parse().unwrap(), 1024))
+        );
+        // Not ours: main table, or another protocol.
+        assert!(
+            bgp_vrf_route_key(&msg(
+                AddressFamily::Inet,
+                v4.clone(),
+                24,
+                254,
+                RouteProtocol::Bgp,
+                None
+            ))
+            .is_none()
+        );
+        assert!(
+            bgp_vrf_route_key(&msg(
+                AddressFamily::Inet,
+                v4,
+                24,
+                100,
+                RouteProtocol::Static,
+                None
+            ))
+            .is_none()
         );
     }
 

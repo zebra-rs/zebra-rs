@@ -83,6 +83,15 @@ this configuration does not provide a route-protocol policy filter.
   RMAC in an L3 VNI, traffic for all of their prefixes goes to one of them
   (FRR has the same limitation). When that VTEP is withdrawn, the entry
   moves to a remaining one. Give each VTEP a distinct RMAC.
+* Bridge Type-5 state is reinstalled when the kernel drops it: on link up
+  of the L3-VNI bridge or VXLAN device (admin-down deletes IPv4 routes
+  without a notification), when its RMAC neighbor or FDB row is deleted
+  while still needed (carrier loss, flushes), and when the VXLAN joins a
+  bridge. A route the kernel rejects (for example while the bridge is
+  down) is kept as desired state and installed on recovery. A route
+  deleted by someone else is reinstalled, as FRR does for its own routes.
+  Moving the L3-VNI VXLAN to another bridge moves the routes and RMAC
+  neighbors with it and removes those left on the old bridge.
 * Adopted fixed-VNI VXLAN ports retain their normal bridge encapsulation.
   VLAN-to-VNI tunnel mapping is applied only to metadata-mode VXLAN.
   Flat fixed-VNI bridges are supported; VLAN-aware fixed-VNI bridges have

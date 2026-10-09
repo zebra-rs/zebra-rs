@@ -196,6 +196,14 @@ pub struct RouteOffload {
 
 #[derive(Debug)]
 pub enum FibMessage {
+    /// A protocol-BGP route left a VRF table. Not a RIB route (our own
+    /// VRF BGP routes are never fed back); see
+    /// `FibHandle::evpn_prefix_deleted`.
+    EvpnRouteDeleted {
+        table_id: u32,
+        prefix: ipnet::IpNet,
+        metric: u32,
+    },
     NewLink(FibLink),
     DelLink(FibLink),
     NewAddr(FibAddr),

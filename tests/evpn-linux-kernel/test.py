@@ -174,6 +174,88 @@ def main():
                     expect(f'r{i} routed {af}', lambda i=i, af=af, address=address:
                            ns('r'+str(i), 'ping', af, '-c', '1', '-W', '1', address, check=False).returncode == 0)
 
+            # The kernel drops bridge Type-5 state on its own: admin-down
+            # deletes the routes (IPv4 without a notification), carrier loss
+            # flushes the RMAC neighbors, and detaching the VXLAN port
+            # flushes its FDB. zebra-rs must put all of it back.
+            def type5_restored(name):
+                for prefix in ['10.20.1.0/24', '2001:db8:20:1::/64']:
+                    expect(f'{name}: Type-5 {prefix}', lambda prefix=prefix:
+                           any(r.get('dev') == 'br2000' and r.get('protocol') == 'bgp'
+                               for r in route('v2', prefix)))
+                for af, gateway in [('-4', '198.51.100.1'), ('-6', '::ffff:198.51.100.1')]:
+                    expect(f'{name}: RMAC neighbor {af}', lambda af=af, gateway=gateway:
+                           'extern_learn' in ns('v2', 'ip', af, 'neighbor', 'show',
+                                               gateway, 'dev', 'br2000').stdout)
+                expect(f'{name}: RMAC FDB', lambda:
+                       'dst 198.51.100.1' in ns('v2', 'bridge', 'fdb', 'show', 'dev', 'vx2000').stdout)
+                for af, address in [('-4', '10.20.1.10'), ('-6', '2001:db8:20:1::10')]:
+                    expect(f'{name}: routed {af}', lambda af=af, address=address:
+                           ns('r2', 'ping', af, '-c', '1', '-W', '1', address,
+                              check=False).returncode == 0)
+
+            ns('v2', 'ip', 'link', 'set', 'br2000', 'down')
+            expect('Bridge admin-down removes the IPv4 Type-5 route', lambda:
+                   not route('v2', '10.20.1.0/24'))
+            ns('v2', 'ip', 'link', 'set', 'br2000', 'up')
+            type5_restored('Bridge admin flap')
+
+            # The flushed neighbors are put back as soon as the deletion is
+            # seen, so the gap itself is too short to assert on.
+            ns('v2', 'ip', 'link', 'set', 'vx2000', 'down')
+            time.sleep(1)
+            ns('v2', 'ip', 'link', 'set', 'vx2000', 'up')
+            type5_restored('VXLAN carrier flap')
+
+            ns('v2', 'ip', 'neighbor', 'flush', 'dev', 'br2000')
+            ns('v2', 'ip', '-6', 'neighbor', 'flush', 'dev', 'br2000')
+            ns('v2', 'bridge', 'fdb', 'del', '02:00:00:00:02:01', 'dev', 'vx2000', 'master')
+            ns('v2', 'bridge', 'fdb', 'del', '02:00:00:00:02:01', 'dev', 'vx2000', 'self',
+               check=False)
+            type5_restored('Neighbor and FDB flush')
+
+            ns('v2', 'ip', 'link', 'set', 'vx2000', 'nomaster')
+            ns('v2', 'ip', 'link', 'set', 'vx2000', 'master', 'br2000')
+            type5_restored('VXLAN re-attach')
+
+            # A route removed by someone else comes back (FRR does the same
+            # for its own routes).
+            ns('v2', 'ip', 'route', 'del', '10.20.1.0/24', 'table', '100')
+            ns('v2', 'ip', '-6', 'route', 'del', '2001:db8:20:1::/64', 'table', '100')
+            type5_restored('External route delete')
+
+            # Moving the L3-VNI VXLAN to another bridge moves its state and
+            # leaves no RMAC neighbors on the old bridge. Then move it back.
+            ns('v2', 'ip', 'link', 'add', 'br2000b', 'type', 'bridge')
+            ns('v2', 'ip', 'link', 'set', 'br2000b', 'address', '02:00:00:00:02:02')
+            ns('v2', 'ip', 'link', 'set', 'br2000b', 'master', 'tenant100')
+            ns('v2', 'ip', 'link', 'set', 'br2000b', 'up')
+            # A dummy port keeps each bridge's carrier up when the VXLAN
+            # leaves; otherwise the kernel flushes its neighbors itself and
+            # the "none left" checks prove nothing.
+            for bridge in ['br2000', 'br2000b']:
+                ns('v2', 'ip', 'link', 'add', 'd' + bridge, 'type', 'dummy')
+                ns('v2', 'ip', 'link', 'set', 'd' + bridge, 'master', bridge)
+                ns('v2', 'ip', 'link', 'set', 'd' + bridge, 'up')
+            for new, old in [('br2000b', 'br2000'), ('br2000', 'br2000b')]:
+                ns('v2', 'ip', 'link', 'set', 'vx2000', 'master', new)
+                for prefix in ['10.20.1.0/24', '2001:db8:20:1::/64']:
+                    expect(f'Move to {new}: Type-5 {prefix}', lambda prefix=prefix, new=new:
+                           any(r.get('dev') == new and r.get('protocol') == 'bgp'
+                               for r in route('v2', prefix)))
+                for af, gateway in [('-4', '198.51.100.1'), ('-6', '::ffff:198.51.100.1')]:
+                    expect(f'Move to {new}: RMAC neighbor {af}', lambda af=af, gateway=gateway, new=new:
+                           'extern_learn' in ns('v2', 'ip', af, 'neighbor', 'show',
+                                               gateway, 'dev', new).stdout)
+                    expect(f'Move to {new}: none left on {old} {af}', lambda af=af, gateway=gateway, old=old:
+                           not ns('v2', 'ip', af, 'neighbor', 'show', gateway, 'dev', old).stdout)
+                for af, address in [('-4', '10.20.1.10'), ('-6', '2001:db8:20:1::10')]:
+                    expect(f'Move to {new}: routed {af}', lambda af=af, address=address:
+                           ns('r2', 'ping', af, '-c', '1', '-W', '1', address,
+                              check=False).returncode == 0)
+            for link in ['dbr2000', 'dbr2000b', 'br2000b']:
+                ns('v2', 'ip', 'link', 'del', link)
+
             # Removing one NLRI must retain the other bindings and their MAC.
             ns('v1', 'ip', '-4', 'neighbor', 'del', '10.10.0.101', 'dev', 'br1000')
             expect('Type-2 IPv4 withdrawal', lambda:

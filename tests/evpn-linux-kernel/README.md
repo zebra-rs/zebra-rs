@@ -21,6 +21,11 @@ The script checks dual-stack Type-2 neighbor installation and switching,
 Type-5 VRF route installation and routing, redistribution of ordinary
 static blackholes present before startup, IPv4 binding withdrawal with
 IPv6/MAC survival, and prefix withdrawal with shared RMAC survival.
+It also removes bridge Type-5 state behind the daemon (L3-VNI bridge
+admin flap, VXLAN carrier flap, neighbor/FDB flush, VXLAN detach and
+re-attach, external route deletion) and checks that routes, RMAC adjacency
+and routing recover. It moves the L3-VNI VXLAN to a second bridge and
+back, checking that no RMAC neighbors remain on the bridge it left.
 Real pings traverse the Linux VXLAN dataplane.
 
 Build the binaries and run from the repository root on Linux with

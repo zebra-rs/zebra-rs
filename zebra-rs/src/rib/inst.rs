@@ -3957,6 +3957,10 @@ impl Rib {
             Message::LinkUp { ifindex } => {
                 // println!("LinkUp {}", ifindex);
                 self.link_up(ifindex).await;
+                // Admin-down dropped any bridge Type-5 routes through this
+                // device without a notification; carrier loss flushed the
+                // RMAC neighbors.
+                self.fib_handle.evpn_link_up(ifindex).await;
             }
             Message::LinkDown { ifindex } => {
                 // println!("LinkDown {}", ifindex);
@@ -4613,6 +4617,29 @@ impl Rib {
                     }
                 }
             }
+            FibMessage::EvpnRouteDeleted {
+                table_id,
+                prefix,
+                metric,
+            } => {
+                // Someone else removed a bridge Type-5 route we still want.
+                // While its bridge is down, link up reinstalls it instead
+                // (IPv6 reports routes it drops on link down).
+                if let Some(l3vni) = self
+                    .fib_handle
+                    .evpn_prefix_deleted(table_id, prefix, metric)
+                    && self
+                        .fib_handle
+                        .vni_bridge_map
+                        .get(&l3vni)
+                        .and_then(|bridge| self.links.get(bridge))
+                        .is_some_and(|link| link.is_up())
+                {
+                    self.fib_handle
+                        .evpn_prefix_reinstall(table_id, prefix)
+                        .await;
+                }
+            }
             FibMessage::DelRoute(route) => {
                 if let IpNet::V6(prefix) = route.prefix {
                     if route.table_id == RT_TABLE_MAIN {
@@ -4673,6 +4700,9 @@ impl Rib {
                 }
             }
             FibMessage::DelNeighbor(nbr) => {
+                // A flushed RMAC FDB row or VTEP neighbor that a bridge
+                // Type-5 route still needs is put back.
+                self.fib_handle.evpn_neighbor_deleted(&nbr).await;
                 let previous = self.cache_neighbor(nbr.clone(), false);
                 if self.cradle_fdb_watch.is_none()
                     && !previous
