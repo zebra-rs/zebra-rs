@@ -33,7 +33,7 @@ Feature: OSPFv3 advertises its Segment Routing capabilities in the Router Inform
     And show command "show ospfv3 database detail" in namespace "r2" should eventually contain "Segment Routing Global Range TLV:"
     And show command "show ospfv3 database detail" in namespace "r2" should eventually contain "Algorithm 128: Flex-Algo 128"
     # r1's SRGB now comes from its Router Information LSA alone.
-    And show command "show ospfv3 segment-routing" in namespace "r2" should eventually contain "SR-Node: 1.1.1.1    Area: 0.0.0.0    SRGB: [16000/18000]"
+    And show command "show ospfv3 segment-routing" in namespace "r2" should eventually contain "SR-Node: 1.1.1.1    Area: 0.0.0.0    SRGB: [16000/23999]"
     And show command "show mpls ilm" in namespace "r2" should eventually contain "16001"
     # The former carrier, an SR-info E-Router-LSA, is no longer sent: only
     # its rendering prints "SR-Algorithm TLV:".

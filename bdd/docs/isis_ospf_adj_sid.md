@@ -3,8 +3,8 @@
 ## Overview
 
 IS-IS, OSPFv2 and OSPFv3 each allocate a dynamic Adjacency-SID label
-for every adjacency from their SRLB, and all three SRLBs start at 15000
-(IS-IS takes the default block's 15000..15099, OSPF 15000..15999).
+for every adjacency from their SRLB, and all three read the same one: the
+default SR block's, 15000..15999.
 IS-IS used to allocate from a pool of its own, so on a router running
 it beside OSPF its first adjacency got 15000 while an OSPF adjacency
 held it too. The node has one MPLS label table, which forwards a label

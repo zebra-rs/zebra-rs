@@ -1970,10 +1970,10 @@ struct Ospfv3SrRemoteRouterJson {
 struct Ospfv3SegmentRoutingJson {
     enabled: bool,
     router_id: String,
-    srgb_start: u32,
-    srgb_end: u32,
-    srlb_start: u32,
-    srlb_end: u32,
+    srgb_start: Option<u32>,
+    srgb_end: Option<u32>,
+    srlb_start: Option<u32>,
+    srlb_end: Option<u32>,
     interfaces: Vec<Ospfv3SrInterfaceJson>,
     ilm: Vec<Ospfv3SrIlmJson>,
     remote_routers: Vec<Ospfv3SrRemoteRouterJson>,
@@ -2014,7 +2014,7 @@ fn show_ospfv3_segment_routing(
     _args: Args,
     json: bool,
 ) -> Result<String, std::fmt::Error> {
-    use super::srmpls::{SRGB_RANGE, SRGB_START, SRLB_RANGE, SRLB_START, SegmentRoutingMode};
+    use super::srmpls::SegmentRoutingMode;
 
     let enabled = top.segment_routing == SegmentRoutingMode::Mpls;
 
@@ -2083,13 +2083,17 @@ fn show_ospfv3_segment_routing(
     // `Lsdb<Ospfv3>::insert_received_v3`.
     let remote_routers = collect_remote_routers(top);
 
+    // This router's own blocks: the watched SR block's, while SR-MPLS is
+    // on; an empty range counts as none.
+    let srgb = top.srgb();
+    let srlb = top.srlb();
     let summary = Ospfv3SegmentRoutingJson {
         enabled,
         router_id: top.router_id.to_string(),
-        srgb_start: SRGB_START,
-        srgb_end: SRGB_START + SRGB_RANGE - 1,
-        srlb_start: SRLB_START,
-        srlb_end: SRLB_START + SRLB_RANGE - 1,
+        srgb_start: srgb.map(|g| g.start),
+        srgb_end: srgb.and_then(|g| g.last()),
+        srlb_start: srlb.map(|l| l.start),
+        srlb_end: srlb.and_then(|l| l.last()),
         interfaces,
         ilm,
         remote_routers,
@@ -2107,10 +2111,15 @@ fn show_ospfv3_segment_routing(
         "  State: {}",
         if enabled { "enabled" } else { "disabled" }
     )?;
+    let range = |start: Option<u32>, end: Option<u32>| match (start, end) {
+        (Some(start), Some(end)) => format!("[{start}/{end}]"),
+        _ => "-".to_string(),
+    };
     writeln!(
         text,
-        "  Local SRGB: [{}/{}]   SRLB: [{}/{}]",
-        summary.srgb_start, summary.srgb_end, summary.srlb_start, summary.srlb_end
+        "  Local SRGB: {}   SRLB: {}",
+        range(summary.srgb_start, summary.srgb_end),
+        range(summary.srlb_start, summary.srlb_end)
     )?;
     writeln!(text)?;
     writeln!(
@@ -2413,9 +2422,9 @@ mod tests {
     /// field-level output.
     #[test]
     fn ext_lsa_detail_renders_sr_capabilities() {
-        use crate::ospf::srmpls::{
-            SRGB_RANGE, SRGB_START, SRLB_RANGE, SRLB_START, e_router_v3_sr_info_lsa_build,
-        };
+        use crate::ospf::srmpls::{FORMER_SRGB, FORMER_SRLB, e_router_v3_sr_info_lsa_build};
+        let (srgb_start, srgb_range) = FORMER_SRGB;
+        let (srlb_start, srlb_range) = FORMER_SRLB;
         use ospf_packet::Algo;
 
         let lsa = e_router_v3_sr_info_lsa_build(
@@ -2429,20 +2438,20 @@ mod tests {
         assert!(out.contains("Algorithm 0: SPF"), "{out}");
         assert!(out.contains("SID/Label Range TLV (SRGB):"), "{out}");
         assert!(
-            out.contains(&format!("Range Size: {}", SRGB_RANGE)),
+            out.contains(&format!("Range Size: {}", srgb_range)),
             "{out}"
         );
         assert!(
-            out.contains(&format!("SID/Label: Label: {}", SRGB_START)),
+            out.contains(&format!("SID/Label: Label: {}", srgb_start)),
             "{out}"
         );
         assert!(out.contains("SR Local Block TLV (SRLB):"), "{out}");
         assert!(
-            out.contains(&format!("Range Size: {}", SRLB_RANGE)),
+            out.contains(&format!("Range Size: {}", srlb_range)),
             "{out}"
         );
         assert!(
-            out.contains(&format!("SID/Label: Label: {}", SRLB_START)),
+            out.contains(&format!("SID/Label: Label: {}", srlb_start)),
             "{out}"
         );
     }
