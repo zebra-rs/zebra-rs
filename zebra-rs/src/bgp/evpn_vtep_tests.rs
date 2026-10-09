@@ -473,3 +473,139 @@ async fn stale_remote_route_does_not_override_a_local_mac() {
     advertise(&mut bgp, 9);
     assert_eq!(mac_messages(&mut rib), vec![(true, key)]);
 }
+
+/// Feed a received MAC/IP route from `from` through ingest.
+fn receive_macip(
+    bgp: &mut Bgp,
+    from: usize,
+    rd: RouteDistinguisher,
+    mac: MacAddr,
+    ip: Option<IpAddr>,
+    seq: u32,
+) {
+    let route = EvpnRoute::Mac(bgp_packet::EvpnMac {
+        id: 0,
+        rd,
+        esi: [0; 10],
+        ether_tag: 0,
+        mac: mac.octets(),
+        ip,
+        vni: 100,
+        label2: None,
+    });
+    let mut attr = BgpAttr::new();
+    attr.nexthop = Some(BgpNexthop::Evpn("10.0.0.11".parse().unwrap()));
+    attr.local_pref = Some(LocalPref::default());
+    attr.ecom = Some(ExtCommunity::from([
+        evpn_route_target(65000, 100),
+        evpn_mac_mobility(seq),
+    ]));
+    let mut top = BgpTop {
+        router_id: &bgp.router_id,
+        srv6_ipv6_export: bgp.srv6_ipv6_export.as_ref(),
+        local_rib: &mut bgp.local_rib,
+        shard: &mut bgp.shard,
+        tx: &bgp.tx,
+        rib_client: &bgp.ctx.rib,
+        attr_store: &mut bgp.attr_store,
+        update_groups: &mut bgp.update_groups,
+        interface_addrs: &bgp.interface_addrs,
+        vrf_export: None,
+        color_policy: Some(&bgp.color_policy),
+        flex_algo_routes: Some(&bgp.flex_algo_routes),
+        flex_algo_srv6_routes: Some(&bgp.flex_algo_srv6_routes),
+        vrf_import: None,
+        nexthop_cache: None,
+        vrf_transport_v4: None,
+        vrf_transport_v6: None,
+        central_label_alloc: None,
+        as_sets_withdraw: bgp.as_sets_withdraw,
+    };
+    route_evpn_update(
+        from,
+        &route,
+        "10.0.0.11".parse().unwrap(),
+        &attr,
+        &mut top,
+        &mut bgp.peers,
+        false,
+    );
+}
+
+/// The mobility sequence number on our own selected MAC/IP route.
+fn local_macip_seq(bgp: &Bgp, mac: MacAddr, ip: IpAddr) -> Option<u32> {
+    let rd = rd_from_router_id_vni(RID, 100)?;
+    let prefix = EvpnPrefix::MacIp {
+        eth_tag: 0,
+        mac: mac.octets(),
+        ip: Some(ip),
+    };
+    let rib = bgp.local_rib.evpn.get(&rd)?.selected.get(&prefix)?;
+    Some(extract_mac_mobility_seq(&rib.attr))
+}
+
+/// An IP that moves to a different MAC (FRR's neighbor sequence numbers):
+/// learned here on a new MAC, our route outranks the remote binding of the
+/// IP to the old MAC, though the new MAC never moved; a stale remote binding
+/// of a local IP is not installed; a newer one (the IP moved away) is.
+#[tokio::test]
+async fn ip_moving_to_another_mac_outranks_the_old_binding() {
+    let (mut bgp, mut rib) = bgp_with_rib();
+    bgp.advertise_all_vni = true;
+    let (from, _rx) = peer(&mut bgp, "10.0.0.11", false);
+    let ip: IpAddr = "10.10.0.101".parse().unwrap();
+    let (old_mac, new_mac) = (
+        MacAddr::from([2, 0, 0, 0, 1, 1]),
+        MacAddr::from([2, 0, 0, 0, 2, 2]),
+    );
+    let remote_rd = rd_from_router_id_vni("10.0.0.11".parse().unwrap(), 100).unwrap();
+    let old_binding = crate::rib::evpn::MacRouteKey::new(remote_rd, 100, old_mac, Some(ip));
+
+    // The IP lives behind the peer on the old MAC.
+    receive_macip(&mut bgp, from, remote_rd, old_mac, Some(ip), 3);
+    assert_eq!(mac_messages(&mut rib), vec![(true, old_binding)]);
+
+    // It appears here on a new MAC: our route carries 4, and the old
+    // binding leaves the RIB.
+    let local = crate::rib::api::FdbEntry {
+        vni: 100,
+        mac: new_mac,
+        ip: Some(ip),
+        ifindex: 7,
+        bridge_ifindex: 5,
+        flags: 0,
+        vxlan_local: Some(IpAddr::V4(RID)),
+    };
+    bgp.evpn_originate_macip(&local);
+    assert_eq!(local_macip_seq(&bgp, new_mac, ip), Some(4));
+    assert_eq!(mac_messages(&mut rib), vec![(false, old_binding)]);
+    // The MAC-only route of the new MAC keeps its own number.
+    let mac_only = crate::rib::api::FdbEntry {
+        ip: None,
+        ..local.clone()
+    };
+    bgp.evpn_originate_macip(&mac_only);
+    let rd = rd_from_router_id_vni(RID, 100).unwrap();
+    let mac_only_seq = bgp.local_rib.evpn[&rd].selected[&EvpnPrefix::MacIp {
+        eth_tag: 0,
+        mac: new_mac.octets(),
+        ip: None,
+    }]
+        .attr
+        .clone();
+    assert_eq!(extract_mac_mobility_seq(&mac_only_seq), 0);
+    mac_messages(&mut rib);
+
+    // A refresh of the stale binding is not installed.
+    receive_macip(&mut bgp, from, remote_rd, old_mac, Some(ip), 3);
+    assert_eq!(mac_messages(&mut rib), vec![(false, old_binding)]);
+    // The IP moved back behind the peer: installed at once.
+    receive_macip(&mut bgp, from, remote_rd, old_mac, Some(ip), 7);
+    assert_eq!(mac_messages(&mut rib), vec![(true, old_binding)]);
+    // Learned here again later, our route carries 8 and wins.
+    bgp.evpn_withdraw_macip(&local);
+    mac_messages(&mut rib);
+    bgp.evpn_originate_macip(&local);
+    assert_eq!(local_macip_seq(&bgp, new_mac, ip), Some(8));
+    assert_eq!(mac_messages(&mut rib), vec![(false, old_binding)]);
+}

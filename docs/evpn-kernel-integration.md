@@ -104,7 +104,13 @@ reinstalled by the end of the grace period is removed.
   MAC Mobility sequence number, then the lower VTEP address (RFC 7432
   §7.7, §15). A route it does not outrank is removed from the kernel
   state rather than overwriting the local FDB row, and is installed again
-  if the local route is withdrawn. Sticky, default-gateway and router flags
+  if the local route is withdrawn. The same applies to an IP bound
+  locally to any MAC: a local MAC/IP route carries the higher of its MAC's
+  sequence number and the IP's highest remote one plus one, so an IP that
+  moves here on a new MAC outranks its old binding (FRR's neighbor
+  sequence numbers). As in FRR, a remote binding is installed as a NOARP
+  neighbor the kernel will not let ARP override, so the PE an IP moved to
+  learns it once the old PE withdraws. Sticky, default-gateway and router flags
   are read from the RFC 7432 MAC Mobility, Default Gateway and RFC 9161 ND
   communities.
 * Remote Type-2 bindings install `EXT_LEARNED` / `NOARP` neighbors on the
