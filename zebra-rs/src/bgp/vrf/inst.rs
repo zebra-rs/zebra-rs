@@ -2376,6 +2376,7 @@ impl BgpVrf {
         };
 
         let rib = super::super::route::BgpRib {
+            evpn_label2: None,
             remote_id: import_id,
             local_id: 0,
             attr: interned,
@@ -2645,6 +2646,7 @@ impl BgpVrf {
         };
 
         let rib = super::super::route::BgpRib {
+            evpn_label2: None,
             remote_id: import_id,
             local_id: 0,
             attr: interned,
@@ -3202,6 +3204,7 @@ impl BgpVrf {
         attr: std::sync::Arc<bgp_packet::BgpAttr>,
     ) -> super::super::route::BgpRib {
         super::super::route::BgpRib {
+            evpn_label2: None,
             remote_id: 0,
             local_id: 0,
             attr,

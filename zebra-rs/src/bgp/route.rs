@@ -1993,6 +1993,10 @@ pub struct BgpRib {
     /// install (`vxlan_vpn_entry`) reads it to build the VXLAN L3 encap's
     /// outer destination. `None` on every non-VXLAN-IRB row.
     pub vxlan_vtep: Option<Ipv4Addr>,
+    /// Type-2 MPLS Label2 as received (RFC 7432 §7.2; the L3VNI under
+    /// symmetric IRB, RFC 9135). Re-emitted unchanged when the route is
+    /// advertised onward. `None` on originated and non-Type-2 rows.
+    pub evpn_label2: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2104,6 +2108,7 @@ impl BgpRib {
             ingress_region: None,
             mup_st1: None,
             vxlan_vtep: None,
+            evpn_label2: None,
         }
     }
 
@@ -6563,6 +6568,7 @@ pub fn route_update_evpn(
         EvpnPrefix::MacIp { eth_tag, mac, ip } => {
             let vni = macip_service_field(rib);
             EvpnRoute::Mac(EvpnMac {
+                label2: rib.evpn_label2,
                 ip: *ip,
                 id,
                 rd: *rd,
@@ -7319,6 +7325,7 @@ fn evpn_route_from_prefix(rd: &RouteDistinguisher, prefix: &EvpnPrefix, id: u32)
             // [4..6] carry the low 16 bits of the VNI.
             let vni = u16::from_be_bytes([rd.val[4], rd.val[5]]) as u32;
             EvpnRoute::Mac(EvpnMac {
+                label2: None,
                 ip: *ip,
                 id,
                 rd: *rd,
@@ -10671,6 +10678,7 @@ pub fn route_evpn_update(
                 bos: true,
             });
         }
+        rib.evpn_label2 = m.label2;
     }
     // Type-5 (IP Prefix) carries an MPLS service label in its NLRI;
     // preserve it on the BgpRib so the VRF import (which reuses the
@@ -14343,6 +14351,7 @@ fn build_evpn_route(
         EvpnPrefix::MacIp { eth_tag, mac, ip } => {
             let vni = macip_service_field(rib);
             Some(EvpnRoute::Mac(EvpnMac {
+                label2: rib.evpn_label2,
                 ip: *ip,
                 id: rib.remote_id,
                 rd: *rd,
@@ -23213,6 +23222,7 @@ mod evpn_addpath_fanout_tests {
     /// path-id on the wire (0 from a non-AddPath client).
     fn mac_route(id: u32) -> EvpnRoute {
         EvpnRoute::Mac(bgp_packet::EvpnMac {
+            label2: None,
             ip: None,
             id,
             rd: rd(),
@@ -26091,6 +26101,7 @@ mod policy_apply_tests {
 
     fn evpn_mac(vni: u32) -> EvpnRoute {
         EvpnRoute::Mac(EvpnMac {
+            label2: None,
             ip: None,
             id: 0,
             rd: RouteDistinguisher::new(RouteDistinguisherType::IP),
@@ -26785,6 +26796,10 @@ mod es_remote_review_tests;
 #[cfg(test)]
 #[path = "es_carve_tests.rs"]
 mod es_carve_tests;
+
+#[cfg(test)]
+#[path = "evpn_vtep_tests.rs"]
+mod evpn_vtep_tests;
 
 #[cfg(test)]
 mod tests {

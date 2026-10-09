@@ -7802,6 +7802,7 @@ impl Bgp {
                 };
 
                 let rib = super::route::BgpRib {
+                    evpn_label2: None,
                     remote_id: 0,
                     local_id: 0,
                     attr: interned,
@@ -8009,6 +8010,7 @@ impl Bgp {
                 };
 
                 let rib = super::route::BgpRib {
+                    evpn_label2: None,
                     remote_id: 0,
                     local_id: 0,
                     attr: interned,

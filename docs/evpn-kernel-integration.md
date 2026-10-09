@@ -61,6 +61,9 @@ this configuration does not provide a route-protocol policy filter.
 * Local Type-2 advertisements correlate eligible local FDB rows with ARP/NDP.
   MAC-only, IPv4 and IPv6 bindings have separate NLRI keys and lifetimes.
   `EXT_LEARNED` state is never re-advertised as local state.
+* Received Type-2 routes may carry the optional Label2 (the L3VNI under
+  symmetric IRB, RFC 9135). It is accepted and re-advertised unchanged;
+  zebra-rs does not yet originate it or install Type-2 host routes in VRFs.
 * Remote Type-2 bindings install `EXT_LEARNED` / `NOARP` neighbors on the
   owning bridge, plus the remote MAC/VTEP FDB. Withdrawing one binding keeps
   the MAC when another NLRI still references it. Neighbor deletion checks
