@@ -73,18 +73,10 @@ Netlink notifications.
 The leftover tests cover unicast, ECMP, blackhole and mixed paths in
 IPv4, IPv6, main and VRF tables. They
 are ignored by ordinary cargo runs because they need root in an isolated
-named network namespace. Run them from the repository root:
+network namespace. Run them from the repository root; each runs in its own
+fresh namespace (sudo creates and removes it):
 
 ```bash
-(
-set -e
-evpn_test_binary=$(cargo test -p zebra-rs --no-run --message-format=json |
-  python3 -c 'import json,sys; rows=[json.loads(line) for line in sys.stdin]; print(next(row["executable"] for row in rows if row.get("executable") and row.get("profile",{}).get("test")))')
-evpn_test_namespace="evpn-regressions-$$"
-sudo ip netns add "$evpn_test_namespace"
-trap 'sudo ip netns delete "$evpn_test_namespace"' EXIT
-sudo ip -n "$evpn_test_namespace" link set lo up
-sudo ip netns exec "$evpn_test_namespace" "$evpn_test_binary" \
-  kernel_exchange_tests --include-ignored --test-threads=1
-)
+tests/evpn-linux-kernel/run-kernel-tests.sh            # all of them
+tests/evpn-linux-kernel/run-kernel-tests.sh multipath  # those matching a substring
 ```
