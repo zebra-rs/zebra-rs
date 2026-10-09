@@ -1812,6 +1812,9 @@ async fn ipv4_entry_selection(
         if replace.is_protocol() {
             if replace.is_fib() {
                 fib.route_ipv4_del(prefix, &replace, table_id).await;
+            } else if is_bridge_type5(&replace) {
+                // Its failed install is still tracked for recovery.
+                fib.evpn_prefix_withdraw(table_id, (*prefix).into()).await;
             }
             replace.nexthop_unsync(nmap, fib).await;
         }
@@ -1883,6 +1886,12 @@ async fn ipv4_entry_selection(
         }
     }
     retry
+}
+
+/// An EVPN Type-5 route installed through its L3-VNI bridge: the FIB
+/// tracks it as desired state even when the kernel rejected it.
+fn is_bridge_type5(entry: &RibEntry) -> bool {
+    matches!(&entry.nexthop, Nexthop::Uni(uni) if uni.vxlan.is_some())
 }
 
 /// Drop our "installed" belief for an entry's nexthop so the next
@@ -2544,6 +2553,9 @@ async fn ipv6_entry_selection(
         if replace.is_protocol() {
             if replace.is_fib() {
                 fib.route_ipv6_del(prefix, &replace, table_id).await;
+            } else if is_bridge_type5(&replace) {
+                // Its failed install is still tracked for recovery.
+                fib.evpn_prefix_withdraw(table_id, (*prefix).into()).await;
             }
             replace.nexthop_unsync(nmap, fib).await;
         }
