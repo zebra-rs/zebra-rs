@@ -1,5 +1,5 @@
 {
-  "binary_sha256": "564f4b8ee80b9ca034426e0e7e57bc5c895d6a317d7feb9394563a95599df410",
+  "binary_sha256": "faab2e646106bf6bc51cc9c329f3b6fc3a6ca78085246d483f493888f9d890a6",
   "checks": [
     {
       "name": "v1 EVPN established",

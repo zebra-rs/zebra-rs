@@ -5623,6 +5623,9 @@ pub fn route_from_msg_with(
     }
 
     let (prefix, mut entry) = builder.build();
+    // The dump lists each IPv4 route at a priority on its own; they sit
+    // side by side in the kernel. The monitor sets this from NLM_F_APPEND.
+    entry.kernel_append = dump && matches!(prefix, IpNet::V4(_));
     if let Some((_, distance)) = leftover {
         entry.stale = true;
         entry.distance = distance;
@@ -5709,6 +5712,7 @@ fn process_msg(msg: NetlinkMessage<RouteNetlinkMessage>, tx: UnboundedSender<Fib
     // send returns `SendError`; that is benign here — we don't want a
     // closing channel to take down the netlink reader task with a
     // secondary panic.
+    let append = msg.header.flags & NLM_F_APPEND != 0;
     if let NetlinkPayload::InnerMessage(msg) = msg.payload {
         match msg {
             RouteNetlinkMessage::NewLink(msg) => {
@@ -5734,7 +5738,10 @@ fn process_msg(msg: NetlinkMessage<RouteNetlinkMessage>, tx: UnboundedSender<Fib
                 let _ = tx.send(FibMessage::DelAddr(addr));
             }
             RouteNetlinkMessage::NewRoute(msg) => {
-                if let Some(route) = route_from_msg(msg) {
+                if let Some(mut route) = route_from_msg(msg) {
+                    // An IPv4 append adds a route beside the others at its
+                    // priority; IPv6 reports the whole merged route.
+                    route.entry.kernel_append = append && matches!(route.prefix, IpNet::V4(_));
                     let _ = tx.send(FibMessage::NewRoute(route));
                 }
             }

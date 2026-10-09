@@ -2278,6 +2278,10 @@ pub(crate) fn kernel_priorities(entry: &RibEntry, v6: bool) -> Vec<u32> {
 /// An RTM_NEWROUTE replaces the complete entry at the same priority:
 /// Linux does not send a delete when its route type changes.
 fn rib_add_kernel(entries: &mut RibEntries, mut entry: RibEntry) {
+    if entry.kernel_append {
+        entries.push(entry);
+        return;
+    }
     if let Some(existing) = entries
         .iter_mut()
         .find(|existing| existing.rtype == entry.rtype && existing.metric == entry.metric)
@@ -2290,12 +2294,79 @@ fn rib_add_kernel(entries: &mut RibEntries, mut entry: RibEntry) {
     }
 }
 
-fn rib_replace_kernel(entries: &mut RibEntries, entry: &RibEntry) -> Vec<RibEntry> {
-    entries
-        .iter()
-        .position(|existing| existing.rtype == entry.rtype && existing.metric == entry.metric)
-        .map(|index| vec![entries.remove(index)])
-        .unwrap_or_default()
+/// The forwarding legs of a kernel route, each keyed by gateway and
+/// interface.
+fn kernel_legs(nexthop: &Nexthop) -> Vec<NexthopUni> {
+    match nexthop {
+        Nexthop::Uni(uni) => vec![uni.clone()],
+        Nexthop::Multi(multi) => multi.nexthops.clone(),
+        Nexthop::List(list) => list
+            .nexthops
+            .iter()
+            .filter_map(|member| match member {
+                NexthopMember::Uni(uni) => Some(uni.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn same_leg(a: &NexthopUni, b: &NexthopUni) -> bool {
+    a.addr == b.addr
+        && match (a.ifindex_origin, b.ifindex_origin) {
+            (Some(x), Some(y)) => x == y,
+            _ => true,
+        }
+}
+
+/// Apply a kernel route deletion at `entry`'s priority. The kernel reports
+/// what it removed, which is not always the whole route there:
+///
+/// - IPv4 keeps same-priority routes side by side (`ip route append`); a
+///   deletion names one of them by its next hops (else the first).
+/// - IPv6 merges them into one multipath route, and deleting one next hop
+///   reports only that next hop. Remove those legs and keep the rest.
+///
+/// Returns the entries removed; an IPv6 entry left with legs is updated in
+/// place.
+fn rib_replace_kernel(entries: &mut RibEntries, entry: &RibEntry, v6: bool) -> Vec<RibEntry> {
+    let same =
+        |existing: &RibEntry| existing.rtype == entry.rtype && existing.metric == entry.metric;
+    let gone = kernel_legs(&entry.nexthop);
+    if !v6 {
+        let matches_legs = |existing: &RibEntry| {
+            let legs = kernel_legs(&existing.nexthop);
+            legs.len() == gone.len() && legs.iter().all(|leg| gone.iter().any(|g| same_leg(leg, g)))
+        };
+        return entries
+            .iter()
+            .position(|e| same(e) && matches_legs(e))
+            .or_else(|| entries.iter().position(same))
+            .map(|index| vec![entries.remove(index)])
+            .unwrap_or_default();
+    }
+    let Some(index) = entries.iter().position(same) else {
+        return Vec::new();
+    };
+    let remaining: Vec<NexthopUni> = kernel_legs(&entries[index].nexthop)
+        .into_iter()
+        .filter(|leg| !gone.iter().any(|g| same_leg(leg, g)))
+        .collect();
+    if gone.is_empty() || remaining.is_empty() {
+        return vec![entries.remove(index)];
+    }
+    let existing = &mut entries[index];
+    existing.nexthop = if remaining.len() == 1 {
+        Nexthop::Uni(remaining.into_iter().next().unwrap())
+    } else {
+        Nexthop::Multi(NexthopMulti {
+            metric: existing.metric,
+            nexthops: remaining,
+            ..Default::default()
+        })
+    };
+    Vec::new()
 }
 
 fn rib_add_system(table: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, entry: RibEntry) {
@@ -2367,7 +2438,7 @@ fn rib_replace_system(
 ) -> Vec<RibEntry> {
     let entries = table.entry(*prefix).or_default();
     if entry.stale || matches!(entry.rtype, RibType::Kernel | RibType::Dhcp) {
-        return rib_replace_kernel(entries, &entry);
+        return rib_replace_kernel(entries, &entry, false);
     }
     let index = if entry.is_connected() {
         // Connected entries are keyed by (type, ifindex) — mirror
@@ -2692,7 +2763,7 @@ fn rib_replace_system_v6(
 ) -> Vec<RibEntry> {
     let entries = table.entry(*prefix).or_default();
     if entry.stale || matches!(entry.rtype, RibType::Kernel | RibType::Dhcp) {
-        return rib_replace_kernel(entries, &entry);
+        return rib_replace_kernel(entries, &entry, true);
     }
     let index = if entry.is_connected() {
         // Connected entries are keyed by (type, ifindex) — mirror
@@ -3080,6 +3151,97 @@ mod tests {
         RecoveryDecision, SuppressReason, addr_recover_decide,
     };
     use std::time::{Duration, Instant};
+
+    /// Linux semantics at one priority: IPv4 keeps routes side by side
+    /// (`ip route append`), and deletes one by its next hops; IPv6 merges
+    /// them into one multipath route, and a deletion reports only the
+    /// next hops it removed.
+    #[test]
+    fn kernel_routes_follow_linux_priority_semantics() {
+        use super::*;
+        let leg = |addr: &str| NexthopUni {
+            addr: addr.parse().unwrap(),
+            ifindex_origin: Some(2),
+            ..Default::default()
+        };
+        let route = |addrs: &[&str], append: bool| {
+            let mut entry = RibEntry::new(RibType::Kernel);
+            entry.metric = 1024;
+            entry.kernel_append = append;
+            entry.nexthop = if addrs.len() == 1 {
+                Nexthop::Uni(leg(addrs[0]))
+            } else {
+                Nexthop::Multi(NexthopMulti {
+                    metric: 1024,
+                    nexthops: addrs.iter().map(|a| leg(a)).collect(),
+                    ..Default::default()
+                })
+            };
+            entry
+        };
+        let legs = |entries: &RibEntries| -> Vec<Vec<String>> {
+            entries
+                .iter()
+                .map(|e| {
+                    kernel_legs(&e.nexthop)
+                        .iter()
+                        .map(|l| l.addr.to_string())
+                        .collect()
+                })
+                .collect()
+        };
+
+        // IPv6: one merged route; deleting a next hop keeps the others.
+        let mut v6 = RibEntries::new();
+        rib_add_kernel(&mut v6, route(&["2001:db8::2", "2001:db8::3"], false));
+        rib_add_kernel(
+            &mut v6,
+            route(&["2001:db8::2", "2001:db8::3", "2001:db8::4"], false),
+        );
+        assert_eq!(
+            legs(&v6),
+            vec![vec!["2001:db8::2", "2001:db8::3", "2001:db8::4"]]
+        );
+        assert!(rib_replace_kernel(&mut v6, &route(&["2001:db8::3"], false), true).is_empty());
+        assert_eq!(legs(&v6), vec![vec!["2001:db8::2", "2001:db8::4"]]);
+        assert!(rib_replace_kernel(&mut v6, &route(&["2001:db8::2"], false), true).is_empty());
+        assert!(matches!(v6[0].nexthop, Nexthop::Uni(_)));
+        assert_eq!(legs(&v6), vec![vec!["2001:db8::4"]]);
+        // The whole route: every remaining next hop is reported.
+        assert_eq!(
+            rib_replace_kernel(&mut v6, &route(&["2001:db8::4"], false), true).len(),
+            1
+        );
+        assert!(v6.is_empty());
+        // A deletion naming no next hop (a discard route) removes it.
+        let mut hole = RibEntries::new();
+        let mut blackhole = RibEntry::new(RibType::Kernel);
+        blackhole.metric = 1024;
+        blackhole.nexthop = Nexthop::Blackhole(1024);
+        rib_add_kernel(&mut hole, blackhole.clone());
+        assert_eq!(rib_replace_kernel(&mut hole, &blackhole, true).len(), 1);
+
+        // IPv4: an append sits beside the route; a replace takes the
+        // first; a delete removes the route its next hops name, or the
+        // first when they name none.
+        let mut v4 = RibEntries::new();
+        rib_add_kernel(&mut v4, route(&["192.0.2.2", "192.0.2.3"], false));
+        rib_add_kernel(&mut v4, route(&["192.0.2.4"], true));
+        assert_eq!(
+            legs(&v4),
+            vec![vec!["192.0.2.2", "192.0.2.3"], vec!["192.0.2.4"]]
+        );
+        rib_add_kernel(&mut v4, route(&["192.0.2.5"], false));
+        assert_eq!(legs(&v4), vec![vec!["192.0.2.5"], vec!["192.0.2.4"]]);
+        let removed = rib_replace_kernel(&mut v4, &route(&["192.0.2.4"], false), false);
+        assert_eq!(legs(&removed), vec![vec!["192.0.2.4"]]);
+        assert_eq!(legs(&v4), vec![vec!["192.0.2.5"]]);
+        assert_eq!(
+            rib_replace_kernel(&mut v4, &route(&["192.0.2.9"], false), false).len(),
+            1
+        );
+        assert!(v4.is_empty());
+    }
 
     #[test]
     fn startup_leftovers_preserve_each_priority_and_kind() {

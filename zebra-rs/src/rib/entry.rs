@@ -33,6 +33,13 @@ pub struct RibEntry {
     /// leaves the kernel by `FibHandle::route_del_leftover`, when
     /// replaced, outranked or swept (`Message::SweepStale`).
     pub stale: bool,
+    /// A kernel route that joins the routes already at its priority
+    /// instead of replacing them: an IPv4 `NLM_F_APPEND`, or any IPv4
+    /// route the startup dump lists (the kernel keeps same-priority IPv4
+    /// routes side by side; only the first forwards). Set by the FIB
+    /// decoder; meaningless on any other entry.
+    #[serde(skip)]
+    pub kernel_append: bool,
     pub distance: u8,
     pub metric: u32,
     pub nexthop: Nexthop,
@@ -60,6 +67,7 @@ impl RibEntry {
             offloaded: false,
             valid: false,
             stale: false,
+            kernel_append: false,
             distance: 0,
             metric: 0,
             nexthop: Nexthop::default(),

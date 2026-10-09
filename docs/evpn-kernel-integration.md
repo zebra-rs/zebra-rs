@@ -60,7 +60,10 @@ protocol and priority) are excluded from kernel ingestion, so static and
 IGP output cannot displace its owning route as a distance-0 kernel entry.
 External static routes remain eligible. Kernel routes at different
 priorities are retained independently; replacing a blackhole with a
-unicast route, or the reverse, updates the selected route and redistribution.
+unicast route, or the reverse, updates the selected route and redistribution. At
+one priority the RIB follows Linux: IPv4 keeps appended routes beside the
+first and removes the one a deletion names; IPv6 merges them into one
+multipath route, and deleting a next hop removes only that next hop.
 
 zebra-rs installs its static routes as `proto zebra` (`RTPROT_ZEBRA`,
 11), so they are distinguishable from operator `proto static` routes,

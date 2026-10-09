@@ -625,3 +625,192 @@ async fn sweep_removes_every_leftover_priority_and_route_type() {
 async fn fresh_floating_static_replaces_every_leftover_priority() {
     check_leftover_priorities(true).await;
 }
+
+/// Apply the kernel's own notifications to the RIB, as the event loop does.
+async fn pump(rib: &mut Rib) {
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    while let Ok(msg) = rib.fib.rx.try_recv() {
+        rib.process_fib_msg(msg).await;
+    }
+}
+
+/// The kernel routes the RIB holds for `prefix`, as gateway lists.
+fn rib_kernel_routes(rib: &Rib, prefix: IpNet) -> Vec<Vec<String>> {
+    let entries = match prefix {
+        IpNet::V4(p) => rib.table.get(&p),
+        IpNet::V6(p) => rib.table_v6.get(&p),
+    };
+    let mut routes: Vec<Vec<String>> = entries
+        .into_iter()
+        .flatten()
+        .filter(|e| e.rtype == RibType::Kernel)
+        .map(|e| {
+            let mut legs: Vec<String> = match &e.nexthop {
+                Nexthop::Uni(uni) => vec![uni.addr.to_string()],
+                Nexthop::Multi(multi) => {
+                    multi.nexthops.iter().map(|u| u.addr.to_string()).collect()
+                }
+                other => vec![format!("{other:?}")],
+            };
+            legs.sort();
+            legs
+        })
+        .collect();
+    routes.sort();
+    routes
+}
+
+/// Multipath kernel routes change one next hop at a time: IPv6 reports a
+/// deleted next hop alone, IPv4 keeps appended routes beside the first.
+/// The RIB (redistribution, VTEP reachability) must follow the kernel, not
+/// drop or overwrite the whole route.
+#[tokio::test]
+#[ignore = "requires root in an isolated network namespace"]
+async fn kernel_multipath_changes_track_the_kernel() {
+    require_netns();
+    ip(&["link", "add", "mpath0", "type", "dummy"]);
+    ip(&["link", "set", "mpath0", "up"]);
+    ip(&["addr", "add", "192.0.2.1/24", "dev", "mpath0"]);
+    ip(&[
+        "-6",
+        "addr",
+        "add",
+        "2001:db8:f::1/64",
+        "dev",
+        "mpath0",
+        "nodad",
+    ]);
+    let mut rib = Rib::new(false).unwrap();
+    crate::fib::fib_dump(&mut rib).await.unwrap();
+    pump(&mut rib).await;
+    let v6: IpNet = "2001:db8:a::/64".parse().unwrap();
+    let v4: IpNet = "10.9.0.0/24".parse().unwrap();
+    let gw = |n: u8, v6: bool| {
+        if v6 {
+            format!("2001:db8:f::{n}")
+        } else {
+            format!("192.0.2.{n}")
+        }
+    };
+    let routes = |list: &[&[u8]], v6: bool| -> Vec<Vec<String>> {
+        let mut out: Vec<Vec<String>> = list
+            .iter()
+            .map(|legs| {
+                let mut l: Vec<String> = legs.iter().map(|n| gw(*n, v6)).collect();
+                l.sort();
+                l
+            })
+            .collect();
+        out.sort();
+        out
+    };
+
+    let (g2, g3, g4) = (gw(2, true), gw(3, true), gw(4, true));
+    ip(&[
+        "-6",
+        "route",
+        "add",
+        "2001:db8:a::/64",
+        "nexthop",
+        "via",
+        &g2,
+        "dev",
+        "mpath0",
+        "nexthop",
+        "via",
+        &g3,
+        "dev",
+        "mpath0",
+    ]);
+    ip(&[
+        "-6",
+        "route",
+        "append",
+        "2001:db8:a::/64",
+        "via",
+        &g4,
+        "dev",
+        "mpath0",
+    ]);
+    pump(&mut rib).await;
+    assert_eq!(rib_kernel_routes(&rib, v6), routes(&[&[2, 3, 4]], true));
+    ip(&[
+        "-6",
+        "route",
+        "del",
+        "2001:db8:a::/64",
+        "via",
+        &g3,
+        "dev",
+        "mpath0",
+    ]);
+    pump(&mut rib).await;
+    assert_eq!(rib_kernel_routes(&rib, v6), routes(&[&[2, 4]], true));
+    ip(&["-6", "route", "del", "2001:db8:a::/64"]);
+    pump(&mut rib).await;
+    assert!(rib_kernel_routes(&rib, v6).is_empty());
+
+    let (g2, g3, g4, g5) = (gw(2, false), gw(3, false), gw(4, false), gw(5, false));
+    ip(&[
+        "route",
+        "add",
+        "10.9.0.0/24",
+        "nexthop",
+        "via",
+        &g2,
+        "dev",
+        "mpath0",
+        "nexthop",
+        "via",
+        &g3,
+        "dev",
+        "mpath0",
+    ]);
+    ip(&[
+        "route",
+        "append",
+        "10.9.0.0/24",
+        "via",
+        &g4,
+        "dev",
+        "mpath0",
+    ]);
+    pump(&mut rib).await;
+    assert_eq!(rib_kernel_routes(&rib, v4), routes(&[&[2, 3], &[4]], false));
+    ip(&[
+        "route",
+        "replace",
+        "10.9.0.0/24",
+        "via",
+        &g5,
+        "dev",
+        "mpath0",
+    ]);
+    pump(&mut rib).await;
+    assert_eq!(rib_kernel_routes(&rib, v4), routes(&[&[5], &[4]], false));
+    ip(&["route", "del", "10.9.0.0/24"]);
+    pump(&mut rib).await;
+    assert_eq!(rib_kernel_routes(&rib, v4), routes(&[&[4]], false));
+    ip(&["route", "del", "10.9.0.0/24"]);
+    pump(&mut rib).await;
+    assert!(rib_kernel_routes(&rib, v4).is_empty());
+
+    // The startup dump lists same-priority IPv4 routes one by one.
+    ip(&["route", "add", "10.9.1.0/24", "via", &g2, "dev", "mpath0"]);
+    ip(&[
+        "route",
+        "append",
+        "10.9.1.0/24",
+        "via",
+        &g3,
+        "dev",
+        "mpath0",
+    ]);
+    let mut fresh = Rib::new(false).unwrap();
+    crate::fib::fib_dump(&mut fresh).await.unwrap();
+    assert_eq!(
+        rib_kernel_routes(&fresh, "10.9.1.0/24".parse().unwrap()),
+        routes(&[&[2], &[3]], false)
+    );
+    ip(&["link", "del", "mpath0"]);
+}
