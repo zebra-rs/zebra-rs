@@ -64,7 +64,12 @@ unicast route, or the reverse, updates the selected route and redistribution.
 
 zebra-rs installs its static routes as `proto zebra` (`RTPROT_ZEBRA`,
 11), so they are distinguishable from operator `proto static` routes,
-which are always kernel routes. Routes left by an earlier zebra-rs run (a
+which are always kernel routes. Consumers that classify kernel routes by
+protocol now see zebra-rs statics as routing-daemon output: OVN learns
+routes above `RTPROT_STATIC` from the VRF tables it watches, so a
+zebra-rs static configured in such a VRF becomes an OVN `Learned_Route`
+(as an FRR static, `proto 196`, does). Statics zebra-rs installed as
+`proto static` before this release were skipped by OVN. Routes left by an earlier zebra-rs run (a
 crash, or a stop without cleanup) are found at startup by protocol:
 `proto zebra`, IS-IS and OSPF in any table, and BGP in VRF tables. Each
 stays in place and keeps forwarding until its owner's fresh route
