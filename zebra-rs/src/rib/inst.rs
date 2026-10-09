@@ -4009,15 +4009,6 @@ impl Rib {
                         .insert(key);
                 }
                 self.reconcile_evpn_mac(key.vni, key.mac).await;
-                // Only an IP bound to several MACs can have been pointed
-                // at the losing one by the reconcile above.
-                if let Some(ip) = key.ip
-                    && self.evpn_ip_refs[&(key.vni, ip)]
-                        .iter()
-                        .any(|other| other.mac != key.mac)
-                {
-                    self.reassert_evpn_ip(key.vni, ip).await;
-                }
             }
             Message::EvpnMacDel(key) => {
                 if self.evpn_mac_routes.remove(&key).is_some() {

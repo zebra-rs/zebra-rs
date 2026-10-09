@@ -53,9 +53,10 @@ priorities in IPv4, IPv6 and VRF tables:
 cargo test -p zebra-rs kernel_exchange_tests
 ```
 
-An additional test checks actual static-route retention. It is ignored
-by ordinary cargo runs because it needs root in an isolated named
-network namespace. Run them from the repository root:
+Two additional tests check actual static-route retention and shared-IP
+neighbor ownership during unrelated MAC/IP updates and withdrawals. They
+are ignored by ordinary cargo runs because they need root in an isolated
+named network namespace. Run them from the repository root:
 
 ```bash
 (

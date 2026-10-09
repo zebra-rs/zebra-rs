@@ -249,3 +249,106 @@ async fn static_blackhole_echo_keeps_real_kernel_route() {
             .is_empty()
     );
 }
+
+#[tokio::test]
+#[ignore = "requires root in an isolated network namespace"]
+async fn unrelated_mac_bindings_preserve_real_shared_ip_neighbors() {
+    use crate::rib::evpn::{MacRoute, MacRouteKey};
+    require_netns();
+    ip(&["link", "add", "brreview", "type", "bridge"]);
+    ip(&["link", "set", "brreview", "up"]);
+    ip(&[
+        "link",
+        "add",
+        "vxreview",
+        "type",
+        "vxlan",
+        "id",
+        "10",
+        "local",
+        "192.0.2.1",
+        "dstport",
+        "4789",
+    ]);
+    ip(&["link", "set", "vxreview", "master", "brreview"]);
+    ip(&["link", "set", "vxreview", "up"]);
+    let links: serde_json::Value = serde_json::from_str(&ip(&["-j", "link", "show"])).unwrap();
+    let index = |name| {
+        links
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|link| link["ifname"] == name)
+            .unwrap()["ifindex"]
+            .as_u64()
+            .unwrap() as u32
+    };
+    let mut rib = Rib::new(false).unwrap();
+    rib.fib_handle.vni_ifindex_map.insert(10, index("vxreview"));
+    rib.fib_handle.vni_bridge_map.insert(10, index("brreview"));
+    let m1: MacAddr = "02:00:00:00:00:01".parse().unwrap();
+    let m2: MacAddr = "02:00:00:00:00:02".parse().unwrap();
+    let route = |mac, ip, seq| {
+        Message::EvpnMacAdd(MacRoute {
+            key: MacRouteKey::new("65000:10".parse().unwrap(), 10, mac, ip),
+            tunnel_endpoint: Some("192.0.2.2".parse().unwrap()),
+            flags: 0,
+            seq,
+            esi: None,
+            srv6_sid: None,
+            mpls_label: None,
+            local_port: None,
+        })
+    };
+    for (family, address, other) in [
+        ("-4", "10.0.0.1", "10.0.0.2"),
+        ("-6", "2001:db8::1", "2001:db8::2"),
+    ] {
+        let shared: IpAddr = address.parse().unwrap();
+        let other: IpAddr = other.parse().unwrap();
+        let neighbor = || ip(&[family, "neigh", "show", address, "dev", "brreview"]);
+        rib.process_msg(route(m1, Some(shared), 2), RT_TABLE_MAIN)
+            .await;
+        rib.process_msg(route(m2, Some(shared), 1), RT_TABLE_MAIN)
+            .await;
+        assert!(neighbor().contains(&m1.to_string()), "{}", neighbor());
+        rib.process_msg(route(m2, Some(other), 1), RT_TABLE_MAIN)
+            .await;
+        assert!(neighbor().contains(&m1.to_string()), "{}", neighbor());
+        rib.process_msg(route(m2, None, 1), RT_TABLE_MAIN).await;
+        assert!(neighbor().contains(&m1.to_string()), "{}", neighbor());
+        rib.process_msg(
+            Message::EvpnMacDel(MacRouteKey::new(
+                "65000:10".parse().unwrap(),
+                10,
+                m2,
+                Some(other),
+            )),
+            RT_TABLE_MAIN,
+        )
+        .await;
+        assert!(neighbor().contains(&m1.to_string()), "{}", neighbor());
+        rib.process_msg(
+            Message::EvpnMacDel(MacRouteKey::new(
+                "65000:10".parse().unwrap(),
+                10,
+                m1,
+                Some(shared),
+            )),
+            RT_TABLE_MAIN,
+        )
+        .await;
+        assert!(neighbor().contains(&m2.to_string()), "{}", neighbor());
+        rib.process_msg(
+            Message::EvpnMacDel(MacRouteKey::new(
+                "65000:10".parse().unwrap(),
+                10,
+                m2,
+                Some(shared),
+            )),
+            RT_TABLE_MAIN,
+        )
+        .await;
+        assert!(neighbor().trim().is_empty(), "{}", neighbor());
+    }
+}

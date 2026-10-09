@@ -119,7 +119,10 @@ impl Rib {
                 && route.mpls_label.is_none()
                 && !self.fib_handle.cradle_active()
             {
-                self.fib_handle.evpn_neighbor(vni, ip, mac, true).await;
+                // Reconciliation can touch IPs other than the incoming
+                // NLRI's IP. Each one must follow its winning binding
+                // across all MACs, rather than the MAC being reconciled.
+                self.reassert_evpn_ip(vni, ip).await;
             }
         }
     }
