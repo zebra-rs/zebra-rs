@@ -44,3 +44,29 @@ This covers flat bridges with fixed-VNI VXLAN and IPv4 VTEPs. Existing
 zebra-created metadata-mode VXLAN playsets remain separate compatibility
 coverage. This test does not qualify VLAN-aware fixed-VNI bridges,
 IPv6 VTEPs, multihoming, mobility, prefix ECMP, or route capacity.
+
+Kernel exchange regression tests cover self-generated route notifications,
+external route eligibility, and blackhole/unicast replacement at multiple
+priorities in IPv4, IPv6 and VRF tables:
+
+```bash
+cargo test -p zebra-rs kernel_exchange_tests
+```
+
+An additional test checks actual static-route retention. It is ignored
+by ordinary cargo runs because it needs root in an isolated named
+network namespace. Run them from the repository root:
+
+```bash
+(
+set -e
+evpn_test_binary=$(cargo test -p zebra-rs --no-run --message-format=json |
+  python3 -c 'import json,sys; rows=[json.loads(line) for line in sys.stdin]; print(next(row["executable"] for row in rows if row.get("executable") and row.get("profile",{}).get("test")))')
+evpn_test_namespace="evpn-regressions-$$"
+sudo ip netns add "$evpn_test_namespace"
+trap 'sudo ip netns delete "$evpn_test_namespace"' EXIT
+sudo ip -n "$evpn_test_namespace" link set lo up
+sudo ip netns exec "$evpn_test_namespace" "$evpn_test_binary" \
+  kernel_exchange_tests --include-ignored --test-threads=1
+)
+```

@@ -55,6 +55,12 @@ interface prefix routes (`proto kernel`) and link-local prefixes are not
 ingested; connected routes come from the interface addresses. The
 source is per VRF and exports all eligible kernel prefixes in that VRF;
 this configuration does not provide a route-protocol policy filter.
+Kernel events matching a route zebra-rs already installed (prefix, table,
+protocol and priority) are excluded from kernel ingestion, so static and
+IGP output cannot displace its owning route as a distance-0 kernel entry.
+External static routes remain eligible. Kernel routes at different
+priorities are retained independently; replacing a blackhole with a
+unicast route, or the reverse, updates the selected route and redistribution.
 
 ## Kernel contract
 

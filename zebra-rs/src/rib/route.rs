@@ -93,6 +93,61 @@ pub fn addr_recover_decide(state: &mut AddrRecoveryState, now: Instant) -> Recov
 }
 
 impl Rib {
+    /// A kernel event for a route this RIB already installed must not
+    /// become a distance-0 competitor to its owning protocol. External
+    /// routes using the same protocol number remain eligible when their
+    /// prefix, table or priority differs, or no installed owner exists.
+    pub(super) fn is_kernel_route_echo(&self, route: &crate::fib::FibRoute) -> bool {
+        if !matches!(route.entry.rtype, RibType::Kernel | RibType::Dhcp) {
+            return false;
+        }
+        let Some(protocol) = route.kernel_protocol else {
+            return false;
+        };
+        let entries = match route.prefix {
+            IpNet::V4(prefix) if route.table_id == RT_TABLE_MAIN => self.table.get(&prefix),
+            IpNet::V6(prefix) if route.table_id == RT_TABLE_MAIN => self.table_v6.get(&prefix),
+            IpNet::V4(prefix) => self
+                .vrf_tables
+                .get(&route.table_id)
+                .and_then(|table| table.table.get(&prefix)),
+            IpNet::V6(prefix) => self
+                .vrf_tables
+                .get(&route.table_id)
+                .and_then(|table| table.table_v6.get(&prefix)),
+        };
+        let priority_matches = |metric| {
+            let metric = if matches!(route.prefix, IpNet::V6(_)) && metric == 0 {
+                1024
+            } else {
+                metric
+            };
+            metric == route.entry.metric
+        };
+        entries.is_some_and(|entries| {
+            entries.iter().any(|entry| {
+                entry.rtype == protocol
+                    && entry.is_protocol()
+                    && entry.is_selected()
+                    && entry.is_fib()
+                    && match &entry.nexthop {
+                        Nexthop::Uni(uni) => priority_matches(uni.metric),
+                        Nexthop::Multi(multi) => priority_matches(multi.metric),
+                        Nexthop::List(list) => list
+                            .nexthops
+                            .iter()
+                            .any(|member| priority_matches(member.metric())),
+                        Nexthop::Protect(protect) => {
+                            priority_matches(protect.primary.metric())
+                                || priority_matches(protect.backup.metric())
+                        }
+                        Nexthop::Blackhole(metric) => priority_matches(*metric),
+                        Nexthop::Link(_) => priority_matches(entry.metric),
+                    }
+            })
+        })
+    }
+
     /// Push a configured address back to the kernel. Used by both
     /// `link_up` (when the kernel dropped a configured address while
     /// the link was down) and the kernel-driven DelAddr recovery
@@ -2149,8 +2204,37 @@ fn rib_add(table: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, entry: 
     entries.push(entry);
 }
 
+/// Kernel routes at different priorities coexist, including discard
+/// routes which cannot be represented as members of a unicast list.
+/// An RTM_NEWROUTE replaces the complete entry at the same priority:
+/// Linux does not send a delete when its route type changes.
+fn rib_add_kernel(entries: &mut RibEntries, mut entry: RibEntry) {
+    if let Some(existing) = entries
+        .iter_mut()
+        .find(|existing| existing.rtype == entry.rtype && existing.metric == entry.metric)
+    {
+        entry.selected = existing.selected;
+        entry.fib = existing.fib;
+        *existing = entry;
+    } else {
+        entries.push(entry);
+    }
+}
+
+fn rib_replace_kernel(entries: &mut RibEntries, entry: &RibEntry) -> Vec<RibEntry> {
+    entries
+        .iter()
+        .position(|existing| existing.rtype == entry.rtype && existing.metric == entry.metric)
+        .map(|index| vec![entries.remove(index)])
+        .unwrap_or_default()
+}
+
 fn rib_add_system(table: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, entry: RibEntry) {
     let entries = table.entry(*prefix).or_default();
+    if matches!(entry.rtype, RibType::Kernel | RibType::Dhcp) {
+        rib_add_kernel(entries, entry);
+        return;
+    }
     let index = if entry.is_connected() {
         // For connected routes, check both type and interface index
         rib_rtype_ifindex(entries, entry.rtype, entry.ifindex)
@@ -2213,6 +2297,9 @@ fn rib_replace_system(
     entry: RibEntry,
 ) -> Vec<RibEntry> {
     let entries = table.entry(*prefix).or_default();
+    if matches!(entry.rtype, RibType::Kernel | RibType::Dhcp) {
+        return rib_replace_kernel(entries, &entry);
+    }
     let index = if entry.is_connected() {
         // Connected entries are keyed by (type, ifindex) — mirror
         // rib_add_system, so a shared-prefix entry on another interface
@@ -2468,6 +2555,10 @@ fn rib_add_system_v6(
     entry: RibEntry,
 ) {
     let entries = table.entry(*prefix).or_default();
+    if matches!(entry.rtype, RibType::Kernel | RibType::Dhcp) {
+        rib_add_kernel(entries, entry);
+        return;
+    }
     let index = if entry.is_connected() {
         // For connected routes, check both type and interface index
         rib_rtype_ifindex(entries, entry.rtype, entry.ifindex)
@@ -2530,6 +2621,9 @@ fn rib_replace_system_v6(
     entry: RibEntry,
 ) -> Vec<RibEntry> {
     let entries = table.entry(*prefix).or_default();
+    if matches!(entry.rtype, RibType::Kernel | RibType::Dhcp) {
+        return rib_replace_kernel(entries, &entry);
+    }
     let index = if entry.is_connected() {
         // Connected entries are keyed by (type, ifindex) — mirror
         // rib_add_system_v6, so a shared-prefix entry on another

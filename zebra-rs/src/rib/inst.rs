@@ -4581,6 +4581,9 @@ impl Rib {
                 self.router_id_update();
             }
             FibMessage::NewRoute(route) => {
+                if self.is_kernel_route_echo(&route) {
+                    return;
+                }
                 // The startup route dump precedes config-driven VRF adoption.
                 // Preserve routes for a kernel VRF already seen in the link
                 // dump, so later adoption and redistribution can replay them.
@@ -4641,6 +4644,9 @@ impl Rib {
                 }
             }
             FibMessage::DelRoute(route) => {
+                if self.is_kernel_route_echo(&route) {
+                    return;
+                }
                 if let IpNet::V6(prefix) = route.prefix {
                     if route.table_id == RT_TABLE_MAIN {
                         self.ipv6_route_del(&prefix, route.entry, RT_TABLE_MAIN)
@@ -5999,6 +6005,10 @@ pub fn serve(mut rib: Rib) {
     });
 }
 
+#[cfg(test)]
+#[path = "kernel_exchange_tests.rs"]
+mod kernel_exchange_tests;
+
 /// The two decisions #2362 added: which kernel FDB rows are this node's
 /// own devices (never originated), and whether a remote MAC is one of
 /// them in its bridge domain (never programmed). Both pure over their
@@ -6170,11 +6180,13 @@ mod local_device_mac_tests {
             let route = crate::fib::FibRoute {
                 prefix,
                 entry,
+                kernel_protocol: Some(RibType::Static),
                 table_id: 100,
             };
             rib.process_fib_msg(FibMessage::NewRoute(crate::fib::FibRoute {
                 prefix: route.prefix,
                 entry: route.entry.clone(),
+                kernel_protocol: route.kernel_protocol,
                 table_id: route.table_id,
             }))
             .await;

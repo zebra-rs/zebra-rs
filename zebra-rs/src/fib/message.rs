@@ -109,6 +109,10 @@ impl FibAddr {
 pub struct FibRoute {
     pub prefix: IpNet,
     pub entry: RibEntry,
+    /// Protocol reported by the kernel, when it maps to a protocol we
+    /// install. Kept separately from the distance-0 kernel RIB entry so
+    /// the RIB can recognize echoes of its own installed routes.
+    pub kernel_protocol: Option<crate::rib::RibType>,
     /// Kernel routing-table id the route belongs to (`rtm_table`, or
     /// the `RTA_TABLE` attribute for ids > 255). `RT_TABLE_MAIN` (254)
     /// for the default table; a VRF's table id otherwise. Lets the RIB

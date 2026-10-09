@@ -5595,6 +5595,13 @@ pub fn route_from_msg_with(
     let msg = FibRoute {
         prefix,
         entry,
+        kernel_protocol: match protocol {
+            RouteProtocol::Static => Some(RibType::Static),
+            RouteProtocol::Ospf => Some(RibType::Ospf),
+            RouteProtocol::Isis => Some(RibType::Isis),
+            RouteProtocol::Bgp => Some(RibType::Bgp),
+            _ => None,
+        },
         table_id,
     };
 
