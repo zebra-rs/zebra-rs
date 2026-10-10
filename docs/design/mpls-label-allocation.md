@@ -336,12 +336,30 @@ ownership is what an operator wants to see in `show mpls label table`.
   Index-form Adj-SIDs (`adjacency-sid index`) derive their label from the
   SRGB, like a Prefix-SID, and claim nothing in the SRLB.
 
-  Binding-SIDs are not claimed yet (phase 3c). A local SR Policy's
-  `binding-sid-label` is only advertised, over BGP (SAFI 73); the ILM for
-  it is installed by the headend that receives the policy
-  (`MplsIlmAction`), at a label its originator chose. So there is no
-  commit at which to claim it: the headend's claim on a received label is
-  what 3c designs.
+  Binding-SIDs (phase 3c). A local SR Policy's `binding-sid-label` is
+  only advertised, over BGP (SAFI 73); the ILM for it is installed by the
+  headend that receives the policy, at a label its originator chose. So
+  there is no commit at which to claim it, and the originator does not
+  check it: the label belongs to the headend's label space. The headend
+  claims it instead, as it selects the policy's active candidate path
+  (`SrPolicyDb::select`, through a pool over the watched `default` block's
+  SRLB):
+  - in the SRLB and free, or held by a dynamic Adj-SID or Mirror Context
+    label (which is moved): the policy holds it, and installs its ILM once
+    the endpoint resolves;
+  - outside the SRLB, held by a configured Adj-SID, another policy's
+    Binding-SID (RFC 9256 §6.1: two policies MUST NOT share one), or no
+    SRLB: not available, which is alerted (§6.2). A candidate path with the
+    Specified-BSID-only flag is then invalid, and selection runs again
+    without it (§6.2.3); without the flag the path stays active with no
+    Binding-SID ILM, and steering uses its inline segment list. No dynamic
+    Binding-SID is bound (§6.2 allows one, outside the SRLB).
+
+  A label the policy no longer wants (another path active, the policy
+  withdrawn) goes back through `Releasing` like any other, and an SRLB
+  change re-evaluates every policy with a Binding-SID. A Binding-SID ILM
+  that goes re-derives the steering of colour-matched routes, so none keeps
+  pushing a label nothing forwards.
 - **Moving a dynamic holder.** The steps run in this order, so a label never
   points at two adjacencies:
   1. The label becomes `Revoking { from, to }`, and no dynamic allocation
@@ -547,8 +565,10 @@ never collide, and no discrepancy state or `clear` command is needed.
   label is allowed. The static
   region is whatever those leave: 16–14999 by default, plus the labels above
   the dynamic range if the operator ends it early (IOS XR's definition).
-- Configured local SIDs (`adjacency-sid absolute`, `binding-sid-label`): in
-  the SRLB and not held by another configured SID. A label held by a
+- Configured local SIDs (`adjacency-sid absolute`): in the SRLB and not
+  held by another configured SID. A `binding-sid-label` is not checked
+  here: it is for the headend that receives the policy, which claims it in
+  its own SRLB (§5.1, phase 3c). A label held by a
   dynamic Adj-SID or Mirror Context label is accepted, and its holder is
   moved (§5.1).
 - `segment-routing block`, new or changed (§6.1):
@@ -589,9 +609,9 @@ the blocks, with any SRGB it still holds for a move (§6.1).
 The startup config is checked the same way but only warned
 about: refusing it would leave the router unconfigured, and a config an
 earlier release accepted can fail a check added since. The IGPs keep their
-interim handling for that case (§10, phase 3b). The Binding-SID checks
-come with phase 3c, which claims them; the dynamic range ones came with
-phase 6c, which made it configurable.
+interim handling for that case (§10, phase 3b). A Binding-SID is checked
+by the headend that receives it instead (phase 3c); the dynamic range checks
+came with phase 6c, which made it configurable.
 
 ## 8. Configuration and show
 
@@ -627,7 +647,7 @@ phase 6c, which made it configurable.
 | Default SRLB 1000 | IS-IS advertises SRLB 15000/1000 (was 100); OSPF's advertised SRLB is unchanged | none found |
 | Adj-SIDs from the RIB's SRLB | none: still 15000 upward, lowest free first | none |
 | Configured Adj-SID on a dynamically held label | the dynamic holder moves to a new label, logged; today both adjacencies can advertise the same label | new scenario |
-| Configured local SIDs must lie in the SRLB | `binding-sid-label 16100`, inside the SRGB, is rejected at commit | `bgp_sr_policy_bsid_steering`, `bgp_sr_policy_bsid_forwarding` (move to the SRLB); the example in `zebra-bgp-sr-policy.yang:53` |
+| A received Binding-SID must lie in the headend's SRLB (phase 3c) | a headend no longer installs one outside it, such as 16100 inside the SRGB: the policy stays active with no Binding-SID ILM | `bgp_sr_policy_bsid_forwarding` (moved to 15100) |
 | OSPFv2 `show` | prints `end` − 1, as v3 does (v2 prints the raw end today, `ospf/show.rs:2385`) | the two features above |
 | Kernel seeding | stale ILMs from a crashed run are reclaimed or swept instead of blocking installs | new feature |
 
@@ -774,10 +794,11 @@ label with precedence over dynamic ones (§5.1):
 - IS-IS has no configured Adjacency-SID, so it claims nothing. It gives up a
   revoked label as OSPF does: another label for the adjacency or Mirror
   Context, then the release.
-- Binding-SIDs are phase 3c (§5.1).
+- Binding-SIDs are phase 3c: the headend that receives a policy claims
+  its Binding-SID in its SRLB (§5.1).
 
 Phase 6 lands in three parts. 6a is commit validation (§7), with the
-Binding-SID checks left to 3c. 6b adds `show mpls label range` and `show
+Binding-SID checks left to the headend (3c). 6b adds `show mpls label range` and `show
 mpls label table` (§8). 6c makes the dynamic range configurable (`mpls
 label-range dynamic`) and checks it.
 

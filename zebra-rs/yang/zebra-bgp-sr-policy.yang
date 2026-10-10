@@ -50,7 +50,7 @@ module zebra-bgp-sr-policy {
              color 100;
              endpoint 10.0.0.9;
              preference 200;
-             binding-sid-label 16100;
+             binding-sid-label 15100;
              segment 1 { mpls-label 16002; }
              segment 2 { mpls-label 16009; }
            }
@@ -119,6 +119,10 @@ module zebra-bgp-sr-policy {
         leaf binding-sid-label {
           ext:help "SR-MPLS Binding SID (MPLS label)";
           type uint32;
+          description
+            "The headend that receives the policy installs it only inside
+             its own SRLB (15000-15999 by default), where it claims it;
+             one outside is not available there (RFC 9256 section 6.2).";
         }
         leaf binding-sid-sid {
           ext:help "SRv6 Binding SID";

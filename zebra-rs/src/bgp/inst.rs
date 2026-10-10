@@ -1614,6 +1614,12 @@ impl Bgp {
             proto: "bgp".into(),
             tx: srv6_sr_tx,
         });
+        // The `default` block's SRLB is where a received SR Policy's
+        // SR-MPLS Binding-SID label is claimed (RFC 9256 §6.2).
+        let _ = bgp.ctx.rib.send(crate::rib::Message::SrBlockWatch {
+            proto: "bgp".into(),
+            name: crate::rib::DEFAULT_BLOCK_NAME.into(),
+        });
         bgp
     }
 
@@ -1751,7 +1757,21 @@ impl Bgp {
                     self.vpws_reconcile(&name);
                 }
             }
-            crate::rib::RibSrRx::Block { .. } => {}
+            crate::rib::RibSrRx::Block { name, block } => {
+                if name != crate::rib::DEFAULT_BLOCK_NAME {
+                    return;
+                }
+                let srlb = block
+                    .and_then(|b| b.local)
+                    .and_then(|lb| Some((lb.start, lb.last()?)));
+                let space = self.rib_subscriber.label_space();
+                let rib = &self.ctx.rib;
+                self.local_rib
+                    .sr_policy
+                    .set_bsid_srlb(srlb, |first, last| space.pool_for(first, last, rib));
+                let mut top = self.nht_install_top();
+                super::route::sr_policy_sync_reselected(&mut top);
+            }
         }
     }
 
@@ -5311,6 +5331,23 @@ impl Bgp {
             }
             RibRx::LabelBlock { start, size } => {
                 self.label_block_arrived(start, size);
+            }
+            // A Binding-SID label an IGP's dynamic Adjacency-SID held is
+            // the claiming policy's now: install its ILM.
+            RibRx::LabelGranted { label } => {
+                if let Some(key) = self.local_rib.sr_policy.bsid_granted(label) {
+                    let activated = super::route::sr_policy_reconcile_mpls(
+                        &self.ctx.rib,
+                        &self.nexthop_cache,
+                        &mut self.local_rib.sr_policy,
+                        key.color,
+                        key.endpoint,
+                    );
+                    if activated {
+                        let top = self.nht_install_top();
+                        super::route::sr_policy_steer_resync(&top, key.color);
+                    }
+                }
             }
             _ => {
                 //
