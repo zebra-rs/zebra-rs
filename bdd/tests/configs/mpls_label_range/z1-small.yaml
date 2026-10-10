@@ -1,0 +1,19 @@
+# z1 — the same BGP over a 100-label dynamic range: too small for BGP's
+# 1024-label block, so its request waits.
+mpls:
+  label-range:
+    dynamic:
+      start: 30000
+      end: 30099
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.1
+    neighbor:
+    - remote-address: 192.168.0.2
+      remote-as: 65001
+      enabled: true
+      afi-safi:
+      - name: vpnv4
+        enabled: true

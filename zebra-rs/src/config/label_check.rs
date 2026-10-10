@@ -134,6 +134,15 @@ impl Labels {
         labels
     }
 
+    /// The dynamic range, `[first, last]`, as applied: each bound defaults
+    /// on its own.
+    fn dynamic_range(&self) -> (u32, u32) {
+        (
+            self.dynamic.0.unwrap_or(DYNAMIC_START),
+            self.dynamic.1.unwrap_or(PLATFORM_LABELS - 1),
+        )
+    }
+
     /// Every block as the RIB applies it: the `default` block is there with
     /// its canonical ranges until it is configured, and a configured range
     /// needs both its start and its range.
@@ -207,12 +216,7 @@ pub fn violations(leaves: &[Leaf], held: &[(LabelBlock, String)]) -> BTreeSet<St
     let last_label = PLATFORM_LABELS - 1;
     let held_spans: Vec<(u32, u32)> = held.iter().filter_map(|(b, _)| span(b)).collect();
 
-    // The dynamic range, as the RIB applies it: each bound defaults on its
-    // own.
-    let dynamic = (
-        labels.dynamic.0.unwrap_or(DYNAMIC_START),
-        labels.dynamic.1.unwrap_or(last_label),
-    );
+    let dynamic = labels.dynamic_range();
     if dynamic.0 > dynamic.1 {
         out.insert(format!(
             "mpls label-range dynamic {}-{} is empty: its start is above its end",
@@ -379,6 +383,24 @@ pub fn violations(leaves: &[Leaf], held: &[(LabelBlock, String)]) -> BTreeSet<St
         }
     }
     out
+}
+
+/// The dynamic range a config sets (`mpls label-range dynamic`),
+/// `[first, last]`: each bound defaults on its own.
+pub fn dynamic_range(leaves: &[Leaf]) -> (u32, u32) {
+    Labels::from_leaves(leaves).dynamic_range()
+}
+
+/// The SRGB and SRLB of every segment-routing block a config sets, as the
+/// RIB applies them.
+pub fn sr_blocks(leaves: &[Leaf]) -> Vec<LabelBlock> {
+    Labels::from_leaves(leaves)
+        .effective_blocks()
+        .into_values()
+        .flat_map(|block| [block.global, block.local])
+        .flatten()
+        .filter(|block| block.start < block.end)
+        .collect()
 }
 
 /// The violations `candidate` has that `running` does not: those this

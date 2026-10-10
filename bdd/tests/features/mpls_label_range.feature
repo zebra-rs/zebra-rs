@@ -60,6 +60,20 @@ Feature: A configurable dynamic label range
     And show command "show mpls label range" in namespace "z1" should contain "30000-1048574    dynamic                                  1024 labels in 1 block"
     And show command "show mpls label range" in namespace "z1" should not contain "static                                   1024 labels"
 
+  Scenario: A block request the range has no room for waits until it grows
+    Given the test topology exists
+    When I apply command "delete router bgp" in namespace "z1"
+    Then show command "show mpls label table" in namespace "z1" should eventually not contain "bgp"
+    # 100 labels: BGP's 1024-label request finds no room and waits.
+    When I apply config "z1-small.yaml" to namespace "z1"
+    Then show command "show mpls label range" in namespace "z1" should eventually contain "30000-30099      dynamic"
+    When I wait 5 seconds for BGP to operate
+    Then show command "show mpls label table" in namespace "z1" should not contain "bgp"
+    # Growing the range serves the waiting request: no new request comes,
+    # BGP sends none while one is unanswered.
+    When I apply command "set mpls label-range dynamic end 39999" in namespace "z1"
+    Then show command "show mpls label table" in namespace "z1" should eventually contain "30000-31023    bgp     block           held"
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "z1"
