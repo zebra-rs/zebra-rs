@@ -12,7 +12,8 @@ Feature: A configured OSPF Adjacency-SID takes its label from a dynamic holder
   `adjacency-sid absolute 15000` on the same link: IS-IS is told to let
   15000 go, takes another label, and once its forwarding entry at 15000
   is withdrawn, OSPFv2 advertises and installs 15000. In `show mpls ilm`
-  an IS-IS entry reads `i 115` and an OSPF one `O 110`.
+  an IS-IS entry reads `i 115` and an OSPF one `O 110`; `show mpls label
+  table` and `show mpls label range` show who holds each SRLB label.
 
   Test Topology:
   ```
@@ -32,6 +33,7 @@ Feature: A configured OSPF Adjacency-SID takes its label from a dynamic holder
     And I apply config "r2.yaml" to namespace "r2"
     Then show command "show isis neighbor" in namespace "r1" should eventually contain "r2"
     And show command "show mpls ilm" in namespace "r1" should eventually contain "i 115  15000"
+    And show command "show mpls label table" in namespace "r1" should contain "15000          isis    local           held"
 
   Scenario: OSPFv2's configured Adjacency-SID moves IS-IS off 15000
     Given the test topology exists
@@ -42,6 +44,16 @@ Feature: A configured OSPF Adjacency-SID takes its label from a dynamic holder
     # IS-IS still has an Adjacency-SID, on another label.
     And show command "show mpls ilm" in namespace "r1" should contain "i 115  1500"
     And command "ip -f mpls route show" in namespace "r1" should eventually contain "15000"
+    # The label table names the claim and IS-IS's label beside it. OSPFv2
+    # still holds a dynamic label for the adjacency too, its fallback should
+    # the configured one stop being advertised; it is neither advertised nor
+    # installed. The range counts all three.
+    And show command "show mpls label table" in namespace "r1" should contain "15000          ospf    configured SID  claimed"
+    And show command "show mpls label table" in namespace "r1" should contain "isis    local           held"
+    And show command "show mpls label table" in namespace "r1" should contain "ospf    local           held"
+    And show command "show mpls label table label 15000" in namespace "r1" should contain "Label 15000: SRLB of segment-routing block default"
+    And show command "show mpls label table label 15000" in namespace "r1" should contain "15000          ospf    configured SID  claimed"
+    And show command "show mpls label range" in namespace "r1" should contain "15000-15999      SRLB of segment-routing block default    3 labels"
 
   Scenario: Dropping the configuration gives 15000 back
     Given the test topology exists
@@ -50,6 +62,8 @@ Feature: A configured OSPF Adjacency-SID takes its label from a dynamic holder
     # OSPFv2 falls back to a dynamic label.
     And show command "show mpls ilm" in namespace "r1" should eventually contain "O 110  1500"
     And show command "show mpls ilm" in namespace "r1" should contain "i 115  1500"
+    And show command "show mpls label table" in namespace "r1" should eventually not contain "configured SID"
+    And show command "show mpls label table" in namespace "r1" should contain "ospf    local           held"
 
   Scenario: Teardown
     Given the test topology exists

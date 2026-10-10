@@ -581,6 +581,16 @@ phase 6c, which makes it configurable.
   `show mpls label range`) and `show mpls label table [label <n>]`
   (label or chunk, owner, kind, state).
 
+  Phase 6b implements both (`rib::label_show`, reading
+  `LabelSpace::entries`). The table lists allocations only: label blocks,
+  and IGP local labels with their state (held, claimed, releasing,
+  draining, and a claim waiting on them). Static bindings and Prefix-SID
+  labels are configuration and stay in `show mpls ilm`; `label <n>` names
+  the region a label is in, so it answers for those too. The range lists
+  the reserved labels, each block's SRGB and SRLB, a retired SRGB still
+  held (§6.1), the dynamic range, and static as whatever those leave,
+  with how much of each is allocated.
+
 ## 9. Compatibility
 
 | Change | Visible effect | BDD to update |

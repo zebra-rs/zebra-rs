@@ -211,6 +211,68 @@ JSON: `{ "entries": [ { "protocol", "distance", "selected",
 "local_label", "outgoing_label", "prefix_or_id", "outgoing_interface",
 "next_hop" } ] }`.
 
+### `show mpls label range`
+
+The regions of the node's MPLS label space, in order, and how many labels
+are allocated in each. The reserved labels come first. Then each
+`segment-routing block`'s SRGB and SRLB, and an SRGB still held while
+Prefix-SID labels move off it after a change. The dynamic range, where
+label blocks are handed out, starts at 24000. Static is whatever those
+leave.
+
+```
+r1> show mpls label range
+Range            Region                                   Allocated
+0-15             reserved (RFC 3032, RFC 7274)
+16-14999         static
+15000-15999      SRLB of segment-routing block default    3 labels
+16000-23999      SRGB of segment-routing block default
+24000-1048574    dynamic                                  1024 labels in 1 block
+```
+
+Allocated counts what the label space hands out: label blocks (BGP's)
+and IGP local labels. Static bindings and Prefix-SID labels are
+configuration, not allocations; `show mpls ilm` shows them.
+
+JSON: `{ "regions": [ { "first", "last", "region", "kind", "block",
+"allocated_labels", "allocated_blocks" } ] }`, where `kind` is
+`reserved`, `static`, `srgb`, `srlb`, `retired-srgb` or `dynamic`.
+
+### `show mpls label table [label <n>]`
+
+Everything the label space has handed out, by first label, with its
+owner, kind and state:
+
+- **Kind:** `block` is a label block for a protocol that allocates its
+  own labels. `local` is an IGP instance's label for a dynamic SID (an
+  Adjacency-SID, a Mirror Context label). `configured SID` is a label
+  claimed for a configured absolute Adjacency-SID.
+- **State:** `held` and `claimed` are in use. A label given back is
+  `releasing` until the RIB is past its owner's earlier messages, then
+  `draining` until the owner's ILM entry at it is withdrawn, and only
+  then free. `claimed by <protocol>` means a configured SID is waiting
+  for the label.
+
+```
+r1> show mpls label table
+Label          Owner   Kind            State
+15000          ospf    configured SID  claimed
+15001          isis    local           held, claimed by ospfv3
+15002          ospf    local           held
+24000-25023    bgp     block           held
+```
+
+`label <n>` shows one label: the region it is in, and what holds it.
+
+```
+r1> show mpls label table label 16005
+Label 16005: SRGB of segment-routing block default
+  not allocated (Prefix-SID labels: see show mpls ilm)
+```
+
+JSON: `{ "entries": [ { "first", "last", "owner", "kind", "state",
+"claimed_by" } ] }`; with `label <n>`, `{ "label", "regions", "entries" }`.
+
 ### `show l2 mac table`
 
 The EVPN MAC table — one entry per (VNI, MAC), with the overlay
