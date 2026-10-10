@@ -727,7 +727,13 @@ label with precedence over dynamic ones (§5.1):
   pool holds the claim now (`LocalLabelPool::holds_claim`); the new
   claim's own grant follows.
 - While a claim waits, the configured SID is not advertised, and the
-  adjacency keeps its dynamic label.
+  adjacency keeps its dynamic label. A point-to-point adjacency holds that
+  label only while its configured SID is not advertised (a claim waiting
+  or refused, the label configured on another link too, none configured):
+  held beside an advertised configured SID, it would be neither advertised
+  nor installed. It goes back once the configured SID is advertised, and
+  the adjacency draws one again if that stops. A LAN adjacency always
+  holds one, its LAN Adj-SID.
 - `unclaim`, a dropped pool, or an SRLB change that leaves the label
   outside gives a claimed label back through `Releasing`, like any other.
 - Commit validation (phase 6a) refuses both of the following, but a
