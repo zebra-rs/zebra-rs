@@ -571,7 +571,18 @@ handed out at that moment, but refuse a commit only for a violation the
 running config does not already have. A violation an earlier release let
 in therefore does not block every later commit, while a change that
 creates one, a block moved over an untouched static binding say, is still
-refused. The startup config is checked the same way but only warned
+refused.
+
+A commit that passes puts its dynamic range and segment-routing blocks
+into the `LabelSpace` itself, under the same lock as the checks and before
+anything is dispatched. The RIB applies them only after the commit, and a
+block request reaches it on another channel (BGP sends one as it starts),
+so a request served first would otherwise come from the old range, or land
+on a new SR block, over labels the checks had just cleared. The SR blocks
+are added to the reserved set; the RIB then replaces the set as it applies
+the blocks, with any SRGB it still holds for a move (§6.1).
+
+The startup config is checked the same way but only warned
 about: refusing it would leave the router unconfigured, and a config an
 earlier release accepted can fail a check added since. The IGPs keep their
 interim handling for that case (§10, phase 3b). The Binding-SID checks
@@ -585,10 +596,10 @@ phase 6c, which made it configurable.
   SRLB 15000/1000 (was 100).
 - New: `mpls label-range dynamic {start, end}`, default 24000 /
   platform_labels − 1. Phase 6c implements it: each bound defaults on its
-  own, and the RIB applies the two together at the end of a commit, so a
-  commit moving both never passes through an empty range. A change applies
-  to blocks handed out from then on (`LabelSpace::set_dynamic`, which
-  reports the blocks left outside; the RIB logs them).
+  own, and the commit applies the two together to the label space (§7), so
+  a commit moving both never passes through an empty range. A change
+  applies to blocks handed out from then on (`LabelSpace::set_dynamic`,
+  which reports the blocks left outside; they are logged).
 - New: `show mpls label range` (regions and their owners, like IOS XR's
   `show mpls label range`) and `show mpls label table [label <n>]`
   (label or chunk, owner, kind, state).

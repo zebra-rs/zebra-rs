@@ -791,13 +791,18 @@ impl ConfigManager {
         }
 
         // MPLS labels: a violation this commit would introduce, against
-        // the label blocks handed out now (`config::label_check`).
-        let held = self.label_space.lock().held_blocks();
-        let violations = label_check::new_violations(
-            &self.label_leaves(&candidate),
-            &self.label_leaves(&running),
-            &held,
-        );
+        // the label blocks handed out now (`config::label_check`). The
+        // label space stays locked from that check until the commit's own
+        // dynamic range and segment-routing blocks are in it, so no block
+        // is handed out in between. The RIB would apply them only after
+        // the commit, while a block request (BGP sends one as it starts)
+        // reaches it on another channel, and could be served first: from
+        // the old range, or over a new SR block.
+        let candidate_leaves = self.label_leaves(&candidate);
+        let running_leaves = self.label_leaves(&running);
+        let mut space = self.label_space.lock();
+        let violations =
+            label_check::new_violations(&candidate_leaves, &running_leaves, &space.held_blocks());
         if !violations.is_empty() {
             if !startup {
                 return Err(anyhow::anyhow!(violations.join("\n")));
@@ -806,6 +811,28 @@ impl ConfigManager {
                 tracing::warn!("startup config: {violation}");
             }
         }
+        space.add_reserved(label_check::sr_blocks(&candidate_leaves));
+        let (first, last) = label_check::dynamic_range(&candidate_leaves);
+        if first > last {
+            // Only a startup config gets here: a commit refuses it.
+            tracing::error!(
+                first,
+                last,
+                "mpls: dynamic label range is empty; not applied"
+            );
+        } else if space.dynamic_range() != (first, last) {
+            // A block already outside the new range stays until released.
+            for (block, proto) in space.set_dynamic(first, last) {
+                tracing::info!(
+                    start = block.start,
+                    last = block.end - 1,
+                    proto,
+                    "mpls: label block outside the dynamic range stays until released"
+                );
+            }
+            tracing::info!(first, last, "mpls: dynamic label range");
+        }
+        drop(space);
 
         let mut ospf = false;
         let mut ospfv3 = false;
@@ -3014,6 +3041,79 @@ mod label_commit_tests {
             err.to_string(),
             "static MPLS label 35000 is in the dynamic label range (30000-99999)"
         );
+    }
+
+    /// The commit puts its dynamic range in the label space itself, before
+    /// it dispatches anything. Left to the RIB at the end of the commit, a
+    /// block request reaching the RIB first (BGP sends one as it starts)
+    /// was served from the old range: here over a static binding the
+    /// commit had just checked against the new one. No RIB runs in this
+    /// test, so a block handed out now shows what the commit applied.
+    #[test]
+    fn a_dynamic_range_takes_effect_with_its_commit() {
+        let labels = SharedLabelSpace::default();
+        let cm = manager(&temp_path("range-now"), labels.clone());
+        edit(&cm, "set mpls label-range dynamic start 30000");
+        edit(&cm, "set router static mpls label 24000 nexthop 10.0.0.2");
+        cm.commit_config().expect("24000 is static now");
+        let block = labels.lock().alloc("bgp", 1024).expect("a block");
+        assert_eq!(block.start, 30000, "not over the static binding at 24000");
+
+        // A refused commit applies nothing.
+        edit(&cm, "set mpls label-range dynamic start 40000");
+        edit(&cm, "set router static mpls label 45000 nexthop 10.0.0.2");
+        cm.commit_config().expect_err("45000 is dynamic");
+        assert_eq!(labels.lock().dynamic_range(), (30000, 1048574));
+    }
+
+    /// Likewise a commit reserves its segment-routing blocks: a block
+    /// request served before the RIB applies a new SR block must not land
+    /// on it.
+    #[test]
+    fn a_new_sr_block_is_reserved_with_its_commit() {
+        let labels = SharedLabelSpace::default();
+        let cm = manager(&temp_path("block-now"), labels.clone());
+        for line in [
+            "set segment-routing block core global start 24000",
+            "set segment-routing block core global range 100",
+            "set segment-routing block core local start 30000",
+            "set segment-routing block core local range 100",
+        ] {
+            edit(&cm, line);
+        }
+        cm.commit_config().expect("free labels");
+        let block = labels.lock().alloc("bgp", 1024).expect("a block");
+        assert_eq!(block.start, 24100, "stepped around core's SRGB");
+        let block = labels.lock().alloc("bgp", 10000).expect("a block");
+        assert_eq!(block.start, 30100, "stepped around core's SRLB");
+    }
+
+    /// The startup config's range is applied although its violations are
+    /// only warned about, and an empty one, which only a startup config
+    /// can carry, is not.
+    #[test]
+    fn a_startup_range_is_applied_unless_empty() {
+        let path = temp_path("startup-range");
+        std::fs::write(
+            &path,
+            "set mpls label-range dynamic start 30000\nset router static mpls label 35000 nexthop 10.0.0.2\n",
+        )
+        .expect("temp config written");
+        let labels = SharedLabelSpace::default();
+        let cm = manager(&path, labels.clone());
+        cm.load_config();
+        assert_eq!(labels.lock().dynamic_range(), (30000, 1048574));
+
+        std::fs::write(
+            &path,
+            "set mpls label-range dynamic start 40000\nset mpls label-range dynamic end 30000\n",
+        )
+        .expect("temp config written");
+        let labels = SharedLabelSpace::default();
+        let cm = manager(&path, labels.clone());
+        cm.load_config();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(labels.lock().dynamic_range(), (24000, 1048574));
     }
 
     /// A block is checked against the label blocks handed out at the

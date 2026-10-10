@@ -1373,9 +1373,6 @@ pub struct Rib {
     /// Fires [`Message::ReserveSrBlocks`] when the first retired SRGB is
     /// due.
     pub retired_srgb_timer: Option<Timer>,
-    /// `mpls label-range dynamic {start, end}` as configured, applied to
-    /// the label space at the end of each commit.
-    pub dynamic_range_config: (Option<u32>, Option<u32>),
 
     /// Debounce interval (seconds) before a queued FIB modification triggers
     /// nexthop resolution. Configurable so an operator can tune for their
@@ -1513,7 +1510,6 @@ impl Rib {
             rib_sync_timer: None,
             reserved_srgbs: Vec::new(),
             retired_srgbs: Vec::new(),
-            dynamic_range_config: (None, None),
             retired_srgb_timer: None,
             rib_sync_interval: DEFAULT_RIB_SYNC_INTERVAL_SEC,
             sr0_owned: false,
@@ -1612,41 +1608,6 @@ impl Rib {
     /// hold (`spf::ilm_hold`) only once the block update and SPF reach it,
     /// so its old labels outlive a timer started here; the withdrawal is
     /// what says they are gone (`ilm_del` calls back in for it).
-    /// Apply `mpls label-range dynamic`, start and end together, so a
-    /// commit moving both never passes through an empty range. Blocks
-    /// already handed out outside the new range stay until released.
-    pub(super) fn apply_dynamic_range(&mut self) {
-        use super::label_space::{DYNAMIC_START, PLATFORM_LABELS};
-        let (start, end) = self.dynamic_range_config;
-        let (first, last) = (
-            start.unwrap_or(DYNAMIC_START),
-            end.unwrap_or(PLATFORM_LABELS - 1),
-        );
-        if first > last {
-            tracing::error!(
-                first,
-                last,
-                "mpls: dynamic label range is empty; not applied"
-            );
-            return;
-        }
-        let mut space = self.label_space.lock();
-        if space.dynamic_range() == (first, last) {
-            return;
-        }
-        let outside = space.set_dynamic(first, last);
-        drop(space);
-        tracing::info!(first, last, "mpls: dynamic label range");
-        for (block, proto) in outside {
-            tracing::info!(
-                start = block.start,
-                last = block.end - 1,
-                proto,
-                "mpls: label block outside the dynamic range stays until released"
-            );
-        }
-    }
-
     pub(super) fn reserve_sr_blocks(&mut self) {
         let now = tokio::time::Instant::now();
         let srgbs: Vec<LabelBlock> = self
@@ -5484,14 +5445,6 @@ impl Rib {
                 } else if path.as_str() == "/mpls/ttl/propagate" {
                     #[cfg(target_os = "linux")]
                     let _ = self.mpls_ttl_propagate_config_exec(args, msg.op);
-                } else if let Some(leaf) = path.as_str().strip_prefix("/mpls/label-range/dynamic/")
-                {
-                    let value = if msg.op.is_set() { args.u32() } else { None };
-                    match leaf {
-                        "start" => self.dynamic_range_config.0 = value,
-                        "end" => self.dynamic_range_config.1 = value,
-                        _ => {}
-                    }
                 } else if path.as_str() == "/mpls/ttl/propagate-local" {
                     #[cfg(target_os = "linux")]
                     let _ = self.mpls_ttl_propagate_local_config_exec(args, msg.op);
@@ -5568,7 +5521,6 @@ impl Rib {
                 self.static_vrf_v4.commit(&self.tx);
                 self.static_vrf_v6.commit(&self.tx);
                 self.mpls_config.commit(self.tx.clone());
-                self.apply_dynamic_range();
                 self.block_config.commit(self.tx.clone());
                 self.locator_config.commit(self.tx.clone());
                 self.repl_seg_config.commit(self.tx.clone());
@@ -7683,36 +7635,5 @@ mod ilm_owner_tests {
         drop(rx);
         rib.subscribe(id, tx, "ospf".to_string(), 0, false);
         assert_eq!(other.allocate(), Some(15000));
-    }
-}
-
-#[cfg(test)]
-mod dynamic_range_tests {
-    use super::*;
-
-    /// The configured dynamic range reaches the label space at the end of
-    /// a commit, each bound defaulting on its own; an empty one (only a
-    /// startup config can carry it) leaves the range as it was.
-    #[tokio::test]
-    async fn the_configured_range_is_applied_at_commit_end() {
-        let mut rib = Rib::new(false).unwrap();
-        let range = |rib: &Rib| rib.label_space.lock().dynamic_range();
-        assert_eq!(range(&rib), (24000, 1048574));
-
-        rib.dynamic_range_config = (Some(30000), None);
-        rib.apply_dynamic_range();
-        assert_eq!(range(&rib), (30000, 1048574));
-
-        rib.dynamic_range_config = (None, Some(99999));
-        rib.apply_dynamic_range();
-        assert_eq!(range(&rib), (24000, 99999));
-
-        rib.dynamic_range_config = (Some(40000), Some(30000));
-        rib.apply_dynamic_range();
-        assert_eq!(range(&rib), (24000, 99999), "empty: not applied");
-
-        rib.dynamic_range_config = (None, None);
-        rib.apply_dynamic_range();
-        assert_eq!(range(&rib), (24000, 1048574));
     }
 }
