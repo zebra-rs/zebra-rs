@@ -364,7 +364,11 @@ ownership is what an operator wants to see in `show mpls label table`.
   (`RibRx::LocalLabelsFreed`, as for a pool that found no free label), and
   it claims again; OSPF's refused Adjacency-SID claims get the same. A Binding-SID ILM
   that goes re-derives the steering of colour-matched routes, so none keeps
-  pushing a label nothing forwards.
+  pushing a label nothing forwards, and so does any change of active path
+  or of its segment lists (`SrPolicyFibDelta::steer_changed`): a route
+  steered by the inline segment list follows the path that replaced one
+  whose Binding-SID became unavailable, with no Binding-SID install
+  changing.
 - **Moving a dynamic holder.** The steps run in this order, so a label never
   points at two adjacencies:
   1. The label becomes `Revoking { from, to }`, and no dynamic allocation

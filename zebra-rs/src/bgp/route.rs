@@ -12740,7 +12740,9 @@ fn apply_srpolicy_fib(delta: super::sr_policy::SrPolicyFibDelta, color: u32, bgp
     if let Some(addr) = delta.remove {
         let _ = bgp.rib_client.send(rib::Message::SidDel { addr });
     }
-    let activated = delta.activated;
+    // A new SRv6 Binding SID, or a new active path or segment list: the
+    // colour-matched routes re-derive their steering.
+    let activated = delta.activated || delta.steer_changed;
     if let Some(install) = delta.install {
         let sid = rib::Sid {
             addr: install.bsid,

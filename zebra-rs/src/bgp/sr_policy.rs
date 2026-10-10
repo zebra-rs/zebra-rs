@@ -201,11 +201,25 @@ pub struct SrPolicyFibDelta {
     /// The SRv6 Binding-SID *address* just appeared or changed, so a
     /// colour-matched service route received before the policy must
     /// re-derive its H.Encap steer onto it. Unlike the SR-MPLS ILM (see
-    /// [`MplsIlmAction::activated`]) the End.B6 SID installs immediately,
-    /// but the same route-before-policy gap applies. A same-address install
-    /// (only the segment list changed) leaves this `false` — the steer
-    /// target is unchanged.
+    /// [`MplsIlmAction::steer_changed`]) the End.B6 SID installs
+    /// immediately, but the same route-before-policy gap applies. A
+    /// same-address install (only the segment list changed) leaves this
+    /// `false` — the steer target is unchanged.
     pub activated: bool,
+    /// The active candidate path, or its segment lists, changed: a path
+    /// selected or swapped (one re-selected because its Binding-SID became
+    /// unavailable among them), or the policy withdrawn. Routes steered by
+    /// the inline segment list must re-derive it, whether or not a
+    /// Binding-SID install changed: a policy steering inline may have none.
+    pub steer_changed: bool,
+}
+
+/// What inline steering through a policy depends on: its active path and
+/// that path's segment lists.
+fn steering(policy: &SrPolicy) -> Option<(CandidatePathKey, Vec<SegmentList>)> {
+    policy
+        .active_cp()
+        .map(|cp| (cp.key.clone(), cp.segment_lists.clone()))
 }
 
 /// An SR-MPLS Binding SID install: the incoming BSID label and the
@@ -377,8 +391,9 @@ impl SrPolicyDb {
     /// return the resulting FIB delta.
     pub fn insert(&mut self, key: SrPolicyKey, cp: CandidatePath) -> SrPolicyFibDelta {
         let policy = self.policies.entry(key.clone()).or_default();
+        let before = steering(policy);
         policy.candidates.insert(cp.key.clone(), cp);
-        let delta = self.select(&key);
+        let delta = self.select(&key, before);
         self.reselect_unavailable(Some(&key));
         delta
     }
@@ -389,8 +404,13 @@ impl SrPolicyDb {
     /// is not available invalidates a path with the Specified-BSID-only
     /// flag, and selection runs again without it (§6.2.3); without the
     /// flag the path stays active with no Binding-SID (§6.2: alert). A
-    /// label the policy held and no longer wants goes back.
-    fn select(&mut self, key: &SrPolicyKey) -> SrPolicyFibDelta {
+    /// label the policy held and no longer wants goes back. `before` is
+    /// what inline steering depended on before the change that led here.
+    fn select(
+        &mut self,
+        key: &SrPolicyKey,
+        before: Option<(CandidatePathKey, Vec<SegmentList>)>,
+    ) -> SrPolicyFibDelta {
         let Self {
             policies,
             bsid_pool,
@@ -447,7 +467,16 @@ impl SrPolicyDb {
         policy.active = active;
         policy.bsid = bsid;
         policy.bsid_excluded = excluded;
-        policy.reconcile_fib()
+        let mut delta = policy.reconcile_fib();
+        delta.steer_changed = steering(policy) != before;
+        delta
+    }
+
+    /// Re-run selection for `key` with nothing about it changed but what
+    /// it depends on (a Binding-SID's availability).
+    fn reselect(&mut self, key: &SrPolicyKey) -> SrPolicyFibDelta {
+        let before = self.policies.get(key).and_then(steering);
+        self.select(key, before)
     }
 
     /// Re-run selection for every policy whose Binding-SID is not
@@ -465,7 +494,7 @@ impl SrPolicyDb {
             .map(|(k, _)| k.clone())
             .collect();
         for key in keys {
-            let delta = self.select(&key);
+            let delta = self.reselect(&key);
             self.reselected.push((key, delta));
         }
     }
@@ -537,7 +566,7 @@ impl SrPolicyDb {
             .map(|(k, _)| k.clone())
             .collect();
         for key in keys {
-            let delta = self.select(&key);
+            let delta = self.reselect(&key);
             self.reselected.push((key, delta));
         }
     }
@@ -581,6 +610,7 @@ impl SrPolicyDb {
         let Some(policy) = self.policies.get_mut(&key) else {
             return (None, SrPolicyFibDelta::default());
         };
+        let before = steering(policy);
         // Every candidate this peer holds for the NLRI goes: the key also
         // carries the originator, so a re-announcement under a changed
         // ORIGINATOR_ID left a second entry that a single removal would
@@ -619,10 +649,11 @@ impl SrPolicyDb {
                     install: None,
                     mpls_remove,
                     activated: false,
+                    steer_changed: before.is_some(),
                 },
             )
         } else {
-            let delta = self.select(&key);
+            let delta = self.select(&key, before);
             self.reselect_unavailable(Some(&key));
             (removed, delta)
         }
@@ -1531,7 +1562,15 @@ mod tests {
                 label: 16001,
             }],
         }];
-        assert_eq!(db.insert(key, c), SrPolicyFibDelta::default());
+        // The path becomes active, which is a steering change, but there is
+        // nothing to install.
+        assert_eq!(
+            db.insert(key, c),
+            SrPolicyFibDelta {
+                steer_changed: true,
+                ..Default::default()
+            }
+        );
     }
 
     /// A database whose Binding-SIDs are claimed from SRLB 15000-15999.
@@ -2083,6 +2122,11 @@ mod bsid_claim_tests {
     /// A valid SR-MPLS candidate path with Binding-SID `bsid`, and the
     /// Specified-BSID-only flag when `s`.
     fn path(disc: u32, pref: u32, bsid: u32, s: bool) -> CandidatePath {
+        path_seg(disc, pref, bsid, s, 16001)
+    }
+
+    /// As [`path`], with the one-label segment list `seg`.
+    fn path_seg(disc: u32, pref: u32, bsid: u32, s: bool, seg: u32) -> CandidatePath {
         let mut bsid = BindingSid::new(BindingSidValue::MplsLabel(bsid));
         if s {
             bsid.flags |= 0x80;
@@ -2104,7 +2148,7 @@ mod bsid_claim_tests {
                 weight: None,
                 segments: vec![Segment::TypeA {
                     flags: 0,
-                    label: 16001,
+                    label: seg,
                 }],
             }],
             policy_name: None,
@@ -2363,6 +2407,71 @@ mod bsid_claim_tests {
             vec![1]
         );
         assert_eq!(installed(&mut db, 1), Some(15100));
+    }
+
+    /// A change of active path, or of its segment lists, is a steering
+    /// change whatever happens to the Binding-SID install: routes steered
+    /// by the inline segment list re-derive it. Here a Specified-BSID-only
+    /// path waiting on its label steers inline over 16001; an SRLB move
+    /// invalidates it, and the fallback's 16002 must reach those routes
+    /// though no Binding-SID ILM is installed or removed.
+    #[tokio::test]
+    async fn an_active_path_change_is_a_steering_change() {
+        let space = SharedLabelSpace::default();
+        let (otx, _orx) = mpsc::unbounded_channel();
+        let igp = RibClient::new(otx, ProtoId::from_raw(99));
+        let mut holder = space.pool_for(15000, 16999, &igp);
+        assert_eq!(holder.allocate(), Some(15000));
+        assert_eq!(holder.claim(16100), Claim::Granted);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let rib = RibClient::new(tx, ProtoId::from_raw(7));
+
+        let (mut db, _r) = db_over(&space);
+        assert!(
+            db.insert(key(1), path_seg(1, 200, 15000, true, 16001))
+                .steer_changed
+        );
+        assert!(
+            !db.insert(key(1), path_seg(2, 100, 16100, false, 16002))
+                .steer_changed
+        );
+        assert_eq!(db.steer_mpls(1, EP.parse().unwrap(), 0), Some(vec![16001]));
+
+        db.set_bsid_srlb(Some((16000, 16999)), |f, l| space.pool_for(f, l, &rib));
+        assert_eq!(db.steer_mpls(1, EP.parse().unwrap(), 0), Some(vec![16002]));
+        let reselected = db.take_reselected();
+        assert_eq!(reselected.len(), 1);
+        assert!(reselected[0].1.steer_changed);
+        assert_eq!(installed(&mut db, 1), None, "16100 is held elsewhere");
+    }
+
+    /// Received paths change steering too: a better path, or the active
+    /// path's segment list replaced in place; withdrawing the policy is
+    /// one. Re-announcing the same path, or withdrawing a backup, is not.
+    #[tokio::test]
+    async fn received_paths_report_steering_changes() {
+        let space = SharedLabelSpace::default();
+        let (mut db, _rx) = db_over(&space);
+        let ep: IpAddr = EP.parse().unwrap();
+        assert!(
+            db.insert(key(1), path_seg(1, 100, 15100, false, 16001))
+                .steer_changed
+        );
+        assert!(
+            !db.insert(key(1), path_seg(1, 100, 15100, false, 16001))
+                .steer_changed
+        );
+        assert!(
+            db.insert(key(1), path_seg(1, 100, 15100, false, 16003))
+                .steer_changed
+        );
+        assert!(
+            db.insert(key(1), path_seg(2, 200, 15200, false, 16004))
+                .steer_changed
+        );
+        // Disc 1 is a backup now: withdrawing it changes nothing.
+        assert!(!db.withdraw(1, ep, 1, 1).1.steer_changed);
+        assert!(db.withdraw(1, ep, 2, 1).1.steer_changed);
     }
 
     /// A Binding-SID the policy no longer wants goes back: the path's label
