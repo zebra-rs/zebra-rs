@@ -123,6 +123,9 @@ pub enum Message {
     LocalLabelRelease {
         label: u32,
     },
+    /// An IGP instance's pool claimed a label another instance holds:
+    /// tell the holder to let it go (`LabelSpace::take_revoked`).
+    LocalLabelClaimed,
     /// IS-IS publishes a per-algorithm IPv4 route snapshot. RIB
     /// shadows it in `flex_algo_routes` and re-broadcasts via
     /// `RibRx::FlexAlgoRouteAdd`. No FIB install — per-algo IPv4
@@ -2498,7 +2501,7 @@ impl Rib {
             self.client_registry.take_deferred(proto_id);
             let freed = self.label_space.lock().free_releasing_of(&[proto_id]);
             if freed {
-                self.notify_starved();
+                self.notify_label_events();
             }
             return;
         }
@@ -2742,7 +2745,7 @@ impl Rib {
         // before the rtype gate so it covers every requester.
         self.label_space.lock().release_all(&proto);
         // Its blocks' labels may be what a local pool was missing.
-        self.notify_starved();
+        self.notify_label_events();
 
         // And its SRv6 SIDs, before the route walk below would take
         // their RIB rows out from under `sid_uninstall`. A protocol
@@ -3369,13 +3372,14 @@ impl Rib {
                 self.label_space.lock().release(&proto, start, size);
                 // The block's labels may be what a local pool was missing
                 // (an SRLB configured over it).
-                self.notify_starved();
+                self.notify_label_events();
             }
             Message::IlmAdd { label, ilm } => {
                 self.ilm_add(label, ilm).await;
             }
             // Handled by `process_inbound`, which knows the sender.
             Message::LocalLabelRelease { .. } => {}
+            Message::LocalLabelClaimed => self.notify_label_events(),
             Message::IlmDel { label, ilm } => {
                 self.ilm_del(label, ilm).await;
             }
@@ -5905,7 +5909,7 @@ impl Rib {
             if let Message::LocalLabelRelease { label } = env.msg {
                 let freed = self.label_space.lock().free_releasing(env.from, label);
                 if freed {
-                    self.notify_starved();
+                    self.notify_label_events();
                 }
                 return;
             }
@@ -5958,18 +5962,36 @@ impl Rib {
             .lock()
             .release_handled(owner, label, installed);
         if freed {
-            self.notify_starved();
+            self.notify_label_events();
         }
     }
 
-    /// Local labels were freed: tell every instance whose pool found none
-    /// since, so it can try again.
-    pub(super) fn notify_starved(&mut self) {
-        let starved = self.label_space.lock().take_starved();
-        for id in starved {
+    /// Tell instances what happened to their local labels: an instance
+    /// whose pool found none that labels were freed (`LocalLabelsFreed`), a
+    /// holder that a configured SID claimed its label (`LabelRevoked`), a
+    /// claimant that it now has the label it claimed (`LabelGranted`).
+    pub(super) fn notify_label_events(&mut self) {
+        let (starved, revoked, granted) = {
+            let mut space = self.label_space.lock();
+            (
+                space.take_starved(),
+                space.take_revoked(),
+                space.take_granted(),
+            )
+        };
+        let send = |id, msg| {
             if let Some(sub) = self.client_registry.subscriber(id) {
-                let _ = sub.rib_rx_tx.send(RibRx::LocalLabelsFreed);
+                let _ = sub.rib_rx_tx.send(msg);
             }
+        };
+        for id in starved {
+            send(id, RibRx::LocalLabelsFreed);
+        }
+        for (id, label) in revoked {
+            send(id, RibRx::LabelRevoked { label });
+        }
+        for (id, label) in granted {
+            send(id, RibRx::LabelGranted { label });
         }
     }
 }
@@ -7193,6 +7215,82 @@ mod label_space_tests {
         rib.proto_cleanup("bgp".to_string()).await;
         let mut rx = subscribe_bgp(&mut rib, 2);
         assert_eq!(request(&mut rib, &mut rx, 1024).await, Some((24000, 1024)));
+    }
+}
+
+#[cfg(test)]
+mod label_claim_tests {
+    use tokio::sync::mpsc::UnboundedReceiver;
+
+    use super::*;
+    use crate::rib::client::{ProtoId, RibClient};
+    use crate::rib::label_space::Claim;
+
+    /// A subscribed instance: its RIB channel, and what the RIB tells it.
+    fn instance(rib: &mut Rib, id: u32, proto: &str) -> (RibClient, UnboundedReceiver<RibRx>) {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let id = ProtoId::from_raw(id);
+        rib.subscribe(id, tx, proto.to_string(), 0, false);
+        while rx.try_recv().is_ok() {}
+        (RibClient::new(rib.inbound_tx.clone(), id), rx)
+    }
+
+    /// Handle every envelope the instances have sent.
+    async fn drain(rib: &mut Rib) {
+        while let Ok(env) = rib.inbound_rx.try_recv() {
+            rib.process_inbound(env).await;
+        }
+    }
+
+    /// OSPF's configured Adj-SID claims the label an IS-IS adjacency
+    /// holds: IS-IS is told to let it go, and OSPF that it has it, once
+    /// IS-IS's entry at the label is gone.
+    #[tokio::test]
+    async fn a_claim_moves_a_label_between_instances() {
+        let mut rib = Rib::new(false).expect("rib");
+        let (isis, mut isis_rx) = instance(&mut rib, 1, "isis");
+        let (ospf, mut ospf_rx) = instance(&mut rib, 2, "ospf");
+        let mut holder = rib.label_space.pool_for(15000, 15999, &isis);
+        assert_eq!(holder.allocate(), Some(15000));
+        let entry = IlmEntry {
+            ilm_type: IlmType::Adjacency(0),
+            nexthop: Nexthop::Uni(NexthopUni {
+                addr: "10.0.0.2".parse().unwrap(),
+                ..Default::default()
+            }),
+            ..IlmEntry::new(RibType::Isis)
+        };
+        let _ = isis.send(Message::IlmAdd {
+            label: 15000,
+            ilm: entry.clone(),
+        });
+        drain(&mut rib).await;
+
+        let mut claimant = rib.label_space.pool_for(15000, 15999, &ospf);
+        assert_eq!(claimant.claim(15000), Claim::Pending);
+        drain(&mut rib).await;
+        assert!(matches!(
+            isis_rx.try_recv(),
+            Ok(RibRx::LabelRevoked { label: 15000 })
+        ));
+
+        // IS-IS lets it go: its release, then the withdrawal of its entry.
+        holder.release(15000);
+        drain(&mut rib).await;
+        assert!(
+            ospf_rx.try_recv().is_err(),
+            "IS-IS's entry is still installed"
+        );
+        let _ = isis.send(Message::IlmDel {
+            label: 15000,
+            ilm: entry,
+        });
+        drain(&mut rib).await;
+        assert!(matches!(
+            ospf_rx.try_recv(),
+            Ok(RibRx::LabelGranted { label: 15000 })
+        ));
+        assert_eq!(holder.allocate(), Some(15001), "15000 is OSPF's");
     }
 }
 

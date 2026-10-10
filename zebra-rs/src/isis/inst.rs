@@ -1856,6 +1856,19 @@ impl Isis {
             // Labels were freed after the pool found none: give the
             // adjacencies and Mirror Context entries without one a label.
             RibRx::LocalLabelsFreed => self.refresh_local_labels(),
+            // A configured SID (OSPF's) claimed a label this instance holds
+            // for an Adjacency-SID or a Mirror Context: draw another for it,
+            // and let this one go.
+            RibRx::LabelRevoked { label } => {
+                tracing::info!(label, "isis: local label given up to a configured SID");
+                if let Some(pool) = self.local_pool.as_mut() {
+                    pool.release(label);
+                }
+                self.forget_local_labels(Some(&[label]));
+                self.refresh_local_labels();
+            }
+            // IS-IS claims no label for a configured SID.
+            RibRx::LabelGranted { .. } => {}
             RibRx::LinkAdd(link) => {
                 self.link_add(link);
             }
@@ -5708,6 +5721,73 @@ mod flex_algo_participation_tests {
         assert!(isis.flex_algo_participating.is_empty());
         assert!(isis.sr_flex_algo_end_sid.is_empty());
         assert!(isis.sr_flex_algo_locators_active.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod label_revoke_tests {
+    use tokio::sync::mpsc;
+
+    use super::commit_and_microloop_gate_tests::fresh_isis;
+    use super::*;
+    use crate::isis::link::{IsisLink, LinkConfig, LinkState, LinkTimer, NetworkType};
+
+    const A: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 2);
+    const PEER: IsisSysId = IsisSysId {
+        id: [0, 0, 0, 0, 0, 9],
+    };
+
+    fn adj_label(isis: &Isis) -> Option<u32> {
+        isis.links
+            .get(&7)?
+            .state
+            .nbrs
+            .get(&Level::L2)
+            .get(&PEER)?
+            .addr4
+            .get(&A)?
+            .label
+    }
+
+    /// A configured SID (OSPF's) claimed the label an adjacency holds: the
+    /// adjacency gets another, and the label goes back through the RIB.
+    #[tokio::test]
+    async fn a_revoked_label_moves_the_adjacency() {
+        let mut isis = fresh_isis();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        isis.ctx.rib = rib::client::RibClient::new(tx, rib::client::ProtoId::from_raw(5));
+        let (ptx, prx) = mpsc::unbounded_channel();
+        Box::leak(Box::new(prx));
+        let mut link = IsisLink {
+            ifindex: 7,
+            ptx,
+            read_task: tokio::spawn(async {}),
+            flags: netlink_packet_route::link::LinkFlags::empty(),
+            circuit_id: 0,
+            config: LinkConfig::default(),
+            state: LinkState::default(),
+            timer: LinkTimer::default(),
+        };
+        let mut nbr =
+            crate::isis::neigh::Neighbor::new(isis.tx.clone(), 7, NetworkType::Lan, PEER, None);
+        nbr.addr4
+            .insert(A, crate::isis::packet::NeighborAddr4::new(A, None));
+        link.state.nbrs.get_mut(&Level::L2).insert(PEER, nbr);
+        isis.links.insert(7, link);
+        isis.sr_block = Some(Block::default_block());
+        isis.config.sr_mpls_enabled = true;
+        isis.reconcile_local_pool();
+        assert_eq!(adj_label(&isis), Some(15000));
+
+        isis.process_rib_msg(RibRx::LabelRevoked { label: 15000 });
+        assert_eq!(adj_label(&isis), Some(15001));
+        let released: Vec<u32> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|env| match env.msg {
+                rib::Message::LocalLabelRelease { label } => Some(label),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(released, vec![15000]);
     }
 }
 

@@ -1933,9 +1933,9 @@ fn config_ospfv3_interface_adjacency_sid_index(
     } else {
         link.config.adjacency_sid = None;
     }
-    let ifindex = link.index;
-
-    ospf.e_router_v3_lsa_originate(ifindex);
+    // Claiming (or dropping) a configured label can move another
+    // link's dynamic Adj-SID: reconcile and re-originate them all.
+    sr_mpls_refresh_v3(ospf);
 
     Some(())
 }
@@ -1955,9 +1955,9 @@ fn config_ospfv3_interface_adjacency_sid_absolute(
     } else {
         link.config.adjacency_sid = None;
     }
-    let ifindex = link.index;
-
-    ospf.e_router_v3_lsa_originate(ifindex);
+    // Claiming (or dropping) a configured label can move another
+    // link's dynamic Adj-SID: reconcile and re-originate them all.
+    sr_mpls_refresh_v3(ospf);
 
     Some(())
 }

@@ -17,6 +17,15 @@
 //! protocol task allocates a label inline without a round trip to the RIB.
 //! One structure means a block is never handed out over a label an IGP holds,
 //! and the RIB sees every label in use.
+//!
+//! Phase 3b: a configured local SID (an absolute Adjacency-SID) claims its
+//! label through its instance's pool, and takes precedence over a dynamic
+//! holder (§5.1). A free label is the claimant's at once; one another
+//! instance holds dynamically, or that is on its way back, is the
+//! claimant's once freed: its holder is told to let it go
+//! ([`LabelSpace::take_revoked`]), and the claimant is told when it has it
+//! ([`LabelSpace::take_granted`]). One another configured SID holds is
+//! refused.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::{Range, RangeInclusive};
@@ -41,6 +50,8 @@ pub const DYNAMIC_START: u32 = 24000;
 enum Local {
     /// Held by a pool.
     Held(u64),
+    /// Claimed by a pool for a configured SID.
+    Claimed(u64),
     /// Given back by its owner's pool; the RIB has not handled the release
     /// yet, which travels behind the owner's earlier ILM messages. No one
     /// may take it, and none of those earlier messages frees it: a
@@ -77,8 +88,32 @@ pub struct LabelSpace {
     /// Owners whose pool found no free label: told when labels are freed
     /// (`take_starved`), so they can try again.
     starved: BTreeSet<ProtoId>,
+    /// The owner of each pool that has one.
+    pools: BTreeMap<u64, ProtoId>,
+    /// Claims waiting for their label to be freed, by the claiming pool.
+    claims: BTreeMap<u32, u64>,
+    /// Holders to tell to let a claimed label go (`take_revoked`).
+    revoked: Vec<(ProtoId, u32)>,
+    /// Claimants to tell they have their label (`take_granted`).
+    granted: Vec<(ProtoId, u32)>,
     /// The next pool's id.
     next_pool: u64,
+}
+
+/// The outcome of a pool's claim on a label for a configured SID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Claim {
+    /// The claimant has the label. If one of its own dynamic SIDs had it,
+    /// that one needs another label.
+    Granted,
+    /// Another instance holds the label dynamically, or it is on its way
+    /// back: the claimant gets it once it is freed.
+    Pending,
+    /// Another configured SID has the label, or a handed-out block covers
+    /// it.
+    Refused,
+    /// The label is outside the pool's range, the SRLB: not claimed.
+    Outside,
 }
 
 impl Default for LabelSpace {
@@ -95,6 +130,10 @@ impl LabelSpace {
             reserved: Vec::new(),
             local: BTreeMap::new(),
             starved: BTreeSet::new(),
+            pools: BTreeMap::new(),
+            claims: BTreeMap::new(),
+            revoked: Vec::new(),
+            granted: Vec::new(),
             next_pool: 0,
         }
     }
@@ -156,9 +195,87 @@ impl LabelSpace {
     }
 
     /// A new pool's id, for [`LocalLabelPool`].
-    fn new_pool(&mut self) -> u64 {
+    fn new_pool(&mut self, owner: Option<ProtoId>) -> u64 {
         self.next_pool += 1;
+        if let Some(owner) = owner {
+            self.pools.insert(self.next_pool, owner);
+        }
         self.next_pool
+    }
+
+    /// `label` is no one's any more: a claim waiting for it gets it, else
+    /// it is free.
+    fn free(&mut self, label: u32) {
+        match self.claims.remove(&label) {
+            Some(pool) => {
+                self.local.insert(label, Local::Claimed(pool));
+                if let Some(owner) = self.pools.get(&pool) {
+                    self.granted.push((*owner, label));
+                }
+            }
+            None => {
+                self.local.remove(&label);
+            }
+        }
+    }
+
+    /// `pool` claims `label`, in its `range`, for a configured SID.
+    fn claim_local(&mut self, pool: u64, range: RangeInclusive<u32>, label: u32) -> Claim {
+        if !range.contains(&label) {
+            return Claim::Outside;
+        }
+        if self.claims.get(&label).is_some_and(|p| *p != pool) {
+            return Claim::Refused;
+        }
+        match self.local.get(&label).copied() {
+            None if self.in_held_block(label) => Claim::Refused,
+            None => {
+                self.local.insert(label, Local::Claimed(pool));
+                Claim::Granted
+            }
+            Some(Local::Claimed(p)) if p == pool => Claim::Granted,
+            Some(Local::Claimed(_)) => Claim::Refused,
+            // The claimant's own dynamic SID: it relabels that one.
+            Some(Local::Held(p)) if p == pool => {
+                self.local.insert(label, Local::Claimed(pool));
+                Claim::Granted
+            }
+            Some(Local::Held(p)) => {
+                if self.claims.insert(label, pool).is_none()
+                    && let Some(holder) = self.pools.get(&p)
+                {
+                    self.revoked.push((*holder, label));
+                }
+                Claim::Pending
+            }
+            Some(Local::Releasing(_) | Local::Draining(_)) => {
+                self.claims.insert(label, pool);
+                Claim::Pending
+            }
+        }
+    }
+
+    /// `pool` drops its claim on `label`: a waiting claim is withdrawn; a
+    /// held one goes back as `release_local` does. Whether the RIB must be
+    /// told of the release.
+    fn unclaim_local(&mut self, pool: u64, owner: Option<ProtoId>, label: u32) -> bool {
+        if self.claims.get(&label) == Some(&pool) {
+            self.claims.remove(&label);
+            return false;
+        }
+        if self.local.get(&label) != Some(&Local::Claimed(pool)) {
+            return false;
+        }
+        match owner {
+            Some(owner) => {
+                self.local.insert(label, Local::Releasing(owner));
+                true
+            }
+            None => {
+                self.free(label);
+                false
+            }
+        }
     }
 
     /// The lowest label in `range` that no pool holds or is giving back
@@ -198,25 +315,42 @@ impl LabelSpace {
             return false;
         }
         match owner {
-            Some(owner) => self.local.insert(label, Local::Releasing(owner)),
-            None => self.local.remove(&label),
-        };
+            Some(owner) => {
+                self.local.insert(label, Local::Releasing(owner));
+            }
+            None => self.free(label),
+        }
         true
     }
 
-    /// Give back every label `pool` holds, as `release_local` does. The
-    /// labels given back.
+    /// Give back every label `pool` holds or has claimed, as
+    /// `release_local` does, and withdraw its waiting claims; the pool is
+    /// gone. The labels given back.
     fn release_pool(&mut self, pool: u64, owner: Option<ProtoId>) -> Vec<u32> {
-        let labels: Vec<u32> = self
+        let held: Vec<u32> = self
             .local
             .iter()
             .filter(|(_, l)| **l == Local::Held(pool))
             .map(|(label, _)| *label)
             .collect();
-        for label in &labels {
+        let claimed: Vec<u32> = self
+            .local
+            .iter()
+            .filter(|(_, l)| **l == Local::Claimed(pool))
+            .map(|(label, _)| *label)
+            .collect();
+        self.claims.retain(|_, p| *p != pool);
+        for label in &held {
             self.release_local(pool, owner, *label);
         }
-        labels
+        let mut told = held;
+        for label in claimed {
+            if self.unclaim_local(pool, owner, label) {
+                told.push(label);
+            }
+        }
+        self.pools.remove(&pool);
+        told
     }
 
     /// Change `pool`'s range to `[first, last]`: the labels it holds there
@@ -238,7 +372,30 @@ impl LabelSpace {
         for label in &outside {
             self.release_local(pool, owner, *label);
         }
-        outside
+        // A configured SID's label left outside goes back too; the instance
+        // finds it outside on its next claim.
+        let claimed: Vec<u32> = self
+            .local
+            .iter()
+            .filter(|(label, l)| **l == Local::Claimed(pool) && !(first..=last).contains(*label))
+            .map(|(label, _)| *label)
+            .collect();
+        let waiting: Vec<u32> = self
+            .claims
+            .iter()
+            .filter(|(label, p)| **p == pool && !(first..=last).contains(*label))
+            .map(|(label, _)| *label)
+            .collect();
+        for label in waiting {
+            self.claims.remove(&label);
+        }
+        let mut told = outside;
+        for label in claimed {
+            if self.unclaim_local(pool, owner, label) {
+                told.push(label);
+            }
+        }
+        told
     }
 
     /// The RIB handled `owner`'s release of `label`, every ILM message the
@@ -253,7 +410,7 @@ impl LabelSpace {
             self.local.insert(label, Local::Draining(owner));
             return false;
         }
-        self.local.remove(&label);
+        self.free(label);
         true
     }
 
@@ -264,7 +421,7 @@ impl LabelSpace {
         if self.local.get(&label) != Some(&Local::Draining(owner)) {
             return false;
         }
-        self.local.remove(&label);
+        self.free(label);
         true
     }
 
@@ -274,7 +431,7 @@ impl LabelSpace {
     pub fn free_releasing(&mut self, owner: ProtoId, label: u32) -> bool {
         match self.local.get(&label) {
             Some(Local::Releasing(o) | Local::Draining(o)) if *o == owner => {
-                self.local.remove(&label);
+                self.free(label);
                 true
             }
             _ => false,
@@ -285,17 +442,34 @@ impl LabelSpace {
     /// registered with the RIB, so they installed no ILM entry, and their
     /// releases will never be handled. Whether any was freed.
     pub fn free_releasing_of(&mut self, owners: &[ProtoId]) -> bool {
-        let before = self.local.len();
-        self.local.retain(
-            |_, l| !matches!(l, Local::Releasing(o) | Local::Draining(o) if owners.contains(o)),
-        );
-        self.local.len() != before
+        let labels: Vec<u32> = self
+            .local
+            .iter()
+            .filter(|(_, l)| {
+                matches!(l, Local::Releasing(o) | Local::Draining(o) if owners.contains(o))
+            })
+            .map(|(label, _)| *label)
+            .collect();
+        for label in &labels {
+            self.free(*label);
+        }
+        !labels.is_empty()
     }
 
     /// The owners whose pool found no free label since the last call:
     /// labels have been freed, so they can try again.
     pub fn take_starved(&mut self) -> BTreeSet<ProtoId> {
         std::mem::take(&mut self.starved)
+    }
+
+    /// Holders to tell to let a label go: a configured SID claimed it.
+    pub fn take_revoked(&mut self) -> Vec<(ProtoId, u32)> {
+        std::mem::take(&mut self.revoked)
+    }
+
+    /// Claimants to tell they now have the label they claimed.
+    pub fn take_granted(&mut self) -> Vec<(ProtoId, u32)> {
+        std::mem::take(&mut self.granted)
     }
 
     /// Replace the reserved SR blocks. Returns the handed-out blocks a new
@@ -358,7 +532,7 @@ impl SharedLabelSpace {
     }
 
     fn new_pool(&self, first: u32, last: u32, rib: Option<RibClient>) -> LocalLabelPool {
-        let id = self.lock().new_pool();
+        let id = self.lock().new_pool(rib.as_ref().map(|rib| rib.proto_id()));
         LocalLabelPool {
             space: self.clone(),
             id,
@@ -410,6 +584,38 @@ impl LocalLabelPool {
             self.tell_rib(*label);
         }
         gone
+    }
+
+    /// Claim `label` for a configured SID, with precedence over dynamic
+    /// holders. A `Pending` claim asks the RIB to tell the holder; the
+    /// instance learns it has the label from `RibRx::LabelGranted`.
+    pub fn claim(&mut self, label: u32) -> Claim {
+        let claim = self
+            .space
+            .lock()
+            .claim_local(self.id, self.first..=self.last, label);
+        if claim == Claim::Pending
+            && let Some(rib) = &self.rib
+        {
+            let _ = rib.send(crate::rib::Message::LocalLabelClaimed);
+        }
+        claim
+    }
+
+    /// Whether this pool has `label` for a configured SID now. A
+    /// `RibRx::LabelGranted` can be stale (the claim it answered was
+    /// dropped, and a new one is waiting again), so the instance checks.
+    pub fn holds_claim(&self, label: u32) -> bool {
+        self.space.lock().local.get(&label) == Some(&Local::Claimed(self.id))
+    }
+
+    /// Drop the claim on `label`: a held one goes back as `release` does,
+    /// a waiting one is withdrawn.
+    pub fn unclaim(&mut self, label: u32) {
+        let owner = self.owner();
+        if self.space.lock().unclaim_local(self.id, owner, label) {
+            self.tell_rib(label);
+        }
     }
 
     /// Give back `label`, if this pool holds it.
@@ -596,5 +802,203 @@ mod tests {
         assert_eq!(pool.allocate(), None, "24001..24009 lie in bgp's block");
         node.lock().release_all("bgp");
         assert_eq!(pool.allocate(), Some(24001));
+    }
+}
+
+#[cfg(test)]
+mod claim_tests {
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::rib::client::RibInbound;
+
+    /// An instance's pool over 15000..=15009, with the RIB messages it
+    /// sends.
+    fn instance(
+        space: &SharedLabelSpace,
+        id: u32,
+    ) -> (LocalLabelPool, mpsc::UnboundedReceiver<RibInbound>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let rib = RibClient::new(tx, ProtoId::from_raw(id));
+        (space.pool_for(15000, 15009, &rib), rx)
+    }
+
+    /// The local-label messages sent so far.
+    fn sent(rx: &mut mpsc::UnboundedReceiver<RibInbound>) -> Vec<&'static str> {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|env| match env.msg {
+                crate::rib::Message::LocalLabelRelease { .. } => Some("release"),
+                crate::rib::Message::LocalLabelClaimed => Some("claimed"),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A free label is the claimant's at once, and no dynamic allocation
+    /// takes it.
+    #[test]
+    fn a_free_label_is_granted() {
+        let space = SharedLabelSpace::default();
+        let (mut a, _rx) = instance(&space, 1);
+        assert_eq!(a.claim(15000), Claim::Granted);
+        assert_eq!(a.claim(15000), Claim::Granted, "claiming again is harmless");
+        assert_eq!(a.allocate(), Some(15001));
+    }
+
+    /// A label outside the SRLB is not claimed.
+    #[test]
+    fn a_label_outside_the_srlb_is_not_claimed() {
+        let space = SharedLabelSpace::default();
+        let (mut a, _rx) = instance(&space, 1);
+        assert_eq!(a.claim(16000), Claim::Outside);
+    }
+
+    /// Two configured SIDs cannot share a label: the first keeps it.
+    #[test]
+    fn a_label_another_configured_sid_holds_is_refused() {
+        let space = SharedLabelSpace::default();
+        let (mut a, _ra) = instance(&space, 1);
+        let (mut b, _rb) = instance(&space, 2);
+        assert_eq!(a.claim(15000), Claim::Granted);
+        assert_eq!(b.claim(15000), Claim::Refused);
+    }
+
+    /// The claimant's own dynamic SID gives way at once; the instance
+    /// relabels it.
+    #[test]
+    fn the_claimants_own_dynamic_label_is_granted_at_once() {
+        let space = SharedLabelSpace::default();
+        let (mut a, mut rx) = instance(&space, 1);
+        assert_eq!(a.allocate(), Some(15000));
+        assert_eq!(a.claim(15000), Claim::Granted);
+        assert_eq!(sent(&mut rx), Vec::<&str>::new(), "nothing to tell anyone");
+        assert_eq!(a.allocate(), Some(15001));
+    }
+
+    /// Another instance's dynamic label: its holder is told to let it go,
+    /// and once the RIB has seen the holder's entry go the claimant has it.
+    #[test]
+    fn another_instances_dynamic_label_moves_to_the_claimant() {
+        let space = SharedLabelSpace::default();
+        let (mut holder, mut holder_rx) = instance(&space, 1);
+        let (mut claimant, mut claimant_rx) = instance(&space, 2);
+        assert_eq!(holder.allocate(), Some(15000));
+
+        assert_eq!(claimant.claim(15000), Claim::Pending);
+        assert_eq!(sent(&mut claimant_rx), vec!["claimed"]);
+        assert_eq!(
+            space.lock().take_revoked(),
+            vec![(ProtoId::from_raw(1), 15000)]
+        );
+        assert_eq!(holder.allocate(), Some(15001), "15000 is not handed out");
+
+        // The holder lets it go; its entry is still installed when the RIB
+        // handles the release, and goes after.
+        holder.release(15000);
+        assert_eq!(sent(&mut holder_rx), vec!["release"]);
+        assert!(
+            !space
+                .lock()
+                .release_handled(ProtoId::from_raw(1), 15000, true)
+        );
+        assert!(
+            space.lock().take_granted().is_empty(),
+            "the entry is still there"
+        );
+        assert!(space.lock().entry_withdrawn(ProtoId::from_raw(1), 15000));
+        assert_eq!(
+            space.lock().take_granted(),
+            vec![(ProtoId::from_raw(2), 15000)]
+        );
+        assert_eq!(claimant.claim(15000), Claim::Granted);
+        assert_eq!(holder.allocate(), Some(15002));
+    }
+
+    /// A label on its way back goes to the claimant, not back to the pool.
+    #[test]
+    fn a_label_on_its_way_back_goes_to_the_claimant() {
+        let space = SharedLabelSpace::default();
+        let (mut holder, _hrx) = instance(&space, 1);
+        let (mut claimant, _crx) = instance(&space, 2);
+        assert_eq!(holder.allocate(), Some(15000));
+        holder.release(15000);
+        assert_eq!(claimant.claim(15000), Claim::Pending);
+        assert!(space.lock().take_revoked().is_empty(), "already let go");
+        assert!(
+            space
+                .lock()
+                .release_handled(ProtoId::from_raw(1), 15000, false)
+        );
+        assert_eq!(
+            space.lock().take_granted(),
+            vec![(ProtoId::from_raw(2), 15000)]
+        );
+    }
+
+    /// Dropping a waiting claim: the label is freed, not granted.
+    #[test]
+    fn a_withdrawn_claim_is_not_granted() {
+        let space = SharedLabelSpace::default();
+        let (mut holder, _hrx) = instance(&space, 1);
+        let (mut claimant, _crx) = instance(&space, 2);
+        assert_eq!(holder.allocate(), Some(15000));
+        assert_eq!(claimant.claim(15000), Claim::Pending);
+        claimant.unclaim(15000);
+        holder.release(15000);
+        space
+            .lock()
+            .release_handled(ProtoId::from_raw(1), 15000, false);
+        assert!(space.lock().take_granted().is_empty());
+        assert_eq!(claimant.allocate(), Some(15000));
+    }
+
+    /// A configured SID's label goes back like a dynamic one: through the
+    /// RIB, once its entry is gone.
+    #[test]
+    fn an_unclaimed_label_goes_back_through_the_rib() {
+        let space = SharedLabelSpace::default();
+        let (mut a, mut rx) = instance(&space, 1);
+        let (mut b, _rb) = instance(&space, 2);
+        assert_eq!(a.claim(15000), Claim::Granted);
+        a.unclaim(15000);
+        assert_eq!(sent(&mut rx), vec!["release"]);
+        assert_eq!(b.allocate(), Some(15001), "15000 is on its way back");
+        space
+            .lock()
+            .release_handled(ProtoId::from_raw(1), 15000, false);
+        assert_eq!(b.allocate(), Some(15000));
+    }
+
+    /// A pool that goes gives back what it claimed and withdraws what it
+    /// waits for.
+    #[test]
+    fn a_dropped_pool_gives_back_its_claims() {
+        let space = SharedLabelSpace::default();
+        let (mut holder, _hrx) = instance(&space, 1);
+        let (mut claimant, mut rx) = instance(&space, 2);
+        assert_eq!(claimant.claim(15005), Claim::Granted);
+        assert_eq!(holder.allocate(), Some(15000));
+        assert_eq!(claimant.claim(15000), Claim::Pending);
+        let _ = sent(&mut rx);
+        drop(claimant);
+        assert_eq!(sent(&mut rx), vec!["release"], "15005 goes back");
+        holder.release(15000);
+        space
+            .lock()
+            .release_handled(ProtoId::from_raw(1), 15000, false);
+        assert!(
+            space.lock().take_granted().is_empty(),
+            "nobody waits for it"
+        );
+    }
+
+    /// An SRLB change that leaves a claimed label outside gives it back.
+    #[test]
+    fn a_retarget_gives_back_a_claim_left_outside() {
+        let space = SharedLabelSpace::default();
+        let (mut a, _rx) = instance(&space, 1);
+        assert_eq!(a.claim(15009), Claim::Granted);
+        assert_eq!(a.retarget(15000, 15004), vec![15009]);
+        assert_eq!(a.claim(15009), Claim::Outside);
     }
 }

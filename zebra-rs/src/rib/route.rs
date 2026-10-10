@@ -1010,7 +1010,7 @@ impl Rib {
         if let Some(owner) = ilm.owner {
             let freed = self.label_space.lock().entry_withdrawn(owner, label);
             if freed {
-                self.notify_starved();
+                self.notify_label_events();
             }
         }
         self.ilm_select_sync(label, prev).await;

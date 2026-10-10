@@ -1,0 +1,40 @@
+# r2: IS-IS and OSPFv2, no configured Adjacency-SID.
+interface:
+- if-name: lo
+  ipv4:
+    address: 192.168.1.2/32
+- if-name: r2-r1
+  ipv4:
+    address: 10.0.12.2/30
+router:
+  isis:
+    net: 49.0000.0000.0000.0002.00
+    hostname: r2
+    is-type: level-2-only
+    segment-routing:
+      mpls: {}
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+        prefix-sid:
+          index: 22
+    - if-name: r2-r1
+      circuit-type: level-2-only
+      network-type: point-to-point
+      ipv4:
+        enabled: true
+  ospf:
+    router-id: 2.2.2.2
+    segment-routing:
+      mpls: {}
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+        prefix-sid:
+          index: 12
+      - if-name: r2-r1
+        enabled: true
+        network-type: point-to-point
