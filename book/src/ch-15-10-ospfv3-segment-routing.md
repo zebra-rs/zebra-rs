@@ -31,7 +31,7 @@ router ospfv3 {
 |---|---|---|
 | `segment-routing/mpls` | presence | Enables SR-MPLS: the Router Information LSA and the Prefix-SID / Adj-SID advertisements. |
 | `area/<id>/interface/<n>/prefix-sid/index` \| `absolute` | uint32 | Prefix-SID for the interface's prefix (RFC 8666 §5); index and absolute are mutually exclusive. |
-| `area/<id>/interface/<n>/adjacency-sid/index` \| `absolute` | uint32 | Staged configuration; dynamic Adj-SIDs are allocated automatically from the SRLB for every adjacency (RFC 8666 §6.2). |
+| `area/<id>/interface/<n>/adjacency-sid/index` \| `absolute` | uint32 | Staged configuration; dynamic Adj-SIDs are allocated automatically from the SRLB for every adjacency (RFC 8666 §6.2), except a point-to-point one while its configured Adj-SID is advertised. |
 
 The label blocks are the `default` entry of the global
 `segment-routing block` (SRGB 16000..23999 and SRLB 15000..15999 unless

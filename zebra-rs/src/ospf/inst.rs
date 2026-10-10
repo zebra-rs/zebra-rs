@@ -917,6 +917,16 @@ impl<V: OspfVersion> Ospf<V> {
         // Configured SIDs first: one may take a label a dynamic SID had.
         self.reconcile_adj_sid_claims();
         for key in full {
+            if !self.adj_needs_dynamic_label(key.0) {
+                // Its configured Adj-SID is advertised: the fallback goes
+                // back.
+                if let Some(label) = self.lan_adj_sids.remove(&key)
+                    && let Some(pool) = self.local_pool.as_mut()
+                {
+                    pool.release(label);
+                }
+                continue;
+            }
             if self.lan_adj_sids.contains_key(&key) {
                 continue;
             }
@@ -932,6 +942,9 @@ impl<V: OspfVersion> Ospf<V> {
                     ifindex, %neighbor, old, new,
                     "ospf: Adj-SID moved off a label a configured Adj-SID claimed"
                 ),
+                // Its own configured Adj-SID took the label: it needs no
+                // other.
+                None if !self.adj_needs_dynamic_label(ifindex) => {}
                 None => tracing::warn!(
                     ifindex, %neighbor, old,
                     "ospf: Adj-SID gave its label to a configured Adj-SID and got no other"
@@ -1093,6 +1106,24 @@ impl<V: OspfVersion> Ospf<V> {
                 "ospf: configured Adj-SID has its label"
             );
         }
+    }
+
+    /// Whether the adjacencies on link `ifindex` need a dynamic SRLB label.
+    /// Every LAN adjacency does: its LAN Adj-SID is that label. A
+    /// point-to-point one only while its configured Adjacency-SID is not
+    /// advertised (a claim waiting or refused, a label configured on
+    /// another link too, or none configured). Held while the configured one
+    /// is advertised, it would be neither advertised nor installed, just
+    /// kept from the SRLB.
+    pub(super) fn adj_needs_dynamic_label(&self, ifindex: u32) -> bool {
+        let Some(link) = self.links.get(&ifindex) else {
+            return true;
+        };
+        link.network_type != super::link::OspfNetworkType::PointToPoint
+            || !link
+                .config
+                .adjacency_sid
+                .is_some_and(|sid| self.adj_sid_advertised(ifindex, &sid))
     }
 
     /// Whether link `ifindex`'s configured Adjacency-SID is advertised. An
@@ -6589,14 +6620,19 @@ impl Ospf<Ospfv2> {
         // one label out of the SRLB on transition into Full and
         // releases it on regression. The label is consumed by LAN
         // Adj-SID origination (broadcast / NBMA links), by the dynamic
-        // P2P Adj-SID fallback (no `adjacency-sid` configured), and by
-        // the matching local ILM install. Pool is only present when
-        // SR-MPLS is enabled, so this is a no-op otherwise.
-        if new_state == NfsmState::Full
-            && let Some(pool) = self.local_pool.as_mut()
-            && let Some(label) = pool.allocate()
-        {
-            self.lan_adj_sids.insert((ifindex, nbr_addr), label);
+        // P2P Adj-SID fallback (no `adjacency-sid` advertised), and by
+        // the matching local ILM install; a P2P adjacency advertising its
+        // configured Adj-SID takes none (`adj_needs_dynamic_label`). Pool
+        // is only present when SR-MPLS is enabled, so this is a no-op
+        // otherwise.
+        let needs_label = self.adj_needs_dynamic_label(ifindex);
+        if new_state == NfsmState::Full {
+            if needs_label
+                && let Some(pool) = self.local_pool.as_mut()
+                && let Some(label) = pool.allocate()
+            {
+                self.lan_adj_sids.insert((ifindex, nbr_addr), label);
+            }
         } else if old_state == NfsmState::Full
             && let Some(label) = self.lan_adj_sids.remove(&(ifindex, nbr_addr))
             && let Some(pool) = self.local_pool.as_mut()
@@ -14224,13 +14260,17 @@ impl Ospf<Ospfv3> {
         // into Full and releases it on regression. Consumed by the
         // LAN-Adj-SID origination path (broadcast / NBMA links) and
         // by the dynamic P2P Adj-SID fallback (no `adjacency-sid`
-        // configured). No-op when SR-MPLS is disabled (no pool
+        // advertised); a P2P adjacency advertising its configured
+        // Adj-SID takes none. No-op when SR-MPLS is disabled (no pool
         // present).
-        if new_state == NfsmState::Full
-            && let Some(pool) = self.local_pool.as_mut()
-            && let Some(label) = pool.allocate()
-        {
-            self.lan_adj_sids.insert((ifindex, nbr_addr), label);
+        let needs_label = self.adj_needs_dynamic_label(ifindex);
+        if new_state == NfsmState::Full {
+            if needs_label
+                && let Some(pool) = self.local_pool.as_mut()
+                && let Some(label) = pool.allocate()
+            {
+                self.lan_adj_sids.insert((ifindex, nbr_addr), label);
+            }
         } else if old_state == NfsmState::Full
             && let Some(label) = self.lan_adj_sids.remove(&(ifindex, nbr_addr))
             && let Some(pool) = self.local_pool.as_mut()
@@ -27993,6 +28033,134 @@ mod adj_sid_claim_tests {
             Vec::<Option<u32>>::new(),
             "nothing went back"
         );
+    }
+
+    /// Make link `ifindex` point-to-point.
+    fn p2p<V: OspfVersion>(top: &mut Ospf<V>, ifindex: u32) {
+        top.links.get_mut(&ifindex).unwrap().network_type =
+            super::super::link::OspfNetworkType::PointToPoint;
+    }
+
+    /// The dynamic labels held in the label space: claims left out.
+    fn dynamic_labels<V: OspfVersion>(top: &Ospf<V>) -> Vec<u32> {
+        top.rib_subscriber
+            .label_space()
+            .lock()
+            .entries()
+            .iter()
+            .filter(|e| e.kind == crate::rib::label_space::EntryKind::Local)
+            .map(|e| e.first)
+            .collect()
+    }
+
+    /// A point-to-point adjacency advertising its configured Adj-SID holds
+    /// no dynamic label, which would be neither advertised nor installed.
+    /// A LAN adjacency keeps its own: its LAN Adj-SID is that label. Once
+    /// the configuration goes, the point-to-point one gets a label again.
+    async fn a_configured_p2p_adjacency_holds_no_fallback<V: OspfVersion>(mut top: Ospf<V>)
+    where
+        V::Prefix: Default,
+    {
+        let _rx = sr_on(&mut top);
+        link(&mut top, 1, Some(15005));
+        p2p(&mut top, 1);
+        link(&mut top, 2, Some(15006));
+        top.reconcile_adj_sid_labels(vec![(1, A), (2, B)]);
+        assert!(top.adj_sid_advertised(1, &AdjacencySid::Absolute(15005)));
+        assert_eq!(top.lan_adj_sids.get(&(1, A)), None, "no fallback");
+        assert_eq!(top.lan_adj_sids.get(&(2, B)), Some(&15000), "LAN");
+        assert_eq!(dynamic_labels(&top), vec![15000], "none held aside");
+
+        top.links.get_mut(&1).unwrap().config.adjacency_sid = None;
+        top.reconcile_adj_sid_labels(vec![(1, A), (2, B)]);
+        assert_eq!(top.lan_adj_sids.get(&(1, A)), Some(&15001));
+        assert!(top.adj_sid_moves.is_empty());
+    }
+
+    #[tokio::test]
+    async fn v2_a_configured_p2p_adjacency_holds_no_fallback() {
+        a_configured_p2p_adjacency_holds_no_fallback(fresh_ospf()).await;
+    }
+
+    #[tokio::test]
+    async fn v3_a_configured_p2p_adjacency_holds_no_fallback() {
+        a_configured_p2p_adjacency_holds_no_fallback(fresh_ospf_v3()).await;
+    }
+
+    /// While the claim waits the adjacency advertises its dynamic label;
+    /// once the configured Adj-SID has its label, the dynamic one goes
+    /// back on the refresh the grant runs.
+    async fn the_fallback_goes_back_once_the_claim_is_granted<V: OspfVersion>(mut top: Ospf<V>)
+    where
+        V::Prefix: Default,
+    {
+        let mut rx = sr_on(&mut top);
+        let space = top.rib_subscriber.label_space().clone();
+        let (otx, _orx) = mpsc::unbounded_channel();
+        let other = RibClient::new(otx, ProtoId::from_raw(99));
+        let mut holder = space.pool_for(15000, 15999, &other);
+        assert_eq!(holder.allocate(), Some(15000));
+
+        link(&mut top, 1, Some(15000));
+        p2p(&mut top, 1);
+        top.reconcile_adj_sid_labels(vec![(1, A)]);
+        assert_eq!(claim(&top, 15000).map(|c| c.state), Some(Claim::Pending));
+        assert_eq!(top.lan_adj_sids.get(&(1, A)), Some(&15001), "the fallback");
+        assert_eq!(sent(&mut rx), vec![None]);
+
+        holder.release(15000);
+        space
+            .lock()
+            .release_handled(ProtoId::from_raw(99), 15000, false);
+        top.local_label_granted(15000);
+        // What `sr_mpls_refresh` runs with the Full adjacency.
+        top.reconcile_adj_sid_labels(vec![(1, A)]);
+        assert_eq!(claim(&top, 15000).map(|c| c.state), Some(Claim::Granted));
+        assert_eq!(top.lan_adj_sids.get(&(1, A)), None);
+        assert_eq!(sent(&mut rx), vec![Some(15001)], "the fallback went back");
+    }
+
+    #[tokio::test]
+    async fn v2_the_fallback_goes_back_once_the_claim_is_granted() {
+        the_fallback_goes_back_once_the_claim_is_granted(fresh_ospf()).await;
+    }
+
+    #[tokio::test]
+    async fn v3_the_fallback_goes_back_once_the_claim_is_granted() {
+        the_fallback_goes_back_once_the_claim_is_granted(fresh_ospf_v3()).await;
+    }
+
+    /// The transition to Full gives a label only to an adjacency that
+    /// needs one: on eth2, point-to-point with its configured Adj-SID
+    /// advertised, none; on eth3, a LAN, one.
+    #[tokio::test]
+    async fn v2_the_full_transition_takes_a_label_only_when_needed() {
+        use super::link_scope_tests::{P, S, v2_addr, v2_top};
+        let mut top = v2_top();
+        let _rx = sr_on(&mut top);
+        top.links.get_mut(&2).unwrap().config.adjacency_sid = Some(AdjacencySid::Absolute(15005));
+        p2p(&mut top, 2);
+        top.reconcile_adj_sid_labels(vec![]);
+        for (ifindex, key) in [(2, v2_addr(S)), (3, v2_addr(P))] {
+            top.process_neighbor_state_change(ifindex, key, NfsmState::ExStart, NfsmState::Full);
+        }
+        assert_eq!(top.lan_adj_sids.get(&(2, v2_addr(S))), None);
+        assert_eq!(top.lan_adj_sids.get(&(3, v2_addr(P))), Some(&15000));
+    }
+
+    #[tokio::test]
+    async fn v3_the_full_transition_takes_a_label_only_when_needed() {
+        use super::link_scope_tests::{P, S, v3_top};
+        let mut top = v3_top();
+        let _rx = sr_on(&mut top);
+        top.links.get_mut(&2).unwrap().config.adjacency_sid = Some(AdjacencySid::Absolute(15005));
+        p2p(&mut top, 2);
+        top.reconcile_adj_sid_labels(vec![]);
+        for (ifindex, key) in [(2, S), (3, P)] {
+            top.process_neighbor_state_change(ifindex, key, NfsmState::ExStart, NfsmState::Full);
+        }
+        assert_eq!(top.lan_adj_sids.get(&(2, S)), None);
+        assert_eq!(top.lan_adj_sids.get(&(3, P)), Some(&15000));
     }
 
     /// Another instance's dynamic Adj-SID has the label: the configured

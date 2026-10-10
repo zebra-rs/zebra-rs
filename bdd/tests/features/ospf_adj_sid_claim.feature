@@ -44,16 +44,16 @@ Feature: A configured OSPF Adjacency-SID takes its label from a dynamic holder
     # IS-IS still has an Adjacency-SID, on another label.
     And show command "show mpls ilm" in namespace "r1" should contain "i 115  1500"
     And command "ip -f mpls route show" in namespace "r1" should eventually contain "15000"
-    # The label table names the claim and IS-IS's label beside it. OSPFv2
-    # still holds a dynamic label for the adjacency too, its fallback should
-    # the configured one stop being advertised; it is neither advertised nor
-    # installed. The range counts all three.
+    # The label table names the claim and IS-IS's label beside it. OSPFv2's
+    # dynamic label for the adjacency, advertised while the claim waited,
+    # goes back once the configured one is advertised: it would be neither
+    # advertised nor installed. The range counts the two left.
     And show command "show mpls label table" in namespace "r1" should contain "15000          ospf    configured SID  claimed"
     And show command "show mpls label table" in namespace "r1" should contain "isis    local           held"
-    And show command "show mpls label table" in namespace "r1" should contain "ospf    local           held"
+    And show command "show mpls label table" in namespace "r1" should eventually not contain "ospf    local"
     And show command "show mpls label table label 15000" in namespace "r1" should contain "Label 15000: SRLB of segment-routing block default"
     And show command "show mpls label table label 15000" in namespace "r1" should contain "15000          ospf    configured SID  claimed"
-    And show command "show mpls label range" in namespace "r1" should contain "15000-15999      SRLB of segment-routing block default    3 labels"
+    And show command "show mpls label range" in namespace "r1" should eventually contain "15000-15999      SRLB of segment-routing block default    2 labels"
 
   Scenario: Dropping the configuration gives 15000 back
     Given the test topology exists
