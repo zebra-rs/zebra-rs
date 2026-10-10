@@ -104,9 +104,31 @@ The SR Policy Loc-RIB (SAFI 73): each policy's color and endpoint, its
 candidate paths (origin, preference, binding-SID), and segment lists.
 Add `ipv6` for the IPv6 family.
 
-JSON: an array of policy objects with `color`, `endpoint`, and a
-`candidate_paths` array (`protocol_origin`, `preference`, `valid`,
-`active`, `binding_sid`, `segment_lists`).
+A headend claims a policy's SR-MPLS Binding-SID in its SRLB before
+installing the Binding-SID's ILM (RFC 9256 §6.2), and the policy shows
+the label's state:
+
+```
+ SR Policy color 100 endpoint 192.168.12.2
+  Binding-SID label 16100: unavailable (outside the SRLB 15000-15999)
+  * candidate-path origin bgp disc 1 pref 100 prio 128 [valid]
+```
+
+- `held`: the policy has the label; its ILM is installed once the
+  endpoint resolves.
+- `waiting`: an IGP's dynamic Adjacency-SID held the label and is being
+  moved off it.
+- `unavailable`: outside the SRLB, held by a configured Adjacency-SID,
+  another SR Policy's Binding-SID, or no SRLB. The path stays active with
+  no Binding-SID ILM, so steering uses its inline segment list. A path with
+  the Specified-BSID-only flag is instead invalid, shown as `[invalid:
+  Binding-SID unavailable]`, and the next path is selected.
+
+JSON: an array of policy objects with `color`, `endpoint`,
+`binding_sid_label` (`label`, `state`: `held`/`waiting`/`unavailable`,
+`reason`), and a `candidate_paths` array (`protocol_origin`, `preference`,
+`valid`, `binding_sid_unavailable`, `active`, `binding_sid`,
+`segment_lists`).
 
 ### `show bgp link-state`
 

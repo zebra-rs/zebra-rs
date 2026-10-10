@@ -271,16 +271,16 @@ impl LabelSpace {
             return Claim::Outside;
         }
         if self.claims.get(&label).is_some_and(|p| *p != pool) {
-            return Claim::Refused;
+            return self.refused(pool);
         }
         match self.local.get(&label).copied() {
-            None if self.in_held_block(label) => Claim::Refused,
+            None if self.in_held_block(label) => self.refused(pool),
             None => {
                 self.local.insert(label, Local::Claimed(pool));
                 Claim::Granted
             }
             Some(Local::Claimed(p)) if p == pool => Claim::Granted,
-            Some(Local::Claimed(_)) => Claim::Refused,
+            Some(Local::Claimed(_)) => self.refused(pool),
             // The claimant's own dynamic SID: it relabels that one.
             Some(Local::Held(p)) if p == pool => {
                 self.local.insert(label, Local::Claimed(pool));
@@ -299,6 +299,17 @@ impl LabelSpace {
                 Claim::Pending
             }
         }
+    }
+
+    /// A claim refused: another configured SID or a handed-out block has
+    /// the label, and nothing tells the claimant when that goes. Its owner
+    /// is told at the next release instead (`take_starved`, sent as
+    /// `RibRx::LocalLabelsFreed`), and claims again.
+    fn refused(&mut self, pool: u64) -> Claim {
+        if let Some(owner) = self.pools.get(&pool) {
+            self.starved.insert(*owner);
+        }
+        Claim::Refused
     }
 
     /// `pool` drops its claim on `label`: a waiting claim is withdrawn; a

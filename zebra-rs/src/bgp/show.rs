@@ -823,6 +823,10 @@ struct SrPolicyCandidateJson {
     preference: u32,
     priority: u8,
     valid: bool,
+    /// Valid, but invalid here: Specified-BSID-only, and its Binding-SID
+    /// is not available.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    binding_sid_unavailable: bool,
     active: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<String>,
@@ -832,9 +836,20 @@ struct SrPolicyCandidateJson {
 }
 
 #[derive(Serialize)]
+struct SrPolicyBsidJson {
+    label: u32,
+    /// `held`, `waiting`, or `unavailable`.
+    state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+#[derive(Serialize)]
 struct SrPolicyJson {
     color: u32,
     endpoint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    binding_sid_label: Option<SrPolicyBsidJson>,
     candidate_paths: Vec<SrPolicyCandidateJson>,
 }
 
@@ -5761,6 +5776,7 @@ fn show_bgp_sr_policy(
                     preference: cp.preference,
                     priority: cp.priority,
                     valid: cp.valid,
+                    binding_sid_unavailable: policy.bsid_excluded.contains(cpkey),
                     active: policy.active.as_ref() == Some(cpkey),
                     name: cp.cp_name.clone(),
                     binding_sid: show_sr_binding_sid(cp),
@@ -5774,9 +5790,18 @@ fn show_bgp_sr_policy(
                         .collect(),
                 })
                 .collect();
+            let srlb = bgp.local_rib.sr_policy.bsid_srlb;
             out.push(SrPolicyJson {
                 color: key.color,
                 endpoint: key.endpoint.to_string(),
+                binding_sid_label: policy.bsid.map(|(label, state)| {
+                    let (state, reason) = show_sr_bsid_state(state, srlb);
+                    SrPolicyBsidJson {
+                        label,
+                        state,
+                        reason,
+                    }
+                }),
                 candidate_paths,
             });
         }
@@ -5804,13 +5829,26 @@ fn show_bgp_sr_policy(
             " SR Policy color {} endpoint {}",
             key.color, key.endpoint
         )?;
+        if let Some((label, state)) = policy.bsid {
+            let (state, reason) = show_sr_bsid_state(state, bgp.local_rib.sr_policy.bsid_srlb);
+            match reason {
+                Some(reason) => writeln!(buf, "  Binding-SID label {label}: {state} ({reason})")?,
+                None => writeln!(buf, "  Binding-SID label {label}: {state}")?,
+            }
+        }
         for (cpkey, cp) in policy.candidates.iter() {
             let mark = if policy.active.as_ref() == Some(cpkey) {
                 "*"
             } else {
                 " "
             };
-            let validity = if cp.valid { "valid" } else { "invalid" };
+            let validity = if !cp.valid {
+                "invalid"
+            } else if policy.bsid_excluded.contains(cpkey) {
+                "invalid: Binding-SID unavailable"
+            } else {
+                "valid"
+            };
             writeln!(
                 buf,
                 "  {mark} candidate-path origin {} disc {} pref {} prio {} [{validity}]",
@@ -5840,6 +5878,34 @@ fn show_bgp_sr_policy(
         writeln!(buf, "  (no SR policies)")?;
     }
     Ok(buf)
+}
+
+/// A policy's SR-MPLS Binding-SID state for `show`: `held`, `waiting`,
+/// or `unavailable`, with why.
+fn show_sr_bsid_state(
+    state: super::sr_policy::BsidState,
+    srlb: Option<(u32, u32)>,
+) -> (&'static str, Option<String>) {
+    use super::sr_policy::{BsidState, BsidUnavailable};
+    match state {
+        BsidState::Granted => ("held", None),
+        BsidState::Pending => (
+            "waiting",
+            Some("for a dynamic Adjacency-SID to move off it".to_string()),
+        ),
+        BsidState::Unavailable(why) => (
+            "unavailable",
+            Some(match (why, srlb) {
+                (BsidUnavailable::NoSrlb, _) => "no SRLB".to_string(),
+                (BsidUnavailable::OutsideSrlb, Some((first, last))) => {
+                    format!("outside the SRLB {first}-{last}")
+                }
+                (BsidUnavailable::OutsideSrlb, None) => "outside the SRLB".to_string(),
+                (BsidUnavailable::InUse, _) => "another configured SID holds it".to_string(),
+                (BsidUnavailable::OtherPolicy, _) => "another SR Policy's Binding-SID".to_string(),
+            }),
+        ),
+    }
 }
 
 fn show_sr_protocol_origin(proto: u8) -> String {

@@ -11887,6 +11887,17 @@ pub fn route_srpolicy_update(
     let delta = bgp.local_rib.sr_policy.insert(key, cp);
     apply_srpolicy_fib(delta, nlri.color, bgp);
     sr_policy_mpls_sync(bgp, nlri.color, nlri.endpoint);
+    sr_policy_sync_reselected(bgp);
+}
+
+/// Apply the policies `SrPolicyDb` re-evaluated as a side effect (a
+/// Binding-SID label another policy gave up, an SRLB change, a grant):
+/// their FIB deltas, and their SR-MPLS Binding-SID ILMs.
+pub(super) fn sr_policy_sync_reselected(bgp: &mut BgpTop) {
+    for (key, delta) in bgp.local_rib.sr_policy.take_reselected() {
+        apply_srpolicy_fib(delta, key.color, bgp);
+        sr_policy_mpls_sync(bgp, key.color, key.endpoint);
+    }
 }
 
 /// Withdraw one SR Policy NLRI from the headend database, reflect the
@@ -11911,6 +11922,7 @@ pub fn route_srpolicy_withdraw(
     }
     apply_srpolicy_fib(delta, nlri.color, bgp);
     sr_policy_mpls_sync(bgp, nlri.color, nlri.endpoint);
+    sr_policy_sync_reselected(bgp);
 }
 
 /// Reflect a received SR Policy update to every other established
@@ -12728,7 +12740,9 @@ fn apply_srpolicy_fib(delta: super::sr_policy::SrPolicyFibDelta, color: u32, bgp
     if let Some(addr) = delta.remove {
         let _ = bgp.rib_client.send(rib::Message::SidDel { addr });
     }
-    let activated = delta.activated;
+    // A new SRv6 Binding SID, or a new active path or segment list: the
+    // colour-matched routes re-derive their steering.
+    let activated = delta.activated || delta.steer_changed;
     if let Some(install) = delta.install {
         let sid = rib::Sid {
             addr: install.bsid,
@@ -12939,11 +12953,11 @@ fn sr_policy_mpls_sync(bgp: &mut BgpTop, color: u32, endpoint: IpAddr) {
 /// receive path and from the NHT re-eval in `inst.rs`, so it takes the
 /// RIB client + cache directly rather than a `BgpTop`.
 ///
-/// Returns `true` on the activation edge (the Binding-SID label just
-/// appeared or swapped to a different value) so the caller can re-install
-/// colour-matched service routes onto the now-active BSID via
-/// [`sr_policy_steer_resync`]. A service route received before its SAFI-73
-/// policy would otherwise sit unsteered until an unrelated re-eval.
+/// Returns `true` when the Binding-SID label appeared, swapped to a
+/// different value, or went, so the caller re-installs colour-matched
+/// service routes via [`sr_policy_steer_resync`]: onto the now-active BSID
+/// (a route received before its SAFI-73 policy would otherwise sit
+/// unsteered until an unrelated re-eval), or off one whose ILM is gone.
 pub(super) fn sr_policy_reconcile_mpls(
     rib_client: &crate::rib::client::RibClient,
     cache: &super::nht::NexthopCache,
@@ -12964,7 +12978,7 @@ pub(super) fn sr_policy_reconcile_mpls(
             cache.transport_for(0, endpoint),
         );
     }
-    action.activated
+    action.steer_changed
 }
 
 /// Re-install every unicast Loc-RIB winner carrying `color` so a service

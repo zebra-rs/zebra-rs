@@ -1,7 +1,8 @@
 # crs2 — SR-TE controller + service-route origin (iBGP AS 65000).
 # Originates:
 #  - an SR-MPLS SR Policy (SAFI 73) for <color 100, endpoint 192.168.12.2>
-#    with an MPLS Binding SID 16100 and a one-hop segment list {16002}, plus
+#    with an MPLS Binding SID 15100 (in crs1's SRLB, 15000-15999, where a
+#    headend claims it) and a one-hop segment list {16002}, plus
 #    route-target 10.0.0.1 (crs1's router-id) so crs1 CONSUMES it locally
 #    (RFC 9830 §4.2 — an IPv4-address RT == the receiver's BGP Identifier);
 #  - the service prefix 10.99.0.0/24 (a blackhole static, redistributed),
@@ -33,7 +34,7 @@ router:
       - name: P1
         color: 100
         endpoint: 192.168.12.2
-        binding-sid-label: 16100
+        binding-sid-label: 15100
         route-target: 10.0.0.1
         segment:
         - index: 1

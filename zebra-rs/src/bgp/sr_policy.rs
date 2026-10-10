@@ -16,7 +16,7 @@
 //! the data model, the §2.9 selection, and the install/steer *decisions*
 //! so they stay unit-testable.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use bgp_packet::{
@@ -26,6 +26,7 @@ use bgp_packet::{
 };
 
 use crate::config::{Args, ConfigOp};
+use crate::rib::label_space::{Claim, LocalLabelPool};
 
 use super::Bgp;
 
@@ -86,12 +87,51 @@ pub struct CandidatePath {
     pub valid: bool,
 }
 
+/// Why a specified SR-MPLS Binding-SID label is not available at this
+/// headend (RFC 9256 §6.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BsidUnavailable {
+    /// The SR block has no SRLB, or has not arrived.
+    NoSrlb,
+    /// The label is outside the SRLB.
+    OutsideSrlb,
+    /// Another configured SID (an absolute Adjacency-SID) holds it.
+    InUse,
+    /// Another SR Policy's Binding-SID is the label (§6.1: two policies
+    /// MUST NOT share one).
+    OtherPolicy,
+}
+
+/// The state of a policy's SR-MPLS Binding-SID label at this headend,
+/// claimed in the SRLB like a configured Adjacency-SID
+/// (docs/design/mpls-label-allocation.md §5.1, phase 3c).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BsidState {
+    /// The policy holds the label: its ILM may be installed.
+    Granted,
+    /// Claimed, waiting for a dynamic Adjacency-SID to move off it.
+    Pending,
+    Unavailable(BsidUnavailable),
+}
+
+impl BsidState {
+    fn holds(self) -> bool {
+        matches!(self, BsidState::Granted | BsidState::Pending)
+    }
+}
+
 /// One SR Policy and its candidate paths.
 #[derive(Clone, Debug, Default)]
 pub struct SrPolicy {
     pub candidates: BTreeMap<CandidatePathKey, CandidatePath>,
     /// Active candidate path (RFC 9256 §2.9), if any valid path exists.
     pub active: Option<CandidatePathKey>,
+    /// The active path's SR-MPLS Binding-SID label and its state, when it
+    /// specifies one.
+    pub bsid: Option<(u32, BsidState)>,
+    /// Paths with the Specified-BSID-only flag whose Binding-SID was not
+    /// available: invalid until it is (RFC 9256 §6.2.3).
+    pub bsid_excluded: BTreeSet<CandidatePathKey>,
     /// SRv6 Binding SID currently programmed in the FIB for this policy
     /// (the active path's End.B6.Encaps install). Tracked so a change of
     /// active path tears the old one down.
@@ -161,11 +201,25 @@ pub struct SrPolicyFibDelta {
     /// The SRv6 Binding-SID *address* just appeared or changed, so a
     /// colour-matched service route received before the policy must
     /// re-derive its H.Encap steer onto it. Unlike the SR-MPLS ILM (see
-    /// [`MplsIlmAction::activated`]) the End.B6 SID installs immediately,
-    /// but the same route-before-policy gap applies. A same-address install
-    /// (only the segment list changed) leaves this `false` — the steer
-    /// target is unchanged.
+    /// [`MplsIlmAction::steer_changed`]) the End.B6 SID installs
+    /// immediately, but the same route-before-policy gap applies. A
+    /// same-address install (only the segment list changed) leaves this
+    /// `false` — the steer target is unchanged.
     pub activated: bool,
+    /// The active candidate path, or its segment lists, changed: a path
+    /// selected or swapped (one re-selected because its Binding-SID became
+    /// unavailable among them), or the policy withdrawn. Routes steered by
+    /// the inline segment list must re-derive it, whether or not a
+    /// Binding-SID install changed: a policy steering inline may have none.
+    pub steer_changed: bool,
+}
+
+/// What inline steering through a policy depends on: its active path and
+/// that path's segment lists.
+fn steering(policy: &SrPolicy) -> Option<(CandidatePathKey, Vec<SegmentList>)> {
+    policy
+        .active_cp()
+        .map(|cp| (cp.key.clone(), cp.segment_lists.clone()))
 }
 
 /// An SR-MPLS Binding SID install: the incoming BSID label and the
@@ -212,6 +266,40 @@ fn mpls_bsid(cp: &CandidatePath) -> Option<MplsBsid> {
     Some(MplsBsid { bsid, segments })
 }
 
+/// The SR-MPLS Binding-SID label a candidate path specifies, if any.
+fn mpls_bsid_label(cp: &CandidatePath) -> Option<u32> {
+    match cp.binding_sid.as_ref().map(|b| &b.value) {
+        Some(BindingSidValue::MplsLabel(label)) => Some(*label),
+        _ => None,
+    }
+}
+
+/// Claim `label` for policy `key` through the SRLB pool, unless another
+/// policy has it.
+fn bsid_claim(
+    pool: Option<&mut LocalLabelPool>,
+    owner: &mut BTreeMap<u32, SrPolicyKey>,
+    key: &SrPolicyKey,
+    label: u32,
+) -> BsidState {
+    if owner.get(&label).is_some_and(|other| other != key) {
+        return BsidState::Unavailable(BsidUnavailable::OtherPolicy);
+    }
+    let Some(pool) = pool else {
+        return BsidState::Unavailable(BsidUnavailable::NoSrlb);
+    };
+    let state = match pool.claim(label) {
+        Claim::Granted => BsidState::Granted,
+        Claim::Pending => BsidState::Pending,
+        Claim::Refused => BsidState::Unavailable(BsidUnavailable::InUse),
+        Claim::Outside => BsidState::Unavailable(BsidUnavailable::OutsideSrlb),
+    };
+    if state.holds() {
+        owner.insert(label, key.clone());
+    }
+    state
+}
+
 /// The LFIB change `mpls_reconcile` wants applied: remove an old BSID
 /// label and/or install a new one. The install is realized by the caller
 /// toward the endpoint's NHT-resolved next-hop.
@@ -219,12 +307,14 @@ fn mpls_bsid(cp: &CandidatePath) -> Option<MplsBsid> {
 pub struct MplsIlmAction {
     pub remove: Option<u32>,
     pub install: Option<MplsBsid>,
-    /// The steering label just appeared or changed (`None`→`Some`, or a
-    /// candidate-path swap to a different BSID). Level-triggered install
-    /// alone can't tell a fresh activation from a steady-state re-eval, so
-    /// the caller re-installs colour-matched service routes only on this
-    /// edge — a route received before the policy re-derives its steer.
-    pub activated: bool,
+    /// The steering label appeared, changed (a candidate-path swap to a
+    /// different BSID), or went (the endpoint unreachable, the Binding-SID
+    /// no longer available). Level-triggered install alone can't tell
+    /// these from a steady-state re-eval, so the caller re-installs
+    /// colour-matched service routes only on this edge: a route received
+    /// before the policy re-derives its steer, and one steered onto a
+    /// label whose ILM went falls back to the inline segment list.
+    pub steer_changed: bool,
 }
 
 /// The SRv6 Binding-SID install an active candidate path realizes, or
@@ -277,23 +367,227 @@ pub enum SteerMode {
 }
 
 /// The SR Policy database (one per BGP instance, lives on the Loc-RIB).
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct SrPolicyDb {
     pub policies: BTreeMap<SrPolicyKey, SrPolicy>,
     /// Headend steering mode (`steering-mode` config). Applies to all
     /// colour steering; default keeps the inline SID-list behaviour.
     pub steer_mode: SteerMode,
+    /// The SRLB SR-MPLS Binding-SID labels are claimed from, the watched
+    /// `default` block's, `[first, last]`.
+    pub bsid_srlb: Option<(u32, u32)>,
+    /// The pool over `bsid_srlb` the claims are made through.
+    bsid_pool: Option<LocalLabelPool>,
+    /// The policy each claimed Binding-SID label is claimed for.
+    bsid_owner: BTreeMap<u32, SrPolicyKey>,
+    /// Policies re-evaluated as a side effect of another change (a label
+    /// another policy gave up, an SRLB change), with their FIB deltas: the
+    /// caller syncs them (`take_reselected`).
+    reselected: Vec<(SrPolicyKey, SrPolicyFibDelta)>,
 }
 
 impl SrPolicyDb {
     /// Insert or replace a candidate path, re-run active selection, and
     /// return the resulting FIB delta.
     pub fn insert(&mut self, key: SrPolicyKey, cp: CandidatePath) -> SrPolicyFibDelta {
-        let policy = self.policies.entry(key).or_default();
-        let prev = policy.active.clone();
+        let policy = self.policies.entry(key.clone()).or_default();
+        let before = steering(policy);
         policy.candidates.insert(cp.key.clone(), cp);
-        policy.active = select_active(&policy.candidates, prev.as_ref());
-        policy.reconcile_fib()
+        let delta = self.select(&key, before);
+        self.reselect_unavailable(Some(&key));
+        delta
+    }
+
+    /// Re-run active selection for `key` with its Binding-SID claim, and
+    /// return the FIB delta. RFC 9256 §2.9 picks among the valid paths; the
+    /// winner's SR-MPLS Binding-SID is then claimed in the SRLB. One that
+    /// is not available invalidates a path with the Specified-BSID-only
+    /// flag, and selection runs again without it (§6.2.3); without the
+    /// flag the path stays active with no Binding-SID (§6.2: alert). A
+    /// label the policy held and no longer wants goes back. `before` is
+    /// what inline steering depended on before the change that led here.
+    fn select(
+        &mut self,
+        key: &SrPolicyKey,
+        before: Option<(CandidatePathKey, Vec<SegmentList>)>,
+    ) -> SrPolicyFibDelta {
+        let Self {
+            policies,
+            bsid_pool,
+            bsid_owner,
+            ..
+        } = self;
+        let Some(policy) = policies.get_mut(key) else {
+            return SrPolicyFibDelta::default();
+        };
+        let prev = policy.active.clone();
+        let held = policy.bsid.filter(|(_, state)| state.holds());
+        let mut excluded = BTreeSet::new();
+        let (active, bsid) = loop {
+            let usable: BTreeMap<_, _> = policy
+                .candidates
+                .iter()
+                .filter(|(k, _)| !excluded.contains(*k))
+                .map(|(k, cp)| (k.clone(), cp.clone()))
+                .collect();
+            let active = select_active(&usable, prev.as_ref());
+            let cp = active.as_ref().and_then(|k| policy.candidates.get(k));
+            let Some(label) = cp.and_then(mpls_bsid_label) else {
+                break (active, None);
+            };
+            let state = match held {
+                Some((l, state)) if l == label => state,
+                _ => bsid_claim(bsid_pool.as_mut(), bsid_owner, key, label),
+            };
+            if let BsidState::Unavailable(why) = state {
+                tracing::warn!(
+                    color = key.color, endpoint = %key.endpoint, label, ?why,
+                    "sr-policy: Binding-SID not available"
+                );
+                if cp.is_some_and(|cp| {
+                    cp.binding_sid
+                        .as_ref()
+                        .is_some_and(BindingSid::specified_bsid_only)
+                }) {
+                    excluded.insert(active.clone().expect("a path"));
+                    continue;
+                }
+            }
+            break (active, Some((label, state)));
+        };
+        // Give back what the policy holds and no longer claims.
+        if let Some((old, _)) = held
+            && bsid.is_none_or(|(new, state)| new != old || !state.holds())
+        {
+            bsid_owner.remove(&old);
+            if let Some(pool) = bsid_pool.as_mut() {
+                pool.unclaim(old);
+            }
+        }
+        policy.active = active;
+        policy.bsid = bsid;
+        policy.bsid_excluded = excluded;
+        let mut delta = policy.reconcile_fib();
+        delta.steer_changed = steering(policy) != before;
+        delta
+    }
+
+    /// Re-run selection for `key` with nothing about it changed but what
+    /// it depends on (a Binding-SID's availability).
+    fn reselect(&mut self, key: &SrPolicyKey) -> SrPolicyFibDelta {
+        let before = self.policies.get(key).and_then(steering);
+        self.select(key, before)
+    }
+
+    /// Re-run selection for every policy whose Binding-SID is not
+    /// available (but `except`): a label given up, or an SRLB change, may
+    /// have made it so. Their deltas wait in `reselected`.
+    fn reselect_unavailable(&mut self, except: Option<&SrPolicyKey>) {
+        let keys: Vec<SrPolicyKey> = self
+            .policies
+            .iter()
+            .filter(|(k, p)| {
+                Some(*k) != except
+                    && (!p.bsid_excluded.is_empty()
+                        || matches!(p.bsid, Some((_, BsidState::Unavailable(_)))))
+            })
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in keys {
+            let delta = self.reselect(&key);
+            self.reselected.push((key, delta));
+        }
+    }
+
+    /// Labels were freed (`RibRx::LocalLabelsFreed`): a Binding-SID refused
+    /// because a configured Adjacency-SID or a label block had it may be
+    /// available now. The re-evaluated policies wait in `reselected`.
+    pub fn labels_freed(&mut self) {
+        self.reselect_unavailable(None);
+    }
+
+    /// The policies re-evaluated as a side effect, with their FIB deltas,
+    /// for the caller to apply and to reconcile their ILMs.
+    pub fn take_reselected(&mut self) -> Vec<(SrPolicyKey, SrPolicyFibDelta)> {
+        std::mem::take(&mut self.reselected)
+    }
+
+    /// The watched block's SRLB changed (`None`: no SRLB). The pool follows
+    /// it (`new_pool` makes one the first time); a claim it leaves outside
+    /// goes back, and every policy with a Binding-SID is re-evaluated.
+    pub fn set_bsid_srlb(
+        &mut self,
+        srlb: Option<(u32, u32)>,
+        new_pool: impl FnOnce(u32, u32) -> LocalLabelPool,
+    ) {
+        if self.bsid_srlb == srlb {
+            return;
+        }
+        self.bsid_srlb = srlb;
+        let gone: Vec<u32> = match (srlb, self.bsid_pool.as_mut()) {
+            (None, _) => {
+                // Dropping the pool gives every claim back.
+                self.bsid_pool = None;
+                self.bsid_owner.keys().copied().collect()
+            }
+            (Some((first, last)), None) => {
+                self.bsid_pool = Some(new_pool(first, last));
+                Vec::new()
+            }
+            (Some((first, last)), Some(pool)) => {
+                // `retarget` returns the labels it gave back, not the
+                // waiting claims it dropped: every claim outside is gone.
+                let mut gone = pool.retarget(first, last);
+                gone.extend(
+                    self.bsid_owner
+                        .keys()
+                        .filter(|label| !(first..=last).contains(*label)),
+                );
+                gone
+            }
+        };
+        for label in gone {
+            if let Some(key) = self.bsid_owner.remove(&label)
+                && let Some(policy) = self.policies.get_mut(&key)
+            {
+                policy.bsid = None;
+            }
+        }
+        // Every policy with an SR-MPLS Binding-SID on any path: its state
+        // was just cleared if the SRLB left its label outside.
+        let keys: Vec<SrPolicyKey> = self
+            .policies
+            .iter()
+            .filter(|(_, p)| {
+                p.candidates
+                    .values()
+                    .any(|cp| mpls_bsid_label(cp).is_some())
+            })
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in keys {
+            let delta = self.reselect(&key);
+            self.reselected.push((key, delta));
+        }
+    }
+
+    /// The RIB granted `label`, which a policy claimed while a dynamic
+    /// Adjacency-SID held it. The grant may be stale (the claim dropped
+    /// and made again), so it stands only if the pool holds the claim now.
+    /// Returns the policy whose ILM can now be installed.
+    pub fn bsid_granted(&mut self, label: u32) -> Option<SrPolicyKey> {
+        let key = self.bsid_owner.get(&label)?.clone();
+        let policy = self.policies.get_mut(&key)?;
+        if policy.bsid != Some((label, BsidState::Pending))
+            || !self
+                .bsid_pool
+                .as_ref()
+                .is_some_and(|pool| pool.holds_claim(label))
+        {
+            return None;
+        }
+        policy.bsid = Some((label, BsidState::Granted));
+        Some(key)
     }
 
     /// Remove the candidate path advertised by `peer` for the NLRI
@@ -316,7 +610,7 @@ impl SrPolicyDb {
         let Some(policy) = self.policies.get_mut(&key) else {
             return (None, SrPolicyFibDelta::default());
         };
-        let prev = policy.active.clone();
+        let before = steering(policy);
         // Every candidate this peer holds for the NLRI goes: the key also
         // carries the originator, so a re-announcement under a changed
         // ORIGINATOR_ID left a second entry that a single removal would
@@ -338,7 +632,16 @@ impl SrPolicyDb {
         if policy.candidates.is_empty() {
             let remove = policy.installed.take().map(|b| b.bsid);
             let mpls_remove = policy.installed_mpls.take();
+            if let Some((label, state)) = policy.bsid
+                && state.holds()
+            {
+                self.bsid_owner.remove(&label);
+                if let Some(pool) = self.bsid_pool.as_mut() {
+                    pool.unclaim(label);
+                }
+            }
             self.policies.remove(&key);
+            self.reselect_unavailable(None);
             (
                 removed,
                 SrPolicyFibDelta {
@@ -346,11 +649,13 @@ impl SrPolicyDb {
                     install: None,
                     mpls_remove,
                     activated: false,
+                    steer_changed: before.is_some(),
                 },
             )
         } else {
-            policy.active = select_active(&policy.candidates, prev.as_ref());
-            (removed, policy.reconcile_fib())
+            let delta = self.select(&key, before);
+            self.reselect_unavailable(Some(&key));
+            (removed, delta)
         }
     }
 
@@ -482,7 +787,8 @@ impl SrPolicyDb {
         let Some(policy) = self.policies.get_mut(&key) else {
             return MplsIlmAction::default();
         };
-        let desired = policy.active_cp().and_then(mpls_bsid);
+        let granted = |bsid: &MplsBsid| policy.bsid == Some((bsid.bsid, BsidState::Granted));
+        let desired = policy.active_cp().and_then(mpls_bsid).filter(granted);
         match desired {
             Some(bsid) if reachable => {
                 // Replace whenever reachable (the resolved next-hop or the
@@ -492,15 +798,18 @@ impl SrPolicyDb {
                 policy.installed_mpls = Some(bsid.bsid);
                 MplsIlmAction {
                     remove,
-                    activated: prev != Some(bsid.bsid),
+                    steer_changed: prev != Some(bsid.bsid),
                     install: Some(bsid),
                 }
             }
-            _ => MplsIlmAction {
-                remove: policy.installed_mpls.take(),
-                install: None,
-                activated: false,
-            },
+            _ => {
+                let remove = policy.installed_mpls.take();
+                MplsIlmAction {
+                    remove,
+                    install: None,
+                    steer_changed: remove.is_some(),
+                }
+            }
         }
     }
 }
@@ -1253,7 +1562,23 @@ mod tests {
                 label: 16001,
             }],
         }];
-        assert_eq!(db.insert(key, c), SrPolicyFibDelta::default());
+        // The path becomes active, which is a steering change, but there is
+        // nothing to install.
+        assert_eq!(
+            db.insert(key, c),
+            SrPolicyFibDelta {
+                steer_changed: true,
+                ..Default::default()
+            }
+        );
+    }
+
+    /// A database whose Binding-SIDs are claimed from SRLB 15000-15999.
+    fn mpls_db() -> SrPolicyDb {
+        let mut db = SrPolicyDb::default();
+        let space = crate::rib::label_space::SharedLabelSpace::default();
+        db.set_bsid_srlb(Some((15000, 15999)), |first, last| space.pool(first, last));
+        db
     }
 
     /// A valid SR-MPLS candidate path: an MPLS Binding SID label plus a
@@ -1271,13 +1596,13 @@ mod tests {
 
     #[test]
     fn mpls_reconcile_gates_install_on_reachability() {
-        let mut db = SrPolicyDb::default();
+        let mut db = mpls_db();
         let ep = endpoint("10.0.0.9");
         let key = SrPolicyKey {
             color: 100,
             endpoint: ep,
         };
-        db.insert(key, mpls_cp(1, 100, 1, 1000, 16001));
+        db.insert(key, mpls_cp(1, 100, 1, 15100, 16001));
 
         // Endpoint unresolved → no install yet.
         assert_eq!(db.mpls_reconcile(100, ep, false), MplsIlmAction::default());
@@ -1287,47 +1612,50 @@ mod tests {
         assert_eq!(
             action.install,
             Some(MplsBsid {
-                bsid: 1000,
+                bsid: 15100,
                 segments: vec![16001],
             })
         );
         // Endpoint goes unreachable → tear the ILM down.
         let action = db.mpls_reconcile(100, ep, false);
-        assert_eq!(action.remove, Some(1000));
+        assert_eq!(action.remove, Some(15100));
         assert_eq!(action.install, None);
     }
 
     #[test]
     fn mpls_reconcile_swaps_label_when_active_path_changes() {
-        let mut db = SrPolicyDb::default();
+        let mut db = mpls_db();
         let ep = endpoint("10.0.0.9");
         let key = SrPolicyKey {
             color: 100,
             endpoint: ep,
         };
-        db.insert(key.clone(), mpls_cp(1, 100, 1, 1000, 16001));
-        assert_eq!(db.mpls_reconcile(100, ep, true).install.unwrap().bsid, 1000);
+        db.insert(key.clone(), mpls_cp(1, 100, 1, 15100, 16001));
+        assert_eq!(
+            db.mpls_reconcile(100, ep, true).install.unwrap().bsid,
+            15100
+        );
         // A higher-preference path with a different BSID label wins.
-        db.insert(key, mpls_cp(2, 200, 2, 2000, 16002));
+        db.insert(key, mpls_cp(2, 200, 2, 15200, 16002));
         let action = db.mpls_reconcile(100, ep, true);
-        assert_eq!(action.remove, Some(1000));
-        assert_eq!(action.install.unwrap().bsid, 2000);
+        assert_eq!(action.remove, Some(15100));
+        assert_eq!(action.install.unwrap().bsid, 15200);
     }
 
     #[test]
     fn withdrawing_mpls_policy_reports_label_to_remove() {
-        let mut db = SrPolicyDb::default();
+        let mut db = mpls_db();
         let ep = endpoint("10.0.0.9");
         let key = SrPolicyKey {
             color: 9,
             endpoint: ep,
         };
-        db.insert(key, mpls_cp(1, 100, 1, 1000, 16001));
+        db.insert(key, mpls_cp(1, 100, 1, 15100, 16001));
         // Install it (records installed_mpls).
         assert!(db.mpls_reconcile(9, ep, true).install.is_some());
         // Withdrawing the last path reports the LFIB label to tear down.
         let (_, delta) = db.withdraw(9, ep, 1, 1);
-        assert_eq!(delta.mpls_remove, Some(1000));
+        assert_eq!(delta.mpls_remove, Some(15100));
     }
 
     #[test]
@@ -1386,14 +1714,14 @@ mod tests {
 
     #[test]
     fn steer_mpls_bsid_gated_on_installed_ilm() {
-        let mut db = SrPolicyDb::default();
+        let mut db = mpls_db();
         let ep = endpoint("10.0.0.9");
         db.insert(
             SrPolicyKey {
                 color: 100,
                 endpoint: ep,
             },
-            mpls_cp(1, 100, 1, 1000, 16001),
+            mpls_cp(1, 100, 1, 15100, 16001),
         );
         // The BSID ILM isn't installed yet (NHT-gated) → nothing to steer
         // to; the caller falls back to inline SID-list steering.
@@ -1401,7 +1729,7 @@ mod tests {
         // Once the endpoint resolves and the ILM installs, steer to the
         // single BSID label instead of the {16001} SID list.
         assert!(db.mpls_reconcile(100, ep, true).install.is_some());
-        assert_eq!(db.steer_mpls_bsid(100, ep, 0), Some(1000));
+        assert_eq!(db.steer_mpls_bsid(100, ep, 0), Some(15100));
         // The inline steer still yields the full stack (mode is a caller
         // choice; the DB exposes both).
         assert_eq!(db.steer_mpls(100, ep, 0), Some(vec![16001]));
@@ -1412,7 +1740,7 @@ mod tests {
 
     #[test]
     fn steer_mpls_bsid_co_bit_fallback() {
-        let mut db = SrPolicyDb::default();
+        let mut db = mpls_db();
         let nh = endpoint("10.0.0.9");
         let null = endpoint("0.0.0.0");
         db.insert(
@@ -1420,12 +1748,12 @@ mod tests {
                 color: 100,
                 endpoint: null,
             },
-            mpls_cp(1, 100, 1, 1000, 17001),
+            mpls_cp(1, 100, 1, 15100, 17001),
         );
         db.mpls_reconcile(100, null, true);
         // No exact <100, nh>: CO=00 → none; CO=01 → the null-endpoint BSID.
         assert_eq!(db.steer_mpls_bsid(100, nh, 0), None);
-        assert_eq!(db.steer_mpls_bsid(100, nh, 0b01), Some(1000));
+        assert_eq!(db.steer_mpls_bsid(100, nh, 0b01), Some(15100));
     }
 
     #[test]
@@ -1759,5 +2087,413 @@ mod tests {
         assert!(reflect_withdraw_to(true, false, true, true)); // non-client→client: yes
         assert!(reflect_withdraw_to(true, true, true, false)); // client→non-client: yes (RFC 4456 §6)
         assert!(reflect_withdraw_to(false, false, true, false)); // eBGP→iBGP: yes
+    }
+}
+
+#[cfg(test)]
+mod bsid_claim_tests {
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::rib::client::{ProtoId, RibClient, RibInbound};
+    use crate::rib::label_space::SharedLabelSpace;
+
+    const EP: &str = "10.0.0.9";
+
+    fn key(color: u32) -> SrPolicyKey {
+        SrPolicyKey {
+            color,
+            endpoint: EP.parse().unwrap(),
+        }
+    }
+
+    /// A database whose Binding-SIDs are claimed from SRLB 15000-15999 of
+    /// `space`, as BGP's instance (proto 7) claims them.
+    fn db_over(space: &SharedLabelSpace) -> (SrPolicyDb, mpsc::UnboundedReceiver<RibInbound>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let rib = RibClient::new(tx, ProtoId::from_raw(7));
+        let mut db = SrPolicyDb::default();
+        db.set_bsid_srlb(Some((15000, 15999)), |first, last| {
+            space.pool_for(first, last, &rib)
+        });
+        (db, rx)
+    }
+
+    /// A valid SR-MPLS candidate path with Binding-SID `bsid`, and the
+    /// Specified-BSID-only flag when `s`.
+    fn path(disc: u32, pref: u32, bsid: u32, s: bool) -> CandidatePath {
+        path_seg(disc, pref, bsid, s, 16001)
+    }
+
+    /// As [`path`], with the one-label segment list `seg`.
+    fn path_seg(disc: u32, pref: u32, bsid: u32, s: bool, seg: u32) -> CandidatePath {
+        let mut bsid = BindingSid::new(BindingSidValue::MplsLabel(bsid));
+        if s {
+            bsid.flags |= 0x80;
+        }
+        CandidatePath {
+            key: CandidatePathKey {
+                protocol_origin: PROTOCOL_ORIGIN_BGP,
+                originator: (65000, "10.0.0.1".parse().unwrap()),
+                discriminator: disc,
+            },
+            peer: 1,
+            from_client: false,
+            preference: pref,
+            priority: DEFAULT_PRIORITY,
+            binding_sid: Some(bsid),
+            srv6_binding_sid: None,
+            enlp: None,
+            segment_lists: vec![SegmentList {
+                weight: None,
+                segments: vec![Segment::TypeA {
+                    flags: 0,
+                    label: seg,
+                }],
+            }],
+            policy_name: None,
+            cp_name: None,
+            valid: true,
+        }
+    }
+
+    fn installed(db: &mut SrPolicyDb, color: u32) -> Option<u32> {
+        db.mpls_reconcile(color, EP.parse().unwrap(), true)
+            .install
+            .map(|b| b.bsid)
+    }
+
+    /// The labels claimed in the label space.
+    fn claimed(space: &SharedLabelSpace) -> Vec<u32> {
+        space
+            .lock()
+            .entries()
+            .iter()
+            .filter(|e| e.kind == crate::rib::label_space::EntryKind::Configured)
+            .map(|e| e.first)
+            .collect()
+    }
+
+    /// A Binding-SID in the SRLB is claimed and installed; one outside it
+    /// is not available, and the path, without the Specified-BSID-only
+    /// flag, stays active with no Binding-SID ILM (RFC 9256 §6.2).
+    #[tokio::test]
+    async fn a_binding_sid_is_installed_only_in_the_srlb() {
+        let space = SharedLabelSpace::default();
+        let (mut db, _rx) = db_over(&space);
+        db.insert(key(1), path(1, 100, 15100, false));
+        assert_eq!(db.policies[&key(1)].bsid, Some((15100, BsidState::Granted)));
+        assert_eq!(installed(&mut db, 1), Some(15100));
+        assert_eq!(claimed(&space), vec![15100]);
+
+        db.insert(key(2), path(1, 100, 16100, false));
+        let policy = &db.policies[&key(2)];
+        assert!(policy.active.is_some(), "still active");
+        assert_eq!(
+            policy.bsid,
+            Some((16100, BsidState::Unavailable(BsidUnavailable::OutsideSrlb)))
+        );
+        assert_eq!(installed(&mut db, 2), None);
+    }
+
+    /// With the Specified-BSID-only flag, an unavailable Binding-SID makes
+    /// the path invalid, and the next one is selected (§6.2.3).
+    #[tokio::test]
+    async fn specified_bsid_only_invalidates_the_path() {
+        let space = SharedLabelSpace::default();
+        let (mut db, _rx) = db_over(&space);
+        db.insert(key(1), path(1, 100, 15100, false));
+        db.insert(key(1), path(2, 200, 16100, true));
+        let policy = &db.policies[&key(1)];
+        assert_eq!(policy.active.as_ref().map(|k| k.discriminator), Some(1));
+        assert_eq!(policy.bsid, Some((15100, BsidState::Granted)));
+        assert_eq!(
+            policy
+                .bsid_excluded
+                .iter()
+                .map(|k| k.discriminator)
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
+
+        // Without the flag the better path wins, with no Binding-SID; the
+        // label the other path held goes back.
+        db.insert(key(1), path(2, 200, 16100, false));
+        let policy = &db.policies[&key(1)];
+        assert_eq!(policy.active.as_ref().map(|k| k.discriminator), Some(2));
+        assert!(policy.bsid_excluded.is_empty());
+        assert!(claimed(&space).is_empty());
+    }
+
+    /// Two policies MUST NOT share a Binding-SID (§6.1): the second waits
+    /// as unavailable, and gets it once the first lets it go.
+    #[tokio::test]
+    async fn two_policies_cannot_share_a_binding_sid() {
+        let space = SharedLabelSpace::default();
+        let (mut db, _rx) = db_over(&space);
+        db.insert(key(1), path(1, 100, 15100, false));
+        db.insert(key(2), path(1, 100, 15100, false));
+        assert_eq!(
+            db.policies[&key(2)].bsid,
+            Some((15100, BsidState::Unavailable(BsidUnavailable::OtherPolicy)))
+        );
+        assert!(db.take_reselected().is_empty());
+
+        // The label goes back through the RIB, as every label does: the
+        // second policy's claim waits until the first one's ILM is gone.
+        let ep: IpAddr = EP.parse().unwrap();
+        db.withdraw(1, ep, 1, 1);
+        assert_eq!(db.policies[&key(2)].bsid, Some((15100, BsidState::Pending)));
+        assert_eq!(
+            db.take_reselected()
+                .iter()
+                .map(|(k, _)| k.color)
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
+        assert_eq!(installed(&mut db, 2), None);
+        space
+            .lock()
+            .release_handled(ProtoId::from_raw(7), 15100, false);
+        assert_eq!(
+            space.lock().take_granted(),
+            vec![(ProtoId::from_raw(7), 15100)]
+        );
+        assert_eq!(db.bsid_granted(15100), Some(key(2)));
+        assert_eq!(installed(&mut db, 2), Some(15100));
+    }
+
+    /// A Binding-SID an IGP's dynamic Adjacency-SID holds is claimed and
+    /// waits; the holder is moved, and the RIB's grant lets the ILM in. A
+    /// stale grant does nothing.
+    #[tokio::test]
+    async fn a_dynamic_holder_makes_the_claim_wait() {
+        let space = SharedLabelSpace::default();
+        let (otx, _orx) = mpsc::unbounded_channel();
+        let igp = RibClient::new(otx, ProtoId::from_raw(99));
+        let mut holder = space.pool_for(15000, 15999, &igp);
+        assert_eq!(holder.allocate(), Some(15000));
+
+        let (mut db, _rx) = db_over(&space);
+        db.insert(key(1), path(1, 100, 15000, false));
+        assert_eq!(db.policies[&key(1)].bsid, Some((15000, BsidState::Pending)));
+        assert_eq!(installed(&mut db, 1), None);
+        assert_eq!(db.bsid_granted(15000), None, "not granted yet");
+        assert_eq!(
+            space.lock().take_revoked(),
+            vec![(ProtoId::from_raw(99), 15000)]
+        );
+
+        holder.release(15000);
+        space
+            .lock()
+            .release_handled(ProtoId::from_raw(99), 15000, false);
+        assert_eq!(
+            space.lock().take_granted(),
+            vec![(ProtoId::from_raw(7), 15000)]
+        );
+        assert_eq!(db.bsid_granted(15000), Some(key(1)));
+        assert_eq!(installed(&mut db, 1), Some(15000));
+        assert_eq!(db.bsid_granted(15000), None, "a second grant is stale");
+    }
+
+    /// An SRLB change re-evaluates every policy with a Binding-SID: one
+    /// left outside goes back, one now inside is claimed; with no SRLB none
+    /// is available.
+    #[tokio::test]
+    async fn an_srlb_change_re_evaluates_the_binding_sids() {
+        let space = SharedLabelSpace::default();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let rib = RibClient::new(tx, ProtoId::from_raw(7));
+        let (mut db, _r) = db_over(&space);
+        db.insert(key(1), path(1, 100, 15100, false));
+        db.insert(key(2), path(1, 100, 16100, false));
+
+        db.set_bsid_srlb(Some((16000, 16999)), |f, l| space.pool_for(f, l, &rib));
+        assert_eq!(
+            db.policies[&key(1)].bsid,
+            Some((15100, BsidState::Unavailable(BsidUnavailable::OutsideSrlb)))
+        );
+        assert_eq!(db.policies[&key(2)].bsid, Some((16100, BsidState::Granted)));
+        assert_eq!(db.take_reselected().len(), 2);
+        assert_eq!(claimed(&space), vec![16100]);
+        assert_eq!(installed(&mut db, 2), Some(16100));
+
+        // The installed ILM goes, and that is a steering change: routes
+        // steered onto 16100 fall back.
+        db.set_bsid_srlb(None, |f, l| space.pool_for(f, l, &rib));
+        assert_eq!(
+            db.policies[&key(2)].bsid,
+            Some((16100, BsidState::Unavailable(BsidUnavailable::NoSrlb)))
+        );
+        let action = db.mpls_reconcile(2, EP.parse().unwrap(), true);
+        assert_eq!((action.remove, action.install), (Some(16100), None));
+        assert!(action.steer_changed);
+        assert!(
+            !db.mpls_reconcile(2, EP.parse().unwrap(), true)
+                .steer_changed
+        );
+    }
+
+    /// An SRLB move drops a waiting claim outside the new range, which the
+    /// pool does not report: the policy must not stay waiting for a grant
+    /// that cannot come. Here a Specified-BSID-only path waits on a label
+    /// an IGP holds; once the SRLB moves away it is invalid, and the next
+    /// path is selected.
+    #[tokio::test]
+    async fn a_moved_srlb_drops_a_waiting_claim() {
+        let space = SharedLabelSpace::default();
+        let (otx, _orx) = mpsc::unbounded_channel();
+        let igp = RibClient::new(otx, ProtoId::from_raw(99));
+        let mut holder = space.pool_for(15000, 15999, &igp);
+        assert_eq!(holder.allocate(), Some(15000));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let rib = RibClient::new(tx, ProtoId::from_raw(7));
+
+        let (mut db, _r) = db_over(&space);
+        db.insert(key(1), path(1, 200, 15000, true));
+        db.insert(key(1), path(2, 100, 16100, false));
+        assert_eq!(db.policies[&key(1)].bsid, Some((15000, BsidState::Pending)));
+
+        db.set_bsid_srlb(Some((16000, 16999)), |f, l| space.pool_for(f, l, &rib));
+        let policy = &db.policies[&key(1)];
+        assert_eq!(policy.active.as_ref().map(|k| k.discriminator), Some(2));
+        assert_eq!(policy.bsid, Some((16100, BsidState::Granted)));
+        assert_eq!(
+            policy
+                .bsid_excluded
+                .iter()
+                .map(|k| k.discriminator)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+    }
+
+    /// A claim refused because a configured Adjacency-SID has the label
+    /// registers no waiter, so the label space tells BGP at the next
+    /// release (`LocalLabelsFreed`), and the policy claims again.
+    #[tokio::test]
+    async fn a_label_a_configured_sid_gives_up_is_claimed_again() {
+        let space = SharedLabelSpace::default();
+        let (otx, _orx) = mpsc::unbounded_channel();
+        let ospf = RibClient::new(otx, ProtoId::from_raw(99));
+        let mut configured = space.pool_for(15000, 15999, &ospf);
+        assert_eq!(configured.claim(15100), Claim::Granted);
+
+        let (mut db, _rx) = db_over(&space);
+        db.insert(key(1), path(1, 100, 15100, false));
+        assert_eq!(
+            db.policies[&key(1)].bsid,
+            Some((15100, BsidState::Unavailable(BsidUnavailable::InUse)))
+        );
+        assert!(
+            space.lock().take_starved().contains(&ProtoId::from_raw(7)),
+            "told at the next release"
+        );
+
+        configured.unclaim(15100);
+        assert!(
+            space
+                .lock()
+                .release_handled(ProtoId::from_raw(99), 15100, false)
+        );
+        db.labels_freed();
+        assert_eq!(db.policies[&key(1)].bsid, Some((15100, BsidState::Granted)));
+        assert_eq!(
+            db.take_reselected()
+                .iter()
+                .map(|(k, _)| k.color)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert_eq!(installed(&mut db, 1), Some(15100));
+    }
+
+    /// A change of active path, or of its segment lists, is a steering
+    /// change whatever happens to the Binding-SID install: routes steered
+    /// by the inline segment list re-derive it. Here a Specified-BSID-only
+    /// path waiting on its label steers inline over 16001; an SRLB move
+    /// invalidates it, and the fallback's 16002 must reach those routes
+    /// though no Binding-SID ILM is installed or removed.
+    #[tokio::test]
+    async fn an_active_path_change_is_a_steering_change() {
+        let space = SharedLabelSpace::default();
+        let (otx, _orx) = mpsc::unbounded_channel();
+        let igp = RibClient::new(otx, ProtoId::from_raw(99));
+        let mut holder = space.pool_for(15000, 16999, &igp);
+        assert_eq!(holder.allocate(), Some(15000));
+        assert_eq!(holder.claim(16100), Claim::Granted);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let rib = RibClient::new(tx, ProtoId::from_raw(7));
+
+        let (mut db, _r) = db_over(&space);
+        assert!(
+            db.insert(key(1), path_seg(1, 200, 15000, true, 16001))
+                .steer_changed
+        );
+        assert!(
+            !db.insert(key(1), path_seg(2, 100, 16100, false, 16002))
+                .steer_changed
+        );
+        assert_eq!(db.steer_mpls(1, EP.parse().unwrap(), 0), Some(vec![16001]));
+
+        db.set_bsid_srlb(Some((16000, 16999)), |f, l| space.pool_for(f, l, &rib));
+        assert_eq!(db.steer_mpls(1, EP.parse().unwrap(), 0), Some(vec![16002]));
+        let reselected = db.take_reselected();
+        assert_eq!(reselected.len(), 1);
+        assert!(reselected[0].1.steer_changed);
+        assert_eq!(installed(&mut db, 1), None, "16100 is held elsewhere");
+    }
+
+    /// Received paths change steering too: a better path, or the active
+    /// path's segment list replaced in place; withdrawing the policy is
+    /// one. Re-announcing the same path, or withdrawing a backup, is not.
+    #[tokio::test]
+    async fn received_paths_report_steering_changes() {
+        let space = SharedLabelSpace::default();
+        let (mut db, _rx) = db_over(&space);
+        let ep: IpAddr = EP.parse().unwrap();
+        assert!(
+            db.insert(key(1), path_seg(1, 100, 15100, false, 16001))
+                .steer_changed
+        );
+        assert!(
+            !db.insert(key(1), path_seg(1, 100, 15100, false, 16001))
+                .steer_changed
+        );
+        assert!(
+            db.insert(key(1), path_seg(1, 100, 15100, false, 16003))
+                .steer_changed
+        );
+        assert!(
+            db.insert(key(1), path_seg(2, 200, 15200, false, 16004))
+                .steer_changed
+        );
+        // Disc 1 is a backup now: withdrawing it changes nothing.
+        assert!(!db.withdraw(1, ep, 1, 1).1.steer_changed);
+        assert!(db.withdraw(1, ep, 2, 1).1.steer_changed);
+    }
+
+    /// A Binding-SID the policy no longer wants goes back: the path's label
+    /// changed, or the policy was withdrawn.
+    #[tokio::test]
+    async fn a_label_no_longer_wanted_goes_back() {
+        let space = SharedLabelSpace::default();
+        let (mut db, mut rx) = db_over(&space);
+        db.insert(key(1), path(1, 100, 15100, false));
+        db.insert(key(1), path(1, 100, 15200, false));
+        assert_eq!(db.policies[&key(1)].bsid, Some((15200, BsidState::Granted)));
+        assert_eq!(claimed(&space), vec![15200]);
+
+        let ep: IpAddr = EP.parse().unwrap();
+        db.withdraw(1, ep, 1, 1);
+        assert!(claimed(&space).is_empty());
+        let released: Vec<u32> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|env| match env.msg {
+                crate::rib::Message::LocalLabelRelease { label } => Some(label),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(released, vec![15100, 15200], "each through the RIB");
     }
 }
