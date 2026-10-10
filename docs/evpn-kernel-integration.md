@@ -113,6 +113,12 @@ reinstalled by the end of the grace period is removed.
   learns it once the old PE withdraws. Sticky, default-gateway and router flags
   are read from the RFC 7432 MAC Mobility, Default Gateway and RFC 9161 ND
   communities.
+* Duplicate address detection (RFC 7432 §15.1) is on by default, as in FRR:
+  5 moves within 180 seconds are logged. With `dup-addr-detection freeze`,
+  the duplicate is neither advertised nor installed from remote routes, and
+  the kernel keeps its last FDB and neighbor state until the freeze ends or
+  `clear bgp evpn dup-addr` releases it. See the book chapter "EVPN
+  Duplicate Address Detection".
 * Remote Type-2 bindings install `EXT_LEARNED` / `NOARP` neighbors on the
   owning bridge, plus the remote MAC/VTEP FDB. Withdrawing one binding keeps
   the MAC when another NLRI still references it. Neighbor deletion checks
