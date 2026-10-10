@@ -60,7 +60,10 @@ protocol and priority) are excluded from kernel ingestion, so static and
 IGP output cannot displace its owning route as a distance-0 kernel entry.
 External static routes remain eligible. Kernel routes at different
 priorities are retained independently; replacing a blackhole with a
-unicast route, or the reverse, updates the selected route and redistribution.
+unicast route, or the reverse, updates the selected route and redistribution. At
+one priority the RIB follows Linux: IPv4 keeps appended routes beside the
+first and removes the one a deletion names; IPv6 merges them into one
+multipath route, and deleting a next hop removes only that next hop.
 
 zebra-rs installs its static routes as `proto zebra` (`RTPROT_ZEBRA`,
 11), so they are distinguishable from operator `proto static` routes,
@@ -84,8 +87,8 @@ upgrading, such a route is adopted when the static configuration
 installs the same route (table, prefix and priority), and otherwise left
 as an operator route. SRv6 routes (`seg6`/`seg6local` encapsulation)
 under zebra-rs's protocol numbers are never ingested: their owners
-reinstall them in place, and an earlier run's that is no longer
-configured is not removed.
+reinstall them in place. An earlier run's that this run has not
+reinstalled by the end of the grace period is removed.
 
 ## Kernel contract
 
@@ -95,6 +98,21 @@ configured is not removed.
 * Received Type-2 routes may carry the optional Label2 (the L3VNI under
   symmetric IRB, RFC 9135). It is accepted and re-advertised unchanged;
   zebra-rs does not yet originate it or install Type-2 host routes in VRFs.
+* A remote MAC/IP route for a MAC learned locally is installed only if it
+  outranks this speaker's own route, in FRR's order: a sticky MAC wins, a
+  shared non-zero Ethernet Segment keeps the local path, then the higher
+  MAC Mobility sequence number, then the lower VTEP address (RFC 7432
+  §7.7, §15). A route it does not outrank is removed from the kernel
+  state rather than overwriting the local FDB row, and is installed again
+  if the local route is withdrawn. The same applies to an IP bound
+  locally to any MAC: a local MAC/IP route carries the higher of its MAC's
+  sequence number and the IP's highest remote one plus one, so an IP that
+  moves here on a new MAC outranks its old binding (FRR's neighbor
+  sequence numbers). As in FRR, a remote binding is installed as a NOARP
+  neighbor the kernel will not let ARP override, so the PE an IP moved to
+  learns it once the old PE withdraws. Sticky, default-gateway and router flags
+  are read from the RFC 7432 MAC Mobility, Default Gateway and RFC 9161 ND
+  communities.
 * Remote Type-2 bindings install `EXT_LEARNED` / `NOARP` neighbors on the
   owning bridge, plus the remote MAC/VTEP FDB. Withdrawing one binding keeps
   the MAC when another NLRI still references it. Neighbor deletion checks
@@ -106,8 +124,13 @@ configured is not removed.
   address and no `vtep-source`) is still rewritten to the session's local
   address.
 * Imported Type-5 routes use the remote VTEP as gateway on the L3-VNI bridge,
-  with RMAC FDB and neighbor state. IPv6 prefixes use an IPv4-mapped gateway
-  and `onlink`, with corresponding IPv4 and mapped-IPv6 RMAC neighbors.
+  with RMAC FDB and neighbor state, for IPv4 and IPv6 VTEPs. With an IPv4
+  VTEP, IPv6 prefixes use its IPv4-mapped address as gateway, with IPv4 and
+  mapped-IPv6 RMAC neighbors. With an IPv6 VTEP, IPv6 prefixes use it as
+  gateway and IPv4 prefixes use it as an IPv6 `via`, with one IPv6 RMAC
+  neighbor. Routes use `onlink`. Underlay ECMP toward one VTEP (same VTEP,
+  L3 VNI and RMAC on every path) installs one bridge adjacency; different
+  overlay adjacencies are not collapsed. cradle rejects IPv6 VTEPs.
   Linux normalizes IPv6 metric zero to 1024. RMAC state remains
   until the last imported prefix using it is withdrawn. The bridge FDB
   holds one destination per MAC, so when several VTEPs advertise the same
@@ -132,12 +155,15 @@ configured is not removed.
   take precedence over their kernel shadows to retain transport metadata.
   VRF kernel routes observed before config adoption survive startup replay.
 
-Bridge-based Type-5 installation is opt-in and currently targets a unicast VXLAN
-nexthop with an IPv4 VTEP. Inner IPv4 and IPv6 are supported. Changing the
+Bridge-based Type-5 installation is opt-in and supports IPv4 and IPv6 VTEPs
+with inner IPv4 and IPv6. Changing the
 mode while routes are active does not replay those routes; configure it at
 startup. Existing route installation remains the default when the option
-is disabled. Validation does not qualify 500k routes, EVPN mobility,
-multihoming or prefix ECMP.
+is disabled. Validation does not qualify 500k routes, multihoming or
+prefix ECMP. A received VXLAN Type-2 installs into the L2 VNI its Label1
+names (RFC 8365); its first route target may be an associated L3
+service's. NHT resolves VTEPs through a plain eBGP underlay route once its
+next hops sit on interfaces.
 
 ## Validation
 

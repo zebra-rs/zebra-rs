@@ -7718,16 +7718,14 @@ impl Bgp {
     /// vxlan`) VRF export, or `None` for a non-VXLAN VRF or one missing its
     /// L3VNI / router-MAC / VTEP. The VTEP is the L3VNI vxlan device's local
     /// address, registered in `local_vxlans` by `api_vxlan_add`.
-    fn vxlan_type5(&self, vrf: &str) -> Option<(u32, std::net::Ipv4Addr, [u8; 6])> {
+    fn vxlan_type5(&self, vrf: &str) -> Option<(u32, std::net::IpAddr, [u8; 6])> {
         let cfg = self.vrfs.get(vrf)?;
         if cfg.encapsulation != super::vrf_config::BgpVrfEncapsulation::Vxlan {
             return None;
         }
         let l3vni = cfg.l3vni?;
         let rmac = cfg.router_mac?;
-        let std::net::IpAddr::V4(vtep) = self.local_vxlans.get(&l3vni)? else {
-            return None;
-        };
+        let vtep = self.local_vxlans.get(&l3vni)?;
         Some((l3vni, *vtep, rmac))
     }
 

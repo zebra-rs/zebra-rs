@@ -92,7 +92,14 @@ impl Rib {
             self.mac_del(vni, mac).await;
             return;
         };
-        if self.local_device_mac_bridge(vni, mac).is_some() {
+        // Refused before `mac_add` (which refuses the same way), so say so
+        // here: the log line is how an operator sees a peer advertising one
+        // of this node's own addresses.
+        if let Some(bridge) = self.local_device_mac_bridge(vni, mac) {
+            tracing::warn!(
+                "mac_add: VNI {vni} mac {mac} is a local address on bridge ifindex {bridge}; \
+                 ignoring the remote EVPN route for it"
+            );
             return;
         }
         let seq = winner.seq;

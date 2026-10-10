@@ -171,6 +171,9 @@ async fn route_dump(
     };
     let mut routes = handle.route().get(route).execute();
     while let Some(msg) = routes.try_next().await? {
+        // An earlier run's SRv6 routes are not mirrored; remember them so
+        // the leftover sweep can remove those nothing reinstalls.
+        rib.fib_handle.note_srv6_leftover(&msg);
         let route = route_from_msg_with(msg, nexthops, true);
         if let Some(route) = route {
             let msg = FibMessage::NewRoute(route);

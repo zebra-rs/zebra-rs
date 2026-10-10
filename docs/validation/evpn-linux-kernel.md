@@ -1,7 +1,7 @@
 # EVPN Linux kernel forwarding validation
 
 The [standalone namespace test](../../tests/evpn-linux-kernel/README.md)
-passed **116/116 checks** on 2026-10-09. Two zebra-rs speakers exchanged
+passed **129/129 checks** on 2026-10-09. Two zebra-rs speakers exchanged
 EVPN Type-2/3/5 state and forwarded tenant traffic through Linux bridge,
 VXLAN and VRF devices. No OVN, OVS, FRR, cEOS or containers participated.
 
@@ -9,7 +9,10 @@ Coverage includes IPv4/IPv6 switching and routing in both directions,
 VTEPs distinct from BGP transport addresses, kernel-only underlay routes,
 Type-2 IPv4 withdrawal with MAC/IPv6 survival, static-blackhole Type-5
 redistribution from startup VRF state, prefix withdrawal and final cleanup
-of both IPv4 and mapped-IPv6 RMAC neighbors. Recovery checks remove
+of both IPv4 and mapped-IPv6 RMAC neighbors. ARP/ND suppression checks
+resolve a remote host's IPv4 and IPv6 address and require no ARP request
+or neighbor solicitation to enter the overlay (with `neigh_suppress` off,
+both are flooded and the checks fail). Recovery checks remove
 bridge Type-5 state in the kernel five ways (L3-VNI bridge admin flap,
 VXLAN carrier flap, neighbor/FDB flush, VXLAN detach and re-attach,
 external route deletion) and require routes, RMAC neighbors and FDB, and
@@ -28,7 +31,10 @@ adopted. Floating statics (two priorities each) check that a removed
 one leaves no priority behind and a changed backup priority replaces the
 old one. A binary built without leftover handling fails exactly the
 eight leftover checks; one handling only a single priority per leftover
-fails the four floating-static checks. The
+fails the four floating-static checks. A MAC mobility scenario moves a station
+behind the other speaker and back and checks both sides settle and stay
+settled; a build that installs a remote route over a local MAC regardless
+of sequence number fails to keep the returned station local. The
 [JSON report](evpn-linux-kernel.json) records each check and the tested
 binary's SHA-256.
 
@@ -42,10 +48,16 @@ Run the standalone test from the repository root:
 ```bash
 cargo build -p zebra-rs -p vtyctl
 sudo python3 tests/evpn-linux-kernel/test.py --output /tmp/evpn-kernel-results.json
+sudo python3 tests/evpn-linux-kernel/test.py --ipv6-vtep --output /tmp/evpn-kernel-ipv6-results.json
 ```
 
-The test uses flat fixed-VNI bridges and IPv4 VTEPs. It does not qualify
-VLAN-aware fixed-VNI bridges, IPv6 VTEPs, mobility, multihoming,
-prefix ECMP or 500k-route capacity. The
+With `--ipv6-vtep` (IPv6 VTEPs over an IPv6 underlay) the same test passed
+**118/118 checks** ([JSON report](evpn-linux-kernel-ipv6.json)); an IPv6
+VTEP needs one RMAC neighbor instead of two, hence fewer checks. A build
+without IPv6 VTEP support on the bridge Type-5 path installs no Type-5
+route in that mode.
+
+The test uses flat fixed-VNI bridges. It does not qualify VLAN-aware
+fixed-VNI bridges, multihoming, prefix ECMP or 500k-route capacity. The
 [OVN/cEOS report](ovn-ceos-kind.md) describes earlier prototype validation,
 with its own hashes and configuration; it is separate evidence.

@@ -257,6 +257,13 @@ fn nht_best_entry(entries: &RibEntries) -> Option<&crate::rib::entry::RibEntry> 
         .iter()
         .filter(|e| {
             entry_resolvable(e)
+                // A plain (eBGP) IP underlay route is usable once its next
+                // hops are resolved onto interfaces. Never recurse through an
+                // unresolved BGP route, which could itself depend on this NHT.
+                || (e.is_valid() && e.rtype == RibType::Bgp && {
+                    let paths = entry_unis(&e.nexthop);
+                    !paths.is_empty() && paths.iter().all(|u| u.ifindex().is_some_and(|i| i != 0))
+                })
                 || (e.is_valid()
                     && matches!(e.rtype, RibType::Kernel | RibType::Dhcp)
                     && !entry_unis(&e.nexthop).is_empty())
@@ -417,6 +424,42 @@ mod tests {
             t.insert(p.parse().unwrap(), vec![e]);
         }
         t
+    }
+
+    /// A BGP-built IP underlay (an eBGP fabric carrying the VTEP loopbacks)
+    /// resolves a VTEP once its next hops sit on interfaces, for both
+    /// families; an unresolved BGP route does not.
+    #[test]
+    fn resolved_plain_bgp_underlay_supports_both_families() {
+        let mut entry = RibEntry::new(RibType::Bgp);
+        entry.valid = true;
+        entry.distance = 20;
+        let mut uni = NexthopUni::new("fe80::1".parse().unwrap(), 0, vec![]);
+        uni.ifindex_origin = Some(7);
+        uni.valid = true;
+        entry.nexthop = Nexthop::Uni(uni);
+        let v4 = table_rows(vec![("198.51.100.1/32", entry.clone())]);
+        let mut v6 = PrefixMap::new();
+        v6.insert(
+            "2001:db8::1/128".parse::<Ipv6Net>().unwrap(),
+            vec![entry.clone()],
+        );
+        for resolution in [
+            resolve_v4(&v4, "198.51.100.1".parse().unwrap()),
+            resolve_v6(&v6, "2001:db8::1".parse().unwrap()),
+        ] {
+            assert!(resolution.reachable);
+            assert_eq!(
+                resolution.nexthops[0].addr,
+                "fe80::1".parse::<IpAddr>().unwrap()
+            );
+            assert_eq!(resolution.nexthops[0].ifindex, 7);
+        }
+        if let Nexthop::Uni(uni) = &mut entry.nexthop {
+            uni.ifindex_origin = None;
+        }
+        let unresolved = table_rows(vec![("198.51.100.1/32", entry)]);
+        assert!(!resolve_v4(&unresolved, "198.51.100.1".parse().unwrap()).reachable);
     }
 
     #[test]

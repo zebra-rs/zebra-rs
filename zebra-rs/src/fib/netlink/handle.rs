@@ -406,10 +406,20 @@ pub struct FibHandle {
     /// The VTEP each `(L3 VNI, RMAC)` FDB entry currently points at.
     /// Several VTEPs can advertise one RMAC; the FDB holds only one, so a
     /// withdrawal of that VTEP must re-point it at a remaining one.
-    evpn_rmac_vtep: std::sync::Mutex<BTreeMap<(u32, [u8; 6]), Ipv4Addr>>,
+    evpn_rmac_vtep: std::sync::Mutex<BTreeMap<(u32, [u8; 6]), IpAddr>>,
     /// The bridge each L3 VNI's Type-5 state was installed on, so a move
     /// to another bridge can remove what was left on the old one.
     evpn_l3vni_bridge: std::sync::Mutex<BTreeMap<u32, u32>>,
+    /// SRv6 routes under our protocols an earlier run left, found by the
+    /// startup dump: `(table, prefix, priority)` → protocol. They are never
+    /// mirrored into the RIB (their owners reinstall them in place), so the
+    /// leftover sweep removes those nothing reinstalled
+    /// (`sweep_srv6_leftovers`).
+    srv6_leftovers: std::sync::Mutex<BTreeMap<(u32, IpNet, u32), RouteProtocol>>,
+    /// The leftovers' keys this run installed a route at, SRv6 or not: a
+    /// route at the same `(table, prefix, priority)` replaced the leftover
+    /// in the kernel, so the sweep must leave that key alone.
+    srv6_installed: std::sync::Mutex<BTreeSet<(u32, IpNet, u32)>>,
     /// VNI to VXLAN interface index mapping
     /// Used to resolve VNI to the correct VXLAN device for FDB operations
     pub vni_ifindex_map: BTreeMap<u32, u32>,
@@ -448,6 +458,25 @@ type CradleMember = (
     Option<crate::fib::cradle::VxlanLeg>,
     Option<crate::fib::cradle::Leaf>,
 );
+
+/// The single overlay adjacency of a bridge Type-5 next hop: a VXLAN leg,
+/// or underlay ECMP whose legs all carry the same VTEP, L3 VNI and router
+/// MAC (the underlay supplies the paths; the bridge route needs one
+/// adjacency). Different overlay adjacencies are not collapsed.
+pub(crate) fn evpn_overlay(nexthop: &Nexthop) -> Option<(crate::rib::VxlanL3Encap, u32)> {
+    match nexthop {
+        Nexthop::Uni(uni) => uni.vxlan.map(|encap| (encap, uni.metric)),
+        Nexthop::Multi(multi) => {
+            let encap = multi.nexthops.first()?.vxlan?;
+            multi
+                .nexthops
+                .iter()
+                .all(|uni| uni.vxlan == Some(encap))
+                .then_some((encap, multi.metric))
+        }
+        _ => None,
+    }
+}
 
 /// Extract a nexthop's cradle-tee members. The gateway is passed as the raw
 /// `IpAddr` (v4 for plain/MPLS legs, v6 for the SRv6 underlay), plus the MPLS
@@ -695,6 +724,8 @@ impl FibHandle {
             evpn_prefix_routes: std::sync::Mutex::new(BTreeMap::new()),
             evpn_rmac_vtep: std::sync::Mutex::new(BTreeMap::new()),
             evpn_l3vni_bridge: std::sync::Mutex::new(BTreeMap::new()),
+            srv6_leftovers: std::sync::Mutex::new(BTreeMap::new()),
+            srv6_installed: std::sync::Mutex::new(BTreeSet::new()),
             vni_ifindex_map: BTreeMap::new(),
             vni_bridge_map: BTreeMap::new(),
             vni_metadata_map: BTreeMap::new(),
@@ -1162,11 +1193,10 @@ impl FibHandle {
         table_id: u32,
     ) -> bool {
         if self.kernel_route_exchange
-            && let Nexthop::Uni(uni) = nexthop
-            && let Some(encap) = uni.vxlan
+            && let Some((encap, metric)) = evpn_overlay(nexthop)
         {
             return self
-                .evpn_prefix_route(IpNet::V4(*prefix), table_id, uni.metric, encap, true)
+                .evpn_prefix_route(IpNet::V4(*prefix), table_id, metric, encap, true)
                 .await;
         }
         let mut msg = RouteMessage::default();
@@ -1267,6 +1297,7 @@ impl FibHandle {
             }
         }
 
+        let replaced = self.leftover_key(&msg);
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
         // Upsert (`NLM_F_REPLACE`), not `NLM_F_EXCL`: the kernel keys a
         // route on (table, dst, priority), NOT on its nexthop — a
@@ -1306,6 +1337,9 @@ impl FibHandle {
                     );
                 }
             }
+        }
+        if ok {
+            self.note_installed(replaced);
         }
         ok
     }
@@ -1459,6 +1493,7 @@ impl FibHandle {
             )));
         msg.attributes.push(RouteAttribute::Priority(metric));
 
+        let replaced = if add { self.leftover_key(&msg) } else { None };
         let inner = if add {
             RouteNetlinkMessage::NewRoute(msg)
         } else {
@@ -1496,6 +1531,9 @@ impl FibHandle {
                 }
             }
         }
+        if ok {
+            self.note_installed(replaced);
+        }
         ok
     }
 
@@ -1508,7 +1546,7 @@ impl FibHandle {
     ) {
         // Follow what was installed, not the knob: it may have been
         // toggled since, and the bridge route only matches this path.
-        if matches!(nexthop, Nexthop::Uni(uni) if uni.vxlan.is_some())
+        if evpn_overlay(nexthop).is_some()
             && let Some((encap, metric)) = self.evpn_prefix_tracked(table_id, IpNet::V4(*prefix))
         {
             self.evpn_prefix_route(IpNet::V4(*prefix), table_id, metric, encap, false)
@@ -1718,11 +1756,10 @@ impl FibHandle {
         table_id: u32,
     ) -> bool {
         if self.kernel_route_exchange
-            && let Nexthop::Uni(uni) = nexthop
-            && let Some(encap) = uni.vxlan
+            && let Some((encap, metric)) = evpn_overlay(nexthop)
         {
             return self
-                .evpn_prefix_route(IpNet::V6(*prefix), table_id, uni.metric, encap, true)
+                .evpn_prefix_route(IpNet::V6(*prefix), table_id, metric, encap, true)
                 .await;
         }
         if fib_route() {
@@ -1788,6 +1825,7 @@ impl FibHandle {
             }
             msg.attributes.push(RouteAttribute::Priority(uni.metric));
 
+            let replaced = self.leftover_key(&msg);
             let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
             req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
             let mut ok = true;
@@ -1799,6 +1837,9 @@ impl FibHandle {
                         "NewRoute seg6local install error: prefix={prefix} action={action:?} err={e}"
                     );
                 }
+            }
+            if ok {
+                self.note_installed(replaced);
             }
             return ok;
         }
@@ -1941,6 +1982,7 @@ impl FibHandle {
             );
         }
 
+        let replaced = self.leftover_key(&msg);
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
         // Upsert (`NLM_F_REPLACE`) — see the v4 sibling: a re-resolved
         // route keeps its (table, dst, priority) key but changes its
@@ -1975,6 +2017,9 @@ impl FibHandle {
                     );
                 }
             }
+        }
+        if ok {
+            self.note_installed(replaced);
         }
         ok
     }
@@ -2059,6 +2104,7 @@ impl FibHandle {
             )));
         msg.attributes.push(RouteAttribute::Priority(metric));
 
+        let replaced = if add { self.leftover_key(&msg) } else { None };
         let inner = if add {
             RouteNetlinkMessage::NewRoute(msg)
         } else {
@@ -2094,6 +2140,9 @@ impl FibHandle {
                 }
             }
         }
+        if ok {
+            self.note_installed(replaced);
+        }
         ok
     }
 
@@ -2106,7 +2155,7 @@ impl FibHandle {
     ) {
         // Follow what was installed, not the knob: it may have been
         // toggled since, and the bridge route only matches this path.
-        if matches!(nexthop, Nexthop::Uni(uni) if uni.vxlan.is_some())
+        if evpn_overlay(nexthop).is_some()
             && let Some((encap, metric)) = self.evpn_prefix_tracked(table_id, IpNet::V6(*prefix))
         {
             self.evpn_prefix_route(IpNet::V6(*prefix), table_id, metric, encap, false)
@@ -2683,11 +2732,14 @@ impl FibHandle {
             );
         }
 
+        let replaced = self.leftover_key(&msg);
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
         req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
+        let mut ok = true;
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(m) = response.next().await {
             if let NetlinkPayload::Error(e) = m.payload {
+                ok = false;
                 // warn level so kernel rejections show up without
                 // requiring `system tracing fib srv6` — silent failures
                 // here are how a misshaped seg6local install slips through.
@@ -2707,6 +2759,9 @@ impl FibHandle {
                     e
                 );
             }
+        }
+        if ok {
+            self.note_installed(replaced);
         }
     }
 
@@ -2757,11 +2812,14 @@ impl FibHandle {
             }
         }
 
+        let replaced = self.leftover_key(&msg);
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
         req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
+        let mut ok = true;
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(m) = response.next().await {
             if let NetlinkPayload::Error(e) = m.payload {
+                ok = false;
                 tracing::warn!(
                     "mirror redirect install error: sid={} mirror_sid={} nh6={} ifindex={} err={}",
                     sid_prefix.addr(),
@@ -2771,6 +2829,9 @@ impl FibHandle {
                     e
                 );
             }
+        }
+        if ok {
+            self.note_installed(replaced);
         }
     }
 
@@ -2877,11 +2938,14 @@ impl FibHandle {
         msg.attributes.push(encap);
         msg.attributes.push(encap_type);
 
+        let replaced = self.leftover_key(&msg);
         let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewRoute(msg));
         req.header.flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
+        let mut ok = true;
         let mut response = self.handle.clone().request(req).unwrap();
         while let Some(m) = response.next().await {
             if let NetlinkPayload::Error(e) = m.payload {
+                ok = false;
                 tracing::warn!(
                     "NewRoute mirror-context install error: prefix={} context_table={} \
                      vrf_table={} ifindex={} err={}",
@@ -2892,6 +2956,9 @@ impl FibHandle {
                     e
                 );
             }
+        }
+        if ok {
+            self.note_installed(replaced);
         }
     }
 
@@ -4039,18 +4106,9 @@ impl FibHandle {
         if add && !shared {
             self.evpn_rmac_install(encap.l3vni, encap.remote_rmac, encap.remote_vtep)
                 .await;
-            self.evpn_neighbor(encap.l3vni, encap.remote_vtep.into(), mac, true)
-                .await;
-            // IPv6 routes name the mapped VTEP as their gateway. Linux
-            // resolves that in the IPv6 neighbor table, independently of
-            // the IPv4 adjacency used by IPv4 routes on the same bridge.
-            self.evpn_neighbor(
-                encap.l3vni,
-                encap.remote_vtep.to_ipv6_mapped().into(),
-                mac,
-                true,
-            )
-            .await;
+            for gateway in vtep_gateways(encap.remote_vtep) {
+                self.evpn_neighbor(encap.l3vni, gateway, mac, true).await;
+            }
         }
         let success = self
             .evpn_prefix_route_send(prefix, table_id, metric, &encap, bridge, add)
@@ -4107,10 +4165,9 @@ impl FibHandle {
         };
         for (vtep, rmac) in adjacencies {
             let mac = MacAddr::from(rmac);
-            self.evpn_neighbor_on(old_bridge, vtep.into(), mac, false)
-                .await;
-            self.evpn_neighbor_on(old_bridge, vtep.to_ipv6_mapped().into(), mac, false)
-                .await;
+            for gateway in vtep_gateways(vtep) {
+                self.evpn_neighbor_on(old_bridge, gateway, mac, false).await;
+            }
         }
     }
 
@@ -4126,6 +4183,82 @@ impl FibHandle {
             .get(&(table_id, prefix))
             .filter(|(_, tracked)| *tracked == metric)
             .map(|(encap, _)| encap.l3vni)
+    }
+
+    /// The SRv6 leftover's key a route install would replace, if any:
+    /// taken from the message before it is sent, and recorded by
+    /// `note_installed` once the kernel accepts the route. Whatever the
+    /// route's encapsulation: a plain route (SRv6 disabled across the
+    /// restart, say) replaces the leftover at the same `(table, prefix,
+    /// priority)`, and deleting the key would delete it. The startup dump
+    /// records the leftovers before any install, in the same task.
+    fn leftover_key(&self, msg: &RouteMessage) -> Option<(u32, IpNet, u32)> {
+        let (key, _, _) = route_key(msg)?;
+        self.srv6_leftovers
+            .lock()
+            .unwrap()
+            .contains_key(&key)
+            .then_some(key)
+    }
+
+    /// The kernel accepted a route at an SRv6 leftover's key: the leftover
+    /// sweep keeps that key. A rejected install left the leftover in
+    /// place, so it stays a leftover.
+    fn note_installed(&self, key: Option<(u32, IpNet, u32)>) {
+        if let Some(key) = key {
+            self.srv6_installed.lock().unwrap().insert(key);
+        }
+    }
+
+    /// Startup dump: record an SRv6 route under our protocols as a
+    /// leftover candidate.
+    pub fn note_srv6_leftover(&self, msg: &RouteMessage) {
+        if let Some((key, protocol)) = srv6_route_key(msg) {
+            self.srv6_leftovers.lock().unwrap().insert(key, protocol);
+        }
+    }
+
+    /// Remove the SRv6 routes an earlier run left that this run has not
+    /// reinstalled by now. Returns how many were removed.
+    pub async fn sweep_srv6_leftovers(&self) -> usize {
+        let leftovers = std::mem::take(&mut *self.srv6_leftovers.lock().unwrap());
+        let stale: Vec<_> = {
+            let installed = self.srv6_installed.lock().unwrap();
+            leftovers
+                .into_iter()
+                .filter(|(key, _)| !installed.contains(key))
+                .collect()
+        };
+        for ((table_id, prefix, priority), protocol) in &stale {
+            let mut msg = RouteMessage::default();
+            msg.header.address_family = match prefix {
+                IpNet::V4(_) => AddressFamily::Inet,
+                IpNet::V6(_) => AddressFamily::Inet6,
+            };
+            msg.header.destination_prefix_length = prefix.prefix_len();
+            msg.header.protocol = *protocol;
+            msg.header.scope = RouteScope::Universe;
+            msg.header.kind = RouteType::Unicast;
+            set_route_table(&mut msg, *table_id);
+            msg.attributes
+                .push(RouteAttribute::Destination(match prefix {
+                    IpNet::V4(p) => RouteAddress::Inet(p.addr()),
+                    IpNet::V6(p) => RouteAddress::Inet6(p.addr()),
+                }));
+            msg.attributes.push(RouteAttribute::Priority(*priority));
+            let mut req = NetlinkMessage::from(RouteNetlinkMessage::DelRoute(msg));
+            req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+            if let Ok(mut response) = self.handle.clone().request(req) {
+                while let Some(msg) = response.next().await {
+                    if let NetlinkPayload::Error(e) = msg.payload {
+                        tracing::info!(
+                            "SRv6 leftover {prefix} table={table_id} metric={priority}: {e}"
+                        );
+                    }
+                }
+            }
+        }
+        stale.len()
     }
 
     /// Withdraw the bridge Type-5 state tracked for `(table_id, prefix)`
@@ -4175,22 +4308,29 @@ impl FibHandle {
         msg.header.kind = RouteType::Unicast;
         msg.header.flags = RouteFlags::Onlink;
         set_route_table(&mut msg, table_id);
-        let (dst, gateway) = match prefix {
-            IpNet::V4(prefix) => (
-                RouteAddress::Inet(prefix.addr()),
-                RouteAddress::Inet(encap.remote_vtep),
-            ),
-            IpNet::V6(prefix) => (
-                RouteAddress::Inet6(prefix.addr()),
-                RouteAddress::Inet6(encap.remote_vtep.to_ipv6_mapped()),
-            ),
+        let dst = match prefix {
+            IpNet::V4(prefix) => RouteAddress::Inet(prefix.addr()),
+            IpNet::V6(prefix) => RouteAddress::Inet6(prefix.addr()),
+        };
+        // The gateway is the VTEP itself, resolved through the RMAC
+        // neighbor on the bridge: an IPv4 VTEP serves IPv6 prefixes as its
+        // IPv4-mapped address; an IPv6 VTEP serves IPv4 prefixes as an IPv6
+        // `via` (RFC 5549 style).
+        let gateway = match (prefix, encap.remote_vtep) {
+            (IpNet::V4(_), IpAddr::V4(vtep)) => RouteAttribute::Gateway(RouteAddress::Inet(vtep)),
+            (IpNet::V4(_), IpAddr::V6(vtep)) => RouteAttribute::Via(RouteVia::Inet6(vtep)),
+            (IpNet::V6(_), IpAddr::V4(vtep)) => {
+                RouteAttribute::Gateway(RouteAddress::Inet6(vtep.to_ipv6_mapped()))
+            }
+            (IpNet::V6(_), IpAddr::V6(vtep)) => RouteAttribute::Gateway(RouteAddress::Inet6(vtep)),
         };
         msg.attributes.extend([
             RouteAttribute::Destination(dst),
-            RouteAttribute::Gateway(gateway),
+            gateway,
             RouteAttribute::Oif(bridge),
             RouteAttribute::Priority(metric),
         ]);
+        let replaced = if add { self.leftover_key(&msg) } else { None };
         let mut request = NetlinkMessage::from(if add {
             RouteNetlinkMessage::NewRoute(msg)
         } else {
@@ -4207,6 +4347,9 @@ impl FibHandle {
                     success = false;
                 }
             }
+        }
+        if success {
+            self.note_installed(replaced);
         }
         success
     }
@@ -4240,9 +4383,9 @@ impl FibHandle {
         }
         for (vtep, rmac) in &plan.adjacencies {
             let mac = MacAddr::from(*rmac);
-            self.evpn_neighbor(l3vni, (*vtep).into(), mac, true).await;
-            self.evpn_neighbor(l3vni, vtep.to_ipv6_mapped().into(), mac, true)
-                .await;
+            for gateway in vtep_gateways(*vtep) {
+                self.evpn_neighbor(l3vni, gateway, mac, true).await;
+            }
         }
         if routes {
             for ((table_id, prefix), (encap, metric)) in &plan.routes {
@@ -4306,15 +4449,9 @@ impl FibHandle {
             return;
         }
         let mac = MacAddr::from(old.remote_rmac);
-        self.evpn_neighbor(old.l3vni, old.remote_vtep.into(), mac, false)
-            .await;
-        self.evpn_neighbor(
-            old.l3vni,
-            old.remote_vtep.to_ipv6_mapped().into(),
-            mac,
-            false,
-        )
-        .await;
+        for gateway in vtep_gateways(old.remote_vtep) {
+            self.evpn_neighbor(old.l3vni, gateway, mac, false).await;
+        }
         // Several VTEPs can share an RMAC; see `evpn_rmac_after_release`.
         let key = (old.l3vni, old.remote_rmac);
         let current = self.evpn_rmac_vtep.lock().unwrap().get(&key).copied();
@@ -4348,12 +4485,12 @@ impl FibHandle {
     /// failed write leaves the previous entry in place, so the previous
     /// record stays too; otherwise a later release could trust a VTEP the
     /// kernel never pointed at and leave the entry on a withdrawn one.
-    async fn evpn_rmac_install(&self, l3vni: u32, rmac: [u8; 6], vtep: Ipv4Addr) {
+    async fn evpn_rmac_install(&self, l3vni: u32, rmac: [u8; 6], vtep: IpAddr) {
         let installed = self
             .mac_add(
                 l3vni,
                 &MacAddr::from(rmac),
-                Some(vtep.into()),
+                Some(vtep),
                 0,
                 0,
                 None,
@@ -5236,6 +5373,77 @@ impl RouteBuilder {
     }
 }
 
+/// `(table, prefix, priority)` and protocol of an SRv6 route (`seg6` or
+/// `seg6local` encapsulation) under one of zebra-rs's protocol numbers: the
+/// routes `route_from_msg_with` never mirrors.
+fn srv6_route_key(msg: &RouteMessage) -> Option<((u32, IpNet, u32), RouteProtocol)> {
+    route_key(msg)
+        .filter(|(_, _, srv6)| *srv6)
+        .map(|(key, protocol, _)| (key, protocol))
+}
+
+/// `(table, prefix, priority)` and protocol of a route under one of
+/// zebra-rs's protocol numbers, and whether it is SRv6. The priority is the
+/// one the kernel reports: an IPv6 route installed without one reads as
+/// 1024.
+fn route_key(msg: &RouteMessage) -> Option<((u32, IpNet, u32), RouteProtocol, bool)> {
+    let protocol = msg.header.protocol;
+    if !matches!(
+        protocol,
+        RouteProtocol::Ospf | RouteProtocol::Isis | RouteProtocol::Bgp | RouteProtocol::Zebra
+    ) {
+        return None;
+    }
+    let mut table_id = msg.header.table as u32;
+    let mut metric = 0;
+    let mut dst = None;
+    let mut srv6 = false;
+    for attr in &msg.attributes {
+        match attr {
+            RouteAttribute::Table(t) => table_id = *t,
+            RouteAttribute::Priority(p) => metric = *p,
+            RouteAttribute::Destination(RouteAddress::Inet(a)) => dst = Some(IpAddr::V4(*a)),
+            RouteAttribute::Destination(RouteAddress::Inet6(a)) => dst = Some(IpAddr::V6(*a)),
+            RouteAttribute::EncapType(RouteLwEnCapType::Seg6 | RouteLwEnCapType::Seg6Local) => {
+                srv6 = true
+            }
+            _ => {}
+        }
+    }
+    let len = msg.header.destination_prefix_length;
+    let prefix = match msg.header.address_family {
+        AddressFamily::Inet => IpNet::V4(
+            Ipv4Net::new(
+                match dst {
+                    Some(IpAddr::V4(a)) => a,
+                    None => Ipv4Addr::UNSPECIFIED,
+                    _ => return None,
+                },
+                len,
+            )
+            .ok()?,
+        ),
+        AddressFamily::Inet6 => {
+            if metric == 0 {
+                metric = 1024;
+            }
+            IpNet::V6(
+                Ipv6Net::new(
+                    match dst {
+                        Some(IpAddr::V6(a)) => a,
+                        None => Ipv6Addr::UNSPECIFIED,
+                        _ => return None,
+                    },
+                    len,
+                )
+                .ok()?,
+            )
+        }
+        _ => return None,
+    };
+    Some(((table_id, prefix, metric), protocol, srv6))
+}
+
 /// `(table, prefix, priority)` of a protocol-BGP unicast route in a VRF
 /// table: the shape of a bridge Type-5 route. IPv6 priority 0 reads as
 /// Linux's 1024, matching what `evpn_prefix_route` records.
@@ -5297,15 +5505,15 @@ fn bgp_vrf_route_key(msg: &RouteMessage) -> Option<(u32, IpNet, u32)> {
 struct EvpnReassertPlan {
     /// RMAC → the VTEP its FDB entry should point at: the recorded one
     /// while a tracked route still uses it, else the lowest user.
-    rmacs: BTreeMap<[u8; 6], Ipv4Addr>,
+    rmacs: BTreeMap<[u8; 6], IpAddr>,
     /// `(VTEP, RMAC)` neighbor adjacencies.
-    adjacencies: BTreeSet<(Ipv4Addr, [u8; 6])>,
+    adjacencies: BTreeSet<(IpAddr, [u8; 6])>,
     routes: Vec<((u32, IpNet), (crate::rib::VxlanL3Encap, u32))>,
 }
 
 fn evpn_reassert_plan(
     tracked: &BTreeMap<(u32, IpNet), (crate::rib::VxlanL3Encap, u32)>,
-    recorded: &BTreeMap<(u32, [u8; 6]), Ipv4Addr>,
+    recorded: &BTreeMap<(u32, [u8; 6]), IpAddr>,
     l3vni: u32,
 ) -> EvpnReassertPlan {
     let mut plan = EvpnReassertPlan::default();
@@ -5349,10 +5557,9 @@ fn evpn_tracked_adjacency_row<'a>(
             && encap.remote_rmac == mac
             && match nbr.family {
                 AddressFamily::Bridge => true,
-                _ => nbr.dst.is_some_and(|dst| {
-                    dst == IpAddr::V4(encap.remote_vtep)
-                        || dst == IpAddr::V6(encap.remote_vtep.to_ipv6_mapped())
-                }),
+                _ => nbr
+                    .dst
+                    .is_some_and(|dst| vtep_gateways(encap.remote_vtep).contains(&dst)),
             }
     })
 }
@@ -5364,7 +5571,7 @@ enum RmacAction {
     /// It still points at a VTEP in use.
     Keep,
     /// It pointed at the released VTEP; another VTEP still uses the RMAC.
-    Repoint(Ipv4Addr),
+    Repoint(IpAddr),
     /// No remaining route uses the RMAC in this VNI.
     Remove,
 }
@@ -5376,7 +5583,7 @@ enum RmacAction {
 fn evpn_rmac_after_release<'a>(
     remaining: impl Iterator<Item = &'a crate::rib::VxlanL3Encap>,
     old: &crate::rib::VxlanL3Encap,
-    current: Option<Ipv4Addr>,
+    current: Option<IpAddr>,
 ) -> RmacAction {
     let next = remaining
         .filter(|route| route.l3vni == old.l3vni && route.remote_rmac == old.remote_rmac)
@@ -5386,6 +5593,17 @@ fn evpn_rmac_after_release<'a>(
         None => RmacAction::Remove,
         Some(_) if current.is_some_and(|vtep| vtep != old.remote_vtep) => RmacAction::Keep,
         Some(vtep) => RmacAction::Repoint(vtep),
+    }
+}
+
+/// The gateway addresses a bridge Type-5 route through `vtep` resolves in
+/// the bridge's neighbor tables, each needing an RMAC neighbor: an IPv4 VTEP
+/// and its IPv4-mapped IPv6 form (the gateway of IPv6 prefixes), or an IPv6
+/// VTEP alone (the gateway of both families).
+fn vtep_gateways(vtep: IpAddr) -> Vec<IpAddr> {
+    match vtep {
+        IpAddr::V4(v4) => vec![IpAddr::V4(v4), IpAddr::V6(v4.to_ipv6_mapped())],
+        IpAddr::V6(_) => vec![vtep],
     }
 }
 
@@ -5635,6 +5853,9 @@ pub fn route_from_msg_with(
     }
 
     let (prefix, mut entry) = builder.build();
+    // The dump lists each IPv4 route at a priority on its own; they sit
+    // side by side in the kernel. The monitor sets this from NLM_F_APPEND.
+    entry.kernel_append = dump && matches!(prefix, IpNet::V4(_));
     if let Some((_, distance)) = leftover {
         entry.stale = true;
         entry.distance = distance;
@@ -5721,6 +5942,7 @@ fn process_msg(msg: NetlinkMessage<RouteNetlinkMessage>, tx: UnboundedSender<Fib
     // send returns `SendError`; that is benign here — we don't want a
     // closing channel to take down the netlink reader task with a
     // secondary panic.
+    let append = msg.header.flags & NLM_F_APPEND != 0;
     if let NetlinkPayload::InnerMessage(msg) = msg.payload {
         match msg {
             RouteNetlinkMessage::NewLink(msg) => {
@@ -5746,7 +5968,10 @@ fn process_msg(msg: NetlinkMessage<RouteNetlinkMessage>, tx: UnboundedSender<Fib
                 let _ = tx.send(FibMessage::DelAddr(addr));
             }
             RouteNetlinkMessage::NewRoute(msg) => {
-                if let Some(route) = route_from_msg(msg) {
+                if let Some(mut route) = route_from_msg(msg) {
+                    // An IPv4 append adds a route beside the others at its
+                    // priority; IPv6 reports the whole merged route.
+                    route.entry.kernel_append = append && matches!(route.prefix, IpNet::V4(_));
                     let _ = tx.send(FibMessage::NewRoute(route));
                 }
             }
@@ -5962,7 +6187,7 @@ mod tests {
         let rmac = [2, 0, 0, 0, 0x20, 1];
         let vtep: Ipv4Addr = "192.0.2.1".parse().unwrap();
         let tracked = [crate::rib::VxlanL3Encap {
-            remote_vtep: vtep,
+            remote_vtep: vtep.into(),
             l3vni: 2000,
             remote_rmac: rmac,
         }];
@@ -6008,6 +6233,79 @@ mod tests {
             },
             2000
         ));
+    }
+
+    /// The SRv6 leftover key: only seg6/seg6local routes under our
+    /// protocols, with the priority the kernel reports (IPv6 none -> 1024),
+    /// so a startup candidate and a fresh install of the same route match.
+    #[test]
+    fn srv6_route_key_matches_our_srv6_routes() {
+        let msg = |protocol, encap: Option<RouteLwEnCapType>, priority: Option<u32>, table| {
+            let mut msg = RouteMessage::default();
+            msg.header.address_family = AddressFamily::Inet6;
+            msg.header.destination_prefix_length = 128;
+            msg.header.kind = RouteType::Unicast;
+            msg.header.protocol = protocol;
+            set_route_table(&mut msg, table);
+            msg.attributes
+                .push(RouteAttribute::Destination(RouteAddress::Inet6(
+                    "fc00:0:1::".parse().unwrap(),
+                )));
+            if let Some(priority) = priority {
+                msg.attributes.push(RouteAttribute::Priority(priority));
+            }
+            if let Some(encap) = encap {
+                msg.attributes.push(RouteAttribute::EncapType(encap));
+            }
+            msg
+        };
+        let main = RouteHeader::RT_TABLE_MAIN as u32;
+        let sid: IpNet = "fc00:0:1::/128".parse().unwrap();
+        // An install without a priority and the dumped route (1024) agree.
+        let installed = srv6_route_key(&msg(
+            RouteProtocol::Isis,
+            Some(RouteLwEnCapType::Seg6Local),
+            None,
+            main,
+        ));
+        let dumped = srv6_route_key(&msg(
+            RouteProtocol::Isis,
+            Some(RouteLwEnCapType::Seg6Local),
+            Some(1024),
+            main,
+        ));
+        assert_eq!(installed, Some(((main, sid, 1024), RouteProtocol::Isis)));
+        assert_eq!(installed, dumped);
+        // H.Encaps routes and context tables count; the table rides in RTA_TABLE.
+        assert_eq!(
+            srv6_route_key(&msg(
+                RouteProtocol::Zebra,
+                Some(RouteLwEnCapType::Seg6),
+                Some(5),
+                1000
+            )),
+            Some(((1000, sid, 5), RouteProtocol::Zebra))
+        );
+        // Not ours, or not SRv6: no key.
+        assert!(
+            srv6_route_key(&msg(
+                RouteProtocol::Static,
+                Some(RouteLwEnCapType::Seg6Local),
+                None,
+                main
+            ))
+            .is_none()
+        );
+        assert!(srv6_route_key(&msg(RouteProtocol::Isis, None, None, main)).is_none());
+        assert!(
+            srv6_route_key(&msg(
+                RouteProtocol::Isis,
+                Some(RouteLwEnCapType::Mpls),
+                None,
+                main
+            ))
+            .is_none()
+        );
     }
 
     #[test]
@@ -6182,6 +6480,65 @@ mod tests {
             leftover_rtype(route_protocol(RibType::Static), main),
             Some((RibType::Static, 1))
         );
+    }
+
+    /// An IPv4 VTEP needs RMAC neighbors for itself and its IPv4-mapped
+    /// form (the IPv6 prefixes' gateway); an IPv6 VTEP serves both families.
+    /// The deleted-row match follows the same set.
+    #[test]
+    fn vtep_gateways_follow_the_vtep_family() {
+        let v4: IpAddr = "192.0.2.1".parse().unwrap();
+        let v6: IpAddr = "2001:db8:100::1".parse().unwrap();
+        assert_eq!(
+            vtep_gateways(v4),
+            vec![v4, "::ffff:192.0.2.1".parse::<IpAddr>().unwrap()]
+        );
+        assert_eq!(vtep_gateways(v6), vec![v6]);
+        let rmac = [2, 0, 0, 0, 0x20, 1];
+        let tracked = [crate::rib::VxlanL3Encap {
+            remote_vtep: v6,
+            l3vni: 2000,
+            remote_rmac: rmac,
+        }];
+        let row = |dst: &str| crate::fib::FibNeighbor {
+            family: AddressFamily::Inet6,
+            dst: Some(dst.parse().unwrap()),
+            lladdr: Some(MacAddr::from(rmac)),
+            ..Default::default()
+        };
+        assert!(evpn_tracked_adjacency_row(
+            tracked.iter(),
+            2000,
+            &row("2001:db8:100::1")
+        ));
+        assert!(!evpn_tracked_adjacency_row(
+            tracked.iter(),
+            2000,
+            &row("::ffff:192.0.2.1")
+        ));
+    }
+
+    #[test]
+    fn overlay_collapse_requires_identical_adjacencies() {
+        let encap = crate::rib::VxlanL3Encap {
+            remote_vtep: "192.0.2.1".parse().unwrap(),
+            l3vni: 2000,
+            remote_rmac: [2; 6],
+        };
+        let mut multi = crate::rib::NexthopMulti::default();
+        for addr in ["fe80::1", "fe80::2"] {
+            let mut uni = NexthopUni::new(addr.parse().unwrap(), 0, vec![]);
+            uni.vxlan = Some(encap);
+            multi.nexthops.push(uni);
+        }
+        assert_eq!(
+            evpn_overlay(&Nexthop::Multi(multi.clone())),
+            Some((encap, 0))
+        );
+        multi.nexthops[1].vxlan.as_mut().unwrap().remote_vtep = "192.0.2.2".parse().unwrap();
+        assert!(evpn_overlay(&Nexthop::Multi(multi.clone())).is_none());
+        multi.nexthops[1].vxlan = None;
+        assert!(evpn_overlay(&Nexthop::Multi(multi)).is_none());
     }
 
     #[test]

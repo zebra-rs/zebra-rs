@@ -626,6 +626,273 @@ async fn fresh_floating_static_replaces_every_leftover_priority() {
     check_leftover_priorities(true).await;
 }
 
+/// Apply the kernel's own notifications to the RIB, as the event loop does.
+async fn pump(rib: &mut Rib) {
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    while let Ok(msg) = rib.fib.rx.try_recv() {
+        rib.process_fib_msg(msg).await;
+    }
+}
+
+/// The kernel routes the RIB holds for `prefix`, as gateway lists.
+fn rib_kernel_routes(rib: &Rib, prefix: IpNet) -> Vec<Vec<String>> {
+    let entries = match prefix {
+        IpNet::V4(p) => rib.table.get(&p),
+        IpNet::V6(p) => rib.table_v6.get(&p),
+    };
+    let mut routes: Vec<Vec<String>> = entries
+        .into_iter()
+        .flatten()
+        .filter(|e| e.rtype == RibType::Kernel)
+        .map(|e| {
+            let mut legs: Vec<String> = match &e.nexthop {
+                Nexthop::Uni(uni) => vec![uni.addr.to_string()],
+                Nexthop::Multi(multi) => {
+                    multi.nexthops.iter().map(|u| u.addr.to_string()).collect()
+                }
+                other => vec![format!("{other:?}")],
+            };
+            legs.sort();
+            legs
+        })
+        .collect();
+    routes.sort();
+    routes
+}
+
+/// Multipath kernel routes change one next hop at a time: IPv6 reports a
+/// deleted next hop alone, IPv4 keeps appended routes beside the first.
+/// The RIB (redistribution, VTEP reachability) must follow the kernel, not
+/// drop or overwrite the whole route.
+#[tokio::test]
+#[ignore = "requires root in an isolated network namespace"]
+async fn kernel_multipath_changes_track_the_kernel() {
+    require_netns();
+    ip(&["link", "add", "mpath0", "type", "dummy"]);
+    ip(&["link", "set", "mpath0", "up"]);
+    ip(&["addr", "add", "192.0.2.1/24", "dev", "mpath0"]);
+    ip(&[
+        "-6",
+        "addr",
+        "add",
+        "2001:db8:f::1/64",
+        "dev",
+        "mpath0",
+        "nodad",
+    ]);
+    let mut rib = Rib::new(false).unwrap();
+    crate::fib::fib_dump(&mut rib).await.unwrap();
+    pump(&mut rib).await;
+    let v6: IpNet = "2001:db8:a::/64".parse().unwrap();
+    let v4: IpNet = "10.9.0.0/24".parse().unwrap();
+    let gw = |n: u8, v6: bool| {
+        if v6 {
+            format!("2001:db8:f::{n}")
+        } else {
+            format!("192.0.2.{n}")
+        }
+    };
+    let routes = |list: &[&[u8]], v6: bool| -> Vec<Vec<String>> {
+        let mut out: Vec<Vec<String>> = list
+            .iter()
+            .map(|legs| {
+                let mut l: Vec<String> = legs.iter().map(|n| gw(*n, v6)).collect();
+                l.sort();
+                l
+            })
+            .collect();
+        out.sort();
+        out
+    };
+
+    let (g2, g3, g4) = (gw(2, true), gw(3, true), gw(4, true));
+    ip(&[
+        "-6",
+        "route",
+        "add",
+        "2001:db8:a::/64",
+        "nexthop",
+        "via",
+        &g2,
+        "dev",
+        "mpath0",
+        "nexthop",
+        "via",
+        &g3,
+        "dev",
+        "mpath0",
+    ]);
+    ip(&[
+        "-6",
+        "route",
+        "append",
+        "2001:db8:a::/64",
+        "via",
+        &g4,
+        "dev",
+        "mpath0",
+    ]);
+    pump(&mut rib).await;
+    assert_eq!(rib_kernel_routes(&rib, v6), routes(&[&[2, 3, 4]], true));
+    ip(&[
+        "-6",
+        "route",
+        "del",
+        "2001:db8:a::/64",
+        "via",
+        &g3,
+        "dev",
+        "mpath0",
+    ]);
+    pump(&mut rib).await;
+    assert_eq!(rib_kernel_routes(&rib, v6), routes(&[&[2, 4]], true));
+    ip(&["-6", "route", "del", "2001:db8:a::/64"]);
+    pump(&mut rib).await;
+    assert!(rib_kernel_routes(&rib, v6).is_empty());
+
+    let (g2, g3, g4, g5) = (gw(2, false), gw(3, false), gw(4, false), gw(5, false));
+    ip(&[
+        "route",
+        "add",
+        "10.9.0.0/24",
+        "nexthop",
+        "via",
+        &g2,
+        "dev",
+        "mpath0",
+        "nexthop",
+        "via",
+        &g3,
+        "dev",
+        "mpath0",
+    ]);
+    ip(&[
+        "route",
+        "append",
+        "10.9.0.0/24",
+        "via",
+        &g4,
+        "dev",
+        "mpath0",
+    ]);
+    pump(&mut rib).await;
+    assert_eq!(rib_kernel_routes(&rib, v4), routes(&[&[2, 3], &[4]], false));
+    ip(&[
+        "route",
+        "replace",
+        "10.9.0.0/24",
+        "via",
+        &g5,
+        "dev",
+        "mpath0",
+    ]);
+    pump(&mut rib).await;
+    assert_eq!(rib_kernel_routes(&rib, v4), routes(&[&[5], &[4]], false));
+    ip(&["route", "del", "10.9.0.0/24"]);
+    pump(&mut rib).await;
+    assert_eq!(rib_kernel_routes(&rib, v4), routes(&[&[4]], false));
+    ip(&["route", "del", "10.9.0.0/24"]);
+    pump(&mut rib).await;
+    assert!(rib_kernel_routes(&rib, v4).is_empty());
+
+    // The startup dump lists same-priority IPv4 routes one by one.
+    ip(&["route", "add", "10.9.1.0/24", "via", &g2, "dev", "mpath0"]);
+    ip(&[
+        "route",
+        "append",
+        "10.9.1.0/24",
+        "via",
+        &g3,
+        "dev",
+        "mpath0",
+    ]);
+    let mut fresh = Rib::new(false).unwrap();
+    crate::fib::fib_dump(&mut fresh).await.unwrap();
+    assert_eq!(
+        rib_kernel_routes(&fresh, "10.9.1.0/24".parse().unwrap()),
+        routes(&[&[2], &[3]], false)
+    );
+    ip(&["link", "del", "mpath0"]);
+}
+
+/// SRv6 routes an earlier run left are never mirrored into the RIB (their
+/// owners reinstall them in place), so the leftover sweep removes those
+/// this run has not reinstalled: a reinstalled SID stays, an unconfigured
+/// one goes, and an operator's SRv6 route is not ours to touch.
+#[tokio::test]
+#[ignore = "requires root in an isolated network namespace"]
+async fn sweep_removes_srv6_leftovers_nothing_reinstalled() {
+    require_netns();
+    ip(&["link", "add", "srv6l0", "type", "dummy"]);
+    ip(&["link", "set", "srv6l0", "up"]);
+    ip(&[
+        "-6",
+        "addr",
+        "add",
+        "2001:db8:f::1/64",
+        "dev",
+        "srv6l0",
+        "nodad",
+    ]);
+    for (sid, protocol) in [
+        ("fc00:0:1::/128", "isis"),
+        ("fc00:0:2::/128", "isis"),
+        ("fc00:0:3::/128", "zebra"),
+        ("fc00:0:4::/128", "static"),
+    ] {
+        ip(&[
+            "-6",
+            "route",
+            "add",
+            sid,
+            "encap",
+            "seg6local",
+            "action",
+            "End",
+            "dev",
+            "srv6l0",
+            "proto",
+            protocol,
+        ]);
+    }
+    let mut rib = Rib::new(false).unwrap();
+    crate::fib::fib_dump(&mut rib).await.unwrap();
+    // None of them became a RIB route.
+    for sid in ["fc00:0:1::/128", "fc00:0:2::/128", "fc00:0:3::/128"] {
+        let prefix: Ipv6Net = sid.parse().unwrap();
+        assert!(
+            rib.table_v6.get(&prefix).is_none_or(|e| e.is_empty()),
+            "{sid}"
+        );
+    }
+    // This run reinstalls fc00:0:1:: through a real install path (an
+    // egress-protection redirect of the same SID, replaced in place).
+    let ifindex = rib
+        .links
+        .values()
+        .find(|link| link.name == "srv6l0")
+        .unwrap()
+        .index;
+    rib.fib_handle
+        .route_sid_redirect_install(
+            &"fc00:0:1::/128".parse().unwrap(),
+            "fc00:0:9::".parse().unwrap(),
+            "2001:db8:f::2".parse().unwrap(),
+            ifindex,
+        )
+        .await;
+    rib.sweep_leftovers().await;
+    let present = |sid: &str| !ip(&["-6", "route", "show", "exact", sid]).trim().is_empty();
+    assert!(present("fc00:0:1::/128"), "reinstalled this run: kept");
+    assert!(
+        !present("fc00:0:2::/128"),
+        "an earlier run's, not reinstalled: removed"
+    );
+    assert!(!present("fc00:0:3::/128"), "RTPROT_ZEBRA leftover: removed");
+    assert!(present("fc00:0:4::/128"), "an operator's: kept");
+    ip(&["link", "del", "srv6l0"]);
+}
+
 /// A bridge Type-5 install that failed (no L3-VNI bridge yet) is kept as
 /// desired state, to be installed once the bridge appears. Its BGP
 /// withdrawal must cancel that, though the route was never installed.
@@ -744,4 +1011,212 @@ async fn a_vxlan_first_seen_up_and_enslaved_gets_its_rmac() {
             .contains("02:00:00:00:00:03 dst 192.0.2.3"),
         "the RMAC is installed on the first reconciliation"
     );
+}
+
+/// The ECMP form: a Type-5 route over underlay ECMP whose legs share one
+/// VTEP, L3 VNI and router MAC is one bridge route, and its BGP withdrawal
+/// cancels a failed install the same way.
+#[tokio::test]
+async fn a_withdrawn_ecmp_type5_route_whose_install_failed_is_not_recovered() {
+    for prefix in ["198.51.100.0/24", "2001:db8:5::/64"] {
+        let prefix: IpNet = prefix.parse().unwrap();
+        let mut rib = Rib::new(false).unwrap();
+        rib.fib_handle.kernel_route_exchange = true;
+        let encap = crate::rib::VxlanL3Encap {
+            remote_vtep: "192.0.2.2".parse().unwrap(),
+            l3vni: 3000,
+            remote_rmac: [2, 0, 0, 0, 0, 3],
+        };
+        let leg = |addr: &str| NexthopUni {
+            addr: addr.parse().unwrap(),
+            vxlan: Some(encap),
+            ..Default::default()
+        };
+        let mut entry = RibEntry::new(RibType::Bgp);
+        entry.valid = true;
+        entry.selected = true;
+        entry.nexthop = Nexthop::Multi(crate::rib::NexthopMulti {
+            nexthops: vec![leg("192.0.2.2"), leg("192.0.2.3")],
+            ..Default::default()
+        });
+        entry.fib = match prefix {
+            IpNet::V4(p) => rib.fib_handle.route_ipv4_add(&p, &entry, 100).await,
+            IpNet::V6(p) => rib.fib_handle.route_ipv6_add(&p, &entry, 100).await,
+        };
+        assert!(!entry.fib, "no bridge for the L3 VNI yet");
+        let metric = if matches!(prefix, IpNet::V6(_)) {
+            1024
+        } else {
+            0
+        };
+        assert_eq!(
+            rib.fib_handle.evpn_prefix_deleted(100, prefix, metric),
+            Some(3000),
+            "the failed ECMP install is kept for recovery"
+        );
+        insert(&mut rib, prefix, 100, entry);
+        match prefix {
+            IpNet::V4(p) => {
+                rib.ipv4_route_del_vrf(100, &p, RibEntry::new(RibType::Bgp))
+                    .await
+            }
+            IpNet::V6(p) => {
+                rib.ipv6_route_del_vrf(100, &p, RibEntry::new(RibType::Bgp))
+                    .await
+            }
+        }
+        assert_eq!(
+            rib.fib_handle.evpn_prefix_deleted(100, prefix, metric),
+            None,
+            "{prefix} was withdrawn: nothing is left to recover"
+        );
+    }
+}
+
+/// An earlier run's SRv6 routes that this run replaced in place, at the
+/// same table, prefix and priority, with a plain route (SRv6 disabled
+/// across the restart, say) or a blackhole: the leftover sweep keeps the
+/// replacements.
+#[tokio::test]
+#[ignore = "requires root in an isolated network namespace"]
+async fn sweep_keeps_routes_that_replaced_srv6_leftovers() {
+    require_netns();
+    ip(&["link", "add", "srv6r0", "type", "dummy"]);
+    ip(&["link", "set", "srv6r0", "up"]);
+    ip(&[
+        "-6",
+        "addr",
+        "add",
+        "2001:db8:e::1/64",
+        "dev",
+        "srv6r0",
+        "nodad",
+    ]);
+    for prefix in ["2001:db8:43::/64", "2001:db8:44::/64"] {
+        ip(&[
+            "-6",
+            "route",
+            "add",
+            prefix,
+            "encap",
+            "seg6",
+            "mode",
+            "encap",
+            "segs",
+            "2001:db8:e::2",
+            "dev",
+            "srv6r0",
+            "proto",
+            "isis",
+        ]);
+    }
+    let mut rib = Rib::new(false).unwrap();
+    crate::fib::fib_dump(&mut rib).await.unwrap();
+    rib.fib_handle.use_nhid = false;
+    let ifindex = rib
+        .links
+        .values()
+        .find(|link| link.name == "srv6r0")
+        .unwrap()
+        .index;
+    let mut plain = RibEntry::new(RibType::Isis);
+    plain.nexthop = Nexthop::Uni(NexthopUni {
+        addr: "2001:db8:e::2".parse().unwrap(),
+        ifindex_origin: Some(ifindex),
+        ..Default::default()
+    });
+    let plain_prefix: Ipv6Net = "2001:db8:43::/64".parse().unwrap();
+    let blackhole_prefix: Ipv6Net = "2001:db8:44::/64".parse().unwrap();
+    assert!(
+        rib.fib_handle
+            .route_ipv6_add(&plain_prefix, &plain, RT_TABLE_MAIN)
+            .await
+    );
+    assert!(
+        rib.fib_handle
+            .route_ipv6_blackhole(
+                &blackhole_prefix,
+                &RibEntry::new(RibType::Isis),
+                1024,
+                RT_TABLE_MAIN,
+                true
+            )
+            .await
+    );
+    let route = |prefix: &str| ip(&["-6", "route", "show", "exact", prefix]);
+    assert!(
+        !route("2001:db8:43::/64").contains("encap"),
+        "replaced in place"
+    );
+    rib.sweep_leftovers().await;
+    assert!(
+        route("2001:db8:43::/64").contains("via 2001:db8:e::2"),
+        "the plain replacement stays"
+    );
+    assert!(
+        route("2001:db8:44::/64").contains("blackhole"),
+        "the blackhole replacement stays"
+    );
+    ip(&["link", "del", "srv6r0"]);
+}
+
+/// An earlier run's SRv6 route whose replacement the kernel rejected (its
+/// gateway is unreachable) is still the leftover, and the sweep removes it.
+#[tokio::test]
+#[ignore = "requires root in an isolated network namespace"]
+async fn sweep_removes_an_srv6_leftover_whose_replacement_failed() {
+    require_netns();
+    ip(&["link", "add", "srv6f0", "type", "dummy"]);
+    ip(&["link", "set", "srv6f0", "up"]);
+    ip(&[
+        "-6",
+        "addr",
+        "add",
+        "2001:db8:d::1/64",
+        "dev",
+        "srv6f0",
+        "nodad",
+    ]);
+    ip(&[
+        "-6",
+        "route",
+        "add",
+        "2001:db8:45::/64",
+        "encap",
+        "seg6",
+        "mode",
+        "encap",
+        "segs",
+        "2001:db8:d::2",
+        "dev",
+        "srv6f0",
+        "proto",
+        "isis",
+    ]);
+    let mut rib = Rib::new(false).unwrap();
+    crate::fib::fib_dump(&mut rib).await.unwrap();
+    rib.fib_handle.use_nhid = false;
+    let ifindex = rib
+        .links
+        .values()
+        .find(|link| link.name == "srv6f0")
+        .unwrap()
+        .index;
+    let mut unreachable = RibEntry::new(RibType::Isis);
+    unreachable.nexthop = Nexthop::Uni(NexthopUni {
+        addr: "2001:db8:ffff::2".parse().unwrap(),
+        ifindex_origin: Some(ifindex),
+        ..Default::default()
+    });
+    let prefix: Ipv6Net = "2001:db8:45::/64".parse().unwrap();
+    assert!(
+        !rib.fib_handle
+            .route_ipv6_add(&prefix, &unreachable, RT_TABLE_MAIN)
+            .await
+    );
+    let route = || ip(&["-6", "route", "show", "exact", "2001:db8:45::/64"]);
+    assert!(route().contains("encap"), "the leftover is still there");
+    rib.sweep_leftovers().await;
+    assert!(route().trim().is_empty(), "and the sweep removed it");
+    ip(&["link", "del", "srv6f0"]);
 }
