@@ -9,6 +9,7 @@
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -20,6 +21,10 @@ use super::session::{MupSession, SessionTable};
 
 /// PFCP default port (3GPP TS 29.244 §4.2.2).
 pub const PFCP_PORT: u16 = 8805;
+
+/// How long a PFCP listener that could not be bound waits before the next
+/// attempt (see [`MupC::retry_bind`]).
+pub(super) const BIND_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Controller config, staged from `router bgp afi-safi mup
 /// mup-c { … }` by the BGP config callbacks and applied at `CommitEnd`.
@@ -149,6 +154,8 @@ impl MupCHandle {
 pub enum Message {
     /// A datagram arrived on the PFCP socket.
     PfcpRecv { data: Vec<u8>, src: SocketAddr },
+    /// The bind retry timer fired.
+    RetryBind,
 }
 
 /// The controller task state.
@@ -172,6 +179,10 @@ pub struct MupC {
     pub(super) recv_task: Option<Task<()>>,
     /// Last successfully bound local address.
     pub(super) listen_addr: Option<SocketAddr>,
+    /// The listen address whose bind is failing, while it is retried.
+    pub(super) bind_failing: Option<SocketAddr>,
+    /// The one-shot [`Message::RetryBind`] timer, while armed.
+    pub(super) bind_retry: Option<Task<()>>,
     /// PFCP Recovery Time Stamp — the instant this controller started.
     /// **Fixed for the controller's lifetime**: per 3GPP TS 29.244 §19.5
     /// the recovery timestamp signals when the node last (re)started, so a
@@ -219,6 +230,8 @@ impl MupC {
             sock: None,
             recv_task: None,
             listen_addr: None,
+            bind_failing: None,
+            bind_retry: None,
             recovery_ts: std::time::SystemTime::now(),
         }
     }
@@ -277,16 +290,136 @@ impl MupC {
             tokio::select! {
                 Some(msg) = self.rx.recv() => match msg {
                     Message::PfcpRecv { data, src } => self.handle_pfcp(&data, src).await,
+                    Message::RetryBind => self.retry_bind().await,
                 },
-                Some(MupCCtl::Reconfig(cfg)) = self.ctl_rx.recv() => {
-                    let rebind = cfg.listen_socket_addr() != self.config.listen_socket_addr();
-                    self.config = cfg;
-                    if rebind {
-                        self.bind().await;
-                    }
-                }
+                Some(MupCCtl::Reconfig(cfg)) = self.ctl_rx.recv() => self.reconfig(cfg).await,
                 else => break,
             }
         }
+    }
+
+    /// A new config: rebind the listener if its address or port changed.
+    pub(super) async fn reconfig(&mut self, cfg: MupCConfig) {
+        let rebind = cfg.listen_socket_addr() != self.config.listen_socket_addr();
+        self.config = cfg;
+        if rebind {
+            self.bind().await;
+        }
+    }
+
+    /// Arm the one-shot [`Message::RetryBind`] timer unless one is already
+    /// running. Dropping the handle (a successful bind, or the controller's
+    /// teardown) aborts it.
+    pub(super) fn arm_bind_retry(&mut self) {
+        if self.bind_retry.is_some() {
+            return;
+        }
+        let tx = self.main_tx.clone();
+        self.bind_retry = Some(Task::spawn(async move {
+            tokio::time::sleep(BIND_RETRY_INTERVAL).await;
+            let _ = tx.send(Message::RetryBind);
+        }));
+    }
+
+    /// [`Message::RetryBind`]: try the bind again, unless a reconfig has
+    /// bound the listener since the timer fired.
+    pub(super) async fn retry_bind(&mut self) {
+        self.bind_retry = None;
+        if self.sock.is_none() {
+            self.bind().await;
+        }
+    }
+}
+
+#[cfg(test)]
+mod bind_retry_tests {
+    use super::*;
+
+    /// TEST-NET-1 (RFC 5737): on no host interface, so binding it fails
+    /// with EADDRNOTAVAIL, as a listen address does when it is committed
+    /// before its interface has it.
+    fn unusable() -> MupCConfig {
+        MupCConfig {
+            listen_address: Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))),
+            port: Some(0),
+            ..Default::default()
+        }
+    }
+
+    fn usable() -> MupCConfig {
+        MupCConfig {
+            listen_address: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            port: Some(0),
+            ..Default::default()
+        }
+    }
+
+    /// The next listener state reported to BGP, if any.
+    fn reported(rx: &mut mpsc::Receiver<crate::bgp::inst::Message>) -> Option<Option<SocketAddr>> {
+        match rx.try_recv() {
+            Ok(crate::bgp::inst::Message::MupC(MupCEvent::Listener { bound })) => Some(bound),
+            Ok(_) => panic!("unexpected message to BGP"),
+            Err(_) => None,
+        }
+    }
+
+    /// A failed bind is reported once and retried while it keeps failing;
+    /// a usable address then binds, is reported, and ends the retries.
+    #[tokio::test]
+    async fn a_failed_bind_is_retried_until_the_listener_is_up() {
+        let (mut mupc, mut bgp_rx) = MupC::new_for_test(unusable());
+        mupc.bind().await;
+        assert!(mupc.sock.is_none());
+        assert!(mupc.bind_retry.is_some(), "retry armed");
+        assert_eq!(reported(&mut bgp_rx), Some(None), "reported down");
+
+        // The tick finds the address still unusable: still down, the
+        // timer armed again, nothing reported again.
+        mupc.retry_bind().await;
+        assert!(mupc.sock.is_none());
+        assert!(mupc.bind_retry.is_some(), "retry armed again");
+        assert_eq!(reported(&mut bgp_rx), None);
+
+        mupc.reconfig(usable()).await;
+        let bound = mupc.listen_addr.expect("bound");
+        assert_eq!(bound.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        assert!(mupc.bind_retry.is_none(), "retries stopped");
+        assert_eq!(mupc.bind_failing, None);
+        assert_eq!(reported(&mut bgp_rx), Some(Some(bound)));
+
+        // A tick that fired before the bind does not bind again.
+        let sock = mupc.sock.clone().expect("listener");
+        mupc.retry_bind().await;
+        assert!(Arc::ptr_eq(&sock, mupc.sock.as_ref().expect("listener")));
+        assert_eq!(reported(&mut bgp_rx), None);
+    }
+
+    /// The armed timer delivers the retry after the interval. The clock
+    /// is paused, so it moves only to the next deadline: the timer's, or
+    /// the bound on the wait if no timer was armed.
+    #[tokio::test(start_paused = true)]
+    async fn the_retry_fires_after_the_interval() {
+        let (mut mupc, _bgp_rx) = MupC::new_for_test(unusable());
+        let start = tokio::time::Instant::now();
+        mupc.bind().await;
+        let msg = tokio::time::timeout(2 * BIND_RETRY_INTERVAL, mupc.rx.recv()).await;
+        assert!(matches!(msg, Ok(Some(Message::RetryBind))), "no retry");
+        assert_eq!(start.elapsed(), BIND_RETRY_INTERVAL);
+    }
+
+    /// A rebind that fails drops the listener on the old address, which
+    /// would otherwise keep serving PFCP while `show` reports it down.
+    #[tokio::test]
+    async fn a_failed_rebind_drops_the_old_listener() {
+        let (mut mupc, mut bgp_rx) = MupC::new_for_test(usable());
+        mupc.bind().await;
+        assert!(matches!(reported(&mut bgp_rx), Some(Some(_))));
+
+        mupc.reconfig(unusable()).await;
+        assert!(mupc.sock.is_none());
+        assert!(mupc.recv_task.is_none());
+        assert_eq!(mupc.listen_addr, None);
+        assert_eq!(reported(&mut bgp_rx), Some(None));
+        assert!(mupc.bind_retry.is_some(), "retry armed");
     }
 }

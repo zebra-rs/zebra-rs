@@ -40,7 +40,7 @@ use rs_pfcp::types::SequenceNumber;
 use crate::context::Task;
 
 use super::assoc::MupAssocInfo;
-use super::inst::{Message, MupC, MupCEvent};
+use super::inst::{BIND_RETRY_INTERVAL, Message, MupC, MupCEvent};
 use super::session::MupSession;
 
 /// Outcome of handling one PFCP request: an optional reply to send back
@@ -58,48 +58,68 @@ const MAX_SESSIONS: usize = 1 << 20;
 impl MupC {
     /// (Re)bind the PFCP listener to the configured address/port and
     /// (re)start the recv task. Idempotent — replacing `recv_task`
-    /// aborts the previous one. Failures are non-fatal: the controller
-    /// stays up and reports the listener as down.
+    /// aborts the previous one. A failure is non-fatal: the controller
+    /// stays up, reports the listener as down, and tries again every
+    /// [`BIND_RETRY_INTERVAL`] until the bind succeeds or the address is
+    /// reconfigured. The address can be on no interface yet when the
+    /// config is committed (applied before the interface's address at
+    /// boot, say), and nothing else would bind it later.
     pub(super) async fn bind(&mut self) {
         let addr = self.config.listen_socket_addr();
+        match self.open_listener(addr) {
+            Ok(sock) => {
+                self.bind_retry = None;
+                if self.bind_failing.take() == Some(addr) {
+                    tracing::info!("mup-c: PFCP listening on {addr} after retrying");
+                }
+                let local = sock.local_addr().ok();
+                self.listen_addr = local;
+                self.sock = Some(sock.clone());
+                // Replace the recv task; dropping the old handle aborts it.
+                let tx = self.main_tx.clone();
+                self.recv_task = Some(Task::spawn(async move {
+                    recv_loop(sock, tx).await;
+                }));
+                self.set_listener(local).await;
+            }
+            Err(e) => {
+                // A listener on the previous address goes too: `addr` is
+                // the one configured, so the old one would serve PFCP on
+                // an address `show` no longer reports.
+                self.sock = None;
+                self.recv_task = None;
+                self.listen_addr = None;
+                if self.bind_failing != Some(addr) {
+                    tracing::warn!("mup-c: PFCP {e}; retrying every {BIND_RETRY_INTERVAL:?}");
+                    self.bind_failing = Some(addr);
+                    self.set_listener(None).await;
+                } else {
+                    tracing::debug!("mup-c: PFCP {e}");
+                }
+                self.arm_bind_retry();
+            }
+        }
+    }
+
+    /// A non-blocking UDP socket bound to `addr`, or what failed.
+    fn open_listener(&self, addr: SocketAddr) -> Result<Arc<UdpSocket>, String> {
         let domain = match addr.ip() {
             IpAddr::V4(_) => Domain::IPV4,
             IpAddr::V6(_) => Domain::IPV6,
         };
-        let sock = match self.ctx.udp_socket_unbound(domain) {
-            Ok(sock) => sock,
-            Err(e) => {
-                tracing::warn!("mup-c: PFCP socket({addr}) failed: {e}");
-                return self.set_listener(None).await;
-            }
-        };
+        let sock = self
+            .ctx
+            .udp_socket_unbound(domain)
+            .map_err(|e| format!("socket({addr}) failed: {e}"))?;
         let _ = sock.set_reuse_address(true);
-        if let Err(e) = sock.bind(&addr.into()) {
-            tracing::warn!("mup-c: PFCP bind {addr} failed: {e}");
-            return self.set_listener(None).await;
-        }
+        sock.bind(&addr.into())
+            .map_err(|e| format!("bind {addr} failed: {e}"))?;
         if let Err(e) = sock.set_nonblocking(true) {
             tracing::warn!("mup-c: PFCP set_nonblocking failed: {e}");
         }
         let std_sock: std::net::UdpSocket = sock.into();
-        let tokio_sock = match UdpSocket::from_std(std_sock) {
-            Ok(sock) => sock,
-            Err(e) => {
-                tracing::warn!("mup-c: PFCP from_std failed: {e}");
-                return self.set_listener(None).await;
-            }
-        };
-        let sock = Arc::new(tokio_sock);
-        let local = sock.local_addr().ok();
-        self.listen_addr = local;
-        self.sock = Some(sock.clone());
-        // Replace the recv task; dropping the old handle aborts it.
-        let tx = self.main_tx.clone();
-        self.recv_task = Some(Task::spawn(async move {
-            recv_loop(sock, tx).await;
-        }));
-        // tracing::info!("mup-c: PFCP listening on {local:?}");
-        self.set_listener(local).await;
+        let sock = UdpSocket::from_std(std_sock).map_err(|e| format!("from_std failed: {e}"))?;
+        Ok(Arc::new(sock))
     }
 
     async fn set_listener(&self, bound: Option<SocketAddr>) {

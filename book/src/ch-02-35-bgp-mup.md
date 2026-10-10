@@ -142,7 +142,9 @@ vrf mobile-up {
 * **`controller-address`** is the IPv6 address advertised as the next
   hop on every originated ST route.
 * **`pfcp`** sets the N4 listener bind address and port (default
-  `[::]:8805`).
+  `[::]:8805`). If the address is on no interface yet, `show bgp mup-c`
+  reports `PFCP listen : down` and the controller tries the bind again
+  every second, so the listener comes up as soon as the address does.
 * **`srv6 locator`** is **reserved** for the non-default mode where the
   controller pushes an explicit SID; in the default mode it is unused.
   Per draft-ietf-bess-mup-safi the controller originates ST routes
