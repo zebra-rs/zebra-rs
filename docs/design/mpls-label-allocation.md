@@ -357,7 +357,12 @@ ownership is what an operator wants to see in `show mpls label table`.
 
   A label the policy no longer wants (another path active, the policy
   withdrawn) goes back through `Releasing` like any other, and an SRLB
-  change re-evaluates every policy with a Binding-SID. A Binding-SID ILM
+  change re-evaluates every policy with a Binding-SID, dropping each claim,
+  held or waiting, the new SRLB leaves outside. A claim refused because a
+  configured SID or a label block has the label registers no waiter, so
+  the label space marks the claimant to be told at the next release
+  (`RibRx::LocalLabelsFreed`, as for a pool that found no free label), and
+  it claims again; OSPF's refused Adjacency-SID claims get the same. A Binding-SID ILM
   that goes re-derives the steering of colour-matched routes, so none keeps
   pushing a label nothing forwards.
 - **Moving a dynamic holder.** The steps run in this order, so a label never

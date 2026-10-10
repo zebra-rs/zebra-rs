@@ -470,6 +470,13 @@ impl SrPolicyDb {
         }
     }
 
+    /// Labels were freed (`RibRx::LocalLabelsFreed`): a Binding-SID refused
+    /// because a configured Adjacency-SID or a label block had it may be
+    /// available now. The re-evaluated policies wait in `reselected`.
+    pub fn labels_freed(&mut self) {
+        self.reselect_unavailable(None);
+    }
+
     /// The policies re-evaluated as a side effect, with their FIB deltas,
     /// for the caller to apply and to reconcile their ILMs.
     pub fn take_reselected(&mut self) -> Vec<(SrPolicyKey, SrPolicyFibDelta)> {
@@ -498,7 +505,17 @@ impl SrPolicyDb {
                 self.bsid_pool = Some(new_pool(first, last));
                 Vec::new()
             }
-            (Some((first, last)), Some(pool)) => pool.retarget(first, last),
+            (Some((first, last)), Some(pool)) => {
+                // `retarget` returns the labels it gave back, not the
+                // waiting claims it dropped: every claim outside is gone.
+                let mut gone = pool.retarget(first, last);
+                gone.extend(
+                    self.bsid_owner
+                        .keys()
+                        .filter(|label| !(first..=last).contains(*label)),
+                );
+                gone
+            }
         };
         for label in gone {
             if let Some(key) = self.bsid_owner.remove(&label)
@@ -2272,6 +2289,80 @@ mod bsid_claim_tests {
             !db.mpls_reconcile(2, EP.parse().unwrap(), true)
                 .steer_changed
         );
+    }
+
+    /// An SRLB move drops a waiting claim outside the new range, which the
+    /// pool does not report: the policy must not stay waiting for a grant
+    /// that cannot come. Here a Specified-BSID-only path waits on a label
+    /// an IGP holds; once the SRLB moves away it is invalid, and the next
+    /// path is selected.
+    #[tokio::test]
+    async fn a_moved_srlb_drops_a_waiting_claim() {
+        let space = SharedLabelSpace::default();
+        let (otx, _orx) = mpsc::unbounded_channel();
+        let igp = RibClient::new(otx, ProtoId::from_raw(99));
+        let mut holder = space.pool_for(15000, 15999, &igp);
+        assert_eq!(holder.allocate(), Some(15000));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let rib = RibClient::new(tx, ProtoId::from_raw(7));
+
+        let (mut db, _r) = db_over(&space);
+        db.insert(key(1), path(1, 200, 15000, true));
+        db.insert(key(1), path(2, 100, 16100, false));
+        assert_eq!(db.policies[&key(1)].bsid, Some((15000, BsidState::Pending)));
+
+        db.set_bsid_srlb(Some((16000, 16999)), |f, l| space.pool_for(f, l, &rib));
+        let policy = &db.policies[&key(1)];
+        assert_eq!(policy.active.as_ref().map(|k| k.discriminator), Some(2));
+        assert_eq!(policy.bsid, Some((16100, BsidState::Granted)));
+        assert_eq!(
+            policy
+                .bsid_excluded
+                .iter()
+                .map(|k| k.discriminator)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+    }
+
+    /// A claim refused because a configured Adjacency-SID has the label
+    /// registers no waiter, so the label space tells BGP at the next
+    /// release (`LocalLabelsFreed`), and the policy claims again.
+    #[tokio::test]
+    async fn a_label_a_configured_sid_gives_up_is_claimed_again() {
+        let space = SharedLabelSpace::default();
+        let (otx, _orx) = mpsc::unbounded_channel();
+        let ospf = RibClient::new(otx, ProtoId::from_raw(99));
+        let mut configured = space.pool_for(15000, 15999, &ospf);
+        assert_eq!(configured.claim(15100), Claim::Granted);
+
+        let (mut db, _rx) = db_over(&space);
+        db.insert(key(1), path(1, 100, 15100, false));
+        assert_eq!(
+            db.policies[&key(1)].bsid,
+            Some((15100, BsidState::Unavailable(BsidUnavailable::InUse)))
+        );
+        assert!(
+            space.lock().take_starved().contains(&ProtoId::from_raw(7)),
+            "told at the next release"
+        );
+
+        configured.unclaim(15100);
+        assert!(
+            space
+                .lock()
+                .release_handled(ProtoId::from_raw(99), 15100, false)
+        );
+        db.labels_freed();
+        assert_eq!(db.policies[&key(1)].bsid, Some((15100, BsidState::Granted)));
+        assert_eq!(
+            db.take_reselected()
+                .iter()
+                .map(|(k, _)| k.color)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert_eq!(installed(&mut db, 1), Some(15100));
     }
 
     /// A Binding-SID the policy no longer wants goes back: the path's label

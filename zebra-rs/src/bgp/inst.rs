@@ -5332,6 +5332,13 @@ impl Bgp {
             RibRx::LabelBlock { start, size } => {
                 self.label_block_arrived(start, size);
             }
+            // Labels were freed after a Binding-SID claim was refused (a
+            // configured Adjacency-SID had the label): claim again.
+            RibRx::LocalLabelsFreed => {
+                self.local_rib.sr_policy.labels_freed();
+                let mut top = self.nht_install_top();
+                super::route::sr_policy_sync_reselected(&mut top);
+            }
             // A Binding-SID label an IGP's dynamic Adjacency-SID held is
             // the claiming policy's now: install its ILM.
             RibRx::LabelGranted { label } => {

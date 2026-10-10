@@ -80,6 +80,22 @@ Feature: BGP SR Policy Binding-SID steering — end-to-end forwarding (RFC 9256 
     And command "ip -f mpls route show" in namespace "crs1" should eventually not contain "15100"
     And command "ip -f mpls route show" in namespace "crs1" should not contain "16100"
 
+  Scenario: A Binding SID a configured Adjacency-SID holds is claimed once it is given up
+    Given the test topology exists
+    # crs1's OSPF holds 15100 as a configured Adjacency-SID.
+    When I apply command "set router ospf router-id 10.0.0.1" in namespace "crs1"
+    And I apply command "set router ospf segment-routing mpls" in namespace "crs1"
+    And I apply command "set router ospf area 0.0.0.0 interface i1 adjacency-sid absolute 15100" in namespace "crs1"
+    Then show command "show mpls label table" in namespace "crs1" should eventually contain "15100          ospf    configured SID  claimed"
+    # The controller moves the Binding SID back to 15100: not available.
+    When I apply command "set router bgp sr-policy policy P1 binding-sid-label 15100" in namespace "crs2"
+    Then show command "show bgp sr-policy" in namespace "crs1" should eventually contain "Binding-SID label 15100: unavailable (another configured SID holds it)"
+    # Removing the Adjacency-SID frees 15100; the RIB tells BGP, which
+    # claims it and installs the ILM, with no other update.
+    When I apply command "delete router ospf area 0.0.0.0 interface i1 adjacency-sid absolute 15100" in namespace "crs1"
+    Then show command "show bgp sr-policy" in namespace "crs1" should eventually contain "Binding-SID label 15100: held"
+    And command "ip -f mpls route show" in namespace "crs1" should eventually contain "15100"
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "crs1"
