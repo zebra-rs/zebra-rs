@@ -1,0 +1,17 @@
+# z1 — the same BGP, with the dynamic range moved to start at 30000.
+mpls:
+  label-range:
+    dynamic:
+      start: 30000
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.1
+    neighbor:
+    - remote-address: 192.168.0.2
+      remote-as: 65001
+      enabled: true
+      afi-safi:
+      - name: vpnv4
+        enabled: true

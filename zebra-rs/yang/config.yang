@@ -573,6 +573,29 @@ module config {
              hides it. Global only — the kernel knob has no per-VRF form.";
         }
       }
+      container label-range {
+        ext:help "MPLS label ranges";
+        // The labels handed out dynamically: BGP's label blocks
+        // (docs/design/mpls-label-allocation.md §3, §8). Segment-routing
+        // blocks inside it are stepped around. A change applies to blocks
+        // handed out from then on; one already outside the new range stays
+        // until its owner gives it back.
+        container dynamic {
+          ext:help "Labels handed out dynamically (BGP's label blocks)";
+          leaf start {
+            ext:help "First dynamic label (default 24000)";
+            type uint32 {
+              range "16..1048574";
+            }
+          }
+          leaf end {
+            ext:help "Last dynamic label (default 1048574, the last the kernel installs)";
+            type uint32 {
+              range "16..1048574";
+            }
+          }
+        }
+      }
     }
 
     container system {

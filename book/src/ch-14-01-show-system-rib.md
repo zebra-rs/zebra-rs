@@ -217,8 +217,10 @@ The regions of the node's MPLS label space, in order, and how many labels
 are allocated in each. The reserved labels come first. Then each
 `segment-routing block`'s SRGB and SRLB, and an SRGB still held while
 Prefix-SID labels move off it after a change. The dynamic range, where
-label blocks are handed out, starts at 24000. Static is whatever those
-leave.
+label blocks are handed out, starts at 24000 unless `mpls label-range
+dynamic` moves it. Static is whatever those leave. A block handed out
+before the range moved stays where it is until released, and is counted
+in the region it now falls in.
 
 ```
 r1> show mpls label range

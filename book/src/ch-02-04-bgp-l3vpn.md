@@ -79,6 +79,11 @@ block** the RIB's label manager reserves for BGP:
   starts at label **24000** and steps around any `segment-routing block`
   configured inside it, so a per-VRF label can never collide with an
   IS-IS / OSPF prefix-SID or adjacency-SID in the kernel MPLS table.
+* `mpls label-range dynamic start <n> end <n>` moves the pool (defaults
+  24000 and 1048574, the last label the kernel installs). The labels it
+  leaves are free for static bindings. A change applies to blocks handed
+  out from then on; a block BGP already holds stays where it is until BGP
+  returns it, and no static binding may take its labels meanwhile.
 * BGP requests a block from the RIB at startup. If a VRF is configured
   before the block is granted it spawns label-less and is reconciled —
   given a real label and re-advertised — the moment the block arrives.

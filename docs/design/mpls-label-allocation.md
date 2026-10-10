@@ -193,8 +193,11 @@ Rules:
   reserved, so an operator can pre-reserve a range; only `default` is read
   by the IGPs. A per-IGP SRGB override (IOS XR's) is deferred, and the
   design keeps it cheap to add (§11, question 3).
-- The dynamic range is configurable (new YANG, §8) and always skips every
-  configured block and static binding, even when they fall inside it.
+- The dynamic range is configurable (`mpls label-range dynamic`, §8) and
+  always skips every configured block, even where one falls inside it.
+  Static bindings are kept out of it at commit (§7). A change applies to
+  blocks handed out from then on: one already outside the new range stays
+  until its owner returns it (phase 6c).
 - The upper bound is the kernel's: `net.mpls.platform_labels = N` admits
   labels `0..N-1`, and the kernel caps N at 2^20 − 1 (`label_limit` in
   `net/mpls/af_mpls.c`; writing 1048576 fails with EINVAL, checked in a
@@ -535,7 +538,9 @@ the SRLB and the dynamic range, so a static binding kept out of both can
 never collide, and no discrepancy state or `clear` command is needed.
 
 - Static `mpls label` bindings: 16 ≤ label < platform_labels, and not in
-  the SRGB, SRLB or dynamic range. Any other label is allowed. The static
+  the SRGB, SRLB or dynamic range, nor in a label block handed out (one
+  handed out before the dynamic range moved can lie outside it). Any other
+  label is allowed. The static
   region is whatever those leave: 16–14999 by default, plus the labels above
   the dynamic range if the operator ends it early (IOS XR's definition).
 - Configured local SIDs (`adjacency-sid absolute`, `binding-sid-label`): in
@@ -552,8 +557,11 @@ never collide, and no discrepancy state or `clear` command is needed.
 
   Labels held by dynamic Adj-SIDs or Mirror Context labels do not block
   the change; their holders are moved.
-- Dynamic range: inside the label space, not overlapping the reserved
-  region.
+- Dynamic range: inside the label space (the schema bounds each end to
+  16–1048574) and not empty. Moving it is not refused for the label blocks
+  already handed out: they stay where they are, possibly outside the new
+  range, until released, and the static check above keeps bindings off
+  them (phase 6c).
 
 The checks (phase 6a, `config::label_check`) run in
 `ConfigManager::commit`, after the mandatory-node and leaf-value checks and
@@ -567,8 +575,8 @@ refused. The startup config is checked the same way but only warned
 about: refusing it would leave the router unconfigured, and a config an
 earlier release accepted can fail a check added since. The IGPs keep their
 interim handling for that case (§10, phase 3b). The Binding-SID checks
-come with phase 3c, which claims them, and the dynamic range ones with
-phase 6c, which makes it configurable.
+come with phase 3c, which claims them; the dynamic range ones came with
+phase 6c, which made it configurable.
 
 ## 8. Configuration and show
 
@@ -576,7 +584,11 @@ phase 6c, which makes it configurable.
   `local {start, range}`. Defaults become SRGB 16000/8000 (unchanged) and
   SRLB 15000/1000 (was 100).
 - New: `mpls label-range dynamic {start, end}`, default 24000 /
-  platform_labels − 1.
+  platform_labels − 1. Phase 6c implements it: each bound defaults on its
+  own, and the RIB applies the two together at the end of a commit, so a
+  commit moving both never passes through an empty range. A change applies
+  to blocks handed out from then on (`LabelSpace::set_dynamic`, which
+  reports the blocks left outside; the RIB logs them).
 - New: `show mpls label range` (regions and their owners, like IOS XR's
   `show mpls label range`) and `show mpls label table [label <n>]`
   (label or chunk, owner, kind, state).

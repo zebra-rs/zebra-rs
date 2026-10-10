@@ -4,9 +4,15 @@
 //! operator to clear later.
 //!
 //! - A static `mpls label` binding: 16 up to the kernel's last usable
-//!   label, and outside every segment-routing block's SRGB and SRLB and the
-//!   dynamic range. The dynamic allocators take labels only from those, so a
-//!   static binding kept out of them never collides.
+//!   label, and outside every segment-routing block's SRGB and SRLB, the
+//!   dynamic range, and every label block handed out (one handed out before
+//!   the dynamic range moved can lie outside it). The dynamic allocators
+//!   take labels only from those, so a static binding kept out of them
+//!   never collides.
+//! - The dynamic range (`mpls label-range dynamic`): not empty. Its bounds
+//!   are kept inside the label space by the schema. Label blocks already
+//!   handed out outside a new range do not block it: they stay until
+//!   released.
 //! - A configured absolute Adjacency-SID: inside the SRLB the IGPs use (the
 //!   `default` block's), and configured on one interface only. One a
 //!   dynamic Adjacency-SID holds is fine: its holder is moved (phase 3b).
@@ -49,6 +55,8 @@ struct Labels {
     adj_sids: Vec<(String, u32)>,
     /// Configured Prefix-SID indexes: who, and the index.
     prefix_sids: Vec<(String, u32)>,
+    /// `mpls label-range dynamic` start and end, when configured.
+    dynamic: (Option<u32>, Option<u32>),
 }
 
 impl Labels {
@@ -58,7 +66,13 @@ impl Labels {
             let arg = |i: usize| args.get(i).map(String::as_str).unwrap_or("");
             let num = |i: usize| arg(i).parse::<u32>().ok();
             let value = || args.last().and_then(|v| v.parse::<u32>().ok());
-            if let Some(leaf) = path.strip_prefix("/segment-routing/block") {
+            if let Some(leaf) = path.strip_prefix("/mpls/label-range/dynamic/") {
+                match leaf {
+                    "start" => labels.dynamic.0 = value(),
+                    "end" => labels.dynamic.1 = value(),
+                    _ => {}
+                }
+            } else if let Some(leaf) = path.strip_prefix("/segment-routing/block") {
                 let block = labels.blocks.entry(arg(0).to_string()).or_default();
                 match leaf {
                     "/global/start" => block.global_start = value(),
@@ -193,6 +207,19 @@ pub fn violations(leaves: &[Leaf], held: &[(LabelBlock, String)]) -> BTreeSet<St
     let last_label = PLATFORM_LABELS - 1;
     let held_spans: Vec<(u32, u32)> = held.iter().filter_map(|(b, _)| span(b)).collect();
 
+    // The dynamic range, as the RIB applies it: each bound defaults on its
+    // own.
+    let dynamic = (
+        labels.dynamic.0.unwrap_or(DYNAMIC_START),
+        labels.dynamic.1.unwrap_or(last_label),
+    );
+    if dynamic.0 > dynamic.1 {
+        out.insert(format!(
+            "mpls label-range dynamic {}-{} is empty: its start is above its end",
+            dynamic.0, dynamic.1
+        ));
+    }
+
     for label in &labels.statics {
         if *label < FIRST_STATIC || *label > last_label {
             out.insert(format!(
@@ -207,10 +234,22 @@ pub fn violations(leaves: &[Leaf], held: &[(LabelBlock, String)]) -> BTreeSet<St
                 ));
             }
         }
-        if *label >= DYNAMIC_START {
+        if (dynamic.0..=dynamic.1).contains(label) {
             out.insert(format!(
-                "static MPLS label {label} is in the dynamic label range ({DYNAMIC_START}-{last_label})"
+                "static MPLS label {label} is in the dynamic label range ({}-{})",
+                dynamic.0, dynamic.1
             ));
+        }
+        // A block handed out before the dynamic range moved stays where it
+        // is, possibly outside the range now.
+        for (block, proto) in held {
+            if let Some((first, last)) = span(block)
+                && (first..=last).contains(label)
+            {
+                out.insert(format!(
+                    "static MPLS label {label} is in a label block {proto} holds ({first}-{last})"
+                ));
+            }
         }
     }
 
@@ -447,6 +486,92 @@ mod tests {
         assert_eq!(
             check(&[leaf("/router/static/vrf/mpls/label", &["blue", "15000"])]).len(),
             1
+        );
+    }
+
+    fn dynamic(start: Option<u32>, end: Option<u32>) -> Vec<Leaf> {
+        let mut leaves = Vec::new();
+        if let Some(start) = start {
+            leaves.push(leaf(
+                "/mpls/label-range/dynamic/start",
+                &[&start.to_string()],
+            ));
+        }
+        if let Some(end) = end {
+            leaves.push(leaf("/mpls/label-range/dynamic/end", &[&end.to_string()]));
+        }
+        leaves
+    }
+
+    /// A configured dynamic range moves where static bindings may go: each
+    /// bound defaults on its own, and the labels above a range ended early
+    /// are static too.
+    #[test]
+    fn a_static_label_stays_out_of_the_configured_dynamic_range() {
+        let mut leaves = dynamic(Some(30000), None);
+        leaves.extend([static_label(24000), static_label(29999)]);
+        assert!(check(&leaves).is_empty());
+        leaves.push(static_label(30000));
+        assert_eq!(
+            check(&leaves),
+            vec!["static MPLS label 30000 is in the dynamic label range (30000-1048574)"]
+        );
+
+        let mut leaves = dynamic(None, Some(99999));
+        leaves.extend([static_label(100000), static_label(1048574)]);
+        assert!(check(&leaves).is_empty());
+        leaves.push(static_label(99999));
+        assert_eq!(
+            check(&leaves),
+            vec!["static MPLS label 99999 is in the dynamic label range (24000-99999)"]
+        );
+    }
+
+    #[test]
+    fn a_dynamic_range_is_not_empty() {
+        assert!(check(&dynamic(Some(30000), Some(30000))).is_empty());
+        assert_eq!(
+            check(&dynamic(Some(40000), Some(30000))),
+            vec!["mpls label-range dynamic 40000-30000 is empty: its start is above its end"]
+        );
+        // An end below the default start, with no start configured.
+        assert_eq!(
+            check(&dynamic(None, Some(20000))),
+            vec!["mpls label-range dynamic 24000-20000 is empty: its start is above its end"]
+        );
+    }
+
+    /// Growing the range over a static binding breaks it; shrinking it
+    /// away from one does not, nor does moving it while label blocks are
+    /// held: those stay until released.
+    #[test]
+    fn a_dynamic_range_change_is_refused_only_over_a_static_binding() {
+        let running = [static_label(100)];
+        assert!(check(&running).is_empty());
+        let held = [(
+            LabelBlock {
+                start: 24000,
+                end: 25024,
+            },
+            "bgp".to_string(),
+        )];
+        let mut moved = running.to_vec();
+        moved.extend(dynamic(Some(30000), Some(99999)));
+        assert!(new_violations(&moved, &running, &held).is_empty());
+
+        // BGP's block stays below the moved range: a static binding there
+        // would share its labels.
+        moved.push(static_label(24500));
+        assert_eq!(
+            new_violations(&moved, &running, &held),
+            vec!["static MPLS label 24500 is in a label block bgp holds (24000-25023)"]
+        );
+
+        let mut grown = running.to_vec();
+        grown.extend(dynamic(Some(16), None));
+        assert_eq!(
+            new_violations(&grown, &running, &held),
+            vec!["static MPLS label 100 is in the dynamic label range (16-1048574)"]
         );
     }
 
