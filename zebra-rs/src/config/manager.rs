@@ -11,6 +11,7 @@ use super::cradle::spawn_cradle;
 use super::files::load_config_file;
 use super::isis::{despawn_isis, spawn_isis};
 use super::json::{DocError, json_read};
+use super::label_check;
 use super::nd::spawn_nd;
 use super::ospf::{despawn_ospf, despawn_ospfv3, spawn_ospf, spawn_ospfv3};
 use super::parse::State;
@@ -719,7 +720,45 @@ impl ConfigManager {
         }
     }
 
+    /// The leaves among config `text`'s lines that a label check reads
+    /// (`config::label_check`), as callback paths and arguments. Lines
+    /// that cannot carry one are not parsed.
+    fn label_leaves(&self, text: &str) -> Vec<label_check::Leaf> {
+        const LABEL_LINES: [&str; 5] = [
+            "segment-routing block ",
+            " mpls label ",
+            "adjacency-sid",
+            "prefix-sid",
+            "area-sid",
+        ];
+        text.lines()
+            .filter(|line| LABEL_LINES.iter().any(|needle| line.contains(needle)))
+            .filter_map(|line| self.paths(line.to_string()))
+            .map(|paths| {
+                let (path, args) = path_from_command(&paths);
+                (path, args.0.into_iter().collect())
+            })
+            .collect()
+    }
+
+    /// Commit the candidate. Refuses it, dispatching nothing, when it
+    /// fails validation: mandatory nodes, the leaf value checks, or a label
+    /// check it would newly break.
     pub fn commit_config(&self) -> anyhow::Result<()> {
+        self.commit(false)
+    }
+
+    /// Commit the startup config. As [`Self::commit_config`], except that a
+    /// label check failure is only logged: refusing the file would leave
+    /// the router unconfigured, and a config an earlier release accepted
+    /// can fail a check added since. Each IGP then handles the label as it
+    /// can (an Adjacency-SID outside the SRLB is advertised unclaimed, a
+    /// second configured one on a label is not advertised).
+    fn commit_startup_config(&self) -> anyhow::Result<()> {
+        self.commit(true)
+    }
+
+    fn commit(&self, startup: bool) -> anyhow::Result<()> {
         let mut errors = Vec::<String>::new();
         self.store.candidate.borrow().validate(&mut errors);
         if !errors.is_empty() {
@@ -748,6 +787,23 @@ impl ConfigManager {
         );
         if !errors.is_empty() {
             return Err(anyhow::anyhow!(errors.join("\n")));
+        }
+
+        // MPLS labels: a violation this commit would introduce, against
+        // the label blocks handed out now (`config::label_check`).
+        let held = self.label_space.lock().held_blocks();
+        let violations = label_check::new_violations(
+            &self.label_leaves(&candidate),
+            &self.label_leaves(&running),
+            &held,
+        );
+        if !violations.is_empty() {
+            if !startup {
+                return Err(anyhow::anyhow!(violations.join("\n")));
+            }
+            for violation in &violations {
+                tracing::warn!("startup config: {violation}");
+            }
         }
 
         let mut ospf = false;
@@ -1186,7 +1242,7 @@ impl ConfigManager {
         // operator hand-edited into an invalid state (e.g. a bare
         // `router isis afi-safi ipv4`) is diagnosable, rather than the
         // daemon silently coming up with no config.
-        if let Err(e) = self.commit_config() {
+        if let Err(e) = self.commit_startup_config() {
             tracing::error!(
                 "startup config {} rejected by commit validation: {}",
                 self.config_path.display(),
@@ -1503,9 +1559,10 @@ impl ConfigManager {
                         return;
                     }
                 }
-                // Commit validation (mandatory / `ext:non-empty`, and the
-                // `config::check` leaf values) runs inside `commit_config`
-                // and returns Err *before* any dispatch. Surface it instead
+                // Commit validation (mandatory / `ext:non-empty`, the
+                // `config::check` leaf values, and the `config::label_check`
+                // MPLS label checks) runs inside `commit_config` and returns
+                // Err *before* any dispatch. Surface it instead
                 // of swallowing it, and revert the candidate so the
                 // rejected lines don't linger into the next apply.
                 if let Err(e) = self.commit_config() {
@@ -2793,6 +2850,171 @@ mod uncommitted_predicate_tests {
         assert!(uncommitted(&cm));
         cm.store.discard();
         assert!(!uncommitted(&cm), "discard must settle the difference");
+    }
+}
+
+#[cfg(test)]
+mod label_commit_tests {
+    use super::*;
+    use crate::rib::label_space::SharedLabelSpace;
+
+    /// A `ConfigManager` on the shipped `yang/` tree, its startup config
+    /// at `path`, its label space `labels`. Nothing here commits a
+    /// `router <proto>` block, so no protocol task is spawned.
+    fn manager(path: &Path, labels: SharedLabelSpace) -> ConfigManager {
+        let (rib_tx, _rib_rx) = mpsc::unbounded_channel();
+        let (rib_inbound_tx, _rib_inbound_rx) = mpsc::unbounded_channel();
+        let (policy_tx, _policy_rx) = mpsc::unbounded_channel();
+        ConfigManager::new(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/yang").to_string(),
+            Vec::new(),
+            Some(path.to_string_lossy().into_owned()),
+            rib_tx,
+            rib_inbound_tx,
+            policy_tx,
+            labels,
+        )
+        .expect("manager builds")
+    }
+
+    fn temp_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("zebra-rs-label-{}-{}", name, std::process::id()))
+    }
+
+    fn edit(cm: &ConfigManager, input: &str) {
+        let mode = cm.modes.get("configure").expect("configure mode");
+        let (code, _output, _paths) = cm.execute(mode, input);
+        assert_eq!(code, ExecCode::Show, "`{input}` was rejected");
+    }
+
+    fn running(cm: &ConfigManager) -> String {
+        let mut running = String::new();
+        cm.store.running.borrow().list(&mut running);
+        running
+    }
+
+    /// Every leaf the label checks read comes out of a config's rendering
+    /// under the path `config::label_check` matches: a violating value on
+    /// each is reported.
+    #[test]
+    fn every_checked_leaf_is_read_from_the_config() {
+        let cm = manager(&temp_path("leaves"), Default::default());
+        for line in [
+            "set segment-routing block default global start 16000",
+            "set segment-routing block default global range 100",
+            "set segment-routing block default local start 15000",
+            "set segment-routing block default local range 1000",
+            "set router static mpls label 24000 nexthop 10.0.0.2",
+            "set router static vrf blue mpls label 15001 nexthop 10.0.0.2",
+            "set router ospf area 0.0.0.0 interface eth1 adjacency-sid absolute 16000",
+            "set router ospfv3 area 0.0.0.0 interface eth2 adjacency-sid absolute 15500",
+            "set router ospfv3 area 0.0.0.0 interface eth3 adjacency-sid absolute 15500",
+            "set router ospf area 0.0.0.0 interface lo prefix-sid index 100",
+            "set router ospf area 0.0.0.0 interface lo flex-algo-prefix-sid 128 index 101",
+            "set router isis interface lo ipv4 prefix-sid index 102",
+            "set router isis interface lo ipv4 flex-algo-prefix-sid 128 index 103",
+            "set router isis area-proxy area-sid index 104",
+        ] {
+            edit(&cm, line);
+        }
+        let mut candidate = String::new();
+        cm.store.candidate.borrow().list(&mut candidate);
+        let found: Vec<_> = label_check::violations(&cm.label_leaves(&candidate), &[])
+            .into_iter()
+            .collect();
+        let srgb = "the SRGB (16000-16099, 100 labels)";
+        assert_eq!(
+            found,
+            vec![
+                format!("IS-IS area-proxy area-sid index 104 does not fit {srgb}"),
+                format!("IS-IS interface lo flex-algo 128 prefix-sid index 103 does not fit {srgb}"),
+                format!("IS-IS interface lo prefix-sid index 102 does not fit {srgb}"),
+                "OSPF area 0.0.0.0 interface eth1 adjacency-sid absolute 16000 is outside the SRLB (15000-15999)".to_string(),
+                format!("OSPF area 0.0.0.0 interface lo flex-algo 128 prefix-sid index 101 does not fit {srgb}"),
+                format!("OSPF area 0.0.0.0 interface lo prefix-sid index 100 does not fit {srgb}"),
+                "adjacency-sid absolute 15500 is configured more than once: OSPFv3 area 0.0.0.0 interface eth2, OSPFv3 area 0.0.0.0 interface eth3".to_string(),
+                "static MPLS label 15001 is in the SRLB of segment-routing block default (15000-15999)".to_string(),
+                "static MPLS label 24000 is in the dynamic label range (24000-1048574)".to_string(),
+            ]
+        );
+    }
+
+    /// A commit that adds a violation is refused before anything is
+    /// dispatched: the running config stays as it was.
+    #[test]
+    fn a_commit_that_adds_a_violation_is_refused() {
+        let cm = manager(&temp_path("refused"), Default::default());
+        edit(&cm, "set router static mpls label 24000 nexthop 10.0.0.2");
+        let err = cm
+            .commit_config()
+            .expect_err("a label in the dynamic range");
+        assert_eq!(
+            err.to_string(),
+            "static MPLS label 24000 is in the dynamic label range (24000-1048574)"
+        );
+        assert!(!running(&cm).contains("mpls label"), "{}", running(&cm));
+    }
+
+    /// The startup load only warns, so a config an earlier release
+    /// accepted still comes up. Its violation then blocks no later
+    /// commit, while a commit adding one of its own is still refused.
+    #[test]
+    fn a_startup_violation_is_loaded_and_blocks_no_later_commit() {
+        let path = temp_path("startup");
+        std::fs::write(
+            &path,
+            "set router static mpls label 24000 nexthop 10.0.0.2\n",
+        )
+        .expect("temp config written");
+        let cm = manager(&path, Default::default());
+        cm.load_config();
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            running(&cm).contains("mpls label 24000"),
+            "{}",
+            running(&cm)
+        );
+
+        edit(&cm, "set system hostname r1");
+        cm.commit_config()
+            .expect("an unrelated commit goes through");
+
+        edit(&cm, "set router static mpls label 24001 nexthop 10.0.0.2");
+        let err = cm
+            .commit_config()
+            .expect_err("a new label in the dynamic range");
+        assert_eq!(
+            err.to_string(),
+            "static MPLS label 24001 is in the dynamic label range (24000-1048574)"
+        );
+    }
+
+    /// A block is checked against the label blocks handed out at the
+    /// commit: one over a block BGP holds is refused.
+    #[test]
+    fn a_block_over_labels_bgp_holds_is_refused() {
+        let labels = SharedLabelSpace::default();
+        let held = labels.lock().alloc("bgp", 1024).expect("a free block");
+        let cm = manager(&temp_path("held"), labels);
+        for line in [
+            "set segment-routing block default global start 24500",
+            "set segment-routing block default global range 8000",
+            "set segment-routing block default local start 15000",
+            "set segment-routing block default local range 1000",
+        ] {
+            edit(&cm, line);
+        }
+        let err = cm.commit_config().expect_err("a block over BGP's labels");
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "the SRGB of segment-routing block default (24500-32499) covers labels bgp holds ({}-{}); the nearest free range of 8000 labels is {}-{}",
+                held.start,
+                held.end - 1,
+                held.end,
+                held.end + 7999
+            )
+        );
     }
 }
 
