@@ -447,8 +447,12 @@ What this replaces in today's BGP (from reading the code; not reproduced):
   `LabelBlockLow` refill was never built.
 - Shard sub-blocks are never returned, and a carved central block can never
   become wholly free, so it never goes back to the RIB.
-- An exhausted RIB pool sends no reply (`rib/inst.rs:1546-1557`), and
-  `vrf_label_request_pending` never clears, so BGP never asks again.
+- An exhausted RIB pool sent no reply, and `vrf_label_request_pending`
+  never cleared, so BGP never asked again. A configurable dynamic range
+  (phase 6c) made this reachable, so the RIB now keeps a request it has no
+  room for and serves it once labels are freed, SR blocks change, or a
+  commit grows the range (`retry_label_block_requests`); BGP's reply
+  handling already clears the flag and labels whatever waited.
 - `label-mode per-route|per-nexthop` is parsed (`vrf_config.rs:501-509`)
   but unused; only per-VRF labels exist. Per-route mode, when built, mints
   from the same shard chunks.
@@ -641,7 +645,7 @@ Each phase is one PR, smallest and most urgent first.
 | 2 | OSPFv2/v3 read the `default` block and follow its changes (§6.1); default SRLB 1000; OSPFv2 `show` end | two sources of truth for SR ranges; OSPF ignoring a block change |
 | 3 | IGP dynamic Adj-SIDs and Mirror Context labels per label from the `LabelSpace` SRLB region; configured Adj-SIDs and Binding-SIDs claimed there, moving a dynamic holder (§5.1); an SRLB change moves every dynamic Adj-SID (§6.1); `LocalLabels` retired | RIB blind to local labels; a dynamic Adj-SID could take a configured label; IS-IS Adj-SIDs left in the old SRLB after a change |
 | 4 | ILM candidates keyed by owner; `Releasing` and `Revoking` complete only once the RIB withdraws the owner's ILMs; old Prefix-SID ILMs held through an SRGB change (§6.1) | reuse races; OSPFv2/v3 overwrite at one label; forwarding gap on an SRGB change |
-| 5 | BGP synchronous adaptive chunks (128 → 65536, reset on return) for the main task and every shard; retire `LabelBlockRequest`, `vrf_label_request_pending`, `relabel_vrf`, `carve` | transit minting failure, worker shards unable to mint, chunks never returned, stuck request flag |
+| 5 | BGP synchronous adaptive chunks (128 → 65536, reset on return) for the main task and every shard; retire `LabelBlockRequest`, `vrf_label_request_pending`, `relabel_vrf`, `carve` | transit minting failure, worker shards unable to mint, chunks never returned (the stuck request flag is fixed already, with 6c) |
 | 6 | Commit validation (§7), including block changes (§6.1), and `show mpls label range/table` | silent overlaps; a new SRGB silently losing to BGP labels |
 | 7 | AF_MPLS dump at startup, `Stale` labels, sweep; IGP graceful restart re-reserves its checkpointed Adj-SIDs | EEXIST after a crash; OSPF GR replay not reserving `lan_adj_sids` |
 
