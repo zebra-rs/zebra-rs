@@ -1008,6 +1008,24 @@ impl MacEntry {
     pub fn installed_dest(&self) -> Option<MacDest> {
         self.dests.first().copied()
     }
+
+    /// Whether programming this entry would program the same thing as
+    /// `other`.
+    fn programs_as(&self, other: &MacEntry) -> bool {
+        (
+            &self.dests,
+            self.esi,
+            self.flags,
+            self.seq,
+            &self.local_port,
+        ) == (
+            &other.dests,
+            other.esi,
+            other.flags,
+            other.seq,
+            &other.local_port,
+        )
+    }
 }
 
 /// The all-zero ESI means "no Ethernet Segment", not a segment whose id
@@ -1882,6 +1900,49 @@ impl Rib {
             self.neighbors.insert(key, nbr);
         }
         previous
+    }
+
+    /// The bridge keeps one master FDB row per (MAC, VLAN). A row reported
+    /// on a new port has moved there — an install taking over a locally
+    /// learned row, or a local learn taking over an installed one — and
+    /// the kernel reports only the new port. Forget a local row still
+    /// cached for the old port, so the binding it backed is withdrawn.
+    /// Returns whether one was.
+    fn evict_moved_bridge_row(&mut self, nbr: &FibNeighbor) -> bool {
+        use netlink_packet_route::AddressFamily;
+        use netlink_packet_route::neighbour::NeighbourFlags;
+        if nbr.family != AddressFamily::Bridge
+            || nbr.master.is_none()
+            || nbr.flags.contains(NeighbourFlags::Own)
+        {
+            return false;
+        }
+        let Some(mac) = nbr.lladdr else {
+            return false;
+        };
+        let moved: Vec<NeighborKey> = self
+            .local_neighbors
+            .get(&mac)
+            .into_iter()
+            .flat_map(|rows| rows.iter())
+            .filter(|(key, row)| {
+                matches!(key, NeighborKey::Bridge { ifindex, vlan, .. }
+                    if *ifindex != nbr.ifindex && *vlan == nbr.vlan)
+                    && row.master == nbr.master
+                    && !row.flags.contains(NeighbourFlags::Own)
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in &moved {
+            self.neighbors.remove(key);
+            if let Some(rows) = self.local_neighbors.get_mut(&mac) {
+                rows.remove(key);
+                if rows.is_empty() {
+                    self.local_neighbors.remove(&mac);
+                }
+            }
+        }
+        !moved.is_empty()
     }
 
     fn reconcile_local_mac(&mut self, mac: MacAddr) {
@@ -4920,6 +4981,7 @@ impl Rib {
                 let local = !nbr
                     .flags
                     .contains(netlink_packet_route::neighbour::NeighbourFlags::ExtLearned);
+                let moved = self.evict_moved_bridge_row(&nbr);
                 let previous = self.cache_neighbor(nbr, true);
                 if self.cradle_fdb_watch.is_none() {
                     if let Some(old) = previous
@@ -4930,7 +4992,9 @@ impl Rib {
                     {
                         self.reconcile_local_mac(old_mac);
                     }
-                    if local && let Some(mac) = mac {
+                    if (local || moved)
+                        && let Some(mac) = mac
+                    {
                         self.reconcile_local_mac(mac);
                     }
                 }
@@ -5597,8 +5661,10 @@ impl Rib {
         }
     }
 
+    /// Record one remote route for `(vni, mac)` in `mac_table`, without
+    /// programming the FIB; `reconcile_evpn_mac` programs the result once.
     #[allow(clippy::too_many_arguments)]
-    pub(super) async fn mac_add(
+    pub(super) fn mac_record(
         &mut self,
         vni: u32,
         mac: MacAddr,
@@ -5636,7 +5702,26 @@ impl Rib {
                 self.mac_table.insert((vni, mac), entry);
             }
         }
-        self.mac_install(vni, mac).await;
+    }
+
+    /// Program `(vni, mac)` after `mac_table` was rebuilt from its routes,
+    /// unless it programs exactly what `previous` did. Re-programming an
+    /// unchanged binding is not harmless: a locally learned row that took
+    /// the address over would be moved back onto the VXLAN port, as when
+    /// BGP withdraws one of a MAC's remote routes ahead of the others.
+    pub(super) async fn mac_reprogram(
+        &mut self,
+        vni: u32,
+        mac: MacAddr,
+        previous: Option<MacEntry>,
+    ) {
+        let unchanged = match (self.mac_table.get(&(vni, mac)), &previous) {
+            (Some(entry), Some(previous)) => entry.programs_as(previous),
+            _ => false,
+        };
+        if !unchanged {
+            self.mac_install(vni, mac).await;
+        }
     }
 
     /// Program the FIB for `(vni, mac)` from its `MacEntry`, choosing the
@@ -6430,6 +6515,84 @@ mod local_device_mac_tests {
                 "without local FDB ownership no IP may be exported"
             );
         }
+    }
+
+    /// The kernel reports a bridge row that changes port only for the new
+    /// port. A local row an install took over, or one taken over by a
+    /// local learn, must leave or enter the local bindings accordingly.
+    #[tokio::test]
+    async fn evpn_bridge_row_moving_port_moves_the_binding() {
+        let mut rib = Rib::new(false).unwrap();
+        rib.links = tables().0;
+        let mac = mac("aa:bb:cc:dd:ee:01");
+        let local = row(HOST0, "aa:bb:cc:dd:ee:01", None, NeighbourState::Reachable);
+        rib.process_fib_msg(FibMessage::NewNeighbor(local.clone()))
+            .await;
+        assert!(rib.local_bindings.contains_key(&(mac, 10, None)));
+        // An install moved it onto the VXLAN port.
+        let remote = FibNeighbor {
+            flags: NeighbourFlags::ExtLearned,
+            ..row(
+                VXLAN10,
+                "aa:bb:cc:dd:ee:01",
+                None,
+                NeighbourState::Reachable,
+            )
+        };
+        rib.process_fib_msg(FibMessage::NewNeighbor(remote)).await;
+        assert!(rib.local_bindings.is_empty());
+        // The VXLAN device's own row and another VLAN's row do not move it.
+        rib.process_fib_msg(FibMessage::NewNeighbor(local.clone()))
+            .await;
+        rib.process_fib_msg(FibMessage::NewNeighbor(self_row(
+            VXLAN10,
+            "aa:bb:cc:dd:ee:01",
+        )))
+        .await;
+        let other_vlan = FibNeighbor {
+            flags: NeighbourFlags::ExtLearned,
+            ..row(
+                VXLAN10,
+                "aa:bb:cc:dd:ee:01",
+                Some(1),
+                NeighbourState::Reachable,
+            )
+        };
+        rib.process_fib_msg(FibMessage::NewNeighbor(other_vlan))
+            .await;
+        assert!(rib.local_bindings.contains_key(&(mac, 10, None)));
+    }
+
+    /// Reconciling a MAC re-programs the kernel only when the winning
+    /// binding changed: withdrawing one of several equal remote routes
+    /// leaves the installed state alone.
+    #[tokio::test]
+    async fn evpn_unchanged_winner_is_not_reprogrammed() {
+        let mut rib = Rib::new(false).unwrap();
+        let entry = MacEntry::new(
+            Some(MacDest::Vxlan {
+                vtep: "192.0.2.1".parse().unwrap(),
+            }),
+            None,
+            0,
+            3,
+        );
+        let mut same = entry.clone();
+        assert!(same.programs_as(&entry));
+        same.seq = 4;
+        assert!(!same.programs_as(&entry), "a newer route retakes the row");
+        let mut moved = entry.clone();
+        moved.dests = [MacDest::Vxlan {
+            vtep: "192.0.2.2".parse().unwrap(),
+        }]
+        .into_iter()
+        .collect();
+        assert!(!moved.programs_as(&entry));
+        let mac = mac("aa:bb:cc:dd:ee:01");
+        rib.mac_table.insert((10, mac), entry.clone());
+        // No local VXLAN: an install would be skipped anyway, so this only
+        // checks the comparison is wired, not the netlink side.
+        rib.mac_reprogram(10, mac, Some(entry)).await;
     }
 
     #[tokio::test]
