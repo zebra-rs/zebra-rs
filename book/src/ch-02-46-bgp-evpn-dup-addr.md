@@ -48,9 +48,9 @@ not counted.
 
 An **IP** is counted separately, but only when it moves to a *different* MAC:
 a host that keeps its MAC as it moves is already counted by the MAC. An IP
-bound to a duplicate MAC is a duplicate as well. Changing its binding to
-another MAC does not release this inherited hold: it lasts until the original
-duplicate MAC is cleared or recovers, and the IP's new binding is then re-run.
+bound to a duplicate MAC is a duplicate as well, for as long as it stays
+bound to it. As in FRR, an IP that moves to a MAC that is not a duplicate
+leaves the hold, and its own detection starts over.
 
 When an address reaches `max-moves`, zebra-rs logs a warning:
 
