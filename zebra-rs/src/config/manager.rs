@@ -5738,6 +5738,53 @@ mod yang_load_tests {
         }
     }
 
+    /// `router bgp afi-safi evpn dup-addr-detection …` and `show evpn
+    /// dup-addr` (RFC 7432 §15.1). `freeze` is a union of the
+    /// `permanent` keyword and a number of seconds.
+    #[test]
+    fn bgp_evpn_dup_addr_detection_is_settable() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        for path in [
+            "set router bgp afi-safi evpn dup-addr-detection enabled false",
+            "set router bgp afi-safi evpn dup-addr-detection max-moves 3",
+            "set router bgp afi-safi evpn dup-addr-detection time 60",
+            "set router bgp afi-safi evpn dup-addr-detection freeze permanent",
+            "set router bgp afi-safi evpn dup-addr-detection freeze 300",
+        ] {
+            let (code, _comps, _state) = parse(path, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "`{path}` must be a settable path");
+        }
+        for path in [
+            "set router bgp afi-safi evpn dup-addr-detection max-moves 1",
+            "set router bgp afi-safi evpn dup-addr-detection freeze 10",
+        ] {
+            let (code, _comps, _state) = parse(path, entry.clone(), None, State::new());
+            assert_ne!(code, ExecCode::Success, "`{path}` is out of range");
+        }
+
+        let mut exec = YangStore::new();
+        exec.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        exec.read_with_resolve("exec").expect("exec mode loads");
+        exec.identity_resolve();
+        let module = exec.find_module("exec").expect("exec module present");
+        let entry = to_entry(&exec, module);
+        let (code, _comps, _state) = parse("show evpn dup-addr", entry, None, State::new());
+        assert_eq!(code, ExecCode::Success);
+    }
+
     #[test]
     fn bgp_evpn_igmp_mld_proxy_is_settable() {
         use crate::config::ExecCode;

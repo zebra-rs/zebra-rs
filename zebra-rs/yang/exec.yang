@@ -446,6 +446,10 @@ module exec {
           type empty;
         }
       }
+      leaf dup-addr {
+        ext:help "EVPN duplicate address detection state";
+        type empty;
+      }
     }
     container bfd {
       ext:help "BFD (Bidirectional Forwarding Detection) information";

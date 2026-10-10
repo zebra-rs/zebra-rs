@@ -92,7 +92,7 @@ impl Rib {
             self.mac_del(vni, mac).await;
             return;
         };
-        // Refused before `mac_add` (which refuses the same way), so say so
+        // Refused before `mac_record` (which refuses the same way), so say so
         // here: the log line is how an operator sees a peer advertising one
         // of this node's own addresses.
         if let Some(bridge) = self.local_device_mac_bridge(vni, mac) {
@@ -104,12 +104,13 @@ impl Rib {
         }
         let seq = winner.seq;
         let esi = winner.esi.filter(|esi| *esi != [0; 10]);
-        self.mac_table.remove(&(vni, mac));
-        for route in routes
+        let previous = self.mac_table.remove(&(vni, mac));
+        let winners: Vec<&MacRoute> = routes
             .iter()
             .filter(|route| route.seq == seq || (esi.is_some() && route.esi == esi))
-        {
-            self.mac_add(
+            .collect();
+        for route in &winners {
+            self.mac_record(
                 vni,
                 mac,
                 route.tunnel_endpoint,
@@ -119,8 +120,10 @@ impl Rib {
                 route.srv6_sid,
                 route.mpls_label,
                 route.local_port.clone(),
-            )
-            .await;
+            );
+        }
+        self.mac_reprogram(vni, mac, previous).await;
+        for route in winners {
             if let Some(ip) = route.key.ip
                 && route.srv6_sid.is_none()
                 && route.mpls_label.is_none()

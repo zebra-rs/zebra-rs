@@ -609,3 +609,312 @@ async fn ip_moving_to_another_mac_outranks_the_old_binding() {
     assert_eq!(local_macip_seq(&bgp, new_mac, ip), Some(8));
     assert_eq!(mac_messages(&mut rib), vec![(false, old_binding)]);
 }
+
+/// RFC 7432 §15.1 duplicate address detection, driven through ingest and
+/// origination. A host flapping between this node and the peer at
+/// 10.0.0.11: each takeover by the peer outranks our route, and the
+/// kernel then replaces our local FDB row (simulated by withdrawing the
+/// local route); each local learn outranks the peer's route.
+struct Flap {
+    bgp: Bgp,
+    rib: mpsc::UnboundedReceiver<crate::rib::client::RibInbound>,
+    from: usize,
+    local: crate::rib::api::FdbEntry,
+    key: crate::rib::evpn::MacRouteKey,
+    remote_rd: RouteDistinguisher,
+    seq: u32,
+}
+
+impl Flap {
+    fn new(
+        config: crate::bgp::evpn_dad::DadConfig,
+    ) -> (Self, mpsc::UnboundedReceiver<bytes::BytesMut>) {
+        let (mut bgp, rib) = bgp_with_rib();
+        bgp.advertise_all_vni = true;
+        bgp.evpn_dad_configure(config);
+        let (from, rx) = peer(&mut bgp, "10.0.0.11", false);
+        let mac = MacAddr::from([2, 0, 0, 0, 1, 1]);
+        let remote_rd = rd_from_router_id_vni("10.0.0.11".parse().unwrap(), 100).unwrap();
+        let local = crate::rib::api::FdbEntry {
+            vni: 100,
+            mac,
+            ip: None,
+            ifindex: 7,
+            bridge_ifindex: 5,
+            flags: 0,
+            vxlan_local: Some(IpAddr::V4(RID)),
+        };
+        bgp.local_fdb.insert((100, mac, None), local.clone());
+        let flap = Self {
+            bgp,
+            rib,
+            from,
+            local,
+            key: crate::rib::evpn::MacRouteKey::new(remote_rd, 100, mac, None),
+            remote_rd,
+            seq: 0,
+        };
+        (flap, rx)
+    }
+
+    /// The peer advertises the host with a sequence number above ours.
+    fn remote(&mut self) {
+        self.seq += 1;
+        receive_macip(
+            &mut self.bgp,
+            self.from,
+            self.remote_rd,
+            self.local.mac,
+            None,
+            self.seq,
+        );
+        // What the event loop does after an UPDATE batch.
+        self.bgp.evpn_dad_drain();
+    }
+
+    /// The kernel replaced our local row with the remote one.
+    fn kernel_replaced(&mut self) {
+        self.bgp.evpn_withdraw_macip(&self.local);
+    }
+
+    /// The host is learned here: our route carries the next number.
+    fn local(&mut self) {
+        self.seq += 1;
+        self.bgp.evpn_originate_macip(&self.local);
+    }
+
+    fn messages(&mut self) -> Vec<(bool, crate::rib::evpn::MacRouteKey)> {
+        mac_messages(&mut self.rib)
+    }
+
+    fn advertised(&self) -> bool {
+        self.bgp.evpn_macip_originated(&self.local)
+    }
+
+    fn dad_key(&self) -> crate::bgp::evpn_dad::DadKey {
+        crate::bgp::evpn_dad::DadKey::Mac(100, self.local.mac)
+    }
+}
+
+fn dad_config(
+    max_moves: u32,
+    freeze: crate::bgp::evpn_dad::Freeze,
+) -> crate::bgp::evpn_dad::DadConfig {
+    crate::bgp::evpn_dad::DadConfig {
+        enabled: true,
+        max_moves,
+        time: 180,
+        freeze,
+    }
+}
+
+/// Warn-only (the default action): the duplicate is detected and marked,
+/// and routes keep flowing.
+#[tokio::test]
+async fn flapping_mac_is_detected_and_still_advertised_without_freeze() {
+    let (mut f, _rx) = Flap::new(dad_config(3, crate::bgp::evpn_dad::Freeze::Off));
+    f.remote(); // the host starts behind the peer: not a move
+    f.local(); // 1
+    f.remote(); // 2
+    f.kernel_replaced();
+    assert!(!f.bgp.local_rib.evpn_dad.mac_duplicate(100, f.local.mac));
+    f.messages();
+    f.local(); // 3: detected
+    assert!(f.bgp.local_rib.evpn_dad.mac_duplicate(100, f.local.mac));
+    assert!(f.advertised());
+    assert_eq!(f.messages(), vec![(false, f.key)]);
+    let view = f.bgp.local_rib.evpn_dad.view(std::time::Instant::now());
+    assert_eq!(view.addresses.len(), 1);
+    assert!(view.addresses[0].duplicate);
+    assert_eq!(view.addresses[0].location, "local");
+}
+
+/// Detected on a local learn under a permanent freeze: our route is not
+/// advertised, the peer's stays where the kernel has it, later routes
+/// from the peer are not installed; `clear` installs the peer's route,
+/// the last one received.
+#[tokio::test]
+async fn freeze_on_a_local_learn_holds_both_sides_until_cleared() {
+    let (mut f, _rx) = Flap::new(dad_config(3, crate::bgp::evpn_dad::Freeze::Permanent));
+    f.remote();
+    f.local(); // 1
+    f.remote(); // 2
+    f.kernel_replaced();
+    f.messages();
+    f.local(); // 3: detected and frozen
+    assert!(!f.advertised());
+    assert_eq!(f.messages(), vec![]);
+    assert_eq!(f.bgp.local_rib.evpn_dad.until(f.dad_key()), None);
+    // A newer route from the peer is held too.
+    f.remote();
+    assert_eq!(f.messages(), vec![]);
+    assert_eq!(f.bgp.evpn_dad_clear(Some(200), None, None), 0);
+    assert_eq!(f.bgp.evpn_dad_clear(Some(100), None, None), 1);
+    assert_eq!(f.messages(), vec![(true, f.key)]);
+    assert!(!f.bgp.local_rib.evpn_dad.mac_duplicate(100, f.local.mac));
+}
+
+/// Detected on the peer's takeover under a timed freeze: the peer's route
+/// is not installed and ours is withdrawn (FRR removes the local MAC from
+/// BGP on a takeover); the freeze elapsing installs the peer's route.
+#[tokio::test]
+async fn freeze_on_a_takeover_withdraws_ours_and_recovers_on_the_timer() {
+    let (mut f, _rx) = Flap::new(dad_config(2, crate::bgp::evpn_dad::Freeze::For(60)));
+    f.remote();
+    f.local(); // 1
+    assert!(f.advertised());
+    f.messages();
+    f.remote(); // 2: detected and frozen
+    assert!(!f.advertised());
+    assert_eq!(f.messages(), vec![]);
+    let until = f
+        .bgp
+        .local_rib
+        .evpn_dad
+        .until(f.dad_key())
+        .expect("a timed freeze arms recovery");
+    // A wake-up for another freeze is ignored.
+    f.bgp
+        .evpn_dad_recover(f.dad_key(), until + std::time::Duration::from_secs(1));
+    assert_eq!(f.messages(), vec![]);
+    f.bgp.evpn_dad_recover(f.dad_key(), until);
+    assert_eq!(f.messages(), vec![(true, f.key)]);
+    assert!(!f.bgp.local_rib.evpn_dad.mac_duplicate(100, f.local.mac));
+}
+
+/// Turning detection off releases a frozen address: a local one is
+/// advertised again, and its route outranks the peer's.
+#[tokio::test]
+async fn disabling_detection_readvertises_a_frozen_local_mac() {
+    let (mut f, _rx) = Flap::new(dad_config(3, crate::bgp::evpn_dad::Freeze::Permanent));
+    f.remote();
+    f.local();
+    f.remote();
+    f.kernel_replaced();
+    f.local(); // frozen while local
+    assert!(!f.advertised());
+    f.messages();
+    f.bgp.evpn_dad_configure(crate::bgp::evpn_dad::DadConfig {
+        enabled: false,
+        ..dad_config(3, crate::bgp::evpn_dad::Freeze::Permanent)
+    });
+    assert!(f.advertised());
+    assert_eq!(f.messages(), vec![(false, f.key)]);
+}
+
+fn frozen_mac_with_ip(freeze: crate::bgp::evpn_dad::Freeze) -> (Flap, IpAddr) {
+    let (mut f, _rx) = Flap::new(dad_config(2, freeze));
+    let ip = "10.10.0.5".parse().unwrap();
+    f.remote();
+    f.bgp
+        .process_rib_msg(RibRx::FdbAdd(crate::rib::api::FdbEntry {
+            ip: Some(ip),
+            ..f.local.clone()
+        })); // first local move
+    f.local(); // MAC-only route for the same local MAC
+    f.remote(); // second move: MAC frozen, IP inherits the freeze
+    assert!(f.bgp.local_rib.evpn_dad.frozen(100, f.local.mac, Some(ip)));
+    assert!(!f.advertised());
+    f.messages();
+    (f, ip)
+}
+
+/// As in FRR (`zebra_evpn_ip_inherit_dad_from_mac`), an IP holds with its
+/// duplicate MAC only while bound to it: rebound to a MAC that is not a
+/// duplicate, remotely or locally, it is released and its own detection
+/// starts over. The duplicate MAC itself stays frozen.
+#[tokio::test]
+async fn an_ip_rebound_to_a_clean_mac_leaves_the_inherited_hold() {
+    use crate::bgp::evpn_dad::Freeze;
+    let (mut f, ip) = frozen_mac_with_ip(Freeze::Permanent);
+    let other_mac = MacAddr::from([2, 0, 0, 0, 1, 2]);
+    receive_macip(&mut f.bgp, f.from, f.remote_rd, other_mac, Some(ip), 10);
+    let new_key = crate::rib::evpn::MacRouteKey::new(f.remote_rd, 100, other_mac, Some(ip));
+    assert!(f.messages().contains(&(true, new_key)));
+    assert!(!f.bgp.local_rib.evpn_dad.frozen(100, other_mac, Some(ip)));
+    assert!(f.bgp.local_rib.evpn_dad.frozen(100, f.local.mac, None));
+
+    let (mut f, ip) = frozen_mac_with_ip(Freeze::Permanent);
+    let local = crate::rib::api::FdbEntry {
+        mac: other_mac,
+        ip: Some(ip),
+        ..f.local.clone()
+    };
+    f.bgp.process_rib_msg(RibRx::FdbAdd(local.clone()));
+    assert!(f.bgp.evpn_macip_originated(&local));
+    assert!(f.bgp.local_rib.evpn_dad.frozen(100, f.local.mac, None));
+}
+
+/// Changing warn-only to a timed freeze withdraws existing advertisements
+/// immediately and arms a real timer that re-advertises on recovery.
+#[tokio::test(start_paused = true)]
+async fn timed_freeze_after_warn_only_withdraws_and_arms_recovery() {
+    use crate::bgp::evpn_dad::Freeze;
+    let (mut f, _rx) = Flap::new(dad_config(3, Freeze::Off));
+    f.remote();
+    f.local();
+    f.remote();
+    f.kernel_replaced();
+    f.local(); // warn-only duplicate, still advertised
+    assert!(f.advertised());
+    f.messages();
+    f.bgp.evpn_dad_configure(dad_config(3, Freeze::For(30)));
+    assert!(!f.advertised());
+    assert!(
+        f.messages().is_empty(),
+        "changing the hold does not program the RIB"
+    );
+    let expected_until = f
+        .bgp
+        .local_rib
+        .evpn_dad
+        .until(f.dad_key())
+        .expect("timed freeze deadline");
+    let message = tokio::time::timeout(std::time::Duration::from_secs(31), f.bgp.rx.recv())
+        .await
+        .expect("a recovery timer is armed")
+        .expect("BGP channel is open");
+    let super::super::inst::Message::EvpnDadRecover { key, until } = message else {
+        panic!("expected duplicate-address recovery");
+    };
+    assert_eq!(key, f.dad_key());
+    assert_eq!(until, expected_until);
+    f.bgp.evpn_dad_recover(key, until);
+    assert!(f.advertised());
+    assert!(!f.bgp.local_rib.evpn_dad.mac_duplicate(100, f.local.mac));
+}
+
+#[tokio::test(start_paused = true)]
+async fn permanent_freeze_changed_to_timed_freeze_arms_recovery() {
+    use crate::bgp::evpn_dad::Freeze;
+    let (mut f, _rx) = Flap::new(dad_config(2, Freeze::For(30)));
+    f.remote();
+    f.local();
+    f.remote();
+    let stale_until = f.bgp.local_rib.evpn_dad.until(f.dad_key()).unwrap();
+    f.messages();
+    f.bgp.evpn_dad_configure(dad_config(2, Freeze::Permanent));
+    f.bgp.evpn_dad_recover(f.dad_key(), stale_until);
+    assert!(f.bgp.local_rib.evpn_dad.frozen(100, f.local.mac, None));
+    assert!(f.messages().is_empty(), "the old timed recovery is ignored");
+
+    f.bgp.evpn_dad_configure(dad_config(2, Freeze::For(60)));
+    let expected_until = f.bgp.local_rib.evpn_dad.until(f.dad_key()).unwrap();
+    loop {
+        let message = tokio::time::timeout(std::time::Duration::from_secs(61), f.bgp.rx.recv())
+            .await
+            .expect("a recovery timer is armed")
+            .expect("BGP channel is open");
+        let super::super::inst::Message::EvpnDadRecover { key, until } = message else {
+            panic!("expected duplicate-address recovery");
+        };
+        f.bgp.evpn_dad_recover(key, until);
+        if until == expected_until {
+            break;
+        }
+        assert!(f.bgp.local_rib.evpn_dad.frozen(100, f.local.mac, None));
+        assert!(f.messages().is_empty());
+    }
+    assert_eq!(f.messages(), vec![(true, f.key)]);
+    assert!(!f.bgp.local_rib.evpn_dad.mac_duplicate(100, f.local.mac));
+}

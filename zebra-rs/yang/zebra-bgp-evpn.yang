@@ -73,9 +73,8 @@ module zebra-bgp-evpn {
          using the remote VTEP and router MAC. The Linux bridge, VXLAN
          FDB and neighbor tables describe the overlay adjacency. This
          supports kernel forwarding and consumers of kernel state.
-         Configure this before
-         establishing EVPN sessions; changing it with active routes is
-         not supported.";
+         Changing it with routes installed moves them between this
+         install and the ordinary one.";
     }
     leaf advertise-all-vni {
       ext:help "Advertise routes for all local VNIs";
@@ -100,6 +99,61 @@ module zebra-bgp-evpn {
          host. Rows an operator parks with `bridge fdb add ... static`
          are stations and are advertised. There is no equivalent of
          FRR's `advertise-svi-ip` / `advertise-default-gw` yet.";
+    }
+    container dup-addr-detection {
+      ext:help "EVPN duplicate address detection (RFC 7432 section 15.1)";
+      description
+        "Detect a MAC, or an IP moving between MACs, that moves between
+         this node and a remote VTEP `max-moves` times within `time`
+         seconds: two hosts, or a loop, claiming one address. On by
+         default, as in FRR (`dup-addr-detection` under `address-family
+         l2vpn evpn`). A detected address is logged and shown by `show
+         evpn dup-addr`; with `freeze` it is also neither advertised nor
+         installed from remote routes until the freeze ends or `clear bgp
+         evpn dup-addr` releases it.";
+      leaf enabled {
+        ext:help "Run duplicate address detection";
+        type boolean;
+        default true;
+        description
+          "Turning detection off releases every detected address and
+           forgets every move counted so far.";
+      }
+      leaf max-moves {
+        ext:help "Moves within the window that make a duplicate";
+        type uint32 {
+          range "2..1000";
+        }
+        default 5;
+        description "RFC 7432's N.";
+      }
+      leaf time {
+        ext:help "Detection window in seconds";
+        type uint32 {
+          range "2..1800";
+        }
+        default 180;
+        description
+          "RFC 7432's M. A local learn of an address that was remote
+           opens the window; moves counted within it add up.";
+      }
+      leaf freeze {
+        ext:help "Hold a duplicate: permanent, or seconds (30-3600)";
+        type union {
+          type enumeration {
+            enum permanent;
+          }
+          type uint32 {
+            range "30..3600";
+          }
+        }
+        description
+          "Hold a detected duplicate in its last state: this node stops
+           advertising it and stops installing remote routes for it. A
+           number of seconds releases it after that long; `permanent`
+           only on `clear bgp evpn dup-addr`. Unset, detection only
+           warns.";
+      }
     }
     leaf encapsulation {
       ext:help "EVPN overlay encapsulation (vxlan, srv6 or mpls)";

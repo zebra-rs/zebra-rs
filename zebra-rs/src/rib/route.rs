@@ -148,6 +148,103 @@ impl Rib {
         }
     }
 
+    /// `kernel-route-exchange` changed at runtime: move every selected
+    /// EVPN overlay route between the ordinary install and the install
+    /// through its L3-VNI bridge. Removal follows what was installed (the
+    /// FIB tracks bridge routes, including failed installs it keeps for
+    /// recovery), so it runs before the knob flips and the re-install
+    /// after.
+    pub(super) async fn kernel_route_exchange_set(&mut self, enabled: bool) {
+        if self.fib_handle.kernel_route_exchange == enabled {
+            return;
+        }
+        let overlay = |entries: &RibEntries| {
+            entries
+                .iter()
+                .position(|e| e.is_selected() && e.is_protocol() && is_bridge_type5(e))
+        };
+        let mut routes: Vec<(u32, IpNet)> = Vec::new();
+        let tables = std::iter::once((RT_TABLE_MAIN, &self.table, &self.table_v6)).chain(
+            self.vrf_tables
+                .iter()
+                .map(|(id, t)| (*id, &t.table, &t.table_v6)),
+        );
+        for (table_id, v4, v6) in tables {
+            routes.extend(
+                v4.iter()
+                    .filter(|(_, entries)| overlay(entries).is_some())
+                    .map(|(prefix, _)| (table_id, IpNet::V4(prefix))),
+            );
+            routes.extend(
+                v6.iter()
+                    .filter(|(_, entries)| overlay(entries).is_some())
+                    .map(|(prefix, _)| (table_id, IpNet::V6(prefix))),
+            );
+        }
+        for (table_id, prefix) in &routes {
+            let Some(entry) = self.overlay_entry(*table_id, *prefix, overlay).cloned() else {
+                continue;
+            };
+            match prefix {
+                IpNet::V4(p) if entry.is_fib() => {
+                    self.fib_handle.route_ipv4_del(p, &entry, *table_id).await
+                }
+                IpNet::V6(p) if entry.is_fib() => {
+                    self.fib_handle.route_ipv6_del(p, &entry, *table_id).await
+                }
+                _ => {
+                    self.fib_handle
+                        .evpn_prefix_withdraw(*table_id, *prefix)
+                        .await
+                }
+            }
+        }
+        self.fib_handle.kernel_route_exchange = enabled;
+        for (table_id, prefix) in routes {
+            let Some(entry) = self.overlay_entry(table_id, prefix, overlay).cloned() else {
+                continue;
+            };
+            let ok = match prefix {
+                IpNet::V4(p) => self.fib_handle.route_ipv4_add(&p, &entry, table_id).await,
+                IpNet::V6(p) => self.fib_handle.route_ipv6_add(&p, &entry, table_id).await,
+            };
+            if let Some(entry) = self.overlay_entry_mut(table_id, prefix, overlay) {
+                entry.set_fib(ok);
+            }
+        }
+    }
+
+    fn overlay_entry(
+        &self,
+        table_id: u32,
+        prefix: IpNet,
+        overlay: impl Fn(&RibEntries) -> Option<usize>,
+    ) -> Option<&RibEntry> {
+        let entries = match prefix {
+            IpNet::V4(p) if table_id == RT_TABLE_MAIN => self.table.get(&p),
+            IpNet::V6(p) if table_id == RT_TABLE_MAIN => self.table_v6.get(&p),
+            IpNet::V4(p) => self.vrf_tables.get(&table_id)?.table.get(&p),
+            IpNet::V6(p) => self.vrf_tables.get(&table_id)?.table_v6.get(&p),
+        }?;
+        entries.get(overlay(entries)?)
+    }
+
+    fn overlay_entry_mut(
+        &mut self,
+        table_id: u32,
+        prefix: IpNet,
+        overlay: impl Fn(&RibEntries) -> Option<usize>,
+    ) -> Option<&mut RibEntry> {
+        let entries = match prefix {
+            IpNet::V4(p) if table_id == RT_TABLE_MAIN => self.table.get_mut(&p),
+            IpNet::V6(p) if table_id == RT_TABLE_MAIN => self.table_v6.get_mut(&p),
+            IpNet::V4(p) => self.vrf_tables.get_mut(&table_id)?.table.get_mut(&p),
+            IpNet::V6(p) => self.vrf_tables.get_mut(&table_id)?.table_v6.get_mut(&p),
+        }?;
+        let index = overlay(entries)?;
+        entries.get_mut(index)
+    }
+
     /// A kernel event for a route this RIB already installed must not
     /// become a distance-0 competitor to its owning protocol. External
     /// routes using the same protocol number remain eligible when their

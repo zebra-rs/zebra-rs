@@ -3734,6 +3734,9 @@ pub struct LocalRib {
     /// The sequence number on our own MAC/IP route per `(vni, ip)`, for
     /// monotonicity across re-advertisements.
     pub evpn_local_ip_seq: std::collections::BTreeMap<(u32, IpAddr), u32>,
+    /// RFC 7432 §15.1 duplicate address detection: configuration and the
+    /// per-MAC / per-IP move counters. See [`super::evpn_dad`].
+    pub evpn_dad: super::evpn_dad::EvpnDad,
     /// Addresses explicitly selected as this speaker's VTEP: every local
     /// VXLAN device's `local` and the configured `vtep-source`. An
     /// originated EVPN next hop in this set is kept on egress even when it
@@ -10116,10 +10119,13 @@ fn route_evpn_export_selected(
                     return;
                 }
                 if let Some(vni) = macip_kernel_vni(wd) {
-                    let msg = rib::Message::EvpnMacDel(rib::evpn::MacRouteKey::new(
-                        *rd, vni, mac_addr, *ip,
-                    ));
-                    let _ = bgp.rib_client.send(msg);
+                    let key = rib::evpn::MacRouteKey::new(*rd, vni, mac_addr, *ip);
+                    if !wd.is_originated() {
+                        bgp.local_rib
+                            .evpn_dad
+                            .remote_gone(key.rd, vni, mac_addr, *ip);
+                    }
+                    let _ = bgp.rib_client.send(rib::Message::EvpnMacDel(key));
                 } else {
                     eprintln!(
                         "[ERROR] EVPN Type 2 withdraw: removed path has no Route Target. \
@@ -10293,15 +10299,39 @@ fn route_evpn_export_selected(
                         local_wins(evpn_local_ip_route(bgp.local_rib, *bgp.router_id, vni, ip))
                     }))
                 {
-                    let _ =
-                        bgp.rib_client
-                            .send(rib::Message::EvpnMacDel(rib::evpn::MacRouteKey::new(
-                                *rd, vni, mac_addr, *ip,
-                            )));
+                    let key = rib::evpn::MacRouteKey::new(*rd, vni, mac_addr, *ip);
+                    bgp.local_rib
+                        .evpn_dad
+                        .remote_gone(key.rd, vni, mac_addr, *ip);
+                    let _ = bgp.rib_client.send(rib::Message::EvpnMacDel(key));
                     return;
                 }
+                let key = rib::evpn::MacRouteKey::new(*rd, vni, mac_addr, *ip);
+                // RFC 7432 §15.1: a remote route taking the address over is a
+                // move. A frozen duplicate is not installed (the kernel keeps
+                // its last state), and our own route for it goes: FRR's zebra
+                // removes the local MAC from BGP on every remote takeover,
+                // which here otherwise follows from the install replacing the
+                // local FDB row.
+                if !best.is_originated() {
+                    const STICKY: u8 = 0x01;
+                    let (verdict, detected) = bgp.local_rib.evpn_dad.remote_takeover(
+                        key.rd,
+                        vni,
+                        mac_addr,
+                        *ip,
+                        extract_tunnel_endpoint(best),
+                        extract_flags_from_attr(&best.attr) & STICKY != 0,
+                        Instant::now(),
+                    );
+                    super::evpn_dad::arm_detected(&bgp.local_rib.evpn_dad, bgp.tx, &detected);
+                    if verdict == super::evpn_dad::Verdict::Hold {
+                        bgp.local_rib.evpn_dad.withdraw.insert((vni, mac_addr, *ip));
+                        return;
+                    }
+                }
                 let msg = rib::Message::EvpnMacAdd(rib::evpn::MacRoute {
-                    key: rib::evpn::MacRouteKey::new(*rd, vni, mac_addr, *ip),
+                    key,
                     tunnel_endpoint: extract_tunnel_endpoint(best),
                     flags: extract_flags_from_attr(&best.attr),
                     seq: extract_mac_mobility_seq(&best.attr),
@@ -19611,6 +19641,19 @@ impl Bgp {
             ip: entry.ip,
         };
 
+        // RFC 7432 §15.1: a learn of a MAC (or IP) that was remote is a
+        // move. A frozen duplicate is not advertised, nor are the remote
+        // routes it competes with re-run: the kernel keeps its last state.
+        let (verdict, detected) =
+            self.local_rib
+                .evpn_dad
+                .local_learn(entry.vni, entry.mac, entry.ip, Instant::now());
+        super::evpn_dad::arm_detected(&self.local_rib.evpn_dad, &self.tx, &detected);
+        if verdict == super::evpn_dad::Verdict::Hold {
+            self.evpn_dad_withdraw_held(entry.vni, entry.mac, entry.ip);
+            return;
+        }
+
         // Build the BGP attributes for this origination. RFC 8365
         // §5.1.2.4 requires both:
         //   - RT (Route Target) carrying the VNI so receivers can
@@ -19817,6 +19860,7 @@ impl Bgp {
         for (rd, prefix, rib) in remote {
             route_evpn_export_selected(&rd, &prefix, &[rib], None, &mut bgp_ref);
         }
+        self.evpn_dad_drain();
     }
 
     /// Inverse of `evpn_originate_macip`. No-op when
@@ -19827,6 +19871,14 @@ impl Bgp {
         if !self.advertise_all_vni {
             return;
         }
+        self.evpn_withdraw_macip_route(entry);
+        // A remote route for this MAC may have been held back by our own.
+        self.evpn_reconcile_remote_mac(entry.vni, entry.mac.octets(), entry.ip);
+    }
+
+    /// Withdraw this speaker's MAC/IP route for `entry` from the Loc-RIB and
+    /// every peer, without re-running the remote routes it competed with.
+    pub(super) fn evpn_withdraw_macip_route(&mut self, entry: &FdbEntry) {
         let Some(rd) = rd_from_router_id_vni(self.router_id, entry.vni) else {
             return;
         };
@@ -19861,8 +19913,23 @@ impl Bgp {
         // receive path does, keying `EvpnPrefix::MacIp` on the same four
         // fields and carrying the ESI on the path.
         route_withdraw_evpn_to_peers(rd, prefix, &mut self.peers);
-        // A remote route for this MAC may have been held back by our own.
-        self.evpn_reconcile_remote_mac(entry.vni, entry.mac.octets(), entry.ip);
+    }
+
+    /// Whether this speaker currently advertises a MAC/IP route for `entry`.
+    pub(super) fn evpn_macip_originated(&self, entry: &FdbEntry) -> bool {
+        let Some(rd) = rd_from_router_id_vni(self.router_id, entry.vni) else {
+            return false;
+        };
+        let prefix = EvpnPrefix::MacIp {
+            eth_tag: 0,
+            mac: entry.mac.octets(),
+            ip: entry.ip,
+        };
+        self.local_rib
+            .evpn
+            .get(&rd)
+            .and_then(|table| table.selected.get(&prefix))
+            .is_some_and(|rib| rib.is_originated())
     }
 
     /// The ESI to stamp on a Type-2 originated from `entry`: that of the

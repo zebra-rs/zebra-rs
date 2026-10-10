@@ -304,6 +304,19 @@ def main():
             ns('v2', 'ip', '-6', 'route', 'del', '2001:db8:20:1::/64', 'table', '100')
             type5_restored('External route delete')
 
+            # `kernel-route-exchange` turned off and on at runtime moves the
+            # installed Type-5 routes off the L3-VNI bridge and back.
+            def exchange(on):
+                ns('v2', str(args.vtyctl), 'apply', '-c',
+                   f'set router bgp afi-safi evpn kernel-route-exchange {str(on).lower()}')
+
+            exchange(False)
+            for prefix in ['10.20.1.0/24', '2001:db8:20:1::/64']:
+                expect(f'Exchange off: Type-5 {prefix} leaves the bridge', lambda prefix=prefix:
+                       not any(r.get('dev') == 'br2000' for r in route('v2', prefix)))
+            exchange(True)
+            type5_restored('Exchange back on')
+
             # Moving the L3-VNI VXLAN to another bridge moves its state and
             # leaves no RMAC neighbors on the old bridge. Then move it back.
             ns('v2', 'ip', 'link', 'add', 'br2000b', 'type', 'bridge')
@@ -382,6 +395,65 @@ def main():
             expect('Mobility back: l2 reaches the station', lambda:
                    ns('l2', 'ping', '-c', '1', '-W', '1', station_ip, check=False).returncode == 0)
 
+            # Duplicate address detection (RFC 7432 §15.1): one MAC/IP behind
+            # both access ports, alternately talking. With max-moves 3 the
+            # third move v2 sees (learn, takeover, learn) freezes the address
+            # there: v2 stops advertising it and installs nothing for it, so
+            # the flapping stops with the station local on both sides. A
+            # clear releases it: v2 advertises again, outranking v1's route.
+            dup_mac, dup_ip = '02:00:00:10:00:aa', '10.10.0.201'
+            for v in ['v1', 'v2']:
+                ns(v, str(args.vtyctl), 'apply', '-c',
+                   'set router bgp afi-safi evpn dup-addr-detection max-moves 3\n'
+                   'set router bgp afi-safi evpn dup-addr-detection freeze permanent')
+            for l in ['l1', 'l2']:
+                ns(l, 'ip', 'link', 'add', 'dup', 'link', 'eth0', 'type', 'macvlan', 'mode', 'bridge')
+                ns(l, 'ip', 'link', 'set', 'dup', 'address', dup_mac)
+                ns(l, 'ip', 'address', 'add', dup_ip + '/24', 'dev', 'dup')
+
+            def dup_fdb(v):
+                return [line for line in ns(v, 'bridge', 'fdb', 'show', 'br', 'br1000').stdout.splitlines()
+                        if line.startswith(dup_mac)]
+
+            def dup_local(v):
+                # The forwarding row: a non-VLAN-filtering bridge looks up
+                # VLAN 0, and a frozen address keeps any `vlan 1` row an
+                # earlier remote install left.
+                rows = [r for r in dup_fdb(v) if ' vlan ' not in r]
+                return any(' dev access ' in r for r in rows) and not any(' dev vx1000 ' in r and 'master' in r for r in rows)
+
+            def dup_remote(v, peer):
+                return any(' dev vx1000 ' in r and f'dst {vtep(peer)}' in r for r in dup_fdb(v))
+
+            def duplicates(v):
+                view = json.loads(ns(v, str(args.vtyctl), 'show', '-j', 'show evpn dup-addr').stdout)
+                return [a for a in view['addresses'] if a['mac'] == dup_mac and a['duplicate']]
+
+            def talk(l, v):
+                ns(l, 'ip', 'link', 'set', 'dup', 'up')
+                ns(l, 'ping', '-c', '1', '-W', '1', '-I', 'dup', f'10.10.0.{v}', check=False)
+                ns(l, 'ip', 'link', 'set', 'dup', 'down')
+
+            talk('l1', 1)
+            expect('DAD: v1 learns the address', lambda: dup_local('v1') and dup_remote('v2', 1))
+            talk('l2', 2)  # v2: move 1
+            expect('DAD: v2 takes it over', lambda: dup_local('v2') and dup_remote('v1', 2))
+            talk('l1', 1)  # v2: move 2 (takeover)
+            expect('DAD: v1 takes it back', lambda: dup_local('v1') and dup_remote('v2', 1))
+            talk('l2', 2)  # v2: move 3, frozen
+            expect('DAD: v2 detects the duplicate', lambda: duplicates('v2'))
+            settle('DAD: frozen local on v2, local on v1', lambda: dup_local('v2') and dup_local('v1'))
+            expect('DAD: v1 has detected nothing', lambda: not duplicates('v1'))
+            ns('v2', str(args.vtyctl), 'clear', 'clear bgp evpn dup-addr vni all')
+            expect('DAD: clear releases v2', lambda: not duplicates('v2'))
+            settle('DAD: after clear, v1 points at v2', lambda: dup_remote('v1', 2) and dup_local('v2'))
+            for l in ['l1', 'l2']:
+                ns(l, 'ip', 'link', 'del', 'dup')
+            for v in ['v1', 'v2']:
+                ns(v, str(args.vtyctl), 'apply', '-c',
+                   'delete router bgp afi-safi evpn dup-addr-detection max-moves\n'
+                   'delete router bgp afi-safi evpn dup-addr-detection freeze')
+
             # A crash leaves routes behind. On restart, each owner's route
             # replaces its leftover; the rest are swept after the grace
             # period; operator routes stay; a pre-RTPROT_ZEBRA static is
@@ -433,6 +505,14 @@ def main():
                    protocols('v2', '10.97.0.0/24') == ['zebra'])
 
             # Removing one NLRI must retain the other bindings and their MAC.
+            # l1 first refreshes its neighbors on v1, which may have aged
+            # out during the scenarios above. The mobility scenario's link
+            # flap removed l1's IPv6 address (keep_addr_on_down is off).
+            ns('l1', 'ip', '-6', 'address', 'replace', '2001:db8:10::101/64', 'dev', 'eth0', 'nodad')
+            ns('l1', 'ping', '-c', '1', '-W', '1', '10.10.0.1', check=False)
+            ns('l1', 'ping', '-6', '-c', '1', '-W', '1', '2001:db8:10::1', check=False)
+            expect('Type-2 IPv6 binding before IPv4 withdrawal', lambda:
+                   'extern_learn' in ns('v2', 'ip', '-6', 'neighbor', 'show', '2001:db8:10::101', 'dev', 'br1000').stdout)
             ns('v1', 'ip', '-4', 'neighbor', 'del', '10.10.0.101', 'dev', 'br1000')
             expect('Type-2 IPv4 withdrawal', lambda:
                    not ns('v2', 'ip', '-4', 'neighbor', 'show', '10.10.0.101', 'dev', 'br1000').stdout)

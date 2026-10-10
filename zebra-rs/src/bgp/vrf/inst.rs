@@ -2241,12 +2241,16 @@ impl BgpVrf {
                 // global event loop queues (and handles) Relisten.
                 // Per-VRF tasks keep their default-port listeners.
             }
-            Message::EsHoldExpired { .. } | Message::EsCarveDue { .. } => {
+            Message::EsHoldExpired { .. }
+            | Message::EsCarveDue { .. }
+            | Message::EvpnDadRecover { .. } => {
                 // Ethernet Segments, their startup holds and their RFC 9722
                 // carving instants live on the global instance
                 // (`Bgp::ethernet_segments`), which is also what arms the
                 // timers and owns the EVPN Loc-RIB the wake-ups re-originate
-                // into. Per-VRF tasks never see them.
+                // into. Per-VRF tasks never see them, nor EVPN
+                // duplicate-address recoveries, which the global instance
+                // arms over the same Loc-RIB.
             }
         }
     }

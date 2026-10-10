@@ -142,6 +142,15 @@ pub enum Message {
         name: String,
         until: std::time::Instant,
     },
+    /// A timed EVPN duplicate-address freeze elapsed (`dup-addr-detection
+    /// freeze <secs>`): release the address and re-run its routes. Sent by
+    /// the timer [`super::evpn_dad::arm_recovery`] spawns; `until` is the
+    /// deadline it was armed for, so a wake-up for a freeze since cleared or
+    /// re-detected is discarded.
+    EvpnDadRecover {
+        key: super::evpn_dad::DadKey,
+        until: std::time::Instant,
+    },
     /// RFC 9722: a segment's carving instant (or its skew-adjusted lead) has
     /// arrived. `at` is the deadline this wake-up was armed for — the identity
     /// of the carve, so a wake-up for one that has since been superseded by a
@@ -2605,6 +2614,9 @@ impl Bgp {
                 // re-originating a Type-1 needs full `self` (SID pool,
                 // peers). Cheap no-op when nothing was marked.
                 self.vpws_df_drain();
+                // EVPN duplicate address detection: withdraw our routes for
+                // addresses a remote takeover froze in this batch.
+                self.evpn_dad_drain();
 
                 // Tier 1a: a peer that just got a fresh resumable v4
                 // sync cursor (set by `route_sync` inside the FSM) is
@@ -2829,6 +2841,9 @@ impl Bgp {
             }
             Message::EsHoldExpired { name, until } => {
                 self.es_hold_expired(&name, until);
+            }
+            Message::EvpnDadRecover { key, until } => {
+                self.evpn_dad_recover(key, until);
             }
             Message::EsCarveDue { esi, at } => {
                 self.es_carve_due(esi, at);
@@ -3604,6 +3619,8 @@ impl Bgp {
                 let (path, mut args) = path_from_command(&msg.paths);
                 if let Some((afi_safi, op)) = parse_clear_bgp_path(&path) {
                     let _ = peer::clear_bgp_action(self, &mut args, afi_safi, op);
+                } else if let Some(filter) = path.strip_prefix("/clear/bgp/evpn/dup-addr/vni") {
+                    self.clear_evpn_dup_addr(filter, &mut args);
                 } else if let Some(action) = path.strip_prefix("/clear/bgp/debug/")
                     && let Some(spec) = args.string()
                 {
