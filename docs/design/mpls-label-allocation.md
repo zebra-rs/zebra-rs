@@ -447,8 +447,12 @@ What this replaces in today's BGP (from reading the code; not reproduced):
   `LabelBlockLow` refill was never built.
 - Shard sub-blocks are never returned, and a carved central block can never
   become wholly free, so it never goes back to the RIB.
-- An exhausted RIB pool sends no reply (`rib/inst.rs:1546-1557`), and
-  `vrf_label_request_pending` never clears, so BGP never asks again.
+- An exhausted RIB pool sent no reply, and `vrf_label_request_pending`
+  never cleared, so BGP never asked again. A configurable dynamic range
+  (phase 6c) made this reachable, so the RIB now keeps a request it has no
+  room for and serves it once labels are freed, SR blocks change, or a
+  commit grows the range (`retry_label_block_requests`); BGP's reply
+  handling already clears the flag and labels whatever waited.
 - `label-mode per-route|per-nexthop` is parsed (`vrf_config.rs:501-509`)
   but unused; only per-VRF labels exist. Per-route mode, when built, mints
   from the same shard chunks.
@@ -571,7 +575,18 @@ handed out at that moment, but refuse a commit only for a violation the
 running config does not already have. A violation an earlier release let
 in therefore does not block every later commit, while a change that
 creates one, a block moved over an untouched static binding say, is still
-refused. The startup config is checked the same way but only warned
+refused.
+
+A commit that passes puts its dynamic range and segment-routing blocks
+into the `LabelSpace` itself, under the same lock as the checks and before
+anything is dispatched. The RIB applies them only after the commit, and a
+block request reaches it on another channel (BGP sends one as it starts),
+so a request served first would otherwise come from the old range, or land
+on a new SR block, over labels the checks had just cleared. The SR blocks
+are added to the reserved set; the RIB then replaces the set as it applies
+the blocks, with any SRGB it still holds for a move (§6.1).
+
+The startup config is checked the same way but only warned
 about: refusing it would leave the router unconfigured, and a config an
 earlier release accepted can fail a check added since. The IGPs keep their
 interim handling for that case (§10, phase 3b). The Binding-SID checks
@@ -585,10 +600,10 @@ phase 6c, which made it configurable.
   SRLB 15000/1000 (was 100).
 - New: `mpls label-range dynamic {start, end}`, default 24000 /
   platform_labels − 1. Phase 6c implements it: each bound defaults on its
-  own, and the RIB applies the two together at the end of a commit, so a
-  commit moving both never passes through an empty range. A change applies
-  to blocks handed out from then on (`LabelSpace::set_dynamic`, which
-  reports the blocks left outside; the RIB logs them).
+  own, and the commit applies the two together to the label space (§7), so
+  a commit moving both never passes through an empty range. A change
+  applies to blocks handed out from then on (`LabelSpace::set_dynamic`,
+  which reports the blocks left outside; they are logged).
 - New: `show mpls label range` (regions and their owners, like IOS XR's
   `show mpls label range`) and `show mpls label table [label <n>]`
   (label or chunk, owner, kind, state).
@@ -630,7 +645,7 @@ Each phase is one PR, smallest and most urgent first.
 | 2 | OSPFv2/v3 read the `default` block and follow its changes (§6.1); default SRLB 1000; OSPFv2 `show` end | two sources of truth for SR ranges; OSPF ignoring a block change |
 | 3 | IGP dynamic Adj-SIDs and Mirror Context labels per label from the `LabelSpace` SRLB region; configured Adj-SIDs and Binding-SIDs claimed there, moving a dynamic holder (§5.1); an SRLB change moves every dynamic Adj-SID (§6.1); `LocalLabels` retired | RIB blind to local labels; a dynamic Adj-SID could take a configured label; IS-IS Adj-SIDs left in the old SRLB after a change |
 | 4 | ILM candidates keyed by owner; `Releasing` and `Revoking` complete only once the RIB withdraws the owner's ILMs; old Prefix-SID ILMs held through an SRGB change (§6.1) | reuse races; OSPFv2/v3 overwrite at one label; forwarding gap on an SRGB change |
-| 5 | BGP synchronous adaptive chunks (128 → 65536, reset on return) for the main task and every shard; retire `LabelBlockRequest`, `vrf_label_request_pending`, `relabel_vrf`, `carve` | transit minting failure, worker shards unable to mint, chunks never returned, stuck request flag |
+| 5 | BGP synchronous adaptive chunks (128 → 65536, reset on return) for the main task and every shard; retire `LabelBlockRequest`, `vrf_label_request_pending`, `relabel_vrf`, `carve` | transit minting failure, worker shards unable to mint, chunks never returned (the stuck request flag is fixed already, with 6c) |
 | 6 | Commit validation (§7), including block changes (§6.1), and `show mpls label range/table` | silent overlaps; a new SRGB silently losing to BGP labels |
 | 7 | AF_MPLS dump at startup, `Stale` labels, sweep; IGP graceful restart re-reserves its checkpointed Adj-SIDs | EEXIST after a crash; OSPF GR replay not reserving `lan_adj_sids` |
 

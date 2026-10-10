@@ -609,6 +609,17 @@ impl LabelSpace {
         std::mem::take(&mut self.granted)
     }
 
+    /// Reserve `blocks` too, keeping the reserved ones: a commit reserves
+    /// its segment-routing blocks before the RIB, which then replaces the
+    /// whole set ([`Self::set_reserved`]), applies them.
+    pub fn add_reserved(&mut self, blocks: impl IntoIterator<Item = LabelBlock>) {
+        for block in blocks {
+            if block.start < block.end && !self.reserved.contains(&block) {
+                self.reserved.push(block);
+            }
+        }
+    }
+
     /// Replace the reserved SR blocks. Returns the handed-out blocks a new
     /// reservation overlaps, with their owners: they stay in use until
     /// released, and the caller says so.
@@ -792,6 +803,18 @@ mod tests {
 
     fn block(start: u32, end: u32) -> LabelBlock {
         LabelBlock { start, end }
+    }
+
+    /// Added blocks join the reserved ones; the RIB's next full set
+    /// replaces them all.
+    #[test]
+    fn added_reservations_keep_the_others() {
+        let mut s = LabelSpace::new();
+        s.set_reserved([block(24000, 24100)]);
+        s.add_reserved([block(24100, 24200), block(24000, 24100), block(5, 5)]);
+        assert_eq!(s.alloc("bgp", 100), Some(block(24200, 24300)));
+        s.set_reserved([]);
+        assert_eq!(s.alloc("bgp", 100), Some(block(24000, 24100)));
     }
 
     /// Blocks come from a configured dynamic range from then on. One
