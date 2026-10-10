@@ -8723,6 +8723,8 @@ impl Bgp {
             .set(show_bgp_neighbor_group)
             .path("/show/evpn/vni/all")
             .set(show_evpn_vni_all)
+            .path("/show/evpn/dup-addr")
+            .set(super::evpn_dad::show_evpn_dup_addr)
             .path("/show/bgp/update-group")
             .set(super::show_update_group::show_bgp_update_group)
             .path("/show/bgp")

@@ -3078,6 +3078,72 @@ fn config_assisted_replication_selective(
     Some(())
 }
 
+/// `router bgp afi-safi evpn dup-addr-detection …`: apply one leaf to the
+/// current settings. Deleting a leaf restores its default.
+fn config_evpn_dad(
+    bgp: &mut Bgp,
+    mut args: Args,
+    op: ConfigOp,
+    apply: impl FnOnce(&mut super::evpn_dad::DadConfig, Option<&mut Args>) -> Option<()>,
+) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
+        return None;
+    }
+    let mut config = bgp.local_rib.evpn_dad.config;
+    apply(&mut config, op.is_set().then_some(&mut args))?;
+    bgp.evpn_dad_configure(config);
+    Some(())
+}
+
+/// `router bgp afi-safi evpn dup-addr-detection enabled <bool>`.
+fn config_evpn_dad_enabled(bgp: &mut Bgp, args: Args, op: ConfigOp) -> Option<()> {
+    config_evpn_dad(bgp, args, op, |config, args| {
+        config.enabled = match args {
+            Some(args) => args.boolean()?,
+            None => true,
+        };
+        Some(())
+    })
+}
+
+/// `router bgp afi-safi evpn dup-addr-detection max-moves <2-1000>`.
+fn config_evpn_dad_max_moves(bgp: &mut Bgp, args: Args, op: ConfigOp) -> Option<()> {
+    config_evpn_dad(bgp, args, op, |config, args| {
+        config.max_moves = match args {
+            Some(args) => args.u32()?,
+            None => super::evpn_dad::DEFAULT_MAX_MOVES,
+        };
+        Some(())
+    })
+}
+
+/// `router bgp afi-safi evpn dup-addr-detection time <2-1800>`.
+fn config_evpn_dad_time(bgp: &mut Bgp, args: Args, op: ConfigOp) -> Option<()> {
+    config_evpn_dad(bgp, args, op, |config, args| {
+        config.time = match args {
+            Some(args) => args.u32()?,
+            None => super::evpn_dad::DEFAULT_TIME,
+        };
+        Some(())
+    })
+}
+
+/// `router bgp afi-safi evpn dup-addr-detection freeze <permanent|30-3600>`.
+fn config_evpn_dad_freeze(bgp: &mut Bgp, args: Args, op: ConfigOp) -> Option<()> {
+    use super::evpn_dad::Freeze;
+    config_evpn_dad(bgp, args, op, |config, args| {
+        config.freeze = match args {
+            Some(args) => match args.string()?.as_str() {
+                "permanent" => Freeze::Permanent,
+                secs => Freeze::For(secs.parse().ok()?),
+            },
+            None => Freeze::Off,
+        };
+        Some(())
+    })
+}
+
 /// `router bgp afi-safi evpn pruned-flood-list broadcast-multicast <bool>`
 /// (RFC 9574). Sets the BM flag in this node's own Type-3 IMET to ask peers
 /// to prune it from the broadcast/multicast flood list.
@@ -5862,6 +5928,25 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/afi-safi/kernel-route-exchange",
             config_kernel_route_exchange,
+        );
+
+        // RFC 7432 §15.1 duplicate address detection under `router bgp
+        // afi-safi evpn dup-addr-detection` (zebra-bgp-evpn.yang).
+        self.callback_add(
+            "/router/bgp/afi-safi/dup-addr-detection/enabled",
+            config_evpn_dad_enabled,
+        );
+        self.callback_add(
+            "/router/bgp/afi-safi/dup-addr-detection/max-moves",
+            config_evpn_dad_max_moves,
+        );
+        self.callback_add(
+            "/router/bgp/afi-safi/dup-addr-detection/time",
+            config_evpn_dad_time,
+        );
+        self.callback_add(
+            "/router/bgp/afi-safi/dup-addr-detection/freeze",
+            config_evpn_dad_freeze,
         );
 
         // EVPN overlay encapsulation (RFC 9252) under

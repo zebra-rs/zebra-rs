@@ -10,6 +10,7 @@ pub mod config;
 pub mod connected;
 pub mod dynamic_neighbors;
 pub mod ethernet_segment;
+pub mod evpn_dad;
 pub mod group_egress;
 pub mod interface_addrs;
 pub mod interface_neighbor;

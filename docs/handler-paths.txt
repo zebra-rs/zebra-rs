@@ -9,6 +9,10 @@
 /router/bgp/afi-safi/assisted-replication/selective
 /router/bgp/afi-safi/bestpath/as-path/multipath-relax
 /router/bgp/afi-safi/bum-tunnel-type
+/router/bgp/afi-safi/dup-addr-detection/enabled
+/router/bgp/afi-safi/dup-addr-detection/freeze
+/router/bgp/afi-safi/dup-addr-detection/max-moves
+/router/bgp/afi-safi/dup-addr-detection/time
 /router/bgp/afi-safi/encapsulation
 /router/bgp/afi-safi/ethernet-segment
 /router/bgp/afi-safi/ethernet-segment/df-election/ac-df
