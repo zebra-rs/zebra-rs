@@ -4293,7 +4293,7 @@ impl Rib {
                 self.sweep_leftovers().await;
             }
             Message::KernelRouteExchange(enabled) => {
-                self.fib_handle.kernel_route_exchange = enabled;
+                self.kernel_route_exchange_set(enabled).await;
             }
             Message::EvpnMacAdd(route) => {
                 let key = route.key;

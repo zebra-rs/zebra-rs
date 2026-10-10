@@ -304,6 +304,19 @@ def main():
             ns('v2', 'ip', '-6', 'route', 'del', '2001:db8:20:1::/64', 'table', '100')
             type5_restored('External route delete')
 
+            # `kernel-route-exchange` turned off and on at runtime moves the
+            # installed Type-5 routes off the L3-VNI bridge and back.
+            def exchange(on):
+                ns('v2', str(args.vtyctl), 'apply', '-c',
+                   f'set router bgp afi-safi evpn kernel-route-exchange {str(on).lower()}')
+
+            exchange(False)
+            for prefix in ['10.20.1.0/24', '2001:db8:20:1::/64']:
+                expect(f'Exchange off: Type-5 {prefix} leaves the bridge', lambda prefix=prefix:
+                       not any(r.get('dev') == 'br2000' for r in route('v2', prefix)))
+            exchange(True)
+            type5_restored('Exchange back on')
+
             # Moving the L3-VNI VXLAN to another bridge moves its state and
             # leaves no RMAC neighbors on the old bridge. Then move it back.
             ns('v2', 'ip', 'link', 'add', 'br2000b', 'type', 'bridge')

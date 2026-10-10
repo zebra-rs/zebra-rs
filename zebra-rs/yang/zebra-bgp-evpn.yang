@@ -73,9 +73,8 @@ module zebra-bgp-evpn {
          using the remote VTEP and router MAC. The Linux bridge, VXLAN
          FDB and neighbor tables describe the overlay adjacency. This
          supports kernel forwarding and consumers of kernel state.
-         Configure this before
-         establishing EVPN sessions; changing it with active routes is
-         not supported.";
+         Changing it with routes installed moves them between this
+         install and the ordinary one.";
     }
     leaf advertise-all-vni {
       ext:help "Advertise routes for all local VNIs";

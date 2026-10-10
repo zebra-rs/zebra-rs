@@ -27,8 +27,8 @@ answered by its own speaker, and no ARP request or neighbor solicitation
 enters the VXLAN overlay (needs `tcpdump`; skipped and recorded without
 it). It also removes bridge Type-5 state behind the daemon (L3-VNI bridge
 admin flap, VXLAN carrier flap, neighbor/FDB flush, VXLAN detach and
-re-attach, external route deletion) and checks that routes, RMAC adjacency
-and routing recover. It moves the L3-VNI VXLAN to a second bridge and
+re-attach, external route deletion, `kernel-route-exchange` turned off and on)
+and checks that routes, RMAC adjacency and routing recover. It moves the L3-VNI VXLAN to a second bridge and
 back, checking that no RMAC neighbors remain on the bridge it left.
 It moves a station's MAC and IP from one speaker to the other and back,
 checking that each side ends with the station local where it is and

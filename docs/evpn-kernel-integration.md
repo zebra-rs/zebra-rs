@@ -14,7 +14,9 @@ additional evidence, not a prerequisite for using the feature.
 
 ## Configuration
 
-Enable bridge-based kernel route installation before establishing EVPN sessions:
+Enable bridge-based kernel route installation. It can be set before or after EVPN
+sessions come up: changing it moves installed Type-5 routes between the bridge install
+and the ordinary one.
 
 ```text
 set router bgp global as 65000
