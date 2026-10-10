@@ -54,6 +54,8 @@ pub mod nht;
 
 pub mod label_space;
 
+pub mod label_show;
+
 pub mod router_id;
 
 pub mod mac_addr;

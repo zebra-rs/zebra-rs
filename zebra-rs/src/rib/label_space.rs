@@ -100,6 +100,52 @@ pub struct LabelSpace {
     next_pool: u64,
 }
 
+/// What holds a label or block ([`LabelEntry`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Holder {
+    /// A protocol, by name: the owner of a handed-out block.
+    Proto(String),
+    /// A protocol instance, by subscription: the owner of a pool, `None`
+    /// for a pool without one.
+    Instance(Option<ProtoId>),
+}
+
+/// What a handed-out label or block is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryKind {
+    /// A block for a protocol that allocates its own labels (BGP's).
+    Block,
+    /// A pool's label for one of its instance's dynamic SIDs (an
+    /// Adjacency-SID, a Mirror Context label), or one on its way back.
+    Local,
+    /// A label a pool claimed for a configured SID.
+    Configured,
+}
+
+/// Where a handed-out label or block is in its life.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryState {
+    Held,
+    Claimed,
+    /// Given back, the RIB not yet past the owner's earlier ILM messages.
+    Releasing,
+    /// Given back, waiting for the owner's ILM entry at it to go.
+    Draining,
+}
+
+/// A handed-out block or local label, for `show mpls label table`
+/// ([`LabelSpace::entries`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LabelEntry {
+    pub first: u32,
+    pub last: u32,
+    pub holder: Holder,
+    pub kind: EntryKind,
+    pub state: EntryState,
+    /// The instance whose configured SID waits for the label.
+    pub claimant: Option<Holder>,
+}
+
 /// The outcome of a pool's claim on a label for a configured SID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Claim {
@@ -471,6 +517,58 @@ impl LabelSpace {
                 )
             })
             .collect()
+    }
+
+    /// Every handed-out block and local label, by first label. A claim
+    /// waits only on a label some pool holds or is giving back, so it is
+    /// shown on that label's entry.
+    pub fn entries(&self) -> Vec<LabelEntry> {
+        let instance = |pool: &u64| Holder::Instance(self.pools.get(pool).copied());
+        let mut entries: Vec<LabelEntry> = self
+            .held
+            .iter()
+            .map(|(start, h)| LabelEntry {
+                first: *start,
+                last: h.end - 1,
+                holder: Holder::Proto(h.proto.clone()),
+                kind: EntryKind::Block,
+                state: EntryState::Held,
+                claimant: None,
+            })
+            .collect();
+        entries.extend(self.local.iter().map(|(label, local)| {
+            let (holder, kind, state) = match local {
+                Local::Held(pool) => (instance(pool), EntryKind::Local, EntryState::Held),
+                Local::Claimed(pool) => {
+                    (instance(pool), EntryKind::Configured, EntryState::Claimed)
+                }
+                Local::Releasing(owner) => (
+                    Holder::Instance(Some(*owner)),
+                    EntryKind::Local,
+                    EntryState::Releasing,
+                ),
+                Local::Draining(owner) => (
+                    Holder::Instance(Some(*owner)),
+                    EntryKind::Local,
+                    EntryState::Draining,
+                ),
+            };
+            LabelEntry {
+                first: *label,
+                last: *label,
+                holder,
+                kind,
+                state,
+                claimant: self.claims.get(label).map(instance),
+            }
+        }));
+        entries.sort_by_key(|e| e.first);
+        entries
+    }
+
+    /// The labels blocks are handed out from, `[first, last]`.
+    pub fn dynamic_range(&self) -> (u32, u32) {
+        (self.dynamic.start, self.dynamic.end - 1)
     }
 
     /// The owners whose pool found no free label since the last call:
@@ -1017,5 +1115,84 @@ mod claim_tests {
         assert_eq!(a.claim(15009), Claim::Granted);
         assert_eq!(a.retarget(15000, 15004), vec![15009]);
         assert_eq!(a.claim(15009), Claim::Outside);
+    }
+}
+
+#[cfg(test)]
+mod entry_tests {
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::rib::client::RibInbound;
+
+    /// An instance's pool over 15000..=15009.
+    fn instance(
+        space: &SharedLabelSpace,
+        id: u32,
+    ) -> (LocalLabelPool, mpsc::UnboundedReceiver<RibInbound>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let rib = RibClient::new(tx, ProtoId::from_raw(id));
+        (space.pool_for(15000, 15009, &rib), rx)
+    }
+
+    fn of(id: u32) -> Holder {
+        Holder::Instance(Some(ProtoId::from_raw(id)))
+    }
+
+    fn local(label: u32, holder: Holder, kind: EntryKind, state: EntryState) -> LabelEntry {
+        LabelEntry {
+            first: label,
+            last: label,
+            holder,
+            kind,
+            state,
+            claimant: None,
+        }
+    }
+
+    /// Every handed-out block and local label, by first label, with its
+    /// holder, kind and state. A waiting claim shows on the label it
+    /// waits for.
+    #[test]
+    fn entries_list_blocks_and_local_labels_in_every_state() {
+        let space = SharedLabelSpace::default();
+        let block = space.lock().alloc("bgp", 128).expect("a block");
+        let (mut a, _ra) = instance(&space, 1);
+        let (mut b, _rb) = instance(&space, 2);
+        assert_eq!(a.allocate(), Some(15000));
+        assert_eq!(b.claim(15001), Claim::Granted);
+        assert_eq!(a.allocate(), Some(15002));
+        a.release(15002);
+        assert_eq!(a.allocate(), Some(15003));
+        a.release(15003);
+        assert!(
+            !space
+                .lock()
+                .release_handled(ProtoId::from_raw(1), 15003, true),
+            "its entry is still installed"
+        );
+        assert_eq!(b.claim(15000), Claim::Pending);
+
+        assert_eq!(
+            space.lock().entries(),
+            vec![
+                LabelEntry {
+                    claimant: Some(of(2)),
+                    ..local(15000, of(1), EntryKind::Local, EntryState::Held)
+                },
+                local(15001, of(2), EntryKind::Configured, EntryState::Claimed),
+                local(15002, of(1), EntryKind::Local, EntryState::Releasing),
+                local(15003, of(1), EntryKind::Local, EntryState::Draining),
+                LabelEntry {
+                    first: block.start,
+                    last: block.end - 1,
+                    holder: Holder::Proto("bgp".to_string()),
+                    kind: EntryKind::Block,
+                    state: EntryState::Held,
+                    claimant: None,
+                },
+            ]
+        );
+        assert_eq!(space.lock().dynamic_range(), (24000, 1048574));
     }
 }

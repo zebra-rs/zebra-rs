@@ -177,6 +177,27 @@ module exec {
         ext:help "MPLS incoming label map (ILM)";
         type empty;
       }
+      container label {
+        ext:help "MPLS label space";
+        leaf range {
+          ext:help "Regions of the label space and the labels allocated in each";
+          type empty;
+        }
+        container table {
+          ext:help "Label blocks and local labels handed out, with owners and states";
+          presence "Show the label table";
+          list label {
+            ext:help "One label: its region and what holds it";
+            key value;
+            leaf value {
+              ext:help "Label";
+              type uint32 {
+                range "0..1048575";
+              }
+            }
+          }
+        }
+      }
     }
     leaf nexthop {
       ext:help "Show nexthop group";
