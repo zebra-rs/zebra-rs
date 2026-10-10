@@ -1,0 +1,15 @@
+# z1 — BGP with a vpnv4 neighbor that never comes up: enabling vpnv4 makes
+# BGP take a label block from the RIB at once, from the default dynamic
+# range (24000-1048574).
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.1
+    neighbor:
+    - remote-address: 192.168.0.2
+      remote-as: 65001
+      enabled: true
+      afi-safi:
+      - name: vpnv4
+        enabled: true

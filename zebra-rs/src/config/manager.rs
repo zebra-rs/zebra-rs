@@ -724,9 +724,10 @@ impl ConfigManager {
     /// (`config::label_check`), as callback paths and arguments. Lines
     /// that cannot carry one are not parsed.
     fn label_leaves(&self, text: &str) -> Vec<label_check::Leaf> {
-        const LABEL_LINES: [&str; 5] = [
+        const LABEL_LINES: [&str; 6] = [
             "segment-routing block ",
             " mpls label ",
+            "mpls label-range ",
             "adjacency-sid",
             "prefix-sid",
             "area-sid",
@@ -2986,6 +2987,32 @@ mod label_commit_tests {
         assert_eq!(
             err.to_string(),
             "static MPLS label 24001 is in the dynamic label range (24000-1048574)"
+        );
+    }
+
+    /// `mpls label-range dynamic` is read from the config: an empty range
+    /// is refused, and a static binding is checked against the configured
+    /// range.
+    #[test]
+    fn the_dynamic_range_is_read_from_the_config() {
+        let cm = manager(&temp_path("dynamic"), Default::default());
+        edit(&cm, "set mpls label-range dynamic start 40000");
+        edit(&cm, "set mpls label-range dynamic end 30000");
+        let err = cm.commit_config().expect_err("an empty range");
+        assert_eq!(
+            err.to_string(),
+            "mpls label-range dynamic 40000-30000 is empty: its start is above its end"
+        );
+
+        edit(&cm, "set mpls label-range dynamic start 30000");
+        edit(&cm, "set mpls label-range dynamic end 99999");
+        edit(&cm, "set router static mpls label 24000 nexthop 10.0.0.2");
+        cm.commit_config().expect("24000 is static now");
+        edit(&cm, "set router static mpls label 35000 nexthop 10.0.0.2");
+        let err = cm.commit_config().expect_err("35000 is dynamic");
+        assert_eq!(
+            err.to_string(),
+            "static MPLS label 35000 is in the dynamic label range (30000-99999)"
         );
     }
 

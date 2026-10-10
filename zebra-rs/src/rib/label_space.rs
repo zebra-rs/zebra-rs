@@ -571,6 +571,28 @@ impl LabelSpace {
         (self.dynamic.start, self.dynamic.end - 1)
     }
 
+    /// Hand blocks out from `[first, last]` from now on
+    /// (`mpls label-range dynamic`). Returns the blocks handed out already
+    /// that fall outside it, with their owners: they stay where they are
+    /// until released.
+    pub fn set_dynamic(&mut self, first: u32, last: u32) -> Vec<(LabelBlock, String)> {
+        let end = last.saturating_add(1).min(PLATFORM_LABELS);
+        self.dynamic = first..end;
+        self.held
+            .iter()
+            .filter(|(start, h)| **start < first || h.end > end)
+            .map(|(start, h)| {
+                (
+                    LabelBlock {
+                        start: *start,
+                        end: h.end,
+                    },
+                    h.proto.clone(),
+                )
+            })
+            .collect()
+    }
+
     /// The owners whose pool found no free label since the last call:
     /// labels have been freed, so they can try again.
     pub fn take_starved(&mut self) -> BTreeSet<ProtoId> {
@@ -770,6 +792,29 @@ mod tests {
 
     fn block(start: u32, end: u32) -> LabelBlock {
         LabelBlock { start, end }
+    }
+
+    /// Blocks come from a configured dynamic range from then on. One
+    /// handed out outside it is reported and stays until released, and a
+    /// range grown back over it steps around it.
+    #[test]
+    fn a_dynamic_range_change_applies_to_new_blocks() {
+        let mut s = LabelSpace::new();
+        let early = s.alloc("bgp", 100).unwrap();
+        assert_eq!(early, block(24000, 24100));
+        assert_eq!(
+            s.set_dynamic(30000, 39999),
+            vec![(early.clone(), "bgp".to_string())]
+        );
+        assert_eq!(s.dynamic_range(), (30000, 39999));
+        assert_eq!(s.alloc("bgp", 100), Some(block(30000, 30100)));
+        assert_eq!(s.alloc("bgp", 9900), Some(block(30100, 40000)));
+        assert_eq!(s.alloc("bgp", 1), None, "the range is full");
+        assert!(s.set_dynamic(24000, 39999).is_empty());
+        assert_eq!(s.alloc("bgp", 100), Some(block(24100, 24200)));
+        // The kernel's last label is the ceiling.
+        assert!(s.set_dynamic(24000, u32::MAX).is_empty());
+        assert_eq!(s.dynamic_range(), (24000, 1048574));
     }
 
     #[test]
