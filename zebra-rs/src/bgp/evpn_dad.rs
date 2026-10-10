@@ -179,6 +179,9 @@ impl Probe {
 pub struct IpProbe {
     pub mac: MacAddr,
     pub probe: Probe,
+    /// The duplicate MAC this IP inherited its hold from. Keep it across
+    /// rebinding, until that MAC is released, even if `mac` has changed.
+    pub inherited_from: Option<MacAddr>,
 }
 
 /// A detected address, for the recovery timer and `clear`.
@@ -225,10 +228,43 @@ impl EvpnDad {
     /// inheritance) when the MAC it is bound to was.
     pub fn ip_duplicate(&self, vni: u32, ip: IpAddr, mac: MacAddr) -> bool {
         self.mac_duplicate(vni, mac)
-            || self
-                .ips
-                .get(&(vni, ip))
-                .is_some_and(|entry| entry.probe.duplicate.is_some())
+            || self.ips.get(&(vni, ip)).is_some_and(|entry| {
+                entry.probe.duplicate.is_some() || self.ip_inherited_duplicate(vni, entry)
+            })
+    }
+
+    fn ip_inherited_duplicate(&self, vni: u32, entry: &IpProbe) -> bool {
+        self.mac_duplicate(vni, entry.mac)
+            || entry
+                .inherited_from
+                .is_some_and(|mac| self.mac_duplicate(vni, mac))
+    }
+
+    fn inherit_mac(&mut self, vni: u32, mac: MacAddr) {
+        for (_, entry) in self
+            .ips
+            .range_mut((vni, IpAddr::from([0u8; 4]))..=(vni, IpAddr::from([0xffu8; 16])))
+            .filter(|(_, entry)| entry.mac == mac && entry.inherited_from.is_none())
+        {
+            entry.inherited_from = Some(mac);
+        }
+    }
+
+    /// Remember inheritance before an event replaces the IP's MAC.
+    fn inherit_ip(&mut self, vni: u32, ip: IpAddr, mac: MacAddr) -> &mut IpProbe {
+        let previous = self.ips.get(&(vni, ip)).map(|entry| entry.mac);
+        let inherited_from = previous
+            .filter(|mac| self.mac_duplicate(vni, *mac))
+            .or_else(|| self.mac_duplicate(vni, mac).then_some(mac));
+        let entry = self.ips.entry((vni, ip)).or_insert_with(|| IpProbe {
+            mac,
+            probe: Probe::default(),
+            inherited_from: None,
+        });
+        if entry.inherited_from.is_none() {
+            entry.inherited_from = inherited_from;
+        }
+        entry
     }
 
     /// Whether the MAC/IP route `(vni, mac, ip)` is frozen.
@@ -265,15 +301,16 @@ impl EvpnDad {
             detected.push(DadKey::Mac(vni, mac));
         }
         probe.owner = Some(Owner::Local);
+        if !detected.is_empty() {
+            self.inherit_mac(vni, mac);
+        }
         if let Some(ip) = ip {
-            let entry = self.ips.entry((vni, ip)).or_insert_with(|| IpProbe {
-                mac,
-                probe: Probe::default(),
-            });
+            let entry = self.inherit_ip(vni, ip, mac);
             // FRR's scenario B: the IP moved here on a different MAC.
             if let Some(Owner::Remote { vtep, .. }) = entry.probe.owner
                 && entry.mac != mac
                 && config.enabled
+                && entry.inherited_from.is_none()
                 && entry.probe.duplicate.is_none()
                 && entry.probe.record(&config, now, true)
             {
@@ -316,15 +353,16 @@ impl EvpnDad {
         }
         probe.owner = owner;
         probe.remote_routes.insert((rd, RouteBinding::Ip(ip)));
+        if !detected.is_empty() {
+            self.inherit_mac(vni, mac);
+        }
         if let Some(ip) = ip {
-            let entry = self.ips.entry((vni, ip)).or_insert_with(|| IpProbe {
-                mac,
-                probe: Probe::default(),
-            });
+            let entry = self.inherit_ip(vni, ip, mac);
             if entry.mac != mac
                 && !matches!(entry.probe.owner, Some(Owner::Remote { .. }))
                 && entry.probe.count > 0
                 && config.enabled
+                && entry.inherited_from.is_none()
                 && entry.probe.duplicate.is_none()
                 && entry.probe.record(&config, now, false)
             {
@@ -362,15 +400,15 @@ impl EvpnDad {
             && let Some(entry) = self.ips.get_mut(&(vni, ip))
         {
             entry.probe.remote_route_gone((rd, RouteBinding::Mac(mac)));
-            if entry.probe.idle() {
+            if entry.probe.idle() && entry.inherited_from.is_none() {
                 self.ips.remove(&(vni, ip));
             }
         }
     }
 
     /// Release `key` from detection, as a recovery timer or `clear` does.
-    /// A MAC releases the IPs bound to it along with it. Returns whether
-    /// anything was marked.
+    /// A MAC releases its bound IPs and those that inherited its hold
+    /// before rebinding. Returns whether anything was marked.
     pub fn release(&mut self, key: DadKey) -> bool {
         match key {
             DadKey::Mac(vni, mac) => {
@@ -382,9 +420,12 @@ impl EvpnDad {
                 for ((_, _), entry) in self
                     .ips
                     .range_mut((vni, IpAddr::from([0u8; 4]))..=(vni, IpAddr::from([0xffu8; 16])))
-                    .filter(|(_, entry)| entry.mac == mac)
+                    .filter(|(_, entry)| entry.mac == mac || entry.inherited_from == Some(mac))
                 {
                     entry.probe.clear();
+                    if entry.inherited_from == Some(mac) {
+                        entry.inherited_from = None;
+                    }
                 }
                 was
             }
@@ -440,15 +481,33 @@ impl EvpnDad {
         probe.duplicate?.until
     }
 
+    /// A MAC recovery also replays IPs that inherited its hold and then
+    /// moved to another MAC. Capture these keys before releasing it.
+    fn recovery_keys(&self, key: DadKey) -> Vec<DadKey> {
+        let mut keys = vec![key];
+        if let DadKey::Mac(vni, mac) = key {
+            keys.extend(self.ips.iter().filter_map(|((v, ip), entry)| {
+                (*v == vni && entry.mac != mac && entry.inherited_from == Some(mac))
+                    .then_some(DadKey::Ip(vni, *ip))
+            }));
+        }
+        keys
+    }
+
     /// The configuration changed. Returns the detected addresses whose
     /// routes must be re-run: all of them when detection is turned off
     /// (which, as `no dup-addr-detection` in FRR, releases every one and
     /// forgets every window), or when a freeze is lifted (they stay marked,
-    /// but nothing holds them any more). Otherwise addresses detected under
-    /// the old settings keep their state and deadline.
-    pub fn set_config(&mut self, config: DadConfig) -> Vec<DadKey> {
-        let was_freezing = self.freezes();
-        let keys = self.detected(None, None, None);
+    /// but nothing holds them any more). A new freeze policy also applies
+    /// to existing duplicates, with timed freezes starting at `now`.
+    /// Changes to the detection window or threshold keep existing deadlines.
+    pub fn set_config(&mut self, config: DadConfig, now: Instant) -> Vec<DadKey> {
+        let freeze_changed = self.config.freeze != config.freeze;
+        let keys: BTreeSet<_> = self
+            .detected(None, None, None)
+            .into_iter()
+            .flat_map(|key| self.recovery_keys(key))
+            .collect();
         self.config = config;
         if !config.enabled {
             for probe in self.macs.values_mut() {
@@ -456,11 +515,25 @@ impl EvpnDad {
             }
             for entry in self.ips.values_mut() {
                 entry.probe.clear();
+                entry.inherited_from = None;
             }
-            return keys;
+            return keys.into_iter().collect();
         }
-        if was_freezing && !self.freezes() {
-            return keys;
+        if freeze_changed {
+            let until = match config.freeze {
+                Freeze::For(secs) => Some(now + Duration::from_secs(secs.into())),
+                Freeze::Off | Freeze::Permanent => None,
+            };
+            for probe in self
+                .macs
+                .values_mut()
+                .chain(self.ips.values_mut().map(|entry| &mut entry.probe))
+            {
+                if let Some(duplicate) = &mut probe.duplicate {
+                    duplicate.until = until;
+                }
+            }
+            return keys.into_iter().collect();
         }
         Vec::new()
     }
@@ -537,8 +610,7 @@ impl Bgp {
             return;
         }
         tracing::info!("EVPN duplicate address {key:?}: freeze elapsed, recovering");
-        self.local_rib.evpn_dad.release(key);
-        self.evpn_dad_rerun(key);
+        self.evpn_dad_release_rerun(&[key]);
     }
 
     /// `clear bgp evpn dup-addr vni <all|N> [mac M | ip I]`: release the
@@ -550,11 +622,21 @@ impl Bgp {
         ip: Option<IpAddr>,
     ) -> usize {
         let keys = self.local_rib.evpn_dad.detected(vni, mac, ip);
-        for key in &keys {
-            self.local_rib.evpn_dad.release(*key);
-            self.evpn_dad_rerun(*key);
-        }
+        self.evpn_dad_release_rerun(&keys);
         keys.len()
+    }
+
+    fn evpn_dad_release_rerun(&mut self, keys: &[DadKey]) {
+        let rerun: BTreeSet<_> = keys
+            .iter()
+            .flat_map(|key| self.local_rib.evpn_dad.recovery_keys(*key))
+            .collect();
+        for key in keys {
+            self.local_rib.evpn_dad.release(*key);
+        }
+        for key in rerun {
+            self.evpn_dad_rerun(key);
+        }
     }
 
     /// The `clear bgp evpn dup-addr vni …` path tail after `vni` (empty,
@@ -592,8 +674,23 @@ impl Bgp {
         if self.local_rib.evpn_dad.config == config {
             return;
         }
-        for key in self.local_rib.evpn_dad.set_config(config) {
-            self.evpn_dad_rerun(key);
+        let keys = self.local_rib.evpn_dad.set_config(config, Instant::now());
+        if self.local_rib.evpn_dad.freezes() {
+            arm_detected(&self.local_rib.evpn_dad, &self.tx, &keys);
+            for key in keys {
+                match key {
+                    DadKey::Mac(vni, mac) => self.evpn_dad_withdraw_held(vni, mac, None),
+                    DadKey::Ip(vni, ip) => {
+                        if let Some(entry) = self.local_rib.evpn_dad.ips.get(&(vni, ip)) {
+                            self.evpn_dad_withdraw_held(vni, entry.mac, Some(ip));
+                        }
+                    }
+                }
+            }
+        } else {
+            for key in keys {
+                self.evpn_dad_rerun(key);
+            }
         }
     }
 
@@ -628,7 +725,12 @@ impl Bgp {
                 .filter(|entry| {
                     entry.vni == vni
                         && match key {
-                            DadKey::Mac(_, mac) => entry.mac == mac,
+                            DadKey::Mac(_, mac) => {
+                                entry.mac == mac
+                                    && entry.ip.is_none_or(|ip| {
+                                        dad.ips.get(&(vni, ip)).is_none_or(|probe| probe.mac == mac)
+                                    })
+                            }
                             DadKey::Ip(_, ip) => entry.ip == Some(ip),
                         }
                 })
@@ -668,7 +770,7 @@ pub struct DadAddressView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ip: Option<String>,
     pub duplicate: bool,
-    /// Duplicate because the MAC the IP is bound to is.
+    /// Duplicate inherited from its current or previous MAC.
     pub inherited: bool,
     pub moves: u32,
     /// `local`, `remote <vtep>`, or `-`.
@@ -727,7 +829,7 @@ impl EvpnDad {
                 .filter(|((vni, _), entry)| {
                     entry.probe.duplicate.is_some()
                         || counting(&entry.probe)
-                        || self.mac_duplicate(*vni, entry.mac)
+                        || self.ip_inherited_duplicate(*vni, entry)
                 })
                 .map(|((vni, ip), entry)| {
                     row(
@@ -735,7 +837,7 @@ impl EvpnDad {
                         entry.mac,
                         Some(*ip),
                         &entry.probe,
-                        self.mac_duplicate(*vni, entry.mac),
+                        self.ip_inherited_duplicate(*vni, entry),
                     )
                 }),
         );
@@ -1035,15 +1137,126 @@ mod tests {
         dad.remote_takeover(RD, VNI, mac(1), None, VTEP, false, t);
         dad.local_learn(VNI, mac(1), None, t);
         assert!(dad.frozen(VNI, mac(1), None));
-        let keys = dad.set_config(DadConfig {
-            enabled: false,
-            ..dad.config
-        });
+        let keys = dad.set_config(
+            DadConfig {
+                enabled: false,
+                ..dad.config
+            },
+            t,
+        );
         assert_eq!(keys, vec![DadKey::Mac(VNI, mac(1))]);
         assert!(!dad.mac_duplicate(VNI, mac(1)));
         // Disabled, nothing is counted.
         dad.remote_takeover(RD, VNI, mac(1), None, VTEP, false, t);
         dad.local_learn(VNI, mac(1), None, t);
         assert_eq!(dad.macs[&(VNI, mac(1))].count, 0);
+    }
+
+    #[test]
+    fn freeze_policy_changes_reset_deadlines_but_threshold_changes_do_not() {
+        let mut dad = dad(2, Freeze::Off);
+        let t = Instant::now();
+        // Detect a MAC and an independent IP, both initially warn-only.
+        dad.remote_takeover(RD, VNI, mac(1), None, VTEP, false, t);
+        dad.local_learn(VNI, mac(1), None, t);
+        dad.remote_takeover(RD, VNI, mac(1), None, VTEP, false, t);
+        dad.remote_takeover(RD, VNI, mac(2), Some(ip(5)), VTEP, false, t);
+        dad.local_learn(VNI, mac(3), Some(ip(5)), t);
+        dad.remote_takeover(RD, VNI, mac(2), Some(ip(5)), VTEP, false, t);
+        let keys = vec![DadKey::Mac(VNI, mac(1)), DadKey::Ip(VNI, ip(5))];
+        assert_eq!(dad.detected(None, None, None), keys);
+
+        let now = t + Duration::from_secs(10);
+        assert_eq!(
+            dad.set_config(
+                DadConfig {
+                    freeze: Freeze::For(30),
+                    ..dad.config
+                },
+                now
+            ),
+            keys
+        );
+        let deadline = now + Duration::from_secs(30);
+        for key in &keys {
+            assert_eq!(dad.until(*key), Some(deadline));
+        }
+        assert!(
+            dad.set_config(
+                DadConfig {
+                    max_moves: 5,
+                    time: 60,
+                    ..dad.config
+                },
+                now
+            )
+            .is_empty()
+        );
+        for key in &keys {
+            assert_eq!(dad.until(*key), Some(deadline));
+        }
+
+        for freeze in [Freeze::Permanent, Freeze::For(60), Freeze::Off] {
+            assert_eq!(
+                dad.set_config(
+                    DadConfig {
+                        freeze,
+                        ..dad.config
+                    },
+                    now
+                ),
+                keys
+            );
+            let until = if freeze == Freeze::For(60) {
+                Some(now + Duration::from_secs(60))
+            } else {
+                None
+            };
+            for key in &keys {
+                assert_eq!(dad.until(*key), until);
+            }
+        }
+        assert!(
+            dad.mac_duplicate(VNI, mac(1)),
+            "removing a freeze keeps duplicate marks"
+        );
+        assert!(!dad.frozen(VNI, mac(1), None));
+        assert!(!dad.frozen(VNI, mac(2), Some(ip(5))));
+    }
+
+    #[test]
+    fn withdrawing_a_frozen_ip_does_not_forget_its_inherited_hold() {
+        let mut dad = dad(2, Freeze::Permanent);
+        let t = Instant::now();
+        dad.remote_takeover(RD, VNI, mac(1), Some(ip(5)), VTEP, false, t);
+        dad.local_learn(VNI, mac(1), None, t);
+        dad.remote_takeover(RD, VNI, mac(1), None, VTEP, false, t);
+        assert!(dad.frozen(VNI, mac(1), Some(ip(5))));
+        dad.remote_gone(RD, VNI, mac(1), Some(ip(5)));
+        assert_eq!(dad.ips[&(VNI, ip(5))].probe.owner, None);
+        assert_eq!(
+            dad.remote_takeover(RD, VNI, mac(2), Some(ip(5)), VTEP, false, t)
+                .0,
+            Verdict::Hold,
+        );
+        dad.release(DadKey::Mac(VNI, mac(1)));
+        assert!(!dad.frozen(VNI, mac(2), Some(ip(5))));
+    }
+
+    #[test]
+    fn clearing_the_replacement_mac_keeps_the_original_macs_ip_hold() {
+        let mut dad = dad(2, Freeze::Permanent);
+        let t = Instant::now();
+        dad.remote_takeover(RD, VNI, mac(1), Some(ip(5)), VTEP, false, t);
+        dad.local_learn(VNI, mac(1), None, t);
+        dad.remote_takeover(RD, VNI, mac(1), None, VTEP, false, t);
+        dad.remote_takeover(RD, VNI, mac(2), Some(ip(5)), VTEP, false, t);
+        dad.local_learn(VNI, mac(2), None, t);
+        dad.remote_takeover(RD, VNI, mac(2), None, VTEP, false, t);
+        assert!(dad.mac_duplicate(VNI, mac(2)));
+        dad.release(DadKey::Mac(VNI, mac(2)));
+        assert!(dad.frozen(VNI, mac(2), Some(ip(5))));
+        dad.release(DadKey::Mac(VNI, mac(1)));
+        assert!(!dad.frozen(VNI, mac(2), Some(ip(5))));
     }
 }

@@ -48,7 +48,9 @@ not counted.
 
 An **IP** is counted separately, but only when it moves to a *different* MAC:
 a host that keeps its MAC as it moves is already counted by the MAC. An IP
-bound to a duplicate MAC is a duplicate as well.
+bound to a duplicate MAC is a duplicate as well. Changing its binding to
+another MAC does not release this inherited hold: it lasts until the original
+duplicate MAC is cleared or recovers, and the IP's new binding is then re-run.
 
 When an address reaches `max-moves`, zebra-rs logs a warning:
 
@@ -77,6 +79,12 @@ A frozen address is released when:
 On release, zebra-rs re-runs the address's routes. A MAC last learned here
 is advertised again with a sequence number above the remote one. A MAC last
 learned remotely is installed from the remote route.
+
+Changing `freeze` also applies to addresses already detected. Enabling a
+freeze withdraws their local advertisements immediately. A timed freeze starts
+from the configuration change, including when changing from warn-only or
+permanent. Changing the time of a freeze restarts its recovery deadline;
+changing only `max-moves` or the detection window leaves that deadline alone.
 
 ## Show and clear
 

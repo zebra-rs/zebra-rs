@@ -801,3 +801,190 @@ async fn disabling_detection_readvertises_a_frozen_local_mac() {
     assert!(f.advertised());
     assert_eq!(f.messages(), vec![(false, f.key)]);
 }
+
+fn frozen_mac_with_ip(freeze: crate::bgp::evpn_dad::Freeze) -> (Flap, IpAddr) {
+    let (mut f, _rx) = Flap::new(dad_config(2, freeze));
+    let ip = "10.10.0.5".parse().unwrap();
+    f.remote();
+    f.bgp
+        .process_rib_msg(RibRx::FdbAdd(crate::rib::api::FdbEntry {
+            ip: Some(ip),
+            ..f.local.clone()
+        })); // first local move
+    f.local(); // MAC-only route for the same local MAC
+    f.remote(); // second move: MAC frozen, IP inherits the freeze
+    assert!(f.bgp.local_rib.evpn_dad.frozen(100, f.local.mac, Some(ip)));
+    assert!(!f.advertised());
+    f.messages();
+    (f, ip)
+}
+
+/// Changing MACs must not let an IP escape a hold inherited from its old
+/// MAC. Clearing that MAC releases and installs the new remote binding.
+#[tokio::test]
+async fn inherited_ip_freeze_survives_remote_rebinding_until_mac_clear() {
+    use crate::bgp::evpn_dad::Freeze;
+    let (mut f, ip) = frozen_mac_with_ip(Freeze::Permanent);
+    let other_mac = MacAddr::from([2, 0, 0, 0, 1, 2]);
+    receive_macip(&mut f.bgp, f.from, f.remote_rd, other_mac, Some(ip), 10);
+    assert!(
+        f.messages().is_empty(),
+        "the rebound IP stays out of the RIB"
+    );
+    let view = f.bgp.local_rib.evpn_dad.view(std::time::Instant::now());
+    let row = view
+        .addresses
+        .iter()
+        .find(|a| a.ip.as_deref() == Some("10.10.0.5"))
+        .unwrap();
+    assert_eq!(row.mac, other_mac.to_string());
+    assert!(row.duplicate && row.inherited);
+
+    assert_eq!(f.bgp.evpn_dad_clear(Some(100), Some(f.local.mac), None), 1);
+    let new_key = crate::rib::evpn::MacRouteKey::new(f.remote_rd, 100, other_mac, Some(ip));
+    assert!(f.messages().contains(&(true, new_key)));
+    assert!(!f.bgp.local_rib.evpn_dad.frozen(100, other_mac, Some(ip)));
+}
+
+/// A locally learned replacement MAC is held too, and advertised when
+/// the original duplicate MAC is cleared.
+#[tokio::test]
+async fn inherited_ip_freeze_survives_local_rebinding_until_mac_clear() {
+    use crate::bgp::evpn_dad::Freeze;
+    let (mut f, ip) = frozen_mac_with_ip(Freeze::Permanent);
+    let local = crate::rib::api::FdbEntry {
+        mac: MacAddr::from([2, 0, 0, 0, 1, 2]),
+        ip: Some(ip),
+        ..f.local.clone()
+    };
+    f.bgp.process_rib_msg(RibRx::FdbAdd(local.clone()));
+    assert!(!f.bgp.evpn_macip_originated(&local));
+    assert!(f.bgp.local_rib.evpn_dad.frozen(100, local.mac, Some(ip)));
+    assert!(f.messages().is_empty());
+    f.bgp.evpn_dad_clear(Some(100), Some(f.local.mac), None);
+    assert!(f.bgp.evpn_macip_originated(&local));
+    assert!(!f.bgp.local_rib.evpn_dad.frozen(100, local.mac, Some(ip)));
+}
+
+/// The source MAC's recovery timer releases inherited holds even after
+/// the IP has moved to a different MAC.
+#[tokio::test(start_paused = true)]
+async fn inherited_ip_freeze_recovers_remote_rebinding_on_the_timer() {
+    use crate::bgp::evpn_dad::Freeze;
+    let (mut f, ip) = frozen_mac_with_ip(Freeze::For(30));
+    let other_mac = MacAddr::from([2, 0, 0, 0, 1, 2]);
+    receive_macip(&mut f.bgp, f.from, f.remote_rd, other_mac, Some(ip), 10);
+    assert!(f.messages().is_empty());
+    let message = tokio::time::timeout(std::time::Duration::from_secs(31), f.bgp.rx.recv())
+        .await
+        .expect("a recovery timer is armed")
+        .expect("BGP channel is open");
+    let super::super::inst::Message::EvpnDadRecover { key, until } = message else {
+        panic!("expected duplicate-address recovery");
+    };
+    assert_eq!(key, f.dad_key());
+    f.bgp.evpn_dad_recover(key, until);
+    let new_key = crate::rib::evpn::MacRouteKey::new(f.remote_rd, 100, other_mac, Some(ip));
+    assert!(f.messages().contains(&(true, new_key)));
+    assert!(!f.bgp.local_rib.evpn_dad.frozen(100, other_mac, Some(ip)));
+}
+
+/// Removing a freeze or disabling DAD also releases moved inherited IPs.
+#[tokio::test]
+async fn inherited_ip_rebinding_recovers_when_the_hold_is_disabled() {
+    use crate::bgp::evpn_dad::Freeze;
+    for enabled in [true, false] {
+        let (mut f, ip) = frozen_mac_with_ip(Freeze::Permanent);
+        let other_mac = MacAddr::from([2, 0, 0, 0, 1, 2]);
+        receive_macip(&mut f.bgp, f.from, f.remote_rd, other_mac, Some(ip), 10);
+        assert!(f.messages().is_empty());
+        f.bgp.evpn_dad_configure(crate::bgp::evpn_dad::DadConfig {
+            enabled,
+            ..dad_config(
+                2,
+                if enabled {
+                    Freeze::Off
+                } else {
+                    Freeze::Permanent
+                },
+            )
+        });
+        let new_key = crate::rib::evpn::MacRouteKey::new(f.remote_rd, 100, other_mac, Some(ip));
+        assert!(f.messages().contains(&(true, new_key)));
+        assert!(!f.bgp.local_rib.evpn_dad.frozen(100, other_mac, Some(ip)));
+    }
+}
+
+/// Changing warn-only to a timed freeze withdraws existing advertisements
+/// immediately and arms a real timer that re-advertises on recovery.
+#[tokio::test(start_paused = true)]
+async fn timed_freeze_after_warn_only_withdraws_and_arms_recovery() {
+    use crate::bgp::evpn_dad::Freeze;
+    let (mut f, _rx) = Flap::new(dad_config(3, Freeze::Off));
+    f.remote();
+    f.local();
+    f.remote();
+    f.kernel_replaced();
+    f.local(); // warn-only duplicate, still advertised
+    assert!(f.advertised());
+    f.messages();
+    f.bgp.evpn_dad_configure(dad_config(3, Freeze::For(30)));
+    assert!(!f.advertised());
+    assert!(
+        f.messages().is_empty(),
+        "changing the hold does not program the RIB"
+    );
+    let expected_until = f
+        .bgp
+        .local_rib
+        .evpn_dad
+        .until(f.dad_key())
+        .expect("timed freeze deadline");
+    let message = tokio::time::timeout(std::time::Duration::from_secs(31), f.bgp.rx.recv())
+        .await
+        .expect("a recovery timer is armed")
+        .expect("BGP channel is open");
+    let super::super::inst::Message::EvpnDadRecover { key, until } = message else {
+        panic!("expected duplicate-address recovery");
+    };
+    assert_eq!(key, f.dad_key());
+    assert_eq!(until, expected_until);
+    f.bgp.evpn_dad_recover(key, until);
+    assert!(f.advertised());
+    assert!(!f.bgp.local_rib.evpn_dad.mac_duplicate(100, f.local.mac));
+}
+
+#[tokio::test(start_paused = true)]
+async fn permanent_freeze_changed_to_timed_freeze_arms_recovery() {
+    use crate::bgp::evpn_dad::Freeze;
+    let (mut f, _rx) = Flap::new(dad_config(2, Freeze::For(30)));
+    f.remote();
+    f.local();
+    f.remote();
+    let stale_until = f.bgp.local_rib.evpn_dad.until(f.dad_key()).unwrap();
+    f.messages();
+    f.bgp.evpn_dad_configure(dad_config(2, Freeze::Permanent));
+    f.bgp.evpn_dad_recover(f.dad_key(), stale_until);
+    assert!(f.bgp.local_rib.evpn_dad.frozen(100, f.local.mac, None));
+    assert!(f.messages().is_empty(), "the old timed recovery is ignored");
+
+    f.bgp.evpn_dad_configure(dad_config(2, Freeze::For(60)));
+    let expected_until = f.bgp.local_rib.evpn_dad.until(f.dad_key()).unwrap();
+    loop {
+        let message = tokio::time::timeout(std::time::Duration::from_secs(61), f.bgp.rx.recv())
+            .await
+            .expect("a recovery timer is armed")
+            .expect("BGP channel is open");
+        let super::super::inst::Message::EvpnDadRecover { key, until } = message else {
+            panic!("expected duplicate-address recovery");
+        };
+        f.bgp.evpn_dad_recover(key, until);
+        if until == expected_until {
+            break;
+        }
+        assert!(f.bgp.local_rib.evpn_dad.frozen(100, f.local.mac, None));
+        assert!(f.messages().is_empty());
+    }
+    assert_eq!(f.messages(), vec![(true, f.key)]);
+    assert!(!f.bgp.local_rib.evpn_dad.mac_duplicate(100, f.local.mac));
+}
