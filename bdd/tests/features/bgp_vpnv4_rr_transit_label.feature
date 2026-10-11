@@ -90,6 +90,25 @@ Feature: A VPNv4 route reflector programs no MPLS transit label
     And show command "show mpls label table" in namespace "rr" should eventually not contain "25024-25151"
     And show command "show mpls label table" in namespace "rr" should contain "24000-25023    bgp     block           held"
 
+  Scenario: Transit rows the label range had no room for are labelled once it grows
+    Given the test topology exists
+    # 100 labels: no room for a 128-label chunk. BGP keeps the block it
+    # holds, so it asks for nothing else.
+    When I apply command "set mpls label-range dynamic start 30000" in namespace "rr"
+    And I apply command "set mpls label-range dynamic end 30099" in namespace "rr"
+    Then show command "show mpls label range" in namespace "rr" should eventually contain "30000-30099      dynamic"
+    When I apply command "set router bgp neighbor 192.168.0.3 afi-safi vpnv4 next-hop-self true" in namespace "rr"
+    And I wait 5 seconds for BGP to operate
+    Then mpls ilm in namespace "rr" should be empty
+    And show command "show mpls label table" in namespace "rr" should not contain "30000"
+    # Growing the range is room returning: the rows are labelled now,
+    # with no flag having changed.
+    When I apply command "set mpls label-range dynamic end 39999" in namespace "rr"
+    Then show command "show mpls label table" in namespace "rr" should eventually contain "30000-30127    bgp     block           held"
+    When I wait 5 seconds for BGP to operate
+    Then mpls ilm in namespace "rr" should contain label 30000
+    And show command "show ip route vrf vrf-cust" in namespace "pe2" should eventually contain "192.168.0.1"
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "rr"

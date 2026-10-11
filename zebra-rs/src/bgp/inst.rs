@@ -1493,6 +1493,7 @@ impl Bgp {
             labels: super::shard::ShardLabelPool::new(super::label_chunks::LabelChunks::new(
                 rib_subscriber.label_space().clone(),
                 "bgp",
+                ctx.rib.proto_id(),
             )),
             ..BgpShard::default()
         };
@@ -5335,12 +5336,18 @@ impl Bgp {
             RibRx::LabelBlock { start, size } => {
                 self.label_block_arrived(start, size);
             }
-            // Labels were freed after a Binding-SID claim was refused (a
-            // configured Adjacency-SID had the label): claim again.
+            // Labels were freed, or a commit or block change made room,
+            // after a Binding-SID claim was refused (a configured
+            // Adjacency-SID had the label) or a transit label found the
+            // dynamic range full: claim again, and label the transit rows
+            // that went without.
             RibRx::LocalLabelsFreed => {
                 self.local_rib.sr_policy.labels_freed();
                 let mut top = self.nht_install_top();
                 super::route::sr_policy_sync_reselected(&mut top);
+                if self.shard.labels.take_starved() {
+                    self.reconcile_transit_labels(true);
+                }
             }
             // A Binding-SID label an IGP's dynamic Adjacency-SID held is
             // the claiming policy's now: install its ILM.
@@ -5638,11 +5645,6 @@ impl Bgp {
         // So do VPWS E-Lines: a service configured before the grant
         // originated its Type-1 with label 0, which no remote binds.
         self.vpws_label_drain();
-        // Transit labels come from the shard's own chunks, not this block,
-        // but a grant means the dynamic range had room: give any transit
-        // row a full range left unlabelled (the mint returned `None`)
-        // another try.
-        self.reconcile_transit_labels(true);
         // The reconcile may have outgrown this block too (a large VRF
         // fleet). If any VRF is still label-less, ask for another.
         if self.vrf_registry.values().any(|h| h.label == 0) {

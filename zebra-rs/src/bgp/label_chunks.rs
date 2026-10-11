@@ -8,7 +8,10 @@
 //! is 128 labels, each further one doubles up to 65536, and returning a
 //! chunk resets the next size to 128. A region too full for the next size
 //! still yields a smaller chunk, halving down to 128; below that,
-//! allocation fails and the next one tries again.
+//! allocation fails, and the next one tries again. A failure also leaves
+//! the owner starved in the label space, so the RIB tells it
+//! (`RibRx::LocalLabelsFreed`) once labels are freed or the range grows,
+//! and it can label what went without ([`LabelChunks::take_starved`]).
 //!
 //! A chunk whose labels are all free is not given back at once: the BGP
 //! task's ILM deletions for its labels may still be on their way to the
@@ -17,6 +20,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::rib::client::ProtoId;
 use crate::rib::label_space::SharedLabelSpace;
 use crate::spf::label_block::LabelBlock;
 
@@ -44,6 +48,10 @@ pub struct LabelChunks {
     space: Option<SharedLabelSpace>,
     /// The protocol chunks are held under.
     proto: &'static str,
+    /// The instance told when room returns after a failed allocation.
+    owner: Option<ProtoId>,
+    /// An allocation failed since [`Self::take_starved`] last ran.
+    starved: bool,
     /// Chunks, by first label.
     chunks: BTreeMap<u32, Chunk>,
     /// Labels handed out and freed, inside the chunks.
@@ -59,11 +67,13 @@ impl Default for LabelChunks {
 }
 
 impl LabelChunks {
-    /// An allocator taking chunks from `space` under `proto`.
-    pub fn new(space: SharedLabelSpace, proto: &'static str) -> Self {
+    /// An allocator taking chunks from `space` under `proto` for
+    /// `owner`, the instance told when room returns.
+    pub fn new(space: SharedLabelSpace, proto: &'static str, owner: ProtoId) -> Self {
         Self {
             space: Some(space),
             proto,
+            owner: Some(owner),
             ..Self::without_space()
         }
     }
@@ -73,6 +83,8 @@ impl LabelChunks {
         Self {
             space: None,
             proto: "bgp",
+            owner: None,
+            starved: false,
             chunks: BTreeMap::new(),
             free: BTreeSet::new(),
             next_size: CHUNK_MIN,
@@ -103,21 +115,30 @@ impl LabelChunks {
     /// [`CHUNK_MIN`] if the region has no room for it, and return its
     /// first label (handed out).
     fn take_chunk(&mut self) -> Option<u32> {
-        let space = self.space.as_ref()?;
+        let mut space = self.space.as_ref()?.lock();
         let mut size = self.next_size;
         let block = loop {
-            if let Some(block) = space.lock().alloc(self.proto, size) {
+            if let Some(block) = space.alloc(self.proto, size) {
                 break block;
             }
             if size <= CHUNK_MIN {
-                tracing::warn!(
-                    proto = self.proto,
-                    "label chunk: the dynamic range has no room for {CHUNK_MIN} labels"
-                );
+                // Under the lock the allocation failed under: room the
+                // RIB makes from here on finds the owner starved.
+                if let Some(owner) = self.owner {
+                    space.starve(owner);
+                }
+                if !self.starved {
+                    tracing::warn!(
+                        proto = self.proto,
+                        "label chunk: the dynamic range has no room for {CHUNK_MIN} labels"
+                    );
+                }
+                self.starved = true;
                 return None;
             }
             size /= 2;
         };
+        drop(space);
         self.next_size = (size * 2).min(CHUNK_MAX);
         self.chunks.insert(
             block.start,
@@ -148,6 +169,12 @@ impl LabelChunks {
         if let Some(chunk) = self.chunk_mut(label) {
             chunk.live -= 1;
         }
+    }
+
+    /// Whether an allocation failed since the last call: the caller, told
+    /// that room returned, labels what went without.
+    pub fn take_starved(&mut self) -> bool {
+        std::mem::take(&mut self.starved)
     }
 
     /// Take out the chunks whose labels are all free, for the caller to
@@ -197,12 +224,16 @@ mod tests {
         LabelBlock { start, end }
     }
 
+    fn owner() -> ProtoId {
+        ProtoId::from_raw(7)
+    }
+
     /// Chunks start at 128 labels from 24000, the lowest label first, and
     /// double as each fills.
     #[test]
     fn chunks_start_small_and_double() {
         let space = SharedLabelSpace::default();
-        let mut labels = LabelChunks::new(space.clone(), "bgp");
+        let mut labels = LabelChunks::new(space.clone(), "bgp", owner());
         assert_eq!(labels.alloc(), Some(24000));
         assert_eq!(labels.alloc(), Some(24001));
         for _ in 2..128 {
@@ -228,7 +259,7 @@ mod tests {
     #[test]
     fn chunks_stop_growing_at_the_maximum() {
         let space = SharedLabelSpace::default();
-        let mut labels = LabelChunks::new(space, "bgp");
+        let mut labels = LabelChunks::new(space, "bgp", owner());
         let mut sizes = Vec::new();
         for _ in 0..12 {
             let start = labels.take_chunk().unwrap();
@@ -250,7 +281,7 @@ mod tests {
     fn a_full_region_yields_smaller_chunks_then_none() {
         let space = SharedLabelSpace::default();
         space.lock().set_dynamic(24000, 24000 + 128 + 256 + 200 - 1);
-        let mut labels = LabelChunks::new(space.clone(), "bgp");
+        let mut labels = LabelChunks::new(space.clone(), "bgp", owner());
         for _ in 0..(128 + 256) {
             labels.alloc().unwrap();
         }
@@ -270,7 +301,7 @@ mod tests {
     #[test]
     fn freed_labels_are_reused_lowest_first() {
         let space = SharedLabelSpace::default();
-        let mut labels = LabelChunks::new(space, "bgp");
+        let mut labels = LabelChunks::new(space, "bgp", owner());
         for _ in 0..5 {
             labels.alloc().unwrap();
         }
@@ -290,7 +321,7 @@ mod tests {
     #[test]
     fn a_drained_chunk_is_handed_back_and_resets_the_size() {
         let space = SharedLabelSpace::default();
-        let mut labels = LabelChunks::new(space.clone(), "bgp");
+        let mut labels = LabelChunks::new(space.clone(), "bgp", owner());
         for _ in 0..129 {
             labels.alloc().unwrap();
         }
@@ -303,6 +334,29 @@ mod tests {
         assert_eq!(space.lock().held_blocks().len(), 2, "the caller returns it");
         assert_eq!(labels.next_size, CHUNK_MIN);
         assert_eq!(labels.alloc(), Some(24129), "from the chunk still held");
+    }
+
+    /// A failure leaves the owner starved in the label space, under the
+    /// same lock, so the RIB tells it when room returns; the allocator
+    /// remembers it until asked. A success starves no one.
+    #[test]
+    fn a_failure_starves_the_owner_until_asked() {
+        let space = SharedLabelSpace::default();
+        space.lock().set_dynamic(24000, 24127);
+        let mut labels = LabelChunks::new(space.clone(), "bgp", owner());
+        for _ in 0..128 {
+            labels.alloc().unwrap();
+        }
+        assert!(space.lock().take_starved().is_empty());
+        assert!(!labels.take_starved());
+        assert_eq!(labels.alloc(), None);
+        assert_eq!(space.lock().take_starved(), [owner()].into());
+        assert!(labels.take_starved());
+        assert!(!labels.take_starved(), "asked once");
+        space.lock().set_dynamic(24000, 30000);
+        assert_eq!(labels.alloc(), Some(24128));
+        assert!(space.lock().take_starved().is_empty());
+        assert!(!labels.take_starved());
     }
 
     /// Without a label space nothing is handed out.

@@ -464,8 +464,14 @@ Chunk rules:
   allocator retries at halving sizes down to 128 (our addition: a nearly
   full or fragmented region still yields a small chunk). If even 128 is not
   available, allocation returns `None` and logs; the next allocation
-  retries. There is no request flag that can stick. A transit row left
-  unlabelled this way is labelled by the next forced transit reconcile.
+  retries. There is no request flag that can stick. The failure also
+  leaves the instance starved in the `LabelSpace`, under the lock the
+  allocation failed under, and the RIB tells it (`RibRx::LocalLabelsFreed`)
+  when room may have returned: a block or label released, a commit ended
+  (it may have grown the range), or an SR block changed. BGP then labels
+  the transit rows that went without, by a forced transit reconcile:
+  their transit flags have not changed, and BGP holding its block already,
+  no grant comes either.
 
 What this replaced in BGP before phase 5 (from reading the code; not
 reproduced; 5a fixed the first three):
@@ -830,8 +836,8 @@ mints whatever labels VRFs, EVIs, ESes and VPWS services hold, and
 The event loop returns a drained chunk after each event, behind its ILM
 deletions (§5.2, Return). Pool workers and per-VRF shards have no label
 space: workers take only IPv4 unicast, and LU/VPN is global-instance-only.
-`label_block_arrived` still runs the forced transit reconcile, a grant
-meaning the range has room. 5b moves the main task's per-VRF, per-EVI,
+A transit mint that finds the range full is retried when the RIB says
+room returned (§5.2, Exhaustion). 5b moves the main task's per-VRF, per-EVI,
 ESI and VPWS labels onto chunks of its own and retires
 `LabelBlockRequest`, `vrf_label_request_pending`, `relabel_vrf` and the
 RIB's waiting block requests.

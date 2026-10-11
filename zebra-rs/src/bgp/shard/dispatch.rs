@@ -1255,7 +1255,11 @@ mod tests {
     fn minting_shard() -> (SharedLabelSpace, BgpShard) {
         let space = SharedLabelSpace::default();
         let shard = BgpShard {
-            labels: ShardLabelPool::new(LabelChunks::new(space.clone(), "bgp")),
+            labels: ShardLabelPool::new(LabelChunks::new(
+                space.clone(),
+                "bgp",
+                crate::rib::client::ProtoId::from_raw(0),
+            )),
             ..Default::default()
         };
         (space, shard)

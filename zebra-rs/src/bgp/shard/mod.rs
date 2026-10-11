@@ -73,6 +73,12 @@ impl ShardLabelPool {
         self.pool.take_drained()
     }
 
+    /// Whether a label could not be had since the last call, the dynamic
+    /// range being full ([`LabelChunks::take_starved`]).
+    pub fn take_starved(&mut self) -> bool {
+        self.pool.take_starved()
+    }
+
     /// The chunks held, for tests.
     #[cfg(test)]
     pub fn chunks(&self) -> Vec<LabelBlock> {
@@ -85,7 +91,11 @@ impl ShardLabelPool {
     pub fn with_test_space(first: u32) -> Self {
         let space = crate::rib::label_space::SharedLabelSpace::default();
         space.lock().set_dynamic(first, first + 99_999);
-        Self::new(LabelChunks::new(space, "bgp"))
+        Self::new(LabelChunks::new(
+            space,
+            "bgp",
+            crate::rib::client::ProtoId::from_raw(0),
+        ))
     }
 
     /// Local label for an IPv4 LU prefix, allocating on first use.
@@ -476,7 +486,11 @@ mod tests {
     /// A pool over a label space, as `Bgp::new` builds the global one.
     fn pool_with_space() -> (SharedLabelSpace, ShardLabelPool) {
         let space = SharedLabelSpace::default();
-        let pool = ShardLabelPool::new(LabelChunks::new(space.clone(), "bgp"));
+        let pool = ShardLabelPool::new(LabelChunks::new(
+            space.clone(),
+            "bgp",
+            crate::rib::client::ProtoId::from_raw(0),
+        ));
         (space, pool)
     }
 

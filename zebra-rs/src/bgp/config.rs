@@ -11962,7 +11962,11 @@ mod transit_label_tests {
         let space = SharedLabelSpace::default();
         space.lock().set_dynamic(2000, 2127);
         space.lock().alloc("isis", 128).expect("the whole range");
-        bgp.shard.labels = ShardLabelPool::new(LabelChunks::new(space.clone(), "bgp"));
+        bgp.shard.labels = ShardLabelPool::new(LabelChunks::new(
+            space.clone(),
+            "bgp",
+            bgp.ctx.rib.proto_id(),
+        ));
         space
     }
 
@@ -12185,9 +12189,8 @@ mod transit_label_tests {
     }
 
     /// Transit rows received while the dynamic range was full carry no
-    /// label (the mint returned `None`); a forced reconcile — which
-    /// `label_block_arrived` runs, a grant meaning the range has room —
-    /// labels them once there is room.
+    /// label (the mint returned `None`); a forced reconcile labels them
+    /// once there is room.
     #[tokio::test]
     async fn forced_reconcile_labels_transit_rows_a_full_range_left_unlabelled() {
         let (mut bgp, mut rx) = fresh_bgp_observed();
@@ -12210,6 +12213,40 @@ mod transit_label_tests {
         bgp.reconcile_transit_labels(true);
         assert_eq!(local_label_of(&bgp, rd, "10.1.0.0/30"), Some(Some(2000)));
         assert_eq!(drain_ilm(&mut rx), vec![(false, 2000)]);
+    }
+
+    /// A transit mint that found the range full leaves BGP starved in the
+    /// label space; when the RIB says room returned
+    /// (`RibRx::LocalLabelsFreed`), the rows that went without are
+    /// labelled. Nothing else would label them: BGP already holds its
+    /// block, so no grant comes, and the transit flags have not changed.
+    #[tokio::test]
+    async fn room_returning_labels_transit_rows_a_full_range_left_unlabelled() {
+        let (mut bgp, mut rx) = fresh_bgp_observed();
+        let space = full_label_space(&mut bgp);
+        let addr = "10.0.0.2";
+        setup_vpnv4_peer(&mut bgp, addr, "64512");
+        config_next_hop_self(&mut bgp, arg_words(&[addr, "vpnv4", "true"]), ConfigOp::Set).unwrap();
+        bgp.reconcile_transit_labels(false);
+
+        let rd = RouteDistinguisher::default();
+        bgp.shard.handle(vpnv4_update(rd, "10.1.0.0/30"));
+        assert_eq!(local_label_of(&bgp, rd, "10.1.0.0/30"), Some(None));
+        assert_eq!(
+            space.lock().take_starved(),
+            [bgp.ctx.rib.proto_id()].into(),
+            "the RIB is to tell BGP when room returns"
+        );
+        let _ = drain_ilm(&mut rx);
+
+        space.lock().release("isis", 2000, 128);
+        bgp.process_rib_msg(crate::rib::api::RibRx::LocalLabelsFreed);
+        assert_eq!(local_label_of(&bgp, rd, "10.1.0.0/30"), Some(Some(2000)));
+        assert_eq!(drain_ilm(&mut rx), vec![(false, 2000)]);
+
+        // Not starved: being told again changes nothing.
+        bgp.process_rib_msg(crate::rib::api::RibRx::LocalLabelsFreed);
+        assert!(drain_ilm(&mut rx).is_empty());
     }
 
     /// AS 64512 with one `label-v4` neighbor; `remote_as` picks iBGP/eBGP.

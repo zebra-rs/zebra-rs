@@ -604,6 +604,14 @@ impl LabelSpace {
             .collect()
     }
 
+    /// `owner` found no room for what it asked (a BGP label chunk with
+    /// the dynamic range full): it is told at the next release, or when a
+    /// commit or a block change may have made room (`take_starved`, sent
+    /// as `RibRx::LocalLabelsFreed`).
+    pub fn starve(&mut self, owner: ProtoId) {
+        self.starved.insert(owner);
+    }
+
     /// The owners whose pool found no free label since the last call:
     /// labels have been freed, so they can try again.
     pub fn take_starved(&mut self) -> BTreeSet<ProtoId> {
