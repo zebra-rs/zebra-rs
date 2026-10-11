@@ -10,7 +10,7 @@
 //! install. The shard task owns the data-structure operations it now
 //! holds state for — Adj-RIB-In, attribute interning, the sharded
 //! Loc-RIB tables, best-path selection, and the per-route label
-//! sub-block.
+//! chunks.
 //!
 //! So a received route flows: main parses + checks + runs policy-in →
 //! sends the shard a [`ShardMsg::UpdateV4`] (pre-policy attr for
@@ -114,7 +114,7 @@ pub enum ShardMsg {
 
     /// A received IPv4 / IPv6 Labeled-Unicast (SAFI 4) route. Like v6
     /// there is no inbound policy; additionally the shard mints a
-    /// per-prefix *local* label (from its own sub-block) so a
+    /// per-prefix *local* label (from its own label chunks) so a
     /// next-hop-self re-advertisement forwards via a swap ILM. Main
     /// has already stamped the MP_REACH next-hop onto `attr`.
     #[allow(dead_code)] // reserved: LU isn't pooled (synchronous shard at every N)

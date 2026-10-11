@@ -11,6 +11,11 @@ Feature: A VPNv4 route reflector programs no MPLS transit label
   moment the knob is turned on, and must drop them again when it is
   turned off.
 
+  The transit labels come from a chunk of the label space BGP takes for
+  them on the spot, 128 labels first, apart from the 1024-label block its
+  VRFs draw from; a chunk whose labels are all free goes back
+  (docs/design/mpls-label-allocation.md §5.2).
+
   Test Topology:
   ```
   ┌───────────────────────────────────────────────┐
@@ -56,6 +61,9 @@ Feature: A VPNv4 route reflector programs no MPLS transit label
     # The reflector holds every VPN route yet owns no label: nothing it
     # advertised carries a label of its own, so there is nothing to swap.
     And mpls ilm in namespace "rr" should be empty
+    # Nor a chunk: BGP holds only its block.
+    And show command "show mpls label table" in namespace "rr" should eventually contain "24000-25023    bgp     block           held"
+    And show command "show mpls label table" in namespace "rr" should not contain "25024"
 
   Scenario: next-hop-self turns the reflector into a transit and labels the routes it already holds
     Given the test topology exists
@@ -64,6 +72,9 @@ Feature: A VPNv4 route reflector programs no MPLS transit label
     # The rows learned before the knob was set are labelled and their
     # swap ILMs installed ...
     Then mpls ilm in namespace "rr" should not be empty
+    # ... from the 128-label chunk BGP took for them, past its block ...
+    And mpls ilm in namespace "rr" should contain label 25024
+    And show command "show mpls label table" in namespace "rr" should contain "25024-25151    bgp     block           held"
     # ... and pe2 is re-advertised pe1's prefix with the reflector as
     # next-hop, carrying the label that ILM swaps.
     And show command "show ip route vrf vrf-cust" in namespace "pe2" should eventually contain "192.168.0.1"
@@ -74,6 +85,10 @@ Feature: A VPNv4 route reflector programs no MPLS transit label
     And I wait 5 seconds for BGP to operate
     Then mpls ilm in namespace "rr" should be empty
     And show command "show ip route vrf vrf-cust" in namespace "pe2" should eventually contain "192.168.0.2"
+    # Every label in the chunk is free, so the chunk goes back; the
+    # block stays.
+    And show command "show mpls label table" in namespace "rr" should eventually not contain "25024-25151"
+    And show command "show mpls label table" in namespace "rr" should contain "24000-25023    bgp     block           held"
 
   Scenario: Teardown topology
     Given the test topology exists

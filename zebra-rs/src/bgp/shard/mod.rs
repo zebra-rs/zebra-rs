@@ -22,9 +22,10 @@ use ipnet::{Ipv4Net, Ipv6Net};
 use bgp_packet::{Afi, BgpAttr, Safi};
 
 use super::adj_rib::ShardAdjIn;
+use super::label_chunks::LabelChunks;
 use super::route::{BgpRib, LocalRibTable};
 use super::store::BgpAttrStore;
-use super::vrf::VrfLabelAllocator;
+use crate::spf::label_block::LabelBlock;
 
 pub mod msg;
 pub use msg::{ShardMsg, ShardOut};
@@ -32,28 +33,18 @@ pub use msg::{ShardMsg, ShardOut};
 pub mod dispatch;
 pub mod pool;
 
-/// Labels a shard carves from the central allocator per refill (RIB
-/// sharding B.2). A shard mints local labels in the per-route hot
-/// path, so it can't ask the main task per label; it draws a chunk
-/// up front and refills when spent. The 20-bit space is vast, so the
-/// chunk only trades a little frontier headroom for far fewer carves.
-const SHARD_LABEL_CHUNK: u32 = 1024;
-
 /// A shard's local MPLS label allocator for the families that mint a
 /// per-route *local* label in the hot path: Labeled-Unicast (v4/v6,
-/// next-hop-self) and the Inter-AS Option B VPNv4 transit case. The
-/// pool starts empty and is filled by carving sub-ranges from the
-/// central [`VrfLabelAllocator`] on `Bgp` (which still serves the
-/// per-VRF-spawn labels); a carve leaves the central frontier, so the
-/// two never collide. This is the inline (N=1) form of the plan's
-/// per-shard sub-block; at B.3 the carve becomes a `LabelBlockLow`
-/// request to the main task.
-#[derive(Debug)]
+/// next-hop-self) and the Inter-AS Option B VPNv4/v6 transit case.
+/// Labels come from chunks of the RIB's label space
+/// ([`LabelChunks`], docs/design/mpls-label-allocation.md §5.2), taken
+/// synchronously, so a shard mints without asking the main task. An
+/// allocator with no label space (pool workers, per-VRF shards) mints
+/// nothing.
+#[derive(Debug, Default)]
 pub struct ShardLabelPool {
-    /// Sub-block allocator — seeded empty, grown by [`carve`] refills.
-    ///
-    /// [`carve`]: VrfLabelAllocator::carve
-    pool: VrfLabelAllocator,
+    /// Chunks of the label space, and the labels handed out in them.
+    pool: LabelChunks,
     /// Per-prefix IPv4 / IPv6 Labeled-Unicast local labels
     /// (allocate-on-first-use, freed on withdraw).
     lu_v4: BTreeMap<Ipv4Net, u32>,
@@ -66,74 +57,66 @@ pub struct ShardLabelPool {
     vpn_v6: BTreeMap<(RouteDistinguisher, Ipv6Net), u32>,
 }
 
-impl Default for ShardLabelPool {
-    fn default() -> Self {
+impl ShardLabelPool {
+    /// A pool minting from `pool`'s chunks.
+    pub fn new(pool: LabelChunks) -> Self {
         Self {
-            pool: VrfLabelAllocator::empty(),
-            lu_v4: BTreeMap::new(),
-            lu_v6: BTreeMap::new(),
-            vpn_v4: BTreeMap::new(),
-            vpn_v6: BTreeMap::new(),
+            pool,
+            ..Self::default()
         }
     }
-}
 
-impl ShardLabelPool {
-    /// Allocate one label, refilling the sub-block from `central`
-    /// (a [`carve`](VrfLabelAllocator::carve)) when it runs dry.
-    /// `None` if `central` is absent or can't grant more.
-    fn alloc(&mut self, central: Option<&mut VrfLabelAllocator>) -> Option<u32> {
-        if let Some(label) = self.pool.alloc() {
-            return Some(label);
-        }
-        let central = central?;
-        let (start, end) = central.carve(SHARD_LABEL_CHUNK)?;
-        self.pool.extend(start, end);
-        self.pool.alloc()
+    /// The chunks whose labels are all free, for the caller to return to
+    /// the RIB behind its ILM deletions for them
+    /// ([`LabelChunks::take_drained`]).
+    pub fn take_drained(&mut self) -> Vec<LabelBlock> {
+        self.pool.take_drained()
+    }
+
+    /// The chunks held, for tests.
+    #[cfg(test)]
+    pub fn chunks(&self) -> Vec<LabelBlock> {
+        self.pool.chunks()
+    }
+
+    /// A pool over a label space of its own whose dynamic range starts at
+    /// `first`, for tests.
+    #[cfg(test)]
+    pub fn with_test_space(first: u32) -> Self {
+        let space = crate::rib::label_space::SharedLabelSpace::default();
+        space.lock().set_dynamic(first, first + 99_999);
+        Self::new(LabelChunks::new(space, "bgp"))
     }
 
     /// Local label for an IPv4 LU prefix, allocating on first use.
-    /// `None` if the dynamic pool is exhausted (the caller advertises
-    /// the received label as a fallback until a block is granted).
-    pub fn label_lu_v4(
-        &mut self,
-        central: Option<&mut VrfLabelAllocator>,
-        prefix: Ipv4Net,
-    ) -> Option<u32> {
+    /// `None` if no label can be had (the caller advertises the received
+    /// label as a fallback).
+    pub fn label_lu_v4(&mut self, prefix: Ipv4Net) -> Option<u32> {
         if let Some(l) = self.lu_v4.get(&prefix) {
             return Some(*l);
         }
-        let label = self.alloc(central)?;
+        let label = self.pool.alloc()?;
         self.lu_v4.insert(prefix, label);
         Some(label)
     }
 
     /// Local label for an IPv6 LU prefix; mirrors [`label_lu_v4`](Self::label_lu_v4).
-    pub fn label_lu_v6(
-        &mut self,
-        central: Option<&mut VrfLabelAllocator>,
-        prefix: Ipv6Net,
-    ) -> Option<u32> {
+    pub fn label_lu_v6(&mut self, prefix: Ipv6Net) -> Option<u32> {
         if let Some(l) = self.lu_v6.get(&prefix) {
             return Some(*l);
         }
-        let label = self.alloc(central)?;
+        let label = self.pool.alloc()?;
         self.lu_v6.insert(prefix, label);
         Some(label)
     }
 
     /// Local label for a received VPNv4 `(RD, prefix)`, allocating on
     /// first use (Inter-AS Option B transit).
-    pub fn label_vpn_v4(
-        &mut self,
-        central: Option<&mut VrfLabelAllocator>,
-        rd: RouteDistinguisher,
-        prefix: Ipv4Net,
-    ) -> Option<u32> {
+    pub fn label_vpn_v4(&mut self, rd: RouteDistinguisher, prefix: Ipv4Net) -> Option<u32> {
         if let Some(l) = self.vpn_v4.get(&(rd, prefix)) {
             return Some(*l);
         }
-        let label = self.alloc(central)?;
+        let label = self.pool.alloc()?;
         self.vpn_v4.insert((rd, prefix), label);
         Some(label)
     }
@@ -160,16 +143,11 @@ impl ShardLabelPool {
         Some(label)
     }
 
-    pub fn label_vpn_v6(
-        &mut self,
-        central: Option<&mut VrfLabelAllocator>,
-        rd: RouteDistinguisher,
-        prefix: Ipv6Net,
-    ) -> Option<u32> {
+    pub fn label_vpn_v6(&mut self, rd: RouteDistinguisher, prefix: Ipv6Net) -> Option<u32> {
         if let Some(l) = self.vpn_v6.get(&(rd, prefix)) {
             return Some(*l);
         }
-        let label = self.alloc(central)?;
+        let label = self.pool.alloc()?;
         self.vpn_v6.insert((rd, prefix), label);
         Some(label)
     }
@@ -227,9 +205,10 @@ pub struct BgpShard {
 
     /// Per-route local-label allocator + caches for the sharded
     /// families that mint labels in the hot path (LU v4/v6, VPNv4
-    /// transit). Draws from a sub-block carved out of the central
-    /// [`VrfLabelAllocator`] on `Bgp`. Empty on per-VRF shards — the
-    /// LU/VPN label path is global-instance-only today.
+    /// transit). Draws from chunks of the RIB's label space on the
+    /// global instance's inline shard only; per-VRF shards and pool
+    /// workers have no label space — the LU/VPN label path is
+    /// global-instance-only today.
     pub labels: ShardLabelPool,
     /// Whether this instance re-advertises received VPNv4 routes with the
     /// next-hop rewritten to itself on at least one peer — eBGP without
@@ -241,8 +220,8 @@ pub struct BgpShard {
     /// MPLS data plane at all. Derived by main from the peer config at
     /// `CommitEnd` (`Bgp::reconcile_transit_labels`), which also brings
     /// the rows already in the table in step when the value flips. Only
-    /// the inline (N=1) shard is ever set: pool workers are handed no
-    /// central allocator (`pool.rs`) and cannot mint regardless.
+    /// the inline (N=1) shard is ever set: pool workers have no label
+    /// space (`pool.rs`) and cannot mint regardless.
     pub vpn_v4_transit: bool,
     /// [`Self::vpn_v4_transit`] for VPNv6: gates the per-`(RD, prefix)`
     /// mint in `handle_update_v6` and the VPNv6 arm of
@@ -479,6 +458,7 @@ impl BgpShard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rib::label_space::SharedLabelSpace;
 
     #[test]
     fn intern_dedups_within_shard_store() {
@@ -493,66 +473,69 @@ mod tests {
         s.parse().unwrap()
     }
 
-    #[test]
-    fn label_pool_refills_from_central_then_dedups() {
-        let mut central = VrfLabelAllocator::bounded(1000, 1_000_000);
-        let mut pool = ShardLabelPool::default();
-        // First alloc carves a chunk from central and hands out its start.
-        let l1 = pool
-            .label_lu_v4(Some(&mut central), v4("10.0.0.0/24"))
-            .unwrap();
-        assert_eq!(l1, 1000);
-        // Same prefix → cache hit, same label.
-        assert_eq!(
-            pool.label_lu_v4(Some(&mut central), v4("10.0.0.0/24")),
-            Some(1000)
-        );
-        // New prefix → next label from the already-carved chunk (no re-carve).
-        assert_eq!(
-            pool.label_lu_v4(Some(&mut central), v4("10.0.1.0/24")),
-            Some(1001)
-        );
+    /// A pool over a label space, as `Bgp::new` builds the global one.
+    fn pool_with_space() -> (SharedLabelSpace, ShardLabelPool) {
+        let space = SharedLabelSpace::default();
+        let pool = ShardLabelPool::new(LabelChunks::new(space.clone(), "bgp"));
+        (space, pool)
     }
 
     #[test]
-    fn label_pool_and_central_never_collide() {
-        let mut central = VrfLabelAllocator::bounded(1000, 1_000_000);
-        let mut pool = ShardLabelPool::default();
-        // Central mints a per-VRF-spawn label; the shard mints a route
-        // label — disjoint, because the carve advanced central's frontier.
-        let vrf_label = central.alloc().unwrap();
-        let route_label = pool
-            .label_lu_v4(Some(&mut central), v4("10.0.0.0/24"))
-            .unwrap();
-        assert_eq!(vrf_label, 1000);
-        assert_eq!(route_label, 1001, "carved from the frontier after 1000");
-        // Central resumes past the whole carved chunk.
-        assert_eq!(central.alloc(), Some(1001 + SHARD_LABEL_CHUNK));
+    fn label_pool_mints_from_a_chunk_then_dedups() {
+        let (space, mut pool) = pool_with_space();
+        // The first label takes a 128-label chunk from the label space.
+        assert_eq!(pool.label_lu_v4(v4("10.0.0.0/24")), Some(24000));
+        assert_eq!(
+            space.lock().held_blocks(),
+            vec![(LabelBlock::new(24000, 128), "bgp".to_string())]
+        );
+        // Same prefix → cache hit, same label.
+        assert_eq!(pool.label_lu_v4(v4("10.0.0.0/24")), Some(24000));
+        // New prefix → next label from the chunk already held.
+        assert_eq!(pool.label_lu_v4(v4("10.0.1.0/24")), Some(24001));
+        assert_eq!(pool.chunks(), vec![LabelBlock::new(24000, 128)]);
+    }
+
+    #[test]
+    fn label_pool_and_other_holders_never_collide() {
+        let (space, mut pool) = pool_with_space();
+        // Another holder (the main task's block, an IGP's chunk) takes
+        // labels first; the shard's chunk comes after them.
+        let other = space.lock().alloc("isis", 1024).unwrap();
+        assert_eq!(other.start, 24000);
+        assert_eq!(pool.label_lu_v4(v4("10.0.0.0/24")), Some(25024));
     }
 
     #[test]
     fn label_pool_free_returns_label_for_reuse() {
-        let mut central = VrfLabelAllocator::bounded(1000, 1_000_000);
-        let mut pool = ShardLabelPool::default();
-        let l = pool
-            .label_lu_v4(Some(&mut central), v4("10.0.0.0/24"))
-            .unwrap();
+        let (_space, mut pool) = pool_with_space();
+        let l = pool.label_lu_v4(v4("10.0.0.0/24")).unwrap();
+        pool.label_lu_v4(v4("10.0.1.0/24")).unwrap();
         assert_eq!(pool.free_lu_v4(v4("10.0.0.0/24")), Some(l));
-        // The freed label comes back out of the shard pool — no central
-        // touch needed (pass None to prove it).
         assert_eq!(
-            pool.label_lu_v4(None, v4("10.9.9.0/24")),
+            pool.label_lu_v4(v4("10.9.9.0/24")),
             Some(l),
-            "freed label reused from the shard sub-block"
+            "freed label reused from the chunk"
         );
     }
 
     #[test]
-    fn label_pool_without_central_is_none_when_empty() {
+    fn label_pool_hands_back_a_drained_chunk() {
+        let (_space, mut pool) = pool_with_space();
+        let l = pool.label_vpn_v4(RouteDistinguisher::default(), v4("10.0.0.0/24"));
+        assert_eq!(l, Some(24000));
+        assert!(pool.take_drained().is_empty(), "label in use");
+        pool.free_vpn_v4(RouteDistinguisher::default(), v4("10.0.0.0/24"));
+        assert_eq!(pool.take_drained(), vec![LabelBlock::new(24000, 128)]);
+        assert!(pool.chunks().is_empty());
+    }
+
+    #[test]
+    fn label_pool_without_space_is_none() {
         let mut pool = ShardLabelPool::default();
-        // Empty sub-block and no central to carve from → no label (the
+        // No label space (pool worker, per-VRF shard) → no label (the
         // caller falls back to advertising the received label).
-        assert_eq!(pool.label_lu_v4(None, v4("10.0.0.0/24")), None);
+        assert_eq!(pool.label_lu_v4(v4("10.0.0.0/24")), None);
     }
 
     #[test]

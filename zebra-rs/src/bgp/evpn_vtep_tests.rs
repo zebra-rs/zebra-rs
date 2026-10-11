@@ -216,7 +216,6 @@ async fn reflected_macip_keeps_label2() {
         nexthop_cache: None,
         vrf_transport_v4: None,
         vrf_transport_v6: None,
-        central_label_alloc: None,
         as_sets_withdraw: bgp.as_sets_withdraw,
     };
     route_evpn_update(
@@ -446,7 +445,6 @@ async fn stale_remote_route_does_not_override_a_local_mac() {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: bgp.as_sets_withdraw,
         };
         route_evpn_update(
@@ -518,7 +516,6 @@ fn receive_macip(
         nexthop_cache: None,
         vrf_transport_v4: None,
         vrf_transport_v6: None,
-        central_label_alloc: None,
         as_sets_withdraw: bgp.as_sets_withdraw,
     };
     route_evpn_update(

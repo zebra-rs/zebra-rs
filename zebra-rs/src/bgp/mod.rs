@@ -50,6 +50,8 @@ pub use route::*;
 
 pub mod shard;
 
+pub mod label_chunks;
+
 pub mod nht;
 
 pub mod flowspec;

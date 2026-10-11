@@ -1682,7 +1682,6 @@ impl BgpVrf {
             nexthop_cache: None,
             vrf_transport_v4: Some(&self.transport_v4),
             vrf_transport_v6: Some(&self.transport_v6),
-            central_label_alloc: None,
             as_sets_withdraw: true,
         };
         match direction {
@@ -2152,7 +2151,6 @@ impl BgpVrf {
                     nexthop_cache: None,
                     vrf_transport_v4: Some(&self.transport_v4),
                     vrf_transport_v6: Some(&self.transport_v6),
-                    central_label_alloc: None,
                     as_sets_withdraw: true,
                 };
                 // Per-VRF tasks don't drive the global shard pool (their
@@ -2455,7 +2453,6 @@ impl BgpVrf {
             nexthop_cache: None,
             vrf_transport_v4: Some(&self.transport_v4),
             vrf_transport_v6: Some(&self.transport_v6),
-            central_label_alloc: None,
             as_sets_withdraw: true,
         };
         super::super::route::route_advertise_to_peers(
@@ -2563,7 +2560,6 @@ impl BgpVrf {
             nexthop_cache: None,
             vrf_transport_v4: Some(&self.transport_v4),
             vrf_transport_v6: Some(&self.transport_v6),
-            central_label_alloc: None,
             as_sets_withdraw: true,
         };
         super::super::route::route_advertise_to_peers(
@@ -2717,7 +2713,6 @@ impl BgpVrf {
             nexthop_cache: None,
             vrf_transport_v4: Some(&self.transport_v4),
             vrf_transport_v6: Some(&self.transport_v6),
-            central_label_alloc: None,
             as_sets_withdraw: true,
         };
         super::super::route::route_advertise_to_peers_v6(
@@ -2802,7 +2797,6 @@ impl BgpVrf {
             nexthop_cache: None,
             vrf_transport_v4: Some(&self.transport_v4),
             vrf_transport_v6: Some(&self.transport_v6),
-            central_label_alloc: None,
             as_sets_withdraw: true,
         };
         super::super::route::route_advertise_to_peers_v6(
@@ -2879,7 +2873,6 @@ impl BgpVrf {
             nexthop_cache: None,
             vrf_transport_v4: Some(&self.transport_v4),
             vrf_transport_v6: Some(&self.transport_v6),
-            central_label_alloc: None,
             as_sets_withdraw: true,
         };
         super::super::route::route_advertise_to_peers(
@@ -2916,7 +2909,6 @@ impl BgpVrf {
             nexthop_cache: None,
             vrf_transport_v4: Some(&self.transport_v4),
             vrf_transport_v6: Some(&self.transport_v6),
-            central_label_alloc: None,
             as_sets_withdraw: true,
         };
         super::super::route::route_advertise_to_peers_v6(
@@ -3429,7 +3421,6 @@ impl BgpVrf {
             nexthop_cache: None,
             vrf_transport_v4: Some(&self.transport_v4),
             vrf_transport_v6: Some(&self.transport_v6),
-            central_label_alloc: None,
             as_sets_withdraw: true,
         };
         // Per-VRF tasks don't drive the global shard pool (their RIB is
@@ -5907,26 +5898,23 @@ mod tests {
             nexthop: Some(BgpNexthop::Ipv4("10.0.0.2".parse().unwrap())),
             ..Default::default()
         };
-        vrf.shard.handle(
-            ShardMsg::UpdateV4(ShardUpdateV4 {
-                ident: peer_idx,
-                rd: None,
-                nlri: Ipv4Nlri { id: 0, prefix },
-                peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
-                typ: BgpRibType::EBGP,
-                from_client: false,
-                attr,
-                label: None,
-                nexthop: None,
-                enhe_egress: None,
-                stale: false,
-                nexthop_reachable: true,
-                vrf_transit_only: false,
-                decision: None,
-                compute_policy: false,
-            }),
-            None,
-        );
+        vrf.shard.handle(ShardMsg::UpdateV4(ShardUpdateV4 {
+            ident: peer_idx,
+            rd: None,
+            nlri: Ipv4Nlri { id: 0, prefix },
+            peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+            typ: BgpRibType::EBGP,
+            from_client: false,
+            attr,
+            label: None,
+            nexthop: None,
+            enhe_egress: None,
+            stale: false,
+            nexthop_reachable: true,
+            vrf_transit_only: false,
+            decision: None,
+            compute_policy: false,
+        }));
         assert_eq!(
             vrf.shard.adj_in(peer_idx).unwrap().v4.0.len(),
             1,
@@ -6034,26 +6022,23 @@ mod tests {
             nexthop: Some(BgpNexthop::Ipv4("10.0.0.2".parse().unwrap())),
             ..Default::default()
         };
-        vrf.shard.handle(
-            ShardMsg::UpdateV4(ShardUpdateV4 {
-                ident: peer_idx,
-                rd: None,
-                nlri: Ipv4Nlri { id: 0, prefix },
-                peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
-                typ: BgpRibType::EBGP,
-                from_client: false,
-                attr,
-                label: None,
-                nexthop: None,
-                enhe_egress: None,
-                stale: false,
-                nexthop_reachable: true,
-                vrf_transit_only: false,
-                decision: None,
-                compute_policy: false,
-            }),
-            None,
-        );
+        vrf.shard.handle(ShardMsg::UpdateV4(ShardUpdateV4 {
+            ident: peer_idx,
+            rd: None,
+            nlri: Ipv4Nlri { id: 0, prefix },
+            peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+            typ: BgpRibType::EBGP,
+            from_client: false,
+            attr,
+            label: None,
+            nexthop: None,
+            enhe_egress: None,
+            stale: false,
+            nexthop_reachable: true,
+            vrf_transit_only: false,
+            decision: None,
+            compute_policy: false,
+        }));
 
         // Resolve the inbound set to PERMIT so the route lands in Loc-RIB
         // (the accepted-and-exported starting state).

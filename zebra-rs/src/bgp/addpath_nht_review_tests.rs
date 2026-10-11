@@ -163,7 +163,6 @@ fn split(bgp: &mut Bgp) -> (BgpTop<'_>, &mut PeerMap) {
             nexthop_cache: Some(&mut bgp.nexthop_cache),
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: bgp.as_sets_withdraw,
         },
         &mut bgp.peers,
@@ -672,14 +671,11 @@ async fn v4_sharded_non_best_flip_reaches_addpath_neighbors_and_the_late_dump() 
     assert_eq!(fam.held(&bgp, c), vec![id_a, id_b]);
     let _ = withdrawn_v4(&mut rx);
     let flip = |worker: &mut BgpShard, bgp: &mut Bgp, reachable| {
-        let outs = worker.handle(
-            ShardMsg::NexthopReachableBatchV4 {
-                nlris: vec![Ipv4Nlri { id: 0, prefix }],
-                nh: fam.nexthop(2).parse().unwrap(),
-                reachable,
-            },
-            None,
-        );
+        let outs = worker.handle(ShardMsg::NexthopReachableBatchV4 {
+            nlris: vec![Ipv4Nlri { id: 0, prefix }],
+            nh: fam.nexthop(2).parse().unwrap(),
+            reachable,
+        });
         let (mut top, peers) = split(bgp);
         route_apply_bestpath_v4_batch(&mut top, peers, outs);
     };
@@ -739,14 +735,11 @@ async fn v4_sharded_flip_under_suppress_fib_pending_withdraws_now_and_releases_l
     fam.dump(&mut bgp, c);
     assert_eq!(fam.held(&bgp, c), vec![id_a, id_b]);
     let flip = |worker: &mut BgpShard, bgp: &mut Bgp, reachable| {
-        let outs = worker.handle(
-            ShardMsg::NexthopReachableBatchV4 {
-                nlris: vec![Ipv4Nlri { id: 0, prefix }],
-                nh: fam.nexthop(2).parse().unwrap(),
-                reachable,
-            },
-            None,
-        );
+        let outs = worker.handle(ShardMsg::NexthopReachableBatchV4 {
+            nlris: vec![Ipv4Nlri { id: 0, prefix }],
+            nh: fam.nexthop(2).parse().unwrap(),
+            reachable,
+        });
         let (mut top, peers) = split(bgp);
         route_apply_bestpath_v4_batch(&mut top, peers, outs);
     };
@@ -908,15 +901,12 @@ async fn v4_sharded_withdraw_under_suppress_fib_pending_reaches_addpath_neighbor
     fam.dump(&mut bgp, c);
     assert_eq!(fam.held(&bgp, c), vec![id_a, id_b]);
 
-    let outs = worker.handle(
-        ShardMsg::WithdrawV4 {
-            ident: b,
-            rd: None,
-            nlri: Ipv4Nlri { id: 0, prefix },
-            rib_in: false,
-        },
-        None,
-    );
+    let outs = worker.handle(ShardMsg::WithdrawV4 {
+        ident: b,
+        rd: None,
+        nlri: Ipv4Nlri { id: 0, prefix },
+        rib_in: false,
+    });
     {
         let (mut top, peers) = split(&mut bgp);
         route_apply_bestpath_v4_batch(&mut top, peers, outs);

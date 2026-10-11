@@ -420,7 +420,6 @@ pub(super) fn remove_peer_full(bgp: &mut Bgp, addr: IpAddr) -> Option<()> {
         nexthop_cache: None,
         vrf_transport_v4: None,
         vrf_transport_v6: None,
-        central_label_alloc: None,
         as_sets_withdraw: bgp.as_sets_withdraw,
     };
     route_clean(peer_idx, &mut bgp_ref, &mut bgp.peers, bgp.shards.as_ref());
@@ -11301,10 +11300,12 @@ mod transit_label_tests {
     use tokio::sync::mpsc;
 
     use super::*;
+    use crate::bgp::label_chunks::LabelChunks;
     use crate::bgp::route::BgpRibType;
+    use crate::bgp::shard::ShardLabelPool;
     use crate::bgp::shard::ShardMsg;
     use crate::bgp::shard::msg::{LuNlri, ShardUpdateLu, ShardUpdateV4, ShardUpdateV6};
-    use crate::bgp::vrf::VrfLabelAllocator;
+    use crate::rib::label_space::SharedLabelSpace;
 
     const VPNV4: AfiSafi = AfiSafi {
         afi: Afi::Ip,
@@ -11495,7 +11496,7 @@ mod transit_label_tests {
         let (mut bgp, mut rx) = fresh_bgp_observed();
         let addr = "10.0.0.2";
         setup_vpnv6_peer(&mut bgp, addr, "64512");
-        bgp.vrf_label_alloc = Some(VrfLabelAllocator::bounded(1000, 5000));
+        bgp.shard.labels = ShardLabelPool::with_test_space(1000);
         bgp.reconcile_transit_labels(false);
         assert!(
             !bgp.transit_needed(VPNV6),
@@ -11505,10 +11506,7 @@ mod transit_label_tests {
 
         // Reflected route: no transit label, no ILM traffic.
         let rd = RouteDistinguisher::default();
-        bgp.shard.handle(
-            vpnv6_update(rd, "2001:db8:1::/64"),
-            bgp.vrf_label_alloc.as_mut(),
-        );
+        bgp.shard.handle(vpnv6_update(rd, "2001:db8:1::/64"));
         assert_eq!(local_label_of_v6(&bgp, rd, "2001:db8:1::/64"), Some(None));
         assert!(
             drain_ilm(&mut rx).is_empty(),
@@ -11531,10 +11529,7 @@ mod transit_label_tests {
         assert_eq!(drain_ilm(&mut rx), vec![(false, 1000)]);
 
         // A route arriving while transit is on mints at receive time.
-        bgp.shard.handle(
-            vpnv6_update(rd, "2001:db8:2::/64"),
-            bgp.vrf_label_alloc.as_mut(),
-        );
+        bgp.shard.handle(vpnv6_update(rd, "2001:db8:2::/64"));
         assert_eq!(
             local_label_of_v6(&bgp, rd, "2001:db8:2::/64"),
             Some(Some(1001)),
@@ -11615,14 +11610,12 @@ mod transit_label_tests {
                 .established_addpath_idents(Afi::Ip6, Safi::MplsVpn),
             vec![ident]
         );
-        bgp.vrf_label_alloc = Some(VrfLabelAllocator::bounded(1000, 5000));
+        bgp.shard.labels = ShardLabelPool::with_test_space(1000);
 
         // A row from another PE (slot 9), held while the reflector is plain.
         let rd = RouteDistinguisher::default();
-        bgp.shard.handle(
-            vpnv6_update_from(9, rd, "2001:db8:1::/64"),
-            bgp.vrf_label_alloc.as_mut(),
-        );
+        bgp.shard
+            .handle(vpnv6_update_from(9, rd, "2001:db8:1::/64"));
 
         // Transit on: the AddPath member is refreshed with our label behind
         // our next-hop ...
@@ -11716,13 +11709,11 @@ mod transit_label_tests {
 
         // A is a transit from the start; the row is labelled at receive.
         config_next_hop_self(&mut bgp, arg_words(&[a, "vpnv6", "true"]), ConfigOp::Set).unwrap();
-        bgp.vrf_label_alloc = Some(VrfLabelAllocator::bounded(1000, 5000));
+        bgp.shard.labels = ShardLabelPool::with_test_space(1000);
         bgp.reconcile_transit_labels(false);
         let rd = RouteDistinguisher::default();
-        bgp.shard.handle(
-            vpnv6_update_from(9, rd, "2001:db8:1::/64"),
-            bgp.vrf_label_alloc.as_mut(),
-        );
+        bgp.shard
+            .handle(vpnv6_update_from(9, rd, "2001:db8:1::/64"));
         for ident in bgp.peers.idents() {
             bgp.peers.get_mut_by_idx(ident).unwrap().flush_vpnv6();
         }
@@ -11810,13 +11801,11 @@ mod transit_label_tests {
 
         // A is a transit from the start; the row is labelled at receive.
         config_next_hop_self(&mut bgp, arg_words(&[a, "vpnv6", "true"]), ConfigOp::Set).unwrap();
-        bgp.vrf_label_alloc = Some(VrfLabelAllocator::bounded(1000, 5000));
+        bgp.shard.labels = ShardLabelPool::with_test_space(1000);
         bgp.reconcile_transit_labels(false);
         let rd = RouteDistinguisher::default();
-        bgp.shard.handle(
-            vpnv6_update_from(9, rd, "2001:db8:1::/64"),
-            bgp.vrf_label_alloc.as_mut(),
-        );
+        bgp.shard
+            .handle(vpnv6_update_from(9, rd, "2001:db8:1::/64"));
         for ident in bgp.peers.idents() {
             bgp.peers.get_mut_by_idx(ident).unwrap().flush_vpnv6();
         }
@@ -11890,14 +11879,12 @@ mod transit_label_tests {
 
         // B is a transit from the start; the row is labelled at receive.
         config_next_hop_self(&mut bgp, arg_words(&[b, "vpnv6", "true"]), ConfigOp::Set).unwrap();
-        bgp.vrf_label_alloc = Some(VrfLabelAllocator::bounded(1000, 5000));
+        bgp.shard.labels = ShardLabelPool::with_test_space(1000);
         bgp.reconcile_transit_labels(false);
         assert!(bgp.shard.vpn_v6_transit);
         let rd = RouteDistinguisher::default();
-        bgp.shard.handle(
-            vpnv6_update_from(9, rd, "2001:db8:1::/64"),
-            bgp.vrf_label_alloc.as_mut(),
-        );
+        bgp.shard
+            .handle(vpnv6_update_from(9, rd, "2001:db8:1::/64"));
         assert_eq!(
             local_label_of_v6(&bgp, rd, "2001:db8:1::/64"),
             Some(Some(1000))
@@ -11944,13 +11931,10 @@ mod transit_label_tests {
         let addr = "10.0.0.2";
         setup_vpnv6_peer(&mut bgp, addr, "64512");
         config_next_hop_self(&mut bgp, arg_words(&[addr, "vpnv6", "true"]), ConfigOp::Set).unwrap();
-        bgp.vrf_label_alloc = Some(VrfLabelAllocator::bounded(1000, 5000));
+        bgp.shard.labels = ShardLabelPool::with_test_space(1000);
         bgp.reconcile_transit_labels(false);
         let rd = RouteDistinguisher::default();
-        bgp.shard.handle(
-            vpnv6_update(rd, "2001:db8:1::/64"),
-            bgp.vrf_label_alloc.as_mut(),
-        );
+        bgp.shard.handle(vpnv6_update(rd, "2001:db8:1::/64"));
         assert_eq!(
             local_label_of_v6(&bgp, rd, "2001:db8:1::/64"),
             Some(Some(1000))
@@ -11971,28 +11955,40 @@ mod transit_label_tests {
         );
     }
 
-    /// The VPNv6 twin of `late_label_block_labels_existing_transit_rows`:
-    /// rows received under transit before the dynamic block is bound are
-    /// labelled (and their ILMs reconciled) when the block arrives.
+    /// Give the shard a label space whose dynamic range, 128 labels from
+    /// 2000, another holder has taken whole: no chunk can be had until it
+    /// lets go.
+    fn full_label_space(bgp: &mut Bgp) -> SharedLabelSpace {
+        let space = SharedLabelSpace::default();
+        space.lock().set_dynamic(2000, 2127);
+        space.lock().alloc("isis", 128).expect("the whole range");
+        bgp.shard.labels = ShardLabelPool::new(LabelChunks::new(space.clone(), "bgp"));
+        space
+    }
+
+    /// The VPNv6 twin of
+    /// `forced_reconcile_labels_transit_rows_a_full_range_left_unlabelled`.
     #[tokio::test]
-    async fn late_label_block_labels_existing_vpnv6_transit_rows() {
+    async fn forced_reconcile_labels_vpnv6_transit_rows_a_full_range_left_unlabelled() {
         let (mut bgp, mut rx) = fresh_bgp_observed();
+        let space = full_label_space(&mut bgp);
         let addr = "10.0.0.2";
         setup_vpnv6_peer(&mut bgp, addr, "64512");
         config_next_hop_self(&mut bgp, arg_words(&[addr, "vpnv6", "true"]), ConfigOp::Set).unwrap();
         bgp.reconcile_transit_labels(false);
         assert!(bgp.shard.vpn_v6_transit);
 
-        // Transit on, but no block yet: the receive path cannot mint.
+        // Transit on, but the range is full: the receive path cannot mint.
         let rd = RouteDistinguisher::default();
-        bgp.shard.handle(
-            vpnv6_update(rd, "2001:db8:1::/64"),
-            bgp.vrf_label_alloc.as_mut(),
-        );
+        bgp.shard.handle(vpnv6_update(rd, "2001:db8:1::/64"));
         assert_eq!(local_label_of_v6(&bgp, rd, "2001:db8:1::/64"), Some(None));
         let _ = drain_ilm(&mut rx);
 
-        bgp.vrf_label_alloc = Some(VrfLabelAllocator::bounded(2000, 5000));
+        // Room again: a plain reconcile leaves the row (no flag flipped),
+        // the forced one labels it.
+        space.lock().release("isis", 2000, 128);
+        bgp.reconcile_transit_labels(false);
+        assert_eq!(local_label_of_v6(&bgp, rd, "2001:db8:1::/64"), Some(None));
         bgp.reconcile_transit_labels(true);
         assert_eq!(
             local_label_of_v6(&bgp, rd, "2001:db8:1::/64"),
@@ -12009,16 +12005,10 @@ mod transit_label_tests {
         let addr = "10.0.0.2";
         setup_vpnv6_peer(&mut bgp, addr, "64512");
         config_afi_safi(&mut bgp, arg_words(&[addr, "vpnv4", "true"]), ConfigOp::Set).unwrap();
-        bgp.vrf_label_alloc = Some(VrfLabelAllocator::bounded(1000, 5000));
+        bgp.shard.labels = ShardLabelPool::with_test_space(1000);
         let rd = RouteDistinguisher::default();
-        bgp.shard.handle(
-            vpnv4_update(rd, "10.1.0.0/30"),
-            bgp.vrf_label_alloc.as_mut(),
-        );
-        bgp.shard.handle(
-            vpnv6_update(rd, "2001:db8:1::/64"),
-            bgp.vrf_label_alloc.as_mut(),
-        );
+        bgp.shard.handle(vpnv4_update(rd, "10.1.0.0/30"));
+        bgp.shard.handle(vpnv6_update(rd, "2001:db8:1::/64"));
         let _ = drain_ilm(&mut rx);
 
         // Only the VPNv6 knob: the VPNv6 row is labelled, the VPNv4 row is not.
@@ -12095,17 +12085,14 @@ mod transit_label_tests {
         let (mut bgp, mut rx) = fresh_bgp_observed();
         let addr = "10.0.0.2";
         setup_vpnv4_peer(&mut bgp, addr, "64512");
-        bgp.vrf_label_alloc = Some(VrfLabelAllocator::bounded(1000, 5000));
+        bgp.shard.labels = ShardLabelPool::with_test_space(1000);
         bgp.reconcile_transit_labels(false);
         assert!(!bgp.shard.vpn_v4_transit);
         let _ = drain_ilm(&mut rx);
 
         // Reflected route: no transit label, no ILM traffic.
         let rd = RouteDistinguisher::default();
-        bgp.shard.handle(
-            vpnv4_update(rd, "10.1.0.0/30"),
-            bgp.vrf_label_alloc.as_mut(),
-        );
+        bgp.shard.handle(vpnv4_update(rd, "10.1.0.0/30"));
         assert_eq!(local_label_of(&bgp, rd, "10.1.0.0/30"), Some(None));
         assert!(
             drain_ilm(&mut rx).is_empty(),
@@ -12124,10 +12111,7 @@ mod transit_label_tests {
         assert_eq!(drain_ilm(&mut rx), vec![(false, 1000)]);
 
         // A route arriving while transit is on mints at receive time.
-        bgp.shard.handle(
-            vpnv4_update(rd, "10.2.0.0/30"),
-            bgp.vrf_label_alloc.as_mut(),
-        );
+        bgp.shard.handle(vpnv4_update(rd, "10.2.0.0/30"));
         assert_eq!(local_label_of(&bgp, rd, "10.2.0.0/30"), Some(Some(1001)));
 
         // Back to a plain reflector: both labels released, ILMs torn
@@ -12144,12 +12128,30 @@ mod transit_label_tests {
         assert!(drain_ilm(&mut rx).is_empty());
     }
 
-    /// A label block that arrives after the routes did (the daemon's
-    /// first block request races the first UPDATE) must still label the
-    /// transit rows: `label_block_arrived` re-runs the reconcile with
-    /// `force`.
+    /// The ILM deletions and label-chunk releases sent to the RIB, in
+    /// the order sent.
+    fn drain_label_msgs(
+        rx: &mut mpsc::UnboundedReceiver<crate::rib::client::RibInbound>,
+    ) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(inbound) = rx.try_recv() {
+            match inbound.msg {
+                crate::rib::Message::IlmDel { label, .. } => out.push(format!("del {label}")),
+                crate::rib::Message::LabelBlockRelease { proto, start, size } => {
+                    out.push(format!("release {proto} {start}+{size}"))
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// The shard's transit labels come from a chunk of the RIB's label
+    /// space (`Bgp::new` wires it); once every label in the chunk is
+    /// free, it goes back on the RIB client channel behind the ILM
+    /// deletions for those labels, and not while one is in use.
     #[tokio::test]
-    async fn late_label_block_labels_existing_transit_rows() {
+    async fn a_drained_transit_chunk_goes_back_behind_its_ilm_deletions() {
         let (mut bgp, mut rx) = fresh_bgp_observed();
         let addr = "10.0.0.2";
         setup_vpnv4_peer(&mut bgp, addr, "64512");
@@ -12157,16 +12159,54 @@ mod transit_label_tests {
         bgp.reconcile_transit_labels(false);
         assert!(bgp.shard.vpn_v4_transit);
 
-        // Transit on, but no block yet: the receive path cannot mint.
         let rd = RouteDistinguisher::default();
-        bgp.shard.handle(
-            vpnv4_update(rd, "10.1.0.0/30"),
-            bgp.vrf_label_alloc.as_mut(),
+        bgp.shard.handle(vpnv4_update(rd, "10.1.0.0/30"));
+        assert_eq!(local_label_of(&bgp, rd, "10.1.0.0/30"), Some(Some(24000)));
+        assert_eq!(
+            bgp.rib_subscriber.label_space().lock().held_blocks(),
+            vec![(
+                crate::spf::label_block::LabelBlock::new(24000, 128),
+                "bgp".to_string()
+            )],
+            "a 128-label chunk of the RIB's label space"
         );
+        let _ = drain_label_msgs(&mut rx);
+        bgp.release_drained_label_chunks();
+        assert!(drain_label_msgs(&mut rx).is_empty(), "label 24000 in use");
+
+        config_next_hop_self(&mut bgp, arg_words(&[addr, "vpnv4"]), ConfigOp::Delete).unwrap();
+        bgp.reconcile_transit_labels(false);
+        bgp.release_drained_label_chunks();
+        assert_eq!(
+            drain_label_msgs(&mut rx),
+            vec!["del 24000", "release bgp 24000+128"],
+            "the chunk goes back after its ILM deletion"
+        );
+    }
+
+    /// Transit rows received while the dynamic range was full carry no
+    /// label (the mint returned `None`); a forced reconcile — which
+    /// `label_block_arrived` runs, a grant meaning the range has room —
+    /// labels them once there is room.
+    #[tokio::test]
+    async fn forced_reconcile_labels_transit_rows_a_full_range_left_unlabelled() {
+        let (mut bgp, mut rx) = fresh_bgp_observed();
+        let space = full_label_space(&mut bgp);
+        let addr = "10.0.0.2";
+        setup_vpnv4_peer(&mut bgp, addr, "64512");
+        config_next_hop_self(&mut bgp, arg_words(&[addr, "vpnv4", "true"]), ConfigOp::Set).unwrap();
+        bgp.reconcile_transit_labels(false);
+        assert!(bgp.shard.vpn_v4_transit);
+
+        // Transit on, but the range is full: the receive path cannot mint.
+        let rd = RouteDistinguisher::default();
+        bgp.shard.handle(vpnv4_update(rd, "10.1.0.0/30"));
         assert_eq!(local_label_of(&bgp, rd, "10.1.0.0/30"), Some(None));
         let _ = drain_ilm(&mut rx);
 
-        bgp.vrf_label_alloc = Some(VrfLabelAllocator::bounded(2000, 5000));
+        space.lock().release("isis", 2000, 128);
+        bgp.reconcile_transit_labels(false);
+        assert_eq!(local_label_of(&bgp, rd, "10.1.0.0/30"), Some(None));
         bgp.reconcile_transit_labels(true);
         assert_eq!(local_label_of(&bgp, rd, "10.1.0.0/30"), Some(Some(2000)));
         assert_eq!(drain_ilm(&mut rx), vec![(false, 2000)]);
@@ -12268,13 +12308,12 @@ mod transit_label_tests {
         let (mut bgp, mut rx) = fresh_bgp_observed();
         let addr = "10.0.0.2";
         setup_lu_peer(&mut bgp, addr, "64512");
-        bgp.vrf_label_alloc = Some(VrfLabelAllocator::bounded(3000, 5000));
+        bgp.shard.labels = ShardLabelPool::with_test_space(3000);
         bgp.reconcile_transit_labels(false);
         assert!(!bgp.shard.lu_v4_transit);
         let _ = drain_ilm(&mut rx);
 
-        bgp.shard
-            .handle(lu_update("10.1.0.0/24"), bgp.vrf_label_alloc.as_mut());
+        bgp.shard.handle(lu_update("10.1.0.0/24"));
         assert_eq!(lu_local_label_of(&bgp, "10.1.0.0/24"), Some(None));
         assert!(
             drain_ilm(&mut rx).is_empty(),
@@ -12293,8 +12332,7 @@ mod transit_label_tests {
         assert_eq!(lu_local_label_of(&bgp, "10.1.0.0/24"), Some(Some(3000)));
         assert_eq!(drain_ilm(&mut rx), vec![(false, 3000)]);
 
-        bgp.shard
-            .handle(lu_update("10.2.0.0/24"), bgp.vrf_label_alloc.as_mut());
+        bgp.shard.handle(lu_update("10.2.0.0/24"));
         assert_eq!(lu_local_label_of(&bgp, "10.2.0.0/24"), Some(Some(3001)));
 
         config_next_hop_self(&mut bgp, arg_words(&[addr, "label-v4"]), ConfigOp::Delete).unwrap();

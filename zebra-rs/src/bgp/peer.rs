@@ -2035,16 +2035,6 @@ pub struct BgpTop<'a> {
     /// per-algo (prefix → node End SID) for colour-aware SRv6 H.Encap
     /// steering. `None` in contexts without colour steering (per-VRF).
     pub flex_algo_srv6_routes: Option<&'a super::color_policy::FlexAlgoSrv6Shadow>,
-    /// Central MPLS label allocator (`Bgp::vrf_label_alloc`), borrowed
-    /// for the receive `BgpTop` so the shard can refill its per-route
-    /// label sub-block by [carving][super::vrf::VrfLabelAllocator::carve]
-    /// from it (RIB sharding B.2). `Some` only on the receive path —
-    /// the per-prefix label caches and the sub-block itself live on
-    /// `BgpShard::labels`; this is just the refill source. `None` in
-    /// every advertise / originate / NHT `BgpTop` (self-originated FECs
-    /// advertise implicit-null and need no local label) and on per-VRF
-    /// tasks.
-    pub central_label_alloc: Option<&'a mut super::vrf::VrfLabelAllocator>,
     /// Precomputed global-IPv6 SRv6 export data (`segment-routing srv6
     /// ipv6-unicast`), borrowed from the owning [`super::inst::Bgp`].
     /// `Some` only when origination is enabled and the locator has
@@ -4122,7 +4112,6 @@ pub fn apply_soft_in_peer(bgp: &mut Bgp, peer_idx: usize) {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: bgp.as_sets_withdraw,
         };
         super::route::route_soft_in_peer(
@@ -4184,7 +4173,6 @@ pub fn advertise_top(bgp: &mut Bgp) -> (BgpTop<'_>, &mut PeerMap) {
         nexthop_cache: None,
         vrf_transport_v4: None,
         vrf_transport_v6: None,
-        central_label_alloc: None,
         as_sets_withdraw: bgp.as_sets_withdraw,
     };
     (top, &mut bgp.peers)
@@ -5524,7 +5512,6 @@ mod fsm_removed_slot_tests {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: false,
         };
 
@@ -5866,7 +5853,6 @@ mod adv_timer_phantom_tests {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: false,
         };
 
@@ -5925,7 +5911,6 @@ mod adv_timer_phantom_tests {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: false,
         };
 
