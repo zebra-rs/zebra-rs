@@ -5652,12 +5652,26 @@ impl Bgp {
         }
     }
 
+    /// Label upkeep after each event. A transit label freed while another
+    /// went without, the range full, labels the rows that went without
+    /// now: the RIB sends no word, the chunk staying held. Then drained
+    /// chunks go back (`release_drained_label_chunks`). Both follow the
+    /// event's ILM messages on the RIB client channel, so a freed label's
+    /// `IlmDel` precedes its reuse, and reuse comes first, before a chunk
+    /// it would have kept could go back.
+    pub(super) fn label_chunk_upkeep(&mut self) {
+        if self.shard.labels.take_room() {
+            self.reconcile_transit_labels(true);
+        }
+        self.release_drained_label_chunks();
+    }
+
     /// Return the shard's drained label chunks — every label in them freed
     /// — to the RIB. Sent on the RIB client channel, the one the ILM
     /// deletions for their labels went out on, so the RIB frees a chunk
     /// only behind them: a chunk handed to another holder never meets a
     /// stale swap ILM of ours.
-    pub(super) fn release_drained_label_chunks(&mut self) {
+    fn release_drained_label_chunks(&mut self) {
         for block in self.shard.labels.take_drained() {
             let size = block.end - block.start;
             bgp_label_trace!(
@@ -7531,9 +7545,10 @@ impl Bgp {
             while let Ok(msg) = self.prx.try_recv() {
                 self.process_msg(msg);
             }
-            // Whatever the last messages drained of the shard's label
-            // chunks goes back now, behind their ILM deletions.
-            self.release_drained_label_chunks();
+            // Labels the last messages freed: reused by a transit row that
+            // went without, else their drained chunks go back, behind the
+            // ILM messages.
+            self.label_chunk_upkeep();
             tokio::select! {
                 // `suppress-fib-pending` expiry. A prefix whose ack was
                 // lost must be advertised eventually, and the next

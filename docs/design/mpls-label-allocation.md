@@ -471,7 +471,10 @@ Chunk rules:
   (it may have grown the range), or an SR block changed. BGP then labels
   the transit rows that went without, by a forced transit reconcile:
   their transit flags have not changed, and BGP holding its block already,
-  no grant comes either.
+  no grant comes either. A label BGP frees itself while starved is room
+  the RIB never hears of, its chunk staying held: the allocator notes it,
+  and BGP's upkeep after each event runs the same reconcile, behind the
+  `IlmDel` for the freed label and before drained chunks go back.
 
 What this replaced in BGP before phase 5 (from reading the code; not
 reproduced; 5a fixed the first three):

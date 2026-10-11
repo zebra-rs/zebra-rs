@@ -12175,12 +12175,12 @@ mod transit_label_tests {
             "a 128-label chunk of the RIB's label space"
         );
         let _ = drain_label_msgs(&mut rx);
-        bgp.release_drained_label_chunks();
+        bgp.label_chunk_upkeep();
         assert!(drain_label_msgs(&mut rx).is_empty(), "label 24000 in use");
 
         config_next_hop_self(&mut bgp, arg_words(&[addr, "vpnv4"]), ConfigOp::Delete).unwrap();
         bgp.reconcile_transit_labels(false);
-        bgp.release_drained_label_chunks();
+        bgp.label_chunk_upkeep();
         assert_eq!(
             drain_label_msgs(&mut rx),
             vec!["del 24000", "release bgp 24000+128"],
@@ -12286,6 +12286,61 @@ mod transit_label_tests {
             .get(&prefix)
             .and_then(|cands| cands.first())
             .map(|r| r.local_label)
+    }
+
+    /// A transit label freed while another row went without — the range
+    /// holding the one chunk, full — goes to that row at the event's label
+    /// upkeep. The chunk stays held, so the RIB sends no word that room
+    /// returned; and the freed label's `IlmDel` went out first.
+    #[tokio::test]
+    async fn a_freed_transit_label_goes_to_a_row_that_went_without() {
+        let (mut bgp, mut rx) = fresh_bgp_observed();
+        let space = SharedLabelSpace::default();
+        space.lock().set_dynamic(2000, 2127);
+        bgp.shard.labels = ShardLabelPool::new(LabelChunks::new(
+            space.clone(),
+            "bgp",
+            bgp.ctx.rib.proto_id(),
+        ));
+        let addr = "10.0.0.2";
+        setup_lu_peer(&mut bgp, addr, "64512");
+        config_next_hop_self(
+            &mut bgp,
+            arg_words(&[addr, "label-v4", "true"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        bgp.reconcile_transit_labels(false);
+        assert!(bgp.shard.lu_v4_transit);
+
+        for i in 0..128 {
+            bgp.shard.handle(lu_update(&format!("10.1.{i}.0/24")));
+        }
+        assert_eq!(lu_local_label_of(&bgp, "10.1.5.0/24"), Some(Some(2005)));
+        bgp.shard.handle(lu_update("10.2.0.0/24"));
+        assert_eq!(
+            lu_local_label_of(&bgp, "10.2.0.0/24"),
+            Some(None),
+            "the chunk is full"
+        );
+        bgp.label_chunk_upkeep();
+        assert_eq!(lu_local_label_of(&bgp, "10.2.0.0/24"), Some(None));
+        let _ = drain_label_msgs(&mut rx);
+
+        // 10.1.5.0/24 goes: its label is free, its chunk still held.
+        let nlri = Ipv4Nlri {
+            id: 0,
+            prefix: "10.1.5.0/24".parse().unwrap(),
+        };
+        {
+            let (mut top, peers) = crate::bgp::peer::advertise_top(&mut bgp);
+            crate::bgp::route::route_labelv4_withdraw(1, &nlri, &mut top, peers, false);
+        }
+        assert_eq!(lu_local_label_of(&bgp, "10.1.5.0/24"), None);
+        assert_eq!(drain_label_msgs(&mut rx), vec!["del 2005"]);
+        bgp.label_chunk_upkeep();
+        assert_eq!(lu_local_label_of(&bgp, "10.2.0.0/24"), Some(Some(2005)));
+        assert_eq!(space.lock().held_blocks().len(), 1, "the chunk stays");
     }
 
     /// Labeled-Unicast follows `route_update_labelv4`'s rule: eBGP always

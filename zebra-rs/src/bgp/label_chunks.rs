@@ -12,6 +12,8 @@
 //! the owner starved in the label space, so the RIB tells it
 //! (`RibRx::LocalLabelsFreed`) once labels are freed or the range grows,
 //! and it can label what went without ([`LabelChunks::take_starved`]).
+//! A label of its own freed meanwhile is room too, one the RIB never
+//! hears of: the chunk stays held ([`LabelChunks::take_room`]).
 //!
 //! A chunk whose labels are all free is not given back at once: the BGP
 //! task's ILM deletions for its labels may still be on their way to the
@@ -52,6 +54,9 @@ pub struct LabelChunks {
     owner: Option<ProtoId>,
     /// An allocation failed since [`Self::take_starved`] last ran.
     starved: bool,
+    /// A label was freed while [`Self::starved`]: what went without can
+    /// have it ([`Self::take_room`]).
+    room: bool,
     /// Chunks, by first label.
     chunks: BTreeMap<u32, Chunk>,
     /// Labels handed out and freed, inside the chunks.
@@ -85,6 +90,7 @@ impl LabelChunks {
             proto: "bgp",
             owner: None,
             starved: false,
+            room: false,
             chunks: BTreeMap::new(),
             free: BTreeSet::new(),
             next_size: CHUNK_MIN,
@@ -169,12 +175,26 @@ impl LabelChunks {
         if let Some(chunk) = self.chunk_mut(label) {
             chunk.live -= 1;
         }
+        self.room |= self.starved;
     }
 
     /// Whether an allocation failed since the last call: the caller, told
     /// that room returned, labels what went without.
     pub fn take_starved(&mut self) -> bool {
+        self.room = false;
         std::mem::take(&mut self.starved)
+    }
+
+    /// Whether a label was freed since an allocation failed: the caller
+    /// labels what went without from it, with no word from the RIB, which
+    /// sees no change while the chunk stays held. A failure again starves
+    /// the allocator again.
+    pub fn take_room(&mut self) -> bool {
+        let room = std::mem::take(&mut self.room);
+        if room {
+            self.starved = false;
+        }
+        room
     }
 
     /// Take out the chunks whose labels are all free, for the caller to
@@ -357,6 +377,33 @@ mod tests {
         assert_eq!(labels.alloc(), Some(24128));
         assert!(space.lock().take_starved().is_empty());
         assert!(!labels.take_starved());
+    }
+
+    /// A label freed while starved is room the allocator reports itself
+    /// (the RIB sees no change: the chunk stays held), and hands out; a
+    /// label freed while not starved is not.
+    #[test]
+    fn a_label_freed_while_starved_is_room() {
+        let space = SharedLabelSpace::default();
+        space.lock().set_dynamic(24000, 24127);
+        let mut labels = LabelChunks::new(space.clone(), "bgp", owner());
+        for _ in 0..128 {
+            labels.alloc().unwrap();
+        }
+        labels.free(24010);
+        assert!(!labels.take_room(), "not starved: nothing went without");
+        assert_eq!(labels.alloc(), Some(24010));
+        assert_eq!(labels.alloc(), None);
+        assert!(!labels.take_room());
+        labels.free(24005);
+        assert!(labels.take_room());
+        assert!(!labels.take_room(), "asked once");
+        assert!(!labels.take_starved(), "the retry clears the starving");
+        assert_eq!(labels.alloc(), Some(24005));
+        assert_eq!(labels.alloc(), None, "starved again");
+        labels.free(24006);
+        assert!(labels.take_starved());
+        assert!(!labels.take_room(), "a full retry covers the room");
     }
 
     /// Without a label space nothing is handed out.

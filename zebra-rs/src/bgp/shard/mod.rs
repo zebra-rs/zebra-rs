@@ -79,6 +79,12 @@ impl ShardLabelPool {
         self.pool.take_starved()
     }
 
+    /// Whether a label was freed since one could not be had
+    /// ([`LabelChunks::take_room`]).
+    pub fn take_room(&mut self) -> bool {
+        self.pool.take_room()
+    }
+
     /// The chunks held, for tests.
     #[cfg(test)]
     pub fn chunks(&self) -> Vec<LabelBlock> {
