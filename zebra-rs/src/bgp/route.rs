@@ -9574,6 +9574,9 @@ fn evpn_vni_of(route: &EvpnRoute, attr: &BgpAttr) -> Option<u32> {
     }
 }
 
+/// [`extract_flags_from_attr`]'s bit for a sticky (static) MAC.
+const EVPN_FLAG_STICKY: u8 = 0x01;
+
 /// Extract flags (sticky, gateway, router) from extended communities
 fn extract_flags_from_attr(attr: &BgpAttr) -> u8 {
     let mut flags = 0u8;
@@ -9583,7 +9586,7 @@ fn extract_flags_from_attr(attr: &BgpAttr) -> u8 {
             match (ec.high_type, ec.low_type) {
                 // MAC Mobility (RFC 7432 §7.7): the flags octet's low bit
                 // is "S", a sticky/static MAC.
-                (0x06, 0x00) if ec.val[0] & 0x01 != 0 => flags |= 0x01,
+                (0x06, 0x00) if ec.val[0] & 0x01 != 0 => flags |= EVPN_FLAG_STICKY,
                 // Default Gateway (RFC 7432 §7.8): opaque, sub-type 0x0d.
                 (0x03, 0x0d) => flags |= 0x02,
                 // EVPN ND (RFC 9161): the flags octet's low bit is "R",
@@ -9989,9 +9992,8 @@ pub(crate) fn attr_vxlan_vtep(attr: &BgpAttr) -> Option<IpAddr> {
 /// non-zero Ethernet Segment, then the higher MAC Mobility sequence number
 /// (RFC 7432 §7.7), then the lower next-hop (VTEP) address (§15.1).
 pub(super) fn evpn_local_path_wins(local: &BgpRib, remote: &BgpRib) -> bool {
-    const STICKY: u8 = 0x01;
-    let local_sticky = extract_flags_from_attr(&local.attr) & STICKY != 0;
-    let remote_sticky = extract_flags_from_attr(&remote.attr) & STICKY != 0;
+    let local_sticky = extract_flags_from_attr(&local.attr) & EVPN_FLAG_STICKY != 0;
+    let remote_sticky = extract_flags_from_attr(&remote.attr) & EVPN_FLAG_STICKY != 0;
     if local_sticky != remote_sticky {
         return local_sticky;
     }
@@ -10300,11 +10302,10 @@ fn route_evpn_export_selected(
                 // which here otherwise follows from the install replacing the
                 // local FDB row.
                 if !best.is_originated() {
-                    const STICKY: u8 = 0x01;
                     let route = super::evpn_dad::RemoteRoute {
                         rd: key.rd,
                         vtep: extract_tunnel_endpoint(best),
-                        sticky: extract_flags_from_attr(&best.attr) & STICKY != 0,
+                        sticky: extract_flags_from_attr(&best.attr) & EVPN_FLAG_STICKY != 0,
                         es: best.esi.filter(|esi| {
                             *esi != ZERO_ESI && bgp.local_rib.own_es.contains_key(esi)
                         }),
@@ -10317,7 +10318,7 @@ fn route_evpn_export_selected(
                         route,
                         Instant::now(),
                     );
-                    super::evpn_dad::arm_detected(&bgp.local_rib.evpn_dad, bgp.tx, &detected);
+                    bgp.local_rib.evpn_dad.arm(bgp.tx, &detected);
                     if verdict == super::evpn_dad::Verdict::Hold {
                         bgp.local_rib.evpn_dad.withdraw.insert((vni, mac_addr, *ip));
                         return;
@@ -19638,7 +19639,7 @@ impl Bgp {
             self.local_rib
                 .evpn_dad
                 .local_learn(entry.vni, entry.mac, entry.ip, Instant::now());
-        super::evpn_dad::arm_detected(&self.local_rib.evpn_dad, &self.tx, &detected);
+        self.local_rib.evpn_dad.arm(&self.tx, &detected);
         if verdict == super::evpn_dad::Verdict::Hold {
             self.evpn_dad_withdraw_held(entry.vni, entry.mac, entry.ip);
             return;

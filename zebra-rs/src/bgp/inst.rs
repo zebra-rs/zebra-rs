@@ -12,7 +12,6 @@ use crate::config::{
 use crate::context::{ProtoContext, Task};
 use crate::policy::com_list::CommunityListMap;
 use crate::policy::{self, PolicyRxChannel};
-use crate::rib::MacAddr;
 use crate::rib::api::{FdbEntry, RibRx};
 use crate::{
     bgp_bfd_trace, bgp_fsm_trace, bgp_label_trace, bgp_packet_trace, bgp_srv6_trace, bgp_vpn_trace,
@@ -138,9 +137,9 @@ pub enum Message {
     },
     /// A timed EVPN duplicate-address freeze elapsed (`dup-addr-detection
     /// freeze <secs>`): release the address and re-run its routes. Sent by
-    /// the timer [`super::evpn_dad::arm_recovery`] spawns; `until` is the
-    /// deadline it was armed for, so a wake-up for a freeze since cleared or
-    /// re-detected is discarded.
+    /// the timer [`super::evpn_dad::EvpnDad::arm`] keeps; `until` is the
+    /// deadline it was armed for, so a wake-up already on its way when the
+    /// freeze was cleared or re-detected is discarded.
     EvpnDadRecover {
         key: super::evpn_dad::DadKey,
         until: std::time::Instant,
@@ -905,7 +904,7 @@ pub struct Bgp {
     /// entry on the false→true transition (and withdraw on true→false),
     /// so origination becomes deterministic regardless of which
     /// channel wins the boot race.
-    pub local_fdb: BTreeMap<(u32, MacAddr, Option<std::net::IpAddr>), FdbEntry>,
+    pub local_fdb: super::local_fdb::LocalFdb,
     /// Local VXLAN VTEP shadow keyed by VNI, value = local VTEP IP
     /// (the VXLAN device's `IFLA_VXLAN_LOCAL` / `LOCAL6`). Populated
     /// from `RibRx::VxlanAdd`, removed on `RibRx::VxlanDel`. Drives
@@ -1515,7 +1514,7 @@ impl Bgp {
             mup_c_dirty: false,
             mup_segment_desired: BTreeMap::new(),
             mup_segment_catalog: Default::default(),
-            local_fdb: BTreeMap::new(),
+            local_fdb: Default::default(),
             local_vxlans: BTreeMap::new(),
             l2_port_evis: BTreeMap::new(),
             es_df_sent: BTreeMap::new(),
@@ -5010,12 +5009,7 @@ impl Bgp {
                 // (router-id) nexthop. `evpn_originate_macip` now resolves the
                 // VTEP from `local_vxlans`, so re-running it fixes the nexthop.
                 // Idempotent (same prefix replaces).
-                let stale: Vec<FdbEntry> = self
-                    .local_fdb
-                    .values()
-                    .filter(|e| e.vni == vni)
-                    .cloned()
-                    .collect();
+                let stale: Vec<FdbEntry> = self.local_fdb.vni(vni).cloned().collect();
                 for entry in stale {
                     self.evpn_originate_macip(&entry);
                 }

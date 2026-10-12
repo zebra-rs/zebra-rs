@@ -6,6 +6,10 @@ pub struct MacAddr {
 }
 
 impl MacAddr {
+    pub const fn new(octets: [u8; 6]) -> Self {
+        Self { octets }
+    }
+
     pub fn from_vec(vec: Vec<u8>) -> Option<Self> {
         if vec.len() != 6 {
             return None;

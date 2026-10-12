@@ -1053,6 +1053,124 @@ async fn permanent_freeze_changed_to_timed_freeze_arms_recovery() {
     assert!(!f.bgp.local_rib.evpn_dad.mac_duplicate(100, f.local.mac));
 }
 
+/// One recovery timer per address: re-arming it replaces, and so cancels,
+/// the timer before, and releasing the address drops it. Each freeze
+/// change spawned another sleeping task and none was cancelled, so
+/// toggling the freeze with many duplicates left thousands pending for up
+/// to an hour, each waking only to be discarded.
+#[tokio::test(start_paused = true)]
+async fn recovery_timers_are_replaced_not_stacked() {
+    use crate::bgp::evpn_dad::Freeze;
+    let (mut f, _rx) = Flap::new(dad_config(2, Freeze::For(30)));
+    f.remote();
+    f.local();
+    f.remote(); // detected, recovering in 30 s
+    for secs in [40, 50, 60] {
+        f.bgp.evpn_dad_configure(dad_config(2, Freeze::For(secs)));
+    }
+    assert_eq!(f.bgp.local_rib.evpn_dad.recovery.len(), 1);
+    let expected_until = f.bgp.local_rib.evpn_dad.until(f.dad_key()).unwrap();
+    // The only wake-up is the last deadline's.
+    let message = tokio::time::timeout(std::time::Duration::from_secs(61), f.bgp.rx.recv())
+        .await
+        .expect("a recovery timer is armed")
+        .expect("BGP channel is open");
+    let super::super::inst::Message::EvpnDadRecover { key, until } = message else {
+        panic!("expected duplicate-address recovery");
+    };
+    assert_eq!((key, until), (f.dad_key(), expected_until));
+    f.bgp.evpn_dad_recover(key, until);
+    assert!(f.bgp.local_rib.evpn_dad.recovery.is_empty());
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(3600), f.bgp.rx.recv())
+            .await
+            .is_err(),
+        "no timer is left behind"
+    );
+
+    // Detected again, then cleared: the timer goes with the freeze.
+    f.local();
+    f.remote();
+    assert_eq!(f.bgp.local_rib.evpn_dad.recovery.len(), 1);
+    assert_eq!(f.bgp.evpn_dad_clear(Some(100), None, None), 1);
+    assert!(f.bgp.local_rib.evpn_dad.recovery.is_empty());
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(3600), f.bgp.rx.recv())
+            .await
+            .is_err(),
+        "the cleared freeze's timer is gone"
+    );
+
+    // Detected again, then the freeze turned off, or detection: nothing
+    // recovers.
+    for config in [
+        dad_config(2, Freeze::Off),
+        crate::bgp::evpn_dad::DadConfig {
+            enabled: false,
+            ..dad_config(2, Freeze::For(30))
+        },
+    ] {
+        f.bgp.evpn_dad_configure(dad_config(2, Freeze::For(30)));
+        f.local();
+        f.remote();
+        assert_eq!(f.bgp.local_rib.evpn_dad.recovery.len(), 1);
+        f.bgp.evpn_dad_configure(config);
+        assert!(f.bgp.local_rib.evpn_dad.recovery.is_empty());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(3600), f.bgp.rx.recv())
+                .await
+                .is_err(),
+            "{config:?}: no timer"
+        );
+    }
+}
+
+/// A frozen IP's local binding on a MAC other than the one the takeover
+/// held is withdrawn as well: the IP is frozen, on whichever MAC.
+#[tokio::test]
+async fn a_frozen_ips_binding_on_another_mac_is_withdrawn() {
+    let (mut f, _rx) = Flap::new(dad_config(2, crate::bgp::evpn_dad::Freeze::Permanent));
+    let ip: IpAddr = "10.10.0.5".parse().unwrap();
+    let remote_mac = MacAddr::from([2, 0, 0, 0, 1, 9]);
+    let binding = crate::rib::api::FdbEntry {
+        ip: Some(ip),
+        ..f.local.clone()
+    };
+    receive_macip(&mut f.bgp, f.from, f.remote_rd, remote_mac, Some(ip), 1);
+    f.bgp.process_rib_msg(RibRx::FdbAdd(binding.clone())); // the IP moved here: 1
+    f.bgp.event_upkeep();
+    assert!(f.bgp.evpn_macip_originated(&binding));
+    receive_macip(&mut f.bgp, f.from, f.remote_rd, remote_mac, Some(ip), 3); // 2
+    f.bgp.event_upkeep();
+    assert!(f.bgp.local_rib.evpn_dad.frozen(100, f.local.mac, Some(ip)));
+    assert!(!f.bgp.evpn_macip_originated(&binding));
+}
+
+/// Clearing an IP detected on a local learn advertises its local binding
+/// again.
+#[tokio::test]
+async fn clearing_an_ip_detected_here_readvertises_its_binding() {
+    let (mut f, _rx) = Flap::new(dad_config(3, crate::bgp::evpn_dad::Freeze::Permanent));
+    let ip: IpAddr = "10.10.0.5".parse().unwrap();
+    let remote_mac = MacAddr::from([2, 0, 0, 0, 1, 9]);
+    let binding = crate::rib::api::FdbEntry {
+        ip: Some(ip),
+        ..f.local.clone()
+    };
+    receive_macip(&mut f.bgp, f.from, f.remote_rd, remote_mac, Some(ip), 1);
+    f.bgp.process_rib_msg(RibRx::FdbAdd(binding.clone())); // 1
+    receive_macip(&mut f.bgp, f.from, f.remote_rd, remote_mac, Some(ip), 3); // 2
+    f.bgp.evpn_withdraw_macip(&binding); // the kernel replaced the binding
+    f.bgp.process_rib_msg(RibRx::FdbAdd(binding.clone())); // 3: detected
+    f.bgp.event_upkeep();
+    assert!(f.bgp.local_rib.evpn_dad.frozen(100, f.local.mac, Some(ip)));
+    assert!(!f.bgp.evpn_macip_originated(&binding));
+
+    assert_eq!(f.bgp.evpn_dad_clear(Some(100), None, Some(ip)), 1);
+    f.bgp.event_upkeep();
+    assert!(f.bgp.evpn_macip_originated(&binding));
+}
+
 /// A multihomed host on a segment this node shares with the peer, learned
 /// on either PE as its traffic hashes: the peer's route for it on the
 /// segment only syncs it (RFC 7432 §8.4, FRR's sync route), and the host is

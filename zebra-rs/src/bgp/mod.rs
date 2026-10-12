@@ -14,6 +14,7 @@ pub mod evpn_dad;
 pub mod group_egress;
 pub mod interface_addrs;
 pub mod interface_neighbor;
+pub mod local_fdb;
 pub mod membership;
 pub mod neighbor_group;
 pub mod peer;

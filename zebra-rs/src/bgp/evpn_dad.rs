@@ -34,6 +34,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use super::inst::{Bgp, Message};
+use crate::context::{Timer, TimerType};
 use crate::rib::MacAddr;
 use crate::rib::api::FdbEntry;
 
@@ -61,6 +62,17 @@ pub struct DadConfig {
     /// The detection window, in seconds.
     pub time: u32,
     pub freeze: Freeze,
+}
+
+impl DadConfig {
+    /// When the freeze releases a duplicate detected at `now`: `None` for
+    /// warn-only or a permanent freeze.
+    pub fn freeze_until(&self, now: Instant) -> Option<Instant> {
+        match self.freeze {
+            Freeze::For(secs) => Some(now + Duration::from_secs(secs.into())),
+            Freeze::Off | Freeze::Permanent => None,
+        }
+    }
 }
 
 impl Default for DadConfig {
@@ -181,11 +193,10 @@ impl Probe {
         if self.count < config.max_moves {
             return false;
         }
-        let until = match config.freeze {
-            Freeze::For(secs) => Some(now + Duration::from_secs(secs.into())),
-            Freeze::Off | Freeze::Permanent => None,
-        };
-        self.duplicate = Some(Duplicate { since: now, until });
+        self.duplicate = Some(Duplicate {
+            since: now,
+            until: config.freeze_until(now),
+        });
         true
     }
 
@@ -263,6 +274,10 @@ pub struct EvpnDad {
     /// by `Bgp::evpn_dad_drain`, which has the peers the withdrawal needs,
     /// after every event (`Bgp::event_upkeep`).
     pub withdraw: BTreeSet<(u32, MacAddr, Option<IpAddr>)>,
+    /// The recovery timer of each address a timed freeze holds: one per
+    /// address, re-armed in place, so a timer replaced or dropped is
+    /// cancelled rather than left to wake for nothing.
+    pub recovery: BTreeMap<DadKey, Timer>,
 }
 
 impl EvpnDad {
@@ -473,6 +488,7 @@ impl EvpnDad {
             && let Some(entry) = self.ips.get_mut(&(vni, ip))
         {
             entry.probe.clear();
+            self.recovery.remove(&DadKey::Ip(vni, ip));
         }
     }
 
@@ -555,12 +571,17 @@ impl EvpnDad {
                 };
                 let was = probe.duplicate.is_some();
                 probe.clear();
-                for ((_, _), entry) in self
+                self.recovery.remove(&key);
+                // A release, on a clear or a recovery, not a move: a scan
+                // of the VNI's IPs, rather than an index of each MAC's,
+                // which would be one more copy of the IPs' bindings.
+                for ((_, ip), entry) in self
                     .ips
                     .range_mut((vni, IpAddr::from([0u8; 4]))..=(vni, IpAddr::from([0xffu8; 16])))
                     .filter(|(_, entry)| entry.mac == mac)
                 {
                     entry.probe.clear();
+                    self.recovery.remove(&DadKey::Ip(vni, *ip));
                 }
                 was
             }
@@ -570,6 +591,7 @@ impl EvpnDad {
                 };
                 let was = entry.probe.duplicate.is_some();
                 entry.probe.clear();
+                self.recovery.remove(&key);
                 was
             }
         }
@@ -634,7 +656,8 @@ impl EvpnDad {
     /// forgets every window), or when the freeze policy changed, which
     /// applies to existing duplicates too, a timed freeze counting from
     /// `now`. Changes to the detection window or threshold keep existing
-    /// deadlines.
+    /// deadlines. The recovery timers go with the old policy; the caller
+    /// arms the new one's.
     pub fn set_config(&mut self, config: DadConfig, now: Instant) -> Vec<DadKey> {
         let freeze_changed = self.config.freeze != config.freeze;
         let keys = self.detected(None, None, None);
@@ -646,13 +669,12 @@ impl EvpnDad {
             for entry in self.ips.values_mut() {
                 entry.probe.clear();
             }
+            self.recovery.clear();
             return keys;
         }
         if freeze_changed {
-            let until = match config.freeze {
-                Freeze::For(secs) => Some(now + Duration::from_secs(secs.into())),
-                Freeze::Off | Freeze::Permanent => None,
-            };
+            let until = config.freeze_until(now);
+            self.recovery.clear();
             for probe in self
                 .macs
                 .values_mut()
@@ -673,31 +695,42 @@ fn warn_detected(vni: u32, what: &str, during: &str, vtep: Option<IpAddr>) {
     tracing::warn!("VNI {vni}: MAC {what} detected as duplicate during {during} VTEP {vtep}");
 }
 
-/// Arm the recovery timer for a timed freeze: `EvpnDadRecover` arrives at
-/// `until`. `until` identifies the freeze, so a wake-up for one that has
-/// since been cleared or re-detected is discarded.
-pub fn arm_recovery(tx: &mpsc::Sender<Message>, key: DadKey, until: Instant) {
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) => {
-            let tx = tx.clone();
-            handle.spawn(async move {
-                tokio::time::sleep_until(tokio::time::Instant::from_std(until)).await;
-                let _ = tx.send(Message::EvpnDadRecover { key, until }).await;
-            });
-        }
-        Err(_) => tracing::warn!(
+/// The recovery timer for a timed freeze: `EvpnDadRecover` arrives at
+/// `until`. `until` identifies the freeze, so a wake-up already on its way
+/// when the freeze was cleared or re-detected is discarded.
+fn recovery_timer(tx: &mpsc::Sender<Message>, key: DadKey, until: Instant) -> Option<Timer> {
+    if tokio::runtime::Handle::try_current().is_err() {
+        tracing::warn!(
             "EVPN duplicate address {key:?}: no runtime to arm the recovery timer; \
              it stays frozen until cleared"
-        ),
+        );
+        return None;
     }
+    let tx = tx.clone();
+    // A zero period would panic the timer's interval.
+    let after = until
+        .saturating_duration_since(Instant::now())
+        .max(Duration::from_millis(1));
+    Some(Timer::new_dur(after, TimerType::Once, move || {
+        let tx = tx.clone();
+        async move {
+            let _ = tx.send(Message::EvpnDadRecover { key, until }).await;
+        }
+    }))
 }
 
-/// Arm the recovery timer of every address in `detected` that a timed
-/// freeze holds.
-pub fn arm_detected(dad: &EvpnDad, tx: &mpsc::Sender<Message>, detected: &[DadKey]) {
-    for key in detected {
-        if let Some(until) = dad.until(*key) {
-            arm_recovery(tx, *key, until);
+impl EvpnDad {
+    /// Arm the recovery timer of every address in `keys` that a timed
+    /// freeze holds. An address has none armed before: a release drops its
+    /// timer, and so does a change of freeze policy (`set_config`).
+    pub fn arm(&mut self, tx: &mpsc::Sender<Message>, keys: &[DadKey]) {
+        for key in keys {
+            if let Some(timer) = self
+                .until(*key)
+                .and_then(|until| recovery_timer(tx, *key, until))
+            {
+                self.recovery.insert(*key, timer);
+            }
         }
     }
 }
@@ -707,16 +740,18 @@ impl Bgp {
     /// `mac` in `vni`, and those binding `ip` to any MAC. Withdrawn without
     /// re-running the remote routes they competed with — those are held too.
     pub(super) fn evpn_dad_withdraw_held(&mut self, vni: u32, mac: MacAddr, ip: Option<IpAddr>) {
+        let binding = ip
+            .into_iter()
+            .flat_map(|ip| self.local_fdb.ip(vni, ip))
+            .filter(|entry| entry.mac != mac);
         let held: Vec<FdbEntry> = self
             .local_fdb
-            .values()
+            .mac(vni, mac)
+            .chain(binding)
             .filter(|entry| {
-                entry.vni == vni
-                    && (entry.mac == mac || ip.is_some_and(|ip| entry.ip == Some(ip)))
-                    && self
-                        .local_rib
-                        .evpn_dad
-                        .frozen(entry.vni, entry.mac, entry.ip)
+                self.local_rib
+                    .evpn_dad
+                    .frozen(entry.vni, entry.mac, entry.ip)
                     && self.evpn_macip_originated(entry)
             })
             .cloned()
@@ -819,7 +854,7 @@ impl Bgp {
         if self.local_rib.evpn_dad.freezes() {
             // Now held (or held for a new time): withdraw what is still
             // advertised and arm the recovery deadlines.
-            arm_detected(&self.local_rib.evpn_dad, &self.tx, &keys);
+            self.local_rib.evpn_dad.arm(&self.tx, &keys);
             for key in keys {
                 match key {
                     DadKey::Mac(vni, mac) => self.evpn_dad_withdraw_held(vni, mac, None),
@@ -866,23 +901,15 @@ impl Bgp {
             // An IP's local bindings on a MAC that has since gone remote
             // are not re-advertised: the remote route beat them, and
             // learning them again would count a move of the MAC.
-            local = self
-                .local_fdb
-                .values()
-                .filter(|entry| {
-                    entry.vni == vni
-                        && match key {
-                            DadKey::Mac(_, mac) => entry.mac == mac,
-                            DadKey::Ip(_, ip) => {
-                                entry.ip == Some(ip)
-                                    && !remote(
-                                        dad.macs.get(&(vni, entry.mac)).and_then(|p| p.owner),
-                                    )
-                            }
-                        }
-                })
-                .cloned()
-                .collect();
+            local = match key {
+                DadKey::Mac(_, mac) => self.local_fdb.mac(vni, mac).cloned().collect(),
+                DadKey::Ip(_, ip) => self
+                    .local_fdb
+                    .ip(vni, ip)
+                    .filter(|entry| !remote(dad.macs.get(&(vni, entry.mac)).and_then(|p| p.owner)))
+                    .cloned()
+                    .collect(),
+            };
         }
         // Each origination re-runs the remote routes it competes with.
         for entry in &local {
@@ -1120,6 +1147,45 @@ mod tests {
             since: t,
             until: None,
         });
+    }
+
+    /// Releasing a MAC releases the IPs bound to it, and their recovery
+    /// timers go with them.
+    #[tokio::test]
+    async fn releasing_a_mac_drops_its_ips_timers() {
+        let t = Instant::now();
+        let (tx, _rx) = mpsc::channel(1);
+        let mut dad = dad(2, Freeze::For(60));
+        // The IP moves from mac(2) to mac(1) and back: detected on its own.
+        dad.remote_takeover(VNI, mac(2), Some(ip(5)), route(), t);
+        dad.local_learn(VNI, mac(1), Some(ip(5)), t); // 1
+        let (_, keys) = dad.remote_takeover(VNI, mac(2), Some(ip(5)), route(), t); // 2
+        assert_eq!(keys, vec![DadKey::Ip(VNI, ip(5))]);
+        dad.arm(&tx, &keys);
+        mark_duplicate(&mut dad, mac(2), t);
+        assert!(dad.recovery.contains_key(&DadKey::Ip(VNI, ip(5))));
+
+        assert!(dad.release(DadKey::Mac(VNI, mac(2))));
+        assert_eq!(dad.ips[&(VNI, ip(5))].probe.duplicate, None);
+        assert!(dad.recovery.is_empty());
+
+        // Released on its own, an IP drops its timer too.
+        dad.local_learn(VNI, mac(1), Some(ip(5)), t); // 1
+        let (_, keys) = dad.remote_takeover(VNI, mac(2), Some(ip(5)), route(), t); // 2
+        dad.arm(&tx, &keys);
+        assert_eq!(dad.recovery.len(), 1);
+        assert!(dad.release(DadKey::Ip(VNI, ip(5))));
+        assert!(dad.recovery.is_empty());
+
+        // And so does an IP that leaves a duplicate MAC for a clean one,
+        // its own mark forgotten with its moves.
+        dad.local_learn(VNI, mac(1), Some(ip(5)), t); // 1
+        let (_, keys) = dad.remote_takeover(VNI, mac(2), Some(ip(5)), route(), t); // 2
+        dad.arm(&tx, &keys);
+        mark_duplicate(&mut dad, mac(2), t);
+        dad.remote_takeover(VNI, mac(3), Some(ip(5)), route(), t);
+        assert_eq!(dad.ips[&(VNI, ip(5))].probe.duplicate, None);
+        assert!(dad.recovery.is_empty());
     }
 
     /// A host on a segment this node shares with the peer is reachable over
