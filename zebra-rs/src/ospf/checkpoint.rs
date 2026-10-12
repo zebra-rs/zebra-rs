@@ -90,11 +90,12 @@ pub struct OspfCheckpoint {
     pub areas: Vec<AreaCheckpoint>,
     /// Per-link state.
     pub links: Vec<LinkCheckpoint>,
-    /// SR-MPLS LAN Adj-SID label allocations. Keyed by
-    /// `(ifindex, neighbor_interface_addr)`. Restored so
-    /// allocated labels stay stable across the restart — fresh
-    /// allocations would shift label values and force helpers
-    /// to re-program ILMs unnecessarily.
+    /// SR-MPLS dynamic Adjacency-SID labels (LAN Adj-SIDs and the P2P
+    /// fallback). Keyed by `(ifindex, neighbor_interface_addr)` in
+    /// OSPFv2, `(ifindex, neighbor Router-ID)` in OSPFv3. Restored, and
+    /// held by the pool again once it exists, so the labels stay stable
+    /// across the restart: fresh allocations would shift label values and
+    /// force helpers to re-program ILMs unnecessarily.
     pub lan_adj_sids: Vec<((u32, Ipv4Addr), u32)>,
 }
 
@@ -253,6 +254,17 @@ fn aged_now<L: Clone>(lsa: &L, age: u16, set_age: fn(&mut L, u16)) -> L {
     lsa
 }
 
+/// The dynamic Adjacency-SID labels to checkpoint: those the adjacencies
+/// hold, and those a restart restored that still wait for the pool (a
+/// restart committed before SR-MPLS came back on keeps them).
+fn adj_sid_labels<V: super::version::OspfVersion>(ospf: &Ospf<V>) -> Vec<((u32, Ipv4Addr), u32)> {
+    ospf.restored_adj_sids
+        .iter()
+        .chain(&ospf.lan_adj_sids)
+        .map(|(k, v)| (*k, *v))
+        .collect()
+}
+
 /// `links` with one more for each interface a staged restart must
 /// re-establish adjacencies on but none of them records: deleted, or
 /// disabled, since the restart began. Its adjacencies were dropped, and
@@ -359,7 +371,7 @@ impl OspfCheckpoint {
             .collect::<Vec<_>>();
         let links = with_gone_links(ospf, links);
 
-        let lan_adj_sids = ospf.lan_adj_sids.iter().map(|(k, v)| (*k, *v)).collect();
+        let lan_adj_sids = adj_sid_labels(ospf);
 
         Self {
             format_version: CHECKPOINT_FORMAT_VERSION,
@@ -376,9 +388,9 @@ impl OspfCheckpoint {
 
     /// v3 sibling of [`Self::from_instance`]. Differences: LSAs emit
     /// through the v3 codec (`Ospfv3Lsa::emit` is header+body in one
-    /// call), the neighbor key column carries the v3 `nbrs` map key
-    /// (the neighbor Router-ID), and `lan_adj_sids` stays empty —
-    /// v3 SRv6 End.X SIDs re-reconcile per adjacency after restart.
+    /// call), and the neighbor key column carries the v3 `nbrs` map key
+    /// (the neighbor Router-ID), as `lan_adj_sids` keys its SR-MPLS
+    /// Adjacency-SID labels.
     pub fn from_instance_v3(
         ospf: &Ospf<super::version::Ospfv3>,
         grace_period_secs: u32,
@@ -448,7 +460,7 @@ impl OspfCheckpoint {
             router_id: ospf.router_id,
             areas,
             links,
-            lan_adj_sids: Vec::new(),
+            lan_adj_sids: adj_sid_labels(ospf),
         }
     }
 

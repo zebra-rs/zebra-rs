@@ -2560,16 +2560,7 @@ pub(super) fn sr_mpls_refresh(ospf: &mut Ospf) {
     // already Full when SR-MPLS came on (or before the block arrived)
     // would otherwise have none and be left out of LAN Adj-SID
     // origination.
-    let full: Vec<(u32, std::net::Ipv4Addr)> = ospf
-        .links
-        .iter()
-        .flat_map(|(ifindex, link)| {
-            link.nbrs
-                .values()
-                .filter(|nbr| nbr.state == super::nfsm::NfsmState::Full)
-                .map(move |nbr| (*ifindex, nbr.ident.prefix.addr()))
-        })
-        .collect();
+    let full = ospf.adj_sid_full_keys();
     ospf.reconcile_adj_sid_labels(full);
 
     ospf.router_info_lsa_originate();

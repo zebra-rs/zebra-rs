@@ -357,6 +357,25 @@ impl LabelSpace {
         Some(label)
     }
 
+    /// `pool` takes `label` back for a dynamic SID, as it held it before a
+    /// graceful restart: if the label is in `range`, and no pool holds it,
+    /// gives it back or waits for it, and no handed-out block covers it.
+    /// One `pool` holds already counts. Whether `pool` holds it now.
+    fn reserve_local(&mut self, pool: u64, range: RangeInclusive<u32>, label: u32) -> bool {
+        if self.local.get(&label) == Some(&Local::Held(pool)) {
+            return true;
+        }
+        if !range.contains(&label)
+            || self.local.contains_key(&label)
+            || self.claims.contains_key(&label)
+            || self.in_held_block(label)
+        {
+            return false;
+        }
+        self.local.insert(label, Local::Held(pool));
+        true
+    }
+
     /// Whether a handed-out block covers `label`.
     fn in_held_block(&self, label: u32) -> bool {
         self.held
@@ -740,6 +759,16 @@ impl LocalLabelPool {
             .alloc_local(self.id, owner, self.first..=self.last)
     }
 
+    /// Take `label` back for a dynamic SID, as the instance held it before a
+    /// graceful restart (its checkpoint), rather than the lowest free one.
+    /// False when the label is outside the pool's range or another holder
+    /// has it: the SID then needs another.
+    pub fn reserve(&mut self, label: u32) -> bool {
+        self.space
+            .lock()
+            .reserve_local(self.id, self.first..=self.last, label)
+    }
+
     /// Move the pool to `[first, last]`. The labels it holds there stay,
     /// so an overlapping SRLB change keeps the allocations it can; the rest
     /// are given back. The labels given back, for the caller to forget.
@@ -1005,6 +1034,34 @@ mod tests {
         node.lock().release_all("bgp");
         assert_eq!(pool.allocate(), Some(24001));
     }
+
+    /// A pool takes a specific label back, as a graceful restart's
+    /// checkpoint names it, when the label is free and in its range: held
+    /// as any allocated label, so no other pool is handed it and it goes
+    /// back when released. One the pool holds already counts; one another
+    /// pool holds, a block covers, or outside the range is refused.
+    #[test]
+    fn a_pool_reserves_a_free_label_in_its_range() {
+        let node = SharedLabelSpace::default();
+        let mut v2 = node.pool(15000, 15009);
+        let mut v3 = node.pool(15000, 15009);
+        assert!(v2.reserve(15005));
+        assert!(v2.reserve(15005), "already its own");
+        assert!(!v3.reserve(15005), "v2 holds it");
+        assert!(!v2.reserve(15010), "outside the range");
+        assert_eq!(v2.allocate(), Some(15000), "lowest free first, still");
+        assert_eq!(v3.allocate(), Some(15001));
+        for _ in 15002..15005 {
+            v3.allocate().unwrap();
+        }
+        assert_eq!(v3.allocate(), Some(15006), "15005 is v2's");
+        v2.release(15005);
+        assert_eq!(v3.allocate(), Some(15005));
+
+        let mut low = node.pool(24000, 24009);
+        assert_eq!(node.lock().alloc("bgp", 16), Some(block(24000, 24016)));
+        assert!(!low.reserve(24003), "in bgp's block");
+    }
 }
 
 #[cfg(test)]
@@ -1135,6 +1192,20 @@ mod claim_tests {
             space.lock().take_granted(),
             vec![(ProtoId::from_raw(2), 15000)]
         );
+    }
+
+    /// A label on its way back, or claimed for a configured SID, is not
+    /// reserved: the restarted instance's SID takes another.
+    #[test]
+    fn a_releasing_or_claimed_label_is_not_reserved() {
+        let space = SharedLabelSpace::default();
+        let (mut holder, _hrx) = instance(&space, 1);
+        let (mut other, _orx) = instance(&space, 2);
+        assert_eq!(holder.allocate(), Some(15000));
+        holder.release(15000);
+        assert!(!other.reserve(15000), "on its way back");
+        assert_eq!(holder.claim(15001), Claim::Granted);
+        assert!(!other.reserve(15001), "claimed");
     }
 
     /// Dropping a waiting claim: the label is freed, not granted.

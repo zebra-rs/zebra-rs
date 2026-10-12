@@ -861,6 +861,38 @@ and the RIB's waiting block requests are gone; `relabel_vrf` remains for
 a VRF configured with the range full. A drained service chunk goes back at
 the event's upkeep, on the channel its ILMs travel (§5.2, Return).
 
+Phase 7 lands in two parts, the graceful-restart half first. 7a has OSPF
+re-reserve the Adjacency-SID labels its checkpoint restores:
+- The labels came back into `lan_adj_sids` with no pool holding them, so
+  the Full transition handed the first adjacency up the lowest free label
+  (possibly one another restored adjacency still advertised), another
+  instance over the SRLB could take one, and a later release freed a label
+  under its other user.
+- `LocalLabelPool::reserve` takes a specific label back as dynamically
+  held: free and in the pool's range, it is the pool's; held, given back or
+  claimed by another, or covered by a block, it is refused. Unlike
+  `claim`, it neither marks the label configured nor revokes a holder.
+- Restored labels wait apart (`restored_adj_sids`) until there is a pool,
+  so the configuration replayed at restart cannot clear them before it
+  establishes the SR mode (an interface's Adj-SID leaf can come before
+  `segment-routing mpls`). The pool takes them over as it is created
+  (`adopt_restored_adj_sids`); a refused one is dropped, and its adjacency
+  is given another. A waiting label goes when its adjacency leaves Full.
+  When the restart ends, a Full adjacency's waits on while SR-MPLS is on
+  (the SR block's reply, which creates the pool, may come later); the
+  others go, and all of them with SR-MPLS off. After the restart,
+  SR-MPLS turned off drops any still waiting. The NFSM's Full step (`adj_sid_label_nfsm`, one
+  generic path for both versions) keeps a label the adjacency already
+  holds. When the restart ends, a restored label whose adjacency is not
+  Full again goes back (`release_restored_adj_sids`).
+- OSPFv3 checkpoints and restores its labels too; it wrote none, so its
+  Adjacency-SIDs could change across a restart. IS-IS checkpoints no
+  labels yet (its checkpoint module defers them).
+
+7b is the kernel seeding: the startup AF_MPLS dump, `Stale` labels and
+their sweep, and `NLM_F_REPLACE` installs. A restored label found `Stale`
+is then taken over by `reserve`.
+
 Phase 2 changes OSPF's advertised SRGB. No phase changes Adjacency-SID
 labels by itself; from phase 3, a configured Adj-SID on a dynamically held
 label moves that holder. Phase 5 is the largest, through the VPN, LU, EVPN
