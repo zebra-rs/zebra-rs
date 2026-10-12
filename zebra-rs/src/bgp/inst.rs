@@ -1240,11 +1240,10 @@ pub struct Bgp {
     /// initial request and any on-demand extension so a burst of
     /// label-less VRFs asks the RIB label manager for only one block.
     vrf_label_request_pending: bool,
-    // The per-prefix LU/VPNv4 local-label caches moved to
-    // `BgpShard::labels` (RIB sharding B.2): they pair with the shard's
-    // sub-block allocator, which refills by carving from
-    // `vrf_label_alloc` above. `vrf_label_alloc` itself stays here — it
-    // is the central pool and still serves the per-VRF-spawn labels.
+    // The per-prefix LU/VPN transit labels live on `BgpShard::labels`,
+    // minted from the shard's own chunks of the RIB's label space;
+    // `vrf_label_alloc` above serves only the per-VRF, EVI, ESI and VPWS
+    // labels.
     /// Configured SRv6 locator name (`router bgp segment-routing
     /// srv6 locator <name>`). When set, BGP watches this locator on the
     /// RIB and (in a follow-up) carves per-VRF End.DT46 service SIDs
@@ -1487,6 +1486,17 @@ impl Bgp {
             let workers = (0..n_shards).map(|_| BgpShard::default()).collect();
             super::shard::pool::ShardPool::spawn(workers, shard_results_tx)
         });
+        // The global instance's transit labels (LU, VPN Option B) come from
+        // chunks of the RIB's label space, taken without a round trip
+        // (docs/design/mpls-label-allocation.md §5.2).
+        let shard = BgpShard {
+            labels: super::shard::ShardLabelPool::new(super::label_chunks::LabelChunks::new(
+                rib_subscriber.label_space().clone(),
+                "bgp",
+                ctx.rib.proto_id(),
+            )),
+            ..BgpShard::default()
+        };
         let mut bgp = Self {
             graceful_restart: super::peer::GracefulRestartGlobal::default(),
             graceful_restart_disable: false,
@@ -1531,7 +1541,7 @@ impl Bgp {
             sync_tick_tx,
             sync_tick_rx,
             local_rib: LocalRib::default(),
-            shard: BgpShard::default(),
+            shard,
             shards,
             shard_results_rx,
             pending_dumps_v4: DumpBarrierV4::default(),
@@ -2501,7 +2511,6 @@ impl Bgp {
             nexthop_cache: Some(&mut self.nexthop_cache),
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: self.vrf_label_alloc.as_mut(),
             as_sets_withdraw: self.as_sets_withdraw,
         };
         let Some(peer) = self.peers.get_mut_by_idx(ident) else {
@@ -2593,7 +2602,6 @@ impl Bgp {
                     nexthop_cache: Some(&mut self.nexthop_cache),
                     vrf_transport_v4: None,
                     vrf_transport_v6: None,
-                    central_label_alloc: self.vrf_label_alloc.as_mut(),
                     as_sets_withdraw: self.as_sets_withdraw,
                 };
 
@@ -3339,7 +3347,6 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: self.as_sets_withdraw,
         };
         super::route::route_advertise_to_peers(
@@ -3428,7 +3435,6 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: self.as_sets_withdraw,
         };
         super::route::route_advertise_to_peers_vpnv6(
@@ -4587,7 +4593,6 @@ impl Bgp {
                 nexthop_cache: None,
                 vrf_transport_v4: None,
                 vrf_transport_v6: None,
-                central_label_alloc: None,
                 as_sets_withdraw: self.as_sets_withdraw,
             };
             super::route::route_advertise_to_peers(
@@ -4709,7 +4714,6 @@ impl Bgp {
                 nexthop_cache: None,
                 vrf_transport_v4: None,
                 vrf_transport_v6: None,
-                central_label_alloc: None,
                 as_sets_withdraw: self.as_sets_withdraw,
             };
             super::route::route_advertise_to_peers_vpnv6(
@@ -5332,12 +5336,18 @@ impl Bgp {
             RibRx::LabelBlock { start, size } => {
                 self.label_block_arrived(start, size);
             }
-            // Labels were freed after a Binding-SID claim was refused (a
-            // configured Adjacency-SID had the label): claim again.
+            // Labels were freed, or a commit or block change made room,
+            // after a Binding-SID claim was refused (a configured
+            // Adjacency-SID had the label) or a transit label found the
+            // dynamic range full: claim again, and label the transit rows
+            // that went without.
             RibRx::LocalLabelsFreed => {
                 self.local_rib.sr_policy.labels_freed();
                 let mut top = self.nht_install_top();
                 super::route::sr_policy_sync_reselected(&mut top);
+                if self.shard.labels.take_starved() {
+                    self.reconcile_transit_labels(true);
+                }
             }
             // A Binding-SID label an IGP's dynamic Adjacency-SID held is
             // the claiming policy's now: install its ILM.
@@ -5401,7 +5411,8 @@ impl Bgp {
 
     /// Re-derive the shard's transit flags (VPNv4, VPNv6, LU v4, LU v6)
     /// from the peer config and, for each family that flipped — or, under `force`
-    /// (a label block just arrived), each family that is a transit — bring
+    /// (a retry for rows a full label range left unlabelled), each family
+    /// that is a transit — bring
     /// the rows already in its Loc-RIB in step: mint the per-prefix label
     /// and program its swap ILM when transit is needed, release both when
     /// it is not (`transit_table_reconcile`). Rows that changed are then
@@ -5419,7 +5430,7 @@ impl Bgp {
         let need_lu4 = self.transit_needed(AfiSafi::new(Afi::Ip, Safi::MplsLabel));
         let need_lu6 = self.transit_needed(AfiSafi::new(Afi::Ip6, Safi::MplsLabel));
         // A family's walk runs when its flag flipped, or when forced and
-        // it is a transit (rows received before the block lack labels).
+        // it is a transit (rows a full label range left unlabelled).
         let arm = |need: bool, flag: &mut bool| {
             let flipped = need != *flag;
             *flag = need;
@@ -5442,8 +5453,7 @@ impl Bgp {
                     need_vpn,
                     table,
                     &mut self.shard.labels,
-                    self.vrf_label_alloc.as_mut(),
-                    |labels, central, p| labels.label_vpn_v4(central, rd, p),
+                    |labels, p| labels.label_vpn_v4(rd, p),
                     |labels, p| labels.free_vpn_v4(rd, p),
                     &self.ctx.rib,
                     &self.nexthop_cache,
@@ -5484,8 +5494,7 @@ impl Bgp {
                     need_vpn6,
                     table,
                     &mut self.shard.labels,
-                    self.vrf_label_alloc.as_mut(),
-                    |labels, central, p| labels.label_vpn_v6(central, rd, p),
+                    |labels, p| labels.label_vpn_v6(rd, p),
                     |labels, p| labels.free_vpn_v6(rd, p),
                     &self.ctx.rib,
                     &self.nexthop_cache,
@@ -5538,8 +5547,7 @@ impl Bgp {
                 need_lu4,
                 &mut self.shard.v4lu,
                 &mut self.shard.labels,
-                self.vrf_label_alloc.as_mut(),
-                |labels, central, p| labels.label_lu_v4(central, p),
+                |labels, p| labels.label_lu_v4(p),
                 |labels, p| labels.free_lu_v4(p),
                 &self.ctx.rib,
                 &self.nexthop_cache,
@@ -5570,8 +5578,7 @@ impl Bgp {
                 need_lu6,
                 &mut self.shard.v6lu,
                 &mut self.shard.labels,
-                self.vrf_label_alloc.as_mut(),
-                |labels, central, p| labels.label_lu_v6(central, p),
+                |labels, p| labels.label_lu_v6(p),
                 |labels, p| labels.free_lu_v6(p),
                 &self.ctx.rib,
                 &self.nexthop_cache,
@@ -5638,13 +5645,46 @@ impl Bgp {
         // So do VPWS E-Lines: a service configured before the grant
         // originated its Type-1 with label 0, which no remote binds.
         self.vpws_label_drain();
-        // VPNv4 / Labeled-Unicast transit rows received before the grant
-        // carry no local label yet (the mint returned `None`); mint now.
-        self.reconcile_transit_labels(true);
         // The reconcile may have outgrown this block too (a large VRF
         // fleet). If any VRF is still label-less, ask for another.
         if self.vrf_registry.values().any(|h| h.label == 0) {
             self.request_label_block();
+        }
+    }
+
+    /// Label upkeep after each event. A transit label freed while another
+    /// went without, the range full, labels the rows that went without
+    /// now: the RIB sends no word, the chunk staying held. Then drained
+    /// chunks go back (`release_drained_label_chunks`). Both follow the
+    /// event's ILM messages on the RIB client channel, so a freed label's
+    /// `IlmDel` precedes its reuse, and reuse comes first, before a chunk
+    /// it would have kept could go back.
+    pub(super) fn label_chunk_upkeep(&mut self) {
+        if self.shard.labels.take_room() {
+            self.reconcile_transit_labels(true);
+        }
+        self.release_drained_label_chunks();
+    }
+
+    /// Return the shard's drained label chunks — every label in them freed
+    /// — to the RIB. Sent on the RIB client channel, the one the ILM
+    /// deletions for their labels went out on, so the RIB frees a chunk
+    /// only behind them: a chunk handed to another holder never meets a
+    /// stale swap ILM of ours.
+    fn release_drained_label_chunks(&mut self) {
+        for block in self.shard.labels.take_drained() {
+            let size = block.end - block.start;
+            bgp_label_trace!(
+                self.tracing,
+                start = block.start,
+                size,
+                "bgp: label chunk returned"
+            );
+            let _ = self.ctx.rib.send(crate::rib::Message::LabelBlockRelease {
+                proto: "bgp".to_string(),
+                start: block.start,
+                size,
+            });
         }
     }
 
@@ -6250,7 +6290,6 @@ impl Bgp {
             nexthop_cache: Some(&mut self.nexthop_cache),
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: self.as_sets_withdraw,
         }
     }
@@ -6521,7 +6560,6 @@ impl Bgp {
             nexthop_cache: Some(&mut self.nexthop_cache),
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: self.vrf_label_alloc.as_mut(),
             as_sets_withdraw: self.as_sets_withdraw,
         };
         super::route::bestpath_recompute_untracked(&mut top, &mut self.peers);
@@ -6611,7 +6649,6 @@ impl Bgp {
             nexthop_cache: Some(&mut self.nexthop_cache),
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: self.as_sets_withdraw,
         };
         match &dep {
@@ -7297,7 +7334,6 @@ impl Bgp {
             nexthop_cache: Some(&mut self.nexthop_cache),
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: self.as_sets_withdraw,
         };
         for (prefix, best) in &winners_v4 {
@@ -7359,7 +7395,6 @@ impl Bgp {
             nexthop_cache: Some(&mut self.nexthop_cache),
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: self.as_sets_withdraw,
         };
         match (prefix, selected_v4, selected_v6) {
@@ -7461,7 +7496,6 @@ impl Bgp {
             nexthop_cache: Some(&mut self.nexthop_cache),
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: self.as_sets_withdraw,
         };
         for (prefix, set) in &selected_v4 {
@@ -7511,6 +7545,10 @@ impl Bgp {
             while let Ok(msg) = self.prx.try_recv() {
                 self.process_msg(msg);
             }
+            // Labels the last messages freed: reused by a transit row that
+            // went without, else their drained chunks go back, behind the
+            // ILM messages.
+            self.label_chunk_upkeep();
             tokio::select! {
                 // `suppress-fib-pending` expiry. A prefix whose ack was
                 // lost must be advertised eventually, and the next
@@ -7690,7 +7728,6 @@ impl Bgp {
             nexthop_cache: Some(&mut self.nexthop_cache),
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: self.vrf_label_alloc.as_mut(),
             as_sets_withdraw: self.as_sets_withdraw,
         };
         super::route::route_apply_bestpath_v4_batch(&mut bgp_ref, &mut self.peers, deltas);
@@ -7940,7 +7977,6 @@ impl Bgp {
                     nexthop_cache: None,
                     vrf_transport_v4: None,
                     vrf_transport_v6: None,
-                    central_label_alloc: None,
                     as_sets_withdraw: self.as_sets_withdraw,
                 };
                 super::route::route_advertise_to_peers(
@@ -8136,7 +8172,6 @@ impl Bgp {
                     nexthop_cache: None,
                     vrf_transport_v4: None,
                     vrf_transport_v6: None,
-                    central_label_alloc: None,
                     as_sets_withdraw: self.as_sets_withdraw,
                 };
                 super::route::route_advertise_to_peers_vpnv6(

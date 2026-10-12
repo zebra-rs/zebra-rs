@@ -13,10 +13,9 @@
 //! prefix is owned end-to-end by a single shard with no cross-shard
 //! synchronization in the hot path.
 //!
-//! The worker calls `handle(msg, None)` — it cannot borrow the main
-//! task's central label allocator across the thread boundary, so it
-//! draws labels from its own [`super::ShardLabelPool`] sub-block;
-//! refills become a `LabelBlockLow` round-trip (follow-up).
+//! A worker's [`super::ShardLabelPool`] has no label space, so it mints
+//! no label: the transit families only mint on the inline shard
+//! (giving workers chunks of their own is a follow-up).
 //!
 //! This module is the parallel-execution machinery; wiring the ingest
 //! and the event-loop result handler through it lands in later slices.
@@ -57,7 +56,7 @@ impl ShardWorker {
             if matches!(msg, ShardMsg::Shutdown) {
                 break;
             }
-            let out = self.shard.handle(msg, None);
+            let out = self.shard.handle(msg);
             // Reply to every message (even empty) so main can account
             // per-message; if main is gone, wind the thread down.
             if self

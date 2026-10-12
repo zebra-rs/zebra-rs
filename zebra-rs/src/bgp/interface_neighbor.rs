@@ -333,7 +333,6 @@ pub fn config_interface_neighbor(bgp: &mut Bgp, mut args: Args, op: ConfigOp) ->
                         nexthop_cache: None,
                         vrf_transport_v4: None,
                         vrf_transport_v6: None,
-                        central_label_alloc: None,
                         as_sets_withdraw: bgp.as_sets_withdraw,
                     };
                     super::route::route_clean(

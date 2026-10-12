@@ -1575,19 +1575,18 @@ pub(super) fn ilm_swap_remove(rib_client: &crate::rib::client::RibClient, local_
 
 /// One Loc-RIB table's share of `Bgp::reconcile_transit_labels`: bring
 /// every *received* row of `table` in step with `need` — mint a local
-/// label (`mint` on `labels`, refilling from `central`) and reconcile its
+/// label (`mint` on `labels`) and reconcile its
 /// swap ILM when transit is needed, release it (`free`) and tear the ILM
 /// down when not. Self-originated
 /// rows are skipped: we are their egress FEC and they carry no transit
 /// label. Returns the prefixes whose rows changed, so the caller can
 /// re-advertise exactly those. Stops early — leaving the rest
-/// unlabelled — when `mint` yields `None` (no dynamic block bound yet;
-/// `label_block_arrived` runs the reconcile again).
+/// unlabelled — when `mint` yields `None` (the dynamic range is full;
+/// the next reconcile tries again).
 pub(super) fn transit_table_reconcile<P, M, F>(
     need: bool,
     table: &mut LocalRibTable<P>,
     labels: &mut super::shard::ShardLabelPool,
-    mut central: Option<&mut super::vrf::VrfLabelAllocator>,
     mut mint: M,
     mut free: F,
     rib_client: &crate::rib::client::RibClient,
@@ -1595,11 +1594,7 @@ pub(super) fn transit_table_reconcile<P, M, F>(
 ) -> Vec<P>
 where
     P: Prefix + Copy,
-    M: FnMut(
-        &mut super::shard::ShardLabelPool,
-        Option<&mut super::vrf::VrfLabelAllocator>,
-        P,
-    ) -> Option<u32>,
+    M: FnMut(&mut super::shard::ShardLabelPool, P) -> Option<u32>,
     F: FnMut(&mut super::shard::ShardLabelPool, P) -> Option<u32>,
 {
     let prefixes: Vec<P> = table
@@ -1611,7 +1606,7 @@ where
     let mut changed = Vec::new();
     for prefix in prefixes {
         if need {
-            let Some(label) = mint(labels, central.as_deref_mut(), prefix) else {
+            let Some(label) = mint(labels, prefix) else {
                 break;
             };
             if table.set_local_label(prefix, Some(label)) {
@@ -4624,9 +4619,7 @@ pub fn route_ipv4_update_batch(
             decision: None,
             compute_policy: true,
         });
-        let deltas = bgp
-            .shard
-            .handle(msg, bgp.central_label_alloc.as_deref_mut());
+        let deltas = bgp.shard.handle(msg);
         for delta in deltas {
             if let Some((_src, job)) = reduce_bestpath_v4_nht_fib(bgp, delta) {
                 jobs.push(job);
@@ -4827,8 +4820,8 @@ fn route_ipv4_update_decided(
     // table op with `compute_policy`. The best-path delta returns
     // asynchronously on the event loop (`process_shard_result`) — no
     // inline advertise job. VPNv4 (rd == Some) stays on the synchronous
-    // shard (its transit label needs main's central allocator, which
-    // can't be borrowed across the thread boundary).
+    // shard (its transit label comes from the inline shard's label
+    // chunks; pool workers have none).
     if let Some(pool) = shards
         && rd.is_none()
     {
@@ -4894,9 +4887,7 @@ fn route_ipv4_update_decided(
         decision,
         compute_policy: false,
     });
-    let deltas = bgp
-        .shard
-        .handle(msg, bgp.central_label_alloc.as_deref_mut());
+    let deltas = bgp.shard.handle(msg);
 
     let mut jobs = Vec::new();
     for delta in deltas {
@@ -7089,7 +7080,6 @@ mod evpn_nexthop_wiring_tests {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: false,
         }
     }
@@ -8699,29 +8689,21 @@ pub fn route_ipv6_update(
 
     // Hand the table op (Adj-RIB-In + policy decision → intern + Loc-RIB
     // + best-path) to the shard; act on the returned best-path delta.
-    let deltas = bgp.shard.handle(
-        ShardMsg::UpdateV6(ShardUpdateV6 {
-            ident: peer_ident,
-            rd,
-            nlri: nlri.clone(),
-            peer_router_id,
-            typ,
-            from_client,
-            attr: attr.clone(),
-            label,
-            nexthop,
-            stale,
-            nexthop_reachable,
-            vrf_transit_only,
-            decision,
-        }),
-        // The central label allocator, as the v4 ingest passes: a VPNv6
-        // transit mints its per-(RD,prefix) label at receive, and the
-        // shard's own pool is empty until its first carve — passing `None`
-        // here left every row received under a transit configured before
-        // the first route unlabelled (review follow-up on finding #8).
-        bgp.central_label_alloc.as_deref_mut(),
-    );
+    let deltas = bgp.shard.handle(ShardMsg::UpdateV6(ShardUpdateV6 {
+        ident: peer_ident,
+        rd,
+        nlri: nlri.clone(),
+        peer_router_id,
+        typ,
+        from_client,
+        attr: attr.clone(),
+        label,
+        nexthop,
+        stale,
+        nexthop_reachable,
+        vrf_transit_only,
+        decision,
+    }));
 
     for delta in deltas {
         let ShardOut::BestPathV6 {
@@ -9071,9 +9053,7 @@ pub fn route_labelv4_update(
             // is sent next-hop-self (`lu_v4_transit`): a reflector passes
             // the received label through and must not park a dead ILM.
             rib.local_label = if bgp.shard.lu_v4_transit {
-                bgp.shard
-                    .labels
-                    .label_lu_v4(bgp.central_label_alloc.as_deref_mut(), lu.nlri.prefix)
+                bgp.shard.labels.label_lu_v4(lu.nlri.prefix)
             } else {
                 None
             };
@@ -9183,9 +9163,7 @@ pub fn route_labelv6_update(
             nht_track_received(bgp, &mut rib, dep.clone());
             // Transit-gated like the v4 path (`lu_v6_transit`).
             rib.local_label = if bgp.shard.lu_v6_transit {
-                bgp.shard
-                    .labels
-                    .label_lu_v6(bgp.central_label_alloc.as_deref_mut(), lu.nlri.prefix)
+                bgp.shard.labels.label_lu_v6(lu.nlri.prefix)
             } else {
                 None
             };
@@ -18577,7 +18555,6 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: self.as_sets_withdraw,
         };
         route_advertise_mup_to_peers(rd, prefix, &selected, &mut bgp_ref, &mut self.peers);
@@ -18749,7 +18726,6 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: self.as_sets_withdraw,
         };
 
@@ -18808,7 +18784,6 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: self.as_sets_withdraw,
         };
 
@@ -18876,7 +18851,6 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: self.as_sets_withdraw,
         };
 
@@ -18910,7 +18884,6 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: self.as_sets_withdraw,
         };
 
@@ -18963,7 +18936,6 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: self.as_sets_withdraw,
         };
 
@@ -19002,7 +18974,6 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: self.as_sets_withdraw,
         };
 
@@ -19060,7 +19031,6 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: self.as_sets_withdraw,
         };
 
@@ -19097,7 +19067,6 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: self.as_sets_withdraw,
         };
 
@@ -19187,7 +19156,6 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: self.as_sets_withdraw,
         };
 
@@ -19232,7 +19200,6 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: self.as_sets_withdraw,
         };
 
@@ -19309,7 +19276,6 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: self.as_sets_withdraw,
         };
 
@@ -19351,7 +19317,6 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: self.as_sets_withdraw,
         };
 
@@ -19411,7 +19376,6 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: self.as_sets_withdraw,
         };
 
@@ -19451,7 +19415,6 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: self.as_sets_withdraw,
         };
 
@@ -19513,7 +19476,6 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: self.as_sets_withdraw,
         };
 
@@ -19551,7 +19513,6 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: self.as_sets_withdraw,
         };
 
@@ -19771,7 +19732,6 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: self.as_sets_withdraw,
         };
 
@@ -19825,7 +19785,6 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: self.as_sets_withdraw,
         };
         for (rd, prefix, rib) in remote {
@@ -20020,7 +19979,6 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: self.as_sets_withdraw,
         };
 
@@ -20186,7 +20144,6 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: self.as_sets_withdraw,
         };
 
@@ -20297,7 +20254,6 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: self.as_sets_withdraw,
         };
 
@@ -20737,7 +20693,6 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: self.as_sets_withdraw,
         };
         for (rd, prefix, rib) in routes {
@@ -22760,7 +22715,6 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: self.as_sets_withdraw,
         };
 
@@ -22886,7 +22840,6 @@ impl Bgp {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: self.as_sets_withdraw,
         };
         if !selected.is_empty() {
@@ -23529,7 +23482,6 @@ mod evpn_addpath_fanout_tests {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: false,
         }
     }
@@ -23961,7 +23913,6 @@ mod vpnv6_transit_label_tests {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: false,
         }
     }
@@ -24242,6 +24193,7 @@ mod vpnv6_transit_label_tests {
         let mut local_rib = LocalRib::default();
         let mut shard = crate::bgp::shard::BgpShard {
             vpn_v6_transit: true,
+            labels: crate::bgp::shard::ShardLabelPool::with_test_space(1000),
             ..Default::default()
         };
         let mut attr_store = crate::bgp::BgpAttrStore::default();
@@ -24249,7 +24201,6 @@ mod vpnv6_transit_label_tests {
         let interface_addrs = crate::bgp::interface_addrs::InterfaceAddrs::default();
         let (tx, rx) = tokio::sync::mpsc::channel(8);
         Box::leak(Box::new(rx));
-        let mut central = crate::bgp::vrf::VrfLabelAllocator::bounded(1000, 5000);
 
         // Two candidates from PE1 (slot 2) and PE2 (slot 3); PE2's next-hop
         // is unreachable. The prefix holds transit label 1000.
@@ -24261,10 +24212,7 @@ mod vpnv6_transit_label_tests {
             let table = shard.v6vpn.entry(rd()).or_default();
             table.update(prefix(), reachable);
             table.update(prefix(), unreachable);
-            let label = shard
-                .labels
-                .label_vpn_v6(Some(&mut central), rd(), prefix())
-                .expect("minted");
+            let label = shard.labels.label_vpn_v6(rd(), prefix()).expect("minted");
             assert_eq!(label, 1000);
             table.set_local_label(prefix(), Some(1000));
             assert_eq!(table.select_best_path(prefix()).len(), 1);
@@ -24308,11 +24256,7 @@ mod vpnv6_transit_label_tests {
         );
         // The label was NOT recycled: another prefix gets a different one.
         let other: Ipv6Net = "2001:db8:9::/64".parse().unwrap();
-        let next = top
-            .shard
-            .labels
-            .label_vpn_v6(Some(&mut central), rd(), other)
-            .expect("minted");
+        let next = top.shard.labels.label_vpn_v6(rd(), other).expect("minted");
         assert_ne!(next, 1000, "label 1000 is still referenced by the survivor");
     }
 
@@ -24346,6 +24290,7 @@ mod vpnv6_transit_label_tests {
         let mut local_rib = LocalRib::default();
         let mut shard = crate::bgp::shard::BgpShard {
             vpn_v6_transit: true,
+            labels: crate::bgp::shard::ShardLabelPool::with_test_space(1000),
             ..Default::default()
         };
         let mut attr_store = crate::bgp::BgpAttrStore::default();
@@ -24353,7 +24298,6 @@ mod vpnv6_transit_label_tests {
         let interface_addrs = crate::bgp::interface_addrs::InterfaceAddrs::default();
         let (tx, rx) = tokio::sync::mpsc::channel(8);
         Box::leak(Box::new(rx));
-        let mut central = crate::bgp::vrf::VrfLabelAllocator::bounded(1000, 5000);
 
         // PE1 (the source) and an AddPath member with next-hop-self.
         let mut peers = PeerMap::new();
@@ -24386,7 +24330,6 @@ mod vpnv6_transit_label_tests {
             &ctx.rib,
             &tx,
         );
-        top.central_label_alloc = Some(&mut central);
         let nlri = Ipv6Nlri {
             id: 0,
             prefix: prefix(),
@@ -24456,6 +24399,7 @@ mod vpnv6_transit_label_tests {
         let mut local_rib = LocalRib::default();
         let mut shard = crate::bgp::shard::BgpShard {
             vpn_v6_transit: true,
+            labels: crate::bgp::shard::ShardLabelPool::with_test_space(1000),
             ..Default::default()
         };
         let mut attr_store = crate::bgp::BgpAttrStore::default();
@@ -24463,7 +24407,6 @@ mod vpnv6_transit_label_tests {
         let interface_addrs = crate::bgp::interface_addrs::InterfaceAddrs::default();
         let (tx, rx) = tokio::sync::mpsc::channel(8);
         Box::leak(Box::new(rx));
-        let mut central = crate::bgp::vrf::VrfLabelAllocator::bounded(1000, 5000);
 
         let mut peers = PeerMap::new();
         let (pe1, _pe1_rx) = ibgp_peer(&[]);
@@ -24491,7 +24434,6 @@ mod vpnv6_transit_label_tests {
             &ctx.rib,
             &tx,
         );
-        top.central_label_alloc = Some(&mut central);
         route_ipv6_update(
             src,
             &Ipv6Nlri {
@@ -24545,6 +24487,7 @@ mod vpnv6_transit_label_tests {
         let mut local_rib = LocalRib::default();
         let mut shard = crate::bgp::shard::BgpShard {
             vpn_v6_transit: true,
+            labels: crate::bgp::shard::ShardLabelPool::with_test_space(1000),
             ..Default::default()
         };
         let mut attr_store = crate::bgp::BgpAttrStore::default();
@@ -24552,7 +24495,6 @@ mod vpnv6_transit_label_tests {
         let interface_addrs = crate::bgp::interface_addrs::InterfaceAddrs::default();
         let (tx, rx) = tokio::sync::mpsc::channel(8);
         Box::leak(Box::new(rx));
-        let mut central = crate::bgp::vrf::VrfLabelAllocator::bounded(1000, 5000);
 
         // PE1 (the source) and an AddPath member with next-hop-self.
         let mut peers = PeerMap::new();
@@ -24585,7 +24527,6 @@ mod vpnv6_transit_label_tests {
             &ctx.rib,
             &tx,
         );
-        top.central_label_alloc = Some(&mut central);
         let nlri = Ipv6Nlri {
             id: 0,
             prefix: prefix(),
@@ -24658,10 +24599,7 @@ mod vpnv6_transit_label_tests {
                 .is_none()
         );
         let other: Ipv6Net = "2001:db8:99::/64".parse().unwrap();
-        let recycled =
-            top.shard
-                .labels
-                .label_vpn_v6(top.central_label_alloc.as_deref_mut(), rd(), other);
+        let recycled = top.shard.labels.label_vpn_v6(rd(), other);
         assert_eq!(
             recycled,
             Some(1000),
@@ -24688,6 +24626,7 @@ mod vpnv6_transit_label_tests {
         let mut local_rib = LocalRib::default();
         let mut shard = crate::bgp::shard::BgpShard {
             vpn_v6_transit: true,
+            labels: crate::bgp::shard::ShardLabelPool::with_test_space(1000),
             ..Default::default()
         };
         let mut attr_store = crate::bgp::BgpAttrStore::default();
@@ -24695,7 +24634,6 @@ mod vpnv6_transit_label_tests {
         let interface_addrs = crate::bgp::interface_addrs::InterfaceAddrs::default();
         let (tx, rx) = tokio::sync::mpsc::channel(8);
         Box::leak(Box::new(rx));
-        let mut central = crate::bgp::vrf::VrfLabelAllocator::bounded(1000, 5000);
 
         let mut peers = PeerMap::new();
         let (pe1, _pe1_rx) = ibgp_peer(&[]);
@@ -24714,7 +24652,6 @@ mod vpnv6_transit_label_tests {
             &ctx.rib,
             &tx,
         );
-        top.central_label_alloc = Some(&mut central);
         let nlri = Ipv6Nlri {
             id: 0,
             prefix: prefix(),
@@ -24774,18 +24711,13 @@ mod vpnv6_transit_label_tests {
         assert_eq!(remaining, 0, "the denied row left the Loc-RIB");
         // The label was released: the next prefix is handed it back.
         let other: Ipv6Net = "2001:db8:9::/64".parse().unwrap();
-        let next = top
-            .shard
-            .labels
-            .label_vpn_v6(top.central_label_alloc.as_deref_mut(), rd(), other)
-            .expect("minted");
+        let next = top.shard.labels.label_vpn_v6(rd(), other).expect("minted");
         assert_eq!(next, 1000, "label 1000 was released with its prefix");
     }
 
     /// Review follow-up: the LIVE VPNv6 ingest (`route_ipv6_update`) must
-    /// hand the shard the central label allocator, or a transit whose
-    /// shard pool is still empty — transit configured before any route
-    /// arrived — mints nothing at receive and the row goes out unlabelled.
+    /// mint the transit label at receive, or a transit configured before
+    /// any route arrived sends the row out unlabelled.
     #[tokio::test]
     async fn vpnv6_row_received_under_transit_is_labelled_on_the_live_path() {
         let router_id = Ipv4Addr::new(10, 0, 0, 1);
@@ -24793,6 +24725,7 @@ mod vpnv6_transit_label_tests {
         let mut local_rib = LocalRib::default();
         let mut shard = crate::bgp::shard::BgpShard {
             vpn_v6_transit: true,
+            labels: crate::bgp::shard::ShardLabelPool::with_test_space(1000),
             ..Default::default()
         };
         let mut attr_store = crate::bgp::BgpAttrStore::default();
@@ -24800,7 +24733,6 @@ mod vpnv6_transit_label_tests {
         let interface_addrs = crate::bgp::interface_addrs::InterfaceAddrs::default();
         let (tx, rx) = tokio::sync::mpsc::channel(8);
         Box::leak(Box::new(rx));
-        let mut central = crate::bgp::vrf::VrfLabelAllocator::bounded(1000, 5000);
 
         // The source PE (a reflector client); its slot is the row's ident.
         let mut peers = PeerMap::new();
@@ -24822,7 +24754,6 @@ mod vpnv6_transit_label_tests {
             &ctx.rib,
             &tx,
         );
-        top.central_label_alloc = Some(&mut central);
 
         let nhop = Vpnv6Nexthop {
             rd: rd(),
@@ -24853,7 +24784,7 @@ mod vpnv6_transit_label_tests {
         assert_eq!(
             row_label,
             Some(Some(1000)),
-            "the live ingest mints the transit label from the central block"
+            "the live ingest mints the transit label from the shard's chunks"
         );
     }
 }
@@ -29261,7 +29192,6 @@ mod enforce_first_as_local_as_tests {
                 nexthop_cache: None,
                 vrf_transport_v4: None,
                 vrf_transport_v6: None,
-                central_label_alloc: None,
                 as_sets_withdraw: false,
             }
         }
@@ -29636,7 +29566,6 @@ mod inbound_drop_withdraw_tests {
                 nexthop_cache: None,
                 vrf_transport_v4: None,
                 vrf_transport_v6: None,
-                central_label_alloc: None,
                 as_sets_withdraw: false,
             }
         }
@@ -30089,7 +30018,6 @@ mod fanout_winner_tests {
                 nexthop_cache: None,
                 vrf_transport_v4: None,
                 vrf_transport_v6: None,
-                central_label_alloc: None,
                 as_sets_withdraw: false,
             }
         }
@@ -30549,7 +30477,6 @@ mod lu_sync_winner_tests {
                 nexthop_cache: None,
                 vrf_transport_v4: None,
                 vrf_transport_v6: None,
-                central_label_alloc: None,
                 as_sets_withdraw: false,
             }
         }
@@ -31322,7 +31249,6 @@ mod v6_addpath_policy_out_tests {
                 nexthop_cache: None,
                 vrf_transport_v4: None,
                 vrf_transport_v6: None,
-                central_label_alloc: None,
                 as_sets_withdraw: false,
             }
         }
@@ -31797,7 +31723,6 @@ mod addpath_exact_id_tests {
                 nexthop_cache: None,
                 vrf_transport_v4: None,
                 vrf_transport_v6: None,
-                central_label_alloc: None,
                 as_sets_withdraw: false,
             }
         }
@@ -33148,7 +33073,6 @@ mod v6_empty_selection_tests {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: false,
         };
 
@@ -33248,7 +33172,6 @@ mod v6_empty_selection_tests {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: false,
         };
 
@@ -33376,7 +33299,6 @@ mod v6_empty_selection_tests {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: false,
         };
 
@@ -33500,7 +33422,6 @@ mod v6_empty_selection_tests {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: false,
         };
 
@@ -34496,7 +34417,6 @@ mod labeled_community_suppress_tests {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: false,
         }
     }
@@ -35086,7 +35006,6 @@ mod eor_stale_expire_tests {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: false,
         };
 
@@ -35332,7 +35251,6 @@ mod stale_sweep_per_family_tests {
                 nexthop_cache: None,
                 vrf_transport_v4: None,
                 vrf_transport_v6: None,
-                central_label_alloc: None,
                 as_sets_withdraw: false,
             }
         }
@@ -35693,7 +35611,6 @@ mod rfc4456_reflect_stamp_tests {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: false,
         }
     }
@@ -36532,7 +36449,6 @@ mod update_group_next_hop_knob_tests {
                 nexthop_cache: None,
                 vrf_transport_v4: None,
                 vrf_transport_v6: None,
-                central_label_alloc: None,
                 as_sets_withdraw: false,
             };
         };

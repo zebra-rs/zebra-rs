@@ -157,7 +157,6 @@ fn split(bgp: &mut Bgp) -> (BgpTop<'_>, &mut PeerMap) {
             nexthop_cache: None,
             vrf_transport_v4: None,
             vrf_transport_v6: None,
-            central_label_alloc: None,
             as_sets_withdraw: bgp.as_sets_withdraw,
         },
         &mut bgp.peers,

@@ -408,10 +408,13 @@ ownership is what an operator wants to see in `show mpls label table`.
 ### 5.2 BGP: chunk based
 
 **BGP allocates in chunks, sized adaptively as FRR's bgpd does.** Every
-BGP label allocator — the main task and each RIB shard, including
-pool-worker shards — holds one or more chunks taken synchronously from the
-dynamic region through its handle. BGP hands out individual labels inside
-its chunks; the RIB tracks the chunk, not the label.
+BGP label allocator that mints — the main task and the global instance's
+inline shard — holds one or more chunks taken synchronously from the
+dynamic region through its handle (`bgp/label_chunks.rs`, `LabelChunks`).
+BGP hands out individual labels inside its chunks; the RIB tracks the
+chunk, not the label. Pool-worker shards take only IPv4 unicast, which
+mints no label, so they hold no label space; a worker that mints would
+get chunks of its own the same way.
 
 Why not per label:
 
@@ -450,17 +453,31 @@ Chunk rules:
   (per-VRF, per-EVI, ESI, VPWS, Type-5 per-VRF). Each shard holds its own
   chunks for per-route labels (LU v4/v6 and VPNv4/v6 transit). There is no
   carving of one allocator's block by another.
-- **Return.** A chunk whose labels are all free goes to `Releasing` and
-  back to the RIB once its ILMs are gone, and the allocator's next size
-  resets to 128, as in FRR. Every chunk goes back when the BGP instance
-  stops.
+- **Return.** A chunk whose labels are all free goes back to the RIB once
+  its ILMs are gone, and the allocator's next size resets to 128, as in
+  FRR. BGP sends the `IlmDel` for a label in the same event that frees it,
+  and after each event returns its drained chunks as
+  `Message::LabelBlockRelease` on the same RIB client channel, so the RIB
+  frees a chunk only after it has withdrawn every ILM at its labels. Every
+  chunk goes back when the BGP instance stops (`proto_cleanup`).
 - **Exhaustion.** If the dynamic region cannot supply the next size, the
   allocator retries at halving sizes down to 128 (our addition: a nearly
   full or fragmented region still yields a small chunk). If even 128 is not
   available, allocation returns `None` and logs; the next allocation
-  retries. There is no request flag that can stick.
+  retries. There is no request flag that can stick. The failure also
+  leaves the instance starved in the `LabelSpace`, under the lock the
+  allocation failed under, and the RIB tells it (`RibRx::LocalLabelsFreed`)
+  when room may have returned: a block or label released, a commit ended
+  (it may have grown the range), or an SR block changed. BGP then labels
+  the transit rows that went without, by a forced transit reconcile:
+  their transit flags have not changed, and BGP holding its block already,
+  no grant comes either. A label BGP frees itself while starved is room
+  the RIB never hears of, its chunk staying held: the allocator notes it,
+  and BGP's upkeep after each event runs the same reconcile, behind the
+  `IlmDel` for the freed label and before drained chunks go back.
 
-What this replaces in today's BGP (from reading the code; not reproduced):
+What this replaced in BGP before phase 5 (from reading the code; not
+reproduced; 5a fixed the first three):
 
 - A shard fills itself by `carve(1024)` from the main allocator, which needs
   1024 contiguous labels inside one 1024-label block (`bgp/vrf/label.rs:99-111`):
@@ -483,6 +500,8 @@ What this replaces in today's BGP (from reading the code; not reproduced):
 - `label-mode per-route|per-nexthop` is parsed (`vrf_config.rs:501-509`)
   but unused; only per-VRF labels exist. Per-route mode, when built, mints
   from the same shard chunks.
+
+The `bgp/` line references above are to the code before 5a.
 
 ## 6. SR blocks, read by every IGP
 
@@ -810,6 +829,21 @@ Phase 6 lands in three parts. 6a is commit validation (§7), with the
 Binding-SID checks left to the headend (3c). 6b adds `show mpls label range` and `show
 mpls label table` (§8). 6c makes the dynamic range configurable (`mpls
 label-range dynamic`) and checks it.
+
+Phase 5 lands in two parts. 5a gives the global instance's inline shard
+chunks of its own (`LabelChunks` over `RibSubscriber::label_space()`,
+wired in `Bgp::new`). LU v4/v6 and VPNv4/v6 transit labels are minted
+from them rather than carved from the main task's block, so a transit
+mints whatever labels VRFs, EVIs, ESes and VPWS services hold, and
+`carve`, `SHARD_LABEL_CHUNK` and `BgpTop::central_label_alloc` are gone.
+The event loop returns a drained chunk after each event, behind its ILM
+deletions (§5.2, Return). Pool workers and per-VRF shards have no label
+space: workers take only IPv4 unicast, and LU/VPN is global-instance-only.
+A transit mint that finds the range full is retried when the RIB says
+room returned (§5.2, Exhaustion). 5b moves the main task's per-VRF, per-EVI,
+ESI and VPWS labels onto chunks of its own and retires
+`LabelBlockRequest`, `vrf_label_request_pending`, `relabel_vrf` and the
+RIB's waiting block requests.
 
 Phase 2 changes OSPF's advertised SRGB. No phase changes Adjacency-SID
 labels by itself; from phase 3, a configured Adj-SID on a dynamically held

@@ -1693,7 +1693,7 @@ impl Rib {
             );
         }
         // A block removed or shrunk leaves room.
-        self.retry_label_block_requests();
+        self.notify_label_events();
     }
 
     /// Re-resolve every tracked nexthop; where the resolution changed,
@@ -5559,8 +5559,9 @@ impl Rib {
                 self.static_vrf_v6.commit(&self.tx);
                 self.mpls_config.commit(self.tx.clone());
                 // The commit may have grown the dynamic range
-                // (`ConfigManager::commit` applies it).
-                self.retry_label_block_requests();
+                // (`ConfigManager::commit` applies it): serve a waiting
+                // block request, and tell a starved BGP label chunk.
+                self.notify_label_events();
                 self.block_config.commit(self.tx.clone());
                 self.locator_config.commit(self.tx.clone());
                 self.repl_seg_config.commit(self.tx.clone());
@@ -7729,6 +7730,33 @@ mod block_request_tests {
             .await;
         assert_eq!(granted(&mut rx), vec![(25024, 1024)]);
         assert!(rib.waiting_block_requests.is_empty());
+    }
+
+    /// Whether BGP was told that room returned.
+    fn told(rx: &mut UnboundedReceiver<RibRx>) -> bool {
+        std::iter::from_fn(|| rx.try_recv().ok()).any(|msg| matches!(msg, RibRx::LocalLabelsFreed))
+    }
+
+    /// An owner that found the dynamic range full (a BGP label chunk) is
+    /// told when a commit ends — the commit may have grown the range —
+    /// and when a segment-routing block goes, not only when labels are
+    /// released: BGP holding its block already, nothing else would wake
+    /// it.
+    #[tokio::test]
+    async fn a_starved_owner_is_told_at_commit_end_and_on_a_block_change() {
+        let (mut rib, mut rx) = rib_with_bgp();
+        let bgp = ProtoId::from_raw(3);
+        rib.label_space.lock().starve(bgp);
+        rib.process_cm_msg(ConfigRequest::new(Vec::new(), ConfigOp::CommitEnd))
+            .await;
+        assert!(told(&mut rx), "at commit end");
+        rib.process_cm_msg(ConfigRequest::new(Vec::new(), ConfigOp::CommitEnd))
+            .await;
+        assert!(!told(&mut rx), "once per starving");
+
+        rib.label_space.lock().starve(bgp);
+        rib.reserve_sr_blocks();
+        assert!(told(&mut rx), "on a block change");
     }
 
     /// A block given back makes room for a waiting request.
