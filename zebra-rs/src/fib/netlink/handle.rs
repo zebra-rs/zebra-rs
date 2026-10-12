@@ -264,6 +264,47 @@ pub(crate) fn leftover_rtype(protocol: RouteProtocol, table_id: u32) -> Option<(
     }
 }
 
+/// An ILM an earlier run of zebra-rs left in the kernel's MPLS table, found
+/// by the startup dump: one under a protocol number zebra-rs installs ILMs
+/// with ([`route_protocol`]). Its label, its owner's type, and its first
+/// next hop's gateway, which tells OSPFv2's from OSPFv3's. The MPLS table
+/// is one for the node, so unlike main-table BGP routes, BGP's ILMs are
+/// ours to claim.
+pub(crate) fn ilm_leftover_from_msg(
+    msg: &RouteMessage,
+) -> Option<(u32, RibType, Option<std::net::IpAddr>)> {
+    if msg.header.address_family != AddressFamily::Mpls {
+        return None;
+    }
+    let rtype = match msg.header.protocol {
+        RouteProtocol::Ospf => RibType::Ospf,
+        RouteProtocol::Isis => RibType::Isis,
+        RouteProtocol::Bgp => RibType::Bgp,
+        RouteProtocol::Zebra => RibType::Static,
+        _ => return None,
+    };
+    let via = |attrs: &[RouteAttribute]| {
+        attrs.iter().find_map(|attr| match attr {
+            RouteAttribute::Via(RouteVia::Inet(addr)) => Some(std::net::IpAddr::V4(*addr)),
+            RouteAttribute::Via(RouteVia::Inet6(addr)) => Some(std::net::IpAddr::V6(*addr)),
+            _ => None,
+        })
+    };
+    let label = msg.attributes.iter().find_map(|attr| match attr {
+        RouteAttribute::Destination(RouteAddress::Mpls(label)) => Some(label.label),
+        _ => None,
+    })?;
+    let gateway = via(&msg.attributes).or_else(|| {
+        msg.attributes.iter().find_map(|attr| match attr {
+            RouteAttribute::MultiPath(nexthops) => {
+                nexthops.iter().find_map(|nh| via(&nh.attributes))
+            }
+            _ => None,
+        })
+    });
+    Some((label, rtype, gateway))
+}
+
 /// The `rtm_protocol` zebra-rs installs a route of `rtype` with. Static
 /// routes use `RTPROT_ZEBRA` (11), not `RTPROT_STATIC` (4): the latter is
 /// what `ip route add` gives an operator's route, so a startup dump could
@@ -3713,17 +3754,15 @@ impl FibHandle {
         }
     }
 
-    pub async fn ilm_add(&self, label: u32, ilm: &IlmEntry) {
-        self.ilm_install(label, ilm, false).await;
-    }
-
-    /// Install an ILM **replacing** any existing route at `label`
-    /// (`NLM_F_REPLACE`) instead of failing on collision. Used by the
-    /// Mirror Context egress redirect to swap a BGP `DecapVrf` VPN-label
-    /// route for a redirect swap (and to restore it), since the kernel
-    /// holds one route per label and a plain add is `CREATE | EXCL`.
+    /// Install an ILM, **replacing** whatever route the kernel holds at
+    /// `label` (`NLM_F_REPLACE`): the kernel holds one route per label.
+    /// The RIB's winner for a label replaces the previous one in place
+    /// (`Rib::ilm_select_sync`), or an earlier run's leftover, which an
+    /// exclusive create failed on with EEXIST; the Mirror Context egress
+    /// redirect swaps a BGP `DecapVrf` VPN-label route for a redirect swap
+    /// and back.
     pub async fn ilm_replace(&self, label: u32, ilm: &IlmEntry) {
-        self.ilm_install(label, ilm, true).await;
+        self.ilm_install(label, ilm).await;
     }
 
     /// Tee an ILM to the cradle eBPF data plane. `DecapVrf`/`ContextLabel`
@@ -3794,7 +3833,7 @@ impl FibHandle {
         }
     }
 
-    async fn ilm_install(&self, label: u32, ilm: &IlmEntry, replace: bool) {
+    async fn ilm_install(&self, label: u32, ilm: &IlmEntry) {
         self.cradle_ilm_program(label, ilm).await;
 
         // EVPN-over-MPLS decap is cradle-only. Linux has no action that pops
@@ -3806,11 +3845,7 @@ impl FibHandle {
             return;
         }
 
-        let create_flags = if replace {
-            NLM_F_REPLACE | NLM_F_CREATE
-        } else {
-            NLM_F_EXCL | NLM_F_CREATE
-        };
+        let create_flags = NLM_F_REPLACE | NLM_F_CREATE;
         let mut msg = RouteMessage::default();
         msg.header.address_family = AddressFamily::Mpls;
         msg.header.destination_prefix_length = 20;
@@ -3957,10 +3992,16 @@ impl FibHandle {
         }
     }
 
-    pub async fn ilm_del(&self, label: u32, ilm: &IlmEntry) {
+    /// Untee `label` from the cradle data plane alone, leaving the kernel
+    /// route to be replaced in place (`Rib::ilm_select_sync`).
+    pub async fn ilm_untee(&self, label: u32) {
         if let Some(cradle) = &self.cradle {
             cradle.ilm_uninstall(label).await;
         }
+    }
+
+    pub async fn ilm_del(&self, label: u32, ilm: &IlmEntry) {
+        self.ilm_untee(label).await;
         // Never installed into the kernel (see `ilm_install`), so there is
         // nothing to delete — and asking would log a spurious ESRCH.
         if matches!(ilm.ilm_type, IlmType::DecapBd { .. }) {

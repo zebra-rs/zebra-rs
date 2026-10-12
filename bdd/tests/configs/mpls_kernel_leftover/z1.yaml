@@ -1,0 +1,26 @@
+# z1 — BGP with one VRF: the VRF takes its MPLS label from the first
+# 128-label chunk BGP takes from the dynamic range, which steps over a
+# label an earlier run left.
+vrf:
+- name: vrf-a
+  ipv4:
+    route-target:
+      import:
+      - 65001:100
+      export:
+      - 65001:100
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.1
+    neighbor:
+    - remote-address: 192.168.0.2
+      remote-as: 65001
+      enabled: true
+      afi-safi:
+      - name: vpnv4
+        enabled: true
+    vrf:
+    - name: vrf-a
+      rd: 65001:1

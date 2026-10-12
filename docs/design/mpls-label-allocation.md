@@ -250,10 +250,10 @@ LabelSpace (owned by Rib, created in Rib::new)
     stale `IlmDel` can only remove its own owner's candidate (fixes
     OSPFv2/OSPFv3 overwriting each other at one label).
 - **Kernel seeding.** At startup the RIB dumps the kernel's AF_MPLS routes
-  and marks their labels `Stale`. A protocol that re-learns one takes it
-  over (graceful restart); the rest are swept, like `SweepStale` for IP
-  routes, once the protocols have converged. ILM installs of labels we own
-  use `NLM_F_REPLACE`.
+  and marks the labels of those under one of our protocol numbers
+  `Stale`. A protocol that re-learns one takes it over (graceful restart);
+  the rest are swept, like `SweepStale` for IP routes, once the protocols
+  have converged. ILM installs use `NLM_F_REPLACE`.
 
 ### 4.1 Where it lives
 
@@ -889,9 +889,28 @@ re-reserve the Adjacency-SID labels its checkpoint restores:
   Adjacency-SIDs could change across a restart. IS-IS checkpoints no
   labels yet (its checkpoint module defers them).
 
-7b is the kernel seeding: the startup AF_MPLS dump, `Stale` labels and
-their sweep, and `NLM_F_REPLACE` installs. A restored label found `Stale`
-is then taken over by `reserve`.
+7b is the kernel seeding:
+- The startup dump (`fib_dump`) reads the kernel's MPLS table. An ILM
+  under one of our protocol numbers (OSPF, IS-IS, BGP, and `RTPROT_ZEBRA`
+  for static bindings) is an earlier run's leftover: a crash, or a
+  graceful restart, which keeps forwarding through it. The MPLS table is
+  one per node, so BGP's are ours too, unlike main-table BGP routes.
+- It enters the RIB's ILM table stale and installed (`Rib::ilm_leftover`),
+  and the label space's stale set, which no pool or chunk hands out. A
+  graceful restart's `reserve`, or a configured SID's `claim`, takes one
+  over; `show mpls label table` lists the rest as `leftover stale`, and
+  `show mpls ilm` marks them `S` ("Earlier run").
+- Any live ILM installed at a leftover's label replaces it.
+  `ilm_select_sync` installs the winner with `NLM_F_REPLACE` and no longer
+  deletes the old route first: a content change reaches the kernel with
+  no gap, and an earlier run's route at the label no longer fails the
+  install with EEXIST, the leftover forwarding on. The kernel route is
+  deleted first only when no winner is left, or the winner is cradle-only.
+- Leftovers nobody replaced are swept from the kernel and the label space
+  (`Rib::ilm_sweep_leftovers`): OSPF's by its own `SweepStale` once it has
+  converged, v2's apart from v3's by their gateways; the rest after the
+  startup grace period (`--leftover-sweep-time`, default 120 s), which
+  skips OSPF's since a graceful restart can outlast it.
 
 Phase 2 changes OSPF's advertised SRGB. No phase changes Adjacency-SID
 labels by itself; from phase 3, a configured Adj-SID on a dynamically held

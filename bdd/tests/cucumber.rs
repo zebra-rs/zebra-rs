@@ -571,6 +571,36 @@ async fn start_zebra_rs(world: &mut World, namespace: String) {
     );
 }
 
+/// Start zebra-rs with `--leftover-sweep-time`: the routes and MPLS labels
+/// an earlier run left in the kernel that nothing replaced are swept that
+/// many seconds after startup, instead of after the default 120.
+#[when(expr = "I start zebra-rs in namespace {string} sweeping leftovers after {int} seconds")]
+async fn start_zebra_rs_leftover_sweep(world: &mut World, namespace: String, secs: u64) {
+    let scoped = world.ns(&namespace);
+    let log_file = format!("logs/{}.log", scoped);
+    world.mark_log_start(&scoped);
+    let pid_file = world.pid_file(&namespace);
+    let _child = netns::spawn_in_netns_env(
+        &scoped,
+        &[],
+        "zebra-rs",
+        &[
+            "--daemon",
+            "--log-output=file",
+            &format!("--log-file={}", log_file),
+            &format!("--pid-file={}", pid_file),
+            &format!("--leftover-sweep-time={secs}"),
+        ],
+    )
+    .await
+    .expect("Failed to start zebra-rs");
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    println!(
+        "✓ zebra-rs started in namespace {} sweeping leftovers after {}s (pid file {})",
+        scoped, secs, pid_file
+    );
+}
+
 #[when(expr = "I start zebra-rs in namespace {string} with {int} shards")]
 async fn start_zebra_rs_sharded(world: &mut World, namespace: String, shards: usize) {
     let scoped = world.ns(&namespace);

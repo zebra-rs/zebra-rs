@@ -9,7 +9,7 @@ use crate::rib::util::IpNetExt;
 use crate::rib::{Link, LinkFlagsExt, Nexthop};
 
 use super::entry::RibEntry;
-use super::inst::{IlmEntry, RT_TABLE_MAIN, Rib};
+use super::inst::{IlmEntry, IlmType, RT_TABLE_MAIN, Rib};
 use super::nexthop::NexthopUni;
 use super::tracing::{rib_interface, rib_nexthop, rib_route};
 use super::{
@@ -142,6 +142,10 @@ impl Rib {
             }
         }
         self.legacy_statics.clear();
+        // And the leftover ILMs nobody replaced, but OSPF's, which it
+        // sweeps itself, as it does its routes: a graceful restart's grace
+        // period can outlast this one.
+        self.ilm_sweep_leftovers(|e| e.rtype != RibType::Ospf).await;
         let srv6 = self.fib_handle.sweep_srv6_leftovers().await;
         if srv6 > 0 {
             tracing::info!("removed {srv6} SRv6 route(s) an earlier run left");
@@ -981,13 +985,47 @@ impl Rib {
         };
         let prev = self.ilm_installed(label);
         let entries = self.ilm.entry(label).or_default();
+        // An earlier run's leftover at the label gives way to any live
+        // entry: the kernel holds one route per label, and the winner
+        // replaces it there.
+        let had_leftover = entries.iter().any(|e| e.stale);
+        entries.retain(|e| !e.stale);
         // One candidate per protocol instance: drop this owner's previous
         // entry before pushing the new one (mirrors `rib_replace`). Keyed
         // by owner as well as rtype: OSPFv2 and OSPFv3 both install as
         // `Ospf`, and one must not replace the other's candidate.
         entries.retain(|e| !(e.rtype == ilm.rtype && e.owner == ilm.owner));
         entries.push(ilm);
+        if had_leftover {
+            self.label_space.lock().unstale(label);
+        }
         self.ilm_select_sync(label, prev).await;
+    }
+
+    /// The startup dump found an ILM at `label` under the protocol number
+    /// of `rtype`, which an earlier run of zebra-rs left (a crash, or a
+    /// graceful restart, which keeps forwarding). It enters the table as
+    /// already installed, and the label space keeps the label from being
+    /// handed out, until a live entry replaces it or a sweep removes it
+    /// (`ilm_sweep_leftovers`). `gateway` is its first next hop's, which
+    /// tells OSPFv2's from OSPFv3's.
+    pub fn ilm_leftover(&mut self, label: u32, rtype: RibType, gateway: Option<std::net::IpAddr>) {
+        if self.ilm.contains_key(&label) {
+            return;
+        }
+        let nexthop = gateway.map_or_else(Nexthop::default, |addr| {
+            Nexthop::Uni(NexthopUni::new(addr, 0, Vec::new()))
+        });
+        let entry = IlmEntry {
+            nexthop,
+            selected: true,
+            stale: true,
+            ..IlmEntry::new(rtype)
+        };
+        self.ilm.insert(label, vec![entry]);
+        self.label_space
+            .lock()
+            .add_stale(label, leftover_proto_name(rtype));
     }
 
     pub async fn ilm_del(&mut self, label: u32, ilm: IlmEntry) {
@@ -1045,11 +1083,25 @@ impl Rib {
             None
         };
 
+        // The winner replaces what the kernel holds at the label
+        // (`NLM_F_REPLACE`), so a same-protocol content change reaches it
+        // with no gap, and an earlier run's leftover there cannot fail the
+        // install with EEXIST. Only the cradle tee of the old entry goes
+        // first, as before; the kernel route goes too when no winner is
+        // left, or when the winner never reaches the kernel (cradle-only
+        // EVPN decap) and the old one did.
         if let Some(prev) = &prev {
-            self.fib_handle.ilm_del(label, prev).await;
+            let replaced = winner
+                .as_ref()
+                .is_some_and(|win| ilm_in_kernel(win) || !ilm_in_kernel(prev));
+            if replaced {
+                self.fib_handle.ilm_untee(label).await;
+            } else {
+                self.fib_handle.ilm_del(label, prev).await;
+            }
         }
         if let Some(win) = &winner {
-            self.fib_handle.ilm_add(label, win).await;
+            self.fib_handle.ilm_replace(label, win).await;
         }
     }
 
@@ -2593,6 +2645,24 @@ fn rib_next(ribs: &RibEntries) -> Option<usize> {
 /// table: lowest admin distance, then lowest metric, then protocol
 /// order, then owner (the older subscription) as a stable final
 /// tie-break. Returns the index into `entries`, or `None` when empty.
+/// Whether an ILM entry is programmed into the kernel's MPLS table, not
+/// the cradle data plane alone (EVPN-over-MPLS decap: Linux cannot pop a
+/// label into a bridge).
+fn ilm_in_kernel(entry: &IlmEntry) -> bool {
+    !matches!(entry.ilm_type, IlmType::DecapBd { .. })
+}
+
+/// The protocol an earlier run's leftover ILM of `rtype` is listed under
+/// in `show mpls label table`.
+fn leftover_proto_name(rtype: RibType) -> &'static str {
+    match rtype {
+        RibType::Ospf => "ospf",
+        RibType::Isis => "isis",
+        RibType::Bgp => "bgp",
+        _ => "static",
+    }
+}
+
 fn ilm_next(entries: &[IlmEntry]) -> Option<usize> {
     entries
         .iter()

@@ -85,6 +85,12 @@ pub struct LabelSpace {
     reserved: Vec<LabelBlock>,
     /// Single labels of IGP instances' pools, held or on their way back.
     local: BTreeMap<u32, Local>,
+    /// Labels an earlier run of zebra-rs left in the kernel's MPLS table,
+    /// found by the startup dump, with the protocol whose they were:
+    /// handed out to nobody until the RIB sweeps them or a protocol takes
+    /// one over (a graceful restart's `reserve`, a configured SID's
+    /// `claim`, or its own ILM installed there).
+    stale: BTreeMap<u32, String>,
     /// Owners whose pool found no free label: told when labels are freed
     /// (`take_starved`), so they can try again.
     starved: BTreeSet<ProtoId>,
@@ -120,6 +126,8 @@ pub enum EntryKind {
     Local,
     /// A label a pool claimed for a configured SID.
     Configured,
+    /// A label an earlier run of zebra-rs left in the kernel.
+    Leftover,
 }
 
 /// Where a handed-out label or block is in its life.
@@ -131,6 +139,8 @@ pub enum EntryState {
     Releasing,
     /// Given back, waiting for the owner's ILM entry at it to go.
     Draining,
+    /// Found in the kernel at startup; swept unless taken over.
+    Stale,
 }
 
 /// A handed-out block or local label, for `show mpls label table`
@@ -175,6 +185,7 @@ impl LabelSpace {
             held: BTreeMap::new(),
             reserved: Vec::new(),
             local: BTreeMap::new(),
+            stale: BTreeMap::new(),
             starved: BTreeSet::new(),
             pools: BTreeMap::new(),
             claims: BTreeMap::new(),
@@ -198,6 +209,7 @@ impl LabelSpace {
             .map(|(start, h)| (*start, h.end))
             .chain(self.reserved.iter().map(|b| (b.start, b.end)))
             .chain(self.local.keys().map(|l| (*l, l + 1)))
+            .chain(self.stale.keys().map(|l| (*l, l + 1)))
             .collect();
         taken.sort_unstable();
         let mut start = self.dynamic.start;
@@ -276,6 +288,8 @@ impl LabelSpace {
         match self.local.get(&label).copied() {
             None if self.in_held_block(label) => self.refused(pool),
             None => {
+                // An earlier run's leftover there is taken over.
+                self.stale.remove(&label);
                 self.local.insert(label, Local::Claimed(pool));
                 Claim::Granted
             }
@@ -343,9 +357,11 @@ impl LabelSpace {
         owner: Option<ProtoId>,
         range: RangeInclusive<u32>,
     ) -> Option<u32> {
-        let found = range
-            .into_iter()
-            .find(|label| !self.local.contains_key(label) && !self.in_held_block(*label));
+        let found = range.into_iter().find(|label| {
+            !self.local.contains_key(label)
+                && !self.stale.contains_key(label)
+                && !self.in_held_block(*label)
+        });
         let Some(label) = found else {
             // A label on its way back may be freed soon; say so then.
             if let Some(owner) = owner {
@@ -360,7 +376,9 @@ impl LabelSpace {
     /// `pool` takes `label` back for a dynamic SID, as it held it before a
     /// graceful restart: if the label is in `range`, and no pool holds it,
     /// gives it back or waits for it, and no handed-out block covers it.
-    /// One `pool` holds already counts. Whether `pool` holds it now.
+    /// One `pool` holds already counts, and so does one the earlier run
+    /// left in the kernel (`stale`): that is this restart's own label.
+    /// Whether `pool` holds it now.
     fn reserve_local(&mut self, pool: u64, range: RangeInclusive<u32>, label: u32) -> bool {
         if self.local.get(&label) == Some(&Local::Held(pool)) {
             return true;
@@ -372,8 +390,22 @@ impl LabelSpace {
         {
             return false;
         }
+        self.stale.remove(&label);
         self.local.insert(label, Local::Held(pool));
         true
+    }
+
+    /// The startup dump found `label` in the kernel's MPLS table, left by
+    /// an earlier run of zebra-rs under `proto`'s protocol number: nobody
+    /// is handed it until it is swept or taken over.
+    pub fn add_stale(&mut self, label: u32, proto: &str) {
+        self.stale.insert(label, proto.to_string());
+    }
+
+    /// `label` is no earlier run's leftover any more: swept from the
+    /// kernel, or a protocol installed its own ILM there. Whether it was.
+    pub fn unstale(&mut self, label: u32) -> bool {
+        self.stale.remove(&label).is_some()
     }
 
     /// Whether a handed-out block covers `label`.
@@ -592,6 +624,25 @@ impl LabelSpace {
                 claimant: self.claims.get(label).map(instance),
             }
         }));
+        // An earlier run's leftovers, runs of consecutive labels of one
+        // protocol as one entry.
+        let mut stale: Vec<LabelEntry> = Vec::new();
+        for (label, proto) in &self.stale {
+            match stale.last_mut() {
+                Some(e) if e.last + 1 == *label && e.holder == Holder::Proto(proto.clone()) => {
+                    e.last = *label;
+                }
+                _ => stale.push(LabelEntry {
+                    first: *label,
+                    last: *label,
+                    holder: Holder::Proto(proto.clone()),
+                    kind: EntryKind::Leftover,
+                    state: EntryState::Stale,
+                    claimant: None,
+                }),
+            }
+        }
+        entries.extend(stale);
         entries.sort_by_key(|e| e.first);
         entries
     }
@@ -1061,6 +1112,63 @@ mod tests {
         let mut low = node.pool(24000, 24009);
         assert_eq!(node.lock().alloc("bgp", 16), Some(block(24000, 24016)));
         assert!(!low.reserve(24003), "in bgp's block");
+    }
+}
+
+#[cfg(test)]
+mod stale_tests {
+    use super::*;
+
+    /// An earlier run's leftover is handed out to nobody, but a graceful
+    /// restart takes its own back (`reserve`), and a configured SID claims
+    /// one (`claim`): either takes it over. Swept, it is free.
+    #[test]
+    fn a_stale_label_is_taken_over_not_handed_out() {
+        let node = SharedLabelSpace::default();
+        node.lock().add_stale(15000, "ospf");
+        node.lock().add_stale(15001, "ospf");
+        node.lock().add_stale(15002, "isis");
+        let mut pool = node.pool(15000, 15009);
+        assert_eq!(pool.allocate(), Some(15003));
+        let mut restarted = node.pool(15000, 15009);
+        assert!(restarted.reserve(15000));
+        assert_eq!(restarted.claim(15001), Claim::Granted);
+        assert!(!node.lock().unstale(15000), "taken over");
+        assert!(!node.lock().unstale(15001), "taken over");
+        assert!(node.lock().unstale(15002), "swept");
+        assert_eq!(pool.allocate(), Some(15002));
+    }
+
+    /// `show mpls label table` lists leftovers as runs of one protocol's
+    /// consecutive labels.
+    #[test]
+    fn leftovers_are_listed_in_runs() {
+        let mut space = LabelSpace::new();
+        for (label, proto) in [
+            (16000, "ospf"),
+            (16001, "ospf"),
+            (16003, "ospf"),
+            (16004, "isis"),
+        ] {
+            space.add_stale(label, proto);
+        }
+        let runs: Vec<(u32, u32, Holder)> = space
+            .entries()
+            .into_iter()
+            .map(|e| {
+                assert_eq!((e.kind, e.state), (EntryKind::Leftover, EntryState::Stale));
+                (e.first, e.last, e.holder)
+            })
+            .collect();
+        let proto = |p: &str| Holder::Proto(p.to_string());
+        assert_eq!(
+            runs,
+            vec![
+                (16000, 16001, proto("ospf")),
+                (16003, 16003, proto("ospf")),
+                (16004, 16004, proto("isis")),
+            ]
+        );
     }
 }
 
