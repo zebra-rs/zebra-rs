@@ -222,6 +222,7 @@ fn kind_text(kind: EntryKind) -> &'static str {
         EntryKind::Block => "block",
         EntryKind::Local => "local",
         EntryKind::Configured => "configured SID",
+        EntryKind::Leftover => "leftover",
     }
 }
 
@@ -231,6 +232,7 @@ fn state_text(state: EntryState) -> &'static str {
         EntryState::Claimed => "claimed",
         EntryState::Releasing => "releasing",
         EntryState::Draining => "draining",
+        EntryState::Stale => "stale",
     }
 }
 

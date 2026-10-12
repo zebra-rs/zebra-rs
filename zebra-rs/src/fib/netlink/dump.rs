@@ -28,6 +28,9 @@ pub async fn fib_dump(rib: &mut Rib) -> Result<()> {
     let nexthops = nexthop_dump(rib, rib.fib_handle.handle.clone()).await;
     route_dump(rib, rib.fib_handle.handle.clone(), IpVersion::V4, &nexthops).await?;
     route_dump(rib, rib.fib_handle.handle.clone(), IpVersion::V6, &nexthops).await?;
+    // The MPLS table: an earlier run's ILMs, kept from the label space
+    // until replaced or swept.
+    mpls_dump(rib, rib.fib_handle.handle.clone()).await;
     // Neighbor tables: ARP (AF_INET), NDP (AF_INET6), and bridge FDB
     // (AF_BRIDGE). Without these, neighbor entries that existed before
     // zebra-rs started are invisible — only post-start RTM_NEWNEIGH
@@ -97,6 +100,40 @@ async fn mdb_dump(rib: &mut Rib, mut handle: rtnetlink::Handle) {
                 rib.process_fib_msg(FibMessage::NewMdb(entry)).await;
             }
         }
+    }
+}
+
+/// Dump the kernel's MPLS table (`RTM_GETROUTE`, AF_MPLS) for the ILMs an
+/// earlier run of zebra-rs left (a crash, or a graceful restart, which
+/// keeps forwarding through them): each enters the RIB stale, and its
+/// label is handed out to nobody until a live ILM replaces it or it is
+/// swept (`Rib::ilm_leftover`). Without this an install at such a label
+/// failed with EEXIST and the leftover kept forwarding. Best-effort: a
+/// kernel without MPLS returns an error we log.
+async fn mpls_dump(rib: &mut Rib, mut handle: rtnetlink::Handle) {
+    let mut route = netlink_packet_route::route::RouteMessage::default();
+    route.header.address_family = AddressFamily::Mpls;
+    let mut req = netlink_packet_core::NetlinkMessage::from(RouteNetlinkMessage::GetRoute(route));
+    req.header.flags = NLM_F_REQUEST | NLM_F_DUMP;
+    req.finalize();
+    let mut resp = match handle.request(req) {
+        Ok(resp) => resp,
+        Err(e) => {
+            tracing::warn!("fib: AF_MPLS route dump request failed ({e}); skipping");
+            return;
+        }
+    };
+    let mut found = 0;
+    while let Some(msg) = resp.next().await {
+        if let NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewRoute(route)) = msg.payload
+            && let Some((label, rtype, gateway)) = super::handle::ilm_leftover_from_msg(&route)
+        {
+            rib.ilm_leftover(label, rtype, gateway);
+            found += 1;
+        }
+    }
+    if found > 0 {
+        tracing::info!("{found} MPLS label(s) of an earlier run found");
     }
 }
 

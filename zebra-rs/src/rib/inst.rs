@@ -858,6 +858,11 @@ pub struct IlmEntry {
     /// `rtype`, so one instance's withdrawal never removes another's:
     /// OSPFv2 and OSPFv3 both install as `RibType::Ospf`.
     pub owner: Option<crate::rib::client::ProtoId>,
+    /// An ILM an earlier run of zebra-rs left in the kernel, found by the
+    /// startup dump (`Rib::ilm_leftover`): already installed, under its
+    /// protocol's `rtype`. Any live candidate installed at the label takes
+    /// its place; one nobody replaces is swept (`Rib::ilm_sweep_leftovers`).
+    pub stale: bool,
 }
 
 impl IlmEntry {
@@ -872,6 +877,7 @@ impl IlmEntry {
             selected: false,
             local_pop: false,
             owner: None,
+            stale: false,
         }
     }
 }
@@ -4162,6 +4168,13 @@ impl Rib {
             }
             Message::SweepStale { rtype, v6 } => {
                 self.sweep_stale(rtype, v6, table_id).await;
+                // The sender's leftover ILMs too: the MPLS table is global,
+                // so only from the default table's instance, and OSPFv2's
+                // apart from OSPFv3's by their gateways.
+                if table_id == RT_TABLE_MAIN {
+                    self.ilm_sweep_leftovers(|e| e.rtype == rtype && ilm_gateways_v6(e) == v6)
+                        .await;
+                }
             }
             Message::SweepLeftovers => {
                 self.sweep_leftovers().await;
@@ -5974,6 +5987,36 @@ impl Rib {
     }
 }
 
+impl Rib {
+    /// Withdraw the leftover ILMs of an earlier run (`IlmEntry::stale`)
+    /// that `sweep` picks: no live entry replaced them, so they lead
+    /// nowhere now. Each leaves the kernel, and its label the label space's
+    /// stale set, so it can be handed out again; an owner that found no
+    /// label is told.
+    pub(super) async fn ilm_sweep_leftovers(&mut self, sweep: impl Fn(&IlmEntry) -> bool) {
+        // A leftover is alone at its label: a live entry replaces it.
+        let labels: Vec<u32> = self
+            .ilm
+            .iter()
+            .filter(|(_, entries)| entries.iter().any(|e| e.stale && sweep(e)))
+            .map(|(label, _)| *label)
+            .collect();
+        if labels.is_empty() {
+            return;
+        }
+        for label in &labels {
+            if let Some(entries) = self.ilm.remove(label) {
+                for entry in entries.iter().filter(|e| e.selected) {
+                    self.fib_handle.ilm_del(*label, entry).await;
+                }
+            }
+            self.label_space.lock().unstale(*label);
+        }
+        tracing::info!("removed {} MPLS label(s) an earlier run left", labels.len());
+        self.notify_label_events();
+    }
+}
+
 /// Whether an ILM entry forwards to IPv6 gateways. Tells OSPFv3's
 /// entries from OSPFv2's at cleanup: both carry `RibType::Ospf`, and
 /// each version's gateways are of its own family.
@@ -7641,5 +7684,162 @@ mod label_wake_tests {
         rib.label_space.lock().starve(bgp);
         rib.reserve_sr_blocks();
         assert!(told(&mut rx), "on a block change");
+    }
+}
+
+#[cfg(test)]
+mod ilm_leftover_tests {
+    //! ILMs an earlier run of zebra-rs left in the kernel's MPLS table
+    //! (docs/design/mpls-label-allocation.md §4, kernel seeding): found by
+    //! the startup dump, kept stale and out of the label space until a live
+    //! ILM replaces one or a sweep removes it.
+    use super::*;
+    use crate::rib::label_space::{EntryKind, EntryState};
+
+    fn live(rtype: RibType, gateway: &str) -> IlmEntry {
+        IlmEntry {
+            ilm_type: IlmType::Node(1),
+            nexthop: Nexthop::Uni(NexthopUni {
+                addr: gateway.parse().unwrap(),
+                ..Default::default()
+            }),
+            ..IlmEntry::new(rtype)
+        }
+    }
+
+    /// The labels the label space lists as an earlier run's leftovers.
+    fn stale(rib: &Rib) -> Vec<(u32, u32)> {
+        rib.label_space
+            .lock()
+            .entries()
+            .into_iter()
+            .filter(|e| e.kind == EntryKind::Leftover && e.state == EntryState::Stale)
+            .map(|e| (e.first, e.last))
+            .collect()
+    }
+
+    /// A leftover enters the table installed and stale, and its label is
+    /// handed out to nobody: a pool over it, and a dynamic block, step
+    /// around it.
+    #[tokio::test]
+    async fn a_leftover_is_kept_out_of_the_label_space() {
+        let mut rib = Rib::new(false).expect("rib");
+        rib.ilm_leftover(15000, RibType::Isis, Some("10.0.0.2".parse().unwrap()));
+        rib.ilm_leftover(24000, RibType::Bgp, None);
+        let entry = &rib.ilm[&15000][0];
+        assert!(entry.stale && entry.selected);
+        assert_eq!(stale(&rib), vec![(15000, 15000), (24000, 24000)]);
+        let mut pool = rib.label_space.pool(15000, 15999);
+        assert_eq!(pool.allocate(), Some(15001));
+        let block = rib.label_space.lock().alloc("bgp", 128).unwrap();
+        assert_eq!(block.start, 24001);
+    }
+
+    /// Any live ILM at a leftover's label replaces it — the kernel holds
+    /// one route per label — and the label is no leftover any more.
+    #[tokio::test]
+    async fn a_live_ilm_replaces_a_leftover() {
+        let mut rib = Rib::new(false).expect("rib");
+        rib.ilm_leftover(16001, RibType::Ospf, Some("10.0.0.2".parse().unwrap()));
+        rib.ilm_add(16001, live(RibType::Isis, "10.0.0.3")).await;
+        let entries = &rib.ilm[&16001];
+        assert_eq!(entries.len(), 1);
+        assert!(!entries[0].stale && entries[0].selected);
+        assert_eq!(entries[0].rtype, RibType::Isis);
+        assert!(stale(&rib).is_empty());
+    }
+
+    /// OSPF's sweep, once it has converged, takes its own leftovers, v2's
+    /// apart from v3's by their gateways; the grace-period sweep takes
+    /// everyone else's, but OSPF's, which may still be restarting.
+    #[tokio::test]
+    async fn sweeps_take_the_leftovers_nobody_replaced() {
+        let mut rib = Rib::new(false).expect("rib");
+        rib.ilm_leftover(16001, RibType::Ospf, Some("10.0.0.2".parse().unwrap()));
+        rib.ilm_leftover(16002, RibType::Ospf, Some("fe80::2".parse().unwrap()));
+        rib.ilm_leftover(16003, RibType::Isis, Some("10.0.0.3".parse().unwrap()));
+        rib.ilm_leftover(100, RibType::Static, Some("10.0.0.4".parse().unwrap()));
+        let sweep = |v6| Message::SweepStale {
+            rtype: RibType::Ospf,
+            v6,
+        };
+        rib.process_msg(sweep(false), RT_TABLE_MAIN).await;
+        assert!(!rib.ilm.contains_key(&16001), "OSPFv2's");
+        assert!(rib.ilm.contains_key(&16002) && rib.ilm.contains_key(&16003));
+        rib.process_msg(Message::SweepLeftovers, RT_TABLE_MAIN)
+            .await;
+        assert!(!rib.ilm.contains_key(&16003) && !rib.ilm.contains_key(&100));
+        assert!(rib.ilm.contains_key(&16002), "OSPF sweeps its own");
+        rib.process_msg(sweep(true), RT_TABLE_MAIN).await;
+        assert!(rib.ilm.is_empty());
+        assert!(stale(&rib).is_empty());
+        let mut pool = rib.label_space.pool(16000, 16999);
+        assert_eq!(pool.allocate(), Some(16000));
+        assert_eq!(pool.allocate(), Some(16001), "swept: free again");
+    }
+
+    /// A VRF's sweep (its table) leaves the global MPLS table alone.
+    #[tokio::test]
+    async fn a_vrf_instances_sweep_leaves_the_leftovers() {
+        let mut rib = Rib::new(false).expect("rib");
+        rib.ilm_leftover(16001, RibType::Ospf, Some("10.0.0.2".parse().unwrap()));
+        let msg = Message::SweepStale {
+            rtype: RibType::Ospf,
+            v6: false,
+        };
+        rib.process_msg(msg, 1000).await;
+        assert!(rib.ilm.contains_key(&16001));
+    }
+
+    /// The dump's parser: an AF_MPLS route under one of our protocol
+    /// numbers is a leftover, with its gateway; anything else is not.
+    #[test]
+    fn the_dump_takes_ilms_under_our_protocol_numbers() {
+        use crate::fib::netlink::ilm_leftover_from_msg;
+        use netlink_packet_route::AddressFamily;
+        use netlink_packet_route::route::{
+            MplsLabel, RouteAddress, RouteAttribute, RouteMessage, RouteNextHop, RouteProtocol,
+            RouteVia,
+        };
+        let route = |protocol, via: Option<RouteAttribute>| {
+            let mut msg = RouteMessage::default();
+            msg.header.address_family = AddressFamily::Mpls;
+            msg.header.protocol = protocol;
+            msg.attributes
+                .push(RouteAttribute::Destination(RouteAddress::Mpls(MplsLabel {
+                    label: 100,
+                    traffic_class: 0,
+                    bottom_of_stack: true,
+                    ttl: 0,
+                })));
+            msg.attributes.extend(via);
+            msg
+        };
+        let v4 = RouteAttribute::Via(RouteVia::Inet("192.0.2.1".parse().unwrap()));
+        assert_eq!(
+            ilm_leftover_from_msg(&route(RouteProtocol::Zebra, Some(v4.clone()))),
+            Some((100, RibType::Static, Some("192.0.2.1".parse().unwrap())))
+        );
+        assert_eq!(
+            ilm_leftover_from_msg(&route(RouteProtocol::Bgp, None)),
+            Some((100, RibType::Bgp, None))
+        );
+        let mut nh = RouteNextHop::default();
+        nh.attributes.push(RouteAttribute::Via(RouteVia::Inet6(
+            "fe80::1".parse().unwrap(),
+        )));
+        let multipath = RouteAttribute::MultiPath(vec![nh]);
+        assert_eq!(
+            ilm_leftover_from_msg(&route(RouteProtocol::Ospf, Some(multipath))),
+            Some((100, RibType::Ospf, Some("fe80::1".parse().unwrap())))
+        );
+        // An operator's (`ip -M route add`, proto boot) is not ours.
+        assert_eq!(
+            ilm_leftover_from_msg(&route(RouteProtocol::Boot, Some(v4))),
+            None
+        );
+        let mut ipv4 = route(RouteProtocol::Isis, None);
+        ipv4.header.address_family = AddressFamily::Inet;
+        assert_eq!(ilm_leftover_from_msg(&ipv4), None);
     }
 }

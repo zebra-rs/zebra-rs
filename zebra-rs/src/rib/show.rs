@@ -1710,9 +1710,11 @@ fn write_ilm_decap_entry(buf: &mut String, rib: &Rib, label: u32, ilm: &super::i
         super::inst::IlmType::DecapBd { bd } => {
             (format!("EVPN Decap (bd {:<4})", bd), "-".to_string())
         }
+        // An earlier run's leftover with no gateway (a pop to a device).
+        _ if ilm.stale => ("Earlier run".to_string(), "-".to_string()),
         _ => return,
     };
-    let marker = if ilm.selected { "*>" } else { "" };
+    let marker = ilm_marker(ilm);
     // No forwarding next-hop column — the popped packet is routed in the VRF.
     writeln!(
         buf,
@@ -1729,6 +1731,18 @@ fn write_ilm_decap_entry(buf: &mut String, rib: &Rib, label: u32, ilm: &super::i
 }
 
 // Helper function to format an ILM entry
+/// The status column of an ILM row: `*>` for the installed candidate, `S`
+/// for an earlier run's leftover (installed, but by that run).
+fn ilm_marker(ilm: &super::inst::IlmEntry) -> &'static str {
+    if ilm.stale {
+        "S"
+    } else if ilm.selected {
+        "*>"
+    } else {
+        ""
+    }
+}
+
 fn write_ilm_entry(
     buf: &mut String,
     rib: &Rib,
@@ -1736,7 +1750,7 @@ fn write_ilm_entry(
     ilm: &super::inst::IlmEntry,
     uni: &super::NexthopUni,
 ) {
-    let marker = if ilm.selected { "*>" } else { "" };
+    let marker = ilm_marker(ilm);
     let protocol = ilm.rtype.abbrev();
     let distance = format!("{:<4}", ilm.distance);
     let local_label = format!("{:<6}", label);
@@ -1766,6 +1780,8 @@ fn write_ilm_entry(
         } => format!("Mirror Ctx (tbl {:<3})", table_id),
         super::inst::IlmType::Swap => "LU Swap".to_string(),
         super::inst::IlmType::DecapBd { bd } => format!("EVPN Decap (bd {:<4})", bd),
+        // An earlier run's leftover: only its label and gateway are known.
+        super::inst::IlmType::None if ilm.stale => "Earlier run".to_string(),
         // A static ILM (`router static mpls label ...`) is keyed by its
         // incoming label and has no prefix or SID identity to show.
         // (Guessing one from the RIB — any route sharing the gateway —
