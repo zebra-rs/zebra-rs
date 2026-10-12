@@ -877,6 +877,89 @@ impl<V: OspfVersion> Ospf<V> {
     /// Full adjacency that has none. A block without an SRLB drops the pool and labels.
     /// Before the block first arrives nothing changes, so labels already
     /// held (a graceful restart's) are kept until then.
+    /// The Adjacency-SID label of the adjacency `(ifindex, nbr)` on an
+    /// NFSM change (both versions): into Full it takes a label from the
+    /// pool, unless its configured Adj-SID is advertised
+    /// (`adj_needs_dynamic_label`) or it holds one already — a graceful
+    /// restart's, restored from the checkpoint (`restore_adj_sid_labels`);
+    /// out of Full it gives its label back. Allocating over a restored
+    /// label handed it to whichever adjacency came Full first, so two
+    /// adjacencies could share one, and the other's later release freed
+    /// it under the first.
+    pub(super) fn adj_sid_label_nfsm(
+        &mut self,
+        ifindex: u32,
+        nbr: Ipv4Addr,
+        old: NfsmState,
+        new: NfsmState,
+    ) {
+        let key = (ifindex, nbr);
+        if new == NfsmState::Full {
+            if self.adj_needs_dynamic_label(ifindex)
+                && !self.lan_adj_sids.contains_key(&key)
+                && let Some(pool) = self.local_pool.as_mut()
+                && let Some(label) = pool.allocate()
+            {
+                self.lan_adj_sids.insert(key, label);
+            }
+        } else if old == NfsmState::Full
+            && let Some(label) = self.lan_adj_sids.remove(&key)
+            && let Some(pool) = self.local_pool.as_mut()
+        {
+            pool.release(label);
+        }
+    }
+
+    /// Put back the Adjacency-SID labels a graceful restart's checkpoint
+    /// holds, so each adjacency keeps its label across the restart. The
+    /// pool, once there is one, holds them (`reserve_adj_sid_labels`):
+    /// only then is no other adjacency, nor another instance over the same
+    /// SRLB, handed one.
+    pub(super) fn restore_adj_sid_labels(&mut self, labels: &[((u32, Ipv4Addr), u32)]) {
+        self.lan_adj_sids.extend(labels.iter().copied());
+        self.reserve_adj_sid_labels();
+    }
+
+    /// Have the pool hold every label in `lan_adj_sids`. A restored label
+    /// went in before there was a pool (a restart's, `restore_adj_sid_labels`);
+    /// one the pool cannot take — outside its SRLB, or another holder's —
+    /// is dropped, and its adjacency, if Full, is given another.
+    fn reserve_adj_sid_labels(&mut self) {
+        let Some(pool) = self.local_pool.as_mut() else {
+            return;
+        };
+        self.lan_adj_sids.retain(|(ifindex, neighbor), label| {
+            let held = pool.reserve(*label);
+            if !held {
+                tracing::warn!(
+                    ifindex, %neighbor, label,
+                    "ospf: restored Adj-SID label unavailable; the adjacency takes another"
+                );
+            }
+            held
+        });
+    }
+
+    /// The restart is over: a restored Adjacency-SID label whose adjacency
+    /// is not Full again (`full`, keyed as `lan_adj_sids`) goes back, so a
+    /// neighbour gone for good holds no label. Other entries are only ever
+    /// Full adjacencies'.
+    pub(super) fn release_restored_adj_sids(&mut self, full: &[(u32, Ipv4Addr)]) {
+        let gone: Vec<(u32, Ipv4Addr)> = self
+            .lan_adj_sids
+            .keys()
+            .filter(|key| !full.contains(key))
+            .copied()
+            .collect();
+        for key in gone {
+            if let Some(label) = self.lan_adj_sids.remove(&key)
+                && let Some(pool) = self.local_pool.as_mut()
+            {
+                pool.release(label);
+            }
+        }
+    }
+
     pub(super) fn reconcile_adj_sid_labels(&mut self, full: Vec<(u32, Ipv4Addr)>) {
         use super::srmpls::SegmentRoutingMode;
         if self.segment_routing != SegmentRoutingMode::Mpls {
@@ -905,6 +988,9 @@ impl<V: OspfVersion> Ospf<V> {
                     last,
                     &self.ctx.rib,
                 ));
+                // Labels a graceful restart restored before there was a
+                // pool: held now, or dropped.
+                self.reserve_adj_sid_labels();
             }
             // The SRLB changed: keep the labels still inside it; the
             // adjacencies whose label went are given another below.
@@ -2907,6 +2993,20 @@ fn redist_policy_eval(
 }
 
 impl Ospf<Ospfv2> {
+    /// The Full adjacencies, keyed as `lan_adj_sids` is in OSPFv2:
+    /// `(ifindex, neighbour interface address)`.
+    pub(super) fn adj_sid_full_keys(&self) -> Vec<(u32, Ipv4Addr)> {
+        self.links
+            .iter()
+            .flat_map(|(ifindex, link)| {
+                link.nbrs
+                    .values()
+                    .filter(|nbr| nbr.state == NfsmState::Full)
+                    .map(move |nbr| (*ifindex, nbr.ident.prefix.addr()))
+            })
+            .collect()
+    }
+
     pub fn new(
         ctx: crate::context::ProtoContext,
         rib_rx: UnboundedReceiver<RibRx>,
@@ -6625,20 +6725,7 @@ impl Ospf<Ospfv2> {
         // configured Adj-SID takes none (`adj_needs_dynamic_label`). Pool
         // is only present when SR-MPLS is enabled, so this is a no-op
         // otherwise.
-        let needs_label = self.adj_needs_dynamic_label(ifindex);
-        if new_state == NfsmState::Full {
-            if needs_label
-                && let Some(pool) = self.local_pool.as_mut()
-                && let Some(label) = pool.allocate()
-            {
-                self.lan_adj_sids.insert((ifindex, nbr_addr), label);
-            }
-        } else if old_state == NfsmState::Full
-            && let Some(label) = self.lan_adj_sids.remove(&(ifindex, nbr_addr))
-            && let Some(pool) = self.local_pool.as_mut()
-        {
-            pool.release(label);
-        }
+        self.adj_sid_label_nfsm(ifindex, nbr_addr, old_state, new_state);
 
         // Router-LSA must be re-originated whenever Full adjacency count changes.
         // (Gated against `in_restart()` inside the method — the
@@ -7011,9 +7098,7 @@ impl Ospf<Ospfv2> {
         // Replay: router-id, areas + their LSDBs, lan_adj_sids.
         self.router_id = cp.router_id;
         let total_lsas = self.gr_restart_replay_areas_aged(&cp.areas, since_write);
-        for ((ifindex, addr), label) in &cp.lan_adj_sids {
-            self.lan_adj_sids.insert((*ifindex, *addr), *label);
-        }
+        self.restore_adj_sid_labels(&cp.lan_adj_sids);
 
         // Restarting state, from when the restart started: the abort
         // timer fires when its grace period is over, rounded up so that
@@ -7116,6 +7201,8 @@ impl Ospf<Ospfv2> {
         if self.restarting.take().is_none() {
             return false;
         }
+        let full = self.adj_sid_full_keys();
+        self.release_restored_adj_sids(&full);
         // A committed restart aborted before its drain ended: the next
         // boot must not replay its checkpoint.
         if let Some(commit) = self.gr_commit.take() {
@@ -8695,6 +8782,19 @@ impl Ospf<Ospfv2> {
 /// IFSM/NFSM-driven send/receive paths, and drive SPF + RIB
 /// installation. Entered from `spawn_ospfv3` in `crate::config::ospf`.
 impl Ospf<Ospfv3> {
+    /// The Full adjacencies, keyed as `lan_adj_sids` is in OSPFv3:
+    /// `(ifindex, neighbour Router ID)`.
+    pub(super) fn adj_sid_full_keys(&self) -> Vec<(u32, Ipv4Addr)> {
+        self.links
+            .iter()
+            .flat_map(|(ifindex, link)| {
+                link.nbrs.iter().filter_map(move |(nbr_key, nbr)| {
+                    (nbr.state == NfsmState::Full).then_some((*ifindex, *nbr_key))
+                })
+            })
+            .collect()
+    }
+
     /// v3 twin of `Ospf<Ospfv2>::stamp_reconcile_and_originate`: when
     /// the reconcile cleared measured values, refresh the E-Router-LSA
     /// so the stale ASLA sub-sub-TLVs are withdrawn.
@@ -11315,6 +11415,8 @@ impl Ospf<Ospfv3> {
         if self.restarting.take().is_none() {
             return false;
         }
+        let full = self.adj_sid_full_keys();
+        self.release_restored_adj_sids(&full);
         // As OSPFv2's: an aborted commit leaves no checkpoint to replay.
         if let Some(commit) = self.gr_commit.take() {
             let _ = super::checkpoint::OspfCheckpoint::delete(&commit.checkpoint);
@@ -11702,10 +11804,9 @@ impl Ospf<Ospfv3> {
     }
 
     /// Restart-aware boot: replay a fresh v3 checkpoint (router-id +
-    /// per-area LSDBs restored byte-identical) and enter restart mode
-    /// for the remaining grace window. v3 sibling of
-    /// `gr_restart_load_checkpoint`; `lan_adj_sids` has no v3
-    /// counterpart (SRv6 End.X SIDs re-reconcile per adjacency).
+    /// per-area LSDBs restored byte-identical, and the Adjacency-SID labels)
+    /// and enter restart mode for the remaining grace window. v3 sibling of
+    /// `gr_restart_load_checkpoint`.
     fn gr_restart_load_checkpoint_v3(&mut self) {
         self.gr_restart_load_checkpoint_v3_from(&super::checkpoint::default_path("ospfv3"));
     }
@@ -11749,6 +11850,7 @@ impl Ospf<Ospfv3> {
 
         self.router_id = cp.router_id;
         let total_lsas = self.gr_restart_replay_areas_aged(&cp.areas, since_write);
+        self.restore_adj_sid_labels(&cp.lan_adj_sids);
 
         let remaining = grace - used;
         let remaining_secs = remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0);
@@ -14263,20 +14365,7 @@ impl Ospf<Ospfv3> {
         // advertised); a P2P adjacency advertising its configured
         // Adj-SID takes none. No-op when SR-MPLS is disabled (no pool
         // present).
-        let needs_label = self.adj_needs_dynamic_label(ifindex);
-        if new_state == NfsmState::Full {
-            if needs_label
-                && let Some(pool) = self.local_pool.as_mut()
-                && let Some(label) = pool.allocate()
-            {
-                self.lan_adj_sids.insert((ifindex, nbr_addr), label);
-            }
-        } else if old_state == NfsmState::Full
-            && let Some(label) = self.lan_adj_sids.remove(&(ifindex, nbr_addr))
-            && let Some(pool) = self.local_pool.as_mut()
-        {
-            pool.release(label);
-        }
+        self.adj_sid_label_nfsm(ifindex, nbr_addr, old_state, new_state);
 
         self.router_lsa_originate();
         // Re-originate the Router-LSA-referenced Intra-Area-Prefix-LSA
@@ -26327,6 +26416,100 @@ mod gr_helper_tests {
         assert!(swept(&mut rx), "v3: by that restart's exit");
     }
 
+    /// Both versions checkpoint their dynamic Adjacency-SID labels and put
+    /// them back at restart, held by the pool once SR-MPLS has its SRLB:
+    /// each adjacency keeps its label, and no other is handed it. A label
+    /// whose adjacency is not Full when the restart ends goes back. OSPFv3
+    /// used to checkpoint none, so its labels could change across a
+    /// restart; OSPFv2's came back into the map with no pool holding
+    /// them.
+    #[tokio::test(start_paused = true)]
+    async fn checkpointed_adj_sid_labels_are_kept_and_held() {
+        use super::super::checkpoint::OspfCheckpoint;
+        use super::super::srmpls::SegmentRoutingMode;
+        use crate::rib::{Block, RibSrRx};
+        let dir = std::env::temp_dir().join(format!(
+            "zebra-rs-ospf-checkpoint-adj-sid-{}",
+            std::process::id()
+        ));
+        let path = dir.join("checkpoint.cbor");
+
+        // OSPFv2, keyed by neighbour address. P (on 3) is not Full after
+        // the restart.
+        let (s, o, p) = (v2_addr(S), v2_addr(O), v2_addr(P));
+        let mut before = v2_top();
+        before.lan_adj_sids = [((2, s), 15003), ((2, o), 15004), ((3, p), 15005)].into();
+        OspfCheckpoint::from_instance(&before, GRACE, 1)
+            .write_to_path(&path)
+            .unwrap();
+        let mut top = v2_top();
+        for nbr in top.links.get_mut(&3).unwrap().nbrs.values_mut() {
+            nbr.state = NfsmState::Init;
+        }
+        top.gr_restart_load_checkpoint_from(&path);
+        assert!(top.restarting.is_some());
+        top.segment_routing = SegmentRoutingMode::Mpls;
+        top.reconcile_block_watch();
+        top.process_sr_rx(RibSrRx::Block {
+            name: crate::rib::DEFAULT_BLOCK_NAME.to_string(),
+            block: Some(Block::default_block()),
+        });
+        assert_eq!(
+            top.lan_adj_sids,
+            [((2, s), 15003), ((2, o), 15004), ((3, p), 15005)].into()
+        );
+        let mut other = top.rib_subscriber.label_space().pool(15000, 15999);
+        for label in [15003, 15004, 15005] {
+            assert!(!other.reserve(label), "v2: {label} held");
+        }
+        top.gr_restart_abort();
+        assert_eq!(top.lan_adj_sids, [((2, s), 15003), ((2, o), 15004)].into());
+        let owner = top.ctx.rib.proto_id();
+        top.rib_subscriber
+            .label_space()
+            .lock()
+            .free_releasing_of(&[owner]);
+        assert!(other.reserve(15005), "v2: P's label went back");
+        assert!(!other.reserve(15003), "v2: S's stays");
+
+        // OSPFv3, keyed by neighbour Router ID.
+        let mut before = v3_top();
+        before.lan_adj_sids = [((2, S), 15003), ((2, O), 15004), ((3, P), 15005)].into();
+        OspfCheckpoint::from_instance_v3(&before, GRACE, 1)
+            .write_to_path(&path)
+            .unwrap();
+        let mut top = v3_top();
+        for nbr in top.links.get_mut(&3).unwrap().nbrs.values_mut() {
+            nbr.state = NfsmState::Init;
+        }
+        top.gr_restart_load_checkpoint_v3_from(&path);
+        assert!(top.restarting.is_some());
+        top.segment_routing = SegmentRoutingMode::Mpls;
+        top.reconcile_block_watch();
+        top.process_sr_rx(RibSrRx::Block {
+            name: crate::rib::DEFAULT_BLOCK_NAME.to_string(),
+            block: Some(Block::default_block()),
+        });
+        assert_eq!(
+            top.lan_adj_sids,
+            [((2, S), 15003), ((2, O), 15004), ((3, P), 15005)].into()
+        );
+        let mut other = top.rib_subscriber.label_space().pool(15000, 15999);
+        for label in [15003, 15004, 15005] {
+            assert!(!other.reserve(label), "v3: {label} held");
+        }
+        top.gr_restart_abort_v3();
+        assert_eq!(top.lan_adj_sids, [((2, S), 15003), ((2, O), 15004)].into());
+        let owner = top.ctx.rib.proto_id();
+        top.rib_subscriber
+            .label_space()
+            .lock()
+            .free_releasing_of(&[owner]);
+        assert!(other.reserve(15005), "v3: P's label went back");
+        assert!(!other.reserve(15003), "v3: S's stays");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A checkpoint keeps each LSA at its age when written, not the age it
     /// arrived with, and the restored LSA ages by the time since: the
     /// router was down, and its copies elsewhere aged. Here 100 seconds
@@ -28548,6 +28731,57 @@ mod sr_block_tests {
             Some((15000, 15999))
         );
         assert_eq!(top.lan_adj_sids.get(&(7, A)), Some(&15005));
+        // ... and the pool holds it: no other instance is handed it.
+        let mut other = top.rib_subscriber.label_space().pool(15000, 15999);
+        assert!(!other.reserve(15005));
+    }
+
+    /// Restored labels stay with their adjacencies whichever comes Full
+    /// first, and a new adjacency, or another instance over the SRLB, is
+    /// handed a free one. The Full transition used to allocate over a
+    /// restored label: the first adjacency up took 15000, which another
+    /// restored adjacency still advertised, and that one's later release
+    /// freed it under the first.
+    #[tokio::test]
+    async fn restored_labels_stay_with_their_adjacencies() {
+        const B: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 3);
+        const C: Ipv4Addr = Ipv4Addr::new(10, 0, 0, 4);
+        let mut top = fresh_ospf();
+        top.restore_adj_sid_labels(&[((7, A), 15000), ((8, B), 15001)]);
+        sr_on_with(&mut top, Block::default_block());
+        top.adj_sid_label_nfsm(8, B, NfsmState::Loading, NfsmState::Full);
+        top.adj_sid_label_nfsm(7, A, NfsmState::Loading, NfsmState::Full);
+        top.adj_sid_label_nfsm(9, C, NfsmState::Loading, NfsmState::Full);
+        assert_eq!(
+            top.lan_adj_sids,
+            [((7, A), 15000), ((8, B), 15001), ((9, C), 15002)].into()
+        );
+        let mut other = top.rib_subscriber.label_space().pool(15000, 15999);
+        assert_eq!(other.allocate(), Some(15003));
+        // A leaving Full gives back its own label only (free once the RIB
+        // has handled the release).
+        top.adj_sid_label_nfsm(7, A, NfsmState::Full, NfsmState::Init);
+        let owner = top.ctx.rib.proto_id();
+        top.rib_subscriber
+            .label_space()
+            .lock()
+            .free_releasing_of(&[owner]);
+        assert!(!other.reserve(15001), "B's label stays held");
+        assert!(other.reserve(15000), "A's went back");
+    }
+
+    /// A restored label another holder has taken meanwhile is dropped,
+    /// and its adjacency, coming Full, is given a free one.
+    #[tokio::test]
+    async fn a_restored_label_another_holder_has_is_dropped() {
+        let mut top = fresh_ospf();
+        let mut isis = top.rib_subscriber.label_space().pool(15000, 15999);
+        assert_eq!(isis.allocate(), Some(15000));
+        top.restore_adj_sid_labels(&[((7, A), 15000)]);
+        sr_on_with(&mut top, Block::default_block());
+        assert!(top.lan_adj_sids.is_empty());
+        top.adj_sid_label_nfsm(7, A, NfsmState::Loading, NfsmState::Full);
+        assert_eq!(top.lan_adj_sids, [((7, A), 15001)].into());
     }
 
     #[tokio::test]

@@ -2092,15 +2092,7 @@ pub(super) fn sr_mpls_refresh_v3(ospf: &mut Ospf<Ospfv3>) {
     // Every Full adjacency gets an Adjacency-SID label, including those
     // that were already Full when SR-MPLS came on (or before the block
     // arrived), so the LAN Adj-SID LSAs cover them.
-    let full: Vec<(u32, std::net::Ipv4Addr)> = ospf
-        .links
-        .iter()
-        .flat_map(|(ifindex, link)| {
-            link.nbrs.iter().filter_map(move |(nbr_key, nbr)| {
-                (nbr.state == super::nfsm::NfsmState::Full).then_some((*ifindex, *nbr_key))
-            })
-        })
-        .collect();
+    let full = ospf.adj_sid_full_keys();
     ospf.reconcile_adj_sid_labels(full);
 
     // Re-originate / flush E-Intra-Area-Prefix-LSAs for every link
