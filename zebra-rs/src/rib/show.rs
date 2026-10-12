@@ -1612,6 +1612,9 @@ pub struct IlmJson {
     pub prefix_or_id: String,
     pub outgoing_interface: String,
     pub next_hop: String,
+    /// An earlier run's leftover (`IlmEntry::stale`); absent otherwise.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub stale: bool,
 }
 
 #[derive(Serialize)]
@@ -1634,7 +1637,11 @@ pub fn ilm_show(rib: &Rib, _args: Args, json: bool) -> String {
                             entries.push(ilm_to_json(rib, *label, ilm, uni));
                         }
                     }
-                    _ => {}
+                    // Pop-and-decap entries carry no forwarding nexthop, as
+                    // in the text below. They used to be left out, so the
+                    // JSON hid every VPN, Mirror Context and EVPN decap
+                    // label.
+                    _ => entries.extend(ilm_decap_to_json(rib, *label, ilm)),
                 }
             }
         }
@@ -1839,6 +1846,7 @@ fn ilm_to_json(
         } => format!("Mirror Ctx (tbl {})", table_id),
         super::inst::IlmType::Swap => "LU Swap".to_string(),
         super::inst::IlmType::DecapBd { bd } => format!("EVPN Decap (bd {:<4})", bd),
+        super::inst::IlmType::None if ilm.stale => "Earlier run".to_string(),
         // See `write_ilm_entry`: no prefix/SID identity to show.
         super::inst::IlmType::None => "-".to_string(),
     };
@@ -1864,7 +1872,46 @@ fn ilm_to_json(
         prefix_or_id,
         outgoing_interface,
         next_hop,
+        stale: ilm.stale,
     }
+}
+
+/// The JSON row of a pop-and-decap ILM entry, the twin of
+/// [`write_ilm_decap_entry`]: `DecapVrf` (BGP/MPLS-VPN) and `ContextLabel`
+/// (Mirror Context) pop into a VRF, `DecapBd` (EVPN over MPLS) into a
+/// bridge domain, and an earlier run's leftover with no gateway pops to a
+/// device. No next hop. `None` for any other entry without one.
+fn ilm_decap_to_json(rib: &Rib, label: u32, ilm: &super::inst::IlmEntry) -> Option<IlmJson> {
+    let (prefix_or_id, outgoing_interface) = match &ilm.ilm_type {
+        super::inst::IlmType::DecapVrf {
+            table_id,
+            vrf_ifindex,
+        } => (
+            format!("VPN Decap (tbl {table_id})"),
+            rib.link_name(*vrf_ifindex),
+        ),
+        super::inst::IlmType::ContextLabel {
+            table_id,
+            vrf_ifindex,
+        } => (
+            format!("Mirror Ctx (tbl {table_id})"),
+            rib.link_name(*vrf_ifindex),
+        ),
+        super::inst::IlmType::DecapBd { bd } => (format!("EVPN Decap (bd {bd})"), "-".to_string()),
+        _ if ilm.stale => ("Earlier run".to_string(), "-".to_string()),
+        _ => return None,
+    };
+    Some(IlmJson {
+        protocol: protocol_long_name(ilm.rtype).to_string(),
+        distance: ilm.distance,
+        selected: ilm.selected,
+        local_label: label,
+        outgoing_label: "Pop".to_string(),
+        prefix_or_id,
+        outgoing_interface,
+        next_hop: String::new(),
+        stale: ilm.stale,
+    })
 }
 
 // Outgoing-interface name for an ILM nexthop. Most producers stamp an
@@ -2440,6 +2487,87 @@ impl From<&super::Sid> for SidJson {
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv6Addr};
+
+    /// `show mpls ilm` JSON lists the pop-and-decap entries the text does —
+    /// VPN decap, Mirror Context, EVPN decap, and an earlier run's
+    /// leftover with no gateway — with no next hop. It used to leave out
+    /// every entry without one, so a VRF's decap label was invisible to
+    /// anything reading it (the BDD `mpls ilm` steps among them). Only a
+    /// leftover carries `stale`.
+    #[tokio::test]
+    async fn ilm_json_lists_the_decap_entries() {
+        use crate::rib::RibType;
+        use crate::rib::inst::{IlmEntry, IlmType};
+        let mut rib = Rib::new(false).expect("rib");
+        let entry = |ilm_type| IlmEntry {
+            ilm_type,
+            selected: true,
+            ..IlmEntry::new(RibType::Bgp)
+        };
+        rib.ilm.insert(
+            24000,
+            vec![entry(IlmType::DecapVrf {
+                table_id: 1,
+                vrf_ifindex: 0,
+            })],
+        );
+        rib.ilm.insert(
+            24001,
+            vec![entry(IlmType::ContextLabel {
+                table_id: 2,
+                vrf_ifindex: 0,
+            })],
+        );
+        rib.ilm
+            .insert(24002, vec![entry(IlmType::DecapBd { bd: 100 })]);
+        rib.ilm_leftover(24003, RibType::Bgp, None);
+        rib.ilm.insert(
+            16001,
+            vec![IlmEntry {
+                ilm_type: IlmType::Node(1),
+                nexthop: Nexthop::Uni(NexthopUni {
+                    addr: "10.0.0.2".parse().unwrap(),
+                    mpls_label: vec![16001],
+                    ..Default::default()
+                }),
+                selected: true,
+                ..IlmEntry::new(RibType::Isis)
+            }],
+        );
+        let json: serde_json::Value =
+            serde_json::from_str(&ilm_show(&rib, Args(Default::default()), true)).unwrap();
+        let rows: Vec<(u64, String, String, bool)> = json["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| {
+                (
+                    e["local_label"].as_u64().unwrap(),
+                    e["prefix_or_id"].as_str().unwrap().to_string(),
+                    e["next_hop"].as_str().unwrap().to_string(),
+                    e.get("stale").is_some_and(|v| v.as_bool() == Some(true)),
+                )
+            })
+            .collect();
+        let row = |label: u64, prefix: &str, next_hop: &str, stale| {
+            (label, prefix.to_string(), next_hop.to_string(), stale)
+        };
+        assert_eq!(
+            rows,
+            vec![
+                row(16001, "SR Pfx (idx 1)", "10.0.0.2", false),
+                row(24000, "VPN Decap (tbl 1)", "", false),
+                row(24001, "Mirror Ctx (tbl 2)", "", false),
+                row(24002, "EVPN Decap (bd 100)", "", false),
+                row(24003, "Earlier run", "", true),
+            ]
+        );
+        // The text lists the same labels.
+        let text = ilm_show(&rib, Args(Default::default()), false);
+        for label in ["16001", "24000", "24001", "24002", "24003"] {
+            assert!(text.contains(label), "{label} in\n{text}");
+        }
+    }
 
     fn uni_with_segs(segs: Vec<Ipv6Addr>) -> NexthopUni {
         let addr = segs.first().copied().unwrap_or(Ipv6Addr::UNSPECIFIED);
