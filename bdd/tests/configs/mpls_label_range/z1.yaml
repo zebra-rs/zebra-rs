@@ -1,6 +1,14 @@
-# z1 — BGP with a vpnv4 neighbor that never comes up: enabling vpnv4 makes
-# BGP take a label block from the RIB at once, from the default dynamic
-# range (24000-1048574).
+# z1 — BGP with one VRF (and a vpnv4 neighbor that never comes up): the
+# VRF takes its MPLS label at once, from a 128-label chunk BGP takes from
+# the default dynamic range (24000-1048574).
+vrf:
+- name: vrf-a
+  ipv4:
+    route-target:
+      import:
+      - 65001:100
+      export:
+      - 65001:100
 router:
   bgp:
     global:
@@ -13,3 +21,6 @@ router:
       afi-safi:
       - name: vpnv4
         enabled: true
+    vrf:
+    - name: vrf-a
+      rd: 65001:1

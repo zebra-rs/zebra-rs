@@ -54,7 +54,7 @@ pub struct BgpVrfHandle {
     /// `AbortHandle` via `Drop`.
     #[allow(dead_code)]
     pub task: Task<()>,
-    /// MPLS label allocated for this VRF by `Bgp::vrf_label_alloc`
+    /// MPLS label allocated for this VRF from `Bgp::service_labels`
     /// at spawn time. Mirrored back onto the handle so the global
     /// `Bgp` can reclaim it on despawn and reuse it on
     /// respawn-with-kernel-ctx — a respawn must keep the same

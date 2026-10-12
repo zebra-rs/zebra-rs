@@ -328,13 +328,6 @@ pub enum RibRx {
         nh: IpAddr,
         resolution: super::nht::NexthopResolution,
     },
-    /// Reply to [`crate::rib::inst::Message::LabelBlockRequest`]: a
-    /// dynamic MPLS label block `[start, start+size)` reserved for the
-    /// requesting protocol. Delivered synchronously on the request.
-    LabelBlock {
-        start: u32,
-        size: u32,
-    },
     /// Local labels were freed after this instance's pool found none:
     /// reconcile its local labels again (`LabelSpace::take_starved`).
     LocalLabelsFreed,

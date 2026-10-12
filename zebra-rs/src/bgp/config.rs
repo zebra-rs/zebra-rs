@@ -1866,16 +1866,6 @@ fn config_afi_safi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     let key: AfiSafi = args.afi_safi()?;
     let enabled = args.boolean();
 
-    // Enabling a Labeled-Unicast or VPN family means we may re-advertise
-    // routes with next-hop-self and need per-prefix local labels (the
-    // Inter-AS Option B/C transit case); request a dynamic label block
-    // eagerly so one is granted before routes arrive. A PE with a VRF
-    // already requests the block on VRF config — this also covers a
-    // transit ASBR that runs VPNv4 with no VRF of its own.
-    let label_block_needed = matches!(key.safi, Safi::MplsLabel | Safi::MplsVpn)
-        && op.is_set()
-        && enabled.unwrap_or(false);
-
     let (ident, bounce) = {
         let peer = bgp.peers.get_mut(&addr)?;
 
@@ -1919,16 +1909,6 @@ fn config_afi_safi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
         let _ = bgp
             .tx
             .try_send(super::inst::Message::Event(ident, super::peer::Event::Stop));
-    }
-    // Only ask while no block is bound yet: `request_label_block`'s
-    // pending flag clears on each grant, so an unguarded per-statement
-    // request draws one unused 1024-label block per vpnv4/LU neighbor
-    // statement — a route reflector with a few thousand clients drains
-    // the RIB's entire dynamic pool during config load. Once a block is
-    // bound, the on-demand paths (`alloc_vrf_label`, `evi_reconcile`)
-    // grow it when the labels are actually spent.
-    if label_block_needed && bgp.vrf_label_alloc.is_none() {
-        bgp.request_label_block();
     }
     Some(())
 }
@@ -7212,45 +7192,6 @@ mod neighbor_group_wiring_tests {
         IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))
     }
 
-    /// Like [`fresh_bgp`], but keeps the receiving half of the RIB
-    /// message channel so the test can observe what the instance sends
-    /// to the RIB (e.g. `Message::LabelBlockRequest`).
-    fn fresh_bgp_with_rib_rx() -> (Bgp, mpsc::UnboundedReceiver<crate::rib::Message>) {
-        let (ctx, rib_rx) = test_ctx();
-        let (policy_tx, _policy_rx) = mpsc::unbounded_channel();
-        Box::leak(Box::new(_policy_rx));
-        let (rib_tx, rib_msg_rx) = mpsc::unbounded_channel();
-        let (rib_inbound_tx, _inbound_rx) = mpsc::unbounded_channel();
-        Box::leak(Box::new(_inbound_rx));
-        let next_proto_id = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(1));
-        let subscriber =
-            crate::config::RibSubscriber::for_test(rib_tx, rib_inbound_tx, next_proto_id);
-        let bgp = Bgp::new(
-            ctx,
-            rib_rx,
-            subscriber,
-            policy_tx,
-            None,
-            None,
-            tokio::sync::mpsc::channel(1).0,
-        );
-        (bgp, rib_msg_rx)
-    }
-
-    /// Drain the RIB message channel, returning the size of every
-    /// queued `Message::LabelBlockRequest`. Other messages are ignored.
-    fn drain_label_block_requests(
-        rx: &mut mpsc::UnboundedReceiver<crate::rib::Message>,
-    ) -> Vec<u32> {
-        let mut out = Vec::new();
-        while let Ok(msg) = rx.try_recv() {
-            if let crate::rib::Message::LabelBlockRequest { size, .. } = msg {
-                out.push(size);
-            }
-        }
-        out
-    }
-
     /// Drain `bgp.rx`, returning the peer-ident of every queued
     /// `Event::Stop`. Other event variants are ignored.
     fn drain_stop_events(bgp: &mut Bgp) -> Vec<usize> {
@@ -8713,124 +8654,38 @@ mod neighbor_group_wiring_tests {
         }
     }
 
-    /// Enabling a VPN / Labeled-Unicast family eagerly requests one
-    /// dynamic label block — and exactly one. Regression: a
-    /// route-reflector config with thousands of `afi-safi vpnv4
-    /// enabled` neighbor statements sent one request per statement
-    /// (the pending flag clears whenever a grant lands between
-    /// statements), draining the RIB's entire dynamic pool during
-    /// config load ("label block request: dynamic pool exhausted").
+    /// Enabling a VPN / Labeled-Unicast family takes no labels: labels
+    /// are taken when one is minted (a VRF, EVI, ESI or VPWS label, a
+    /// transit row). It used to request a 1024-label block eagerly, and a
+    /// route reflector with thousands of `afi-safi vpnv4 enabled`
+    /// neighbor statements once drained the dynamic range with them.
     #[tokio::test]
-    async fn vpnv4_afi_safi_requests_at_most_one_label_block() {
-        let (mut bgp, mut rib_rx) = fresh_bgp_with_rib_rx();
-
-        // First vpnv4 statement, no block bound yet: the eager request
-        // (the transit-ASBR Option B/C warm-up) must go out.
-        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
-        config_afi_safi(
-            &mut bgp,
-            arg_words(&["10.0.0.1", "vpnv4", "true"]),
-            ConfigOp::Set,
-        )
-        .unwrap();
-        assert_eq!(
-            drain_label_block_requests(&mut rib_rx).len(),
-            1,
-            "first vpnv4 statement must request a label block",
-        );
-
-        // Further statements while that request is outstanding dedup on
-        // the pending flag.
-        config_peer(&mut bgp, arg_words(&["10.0.0.2"]), ConfigOp::Set).unwrap();
-        config_afi_safi(
-            &mut bgp,
-            arg_words(&["10.0.0.2", "vpnv4", "true"]),
-            ConfigOp::Set,
-        )
-        .unwrap();
+    async fn vpnv4_afi_safi_statements_take_no_labels() {
+        let mut bgp = fresh_bgp();
+        for addr in ["10.0.0.1", "10.0.0.2", "10.0.0.3"] {
+            config_peer(&mut bgp, arg_words(&[addr]), ConfigOp::Set).unwrap();
+            config_afi_safi(&mut bgp, arg_words(&[addr, "vpnv4", "true"]), ConfigOp::Set).unwrap();
+            config_afi_safi(
+                &mut bgp,
+                arg_words(&[addr, "label-v4", "true"]),
+                ConfigOp::Set,
+            )
+            .unwrap();
+        }
+        for group in ["G", "H"] {
+            config_neighbor_group_afi_safi_enabled(
+                &mut bgp,
+                arg_words(&[group, "vpnv4", "true"]),
+                ConfigOp::Set,
+            )
+            .unwrap();
+        }
         assert!(
-            drain_label_block_requests(&mut rib_rx).is_empty(),
-            "a statement with a request outstanding must not re-request",
-        );
-
-        // The grant lands, clearing the pending flag. Statements after
-        // it see the bound allocator and must stay quiet — this is the
-        // request-per-statement loop that exhausted the pool.
-        bgp.process_rib_msg(crate::rib::api::RibRx::LabelBlock {
-            start: 16,
-            size: 1024,
-        });
-        config_peer(&mut bgp, arg_words(&["10.0.0.3"]), ConfigOp::Set).unwrap();
-        config_afi_safi(
-            &mut bgp,
-            arg_words(&["10.0.0.3", "vpnv4", "true"]),
-            ConfigOp::Set,
-        )
-        .unwrap();
-        assert!(
-            drain_label_block_requests(&mut rib_rx).is_empty(),
-            "a statement after the grant must not draw another block",
-        );
-    }
-
-    /// The group-level `afi-safi <family> enabled` statement does the
-    /// same eager label-block warm-up as the per-neighbor one — a
-    /// transit ASBR whose vpnv4 comes entirely from a group opinion
-    /// used to never request a block at all — and with the same
-    /// at-most-one guard: once a block is bound, further statements
-    /// (group or per-peer) must not draw more.
-    #[tokio::test]
-    async fn group_vpnv4_afi_safi_requests_at_most_one_label_block() {
-        let (mut bgp, mut rib_rx) = fresh_bgp_with_rib_rx();
-
-        // First group vpnv4 opinion, no block bound yet: request.
-        config_neighbor_group_afi_safi_enabled(
-            &mut bgp,
-            arg_words(&["G", "vpnv4", "true"]),
-            ConfigOp::Set,
-        )
-        .unwrap();
-        assert_eq!(
-            drain_label_block_requests(&mut rib_rx).len(),
-            1,
-            "first group vpnv4 statement must request a label block",
-        );
-
-        // Another group's opinion while the request is outstanding
-        // dedups on the pending flag.
-        config_neighbor_group_afi_safi_enabled(
-            &mut bgp,
-            arg_words(&["H", "vpnv4", "true"]),
-            ConfigOp::Set,
-        )
-        .unwrap();
-        assert!(
-            drain_label_block_requests(&mut rib_rx).is_empty(),
-            "a group statement with a request outstanding must not re-request",
-        );
-
-        // After the grant lands, neither a group nor a per-peer vpnv4
-        // statement may draw another block.
-        bgp.process_rib_msg(crate::rib::api::RibRx::LabelBlock {
-            start: 16,
-            size: 1024,
-        });
-        config_neighbor_group_afi_safi_enabled(
-            &mut bgp,
-            arg_words(&["I", "vpnv4", "true"]),
-            ConfigOp::Set,
-        )
-        .unwrap();
-        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
-        config_afi_safi(
-            &mut bgp,
-            arg_words(&["10.0.0.1", "vpnv4", "true"]),
-            ConfigOp::Set,
-        )
-        .unwrap();
-        assert!(
-            drain_label_block_requests(&mut rib_rx).is_empty(),
-            "statements after the grant must not draw another block",
+            bgp.rib_subscriber
+                .label_space()
+                .lock()
+                .held_blocks()
+                .is_empty()
         );
     }
 
@@ -12433,5 +12288,180 @@ mod transit_label_tests {
         assert_eq!(lu_local_label_of(&bgp, "10.1.0.0/24"), Some(None));
         assert_eq!(lu_local_label_of(&bgp, "10.2.0.0/24"), Some(None));
         assert_eq!(drain_ilm(&mut rx), vec![(false, 3000), (false, 3001)]);
+    }
+}
+
+#[cfg(test)]
+mod service_label_tests {
+    //! Per-object MPLS labels (VRF, EVI, ESI, VPWS) from BGP's service-label
+    //! chunks (docs/design/mpls-label-allocation.md §5.2, phase 5b): taken
+    //! at configuration, waiting with the range full until room returns,
+    //! and given back behind the ILM deletions for them. Driven through
+    //! the EVI config handlers: an EVI under `encapsulation mpls` takes a
+    //! label and installs its decap ILM.
+
+    use tokio::sync::mpsc;
+
+    use super::*;
+    use crate::bgp::label_chunks::LabelChunks;
+    use crate::rib::label_space::SharedLabelSpace;
+    use crate::spf::label_block::LabelBlock;
+
+    fn arg_words(parts: &[&str]) -> Args {
+        Args(parts.iter().map(|s| s.to_string()).collect())
+    }
+
+    /// A fresh instance, and the RIB channel its service ILMs and service
+    /// chunk releases go out on (`rib_subscriber`).
+    fn fresh_bgp() -> (Bgp, mpsc::UnboundedReceiver<crate::rib::Message>) {
+        let (client_tx, client_rx) = mpsc::unbounded_channel();
+        Box::leak(Box::new(client_rx));
+        let (_rib_rx_tx, rib_rx) = mpsc::unbounded_channel();
+        let client =
+            crate::rib::client::RibClient::new(client_tx, crate::rib::client::ProtoId::from_raw(0));
+        let ctx = crate::context::ProtoContext::default_table(client);
+        let (rib_tx, rib_msg_rx) = mpsc::unbounded_channel();
+        let (rib_inbound_tx, inbound_rx) = mpsc::unbounded_channel();
+        Box::leak(Box::new(inbound_rx));
+        let next_proto_id = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(1));
+        let subscriber =
+            crate::config::RibSubscriber::for_test(rib_tx, rib_inbound_tx, next_proto_id);
+        let (policy_tx, policy_rx) = mpsc::unbounded_channel();
+        Box::leak(Box::new(policy_rx));
+        let mut bgp = Bgp::new(
+            ctx,
+            rib_rx,
+            subscriber,
+            policy_tx,
+            None,
+            None,
+            tokio::sync::mpsc::channel(1).0,
+        );
+        config_evpn_encapsulation(&mut bgp, arg_words(&["evpn", "mpls"]), ConfigOp::Set).unwrap();
+        (bgp, rib_msg_rx)
+    }
+
+    fn add_evi(bgp: &mut Bgp, evi: u32) {
+        config_evi(bgp, arg_words(&["evpn", &evi.to_string()]), ConfigOp::Set).unwrap();
+    }
+
+    fn del_evi(bgp: &mut Bgp, evi: u32) {
+        config_evi(
+            bgp,
+            arg_words(&["evpn", &evi.to_string()]),
+            ConfigOp::Delete,
+        )
+        .unwrap();
+    }
+
+    fn evi_label(bgp: &Bgp, evi: u32) -> Option<u32> {
+        bgp.evpn_evis.get(&evi).and_then(|cfg| cfg.label)
+    }
+
+    /// The ILM messages and label-chunk releases sent to the RIB, in the
+    /// order sent.
+    fn label_msgs(rx: &mut mpsc::UnboundedReceiver<crate::rib::Message>) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                crate::rib::Message::IlmAdd { label, .. } => out.push(format!("add {label}")),
+                crate::rib::Message::IlmDel { label, .. } => out.push(format!("del {label}")),
+                crate::rib::Message::LabelBlockRelease { proto, start, size } => {
+                    out.push(format!("release {proto} {start}+{size}"))
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// Give the service labels a label space of their own, its dynamic
+    /// range 128 labels from 2000.
+    fn small_space(bgp: &mut Bgp) -> SharedLabelSpace {
+        let space = SharedLabelSpace::default();
+        space.lock().set_dynamic(2000, 2127);
+        bgp.service_labels = LabelChunks::new(space.clone(), "bgp", bgp.ctx.rib.proto_id());
+        space
+    }
+
+    /// An object has its label the moment it is configured — no block
+    /// request, no label-0 stand-in — from a 128-label chunk of the RIB's
+    /// label space.
+    #[tokio::test]
+    async fn an_evi_has_its_label_at_once_from_a_chunk() {
+        let (mut bgp, mut rx) = fresh_bgp();
+        add_evi(&mut bgp, 100);
+        add_evi(&mut bgp, 200);
+        assert_eq!(evi_label(&bgp, 100), Some(24000));
+        assert_eq!(evi_label(&bgp, 200), Some(24001));
+        assert_eq!(label_msgs(&mut rx), vec!["add 24000", "add 24001"]);
+        assert_eq!(
+            bgp.rib_subscriber.label_space().lock().held_blocks(),
+            vec![(LabelBlock::new(24000, 128), "bgp".to_string())]
+        );
+    }
+
+    /// A chunk whose labels are all free goes back at the event's label
+    /// upkeep, on the channel the ILM deletions went out on, after them;
+    /// not while a label in it is in use.
+    #[tokio::test]
+    async fn a_drained_service_chunk_goes_back_behind_its_ilm_deletions() {
+        let (mut bgp, mut rx) = fresh_bgp();
+        add_evi(&mut bgp, 100);
+        add_evi(&mut bgp, 200);
+        let _ = label_msgs(&mut rx);
+        del_evi(&mut bgp, 100);
+        bgp.label_chunk_upkeep();
+        assert_eq!(label_msgs(&mut rx), vec!["del 24000"], "24001 in use");
+        del_evi(&mut bgp, 200);
+        bgp.label_chunk_upkeep();
+        assert_eq!(
+            label_msgs(&mut rx),
+            vec!["del 24001", "release bgp 24000+128"]
+        );
+    }
+
+    /// With the range full an object goes without, and BGP is left starved
+    /// in the label space; when the RIB says room returned, it has its
+    /// label.
+    #[tokio::test]
+    async fn with_the_range_full_a_service_label_waits_until_room_returns() {
+        let (mut bgp, mut rx) = fresh_bgp();
+        let space = small_space(&mut bgp);
+        space.lock().alloc("isis", 128).expect("the whole range");
+        add_evi(&mut bgp, 100);
+        assert_eq!(evi_label(&bgp, 100), None);
+        assert_eq!(space.lock().take_starved(), [bgp.ctx.rib.proto_id()].into());
+        let _ = label_msgs(&mut rx);
+
+        space.lock().release("isis", 2000, 128);
+        bgp.process_rib_msg(crate::rib::api::RibRx::LocalLabelsFreed);
+        assert_eq!(evi_label(&bgp, 100), Some(2000));
+        assert_eq!(label_msgs(&mut rx), vec!["add 2000"]);
+    }
+
+    /// A service label freed while another object went without — the
+    /// range holding the one chunk, full — goes to that object at the
+    /// event's label upkeep: the chunk stays held, so the RIB sends no
+    /// word. The freed label's ILM deletion goes first.
+    #[tokio::test]
+    async fn a_freed_service_label_goes_to_an_object_that_went_without() {
+        let (mut bgp, mut rx) = fresh_bgp();
+        let space = small_space(&mut bgp);
+        for evi in 1..=128 {
+            add_evi(&mut bgp, evi);
+        }
+        assert_eq!(evi_label(&bgp, 5), Some(2004));
+        add_evi(&mut bgp, 999);
+        assert_eq!(evi_label(&bgp, 999), None, "the chunk is full");
+        bgp.label_chunk_upkeep();
+        assert_eq!(evi_label(&bgp, 999), None);
+        let _ = label_msgs(&mut rx);
+
+        del_evi(&mut bgp, 5);
+        bgp.label_chunk_upkeep();
+        assert_eq!(evi_label(&bgp, 999), Some(2004));
+        assert_eq!(label_msgs(&mut rx), vec!["del 2004", "add 2004"]);
+        assert_eq!(space.lock().held_blocks().len(), 1, "the chunk stays");
     }
 }

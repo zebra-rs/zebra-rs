@@ -1,4 +1,12 @@
-# z1 — the same BGP, with the dynamic range moved to start at 30000.
+# z1 — the same BGP and VRF, with the dynamic range moved to start at 30000.
+vrf:
+- name: vrf-a
+  ipv4:
+    route-target:
+      import:
+      - 65001:100
+      export:
+      - 65001:100
 mpls:
   label-range:
     dynamic:
@@ -15,3 +23,6 @@ router:
       afi-safi:
       - name: vpnv4
         enabled: true
+    vrf:
+    - name: vrf-a
+      rd: 65001:1
