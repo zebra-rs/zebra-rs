@@ -1278,3 +1278,28 @@ async fn a_withdrawn_sync_route_leaves_no_exemption() {
         "learned here from the ordinary route left: a move"
     );
 }
+
+/// The IP's winning binding replaced by an UPDATE with a lower sequence
+/// number: (mac 1, seq 10) and (mac 2, seq 5) from different RDs, then mac
+/// 1's route again with seq 1. The IP is at mac 2 now, and the host
+/// learned here on mac 2 kept its MAC. The IP stayed on mac 1, and the
+/// learn counted an IP move.
+#[tokio::test]
+async fn a_binding_replaced_by_an_older_one_moves_the_ip() {
+    let (mut f, _rx) = Flap::new(dad_config(3, crate::bgp::evpn_dad::Freeze::Permanent));
+    let ip: IpAddr = "10.10.0.5".parse().unwrap();
+    let mac1 = MacAddr::from([2, 0, 0, 0, 1, 8]);
+    let other_rd = rd_from_router_id_vni("10.0.0.12".parse().unwrap(), 100).unwrap();
+    receive_macip(&mut f.bgp, f.from, f.remote_rd, mac1, Some(ip), 10);
+    receive_macip(&mut f.bgp, f.from, other_rd, f.local.mac, Some(ip), 5);
+    assert_eq!(f.bgp.local_rib.evpn_dad.ips[&(100, ip)].mac, mac1);
+    receive_macip(&mut f.bgp, f.from, f.remote_rd, mac1, Some(ip), 1);
+    assert_eq!(f.bgp.local_rib.evpn_dad.ips[&(100, ip)].mac, f.local.mac);
+
+    f.bgp
+        .process_rib_msg(RibRx::FdbAdd(crate::rib::api::FdbEntry {
+            ip: Some(ip),
+            ..f.local.clone()
+        }));
+    assert_eq!(f.bgp.local_rib.evpn_dad.ips[&(100, ip)].probe.count, 0);
+}

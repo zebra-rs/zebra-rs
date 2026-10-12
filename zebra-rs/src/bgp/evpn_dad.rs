@@ -412,8 +412,47 @@ impl EvpnDad {
                 entry.probe.owner = Some(route.owner());
             }
             entry.probe.remote_routes.insert(binding, route);
+            // Not the newest. An older binding re-run leaves the IP where it
+            // is, but the IP's own binding replaced by an older one (a lower
+            // number in an UPDATE, a best path falling back) may leave
+            // another binding the newest.
+            if !binds {
+                self.ip_to_newest_binding(vni, ip);
+            }
         }
         (self.verdict(vni, mac, ip), detected)
+    }
+
+    /// A remote IP is at the newest of its live bindings. After one of them
+    /// came, went or changed its number, the IP moves to the newest if its
+    /// own binding no longer is; a binding tied with the newest keeps it.
+    /// Not a move this node takes part in, so nothing is counted.
+    fn ip_to_newest_binding(&mut self, vni: u32, ip: IpAddr) {
+        let Some(entry) = self.ips.get(&(vni, ip)) else {
+            return;
+        };
+        if !matches!(entry.probe.owner, Some(Owner::Remote { .. })) {
+            return;
+        }
+        let Some((RouteBinding::Mac(newest), newest_route)) = entry.probe.newest_remote() else {
+            return;
+        };
+        let own = entry
+            .probe
+            .remote_routes
+            .iter()
+            .filter(|((_, binding), _)| *binding == RouteBinding::Mac(entry.mac))
+            .map(|(_, route)| *route)
+            .max_by_key(|route| route.seq);
+        let (mac, route) = match own {
+            Some(own) if own.seq >= newest_route.seq => (entry.mac, own),
+            _ => (newest, newest_route),
+        };
+        self.ip_leaves_duplicate_mac(vni, ip, mac);
+        if let Some(entry) = self.ips.get_mut(&(vni, ip)) {
+            entry.mac = mac;
+            entry.probe.owner = Some(route.owner());
+        }
     }
 
     /// `ip` is about to be bound to `mac`. If it leaves a duplicate MAC for
@@ -501,16 +540,7 @@ impl EvpnDad {
                 self.ips.remove(&(vni, ip));
                 return;
             }
-            // Still remote: bound to the newest binding left.
-            if let Some(Owner::Remote { .. }) = entry.probe.owner
-                && let Some((RouteBinding::Mac(newest), _)) = entry.probe.newest_remote()
-                && newest != entry.mac
-            {
-                self.ip_leaves_duplicate_mac(vni, ip, newest);
-                if let Some(entry) = self.ips.get_mut(&(vni, ip)) {
-                    entry.mac = newest;
-                }
-            }
+            self.ip_to_newest_binding(vni, ip);
         }
     }
 
@@ -1193,6 +1223,40 @@ mod tests {
         assert_eq!(dad.ips[&(VNI, ip(5))].mac, mac(1));
         dad.local_learn(VNI, mac(1), Some(ip(5)), t);
         assert_eq!(dad.ips[&(VNI, ip(5))].probe.count, 0);
+    }
+
+    /// The IP's own binding replaced by an older one (a lower number in an
+    /// UPDATE, a best path falling back) leaves another binding the newest,
+    /// and the IP moves there; it stayed, and the host learned here on the
+    /// newest binding's MAC counted an IP move. A binding tied with the
+    /// newest keeps the IP.
+    #[test]
+    fn an_ip_follows_its_binding_replaced_by_an_older_one() {
+        let t = Instant::now();
+        let at = |rd_last: u8, seq: u32| RemoteRoute {
+            rd: [0, 1, 10, 0, 0, rd_last, 0, 100],
+            seq,
+            ..route()
+        };
+        let mut dad = dad(3, Freeze::Permanent);
+        dad.remote_takeover(VNI, mac(1), Some(ip(5)), at(11, 10), t);
+        dad.remote_takeover(VNI, mac(2), Some(ip(5)), at(12, 5), t);
+        assert_eq!(dad.ips[&(VNI, ip(5))].mac, mac(1));
+        dad.remote_takeover(VNI, mac(1), Some(ip(5)), at(11, 1), t);
+        assert_eq!(dad.ips[&(VNI, ip(5))].mac, mac(2));
+        dad.local_learn(VNI, mac(2), Some(ip(5)), t);
+        assert_eq!(dad.ips[&(VNI, ip(5))].probe.count, 0);
+
+        // mac(2) and mac(1) tie at 10, the IP on mac(2), the one that came
+        // last; an older binding re-run does not move it to mac(1).
+        let mut dad = super::EvpnDad {
+            config: dad.config,
+            ..Default::default()
+        };
+        dad.remote_takeover(VNI, mac(1), Some(ip(5)), at(12, 10), t);
+        dad.remote_takeover(VNI, mac(2), Some(ip(5)), at(11, 10), t);
+        dad.remote_takeover(VNI, mac(3), Some(ip(5)), at(13, 1), t);
+        assert_eq!(dad.ips[&(VNI, ip(5))].mac, mac(2));
     }
 
     /// A remote address is where the newest of its live routes is. A
