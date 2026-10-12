@@ -46,11 +46,19 @@ VTEPs, or a change of sequence number alone. A MAC learned here while a
 remote PE advertises it as **sticky** is an operator error: it is logged and
 not counted.
 
+A host on an **Ethernet Segment** this PE shares with another PE is reachable
+over this PE's own port wherever it was learned (RFC 7432 §8.4). The other
+PE's route for it on the segment only syncs it, as FRR treats it, so a
+multihomed host whose traffic hashes between the two PEs does not move:
+neither that route nor a learn here after it is counted.
+
 An **IP** is counted separately, but only when it moves to a *different* MAC:
 a host that keeps its MAC as it moves is already counted by the MAC. An IP
 bound to a duplicate MAC is a duplicate as well, for as long as it stays
 bound to it. As in FRR, an IP that moves to a MAC that is not a duplicate
-leaves the hold, and its own detection starts over.
+leaves the hold, and its own detection starts over. Only an IP's newest
+binding, the route with the highest sequence number for it, moves it: a route
+for an older binding, still advertised after the host moved on, does not.
 
 When an address reaches `max-moves`, zebra-rs logs a warning:
 
@@ -110,7 +118,10 @@ its MAC is. `show evpn dup-addr json` gives the same data as JSON.
 ```
 
 Clearing releases the named duplicates, and their routes are re-run as on a
-timed release. Clearing a MAC also releases the IPs bound to it.
+timed release. Clearing a MAC also releases the IPs bound to it. An IP shown
+as `dup (MAC)`, or any IP whose MAC is still a duplicate, is not released by
+clearing the IP: it stays held with its MAC. zebra-rs logs a warning naming
+the MAC; clear the MAC to release both, as FRR requires.
 
 ## Differences from FRR
 
