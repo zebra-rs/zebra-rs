@@ -26,4 +26,5 @@ participates without advertising a FAD.
 | Algo 128 (US-only) SRv6 routes confine to the US sub-topology | |
 | Algo 129 (EU-only) SRv6 routes confine to the EU sub-topology | |
 | Per-algo SRv6 locator routes install into the IPv6 FIB | |
+| A router that stops participating removes its per-algo SRv6 SIDs | |
 | Teardown SRv6 Flex-Algo topology | |

@@ -51,36 +51,58 @@ Feature: IS-IS Flexible Algorithm over the SRv6 dataplane
     And I apply config "va.yaml" to namespace "va"
     And I apply config "ln.yaml" to namespace "ln"
     And I apply config "fr.yaml" to namespace "fr"
-    And I wait 15 seconds
+    # Converged rather than after a fixed wait, which under load was not
+    # always long enough. A node advertises its flex-algo participation, and
+    # its per-algo locator, only once it has ch's definitions: a flooding
+    # round after its algo-0 reachability. The exclusion checks below need
+    # se to have ln's and fr's, and ln to have se's, ch's and va's.
+    Then show command "show isis flex-algo" in namespace "se" should eventually contain "ln (0000.0000.0004): [0, 128, 129]"
+    And show command "show isis flex-algo" in namespace "se" should eventually contain "ln (0000.0000.0004): algo 128 locator 2001:db8:d128::/48"
+    And show command "show isis flex-algo" in namespace "se" should eventually contain "fr (0000.0000.0005): [0, 128, 129]"
+    And show command "show isis flex-algo" in namespace "se" should eventually contain "fr (0000.0000.0005): algo 128 locator 2001:db8:e128::/48"
+    And show command "show isis flex-algo" in namespace "ln" should eventually contain "se (0000.0000.0001): [0, 128, 129]"
+    And show command "show isis flex-algo" in namespace "ln" should eventually contain "se (0000.0000.0001): algo 129 locator 2001:db8:a129::/48"
+    And show command "show isis flex-algo" in namespace "ln" should eventually contain "ch (0000.0000.0002): [0, 128, 129]"
+    And show command "show isis flex-algo" in namespace "ln" should eventually contain "ch (0000.0000.0002): algo 129 locator 2001:db8:b129::/48"
+    And show command "show isis flex-algo" in namespace "ln" should eventually contain "va (0000.0000.0003): [0, 128, 129]"
+    And show command "show isis flex-algo" in namespace "ln" should eventually contain "va (0000.0000.0003): algo 129 locator 2001:db8:c129::/48"
+    # An SPF over that runs within the SPF throttle's maximum wait (5 s), so
+    # after this the flex-algo tables are final: a route missing from one is
+    # excluded by the algorithm, not still to come. Only the exclusion checks
+    # depend on this wait, and only to be able to fail.
+    And I wait 6 seconds
     # se and ch are directly adjacent over se-ch (algo-0 reachability).
-    Then ping from "se" to "192.168.1.2" should succeed
+    And ping from "se" to "192.168.1.2" should succeed
 
   Scenario: Local per-algo SRv6 locators are visible on the originator
     Given the test topology exists
     # ch binds its own /48 per algorithm; both must resolve and carry a
     # node End SID.
-    Then show command "show isis flex-algo" in namespace "ch" should contain "2001:db8:b128"
-    And show command "show isis flex-algo" in namespace "ch" should contain "2001:db8:b129"
+    Then show command "show isis flex-algo" in namespace "ch" should eventually contain "2001:db8:b128"
+    And show command "show isis flex-algo" in namespace "ch" should eventually contain "2001:db8:b129"
 
   Scenario: Per-algo SRv6 locators flood to non-originating routers
     Given the test topology exists
     # se learns ch's per-algo locators from ch's SRv6 Locator TLV 27.
-    Then show command "show isis flex-algo" in namespace "se" should contain "2001:db8:b128"
+    Then show command "show isis flex-algo" in namespace "se" should eventually contain "2001:db8:b128"
 
   Scenario: Algo 128 (US-only) SRv6 routes confine to the US sub-topology
     Given the test topology exists
     # From se: ch (b128) and va (c128) are reachable over us-tagged links
-    # only. ln and fr need a transatlantic link, which algo 128 excludes.
-    Then show command "show isis flex-algo route algorithm 128" in namespace "se" should contain "2001:db8:b128"
-    And show command "show isis flex-algo route algorithm 128" in namespace "se" should contain "2001:db8:c128"
+    # only. ln and fr need a transatlantic link, which algo 128 excludes;
+    # se has seen them participate (the first scenario), so their absence
+    # is the constraint's doing.
+    Then show command "show isis flex-algo route algorithm 128" in namespace "se" should eventually contain "2001:db8:b128"
+    And show command "show isis flex-algo route algorithm 128" in namespace "se" should eventually contain "2001:db8:c128"
     And show command "show isis flex-algo route algorithm 128" in namespace "se" should not contain "2001:db8:d128"
     And show command "show isis flex-algo route algorithm 128" in namespace "se" should not contain "2001:db8:e128"
 
   Scenario: Algo 129 (EU-only) SRv6 routes confine to the EU sub-topology
     Given the test topology exists
     # From ln: fr (e129) is reachable over the eu link only. se/ch/va all
-    # require a transatlantic link, which algo 129 excludes.
-    Then show command "show isis flex-algo route algorithm 129" in namespace "ln" should contain "2001:db8:e129"
+    # require a transatlantic link, which algo 129 excludes; ln has seen
+    # them participate (the first scenario).
+    Then show command "show isis flex-algo route algorithm 129" in namespace "ln" should eventually contain "2001:db8:e129"
     And show command "show isis flex-algo route algorithm 129" in namespace "ln" should not contain "2001:db8:a129"
     And show command "show isis flex-algo route algorithm 129" in namespace "ln" should not contain "2001:db8:b129"
     And show command "show isis flex-algo route algorithm 129" in namespace "ln" should not contain "2001:db8:c129"
@@ -88,7 +110,7 @@ Feature: IS-IS Flexible Algorithm over the SRv6 dataplane
   Scenario: Per-algo SRv6 locator routes install into the IPv6 FIB
     Given the test topology exists
     # The algo-128 locator route to ch is a real IPv6 route in se's RIB.
-    Then show command "show ipv6 route" in namespace "se" should contain "2001:db8:b128"
+    Then show command "show ipv6 route" in namespace "se" should eventually contain "2001:db8:b128"
 
   Scenario: A router that stops participating removes its per-algo SRv6 SIDs
     Given the test topology exists
