@@ -27,12 +27,16 @@ answered by its own speaker, and no ARP request or neighbor solicitation
 enters the VXLAN overlay (needs `tcpdump`; skipped and recorded without
 it). It also removes bridge Type-5 state behind the daemon (L3-VNI bridge
 admin flap, VXLAN carrier flap, neighbor/FDB flush, VXLAN detach and
-re-attach, external route deletion) and checks that routes, RMAC adjacency
-and routing recover. It moves the L3-VNI VXLAN to a second bridge and
+re-attach, external route deletion, `kernel-route-exchange` turned off and on)
+and checks that routes, RMAC adjacency and routing recover. It moves the L3-VNI VXLAN to a second bridge and
 back, checking that no RMAC neighbors remain on the bridge it left.
 It moves a station's MAC and IP from one speaker to the other and back,
 checking that each side ends with the station local where it is and
 remote toward the other VTEP where it is not, and that this holds.
+It puts one MAC/IP behind both speakers, talking alternately, with
+`dup-addr-detection max-moves 3 freeze permanent`: the speaker that sees
+the third move detects the duplicate and freezes it, the station stays
+local on both sides, and `clear bgp evpn dup-addr` releases it.
 Finally it kills one speaker, changes its configuration and the peer's
 advertisements while it is down, and restarts it with a short
 `--leftover-sweep-time`. Leftovers its fresh routes replace are kept,

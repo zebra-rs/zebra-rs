@@ -8,6 +8,11 @@
 /router/bgp/afi-safi/bestpath/as-path	container
 /router/bgp/afi-safi/bestpath/as-path/multipath-relax	leaf
 /router/bgp/afi-safi/bum-tunnel-type	leaf
+/router/bgp/afi-safi/dup-addr-detection	container
+/router/bgp/afi-safi/dup-addr-detection/enabled	leaf
+/router/bgp/afi-safi/dup-addr-detection/freeze	leaf
+/router/bgp/afi-safi/dup-addr-detection/max-moves	leaf
+/router/bgp/afi-safi/dup-addr-detection/time	leaf
 /router/bgp/afi-safi/encapsulation	leaf
 /router/bgp/afi-safi/ethernet-segment	list keys=name
 /router/bgp/afi-safi/ethernet-segment/df-election	p-container

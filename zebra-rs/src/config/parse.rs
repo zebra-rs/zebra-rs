@@ -1108,6 +1108,23 @@ mod tests {
                 "/clear/bgp/evpn/neighbor",
                 vec!["all"],
             ),
+            // `clear bgp evpn dup-addr …` must not fall into the
+            // positional `neighbor` key.
+            (
+                "clear bgp evpn dup-addr vni all",
+                "/clear/bgp/evpn/dup-addr/vni",
+                vec!["all"],
+            ),
+            (
+                "clear bgp evpn dup-addr vni 100 mac 02:00:00:00:00:01",
+                "/clear/bgp/evpn/dup-addr/vni/mac",
+                vec!["100", "02:00:00:00:00:01"],
+            ),
+            (
+                "clear bgp evpn dup-addr vni 100 ip 2001:db8::5",
+                "/clear/bgp/evpn/dup-addr/vni/ip",
+                vec!["100", "2001:db8::5"],
+            ),
             // Interface-neighbor names (IPv6 unnumbered peers have no
             // typeable address). The pattern-less string arm of
             // `peer-id-or-all` must word-match a single token, so the

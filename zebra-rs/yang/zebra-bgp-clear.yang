@@ -8,6 +8,10 @@ module zebra-bgp-clear {
     prefix inet;
   }
 
+  import ietf-yang-types {
+    prefix yang;
+  }
+
   import configure {
     prefix configure;
   }
@@ -158,6 +162,37 @@ module zebra-bgp-clear {
         ext:help "L2VPN EVPN (RFC 7432)";
         ext:default-child "neighbor";
         uses bgp-clear-neighbor-actions;
+        // `clear bgp evpn dup-addr vni <all|N> [mac M | ip I]` (FRR's
+        // `clear evpn dup-addr`): release detected duplicate addresses —
+        // every one in the VNI, or the one MAC or IP named — and re-run
+        // their routes.
+        container dup-addr {
+          ext:help "Release EVPN duplicate addresses";
+          list vni {
+            ext:help "VNI (or all)";
+            ext:presence "Release every duplicate address in the VNI";
+            key id;
+            leaf id {
+              ext:help "VNI, or all";
+              type union {
+                type enumeration {
+                  enum all;
+                }
+                type uint32 {
+                  range "1..16777215";
+                }
+              }
+            }
+            leaf mac {
+              ext:help "Release this MAC";
+              type yang:mac-address;
+            }
+            leaf ip {
+              ext:help "Release this IP";
+              type inet:ip-address;
+            }
+          }
+        }
       }
       // Debug / test-injection surface for the RFC 9251 EVPN Type-7
       // (IGMP/MLD Join Synch) and Type-8 (Leave Synch) routes. Each action
