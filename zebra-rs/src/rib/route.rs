@@ -204,17 +204,29 @@ impl Rib {
             }
         }
         self.fib_handle.kernel_route_exchange = enabled;
+        // Installed as selection installs: its nexthop first, and on a
+        // failure the nexthop recreated and the route retried by the next
+        // resolve, which re-adds a selected route the FIB lacks.
+        let mut retry = false;
         for (table_id, prefix) in routes {
-            let Some(entry) = self.overlay_entry(table_id, prefix, overlay).cloned() else {
+            let Some(mut entry) = self.overlay_entry(table_id, prefix, overlay).cloned() else {
                 continue;
             };
+            entry.nexthop_sync(&mut self.nmap, &self.fib_handle).await;
             let ok = match prefix {
                 IpNet::V4(p) => self.fib_handle.route_ipv4_add(&p, &entry, table_id).await,
                 IpNet::V6(p) => self.fib_handle.route_ipv6_add(&p, &entry, table_id).await,
             };
+            if !ok {
+                nexthop_force_reinstall(&entry.nexthop, &mut self.nmap);
+                retry = true;
+            }
             if let Some(entry) = self.overlay_entry_mut(table_id, prefix, overlay) {
                 entry.set_fib(ok);
             }
+        }
+        if retry {
+            self.schedule_rib_sync();
         }
     }
 

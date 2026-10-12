@@ -1073,6 +1073,59 @@ async fn a_withdrawn_ecmp_type5_route_whose_install_failed_is_not_recovered() {
     }
 }
 
+/// `kernel-route-exchange` turned off moves each bridge Type-5 route to the
+/// ordinary install, which goes through its kernel nexthop object. A route
+/// the kernel rejects there, its nexthop object gone, is retried as
+/// selection retries one: the nexthop is recreated and a resolve, which
+/// re-adds a selected route the FIB lacks, is scheduled. Nothing was, and
+/// the prefix stayed unrouted until some other event re-ran its selection.
+#[tokio::test]
+async fn a_type5_route_the_kernel_rejects_on_an_exchange_change_is_retried() {
+    use crate::rib::nexthop::GroupTrait;
+    for prefix in ["198.51.100.0/24", "2001:db8:5::/64"] {
+        let prefix: IpNet = prefix.parse().unwrap();
+        let mut rib = Rib::new(false).unwrap();
+        rib.fib_handle.kernel_route_exchange = true;
+        let mut uni = NexthopUni {
+            addr: "192.0.2.2".parse().unwrap(),
+            vxlan: Some(crate::rib::VxlanL3Encap {
+                remote_vtep: "192.0.2.2".parse().unwrap(),
+                l3vni: 3000,
+                remote_rmac: [2, 0, 0, 0, 0, 3],
+            }),
+            ..Default::default()
+        };
+        // Installed once, as far as the RIB knows; the kernel has no such
+        // object, so the route referring to it is refused.
+        let group = rib.nmap.fetch_uni(&uni, 100).unwrap();
+        group.set_valid(true);
+        group.set_installed(true);
+        uni.gid = group.gid();
+        let mut entry = RibEntry::new(RibType::Bgp);
+        entry.valid = true;
+        entry.selected = true;
+        entry.fib = true;
+        entry.nexthop = Nexthop::Uni(uni.clone());
+        insert(&mut rib, prefix, 100, entry);
+
+        rib.kernel_route_exchange_set(false).await;
+        let tables = &rib.vrf_tables[&100];
+        let fib = match prefix {
+            IpNet::V4(p) => tables.table.get(&p).unwrap()[0].is_fib(),
+            IpNet::V6(p) => tables.table_v6.get(&p).unwrap()[0].is_fib(),
+        };
+        assert!(!fib, "{prefix}: refused");
+        assert!(
+            !rib.nmap.get(uni.gid).unwrap().is_installed(),
+            "{prefix}: the next sync recreates the nexthop"
+        );
+        assert!(
+            rib.rib_sync_timer.is_some(),
+            "{prefix}: a resolve retries it"
+        );
+    }
+}
+
 /// An earlier run's SRv6 routes that this run replaced in place, at the
 /// same table, prefix and priority, with a plain route (SRv6 disabled
 /// across the restart, say) or a blackhole: the leftover sweep keeps the
