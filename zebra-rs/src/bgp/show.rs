@@ -7766,8 +7766,8 @@ fn evpn_vni_all_view(bgp: &Bgp) -> EvpnVniAllJson {
                 route_target: format!("{}:{}", bgp.asn as u16, vni),
                 local_macs: bgp
                     .local_fdb
-                    .keys()
-                    .filter(|(v, _, ip)| *v == vni && ip.is_none())
+                    .vni(vni)
+                    .filter(|entry| entry.ip.is_none())
                     .count(),
                 remote_macs: remote_macs.iter().filter(|(v, _)| *v == vni).count(),
                 remote_vteps: bgp
