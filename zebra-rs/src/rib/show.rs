@@ -2455,6 +2455,7 @@ mod tests {
             seq: 0,
             installed: false,
             local_port: None,
+            kernel_row_lost: false,
         }
     }
 

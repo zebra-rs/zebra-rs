@@ -10121,9 +10121,13 @@ fn route_evpn_export_selected(
                 if let Some(vni) = macip_kernel_vni(wd) {
                     let key = rib::evpn::MacRouteKey::new(*rd, vni, mac_addr, *ip);
                     if !wd.is_originated() {
-                        bgp.local_rib
-                            .evpn_dad
-                            .remote_gone(key.rd, vni, mac_addr, *ip);
+                        bgp.local_rib.evpn_dad.remote_gone(
+                            key.rd,
+                            vni,
+                            mac_addr,
+                            *ip,
+                            std::time::Instant::now(),
+                        );
                     }
                     let _ = bgp.rib_client.send(rib::Message::EvpnMacDel(key));
                 } else {
@@ -10300,9 +10304,13 @@ fn route_evpn_export_selected(
                     }))
                 {
                     let key = rib::evpn::MacRouteKey::new(*rd, vni, mac_addr, *ip);
-                    bgp.local_rib
-                        .evpn_dad
-                        .remote_gone(key.rd, vni, mac_addr, *ip);
+                    bgp.local_rib.evpn_dad.remote_gone(
+                        key.rd,
+                        vni,
+                        mac_addr,
+                        *ip,
+                        std::time::Instant::now(),
+                    );
                     let _ = bgp.rib_client.send(rib::Message::EvpnMacDel(key));
                     return;
                 }

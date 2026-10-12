@@ -158,9 +158,15 @@ impl Probe {
         self.duplicate = None;
     }
 
-    /// Nothing worth keeping: no owner, no open window, no mark.
-    fn idle(&self) -> bool {
-        self.owner.is_none() && self.count == 0 && self.duplicate.is_none()
+    /// Nothing worth keeping: no owner, no open window, no mark. A window
+    /// that has run out counts as closed: its moves no longer count.
+    fn idle(&self, config: &DadConfig, now: Instant) -> bool {
+        let window = Duration::from_secs(config.time.into());
+        let open = self.count > 0
+            && self
+                .start
+                .is_some_and(|start| now.saturating_duration_since(start) <= window);
+        self.owner.is_none() && !open && self.duplicate.is_none()
     }
 
     /// One remote route for the address went; with the last, it is no
@@ -266,6 +272,7 @@ impl EvpnDad {
         }
         probe.owner = Some(Owner::Local);
         if let Some(ip) = ip {
+            self.ip_leaves_duplicate_mac(vni, ip, mac);
             let entry = self.ips.entry((vni, ip)).or_insert_with(|| IpProbe {
                 mac,
                 probe: Probe::default(),
@@ -317,6 +324,7 @@ impl EvpnDad {
         probe.owner = owner;
         probe.remote_routes.insert((rd, RouteBinding::Ip(ip)));
         if let Some(ip) = ip {
+            self.ip_leaves_duplicate_mac(vni, ip, mac);
             let entry = self.ips.entry((vni, ip)).or_insert_with(|| IpProbe {
                 mac,
                 probe: Probe::default(),
@@ -341,6 +349,58 @@ impl EvpnDad {
         (self.verdict(vni, mac, ip), detected)
     }
 
+    /// `ip` is about to be bound to `mac`. If it leaves a duplicate MAC for
+    /// one that is not, it leaves that MAC's hold and its own detection
+    /// starts over, as FRR's `zebra_evpn_ip_inherit_dad_from_mac` does
+    /// ("clear duplicate flag for IP and reset detection params and let IP
+    /// DAD retrigger"): the moves it made before are forgotten, so the
+    /// rebinding is not counted on top of them. Without the reset an IP
+    /// that had moved once, its MAC then detected, was itself detected by
+    /// the rebinding (`max-moves 2`) and frozen.
+    fn ip_leaves_duplicate_mac(&mut self, vni: u32, ip: IpAddr, mac: MacAddr) {
+        let Some(old) = self.ips.get(&(vni, ip)).map(|entry| entry.mac) else {
+            return;
+        };
+        if old != mac
+            && self.mac_duplicate(vni, old)
+            && !self.mac_duplicate(vni, mac)
+            && let Some(entry) = self.ips.get_mut(&(vni, ip))
+        {
+            entry.probe.clear();
+        }
+    }
+
+    /// This node no longer has `mac` (bound to `ip`, for a MAC/IP route):
+    /// the FDB entry was deleted. The address stops being local, and its
+    /// state goes once nothing is left of it. Detection made an entry for
+    /// every local MAC and IP, with detection on or off, and nothing removed
+    /// it: the maps grew with every MAC that ever came and went.
+    pub fn local_gone(&mut self, vni: u32, mac: MacAddr, ip: Option<IpAddr>, now: Instant) {
+        let config = self.config;
+        match ip {
+            None => {
+                if let Some(probe) = self.macs.get_mut(&(vni, mac)) {
+                    if probe.owner == Some(Owner::Local) {
+                        probe.owner = None;
+                    }
+                    if probe.idle(&config, now) {
+                        self.macs.remove(&(vni, mac));
+                    }
+                }
+            }
+            Some(ip) => {
+                if let Some(entry) = self.ips.get_mut(&(vni, ip)) {
+                    if entry.mac == mac && entry.probe.owner == Some(Owner::Local) {
+                        entry.probe.owner = None;
+                    }
+                    if entry.probe.idle(&config, now) {
+                        self.ips.remove(&(vni, ip));
+                    }
+                }
+            }
+        }
+    }
+
     fn verdict(&self, vni: u32, mac: MacAddr, ip: Option<IpAddr>) -> Verdict {
         if self.frozen(vni, mac, ip) {
             Verdict::Hold
@@ -351,10 +411,18 @@ impl EvpnDad {
 
     /// The remote route (RD `rd`) for `mac`, bound to `ip`, is no longer
     /// installed: withdrawn, or beaten by this node's own.
-    pub fn remote_gone(&mut self, rd: [u8; 8], vni: u32, mac: MacAddr, ip: Option<IpAddr>) {
+    pub fn remote_gone(
+        &mut self,
+        rd: [u8; 8],
+        vni: u32,
+        mac: MacAddr,
+        ip: Option<IpAddr>,
+        now: Instant,
+    ) {
+        let config = self.config;
         if let Some(probe) = self.macs.get_mut(&(vni, mac)) {
             probe.remote_route_gone((rd, RouteBinding::Ip(ip)));
-            if probe.idle() {
+            if probe.idle(&config, now) {
                 self.macs.remove(&(vni, mac));
             }
         }
@@ -362,7 +430,7 @@ impl EvpnDad {
             && let Some(entry) = self.ips.get_mut(&(vni, ip))
         {
             entry.probe.remote_route_gone((rd, RouteBinding::Mac(mac)));
-            if entry.probe.idle() {
+            if entry.probe.idle(&config, now) {
                 self.ips.remove(&(vni, ip));
             }
         }
@@ -886,7 +954,81 @@ mod tests {
         keys
     }
 
+    /// Mark `mac` detected, as a flap would.
+    fn mark_duplicate(dad: &mut EvpnDad, mac: MacAddr, t: Instant) {
+        dad.macs.entry((VNI, mac)).or_default().duplicate = Some(Duplicate {
+            since: t,
+            until: None,
+        });
+    }
+
+    /// An IP leaving a duplicate MAC for a clean one forgets its earlier
+    /// moves (FRR's `zebra_evpn_ip_inherit_dad_from_mac`), so the
+    /// rebinding does not complete its own detection; on a duplicate MAC,
+    /// or a MAC that is not one in the first place, it keeps them.
+    #[test]
+    fn an_ip_leaving_a_duplicate_mac_forgets_its_moves() {
+        let t = Instant::now();
+        let setup = || {
+            let mut dad = dad(2, Freeze::Permanent);
+            // On mac(2) remotely, then learned here on mac(1): one move.
+            dad.remote_takeover(RD, VNI, mac(2), Some(ip(5)), VTEP, false, t);
+            dad.local_learn(VNI, mac(1), Some(ip(5)), t);
+            assert_eq!(dad.ips[&(VNI, ip(5))].probe.count, 1);
+            dad
+        };
+
+        let mut clean = setup();
+        mark_duplicate(&mut clean, mac(1), t);
+        let (verdict, keys) = clean.remote_takeover(RD, VNI, mac(2), Some(ip(5)), VTEP, false, t);
+        assert_eq!((verdict, keys), (Verdict::Proceed, vec![]));
+        let probe = &clean.ips[&(VNI, ip(5))].probe;
+        assert_eq!((probe.count, probe.duplicate), (0, None));
+
+        // To a MAC that is a duplicate too: the move still counts.
+        let mut dup = setup();
+        mark_duplicate(&mut dup, mac(1), t);
+        mark_duplicate(&mut dup, mac(3), t);
+        let (verdict, _) = dup.remote_takeover(RD, VNI, mac(3), Some(ip(5)), VTEP, false, t);
+        assert_eq!(verdict, Verdict::Hold);
+        assert_eq!(dup.ips[&(VNI, ip(5))].probe.count, 2);
+
+        // From a MAC that is not a duplicate: likewise.
+        let mut plain = setup();
+        let (_, keys) = plain.remote_takeover(RD, VNI, mac(2), Some(ip(5)), VTEP, false, t);
+        assert_eq!(keys, vec![DadKey::Ip(VNI, ip(5))]);
+    }
+
+    /// A local address that goes (its FDB entry deleted) is forgotten,
+    /// detection on or off, unless a window it opened is still counting:
+    /// that stays until it runs out.
+    #[test]
+    fn a_local_address_that_goes_is_forgotten() {
+        let t = Instant::now();
+        for enabled in [true, false] {
+            let mut dad = dad(2, Freeze::Off);
+            dad.config.enabled = enabled;
+            dad.local_learn(VNI, mac(1), Some(ip(1)), t);
+            dad.local_gone(VNI, mac(1), Some(ip(1)), t);
+            dad.local_gone(VNI, mac(1), None, t);
+            assert!(
+                dad.macs.is_empty() && dad.ips.is_empty(),
+                "enabled {enabled}"
+            );
+        }
+
+        // A learn of a remote MAC opens a window (one move).
+        let mut dad = dad(3, Freeze::Off);
+        dad.remote_takeover(RD, VNI, mac(1), None, VTEP, false, t);
+        dad.local_learn(VNI, mac(1), None, t);
+        dad.local_gone(VNI, mac(1), None, t);
+        assert_eq!(dad.macs[&(VNI, mac(1))].count, 1, "window open");
+        dad.remote_gone(RD, VNI, mac(1), None, t + Duration::from_secs(181));
+        assert!(dad.macs.is_empty(), "window run out");
+    }
+
     /// A first local learn, or one after the remote route went, is not a
+    /// move; refreshes of a local MAC are not moves either.    /// A first local learn, or one after the remote route went, is not a
     /// move; refreshes of a local MAC are not moves either.
     #[test]
     fn only_a_learn_of_a_remote_mac_is_a_move() {
@@ -898,7 +1040,7 @@ mod tests {
         // A remote route outside any window counts nothing.
         dad.remote_takeover(RD, VNI, mac(1), None, VTEP, false, t);
         assert_eq!(dad.macs[&(VNI, mac(1))].count, 0);
-        dad.remote_gone(RD, VNI, mac(1), None);
+        dad.remote_gone(RD, VNI, mac(1), None, t);
         dad.local_learn(VNI, mac(1), None, t);
         assert_eq!(dad.macs[&(VNI, mac(1))].count, 0);
     }

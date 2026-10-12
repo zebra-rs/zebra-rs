@@ -927,6 +927,12 @@ pub struct MacEntry {
     /// not the overlay (RFC 7432 §8.4). Set by BGP, which alone knows the
     /// local segments; the overlay `dests` are still recorded for `show`.
     pub local_port: Option<String>,
+    /// The kernel deleted the row a local learn had put in place of the
+    /// one programmed from this entry (the host left this node), so the
+    /// bridge has no row for the MAC: the next reprogram installs it even
+    /// if the binding is unchanged (`Rib::mac_reprogram`). Not part of
+    /// `programs_as`.
+    pub kernel_row_lost: bool,
 }
 
 /// One overlay destination for a MAC. The three encapsulations are
@@ -957,6 +963,7 @@ impl MacEntry {
             seq,
             installed: false,
             local_port: None,
+            kernel_row_lost: false,
         }
     }
 
@@ -1972,6 +1979,9 @@ impl Rib {
             if !desired.contains_key(&key) {
                 self.api_fdb_del(&entry);
                 self.local_bindings.remove(&key);
+                if entry.ip.is_none() {
+                    self.mac_local_row_gone(entry.vni, entry.mac);
+                }
             }
         }
         for (key, entry) in desired {
@@ -5514,6 +5524,7 @@ impl Rib {
             vxlan_local,
         };
         self.api_fdb_del(&entry);
+        self.mac_local_row_gone(vni, mac);
     }
 
     async fn process_cm_msg(&mut self, msg: ConfigRequest) {
@@ -5709,18 +5720,37 @@ impl Rib {
     /// unchanged binding is not harmless: a locally learned row that took
     /// the address over would be moved back onto the VXLAN port, as when
     /// BGP withdraws one of a MAC's remote routes ahead of the others.
+    ///
+    /// A row the kernel lost after a local learn displaced it
+    /// (`MacEntry::kernel_row_lost`) is installed again even then: nothing
+    /// else restores it, and the bridge floods the MAC. A duplicate address
+    /// released by `clear` is re-run unchanged, and must reach the kernel.
+    /// Returns whether it programmed.
     pub(super) async fn mac_reprogram(
         &mut self,
         vni: u32,
         mac: MacAddr,
         previous: Option<MacEntry>,
-    ) {
+    ) -> bool {
         let unchanged = match (self.mac_table.get(&(vni, mac)), &previous) {
-            (Some(entry), Some(previous)) => entry.programs_as(previous),
+            (Some(entry), Some(previous)) => {
+                entry.programs_as(previous) && !previous.kernel_row_lost
+            }
             _ => false,
         };
         if !unchanged {
             self.mac_install(vni, mac).await;
+        }
+        !unchanged
+    }
+
+    /// The kernel's locally learned row for `(vni, mac)` went. If a remote
+    /// route's entry was programmed before the local learn displaced it,
+    /// the bridge holds no row for the MAC now: mark the entry, so the next
+    /// reprogram installs it even unchanged.
+    fn mac_local_row_gone(&mut self, vni: u32, mac: MacAddr) {
+        if let Some(entry) = self.mac_table.get_mut(&(vni, mac)) {
+            entry.kernel_row_lost = true;
         }
     }
 
@@ -6590,9 +6620,41 @@ mod local_device_mac_tests {
         assert!(!moved.programs_as(&entry));
         let mac = mac("aa:bb:cc:dd:ee:01");
         rib.mac_table.insert((10, mac), entry.clone());
-        // No local VXLAN: an install would be skipped anyway, so this only
-        // checks the comparison is wired, not the netlink side.
-        rib.mac_reprogram(10, mac, Some(entry)).await;
+        assert!(!rib.mac_reprogram(10, mac, Some(entry.clone())).await);
+        assert!(rib.mac_reprogram(10, mac, Some(moved)).await);
+        assert!(rib.mac_reprogram(10, mac, None).await, "a new MAC");
+    }
+
+    /// When the kernel deletes the local row that had displaced a remote
+    /// MAC's (the host left this node), the bridge has no row for it, and
+    /// the next reprogram installs the remote one even though its binding
+    /// is unchanged. A duplicate address released by `clear` is re-run
+    /// unchanged: the unchanged check skipped it, and the MAC flooded.
+    #[tokio::test]
+    async fn a_row_the_kernel_lost_is_reprogrammed_unchanged() {
+        let mut rib = Rib::new(false).unwrap();
+        rib.links = tables().0;
+        let mac = mac("aa:bb:cc:dd:ee:01");
+        let entry = MacEntry::new(
+            Some(MacDest::Vxlan {
+                vtep: "192.0.2.1".parse().unwrap(),
+            }),
+            None,
+            0,
+            3,
+        );
+        rib.mac_table.insert((10, mac), entry.clone());
+        let local = row(HOST0, "aa:bb:cc:dd:ee:01", None, NeighbourState::Reachable);
+        rib.process_fib_msg(FibMessage::NewNeighbor(local.clone()))
+            .await;
+        assert!(
+            !rib.mac_table[&(10, mac)].kernel_row_lost,
+            "displaced, not lost: a reprogram must not move it back"
+        );
+        rib.process_fib_msg(FibMessage::DelNeighbor(local)).await;
+        let previous = rib.mac_table[&(10, mac)].clone();
+        assert!(previous.kernel_row_lost);
+        assert!(rib.mac_reprogram(10, mac, Some(previous)).await);
     }
 
     #[tokio::test]

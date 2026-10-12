@@ -4989,6 +4989,14 @@ impl Bgp {
             }
             RibRx::FdbDel(entry) => {
                 self.local_fdb.remove(&(entry.vni, entry.mac, entry.ip));
+                // No longer local: detection forgets the address once
+                // nothing is left of it.
+                self.local_rib.evpn_dad.local_gone(
+                    entry.vni,
+                    entry.mac,
+                    entry.ip,
+                    std::time::Instant::now(),
+                );
                 self.evpn_withdraw_macip(&entry);
             }
             RibRx::VxlanAdd { vni, vtep_local } => {

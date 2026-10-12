@@ -845,6 +845,101 @@ async fn an_ip_rebound_to_a_clean_mac_leaves_the_inherited_hold() {
     assert!(f.bgp.local_rib.evpn_dad.frozen(100, f.local.mac, None));
 }
 
+/// An IP that moved once, then had its MAC detected: it holds with the
+/// MAC (inherited), with a move of its own still counted.
+fn ip_moved_then_its_mac_detected() -> (Flap, IpAddr, MacAddr) {
+    use crate::bgp::evpn_dad::Freeze;
+    let (mut f, _rx) = Flap::new(dad_config(2, Freeze::Permanent));
+    let ip = "10.10.0.5".parse().unwrap();
+    let other = MacAddr::from([2, 0, 0, 0, 1, 2]);
+    // On the peer's other MAC, then learned here on ours: a move.
+    receive_macip(&mut f.bgp, f.from, f.remote_rd, other, Some(ip), 1);
+    f.bgp
+        .process_rib_msg(RibRx::FdbAdd(crate::rib::api::FdbEntry {
+            ip: Some(ip),
+            ..f.local.clone()
+        }));
+    assert_eq!(f.bgp.local_rib.evpn_dad.ips[&(100, ip)].probe.count, 1);
+    // Our MAC flaps until detected.
+    f.seq = 3;
+    f.remote();
+    f.local();
+    f.remote();
+    let dad = &f.bgp.local_rib.evpn_dad;
+    assert!(dad.mac_duplicate(100, f.local.mac));
+    assert!(dad.frozen(100, f.local.mac, Some(ip)), "inherited");
+    assert!(dad.ips[&(100, ip)].probe.duplicate.is_none());
+    f.messages();
+    (f, ip, other)
+}
+
+/// Rebound to a clean MAC, such an IP leaves the hold and its own detection
+/// starts over (FRR's `zebra_evpn_ip_inherit_dad_from_mac`): its earlier
+/// move is forgotten, not counted with the rebinding. It was: with
+/// `max-moves 2` the rebinding completed its own detection, and the
+/// rebound route was not installed (remote) nor advertised (local).
+#[tokio::test]
+async fn an_ip_leaving_a_duplicate_mac_starts_its_detection_over() {
+    let (mut f, ip, other) = ip_moved_then_its_mac_detected();
+    receive_macip(&mut f.bgp, f.from, f.remote_rd, other, Some(ip), 20);
+    let key = crate::rib::evpn::MacRouteKey::new(f.remote_rd, 100, other, Some(ip));
+    assert!(f.messages().contains(&(true, key)), "remote: installed");
+    let probe = &f.bgp.local_rib.evpn_dad.ips[&(100, ip)].probe;
+    assert_eq!((probe.count, probe.duplicate), (0, None));
+
+    let (mut f, ip, other) = ip_moved_then_its_mac_detected();
+    receive_macip(&mut f.bgp, f.from, f.remote_rd, f.local.mac, Some(ip), 20);
+    let local = crate::rib::api::FdbEntry {
+        mac: other,
+        ip: Some(ip),
+        ..f.local.clone()
+    };
+    f.bgp.process_rib_msg(RibRx::FdbAdd(local.clone()));
+    assert!(f.bgp.evpn_macip_originated(&local), "local: advertised");
+    assert_eq!(f.bgp.local_rib.evpn_dad.ips[&(100, ip)].probe.count, 1);
+}
+
+/// Detection forgets a local MAC and IP once the FDB entry is deleted, with
+/// detection on or off. It kept an entry for every one that ever came and
+/// went.
+#[tokio::test]
+async fn a_local_address_that_goes_leaves_no_detection_state() {
+    use crate::bgp::evpn_dad::{DadConfig, Freeze};
+    for enabled in [true, false] {
+        let (mut f, _rx) = Flap::new(DadConfig {
+            enabled,
+            ..dad_config(3, Freeze::Off)
+        });
+        for i in 0..50u8 {
+            let mac = MacAddr::from([2, 0, 0, 1, 0, i]);
+            let ip = Some(IpAddr::from([10, 10, 1, i]));
+            for ip in [None, ip] {
+                f.bgp
+                    .process_rib_msg(RibRx::FdbAdd(crate::rib::api::FdbEntry {
+                        mac,
+                        ip,
+                        ..f.local.clone()
+                    }));
+            }
+            for ip in [ip, None] {
+                f.bgp
+                    .process_rib_msg(RibRx::FdbDel(crate::rib::api::FdbEntry {
+                        mac,
+                        ip,
+                        ..f.local.clone()
+                    }));
+            }
+        }
+        let dad = &f.bgp.local_rib.evpn_dad;
+        assert!(
+            dad.macs.is_empty(),
+            "enabled {enabled}: {:?}",
+            dad.macs.len()
+        );
+        assert!(dad.ips.is_empty(), "enabled {enabled}: {:?}", dad.ips.len());
+    }
+}
+
 /// Changing warn-only to a timed freeze withdraws existing advertisements
 /// immediately and arms a real timer that re-advertises on recovery.
 #[tokio::test(start_paused = true)]
