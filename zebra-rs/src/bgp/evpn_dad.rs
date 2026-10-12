@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use super::inst::{Bgp, Message};
-use crate::context::{Timer, TimerType};
+use crate::context::Task;
 use crate::rib::MacAddr;
 use crate::rib::api::FdbEntry;
 
@@ -274,10 +274,10 @@ pub struct EvpnDad {
     /// by `Bgp::evpn_dad_drain`, which has the peers the withdrawal needs,
     /// after every event (`Bgp::event_upkeep`).
     pub withdraw: BTreeSet<(u32, MacAddr, Option<IpAddr>)>,
-    /// The recovery timer of each address a timed freeze holds: one per
-    /// address, re-armed in place, so a timer replaced or dropped is
-    /// cancelled rather than left to wake for nothing.
-    pub recovery: BTreeMap<DadKey, Timer>,
+    /// The recovery timer of each address a timed freeze holds, one per
+    /// address: dropping it (a release, a change of freeze policy) cancels
+    /// it, rather than leaving it to wake for nothing.
+    pub recovery: BTreeMap<DadKey, Task<()>>,
 }
 
 impl EvpnDad {
@@ -696,9 +696,12 @@ fn warn_detected(vni: u32, what: &str, during: &str, vtep: Option<IpAddr>) {
 }
 
 /// The recovery timer for a timed freeze: `EvpnDadRecover` arrives at
-/// `until`. `until` identifies the freeze, so a wake-up already on its way
-/// when the freeze was cleared or re-detected is discarded.
-fn recovery_timer(tx: &mpsc::Sender<Message>, key: DadKey, until: Instant) -> Option<Timer> {
+/// `until`, the absolute deadline however late the task first runs (a
+/// timer counting its period from then would extend the freeze). `until`
+/// identifies the freeze, so a wake-up already on its way when the freeze
+/// was cleared or re-detected is discarded. The task is aborted when
+/// dropped.
+fn recovery_timer(tx: &mpsc::Sender<Message>, key: DadKey, until: Instant) -> Option<Task<()>> {
     if tokio::runtime::Handle::try_current().is_err() {
         tracing::warn!(
             "EVPN duplicate address {key:?}: no runtime to arm the recovery timer; \
@@ -707,15 +710,9 @@ fn recovery_timer(tx: &mpsc::Sender<Message>, key: DadKey, until: Instant) -> Op
         return None;
     }
     let tx = tx.clone();
-    // A zero period would panic the timer's interval.
-    let after = until
-        .saturating_duration_since(Instant::now())
-        .max(Duration::from_millis(1));
-    Some(Timer::new_dur(after, TimerType::Once, move || {
-        let tx = tx.clone();
-        async move {
-            let _ = tx.send(Message::EvpnDadRecover { key, until }).await;
-        }
+    Some(Task::spawn(async move {
+        tokio::time::sleep_until(tokio::time::Instant::from_std(until)).await;
+        let _ = tx.send(Message::EvpnDadRecover { key, until }).await;
     }))
 }
 
@@ -1147,6 +1144,32 @@ mod tests {
             since: t,
             until: None,
         });
+    }
+
+    /// A recovery timer wakes at the freeze's deadline, however late its
+    /// task first runs. A timer counting its period from its first run
+    /// extended the freeze: one first run 31 s into a 30 s freeze waited
+    /// another 30 s.
+    #[tokio::test(start_paused = true)]
+    async fn recovery_wakes_at_the_deadline_however_late_the_timer_starts() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let mut dad = dad(2, Freeze::For(30));
+        let t = Instant::now();
+        let mut keys = flap(&mut dad, t, 0);
+        keys.extend(flap(&mut dad, t, 0));
+        assert_eq!(keys, vec![DadKey::Mac(VNI, mac(1))]);
+        dad.arm(&tx, &keys);
+        let deadline = dad.until(keys[0]).unwrap();
+        // The clock passes the deadline before the timer's task first runs.
+        tokio::time::advance(Duration::from_secs(31)).await;
+        let message = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("woken at the deadline")
+            .expect("channel open");
+        let Message::EvpnDadRecover { key, until } = message else {
+            panic!("expected a recovery");
+        };
+        assert_eq!((key, until), (keys[0], deadline));
     }
 
     /// Releasing a MAC releases the IPs bound to it, and their recovery
