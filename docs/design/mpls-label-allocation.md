@@ -872,9 +872,12 @@ re-reserve the Adjacency-SID labels its checkpoint restores:
   held: free and in the pool's range, it is the pool's; held, given back or
   claimed by another, or covered by a block, it is refused. Unlike
   `claim`, it neither marks the label configured nor revokes a holder.
-- The pool reserves every restored label as it is created
-  (`reserve_adj_sid_labels`); a refused one is dropped, and its adjacency
-  is given another. The NFSM's Full step (`adj_sid_label_nfsm`, one
+- Restored labels wait apart (`restored_adj_sids`) until there is a pool,
+  so the configuration replayed at restart cannot clear them before it
+  establishes the SR mode (an interface's Adj-SID leaf can come before
+  `segment-routing mpls`). The pool takes them over as it is created
+  (`adopt_restored_adj_sids`); a refused one is dropped, and its adjacency
+  is given another. Any still waiting when the restart ends are dropped. The NFSM's Full step (`adj_sid_label_nfsm`, one
   generic path for both versions) keeps a label the adjacency already
   holds. When the restart ends, a restored label whose adjacency is not
   Full again goes back (`release_restored_adj_sids`).
