@@ -1273,3 +1273,137 @@ async fn sweep_removes_an_srv6_leftover_whose_replacement_failed() {
     assert!(route().trim().is_empty(), "and the sweep removed it");
     ip(&["link", "del", "srv6f0"]);
 }
+
+/// Read `name` from the kernel into the RIB, as its RTM_NEWLINK would.
+async fn kernel_link(rib: &mut Rib, name: &str) {
+    use futures::TryStreamExt;
+    let mut links = rib
+        .fib_handle
+        .handle
+        .link()
+        .get()
+        .match_name(name.into())
+        .execute();
+    let link = links.try_next().await.unwrap().unwrap();
+    rib.link_add(crate::fib::netlink::link_from_msg(link)).await;
+}
+
+/// The device `name` is enslaved to, per the kernel.
+fn master_of(name: &str) -> Option<String> {
+    let out = ip(&["-o", "link", "show", name]);
+    let mut words = out.split_whitespace();
+    words.find(|w| *w == "master")?;
+    words.next().map(str::to_string)
+}
+
+/// Handle what the RIB queued for itself, as its event loop would.
+async fn drain(rib: &mut Rib) {
+    while let Ok(msg) = rib.rx.try_recv() {
+        rib.process_msg(msg, RT_TABLE_MAIN).await;
+    }
+}
+
+/// A bridge binding withdrawn while a replay of it is queued stays
+/// withdrawn. `link_add` queues a replay of the pending binding on every
+/// link event of the port, and enslaving one emits a burst of them. A
+/// replay still queued when `delete interface X bridge` detached the port,
+/// and handled after the kernel's echo of the detach, carried the binding
+/// as it was when queued and enslaved the port again, with nothing left to
+/// undo it (cradle_spawn failed on it, 2026-10-12).
+#[tokio::test]
+#[ignore = "requires root in an isolated network namespace"]
+async fn a_withdrawn_bridge_binding_is_not_replayed() {
+    require_netns();
+    ip(&["link", "add", "brrace", "type", "bridge"]);
+    ip(&["link", "add", "dmrace", "type", "dummy"]);
+    let mut rib = Rib::new(false).unwrap();
+    rib.bridges.insert(
+        "brrace".to_string(),
+        Bridge {
+            name: "brrace".to_string(),
+            ..Default::default()
+        },
+    );
+    kernel_link(&mut rib, "brrace").await;
+    kernel_link(&mut rib, "dmrace").await;
+    drain(&mut rib).await;
+
+    let bind = |bridge: Option<&str>| Message::LinkBridgeBind {
+        ifname: "dmrace".to_string(),
+        bridge: bridge.map(str::to_string),
+    };
+    rib.process_msg(bind(Some("brrace")), RT_TABLE_MAIN).await;
+    assert_eq!(master_of("dmrace").as_deref(), Some("brrace"));
+    // An event of the enslave burst: a replay of the binding is queued.
+    kernel_link(&mut rib, "dmrace").await;
+    // The port is detached before the replay is handled, and the kernel's
+    // echo of the detach is handled before it too.
+    rib.process_msg(bind(None), RT_TABLE_MAIN).await;
+    kernel_link(&mut rib, "dmrace").await;
+    drain(&mut rib).await;
+    assert_eq!(
+        master_of("dmrace"),
+        None,
+        "the withdrawn binding stays withdrawn"
+    );
+
+    ip(&["link", "del", "dmrace"]);
+    ip(&["link", "del", "brrace"]);
+}
+
+/// The VRF twin of `a_withdrawn_bridge_binding_is_not_replayed`: the same
+/// replay queued from a link event re-bound a port detached from its VRF.
+#[tokio::test]
+#[ignore = "requires root in an isolated network namespace"]
+async fn a_withdrawn_vrf_binding_is_not_replayed() {
+    require_netns();
+    ip(&["link", "add", "vrfrace", "type", "vrf", "table", "1001"]);
+    ip(&["link", "add", "dmvrf", "type", "dummy"]);
+    let mut rib = Rib::new(false).unwrap();
+    kernel_link(&mut rib, "vrfrace").await;
+    kernel_link(&mut rib, "dmvrf").await;
+    drain(&mut rib).await;
+    let ifindex = rib
+        .links
+        .values()
+        .find(|link| link.name == "vrfrace")
+        .unwrap()
+        .index;
+    rib.vrfs.insert(
+        "vrfrace".to_string(),
+        crate::rib::Vrf {
+            name: "vrfrace".to_string(),
+            table_id: 1001,
+            ifindex,
+            router_id: std::net::Ipv4Addr::UNSPECIFIED,
+            router_id_config: None,
+            mpls_ttl_propagate: None,
+            owned: false,
+            ipv4_import_rts: Default::default(),
+            ipv4_export_rts: Default::default(),
+            ipv6_import_rts: Default::default(),
+            ipv6_export_rts: Default::default(),
+            mup_import_rts: Default::default(),
+            mup_export_rts: Default::default(),
+        },
+    );
+
+    let bind = |vrf: Option<&str>| Message::LinkVrfBind {
+        ifname: "dmvrf".to_string(),
+        vrf: vrf.map(str::to_string),
+    };
+    rib.process_msg(bind(Some("vrfrace")), RT_TABLE_MAIN).await;
+    assert_eq!(master_of("dmvrf").as_deref(), Some("vrfrace"));
+    kernel_link(&mut rib, "dmvrf").await;
+    rib.process_msg(bind(None), RT_TABLE_MAIN).await;
+    kernel_link(&mut rib, "dmvrf").await;
+    drain(&mut rib).await;
+    assert_eq!(
+        master_of("dmvrf"),
+        None,
+        "the withdrawn binding stays withdrawn"
+    );
+
+    ip(&["link", "del", "dmvrf"]);
+    ip(&["link", "del", "vrfrace"]);
+}
