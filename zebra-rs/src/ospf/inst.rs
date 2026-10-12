@@ -310,6 +310,14 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// IS-IS-parity automatic allocation), and the matching local ILM
     /// install. Cleared when SR-MPLS is disabled.
     pub lan_adj_sids: BTreeMap<(u32, Ipv4Addr), u32>,
+    /// Adjacency-SID labels a graceful restart restored from its
+    /// checkpoint, keyed as `lan_adj_sids`, waiting for the pool: it takes
+    /// them over as it is created (`adopt_restored_adj_sids`). Kept apart
+    /// so the configuration replayed at restart cannot clear them before
+    /// it establishes the SR mode (an interface's Adj-SID leaf, replayed
+    /// before `segment-routing mpls`, reconciles with SR-MPLS still off);
+    /// dropped if the restart ends with SR-MPLS never on.
+    pub restored_adj_sids: BTreeMap<(u32, Ipv4Addr), u32>,
     /// The claim on each configured absolute Adjacency-SID's label, and
     /// the link it is for (`reconcile_adj_sid_claims`). A `Pending` or
     /// `Refused` one is not advertised, nor the label on another link
@@ -911,40 +919,43 @@ impl<V: OspfVersion> Ospf<V> {
     }
 
     /// Put back the Adjacency-SID labels a graceful restart's checkpoint
-    /// holds, so each adjacency keeps its label across the restart. The
-    /// pool, once there is one, holds them (`reserve_adj_sid_labels`):
-    /// only then is no other adjacency, nor another instance over the same
-    /// SRLB, handed one.
+    /// holds, so each adjacency keeps its label across the restart. They
+    /// wait in `restored_adj_sids` until there is a pool, which then holds
+    /// them (`adopt_restored_adj_sids`): only then is no other adjacency,
+    /// nor another instance over the same SRLB, handed one.
     pub(super) fn restore_adj_sid_labels(&mut self, labels: &[((u32, Ipv4Addr), u32)]) {
-        self.lan_adj_sids.extend(labels.iter().copied());
-        self.reserve_adj_sid_labels();
+        self.restored_adj_sids.extend(labels.iter().copied());
+        self.adopt_restored_adj_sids();
     }
 
-    /// Have the pool hold every label in `lan_adj_sids`. A restored label
-    /// went in before there was a pool (a restart's, `restore_adj_sid_labels`);
-    /// one the pool cannot take — outside its SRLB, or another holder's —
-    /// is dropped, and its adjacency, if Full, is given another.
-    fn reserve_adj_sid_labels(&mut self) {
+    /// The pool takes over the restored labels waiting for it: each one it
+    /// holds (`LocalLabelPool::reserve`) is its adjacency's again; one it
+    /// cannot take — outside its SRLB, or another holder's — is dropped,
+    /// and its adjacency, if Full, is given another. Nothing while there
+    /// is no pool.
+    fn adopt_restored_adj_sids(&mut self) {
         let Some(pool) = self.local_pool.as_mut() else {
             return;
         };
-        self.lan_adj_sids.retain(|(ifindex, neighbor), label| {
-            let held = pool.reserve(*label);
-            if !held {
+        for ((ifindex, neighbor), label) in std::mem::take(&mut self.restored_adj_sids) {
+            if pool.reserve(label) {
+                self.lan_adj_sids.insert((ifindex, neighbor), label);
+            } else {
                 tracing::warn!(
                     ifindex, %neighbor, label,
                     "ospf: restored Adj-SID label unavailable; the adjacency takes another"
                 );
             }
-            held
-        });
+        }
     }
 
     /// The restart is over: a restored Adjacency-SID label whose adjacency
     /// is not Full again (`full`, keyed as `lan_adj_sids`) goes back, so a
     /// neighbour gone for good holds no label. Other entries are only ever
-    /// Full adjacencies'.
+    /// Full adjacencies'. Restored labels still waiting for a pool — the
+    /// restart ended with SR-MPLS never on — are dropped.
     pub(super) fn release_restored_adj_sids(&mut self, full: &[(u32, Ipv4Addr)]) {
+        self.restored_adj_sids.clear();
         let gone: Vec<(u32, Ipv4Addr)> = self
             .lan_adj_sids
             .keys()
@@ -990,7 +1001,7 @@ impl<V: OspfVersion> Ospf<V> {
                 ));
                 // Labels a graceful restart restored before there was a
                 // pool: held now, or dropped.
-                self.reserve_adj_sid_labels();
+                self.adopt_restored_adj_sids();
             }
             // The SRLB changed: keep the labels still inside it; the
             // adjacencies whose label went are given another below.
@@ -3079,6 +3090,7 @@ impl Ospf<Ospfv2> {
             ilm_hold_timer: None,
             local_pool: None,
             lan_adj_sids: BTreeMap::new(),
+            restored_adj_sids: BTreeMap::new(),
             adj_sid_claims: BTreeMap::new(),
             adj_sid_dups: BTreeSet::new(),
             adj_sid_moves: Vec::new(),
@@ -8937,6 +8949,7 @@ impl Ospf<Ospfv3> {
             ilm_hold_timer: None,
             local_pool: None,
             lan_adj_sids: BTreeMap::new(),
+            restored_adj_sids: BTreeMap::new(),
             adj_sid_claims: BTreeMap::new(),
             adj_sid_dups: BTreeSet::new(),
             adj_sid_moves: Vec::new(),
@@ -19838,6 +19851,7 @@ mod test_support {
             ilm_hold_timer: None,
             local_pool: None,
             lan_adj_sids: BTreeMap::new(),
+            restored_adj_sids: BTreeMap::new(),
             adj_sid_claims: BTreeMap::new(),
             adj_sid_dups: BTreeSet::new(),
             adj_sid_moves: Vec::new(),
@@ -26510,6 +26524,33 @@ mod gr_helper_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Restored labels still waiting for a pool when the restart ends —
+    /// SR-MPLS never came back on — are dropped, and none is held.
+    #[tokio::test(start_paused = true)]
+    async fn a_restart_without_segment_routing_drops_its_restored_labels() {
+        use super::super::checkpoint::OspfCheckpoint;
+        let dir = std::env::temp_dir().join(format!(
+            "zebra-rs-ospf-checkpoint-adj-sid-nosr-{}",
+            std::process::id()
+        ));
+        let path = dir.join("checkpoint.cbor");
+        let mut before = v2_top();
+        before.lan_adj_sids = [((2, v2_addr(S)), 15003)].into();
+        OspfCheckpoint::from_instance(&before, GRACE, 1)
+            .write_to_path(&path)
+            .unwrap();
+        let mut top = v2_top();
+        top.gr_restart_load_checkpoint_from(&path);
+        assert_eq!(top.restored_adj_sids, [((2, v2_addr(S)), 15003)].into());
+        // A restart committed meanwhile checkpoints them again.
+        let again = OspfCheckpoint::from_instance(&top, GRACE, 1);
+        assert_eq!(again.lan_adj_sids, vec![((2, v2_addr(S)), 15003)]);
+        top.gr_restart_abort();
+        assert!(top.restored_adj_sids.is_empty());
+        assert!(top.lan_adj_sids.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A checkpoint keeps each LSA at its age when written, not the age it
     /// arrived with, and the restored LSA ages by the time since: the
     /// router was down, and its copies elsewhere aged. Here 100 seconds
@@ -28715,10 +28756,10 @@ mod sr_block_tests {
         let mut top = fresh_ospf();
         top.sr_block = None;
         top.segment_routing = SegmentRoutingMode::Mpls;
-        // A graceful restart restored this one.
-        top.lan_adj_sids.insert((7, A), 15005);
+        // A graceful restart restored this one: it waits for the pool.
+        top.restore_adj_sid_labels(&[((7, A), 15005)]);
         top.reconcile_adj_sid_labels(vec![(7, A)]);
-        assert_eq!(top.lan_adj_sids.get(&(7, A)), Some(&15005));
+        assert_eq!(top.restored_adj_sids.get(&(7, A)), Some(&15005));
         assert!(top.local_pool.is_none());
         // The block arrives: a pool over its SRLB; the label stays.
         top.reconcile_block_watch();
@@ -28734,6 +28775,55 @@ mod sr_block_tests {
         // ... and the pool holds it: no other instance is handed it.
         let mut other = top.rib_subscriber.label_space().pool(15000, 15999);
         assert!(!other.reserve(15005));
+    }
+
+    /// The configuration replayed after a graceful restart can carry an
+    /// interface's Adjacency-SID leaf before `segment-routing mpls`: its
+    /// callback reconciles with SR-MPLS still off, which clears the
+    /// labels. The restored ones wait apart, so they survive it, and the
+    /// pool, once SR-MPLS and its block are there, holds them. Both
+    /// versions.
+    #[tokio::test]
+    async fn restored_labels_survive_config_replayed_before_segment_routing() {
+        use super::link_scope_tests::{v2_top, v3_top};
+        fn cfg<V: OspfVersion>(top: &mut Ospf<V>, path: &str, vals: &[&str]) {
+            let f = *top.callbacks.get(path).unwrap();
+            let args = crate::config::Args(vals.iter().map(|v| v.to_string()).collect());
+            f(top, args, crate::config::ConfigOp::Set).unwrap();
+        }
+        let block = || RibSrRx::Block {
+            name: crate::rib::DEFAULT_BLOCK_NAME.to_string(),
+            block: Some(Block::default_block()),
+        };
+        let key = (8, A);
+
+        let mut v2 = v2_top();
+        v2.callback_build();
+        v2.restore_adj_sid_labels(&[(key, 15005)]);
+        cfg(
+            &mut v2,
+            "/router/ospf/area/interface/adjacency-sid/absolute",
+            &["0.0.0.0", "eth2", "15010"],
+        );
+        cfg(&mut v2, "/router/ospf/segment-routing/mpls", &[]);
+        v2.process_sr_rx(block());
+        assert_eq!(v2.lan_adj_sids.get(&key), Some(&15005), "v2");
+        let mut other = v2.rib_subscriber.label_space().pool(15000, 15999);
+        assert!(!other.reserve(15005), "v2: held");
+
+        let mut v3 = v3_top();
+        v3.callback_build();
+        v3.restore_adj_sid_labels(&[(key, 15005)]);
+        cfg(
+            &mut v3,
+            "/router/ospfv3/area/interface/adjacency-sid/absolute",
+            &["0.0.0.0", "eth2", "15010"],
+        );
+        cfg(&mut v3, "/router/ospfv3/segment-routing/mpls", &[]);
+        v3.process_sr_rx(block());
+        assert_eq!(v3.lan_adj_sids.get(&key), Some(&15005), "v3");
+        let mut other = v3.rib_subscriber.label_space().pool(15000, 15999);
+        assert!(!other.reserve(15005), "v3: held");
     }
 
     /// Restored labels stay with their adjacencies whichever comes Full

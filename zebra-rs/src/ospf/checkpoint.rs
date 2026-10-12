@@ -254,6 +254,17 @@ fn aged_now<L: Clone>(lsa: &L, age: u16, set_age: fn(&mut L, u16)) -> L {
     lsa
 }
 
+/// The dynamic Adjacency-SID labels to checkpoint: those the adjacencies
+/// hold, and those a restart restored that still wait for the pool (a
+/// restart committed before SR-MPLS came back on keeps them).
+fn adj_sid_labels<V: super::version::OspfVersion>(ospf: &Ospf<V>) -> Vec<((u32, Ipv4Addr), u32)> {
+    ospf.restored_adj_sids
+        .iter()
+        .chain(&ospf.lan_adj_sids)
+        .map(|(k, v)| (*k, *v))
+        .collect()
+}
+
 /// `links` with one more for each interface a staged restart must
 /// re-establish adjacencies on but none of them records: deleted, or
 /// disabled, since the restart began. Its adjacencies were dropped, and
@@ -360,7 +371,7 @@ impl OspfCheckpoint {
             .collect::<Vec<_>>();
         let links = with_gone_links(ospf, links);
 
-        let lan_adj_sids = ospf.lan_adj_sids.iter().map(|(k, v)| (*k, *v)).collect();
+        let lan_adj_sids = adj_sid_labels(ospf);
 
         Self {
             format_version: CHECKPOINT_FORMAT_VERSION,
@@ -449,7 +460,7 @@ impl OspfCheckpoint {
             router_id: ospf.router_id,
             areas,
             links,
-            lan_adj_sids: ospf.lan_adj_sids.iter().map(|(k, v)| (*k, *v)).collect(),
+            lan_adj_sids: adj_sid_labels(ospf),
         }
     }
 
