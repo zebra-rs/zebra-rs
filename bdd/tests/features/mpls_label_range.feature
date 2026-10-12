@@ -32,9 +32,10 @@ Feature: A configurable dynamic label range
     And I apply config "z1.yaml" to namespace "z1"
     Then show command "show mpls label table" in namespace "z1" should eventually contain "24000-24127    bgp     block           held"
     And show command "show mpls label range" in namespace "z1" should contain "24000-1048574    dynamic                                  128 labels in 1 block"
-    # The VRF's decap ILM sits at the chunk's first label. (`show mpls
-    # ilm` JSON omits decap entries, so the `mpls ilm` steps cannot see it.)
+    # The VRF's decap ILM sits at the chunk's first label, in the text and
+    # the JSON (which used to leave decap entries out).
     And show command "show mpls ilm" in namespace "z1" should eventually contain "24000  Pop         VPN Decap"
+    And mpls ilm in namespace "z1" should contain label 24000
 
   Scenario: Moving the range leaves BGP's chunk where it is
     Given the test topology exists
@@ -64,6 +65,8 @@ Feature: A configurable dynamic label range
     And show command "show mpls label range" in namespace "z1" should not contain "static                                   128 labels"
     And show command "show mpls ilm" in namespace "z1" should eventually contain "30000  Pop         VPN Decap"
     And show command "show mpls ilm" in namespace "z1" should not contain "24000  Pop"
+    And mpls ilm in namespace "z1" should contain label 30000
+    And mpls ilm in namespace "z1" should not contain label 24000
 
   Scenario: A VRF the range has no room for gets its label once it grows
     Given the test topology exists
@@ -76,11 +79,13 @@ Feature: A configurable dynamic label range
     When I wait 5 seconds for BGP to operate
     Then show command "show mpls label table" in namespace "z1" should not contain "bgp"
     And show command "show mpls ilm" in namespace "z1" should not contain "VPN Decap"
+    And mpls ilm in namespace "z1" should be empty
     # Growing the range is room returning: the VRF is relabelled, and
     # installs its decap ILM.
     When I apply command "set mpls label-range dynamic end 39999" in namespace "z1"
     Then show command "show mpls label table" in namespace "z1" should eventually contain "30000-30127    bgp     block           held"
     And show command "show mpls ilm" in namespace "z1" should eventually contain "30000  Pop         VPN Decap"
+    And mpls ilm in namespace "z1" should contain label 30000
 
   Scenario: Deleting the VRF gives its label and the chunk back
     Given the test topology exists
