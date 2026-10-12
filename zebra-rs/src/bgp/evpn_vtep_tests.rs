@@ -494,6 +494,30 @@ fn receive_macip_on(
     seq: u32,
     esi: [u8; 10],
 ) {
+    feed_macip(bgp, from, rd, mac, ip, Some(seq), esi);
+}
+
+/// Feed the withdrawal of a MAC/IP route from `from` through ingest.
+fn withdraw_macip(
+    bgp: &mut Bgp,
+    from: usize,
+    rd: RouteDistinguisher,
+    mac: MacAddr,
+    ip: Option<IpAddr>,
+) {
+    feed_macip(bgp, from, rd, mac, ip, None, [0; 10]);
+}
+
+/// A MAC/IP route announced with sequence number `seq`, or withdrawn.
+fn feed_macip(
+    bgp: &mut Bgp,
+    from: usize,
+    rd: RouteDistinguisher,
+    mac: MacAddr,
+    ip: Option<IpAddr>,
+    seq: Option<u32>,
+    esi: [u8; 10],
+) {
     let route = EvpnRoute::Mac(bgp_packet::EvpnMac {
         id: 0,
         rd,
@@ -509,7 +533,7 @@ fn receive_macip_on(
     attr.local_pref = Some(LocalPref::default());
     attr.ecom = Some(ExtCommunity::from([
         evpn_route_target(65000, 100),
-        evpn_mac_mobility(seq),
+        evpn_mac_mobility(seq.unwrap_or(0)),
     ]));
     let mut top = BgpTop {
         router_id: &bgp.router_id,
@@ -531,6 +555,10 @@ fn receive_macip_on(
         vrf_transport_v6: None,
         as_sets_withdraw: bgp.as_sets_withdraw,
     };
+    if seq.is_none() {
+        route_evpn_withdraw(from, &route, &mut top, &mut bgp.peers);
+        return;
+    }
     route_evpn_update(
         from,
         &route,
@@ -1203,4 +1231,50 @@ async fn clearing_an_ip_its_duplicate_mac_holds_releases_nothing() {
     let dad = &f.bgp.local_rib.evpn_dad;
     assert!(!dad.frozen(100, f.local.mac, Some(held)));
     assert!(!dad.frozen(100, f.local.mac, Some(both)));
+}
+
+/// An IP is where the newest of its live bindings is: a withdrawn one no
+/// longer counts, however high its number was. Detection compared with the
+/// highest number ever seen for the IP, which a withdrawal never lowers,
+/// so after (mac, seq 100) went, (mac 1, seq 1) then (mac 2, seq 5) left
+/// the IP on mac 1, and a learn of mac 2 here counted an IP move.
+#[tokio::test]
+async fn a_withdrawn_binding_does_not_pin_the_ip() {
+    let (mut f, _rx) = Flap::new(dad_config(3, crate::bgp::evpn_dad::Freeze::Permanent));
+    let ip: IpAddr = "10.10.0.5".parse().unwrap();
+    let mac1 = MacAddr::from([2, 0, 0, 0, 1, 8]);
+    let mac2 = MacAddr::from([2, 0, 0, 0, 1, 9]);
+    receive_macip(&mut f.bgp, f.from, f.remote_rd, f.local.mac, Some(ip), 100);
+    withdraw_macip(&mut f.bgp, f.from, f.remote_rd, f.local.mac, Some(ip));
+    receive_macip(&mut f.bgp, f.from, f.remote_rd, mac1, Some(ip), 1);
+    receive_macip(&mut f.bgp, f.from, f.remote_rd, mac2, Some(ip), 5);
+    assert_eq!(f.bgp.local_rib.evpn_dad.ips[&(100, ip)].mac, mac2);
+
+    let binding = crate::rib::api::FdbEntry {
+        mac: mac2,
+        ip: Some(ip),
+        ..f.local.clone()
+    };
+    f.bgp.process_rib_msg(RibRx::FdbAdd(binding));
+    assert_eq!(f.bgp.local_rib.evpn_dad.ips[&(100, ip)].probe.count, 0);
+}
+
+/// A segment peer's sync route withdrawn while an ordinary remote route
+/// for the MAC stays: the MAC is at the ordinary route, and a learn here
+/// is a move. The owner kept the sync route's segment, and the move went
+/// uncounted.
+#[tokio::test]
+async fn a_withdrawn_sync_route_leaves_no_exemption() {
+    let (mut f, _rx) = Flap::new(dad_config(3, crate::bgp::evpn_dad::Freeze::Permanent));
+    let sync_rd = rd_from_router_id_vni("10.0.0.12".parse().unwrap(), 100).unwrap();
+    f.bgp.local_rib.own_es.insert(ESI, "host0".to_string());
+    receive_macip(&mut f.bgp, f.from, f.remote_rd, f.local.mac, None, 1);
+    receive_macip_on(&mut f.bgp, f.from, sync_rd, f.local.mac, None, 2, ESI);
+    withdraw_macip(&mut f.bgp, f.from, sync_rd, f.local.mac, None);
+    f.local();
+    assert_eq!(
+        f.bgp.local_rib.evpn_dad.macs[&(100, f.local.mac)].count,
+        1,
+        "learned here from the ordinary route left: a move"
+    );
 }

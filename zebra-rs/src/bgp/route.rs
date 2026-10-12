@@ -10308,12 +10308,7 @@ fn route_evpn_export_selected(
                         es: best.esi.filter(|esi| {
                             *esi != ZERO_ESI && bgp.local_rib.own_es.contains_key(esi)
                         }),
-                        newest: ip.is_none_or(|ip| {
-                            bgp.local_rib
-                                .evpn_remote_ip_seq
-                                .get(&(vni, ip))
-                                .is_none_or(|newest| seq >= *newest)
-                        }),
+                        seq,
                     };
                     let (verdict, detected) = bgp.local_rib.evpn_dad.remote_takeover(
                         vni,
