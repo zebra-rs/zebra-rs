@@ -10301,13 +10301,20 @@ fn route_evpn_export_selected(
                 // local FDB row.
                 if !best.is_originated() {
                     const STICKY: u8 = 0x01;
+                    let route = super::evpn_dad::RemoteRoute {
+                        rd: key.rd,
+                        vtep: extract_tunnel_endpoint(best),
+                        sticky: extract_flags_from_attr(&best.attr) & STICKY != 0,
+                        es: best.esi.filter(|esi| {
+                            *esi != ZERO_ESI && bgp.local_rib.own_es.contains_key(esi)
+                        }),
+                        seq,
+                    };
                     let (verdict, detected) = bgp.local_rib.evpn_dad.remote_takeover(
-                        key.rd,
                         vni,
                         mac_addr,
                         *ip,
-                        extract_tunnel_endpoint(best),
-                        extract_flags_from_attr(&best.attr) & STICKY != 0,
+                        route,
                         Instant::now(),
                     );
                     super::evpn_dad::arm_detected(&bgp.local_rib.evpn_dad, bgp.tx, &detected);
@@ -19841,7 +19848,6 @@ impl Bgp {
         for (rd, prefix, rib) in remote {
             route_evpn_export_selected(&rd, &prefix, &[rib], None, &mut bgp_ref);
         }
-        self.evpn_dad_drain();
     }
 
     /// Inverse of `evpn_originate_macip`. No-op when

@@ -15,6 +15,11 @@
 //! own moves already cover a host keeping its MAC), and an IP bound to a
 //! duplicate MAC is a duplicate with it.
 //!
+//! A host on an Ethernet Segment this node shares with a peer is reachable
+//! over our own port wherever it was learned (RFC 7432 §8.4): a route the
+//! peer advertises for it on that segment is FRR's sync route, and the
+//! host moving between the peer and this node is no move.
+//!
 //! On detection a warning is logged. Without `freeze` nothing else changes
 //! (FRR's default, warn-only); the address stays marked until cleared. With
 //! `freeze` this node stops advertising the address and stops installing
@@ -79,7 +84,39 @@ pub enum Owner {
     Remote {
         vtep: Option<IpAddr>,
         sticky: bool,
+        /// The route's Ethernet Segment, when this node is attached to it
+        /// too: the address is reachable over our own port as well.
+        es: Option<[u8; 10]>,
     },
+}
+
+/// A remote MAC/IP route installed (or held) for an address, as detection
+/// sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemoteRoute {
+    pub rd: [u8; 8],
+    pub vtep: Option<IpAddr>,
+    pub sticky: bool,
+    /// Its Ethernet Segment, when this node is attached to that segment
+    /// too: the host is reachable over our own port, and the route only
+    /// syncs it (FRR's `zebra_evpn_process_sync_macip_add`). Never a move.
+    pub es: Option<[u8; 10]>,
+    /// Its MAC Mobility sequence number. Of the routes live for an
+    /// address, the one with the highest says where it is: a route for an
+    /// older binding of an IP, re-run while a newer one binds it to another
+    /// MAC, does not move the IP back to its MAC, as FRR ignores it
+    /// (`zebra_evpn_neigh_is_bgp_seq_ok`).
+    pub seq: u32,
+}
+
+impl RemoteRoute {
+    fn owner(&self) -> Owner {
+        Owner::Remote {
+            vtep: self.vtep,
+            sticky: self.sticky,
+            es: self.es,
+        }
+    }
 }
 
 /// A detected duplicate.
@@ -101,9 +138,10 @@ pub struct Probe {
     pub start: Option<Instant>,
     pub duplicate: Option<Duplicate>,
     /// The remote routes installed (or held) for the address, by RD and
-    /// the IP (MAC probe) or MAC (IP probe) they bind: it stops being
+    /// the IP (MAC probe) or MAC (IP probe) they bind. While the address
+    /// is remote it is where the newest of them is, and it stops being
     /// remote when the last one goes.
-    pub remote_routes: BTreeSet<([u8; 8], RouteBinding)>,
+    pub remote_routes: BTreeMap<([u8; 8], RouteBinding), RemoteRoute>,
 }
 
 /// The other half of a MAC/IP route's key, from the probe's side.
@@ -169,12 +207,22 @@ impl Probe {
         self.owner.is_none() && !open && self.duplicate.is_none()
     }
 
-    /// One remote route for the address went; with the last, it is no
-    /// longer remote.
+    /// The newest of the remote routes live for the address.
+    fn newest_remote(&self) -> Option<(RouteBinding, RemoteRoute)> {
+        self.remote_routes
+            .iter()
+            .max_by_key(|(_, route)| route.seq)
+            .map(|((_, binding), route)| (*binding, *route))
+    }
+
+    /// One remote route for the address went. A remote address is now
+    /// where the newest of those left is (a segment peer's sync route gone,
+    /// an ordinary route left is no longer exempt), and with the last it is
+    /// no longer remote.
     fn remote_route_gone(&mut self, route: ([u8; 8], RouteBinding)) {
         self.remote_routes.remove(&route);
-        if self.remote_routes.is_empty() && matches!(self.owner, Some(Owner::Remote { .. })) {
-            self.owner = None;
+        if matches!(self.owner, Some(Owner::Remote { .. })) {
+            self.owner = self.newest_remote().map(|(_, route)| route.owner());
         }
     }
 }
@@ -212,7 +260,8 @@ pub struct EvpnDad {
     /// This node's own MAC/IP routes to withdraw because a remote route
     /// took a frozen address over: `(vni, mac, None)` for every route of
     /// the MAC, `(vni, mac, Some(ip))` for the route binding `ip`. Drained
-    /// by `Bgp::evpn_dad_drain`, which has the peers the withdrawal needs.
+    /// by `Bgp::evpn_dad_drain`, which has the peers the withdrawal needs,
+    /// after every event (`Bgp::event_upkeep`).
     pub withdraw: BTreeSet<(u32, MacAddr, Option<IpAddr>)>,
 }
 
@@ -259,11 +308,16 @@ impl EvpnDad {
         let config = self.config;
         let mut detected = Vec::new();
         let probe = self.macs.entry((vni, mac)).or_default();
-        // A move only from a remote owner; a remote sticky MAC learned
-        // here is an operator error FRR reports and does not count.
-        if let Some(Owner::Remote { vtep, sticky }) = probe.owner
+        // A move only from a remote owner, and not from a peer on one of
+        // our segments: the host was reachable over our own port all
+        // along. A remote sticky MAC learned here is an operator error FRR
+        // reports and does not count.
+        if let Some(Owner::Remote {
+            vtep,
+            sticky: false,
+            es: None,
+        }) = probe.owner
             && config.enabled
-            && !sticky
             && probe.duplicate.is_none()
             && probe.record(&config, now, true)
         {
@@ -278,7 +332,7 @@ impl EvpnDad {
                 probe: Probe::default(),
             });
             // FRR's scenario B: the IP moved here on a different MAC.
-            if let Some(Owner::Remote { vtep, .. }) = entry.probe.owner
+            if let Some(Owner::Remote { vtep, es: None, .. }) = entry.probe.owner
                 && entry.mac != mac
                 && config.enabled
                 && entry.probe.duplicate.is_none()
@@ -293,26 +347,24 @@ impl EvpnDad {
         (self.verdict(vni, mac, ip), detected)
     }
 
-    /// A remote route (RD `rd`) for `mac`, bound to `ip`, from `vtep`
-    /// beats this node's own and is about to be installed.
-    #[allow(clippy::too_many_arguments)]
+    /// A remote `route` for `mac`, bound to `ip`, beats this node's own
+    /// and is about to be installed.
     pub fn remote_takeover(
         &mut self,
-        rd: [u8; 8],
         vni: u32,
         mac: MacAddr,
         ip: Option<IpAddr>,
-        vtep: Option<IpAddr>,
-        sticky: bool,
+        route: RemoteRoute,
         now: Instant,
     ) -> (Verdict, Vec<DadKey>) {
         let config = self.config;
         let mut detected = Vec::new();
-        let owner = Some(Owner::Remote { vtep, sticky });
+        let RemoteRoute { rd, vtep, es, .. } = route;
         let probe = self.macs.entry((vni, mac)).or_default();
         // A takeover from this node, while a window a local learn opened
-        // is still counting.
+        // is still counting; a sync route takes nothing over.
         if !matches!(probe.owner, Some(Owner::Remote { .. }))
+            && es.is_none()
             && probe.count > 0
             && config.enabled
             && probe.duplicate.is_none()
@@ -321,16 +373,32 @@ impl EvpnDad {
             warn_detected(vni, &mac.to_string(), "remote update, from", vtep);
             detected.push(DadKey::Mac(vni, mac));
         }
-        probe.owner = owner;
-        probe.remote_routes.insert((rd, RouteBinding::Ip(ip)));
+        probe
+            .remote_routes
+            .insert((rd, RouteBinding::Ip(ip)), route);
+        probe.owner = probe.newest_remote().map(|(_, route)| route.owner());
         if let Some(ip) = ip {
-            self.ip_leaves_duplicate_mac(vni, ip, mac);
+            // Only a binding at least as new as every other live one moves
+            // the IP; an older one leaves it where it is.
+            let binding = (rd, RouteBinding::Mac(mac));
+            let binds = self.ips.get(&(vni, ip)).is_none_or(|entry| {
+                entry
+                    .probe
+                    .remote_routes
+                    .iter()
+                    .all(|(key, other)| *key == binding || route.seq >= other.seq)
+            });
+            if binds {
+                self.ip_leaves_duplicate_mac(vni, ip, mac);
+            }
             let entry = self.ips.entry((vni, ip)).or_insert_with(|| IpProbe {
                 mac,
                 probe: Probe::default(),
             });
-            if entry.mac != mac
+            if binds
+                && entry.mac != mac
                 && !matches!(entry.probe.owner, Some(Owner::Remote { .. }))
+                && es.is_none()
                 && entry.probe.count > 0
                 && config.enabled
                 && entry.probe.duplicate.is_none()
@@ -339,14 +407,52 @@ impl EvpnDad {
                 warn_detected(vni, &format!("{mac} IP {ip}"), "remote update, from", vtep);
                 detected.push(DadKey::Ip(vni, ip));
             }
-            entry.mac = mac;
-            entry.probe.owner = owner;
-            entry
-                .probe
-                .remote_routes
-                .insert((rd, RouteBinding::Mac(mac)));
+            if binds {
+                entry.mac = mac;
+                entry.probe.owner = Some(route.owner());
+            }
+            entry.probe.remote_routes.insert(binding, route);
+            // Not the newest. An older binding re-run leaves the IP where it
+            // is, but the IP's own binding replaced by an older one (a lower
+            // number in an UPDATE, a best path falling back) may leave
+            // another binding the newest.
+            if !binds {
+                self.ip_to_newest_binding(vni, ip);
+            }
         }
         (self.verdict(vni, mac, ip), detected)
+    }
+
+    /// A remote IP is at the newest of its live bindings. After one of them
+    /// came, went or changed its number, the IP moves to the newest if its
+    /// own binding no longer is; a binding tied with the newest keeps it.
+    /// Not a move this node takes part in, so nothing is counted.
+    fn ip_to_newest_binding(&mut self, vni: u32, ip: IpAddr) {
+        let Some(entry) = self.ips.get(&(vni, ip)) else {
+            return;
+        };
+        if !matches!(entry.probe.owner, Some(Owner::Remote { .. })) {
+            return;
+        }
+        let Some((RouteBinding::Mac(newest), newest_route)) = entry.probe.newest_remote() else {
+            return;
+        };
+        let own = entry
+            .probe
+            .remote_routes
+            .iter()
+            .filter(|((_, binding), _)| *binding == RouteBinding::Mac(entry.mac))
+            .map(|(_, route)| *route)
+            .max_by_key(|route| route.seq);
+        let (mac, route) = match own {
+            Some(own) if own.seq >= newest_route.seq => (entry.mac, own),
+            _ => (newest, newest_route),
+        };
+        self.ip_leaves_duplicate_mac(vni, ip, mac);
+        if let Some(entry) = self.ips.get_mut(&(vni, ip)) {
+            entry.mac = mac;
+            entry.probe.owner = Some(route.owner());
+        }
     }
 
     /// `ip` is about to be bound to `mac`. If it leaves a duplicate MAC for
@@ -432,7 +538,9 @@ impl EvpnDad {
             entry.probe.remote_route_gone((rd, RouteBinding::Mac(mac)));
             if entry.probe.idle(&config, now) {
                 self.ips.remove(&(vni, ip));
+                return;
             }
+            self.ip_to_newest_binding(vni, ip);
         }
     }
 
@@ -497,6 +605,18 @@ impl EvpnDad {
             })
             .map(|((v, i), _)| DadKey::Ip(*v, *i));
         macs.chain(ips).collect()
+    }
+
+    /// The duplicate MACs that hold `ip` in `vni` (or in every VNI), the
+    /// IP being bound to them: releasing the IP alone cannot let it go.
+    pub fn held_by_mac(&self, vni: Option<u32>, ip: IpAddr) -> Vec<(u32, MacAddr)> {
+        self.ips
+            .iter()
+            .filter(|((v, i), entry)| {
+                *i == ip && vni.is_none_or(|vni| vni == *v) && self.mac_duplicate(*v, entry.mac)
+            })
+            .map(|((v, _), entry)| (*v, entry.mac))
+            .collect()
     }
 
     /// The recovery deadline armed for `key`, if any.
@@ -625,13 +745,28 @@ impl Bgp {
 
     /// `clear bgp evpn dup-addr vni <all|N> [mac M | ip I]`: release the
     /// matching detected addresses. Returns how many there were.
+    ///
+    /// An IP named on its own whose MAC is still a duplicate is left
+    /// alone, as FRR refuses it ("Requested IP's associated MAC … is
+    /// still in duplicate state"): it stays frozen with the MAC, and
+    /// clearing the MAC releases both.
     pub fn evpn_dad_clear(
         &mut self,
         vni: Option<u32>,
         mac: Option<MacAddr>,
         ip: Option<IpAddr>,
     ) -> usize {
-        let keys = self.local_rib.evpn_dad.detected(vni, mac, ip);
+        let dad = &self.local_rib.evpn_dad;
+        let mut keys = dad.detected(vni, mac, ip);
+        if let Some(ip) = ip {
+            for (v, mac) in dad.held_by_mac(vni, ip) {
+                tracing::warn!(
+                    "clear bgp evpn dup-addr: VNI {v} IP {ip}: its MAC {mac} is still a \
+                     duplicate; clear the MAC to release both"
+                );
+                keys.retain(|key| *key != DadKey::Ip(v, ip));
+            }
+        }
         for key in &keys {
             self.local_rib.evpn_dad.release(*key);
             self.evpn_dad_rerun(*key);
@@ -643,27 +778,33 @@ impl Bgp {
     /// `/mac` or `/ip`) and its arguments: the VNI (or `all`), then the
     /// MAC or IP.
     pub(super) fn clear_evpn_dup_addr(&mut self, filter: &str, args: &mut crate::config::Args) {
-        let Some(vni) = args.string() else {
-            return;
+        let invalid = |what: &str, value: Option<String>| {
+            tracing::warn!(
+                "clear bgp evpn dup-addr: invalid {what} {}; nothing cleared",
+                value.as_deref().unwrap_or("(missing)")
+            );
         };
-        let vni = match vni.as_str() {
-            "all" => None,
-            vni => match vni.parse() {
+        let arg = args.string();
+        let vni = match arg.as_deref() {
+            Some("all") => None,
+            Some(vni) => match vni.parse() {
                 Ok(vni) => Some(vni),
-                Err(_) => return,
+                Err(_) => return invalid("VNI", arg),
             },
+            None => return invalid("VNI", arg),
         };
+        let arg = args.string();
         let (mac, ip) = match filter {
             "" => (None, None),
-            "/mac" => match args.string().and_then(|mac| mac.parse().ok()) {
+            "/mac" => match arg.as_deref().and_then(|mac| mac.parse().ok()) {
                 Some(mac) => (Some(mac), None),
-                None => return,
+                None => return invalid("MAC", arg),
             },
-            "/ip" => match args.string().and_then(|ip| ip.parse().ok()) {
+            "/ip" => match arg.as_deref().and_then(|ip| ip.parse().ok()) {
                 Some(ip) => (None, Some(ip)),
-                None => return,
+                None => return invalid("IP", arg),
             },
-            _ => return,
+            _ => return invalid("filter", Some(filter.to_string())),
         };
         let released = self.evpn_dad_clear(vni, mac, ip);
         tracing::info!("clear bgp evpn dup-addr: released {released} duplicate address(es)");
@@ -719,8 +860,12 @@ impl Bgp {
                 )
             }
         };
+        let remote = |owner: Option<Owner>| matches!(owner, Some(Owner::Remote { .. }));
         let mut local = Vec::new();
-        if !matches!(owner, Some(Owner::Remote { .. })) {
+        if !remote(owner) {
+            // An IP's local bindings on a MAC that has since gone remote
+            // are not re-advertised: the remote route beat them, and
+            // learning them again would count a move of the MAC.
             local = self
                 .local_fdb
                 .values()
@@ -728,7 +873,12 @@ impl Bgp {
                     entry.vni == vni
                         && match key {
                             DadKey::Mac(_, mac) => entry.mac == mac,
-                            DadKey::Ip(_, ip) => entry.ip == Some(ip),
+                            DadKey::Ip(_, ip) => {
+                                entry.ip == Some(ip)
+                                    && !remote(
+                                        dad.macs.get(&(vni, entry.mac)).and_then(|p| p.owner),
+                                    )
+                            }
                         }
                 })
                 .cloned()
@@ -743,7 +893,6 @@ impl Bgp {
         {
             self.evpn_reconcile_remote_mac(vni, mac.octets(), ip);
         }
-        self.evpn_dad_drain();
     }
 }
 
@@ -946,10 +1095,21 @@ mod tests {
         }
     }
 
+    /// A route from `VTEP`: not sticky, on no segment of ours.
+    fn route() -> RemoteRoute {
+        RemoteRoute {
+            rd: RD,
+            vtep: VTEP,
+            sticky: false,
+            es: None,
+            seq: 1,
+        }
+    }
+
     /// One remote takeover followed by one local learn, `secs` after `t`.
     fn flap(dad: &mut EvpnDad, t: Instant, secs: u64) -> Vec<DadKey> {
         let now = t + Duration::from_secs(secs);
-        let (_, mut keys) = dad.remote_takeover(RD, VNI, mac(1), None, VTEP, false, now);
+        let (_, mut keys) = dad.remote_takeover(VNI, mac(1), None, route(), now);
         keys.extend(dad.local_learn(VNI, mac(1), None, now).1);
         keys
     }
@@ -962,6 +1122,185 @@ mod tests {
         });
     }
 
+    /// A host on a segment this node shares with the peer is reachable over
+    /// our own port wherever it was learned. The peer's route for it on the
+    /// segment only syncs it (FRR's sync route), so neither that route nor
+    /// a learn here after it is a move, for the MAC or for an IP changing
+    /// MACs. A route from a peer off our segments still is.
+    #[test]
+    fn moves_with_a_peer_on_our_segment_do_not_count() {
+        let t = Instant::now();
+        let sync = RemoteRoute {
+            es: Some([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]),
+            ..route()
+        };
+        let mut dad = dad(2, Freeze::Permanent);
+        // From a peer off our segments, then here: the MAC moved, and the
+        // IP moved from mac(2) to mac(1). Both windows are open.
+        dad.remote_takeover(VNI, mac(1), None, route(), t);
+        dad.remote_takeover(VNI, mac(2), Some(ip(5)), route(), t);
+        dad.local_learn(VNI, mac(1), Some(ip(5)), t);
+        assert_eq!(dad.macs[&(VNI, mac(1))].count, 1);
+        assert_eq!(dad.ips[&(VNI, ip(5))].probe.count, 1);
+
+        // Back and forth between the peer on our segment and here.
+        for _ in 0..3 {
+            dad.remote_takeover(VNI, mac(2), Some(ip(5)), sync, t);
+            dad.remote_takeover(VNI, mac(1), None, sync, t);
+            dad.local_learn(VNI, mac(1), Some(ip(5)), t);
+        }
+        assert_eq!(dad.detected(None, None, None), vec![]);
+        assert_eq!(dad.macs[&(VNI, mac(1))].count, 1);
+        assert_eq!(dad.ips[&(VNI, ip(5))].probe.count, 1);
+
+        // Off our segments the takeover counts, and completes detection.
+        let (_, keys) = dad.remote_takeover(VNI, mac(1), None, route(), t);
+        assert_eq!(keys, vec![DadKey::Mac(VNI, mac(1))]);
+    }
+
+    /// Only the newest binding of an IP moves it. A route for an older one,
+    /// re-run (by a reconcile, a refresh) while a newer route binds the IP
+    /// to another MAC, leaves the IP where it is; it moved it back, and the
+    /// host learned here on its newest MAC then counted as an IP move.
+    #[test]
+    fn an_older_binding_of_an_ip_does_not_move_it() {
+        let t = Instant::now();
+        let older = RemoteRoute {
+            rd: [0, 1, 10, 0, 0, 12, 0, 100],
+            ..route()
+        };
+        let newer = RemoteRoute { seq: 5, ..route() };
+        let mut dad = dad(2, Freeze::Permanent);
+        // (mac(2), seq 5) is the newest; (mac(1), seq 1) re-runs after it.
+        dad.remote_takeover(VNI, mac(2), Some(ip(5)), newer, t);
+        dad.remote_takeover(VNI, mac(1), Some(ip(5)), older, t);
+        assert_eq!(dad.ips[&(VNI, ip(5))].mac, mac(2));
+        // The host, on the same MAC, is learned here: the MAC moved, the IP
+        // did not leave it.
+        dad.local_learn(VNI, mac(2), Some(ip(5)), t);
+        assert_eq!(dad.ips[&(VNI, ip(5))].probe.count, 0);
+
+        // Nor is an older binding re-run a takeover of the IP from here.
+        let mut dad = super::EvpnDad {
+            config: dad.config,
+            ..Default::default()
+        };
+        dad.remote_takeover(VNI, mac(2), Some(ip(5)), newer, t);
+        dad.local_learn(VNI, mac(3), Some(ip(5)), t); // 1
+        let (_, keys) = dad.remote_takeover(VNI, mac(1), Some(ip(5)), older, t);
+        assert_eq!(keys, vec![]);
+        let entry = &dad.ips[&(VNI, ip(5))];
+        assert_eq!((entry.mac, entry.probe.count), (mac(3), 1));
+        assert_eq!(entry.probe.owner, Some(Owner::Local));
+        // With no other binding live, an older-numbered route binds the IP
+        // all the same: the IP is remote, on that MAC.
+        dad.remote_takeover(VNI, mac(1), Some(ip(6)), older, t);
+        let entry = &dad.ips[&(VNI, ip(6))];
+        assert_eq!(entry.mac, mac(1));
+        assert!(matches!(entry.probe.owner, Some(Owner::Remote { .. })));
+    }
+
+    /// An IP is where the newest of its live bindings is. A withdrawn one
+    /// no longer counts, however high its number was, and when the IP's
+    /// binding is withdrawn it goes back to the newest one left.
+    #[test]
+    fn an_ip_is_at_its_newest_live_binding() {
+        let t = Instant::now();
+        let at = |rd_last: u8, seq: u32| RemoteRoute {
+            rd: [0, 1, 10, 0, 0, rd_last, 0, 100],
+            seq,
+            ..route()
+        };
+        let mut dad = dad(3, Freeze::Permanent);
+        dad.remote_takeover(VNI, mac(1), Some(ip(5)), at(11, 1), t);
+        dad.remote_takeover(VNI, mac(2), Some(ip(5)), at(12, 5), t);
+        dad.remote_takeover(VNI, mac(1), Some(ip(5)), at(11, 1), t); // re-run
+        assert_eq!(dad.ips[&(VNI, ip(5))].mac, mac(2));
+
+        // mac(2)'s route withdrawn: the IP is on mac(1), and the host
+        // learned here on mac(1) kept its MAC.
+        dad.remote_gone(at(12, 5).rd, VNI, mac(2), Some(ip(5)), t);
+        assert_eq!(dad.ips[&(VNI, ip(5))].mac, mac(1));
+        dad.local_learn(VNI, mac(1), Some(ip(5)), t);
+        assert_eq!(dad.ips[&(VNI, ip(5))].probe.count, 0);
+    }
+
+    /// The IP's own binding replaced by an older one (a lower number in an
+    /// UPDATE, a best path falling back) leaves another binding the newest,
+    /// and the IP moves there; it stayed, and the host learned here on the
+    /// newest binding's MAC counted an IP move. A binding tied with the
+    /// newest keeps the IP.
+    #[test]
+    fn an_ip_follows_its_binding_replaced_by_an_older_one() {
+        let t = Instant::now();
+        let at = |rd_last: u8, seq: u32| RemoteRoute {
+            rd: [0, 1, 10, 0, 0, rd_last, 0, 100],
+            seq,
+            ..route()
+        };
+        let mut dad = dad(3, Freeze::Permanent);
+        dad.remote_takeover(VNI, mac(1), Some(ip(5)), at(11, 10), t);
+        dad.remote_takeover(VNI, mac(2), Some(ip(5)), at(12, 5), t);
+        assert_eq!(dad.ips[&(VNI, ip(5))].mac, mac(1));
+        dad.remote_takeover(VNI, mac(1), Some(ip(5)), at(11, 1), t);
+        assert_eq!(dad.ips[&(VNI, ip(5))].mac, mac(2));
+        dad.local_learn(VNI, mac(2), Some(ip(5)), t);
+        assert_eq!(dad.ips[&(VNI, ip(5))].probe.count, 0);
+
+        // mac(2) and mac(1) tie at 10, the IP on mac(2), the one that came
+        // last; an older binding re-run does not move it to mac(1).
+        let mut dad = super::EvpnDad {
+            config: dad.config,
+            ..Default::default()
+        };
+        dad.remote_takeover(VNI, mac(1), Some(ip(5)), at(12, 10), t);
+        dad.remote_takeover(VNI, mac(2), Some(ip(5)), at(11, 10), t);
+        dad.remote_takeover(VNI, mac(3), Some(ip(5)), at(13, 1), t);
+        assert_eq!(dad.ips[&(VNI, ip(5))].mac, mac(2));
+    }
+
+    /// A remote address is where the newest of its live routes is. A
+    /// segment peer's sync route withdrawn, or re-run older than an
+    /// ordinary route, leaves the ordinary route deciding, so a learn here
+    /// is a move again.
+    #[test]
+    fn an_ordinary_route_left_is_not_exempt() {
+        let t = Instant::now();
+        let es = Some([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        let ordinary = |seq| RemoteRoute { seq, ..route() };
+        let sync = |seq| RemoteRoute {
+            rd: [0, 1, 10, 0, 0, 12, 0, 100],
+            es,
+            seq,
+            ..route()
+        };
+        let owner_es = |dad: &EvpnDad| match dad.macs[&(VNI, mac(1))].owner {
+            Some(Owner::Remote { es, .. }) => es,
+            owner => panic!("not remote: {owner:?}"),
+        };
+
+        // The sync route is the newest, then goes.
+        let mut dad = dad(3, Freeze::Permanent);
+        dad.remote_takeover(VNI, mac(1), None, ordinary(1), t);
+        dad.remote_takeover(VNI, mac(1), None, sync(2), t);
+        assert_eq!(owner_es(&dad), es);
+        dad.remote_gone(sync(2).rd, VNI, mac(1), None, t);
+        assert_eq!(owner_es(&dad), None);
+        dad.local_learn(VNI, mac(1), None, t);
+        assert_eq!(dad.macs[&(VNI, mac(1))].count, 1);
+
+        // The sync route re-runs older than the ordinary one.
+        let mut dad = super::EvpnDad {
+            config: dad.config,
+            ..Default::default()
+        };
+        dad.remote_takeover(VNI, mac(1), None, ordinary(3), t);
+        dad.remote_takeover(VNI, mac(1), None, sync(2), t);
+        assert_eq!(owner_es(&dad), None);
+        dad.local_learn(VNI, mac(1), None, t);
+        assert_eq!(dad.macs[&(VNI, mac(1))].count, 1);
+    }
+
     /// An IP leaving a duplicate MAC for a clean one forgets its earlier
     /// moves (FRR's `zebra_evpn_ip_inherit_dad_from_mac`), so the
     /// rebinding does not complete its own detection; on a duplicate MAC,
@@ -972,7 +1311,7 @@ mod tests {
         let setup = || {
             let mut dad = dad(2, Freeze::Permanent);
             // On mac(2) remotely, then learned here on mac(1): one move.
-            dad.remote_takeover(RD, VNI, mac(2), Some(ip(5)), VTEP, false, t);
+            dad.remote_takeover(VNI, mac(2), Some(ip(5)), route(), t);
             dad.local_learn(VNI, mac(1), Some(ip(5)), t);
             assert_eq!(dad.ips[&(VNI, ip(5))].probe.count, 1);
             dad
@@ -980,7 +1319,7 @@ mod tests {
 
         let mut clean = setup();
         mark_duplicate(&mut clean, mac(1), t);
-        let (verdict, keys) = clean.remote_takeover(RD, VNI, mac(2), Some(ip(5)), VTEP, false, t);
+        let (verdict, keys) = clean.remote_takeover(VNI, mac(2), Some(ip(5)), route(), t);
         assert_eq!((verdict, keys), (Verdict::Proceed, vec![]));
         let probe = &clean.ips[&(VNI, ip(5))].probe;
         assert_eq!((probe.count, probe.duplicate), (0, None));
@@ -989,13 +1328,13 @@ mod tests {
         let mut dup = setup();
         mark_duplicate(&mut dup, mac(1), t);
         mark_duplicate(&mut dup, mac(3), t);
-        let (verdict, _) = dup.remote_takeover(RD, VNI, mac(3), Some(ip(5)), VTEP, false, t);
+        let (verdict, _) = dup.remote_takeover(VNI, mac(3), Some(ip(5)), route(), t);
         assert_eq!(verdict, Verdict::Hold);
         assert_eq!(dup.ips[&(VNI, ip(5))].probe.count, 2);
 
         // From a MAC that is not a duplicate: likewise.
         let mut plain = setup();
-        let (_, keys) = plain.remote_takeover(RD, VNI, mac(2), Some(ip(5)), VTEP, false, t);
+        let (_, keys) = plain.remote_takeover(VNI, mac(2), Some(ip(5)), route(), t);
         assert_eq!(keys, vec![DadKey::Ip(VNI, ip(5))]);
     }
 
@@ -1019,7 +1358,7 @@ mod tests {
 
         // A learn of a remote MAC opens a window (one move).
         let mut dad = dad(3, Freeze::Off);
-        dad.remote_takeover(RD, VNI, mac(1), None, VTEP, false, t);
+        dad.remote_takeover(VNI, mac(1), None, route(), t);
         dad.local_learn(VNI, mac(1), None, t);
         dad.local_gone(VNI, mac(1), None, t);
         assert_eq!(dad.macs[&(VNI, mac(1))].count, 1, "window open");
@@ -1038,7 +1377,7 @@ mod tests {
         dad.local_learn(VNI, mac(1), None, t);
         assert_eq!(dad.macs[&(VNI, mac(1))].count, 0);
         // A remote route outside any window counts nothing.
-        dad.remote_takeover(RD, VNI, mac(1), None, VTEP, false, t);
+        dad.remote_takeover(VNI, mac(1), None, route(), t);
         assert_eq!(dad.macs[&(VNI, mac(1))].count, 0);
         dad.remote_gone(RD, VNI, mac(1), None, t);
         dad.local_learn(VNI, mac(1), None, t);
@@ -1051,13 +1390,13 @@ mod tests {
     fn max_moves_within_the_window_detects() {
         let mut dad = dad(5, Freeze::Off);
         let t = Instant::now();
-        dad.remote_takeover(RD, VNI, mac(1), None, VTEP, false, t);
+        dad.remote_takeover(VNI, mac(1), None, route(), t);
         assert!(dad.local_learn(VNI, mac(1), None, t).1.is_empty()); // 1
         assert!(flap(&mut dad, t, 10).is_empty()); // 2, 3
         assert_eq!(dad.macs[&(VNI, mac(1))].count, 3);
         // The fourth move, a takeover, does not yet; the fifth, local, does.
         let now = t + Duration::from_secs(20);
-        let (verdict, keys) = dad.remote_takeover(RD, VNI, mac(1), None, VTEP, false, now);
+        let (verdict, keys) = dad.remote_takeover(VNI, mac(1), None, route(), now);
         assert_eq!((verdict, keys), (Verdict::Proceed, vec![]));
         let (verdict, keys) = dad.local_learn(VNI, mac(1), None, now);
         assert_eq!(keys, vec![DadKey::Mac(VNI, mac(1))]);
@@ -1072,7 +1411,7 @@ mod tests {
     fn moves_outside_the_window_restart_it() {
         let mut dad = dad(3, Freeze::Off);
         let t = Instant::now();
-        dad.remote_takeover(RD, VNI, mac(1), None, VTEP, false, t);
+        dad.remote_takeover(VNI, mac(1), None, route(), t);
         dad.local_learn(VNI, mac(1), None, t); // 1
         // Past the window: the takeover counts nothing, the learn restarts.
         assert!(flap(&mut dad, t, 200).is_empty());
@@ -1087,24 +1426,25 @@ mod tests {
     fn remote_to_remote_and_sticky_moves_do_not_count() {
         let mut dad = dad(2, Freeze::Off);
         let t = Instant::now();
-        dad.remote_takeover(RD, VNI, mac(1), None, VTEP, false, t);
+        dad.remote_takeover(VNI, mac(1), None, route(), t);
         dad.local_learn(VNI, mac(1), None, t); // 1
-        dad.remote_takeover(RD, VNI, mac(1), None, VTEP, false, t); // 2: detected
+        dad.remote_takeover(VNI, mac(1), None, route(), t); // 2: detected
         assert!(dad.mac_duplicate(VNI, mac(1)));
 
         let mut dad = super::EvpnDad {
             config: dad.config,
             ..Default::default()
         };
-        dad.remote_takeover(RD, VNI, mac(1), None, VTEP, false, t);
+        dad.remote_takeover(VNI, mac(1), None, route(), t);
         dad.local_learn(VNI, mac(1), None, t); // 1
         dad.remote_takeover(
-            RD,
             VNI,
             mac(1),
             None,
-            VTEP,
-            true,
+            RemoteRoute {
+                sticky: true,
+                ..route()
+            },
             t + Duration::from_secs(1),
         ); // 2
         dad.release(DadKey::Mac(VNI, mac(1)));
@@ -1113,11 +1453,20 @@ mod tests {
         assert_eq!(dad.macs[&(VNI, mac(1))].count, 0);
         // Another VTEP taking over from a remote owner is not a move.
         let other = Some(IpAddr::from([10, 0, 0, 12]));
-        dad.remote_takeover(RD, VNI, mac(2), None, VTEP, false, t);
+        dad.remote_takeover(VNI, mac(2), None, route(), t);
         dad.local_learn(VNI, mac(2), None, t); // 1
-        dad.remote_takeover(RD, VNI, mac(2), None, VTEP, false, t); // 2
+        dad.remote_takeover(VNI, mac(2), None, route(), t); // 2
         dad.release(DadKey::Mac(VNI, mac(2)));
-        dad.remote_takeover(RD, VNI, mac(2), None, other, false, t);
+        dad.remote_takeover(
+            VNI,
+            mac(2),
+            None,
+            RemoteRoute {
+                vtep: other,
+                ..route()
+            },
+            t,
+        );
         assert_eq!(dad.macs[&(VNI, mac(2))].count, 0);
     }
 
@@ -1128,9 +1477,9 @@ mod tests {
         let mut dad = dad(2, Freeze::For(60));
         let t = Instant::now();
         dad.local_learn(VNI, mac(1), Some(ip(5)), t);
-        dad.remote_takeover(RD, VNI, mac(1), None, VTEP, false, t);
+        dad.remote_takeover(VNI, mac(1), None, route(), t);
         dad.local_learn(VNI, mac(1), None, t); // 1
-        let (verdict, keys) = dad.remote_takeover(RD, VNI, mac(1), None, VTEP, false, t); // 2
+        let (verdict, keys) = dad.remote_takeover(VNI, mac(1), None, route(), t); // 2
         assert_eq!(verdict, Verdict::Hold);
         assert_eq!(keys, vec![DadKey::Mac(VNI, mac(1))]);
         assert_eq!(dad.until(keys[0]), Some(t + Duration::from_secs(60)));
@@ -1149,12 +1498,12 @@ mod tests {
     fn an_ip_moving_between_macs_is_detected() {
         let mut dad = dad(2, Freeze::Permanent);
         let t = Instant::now();
-        dad.remote_takeover(RD, VNI, mac(1), Some(ip(5)), VTEP, false, t);
+        dad.remote_takeover(VNI, mac(1), Some(ip(5)), route(), t);
         // The IP appears here on another MAC: one move.
         dad.local_learn(VNI, mac(2), Some(ip(5)), t);
         assert_eq!(dad.ips[&(VNI, ip(5))].probe.count, 1);
         // Back behind the peer on the first MAC: two, detected.
-        let (verdict, keys) = dad.remote_takeover(RD, VNI, mac(1), Some(ip(5)), VTEP, false, t);
+        let (verdict, keys) = dad.remote_takeover(VNI, mac(1), Some(ip(5)), route(), t);
         assert_eq!(keys, vec![DadKey::Ip(VNI, ip(5))]);
         assert_eq!(verdict, Verdict::Hold);
         // Permanent: no deadline. The MACs themselves are not duplicates.
@@ -1168,7 +1517,7 @@ mod tests {
             config: dad.config,
             ..Default::default()
         };
-        dad.remote_takeover(RD, VNI, mac(1), Some(ip(5)), VTEP, false, t);
+        dad.remote_takeover(VNI, mac(1), Some(ip(5)), route(), t);
         dad.local_learn(VNI, mac(1), Some(ip(5)), t);
         assert_eq!(dad.ips[&(VNI, ip(5))].probe.count, 0);
     }
@@ -1179,10 +1528,10 @@ mod tests {
         let mut dad = dad(1, Freeze::Off);
         let t = Instant::now();
         for (vni, m) in [(100, mac(1)), (200, mac(2))] {
-            dad.remote_takeover(RD, vni, m, None, VTEP, false, t);
+            dad.remote_takeover(vni, m, None, route(), t);
             dad.local_learn(vni, m, None, t);
         }
-        dad.remote_takeover(RD, 100, mac(3), Some(ip(5)), VTEP, false, t);
+        dad.remote_takeover(100, mac(3), Some(ip(5)), route(), t);
         dad.local_learn(100, mac(4), Some(ip(5)), t);
         assert_eq!(dad.detected(None, None, None).len(), 3);
         assert_eq!(
@@ -1205,7 +1554,7 @@ mod tests {
     fn disabling_detection_clears_state_and_lifts_the_freeze() {
         let mut dad = dad(1, Freeze::Permanent);
         let t = Instant::now();
-        dad.remote_takeover(RD, VNI, mac(1), None, VTEP, false, t);
+        dad.remote_takeover(VNI, mac(1), None, route(), t);
         dad.local_learn(VNI, mac(1), None, t);
         assert!(dad.frozen(VNI, mac(1), None));
         let keys = dad.set_config(
@@ -1218,7 +1567,7 @@ mod tests {
         assert_eq!(keys, vec![DadKey::Mac(VNI, mac(1))]);
         assert!(!dad.mac_duplicate(VNI, mac(1)));
         // Disabled, nothing is counted.
-        dad.remote_takeover(RD, VNI, mac(1), None, VTEP, false, t);
+        dad.remote_takeover(VNI, mac(1), None, route(), t);
         dad.local_learn(VNI, mac(1), None, t);
         assert_eq!(dad.macs[&(VNI, mac(1))].count, 0);
     }
@@ -1231,12 +1580,12 @@ mod tests {
         let mut dad = dad(2, Freeze::Off);
         let t = Instant::now();
         // Detect a MAC and an independent IP, both initially warn-only.
-        dad.remote_takeover(RD, VNI, mac(1), None, VTEP, false, t);
+        dad.remote_takeover(VNI, mac(1), None, route(), t);
         dad.local_learn(VNI, mac(1), None, t);
-        dad.remote_takeover(RD, VNI, mac(1), None, VTEP, false, t);
-        dad.remote_takeover(RD, VNI, mac(2), Some(ip(5)), VTEP, false, t);
+        dad.remote_takeover(VNI, mac(1), None, route(), t);
+        dad.remote_takeover(VNI, mac(2), Some(ip(5)), route(), t);
         dad.local_learn(VNI, mac(3), Some(ip(5)), t);
-        dad.remote_takeover(RD, VNI, mac(2), Some(ip(5)), VTEP, false, t);
+        dad.remote_takeover(VNI, mac(2), Some(ip(5)), route(), t);
         let keys = vec![DadKey::Mac(VNI, mac(1)), DadKey::Ip(VNI, ip(5))];
         assert_eq!(dad.detected(None, None, None), keys);
 

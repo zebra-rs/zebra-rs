@@ -2633,9 +2633,6 @@ impl Bgp {
                 // re-originating a Type-1 needs full `self` (SID pool,
                 // peers). Cheap no-op when nothing was marked.
                 self.vpws_df_drain();
-                // EVPN duplicate address detection: withdraw our routes for
-                // addresses a remote takeover froze in this batch.
-                self.evpn_dad_drain();
 
                 // Tier 1a: a peer that just got a fresh resumable v4
                 // sync cursor (set by `route_sync` inside the FSM) is
@@ -7462,6 +7459,19 @@ impl Bgp {
         }
     }
 
+    /// What the event loop does after every event, before it waits for the
+    /// next. Our routes for addresses a remote takeover froze are withdrawn:
+    /// a takeover happens wherever a remote MAC/IP route is re-run (an
+    /// UPDATE, a reconcile, a best-path recompute after a knob change), and
+    /// the withdrawal needs the peers, which those paths do not all have.
+    /// Then the labels the event freed are reused by a transit row that
+    /// went without, else their drained chunks go back, behind the ILM
+    /// messages.
+    pub(super) fn event_upkeep(&mut self) {
+        self.evpn_dad_drain();
+        self.label_chunk_upkeep();
+    }
+
     pub async fn event_loop(&mut self) {
         if let Err(err) = self.listen().await {
             self.listen_err = Some(err);
@@ -7495,10 +7505,7 @@ impl Bgp {
             while let Ok(msg) = self.prx.try_recv() {
                 self.process_msg(msg);
             }
-            // Labels the last messages freed: reused by a transit row that
-            // went without, else their drained chunks go back, behind the
-            // ILM messages.
-            self.label_chunk_upkeep();
+            self.event_upkeep();
             tokio::select! {
                 // `suppress-fib-pending` expiry. A prefix whose ack was
                 // lost must be advertised eventually, and the next

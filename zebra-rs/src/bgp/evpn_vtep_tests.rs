@@ -481,10 +481,47 @@ fn receive_macip(
     ip: Option<IpAddr>,
     seq: u32,
 ) {
+    receive_macip_on(bgp, from, rd, mac, ip, seq, [0; 10]);
+}
+
+/// [`receive_macip`] for a host on Ethernet Segment `esi`.
+fn receive_macip_on(
+    bgp: &mut Bgp,
+    from: usize,
+    rd: RouteDistinguisher,
+    mac: MacAddr,
+    ip: Option<IpAddr>,
+    seq: u32,
+    esi: [u8; 10],
+) {
+    feed_macip(bgp, from, rd, mac, ip, Some(seq), esi);
+}
+
+/// Feed the withdrawal of a MAC/IP route from `from` through ingest.
+fn withdraw_macip(
+    bgp: &mut Bgp,
+    from: usize,
+    rd: RouteDistinguisher,
+    mac: MacAddr,
+    ip: Option<IpAddr>,
+) {
+    feed_macip(bgp, from, rd, mac, ip, None, [0; 10]);
+}
+
+/// A MAC/IP route announced with sequence number `seq`, or withdrawn.
+fn feed_macip(
+    bgp: &mut Bgp,
+    from: usize,
+    rd: RouteDistinguisher,
+    mac: MacAddr,
+    ip: Option<IpAddr>,
+    seq: Option<u32>,
+    esi: [u8; 10],
+) {
     let route = EvpnRoute::Mac(bgp_packet::EvpnMac {
         id: 0,
         rd,
-        esi: [0; 10],
+        esi,
         ether_tag: 0,
         mac: mac.octets(),
         ip,
@@ -496,7 +533,7 @@ fn receive_macip(
     attr.local_pref = Some(LocalPref::default());
     attr.ecom = Some(ExtCommunity::from([
         evpn_route_target(65000, 100),
-        evpn_mac_mobility(seq),
+        evpn_mac_mobility(seq.unwrap_or(0)),
     ]));
     let mut top = BgpTop {
         router_id: &bgp.router_id,
@@ -518,6 +555,10 @@ fn receive_macip(
         vrf_transport_v6: None,
         as_sets_withdraw: bgp.as_sets_withdraw,
     };
+    if seq.is_none() {
+        route_evpn_withdraw(from, &route, &mut top, &mut bgp.peers);
+        return;
+    }
     route_evpn_update(
         from,
         &route,
@@ -665,19 +706,20 @@ impl Flap {
             None,
             self.seq,
         );
-        // What the event loop does after an UPDATE batch.
-        self.bgp.evpn_dad_drain();
+        self.bgp.event_upkeep();
     }
 
     /// The kernel replaced our local row with the remote one.
     fn kernel_replaced(&mut self) {
         self.bgp.evpn_withdraw_macip(&self.local);
+        self.bgp.event_upkeep();
     }
 
     /// The host is learned here: our route carries the next number.
     fn local(&mut self) {
         self.seq += 1;
         self.bgp.evpn_originate_macip(&self.local);
+        self.bgp.event_upkeep();
     }
 
     fn messages(&mut self) -> Vec<(bool, crate::rib::evpn::MacRouteKey)> {
@@ -1009,4 +1051,255 @@ async fn permanent_freeze_changed_to_timed_freeze_arms_recovery() {
     }
     assert_eq!(f.messages(), vec![(true, f.key)]);
     assert!(!f.bgp.local_rib.evpn_dad.mac_duplicate(100, f.local.mac));
+}
+
+/// A multihomed host on a segment this node shares with the peer, learned
+/// on either PE as its traffic hashes: the peer's route for it on the
+/// segment only syncs it (RFC 7432 §8.4, FRR's sync route), and the host is
+/// reachable over our own port all along. Each learn here and each re-run
+/// of the peer's route after ours went counted a move, two a cycle, so the
+/// healthy host was flagged and, with freeze, withdrawn by both PEs. The
+/// same host on a segment this node is not on is a duplicate as before.
+#[tokio::test]
+async fn a_host_moving_within_our_segment_is_no_duplicate() {
+    use crate::bgp::ethernet_segment::EthernetSegment;
+    use crate::bgp::evpn_dad::Freeze;
+    for ours in [true, false] {
+        let (mut f, _rx) = Flap::new(dad_config(2, Freeze::Permanent));
+        if ours {
+            f.bgp.ethernet_segments.insert(
+                "es1".to_string(),
+                EthernetSegment {
+                    esi: Some(ESI),
+                    interface: Some("host0".to_string()),
+                    ..Default::default()
+                },
+            );
+            f.bgp
+                .link_index_by_name
+                .insert("host0".to_string(), f.local.ifindex);
+            f.bgp.local_rib.own_es.insert(ESI, "host0".to_string());
+            assert_eq!(f.bgp.macip_esi(&f.local), Some(ESI));
+        }
+        for _ in 0..3 {
+            f.seq += 1;
+            receive_macip_on(
+                &mut f.bgp,
+                f.from,
+                f.remote_rd,
+                f.local.mac,
+                None,
+                f.seq,
+                ESI,
+            );
+            f.bgp.event_upkeep();
+            f.local();
+            f.kernel_replaced(); // aged out here: the peer's route re-runs
+        }
+        assert_eq!(
+            f.bgp.local_rib.evpn_dad.mac_duplicate(100, f.local.mac),
+            !ours,
+            "on our segment: {ours}"
+        );
+    }
+}
+
+/// Only the newest binding of an IP moves it. The IP has (mac 1, seq 1)
+/// and (mac 2, seq 5) from different RDs; a reconcile re-runs the first,
+/// and the host, still on mac 2, is then learned here. That is a move of
+/// mac 2, not of the IP, but the re-run had left the IP on mac 1.
+#[tokio::test]
+async fn an_older_binding_re_run_is_no_ip_move() {
+    let (mut f, _rx) = Flap::new(dad_config(3, crate::bgp::evpn_dad::Freeze::Permanent));
+    let ip: IpAddr = "10.10.0.5".parse().unwrap();
+    let old_mac = MacAddr::from([2, 0, 0, 0, 1, 9]);
+    let old_rd = rd_from_router_id_vni("10.0.0.12".parse().unwrap(), 100).unwrap();
+    receive_macip(&mut f.bgp, f.from, old_rd, old_mac, Some(ip), 1);
+    receive_macip(&mut f.bgp, f.from, f.remote_rd, f.local.mac, Some(ip), 5);
+    f.bgp
+        .evpn_reconcile_remote_mac(100, old_mac.octets(), Some(ip));
+    f.bgp.event_upkeep();
+    let dad = &f.bgp.local_rib.evpn_dad;
+    assert_eq!(dad.ips[&(100, ip)].mac, f.local.mac);
+
+    f.bgp.evpn_originate_macip(&crate::rib::api::FdbEntry {
+        ip: Some(ip),
+        ..f.local.clone()
+    });
+    let dad = &f.bgp.local_rib.evpn_dad;
+    assert_eq!(dad.macs[&(100, f.local.mac)].count, 1, "the MAC moved");
+    assert_eq!(dad.ips[&(100, ip)].probe.count, 0, "the IP kept its MAC");
+}
+
+/// Releasing an IP re-advertises its local bindings, but not one on a MAC
+/// that has since gone remote: the remote route beat it, and advertising it
+/// again was a local learn of that MAC, a move that never happened.
+#[tokio::test]
+async fn releasing_an_ip_does_not_relearn_its_remote_mac() {
+    use crate::bgp::evpn_dad::{Duplicate, IpProbe, Owner, Probe};
+    let (mut f, _rx) = Flap::new(dad_config(3, crate::bgp::evpn_dad::Freeze::Permanent));
+    let ip: IpAddr = "10.10.0.5".parse().unwrap();
+    let binding = crate::rib::api::FdbEntry {
+        ip: Some(ip),
+        ..f.local.clone()
+    };
+    f.bgp
+        .local_fdb
+        .insert((100, f.local.mac, Some(ip)), binding.clone());
+    let now = std::time::Instant::now();
+    let dad = &mut f.bgp.local_rib.evpn_dad;
+    // The MAC went to the peer within a window; the IP, local, was
+    // detected on its own.
+    dad.macs.insert(
+        (100, f.local.mac),
+        Probe {
+            owner: Some(Owner::Remote {
+                vtep: Some("10.0.0.11".parse().unwrap()),
+                sticky: false,
+                es: None,
+            }),
+            count: 1,
+            start: Some(now),
+            ..Default::default()
+        },
+    );
+    dad.ips.insert(
+        (100, ip),
+        IpProbe {
+            mac: f.local.mac,
+            probe: Probe {
+                owner: Some(Owner::Local),
+                duplicate: Some(Duplicate {
+                    since: now,
+                    until: None,
+                }),
+                ..Default::default()
+            },
+        },
+    );
+    assert_eq!(f.bgp.evpn_dad_clear(Some(100), None, Some(ip)), 1);
+    let dad = &f.bgp.local_rib.evpn_dad;
+    assert_eq!(dad.macs[&(100, f.local.mac)].count, 1);
+    assert!(dad.detected(None, None, None).is_empty());
+    assert!(!f.bgp.evpn_macip_originated(&binding));
+}
+
+/// `clear … ip` on an IP its duplicate MAC holds leaves it alone, as FRR
+/// refuses it: the IP stays frozen with the MAC whatever its own mark, and
+/// clearing the MAC releases both. It reported success and released
+/// nothing (or only the IP's own mark, which changed nothing).
+#[tokio::test]
+async fn clearing_an_ip_its_duplicate_mac_holds_releases_nothing() {
+    use crate::bgp::evpn_dad::{Duplicate, IpProbe, Probe};
+    let (mut f, _rx) = Flap::new(dad_config(3, crate::bgp::evpn_dad::Freeze::Permanent));
+    let now = std::time::Instant::now();
+    let marked = Some(Duplicate {
+        since: now,
+        until: None,
+    });
+    let held: IpAddr = "10.10.0.5".parse().unwrap();
+    let both: IpAddr = "10.10.0.6".parse().unwrap();
+    let dad = &mut f.bgp.local_rib.evpn_dad;
+    dad.macs.insert(
+        (100, f.local.mac),
+        Probe {
+            duplicate: marked,
+            ..Default::default()
+        },
+    );
+    for (ip, duplicate) in [(held, None), (both, marked)] {
+        dad.ips.insert(
+            (100, ip),
+            IpProbe {
+                mac: f.local.mac,
+                probe: Probe {
+                    duplicate,
+                    ..Default::default()
+                },
+            },
+        );
+    }
+    for ip in [held, both] {
+        assert_eq!(f.bgp.evpn_dad_clear(Some(100), None, Some(ip)), 0);
+        assert_eq!(f.bgp.evpn_dad_clear(None, None, Some(ip)), 0);
+    }
+    let dad = &f.bgp.local_rib.evpn_dad;
+    assert!(dad.frozen(100, f.local.mac, Some(held)));
+    assert_eq!(dad.ips[&(100, both)].probe.duplicate, marked);
+
+    assert_eq!(f.bgp.evpn_dad_clear(Some(100), Some(f.local.mac), None), 1);
+    let dad = &f.bgp.local_rib.evpn_dad;
+    assert!(!dad.frozen(100, f.local.mac, Some(held)));
+    assert!(!dad.frozen(100, f.local.mac, Some(both)));
+}
+
+/// An IP is where the newest of its live bindings is: a withdrawn one no
+/// longer counts, however high its number was. Detection compared with the
+/// highest number ever seen for the IP, which a withdrawal never lowers,
+/// so after (mac, seq 100) went, (mac 1, seq 1) then (mac 2, seq 5) left
+/// the IP on mac 1, and a learn of mac 2 here counted an IP move.
+#[tokio::test]
+async fn a_withdrawn_binding_does_not_pin_the_ip() {
+    let (mut f, _rx) = Flap::new(dad_config(3, crate::bgp::evpn_dad::Freeze::Permanent));
+    let ip: IpAddr = "10.10.0.5".parse().unwrap();
+    let mac1 = MacAddr::from([2, 0, 0, 0, 1, 8]);
+    let mac2 = MacAddr::from([2, 0, 0, 0, 1, 9]);
+    receive_macip(&mut f.bgp, f.from, f.remote_rd, f.local.mac, Some(ip), 100);
+    withdraw_macip(&mut f.bgp, f.from, f.remote_rd, f.local.mac, Some(ip));
+    receive_macip(&mut f.bgp, f.from, f.remote_rd, mac1, Some(ip), 1);
+    receive_macip(&mut f.bgp, f.from, f.remote_rd, mac2, Some(ip), 5);
+    assert_eq!(f.bgp.local_rib.evpn_dad.ips[&(100, ip)].mac, mac2);
+
+    let binding = crate::rib::api::FdbEntry {
+        mac: mac2,
+        ip: Some(ip),
+        ..f.local.clone()
+    };
+    f.bgp.process_rib_msg(RibRx::FdbAdd(binding));
+    assert_eq!(f.bgp.local_rib.evpn_dad.ips[&(100, ip)].probe.count, 0);
+}
+
+/// A segment peer's sync route withdrawn while an ordinary remote route
+/// for the MAC stays: the MAC is at the ordinary route, and a learn here
+/// is a move. The owner kept the sync route's segment, and the move went
+/// uncounted.
+#[tokio::test]
+async fn a_withdrawn_sync_route_leaves_no_exemption() {
+    let (mut f, _rx) = Flap::new(dad_config(3, crate::bgp::evpn_dad::Freeze::Permanent));
+    let sync_rd = rd_from_router_id_vni("10.0.0.12".parse().unwrap(), 100).unwrap();
+    f.bgp.local_rib.own_es.insert(ESI, "host0".to_string());
+    receive_macip(&mut f.bgp, f.from, f.remote_rd, f.local.mac, None, 1);
+    receive_macip_on(&mut f.bgp, f.from, sync_rd, f.local.mac, None, 2, ESI);
+    withdraw_macip(&mut f.bgp, f.from, sync_rd, f.local.mac, None);
+    f.local();
+    assert_eq!(
+        f.bgp.local_rib.evpn_dad.macs[&(100, f.local.mac)].count,
+        1,
+        "learned here from the ordinary route left: a move"
+    );
+}
+
+/// The IP's winning binding replaced by an UPDATE with a lower sequence
+/// number: (mac 1, seq 10) and (mac 2, seq 5) from different RDs, then mac
+/// 1's route again with seq 1. The IP is at mac 2 now, and the host
+/// learned here on mac 2 kept its MAC. The IP stayed on mac 1, and the
+/// learn counted an IP move.
+#[tokio::test]
+async fn a_binding_replaced_by_an_older_one_moves_the_ip() {
+    let (mut f, _rx) = Flap::new(dad_config(3, crate::bgp::evpn_dad::Freeze::Permanent));
+    let ip: IpAddr = "10.10.0.5".parse().unwrap();
+    let mac1 = MacAddr::from([2, 0, 0, 0, 1, 8]);
+    let other_rd = rd_from_router_id_vni("10.0.0.12".parse().unwrap(), 100).unwrap();
+    receive_macip(&mut f.bgp, f.from, f.remote_rd, mac1, Some(ip), 10);
+    receive_macip(&mut f.bgp, f.from, other_rd, f.local.mac, Some(ip), 5);
+    assert_eq!(f.bgp.local_rib.evpn_dad.ips[&(100, ip)].mac, mac1);
+    receive_macip(&mut f.bgp, f.from, f.remote_rd, mac1, Some(ip), 1);
+    assert_eq!(f.bgp.local_rib.evpn_dad.ips[&(100, ip)].mac, f.local.mac);
+
+    f.bgp
+        .process_rib_msg(RibRx::FdbAdd(crate::rib::api::FdbEntry {
+            ip: Some(ip),
+            ..f.local.clone()
+        }));
+    assert_eq!(f.bgp.local_rib.evpn_dad.ips[&(100, ip)].probe.count, 0);
 }
