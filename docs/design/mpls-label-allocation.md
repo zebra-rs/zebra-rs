@@ -877,7 +877,11 @@ re-reserve the Adjacency-SID labels its checkpoint restores:
   establishes the SR mode (an interface's Adj-SID leaf can come before
   `segment-routing mpls`). The pool takes them over as it is created
   (`adopt_restored_adj_sids`); a refused one is dropped, and its adjacency
-  is given another. Any still waiting when the restart ends are dropped. The NFSM's Full step (`adj_sid_label_nfsm`, one
+  is given another. A waiting label goes when its adjacency leaves Full.
+  When the restart ends, a Full adjacency's waits on while SR-MPLS is on
+  (the SR block's reply, which creates the pool, may come later); the
+  others go, and all of them with SR-MPLS off. After the restart,
+  SR-MPLS turned off drops any still waiting. The NFSM's Full step (`adj_sid_label_nfsm`, one
   generic path for both versions) keeps a label the adjacency already
   holds. When the restart ends, a restored label whose adjacency is not
   Full again goes back (`release_restored_adj_sids`).

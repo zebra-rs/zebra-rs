@@ -315,8 +315,10 @@ pub struct Ospf<V: OspfVersion = Ospfv2> {
     /// them over as it is created (`adopt_restored_adj_sids`). Kept apart
     /// so the configuration replayed at restart cannot clear them before
     /// it establishes the SR mode (an interface's Adj-SID leaf, replayed
-    /// before `segment-routing mpls`, reconciles with SR-MPLS still off);
-    /// dropped if the restart ends with SR-MPLS never on.
+    /// before `segment-routing mpls`, reconciles with SR-MPLS still off).
+    /// One goes when its adjacency leaves Full; when the restart ends, all
+    /// go but Full adjacencies' while SR-MPLS is on (the SR block's reply
+    /// may yet be on its way); after it, SR-MPLS turned off drops them.
     pub restored_adj_sids: BTreeMap<(u32, Ipv4Addr), u32>,
     /// The claim on each configured absolute Adjacency-SID's label, and
     /// the link it is for (`reconcile_adj_sid_claims`). A `Pending` or
@@ -902,6 +904,11 @@ impl<V: OspfVersion> Ospf<V> {
         new: NfsmState,
     ) {
         let key = (ifindex, nbr);
+        if old == NfsmState::Full && new != NfsmState::Full {
+            // A restored label still waiting for the pool is this
+            // adjacency's no more.
+            self.restored_adj_sids.remove(&key);
+        }
         if new == NfsmState::Full {
             if self.adj_needs_dynamic_label(ifindex)
                 && !self.lan_adj_sids.contains_key(&key)
@@ -952,10 +959,16 @@ impl<V: OspfVersion> Ospf<V> {
     /// The restart is over: a restored Adjacency-SID label whose adjacency
     /// is not Full again (`full`, keyed as `lan_adj_sids`) goes back, so a
     /// neighbour gone for good holds no label. Other entries are only ever
-    /// Full adjacencies'. Restored labels still waiting for a pool — the
-    /// restart ended with SR-MPLS never on — are dropped.
+    /// Full adjacencies'. Of the restored labels still waiting for a pool,
+    /// a Full adjacency's waits on while SR-MPLS is on: the SR block's
+    /// reply, which creates the pool, may not have arrived yet. The rest
+    /// go, and all of them with SR-MPLS off.
     pub(super) fn release_restored_adj_sids(&mut self, full: &[(u32, Ipv4Addr)]) {
-        self.restored_adj_sids.clear();
+        if self.segment_routing == super::srmpls::SegmentRoutingMode::Mpls {
+            self.restored_adj_sids.retain(|key, _| full.contains(key));
+        } else {
+            self.restored_adj_sids.clear();
+        }
         let gone: Vec<(u32, Ipv4Addr)> = self
             .lan_adj_sids
             .keys()
@@ -976,6 +989,11 @@ impl<V: OspfVersion> Ospf<V> {
         if self.segment_routing != SegmentRoutingMode::Mpls {
             self.local_pool = None;
             self.lan_adj_sids.clear();
+            // Restored labels outlive SR-MPLS off only while the restart's
+            // configuration replay may still turn it on.
+            if self.restarting.is_none() {
+                self.restored_adj_sids.clear();
+            }
             self.adj_sid_claims.clear();
             return;
         }
@@ -26524,6 +26542,101 @@ mod gr_helper_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A Full adjacency's restored label still waiting for the pool when
+    /// the restart ends, SR-MPLS on and its block's reply not yet in, is
+    /// kept and taken over once the reply creates the pool. It used to go
+    /// with the rest, so the adjacency came back with the lowest free
+    /// label instead. One whose adjacency leaves Full meanwhile goes. Both
+    /// versions.
+    #[tokio::test(start_paused = true)]
+    async fn a_full_adjacencys_label_waits_past_the_restart_for_the_block() {
+        use super::super::checkpoint::OspfCheckpoint;
+        use super::super::srmpls::SegmentRoutingMode;
+        use crate::rib::{Block, RibSrRx};
+        let dir = std::env::temp_dir().join(format!(
+            "zebra-rs-ospf-checkpoint-adj-sid-late-{}",
+            std::process::id()
+        ));
+        let path = dir.join("checkpoint.cbor");
+        let block = || RibSrRx::Block {
+            name: crate::rib::DEFAULT_BLOCK_NAME.to_string(),
+            block: Some(Block::default_block()),
+        };
+
+        // OSPFv2: S stays Full, O leaves Full before the block arrives.
+        let (s, o) = (v2_addr(S), v2_addr(O));
+        let mut before = v2_top();
+        before.lan_adj_sids = [((2, s), 15005), ((2, o), 15006)].into();
+        OspfCheckpoint::from_instance(&before, GRACE, 1)
+            .write_to_path(&path)
+            .unwrap();
+        let mut top = v2_top();
+        top.gr_restart_load_checkpoint_from(&path);
+        top.segment_routing = SegmentRoutingMode::Mpls;
+        top.reconcile_block_watch();
+        assert!(top.local_pool.is_none(), "the block's reply is not in");
+        top.gr_restart_exit_success();
+        assert!(top.restarting.is_none());
+        top.adj_sid_label_nfsm(2, o, NfsmState::Full, NfsmState::Init);
+        for nbr in top.links.get_mut(&2).unwrap().nbrs.values_mut() {
+            if nbr.ident.prefix.addr() == o {
+                nbr.state = NfsmState::Init;
+            }
+        }
+        top.process_sr_rx(block());
+        assert_eq!(
+            top.lan_adj_sids.get(&(2, s)),
+            Some(&15005),
+            "v2: S keeps it"
+        );
+        assert_ne!(top.lan_adj_sids.get(&(2, o)), Some(&15006), "v2: O's went");
+        assert!(top.restored_adj_sids.is_empty());
+
+        // OSPFv3.
+        let mut before = v3_top();
+        before.lan_adj_sids = [((2, S), 15005), ((2, O), 15006)].into();
+        OspfCheckpoint::from_instance_v3(&before, GRACE, 1)
+            .write_to_path(&path)
+            .unwrap();
+        let mut top = v3_top();
+        top.gr_restart_load_checkpoint_v3_from(&path);
+        top.segment_routing = SegmentRoutingMode::Mpls;
+        top.reconcile_block_watch();
+        assert!(top.local_pool.is_none(), "the block's reply is not in");
+        top.gr_restart_exit_success_v3();
+        assert!(top.restarting.is_none());
+        top.adj_sid_label_nfsm(2, O, NfsmState::Full, NfsmState::Init);
+        top.links
+            .get_mut(&2)
+            .unwrap()
+            .nbrs
+            .get_mut(&O)
+            .unwrap()
+            .state = NfsmState::Init;
+        top.process_sr_rx(block());
+        assert_eq!(
+            top.lan_adj_sids.get(&(2, S)),
+            Some(&15005),
+            "v3: S keeps it"
+        );
+        assert_ne!(top.lan_adj_sids.get(&(2, O)), Some(&15006), "v3: O's went");
+        assert!(top.restored_adj_sids.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// After the restart, SR-MPLS turned off drops restored labels still
+    /// waiting for a pool: no configuration replay can turn it back on.
+    #[tokio::test(start_paused = true)]
+    async fn sr_mpls_off_after_the_restart_drops_waiting_labels() {
+        use super::super::srmpls::SegmentRoutingMode;
+        let mut top = v2_top();
+        top.segment_routing = SegmentRoutingMode::Mpls;
+        top.restore_adj_sid_labels(&[((2, v2_addr(S)), 15005)]);
+        top.segment_routing = SegmentRoutingMode::None;
+        top.reconcile_adj_sid_labels(vec![]);
+        assert!(top.restored_adj_sids.is_empty());
+    }
+
     /// Restored labels still waiting for a pool when the restart ends —
     /// SR-MPLS never came back on — are dropped, and none is held.
     #[tokio::test(start_paused = true)]
@@ -28785,6 +28898,7 @@ mod sr_block_tests {
     /// versions.
     #[tokio::test]
     async fn restored_labels_survive_config_replayed_before_segment_routing() {
+        use super::super::checkpoint::OspfCheckpoint;
         use super::link_scope_tests::{v2_top, v3_top};
         fn cfg<V: OspfVersion>(top: &mut Ospf<V>, path: &str, vals: &[&str]) {
             let f = *top.callbacks.get(path).unwrap();
@@ -28796,10 +28910,21 @@ mod sr_block_tests {
             block: Some(Block::default_block()),
         };
         let key = (8, A);
+        let dir = std::env::temp_dir().join(format!(
+            "zebra-rs-ospf-checkpoint-replay-{}",
+            std::process::id()
+        ));
+        let path = dir.join("checkpoint.cbor");
 
+        let mut before = v2_top();
+        before.lan_adj_sids = [(key, 15005)].into();
+        OspfCheckpoint::from_instance(&before, 120, 1)
+            .write_to_path(&path)
+            .unwrap();
         let mut v2 = v2_top();
         v2.callback_build();
-        v2.restore_adj_sid_labels(&[(key, 15005)]);
+        v2.gr_restart_load_checkpoint_from(&path);
+        assert!(v2.restarting.is_some());
         cfg(
             &mut v2,
             "/router/ospf/area/interface/adjacency-sid/absolute",
@@ -28811,9 +28936,15 @@ mod sr_block_tests {
         let mut other = v2.rib_subscriber.label_space().pool(15000, 15999);
         assert!(!other.reserve(15005), "v2: held");
 
+        let mut before = v3_top();
+        before.lan_adj_sids = [(key, 15005)].into();
+        OspfCheckpoint::from_instance_v3(&before, 120, 1)
+            .write_to_path(&path)
+            .unwrap();
         let mut v3 = v3_top();
         v3.callback_build();
-        v3.restore_adj_sid_labels(&[(key, 15005)]);
+        v3.gr_restart_load_checkpoint_v3_from(&path);
+        assert!(v3.restarting.is_some());
         cfg(
             &mut v3,
             "/router/ospfv3/area/interface/adjacency-sid/absolute",
@@ -28824,6 +28955,7 @@ mod sr_block_tests {
         assert_eq!(v3.lan_adj_sids.get(&key), Some(&15005), "v3");
         let mut other = v3.rib_subscriber.label_space().pool(15000, 15999);
         assert!(!other.reserve(15005), "v3: held");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Restored labels stay with their adjacencies whichever comes Full
