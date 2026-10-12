@@ -124,7 +124,7 @@ pub struct BgpVrf {
     /// separate ASN today; if a future spec requires one this is
     /// where it lives.
     pub asn: u32,
-    /// Per-VRF MPLS label, allocated by `Bgp::vrf_label_alloc`
+    /// Per-VRF MPLS label, allocated from `Bgp::service_labels`
     /// at spawn time. Stamped onto every `BgpGlobalMsg::Export`
     /// this VRF emits so receiving PEs can identify the egress
     /// VRF; the matching AF_MPLS ILM pops this label and routes
@@ -362,7 +362,7 @@ pub type BgpVrfInbox = UnboundedSender<BgpVrfMsg>;
 pub struct VrfExporter {
     pub name: String,
     pub tx: UnboundedSender<BgpGlobalMsg>,
-    /// Per-VRF MPLS label, allocated by `Bgp::vrf_label_alloc`.
+    /// Per-VRF MPLS label, allocated from `Bgp::service_labels`.
     /// Stamped onto every `BgpGlobalMsg::Export` emitted from
     /// this exporter; the receiving PE binds an AF_MPLS ILM at
     /// this label so data-plane forwarding pops the label and

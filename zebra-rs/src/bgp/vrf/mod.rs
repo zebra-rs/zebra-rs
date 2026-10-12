@@ -12,12 +12,10 @@
 //! `BgpGlobalMsg` / `BgpVrfMsg` channels.
 
 pub mod inst;
-pub mod label;
 pub mod msg;
 pub mod sid;
 pub mod spawn;
 
-pub use label::VrfLabelAllocator;
 pub use sid::{BgpSidPool, Srv6VrfSid};
 
 // External consumers (`Bgp` field types, `process_vrf_global_msg`)

@@ -265,18 +265,10 @@ pub enum Message {
         nh: std::net::IpAddr,
         vrf_id: u32,
     },
-    /// Reserve a dynamic MPLS label block of `size` labels for `proto`
-    /// from the RIB's [`super::label_space::LabelSpace`]. The RIB replies
-    /// synchronously with a `RibRx::LabelBlock`. Used by BGP for its
-    /// per-VRF, per-EVI, ESI, VPWS and transit labels.
-    LabelBlockRequest {
-        proto: String,
-        size: u32,
-    },
-    /// Return a previously-reserved label block `[start, start+size)` to
-    /// the pool — produced by a protocol whose label usage shrank enough
-    /// to free a whole block. `proto_cleanup` is the backstop for a
-    /// proto that exits without releasing.
+    /// Return a label block `[start, start+size)` a protocol took from
+    /// the shared [`super::label_space::LabelSpace`] (BGP's label chunks)
+    /// to the pool, once every label in it is free. `proto_cleanup` is
+    /// the backstop for a proto that exits without releasing.
     LabelBlockRelease {
         proto: String,
         start: u32,
@@ -1373,11 +1365,6 @@ pub struct Rib {
     /// Fires [`Message::ReserveSrBlocks`] when the first retired SRGB is
     /// due.
     pub retired_srgb_timer: Option<Timer>,
-    /// Label block requests the label space could not serve, by protocol,
-    /// with their size: served once labels are freed or the dynamic range
-    /// grows (`retry_label_block_requests`). The requester (BGP) sends no
-    /// other while one is unanswered.
-    pub waiting_block_requests: BTreeMap<String, u32>,
 
     /// Debounce interval (seconds) before a queued FIB modification triggers
     /// nexthop resolution. Configurable so an operator can tune for their
@@ -1515,7 +1502,6 @@ impl Rib {
             rib_sync_timer: None,
             reserved_srgbs: Vec::new(),
             retired_srgbs: Vec::new(),
-            waiting_block_requests: BTreeMap::new(),
             retired_srgb_timer: None,
             rib_sync_interval: DEFAULT_RIB_SYNC_INTERVAL_SEC,
             sr0_owned: false,
@@ -1582,50 +1568,6 @@ impl Rib {
                 nh,
                 resolution,
             });
-        }
-    }
-
-    /// Handle `Message::LabelBlockRequest`: reserve a dynamic label
-    /// block for `proto` and reply with it. A request the dynamic range
-    /// has no room for waits, unanswered, until labels are freed or the
-    /// range grows (`retry_label_block_requests`); the requester degrades
-    /// to label-less meanwhile and sends no other. A missing subscriber
-    /// returns the block rather than stranding it.
-    pub(super) fn label_block_request(&mut self, proto: String, size: u32) {
-        let block = self.label_space.lock().alloc(&proto, size);
-        match block {
-            Some(block) => self.label_block_reply(&proto, block),
-            None => {
-                tracing::warn!(%proto, size, "label block request: dynamic pool exhausted; waiting");
-                self.waiting_block_requests.insert(proto, size);
-            }
-        }
-    }
-
-    fn label_block_reply(&mut self, proto: &str, block: LabelBlock) {
-        let (start, size) = (block.start, block.end - block.start);
-        if let Some(sub) = self.client_registry.subscriber_for_proto(proto) {
-            let _ = sub.rib_rx_tx.send(RibRx::LabelBlock { start, size });
-        } else {
-            self.label_space.lock().release(proto, start, size);
-        }
-    }
-
-    /// Serve the waiting block requests there is room for now: after
-    /// labels are freed, SR blocks change, or a commit (which may have
-    /// grown the dynamic range).
-    pub(super) fn retry_label_block_requests(&mut self) {
-        for (proto, size) in std::mem::take(&mut self.waiting_block_requests) {
-            let block = self.label_space.lock().alloc(&proto, size);
-            match block {
-                Some(block) => {
-                    tracing::info!(%proto, size, start = block.start, "label block request served after waiting");
-                    self.label_block_reply(&proto, block);
-                }
-                None => {
-                    self.waiting_block_requests.insert(proto, size);
-                }
-            }
         }
     }
 
@@ -2779,8 +2721,6 @@ impl Rib {
         // Reclaim any dynamic label blocks the protocol held — done
         // before the rtype gate so it covers every requester.
         self.label_space.lock().release_all(&proto);
-        // Nobody is left to answer.
-        self.waiting_block_requests.remove(&proto);
         // Its blocks' labels may be what a local pool was missing.
         self.notify_label_events();
 
@@ -3401,9 +3341,6 @@ impl Rib {
             }
             Message::NexthopUnregister { proto, nh, vrf_id } => {
                 self.nht.unregister(&proto, vrf_id, nh);
-            }
-            Message::LabelBlockRequest { proto, size } => {
-                self.label_block_request(proto, size);
             }
             Message::LabelBlockRelease { proto, start, size } => {
                 self.label_space.lock().release(&proto, start, size);
@@ -5559,8 +5496,8 @@ impl Rib {
                 self.static_vrf_v6.commit(&self.tx);
                 self.mpls_config.commit(self.tx.clone());
                 // The commit may have grown the dynamic range
-                // (`ConfigManager::commit` applies it): serve a waiting
-                // block request, and tell a starved BGP label chunk.
+                // (`ConfigManager::commit` applies it): tell an owner
+                // whose label chunk found it full.
                 self.notify_label_events();
                 self.block_config.commit(self.tx.clone());
                 self.locator_config.commit(self.tx.clone());
@@ -6012,8 +5949,6 @@ impl Rib {
     /// holder that a configured SID claimed its label (`LabelRevoked`), a
     /// claimant that it now has the label it claimed (`LabelGranted`).
     pub(super) fn notify_label_events(&mut self) {
-        // Labels were freed: a waiting block request may fit now.
-        self.retry_label_block_requests();
         let (starved, revoked, granted) = {
             let mut space = self.label_space.lock();
             (
@@ -7194,32 +7129,19 @@ mod label_space_tests {
         rx
     }
 
-    /// Ask for a block for "bgp" and return the reply, skipping the
-    /// subscribe-time dump.
-    async fn request(
-        rib: &mut Rib,
-        rx: &mut UnboundedReceiver<RibRx>,
-        size: u32,
-    ) -> Option<(u32, u32)> {
-        let msg = Message::LabelBlockRequest {
-            proto: "bgp".to_string(),
-            size,
-        };
-        rib.process_msg(msg, RT_TABLE_MAIN).await;
-        while let Ok(reply) = rx.try_recv() {
-            if let RibRx::LabelBlock { start, size } = reply {
-                return Some((start, size));
-            }
-        }
-        None
+    /// Take a block for "bgp" from the label space, as BGP's label chunks
+    /// do.
+    fn request(rib: &mut Rib, size: u32) -> Option<(u32, u32)> {
+        let block = rib.label_space.lock().alloc("bgp", size)?;
+        Some((block.start, block.end - block.start))
     }
 
     #[tokio::test]
     async fn bgp_label_blocks_come_from_24000_up() {
         let mut rib = Rib::new(false).expect("rib");
-        let mut rx = subscribe_bgp(&mut rib, 1);
-        assert_eq!(request(&mut rib, &mut rx, 1024).await, Some((24000, 1024)));
-        assert_eq!(request(&mut rib, &mut rx, 1024).await, Some((25024, 1024)));
+        let _rx = subscribe_bgp(&mut rib, 1);
+        assert_eq!(request(&mut rib, 1024), Some((24000, 1024)));
+        assert_eq!(request(&mut rib, 1024), Some((25024, 1024)));
     }
 
     /// A deleted block's SRGB stays reserved for the Prefix-SID move hold
@@ -7227,7 +7149,7 @@ mod label_space_tests {
     #[tokio::test(start_paused = true)]
     async fn a_configured_sr_block_is_stepped_around_until_deleted() {
         let mut rib = Rib::new(false).expect("rib");
-        let mut rx = subscribe_bgp(&mut rib, 1);
+        let _rx = subscribe_bgp(&mut rib, 1);
         let config = BlockConfig {
             global_start: Some(24500),
             global_range: Some(1000),
@@ -7238,26 +7160,26 @@ mod label_space_tests {
             config,
         };
         rib.process_msg(add, RT_TABLE_MAIN).await;
-        assert_eq!(request(&mut rib, &mut rx, 1024).await, Some((25500, 1024)));
+        assert_eq!(request(&mut rib, 1024), Some((25500, 1024)));
         let del = Message::BlockDel {
             name: "core".to_string(),
         };
         rib.process_msg(del, RT_TABLE_MAIN).await;
-        assert_eq!(request(&mut rib, &mut rx, 1024).await, Some((26524, 1024)));
+        assert_eq!(request(&mut rib, 1024), Some((26524, 1024)));
         tokio::time::advance(crate::spf::ilm_hold::SID_MOVE_HOLD).await;
         rib.process_msg(Message::ReserveSrBlocks, RT_TABLE_MAIN)
             .await;
-        assert_eq!(request(&mut rib, &mut rx, 1024).await, Some((24000, 1024)));
+        assert_eq!(request(&mut rib, 1024), Some((24000, 1024)));
     }
 
     #[tokio::test]
     async fn cleanup_returns_a_protocols_blocks() {
         let mut rib = Rib::new(false).expect("rib");
-        let mut rx = subscribe_bgp(&mut rib, 1);
-        assert_eq!(request(&mut rib, &mut rx, 1024).await, Some((24000, 1024)));
+        let _rx = subscribe_bgp(&mut rib, 1);
+        assert_eq!(request(&mut rib, 1024), Some((24000, 1024)));
         rib.proto_cleanup("bgp".to_string()).await;
-        let mut rx = subscribe_bgp(&mut rib, 2);
-        assert_eq!(request(&mut rib, &mut rx, 1024).await, Some((24000, 1024)));
+        let _rx = subscribe_bgp(&mut rib, 2);
+        assert_eq!(request(&mut rib, 1024), Some((24000, 1024)));
     }
 }
 
@@ -7682,7 +7604,7 @@ mod ilm_owner_tests {
 }
 
 #[cfg(test)]
-mod block_request_tests {
+mod label_wake_tests {
     use super::*;
     use crate::rib::client::ProtoId;
 
@@ -7695,43 +7617,6 @@ mod block_request_tests {
         (rib, rx)
     }
 
-    /// The blocks granted so far.
-    fn granted(rx: &mut UnboundedReceiver<RibRx>) -> Vec<(u32, u32)> {
-        std::iter::from_fn(|| rx.try_recv().ok())
-            .filter_map(|msg| match msg {
-                RibRx::LabelBlock { start, size } => Some((start, size)),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// A request the range has no room for waits, unanswered, and is
-    /// served once a commit grows the range. It used to be dropped, and
-    /// BGP, which sends no other while one is unanswered, stayed without
-    /// labels until restarted.
-    #[tokio::test]
-    async fn a_waiting_block_request_is_served_when_the_range_grows() {
-        let (mut rib, mut rx) = rib_with_bgp();
-        rib.label_space.lock().set_dynamic(24000, 25023);
-        rib.label_block_request("bgp".to_string(), 1024);
-        assert_eq!(granted(&mut rx), vec![(24000, 1024)]);
-        rib.label_block_request("bgp".to_string(), 1024);
-        assert!(granted(&mut rx).is_empty(), "no room, no answer");
-
-        // A commit that does not grow the range leaves it waiting.
-        rib.process_cm_msg(ConfigRequest::new(Vec::new(), ConfigOp::CommitEnd))
-            .await;
-        assert!(granted(&mut rx).is_empty());
-
-        // `ConfigManager::commit` grows the range, then the RIB sees the
-        // commit end.
-        rib.label_space.lock().set_dynamic(24000, 26047);
-        rib.process_cm_msg(ConfigRequest::new(Vec::new(), ConfigOp::CommitEnd))
-            .await;
-        assert_eq!(granted(&mut rx), vec![(25024, 1024)]);
-        assert!(rib.waiting_block_requests.is_empty());
-    }
-
     /// Whether BGP was told that room returned.
     fn told(rx: &mut UnboundedReceiver<RibRx>) -> bool {
         std::iter::from_fn(|| rx.try_recv().ok()).any(|msg| matches!(msg, RibRx::LocalLabelsFreed))
@@ -7740,8 +7625,7 @@ mod block_request_tests {
     /// An owner that found the dynamic range full (a BGP label chunk) is
     /// told when a commit ends — the commit may have grown the range —
     /// and when a segment-routing block goes, not only when labels are
-    /// released: BGP holding its block already, nothing else would wake
-    /// it.
+    /// released: nothing else would wake it.
     #[tokio::test]
     async fn a_starved_owner_is_told_at_commit_end_and_on_a_block_change() {
         let (mut rib, mut rx) = rib_with_bgp();
@@ -7757,53 +7641,5 @@ mod block_request_tests {
         rib.label_space.lock().starve(bgp);
         rib.reserve_sr_blocks();
         assert!(told(&mut rx), "on a block change");
-    }
-
-    /// A block given back makes room for a waiting request.
-    #[tokio::test]
-    async fn a_released_block_serves_a_waiting_request() {
-        let (mut rib, mut rx) = rib_with_bgp();
-        rib.label_space.lock().set_dynamic(24000, 25023);
-        let other = rib.label_space.lock().alloc("ldp", 1024).unwrap();
-        rib.label_block_request("bgp".to_string(), 1024);
-        assert!(granted(&mut rx).is_empty());
-        rib.process_msg(
-            Message::LabelBlockRelease {
-                proto: "ldp".to_string(),
-                start: other.start,
-                size: 1024,
-            },
-            0,
-        )
-        .await;
-        assert_eq!(granted(&mut rx), vec![(24000, 1024)]);
-    }
-
-    /// So does a segment-routing block removed from the range (an SRLB:
-    /// an SRGB is held a while for its Prefix-SIDs). A protocol that goes
-    /// away takes its waiting request with it.
-    #[tokio::test]
-    async fn a_removed_sr_block_serves_a_waiting_request_until_its_owner_goes() {
-        let (mut rib, mut rx) = rib_with_bgp();
-        rib.label_space.lock().set_dynamic(24000, 25023);
-        rib.blocks.insert(
-            "core".to_string(),
-            Block {
-                global: None,
-                local: Some(LabelBlock::new(24000, 512)),
-            },
-        );
-        rib.reserve_sr_blocks();
-        rib.label_block_request("bgp".to_string(), 1024);
-        assert!(granted(&mut rx).is_empty());
-        rib.blocks.remove("core");
-        rib.reserve_sr_blocks();
-        assert_eq!(granted(&mut rx), vec![(24000, 1024)]);
-
-        rib.label_block_request("bgp".to_string(), 1024);
-        assert!(granted(&mut rx).is_empty(), "the range is full");
-        rib.proto_cleanup("bgp".to_string()).await;
-        assert!(rib.waiting_block_requests.is_empty());
-        assert!(granted(&mut rx).is_empty(), "nobody to answer");
     }
 }

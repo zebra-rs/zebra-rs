@@ -198,19 +198,10 @@ impl RibSubscriber {
         });
     }
 
-    /// Request a dynamic MPLS label block of `size` labels for `proto`
-    /// from the RIB label manager. The RIB replies asynchronously with
-    /// a `RibRx::LabelBlock` on `proto`'s subscriber channel.
-    pub fn send_label_block_request(&self, proto: &str, size: u32) {
-        let _ = self.rib_tx.send(crate::rib::Message::LabelBlockRequest {
-            proto: proto.to_string(),
-            size,
-        });
-    }
-
-    /// Return a previously-granted label block `[start, start+size)` to
-    /// the RIB label manager — used when a protocol's label usage
-    /// shrinks enough to free a whole block.
+    /// Return a label block `[start, start+size)` taken from the shared
+    /// label space (BGP's service-label chunks) to the RIB, on the same
+    /// channel as [`Self::send_ilm_del`], so the RIB frees it behind the
+    /// ILM deletions for its labels.
     pub fn send_label_block_release(&self, proto: &str, start: u32, size: u32) {
         let _ = self.rib_tx.send(crate::rib::Message::LabelBlockRelease {
             proto: proto.to_string(),

@@ -107,11 +107,12 @@ pub struct VpwsService {
     /// service is re-pointed; state shows `vni-conflict`.
     pub vni_conflict: Option<String>,
     /// The MPLS service label our Type-1 advertises under `encapsulation
-    /// mpls` — this PE's decap identity for the service, drawn from the
-    /// same dynamic block as VRF and EVI labels (the `sids`/`local_vni`
-    /// analog). `None` under other encapsulations, or while no block
-    /// space is available (the service then advertises label 0 until the
-    /// grant lands and `label_block_arrived` reconciles it).
+    /// mpls` — this PE's decap identity for the service, drawn from
+    /// BGP's service labels like VRF and EVI labels (the
+    /// `sids`/`local_vni` analog). `None` under other encapsulations, or
+    /// while the dynamic range is full (the service then advertises label
+    /// 0 until room returns and `service_labels_reconcile` reconciles
+    /// it).
     pub local_label: Option<u32>,
     /// The remote's L2 MTU when a matching Type-1 was **rejected** for an
     /// MTU mismatch — the service shows `mtu-mismatch` instead of `up`.

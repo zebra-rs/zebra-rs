@@ -23,12 +23,6 @@ use std::net::{Ipv4Addr, SocketAddr};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
-/// Size of the dynamic MPLS label block BGP requests from the RIB
-/// label manager at startup, for per-VRF L3VPN labels. One label per
-/// VRF, so 1024 covers any realistic deployment; on-demand extension
-/// for larger fleets is a follow-up.
-const VRF_LABEL_BLOCK_SIZE: u32 = 1024;
-
 /// Map a `/clear/bgp[/<afi>]/neighbor[/soft[/in|out]]` path (from
 /// zebra-bgp-clear.yang) to the (AFI/SAFI filter, op) pair the BGP
 /// runtime understands. The AFI segment is optional — the AFI-less
@@ -1227,23 +1221,16 @@ pub struct Bgp {
     /// inbound dispatcher routes route installs into
     /// `vrf_tables[table_id]`.
     pub rib_subscriber: crate::config::RibSubscriber,
-    /// Per-VRF MPLS label allocator. Hands out one label per
-    /// `spawn_bgp_vrf` call; reclaims at despawn. The label gets
-    /// stamped onto every `BgpGlobalMsg::Export` the VRF emits and
-    /// drives the matching ILM Decap install on the PE.
-    /// Per-VRF label allocator, bounded to the dynamic block the RIB
-    /// label manager hands BGP at startup. `None` until that
-    /// `RibRx::LabelBlock` arrives — VRFs spawned before then take
-    /// label 0 (degraded) and are reconciled on arrival.
-    pub vrf_label_alloc: Option<super::vrf::VrfLabelAllocator>,
-    /// True while a `LabelBlockRequest` is outstanding — dedups the
-    /// initial request and any on-demand extension so a burst of
-    /// label-less VRFs asks the RIB label manager for only one block.
-    vrf_label_request_pending: bool,
-    // The per-prefix LU/VPN transit labels live on `BgpShard::labels`,
-    // minted from the shard's own chunks of the RIB's label space;
-    // `vrf_label_alloc` above serves only the per-VRF, EVI, ESI and VPWS
-    // labels.
+    /// The per-object MPLS labels: one per VRF (stamped onto every
+    /// `BgpGlobalMsg::Export` the VRF emits, and the PE's decap ILM), per
+    /// EVI, per Ethernet Segment (its ESI label) and per VPWS service.
+    /// Taken at configuration from chunks of the RIB's label space
+    /// (docs/design/mpls-label-allocation.md §5.2), so an object has its
+    /// label at once; with the dynamic range full it goes without (a VRF
+    /// spawns with label 0) until room returns
+    /// (`service_labels_reconcile`). The per-prefix LU/VPN transit labels
+    /// live on `BgpShard::labels`, in chunks of their own.
+    pub service_labels: super::label_chunks::LabelChunks,
     /// Configured SRv6 locator name (`router bgp segment-routing
     /// srv6 locator <name>`). When set, BGP watches this locator on the
     /// RIB and (in a follow-up) carves per-VRF End.DT46 service SIDs
@@ -1497,6 +1484,11 @@ impl Bgp {
             )),
             ..BgpShard::default()
         };
+        let service_labels = super::label_chunks::LabelChunks::new(
+            rib_subscriber.label_space().clone(),
+            "bgp",
+            ctx.rib.proto_id(),
+        );
         let mut bgp = Self {
             graceful_restart: super::peer::GracefulRestartGlobal::default(),
             graceful_restart_disable: false,
@@ -1577,8 +1569,7 @@ impl Bgp {
             vrf_registry: BTreeMap::new(),
             rib_known_vrfs: BTreeMap::new(),
             rib_subscriber,
-            vrf_label_alloc: None,
-            vrf_label_request_pending: false,
+            service_labels,
             srv6_locator_name: None,
             srv6_locator_rx,
             srv6_locator: None,
@@ -3026,22 +3017,10 @@ impl Bgp {
                     };
                     self.rib_subscriber.send_ilm_del(handle.label, entry);
                 }
-                // Return the label to the pool so a future VRF
-                // can pick it back up. Reclaim before the handle
-                // drops — handle drop aborts the task but doesn't
-                // know about the allocator.
-                let released: Vec<(u32, u32)> = if let Some(alloc) = self.vrf_label_alloc.as_mut() {
-                    alloc.free(handle.label);
-                    // A shrinking VRF count can free a whole block;
-                    // return it to the RIB label manager.
-                    alloc.reclaim_free_blocks()
-                } else {
-                    Vec::new()
-                };
-                for (start, end) in released {
-                    self.rib_subscriber
-                        .send_label_block_release("bgp", start, end - start);
-                }
+                // Return the label so a future VRF can pick it back
+                // up; a chunk it drains goes back to the RIB at the
+                // event's label upkeep, behind the ILM deletion above.
+                self.free_service_labels(vec![handle.label]);
                 // Withdraw the SRv6 End.DT46 service SID and return its
                 // function to the pool (srv6-mode VRFs only).
                 if let Some((addr, function)) = handle.srv6_sid {
@@ -5333,18 +5312,18 @@ impl Bgp {
             } => {
                 self.nht_handle_update(vrf_id, nh, &resolution);
             }
-            RibRx::LabelBlock { start, size } => {
-                self.label_block_arrived(start, size);
-            }
             // Labels were freed, or a commit or block change made room,
             // after a Binding-SID claim was refused (a configured
-            // Adjacency-SID had the label) or a transit label found the
-            // dynamic range full: claim again, and label the transit rows
-            // that went without.
+            // Adjacency-SID had the label), or a service or transit label
+            // found the dynamic range full: claim again, and label what
+            // went without.
             RibRx::LocalLabelsFreed => {
                 self.local_rib.sr_policy.labels_freed();
                 let mut top = self.nht_install_top();
                 super::route::sr_policy_sync_reselected(&mut top);
+                if self.service_labels.take_starved() {
+                    self.service_labels_reconcile();
+                }
                 if self.shard.labels.take_starved() {
                     self.reconcile_transit_labels(true);
                 }
@@ -5605,29 +5584,13 @@ impl Bgp {
         }
     }
 
-    /// The RIB label manager granted BGP a dynamic block `[start,
-    /// start+size)`. Bind the per-VRF allocator to it, then reconcile
-    /// any VRF that spawned label-less before the block arrived:
-    /// give it a real label and respawn so it stamps exports and
-    /// installs its decap ILM.
-    fn label_block_arrived(&mut self, start: u32, size: u32) {
-        self.vrf_label_request_pending = false;
-        match self.vrf_label_alloc.as_mut() {
-            // First grant binds the allocator; later grants extend it
-            // (on-demand growth past the initial block).
-            Some(alloc) => alloc.extend(start, start + size),
-            None => {
-                self.vrf_label_alloc =
-                    Some(super::vrf::VrfLabelAllocator::bounded(start, start + size))
-            }
-        }
-        bgp_label_trace!(
-            self.tracing,
-            start,
-            size,
-            "bgp: dynamic MPLS label block granted"
-        );
-
+    /// Room returned after a service label could not be had, the dynamic
+    /// range full: give what went without its label. A VRF that spawned
+    /// with label 0 gets one and respawns, so it stamps exports and
+    /// installs its decap ILM; EVIs, Ethernet Segments and VPWS services
+    /// reconcile theirs. What still finds no label waits for the next
+    /// room.
+    pub(super) fn service_labels_reconcile(&mut self) {
         let unlabelled: Vec<String> = self
             .vrf_registry
             .iter()
@@ -5637,19 +5600,14 @@ impl Bgp {
         for name in unlabelled {
             self.relabel_vrf(&name);
         }
-        // EVPN-over-MPLS instances draw from the same block, and an EVI
-        // configured before the grant is sitting label-less too.
+        // EVPN-over-MPLS instances draw from the same chunks, and an EVI
+        // configured while the range was full is sitting label-less too.
         self.evi_reconcile();
         // ... as do the Ethernet Segments' ESI labels (RFC 7432 §8.3).
         self.es_label_reconcile();
-        // So do VPWS E-Lines: a service configured before the grant
-        // originated its Type-1 with label 0, which no remote binds.
+        // So do VPWS E-Lines: a service configured meanwhile originated
+        // its Type-1 with label 0, which no remote binds.
         self.vpws_label_drain();
-        // The reconcile may have outgrown this block too (a large VRF
-        // fleet). If any VRF is still label-less, ask for another.
-        if self.vrf_registry.values().any(|h| h.label == 0) {
-            self.request_label_block();
-        }
     }
 
     /// Label upkeep after each event. A transit label freed while another
@@ -5659,7 +5617,15 @@ impl Bgp {
     /// event's ILM messages on the RIB client channel, so a freed label's
     /// `IlmDel` precedes its reuse, and reuse comes first, before a chunk
     /// it would have kept could go back.
+    ///
+    /// The service labels follow the same rule, on their own channel: a
+    /// service label freed while one went without labels that object now,
+    /// and drained service chunks go back on `rib_subscriber`, the
+    /// channel their ILMs (VRF and EVI decap) travel.
     pub(super) fn label_chunk_upkeep(&mut self) {
+        if self.service_labels.take_room() {
+            self.service_labels_reconcile();
+        }
         if self.shard.labels.take_room() {
             self.reconcile_transit_labels(true);
         }
@@ -5672,6 +5638,17 @@ impl Bgp {
     /// only behind them: a chunk handed to another holder never meets a
     /// stale swap ILM of ours.
     fn release_drained_label_chunks(&mut self) {
+        for block in self.service_labels.take_drained() {
+            let size = block.end - block.start;
+            bgp_label_trace!(
+                self.tracing,
+                start = block.start,
+                size,
+                "bgp: service label chunk returned"
+            );
+            self.rib_subscriber
+                .send_label_block_release("bgp", block.start, size);
+        }
         for block in self.shard.labels.take_drained() {
             let size = block.end - block.start;
             bgp_label_trace!(
@@ -5686,18 +5663,6 @@ impl Bgp {
                 size,
             });
         }
-    }
-
-    /// Send a `LabelBlockRequest` to the RIB label manager unless one is
-    /// already outstanding. Dedup keeps a burst of label-less VRFs from
-    /// each requesting a block.
-    pub(super) fn request_label_block(&mut self) {
-        if self.vrf_label_request_pending {
-            return;
-        }
-        self.vrf_label_request_pending = true;
-        self.rib_subscriber
-            .send_label_block_request("bgp", VRF_LABEL_BLOCK_SIZE);
     }
 
     /// Bring every configured EVPN Instance's MPLS service label and decap
@@ -5718,16 +5683,14 @@ impl Bgp {
         let want_labels = self.evpn_encap.is_mpls();
         let evis: Vec<u32> = self.evpn_evis.keys().copied().collect();
         let mut freed = Vec::new();
-        let mut short = false;
         let mut changed = false;
         for evi in evis {
             let current = self.evpn_evis.get(&evi).and_then(|e| e.label);
             match (want_labels, current) {
                 (true, None) => {
-                    let Some(label) = self.vrf_label_alloc.as_mut().and_then(|a| a.alloc()) else {
-                        // No block bound yet, or this one is spent. Ask for
-                        // (more) space; `label_block_arrived` calls us back.
-                        short = true;
+                    let Some(label) = self.service_labels.alloc() else {
+                        // The range is full: `service_labels_reconcile`
+                        // calls us back once room returns.
                         continue;
                     };
                     if let Some(cfg) = self.evpn_evis.get_mut(&evi) {
@@ -5747,13 +5710,10 @@ impl Bgp {
                 _ => {}
             }
         }
-        self.free_evi_labels(freed);
-        if short {
-            self.request_label_block();
-        }
+        self.free_service_labels(freed);
         // A label that just appeared (or went away) changes what every L2
         // route for that EVI puts on the wire, so re-originate. Routes
-        // originated before the block landed carry label 0; this is what
+        // originated while the range was full carry label 0; this is what
         // replaces them.
         if changed {
             self.evpn_reoriginate_l2();
@@ -5777,18 +5737,17 @@ impl Bgp {
 
     /// Bring every configured Ethernet Segment's ESI label (RFC 7432 §8.3)
     /// in line with the encapsulation: under `encapsulation mpls` each
-    /// segment with an ESI draws one from the dynamic block — advertised in
+    /// segment with an ESI draws one from the service labels — advertised in
     /// its per-ES A-D's ESI Label EC, teed to cradle for decap — and hands
     /// it back under any other encapsulation (VXLAN and SRv6 identify the
     /// ingress PE by the outer source instead). Idempotent; a segment
     /// whose label appears or goes re-originates its ES routes and re-syncs
-    /// the tee. Called from the ESI/encapsulation config handlers and from
-    /// a label-block grant.
+    /// the tee. Called from the ESI/encapsulation config handlers and when
+    /// room returns.
     pub(super) fn es_label_reconcile(&mut self) {
         let want = self.evpn_encap.is_mpls();
         let names: Vec<String> = self.ethernet_segments.keys().cloned().collect();
         let mut freed = Vec::new();
-        let mut short = false;
         let mut changed = Vec::new();
         for name in names {
             let Some(es) = self.ethernet_segments.get(&name) else {
@@ -5796,8 +5755,7 @@ impl Bgp {
             };
             match (want && es.esi.is_some(), es.esi_label) {
                 (true, None) => {
-                    let Some(label) = self.vrf_label_alloc.as_mut().and_then(|a| a.alloc()) else {
-                        short = true;
+                    let Some(label) = self.service_labels.alloc() else {
                         continue;
                     };
                     if let Some(es) = self.ethernet_segments.get_mut(&name) {
@@ -5815,10 +5773,7 @@ impl Bgp {
                 _ => {}
             }
         }
-        self.free_evi_labels(freed);
-        if short {
-            self.request_label_block();
-        }
+        self.free_service_labels(freed);
         if changed.is_empty() {
             return;
         }
@@ -5847,7 +5802,7 @@ impl Bgp {
             .get_mut(name)
             .and_then(|es| es.esi_label.take())
         {
-            self.free_evi_labels(vec![label]);
+            self.free_service_labels(vec![label]);
         }
     }
 
@@ -5885,10 +5840,10 @@ impl Bgp {
 
     /// Allocate (or return the memoized) MPLS service label for VPWS
     /// service `name` — advertised in the Type-1's label field under
-    /// `encapsulation mpls`, drawn from the same dynamic block as VRF and
-    /// EVI labels. `None` when no block space is available yet: a block
-    /// request goes out and `label_block_arrived` reconciles the service
-    /// once the grant lands.
+    /// `encapsulation mpls`, drawn from the service labels like VRF and
+    /// EVI labels. `None` with the dynamic range full:
+    /// `service_labels_reconcile` reconciles the service once room
+    /// returns.
     pub(super) fn alloc_vpws_label(&mut self, name: &str) -> Option<u32> {
         if let Some(label) = self
             .local_rib
@@ -5899,22 +5854,14 @@ impl Bgp {
         {
             return Some(label);
         }
-        match self.vrf_label_alloc.as_mut().and_then(|a| a.alloc()) {
-            Some(label) => {
-                if let Some(svc) = self.local_rib.evpn_vpws.services.get_mut(name) {
-                    svc.local_label = Some(label);
-                }
-                Some(label)
-            }
-            None => {
-                self.request_label_block();
-                None
-            }
+        let label = self.service_labels.alloc()?;
+        if let Some(svc) = self.local_rib.evpn_vpws.services.get_mut(name) {
+            svc.local_label = Some(label);
         }
+        Some(label)
     }
 
-    /// Release VPWS service `name`'s MPLS service label back to the shared
-    /// pool (releasing any block that fully empties).
+    /// Release VPWS service `name`'s MPLS service label.
     pub(super) fn free_vpws_label(&mut self, name: &str) {
         if let Some(label) = self
             .local_rib
@@ -5923,12 +5870,12 @@ impl Bgp {
             .get_mut(name)
             .and_then(|s| s.local_label.take())
         {
-            self.free_evi_labels(vec![label]);
+            self.free_service_labels(vec![label]);
         }
     }
 
     /// Reconcile every VPWS service still label-less under `encapsulation
-    /// mpls` — the label-block-grant callback's VPWS half.
+    /// mpls` — `service_labels_reconcile`'s VPWS half.
     fn vpws_label_drain(&mut self) {
         if !self.evpn_encap.is_mpls() {
             return;
@@ -5952,26 +5899,15 @@ impl Bgp {
             return;
         };
         self.evi_ilm_uninstall(evi, label);
-        self.free_evi_labels(vec![label]);
+        self.free_service_labels(vec![label]);
     }
 
-    /// Return EVI labels to the shared pool, releasing any block that fully
-    /// empties (mirrors the per-VRF despawn path).
-    fn free_evi_labels(&mut self, labels: Vec<u32>) {
-        if labels.is_empty() {
-            return;
-        }
-        let released: Vec<(u32, u32)> = if let Some(alloc) = self.vrf_label_alloc.as_mut() {
-            for label in labels {
-                alloc.free(label);
-            }
-            alloc.reclaim_free_blocks()
-        } else {
-            Vec::new()
-        };
-        for (start, end) in released {
-            self.rib_subscriber
-                .send_label_block_release("bgp", start, end - start);
+    /// Give back service labels (VRF, EVI, ESI, VPWS). A chunk they drain
+    /// goes back to the RIB at the event's label upkeep, behind the ILM
+    /// deletions sent for them; label 0 (none) is ignored.
+    fn free_service_labels(&mut self, labels: Vec<u32>) {
+        for label in labels {
+            self.service_labels.free(label);
         }
     }
 
@@ -5996,27 +5932,22 @@ impl Bgp {
         self.rib_subscriber.send_ilm_del(label, entry);
     }
 
-    /// Allocate a per-VRF label from the dynamic block(s). When no block
-    /// is bound yet, or every block is spent, request (more) space and
-    /// return 0 — the VRF spawns label-less and is reconciled by
-    /// `label_block_arrived` once the grant lands.
+    /// A per-VRF label from the service labels, or 0 with the dynamic
+    /// range full: the VRF spawns label-less and
+    /// `service_labels_reconcile` relabels it once room returns.
     fn alloc_vrf_label(&mut self) -> u32 {
-        if let Some(label) = self.vrf_label_alloc.as_mut().and_then(|a| a.alloc()) {
-            return label;
-        }
-        self.request_label_block();
-        0
+        self.service_labels.alloc().unwrap_or(0)
     }
 
     /// Respawn `name`'s per-VRF task with a freshly-allocated label.
-    /// Used to fix up a VRF that spawned with label 0 (the block hadn't
-    /// arrived yet). Mirrors [`Self::maybe_respawn_vrf_with_kernel_ctx`]
+    /// Used to fix up a VRF that spawned with label 0 (the dynamic range
+    /// was full). Mirrors [`Self::maybe_respawn_vrf_with_kernel_ctx`]
     /// but swaps the label rather than the `ProtoContext`.
     fn relabel_vrf(&mut self, name: &str) {
         let Some(cfg) = self.vrfs.get(name).cloned() else {
             return;
         };
-        let Some(label) = self.vrf_label_alloc.as_mut().and_then(|a| a.alloc()) else {
+        let Some(label) = self.service_labels.alloc() else {
             return;
         };
         let kernel = self.rib_known_vrfs.get(name).cloned();
@@ -7507,12 +7438,6 @@ impl Bgp {
     }
 
     pub async fn event_loop(&mut self) {
-        // Request our dynamic MPLS label block from the RIB label
-        // manager up front. The reply (`RibRx::LabelBlock`) binds
-        // `vrf_label_alloc` before per-VRF tasks start asking for
-        // labels; a VRF spawned before it lands takes label 0 and is
-        // reconciled on arrival.
-        self.request_label_block();
         if let Err(err) = self.listen().await {
             self.listen_err = Some(err);
         }

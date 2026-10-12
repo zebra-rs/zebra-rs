@@ -15189,12 +15189,12 @@ pub fn route_update_ipv6(
         if let Some(local_v6) = self_v6 {
             // A rewritten next-hop on a RECEIVED MPLS VPNv6 row needs our
             // transit label behind it (review finding #8). Without one — the
-            // dynamic block not bound yet — the only label we could send is
+            // dynamic range full — the only label we could send is
             // the received one, which the peer would push toward us and we
             // hold no ILM for: a black hole. Withhold the row instead (the
             // fan-out withdraws it from a peer that holds it);
-            // `label_block_arrived` runs the transit reconcile, which labels
-            // the row and re-advertises it. SRv6 rows carry no MPLS service
+            // the transit reconcile run when room returns labels the row and
+            // re-advertises it. SRv6 rows carry no MPLS service
             // label and keep the PE locator as next-hop; originated rows
             // advertise their own VRF label. Checked here, once the rewrite
             // is certain: with no self address the builder keeps the remote
@@ -20845,9 +20845,9 @@ impl Bgp {
         }
         // Per the afi-safi encapsulation: VXLAN advertises the service
         // VNI (the `vni` leaf, default the EVI); MPLS advertises a
-        // per-service label from the shared dynamic block (label 0 until
-        // the block grant lands — no remote binds it, and
-        // `label_block_arrived` re-originates); SRv6 advertises the
+        // per-service label from BGP's service labels (label 0 while the
+        // dynamic range is full — no remote binds it, and
+        // `service_labels_reconcile` re-originates); SRv6 advertises the
         // End.DX2/DX2V Prefix-SID.
         let local_vni = self.evpn_encap.is_vxlan().then(|| vni.unwrap_or(evi));
         let local_label = if self.evpn_encap.is_mpls() {
