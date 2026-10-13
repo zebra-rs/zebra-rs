@@ -3139,6 +3139,13 @@ impl LocalRibMupTable {
 pub struct LocalRibFlowspecTable {
     pub cands: BTreeMap<FlowspecNlri, Vec<BgpRib>>,
     pub selected: BTreeMap<FlowspecNlri, BgpRib>,
+    /// The selected flow specs the last re-advertise decision
+    /// (`route_flowspec_propagate`) found valid and advertised: what the
+    /// session-up dump sends a peer that comes up later, so it gets what
+    /// the other peers were sent (review finding #27). Validity reads the
+    /// source neighbor's `flowspec validation` setting, which the dump
+    /// cannot reach.
+    pub advertised: BTreeSet<FlowspecNlri>,
 }
 
 impl LocalRibFlowspecTable {
@@ -3818,7 +3825,7 @@ impl LocalRib {
 
     // Flow Specification dispatch --------------------------------------------
 
-    fn flowspec_table_mut(&mut self, afi: Afi) -> &mut LocalRibFlowspecTable {
+    pub(super) fn flowspec_table_mut(&mut self, afi: Afi) -> &mut LocalRibFlowspecTable {
         match afi {
             Afi::Ip6 => &mut self.flowspec_v6,
             _ => &mut self.flowspec_v4,
@@ -11974,7 +11981,7 @@ fn srpolicy_reflect(
         let Some(peer) = peers.get_mut_by_idx(ident) else {
             continue;
         };
-        let Some(out_attr) = super::sr_policy::reflect_attr(
+        let Some(mut out_attr) = super::sr_policy::reflect_attr(
             attr,
             source_ibgp,
             source_rid,
@@ -11985,6 +11992,18 @@ fn srpolicy_reflect(
         ) else {
             continue;
         };
+        // The gates every other family's egress applies (review finding
+        // #27): NO_EXPORT / NO_EXPORT_SUBCONFED stay inside the AS (RFC
+        // 1997; `reflect_attr` already held NO_ADVERTISE back), our AS on
+        // the AS_PATH toward an external peer (RFC 4271 §5.1.2), LOCAL_PREF
+        // toward an internal one (§5.1.5).
+        if community_suppresses_advertisement(&out_attr, peer.peer_type) {
+            continue;
+        }
+        ebgp_egress_aspath(&peer.egress_as(), &mut out_attr);
+        if peer.is_ibgp() && out_attr.local_pref.is_none() {
+            out_attr.local_pref = Some(LocalPref::default());
+        }
         let mut update = peer.update_packet();
         update.mp_update = Some(MpReachAttr::SrPolicy {
             afi,
@@ -12208,7 +12227,7 @@ fn bgpls_peer_idents(peers: &PeerMap) -> Vec<usize> {
 /// policy denies: the egress transform, then policy, then the rules
 /// that hold regardless of what policy asked for.
 fn bgpls_out_attr(peer: &mut Peer, base: &BgpAttr, weight: u32) -> Option<BgpAttr> {
-    let mut attr = bgpls_policy_out(peer, bgpls_egress_attr(peer, base), weight)?;
+    let mut attr = bgpls_policy_out(peer, originated_egress_attr(peer, base), weight)?;
     // RFC 4271 §5.1.5: LOCAL_PREF is never sent to an external peer.
     // The egress transform only *adds* it for iBGP, but policy runs
     // afterwards and `set local-preference` does not know the peer
@@ -12565,20 +12584,24 @@ fn entry_matches_bgpls(
     true
 }
 
-/// The egress copy of a locally originated BGP-LS attribute for one
-/// peer: prepend our AS toward an external peer (RFC 4271 §5.1.2) and
-/// supply LOCAL_PREF toward an internal one (§5.1.5).
+/// The egress copy of a locally originated attribute (BGP-LS, SR Policy)
+/// for one peer: a well-known AS_PATH, prepended with our AS toward an
+/// external peer (RFC 4271 §5.1.2), and LOCAL_PREF toward an internal one
+/// (§5.1.5).
 ///
 /// Without this an external collector sees an empty AS_PATH — which a
 /// peer enforcing first-AS rejects outright, as this implementation's
 /// own receive path does — and an internal one sees no LOCAL_PREF.
-fn bgpls_egress_attr(peer: &Peer, base: &BgpAttr) -> BgpAttr {
+fn originated_egress_attr(peer: &Peer, base: &BgpAttr) -> BgpAttr {
     let mut attrs = base.clone();
     if attrs.origin.is_none() {
         attrs.origin = Some(Origin::Igp);
     }
     if attrs.aspath.is_none() {
-        attrs.aspath = Some(As4Path::from(Vec::<u32>::new()));
+        // No segment at all: `As4Path::from(vec![])` holds one AS_SEQUENCE
+        // with no ASNs, which goes on the wire as a zero Path Segment
+        // Length — a malformed AS_PATH (RFC 7606 §7.2).
+        attrs.aspath = Some(As4Path::new());
     }
     ebgp_egress_aspath(&peer.egress_as(), &mut attrs);
     if peer.is_ibgp() && attrs.local_pref.is_none() {
@@ -12857,7 +12880,9 @@ pub(super) fn srpolicy_origin_reach(bgp: &mut Bgp, nlri: SrPolicyNlri, attr: Bgp
             nhop,
             updates: vec![nlri.clone()],
         });
-        update.bgp_attr = Some(attr.clone());
+        // A well-known AS_PATH and LOCAL_PREF per peer: the policy went out
+        // with neither (review finding #27).
+        update.bgp_attr = Some(originated_egress_attr(peer, &attr));
         if let Some(bytes) = update.pop_srpolicy()
             && let Some(ref tx) = peer.packet_tx
         {
@@ -12911,7 +12936,7 @@ pub fn route_sync_srpolicy(peer: &mut Peer, bgp: &BgpTop) {
             nhop: IpAddr::V4(router_id),
             updates: vec![nlri],
         });
-        update.bgp_attr = Some(attr);
+        update.bgp_attr = Some(originated_egress_attr(peer, &attr));
         if let Some(bytes) = update.pop_srpolicy()
             && let Some(ref tx) = peer.packet_tx
         {
@@ -13094,6 +13119,10 @@ fn route_flowspec_propagate(
     peers: &mut PeerMap,
 ) {
     let Some(best) = selected.first() else {
+        bgp.local_rib
+            .flowspec_table_mut(afi)
+            .advertised
+            .remove(nlri);
         route_withdraw_flowspec_to_peers(afi, nlri, peers);
         return;
     };
@@ -13108,18 +13137,28 @@ fn route_flowspec_propagate(
         super::flowspec::flowspec_validate_with_mode(bgp.shard, nlri, best, validation_enabled)
             .is_valid();
     if valid {
+        bgp.local_rib
+            .flowspec_table_mut(afi)
+            .advertised
+            .insert(nlri.clone());
         route_advertise_flowspec_to_peers(afi, nlri, best, bgp, peers);
     } else {
+        bgp.local_rib
+            .flowspec_table_mut(afi)
+            .advertised
+            .remove(nlri);
         route_withdraw_flowspec_to_peers(afi, nlri, peers);
     }
 }
 
 /// Build the per-peer flow spec NLRI + path attributes for a re-advertise.
 /// Returns `None` to suppress the advertisement: split horizon (never
-/// reflect back to the path's source) and iBGP-to-iBGP without route
-/// reflection. eBGP prepends the local AS; iBGP supplies a default
-/// LOCAL_PREF. Flow specs carry no next-hop (RFC 8955 §4.2.2), so the
-/// NEXT_HOP attribute is cleared.
+/// reflect back to the path's source), iBGP-to-iBGP without route
+/// reflection, NO_ADVERTISE / NO_EXPORT (RFC 1997) and an LLGR-stale path
+/// toward a peer without LLGR (RFC 9494 §4.3), as every other family's
+/// builder does (review finding #27). eBGP prepends the local AS; iBGP
+/// supplies a default LOCAL_PREF. Flow specs carry no next-hop (RFC 8955
+/// §4.2.2), so the NEXT_HOP attribute is cleared.
 pub fn route_update_flowspec(
     peer: &mut Peer,
     nlri: &FlowspecNlri,
@@ -13134,6 +13173,11 @@ pub fn route_update_flowspec(
         && rib.typ == BgpRibType::IBGP
         && !peer.is_reflector_client()
         && !rib.from_client
+    {
+        return None;
+    }
+    if community_suppresses_advertisement(&rib.attr, peer.peer_type)
+        || llgr_blocks_advertisement(rib.stale, &peer.cap_recv, nlri.afi, Safi::Flowspec)
     {
         return None;
     }
@@ -13205,18 +13249,31 @@ pub fn route_advertise_flowspec_to_peers(
 
     for ident in peer_idents {
         let peer = peers.get_mut_by_idx(ident).expect("peer exists");
-        let add_path = peer.opt.is_add_path_send(afi, Safi::Flowspec);
-
-        let Some((out_nlri, attr)) = route_update_flowspec(peer, nlri, best, add_path, bgp) else {
-            continue;
-        };
-
-        let attr = bgp.attr_store.intern(attr);
-        let mut adj = best.clone();
-        adj.attr = attr.clone();
-        peer.adj_out.add_flowspec(afi, out_nlri.clone(), adj);
-        send_flowspec_one(peer, afi, out_nlri, attr);
+        advertise_flowspec_to_peer(afi, nlri, best, peer, bgp);
     }
+}
+
+/// Advertise `best` to one peer and record it in the peer's Adj-RIB-Out —
+/// or, when the build refuses this peer (split horizon, a community, an
+/// LLGR-stale path), withdraw the copy the peer holds: it was sent the
+/// previous best (review finding #27).
+fn advertise_flowspec_to_peer(
+    afi: Afi,
+    nlri: &FlowspecNlri,
+    best: &BgpRib,
+    peer: &mut Peer,
+    bgp: &mut BgpTop,
+) {
+    let add_path = peer.opt.is_add_path_send(afi, Safi::Flowspec);
+    let Some((out_nlri, attr)) = route_update_flowspec(peer, nlri, best, add_path, bgp) else {
+        withdraw_flowspec_from_peer(afi, nlri, peer);
+        return;
+    };
+    let attr = bgp.attr_store.intern(attr);
+    let mut adj = best.clone();
+    adj.attr = attr.clone();
+    peer.adj_out.add_flowspec(afi, out_nlri.clone(), adj);
+    send_flowspec_one(peer, afi, out_nlri, attr);
 }
 
 /// Withdraw a flow spec from every peer to which it was advertised
@@ -13226,27 +13283,61 @@ pub fn route_withdraw_flowspec_to_peers(afi: Afi, nlri: &FlowspecNlri, peers: &m
 
     for ident in peer_idents {
         let peer = peers.get_mut_by_idx(ident).expect("peer exists");
-        // Only withdraw what we actually advertised (skips the source
-        // peer and any peer the announce-side policy suppressed).
-        let advertised = {
-            let table = if afi == Afi::Ip6 {
-                &peer.adj_out.flowspec_v6
-            } else {
-                &peer.adj_out.flowspec_v4
-            };
-            table.0.contains_key(nlri)
+        withdraw_flowspec_from_peer(afi, nlri, peer);
+    }
+}
+
+/// Withdraw a flow spec from one peer if it was advertised to it (tracked
+/// via Adj-RIB-Out); a peer that never received it is sent nothing.
+fn withdraw_flowspec_from_peer(afi: Afi, nlri: &FlowspecNlri, peer: &mut Peer) {
+    let advertised = {
+        let table = if afi == Afi::Ip6 {
+            &peer.adj_out.flowspec_v6
+        } else {
+            &peer.adj_out.flowspec_v4
         };
-        if !advertised {
+        table.0.contains_key(nlri)
+    };
+    if !advertised {
+        return;
+    }
+    peer.adj_out.remove_flowspec(afi, nlri, 0);
+
+    let mut update = peer.update_packet();
+    update.mp_withdraw = Some(MpUnreachAttr::Flowspec {
+        afi,
+        withdraws: vec![nlri.clone()],
+    });
+    peer.send_update(update);
+}
+
+/// Send a peer that just came up the flow specs the other peers were sent
+/// (`LocalRibFlowspecTable::advertised`), through the same per-peer build.
+/// The session-up dump had no Flowspec step, so a peer that came up after a
+/// flow spec was learned never got it (review finding #27).
+pub fn route_sync_flowspec(peer: &mut Peer, bgp: &mut BgpTop) {
+    for afi in [Afi::Ip, Afi::Ip6] {
+        if !peer.is_afi_safi(afi, Safi::Flowspec) {
             continue;
         }
-        peer.adj_out.remove_flowspec(afi, nlri, 0);
-
-        let mut update = peer.update_packet();
-        update.mp_withdraw = Some(MpUnreachAttr::Flowspec {
-            afi,
-            withdraws: vec![nlri.clone()],
-        });
-        peer.send_update(update);
+        let table = if afi == Afi::Ip6 {
+            &bgp.local_rib.flowspec_v6
+        } else {
+            &bgp.local_rib.flowspec_v4
+        };
+        let rows: Vec<(FlowspecNlri, BgpRib)> = table
+            .advertised
+            .iter()
+            .filter_map(|nlri| {
+                table
+                    .selected
+                    .get(nlri)
+                    .map(|rib| (nlri.clone(), rib.clone()))
+            })
+            .collect();
+        for (nlri, best) in rows {
+            advertise_flowspec_to_peer(afi, &nlri, &best, peer, bgp);
+        }
     }
 }
 
@@ -18263,6 +18354,10 @@ pub fn route_sync(peer: &mut Peer, bgp: &mut BgpTop, v4_via_pool: bool) {
     // SAFI 73: dump our locally-originated SR Policies to the new peer.
     if peer.is_afi_safi(Afi::Ip, Safi::SrTePolicy) || peer.is_afi_safi(Afi::Ip6, Safi::SrTePolicy) {
         route_sync_srpolicy(peer, bgp);
+    }
+    // SAFI 133: the flow specs the other peers were sent.
+    if peer.is_afi_safi(Afi::Ip, Safi::Flowspec) || peer.is_afi_safi(Afi::Ip6, Safi::Flowspec) {
+        route_sync_flowspec(peer, bgp);
     }
     // SAFI 71 (RFC 9552): dump the self-originated Link-State objects.
     // The IGP producer runs off SPF, which converges long before a

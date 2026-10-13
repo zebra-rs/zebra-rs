@@ -105,10 +105,10 @@ the three registrations and their `config_com_list*` callbacks.
 
 - `soft-reconfiguration/inbound`: schema node was removed, handler
   kept. Restore the knob or drop the handler.
-- `neighbor/flowspec/validation`: handler exists but
-  `zebra-bgp-flowspec.yang` is never imported by `config.yang`. Import
-  it when flowspec (SAFI 133 plan, `docs/design/bgp-flowspec-plan.md`)
-  lands, or remove the handler until then.
+- `neighbor/flowspec/validation`: DONE — `zebra-bgp-flowspec.yang` is
+  imported by `config.yang` (review finding #27 in
+  `docs/design/bgp-path-selection-update-review.md`), so the knob loads
+  and its handler is reached.
 - The lua / loc-rib-hook / adj-rib-out-hook entries are fine as-is:
   explicitly parked with the `lua` feature (commented import in
   `zebra-rs/yang/config.yang`).

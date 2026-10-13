@@ -153,6 +153,10 @@ module config {
     prefix zbsp;
   }
 
+  import zebra-bgp-flowspec {
+    prefix zbfs;
+  }
+
   import zebra-bgp-allowas-in {
     prefix zbai;
   }
