@@ -1,0 +1,18 @@
+# z4 (AS 65004): consumes BLUE; enforce-first-as toward z1.
+router:
+  bgp:
+    global:
+      as: 65004
+      router-id: 10.0.69.4
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 10.0.69.1
+      afi-safi:
+      - name: sr-policy-v6
+        enabled: true
+      enabled: true
+      remote-as: 65000
+      enforce-first-as: {}

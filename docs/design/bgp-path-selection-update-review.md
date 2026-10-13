@@ -24,9 +24,10 @@ knobs (PR #2423, `7852fc15`), #16 (PR #2425, `6d4446b1`), #17 with #18
 (AddPath withdraws held by `suppress-fib-pending`, PR #2433, `b5c4c210`),
 #19 (PR #2436, `17b906bc`, one review round folded in) and #21's
 `bgp router-id` item (PR #2438, `ae20d01f`, one review round folded in)
-and #22 (PR #2440, `02633546`, one review round folded in). Each fixed
-entry ends with its fix note; everything else is open. In progress: #25,
-branch `bgp-pet-sync-adj-out`.
+#22 (PR #2440, `02633546`, one review round folded in) and #25 (PR #2441,
+`abdd26d7`, one review round folded in). Each fixed entry ends with its fix
+note; everything else is open. In progress: #27, branch
+`bgp-fs-srp-egress-gates`.
 
 Method: one lead read the selection ladder and every egress builder, then
 five independent read-only reviewers each took one dimension (update-group
@@ -1909,7 +1910,7 @@ cap. The two reviews agree on every overlapping item.
   Gates `v4_rt_removal_switches_to_the_vpn_route_that_still_matches` and its
   `v6_` twin (fail on `main` and without that fallback).
 
-### 25. P2 CONFIRMED (knob-gated), FIXED on branch `bgp-pet-sync-adj-out` — with `peer-sharding` at N=1 the session-up dump is never recorded in the PET's Adj-RIB-Out, so every dump-learned prefix is unwithdrawable
+### 25. P2 CONFIRMED (knob-gated), FIXED in #2441 — with `peer-sharding` at N=1 the session-up dump is never recorded in the PET's Adj-RIB-Out, so every dump-learned prefix is unwithdrawable
 
 - `peer.rs:2193-2198` spawns the PET and then runs `route_sync`;
   `route_sync_ipv4` (`route.rs:15024-15040`) sends `RecordAdjOut` to the
@@ -1946,7 +1947,7 @@ cap. The two reviews agree on every overlapping item.
   comes up before z1's routes, z4 after): on `main` z2's
   `advertised-routes` for z4 lists neither route and z4 keeps them after z1
   withdraws them, while z3 loses them. IPv4 only — the PET's family.
-- FIXED (branch `bgp-pet-sync-adj-out`): both N=1 dumps
+- FIXED (#2441): both N=1 dumps
   (`route_sync_ipv4` and the chunked `route_sync_v4_chunk`) record each row
   they send in the egress engine that sends the peer's later withdraws
   (`record_sync_row_in_engine`): its update group's engine when that runs,
@@ -1960,7 +1961,7 @@ cap. The two reviews agree on every overlapping item.
   `bgp_network_origin_shard_pet`, `bgp_egress_group_task`,
   `bgp_egress_group_sharded`, `bgp_group_egress_nht_withdraw`,
   `bgp_shard_v4_sync` and `bgp_update_group_source_withdraw` stay green.
-- Review round (FIXED on the branch; the reviewer's probe is now the gate
+- Review round (FIXED in #2441; the reviewer's probe is now the gate
   `the_session_up_dump_is_recorded_in_the_group_engine_the_peer_joins`,
   which drives the real Established transition in a child test process with
   the group engine's gate on, and also checks the group's withdraw reaches
@@ -1987,7 +1988,7 @@ cap. The two reviews agree on every overlapping item.
   stale PE's import is not depreferenced against a fresh sibling-RD import
   and CE peers receive LLGR_STALE-tagged routes.
 
-### 27. P3 CONFIRMED — Flowspec and SR-Policy egress skip the shared gates
+### 27. P3 CONFIRMED, FIXED on branch `bgp-fs-srp-egress-gates` (bar two follow-ups) — Flowspec and SR-Policy egress skip the shared gates
 
 - `route_update_flowspec` (`route.rs:11094-11150`) has no
   `community_suppresses_advertisement`, no LLGR gate in
@@ -1996,6 +1997,102 @@ cap. The two reviews agree on every overlapping item.
   NO_ADVERTISE only (NO_EXPORT leaks to eBGP), never call
   `ebgp_egress_aspath` (no local-AS prepend toward eBGP, RFC 4271 §5.1.2),
   and `route_sync_srpolicy` (`10862`) replays only local policies.
+- Re-read on `main` (2026-10-13): Flowspec does prepend our AS toward
+  eBGP now (`ebgp_egress_aspath` in `route_update_flowspec`); the rest
+  stands. An out-policy bound on `flowspec-ipv4|ipv6` is stored and never
+  applied (accepted but inert); inbound policy is not applied to either
+  family either.
+- Found while gating:
+  - Flowspec: a peer the new best no longer reaches is `continue`d past in
+    `route_advertise_flowspec_to_peers`, never withdrawn, so it keeps the
+    previous flow spec; `route_sync` has no Flowspec step, so a peer that
+    comes up after a flow spec was learned never gets it; and the
+    per-neighbor `flowspec validation` knob cannot be set at all —
+    `zebra-bgp-flowspec.yang` is not imported into `config.yang`, so
+    `neighbor X flowspec validation false` is an unknown key.
+  - SR Policy: our own policies (`srpolicy_origin_reach`,
+    `route_sync_srpolicy`) go out with no AS_PATH at all — a missing
+    well-known attribute, which RFC 7606 makes a treat-as-withdraw, and
+    which a zebra-rs neighbor running `enforce-first-as` rejects — and with
+    no LOCAL_PREF toward iBGP; an eBGP-learned policy is reflected to iBGP
+    without LOCAL_PREF. Reflection is stateless (a policy not consumed here
+    is not stored), so replaying reflected policies to a late peer needs a
+    received-policy store first.
+- Gates (branch `bgp-fs-srp-egress-gates`; each compiles on `main` and
+  fails there). Unit, `fs_srp_egress_review_tests.rs` (a child of
+  `inst.rs`; flow specs and policies arrive through `route_from_peer`, and
+  what each neighbor is sent is parsed off its packet channel), each with
+  an IPv4 and an IPv6 twin: Flowspec
+  `flowspec_v4_with_no_advertise_is_sent_to_no_peer`,
+  `flowspec_v4_with_no_export_stays_inside_the_as`,
+  `flowspec_v4_stale_goes_only_to_llgr_peers`,
+  `flowspec_v4_a_peer_the_new_best_does_not_reach_is_withdrawn`,
+  `flowspec_v4_a_late_peer_is_sent_the_flowspecs_held`,
+  `flowspec_v4_out_policy_applies`; SR Policy
+  `sr_policy_v4_with_no_export_is_not_reflected_to_ebgp`,
+  `sr_policy_v4_reflected_to_ebgp_carries_our_as`,
+  `sr_policy_v4_from_ebgp_reflected_to_ibgp_carries_local_pref`,
+  `sr_policy_v4_local_carries_an_as_path_and_local_pref` (origination and
+  the session-up dump), `sr_policy_v4_a_late_peer_is_sent_the_policies_reflected_before`.
+  Config, `bgp_neighbor_flowspec_validation_parses` (`config/manager.rs`).
+  BDD `bgp_flowspec_egress` and `_v6` (a scripted iBGP reflector client,
+  `tests/scripts/bgp_flowspec_send.py`, announces three rules — plain,
+  NO_EXPORT, NO_ADVERTISE — through z1 to eBGP z2, iBGP z3 and a late eBGP
+  z4, then re-announces the plain one with NO_ADVERTISE): on `main` z2 holds
+  the NO_EXPORT and NO_ADVERTISE rules, z4 never gets the plain one, and z2
+  keeps it after the re-announce. BDD `bgp_sr_policy_egress` and `_v6`
+  (z1 originates one policy per consuming neighbor: z4 over direct eBGP, z3
+  reflected by z2 onto eBGP — both running `enforce-first-as` — and z5,
+  an iBGP neighbor of z2 that comes up later): on `main` z4 and z3 reject
+  their policies and z5 never gets its own (the z5 half moved out with the
+  replay follow-up, below).
+- FIXED (branch `bgp-fs-srp-egress-gates`):
+  - Flowspec: `route_update_flowspec` holds a path back on NO_ADVERTISE /
+    NO_EXPORT (`community_suppresses_advertisement`) and on an LLGR-stale
+    path toward a peer without LLGR (`llgr_blocks_advertisement`); a peer
+    the build refuses is withdrawn the copy it holds
+    (`advertise_flowspec_to_peer` → `withdraw_flowspec_from_peer`); the
+    session-up dump gains a Flowspec step (`route_sync_flowspec`) that
+    sends the flow specs the other peers were sent — the selected ones the
+    last re-advertise decision found valid, kept in
+    `LocalRibFlowspecTable::advertised` by `route_flowspec_propagate`,
+    since validity reads the source's `flowspec validation` setting, which
+    the dump cannot reach. `config.yang` imports `zebra-bgp-flowspec`, so
+    the validation knob loads (`docs/schema-paths.txt` and the
+    hand-maintained `docs/orphan-report.txt` updated; the audit
+    follow-up in `bgp-config-audit-followups.md` marked done).
+  - SR Policy: a reflected policy is held back from eBGP on NO_EXPORT /
+    NO_EXPORT_SUBCONFED, carries our AS toward eBGP and LOCAL_PREF toward
+    iBGP; our own policies (announce and session-up dump) get the per-peer
+    egress attributes BGP-LS already had, through the shared
+    `originated_egress_attr` (was `bgpls_egress_attr`). Its empty AS_PATH
+    is now `As4Path::new()`: `As4Path::from(vec![])` is one AS_SEQUENCE with
+    no ASNs, which the encoder keeps as a zero Path Segment Length — a
+    malformed AS_PATH (RFC 7606 §7.2). BGP-LS did not leak it (its
+    out-policy step drops the empty segment); SR Policy, calling the helper
+    directly, would have.
+  - Not in this fix (the user's scope A), gated and `#[ignore]`d:
+    `flowspec_v4|v6_out_policy_applies` — Flowspec out-policy needs an
+    attribute-only matcher (EVPN's model) and a call on what a prefix-set
+    clause means for a flow spec; `sr_policy_v4|v6_a_late_peer_is_sent_the_policies_reflected_before`
+    — reflection is stateless, so a replay needs a store of received
+    reflectable policies (with withdraw tracking). The BDD shows the latter
+    as a race: a reflected policy reaches only the neighbors up when it
+    arrives, so `bgp_sr_policy_egress` brings z2–z3 up before z1
+    originates.
+  - Verified: 18 unit gates and a control
+    (`flowspec_a_late_peer_is_not_sent_an_invalid_flowspec`) pass, 4
+    ignored; the config gate passes; each of twelve mutations (no
+    community gate, no LLGR gate, skip instead of withdraw, no dump, dump
+    every selected rule, no YANG import, no SR-Policy community gate, no
+    prepend, no iBGP LOCAL_PREF, raw attributes on announce, raw on the
+    dump, the empty-segment AS_PATH) fails its own gates; workspace clippy
+    and the full unit suite stay green. BDD `bgp_flowspec_egress` /
+    `_v6` and `bgp_sr_policy_egress` / `_v6` pass (the latter twice; with
+    the SR-Policy fix removed they fail at z4 and z3), and
+    `bgp_sr_policy_bsid_forwarding`, `bgp_sr_policy_bsid_steering`,
+    `bgp_ls_te_metric`, `bgp_rr_client_to_nonclient` / `_v6` and
+    `bgp_ebgp_rr_attr_discard` / `_v6` stay green.
 
 ### 28. P3 CONFIRMED — family-specific next-hop divergences that commit silently
 
@@ -2042,6 +2139,9 @@ cap. The two reviews agree on every overlapping item.
   (`5820-5835`, `13359-13372`) sends without recording; only
   `route_sync_vpnv6` (`15275`) records, so `advertised-routes` / PfxSnt
   drift (the recorded "plausible" item, confirmed display-only).
+- The VPNv6 AddPath half is FIXED: `V6Batch::advertise_addpath` records
+  each path under its path-id (review follow-up on #8); the PET half
+  stands.
 
 ### Found while fixing #1 (FIXED — PR #2373, merged to `main` as `ba327126` on 2026-09-08: `try_dynamic_accept` now derives `peer_type` from the group's remote-as the way `interface_neighbor.rs` does; regression test `accepted_dynamic_peer_takes_its_type_from_the_group_remote_as` and `bgp_dynamic_neighbors` asserts `route_type eBGP` / `as_path 65001`)
 

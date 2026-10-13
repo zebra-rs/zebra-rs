@@ -1,0 +1,40 @@
+# z1 (AS 65000): originates GREEN for z3 and BLUE for z4 —
+# each Route Target is the consuming neighbor's router-id.
+router:
+  bgp:
+    global:
+      as: 65000
+      router-id: 10.0.69.1
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    sr-policy:
+      policy:
+      - name: GREEN
+        color: 100
+        endpoint: 2001:db8:69::3
+        route-target: 10.0.69.3
+        segment:
+        - index: 1
+          mpls-label: 16002
+      - name: BLUE
+        color: 200
+        endpoint: 2001:db8:69::4
+        route-target: 10.0.69.4
+        segment:
+        - index: 1
+          mpls-label: 16002
+    neighbor:
+    - remote-address: 10.0.69.2
+      afi-safi:
+      - name: sr-policy-v6
+        enabled: true
+      enabled: true
+      remote-as: 65000
+    - remote-address: 10.0.69.4
+      afi-safi:
+      - name: sr-policy-v6
+        enabled: true
+      enabled: true
+      remote-as: 65004

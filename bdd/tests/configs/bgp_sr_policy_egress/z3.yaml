@@ -1,0 +1,18 @@
+# z3 (AS 65003): consumes GREEN; enforce-first-as toward z2.
+router:
+  bgp:
+    global:
+      as: 65003
+      router-id: 10.0.68.3
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    - remote-address: 10.0.68.2
+      afi-safi:
+      - name: sr-policy-v4
+        enabled: true
+      enabled: true
+      remote-as: 65000
+      enforce-first-as: {}

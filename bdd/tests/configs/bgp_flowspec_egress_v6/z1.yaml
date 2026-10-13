@@ -1,0 +1,43 @@
+# z1 (DUT, AS 65001): relays h1's flow specs (h1 is an iBGP reflector
+# client) to z2 (eBGP), z3 (iBGP) and the late z4 (eBGP).
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.67.1
+    timer:
+      adv-interval:
+        ibgp: 1
+        ebgp: 1
+    neighbor:
+    # The scripted speaker never listens on 179: passive keeps this peer in
+    # Active so the script's connect is accepted. It is an iBGP reflector
+    # client, so its rules reach the iBGP z3 too.
+    - remote-address: 192.168.67.2
+      afi-safi:
+      - name: flowspec-ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65001
+      transport:
+        passive-mode: true
+      route-reflector:
+        client: true
+    - remote-address: 192.168.67.3
+      afi-safi:
+      - name: flowspec-ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65002
+    - remote-address: 192.168.67.4
+      afi-safi:
+      - name: flowspec-ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65001
+    - remote-address: 192.168.67.5
+      afi-safi:
+      - name: flowspec-ipv6
+        enabled: true
+      enabled: true
+      remote-as: 65004

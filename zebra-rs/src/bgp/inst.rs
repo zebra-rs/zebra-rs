@@ -9103,3 +9103,7 @@ mod router_id_change_review_tests;
 #[cfg(test)]
 #[path = "pet_sync_review_tests.rs"]
 mod pet_sync_review_tests;
+
+#[cfg(test)]
+#[path = "fs_srp_egress_review_tests.rs"]
+mod fs_srp_egress_review_tests;
