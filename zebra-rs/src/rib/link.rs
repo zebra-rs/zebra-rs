@@ -1221,10 +1221,9 @@ impl Rib {
             .get(&ifindex)
             .map(|l| l.name.clone())
             .unwrap_or_default();
-        if let Some(vrf) = self.pending_vrf_bind.get(&ifname).cloned() {
-            let _ = self.tx.send(Message::LinkVrfBind {
+        if self.pending_vrf_bind.contains_key(&ifname) {
+            let _ = self.tx.send(Message::LinkVrfReplay {
                 ifname: ifname.clone(),
-                vrf,
             });
         }
 
@@ -1236,23 +1235,21 @@ impl Rib {
         //      before its bridge existed).
         //   2. this link is the *bridge master* one or more slaves were
         //      waiting on (BridgeAdd's netlink create just echoed back).
-        if let Some(bridge) = self.pending_bridge_bind.get(&ifname).cloned() {
-            let _ = self.tx.send(Message::LinkBridgeBind {
+        // The replays carry no binding: it is read when they are handled, so
+        // one withdrawn in between is not applied.
+        if self.pending_bridge_bind.contains_key(&ifname) {
+            let _ = self.tx.send(Message::LinkBridgeReplay {
                 ifname: ifname.clone(),
-                bridge,
             });
         }
-        let waiting: Vec<(String, Option<String>)> = self
+        let waiting: Vec<String> = self
             .pending_bridge_bind
             .iter()
             .filter(|(_, b)| b.as_deref() == Some(ifname.as_str()))
-            .map(|(slave, b)| (slave.clone(), b.clone()))
+            .map(|(slave, _)| slave.clone())
             .collect();
-        for (slave, bridge) in waiting {
-            let _ = self.tx.send(Message::LinkBridgeBind {
-                ifname: slave,
-                bridge,
-            });
+        for slave in waiting {
+            let _ = self.tx.send(Message::LinkBridgeReplay { ifname: slave });
         }
 
         // Replay configured VLAN sub-interfaces waiting on this link as

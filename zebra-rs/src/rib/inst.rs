@@ -383,6 +383,17 @@ pub enum Message {
         ifname: String,
         bridge: Option<String>,
     },
+    /// Re-apply the VRF binding `pending_vrf_bind` records for `ifname`
+    /// when this is handled. Queued by `link_add` and `VrfAdd` when a
+    /// missing piece may have arrived; reading the intent at handling time
+    /// keeps a binding withdrawn in between from coming back.
+    LinkVrfReplay {
+        ifname: String,
+    },
+    /// The bridge twin of `LinkVrfReplay`, for `pending_bridge_bind`.
+    LinkBridgeReplay {
+        ifname: String,
+    },
     EvpnMacAdd(crate::rib::evpn::MacRoute),
     EvpnMacDel(crate::rib::evpn::MacRouteKey),
     KernelRouteExchange(bool),
@@ -3282,6 +3293,144 @@ impl Rib {
         }
     }
 
+    /// Apply the VRF binding `vrf` to `ifname` (`None` detaches), once both
+    /// the interface and the VRF are known; until then it stays pending.
+    async fn link_vrf_apply(&mut self, ifname: String, vrf: Option<String>) {
+        let (ifindex, current_master) = match self.links.values().find(|l| l.name == ifname) {
+            Some(link) => (link.index, link.master.unwrap_or(0)),
+            None => {
+                if crate::rib::tracing::fib_vrf() {
+                    tracing::info!(
+                        "link_vrf_bind: interface {} not present yet — pending",
+                        ifname
+                    );
+                }
+                return;
+            }
+        };
+
+        let master = match &vrf {
+            Some(vrf_name) => match self.vrfs.get(vrf_name) {
+                Some(v) => v.ifindex,
+                None => {
+                    if crate::rib::tracing::fib_vrf() {
+                        tracing::info!("link_vrf_bind: vrf {} not present yet — pending", vrf_name);
+                    }
+                    return;
+                }
+            },
+            None => 0,
+        };
+
+        // Only touch the kernel when the master actually changes.
+        // `pending_vrf_bind` is kept as durable desired-state (so
+        // an interface flap re-binds), which means `link_add`
+        // replays it (`LinkVrfReplay`) on every RTM_NEWLINK for the
+        // interface. Enslaving emits a burst of those (master +
+        // operstate/flag transitions), so without this guard each
+        // one re-issues a redundant `link_set_master` — log spam
+        // and a potential feedback loop.
+        if current_master == master {
+            return;
+        }
+
+        self.fib_handle.link_set_master(ifindex, master).await;
+        if crate::rib::tracing::fib_vrf() {
+            tracing::info!(
+                "link_vrf_bind: ifname={} ifindex={} master={} vrf={:?}",
+                ifname,
+                ifindex,
+                master,
+                vrf
+            );
+        }
+    }
+
+    /// Apply the bridge binding `bridge` to `ifname` (`None` detaches),
+    /// once both the interface and the bridge are known; until then it
+    /// stays pending.
+    async fn link_bridge_apply(&mut self, ifname: String, bridge: Option<String>) {
+        let (ifindex, current_master) = match self.links.values().find(|l| l.name == ifname) {
+            Some(link) => (link.index, link.master.unwrap_or(0)),
+            None => {
+                if crate::rib::tracing::fib_link() {
+                    tracing::info!(
+                        "link_bridge_bind: interface {} not present yet — pending",
+                        ifname
+                    );
+                }
+                return;
+            }
+        };
+
+        // Resolve the bridge to its kernel ifindex. `master == 0`
+        // detaches (`ip link set ... nomaster`). Gate on TWO
+        // things, mirroring how the VRF bind resolves through
+        // `self.vrfs`:
+        //   1. config presence (`self.bridges`) — `BridgeDel`
+        //      removes the entry synchronously, BEFORE the netlink
+        //      delete that releases this port. The released port's
+        //      RTM_NEWLINK (master cleared) re-fires the binding via
+        //      `link_add`'s replay; gating here means it sees the bridge
+        //      already gone and stays pending, instead of racing a
+        //      `link_set_master` against the vanishing device —
+        //      which the kernel rejects with EINVAL. The `bridge`
+        //      leaf is a leafref to `/bridge/name`, so a bound
+        //      bridge is always a configured one.
+        //   2. kernel presence (`self.links`) for the ifindex — it
+        //      lands there once `BridgeAdd`'s netlink create echoes
+        //      back as RTM_NEWLINK.
+        let master_ifindex = match &bridge {
+            Some(bridge) => {
+                if !self.bridges.contains_key(bridge) {
+                    if crate::rib::tracing::fib_link() {
+                        tracing::info!(
+                            "link_bridge_bind: bridge {} not configured — pending",
+                            bridge
+                        );
+                    }
+                    return;
+                }
+                match self.links.values().find(|l| l.name == *bridge) {
+                    Some(l) => l.index,
+                    None => {
+                        if crate::rib::tracing::fib_link() {
+                            tracing::info!(
+                                "link_bridge_bind: bridge {} not present yet — pending",
+                                bridge
+                            );
+                        }
+                        return;
+                    }
+                }
+            }
+            None => 0,
+        };
+
+        // Only touch the kernel when the master actually changes.
+        // `pending_bridge_bind` is durable desired-state, so
+        // `link_add` replays it (`LinkBridgeReplay`) on every
+        // RTM_NEWLINK for the interface; without this guard the enslave
+        // burst would re-issue redundant `link_set_master` calls (see
+        // `link_vrf_apply`'s guard for the same rationale).
+        if current_master == master_ifindex {
+            return;
+        }
+
+        self.fib_handle
+            .link_set_master(ifindex, master_ifindex)
+            .await;
+        if crate::rib::tracing::fib_link() {
+            tracing::info!(
+                "link_bridge_bind: ifname={} ifindex={} master={} bridge={:?}",
+                ifname,
+                ifindex,
+                master_ifindex,
+                bridge
+            );
+        }
+    }
+
     async fn process_msg(&mut self, msg: Message, table_id: u32) {
         match msg {
             Message::Ipv4Add { prefix, rib } => {
@@ -3685,14 +3834,14 @@ impl Rib {
                 self.api_vrf_add(&vrf);
                 // Replay any interface bindings that were waiting for
                 // this VRF to come up.
-                let to_replay: Vec<(String, Option<String>)> = self
+                let to_replay: Vec<String> = self
                     .pending_vrf_bind
                     .iter()
                     .filter(|(_, vrf)| vrf.as_deref() == Some(name.as_str()))
-                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .map(|(ifname, _)| ifname.clone())
                     .collect();
-                for (ifname, vrf) in to_replay {
-                    let _ = self.tx.send(Message::LinkVrfBind { ifname, vrf });
+                for ifname in to_replay {
+                    let _ = self.tx.send(Message::LinkVrfReplay { ifname });
                 }
                 // Re-tee any EVPN symmetric-IRB L3VNI vxlan device bound to
                 // this VRF. Its cradle SetVni-L3 was deferred (not registered
@@ -3851,57 +4000,14 @@ impl Rib {
                     self.pending_vrf_bind.insert(ifname.clone(), vrf.clone());
                 }
 
-                let (ifindex, current_master) = match self.links.values().find(|l| l.name == ifname)
-                {
-                    Some(link) => (link.index, link.master.unwrap_or(0)),
-                    None => {
-                        if crate::rib::tracing::fib_vrf() {
-                            tracing::info!(
-                                "link_vrf_bind: interface {} not present yet — pending",
-                                ifname
-                            );
-                        }
-                        return;
-                    }
-                };
-
-                let master = match &vrf {
-                    Some(vrf_name) => match self.vrfs.get(vrf_name) {
-                        Some(v) => v.ifindex,
-                        None => {
-                            if crate::rib::tracing::fib_vrf() {
-                                tracing::info!(
-                                    "link_vrf_bind: vrf {} not present yet — pending",
-                                    vrf_name
-                                );
-                            }
-                            return;
-                        }
-                    },
-                    None => 0,
-                };
-
-                // Only touch the kernel when the master actually changes.
-                // `pending_vrf_bind` is kept as durable desired-state (so
-                // an interface flap re-binds), which means `link_add`
-                // replays this message on every RTM_NEWLINK for the
-                // interface. Enslaving emits a burst of those (master +
-                // operstate/flag transitions), so without this guard each
-                // one re-issues a redundant `link_set_master` — log spam
-                // and a potential feedback loop.
-                if current_master == master {
-                    return;
-                }
-
-                self.fib_handle.link_set_master(ifindex, master).await;
-                if crate::rib::tracing::fib_vrf() {
-                    tracing::info!(
-                        "link_vrf_bind: ifname={} ifindex={} master={} vrf={:?}",
-                        ifname,
-                        ifindex,
-                        master,
-                        vrf
-                    );
+                self.link_vrf_apply(ifname, vrf).await;
+            }
+            Message::LinkVrfReplay { ifname } => {
+                // The binding as recorded now, not as it was when the link
+                // event that queued this was handled: one withdrawn since
+                // (`delete interface X vrf`) is not re-applied.
+                if let Some(vrf) = self.pending_vrf_bind.get(&ifname).cloned() {
+                    self.link_vrf_apply(ifname, vrf).await;
                 }
             }
             Message::LinkBridgeBind { ifname, bridge } => {
@@ -3916,85 +4022,16 @@ impl Rib {
                         .insert(ifname.clone(), bridge.clone());
                 }
 
-                let (ifindex, current_master) = match self.links.values().find(|l| l.name == ifname)
-                {
-                    Some(link) => (link.index, link.master.unwrap_or(0)),
-                    None => {
-                        if crate::rib::tracing::fib_link() {
-                            tracing::info!(
-                                "link_bridge_bind: interface {} not present yet — pending",
-                                ifname
-                            );
-                        }
-                        return;
-                    }
-                };
-
-                // Resolve the bridge to its kernel ifindex. `master == 0`
-                // detaches (`ip link set ... nomaster`). Gate on TWO
-                // things, mirroring how the VRF bind resolves through
-                // `self.vrfs`:
-                //   1. config presence (`self.bridges`) — `BridgeDel`
-                //      removes the entry synchronously, BEFORE the netlink
-                //      delete that releases this port. The released port's
-                //      RTM_NEWLINK (master cleared) re-fires this bind via
-                //      `link_add`; gating here means it sees the bridge
-                //      already gone and stays pending, instead of racing a
-                //      `link_set_master` against the vanishing device —
-                //      which the kernel rejects with EINVAL. The `bridge`
-                //      leaf is a leafref to `/bridge/name`, so a bound
-                //      bridge is always a configured one.
-                //   2. kernel presence (`self.links`) for the ifindex — it
-                //      lands there once `BridgeAdd`'s netlink create echoes
-                //      back as RTM_NEWLINK.
-                let master_ifindex = match &bridge {
-                    Some(bridge) => {
-                        if !self.bridges.contains_key(bridge) {
-                            if crate::rib::tracing::fib_link() {
-                                tracing::info!(
-                                    "link_bridge_bind: bridge {} not configured — pending",
-                                    bridge
-                                );
-                            }
-                            return;
-                        }
-                        match self.links.values().find(|l| l.name == *bridge) {
-                            Some(l) => l.index,
-                            None => {
-                                if crate::rib::tracing::fib_link() {
-                                    tracing::info!(
-                                        "link_bridge_bind: bridge {} not present yet — pending",
-                                        bridge
-                                    );
-                                }
-                                return;
-                            }
-                        }
-                    }
-                    None => 0,
-                };
-
-                // Only touch the kernel when the master actually changes.
-                // `pending_bridge_bind` is durable desired-state, so
-                // `link_add` replays this on every RTM_NEWLINK for the
-                // interface; without this guard the enslave burst would
-                // re-issue redundant `link_set_master` calls (see the
-                // `LinkVrfBind` guard for the same rationale).
-                if current_master == master_ifindex {
-                    return;
-                }
-
-                self.fib_handle
-                    .link_set_master(ifindex, master_ifindex)
-                    .await;
-                if crate::rib::tracing::fib_link() {
-                    tracing::info!(
-                        "link_bridge_bind: ifname={} ifindex={} master={} bridge={:?}",
-                        ifname,
-                        ifindex,
-                        master_ifindex,
-                        bridge
-                    );
+                self.link_bridge_apply(ifname, bridge).await;
+            }
+            Message::LinkBridgeReplay { ifname } => {
+                // As `LinkVrfReplay`: a bridge binding withdrawn after the
+                // event that queued this (`delete interface X bridge`) is
+                // not re-applied. It was: a replay queued from the enslave
+                // burst, handled after the detach and its kernel echo,
+                // enslaved the port again.
+                if let Some(bridge) = self.pending_bridge_bind.get(&ifname).cloned() {
+                    self.link_bridge_apply(ifname, bridge).await;
                 }
             }
             Message::BlockAdd { name, config } => {
