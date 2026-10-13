@@ -196,6 +196,8 @@
 /router/bgp/neighbor/ebgp-multihop	leaf
 /router/bgp/neighbor/enabled	leaf
 /router/bgp/neighbor/enforce-first-as	p-container
+/router/bgp/neighbor/flowspec	container
+/router/bgp/neighbor/flowspec/validation	leaf
 /router/bgp/neighbor/ip-transparent	p-container
 /router/bgp/neighbor/local-as	list keys=as-number
 /router/bgp/neighbor/local-as/dual-as	leaf

@@ -4868,6 +4868,32 @@ mod yang_load_tests {
         }
     }
 
+    /// Review finding #27, found while gating: the per-neighbor Flowspec
+    /// validation toggle (zebra-bgp-flowspec.yang, RFC 9117) has a
+    /// callback but its module was never imported into the configure
+    /// tree, so `neighbor X flowspec validation false` was rejected as an
+    /// unknown key and the knob could not be set at all.
+    #[test]
+    fn bgp_neighbor_flowspec_validation_parses() {
+        use crate::config::ExecCode;
+        use crate::config::parse::{State, parse};
+        use libyang::to_entry;
+
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        yang.read_with_resolve("configure")
+            .expect("configure mode loads");
+        yang.identity_resolve();
+        let module = yang
+            .find_module("configure")
+            .expect("configure module present");
+        let entry = to_entry(&yang, module);
+
+        let cmd = "set router bgp neighbor 10.0.0.1 flowspec validation false";
+        let (code, _comps, _state) = parse(cmd, entry.clone(), None, State::new());
+        assert_eq!(code, ExecCode::Success, "should parse: {cmd}");
+    }
+
     /// The `neighbor-group` list inherits the per-neighbor knob set
     /// (zebra-bgp-neighbor-group.yang reuses the feature modules'
     /// groupings via cross-module `uses`, plus inline mirrors for

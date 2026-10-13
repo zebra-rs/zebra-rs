@@ -23,8 +23,8 @@ in src/bgp/config.rs (an empty relative path, easy to miss when
 grepping for registrations), and it creates/tears down the peer when
 the list entry itself is set/deleted.
 
-Total settable schema nodes: 367
-Handled: 352
+Total settable schema nodes: 368
+Handled: 353
 Orphans: 3
 
 Note: these orphans have no config callback but are kept intentionally.
@@ -125,14 +125,11 @@ cadence.
   /router/bgp/lua-map/source-path
   /router/bgp/lua-script
   /router/bgp/lua-script/source-path
-  /router/bgp/neighbor/flowspec/validation
   /router/bgp/neighbor/soft-reconfiguration/inbound
 
 Note: the lua-script / lua-map / loc-rib-hook / adj-rib-out-hook handlers
 remain registered while the Lua scripting YANG surface is commented out
 (zebra-bgp-lua.yang), so those paths currently have no schema node.
-flowspec/validation has a handler but zebra-bgp-flowspec.yang is not
-imported by config.yang, so its schema nodes are never loaded.
 soft-reconfiguration/inbound's schema node was removed; the handler was
 kept. The community-list handlers (config_com_list* in
 src/bgp/config.rs) are registered but no loaded YANG module defines a

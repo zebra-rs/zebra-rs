@@ -123,7 +123,7 @@ fn bgpls_review_oversized_replacement_withdraws_then_small_restores() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     peer.packet_tx = Some(tx);
     let nhop = IpAddr::V4(peer.router_id);
-    let small = bgpls_egress_attr(&peer, &BgpAttr::new());
+    let small = originated_egress_attr(&peer, &BgpAttr::new());
     bgpls_send_reach(&mut peer, nhop, &nlri, small.clone());
     let first = rx.try_recv().expect("initial advertisement");
     let (_, decoded) = UpdatePacket::parse_packet(&first, peer.as4, None).unwrap();
