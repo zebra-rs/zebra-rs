@@ -1139,12 +1139,12 @@ impl<N: FlushNlri> FlushJob<N> {
                     }
                     let Some(tx) = ctx.tx.as_ref() else { continue };
                     let Some(nh) = ctx.enhe_v6 else {
-                        // ND hasn't observed any link-local on this
-                        // peer's egress interface yet; the
-                        // operator-side address-add events haven't
-                        // reached BGP. Skip this member's flush —
-                        // we'll re-cache on the next event arrival
-                        // rather than emit a garbage next-hop.
+                        // No link-local is known on this peer's egress
+                        // interface yet: skip the member rather than emit
+                        // a garbage next-hop. The route stays recorded in
+                        // its Adj-RIB-Out; the address event that brings
+                        // the link-local re-sends it
+                        // (`Bgp::enhe_next_hop_event`, review finding #29).
                         continue;
                     };
                     let nlris: Vec<N> = entries

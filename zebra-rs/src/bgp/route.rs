@@ -260,6 +260,54 @@ pub struct SyncCtx {
     pub attach_unknown_attr: Option<bgp_packet::UnknownAttr>,
     /// RFC 9774 global toggle (`router bgp as-sets-withdraw`).
     pub as_sets_withdraw: bool,
+    /// The RFC 8950 extended next-hop toward this peer (`Peer::
+    /// enhe_next_hop`): the gate-on egress engines encode with it, and hold
+    /// a route back while it is `Missing` (review finding #29).
+    pub enhe: EnheNextHop,
+}
+
+/// The RFC 8950 extended next-hop for IPv4 unicast toward one peer: an
+/// unnumbered neighbor that negotiated it is sent IPv4 routes with our IPv6
+/// address on its interface as the next-hop, which BGP knows only once the
+/// RIB has reported it (review finding #29).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EnheNextHop {
+    /// Not negotiated: the legacy NLRI with an IPv4 NEXT_HOP.
+    #[default]
+    Off,
+    /// Negotiated, with our next-hop on the peer's interface.
+    Ready(Ipv4MpReachNextHop),
+    /// Negotiated, but no link-local is known for the interface yet: a
+    /// route is recorded but not sent — the legacy form would carry our
+    /// router-id, which an unnumbered neighbor cannot reach — and goes out
+    /// once the address is reported.
+    Missing,
+}
+
+impl EnheNextHop {
+    /// The extended next-hop a send passes to the encoder (`None` for the
+    /// legacy form), or `None` when the send must wait for a link-local.
+    pub fn for_send(self) -> Option<Option<Ipv4MpReachNextHop>> {
+        match self {
+            EnheNextHop::Off => Some(None),
+            EnheNextHop::Ready(nh) => Some(Some(nh)),
+            EnheNextHop::Missing => None,
+        }
+    }
+}
+
+/// The extended next-hop toward `peer` given our interface addresses.
+pub(super) fn enhe_next_hop(
+    peer: &Peer,
+    addrs: &super::interface_addrs::InterfaceAddrs,
+) -> EnheNextHop {
+    if !peer.is_enhe_v4_negotiated() {
+        return EnheNextHop::Off;
+    }
+    match super::update_group::compose_enhe_next_hop(peer, addrs) {
+        Some(nh) => EnheNextHop::Ready(nh),
+        None => EnheNextHop::Missing,
+    }
 }
 
 impl SyncCtx {
@@ -366,6 +414,7 @@ impl SyncCtx {
             as4: true,
             attach_unknown_attr: None,
             as_sets_withdraw: true,
+            enhe: EnheNextHop::Off,
         }
     }
 }
@@ -7997,16 +8046,15 @@ fn route_soft_out_peer_table(
     // Direct-emit IPv4 unicast batch (no group fan-out). When the
     // peer negotiated RFC 8950 ENHE for IPv4 unicast, pass the
     // per-interface next-hop so the encoder emits MP_REACH instead
-    // of the legacy inline-NLRI form. `compose_enhe_next_hop`
-    // selects 32-octet dual when the egress interface also has a
-    // global v6, else 16-octet link-local-only.
+    // of the legacy inline-NLRI form (32-octet dual when the egress
+    // interface also has a global v6, else 16-octet link-local-only).
+    // With no link-local known yet the batch is held back — it is
+    // recorded above and sent once the address is reported (review
+    // finding #29).
     if rd.is_none()
         && let Some(peer) = peers.get_by_idx(peer_idx)
+        && let Some(enhe_v6) = enhe_next_hop(peer, bgp.interface_addrs).for_send()
     {
-        let enhe_v6 = peer
-            .is_enhe_v4_negotiated()
-            .then(|| super::update_group::compose_enhe_next_hop(peer, bgp.interface_addrs))
-            .flatten();
         super::update_group::send_ipv4_direct(
             &peer.sync_ctx(*bgp.router_id, bgp.as_sets_withdraw),
             ipv4_entries,
@@ -17407,15 +17455,16 @@ pub(super) fn route_sync_v4_chunk(peer: &mut Peer, bgp: &mut BgpTop, chunk: usiz
         }
     }
 
-    let enhe_v6 = peer
-        .is_enhe_v4_negotiated()
-        .then(|| super::update_group::compose_enhe_next_hop(peer, bgp.interface_addrs))
-        .flatten();
-    super::update_group::send_ipv4_direct(
-        &peer.sync_ctx(*bgp.router_id, bgp.as_sets_withdraw),
-        entries,
-        enhe_v6,
-    );
+    // Held back while the extended next-hop waits for a link-local: the
+    // rows are recorded above and go out once the address is reported
+    // (review finding #29) — the legacy form would carry our router-id.
+    if let Some(enhe_v6) = enhe_next_hop(peer, bgp.interface_addrs).for_send() {
+        super::update_group::send_ipv4_direct(
+            &peer.sync_ctx(*bgp.router_id, bgp.as_sets_withdraw),
+            entries,
+            enhe_v6,
+        );
+    }
 
     if done {
         send_eor_ipv4_unicast(peer);
@@ -17546,15 +17595,16 @@ pub fn route_sync_ipv4(peer: &mut Peer, bgp: &mut BgpTop) {
         entries.push((arc_attr, nlri));
     }
 
-    let enhe_v6 = peer
-        .is_enhe_v4_negotiated()
-        .then(|| super::update_group::compose_enhe_next_hop(peer, bgp.interface_addrs))
-        .flatten();
-    super::update_group::send_ipv4_direct(
-        &peer.sync_ctx(*bgp.router_id, bgp.as_sets_withdraw),
-        entries,
-        enhe_v6,
-    );
+    // Held back while the extended next-hop waits for a link-local: the
+    // rows are recorded above and go out once the address is reported
+    // (review finding #29) — the legacy form would carry our router-id.
+    if let Some(enhe_v6) = enhe_next_hop(peer, bgp.interface_addrs).for_send() {
+        super::update_group::send_ipv4_direct(
+            &peer.sync_ctx(*bgp.router_id, bgp.as_sets_withdraw),
+            entries,
+            enhe_v6,
+        );
+    }
 
     // Send End-of-RIB marker for IPv4 Unicast
     send_eor_ipv4_unicast(peer);
@@ -32837,6 +32887,7 @@ mod as_sets_withdraw_tests {
             as4: true,
             attach_unknown_attr: None,
             as_sets_withdraw: true,
+            enhe: crate::bgp::route::EnheNextHop::Off,
         };
         let rib = BgpRib::new(
             2,
@@ -32896,6 +32947,7 @@ mod as_sets_withdraw_tests {
             as4: true,
             attach_unknown_attr: None,
             as_sets_withdraw: false,
+            enhe: crate::bgp::route::EnheNextHop::Off,
         };
 
         // A VPNv4 row learned from an iBGP RR client: the originating PE
@@ -32988,6 +33040,7 @@ mod as_sets_withdraw_tests {
             as4: true,
             attach_unknown_attr: None,
             as_sets_withdraw: false,
+            enhe: crate::bgp::route::EnheNextHop::Off,
         };
         // A plain v4-unicast row learned from eBGP (so the iBGP→iBGP
         // suppression doesn't apply), received next-hop 3.3.3.3.
@@ -33058,6 +33111,7 @@ mod as_sets_withdraw_tests {
             as4: true,
             attach_unknown_attr: None,
             as_sets_withdraw: false,
+            enhe: crate::bgp::route::EnheNextHop::Off,
         };
         let recv = Ipv4Addr::new(3, 3, 3, 3);
         let mut attr = attr_with_path("65001");
