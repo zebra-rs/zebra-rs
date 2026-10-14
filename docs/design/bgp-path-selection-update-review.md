@@ -27,9 +27,9 @@ knobs (PR #2423, `7852fc15`), #16 (PR #2425, `6d4446b1`), #17 with #18
 #22 (PR #2440, `02633546`, one review round folded in) and #25 (PR #2441,
 `abdd26d7`, one review round folded in), and #27 part A (PR #2515,
 `1f9fb965`; two follow-ups open) and #29 (PR #2517, `78cf9df0`, one
-review round folded in). Each fixed entry ends with its fix note;
-everything else is open. In progress: a second review follow-up to #29 (a
-flush in flight), branch `bgp-enhe-flush-inflight`.
+review round folded in; a second, a flush in flight, PR #2518,
+`140126e6`). Each fixed entry ends with its fix note; everything else is
+open. In progress: #30, branch `bgp-fib-pending-sharded-dump`.
 
 Method: one lead read the selection ladder and every egress builder, then
 five independent read-only reviewers each took one dimension (update-group
@@ -2108,7 +2108,7 @@ cap. The two reviews agree on every overlapping item.
   not the RFC 4659 IPv4-mapped form LU-v6 uses (`13525`); with no global
   v6 the upstream next-hop is left untouched (`13062`).
 
-### 29. P3 CONFIRMED, FIXED in #2517 (one follow-up in progress) — ENHE member without an observed link-local is skipped at flush after Adj-RIB-Out recorded the send; gate-on engines ignore ENHE
+### 29. P3 CONFIRMED, FIXED in #2517 and #2518 — ENHE member without an observed link-local is skipped at flush after Adj-RIB-Out recorded the send; gate-on engines ignore ENHE
 
 - `update_group.rs:876-897` `continue`s per member when `enhe_v6` is
   `None` (asserted as intended by `flush_job_enhe_per_member_next_hops`),
@@ -2265,6 +2265,86 @@ cap. The two reviews agree on every overlapping item.
   and `DumpParamsV4` (`shard/msg.rs:230`) carries none; `route.rs:15605-15620`
   skips the gated N=1 dump when `v4_via_pool`. A new peer learns prefixes
   the dataplane has not confirmed; the later release re-sends them.
+- Re-read on `main` (2026-10-14): still so. Every dump on main —
+  `route_sync_ipv4`, its chunked form, `route_sync_ipv6` — skips a prefix
+  `fib_pending_blocks_sync` reports held and leaves it to the release,
+  which fans it to every Established neighbor. The holds live on main
+  (`LocalRib::fib_pending`); `broadcast_dump_v4` sends the shards none of
+  them, and `handle_dump_v4` walks its whole slice. With no forwarding
+  plane that acknowledges installs (only the FPM client does), every hold
+  runs to the 30-second deadline, so the window is real on a plain Linux
+  dataplane too. IPv4 only: the pool serves plain IPv4 unicast, and the
+  IPv6 session-up dump runs on main.
+- Gates (branch `bgp-fib-pending-sharded-dump`; each compiles on `main`).
+  Unit, `fib_pending_dump_review_tests.rs` (a child of `inst.rs`; a real
+  two-shard pool with a held and a free prefix in one shard's slice and in
+  main's replica; the session-up dump as the transition to Established
+  starts it, `route_sync` and then `broadcast_dump_v4`, run to completion:
+  main takes the pool's acks and runs its own cursor out, so a gate holds
+  whichever path the dump takes; the release as the RIB reply handler runs
+  it, then the group flush):
+  `a_sharded_dump_holds_back_a_prefix_awaiting_the_fib` and
+  `a_sharded_addpath_dump_holds_back_a_prefix_awaiting_the_fib` (on `main`
+  the dump sends both prefixes); control
+  `a_sharded_dump_sends_a_prefix_whose_hold_expired` (a hold past its
+  deadline is not skipped, as on main's dumps). BDD
+  `bgp_fib_pending_sharded_dump` (z1 with `rib-sharding 2` and
+  `suppress-fib-pending`, z2 originating 10.30.10.0/24, z3 coming up while
+  z1 holds it): on `main` z3 has the route 3 s after Established, while
+  z1's summary still shows it held; the deadline's release, checked
+  through `1 released by timeout`, then reaches z3.
+- Reviewer round 1 (before any commit): the first cut handed the shards
+  main's holds at broadcast time and had them skip those prefixes. That
+  misses a best path a pool shard has just picked: main has no hold for it
+  until it reduces that delta, so the dump sent the prefix and the reduce
+  armed the hold behind it. Gates (each compiles on `main`):
+  `a_sharded_dump_holds_back_a_best_path_main_has_not_reduced` and
+  `a_sharded_addpath_dump_holds_back_a_best_path_main_has_not_reduced`.
+  These send the UPDATE into the owning pool shard and start the
+  session-up dump before main takes the shard's delta; main then takes the
+  delta, then the dump's acks. An anchor checks that the reduce armed the
+  hold. On `main` the dump sends both prefixes; the anchor holds.
+- Reviewer round 2 (before any commit): the second cut had the shards
+  report every row without sending under `suppress-fib-pending`, and main
+  filter and send each shard's rows as it took the ack. That is exact on
+  holds, since main has reduced the shard's earlier deltas by then. But
+  main sent each slice in one go, without the shards' parking on the
+  neighbor's egress backlog. A slow neighbor could then have the whole
+  table queued toward it, and the encoding stalled main's loop. Control
+  (passes on `main`, where the shards park):
+  `a_sharded_dump_under_suppress_fib_pending_parks_on_a_backed_up_neighbor`.
+  It holds the neighbor's egress depth over the high-water mark, runs
+  main's cursor and takes whatever the pool has finished (the shard with
+  an empty slice acks at once), checks that nothing goes out, then drains
+  the queue and checks that the dump resumes.
+- FIXED (branch `bgp-fib-pending-sharded-dump`), the third cut:
+  - Under `suppress-fib-pending` at N>1, `route_sync` gives a new peer
+    main's resumable IPv4 dump cursor over the read replica
+    (`Ipv4SyncCursor`, driven by `drive_sync_v4`) instead of leaving the
+    dump to the pool. `broadcast_dump_v4` stands down for a peer that has
+    the cursor. With the knob off, the pool dumps as before.
+  - The cursor was already the N=1 chunked dump (`ZEBRA_BGP_SYNC_CHUNK`),
+    and it covers both reviewer rounds. Each chunk reads the replica and
+    the holds live, and the reduce changes the two together. So a best
+    path still on its way from a shard is in neither: the cursor sends the
+    replica's earlier, confirmed state or nothing, and the reduce's hold
+    then covers the new path until the release. Each tick parks on the
+    neighbor's egress backlog against the same high-water mark the shards
+    use. It also carries the extended next-hop, LLGR, AddPath, the
+    egress-engine records and End-of-RIB, as at N=1.
+  - What the pool would have done in parallel (the walk, the out-policy
+    and the encoding) runs on main, chunked, for a neighbor that comes up
+    while the knob is on. That is the price of exact holds: only main
+    knows them.
+  - Verified: the 4 gates fail on `main`; with the fix they and the 2
+    controls pass. Each of five mutations fails its own gates: no cursor
+    at N>1; the pool still dumping for a peer with the cursor; the cursor
+    ignoring the backlog; the cursor not skipping held prefixes; the
+    cursor skipping expired holds too. Workspace clippy (and the `lua`
+    feature's) and the full unit suite (4001) stay green. The full BDD
+    suite at the default concurrency (32) passes, 382 of 382
+    (`bgp_fib_pending_sharded_dump` included: z3 lacks the route while z1
+    holds it and gets it from the deadline's release).
 
 ### 31. P3 PLAUSIBLE — `multipath_eligible_agrees_with_is_better` (`route.rs:25609`) does not pin the lockstep property
 

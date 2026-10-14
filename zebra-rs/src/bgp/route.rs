@@ -18323,7 +18323,9 @@ pub fn route_sync_labelv6(peer: &mut Peer, bgp: &mut BgpTop) {
 
 /// `v4_via_pool` is true at N>1 (RIB sharding): the v4-unicast session-up
 /// dump runs shard-parallel via `DumpV4` (the caller broadcasts it after
-/// the FSM), so this skips its v4-unicast block. At N=1 it's false and the
+/// the FSM), so this skips its v4-unicast block — except under
+/// `suppress-fib-pending`, where it hands the peer the resumable cursor over
+/// main's read replica (review finding #30). At N=1 it's false and the
 /// v4 dump runs here via the resumable cursor or legacy `route_sync_ipv4`.
 pub fn route_sync(peer: &mut Peer, bgp: &mut BgpTop, v4_via_pool: bool) {
     // RFC 4684: advertise our Route Target Constraint membership BEFORE
@@ -18349,9 +18351,16 @@ pub fn route_sync(peer: &mut Peer, bgp: &mut BgpTop, v4_via_pool: bool) {
         send_eor_rtcv6_unicast(peer);
     }
     // Advertize. At N>1 the v4-unicast dump is shard-parallel (`DumpV4`,
-    // broadcast by the caller after the FSM), so skip it here.
-    if peer.is_afi_safi(Afi::Ip, Safi::Unicast) && !v4_via_pool {
-        if sync_chunk_size().is_some() {
+    // broadcast by the caller after the FSM), so skip it here — except
+    // under `suppress-fib-pending`. Its holds live on main and are armed as
+    // main reduces each shard's best paths, so no shard can tell what a new
+    // peer must not learn yet. Main's cursor can: it reads the read replica
+    // and the holds, which the reduce changes together, live chunk by chunk,
+    // and it parks on the peer's egress backlog as the shards do
+    // (review finding #30). `broadcast_dump_v4` stands down for its peer.
+    let v4_cursor = v4_via_pool && bgp.local_rib.suppress_fib_pending;
+    if peer.is_afi_safi(Afi::Ip, Safi::Unicast) && (!v4_via_pool || v4_cursor) {
+        if v4_cursor || sync_chunk_size().is_some() {
             // Tier 1a: snapshot the v4 keys and hand them to the
             // resumable cursor; the event loop kicks (`process_msg`)
             // and drives it in chunks (`drive_sync_v4`). Reads stay on

@@ -2660,7 +2660,9 @@ impl Bgp {
                 // `route_sync` skipped its v4 block above, so broadcast the
                 // dump to the pool here — it needs full `self` for the
                 // per-req_id barrier. No-op at N=1 (no pool), where the
-                // cursor / legacy `route_sync_ipv4` already ran the dump.
+                // cursor / legacy `route_sync_ipv4` already ran the dump,
+                // and for a peer `route_sync` gave the cursor at N>1
+                // (`suppress-fib-pending`, review finding #30).
                 let became_established = prev_state.is_some_and(|s| !s.is_established())
                     && self
                         .peers
@@ -7773,7 +7775,9 @@ impl Bgp {
     /// A2 — fan a `DumpV4` to every pool shard for `ident`'s session-up
     /// IPv4-unicast dump, returning the `req_id` its per-shard `DumpDoneV4`
     /// acks carry. `None` when there is no pool (N=1, where the resumable
-    /// cursor handles the dump). Each shard builds + sends its own slice
+    /// cursor handles the dump), or when `route_sync` gave the peer that
+    /// cursor at N>1 (`suppress-fib-pending`, review finding #30). Each
+    /// shard builds + sends its own slice
     /// from the shared `Arc<SyncCtx>` (the `&Peer`-free egress snapshot);
     /// main records the adj_out deltas + counts the N acks via
     /// [`DumpBarrierV4`], emitting EoR on the last. Called at session-up
@@ -7784,6 +7788,9 @@ impl Bgp {
         let n = self.shards.as_ref()?.n();
         let high_water = sync_egress_high_water();
         let peer = self.peers.get_by_idx(ident)?;
+        if peer.sync_v4.is_some() {
+            return None;
+        }
         // The peer-derived egress params the shards can't reconstruct.
         let params = super::shard::msg::DumpParamsV4 {
             add_path: peer.opt.is_add_path_send(Afi::Ip, Safi::Unicast),
@@ -9194,3 +9201,7 @@ mod fs_srp_egress_review_tests;
 #[cfg(test)]
 #[path = "enhe_link_local_review_tests.rs"]
 mod enhe_link_local_review_tests;
+
+#[cfg(test)]
+#[path = "fib_pending_dump_review_tests.rs"]
+mod fib_pending_dump_review_tests;
