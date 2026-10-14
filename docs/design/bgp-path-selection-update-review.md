@@ -26,9 +26,10 @@ knobs (PR #2423, `7852fc15`), #16 (PR #2425, `6d4446b1`), #17 with #18
 `bgp router-id` item (PR #2438, `ae20d01f`, one review round folded in)
 #22 (PR #2440, `02633546`, one review round folded in) and #25 (PR #2441,
 `abdd26d7`, one review round folded in), and #27 part A (PR #2515,
-`1f9fb965`; two follow-ups open). Each fixed entry ends with its fix note;
-everything else is open. In progress: #29, branch
-`bgp-enhe-link-local-flush`.
+`1f9fb965`; two follow-ups open) and #29 (PR #2517, `78cf9df0`, one
+review round folded in). Each fixed entry ends with its fix note;
+everything else is open. In progress: a second review follow-up to #29 (a
+flush in flight), branch `bgp-enhe-flush-inflight`.
 
 Method: one lead read the selection ladder and every egress builder, then
 five independent read-only reviewers each took one dimension (update-group
@@ -2107,7 +2108,7 @@ cap. The two reviews agree on every overlapping item.
   not the RFC 4659 IPv4-mapped form LU-v6 uses (`13525`); with no global
   v6 the upstream next-hop is left untouched (`13062`).
 
-### 29. P3 CONFIRMED, FIXED on branch `bgp-enhe-link-local-flush` — ENHE member without an observed link-local is skipped at flush after Adj-RIB-Out recorded the send; gate-on engines ignore ENHE
+### 29. P3 CONFIRMED, FIXED in #2517 (one follow-up in progress) — ENHE member without an observed link-local is skipped at flush after Adj-RIB-Out recorded the send; gate-on engines ignore ENHE
 
 - `update_group.rs:876-897` `continue`s per member when `enhe_v6` is
   `None` (asserted as intended by `flush_job_enhe_per_member_next_hops`),
@@ -2206,6 +2207,57 @@ cap. The two reviews agree on every overlapping item.
     380 of 381, that feature failing at its gap step); a throwaway copy
     with a `clear` showed `Last reset` on both sides, so the feature's
     no-reset checks are live.
+- Second reviewer follow-up on the fix (P2, a flush in flight): the update
+  group's flush runs on the blocking pool (`flush_ipv4`), and the job
+  resolves each member's extended next-hop when it is built
+  (`build_flush_job_ipv4`). An address event while the job is out made
+  main re-send the Adj-RIB-Out with the new next-hop at once
+  (`enhe_catch_up_v4`, `inst.rs:4443`), uncoordinated with
+  `flush_inflight_ipv4`; the job, still writing, then announced its routes
+  with the old one, and `flush_done_ipv4` replays only withdraws. The
+  neighbor keeps the routes via a link-local that no longer exists. Main
+  path only: the gate-on engines and the per-peer egress task send from
+  one task in order. Gates (branch `bgp-enhe-flush-inflight`; each
+  compiles on `main`), same file (the job built and the in-flight latch set
+  as `flush_ipv4` does, the link-local replaced — `fe80::1` deleted,
+  `fe80::3` added — then the job run and `FlushDoneIpv4` handed to main):
+  `a_flush_in_flight_when_the_link_local_moves_does_not_have_the_last_word`
+  (the job's `fe80::1`, then the catch-up's `fe80::3`; fails on `main`,
+  where the wire order is `fe80::3`, then `fe80::1` — the reviewer's own
+  probe); controls
+  `a_flush_in_flight_with_the_link_local_unchanged_sends_once` and
+  `losing_the_link_local_sends_nothing` (the address deleted, no new one:
+  nothing re-sent, not the legacy form with our router-id — main's catch-up
+  had that guard untested). No BDD twin: the window is the job's run on
+  the blocking pool, microseconds wide, which a scenario cannot time;
+  `bgp_unnumbered_link_local_gap` keeps covering the catch-up end to end.
+- FIXED (branch `bgp-enhe-flush-inflight`), the reviewer's first remedy:
+  - While the peer's IPv4 update group has a flush job out
+    (`flush_inflight_ipv4`), main's catch-up parks the peer in the group
+    (`UpdateGroup::enhe_resend_pending`) instead of sending.
+    `flush_done_ipv4` sends it once every byte of the job is enqueued,
+    after the parked withdraws and before any re-run, with the peer's
+    next-hop as it is then (nothing while it has none; a peer that left
+    meanwhile has an empty Adj-RIB-Out). The same shape as the parked
+    withdraws (`withdraw_ipv4_deferrable`) and the members frozen for a
+    move.
+  - Main's re-send is one function, `update_group::resend_ipv4_enhe`,
+    called by `Bgp::enhe_catch_up_v4` and by `flush_done_ipv4`.
+  - Verified: the 16 gates and controls of `enhe_link_local_review_tests`
+    pass; each of six mutations (no deferral; a deferral that also sends
+    at once; no re-send at completion; a re-send to every member at
+    completion; the re-send sending the legacy form without a next-hop;
+    no re-send at all) fails its own gates; workspace clippy (and the
+    `lua` feature's) and the full unit suite stay green. The full BDD suite
+    at the default concurrency (32) passes, 381 of 381.
+- Adjacent, open (PLAUSIBLE, read only): the soft-out re-send
+  (`route_soft_out_peer_table`, `send_ipv4_direct`) is the same race in
+  general form, not tied to the extended next-hop. An out-policy edit that
+  leaves the group signature alone re-sends a member's routes directly
+  while a flush job carrying the old policy's attribute may still be out;
+  the job's bytes then land last, and the Adj-RIB-Out records the new
+  attribute. Its withdraws are already parked (`withdraw_ipv4_deferrable`);
+  its announces are not. Wants its own gate before a fix.
 
 ### 30. P3 CONFIRMED — `suppress-fib-pending` is bypassed by the N>1 session-up dump
 
