@@ -1205,6 +1205,13 @@ pub struct Peer {
     /// task is spawned/torn down here but idle; routing the egress
     /// through it comes later.
     pub pet: Option<super::peer_egress::PeerEgressTask>,
+    /// The RFC 8950 extended next-hop toward this peer as of the last
+    /// refresh (`refresh_enhe_next_hop`: at session-up and on every address
+    /// event for its interface). Carried in `sync_ctx` to the gate-on
+    /// egress engines, and compared on an address event to tell when the
+    /// routes held back or sent with an old next-hop must go out again
+    /// (review finding #29).
+    pub enhe_next_hop: super::route::EnheNextHop,
     /// Egress backlog gauge (Tier 1b backpressure): the per-peer writer
     /// task publishes `packet_rx.len()` (pending UPDATE messages) here
     /// after each write; the sync cursor reads it and parks itself when
@@ -1429,6 +1436,7 @@ impl Peer {
             adj_out: AdjRib::new(),
             sync_v4: None,
             pet: None,
+            enhe_next_hop: super::route::EnheNextHop::Off,
             egress_depth: Arc::new(AtomicUsize::new(0)),
             opt: ParseOption::default(),
             policy_list: BTreeMap::new(),
@@ -1840,7 +1848,18 @@ impl Peer {
             as4: self.as4,
             attach_unknown_attr: self.config.attach_unknown_attr.clone(),
             as_sets_withdraw,
+            enhe: self.enhe_next_hop,
         }
+    }
+
+    /// Recompute [`Self::enhe_next_hop`] from our interface addresses;
+    /// returns whether it changed.
+    pub fn refresh_enhe_next_hop(
+        &mut self,
+        addrs: &super::interface_addrs::InterfaceAddrs,
+    ) -> bool {
+        let now = super::route::enhe_next_hop(self, addrs);
+        std::mem::replace(&mut self.enhe_next_hop, now) != now
     }
 
     /// The eBGP AS_PATH egress transform inputs for this peer (A2). Shared
@@ -2266,6 +2285,9 @@ pub fn fsm(
             // with the session coming up) must not mislabel the next
             // reset.
             peer.down_reason = None;
+            // The extended next-hop the egress engines and the session-up
+            // dump below use (review finding #29).
+            peer.refresh_enhe_next_hop(bgp_ref.interface_addrs);
             // A2 ⑥ (gate-on): spawn the per-peer egress task. For now it
             // is idle (lifecycle only); routing the v4 egress to it comes later.
             if super::peer_egress::peer_egress_task_enabled() {

@@ -1,0 +1,7 @@
+# Phase 1: a bare `router bgp` block — spawns ND so it learns i1 before RA
+# is enabled (the two-step bring-up of bgp_unnumbered_neighbor).
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 1.1.1.1

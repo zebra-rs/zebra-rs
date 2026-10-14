@@ -25,9 +25,10 @@ knobs (PR #2423, `7852fc15`), #16 (PR #2425, `6d4446b1`), #17 with #18
 #19 (PR #2436, `17b906bc`, one review round folded in) and #21's
 `bgp router-id` item (PR #2438, `ae20d01f`, one review round folded in)
 #22 (PR #2440, `02633546`, one review round folded in) and #25 (PR #2441,
-`abdd26d7`, one review round folded in). Each fixed entry ends with its fix
-note; everything else is open. In progress: #27, branch
-`bgp-fs-srp-egress-gates`.
+`abdd26d7`, one review round folded in), and #27 part A (PR #2515,
+`1f9fb965`; two follow-ups open). Each fixed entry ends with its fix note;
+everything else is open. In progress: #29, branch
+`bgp-enhe-link-local-flush`.
 
 Method: one lead read the selection ladder and every egress builder, then
 five independent read-only reviewers each took one dimension (update-group
@@ -1988,7 +1989,7 @@ cap. The two reviews agree on every overlapping item.
   stale PE's import is not depreferenced against a fresh sibling-RD import
   and CE peers receive LLGR_STALE-tagged routes.
 
-### 27. P3 CONFIRMED, FIXED on branch `bgp-fs-srp-egress-gates` (bar two follow-ups) — Flowspec and SR-Policy egress skip the shared gates
+### 27. P3 CONFIRMED, FIXED in #2515 (bar two follow-ups) — Flowspec and SR-Policy egress skip the shared gates
 
 - `route_update_flowspec` (`route.rs:11094-11150`) has no
   `community_suppresses_advertisement`, no LLGR gate in
@@ -2046,7 +2047,7 @@ cap. The two reviews agree on every overlapping item.
   an iBGP neighbor of z2 that comes up later): on `main` z4 and z3 reject
   their policies and z5 never gets its own (the z5 half moved out with the
   replay follow-up, below).
-- FIXED (branch `bgp-fs-srp-egress-gates`):
+- FIXED (#2515):
   - Flowspec: `route_update_flowspec` holds a path back on NO_ADVERTISE /
     NO_EXPORT (`community_suppresses_advertisement`) and on an LLGR-stale
     path toward a peer without LLGR (`llgr_blocks_advertisement`); a peer
@@ -2106,7 +2107,7 @@ cap. The two reviews agree on every overlapping item.
   not the RFC 4659 IPv4-mapped form LU-v6 uses (`13525`); with no global
   v6 the upstream next-hop is left untouched (`13062`).
 
-### 29. P3 CONFIRMED — ENHE member without an observed link-local is skipped at flush after Adj-RIB-Out recorded the send; gate-on engines ignore ENHE
+### 29. P3 CONFIRMED, FIXED on branch `bgp-enhe-link-local-flush` — ENHE member without an observed link-local is skipped at flush after Adj-RIB-Out recorded the send; gate-on engines ignore ENHE
 
 - `update_group.rs:876-897` `continue`s per member when `enhe_v6` is
   `None` (asserted as intended by `flush_job_enhe_per_member_next_hops`),
@@ -2115,6 +2116,96 @@ cap. The two reviews agree on every overlapping item.
   (`route.rs:15045-15053`) falls back to legacy encoding with
   NEXT_HOP = router-id. `group_egress.rs:309-313` and `peer_egress.rs`
   never compose an ENHE next-hop (env-gated).
+- Re-read on `main` (2026-10-13): still so. The flush comment ("we'll
+  re-cache on the next event arrival") promises a catch-up that does not
+  exist — `RibRx::AddrAdd` only records the address. Every direct send
+  (`route_sync_ipv4`, `route_sync_v4_chunk`, the soft-out send, the N>1
+  `DumpV4` through `DumpParamsV4::enhe_v6`) takes a missing next-hop as
+  "not extended next-hop" and falls back to the legacy NLRI with our
+  router-id as the IPv4 NEXT_HOP. The window is any time BGP holds no
+  link-local for the interface while the session is up: an address flap,
+  or an `AddrAdd` that reaches BGP after the session came up.
+- Gates (branch `bgp-enhe-link-local-flush`; each compiles on `main` and
+  fails there, except the controls). Unit,
+  `enhe_link_local_review_tests.rs` (a child of `inst.rs`; an unnumbered
+  eBGP neighbor on interface 7 with RFC 8950 negotiated, in its update
+  group; the flush job built and run in place; the address arrives as
+  `RibRx::AddrAdd`):
+  `a_member_skipped_for_want_of_a_link_local_is_sent_the_route_once_one_appears`,
+  `the_session_up_dump_waits_for_the_link_local`,
+  `the_chunked_session_up_dump_waits_for_the_link_local` (on `main` both
+  dumps send the route with NEXT_HOP 10.0.0.9, our router-id); controls
+  `with_the_link_local_known_the_route_goes_out_once` (and a repeated
+  address event re-sends nothing) and
+  `a_numbered_neighbor_ignores_link_local_events`. BDD
+  `bgp_unnumbered_link_local_gap` (z1–z2 unnumbered over RA, z1's
+  link-local pinned to fe80::1; z1 deletes it, announces a route, adds it
+  back): on `main` z2 never gets the route, while a route announced after
+  the re-add arrives and neither side shows a reset — so the failure is not
+  a re-sync's doing. IPv4 only — the extended next-hop's family.
+- Gates for the gate-on engines (with the fix, the user's scope A+B), in
+  the same file, each in a child test process with one engine's switch on
+  and the session brought up through the real Established transition:
+  `the_peer_egress_task_sends_the_link_local_next_hop` /
+  `the_group_engine_sends_the_link_local_next_hop` (on `main` both send the
+  route with NEXT_HOP 10.0.0.9) and
+  `the_peer_egress_task_catches_up_once_the_link_local_appears` /
+  `the_group_engine_catches_up_once_the_link_local_appears` (on `main`
+  both send the legacy form before any link-local exists).
+- Reviewer follow-up on the fix (P2, the N>1 dump): the shards build
+  `DumpV4` with the next-hop main resolved when it broadcast the dump, and
+  main records the dump's rows only as the shards' acks arrive. An
+  `AddrAdd` between the two re-sent an Adj-RIB-Out still without those
+  rows; the acks then only recorded them, and a later address event finds
+  the next-hop unchanged — the routes never went out. Gates, same file (a
+  two-shard pool with the route in one shard's slice; the address reported
+  between the broadcast and main taking the acks):
+  `a_sharded_dump_in_flight_when_the_link_local_appears_is_sent` and, with
+  an engine on, `the_peer_egress_task_sends_a_sharded_dump_in_flight` /
+  `the_group_engine_sends_a_sharded_dump_in_flight` (before this, none sent
+  the route; on `main` the shard sends the legacy form); control
+  `a_sharded_dump_with_the_link_local_known_sends_once`.
+- FIXED (branch `bgp-enhe-link-local-flush`):
+  - `EnheNextHop` (`Off` / `Ready(next-hop)` / `Missing`) names the three
+    cases the code had folded into an `Option`; `enhe_next_hop(peer,
+    addrs)` computes it. Every direct send — the session-up dump, its
+    chunked form, the soft-out send — and the N>1 `DumpV4`
+    (`DumpParamsV4::enhe`) holds a route back while it is `Missing`
+    instead of sending the legacy form with our router-id; the rows are
+    still recorded (the shard still reports them).
+  - The peer keeps the value (`Peer::enhe_next_hop`), refreshed at
+    session-up and on every address event for its interface
+    (`Bgp::enhe_next_hop_event`, on `RibRx::AddrAdd` / `AddrDel`). When it
+    changes, the peer catches up (`Bgp::enhe_catch_up_v4`) through
+    whichever egress owns it: main re-sends the peer's Adj-RIB-Out with a
+    ready next-hop; the per-peer egress task (`Refresh`) or the group
+    engine (`AddMember`) takes the new value, and main then asks it to
+    re-send its own (`Resend`, a no-op while the next-hop is missing). Main
+    alone decides when a re-send is due.
+  - The dump barrier keeps the next-hop the N>1 dump was built with; when
+    the last shard's ack is in and the peer's next-hop has changed since,
+    the peer catches up once more, before End-of-RIB — every dump row is
+    recorded by then, wherever the Adj-RIB-Out lives.
+  - `SyncCtx::enhe` carries the value to the gate-on engines: the per-peer
+    egress task encodes with it, and the group engine encodes per member
+    (`send_route_to`: the shared legacy bytes, the member's own next-hop,
+    or nothing while it has none). Both built the legacy form only.
+  - The session-up End-of-RIB still goes out on time when routes are held
+    back; the catch-up follows it.
+  - Verified: the 10 gates and 3 controls pass, and a shard test pins the
+    N>1 hold-back; each of sixteen mutations (no catch-up, `Missing`
+    sending the legacy form, no refresh at session-up, the task's / the
+    group engine's legacy encode, the task's / the group engine's missing
+    re-send, a re-send on every event, main's missing re-send, the shard
+    sending the legacy form, the new next-hop withheld from the task / the
+    group engine, no catch-up at the dump's completion, a catch-up at every
+    completion, the barrier forgetting the dump's next-hop) fails its own
+    gates; workspace clippy and the full unit suite stay green. The full
+    BDD suite at the default concurrency (32) passes, 381 of 381
+    (`bgp_unnumbered_link_local_gap` included; on the gates alone it was
+    380 of 381, that feature failing at its gap step); a throwaway copy
+    with a `clear` showed `Last reset` on both sides, so the feature's
+    no-reset checks are live.
 
 ### 30. P3 CONFIRMED — `suppress-fib-pending` is bypassed by the N>1 session-up dump
 

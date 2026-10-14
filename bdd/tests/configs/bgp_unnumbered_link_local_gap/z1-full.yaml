@@ -1,0 +1,25 @@
+# Phase 2: RA on i1 and the interface-keyed neighbor; IPv4 routes go to
+# z2 over the link-local session with the RFC 8950 extended next-hop. No
+# BFD: the feature takes z1's link-local away for a few seconds and the
+# session must ride that out. A one-second advertisement interval makes
+# the update-group flush happen inside the gap.
+interface:
+- if-name: i1
+  ipv6:
+    router-advertisements:
+      send-advertisements: true
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 1.1.1.1
+    timer:
+      adv-interval:
+        ebgp: 1
+    interface-neighbor:
+    - interface: i1
+      remote-as: 65002
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.0.0.1/32

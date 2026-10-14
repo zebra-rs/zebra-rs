@@ -670,18 +670,22 @@ struct DumpStateV4 {
     remaining: usize,
     /// UPDATEs enqueued so far, summed across shards (for the EoR log).
     sent: usize,
+    /// The RFC 8950 extended next-hop the shards built the dump with.
+    enhe: super::route::EnheNextHop,
 }
 
 /// Returned by [`DumpBarrierV4::ack`] on the final ack of a `req_id`.
 struct DumpDoneSummaryV4 {
     ident: usize,
     sent: usize,
+    enhe: super::route::EnheNextHop,
 }
 
 impl DumpBarrierV4 {
-    /// Register a dump fanned to `n` shards for `ident`; returns its
-    /// `req_id`. Called from `Bgp::broadcast_dump_v4` at session-up (N>1).
-    fn start(&mut self, ident: usize, n: usize) -> u64 {
+    /// Register a dump fanned to `n` shards for `ident`, built with extended
+    /// next-hop `enhe`; returns its `req_id`. Called from
+    /// `Bgp::broadcast_dump_v4` at session-up (N>1).
+    fn start(&mut self, ident: usize, n: usize, enhe: super::route::EnheNextHop) -> u64 {
         let req_id = self.next_req_id;
         self.next_req_id += 1;
         self.inflight.insert(
@@ -690,6 +694,7 @@ impl DumpBarrierV4 {
                 ident,
                 remaining: n,
                 sent: 0,
+                enhe,
             },
         );
         req_id
@@ -709,6 +714,7 @@ impl DumpBarrierV4 {
         Some(DumpDoneSummaryV4 {
             ident: state.ident,
             sent: state.sent,
+            enhe: state.enhe,
         })
     }
 }
@@ -4364,6 +4370,80 @@ impl Bgp {
         }
     }
 
+    /// Review finding #29: an address on `ifindex` came or went. Each
+    /// Established unnumbered peer there whose RFC 8950 extended next-hop
+    /// that changed catches up ([`Self::enhe_catch_up_v4`]).
+    fn enhe_next_hop_event(&mut self, ifindex: u32) {
+        for ident in self.peers.idents() {
+            let Some(peer) = self.peers.get_mut_by_idx(ident) else {
+                continue;
+            };
+            if peer.state == super::peer::State::Established
+                && peer.scope_id == Some(ifindex)
+                && peer.refresh_enhe_next_hop(&self.interface_addrs)
+            {
+                self.enhe_catch_up_v4(ident);
+            }
+        }
+    }
+
+    /// Bring peer `ident`'s IPv4-unicast egress in step with its extended
+    /// next-hop after it changed: the egress that owns the peer's routes —
+    /// its update group's engine or its per-peer egress task, which take the
+    /// new `SyncCtx` and then a `Resend`, else main — sends the peer's whole
+    /// Adj-RIB-Out again with the new next-hop when there is one: the routes
+    /// held back while no link-local was known, or sent with the old
+    /// next-hop (review finding #29).
+    fn enhe_catch_up_v4(&self, ident: usize) {
+        let v4 = bgp_packet::AfiSafi::new(bgp_packet::Afi::Ip, bgp_packet::Safi::Unicast);
+        let Some(peer) = self.peers.get_by_idx(ident) else {
+            return;
+        };
+        let ctx = peer.sync_ctx(self.router_id, self.as_sets_withdraw);
+        let add_path = peer.opt.is_add_path_send(v4.afi, v4.safi);
+        let group_task = peer
+            .update_group_id
+            .get(&v4)
+            .and_then(|gid| self.update_groups.get(&v4)?.group_by_id(gid))
+            .and_then(|group| group.task.as_ref());
+        if let Some(task) = group_task {
+            task.send(super::group_egress::GroupEgressDeltaV4::AddMember {
+                ident,
+                ctx: Box::new(ctx),
+                add_path,
+            });
+            task.send(super::group_egress::GroupEgressDeltaV4::Resend { ident });
+        } else if let Some(pet) = peer.pet.as_ref() {
+            let _ = pet
+                .delta_tx
+                .send(super::peer_egress::EgressDeltaV4::Refresh {
+                    ctx: Box::new(ctx),
+                    add_path,
+                });
+            let _ = pet.delta_tx.send(super::peer_egress::EgressDeltaV4::Resend);
+        } else if let super::route::EnheNextHop::Ready(nh) = peer.enhe_next_hop {
+            let entries: Vec<(std::sync::Arc<bgp_packet::BgpAttr>, bgp_packet::Ipv4Nlri)> = peer
+                .adj_out
+                .v4
+                .0
+                .iter()
+                .flat_map(|(prefix, rows)| {
+                    rows.iter().map(move |row| {
+                        let id = if add_path { row.local_id } else { 0 };
+                        (
+                            row.attr.clone(),
+                            bgp_packet::Ipv4Nlri {
+                                id,
+                                prefix: *prefix,
+                            },
+                        )
+                    })
+                })
+                .collect();
+            super::update_group::send_ipv4_direct(&ctx, entries, Some(nh));
+        }
+    }
+
     /// Our RTC membership (RFC 4684), IPv4 and IPv6: the union of the local
     /// VRFs' import RTs per family, empty meaning the default.
     fn local_rtc_membership(
@@ -4964,12 +5044,14 @@ impl Bgp {
                 // session subscribed before this address was learned picks up
                 // its concrete ifindex. Per-neighbor no-op when unchanged.
                 super::config::bfd_reconcile_all(self);
+                self.enhe_next_hop_event(addr.ifindex);
             }
             RibRx::AddrDel(addr) => {
                 self.interface_addrs.forget(&addr);
                 self.connected_subnets.forget(&addr);
                 self.refresh_connected();
                 super::config::bfd_reconcile_all(self);
+                self.enhe_next_hop_event(addr.ifindex);
             }
             RibRx::RouterIdUpdate(router_id) => {
                 // RIB-derived router-id (`system router-id` config
@@ -7640,6 +7722,18 @@ impl Bgp {
                         }
                     }
                     if let Some(done) = self.pending_dumps_v4.ack(req_id, sent) {
+                        // The peer's extended next-hop changed while the dump
+                        // was in flight: the shards sent its routes with the
+                        // old one, or held them back, and the address event
+                        // re-sent an Adj-RIB-Out still without them. Every
+                        // row is recorded now, so catch up once more before
+                        // EoR (reviewer follow-up on #29).
+                        if self.peers.get_by_idx(done.ident).is_some_and(|p| {
+                            p.state == super::peer::State::Established
+                                && p.enhe_next_hop != done.enhe
+                        }) {
+                            self.enhe_catch_up_v4(done.ident);
+                        }
                         if let Some(peer) = self.peers.get_mut_by_idx(done.ident) {
                             super::route::send_eor_ipv4_unicast(peer);
                         }
@@ -7705,14 +7799,11 @@ impl Bgp {
                 .cap_recv
                 .llgr
                 .contains_key(&AfiSafi::new(Afi::Ip, Safi::Unicast)),
-            enhe_v6: peer
-                .is_enhe_v4_negotiated()
-                .then(|| super::update_group::compose_enhe_next_hop(peer, &self.interface_addrs))
-                .flatten(),
+            enhe: super::route::enhe_next_hop(peer, &self.interface_addrs),
             egress_high_water: high_water,
         };
         let ctx = std::sync::Arc::new(peer.sync_ctx(self.router_id, self.as_sets_withdraw));
-        let req_id = self.pending_dumps_v4.start(ident, n);
+        let req_id = self.pending_dumps_v4.start(ident, n, params.enhe);
         self.shards
             .as_ref()
             .expect("pool present (checked above)")
@@ -8363,7 +8454,7 @@ mod tests {
         // A2 step ① — the per-req_id barrier: N acks complete one dump,
         // summing the per-shard `sent` counts.
         let mut b = DumpBarrierV4::default();
-        let req = b.start(7, 3); // peer ident 7, fanned to 3 shards
+        let req = b.start(7, 3, crate::bgp::route::EnheNextHop::Off); // peer ident 7, fanned to 3 shards
         assert!(b.ack(req, 10).is_none(), "1/3");
         assert!(b.ack(req, 5).is_none(), "2/3");
         let done = b.ack(req, 2).expect("3/3 completes");
@@ -8375,8 +8466,8 @@ mod tests {
     #[test]
     fn dump_barrier_tracks_concurrent_dumps_independently() {
         let mut b = DumpBarrierV4::default();
-        let a = b.start(1, 2);
-        let c = b.start(2, 2);
+        let a = b.start(1, 2, crate::bgp::route::EnheNextHop::Off);
+        let c = b.start(2, 2, crate::bgp::route::EnheNextHop::Off);
         assert_ne!(a, c, "req_ids are distinct");
         assert!(b.ack(a, 1).is_none());
         assert!(b.ack(c, 4).is_none());
@@ -9107,3 +9198,7 @@ mod pet_sync_review_tests;
 #[cfg(test)]
 #[path = "fs_srp_egress_review_tests.rs"]
 mod fs_srp_egress_review_tests;
+
+#[cfg(test)]
+#[path = "enhe_link_local_review_tests.rs"]
+mod enhe_link_local_review_tests;

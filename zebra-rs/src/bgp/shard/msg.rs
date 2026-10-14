@@ -37,9 +37,9 @@
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr};
 
-use bgp_packet::{Ipv4MpReachNextHop, Ipv4Nlri, Ipv6Nlri, Label, RouteDistinguisher};
+use bgp_packet::{Ipv4Nlri, Ipv6Nlri, Label, RouteDistinguisher};
 
-use super::super::route::{BgpRib, BgpRibType, PolicyDecision, SyncCtx, VpnNexthop};
+use super::super::route::{BgpRib, BgpRibType, EnheNextHop, PolicyDecision, SyncCtx, VpnNexthop};
 
 /// Main → shard. Each variant is one unit of work the shard applies to
 /// its owned state; route-bearing variants reply with a [`ShardOut`].
@@ -224,15 +224,17 @@ pub enum ShardMsg {
 /// Per-dump egress params a [`ShardMsg::DumpV4`] carries — the peer-derived
 /// inputs a shard can't reconstruct without the `Peer`, resolved on main in
 /// `broadcast_dump_v4`: AddPath-send, the LLGR capability (for the
-/// stale-route gate, RFC 9494 §4.3), the RFC 8950 ENHE next-hop (`Some`
-/// only on an IPv4-over-IPv6 session), and the Tier-1b egress high-water
+/// stale-route gate, RFC 9494 §4.3), the RFC 8950 extended next-hop
+/// (`Missing` holds the sends back: the rows are still reported, recorded on
+/// main and sent once the link-local is reported — review finding #29), and
+/// the Tier-1b egress high-water
 /// mark the shard parks against. All `Copy`, so the broadcast closure
 /// stamps each shard's message cheaply.
 #[derive(Debug, Clone, Copy)]
 pub struct DumpParamsV4 {
     pub add_path: bool,
     pub llgr_v4: bool,
-    pub enhe_v6: Option<Ipv4MpReachNextHop>,
+    pub enhe: EnheNextHop,
     pub egress_high_water: usize,
 }
 

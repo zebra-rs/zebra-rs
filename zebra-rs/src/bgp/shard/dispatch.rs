@@ -219,17 +219,24 @@ impl BgpShard {
         // thread sleeps.
         let max = ctx.max_packet_size();
         let mut sent = 0usize;
+        // No link-local for the extended next-hop yet: send nothing, but
+        // report the rows so main records them and sends them once the
+        // address is reported (review finding #29).
+        let Some(enhe_v6) = params.enhe.for_send() else {
+            return vec![ShardOut::DumpDoneV4 {
+                req_id,
+                ident: ctx.ident,
+                sent,
+                advertised,
+            }];
+        };
         for (attr, nlris) in buckets {
             while ctx.egress_depth.load(Ordering::Relaxed) > params.egress_high_water {
                 std::thread::sleep(std::time::Duration::from_millis(DUMP_PARK_MS));
             }
-            for buf in super::super::update_group::encode_ipv4_update(
-                &attr,
-                &nlris,
-                max,
-                ctx.as4,
-                params.enhe_v6,
-            ) {
+            for buf in
+                super::super::update_group::encode_ipv4_update(&attr, &nlris, max, ctx.as4, enhe_v6)
+            {
                 ctx.send_packet(buf);
                 sent += 1;
             }
@@ -1664,7 +1671,7 @@ mod tests {
         super::super::msg::DumpParamsV4 {
             add_path: false,
             llgr_v4: true,
-            enhe_v6: None,
+            enhe: super::super::super::route::EnheNextHop::Off,
             egress_high_water: 64,
         }
     }
@@ -1716,5 +1723,36 @@ mod tests {
             "the shard's one route is built + encoded into >=1 UPDATE and reported \
              as one adj_out delta: {out:?}"
         );
+    }
+
+    /// Review finding #29: toward an extended-next-hop peer with no
+    /// link-local known yet the shard sends nothing — the legacy encoding
+    /// would carry our router-id as the next-hop — but still reports the
+    /// row, so main records it and sends it once the address is reported.
+    #[test]
+    fn dump_v4_holds_back_with_no_link_local() {
+        let mut shard = BgpShard::default();
+        shard.handle(update_v4_compute(5, "10.0.0.0/24", "192.0.2.1"));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut ctx = super::super::super::route::SyncCtx::for_test();
+        ctx.packet_tx = Some(tx);
+        let params = super::super::msg::DumpParamsV4 {
+            enhe: super::super::super::route::EnheNextHop::Missing,
+            ..dump_params()
+        };
+        let out = shard.handle(ShardMsg::DumpV4 {
+            req_id: 8,
+            ctx: std::sync::Arc::new(ctx),
+            params,
+        });
+        assert!(
+            matches!(
+                out.as_slice(),
+                [ShardOut::DumpDoneV4 { req_id: 8, sent: 0, advertised, .. }]
+                    if advertised.len() == 1
+            ),
+            "nothing sent, the row reported: {out:?}"
+        );
+        assert!(rx.try_recv().is_err(), "no UPDATE left the shard");
     }
 }

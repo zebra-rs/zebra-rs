@@ -22,7 +22,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
 
-use bgp_packet::{Ipv4Nlri, UpdatePacket};
+use bgp_packet::{BgpAttr, Ipv4Nlri, UpdatePacket};
 use bytes::BytesMut;
 use ipnet::Ipv4Net;
 use tokio::sync::mpsc::{self, UnboundedSender};
@@ -30,7 +30,7 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 use crate::context::task::Task;
 
 use super::adj_rib::{AdjRibTable, Out};
-use super::route::{BgpRib, SyncCtx};
+use super::route::{BgpRib, EnheNextHop, SyncCtx};
 use super::store::BgpAttrStore;
 use super::update_group::{UpdateGroupId, encode_ipv4_update};
 
@@ -77,6 +77,15 @@ pub enum GroupEgressDeltaV4 {
     RecordAdjOut {
         prefix: Ipv4Net,
         rib: BgpRib,
+    },
+    /// Send member `ident` the group's Adj-RIB-Out again with its extended
+    /// next-hop, now ready: the routes it was held back while it had none,
+    /// or was sent with an old one. Main asks after the member's next-hop
+    /// changed — on the address event (after an `AddMember` carrying it), or
+    /// when a sharded session-up dump built with the old one completes
+    /// (review finding #29).
+    Resend {
+        ident: usize,
     },
     /// `prefix` (path `id` under AddPath, else the whole prefix) is gone.
     /// The member left out is the one whose path the withdrawn row was — it
@@ -215,6 +224,7 @@ impl Engine {
                 self.add_path = add_path;
                 self.members.insert(ident, *ctx);
             }
+            GroupEgressDeltaV4::Resend { ident } => self.resend_to(ident),
             GroupEgressDeltaV4::RemoveMember { ident } => {
                 self.members.remove(&ident);
             }
@@ -306,9 +316,18 @@ impl Engine {
         let prev_source = prev.as_ref().map(|p| p.ident);
         let already_sent = prev.is_some_and(|p| Arc::ptr_eq(&p.attr, &arc));
         if !already_sent {
-            let bytes_list =
-                encode_ipv4_update(&arc, &[nlri], ctx.max_packet_size(), ctx.as4, None);
-            self.fan(&bytes_list, Some(source));
+            let legacy = encode_ipv4_update(
+                &arc,
+                std::slice::from_ref(&nlri),
+                ctx.max_packet_size(),
+                ctx.as4,
+                None,
+            );
+            for (ident, member) in &self.members {
+                if *ident != source {
+                    send_route_to(member, &arc, &nlri, &legacy);
+                }
+            }
         } else if let Some(old) = prev_source
             && old != source
             && let Some(member) = self.members.get(&old)
@@ -316,10 +335,48 @@ impl Engine {
             // The UPDATE every member holds is unchanged, but its path moved
             // off the member it was kept from (split-horizon): that member
             // lacks it and is sent it now (review follow-up on #22).
-            for bytes in encode_ipv4_update(&arc, &[nlri], ctx.max_packet_size(), ctx.as4, None) {
-                member.send_packet(bytes);
-            }
+            let legacy = encode_ipv4_update(
+                &arc,
+                std::slice::from_ref(&nlri),
+                ctx.max_packet_size(),
+                ctx.as4,
+                None,
+            );
+            send_route_to(member, &arc, &nlri, &legacy);
         }
+    }
+
+    /// Send member `ident` every route of the group's Adj-RIB-Out but its
+    /// own paths (split horizon), with its extended next-hop — when it has
+    /// one: the routes it was held back while it had none, or was sent with
+    /// an old one.
+    fn resend_to(&self, ident: usize) {
+        let Some(member) = self.members.get(&ident) else {
+            return;
+        };
+        let EnheNextHop::Ready(nh) = member.enhe else {
+            return;
+        };
+        let entries: Vec<(Arc<BgpAttr>, Ipv4Nlri)> = self
+            .adj_out
+            .0
+            .iter()
+            .flat_map(|(prefix, rows)| {
+                rows.iter()
+                    .filter(|row| row.ident != ident)
+                    .map(move |row| {
+                        let id = if self.add_path { row.local_id } else { 0 };
+                        (
+                            row.attr.clone(),
+                            Ipv4Nlri {
+                                id,
+                                prefix: *prefix,
+                            },
+                        )
+                    })
+            })
+            .collect();
+        super::update_group::send_ipv4_direct(member, entries, Some(nh));
     }
 
     /// Record a session-up-sync row in `adj_out` **without** sending — sync
@@ -380,7 +437,7 @@ impl Engine {
         }
     }
 
-    /// Fan pre-encoded UPDATE bytes to every member but `skip` (the path's
+    /// Fan pre-encoded UPDATE bytes (a withdraw) to every member but `skip` (the path's
     /// source, split-horizon). The encode happened once; this is a cheap
     /// per-member buffer clone + enqueue (the per-member backpressure rides
     /// each ctx's `send_packet`).
@@ -393,6 +450,34 @@ impl Engine {
                 ctx.send_packet(buf.clone());
             }
         }
+    }
+}
+
+/// Send one built route to a member: the group's shared legacy bytes, or —
+/// toward an RFC 8950 extended-next-hop member — an encode with its own
+/// next-hop on its interface, or nothing while it has none yet (the route
+/// is in the Adj-RIB-Out and goes out when the next-hop is reported). The
+/// engine built every route with the legacy encoding only (review finding
+/// #29).
+fn send_route_to(member: &SyncCtx, attr: &Arc<BgpAttr>, nlri: &Ipv4Nlri, legacy: &[BytesMut]) {
+    match member.enhe {
+        EnheNextHop::Off => {
+            for bytes in legacy {
+                member.send_packet(bytes.clone());
+            }
+        }
+        EnheNextHop::Ready(nh) => {
+            for bytes in encode_ipv4_update(
+                attr,
+                std::slice::from_ref(nlri),
+                member.max_packet_size(),
+                member.as4,
+                Some(nh),
+            ) {
+                member.send_packet(bytes);
+            }
+        }
+        EnheNextHop::Missing => {}
     }
 }
 

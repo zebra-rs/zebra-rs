@@ -115,6 +115,12 @@ pub enum EgressDeltaV4 {
     /// re-fanning the Loc-RIB on soft-out, so the re-evaluation uses the new
     /// policy. `Box`ed to keep the enum small.
     Refresh { ctx: Box<SyncCtx>, add_path: bool },
+    /// Send the Adj-RIB-Out again with the extended next-hop, now ready: the
+    /// routes held back while there was none, or sent with an old one. Main
+    /// asks after the next-hop changed — on the address event (after a
+    /// `Refresh` carrying it), or when a sharded session-up dump built with
+    /// the old one completes (review finding #29).
+    Resend,
     /// A `show … advertised-routes` request at gate-on: reply with the PET's
     /// v4 Adj-RIB-Out (one `(prefix, paths)` per prefix) on the oneshot,
     /// since `adj_out` lives here, not on the peer.
@@ -189,6 +195,7 @@ impl Engine {
                 self.ctx = *ctx;
                 self.add_path = add_path;
             }
+            EgressDeltaV4::Resend => self.resend(),
             EgressDeltaV4::DumpAdjOut { reply } => {
                 let entries = self
                     .adj_out
@@ -230,9 +237,38 @@ impl Engine {
         // a re-advertise of the same attr records but does not re-send.
         let prev = self.adj_out.record_out(prefix, rib, self.add_path);
         let already_sent = prev.is_some_and(|p| Arc::ptr_eq(&p.attr, &arc));
-        if !already_sent {
-            super::update_group::send_ipv4_direct(&self.ctx, vec![(arc, nlri)], None);
+        // Toward an extended-next-hop peer, its next-hop on the interface —
+        // or nothing while it has none: the route is recorded and goes out
+        // when the next-hop is reported (review finding #29).
+        if !already_sent && let Some(enhe_v6) = self.ctx.enhe.for_send() {
+            super::update_group::send_ipv4_direct(&self.ctx, vec![(arc, nlri)], enhe_v6);
         }
+    }
+
+    /// Send every route of the Adj-RIB-Out with the extended next-hop, when
+    /// there is one.
+    fn resend(&self) {
+        let super::route::EnheNextHop::Ready(nh) = self.ctx.enhe else {
+            return;
+        };
+        let entries: Vec<(Arc<bgp_packet::BgpAttr>, Ipv4Nlri)> = self
+            .adj_out
+            .0
+            .iter()
+            .flat_map(|(prefix, rows)| {
+                rows.iter().map(move |row| {
+                    let id = if self.add_path { row.local_id } else { 0 };
+                    (
+                        row.attr.clone(),
+                        Ipv4Nlri {
+                            id,
+                            prefix: *prefix,
+                        },
+                    )
+                })
+            })
+            .collect();
+        super::update_group::send_ipv4_direct(&self.ctx, entries, Some(nh));
     }
 
     /// Record a DumpV4 ③ row in `adj_out` **without rebuilding** — `rib.attr`
