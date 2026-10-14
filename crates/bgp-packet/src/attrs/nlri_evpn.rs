@@ -733,6 +733,10 @@ pub fn esi_from_str(s: &str) -> Option<[u8; 10]> {
     Some(esi)
 }
 
+/// MAX-ESI, ten octets of 0xFF, which RFC 7432 §5 reserves (as it does
+/// ESI 0, a single-homed site).
+pub const MAX_ESI: [u8; 10] = [0xFF; 10];
+
 /// Shared `Display` body for the IGMP/MLD Join (Type 7) and Leave (Type 8)
 /// Synch route keys, which differ only in the leading route-type number:
 /// `[<rt>]:[<ESI>]:[EthTag]:[SrcLen]:[Src]:[GrpLen]:[Grp]:[OrigLen]:[Orig]`.

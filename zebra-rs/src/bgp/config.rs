@@ -2189,7 +2189,9 @@ fn config_ethernet_segment(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
 }
 
 /// `router bgp afi-safi evpn ethernet-segment <name> esi <value>` — the
-/// 10-octet ESI (colon-hex or 20 hex digits). A malformed value is rejected.
+/// 10-octet ESI (colon-hex or 20 hex digits). A malformed or reserved value
+/// (`check_es_esi`) is refused at commit; one only the startup config can
+/// still bring in leaves the segment without an ESI.
 /// Setting the ESI originates the ES routes (Type-4 + per-ES Type-1 A-D);
 /// changing or clearing it withdraws the previous ones first.
 fn config_ethernet_segment_esi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
@@ -2199,7 +2201,21 @@ fn config_ethernet_segment_esi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> O
     }
     let name = args.string()?;
     let new_esi = if op.is_set() {
-        Some(bgp_packet::esi_from_str(&args.string()?)?)
+        let value = args.string()?;
+        match super::ethernet_segment::check_es_esi(&value) {
+            Ok(esi) => Some(esi),
+            Err(e) => {
+                tracing::warn!(
+                    proto = "bgp",
+                    category = "evpn",
+                    es = %name,
+                    esi = %value,
+                    error = %e,
+                    "ethernet-segment esi refused; segment left without an ESI"
+                );
+                None
+            }
+        }
     } else {
         None
     };
@@ -11149,6 +11165,52 @@ mod es_linkadd_resync_tests {
             .and_then(|t| t.selected.get(&prefix))
             .expect("the Type-2 must stay originated across the resync")
             .esi
+    }
+
+    /// The ESIs of the Ethernet Segment (Type-4) routes we originate.
+    fn originated_es_esis(bgp: &Bgp) -> Vec<[u8; 10]> {
+        bgp.local_rib
+            .evpn
+            .values()
+            .flat_map(|t| t.selected.keys())
+            .filter_map(|p| match p {
+                EvpnPrefix::EthernetSeg { esi, .. } => Some(*esi),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A reserved or malformed ESI reaches the setter only from a startup
+    /// config (a commit refuses it, `config::check`). It leaves the segment
+    /// without an ESI: the previous one's routes are withdrawn and nothing
+    /// is originated under ESI 0, the key of the E-Tree leaf-label route.
+    #[tokio::test]
+    async fn a_reserved_esi_leaves_the_segment_without_one() {
+        let mut bgp = fresh_bgp();
+        bgp.router_id = "10.0.0.1".parse().unwrap();
+        let set_esi = |bgp: &mut Bgp, esi: &str| {
+            config_ethernet_segment_esi(bgp, arg_words(&["evpn", "es1", esi]), ConfigOp::Set)
+        };
+        // The control: a segment's own ESI originates its Type-4.
+        set_esi(&mut bgp, "00:11:22:33:44:55:66:77:88:99").unwrap();
+        assert_eq!(bgp.ethernet_segments["es1"].esi, Some(ESI1));
+        assert_eq!(originated_es_esis(&bgp), vec![ESI1]);
+
+        for reserved in [
+            "00:00:00:00:00:00:00:00:00:00",
+            "ff:ff:ff:ff:ff:ff:ff:ff:ff:ff",
+            "00:11:22",
+        ] {
+            set_esi(&mut bgp, reserved).unwrap();
+            assert_eq!(bgp.ethernet_segments["es1"].esi, None, "{reserved}");
+            assert_eq!(
+                originated_es_esis(&bgp),
+                Vec::<[u8; 10]>::new(),
+                "{reserved}"
+            );
+            set_esi(&mut bgp, "00:11:22:33:44:55:66:77:88:99").unwrap();
+            assert_eq!(originated_es_esis(&bgp), vec![ESI1]);
+        }
     }
 
     /// Segment fully configured before the RIB announces its access-port
