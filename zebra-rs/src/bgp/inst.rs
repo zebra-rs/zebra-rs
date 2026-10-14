@@ -4393,8 +4393,9 @@ impl Bgp {
     /// new `SyncCtx` and then a `Resend`, else main — sends the peer's whole
     /// Adj-RIB-Out again with the new next-hop when there is one: the routes
     /// held back while no link-local was known, or sent with the old
-    /// next-hop (review finding #29).
-    fn enhe_catch_up_v4(&self, ident: usize) {
+    /// next-hop (review finding #29). Main waits for a flush job still out
+    /// on the peer's group, built with the old next-hop.
+    fn enhe_catch_up_v4(&mut self, ident: usize) {
         let v4 = bgp_packet::AfiSafi::new(bgp_packet::Afi::Ip, bgp_packet::Safi::Unicast);
         let Some(peer) = self.peers.get_by_idx(ident) else {
             return;
@@ -4421,26 +4422,17 @@ impl Bgp {
                     add_path,
                 });
             let _ = pet.delta_tx.send(super::peer_egress::EgressDeltaV4::Resend);
-        } else if let super::route::EnheNextHop::Ready(nh) = peer.enhe_next_hop {
-            let entries: Vec<(std::sync::Arc<bgp_packet::BgpAttr>, bgp_packet::Ipv4Nlri)> = peer
-                .adj_out
-                .v4
-                .0
-                .iter()
-                .flat_map(|(prefix, rows)| {
-                    rows.iter().map(move |row| {
-                        let id = if add_path { row.local_id } else { 0 };
-                        (
-                            row.attr.clone(),
-                            bgp_packet::Ipv4Nlri {
-                                id,
-                                prefix: *prefix,
-                            },
-                        )
-                    })
-                })
-                .collect();
-            super::update_group::send_ipv4_direct(&ctx, entries, Some(nh));
+        } else if let Some(group) = peer
+            .update_group_id
+            .get(&v4)
+            .and_then(|gid| self.update_groups.get_mut(&v4)?.group_by_id_mut(gid))
+            && group.flush_inflight_ipv4
+        {
+            // Sent now, the re-send would be overtaken by the job's bytes
+            // with the old next-hop: `flush_done_ipv4` sends it after them.
+            group.enhe_resend_pending.insert(ident);
+        } else {
+            super::update_group::resend_ipv4_enhe(peer, self.router_id, self.as_sets_withdraw);
         }
     }
 

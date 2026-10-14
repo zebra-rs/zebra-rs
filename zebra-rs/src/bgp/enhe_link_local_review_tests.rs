@@ -170,6 +170,15 @@ fn link_local_appears(bgp: &mut Bgp) {
     }));
 }
 
+/// The RIB withdraws our link-local on [`IFINDEX`].
+fn link_local_goes(bgp: &mut Bgp) {
+    bgp.process_rib_msg(RibRx::AddrDel(LinkAddr {
+        addr: format!("{OUR_LL}/64").parse().unwrap(),
+        ifindex: IFINDEX,
+        ..Default::default()
+    }));
+}
+
 fn split(bgp: &mut Bgp) -> (BgpTop<'_>, &mut PeerMap) {
     (
         BgpTop {
@@ -332,6 +341,21 @@ async fn with_the_link_local_known_the_route_goes_out_once() {
 
     link_local_appears(&mut bgp);
     assert_eq!(sent(&mut rx), vec![], "the next-hop did not change");
+}
+
+/// Control: the link-local going away re-sends nothing — not the routes in
+/// the legacy form with our router-id; they wait for a new link-local.
+#[tokio::test]
+async fn losing_the_link_local_sends_nothing() {
+    let mut bgp = fresh_bgp();
+    put(&mut bgp);
+    let (c, mut rx) = add_peer(&mut bgp, true);
+    link_local_appears(&mut bgp);
+    advertise_and_flush(&mut bgp, c);
+    assert_eq!(sent(&mut rx), enhe_sent());
+
+    link_local_goes(&mut bgp);
+    assert_eq!(sent(&mut rx), vec![], "no next-hop to send with");
 }
 
 /// Control: a numbered IPv4 neighbor is untouched by IPv6 address events.
@@ -612,4 +636,97 @@ async fn the_group_engine_sends_a_sharded_dump_in_flight() {
         ("ZEBRA_BGP_EGRESS_GROUP_TASK", "1"),
     )
     .await;
+}
+
+// -------------------------------------------------------------------------
+// The update group's flush runs on the blocking pool (`flush_ipv4`), with
+// each member's extended next-hop resolved when the job was built. An
+// address event while the job is out re-sent the Adj-RIB-Out with the new
+// next-hop at once, and the job, still writing, then announced its routes
+// with the old one, which the neighbor kept (reviewer follow-up on #29).
+// -------------------------------------------------------------------------
+
+/// The event-driven advertise of `P`, then the update group's flush taken
+/// out as `flush_ipv4` does: the job is built and the in-flight latch set,
+/// but the job has not run.
+fn advertise_with_flush_in_flight(
+    bgp: &mut Bgp,
+    c: usize,
+) -> (
+    crate::bgp::update_group::UpdateGroupId,
+    crate::bgp::update_group::FlushJob<bgp_packet::Ipv4Nlri>,
+) {
+    let prefix: Ipv4Net = P.parse().unwrap();
+    let selected = vec![bgp.shard.v4.1.get(&prefix).unwrap().clone()];
+    {
+        let (mut top, peers) = split(bgp);
+        route_advertise_to_peers(None, prefix, &selected, SOURCE, &mut top, peers);
+    }
+    let gid = bgp.peers.get_by_idx(c).unwrap().update_group_id[&V4].clone();
+    let group = bgp
+        .update_groups
+        .get_mut(&V4)
+        .unwrap()
+        .group_by_id_mut(&gid)
+        .unwrap();
+    let job =
+        crate::bgp::update_group::build_flush_job_ipv4(group, &bgp.peers, &bgp.interface_addrs)
+            .expect("a job carrying P");
+    group.flush_inflight_ipv4 = true;
+    (gid, job)
+}
+
+/// The job runs to completion and the worker reports back to main.
+fn flush_completes(
+    bgp: &mut Bgp,
+    gid: crate::bgp::update_group::UpdateGroupId,
+    job: crate::bgp::update_group::FlushJob<bgp_packet::Ipv4Nlri>,
+) {
+    let deltas = job.run();
+    bgp.process_msg(Message::FlushDoneIpv4(gid, deltas));
+}
+
+/// Our link-local on [`IFINDEX`] is replaced: [`OUR_LL`] goes, `fe80::3`
+/// comes.
+fn link_local_moves(bgp: &mut Bgp) {
+    link_local_goes(bgp);
+    bgp.process_rib_msg(RibRx::AddrAdd(LinkAddr {
+        addr: "fe80::3/64".parse().unwrap(),
+        ifindex: IFINDEX,
+        ..Default::default()
+    }));
+}
+
+/// The link-local moves while the flush carrying `P` with the old one is
+/// out: the catch-up with the new one follows the job's bytes, so the
+/// neighbor ends up with `P` via the link-local that exists. It ended up
+/// via the removed one — the catch-up went out first.
+#[tokio::test]
+async fn a_flush_in_flight_when_the_link_local_moves_does_not_have_the_last_word() {
+    let mut bgp = fresh_bgp();
+    put(&mut bgp);
+    let (c, mut rx) = add_peer(&mut bgp, true);
+    link_local_appears(&mut bgp);
+    let (gid, job) = advertise_with_flush_in_flight(&mut bgp, c);
+    link_local_moves(&mut bgp);
+    flush_completes(&mut bgp, gid, job);
+    let ll = |a: &str| Sent::Enhe(P.to_string(), a.parse().unwrap());
+    assert_eq!(
+        sent(&mut rx),
+        vec![ll(OUR_LL), ll("fe80::3")],
+        "the job's bytes, then the catch-up: the last word on P carries the link-local that exists"
+    );
+}
+
+/// Control: with the link-local unchanged while the flush is out, its
+/// completion sends nothing more.
+#[tokio::test]
+async fn a_flush_in_flight_with_the_link_local_unchanged_sends_once() {
+    let mut bgp = fresh_bgp();
+    put(&mut bgp);
+    let (c, mut rx) = add_peer(&mut bgp, true);
+    link_local_appears(&mut bgp);
+    let (gid, job) = advertise_with_flush_in_flight(&mut bgp, c);
+    flush_completes(&mut bgp, gid, job);
+    assert_eq!(sent(&mut rx), enhe_sent());
 }

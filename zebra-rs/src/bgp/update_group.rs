@@ -346,6 +346,12 @@ pub struct UpdateGroup {
     pub flush_inflight_ipv6: bool,
     pub flush_pending_ipv6: bool,
     pub deferred_withdraw_ipv6: Vec<(usize, Ipv6Nlri)>,
+    /// Extended-next-hop members whose next-hop changed during an IPv4
+    /// flight (review finding #29; the extended next-hop is IPv4's alone):
+    /// the job announces its routes with the next-hop it was built with, so
+    /// their re-send with the new one waits for `flush_done_ipv4` — sent at
+    /// once, the job's bytes would land after it and have the last word.
+    pub enhe_resend_pending: BTreeSet<usize>,
     /// Members whose signature changed while this group still had a flush
     /// in flight or advertisements queued: `regroup_if_stale` parks them
     /// here instead of moving them, and `flush_done_*` moves them once the
@@ -675,6 +681,7 @@ fn attach_family(
             flush_inflight_ipv6: false,
             flush_pending_ipv6: false,
             deferred_withdraw_ipv6: Vec::new(),
+            enhe_resend_pending: BTreeSet::new(),
             regroup_pending: BTreeSet::new(),
             task,
         }
@@ -1376,6 +1383,7 @@ pub fn flush_done_ipv4(
     group.counters.merge(&deltas);
     group.flush_inflight_ipv4 = false;
     let deferred = std::mem::take(&mut group.deferred_withdraw_ipv4);
+    let enhe_resend = std::mem::take(&mut group.enhe_resend_pending);
     let rerun = std::mem::take(&mut group.flush_pending_ipv4);
     let members = group.members.clone();
     for (ident, nlri) in deferred {
@@ -1397,6 +1405,14 @@ pub fn flush_done_ipv4(
             continue;
         }
         super::route::route_withdraw_ipv4(peer, None, nlri.prefix, nlri.id);
+    }
+    // Members whose extended next-hop changed while the job was out: every
+    // byte it built with the old one is enqueued, so their catch-up goes out
+    // now. One that left meanwhile has an empty Adj-RIB-Out (`route_clean`).
+    for ident in enhe_resend {
+        if let Some(peer) = peers.get_by_idx(ident) {
+            resend_ipv4_enhe(peer, router_id, as_sets_withdraw);
+        }
     }
     // Members frozen for a pending move: the job that pinned them has
     // completed and their deferred withdraws went out above, so move them
@@ -1438,6 +1454,40 @@ pub fn flush_done_ipv4(
         flush_ipv4(update_groups, peers, tx, id, interface_addrs);
     }
     frozen
+}
+
+/// Main's catch-up for an extended-next-hop peer (review finding #29):
+/// send it its whole IPv4-unicast Adj-RIB-Out again with its current
+/// next-hop — the routes held back while no link-local was known, or sent
+/// with the old one. Nothing while it has none.
+pub(super) fn resend_ipv4_enhe(peer: &Peer, router_id: Ipv4Addr, as_sets_withdraw: bool) {
+    let super::route::EnheNextHop::Ready(nh) = peer.enhe_next_hop else {
+        return;
+    };
+    let add_path = peer.opt.is_add_path_send(Afi::Ip, Safi::Unicast);
+    let entries: Vec<(Arc<BgpAttr>, Ipv4Nlri)> = peer
+        .adj_out
+        .v4
+        .0
+        .iter()
+        .flat_map(|(prefix, rows)| {
+            rows.iter().map(move |row| {
+                let id = if add_path { row.local_id } else { 0 };
+                (
+                    row.attr.clone(),
+                    Ipv4Nlri {
+                        id,
+                        prefix: *prefix,
+                    },
+                )
+            })
+        })
+        .collect();
+    send_ipv4_direct(
+        &peer.sync_ctx(router_id, as_sets_withdraw),
+        entries,
+        Some(nh),
+    );
 }
 
 /// Per-peer batched encode + send. Used by the route_sync_ipv4 and
@@ -2772,6 +2822,7 @@ mod tests {
                 flush_inflight_ipv6: false,
                 flush_pending_ipv6: false,
                 deferred_withdraw_ipv6: Vec::new(),
+                enhe_resend_pending: BTreeSet::new(),
                 regroup_pending: BTreeSet::new(),
                 task: None,
             },
@@ -3122,6 +3173,7 @@ mod tests {
             flush_inflight_ipv6: false,
             flush_pending_ipv6: false,
             deferred_withdraw_ipv6: Vec::new(),
+            enhe_resend_pending: BTreeSet::new(),
             regroup_pending: BTreeSet::new(),
             task: None,
         };
