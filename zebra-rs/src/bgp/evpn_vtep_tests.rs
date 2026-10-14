@@ -1644,3 +1644,77 @@ async fn a_leaf_ac_link_arriving_late_colours_its_macs() {
     bgp.process_rib_msg(RibRx::LinkAdd(link));
     assert!(has_etree_leaf(&local_macip_attr(&bgp, mac)));
 }
+
+/// Withdraw `route` as received from `from`, as a looped UPDATE is
+/// (`inbound_loop_reject` turns it into treat-as-withdraw).
+fn withdraw_route(bgp: &mut Bgp, from: usize, route: &EvpnRoute) {
+    let mut top = BgpTop {
+        router_id: &bgp.router_id,
+        srv6_ipv6_export: bgp.srv6_ipv6_export.as_ref(),
+        local_rib: &mut bgp.local_rib,
+        shard: &mut bgp.shard,
+        tx: &bgp.tx,
+        rib_client: &bgp.ctx.rib,
+        attr_store: &mut bgp.attr_store,
+        update_groups: &mut bgp.update_groups,
+        interface_addrs: &bgp.interface_addrs,
+        vrf_export: None,
+        color_policy: Some(&bgp.color_policy),
+        flex_algo_routes: Some(&bgp.flex_algo_routes),
+        flex_algo_srv6_routes: Some(&bgp.flex_algo_srv6_routes),
+        vrf_import: None,
+        nexthop_cache: None,
+        vrf_transport_v4: None,
+        vrf_transport_v6: None,
+        as_sets_withdraw: bgp.as_sets_withdraw,
+    };
+    route_evpn_withdraw(from, route, &mut top, &mut bgp.peers);
+}
+
+/// An eBGP spine that sends our own Type-2 back is loop-rejected, and the
+/// withdraw re-selects our originated path. That path must not be
+/// installed (it would point our local MAC at our own VTEP), nor its
+/// sequence number taken for a remote one.
+#[tokio::test]
+async fn looped_own_macip_is_not_installed() {
+    let (mut bgp, mut rib) = bgp_with_rib();
+    bgp.advertise_all_vni = true;
+    let (from, _rx) = peer(&mut bgp, "10.1.1.1", true);
+    let mac = MacAddr::from([2, 0, 0, 0, 1, 1]);
+    // A move was seen before: our route carries sequence number 5.
+    bgp.local_rib.evpn_remote_mac_seq.insert((100, mac), 4);
+    let local = crate::rib::api::FdbEntry {
+        vni: 100,
+        mac,
+        ip: None,
+        ifindex: 7,
+        bridge_ifindex: 5,
+        flags: 0,
+        vxlan_local: Some(IpAddr::V4(RID)),
+    };
+    bgp.evpn_originate_macip(&local);
+    mac_messages(&mut rib);
+
+    let own_rd = rd_from_router_id_vni(RID, 100).unwrap();
+    withdraw_macip(&mut bgp, from, own_rd, mac, None);
+    assert_eq!(mac_messages(&mut rib), vec![]);
+    assert_eq!(bgp.local_rib.evpn_remote_mac_seq[&(100, mac)], 4);
+}
+
+/// The same for our own Type-3: our VTEP must not join our flood list.
+#[tokio::test]
+async fn looped_own_imet_does_not_flood_to_ourselves() {
+    let (mut bgp, _rib) = bgp_with_rib();
+    bgp.advertise_all_vni = true;
+    let (from, _rx) = peer(&mut bgp, "10.1.1.1", true);
+    bgp.evpn_originate_imet(100, IpAddr::V4(RID));
+
+    let route = EvpnRoute::Multicast(EvpnMulticast {
+        id: 0,
+        rd: rd_from_router_id_vni(RID, 100).unwrap(),
+        ether_tag: 0,
+        addr: IpAddr::V4(RID),
+    });
+    withdraw_route(&mut bgp, from, &route);
+    assert!(bgp.local_rib.evpn_flood.remote_vteps(100).is_empty());
+}
