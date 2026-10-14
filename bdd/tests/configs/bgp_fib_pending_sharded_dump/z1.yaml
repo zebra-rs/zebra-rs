@@ -1,0 +1,29 @@
+# z1 (DUT, AS 65001): RIB sharding N=2 — the session-up dump runs in the
+# pool — with suppress-fib-pending; eBGP to z2 (origin) and z3 (late).
+router:
+  bgp:
+    # Logs the RIB sharding degree, which the feature checks.
+    tracing:
+      sharding: null
+    global:
+      as: 65001
+      router-id: 10.0.30.1
+    suppress-fib-pending: true
+    sharding:
+      rib-sharding: 2
+    timer:
+      adv-interval:
+        ebgp: 1
+    neighbor:
+    - remote-address: 10.0.30.2
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65002
+    - remote-address: 10.0.30.3
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65003

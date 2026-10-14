@@ -1,0 +1,16 @@
+# z3 (AS 65003): z1's late peer, started while z1 holds z2's route.
+router:
+  bgp:
+    global:
+      as: 65003
+      router-id: 10.0.30.3
+    timer:
+      adv-interval:
+        ebgp: 1
+    neighbor:
+    - remote-address: 10.0.30.1
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65001

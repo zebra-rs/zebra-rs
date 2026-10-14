@@ -1,0 +1,20 @@
+# z2 (AS 65002): originates 10.30.10.0/24.
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 10.0.30.2
+    timer:
+      adv-interval:
+        ebgp: 1
+    neighbor:
+    - remote-address: 10.0.30.1
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65001
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.30.10.0/24

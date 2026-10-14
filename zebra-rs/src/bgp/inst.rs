@@ -9194,3 +9194,7 @@ mod fs_srp_egress_review_tests;
 #[cfg(test)]
 #[path = "enhe_link_local_review_tests.rs"]
 mod enhe_link_local_review_tests;
+
+#[cfg(test)]
+#[path = "fib_pending_dump_review_tests.rs"]
+mod fib_pending_dump_review_tests;
