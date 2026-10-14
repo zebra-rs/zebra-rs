@@ -8,6 +8,7 @@
 //! dispatched: a step (YANG has none), or a decimal64 range or
 //! `fraction-digits` (libyang extracts neither).
 
+use crate::bgp::ethernet_segment::check_es_esi;
 use crate::flex_algo::check_max_link_loss;
 use crate::stamp::session::{check_loss_interval, check_loss_percent};
 
@@ -29,6 +30,19 @@ pub fn value_check(path: &str) -> Option<ValueCheck> {
         "minimum-change" | "accelerated-threshold" | "anomaly-threshold" | "reuse-threshold" => {
             Some(|v| check_loss_percent(v).map(drop))
         }
+        _ => None,
+    }
+}
+
+/// The check for a leaf at `path`, as for [`value_check`], whose values
+/// an earlier release took unchecked. A commit setting a bad one is
+/// refused like any other, but the startup config is only warned about,
+/// as for the MPLS label checks (`config::label_check`): a file an earlier
+/// release loaded must not leave the router unconfigured. The protocol's
+/// setter ignores the value instead.
+pub fn startup_tolerant_check(path: &str) -> Option<ValueCheck> {
+    match path {
+        "/router/bgp/afi-safi/ethernet-segment/esi" => Some(|v| check_es_esi(v).map(drop)),
         _ => None,
     }
 }
@@ -76,5 +90,27 @@ mod tests {
         assert!(check("50.331642").is_ok());
         assert!(check("50.331643").is_err());
         assert!(check("5.1234567").is_err());
+    }
+
+    /// An Ethernet Segment's ESI: well-formed and not reserved (RFC 7432
+    /// §5). Only the startup config tolerates a bad one.
+    #[test]
+    fn es_esi_is_checked() {
+        let path = "/router/bgp/afi-safi/ethernet-segment/esi";
+        assert!(value_check(path).is_none());
+        let check = startup_tolerant_check(path).expect("checked");
+        assert!(check("00:11:22:33:44:55:66:77:88:99").is_ok());
+        assert!(check("00000000000000000001").is_ok());
+        assert!(check("fe:ff:ff:ff:ff:ff:ff:ff:ff:ff").is_ok());
+        for bad in [
+            "00:00:00:00:00:00:00:00:00:00",
+            "00000000000000000000",
+            "ff:ff:ff:ff:ff:ff:ff:ff:ff:ff",
+            "FFFFFFFFFFFFFFFFFFFF",
+            "00:11:22",
+            "zz:11:22:33:44:55:66:77:88:99",
+        ] {
+            assert!(check(bad).is_err(), "{bad}");
+        }
     }
 }

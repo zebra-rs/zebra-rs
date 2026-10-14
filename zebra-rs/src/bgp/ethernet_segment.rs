@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
-use bgp_packet::{DfElectionEc, ExtCommunityValue, SctEc};
+use bgp_packet::{DfElectionEc, ExtCommunityValue, MAX_ESI, SctEc, esi_from_str};
 
 use super::vpws::{EsBinding, bind_es};
 
@@ -55,6 +55,26 @@ pub fn esi_for_ac(
         EsBinding::Ambiguous(claims) => Err(claims),
         EsBinding::None | EsBinding::Unresolved(_) => Ok(None),
     }
+}
+
+/// `ethernet-segment <name> esi <value>`: ten octets, colon-hex or 20 hex
+/// digits, and not a value RFC 7432 §5 reserves. ESI 0 also names the
+/// E-Tree leaf-label route (RFC 8317 §4.2.1), which a segment configured
+/// with it would collide with. The schema takes any string, so the config
+/// manager also runs this at commit (`config::check`); the setter applies
+/// the same rule.
+pub fn check_es_esi(value: &str) -> Result<[u8; 10], String> {
+    let esi =
+        esi_from_str(value).ok_or("must be 10 octets, colon-hex (00:11:..:99) or 20 hex digits")?;
+    if esi == [0; 10] {
+        return Err(
+            "ESI 0 denotes a single-homed site, not an Ethernet Segment (RFC 7432 §5)".into(),
+        );
+    }
+    if esi == MAX_ESI {
+        return Err("MAX-ESI is reserved (RFC 7432 §5)".into());
+    }
+    Ok(esi)
 }
 
 /// All-active vs single-active multihoming redundancy mode (RFC 7432 §14.1).

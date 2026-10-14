@@ -24,7 +24,8 @@ Read together with:
   shape this plan follows, and the source of the review lessons in §10.
 - cradle-rs `docs/design/bgp-evpn.md` §Multihoming — the datapath side.
 
-Branch: `evpn-e-tree-design` (this document only).
+Branches: `evpn-e-tree-design` (this document, #2519), `evpn-e-tree`
+(phase 1).
 
 ## 1. What E-Tree means, and which flavour we build
 
@@ -178,8 +179,11 @@ not fit one route, advertise several (RFC 8317 §4.2.1). Our per-ES A-D key is
 **Collision found while writing this:** `esi_from_str`
 (`crates/bgp-packet/src/attrs/nlri_evpn.rs:724`) accepts the all-zero ESI,
 so an `ethernet-segment` configured with ESI 0 would originate the same
-NLRI. RFC 7432 §5 reserves ESI 0 for single-homed sites; phase 1 rejects it
-at commit.
+NLRI. RFC 7432 §5 reserves ESI 0 for single-homed sites, and MAX-ESI too.
+Phase 1 refuses both at commit (`check_es_esi`, run by `config::check`).
+A startup config is only warned about, as for the MPLS label checks,
+because an earlier release accepted any ESI. The setter then leaves that
+segment without an ESI.
 
 ### 4.3 The composite PMSI tunnel bit
 
@@ -190,8 +194,17 @@ P2MP on an E-Tree BD). On receive, our `PmsiTunnel::parse_be`
 (`pmsi_tunnel.rs:235`) expects a bare 4- or 16-octet endpoint, so a
 composite identifier **fails to parse**. RFC 8317 says a PE that does not
 understand the bit treats the attribute as malformed per RFC 6514 —
-treat-as-withdraw, **not** a session reset. Phase 1 confirms which of the
-two ours does, and fixes it if it is the reset.
+treat-as-withdraw, **not** a session reset.
+
+Ours reset the session: `PmsiTunnel` was not in
+`attr_malformation_is_withdraw` (`attrs/attr.rs`). Phase 1 adds it, so a
+PMSI Tunnel attribute that does not parse withdraws the UPDATE's routes.
+That covers more than the composite bit: any tunnel identifier other than
+an IPv4 or IPv6 address, or an SR P2MP tree, fails to parse. Examples are
+RSVP-TE P2MP, mLDP and PIM trees. Phase 1 also refuses the composite range
+(0x80–0xFA, RFC 8317 §8.1) in `PmsiTunnel::parse_be` outright. Otherwise a
+13-octet transmit identifier behind the 3-octet label would be read as an
+IPv6 endpoint.
 
 ## 5. Roles and configuration
 
@@ -476,12 +489,14 @@ Each drop counter needs a BDD that asserts it non-zero in the treatment
 ## 9. Show / observability
 
 - **Route display.** `show bgp evpn route` renders the community through
-  `ExtCommunityValue`'s `Display`, as one of:
-  - `etree:leaf` (Type-2);
-  - `etree:leaf-label:<n>` (ESI-0 A-D);
-  - `etree:L` / `etree:RL[:vni:<n>]` (IMET).
-
-  An invalid combination renders as such rather than as `unknown:…`.
+  `ExtCommunityValue`'s `Display`. The EC alone does not say which route
+  carries it, so `EtreeEc`'s `Display` picks by its bytes:
+  - `etree:leaf`: L only, no field. This is a Type-2, or an IMET in the
+    Arista form (V1+), which has the same bytes;
+  - `etree:leaf-label:<n>`: no flags, a field (ESI-0 A-D);
+  - otherwise `etree:` then `R`/`L` (`-` for neither), then `:vni:<n>` if
+    there is a field. This is the rfc8317bis IMET form, and how an invalid
+    combination shows: a Type-2 with L clear is `etree:-`.
 - **`show bgp evpn etree`** (and JSON) shows:
   - the local leaf ACs per EVI, with whether each one's role is programmed;
   - our leaf label, and the RT set on the leaf-label route;
@@ -505,13 +520,28 @@ before the zebra half that drives it.
 
 | Phase | Deliverable | Repo | Gate |
 | ----- | ----------- | ---- | ---- |
-| **1** | **Codec + guards**: `EtreeEc` (L, R, label/VNI) parse/emit/`Display`/`is_`/`as_`; unknown flag bits preserved; reject ESI 0 on `ethernet-segment` at commit; confirm (and if needed fix) composite-PMSI receive = treat-as-withdraw | zebra | unit round-trips incl. the RFC 8317 figure; mutation of the L-bit position must fail a test |
+| **1** ✅ | **Codec + guards**: `EtreeEc` (L, R, label/VNI) parse/emit/`Display`/`is_`/`as_`; unknown flag bits preserved; reject ESI 0 on `ethernet-segment` at commit; confirm (and if needed fix) composite-PMSI receive = treat-as-withdraw | zebra | unit round-trips incl. the RFC 8317 figure; mutation of the L-bit position must fail a test |
 | **2a** | **cradle roles + known unicast**: `SetPortRole`, `PORT_ETREE`, local leaf↔leaf drop, `FdbRemote.flags`, `FDB_F_ETREE_LEAF`, XDP ingress check, counters | cradle | static-config BDD: leaf→leaf (local and remote) dropped with the counter non-zero; **control** = the same topology with one AC a root, ping passes and counter zero |
 | **2b** | **zebra roles + Type-2 colouring**: `etree leaf-interface` (behind the feature gate), role tee via a new RIB message, Type-2 EC origination + resync, selected-path flag → `MacRoute` → `FdbRemote.flags`, `show bgp evpn etree` | zebra | zebra BDD: Type-2 shows `etree:leaf` only for leaf-AC MACs; cradle zebra-driven VXLAN BDD: remote leaf→leaf unicast dropped, leaf→root passes; MAC move leaf→root un-drops |
 | **3** | **MPLS BUM**: leaf label lifecycle, ESI-0 leaf-label A-D origination + consumption, cradle leaf slots, `LEAF_LABEL` decap, egress flood filter | both | cradle MPLS zebra-driven BDD: leaf broadcast reaches roots only; multihomed leaf: the copy carries the leaf label and **not** the ESI label (`mpls_l2_esi_push` stays zero); control = root broadcast reaches leaves |
 | **4** | **VXLAN BUM** per D2 (V1+ recommended): IMET colouring, flood-list pruning, source-VTEP egress bit | both | BDD with a leaf-only PE and a mixed PE; `show` warning for two mixed PEs |
 | **5** | **SRv6 BUM**: Arg.FE2 End.DT2M in cradle (prerequisite, own PR), then the ESI-0 A-D signalling | both | BDD as phase 3 over SRv6 |
 | **6** | **Docs + interop**: book chapter, `bgp-evpn-support-status.md` row, lab against Arista cEOS (VXLAN: Type-2 + IMET) and a Nokia/Juniper image (MPLS) | — | the lab report |
+
+**Status: phase 1 is implemented** on `evpn-e-tree`.
+- **Codec.** `ExtCommunityValue::etree_leaf()` (Type-2) and
+  `etree_leaf_label(n)` (ESI-0 A-D) build the EC; `is_etree` / `as_etree`
+  decode it into `EtreeEc { flags, field }`. `flags` keeps the MBZ bits as
+  received. `valid_leaf_label()` drops the reserved labels 0–15.
+- **Tests.** The tests pin Appendix A's bytes. Mutants that move L or R,
+  drop the 4-bit label shift, or accept a reserved label each fail a test.
+- **ESI guard.** ESI 0 and MAX-ESI are refused at commit and warned about
+  at startup (§4.2).
+- **PMSI.** A malformed PMSI Tunnel attribute, a composite one included, is
+  treat-as-withdraw (§4.3). Not done: RFC 6514 §5 requires an error log
+  when a malformed PMSI is detected. Nothing is logged for it, nor for any
+  other treat-as-withdraw attribute, because the parser reports only a
+  bool. That is a follow-up across all of them.
 
 **Review lessons carried over from the single-active arc** (see that plan
 and the memory notes):

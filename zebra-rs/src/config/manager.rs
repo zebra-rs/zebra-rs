@@ -673,19 +673,32 @@ impl ConfigManager {
     }
 
     /// Every line among `lines` (config lines without `set`) whose
-    /// leaf value fails its [`check::value_check`], as commit errors.
-    fn value_errors(&self, lines: impl Iterator<Item = String>) -> Vec<String> {
+    /// leaf value fails its [`check::value_check`], as commit errors. A
+    /// failed [`check::startup_tolerant_check`] is one too, except in the
+    /// `startup` config, where it is only logged.
+    fn value_errors(&self, lines: impl Iterator<Item = String>, startup: bool) -> Vec<String> {
         let mut errors = Vec::new();
         for line in lines {
             let Some(paths) = self.paths(line.clone()) else {
                 continue;
             };
             let (path, args) = path_from_command(&paths);
+            let Some(value) = args.0.back() else {
+                continue;
+            };
             if let Some(check) = check::value_check(&path)
-                && let Some(value) = args.0.back()
                 && let Err(e) = check(value)
             {
                 errors.push(format!("'{line}': {e}"));
+            }
+            if let Some(check) = check::startup_tolerant_check(&path)
+                && let Err(e) = check(value)
+            {
+                if startup {
+                    tracing::warn!("startup config: '{line}': {e}; ignored");
+                } else {
+                    errors.push(format!("'{line}': {e}"));
+                }
             }
         }
         errors
@@ -776,6 +789,7 @@ impl ConfigManager {
             diff.lines()
                 .filter_map(|l| l.strip_prefix('+'))
                 .map(str::to_string),
+            startup,
         );
         if !errors.is_empty() {
             return Err(anyhow::anyhow!(errors.join("\n")));
@@ -2649,7 +2663,7 @@ mod save_config_tests {
             valid.iter().all(|l| candidate.lines().any(|c| c == l)),
             "{candidate}"
         );
-        let errors = cm.value_errors(candidate.lines().map(str::to_string));
+        let errors = cm.value_errors(candidate.lines().map(str::to_string), false);
         assert_eq!(errors, Vec::<String>::new(), "{candidate}");
 
         // The reflector modes (design D3) are enumerations YANG checks
@@ -2664,6 +2678,58 @@ mod save_config_tests {
             let (code, output, _) = cm.execute(mode, &format!("set {line}"));
             assert_eq!(code == ExecCode::Show, ok, "`{line}`: {output:?}");
         }
+    }
+
+    /// An Ethernet Segment's ESI is checked at commit (RFC 7432 §5 reserves
+    /// ESI 0 and MAX-ESI, and the schema takes any string), but the startup
+    /// config only warns: an earlier release took any ESI.
+    #[test]
+    fn a_reserved_esi_fails_the_commit_but_not_the_startup_config() {
+        let path = temp_path("esi-check");
+        let cm = manager_with_config(&path);
+        let mode = cm.modes.get("configure").expect("configure mode");
+        let es = "router bgp afi-safi evpn ethernet-segment es1 esi";
+        for (line, reason) in [
+            (
+                format!("{es} 00:00:00:00:00:00:00:00:00:00"),
+                "ESI 0 denotes a single-homed site, not an Ethernet Segment (RFC 7432 §5)",
+            ),
+            (
+                format!("{es} ff:ff:ff:ff:ff:ff:ff:ff:ff:ff"),
+                "MAX-ESI is reserved (RFC 7432 §5)",
+            ),
+            (
+                format!("{es} 00:11:22"),
+                "must be 10 octets, colon-hex (00:11:..:99) or 20 hex digits",
+            ),
+        ] {
+            let (code, output, _) = cm.execute(mode, &format!("set {line}"));
+            assert_eq!(code, ExecCode::Show, "schema accepts `{line}`: {output:?}");
+            let err = cm.commit_config().expect_err(&line).to_string();
+            assert_eq!(err, format!("'{line}': {reason}"));
+            let mut running = String::new();
+            cm.store.running.borrow().list(&mut running);
+            assert_eq!(running, "", "`{line}` must not reach the running config");
+
+            // The same candidate, loaded as the startup config, only warns.
+            let mut candidate = String::new();
+            cm.store.candidate.borrow().list(&mut candidate);
+            assert!(candidate.contains(&line), "{candidate}");
+            let errors = cm.value_errors(candidate.lines().map(str::to_string), true);
+            assert_eq!(errors, Vec::<String>::new(), "{candidate}");
+            cm.store.discard();
+        }
+
+        // A segment's own ESI passes. (Checked without committing: a commit
+        // would spawn BGP.)
+        let valid = format!("{es} 00:11:22:33:44:55:66:77:88:99");
+        let (code, output, _) = cm.execute(mode, &format!("set {valid}"));
+        assert_eq!(code, ExecCode::Show, "set rejected: {output:?}");
+        let mut candidate = String::new();
+        cm.store.candidate.borrow().list(&mut candidate);
+        assert!(candidate.contains(&valid), "{candidate}");
+        let errors = cm.value_errors(candidate.lines().map(str::to_string), false);
+        assert_eq!(errors, Vec::<String>::new(), "{candidate}");
     }
 
     /// The .deb ships `/etc/zebra-rs/zebra-rs.conf` comment-only, and

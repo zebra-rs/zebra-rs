@@ -247,6 +247,46 @@ impl ExtCommunityValue {
         })
     }
 
+    /// Build the E-Tree Extended Community a MAC/IP Advertisement (Type-2)
+    /// route carries for a MAC learned on a leaf AC (RFC 8317 §4.1, §6.1):
+    /// Leaf-Indication set, Leaf Label zero.
+    pub fn etree_leaf() -> Self {
+        EtreeEc {
+            flags: EtreeEc::LEAF,
+            field: 0,
+        }
+        .into()
+    }
+
+    /// Build the E-Tree Extended Community the per-PE leaf-label route (an
+    /// Ethernet A-D per-ES route with ESI 0) carries (RFC 8317 §4.2.1,
+    /// §6.1): Leaf-Indication clear, `label` in the high-order 20 bits of
+    /// the Leaf Label field. A `label` above 20 bits is masked.
+    pub fn etree_leaf_label(label: u32) -> Self {
+        EtreeEc {
+            flags: 0,
+            field: (label & EtreeEc::LABEL_MASK) << 4,
+        }
+        .into()
+    }
+
+    /// True iff this entry is the E-Tree Extended Community (RFC 8317
+    /// §6.1): EVPN high-type (0x06) + E-Tree sub-type (0x05).
+    pub fn is_etree(&self) -> bool {
+        self.high_type == ExtCommunityType::Evpn as u8 && self.low_type == EVPN_ETREE_SUB_TYPE
+    }
+
+    /// Decode the E-Tree Extended Community (RFC 8317 §6.1). Every
+    /// combination decodes: which flags and which field a receiver reads
+    /// depends on the route carrying it (see [`EtreeEc`]). `None` for any
+    /// non-matching EC.
+    pub fn as_etree(&self) -> Option<EtreeEc> {
+        self.is_etree().then(|| EtreeEc {
+            flags: self.val[0],
+            field: u32::from_be_bytes([0, self.val[3], self.val[4], self.val[5]]),
+        })
+    }
+
     /// Build a Router's MAC Extended Community (RFC 9135 §6): EVPN high-type
     /// (0x06) + Router's MAC sub-type (0x03), value = the 6-octet router MAC.
     /// Attached to symmetric-IRB Type-2/Type-5 routes so a receiver can use
@@ -444,6 +484,131 @@ const EVPN_L2_ATTR_SUB_TYPE: u8 = 0x04;
 /// Service Carving Time Extended Community sub-type (RFC 9722 §2.1), carried
 /// under the EVPN high-type (0x06) on the Ethernet Segment (Type-4) route.
 const EVPN_SCT_SUB_TYPE: u8 = 0x0F;
+
+/// E-Tree Extended Community sub-type (RFC 8317 §6.1), carried under the
+/// EVPN high-type (0x06).
+const EVPN_ETREE_SUB_TYPE: u8 = 0x05;
+
+/// Decoded E-Tree Extended Community (RFC 8317 §6.1, with the
+/// Root-Indication flag of draft-ietf-bess-rfc8317bis §7.1).
+///
+/// Wire layout of the 6-octet value (after the 0x06/0x05 type bytes):
+/// `val[0]` = Flags, `val[1..3]` = reserved, `val[3..6]` = the Leaf Label
+/// or Leaf VNI field. A receiver reads it per the route carrying it:
+///
+/// - a MAC/IP Advertisement (Type-2) route: only [`leaf`](Self::leaf),
+///   which MUST be set (a clear one is invalid and logged); the field is
+///   ignored;
+/// - an Ethernet A-D per-ES route with ESI 0: only
+///   [`valid_leaf_label`](Self::valid_leaf_label); the flags are ignored;
+/// - an Inclusive Multicast (Type-3) route (VXLAN, not in RFC 8317): the
+///   flags and [`leaf_vni`](Self::leaf_vni), per
+///   docs/design/bgp-evpn-e-tree-plan.md §8.5.
+///
+/// The absence of the community means root (RFC 8317 §4.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EtreeEc {
+    /// The whole Flags octet. The MBZ bits are kept as received, so a
+    /// decode then encode round-trips them; a receiver ignores them.
+    pub flags: u8,
+    /// The 3-octet Leaf Label / Leaf VNI field, all 24 bits.
+    pub field: u32,
+}
+
+impl EtreeEc {
+    /// Flags bit 7 (LSB, MSB-0 numbering): L — Leaf-Indication.
+    pub const LEAF: u8 = 0x01;
+    /// Flags bit 6: R — Root-Indication (rfc8317bis §7.1, IMET only).
+    pub const ROOT: u8 = 0x02;
+    /// The 20 bits of an MPLS label.
+    const LABEL_MASK: u32 = 0xF_FFFF;
+    /// Labels 0-15 are reserved (RFC 3032 §2.1).
+    const FIRST_UNRESERVED_LABEL: u32 = 16;
+
+    /// The L (Leaf-Indication) flag.
+    pub fn leaf(&self) -> bool {
+        self.flags & Self::LEAF != 0
+    }
+
+    /// The R (Root-Indication) flag.
+    pub fn root(&self) -> bool {
+        self.flags & Self::ROOT != 0
+    }
+
+    /// The MPLS leaf label: the high-order 20 bits of the field (RFC 8317
+    /// §6.1).
+    pub fn leaf_label(&self) -> u32 {
+        self.field >> 4
+    }
+
+    /// The leaf label if it is one a PE may use: RFC 8317 §6.1 requires a
+    /// valid MPLS label, so a reserved one (0-15) is `None`, and the
+    /// receiver ignores and logs it.
+    pub fn valid_leaf_label(&self) -> Option<u32> {
+        let label = self.leaf_label();
+        (label >= Self::FIRST_UNRESERVED_LABEL).then_some(label)
+    }
+
+    /// The leaf VNI (rfc8317bis §5.3): all 24 bits of the field.
+    pub fn leaf_vni(&self) -> u32 {
+        self.field
+    }
+}
+
+impl From<EtreeEc> for ExtCommunityValue {
+    fn from(e: EtreeEc) -> Self {
+        let mut val = [0u8; 6];
+        val[0] = e.flags;
+        // val[1..3] reserved (zero); the field is the low 24 bits of val.
+        val[3..6].copy_from_slice(&e.field.to_be_bytes()[1..4]);
+        ExtCommunityValue {
+            high_type: ExtCommunityType::Evpn as u8,
+            low_type: EVPN_ETREE_SUB_TYPE,
+            val,
+        }
+    }
+}
+
+/// Render an E-Tree EC by the route it most likely rides on, since the EC
+/// alone cannot say which:
+///
+/// - `etree:leaf`: L only, field zero — a Type-2 from a leaf AC (and the
+///   identical IMET of draft-bamberger-bess-imet-filter-evpn-etree-vxlan);
+/// - `etree:leaf-label:<n>`: no flags, a non-zero field — the per-PE leaf
+///   label on the ESI-0 A-D, which RFC 8317 §6.1 has the sender send with
+///   L clear;
+/// - otherwise `etree:` then `R` / `L` for the flags set (`-` for none),
+///   then `:vni:<n>` when the field is non-zero — the rfc8317bis IMET form,
+///   and how an invalid combination (a Type-2 with L clear: `etree:-`)
+///   shows.
+///
+/// The MBZ flag bits are not rendered: a receiver ignores them.
+impl fmt::Display for EtreeEc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (self.flags & (Self::ROOT | Self::LEAF), self.field) {
+            (Self::LEAF, 0) => write!(f, "etree:leaf"),
+            (0, field) if field != 0 => write!(f, "etree:leaf-label:{}", self.leaf_label()),
+            (_, field) => {
+                write!(f, "etree:")?;
+                match (self.root(), self.leaf()) {
+                    (false, false) => write!(f, "-")?,
+                    (root, leaf) => {
+                        if root {
+                            write!(f, "R")?;
+                        }
+                        if leaf {
+                            write!(f, "L")?;
+                        }
+                    }
+                }
+                if field != 0 {
+                    write!(f, ":vni:{field}")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
 
 /// Decoded EVPN Layer-2 Attributes Extended Community (RFC 8214 §3.1).
 /// Carried on the per-EVI Ethernet A-D (Type-1) route of a VPWS service to
@@ -988,6 +1153,9 @@ impl fmt::Display for ExtCommunityValue {
                 "all-active"
             };
             write!(f, "esi-label:{mode}:{}", es.label)
+        } else if let Some(e) = self.as_etree() {
+            // E-Tree EC (RFC 8317 §6.1): see `EtreeEc`'s Display.
+            write!(f, "{e}")
         } else if let Some(a) = self.as_l2_attr() {
             // Layer-2 Attributes EC (RFC 8214 §3.1): the P/B/C control
             // flags then the L2 MTU, e.g. `l2-attr:P:mtu1500`.
@@ -2091,5 +2259,158 @@ mod tests {
             val: [0; 6],
         };
         assert!(!rt.is_esi_label());
+    }
+
+    /// Decode one 8-octet EC from its wire bytes.
+    fn ec_from_wire(bytes: [u8; 8]) -> ExtCommunityValue {
+        let (rest, ec) = ExtCommunityValue::parse_be(&bytes).expect("8-octet EC");
+        assert!(rest.is_empty());
+        ec
+    }
+
+    /// The Type-2 colouring (RFC 8317 §4.1, Figure 4): L is the low-order
+    /// bit of the Flags octet, the Leaf Label is zero. The bytes are the
+    /// design doc's Appendix A, so moving the L bit fails here.
+    #[test]
+    fn etree_leaf_wire_layout_matches_rfc_8317() {
+        let wire = [0x06, 0x05, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let mut buf = BytesMut::new();
+        ExtCommunityValue::etree_leaf().encode(&mut buf);
+        assert_eq!(&buf[..], &wire, "constructor emits Figure 4");
+
+        let ec = ec_from_wire(wire);
+        assert!(ec.is_etree());
+        let e = ec.as_etree().expect("decodes");
+        assert!(e.leaf(), "flags 0x01 is Leaf-Indication");
+        assert!(!e.root());
+        assert_eq!(e.field, 0);
+        assert_eq!(ec.to_string(), "etree:leaf");
+        assert_eq!(ec, ExtCommunityValue::etree_leaf());
+    }
+
+    /// The per-PE leaf label on the ESI-0 A-D (RFC 8317 §6.1): L clear and
+    /// the label in the high-order 20 bits, so 1000 (0x3E8) is 0x003E80.
+    #[test]
+    fn etree_leaf_label_is_the_high_20_bits() {
+        let wire = [0x06, 0x05, 0x00, 0x00, 0x00, 0x00, 0x3E, 0x80];
+        let mut buf = BytesMut::new();
+        ExtCommunityValue::etree_leaf_label(1000).encode(&mut buf);
+        assert_eq!(&buf[..], &wire);
+
+        let e = ec_from_wire(wire).as_etree().expect("decodes");
+        assert!(!e.leaf());
+        assert_eq!(e.leaf_label(), 1000);
+        assert_eq!(e.valid_leaf_label(), Some(1000));
+        assert_eq!(e.leaf_vni(), 0x3E80, "the raw field, unshifted");
+        assert_eq!(ec_from_wire(wire).to_string(), "etree:leaf-label:1000");
+
+        // The largest label fills the field's top 20 bits; a wider value
+        // is masked to 20 bits rather than spilling into the reserved octet.
+        let max = ExtCommunityValue::etree_leaf_label(0xF_FFFF);
+        assert_eq!(max.val, [0, 0, 0, 0xFF, 0xFF, 0xF0]);
+        assert_eq!(ExtCommunityValue::etree_leaf_label(0x1F_FFFF), max);
+    }
+
+    /// Only the Flags octet's low-order bit is L; the next one up is R
+    /// (rfc8317bis §7.1) and the high-order one is MBZ.
+    #[test]
+    fn etree_flag_positions() {
+        let flags = |f: u8| {
+            ec_from_wire([0x06, 0x05, f, 0, 0, 0, 0, 0])
+                .as_etree()
+                .unwrap()
+        };
+        assert!(flags(0x01).leaf() && !flags(0x01).root());
+        assert!(flags(0x02).root() && !flags(0x02).leaf());
+        assert!(!flags(0x80).leaf() && !flags(0x80).root(), "MSB is MBZ");
+        assert!(!flags(0x00).leaf());
+    }
+
+    /// The MBZ flag bits survive a decode and re-encode, and are ignored by
+    /// the accessors and the rendering. The reserved octets are ignored too.
+    #[test]
+    fn etree_unknown_flag_bits_round_trip() {
+        let wire = [0x06, 0x05, 0xFD, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let e = ec_from_wire(wire).as_etree().expect("decodes");
+        assert_eq!(e.flags, 0xFD);
+        assert!(e.leaf() && !e.root());
+        let mut buf = BytesMut::new();
+        ExtCommunityValue::from(e).encode(&mut buf);
+        assert_eq!(&buf[..], &wire, "MBZ bits kept");
+        assert_eq!(ec_from_wire(wire).to_string(), "etree:leaf");
+
+        let reserved = ec_from_wire([0x06, 0x05, 0x00, 0xAA, 0xBB, 0x00, 0x3E, 0x80]);
+        let e = reserved.as_etree().expect("decodes");
+        assert_eq!(e.leaf_label(), 1000, "reserved octets are not the field");
+    }
+
+    /// RFC 8317 §6.1: the leaf label must be a valid, non-reserved MPLS
+    /// label; 0-15 are reserved (RFC 3032).
+    #[test]
+    fn etree_reserved_leaf_labels_are_not_valid() {
+        for label in [0, 3, 15] {
+            let e = ExtCommunityValue::etree_leaf_label(label)
+                .as_etree()
+                .unwrap();
+            assert_eq!(e.valid_leaf_label(), None, "label {label}");
+        }
+        for label in [16, 24000, 0xF_FFFF] {
+            let e = ExtCommunityValue::etree_leaf_label(label)
+                .as_etree()
+                .unwrap();
+            assert_eq!(e.valid_leaf_label(), Some(label));
+        }
+    }
+
+    /// The rfc8317bis IMET forms carry the flags with a 24-bit leaf VNI; an
+    /// invalid Type-2 (L clear, no field) renders as such.
+    #[test]
+    fn etree_renders_the_imet_and_invalid_forms() {
+        let ec = |flags: u8, field: u32| ExtCommunityValue::from(EtreeEc { flags, field });
+        assert_eq!(
+            ec(EtreeEc::ROOT | EtreeEc::LEAF, 5000).to_string(),
+            "etree:RL:vni:5000"
+        );
+        assert_eq!(ec(EtreeEc::LEAF, 5000).to_string(), "etree:L:vni:5000");
+        assert_eq!(ec(EtreeEc::ROOT, 0).to_string(), "etree:R");
+        assert_eq!(ec(0, 0).to_string(), "etree:-");
+
+        let vni = ec(EtreeEc::LEAF, 0xAB_CDEF).as_etree().unwrap();
+        assert_eq!(vni.leaf_vni(), 0xAB_CDEF, "all 24 bits");
+    }
+
+    /// Same EVPN high-type as the ESI Label and Layer-2 Attributes ECs, a
+    /// different sub-type: none of them cross-decodes.
+    #[test]
+    fn etree_does_not_cross_decode() {
+        let etree = ExtCommunityValue::etree_leaf_label(1000);
+        assert!(etree.as_esi_label().is_none());
+        assert!(etree.as_l2_attr().is_none());
+        assert!(
+            ExtCommunityValue::esi_label(true, 1000)
+                .as_etree()
+                .is_none()
+        );
+        assert!(
+            ExtCommunityValue::l2_attr(true, false, false, 0)
+                .as_etree()
+                .is_none()
+        );
+        let rt = ExtCommunity::from_str("rt:100:200").unwrap();
+        assert!(!rt.0.first().unwrap().is_etree());
+    }
+
+    /// Through the whole attribute: emitted beside an RT, parsed back, and
+    /// rendered by name rather than as `unknown:…`.
+    #[test]
+    fn etree_round_trips_through_attribute_emit_parse() {
+        let mut ecom = ExtCommunity::from_str("rt:100:200").unwrap();
+        ecom.0.insert(ExtCommunityValue::etree_leaf());
+        let mut buf = BytesMut::new();
+        ecom.emit(&mut buf);
+        let (rest, parsed) = ExtCommunity::parse_be(&buf).expect("parse");
+        assert!(rest.is_empty());
+        assert_eq!(parsed, ecom);
+        assert_eq!(parsed.to_string(), "rt:100:200 etree:leaf");
     }
 }

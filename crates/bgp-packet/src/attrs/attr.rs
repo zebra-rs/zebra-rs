@@ -390,6 +390,13 @@ fn attr_malformation_is_withdraw(attr_type: AttrType) -> bool {
             // side reaches here.)
             | AttrType::OriginatorId
             | AttrType::ClusterList
+            // RFC 6514 §5: a PMSI Tunnel attribute with an undefined tunnel
+            // type, or a Tunnel Identifier the router cannot parse, is
+            // malformed, and the UPDATE is treated as withdrawn. RFC 8317
+            // §6.2 relies on it: a PE that does not understand the composite
+            // tunnel bit (we do not) treats the attribute as malformed.
+            // RFC 7606 §7 lists PMSI_TUNNEL as already handled that way.
+            | AttrType::PmsiTunnel
     )
 }
 
@@ -728,6 +735,59 @@ mod tests {
             "malformed Prefix-SID must be discarded"
         );
         assert!(mp_update.is_none() && mp_withdraw.is_none());
+    }
+
+    /// ORIGIN then a PMSI Tunnel attribute with `pmsi` as its value.
+    fn origin_and_pmsi(pmsi: &[u8]) -> Vec<u8> {
+        let mut block = vec![0x40, 0x01, 0x01, 0x00]; // ORIGIN = IGP
+        block.extend_from_slice(&[0xC0, 22, pmsi.len() as u8]); // optional + transitive
+        block.extend_from_slice(pmsi);
+        block
+    }
+
+    /// RFC 6514 §5 / RFC 8317 §6.2: a composite tunnel type, which we do not
+    /// support, makes the PMSI Tunnel attribute malformed. The UPDATE is
+    /// treated as withdrawn, and the session stays up. It used to be reset.
+    #[test]
+    fn composite_pmsi_tunnel_is_treat_as_withdraw_not_session_reset() {
+        // Composite RSVP-TE P2MP (0x80 | 0x01): Flags, Tunnel Type, MPLS
+        // Label, then the 3-octet receive label and the 12-octet P2MP
+        // session object.
+        let mut pmsi = vec![0x00, 0x81, 0x00, 0x00, 0x00];
+        pmsi.extend_from_slice(&[0x00, 0x3E, 0x80]);
+        pmsi.extend_from_slice(&[0x0A; 12]);
+        let block = origin_and_pmsi(&pmsi);
+        let (_, bgp_attr, _, _, treat_as_withdraw) =
+            parse_bgp_update_attribute(&block, block.len() as u16, false, None)
+                .expect("must not reset session");
+        assert!(treat_as_withdraw, "composite PMSI must treat-as-withdraw");
+        let bgp_attr = bgp_attr.expect("attrs parsed");
+        assert!(bgp_attr.origin.is_some(), "ORIGIN survives");
+        assert!(bgp_attr.pmsi_tunnel.is_none(), "PMSI discarded");
+    }
+
+    /// RFC 6514 §5 (b): a Tunnel Identifier that cannot be parsed, here an
+    /// Ingress Replication one of 7 octets, is malformed the same way.
+    #[test]
+    fn unparsable_pmsi_tunnel_identifier_is_treat_as_withdraw() {
+        let pmsi = [0x00, 0x06, 0x00, 0x00, 0x64, 10, 0, 0, 1, 0, 0, 0];
+        let block = origin_and_pmsi(&pmsi);
+        let (_, bgp_attr, _, _, treat_as_withdraw) =
+            parse_bgp_update_attribute(&block, block.len() as u16, false, None)
+                .expect("must not reset session");
+        assert!(treat_as_withdraw);
+        assert!(bgp_attr.expect("attrs parsed").pmsi_tunnel.is_none());
+
+        // The control: the same attribute with a 4-octet identifier is kept.
+        let pmsi = [0x00, 0x06, 0x00, 0x00, 0x64, 10, 0, 0, 1];
+        let block = origin_and_pmsi(&pmsi);
+        let (_, bgp_attr, _, _, treat_as_withdraw) =
+            parse_bgp_update_attribute(&block, block.len() as u16, false, None)
+                .expect("well-formed");
+        assert!(!treat_as_withdraw);
+        let pmsi = bgp_attr.expect("attrs parsed").pmsi_tunnel.expect("kept");
+        assert!(pmsi.is_ingress_replication());
+        assert_eq!(pmsi.vni, 100);
     }
 
     /// Regression: every MP family beyond Vpnv4/Evpn/Ipv4/Ipv6 (here a
