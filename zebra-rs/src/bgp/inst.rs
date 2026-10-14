@@ -9107,3 +9107,7 @@ mod pet_sync_review_tests;
 #[cfg(test)]
 #[path = "fs_srp_egress_review_tests.rs"]
 mod fs_srp_egress_review_tests;
+
+#[cfg(test)]
+#[path = "enhe_link_local_review_tests.rs"]
+mod enhe_link_local_review_tests;

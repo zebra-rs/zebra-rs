@@ -1,0 +1,6 @@
+# Phase 1: a bare `router bgp` block (see z1-base.yaml).
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 2.2.2.2
