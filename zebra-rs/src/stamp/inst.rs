@@ -29,7 +29,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use stamp_packet::{ErrorEstimate, ReflectorPacket, SenderPacket, StampTimestamp};
-use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::config::{
@@ -211,7 +210,7 @@ impl Stamp {
             .local_addr()?
             .as_socket_ipv4()
             .ok_or_else(|| std::io::Error::other("bound socket has no IPv4 local address"))?;
-        let sock = Arc::new(AsyncFd::new(sock)?);
+        let sock = Arc::new(crate::async_fd::register(sock)?);
 
         let (main_tx, rx) = mpsc::unbounded_channel::<Message>();
         let (reflect_tx, reflect_rx) = mpsc::unbounded_channel::<ReflectRequest>();
@@ -276,7 +275,7 @@ impl Stamp {
             .local_addr()?
             .as_socket_ipv6()
             .ok_or_else(|| std::io::Error::other("bound socket has no IPv6 local address"))?;
-        let sock = Arc::new(AsyncFd::new(sock)?);
+        let sock = Arc::new(crate::async_fd::register(sock)?);
 
         let (reflect_tx, reflect_rx) = mpsc::unbounded_channel::<ReflectRequest>();
         let read_sock = sock.clone();
@@ -514,7 +513,7 @@ impl Stamp {
                 ));
             }
         };
-        let sock = Arc::new(AsyncFd::new(sock)?);
+        let sock = Arc::new(crate::async_fd::register(sock)?);
 
         let read_sock = sock.clone();
         let read_tx = self.main_tx.clone();

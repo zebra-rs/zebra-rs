@@ -554,7 +554,6 @@ async fn watch_bash_death_with<F>(
     F: FnOnce(i32) -> std::io::Result<std::os::fd::OwnedFd>,
 {
     use tokio::io::Interest;
-    use tokio::io::unix::AsyncFd;
 
     let fd = match open(bash_pid as i32) {
         Ok(fd) => fd,
@@ -583,7 +582,7 @@ async fn watch_bash_death_with<F>(
         }
     };
 
-    let async_fd = match AsyncFd::with_interest(fd, Interest::READABLE) {
+    let async_fd = match crate::async_fd::register_with_interest(fd, Interest::READABLE) {
         Ok(a) => a,
         Err(e) => {
             tracing::warn!(

@@ -2,7 +2,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::sync::Arc;
 
-use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::config::{
@@ -222,7 +221,7 @@ impl Bfd {
             .local_addr()?
             .as_socket_ipv4()
             .ok_or_else(|| std::io::Error::other("bound socket has no IPv4 local address"))?;
-        let sock = Arc::new(AsyncFd::new(sock)?);
+        let sock = Arc::new(crate::async_fd::register(sock)?);
 
         let (main_tx, rx) = mpsc::unbounded_channel::<Message>();
         let (write_tx, write_rx) = mpsc::unbounded_channel::<WriteRequest>();
@@ -254,7 +253,7 @@ impl Bfd {
                 &ctx,
                 SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, BFD_MULTI_HOP_PORT),
             )
-            .and_then(AsyncFd::new)
+            .and_then(crate::async_fd::register)
             {
                 Ok(mh_sock) => {
                     let mh_sock = Arc::new(mh_sock);
@@ -281,7 +280,7 @@ impl Bfd {
                 &ctx,
                 SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, BFD_SINGLE_HOP_PORT, 0, 0),
             )
-            .and_then(AsyncFd::new)
+            .and_then(crate::async_fd::register)
             {
                 Ok(sock6) => {
                     let sock6 = Arc::new(sock6);
@@ -303,7 +302,7 @@ impl Bfd {
                 &ctx,
                 SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, BFD_MULTI_HOP_PORT, 0, 0),
             )
-            .and_then(AsyncFd::new)
+            .and_then(crate::async_fd::register)
             {
                 Ok(mh6) => {
                     let mh6 = Arc::new(mh6);

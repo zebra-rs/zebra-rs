@@ -43,7 +43,7 @@ pub fn pim_socket(ctx: &ProtoContext) -> Result<AsyncFd<Socket>, std::io::Error>
     socket.set_tos_v4(libc::IPTOS_PREC_INTERNETCONTROL as u32)?;
     set_ipv4_pktinfo(&socket)?;
 
-    AsyncFd::new(socket)
+    crate::async_fd::register(socket)
 }
 
 /// The raw IPv6 socket for PIMv6 (protocol 103), mirroring
@@ -62,7 +62,7 @@ pub fn pim_socket_v6(ctx: &ProtoContext) -> Result<AsyncFd<Socket>, std::io::Err
     socket.set_multicast_hops_v6(1)?;
     set_ipv6_pktinfo(&socket);
 
-    AsyncFd::new(socket)
+    crate::async_fd::register(socket)
 }
 
 fn set_ipv6_pktinfo(socket: &Socket) {
@@ -108,7 +108,7 @@ pub fn mld_socket(ctx: &ProtoContext) -> Result<AsyncFd<Socket>, std::io::Error>
     set_int_sockopt(&socket, libc::IPPROTO_IPV6, libc::IPV6_ROUTER_ALERT, 0);
     apply_mld_icmp6_filter(&socket)?;
 
-    AsyncFd::new(socket)
+    crate::async_fd::register(socket)
 }
 
 fn set_int_sockopt(socket: &Socket, level: c_int, name: c_int, value: c_int) {
@@ -231,7 +231,7 @@ pub fn igmp_socket(ctx: &ProtoContext) -> Result<AsyncFd<Socket>, std::io::Error
     set_ipv4_pktinfo(&socket)?;
     set_ipv4_router_alert(&socket)?;
 
-    AsyncFd::new(socket)
+    crate::async_fd::register(socket)
 }
 
 /// RFC 3376 §4: IGMP messages are sent with the IP Router Alert

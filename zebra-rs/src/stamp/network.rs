@@ -421,7 +421,7 @@ mod tests {
         let ctx = ProtoContext::default_table_no_rib();
         let sock = stamp_reflector_socket(&ctx, SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).unwrap();
         let port = sock.local_addr().unwrap().as_socket_ipv4().unwrap().port();
-        let sock = Arc::new(AsyncFd::new(sock).unwrap());
+        let sock = Arc::new(crate::async_fd::register(sock).unwrap());
 
         // Send one datagram to the bound port.
         let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -472,7 +472,7 @@ mod tests {
         let sock = stamp_reflector_socket_v6(&ctx, SocketAddrV6::new(Ipv6Addr::LOCALHOST, 0, 0, 0))
             .unwrap();
         let port = sock.local_addr().unwrap().as_socket_ipv6().unwrap().port();
-        let sock = Arc::new(AsyncFd::new(sock).unwrap());
+        let sock = Arc::new(crate::async_fd::register(sock).unwrap());
 
         let sender = UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).unwrap();
         sender

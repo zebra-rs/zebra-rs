@@ -11,7 +11,6 @@ use isis_packet::*;
 use netlink_packet_route::link::LinkFlags;
 use serde::Serialize;
 use strum_macros::{Display, EnumString};
-use tokio::io::unix::AsyncFd;
 use tokio::sync::mpsc::{self, UnboundedSender};
 
 use crate::bfd::session::{EchoMode, SessionKey};
@@ -1032,7 +1031,7 @@ impl IsisLink {
     /// daemon ran without the right caps.
     pub fn from(link: Link, tx: UnboundedSender<Message>) -> std::io::Result<Self> {
         let raw = isis_socket(link.index)?;
-        let sock = Arc::new(AsyncFd::new(raw)?);
+        let sock = Arc::new(crate::async_fd::register(raw)?);
         let (ptx, prx) = mpsc::unbounded_channel();
         // Socket for read/write per interface.
         let read_task = tokio::spawn(read_packet(sock.clone(), tx.clone()));

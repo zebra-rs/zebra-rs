@@ -319,14 +319,14 @@ mod tests {
         let addr = Ipv4Addr::new(127, 0, 53, host);
         let sock = bfd_socket_ipv4(&ctx, SocketAddrV4::new(addr, 0)).unwrap();
         let bound = sock.local_addr().unwrap().as_socket_ipv4().unwrap();
-        (Arc::new(AsyncFd::new(sock).unwrap()), bound)
+        (Arc::new(crate::async_fd::register(sock).unwrap()), bound)
     }
 
     fn loopback_recv_socket_v6() -> (Arc<AsyncFd<Socket>>, u16) {
         let ctx = ProtoContext::default_table_no_rib();
         let sock = bfd_socket_ipv6(&ctx, SocketAddrV6::new(Ipv6Addr::LOCALHOST, 0, 0, 0)).unwrap();
         let port = sock.local_addr().unwrap().as_socket_ipv6().unwrap().port();
-        (Arc::new(AsyncFd::new(sock).unwrap()), port)
+        (Arc::new(crate::async_fd::register(sock).unwrap()), port)
     }
 
     fn send_raw_v6(buf: &[u8], dst_port: u16, hops: u32) {
@@ -506,7 +506,7 @@ mod tests {
 
         let ctx = ProtoContext::default_table_no_rib();
         let sock = bfd_socket_ipv4(&ctx, SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)).unwrap();
-        let sock = Arc::new(AsyncFd::new(sock).unwrap());
+        let sock = Arc::new(crate::async_fd::register(sock).unwrap());
         let (tx, rx) = mpsc::unbounded_channel();
         let write_handle = tokio::spawn(async move { write_packet(sock, rx).await });
 
