@@ -601,6 +601,35 @@ async fn start_zebra_rs_leftover_sweep(world: &mut World, namespace: String, sec
     );
 }
 
+/// Start zebra-rs with `--feature <name>`: the schema nodes gated on that
+/// optional feature (`zebra-features.yang`) exist only for this daemon.
+#[when(expr = "I start zebra-rs in namespace {string} with feature {string}")]
+async fn start_zebra_rs_feature(world: &mut World, namespace: String, feature: String) {
+    let scoped = world.ns(&namespace);
+    let log_file = format!("logs/{}.log", scoped);
+    world.mark_log_start(&scoped);
+    let pid_file = world.pid_file(&namespace);
+    let _child = netns::spawn_in_netns_env(
+        &scoped,
+        &[],
+        "zebra-rs",
+        &[
+            "--daemon",
+            "--log-output=file",
+            &format!("--log-file={}", log_file),
+            &format!("--pid-file={}", pid_file),
+            &format!("--feature={feature}"),
+        ],
+    )
+    .await
+    .expect("Failed to start zebra-rs");
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    println!(
+        "✓ zebra-rs started in namespace {} with feature {} (pid file {})",
+        scoped, feature, pid_file
+    );
+}
+
 #[when(expr = "I start zebra-rs in namespace {string} with {int} shards")]
 async fn start_zebra_rs_sharded(world: &mut World, namespace: String, shards: usize) {
     let scoped = world.ns(&namespace);
@@ -1061,6 +1090,35 @@ async fn execute_command(world: &mut World, command: String, namespace: String) 
         .await
         .unwrap_or_else(|e| panic!("Failed to execute '{}' in {}: {}", command, scoped, e));
     println!("✓ Executed '{}' in namespace {}", command, scoped);
+}
+
+/// SIGKILL the cradle engine running in `namespace`, and only that one.
+/// Network namespaces share the host's PID space, so a `pkill -x cradle`
+/// run inside one kills every concurrent feature's engine as well.
+#[when(expr = "I kill the cradle engine in namespace {string}")]
+async fn kill_cradle_engine(world: &mut World, namespace: String) {
+    let scoped = world.ns(&namespace);
+    let out = tokio::process::Command::new("sudo")
+        .args(["ip", "netns", "pids", &scoped])
+        .output()
+        .await
+        .expect("Failed to run ip netns pids");
+    let mut killed = 0;
+    for pid in String::from_utf8_lossy(&out.stdout).split_whitespace() {
+        let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
+        if comm.trim() != "cradle" {
+            continue;
+        }
+        let status = tokio::process::Command::new("sudo")
+            .args(["kill", "-9", pid])
+            .status()
+            .await
+            .expect("Failed to run kill");
+        assert!(status.success(), "kill -9 {pid} in {scoped} failed");
+        killed += 1;
+    }
+    assert!(killed > 0, "no cradle engine is running in {scoped}");
+    println!("✓ Killed {killed} cradle engine(s) in namespace {scoped}");
 }
 
 #[when(expr = "I delete namespace {string}")]

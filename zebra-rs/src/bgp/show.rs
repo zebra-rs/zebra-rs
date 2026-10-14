@@ -2569,6 +2569,123 @@ struct EsMemberVtepJson {
     local: bool,
 }
 
+/// `show bgp evpn etree json`: one leaf AC.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EtreeLeafJson {
+    name: String,
+    /// `None` while the interface does not exist.
+    ifindex: Option<u32>,
+    evis: Vec<u32>,
+    /// Locally-learned MACs on it, advertised with the leaf flag.
+    local_macs: usize,
+}
+
+/// `show bgp evpn etree json`: remote leaf MACs in one EVI.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EtreeRemoteJson {
+    evi: u32,
+    leaf_macs: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EtreeJson {
+    leaf_interfaces: Vec<EtreeLeafJson>,
+    remote_leaf_macs: Vec<EtreeRemoteJson>,
+    /// What is enforced so far: leaf to leaf on one PE, and known unicast
+    /// from a leaf to a remote leaf MAC. Not yet a leaf's BUM toward
+    /// leaves on other PEs.
+    bum_filtered: bool,
+}
+
+/// `show bgp evpn etree` — EVPN E-Tree (RFC 8317): the leaf ACs this PE
+/// colours its Type-2s for, and the remote MACs behind leaf ACs that a
+/// local leaf may not reach. Whether the datapath holds each role is
+/// `show ebpf`'s (the cradle supervisor programs it).
+fn show_bgp_evpn_etree(
+    bgp: &Bgp,
+    _args: Args,
+    json: bool,
+) -> std::result::Result<String, std::fmt::Error> {
+    let leaves: Vec<EtreeLeafJson> = bgp
+        .etree_leaf_ifs
+        .iter()
+        .map(|name| {
+            let ifindex = bgp.link_index_by_name.get(name).copied();
+            EtreeLeafJson {
+                name: name.clone(),
+                ifindex,
+                evis: ifindex
+                    .map(|i| bgp.port_evis(i).into_iter().collect())
+                    .unwrap_or_default(),
+                local_macs: ifindex
+                    .map(|i| {
+                        bgp.local_fdb
+                            .values()
+                            .filter(|e| e.ifindex == i)
+                            .map(|e| (e.vni, e.mac))
+                            .collect::<std::collections::BTreeSet<_>>()
+                            .len()
+                    })
+                    .unwrap_or(0),
+            }
+        })
+        .collect();
+    let remote: Vec<EtreeRemoteJson> = bgp
+        .evpn_remote_etree_leaf_macs()
+        .into_iter()
+        .map(|(evi, macs)| EtreeRemoteJson {
+            evi,
+            leaf_macs: macs.len(),
+        })
+        .collect();
+    if json {
+        let out = EtreeJson {
+            leaf_interfaces: leaves,
+            remote_leaf_macs: remote,
+            bum_filtered: false,
+        };
+        return Ok(serde_json::to_string_pretty(&out)
+            .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")));
+    }
+    let mut out = String::new();
+    writeln!(out, "EVPN E-Tree (RFC 8317)")?;
+    writeln!(out, "  Leaf interfaces: {}", leaves.len())?;
+    for leaf in &leaves {
+        match leaf.ifindex {
+            Some(ifindex) => {
+                let evis: Vec<String> = leaf.evis.iter().map(u32::to_string).collect();
+                let evis = if evis.is_empty() {
+                    "-".to_string()
+                } else {
+                    evis.join(",")
+                };
+                writeln!(
+                    out,
+                    "    {:<16} ifindex {:<6} EVI {:<10} local MACs {}",
+                    leaf.name, ifindex, evis, leaf.local_macs
+                )?;
+            }
+            None => writeln!(out, "    {:<16} link absent", leaf.name)?,
+        }
+    }
+    writeln!(out, "  Remote leaf MACs:")?;
+    if remote.is_empty() {
+        writeln!(out, "    none")?;
+    }
+    for r in &remote {
+        writeln!(out, "    EVI {:<10} {}", r.evi, r.leaf_macs)?;
+    }
+    writeln!(
+        out,
+        "  Not filtered yet: a leaf's broadcast, multicast and unknown unicast \
+         toward leaves on other PEs"
+    )?;
+    Ok(out)
+}
+
 #[derive(Serialize)]
 struct EthernetSegmentJson {
     name: String,
@@ -4701,6 +4818,10 @@ fn format_evpn_ecom_value(v: &ExtCommunityValue) -> String {
         // carried on the Type-7/8 Synch routes. Reuse the codec's Display:
         // `evi-rt:<route-target>`.
         (0x06, 0x0a) | (0x06, 0x0b) | (0x06, 0x0c) | (0x06, 0x0d) => v.to_string(),
+        // EVPN E-Tree EC — RFC 8317 §6.1, the Leaf-Indication flag on a
+        // Type-2 or the leaf label on an ESI-0 A-D. Reuse the codec's
+        // Display: `etree:leaf`, `etree:leaf-label:<n>`, `etree:<flags>…`.
+        (0x06, 0x05) => v.to_string(),
         _ => format!(
             "0x{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
             v.high_type, v.low_type, v.val[0], v.val[1], v.val[2], v.val[3], v.val[4], v.val[5]
@@ -6211,6 +6332,20 @@ mod evpn_show_tests {
             val: [0, 0, 0, 0, 0, 8], // tunnel type 8 = VXLAN
         };
         assert_eq!(format_evpn_ecom_value(&v), "ET:8");
+    }
+
+    /// RFC 8317 §6.1: the E-Tree community renders through the codec, as
+    /// a leaf flag on a Type-2 and a leaf label on an ESI-0 A-D.
+    #[test]
+    fn ecom_etree() {
+        assert_eq!(
+            format_evpn_ecom_value(&ExtCommunityValue::etree_leaf()),
+            "etree:leaf"
+        );
+        assert_eq!(
+            format_evpn_ecom_value(&ExtCommunityValue::etree_leaf_label(1000)),
+            "etree:leaf-label:1000"
+        );
     }
 
     #[test]
@@ -8815,6 +8950,8 @@ impl Bgp {
             .set(show_bgp_evpn_ethernet_segment)
             .path("/show/bgp/evpn/vpws")
             .set(show_bgp_evpn_vpws)
+            .path("/show/bgp/evpn/etree")
+            .set(show_bgp_evpn_etree)
             .path("/show/bgp/mup")
             .set(show_bgp_mup)
             .path("/show/bgp/mup/summary")

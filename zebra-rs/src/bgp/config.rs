@@ -2594,6 +2594,30 @@ fn config_ethernet_segment_interface(bgp: &mut Bgp, mut args: Args, op: ConfigOp
     Some(())
 }
 
+/// `router bgp afi-safi evpn etree leaf-interface <name>` — an EVPN E-Tree
+/// leaf attachment circuit (RFC 8317). Every AC not listed is a root.
+///
+/// A role change is an attribute change on each MAC already learned on the
+/// AC: re-originating them is an implicit replace, with no MAC-mobility
+/// sequence bump (RFC 8317 §4.1). The cradle supervisor reads this config
+/// too and programs the datapath role; this side only colours Type-2s.
+fn config_etree_leaf_interface(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
+    let afi_safi: AfiSafi = args.afi_safi()?;
+    if afi_safi.afi != Afi::L2vpn || afi_safi.safi != Safi::Evpn {
+        return None;
+    }
+    let name = args.string()?;
+    let changed = if op.is_set() {
+        bgp.etree_leaf_ifs.insert(name)
+    } else {
+        bgp.etree_leaf_ifs.remove(&name)
+    };
+    if changed {
+        bgp.evpn_resync_macip_esi();
+    }
+    Some(())
+}
+
 /// `router bgp afi-safi evpn evi <id>` — declare or remove an EVPN Instance.
 ///
 /// The VXLAN and SRv6 paths read a local VXLAN device's VNI to learn which
@@ -5984,6 +6008,13 @@ impl Bgp {
         self.callback_add(
             "/router/bgp/afi-safi/ethernet-segment/interface",
             config_ethernet_segment_interface,
+        );
+        // EVPN E-Tree (RFC 8317) leaf ACs, under `router bgp afi-safi evpn
+        // etree leaf-interface <name>`; the subtree exists only with
+        // `--feature etree` (zebra-bgp-evpn.yang).
+        self.callback_add(
+            "/router/bgp/afi-safi/etree/leaf-interface",
+            config_etree_leaf_interface,
         );
         self.callback_add(
             "/router/bgp/afi-safi/ethernet-segment/role-signaling",

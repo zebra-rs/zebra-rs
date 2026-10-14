@@ -162,6 +162,22 @@ struct CradleMirror {
     /// `(bd, mac)` → local port: static local entries for MACs on a segment
     /// this node is attached to (`AddFdbLocal`).
     fdb_local: HashMap<(u32, [u8; 6]), String>,
+    /// EVPN E-Tree (RFC 8317 §4.1): the overlay FDB entries (`fdb`,
+    /// `fdb_vxlan`, `fdb_mpls`, `fdb_es`) whose MAC is behind a leaf AC on
+    /// its PE (`FdbRemote.etree_leaf`). A flag of the entry, not a kind of
+    /// its own: every installer sets or clears it and `fdb_del` drops it.
+    fdb_etree_leaf: HashSet<(u32, [u8; 6])>,
+}
+
+impl CradleMirror {
+    /// Record whether the overlay FDB entry `key` is behind a leaf AC.
+    fn set_etree_leaf(&mut self, key: (u32, [u8; 6]), leaf: bool) {
+        if leaf {
+            self.fdb_etree_leaf.insert(key);
+        } else {
+            self.fdb_etree_leaf.remove(&key);
+        }
+    }
 }
 
 /// Map zebra's `SidBehavior` to cradle's `SRV6_BH_*` (data-plane ABI). The
@@ -527,6 +543,22 @@ impl CradleFib {
         Ok(())
     }
 
+    /// EVPN E-Tree (RFC 8317): port `name` is a leaf AC (`leaf`) or a root.
+    /// cradle keeps the role by name, so it may precede the port's
+    /// `SetPort` — which is how the supervisor sends it, and why it is not
+    /// mirrored here: the supervisor re-sends every role before re-attaching
+    /// the ports of a fresh engine.
+    pub async fn set_etree_role(&self, name: &str, leaf: bool) -> anyhow::Result<()> {
+        self.client()
+            .await?
+            .set_etree_role(pb::EtreeRole {
+                port: name.to_string(),
+                leaf,
+            })
+            .await?;
+        Ok(())
+    }
+
     /// Replay the entire mirrored tee state into a fresh engine. Called
     /// (via `FibHandle::cradle_replay` ← `Message::CradleEngineUp`) when
     /// the `system ebpf` supervisor reports the engine ready after a
@@ -569,7 +601,8 @@ impl CradleFib {
             self.route_install6(*prefix, *table, members.clone()).await;
         }
         for ((vni, mac), sid) in &m.fdb {
-            self.fdb_add(*vni, *mac, *sid).await;
+            let leaf = m.fdb_etree_leaf.contains(&(*vni, *mac));
+            self.fdb_add(*vni, *mac, *sid, leaf).await;
         }
         for (vni, sid) in &m.repl_slots {
             self.repl_slot_add(*vni, *sid).await;
@@ -615,19 +648,22 @@ impl CradleFib {
             self.set_es_nhg(esi, *bd, members, *single_active).await;
         }
         for ((bd, mac), esi) in &m.fdb_es {
-            self.fdb_add_es(*bd, *mac, esi).await;
+            let leaf = m.fdb_etree_leaf.contains(&(*bd, *mac));
+            self.fdb_add_es(*bd, *mac, esi, leaf).await;
         }
         for ((bd, mac), port) in &m.fdb_local {
             self.fdb_add_local(*bd, *mac, port).await;
         }
         for ((vni, mac), vtep) in &m.fdb_vxlan {
-            self.fdb_add_vxlan(*vni, *mac, *vtep).await;
+            let leaf = m.fdb_etree_leaf.contains(&(*vni, *mac));
+            self.fdb_add_vxlan(*vni, *mac, *vtep, leaf).await;
         }
         for (vni, vtep) in &m.repl_slots_vxlan {
             self.repl_slot_add_vxlan(*vni, *vtep).await;
         }
         for ((vni, mac), (pe, label)) in &m.fdb_mpls {
-            self.fdb_add_mpls(*vni, *mac, *pe, *label).await;
+            let leaf = m.fdb_etree_leaf.contains(&(*vni, *mac));
+            self.fdb_add_mpls(*vni, *mac, *pe, *label, leaf).await;
         }
         for (vni, pe, label) in &m.repl_slots_mpls {
             self.repl_slot_add_mpls(*vni, *pe, *label).await;
@@ -1581,8 +1617,12 @@ impl CradleFib {
     /// unicast; the all-ones BUM sentinel carries End.DT2M). `nexthop_id: 0`
     /// — cradle resolves the underlay adjacency with a FIB6 lookup on the
     /// SID (the IGP's locator route, already teed).
-    pub async fn fdb_add(&self, vni: u32, mac: [u8; 6], sid: std::net::Ipv6Addr) {
-        self.mirror.lock().await.fdb.insert((vni, mac), sid);
+    pub async fn fdb_add(&self, vni: u32, mac: [u8; 6], sid: std::net::Ipv6Addr, etree_leaf: bool) {
+        {
+            let mut m = self.mirror.lock().await;
+            m.fdb.insert((vni, mac), sid);
+            m.set_etree_leaf((vni, mac), etree_leaf);
+        }
         let mac_str = format!(
             "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
@@ -1599,6 +1639,7 @@ impl CradleFib {
                     remote_pe: String::new(),
                     remote_label: 0,
                     esi: String::new(),
+                    etree_leaf,
                 })
                 .await?;
             anyhow::Ok(())
@@ -1613,8 +1654,12 @@ impl CradleFib {
     /// sits behind the remote VTEP `vtep`. The VNI stamped on encap comes
     /// from the bridge domain's `SetVni` binding; `nexthop_id: 0` — cradle
     /// resolves the underlay adjacency with a FIB4 lookup on the VTEP.
-    pub async fn fdb_add_vxlan(&self, vni: u32, mac: [u8; 6], vtep: IpAddr) {
-        self.mirror.lock().await.fdb_vxlan.insert((vni, mac), vtep);
+    pub async fn fdb_add_vxlan(&self, vni: u32, mac: [u8; 6], vtep: IpAddr, etree_leaf: bool) {
+        {
+            let mut m = self.mirror.lock().await;
+            m.fdb_vxlan.insert((vni, mac), vtep);
+            m.set_etree_leaf((vni, mac), etree_leaf);
+        }
         let mac_str = format!(
             "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
@@ -1631,6 +1676,7 @@ impl CradleFib {
                     remote_pe: String::new(),
                     remote_label: 0,
                     esi: String::new(),
+                    etree_leaf,
                 })
                 .await?;
             anyhow::Ok(())
@@ -1646,12 +1692,19 @@ impl CradleFib {
     /// `label`. `nexthop_id: 0` — cradle resolves the underlay adjacency with
     /// a FIB lookup on the PE, which is also what supplies the transport LSP
     /// label stack the service label rides under.
-    pub async fn fdb_add_mpls(&self, bd: u32, mac: [u8; 6], pe: IpAddr, label: u32) {
-        self.mirror
-            .lock()
-            .await
-            .fdb_mpls
-            .insert((bd, mac), (pe, label));
+    pub async fn fdb_add_mpls(
+        &self,
+        bd: u32,
+        mac: [u8; 6],
+        pe: IpAddr,
+        label: u32,
+        etree_leaf: bool,
+    ) {
+        {
+            let mut m = self.mirror.lock().await;
+            m.fdb_mpls.insert((bd, mac), (pe, label));
+            m.set_etree_leaf((bd, mac), etree_leaf);
+        }
         let mac_str = format!(
             "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
@@ -1668,6 +1721,7 @@ impl CradleFib {
                     remote_pe: pe.to_string(),
                     remote_label: label,
                     esi: String::new(),
+                    etree_leaf,
                 })
                 .await?;
             anyhow::Ok(())
@@ -1688,6 +1742,7 @@ impl CradleFib {
             m.fdb_mpls.remove(&(vni, mac));
             m.fdb_es.remove(&(vni, mac));
             m.fdb_local.remove(&(vni, mac));
+            m.fdb_etree_leaf.remove(&(vni, mac));
         }
         let mac_str = format!(
             "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
@@ -2424,7 +2479,7 @@ impl CradleFib {
     /// overlay FDB entry that resolves through the segment's nexthop group
     /// (`FdbRemote.esi`). Mirrored under the MAC like the other FDB kinds;
     /// `fdb_del` clears it.
-    pub async fn fdb_add_es(&self, bd: u32, mac: [u8; 6], esi: &str) {
+    pub async fn fdb_add_es(&self, bd: u32, mac: [u8; 6], esi: &str, etree_leaf: bool) {
         {
             let mut m = self.mirror.lock().await;
             m.fdb.remove(&(bd, mac));
@@ -2432,6 +2487,7 @@ impl CradleFib {
             m.fdb_mpls.remove(&(bd, mac));
             m.fdb_local.remove(&(bd, mac));
             m.fdb_es.insert((bd, mac), esi.to_string());
+            m.set_etree_leaf((bd, mac), etree_leaf);
         }
         let mac_str = format!(
             "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
@@ -2449,6 +2505,7 @@ impl CradleFib {
                     remote_pe: String::new(),
                     remote_label: 0,
                     esi: esi.to_string(),
+                    etree_leaf,
                 })
                 .await?;
             anyhow::Ok(())
@@ -2469,6 +2526,7 @@ impl CradleFib {
             m.fdb_vxlan.remove(&(bd, mac));
             m.fdb_mpls.remove(&(bd, mac));
             m.fdb_es.remove(&(bd, mac));
+            m.fdb_etree_leaf.remove(&(bd, mac));
             m.fdb_local.insert((bd, mac), port.to_string());
         }
         let mac_str = format!(

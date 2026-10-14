@@ -1185,10 +1185,11 @@ impl FibHandle {
 
     /// EVPN multihoming tee: `mac` in `vni` sits behind segment `esi` —
     /// install it through the segment's nexthop group (a member per flow).
-    pub async fn cradle_fdb_es(&self, vni: u32, mac: &MacAddr, esi: &[u8; 10]) {
+    /// `etree_leaf`: the MAC is behind a leaf AC (RFC 8317 §4.1).
+    pub async fn cradle_fdb_es(&self, vni: u32, mac: &MacAddr, esi: &[u8; 10], etree_leaf: bool) {
         if let Some(cradle) = &self.cradle {
             cradle
-                .fdb_add_es(vni, mac.octets(), &bgp_packet::esi_display(esi))
+                .fdb_add_es(vni, mac.octets(), &bgp_packet::esi_display(esi), etree_leaf)
                 .await;
         }
     }
@@ -4678,13 +4679,17 @@ impl FibHandle {
         srv6_sid: Option<std::net::Ipv6Addr>,
         mpls_label: Option<u32>,
     ) -> bool {
+        // EVPN E-Tree (RFC 8317 §4.1): a MAC behind a remote leaf AC. Only
+        // the cradle datapath acts on it; the kernel bridge has no per-MAC
+        // leaf drop, so the kernel rows below ignore it.
+        let etree_leaf = flags & crate::rib::evpn::MAC_FLAG_ETREE_LEAF != 0;
         // EVPN over SRv6 (RFC 9252): the MAC sits behind a remote L2 service
         // SID (End.DT2U; the all-ones BUM sentinel behind End.DT2M). The
         // cradle eBPF tee is the L2 data plane — there is no kernel VXLAN
         // FDB row to install (and no VXLAN device is required).
         if let Some(sid) = srv6_sid {
             if let Some(cradle) = &self.cradle {
-                cradle.fdb_add(vni, mac.octets(), sid).await;
+                cradle.fdb_add(vni, mac.octets(), sid, etree_leaf).await;
             }
             return true;
         }
@@ -4696,7 +4701,9 @@ impl FibHandle {
         // row for it would be worse than doing nothing.
         if let Some(label) = mpls_label {
             if let (Some(cradle), Some(pe)) = (&self.cradle, tunnel_endpoint) {
-                cradle.fdb_add_mpls(vni, mac.octets(), pe, label).await;
+                cradle
+                    .fdb_add_mpls(vni, mac.octets(), pe, label, etree_leaf)
+                    .await;
             }
             return true;
         }
@@ -4708,7 +4715,9 @@ impl FibHandle {
         if let Some(cradle) = &self.cradle
             && let Some(vtep) = tunnel_endpoint
         {
-            cradle.fdb_add_vxlan(vni, mac.octets(), vtep).await;
+            cradle
+                .fdb_add_vxlan(vni, mac.octets(), vtep, etree_leaf)
+                .await;
             return true;
         }
         let Some(&vxlan_ifindex) = self.vni_ifindex_map.get(&vni) else {

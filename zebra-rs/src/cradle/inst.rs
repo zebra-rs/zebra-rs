@@ -5,7 +5,7 @@
 //! [`supervisor`]) and the engine's port set (`SetPort`/`DelPort` over the
 //! gRPC control API) against the committed state.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::watch;
@@ -159,6 +159,15 @@ pub struct Cradle {
     /// the EVI id *is* the bridge domain, so the control plane's `(mac, bd)`
     /// and the datapath's agree.
     evi_by_bridge: BTreeMap<String, u16>,
+    /// EVPN E-Tree (RFC 8317) leaf ACs, by interface name, from `router bgp
+    /// afi-safi evpn etree leaf-interface <name>` (config is broadcast, as
+    /// for the EVI bridge above). Every other port is a root.
+    etree_leaves: BTreeSet<String>,
+    /// The leaf roles the current engine has acknowledged (`SetEtreeRole`).
+    /// A leaf in `etree_leaves` but not here is held out of the data plane:
+    /// not attached, or detached, until its role lands, so it never
+    /// forwards as a root (fail closed). Reset with `applied`.
+    applied_etree: BTreeSet<String>,
     engine: Option<Engine>,
     /// Last observed engine availability (from [`EngineEvent`]s).
     status: EngineStatus,
@@ -202,6 +211,8 @@ impl Cradle {
             bd_by_ifindex: HashMap::new(),
             bd_alloc: BTreeMap::new(),
             evi_by_bridge: BTreeMap::new(),
+            etree_leaves: BTreeSet::new(),
+            applied_etree: BTreeSet::new(),
             engine: None,
             status: EngineStatus::default(),
             applied: HashMap::new(),
@@ -300,6 +311,20 @@ impl Cradle {
                         }
                         self.recompute_bds();
                     }
+                    // `router bgp afi-safi evpn etree leaf-interface <name>`:
+                    // an E-Tree leaf AC. Applied by `reconcile_ports` at
+                    // CommitEnd, before any port moves.
+                    "/router/bgp/afi-safi/etree/leaf-interface" => {
+                        if args.string().as_deref() != Some("evpn") {
+                            return;
+                        }
+                        let Some(name) = args.string() else { return };
+                        if msg.op.is_set() {
+                            self.etree_leaves.insert(name);
+                        } else {
+                            self.etree_leaves.remove(&name);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -386,6 +411,52 @@ impl Cradle {
         names.into_iter().collect()
     }
 
+    /// Whether port `name` is an E-Tree leaf whose role the current engine
+    /// has not acknowledged: it must not forward, because it would forward
+    /// as a root.
+    fn etree_held(&self, name: &str) -> bool {
+        self.etree_leaves.contains(name) && !self.applied_etree.contains(name)
+    }
+
+    /// Bring the engine's E-Tree roles to `etree_leaves`: `SetEtreeRole`
+    /// leaf for each new leaf, root for each one no longer configured. A
+    /// failure leaves the name where it was, to retry on the next
+    /// reconcile; meanwhile a new leaf stays held (`etree_held`) and a
+    /// former leaf stays a leaf — both fail closed.
+    async fn sync_etree_roles(&mut self, client: &CradleFib) {
+        let add: Vec<String> = self
+            .etree_leaves
+            .difference(&self.applied_etree)
+            .cloned()
+            .collect();
+        let remove: Vec<String> = self
+            .applied_etree
+            .difference(&self.etree_leaves)
+            .cloned()
+            .collect();
+        for name in add {
+            match client.set_etree_role(&name, true).await {
+                Ok(()) => {
+                    info!("cradle: E-Tree leaf {name}");
+                    self.applied_etree.insert(name);
+                }
+                Err(e) => warn!(
+                    "cradle: SetEtreeRole {name} leaf failed: {e} (port held out of the \
+                     data plane; will retry)"
+                ),
+            }
+        }
+        for name in remove {
+            match client.set_etree_role(&name, false).await {
+                Ok(()) => {
+                    info!("cradle: E-Tree root {name}");
+                    self.applied_etree.remove(&name);
+                }
+                Err(e) => warn!("cradle: SetEtreeRole {name} root failed: {e} (will retry)"),
+            }
+        }
+    }
+
     /// Re-derive every bridge's domain id from link state. Preference
     /// order per bridge: a configured EVI id (EVPN over MPLS — the operator
     /// named this bridge's instance), else the VNI of a VXLAN slave when it
@@ -442,6 +513,7 @@ impl Cradle {
         // Both edges reset the applied set: a fresh (or vanished) engine
         // has no ports, so everything must be re-applied on the next Up.
         self.applied.clear();
+        self.applied_etree.clear();
         match ev {
             EngineEvent::Up { pid, adopted } => {
                 self.status.up = true;
@@ -678,6 +750,7 @@ impl Cradle {
                         }),
                         "attached": binding.is_some()
                             && self.applied.get(name) == binding.as_ref(),
+                        "etreeLeaf": self.etree_leaves.contains(name),
                     })
                 })
                 .collect();
@@ -690,6 +763,14 @@ impl Cradle {
                 "engineUpSeconds": up_secs,
                 "engineRestarts": restarts,
                 "ports": ports,
+                "etreeLeaves": self
+                    .etree_leaves
+                    .iter()
+                    .map(|name| serde_json::json!({
+                        "name": name,
+                        "programmed": self.applied_etree.contains(name),
+                    }))
+                    .collect::<Vec<_>>(),
                 "fib4Mode": fib.as_ref().map(|f| f.fib4_mode.clone()),
                 "fib4Routes": fib.as_ref().map(|f| f.routes4),
             })
@@ -782,6 +863,8 @@ impl Cradle {
                     };
                     let state = if applied == Some(&binding) {
                         "attached"
+                    } else if self.etree_held(name) {
+                        "held (E-Tree leaf role pending)"
                     } else {
                         "pending"
                     };
@@ -795,6 +878,20 @@ impl Cradle {
                     writeln!(out, "    {name:<16} {:<20} {src:<11} link absent", "-").unwrap();
                 }
             }
+        }
+        if !self.etree_leaves.is_empty() {
+            let leaves: Vec<String> = self
+                .etree_leaves
+                .iter()
+                .map(|name| {
+                    if self.applied_etree.contains(name) {
+                        name.clone()
+                    } else {
+                        format!("{name} (pending)")
+                    }
+                })
+                .collect();
+            writeln!(out, "  E-Tree leaves:   {}", leaves.join(", ")).unwrap();
         }
         out
     }
@@ -902,6 +999,7 @@ impl Cradle {
             // its state is gone or not ours — just reset ours.
             self.applied.clear();
             self.applied_domains.clear();
+            self.applied_etree.clear();
             self.ports_client = None;
             self.client_endpoint = None;
             return;
@@ -913,8 +1011,17 @@ impl Cradle {
             self.client_endpoint = Some(endpoint.clone());
             self.applied.clear();
             self.applied_domains.clear();
+            self.applied_etree.clear();
         }
         let client = self.ports_client.as_ref().expect("set above").clone();
+
+        // Phase 0 — E-Tree roles, before any port moves: a leaf must never
+        // forward as a root, not even while its role is in flight
+        // (docs/design/bgp-evpn-e-tree-plan.md §7.3, invariant 6). cradle
+        // keeps a role by port name, so it may precede the port, and a
+        // fresh engine gets every leaf role back before its ports are
+        // re-attached below.
+        self.sync_etree_roles(&client).await;
 
         // Phase A — take leavers out of their flood domains first: ports
         // being detached, and ports staying attached but leaving a bd
@@ -925,7 +1032,9 @@ impl Cradle {
         // get their learned MACs flushed at the end.
         let mut flush_after: Vec<String> = Vec::new();
         for (name, (applied_ifindex, applied_role)) in self.applied.clone() {
-            let enabled = self.is_port_wanted(&name);
+            // A leaf whose role the engine has not acknowledged is detached
+            // rather than left forwarding as a root.
+            let enabled = self.is_port_wanted(&name) && !self.etree_held(&name);
             let binding = self.port_binding(&name);
             let same_device =
                 enabled && binding.is_some_and(|(ifindex, _)| ifindex == applied_ifindex);
@@ -963,6 +1072,11 @@ impl Cradle {
                 continue;
             };
             if self.applied.get(&name) == Some(&(ifindex, role)) {
+                continue;
+            }
+            // Fail closed: no attach until the leaf role has landed (retried
+            // with the role on the next reconcile).
+            if self.etree_held(&name) {
                 continue;
             }
             let (l3, vlan, vrf) = match role {
@@ -1070,6 +1184,24 @@ mod tests {
         // BFD releasing does NOT detach while config still wants it.
         c.process_port_request(PortRequest::Release(5));
         assert!(c.is_port_wanted("eth0"));
+    }
+
+    /// An E-Tree leaf is held out of the data plane until the engine has
+    /// acknowledged its role; a root never is, and a former leaf is no
+    /// longer held once it leaves the config.
+    #[test]
+    fn an_unacknowledged_leaf_is_held() {
+        let mut c = test_cradle();
+        c.etree_leaves.insert("ce1".to_string());
+        assert!(c.etree_held("ce1"));
+        assert!(!c.etree_held("ce2"), "a root is never held");
+        c.applied_etree.insert("ce1".to_string());
+        assert!(!c.etree_held("ce1"));
+        // A fresh engine forgets every acknowledgement.
+        c.process_engine_event(EngineEvent::Down);
+        assert!(c.etree_held("ce1"));
+        c.etree_leaves.remove("ce1");
+        assert!(!c.etree_held("ce1"));
     }
 
     #[test]

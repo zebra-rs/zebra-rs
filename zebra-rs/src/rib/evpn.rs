@@ -3,6 +3,13 @@
 use super::{MacAddr, Rib};
 use std::net::{IpAddr, Ipv6Addr};
 
+/// `MacRoute::flags` / `MacEntry::flags` bit: EVPN E-Tree (RFC 8317 §4.1),
+/// the MAC is behind a leaf AC on its PE — its selected Type-2 carries the
+/// E-Tree EC with the Leaf-Indication flag. The cradle tee hands it to the
+/// datapath as `FdbRemote.etree_leaf`. Bits 0x01-0x08 are sticky, gateway,
+/// router and (shown, never set) sync.
+pub const MAC_FLAG_ETREE_LEAF: u8 = 0x10;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MacRouteKey {
     pub vni: u32,

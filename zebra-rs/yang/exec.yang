@@ -650,6 +650,11 @@ module exec {
           ext:help "EVPN VPWS E-Line services (RFC 8214)";
           type empty;
         }
+        leaf etree {
+          if-feature feat:etree;
+          ext:help "EVPN E-Tree leaf interfaces and remote leaf MACs (RFC 8317)";
+          type empty;
+        }
         leaf route-type {
           ext:help "Filter the EVPN RIB by route type";
           // ethernet-ad=1, macip=2, multicast=3, ethernet-segment=4,

@@ -20,6 +20,10 @@ module zebra-bgp-evpn {
     prefix inet;
   }
 
+  import zebra-features {
+    prefix feat;
+  }
+
   organization
     "zebra-rs";
 
@@ -827,6 +831,36 @@ module zebra-bgp-evpn {
            to replicate to. An AR-LEAF originates a Leaf A-D toward each
            selective replicator it sees. Non-selective (the default)
            replicates to every node in the broadcast domain.";
+      }
+    }
+    container etree {
+      if-feature feat:etree;
+      ext:help "EVPN E-Tree: root and leaf attachment circuits (RFC 8317)";
+      description
+        "EVPN E-Tree (RFC 8317): every attachment circuit is a root or a
+         leaf, and a leaf never reaches another leaf. An AC not listed
+         as a leaf is a root, so a PE with no leaf ACs needs no E-Tree
+         configuration. Needs the cradle data plane (`system ebpf
+         enabled` or `system cradle enabled`); a commit without it is
+         refused, because the kernel bridge cannot isolate leaves.
+
+         Enforced so far: leaf to leaf on one PE, and known unicast from
+         a leaf to a MAC behind a leaf on another PE. Not yet: a leaf's
+         broadcast, multicast and unknown unicast toward leaves on other
+         PEs.";
+      list leaf-interface {
+        ext:help "A leaf attachment circuit";
+        key "name";
+        description
+          "A leaf AC, by interface name: the bridge port the CE is
+           attached to (for a multihomed CE, the Ethernet Segment's
+           interface). MACs learned on it are advertised with the E-Tree
+           community's Leaf-Indication flag (RFC 8317 §4.1), and the
+           cradle data plane keeps it from every other leaf.";
+        leaf name {
+          ext:help "Interface name";
+          type string;
+        }
       }
     }
   }

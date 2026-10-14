@@ -12,6 +12,50 @@ use crate::bgp::ethernet_segment::check_es_esi;
 use crate::flex_algo::check_max_link_loss;
 use crate::stamp::session::{check_loss_interval, check_loss_percent};
 
+/// The E-Tree leaf-AC list (`router bgp afi-safi evpn etree
+/// leaf-interface <name>`), as a callback path.
+pub const ETREE_LEAF_PATH: &str = "/router/bgp/afi-safi/etree/leaf-interface";
+
+/// The leaves that turn the cradle data plane on: the managed engine, or
+/// the tee to an external one.
+const CRADLE_ENABLED_PATHS: [&str; 2] = ["/system/ebpf/enabled", "/system/cradle/enabled"];
+
+/// Whether a config line can carry a leaf [`etree_backend`] reads, so the
+/// caller parses only those.
+pub fn etree_backend_line(line: &str) -> bool {
+    line.contains(" etree leaf-interface ")
+        || line.starts_with("system ebpf enabled ")
+        || line.starts_with("system cradle enabled ")
+}
+
+/// An E-Tree leaf AC needs the cradle data plane: only cradle keeps a leaf
+/// from another leaf. The kernel bridge cannot drop by a remote MAC's
+/// colour, and a leaf left unisolated is a leak of what E-Tree exists to
+/// keep apart (RFC 8317 §7). `leaves` are a whole config's
+/// [`etree_backend_line`]s as (callback path, arguments); the result is
+/// one error per leaf AC when neither switch is on.
+pub fn etree_backend(leaves: &[(String, Vec<String>)]) -> Vec<String> {
+    let cradle = leaves.iter().any(|(path, args)| {
+        CRADLE_ENABLED_PATHS.contains(&path.as_str())
+            && args.last().map(String::as_str) == Some("true")
+    });
+    if cradle {
+        return Vec::new();
+    }
+    leaves
+        .iter()
+        .filter(|(path, _)| path == ETREE_LEAF_PATH)
+        .filter_map(|(_, args)| args.last())
+        .map(|name| {
+            format!(
+                "etree leaf-interface {name}: E-Tree needs the cradle data plane \
+                 (`system ebpf enabled` or `system cradle enabled`); the kernel \
+                 bridge cannot keep leaves apart"
+            )
+        })
+        .collect()
+}
+
 /// A leaf value check: `Err` holds the reason, shown after the line.
 pub type ValueCheck = fn(&str) -> Result<(), String>;
 
@@ -90,6 +134,42 @@ mod tests {
         assert!(check("50.331642").is_ok());
         assert!(check("50.331643").is_err());
         assert!(check("5.1234567").is_err());
+    }
+
+    fn leaf(path: &str, args: &[&str]) -> (String, Vec<String>) {
+        (
+            path.to_string(),
+            args.iter().map(|a| a.to_string()).collect(),
+        )
+    }
+
+    /// A leaf AC is refused unless the cradle data plane is on, through
+    /// either switch, and set to true rather than merely present.
+    #[test]
+    fn etree_leaf_needs_cradle() {
+        let leaf_ac = leaf(ETREE_LEAF_PATH, &["evpn", "ce1"]);
+        let errors = etree_backend(std::slice::from_ref(&leaf_ac));
+        assert_eq!(errors.len(), 1);
+        assert!(
+            errors[0].starts_with("etree leaf-interface ce1:"),
+            "{errors:?}"
+        );
+        for path in CRADLE_ENABLED_PATHS {
+            assert!(etree_backend(&[leaf_ac.clone(), leaf(path, &["true"])]).is_empty());
+            assert_eq!(
+                etree_backend(&[leaf_ac.clone(), leaf(path, &["false"])]).len(),
+                1,
+                "{path} false"
+            );
+        }
+        // No leaf AC, nothing to refuse.
+        assert!(etree_backend(&[leaf("/system/ebpf/enabled", &["false"])]).is_empty());
+        assert!(etree_backend_line(
+            "router bgp afi-safi evpn etree leaf-interface ce1"
+        ));
+        assert!(etree_backend_line("system ebpf enabled true"));
+        assert!(etree_backend_line("system cradle enabled true"));
+        assert!(!etree_backend_line("system cradle grpc-endpoint unix:x"));
     }
 
     /// An Ethernet Segment's ESI: well-formed and not reserved (RFC 7432

@@ -51,6 +51,17 @@ message EsRole {
   bool single_active = 4;
 }
 
+// EVPN E-Tree (RFC 8317): local port `port` is a leaf AC (`leaf`) or a root.
+// A leaf never reaches another leaf: not another local leaf port (unicast or
+// a flood copy), and not a remote MAC whose FdbRemote said `etree_leaf`
+// (known unicast, dropped before encapsulation). No role = root. The role is
+// kept by port name and may be sent before the port (SetPort): it applies
+// when the port appears, so a leaf never forwards as a root in between.
+message EtreeRole {
+  string port = 1;  // interface name
+  bool leaf = 2;
+}
+
 // The other PEs attached to Ethernet Segment `esi` — their VTEP / overlay
 // source addresses, as learned from the Type-4 ES routes. Replace
 // semantics. BUM that arrives from one of them is never sent back onto the
@@ -242,6 +253,10 @@ message FdbRemote {
   // Segment and is reached through the segment's nexthop group for `bd`
   // (SetEsNhg) instead of a single remote — the remote_* fields are ignored.
   string esi = 8;
+  // EVPN E-Tree (RFC 8317 §4.1): the MAC is behind a leaf AC on its PE (its
+  // selected Type-2 carries the E-Tree EC with the Leaf-Indication flag).
+  // A frame from a local leaf port is then not sent to it (EtreeRole).
+  bool etree_leaf = 9;
 }
 
 message FdbRemoteDel {
@@ -617,6 +632,8 @@ service Cradle {
   rpc SetEsRole(EsRole) returns (Empty);
   rpc SetEsPeers(EsPeers) returns (Empty);
   rpc SetEsNhg(EsNhg) returns (Empty);
+  // EVPN E-Tree: a local port's leaf/root role (RFC 8317).
+  rpc SetEtreeRole(EtreeRole) returns (Empty);
   rpc AddFdbLocal(FdbLocal) returns (Empty);
   // Flush locally-learned FDB entries (never control-plane-installed remote
   // entries). WatchFdb subscribers observe the removals as age events.

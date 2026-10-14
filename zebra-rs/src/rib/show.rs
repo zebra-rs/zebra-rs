@@ -2072,6 +2072,9 @@ fn format_mac_flags(flags: u8) -> String {
     if (flags & 0x08) != 0 {
         flag_str.push('Y'); // sYnc
     }
+    if (flags & crate::rib::evpn::MAC_FLAG_ETREE_LEAF) != 0 {
+        flag_str.push('L'); // E-Tree Leaf (RFC 8317)
+    }
     if flag_str.is_empty() {
         flag_str.push('-');
     }
