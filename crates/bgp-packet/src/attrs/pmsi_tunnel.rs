@@ -111,6 +111,21 @@ impl PmsiTunnel {
     /// Identifier carries the replication SID. Decoding is a follow-up.
     pub const TUNNEL_SRV6_P2MP: u8 = 0x0D;
 
+    /// The tunnel types RFC 8317 §8.1 reserves for composite tunnels: the
+    /// high-order bit set, on a type up to 0xFA (0xFB-0xFE are experimental,
+    /// 0xFF reserved). A composite tunnel's identifier starts with a
+    /// 3-octet receive label (RFC 8317 §6.2).
+    const COMPOSITE_TUNNEL_TYPES: std::ops::RangeInclusive<u8> = 0x80..=0xFA;
+
+    /// True for a composite tunnel type (RFC 8317 §6.2), the transmit P2MP
+    /// tunnel plus ingress-replication receive of an E-Tree Root PE. We do
+    /// not support it, so a PMSI Tunnel attribute carrying one is
+    /// malformed: RFC 8317 §6.2 has a PE that does not understand the bit
+    /// treat the type as undefined, which RFC 6514 §5 calls malformed.
+    pub fn is_composite_tunnel_type(tunnel_type: u8) -> bool {
+        Self::COMPOSITE_TUNNEL_TYPES.contains(&tunnel_type)
+    }
+
     // PMSI Tunnel Attribute Flags bit layout, redefined for EVPN by
     // RFC 9574 §4 Figure 3. Bits are numbered with bit 0 = most significant
     // (leftmost), per the IANA PMSI Tunnel Attribute Flags registry:
@@ -235,6 +250,15 @@ impl ParseBe<PmsiTunnel> for PmsiTunnel {
     fn parse_be(input: &[u8]) -> IResult<&[u8], Self> {
         let (input, flags) = be_u8(input)?;
         let (input, tunnel_type) = be_u8(input)?;
+        // A composite tunnel's identifier is a label then the transmit
+        // tunnel's, which the endpoint decode below would misread or fail
+        // on: refuse it outright (see `is_composite_tunnel_type`).
+        if PmsiTunnel::is_composite_tunnel_type(tunnel_type) {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Verify,
+            )));
+        }
         let (input, vni) = be_u24(input)?;
         // SR P2MP trees prefix the Root IP with a 4-octet Tree-ID; every
         // other tunnel type's identifier is the bare endpoint IP.
@@ -491,6 +515,32 @@ mod pmsi_tunnel_tests {
         assert!(parsed.is_assisted_replication());
         assert!(parsed.prune_bm());
         assert!(!parsed.prune_unknown());
+    }
+
+    /// A composite tunnel type (RFC 8317 §6.2: the high-order bit, on a
+    /// type up to 0xFA) is refused even when its identifier happens to be
+    /// 16 octets, a 3-octet label then 13, which would otherwise decode as
+    /// an IPv6 endpoint. The types around the range still decode.
+    #[test]
+    fn composite_tunnel_types_are_refused() {
+        let attr = |tunnel_type: u8, ident_len: usize| {
+            let mut buf = vec![0x00, tunnel_type, 0x00, 0x00, 0x64];
+            buf.extend(std::iter::repeat_n(0x0A, ident_len));
+            buf
+        };
+        for tunnel_type in [0x80, 0x82, 0x86, 0xFA] {
+            for ident_len in [3 + 4, 3 + 16, 16] {
+                assert!(
+                    PmsiTunnel::parse_be(&attr(tunnel_type, ident_len)).is_err(),
+                    "type {tunnel_type:#04x}, identifier {ident_len}"
+                );
+            }
+        }
+        for tunnel_type in [0x06, 0x7F, 0xFB, 0xFF] {
+            let (_, p) = PmsiTunnel::parse_be(&attr(tunnel_type, 4)).expect("decodes");
+            assert_eq!(p.tunnel_type, tunnel_type);
+            assert_eq!(p.endpoint, IpAddr::V4(Ipv4Addr::new(10, 10, 10, 10)));
+        }
     }
 
     /// The legacy Ingress Replication encoding (flags = 0, type 6) is
