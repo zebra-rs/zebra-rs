@@ -3046,7 +3046,7 @@ impl Ospf<Ospfv2> {
         bfd_client_tx: Option<UnboundedSender<crate::bfd::inst::ClientReq>>,
         stamp_client_tx: Option<UnboundedSender<crate::stamp::client::ClientReq>>,
     ) -> Self {
-        let sock = Arc::new(AsyncFd::new(ospf_socket_ipv4(&ctx).unwrap()).unwrap());
+        let sock = Arc::new(crate::async_fd::register(ospf_socket_ipv4(&ctx).unwrap()).unwrap());
         let (bfd_event_tx, bfd_event_rx) = mpsc::unbounded_channel();
         let (stamp_event_tx, stamp_event_rx) = mpsc::unbounded_channel();
 
@@ -8881,7 +8881,9 @@ impl Ospf<Ospfv3> {
         bfd_client_tx: Option<UnboundedSender<crate::bfd::inst::ClientReq>>,
         stamp_client_tx: Option<UnboundedSender<crate::stamp::client::ClientReq>>,
     ) -> Self {
-        let sock = Arc::new(AsyncFd::new(super::socket::ospf_socket_ipv6(&ctx).unwrap()).unwrap());
+        let sock = Arc::new(
+            crate::async_fd::register(super::socket::ospf_socket_ipv6(&ctx).unwrap()).unwrap(),
+        );
         let (bfd_event_tx, bfd_event_rx) = mpsc::unbounded_channel();
         let (stamp_event_tx, stamp_event_rx) = mpsc::unbounded_channel();
 
@@ -19808,7 +19810,7 @@ mod test_support {
     fn fresh<V: OspfVersion>(domain: socket2::Domain) -> Ospf<V> {
         let sock = socket2::Socket::new(domain, socket2::Type::DGRAM, None).unwrap();
         sock.set_nonblocking(true).unwrap();
-        let sock = Arc::new(AsyncFd::new(sock).unwrap());
+        let sock = Arc::new(crate::async_fd::register(sock).unwrap());
         let ctx = crate::context::ProtoContext::default_table_no_rib();
         let (_, rib_rx) = mpsc::unbounded_channel();
         let (policy_tx, _) = mpsc::unbounded_channel();

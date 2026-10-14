@@ -90,7 +90,7 @@ pub fn nd_socket() -> Result<AsyncFd<Socket>, SocketError> {
     let filter = Icmp6Filter::pass_only(&[133, 134, 135, 136]);
     apply_icmp6_filter(&socket, &filter).map_err(SocketError::Filter)?;
 
-    AsyncFd::new(socket).map_err(SocketError::AsyncFd)
+    crate::async_fd::register(socket).map_err(SocketError::AsyncFd)
 }
 
 fn set_multicast_hops_255(s: &Socket) -> io::Result<()> {

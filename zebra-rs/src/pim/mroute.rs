@@ -227,7 +227,7 @@ impl PimForwardingPlane<Ipv4> for Mrt4 {
             tracing::warn!("mroute: register VIF add failed ({e}); registers degraded");
         }
         Ok(Self {
-            sock: Arc::new(AsyncFd::new(sock)?),
+            sock: Arc::new(crate::async_fd::register(sock)?),
             vifs: BTreeMap::new(),
         })
     }
@@ -453,7 +453,7 @@ impl PimForwardingPlane<Ipv6> for Mrt6 {
             tracing::warn!("mroute6: register MIF add failed ({e}); registers degraded");
         }
         Ok(Self {
-            sock: Arc::new(AsyncFd::new(sock)?),
+            sock: Arc::new(crate::async_fd::register(sock)?),
             mifs: BTreeMap::new(),
         })
     }

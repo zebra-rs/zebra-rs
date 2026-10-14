@@ -689,7 +689,7 @@ mod tests {
         )
         .unwrap();
         sock.set_nonblocking(true).unwrap();
-        let sock = Arc::new(AsyncFd::new(sock).unwrap());
+        let sock = Arc::new(crate::async_fd::register(sock).unwrap());
         let read_task = Task::spawn(async {});
         Session::new(key, SessionParams::default(), ssid, sock, read_task)
     }

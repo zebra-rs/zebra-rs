@@ -12,6 +12,7 @@ use daemonize::Daemonize;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+mod async_fd;
 mod bfd;
 mod bgp;
 mod config;
