@@ -1003,9 +1003,10 @@ pub struct Bgp {
     /// has a leaf AC (`etree_label_reconcile`). Advertised in the
     /// leaf-label route and teed to cradle for decap; no ILM.
     pub etree_leaf_label: Option<u32>,
-    /// The leaf-label route last originated, so a change of RD withdraws
-    /// the old one and an unchanged route is not re-sent.
-    pub(super) etree_leaf_ad: Option<super::route::EtreeLeafAd>,
+    /// The leaf-label routes last originated, one per chunk of RTs (RD
+    /// `<router-id>:i`): an RD no longer wanted is withdrawn, and an
+    /// unchanged route is not re-sent.
+    pub(super) etree_leaf_ad: Vec<super::route::EtreeLeafAd>,
     /// The leaf label last teed to cradle (`Some(0)` = none). `None` until
     /// a tee exists to take it, and again when a new one comes up
     /// (`RibRx::CradleUp`): a label teed before that never arrived.
@@ -1566,7 +1567,7 @@ impl Bgp {
             ethernet_segments: BTreeMap::new(),
             etree_leaf_ifs: BTreeSet::new(),
             etree_leaf_label: None,
-            etree_leaf_ad: None,
+            etree_leaf_ad: Vec::new(),
             etree_leaf_label_teed: None,
             etree_slots_sent: BTreeSet::new(),
             etree_imet_leaf_vnis: BTreeSet::new(),
