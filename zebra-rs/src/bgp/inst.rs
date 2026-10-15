@@ -1017,8 +1017,6 @@ pub struct Bgp {
     /// ACs on this PE are all leaves, so whose IMET carries the E-Tree EC
     /// with the Leaf flag (`etree_imet_reconcile`).
     pub(super) etree_imet_leaf_vnis: BTreeSet<u32>,
-    /// The leaf-only remote PEs last teed (`SetEtreeRemote`): `(bd, VTEP)`.
-    pub(super) etree_remotes_sent: BTreeSet<(u32, std::net::IpAddr)>,
     /// Configured hostname for the local BGP speaker. Advertised in
     /// the FQDN capability (capability code 73). When None, falls back
     /// to the OS hostname; if that also fails, no FQDN capability is
@@ -1572,7 +1570,6 @@ impl Bgp {
             etree_leaf_label_teed: None,
             etree_slots_sent: BTreeSet::new(),
             etree_imet_leaf_vnis: BTreeSet::new(),
-            etree_remotes_sent: BTreeSet::new(),
             hostname: None,
             no_fib_install: false,
             fast_external_failover: true,
@@ -5233,7 +5230,7 @@ impl Bgp {
                 // copy dropped here as malformed.
                 self.etree_leaf_label_teed = None;
                 self.etree_slots_sent.clear();
-                self.etree_remotes_sent.clear();
+                self.local_rib.etree_remotes_sent.clear();
                 self.etree_label_reconcile();
             }
             RibRx::L2PortEvis { ifindex, vnis } => {

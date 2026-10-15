@@ -178,6 +178,78 @@ struct CradleMirror {
     etree_remotes: HashSet<(u32, IpAddr)>,
 }
 
+/// One step of an engine replay that makes a BUM replication slot, or a
+/// restriction on one ([`slot_replay`]).
+#[derive(Debug, Clone, PartialEq)]
+enum SlotOp {
+    EtreeRemote(u32, IpAddr),
+    VxlanSlot(u32, IpAddr),
+    EtreeLeafLabel(u32),
+    MplsLeafSlot(u32, IpAddr, u32, u32),
+    MplsEsSlot(u32, IpAddr, u32, String, u32),
+    MplsSlot(u32, IpAddr, u32),
+}
+
+#[derive(Clone, Copy)]
+enum SlotFamily {
+    Vxlan,
+    Mpls,
+}
+
+/// The replay order of a family's flood slots: every restriction before the
+/// slot it restricts. A slot floods as soon as cradle makes it, so a plain
+/// slot replayed before its restrictions sends what they keep out until
+/// they land:
+/// - VXLAN: a leaf-only remote's mark (E-Tree V1+) precedes its slot, so
+///   cradle restricts the slot to roots as it creates it; after it, a
+///   leaf's BUM reaches the leaf-only PE.
+/// - MPLS: a PE's slots form one group, and the plain slot's restrictions
+///   come from its siblings — the segments it skips (RFC 7432 §8.3) and,
+///   with a leaf slot, serving roots only (RFC 8317 §4.2). So the leaf
+///   label, the leaf slots and the segment slots come first.
+fn slot_replay(m: &CradleMirror, family: SlotFamily) -> Vec<SlotOp> {
+    let mut ops = Vec::new();
+    match family {
+        SlotFamily::Vxlan => {
+            ops.extend(
+                m.etree_remotes
+                    .iter()
+                    .map(|(bd, remote)| SlotOp::EtreeRemote(*bd, *remote)),
+            );
+            ops.extend(
+                m.repl_slots_vxlan
+                    .iter()
+                    .map(|(vni, vtep)| SlotOp::VxlanSlot(*vni, *vtep)),
+            );
+        }
+        SlotFamily::Mpls => {
+            if m.etree_leaf_label != 0 {
+                ops.push(SlotOp::EtreeLeafLabel(m.etree_leaf_label));
+            }
+            ops.extend(
+                m.repl_slots_mpls_leaf
+                    .iter()
+                    .map(|((bd, pe), (label, leaf_label))| {
+                        SlotOp::MplsLeafSlot(*bd, *pe, *label, *leaf_label)
+                    }),
+            );
+            ops.extend(
+                m.repl_slots_mpls_es
+                    .iter()
+                    .map(|(bd, pe, label, esi, esi_label)| {
+                        SlotOp::MplsEsSlot(*bd, *pe, *label, esi.clone(), *esi_label)
+                    }),
+            );
+            ops.extend(
+                m.repl_slots_mpls
+                    .iter()
+                    .map(|(bd, pe, label)| SlotOp::MplsSlot(*bd, *pe, *label)),
+            );
+        }
+    }
+    ops
+}
+
 impl CradleMirror {
     /// Record whether the overlay FDB entry `key` is behind a leaf AC.
     fn set_etree_leaf(&mut self, key: (u32, [u8; 6]), leaf: bool) {
@@ -576,6 +648,24 @@ impl CradleFib {
     /// refers to a `NEXTHOPS` entry only the dead instance knew, so the
     /// dedup caches must reset or even *new* routes would reference
     /// missing nexthops.
+    /// Execute one [`SlotOp`] of a replay.
+    async fn replay_slot_op(&self, op: SlotOp) {
+        match op {
+            SlotOp::EtreeRemote(bd, remote) => self.set_etree_remote(bd, remote, true).await,
+            SlotOp::VxlanSlot(vni, vtep) => self.repl_slot_add_vxlan(vni, vtep).await,
+            SlotOp::EtreeLeafLabel(label) => self.set_etree_leaf_label(label).await,
+            SlotOp::MplsLeafSlot(bd, pe, label, leaf_label) => {
+                self.repl_slot_add_mpls_leaf(bd, pe, label, leaf_label)
+                    .await
+            }
+            SlotOp::MplsEsSlot(bd, pe, label, esi, esi_label) => {
+                self.repl_slot_add_mpls_es(bd, pe, label, &esi, esi_label)
+                    .await
+            }
+            SlotOp::MplsSlot(bd, pe, label) => self.repl_slot_add_mpls(bd, pe, label).await,
+        }
+    }
+
     pub async fn replay(&self) {
         self.nh_ids.lock().await.clear();
         self.nh_ids6.lock().await.clear();
@@ -667,32 +757,17 @@ impl CradleFib {
             let leaf = m.fdb_etree_leaf.contains(&(*vni, *mac));
             self.fdb_add_vxlan(*vni, *mac, *vtep, leaf).await;
         }
-        for (vni, vtep) in &m.repl_slots_vxlan {
-            self.repl_slot_add_vxlan(*vni, *vtep).await;
+        // The VXLAN flood slots, after their restrictions (`slot_replay`).
+        for op in slot_replay(&m, SlotFamily::Vxlan) {
+            self.replay_slot_op(op).await;
         }
         for ((vni, mac), (pe, label)) in &m.fdb_mpls {
             let leaf = m.fdb_etree_leaf.contains(&(*vni, *mac));
             self.fdb_add_mpls(*vni, *mac, *pe, *label, leaf).await;
         }
-        for (vni, pe, label) in &m.repl_slots_mpls {
-            self.repl_slot_add_mpls(*vni, *pe, *label).await;
-        }
-        for (vni, pe, label, esi, esi_label) in &m.repl_slots_mpls_es {
-            self.repl_slot_add_mpls_es(*vni, *pe, *label, esi, *esi_label)
-                .await;
-        }
-        // E-Tree over MPLS: our leaf label (decap), then the leaf slots.
-        if m.etree_leaf_label != 0 {
-            self.set_etree_leaf_label(m.etree_leaf_label).await;
-        }
-        for ((vni, pe), (label, leaf_label)) in &m.repl_slots_mpls_leaf {
-            self.repl_slot_add_mpls_leaf(*vni, *pe, *label, *leaf_label)
-                .await;
-        }
-        // E-Tree over VXLAN: the leaf-only remotes (a mark may precede its
-        // slot, so the order against the VXLAN slots above is free).
-        for (bd, remote) in &m.etree_remotes {
-            self.set_etree_remote(*bd, *remote, true).await;
+        // The MPLS flood slots, after their restrictions (`slot_replay`).
+        for op in slot_replay(&m, SlotFamily::Mpls) {
+            self.replay_slot_op(op).await;
         }
         for ((port, vid, table), (remote, local_sid, local_vni, local_label)) in &m.xconnects {
             self.xconnect_add(
@@ -2855,5 +2930,38 @@ impl CradleFib {
         if let Err(e) = result {
             tracing::warn!("fib: cradle neighbor_add {ip} failed: {e}");
         }
+    }
+}
+
+#[cfg(test)]
+mod slot_replay_tests {
+    use super::*;
+
+    /// A replayed engine gets every flood-slot restriction before the slot
+    /// it restricts: a leaf-only VXLAN remote's mark before its slot, and a
+    /// PE's leaf and segment slots before its plain MPLS slot.
+    #[test]
+    fn restrictions_replay_before_their_slots() {
+        let pe: IpAddr = "192.0.2.2".parse().unwrap();
+        let mut m = CradleMirror::default();
+        m.repl_slots_vxlan.insert((100, pe));
+        m.etree_remotes.insert((100, pe));
+        m.repl_slots_mpls.insert((200, pe, 2200));
+        m.repl_slots_mpls_es
+            .insert((200, pe, 2200, "00:11:22:33:44:55:66:77:88:99".into(), 2900));
+        m.repl_slots_mpls_leaf.insert((200, pe), (2200, 2800));
+        m.etree_leaf_label = 1800;
+
+        assert_eq!(
+            slot_replay(&m, SlotFamily::Vxlan),
+            vec![SlotOp::EtreeRemote(100, pe), SlotOp::VxlanSlot(100, pe)]
+        );
+        let mpls = slot_replay(&m, SlotFamily::Mpls);
+        let at = |want: fn(&SlotOp) -> bool| mpls.iter().position(want).unwrap();
+        let plain = at(|op| matches!(op, SlotOp::MplsSlot(..)));
+        assert!(at(|op| matches!(op, SlotOp::MplsLeafSlot(..))) < plain);
+        assert!(at(|op| matches!(op, SlotOp::MplsEsSlot(..))) < plain);
+        assert!(at(|op| matches!(op, SlotOp::EtreeLeafLabel(_))) < plain);
+        assert_eq!(mpls.len(), 4);
     }
 }
