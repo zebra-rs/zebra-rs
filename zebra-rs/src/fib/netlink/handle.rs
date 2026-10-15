@@ -1006,6 +1006,14 @@ impl FibHandle {
         }
     }
 
+    /// EVPN E-Tree over VXLAN tee (RFC 8317, the V1+ scheme): the PE at
+    /// VTEP `remote` is, or is no longer, leaf-only in bridge domain `bd`.
+    pub async fn cradle_etree_remote(&self, bd: u32, remote: IpAddr, leaf_only: bool) {
+        if let Some(cradle) = &self.cradle {
+            cradle.set_etree_remote(bd, remote, leaf_only).await;
+        }
+    }
+
     /// Tee an RFC 9524 Replication segment (operator `replication-segment`
     /// config) to cradle: the local End.Replicate SID and its downstream
     /// branches. No kernel counterpart — cradle's `REPL_SEG` is the SR-P2MP

@@ -456,6 +456,15 @@ pub enum Message {
     EtreeLeafLabel {
         label: u32,
     },
+    /// EVPN E-Tree over VXLAN (RFC 8317, the V1+ scheme): the PE at VTEP
+    /// `remote` is (`leaf_only`), or is no longer, leaf-only in bridge
+    /// domain `bd` — its IMET carries the E-Tree EC with the Leaf flag.
+    /// Teed as `SetEtreeRemote`.
+    CradleEtreeRemote {
+        bd: u32,
+        remote: IpAddr,
+        leaf_only: bool,
+    },
     /// MUP `dataplane gtp` uplink decap (`H.M.GTP4.D`): a GTP-U decap PDR teed
     /// to cradle — a G-PDU on (`dst`, `teid`), arriving on a port bound to VRF
     /// table `match_vrf` (0 = global), is stripped and its inner packet
@@ -4400,6 +4409,15 @@ impl Rib {
             }
             Message::EtreeLeafLabel { label } => {
                 self.fib_handle.cradle_etree_leaf_label(label).await;
+            }
+            Message::CradleEtreeRemote {
+                bd,
+                remote,
+                leaf_only,
+            } => {
+                self.fib_handle
+                    .cradle_etree_remote(bd, remote, leaf_only)
+                    .await;
             }
             Message::CradleReplDelMplsEs { bd, pe, esi } => {
                 self.fib_handle.cradle_repl_del_mpls_es(bd, pe, &esi).await;

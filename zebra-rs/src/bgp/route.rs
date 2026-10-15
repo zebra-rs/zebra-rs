@@ -9886,6 +9886,41 @@ fn etree_route_leaf_label(attr: &BgpAttr) -> Option<u32> {
         .and_then(|etree| etree.valid_leaf_label())
 }
 
+/// Whether an IMET says its PE is leaf-only in the VNI: the E-Tree EC in
+/// the V1+ form (plan §8.5), the Leaf flag with neither the Root flag nor
+/// a field. The rfc8317bis form, a leaf VNI in the field, is not spoken
+/// here and reads as a root, which never causes a drop (RFC 8317 §4.1).
+fn imet_etree_leaf_only(attr: &BgpAttr) -> bool {
+    attr.ecom.as_ref().is_some_and(|ecom| {
+        ecom.0
+            .iter()
+            .filter_map(|ec| ec.as_etree())
+            .any(|etree| etree.leaf() && !etree.root() && etree.leaf_vni() == 0)
+    })
+}
+
+/// EVPN E-Tree over VXLAN (the V1+ scheme, plan §8.5): the remote PEs that
+/// are leaf-only in a VNI, `(VNI, VTEP)`, from their selected IMETs. Only a
+/// VXLAN IMET counts: one with an MPLS BUM label or an End.DT2M SID feeds
+/// another flood mechanism.
+fn etree_leaf_only_remotes(local_rib: &LocalRib) -> BTreeSet<(u32, IpAddr)> {
+    let mut out = BTreeSet::new();
+    for table in local_rib.evpn.values() {
+        for (prefix, rib) in table.selected.iter() {
+            if let EvpnPrefix::InclusiveMulticast { orig, .. } = prefix
+                && rib.typ != BgpRibType::Originated
+                && imet_etree_leaf_only(&rib.attr)
+                && evpn_mpls_bum(rib).is_none()
+                && evpn_srv6_sid(&rib.attr, bgp_packet::SRV6_BEHAVIOR_END_DT2M).is_none()
+                && let Some(vni) = extract_vni_from_attr(&rib.attr)
+            {
+                out.insert((vni, *orig));
+            }
+        }
+    }
+    out
+}
+
 /// Every remote endpoint advertised for VPWS service instance `remote_id`
 /// within `evi`: the non-originated per-EVI Type-1s carrying an
 /// `End.DX2`/`End.DX2V` SID, with their ESI, advertising PE and RFC 8214
@@ -10244,6 +10279,9 @@ fn route_evpn_export_selected(
             }
             EvpnPrefix::InclusiveMulticast { orig, .. } => {
                 if let Some(vni) = extract_vni_from_attr(&wd.attr) {
+                    // The E-Tree leaf slots toward that PE (MPLS, RFC 8317
+                    // §4.2.1), or its leaf-only mark (VXLAN), go with it.
+                    bgp.local_rib.etree_dirty = true;
                     // Mirror the announce side: the withdrawn IMET carried a
                     // DT2M SID -> drop its replication slot.
                     if let Some(dt2m) = evpn_srv6_sid(&wd.attr, bgp_packet::SRV6_BEHAVIOR_END_DT2M)
@@ -10258,10 +10296,8 @@ fn route_evpn_export_selected(
                             .rib_client
                             .send(rib::Message::CradleReplDelMpls { bd: vni, pe });
                         // The ESI-label slots toward that PE went with it
-                        // (RFC 7432 §8.3): re-sync the segments. So did its
-                        // E-Tree leaf slots (RFC 8317 §4.2.1).
+                        // (RFC 7432 §8.3): re-sync the segments.
                         bgp.local_rib.evpn_vpws.es_df_dirty = true;
-                        bgp.local_rib.etree_dirty = true;
                     }
                     bgp.local_rib.evpn_flood.remove_remote(vni, *orig);
                     bgp.local_rib.evpn_flood.reconcile(vni, bgp.rib_client);
@@ -10513,6 +10549,10 @@ fn route_evpn_export_selected(
                 return;
             }
             if let Some(vni) = extract_vni_from_attr(&best.attr) {
+                // Half of an E-Tree leaf slot toward that PE (its BUM label,
+                // MPLS, RFC 8317 §4.2.1), or its leaf-only mark (the IMET's
+                // colour, VXLAN): re-sync them.
+                bgp.local_rib.etree_dirty = true;
                 // RFC 9252 §6.4: a remote End.DT2M SID on the IMET is a BUM
                 // flood-set member for this VNI. Tee it to cradle as a
                 // replication slot — per-copy MAC-in-SRv6 encap in the
@@ -10536,10 +10576,8 @@ fn route_evpn_export_selected(
                             .send(rib::Message::CradleReplAddMpls { bd: vni, pe, label });
                     // A peer's BUM label is half of an ESI-label slot toward
                     // it (RFC 7432 §8.3) — it may land after the peer's
-                    // per-ES A-D did: re-sync the segments. Likewise half
-                    // of an E-Tree leaf slot (RFC 8317 §4.2.1).
+                    // per-ES A-D did: re-sync the segments.
                     bgp.local_rib.evpn_vpws.es_df_dirty = true;
-                    bgp.local_rib.etree_dirty = true;
                 }
                 let pmsi = best.attr.pmsi_tunnel.as_ref();
                 if let Some(p) = pmsi.filter(|p| p.is_sr_p2mp()) {
@@ -20259,6 +20297,47 @@ impl Bgp {
         out
     }
 
+    /// EVPN E-Tree over VXLAN (plan §8.5): the PEs in each VNI with both
+    /// leaf and root ACs, where there are two or more of them. A leaf's BUM
+    /// between two such PEs reads as a root's (V1+ marks a PE, not a
+    /// frame), so it reaches the other's leaves. This PE is mixed when it
+    /// has both kinds of AC in the VNI (`None` in the list); a remote PE
+    /// when it advertised a leaf MAC there without a leaf-only IMET. A
+    /// remote leaf AC with no MAC learned yet is not seen.
+    pub fn etree_mixed_pes(&self) -> BTreeMap<u32, Vec<Option<IpAddr>>> {
+        let mut out: BTreeMap<u32, Vec<Option<IpAddr>>> = BTreeMap::new();
+        if !self.evpn_encap.is_vxlan() {
+            return out;
+        }
+        let (leaf, root) = self.etree_ac_vnis();
+        for vni in leaf.intersection(&root) {
+            out.entry(*vni).or_default().push(None);
+        }
+        let leaf_only = etree_leaf_only_remotes(&self.local_rib);
+        for table in self.local_rib.evpn.values() {
+            for (prefix, rib) in &table.selected {
+                if !matches!(prefix, EvpnPrefix::MacIp { .. })
+                    || rib.is_originated()
+                    || extract_flags_from_attr(&rib.attr) & crate::rib::evpn::MAC_FLAG_ETREE_LEAF
+                        == 0
+                {
+                    continue;
+                }
+                if let Some(vni) = macip_kernel_vni(rib)
+                    && let Some(BgpNexthop::Evpn(pe)) = rib.attr.nexthop
+                    && !leaf_only.contains(&(vni, pe))
+                {
+                    let pes = out.entry(vni).or_default();
+                    if !pes.contains(&Some(pe)) {
+                        pes.push(Some(pe));
+                    }
+                }
+            }
+        }
+        out.retain(|_, pes| pes.len() >= 2);
+        out
+    }
+
     /// Whether the port that learned `entry` is an E-Tree leaf AC
     /// (`etree leaf-interface`). A learn with no port is a root: no role was
     /// configured for it, and a root never causes a drop (RFC 8317 §4.1).
@@ -20461,6 +20540,13 @@ impl Bgp {
                 }
                 .into(),
             );
+        }
+        // EVPN E-Tree over VXLAN (the V1+ scheme, plan §8.5): a PE whose ACs
+        // in the VNI are all leaves says so with the E-Tree EC's Leaf flag,
+        // so remote PEs keep its BUM off their leaves and send it none of
+        // theirs.
+        if self.evpn_encap.is_vxlan() && self.etree_imet_leaf_vnis.contains(&vni) {
+            ecom.0.insert(ExtCommunityValue::etree_leaf());
         }
         attr.ecom = Some(ecom);
         // RFC 9574: the PMSI Tunnel attribute and next hop depend on the
@@ -20886,6 +20972,103 @@ impl Bgp {
                 });
         }
         self.etree_slots_sent = desired;
+    }
+
+    /// The VNIs of this PE's attachment circuits, split by E-Tree role:
+    /// `(VNIs with a leaf AC, VNIs with a root AC)`. An AC is a bridge port
+    /// in the VNI (`port_evis`) that is not a VXLAN device; a leaf if `etree
+    /// leaf-interface` names it, a root otherwise. A port outside the VNI's
+    /// bridge is not seen.
+    pub fn etree_ac_vnis(&self) -> (BTreeSet<u32>, BTreeSet<u32>) {
+        let mut leaf = BTreeSet::new();
+        let mut root = BTreeSet::new();
+        for (ifindex, name) in &self.link_name_by_index {
+            if self.vxlan_links.contains(ifindex) {
+                continue;
+            }
+            let evis = self.port_evis(*ifindex);
+            if self.etree_leaf_ifs.contains(name) {
+                leaf.extend(evis);
+            } else {
+                root.extend(evis);
+            }
+        }
+        (leaf, root)
+    }
+
+    /// EVPN E-Tree over VXLAN (the V1+ scheme, plan §8.5): the VNIs whose
+    /// ACs on this PE are all leaves, at least one of them. Their IMET
+    /// carries the E-Tree EC with the Leaf flag. None outside VXLAN: MPLS
+    /// signals leaves with the leaf label (RFC 8317 §4.2).
+    pub fn etree_leaf_only_vnis(&self) -> BTreeSet<u32> {
+        if !self.evpn_encap.is_vxlan() || self.etree_leaf_ifs.is_empty() {
+            return BTreeSet::new();
+        }
+        let (leaf, root) = self.etree_ac_vnis();
+        leaf.difference(&root).copied().collect()
+    }
+
+    /// Re-colour the IMETs: re-originate the IMET of every VNI that became,
+    /// or stopped being, leaf-only (`etree_leaf_only_vnis`). Idempotent;
+    /// called wherever an AC's role, VNI or existence changes.
+    pub(super) fn etree_imet_reconcile(&mut self) {
+        let desired = self.etree_leaf_only_vnis();
+        if desired == self.etree_imet_leaf_vnis {
+            return;
+        }
+        let changed: Vec<u32> = desired
+            .symmetric_difference(&self.etree_imet_leaf_vnis)
+            .copied()
+            .collect();
+        self.etree_imet_leaf_vnis = desired;
+        // Leaving VXLAN, the encapsulation change re-originates every IMET.
+        if !self.evpn_encap.is_vxlan() {
+            return;
+        }
+        for vni in changed {
+            if let Some(&vtep_local) = self.local_vxlans.get(&vni) {
+                self.evpn_originate_imet(vni, vtep_local);
+            }
+        }
+    }
+
+    /// Tee the leaf-only remote PEs (`SetEtreeRemote`): every `(VNI, VTEP)`
+    /// whose IMET carries the Leaf flag, while this PE has a leaf AC under
+    /// VXLAN. cradle then keeps that PE's BUM off the local leaf ports and
+    /// sends it none of theirs. Diffed against what was sent.
+    pub fn evpn_etree_remotes_sync(&mut self) {
+        let desired = if self.evpn_encap.is_vxlan() && !self.etree_leaf_ifs.is_empty() {
+            etree_leaf_only_remotes(&self.local_rib)
+        } else {
+            BTreeSet::new()
+        };
+        if desired == self.etree_remotes_sent {
+            return;
+        }
+        for &(bd, remote) in self.etree_remotes_sent.difference(&desired) {
+            let _ = self.ctx.rib.send(crate::rib::Message::CradleEtreeRemote {
+                bd,
+                remote,
+                leaf_only: false,
+            });
+        }
+        for &(bd, remote) in desired.difference(&self.etree_remotes_sent) {
+            let _ = self.ctx.rib.send(crate::rib::Message::CradleEtreeRemote {
+                bd,
+                remote,
+                leaf_only: true,
+            });
+        }
+        self.etree_remotes_sent = desired;
+    }
+
+    /// The remote PEs that are leaf-only in a VNI, by VNI, for `show`.
+    pub fn etree_leaf_only_remote_pes(&self) -> BTreeMap<u32, BTreeSet<IpAddr>> {
+        let mut out: BTreeMap<u32, BTreeSet<IpAddr>> = BTreeMap::new();
+        for (vni, pe) in etree_leaf_only_remotes(&self.local_rib) {
+            out.entry(vni).or_default().insert(pe);
+        }
+        out
     }
 
     /// Originate the per-ES Ethernet Auto-Discovery route (Type-1, RFC 7432
@@ -21755,9 +21938,11 @@ impl Bgp {
         if std::mem::take(&mut self.local_rib.es_nhg_dirty) {
             self.evpn_es_nhg_sync();
         }
-        // And the E-Tree leaf slots, from the leaf-label routes and IMETs.
+        // And the E-Tree leaf slots, from the leaf-label routes and IMETs,
+        // and the leaf-only remotes, from the IMETs.
         if std::mem::take(&mut self.local_rib.etree_dirty) {
             self.evpn_etree_slots_sync();
+            self.evpn_etree_remotes_sync();
         }
     }
 

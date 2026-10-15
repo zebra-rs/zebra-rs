@@ -2589,6 +2589,24 @@ struct EtreeRemoteJson {
     leaf_macs: usize,
 }
 
+/// `show bgp evpn etree json`: the remote PEs that are leaf-only in one
+/// EVI (VXLAN: their IMET carries the Leaf flag).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EtreeLeafOnlyJson {
+    evi: u32,
+    pes: Vec<String>,
+}
+
+/// `show bgp evpn etree json`: an EVI whose leaf BUM is not isolated, with
+/// its mixed PEs (`local` for this one).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EtreeMixedJson {
+    evi: u32,
+    pes: Vec<String>,
+}
+
 /// `show bgp evpn etree json`: a remote PE's leaf label (MPLS).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2606,8 +2624,17 @@ struct EtreeJson {
     leaf_label: Option<u32>,
     /// The leaf label each remote PE advertised.
     remote_leaf_labels: Vec<EtreePeerLabelJson>,
+    /// VXLAN: the EVIs whose ACs here are all leaves, so whose IMET
+    /// carries the Leaf flag.
+    leaf_only_evis: Vec<u32>,
+    /// VXLAN: the remote PEs that are leaf-only, per EVI.
+    remote_leaf_only: Vec<EtreeLeafOnlyJson>,
+    /// VXLAN: the EVIs with two or more mixed PEs, between which a leaf's
+    /// BUM is not isolated.
+    mixed_pes: Vec<EtreeMixedJson>,
     /// Whether a leaf's BUM is kept from leaves on other PEs: over MPLS,
-    /// by the leaf label (RFC 8317 §4.2). Not yet over VXLAN or SRv6.
+    /// by the leaf label (RFC 8317 §4.2); over VXLAN, by the IMET colour,
+    /// except between mixed PEs. Not yet over SRv6.
     bum_filtered: bool,
 }
 
@@ -2615,7 +2642,7 @@ struct EtreeJson {
 /// colours its Type-2s for, and the remote MACs behind leaf ACs that a
 /// local leaf may not reach. Whether the datapath holds each role is
 /// `show ebpf`'s (the cradle supervisor programs it).
-fn show_bgp_evpn_etree(
+pub(super) fn show_bgp_evpn_etree(
     bgp: &Bgp,
     _args: Args,
     json: bool,
@@ -2660,13 +2687,36 @@ fn show_bgp_evpn_etree(
             leaf_label,
         })
         .collect();
+    let leaf_only_evis: Vec<u32> = bgp.etree_leaf_only_vnis().into_iter().collect();
+    let remote_leaf_only: Vec<EtreeLeafOnlyJson> = bgp
+        .etree_leaf_only_remote_pes()
+        .into_iter()
+        .map(|(evi, pes)| EtreeLeafOnlyJson {
+            evi,
+            pes: pes.iter().map(IpAddr::to_string).collect(),
+        })
+        .collect();
+    let mixed: Vec<EtreeMixedJson> = bgp
+        .etree_mixed_pes()
+        .into_iter()
+        .map(|(evi, pes)| EtreeMixedJson {
+            evi,
+            pes: pes
+                .iter()
+                .map(|pe| pe.map_or_else(|| "local".to_string(), |pe| pe.to_string()))
+                .collect(),
+        })
+        .collect();
     if json {
         let out = EtreeJson {
             leaf_interfaces: leaves,
             remote_leaf_macs: remote,
             leaf_label: bgp.etree_leaf_label,
             remote_leaf_labels: peer_labels,
-            bum_filtered: bgp.evpn_encap.is_mpls(),
+            leaf_only_evis,
+            remote_leaf_only,
+            mixed_pes: mixed,
+            bum_filtered: bgp.evpn_encap.is_mpls() || bgp.evpn_encap.is_vxlan(),
         };
         return Ok(serde_json::to_string_pretty(&out)
             .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")));
@@ -2711,11 +2761,37 @@ fn show_bgp_evpn_etree(
         for p in &peer_labels {
             writeln!(out, "    {:<16} {}", p.pe, p.leaf_label)?;
         }
+    } else if bgp.evpn_encap.is_vxlan() {
+        let evis: Vec<String> = leaf_only_evis.iter().map(u32::to_string).collect();
+        writeln!(
+            out,
+            "  Leaf-only EVIs:  {}",
+            if evis.is_empty() {
+                "none".to_string()
+            } else {
+                evis.join(",")
+            }
+        )?;
+        writeln!(out, "  Remote leaf-only PEs:")?;
+        if remote_leaf_only.is_empty() {
+            writeln!(out, "    none")?;
+        }
+        for r in &remote_leaf_only {
+            writeln!(out, "    EVI {:<10} {}", r.evi, r.pes.join(", "))?;
+        }
+        for m in &mixed {
+            writeln!(
+                out,
+                "  Warning: EVI {}: leaf BUM not isolated between mixed PEs: {}",
+                m.evi,
+                m.pes.join(", ")
+            )?;
+        }
     } else {
         writeln!(
             out,
             "  Not filtered yet: a leaf's broadcast, multicast and unknown unicast \
-             toward leaves on other PEs (filtered over MPLS only)"
+             toward leaves on other PEs (filtered over MPLS and VXLAN only)"
         )?;
     }
     Ok(out)

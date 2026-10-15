@@ -667,6 +667,68 @@ choices:
     without the `etree_dirty` drain. Its first run is what caught the lost
     leaf label.
 
+**Phase 4a is merged** as cradle-rs #210, released in cradle-rs v1.1.6,
+which zebra-rs pins since #2527. It is §8.5's V1+ as planned:
+- **`SetEtreeRemote{bd, remote, leaf_only}`** marks a remote VTEP leaf-only
+  in one bridge domain (`VTEP_ETREE`, keyed per domain: a PE can be
+  leaf-only in one and mixed in another).
+- **Egress.** VXLAN decap ORs the leaf mark into the source lookup it
+  already does for local bias, and the phase-3a filter keeps the copy off
+  leaf ports.
+- **Ingress.** The slot toward a leaf-only PE serves roots only, reusing
+  phase 3a's `SLOT_ETREE_ROOT`.
+
+**Status: phase 4b is implemented** on `evpn-e-tree`.
+- **What an AC is.** zebra-rs learns a VNI's ACs from the kernel bridge:
+  every port of the VNI's bridge (`port_evis`) that is not a VXLAN device
+  (`Bgp::vxlan_links`, from `Link.vni` on `RibRx::LinkAdd`, because
+  `VxlanAdd` carries no ifindex). That is how the cradle supervisor binds
+  an L2 port too. A port that an external engine puts in the domain
+  without bridging it is invisible, and a hidden root would make the VNI
+  look leaf-only, so its leaves' BUM from other PEs would never reach it.
+  Bridge every AC.
+- **IMET colouring.** `etree_leaf_only_vnis` is the VNIs with a leaf AC and
+  no root AC, under VXLAN only. `evpn_originate_imet` adds
+  `EtreeEc{L=1, field 0}` for those VNIs. `etree_imet_reconcile`
+  re-originates a VNI's IMET when its colour flips, and runs on any AC's
+  bridge change (`L2PortEvis`), a link becoming or ceasing to be a VXLAN
+  device, a link deleted, and every `etree_label_reconcile` (a role
+  change, an EVI, the encapsulation).
+- **Consumption.** `etree_leaf_only_remotes` reads the selected VXLAN IMETs
+  (no MPLS BUM label, no End.DT2M SID) that carry the V1+ form: L set, R
+  clear, field 0. The rfc8317bis form, a leaf VNI, reads as a root.
+  `evpn_etree_remotes_sync` tees each `(VNI, VTEP)` as `CradleEtreeRemote`
+  (mirrored as `SetEtreeRemote`) while this PE has a leaf AC, and is
+  diffed against what was sent. It runs from the `etree_dirty` drain,
+  which every IMET announce and withdraw now sets, and is re-sent to a new
+  tee (`RibRx::CradleUp`).
+- **Show.** `show bgp evpn etree` under VXLAN lists the leaf-only EVIs, the
+  leaf-only remote PEs per EVI, and the warning
+  `EVI <n>: leaf BUM not isolated between mixed PEs: <list>` when two or
+  more PEs in an EVI are mixed (`etree_mixed_pes`): this PE when it has
+  both kinds of AC there, a remote PE when it advertised a leaf MAC there
+  without a leaf-only IMET. A remote leaf AC with no MAC learned yet is
+  not seen.
+- **Tests.**
+  - Unit tests: the IMET colour following a root AC joining, leaving and
+    being deleted (the VXLAN device is no AC), none under MPLS; a
+    leaf-only IMET marking its PE and the mark cleared when the colour or
+    the route goes, the rfc8317bis form ignored, nothing without a local
+    leaf, a new tee getting the marks again; two mixed PEs reported, and
+    the `show` text and JSON. Eleven mutants each fail one.
+  - cradle-rs BDD `cradle_evpn_etree_vxlan_zebra`: a leaf-only pe1 against
+    a mixed pe2. pe1's leaf broadcast is kept off pe2's leaf, pe2's leaf
+    broadcast is not sent to pe1, and a root's still reaches pe1. A root
+    AC added on pe1 makes it mixed: pe2 warns and the leaf broadcasts
+    cross both ways (the control). The root AC leaving restores the
+    isolation.
+- **A test gap found on the way.** cradle-rs had no
+  `command … should contain` step, and cucumber skips an unmatched step
+  without failing. The tc-counter "nothing received" checks in
+  `cradle_evpn_etree_mpls`, `cradle_evpn_etree_mpls_zebra` and
+  `cradle_evpn_etree_vxlan` never ran. The step is added with this phase,
+  and those features re-run with it.
+
 **Review lessons carried over from the single-active arc** (see that plan
 and the memory notes):
 - Every negative assertion ("leaf did not receive") is first shown to fail
