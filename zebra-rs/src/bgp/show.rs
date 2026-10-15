@@ -2607,6 +2607,15 @@ struct EtreeMixedJson {
     pes: Vec<String>,
 }
 
+/// `show bgp evpn etree json`: a remote PE's leaf argument (SRv6).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EtreePeerArgJson {
+    pe: String,
+    leaf_arg: u32,
+    arg_bits: u8,
+}
+
 /// `show bgp evpn etree json`: a remote PE's leaf label (MPLS).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2624,6 +2633,10 @@ struct EtreeJson {
     leaf_label: Option<u32>,
     /// The leaf label each remote PE advertised.
     remote_leaf_labels: Vec<EtreePeerLabelJson>,
+    /// SRv6: this PE's leaf argument (plan §8.6, D6), when it has one.
+    leaf_arg: Option<u32>,
+    /// SRv6: the leaf argument each remote PE advertised.
+    remote_leaf_args: Vec<EtreePeerArgJson>,
     /// VXLAN: the EVIs whose ACs here are all leaves, so whose IMET
     /// carries the Leaf flag.
     leaf_only_evis: Vec<u32>,
@@ -2633,8 +2646,9 @@ struct EtreeJson {
     /// BUM is not isolated.
     mixed_pes: Vec<EtreeMixedJson>,
     /// Whether a leaf's BUM is kept from leaves on other PEs: over MPLS,
-    /// by the leaf label (RFC 8317 §4.2); over VXLAN, by the IMET colour,
-    /// except between mixed PEs. Not yet over SRv6.
+    /// by the leaf label (RFC 8317 §4.2); over SRv6, by the leaf argument
+    /// (RFC 9819); over VXLAN, by the IMET colour, except between mixed
+    /// PEs.
     bum_filtered: bool,
 }
 
@@ -2679,6 +2693,15 @@ pub(super) fn show_bgp_evpn_etree(
             leaf_macs: macs.len(),
         })
         .collect();
+    let peer_args: Vec<EtreePeerArgJson> = bgp
+        .etree_peer_leaf_args()
+        .into_iter()
+        .map(|(pe, (leaf_arg, arg_bits))| EtreePeerArgJson {
+            pe: pe.to_string(),
+            leaf_arg,
+            arg_bits,
+        })
+        .collect();
     let peer_labels: Vec<EtreePeerLabelJson> = bgp
         .etree_peer_leaf_labels()
         .into_iter()
@@ -2713,10 +2736,12 @@ pub(super) fn show_bgp_evpn_etree(
             remote_leaf_macs: remote,
             leaf_label: bgp.etree_leaf_label,
             remote_leaf_labels: peer_labels,
+            leaf_arg: bgp.etree_leaf_arg,
+            remote_leaf_args: peer_args,
             leaf_only_evis,
             remote_leaf_only,
             mixed_pes: mixed,
-            bum_filtered: bgp.evpn_encap.is_mpls() || bgp.evpn_encap.is_vxlan(),
+            bum_filtered: true,
         };
         return Ok(serde_json::to_string_pretty(&out)
             .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")));
@@ -2788,11 +2813,17 @@ pub(super) fn show_bgp_evpn_etree(
             )?;
         }
     } else {
-        writeln!(
-            out,
-            "  Not filtered yet: a leaf's broadcast, multicast and unknown unicast \
-             toward leaves on other PEs (filtered over MPLS and VXLAN only)"
-        )?;
+        match bgp.etree_leaf_arg {
+            Some(arg) => writeln!(out, "  Leaf argument:   {arg}")?,
+            None => writeln!(out, "  Leaf argument:   none")?,
+        }
+        writeln!(out, "  Remote leaf arguments:")?;
+        if peer_args.is_empty() {
+            writeln!(out, "    none")?;
+        }
+        for p in &peer_args {
+            writeln!(out, "    {:<16} {} ({} bits)", p.pe, p.leaf_arg, p.arg_bits)?;
+        }
     }
     Ok(out)
 }

@@ -2435,3 +2435,209 @@ async fn many_leaf_evis_split_the_leaf_label_route() {
     assert!(local_leaf_ad_at(&bgp, 1).is_none(), "withdrawn");
     assert!(local_leaf_ad_at(&bgp, 2).is_none(), "withdrawn");
 }
+
+/// A PE with EVPN over SRv6 (uSID locator `fd00:1::/48`: LBL 32, LNL 16,
+/// FL 16), advertising VNI 100 from VTEP `RID`, whose bridge holds
+/// `vxlan100` (9) and the E-Tree leaf AC `ce1` (7).
+fn etree_srv6_bgp() -> (Bgp, mpsc::UnboundedReceiver<crate::rib::client::RibInbound>) {
+    let (mut bgp, rib) = bgp_with_rib();
+    bgp.advertise_all_vni = true;
+    bgp.evpn_encap = super::super::inst::EvpnEncap::Srv6;
+    bgp.srv6_locator = Some(crate::rib::Locator {
+        prefix: Some("fd00:1::/48".parse().unwrap()),
+        behavior: Some(crate::rib::LocatorBehavior::Usid),
+        ..Default::default()
+    });
+    bgp.etree_leaf_ifs.insert("ce1".to_string());
+    for (index, name, vni) in [(9, "vxlan100", Some(100)), (7, "ce1", None)] {
+        bgp.process_rib_msg(RibRx::LinkAdd(rib_link(index, name, vni)));
+        bgp.process_rib_msg(RibRx::L2PortEvis {
+            ifindex: index,
+            vnis: BTreeSet::from([100]),
+        });
+    }
+    bgp.process_rib_msg(RibRx::VxlanAdd {
+        vni: 100,
+        vtep_local: IpAddr::V4(RID),
+    });
+    (bgp, rib)
+}
+
+/// The E-Tree-over-SRv6 messages BGP sent the RIB, as strings.
+fn etree_srv6_messages(
+    rx: &mut mpsc::UnboundedReceiver<crate::rib::client::RibInbound>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    while let Ok(inbound) = rx.try_recv() {
+        match inbound.msg {
+            crate::rib::Message::EtreeLeafArg { arg } => out.push(format!("arg {arg}")),
+            crate::rib::Message::SidAdd { sid }
+                if sid.behavior == crate::rib::SidBehavior::EndDT2M =>
+            {
+                let al = sid.structure.map_or(0, |s| s.arg_bits);
+                out.push(format!("dt2m {} al {al}", sid.addr));
+            }
+            crate::rib::Message::SidDel { addr } => out.push(format!("sid del {addr}")),
+            crate::rib::Message::CradleReplAddSrv6Leaf { bd, sid, leaf_sid } => {
+                out.push(format!("add {bd} {sid} {leaf_sid}"))
+            }
+            crate::rib::Message::CradleReplDelSrv6Leaf { bd, sid } => {
+                out.push(format!("del {bd} {sid}"))
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The End.DT2M SID structure on an attribute, as (SID, AL).
+fn dt2m_of(attr: &BgpAttr) -> Option<(std::net::Ipv6Addr, u8)> {
+    evpn_srv6_sid_info(attr, bgp_packet::SRV6_BEHAVIOR_END_DT2M)
+        .map(|(sid, st)| (sid, st.map_or(0, |st| st.argument_len)))
+}
+
+#[test]
+fn sid_arguments_are_placed_after_the_function() {
+    let sid: std::net::Ipv6Addr = "fd00:2:0:200::".parse().unwrap();
+    let leaf = sid_place_arg(sid, 64, 16, 1).unwrap();
+    assert_eq!(
+        leaf,
+        "fd00:2:0:200:1::".parse::<std::net::Ipv6Addr>().unwrap()
+    );
+    assert_eq!(sid_read_arg(leaf, 64, 16), Some(1));
+    assert_eq!(sid_read_arg(leaf, 48, 16), Some(0x200), "the function");
+    assert_eq!(sid_place_arg(sid, 120, 16, 1), None, "past the address");
+    assert_eq!(sid_place_arg(sid, 64, 8, 0x100), None, "wider than 8 bits");
+}
+
+/// Plan §8.6 (D6): under SRv6 a PE with a leaf AC has leaf argument 1. It
+/// is teed for decap; the leaf VNI's End.DT2M is installed with a 16-bit
+/// argument and its IMET advertises the argument length; the leaf-label
+/// route carries the E-Tree EC with no field and an End.DT2M SID with the
+/// argument at LBL+LNL+FL. Without a leaf AC all of it goes, and the
+/// End.DT2M is installed plain again.
+#[tokio::test]
+async fn an_srv6_leaf_ac_gets_a_leaf_argument() {
+    let (mut bgp, mut rib) = etree_srv6_bgp();
+    assert_eq!(bgp.etree_leaf_arg, Some(1));
+    let msgs = etree_srv6_messages(&mut rib);
+    assert!(msgs.contains(&"arg 1".to_string()), "{msgs:?}");
+    let dt2m = bgp.evpn_dt2m_sids[&100].0;
+    assert!(msgs.contains(&format!("dt2m {dt2m} al 16")), "{msgs:?}");
+    assert_eq!(dt2m_of(&local_imet(&bgp)), Some((dt2m, 16)));
+
+    let ad = local_leaf_ad(&bgp).expect("the leaf-label route");
+    let ecom = ad.ecom.as_ref().unwrap();
+    assert!(ecom.0.contains(&ExtCommunityValue::etree_leaf_label(0)));
+    assert!(ecom.0.contains(&evpn_route_target(bgp.asn, 100)));
+    assert_eq!(
+        dt2m_of(&ad),
+        Some(("::1:0:0:0".parse().unwrap(), 16)),
+        "the argument at offset 64"
+    );
+
+    bgp.etree_leaf_ifs.clear();
+    bgp.etree_label_reconcile();
+    assert_eq!(bgp.etree_leaf_arg, None);
+    let msgs = etree_srv6_messages(&mut rib);
+    assert!(msgs.contains(&"arg 0".to_string()), "{msgs:?}");
+    assert!(msgs.contains(&format!("sid del {dt2m}")), "{msgs:?}");
+    assert!(msgs.contains(&format!("dt2m {dt2m} al 0")), "{msgs:?}");
+    assert_eq!(dt2m_of(&local_imet(&bgp)), Some((dt2m, 0)));
+    assert!(local_leaf_ad(&bgp).is_none(), "withdrawn");
+}
+
+/// A remote PE's SRv6 IMET for VNI 100 with End.DT2M `sid` and argument
+/// length `al`.
+fn srv6_imet_route(pe: &str, sid: &str, al: u8) -> (EvpnRoute, BgpAttr) {
+    let (route, mut attr) = vxlan_imet_route(pe, None);
+    attr.prefix_sid = Some(super::super::inst::srv6_l2_service_prefix_sid(
+        sid.parse().unwrap(),
+        Some(crate::rib::SidStructure {
+            lb_bits: 32,
+            ln_bits: 16,
+            fun_bits: 16,
+            arg_bits: al,
+        }),
+        bgp_packet::SRV6_BEHAVIOR_END_DT2M,
+    ));
+    (route, attr)
+}
+
+/// A remote PE's SRv6 leaf-label route with leaf argument `arg` (16 bits
+/// at offset 64).
+fn srv6_leaf_ad_route(pe: &str, arg: u32) -> (EvpnRoute, BgpAttr) {
+    let (route, mut attr) = leaf_ad_route(pe, 0);
+    attr.ecom = Some(ExtCommunity::from([
+        evpn_route_target(65000, 100),
+        ExtCommunityValue::etree_leaf_label(0),
+    ]));
+    attr.prefix_sid = Some(super::super::inst::srv6_l2_service_prefix_sid(
+        sid_place_arg(std::net::Ipv6Addr::UNSPECIFIED, 64, 16, arg).unwrap(),
+        Some(crate::rib::SidStructure {
+            lb_bits: 32,
+            ln_bits: 16,
+            fun_bits: 16,
+            arg_bits: 16,
+        }),
+        bgp_packet::SRV6_BEHAVIOR_END_DT2M,
+    ));
+    (route, attr)
+}
+
+/// A remote PE's leaf argument and End.DT2M SID make a leaf slot toward it
+/// whose SID carries the argument (RFC 9819 §3.3). An IMET without the
+/// argument length makes none (§3.2); the leaf-label route gone takes the
+/// slot with it.
+#[tokio::test]
+async fn a_remote_leaf_argument_makes_an_srv6_leaf_slot() {
+    let (mut bgp, mut rib) = etree_srv6_bgp();
+    etree_srv6_messages(&mut rib);
+    let (from, _rx) = peer(&mut bgp, "10.0.0.11", false);
+    let pe = "10.0.0.11";
+    let (ad, ad_attr) = srv6_leaf_ad_route(pe, 1);
+    feed_evpn(&mut bgp, from, ad.clone(), Some(ad_attr));
+
+    // The IMET says no argument: no leaf slot.
+    let (imet, attr) = srv6_imet_route(pe, "fd00:2:0:200::", 0);
+    feed_evpn(&mut bgp, from, imet.clone(), Some(attr));
+    bgp.vpws_df_drain();
+    assert_eq!(etree_srv6_messages(&mut rib), Vec::<String>::new());
+
+    let (_, attr) = srv6_imet_route(pe, "fd00:2:0:200::", 16);
+    feed_evpn(&mut bgp, from, imet, Some(attr));
+    bgp.vpws_df_drain();
+    assert_eq!(
+        etree_srv6_messages(&mut rib),
+        vec!["add 100 fd00:2:0:200:: fd00:2:0:200:1::".to_string()]
+    );
+
+    feed_evpn(&mut bgp, from, ad, None);
+    bgp.vpws_df_drain();
+    assert_eq!(
+        etree_srv6_messages(&mut rib),
+        vec!["del 100 fd00:2:0:200::".to_string()]
+    );
+}
+
+/// `show bgp evpn etree` under SRv6 names this PE's leaf argument and each
+/// remote PE's; a new cradle tee gets the argument again.
+#[tokio::test]
+async fn srv6_leaf_arguments_show_and_replay() {
+    let (mut bgp, mut rib) = etree_srv6_bgp();
+    let (from, _rx) = peer(&mut bgp, "10.0.0.11", false);
+    let (ad, ad_attr) = srv6_leaf_ad_route("10.0.0.11", 7);
+    feed_evpn(&mut bgp, from, ad, Some(ad_attr));
+    let text = super::super::show::show_bgp_evpn_etree(
+        &bgp,
+        crate::config::Args(std::collections::VecDeque::new()),
+        false,
+    )
+    .unwrap();
+    assert!(text.contains("Leaf argument:   1\n"), "{text}");
+    assert!(text.contains("10.0.0.11        7 (16 bits)"), "{text}");
+
+    etree_srv6_messages(&mut rib);
+    bgp.process_rib_msg(RibRx::CradleUp);
+    assert!(etree_srv6_messages(&mut rib).contains(&"arg 1".to_string()));
+}

@@ -70,6 +70,16 @@ message EtreeLeafLabel {
   uint32 label = 1;
 }
 
+// EVPN E-Tree over SRv6 (RFC 8317, RFC 8986 §4.12): the Arg.FE2 value this
+// PE advertised as its leaf argument in its ESI-0 Ethernet A-D route; 0 =
+// none. A peer places it in our End.DT2M SID (RFC 9819 §3.3) on BUM from its
+// leaf ACs, and the copy is kept off our leaf ports. The End.DT2M SID must
+// be installed with its argument length (`LocalSid.arg_bits`, 8 or 16) at
+// the LOC:FUNC prefix length. Replace semantics.
+message EtreeLeafArg {
+  uint32 arg = 1;
+}
+
 // EVPN E-Tree over VXLAN (RFC 8317; the V1+ scheme: the IMET carries the
 // E-Tree EC when a PE's ACs in the domain are all leaves): the PE at
 // `remote` (its VTEP) is leaf-only in bridge domain `bd`. Its VXLAN BUM is
@@ -357,6 +367,12 @@ message ReplSlot {
   // toward the PE then serves roots only. Exclusive with `esi`/`esi_label`:
   // the leaf label replaces the ESI label. Keyed apart from the plain slot.
   uint32 etree_leaf_label = 8;
+  // EVPN E-Tree over SRv6 (RFC 8317): the leaf slot toward the PE whose
+  // End.DT2M SID is `remote_sid` — it carries BUM from local leaf ports only,
+  // to this SID (`remote_sid` with that PE's leaf argument placed, RFC 9819
+  // §3.3), and every other slot toward the PE then serves roots only. Keyed
+  // apart from the plain slot.
+  string etree_leaf_sid = 9;
 }
 
 // An RFC 9524 Replication segment: the local End.Replicate SID `sid` is an SR
@@ -661,6 +677,7 @@ service Cradle {
   // EVPN E-Tree: a local port's leaf/root role (RFC 8317).
   rpc SetEtreeRole(EtreeRole) returns (Empty);
   rpc SetEtreeLeafLabel(EtreeLeafLabel) returns (Empty);
+  rpc SetEtreeLeafArg(EtreeLeafArg) returns (Empty);
   rpc SetEtreeRemote(EtreeRemote) returns (Empty);
   rpc AddFdbLocal(FdbLocal) returns (Empty);
   // Flush locally-learned FDB entries (never control-plane-installed remote

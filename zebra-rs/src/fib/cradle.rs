@@ -176,6 +176,11 @@ struct CradleMirror {
     /// pairs whose PE is leaf-only in that bridge domain (`SetEtreeRemote`).
     /// Only the marks are kept; cradle holds no row for any other remote.
     etree_remotes: HashSet<(u32, IpAddr)>,
+    /// EVPN E-Tree over SRv6: this PE's leaf argument (`SetEtreeLeafArg`,
+    /// 0 = none), and the leaf slots `(bd, PE's End.DT2M SID)` → that SID
+    /// with the PE's leaf argument placed.
+    etree_leaf_arg: u32,
+    repl_slots_srv6_leaf: HashMap<(u32, Ipv6Addr), Ipv6Addr>,
 }
 
 /// One step of an engine replay that makes a BUM replication slot, or a
@@ -188,12 +193,16 @@ enum SlotOp {
     MplsLeafSlot(u32, IpAddr, u32, u32),
     MplsEsSlot(u32, IpAddr, u32, String, u32),
     MplsSlot(u32, IpAddr, u32),
+    EtreeLeafArg(u32),
+    Srv6LeafSlot(u32, Ipv6Addr, Ipv6Addr),
+    Srv6Slot(u32, Ipv6Addr),
 }
 
 #[derive(Clone, Copy)]
 enum SlotFamily {
     Vxlan,
     Mpls,
+    Srv6,
 }
 
 /// The replay order of a family's flood slots: every restriction before the
@@ -207,6 +216,9 @@ enum SlotFamily {
 ///   come from its siblings — the segments it skips (RFC 7432 §8.3) and,
 ///   with a leaf slot, serving roots only (RFC 8317 §4.2). So the leaf
 ///   label, the leaf slots and the segment slots come first.
+/// - SRv6: likewise, a PE's leaf slot (its End.DT2M SID with its leaf
+///   argument) makes its plain slot serve roots only, so the leaf argument
+///   and the leaf slots come first.
 fn slot_replay(m: &CradleMirror, family: SlotFamily) -> Vec<SlotOp> {
     let mut ops = Vec::new();
     match family {
@@ -244,6 +256,21 @@ fn slot_replay(m: &CradleMirror, family: SlotFamily) -> Vec<SlotOp> {
                 m.repl_slots_mpls
                     .iter()
                     .map(|(bd, pe, label)| SlotOp::MplsSlot(*bd, *pe, *label)),
+            );
+        }
+        SlotFamily::Srv6 => {
+            if m.etree_leaf_arg != 0 {
+                ops.push(SlotOp::EtreeLeafArg(m.etree_leaf_arg));
+            }
+            ops.extend(
+                m.repl_slots_srv6_leaf
+                    .iter()
+                    .map(|((bd, sid), leaf)| SlotOp::Srv6LeafSlot(*bd, *sid, *leaf)),
+            );
+            ops.extend(
+                m.repl_slots
+                    .iter()
+                    .map(|(vni, sid)| SlotOp::Srv6Slot(*vni, *sid)),
             );
         }
     }
@@ -663,6 +690,11 @@ impl CradleFib {
                     .await
             }
             SlotOp::MplsSlot(bd, pe, label) => self.repl_slot_add_mpls(bd, pe, label).await,
+            SlotOp::EtreeLeafArg(arg) => self.set_etree_leaf_arg(arg).await,
+            SlotOp::Srv6LeafSlot(bd, sid, leaf) => {
+                self.repl_slot_add_srv6_leaf(bd, sid, leaf).await
+            }
+            SlotOp::Srv6Slot(vni, sid) => self.repl_slot_add(vni, sid).await,
         }
     }
 
@@ -703,8 +735,9 @@ impl CradleFib {
             let leaf = m.fdb_etree_leaf.contains(&(*vni, *mac));
             self.fdb_add(*vni, *mac, *sid, leaf).await;
         }
-        for (vni, sid) in &m.repl_slots {
-            self.repl_slot_add(*vni, *sid).await;
+        // The SRv6 flood slots, after their restrictions (`slot_replay`).
+        for op in slot_replay(&m, SlotFamily::Srv6) {
+            self.replay_slot_op(op).await;
         }
         // RFC 9524 Replication segments (the local End.Replicate SID is
         // replayed above with the other local SIDs, so SRV6_LOCALSID is
@@ -1984,6 +2017,7 @@ impl CradleFib {
                     esi: String::new(),
                     esi_label: 0,
                     etree_leaf_label: 0,
+                    etree_leaf_sid: String::new(),
                 })
                 .await?;
             anyhow::Ok(())
@@ -2161,6 +2195,7 @@ impl CradleFib {
                     esi: String::new(),
                     esi_label: 0,
                     etree_leaf_label: 0,
+                    etree_leaf_sid: String::new(),
                 })
                 .await?;
             anyhow::Ok(())
@@ -2193,6 +2228,7 @@ impl CradleFib {
                     esi: String::new(),
                     esi_label: 0,
                     etree_leaf_label: 0,
+                    etree_leaf_sid: String::new(),
                 })
                 .await?;
             anyhow::Ok(())
@@ -2224,6 +2260,7 @@ impl CradleFib {
                     esi: String::new(),
                     esi_label: 0,
                     etree_leaf_label: 0,
+                    etree_leaf_sid: String::new(),
                 })
                 .await?;
             anyhow::Ok(())
@@ -2265,6 +2302,7 @@ impl CradleFib {
                     esi: esi.to_string(),
                     esi_label,
                     etree_leaf_label: 0,
+                    etree_leaf_sid: String::new(),
                 })
                 .await?;
             anyhow::Ok(())
@@ -2298,6 +2336,7 @@ impl CradleFib {
                     esi: String::new(),
                     esi_label: 0,
                     etree_leaf_label: leaf_label,
+                    etree_leaf_sid: String::new(),
                 })
                 .await?;
             anyhow::Ok(())
@@ -2332,6 +2371,7 @@ impl CradleFib {
                     esi: String::new(),
                     esi_label: 0,
                     etree_leaf_label: leaf_label,
+                    etree_leaf_sid: String::new(),
                 })
                 .await?;
             anyhow::Ok(())
@@ -2390,6 +2430,95 @@ impl CradleFib {
         }
     }
 
+    /// EVPN E-Tree over SRv6 (RFC 8317, RFC 8986 §4.12): this PE's leaf
+    /// argument, for decap (0 = none). A copy a peer sends with it in our
+    /// End.DT2M SID came from a leaf AC and is kept off our leaf ports.
+    /// Mirrored; replayed before the SRv6 slots.
+    pub async fn set_etree_leaf_arg(&self, arg: u32) {
+        self.mirror.lock().await.etree_leaf_arg = arg;
+        let result = async {
+            self.client()
+                .await?
+                .set_etree_leaf_arg(pb::EtreeLeafArg { arg })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle set_etree_leaf_arg {arg} failed: {e}");
+        }
+    }
+
+    /// EVPN E-Tree over SRv6 (RFC 8317): the leaf slot toward the PE whose
+    /// End.DT2M SID for bridge domain `bd` is `sid` — BUM from local leaf
+    /// ports only, sent to `leaf_sid` (`sid` with that PE's leaf argument
+    /// placed, RFC 9819 §3.3). cradle then keeps leaf BUM off the PE's
+    /// plain slot. Mirrored.
+    pub async fn repl_slot_add_srv6_leaf(&self, bd: u32, sid: Ipv6Addr, leaf_sid: Ipv6Addr) {
+        self.mirror
+            .lock()
+            .await
+            .repl_slots_srv6_leaf
+            .insert((bd, sid), leaf_sid);
+        let result = async {
+            self.client()
+                .await?
+                .add_repl_slot(pb::ReplSlot {
+                    bd,
+                    remote_sid: sid.to_string(),
+                    remote_vtep: String::new(),
+                    remote_pe: String::new(),
+                    remote_label: 0,
+                    esi: String::new(),
+                    esi_label: 0,
+                    etree_leaf_label: 0,
+                    etree_leaf_sid: leaf_sid.to_string(),
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle repl_slot_add_srv6_leaf bd {bd} {sid} failed: {e}");
+        }
+    }
+
+    /// Inverse of [`Self::repl_slot_add_srv6_leaf`]: cradle keys the leaf
+    /// slot on `(bd, sid)` apart from the plain one; any non-empty
+    /// `etree_leaf_sid` names it.
+    pub async fn repl_slot_del_srv6_leaf(&self, bd: u32, sid: Ipv6Addr) {
+        let Some(leaf_sid) = self
+            .mirror
+            .lock()
+            .await
+            .repl_slots_srv6_leaf
+            .remove(&(bd, sid))
+        else {
+            return;
+        };
+        let result = async {
+            self.client()
+                .await?
+                .del_repl_slot(pb::ReplSlot {
+                    bd,
+                    remote_sid: sid.to_string(),
+                    remote_vtep: String::new(),
+                    remote_pe: String::new(),
+                    remote_label: 0,
+                    esi: String::new(),
+                    esi_label: 0,
+                    etree_leaf_label: 0,
+                    etree_leaf_sid: leaf_sid.to_string(),
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle repl_slot_del_srv6_leaf bd {bd} {sid} failed: {e}");
+        }
+    }
+
     /// Inverse of [`Self::repl_slot_add_mpls_es`].
     pub async fn repl_slot_del_mpls_es(&self, bd: u32, pe: IpAddr, esi: &str) {
         self.mirror
@@ -2409,6 +2538,7 @@ impl CradleFib {
                     esi: esi.to_string(),
                     esi_label: 0,
                     etree_leaf_label: 0,
+                    etree_leaf_sid: String::new(),
                 })
                 .await?;
             anyhow::Ok(())
@@ -2439,6 +2569,7 @@ impl CradleFib {
                     esi: String::new(),
                     esi_label: 0,
                     etree_leaf_label: 0,
+                    etree_leaf_sid: String::new(),
                 })
                 .await?;
             anyhow::Ok(())
@@ -2468,6 +2599,7 @@ impl CradleFib {
                     esi: String::new(),
                     esi_label: 0,
                     etree_leaf_label: 0,
+                    etree_leaf_sid: String::new(),
                 })
                 .await?;
             anyhow::Ok(())

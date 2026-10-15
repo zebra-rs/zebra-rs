@@ -456,6 +456,23 @@ pub enum Message {
     EtreeLeafLabel {
         label: u32,
     },
+    /// EVPN E-Tree over SRv6 (RFC 8317, RFC 8986 §4.12): the leaf argument
+    /// this PE advertises, teed as `SetEtreeLeafArg` for decap (0 = none).
+    EtreeLeafArg {
+        arg: u32,
+    },
+    /// EVPN E-Tree over SRv6: the leaf slot toward the PE whose End.DT2M
+    /// SID for bridge domain `bd` is `sid` — BUM from local leaf ports only,
+    /// sent to `leaf_sid` (that SID with the PE's leaf argument placed).
+    CradleReplAddSrv6Leaf {
+        bd: u32,
+        sid: std::net::Ipv6Addr,
+        leaf_sid: std::net::Ipv6Addr,
+    },
+    CradleReplDelSrv6Leaf {
+        bd: u32,
+        sid: std::net::Ipv6Addr,
+    },
     /// EVPN E-Tree over VXLAN (RFC 8317, the V1+ scheme): the PE at VTEP
     /// `remote` is (`leaf_only`), or is no longer, leaf-only in bridge
     /// domain `bd` — its IMET carries the E-Tree EC with the Leaf flag.
@@ -4409,6 +4426,17 @@ impl Rib {
             }
             Message::EtreeLeafLabel { label } => {
                 self.fib_handle.cradle_etree_leaf_label(label).await;
+            }
+            Message::EtreeLeafArg { arg } => {
+                self.fib_handle.cradle_etree_leaf_arg(arg).await;
+            }
+            Message::CradleReplAddSrv6Leaf { bd, sid, leaf_sid } => {
+                self.fib_handle
+                    .cradle_repl_add_srv6_leaf(bd, sid, leaf_sid)
+                    .await;
+            }
+            Message::CradleReplDelSrv6Leaf { bd, sid } => {
+                self.fib_handle.cradle_repl_del_srv6_leaf(bd, sid).await;
             }
             Message::CradleEtreeRemote {
                 bd,
