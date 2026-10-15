@@ -680,7 +680,8 @@ finding).
     `l2_drop_etree_uc` counted, and a host moving from a leaf AC to a root
     AC becoming reachable from the leaves.
 - **Not in 2b:** the multihomed role-conflict warning (§5.3) and the IRB
-  warning (§9, D4).
+  warning (§9, D4). The IRB warning came later, with D4 decided: a leaf
+  AC's bridge with a routable address or a VRF master.
 
 **Phase 3a is merged** as cradle-rs #207, released in cradle-rs v1.1.5,
 which zebra-rs pins since #2524. It is §8.4 as planned, with these
@@ -863,8 +864,8 @@ and the memory notes):
 
 ## 11. Risks and open decisions
 
-**Decisions for the user** (D1, D3 and D5 decided 2026-10-14, D2 and D6
-2026-10-15, each as recommended; D4 open):
+**Decisions for the user** (D1, D3 and D5 decided 2026-10-14, D2, D4 and
+D6 2026-10-15, each as recommended; D5's gate lifted 2026-10-15):
 - **D1 — Where the role is configured.** Decided:
   `router bgp afi-safi evpn etree leaf-interface <if>` (§5.2). Alternatives:
   - per EVI (`evi <id> etree leaf-interface …`), which only exists in the
@@ -875,7 +876,12 @@ and the memory notes):
 - **D3 — A leaf AC under the kernel backend.** Decided: reject at commit
   (isolation is a security property, RFC 8317 §7). The alternative was to
   accept and warn.
-- **D4 — IRB on an E-Tree BD.** Warn (recommended) or reject at commit.
+- **D4 — IRB on an E-Tree BD.** Decided 2026-10-15: warn, as recommended
+  (the alternative was to reject at commit). `show bgp evpn etree` names
+  each leaf EVI whose leaf AC's bridge has IRB — a routable address or a
+  VRF master (`Bgp::etree_irb_evis`) — as `Warning: EVI <n>: IRB on bridge
+  <br>: leaves can reach each other through L3`. Routed traffic is not
+  blocked: E-Tree is an L2 property (RFC 8317 §4.2.3).
 - **D5 — Gating.** Decided: keep `etree` behind a YANG feature until BUM
   filtering exists for the configured encapsulation. The alternative was to
   ship each phase visible with `show` naming what is not yet filtered.

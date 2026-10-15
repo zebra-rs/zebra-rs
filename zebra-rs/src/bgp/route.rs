@@ -21418,6 +21418,37 @@ impl Bgp {
         self.local_rib.etree_remotes_sent = desired;
     }
 
+    /// The EVIs whose E-Tree leaf ACs sit in a bridge with IRB, by EVI, with
+    /// the bridge's name: the bridge has a routable address, or a master
+    /// (a VRF). RFC 8317 §4.2.3 puts IRB out of scope, and for a reason
+    /// that matters: two leaves of such a domain reach each other through
+    /// L3, where no E-Tree rule applies. Decision D4: warned about in
+    /// `show bgp evpn etree`, not refused.
+    pub fn etree_irb_evis(&self) -> BTreeMap<u32, String> {
+        let mut out = BTreeMap::new();
+        for name in &self.etree_leaf_ifs {
+            let Some(&ifindex) = self.link_index_by_name.get(name) else {
+                continue;
+            };
+            let Some(&bridge) = self.link_master.get(&ifindex) else {
+                continue;
+            };
+            if !self.interface_addrs.has_routable(bridge) && !self.link_master.contains_key(&bridge)
+            {
+                continue;
+            }
+            let bridge_name = self
+                .link_name_by_index
+                .get(&bridge)
+                .cloned()
+                .unwrap_or_else(|| bridge.to_string());
+            for evi in self.port_evis(ifindex) {
+                out.insert(evi, bridge_name.clone());
+            }
+        }
+        out
+    }
+
     /// The leaf argument and its length each remote PE advertised (SRv6),
     /// for `show`.
     pub fn etree_peer_leaf_args(&self) -> BTreeMap<IpAddr, (u32, u8)> {

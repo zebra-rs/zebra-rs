@@ -2607,6 +2607,15 @@ struct EtreeMixedJson {
     pes: Vec<String>,
 }
 
+/// `show bgp evpn etree json`: an EVI whose leaf ACs sit in a bridge with
+/// IRB (D4).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EtreeIrbJson {
+    evi: u32,
+    bridge: String,
+}
+
 /// `show bgp evpn etree json`: a remote PE's leaf argument (SRv6).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2645,6 +2654,9 @@ struct EtreeJson {
     /// VXLAN: the EVIs with two or more mixed PEs, between which a leaf's
     /// BUM is not isolated.
     mixed_pes: Vec<EtreeMixedJson>,
+    /// The EVIs with IRB on a leaf AC's bridge: their leaves reach each
+    /// other through L3, which E-Tree does not filter (RFC 8317 §4.2.3).
+    irb: Vec<EtreeIrbJson>,
     /// Whether a leaf's BUM is kept from leaves on other PEs: over MPLS,
     /// by the leaf label (RFC 8317 §4.2); over SRv6, by the leaf argument
     /// (RFC 9819); over VXLAN, by the IMET colour, except between mixed
@@ -2692,6 +2704,11 @@ pub(super) fn show_bgp_evpn_etree(
             evi,
             leaf_macs: macs.len(),
         })
+        .collect();
+    let irb: Vec<EtreeIrbJson> = bgp
+        .etree_irb_evis()
+        .into_iter()
+        .map(|(evi, bridge)| EtreeIrbJson { evi, bridge })
         .collect();
     let peer_args: Vec<EtreePeerArgJson> = bgp
         .etree_peer_leaf_args()
@@ -2741,6 +2758,7 @@ pub(super) fn show_bgp_evpn_etree(
             leaf_only_evis,
             remote_leaf_only,
             mixed_pes: mixed,
+            irb,
             bum_filtered: true,
         };
         return Ok(serde_json::to_string_pretty(&out)
@@ -2824,6 +2842,13 @@ pub(super) fn show_bgp_evpn_etree(
         for p in &peer_args {
             writeln!(out, "    {:<16} {} ({} bits)", p.pe, p.leaf_arg, p.arg_bits)?;
         }
+    }
+    for i in &irb {
+        writeln!(
+            out,
+            "  Warning: EVI {}: IRB on bridge {}: leaves can reach each other through L3",
+            i.evi, i.bridge
+        )?;
     }
     Ok(out)
 }
