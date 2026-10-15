@@ -25,7 +25,8 @@ Read together with:
 - cradle-rs `docs/design/bgp-evpn.md` §Multihoming — the datapath side.
 
 Branches: `evpn-e-tree-design` (this document, #2519), `evpn-e-tree`
-(phase 1).
+(phase 1, #2521; phase 2b). Phase 2a is cradle-rs #204, released in
+cradle-rs v1.1.4.
 
 ## 1. What E-Tree means, and which flavour we build
 
@@ -217,7 +218,7 @@ exactly **one** bridge domain. A VLAN sub-interface is just another netdev,
 so "role per AC" in RFC 8317's sense (an AC identified by the Ethernet tag,
 §4.2) is "role per netdev" here. No new AC object is needed.
 
-### 5.2 Configuration surface (proposal — decision D1)
+### 5.2 Configuration surface (decision D1: adopted)
 
 ```
 router bgp <asn>
@@ -240,8 +241,9 @@ router bgp <asn>
   `ZEBRA_UPDATE_AUDIT_DOCS=1 cargo test -p zebra-rs bgp_config_audit`, and
   bump the `docs/orphan-report.txt` Total/Handled counts by hand.
 - Until BUM filtering exists for the configured encapsulation, the subtree
-  stays behind a YANG `feature`/`if-feature` gate (decision D5). A
-  half-built E-Tree that floods leaf BUM to leaves must not look finished.
+  stays behind a YANG `feature`/`if-feature` gate (decision D5, adopted:
+  `--feature etree`, `zebra-features.yang`). A half-built E-Tree that floods
+  leaf BUM to leaves must not look finished.
 
 ### 5.3 Multihomed leaves
 
@@ -356,14 +358,16 @@ the `InfoBridgePort` setter that would set it.
 
 Local isolation alone is the least valuable third of E-Tree, though, and
 shipping it would let an operator believe leaves are isolated across the
-core when they are not. Decision D3 is whether a leaf AC under the kernel
-backend is rejected at commit (recommended) or accepted with a loud
-"not enforced".
+core when they are not. Decision D3 (adopted): a leaf AC is refused at
+commit unless the cradle data plane is on (`system ebpf enabled` or
+`system cradle enabled`; `config::check::etree_backend`). A startup config
+is only warned about, as for the MPLS label checks: refusing the file
+would leave the router unconfigured.
 
 ### 8.2 Port role and local filtering
 
 - **New RPC.** `SetPortRole{port, leaf}`, stored by port name, applied when
-  the port appears.
+  the port appears. As built (cradle-rs #204): `SetEtreeRole{port, leaf}`.
 - **New map.** `PORT_ETREE: ifindex → flags`, with its own owner. Do **not**
   fold the role into `PortConfig.flags` or `ES_DF`: `SetPort` and
   `es_render` rewrite those wholesale, so a role kept there would be wiped
@@ -377,7 +381,7 @@ backend is rejected at commit (recommended) or accepted with a loud
 ### 8.3 Known unicast across the core
 
 - **Proto.** `FdbRemote` gains a `flags` field. It has none today (proto
-  `:233`).
+  `:233`). As built (cradle-rs #204): a bool, `FdbRemote.etree_leaf = 9`.
 - **FDB.** Add `FDB_F_ETREE_LEAF = 1 << 6` in `FdbEntry.flags`.
 - **Check.** In `l2_evpn_xdp`, between the FDB lookup and the single encap
   call (`main.rs:3383-3437`): if the ingress port is a leaf and the entry is
@@ -543,6 +547,72 @@ before the zebra half that drives it.
   other treat-as-withdraw attribute, because the parser reports only a
   bool. That is a follow-up across all of them.
 
+**Phase 2a is merged** as cradle-rs #204, released in cradle-rs v1.1.4,
+which zebra-rs pins since #2522. Two names differ from §8.2-§8.3: the RPC is
+`SetEtreeRole`, and the remote MAC's flag is `FdbRemote.etree_leaf`, a bool.
+`DelPort` leaves a port's role row, as it leaves the multihoming rows: the
+port stays in its flood list until the caller's `SetL2Domain` (a review
+finding).
+
+**Status: phase 2b is implemented** on `evpn-e-tree`.
+- **Config.** `router bgp afi-safi evpn etree leaf-interface <if>` (D1)
+  exists only with `--feature etree` (D5). A commit naming a leaf AC
+  without the cradle data plane is refused (D3, `config::check`).
+- **Roles go through the cradle supervisor, not a RIB message.** The
+  supervisor (`cradle/inst.rs`) already receives `router bgp` config (the
+  EVI bridge) and owns `SetPort`. So it sends every `SetEtreeRole` before
+  any port moves (`sync_etree_roles`), and a leaf whose role the engine has
+  not acknowledged is held out of the datapath: not attached, or detached
+  (`etree_held`). A respawned engine gets every role back before its
+  ports. That is invariant 6 (§7.3) by construction; a RIB-side tee would
+  race the supervisor re-attaching the ports of a fresh engine. Ports
+  zebra-rs does not attach (an external engine's own port config) are the
+  exception: their role arrives when zebra-rs sends it.
+- **Type-2 origination.** `evpn_originate_macip` adds the E-Tree EC (L=1)
+  to a MAC learned on a leaf AC (`macip_etree_leaf`). A role change
+  re-originates the cached local MACs, with no sequence bump
+  (`config_etree_leaf_interface`). So does a leaf AC's link becoming known
+  to BGP after MACs were learned on it (cradle's learn replay can beat the
+  link dump), which would otherwise leave them advertised as roots.
+- **Type-2 receive.** `extract_flags_from_attr` sets `MAC_FLAG_ETREE_LEAF`
+  from the selected path. A Type-2 carrying the EC with L clear is logged
+  and treated as a root (`etree_leaf_flag_missing`). The flag rides
+  `MacRoute.flags` and `MacEntry.flags` to `mac_add`, which hands it to
+  cradle as `FdbRemote.etree_leaf` for VXLAN, MPLS, SRv6 and
+  segment-group entries. It is mirrored, so an engine replay keeps it.
+- **Show.** `show bgp evpn etree` lists the leaf ACs, their EVIs and local
+  MACs, and the remote leaf MACs per EVI. `show bgp evpn` renders the EC
+  (`etree:leaf`), which had fallen back to hex. `show l2 mac table` flags a
+  leaf MAC `L`. `show ebpf` lists the leaf roles and whether each is
+  programmed, and `show ebpf l2` shows `etree-leaf`.
+- **Local MACs come from cradle's learning.** While cradle's `WatchFdb`
+  runs, the kernel bridge's learns are not advertised
+  (`FibMessage::NewNeighbor`). So the BDD uses real hosts on engine ports,
+  not static bridge entries.
+- **Tests.**
+  - Unit tests cover the commit check (feature gate and cradle
+    requirement), Type-2 colouring (including a role change keeping the
+    sequence number, and a late link), the receive flag, the invalid-EC
+    case, the supervisor's hold, and the `show bgp evpn` rendering.
+  - BDD `bgp_evpn_etree` (zebra-rs, managed cradle) covers the refused
+    commit, the programmed roles, local leaf isolation with
+    `l2_drop_etree_local` non-zero, the flag in the remote engine's FDB,
+    an engine restart, and a leaf turned into a root.
+  - Mutants: removing the colouring, the receive flag, the tee's flag, the
+    commit check, the role sync, the reset of acknowledged roles on an
+    engine restart, the re-origination on a role change, or the root on
+    removal each fail it.
+  - Two test traps turned up and are guarded in the feature: an idle host's
+    IPv6 router solicitations make cradle re-report its MAC, and the
+    engine restart's learn replay lands seconds later. Either one
+    re-advertises a MAC by itself and hid a missing re-origination.
+  - cradle-rs BDD `cradle_evpn_etree_zebra` covers the cross-core
+    known-unicast drop driven by zebra-rs, with each PE's
+    `l2_drop_etree_uc` counted, and a host moving from a leaf AC to a root
+    AC becoming reachable from the leaves.
+- **Not in 2b:** the multihomed role-conflict warning (§5.3) and the IRB
+  warning (§9, D4).
+
 **Review lessons carried over from the single-active arc** (see that plan
 and the memory notes):
 - Every negative assertion ("leaf did not receive") is first shown to fail
@@ -555,21 +625,22 @@ and the memory notes):
 
 ## 11. Risks and open decisions
 
-**Decisions for the user:**
-- **D1 — Where the role is configured.** Recommended:
+**Decisions for the user** (D1, D3 and D5 decided 2026-10-14, each as
+recommended):
+- **D1 — Where the role is configured.** Decided:
   `router bgp afi-safi evpn etree leaf-interface <if>` (§5.2). Alternatives:
   - per EVI (`evi <id> etree leaf-interface …`), which only exists in the
     MPLS-shaped model today;
   - on the interface itself, next to `interface X bridge BR`.
 - **D2 — VXLAN BUM.** V1+ (recommended), V2, or known-unicast-only for VXLAN
   (§8.5).
-- **D3 — A leaf AC under the kernel backend.** Reject at commit
-  (recommended; isolation is a security property, RFC 8317 §7), or accept
-  and warn.
+- **D3 — A leaf AC under the kernel backend.** Decided: reject at commit
+  (isolation is a security property, RFC 8317 §7). The alternative was to
+  accept and warn.
 - **D4 — IRB on an E-Tree BD.** Warn (recommended) or reject at commit.
-- **D5 — Gating.** Keep `etree` behind a YANG feature until BUM filtering
-  exists for the configured encapsulation (recommended), or ship each phase
-  visible with `show` naming what is not yet filtered.
+- **D5 — Gating.** Decided: keep `etree` behind a YANG feature until BUM
+  filtering exists for the configured encapsulation. The alternative was to
+  ship each phase visible with `show` naming what is not yet filtered.
 
 **Risks:**
 1. **No FRR partner.** Every claim is zebra-rs against zebra-rs until the
