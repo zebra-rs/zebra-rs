@@ -22,9 +22,9 @@ module firewall {
      interface-definitions/firewall.xml.in and its include fragments).
 
      This module is a grouping library in the dhcp.yang style:
-     config.yang instantiates `grouping firewall` under an iso-gated
+     config.yang instantiates `grouping firewall` under an insomnia-gated
      `container firewall`, so every node here exists only when the
-     daemon runs with `--feature iso`.
+     daemon runs with `--feature insomnia`.
 
      Current scope: `group` (static named groups), `ipv4` and `ipv6`
      filter hooks (forward/input/output) plus the raw hooks

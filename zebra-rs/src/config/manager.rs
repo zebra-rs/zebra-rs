@@ -347,7 +347,7 @@ const DEFAULT_FEATURES: &[(&str, &str)] = &[
 /// is loaded: first the always-on compatibility set above, then the
 /// `--feature` specs. Each spec is `feature` or `module:feature`; a
 /// bare name refers to the central `zebra-features` registry module,
-/// so `--feature iso` enables `zebra-features:iso`. Schema nodes
+/// so `--feature insomnia` enables `zebra-features:insomnia`. Schema nodes
 /// guarded by `if-feature` are pruned from the entry tree unless
 /// their expression holds for the enabled set.
 fn enable_features(yang: &mut YangStore, features: &[String]) {
@@ -355,11 +355,78 @@ fn enable_features(yang: &mut YangStore, features: &[String]) {
         yang.enable_feature(module, feature);
     }
     for spec in features {
-        let (module, feature) = spec
-            .split_once(':')
-            .unwrap_or(("zebra-features", spec.as_str()));
+        let (module, feature) = feature_spec(spec);
         yang.enable_feature(module, feature);
     }
+}
+
+/// Features renamed after a release shipped them, as `(module, old,
+/// new)`. The old name still enables the feature, with a warning at
+/// startup, so a router whose unit file says `--feature iso` keeps its
+/// firewall, IPsec and VRRP configuration across the upgrade.
+const RENAMED_FEATURES: &[(&str, &str, &str)] = &[("zebra-features", "iso", "insomnia")];
+
+/// Split a `--feature` spec into `(module, feature)`. A bare name
+/// belongs to the `zebra-features` registry module, and a renamed
+/// feature resolves to its current name.
+fn feature_spec(spec: &str) -> (&str, &str) {
+    let (module, feature) = spec.split_once(':').unwrap_or(("zebra-features", spec));
+    let feature = RENAMED_FEATURES
+        .iter()
+        .find(|(m, old, _)| *m == module && *old == feature)
+        .map_or(feature, |(_, _, new)| *new);
+    (module, feature)
+}
+
+/// The startup warnings for the `--feature` specs: one for each spec
+/// using a renamed feature's old name, and one for each spec no loaded
+/// module declares. The schema store records any name it is asked to
+/// enable, and a name no `feature` statement defines guards nothing, so
+/// a misspelled or guessed flag (`--feature firewall`) would otherwise
+/// start the daemon exactly as if it had been left out. Call once every
+/// mode is loaded, so the imported modules are all known.
+fn feature_flag_warnings(yang: &YangStore, features: &[String]) -> Vec<String> {
+    features
+        .iter()
+        .filter_map(|spec| {
+            let (module, feature) = feature_spec(spec);
+            let named = spec.split_once(':').map_or(spec.as_str(), |(_, f)| f);
+            if named != feature {
+                let current = if spec.contains(':') {
+                    format!("{module}:{feature}")
+                } else {
+                    feature.to_string()
+                };
+                return Some(format!(
+                    "--feature {spec} is deprecated: the feature is now named \"{feature}\"; it is enabled, but use --feature {current}"
+                ));
+            }
+            let Some(m) = yang.find_module(module) else {
+                return Some(format!(
+                    "--feature {spec}: no loaded YANG module is named \"{module}\"; the flag has no effect"
+                ));
+            };
+            // A submodule's features belong to the module including it.
+            let mut declared: Vec<&str> = m.feature.iter().map(|f| f.name.as_str()).collect();
+            for include in &m.include {
+                if let Some(sub) = yang.find_submodule(&include.name) {
+                    declared.extend(sub.feature.iter().map(|f| f.name.as_str()));
+                }
+            }
+            if declared.contains(&feature) {
+                return None;
+            }
+            declared.sort_unstable();
+            let known = if declared.is_empty() {
+                String::from("none")
+            } else {
+                declared.join(", ")
+            };
+            Some(format!(
+                "--feature {spec}: module \"{module}\" declares no feature \"{feature}\" (it declares: {known}); the flag has no effect"
+            ))
+        })
+        .collect()
 }
 
 impl ConfigManager {
@@ -561,6 +628,9 @@ impl ConfigManager {
         // make a misspelled feature module look like a no-op.
         for diag in yang.take_diagnostics() {
             tracing::warn!("yang: {diag}");
+        }
+        for warning in feature_flag_warnings(&yang, &self.features) {
+            tracing::warn!("{warning}");
         }
 
         Ok(())
@@ -1968,7 +2038,7 @@ fn is_ebpf(paths: &[CommandPath]) -> bool {
     paths.iter().any(|x| x.name == "ebpf")
 }
 
-/// `show firewall …` — served by the system/firewall task (iso-gated
+/// `show firewall …` — served by the system/firewall task (insomnia-gated
 /// grammar; the task always runs, so no not-running fallback in
 /// practice).
 fn is_firewall(paths: &[CommandPath]) -> bool {
@@ -1976,14 +2046,14 @@ fn is_firewall(paths: &[CommandPath]) -> bool {
 }
 
 /// `show vpn ...` — the whole VPN show tree (only IPsec today) is
-/// served by the IPsec task (iso-gated exec grammar; the task always
+/// served by the IPsec task (insomnia-gated exec grammar; the task always
 /// runs, so no not-running fallback in practice).
 fn is_vpn(paths: &[CommandPath]) -> bool {
     paths.iter().any(|x| x.name == "vpn")
 }
 
 /// `show vrrp …` — served by the external insomnia daemon, which
-/// registers the `"vrrp"` show provider (zebra.show.v1); iso-gated
+/// registers the `"vrrp"` show provider (zebra.show.v1); insomnia-gated
 /// exec grammar. With no provider connected the not-running fallback
 /// answers.
 fn is_vrrp(paths: &[CommandPath]) -> bool {
@@ -6893,15 +6963,15 @@ mod feature_gate_tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     /// A scratch module that augments `set router` in the real
-    /// configure tree with a container gated on `feat:iso` from the
+    /// configure tree with a container gated on `feat:insomnia` from the
     /// shipped zebra-features registry, exercising the augment path of
     /// the gating (the shipped `interface ipv4 address dhcp` enum arm
     /// covers the in-module path — see
-    /// `shipped_interface_ipv4_address_dhcp_gated_on_iso`).
+    /// `shipped_interface_ipv4_address_dhcp_gated_on_insomnia`).
     const FIXTURE: &str = r#"
-module test-iso-gated {
+module test-insomnia-gated {
   yang-version "1";
-  namespace "urn:test:test-iso-gated";
+  namespace "urn:test:test-insomnia-gated";
   prefix "tig";
 
   import configure {
@@ -6917,8 +6987,8 @@ module test-iso-gated {
   }
 
   augment "/configure:set/config:router" {
-    container iso-test {
-      if-feature feat:iso;
+    container insomnia-test {
+      if-feature feat:insomnia;
       leaf tag {
         type string;
       }
@@ -6929,16 +6999,16 @@ module test-iso-gated {
 
     /// Build the configure tree from the shipped `yang/` plus the
     /// fixture module, with the given `--feature` specs applied, and
-    /// report whether the gated `set router iso-test` node exists.
+    /// report whether the gated `set router insomnia-test` node exists.
     fn gated_node_present(features: &[&str]) -> bool {
         static SEQ: AtomicU32 = AtomicU32::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "zebra-rs-iso-gate-{}-{}",
+            "zebra-rs-insomnia-gate-{}-{}",
             std::process::id(),
             SEQ.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&dir).expect("fixture dir");
-        std::fs::write(dir.join("test-iso-gated.yang"), FIXTURE).expect("fixture written");
+        std::fs::write(dir.join("test-insomnia-gated.yang"), FIXTURE).expect("fixture written");
 
         let mut yang = YangStore::new();
         yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
@@ -6947,7 +7017,7 @@ module test-iso-gated {
         enable_features(&mut yang, &specs);
         yang.read_with_resolve("configure")
             .expect("configure loads");
-        yang.read_with_resolve("test-iso-gated")
+        yang.read_with_resolve("test-insomnia-gated")
             .expect("fixture loads");
         yang.identity_resolve();
         let module = yang.find_module("configure").expect("configure module");
@@ -6968,7 +7038,7 @@ module test-iso-gated {
         };
         let set = child(&entry, "set").expect("set subtree");
         let router = child(&set, "router").expect("router subtree");
-        child(&router, "iso-test").is_some()
+        child(&router, "insomnia-test").is_some()
     }
 
     #[test]
@@ -6981,21 +7051,108 @@ module test-iso-gated {
 
     #[test]
     fn bare_feature_spec_resolves_to_zebra_features() {
-        assert!(gated_node_present(&["iso"]), "--feature iso enables it");
+        assert!(
+            gated_node_present(&["insomnia"]),
+            "--feature insomnia enables it"
+        );
     }
 
     #[test]
     fn module_qualified_spec_must_name_the_defining_module() {
-        assert!(gated_node_present(&["zebra-features:iso"]));
+        assert!(gated_node_present(&["zebra-features:insomnia"]));
         assert!(
-            !gated_node_present(&["config:iso"]),
+            !gated_node_present(&["config:insomnia"]),
             "a feature enabled against the wrong module stays off"
+        );
+    }
+
+    #[test]
+    fn the_old_iso_name_still_enables_insomnia() {
+        assert!(gated_node_present(&["iso"]), "--feature iso enables it");
+        assert!(gated_node_present(&["zebra-features:iso"]));
+    }
+
+    #[test]
+    fn the_old_iso_name_is_warned_as_deprecated() {
+        let warnings = feature_warnings(&["iso", "zebra-features:iso"]);
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(
+            warnings[0].contains("--feature iso is deprecated")
+                && warnings[0].ends_with("use --feature insomnia"),
+            "{}",
+            warnings[0]
+        );
+        assert!(
+            warnings[1].ends_with("use --feature zebra-features:insomnia"),
+            "{}",
+            warnings[1]
+        );
+    }
+
+    /// The `--feature` warnings `init()` would log for `features`,
+    /// against the shipped exec and configure schema.
+    fn feature_warnings(features: &[&str]) -> Vec<String> {
+        let mut yang = YangStore::new();
+        yang.add_path(concat!(env!("CARGO_MANIFEST_DIR"), "/yang"));
+        let specs: Vec<String> = features.iter().map(|s| s.to_string()).collect();
+        enable_features(&mut yang, &specs);
+        yang.read_with_resolve("exec").expect("exec loads");
+        yang.read_with_resolve("configure")
+            .expect("configure loads");
+        feature_flag_warnings(&yang, &specs)
+    }
+
+    #[test]
+    fn a_declared_feature_raises_no_warning() {
+        let warnings = feature_warnings(&[
+            "insomnia",
+            "etree",
+            "zebra-features:insomnia",
+            "iana-bgp-types:graceful-restart",
+        ]);
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+    }
+
+    #[test]
+    fn an_undeclared_bare_feature_lists_the_registry() {
+        let warnings = feature_warnings(&["firewall"]);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        let warning = &warnings[0];
+        assert!(
+            warning.contains(
+                "--feature firewall: module \"zebra-features\" declares no feature \"firewall\""
+            ),
+            "{warning}"
+        );
+        let declared = warning
+            .split_once("(it declares: ")
+            .and_then(|(_, rest)| rest.split_once(')'))
+            .map(|(list, _)| list.split(", ").collect::<Vec<_>>())
+            .expect("the declared list is named");
+        assert!(declared.contains(&"insomnia"), "{warning}");
+        assert!(declared.contains(&"etree"), "{warning}");
+    }
+
+    #[test]
+    fn a_wrong_or_unloaded_module_is_warned() {
+        let warnings = feature_warnings(&["config:insomnia", "no-such-module:insomnia"]);
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(
+            warnings[0]
+                .contains("module \"config\" declares no feature \"insomnia\" (it declares: none)"),
+            "{}",
+            warnings[0]
+        );
+        assert!(
+            warnings[1].contains("no loaded YANG module is named \"no-such-module\""),
+            "{}",
+            warnings[1]
         );
     }
 
     /// Whether the shipped `interface <name> ipv4 address` union
     /// accepts the `dhcp` value — the first real feature-gated schema
-    /// element (`if-feature feat:iso` on the enum arm in config.yang).
+    /// element (`if-feature feat:insomnia` on the enum arm in config.yang).
     /// The gate is on the value, not the node: the address leaf-list
     /// itself must exist either way.
     fn shipped_dhcp_present(features: &[&str]) -> bool {
@@ -7026,22 +7183,22 @@ module test-iso-gated {
     }
 
     #[test]
-    fn shipped_interface_ipv4_address_dhcp_gated_on_iso() {
+    fn shipped_interface_ipv4_address_dhcp_gated_on_insomnia() {
         assert!(
             !shipped_dhcp_present(&[]),
             "the dhcp address value must be absent on a stock start"
         );
         assert!(
-            shipped_dhcp_present(&["iso"]),
-            "interface ipv4 address dhcp must appear with --feature iso"
+            shipped_dhcp_present(&["insomnia"]),
+            "interface ipv4 address dhcp must appear with --feature insomnia"
         );
     }
 
     /// End-to-end CLI grammar for the gated value: `set interface eth0
-    /// ipv4 address dhcp` parses only when iso is enabled, while the
+    /// ipv4 address dhcp` parses only when insomnia is enabled, while the
     /// plain prefix form always parses.
     #[test]
-    fn address_dhcp_command_parses_only_with_iso() {
+    fn address_dhcp_command_parses_only_with_insomnia() {
         use crate::config::ExecCode;
         use crate::config::parse::{State, parse};
 
@@ -7070,12 +7227,12 @@ module test-iso-gated {
         let (code, _, _) = parse(prefix, entry, None, State::new());
         assert_eq!(code, ExecCode::Success, "prefix form must always parse");
 
-        let entry = tree(&["iso"]);
+        let entry = tree(&["insomnia"]);
         let (code, _, _) = parse(dhcp, entry.clone(), None, State::new());
         assert_eq!(
             code,
             ExecCode::Success,
-            "dhcp value must parse with --feature iso"
+            "dhcp value must parse with --feature insomnia"
         );
         let (code, _, _) = parse(prefix, entry, None, State::new());
         assert_eq!(code, ExecCode::Success, "prefix form must always parse");
@@ -7107,11 +7264,11 @@ module test-iso-gated {
     }
 
     /// The whole VyOS-style `firewall` subtree (firewall.yang, used
-    /// under an `if-feature feat:iso` container in config.yang) is
-    /// part of the ISO-only config surface: absent on a stock start,
-    /// present with `--feature iso`.
+    /// under an `if-feature feat:insomnia` container in config.yang) is
+    /// part of the insomnia-only config surface: absent on a stock start,
+    /// present with `--feature insomnia`.
     #[test]
-    fn shipped_firewall_gated_on_iso() {
+    fn shipped_firewall_gated_on_insomnia() {
         let child = |e: &Rc<Entry>, name: &str| -> Option<Rc<Entry>> {
             e.dir.borrow().iter().find(|c| c.name == name).cloned()
         };
@@ -7122,8 +7279,8 @@ module test-iso-gated {
             "firewall subtree must be absent on a stock start"
         );
 
-        let set = child(&shipped_tree(&["iso"]), "set").expect("set subtree");
-        let firewall = child(&set, "firewall").expect("firewall subtree with --feature iso");
+        let set = child(&shipped_tree(&["insomnia"]), "set").expect("set subtree");
+        let firewall = child(&set, "firewall").expect("firewall subtree with --feature insomnia");
         // The grouping expanded: all four top-level branches exist.
         for name in ["group", "ipv4", "ipv6", "global-options"] {
             assert!(
@@ -7134,13 +7291,13 @@ module test-iso-gated {
     }
 
     /// End-to-end CLI grammar for the firewall subtree: a battery of
-    /// representative `set firewall …` commands parses with iso and is
+    /// representative `set firewall …` commands parses with insomnia and is
     /// rejected on a stock start. Also pins hook fidelity: matchers
     /// that VyOS scopes per hook (inbound on input, outbound on
     /// output) and the restricted base-chain default-action enum must
     /// NOT parse where VyOS forbids them.
     #[test]
-    fn firewall_commands_parse_only_with_iso() {
+    fn firewall_commands_parse_only_with_insomnia() {
         use crate::config::ExecCode;
         use crate::config::parse::{State, parse};
 
@@ -7211,8 +7368,8 @@ module test-iso-gated {
         ];
 
         // VyOS scopes these per hook / per chain kind; the schema must
-        // reject them even with iso enabled.
-        let bad_with_iso = [
+        // reject them even with insomnia enabled.
+        let bad_with_insomnia = [
             // input has no outbound-interface, output no inbound-interface
             "set firewall ipv4 input filter rule 20 outbound-interface name eth0",
             "set firewall ipv4 output filter rule 5 inbound-interface name eth0",
@@ -7234,12 +7391,12 @@ module test-iso-gated {
             "set firewall ipv4 output raw rule 5 jump-target FOO",
         ];
 
-        let entry = shipped_tree(&["iso"]);
+        let entry = shipped_tree(&["insomnia"]);
         for cmd in ok {
             let (code, _, _) = parse(cmd, entry.clone(), None, State::new());
-            assert_eq!(code, ExecCode::Success, "`{cmd}` must parse with iso");
+            assert_eq!(code, ExecCode::Success, "`{cmd}` must parse with insomnia");
         }
-        for cmd in bad_with_iso {
+        for cmd in bad_with_insomnia {
             let (code, _, _) = parse(cmd, entry.clone(), None, State::new());
             assert_ne!(
                 code,
@@ -7262,7 +7419,7 @@ module test-iso-gated {
         }
     }
 
-    /// CLI commands through the real iso-enabled schema into a config
+    /// CLI commands through the real insomnia-enabled schema into a config
     /// tree, marshaled to JSON exactly as the JSON subscriptions
     /// (`subtree_json` / zebra.config.v1) deliver it. The nftables
     /// backend lives in the insomnia daemon now, so this side pins the
@@ -7275,7 +7432,7 @@ module test-iso-gated {
     fn firewall_json_marshal_contract() {
         use crate::config::parse::{State, parse};
 
-        let entry = shipped_tree(&["iso"]);
+        let entry = shipped_tree(&["insomnia"]);
 
         let store = ConfigStore::new();
         for cmd in [
@@ -7331,7 +7488,7 @@ module test-iso-gated {
         use crate::config::parse::{State, parse};
         use crate::config::path_from_command;
 
-        let entry = shipped_tree(&["iso"]);
+        let entry = shipped_tree(&["insomnia"]);
         let store = ConfigStore::new();
 
         let apply_set = |cmd: &str| {
@@ -7435,16 +7592,16 @@ module test-iso-gated {
         assert_ne!(code, ExecCode::Success, "set at container stays incomplete");
     }
 
-    /// The `show firewall` exec grammar: iso-gated like the config
+    /// The `show firewall` exec grammar: insomnia-gated like the config
     /// subtree, every view parses to the path the firewall task
     /// dispatches on, and the manager routes any firewall path to the
     /// `"firewall"` show subscriber.
     #[test]
-    fn show_firewall_grammar_gated_on_iso() {
+    fn show_firewall_grammar_gated_on_insomnia() {
         use crate::config::parse::{State, parse};
         use crate::config::path_from_command;
 
-        let entry = shipped_tree_mode("exec", &["iso"]);
+        let entry = shipped_tree_mode("exec", &["insomnia"]);
 
         let cases: Vec<(&str, &str, Vec<&str>)> = vec![
             ("show firewall", "/show/firewall", vec![]),
@@ -7503,21 +7660,25 @@ module test-iso-gated {
         // Stock start: the whole tree is absent.
         let entry = shipped_tree_mode("exec", &[]);
         let (code, _, _) = parse("show firewall", entry.clone(), None, State::new());
-        assert_ne!(code, ExecCode::Success, "gated off without --feature iso");
+        assert_ne!(
+            code,
+            ExecCode::Success,
+            "gated off without --feature insomnia"
+        );
         let (code, _, _) = parse("show interface", entry, None, State::new());
         assert_eq!(code, ExecCode::Success, "the rest of show survives");
     }
 
-    /// The `show vpn ipsec` exec grammar: iso-gated like the config
+    /// The `show vpn ipsec` exec grammar: insomnia-gated like the config
     /// subtree, every view parses to the path the ipsec task
     /// dispatches on, and the manager routes any vpn path to the
     /// `"ipsec"` show subscriber.
     #[test]
-    fn show_vpn_ipsec_grammar_gated_on_iso() {
+    fn show_vpn_ipsec_grammar_gated_on_insomnia() {
         use crate::config::parse::{State, parse};
         use crate::config::path_from_command;
 
-        let entry = shipped_tree_mode("exec", &["iso"]);
+        let entry = shipped_tree_mode("exec", &["insomnia"]);
 
         let cases: Vec<(&str, &str)> = vec![
             ("show vpn ipsec sa", "/show/vpn/ipsec/sa"),
@@ -7546,15 +7707,19 @@ module test-iso-gated {
         // Stock start: the whole tree is absent.
         let entry = shipped_tree_mode("exec", &[]);
         let (code, _, _) = parse("show vpn ipsec sa", entry, None, State::new());
-        assert_ne!(code, ExecCode::Success, "gated off without --feature iso");
+        assert_ne!(
+            code,
+            ExecCode::Success,
+            "gated off without --feature insomnia"
+        );
     }
 
     /// The VyOS-style `vpn ipsec` subtree (ipsec.yang, used inside
-    /// the iso-gated `vpn` container in config.yang) is part of the
-    /// ISO-only config surface: absent on a stock start, present with
-    /// `--feature iso`.
+    /// the insomnia-gated `vpn` container in config.yang) is part of the
+    /// insomnia-only config surface: absent on a stock start, present with
+    /// `--feature insomnia`.
     #[test]
-    fn shipped_vpn_ipsec_gated_on_iso() {
+    fn shipped_vpn_ipsec_gated_on_insomnia() {
         let child = |e: &Rc<Entry>, name: &str| -> Option<Rc<Entry>> {
             e.dir.borrow().iter().find(|c| c.name == name).cloned()
         };
@@ -7565,8 +7730,8 @@ module test-iso-gated {
             "vpn subtree must be absent on a stock start"
         );
 
-        let set = child(&shipped_tree(&["iso"]), "set").expect("set subtree");
-        let vpn = child(&set, "vpn").expect("vpn subtree with --feature iso");
+        let set = child(&shipped_tree(&["insomnia"]), "set").expect("set subtree");
+        let vpn = child(&set, "vpn").expect("vpn subtree with --feature insomnia");
         let ipsec = child(&vpn, "ipsec").expect("ipsec container");
         // The grouping expanded: every ported top-level branch exists.
         for name in [
@@ -7587,14 +7752,14 @@ module test-iso-gated {
     }
 
     /// End-to-end CLI grammar for the `vpn ipsec` subtree: a battery
-    /// of representative `set vpn ipsec …` commands parses with iso
+    /// of representative `set vpn ipsec …` commands parses with insomnia
     /// and is rejected on a stock start. The negatives pin VyOS
     /// fidelity: deferred branches (profile, remote-access, rsa/x509
     /// auth) must not exist, enum and range constraints must hold —
     /// including the disjoint IKE dh-group range — and `ikev2-reauth`
     /// must be valueless on the ike-group but valued on the peer.
     #[test]
-    fn ipsec_commands_parse_only_with_iso() {
+    fn ipsec_commands_parse_only_with_insomnia() {
         use crate::config::ExecCode;
         use crate::config::parse::{State, parse};
 
@@ -7673,7 +7838,7 @@ module test-iso-gated {
             "set vpn ipsec site-to-site peer OFFICE-B vti esp-group ESP-1",
         ];
 
-        let bad_with_iso = [
+        let bad_with_insomnia = [
             // deferred branches must not exist yet
             "set vpn ipsec profile NHRP authentication mode pre-shared-secret",
             "set vpn ipsec remote-access connection RA pool CLIENTS",
@@ -7695,12 +7860,12 @@ module test-iso-gated {
             "set vpn ipsec site-to-site peer OFFICE-A ikev2-reauth",
         ];
 
-        let entry = shipped_tree(&["iso"]);
+        let entry = shipped_tree(&["insomnia"]);
         for cmd in ok {
             let (code, _, _) = parse(cmd, entry.clone(), None, State::new());
-            assert_eq!(code, ExecCode::Success, "`{cmd}` must parse with iso");
+            assert_eq!(code, ExecCode::Success, "`{cmd}` must parse with insomnia");
         }
-        for cmd in bad_with_iso {
+        for cmd in bad_with_insomnia {
             let (code, _, _) = parse(cmd, entry.clone(), None, State::new());
             assert_ne!(
                 code,
@@ -7732,7 +7897,7 @@ module test-iso-gated {
     fn ipsec_json_marshal_contract() {
         use crate::config::parse::{State, parse};
 
-        let entry = shipped_tree(&["iso"]);
+        let entry = shipped_tree(&["insomnia"]);
 
         let store = ConfigStore::new();
         for cmd in [
@@ -7775,11 +7940,11 @@ module test-iso-gated {
     }
 
     /// The VyOS-derived `vrrp` subtree (vrrp.yang, instantiated as an
-    /// iso-gated top-level container in config.yang) is part of the
-    /// ISO-only config surface: absent on a stock start, present with
-    /// `--feature iso`.
+    /// insomnia-gated top-level container in config.yang) is part of the
+    /// insomnia-only config surface: absent on a stock start, present with
+    /// `--feature insomnia`.
     #[test]
-    fn shipped_vrrp_gated_on_iso() {
+    fn shipped_vrrp_gated_on_insomnia() {
         let child = |e: &Rc<Entry>, name: &str| -> Option<Rc<Entry>> {
             e.dir.borrow().iter().find(|c| c.name == name).cloned()
         };
@@ -7790,8 +7955,8 @@ module test-iso-gated {
             "vrrp subtree must be absent on a stock start"
         );
 
-        let set = child(&shipped_tree(&["iso"]), "set").expect("set subtree");
-        let vrrp = child(&set, "vrrp").expect("vrrp subtree with --feature iso");
+        let set = child(&shipped_tree(&["insomnia"]), "set").expect("set subtree");
+        let vrrp = child(&set, "vrrp").expect("vrrp subtree with --feature insomnia");
         // The grouping expanded: every top-level branch exists.
         for name in ["disable", "global-parameters", "group", "sync-group"] {
             assert!(child(&vrrp, name).is_some(), "vrrp {name} branch missing");
@@ -7799,13 +7964,13 @@ module test-iso-gated {
     }
 
     /// End-to-end CLI grammar for the `vrrp` subtree: representative
-    /// `set vrrp …` commands parse with iso and are rejected on a
+    /// `set vrrp …` commands parse with insomnia and are rejected on a
     /// stock start. The negatives pin the VyOS ranges and enums, the
     /// address-typed leaves, the decimal `advertise-interval`
     /// extension, and the absence of VyOS's `high-availability`
     /// wrapper.
     #[test]
-    fn vrrp_commands_parse_only_with_iso() {
+    fn vrrp_commands_parse_only_with_insomnia() {
         use crate::config::parse::{State, parse};
 
         let ok = [
@@ -7849,7 +8014,7 @@ module test-iso-gated {
             "set vrrp sync-group SG transition-script backup /usr/local/bin/backup.sh",
         ];
 
-        let bad_with_iso = [
+        let bad_with_insomnia = [
             "set vrrp group WAN vrid 0",
             "set vrrp group WAN vrid 256",
             "set vrrp group WAN priority 0",
@@ -7864,12 +8029,12 @@ module test-iso-gated {
             "set high-availability vrrp group WAN vrid 10",
         ];
 
-        let entry = shipped_tree(&["iso"]);
+        let entry = shipped_tree(&["insomnia"]);
         for cmd in ok {
             let (code, _, _) = parse(cmd, entry.clone(), None, State::new());
-            assert_eq!(code, ExecCode::Success, "`{cmd}` must parse with iso");
+            assert_eq!(code, ExecCode::Success, "`{cmd}` must parse with insomnia");
         }
-        for cmd in bad_with_iso {
+        for cmd in bad_with_insomnia {
             let (code, _, _) = parse(cmd, entry.clone(), None, State::new());
             assert_ne!(code, ExecCode::Success, "`{cmd}` must not parse");
         }
@@ -7888,16 +8053,16 @@ module test-iso-gated {
         }
     }
 
-    /// `show vrrp …` grammar (exec.yang, iso-gated): the summary, the
+    /// `show vrrp …` grammar (exec.yang, insomnia-gated): the summary, the
     /// two views, and their per-group filters map to the dispatch
     /// paths the insomnia provider matches on, and every one of them
     /// routes to the `"vrrp"` show subscriber.
     #[test]
-    fn show_vrrp_grammar_gated_on_iso() {
+    fn show_vrrp_grammar_gated_on_insomnia() {
         use crate::config::parse::{State, parse};
         use crate::config::path_from_command;
 
-        let entry = shipped_tree_mode("exec", &["iso"]);
+        let entry = shipped_tree_mode("exec", &["insomnia"]);
 
         let cases: Vec<(&str, &str, Vec<&str>)> = vec![
             ("show vrrp", "/show/vrrp", vec![]),
@@ -7927,7 +8092,11 @@ module test-iso-gated {
         // Stock start: the whole tree is absent.
         let entry = shipped_tree_mode("exec", &[]);
         let (code, _, _) = parse("show vrrp", entry, None, State::new());
-        assert_ne!(code, ExecCode::Success, "gated off without --feature iso");
+        assert_ne!(
+            code,
+            ExecCode::Success,
+            "gated off without --feature insomnia"
+        );
     }
 
     /// The `/vrrp` half of the marshal contract — same story as
@@ -7941,7 +8110,7 @@ module test-iso-gated {
     fn vrrp_json_marshal_contract() {
         use crate::config::parse::{State, parse};
 
-        let entry = shipped_tree(&["iso"]);
+        let entry = shipped_tree(&["insomnia"]);
 
         let store = ConfigStore::new();
         for cmd in [

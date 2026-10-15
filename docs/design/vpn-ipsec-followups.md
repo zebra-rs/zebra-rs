@@ -2,11 +2,11 @@
 
 Status as of 2026-08-04. The core port of the VyOS 1.5 (circinus)
 `vpn ipsec` tree landed in four PRs, all merged, all gated on
-`--feature iso`:
+`--feature insomnia`:
 
 - **#2241 schema** — `zebra-rs/yang/ipsec.yang` grouping library
   (firewall.yang style), instantiated in config.yang as
-  `container vpn { if-feature feat:iso; container ipsec }`:
+  `container vpn { if-feature feat:insomnia; container ipsec }`:
   `authentication psk`, `esp-group` / `ike-group` with the full VyOS
   proposal cipher/hash/DH lists, `interface`, `log`, `options`, and
   `site-to-site peer` with per-tunnel traffic selectors and VTI

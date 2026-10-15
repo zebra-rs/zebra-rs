@@ -5677,18 +5677,18 @@ module config {
       }
     }
     // VyOS-compatible firewall (see firewall.yang). Part of the
-    // ISO-only config surface: the whole subtree is feature-gated, so
-    // it exists only when the daemon runs with `--feature iso`.
+    // insomnia-only config surface: the whole subtree is feature-gated, so
+    // it exists only when the daemon runs with `--feature insomnia`.
     container firewall {
-      if-feature feat:iso;
+      if-feature feat:insomnia;
       ext:help "Firewall configuration";
       uses "fw:firewall";
     }
 
-    // Also ISO-only: the whole VPN subtree (only IPsec today) exists
-    // solely with `--feature iso`.
+    // Also insomnia-only: the whole VPN subtree (only IPsec today) exists
+    // solely with `--feature insomnia`.
     container vpn {
-      if-feature feat:iso;
+      if-feature feat:insomnia;
       ext:help "Virtual Private Network (VPN)";
       container ipsec {
         ext:help "VPN IP security (IPsec) parameters";
@@ -5697,9 +5697,9 @@ module config {
     }
 
     // VyOS-derived VRRP (see vrrp.yang): VyOS's `high-availability`
-    // wrapper is dropped, `vrrp` is a top-level node. ISO-only.
+    // wrapper is dropped, `vrrp` is a top-level node. insomnia-only.
     container vrrp {
-      if-feature feat:iso;
+      if-feature feat:insomnia;
       ext:help "Virtual Router Redundancy Protocol (VRRP)";
       uses "vrrp:vrrp";
     }
@@ -5788,7 +5788,7 @@ module config {
             type inet:ipv4-prefix;
             type enumeration {
               enum dhcp {
-                if-feature feat:iso;
+                if-feature feat:insomnia;
               }
             }
           }
@@ -5802,7 +5802,7 @@ module config {
 
              `dhcp` — acquire the address dynamically instead — is the
              first consumer of conditional schema: the value exists
-             only when the daemon runs with `--feature iso` (RFC 7950
+             only when the daemon runs with `--feature insomnia` (RFC 7950
              if-feature on the enum arm). The daemon-side DHCP client
              lands in a later change, so setting it today stores
              config without acting on it.";

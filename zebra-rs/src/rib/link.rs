@@ -1600,7 +1600,7 @@ pub async fn link_config_exec(
         // drop trailing values.
         //
         // `dhcp` is the feature-gated enum arm of the address union
-        // (present only under `--feature iso`). The daemon-side DHCP
+        // (present only under `--feature insomnia`). The daemon-side DHCP
         // client is not implemented yet, so the value is accepted
         // without kernel action — and it must be consumed here: an
         // unparsed value left in the deque would read as the

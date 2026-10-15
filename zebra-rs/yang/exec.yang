@@ -303,12 +303,12 @@ module exec {
         "The name of the host.  This name can be a single domain
         label or the fully qualified domain name of the host.";
     }
-    // ISO-only surface (mirrors the iso-gated config subtree): the
-    // whole `show firewall` tree exists only with `--feature iso`.
+    // insomnia-only surface (mirrors the insomnia-gated config subtree): the
+    // whole `show firewall` tree exists only with `--feature insomnia`.
     // Served by the system/firewall task, which merges the configured
     // ruleset with live counters from nftables.
     container firewall {
-      if-feature feat:iso;
+      if-feature feat:insomnia;
       ext:help "Firewall information";
       presence "Firewall ruleset overview";
       container group {
@@ -407,7 +407,7 @@ module exec {
       }
     }
     container vpn {
-      if-feature feat:iso;
+      if-feature feat:insomnia;
       ext:help "VPN information";
       container ipsec {
         ext:help "IPsec (Internet Protocol Security) information";
@@ -430,9 +430,9 @@ module exec {
       }
     }
     // `show vrrp …` — served by the external insomnia provider
-    // (zebra.show.v1 name "vrrp"); iso-gated like the config tree.
+    // (zebra.show.v1 name "vrrp"); insomnia-gated like the config tree.
     container vrrp {
-      if-feature feat:iso;
+      if-feature feat:insomnia;
       ext:help "VRRP information";
       presence "VRRP group summary";
       uses vrrp-show-views;

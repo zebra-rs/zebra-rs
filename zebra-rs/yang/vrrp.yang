@@ -23,8 +23,8 @@ module vrrp {
 
      This module is a grouping library in the firewall.yang /
      ipsec.yang style: config.yang instantiates `grouping vrrp` under
-     an iso-gated top-level `container vrrp`, so every node here exists
-     only when the daemon runs with `--feature iso`.
+     an insomnia-gated top-level `container vrrp`, so every node here exists
+     only when the daemon runs with `--feature insomnia`.
 
      Placement differs from VyOS on purpose: VyOS wraps VRRP in
      `high-availability`, a node that exists only to co-locate it with
