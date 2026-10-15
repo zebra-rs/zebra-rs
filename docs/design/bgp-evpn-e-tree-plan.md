@@ -85,7 +85,8 @@ What is settled, what is drafted, and what is merely deployed:
 | -------- | ------ | ---------------- |
 | **RFC 8317** (2018) | Standards Track | The E-Tree EC (EVPN sub-type `0x05`) with the Leaf-Indication flag; Type-2 colouring for known unicast (§4.1); the per-PE **leaf label** on an EAD-ES route with **ESI 0** for MPLS BUM egress filtering (§4.2); the composite PMSI tunnel bit (§6.2). MPLS only. |
 | **RFC 9252** §6.3 | Standards Track | One sentence that matters: for E-Tree, the ESI filtering argument (**Arg.FE2**) of the SID on the Route Type 1 is OR-ed into the remote End.DT2M SID, "details … in [RFC8317]". |
-| **draft-ietf-bess-rfc8317bis-00** (2025-10) | WG document, **expired 2026-04** | Adds §5.3 VXLAN/GENEVE BUM via a second **leaf VNI** carried in the E-Tree EC on the IMET; §5.4 SRv6 via Arg.FE2 on the ESI-0 EAD-ES (encoding deferred to draft-ietf-bess-bgp-srv6-args); §5.6 *adaptive* ingress/egress filtering with a new **Root-Indication** flag (bit 6). |
+| **draft-ietf-bess-rfc8317bis-00** (2025-10) | WG document, **expired 2026-04** | Adds §5.3 VXLAN/GENEVE BUM via a second **leaf VNI** carried in the E-Tree EC on the IMET; §5.4 SRv6 via Arg.FE2 on the ESI-0 EAD-ES (encoding deferred to draft-ietf-bess-bgp-srv6-args, now RFC 9819); §5.6 *adaptive* ingress/egress filtering with a new **Root-Indication** flag (bit 6). |
+| **RFC 9819** (2025-07, was draft-ietf-bess-bgp-srv6-args) | Standards Track, updates RFC 9252 | Replaces RFC 9252's bitwise OR of Arg.FE2 into the End.DT2M SID with explicit placement at offset LBL+LNL+FL; the IMET and the A-D route must signal the same argument length (§8.6). |
 | **draft-bamberger-bess-imet-filter-evpn-etree-vxlan-00** (2023, Arista) | Individual, **expired** | VXLAN BUM by *flood-list pruning*: a leaf PE puts the E-Tree EC (L=1, label 0) on its IMET; a leaf PE receiving it leaves the sender out of its flood list. No datapath tag. |
 
 The two VXLAN proposals are **not wire-compatible**: rfc8317bis requires a
@@ -459,23 +460,88 @@ addition.
 PEs as `etree: leaf BUM not isolated between mixed PEs`. Revisit V2 if
 rfc8317bis is revived and someone ships it.
 
-### 8.6 SRv6 BUM
+### 8.6 SRv6 BUM (decision D6: adopted)
 
-RFC 9252 and rfc8317bis §5.4 carry the leaf mark as an **Arg.FE2** argument:
-- the egress PE advertises it on its ESI-0 per-ES A-D;
-- the ingress PE ORs it into the egress PE's End.DT2M SID for
-  leaf-originated BUM;
-- the encoding is deferred to draft-ietf-bess-bgp-srv6-args.
+The leaf mark over SRv6 is an **Arg.FE2** argument of the egress PE's
+End.DT2M SID (RFC 8986 §4.12). The argument is opaque, and its value is
+local to the egress PE: the egress PE allocates it and signals it in the
+control plane, and only the egress PE interprets it.
 
-cradle implements **no Arg.FE2 at all**:
-- SRv6 split horizon uses local bias by outer source address;
-- `LocalSid` has no argument field;
-- the proto's `LocalSid.arg_bits` is dropped by the handler (cradle
-  `control.rs:3453`).
+**Standards.** RFC 9819 (formerly draft-ietf-bess-bgp-srv6-args, July
+2025, updates RFC 9252) is what to follow:
+- it replaces RFC 9252 §6.3's bitwise OR, which assumed a uniform SID
+  structure, with explicit placement: the argument goes at offset
+  LBL+LNL+FL of the IMET's End.DT2M SID (§3.3);
+- the IMET carries the End.DT2M SID (LOC:FUNC) with an AL, and the
+  argument rides an Ethernet A-D per-ES route with the same AL (§3.2: AL
+  MUST be equal; §3.1: AL SHOULD be a multiple of 8);
+- an IMET with AL 0 means "no argument": the ingress PE sends to LOC:FUNC
+  and ignores any argument (§3.3).
 
-SRv6 E-Tree BUM therefore needs, first, an Arg.FE2-capable End.DT2M in
-cradle. That would also enable RFC-style ESI filtering for SRv6. Last phase,
-and possibly its own plan.
+rfc8317bis §5.4 applies it to E-Tree: the leaf argument is allocated per
+PE (not per ES, not per EVI) and signalled in the same ESI-0 per-ES A-D
+route as the MPLS leaf label (§4.2), with the RT of every BD that has a
+leaf AC. The ingress PE applies it only to BUM from a leaf AC. The draft
+expired in April 2026, but its SRv6 section is RFC 9819's procedure with
+ESI 0.
+
+**Implementations** (EANTC 2026 interop report, Nokia documentation): every
+participant used LBL 32, LNL 16, FL 16, **AL 16**. Cisco, Nokia and Ciena
+transpose the argument into the ESI Label EC (TL 16, TO 64); HPE (Juniper)
+and Raisecom carry it in the SID itself. No vendor documents E-Tree over
+SRv6, and FRR has no Arg.FE2 at all.
+
+**Decisions** (each the recommendation, adopted 2026-10-15):
+1. **AL 16, right after the function.** zebra-rs already places its 16-bit
+   function immediately after the locator (`function_addr`), so the
+   argument is the next 16 bits: for a uSID /48 locator that is exactly
+   LBL 32, LNL 16, FL 16, AL 16. A locator too long to fit 16 more bits
+   gets no leaf argument (and `show` says so).
+2. **No transposition.** The argument rides in the SID of the A-D route's
+   SRv6 L2 Service TLV (TL 0), as RFC 9819's examples do. A received
+   leaf route that transposes (TL > 0) is logged and not used: no vendor
+   documents E-Tree over SRv6, so there is no peer to match yet, and
+   where the bits would go on an ESI-0 route (it has no ESI Label EC) is
+   not specified anywhere.
+3. **One leaf argument per PE, value 1.** Values are local; 0 means none.
+   If RFC-style ESI filtering over SRv6 is ever added (today's split
+   horizon is local bias by outer source), its per-ES values come from the
+   same 16-bit space and must avoid the leaf value.
+4. **AL 16 on the IMET only where it is needed.** A PE advertises AL 16 on
+   a VNI's End.DT2M SID only while it has a leaf AC in that VNI (it is the
+   only one that allocated an argument). Every other deployment's routes
+   stay byte for byte the same.
+5. **The E-Tree EC rides the SRv6 leaf route too**, with field 0. rfc8317bis
+   §7.1 requires a valid MPLS label in it, but that text predates SRv6;
+   the EC is what marks an ESI-0 A-D route as a leaf-indication route, and
+   zebra-rs's receivers already ignore a reserved label.
+
+**Datapath (cradle, phase 5a).**
+- *Decap.* A local End.DT2M SID with an argument is installed as its
+  LOC:FUNC prefix (LBL+LNL+FL bits), so the LPM lookup matches any
+  argument. `srv6_dt2u` reads the AL bits at that offset: this PE's leaf
+  argument sets `ES_BITS_ETREE_LEAF`, and phase 3a's egress filter keeps
+  the copy off leaf ports. Any other non-zero value is unknown and
+  dropped; 0 is plain BUM. `LocalSid` gains the argument offset and length
+  (the proto's `arg_bits` is today dropped by the handler); a new
+  `SetEtreeLeafArg` sets the leaf value (0 = none).
+- *Encap.* A leaf slot toward a PE is a replication slot whose SID is that
+  PE's End.DT2M SID with its leaf argument already placed (zebra-rs
+  computes it). It reuses phase 3a's `SlotEs.etree` selection: a leaf's
+  BUM goes through the PE's leaf slot alone, and its other slot serves
+  roots only.
+
+**Control plane (zebra-rs, phase 5b).**
+- Allocate nothing new: the leaf argument is the constant 1, and AL 16 is
+  advertised per decision 4.
+- Originate the ESI-0 A-D route under SRv6 as under MPLS (§4.2), with the
+  SRv6 L2 Service TLV carrying `::<arg>` at offset LBL+LNL+FL and the SID
+  Structure Sub-Sub-TLV (LBL, LNL, FL, AL 16, TL 0).
+- Read each peer's argument from its ESI-0 A-D route, check its AL against
+  that peer's IMET AL (RFC 9819 §3.3: unequal non-zero ALs mean no leaf
+  BUM to that PE), and tee a leaf slot `(bd, PE, DT2M SID | arg)`.
+- Install the local End.DT2M SID with its argument shape, and tee the leaf
+  argument to cradle.
 
 ### 8.7 Counters
 
@@ -529,7 +595,7 @@ before the zebra half that drives it.
 | **2b** | **zebra roles + Type-2 colouring**: `etree leaf-interface` (behind the feature gate), role tee via a new RIB message, Type-2 EC origination + resync, selected-path flag → `MacRoute` → `FdbRemote.flags`, `show bgp evpn etree` | zebra | zebra BDD: Type-2 shows `etree:leaf` only for leaf-AC MACs; cradle zebra-driven VXLAN BDD: remote leaf→leaf unicast dropped, leaf→root passes; MAC move leaf→root un-drops |
 | **3** | **MPLS BUM**: leaf label lifecycle, ESI-0 leaf-label A-D origination + consumption, cradle leaf slots, `LEAF_LABEL` decap, egress flood filter | both | cradle MPLS zebra-driven BDD: leaf broadcast reaches roots only; multihomed leaf: the copy carries the leaf label and **not** the ESI label (`mpls_l2_esi_push` stays zero); control = root broadcast reaches leaves |
 | **4** | **VXLAN BUM** per D2 (V1+ recommended): IMET colouring, flood-list pruning, source-VTEP egress bit | both | BDD with a leaf-only PE and a mixed PE; `show` warning for two mixed PEs |
-| **5** | **SRv6 BUM**: Arg.FE2 End.DT2M in cradle (prerequisite, own PR), then the ESI-0 A-D signalling | both | BDD as phase 3 over SRv6 |
+| **5** | **SRv6 BUM** per D6 (§8.6): 5a cradle — an argument-aware End.DT2M (the leaf argument marks the copy), `SetEtreeLeafArg`, SRv6 leaf slots; 5b zebra — the leaf argument on the ESI-0 A-D, AL 16 on the IMET, leaf slots from peers' arguments | both | BDD as phase 3 over SRv6 |
 | **6** | **Docs + interop**: book chapter, `bgp-evpn-support-status.md` row, lab against Arista cEOS (VXLAN: Type-2 + IMET) and a Nokia/Juniper image (MPLS) | — | the lab report |
 
 **Status: phase 1 is implemented** on `evpn-e-tree`.
@@ -741,15 +807,15 @@ and the memory notes):
 
 ## 11. Risks and open decisions
 
-**Decisions for the user** (D1, D3 and D5 decided 2026-10-14, each as
-recommended):
+**Decisions for the user** (D1, D3 and D5 decided 2026-10-14, D2 and D6
+2026-10-15, each as recommended; D4 open):
 - **D1 — Where the role is configured.** Decided:
   `router bgp afi-safi evpn etree leaf-interface <if>` (§5.2). Alternatives:
   - per EVI (`evi <id> etree leaf-interface …`), which only exists in the
     MPLS-shaped model today;
   - on the interface itself, next to `interface X bridge BR`.
-- **D2 — VXLAN BUM.** V1+ (recommended), V2, or known-unicast-only for VXLAN
-  (§8.5).
+- **D2 — VXLAN BUM.** Decided 2026-10-15: V1+ (§8.5). The alternatives
+  were V2 and known-unicast-only for VXLAN.
 - **D3 — A leaf AC under the kernel backend.** Decided: reject at commit
   (isolation is a security property, RFC 8317 §7). The alternative was to
   accept and warn.
@@ -757,6 +823,11 @@ recommended):
 - **D5 — Gating.** Decided: keep `etree` behind a YANG feature until BUM
   filtering exists for the configured encapsulation. The alternative was to
   ship each phase visible with `show` naming what is not yet filtered.
+- **D6 — The SRv6 leaf argument.** Decided 2026-10-15 as recommended
+  (§8.6): RFC 9819 placement, AL 16 right after the function, no
+  transposition, one leaf argument per PE (value 1), AL 16 on a VNI's IMET
+  only while it has a leaf AC, and the E-Tree EC (field 0) on the SRv6
+  leaf route.
 
 **Risks:**
 1. **No FRR partner.** Every claim is zebra-rs against zebra-rs until the
