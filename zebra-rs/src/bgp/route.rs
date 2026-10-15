@@ -9821,7 +9821,14 @@ fn vpws_es_live_pes(local_rib: &LocalRib, esi: &[u8; 10]) -> BTreeSet<IpAddr> {
     live
 }
 
-/// The E-Tree leaf-label route this PE last originated (RFC 8317 §4.2.1),
+/// The most route targets one E-Tree leaf-label route carries. A BGP
+/// UPDATE is at most 4096 bytes without the Extended Message capability
+/// (RFC 4271 §4, RFC 8654), and each RT is an 8-byte extended community:
+/// 256 of them (2 KiB) leave ample room for the NLRI, the next hop, the
+/// E-Tree EC and what a route reflector or policy adds.
+pub(super) const ETREE_LEAF_AD_RTS: usize = 256;
+
+/// One E-Tree leaf-label route this PE last originated (RFC 8317 §4.2.1),
 /// by what goes into it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EtreeLeafAd {
@@ -20927,29 +20934,22 @@ impl Bgp {
 
     /// Originate, refresh or withdraw the E-Tree leaf-label route (RFC 8317
     /// §4.2.1): a per-ES Ethernet A-D route with ESI 0 — `[1]:[0]:[MAX-ET]`
-    /// under RD `<router-id>:0` — carrying the E-Tree EC with this PE's
-    /// leaf label and the RT of every EVI with a leaf AC, so each PE in
-    /// those EVIs imports it. Present while the PE has a leaf label and a
-    /// leaf AC. Idempotent: an unchanged route is not re-sent, and a new RD
-    /// (router-id change) withdraws the old one.
+    /// — carrying the E-Tree EC with this PE's leaf label and the RT of
+    /// every EVI with a leaf AC, so each PE in those EVIs imports it.
+    /// Present while the PE has a leaf label and a leaf AC.
     ///
-    /// The RTs ride one route. RFC 8317 splits the set over several routes
-    /// when it does not fit; an extended-length attribute carries some
-    /// eight thousand, so that is not done.
+    /// The RTs are split over as many routes as it takes,
+    /// [`ETREE_LEAF_AD_RTS`] each, so every route fits a 4096-byte UPDATE:
+    /// several per-ES A-D routes, each with its own RD and a subset of the
+    /// RTs (RFC 7432 §8.2.1, RFC 8317 §4.2.1). Route `i` has RD
+    /// `<router-id>:i`: an EVI's own routes share that RD but never the
+    /// key `[ESI 0]:[MAX-ET]`, and receivers import by RT.
+    ///
+    /// Idempotent: an unchanged route is not re-sent, a changed one is
+    /// replaced in place, and one whose RD is gone (fewer RTs, a router-id
+    /// change) is withdrawn.
     pub fn evpn_originate_etree_leaf_ad(&mut self) {
-        let desired = self.etree_leaf_label.and_then(|label| {
-            if self.router_id.is_unspecified() {
-                return None;
-            }
-            let rd = rd_from_router_id_vni(self.router_id, 0)?;
-            let evis = self.etree_leaf_evis();
-            (!evis.is_empty()).then(|| EtreeLeafAd {
-                rd,
-                label,
-                evis,
-                nexthop: self.evpn_local_source(),
-            })
-        });
+        let desired = self.etree_leaf_ad_routes();
         if self.etree_leaf_ad == desired {
             return;
         }
@@ -20957,16 +20957,23 @@ impl Bgp {
             esi: ZERO_ESI,
             eth_tag: MAX_ET,
         };
-        if let Some(old) = self.etree_leaf_ad.take()
-            && desired.as_ref().is_none_or(|d| d.rd != old.rd)
-        {
-            let _ = self
-                .local_rib
-                .remove_evpn(old.rd, &prefix, 0, ORIGINATED_PEER);
-            let _ = self.local_rib.select_best_path_evpn(&old.rd, &prefix);
-            route_withdraw_evpn_to_peers(old.rd, prefix.clone(), &mut self.peers);
+        let gone: Vec<RouteDistinguisher> = self
+            .etree_leaf_ad
+            .iter()
+            .map(|old| old.rd)
+            .filter(|rd| !desired.iter().any(|d| d.rd == *rd))
+            .collect();
+        for rd in gone {
+            let _ = self.local_rib.remove_evpn(rd, &prefix, 0, ORIGINATED_PEER);
+            let _ = self.local_rib.select_best_path_evpn(&rd, &prefix);
+            route_withdraw_evpn_to_peers(rd, prefix.clone(), &mut self.peers);
         }
-        if let Some(d) = &desired {
+        let changed: Vec<EtreeLeafAd> = desired
+            .iter()
+            .filter(|d| !self.etree_leaf_ad.contains(d))
+            .cloned()
+            .collect();
+        for d in &changed {
             let mut ecom = ExtCommunity::from([ExtCommunityValue::etree_leaf_label(d.label)]);
             for evi in &d.evis {
                 ecom.0.insert(evpn_route_target(self.asn, *evi));
@@ -20986,9 +20993,35 @@ impl Bgp {
                 false,
             );
             rib.esi = Some(ZERO_ESI);
-            self.evpn_originate_synch(d.rd, prefix, rib);
+            self.evpn_originate_synch(d.rd, prefix.clone(), rib);
         }
         self.etree_leaf_ad = desired;
+    }
+
+    /// The leaf-label routes this PE should advertise: the EVIs with a leaf
+    /// AC in chunks of [`ETREE_LEAF_AD_RTS`], route `i` under RD
+    /// `<router-id>:i`. None without a leaf label, a router-id or a leaf
+    /// AC.
+    fn etree_leaf_ad_routes(&self) -> Vec<EtreeLeafAd> {
+        let Some(label) = self.etree_leaf_label else {
+            return Vec::new();
+        };
+        if self.router_id.is_unspecified() {
+            return Vec::new();
+        }
+        let evis: Vec<u32> = self.etree_leaf_evis().into_iter().collect();
+        let nexthop = self.evpn_local_source();
+        evis.chunks(ETREE_LEAF_AD_RTS)
+            .enumerate()
+            .filter_map(|(i, chunk)| {
+                Some(EtreeLeafAd {
+                    rd: rd_from_router_id_vni(self.router_id, u32::try_from(i).ok()?)?,
+                    label,
+                    evis: chunk.iter().copied().collect(),
+                    nexthop,
+                })
+            })
+            .collect()
     }
 
     /// Tee the E-Tree leaf-label replication slots (RFC 8317 §4.2.1): in

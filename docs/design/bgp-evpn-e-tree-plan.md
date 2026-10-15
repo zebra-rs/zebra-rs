@@ -701,10 +701,15 @@ choices:
   MPLS the AC must be in the EVI's bridge. The label is teed to cradle for
   decap (`EtreeLeafLabel`, mirrored) and installs no ILM.
 - **Leaf-label route.** `evpn_originate_etree_leaf_ad` originates the
-  per-ES A-D with ESI 0 under `<router-id>:0`, carrying the E-Tree EC and
-  the RT of every EVI with a leaf AC. It is idempotent, and withdraws the
-  old-RD route after a router-id change. The RTs ride one route (an
-  extended-length attribute holds thousands).
+  per-ES A-D with ESI 0, carrying the E-Tree EC and the RT of every EVI
+  with a leaf AC. The RTs are split over as many routes as it takes, 256
+  each (`ETREE_LEAF_AD_RTS`), route `i` under RD `<router-id>:i` (RFC 7432
+  §8.2.1). An extended-length attribute could hold thousands, but an
+  UPDATE without the Extended Message capability (RFC 8654) is at most
+  4096 bytes, so about 500 RTs would not fit one route; the first cut put
+  them all in one, and a review caught it. It is idempotent: an unchanged
+  route is not re-sent, and an RD no longer wanted (fewer leaf EVIs, a
+  router-id change) is withdrawn.
 - **Leaf slots.** `etree_peer_leaf_labels` reads each remote PE's label
   from its selected leaf-label route; a reserved label is ignored and
   logged on receipt. `evpn_etree_slots_sync` builds, per EVI with a local

@@ -2361,3 +2361,77 @@ async fn a_leaf_only_mark_precedes_its_flood_slot() {
     }
     assert_eq!(order, vec!["mark", "flood"]);
 }
+
+/// Whether an UPDATE carrying `route` with `attr` fits `max` bytes.
+fn evpn_update_fits(route: EvpnRoute, attr: BgpAttr, max: usize) -> bool {
+    let mut update = bgp_packet::UpdatePacket::with_max_packet_size(max);
+    update.bgp_attr = Some(attr);
+    update.mp_update = Some(bgp_packet::MpReachAttr::Evpn {
+        snpa: 0,
+        nhop: IpAddr::V4(RID),
+        updates: vec![route],
+    });
+    update.pop_evpn().is_some()
+}
+
+/// Our selected leaf-label route under RD `<router-id>:i`, if any.
+fn local_leaf_ad_at(bgp: &Bgp, i: u32) -> Option<BgpAttr> {
+    let rd = rd_from_router_id_vni(RID, i)?;
+    let prefix = EvpnPrefix::EthernetAd {
+        esi: ZERO_ESI,
+        eth_tag: MAX_ET,
+    };
+    let rib = bgp.local_rib.evpn.get(&rd)?.selected.get(&prefix)?;
+    Some((*rib.attr).clone())
+}
+
+/// RFC 7432 §8.2.1 / RFC 8317 §4.2.1: with more leaf EVIs than one UPDATE
+/// holds, the RTs are split over several leaf-label routes, each under its
+/// own RD and each fitting a 4096-byte UPDATE (no Extended Message, RFC
+/// 8654). Fewer EVIs withdraw the routes no longer needed.
+#[tokio::test]
+async fn many_leaf_evis_split_the_leaf_label_route() {
+    let (mut bgp, _rib) = etree_mpls_bgp();
+    bgp.l2_port_evis.insert(7, (1..=600).collect());
+    bgp.etree_label_reconcile();
+    let label = bgp.etree_leaf_label.expect("a leaf label");
+    let route = |i: u32| {
+        EvpnRoute::EthernetAd(bgp_packet::EvpnEthernetAd {
+            id: 0,
+            rd: rd_from_router_id_vni(RID, i).unwrap(),
+            esi: ZERO_ESI,
+            ether_tag: MAX_ET,
+            label: 0,
+        })
+    };
+
+    let mut rts = 0;
+    for i in 0..3 {
+        let attr = local_leaf_ad_at(&bgp, i).expect("a leaf-label route");
+        let ecom = attr.ecom.as_ref().unwrap();
+        assert!(ecom.0.contains(&ExtCommunityValue::etree_leaf_label(label)));
+        // Every community but the E-Tree EC is an EVI's RT.
+        rts += ecom.0.len() - 1;
+        assert!(
+            evpn_update_fits(route(i), attr, 4096),
+            "route {i} fits 4096 bytes"
+        );
+    }
+    assert_eq!(rts, 600, "every leaf EVI's RT, once");
+    assert!(local_leaf_ad_at(&bgp, 3).is_none());
+
+    // The control: the old single route with all 600 RTs does not fit.
+    let mut all = local_leaf_ad_at(&bgp, 0).unwrap();
+    let ecom = all.ecom.as_mut().unwrap();
+    for evi in 1..=600 {
+        ecom.0.insert(evpn_route_target(bgp.asn, evi));
+    }
+    assert!(!evpn_update_fits(route(0), all, 4096));
+
+    // Down to 100 leaf EVIs: one route left.
+    bgp.l2_port_evis.insert(7, (1..=100).collect());
+    bgp.etree_label_reconcile();
+    assert!(local_leaf_ad_at(&bgp, 0).is_some());
+    assert!(local_leaf_ad_at(&bgp, 1).is_none(), "withdrawn");
+    assert!(local_leaf_ad_at(&bgp, 2).is_none(), "withdrawn");
+}
