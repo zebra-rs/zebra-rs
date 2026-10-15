@@ -2340,3 +2340,24 @@ async fn our_own_selected_path_is_not_installed() {
     export_selected(&mut bgp, &rd, &imet, own);
     assert!(bgp.local_rib.evpn_flood.remote_vteps(100).is_empty());
 }
+
+/// A leaf-only VXLAN IMET's mark reaches the RIB before the flood entry
+/// the same IMET creates: cradle then makes the slot toward that PE
+/// root-only from the start, and no local leaf's BUM reaches it meanwhile.
+#[tokio::test]
+async fn a_leaf_only_mark_precedes_its_flood_slot() {
+    let (mut bgp, mut rib) = etree_vxlan_bgp();
+    while rib.try_recv().is_ok() {}
+    let (from, _rx) = peer(&mut bgp, "10.0.0.11", false);
+    let (imet, attr) = vxlan_imet_route("10.0.0.11", Some(ExtCommunityValue::etree_leaf()));
+    feed_evpn(&mut bgp, from, imet, Some(attr));
+    let mut order = Vec::new();
+    while let Ok(inbound) = rib.try_recv() {
+        match inbound.msg {
+            crate::rib::Message::CradleEtreeRemote { .. } => order.push("mark"),
+            crate::rib::Message::MdbAdd { .. } => order.push("flood"),
+            _ => {}
+        }
+    }
+    assert_eq!(order, vec!["mark", "flood"]);
+}

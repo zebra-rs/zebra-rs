@@ -3816,6 +3816,14 @@ pub struct LocalRib {
     /// re-derived once the receive path's borrow ends
     /// (`Bgp::evpn_etree_slots_sync`, drained with the DF re-election).
     pub etree_dirty: bool,
+    /// EVPN E-Tree over VXLAN: this PE tees leaf-only marks (it has a leaf
+    /// AC under VXLAN; `Bgp::evpn_etree_remotes_sync` keeps it). Here so the
+    /// receive path can send a leaf-only IMET's mark before the slot the same
+    /// IMET creates.
+    pub etree_vxlan_marks: bool,
+    /// The leaf-only remote PEs teed (`SetEtreeRemote`): `(bd, VTEP)`. Both
+    /// the receive path (a new leaf-only IMET) and the sync add to it.
+    pub etree_remotes_sent: BTreeSet<(u32, IpAddr)>,
 }
 
 impl LocalRib {
@@ -10620,6 +10628,23 @@ fn route_evpn_export_selected(
                     // v4-only VTEP gate that duplicate was inert; with v6
                     // VTEPs live it would be real double delivery.)
                     let region = best.ingress_region;
+                    // E-Tree over VXLAN (V1+): a leaf-only PE's mark goes
+                    // out before the flood entry, so cradle makes the slot
+                    // toward it root-only from the start. Sent at the next
+                    // drain instead, it would follow the slot, and a local
+                    // leaf's BUM would reach that PE's leaves meanwhile.
+                    // Recorded as sent, so the drain's sync does not repeat
+                    // it.
+                    if bgp.local_rib.etree_vxlan_marks
+                        && imet_etree_leaf_only(&best.attr)
+                        && bgp.local_rib.etree_remotes_sent.insert((vni, *orig))
+                    {
+                        let _ = bgp.rib_client.send(rib::Message::CradleEtreeRemote {
+                            bd: vni,
+                            remote: *orig,
+                            leaf_only: true,
+                        });
+                    }
                     bgp.local_rib.evpn_flood.update_remote(
                         vni,
                         *orig,
@@ -21074,29 +21099,31 @@ impl Bgp {
     /// VXLAN. cradle then keeps that PE's BUM off the local leaf ports and
     /// sends it none of theirs. Diffed against what was sent.
     pub fn evpn_etree_remotes_sync(&mut self) {
-        let desired = if self.evpn_encap.is_vxlan() && !self.etree_leaf_ifs.is_empty() {
+        let marks = self.evpn_encap.is_vxlan() && !self.etree_leaf_ifs.is_empty();
+        self.local_rib.etree_vxlan_marks = marks;
+        let desired = if marks {
             etree_leaf_only_remotes(&self.local_rib)
         } else {
             BTreeSet::new()
         };
-        if desired == self.etree_remotes_sent {
+        if desired == self.local_rib.etree_remotes_sent {
             return;
         }
-        for &(bd, remote) in self.etree_remotes_sent.difference(&desired) {
+        for &(bd, remote) in self.local_rib.etree_remotes_sent.difference(&desired) {
             let _ = self.ctx.rib.send(crate::rib::Message::CradleEtreeRemote {
                 bd,
                 remote,
                 leaf_only: false,
             });
         }
-        for &(bd, remote) in desired.difference(&self.etree_remotes_sent) {
+        for &(bd, remote) in desired.difference(&self.local_rib.etree_remotes_sent) {
             let _ = self.ctx.rib.send(crate::rib::Message::CradleEtreeRemote {
                 bd,
                 remote,
                 leaf_only: true,
             });
         }
-        self.etree_remotes_sent = desired;
+        self.local_rib.etree_remotes_sent = desired;
     }
 
     /// The remote PEs that are leaf-only in a VNI, by VNI, for `show`.
