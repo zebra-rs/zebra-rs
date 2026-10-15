@@ -2176,3 +2176,167 @@ async fn two_mixed_pes_are_reported() {
     assert_eq!(json["remoteLeafOnly"][0]["pes"][0], "10.0.0.11");
     assert_eq!(json["bumFiltered"], true);
 }
+
+/// A host on our access port, MAC `mac` in VNI 100.
+fn local_fdb(mac: MacAddr) -> crate::rib::api::FdbEntry {
+    crate::rib::api::FdbEntry {
+        vni: 100,
+        mac,
+        ip: None,
+        ifindex: 7,
+        bridge_ifindex: 5,
+        flags: 0,
+        vxlan_local: Some(IpAddr::V4(RID)),
+    }
+}
+
+/// Our own MAC/IP route for `mac` in VNI 100 as a spine sends it back from
+/// `from`, with next hop `nexthop`, past the AS_PATH check (`allowas-in`).
+fn echo_own_macip(bgp: &mut Bgp, from: usize, mac: MacAddr, nexthop: IpAddr) -> EvpnPrefix {
+    let route = EvpnRoute::Mac(bgp_packet::EvpnMac {
+        id: 0,
+        rd: rd_from_router_id_vni(RID, 100).unwrap(),
+        esi: [0; 10],
+        ether_tag: 0,
+        mac: mac.octets(),
+        ip: None,
+        vni: 100,
+        label2: None,
+    });
+    let mut attr = BgpAttr::new();
+    attr.nexthop = Some(BgpNexthop::Evpn(nexthop));
+    attr.local_pref = Some(LocalPref::default());
+    attr.ecom = Some(ExtCommunity::from([evpn_route_target(65000, 100)]));
+    let (_, prefix) = EvpnPrefix::from_route(&route);
+    feed_evpn(bgp, from, route, Some(attr));
+    prefix
+}
+
+/// How many received (not originated) paths our own VNI-100 RD holds for
+/// `prefix`.
+fn received_in_own_rd(bgp: &Bgp, prefix: &EvpnPrefix) -> usize {
+    let rd = rd_from_router_id_vni(RID, 100).unwrap();
+    bgp.local_rib
+        .evpn
+        .get(&rd)
+        .and_then(|table| table.cands.get(prefix))
+        .map_or(0, |cands| {
+            cands.iter().filter(|rib| !rib.is_originated()).count()
+        })
+}
+
+/// With `allowas-in`, our own Type-2 sent back by a spine passes the AS_PATH
+/// check. Its next hop is our VTEP, so it is dropped on receipt: when our
+/// host leaves, nothing installs its MAC toward ourselves.
+#[tokio::test]
+async fn an_echo_past_the_loop_check_is_never_installed() {
+    let (mut bgp, mut rib) = bgp_with_rib();
+    bgp.advertise_all_vni = true;
+    bgp.process_rib_msg(RibRx::VxlanAdd {
+        vni: 100,
+        vtep_local: IpAddr::V4(RID),
+    });
+    let (from, _rx) = peer(&mut bgp, "10.1.1.1", true);
+    let mac = MacAddr::from([2, 0, 0, 0, 1, 1]);
+    let local = local_fdb(mac);
+    bgp.evpn_originate_macip(&local);
+    let prefix = echo_own_macip(&mut bgp, from, mac, IpAddr::V4(RID));
+    assert_eq!(received_in_own_rd(&bgp, &prefix), 0);
+
+    mac_messages(&mut rib);
+    bgp.evpn_withdraw_macip(&local);
+    assert_eq!(mac_messages(&mut rib), vec![]);
+}
+
+/// The same for an echo naming our end of the session, where egress
+/// re-points an originated route with no VTEP. A remote PE's route on that
+/// session is still taken.
+#[tokio::test]
+async fn an_echo_naming_our_session_address_is_dropped() {
+    let (mut bgp, _rib) = bgp_with_rib();
+    bgp.advertise_all_vni = true;
+    let (from, _rx) = peer(&mut bgp, "10.1.1.1", true);
+    let mac = MacAddr::from([2, 0, 0, 0, 1, 1]);
+    bgp.evpn_originate_macip(&local_fdb(mac));
+    let prefix = echo_own_macip(&mut bgp, from, mac, IpAddr::V4(LINK));
+    assert_eq!(received_in_own_rd(&bgp, &prefix), 0);
+
+    let remote_rd = rd_from_router_id_vni("10.0.0.11".parse().unwrap(), 100).unwrap();
+    receive_macip(&mut bgp, from, remote_rd, mac, None, 1);
+    assert!(
+        bgp.local_rib
+            .evpn
+            .get(&remote_rd)
+            .is_some_and(|table| !table.selected.is_empty())
+    );
+}
+
+/// A looped UPDATE for our own route removes nothing, so it sends nothing:
+/// not to the spine that looped it, nor to any other peer.
+#[tokio::test]
+async fn a_looped_update_sends_peers_nothing() {
+    let (mut bgp, _rib) = bgp_with_rib();
+    bgp.advertise_all_vni = true;
+    let (from, mut rx) = peer(&mut bgp, "10.1.1.1", true);
+    let (other, mut other_rx) = peer(&mut bgp, "10.1.1.2", true);
+    let mac = MacAddr::from([2, 0, 0, 0, 1, 1]);
+    bgp.evpn_originate_macip(&local_fdb(mac));
+    assert_eq!(sent(&mut bgp, from, &mut rx).len(), 1);
+    assert_eq!(sent(&mut bgp, other, &mut other_rx).len(), 1);
+
+    let own_rd = rd_from_router_id_vni(RID, 100).unwrap();
+    withdraw_macip(&mut bgp, from, own_rd, mac, None);
+    assert_eq!(sent(&mut bgp, from, &mut rx), vec![]);
+    assert_eq!(sent(&mut bgp, other, &mut other_rx), vec![]);
+}
+
+/// Export `rib` as the selection for `prefix` under `rd`.
+fn export_selected(bgp: &mut Bgp, rd: &RouteDistinguisher, prefix: &EvpnPrefix, rib: BgpRib) {
+    let mut top = BgpTop {
+        router_id: &bgp.router_id,
+        srv6_ipv6_export: bgp.srv6_ipv6_export.as_ref(),
+        local_rib: &mut bgp.local_rib,
+        shard: &mut bgp.shard,
+        tx: &bgp.tx,
+        rib_client: &bgp.ctx.rib,
+        attr_store: &mut bgp.attr_store,
+        update_groups: &mut bgp.update_groups,
+        interface_addrs: &bgp.interface_addrs,
+        vrf_export: None,
+        color_policy: Some(&bgp.color_policy),
+        flex_algo_routes: Some(&bgp.flex_algo_routes),
+        flex_algo_srv6_routes: Some(&bgp.flex_algo_srv6_routes),
+        vrf_import: None,
+        nexthop_cache: None,
+        vrf_transport_v4: None,
+        vrf_transport_v6: None,
+        as_sets_withdraw: bgp.as_sets_withdraw,
+    };
+    route_evpn_export_selected(rd, prefix, &[rib], None, &mut top);
+}
+
+/// Our own path selected is never a remote binding: a Type-2 sends the RIB
+/// nothing, a Type-3 leaves our VTEP out of the flood list. A looped UPDATE
+/// no longer gets this far (`a_looped_update_sends_peers_nothing`); a
+/// re-selection such as `bestpath_recompute_untracked` does.
+#[tokio::test]
+async fn our_own_selected_path_is_not_installed() {
+    let (mut bgp, mut rib) = bgp_with_rib();
+    let rd = rd_from_router_id_vni(RID, 100).unwrap();
+    let own = macip_path(0, false, [0; 10], "192.0.2.1", true);
+
+    let mac = EvpnPrefix::MacIp {
+        eth_tag: 0,
+        mac: [2, 0, 0, 0, 1, 1],
+        ip: None,
+    };
+    export_selected(&mut bgp, &rd, &mac, own.clone());
+    assert_eq!(mac_messages(&mut rib), vec![]);
+
+    let imet = EvpnPrefix::InclusiveMulticast {
+        eth_tag: 0,
+        orig: IpAddr::V4(RID),
+    };
+    export_selected(&mut bgp, &rd, &imet, own);
+    assert!(bgp.local_rib.evpn_flood.remote_vteps(100).is_empty());
+}
