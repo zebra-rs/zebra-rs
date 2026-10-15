@@ -437,6 +437,25 @@ pub enum Message {
         pe: IpAddr,
         esi: String,
     },
+    /// EVPN E-Tree over MPLS (RFC 8317 §4.2): the leaf-label slot toward
+    /// `pe` for bridge domain `bd` — BUM from local leaf ports only, each
+    /// copy carrying `pe`'s `leaf_label` under its BUM `label`. cradle then
+    /// keeps leaf BUM off the PE's other slots.
+    CradleReplAddMplsLeaf {
+        bd: u32,
+        pe: IpAddr,
+        label: u32,
+        leaf_label: u32,
+    },
+    CradleReplDelMplsLeaf {
+        bd: u32,
+        pe: IpAddr,
+    },
+    /// EVPN E-Tree over MPLS (RFC 8317 §4.2): the leaf label this PE
+    /// advertises, teed as `SetEtreeLeafLabel` for decap (0 = none).
+    EtreeLeafLabel {
+        label: u32,
+    },
     /// MUP `dataplane gtp` uplink decap (`H.M.GTP4.D`): a GTP-U decap PDR teed
     /// to cradle — a G-PDU on (`dst`, `teid`), arriving on a port bound to VRF
     /// table `match_vrf` (0 = global), is stripped and its inner packet
@@ -4365,6 +4384,22 @@ impl Rib {
                 self.fib_handle
                     .cradle_repl_add_mpls_es(bd, pe, label, &esi, esi_label)
                     .await;
+            }
+            Message::CradleReplAddMplsLeaf {
+                bd,
+                pe,
+                label,
+                leaf_label,
+            } => {
+                self.fib_handle
+                    .cradle_repl_add_mpls_leaf(bd, pe, label, leaf_label)
+                    .await;
+            }
+            Message::CradleReplDelMplsLeaf { bd, pe } => {
+                self.fib_handle.cradle_repl_del_mpls_leaf(bd, pe).await;
+            }
+            Message::EtreeLeafLabel { label } => {
+                self.fib_handle.cradle_etree_leaf_label(label).await;
             }
             Message::CradleReplDelMplsEs { bd, pe, esi } => {
                 self.fib_handle.cradle_repl_del_mpls_es(bd, pe, &esi).await;

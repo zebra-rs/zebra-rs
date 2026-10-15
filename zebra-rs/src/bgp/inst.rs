@@ -998,6 +998,21 @@ pub struct Bgp {
     /// E-Tree EC's Leaf-Indication flag (§4.1). The cradle supervisor reads
     /// the same config and programs the port's role into the datapath.
     pub etree_leaf_ifs: BTreeSet<String>,
+    /// EVPN E-Tree over MPLS (RFC 8317 §4.2.1): this PE's leaf label, drawn
+    /// from the service labels while the encapsulation is MPLS and an EVI
+    /// has a leaf AC (`etree_label_reconcile`). Advertised in the
+    /// leaf-label route and teed to cradle for decap; no ILM.
+    pub etree_leaf_label: Option<u32>,
+    /// The leaf-label route last originated, so a change of RD withdraws
+    /// the old one and an unchanged route is not re-sent.
+    pub(super) etree_leaf_ad: Option<super::route::EtreeLeafAd>,
+    /// The leaf label last teed to cradle (`Some(0)` = none). `None` until
+    /// a tee exists to take it, and again when a new one comes up
+    /// (`RibRx::CradleUp`): a label teed before that never arrived.
+    pub(super) etree_leaf_label_teed: Option<u32>,
+    /// The leaf-label replication slots last teed: `(bd, PE, its BUM
+    /// label, its leaf label)`.
+    pub(super) etree_slots_sent: BTreeSet<(u32, std::net::IpAddr, u32, u32)>,
     /// Configured hostname for the local BGP speaker. Advertised in
     /// the FQDN capability (capability code 73). When None, falls back
     /// to the OS hostname; if that also fails, no FQDN capability is
@@ -1541,6 +1556,10 @@ impl Bgp {
             local_smet: BTreeMap::new(),
             ethernet_segments: BTreeMap::new(),
             etree_leaf_ifs: BTreeSet::new(),
+            etree_leaf_label: None,
+            etree_leaf_ad: None,
+            etree_leaf_label_teed: None,
+            etree_slots_sent: BTreeSet::new(),
             hostname: None,
             no_fib_install: false,
             fast_external_failover: true,
@@ -2409,6 +2428,9 @@ impl Bgp {
         // change rebinds the key, so withdraw the old-keyed DSD and
         // re-originate under the new — `reconcile_mup_segment` does both.
         self.reconcile_mup_segment();
+        // The E-Tree leaf-label route's RD is `<router-id>:0` too; the
+        // originate body withdraws the old-RD route itself.
+        self.evpn_originate_etree_leaf_ad();
     }
 
     /// Recompute the effective BGP Identifier from its two sources —
@@ -4997,6 +5019,11 @@ impl Bgp {
                 if index_changed && self.etree_leaf_ifs.contains(&link.name) {
                     self.evpn_resync_macip_esi();
                 }
+                // A leaf AC's link (index, bridge) decides which EVIs have
+                // leaves: the leaf label, its route and the leaf slots.
+                if self.etree_leaf_ifs.contains(&link.name) {
+                    self.etree_label_reconcile();
+                }
                 if !esis_on_link.is_empty() {
                     self.evpn_resync_macip_esi();
                     // The cradle tee names the port; a `SetEthernetSegment`
@@ -5027,7 +5054,10 @@ impl Bgp {
             RibRx::LinkDel(ifindex) => {
                 self.link_down_failover(ifindex);
                 self.evpn_link_ifindex_state(ifindex, false);
-                self.link_name_by_index.remove(&ifindex);
+                let etree_leaf = self
+                    .link_name_by_index
+                    .remove(&ifindex)
+                    .is_some_and(|name| self.etree_leaf_ifs.contains(&name));
                 self.link_master.remove(&ifindex);
                 // A deleted link's addresses are not reliably withdrawn
                 // one by one (a veth moved into another netns emits only
@@ -5042,6 +5072,10 @@ impl Bgp {
                 self.connected_subnets.purge_ifindex(ifindex);
                 self.refresh_connected();
                 super::config::bfd_reconcile_all(self);
+                // A leaf AC gone takes its EVIs out of the leaf set.
+                if etree_leaf {
+                    self.etree_label_reconcile();
+                }
             }
             RibRx::LinkUp(ifindex) => {
                 self.link_up_kick(ifindex);
@@ -5163,6 +5197,13 @@ impl Bgp {
                 self.es_nhg_sent.clear();
                 self.evpn_es_df_sync();
                 self.evpn_es_nhg_sync();
+                // ... and the E-Tree leaf label and leaf slots (RFC 8317
+                // §4.2.1). A leaf label drawn at config load precedes the
+                // tee, and a lost one leaves every peer's leaf-labelled
+                // copy dropped here as malformed.
+                self.etree_leaf_label_teed = None;
+                self.etree_slots_sent.clear();
+                self.etree_label_reconcile();
             }
             RibRx::L2PortEvis { ifindex, vnis } => {
                 // A snapshot, so an unchanged set is a no-op — the RIB
@@ -5179,6 +5220,15 @@ impl Bgp {
                     // The EVI set is the bridge-domain set the DF-role tee
                     // carves over (one role per (ESI, bd)).
                     self.evpn_es_df_sync();
+                    // ... and a leaf AC's EVIs are the leaf-label route's
+                    // RTs and the leaf slots' bridge domains.
+                    if self
+                        .link_name_by_index
+                        .get(&ifindex)
+                        .is_some_and(|name| self.etree_leaf_ifs.contains(name))
+                    {
+                        self.etree_label_reconcile();
+                    }
                 }
             }
             RibRx::SnoopJoin {
@@ -5713,8 +5763,10 @@ impl Bgp {
         // EVPN-over-MPLS instances draw from the same chunks, and an EVI
         // configured while the range was full is sitting label-less too.
         self.evi_reconcile();
-        // ... as do the Ethernet Segments' ESI labels (RFC 7432 §8.3).
+        // ... as do the Ethernet Segments' ESI labels (RFC 7432 §8.3), and
+        // the E-Tree leaf label (RFC 8317 §4.2.1).
         self.es_label_reconcile();
+        self.etree_label_reconcile();
         // So do VPWS E-Lines: a service configured meanwhile originated
         // its Type-1 with label 0, which no remote binds.
         self.vpws_label_drain();
@@ -5902,6 +5954,57 @@ impl Bgp {
             self.evpn_originate_es_routes(esi, vtep, single_active);
         }
         self.evpn_es_df_sync();
+    }
+
+    /// EVPN E-Tree over MPLS (RFC 8317 §4.2.1): this PE's leaf label. One
+    /// label per PE, drawn from the service labels while the encapsulation
+    /// is MPLS and an EVI has a leaf AC, and handed back otherwise. Like the
+    /// ESI label it installs no ILM: cradle resolves it in its own map.
+    /// Then the label's tee, the leaf-label route and the leaf slots follow
+    /// it. Idempotent; called wherever those inputs change, and when room
+    /// returns to the service labels.
+    pub(super) fn etree_label_reconcile(&mut self) {
+        let want = self.evpn_encap.is_mpls() && !self.etree_leaf_evis().is_empty();
+        match (want, self.etree_leaf_label) {
+            (true, None) => {
+                if let Some(label) = self.service_labels.alloc() {
+                    tracing::info!(
+                        proto = "bgp",
+                        category = "evpn",
+                        label,
+                        "E-Tree leaf label allocated"
+                    );
+                    self.etree_leaf_label = Some(label);
+                }
+            }
+            (false, Some(label)) => {
+                tracing::info!(
+                    proto = "bgp",
+                    category = "evpn",
+                    label,
+                    "E-Tree leaf label released"
+                );
+                self.etree_leaf_label = None;
+                self.free_service_labels(vec![label]);
+            }
+            _ => {}
+        }
+        // A fresh tee holds no label, so "none" goes out only to clear one
+        // that was sent.
+        let label = self.etree_leaf_label.unwrap_or(0);
+        let stale = match self.etree_leaf_label_teed {
+            None => label != 0,
+            Some(teed) => teed != label,
+        };
+        if stale {
+            let _ = self
+                .ctx
+                .rib
+                .send(crate::rib::Message::EtreeLeafLabel { label });
+        }
+        self.etree_leaf_label_teed = Some(label);
+        self.evpn_originate_etree_leaf_ad();
+        self.evpn_etree_slots_sync();
     }
 
     /// Hand back the ESI label of segment `name` (about to be deleted, or

@@ -2063,6 +2063,8 @@ fn config_evpn_vtep_source(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Optio
     reoriginate_all_imet(bgp);
     es_df_election_changed(bgp);
     bgp.vpws_reencap();
+    // The E-Tree leaf-label route's next hop is the EVPN source.
+    bgp.evpn_originate_etree_leaf_ad();
     Some(())
 }
 
@@ -2093,8 +2095,10 @@ fn config_evpn_encapsulation(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Opt
     // and a stale ILM would decap traffic the label no longer owns).
     bgp.evi_reconcile();
     // ... and every Ethernet Segment an ESI label (RFC 7432 §8.3), likewise
-    // handed back on the way out.
+    // handed back on the way out, and the E-Tree leaf label (RFC 8317
+    // §4.2.1).
     bgp.es_label_reconcile();
+    bgp.etree_label_reconcile();
     // Re-originate under the new encapsulation (no-op when
     // advertise-all-vni is off; the config-load gate replay covers
     // cold boot, where this leaf lands before the FdbAdds arrive).
@@ -2614,6 +2618,8 @@ fn config_etree_leaf_interface(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> O
     };
     if changed {
         bgp.evpn_resync_macip_esi();
+        // Under MPLS, the leaf label and its route follow the leaf ACs.
+        bgp.etree_label_reconcile();
     }
     Some(())
 }
@@ -2641,6 +2647,8 @@ fn config_evi(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
         }
         _ => {}
     }
+    // An EVI with a leaf AC is in the leaf-label route's RTs.
+    bgp.etree_label_reconcile();
     Some(())
 }
 
@@ -2667,6 +2675,9 @@ fn config_evi_bridge(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> 
     // follow (`Bgp::port_evis`).
     bgp.evpn_resync_ad_evi();
     bgp.evpn_es_df_sync();
+    // ... and so do the leaf ACs' EVIs (the leaf label, its route and the
+    // leaf slots).
+    bgp.etree_label_reconcile();
     Some(())
 }
 

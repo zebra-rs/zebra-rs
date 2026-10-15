@@ -167,6 +167,11 @@ struct CradleMirror {
     /// its PE (`FdbRemote.etree_leaf`). A flag of the entry, not a kind of
     /// its own: every installer sets or clears it and `fdb_del` drops it.
     fdb_etree_leaf: HashSet<(u32, [u8; 6])>,
+    /// EVPN E-Tree over MPLS (RFC 8317 §4.2): this PE's leaf label
+    /// (`SetEtreeLeafLabel`, 0 = none), and the leaf-label replication
+    /// slots `(bd, PE)` → `(its BUM label, its leaf label)`.
+    etree_leaf_label: u32,
+    repl_slots_mpls_leaf: HashMap<(u32, IpAddr), (u32, u32)>,
 }
 
 impl CradleMirror {
@@ -670,6 +675,14 @@ impl CradleFib {
         }
         for (vni, pe, label, esi, esi_label) in &m.repl_slots_mpls_es {
             self.repl_slot_add_mpls_es(*vni, *pe, *label, esi, *esi_label)
+                .await;
+        }
+        // E-Tree over MPLS: our leaf label (decap), then the leaf slots.
+        if m.etree_leaf_label != 0 {
+            self.set_etree_leaf_label(m.etree_leaf_label).await;
+        }
+        for ((vni, pe), (label, leaf_label)) in &m.repl_slots_mpls_leaf {
+            self.repl_slot_add_mpls_leaf(*vni, *pe, *label, *leaf_label)
                 .await;
         }
         for ((port, vid, table), (remote, local_sid, local_vni, local_label)) in &m.xconnects {
@@ -1886,6 +1899,7 @@ impl CradleFib {
                     remote_label: 0,
                     esi: String::new(),
                     esi_label: 0,
+                    etree_leaf_label: 0,
                 })
                 .await?;
             anyhow::Ok(())
@@ -2062,6 +2076,7 @@ impl CradleFib {
                     remote_label: 0,
                     esi: String::new(),
                     esi_label: 0,
+                    etree_leaf_label: 0,
                 })
                 .await?;
             anyhow::Ok(())
@@ -2093,6 +2108,7 @@ impl CradleFib {
                     remote_label: 0,
                     esi: String::new(),
                     esi_label: 0,
+                    etree_leaf_label: 0,
                 })
                 .await?;
             anyhow::Ok(())
@@ -2123,6 +2139,7 @@ impl CradleFib {
                     remote_label: label,
                     esi: String::new(),
                     esi_label: 0,
+                    etree_leaf_label: 0,
                 })
                 .await?;
             anyhow::Ok(())
@@ -2163,6 +2180,7 @@ impl CradleFib {
                     remote_label: label,
                     esi: esi.to_string(),
                     esi_label,
+                    etree_leaf_label: 0,
                 })
                 .await?;
             anyhow::Ok(())
@@ -2170,6 +2188,91 @@ impl CradleFib {
         .await;
         if let Err(e) = result {
             tracing::warn!("fib: cradle repl_slot_add_mpls_es bd {bd} {pe} es {esi} failed: {e}");
+        }
+    }
+
+    /// EVPN E-Tree over MPLS (RFC 8317 §4.2): the leaf-label slot toward PE
+    /// `pe` in bridge domain `bd`. Its copies carry BUM from local leaf
+    /// ports only, each with the PE's `leaf_label` under its BUM `label`;
+    /// cradle then sends no leaf's BUM through the PE's other slots.
+    /// Mirrored; replayed after the plain and ESI-label slots.
+    pub async fn repl_slot_add_mpls_leaf(&self, bd: u32, pe: IpAddr, label: u32, leaf_label: u32) {
+        self.mirror
+            .lock()
+            .await
+            .repl_slots_mpls_leaf
+            .insert((bd, pe), (label, leaf_label));
+        let result = async {
+            self.client()
+                .await?
+                .add_repl_slot(pb::ReplSlot {
+                    bd,
+                    remote_sid: String::new(),
+                    remote_vtep: String::new(),
+                    remote_pe: pe.to_string(),
+                    remote_label: label,
+                    esi: String::new(),
+                    esi_label: 0,
+                    etree_leaf_label: leaf_label,
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle repl_slot_add_mpls_leaf bd {bd} {pe} failed: {e}");
+        }
+    }
+
+    /// Inverse of [`Self::repl_slot_add_mpls_leaf`]. cradle keys the leaf
+    /// slot on `(bd, PE)` apart from the plain one; any non-zero
+    /// `etree_leaf_label` names it.
+    pub async fn repl_slot_del_mpls_leaf(&self, bd: u32, pe: IpAddr) {
+        let leaf_label = self
+            .mirror
+            .lock()
+            .await
+            .repl_slots_mpls_leaf
+            .remove(&(bd, pe))
+            .map(|(_, leaf)| leaf)
+            .unwrap_or(1);
+        let result = async {
+            self.client()
+                .await?
+                .del_repl_slot(pb::ReplSlot {
+                    bd,
+                    remote_sid: String::new(),
+                    remote_vtep: String::new(),
+                    remote_pe: pe.to_string(),
+                    remote_label: 0,
+                    esi: String::new(),
+                    esi_label: 0,
+                    etree_leaf_label: leaf_label,
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle repl_slot_del_mpls_leaf bd {bd} {pe} failed: {e}");
+        }
+    }
+
+    /// EVPN E-Tree over MPLS (RFC 8317 §4.2): this PE's leaf label, for
+    /// decap (0 = none). A copy a peer sends with it came from a leaf AC and
+    /// is kept off our leaf ports. Mirrored; replayed before the slots.
+    pub async fn set_etree_leaf_label(&self, label: u32) {
+        self.mirror.lock().await.etree_leaf_label = label;
+        let result = async {
+            self.client()
+                .await?
+                .set_etree_leaf_label(pb::EtreeLeafLabel { label })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle set_etree_leaf_label {label} failed: {e}");
         }
     }
 
@@ -2191,6 +2294,7 @@ impl CradleFib {
                     remote_label: 0,
                     esi: esi.to_string(),
                     esi_label: 0,
+                    etree_leaf_label: 0,
                 })
                 .await?;
             anyhow::Ok(())
@@ -2220,6 +2324,7 @@ impl CradleFib {
                     remote_label: 0,
                     esi: String::new(),
                     esi_label: 0,
+                    etree_leaf_label: 0,
                 })
                 .await?;
             anyhow::Ok(())
@@ -2248,6 +2353,7 @@ impl CradleFib {
                     remote_label: 0,
                     esi: String::new(),
                     esi_label: 0,
+                    etree_leaf_label: 0,
                 })
                 .await?;
             anyhow::Ok(())
