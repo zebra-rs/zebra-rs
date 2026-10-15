@@ -2589,14 +2589,25 @@ struct EtreeRemoteJson {
     leaf_macs: usize,
 }
 
+/// `show bgp evpn etree json`: a remote PE's leaf label (MPLS).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EtreePeerLabelJson {
+    pe: String,
+    leaf_label: u32,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct EtreeJson {
     leaf_interfaces: Vec<EtreeLeafJson>,
     remote_leaf_macs: Vec<EtreeRemoteJson>,
-    /// What is enforced so far: leaf to leaf on one PE, and known unicast
-    /// from a leaf to a remote leaf MAC. Not yet a leaf's BUM toward
-    /// leaves on other PEs.
+    /// This PE's leaf label (MPLS; RFC 8317 §4.2.1), when it has one.
+    leaf_label: Option<u32>,
+    /// The leaf label each remote PE advertised.
+    remote_leaf_labels: Vec<EtreePeerLabelJson>,
+    /// Whether a leaf's BUM is kept from leaves on other PEs: over MPLS,
+    /// by the leaf label (RFC 8317 §4.2). Not yet over VXLAN or SRv6.
     bum_filtered: bool,
 }
 
@@ -2641,11 +2652,21 @@ fn show_bgp_evpn_etree(
             leaf_macs: macs.len(),
         })
         .collect();
+    let peer_labels: Vec<EtreePeerLabelJson> = bgp
+        .etree_peer_leaf_labels()
+        .into_iter()
+        .map(|(pe, leaf_label)| EtreePeerLabelJson {
+            pe: pe.to_string(),
+            leaf_label,
+        })
+        .collect();
     if json {
         let out = EtreeJson {
             leaf_interfaces: leaves,
             remote_leaf_macs: remote,
-            bum_filtered: false,
+            leaf_label: bgp.etree_leaf_label,
+            remote_leaf_labels: peer_labels,
+            bum_filtered: bgp.evpn_encap.is_mpls(),
         };
         return Ok(serde_json::to_string_pretty(&out)
             .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")));
@@ -2678,11 +2699,25 @@ fn show_bgp_evpn_etree(
     for r in &remote {
         writeln!(out, "    EVI {:<10} {}", r.evi, r.leaf_macs)?;
     }
-    writeln!(
-        out,
-        "  Not filtered yet: a leaf's broadcast, multicast and unknown unicast \
-         toward leaves on other PEs"
-    )?;
+    if bgp.evpn_encap.is_mpls() {
+        match bgp.etree_leaf_label {
+            Some(label) => writeln!(out, "  Leaf label:      {label}")?,
+            None => writeln!(out, "  Leaf label:      none")?,
+        }
+        writeln!(out, "  Remote leaf labels:")?;
+        if peer_labels.is_empty() {
+            writeln!(out, "    none")?;
+        }
+        for p in &peer_labels {
+            writeln!(out, "    {:<16} {}", p.pe, p.leaf_label)?;
+        }
+    } else {
+        writeln!(
+            out,
+            "  Not filtered yet: a leaf's broadcast, multicast and unknown unicast \
+             toward leaves on other PEs (filtered over MPLS only)"
+        )?;
+    }
     Ok(out)
 }
 

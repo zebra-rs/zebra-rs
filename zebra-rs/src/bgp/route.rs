@@ -3811,6 +3811,11 @@ pub struct LocalRib {
     /// path's borrow ends (`Bgp::evpn_es_nhg_sync`, drained with the DF
     /// re-election).
     pub es_nhg_dirty: bool,
+    /// EVPN E-Tree over MPLS: a leaf-label route (per-ES A-D with ESI 0) or
+    /// an MPLS IMET was installed or withdrawn, so the leaf slots must be
+    /// re-derived once the receive path's borrow ends
+    /// (`Bgp::evpn_etree_slots_sync`, drained with the DF re-election).
+    pub etree_dirty: bool,
 }
 
 impl LocalRib {
@@ -9791,6 +9796,16 @@ fn vpws_es_live_pes(local_rib: &LocalRib, esi: &[u8; 10]) -> BTreeSet<IpAddr> {
     live
 }
 
+/// The E-Tree leaf-label route this PE last originated (RFC 8317 §4.2.1),
+/// by what goes into it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EtreeLeafAd {
+    pub rd: RouteDistinguisher,
+    pub label: u32,
+    pub evis: BTreeSet<u32>,
+    pub nexthop: IpAddr,
+}
+
 /// RFC 7432 §8.3: the ESI label each peer PE advertised for `esi` in its
 /// live per-ES A-D route (the ESI Label EC), by advertising PE. Peers
 /// advertising label 0 (VXLAN / SRv6 local bias) are absent.
@@ -9835,6 +9850,40 @@ fn imet_mpls_bum_labels(local_rib: &LocalRib, vni: u32) -> BTreeMap<IpAddr, u32>
         }
     }
     out
+}
+
+/// RFC 8317 §4.2.1: the leaf label each remote PE advertised in its live
+/// leaf-label route — a per-ES Ethernet A-D route with ESI 0 carrying the
+/// E-Tree EC — by advertising PE. A PE with no leaf ACs advertises none,
+/// and gets no leaf slot. A reserved label is ignored (and was logged on
+/// receipt).
+fn etree_peer_leaf_labels(local_rib: &LocalRib) -> BTreeMap<IpAddr, u32> {
+    let mut out = BTreeMap::new();
+    for table in local_rib.evpn.values() {
+        for (prefix, rib) in table.selected.iter() {
+            if let EvpnPrefix::EthernetAd { esi, eth_tag } = prefix
+                && *esi == ZERO_ESI
+                && *eth_tag == MAX_ET
+                && rib.typ != BgpRibType::Originated
+                && let Some(BgpNexthop::Evpn(nh)) = rib.attr.nexthop
+                && let Some(label) = etree_route_leaf_label(&rib.attr)
+            {
+                out.insert(nh, label);
+            }
+        }
+    }
+    out
+}
+
+/// The leaf label a leaf-label route's E-Tree EC carries, if it is a usable
+/// one (RFC 8317 §6.1: a valid MPLS label; the L flag is ignored here).
+fn etree_route_leaf_label(attr: &BgpAttr) -> Option<u32> {
+    attr.ecom
+        .as_ref()?
+        .0
+        .iter()
+        .find_map(|ec| ec.as_etree())
+        .and_then(|etree| etree.valid_leaf_label())
 }
 
 /// Every remote endpoint advertised for VPWS service instance `remote_id`
@@ -10209,8 +10258,10 @@ fn route_evpn_export_selected(
                             .rib_client
                             .send(rib::Message::CradleReplDelMpls { bd: vni, pe });
                         // The ESI-label slots toward that PE went with it
-                        // (RFC 7432 §8.3): re-sync the segments.
+                        // (RFC 7432 §8.3): re-sync the segments. So did its
+                        // E-Tree leaf slots (RFC 8317 §4.2.1).
                         bgp.local_rib.evpn_vpws.es_df_dirty = true;
+                        bgp.local_rib.etree_dirty = true;
                     }
                     bgp.local_rib.evpn_flood.remove_remote(vni, *orig);
                     bgp.local_rib.evpn_flood.reconcile(vni, bgp.rib_client);
@@ -10265,6 +10316,10 @@ fn route_evpn_export_selected(
                 // segment re-elects once this borrow ends.
                 if *esi != ZERO_ESI {
                     vpws_mark_df_dirty(bgp.local_rib, esi);
+                } else if *eth_tag == MAX_ET {
+                    // A leaf-label route gone (RFC 8317 §4.2.1): that PE's
+                    // leaf slots go with it.
+                    bgp.local_rib.etree_dirty = true;
                 }
                 let scope = if *eth_tag == MAX_ET {
                     None
@@ -10481,8 +10536,10 @@ fn route_evpn_export_selected(
                             .send(rib::Message::CradleReplAddMpls { bd: vni, pe, label });
                     // A peer's BUM label is half of an ESI-label slot toward
                     // it (RFC 7432 §8.3) — it may land after the peer's
-                    // per-ES A-D did: re-sync the segments.
+                    // per-ES A-D did: re-sync the segments. Likewise half
+                    // of an E-Tree leaf slot (RFC 8317 §4.2.1).
                     bgp.local_rib.evpn_vpws.es_df_dirty = true;
+                    bgp.local_rib.etree_dirty = true;
                 }
                 let pmsi = best.attr.pmsi_tunnel.as_ref();
                 if let Some(p) = pmsi.filter(|p| p.is_sr_p2mp()) {
@@ -10583,6 +10640,25 @@ fn route_evpn_export_selected(
             bgp.local_rib.es_nhg_dirty = true;
             if *esi != ZERO_ESI {
                 vpws_mark_df_dirty(bgp.local_rib, esi);
+            } else if *eth_tag == MAX_ET && !best.is_originated() {
+                // A leaf-label route (RFC 8317 §4.2.1): that PE's leaf
+                // label, for the leaf slots toward it. A reserved label is
+                // ignored and logged (§6.1).
+                bgp.local_rib.etree_dirty = true;
+                if best
+                    .attr
+                    .ecom
+                    .as_ref()
+                    .is_some_and(|ecom| ecom.0.iter().any(|ec| ec.as_etree().is_some()))
+                    && etree_route_leaf_label(&best.attr).is_none()
+                {
+                    tracing::warn!(
+                        proto = "bgp",
+                        category = "evpn",
+                        pe = ?best.attr.nexthop,
+                        "E-Tree leaf-label route with a reserved leaf label (RFC 8317 §6.1); ignored"
+                    );
+                }
             }
             let scope = if *eth_tag == MAX_ET {
                 None
@@ -20684,6 +20760,134 @@ impl Bgp {
         route_withdraw_evpn_to_peers(rd, prefix, &mut self.peers);
     }
 
+    /// The leaf label each remote PE advertised (RFC 8317 §4.2.1), for
+    /// `show`.
+    pub fn etree_peer_leaf_labels(&self) -> BTreeMap<IpAddr, u32> {
+        etree_peer_leaf_labels(&self.local_rib)
+    }
+
+    /// The EVIs with at least one E-Tree leaf AC: those of every `etree
+    /// leaf-interface` that is a live link (`port_evis`).
+    pub fn etree_leaf_evis(&self) -> BTreeSet<u32> {
+        self.etree_leaf_ifs
+            .iter()
+            .filter_map(|name| self.link_index_by_name.get(name).copied())
+            .filter(|ifindex| self.link_name_by_index.contains_key(ifindex))
+            .flat_map(|ifindex| self.port_evis(ifindex))
+            .collect()
+    }
+
+    /// Originate, refresh or withdraw the E-Tree leaf-label route (RFC 8317
+    /// §4.2.1): a per-ES Ethernet A-D route with ESI 0 — `[1]:[0]:[MAX-ET]`
+    /// under RD `<router-id>:0` — carrying the E-Tree EC with this PE's
+    /// leaf label and the RT of every EVI with a leaf AC, so each PE in
+    /// those EVIs imports it. Present while the PE has a leaf label and a
+    /// leaf AC. Idempotent: an unchanged route is not re-sent, and a new RD
+    /// (router-id change) withdraws the old one.
+    ///
+    /// The RTs ride one route. RFC 8317 splits the set over several routes
+    /// when it does not fit; an extended-length attribute carries some
+    /// eight thousand, so that is not done.
+    pub fn evpn_originate_etree_leaf_ad(&mut self) {
+        let desired = self.etree_leaf_label.and_then(|label| {
+            if self.router_id.is_unspecified() {
+                return None;
+            }
+            let rd = rd_from_router_id_vni(self.router_id, 0)?;
+            let evis = self.etree_leaf_evis();
+            (!evis.is_empty()).then(|| EtreeLeafAd {
+                rd,
+                label,
+                evis,
+                nexthop: self.evpn_local_source(),
+            })
+        });
+        if self.etree_leaf_ad == desired {
+            return;
+        }
+        let prefix = EvpnPrefix::EthernetAd {
+            esi: ZERO_ESI,
+            eth_tag: MAX_ET,
+        };
+        if let Some(old) = self.etree_leaf_ad.take()
+            && desired.as_ref().is_none_or(|d| d.rd != old.rd)
+        {
+            let _ = self
+                .local_rib
+                .remove_evpn(old.rd, &prefix, 0, ORIGINATED_PEER);
+            let _ = self.local_rib.select_best_path_evpn(&old.rd, &prefix);
+            route_withdraw_evpn_to_peers(old.rd, prefix.clone(), &mut self.peers);
+        }
+        if let Some(d) = &desired {
+            let mut ecom = ExtCommunity::from([ExtCommunityValue::etree_leaf_label(d.label)]);
+            for evi in &d.evis {
+                ecom.0.insert(evpn_route_target(self.asn, *evi));
+            }
+            let mut attr = BgpAttr::new();
+            attr.ecom = Some(ecom);
+            attr.nexthop = Some(BgpNexthop::Evpn(d.nexthop));
+            let mut rib = BgpRib::new(
+                ORIGINATED_PEER,
+                Ipv4Addr::UNSPECIFIED,
+                BgpRibType::Originated,
+                0,
+                32768,
+                &attr,
+                None,
+                None,
+                false,
+            );
+            rib.esi = Some(ZERO_ESI);
+            self.evpn_originate_synch(d.rd, prefix, rib);
+        }
+        self.etree_leaf_ad = desired;
+    }
+
+    /// Tee the E-Tree leaf-label replication slots (RFC 8317 §4.2.1): in
+    /// every EVI where this PE has a leaf AC, toward every remote PE that
+    /// advertised both a leaf label and a BUM label, a slot whose copies
+    /// carry that PE's leaf label under its BUM label. cradle then sends a
+    /// leaf's BUM to the PE through that slot alone. Diffed against what was
+    /// sent; a slot whose labels changed is removed and added again (cradle
+    /// keys it on `(bd, PE)` and ignores a repeat add).
+    pub fn evpn_etree_slots_sync(&mut self) {
+        let mut desired = BTreeSet::new();
+        if self.evpn_encap.is_mpls() {
+            let peers = etree_peer_leaf_labels(&self.local_rib);
+            if !peers.is_empty() {
+                for vni in self.etree_leaf_evis() {
+                    let bum = imet_mpls_bum_labels(&self.local_rib, vni);
+                    for (pe, leaf_label) in &peers {
+                        if let Some(&label) = bum.get(pe) {
+                            desired.insert((vni, *pe, label, *leaf_label));
+                        }
+                    }
+                }
+            }
+        }
+        if desired == self.etree_slots_sent {
+            return;
+        }
+        for &(bd, pe, _, _) in self.etree_slots_sent.difference(&desired) {
+            let _ = self
+                .ctx
+                .rib
+                .send(crate::rib::Message::CradleReplDelMplsLeaf { bd, pe });
+        }
+        for &(bd, pe, label, leaf_label) in desired.difference(&self.etree_slots_sent) {
+            let _ = self
+                .ctx
+                .rib
+                .send(crate::rib::Message::CradleReplAddMplsLeaf {
+                    bd,
+                    pe,
+                    label,
+                    leaf_label,
+                });
+        }
+        self.etree_slots_sent = desired;
+    }
+
     /// Originate the per-ES Ethernet Auto-Discovery route (Type-1, RFC 7432
     /// §8.2.1) for a configured ES: Ethernet Tag = `MAX-ET`, NLRI label 0, with
     /// the **ESI Label EC** carrying the redundancy mode (and, for VXLAN, a
@@ -21550,6 +21754,10 @@ impl Bgp {
         // And the aliasing nexthop groups, from the A-D routes.
         if std::mem::take(&mut self.local_rib.es_nhg_dirty) {
             self.evpn_es_nhg_sync();
+        }
+        // And the E-Tree leaf slots, from the leaf-label routes and IMETs.
+        if std::mem::take(&mut self.local_rib.etree_dirty) {
+            self.evpn_etree_slots_sync();
         }
     }
 

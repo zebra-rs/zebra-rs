@@ -613,6 +613,60 @@ finding).
 - **Not in 2b:** the multihomed role-conflict warning (§5.3) and the IRB
   warning (§9, D4).
 
+**Phase 3a is merged** as cradle-rs #207, released in cradle-rs v1.1.5,
+which zebra-rs pins since #2524. It is §8.4 as planned, with these
+choices:
+- **Leaf mark.** The decap leaf mark is bit 63 of `es_bits`
+  (`ES_BITS_ETREE_LEAF`), so segment ids stop at 62.
+- **Leaf label on the wire.** The leaf label rides `ReplTarget.esi_label`,
+  marked above the 20 label bits. The encap path keeps its signature, for
+  the verifier budget.
+- **Slot selection.** `SlotEs.etree` makes a leaf's flood use the PE's leaf
+  slot alone, and makes the PE's other slots serve roots only.
+- **A path the plan missed.** Egress filtering also covers `l2_switch`: a
+  remote leaf's unknown unicast is flooded with the leaf label, and at the
+  egress PE it can meet a MAC known there, which would otherwise be
+  switched straight to a leaf.
+
+**Status: phase 3b is implemented** on `evpn-e-tree`.
+- **Leaf label.** `etree_label_reconcile` draws one per PE from the service
+  labels while the encapsulation is MPLS and an EVI has a leaf AC, and
+  hands it back otherwise. A leaf AC's EVIs are its `port_evis`, so under
+  MPLS the AC must be in the EVI's bridge. The label is teed to cradle for
+  decap (`EtreeLeafLabel`, mirrored) and installs no ILM.
+- **Leaf-label route.** `evpn_originate_etree_leaf_ad` originates the
+  per-ES A-D with ESI 0 under `<router-id>:0`, carrying the E-Tree EC and
+  the RT of every EVI with a leaf AC. It is idempotent, and withdraws the
+  old-RD route after a router-id change. The RTs ride one route (an
+  extended-length attribute holds thousands).
+- **Leaf slots.** `etree_peer_leaf_labels` reads each remote PE's label
+  from its selected leaf-label route; a reserved label is ignored and
+  logged on receipt. `evpn_etree_slots_sync` builds, per EVI with a local
+  leaf AC, a slot toward every PE with a leaf label and a BUM label
+  (`CradleReplAddMplsLeaf`). It runs off a new `LocalRib::etree_dirty`,
+  which the leaf-label route and the MPLS IMETs set.
+- **A tee that comes up later.** A leaf label drawn at config load precedes
+  the cradle tee and never reached it. Every peer's leaf-labelled copy was
+  then dropped as malformed. `RibRx::CradleUp` now re-sends the label and
+  the slots, as it does the Ethernet Segment state. The zebra-driven BDD
+  found this on its first run.
+- **Show.** `show bgp evpn etree` shows this PE's leaf label and each
+  remote PE's.
+- **Tests.**
+  - Unit tests: the label's lifecycle and route under MPLS, none under
+    VXLAN, a peer's label making a leaf slot (its route withdrawn, the slot
+    gone; a reserved label, none), and a new tee getting the label again.
+  - cradle-rs BDD `cradle_evpn_etree_mpls_zebra` runs IS-IS SR-MPLS across
+    a P router:
+    - the labels cross in BGP;
+    - a leaf's broadcast reaches the remote root but not the remote leaf
+      (`l2_drop_etree_bum`), and a root's reaches both;
+    - a leaf's known unicast to the remote leaf is dropped at its own PE.
+
+    It fails without the leaf-label route, without the slot adds, or
+    without the `etree_dirty` drain. Its first run is what caught the lost
+    leaf label.
+
 **Review lessons carried over from the single-active arc** (see that plan
 and the memory notes):
 - Every negative assertion ("leaf did not receive") is first shown to fail

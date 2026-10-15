@@ -976,6 +976,36 @@ impl FibHandle {
         }
     }
 
+    /// EVPN E-Tree over MPLS tee (RFC 8317 §4.2): the leaf-label slot toward
+    /// `pe` in `bd`. cradle-only, like every MPLS L2 path.
+    pub async fn cradle_repl_add_mpls_leaf(
+        &self,
+        bd: u32,
+        pe: IpAddr,
+        label: u32,
+        leaf_label: u32,
+    ) {
+        if let Some(cradle) = &self.cradle {
+            cradle
+                .repl_slot_add_mpls_leaf(bd, pe, label, leaf_label)
+                .await;
+        }
+    }
+
+    pub async fn cradle_repl_del_mpls_leaf(&self, bd: u32, pe: IpAddr) {
+        if let Some(cradle) = &self.cradle {
+            cradle.repl_slot_del_mpls_leaf(bd, pe).await;
+        }
+    }
+
+    /// EVPN E-Tree over MPLS tee (RFC 8317 §4.2): this PE's leaf label, for
+    /// decap (0 = none).
+    pub async fn cradle_etree_leaf_label(&self, label: u32) {
+        if let Some(cradle) = &self.cradle {
+            cradle.set_etree_leaf_label(label).await;
+        }
+    }
+
     /// Tee an RFC 9524 Replication segment (operator `replication-segment`
     /// config) to cradle: the local End.Replicate SID and its downstream
     /// branches. No kernel counterpart — cradle's `REPL_SEG` is the SR-P2MP

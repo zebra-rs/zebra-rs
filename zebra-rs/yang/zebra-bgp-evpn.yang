@@ -844,10 +844,11 @@ module zebra-bgp-evpn {
          enabled` or `system cradle enabled`); a commit without it is
          refused, because the kernel bridge cannot isolate leaves.
 
-         Enforced so far: leaf to leaf on one PE, and known unicast from
-         a leaf to a MAC behind a leaf on another PE. Not yet: a leaf's
-         broadcast, multicast and unknown unicast toward leaves on other
-         PEs.";
+         Enforced: leaf to leaf on one PE, and known unicast from a leaf
+         to a MAC behind a leaf on another PE. Over MPLS, a leaf's
+         broadcast, multicast and unknown unicast are kept from leaves
+         on other PEs too: each PE advertises a leaf label (RFC 8317
+         §4.2). Not yet over VXLAN and SRv6.";
       list leaf-interface {
         ext:help "A leaf attachment circuit";
         key "name";

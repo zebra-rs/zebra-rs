@@ -1645,9 +1645,94 @@ async fn a_leaf_ac_link_arriving_late_colours_its_macs() {
     assert!(has_etree_leaf(&local_macip_attr(&bgp, mac)));
 }
 
-/// Withdraw `route` as received from `from`, as a looped UPDATE is
-/// (`inbound_loop_reject` turns it into treat-as-withdraw).
-fn withdraw_route(bgp: &mut Bgp, from: usize, route: &EvpnRoute) {
+/// A PE with EVPN over MPLS, a service-label space, and one E-Tree leaf AC
+/// (`ce1`, ifindex 7) in EVI 100.
+fn etree_mpls_bgp() -> (Bgp, mpsc::UnboundedReceiver<crate::rib::client::RibInbound>) {
+    let (mut bgp, rib) = bgp_with_rib();
+    bgp.evpn_encap = super::super::inst::EvpnEncap::Mpls;
+    bgp.service_labels = super::super::label_chunks::LabelChunks::new(
+        crate::rib::label_space::SharedLabelSpace::default(),
+        "bgp",
+        crate::rib::client::ProtoId::from_raw(0),
+    );
+    bgp.link_index_by_name.insert("ce1".to_string(), 7);
+    bgp.link_name_by_index.insert(7, "ce1".to_string());
+    bgp.l2_port_evis.insert(7, BTreeSet::from([100]));
+    bgp.etree_leaf_ifs.insert("ce1".to_string());
+    (bgp, rib)
+}
+
+/// The E-Tree messages BGP sent the RIB, as strings for comparison.
+fn etree_messages(rx: &mut mpsc::UnboundedReceiver<crate::rib::client::RibInbound>) -> Vec<String> {
+    let mut out = Vec::new();
+    while let Ok(inbound) = rx.try_recv() {
+        match inbound.msg {
+            crate::rib::Message::EtreeLeafLabel { label } => out.push(format!("label {label}")),
+            crate::rib::Message::CradleReplAddMplsLeaf {
+                bd,
+                pe,
+                label,
+                leaf_label,
+            } => out.push(format!("add {bd} {pe} {label} {leaf_label}")),
+            crate::rib::Message::CradleReplDelMplsLeaf { bd, pe } => {
+                out.push(format!("del {bd} {pe}"))
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Our own selected leaf-label route (per-ES A-D, ESI 0), if any.
+fn local_leaf_ad(bgp: &Bgp) -> Option<BgpAttr> {
+    let rd = rd_from_router_id_vni(RID, 0)?;
+    let prefix = EvpnPrefix::EthernetAd {
+        esi: ZERO_ESI,
+        eth_tag: MAX_ET,
+    };
+    let rib = bgp.local_rib.evpn.get(&rd)?.selected.get(&prefix)?;
+    Some((*rib.attr).clone())
+}
+
+/// RFC 8317 §4.2.1: under MPLS, a PE with a leaf AC draws one leaf label,
+/// tees it to cradle, and advertises it in a per-ES A-D route with ESI 0
+/// carrying the E-Tree EC and the leaf AC's EVI RT. With no leaf AC left,
+/// the label goes back and the route is withdrawn.
+#[tokio::test]
+async fn a_leaf_ac_under_mpls_draws_and_advertises_a_leaf_label() {
+    let (mut bgp, mut rib) = etree_mpls_bgp();
+    bgp.etree_label_reconcile();
+    let label = bgp.etree_leaf_label.expect("a leaf label");
+    assert_eq!(etree_messages(&mut rib), vec![format!("label {label}")]);
+    let attr = local_leaf_ad(&bgp).expect("the leaf-label route");
+    let ecom = attr.ecom.expect("communities");
+    assert!(ecom.0.contains(&ExtCommunityValue::etree_leaf_label(label)));
+    assert!(ecom.0.contains(&evpn_route_target(bgp.asn, 100)));
+    // Idempotent: nothing more to say.
+    bgp.etree_label_reconcile();
+    assert_eq!(etree_messages(&mut rib), Vec::<String>::new());
+
+    bgp.etree_leaf_ifs.clear();
+    bgp.etree_label_reconcile();
+    assert_eq!(bgp.etree_leaf_label, None);
+    assert_eq!(etree_messages(&mut rib), vec!["label 0".to_string()]);
+    assert!(local_leaf_ad(&bgp).is_none(), "withdrawn");
+}
+
+/// The leaf label is an MPLS mechanism: under VXLAN no label is drawn and
+/// no leaf-label route goes out.
+#[tokio::test]
+async fn no_leaf_label_outside_mpls() {
+    let (mut bgp, mut rib) = etree_mpls_bgp();
+    bgp.evpn_encap = super::super::inst::EvpnEncap::Vxlan;
+    bgp.etree_label_reconcile();
+    assert_eq!(bgp.etree_leaf_label, None);
+    assert!(local_leaf_ad(&bgp).is_none());
+    assert_eq!(etree_messages(&mut rib), Vec::<String>::new());
+}
+
+/// Feed a received EVPN route (or its withdrawal) from `from`.
+fn feed_evpn(bgp: &mut Bgp, from: usize, route: EvpnRoute, attr: Option<BgpAttr>) {
     let mut top = BgpTop {
         router_id: &bgp.router_id,
         srv6_ipv6_export: bgp.srv6_ipv6_export.as_ref(),
@@ -1668,7 +1753,113 @@ fn withdraw_route(bgp: &mut Bgp, from: usize, route: &EvpnRoute) {
         vrf_transport_v6: None,
         as_sets_withdraw: bgp.as_sets_withdraw,
     };
-    route_evpn_withdraw(from, route, &mut top, &mut bgp.peers);
+    match attr {
+        Some(attr) => route_evpn_update(
+            from,
+            &route,
+            "10.0.0.11".parse().unwrap(),
+            &attr,
+            &mut top,
+            &mut bgp.peers,
+            false,
+        ),
+        None => route_evpn_withdraw(from, &route, &mut top, &mut bgp.peers),
+    }
+}
+
+/// A remote PE's leaf-label route (RFC 8317 §4.2.1) with `label`.
+fn leaf_ad_route(pe: &str, label: u32) -> (EvpnRoute, BgpAttr) {
+    let rd = rd_from_router_id_vni(pe.parse().unwrap(), 0).unwrap();
+    let route = EvpnRoute::EthernetAd(bgp_packet::EvpnEthernetAd {
+        id: 0,
+        rd,
+        esi: ZERO_ESI,
+        ether_tag: MAX_ET,
+        label: 0,
+    });
+    let mut attr = BgpAttr::new();
+    attr.nexthop = Some(BgpNexthop::Evpn(pe.parse().unwrap()));
+    attr.local_pref = Some(LocalPref::default());
+    attr.ecom = Some(ExtCommunity::from([
+        evpn_route_target(65000, 100),
+        ExtCommunityValue::etree_leaf_label(label),
+    ]));
+    (route, attr)
+}
+
+/// A remote PE's MPLS IMET for VNI 100 with BUM `label`.
+fn mpls_imet_route(pe: &str, label: u32) -> (EvpnRoute, BgpAttr) {
+    let rd = rd_from_router_id_vni(pe.parse().unwrap(), 100).unwrap();
+    let route = EvpnRoute::Multicast(bgp_packet::EvpnMulticast {
+        id: 0,
+        rd,
+        ether_tag: 0,
+        addr: pe.parse().unwrap(),
+    });
+    let mut attr = BgpAttr::new();
+    attr.nexthop = Some(BgpNexthop::Evpn(pe.parse().unwrap()));
+    attr.local_pref = Some(LocalPref::default());
+    attr.ecom = Some(ExtCommunity::from([evpn_route_target(65000, 100)]));
+    attr.pmsi_tunnel = Some(bgp_packet::PmsiTunnel {
+        flags: 0,
+        tunnel_type: bgp_packet::PmsiTunnel::TUNNEL_INGRESS_REPLICATION,
+        vni: label,
+        endpoint: pe.parse().unwrap(),
+        tree_id: None,
+    });
+    (route, attr)
+}
+
+/// A remote PE's leaf label and BUM label make a leaf slot toward it in
+/// each EVI with a local leaf AC; the leaf-label route gone takes the slot
+/// with it. A reserved leaf label makes none.
+#[tokio::test]
+async fn a_remote_leaf_label_makes_a_leaf_slot() {
+    let (mut bgp, mut rib) = etree_mpls_bgp();
+    bgp.etree_label_reconcile();
+    etree_messages(&mut rib);
+    let (from, _rx) = peer(&mut bgp, "10.0.0.11", false);
+    let pe = "10.0.0.11";
+
+    let (imet, imet_attr) = mpls_imet_route(pe, 2200);
+    feed_evpn(&mut bgp, from, imet, Some(imet_attr));
+    let (ad, ad_attr) = leaf_ad_route(pe, 2800);
+    feed_evpn(&mut bgp, from, ad.clone(), Some(ad_attr));
+    bgp.vpws_df_drain();
+    assert_eq!(
+        etree_messages(&mut rib),
+        vec![format!("add 100 {pe} 2200 2800")]
+    );
+    assert_eq!(
+        bgp.etree_peer_leaf_labels(),
+        BTreeMap::from([(pe.parse().unwrap(), 2800)])
+    );
+
+    feed_evpn(&mut bgp, from, ad, None);
+    bgp.vpws_df_drain();
+    assert_eq!(etree_messages(&mut rib), vec![format!("del 100 {pe}")]);
+
+    let (ad, ad_attr) = leaf_ad_route(pe, 15);
+    feed_evpn(&mut bgp, from, ad, Some(ad_attr));
+    bgp.vpws_df_drain();
+    assert_eq!(
+        etree_messages(&mut rib),
+        Vec::<String>::new(),
+        "reserved label"
+    );
+}
+
+/// A leaf label drawn before the cradle tee existed never reached it: when
+/// a tee comes up (`RibRx::CradleUp`) the label and the leaf slots are sent
+/// again.
+#[tokio::test]
+async fn a_new_tee_gets_the_leaf_label_again() {
+    let (mut bgp, mut rib) = etree_mpls_bgp();
+    bgp.etree_label_reconcile();
+    let label = bgp.etree_leaf_label.expect("a leaf label");
+    assert_eq!(etree_messages(&mut rib), vec![format!("label {label}")]);
+    bgp.process_rib_msg(RibRx::CradleUp);
+    assert_eq!(etree_messages(&mut rib), vec![format!("label {label}")]);
 }
 
 /// An eBGP spine that sends our own Type-2 back is loop-rejected, and the
@@ -1715,6 +1906,6 @@ async fn looped_own_imet_does_not_flood_to_ourselves() {
         ether_tag: 0,
         addr: IpAddr::V4(RID),
     });
-    withdraw_route(&mut bgp, from, &route);
+    feed_evpn(&mut bgp, from, route, None);
     assert!(bgp.local_rib.evpn_flood.remote_vteps(100).is_empty());
 }
