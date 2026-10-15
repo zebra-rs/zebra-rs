@@ -1861,3 +1861,51 @@ async fn a_new_tee_gets_the_leaf_label_again() {
     bgp.process_rib_msg(RibRx::CradleUp);
     assert_eq!(etree_messages(&mut rib), vec![format!("label {label}")]);
 }
+
+/// An eBGP spine that sends our own Type-2 back is loop-rejected, and the
+/// withdraw re-selects our originated path. That path must not be
+/// installed (it would point our local MAC at our own VTEP), nor its
+/// sequence number taken for a remote one.
+#[tokio::test]
+async fn looped_own_macip_is_not_installed() {
+    let (mut bgp, mut rib) = bgp_with_rib();
+    bgp.advertise_all_vni = true;
+    let (from, _rx) = peer(&mut bgp, "10.1.1.1", true);
+    let mac = MacAddr::from([2, 0, 0, 0, 1, 1]);
+    // A move was seen before: our route carries sequence number 5.
+    bgp.local_rib.evpn_remote_mac_seq.insert((100, mac), 4);
+    let local = crate::rib::api::FdbEntry {
+        vni: 100,
+        mac,
+        ip: None,
+        ifindex: 7,
+        bridge_ifindex: 5,
+        flags: 0,
+        vxlan_local: Some(IpAddr::V4(RID)),
+    };
+    bgp.evpn_originate_macip(&local);
+    mac_messages(&mut rib);
+
+    let own_rd = rd_from_router_id_vni(RID, 100).unwrap();
+    withdraw_macip(&mut bgp, from, own_rd, mac, None);
+    assert_eq!(mac_messages(&mut rib), vec![]);
+    assert_eq!(bgp.local_rib.evpn_remote_mac_seq[&(100, mac)], 4);
+}
+
+/// The same for our own Type-3: our VTEP must not join our flood list.
+#[tokio::test]
+async fn looped_own_imet_does_not_flood_to_ourselves() {
+    let (mut bgp, _rib) = bgp_with_rib();
+    bgp.advertise_all_vni = true;
+    let (from, _rx) = peer(&mut bgp, "10.1.1.1", true);
+    bgp.evpn_originate_imet(100, IpAddr::V4(RID));
+
+    let route = EvpnRoute::Multicast(EvpnMulticast {
+        id: 0,
+        rd: rd_from_router_id_vni(RID, 100).unwrap(),
+        ether_tag: 0,
+        addr: IpAddr::V4(RID),
+    });
+    feed_evpn(&mut bgp, from, route, None);
+    assert!(bgp.local_rib.evpn_flood.remote_vteps(100).is_empty());
+}

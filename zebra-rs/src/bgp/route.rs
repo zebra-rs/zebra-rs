@@ -10357,6 +10357,13 @@ fn route_evpn_export_selected(
 
     match prefix {
         EvpnPrefix::MacIp { mac, ip, .. } => {
+            // Our own Type-2 is never a remote binding. A looped UPDATE
+            // (treat-as-withdraw) re-selects only our path; installing it
+            // would point the local MAC at our own VTEP, and recording its
+            // sequence as a remote one would inflate our next one.
+            if best.is_originated() {
+                return;
+            }
             // Defensive: the local FDB->BGP origination path skips
             // multicast MACs in `fdb_entry_from_neighbor`, but a peer
             // running different software may still have advertised
@@ -10500,6 +10507,11 @@ fn route_evpn_export_selected(
             // classify the remote as Regular-IR vs Replicator-AR (PMSI tunnel
             // type 0x0A carries the AR-IP) and reconcile the role-aware flood
             // list, rather than blindly flooding toward the originating IP.
+            // Our own IMET (a looped UPDATE, as for Type-2) is not a remote
+            // PE: our VTEP never joins our own flood list.
+            if best.is_originated() {
+                return;
+            }
             if let Some(vni) = extract_vni_from_attr(&best.attr) {
                 // RFC 9252 §6.4: a remote End.DT2M SID on the IMET is a BUM
                 // flood-set member for this VNI. Tee it to cradle as a
