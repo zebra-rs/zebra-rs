@@ -1,0 +1,29 @@
+# z2 — a root-only EVPN/VXLAN PE: it needs no E-Tree configuration at all
+# (RFC 8317 §7). It runs the managed cradle engine, so the leaf flag on z1's
+# Type-2s can be seen reaching its data plane FDB (`show ebpf l2`).
+system:
+  ebpf:
+    enabled: true
+interface:
+- if-name: r2
+  ebpf:
+    enabled: true
+vxlan:
+- name: vxlan10
+  vni: 10
+  local-address: 192.168.0.2
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.2
+    afi-safi:
+    - name: evpn
+      advertise-all-vni: true
+    neighbor:
+    - remote-address: 192.168.0.1
+      enabled: true
+      remote-as: 65001
+      afi-safi:
+      - name: evpn
+        enabled: true
