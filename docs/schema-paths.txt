@@ -28,6 +28,8 @@
 /router/bgp/afi-safi/ethernet-segment/interface	leaf
 /router/bgp/afi-safi/ethernet-segment/redundancy-mode	leaf
 /router/bgp/afi-safi/ethernet-segment/role-signaling	leaf
+/router/bgp/afi-safi/etree	container
+/router/bgp/afi-safi/etree/leaf-interface	list keys=name
 /router/bgp/afi-safi/evi	list keys=id
 /router/bgp/afi-safi/evi/bridge	leaf
 /router/bgp/afi-safi/igmp-mld-proxy	leaf

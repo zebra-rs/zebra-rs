@@ -8,8 +8,9 @@ Feature: EVPN E-Tree leaf ACs: roles in the data plane, Type-2 colouring (RFC 83
   Leaf-Indication flag, so a receiving PE carries that flag into its own
   data plane FDB.
 
-  `router bgp afi-safi evpn etree` exists only with `--feature etree`, and
-  a leaf AC needs the cradle data plane: the kernel bridge cannot keep
+  `router bgp afi-safi evpn etree` is always available (the `etree`
+  feature no longer gates it, so the daemons start without it), and a
+  leaf AC needs the cradle data plane: the kernel bridge cannot keep
   leaves apart, so a commit naming one without `system ebpf` (or
   `system cradle`) is refused. zebra-rs's engine supervisor sends each
   role (`SetEtreeRole`) before it attaches the port, and again to a
@@ -62,8 +63,8 @@ Feature: EVPN E-Tree leaf ACs: roles in the data plane, Type-2 colouring (RFC 83
     And I add address "10.10.0.2/24" to interface "eth0" in namespace "h2"
     And I add address "10.10.0.3/24" to interface "eth0" in namespace "h3"
     And I add address "10.10.0.4/24" to interface "eth0" in namespace "h4"
-    And I start zebra-rs in namespace "z1" with feature "etree"
-    And I start zebra-rs in namespace "z2" with feature "etree"
+    And I start zebra-rs in namespace "z1"
+    And I start zebra-rs in namespace "z2"
     And I apply config "z1.yaml" to namespace "z1"
     And I apply config "z2.yaml" to namespace "z2"
     # br10 carries VNI 10 on each PE, with the access ports in it.

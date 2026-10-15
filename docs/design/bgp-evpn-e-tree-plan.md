@@ -241,10 +241,12 @@ router bgp <asn>
 - Adding BGP config paths trips `bgp_config_audit_tests`. Regenerate with
   `ZEBRA_UPDATE_AUDIT_DOCS=1 cargo test -p zebra-rs bgp_config_audit`, and
   bump the `docs/orphan-report.txt` Total/Handled counts by hand.
-- Until BUM filtering exists for the configured encapsulation, the subtree
-  stays behind a YANG `feature`/`if-feature` gate (decision D5, adopted:
-  `--feature etree`, `zebra-features.yang`). A half-built E-Tree that floods
-  leaf BUM to leaves must not look finished.
+- Until BUM filtering existed for every encapsulation, the subtree stayed
+  behind a YANG `feature`/`if-feature` gate (decision D5: `--feature
+  etree`, `zebra-features.yang`), so a half-built E-Tree that flooded leaf
+  BUM to leaves would not look finished. The gate was lifted after phase 5
+  (D5); the feature is still declared, gating nothing, so `--feature
+  etree` is accepted without a warning.
 
 ### 5.3 Multihomed leaves
 
@@ -622,8 +624,9 @@ finding).
 
 **Status: phase 2b is implemented** on `evpn-e-tree`.
 - **Config.** `router bgp afi-safi evpn etree leaf-interface <if>` (D1)
-  exists only with `--feature etree` (D5). A commit naming a leaf AC
-  without the cradle data plane is refused (D3, `config::check`).
+  existed only with `--feature etree` (D5) until the gate was lifted after
+  phase 5. A commit naming a leaf AC without the cradle data plane is
+  refused (D3, `config::check`).
 - **Roles go through the cradle supervisor, not a RIB message.** The
   supervisor (`cradle/inst.rs`) already receives `router bgp` config (the
   EVI bridge) and owns `SetPort`. So it sends every `SetEtreeRole` before
@@ -876,6 +879,13 @@ and the memory notes):
 - **D5 — Gating.** Decided: keep `etree` behind a YANG feature until BUM
   filtering exists for the configured encapsulation. The alternative was to
   ship each phase visible with `show` naming what is not yet filtered.
+  **Lifted 2026-10-15** once phases 3–5 filtered BUM over MPLS, VXLAN and
+  SRv6: the `if-feature` statements are gone and E-Tree is always
+  available; `feature etree` stays declared, gating nothing, so existing
+  `--feature etree` invocations still start without a warning. The known
+  limits (VXLAN mixed PEs, the SRv6 argument-length mismatch, no third-party
+  interop yet) are documented and, for mixed PEs, shown by `show bgp evpn
+  etree`.
 - **D6 — The SRv6 leaf argument.** Decided 2026-10-15 as recommended
   (§8.6): RFC 9819 placement, AL 16 right after the function, no
   transposition, one leaf argument per PE (value 1), AL 16 on a VNI's IMET

@@ -9,8 +9,9 @@ MAC learned on a leaf AC advertised with the E-Tree community's
 Leaf-Indication flag, so a receiving PE carries that flag into its own
 data plane FDB.
 
-`router bgp afi-safi evpn etree` exists only with `--feature etree`, and
-a leaf AC needs the cradle data plane: the kernel bridge cannot keep
+`router bgp afi-safi evpn etree` is always available (the `etree`
+feature no longer gates it, so the daemons start without it), and a
+leaf AC needs the cradle data plane: the kernel bridge cannot keep
 leaves apart, so a commit naming one without `system ebpf` (or
 `system cradle`) is refused. zebra-rs's engine supervisor sends each
 role (`SetEtreeRole`) before it attaches the port, and again to a

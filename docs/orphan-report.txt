@@ -23,8 +23,8 @@ in src/bgp/config.rs (an empty relative path, easy to miss when
 grepping for registrations), and it creates/tears down the peer when
 the list entry itself is set/deleted.
 
-Total settable schema nodes: 368
-Handled: 353
+Total settable schema nodes: 369
+Handled: 354
 Orphans: 3
 
 Note: these orphans have no config callback but are kept intentionally.
@@ -117,7 +117,6 @@ cadence.
   /community-list/seq/action
   /router/bgp/adj-rib-out-hook/ipv4-unicast/export
   /router/bgp/adj-rib-out-hook/l2vpn-evpn/export
-  /router/bgp/afi-safi/etree/leaf-interface
   /router/bgp/loc-rib-hook/ipv4-unicast/import
   /router/bgp/loc-rib-hook/ipv4-unicast/withdraw
   /router/bgp/loc-rib-hook/l2vpn-evpn/import
@@ -136,7 +135,4 @@ kept. The community-list handlers (config_com_list* in
 src/bgp/config.rs) are registered but no loaded YANG module defines a
 community-list node anywhere in the configure tree — the surface was
 never wired; wire it or drop the handlers (see
-docs/design/bgp-config-audit-followups.md). The etree leaf-interface
-handler (EVPN E-Tree) is real: its schema node is gated on `if-feature
-feat:etree` (zebra-bgp-evpn.yang), and the audit loads the schema with no
-optional features enabled.
+docs/design/bgp-config-audit-followups.md).

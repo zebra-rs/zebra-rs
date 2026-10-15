@@ -20,9 +20,6 @@ module zebra-bgp-evpn {
     prefix inet;
   }
 
-  import zebra-features {
-    prefix feat;
-  }
 
   organization
     "zebra-rs";
@@ -834,7 +831,6 @@ module zebra-bgp-evpn {
       }
     }
     container etree {
-      if-feature feat:etree;
       ext:help "EVPN E-Tree: root and leaf attachment circuits (RFC 8317)";
       description
         "EVPN E-Tree (RFC 8317): every attachment circuit is a root or a
