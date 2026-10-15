@@ -1909,3 +1909,270 @@ async fn looped_own_imet_does_not_flood_to_ourselves() {
     feed_evpn(&mut bgp, from, route, None);
     assert!(bgp.local_rib.evpn_flood.remote_vteps(100).is_empty());
 }
+
+/// A link as the RIB announces it; `vni` makes it a VXLAN device.
+fn rib_link(index: u32, name: &str, vni: Option<u32>) -> crate::rib::Link {
+    crate::rib::Link {
+        index,
+        name: name.to_string(),
+        mtu: 1500,
+        original_mtu: 1500,
+        metric: 1,
+        flags: Default::default(),
+        link_type: crate::rib::LinkType::Ethernet,
+        label: false,
+        mac: None,
+        addr4: Vec::new(),
+        addr6: Vec::new(),
+        master: Some(5),
+        vni,
+        vrf_table: None,
+        bridge: false,
+        vxlan_local: None,
+        vxlan_metadata: None,
+        parent: None,
+        vlan_id: None,
+        mtu_error: None,
+    }
+}
+
+/// A PE with EVPN over VXLAN advertising VNI 100 from VTEP `RID`, whose
+/// bridge holds `vxlan100` (ifindex 9), the E-Tree leaf AC `ce1` (7) and
+/// the root AC `ce2` (8).
+fn etree_vxlan_bgp() -> (Bgp, mpsc::UnboundedReceiver<crate::rib::client::RibInbound>) {
+    let (mut bgp, rib) = bgp_with_rib();
+    bgp.advertise_all_vni = true;
+    bgp.etree_leaf_ifs.insert("ce1".to_string());
+    for (index, name, vni) in [
+        (9, "vxlan100", Some(100)),
+        (7, "ce1", None),
+        (8, "ce2", None),
+    ] {
+        bgp.process_rib_msg(RibRx::LinkAdd(rib_link(index, name, vni)));
+        bgp.process_rib_msg(RibRx::L2PortEvis {
+            ifindex: index,
+            vnis: BTreeSet::from([100]),
+        });
+    }
+    bgp.process_rib_msg(RibRx::VxlanAdd {
+        vni: 100,
+        vtep_local: IpAddr::V4(RID),
+    });
+    (bgp, rib)
+}
+
+/// Our own selected IMET for VNI 100.
+fn local_imet(bgp: &Bgp) -> BgpAttr {
+    let rd = rd_from_router_id_vni(RID, 100).unwrap();
+    let prefix = EvpnPrefix::InclusiveMulticast {
+        eth_tag: 0,
+        orig: IpAddr::V4(RID),
+    };
+    (*bgp.local_rib.evpn[&rd].selected[&prefix].attr).clone()
+}
+
+/// The V1+ scheme (plan §8.5): a VNI whose ACs here are all leaves has its
+/// IMET coloured with the Leaf flag. A root AC in it, or none of the ACs a
+/// leaf, leaves it uncoloured; the VXLAN device is no AC. Not under MPLS.
+#[tokio::test]
+async fn a_vni_with_leaf_acs_only_colours_its_imet() {
+    let (mut bgp, _rib) = etree_vxlan_bgp();
+    assert!(!has_etree_leaf(&local_imet(&bgp)), "ce2 is a root");
+    assert_eq!(bgp.etree_mixed_pes(), BTreeMap::new(), "one mixed PE");
+
+    // ce2 leaves the bridge: ce1 is the only AC, and the VXLAN device is
+    // not one.
+    bgp.process_rib_msg(RibRx::L2PortEvis {
+        ifindex: 8,
+        vnis: BTreeSet::new(),
+    });
+    assert!(has_etree_leaf(&local_imet(&bgp)));
+    assert_eq!(bgp.etree_leaf_only_vnis(), BTreeSet::from([100]));
+
+    // It comes back: a root again.
+    bgp.process_rib_msg(RibRx::L2PortEvis {
+        ifindex: 8,
+        vnis: BTreeSet::from([100]),
+    });
+    assert!(!has_etree_leaf(&local_imet(&bgp)));
+
+    // ce2 deleted: leaves only.
+    bgp.process_rib_msg(RibRx::LinkDel(8));
+    assert!(has_etree_leaf(&local_imet(&bgp)));
+
+    // ce1 a root: no leaf AC at all.
+    bgp.etree_leaf_ifs.clear();
+    bgp.etree_label_reconcile();
+    assert!(!has_etree_leaf(&local_imet(&bgp)));
+
+    // The leaf flag is a VXLAN signal: MPLS has the leaf label.
+    bgp.etree_leaf_ifs.insert("ce1".to_string());
+    bgp.evpn_encap = super::super::inst::EvpnEncap::Mpls;
+    bgp.etree_label_reconcile();
+    assert_eq!(bgp.etree_leaf_only_vnis(), BTreeSet::new());
+}
+
+/// A remote PE's VXLAN IMET for VNI 100, coloured leaf-only or not, or in
+/// the rfc8317bis form (a leaf VNI in the field).
+fn vxlan_imet_route(pe: &str, etree: Option<ExtCommunityValue>) -> (EvpnRoute, BgpAttr) {
+    let rd = rd_from_router_id_vni(pe.parse().unwrap(), 100).unwrap();
+    let route = EvpnRoute::Multicast(bgp_packet::EvpnMulticast {
+        id: 0,
+        rd,
+        ether_tag: 0,
+        addr: pe.parse().unwrap(),
+    });
+    let mut attr = BgpAttr::new();
+    attr.nexthop = Some(BgpNexthop::Evpn(pe.parse().unwrap()));
+    attr.local_pref = Some(LocalPref::default());
+    let mut ecom = ExtCommunity::from([evpn_route_target(65000, 100), evpn_encap_vxlan()]);
+    ecom.0.extend(etree);
+    attr.ecom = Some(ecom);
+    attr.pmsi_tunnel = Some(bgp_packet::PmsiTunnel {
+        flags: 0,
+        tunnel_type: bgp_packet::PmsiTunnel::TUNNEL_INGRESS_REPLICATION,
+        vni: 100,
+        endpoint: pe.parse().unwrap(),
+        tree_id: None,
+    });
+    (route, attr)
+}
+
+/// The `SetEtreeRemote` tees BGP sent the RIB.
+fn etree_remote_messages(
+    rx: &mut mpsc::UnboundedReceiver<crate::rib::client::RibInbound>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    while let Ok(inbound) = rx.try_recv() {
+        if let crate::rib::Message::CradleEtreeRemote {
+            bd,
+            remote,
+            leaf_only,
+        } = inbound.msg
+        {
+            out.push(format!("{bd} {remote} {leaf_only}"));
+        }
+    }
+    out
+}
+
+/// A remote PE's leaf-only IMET marks it for cradle (`SetEtreeRemote`);
+/// the colour gone, or the IMET withdrawn, clears the mark. The
+/// rfc8317bis form is not a mark, and nothing is teed without a local leaf
+/// AC. A new tee gets the marks again.
+#[tokio::test]
+async fn a_leaf_only_imet_marks_its_pe() {
+    let (mut bgp, mut rib) = etree_vxlan_bgp();
+    etree_remote_messages(&mut rib);
+    let (from, _rx) = peer(&mut bgp, "10.0.0.11", false);
+    let pe = "10.0.0.11";
+
+    let (imet, attr) = vxlan_imet_route(pe, Some(ExtCommunityValue::etree_leaf()));
+    feed_evpn(&mut bgp, from, imet.clone(), Some(attr));
+    bgp.vpws_df_drain();
+    assert_eq!(
+        etree_remote_messages(&mut rib),
+        vec![format!("100 {pe} true")]
+    );
+
+    bgp.process_rib_msg(RibRx::CradleUp);
+    assert_eq!(
+        etree_remote_messages(&mut rib),
+        vec![format!("100 {pe} true")]
+    );
+
+    let (_, attr) = vxlan_imet_route(pe, None);
+    feed_evpn(&mut bgp, from, imet.clone(), Some(attr));
+    bgp.vpws_df_drain();
+    assert_eq!(
+        etree_remote_messages(&mut rib),
+        vec![format!("100 {pe} false")]
+    );
+
+    let bis = bgp_packet::EtreeEc {
+        flags: bgp_packet::EtreeEc::LEAF,
+        field: 5100,
+    };
+    let (_, attr) = vxlan_imet_route(pe, Some(bis.into()));
+    feed_evpn(&mut bgp, from, imet.clone(), Some(attr));
+    bgp.vpws_df_drain();
+    assert_eq!(etree_remote_messages(&mut rib), Vec::<String>::new());
+
+    let (_, attr) = vxlan_imet_route(pe, Some(ExtCommunityValue::etree_leaf()));
+    feed_evpn(&mut bgp, from, imet.clone(), Some(attr));
+    bgp.vpws_df_drain();
+    etree_remote_messages(&mut rib);
+    feed_evpn(&mut bgp, from, imet.clone(), None);
+    bgp.vpws_df_drain();
+    assert_eq!(
+        etree_remote_messages(&mut rib),
+        vec![format!("100 {pe} false")]
+    );
+
+    // No leaf AC here: no marks.
+    bgp.etree_leaf_ifs.clear();
+    bgp.etree_label_reconcile();
+    let (_, attr) = vxlan_imet_route(pe, Some(ExtCommunityValue::etree_leaf()));
+    feed_evpn(&mut bgp, from, imet, Some(attr));
+    bgp.vpws_df_drain();
+    assert_eq!(etree_remote_messages(&mut rib), Vec::<String>::new());
+}
+
+/// A remote PE with a leaf MAC and no leaf-only IMET is mixed; with this
+/// PE mixed too, VNI 100's leaf BUM is not isolated between them. A
+/// leaf-only IMET from that PE takes it off the list.
+#[tokio::test]
+async fn two_mixed_pes_are_reported() {
+    let (mut bgp, _rib) = etree_vxlan_bgp();
+    let (from, _rx) = peer(&mut bgp, "10.0.0.11", false);
+    let pe: IpAddr = "10.0.0.11".parse().unwrap();
+    let rd = rd_from_router_id_vni(Ipv4Addr::new(10, 0, 0, 11), 100).unwrap();
+    let mac = EvpnRoute::Mac(bgp_packet::EvpnMac {
+        id: 0,
+        rd,
+        esi: [0; 10],
+        ether_tag: 0,
+        mac: [2, 0, 0, 0, 0xe2, 1],
+        ip: None,
+        vni: 100,
+        label2: None,
+    });
+    let mut attr = BgpAttr::new();
+    attr.nexthop = Some(BgpNexthop::Evpn(pe));
+    attr.local_pref = Some(LocalPref::default());
+    attr.ecom = Some(ExtCommunity::from([
+        evpn_route_target(65000, 100),
+        evpn_encap_vxlan(),
+        ExtCommunityValue::etree_leaf(),
+    ]));
+    feed_evpn(&mut bgp, from, mac, Some(attr));
+    let (imet, attr) = vxlan_imet_route("10.0.0.11", None);
+    feed_evpn(&mut bgp, from, imet.clone(), Some(attr));
+    assert_eq!(
+        bgp.etree_mixed_pes(),
+        BTreeMap::from([(100, vec![None, Some(pe)])])
+    );
+    let show = |bgp: &Bgp, json| {
+        super::super::show::show_bgp_evpn_etree(
+            bgp,
+            crate::config::Args(std::collections::VecDeque::new()),
+            json,
+        )
+        .unwrap()
+    };
+    assert!(
+        show(&bgp, false).contains(
+            "Warning: EVI 100: leaf BUM not isolated between mixed PEs: local, 10.0.0.11"
+        )
+    );
+
+    let (_, attr) = vxlan_imet_route("10.0.0.11", Some(ExtCommunityValue::etree_leaf()));
+    feed_evpn(&mut bgp, from, imet, Some(attr));
+    assert_eq!(bgp.etree_mixed_pes(), BTreeMap::new());
+    let text = show(&bgp, false);
+    assert!(!text.contains("Warning"));
+    assert!(text.contains("Remote leaf-only PEs:\n    EVI 100        10.0.0.11\n"));
+    let json: serde_json::Value = serde_json::from_str(&show(&bgp, true)).unwrap();
+    assert_eq!(json["remoteLeafOnly"][0]["pes"][0], "10.0.0.11");
+    assert_eq!(json["bumFiltered"], true);
+}

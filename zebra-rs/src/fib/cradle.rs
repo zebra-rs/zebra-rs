@@ -172,6 +172,10 @@ struct CradleMirror {
     /// slots `(bd, PE)` → `(its BUM label, its leaf label)`.
     etree_leaf_label: u32,
     repl_slots_mpls_leaf: HashMap<(u32, IpAddr), (u32, u32)>,
+    /// EVPN E-Tree over VXLAN (the V1+ scheme): the `(bd, remote VTEP)`
+    /// pairs whose PE is leaf-only in that bridge domain (`SetEtreeRemote`).
+    /// Only the marks are kept; cradle holds no row for any other remote.
+    etree_remotes: HashSet<(u32, IpAddr)>,
 }
 
 impl CradleMirror {
@@ -684,6 +688,11 @@ impl CradleFib {
         for ((vni, pe), (label, leaf_label)) in &m.repl_slots_mpls_leaf {
             self.repl_slot_add_mpls_leaf(*vni, *pe, *label, *leaf_label)
                 .await;
+        }
+        // E-Tree over VXLAN: the leaf-only remotes (a mark may precede its
+        // slot, so the order against the VXLAN slots above is free).
+        for (bd, remote) in &m.etree_remotes {
+            self.set_etree_remote(*bd, *remote, true).await;
         }
         for ((port, vid, table), (remote, local_sid, local_vni, local_label)) in &m.xconnects {
             self.xconnect_add(
@@ -2273,6 +2282,36 @@ impl CradleFib {
         .await;
         if let Err(e) = result {
             tracing::warn!("fib: cradle set_etree_leaf_label {label} failed: {e}");
+        }
+    }
+
+    /// EVPN E-Tree over VXLAN (RFC 8317, the V1+ scheme): the PE at VTEP
+    /// `remote` is (`leaf_only`) or is no longer leaf-only in bridge domain
+    /// `bd`. Its VXLAN BUM is then kept off our leaf ports, and our leaves'
+    /// BUM is not sent to it. Mirrored; replayed after the VXLAN slots.
+    pub async fn set_etree_remote(&self, bd: u32, remote: IpAddr, leaf_only: bool) {
+        {
+            let mut m = self.mirror.lock().await;
+            if leaf_only {
+                m.etree_remotes.insert((bd, remote));
+            } else {
+                m.etree_remotes.remove(&(bd, remote));
+            }
+        }
+        let result = async {
+            self.client()
+                .await?
+                .set_etree_remote(pb::EtreeRemote {
+                    bd,
+                    remote: remote.to_string(),
+                    leaf_only,
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle set_etree_remote bd {bd} {remote} {leaf_only} failed: {e}");
         }
     }
 

@@ -70,6 +70,18 @@ message EtreeLeafLabel {
   uint32 label = 1;
 }
 
+// EVPN E-Tree over VXLAN (RFC 8317; the V1+ scheme: the IMET carries the
+// E-Tree EC when a PE's ACs in the domain are all leaves): the PE at
+// `remote` (its VTEP) is leaf-only in bridge domain `bd`. Its VXLAN BUM is
+// then kept off our leaf ports (egress), and our leaves' BUM is not sent to
+// it (its slot serves roots only). Replace semantics per (bd, remote);
+// `leaf_only = false` clears it. May precede the replication slot.
+message EtreeRemote {
+  uint32 bd = 1;
+  string remote = 2;
+  bool leaf_only = 3;
+}
+
 // The other PEs attached to Ethernet Segment `esi` — their VTEP / overlay
 // source addresses, as learned from the Type-4 ES routes. Replace
 // semantics. BUM that arrives from one of them is never sent back onto the
@@ -649,6 +661,7 @@ service Cradle {
   // EVPN E-Tree: a local port's leaf/root role (RFC 8317).
   rpc SetEtreeRole(EtreeRole) returns (Empty);
   rpc SetEtreeLeafLabel(EtreeLeafLabel) returns (Empty);
+  rpc SetEtreeRemote(EtreeRemote) returns (Empty);
   rpc AddFdbLocal(FdbLocal) returns (Empty);
   // Flush locally-learned FDB entries (never control-plane-installed remote
   // entries). WatchFdb subscribers observe the removals as age events.

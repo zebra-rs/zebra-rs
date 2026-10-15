@@ -1013,6 +1013,12 @@ pub struct Bgp {
     /// The leaf-label replication slots last teed: `(bd, PE, its BUM
     /// label, its leaf label)`.
     pub(super) etree_slots_sent: BTreeSet<(u32, std::net::IpAddr, u32, u32)>,
+    /// EVPN E-Tree over VXLAN (the V1+ scheme, plan §8.5): the VNIs whose
+    /// ACs on this PE are all leaves, so whose IMET carries the E-Tree EC
+    /// with the Leaf flag (`etree_imet_reconcile`).
+    pub(super) etree_imet_leaf_vnis: BTreeSet<u32>,
+    /// The leaf-only remote PEs last teed (`SetEtreeRemote`): `(bd, VTEP)`.
+    pub(super) etree_remotes_sent: BTreeSet<(u32, std::net::IpAddr)>,
     /// Configured hostname for the local BGP speaker. Advertised in
     /// the FQDN capability (capability code 73). When None, falls back
     /// to the OS hostname; if that also fails, no FQDN capability is
@@ -1369,6 +1375,11 @@ pub struct Bgp {
     /// is attributed to the port (`Bgp::port_evis`).
     pub link_name_by_index: BTreeMap<u32, String>,
     pub link_master: BTreeMap<u32, u32>,
+    /// The links that are VXLAN devices (`Link.vni` set), from
+    /// `RibRx::LinkAdd`. A VXLAN device is a port of its bridge, so it is
+    /// in `l2_port_evis` with its VNI, but it is not an attachment circuit
+    /// (`Bgp::etree_ac_vnis`). `RibRx::VxlanAdd` carries no ifindex.
+    pub vxlan_links: BTreeSet<u32>,
     /// Per-ifindex IPv6 link-local registry, populated from
     /// `RibRx::AddrAdd`/`AddrDel`. Source of the v6 next-hop emitted
     /// in MP_REACH for IPv4-unicast advertisements on interface peers
@@ -1560,6 +1571,8 @@ impl Bgp {
             etree_leaf_ad: None,
             etree_leaf_label_teed: None,
             etree_slots_sent: BTreeSet::new(),
+            etree_imet_leaf_vnis: BTreeSet::new(),
+            etree_remotes_sent: BTreeSet::new(),
             hostname: None,
             no_fib_install: false,
             fast_external_failover: true,
@@ -1629,6 +1642,7 @@ impl Bgp {
             link_index_by_name: BTreeMap::new(),
             link_name_by_index: BTreeMap::new(),
             link_master: BTreeMap::new(),
+            vxlan_links: BTreeSet::new(),
             interface_addrs: super::interface_addrs::InterfaceAddrs::new(),
             connected_subnets: super::connected::ConnectedSubnets::new(),
             update_groups: super::update_group::empty_map(),
@@ -4991,6 +5005,17 @@ impl Bgp {
                     self.evpn_reconcile_ad_evi_for_port(link.index);
                     self.evpn_es_df_sync();
                 }
+                // Whether the link is a VXLAN device decides whether it
+                // counts as an AC of its VNI, so which VNIs have leaf ACs
+                // only (the E-Tree IMET colour).
+                let vxlan_changed = if link.vni.is_some() {
+                    self.vxlan_links.insert(link.index)
+                } else {
+                    self.vxlan_links.remove(&link.index)
+                };
+                if vxlan_changed {
+                    self.etree_imet_reconcile();
+                }
                 // An `interface-neighbor` typed before RIB announced
                 // this link (config replay at startup races the link
                 // dump) materializes its dormant peer now, so the
@@ -5059,6 +5084,7 @@ impl Bgp {
                     .remove(&ifindex)
                     .is_some_and(|name| self.etree_leaf_ifs.contains(&name));
                 self.link_master.remove(&ifindex);
+                self.vxlan_links.remove(&ifindex);
                 // A deleted link's addresses are not reliably withdrawn
                 // one by one (a veth moved into another netns emits only
                 // RTM_DELLINK), so sweep its contributions out of the
@@ -5072,9 +5098,13 @@ impl Bgp {
                 self.connected_subnets.purge_ifindex(ifindex);
                 self.refresh_connected();
                 super::config::bfd_reconcile_all(self);
-                // A leaf AC gone takes its EVIs out of the leaf set.
+                // A leaf AC gone takes its EVIs out of the leaf set; any
+                // AC gone may leave a VNI with leaves only (its IMET
+                // colour).
                 if etree_leaf {
                     self.etree_label_reconcile();
+                } else {
+                    self.etree_imet_reconcile();
                 }
             }
             RibRx::LinkUp(ifindex) => {
@@ -5203,6 +5233,7 @@ impl Bgp {
                 // copy dropped here as malformed.
                 self.etree_leaf_label_teed = None;
                 self.etree_slots_sent.clear();
+                self.etree_remotes_sent.clear();
                 self.etree_label_reconcile();
             }
             RibRx::L2PortEvis { ifindex, vnis } => {
@@ -5228,6 +5259,10 @@ impl Bgp {
                         .is_some_and(|name| self.etree_leaf_ifs.contains(name))
                     {
                         self.etree_label_reconcile();
+                    } else {
+                        // Any AC's EVIs decide which VNIs have leaf ACs
+                        // only (the E-Tree IMET colour).
+                        self.etree_imet_reconcile();
                     }
                 }
             }
@@ -5961,8 +5996,9 @@ impl Bgp {
     /// is MPLS and an EVI has a leaf AC, and handed back otherwise. Like the
     /// ESI label it installs no ILM: cradle resolves it in its own map.
     /// Then the label's tee, the leaf-label route and the leaf slots follow
-    /// it. Idempotent; called wherever those inputs change, and when room
-    /// returns to the service labels.
+    /// it, and so does the VXLAN side (the IMET colour and the leaf-only
+    /// remotes), which reads the same inputs. Idempotent; called wherever
+    /// those inputs change, and when room returns to the service labels.
     pub(super) fn etree_label_reconcile(&mut self) {
         let want = self.evpn_encap.is_mpls() && !self.etree_leaf_evis().is_empty();
         match (want, self.etree_leaf_label) {
@@ -6005,6 +6041,8 @@ impl Bgp {
         self.etree_leaf_label_teed = Some(label);
         self.evpn_originate_etree_leaf_ad();
         self.evpn_etree_slots_sync();
+        self.etree_imet_reconcile();
+        self.evpn_etree_remotes_sync();
     }
 
     /// Hand back the ESI label of segment `name` (about to be deleted, or
