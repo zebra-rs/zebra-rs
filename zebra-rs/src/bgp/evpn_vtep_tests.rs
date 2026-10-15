@@ -1421,3 +1421,226 @@ async fn a_binding_replaced_by_an_older_one_moves_the_ip() {
         }));
     assert_eq!(f.bgp.local_rib.evpn_dad.ips[&(100, ip)].probe.count, 0);
 }
+
+/// EVPN E-Tree (RFC 8317 §4.1): only a Type-2 whose E-Tree community sets
+/// the Leaf-Indication flag is a leaf MAC. The community with L clear is
+/// invalid on a Type-2 and reads as a root; it is the one that gets logged.
+#[test]
+fn etree_leaf_flag_needs_the_leaf_indication() {
+    let attr = |values: Vec<ExtCommunityValue>| {
+        let mut attr = BgpAttr::new();
+        attr.ecom = Some(ExtCommunity(values.into_iter().collect()));
+        attr
+    };
+    let leaf = attr(vec![
+        evpn_route_target(65000, 100),
+        ExtCommunityValue::etree_leaf(),
+    ]);
+    assert_eq!(
+        extract_flags_from_attr(&leaf),
+        crate::rib::evpn::MAC_FLAG_ETREE_LEAF
+    );
+    assert!(!etree_leaf_flag_missing(&leaf));
+    // L clear: the ESI-0 A-D form, which is no leaf flag on a Type-2.
+    let no_l = attr(vec![ExtCommunityValue::etree_leaf_label(1000)]);
+    assert_eq!(extract_flags_from_attr(&no_l), 0);
+    assert!(etree_leaf_flag_missing(&no_l));
+    let root = attr(vec![evpn_route_target(65000, 100)]);
+    assert_eq!(extract_flags_from_attr(&root), 0);
+    assert!(!etree_leaf_flag_missing(&root));
+}
+
+/// Our own selected MAC-only route for `mac`'s attributes.
+fn local_macip_attr(bgp: &Bgp, mac: MacAddr) -> BgpAttr {
+    let rd = rd_from_router_id_vni(RID, 100).expect("rd");
+    let prefix = EvpnPrefix::MacIp {
+        eth_tag: 0,
+        mac: mac.octets(),
+        ip: None,
+    };
+    (*bgp.local_rib.evpn[&rd].selected[&prefix].attr).clone()
+}
+
+fn has_etree_leaf(attr: &BgpAttr) -> bool {
+    attr.ecom
+        .as_ref()
+        .is_some_and(|ecom| ecom.0.contains(&ExtCommunityValue::etree_leaf()))
+}
+
+/// A MAC learned on a leaf AC is advertised with the E-Tree leaf flag, one
+/// learned on any other port without it, and a role change re-advertises
+/// the MACs already learned with their mobility sequence number unchanged
+/// (RFC 8317 §4.1: an attribute change, not a move).
+#[tokio::test]
+async fn a_mac_learned_on_a_leaf_ac_is_coloured() {
+    let (mut bgp, _rib) = bgp_with_rib();
+    bgp.advertise_all_vni = true;
+    bgp.link_index_by_name.insert("ce1".to_string(), 7);
+    bgp.link_index_by_name.insert("ce2".to_string(), 8);
+    bgp.etree_leaf_ifs.insert("ce1".to_string());
+    let learn = |mac: MacAddr, ifindex| crate::rib::api::FdbEntry {
+        vni: 100,
+        mac,
+        ip: None,
+        ifindex,
+        bridge_ifindex: 5,
+        flags: 0,
+        vxlan_local: Some(IpAddr::V4(RID)),
+    };
+    let leaf_mac = MacAddr::from([2, 0, 0, 0, 0xe1, 1]);
+    let root_mac = MacAddr::from([2, 0, 0, 0, 0xe1, 2]);
+    let portless_mac = MacAddr::from([2, 0, 0, 0, 0xe1, 3]);
+    for entry in [
+        learn(leaf_mac, 7),
+        learn(root_mac, 8),
+        learn(portless_mac, 0),
+    ] {
+        bgp.local_fdb
+            .insert((entry.vni, entry.mac, entry.ip), entry.clone());
+        bgp.evpn_originate_macip(&entry);
+    }
+    assert!(has_etree_leaf(&local_macip_attr(&bgp, leaf_mac)));
+    assert!(!has_etree_leaf(&local_macip_attr(&bgp, root_mac)));
+    assert!(!has_etree_leaf(&local_macip_attr(&bgp, portless_mac)));
+    let seq = extract_mac_mobility_seq(&local_macip_attr(&bgp, leaf_mac));
+
+    // ce1 becomes a root and ce2 a leaf: both MACs are re-advertised.
+    bgp.etree_leaf_ifs.clear();
+    bgp.etree_leaf_ifs.insert("ce2".to_string());
+    bgp.evpn_resync_macip_esi();
+    let leaf_now_root = local_macip_attr(&bgp, leaf_mac);
+    assert!(!has_etree_leaf(&leaf_now_root));
+    assert_eq!(extract_mac_mobility_seq(&leaf_now_root), seq);
+    assert!(has_etree_leaf(&local_macip_attr(&bgp, root_mac)));
+}
+
+/// A received Type-2 hands its leaf flag to the RIB on the installed
+/// route (`MacRoute.flags`), where the cradle tee reads it.
+#[tokio::test]
+async fn a_received_leaf_mac_reaches_the_rib_flagged() {
+    let (mut bgp, mut rib) = bgp_with_rib();
+    bgp.advertise_all_vni = true;
+    let (from, _rx) = peer(&mut bgp, "10.0.0.11", false);
+    let remote_rd = rd_from_router_id_vni("10.0.0.11".parse().unwrap(), 100).unwrap();
+    let mut flags_of = |bgp: &mut Bgp, mac: MacAddr, extra: Option<ExtCommunityValue>| {
+        let route = EvpnRoute::Mac(bgp_packet::EvpnMac {
+            id: 0,
+            rd: remote_rd,
+            esi: [0; 10],
+            ether_tag: 0,
+            mac: mac.octets(),
+            ip: None,
+            vni: 100,
+            label2: None,
+        });
+        let mut attr = BgpAttr::new();
+        attr.nexthop = Some(BgpNexthop::Evpn("10.0.0.11".parse().unwrap()));
+        attr.local_pref = Some(LocalPref::default());
+        let mut ecom = ExtCommunity::from([evpn_route_target(65000, 100)]);
+        ecom.0.extend(extra);
+        attr.ecom = Some(ecom);
+        let mut top = BgpTop {
+            router_id: &bgp.router_id,
+            srv6_ipv6_export: bgp.srv6_ipv6_export.as_ref(),
+            local_rib: &mut bgp.local_rib,
+            shard: &mut bgp.shard,
+            tx: &bgp.tx,
+            rib_client: &bgp.ctx.rib,
+            attr_store: &mut bgp.attr_store,
+            update_groups: &mut bgp.update_groups,
+            interface_addrs: &bgp.interface_addrs,
+            vrf_export: None,
+            color_policy: Some(&bgp.color_policy),
+            flex_algo_routes: Some(&bgp.flex_algo_routes),
+            flex_algo_srv6_routes: Some(&bgp.flex_algo_srv6_routes),
+            vrf_import: None,
+            nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+            as_sets_withdraw: bgp.as_sets_withdraw,
+        };
+        route_evpn_update(
+            from,
+            &route,
+            "10.0.0.11".parse().unwrap(),
+            &attr,
+            &mut top,
+            &mut bgp.peers,
+            false,
+        );
+        let mut flags = Vec::new();
+        while let Ok(inbound) = rib.try_recv() {
+            if let crate::rib::Message::EvpnMacAdd(route) = inbound.msg {
+                flags.push(route.flags);
+            }
+        }
+        flags
+    };
+    let leaf = crate::rib::evpn::MAC_FLAG_ETREE_LEAF;
+    let mac = MacAddr::from([2, 0, 0, 0, 0xe2, 1]);
+    assert_eq!(
+        flags_of(&mut bgp, mac, Some(ExtCommunityValue::etree_leaf())),
+        vec![leaf]
+    );
+    // The same route without the community: the MAC is a root again.
+    assert_eq!(flags_of(&mut bgp, mac, None), vec![0]);
+    // L clear is no leaf.
+    let other = MacAddr::from([2, 0, 0, 0, 0xe2, 2]);
+    assert_eq!(
+        flags_of(
+            &mut bgp,
+            other,
+            Some(ExtCommunityValue::etree_leaf_label(1000))
+        ),
+        vec![0]
+    );
+}
+
+/// A MAC learned on a leaf AC before BGP knew the link (cradle's WatchFdb
+/// replay can beat the link dump) went out as a root. The link's arrival
+/// re-originates it with the leaf flag.
+#[tokio::test]
+async fn a_leaf_ac_link_arriving_late_colours_its_macs() {
+    let (mut bgp, _rib) = bgp_with_rib();
+    bgp.advertise_all_vni = true;
+    bgp.etree_leaf_ifs.insert("ce1".to_string());
+    let mac = MacAddr::from([2, 0, 0, 0, 0xe1, 9]);
+    let entry = crate::rib::api::FdbEntry {
+        vni: 100,
+        mac,
+        ip: None,
+        ifindex: 7,
+        bridge_ifindex: 5,
+        flags: 0,
+        vxlan_local: Some(IpAddr::V4(RID)),
+    };
+    bgp.local_fdb
+        .insert((entry.vni, entry.mac, entry.ip), entry.clone());
+    bgp.evpn_originate_macip(&entry);
+    assert!(!has_etree_leaf(&local_macip_attr(&bgp, mac)), "no name yet");
+
+    let link = crate::rib::Link {
+        index: 7,
+        name: "ce1".to_string(),
+        mtu: 1500,
+        original_mtu: 1500,
+        metric: 1,
+        flags: Default::default(),
+        link_type: crate::rib::LinkType::Ethernet,
+        label: false,
+        mac: None,
+        addr4: Vec::new(),
+        addr6: Vec::new(),
+        master: None,
+        vni: None,
+        vrf_table: None,
+        bridge: false,
+        vxlan_local: None,
+        vxlan_metadata: None,
+        parent: None,
+        vlan_id: None,
+        mtu_error: None,
+    };
+    bgp.process_rib_msg(RibRx::LinkAdd(link));
+    assert!(has_etree_leaf(&local_macip_attr(&bgp, mac)));
+}

@@ -9647,12 +9647,32 @@ fn extract_flags_from_attr(attr: &BgpAttr) -> u8 {
                 // EVPN ND (RFC 9161): the flags octet's low bit is "R",
                 // a router.
                 (0x06, 0x08) if ec.val[0] & 0x01 != 0 => flags |= 0x04,
+                // E-Tree (RFC 8317 §4.1): the MAC is behind a leaf AC. A
+                // Type-2 must set L; one with L clear is invalid, and is a
+                // root here ([`etree_leaf_flag_missing`] logs it).
+                _ if ec.as_etree().is_some_and(|etree| etree.leaf()) => {
+                    flags |= crate::rib::evpn::MAC_FLAG_ETREE_LEAF;
+                }
                 _ => {}
             }
         }
     }
 
     flags
+}
+
+/// True when a Type-2's attributes carry the E-Tree Extended Community
+/// without the Leaf-Indication flag. RFC 8317 §6.1: L MUST be set on a
+/// MAC/IP route, and a receiver logs an error otherwise. The MAC is then a
+/// root: no community, or a community we cannot classify, never causes a
+/// drop.
+fn etree_leaf_flag_missing(attr: &BgpAttr) -> bool {
+    attr.ecom.as_ref().is_some_and(|ecom| {
+        ecom.0
+            .iter()
+            .filter_map(|ec| ec.as_etree())
+            .any(|etree| !etree.leaf())
+    })
 }
 
 /// Extract MAC mobility sequence number from extended communities
@@ -10378,6 +10398,16 @@ fn route_evpn_export_selected(
                         bgp.local_rib.evpn_dad.withdraw.insert((vni, mac_addr, *ip));
                         return;
                     }
+                }
+                if etree_leaf_flag_missing(&best.attr) {
+                    tracing::error!(
+                        proto = "bgp",
+                        category = "evpn",
+                        vni,
+                        mac = %mac_addr,
+                        "E-Tree community on a MAC/IP route without the \
+                         Leaf-Indication flag (RFC 8317 §6.1); treating the MAC as a root"
+                    );
                 }
                 let msg = rib::Message::EvpnMacAdd(rib::evpn::MacRoute {
                     key,
@@ -19858,6 +19888,12 @@ impl Bgp {
         if seq > 0 {
             ecom.0.insert(evpn_mac_mobility(seq));
         }
+        // RFC 8317 §4.1: a MAC learned on a leaf AC carries the E-Tree EC
+        // with the Leaf-Indication flag, so a PE with a leaf AC of its own
+        // drops known unicast toward it at ingress. A root MAC carries none.
+        if self.macip_etree_leaf(entry) {
+            ecom.0.insert(ExtCommunityValue::etree_leaf());
+        }
         attr.ecom = Some(ecom);
         // Prefer the current VNI→VTEP binding over the entry's cached
         // `vxlan_local`: a MAC learned before its VXLAN device was observed
@@ -20108,11 +20144,47 @@ impl Bgp {
         }
     }
 
+    /// The remote MACs behind a leaf AC on their PE, per VNI: every
+    /// selected, received Type-2 carrying the E-Tree leaf flag (RFC 8317
+    /// §4.1). A MAC with MAC-only and MAC/IP routes counts once.
+    pub fn evpn_remote_etree_leaf_macs(
+        &self,
+    ) -> std::collections::BTreeMap<u32, std::collections::BTreeSet<[u8; 6]>> {
+        let mut out: std::collections::BTreeMap<u32, std::collections::BTreeSet<[u8; 6]>> =
+            Default::default();
+        for table in self.local_rib.evpn.values() {
+            for (prefix, rib) in &table.selected {
+                let EvpnPrefix::MacIp { mac, .. } = prefix else {
+                    continue;
+                };
+                if rib.is_originated()
+                    || extract_flags_from_attr(&rib.attr) & crate::rib::evpn::MAC_FLAG_ETREE_LEAF
+                        == 0
+                {
+                    continue;
+                }
+                if let Some(vni) = macip_kernel_vni(rib) {
+                    out.entry(vni).or_default().insert(*mac);
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether the port that learned `entry` is an E-Tree leaf AC
+    /// (`etree leaf-interface`). A learn with no port is a root: no role was
+    /// configured for it, and a root never causes a drop (RFC 8317 §4.1).
+    pub fn macip_etree_leaf(&self, entry: &FdbEntry) -> bool {
+        super::ethernet_segment::ac_name_for_ifindex(entry.ifindex, &self.link_index_by_name)
+            .is_some_and(|ac| self.etree_leaf_ifs.contains(&ac))
+    }
+
     /// Re-originate every locally-learned Type-2 so its ESI matches the
-    /// current `ethernet_segments`. The ESI is carried on the path rather
-    /// than in the route key, so this is a plain refresh — no withdraw first,
-    /// and MAC mobility sequence numbers are untouched (a local
-    /// re-advertisement does not bump them).
+    /// current `ethernet_segments`, and its E-Tree leaf flag the current
+    /// `etree_leaf_ifs`. Both are carried on the path rather than in the
+    /// route key, so this is a plain refresh — no withdraw first, and MAC
+    /// mobility sequence numbers are untouched (a local re-advertisement
+    /// does not bump them).
     ///
     /// The Type-2 twin of [`Self::vpws_resync_es`], called from the same
     /// config sites: anything that changes which port belongs to which

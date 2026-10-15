@@ -5793,7 +5793,8 @@ impl Rib {
             if let Some(esi) = esi
                 && self.es_groups.contains(&(esi, vni))
             {
-                self.fib_handle.cradle_fdb_es(vni, &mac, &esi).await;
+                let leaf = flags & super::evpn::MAC_FLAG_ETREE_LEAF != 0;
+                self.fib_handle.cradle_fdb_es(vni, &mac, &esi, leaf).await;
                 return;
             }
         }

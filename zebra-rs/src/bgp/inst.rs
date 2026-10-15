@@ -17,7 +17,7 @@ use crate::{
     bgp_bfd_trace, bgp_fsm_trace, bgp_label_trace, bgp_packet_trace, bgp_srv6_trace, bgp_vpn_trace,
     bgp_vrf_trace,
 };
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::{Ipv4Addr, SocketAddr};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -992,6 +992,12 @@ pub struct Bgp {
     /// Config + state only in this phase — Type-4 discovery and DF election
     /// are later phases.
     pub ethernet_segments: BTreeMap<String, super::ethernet_segment::EthernetSegment>,
+    /// EVPN E-Tree (RFC 8317) leaf attachment circuits, by interface name,
+    /// from `router bgp afi-safi evpn etree leaf-interface <name>`. Every
+    /// other AC is a root. A MAC learned on one is advertised with the
+    /// E-Tree EC's Leaf-Indication flag (§4.1). The cradle supervisor reads
+    /// the same config and programs the port's role into the datapath.
+    pub etree_leaf_ifs: BTreeSet<String>,
     /// Configured hostname for the local BGP speaker. Advertised in
     /// the FQDN capability (capability code 73). When None, falls back
     /// to the OS hostname; if that also fails, no FQDN capability is
@@ -1534,6 +1540,7 @@ impl Bgp {
             links_down: std::collections::BTreeSet::new(),
             local_smet: BTreeMap::new(),
             ethernet_segments: BTreeMap::new(),
+            etree_leaf_ifs: BTreeSet::new(),
             hostname: None,
             no_fib_install: false,
             fast_external_failover: true,
@@ -4945,8 +4952,10 @@ impl Bgp {
                 // interface-neighbor materialization. Keeps the most
                 // recent name for an ifindex; renames are rare but
                 // covered by simple insert-replaces-on-collision.
-                self.link_index_by_name
-                    .insert(link.name.clone(), link.index);
+                let index_changed = self
+                    .link_index_by_name
+                    .insert(link.name.clone(), link.index)
+                    != Some(link.index);
                 self.link_name_by_index
                     .insert(link.index, link.name.clone());
                 // The port's bridge membership, for EVIs declared by
@@ -4979,6 +4988,15 @@ impl Bgp {
                     .filter(|es| es.interface.as_deref() == Some(&link.name))
                     .filter_map(|es| es.esi)
                     .collect();
+                // An E-Tree leaf AC whose link was not known yet when MACs
+                // were learned on it (the same race): `macip_etree_leaf`
+                // found no name for their port, so they went out as roots.
+                // Re-originate them with the leaf flag. Only when the name
+                // gains or changes its ifindex: no other link update
+                // changes a MAC's colour.
+                if index_changed && self.etree_leaf_ifs.contains(&link.name) {
+                    self.evpn_resync_macip_esi();
+                }
                 if !esis_on_link.is_empty() {
                     self.evpn_resync_macip_esi();
                     // The cradle tee names the port; a `SetEthernetSegment`

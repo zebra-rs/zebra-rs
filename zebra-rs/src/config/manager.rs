@@ -746,6 +746,19 @@ impl ConfigManager {
             .collect()
     }
 
+    /// The leaves among config `text`'s lines the E-Tree backend check reads
+    /// (`check::etree_backend`), as callback paths and arguments.
+    fn etree_backend_leaves(&self, text: &str) -> Vec<(String, Vec<String>)> {
+        text.lines()
+            .filter(|line| check::etree_backend_line(line))
+            .filter_map(|line| self.paths(line.to_string()))
+            .map(|paths| {
+                let (path, args) = path_from_command(&paths);
+                (path, args.0.into_iter().collect())
+            })
+            .collect()
+    }
+
     /// Commit the candidate. Refuses it, dispatching nothing, when it
     /// fails validation: mandatory nodes, the leaf value checks, or a label
     /// check it would newly break.
@@ -793,6 +806,20 @@ impl ConfigManager {
         );
         if !errors.is_empty() {
             return Err(anyhow::anyhow!(errors.join("\n")));
+        }
+
+        // EVPN E-Tree: a leaf AC needs the cradle data plane, which is a
+        // property of the whole candidate rather than of one line. A
+        // startup config is only warned about, as for the label checks
+        // below: refusing it would leave the router unconfigured.
+        let etree = check::etree_backend(&self.etree_backend_leaves(&candidate));
+        if !etree.is_empty() {
+            if !startup {
+                return Err(anyhow::anyhow!(etree.join("\n")));
+            }
+            for error in &etree {
+                tracing::warn!("startup config: {error}");
+            }
         }
 
         // MPLS labels: a violation this commit would introduce, against
@@ -2442,12 +2469,18 @@ mod save_config_tests {
     /// helper: the configs used here stay inside `system`, so no
     /// protocol task is ever spawned and this needs no tokio runtime.
     fn manager_with_config(path: &Path) -> ConfigManager {
+        manager_with_features(path, Vec::new())
+    }
+
+    /// As [`manager_with_config`], started with `--feature` for each of
+    /// `features`.
+    fn manager_with_features(path: &Path, features: Vec<String>) -> ConfigManager {
         let (rib_tx, _rib_rx) = mpsc::unbounded_channel();
         let (rib_inbound_tx, _rib_inbound_rx) = mpsc::unbounded_channel();
         let (policy_tx, _policy_rx) = mpsc::unbounded_channel();
         ConfigManager::new(
             concat!(env!("CARGO_MANIFEST_DIR"), "/yang").to_string(),
-            Vec::new(),
+            features,
             Some(path.to_string_lossy().into_owned()),
             rib_tx,
             rib_inbound_tx,
@@ -2677,6 +2710,52 @@ mod save_config_tests {
         ] {
             let (code, output, _) = cm.execute(mode, &format!("set {line}"));
             assert_eq!(code == ExecCode::Show, ok, "`{line}`: {output:?}");
+        }
+    }
+
+    /// `router bgp afi-safi evpn etree` exists only with `--feature etree`,
+    /// and a leaf AC is refused at commit without the cradle data plane:
+    /// the kernel bridge cannot keep leaves apart. The startup config only
+    /// warns, as for the label checks.
+    #[test]
+    fn an_etree_leaf_needs_the_feature_and_cradle() {
+        let line = "set router bgp afi-safi evpn etree leaf-interface ce1";
+
+        let cm = manager_with_config(&temp_path("etree-off"));
+        let mode = cm.modes.get("configure").expect("configure mode");
+        let (code, _, _) = cm.execute(mode, line);
+        assert_ne!(code, ExecCode::Show, "`{line}` needs --feature etree");
+
+        let cm = manager_with_features(&temp_path("etree-on"), vec!["etree".to_string()]);
+        let mode = cm.modes.get("configure").expect("configure mode");
+        let (code, output, _) = cm.execute(mode, line);
+        assert_eq!(code, ExecCode::Show, "set rejected: {output:?}");
+        let err = cm.commit_config().expect_err("no cradle data plane");
+        assert_eq!(
+            err.to_string(),
+            "etree leaf-interface ce1: E-Tree needs the cradle data plane \
+             (`system ebpf enabled` or `system cradle enabled`); the kernel bridge \
+             cannot keep leaves apart"
+        );
+        let mut running = String::new();
+        cm.store.running.borrow().list(&mut running);
+        assert_eq!(running, "", "the leaf must not reach the running config");
+
+        // Either switch passes. (Checked without committing: a commit would
+        // spawn BGP.)
+        for cradle in ["system ebpf enabled true", "system cradle enabled true"] {
+            let (code, output, _) = cm.execute(mode, &format!("set {cradle}"));
+            assert_eq!(code, ExecCode::Show, "set rejected: {output:?}");
+            let mut candidate = String::new();
+            cm.store.candidate.borrow().list(&mut candidate);
+            let leaves = cm.etree_backend_leaves(&candidate);
+            assert_eq!(
+                check::etree_backend(&leaves),
+                Vec::<String>::new(),
+                "{candidate}"
+            );
+            let (code, output, _) = cm.execute(mode, &format!("delete {cradle}"));
+            assert_eq!(code, ExecCode::Show, "delete rejected: {output:?}");
         }
     }
 

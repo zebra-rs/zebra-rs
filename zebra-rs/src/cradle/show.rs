@@ -13,6 +13,8 @@ use crate::fib::cradle::pb;
 // has no dependency on the cradle crates.
 const FDB_F_LOCAL: u32 = 1 << 0;
 const FDB_F_REMOTE: u32 = 1 << 1;
+/// EVPN E-Tree (RFC 8317 §4.1): a remote MAC behind a leaf AC.
+const FDB_F_ETREE_LEAF: u32 = 1 << 6;
 const FIB_F_BLACKHOLE: u32 = 1 << 0;
 const FIB_F_LOCAL: u32 = 1 << 1;
 const FIB_F_CONNECTED: u32 = 1 << 2;
@@ -32,6 +34,9 @@ fn fdb_flags(flags: u32) -> String {
     }
     if flags & FDB_F_REMOTE != 0 {
         v.push("remote");
+    }
+    if flags & FDB_F_ETREE_LEAF != 0 {
+        v.push("etree-leaf");
     }
     if v.is_empty() {
         "learned".to_string()
@@ -144,6 +149,7 @@ pub(super) fn render_dump(entries: &[pb::DumpEntry], json: bool) -> String {
                         let mut v = Vec::new();
                         if f.flags & FDB_F_LOCAL != 0 { v.push("local"); }
                         if f.flags & FDB_F_REMOTE != 0 { v.push("remote"); }
+                        if f.flags & FDB_F_ETREE_LEAF != 0 { v.push("etree-leaf"); }
                         v
                     },
                     "remoteSid": if f.remote_sid.is_empty() { None } else { Some(&f.remote_sid) },

@@ -23,4 +23,12 @@ module zebra-features {
        Gates schema nodes that only make sense on an ISO-enabled
        router.";
   }
+
+  feature etree {
+    description
+      "EVPN E-Tree (RFC 8317): root and leaf attachment circuits under
+       `router bgp afi-safi evpn etree`. Gated while it is incomplete:
+       a leaf's broadcast, multicast and unknown unicast still reach
+       leaves on other PEs, so E-Tree must not look finished.";
+  }
 }
