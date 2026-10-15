@@ -20,8 +20,8 @@ module ipsec {
 
      This module is a grouping library in the firewall.yang style:
      config.yang instantiates `grouping vpn-ipsec` inside an
-     iso-gated `container vpn`, so every node here exists only when
-     the daemon runs with `--feature iso`.
+     insomnia-gated `container vpn`, so every node here exists only when
+     the daemon runs with `--feature insomnia`.
 
      Current scope: `authentication psk`, `esp-group` and `ike-group`
      (with the full VyOS proposal cipher/hash/DH lists), `interface`,

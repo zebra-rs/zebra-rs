@@ -10,18 +10,27 @@ module zebra-features {
      imports this registry (conventionally with prefix `feat`) and
      guards nodes with `if-feature feat:NAME`; the guarded nodes exist
      only while the daemon is started with `--feature NAME` (a bare
-     name on the flag resolves to this module — `--feature iso` means
-     `zebra-features:iso`). Features default to off, so guarded nodes
-     are absent from the schema tree unless explicitly enabled.
+     name on the flag resolves to this module — `--feature insomnia`
+     means `zebra-features:insomnia`). Features default to off, so
+     guarded nodes are absent from the schema tree unless explicitly
+     enabled.
 
      Module-local features are also possible (`--feature MODULE:NAME`),
      but prefer registering here so operators have one place to look.";
 
-  feature iso {
+  feature insomnia {
     description
-      "ISO / OSI protocol-family support (NSAP addressing, CLNS).
-       Gates schema nodes that only make sense on an ISO-enabled
-       router.";
+      "Optional system-service configuration that zebra-rs stores but
+       does not enforce itself. It gates:
+         - `firewall` and `show firewall`;
+         - `vpn` (IPsec) and `show vpn`;
+         - `vrrp` and `show vrrp`;
+       all three enforced by the out-of-process insomnia daemon; and
+       the `dhcp` value of `interface <name> ipv4 address`, which is
+       schema only (zebra-rs has no DHCP client yet).
+
+       Formerly named `iso`. `--feature iso` still enables it, with a
+       deprecation warning at startup; use `--feature insomnia`.";
   }
 
   feature etree {
