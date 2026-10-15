@@ -800,6 +800,54 @@ which zebra-rs pins since #2527. It is §8.5's V1+ as planned:
   `cradle_evpn_etree_vxlan` never ran. The step is added with this phase,
   and those features re-run with it.
 
+**Phase 5a is merged** as cradle-rs #216, released in cradle-rs v1.1.8,
+which zebra-rs pins since #2534. It is §8.6 as decided (D6):
+- **Decap.** `LocalSid.arg_bits` (8 or 16) gives an End.DT2M its
+  argument, installed at the LOC:FUNC prefix length. `srv6_dt2u` reads it
+  in a non-inlined subprogram (inlined, the `cradle_xdp` stack reached 544
+  bytes): this PE's leaf argument (`SetEtreeLeafArg`) sets
+  `ES_BITS_ETREE_LEAF`, 0 is plain BUM, anything else is dropped
+  (`srv6_drop_arg`).
+- **Leaf slots.** `ReplSlot.etree_leaf_sid` is a slot to the PE's SID with
+  its argument placed; SRv6 slots now join the slot group `(SID, 0)`, so
+  phase 3a's selection applies and the encap path is unchanged.
+
+**Status: phase 5b is implemented** on `evpn-etree-srv6`.
+- **Leaf argument.** Under SRv6, with a leaf AC and a locator that leaves
+  room, `etree_label_reconcile` sets `etree_leaf_arg` to 1
+  (`ETREE_LEAF_ARG`) and tees it (`EtreeLeafArg`, mirrored, re-sent to a
+  new tee).
+- **End.DT2M with an argument, only where needed (D6.4).** For each VNI
+  with a leaf AC (`etree_dt2m_arg_vnis`), the End.DT2M SID carries the
+  structure with `arg_bits` 16 (`etree_arg_structure`): the RIB installs
+  it at LOC:FUNC (`sid_route_target`), and the IMET advertises AL 16. A
+  VNI that changes over is re-installed and its IMET re-originated
+  (`etree_dt2m_arg_reconcile`); every other VNI keeps its /128 SID and an
+  IMET without an argument.
+- **Leaf-label route over SRv6.** The ESI-0 per-ES A-D route carries the
+  E-Tree EC with no field and an End.DT2M SRv6 L2 Service SID with the
+  argument at LBL+LNL+FL (TL 0). Its next hop is the leaf EVIs' VXLAN
+  local address, the one this PE's SRv6 IMETs carry, so a receiver pairs
+  them; under MPLS both carry the EVPN source.
+- **Leaf slots.** `etree_peer_leaf_args` reads each PE's argument (a
+  transposed one is not read). `evpn_etree_srv6_slots_sync` makes, per
+  leaf EVI, a slot to the PE's End.DT2M SID with the argument placed at the
+  IMET's offset, only when the IMET's argument length matches (RFC 9819
+  §3.2); `CradleReplAddSrv6Leaf`, mirrored and replayed before the plain
+  SRv6 slots. It runs off `etree_dirty`.
+- **Show.** `show bgp evpn etree` under SRv6 names the leaf argument and
+  each remote PE's.
+- **Gap.** A PE whose IMET argument length differs from its leaf route's
+  gets no leaf slot, so its leaves still receive our leaves' BUM; RFC 9819
+  says not to forward then, and there is no slot type that withholds leaf
+  BUM from a PE over SRv6.
+- **Tests.** Unit tests: argument placement; the leaf argument, the
+  End.DT2M's install shape and IMET AL, the leaf route, and all of it gone
+  without a leaf AC; a remote argument making a leaf slot (none for an
+  IMET without the length; removed with the route); `show`; a new tee
+  getting the argument again; the install prefix. Seven mutants each fail
+  one.
+
 **Review lessons carried over from the single-active arc** (see that plan
 and the memory notes):
 - Every negative assertion ("leaf did not receive") is first shown to fail

@@ -9828,12 +9828,26 @@ fn vpws_es_live_pes(local_rib: &LocalRib, esi: &[u8; 10]) -> BTreeSet<IpAddr> {
 /// E-Tree EC and what a route reflector or policy adds.
 pub(super) const ETREE_LEAF_AD_RTS: usize = 256;
 
+/// EVPN E-Tree over SRv6 (plan §8.6, decision D6): this PE's leaf argument
+/// (Arg.FE2, RFC 8986 §4.12), one per PE (rfc8317bis §5.4). Values are
+/// local to the egress PE; 0 means none.
+pub(super) const ETREE_LEAF_ARG: u32 = 1;
+/// Its length, right after the End.DT2M function (RFC 9819 §3.3; LBL 32 /
+/// LNL 16 / FL 16 / AL 16 is what every EANTC 2026 participant used).
+pub(super) const ETREE_ARG_BITS: u8 = 16;
+
 /// One E-Tree leaf-label route this PE last originated (RFC 8317 §4.2.1),
 /// by what goes into it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EtreeLeafAd {
     pub rd: RouteDistinguisher,
+    /// The MPLS leaf label; 0 under SRv6, where the E-Tree EC carries no
+    /// field and the leaf argument rides `arg_sid`.
     pub label: u32,
+    /// SRv6: the leaf argument placed at its offset in an otherwise zero
+    /// SID, and the SID structure that says where (RFC 9819 §3.2), carried
+    /// as an End.DT2M SRv6 L2 Service SID.
+    pub arg_sid: Option<(std::net::Ipv6Addr, crate::rib::SidStructure)>,
     pub evis: BTreeSet<u32>,
     pub nexthop: IpAddr,
 }
@@ -9916,6 +9930,122 @@ fn etree_route_leaf_label(attr: &BgpAttr) -> Option<u32> {
         .iter()
         .find_map(|ec| ec.as_etree())
         .and_then(|etree| etree.valid_leaf_label())
+}
+
+/// The SRv6 L2 Service SID with endpoint `behavior` on `attr`, with its SID
+/// structure when the route carried one.
+fn evpn_srv6_sid_info(
+    attr: &BgpAttr,
+    behavior: u16,
+) -> Option<(std::net::Ipv6Addr, Option<bgp_packet::Srv6SidStructure>)> {
+    attr.prefix_sid
+        .iter()
+        .flat_map(|ps| ps.tlvs.iter())
+        .filter_map(|t| match t {
+            bgp_packet::PrefixSidTlv::Srv6L2Service(svc) => Some(svc),
+            _ => None,
+        })
+        .flat_map(|svc| svc.sids.iter())
+        .find(|info| info.behavior == behavior)
+        .map(|info| (info.sid, info.structure))
+}
+
+/// `sid` with `arg` (`len` bits) placed at bit `off` (RFC 9819 §3.3), or
+/// `None` when it does not fit the address.
+pub(super) fn sid_place_arg(
+    sid: std::net::Ipv6Addr,
+    off: u8,
+    len: u8,
+    arg: u32,
+) -> Option<std::net::Ipv6Addr> {
+    let (off, len) = (u32::from(off), u32::from(len));
+    if len == 0 || len > 32 || off + len > 128 || u64::from(arg) >> len != 0 {
+        return None;
+    }
+    let shift = 128 - off - len;
+    Some(std::net::Ipv6Addr::from(
+        u128::from(sid) | (u128::from(arg) << shift),
+    ))
+}
+
+/// The `len`-bit argument at bit `off` of `sid`.
+fn sid_read_arg(sid: std::net::Ipv6Addr, off: u8, len: u8) -> Option<u32> {
+    let (off, len) = (u32::from(off), u32::from(len));
+    if len == 0 || len > 32 || off + len > 128 {
+        return None;
+    }
+    let shift = 128 - off - len;
+    Some(((u128::from(sid) >> shift) & ((1u128 << len) - 1)) as u32)
+}
+
+/// RFC 8317 over SRv6 (rfc8317bis §5.4, RFC 9819): the leaf argument each
+/// remote PE advertised on its leaf-label route — an ESI-0 per-ES A-D route
+/// carrying the E-Tree EC and an End.DT2M SRv6 L2 Service SID whose
+/// structure has an argument — with its length, by advertising PE. The
+/// argument sits at offset LBL+LNL+FL of that SID. A transposed argument
+/// (TL > 0) is not read: on an ESI-0 route there is no ESI Label EC to
+/// carry the bits, and no implementation documents another place.
+fn etree_peer_leaf_args(local_rib: &LocalRib) -> BTreeMap<IpAddr, (u32, u8)> {
+    let mut out = BTreeMap::new();
+    for table in local_rib.evpn.values() {
+        for (prefix, rib) in table.selected.iter() {
+            if let EvpnPrefix::EthernetAd { esi, eth_tag } = prefix
+                && *esi == ZERO_ESI
+                && *eth_tag == MAX_ET
+                && rib.typ != BgpRibType::Originated
+                && let Some(BgpNexthop::Evpn(nh)) = rib.attr.nexthop
+                && rib
+                    .attr
+                    .ecom
+                    .as_ref()
+                    .is_some_and(|ecom| ecom.0.iter().any(|ec| ec.as_etree().is_some()))
+                && let Some((sid, Some(st))) =
+                    evpn_srv6_sid_info(&rib.attr, bgp_packet::SRV6_BEHAVIOR_END_DT2M)
+                && st.argument_len != 0
+                && st.transposition_len == 0
+                && let Some(arg) = sid_read_arg(
+                    sid,
+                    st.locator_block_len + st.locator_node_len + st.function_len,
+                    st.argument_len,
+                )
+                && arg != 0
+            {
+                out.insert(nh, (arg, st.argument_len));
+            }
+        }
+    }
+    out
+}
+
+/// Each remote PE's End.DT2M SID for `vni` from its selected IMET, with the
+/// SID structure: `(originating router, next hop, SID, structure)`.
+fn imet_srv6_dt2m(
+    local_rib: &LocalRib,
+    vni: u32,
+) -> Vec<(
+    IpAddr,
+    Option<IpAddr>,
+    std::net::Ipv6Addr,
+    Option<bgp_packet::Srv6SidStructure>,
+)> {
+    let mut out = Vec::new();
+    for table in local_rib.evpn.values() {
+        for (prefix, rib) in table.selected.iter() {
+            if let EvpnPrefix::InclusiveMulticast { orig, .. } = prefix
+                && rib.typ != BgpRibType::Originated
+                && extract_vni_from_attr(&rib.attr) == Some(vni)
+                && let Some((sid, st)) =
+                    evpn_srv6_sid_info(&rib.attr, bgp_packet::SRV6_BEHAVIOR_END_DT2M)
+            {
+                let nh = match rib.attr.nexthop {
+                    Some(BgpNexthop::Evpn(nh)) => Some(nh),
+                    _ => None,
+                };
+                out.push((*orig, nh, sid, st));
+            }
+        }
+    }
+    out
 }
 
 /// Whether an IMET says its PE is leaf-only in the VNI: the E-Tree EC in
@@ -20981,6 +21111,13 @@ impl Bgp {
             let mut attr = BgpAttr::new();
             attr.ecom = Some(ecom);
             attr.nexthop = Some(BgpNexthop::Evpn(d.nexthop));
+            if let Some((sid, st)) = d.arg_sid {
+                attr.prefix_sid = Some(super::inst::srv6_l2_service_prefix_sid(
+                    sid,
+                    Some(st),
+                    bgp_packet::SRV6_BEHAVIOR_END_DT2M,
+                ));
+            }
             let mut rib = BgpRib::new(
                 ORIGINATED_PEER,
                 Ipv4Addr::UNSPECIFIED,
@@ -21003,20 +21140,45 @@ impl Bgp {
     /// `<router-id>:i`. None without a leaf label, a router-id or a leaf
     /// AC.
     fn etree_leaf_ad_routes(&self) -> Vec<EtreeLeafAd> {
-        let Some(label) = self.etree_leaf_label else {
-            return Vec::new();
+        // MPLS: the leaf label in the E-Tree EC. SRv6: the EC with no
+        // field, and the leaf argument placed in an End.DT2M SID.
+        let (label, arg_sid) = match (self.etree_leaf_label, self.etree_leaf_arg) {
+            (Some(label), _) => (label, None),
+            (None, Some(arg)) => {
+                let Some(st) = self.etree_arg_structure() else {
+                    return Vec::new();
+                };
+                let off = st.lb_bits + st.ln_bits + st.fun_bits;
+                let Some(sid) =
+                    sid_place_arg(std::net::Ipv6Addr::UNSPECIFIED, off, st.arg_bits, arg)
+                else {
+                    return Vec::new();
+                };
+                (0, Some((sid, st)))
+            }
+            (None, None) => return Vec::new(),
         };
         if self.router_id.is_unspecified() {
             return Vec::new();
         }
         let evis: Vec<u32> = self.etree_leaf_evis().into_iter().collect();
-        let nexthop = self.evpn_local_source();
+        // A receiver pairs this route with our IMETs by PE address. Under
+        // MPLS both carry the EVPN source; an SRv6 IMET carries the VXLAN
+        // device's local address, so the route takes that too.
+        let nexthop = if arg_sid.is_some() {
+            evis.iter()
+                .find_map(|vni| self.local_vxlans.get(vni).copied())
+                .unwrap_or_else(|| self.evpn_local_source())
+        } else {
+            self.evpn_local_source()
+        };
         evis.chunks(ETREE_LEAF_AD_RTS)
             .enumerate()
             .filter_map(|(i, chunk)| {
                 Some(EtreeLeafAd {
                     rd: rd_from_router_id_vni(self.router_id, u32::try_from(i).ok()?)?,
                     label,
+                    arg_sid,
                     evis: chunk.iter().copied().collect(),
                     nexthop,
                 })
@@ -21067,6 +21229,103 @@ impl Bgp {
                 });
         }
         self.etree_slots_sent = desired;
+    }
+
+    /// Tee the E-Tree leaf slots over SRv6 (RFC 8317, RFC 9819 §3.3): in
+    /// every EVI where this PE has a leaf AC, toward every remote PE that
+    /// advertised a leaf argument, a slot to its End.DT2M SID for the EVI
+    /// with that argument placed at the offset the IMET's SID structure
+    /// gives (LBL+LNL+FL). The IMET must carry the same argument length as
+    /// the leaf-label route, as RFC 9819 §3.2 requires; otherwise the PE
+    /// gets no leaf slot. A PE's routes are paired by its IMET's
+    /// originating address or next hop. Diffed against what was sent.
+    pub fn evpn_etree_srv6_slots_sync(&mut self) {
+        let mut desired = BTreeSet::new();
+        if self.evpn_encap.is_srv6() {
+            let peers = etree_peer_leaf_args(&self.local_rib);
+            if !peers.is_empty() {
+                for vni in self.etree_leaf_evis() {
+                    for (orig, nh, sid, st) in imet_srv6_dt2m(&self.local_rib, vni) {
+                        let Some(&(arg, len)) = peers
+                            .get(&orig)
+                            .or_else(|| nh.and_then(|nh| peers.get(&nh)))
+                        else {
+                            continue;
+                        };
+                        let Some(st) =
+                            st.filter(|st| st.argument_len == len && st.transposition_len == 0)
+                        else {
+                            continue;
+                        };
+                        let off = st.locator_block_len + st.locator_node_len + st.function_len;
+                        if let Some(leaf) = sid_place_arg(sid, off, len, arg) {
+                            desired.insert((vni, sid, leaf));
+                        }
+                    }
+                }
+            }
+        }
+        if desired == self.etree_srv6_slots_sent {
+            return;
+        }
+        for &(bd, sid, _) in self.etree_srv6_slots_sent.difference(&desired) {
+            let _ = self
+                .ctx
+                .rib
+                .send(crate::rib::Message::CradleReplDelSrv6Leaf { bd, sid });
+        }
+        for &(bd, sid, leaf_sid) in desired.difference(&self.etree_srv6_slots_sent) {
+            let _ = self
+                .ctx
+                .rib
+                .send(crate::rib::Message::CradleReplAddSrv6Leaf { bd, sid, leaf_sid });
+        }
+        self.etree_srv6_slots_sent = desired;
+    }
+
+    /// The SID structure of an End.DT2M with a leaf argument: this PE's
+    /// locator structure with [`ETREE_ARG_BITS`] of argument right after the
+    /// function. `None` without a locator, or when the argument would not
+    /// fit the address.
+    pub(super) fn etree_arg_structure(&self) -> Option<crate::rib::SidStructure> {
+        let mut st = self.srv6_locator.as_ref()?.sid_structure()?;
+        let used = u32::from(st.lb_bits) + u32::from(st.ln_bits) + u32::from(st.fun_bits);
+        if used + u32::from(ETREE_ARG_BITS) > 128 {
+            return None;
+        }
+        st.arg_bits = ETREE_ARG_BITS;
+        Some(st)
+    }
+
+    /// Give each VNI with a leaf AC an End.DT2M with an argument (decision
+    /// D6.4): installed at the LOC:FUNC prefix length so cradle reads the
+    /// argument (`LocalSid.arg_bits`), and advertised on the IMET with the
+    /// argument length, so peers place our leaf argument. Every other VNI
+    /// keeps the plain /128 SID and an IMET without an argument. A VNI that
+    /// changes over is re-installed and its IMET re-originated.
+    pub(super) fn etree_dt2m_arg_reconcile(&mut self) {
+        let desired: BTreeSet<u32> = if self.etree_leaf_arg.is_some() {
+            self.etree_leaf_evis()
+        } else {
+            BTreeSet::new()
+        };
+        if desired == self.etree_dt2m_arg_vnis {
+            return;
+        }
+        let changed: Vec<u32> = desired
+            .symmetric_difference(&self.etree_dt2m_arg_vnis)
+            .copied()
+            .collect();
+        self.etree_dt2m_arg_vnis = desired;
+        for vni in changed {
+            if let Some(&(addr, _)) = self.evpn_dt2m_sids.get(&vni) {
+                let _ = self.ctx.rib.send(crate::rib::Message::SidDel { addr });
+                self.send_vni_l2_sid_add(vni, addr, crate::rib::SidBehavior::EndDT2M);
+            }
+            if let Some(&vtep_local) = self.local_vxlans.get(&vni) {
+                self.evpn_originate_imet(vni, vtep_local);
+            }
+        }
     }
 
     /// The VNIs of this PE's attachment circuits, split by E-Tree role:
@@ -21157,6 +21416,12 @@ impl Bgp {
             });
         }
         self.local_rib.etree_remotes_sent = desired;
+    }
+
+    /// The leaf argument and its length each remote PE advertised (SRv6),
+    /// for `show`.
+    pub fn etree_peer_leaf_args(&self) -> BTreeMap<IpAddr, (u32, u8)> {
+        etree_peer_leaf_args(&self.local_rib)
     }
 
     /// The remote PEs that are leaf-only in a VNI, by VNI, for `show`.
@@ -22039,6 +22304,7 @@ impl Bgp {
         // and the leaf-only remotes, from the IMETs.
         if std::mem::take(&mut self.local_rib.etree_dirty) {
             self.evpn_etree_slots_sync();
+            self.evpn_etree_srv6_slots_sync();
             self.evpn_etree_remotes_sync();
         }
     }

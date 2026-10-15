@@ -397,6 +397,24 @@ fn sid_route_target(
         // they never reach the kernel (no End.DT2U/DT2M seg6local action) —
         // `route_sid_install` returns after the cradle tee. The target is
         // computed anyway so the tee gets the right prefix length.
+        // An End.DT2M with an argument (Arg.FE2, RFC 8986 §4.12; the E-Tree
+        // leaf argument, RFC 9819): the /(LB+LN+Fun) prefix leaves the
+        // argument wild, and cradle reads it at decap (`LocalSid.arg_bits`).
+        SidBehavior::EndDT2M if structure.is_some_and(|s| s.arg_bits != 0) => {
+            let plen = structure
+                .map(|s| {
+                    s.lb_bits
+                        .saturating_add(s.ln_bits)
+                        .saturating_add(s.fun_bits)
+                })
+                .unwrap_or(128);
+            (
+                RouteHeader::RT_TABLE_MAIN,
+                RouteType::Unicast,
+                plen,
+                mask_v6(addr, plen),
+            )
+        }
         SidBehavior::EndDT2U
         | SidBehavior::EndDT2M
         | SidBehavior::EndDX2
@@ -1003,6 +1021,28 @@ impl FibHandle {
     pub async fn cradle_etree_leaf_label(&self, label: u32) {
         if let Some(cradle) = &self.cradle {
             cradle.set_etree_leaf_label(label).await;
+        }
+    }
+
+    /// EVPN E-Tree over SRv6 tee (RFC 8317, RFC 8986 §4.12): this PE's leaf
+    /// argument, for decap (0 = none).
+    pub async fn cradle_etree_leaf_arg(&self, arg: u32) {
+        if let Some(cradle) = &self.cradle {
+            cradle.set_etree_leaf_arg(arg).await;
+        }
+    }
+
+    /// EVPN E-Tree over SRv6 tee: the leaf slot toward the PE whose End.DT2M
+    /// SID for bridge domain `bd` is `sid`, sending to `leaf_sid`.
+    pub async fn cradle_repl_add_srv6_leaf(&self, bd: u32, sid: Ipv6Addr, leaf_sid: Ipv6Addr) {
+        if let Some(cradle) = &self.cradle {
+            cradle.repl_slot_add_srv6_leaf(bd, sid, leaf_sid).await;
+        }
+    }
+
+    pub async fn cradle_repl_del_srv6_leaf(&self, bd: u32, sid: Ipv6Addr) {
+        if let Some(cradle) = &self.cradle {
+            cradle.repl_slot_del_srv6_leaf(bd, sid).await;
         }
     }
 
@@ -6202,6 +6242,26 @@ pub(crate) fn mdb_entries_from_msg(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An End.DT2M with an argument (the E-Tree leaf argument, RFC 9819)
+    /// installs at LOC:FUNC so any argument matches; a plain one at /128.
+    #[test]
+    fn an_end_dt2m_with_an_argument_installs_at_loc_func() {
+        let sid: std::net::Ipv6Addr = "fd00:1:0:200::".parse().unwrap();
+        let st = crate::rib::SidStructure {
+            lb_bits: 32,
+            ln_bits: 16,
+            fun_bits: 16,
+            arg_bits: 16,
+        };
+        let (_, _, plen, dst) = sid_route_target(crate::rib::SidBehavior::EndDT2M, sid, Some(st));
+        assert_eq!((plen, dst), (64, sid));
+        let (_, _, plen, _) = sid_route_target(crate::rib::SidBehavior::EndDT2M, sid, None);
+        assert_eq!(plen, 128);
+        let plain = crate::rib::SidStructure { arg_bits: 0, ..st };
+        let (_, _, plen, _) = sid_route_target(crate::rib::SidBehavior::EndDT2M, sid, Some(plain));
+        assert_eq!(plen, 128);
+    }
 
     #[test]
     fn evpn_shared_rmac_follows_remaining_vtep() {

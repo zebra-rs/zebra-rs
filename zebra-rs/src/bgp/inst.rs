@@ -1014,6 +1014,18 @@ pub struct Bgp {
     /// The leaf-label replication slots last teed: `(bd, PE, its BUM
     /// label, its leaf label)`.
     pub(super) etree_slots_sent: BTreeSet<(u32, std::net::IpAddr, u32, u32)>,
+    /// EVPN E-Tree over SRv6 (plan §8.6, D6): this PE's leaf argument,
+    /// [`super::route::ETREE_LEAF_ARG`] while the encapsulation is SRv6, an
+    /// EVI has a leaf AC and the locator leaves room for the argument.
+    pub etree_leaf_arg: Option<u32>,
+    /// The leaf argument last teed to cradle (`Some(0)` = none); `None`
+    /// until a tee exists, as for the leaf label.
+    pub(super) etree_leaf_arg_teed: Option<u32>,
+    /// The VNIs whose End.DT2M carries an argument (installed at LOC:FUNC,
+    /// advertised with the argument length): those with a leaf AC.
+    pub(super) etree_dt2m_arg_vnis: BTreeSet<u32>,
+    /// The SRv6 leaf slots last teed: `(bd, PE's End.DT2M SID, leaf SID)`.
+    pub(super) etree_srv6_slots_sent: BTreeSet<(u32, std::net::Ipv6Addr, std::net::Ipv6Addr)>,
     /// EVPN E-Tree over VXLAN (the V1+ scheme, plan §8.5): the VNIs whose
     /// ACs on this PE are all leaves, so whose IMET carries the E-Tree EC
     /// with the Leaf flag (`etree_imet_reconcile`).
@@ -1570,6 +1582,10 @@ impl Bgp {
             etree_leaf_ad: Vec::new(),
             etree_leaf_label_teed: None,
             etree_slots_sent: BTreeSet::new(),
+            etree_leaf_arg: None,
+            etree_leaf_arg_teed: None,
+            etree_dt2m_arg_vnis: BTreeSet::new(),
+            etree_srv6_slots_sent: BTreeSet::new(),
             etree_imet_leaf_vnis: BTreeSet::new(),
             hostname: None,
             no_fib_install: false,
@@ -1867,7 +1883,7 @@ impl Bgp {
     /// RIB SID registry — `table_id` carries the VNI (the bridge domain).
     /// The kernel has no L2 seg6local actions, so `route_sid_install`
     /// skips netlink for these; the cradle eBPF tee is the data plane.
-    fn send_vni_l2_sid_add(
+    pub(super) fn send_vni_l2_sid_add(
         &self,
         vni: u32,
         addr: std::net::Ipv6Addr,
@@ -1882,7 +1898,13 @@ impl Bgp {
             allocation_type: crate::rib::SidAllocationType::Dynamic,
             ifindex: 0,
             nh6: None,
-            structure: None,
+            // An End.DT2M in a VNI with a leaf AC carries its argument
+            // shape, so it installs at LOC:FUNC and cradle reads the leaf
+            // argument (plan §8.6, D6).
+            structure: (behavior == crate::rib::SidBehavior::EndDT2M
+                && self.etree_dt2m_arg_vnis.contains(&vni))
+            .then(|| self.etree_arg_structure())
+            .flatten(),
             table_id: vni,
             segs: Vec::new(),
             flavors: 0,
@@ -1973,7 +1995,13 @@ impl Bgp {
     /// on the next locator update).
     pub(super) fn vni_dt2m_prefix_sid(&mut self, vni: u32) -> Option<bgp_packet::PrefixSid> {
         let sid = self.alloc_vni_dt2m_sid(vni)?;
-        let structure = self.srv6_locator.as_ref().and_then(|l| l.sid_structure());
+        // A VNI with a leaf AC advertises the argument length, so peers
+        // place our leaf argument (RFC 9819 §3.3, plan D6.4).
+        let structure = if self.etree_dt2m_arg_vnis.contains(&vni) {
+            self.etree_arg_structure()
+        } else {
+            self.srv6_locator.as_ref().and_then(|l| l.sid_structure())
+        };
         Some(srv6_l2_service_prefix_sid(
             sid,
             structure,
@@ -5231,6 +5259,8 @@ impl Bgp {
                 // copy dropped here as malformed.
                 self.etree_leaf_label_teed = None;
                 self.etree_slots_sent.clear();
+                self.etree_leaf_arg_teed = None;
+                self.etree_srv6_slots_sent.clear();
                 self.local_rib.etree_remotes_sent.clear();
                 self.etree_label_reconcile();
             }
@@ -6037,8 +6067,26 @@ impl Bgp {
                 .send(crate::rib::Message::EtreeLeafLabel { label });
         }
         self.etree_leaf_label_teed = Some(label);
+        // Over SRv6 the mark is the leaf argument (plan §8.6, D6): one
+        // constant per PE, so nothing is drawn; it is teed for decap and
+        // gives the leaf EVIs' End.DT2M an argument.
+        self.etree_leaf_arg = (self.evpn_encap.is_srv6()
+            && !self.etree_leaf_evis().is_empty()
+            && self.etree_arg_structure().is_some())
+        .then_some(super::route::ETREE_LEAF_ARG);
+        let arg = self.etree_leaf_arg.unwrap_or(0);
+        let stale = match self.etree_leaf_arg_teed {
+            None => arg != 0,
+            Some(teed) => teed != arg,
+        };
+        if stale {
+            let _ = self.ctx.rib.send(crate::rib::Message::EtreeLeafArg { arg });
+        }
+        self.etree_leaf_arg_teed = Some(arg);
+        self.etree_dt2m_arg_reconcile();
         self.evpn_originate_etree_leaf_ad();
         self.evpn_etree_slots_sync();
+        self.evpn_etree_srv6_slots_sync();
         self.etree_imet_reconcile();
         self.evpn_etree_remotes_sync();
     }
