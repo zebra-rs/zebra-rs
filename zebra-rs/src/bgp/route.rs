@@ -6566,6 +6566,23 @@ fn evpn_originated_vtep_selected(
     }
 }
 
+/// Whether a received EVPN path's next hop names this speaker: one of its
+/// VTEPs, or its own end of the session the path arrived on, where egress
+/// re-points an originated route that has no VTEP
+/// ([`evpn_should_rewrite_nexthop`]). Only our own routes carry either.
+fn evpn_nexthop_is_self(
+    nexthop: Option<&BgpNexthop>,
+    vteps: &std::collections::BTreeSet<IpAddr>,
+    session_local: Option<IpAddr>,
+) -> bool {
+    match nexthop {
+        Some(BgpNexthop::Evpn(addr)) => {
+            !addr.is_unspecified() && (vteps.contains(addr) || session_local == Some(*addr))
+        }
+        _ => false,
+    }
+}
+
 /// Per-peer EVPN advertise builder. Mirrors `route_update_ipv4`:
 /// applies split-horizon, the iBGP-iBGP / route-reflector filter,
 /// and fixes up AS_PATH / NEXT_HOP / LOCAL_PREF for the outgoing
@@ -10446,16 +10463,14 @@ fn route_evpn_export_selected(
                 // remote route binding it elsewhere must outrank our own.
                 let local_wins =
                     |local: Option<&BgpRib>| local.is_some_and(|l| evpn_local_path_wins(l, best));
-                if !best.is_originated()
-                    && (local_wins(evpn_local_mac_route(
-                        bgp.local_rib,
-                        *bgp.router_id,
-                        vni,
-                        *mac,
-                    )) || ip.is_some_and(|ip| {
-                        local_wins(evpn_local_ip_route(bgp.local_rib, *bgp.router_id, vni, ip))
-                    }))
-                {
+                if local_wins(evpn_local_mac_route(
+                    bgp.local_rib,
+                    *bgp.router_id,
+                    vni,
+                    *mac,
+                )) || ip.is_some_and(|ip| {
+                    local_wins(evpn_local_ip_route(bgp.local_rib, *bgp.router_id, vni, ip))
+                }) {
                     let key = rib::evpn::MacRouteKey::new(*rd, vni, mac_addr, *ip);
                     bgp.local_rib.evpn_dad.remote_gone(
                         key.rd,
@@ -10474,28 +10489,26 @@ fn route_evpn_export_selected(
                 // removes the local MAC from BGP on every remote takeover,
                 // which here otherwise follows from the install replacing the
                 // local FDB row.
-                if !best.is_originated() {
-                    let route = super::evpn_dad::RemoteRoute {
-                        rd: key.rd,
-                        vtep: extract_tunnel_endpoint(best),
-                        sticky: extract_flags_from_attr(&best.attr) & EVPN_FLAG_STICKY != 0,
-                        es: best.esi.filter(|esi| {
-                            *esi != ZERO_ESI && bgp.local_rib.own_es.contains_key(esi)
-                        }),
-                        seq,
-                    };
-                    let (verdict, detected) = bgp.local_rib.evpn_dad.remote_takeover(
-                        vni,
-                        mac_addr,
-                        *ip,
-                        route,
-                        Instant::now(),
-                    );
-                    bgp.local_rib.evpn_dad.arm(bgp.tx, &detected);
-                    if verdict == super::evpn_dad::Verdict::Hold {
-                        bgp.local_rib.evpn_dad.withdraw.insert((vni, mac_addr, *ip));
-                        return;
-                    }
+                let route = super::evpn_dad::RemoteRoute {
+                    rd: key.rd,
+                    vtep: extract_tunnel_endpoint(best),
+                    sticky: extract_flags_from_attr(&best.attr) & EVPN_FLAG_STICKY != 0,
+                    es: best
+                        .esi
+                        .filter(|esi| *esi != ZERO_ESI && bgp.local_rib.own_es.contains_key(esi)),
+                    seq,
+                };
+                let (verdict, detected) = bgp.local_rib.evpn_dad.remote_takeover(
+                    vni,
+                    mac_addr,
+                    *ip,
+                    route,
+                    Instant::now(),
+                );
+                bgp.local_rib.evpn_dad.arm(bgp.tx, &detected);
+                if verdict == super::evpn_dad::Verdict::Hold {
+                    bgp.local_rib.evpn_dad.withdraw.insert((vni, mac_addr, *ip));
+                    return;
                 }
                 if etree_leaf_flag_missing(&best.attr) {
                     tracing::error!(
@@ -11149,6 +11162,24 @@ pub fn route_evpn_update(
         route_evpn_withdraw(ident, route, bgp, peers);
         return;
     };
+    // Our own route coming back. With `allowas-in` (leaves sharing an AS) or
+    // a spine's `as-override`, an eBGP spine that sends a leaf its own routes
+    // gets past the AS_PATH check, and the path lands in our own RD as a
+    // received one. It is never a remote binding — installed, it points the
+    // local MAC or the flood list at ourselves — so drop it as the loop check
+    // would.
+    let session_local = peers
+        .get_by_idx(ident)
+        .and_then(|peer| peer.param.local_addr)
+        .map(|addr| addr.ip());
+    if evpn_nexthop_is_self(
+        decision.attr.nexthop.as_ref(),
+        &bgp.local_rib.evpn_vteps,
+        session_local,
+    ) {
+        route_evpn_withdraw(ident, route, bgp, peers);
+        return;
+    }
     rib.attr = bgp.attr_store.intern(decision.attr);
     rib.weight = decision.weight;
     rib.tag = decision.tag;
@@ -11222,9 +11253,17 @@ pub fn route_evpn_withdraw(ident: usize, route: &EvpnRoute, bgp: &mut BgpTop, pe
     // RT-derived VNI when the prefix has no remaining selected path.
     // `remove_evpn` returns every candidate that matched
     // `(ident, remote_id)`; in normal operation that's a single path,
-    // and `.first()` is fine. If the prefix wasn't in the RIB the
-    // vec is empty and the export becomes a no-op.
+    // and `.first()` is fine.
     let removed = bgp.local_rib.remove_evpn(rd, &prefix, id, ident);
+    // Nothing of this peer's was in the Loc-RIB — a looped UPDATE
+    // (treat-as-withdraw), or a withdraw of a route never accepted — so the
+    // selection is unchanged: nothing to export, nothing to tell peers.
+    // Going on would re-advertise the survivor to every peer once per
+    // looped UPDATE, and re-export it: for a looped route of our own that
+    // survivor is our originated path, never a remote binding.
+    if removed.is_empty() {
+        return;
+    }
 
     // Lua EVPN withdraw hook (Loc-RIB → gone): hand the script the stored
     // attributes of the EVPN path that just left the Loc-RIB (the GBP
@@ -11247,13 +11286,11 @@ pub fn route_evpn_withdraw(ident: usize, route: &EvpnRoute, bgp: &mut BgpTop, pe
     // EVPN withdraw (or a peer-down sweep) removed the route locally
     // but every other peer — a route-reflector client, an eBGP transit
     // neighbor — kept forwarding to the departed host's stale VTEP
-    // until its own session bounced. Only propagate when the Loc-RIB
-    // actually changed: re-flooding a withdraw for an already-absent
-    // route makes peers echo it back.
+    // until its own session bounced. The Loc-RIB changed (the early
+    // return above): re-flooding a withdraw for an already-absent route
+    // makes peers echo it back.
     if selected.is_empty() {
-        if !removed.is_empty() {
-            route_withdraw_evpn_to_peers(rd, prefix.clone(), peers);
-        }
+        route_withdraw_evpn_to_peers(rd, prefix.clone(), peers);
     } else {
         // Another path remains best for this key — re-advertise it so
         // peers that held the withdrawn path converge on the survivor.
