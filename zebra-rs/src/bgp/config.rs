@@ -6021,8 +6021,7 @@ impl Bgp {
             config_ethernet_segment_interface,
         );
         // EVPN E-Tree (RFC 8317) leaf ACs, under `router bgp afi-safi evpn
-        // etree leaf-interface <name>`; the subtree exists only with
-        // `--feature etree` (zebra-bgp-evpn.yang).
+        // etree leaf-interface <name>` (zebra-bgp-evpn.yang).
         self.callback_add(
             "/router/bgp/afi-safi/etree/leaf-interface",
             config_etree_leaf_interface,

@@ -35,10 +35,18 @@ module zebra-features {
 
   feature etree {
     description
-      "EVPN E-Tree (RFC 8317): root and leaf attachment circuits under
-       `router bgp afi-safi evpn etree`. Gated while it is incomplete:
-       over VXLAN and SRv6 a leaf's broadcast, multicast and unknown
-       unicast still reach leaves on other PEs (over MPLS the leaf label
-       keeps them off), so E-Tree must not look finished.";
+      "No longer gates anything; kept so `--feature etree` is still
+       accepted without a warning.
+
+       EVPN E-Tree (RFC 8317) — root and leaf attachment circuits under
+       `router bgp afi-safi evpn etree`, and `show bgp evpn etree` — is
+       always available. It was gated until a leaf's broadcast,
+       multicast and unknown unicast were kept from leaves on other PEs
+       over every encapsulation: MPLS by the leaf label, VXLAN by the
+       leaf-only IMET colour, and SRv6 by the leaf argument. Over VXLAN
+       two PEs that both have leaf and root ACs still exchange their
+       leaves' BUM, and `show bgp evpn etree` warns about such a domain.
+       A leaf AC needs the cradle data plane; a commit naming one
+       without it is refused.";
   }
 }

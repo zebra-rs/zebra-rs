@@ -651,7 +651,6 @@ module exec {
           type empty;
         }
         leaf etree {
-          if-feature feat:etree;
           ext:help "EVPN E-Tree leaf interfaces and remote leaf MACs (RFC 8317)";
           type empty;
         }

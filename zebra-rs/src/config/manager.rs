@@ -2783,20 +2783,16 @@ mod save_config_tests {
         }
     }
 
-    /// `router bgp afi-safi evpn etree` exists only with `--feature etree`,
-    /// and a leaf AC is refused at commit without the cradle data plane:
-    /// the kernel bridge cannot keep leaves apart. The startup config only
-    /// warns, as for the label checks.
+    /// `router bgp afi-safi evpn etree` is always in the schema (the
+    /// `etree` feature no longer gates it), and a leaf AC is refused at
+    /// commit without the cradle data plane: the kernel bridge cannot keep
+    /// leaves apart. The startup config only warns, as for the label
+    /// checks.
     #[test]
-    fn an_etree_leaf_needs_the_feature_and_cradle() {
+    fn an_etree_leaf_needs_cradle() {
         let line = "set router bgp afi-safi evpn etree leaf-interface ce1";
 
-        let cm = manager_with_config(&temp_path("etree-off"));
-        let mode = cm.modes.get("configure").expect("configure mode");
-        let (code, _, _) = cm.execute(mode, line);
-        assert_ne!(code, ExecCode::Show, "`{line}` needs --feature etree");
-
-        let cm = manager_with_features(&temp_path("etree-on"), vec!["etree".to_string()]);
+        let cm = manager_with_config(&temp_path("etree-on"));
         let mode = cm.modes.get("configure").expect("configure mode");
         let (code, output, _) = cm.execute(mode, line);
         assert_eq!(code, ExecCode::Show, "set rejected: {output:?}");
