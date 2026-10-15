@@ -62,6 +62,14 @@ message EtreeRole {
   bool leaf = 2;
 }
 
+// EVPN E-Tree over MPLS (RFC 8317 §4.2): the leaf label this PE advertised
+// in its ESI-0 Ethernet A-D route; 0 = none. A peer pushes it under our
+// service label on BUM from its leaf ACs, and the copy is kept off our
+// leaf ports (egress filtering). Replace semantics.
+message EtreeLeafLabel {
+  uint32 label = 1;
+}
+
 // The other PEs attached to Ethernet Segment `esi` — their VTEP / overlay
 // source addresses, as learned from the Type-4 ES routes. Replace
 // semantics. BUM that arrives from one of them is never sent back onto the
@@ -331,6 +339,12 @@ message ReplSlot {
   uint32 remote_label = 5;  // MPLS: that PE's BUM (EVI) service label
   string esi = 6;           // RFC 7432 §8.3 (MPLS): the segment this slot serves exclusively (empty = plain slot)
   uint32 esi_label = 7;     // ... pushing the remote PE's ESI label for it under the service label
+  // EVPN E-Tree (RFC 8317 §4.2, MPLS only): the leaf-label slot toward
+  // `remote_pe` — it carries BUM from local leaf ports only, each copy with
+  // that PE's leaf label under the service label, and every other slot
+  // toward the PE then serves roots only. Exclusive with `esi`/`esi_label`:
+  // the leaf label replaces the ESI label. Keyed apart from the plain slot.
+  uint32 etree_leaf_label = 8;
 }
 
 // An RFC 9524 Replication segment: the local End.Replicate SID `sid` is an SR
@@ -634,6 +648,7 @@ service Cradle {
   rpc SetEsNhg(EsNhg) returns (Empty);
   // EVPN E-Tree: a local port's leaf/root role (RFC 8317).
   rpc SetEtreeRole(EtreeRole) returns (Empty);
+  rpc SetEtreeLeafLabel(EtreeLeafLabel) returns (Empty);
   rpc AddFdbLocal(FdbLocal) returns (Empty);
   // Flush locally-learned FDB entries (never control-plane-installed remote
   // entries). WatchFdb subscribers observe the removals as age events.
