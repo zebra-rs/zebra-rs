@@ -3821,9 +3821,11 @@ pub struct LocalRib {
     /// receive path can send a leaf-only IMET's mark before the slot the same
     /// IMET creates.
     pub etree_vxlan_marks: bool,
-    /// EVPN E-Tree (RFC 8317 §4.2.3): a Type-2 on an Ethernet Segment was
-    /// installed or withdrawn, so the role-conflict check re-runs once the
-    /// receive path's borrow ends (`Bgp::etree_role_conflict_reconcile`).
+    /// EVPN E-Tree (RFC 8317 §4.2.3): a Type-2 selection changed with a
+    /// path on an Ethernet Segment winning before or after
+    /// (`etree_role_mark`, from `update_evpn` and `select_best_path_evpn`),
+    /// so the role-conflict check re-runs once the borrow ends
+    /// (`Bgp::etree_role_drain`).
     pub etree_role_dirty: bool,
     /// The leaf-only remote PEs teed (`SetEtreeRemote`): `(bd, VTEP)`. Both
     /// the receive path (a new leaf-only IMET) and the sync add to it.
@@ -3839,7 +3841,33 @@ impl LocalRib {
         prefix: EvpnPrefix,
         rib: BgpRib,
     ) -> (Vec<BgpRib>, Vec<BgpRib>, u32) {
-        self.evpn.entry(rd).or_default().update(prefix, rib)
+        let before = self.evpn_segment_winner(&rd, &prefix);
+        let out = self.evpn.entry(rd).or_default().update(prefix.clone(), rib);
+        self.etree_role_mark(&rd, &prefix, before);
+        out
+    }
+
+    /// Whether the selected path for `(rd, prefix)` is a received Type-2 on
+    /// an Ethernet Segment: what the E-Tree role check looks at.
+    fn evpn_segment_winner(&self, rd: &RouteDistinguisher, prefix: &EvpnPrefix) -> bool {
+        matches!(prefix, EvpnPrefix::MacIp { .. })
+            && self
+                .evpn
+                .get(rd)
+                .and_then(|table| table.selected.get(prefix))
+                .is_some_and(|rib| {
+                    !rib.is_originated() && rib.esi.is_some_and(|esi| esi != ZERO_ESI)
+                })
+    }
+
+    /// A selection change on a Type-2 marks the E-Tree role check
+    /// (RFC 8317 §4.2.3) when the winner before or after is a received
+    /// path on a segment: one arrived, or one left — replaced by a path on
+    /// no segment, withdrawn, or out-selected on a recompute.
+    fn etree_role_mark(&mut self, rd: &RouteDistinguisher, prefix: &EvpnPrefix, before: bool) {
+        if before || self.evpn_segment_winner(rd, prefix) {
+            self.etree_role_dirty = true;
+        }
     }
 
     pub fn remove_evpn(
@@ -3857,7 +3885,10 @@ impl LocalRib {
         rd: &RouteDistinguisher,
         prefix: &EvpnPrefix,
     ) -> Vec<BgpRib> {
-        self.evpn.entry(*rd).or_default().select_best_path(prefix)
+        let before = self.evpn_segment_winner(rd, prefix);
+        let selected = self.evpn.entry(*rd).or_default().select_best_path(prefix);
+        self.etree_role_mark(rd, prefix, before);
+        selected
     }
 
     // MUP dispatch -----------------------------------------------------------
@@ -10426,10 +10457,6 @@ fn route_evpn_export_selected(
         };
         match prefix {
             EvpnPrefix::MacIp { mac, ip, .. } => {
-                // A MAC on a segment: the E-Tree role check re-runs.
-                if wd.esi.is_some_and(|esi| esi != ZERO_ESI) {
-                    bgp.local_rib.etree_role_dirty = true;
-                }
                 // Match the announce-side filter: never installed
                 // multicast MAC entries → nothing to delete.
                 let mac_addr = MacAddr::from(*mac);
@@ -10578,13 +10605,6 @@ fn route_evpn_export_selected(
             // sequence as a remote one would inflate our next one.
             if best.is_originated() {
                 return;
-            }
-            // A MAC on a segment, or one replacing a path that was: the
-            // E-Tree role check re-runs.
-            if best.esi.is_some_and(|esi| esi != ZERO_ESI)
-                || withdrawn.is_some_and(|wd| wd.esi.is_some_and(|esi| esi != ZERO_ESI))
-            {
-                bgp.local_rib.etree_role_dirty = true;
             }
             // Defensive: the local FDB->BGP origination path skips
             // multicast MACs in `fdb_entry_from_neighbor`, but a peer
@@ -11379,19 +11399,6 @@ pub fn route_evpn_update(
         nht_track_received(bgp, &mut rib, dep);
     }
 
-    // A Type-2 that displaces one on a segment changes the E-Tree role
-    // check even when it has no ESI itself (the conflict ends): look at the
-    // path it may replace before it does.
-    if matches!(prefix, EvpnPrefix::MacIp { .. })
-        && bgp
-            .local_rib
-            .evpn
-            .get(&rd)
-            .and_then(|table| table.selected.get(&prefix))
-            .is_some_and(|old| old.esi.is_some_and(|esi| esi != ZERO_ESI))
-    {
-        bgp.local_rib.etree_role_dirty = true;
-    }
     let _ = bgp.local_rib.update_evpn(rd, prefix.clone(), rib);
 
     // After updating Loc-RIB, re-run best path selection and export to RIB.
@@ -21511,6 +21518,16 @@ impl Bgp {
         out
     }
 
+    /// Re-run the E-Tree role check if a selection change marked it
+    /// (`LocalRib::etree_role_dirty`): from the receive path's drain, and
+    /// after every event (`event_upkeep`) for the other reselections — a
+    /// best-path recompute, a local origination, a next-hop change.
+    pub(super) fn etree_role_drain(&mut self) {
+        if std::mem::take(&mut self.local_rib.etree_role_dirty) {
+            self.etree_role_conflict_reconcile();
+        }
+    }
+
     /// Log each E-Tree role conflict once when it starts and once when it
     /// clears (`etree_role_conflicts`), against what was last logged.
     pub(super) fn etree_role_conflict_reconcile(&mut self) {
@@ -22459,9 +22476,7 @@ impl Bgp {
             self.evpn_etree_remotes_sync();
         }
         // And the E-Tree role check, from the Type-2s on segments.
-        if std::mem::take(&mut self.local_rib.etree_role_dirty) {
-            self.etree_role_conflict_reconcile();
-        }
+        self.etree_role_drain();
     }
 
     /// Tee the Ethernet Segment nexthop groups to the cradle datapath (RFC

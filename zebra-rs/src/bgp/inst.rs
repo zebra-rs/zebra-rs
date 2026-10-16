@@ -7745,10 +7745,13 @@ impl Bgp {
     /// the withdrawal needs the peers, which those paths do not all have.
     /// Then the labels the event freed are reused by a transit row that
     /// went without, else their drained chunks go back, behind the ILM
-    /// messages.
+    /// messages. And the E-Tree role check re-runs if a Type-2 on a segment
+    /// won or lost, whichever path reselected it (a best-path recompute
+    /// after a MED knob change has no UPDATE behind it).
     pub(super) fn event_upkeep(&mut self) {
         self.evpn_dad_drain();
         self.label_chunk_upkeep();
+        self.etree_role_drain();
     }
 
     pub async fn event_loop(&mut self) {

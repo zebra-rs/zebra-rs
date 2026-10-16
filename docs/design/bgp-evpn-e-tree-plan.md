@@ -268,10 +268,13 @@ each segment with an ESI and an access port, the port's role
 carrying that ESI. `show bgp evpn etree` (JSON `roleConflicts`) prints
 `Warning: ESI <esi>: role conflict: our AC <if> is a <role>, <PEs> advertise
 its MACs as <other role>`. `etree_role_conflict_reconcile` logs the onset
-(warn) and the clear (info) once each; it runs off `etree_role_dirty`, set
-by a Type-2 on a segment arriving or going, and from
-`evpn_resync_macip_esi`, which every segment and leaf-interface change
-calls. A conflict is seen only once the peer has advertised a MAC on the
+(warn) and the clear (info) once each. It runs off `etree_role_dirty`,
+which the Type-2 selection itself sets (`update_evpn`,
+`select_best_path_evpn`) when a remote path on a segment wins before or
+after — so a winner leaving the segment through a replacement, a withdraw
+or a MED-knob recompute counts — and is drained after every event
+(`event_upkeep`). It also runs from `evpn_resync_macip_esi`, which every
+segment and leaf-interface change calls. A conflict is seen only once the peer has advertised a MAC on the
 segment.
 
 ## 6. Who drops what, where
