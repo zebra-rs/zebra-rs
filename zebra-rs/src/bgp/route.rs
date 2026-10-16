@@ -10579,8 +10579,11 @@ fn route_evpn_export_selected(
             if best.is_originated() {
                 return;
             }
-            // A MAC on a segment: the E-Tree role check re-runs.
-            if best.esi.is_some_and(|esi| esi != ZERO_ESI) {
+            // A MAC on a segment, or one replacing a path that was: the
+            // E-Tree role check re-runs.
+            if best.esi.is_some_and(|esi| esi != ZERO_ESI)
+                || withdrawn.is_some_and(|wd| wd.esi.is_some_and(|esi| esi != ZERO_ESI))
+            {
                 bgp.local_rib.etree_role_dirty = true;
             }
             // Defensive: the local FDB->BGP origination path skips
@@ -11376,6 +11379,19 @@ pub fn route_evpn_update(
         nht_track_received(bgp, &mut rib, dep);
     }
 
+    // A Type-2 that displaces one on a segment changes the E-Tree role
+    // check even when it has no ESI itself (the conflict ends): look at the
+    // path it may replace before it does.
+    if matches!(prefix, EvpnPrefix::MacIp { .. })
+        && bgp
+            .local_rib
+            .evpn
+            .get(&rd)
+            .and_then(|table| table.selected.get(&prefix))
+            .is_some_and(|old| old.esi.is_some_and(|esi| esi != ZERO_ESI))
+    {
+        bgp.local_rib.etree_role_dirty = true;
+    }
     let _ = bgp.local_rib.update_evpn(rd, prefix.clone(), rib);
 
     // After updating Loc-RIB, re-run best path selection and export to RIB.

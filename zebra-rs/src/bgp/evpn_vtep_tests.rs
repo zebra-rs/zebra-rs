@@ -2807,3 +2807,81 @@ async fn a_role_conflict_on_a_segment_is_reported() {
         "cleared by the withdraw"
     );
 }
+
+/// Review finding: a conflicting Type-2 replaced by the same MAC/IP with no
+/// ESI ends the conflict, so the clear is logged — and a later conflict on
+/// the segment is logged again, not swallowed by stale state.
+#[tokio::test]
+async fn a_conflict_cleared_by_a_replacement_without_an_esi_is_logged() {
+    let (mut bgp, _rib) = bgp_with_rib();
+    bgp.advertise_all_vni = true;
+    bgp.ethernet_segments.insert(
+        "es1".to_string(),
+        super::super::ethernet_segment::EthernetSegment {
+            esi: Some(ESI),
+            interface: Some("ce1".to_string()),
+            ..Default::default()
+        },
+    );
+    bgp.etree_leaf_ifs.insert("ce1".to_string());
+    let (from, _rx) = peer(&mut bgp, "10.0.0.11", false);
+    let pe: IpAddr = "10.0.0.11".parse().unwrap();
+    let rd = rd_from_router_id_vni(Ipv4Addr::new(10, 0, 0, 11), 100).unwrap();
+    let mac_route = |esi: [u8; 10]| {
+        let route = EvpnRoute::Mac(bgp_packet::EvpnMac {
+            id: 0,
+            rd,
+            esi,
+            ether_tag: 0,
+            mac: [2, 0, 0, 0, 0xe2, 1],
+            ip: None,
+            vni: 100,
+            label2: None,
+        });
+        let mut attr = BgpAttr::new();
+        attr.nexthop = Some(BgpNexthop::Evpn(pe));
+        attr.local_pref = Some(LocalPref::default());
+        attr.ecom = Some(ExtCommunity::from([
+            evpn_route_target(65000, 100),
+            evpn_encap_vxlan(),
+        ]));
+        (route, attr)
+    };
+    // The peer says root on our leaf segment: a conflict.
+    let (route, attr) = mac_route(ESI);
+    feed_evpn(&mut bgp, from, route, Some(attr));
+    bgp.vpws_df_drain();
+    assert_eq!(bgp.etree_role_conflicts_logged, BTreeSet::from([ESI]));
+
+    // The same MAC/IP again, now on no segment: the conflict is gone.
+    let (route, attr) = mac_route([0; 10]);
+    feed_evpn(&mut bgp, from, route, Some(attr));
+    bgp.vpws_df_drain();
+    assert!(bgp.etree_role_conflicts().is_empty());
+    assert!(
+        bgp.etree_role_conflicts_logged.is_empty(),
+        "the clear is logged"
+    );
+
+    // Back on the segment: the onset is logged again.
+    let (route, mut attr) = mac_route(ESI);
+    attr.local_pref = Some(LocalPref::new(200));
+    feed_evpn(&mut bgp, from, route.clone(), Some(attr));
+    bgp.vpws_df_drain();
+    assert_eq!(bgp.etree_role_conflicts_logged, BTreeSet::from([ESI]));
+
+    // A second path for the same MAC, on no segment and less preferred;
+    // the segment path withdrawn promotes it, and the conflict clears.
+    let (from2, _rx2) = peer(&mut bgp, "10.0.0.12", false);
+    let (route2, attr2) = mac_route([0; 10]);
+    feed_evpn(&mut bgp, from2, route2, Some(attr2));
+    bgp.vpws_df_drain();
+    assert_eq!(bgp.etree_role_conflicts_logged, BTreeSet::from([ESI]));
+    feed_evpn(&mut bgp, from, route, None);
+    bgp.vpws_df_drain();
+    assert!(bgp.etree_role_conflicts().is_empty());
+    assert!(
+        bgp.etree_role_conflicts_logged.is_empty(),
+        "the clear is logged when a withdraw promotes a path off the segment"
+    );
+}
