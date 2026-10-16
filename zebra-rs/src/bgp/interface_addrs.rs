@@ -111,6 +111,14 @@ impl InterfaceAddrs {
         self.v4_owner.get(&addr).copied()
     }
 
+    /// Whether `ifindex` has a routable address: an IPv4 address or a
+    /// global IPv6 one (a link-local does not count). An E-Tree bridge
+    /// with one is an IRB gateway (`Bgp::etree_irb_evis`).
+    pub fn has_routable(&self, ifindex: u32) -> bool {
+        self.v4_owner.values().any(|owner| *owner == ifindex)
+            || self.global.get(&ifindex).is_some_and(|g| !g.is_empty())
+    }
+
     /// Return the chosen link-local for `ifindex`, or `None` if none
     /// is registered. State-aware: see [`pick`].
     pub fn link_local_for(&self, ifindex: u32) -> Option<Ipv6Addr> {

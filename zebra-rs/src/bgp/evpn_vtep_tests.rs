@@ -2641,3 +2641,71 @@ async fn srv6_leaf_arguments_show_and_replay() {
     bgp.process_rib_msg(RibRx::CradleUp);
     assert!(etree_srv6_messages(&mut rib).contains(&"arg 1".to_string()));
 }
+
+/// Decision D4: a leaf AC's bridge with IRB — a routable address, or a VRF
+/// master — is warned about in `show bgp evpn etree`, not refused: two
+/// leaves reach each other through L3 there (RFC 8317 §4.2.3). A
+/// link-local address alone is no gateway.
+#[tokio::test]
+async fn irb_on_a_leaf_bridge_is_warned_about() {
+    let (mut bgp, _rib) = etree_vxlan_bgp();
+    let mut bridge = rib_link(5, "br100", None);
+    bridge.master = None;
+    bridge.bridge = true;
+    bgp.process_rib_msg(RibRx::LinkAdd(bridge.clone()));
+    let show = |bgp: &Bgp| {
+        super::super::show::show_bgp_evpn_etree(
+            bgp,
+            crate::config::Args(std::collections::VecDeque::new()),
+            false,
+        )
+        .unwrap()
+    };
+    let addr = |a: &str| crate::rib::link::LinkAddr {
+        addr: a.parse().unwrap(),
+        ifindex: 5,
+        ..Default::default()
+    };
+    assert!(bgp.etree_irb_evis().is_empty());
+    assert!(!show(&bgp).contains("IRB"));
+
+    bgp.process_rib_msg(RibRx::AddrAdd(addr("fe80::1/64")));
+    assert!(
+        bgp.etree_irb_evis().is_empty(),
+        "a link-local is no gateway"
+    );
+
+    bgp.process_rib_msg(RibRx::AddrAdd(addr("10.0.0.1/24")));
+    assert_eq!(
+        bgp.etree_irb_evis(),
+        BTreeMap::from([(100, "br100".to_string())])
+    );
+    assert!(
+        show(&bgp).contains(
+            "Warning: EVI 100: IRB on bridge br100: leaves can reach each other through L3"
+        ),
+        "{}",
+        show(&bgp)
+    );
+    let json: serde_json::Value = serde_json::from_str(
+        &super::super::show::show_bgp_evpn_etree(
+            &bgp,
+            crate::config::Args(std::collections::VecDeque::new()),
+            true,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(json["irb"][0]["evi"], 100);
+
+    bgp.process_rib_msg(RibRx::AddrDel(addr("10.0.0.1/24")));
+    assert!(bgp.etree_irb_evis().is_empty());
+    bgp.process_rib_msg(RibRx::AddrAdd(addr("2001:db8::1/64")));
+    assert_eq!(bgp.etree_irb_evis().len(), 1, "a global IPv6 address");
+    bgp.process_rib_msg(RibRx::AddrDel(addr("2001:db8::1/64")));
+
+    // In a VRF: symmetric IRB's shape.
+    bridge.master = Some(50);
+    bgp.process_rib_msg(RibRx::LinkAdd(bridge));
+    assert_eq!(bgp.etree_irb_evis().len(), 1, "a VRF master");
+}
