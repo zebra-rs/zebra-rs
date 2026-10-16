@@ -1026,6 +1026,9 @@ pub struct Bgp {
     pub(super) etree_dt2m_arg_vnis: BTreeSet<u32>,
     /// The SRv6 leaf slots last teed: `(bd, PE's End.DT2M SID, leaf SID)`.
     pub(super) etree_srv6_slots_sent: BTreeSet<(u32, std::net::Ipv6Addr, std::net::Ipv6Addr)>,
+    /// The E-Tree role conflicts last logged, by ESI
+    /// (`etree_role_conflict_reconcile` logs onset and clear once each).
+    pub(super) etree_role_conflicts_logged: BTreeSet<[u8; 10]>,
     /// EVPN E-Tree over VXLAN (the V1+ scheme, plan §8.5): the VNIs whose
     /// ACs on this PE are all leaves, so whose IMET carries the E-Tree EC
     /// with the Leaf flag (`etree_imet_reconcile`).
@@ -1586,6 +1589,7 @@ impl Bgp {
             etree_leaf_arg_teed: None,
             etree_dt2m_arg_vnis: BTreeSet::new(),
             etree_srv6_slots_sent: BTreeSet::new(),
+            etree_role_conflicts_logged: BTreeSet::new(),
             etree_imet_leaf_vnis: BTreeSet::new(),
             hostname: None,
             no_fib_install: false,

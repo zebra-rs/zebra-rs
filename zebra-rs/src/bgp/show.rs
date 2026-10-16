@@ -2607,6 +2607,19 @@ struct EtreeMixedJson {
     pes: Vec<String>,
 }
 
+/// `show bgp evpn etree json`: an E-Tree role conflict on an Ethernet
+/// Segment (RFC 8317 §4.2.3).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EtreeRoleConflictJson {
+    esi: String,
+    ac: String,
+    /// `leaf` or `root`: our AC's role on the segment.
+    local_role: &'static str,
+    /// The PEs advertising MACs on the segment with the other role.
+    pes: Vec<String>,
+}
+
 /// `show bgp evpn etree json`: an EVI whose leaf ACs sit in a bridge with
 /// IRB (D4).
 #[derive(Serialize)]
@@ -2657,6 +2670,9 @@ struct EtreeJson {
     /// The EVIs with IRB on a leaf AC's bridge: their leaves reach each
     /// other through L3, which E-Tree does not filter (RFC 8317 §4.2.3).
     irb: Vec<EtreeIrbJson>,
+    /// The Ethernet Segments whose AC role disagrees between PEs: a leaf's
+    /// BUM may loop back into the segment (RFC 8317 §4.2.3).
+    role_conflicts: Vec<EtreeRoleConflictJson>,
     /// Whether a leaf's BUM is kept from leaves on other PEs: over MPLS,
     /// by the leaf label (RFC 8317 §4.2); over SRv6, by the leaf argument
     /// (RFC 9819); over VXLAN, by the IMET colour, except between mixed
@@ -2703,6 +2719,17 @@ pub(super) fn show_bgp_evpn_etree(
         .map(|(evi, macs)| EtreeRemoteJson {
             evi,
             leaf_macs: macs.len(),
+        })
+        .collect();
+    let role = |leaf: bool| if leaf { "leaf" } else { "root" };
+    let role_conflicts: Vec<EtreeRoleConflictJson> = bgp
+        .etree_role_conflicts()
+        .into_iter()
+        .map(|(esi, c)| EtreeRoleConflictJson {
+            esi: bgp_packet::esi_display(&esi),
+            ac: c.ac,
+            local_role: role(c.local_leaf),
+            pes: c.pes.iter().map(IpAddr::to_string).collect(),
         })
         .collect();
     let irb: Vec<EtreeIrbJson> = bgp
@@ -2759,6 +2786,7 @@ pub(super) fn show_bgp_evpn_etree(
             remote_leaf_only,
             mixed_pes: mixed,
             irb,
+            role_conflicts,
             bum_filtered: true,
         };
         return Ok(serde_json::to_string_pretty(&out)
@@ -2848,6 +2876,22 @@ pub(super) fn show_bgp_evpn_etree(
             out,
             "  Warning: EVI {}: IRB on bridge {}: leaves can reach each other through L3",
             i.evi, i.bridge
+        )?;
+    }
+    for c in &role_conflicts {
+        let other = if c.local_role == "leaf" {
+            "root"
+        } else {
+            "leaf"
+        };
+        writeln!(
+            out,
+            "  Warning: ESI {}: role conflict: our AC {} is a {}, {} advertise its MACs as {}",
+            c.esi,
+            c.ac,
+            c.local_role,
+            c.pes.join(", "),
+            other
         )?;
     }
     Ok(out)
