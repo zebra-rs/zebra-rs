@@ -20210,7 +20210,11 @@ impl Bgp {
             }
             self.local_rib.evpn_local_ip_seq.insert(ip_key, seq);
         }
-        if seq > 0 {
+        // RFC 7432 §15.2: a static MAC (an FDB entry the operator added
+        // `static sticky`) is advertised sticky with sequence number zero.
+        if entry.flags & NTF_STICKY != 0 {
+            ecom.0.insert(evpn_mac_mobility_sticky());
+        } else if seq > 0 {
             ecom.0.insert(evpn_mac_mobility(seq));
         }
         // RFC 8317 §4.1: a MAC learned on a leaf AC carries the E-Tree EC
@@ -23999,6 +24003,10 @@ impl Bgp {
 /// origination to avoid advertise loops.
 const NTF_EXT_LEARNED: u8 = 0x10;
 
+/// `NTF_STICKY` from `<linux/neighbour.h>` — bit 0x40. Set on an FDB
+/// entry the operator added `static sticky`: a MAC that must not move.
+const NTF_STICKY: u8 = 0x40;
+
 /// Fixed Maximum Response Time stamped on a Type-8 Leave Synch route
 /// originated by the `clear bgp debug igmp-leave-sync-*` test command
 /// (RFC 9251 §9.3; IGMP units, ~10s). The real value would come from the
@@ -24444,9 +24452,9 @@ fn evpn_route_target(asn: u32, vni: u32) -> ExtCommunityValue {
 }
 
 /// Build the MAC Mobility extended community (RFC 7432 §7.7): type 0x06
-/// (EVPN) / sub-type 0x00; flags octet unused (no sticky bit), sequence
-/// number in the trailing 4 octets — the layout
-/// `extract_mac_mobility_seq` parses.
+/// (EVPN) / sub-type 0x00; flags octet clear (see
+/// [`evpn_mac_mobility_sticky`] for a static MAC), sequence number in the
+/// trailing 4 octets — the layout `extract_mac_mobility_seq` parses.
 fn evpn_mac_mobility(seq: u32) -> ExtCommunityValue {
     let mut ec = ExtCommunityValue {
         high_type: 0x06,
@@ -24454,6 +24462,15 @@ fn evpn_mac_mobility(seq: u32) -> ExtCommunityValue {
         val: [0; 6],
     };
     ec.val[2..6].copy_from_slice(&seq.to_be_bytes());
+    ec
+}
+
+/// The MAC Mobility extended community of a static MAC (RFC 7432 §15.2):
+/// the sticky flag (low-order bit of the flags octet) set and sequence
+/// number zero.
+fn evpn_mac_mobility_sticky() -> ExtCommunityValue {
+    let mut ec = evpn_mac_mobility(0);
+    ec.val[0] = 0x01;
     ec
 }
 

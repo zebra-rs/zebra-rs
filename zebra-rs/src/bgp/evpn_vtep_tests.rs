@@ -472,6 +472,64 @@ async fn stale_remote_route_does_not_override_a_local_mac() {
     assert_eq!(mac_messages(&mut rib), vec![(true, key)]);
 }
 
+/// RFC 7432 §15.2: a MAC the operator added `static sticky` is advertised
+/// sticky with sequence number zero, MAC-only and MAC/IP alike, even after
+/// a move was seen; a remote route with a higher sequence number does not
+/// take it over. Dropping the sticky flag restores the ordinary rules.
+#[tokio::test]
+async fn static_local_mac_is_advertised_sticky_and_kept() {
+    let (mut bgp, mut rib) = bgp_with_rib();
+    bgp.advertise_all_vni = true;
+    let (from, _rx) = peer(&mut bgp, "10.0.0.11", false);
+    let mac = MacAddr::from([2, 0, 0, 0, 1, 1]);
+    let ip: IpAddr = "10.10.0.101".parse().unwrap();
+    // A move was seen before: a dynamic MAC would carry 5.
+    bgp.local_rib.evpn_remote_mac_seq.insert((100, mac), 4);
+    let local = crate::rib::api::FdbEntry {
+        vni: 100,
+        mac,
+        ip: None,
+        ifindex: 7,
+        bridge_ifindex: 5,
+        flags: NTF_STICKY,
+        vxlan_local: Some(IpAddr::V4(RID)),
+    };
+    let rd = rd_from_router_id_vni(RID, 100).unwrap();
+    let selected = |bgp: &Bgp, ip: Option<IpAddr>| {
+        let prefix = EvpnPrefix::MacIp {
+            eth_tag: 0,
+            mac: mac.octets(),
+            ip,
+        };
+        bgp.local_rib.evpn[&rd].selected[&prefix].attr.clone()
+    };
+    for ip in [None, Some(ip)] {
+        bgp.evpn_originate_macip(&crate::rib::api::FdbEntry {
+            ip,
+            ..local.clone()
+        });
+        let attr = selected(&bgp, ip);
+        assert_eq!(
+            extract_flags_from_attr(&attr) & EVPN_FLAG_STICKY,
+            EVPN_FLAG_STICKY
+        );
+        assert_eq!(extract_mac_mobility_seq(&attr), 0);
+    }
+    mac_messages(&mut rib);
+
+    let remote_rd = rd_from_router_id_vni("10.0.0.11".parse().unwrap(), 100).unwrap();
+    let key = crate::rib::evpn::MacRouteKey::new(remote_rd, 100, mac, None);
+    receive_macip(&mut bgp, from, remote_rd, mac, None, 9);
+    assert_eq!(mac_messages(&mut rib), vec![(false, key)]);
+
+    // No longer static: advertised as an ordinary move, above the remote
+    // route's number.
+    bgp.evpn_originate_macip(&crate::rib::api::FdbEntry { flags: 0, ..local });
+    let attr = selected(&bgp, None);
+    assert_eq!(extract_flags_from_attr(&attr) & EVPN_FLAG_STICKY, 0);
+    assert_eq!(extract_mac_mobility_seq(&attr), 10);
+}
+
 /// Feed a received MAC/IP route from `from` through ingest.
 fn receive_macip(
     bgp: &mut Bgp,
