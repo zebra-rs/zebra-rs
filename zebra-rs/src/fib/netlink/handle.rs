@@ -611,6 +611,32 @@ fn cradle_members(nexthop: &Nexthop) -> Vec<CradleMember> {
 /// carries more than one.
 const EVPN_SVD_VLAN: u16 = 1;
 
+/// Netlink flags and NUD state of the bridge-master FDB entry for a remote
+/// EVPN MAC, built as FRR's `netlink_macfdb_update_ctx()` builds them.
+/// NUD_REACHABLE matches what Linux records for kernel-learned entries.
+///
+/// A sticky MAC "is static and cannot move" (RFC 7432 §7.7). The bridge
+/// keeps an entry on its port when a local frame carries the address only
+/// if the entry is `NTF_STICKY`, and it drops that flag from an
+/// `NTF_EXT_LEARNED` request without an error. A sticky MAC is therefore
+/// installed as a static sticky entry instead of an extern-learned one.
+fn evpn_master_fdb_flags(sticky: bool) -> (u8, u16) {
+    const NTF_MASTER: u8 = 0x04;
+    const NTF_EXT_LEARNED: u8 = 0x10;
+    const NTF_STICKY: u8 = 0x40;
+    const NUD_REACHABLE: u16 = 0x02;
+    const NUD_NOARP: u16 = 0x40;
+    let (mut flags, mut state) = (NTF_MASTER, NUD_REACHABLE);
+    if sticky {
+        flags |= NTF_STICKY;
+        // Static: never ages out, like the extern-learned entry.
+        state |= NUD_NOARP;
+    } else {
+        flags |= NTF_EXT_LEARNED;
+    }
+    (flags, state)
+}
+
 /// Op selector for `fdb_neigh_send`. The kernel netlink flag set
 /// differs per scenario:
 ///
@@ -4726,7 +4752,9 @@ impl FibHandle {
     /// landing in different kernel tables (selected by the netlink
     /// `NTF_*` flag):
     ///
-    ///   1. Bridge master FDB — `NTF_MASTER | NTF_EXT_LEARNED`.
+    ///   1. Bridge master FDB — `NTF_MASTER | NTF_EXT_LEARNED`, or a
+    ///      static `NTF_STICKY` entry for a sticky MAC
+    ///      ([`evpn_master_fdb_flags`]).
     ///      "MAC X is reachable via this slave port." Without this
     ///      entry, frames arriving at the bridge from a local port
     ///      destined for the remote MAC are flooded to every bridge
@@ -4822,21 +4850,18 @@ impl FibHandle {
         }
 
         // Entry 1 — bridge master FDB. No VXLAN-specific attrs.
-        // NUD_REACHABLE matches what Linux records for kernel-learned
-        // entries and what FRR sets on its master-side install.
-        const NTF_MASTER: u8 = 0x04;
         const NTF_SELF: u8 = 0x02;
         const NTF_EXT_LEARNED: u8 = 0x10;
         const NTF_STICKY: u8 = 0x40;
-        const NUD_REACHABLE: u16 = 0x02;
         const NUD_PERMANENT: u16 = 0x80;
 
+        let (master_flags, master_state) = evpn_master_fdb_flags((flags & 0x01) != 0);
         let master_ok = self
             .fdb_neigh_send(
                 vxlan_ifindex,
                 mac,
-                NTF_MASTER | NTF_EXT_LEARNED,
-                NUD_REACHABLE,
+                master_flags,
+                master_state,
                 None,
                 None,
                 self.vni_metadata_map
@@ -6261,6 +6286,15 @@ mod tests {
         let plain = crate::rib::SidStructure { arg_bits: 0, ..st };
         let (_, _, plen, _) = sid_route_target(crate::rib::SidBehavior::EndDT2M, sid, Some(plain));
         assert_eq!(plen, 128);
+    }
+
+    #[test]
+    fn evpn_master_fdb_sticky_is_static_without_ext_learned() {
+        // Non-sticky: NTF_MASTER | NTF_EXT_LEARNED, NUD_REACHABLE.
+        assert_eq!(evpn_master_fdb_flags(false), (0x04 | 0x10, 0x02));
+        // Sticky: NTF_MASTER | NTF_STICKY without NTF_EXT_LEARNED (that
+        // path drops the sticky flag), NUD_REACHABLE | NUD_NOARP.
+        assert_eq!(evpn_master_fdb_flags(true), (0x04 | 0x40, 0x02 | 0x40));
     }
 
     #[test]

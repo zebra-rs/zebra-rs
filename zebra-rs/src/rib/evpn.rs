@@ -77,6 +77,7 @@ impl Rib {
     }
 
     pub(super) async fn reconcile_evpn_mac(&mut self, vni: u32, mac: MacAddr) {
+        const STICKY: u8 = 0x01;
         let lo = MacRouteKey {
             vni,
             mac,
@@ -116,12 +117,27 @@ impl Rib {
             .iter()
             .filter(|route| route.seq == seq || (esi.is_some() && route.esi == esi))
             .collect();
+        // FRR sets the sticky flag on the MAC-only route of a sticky MAC and
+        // sends its MAC+IP routes without a MAC Mobility community. Carry
+        // the flag to every route of the same originator (RD), so that the
+        // order the routes are applied in does not decide whether the MAC
+        // is sticky.
+        let sticky_rds: Vec<[u8; 8]> = winners
+            .iter()
+            .filter(|route| route.flags & STICKY != 0)
+            .map(|route| route.key.rd)
+            .collect();
         for route in &winners {
+            let flags = if sticky_rds.contains(&route.key.rd) {
+                route.flags | STICKY
+            } else {
+                route.flags
+            };
             self.mac_record(
                 vni,
                 mac,
                 route.tunnel_endpoint,
-                route.flags,
+                flags,
                 route.seq,
                 route.esi,
                 route.srv6_sid,

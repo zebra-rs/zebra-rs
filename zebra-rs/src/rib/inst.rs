@@ -1070,6 +1070,12 @@ impl MacEntry {
         self.dests.first().copied()
     }
 
+    /// A sticky (static) MAC, RFC 7432 §7.7: bit 0 of the flags
+    /// `extract_flags_from_attr()` decodes.
+    fn is_sticky(&self) -> bool {
+        self.flags & 0x01 != 0
+    }
+
     /// Whether programming this entry would program the same thing as
     /// `other`.
     fn programs_as(&self, other: &MacEntry) -> bool {
@@ -5800,6 +5806,17 @@ impl Rib {
             _ => false,
         };
         if !unchanged {
+            // The bridge keeps NTF_STICKY when a sticky entry is overwritten
+            // by a non-sticky upsert, so take out the rows of a MAC that
+            // stopped being sticky before installing it again.
+            if previous.as_ref().is_some_and(MacEntry::is_sticky)
+                && self
+                    .mac_table
+                    .get(&(vni, mac))
+                    .is_some_and(|entry| !entry.is_sticky())
+            {
+                self.fib_handle.mac_del(vni, &mac).await;
+            }
             self.mac_install(vni, mac).await;
         }
         !unchanged
@@ -6787,6 +6804,64 @@ mod local_device_mac_tests {
             assert_eq!(rib.mac_table.contains_key(&(10, mac)), remaining != 0);
         }
         assert!(rib.evpn_ip_refs.is_empty());
+    }
+
+    fn evpn_route(rd: &str, vtep: &str, ip: Option<&str>, flags: u8) -> Message {
+        use crate::rib::evpn::{MacRoute, MacRouteKey};
+        Message::EvpnMacAdd(MacRoute {
+            key: MacRouteKey::new(
+                rd.parse().unwrap(),
+                10,
+                mac("aa:bb:cc:dd:ee:01"),
+                ip.map(|ip| ip.parse().unwrap()),
+            ),
+            tunnel_endpoint: Some(vtep.parse().unwrap()),
+            flags,
+            seq: 0,
+            esi: None,
+            srv6_sid: None,
+            mpls_label: None,
+            local_port: None,
+        })
+    }
+
+    /// FRR flags only the MAC-only route of a sticky MAC; its MAC+IP route
+    /// carries no MAC Mobility community. The MAC stays sticky whichever
+    /// arrives first.
+    #[tokio::test]
+    async fn evpn_sticky_survives_a_macip_route_without_it() {
+        let mac_only = || evpn_route("65000:10", "192.0.2.1", None, 0x01);
+        let mac_ip = || evpn_route("65000:10", "192.0.2.1", Some("10.10.0.101"), 0);
+        for routes in [[mac_only(), mac_ip()], [mac_ip(), mac_only()]] {
+            let mut rib = Rib::new(false).unwrap();
+            for route in routes {
+                rib.process_msg(route, RT_TABLE_MAIN).await;
+            }
+            let entry = &rib.mac_table[&(10, mac("aa:bb:cc:dd:ee:01"))];
+            assert_eq!(entry.flags & 0x01, 0x01, "the MAC must stay sticky");
+        }
+    }
+
+    /// One PE's sticky flag does not make another PE's route for the same
+    /// MAC sticky.
+    #[tokio::test]
+    async fn evpn_sticky_does_not_spread_across_originators() {
+        let mut rib = Rib::new(false).unwrap();
+        rib.process_msg(
+            evpn_route("65000:10", "192.0.2.1", None, 0x01),
+            RT_TABLE_MAIN,
+        )
+        .await;
+        rib.process_msg(evpn_route("65000:20", "192.0.2.2", None, 0), RT_TABLE_MAIN)
+            .await;
+        let entry = &rib.mac_table[&(10, mac("aa:bb:cc:dd:ee:01"))];
+        assert_eq!(
+            entry.installed_dest(),
+            Some(MacDest::Vxlan {
+                vtep: "192.0.2.2".parse().unwrap()
+            })
+        );
+        assert_eq!(entry.flags & 0x01, 0, "192.0.2.2 did not say sticky");
     }
 
     #[tokio::test]
