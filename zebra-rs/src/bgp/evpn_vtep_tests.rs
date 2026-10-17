@@ -2548,6 +2548,9 @@ fn etree_srv6_messages(
             crate::rib::Message::CradleReplDelSrv6Leaf { bd, sid } => {
                 out.push(format!("del {bd} {sid}"))
             }
+            crate::rib::Message::CradleEtreeRootOnly { sid, root_only } => {
+                out.push(format!("root-only {sid} {root_only}"))
+            }
             _ => {}
         }
     }
@@ -2765,47 +2768,65 @@ async fn a_leaf_ac_without_a_leaf_label_is_not_filtered() {
 }
 
 /// Over SRv6, a PE whose IMET argument length is non-zero and differs from
-/// its leaf route's gets no leaf slot (RFC 9819 §3.2), so our leaves' BUM
-/// reaches its leaves: `show` names it, and `bumFiltered` is false until
-/// the lengths agree. An IMET with length 0 is no mismatch: a plain copy is
+/// its leaf route's gets no leaf slot (RFC 9819 §3.2), and no leaf BUM at
+/// all: its End.DT2M SID is teed root-only, `show` names it, and a new tee
+/// gets the mark again. Once the lengths agree, the mark is cleared and the
+/// leaf slot made. An IMET with length 0 is no mismatch: a plain copy is
 /// what RFC 9819 §3.3 asks for, and how a PE with no leaf in the EVI
 /// advertises (D6.4).
 #[tokio::test]
-async fn an_srv6_argument_length_mismatch_is_shown() {
-    let (mut bgp, _rib) = etree_srv6_bgp();
+async fn an_srv6_argument_length_mismatch_withholds_leaf_bum() {
+    let (mut bgp, mut rib) = etree_srv6_bgp();
+    etree_srv6_messages(&mut rib);
     let (from, _rx) = peer(&mut bgp, "10.0.0.11", false);
     let (ad, ad_attr) = srv6_leaf_ad_route("10.0.0.11", 1);
     feed_evpn(&mut bgp, from, ad, Some(ad_attr));
 
-    // Length 0: no argument here, a plain copy; nothing to warn about.
+    // Length 0: no argument here, a plain copy; nothing withheld.
     let (imet, attr) = srv6_imet_route("10.0.0.11", "fd00:2:0:200::", 0);
     feed_evpn(&mut bgp, from, imet.clone(), Some(attr));
+    bgp.vpws_df_drain();
+    assert_eq!(etree_srv6_messages(&mut rib), Vec::<String>::new());
     assert!(!etree_show(&bgp, false).contains("Warning"));
     let json: serde_json::Value = serde_json::from_str(&etree_show(&bgp, true)).unwrap();
     assert_eq!(json["argLengthMismatch"], serde_json::json!([]));
-    assert_eq!(json["bumFiltered"], true);
 
-    // Length 8 against the leaf route's 16: a mismatch.
+    // Length 8 against the leaf route's 16: the PE gets no leaf BUM.
     let (_, attr) = srv6_imet_route("10.0.0.11", "fd00:2:0:200::", 8);
     feed_evpn(&mut bgp, from, imet.clone(), Some(attr));
+    bgp.vpws_df_drain();
+    assert_eq!(
+        etree_srv6_messages(&mut rib),
+        vec!["root-only fd00:2:0:200:: true".to_string()]
+    );
     let text = etree_show(&bgp, false);
     assert!(
         text.contains(
-            "Warning: EVI 100: leaf argument length differs from the IMET's: our leaf BUM reaches the leaves of 10.0.0.11"
+            "Warning: EVI 100: leaf argument length differs from the IMET's: no leaf BUM to 10.0.0.11"
         ),
         "{text}"
     );
     let json: serde_json::Value = serde_json::from_str(&etree_show(&bgp, true)).unwrap();
     assert_eq!(json["argLengthMismatch"][0]["evi"], 100);
     assert_eq!(json["argLengthMismatch"][0]["pes"][0], "10.0.0.11");
-    assert_eq!(json["bumFiltered"], false);
+    assert_eq!(json["bumFiltered"], true, "withheld, so nothing leaks");
 
+    // A new tee gets the mark again.
+    bgp.process_rib_msg(RibRx::CradleUp);
+    assert!(etree_srv6_messages(&mut rib).contains(&"root-only fd00:2:0:200:: true".to_string()));
+
+    // The lengths agree: the mark goes, the leaf slot comes.
     let (_, attr) = srv6_imet_route("10.0.0.11", "fd00:2:0:200::", 16);
     feed_evpn(&mut bgp, from, imet, Some(attr));
+    bgp.vpws_df_drain();
+    assert_eq!(
+        etree_srv6_messages(&mut rib),
+        vec![
+            "root-only fd00:2:0:200:: false".to_string(),
+            "add 100 fd00:2:0:200:: fd00:2:0:200:1::".to_string(),
+        ]
+    );
     assert!(!etree_show(&bgp, false).contains("Warning"));
-    let json: serde_json::Value = serde_json::from_str(&etree_show(&bgp, true)).unwrap();
-    assert_eq!(json["argLengthMismatch"], serde_json::json!([]));
-    assert_eq!(json["bumFiltered"], true);
 }
 
 /// Review finding (phase 6 docs): a deleted leaf AC kept its old ifindex in

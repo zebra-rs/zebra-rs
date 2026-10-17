@@ -10052,6 +10052,16 @@ pub(super) fn etree_route_leaf_arg(attr: &BgpAttr) -> Option<Result<(u32, u8), &
     )
 }
 
+/// The E-Tree slots over SRv6 (`Bgp::etree_srv6_leaf_slots`).
+#[derive(Default)]
+pub struct EtreeSrv6Slots {
+    /// `(bd, PE's End.DT2M SID, that SID with the PE's leaf argument)`.
+    pub leaf: BTreeSet<(u32, std::net::Ipv6Addr, std::net::Ipv6Addr)>,
+    /// Per EVI, the PEs whose leaf argument cannot be placed, with their
+    /// End.DT2M SID there: they get no leaf BUM (RFC 9819 §3.2).
+    pub mismatched: BTreeMap<u32, BTreeMap<IpAddr, std::net::Ipv6Addr>>,
+}
+
 /// Why a received leaf-label route (an ESI-0 per-ES A-D route with the
 /// E-Tree EC) gives this PE nothing, for the log: under SRv6 what
 /// [`etree_route_leaf_arg`] finds wrong; otherwise a reserved MPLS label
@@ -21325,11 +21335,32 @@ impl Bgp {
     /// advertised a leaf argument, a slot to its End.DT2M SID for the EVI
     /// with that argument placed at the offset the IMET's SID structure
     /// gives (LBL+LNL+FL). The IMET must carry the same argument length as
-    /// the leaf-label route, as RFC 9819 §3.2 requires; otherwise the PE
-    /// gets no leaf slot. A PE's routes are paired by its IMET's
+    /// the leaf-label route, as RFC 9819 §3.2 requires; a PE whose IMET
+    /// carries another non-zero length gets no leaf slot and no leaf BUM at
+    /// all: its End.DT2M SID is teed root-only (`SetEtreeRootOnly`), so its
+    /// slots serve roots only. A PE's routes are paired by its IMET's
     /// originating address or next hop. Diffed against what was sent.
     pub fn evpn_etree_srv6_slots_sync(&mut self) {
-        let (desired, _) = self.etree_srv6_leaf_slots();
+        let slots = self.etree_srv6_leaf_slots();
+        let root_only: BTreeSet<std::net::Ipv6Addr> = slots
+            .mismatched
+            .values()
+            .flat_map(|pes| pes.values().copied())
+            .collect();
+        for &sid in self.etree_srv6_root_only_sent.difference(&root_only) {
+            let _ = self.ctx.rib.send(crate::rib::Message::CradleEtreeRootOnly {
+                sid,
+                root_only: false,
+            });
+        }
+        for &sid in root_only.difference(&self.etree_srv6_root_only_sent) {
+            let _ = self.ctx.rib.send(crate::rib::Message::CradleEtreeRootOnly {
+                sid,
+                root_only: true,
+            });
+        }
+        self.etree_srv6_root_only_sent = root_only;
+        let desired = slots.leaf;
         if desired == self.etree_srv6_slots_sent {
             return;
         }
@@ -21353,29 +21384,23 @@ impl Bgp {
     /// every PE whose leaf-label route gave an argument, placed at its
     /// IMET's offset. And, per EVI, the PEs that gave an argument but whose
     /// IMET's non-zero argument length differs from it (RFC 9819 §3.2), or
-    /// is transposed, or leaves no room: our leaves' BUM still reaches
-    /// their leaves, since no slot type withholds it.
+    /// is transposed, or leaves no room, with that IMET's End.DT2M SID: no
+    /// marked copy can go to them, so they get no leaf BUM at all
+    /// (`SetEtreeRootOnly`).
     ///
     /// An IMET with no argument (no SID structure, or argument length 0)
     /// is neither: the ingress sends a plain copy and ignores the argument
     /// (RFC 9819 §3.3). It is also how a PE with no leaf AC in that EVI
     /// advertises (plan §8.6, D6.4), since its leaf-label route covers
     /// only the EVIs it has leaves in.
-    #[allow(clippy::type_complexity)]
-    pub fn etree_srv6_leaf_slots(
-        &self,
-    ) -> (
-        BTreeSet<(u32, std::net::Ipv6Addr, std::net::Ipv6Addr)>,
-        BTreeMap<u32, BTreeSet<IpAddr>>,
-    ) {
-        let mut slots = BTreeSet::new();
-        let mut mismatched: BTreeMap<u32, BTreeSet<IpAddr>> = BTreeMap::new();
+    pub fn etree_srv6_leaf_slots(&self) -> EtreeSrv6Slots {
+        let mut out = EtreeSrv6Slots::default();
         if !self.evpn_encap.is_srv6() {
-            return (slots, mismatched);
+            return out;
         }
         let peers = etree_peer_leaf_args(&self.local_rib);
         if peers.is_empty() {
-            return (slots, mismatched);
+            return out;
         }
         for vni in self.etree_leaf_evis() {
             for (orig, nh, sid, st) in imet_srv6_dt2m(&self.local_rib, vni) {
@@ -21396,15 +21421,15 @@ impl Bgp {
                     .flatten();
                 match leaf {
                     Some(leaf) => {
-                        slots.insert((vni, sid, leaf));
+                        out.leaf.insert((vni, sid, leaf));
                     }
                     None => {
-                        mismatched.entry(vni).or_default().insert(*pe);
+                        out.mismatched.entry(vni).or_default().insert(*pe, sid);
                     }
                 }
             }
         }
-        (slots, mismatched)
+        out
     }
 
     /// The SID structure of an End.DT2M with a leaf argument: this PE's

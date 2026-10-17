@@ -2640,7 +2640,8 @@ struct EtreePeerArgJson {
 
 /// `show bgp evpn etree json`: the remote PEs in one EVI that advertised
 /// an SRv6 leaf argument but get no leaf slot, because their IMET's
-/// argument length differs (RFC 9819 §3.2).
+/// argument length differs: they get no leaf BUM at all (RFC 9819 §3.2),
+/// so their roots miss our leaves' BUM.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct EtreeArgMismatchJson {
@@ -2670,8 +2671,8 @@ struct EtreeJson {
     /// SRv6: the leaf argument each remote PE advertised.
     remote_leaf_args: Vec<EtreePeerArgJson>,
     /// SRv6: per EVI, the PEs whose leaf argument cannot be used (its
-    /// length differs from their IMET's), so our leaves' BUM reaches their
-    /// leaves.
+    /// length differs from their IMET's), so they get no leaf BUM (RFC 9819
+    /// §3.2).
     arg_length_mismatch: Vec<EtreeArgMismatchJson>,
     /// VXLAN: the EVIs whose ACs here are all leaves, so whose IMET
     /// carries the Leaf flag.
@@ -2690,10 +2691,10 @@ struct EtreeJson {
     /// Whether a leaf's BUM is kept from leaves on other PEs, as far as
     /// this PE can tell. False over MPLS when this PE has a leaf AC but no
     /// leaf label (RFC 8317 §4.2); over SRv6 when it has a leaf AC but no
-    /// leaf argument (RFC 9819), or a PE's argument length differs
-    /// (`argLengthMismatch`); over VXLAN when two PEs in an EVI are mixed
-    /// (`mixedPes`). A P2MP tunnel or Assisted Replication on the EVI is
-    /// not looked at.
+    /// leaf argument (RFC 9819); over VXLAN when two PEs in an EVI are
+    /// mixed (`mixedPes`). A PE whose argument length differs
+    /// (`argLengthMismatch`) gets no leaf BUM, so it leaks none. A P2MP
+    /// tunnel or Assisted Replication on the EVI is not looked at.
     bum_filtered: bool,
 }
 
@@ -2792,12 +2793,13 @@ pub(super) fn show_bgp_evpn_etree(
         })
         .collect();
     let has_leaf = !bgp.etree_leaf_evis().is_empty();
-    let (_, arg_mismatch) = bgp.etree_srv6_leaf_slots();
-    let arg_mismatch: Vec<EtreeArgMismatchJson> = arg_mismatch
+    let arg_mismatch: Vec<EtreeArgMismatchJson> = bgp
+        .etree_srv6_leaf_slots()
+        .mismatched
         .into_iter()
         .map(|(evi, pes)| EtreeArgMismatchJson {
             evi,
-            pes: pes.iter().map(IpAddr::to_string).collect(),
+            pes: pes.keys().map(IpAddr::to_string).collect(),
         })
         .collect();
     // This PE's own mark is missing: leaf BUM from other PEs cannot be told
@@ -2810,7 +2812,7 @@ pub(super) fn show_bgp_evpn_etree(
         } else {
             false
         };
-    let bum_filtered = !no_local_mark && mixed.is_empty() && arg_mismatch.is_empty();
+    let bum_filtered = !no_local_mark && mixed.is_empty();
     if json {
         let out = EtreeJson {
             leaf_interfaces: leaves,
@@ -2923,7 +2925,7 @@ pub(super) fn show_bgp_evpn_etree(
         for m in &arg_mismatch {
             writeln!(
                 out,
-                "  Warning: EVI {}: leaf argument length differs from the IMET's: our leaf BUM reaches the leaves of {}",
+                "  Warning: EVI {}: leaf argument length differs from the IMET's: no leaf BUM to {}",
                 m.evi,
                 m.pes.join(", ")
             )?;

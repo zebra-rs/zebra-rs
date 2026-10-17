@@ -243,13 +243,13 @@ leaf argument (`Leaf argument: none` in `show bgp evpn etree`, with a
 warning), and leaf BUM from other PEs reaches its leaves.
 
 A PE whose IMET argument length is not 0 and differs from the one on its
-leaf-label route gets no marked copy, so its leaves receive the leaves' BUM.
-RFC 9819 says not to forward to such a PE at all; zebra-rs cannot withhold a
-leaf's BUM from a single PE over SRv6 yet. `show bgp evpn etree` names each
-such PE:
+leaf-label route cannot be sent a marked copy. As RFC 9819 asks, it then gets
+no copy of a leaf's BUM at all: its replication slots serve roots only. Its
+leaves stay apart, but its roots miss our leaves' BUM, so `show bgp evpn
+etree` names each such PE:
 
 ```
-  Warning: EVI 100: leaf argument length differs from the IMET's: our leaf BUM reaches the leaves of 10.0.0.12
+  Warning: EVI 100: leaf argument length differs from the IMET's: no leaf BUM to 10.0.0.12
 ```
 
 An IMET with argument length 0 is no mismatch. RFC 9819 then asks for a plain
@@ -323,9 +323,9 @@ EVPN E-Tree (RFC 8317)
     mixed-PE warning.
   * SRv6: this PE's leaf argument and each remote PE's, with its length.
 * **Warnings.** Leaf BUM that is not kept from other PEs' leaves: mixed PEs
-  (VXLAN), an argument length mismatch (SRv6), and no leaf label (MPLS) or
-  leaf argument (SRv6) of our own while we have a leaf AC. Then a role
-  conflict on a segment, and IRB:
+  (VXLAN), and no leaf label (MPLS) or leaf argument (SRv6) of our own while
+  we have a leaf AC. A PE that gets no leaf BUM because of an argument length
+  mismatch (SRv6). Then a role conflict on a segment, and IRB:
 
   ```
     Warning: EVI 100: IRB on bridge br100: leaves can reach each other through L3
@@ -336,9 +336,10 @@ EVPN E-Tree (RFC 8317)
   leaves, and E-Tree does not filter routed traffic. The warning is there so
   this is a choice and not an accident.
 
-`vtyctl show -j 'show bgp evpn etree'` gives the same data as JSON. Its `bumFiltered` is
-false whenever one of the BUM warnings above applies. It does not look at a
-P2MP tunnel or Assisted Replication on the EVI (see [Not
+`vtyctl show -j 'show bgp evpn etree'` gives the same data as JSON. Its
+`bumFiltered` is false whenever leaf BUM is not kept from other PEs' leaves; a
+PE that gets no leaf BUM leaks none, so a mismatch does not make it false. It
+does not look at a P2MP tunnel or Assisted Replication on the EVI (see [Not
 supported](#not-supported)).
 
 Elsewhere:
