@@ -474,8 +474,9 @@ show isis flex-algo <128-255> { route | topology | spf | graph | repair-list }
 ```
 
 Each has an algorithm-0 twin (`show isis route`, `show isis graph`, …)
-to compare against — see [show isis](ch-14-04-show-isis.md) for the
-full grammar. The two most useful during bring-up:
+to compare against — see
+[IS-IS Show Commands](ch-07-13-isis-show.md#segment-routing--flexible-algorithm)
+for the full grammar. The two most useful during bring-up:
 
 * `show isis flex-algo <n> graph` — the link-state graph *after* FAD
   pruning. A pruned link is absent from the graph and listed at the end
@@ -559,7 +560,7 @@ repairs are inspected with `show isis flex-algo <n> repair-list`.
 * [AI-Designed Flex-Algorithm](ch-13-02-flexalgo-ai-demo.md) — an AI
   authors exactly this configuration from a sentence of intent, over
   MCP.
-* [show isis reference](ch-14-04-show-isis.md) — the per-algorithm
-  show views.
+* [IS-IS Show Commands](ch-07-13-isis-show.md#segment-routing--flexible-algorithm)
+  — the per-algorithm show views.
 * [SRLG](ch-07-02-isis-srlg.md) — the named-group table
   `srlg-exclude` references.
