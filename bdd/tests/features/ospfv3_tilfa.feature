@@ -128,6 +128,18 @@ Feature: OSPFv3 TI-LFA fast-reroute over SR-MPLS
     And show command "show ospfv3 repair-list" in namespace "s" should contain "[16500, 15"
     And show command "show ospfv3 repair-list detail" in namespace "s" should contain "sr-mpls"
 
+  Scenario: A repair that starts on the router's own adjacency pushes no Adj-SID for it
+    Given the test topology exists
+    # r3 reaches n1 through d (r3-d-n1, cost 2). Protecting d, its only
+    # other neighbour r2 is no P-node: r3's own shortest path to r2 also
+    # runs through d. So the repair list starts at r3 itself, with r3's
+    # Adj-SID for r3->r2. That segment is the link the repair leaves on.
+    # Its label is r3's own, and r2 would read it in its own label space,
+    # so the repair pushes only n1's Prefix-SID 16200.
+    Then show command "show ospfv3 ti-lfa" in namespace "r3" should eventually contain "Adj-SID 10.0.0.7 -> 10.0.0.6"
+    And show command "show ospfv3 repair-list" in namespace "r3" should contain "[16200]"
+    And show command "show ipv6 route 2001:db8::2/128" in namespace "r3" should contain "r3-r2, label 16200,"
+
   Scenario: Source reaches the destination over the primary path
     Given the test topology exists
     # s -> d primary is s-n1-d (cost 2).
