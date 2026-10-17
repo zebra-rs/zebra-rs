@@ -11,9 +11,11 @@ zebra-rs detects duplicates the way FRR's zebra does, and it is on by default
 with RFC 7432's values: 5 moves within 180 seconds.
 
 ```
-router bgp 65001 {
-  afi-safi {
-    name evpn;
+router bgp {
+  global {
+    as 65001;
+  }
+  afi-safi evpn {
     advertise-all-vni true;
     dup-addr-detection {
       max-moves 5;

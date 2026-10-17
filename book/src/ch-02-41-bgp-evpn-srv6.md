@@ -34,8 +34,9 @@ segment-routing {
     behavior usid;
   }
 }
-router bgp 65001 {
+router bgp {
   global {
+    as 65001;
     router-id 10.0.0.1;
   }
   segment-routing {
@@ -44,10 +45,9 @@ router bgp 65001 {
   neighbor 2001:db8::2 {
     remote-as 65001;
     update-source 2001:db8::1;
-    afi-safi { name evpn; enabled true; }
+    afi-safi evpn { enabled true; }
   }
-  afi-safi {
-    name evpn;
+  afi-safi evpn {
     advertise-all-vni true;
     encapsulation srv6;
   }

@@ -9,9 +9,11 @@ takes more than setting the mode. Three things have to line up: which PE is
 elected, how remote PEs find out, and when everyone changes over.
 
 ```
-router bgp 65001 {
-  afi-safi {
-    name evpn;
+router bgp {
+  global {
+    as 65001;
+  }
+  afi-safi evpn {
     ethernet-segment ES1 {
       esi 00:11:22:33:44:55:66:77:88:99;
       redundancy-mode single-active;
