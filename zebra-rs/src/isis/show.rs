@@ -2,9 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
 use isis_packet::neigh::IsisSubTlv as NeighSubTlv;
+use isis_packet::prefix::IsisSubTlv as PrefixSubTlv;
 use isis_packet::{
     IsisNeighborId, IsisSysId, IsisTlv, IsisTlvExtIpReachEntry, IsisTlvExtIsReachEntry,
-    IsisTlvIpv6ReachEntry, Nsap,
+    IsisTlvIpv6ReachEntry, Nsap, SidLabelValue,
 };
 use prefix_trie::PrefixMap;
 use serde::Serialize;
@@ -2352,22 +2353,50 @@ fn label_value(l: &rib::Label) -> u32 {
     }
 }
 
-/// Resolve an MPLS label to a symbolic node name, when the label is
-/// a prefix-SID (Node-SID) inside some peer's SRGB. Returns `None`
-/// for labels outside any peer's SRGB — typically Adj-SIDs (which
-/// fall in the SRLB or local label range), or labels owned by a peer
-/// we don't yet know about.
+/// The router that advertises `label` as a Prefix-SID, of any
+/// algorithm. This is the reverse of the TI-LFA Node-SID lookup
+/// (`tilfa::node_sid_label_for_vertex`), which resolves an
+/// Index-encoded SID against its originator's SRGB. Returns `None`
+/// for a label no router advertises as a Prefix-SID — typically an
+/// Adj-SID.
 ///
-/// Fallback chain (per design decision): hostname → sys-id string.
-/// Router-id mapping is a follow-up (would require an LSDB walk for
-/// the TE-router-id sub-TLV).
-fn label_to_node_symbol(isis: &Isis, level: &Level, label: u32) -> Option<String> {
-    for (sys_id, cfg) in isis.label_map.get(level).iter() {
-        if label >= cfg.global.start && label < cfg.global.end {
-            return Some(hostname_for(isis, level, sys_id));
-        }
-    }
-    None
+/// The SID itself has to match: routers normally share one SRGB, so
+/// the range a label falls in names no router.
+fn prefix_sid_owner(isis: &Isis, level: &Level, label: u32) -> Option<IsisSysId> {
+    let label_map = isis.label_map.get(level);
+    isis.reach_map
+        .get(level)
+        .get(&Afi::Ip)
+        .iter()
+        .find(|(sys_id, entries)| {
+            entries
+                .iter()
+                .flat_map(|entry| entry.subs.iter())
+                .any(|sub| match sub {
+                    PrefixSubTlv::PrefixSid(ps) => match ps.sid {
+                        SidLabelValue::Label(l) => l == label,
+                        SidLabelValue::Index(idx) => label_map
+                            .get(sys_id)
+                            .is_some_and(|b| label.checked_sub(b.global.start) == Some(idx)),
+                    },
+                    _ => false,
+                })
+        })
+        .map(|(sys_id, _)| *sys_id)
+}
+
+/// The neighbor an MPLS repair path sends to: the adjacency on the
+/// repair's interface that owns its next-hop address, the reverse of
+/// how `tilfa::build_repair_path_mpls` picked that address.
+fn repair_nbr_sys_id(isis: &Isis, level: &Level, backup: &RepairPathMpls) -> Option<IsisSysId> {
+    isis.links
+        .get(&backup.ifindex)?
+        .state
+        .nbrs
+        .get(level)
+        .iter()
+        .find(|(_, nbr)| nbr.addr4.contains_key(&backup.addr))
+        .map(|(sys_id, _)| *sys_id)
 }
 
 /// SRGB base label for a peer's prefix-SIDs. `None` when the peer
@@ -2417,12 +2446,14 @@ trait IsisRibFamilyShow: IsisRibFamily {
         route: &SpfRoute<Self>,
         nhop: &SpfNexthop<Self>,
     ) -> std::fmt::Result;
-    /// Write the backup-path stanza.
+    /// Write the backup-path stanza. `sid` is the route's own
+    /// Prefix-SID label, which may close an SR-MPLS repair stack.
     fn write_backup(
         buf: &mut String,
         isis: &Isis,
         level: &Level,
         nhop: &SpfNexthop<Self>,
+        sid: Option<u32>,
     ) -> std::fmt::Result;
     /// Node gate for the SPF-tree renderers: the set of nodes capable
     /// of this family, or None for no gating. Only the legacy
@@ -2514,9 +2545,10 @@ impl IsisRibFamilyShow for V4 {
         isis: &Isis,
         level: &Level,
         nhop: &SpfNexthop<V4>,
+        sid: Option<u32>,
     ) -> std::fmt::Result {
         if let Some(backup) = &nhop.backup {
-            write_isis_backup_v4_detail(buf, isis, level, backup)?;
+            write_isis_backup_v4_detail(buf, isis, level, backup, sid)?;
         }
         Ok(())
     }
@@ -2620,6 +2652,7 @@ impl IsisRibFamilyShow for V6 {
         isis: &Isis,
         level: &Level,
         nhop: &SpfNexthop<V6>,
+        _sid: Option<u32>,
     ) -> std::fmt::Result {
         if let Some(backup) = &nhop.backup {
             write_isis_backup_v6_detail(buf, isis, level, backup)?;
@@ -2720,7 +2753,7 @@ where
     F::write_nhop_extra(buf, isis, level, nhop)?;
     writeln!(buf)?;
     F::write_sid_block(buf, route, nhop)?;
-    F::write_backup(buf, isis, level, nhop)?;
+    F::write_backup(buf, isis, level, nhop, route.sid)?;
     Ok(())
 }
 
@@ -2730,35 +2763,40 @@ fn write_isis_backup_v4_detail(
     isis: &Isis,
     level: &Level,
     backup: &RepairPathMpls,
+    sid: Option<u32>,
 ) -> std::fmt::Result {
-    // Repair-nbr hostname comes from the first label's SRGB owner
-    // when the label resolves; otherwise the per-link nbr name is
-    // not directly known from RepairPathMpls (the local egress
-    // ifindex is, but not the peer's sys-id). Best-effort lookup.
-    let first_label = backup.labels.first().map(label_value);
-    let p_node = first_label.and_then(|n| label_to_node_symbol(isis, level, n));
-    let nbr_label = p_node.clone().unwrap_or_else(|| "-".into());
-
+    let nbr_name = repair_nbr_sys_id(isis, level, backup)
+        .map(|sys_id| hostname_for(isis, level, &sys_id))
+        .unwrap_or_else(|| "-".into());
     writeln!(
         buf,
         "    Backup path: TI-LFA, via {}, {} {}",
         backup.addr,
         isis.ifname(backup.ifindex),
-        nbr_label,
+        nbr_name,
     )?;
-    if backup.labels.is_empty() {
-        writeln!(buf, "      (trivial repair, no SR segments)")?;
-    } else {
+    if !backup.labels.is_empty() {
         writeln!(
             buf,
             "      Labels imposed {}",
             fmt_isis_label_stack(&backup.labels)
         )?;
-        if let (Some(label), Some(name)) = (first_label, p_node) {
-            writeln!(buf, "      P node: {}, Label: {}", name, label)?;
-        } else if let Some(label) = first_label {
-            writeln!(buf, "      P node: label {}", label)?;
-        }
+    }
+    // The P node is the first repair segment's. The destination's own
+    // Prefix-SID that closes the stack is not a repair segment, so a
+    // trivial repair stays trivial with it.
+    let repair = &backup.labels[..V4::backup_repair_len(backup, sid)];
+    match repair.first().map(label_value) {
+        None => writeln!(buf, "      (trivial repair, no SR segments)")?,
+        Some(label) => match prefix_sid_owner(isis, level, label) {
+            Some(p_node) => writeln!(
+                buf,
+                "      P node: {}, Label: {}",
+                hostname_for(isis, level, &p_node),
+                label
+            )?,
+            None => writeln!(buf, "      P node: label {}", label)?,
+        },
     }
     Ok(())
 }
@@ -5379,5 +5417,136 @@ mod tests {
         assert_eq!(kinds(Some(16005)), ["NodeSID", "AdjSID", "PrefixSID"]);
         // A route without a SID has no closing label.
         assert_eq!(kinds(None), ["NodeSID", "AdjSID", "AdjSID"]);
+    }
+
+    fn rtr(n: u8) -> IsisSysId {
+        IsisSysId {
+            id: [0, 0, 0, 0, 0, n],
+        }
+    }
+
+    /// r1's view of r2, r3 and r4 sharing SRGB 16000: each advertises
+    /// Prefix-SID index `n` on 10.0.0.`n`/32, and r3 also index 103
+    /// for Flex-Algo 128. r3 is the neighbor on r1-r3 (ifindex 3).
+    fn backup_detail_fixture() -> Isis {
+        use isis_packet::prefix::Ipv4ControlInfo;
+        use isis_packet::{Algo, IsisSubPrefixSid, PrefixSidFlags};
+
+        use crate::isis::link::{IsisLink, LinkConfig, LinkState, LinkTimer, NetworkType};
+        use crate::isis::packet::NeighborAddr4;
+        use crate::spf::label_block::{LabelBlock, LabelConfig};
+
+        let mut isis = super::super::inst::commit_and_microloop_gate_tests::fresh_isis();
+        let prefix_sid = |algo, idx| {
+            PrefixSubTlv::PrefixSid(IsisSubPrefixSid {
+                flags: PrefixSidFlags::from(0u8),
+                algo,
+                sid: SidLabelValue::Index(idx),
+            })
+        };
+        for n in [2, 3, 4] {
+            let mut subs = vec![prefix_sid(Algo::Spf, n as u32)];
+            if n == 3 {
+                subs.push(prefix_sid(Algo::FlexAlgo(128), 103));
+            }
+            let entry = IsisTlvExtIpReachEntry {
+                metric: 10,
+                flags: Ipv4ControlInfo::new(),
+                prefix: format!("10.0.0.{n}/32").parse().unwrap(),
+                subs,
+            };
+            isis.reach_map
+                .get_mut(&Level::L2)
+                .get_mut(&Afi::Ip)
+                .insert(rtr(n), vec![entry]);
+            isis.label_map.get_mut(&Level::L2).insert(
+                rtr(n),
+                LabelConfig {
+                    global: LabelBlock::new(16000, 8000),
+                    local: Some(LabelBlock::new(15000, 1000)),
+                },
+            );
+            isis.hostname
+                .get_mut(&Level::L2)
+                .insert(rtr(n), format!("r{n}"));
+        }
+
+        let (ptx, prx) = tokio::sync::mpsc::unbounded_channel();
+        Box::leak(Box::new(prx));
+        let mut link = IsisLink {
+            ifindex: 3,
+            ptx,
+            read_task: tokio::spawn(async {}),
+            flags: netlink_packet_route::link::LinkFlags::empty(),
+            circuit_id: 0,
+            config: LinkConfig::default(),
+            state: LinkState::default(),
+            timer: LinkTimer::default(),
+        };
+        link.state.name = "r1-r3".into();
+        let addr = "192.168.13.3".parse().unwrap();
+        let mut nbr = neigh::Neighbor::new(isis.tx.clone(), 3, NetworkType::P2p, rtr(3), None);
+        nbr.addr4.insert(addr, NeighborAddr4::new(addr, None));
+        link.state.nbrs.get_mut(&Level::L2).insert(rtr(3), nbr);
+        isis.links.insert(3, link);
+        isis
+    }
+
+    fn backup_detail(isis: &Isis, labels: &[u32], sid: Option<u32>) -> String {
+        let backup = RepairPathMpls {
+            ifindex: 3,
+            addr: "192.168.13.3".parse().unwrap(),
+            labels: labels.iter().copied().map(rib::Label::Explicit).collect(),
+        };
+        let mut buf = String::new();
+        write_isis_backup_v4_detail(&mut buf, isis, &Level::L2, &backup, sid).unwrap();
+        buf
+    }
+
+    /// Every router shares the SRGB, so the label's range names no
+    /// router: the P node is the one whose Prefix-SID the label is,
+    /// and the neighbor is the one that owns the next-hop address.
+    #[tokio::test]
+    async fn backup_detail_names_the_p_node_and_the_neighbor() {
+        let isis = backup_detail_fixture();
+        assert_eq!(
+            backup_detail(&isis, &[16003, 15002, 16004], Some(16004)),
+            "    Backup path: TI-LFA, via 192.168.13.3, r1-r3 r3\n\
+             \x20     Labels imposed { 16003 15002 16004 }\n\
+             \x20     P node: r3, Label: 16003\n"
+        );
+        // The P node can lie beyond the neighbor.
+        assert_eq!(
+            backup_detail(&isis, &[16002, 15004], None),
+            "    Backup path: TI-LFA, via 192.168.13.3, r1-r3 r3\n\
+             \x20     Labels imposed { 16002 15004 }\n\
+             \x20     P node: r2, Label: 16002\n"
+        );
+        // A Flex-Algo repair starts with the P node's algorithm SID.
+        assert_eq!(
+            backup_detail(&isis, &[16103, 15002], None),
+            "    Backup path: TI-LFA, via 192.168.13.3, r1-r3 r3\n\
+             \x20     Labels imposed { 16103 15002 }\n\
+             \x20     P node: r3, Label: 16103\n"
+        );
+    }
+
+    /// The destination's Prefix-SID that closes the stack is not a
+    /// repair segment: the destination is no P node, and a repair with
+    /// no other label is still trivial.
+    #[tokio::test]
+    async fn backup_detail_closing_prefix_sid_is_no_p_node() {
+        let isis = backup_detail_fixture();
+        assert_eq!(
+            backup_detail(&isis, &[16004], Some(16004)),
+            "    Backup path: TI-LFA, via 192.168.13.3, r1-r3 r3\n\
+             \x20     Labels imposed { 16004 }\n\
+             \x20     (trivial repair, no SR segments)\n"
+        );
+        assert_eq!(
+            backup_detail(&isis, &[], None),
+            "    Backup path: TI-LFA, via 192.168.13.3, r1-r3 r3\n\
+             \x20     (trivial repair, no SR segments)\n"
+        );
     }
 }
