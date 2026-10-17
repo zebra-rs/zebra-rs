@@ -4882,13 +4882,13 @@ mod purge_poi_tests {
 }
 
 #[cfg(test)]
-mod commit_and_microloop_gate_tests {
+pub(super) mod commit_and_microloop_gate_tests {
     use tokio::sync::mpsc;
 
     use super::bfd_wiring_tests::{test_config_tx, test_ctx, test_rib_subscriber};
     use super::*;
 
-    pub(super) fn fresh_isis() -> Isis {
+    pub(in crate::isis) fn fresh_isis() -> Isis {
         let (ctx, rib_rx) = test_ctx();
         let (policy_tx, policy_rx) = mpsc::unbounded_channel();
         Box::leak(Box::new(policy_rx));

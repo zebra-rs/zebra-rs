@@ -44,6 +44,10 @@ impl<E> ReachMap<E> {
     pub fn remove(&mut self, key: &IsisSysId) -> Option<Vec<E>> {
         self.map.remove(key)
     }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&IsisSysId, &Vec<E>)> {
+        self.map.iter()
+    }
 }
 
 pub type ReachMapV4 = ReachMap<IsisTlvExtIpReachEntry>;
