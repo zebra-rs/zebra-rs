@@ -330,14 +330,27 @@ IS-IS L2 IPv4 routing table:
 L2 10.0.0.2/32 [metric 20]
   via 192.168.12.2, r1-r2, r2, SRGB Base: 16000
     Prefix-SID: 16002 (impl-null)
+L2 10.0.0.3/32 [metric 25]
+  via 192.168.13.3, r1-r3, r3, SRGB Base: 16000
+    Prefix-SID: 16003 (impl-null)
+L2 10.0.0.4/32 [metric 30]
+  via 192.168.12.2, r1-r2, r2, SRGB Base: 16000
+    Prefix-SID: 16004
+    Backup path: TI-LFA, via 192.168.13.3, r1-r3 r3
+      Labels imposed { 16003 15002 16004 }
+      P node: r3, Label: 16003
+...
 ```
 
-A route protected by TI-LFA adds a `Backup path: TI-LFA, via <address>,
-<interface>` line, the label stack it imposes (`Labels imposed { … }`:
-the repair segments, then the destination's own Prefix-SID), and a
-`P node:` line. A repair with no SR segments prints
-`(trivial repair, no SR segments)`. `show isis repair-list` shows the
-same repairs as a table.
+A route protected by TI-LFA, like 10.0.0.4/32 here, adds a
+`Backup path: TI-LFA, via <address>, <interface> <neighbor>` line, the
+label stack it imposes (`Labels imposed { … }`: the repair segments,
+then the destination's own Prefix-SID), and a `P node:` line naming the
+router whose Node-SID starts the repair — only the label when the repair
+starts with an Adj-SID. A repair with no segments besides the
+destination's Prefix-SID prints `(trivial repair, no SR segments)` in
+place of the `P node:` line. `show isis repair-list` shows the same
+repairs as a table.
 
 JSON: `{ level_1, level_2 }`, arrays of `{ prefix, metric, nexthops }`
 with `nexthops` of `{ address, interface, label, implicit_null }`
@@ -459,6 +472,17 @@ One IPv4 prefix as `show isis route detail` prints it, with
 `Protected by TI-LFA` or `Unprotected (no TI-LFA backup stamped)` under
 its header line. A prefix that is not in the IS-IS RIB prints
 `% No route for <prefix> in IS-IS RIB`. `detail` is optional.
+
+```
+r1> show isis fast-reroute prefix 10.0.0.4/32
+L2 10.0.0.4/32 [metric 30]
+  Protected by TI-LFA
+  via 192.168.12.2, r1-r2, r2, SRGB Base: 16000
+    Prefix-SID: 16004
+    Backup path: TI-LFA, via 192.168.13.3, r1-r3 r3
+      Labels imposed { 16003 15002 16004 }
+      P node: r3, Label: 16003
+```
 
 JSON: `{ prefix, found, entries: [ { level, metric, protected, nexthops:
 [ { address, interface, has_backup } ] } ] }`.
