@@ -1,23 +1,30 @@
-# BGP
+# BGP Show Commands
 
 The `show bgp` family reports BGP's Loc-RIB for every address family,
-neighbor state, the per-peer Adj-RIB-In/Out, update-group internals, and
-the MUP controller. Every command honors the `-j` / `--json` flag.
+neighbor state, the per-peer Adj-RIB-In/Out, update-group internals,
+EVPN service state, and the MUP controller. Every command honors the
+`-j` / `--json` flag; see
+[Operational Show Commands](ch-06-03-show-commands.md) for how to run a
+show command and request JSON.
 
 A bare `show bgp` is shorthand for `show bgp ipv4` — the IPv4 unicast
 Loc-RIB. All the route-table views share one layout and status legend:
 
 ```
-Status codes:  s suppressed, d damped, h history, * valid, > best,
-               = multipath, i internal, S Stale, R Removed
+Status codes:  s suppressed, d damped, h history, u unsorted,
+               * valid, > best, = multipath,
+               i internal, r RIB-failure, S Stale, R Removed
+Nexthop codes: @NNN nexthop's vrf id, < announce-nh-self
 Origin codes:  i - IGP, e - EGP, ? - incomplete
+RPKI validation codes: V valid, I invalid, N Not found
 
-    Network        Next Hop   Metric LocPrf Weight Path
- *> 10.0.0.0/24    192.0.2.1                     0 65000 i
+    Network            Next Hop            Metric LocPrf Weight Path
+ *>  10.0.0.0/24        192.0.2.1                              0 65001 i
+ *>i 10.1.0.0/24        192.0.2.9                0    100      0 i
 ```
 
-`*>` marks a valid best path; `i` in the leading code column marks an
-iBGP-learned route.
+`*>` marks a valid best path (`*=` a multipath), `i` after it marks an
+iBGP-learned route, and a leading `S` a stale one.
 
 ## Per-family Loc-RIB
 
@@ -81,14 +88,12 @@ to one NLRI type: `ethernet-ad`, `macip`, `multicast`,
 `igmp-leave-sync`, `per-region-imet`, `s-pmsi`, or `leaf`. See the EVPN
 chapters starting at [EVPN Type-5](ch-02-06-bgp-evpn-type5.md).
 
-- `show bgp evpn summary` — the EVPN neighbor section only.
-- `show bgp evpn ethernet-segment` — locally-configured Ethernet
-  Segments (RFC 7432): ESI, redundancy mode, member VTEPs, DF algorithm,
-  and the elected Designated Forwarder.
+`show bgp evpn summary` shows the EVPN neighbor section only. The EVPN
+service views (`ethernet-segment`, `vpws`, `etree`) are under
+[EVPN services](#evpn-services).
 
 JSON: an array of EVPN route objects (`route_distinguisher`,
-`route_type`, `prefix`, common attrs, `extended_communities`);
-`ethernet-segment` returns an array of segment objects.
+`route_type`, `prefix`, common attrs, `extended_communities`).
 
 ### `show bgp flowspec [ipv6]`
 
@@ -160,6 +165,132 @@ The MUP Controller (MUP-C): admin state and PFCP listen address;
 JSON: an array of MUP route objects; `mup-c` returns a controller object
 or an array of session / association objects.
 
+## EVPN services
+
+These views report EVPN state beyond the Loc-RIB: the VNIs this node
+serves, its Ethernet Segments, VPWS and E-Tree services, and duplicate
+address detection. The two `show evpn` commands sit outside `show bgp`
+but are answered by BGP, which owns the EVPN state.
+
+### `show evpn vni all`
+
+Every VNI this node takes part in, from any source: a kernel VXLAN
+device, a configured MPLS EVI, a VRF's symmetric-IRB L3VNI, or remote
+IMET (Type-3) state. The header gives the advertise-all-vni flag, the
+BUM flooding mechanism, and the L2 and L3 VNI counts.
+
+```
+r1> show evpn vni all
+Advertise All VNI flag: Enabled
+BUM flooding: Head-end replication
+Number of L2 VNIs: 2
+Number of L3 VNIs: 1
+Flags: * - Kernel VXLAN device
+  VNI        Type Local VTEP                RD                     Import/Export RT  #MACs(loc)  #MACs(rem) #Remote VTEPs  Tenant VRF
+* 10         L2   192.168.0.1               192.168.0.1:10         65001:10                   2           2             1  default
+  20         L2   -                         192.168.0.1:20         65001:20                   0           1             1  default
+* 4001       L3   2001:db8:ff::1            192.168.0.1:4001       65001:4001                 0           0             0  cust1
+```
+
+- `*` marks a VNI with a kernel VXLAN device. VNI 20 above has none: it
+  is known only from a remote IMET route, so it has no local VTEP.
+- `Type` is `L3` when a VRF uses the VNI as its L3VNI, else `L2`.
+- `RD` is the auto-derived `router-id:vni`, and `-` while the router-id
+  is unset or the VNI does not fit in 16 bits.
+- `Import/Export RT` is the auto-derived `as:vni` exactly as advertised:
+  a 4-byte AS is cut to its low 16 bits.
+- `BUM flooding` is `Head-end replication`, `Assisted replication
+  (replicator)` or `(leaf)`, `SR-MPLS P2MP replication tree`, or `SRv6
+  P2MP replication tree`.
+
+Per-MAC state is in
+[`show l2 mac table`](ch-14-01-show-system-rib.md#show-l2-mac-table).
+
+JSON: `{ advertise_all_vni, bum_flooding, num_l2_vnis, num_l3_vnis,
+vnis: [ { vni, type, kernel, local_vtep, rd, route_target, local_macs,
+remote_macs, remote_vteps, tenant_vrf } ] }`. `local_vtep` and `rd` are
+omitted when absent.
+
+### `show bgp evpn ethernet-segment`
+
+The locally-configured Ethernet Segments (RFC 7432): ESI, redundancy
+mode, interface, ES-Import RT, the ESI label (MPLS), member VTEPs, the
+DF algorithm, and the elected Designated Forwarder. See
+[EVPN Single-Active Multihoming](ch-02-45-bgp-evpn-single-active.md).
+
+JSON: an array of segment objects.
+
+### `show bgp evpn vpws`
+
+Each EVPN VPWS (E-Line, RFC 8214) service: its EVI, local and remote
+service IDs, the attachment circuit (interface, VLAN, MTU), the local and
+remote endpoint for its encapsulation (SRv6 SIDs, VXLAN VNI and VTEP, or
+MPLS labels), the Ethernet Segment and role when multihomed, and its
+state.
+
+```
+r1> show bgp evpn vpws
+VPWS service: eline1
+  EVI: 100
+  Service ID: local 101, remote 102
+  Interface: ce1
+  Local SID (End.DX2): fcbb:bbbb:1:40::
+  Remote SID: fcbb:bbbb:2:40::
+  State: up
+```
+
+The state is `partial-config`, `pending`, `advertised`, `up`,
+`mtu-mismatch` or `vni-conflict`. See
+[EVPN VPWS](ch-02-38-bgp-evpn-vpws.md#show-command) for each line and
+state.
+
+JSON: an array of service objects with `name`, `evi`,
+`local_service_id`, `remote_service_id`, `interface`, `vlan`, `mtu`, the
+endpoint fields (`local_sid` / `remote_sid`, `local_vni` / `remote_vtep`
+/ `remote_vni`, `local_label` / `remote_label`, `remote_pe`), the segment
+fields (`ethernet_segment`, `esi`, `redundancy_mode`, `role`,
+`designated_forwarder`), and `state`.
+
+### `show bgp evpn etree`
+
+E-Tree (RFC 8317) state: each leaf attachment circuit with its EVIs and
+local MACs, the remote MACs behind a leaf per EVI, the leaf label (MPLS)
+or leaf argument (SRv6) of this PE and each remote PE, the leaf-only EVIs
+and PEs (VXLAN), and warnings for cases where leaf traffic is not kept
+apart. See [EVPN E-Tree](ch-02-47-bgp-evpn-e-tree.md#show).
+
+JSON: `{ leafInterfaces, remoteLeafMacs, leafLabel, remoteLeafLabels,
+leafArg, remoteLeafArgs, argLengthMismatch, leafOnlyEvis,
+remoteLeafOnly, mixedPes, irb, roleConflicts, bumFiltered }`. Unlike the
+other BGP views, its keys are camelCase. `bumFiltered` is false whenever
+one of the BUM warnings applies.
+
+### `show evpn dup-addr`
+
+Duplicate address detection (RFC 7432 §15): the configured limits,
+then every address that is a duplicate or whose moves are being counted
+in an open window.
+
+```
+r1> show evpn dup-addr
+Duplicate address detection: max-moves 5 within 180s, freeze 300s
+
+VNI       MAC               IP                                      State      Moves Location                 Detected
+100       02:00:00:00:01:01 -                                       duplicate  5     local                    12s ago, recovers in 288s
+100       02:00:00:00:01:01 10.10.0.101                             dup (MAC)  0     local                    -
+100       02:00:00:00:02:02 -                                       counting   2     remote 10.0.0.12         -
+```
+
+`dup (MAC)` marks an IP that is a duplicate because its MAC is. With
+detection off, the command prints `Duplicate address detection:
+disabled`. See
+[EVPN Duplicate Address Detection](ch-02-46-bgp-evpn-dup-addr.md#show-and-clear).
+
+JSON: `{ enabled, max_moves, time, freeze, addresses: [ { vni, mac, ip,
+duplicate, inherited, moves, location, detected_secs_ago,
+recovers_in_secs } ] }`. `freeze` is `off`, `permanent`, or the freeze
+time in seconds.
+
 ## Neighbor state
 
 ### `show bgp summary`
@@ -171,10 +302,18 @@ prefix counts received/sent.
 ```
 r1> show bgp summary
 IPv4 Unicast Summary:
-BGP router identifier 192.0.2.1, local AS 65000, VRF default
-Neighbor    V    AS  MsgRcvd MsgSent Up/Down     State    PfxRcd/Snt
-192.0.2.2   4 65001       42      40 00:05:00 Established       42/10
+BGP router identifier 192.0.2.1, local AS number 65000 VRF default vrf-id 0
+RIB entries 42
+Peers 1
+
+Neighbor        V         AS   MsgRcvd   MsgSent   TblVer  InQ OutQ  Up/Down State       PfxRcd/Snt Hostname
+192.0.2.2       4      65001        42        40        0    0    0 00:05:00 Established      42/10 r2
 ```
+
+`PfxRcd/Snt` reads `N/A` until the session is Established and `NoNeg`
+when the family was not negotiated with the peer. `Hostname` is the
+peer's FQDN capability, or `N/A`. `TblVer`, `InQ` and `OutQ` are not
+tracked and always read `0`.
 
 JSON: `{ router_id, local_as, afi_safis: [ { afi_safi, peers: [ … ] } ] }`.
 

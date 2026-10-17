@@ -8,14 +8,25 @@ configuration.
 This is distinct from the configuration viewers
 (`show running-config` / `show candidate-config`), which render the
 *configuration* tree and are covered in
-[Show Config Commands](ch-06-02-show-config-commands.md). Everything
-else under `show` is documented in this section:
+[Show Config Commands](ch-06-02-show-config-commands.md).
+
+This page covers what every show command has in common: how to run
+one, how to get JSON, and the per-VRF forms. Each protocol documents its
+own show commands in its chapter, next to its configuration:
+
+- [BGP Show Commands](ch-02-48-bgp-show.md) — every address family's
+  Loc-RIB, neighbor state, Adj-RIB-In/Out, update-groups, EVPN service
+  state, and the MUP controller.
+- [PIM](ch-17-00-pim.md#show-commands) — PIM, IGMP and MLD state and
+  the multicast routing table.
+- [eBPF Data Plane](ch-16-00-ebpf.md#show-ebpf) — the eBPF forwarding
+  tables and counters.
+
+The rest are still being moved into their chapters:
 
 - [System, RIB and Forwarding](ch-14-01-show-system-rib.md) — version,
   interfaces, the IPv4/IPv6 routing tables, nexthops, MPLS, L2, VRFs,
   and SRv6 SIDs.
-- [BGP](ch-14-02-show-bgp.md) — every address family's Loc-RIB, neighbor
-  state, Adj-RIB-In/Out, update-groups, and the MUP controller.
 - [OSPFv2 and OSPFv3](ch-14-03-show-ospf.md) — instances, interfaces,
   neighbors, the LSDB, the SPF tree, and Segment Routing / TI-LFA state.
 - [IS-IS](ch-14-04-show-isis.md) — adjacencies, the LSDB, topology,
@@ -69,8 +80,11 @@ vtyctl show -j 'show ip route'      # JSON RIB
 vtyctl show    'show ip route'      # text RIB
 ```
 
-The flag is accepted on *any* `show` command. Each command's page below
-notes the top-level shape of the JSON it returns.
+The flag is accepted on *any* `show` command. Each protocol's show
+reference notes the top-level shape of the JSON each command returns.
+
+There is no trailing `json` keyword: `show bgp summary json` is
+rejected. Use `-j` or `cli format json`.
 
 ### `cli format json` (per-session default)
 
@@ -78,10 +92,10 @@ Inside an interactive VTY session you can flip the default output format
 for the whole session instead of typing `-j` every time:
 
 ```
-r1> set cli format json
+r1> cli format json
 ```
 
-`set cli format terminal` switches back to the human-readable view.
+`cli format terminal` switches back to the human-readable view.
 
 ### Config viewers carry their own keyword
 

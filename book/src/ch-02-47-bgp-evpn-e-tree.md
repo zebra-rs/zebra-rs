@@ -336,7 +336,7 @@ EVPN E-Tree (RFC 8317)
   leaves, and E-Tree does not filter routed traffic. The warning is there so
   this is a choice and not an accident.
 
-`show bgp evpn etree json` gives the same data as JSON. Its `bumFiltered` is
+`vtyctl show -j 'show bgp evpn etree'` gives the same data as JSON. Its `bumFiltered` is
 false whenever one of the BUM warnings above applies. It does not look at a
 P2MP tunnel or Assisted Replication on the EVI (see [Not
 supported](#not-supported)).

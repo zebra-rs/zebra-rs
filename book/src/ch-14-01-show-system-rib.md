@@ -6,7 +6,7 @@ programs into the kernel — nexthop groups, MPLS labels, the L2 bridge
 table, and SRv6 SIDs.
 
 Every command honors the `-j` / `--json` flag described in the
-[overview](ch-14-00-show-overview.md).
+[overview](ch-06-03-show-commands.md).
 
 ## Daemon identity
 
@@ -169,7 +169,7 @@ JSON (all RIB forms): `{ "routes": [ … ] }`. Each route carries
 
 > The per-VRF RIB forms (`show ip route vrf …`) are answered by the RIB
 > directly, unlike the protocol per-VRF forms, which are redirected to a
-> per-VRF task (see the [overview](ch-14-00-show-overview.md)).
+> per-VRF task (see the [overview](ch-06-03-show-commands.md)).
 
 ## Forwarding constructs
 
@@ -299,6 +299,9 @@ VNI    MAC Address         Encap Tunnel Endpoint       Flags Seq    Installed
 JSON: `{ "entries": [ { "vni", "mac", "tunnel_endpoint", "encap",
 "flags", "seq", "installed" } ] }`.
 
+For one line per VNI instead of per MAC, use
+[`show evpn vni all`](ch-02-48-bgp-show.md#show-evpn-vni-all).
+
 ### `show l2 neighbor`
 
 Bridge forwarding-database (FDB) entries — MACs learned locally or via
@@ -332,10 +335,3 @@ r1> show segment-routing srv6 sid
 
 JSON: `{ "entries": [ { "sid", "behavior", "context", "owner",
 "locator", "allocation_type", "redirected_to" } ] }`.
-
-### `show evpn vni all`
-
-A placeholder for EVPN VNI inventory. Per-VNI MAC state is surfaced by
-`show l2 mac table`; this command currently returns an empty result
-(text banner, or `[]` under `-j`) and is reserved for a future VNI
-summary.

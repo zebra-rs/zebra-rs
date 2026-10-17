@@ -4,7 +4,7 @@ The `show isis` family reports adjacencies, the link-state database, the
 per-level SPF results and routing table, DIS election, and Fast ReRoute
 (TI-LFA) state. Every command honors `-j` / `--json`, and each accepts a
 `vrf <name>` selector that mirrors the non-VRF sibling (see the
-[overview](ch-14-00-show-overview.md)).
+[overview](ch-06-03-show-commands.md)).
 
 Most views are organized per **level** (L1 / L2) and, where relevant,
 per address family (IPv4 / IPv6). See the protocol chapters for

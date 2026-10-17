@@ -508,7 +508,7 @@ a deliberately single-homed service:
   WARNING: segment interface ce7 differs from AC ce1
 ```
 
-`json` is supported. The state progresses `partial-config` (mandatory
+JSON is available with `-j`. The state progresses `partial-config` (mandatory
 leaves missing) → `pending` (config complete, no router-id yet — or,
 under srv6, no locator) → `advertised` (Type-1 originated, remote not
 matched) → `up` (remote endpoint bound to the AC), with `mtu-mismatch`
