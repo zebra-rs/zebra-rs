@@ -123,12 +123,19 @@ pub(super) fn tilfa_repair_path(
 /// table). Returns `None` when any segment fails to resolve or when
 /// the first-hop has no usable address — a partial stack is refused
 /// because a divergent label path would silently misroute.
+///
+/// A list that starts with `source`'s own adjacency is sent over that
+/// adjacency without its Adj-SID, which is local to `source` (see
+/// `RepairPath::split_local_adjacency`). OSPF's graph has no LAN
+/// pseudonode, so the adjacency's far end is the first hop.
 pub(super) fn build_repair_path_mpls(
     top: &Ospf,
     area: &OspfArea,
+    source: usize,
     rp: &spf::RepairPath,
 ) -> Option<RepairPathMpls> {
-    let labels = repair_segments_to_mpls_labels(top, area, &rp.segs)?;
+    let (_, segs) = rp.split_local_adjacency(source);
+    let labels = repair_segments_to_mpls_labels(top, area, segs)?;
 
     let first_hop_router = *top.lsp_map.resolve(rp.first_hop)?;
     let (ifindex, addr) = resolve_first_hop_egress(top, rp.first_hop_link_id, first_hop_router)?;
@@ -320,9 +327,12 @@ pub struct RepairPathMplsV3 {
 pub(super) fn build_repair_path_mpls_v3(
     top: &Ospf<Ospfv3>,
     area: &OspfArea<Ospfv3>,
+    source: usize,
     rp: &spf::RepairPath,
 ) -> Option<RepairPathMplsV3> {
-    let labels = repair_segments_to_mpls_labels_v3(top, area, &rp.segs)?;
+    // As in v2, a leading adjacency out of `source` itself is not imposed.
+    let (_, segs) = rp.split_local_adjacency(source);
+    let labels = repair_segments_to_mpls_labels_v3(top, area, segs)?;
     let first_hop_router = *top.lsp_map.resolve(rp.first_hop)?;
     let (ifindex, addr) = resolve_first_hop_egress_v3(top, first_hop_router)?;
     Some(RepairPathMplsV3 {

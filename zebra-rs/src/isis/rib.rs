@@ -88,10 +88,12 @@ pub trait IsisRibFamily: Sized + 'static {
         e: &Self::Entry,
     ) -> (Option<u32>, Option<(SidLabelValue, LabelConfig)>, bool);
 
-    /// Build the TI-LFA repair path for this family.
+    /// Build the TI-LFA repair path for this family. `source` is the
+    /// SPF root, this router's vertex.
     fn build_repair(
         top: &mut IsisTop,
         level: Level,
+        source: usize,
         repair: &spf::RepairPath,
     ) -> Option<Self::Backup>;
 
@@ -195,12 +197,13 @@ impl IsisRibFamily for V4 {
     fn build_repair(
         top: &mut IsisTop,
         level: Level,
+        source: usize,
         repair: &spf::RepairPath,
     ) -> Option<RepairPathMpls> {
         // Algo-0 (legacy) repair: node segments resolve to base
         // Prefix-SIDs. Per-algo repairs go through
         // `build_rib_from_flex_algo`, which passes `Some(algo)`.
-        build_repair_path_mpls(top, level, None, repair)
+        build_repair_path_mpls(top, level, source, None, repair)
     }
 
     fn trunc_prefix(p: Ipv4Net) -> Ipv4Net {
@@ -281,6 +284,7 @@ impl IsisRibFamily for V6 {
     fn build_repair(
         top: &mut IsisTop,
         level: Level,
+        _source: usize,
         repair: &spf::RepairPath,
     ) -> Option<RepairPathSrv6> {
         // Algo-0 (legacy) repair: node segments resolve to base End SIDs.
@@ -1098,7 +1102,7 @@ fn build_rib_from_spf<F: IsisRibFamily>(
         let Some(repair) = repair_paths.first() else {
             continue;
         };
-        let Some(mut backup) = F::build_repair(top, level, repair) else {
+        let Some(mut backup) = F::build_repair(top, level, source, repair) else {
             continue;
         };
         // A repair list only steers the packet to its release point
@@ -2436,7 +2440,8 @@ fn build_rib_from_flex_algo(
             // with algorithm-0 labels.
             if nhops_for_route.len() == 1
                 && let Some(repair) = tilfa.get(node).and_then(|paths| paths.first())
-                && let Some(mut backup) = build_repair_path_mpls(top, level, Some(algo), repair)
+                && let Some(mut backup) =
+                    build_repair_path_mpls(top, level, source, Some(algo), repair)
             {
                 // Close the repair into a full SR path to the
                 // destination: the segment list only steers as far as

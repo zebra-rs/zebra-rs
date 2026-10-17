@@ -63,25 +63,30 @@ pub(super) fn first_router_hop_id(lsp_map: &LspMap, path: &[usize]) -> Option<us
 /// the first-hop has no usable IPv4 address — partial stacks are
 /// refused because a divergent label path would silently misroute.
 ///
-/// LAN trivial-repair (empty label stack, first_hop is a pseudonode)
-/// is skipped: picking an arbitrary LAN member for an un-steered
-/// repair can loop, and the per-path "real router after the PN" is
-/// not carried on `RepairPath` today. SR-steered LAN repairs are
-/// fine — the labels drive forwarding independent of which LAN
-/// member receives the packet first.
+/// A list that starts with `source`'s own adjacency is sent over that
+/// adjacency without its Adj-SID, which is local to `source` (see
+/// `RepairPath::split_local_adjacency`); on a LAN the adjacency names
+/// the member to send to. Otherwise a LAN trivial-repair (empty label
+/// stack, first_hop is a pseudonode) is skipped: picking an arbitrary
+/// LAN member for an un-steered repair can loop. SR-steered LAN
+/// repairs are fine — the labels drive forwarding independent of
+/// which LAN member receives the packet first.
 pub(super) fn build_repair_path_mpls(
     top: &IsisTop,
     level: Level,
+    source: usize,
     algo: Option<u8>,
     rp: &spf::RepairPath,
 ) -> Option<RepairPathMpls> {
-    let labels = repair_segments_to_mpls_labels(top, level, algo, &rp.segs)?;
+    let (local_adj_to, segs) = rp.split_local_adjacency(source);
+    let labels = repair_segments_to_mpls_labels(top, level, algo, segs)?;
 
     let ifindex = (rp.first_hop_link_id != 0).then_some(rp.first_hop_link_id)?;
     let link = top.links.get(&ifindex)?;
     let lsp_map = top.lsp_map.get(&level);
 
-    let addr = if lsp_map.is_pseudo(rp.first_hop) {
+    let to = local_adj_to.unwrap_or(rp.first_hop);
+    let addr = if lsp_map.is_pseudo(to) {
         if labels.is_empty() {
             return None;
         }
@@ -91,7 +96,7 @@ pub(super) fn build_repair_path_mpls(
             .values()
             .find_map(|nbr| nbr.addr4.keys().next().copied())?
     } else {
-        let sys_id = lsp_map.resolve(rp.first_hop)?;
+        let sys_id = lsp_map.resolve(to)?;
         link.state
             .nbrs
             .get(&level)
