@@ -20,4 +20,5 @@ and `ospf6d`.
 This chapter documents the OSPFv2 configuration surface (`router
 ospf`). OSPFv3 has [its own chapter](ch-15-00-ospfv3.md) covering
 `router ospfv3`, the v3 LSA model, SRv6, and the current v2/v3
-feature asymmetries.
+feature asymmetries. Every `show ospf` command is listed in
+[OSPF Show Commands](ch-08-18-ospf-show.md).

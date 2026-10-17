@@ -104,6 +104,7 @@
   - [Cross-Reference with FRR ospfd](ch-08-11-ospf-frr-cross-reference.md)
   - [Gaps Relative to FRR ospfd](ch-08-12-ospf-frr-gaps.md)
   - [BFD](ch-08-02-ospf-bfd.md)
+  - [Show Commands](ch-08-18-ospf-show.md)
   - [Clearing OSPF State](ch-08-03-ospf-clear.md)
 - [OSPFv3](ch-15-00-ospfv3.md)
   - [Minimum Working Example](ch-15-01-ospfv3-minimum-working-example.md)
@@ -164,7 +165,6 @@
 ## Show Commands
 
 - [System, RIB and Forwarding](ch-14-01-show-system-rib.md)
-- [OSPFv2 and OSPFv3](ch-14-03-show-ospf.md)
 - [Neighbor Discovery, BFD and STAMP](ch-14-05-show-bfd-stamp-nd.md)
 - [Policy Objects](ch-14-06-show-policy.md)
 
