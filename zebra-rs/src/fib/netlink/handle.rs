@@ -612,29 +612,34 @@ fn cradle_members(nexthop: &Nexthop) -> Vec<CradleMember> {
 const EVPN_SVD_VLAN: u16 = 1;
 
 /// Netlink flags and NUD state of the bridge-master FDB entry for a remote
-/// EVPN MAC, built as FRR's `netlink_macfdb_update_ctx()` builds them.
-/// NUD_REACHABLE matches what Linux records for kernel-learned entries.
+/// EVPN MAC. NUD_REACHABLE matches what Linux records for kernel-learned
+/// entries.
 ///
 /// A sticky MAC "is static and cannot move" (RFC 7432 §7.7). The bridge
 /// keeps an entry on its port when a local frame carries the address only
 /// if the entry is `NTF_STICKY`, and it drops that flag from an
 /// `NTF_EXT_LEARNED` request without an error. A sticky MAC is therefore
-/// installed as a static sticky entry instead of an extern-learned one.
+/// installed as a static sticky entry instead of an extern-learned one, as
+/// FRR's `netlink_macfdb_update_ctx()` does. Its state is `NUD_NOARP`
+/// alone, the state the bridge reports for a static entry
+/// (`fdb_to_nud()`): FRR's `NUD_REACHABLE | NUD_NOARP` never matches it, so
+/// every reinstall would count as a change and be notified.
 fn evpn_master_fdb_flags(sticky: bool) -> (u8, u16) {
-    const NTF_MASTER: u8 = 0x04;
-    const NTF_EXT_LEARNED: u8 = 0x10;
-    const NTF_STICKY: u8 = 0x40;
+    use netlink_packet_route::neighbour::NeighbourFlags;
     const NUD_REACHABLE: u16 = 0x02;
     const NUD_NOARP: u16 = 0x40;
-    let (mut flags, mut state) = (NTF_MASTER, NUD_REACHABLE);
     if sticky {
-        flags |= NTF_STICKY;
         // Static: never ages out, like the extern-learned entry.
-        state |= NUD_NOARP;
+        (
+            (NeighbourFlags::Controller | NeighbourFlags::Sticky).bits(),
+            NUD_NOARP,
+        )
     } else {
-        flags |= NTF_EXT_LEARNED;
+        (
+            (NeighbourFlags::Controller | NeighbourFlags::ExtLearned).bits(),
+            NUD_REACHABLE,
+        )
     }
-    (flags, state)
 }
 
 /// Op selector for `fdb_neigh_send`. The kernel netlink flag set
@@ -4855,7 +4860,9 @@ impl FibHandle {
         const NTF_STICKY: u8 = 0x40;
         const NUD_PERMANENT: u16 = 0x80;
 
-        let (master_flags, master_state) = evpn_master_fdb_flags((flags & 0x01) != 0);
+        // BGP signaled MAC mobility "sticky" (RFC 7432 §15.2).
+        let sticky = flags & crate::rib::evpn::MAC_FLAG_STICKY != 0;
+        let (master_flags, master_state) = evpn_master_fdb_flags(sticky);
         let master_ok = self
             .fdb_neigh_send(
                 vxlan_ifindex,
@@ -4876,8 +4883,7 @@ impl FibHandle {
 
         // Entry 2 — VXLAN self FDB. Carries the encap target and VNI.
         let mut self_flags: u8 = NTF_SELF | NTF_EXT_LEARNED;
-        if (flags & 0x01) != 0 {
-            // BGP signaled MAC mobility "sticky" (RFC 7432 §10.6).
+        if sticky {
             self_flags |= NTF_STICKY;
         }
         let self_ok = self
@@ -5126,6 +5132,42 @@ impl FibHandle {
                 );
             }
         }
+    }
+
+    /// Take out the bridge master FDB entry of a remote MAC that is no
+    /// longer sticky, before `mac_add` installs it again. The bridge keeps
+    /// `NTF_STICKY` when an `NTF_EXT_LEARNED` upsert overwrites a sticky
+    /// entry (`br_fdb_external_learn_add()` takes no sticky argument), so
+    /// the MAC would stay static and pinned to the VXLAN port. Only that
+    /// entry needs it: the VXLAN self entry's flags are replaced on upsert,
+    /// and with cradle no kernel entry is installed.
+    pub async fn mac_unstick(&self, vni: u32, mac: &MacAddr) {
+        if self.cradle.is_some() {
+            return;
+        }
+        let Some(&vxlan_ifindex) = self.vni_ifindex_map.get(&vni) else {
+            return;
+        };
+        if fib_l2_fdb() {
+            tracing::info!("mac_unstick: VNI {vni} mac {mac} ifindex {vxlan_ifindex}");
+        }
+        const NTF_MASTER: u8 = 0x04;
+        self.fdb_neigh_send(
+            vxlan_ifindex,
+            mac,
+            NTF_MASTER,
+            0,
+            None,
+            None,
+            self.vni_metadata_map
+                .get(&vni)
+                .copied()
+                .unwrap_or(false)
+                .then_some(EVPN_SVD_VLAN),
+            FdbOp::Delete,
+            "mac_unstick(master)",
+        )
+        .await;
     }
 
     /// Delete EVPN MAC entry from bridge FDB
@@ -6293,8 +6335,8 @@ mod tests {
         // Non-sticky: NTF_MASTER | NTF_EXT_LEARNED, NUD_REACHABLE.
         assert_eq!(evpn_master_fdb_flags(false), (0x04 | 0x10, 0x02));
         // Sticky: NTF_MASTER | NTF_STICKY without NTF_EXT_LEARNED (that
-        // path drops the sticky flag), NUD_REACHABLE | NUD_NOARP.
-        assert_eq!(evpn_master_fdb_flags(true), (0x04 | 0x40, 0x02 | 0x40));
+        // path drops the sticky flag), NUD_NOARP as the kernel reports it.
+        assert_eq!(evpn_master_fdb_flags(true), (0x04 | 0x40, 0x40));
     }
 
     #[test]
