@@ -3,11 +3,17 @@
 use super::{MacAddr, Rib};
 use std::net::{IpAddr, Ipv6Addr};
 
+/// `MacRoute::flags` / `MacEntry::flags` bit: a sticky (static) MAC, the
+/// sticky flag of the RFC 7432 §7.7 MAC Mobility community. It must not
+/// move: it wins over any sequence number (§15.2), and the kernel bridge
+/// row is installed static and sticky.
+pub const MAC_FLAG_STICKY: u8 = 0x01;
+
 /// `MacRoute::flags` / `MacEntry::flags` bit: EVPN E-Tree (RFC 8317 §4.1),
 /// the MAC is behind a leaf AC on its PE — its selected Type-2 carries the
 /// E-Tree EC with the Leaf-Indication flag. The cradle tee hands it to the
-/// datapath as `FdbRemote.etree_leaf`. Bits 0x01-0x08 are sticky, gateway,
-/// router and (shown, never set) sync.
+/// datapath as `FdbRemote.etree_leaf`. Bits 0x02-0x08 are gateway, router
+/// and (shown, never set) sync.
 pub const MAC_FLAG_ETREE_LEAF: u8 = 0x10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -47,6 +53,14 @@ pub struct MacRoute {
     pub srv6_sid: Option<Ipv6Addr>,
     pub mpls_label: Option<u32>,
     pub local_port: Option<String>,
+}
+
+impl MacRoute {
+    /// The PE that advertised the route. The RD alone does not tell PEs
+    /// apart: an operator may configure the same RD on every PE.
+    fn originator(&self) -> ([u8; 8], Option<IpAddr>) {
+        (self.key.rd, self.tunnel_endpoint)
+    }
 }
 
 impl Rib {
@@ -94,6 +108,28 @@ impl Rib {
             .range(lo..=hi)
             .map(|(_, route)| route.clone())
             .collect();
+        // FRR sets the sticky flag on the MAC-only route of a sticky MAC and
+        // sends its MAC+IP routes without a MAC Mobility community. Carry
+        // the flag to every route of the same PE, so that neither the order
+        // the routes are applied in nor which of them carries the highest
+        // sequence number decides whether the MAC is sticky.
+        let sticky: Vec<_> = routes
+            .iter()
+            .filter(|route| route.flags & MAC_FLAG_STICKY != 0)
+            .map(MacRoute::originator)
+            .collect();
+        for route in &mut routes {
+            if sticky.contains(&route.originator()) {
+                route.flags |= MAC_FLAG_STICKY;
+            }
+        }
+        // RFC 7432 §15.2: a sticky MAC is advertised with sequence number
+        // zero and must not move, so it wins over any sequence number from
+        // another PE, as in FRR's best-path selection and in
+        // `evpn_local_path_wins` against this node's own route.
+        if !sticky.is_empty() {
+            routes.retain(|route| route.flags & MAC_FLAG_STICKY != 0);
+        }
         routes.sort_by_key(|route| std::cmp::Reverse(route.seq));
         let Some(winner) = routes.first() else {
             self.mac_del(vni, mac).await;

@@ -1407,3 +1407,99 @@ async fn a_withdrawn_vrf_binding_is_not_replayed() {
     ip(&["link", "del", "dmvrf"]);
     ip(&["link", "del", "vrfrace"]);
 }
+
+/// A remote MAC that stops being sticky is installed extern-learned again.
+/// The bridge keeps a sticky entry sticky across an extern-learned upsert,
+/// which would leave the MAC static and pinned to the VXLAN port. The same
+/// holds for a sticky entry an earlier run left, known only from the dump.
+#[tokio::test]
+#[ignore = "requires root in an isolated network namespace"]
+async fn a_mac_no_longer_sticky_is_installed_extern_learned() {
+    use crate::rib::evpn::{MAC_FLAG_STICKY, MacRoute, MacRouteKey};
+    require_netns();
+    ip(&["link", "add", "brpin", "type", "bridge"]);
+    ip(&["link", "set", "brpin", "up"]);
+    ip(&[
+        "link",
+        "add",
+        "vxpin",
+        "type",
+        "vxlan",
+        "id",
+        "10",
+        "local",
+        "192.0.2.1",
+        "dstport",
+        "4789",
+        "nolearning",
+    ]);
+    ip(&["link", "set", "vxpin", "master", "brpin"]);
+    ip(&["link", "set", "vxpin", "up"]);
+    let mac: MacAddr = "02:00:00:00:00:11".parse().unwrap();
+    let route = |flags| {
+        Message::EvpnMacAdd(MacRoute {
+            key: MacRouteKey::new("65000:10".parse().unwrap(), 10, mac, None),
+            tunnel_endpoint: Some("192.0.2.2".parse().unwrap()),
+            flags,
+            seq: 0,
+            esi: None,
+            srv6_sid: None,
+            mpls_label: None,
+            local_port: None,
+        })
+    };
+    // The bridge entries for the MAC (one per VLAN on the port), each as
+    // the words `bridge fdb` prints.
+    let bridge_entries = || {
+        let out = std::process::Command::new("bridge")
+            .args(["fdb", "show", "dev", "vxpin"])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        let entries: Vec<Vec<String>> = String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .filter(|line| line.starts_with(&mac.to_string()) && line.contains("master brpin"))
+            .map(|line| line.split_whitespace().map(str::to_string).collect())
+            .collect();
+        assert!(!entries.is_empty());
+        entries
+    };
+    let all = |word: &str| bridge_entries().iter().all(|e| e.iter().any(|w| w == word));
+    let none = |word: &str| bridge_entries().iter().all(|e| e.iter().all(|w| w != word));
+    let new_rib = || async {
+        let mut rib = Rib::new(false).unwrap();
+        crate::fib::netlink::fib_resync(&mut rib).await.unwrap();
+        let vxlan = rib.links.values().find(|l| l.name == "vxpin").unwrap();
+        let bridge = vxlan.master.unwrap();
+        let vxlan = vxlan.index;
+        rib.fib_handle.vni_ifindex_map.insert(10, vxlan);
+        rib.fib_handle.vni_bridge_map.insert(10, bridge);
+        rib
+    };
+
+    let mut rib = new_rib().await;
+    rib.process_msg(route(MAC_FLAG_STICKY), RT_TABLE_MAIN).await;
+    assert!(all("static") && all("sticky"), "{:?}", bridge_entries());
+    rib.process_msg(route(0), RT_TABLE_MAIN).await;
+    assert!(
+        all("extern_learn") && none("sticky") && none("static"),
+        "{:?}",
+        bridge_entries()
+    );
+
+    // An earlier run installed it sticky and exited without cleanup.
+    rib.process_msg(route(MAC_FLAG_STICKY), RT_TABLE_MAIN).await;
+    assert!(all("sticky"), "{:?}", bridge_entries());
+    drop(rib);
+    let mut rib = new_rib().await;
+    rib.process_msg(route(0), RT_TABLE_MAIN).await;
+    assert!(
+        all("extern_learn") && none("sticky") && none("static"),
+        "{:?}",
+        bridge_entries()
+    );
+
+    ip(&["link", "del", "vxpin"]);
+    ip(&["link", "del", "brpin"]);
+}

@@ -96,7 +96,18 @@ reinstalled by the end of the grace period is removed.
 
 * Local Type-2 advertisements correlate eligible local FDB rows with ARP/NDP.
   MAC-only, IPv4 and IPv6 bindings have separate NLRI keys and lifetimes.
-  `EXT_LEARNED` state is never re-advertised as local state.
+  `EXT_LEARNED` state, and any row on a VXLAN port, is never re-advertised
+  as local state.
+* A local FDB row the operator marks `sticky` is advertised with the MAC
+  Mobility sticky flag (RFC 7432 §15.2): its MAC-only route with sequence
+  number zero, as FRR does, and its MAC/IP routes with their own sequence
+  numbers, so an IP that moves onto the MAC still outranks its old
+  binding. Received, the flag applies to every route of the advertising PE
+  (RD and next hop), since FRR sets it only on the MAC-only route. A sticky
+  MAC wins over any sequence number from another PE and is installed as a
+  static sticky bridge row, which a local learn does not move. When it
+  stops being sticky, the row is replaced by an extern-learned one; so is
+  a sticky row an earlier run left behind.
 * Received Type-2 routes may carry the optional Label2 (the L3VNI under
   symmetric IRB, RFC 9135). It is accepted and re-advertised unchanged;
   zebra-rs does not yet originate it or install Type-2 host routes in VRFs.

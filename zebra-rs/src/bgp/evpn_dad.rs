@@ -226,6 +226,31 @@ impl Probe {
             .map(|((_, binding), route)| (*binding, *route))
     }
 
+    /// Where a remote MAC is: at the newest of its live routes, a sticky
+    /// one first, as the RIB installs it (`reconcile_evpn_mac`, RFC 7432
+    /// §15.2). A route is sticky when any route of its PE (RD and next hop)
+    /// is: FRR sets the flag only on a sticky MAC's MAC-only route, and its
+    /// MAC/IP routes, carrying no MAC Mobility community, would otherwise
+    /// make the MAC look movable.
+    fn mac_remote_owner(&self) -> Option<Owner> {
+        let sticky = |route: &RemoteRoute| {
+            self.remote_routes
+                .values()
+                .any(|other| other.sticky && (other.rd, other.vtep) == (route.rd, route.vtep))
+        };
+        let any_sticky = self.remote_routes.values().any(|route| route.sticky);
+        let newest = self
+            .remote_routes
+            .values()
+            .filter(|route| !any_sticky || sticky(route))
+            .max_by_key(|route| route.seq)?;
+        Some(Owner::Remote {
+            vtep: newest.vtep,
+            sticky: sticky(newest),
+            es: newest.es,
+        })
+    }
+
     /// One remote route for the address went. A remote address is now
     /// where the newest of those left is (a segment peer's sync route gone,
     /// an ordinary route left is no longer exempt), and with the last it is
@@ -233,7 +258,11 @@ impl Probe {
     fn remote_route_gone(&mut self, route: ([u8; 8], RouteBinding)) {
         self.remote_routes.remove(&route);
         if matches!(self.owner, Some(Owner::Remote { .. })) {
-            self.owner = self.newest_remote().map(|(_, route)| route.owner());
+            self.owner = match route.1 {
+                // A MAC's routes bind IPs.
+                RouteBinding::Ip(_) => self.mac_remote_owner(),
+                RouteBinding::Mac(_) => self.newest_remote().map(|(_, route)| route.owner()),
+            };
         }
     }
 }
@@ -391,7 +420,7 @@ impl EvpnDad {
         probe
             .remote_routes
             .insert((rd, RouteBinding::Ip(ip)), route);
-        probe.owner = probe.newest_remote().map(|(_, route)| route.owner());
+        probe.owner = probe.mac_remote_owner();
         if let Some(ip) = ip {
             // Only a binding at least as new as every other live one moves
             // the IP; an older one leaves it where it is.
@@ -1508,6 +1537,58 @@ mod tests {
         assert!(flap(&mut dad, t, 400).is_empty());
         assert_eq!(dad.macs[&(VNI, mac(1))].count, 1);
         assert!(!dad.mac_duplicate(VNI, mac(1)));
+    }
+
+    /// FRR flags only a sticky MAC's MAC-only route; its MAC/IP route
+    /// carries no MAC Mobility community. The MAC is remote sticky all the
+    /// same, and stays so over a newer route from another PE, where the RIB
+    /// keeps it: a local learn of it is not a move.
+    #[test]
+    fn a_mac_sticky_on_one_route_of_its_pe_is_remote_sticky() {
+        let t = Instant::now();
+        let sticky = RemoteRoute {
+            sticky: true,
+            seq: 0,
+            ..route()
+        };
+        let flagless = RemoteRoute { seq: 0, ..route() };
+        let other = RemoteRoute {
+            rd: [0, 1, 10, 0, 0, 12, 0, 100],
+            vtep: Some(IpAddr::from([10, 0, 0, 12])),
+            seq: 5,
+            ..route()
+        };
+        let ip = Some(IpAddr::from([10, 10, 0, 101]));
+        let owner = |dad: &EvpnDad| dad.macs[&(VNI, mac(1))].owner;
+        let remote = |vtep, sticky| {
+            Some(Owner::Remote {
+                vtep,
+                sticky,
+                es: None,
+            })
+        };
+        for flagless_first in [false, true] {
+            let mut dad = dad(2, Freeze::Off);
+            if flagless_first {
+                dad.remote_takeover(VNI, mac(1), ip, flagless, t);
+                dad.remote_takeover(VNI, mac(1), None, sticky, t);
+            } else {
+                dad.remote_takeover(VNI, mac(1), None, sticky, t);
+                dad.remote_takeover(VNI, mac(1), ip, flagless, t);
+            }
+            assert_eq!(owner(&dad), remote(VTEP, true));
+            dad.remote_takeover(VNI, mac(1), None, other, t);
+            assert_eq!(owner(&dad), remote(VTEP, true));
+            dad.remote_gone(RD, VNI, mac(1), ip, t);
+            assert_eq!(owner(&dad), remote(VTEP, true));
+            dad.remote_gone(RD, VNI, mac(1), None, t);
+            assert_eq!(owner(&dad), remote(other.vtep, false));
+        }
+        let mut dad = dad(2, Freeze::Off);
+        dad.remote_takeover(VNI, mac(1), None, sticky, t);
+        dad.remote_takeover(VNI, mac(1), ip, flagless, t);
+        assert!(dad.local_learn(VNI, mac(1), None, t).1.is_empty());
+        assert_eq!(dad.macs[&(VNI, mac(1))].count, 0);
     }
 
     /// A remote VTEP change or a sticky remote MAC is not a move.
