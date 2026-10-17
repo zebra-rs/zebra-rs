@@ -80,6 +80,20 @@ message EtreeLeafArg {
   uint32 arg = 1;
 }
 
+// EVPN E-Tree (RFC 8317) over SRv6 (RFC 9819 §3.2): the PE whose End.DT2M
+// SID is `remote` (`label` 0) advertised a leaf argument whose length
+// differs from its IMET's, so no leaf slot can mark our leaves' BUM toward
+// it, and RFC 9819 asks not to send it. The replication slots toward that
+// SID then serve roots only: a local leaf's BUM goes nowhere near the PE.
+// Keyed like the slot group, `(remote, label)`, so an MPLS PE with its BUM
+// label works the same way. Replace semantics per key; `root_only = false`
+// clears it. May precede the replication slots.
+message EtreeRootOnly {
+  string remote = 1;
+  uint32 label = 2;
+  bool root_only = 3;
+}
+
 // EVPN E-Tree over VXLAN (RFC 8317; the V1+ scheme: the IMET carries the
 // E-Tree EC when a PE's ACs in the domain are all leaves): the PE at
 // `remote` (its VTEP) is leaf-only in bridge domain `bd`. Its VXLAN BUM is
@@ -679,6 +693,7 @@ service Cradle {
   rpc SetEtreeLeafLabel(EtreeLeafLabel) returns (Empty);
   rpc SetEtreeLeafArg(EtreeLeafArg) returns (Empty);
   rpc SetEtreeRemote(EtreeRemote) returns (Empty);
+  rpc SetEtreeRootOnly(EtreeRootOnly) returns (Empty);
   rpc AddFdbLocal(FdbLocal) returns (Empty);
   // Flush locally-learned FDB entries (never control-plane-installed remote
   // entries). WatchFdb subscribers observe the removals as age events.

@@ -490,6 +490,13 @@ pub enum Message {
         remote: IpAddr,
         leaf_only: bool,
     },
+    /// EVPN E-Tree over SRv6 (RFC 9819 §3.2): the PE whose End.DT2M SID is
+    /// `sid` gets (`root_only`), or again may get, no leaf BUM, its leaf
+    /// argument not being placeable. Teed as `SetEtreeRootOnly`.
+    CradleEtreeRootOnly {
+        sid: std::net::Ipv6Addr,
+        root_only: bool,
+    },
     /// MUP `dataplane gtp` uplink decap (`H.M.GTP4.D`): a GTP-U decap PDR teed
     /// to cradle — a G-PDU on (`dst`, `teid`), arriving on a port bound to VRF
     /// table `match_vrf` (0 = global), is stripped and its inner packet
@@ -4459,6 +4466,9 @@ impl Rib {
             }
             Message::CradleReplDelSrv6Leaf { bd, sid } => {
                 self.fib_handle.cradle_repl_del_srv6_leaf(bd, sid).await;
+            }
+            Message::CradleEtreeRootOnly { sid, root_only } => {
+                self.fib_handle.cradle_etree_root_only(sid, root_only).await;
             }
             Message::CradleEtreeRemote {
                 bd,

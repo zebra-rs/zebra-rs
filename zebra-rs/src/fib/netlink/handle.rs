@@ -1064,6 +1064,14 @@ impl FibHandle {
         }
     }
 
+    /// EVPN E-Tree over SRv6 tee (RFC 9819 §3.2): the PE whose End.DT2M SID
+    /// is `sid` gets, or again may get, no leaf BUM (`root_only`).
+    pub async fn cradle_etree_root_only(&self, sid: std::net::Ipv6Addr, root_only: bool) {
+        if let Some(cradle) = &self.cradle {
+            cradle.set_etree_root_only(sid, root_only).await;
+        }
+    }
+
     /// EVPN E-Tree over SRv6 tee: the leaf slot toward the PE whose End.DT2M
     /// SID for bridge domain `bd` is `sid`, sending to `leaf_sid`.
     pub async fn cradle_repl_add_srv6_leaf(&self, bd: u32, sid: Ipv6Addr, leaf_sid: Ipv6Addr) {

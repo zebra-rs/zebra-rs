@@ -181,6 +181,10 @@ struct CradleMirror {
     /// with the PE's leaf argument placed.
     etree_leaf_arg: u32,
     repl_slots_srv6_leaf: HashMap<(u32, Ipv6Addr), Ipv6Addr>,
+    /// EVPN E-Tree over SRv6 (RFC 9819 §3.2): the End.DT2M SIDs whose PE
+    /// gets no leaf BUM at all, its leaf argument not being placeable
+    /// (`SetEtreeRootOnly`): their slots serve roots only.
+    etree_root_only: HashSet<Ipv6Addr>,
 }
 
 /// One step of an engine replay that makes a BUM replication slot, or a
@@ -195,6 +199,7 @@ enum SlotOp {
     MplsSlot(u32, IpAddr, u32),
     EtreeLeafArg(u32),
     Srv6LeafSlot(u32, Ipv6Addr, Ipv6Addr),
+    EtreeRootOnly(Ipv6Addr),
     Srv6Slot(u32, Ipv6Addr),
 }
 
@@ -217,8 +222,9 @@ enum SlotFamily {
 ///   with a leaf slot, serving roots only (RFC 8317 §4.2). So the leaf
 ///   label, the leaf slots and the segment slots come first.
 /// - SRv6: likewise, a PE's leaf slot (its End.DT2M SID with its leaf
-///   argument) makes its plain slot serve roots only, so the leaf argument
-///   and the leaf slots come first.
+///   argument) makes its plain slot serve roots only, and so does a
+///   root-only mark (RFC 9819 §3.2), so the leaf argument, the leaf slots
+///   and the marks come first.
 fn slot_replay(m: &CradleMirror, family: SlotFamily) -> Vec<SlotOp> {
     let mut ops = Vec::new();
     match family {
@@ -266,6 +272,11 @@ fn slot_replay(m: &CradleMirror, family: SlotFamily) -> Vec<SlotOp> {
                 m.repl_slots_srv6_leaf
                     .iter()
                     .map(|((bd, sid), leaf)| SlotOp::Srv6LeafSlot(*bd, *sid, *leaf)),
+            );
+            ops.extend(
+                m.etree_root_only
+                    .iter()
+                    .map(|sid| SlotOp::EtreeRootOnly(*sid)),
             );
             ops.extend(
                 m.repl_slots
@@ -694,6 +705,7 @@ impl CradleFib {
             SlotOp::Srv6LeafSlot(bd, sid, leaf) => {
                 self.repl_slot_add_srv6_leaf(bd, sid, leaf).await
             }
+            SlotOp::EtreeRootOnly(sid) => self.set_etree_root_only(sid, true).await,
             SlotOp::Srv6Slot(vni, sid) => self.repl_slot_add(vni, sid).await,
         }
     }
@@ -2430,6 +2442,36 @@ impl CradleFib {
         }
     }
 
+    /// EVPN E-Tree over SRv6 (RFC 9819 §3.2): the PE whose End.DT2M SID is
+    /// `sid` gets (`root_only`), or again may get, no leaf BUM: its leaf
+    /// argument cannot be placed, so its slots serve roots only. Mirrored;
+    /// replayed before the SRv6 slots.
+    pub async fn set_etree_root_only(&self, sid: Ipv6Addr, root_only: bool) {
+        {
+            let mut m = self.mirror.lock().await;
+            if root_only {
+                m.etree_root_only.insert(sid);
+            } else {
+                m.etree_root_only.remove(&sid);
+            }
+        }
+        let result = async {
+            self.client()
+                .await?
+                .set_etree_root_only(pb::EtreeRootOnly {
+                    remote: sid.to_string(),
+                    label: 0,
+                    root_only,
+                })
+                .await?;
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            tracing::warn!("fib: cradle set_etree_root_only {sid} {root_only} failed: {e}");
+        }
+    }
+
     /// EVPN E-Tree over SRv6 (RFC 8317, RFC 8986 §4.12): this PE's leaf
     /// argument, for decap (0 = none). A copy a peer sends with it in our
     /// End.DT2M SID came from a leaf AC and is kept off our leaf ports.
@@ -3095,5 +3137,20 @@ mod slot_replay_tests {
         assert!(at(|op| matches!(op, SlotOp::MplsEsSlot(..))) < plain);
         assert!(at(|op| matches!(op, SlotOp::EtreeLeafLabel(_))) < plain);
         assert_eq!(mpls.len(), 4);
+    }
+
+    /// RFC 9819 §3.2: a root-only SRv6 slot group's mark replays before its
+    /// plain slot, so a respawned engine never floods a leaf's BUM to a PE
+    /// whose leaf argument cannot be placed.
+    #[test]
+    fn a_root_only_mark_replays_before_the_srv6_slot() {
+        let sid: Ipv6Addr = "fd00:2:0:200::".parse().unwrap();
+        let mut m = CradleMirror::default();
+        m.repl_slots.insert((300, sid));
+        m.etree_root_only.insert(sid);
+        assert_eq!(
+            slot_replay(&m, SlotFamily::Srv6),
+            vec![SlotOp::EtreeRootOnly(sid), SlotOp::Srv6Slot(300, sid)]
+        );
     }
 }

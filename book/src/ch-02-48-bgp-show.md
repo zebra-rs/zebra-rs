@@ -257,13 +257,16 @@ E-Tree (RFC 8317) state: each leaf attachment circuit with its EVIs and
 local MACs, the remote MACs behind a leaf per EVI, the leaf label (MPLS)
 or leaf argument (SRv6) of this PE and each remote PE, the leaf-only EVIs
 and PEs (VXLAN), and warnings for cases where leaf traffic is not kept
-apart. See [EVPN E-Tree](ch-02-47-bgp-evpn-e-tree.md#show).
+apart, or where a PE gets no leaf BUM at all (an SRv6 argument length
+mismatch). See [EVPN E-Tree](ch-02-47-bgp-evpn-e-tree.md#show).
 
 JSON: `{ leafInterfaces, remoteLeafMacs, leafLabel, remoteLeafLabels,
 leafArg, remoteLeafArgs, argLengthMismatch, leafOnlyEvis,
 remoteLeafOnly, mixedPes, irb, roleConflicts, bumFiltered }`. Unlike the
 other BGP views, its keys are camelCase. `bumFiltered` is false whenever
-one of the BUM warnings applies.
+leaf BUM is not kept from other PEs' leaves: mixed PEs, or no leaf label or
+leaf argument of this PE's own. A PE that gets no leaf BUM leaks none, so
+`argLengthMismatch` does not make it false.
 
 ### `show evpn dup-addr`
 

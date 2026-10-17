@@ -1026,6 +1026,10 @@ pub struct Bgp {
     pub(super) etree_dt2m_arg_vnis: BTreeSet<u32>,
     /// The SRv6 leaf slots last teed: `(bd, PE's End.DT2M SID, leaf SID)`.
     pub(super) etree_srv6_slots_sent: BTreeSet<(u32, std::net::Ipv6Addr, std::net::Ipv6Addr)>,
+    /// The End.DT2M SIDs last teed root-only (`SetEtreeRootOnly`): PEs
+    /// whose leaf argument cannot be placed get no leaf BUM (RFC 9819
+    /// §3.2).
+    pub(super) etree_srv6_root_only_sent: BTreeSet<std::net::Ipv6Addr>,
     /// The E-Tree role conflicts last logged, by ESI
     /// (`etree_role_conflict_reconcile` logs onset and clear once each).
     pub(super) etree_role_conflicts_logged: BTreeSet<[u8; 10]>,
@@ -1589,6 +1593,7 @@ impl Bgp {
             etree_leaf_arg_teed: None,
             etree_dt2m_arg_vnis: BTreeSet::new(),
             etree_srv6_slots_sent: BTreeSet::new(),
+            etree_srv6_root_only_sent: BTreeSet::new(),
             etree_role_conflicts_logged: BTreeSet::new(),
             etree_imet_leaf_vnis: BTreeSet::new(),
             hostname: None,
@@ -5265,6 +5270,7 @@ impl Bgp {
                 self.etree_slots_sent.clear();
                 self.etree_leaf_arg_teed = None;
                 self.etree_srv6_slots_sent.clear();
+                self.etree_srv6_root_only_sent.clear();
                 self.local_rib.etree_remotes_sent.clear();
                 self.etree_label_reconcile();
             }
