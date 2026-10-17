@@ -6,7 +6,7 @@ link-state database, the routing table, the SPF tree, and the Segment
 Routing / TI-LFA state. The two command trees are near-identical; the
 differences are called out below. Every command honors `-j` / `--json`,
 and each accepts a `vrf <name>` selector that mirrors the non-VRF
-sibling (see the [overview](ch-14-00-show-overview.md)).
+sibling (see the [overview](ch-06-03-show-commands.md)).
 
 See the protocol chapters for configuration:
 [OSPF](ch-08-00-ospf.md).

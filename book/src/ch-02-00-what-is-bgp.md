@@ -37,3 +37,6 @@ IPv4 Unicast Summary:
 BGP router identifier 10.0.0.1, local AS number 65000 VRF default vrf-id 0
 ...
 ```
+
+Every BGP show command is listed in
+[BGP Show Commands](ch-02-48-bgp-show.md).

@@ -6,3 +6,9 @@ src = "src"
 [output.html.fold]
 enable = true
 level = 0 
+
+# Show-command pages folded into their protocol chapters keep their old
+# URLs working.
+[output.html.redirect]
+"/ch-14-00-show-overview.html" = "ch-06-03-show-commands.html"
+"/ch-14-02-show-bgp.html" = "ch-02-48-bgp-show.html"

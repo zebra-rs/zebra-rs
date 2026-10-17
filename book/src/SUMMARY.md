@@ -71,6 +71,7 @@
   - [BFD](ch-02-08-bgp-bfd.md)
   - [Route Reflector](ch-02-09-bgp-route-reflector.md)
   - [RIB Sharding (Parallel Route Processing)](ch-02-31-bgp-rib-sharding.md)
+  - [Show Commands](ch-02-48-bgp-show.md)
   - [Clearing BGP Sessions](ch-02-25-bgp-clear.md)
   - [Conditional Tracing](ch-02-10-bgp-tracing.md)
 - [IS-IS](ch-07-00-isis.md)
@@ -157,12 +158,11 @@
 - [VTY](ch-06-00-vty-access.md)
   - [Session Management Design](ch-06-01-session-design.md)
   - [Show Config Commands](ch-06-02-show-config-commands.md)
+  - [Operational Show Commands](ch-06-03-show-commands.md)
 
 ## Show Commands
 
-- [Overview](ch-14-00-show-overview.md)
 - [System, RIB and Forwarding](ch-14-01-show-system-rib.md)
-- [BGP](ch-14-02-show-bgp.md)
 - [OSPFv2 and OSPFv3](ch-14-03-show-ospf.md)
 - [IS-IS](ch-14-04-show-isis.md)
 - [Neighbor Discovery, BFD and STAMP](ch-14-05-show-bfd-stamp-nd.md)

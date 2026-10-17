@@ -110,7 +110,7 @@ VNI       MAC               IP                                      State      M
 
 The list shows detected addresses and addresses whose moves are still being
 counted in an open window. `dup (MAC)` marks an IP that is a duplicate because
-its MAC is. `show evpn dup-addr json` gives the same data as JSON.
+its MAC is. `vtyctl show -j 'show evpn dup-addr'` gives the same data as JSON.
 
 ```
 > clear bgp evpn dup-addr vni all
