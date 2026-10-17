@@ -2227,6 +2227,8 @@ async fn two_mixed_pes_are_reported() {
             "Warning: EVI 100: leaf BUM not isolated between mixed PEs: local, 10.0.0.11"
         )
     );
+    let json: serde_json::Value = serde_json::from_str(&show(&bgp, true)).unwrap();
+    assert_eq!(json["bumFiltered"], false, "two mixed PEs");
 
     let (_, attr) = vxlan_imet_route("10.0.0.11", Some(ExtCommunityValue::etree_leaf()));
     feed_evpn(&mut bgp, from, imet, Some(attr));
@@ -2727,6 +2729,90 @@ async fn a_remote_leaf_argument_makes_an_srv6_leaf_slot() {
     assert_eq!(
         etree_srv6_messages(&mut rib),
         vec!["del 100 fd00:2:0:200::".to_string()]
+    );
+}
+
+fn etree_show(bgp: &Bgp, json: bool) -> String {
+    super::super::show::show_bgp_evpn_etree(
+        bgp,
+        crate::config::Args(std::collections::VecDeque::new()),
+        json,
+    )
+    .unwrap()
+}
+
+/// Review finding (phase 6 docs): `bumFiltered` was always true. Under
+/// MPLS, a leaf AC without a leaf label leaves leaf BUM from other PEs
+/// unmarked here: warned and false until the label is drawn.
+#[tokio::test]
+async fn a_leaf_ac_without_a_leaf_label_is_not_filtered() {
+    let (mut bgp, _rib) = etree_mpls_bgp();
+    let warning = "Warning: no leaf label: leaf BUM from other PEs reaches the local leaves";
+    assert!(etree_show(&bgp, false).contains(warning));
+    let json: serde_json::Value = serde_json::from_str(&etree_show(&bgp, true)).unwrap();
+    assert_eq!(json["bumFiltered"], false);
+
+    bgp.etree_label_reconcile();
+    assert!(!etree_show(&bgp, false).contains("Warning"));
+    let json: serde_json::Value = serde_json::from_str(&etree_show(&bgp, true)).unwrap();
+    assert_eq!(json["bumFiltered"], true);
+
+    // No leaf AC, nothing to filter.
+    bgp.etree_leaf_ifs.clear();
+    bgp.etree_label_reconcile();
+    let json: serde_json::Value = serde_json::from_str(&etree_show(&bgp, true)).unwrap();
+    assert_eq!(json["bumFiltered"], true);
+}
+
+/// Over SRv6, a PE whose IMET argument length differs from its leaf
+/// route's gets no leaf slot (RFC 9819 §3.2), so our leaves' BUM reaches
+/// its leaves: `show` names it, and `bumFiltered` is false until the
+/// lengths agree.
+#[tokio::test]
+async fn an_srv6_argument_length_mismatch_is_shown() {
+    let (mut bgp, _rib) = etree_srv6_bgp();
+    let (from, _rx) = peer(&mut bgp, "10.0.0.11", false);
+    let (ad, ad_attr) = srv6_leaf_ad_route("10.0.0.11", 1);
+    feed_evpn(&mut bgp, from, ad, Some(ad_attr));
+    let (imet, attr) = srv6_imet_route("10.0.0.11", "fd00:2:0:200::", 0);
+    feed_evpn(&mut bgp, from, imet.clone(), Some(attr));
+    let text = etree_show(&bgp, false);
+    assert!(
+        text.contains(
+            "Warning: EVI 100: leaf argument length differs from the IMET's: our leaf BUM reaches the leaves of 10.0.0.11"
+        ),
+        "{text}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&etree_show(&bgp, true)).unwrap();
+    assert_eq!(json["argLengthMismatch"][0]["evi"], 100);
+    assert_eq!(json["argLengthMismatch"][0]["pes"][0], "10.0.0.11");
+    assert_eq!(json["bumFiltered"], false);
+
+    let (_, attr) = srv6_imet_route("10.0.0.11", "fd00:2:0:200::", 16);
+    feed_evpn(&mut bgp, from, imet, Some(attr));
+    assert!(!etree_show(&bgp, false).contains("Warning"));
+    let json: serde_json::Value = serde_json::from_str(&etree_show(&bgp, true)).unwrap();
+    assert_eq!(json["argLengthMismatch"], serde_json::json!([]));
+    assert_eq!(json["bumFiltered"], true);
+}
+
+/// Review finding (phase 6 docs): a deleted leaf AC kept its old ifindex in
+/// `show bgp evpn etree`, because the name→ifindex mirror outlives the
+/// link. It shows as absent.
+#[tokio::test]
+async fn a_deleted_leaf_ac_shows_as_absent() {
+    let (mut bgp, _rib) = etree_srv6_bgp();
+    assert!(etree_show(&bgp, false).contains("    ce1              ifindex 7      EVI 100 "));
+    bgp.process_rib_msg(RibRx::LinkDel(7));
+    let text = etree_show(&bgp, false);
+    assert!(
+        text.contains("    ce1              link absent\n"),
+        "{text}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&etree_show(&bgp, true)).unwrap();
+    assert_eq!(
+        json["leafInterfaces"][0]["ifindex"],
+        serde_json::Value::Null
     );
 }
 

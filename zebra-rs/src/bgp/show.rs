@@ -2638,6 +2638,16 @@ struct EtreePeerArgJson {
     arg_bits: u8,
 }
 
+/// `show bgp evpn etree json`: the remote PEs in one EVI that advertised
+/// an SRv6 leaf argument but get no leaf slot, because their IMET's
+/// argument length differs (RFC 9819 §3.2).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EtreeArgMismatchJson {
+    evi: u32,
+    pes: Vec<String>,
+}
+
 /// `show bgp evpn etree json`: a remote PE's leaf label (MPLS).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2659,6 +2669,10 @@ struct EtreeJson {
     leaf_arg: Option<u32>,
     /// SRv6: the leaf argument each remote PE advertised.
     remote_leaf_args: Vec<EtreePeerArgJson>,
+    /// SRv6: per EVI, the PEs whose leaf argument cannot be used (its
+    /// length differs from their IMET's), so our leaves' BUM reaches their
+    /// leaves.
+    arg_length_mismatch: Vec<EtreeArgMismatchJson>,
     /// VXLAN: the EVIs whose ACs here are all leaves, so whose IMET
     /// carries the Leaf flag.
     leaf_only_evis: Vec<u32>,
@@ -2673,10 +2687,13 @@ struct EtreeJson {
     /// The Ethernet Segments whose AC role disagrees between PEs: a leaf's
     /// BUM may loop back into the segment (RFC 8317 §4.2.3).
     role_conflicts: Vec<EtreeRoleConflictJson>,
-    /// Whether a leaf's BUM is kept from leaves on other PEs: over MPLS,
-    /// by the leaf label (RFC 8317 §4.2); over SRv6, by the leaf argument
-    /// (RFC 9819); over VXLAN, by the IMET colour, except between mixed
-    /// PEs.
+    /// Whether a leaf's BUM is kept from leaves on other PEs, as far as
+    /// this PE can tell. False over MPLS when this PE has a leaf AC but no
+    /// leaf label (RFC 8317 §4.2); over SRv6 when it has a leaf AC but no
+    /// leaf argument (RFC 9819), or a PE's argument length differs
+    /// (`argLengthMismatch`); over VXLAN when two PEs in an EVI are mixed
+    /// (`mixedPes`). A P2MP tunnel or Assisted Replication on the EVI is
+    /// not looked at.
     bum_filtered: bool,
 }
 
@@ -2693,7 +2710,7 @@ pub(super) fn show_bgp_evpn_etree(
         .etree_leaf_ifs
         .iter()
         .map(|name| {
-            let ifindex = bgp.link_index_by_name.get(name).copied();
+            let ifindex = bgp.live_link_index(name);
             EtreeLeafJson {
                 name: name.clone(),
                 ifindex,
@@ -2774,6 +2791,26 @@ pub(super) fn show_bgp_evpn_etree(
                 .collect(),
         })
         .collect();
+    let has_leaf = !bgp.etree_leaf_evis().is_empty();
+    let (_, arg_mismatch) = bgp.etree_srv6_leaf_slots();
+    let arg_mismatch: Vec<EtreeArgMismatchJson> = arg_mismatch
+        .into_iter()
+        .map(|(evi, pes)| EtreeArgMismatchJson {
+            evi,
+            pes: pes.iter().map(IpAddr::to_string).collect(),
+        })
+        .collect();
+    // This PE's own mark is missing: leaf BUM from other PEs cannot be told
+    // from a root's here.
+    let no_local_mark = has_leaf
+        && if bgp.evpn_encap.is_mpls() {
+            bgp.etree_leaf_label.is_none()
+        } else if bgp.evpn_encap.is_srv6() {
+            bgp.etree_leaf_arg.is_none()
+        } else {
+            false
+        };
+    let bum_filtered = !no_local_mark && mixed.is_empty() && arg_mismatch.is_empty();
     if json {
         let out = EtreeJson {
             leaf_interfaces: leaves,
@@ -2782,12 +2819,13 @@ pub(super) fn show_bgp_evpn_etree(
             remote_leaf_labels: peer_labels,
             leaf_arg: bgp.etree_leaf_arg,
             remote_leaf_args: peer_args,
+            arg_length_mismatch: arg_mismatch,
             leaf_only_evis,
             remote_leaf_only,
             mixed_pes: mixed,
             irb,
             role_conflicts,
-            bum_filtered: true,
+            bum_filtered,
         };
         return Ok(serde_json::to_string_pretty(&out)
             .unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}")));
@@ -2832,6 +2870,12 @@ pub(super) fn show_bgp_evpn_etree(
         for p in &peer_labels {
             writeln!(out, "    {:<16} {}", p.pe, p.leaf_label)?;
         }
+        if no_local_mark {
+            writeln!(
+                out,
+                "  Warning: no leaf label: leaf BUM from other PEs reaches the local leaves"
+            )?;
+        }
     } else if bgp.evpn_encap.is_vxlan() {
         let evis: Vec<String> = leaf_only_evis.iter().map(u32::to_string).collect();
         writeln!(
@@ -2869,6 +2913,20 @@ pub(super) fn show_bgp_evpn_etree(
         }
         for p in &peer_args {
             writeln!(out, "    {:<16} {} ({} bits)", p.pe, p.leaf_arg, p.arg_bits)?;
+        }
+        if no_local_mark {
+            writeln!(
+                out,
+                "  Warning: no leaf argument: leaf BUM from other PEs reaches the local leaves"
+            )?;
+        }
+        for m in &arg_mismatch {
+            writeln!(
+                out,
+                "  Warning: EVI {}: leaf argument length differs from the IMET's: our leaf BUM reaches the leaves of {}",
+                m.evi,
+                m.pes.join(", ")
+            )?;
         }
     }
     for i in &irb {
@@ -5046,7 +5104,19 @@ fn show_evpn_ecom(attr: &BgpAttr) -> String {
     };
     ecom.0
         .iter()
-        .map(format_evpn_ecom_value)
+        .map(|v| {
+            // The SRv6 leaf-label route's E-Tree EC carries no field: its
+            // leaf argument rides the End.DT2M SID (plan §8.6, D6.5). The
+            // EC alone renders as `etree:-`, so name the argument instead.
+            if let Some(etree) = v.as_etree()
+                && etree.flags & (EtreeEc::ROOT | EtreeEc::LEAF) == 0
+                && etree.field == 0
+                && let Some(Ok((arg, _))) = super::route::etree_route_leaf_arg(attr)
+            {
+                return format!("etree:leaf-arg:{arg}");
+            }
+            format_evpn_ecom_value(v)
+        })
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -6557,6 +6627,30 @@ mod evpn_show_tests {
             format_evpn_ecom_value(&ExtCommunityValue::etree_leaf_label(1000)),
             "etree:leaf-label:1000"
         );
+    }
+
+    /// The SRv6 leaf-label route's E-Tree EC has no field, so the EC alone
+    /// would read `etree:-`; the route names its leaf argument from the
+    /// End.DT2M SID instead. A Type-2 with the same EC (invalid, a root)
+    /// still reads `etree:-`.
+    #[test]
+    fn ecom_srv6_leaf_route_names_its_argument() {
+        let mut attr = BgpAttr {
+            ecom: Some(ExtCommunity::from([ExtCommunityValue::etree_leaf_label(0)])),
+            ..Default::default()
+        };
+        assert_eq!(show_evpn_ecom(&attr), "etree:-");
+        attr.prefix_sid = Some(super::super::inst::srv6_l2_service_prefix_sid(
+            super::super::route::sid_place_arg(std::net::Ipv6Addr::UNSPECIFIED, 64, 16, 1).unwrap(),
+            Some(crate::rib::SidStructure {
+                lb_bits: 32,
+                ln_bits: 16,
+                fun_bits: 16,
+                arg_bits: 16,
+            }),
+            bgp_packet::SRV6_BEHAVIOR_END_DT2M,
+        ));
+        assert_eq!(show_evpn_ecom(&attr), "etree:leaf-arg:1");
     }
 
     #[test]

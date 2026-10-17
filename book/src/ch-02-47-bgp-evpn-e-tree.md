@@ -239,13 +239,17 @@ with RFC 9819's placement). Each PE with a leaf AC uses the leaf argument 1,
 
 The locator must leave room for the argument: its block, node and function
 bits plus 16 must fit in 128. With a locator that does not, the PE has no
-leaf argument (`Leaf argument: none` in `show bgp evpn etree`), and leaf BUM
-from other PEs reaches its leaves.
+leaf argument (`Leaf argument: none` in `show bgp evpn etree`, with a
+warning), and leaf BUM from other PEs reaches its leaves.
 
 A PE whose IMET argument length differs from the one on its leaf-label route
 gets no marked copy, so its leaves receive the leaves' BUM. RFC 9819 says not
 to forward to such a PE at all; zebra-rs cannot withhold a leaf's BUM from a
-single PE over SRv6 yet.
+single PE over SRv6 yet. `show bgp evpn etree` names each such PE:
+
+```
+  Warning: EVI 100: leaf argument length differs from the IMET's: our leaf BUM reaches the leaves of 10.0.0.12
+```
 
 ## Multihomed leaves
 
@@ -304,8 +308,8 @@ EVPN E-Tree (RFC 8317)
 ```
 
 * **Leaf interfaces.** Each leaf AC, its EVIs and the MACs learned on it.
-  `link absent` means the interface has not appeared yet, and `EVI -` that it
-  is not a port of any EVI's bridge.
+  `link absent` means the interface does not exist (not yet, or no longer),
+  and `EVI -` that it is not a port of any EVI's bridge.
 * **Remote leaf MACs.** Per EVI, the remote MACs behind a leaf: the ones a
   local leaf may not reach.
 * Then, depending on the encapsulation:
@@ -313,7 +317,10 @@ EVPN E-Tree (RFC 8317)
   * VXLAN: this PE's leaf-only EVIs, the leaf-only remote PEs per EVI, and the
     mixed-PE warning.
   * SRv6: this PE's leaf argument and each remote PE's, with its length.
-* **Warnings.** Mixed PEs (VXLAN), a role conflict on a segment, and IRB:
+* **Warnings.** Leaf BUM that is not kept from other PEs' leaves: mixed PEs
+  (VXLAN), an argument length mismatch (SRv6), and no leaf label (MPLS) or
+  leaf argument (SRv6) of our own while we have a leaf AC. Then a role
+  conflict on a segment, and IRB:
 
   ```
     Warning: EVI 100: IRB on bridge br100: leaves can reach each other through L3
@@ -324,13 +331,16 @@ EVPN E-Tree (RFC 8317)
   leaves, and E-Tree does not filter routed traffic. The warning is there so
   this is a choice and not an accident.
 
-`show bgp evpn etree json` gives the same data as JSON.
+`show bgp evpn etree json` gives the same data as JSON. Its `bumFiltered` is
+false whenever one of the BUM warnings above applies. It does not look at a
+P2MP tunnel or Assisted Replication on the EVI (see [Not
+supported](#not-supported)).
 
 Elsewhere:
 
 | Command | What it shows |
 |---|---|
-| `show bgp evpn` | the community on each route: `etree:leaf` (Type-2, VXLAN IMET), `etree:leaf-label:<n>` (MPLS leaf-label route), `etree:-` (SRv6 leaf-label route, whose community carries no label: the argument is in the SID) |
+| `show bgp evpn` | the community on each route: `etree:leaf` (Type-2, VXLAN IMET), `etree:leaf-label:<n>` (MPLS leaf-label route), `etree:leaf-arg:<n>` (SRv6 leaf-label route: its community carries no label, and `<n>` is the leaf argument in its SID) |
 | `show l2 mac table` | flag `L` on a remote MAC behind a leaf |
 | `show ebpf` | `E-Tree leaves:` with `(pending)` after a role the engine has not acknowledged, and a port `held (E-Tree leaf role pending)` |
 | `show ebpf l2` | `etree-leaf` on a remote MAC behind a leaf |

@@ -6112,6 +6112,15 @@ impl Bgp {
     /// configured bridge (`evi <id> bridge <name>`) is the port's master —
     /// the MPLS shape, where the bridge has no VXLAN device and the RIB
     /// alone cannot tell.
+    /// The ifindex of the link named `name` while a link of that name
+    /// exists. `link_index_by_name` keeps a deleted or renamed link's
+    /// entry (the interface-neighbor teardown looks it up after the link is
+    /// gone); `link_name_by_index` follows `LinkDel` and renames.
+    pub fn live_link_index(&self, name: &str) -> Option<u32> {
+        let ifindex = *self.link_index_by_name.get(name)?;
+        (self.link_name_by_index.get(&ifindex).map(String::as_str) == Some(name)).then_some(ifindex)
+    }
+
     pub fn port_evis(&self, ifindex: u32) -> std::collections::BTreeSet<u32> {
         let mut out = self.l2_port_evis.get(&ifindex).cloned().unwrap_or_default();
         if let Some(bridge) = self
