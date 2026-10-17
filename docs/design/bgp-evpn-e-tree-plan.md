@@ -909,8 +909,9 @@ not run.
     attached to cradle (`etree_held` in `reconcile_ports`), and an
     unattached AC is an ordinary kernel bridge port, which switches leaf to
     leaf. That window covers a pending role, the managed engine being down
-    or starting, and boot before cradle. The chapter says so; closing it is
-    open.
+    or starting, and boot before cradle. Closed by #2543: the cradle
+    supervisor guards each leaf AC in the kernel bridge (isolated, and held
+    in the listening state until cradle has it); see invariant 6.
   - A P2MP BUM tunnel or Assisted Replication on an E-Tree EVI is neither
     refused nor warned about, and a leaf's BUM over it is unmarked.
   - Smaller gaps, not fixed: `bum_filtered` in the JSON is always true; a

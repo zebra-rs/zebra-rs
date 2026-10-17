@@ -848,8 +848,10 @@ module zebra-bgp-evpn {
          (RFC 8317 §4.2), over SRv6 by a leaf argument of the End.DT2M
          SID (RFC 9819), and over VXLAN by the IMET of a PE whose ACs are
          all leaves, which is not exact between two PEs that each have
-         both roots and leaves. A port cradle has not attached is
-         switched by the kernel bridge, which knows no roles.";
+         both roots and leaves. A leaf the kernel bridge switches
+         instead (cradle has not attached it yet) is isolated from the
+         other leaves there, and held in the listening state until cradle
+         has it.";
       list leaf-interface {
         ext:help "A leaf attachment circuit";
         key "name";
