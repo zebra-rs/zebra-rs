@@ -791,7 +791,7 @@ pub fn dis_selection(link: &mut LinkTop, level: Level) {
         link.state
             .dis_stats
             .get_mut(&level)
-            .record_change(old_status, new_status, new_sys_id, new_sys_id, reason);
+            .record_change(old_status, new_status, new_sys_id, reason);
     }
 
     // (Re)originate our pseudonode LSP whenever we are the DIS on this

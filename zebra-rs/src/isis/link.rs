@@ -782,11 +782,18 @@ impl DisStatistics {
         &mut self,
         from_status: DisStatus,
         to_status: DisStatus,
-        from_sys_id: Option<IsisSysId>,
         to_sys_id: Option<IsisSysId>,
         reason: String,
     ) {
         let now = std::time::SystemTime::now();
+
+        // The outgoing DIS is the one the previous change elected. A
+        // circuit reset drops the status to NotSelected without a
+        // record, so that previous DIS only counts while it still holds.
+        let from_sys_id = match from_status {
+            DisStatus::NotSelected => None,
+            _ => self.history.last().and_then(|change| change.to_sys_id),
+        };
 
         // Update flap count
         self.flap_count += 1;
@@ -2606,7 +2613,7 @@ pub fn show_detail_entry(buf: &mut String, link: &IsisLink, level: Level) -> std
     )?;
     writeln!(
         buf,
-        "    CNSP interval: {}, PSNP interval: {}",
+        "    CSNP interval: {}, PSNP interval: {}",
         link.config.csnp_interval(),
         link.config.psnp_interval()
     )?;
@@ -3651,5 +3658,57 @@ mod v6_pick_tests {
         assert_eq!(nbr_v6ll_pick(&[b, a]), Some(a));
         assert_eq!(nbr_v6ll_pick(&[a, b]), Some(a));
         assert_eq!(nbr_v6ll_pick(&[]), None);
+    }
+}
+
+#[cfg(test)]
+mod dis_history_tests {
+    use super::*;
+
+    fn sys_id(s: &str) -> IsisSysId {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn a_change_records_the_outgoing_dis() {
+        let a = sys_id("0000.0000.000a");
+        let b = sys_id("0000.0000.000b");
+        let mut stats = DisStatistics::default();
+        stats.record_change(
+            DisStatus::NotSelected,
+            DisStatus::Myself,
+            Some(a),
+            "a".into(),
+        );
+        stats.record_change(DisStatus::Myself, DisStatus::Other, Some(b), "b".into());
+
+        assert_eq!(stats.history[0].from_sys_id, None);
+        assert_eq!(stats.history[0].to_sys_id, Some(a));
+        assert_eq!(stats.history[1].from_sys_id, Some(a));
+        assert_eq!(stats.history[1].to_sys_id, Some(b));
+    }
+
+    #[test]
+    fn a_reset_circuit_has_no_outgoing_dis() {
+        // A circuit reset drops the status to NotSelected without a
+        // record; the DIS elected before it is not the one replaced.
+        let a = sys_id("0000.0000.000a");
+        let c = sys_id("0000.0000.000c");
+        let mut stats = DisStatistics::default();
+        stats.record_change(
+            DisStatus::NotSelected,
+            DisStatus::Other,
+            Some(a),
+            "a".into(),
+        );
+        stats.record_change(
+            DisStatus::NotSelected,
+            DisStatus::Other,
+            Some(c),
+            "c".into(),
+        );
+
+        assert_eq!(stats.history[1].from_sys_id, None);
+        assert_eq!(stats.history[1].to_sys_id, Some(c));
     }
 }

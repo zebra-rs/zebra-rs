@@ -33,10 +33,17 @@ impl Isis {
             .set(show_isis_route)
             .path("/show/isis/route/detail")
             .set(show_isis_route_detail)
+            // `fast-reroute` and `fast-reroute prefix <p>` are presence
+            // nodes, so both parse on their own: answer them with the
+            // summary and the one per-prefix view there is.
+            .path("/show/isis/fast-reroute")
+            .set(show_isis_fast_reroute_summary)
             .path("/show/isis/fast-reroute/summary")
             .set(show_isis_fast_reroute_summary)
             .path("/show/isis/micro-loop-avoidance")
             .set(show_isis_microloop_avoidance)
+            .path("/show/isis/fast-reroute/prefix")
+            .set(show_isis_fast_reroute_prefix_detail)
             .path("/show/isis/fast-reroute/prefix/detail")
             .set(show_isis_fast_reroute_prefix_detail)
             .path("/show/isis/egress-protection")
@@ -1092,7 +1099,7 @@ struct FrrSummary {
 /// Tally TI-LFA protection state across one level's RIB.  The SR
 /// steering depth — MPLS label-stack depth for V4, SRv6 segment-list
 /// length for V6 — is dispatched through `F::backup_sr_len`.
-fn summarize_frr<F: IsisRibFamily>(rib: &PrefixMap<F::Prefix, SpfRoute<F>>) -> FrrSummary {
+fn summarize_frr<F: IsisRibFamilyShow>(rib: &PrefixMap<F::Prefix, SpfRoute<F>>) -> FrrSummary {
     let mut s = FrrSummary::default();
     for (_, route) in rib.iter() {
         s.total += 1;
@@ -1101,7 +1108,9 @@ fn summarize_frr<F: IsisRibFamily>(rib: &PrefixMap<F::Prefix, SpfRoute<F>>) -> F
             None => s.unprotected += 1,
             Some(b) => {
                 s.protected += 1;
-                match F::backup_sr_len(b) {
+                // Bucket by the repair's own segments: the destination
+                // SID closing an SR-MPLS stack is not a repair segment.
+                match F::backup_repair_len(b, route.sid) {
                     0 => s.trivial += 1,
                     1 => s.one_segment += 1,
                     _ => s.multi_segment += 1,
@@ -1361,10 +1370,10 @@ fn show_isis_microloop_avoidance(
             )?;
             writeln!(
                 buf,
-                "    Topology gate: required generation {}, ready {}, timeout remaining {:?} ms",
+                "    Topology gate: required generation {}, ready {}, timeout remaining {} ms",
                 level.required_self_lsp_generation.unwrap_or_default(),
                 level.topology_ready,
-                level.candidate_timeout_remaining_ms
+                crate::fmt::DisplayOpt(&level.candidate_timeout_remaining_ms)
             )?;
         }
         if let Some(remaining) = level.remaining_ms {
@@ -1376,7 +1385,7 @@ fn show_isis_microloop_avoidance(
         }
         writeln!(
             buf,
-            "    Counters: events {}, holds {}, deferred {}, releases {}, aborts {}, activation-failures {}, topology-waits {}, topology-timeouts {}, no-eligible {}, suppressed {}, last/max hold {:?}/{} ms",
+            "    Counters: events {}, holds {}, deferred {}, releases {}, aborts {}, activation-failures {}, topology-waits {}, topology-timeouts {}, no-eligible {}, suppressed {}, last/max hold {}/{} ms",
             level.events,
             level.holds_started,
             level.prefixes_deferred,
@@ -1387,7 +1396,7 @@ fn show_isis_microloop_avoidance(
             level.topology_timeouts,
             level.no_eligible_routes,
             level.suppressed_events,
-            level.last_hold_duration_ms,
+            crate::fmt::DisplayOpt(&level.last_hold_duration_ms),
             level.max_hold_duration_ms
         )?;
     }
@@ -1698,6 +1707,38 @@ fn show_isis_topology_json(isis: &Isis) -> String {
             ipv4,
             ipv6,
             ipv6_mt2: mt2,
+        });
+    }
+
+    let view = TopologyJson {
+        area: format_area_id(&isis.config.net),
+        levels,
+    };
+    serde_json::to_string_pretty(&view).unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}"))
+}
+
+/// JSON sibling of `show_isis_flex_algo_topology`: the same shape as
+/// `show isis topology`, built from algorithm `algo`'s SPF result. Both
+/// families walk that one result, as the text view does — there is no
+/// per-algorithm MT 2 run.
+fn show_isis_flex_algo_topology_json(isis: &Isis, algo: u8) -> String {
+    let local_sys_id = isis.config.net.sys_id();
+    let mut levels = Vec::new();
+    for level in &[Level::L1, Level::L2] {
+        let Some(Some(spf_result)) = isis.spf_flex_algo.get(level).get(&algo) else {
+            continue;
+        };
+        if spf_result.is_empty() {
+            continue;
+        }
+        levels.push(TopologyLevelJson {
+            level: match level {
+                Level::L1 => 1,
+                Level::L2 => 2,
+            },
+            ipv4: spf_tree_json::<V4>(isis, level, &local_sys_id, spf_result, false),
+            ipv6: spf_tree_json::<V6>(isis, level, &local_sys_id, spf_result, false),
+            ipv6_mt2: false,
         });
     }
 
@@ -2422,8 +2463,12 @@ trait IsisRibFamilyShow: IsisRibFamily {
     /// Repair-path egress ifindex.
     fn backup_ifindex(backup: &Self::Backup) -> u32;
     /// Repair-path SR segments as JSON rows (label stack for SR-MPLS,
-    /// SID list for SRv6).
-    fn backup_segments_json(backup: &Self::Backup) -> Vec<RepairSegmentJson>;
+    /// SID list for SRv6). `sid` is the route's own Prefix-SID label.
+    fn backup_segments_json(backup: &Self::Backup, sid: Option<u32>) -> Vec<RepairSegmentJson>;
+    /// Repair segments in `backup`, not counting the destination
+    /// Prefix-SID `sid` that closes an SR-MPLS repair (see
+    /// `IsisRibFamily::backup_append_prefix_sid`).
+    fn backup_repair_len(backup: &Self::Backup, sid: Option<u32>) -> usize;
 }
 
 impl IsisRibFamilyShow for V4 {
@@ -2521,16 +2566,31 @@ impl IsisRibFamilyShow for V4 {
     fn backup_ifindex(backup: &RepairPathMpls) -> u32 {
         backup.ifindex
     }
-    fn backup_segments_json(backup: &RepairPathMpls) -> Vec<RepairSegmentJson> {
+    fn backup_segments_json(backup: &RepairPathMpls, sid: Option<u32>) -> Vec<RepairSegmentJson> {
+        let repair_len = Self::backup_repair_len(backup, sid);
         backup
             .labels
             .iter()
             .enumerate()
             .map(|(idx, label)| RepairSegmentJson {
-                kind: mpls_segment_kind(idx),
+                kind: if idx < repair_len {
+                    mpls_segment_kind(idx)
+                } else {
+                    "PrefixSID"
+                },
                 value: label_value_str(label),
             })
             .collect()
+    }
+
+    fn backup_repair_len(backup: &RepairPathMpls, sid: Option<u32>) -> usize {
+        // Only a stack that actually ends in the route's SID was closed
+        // with it: an ECMP merge can give a route its SID after a
+        // sibling's backup was stamped without one.
+        let closed = sid.is_some_and(
+            |sid| matches!(backup.labels.last(), Some(rib::Label::Explicit(l)) if *l == sid),
+        );
+        Self::backup_sr_len(backup) - usize::from(closed)
     }
 }
 
@@ -2616,7 +2676,7 @@ impl IsisRibFamilyShow for V6 {
     fn backup_ifindex(backup: &RepairPathSrv6) -> u32 {
         backup.ifindex
     }
-    fn backup_segments_json(backup: &RepairPathSrv6) -> Vec<RepairSegmentJson> {
+    fn backup_segments_json(backup: &RepairPathSrv6, _sid: Option<u32>) -> Vec<RepairSegmentJson> {
         backup
             .segs
             .iter()
@@ -2626,6 +2686,10 @@ impl IsisRibFamilyShow for V6 {
                 value: seg.to_string(),
             })
             .collect()
+    }
+
+    fn backup_repair_len(backup: &RepairPathSrv6, _sid: Option<u32>) -> usize {
+        Self::backup_sr_len(backup)
     }
 }
 
@@ -3478,7 +3542,9 @@ struct RepairRowJson {
 
 #[derive(Serialize)]
 struct RepairSegmentJson {
-    /// "NodeSID" / "AdjSID" for SR-MPLS, "End" / "End.X" for SRv6.
+    /// "NodeSID" / "AdjSID" for SR-MPLS repair segments, then
+    /// "PrefixSID" for the destination SID closing the stack; "End" /
+    /// "End.X" for SRv6.
     kind: &'static str,
     /// MPLS label value as a number, or SRv6 segment address as a string.
     value: String,
@@ -3537,7 +3603,7 @@ fn collect_repair_rows_from<F>(
                 repair_nexthop: F::backup_addr_str(backup),
                 repair_ifindex: F::backup_ifindex(backup),
                 repair_metric: route.metric.saturating_add(1),
-                segments: F::backup_segments_json(backup),
+                segments: F::backup_segments_json(backup, route.sid),
             });
         }
     }
@@ -4691,7 +4757,7 @@ fn show_isis_flex_algo_topology(
         Err(msg) => return Ok(msg),
     };
     if json {
-        return Ok(show_isis_topology_json(isis));
+        return Ok(show_isis_flex_algo_topology_json(isis, algo));
     }
     let mut buf = String::new();
     let local_sys_id = isis.config.net.sys_id();
@@ -5240,5 +5306,78 @@ mod tests {
         assert_eq!(rows[0].count, 1);
         assert_eq!(rows[0].frag_low, 1);
         assert_eq!(rows[0].frag_high, 1);
+    }
+
+    fn v4_route_with_backup(sid: Option<u32>, labels: Vec<u32>) -> SpfRoute<V4> {
+        let mut nhops = BTreeMap::new();
+        nhops.insert(
+            "10.0.0.1".parse().unwrap(),
+            SpfNexthop::<V4> {
+                ifindex: 10,
+                adjacency: true,
+                sys_id: None,
+                backup: Some(RepairPathMpls {
+                    ifindex: 20,
+                    addr: "10.0.0.5".parse().unwrap(),
+                    labels: labels.into_iter().map(rib::Label::Explicit).collect(),
+                }),
+            },
+        );
+        SpfRoute::<V4> {
+            metric: 20,
+            nhops,
+            sid,
+            prefix_sid: None,
+            no_php: false,
+            dest_vertex: None,
+            backup_as_primary: false,
+        }
+    }
+
+    #[test]
+    fn frr_summary_does_not_count_the_closing_prefix_sid() {
+        // build_rib_from_spf closes an SR-MPLS repair with the
+        // destination's own Prefix-SID, which is not a repair segment.
+        let mut rib: PrefixMap<ipnet::Ipv4Net, SpfRoute<V4>> = PrefixMap::new();
+        let routes = [
+            // Trivial repair, closed with the destination SID.
+            ("10.0.0.2/32", Some(16002), vec![16002]),
+            // One repair segment, then the destination SID.
+            ("10.0.0.3/32", Some(16003), vec![16004, 16003]),
+            // Two repair segments, then the destination SID.
+            ("10.0.0.4/32", Some(16005), vec![16004, 24001, 16005]),
+            // Not closed with the route's SID: every label is repair.
+            ("10.0.0.6/32", Some(16006), vec![16004]),
+        ];
+        for (prefix, sid, labels) in routes {
+            rib.insert(prefix.parse().unwrap(), v4_route_with_backup(sid, labels));
+        }
+        let s = summarize_frr::<V4>(&rib);
+        assert_eq!(s.total, 4);
+        assert_eq!(s.protected, 4);
+        assert_eq!(s.trivial, 1);
+        assert_eq!(s.one_segment, 2);
+        assert_eq!(s.multi_segment, 1);
+    }
+
+    #[test]
+    fn repair_segments_name_the_closing_prefix_sid() {
+        let backup = RepairPathMpls {
+            ifindex: 20,
+            addr: "10.0.0.5".parse().unwrap(),
+            labels: [16004, 24001, 16005]
+                .into_iter()
+                .map(rib::Label::Explicit)
+                .collect(),
+        };
+        let kinds = |sid| -> Vec<&'static str> {
+            V4::backup_segments_json(&backup, sid)
+                .iter()
+                .map(|seg| seg.kind)
+                .collect()
+        };
+        assert_eq!(kinds(Some(16005)), ["NodeSID", "AdjSID", "PrefixSID"]);
+        // A route without a SID has no closing label.
+        assert_eq!(kinds(None), ["NodeSID", "AdjSID", "AdjSID"]);
     }
 }
