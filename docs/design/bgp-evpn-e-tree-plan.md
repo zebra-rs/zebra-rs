@@ -849,8 +849,13 @@ which zebra-rs pins since #2534. It is §8.6 as decided (D6):
   argument at LBL+LNL+FL (TL 0). Its next hop is the leaf EVIs' VXLAN
   local address, the one this PE's SRv6 IMETs carry, so a receiver pairs
   them; under MPLS both carry the EVPN source.
-- **Leaf slots.** `etree_peer_leaf_args` reads each PE's argument (a
-  transposed one is not read). `evpn_etree_srv6_slots_sync` makes, per
+- **Leaf slots.** `etree_peer_leaf_args` reads each PE's argument
+  (`etree_route_leaf_arg`). A leaf route that gives none (transposed, no
+  SID structure, no argument length, argument 0) is logged and not used
+  (`etree_leaf_route_fault`); the MPLS reserved-label warning is not
+  applied to it, since its EC's field is 0 by design (D6.5). The first cut
+  logged every SRv6 leaf route as having a reserved label; the phase-6
+  docs check found it. `evpn_etree_srv6_slots_sync` makes, per
   leaf EVI, a slot to the PE's End.DT2M SID with the argument placed at the
   IMET's offset, only when the IMET's argument length matches (RFC 9819
   §3.2); `CradleReplAddSrv6Leaf`, mirrored and replayed before the plain

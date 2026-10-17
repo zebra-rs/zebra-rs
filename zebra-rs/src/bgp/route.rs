@@ -10022,13 +10022,59 @@ fn sid_read_arg(sid: std::net::Ipv6Addr, off: u8, len: u8) -> Option<u32> {
     Some(((u128::from(sid) >> shift) & ((1u128 << len) - 1)) as u32)
 }
 
-/// RFC 8317 over SRv6 (rfc8317bis §5.4, RFC 9819): the leaf argument each
-/// remote PE advertised on its leaf-label route — an ESI-0 per-ES A-D route
-/// carrying the E-Tree EC and an End.DT2M SRv6 L2 Service SID whose
-/// structure has an argument — with its length, by advertising PE. The
-/// argument sits at offset LBL+LNL+FL of that SID. A transposed argument
+/// The leaf argument and its length on an SRv6 leaf-label route (RFC 8317
+/// over SRv6: rfc8317bis §5.4, RFC 9819): an End.DT2M SRv6 L2 Service SID
+/// whose structure has an argument, at offset LBL+LNL+FL. `None` when the
+/// route has no End.DT2M SID (an MPLS leaf-label route); `Err` with the
+/// reason when it has one that gives no argument. A transposed argument
 /// (TL > 0) is not read: on an ESI-0 route there is no ESI Label EC to
 /// carry the bits, and no implementation documents another place.
+fn etree_route_leaf_arg(attr: &BgpAttr) -> Option<Result<(u32, u8), &'static str>> {
+    let (sid, st) = evpn_srv6_sid_info(attr, bgp_packet::SRV6_BEHAVIOR_END_DT2M)?;
+    let Some(st) = st else {
+        return Some(Err("no SID structure"));
+    };
+    if st.transposition_len != 0 {
+        return Some(Err("a transposed argument"));
+    }
+    if st.argument_len == 0 {
+        return Some(Err("no argument length"));
+    }
+    Some(
+        match sid_read_arg(
+            sid,
+            st.locator_block_len + st.locator_node_len + st.function_len,
+            st.argument_len,
+        ) {
+            Some(arg) if arg != 0 => Ok((arg, st.argument_len)),
+            _ => Err("no argument"),
+        },
+    )
+}
+
+/// Why a received leaf-label route (an ESI-0 per-ES A-D route with the
+/// E-Tree EC) gives this PE nothing, for the log: under SRv6 what
+/// [`etree_route_leaf_arg`] finds wrong; otherwise a reserved MPLS label
+/// (RFC 8317 §6.1). An SRv6 route's EC carries field 0 by design (plan
+/// §8.6, D6.5), so its label is never looked at.
+fn etree_leaf_route_fault(attr: &BgpAttr) -> Option<&'static str> {
+    if !attr
+        .ecom
+        .as_ref()
+        .is_some_and(|ecom| ecom.0.iter().any(|ec| ec.as_etree().is_some()))
+    {
+        return None;
+    }
+    match etree_route_leaf_arg(attr) {
+        Some(arg) => arg.err(),
+        None => etree_route_leaf_label(attr)
+            .is_none()
+            .then_some("a reserved leaf label (RFC 8317 §6.1)"),
+    }
+}
+
+/// The leaf argument each remote PE advertised on its SRv6 leaf-label
+/// route ([`etree_route_leaf_arg`]), with its length, by advertising PE.
 fn etree_peer_leaf_args(local_rib: &LocalRib) -> BTreeMap<IpAddr, (u32, u8)> {
     let mut out = BTreeMap::new();
     for table in local_rib.evpn.values() {
@@ -10043,18 +10089,9 @@ fn etree_peer_leaf_args(local_rib: &LocalRib) -> BTreeMap<IpAddr, (u32, u8)> {
                     .ecom
                     .as_ref()
                     .is_some_and(|ecom| ecom.0.iter().any(|ec| ec.as_etree().is_some()))
-                && let Some((sid, Some(st))) =
-                    evpn_srv6_sid_info(&rib.attr, bgp_packet::SRV6_BEHAVIOR_END_DT2M)
-                && st.argument_len != 0
-                && st.transposition_len == 0
-                && let Some(arg) = sid_read_arg(
-                    sid,
-                    st.locator_block_len + st.locator_node_len + st.function_len,
-                    st.argument_len,
-                )
-                && arg != 0
+                && let Some(Ok(arg)) = etree_route_leaf_arg(&rib.attr)
             {
-                out.insert(nh, (arg, st.argument_len));
+                out.insert(nh, arg);
             }
         }
     }
@@ -10899,21 +10936,15 @@ fn route_evpn_export_selected(
                 vpws_mark_df_dirty(bgp.local_rib, esi);
             } else if *eth_tag == MAX_ET && !best.is_originated() {
                 // A leaf-label route (RFC 8317 §4.2.1): that PE's leaf
-                // label, for the leaf slots toward it. A reserved label is
-                // ignored and logged (§6.1).
+                // label or leaf argument, for the leaf slots toward it. One
+                // that gives neither is ignored and logged.
                 bgp.local_rib.etree_dirty = true;
-                if best
-                    .attr
-                    .ecom
-                    .as_ref()
-                    .is_some_and(|ecom| ecom.0.iter().any(|ec| ec.as_etree().is_some()))
-                    && etree_route_leaf_label(&best.attr).is_none()
-                {
+                if let Some(fault) = etree_leaf_route_fault(&best.attr) {
                     tracing::warn!(
                         proto = "bgp",
                         category = "evpn",
                         pe = ?best.attr.nexthop,
-                        "E-Tree leaf-label route with a reserved leaf label (RFC 8317 §6.1); ignored"
+                        "E-Tree leaf-label route with {fault}; ignored"
                     );
                 }
             }

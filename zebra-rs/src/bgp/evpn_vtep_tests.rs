@@ -2585,6 +2585,54 @@ fn srv6_leaf_ad_route(pe: &str, arg: u32) -> (EvpnRoute, BgpAttr) {
     (route, attr)
 }
 
+/// Review finding (phase 6 docs): an SRv6 leaf-label route's E-Tree EC
+/// carries field 0 by design, so it must not be logged as a reserved MPLS
+/// label; one whose argument cannot be read (transposed, zero) is, and is
+/// not used. An MPLS route is judged by its label alone.
+#[test]
+fn a_leaf_route_is_logged_only_when_it_gives_nothing() {
+    let (_, attr) = leaf_ad_route("10.0.0.11", 1000);
+    assert_eq!(etree_leaf_route_fault(&attr), None, "a valid leaf label");
+    let (_, attr) = leaf_ad_route("10.0.0.11", 3);
+    assert_eq!(
+        etree_leaf_route_fault(&attr),
+        Some("a reserved leaf label (RFC 8317 §6.1)")
+    );
+
+    let (_, attr) = srv6_leaf_ad_route("10.0.0.11", 1);
+    assert_eq!(
+        etree_leaf_route_fault(&attr),
+        None,
+        "field 0 is SRv6's form"
+    );
+    assert_eq!(etree_route_leaf_arg(&attr), Some(Ok((1, 16))));
+
+    let (_, attr) = srv6_leaf_ad_route("10.0.0.11", 0);
+    assert_eq!(etree_leaf_route_fault(&attr), Some("no argument"));
+
+    let (_, mut attr) = srv6_leaf_ad_route("10.0.0.11", 1);
+    for tlv in attr.prefix_sid.as_mut().unwrap().tlvs.iter_mut() {
+        if let bgp_packet::PrefixSidTlv::Srv6L2Service(svc) = tlv {
+            for info in svc.sids.iter_mut() {
+                let st = info.structure.as_mut().unwrap();
+                st.transposition_len = 16;
+                st.transposition_offset = 64;
+            }
+        }
+    }
+    assert_eq!(etree_leaf_route_fault(&attr), Some("a transposed argument"));
+    assert_eq!(
+        etree_route_leaf_arg(&attr),
+        Some(Err("a transposed argument")),
+        "not used"
+    );
+
+    // No E-Tree EC: not a leaf-label route, nothing to say.
+    let (_, mut attr) = leaf_ad_route("10.0.0.11", 3);
+    attr.ecom = Some(ExtCommunity::from([evpn_route_target(65000, 100)]));
+    assert_eq!(etree_leaf_route_fault(&attr), None);
+}
+
 /// A remote PE's leaf argument and End.DT2M SID make a leaf slot toward it
 /// whose SID carries the argument (RFC 9819 §3.3). An IMET without the
 /// argument length makes none (§3.2); the leaf-label route gone takes the
