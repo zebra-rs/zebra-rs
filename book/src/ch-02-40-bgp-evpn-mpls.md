@@ -25,16 +25,16 @@ an IS-IS SR-MPLS underlay, one stretched segment, fully dynamic.
 ## Configuration
 
 ```
-router bgp 65001 {
+router bgp {
   global {
+    as 65001;
     router-id 10.255.0.1;
   }
   neighbor 10.255.0.2 {
     remote-as 65001;
-    afi-safi { name evpn; enabled true; }
+    afi-safi evpn { enabled true; }
   }
-  afi-safi {
-    name evpn;
+  afi-safi evpn {
     advertise-all-vni true;
     encapsulation mpls;
     evi 100 {
@@ -198,11 +198,12 @@ adjacency. Three pieces make an IPv6-only deployment:
   services; here it covers every origination):
 
   ```
-  afi-safi {
-    name evpn;
-    encapsulation mpls;
-    vtep-source 2001:db8:255::1;
-    ...
+  router bgp {
+    afi-safi evpn {
+      encapsulation mpls;
+      vtep-source 2001:db8:255::1;
+      ...
+    }
   }
   ```
 
