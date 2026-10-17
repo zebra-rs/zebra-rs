@@ -242,14 +242,19 @@ bits plus 16 must fit in 128. With a locator that does not, the PE has no
 leaf argument (`Leaf argument: none` in `show bgp evpn etree`, with a
 warning), and leaf BUM from other PEs reaches its leaves.
 
-A PE whose IMET argument length differs from the one on its leaf-label route
-gets no marked copy, so its leaves receive the leaves' BUM. RFC 9819 says not
-to forward to such a PE at all; zebra-rs cannot withhold a leaf's BUM from a
-single PE over SRv6 yet. `show bgp evpn etree` names each such PE:
+A PE whose IMET argument length is not 0 and differs from the one on its
+leaf-label route gets no marked copy, so its leaves receive the leaves' BUM.
+RFC 9819 says not to forward to such a PE at all; zebra-rs cannot withhold a
+leaf's BUM from a single PE over SRv6 yet. `show bgp evpn etree` names each
+such PE:
 
 ```
   Warning: EVI 100: leaf argument length differs from the IMET's: our leaf BUM reaches the leaves of 10.0.0.12
 ```
+
+An IMET with argument length 0 is no mismatch. RFC 9819 then asks for a plain
+copy, and it is how a PE with no leaf in that EVI advertises: its leaf-label
+route only covers the EVIs it has leaves in.
 
 ## Multihomed leaves
 

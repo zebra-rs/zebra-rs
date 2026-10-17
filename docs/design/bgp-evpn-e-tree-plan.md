@@ -884,10 +884,12 @@ which zebra-rs pins since #2534. It is §8.6 as decided (D6):
   SRv6 slots. It runs off `etree_dirty`.
 - **Show.** `show bgp evpn etree` under SRv6 names the leaf argument and
   each remote PE's.
-- **Gap.** A PE whose IMET argument length differs from its leaf route's
-  gets no leaf slot, so its leaves still receive our leaves' BUM; RFC 9819
-  says not to forward then, and there is no slot type that withholds leaf
-  BUM from a PE over SRv6.
+- **Gap.** A PE whose IMET argument length is non-zero and differs from its
+  leaf route's gets no leaf slot, so its leaves still receive our leaves'
+  BUM; RFC 9819 says not to forward then, and there is no slot type that
+  withholds leaf BUM from a PE over SRv6. An IMET with length 0 is no
+  mismatch: RFC 9819 §3.3 then asks for a plain copy, and it is how a PE
+  with no leaf in the EVI advertises (D6.4).
 - **Tests.** Unit tests: argument placement; the leaf argument, the
   End.DT2M's install shape and IMET AL, the leaf route, and all of it gone
   without a leaf AC; a remote argument making a leaf slot (none for an
@@ -921,7 +923,9 @@ not run.
     leaf AC kept its old ifindex (`live_link_index`: `link_index_by_name`
     keeps a dead entry on purpose, for the interface-neighbor teardown);
     the SRv6 leaf route's EC rendered as `etree:-` (now
-    `etree:leaf-arg:<n>`, read from the SID).
+    `etree:leaf-arg:<n>`, read from the SID). The first cut of the mismatch
+    list also counted an IMET with argument length 0, which is every EVI a
+    PE has no leaf in: a false warning, fixed in the follow-up.
 - **Matrix.** `bgp-evpn-support-status.md` gains an E-Tree row per
   encapsulation, naming the function behind each claim, and a row for the
   shared checks and the interop state. The stale MPLS split-horizon cell

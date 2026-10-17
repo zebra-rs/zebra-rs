@@ -21351,10 +21351,16 @@ impl Bgp {
     /// The SRv6 leaf slots this PE needs, `(bd, SID, SID with the PE's
     /// leaf argument placed)`: per EVI with a local leaf AC, one toward
     /// every PE whose leaf-label route gave an argument, placed at its
-    /// IMET's offset. And, per EVI, the PEs that gave an argument but get
-    /// no slot, because their IMET's argument length differs (RFC 9819
-    /// §3.2), is transposed or is missing: our leaves' BUM still reaches
+    /// IMET's offset. And, per EVI, the PEs that gave an argument but whose
+    /// IMET's non-zero argument length differs from it (RFC 9819 §3.2), or
+    /// is transposed, or leaves no room: our leaves' BUM still reaches
     /// their leaves, since no slot type withholds it.
+    ///
+    /// An IMET with no argument (no SID structure, or argument length 0)
+    /// is neither: the ingress sends a plain copy and ignores the argument
+    /// (RFC 9819 §3.3). It is also how a PE with no leaf AC in that EVI
+    /// advertises (plan §8.6, D6.4), since its leaf-label route covers
+    /// only the EVIs it has leaves in.
     #[allow(clippy::type_complexity)]
     pub fn etree_srv6_leaf_slots(
         &self,
@@ -21379,12 +21385,15 @@ impl Bgp {
                 else {
                     continue;
                 };
-                let leaf = st
-                    .filter(|st| st.argument_len == len && st.transposition_len == 0)
-                    .and_then(|st| {
+                let Some(st) = st.filter(|st| st.argument_len != 0) else {
+                    continue;
+                };
+                let leaf = (st.argument_len == len && st.transposition_len == 0)
+                    .then(|| {
                         let off = st.locator_block_len + st.locator_node_len + st.function_len;
                         sid_place_arg(sid, off, len, arg)
-                    });
+                    })
+                    .flatten();
                 match leaf {
                     Some(leaf) => {
                         slots.insert((vni, sid, leaf));
