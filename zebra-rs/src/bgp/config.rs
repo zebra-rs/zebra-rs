@@ -9022,6 +9022,163 @@ mod neighbor_group_wiring_tests {
         assert!(!peer.active, "still no RA — stays dormant");
     }
 
+    // ---- interface-neighbor link re-created under a new ifindex ----
+    // Peers are keyed by the ifindex they materialized on. A link
+    // deleted and re-created under the same name comes back with a new
+    // ifindex, and the peer on the old one must not survive beside the
+    // new peer.
+
+    fn named_link(index: u32, name: &str) -> crate::rib::Link {
+        crate::rib::Link {
+            index,
+            name: name.to_string(),
+            mtu: 1500,
+            original_mtu: 1500,
+            metric: 1,
+            flags: Default::default(),
+            link_type: crate::rib::LinkType::Ethernet,
+            label: false,
+            mac: None,
+            addr4: Vec::new(),
+            addr6: Vec::new(),
+            master: None,
+            vni: None,
+            vrf_table: None,
+            bridge: false,
+            vxlan_local: None,
+            vxlan_metadata: None,
+            parent: None,
+            vlan_id: None,
+            mtu_error: None,
+        }
+    }
+
+    fn configure_interface_neighbor(bgp: &mut Bgp, name: &str) {
+        use super::super::interface_neighbor::{
+            config_interface_neighbor, config_interface_neighbor_remote_as,
+        };
+        config_interface_neighbor(bgp, arg_words(&[name]), ConfigOp::Set).unwrap();
+        config_interface_neighbor_remote_as(bgp, arg_words(&[name, "65002"]), ConfigOp::Set)
+            .unwrap();
+    }
+
+    fn interface_peers(bgp: &Bgp) -> Vec<(u32, String)> {
+        use super::super::peer_key::PeerKey;
+        bgp.peers
+            .iter_all()
+            .filter_map(|(key, peer)| match key {
+                PeerKey::Interface(ifindex) => Some((*ifindex, peer.ifname.clone()?)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Delete and re-create: only the peer on the new ifindex remains.
+    /// The link going away alone leaves the peer in place.
+    #[tokio::test]
+    async fn interface_neighbor_link_recreate_removes_the_old_ifindex_peer() {
+        use crate::rib::api::RibRx;
+
+        let mut bgp = fresh_bgp();
+        bgp.process_rib_msg(RibRx::LinkAdd(named_link(7, "i1")));
+        configure_interface_neighbor(&mut bgp, "i1");
+        assert_eq!(interface_peers(&bgp), vec![(7, "i1".to_string())]);
+
+        bgp.process_rib_msg(RibRx::LinkDel(7));
+        assert_eq!(
+            interface_peers(&bgp),
+            vec![(7, "i1".to_string())],
+            "the link being gone alone does not drop the peer"
+        );
+
+        bgp.process_rib_msg(RibRx::LinkAdd(named_link(9, "i1")));
+        assert_eq!(
+            interface_peers(&bgp),
+            vec![(9, "i1".to_string())],
+            "the peer on the old ifindex must be removed"
+        );
+
+        // A second re-create does not accumulate either.
+        bgp.process_rib_msg(RibRx::LinkDel(9));
+        bgp.process_rib_msg(RibRx::LinkAdd(named_link(11, "i1")));
+        assert_eq!(interface_peers(&bgp), vec![(11, "i1".to_string())]);
+    }
+
+    /// Deleting the neighbor after a re-create leaves no peer behind.
+    #[tokio::test]
+    async fn interface_neighbor_delete_after_link_recreate_leaves_no_peer() {
+        use super::super::interface_neighbor::config_interface_neighbor;
+        use crate::rib::api::RibRx;
+
+        let mut bgp = fresh_bgp();
+        bgp.process_rib_msg(RibRx::LinkAdd(named_link(7, "i1")));
+        configure_interface_neighbor(&mut bgp, "i1");
+        bgp.process_rib_msg(RibRx::LinkDel(7));
+        bgp.process_rib_msg(RibRx::LinkAdd(named_link(9, "i1")));
+
+        config_interface_neighbor(&mut bgp, arg_words(&["i1"]), ConfigOp::Delete).unwrap();
+        assert!(interface_peers(&bgp).is_empty());
+    }
+
+    /// A LinkAdd that keeps the ifindex (a flag or MTU update) keeps
+    /// the peer as is.
+    #[tokio::test]
+    async fn interface_neighbor_link_update_keeps_the_peer() {
+        use super::super::peer_key::PeerKey;
+        use crate::rib::api::RibRx;
+
+        let mut bgp = fresh_bgp();
+        bgp.process_rib_msg(RibRx::LinkAdd(named_link(7, "i1")));
+        configure_interface_neighbor(&mut bgp, "i1");
+        let ident = bgp.peers.get_by_key(&PeerKey::Interface(7)).unwrap().ident;
+
+        bgp.process_rib_msg(RibRx::LinkAdd(named_link(7, "i1")));
+        assert_eq!(
+            bgp.peers.get_by_key(&PeerKey::Interface(7)).unwrap().ident,
+            ident
+        );
+        assert_eq!(interface_peers(&bgp), vec![(7, "i1".to_string())]);
+    }
+
+    /// While the link is gone, `link_index_by_name` still maps the name
+    /// to the old ifindex, so a neighbor deleted and added again in that
+    /// window materializes there. The link's return removes it too.
+    #[tokio::test]
+    async fn interface_neighbor_readded_while_link_is_gone_is_removed_when_it_returns() {
+        use super::super::interface_neighbor::config_interface_neighbor;
+        use crate::rib::api::RibRx;
+
+        let mut bgp = fresh_bgp();
+        bgp.process_rib_msg(RibRx::LinkAdd(named_link(7, "i1")));
+        configure_interface_neighbor(&mut bgp, "i1");
+        bgp.process_rib_msg(RibRx::LinkDel(7));
+
+        config_interface_neighbor(&mut bgp, arg_words(&["i1"]), ConfigOp::Delete).unwrap();
+        assert!(interface_peers(&bgp).is_empty());
+        configure_interface_neighbor(&mut bgp, "i1");
+        assert_eq!(interface_peers(&bgp), vec![(7, "i1".to_string())]);
+
+        bgp.process_rib_msg(RibRx::LinkAdd(named_link(9, "i1")));
+        assert_eq!(interface_peers(&bgp), vec![(9, "i1".to_string())]);
+    }
+
+    /// Only a peer materialized for the returning name is removed: one
+    /// keyed by the old ifindex but belonging to another name stays.
+    #[tokio::test]
+    async fn interface_neighbor_link_recreate_leaves_another_names_peer() {
+        use crate::rib::api::RibRx;
+
+        let mut bgp = fresh_bgp();
+        bgp.process_rib_msg(RibRx::LinkAdd(named_link(7, "i1")));
+        bgp.process_rib_msg(RibRx::LinkDel(7));
+        // ifindex 7 reused by another link, which has its own neighbor.
+        bgp.process_rib_msg(RibRx::LinkAdd(named_link(7, "i2")));
+        configure_interface_neighbor(&mut bgp, "i2");
+
+        bgp.process_rib_msg(RibRx::LinkAdd(named_link(9, "i1")));
+        assert_eq!(interface_peers(&bgp), vec![(7, "i2".to_string())]);
+    }
+
     // ---- interface-neighbor timers --------------------------------
 
     /// Timers typed before the peer exists must reach it when it

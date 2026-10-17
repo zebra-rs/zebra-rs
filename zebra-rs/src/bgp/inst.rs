@@ -5023,10 +5023,10 @@ impl Bgp {
                 // interface-neighbor materialization. Keeps the most
                 // recent name for an ifindex; renames are rare but
                 // covered by simple insert-replaces-on-collision.
-                let index_changed = self
+                let prev_index = self
                     .link_index_by_name
-                    .insert(link.name.clone(), link.index)
-                    != Some(link.index);
+                    .insert(link.name.clone(), link.index);
+                let index_changed = prev_index != Some(link.index);
                 self.link_name_by_index
                     .insert(link.index, link.name.clone());
                 // The port's bridge membership, for EVIs declared by
@@ -5050,6 +5050,13 @@ impl Bgp {
                 };
                 if vxlan_changed {
                     self.etree_imet_reconcile();
+                }
+                // The name came back under a new ifindex (the link was
+                // deleted and re-created): remove the interface-neighbor
+                // peer left on the old ifindex before materializing on the
+                // new one, or both stay.
+                if let Some(old) = prev_index.filter(|&old| old != link.index) {
+                    super::interface_neighbor::remove_old_ifindex_peer(self, &link.name, old);
                 }
                 // An `interface-neighbor` typed before RIB announced
                 // this link (config replay at startup races the link

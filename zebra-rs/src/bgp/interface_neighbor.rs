@@ -304,56 +304,71 @@ pub fn config_interface_neighbor(bgp: &mut Bgp, mut args: Args, op: ConfigOp) ->
             // down without holding a borrow.
             bgp.interface_neighbors.remove(&name);
             if let Some(&ifindex) = bgp.link_index_by_name.get(&name) {
-                // Withdraw everything the peer contributed (Loc-RIB,
-                // main RIB / kernel FIB, MP_UNREACH fan-out to other
-                // peers) before dropping it — mirrors the addressed
-                // `neighbor <addr>` delete path in `config.rs`.
-                // Without this the peer's ENHE-installed v4 routes
-                // outlive the neighbor in the kernel.
-                let peer_idx = bgp
-                    .peers
-                    .get_by_key(&PeerKey::Interface(ifindex))
-                    .map(|p| p.ident);
-                if let Some(peer_idx) = peer_idx {
-                    let mut bgp_ref = super::peer::BgpTop {
-                        router_id: &bgp.router_id,
-                        srv6_ipv6_export: bgp.srv6_ipv6_export.as_ref(),
-                        local_rib: &mut bgp.local_rib,
-                        shard: &mut bgp.shard,
-                        tx: &bgp.tx,
-                        rib_client: &bgp.ctx.rib,
-                        attr_store: &mut bgp.attr_store,
-                        update_groups: &mut bgp.update_groups,
-                        interface_addrs: &bgp.interface_addrs,
-                        vrf_export: None,
-                        color_policy: Some(&bgp.color_policy),
-                        flex_algo_routes: Some(&bgp.flex_algo_routes),
-                        flex_algo_srv6_routes: Some(&bgp.flex_algo_srv6_routes),
-                        vrf_import: None,
-                        nexthop_cache: None,
-                        vrf_transport_v4: None,
-                        vrf_transport_v6: None,
-                        as_sets_withdraw: bgp.as_sets_withdraw,
-                    };
-                    super::route::route_clean(
-                        peer_idx,
-                        &mut bgp_ref,
-                        &mut bgp.peers,
-                        bgp.shards.as_ref(),
-                    );
-                    // Update-groups live outside `PeerMap`: the
-                    // removal below purges the membership index by
-                    // construction, but the group member sets need an
-                    // explicit detach or the freed ident lingers and a
-                    // future slot reuse inherits the group.
-                    super::update_group::detach(&mut bgp.update_groups, &mut bgp.peers, peer_idx);
-                }
-                bgp.peers.remove_by_key(&PeerKey::Interface(ifindex));
+                teardown_peer(bgp, ifindex);
             }
         }
         _ => {}
     }
     Some(())
+}
+
+/// Drop the interface-keyed peer on `ifindex`, if any. Withdraw
+/// everything the peer contributed (Loc-RIB, main RIB / kernel FIB,
+/// MP_UNREACH fan-out to other peers) before dropping it — mirrors the
+/// addressed `neighbor <addr>` delete path in `config.rs`. Without this
+/// the peer's ENHE-installed v4 routes outlive the neighbor in the
+/// kernel.
+fn teardown_peer(bgp: &mut Bgp, ifindex: u32) {
+    let peer_idx = bgp
+        .peers
+        .get_by_key(&PeerKey::Interface(ifindex))
+        .map(|p| p.ident);
+    if let Some(peer_idx) = peer_idx {
+        let mut bgp_ref = super::peer::BgpTop {
+            router_id: &bgp.router_id,
+            srv6_ipv6_export: bgp.srv6_ipv6_export.as_ref(),
+            local_rib: &mut bgp.local_rib,
+            shard: &mut bgp.shard,
+            tx: &bgp.tx,
+            rib_client: &bgp.ctx.rib,
+            attr_store: &mut bgp.attr_store,
+            update_groups: &mut bgp.update_groups,
+            interface_addrs: &bgp.interface_addrs,
+            vrf_export: None,
+            color_policy: Some(&bgp.color_policy),
+            flex_algo_routes: Some(&bgp.flex_algo_routes),
+            flex_algo_srv6_routes: Some(&bgp.flex_algo_srv6_routes),
+            vrf_import: None,
+            nexthop_cache: None,
+            vrf_transport_v4: None,
+            vrf_transport_v6: None,
+            as_sets_withdraw: bgp.as_sets_withdraw,
+        };
+        super::route::route_clean(peer_idx, &mut bgp_ref, &mut bgp.peers, bgp.shards.as_ref());
+        // Update-groups live outside `PeerMap`: the removal below
+        // purges the membership index by construction, but the group
+        // member sets need an explicit detach or the freed ident
+        // lingers and a future slot reuse inherits the group.
+        super::update_group::detach(&mut bgp.update_groups, &mut bgp.peers, peer_idx);
+    }
+    bgp.peers.remove_by_key(&PeerKey::Interface(ifindex));
+}
+
+/// `RibRx::LinkAdd` moved `name` off ifindex `old`: the link was deleted
+/// and re-created under the same name. Peers are keyed by the ifindex
+/// they materialized on, so the peer on `old` would otherwise linger,
+/// re-dialing a link that is gone, and the config delete (which
+/// resolves `name` through the current map) could no longer reach it.
+/// Tear it down so the new ifindex holds the only peer. Only a peer
+/// materialized for `name` is touched.
+pub fn remove_old_ifindex_peer(bgp: &mut Bgp, name: &str, old: u32) {
+    let ours = bgp
+        .peers
+        .get_by_key(&PeerKey::Interface(old))
+        .is_some_and(|p| p.ifname.as_deref() == Some(name));
+    if ours {
+        teardown_peer(bgp, old);
+    }
 }
 
 /// `set router bgp interface-neighbor <name> neighbor-group <group>`.
