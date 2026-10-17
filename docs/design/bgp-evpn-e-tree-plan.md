@@ -914,10 +914,14 @@ not run.
     in the listening state until cradle has it); see invariant 6.
   - A P2MP BUM tunnel or Assisted Replication on an E-Tree EVI is neither
     refused nor warned about, and a leaf's BUM over it is unmarked.
-  - Smaller gaps, not fixed: `bum_filtered` in the JSON is always true; a
-    deleted leaf AC keeps its old ifindex in `show bgp evpn etree` (no
-    `LinkDel` cleanup of `link_index_by_name`); the SRv6 leaf route's EC
-    renders as `etree:-`, the form `Display` uses for an invalid one.
+  - Smaller show gaps, fixed after: `bumFiltered` was always true (now
+    false for mixed PEs, an SRv6 argument-length mismatch, or no leaf
+    label/argument of our own, each also warned; the mismatch list comes
+    from `etree_srv6_leaf_slots`, which the slot sync shares); a deleted
+    leaf AC kept its old ifindex (`live_link_index`: `link_index_by_name`
+    keeps a dead entry on purpose, for the interface-neighbor teardown);
+    the SRv6 leaf route's EC rendered as `etree:-` (now
+    `etree:leaf-arg:<n>`, read from the SID).
 - **Matrix.** `bgp-evpn-support-status.md` gains an E-Tree row per
   encapsulation, naming the function behind each claim, and a row for the
   shared checks and the interop state. The stale MPLS split-horizon cell

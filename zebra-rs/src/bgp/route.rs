@@ -10029,7 +10029,7 @@ fn sid_read_arg(sid: std::net::Ipv6Addr, off: u8, len: u8) -> Option<u32> {
 /// reason when it has one that gives no argument. A transposed argument
 /// (TL > 0) is not read: on an ESI-0 route there is no ESI Label EC to
 /// carry the bits, and no implementation documents another place.
-fn etree_route_leaf_arg(attr: &BgpAttr) -> Option<Result<(u32, u8), &'static str>> {
+pub(super) fn etree_route_leaf_arg(attr: &BgpAttr) -> Option<Result<(u32, u8), &'static str>> {
     let (sid, st) = evpn_srv6_sid_info(attr, bgp_packet::SRV6_BEHAVIOR_END_DT2M)?;
     let Some(st) = st else {
         return Some(Err("no SID structure"));
@@ -21146,8 +21146,7 @@ impl Bgp {
     pub fn etree_leaf_evis(&self) -> BTreeSet<u32> {
         self.etree_leaf_ifs
             .iter()
-            .filter_map(|name| self.link_index_by_name.get(name).copied())
-            .filter(|ifindex| self.link_name_by_index.contains_key(ifindex))
+            .filter_map(|name| self.live_link_index(name))
             .flat_map(|ifindex| self.port_evis(ifindex))
             .collect()
     }
@@ -21330,31 +21329,7 @@ impl Bgp {
     /// gets no leaf slot. A PE's routes are paired by its IMET's
     /// originating address or next hop. Diffed against what was sent.
     pub fn evpn_etree_srv6_slots_sync(&mut self) {
-        let mut desired = BTreeSet::new();
-        if self.evpn_encap.is_srv6() {
-            let peers = etree_peer_leaf_args(&self.local_rib);
-            if !peers.is_empty() {
-                for vni in self.etree_leaf_evis() {
-                    for (orig, nh, sid, st) in imet_srv6_dt2m(&self.local_rib, vni) {
-                        let Some(&(arg, len)) = peers
-                            .get(&orig)
-                            .or_else(|| nh.and_then(|nh| peers.get(&nh)))
-                        else {
-                            continue;
-                        };
-                        let Some(st) =
-                            st.filter(|st| st.argument_len == len && st.transposition_len == 0)
-                        else {
-                            continue;
-                        };
-                        let off = st.locator_block_len + st.locator_node_len + st.function_len;
-                        if let Some(leaf) = sid_place_arg(sid, off, len, arg) {
-                            desired.insert((vni, sid, leaf));
-                        }
-                    }
-                }
-            }
-        }
+        let (desired, _) = self.etree_srv6_leaf_slots();
         if desired == self.etree_srv6_slots_sent {
             return;
         }
@@ -21371,6 +21346,56 @@ impl Bgp {
                 .send(crate::rib::Message::CradleReplAddSrv6Leaf { bd, sid, leaf_sid });
         }
         self.etree_srv6_slots_sent = desired;
+    }
+
+    /// The SRv6 leaf slots this PE needs, `(bd, SID, SID with the PE's
+    /// leaf argument placed)`: per EVI with a local leaf AC, one toward
+    /// every PE whose leaf-label route gave an argument, placed at its
+    /// IMET's offset. And, per EVI, the PEs that gave an argument but get
+    /// no slot, because their IMET's argument length differs (RFC 9819
+    /// §3.2), is transposed or is missing: our leaves' BUM still reaches
+    /// their leaves, since no slot type withholds it.
+    #[allow(clippy::type_complexity)]
+    pub fn etree_srv6_leaf_slots(
+        &self,
+    ) -> (
+        BTreeSet<(u32, std::net::Ipv6Addr, std::net::Ipv6Addr)>,
+        BTreeMap<u32, BTreeSet<IpAddr>>,
+    ) {
+        let mut slots = BTreeSet::new();
+        let mut mismatched: BTreeMap<u32, BTreeSet<IpAddr>> = BTreeMap::new();
+        if !self.evpn_encap.is_srv6() {
+            return (slots, mismatched);
+        }
+        let peers = etree_peer_leaf_args(&self.local_rib);
+        if peers.is_empty() {
+            return (slots, mismatched);
+        }
+        for vni in self.etree_leaf_evis() {
+            for (orig, nh, sid, st) in imet_srv6_dt2m(&self.local_rib, vni) {
+                let Some((pe, &(arg, len))) = peers
+                    .get_key_value(&orig)
+                    .or_else(|| nh.and_then(|nh| peers.get_key_value(&nh)))
+                else {
+                    continue;
+                };
+                let leaf = st
+                    .filter(|st| st.argument_len == len && st.transposition_len == 0)
+                    .and_then(|st| {
+                        let off = st.locator_block_len + st.locator_node_len + st.function_len;
+                        sid_place_arg(sid, off, len, arg)
+                    });
+                match leaf {
+                    Some(leaf) => {
+                        slots.insert((vni, sid, leaf));
+                    }
+                    None => {
+                        mismatched.entry(vni).or_default().insert(*pe);
+                    }
+                }
+            }
+        }
+        (slots, mismatched)
     }
 
     /// The SID structure of an End.DT2M with a leaf argument: this PE's
