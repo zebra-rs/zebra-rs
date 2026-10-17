@@ -17,6 +17,8 @@ own show commands in its chapter, next to its configuration:
 - [BGP Show Commands](ch-02-48-bgp-show.md) — every address family's
   Loc-RIB, neighbor state, Adj-RIB-In/Out, update-groups, EVPN service
   state, and the MUP controller.
+- [IS-IS Show Commands](ch-07-13-isis-show.md) — adjacencies, the
+  LSDB, topology, routes, DIS election, Fast ReRoute, and Flex-Algo.
 - [PIM](ch-17-00-pim.md#show-commands) — PIM, IGMP and MLD state and
   the multicast routing table.
 - [eBPF Data Plane](ch-16-00-ebpf.md#show-ebpf) — the eBPF forwarding
@@ -29,8 +31,6 @@ The rest are still being moved into their chapters:
   and SRv6 SIDs.
 - [OSPFv2 and OSPFv3](ch-14-03-show-ospf.md) — instances, interfaces,
   neighbors, the LSDB, the SPF tree, and Segment Routing / TI-LFA state.
-- [IS-IS](ch-14-04-show-isis.md) — adjacencies, the LSDB, topology,
-  routes, DIS election, and Fast ReRoute.
 - [Neighbor Discovery, BFD and STAMP](ch-14-05-show-bfd-stamp-nd.md) —
   IPv6 ND, BFD sessions, and STAMP delay measurement.
 - [Policy Objects](ch-14-06-show-policy.md) — route policies,
@@ -118,8 +118,10 @@ show bgp vrf customer-a summary
 
 These are **not** a separate set of handlers. The configuration manager
 strips the `vrf <name>` selector and replays the remaining command
-against the named VRF's protocol task. Each per-VRF form therefore
-mirrors its non-VRF sibling exactly — same output, same JSON, same
-arguments. The `show ip route vrf` / `show ipv6 route vrf` RIB forms
+against the named VRF's protocol task, so a per-VRF form gives the same
+output and JSON as its non-VRF sibling. Only some commands have a
+per-VRF form, though: the grammar accepts `vrf <name>` in front of a
+fixed set of subcommands per protocol, and each protocol's show page
+lists them. The `show ip route vrf` / `show ipv6 route vrf` RIB forms
 work the same way and are documented on the
 [System, RIB and Forwarding](ch-14-01-show-system-rib.md) page.

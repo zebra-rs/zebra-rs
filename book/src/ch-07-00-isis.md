@@ -15,7 +15,8 @@ paths (TI-LFA, RFC 9855).
 
 This section documents operational tuning surfaces. See `router isis`
 under `/router/isis` in the YANG schema for the full configuration
-tree.
+tree. Every `show isis` command is listed in
+[IS-IS Show Commands](ch-07-13-isis-show.md).
 
 ## Identity: NET and TE Router ID
 
