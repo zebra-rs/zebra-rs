@@ -473,9 +473,11 @@ async fn stale_remote_route_does_not_override_a_local_mac() {
 }
 
 /// RFC 7432 §15.2: a MAC the operator added `static sticky` is advertised
-/// sticky with sequence number zero, MAC-only and MAC/IP alike, even after
-/// a move was seen; a remote route with a higher sequence number does not
-/// take it over. Dropping the sticky flag restores the ordinary rules.
+/// sticky, MAC-only and MAC/IP alike, even after a move was seen; a remote
+/// route with a higher sequence number does not take it over. The MAC-only
+/// route carries sequence number zero; a MAC/IP route keeps its number, so
+/// an IP that moved onto the MAC outranks its old binding. Dropping the
+/// sticky flag restores the ordinary rules.
 #[tokio::test]
 async fn static_local_mac_is_advertised_sticky_and_kept() {
     let (mut bgp, mut rib) = bgp_with_rib();
@@ -485,6 +487,8 @@ async fn static_local_mac_is_advertised_sticky_and_kept() {
     let ip: IpAddr = "10.10.0.101".parse().unwrap();
     // A move was seen before: a dynamic MAC would carry 5.
     bgp.local_rib.evpn_remote_mac_seq.insert((100, mac), 4);
+    // The IP moved here from another MAC, whose binding carries 7.
+    bgp.local_rib.evpn_remote_ip_seq.insert((100, ip), 7);
     let local = crate::rib::api::FdbEntry {
         vni: 100,
         mac,
@@ -503,7 +507,7 @@ async fn static_local_mac_is_advertised_sticky_and_kept() {
         };
         bgp.local_rib.evpn[&rd].selected[&prefix].attr.clone()
     };
-    for ip in [None, Some(ip)] {
+    for (ip, seq) in [(None, 0), (Some(ip), 8)] {
         bgp.evpn_originate_macip(&crate::rib::api::FdbEntry {
             ip,
             ..local.clone()
@@ -513,7 +517,7 @@ async fn static_local_mac_is_advertised_sticky_and_kept() {
             extract_flags_from_attr(&attr) & EVPN_FLAG_STICKY,
             EVPN_FLAG_STICKY
         );
-        assert_eq!(extract_mac_mobility_seq(&attr), 0);
+        assert_eq!(extract_mac_mobility_seq(&attr), seq);
     }
     mac_messages(&mut rib);
 

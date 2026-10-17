@@ -20211,9 +20211,14 @@ impl Bgp {
             self.local_rib.evpn_local_ip_seq.insert(ip_key, seq);
         }
         // RFC 7432 §15.2: a static MAC (an FDB entry the operator added
-        // `static sticky`) is advertised sticky with sequence number zero.
+        // `static sticky`) is advertised sticky. Its MAC-only route carries
+        // sequence number zero, as FRR's does. A MAC/IP route keeps the
+        // number above, so an IP that moved onto the MAC still outranks its
+        // old binding, and keeps the flag too: FRR's zebra takes a MAC's
+        // sticky state from whichever of its routes it processed last.
         if entry.flags & NTF_STICKY != 0 {
-            ecom.0.insert(evpn_mac_mobility_sticky());
+            let seq = if entry.ip.is_some() { seq } else { 0 };
+            ecom.0.insert(evpn_mac_mobility_sticky(seq));
         } else if seq > 0 {
             ecom.0.insert(evpn_mac_mobility(seq));
         }
@@ -24466,10 +24471,9 @@ fn evpn_mac_mobility(seq: u32) -> ExtCommunityValue {
 }
 
 /// The MAC Mobility extended community of a static MAC (RFC 7432 §15.2):
-/// the sticky flag (low-order bit of the flags octet) set and sequence
-/// number zero.
-fn evpn_mac_mobility_sticky() -> ExtCommunityValue {
-    let mut ec = evpn_mac_mobility(0);
+/// the sticky flag (low-order bit of the flags octet) set, with `seq`.
+fn evpn_mac_mobility_sticky(seq: u32) -> ExtCommunityValue {
+    let mut ec = evpn_mac_mobility(seq);
     ec.val[0] = 0x01;
     ec
 }
