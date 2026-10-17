@@ -199,6 +199,23 @@ Feature: IS-IS TI-LFA fast-reroute over SRv6 with BGP L3 service traffic
     And ping from "s" to "2001:db8::8" should succeed
     And ping from "e1" to "2001:db8:200::2" should succeed
 
+  Scenario: A repair that is only the router's own adjacency forwards without an SRH
+    Given the test topology exists
+    # r3 reaches n1 through d (r3-d-n1, cost 2). Protecting d, its only
+    # other neighbour r2 is no P-node: r3's own shortest path to r2 also
+    # runs through d. So the repair is r3's own adjacency to r2 and
+    # nothing more, and r3 sends it to r2 as a plain IPv6 next hop. With
+    # r3's own End.X SID as the SRH destination, the kernel would route
+    # the packets r3 itself sends by that SID and lose them (packets r3
+    # forwards would still get through).
+    Then show command "show isis ti-lfa" in namespace "r3" should eventually contain "AdjSid(r3, r2"
+    And show command "show isis repair-list" in namespace "r3" should contain "[]"
+    When I apply command "set router isis fast-reroute backup-as-primary" in namespace "r3"
+    And I run "clear isis spf" in namespace "r3"
+    # Promoted: the plain primary through d demotes to metric 13.
+    Then kernel route "2001:db8::2" in namespace "r3" should eventually contain "dev r3-d proto isis metric 13"
+    And ping from "r3" to "2001:db8::2" should eventually succeed
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "s"

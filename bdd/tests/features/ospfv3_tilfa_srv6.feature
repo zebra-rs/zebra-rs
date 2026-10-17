@@ -133,6 +133,23 @@ Feature: OSPFv3 TI-LFA fast-reroute over SRv6
     And I wait 5 seconds
     Then ping from "s" to "2001:db8::8" should eventually succeed
 
+  Scenario: A repair that is only the router's own adjacency forwards without an SRH
+    Given the test topology exists
+    # r3 reaches n1 through d (r3-d-n1, cost 2). Protecting d, its only
+    # other neighbour r2 is no P-node: r3's own shortest path to r2 also
+    # runs through d. So the repair is r3's own adjacency to r2 and
+    # nothing more, and r3 sends it to r2 as a plain IPv6 next hop. With
+    # r3's own End.X SID as the SRH destination, the kernel would route
+    # the packets r3 itself sends by that SID and lose them (packets r3
+    # forwards would still get through).
+    Then show command "show ospfv3 ti-lfa" in namespace "r3" should eventually contain "Adj-SID 10.0.0.7 -> 10.0.0.6"
+    And show command "show ospfv3 repair-list" in namespace "r3" should contain "[]"
+    When I apply command "set router ospfv3 fast-reroute backup-as-primary" in namespace "r3"
+    And I wait 5 seconds
+    # Promoted: the plain primary through d demotes to metric 3.
+    Then kernel route "2001:db8::2" in namespace "r3" should eventually contain "dev r3-d proto ospf metric 3"
+    And ping from "r3" to "2001:db8::2" should eventually succeed
+
   Scenario: Teardown topology
     Given the test topology exists
     When I stop zebra-rs in namespace "s"

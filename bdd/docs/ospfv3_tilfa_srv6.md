@@ -46,4 +46,5 @@ coverage rule every TI-LFA feature carries since #1361.
 | SRv6 SIDs exist and a TI-LFA SRv6 repair is installed | |
 | Fast-reroute survives the primary link failure (s-n1) | |
 | Promoted backup actually forwards over the SRv6 repair | |
+| A repair that is only the router's own adjacency forwards without an SRH | |
 | Teardown topology | |

@@ -580,6 +580,24 @@ impl RepairPath {
             _ => (None, &self.segs),
         }
     }
+
+    /// The segments an SRv6 repair from `s` encodes.
+    ///
+    /// A list that is only `s`'s own adjacency encodes none: the
+    /// repair is a plain next hop to the neighbor. Linux re-routes a
+    /// seg6 packet by its new destination, and `s`'s own End.X SID as
+    /// that destination works only for traffic `s` forwards, whose
+    /// input path runs the End.X; traffic `s` originates looks the SID
+    /// up on the output path, where it resolves to no next hop, and is
+    /// lost. When segments follow the adjacency the list is kept
+    /// whole: for forwarded traffic the End.X is what sends the packet
+    /// over the adjacency rather than along the route to the next SID.
+    pub fn srv6_segments(&self, s: usize) -> &[SrSegment] {
+        match self.split_local_adjacency(s) {
+            (Some(_), []) => &[],
+            _ => &self.segs,
+        }
+    }
 }
 
 /// Build the TI-LFA repair paths for one destination from
@@ -1725,5 +1743,34 @@ mod tests {
             segs: vec![SrSegment::AdjSid(4, 5, None)],
         };
         assert_eq!(other.split_local_adjacency(s), (None, &other.segs[..]));
+    }
+
+    /// An SRv6 repair that is only the source's own adjacency encodes
+    /// no SID; one with segments after that adjacency keeps it, and a
+    /// list starting anywhere else is encoded whole.
+    #[test]
+    fn srv6_repair_drops_only_a_lone_source_adjacency() {
+        let graph = tilfa_graph();
+        let (s, n1, r2, r3, d) = (0, 1, 5, 6, 7);
+        let lone = tilfa(&graph, r3, n1, &[d]).into_iter().next().unwrap();
+        assert_eq!(lone.segs, [SrSegment::AdjSid(r3, r2, None)]);
+        assert_eq!(lone.srv6_segments(r3), &[][..]);
+
+        let followed = RepairPath {
+            first_hop: 2,
+            first_hop_link_id: 0,
+            segs: vec![
+                SrSegment::AdjSid(0, 2, Some(9)),
+                SrSegment::AdjSid(2, 3, None),
+            ],
+        };
+        assert_eq!(followed.srv6_segments(0), &followed.segs[..]);
+
+        let elsewhere = tilfa(&graph, s, d, &[n1]).into_iter().next().unwrap();
+        assert!(matches!(
+            elsewhere.segs.first(),
+            Some(SrSegment::NodeSid(_))
+        ));
+        assert_eq!(elsewhere.srv6_segments(s), &elsewhere.segs[..]);
     }
 }
