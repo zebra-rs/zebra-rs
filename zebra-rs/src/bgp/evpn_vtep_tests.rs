@@ -2764,17 +2764,29 @@ async fn a_leaf_ac_without_a_leaf_label_is_not_filtered() {
     assert_eq!(json["bumFiltered"], true);
 }
 
-/// Over SRv6, a PE whose IMET argument length differs from its leaf
-/// route's gets no leaf slot (RFC 9819 §3.2), so our leaves' BUM reaches
-/// its leaves: `show` names it, and `bumFiltered` is false until the
-/// lengths agree.
+/// Over SRv6, a PE whose IMET argument length is non-zero and differs from
+/// its leaf route's gets no leaf slot (RFC 9819 §3.2), so our leaves' BUM
+/// reaches its leaves: `show` names it, and `bumFiltered` is false until
+/// the lengths agree. An IMET with length 0 is no mismatch: a plain copy is
+/// what RFC 9819 §3.3 asks for, and how a PE with no leaf in the EVI
+/// advertises (D6.4).
 #[tokio::test]
 async fn an_srv6_argument_length_mismatch_is_shown() {
     let (mut bgp, _rib) = etree_srv6_bgp();
     let (from, _rx) = peer(&mut bgp, "10.0.0.11", false);
     let (ad, ad_attr) = srv6_leaf_ad_route("10.0.0.11", 1);
     feed_evpn(&mut bgp, from, ad, Some(ad_attr));
+
+    // Length 0: no argument here, a plain copy; nothing to warn about.
     let (imet, attr) = srv6_imet_route("10.0.0.11", "fd00:2:0:200::", 0);
+    feed_evpn(&mut bgp, from, imet.clone(), Some(attr));
+    assert!(!etree_show(&bgp, false).contains("Warning"));
+    let json: serde_json::Value = serde_json::from_str(&etree_show(&bgp, true)).unwrap();
+    assert_eq!(json["argLengthMismatch"], serde_json::json!([]));
+    assert_eq!(json["bumFiltered"], true);
+
+    // Length 8 against the leaf route's 16: a mismatch.
+    let (_, attr) = srv6_imet_route("10.0.0.11", "fd00:2:0:200::", 8);
     feed_evpn(&mut bgp, from, imet.clone(), Some(attr));
     let text = etree_show(&bgp, false);
     assert!(
