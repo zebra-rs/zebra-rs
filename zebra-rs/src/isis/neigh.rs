@@ -733,8 +733,11 @@ fn show_entry(buf: &mut String, top: &Isis, nbr: &Neighbor, level: Level) -> std
             .iter()
             .map(|&nlpid| IsisProto::from(nlpid))
             .join(", ");
-        writeln!(buf, " {}", protocols)?;
+        write!(buf, " {}", protocols)?;
     }
+    // End the line even with no Protocols Supported TLV, or the SNPA
+    // line runs onto it.
+    writeln!(buf)?;
 
     writeln!(
         buf,

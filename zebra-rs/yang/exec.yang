@@ -968,7 +968,7 @@ module exec {
             type inet:ipv4-prefix;
           }
           leaf detail {
-            ext:help "Detail format (P/Q nodes, segment list, backup-src)";
+            ext:help "Detail format (backup nexthop, P node, label stack)";
             type empty;
           }
         }
