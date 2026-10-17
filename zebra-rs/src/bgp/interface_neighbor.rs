@@ -351,6 +351,20 @@ fn teardown_peer(bgp: &mut Bgp, ifindex: u32) {
         // lingers and a future slot reuse inherits the group.
         super::update_group::detach(&mut bgp.update_groups, &mut bgp.peers, peer_idx);
     }
+    // Release the peer's BFD session before it leaves the map. The BFD
+    // reconcile only visits peers still present, so nothing else would
+    // unsubscribe the tracked key.
+    if let (Some(key), Some(client_tx)) = (
+        bgp.peers
+            .get_by_key(&PeerKey::Interface(ifindex))
+            .and_then(|p| p.bfd_session_key),
+        bgp.bfd_client_tx.as_ref(),
+    ) {
+        let _ = client_tx.send(crate::bfd::inst::ClientReq::Unsubscribe {
+            client: "bgp".to_string(),
+            key,
+        });
+    }
     bgp.peers.remove_by_key(&PeerKey::Interface(ifindex));
 }
 

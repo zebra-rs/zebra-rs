@@ -9179,6 +9179,65 @@ mod neighbor_group_wiring_tests {
         assert_eq!(interface_peers(&bgp), vec![(7, "i2".to_string())]);
     }
 
+    /// `i1` on ifindex 7 with BFD enabled and its link-local learned, so
+    /// the peer holds a BFD subscription. Returns the subscribed key with
+    /// the BFD request channel drained.
+    fn interface_neighbor_on_link_with_bfd() -> (Bgp, mpsc::UnboundedReceiver<ClientReq>, SessionKey)
+    {
+        use super::super::interface_neighbor::materialize_peer;
+        use crate::rib::api::RibRx;
+
+        let (mut bgp, mut bfd_rx) = fresh_bgp_with_bfd();
+        config_bgp_bfd_enable(&mut bgp, arg_words(&["true"]), ConfigOp::Set).unwrap();
+        bgp.process_rib_msg(RibRx::LinkAdd(named_link(7, "i1")));
+        configure_interface_neighbor(&mut bgp, "i1");
+        let link_local: std::net::Ipv6Addr = "fe80::2".parse().unwrap();
+        materialize_peer(&mut bgp, "i1", 7, link_local).expect("RA upgrades the peer");
+
+        let mut subscribed = None;
+        while let Ok(req) = bfd_rx.try_recv() {
+            if let ClientReq::Subscribe { key, .. } = req {
+                subscribed = Some(key);
+            }
+        }
+        let key = subscribed.expect("the RA must trigger a BFD Subscribe");
+        (bgp, bfd_rx, key)
+    }
+
+    fn unsubscribed(bfd_rx: &mut mpsc::UnboundedReceiver<ClientReq>) -> Vec<SessionKey> {
+        let mut keys = Vec::new();
+        while let Ok(req) = bfd_rx.try_recv() {
+            if let ClientReq::Unsubscribe { key, .. } = req {
+                keys.push(key);
+            }
+        }
+        keys
+    }
+
+    /// Removing the peer left on the old ifindex releases its BFD
+    /// session; the link going away alone keeps it.
+    #[tokio::test]
+    async fn interface_neighbor_link_recreate_releases_the_old_bfd_session() {
+        use crate::rib::api::RibRx;
+
+        let (mut bgp, mut bfd_rx, key) = interface_neighbor_on_link_with_bfd();
+        bgp.process_rib_msg(RibRx::LinkDel(7));
+        assert!(unsubscribed(&mut bfd_rx).is_empty());
+
+        bgp.process_rib_msg(RibRx::LinkAdd(named_link(9, "i1")));
+        assert_eq!(unsubscribed(&mut bfd_rx), vec![key]);
+    }
+
+    /// Deleting the neighbor releases its BFD session.
+    #[tokio::test]
+    async fn interface_neighbor_delete_releases_the_bfd_session() {
+        use super::super::interface_neighbor::config_interface_neighbor;
+
+        let (mut bgp, mut bfd_rx, key) = interface_neighbor_on_link_with_bfd();
+        config_interface_neighbor(&mut bgp, arg_words(&["i1"]), ConfigOp::Delete).unwrap();
+        assert_eq!(unsubscribed(&mut bfd_rx), vec![key]);
+    }
+
     // ---- interface-neighbor timers --------------------------------
 
     /// Timers typed before the peer exists must reach it when it
