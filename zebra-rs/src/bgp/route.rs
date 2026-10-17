@@ -3821,6 +3821,12 @@ pub struct LocalRib {
     /// receive path can send a leaf-only IMET's mark before the slot the same
     /// IMET creates.
     pub etree_vxlan_marks: bool,
+    /// EVPN E-Tree (RFC 8317 §4.2.3): a Type-2 selection changed with a
+    /// path on an Ethernet Segment winning before or after
+    /// (`etree_role_mark`, from `update_evpn` and `select_best_path_evpn`),
+    /// so the role-conflict check re-runs once the borrow ends
+    /// (`Bgp::etree_role_drain`).
+    pub etree_role_dirty: bool,
     /// The leaf-only remote PEs teed (`SetEtreeRemote`): `(bd, VTEP)`. Both
     /// the receive path (a new leaf-only IMET) and the sync add to it.
     pub etree_remotes_sent: BTreeSet<(u32, IpAddr)>,
@@ -3835,7 +3841,33 @@ impl LocalRib {
         prefix: EvpnPrefix,
         rib: BgpRib,
     ) -> (Vec<BgpRib>, Vec<BgpRib>, u32) {
-        self.evpn.entry(rd).or_default().update(prefix, rib)
+        let before = self.evpn_segment_winner(&rd, &prefix);
+        let out = self.evpn.entry(rd).or_default().update(prefix.clone(), rib);
+        self.etree_role_mark(&rd, &prefix, before);
+        out
+    }
+
+    /// Whether the selected path for `(rd, prefix)` is a received Type-2 on
+    /// an Ethernet Segment: what the E-Tree role check looks at.
+    fn evpn_segment_winner(&self, rd: &RouteDistinguisher, prefix: &EvpnPrefix) -> bool {
+        matches!(prefix, EvpnPrefix::MacIp { .. })
+            && self
+                .evpn
+                .get(rd)
+                .and_then(|table| table.selected.get(prefix))
+                .is_some_and(|rib| {
+                    !rib.is_originated() && rib.esi.is_some_and(|esi| esi != ZERO_ESI)
+                })
+    }
+
+    /// A selection change on a Type-2 marks the E-Tree role check
+    /// (RFC 8317 §4.2.3) when the winner before or after is a received
+    /// path on a segment: one arrived, or one left — replaced by a path on
+    /// no segment, withdrawn, or out-selected on a recompute.
+    fn etree_role_mark(&mut self, rd: &RouteDistinguisher, prefix: &EvpnPrefix, before: bool) {
+        if before || self.evpn_segment_winner(rd, prefix) {
+            self.etree_role_dirty = true;
+        }
     }
 
     pub fn remove_evpn(
@@ -3853,7 +3885,10 @@ impl LocalRib {
         rd: &RouteDistinguisher,
         prefix: &EvpnPrefix,
     ) -> Vec<BgpRib> {
-        self.evpn.entry(*rd).or_default().select_best_path(prefix)
+        let before = self.evpn_segment_winner(rd, prefix);
+        let selected = self.evpn.entry(*rd).or_default().select_best_path(prefix);
+        self.etree_role_mark(rd, prefix, before);
+        selected
     }
 
     // MUP dispatch -----------------------------------------------------------
@@ -9835,6 +9870,15 @@ pub(super) const ETREE_LEAF_ARG: u32 = 1;
 /// Its length, right after the End.DT2M function (RFC 9819 §3.3; LBL 32 /
 /// LNL 16 / FL 16 / AL 16 is what every EANTC 2026 participant used).
 pub(super) const ETREE_ARG_BITS: u8 = 16;
+
+/// An E-Tree role conflict on one Ethernet Segment (RFC 8317 §4.2.3): our
+/// AC on it, its role, and the PEs advertising MACs on it with the other.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EtreeRoleConflict {
+    pub ac: String,
+    pub local_leaf: bool,
+    pub pes: BTreeSet<IpAddr>,
+}
 
 /// One E-Tree leaf-label route this PE last originated (RFC 8317 §4.2.1),
 /// by what goes into it.
@@ -20557,6 +20601,9 @@ impl Bgp {
     /// segment, or what that segment's ESI is, changes what we should be
     /// advertising for MACs already learned on it.
     pub fn evpn_resync_macip_esi(&mut self) {
+        // Every segment and leaf-interface change comes through here: the
+        // E-Tree role check follows them.
+        self.etree_role_conflict_reconcile();
         if !self.advertise_all_vni {
             return;
         }
@@ -21416,6 +21463,96 @@ impl Bgp {
             });
         }
         self.local_rib.etree_remotes_sent = desired;
+    }
+
+    /// RFC 8317 §4.2.3 assumes an Ethernet Segment's AC has the same role on
+    /// every PE of the segment. Nothing on the wire states an AC's role, so
+    /// that can only be checked, and a violation is a loop: a leaf's BUM
+    /// copy carries the leaf label instead of the ESI label (§4.2.3), so a
+    /// peer whose AC on the segment is a root sends it back into the
+    /// segment it came from. What can be seen is a peer advertising a MAC
+    /// on a segment we also attach to whose leaf flag disagrees with our
+    /// AC's role. By ESI: our AC, its role, and the PEs that disagree.
+    pub fn etree_role_conflicts(&self) -> BTreeMap<[u8; 10], EtreeRoleConflict> {
+        let ours: BTreeMap<[u8; 10], (String, bool)> = self
+            .ethernet_segments
+            .values()
+            .filter_map(|es| {
+                let ac = es.interface.clone()?;
+                let leaf = self.etree_leaf_ifs.contains(&ac);
+                Some((es.esi?, (ac, leaf)))
+            })
+            .collect();
+        let mut out: BTreeMap<[u8; 10], EtreeRoleConflict> = BTreeMap::new();
+        if ours.is_empty() {
+            return out;
+        }
+        for table in self.local_rib.evpn.values() {
+            for (prefix, rib) in &table.selected {
+                if !matches!(prefix, EvpnPrefix::MacIp { .. }) || rib.is_originated() {
+                    continue;
+                }
+                let Some(esi) = rib.esi else {
+                    continue;
+                };
+                let Some((ac, local_leaf)) = ours.get(&esi) else {
+                    continue;
+                };
+                let remote_leaf =
+                    extract_flags_from_attr(&rib.attr) & crate::rib::evpn::MAC_FLAG_ETREE_LEAF != 0;
+                if remote_leaf == *local_leaf {
+                    continue;
+                }
+                if let Some(BgpNexthop::Evpn(pe)) = rib.attr.nexthop {
+                    out.entry(esi)
+                        .or_insert_with(|| EtreeRoleConflict {
+                            ac: ac.clone(),
+                            local_leaf: *local_leaf,
+                            pes: BTreeSet::new(),
+                        })
+                        .pes
+                        .insert(pe);
+                }
+            }
+        }
+        out
+    }
+
+    /// Re-run the E-Tree role check if a selection change marked it
+    /// (`LocalRib::etree_role_dirty`): from the receive path's drain, and
+    /// after every event (`event_upkeep`) for the other reselections — a
+    /// best-path recompute, a local origination, a next-hop change.
+    pub(super) fn etree_role_drain(&mut self) {
+        if std::mem::take(&mut self.local_rib.etree_role_dirty) {
+            self.etree_role_conflict_reconcile();
+        }
+    }
+
+    /// Log each E-Tree role conflict once when it starts and once when it
+    /// clears (`etree_role_conflicts`), against what was last logged.
+    pub(super) fn etree_role_conflict_reconcile(&mut self) {
+        let now: BTreeSet<[u8; 10]> = self.etree_role_conflicts().into_keys().collect();
+        if now == self.etree_role_conflicts_logged {
+            return;
+        }
+        for esi in now.difference(&self.etree_role_conflicts_logged) {
+            tracing::warn!(
+                proto = "bgp",
+                category = "evpn",
+                esi = %bgp_packet::esi_display(esi),
+                "E-Tree role conflict: a peer on this segment advertises its MACs with the \
+                 other role; leaf BUM may loop back into the segment"
+            );
+        }
+        for esi in self.etree_role_conflicts_logged.difference(&now) {
+            tracing::info!(
+                proto = "bgp",
+                category = "evpn",
+                esi = %bgp_packet::esi_display(esi),
+                "E-Tree role conflict cleared"
+            );
+        }
+        self.etree_role_conflicts_logged = now;
     }
 
     /// The EVIs whose E-Tree leaf ACs sit in a bridge with IRB, by EVI, with
@@ -22338,6 +22475,8 @@ impl Bgp {
             self.evpn_etree_srv6_slots_sync();
             self.evpn_etree_remotes_sync();
         }
+        // And the E-Tree role check, from the Type-2s on segments.
+        self.etree_role_drain();
     }
 
     /// Tee the Ethernet Segment nexthop groups to the cradle datapath (RFC

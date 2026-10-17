@@ -262,6 +262,21 @@ attach to, with a leaf flag that disagrees with our own AC's role. `show`
 reports that as an `etree role conflict on <esi>`, and it is logged once per
 onset/clear.
 
+**Implemented** (after phase 5): `Bgp::etree_role_conflicts` compares, for
+each segment with an ESI and an access port, the port's role
+(`etree leaf-interface`) with the leaf flag of every selected remote Type-2
+carrying that ESI. `show bgp evpn etree` (JSON `roleConflicts`) prints
+`Warning: ESI <esi>: role conflict: our AC <if> is a <role>, <PEs> advertise
+its MACs as <other role>`. `etree_role_conflict_reconcile` logs the onset
+(warn) and the clear (info) once each. It runs off `etree_role_dirty`,
+which the Type-2 selection itself sets (`update_evpn`,
+`select_best_path_evpn`) when a remote path on a segment wins before or
+after — so a winner leaving the segment through a replacement, a withdraw
+or a MED-knob recompute counts — and is drained after every event
+(`event_upkeep`). It also runs from `evpn_resync_macip_esi`, which every
+segment and leaf-interface change calls. A conflict is seen only once the peer has advertised a MAC on the
+segment.
+
 ## 6. Who drops what, where
 
 | Traffic | Filter | Where | Encapsulations |
@@ -680,8 +695,9 @@ finding).
     `l2_drop_etree_uc` counted, and a host moving from a leaf AC to a root
     AC becoming reachable from the leaves.
 - **Not in 2b:** the multihomed role-conflict warning (§5.3) and the IRB
-  warning (§9, D4). The IRB warning came later, with D4 decided: a leaf
-  AC's bridge with a routable address or a VRF master.
+  warning (§9, D4). Both came later: the IRB warning with D4 decided (a
+  leaf AC's bridge with a routable address or a VRF master), and the role
+  conflict as §5.3 describes.
 
 **Phase 3a is merged** as cradle-rs #207, released in cradle-rs v1.1.5,
 which zebra-rs pins since #2524. It is §8.4 as planned, with these

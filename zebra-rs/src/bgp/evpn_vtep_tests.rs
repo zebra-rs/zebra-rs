@@ -2709,3 +2709,269 @@ async fn irb_on_a_leaf_bridge_is_warned_about() {
     bgp.process_rib_msg(RibRx::LinkAdd(bridge));
     assert_eq!(bgp.etree_irb_evis().len(), 1, "a VRF master");
 }
+
+/// RFC 8317 §4.2.3: a peer advertising a MAC on a segment we also attach to
+/// with the other role is a role conflict (a leaf's BUM may loop back into
+/// the segment). `show bgp evpn etree` names it, and it is logged once at
+/// onset and once at clear. A MAC on no segment, or with the same role, is
+/// none; our own role change re-checks.
+#[tokio::test]
+async fn a_role_conflict_on_a_segment_is_reported() {
+    let (mut bgp, _rib) = bgp_with_rib();
+    bgp.advertise_all_vni = true;
+    bgp.ethernet_segments.insert(
+        "es1".to_string(),
+        super::super::ethernet_segment::EthernetSegment {
+            esi: Some(ESI),
+            interface: Some("ce1".to_string()),
+            ..Default::default()
+        },
+    );
+    bgp.etree_leaf_ifs.insert("ce1".to_string());
+    let (from, _rx) = peer(&mut bgp, "10.0.0.11", false);
+    let pe: IpAddr = "10.0.0.11".parse().unwrap();
+    let rd = rd_from_router_id_vni(Ipv4Addr::new(10, 0, 0, 11), 100).unwrap();
+    let mac_route = |esi: [u8; 10], leaf: bool| {
+        let route = EvpnRoute::Mac(bgp_packet::EvpnMac {
+            id: 0,
+            rd,
+            esi,
+            ether_tag: 0,
+            mac: [2, 0, 0, 0, 0xe2, 1],
+            ip: None,
+            vni: 100,
+            label2: None,
+        });
+        let mut attr = BgpAttr::new();
+        attr.nexthop = Some(BgpNexthop::Evpn(pe));
+        attr.local_pref = Some(LocalPref::default());
+        let mut ecom = ExtCommunity::from([evpn_route_target(65000, 100), evpn_encap_vxlan()]);
+        if leaf {
+            ecom.0.insert(ExtCommunityValue::etree_leaf());
+        }
+        attr.ecom = Some(ecom);
+        (route, attr)
+    };
+
+    // On no segment: no conflict whatever the role.
+    let (route, attr) = mac_route([0; 10], false);
+    feed_evpn(&mut bgp, from, route, Some(attr));
+    bgp.vpws_df_drain();
+    assert!(bgp.etree_role_conflicts().is_empty());
+
+    // Our AC on ES-1 is a leaf; the peer says root.
+    let (route, attr) = mac_route(ESI, false);
+    feed_evpn(&mut bgp, from, route.clone(), Some(attr));
+    bgp.vpws_df_drain();
+    let conflicts = bgp.etree_role_conflicts();
+    assert_eq!(conflicts[&ESI].ac, "ce1");
+    assert!(conflicts[&ESI].local_leaf);
+    assert_eq!(conflicts[&ESI].pes, BTreeSet::from([pe]));
+    assert_eq!(
+        bgp.etree_role_conflicts_logged,
+        BTreeSet::from([ESI]),
+        "onset logged"
+    );
+    let text = super::super::show::show_bgp_evpn_etree(
+        &bgp,
+        crate::config::Args(std::collections::VecDeque::new()),
+        false,
+    )
+    .unwrap();
+    assert!(
+        text.contains(&format!(
+            "Warning: ESI {}: role conflict: our AC ce1 is a leaf, 10.0.0.11 advertise its MACs as root",
+            bgp_packet::esi_display(&ESI)
+        )),
+        "{text}"
+    );
+
+    // The peer agrees: cleared.
+    let (_, attr) = mac_route(ESI, true);
+    feed_evpn(&mut bgp, from, route, Some(attr));
+    bgp.vpws_df_drain();
+    assert!(bgp.etree_role_conflicts().is_empty());
+    assert!(bgp.etree_role_conflicts_logged.is_empty(), "clear logged");
+
+    // Our AC becomes a root: the peer's leaf MACs now disagree.
+    bgp.etree_leaf_ifs.clear();
+    bgp.evpn_resync_macip_esi();
+    assert_eq!(bgp.etree_role_conflicts_logged, BTreeSet::from([ESI]));
+
+    // The MAC withdrawn: cleared.
+    let (route, _) = mac_route(ESI, true);
+    feed_evpn(&mut bgp, from, route, None);
+    bgp.vpws_df_drain();
+    assert!(
+        bgp.etree_role_conflicts_logged.is_empty(),
+        "cleared by the withdraw"
+    );
+}
+
+/// Review finding: a conflicting Type-2 replaced by the same MAC/IP with no
+/// ESI ends the conflict, so the clear is logged — and a later conflict on
+/// the segment is logged again, not swallowed by stale state.
+#[tokio::test]
+async fn a_conflict_cleared_by_a_replacement_without_an_esi_is_logged() {
+    let (mut bgp, _rib) = bgp_with_rib();
+    bgp.advertise_all_vni = true;
+    bgp.ethernet_segments.insert(
+        "es1".to_string(),
+        super::super::ethernet_segment::EthernetSegment {
+            esi: Some(ESI),
+            interface: Some("ce1".to_string()),
+            ..Default::default()
+        },
+    );
+    bgp.etree_leaf_ifs.insert("ce1".to_string());
+    let (from, _rx) = peer(&mut bgp, "10.0.0.11", false);
+    let pe: IpAddr = "10.0.0.11".parse().unwrap();
+    let rd = rd_from_router_id_vni(Ipv4Addr::new(10, 0, 0, 11), 100).unwrap();
+    let mac_route = |esi: [u8; 10]| {
+        let route = EvpnRoute::Mac(bgp_packet::EvpnMac {
+            id: 0,
+            rd,
+            esi,
+            ether_tag: 0,
+            mac: [2, 0, 0, 0, 0xe2, 1],
+            ip: None,
+            vni: 100,
+            label2: None,
+        });
+        let mut attr = BgpAttr::new();
+        attr.nexthop = Some(BgpNexthop::Evpn(pe));
+        attr.local_pref = Some(LocalPref::default());
+        attr.ecom = Some(ExtCommunity::from([
+            evpn_route_target(65000, 100),
+            evpn_encap_vxlan(),
+        ]));
+        (route, attr)
+    };
+    // The peer says root on our leaf segment: a conflict.
+    let (route, attr) = mac_route(ESI);
+    feed_evpn(&mut bgp, from, route, Some(attr));
+    bgp.vpws_df_drain();
+    assert_eq!(bgp.etree_role_conflicts_logged, BTreeSet::from([ESI]));
+
+    // The same MAC/IP again, now on no segment: the conflict is gone.
+    let (route, attr) = mac_route([0; 10]);
+    feed_evpn(&mut bgp, from, route, Some(attr));
+    bgp.vpws_df_drain();
+    assert!(bgp.etree_role_conflicts().is_empty());
+    assert!(
+        bgp.etree_role_conflicts_logged.is_empty(),
+        "the clear is logged"
+    );
+
+    // Back on the segment: the onset is logged again.
+    let (route, mut attr) = mac_route(ESI);
+    attr.local_pref = Some(LocalPref::new(200));
+    feed_evpn(&mut bgp, from, route.clone(), Some(attr));
+    bgp.vpws_df_drain();
+    assert_eq!(bgp.etree_role_conflicts_logged, BTreeSet::from([ESI]));
+
+    // A second path for the same MAC, on no segment and less preferred;
+    // the segment path withdrawn promotes it, and the conflict clears.
+    let (from2, _rx2) = peer(&mut bgp, "10.0.0.12", false);
+    let (route2, attr2) = mac_route([0; 10]);
+    feed_evpn(&mut bgp, from2, route2, Some(attr2));
+    bgp.vpws_df_drain();
+    assert_eq!(bgp.etree_role_conflicts_logged, BTreeSet::from([ESI]));
+    feed_evpn(&mut bgp, from, route, None);
+    bgp.vpws_df_drain();
+    assert!(bgp.etree_role_conflicts().is_empty());
+    assert!(
+        bgp.etree_role_conflicts_logged.is_empty(),
+        "the clear is logged when a withdraw promotes a path off the segment"
+    );
+}
+
+/// Review finding: a best-path recompute (`bgp bestpath med
+/// missing-as-worst`) can move a MAC's winner off the segment with no
+/// UPDATE behind it, so the reselection itself marks the role check and the
+/// event's upkeep runs it. The MED knob is process-wide, so the reorder is
+/// made by hand on the candidates here and the recompute does the rest.
+#[tokio::test]
+async fn a_conflict_cleared_by_a_recompute_is_logged() {
+    let (mut bgp, _rib) = bgp_with_rib();
+    bgp.advertise_all_vni = true;
+    bgp.ethernet_segments.insert(
+        "es1".to_string(),
+        super::super::ethernet_segment::EthernetSegment {
+            esi: Some(ESI),
+            interface: Some("ce1".to_string()),
+            ..Default::default()
+        },
+    );
+    bgp.etree_leaf_ifs.insert("ce1".to_string());
+    let rd = rd_from_router_id_vni(Ipv4Addr::new(10, 0, 0, 11), 100).unwrap();
+    let mac = [2, 0, 0, 0, 0xe2, 1];
+    let mac_route = |pe: IpAddr, esi: [u8; 10], local_pref: u32| {
+        let route = EvpnRoute::Mac(bgp_packet::EvpnMac {
+            id: 0,
+            rd,
+            esi,
+            ether_tag: 0,
+            mac,
+            ip: None,
+            vni: 100,
+            label2: None,
+        });
+        let mut attr = BgpAttr::new();
+        attr.nexthop = Some(BgpNexthop::Evpn(pe));
+        attr.local_pref = Some(LocalPref::new(local_pref));
+        attr.ecom = Some(ExtCommunity::from([
+            evpn_route_target(65000, 100),
+            evpn_encap_vxlan(),
+        ]));
+        (route, attr)
+    };
+    // The segment path (root, on our leaf segment) wins: a conflict.
+    let (from, _rx) = peer(&mut bgp, "10.0.0.11", false);
+    let (route, attr) = mac_route("10.0.0.11".parse().unwrap(), ESI, 200);
+    feed_evpn(&mut bgp, from, route, Some(attr));
+    let (from2, _rx2) = peer(&mut bgp, "10.0.0.12", false);
+    let (route, attr) = mac_route("10.0.0.12".parse().unwrap(), [0; 10], 100);
+    feed_evpn(&mut bgp, from2, route, Some(attr));
+    bgp.vpws_df_drain();
+    assert_eq!(bgp.etree_role_conflicts_logged, BTreeSet::from([ESI]));
+
+    let prefix = EvpnPrefix::MacIp {
+        eth_tag: 0,
+        mac,
+        ip: None,
+    };
+    let set_segment_pref = |bgp: &mut Bgp, local_pref: u32| {
+        let cands = bgp
+            .local_rib
+            .evpn
+            .get_mut(&rd)
+            .unwrap()
+            .cands
+            .get_mut(&prefix)
+            .unwrap();
+        let rib = cands.iter_mut().find(|r| r.esi == Some(ESI)).unwrap();
+        std::sync::Arc::make_mut(&mut rib.attr).local_pref = Some(LocalPref::new(local_pref));
+    };
+
+    // The recompute moves the winner off the segment: the clear is logged.
+    set_segment_pref(&mut bgp, 50);
+    bgp.bestpath_recompute_all();
+    bgp.event_upkeep();
+    assert_ne!(
+        bgp.local_rib.evpn[&rd].selected[&prefix].esi,
+        Some(ESI),
+        "the path on no segment won"
+    );
+    assert!(bgp.etree_role_conflicts().is_empty());
+    assert!(
+        bgp.etree_role_conflicts_logged.is_empty(),
+        "the clear is logged after a recompute"
+    );
+
+    // And back: the onset is logged again, not swallowed by stale state.
+    set_segment_pref(&mut bgp, 200);
+    bgp.bestpath_recompute_all();
+    bgp.event_upkeep();
+    assert_eq!(bgp.etree_role_conflicts_logged, BTreeSet::from([ESI]));
+}
