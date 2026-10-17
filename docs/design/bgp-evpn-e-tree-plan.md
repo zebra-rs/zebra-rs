@@ -873,6 +873,23 @@ which zebra-rs pins since #2534. It is §8.6 as decided (D6):
   getting the argument again; the install prefix. Seven mutants each fail
   one.
 
+**Status: phase 6 docs are written** on `etree-docs`; the interop lab is
+not run.
+- **Book.** `book/src/ch-02-47-bgp-evpn-e-tree.md`: configuration, what an
+  AC is, what is advertised, who drops what, BUM per encapsulation (with
+  the VXLAN mixed-PE limit and the SRv6 argument-length gap), multihomed
+  leaves and the role conflict, `show`, the receive rules, what is not
+  supported, and that interop is zebra-rs against zebra-rs only. Every
+  sentence was checked against the code, not this plan.
+- **Matrix.** `bgp-evpn-support-status.md` gains an E-Tree row per
+  encapsulation, naming the function behind each claim, and a row for the
+  shared checks and the interop state. The stale MPLS split-horizon cell
+  (shipped in #2347) is corrected on the way.
+- **YANG.** The `etree` container's description no longer says BUM is
+  filtered over MPLS only.
+- **Lab.** Not run: no Arista cEOS, Nokia or Juniper image is available
+  here. Until it runs, risk 1 (§11) stands.
+
 **Review lessons carried over from the single-active arc** (see that plan
 and the memory notes):
 - Every negative assertion ("leaf did not receive") is first shown to fail

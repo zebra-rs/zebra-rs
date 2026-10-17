@@ -841,10 +841,12 @@ module zebra-bgp-evpn {
          refused, because the kernel bridge cannot isolate leaves.
 
          Enforced: leaf to leaf on one PE, and known unicast from a leaf
-         to a MAC behind a leaf on another PE. Over MPLS, a leaf's
-         broadcast, multicast and unknown unicast are kept from leaves
-         on other PEs too: each PE advertises a leaf label (RFC 8317
-         §4.2). Not yet over VXLAN and SRv6.";
+         to a MAC behind a leaf on another PE. A leaf's broadcast,
+         multicast and unknown unicast are kept from leaves on other PEs
+         too: over MPLS by a leaf label (RFC 8317 §4.2), over SRv6 by a
+         leaf argument of the End.DT2M SID (RFC 9819), and over VXLAN by
+         the IMET of a PE whose ACs are all leaves, which is exact
+         unless two PEs in an EVI each have both roots and leaves.";
       list leaf-interface {
         ext:help "A leaf attachment circuit";
         key "name";
