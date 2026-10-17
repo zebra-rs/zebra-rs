@@ -19,8 +19,10 @@ own show commands in its chapter, next to its configuration:
   state, and the MUP controller.
 - [IS-IS Show Commands](ch-07-13-isis-show.md) — adjacencies, the
   LSDB, topology, routes, DIS election, Fast ReRoute, and Flex-Algo.
-- [OSPF Show Commands](ch-08-18-ospf-show.md) — instances, interfaces,
-  neighbors, the LSDB, the SPF tree, and Segment Routing / TI-LFA state.
+- [OSPFv2 Show Commands](ch-08-18-ospf-show.md) and
+  [OSPFv3 Show Commands](ch-15-18-ospfv3-show.md) — instances,
+  interfaces, neighbors, the LSDB, routes, the SPF tree, Segment Routing,
+  Flex-Algo, TI-LFA and Graceful Restart.
 - [PIM](ch-17-00-pim.md#show-commands) — PIM, IGMP and MLD state and
   the multicast routing table.
 - [eBPF Data Plane](ch-16-00-ebpf.md#show-ebpf) — the eBPF forwarding

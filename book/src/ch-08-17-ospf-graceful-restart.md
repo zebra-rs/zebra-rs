@@ -100,9 +100,9 @@ on-disk file.
 `Restart staged:` line while a local restart is pending, and a
 table of active helper sessions (neighbor, interface, restart
 reason, grace period, time remaining). `show ospf checkpoint`
-summarizes the on-disk checkpoint, and `show ospf database` marks
-neighbors advertising the Router Information "Graceful Restart
-helper" capability.
+summarizes the on-disk checkpoint, and `show ospf database detail`
+lists each router's Router Information LSA capabilities, including
+`Graceful Restart helper`.
 
 The full cycle is BDD-validated (`ospfv2_graceful_restart.feature`):
 a staged restart drives helper entry on the peer and abort recovers,
