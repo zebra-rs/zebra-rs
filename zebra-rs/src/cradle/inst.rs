@@ -165,9 +165,15 @@ pub struct Cradle {
     etree_leaves: BTreeSet<String>,
     /// The leaf roles the current engine has acknowledged (`SetEtreeRole`).
     /// A leaf in `etree_leaves` but not here is held out of the data plane:
-    /// not attached, or detached, until its role lands, so it never
-    /// forwards as a root (fail closed). Reset with `applied`.
+    /// not attached, or detached, until its role lands, so cradle never
+    /// switches it as a root. Reset with `applied`.
     applied_etree: BTreeSet<String>,
+    /// The kernel bridge guard last sent per leaf AC (ifindex → blocked):
+    /// a leaf cradle does not switch is an ordinary bridge port, so it is
+    /// made `isolated` always, and held in the listening state (no
+    /// learning, no forwarding) while it must be cradle's and is not
+    /// ([`Self::etree_guards`]).
+    etree_guard_sent: HashMap<u32, bool>,
     engine: Option<Engine>,
     /// Last observed engine availability (from [`EngineEvent`]s).
     status: EngineStatus,
@@ -213,6 +219,7 @@ impl Cradle {
             evi_by_bridge: BTreeMap::new(),
             etree_leaves: BTreeSet::new(),
             applied_etree: BTreeSet::new(),
+            etree_guard_sent: HashMap::new(),
             engine: None,
             status: EngineStatus::default(),
             applied: HashMap::new(),
@@ -354,6 +361,15 @@ impl Cradle {
             RibRx::LinkDel(ifindex) => {
                 self.links.remove(&ifindex);
                 self.recompute_bds();
+                self.etree_guard_sent.remove(&ifindex);
+            }
+            // The bridge puts a port back to forwarding when the port's
+            // carrier comes back or the bridge itself comes up, and refuses
+            // a state while the port is down: send every leaf's guard
+            // again. Our own bridge-port writes raise only `LinkAdd`, so
+            // this does not feed itself.
+            RibRx::LinkUp(_) | RibRx::LinkDown(_) => {
+                self.etree_guard_sent.clear();
             }
             _ => {}
         }
@@ -416,6 +432,69 @@ impl Cradle {
     /// as a root.
     fn etree_held(&self, name: &str) -> bool {
         self.etree_leaves.contains(name) && !self.applied_etree.contains(name)
+    }
+
+    /// The kernel bridge guard each leaf AC needs, by ifindex: `true` when
+    /// it must also be blocked. Every leaf that is a bridge port is
+    /// `isolated`, so the bridge keeps it from the other leaves whenever it
+    /// switches it: before cradle attaches it, while the engine is down, at
+    /// boot. A leaf that must be cradle's (a managed engine, or a port this
+    /// supervisor attaches) is also blocked until it is attached with its
+    /// role acknowledged, so nothing reaches or leaves it through the bridge
+    /// meanwhile. A port an external engine attaches itself is only
+    /// isolated: its attach state is not ours to know.
+    fn etree_guards(&self) -> HashMap<u32, bool> {
+        let mut out = HashMap::new();
+        for name in &self.etree_leaves {
+            let Some((&ifindex, link)) = self.links.iter().find(|(_, l)| &l.name == name) else {
+                continue;
+            };
+            let bridged = link
+                .master
+                .and_then(|m| self.links.get(&m))
+                .is_some_and(|m| m.bridge);
+            if !bridged {
+                continue;
+            }
+            let attached =
+                self.applied.contains_key(name.as_str()) && self.applied_etree.contains(name);
+            let ours = self.ebpf_enabled || self.is_port_wanted(name);
+            out.insert(ifindex, ours && !attached);
+        }
+        out
+    }
+
+    /// Bring the kernel bridge guards to [`Self::etree_guards`]: a new
+    /// leaf is isolated (and blocked if it must be), a leaf that becomes
+    /// attached is unblocked, one that stops being attached is blocked, and
+    /// a port that stops being a leaf gets both undone. The state is only
+    /// touched where the guard sets or clears a block, so a root keeps
+    /// whatever the bridge gave it.
+    fn sync_etree_guards(&mut self) {
+        let desired = self.etree_guards();
+        for (&ifindex, &blocked) in &desired {
+            let state = match self.etree_guard_sent.get(&ifindex) {
+                Some(&sent) if sent == blocked => continue,
+                Some(_) => Some(blocked),
+                None => blocked.then_some(true),
+            };
+            let _ = self.rib.send(crate::rib::Message::EtreeBridgePort {
+                ifindex,
+                isolated: true,
+                blocked: state,
+            });
+        }
+        for (&ifindex, &blocked) in &self.etree_guard_sent {
+            if desired.contains_key(&ifindex) || !self.links.contains_key(&ifindex) {
+                continue;
+            }
+            let _ = self.rib.send(crate::rib::Message::EtreeBridgePort {
+                ifindex,
+                isolated: false,
+                blocked: blocked.then_some(false),
+            });
+        }
+        self.etree_guard_sent = desired;
     }
 
     /// Bring the engine's E-Tree roles to `etree_leaves`: `SetEtreeRole`
@@ -993,7 +1072,16 @@ impl Cradle {
     /// PORTS entry says L3": domain removals land before role flips, and
     /// domain additions after. Failures stay pending and are retried on
     /// [`RETRY_TICK`].
+    /// Converge the engine's ports on the wanted set, with the E-Tree
+    /// bridge guards around it: a leaf about to be detached is blocked
+    /// first, and one just attached is unblocked after.
     async fn reconcile_ports(&mut self) {
+        self.sync_etree_guards();
+        self.reconcile_engine_ports().await;
+        self.sync_etree_guards();
+    }
+
+    async fn reconcile_engine_ports(&mut self) {
         let Some(endpoint) = self.usable_endpoint() else {
             // No engine to program (disabled, or managed engine not up):
             // its state is gone or not ours — just reset ours.
@@ -1184,6 +1272,138 @@ mod tests {
         // BFD releasing does NOT detach while config still wants it.
         c.process_port_request(PortRequest::Release(5));
         assert!(c.is_port_wanted("eth0"));
+    }
+
+    fn guard_cradle() -> (
+        Cradle,
+        mpsc::UnboundedReceiver<crate::rib::client::RibInbound>,
+    ) {
+        let (rib_in_tx, rib_in_rx) = mpsc::unbounded_channel();
+        let rib_client = RibClient::new(rib_in_tx, ProtoId::from_raw(0));
+        let (_rib_tx, rib_rx) = mpsc::unbounded_channel();
+        let mut c = Cradle::new(rib_client, rib_rx, None);
+        // br0 (10) with leaves ce1 (11) and ce2 (12) and root r1 (13);
+        // ce3 (14) is a leaf on no bridge.
+        add_link(&mut c, 10, "br0");
+        c.links.get_mut(&10).unwrap().bridge = true;
+        for (ifindex, name) in [(11, "ce1"), (12, "ce2"), (13, "r1")] {
+            add_link(&mut c, ifindex, name);
+            c.links.get_mut(&ifindex).unwrap().master = Some(10);
+        }
+        add_link(&mut c, 14, "ce3");
+        for leaf in ["ce1", "ce2", "ce3"] {
+            c.etree_leaves.insert(leaf.to_string());
+        }
+        (c, rib_in_rx)
+    }
+
+    fn guard_msgs(
+        rx: &mut mpsc::UnboundedReceiver<crate::rib::client::RibInbound>,
+    ) -> Vec<(u32, bool, Option<bool>)> {
+        let mut out = Vec::new();
+        while let Ok(inbound) = rx.try_recv() {
+            if let crate::rib::Message::EtreeBridgePort {
+                ifindex,
+                isolated,
+                blocked,
+            } = inbound.msg
+            {
+                out.push((ifindex, isolated, blocked));
+            }
+        }
+        out.sort();
+        out
+    }
+
+    fn attach(c: &mut Cradle, name: &str, ifindex: u32) {
+        c.applied
+            .insert(name.to_string(), (ifindex, PortRole::L2 { bd: 1 }));
+        c.applied_etree.insert(name.to_string());
+    }
+
+    /// Plan §7.3 invariant 6: a leaf cradle does not switch is an ordinary
+    /// bridge port, so every leaf on a bridge is isolated, and one that
+    /// must be cradle's is blocked until it is attached with its role.
+    #[test]
+    fn a_leaf_cradle_does_not_switch_is_guarded_in_the_bridge() {
+        let (mut c, mut rx) = guard_cradle();
+        c.ebpf_enabled = true;
+        // Nothing attached: both bridged leaves isolated and blocked; the
+        // root and the unbridged leaf untouched.
+        c.sync_etree_guards();
+        assert_eq!(
+            guard_msgs(&mut rx),
+            vec![(11, true, Some(true)), (12, true, Some(true))]
+        );
+        c.sync_etree_guards();
+        assert_eq!(guard_msgs(&mut rx), vec![], "unchanged, nothing sent");
+
+        // Attached with its role acknowledged: unblocked, still isolated.
+        attach(&mut c, "ce1", 11);
+        c.sync_etree_guards();
+        assert_eq!(guard_msgs(&mut rx), vec![(11, true, Some(false))]);
+        // Attached as a root before its leaf role landed: blocked.
+        c.applied
+            .insert("ce2".to_string(), (12, PortRole::L2 { bd: 1 }));
+        c.sync_etree_guards();
+        assert_eq!(guard_msgs(&mut rx), vec![]);
+
+        // The engine goes away: everything is blocked again.
+        c.process_engine_event(EngineEvent::Down);
+        c.sync_etree_guards();
+        assert_eq!(guard_msgs(&mut rx), vec![(11, true, Some(true))]);
+
+        // A link edge (the bridge re-enables a disabled port when its
+        // carrier or the bridge comes back): every guard is sent again.
+        c.process_rib_msg(RibRx::LinkUp(10));
+        c.sync_etree_guards();
+        assert_eq!(
+            guard_msgs(&mut rx),
+            vec![(11, true, Some(true)), (12, true, Some(true))]
+        );
+
+        // No longer a leaf: isolation and the block undone.
+        c.etree_leaves.remove("ce1");
+        c.sync_etree_guards();
+        assert_eq!(guard_msgs(&mut rx), vec![(11, false, Some(false))]);
+    }
+
+    /// With an external engine, a leaf this supervisor does not attach is
+    /// only isolated (its attach state is not ours to know); one it does
+    /// attach is blocked until attached. An unblocked leaf's state is never
+    /// touched, so taking the leaf away leaves the state alone too.
+    #[test]
+    fn an_external_engines_own_port_is_only_isolated() {
+        let (mut c, mut rx) = guard_cradle();
+        c.if_ebpf.insert("ce2".to_string(), true);
+        c.sync_etree_guards();
+        assert_eq!(
+            guard_msgs(&mut rx),
+            vec![(11, true, None), (12, true, Some(true))]
+        );
+        c.etree_leaves.remove("ce1");
+        c.sync_etree_guards();
+        assert_eq!(guard_msgs(&mut rx), vec![(11, false, None)]);
+    }
+
+    /// With no usable engine the reconcile returns early, and the guard
+    /// still blocks every leaf the managed engine should switch.
+    #[tokio::test]
+    async fn a_leaf_is_blocked_while_the_engine_is_down() {
+        let (mut c, mut rx) = guard_cradle();
+        c.ebpf_enabled = true;
+        attach(&mut c, "ce1", 11);
+        c.reconcile_ports().await;
+        // Before: ce1 attached, so only isolated. After the reconcile found
+        // no engine and forgot the attach: blocked.
+        assert_eq!(
+            guard_msgs(&mut rx),
+            vec![
+                (11, true, None),
+                (11, true, Some(true)),
+                (12, true, Some(true))
+            ]
+        );
     }
 
     /// An E-Tree leaf is held out of the data plane until the engine has

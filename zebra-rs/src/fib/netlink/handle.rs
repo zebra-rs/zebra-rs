@@ -10,8 +10,9 @@ use netlink_packet_core::{
 };
 use netlink_packet_route::address::{AddressAttribute, AddressMessage, AddressScope};
 use netlink_packet_route::link::{
-    AfSpecInet6, AfSpecUnspec, InfoBridgePort, InfoData, InfoKind, InfoPortData, InfoPortKind,
-    InfoVlan, InfoVrf, InfoVxlan, LinkAttribute, LinkFlags, LinkInfo, LinkLayerType, LinkMessage,
+    AfSpecInet6, AfSpecUnspec, BridgePortState, InfoBridgePort, InfoData, InfoKind, InfoPortData,
+    InfoPortKind, InfoVlan, InfoVrf, InfoVxlan, LinkAttribute, LinkFlags, LinkInfo, LinkLayerType,
+    LinkMessage,
 };
 use netlink_packet_route::neighbour::{NeighbourAddress, NeighbourAttribute, NeighbourMessage};
 use netlink_packet_route::nexthop::{NexthopAttribute, NexthopFlags, NexthopGroup, NexthopMessage};
@@ -3310,6 +3311,61 @@ impl FibHandle {
     ///     neigh_suppress on learning off vlan_tunnel on
     /// Called when the RIB observes a VXLAN device gaining a bridge
     /// master; a no-op error is logged if the master is not a bridge.
+    /// EVPN E-Tree: the kernel bridge's guard on a leaf AC, for while
+    /// cradle does not switch it (plan §7.3, invariant 6). `isolated`
+    /// (`IFLA_BRPORT_ISOLATED`) keeps it from the bridge's other isolated
+    /// ports, the leaves; `blocked` sets the port state listening
+    /// (`Some(true)`) or forwarding (`Some(false)`), and `None` leaves it.
+    /// Listening neither learns nor forwards, and with STP off nothing
+    /// moves a port out of it but a carrier or admin flap. Disabled would
+    /// not hold: this request's own `NETDEV_CHANGE` makes the bridge
+    /// re-enable a disabled port that is up, as does any later one (6.8),
+    /// and blocking is promoted to forwarding. Two requests, so an
+    /// STP-managed state (`EBUSY`) or a port that is down (`ENETDOWN`,
+    /// retried on its next link event) does not undo the isolation.
+    pub async fn bridge_port_etree_guard(
+        &self,
+        ifindex: u32,
+        isolated: bool,
+        blocked: Option<bool>,
+    ) {
+        self.bridge_port_set(ifindex, InfoBridgePort::Isolated(isolated))
+            .await;
+        if let Some(blocked) = blocked {
+            let state = if blocked {
+                BridgePortState::Listening
+            } else {
+                BridgePortState::Forwarding
+            };
+            self.bridge_port_set(ifindex, InfoBridgePort::State(state))
+                .await;
+        }
+    }
+
+    /// Set one bridge-port attribute on `ifindex`; an error is logged.
+    async fn bridge_port_set(&self, ifindex: u32, attr: InfoBridgePort) {
+        let mut msg = LinkMessage::default();
+        msg.header.index = ifindex;
+        let what = format!("{attr:?}");
+        msg.attributes.push(LinkAttribute::LinkInfo(vec![
+            LinkInfo::PortKind(InfoPortKind::Bridge),
+            LinkInfo::PortData(InfoPortData::BridgePort(vec![attr])),
+        ]));
+        let mut req = NetlinkMessage::from(RouteNetlinkMessage::NewLink(msg));
+        req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+        let Ok(mut response) = self.handle.clone().request(req) else {
+            tracing::warn!("SetLink bridge-port {what} on ifindex {ifindex}: request failed");
+            return;
+        };
+        while let Some(msg) = response.next().await {
+            if let NetlinkPayload::Error(e) = msg.payload
+                && e.code.is_some()
+            {
+                tracing::warn!("SetLink bridge-port {what} on ifindex {ifindex}: {e}");
+            }
+        }
+    }
+
     pub async fn vxlan_bridge_port_defaults(&self, ifindex: u32, metadata: bool) {
         let mut msg = LinkMessage::default();
         msg.header.index = ifindex;

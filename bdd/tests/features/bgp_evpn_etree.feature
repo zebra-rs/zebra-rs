@@ -129,6 +129,29 @@ Feature: EVPN E-Tree leaf ACs: roles in the data plane, Type-2 colouring (RFC 83
     # Counters start over with the new engine: this drop is its own.
     And show command "show ebpf stats" in namespace "z1" should not contain "l2_drop_etree_local 0"
 
+  Scenario: A leaf AC the engine does not switch is guarded by the kernel bridge
+    Given the test topology exists
+    # A leaf cradle does not switch is an ordinary bridge port, so every
+    # leaf is isolated in br10, and one the engine has attached forwards;
+    # the root is neither.
+    Then command "bridge -d link show dev l1" in namespace "z1" should eventually contain "isolated on"
+    And command "bridge -d link show dev l1" in namespace "z1" should eventually contain "state forwarding"
+    And command "bridge -d link show dev l2" in namespace "z1" should eventually contain "isolated on"
+    And command "bridge -d link show dev r1" in namespace "z1" should not contain "isolated on"
+    # Off the engine, l1 is held in the listening state (no learning, no
+    # forwarding): the bridge does not even deliver h1 to its own address,
+    # which it would through a forwarding port.
+    When I execute "ip addr add 10.10.0.254/24 dev br10" in namespace "z1"
+    And I apply command "set interface l1 ebpf enabled false" in namespace "z1"
+    Then command "bridge -d link show dev l1" in namespace "z1" should eventually contain "state listening"
+    And ping from "h1" to "10.10.0.254" should fail
+    # Back on the engine: forwarding again, through cradle.
+    When I apply command "set interface l1 ebpf enabled true" in namespace "z1"
+    Then command "bridge -d link show dev l1" in namespace "z1" should eventually contain "state forwarding"
+    And show command "show ebpf" in namespace "z1" should eventually contain "3 attached"
+    And ping from "h1" to "10.10.0.3" should eventually succeed
+    When I execute "ip addr del 10.10.0.254/24 dev br10" in namespace "z1"
+
   Scenario: A leaf AC turned into a root reaches the other leaf and loses its colour
     Given the test topology exists
     # Let the engine restart above settle first: zebra-rs resubscribes to
@@ -146,6 +169,8 @@ Feature: EVPN E-Tree leaf ACs: roles in the data plane, Type-2 colouring (RFC 83
     And show command "show bgp evpn" in namespace "z2" should contain "02:00:00:00:e1:02"
     And show command "show ebpf" in namespace "z1" should eventually contain "E-Tree leaves:   l1"
     And show command "show ebpf" in namespace "z1" should not contain "l1, l2"
+    # No longer a leaf: no longer isolated in the bridge.
+    And command "bridge -d link show dev l2" in namespace "z1" should eventually not contain "isolated on"
     And ping from "h1" to "10.10.0.2" should eventually succeed
 
   Scenario: Teardown topology

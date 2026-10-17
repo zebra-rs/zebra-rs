@@ -358,6 +358,28 @@ roots and leaves alike, so it is filtered at the **egress** PE (§4.2).
    switch to another leaf AC for even one window because its role arrived
    second.
 
+   **As built.** Holding a leaf back from cradle (`etree_held`) only
+   leaves it unattached, and an unattached AC is an ordinary kernel bridge
+   port that switches leaf to leaf: while its role is pending, while the
+   managed engine is down or starting, at boot. The phase-6 docs check
+   found this. So the cradle supervisor also guards every leaf AC in the
+   kernel bridge (`sync_etree_guards`, `Message::EtreeBridgePort`):
+   - `isolated on`, always, so the bridge keeps it from the other leaves
+     whenever it switches it;
+   - port state listening while it must be cradle's (a managed engine, or
+     a port the supervisor attaches) and is not attached with its role, so
+     nothing reaches or leaves it through the bridge, toward a remote leaf
+     over the kernel VXLAN device included. Not disabled: on 6.8 the
+     setlink's own `NETDEV_CHANGE` makes the bridge re-enable a disabled
+     port that is up, and so would any later one; with STP off, only a
+     carrier or admin flap moves a port out of listening.
+
+   The bridge returns a port to forwarding when its carrier or the bridge
+   comes back, so every `LinkUp`/`LinkDown` re-sends the guards.
+   What is left: the moments between such an edge and the re-send; boot
+   before zebra-rs runs; and a port an external engine attaches itself,
+   which is only isolated, its attach state not being ours to know.
+
 ## 8. Datapath (cradle)
 
 ### 8.1 Why cradle-only
