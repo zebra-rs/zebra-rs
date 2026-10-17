@@ -59,7 +59,10 @@ pub struct FlexAlgoSrv6Route {
 /// `flags` carries the kernel's `NTF_*` bits — most importantly
 /// `NTF_EXT_LEARNED` (bit 0x10), which an EVPN advertise consumer
 /// must check to avoid re-advertising MACs that this same daemon
-/// just installed from a remote peer.
+/// just installed from a remote peer, and `NTF_STICKY` (0x40), a MAC
+/// advertised sticky. A remote sticky MAC is installed without
+/// `NTF_EXT_LEARNED`; it is on a VXLAN port, and no row there becomes
+/// an `FdbEntry`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FdbEntry {
     pub vni: u32,

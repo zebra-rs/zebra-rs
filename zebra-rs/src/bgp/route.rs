@@ -20096,7 +20096,10 @@ impl Bgp {
     ///   - `NTF_EXT_LEARNED` must be clear in the FDB flags. Set bits
     ///     mark FDB rows that arrived via netlink from another speaker
     ///     (typically zebra-rs's own `mac_add` path installing a
-    ///     remote VTEP MAC); re-advertising them would loop.
+    ///     remote VTEP MAC); re-advertising them would loop. A sticky
+    ///     remote MAC's row is static and sticky instead; like every row
+    ///     on a VXLAN port, the RIB never hands it here
+    ///     (`fdb_entry_from_neighbor`).
     ///
     /// Hardcodes (per RFC 8365 single-homed VLAN-Based service):
     ///   - Ethernet Tag = 0 (one bridge per VNI)
