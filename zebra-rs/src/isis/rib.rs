@@ -284,11 +284,11 @@ impl IsisRibFamily for V6 {
     fn build_repair(
         top: &mut IsisTop,
         level: Level,
-        _source: usize,
+        source: usize,
         repair: &spf::RepairPath,
     ) -> Option<RepairPathSrv6> {
         // Algo-0 (legacy) repair: node segments resolve to base End SIDs.
-        build_repair_path_srv6(top, level, None, repair)
+        build_repair_path_srv6(top, level, source, None, repair)
     }
 
     fn trunc_prefix(p: Ipv6Net) -> Ipv6Net {
@@ -2249,7 +2249,7 @@ fn build_rib6_from_flex_algo(
         // SID for a node hop) is dropped rather than installed partial.
         if route.nhops.len() == 1
             && let Some(repair) = tilfa.get(node).and_then(|paths| paths.first())
-            && let Some(backup) = build_repair_path_srv6(top, level, Some(algo), repair)
+            && let Some(backup) = build_repair_path_srv6(top, level, source, Some(algo), repair)
             && let Some(nhop) = route.nhops.values_mut().next()
         {
             nhop.backup = Some(backup);

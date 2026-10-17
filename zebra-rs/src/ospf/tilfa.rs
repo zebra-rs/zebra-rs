@@ -512,16 +512,20 @@ pub struct RepairPathSrv6V3 {
 /// advertiser's End.X SID (sub-TLV 31/32 on its E-Router-LSA
 /// Router-Link TLVs). Returns `None` when any segment fails to
 /// resolve — a partial SID list would diverge from the
-/// post-convergence path.
+/// post-convergence path. As in IS-IS, a list that is only `source`'s
+/// own adjacency becomes a plain next hop to that neighbor (see
+/// `RepairPath::srv6_segments`).
 pub(super) fn build_repair_path_srv6_v3(
     top: &Ospf<Ospfv3>,
     area: &OspfArea<Ospfv3>,
+    source: usize,
     rp: &spf::RepairPath,
 ) -> Option<RepairPathSrv6V3> {
     use crate::spf::srv6::{RepairSeg, pack_carriers};
 
-    let mut parts: Vec<RepairSeg> = Vec::with_capacity(rp.segs.len());
-    for seg in &rp.segs {
+    let repair_segs = rp.srv6_segments(source);
+    let mut parts: Vec<RepairSeg> = Vec::with_capacity(repair_segs.len());
+    for seg in repair_segs {
         let part = match seg {
             spf::SrSegment::NodeSid(v) => {
                 let info = srv6_end_sid_for_vertex_v3(top, area, *v)?;

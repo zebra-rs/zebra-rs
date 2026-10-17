@@ -52,4 +52,5 @@ through the r-plane rather than a plain loop-free alternate.
 | BGP carries the LAN prefixes as SRv6 End.DT6 service routes | |
 | Fast-reroute survives the primary link failure (s-n1) | |
 | Promoted backup actually forwards over the SRv6 repair | |
+| A repair that is only the router's own adjacency forwards without an SRH | |
 | Teardown topology | |

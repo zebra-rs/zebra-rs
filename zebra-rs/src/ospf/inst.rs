@@ -17690,7 +17690,7 @@ fn build_rib6_from_spf(
             // SRv6 repair when the locator is active (RFC 9513 SID
             // list, H.Insert); SR-MPLS label stack otherwise.
             let backup = if top.srv6_active() {
-                super::tilfa::build_repair_path_srv6_v3(top, area, repair)
+                super::tilfa::build_repair_path_srv6_v3(top, area, source, repair)
                     .map(super::tilfa::RepairBackupV3::Srv6)
             } else {
                 build_repair_path_mpls_v3(top, area, source, repair)

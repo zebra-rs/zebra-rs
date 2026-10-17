@@ -124,18 +124,23 @@ pub(super) fn build_repair_path_mpls(
 /// `HInsert` — see `RepairPathSrv6` for why insertion rather than
 /// H.Encap.
 ///
-/// LAN trivial-repair (empty segs, first_hop is a pseudonode) is
-/// skipped for the same reason as in the MPLS sibling — `RepairPath`
-/// doesn't carry the specific post-PN router today.
+/// A list that is only `source`'s own adjacency becomes a plain next
+/// hop to that neighbor, with no SID (see `RepairPath::srv6_segments`);
+/// on a LAN the adjacency names the member to send to. Otherwise a LAN
+/// trivial-repair (empty segs, first_hop is a pseudonode) is skipped
+/// for the same reason as in the MPLS sibling.
 pub(super) fn build_repair_path_srv6(
     top: &IsisTop,
     level: Level,
+    source: usize,
     algo: Option<u8>,
     rp: &spf::RepairPath,
 ) -> Option<RepairPathSrv6> {
     let lsp_map = top.lsp_map.get(&level);
-    let mut parts: Vec<RepairSeg> = Vec::with_capacity(rp.segs.len());
-    for (idx, seg) in rp.segs.iter().enumerate() {
+    let (local_adj_to, _) = rp.split_local_adjacency(source);
+    let repair_segs = rp.srv6_segments(source);
+    let mut parts: Vec<RepairSeg> = Vec::with_capacity(repair_segs.len());
+    for (idx, seg) in repair_segs.iter().enumerate() {
         let resolved = match seg {
             spf::SrSegment::NodeSid(v) => {
                 // REPLACE-C-SID SIDs are only valid inside packed C-SID
@@ -175,7 +180,8 @@ pub(super) fn build_repair_path_srv6(
     let ifindex = (rp.first_hop_link_id != 0).then_some(rp.first_hop_link_id)?;
     let link = top.links.get(&ifindex)?;
 
-    let addr = if lsp_map.is_pseudo(rp.first_hop) {
+    let to = local_adj_to.unwrap_or(rp.first_hop);
+    let addr = if lsp_map.is_pseudo(to) {
         if segs.is_empty() {
             return None;
         }
@@ -185,7 +191,7 @@ pub(super) fn build_repair_path_srv6(
             .values()
             .find_map(|nbr| super::link::nbr_v6ll_pick(&nbr.addr6l))?
     } else {
-        let sys_id = lsp_map.resolve(rp.first_hop)?;
+        let sys_id = lsp_map.resolve(to)?;
         link.state
             .nbrs
             .get(&level)
