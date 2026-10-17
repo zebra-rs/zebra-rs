@@ -358,6 +358,28 @@ roots and leaves alike, so it is filtered at the **egress** PE (§4.2).
    switch to another leaf AC for even one window because its role arrived
    second.
 
+   **As built.** Holding a leaf back from cradle (`etree_held`) only
+   leaves it unattached, and an unattached AC is an ordinary kernel bridge
+   port that switches leaf to leaf: while its role is pending, while the
+   managed engine is down or starting, at boot. The phase-6 docs check
+   found this. So the cradle supervisor also guards every leaf AC in the
+   kernel bridge (`sync_etree_guards`, `Message::EtreeBridgePort`):
+   - `isolated on`, always, so the bridge keeps it from the other leaves
+     whenever it switches it;
+   - port state listening while it must be cradle's (a managed engine, or
+     a port the supervisor attaches) and is not attached with its role, so
+     nothing reaches or leaves it through the bridge, toward a remote leaf
+     over the kernel VXLAN device included. Not disabled: on 6.8 the
+     setlink's own `NETDEV_CHANGE` makes the bridge re-enable a disabled
+     port that is up, and so would any later one; with STP off, only a
+     carrier or admin flap moves a port out of listening.
+
+   The bridge returns a port to forwarding when its carrier or the bridge
+   comes back, so every `LinkUp`/`LinkDown` re-sends the guards.
+   What is left: the moments between such an edge and the re-send; boot
+   before zebra-rs runs; and a port an external engine attaches itself,
+   which is only isolated, its attach state not being ours to know.
+
 ## 8. Datapath (cradle)
 
 ### 8.1 Why cradle-only
@@ -887,8 +909,9 @@ not run.
     attached to cradle (`etree_held` in `reconcile_ports`), and an
     unattached AC is an ordinary kernel bridge port, which switches leaf to
     leaf. That window covers a pending role, the managed engine being down
-    or starting, and boot before cradle. The chapter says so; closing it is
-    open.
+    or starting, and boot before cradle. Closed by #2543: the cradle
+    supervisor guards each leaf AC in the kernel bridge (isolated, and held
+    in the listening state until cradle has it); see invariant 6.
   - A P2MP BUM tunnel or Assisted Replication on an E-Tree EVI is neither
     refused nor warned about, and a leaf's BUM over it is unmarked.
   - Smaller gaps, not fixed: `bum_filtered` in the JSON is always true; a

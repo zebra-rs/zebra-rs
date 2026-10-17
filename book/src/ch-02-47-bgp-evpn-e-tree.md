@@ -77,7 +77,9 @@ Attach every AC, roots and leaves, to cradle with `interface <name> ebpf
 enabled`, and the core-facing interface too (`core0` above). cradle filters
 both on the AC a frame enters by and on the core interface a remote PE's copy
 arrives on. The commit check only looks for `system ebpf enabled` or `system
-cradle enabled`, so it does not catch a missing interface.
+cradle enabled`, so it does not catch a missing interface. Under the managed
+engine, a leaf AC left out is held and passes no traffic (see below); a root
+left out is switched by the Linux bridge, outside cradle's filters.
 
 ### What an AC is
 
@@ -105,13 +107,30 @@ gets every role back before its ports. zebra-rs does not see an external
 engine (`system cradle enabled`) restart, and a port that an external engine
 attaches itself gets its role when zebra-rs sends it.
 
-> **An unattached port is switched by the Linux bridge, which knows no
-> roles.** That covers a leaf whose role the engine has not acknowledged
-> (`show ebpf` says `held (E-Tree leaf role pending)`), every port while the
-> managed engine is down or starting, and every port at boot before cradle
-> starts. In those windows a leaf can reach other leaves through the bridge.
-> Check that `show ebpf` lists each leaf AC as attached before you rely on
-> the isolation.
+A port cradle has not attached is switched by the Linux bridge, which knows
+no roles. That covers a leaf whose role the engine has not acknowledged
+(`show ebpf` says `held (E-Tree leaf role pending)`), every port while the
+managed engine is down or starting, and every port at boot before cradle
+starts. So zebra-rs also guards each leaf AC in the bridge:
+
+* **`isolated on`, always** (`bridge -d link show` shows it). The bridge
+  never switches one isolated port to another, so whenever the bridge rather
+  than cradle switches a leaf, it still keeps it from the other leaves.
+* **Held in the `listening` state** while cradle should switch the leaf and
+  has not attached it with its role. A listening port neither learns nor
+  forwards, so nothing reaches or leaves the leaf through the bridge, toward
+  a remote leaf included. It goes back to `forwarding` once cradle has it.
+
+With the managed engine (`system ebpf enabled`), a leaf AC without
+`interface <name> ebpf enabled` is never attached, so it stays held and passes
+no traffic. With an external engine (`system cradle enabled`), such a port is
+one the engine may attach by itself, and zebra-rs cannot know whether it has,
+so it gets only the isolation. Removing a `leaf-interface` undoes both.
+
+> **What is left.** The bridge returns a port to forwarding when its carrier
+> or the bridge itself comes back up, and zebra-rs then holds it again a
+> moment later. At boot, a bridged leaf is unguarded until zebra-rs has
+> started. Bring leaf ACs up after zebra-rs if those moments matter.
 
 ## What zebra-rs advertises
 

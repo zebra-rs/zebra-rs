@@ -42,5 +42,6 @@ reaching z2's engine FDB.
 | A leaf reaches the root on its PE but not the other leaf | |
 | Only the MACs learned on leaf ACs are advertised as leaves | |
 | A respawned engine gets the roles back before the ports | |
+| A leaf AC the engine does not switch is guarded by the kernel bridge | |
 | A leaf AC turned into a root reaches the other leaf and loses its colour | |
 | Teardown topology | |

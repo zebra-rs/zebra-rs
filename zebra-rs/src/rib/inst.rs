@@ -461,6 +461,14 @@ pub enum Message {
     EtreeLeafArg {
         arg: u32,
     },
+    /// EVPN E-Tree: the kernel bridge's guard on a leaf AC while cradle
+    /// does not switch it (`FibHandle::bridge_port_etree_guard`), from the
+    /// cradle supervisor.
+    EtreeBridgePort {
+        ifindex: u32,
+        isolated: bool,
+        blocked: Option<bool>,
+    },
     /// EVPN E-Tree over SRv6: the leaf slot toward the PE whose End.DT2M
     /// SID for bridge domain `bd` is `sid` — BUM from local leaf ports only,
     /// sent to `leaf_sid` (that SID with the PE's leaf argument placed).
@@ -4429,6 +4437,15 @@ impl Rib {
             }
             Message::EtreeLeafArg { arg } => {
                 self.fib_handle.cradle_etree_leaf_arg(arg).await;
+            }
+            Message::EtreeBridgePort {
+                ifindex,
+                isolated,
+                blocked,
+            } => {
+                self.fib_handle
+                    .bridge_port_etree_guard(ifindex, isolated, blocked)
+                    .await;
             }
             Message::CradleReplAddSrv6Leaf { bd, sid, leaf_sid } => {
                 self.fib_handle
