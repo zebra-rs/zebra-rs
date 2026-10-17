@@ -834,19 +834,22 @@ module zebra-bgp-evpn {
       ext:help "EVPN E-Tree: root and leaf attachment circuits (RFC 8317)";
       description
         "EVPN E-Tree (RFC 8317): every attachment circuit is a root or a
-         leaf, and a leaf never reaches another leaf. An AC not listed
+         leaf, and a leaf may not reach another leaf. An AC not listed
          as a leaf is a root, so a PE with no leaf ACs needs no E-Tree
          configuration. Needs the cradle data plane (`system ebpf
-         enabled` or `system cradle enabled`); a commit without it is
-         refused, because the kernel bridge cannot isolate leaves.
+         enabled` or `system cradle enabled`): a commit without it is
+         refused, because the kernel bridge cannot isolate leaves (a
+         startup config is only warned about).
 
-         Enforced: leaf to leaf on one PE, and known unicast from a leaf
-         to a MAC behind a leaf on another PE. A leaf's broadcast,
-         multicast and unknown unicast are kept from leaves on other PEs
-         too: over MPLS by a leaf label (RFC 8317 §4.2), over SRv6 by a
-         leaf argument of the End.DT2M SID (RFC 9819), and over VXLAN by
-         the IMET of a PE whose ACs are all leaves, which is exact
-         unless two PEs in an EVI each have both roots and leaves.";
+         Enforced by cradle on the ports it has attached: leaf to leaf on
+         one PE, and known unicast from a leaf to a MAC behind a leaf on
+         another PE. A leaf's broadcast, multicast and unknown unicast
+         are kept from leaves on other PEs too: over MPLS by a leaf label
+         (RFC 8317 §4.2), over SRv6 by a leaf argument of the End.DT2M
+         SID (RFC 9819), and over VXLAN by the IMET of a PE whose ACs are
+         all leaves, which is not exact between two PEs that each have
+         both roots and leaves. A port cradle has not attached is
+         switched by the kernel bridge, which knows no roles.";
       list leaf-interface {
         ext:help "A leaf attachment circuit";
         key "name";
