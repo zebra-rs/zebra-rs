@@ -563,6 +563,25 @@ pub struct RepairPath {
     pub segs: Vec<SrSegment>,
 }
 
+impl RepairPath {
+    /// Split off a leading adjacency segment out of the computing
+    /// router `s` itself.
+    ///
+    /// `make_repair_list` starts the list with `AdjSid(s, n, via)`
+    /// when the post-convergence path leaves P-space at its first hop.
+    /// `s` executes that segment by sending the packet over the link,
+    /// so the segment is not imposed: its SID is local to `s`, and `n`
+    /// would read it in its own label space. Returns the far end `n`,
+    /// which is the router the repair goes to (on a LAN, the member it
+    /// has to cross to), and the segments the packet carries.
+    pub fn split_local_adjacency(&self, s: usize) -> (Option<usize>, &[SrSegment]) {
+        match self.segs.split_first() {
+            Some((SrSegment::AdjSid(from, to, _), rest)) if *from == s => (Some(*to), rest),
+            _ => (None, &self.segs),
+        }
+    }
+}
+
 /// Build the TI-LFA repair paths for one destination from
 /// already-computed parts: the P-space / Q-space vertex sets and the
 /// destination's PC paths + first-hop links out of the x-excluded SPF
@@ -1662,5 +1681,49 @@ mod tests {
                 assert!(f_hops.contains(&chain[0]), "vertex {id} chain {chain:?}");
             }
         }
+    }
+
+    /// R3 reaches N1 through D. Protecting D, its other neighbor R2 is
+    /// no P-node, since R3's own path to R2 runs through D too. So the
+    /// repair list starts with R3's own adjacency, which the packet
+    /// does not carry: R2 is where the repair goes.
+    #[test]
+    fn repair_starting_on_the_source_adjacency_splits_it_off() {
+        let graph = tilfa_graph();
+        let (n1, r2, r3, d) = (1, 5, 6, 7);
+        let repair = tilfa(&graph, r3, n1, &[d]).into_iter().next().unwrap();
+        assert_eq!(repair.first_hop, r2);
+        assert_eq!(repair.segs, [SrSegment::AdjSid(r3, r2, None)]);
+        assert_eq!(repair.split_local_adjacency(r3), (Some(r2), &[][..]));
+
+        // On a LAN the adjacency names the member to cross to, and
+        // the segments after it are carried.
+        let lan = RepairPath {
+            first_hop: 9,
+            first_hop_link_id: 0,
+            segs: vec![SrSegment::AdjSid(0, 2, Some(9)), SrSegment::NodeSid(3)],
+        };
+        assert_eq!(
+            lan.split_local_adjacency(0),
+            (Some(2), &[SrSegment::NodeSid(3)][..])
+        );
+    }
+
+    /// A repair list that starts with a Node-SID, or with another
+    /// router's adjacency, is carried whole.
+    #[test]
+    fn repair_starting_elsewhere_is_carried_whole() {
+        let graph = tilfa_graph();
+        let (s, n1, d) = (0, 1, 7);
+        let repair = tilfa(&graph, s, d, &[n1]).into_iter().next().unwrap();
+        assert!(matches!(repair.segs.first(), Some(SrSegment::NodeSid(_))));
+        assert_eq!(repair.split_local_adjacency(s), (None, &repair.segs[..]));
+
+        let other = RepairPath {
+            first_hop: 4,
+            first_hop_link_id: 0,
+            segs: vec![SrSegment::AdjSid(4, 5, None)],
+        };
+        assert_eq!(other.split_local_adjacency(s), (None, &other.segs[..]));
     }
 }

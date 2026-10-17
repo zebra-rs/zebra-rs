@@ -45,6 +45,7 @@ Test Topology (metric shown where != 1; loopback 10.0.0.X / SID X00
 |----------|--------|
 | Build the TI-LFA topology and confirm adjacencies + routes | |
 | SR-MPLS labels and a TI-LFA repair are installed on the source | |
+| A repair that starts on the router's own adjacency pushes no Adj-SID for it | |
 | Source reaches the destination over the primary path | |
 | Fast-reroute survives the primary link failure (s-n1) | |
 | TI-LFA compute-mode aggressive computes the same repair in parallel | |

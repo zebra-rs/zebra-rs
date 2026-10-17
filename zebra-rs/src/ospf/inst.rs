@@ -16287,7 +16287,7 @@ fn build_rib_from_spf(
             let Some(repair) = tilfa_result.get(&dest).and_then(|paths| paths.first()) else {
                 continue;
             };
-            let Some(mut backup) = build_repair_path_mpls(top, area, repair) else {
+            let Some(mut backup) = build_repair_path_mpls(top, area, source, repair) else {
                 continue;
             };
             // A repair list only steers the packet to its release
@@ -17693,7 +17693,8 @@ fn build_rib6_from_spf(
                 super::tilfa::build_repair_path_srv6_v3(top, area, repair)
                     .map(super::tilfa::RepairBackupV3::Srv6)
             } else {
-                build_repair_path_mpls_v3(top, area, repair).map(super::tilfa::RepairBackupV3::Mpls)
+                build_repair_path_mpls_v3(top, area, source, repair)
+                    .map(super::tilfa::RepairBackupV3::Mpls)
             };
             let Some(backup) = backup else {
                 continue;

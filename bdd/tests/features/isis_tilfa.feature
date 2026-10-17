@@ -85,6 +85,20 @@ Feature: IS-IS TI-LFA fast-reroute over SR-MPLS
     Then show command "show isis route detail" in namespace "s" should contain "Prefix-SID:"
     And show command "show isis route detail" in namespace "s" should contain "Backup path: TI-LFA"
 
+  Scenario: A repair that starts on the router's own adjacency pushes no Adj-SID for it
+    Given the test topology exists
+    # r3 reaches n1 through d (r3-d-n1, cost 2). Protecting d, its only
+    # other neighbour r2 is no P-node: r3's own shortest path to r2 also
+    # runs through d. So the repair list starts at r3 itself, with r3's
+    # Adj-SID for r3->r2. That segment is the link the repair leaves on.
+    # Its label is r3's own, and r2 would read it in its own label space,
+    # so the repair pushes only n1's Prefix-SID 16200. The links here are
+    # LANs, so the adjacency also names r2 as the member to send to.
+    Then show command "show isis ti-lfa" in namespace "r3" should eventually contain "AdjSid(r3, r2"
+    And show command "show isis repair-list" in namespace "r3" should contain "[16200]"
+    And show command "show ip route 10.0.0.2/32" in namespace "r3" should contain "r3-r2, label 16200,"
+    And kernel route "10.0.0.2" in namespace "r3" should eventually contain "encap mpls  16200 via 192.168.0.33 dev r3-r2"
+
   Scenario: Source reaches the destination over the primary path
     Given the test topology exists
     # s -> d primary is s-n1-d (cost 2).
