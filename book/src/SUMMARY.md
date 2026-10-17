@@ -60,6 +60,7 @@
   - [EVPN over SRv6](ch-02-41-bgp-evpn-srv6.md)
   - [EVPN Single-Active Multihoming](ch-02-45-bgp-evpn-single-active.md)
   - [EVPN Duplicate Address Detection](ch-02-46-bgp-evpn-dup-addr.md)
+  - [EVPN E-Tree (RFC 8317)](ch-02-47-bgp-evpn-e-tree.md)
   - [Mobile User Plane (MUP) & the MUP Controller](ch-02-35-bgp-mup.md)
   - [Route Target Constraint (RTC)](ch-02-07-bgp-rtc.md)
   - [Inter-AS L3VPN](ch-02-18-bgp-interas.md)

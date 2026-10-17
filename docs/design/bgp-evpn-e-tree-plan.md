@@ -873,6 +873,37 @@ which zebra-rs pins since #2534. It is §8.6 as decided (D6):
   getting the argument again; the install prefix. Seven mutants each fail
   one.
 
+**Status: phase 6 docs are written** on `etree-docs`; the interop lab is
+not run.
+- **Book.** `book/src/ch-02-47-bgp-evpn-e-tree.md`: configuration, what an
+  AC is, what is advertised, who drops what, BUM per encapsulation (with
+  the VXLAN mixed-PE limit and the SRv6 argument-length gap), multihomed
+  leaves and the role conflict, `show`, the receive rules, what is not
+  supported, and that interop is zebra-rs against zebra-rs only. Every
+  sentence was checked against the code, not this plan, in two passes.
+- **What the check found.**
+  - Every SRv6 leaf route was logged as a reserved label (fixed in #2541).
+  - **Invariant 6 (§7.3) holds only for attached ports.** "Held" means not
+    attached to cradle (`etree_held` in `reconcile_ports`), and an
+    unattached AC is an ordinary kernel bridge port, which switches leaf to
+    leaf. That window covers a pending role, the managed engine being down
+    or starting, and boot before cradle. The chapter says so; closing it is
+    open.
+  - A P2MP BUM tunnel or Assisted Replication on an E-Tree EVI is neither
+    refused nor warned about, and a leaf's BUM over it is unmarked.
+  - Smaller gaps, not fixed: `bum_filtered` in the JSON is always true; a
+    deleted leaf AC keeps its old ifindex in `show bgp evpn etree` (no
+    `LinkDel` cleanup of `link_index_by_name`); the SRv6 leaf route's EC
+    renders as `etree:-`, the form `Display` uses for an invalid one.
+- **Matrix.** `bgp-evpn-support-status.md` gains an E-Tree row per
+  encapsulation, naming the function behind each claim, and a row for the
+  shared checks and the interop state. The stale MPLS split-horizon cell
+  (shipped in #2347) is corrected on the way.
+- **YANG.** The `etree` container's description no longer says BUM is
+  filtered over MPLS only.
+- **Lab.** Not run: no Arista cEOS, Nokia or Juniper image is available
+  here. Until it runs, risk 1 (§11) stands.
+
 **Review lessons carried over from the single-active arc** (see that plan
 and the memory notes):
 - Every negative assertion ("leaf did not receive") is first shown to fail
