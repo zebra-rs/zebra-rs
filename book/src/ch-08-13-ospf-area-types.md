@@ -166,15 +166,16 @@ immediately.
 
 ## Observing area types
 
-`show ospf neighbor` and `show ospf database` render the OSPF
-options byte per adjacency/LSA — the `E` flag is clear on stub and
-NSSA links and the `N/P` flag is set on NSSA links, which is the
-quickest way to confirm both ends agree on the area type. Type-7
-LSAs appear as `NSSA External` in `show ospf database` (v3:
-`NSSA-LSA` in `show ospfv3 database`). Translator election has no
-dedicated show field; whether translation is running is observable
-on the backbone side, where translated Type-5s appear in
-`show ospf database` and their prefixes in `show ospf route`.
+`show ospf neighbor detail` renders the options byte each neighbor
+advertised — the `E` flag is clear on stub and NSSA links and the `N/P`
+flag is set on NSSA links, which is the quickest way to confirm both
+ends agree on the area type. `show ospf database` does not list Type-7
+or Type-5 LSAs (see
+[OSPFv2 Show Commands](ch-08-18-ospf-show.md#show-ospf-database-detail));
+`show ospfv3 database` lists them as `NSSA-LSA` and `AS-External-LSA`.
+Translator election has no dedicated show field; whether translation is
+running is observable on the backbone side, where the translated
+prefixes appear in `show ospf route`.
 
 ## OSPFv3
 

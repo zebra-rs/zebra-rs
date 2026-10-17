@@ -34,4 +34,5 @@ This chapter documents the OSPFv3 configuration surface. Where
 behavior is identical to OSPFv2 the pages summarize and link to the
 v2 chapter; v3-specific behavior — link-local transport, the LSA
 model, SRv6, and the current v2/v3 feature asymmetries — is covered
-in full.
+in full. Every `show ospfv3` command is listed in
+[OSPFv3 Show Commands](ch-15-18-ospfv3-show.md).
