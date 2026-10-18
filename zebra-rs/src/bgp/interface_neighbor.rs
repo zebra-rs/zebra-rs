@@ -370,20 +370,8 @@ fn teardown_peer(bgp: &mut Bgp, ifindex: u32) {
         // member sets need an explicit detach or the freed ident
         // lingers and a future slot reuse inherits the group.
         super::update_group::detach(&mut bgp.update_groups, &mut bgp.peers, peer_idx);
-    }
-    // Release the peer's BFD session before it leaves the map. The BFD
-    // reconcile only visits peers still present, so nothing else would
-    // unsubscribe the tracked key.
-    if let (Some(key), Some(client_tx)) = (
-        bgp.peers
-            .get_by_key(&PeerKey::Interface(ifindex))
-            .and_then(|p| p.bfd_session_key),
-        bgp.bfd_client_tx.as_ref(),
-    ) {
-        let _ = client_tx.send(crate::bfd::inst::ClientReq::Unsubscribe {
-            client: "bgp".to_string(),
-            key,
-        });
+        // Release the peer's BFD session before it leaves the map.
+        super::config::bfd_release_ident(bgp, peer_idx);
     }
     // Unregister the policy-list / prefix-set watches the neighbor-group
     // inheritance registered under the peer's ident. A re-created link

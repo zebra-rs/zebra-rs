@@ -428,6 +428,9 @@ pub(super) fn remove_peer_full(bgp: &mut Bgp, addr: IpAddr) -> Option<()> {
     // sets must be detached explicitly or the freed ident lingers
     // and a future slot reuse inherits the group.
     super::update_group::detach(&mut bgp.update_groups, &mut bgp.peers, peer_idx);
+    // A whole-neighbor delete doesn't fire the per-leaf `bfd` delete,
+    // and an instance-wide `bfd enabled` has none to fire.
+    bfd_release_ident(bgp, peer_idx);
     bgp.peers.remove(&addr);
     // Keep the shared listener's TCP MSS minimum in step with the peer
     // set: a whole-neighbor delete may drop the peer that owned the
@@ -1792,6 +1795,22 @@ fn config_peer_bfd_detect_offload(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -
         peer.config.bfd.detect_offload = op.is_set().then_some(offload);
     }
     bfd_apply(bgp, addr)
+}
+
+/// Release the BFD session peer `ident` tracks, before the peer leaves
+/// the map. The BFD reconcile only visits peers still present, so
+/// nothing else would unsubscribe the key. Shared by the addressed
+/// ([`remove_peer_full`]) and the interface-neighbor peer removals.
+pub(super) fn bfd_release_ident(bgp: &Bgp, ident: usize) {
+    let Some(key) = bgp.peers.get_by_idx(ident).and_then(|p| p.bfd_session_key) else {
+        return;
+    };
+    if let Some(client_tx) = bgp.bfd_client_tx.as_ref() {
+        let _ = client_tx.send(ClientReq::Unsubscribe {
+            client: "bgp".to_string(),
+            key,
+        });
+    }
 }
 
 /// Re-reconcile BFD for every neighbor — used by the instance-level
@@ -6727,6 +6746,26 @@ mod bfd_wiring_tests {
             .unwrap();
         let req = bfd_rx.try_recv().expect("unsubscribe must follow");
         match req {
+            ClientReq::Unsubscribe { client, key } => {
+                assert_eq!(client, "bgp");
+                assert_eq!(key.remote, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)));
+            }
+            other => panic!("expected Unsubscribe, got {other:?}"),
+        }
+    }
+
+    /// Deleting a neighbor whose session comes from the instance-wide
+    /// `bfd enabled` sends an `Unsubscribe`: no per-neighbor leaf delete
+    /// fires, and the reconcile only visits peers still present.
+    #[tokio::test]
+    async fn neighbor_delete_sends_unsubscribe() {
+        let (mut bgp, mut bfd_rx) = fresh_bgp_with_bfd();
+        config_peer(&mut bgp, arg_words(&["10.0.0.3"]), ConfigOp::Set).unwrap();
+        config_bgp_bfd_enable(&mut bgp, arg_words(&["true"]), ConfigOp::Set).unwrap();
+        let _ = bfd_rx.try_recv().expect("subscribe arrived first");
+
+        config_peer(&mut bgp, arg_words(&["10.0.0.3"]), ConfigOp::Delete).unwrap();
+        match bfd_rx.try_recv().expect("unsubscribe must follow") {
             ClientReq::Unsubscribe { client, key } => {
                 assert_eq!(client, "bgp");
                 assert_eq!(key.remote, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)));
