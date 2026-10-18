@@ -1,0 +1,11 @@
+# z2 with its neighbor deleted: the DUT's dynamic peer loses its
+# session and is reaped.
+interface:
+- if-name: i1
+  ipv4:
+    address: 192.168.0.2/24
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 192.168.0.2

@@ -9606,6 +9606,46 @@ mod neighbor_group_wiring_tests {
         assert!(ibgp.multihop, "now iBGP again");
     }
 
+    /// Under an instance-wide `bfd enabled`, a dynamic peer subscribes
+    /// its BFD session on accept, not on the next BFD config change or
+    /// address event.
+    #[tokio::test]
+    async fn dynamic_peer_accept_subscribes_its_bfd_session() {
+        use super::super::dynamic_neighbors::{
+            config_listen_range, config_listen_range_neighbor_group,
+        };
+        use super::super::peer::try_dynamic_accept;
+
+        let (mut bgp, mut bfd_rx) = fresh_bgp_with_bfd();
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["G", "65002"]), ConfigOp::Set)
+            .unwrap();
+        config_listen_range(&mut bgp, arg_words(&["10.1.0.0/24"]), ConfigOp::Set).unwrap();
+        config_listen_range_neighbor_group(
+            &mut bgp,
+            arg_words(&["10.1.0.0/24", "G"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        config_bgp_bfd_enable(&mut bgp, arg_words(&["true"]), ConfigOp::Set).unwrap();
+        assert!(bfd_rx.try_recv().is_err(), "no peer yet");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let _client = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let source: IpAddr = "10.1.0.7".parse().unwrap();
+        assert!(try_dynamic_accept(&mut bgp, source, server).is_none());
+
+        let key = match bfd_rx.try_recv().expect("the accept subscribed") {
+            ClientReq::Subscribe { key, .. } => key,
+            other => panic!("expected Subscribe, got {other:?}"),
+        };
+        assert_eq!(key.remote, source);
+        assert_eq!(bgp.peers.get(&source).unwrap().bfd_session_key, Some(key));
+        assert!(bfd_rx.try_recv().is_err(), "one Subscribe");
+    }
+
     /// The dynamic-neighbor reaper releases what the peer held: the BFD
     /// session an instance-wide `bfd enabled` subscribed, and the policy
     /// watches its group registered. Each new source address

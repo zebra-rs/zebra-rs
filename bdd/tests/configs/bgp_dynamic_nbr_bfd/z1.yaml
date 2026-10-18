@@ -1,0 +1,26 @@
+# z1 — the DUT. No static neighbors: z2's session arrives via the
+# listen-range 192.168.0.0/24, which materializes a passive peer
+# inheriting PEERS (remote-as 65002, ipv4 enabled). The dynamic peer
+# has no `bfd` leaf of its own, so the instance-wide `bfd enabled` is
+# the only thing that attaches its single-hop BFD session.
+interface:
+- if-name: i1
+  ipv4:
+    address: 192.168.0.1/24
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 192.168.0.1
+    bfd:
+      enabled: true
+    neighbor-group:
+    - name: PEERS
+      remote-as: 65002
+      afi-safi:
+      - name: ipv4
+        enabled: true
+    dynamic-neighbors:
+      listen-range:
+      - prefix: 192.168.0.0/24
+        neighbor-group: PEERS
