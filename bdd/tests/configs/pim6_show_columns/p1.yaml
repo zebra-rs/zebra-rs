@@ -1,0 +1,8 @@
+# p1: PIMv6 on eth1 toward p2; its link-local there is fixed by the
+# feature (fe80::1111:2222:3333:4401).
+router:
+  pim:
+    ipv6:
+      interface:
+      - if-name: eth1
+        enabled: true
