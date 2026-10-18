@@ -164,6 +164,14 @@ pub struct RouteTable {
     pub routes: Vec<RouteEntry>,
 }
 
+/// The interface a `Nexthop::Link` route goes out of. Connected and
+/// kernel routes keep it in the entry (`RibEntry::ifindex`), with the
+/// nexthop's own left 0; the JSON and detail views used to name that 0,
+/// as `unknown`.
+fn link_ifindex(e: &RibEntry, ifindex: u32) -> u32 {
+    if ifindex != 0 { ifindex } else { e.ifindex }
+}
+
 // Helper function to convert RibEntry to JSON format
 fn rib_entry_to_json(rib: &Rib, prefix: &Ipv4Net, e: &RibEntry) -> RouteEntry {
     let protocol = format!("{:?}", e.rtype).to_lowercase();
@@ -173,7 +181,7 @@ fn rib_entry_to_json(rib: &Rib, prefix: &Ipv4Net, e: &RibEntry) -> RouteEntry {
         Nexthop::Link(ifindex) => {
             vec![NexthopJson {
                 address: None,
-                interface: rib.link_name(*ifindex),
+                interface: rib.link_name(link_ifindex(e, *ifindex)),
                 weight: None,
                 metric: None,
                 mpls_labels: vec![],
@@ -323,7 +331,7 @@ fn rib_entry_to_json_v6(rib: &Rib, prefix: &Ipv6Net, e: &RibEntry) -> RouteEntry
         Nexthop::Link(ifindex) => {
             vec![NexthopJson {
                 address: None,
-                interface: rib.link_name(*ifindex),
+                interface: rib.link_name(link_ifindex(e, *ifindex)),
                 weight: None,
                 metric: None,
                 mpls_labels: vec![],
@@ -490,8 +498,9 @@ pub fn rib_entry_show(
         .unwrap();
     } else {
         match &e.nexthop {
-            Nexthop::Link(_ifindex) => {
-                let _ = writeln!(buf, " via {}, {}", rib.link_name(e.ifindex), uptime);
+            Nexthop::Link(ifindex) => {
+                let iface = rib.link_name(link_ifindex(e, *ifindex));
+                let _ = writeln!(buf, " via {}, {}", iface, uptime);
             }
             Nexthop::Blackhole(_) => {
                 let _ = writeln!(buf, " is a discard (blackhole), {}", uptime);
@@ -595,8 +604,9 @@ pub fn rib_entry_show_v6(
         .unwrap();
     } else {
         match &e.nexthop {
-            Nexthop::Link(_ifindex) => {
-                let _ = writeln!(buf, " via {}, {}", rib.link_name(e.ifindex), uptime);
+            Nexthop::Link(ifindex) => {
+                let iface = rib.link_name(link_ifindex(e, *ifindex));
+                let _ = writeln!(buf, " via {}, {}", iface, uptime);
             }
             Nexthop::Blackhole(_) => {
                 let _ = writeln!(buf, " is a discard (blackhole), {}", uptime);
@@ -992,10 +1002,11 @@ fn write_descriptor_block_v6(buf: &mut String, rib: &Rib, uni: &NexthopUni, role
 
 /// Walk a `Nexthop` and emit one descriptor block per leg. Handles
 /// the `List` case so backups get the right role tag.
-fn write_nexthop_blocks_v4(buf: &mut String, rib: &Rib, nh: &Nexthop) {
-    match nh {
+fn write_nexthop_blocks_v4(buf: &mut String, rib: &Rib, e: &RibEntry) {
+    match &e.nexthop {
         Nexthop::Link(ifindex) => {
-            let _ = writeln!(buf, "    directly attached via {}", rib.link_name(*ifindex));
+            let iface = rib.link_name(link_ifindex(e, *ifindex));
+            let _ = writeln!(buf, "    directly attached via {}", iface);
         }
         Nexthop::Blackhole(_) => {
             let _ = writeln!(buf, "    discard (blackhole)");
@@ -1025,10 +1036,11 @@ fn write_nexthop_blocks_v4(buf: &mut String, rib: &Rib, nh: &Nexthop) {
     }
 }
 
-fn write_nexthop_blocks_v6(buf: &mut String, rib: &Rib, nh: &Nexthop) {
-    match nh {
+fn write_nexthop_blocks_v6(buf: &mut String, rib: &Rib, e: &RibEntry) {
+    match &e.nexthop {
         Nexthop::Link(ifindex) => {
-            let _ = writeln!(buf, "    directly attached via {}", rib.link_name(*ifindex));
+            let iface = rib.link_name(link_ifindex(e, *ifindex));
+            let _ = writeln!(buf, "    directly attached via {}", iface);
         }
         Nexthop::Blackhole(_) => {
             let _ = writeln!(buf, "    discard (blackhole)");
@@ -1108,7 +1120,7 @@ pub fn rib_entry_show_detail(rib: &Rib, prefix: &Ipv4Net, e: &RibEntry) -> Strin
     }
 
     let _ = writeln!(buf, "  Routing Descriptor Blocks");
-    write_nexthop_blocks_v4(&mut buf, rib, &e.nexthop);
+    write_nexthop_blocks_v4(&mut buf, rib, e);
     buf
 }
 
@@ -1151,7 +1163,7 @@ pub fn rib_entry_show_v6_detail(rib: &Rib, prefix: &Ipv6Net, e: &RibEntry) -> St
     }
 
     let _ = writeln!(buf, "  Routing Descriptor Blocks");
-    write_nexthop_blocks_v6(&mut buf, rib, &e.nexthop);
+    write_nexthop_blocks_v6(&mut buf, rib, e);
     buf
 }
 
@@ -2965,15 +2977,19 @@ mod tests {
             addr: addr.parse().unwrap(),
             ..Default::default()
         };
+        let entry = |nexthop| RibEntry {
+            nexthop,
+            ..RibEntry::new(crate::rib::RibType::Ospf)
+        };
         let mut buf = String::new();
-        write_nexthop_blocks_v4(&mut buf, &rib, &Nexthop::Uni(uni("10.0.0.2")));
+        write_nexthop_blocks_v4(&mut buf, &rib, &entry(Nexthop::Uni(uni("10.0.0.2"))));
         assert!(buf.starts_with("    10.0.0.2, via unknown\n"), "{buf}");
         let multi = Nexthop::Multi(crate::rib::nexthop::NexthopMulti {
             nexthops: vec![uni("10.0.0.2"), uni("10.0.0.3")],
             ..Default::default()
         });
         let mut buf = String::new();
-        write_nexthop_blocks_v6(&mut buf, &rib, &multi);
+        write_nexthop_blocks_v6(&mut buf, &rib, &entry(multi));
         assert!(!buf.contains("Protected"), "{buf}");
         assert!(buf.contains("    10.0.0.3, via unknown\n"), "{buf}");
         // A primary and its backup still say which is which.
@@ -2984,11 +3000,60 @@ mod tests {
             ],
         });
         let mut buf = String::new();
-        write_nexthop_blocks_v4(&mut buf, &rib, &list);
+        write_nexthop_blocks_v4(&mut buf, &rib, &entry(list));
         assert!(buf.contains("10.0.0.2, via unknown, Protected\n"), "{buf}");
         assert!(
             buf.contains("10.0.0.3, via unknown, Backup (TI-LFA)\n"),
             "{buf}"
+        );
+    }
+
+    /// A connected or kernel route names its interface in every view.
+    /// Its `Nexthop::Link` holds 0 and the entry holds the interface;
+    /// the JSON and detail views read the 0, as `"interface": "unknown"`
+    /// and `directly attached via unknown`.
+    #[tokio::test]
+    async fn link_routes_name_their_interface() {
+        use crate::rib::RibType;
+        let mut rib = Rib::new(false).expect("rib");
+        rib.links.insert(
+            7,
+            crate::rib::Link::from(crate::fib::message::FibLink {
+                index: 7,
+                name: "eth7".to_string(),
+                mtu: 1500,
+                ..Default::default()
+            }),
+        );
+        let kernel = RibEntry {
+            ifindex: 7,
+            ..RibEntry::new(RibType::Kernel)
+        };
+        let connected = RibEntry {
+            ifindex: 7,
+            ..RibEntry::new(RibType::Connected)
+        };
+        let v4: Ipv4Net = "10.9.9.0/24".parse().unwrap();
+        let v6: Ipv6Net = "2001:db8:9::/64".parse().unwrap();
+        for e in [&kernel, &connected] {
+            assert_eq!(
+                rib_entry_to_json(&rib, &v4, e).nexthops[0].interface,
+                "eth7"
+            );
+            assert_eq!(
+                rib_entry_to_json_v6(&rib, &v6, e).nexthops[0].interface,
+                "eth7"
+            );
+        }
+        let detail = rib_entry_show_detail(&rib, &v4, &kernel);
+        assert!(
+            detail.contains("    directly attached via eth7\n"),
+            "{detail}"
+        );
+        let detail = rib_entry_show_v6_detail(&rib, &v6, &kernel);
+        assert!(
+            detail.contains("    directly attached via eth7\n"),
+            "{detail}"
         );
     }
 

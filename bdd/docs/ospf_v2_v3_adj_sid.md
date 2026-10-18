@@ -14,6 +14,10 @@ r1 and r2 run both versions over one dual-stack point-to-point link,
 both with SR-MPLS: each router has one v2 and one v3 adjacency, so it
 must hold two Adjacency-SID labels, 15000 and 15001.
 
+The RIB views show what was installed: each Adjacency-SID's index in
+the SRLB, the label stack of each nexthop, and no protection role on
+a path with no backup.
+
 ## Config Files
 
 - r1.yaml: OSPFv2 and OSPFv3 with SR-MPLS; loopback Prefix-SIDs 16011 (v2), 16001 (v3).
@@ -24,4 +28,8 @@ must hold two Adjacency-SID labels, 15000 and 15001.
 | Scenario | Result |
 |----------|--------|
 | Each router installs one Adjacency-SID label per OSPF version | |
+| The ILM shows each Adjacency-SID's index in the SRLB | |
+| show nexthop names each label stack | |
+| A path with no backup is not tagged Protected | |
+| The route legend lists only codes a route can carry | |
 | Teardown | |
