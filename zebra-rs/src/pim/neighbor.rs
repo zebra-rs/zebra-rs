@@ -63,7 +63,7 @@ impl<A: PimAf> Pim<A> {
         if !link.enabled || link.is_my_addr(&src) {
             return;
         }
-        if self.link_config(&link.name).passive() {
+        if link.is_passive(&self.link_config(&link.name)) {
             return;
         }
 

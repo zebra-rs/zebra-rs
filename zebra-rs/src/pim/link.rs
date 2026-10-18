@@ -70,6 +70,10 @@ pub struct PimLink<A: PimAf = Ipv4> {
     pub ifindex: u32,
     pub name: String,
     pub link_up: bool,
+    /// A loopback (`IFF_LOOPBACK`), which has no segment to speak on: a
+    /// Hello sent there comes straight back to us, from whatever source
+    /// the kernel picked. See [`Self::is_passive`].
+    pub loopback: bool,
     /// Family addresses on the link; the first is the primary address
     /// used as our Hello source identity and DR candidate.
     pub addrs: Vec<A::Prefix>,
@@ -89,6 +93,7 @@ impl<A: PimAf> PimLink<A> {
             ifindex: link.index,
             name: link.name.clone(),
             link_up: link.is_up(),
+            loopback: link.is_loopback(),
             addrs,
             enabled: false,
             gen_id: 0,
@@ -96,6 +101,18 @@ impl<A: PimAf> PimLink<A> {
             nbrs: BTreeMap::new(),
             hello_timer: None,
         }
+    }
+
+    /// Whether the interface runs no Hello protocol: it sends and
+    /// accepts no Hellos, so it forms no neighbors. True when the
+    /// operator set `passive`, and implicitly for a loopback, as in
+    /// OSPF and IS-IS. A loopback's own Hellos come straight back, and
+    /// would be a neighbor whenever their source is not one of its
+    /// addresses: `127.0.0.1` is host-scope, so the kernel picks another
+    /// interface's address, `0.0.0.0` before there is one, or a
+    /// configured `lo` address before its AddrAdd reaches us.
+    pub fn is_passive(&self, config: &LinkConfig) -> bool {
+        self.loopback || config.passive()
     }
 
     pub fn primary_addr(&self) -> Option<A::Addr> {
@@ -429,5 +446,34 @@ impl<A: PimAf> Pim<A> {
         self.reconcile(addr.ifindex);
         // Losing the primary address changes our DR candidate.
         self.dr_election(addr.ifindex);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use netlink_packet_route::link::LinkFlags;
+
+    use super::*;
+    use crate::fib::FibLink;
+
+    fn link(name: &str, flags: LinkFlags) -> PimLink {
+        PimLink::from_link(&Link::from(FibLink {
+            index: 1,
+            name: name.to_string(),
+            flags,
+            ..Default::default()
+        }))
+    }
+
+    #[test]
+    fn a_loopback_is_passive() {
+        let config = LinkConfig::default();
+        assert!(link("lo", LinkFlags::Loopback | LinkFlags::Up).is_passive(&config));
+        assert!(!link("eth0", LinkFlags::Up).is_passive(&config));
+        let passive = LinkConfig {
+            passive: Some(true),
+            ..Default::default()
+        };
+        assert!(link("eth0", LinkFlags::Up).is_passive(&passive));
     }
 }
