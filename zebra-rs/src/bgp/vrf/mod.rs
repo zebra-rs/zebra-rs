@@ -28,7 +28,7 @@ pub use inst::{
     dispatch_withdraw_import_v6, vrf_emit_export, vrf_emit_export_v6, vrf_emit_withdraw,
     vrf_emit_withdraw_v6, withdraw_mup_segment, withdraw_mup_session,
 };
-pub use msg::BgpGlobalMsg;
+pub use msg::{BgpGlobalMsg, ImportSource};
 pub use spawn::{
     BgpVrfHandle, VrfNeighborDiff, compute_vrf_diff, compute_vrf_neighbor_diff,
     compute_vrf_respawn, despawn_bgp_vrf, spawn_bgp_vrf,

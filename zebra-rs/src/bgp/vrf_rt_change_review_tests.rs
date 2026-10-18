@@ -18,7 +18,7 @@ use crate::bgp::route::{
     BgpRib, BgpRibType, ORIGINATED_PEER, VpnNexthop, route_advertise_to_peers,
     route_advertise_to_peers_vpnv6,
 };
-use crate::bgp::vrf::msg::BgpVrfMsg;
+use crate::bgp::vrf::msg::{BgpVrfMsg, ImportSource};
 use crate::bgp::vrf_config::BgpVrfConfig;
 use crate::context::Task;
 use bgp_packet::{
@@ -155,13 +155,13 @@ fn told(rx: &mut VrfRx) -> Vec<(&'static str, String, String)> {
             BgpVrfMsg::ImportV4 { rd, prefix, .. } => {
                 out.push(("import", rd.to_string(), prefix.to_string()))
             }
-            BgpVrfMsg::WithdrawImport { rd, prefix } => {
+            BgpVrfMsg::WithdrawImport { rd, prefix, .. } => {
                 out.push(("withdraw", rd.to_string(), prefix.to_string()))
             }
             BgpVrfMsg::ImportV6 { rd, prefix, .. } => {
                 out.push(("import", rd.to_string(), prefix.to_string()))
             }
-            BgpVrfMsg::WithdrawImportV6 { rd, prefix } => {
+            BgpVrfMsg::WithdrawImportV6 { rd, prefix, .. } => {
                 out.push(("withdraw", rd.to_string(), prefix.to_string()))
             }
             _ => {}
@@ -234,12 +234,26 @@ fn check_type5_import_rt_change(prefix: ipnet::IpNet, remove: bool) {
         vrf_registry: &bgp.vrf_registry,
     };
     match prefix {
-        ipnet::IpNet::V4(p) => {
-            super::super::vrf::dispatch_import_v4(&dispatcher, rd, p, &attr, 100, &[], None)
-        }
-        ipnet::IpNet::V6(p) => {
-            super::super::vrf::dispatch_import_v6(&dispatcher, rd, p, &attr, 100, &[], None)
-        }
+        ipnet::IpNet::V4(p) => super::super::vrf::dispatch_import_v4(
+            &dispatcher,
+            rd,
+            super::super::vrf::ImportSource::Evpn,
+            p,
+            &attr,
+            100,
+            &[],
+            None,
+        ),
+        ipnet::IpNet::V6(p) => super::super::vrf::dispatch_import_v6(
+            &dispatcher,
+            rd,
+            super::super::vrf::ImportSource::Evpn,
+            p,
+            &attr,
+            100,
+            &[],
+            None,
+        ),
     }
     let before = told(&mut blue);
     assert_eq!(
@@ -268,17 +282,18 @@ async fn type5_v4_import_rt_added_imports_the_held_route() {
     check_type5_import_rt_change("10.24.99.0/24".parse().unwrap(), false);
 }
 
-/// A VPN route and a received Type-5 route share `(RD, prefix)` — the key
-/// the VRF holds one imported path under, whichever table it came from —
-/// with different RTs: the VPN route 65000:100, the Type-5 route
-/// 65000:200. Blue holds the Type-5 route, imported last. Blue's import RTs
-/// become 65000:100 alone — from 65000:200 (a switch), or, with
-/// `vpn_already_matched`, from both (a removal: the VPN route's own match
-/// does not change). Applying the messages in delivery order, as the VRF
-/// does, blue must end up holding the VPN route (reviews of #24): the
-/// per-route replay imported it and then sent the Type-5 route's withdraw
-/// for the same key, erasing it; after a removal it sent nothing, so blue
-/// kept the Type-5 route; on `main` blue kept the Type-5 route either way.
+/// A VPN route and a received Type-5 route share `(RD, prefix)` with
+/// different RTs: the VPN route 65000:100, the Type-5 route 65000:200. The
+/// VRF holds one imported path per `(RD, source)`, so it holds the Type-5
+/// route and, with `vpn_already_matched`, the VPN route beside it. Blue's
+/// import RTs become 65000:100 alone — from 65000:200 (a switch), or from
+/// both (a removal: the VPN route's own match does not change). Applying
+/// the messages in delivery order, as the VRF does, blue must end up
+/// holding the VPN route and only it (reviews of #24). While the VRF held
+/// one path per `(RD, prefix)`, whichever table it came from, the
+/// per-route replay imported the VPN route and then sent the Type-5
+/// route's withdraw for the same key, erasing it; after a removal it sent
+/// nothing, so blue kept the Type-5 route.
 fn check_rt_switch_between_vpn_and_type5(prefix: ipnet::IpNet, vpn_already_matched: bool) {
     let mut bgp = fresh_bgp();
     let policy = |rt_value: &'static str| match prefix {
@@ -334,27 +349,36 @@ fn check_rt_switch_between_vpn_and_type5(prefix: ipnet::IpNet, vpn_already_match
         rib,
     );
     set_rts(&mut bgp, "blue", policy("new"));
-    // The path blue holds under the key, named by its RT: the Type-5 route,
-    // imported under the old RT.
-    let mut held: Option<Vec<String>> = Some(vec!["65000:200".to_string()]);
+    // The paths blue holds, one per source, named by their RTs: the Type-5
+    // route, imported under the old RTs, and the VPN route when those
+    // matched it too.
+    let mut held: std::collections::BTreeMap<ImportSource, Vec<String>> =
+        std::collections::BTreeMap::from([(ImportSource::Evpn, vec!["65000:200".to_string()])]);
+    if vpn_already_matched {
+        held.insert(ImportSource::Vpn, vec!["65000:100".to_string()]);
+    }
     while let Ok(msg) = blue.try_recv() {
         match msg {
-            BgpVrfMsg::ImportV4 { attr, .. } | BgpVrfMsg::ImportV6 { attr, .. } => {
-                held = Some(
+            BgpVrfMsg::ImportV4 { source, attr, .. } | BgpVrfMsg::ImportV6 { source, attr, .. } => {
+                held.insert(
+                    source,
                     route_rts_from_ecom(&attr.ecom)
                         .iter()
                         .map(|r| r.to_string())
                         .collect(),
-                )
+                );
             }
-            BgpVrfMsg::WithdrawImport { .. } | BgpVrfMsg::WithdrawImportV6 { .. } => held = None,
+            BgpVrfMsg::WithdrawImport { source, .. }
+            | BgpVrfMsg::WithdrawImportV6 { source, .. } => {
+                held.remove(&source);
+            }
             _ => {}
         }
     }
     assert_eq!(
         held,
-        Some(vec!["65000:100".to_string()]),
-        "blue holds the VPN route the new RT matches"
+        std::collections::BTreeMap::from([(ImportSource::Vpn, vec!["65000:100".to_string()])]),
+        "blue holds the VPN route the new RT matches, and not the Type-5 route"
     );
 }
 
