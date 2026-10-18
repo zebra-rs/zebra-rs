@@ -2963,7 +2963,7 @@ impl Bgp {
     ///
     /// Static peers are untouched — they stay in `PeerMap` so a config
     /// change or reconnect attempt can revive them.
-    fn gc_dynamic_peer_if_session_ended(
+    pub(super) fn gc_dynamic_peer_if_session_ended(
         &mut self,
         ident: usize,
         prev_state: Option<super::peer::State>,
@@ -2994,6 +2994,12 @@ impl Bgp {
         // never attached), but a GC'd ident must never linger in a
         // group's member set.
         super::update_group::detach(&mut self.update_groups, &mut self.peers, ident);
+        // An instance-wide `bfd enabled` subscribed this peer, and the
+        // group inheritance registered its policy watches; the next
+        // session from this source materializes a new peer that
+        // subscribes and registers its own.
+        super::config::bfd_release_ident(self, ident);
+        super::config::policy_release_ident(self, ident);
         self.peers.remove(&addr);
         self.dynamic_peer_count = self.dynamic_peer_count.saturating_sub(1);
         // Losing this peer may drop the last next-hop-self holder for a

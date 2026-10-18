@@ -431,6 +431,7 @@ pub(super) fn remove_peer_full(bgp: &mut Bgp, addr: IpAddr) -> Option<()> {
     // A whole-neighbor delete doesn't fire the per-leaf `bfd` delete,
     // and an instance-wide `bfd enabled` has none to fire.
     bfd_release_ident(bgp, peer_idx);
+    policy_release_ident(bgp, peer_idx);
     bgp.peers.remove(&addr);
     // Keep the shared listener's TCP MSS minimum in step with the peer
     // set: a whole-neighbor delete may drop the peer that owned the
@@ -1800,7 +1801,8 @@ fn config_peer_bfd_detect_offload(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -
 /// Release the BFD session peer `ident` tracks, before the peer leaves
 /// the map. The BFD reconcile only visits peers still present, so
 /// nothing else would unsubscribe the key. Shared by the addressed
-/// ([`remove_peer_full`]) and the interface-neighbor peer removals.
+/// ([`remove_peer_full`]), dynamic-neighbor reaper and
+/// interface-neighbor peer removals.
 pub(super) fn bfd_release_ident(bgp: &Bgp, ident: usize) {
     let Some(key) = bgp.peers.get_by_idx(ident).and_then(|p| p.bfd_session_key) else {
         return;
@@ -1811,6 +1813,54 @@ pub(super) fn bfd_release_ident(bgp: &Bgp, ident: usize) {
             key,
         });
     }
+}
+
+/// Unregister every policy, prefix-set and TCP-AO key-chain watch peer
+/// `ident` holds with the policy actor, before the peer leaves the map.
+/// The binding leaves can't do it: the commit diff deletes a neighbor
+/// entry before its leaves, whose deletes then find no peer, and a
+/// dynamic or interface-neighbor peer has no leaves of its own. Left
+/// registered, the actor keeps every one of them for good and answers
+/// each edit of those policies for a peer that is gone.
+pub(super) fn policy_release_ident(bgp: &mut Bgp, ident: usize) {
+    use policy::PolicyType;
+    let Some(peer) = bgp.peers.get_mut_by_idx(ident) else {
+        return;
+    };
+    let types = [
+        PolicyType::PolicyListIn,
+        PolicyType::PolicyListOut,
+        PolicyType::PrefixSetIn,
+        PolicyType::PrefixSetOut,
+    ];
+    let families: std::collections::BTreeSet<AfiSafi> = peer
+        .policy_list
+        .keys()
+        .chain(peer.prefix_set.keys())
+        .copied()
+        .collect();
+    for afi_safi in families {
+        for policy_type in types {
+            apply_peer_afi_policy_ref(&bgp.policy_tx, peer, afi_safi, policy_type, None);
+        }
+    }
+    for policy_type in types {
+        apply_peer_policy_ref(&bgp.policy_tx, peer, policy_type, None);
+    }
+    let chain = peer
+        .config
+        .transport
+        .ao_config
+        .as_ref()
+        .map(|ao| ao.key_chain.clone())
+        .filter(|s| !s.is_empty());
+    policy_attach_msgs(
+        &bgp.policy_tx,
+        ident,
+        PolicyType::KeyChain(policy::KeyChainScope::BgpNeighbor),
+        chain,
+        None,
+    );
 }
 
 /// Re-reconcile BFD for every neighbor — used by the instance-level
@@ -9384,6 +9434,37 @@ mod neighbor_group_wiring_tests {
         assert_eq!(unsubscribed(&mut bfd_rx), vec![key]);
     }
 
+    type PolicyWatch = (String, usize, crate::policy::PolicyType);
+
+    /// Drain the policy actor's channel into the watches it was asked
+    /// to register and to unregister, each sorted by name.
+    fn drain(
+        rx: &mut mpsc::UnboundedReceiver<crate::policy::Message>,
+    ) -> (Vec<PolicyWatch>, Vec<PolicyWatch>) {
+        use crate::policy::Message;
+        let (mut registered, mut unregistered) = (Vec::new(), Vec::new());
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                Message::Register {
+                    name,
+                    ident,
+                    policy_type,
+                    ..
+                } => registered.push((name, ident, policy_type)),
+                Message::Unregister {
+                    name,
+                    ident,
+                    policy_type,
+                    ..
+                } => unregistered.push((name, ident, policy_type)),
+                _ => {}
+            }
+        }
+        registered.sort_by(|a, b| a.0.cmp(&b.0));
+        unregistered.sort_by(|a, b| a.0.cmp(&b.0));
+        (registered, unregistered)
+    }
+
     /// Removing the peer left on the old ifindex unregisters the policy
     /// watches its group registered. The new peer has a new ident and
     /// registers its own, so the old ones would pile up per re-create.
@@ -9393,35 +9474,7 @@ mod neighbor_group_wiring_tests {
         use super::super::neighbor_group::{
             config_neighbor_group_policy_in, config_neighbor_group_prefix_set_out,
         };
-        use crate::policy::{Message, PolicyType};
         use crate::rib::api::RibRx;
-
-        fn drain(
-            rx: &mut mpsc::UnboundedReceiver<Message>,
-        ) -> (
-            Vec<(String, usize, PolicyType)>,
-            Vec<(String, usize, PolicyType)>,
-        ) {
-            let (mut registered, mut unregistered) = (Vec::new(), Vec::new());
-            while let Ok(msg) = rx.try_recv() {
-                match msg {
-                    Message::Register {
-                        name,
-                        ident,
-                        policy_type,
-                        ..
-                    } => registered.push((name, ident, policy_type)),
-                    Message::Unregister {
-                        name,
-                        ident,
-                        policy_type,
-                        ..
-                    } => unregistered.push((name, ident, policy_type)),
-                    _ => {}
-                }
-            }
-            (registered, unregistered)
-        }
 
         let mut bgp = fresh_bgp();
         let (policy_tx, mut policy_rx) = mpsc::unbounded_channel();
@@ -9441,6 +9494,104 @@ mod neighbor_group_wiring_tests {
         let (new_watches, unregistered) = drain(&mut policy_rx);
         assert_eq!(unregistered, old_watches);
         assert_eq!(new_watches.len(), 2, "the new peer registers its own");
+    }
+
+    /// Deleting a neighbor unregisters every watch it holds: per-family
+    /// policy and prefix-set, the group's peer-wide policy and the TCP-AO
+    /// key-chain. The commit diff deletes the neighbor entry before its
+    /// leaves, so the leaf deletes find no peer and can't do it.
+    #[tokio::test]
+    async fn neighbor_delete_unregisters_its_policy_watches() {
+        use super::super::neighbor_group::config_neighbor_group_policy_out;
+
+        let mut bgp = fresh_bgp();
+        let (policy_tx, mut policy_rx) = mpsc::unbounded_channel();
+        bgp.policy_tx = policy_tx;
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["G", "65000"]), ConfigOp::Set)
+            .unwrap();
+        config_neighbor_group_policy_out(&mut bgp, arg_words(&["G", "GROUP"]), ConfigOp::Set)
+            .unwrap();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        config_peer_neighbor_group(&mut bgp, arg_words(&["10.0.0.1", "G"]), ConfigOp::Set).unwrap();
+        super::config_afi_safi_policy_in(
+            &mut bgp,
+            arg_words(&["10.0.0.1", "ipv4", "PER-AFI"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        super::config_afi_safi_prefix_in(
+            &mut bgp,
+            arg_words(&["10.0.0.1", "ipv6", "PREFIXES"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        super::config_peer_tcp_ao_key_chain(
+            &mut bgp,
+            arg_words(&["10.0.0.1", "CHAIN"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        let (registered, _) = drain(&mut policy_rx);
+        assert_eq!(registered.len(), 4);
+
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Delete).unwrap();
+        let (_, unregistered) = drain(&mut policy_rx);
+        assert_eq!(unregistered, registered);
+    }
+
+    /// The dynamic-neighbor reaper releases what the peer held: the BFD
+    /// session an instance-wide `bfd enabled` subscribed, and the policy
+    /// watches its group registered. Each new source address
+    /// materializes a new peer, so these would pile up per session.
+    #[tokio::test]
+    async fn dynamic_peer_reap_releases_its_bfd_session_and_policy_watches() {
+        use super::super::dynamic_neighbors::{
+            config_listen_range, config_listen_range_neighbor_group,
+        };
+        use super::super::neighbor_group::config_neighbor_group_policy_in;
+        use super::super::peer::{State, try_dynamic_accept};
+
+        let (mut bgp, mut bfd_rx) = fresh_bgp_with_bfd();
+        let (policy_tx, mut policy_rx) = mpsc::unbounded_channel();
+        bgp.policy_tx = policy_tx;
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["G", "65002"]), ConfigOp::Set)
+            .unwrap();
+        config_neighbor_group_policy_in(&mut bgp, arg_words(&["G", "P"]), ConfigOp::Set).unwrap();
+        config_listen_range(&mut bgp, arg_words(&["10.1.0.0/24"]), ConfigOp::Set).unwrap();
+        config_listen_range_neighbor_group(
+            &mut bgp,
+            arg_words(&["10.1.0.0/24", "G"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        // Any connected socket will do: the accept path reads the peer
+        // address from its argument, not from the stream.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let _client = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let source: IpAddr = "10.1.0.7".parse().unwrap();
+        assert!(try_dynamic_accept(&mut bgp, source, server).is_none());
+        config_bgp_bfd_enable(&mut bgp, arg_words(&["true"]), ConfigOp::Set).unwrap();
+        let key = match bfd_rx.try_recv().expect("the dynamic peer subscribed") {
+            ClientReq::Subscribe { key, .. } => key,
+            other => panic!("expected Subscribe, got {other:?}"),
+        };
+        let (registered, _) = drain(&mut policy_rx);
+        assert_eq!(registered.len(), 1, "the group's policy in");
+
+        let ident = bgp.peers.get(&source).unwrap().ident;
+        bgp.peers.get_mut(&source).unwrap().state = State::Idle;
+        bgp.gc_dynamic_peer_if_session_ended(ident, Some(State::OpenSent));
+
+        assert!(bgp.peers.get(&source).is_none(), "the peer was reaped");
+        match bfd_rx.try_recv().expect("the reap unsubscribes") {
+            ClientReq::Unsubscribe { key: gone, .. } => assert_eq!(gone, key),
+            other => panic!("expected Unsubscribe, got {other:?}"),
+        }
+        let (_, unregistered) = drain(&mut policy_rx);
+        assert_eq!(unregistered, registered);
     }
 
     // ---- interface-neighbor timers --------------------------------
