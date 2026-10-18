@@ -141,6 +141,10 @@ pub struct RouteEntry {
     pub metric: u32,
     pub nexthops: Vec<NexthopJson>,
     pub interface_name: Option<String>,
+    /// The VRF the route is in, in the `show ip|ipv6 route vrf` views;
+    /// without it, the routes of every VRF ran together in one list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vrf: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -293,6 +297,7 @@ fn rib_entry_to_json(rib: &Rib, prefix: &Ipv4Net, e: &RibEntry) -> RouteEntry {
         metric: e.metric,
         nexthops,
         interface_name,
+        vrf: None,
     }
 }
 
@@ -443,13 +448,14 @@ fn rib_entry_to_json_v6(rib: &Rib, prefix: &Ipv6Net, e: &RibEntry) -> RouteEntry
         metric: e.metric,
         nexthops,
         interface_name,
+        vrf: None,
     }
 }
 
 static SHOW_HEADER: &str = r#"Codes: K - kernel, D - DHCP route, C - connected, S - static
        O - OSPF, IA - OSPF inter area, N1/N2 - OSPF NSSA external type 1/2
        E1/E2 - OSPF external type 1/2
-       L1/L2 - IS-IS level-1/2, ia - IS-IS inter area, B - BGP
+       L1/L2 - IS-IS level-1/2, B - BGP
        > - selected route, * - FIB route, ? - backup route
 
 "#;
@@ -1262,11 +1268,20 @@ fn rib_lookup_one<'a>(
 
 /// Render one resolved route: the JSON routes array, or the one-line
 /// layout under the codes header.
-fn rib_render_one(rib: &Rib, prefix: &Ipv4Net, entries: &RibEntries, json: bool) -> String {
+fn rib_render_one(
+    rib: &Rib,
+    prefix: &Ipv4Net,
+    entries: &RibEntries,
+    json: bool,
+    vrf: Option<&Vrf>,
+) -> String {
     if json {
         let routes: Vec<RouteEntry> = entries
             .iter()
-            .map(|e| rib_entry_to_json(rib, prefix, e))
+            .map(|e| RouteEntry {
+                vrf: vrf.map(|v| v.name.clone()),
+                ..rib_entry_to_json(rib, prefix, e)
+            })
             .collect();
         return serde_json::to_string_pretty(&RouteTable { routes })
             .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize routes: {}\"}}", e));
@@ -1281,7 +1296,7 @@ fn rib_render_one(rib: &Rib, prefix: &Ipv4Net, entries: &RibEntries, json: bool)
 
 fn rib_show_one(rib: &Rib, tok: Option<String>, json: bool) -> String {
     match rib_lookup_one(&rib.table, &tok, json) {
-        Ok((prefix, entries)) => rib_render_one(rib, &prefix, entries, json),
+        Ok((prefix, entries)) => rib_render_one(rib, &prefix, entries, json, None),
         Err(out) => out,
     }
 }
@@ -1329,7 +1344,10 @@ fn rib_vrf_render(rib: &Rib, name: Option<String>, json: bool, detail: bool) -> 
             if let Some(tables) = rib.vrf_tables.get(&vrf.table_id) {
                 for (prefix, entries) in tables.table.iter() {
                     for entry in entries.iter() {
-                        routes.push(rib_entry_to_json(rib, &prefix, entry));
+                        routes.push(RouteEntry {
+                            vrf: Some(vrf.name.clone()),
+                            ..rib_entry_to_json(rib, &prefix, entry)
+                        });
                     }
                 }
             }
@@ -1381,7 +1399,10 @@ fn rib6_vrf_render(rib: &Rib, name: Option<String>, json: bool, detail: bool) ->
             if let Some(tables) = rib.vrf_tables.get(&vrf.table_id) {
                 for (prefix, entries) in tables.table_v6.iter() {
                     for entry in entries.iter() {
-                        routes.push(rib_entry_to_json_v6(rib, &prefix, entry));
+                        routes.push(RouteEntry {
+                            vrf: Some(vrf.name.clone()),
+                            ..rib_entry_to_json_v6(rib, &prefix, entry)
+                        });
                     }
                 }
             }
@@ -1459,7 +1480,7 @@ pub fn rib_show_vrf_prefix(rib: &Rib, mut args: Args, json: bool) -> String {
             if !json {
                 let _ = writeln!(buf, "VRF {} (table {}):", vrf.name, vrf.table_id);
             }
-            buf.push_str(&rib_render_one(rib, &prefix, entries, json));
+            buf.push_str(&rib_render_one(rib, &prefix, entries, json, Some(vrf)));
             buf
         }
         Err(out) => out,
@@ -1481,7 +1502,7 @@ pub fn rib6_show_vrf_prefix(rib: &Rib, mut args: Args, json: bool) -> String {
             if !json {
                 let _ = writeln!(buf, "VRF {} (table {}):", vrf.name, vrf.table_id);
             }
-            buf.push_str(&rib6_render_one(rib, &prefix, entries, json));
+            buf.push_str(&rib6_render_one(rib, &prefix, entries, json, Some(vrf)));
             buf
         }
         Err(out) => out,
@@ -1597,11 +1618,20 @@ fn rib6_lookup_one<'a>(
 }
 
 /// V6 twin of [`rib_render_one`].
-fn rib6_render_one(rib: &Rib, prefix: &Ipv6Net, entries: &RibEntries, json: bool) -> String {
+fn rib6_render_one(
+    rib: &Rib,
+    prefix: &Ipv6Net,
+    entries: &RibEntries,
+    json: bool,
+    vrf: Option<&Vrf>,
+) -> String {
     if json {
         let routes: Vec<RouteEntry> = entries
             .iter()
-            .map(|e| rib_entry_to_json_v6(rib, prefix, e))
+            .map(|e| RouteEntry {
+                vrf: vrf.map(|v| v.name.clone()),
+                ..rib_entry_to_json_v6(rib, prefix, e)
+            })
             .collect();
         return serde_json::to_string_pretty(&RouteTable { routes })
             .unwrap_or_else(|e| format!("{{\"error\": \"Failed to serialize routes: {}\"}}", e));
@@ -1620,7 +1650,7 @@ fn rib6_render_one(rib: &Rib, prefix: &Ipv6Net, entries: &RibEntries, json: bool
 
 fn rib6_show_one(rib: &Rib, tok: Option<String>, json: bool) -> String {
     match rib6_lookup_one(&rib.table_v6, &tok, json) {
-        Ok((prefix, entries)) => rib6_render_one(rib, &prefix, entries, json),
+        Ok((prefix, entries)) => rib6_render_one(rib, &prefix, entries, json, None),
         Err(out) => out,
     }
 }
@@ -3146,11 +3176,96 @@ mod tests {
     }
 
     /// The legend lists only codes a route can carry: `S` is static.
-    /// It also read `S - Stale route`, which no route line prints.
+    /// It also read `S - Stale route`, which no route line prints, and
+    /// `ia - IS-IS inter area`, which IS-IS never sets: it keeps its
+    /// levels apart and never leaks a route from one to the other.
     #[test]
     fn legend_has_no_stale_code() {
         assert!(!SHOW_HEADER.contains("Stale"), "{SHOW_HEADER}");
         assert!(SHOW_HEADER.contains("S - static"), "{SHOW_HEADER}");
+        assert!(!SHOW_HEADER.contains("ia - "), "{SHOW_HEADER}");
+        assert!(
+            SHOW_HEADER.contains("L1/L2 - IS-IS level-1/2, B - BGP"),
+            "{SHOW_HEADER}"
+        );
+    }
+
+    /// Every `vrf` view names each route's VRF in JSON. With no name,
+    /// the routes of every VRF used to run together in one list.
+    #[tokio::test]
+    async fn vrf_route_json_names_the_vrf() {
+        use crate::rib::RibType;
+        use std::collections::VecDeque;
+        let mut rib = Rib::new(false).expect("rib");
+        for (name, table_id, v4, v6) in [
+            ("blue", 10, "10.1.0.0/24", "2001:db8:1::/64"),
+            ("red", 20, "10.2.0.0/24", "2001:db8:2::/64"),
+        ] {
+            rib.vrfs.insert(
+                name.to_string(),
+                Vrf {
+                    name: name.to_string(),
+                    table_id,
+                    ifindex: 0,
+                    router_id: Ipv4Addr::UNSPECIFIED,
+                    router_id_config: None,
+                    mpls_ttl_propagate: None,
+                    owned: false,
+                    ipv4_import_rts: Default::default(),
+                    ipv4_export_rts: Default::default(),
+                    ipv6_import_rts: Default::default(),
+                    ipv6_export_rts: Default::default(),
+                    mup_import_rts: Default::default(),
+                    mup_export_rts: Default::default(),
+                },
+            );
+            let mut tables = VrfRibTables::new();
+            let entry = || vec![RibEntry::new(RibType::Connected)];
+            tables.table.insert(v4.parse().unwrap(), entry());
+            tables.table_v6.insert(v6.parse().unwrap(), entry());
+            rib.vrf_tables.insert(table_id, tables);
+        }
+        let args =
+            |words: &[&str]| Args(words.iter().map(|w| w.to_string()).collect::<VecDeque<_>>());
+        let vrfs = |out: String| -> Vec<(String, String)> {
+            let v: serde_json::Value = serde_json::from_str(&out).expect(&out);
+            v["routes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| {
+                    (
+                        r["prefix"].as_str().unwrap().to_string(),
+                        r["vrf"].as_str().unwrap_or("-").to_string(),
+                    )
+                })
+                .collect()
+        };
+        let pair = |p: &str, v: &str| (p.to_string(), v.to_string());
+        assert_eq!(
+            vrfs(rib_show_vrf(&rib, args(&[]), true)),
+            [pair("10.1.0.0/24", "blue"), pair("10.2.0.0/24", "red")]
+        );
+        assert_eq!(
+            vrfs(rib6_show_vrf_detail(&rib, args(&[]), true)),
+            [
+                pair("2001:db8:1::/64", "blue"),
+                pair("2001:db8:2::/64", "red")
+            ]
+        );
+        assert_eq!(
+            vrfs(rib_show_vrf_prefix(&rib, args(&["red", "10.2.0.1"]), true)),
+            [pair("10.2.0.0/24", "red")]
+        );
+        // The default table's JSON is unchanged.
+        rib.table.insert(
+            "10.9.0.0/24".parse().unwrap(),
+            vec![RibEntry::new(RibType::Connected)],
+        );
+        assert_eq!(
+            vrfs(rib_show(&rib, args(&[]), true)),
+            [pair("10.9.0.0/24", "-")]
+        );
     }
 
     #[test]

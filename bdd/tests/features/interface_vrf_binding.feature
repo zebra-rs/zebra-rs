@@ -64,6 +64,15 @@ Feature: Interface-to-VRF enslavement (`interface <name> vrf <vrf>`)
     And show command "show ip route vrf vrf1" in namespace "z1" should eventually contain "192.168.10.0/24"
     And show command "show ip route" in namespace "z1" should not contain "192.168.10.0/24"
 
+  # With no VRF named, the routes of every VRF share one JSON list, so
+  # each route names its VRF; the single-route form does too. The
+  # default table's JSON has no such field.
+  Scenario: A2 - the VRF route JSON names each route's VRF
+    Given the test topology exists
+    Then show command "show ip route vrf" as JSON in namespace "z1" should eventually contain '"vrf": "vrf1"'
+    And show command "show ip route vrf vrf1 192.168.10.1" as JSON in namespace "z1" should eventually contain '"vrf": "vrf1"'
+    And show command "show ip route" as JSON in namespace "z1" should not contain '"vrf"'
+
   Scenario: B - show vrf lists the member and show interface brief names the VRF
     Given the test topology exists
     Then show command "show vrf" in namespace "z1" should eventually contain "vrf1"

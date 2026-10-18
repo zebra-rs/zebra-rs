@@ -66,7 +66,7 @@ r1> show ip route
 Codes: K - kernel, D - DHCP route, C - connected, S - static
        O - OSPF, IA - OSPF inter area, N1/N2 - OSPF NSSA external type 1/2
        E1/E2 - OSPF external type 1/2
-       L1/L2 - IS-IS level-1/2, ia - IS-IS inter area, B - BGP
+       L1/L2 - IS-IS level-1/2, B - BGP
        > - selected route, * - FIB route, ? - backup route
 
 C  *> 10.0.0.1/32 is directly connected, lo, 00:01:10
@@ -124,7 +124,7 @@ r1> show ipv6 route
 Codes: K - kernel, D - DHCP route, C - connected, S - static
        O - OSPF, IA - OSPF inter area, N1/N2 - OSPF NSSA external type 1/2
        E1/E2 - OSPF external type 1/2
-       L1/L2 - IS-IS level-1/2, ia - IS-IS inter area, B - BGP
+       L1/L2 - IS-IS level-1/2, B - BGP
        > - selected route, * - FIB route, ? - backup route
 
 C  *> ::1/128 is directly connected, lo, 00:01:13
@@ -159,7 +159,7 @@ r1> show ip route 10.0.0.4
 Codes: K - kernel, D - DHCP route, C - connected, S - static
        O - OSPF, IA - OSPF inter area, N1/N2 - OSPF NSSA external type 1/2
        E1/E2 - OSPF external type 1/2
-       L1/L2 - IS-IS level-1/2, ia - IS-IS inter area, B - BGP
+       L1/L2 - IS-IS level-1/2, B - BGP
        > - selected route, * - FIB route, ? - backup route
 
 O  *> 10.0.0.4/32 [110/20] via 192.168.12.2, r1-r2, label 16004, 00:00:30
@@ -241,7 +241,7 @@ VRF blue (table 1):
 Codes: K - kernel, D - DHCP route, C - connected, S - static
        O - OSPF, IA - OSPF inter area, N1/N2 - OSPF NSSA external type 1/2
        E1/E2 - OSPF external type 1/2
-       L1/L2 - IS-IS level-1/2, ia - IS-IS inter area, B - BGP
+       L1/L2 - IS-IS level-1/2, B - BGP
        > - selected route, * - FIB route, ? - backup route
 
 C  *> 192.168.120.0/24 is directly connected, r1-v, 00:01:10
@@ -265,6 +265,7 @@ Every form returns `{ "routes": [ … ] }`, with one object per entry:
 - `selected`, `fib` and `valid`;
 - `distance` and `metric`;
 - `interface_name`, a connected route's interface, `null` for others;
+- `vrf`, the route's VRF, in the `vrf` forms only;
 - `nexthops`: one object per path, with `address` (`null` for a route
   with no gateway), `interface`, `weight`, `metric`, `mpls_labels` (a
   list of `{ "label": <n> }`) and, on a backup path, `"backup": true`.
