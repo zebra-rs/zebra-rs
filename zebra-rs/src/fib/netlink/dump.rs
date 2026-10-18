@@ -26,6 +26,7 @@ pub async fn fib_dump(rib: &mut Rib) -> Result<()> {
     // gateway, and the RIB must reserve their ids before anything of ours
     // is installed.
     let nexthops = nexthop_dump(rib, rib.fib_handle.handle.clone()).await;
+    rib.fib_handle.note_nexthop_leftovers(&nexthops);
     route_dump(rib, rib.fib_handle.handle.clone(), IpVersion::V4, &nexthops).await?;
     route_dump(rib, rib.fib_handle.handle.clone(), IpVersion::V6, &nexthops).await?;
     // The MPLS table: an earlier run's ILMs, kept from the label space

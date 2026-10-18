@@ -4356,6 +4356,8 @@ impl Rib {
                     self.ilm_sweep_leftovers(|e| e.rtype == rtype && ilm_gateways_v6(e) == v6)
                         .await;
                 }
+                // The objects only the swept routes still forwarded through.
+                self.sweep_nexthop_leftovers().await;
             }
             Message::SweepLeftovers => {
                 self.sweep_leftovers().await;
