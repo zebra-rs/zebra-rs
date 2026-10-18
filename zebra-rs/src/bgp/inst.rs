@@ -5023,10 +5023,10 @@ impl Bgp {
                 // interface-neighbor materialization. Keeps the most
                 // recent name for an ifindex; renames are rare but
                 // covered by simple insert-replaces-on-collision.
-                let index_changed = self
+                let prev_index = self
                     .link_index_by_name
-                    .insert(link.name.clone(), link.index)
-                    != Some(link.index);
+                    .insert(link.name.clone(), link.index);
+                let index_changed = prev_index != Some(link.index);
                 self.link_name_by_index
                     .insert(link.index, link.name.clone());
                 // The port's bridge membership, for EVIs declared by
@@ -5051,6 +5051,17 @@ impl Bgp {
                 if vxlan_changed {
                     self.etree_imet_reconcile();
                 }
+                // The name came back under a new ifindex (the link was
+                // deleted and re-created): remove the interface-neighbor
+                // peer left on the old ifindex before materializing on the
+                // new one, or both stay.
+                if let Some(old) = prev_index.filter(|&old| old != link.index) {
+                    super::interface_neighbor::remove_old_ifindex_peer(self, &link.name, old);
+                }
+                // The ifindex came back under another name (a rename, or
+                // a deleted link's ifindex reused): the peer left on it
+                // belongs to the old name, and the new one would adopt it.
+                super::interface_neighbor::remove_other_name_peer(self, link.index, &link.name);
                 // An `interface-neighbor` typed before RIB announced
                 // this link (config replay at startup races the link
                 // dump) materializes its dormant peer now, so the
@@ -8513,22 +8524,17 @@ impl Bgp {
 
     /// Handle an ND `NeighborDiscovered` notification by checking for
     /// a configured `interface-neighbor` on the matching ifindex and,
-    /// if found, materializing the peer. The lookup is a linear scan
-    /// of `link_index_by_name` since the operator-typed leaf is keyed
-    /// by name; for typical (single-digit) interface-neighbor counts
-    /// this is fine, and it lets the config use the friendly name in
-    /// `show bgp summary`.
-    fn process_nd_event(&mut self, event: crate::nd::engine::NdEvent) {
+    /// if found, materializing the peer. The operator-typed leaf is
+    /// keyed by name, so the ifindex resolves to the link's current
+    /// name through `link_name_by_index`; `link_index_by_name` also
+    /// keeps deleted and renamed links' last ifindex, and a scan of it
+    /// could answer with a name the ifindex no longer belongs to.
+    pub(super) fn process_nd_event(&mut self, event: crate::nd::engine::NdEvent) {
         let crate::nd::engine::NdEvent::NeighborDiscovered { ifindex, src } = event;
-        let name = self
-            .link_index_by_name
-            .iter()
-            .find(|(_, idx)| **idx == ifindex)
-            .map(|(name, _)| name.clone());
-        let Some(name) = name else {
+        let Some(name) = self.link_name_by_index.get(&ifindex).cloned() else {
             // RA arrived on an interface RIB hasn't told us about yet
-            // — possible during early startup. Drop; the next RA will
-            // re-trigger this path.
+            // — possible during early startup — or one deleted since.
+            // Drop; the next RA will re-trigger this path.
             return;
         };
         super::interface_neighbor::materialize_peer(self, &name, ifindex, src);
