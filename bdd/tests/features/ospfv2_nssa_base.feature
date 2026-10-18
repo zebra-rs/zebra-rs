@@ -89,6 +89,8 @@ Feature: OSPFv2 NSSA (Not-So-Stubby Area) Type-7 origination and translation
     #     external prefix straight from c's Type-7, E2 metric [20]. ---
     And show command "show ospf route" in namespace "d" should contain "192.168.1.0/24"
     And show command "show ospf route" in namespace "d" should contain "[20]"
+    And show command "show ospf database" in namespace "d" should contain "NSSA-external Link States (Area 0.0.0.1)"
+    And show command "show ospf database" in namespace "d" should contain "E2 192.168.1.0/24"
 
     # --- The headline: Type-7 -> Type-5 translation at the ABR. b is in
     #     the backbone only, so it can learn 192.168.1.0/24 ONLY as a
@@ -96,6 +98,9 @@ Feature: OSPFv2 NSSA (Not-So-Stubby Area) Type-7 origination and translation
     #     metric [20], carried verbatim across the translation. ---
     And show command "show ospf route" in namespace "b" should contain "192.168.1.0/24"
     And show command "show ospf route" in namespace "b" should contain "[20]"
+    # b holds the translated Type-5.
+    And show command "show ospf database" in namespace "b" should contain "AS External Link States"
+    And show command "show ospf database" in namespace "b" should contain "E2 192.168.1.0/24"
 
     # --- ABR default-originate: a injects a default Type-7 into the
     #     NSSA, so both internal routers hold a 0.0.0.0/0. ---

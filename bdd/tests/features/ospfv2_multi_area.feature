@@ -99,6 +99,14 @@ Feature: OSPFv2 multi-area routing across two Area Border Routers
     And show command "show ospf route" in namespace "e" should contain "10.0.0.6/32"
     # f (area 2) learns e (area 1) the same way.
     And show command "show ospf route" in namespace "f" should contain "10.0.0.5/32"
+    # e's database is area 0.0.0.1's: its Router-LSAs and the Type-3
+    # summaries a injects, f's loopback among them.
+    And show command "show ospf database" in namespace "e" should contain "Router Link States (Area 0.0.0.1)"
+    And show command "show ospf database" in namespace "e" should contain "Summary Link States (Area 0.0.0.1)"
+    And show command "show ospf database" in namespace "e" should contain "10.0.0.6/32"
+    # The ABR a holds both areas'.
+    And show command "show ospf database" in namespace "a" should contain "Router Link States (Area 0.0.0.0)"
+    And show command "show ospf database" in namespace "a" should contain "Router Link States (Area 0.0.0.1)"
 
     # --- Inter-area reachability end to end. ---
     # Area 1 host e to area 2 host f and back — the headline cross-area ping.

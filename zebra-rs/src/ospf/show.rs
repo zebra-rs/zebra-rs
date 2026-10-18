@@ -11,7 +11,7 @@ use crate::rib::LinkFlagsExt;
 use crate::spf;
 
 use super::ifsm::IfsmState;
-use super::{AREA0, Neighbor, NfsmState, Ospf, OspfLink, ShowCallback};
+use super::{Neighbor, NfsmState, Ospf, OspfLink, ShowCallback};
 
 // JSON output structs for show ospf interface.
 #[derive(Serialize)]
@@ -94,6 +94,12 @@ struct OspfNeighborDetailJson {
 struct OspfDatabaseJson {
     router_id: String,
     areas: Vec<OspfAreaDatabaseJson>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    as_external_lsas: Vec<OspfLsaSummaryJson>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    opaque_as_lsas: Vec<OspfLsaSummaryJson>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    links: Vec<OspfLinkDatabaseJson>,
 }
 
 #[derive(Serialize)]
@@ -102,7 +108,20 @@ struct OspfAreaDatabaseJson {
     router_lsas: Vec<OspfLsaSummaryJson>,
     network_lsas: Vec<OspfLsaSummaryJson>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    summary_lsas: Vec<OspfLsaSummaryJson>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    asbr_summary_lsas: Vec<OspfLsaSummaryJson>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    nssa_lsas: Vec<OspfLsaSummaryJson>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     opaque_area_lsas: Vec<OspfLsaSummaryJson>,
+}
+
+/// One interface's link-scope LSAs (Opaque type 9, e.g. Grace-LSAs).
+#[derive(Serialize)]
+struct OspfLinkDatabaseJson {
+    interface: String,
+    opaque_link_lsas: Vec<OspfLsaSummaryJson>,
 }
 
 #[derive(Serialize)]
@@ -114,6 +133,12 @@ struct OspfLsaSummaryJson {
     checksum: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     link_count: Option<usize>,
+    /// The prefix a Summary, AS-external or NSSA LSA describes, with
+    /// the metric type for the latter two (`E2 172.16.1.0/24`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    route: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tag: Option<u32>,
 }
 
 // JSON output structs for show ospf database detail.
@@ -121,6 +146,12 @@ struct OspfLsaSummaryJson {
 struct OspfDatabaseDetailJson {
     router_id: String,
     areas: Vec<OspfAreaDatabaseDetailJson>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    as_external_lsas: Vec<OspfExternalLsaDetailJson>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    opaque_as_lsas: Vec<OspfOpaqueLsaDetailJson>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    links: Vec<OspfLinkDatabaseDetailJson>,
 }
 
 #[derive(Serialize)]
@@ -128,6 +159,63 @@ struct OspfAreaDatabaseDetailJson {
     area_id: String,
     router_lsas: Vec<OspfRouterLsaDetailJson>,
     network_lsas: Vec<OspfNetworkLsaDetailJson>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    summary_lsas: Vec<OspfSummaryLsaDetailJson>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    asbr_summary_lsas: Vec<OspfSummaryLsaDetailJson>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    nssa_lsas: Vec<OspfExternalLsaDetailJson>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    opaque_area_lsas: Vec<OspfOpaqueLsaDetailJson>,
+}
+
+#[derive(Serialize)]
+struct OspfLinkDatabaseDetailJson {
+    interface: String,
+    opaque_link_lsas: Vec<OspfOpaqueLsaDetailJson>,
+}
+
+/// The header fields every LSA shares.
+#[derive(Serialize)]
+struct OspfLsaHeaderDetailJson {
+    ls_age: u16,
+    options: String,
+    link_state_id: String,
+    advertising_router: String,
+    ls_seq_number: String,
+    checksum: String,
+    length: u16,
+}
+
+/// A Summary (type 3) or ASBR-summary (type 4) LSA.
+#[derive(Serialize)]
+struct OspfSummaryLsaDetailJson {
+    #[serde(flatten)]
+    header: OspfLsaHeaderDetailJson,
+    network_mask: String,
+    metric: u32,
+}
+
+/// An AS-external (type 5) or NSSA (type 7) LSA.
+#[derive(Serialize)]
+struct OspfExternalLsaDetailJson {
+    #[serde(flatten)]
+    header: OspfLsaHeaderDetailJson,
+    network_mask: String,
+    metric_type: u8,
+    metric: u32,
+    forwarding_address: String,
+    external_route_tag: u32,
+}
+
+/// An Opaque LSA (types 9, 10, 11); the TLVs are in the text form.
+#[derive(Serialize)]
+struct OspfOpaqueLsaDetailJson {
+    #[serde(flatten)]
+    header: OspfLsaHeaderDetailJson,
+    opaque_type: u8,
+    opaque_type_name: &'static str,
+    opaque_id: u32,
 }
 
 #[derive(Serialize)]
@@ -995,56 +1083,39 @@ fn show_ospf_database(
             )
             .unwrap_or_default());
         }
-        let mut areas = Vec::new();
-        if let Some(area) = ospf.areas.get(AREA0) {
-            let mut router_lsas = Vec::new();
-            for ((lsa_id, adv_router), lsa) in area.lsdb.iter_by_type(OspfLsType::Router) {
-                let link_count = if let OspfLsp::Router(ref lsp) = lsa.data.lsp {
-                    Some(lsp.links.len())
-                } else {
-                    None
-                };
-                router_lsas.push(OspfLsaSummaryJson {
-                    link_id: lsa_id.to_string(),
-                    adv_router: adv_router.to_string(),
-                    age: lsa.current_age(),
-                    seq_number: format!("0x{:08x}", lsa.ls_seq_number()),
-                    checksum: format!("0x{:04x}", lsa.ls_checksum()),
-                    link_count,
-                });
-            }
-            let mut network_lsas = Vec::new();
-            for ((lsa_id, adv_router), lsa) in area.lsdb.iter_by_type(OspfLsType::Network) {
-                network_lsas.push(OspfLsaSummaryJson {
-                    link_id: lsa_id.to_string(),
-                    adv_router: adv_router.to_string(),
-                    age: lsa.current_age(),
-                    seq_number: format!("0x{:08x}", lsa.ls_seq_number()),
-                    checksum: format!("0x{:04x}", lsa.ls_checksum()),
-                    link_count: None,
-                });
-            }
-            let mut opaque_area_lsas = Vec::new();
-            for ((lsa_id, adv_router), lsa) in area.lsdb.iter_by_type(OspfLsType::OpaqueAreaLocal) {
-                opaque_area_lsas.push(OspfLsaSummaryJson {
-                    link_id: lsa_id.to_string(),
-                    adv_router: adv_router.to_string(),
-                    age: lsa.current_age(),
-                    seq_number: format!("0x{:08x}", lsa.ls_seq_number()),
-                    checksum: format!("0x{:04x}", lsa.ls_checksum()),
-                    link_count: None,
-                });
-            }
-            areas.push(OspfAreaDatabaseJson {
-                area_id: area.id.to_string(),
-                router_lsas,
-                network_lsas,
-                opaque_area_lsas,
-            });
-        }
+        let areas = ospf
+            .areas
+            .iter()
+            .map(|(_, area)| {
+                let rows = |ls_type| lsa_summary_rows(&area.lsdb, ls_type);
+                OspfAreaDatabaseJson {
+                    area_id: area.id.to_string(),
+                    router_lsas: rows(OspfLsType::Router),
+                    network_lsas: rows(OspfLsType::Network),
+                    summary_lsas: rows(OspfLsType::Summary),
+                    asbr_summary_lsas: rows(OspfLsType::SummaryAsbr),
+                    nssa_lsas: rows(OspfLsType::NssaAsExternal),
+                    opaque_area_lsas: rows(OspfLsType::OpaqueAreaLocal),
+                }
+            })
+            .collect();
+        let links = ospf
+            .links
+            .values()
+            .filter_map(|link| {
+                let opaque_link_lsas = lsa_summary_rows(&link.lsdb, OspfLsType::OpaqueLinkLocal);
+                (!opaque_link_lsas.is_empty()).then(|| OspfLinkDatabaseJson {
+                    interface: link.name.clone(),
+                    opaque_link_lsas,
+                })
+            })
+            .collect();
         let db = OspfDatabaseJson {
             router_id: ospf.router_id.to_string(),
             areas,
+            as_external_lsas: lsa_summary_rows(&ospf.lsdb_as, OspfLsType::AsExternal),
+            opaque_as_lsas: lsa_summary_rows(&ospf.lsdb_as, OspfLsType::OpaqueAsWide),
+            links,
         };
         return Ok(serde_json::to_string_pretty(&db)
             .unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e)));
@@ -1060,7 +1131,10 @@ fn show_ospf_database(
     writeln!(out, "       OSPF Router with ID ({})", ospf.router_id)?;
     let _ = writeln!(out);
 
-    if let Some(area) = ospf.areas.get(AREA0) {
+    for (i, (_, area)) in ospf.areas.iter().enumerate() {
+        if i > 0 {
+            writeln!(out)?;
+        }
         writeln!(out, "Router Link States (Area {})", area.id)?;
         let _ = writeln!(out);
 
@@ -1114,6 +1188,15 @@ fn show_ospf_database(
             );
         }
 
+        for (ls_type, title) in [
+            (OspfLsType::Summary, "Summary Link States"),
+            (OspfLsType::SummaryAsbr, "ASBR-Summary Link States"),
+            (OspfLsType::NssaAsExternal, "NSSA-external Link States"),
+        ] {
+            let title = format!("{} (Area {})", title, area.id);
+            write_lsa_rows(&mut out, &title, &area.lsdb, ls_type)?;
+        }
+
         let mut opaque_iter = area
             .lsdb
             .iter_by_type(OspfLsType::OpaqueAreaLocal)
@@ -1145,6 +1228,23 @@ fn show_ospf_database(
         }
     }
 
+    write_lsa_rows(
+        &mut out,
+        "AS External Link States",
+        &ospf.lsdb_as,
+        OspfLsType::AsExternal,
+    )?;
+    write_lsa_rows(
+        &mut out,
+        "AS-Scope Opaque-LSA",
+        &ospf.lsdb_as,
+        OspfLsType::OpaqueAsWide,
+    )?;
+    for link in ospf.links.values() {
+        let title = format!("Link-Local Opaque-LSA (Interface {})", link.name);
+        write_lsa_rows(&mut out, &title, &link.lsdb, OspfLsType::OpaqueLinkLocal)?;
+    }
+
     Ok(out)
 }
 
@@ -1161,7 +1261,7 @@ fn show_ospf_database_detail(
             .unwrap_or_default());
         }
         let mut areas = Vec::new();
-        if let Some(area) = ospf.areas.get(AREA0) {
+        for (_, area) in ospf.areas.iter() {
             let mut router_lsas = Vec::new();
             for ((_lsa_id, _adv_router), lsa) in area.lsdb.iter_by_type(OspfLsType::Router) {
                 let opts = OspfOptions::from(lsa.data.h.options);
@@ -1224,11 +1324,29 @@ fn show_ospf_database_detail(
                 area_id: area.id.to_string(),
                 router_lsas,
                 network_lsas,
+                summary_lsas: summary_lsa_details(&area.lsdb, OspfLsType::Summary),
+                asbr_summary_lsas: summary_lsa_details(&area.lsdb, OspfLsType::SummaryAsbr),
+                nssa_lsas: external_lsa_details(&area.lsdb, OspfLsType::NssaAsExternal),
+                opaque_area_lsas: opaque_lsa_details(&area.lsdb, OspfLsType::OpaqueAreaLocal),
             });
         }
+        let links = ospf
+            .links
+            .values()
+            .filter_map(|link| {
+                let opaque_link_lsas = opaque_lsa_details(&link.lsdb, OspfLsType::OpaqueLinkLocal);
+                (!opaque_link_lsas.is_empty()).then(|| OspfLinkDatabaseDetailJson {
+                    interface: link.name.clone(),
+                    opaque_link_lsas,
+                })
+            })
+            .collect();
         let db = OspfDatabaseDetailJson {
             router_id: ospf.router_id.to_string(),
             areas,
+            as_external_lsas: external_lsa_details(&ospf.lsdb_as, OspfLsType::AsExternal),
+            opaque_as_lsas: opaque_lsa_details(&ospf.lsdb_as, OspfLsType::OpaqueAsWide),
+            links,
         };
         return Ok(serde_json::to_string_pretty(&db)
             .unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e)));
@@ -1244,7 +1362,7 @@ fn show_ospf_database_detail(
     writeln!(out, "       OSPF Router with ID ({})", ospf.router_id)?;
     writeln!(out)?;
 
-    if let Some(area) = ospf.areas.get(AREA0) {
+    for (_, area) in ospf.areas.iter() {
         writeln!(out, "                Router Link States (Area {})", area.id)?;
         writeln!(out)?;
 
@@ -1359,6 +1477,15 @@ fn show_ospf_database_detail(
             writeln!(out)?;
         }
 
+        for (ls_type, title) in [
+            (OspfLsType::Summary, "Summary Link States"),
+            (OspfLsType::SummaryAsbr, "ASBR-Summary Link States"),
+            (OspfLsType::NssaAsExternal, "NSSA-external Link States"),
+        ] {
+            let title = format!("{} (Area {})", title, area.id);
+            write_lsa_details(&mut out, &title, &area.lsdb, ls_type)?;
+        }
+
         let mut opaque_iter = area
             .lsdb
             .iter_by_type(OspfLsType::OpaqueAreaLocal)
@@ -1424,6 +1551,23 @@ fn show_ospf_database_detail(
         }
     }
 
+    write_lsa_details(
+        &mut out,
+        "AS External Link States",
+        &ospf.lsdb_as,
+        OspfLsType::AsExternal,
+    )?;
+    write_lsa_details(
+        &mut out,
+        "AS-Scope Opaque-LSA",
+        &ospf.lsdb_as,
+        OspfLsType::OpaqueAsWide,
+    )?;
+    for link in ospf.links.values() {
+        let title = format!("Link-Local Opaque-LSA (Interface {})", link.name);
+        write_lsa_details(&mut out, &title, &link.lsdb, OspfLsType::OpaqueLinkLocal)?;
+    }
+
     Ok(out)
 }
 
@@ -1432,6 +1576,339 @@ fn show_ospf_database_detail(
 /// `3581s (1781s)`. Reads the actual `Timer::remaining()` so a
 /// missing or wrong timer surfaces in `show ospf database`
 /// rather than being masked by a derived value.
+/// RFC 2328 §A.4.5: an AS-external (or NSSA) LSA's E bit selects
+/// metric type 2.
+fn external_metric_type(bits: u8) -> u8 {
+    if bits & 0x80 != 0 { 2 } else { 1 }
+}
+
+fn mask_len(mask: Ipv4Addr) -> u32 {
+    u32::from(mask).leading_ones()
+}
+
+/// The route a Summary, AS-external or NSSA LSA describes, and the tag
+/// of the external kinds: `172.16.4.0/24`, or `E2 172.16.1.0/24` and 0.
+fn lsa_route(lsa: &super::lsdb::Lsa) -> Option<(String, Option<u32>)> {
+    let prefix = |mask| format!("{}/{}", lsa.data.h.ls_id, mask_len(mask));
+    match &lsa.data.lsp {
+        OspfLsp::Summary(sum) => Some((prefix(sum.netmask), None)),
+        OspfLsp::AsExternal(ext) => Some((
+            format!(
+                "E{} {}",
+                external_metric_type(ext.ext_and_resvd),
+                prefix(ext.netmask)
+            ),
+            Some(ext.external_route_tag),
+        )),
+        OspfLsp::NssaAsExternal(ext) => Some((
+            format!(
+                "E{} {}",
+                external_metric_type(ext.ext_and_tos),
+                prefix(ext.netmask)
+            ),
+            Some(ext.external_route_tag),
+        )),
+        _ => None,
+    }
+}
+
+/// One `show ospf database` JSON row per LSA of `ls_type` in `lsdb`.
+fn lsa_summary_rows(lsdb: &super::lsdb::Lsdb, ls_type: OspfLsType) -> Vec<OspfLsaSummaryJson> {
+    lsdb.iter_by_type(ls_type)
+        .map(|((lsa_id, adv_router), lsa)| {
+            let link_count = match &lsa.data.lsp {
+                OspfLsp::Router(lsp) => Some(lsp.links.len()),
+                _ => None,
+            };
+            let (route, tag) =
+                lsa_route(lsa).map_or((None, None), |(route, tag)| (Some(route), tag));
+            OspfLsaSummaryJson {
+                link_id: lsa_id.to_string(),
+                adv_router: adv_router.to_string(),
+                age: lsa.current_age(),
+                seq_number: format!("0x{:08x}", lsa.ls_seq_number()),
+                checksum: format!("0x{:04x}", lsa.ls_checksum()),
+                link_count,
+                route,
+                tag,
+            }
+        })
+        .collect()
+}
+
+/// One `show ospf database` section: `title`, then a row per LSA of
+/// `ls_type` in `lsdb`, with the route for the Summary, AS-external and
+/// NSSA kinds. Prints nothing when there are none.
+fn write_lsa_rows(
+    out: &mut String,
+    title: &str,
+    lsdb: &super::lsdb::Lsdb,
+    ls_type: OspfLsType,
+) -> std::result::Result<(), std::fmt::Error> {
+    let mut lsas = lsdb.iter_by_type(ls_type).peekable();
+    if lsas.peek().is_none() {
+        return Ok(());
+    }
+    let with_route = matches!(
+        ls_type,
+        OspfLsType::Summary | OspfLsType::AsExternal | OspfLsType::NssaAsExternal
+    );
+    let id = match ls_type {
+        OspfLsType::OpaqueAsWide | OspfLsType::OpaqueLinkLocal => "Opaque-Type/Id",
+        _ => "Link ID",
+    };
+    writeln!(out)?;
+    writeln!(out, "{}", title)?;
+    writeln!(out)?;
+    if with_route {
+        writeln!(
+            out,
+            "{:15} ADV Router      Age  Seq#       CkSum   Route                    Hold",
+            id
+        )?;
+    } else {
+        writeln!(
+            out,
+            "{:15} ADV Router      Age  Seq#       CkSum   Hold",
+            id
+        )?;
+    }
+    for ((lsa_id, adv_router), lsa) in lsas {
+        let route = match lsa_route(lsa) {
+            Some((route, Some(tag))) => format!("{} [0x{:x}]", route, tag),
+            Some((route, None)) => route,
+            None => String::new(),
+        };
+        if with_route {
+            writeln!(
+                out,
+                "{:15} {:15} {:4} 0x{:08x} 0x{:04x}  {:24} {}",
+                lsa_id,
+                adv_router,
+                lsa.current_age(),
+                lsa.ls_seq_number(),
+                lsa.ls_checksum(),
+                route,
+                fmt_hold(lsa),
+            )?;
+        } else {
+            writeln!(
+                out,
+                "{:15} {:15} {:4} 0x{:08x} 0x{:04x}  {}",
+                lsa_id,
+                adv_router,
+                lsa.current_age(),
+                lsa.ls_seq_number(),
+                lsa.ls_checksum(),
+                fmt_hold(lsa),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// The `show ospf database detail` section for the LSAs of `ls_type`
+/// in `lsdb` that the Router/Network/Area-Opaque code above does not
+/// cover: Summary, ASBR-summary, AS-external, NSSA and the AS- and
+/// link-scope Opaque LSAs. Prints nothing when there are none.
+fn write_lsa_details(
+    out: &mut String,
+    title: &str,
+    lsdb: &super::lsdb::Lsdb,
+    ls_type: OspfLsType,
+) -> std::result::Result<(), std::fmt::Error> {
+    let mut lsas = lsdb.iter_by_type(ls_type).peekable();
+    if lsas.peek().is_none() {
+        return Ok(());
+    }
+    let (type_name, id_name) = match ls_type {
+        OspfLsType::Summary => ("Summary Links (Network)", "Summary Network Number"),
+        OspfLsType::SummaryAsbr => ("Summary Links (ASBR)", "AS Boundary Router"),
+        OspfLsType::AsExternal => ("AS External Link", "External Network Number"),
+        OspfLsType::NssaAsExternal => ("NSSA External Link", "External Network Number"),
+        OspfLsType::OpaqueAsWide => ("AS-Scope Opaque-LSA", "Opaque Type and ID"),
+        _ => ("Link-Local Opaque-LSA", "Opaque Type and ID"),
+    };
+    writeln!(out, "                {}", title)?;
+    writeln!(out)?;
+    for ((lsa_id, adv_router), lsa) in lsas {
+        writeln!(out, "  LS age: {}", lsa.current_age())?;
+        let opts = OspfOptions::from(lsa.data.h.options);
+        writeln!(
+            out,
+            "  Options: 0x{:x}  : {}",
+            lsa.data.h.options,
+            format_options_flags(&opts)
+        )?;
+        writeln!(out, "  LS Type: {}", type_name)?;
+        writeln!(out, "  Link State ID: {} ({})", lsa_id, id_name)?;
+        writeln!(out, "  Advertising Router: {}", adv_router)?;
+        writeln!(out, "  LS Seq Number: 0x{:08x}", lsa.ls_seq_number())?;
+        writeln!(out, "  Checksum: 0x{:04x}", lsa.ls_checksum())?;
+        writeln!(out, "  Length: {}", lsa.length())?;
+        write_timer_remaining(out, lsa)?;
+        writeln!(out)?;
+        match &lsa.data.lsp {
+            OspfLsp::Summary(sum) => {
+                writeln!(out, "  Network Mask: /{}", mask_len(sum.netmask))?;
+                writeln!(out, "        TOS: 0  Metric: {}", sum.metric)?;
+            }
+            OspfLsp::SummaryAsbr(sum) => {
+                writeln!(out, "        TOS: 0  Metric: {}", sum.metric)?;
+            }
+            OspfLsp::AsExternal(ext) => write_external_body(
+                out,
+                ext.netmask,
+                ext.ext_and_resvd,
+                ext.metric,
+                ext.forwarding_address,
+                ext.external_route_tag,
+            )?,
+            OspfLsp::NssaAsExternal(ext) => write_external_body(
+                out,
+                ext.netmask,
+                ext.ext_and_tos,
+                ext.metric,
+                ext.forwarding_address,
+                ext.external_route_tag,
+            )?,
+            OspfLsp::OpaqueLinkLocalGrace(grace) => {
+                writeln!(out, "  Opaque-Type 3 (Grace LSA)")?;
+                for tlv in &grace.tlvs {
+                    match tlv {
+                        GraceTlv::GracePeriod(secs) => {
+                            writeln!(out, "    Grace Period: {}s", secs)?
+                        }
+                        GraceTlv::Reason(reason) => {
+                            writeln!(out, "    Restart Reason: {:?}", reason)?
+                        }
+                        GraceTlv::IpInterfaceAddress(addr) => {
+                            writeln!(out, "    IP Interface Address: {}", addr)?
+                        }
+                        GraceTlv::Unknown(_) => writeln!(out, "    Unknown TLV")?,
+                    }
+                }
+            }
+            _ => writeln!(
+                out,
+                "  Opaque-Info: {} octets of data",
+                lsa.length().saturating_sub(20)
+            )?,
+        }
+        writeln!(out)?;
+    }
+    Ok(())
+}
+
+fn write_external_body(
+    out: &mut String,
+    mask: Ipv4Addr,
+    bits: u8,
+    metric: u32,
+    forwarding_address: Ipv4Addr,
+    tag: u32,
+) -> std::result::Result<(), std::fmt::Error> {
+    let metric_type = external_metric_type(bits);
+    let meaning = if metric_type == 2 {
+        "Larger than any link state path"
+    } else {
+        "Comparable directly to link state metric"
+    };
+    writeln!(out, "  Network Mask: /{}", mask_len(mask))?;
+    writeln!(out, "        Metric Type: {} ({})", metric_type, meaning)?;
+    writeln!(out, "        TOS: 0")?;
+    writeln!(out, "        Metric: {}", metric)?;
+    writeln!(out, "        Forward Address: {}", forwarding_address)?;
+    writeln!(out, "        External Route Tag: {}", tag)?;
+    Ok(())
+}
+
+fn lsa_header_json(lsa: &super::lsdb::Lsa) -> OspfLsaHeaderDetailJson {
+    OspfLsaHeaderDetailJson {
+        ls_age: lsa.current_age(),
+        options: format_options_flags(&OspfOptions::from(lsa.data.h.options)),
+        link_state_id: lsa.data.h.ls_id.to_string(),
+        advertising_router: lsa.adv_router().to_string(),
+        ls_seq_number: format!("0x{:08x}", lsa.ls_seq_number()),
+        checksum: format!("0x{:04x}", lsa.ls_checksum()),
+        length: lsa.length(),
+    }
+}
+
+fn summary_lsa_details(
+    lsdb: &super::lsdb::Lsdb,
+    ls_type: OspfLsType,
+) -> Vec<OspfSummaryLsaDetailJson> {
+    lsdb.iter_by_type(ls_type)
+        .filter_map(|(_, lsa)| match &lsa.data.lsp {
+            OspfLsp::Summary(sum) | OspfLsp::SummaryAsbr(sum) => Some(OspfSummaryLsaDetailJson {
+                header: lsa_header_json(lsa),
+                network_mask: format!("/{}", mask_len(sum.netmask)),
+                metric: sum.metric,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+fn external_lsa_details(
+    lsdb: &super::lsdb::Lsdb,
+    ls_type: OspfLsType,
+) -> Vec<OspfExternalLsaDetailJson> {
+    lsdb.iter_by_type(ls_type)
+        .filter_map(|(_, lsa)| {
+            let (mask, bits, metric, fa, tag) = match &lsa.data.lsp {
+                OspfLsp::AsExternal(ext) => (
+                    ext.netmask,
+                    ext.ext_and_resvd,
+                    ext.metric,
+                    ext.forwarding_address,
+                    ext.external_route_tag,
+                ),
+                OspfLsp::NssaAsExternal(ext) => (
+                    ext.netmask,
+                    ext.ext_and_tos,
+                    ext.metric,
+                    ext.forwarding_address,
+                    ext.external_route_tag,
+                ),
+                _ => return None,
+            };
+            Some(OspfExternalLsaDetailJson {
+                header: lsa_header_json(lsa),
+                network_mask: format!("/{}", mask_len(mask)),
+                metric_type: external_metric_type(bits),
+                metric,
+                forwarding_address: fa.to_string(),
+                external_route_tag: tag,
+            })
+        })
+        .collect()
+}
+
+fn opaque_lsa_details(
+    lsdb: &super::lsdb::Lsdb,
+    ls_type: OspfLsType,
+) -> Vec<OspfOpaqueLsaDetailJson> {
+    lsdb.iter_by_type(ls_type)
+        .map(|((lsa_id, _), lsa)| {
+            let octets = lsa_id.octets();
+            OspfOpaqueLsaDetailJson {
+                header: lsa_header_json(lsa),
+                opaque_type: octets[0],
+                opaque_type_name: match octets[0] {
+                    3 => "Grace LSA",
+                    4 => "Router Information LSA",
+                    7 => "Extended Prefix LSA",
+                    8 => "Extended Link LSA",
+                    _ => "Unknown",
+                },
+                opaque_id: u32::from_be_bytes([0, octets[1], octets[2], octets[3]]),
+            }
+        })
+        .collect()
+}
+
 fn fmt_hold(lsa: &super::lsdb::Lsa) -> String {
     let hold = match lsa.hold_remaining() {
         Some(s) => format!("{}s", s),
@@ -3108,5 +3585,14 @@ mod tests {
         assert_eq!(fmt_written_at(at), "2026-10-17T21:46:38Z");
         assert_eq!(fmt_restart_reason(1), "SoftwareRestart");
         assert_eq!(fmt_restart_reason(0), "Unknown");
+    }
+
+    /// An external LSA's E bit is metric type 2 (RFC 2328 §A.4.5).
+    #[test]
+    fn external_metric_type_and_mask_length() {
+        assert_eq!(external_metric_type(0x80), 2);
+        assert_eq!(external_metric_type(0x00), 1);
+        assert_eq!(mask_len(Ipv4Addr::new(255, 255, 255, 0)), 24);
+        assert_eq!(mask_len(Ipv4Addr::new(255, 255, 255, 255)), 32);
     }
 }
