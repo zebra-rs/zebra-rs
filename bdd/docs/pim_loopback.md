@@ -11,6 +11,10 @@ neighbor on lo. A configured lo address raced the same way, until its
 AddrAdd reached PIM. A loopback is now passive, as in OSPF and IS-IS:
 it sends and accepts no Hellos.
 
+The kernel lists 127.0.0.1 and ::1 first on lo, so PIM showed lo by
+them and used them as its DR. A loopback address names the host, not a
+link: it now comes last, and lo is known by the address given to it.
+
 ## Test Topology
 
 ```
@@ -23,4 +27,5 @@ it sends and accepts no Hellos.
 |----------|--------|
 | p1 runs PIM on lo and meets p2 on eth1 | |
 | p1 is not its own neighbor on lo | |
+| lo is known by the address given to it | |
 | Teardown topology | |

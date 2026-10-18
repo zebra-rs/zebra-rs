@@ -9,6 +9,10 @@ Feature: PIM on a loopback forms no neighbors
   AddrAdd reached PIM. A loopback is now passive, as in OSPF and IS-IS:
   it sends and accepts no Hellos.
 
+  The kernel lists 127.0.0.1 and ::1 first on lo, so PIM showed lo by
+  them and used them as its DR. A loopback address names the host, not a
+  link: it now comes last, and lo is known by the address given to it.
+
   Test Topology:
   ```
     p1 (lo; eth1 10.1.12.1/24) --- veth --- p2 (eth2 10.1.12.2/24)
@@ -32,6 +36,13 @@ Feature: PIM on a loopback forms no neighbors
   Scenario: p1 is not its own neighbor on lo
     Given the test topology exists
     Then show command "show pim neighbor" in namespace "p1" should not contain "10.1.12.1"
+
+  Scenario: lo is known by the address given to it
+    Given the test topology exists
+    When I apply command "set interface lo ipv4 address 10.0.0.1/32" in namespace "p1"
+    And I apply command "set interface lo ipv6 address 2001:db8::1/128" in namespace "p1"
+    Then show command "show pim interface" in namespace "p1" should eventually contain "lo           Up      10.0.0.1         10.0.0.1"
+    And show command "show pim ipv6 interface" in namespace "p1" should eventually contain "lo           Up      2001:db8::1      2001:db8::1"
 
   Scenario: Teardown topology
     Given the test topology exists
