@@ -2041,6 +2041,12 @@ pub struct BgpRib {
     /// symmetric IRB, RFC 9135). Re-emitted unchanged when the route is
     /// advertised onward. `None` on originated and non-Type-2 rows.
     pub evpn_label2: Option<u32>,
+    /// Type-5 Gateway IP as received (RFC 9136 §3.1; the overlay index of
+    /// §3.2). Like the Type-5 ESI, which rides `esi`, it is a per-path NLRI
+    /// field outside the route key, kept so a reflected route re-emits it
+    /// unchanged. `None` on originated rows and when the field was zero
+    /// (the interface-less model).
+    pub evpn_gw_ip: Option<IpAddr>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2153,6 +2159,7 @@ impl BgpRib {
             mup_st1: None,
             vxlan_vtep: None,
             evpn_label2: None,
+            evpn_gw_ip: None,
         }
     }
 
@@ -6626,6 +6633,18 @@ fn evpn_nexthop_is_self(
     }
 }
 
+/// The Gateway IP a Type-5 path is sent with: the one it was received with
+/// (`BgpRib::evpn_gw_ip`), else the prefix family's unspecified address.
+/// The NLRI length ties the gateway's family to the prefix's (RFC 9136
+/// §3.1), so a gateway of the other family is never emitted.
+fn type5_gateway(prefix: &IpNet, rib: &BgpRib) -> IpAddr {
+    match (prefix, rib.evpn_gw_ip) {
+        (IpNet::V4(_), Some(gw @ IpAddr::V4(_))) | (IpNet::V6(_), Some(gw @ IpAddr::V6(_))) => gw,
+        (IpNet::V4(_), _) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        (IpNet::V6(_), _) => IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+    }
+}
+
 /// Per-peer EVPN advertise builder. Mirrors `route_update_ipv4`:
 /// applies split-horizon, the iBGP-iBGP / route-reflector filter,
 /// and fixes up AS_PATH / NEXT_HOP / LOCAL_PREF for the outgoing
@@ -6723,21 +6742,17 @@ pub fn route_update_evpn(
             addr: *orig,
         }),
         EvpnPrefix::IpPrefix { eth_tag, prefix } => {
-            // Type-5: the MPLS service label rides on the BgpRib; the
-            // gateway IP defaults to the prefix family's unspecified
-            // address (interface-less model — forwarding recurses on the
-            // BGP next-hop).
-            let gw = match prefix.addr() {
-                IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-                IpAddr::V6(_) => IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
-            };
+            // Type-5: the MPLS service label, the ESI and the gateway IP
+            // ride on the BgpRib; an originated route carries neither of
+            // the last two (interface-less model — forwarding recurses on
+            // the BGP next-hop).
             EvpnRoute::Prefix(EvpnIpPrefix {
                 id,
                 rd: *rd,
                 esi: rib.esi.unwrap_or([0; 10]),
                 ether_tag: *eth_tag,
                 prefix: *prefix,
-                gw,
+                gw: type5_gateway(prefix, rib),
                 label: rib.label.as_ref().map(|l| l.label).unwrap_or(0),
             })
         }
@@ -11343,14 +11358,19 @@ pub fn route_evpn_update(
     // preserve it on the BgpRib so the VRF import (which reuses the
     // VPNv4/v6 path) can build the label-push FIB entry. SRv6 Type-5
     // carries label 0 + the SID in the Prefix-SID attribute.
-    if let EvpnRoute::Prefix(p) = route
-        && p.label != 0
-    {
-        rib.label = Some(bgp_packet::Label {
-            label: p.label,
-            exp: 0,
-            bos: true,
-        });
+    if let EvpnRoute::Prefix(p) = route {
+        if p.label != 0 {
+            rib.label = Some(bgp_packet::Label {
+                label: p.label,
+                exp: 0,
+                bos: true,
+            });
+        }
+        // The ESI and Gateway IP (RFC 9136 §3.1) are not in the route key
+        // either: capture them so a reflected route re-emits the overlay
+        // index it arrived with instead of zeroing it.
+        rib.esi = Some(p.esi);
+        rib.evpn_gw_ip = (!p.gw.is_unspecified()).then_some(p.gw);
     }
     // Type-1 Ethernet A-D: the MPLS label / VNI is per-path (not in the key);
     // capture it so a reflected A-D re-emits it faithfully.
@@ -15150,21 +15170,15 @@ fn build_evpn_route(
                 addr: *orig,
             }))
         }
-        EvpnPrefix::IpPrefix { eth_tag, prefix } => {
-            let gw = match prefix.addr() {
-                IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-                IpAddr::V6(_) => IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
-            };
-            Some(EvpnRoute::Prefix(EvpnIpPrefix {
-                id: rib.remote_id,
-                rd: *rd,
-                esi: rib.esi.unwrap_or([0; 10]),
-                ether_tag: *eth_tag,
-                prefix: *prefix,
-                gw,
-                label: rib.label.as_ref().map(|l| l.label).unwrap_or(0),
-            }))
-        }
+        EvpnPrefix::IpPrefix { eth_tag, prefix } => Some(EvpnRoute::Prefix(EvpnIpPrefix {
+            id: rib.remote_id,
+            rd: *rd,
+            esi: rib.esi.unwrap_or([0; 10]),
+            ether_tag: *eth_tag,
+            prefix: *prefix,
+            gw: type5_gateway(prefix, rib),
+            label: rib.label.as_ref().map(|l| l.label).unwrap_or(0),
+        })),
         EvpnPrefix::Smet {
             eth_tag,
             src,

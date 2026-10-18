@@ -122,3 +122,17 @@ table as a normal IP route whose next-hop is the MPLS label-push (check
 `ip -f mpls route` for the per-VRF decap label) or the SRv6 H.Encap
 (`ip -6 route` shows `encap seg6 ... segs <remote-SID>`). CE-facing
 routes remain plain.
+
+A received Type-5 path that carries an **ESI** or a **Gateway IP**
+(RFC 9136 §3.1) shows them on their own lines under the path:
+
+```
+                    ESI: 00:11:22:33:44:55:66:77:88:99
+                    Gateway IP: 10.20.0.1
+```
+
+(`esi` and `gateway_ip` in the JSON view). A route reflector passes both
+on unchanged. zebra-rs itself originates interface-less routes only, with
+both fields zero, and forwards an imported Type-5 on its BGP next hop
+whatever they hold: it does not resolve a prefix through either overlay
+index (RFC 9136 §3.2).
