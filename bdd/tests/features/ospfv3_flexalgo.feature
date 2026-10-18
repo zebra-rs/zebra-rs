@@ -56,6 +56,22 @@ Feature: OSPFv3 Flex-Algo computes with the winning definition
     # algorithm-0 one (16001).
     And show command "show ospfv3 segment-routing" in namespace "r2" should eventually contain "SR Pfx (idx 1281)   Push 17281"
 
+  Scenario: r1 pops its own algorithm-128 Prefix-SID
+    Given the test topology exists
+    # r1's algorithm-128 Prefix-SID (index 1281, label 17281) has NP
+    # set, so the hop before r1 does not pop it: r1 must. r1 used to
+    # pop only its algorithm-0 Prefix-SID, and dropped a packet
+    # labelled 17281. r2 sends one straight to r1, to an address on a
+    # dummy interface OSPF does not advertise.
+    When I execute "ip link add fa1 type dummy" in namespace "r1"
+    And I execute "ip link set fa1 up" in namespace "r1"
+    And I execute "ip -6 addr add 2001:db8:1::1/128 dev fa1 nodad" in namespace "r1"
+    And I execute "ip -6 route add 2001:db8:1::1/128 encap mpls 17281 via 2001:db8:12::1 dev r2-r1" in namespace "r2"
+    Then ping from "r2" to "2001:db8:1::1" should eventually succeed
+    And mpls ilm outgoing label for label 17281 in namespace "r1" should be "Pop"
+    When I execute "ip -6 route del 2001:db8:1::1/128" in namespace "r2"
+    And I execute "ip link del fa1" in namespace "r1"
+
   Scenario: A definition edit takes effect at once
     Given the test topology exists
     # Lowering r2's priority makes r1's definition the winner, which

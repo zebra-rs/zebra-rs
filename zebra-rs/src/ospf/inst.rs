@@ -19264,7 +19264,10 @@ fn build_ilm_from_rib6(
 
 /// For every self-originated Extended-Prefix LSA in any area, emit
 /// an ILM entry that pops the local Prefix-SID label and delivers
-/// to the owning interface.
+/// to the owning interface: one per Prefix-SID sub-TLV, so the
+/// algorithm-0 SID and each Flexible Algorithm SID (RFC 9350 §7) of
+/// the prefix all pop. Only the first used to, and a packet arriving
+/// on a Flex-Algo SID was dropped here.
 ///
 /// Needed because `srmpls.rs::ext_prefix_lsa_build` sets the NP
 /// (No-PHP) flag on Index-form Prefix-SIDs we originate. With NP=1
@@ -19339,7 +19342,6 @@ fn add_self_prefix_sids_to_ilm(top: &Ospf, ilm: &mut BTreeMap<u32, SpfIlm>) {
                             }),
                         },
                     );
-                    break;
                 }
             }
         }
@@ -19349,7 +19351,8 @@ fn add_self_prefix_sids_to_ilm(top: &Ospf, ilm: &mut BTreeMap<u32, SpfIlm>) {
 /// v3 sibling of `add_self_prefix_sids_to_ilm`. Walks every area's
 /// self-originated E-Intra-Area-Prefix-LSAs (LS Type 0xA029,
 /// RFC 8362 §3.7) and emits an ILM entry that pops the local
-/// Prefix-SID label and delivers to the owning link.
+/// Prefix-SID label and delivers to the owning link, one per
+/// Prefix-SID sub-TLV: every algorithm's SID pops.
 ///
 /// Needed because `srmpls::ext_intra_area_prefix_v3_lsa_build` sets
 /// the NP (No-PHP) flag on Index-form Prefix-SIDs we originate; per
@@ -19457,7 +19460,6 @@ fn add_self_prefix_sids_to_ilm_v3(top: &Ospf<Ospfv3>, ilm: &mut BTreeMap<u32, Sp
                             }),
                         },
                     );
-                    break;
                 }
             }
         }
@@ -21018,6 +21020,69 @@ mod flex_algo_selection_tests {
         assert_eq!(peers[&rid(2)][&129].priority, 50);
     }
 
+    /// This router pops each of its own Prefix-SIDs, every algorithm's.
+    /// They carry NP, so the hop before does not pop them (RFC 8665 §5).
+    /// Only the first Prefix-SID of a prefix used to get an entry, so a
+    /// packet arriving on its Flex-Algo SID was dropped here.
+    #[tokio::test]
+    async fn own_prefix_sids_pop_for_every_algorithm() {
+        let mut top = fresh_ospf();
+        top.router_id = rid(1);
+        top.flex_algo.config.insert(128, Default::default());
+        top.segment_routing = super::super::srmpls::SegmentRoutingMode::Mpls;
+        top.reconcile_block_watch();
+        top.process_sr_rx(crate::rib::RibSrRx::Block {
+            name: crate::rib::DEFAULT_BLOCK_NAME.to_string(),
+            block: Some(crate::rib::Block::default_block()),
+        });
+        let mut link = OspfLink::from(
+            top.tx.clone(),
+            crate::rib::Link::from(crate::fib::message::FibLink {
+                index: 7,
+                name: "probe7".into(),
+                mtu: 1500,
+                ..Default::default()
+            }),
+            top.sock.clone(),
+            top.router_id,
+            top.ptx.clone(),
+        );
+        link.enabled = true;
+        link.addr.push(super::super::addr::OspfAddr {
+            prefix: "192.0.2.1/32".parse().unwrap(),
+            secondary: false,
+        });
+        link.config.prefix_sid = Some(super::super::link::PrefixSid::Index(1));
+        link.config
+            .flex_algo_prefix_sids
+            .insert(128, super::super::link::PrefixSid::Index(101));
+        top.links.insert(7, link);
+        top.areas.fetch(AREA0).links.insert(7);
+        top.router_lsa_originate();
+        install_ri(
+            top.areas.get_mut(AREA0).unwrap(),
+            &top.tx,
+            rid(2),
+            0,
+            vec![fad(128, 200)],
+            0,
+        );
+        top.router_info_lsa_originate();
+        top.ext_prefix_lsa_originate(7);
+
+        let mut ilm = BTreeMap::new();
+        add_self_prefix_sids_to_ilm(&top, &mut ilm);
+        let pops: Vec<(u32, Option<u8>)> = ilm
+            .iter()
+            .map(|(label, e)| (*label, e.fec.as_ref().map(|f| f.algo)))
+            .collect();
+        assert_eq!(pops, vec![(16001, Some(0)), (16101, Some(128))]);
+        assert!(
+            ilm.values()
+                .all(|e| e.nhops.values().all(|nhop| nhop.adjacency))
+        );
+    }
+
     /// A Router Information refresh on another path — a graceful-restart
     /// abort — between an unsupported winner arriving and SPF must not
     /// swallow the pending Prefix-SID withdrawal: the algorithm's
@@ -21464,6 +21529,39 @@ mod v3_flex_algo_selection_tests {
             build_v3_spf_input(&mut top, area_id).expect("own router LSA");
         }
         assert_eq!(sequences(&top), before);
+    }
+
+    /// This router pops each of its own Prefix-SIDs, every algorithm's.
+    /// They carry NP, so the hop before does not pop them (RFC 8666 §5).
+    /// Only the first Prefix-SID of a prefix used to get an entry, so a
+    /// packet arriving on its Flex-Algo SID was dropped here.
+    #[tokio::test]
+    async fn own_prefix_sids_pop_for_every_algorithm() {
+        let mut top = sr_router();
+        top.reconcile_block_watch();
+        top.process_sr_rx(crate::rib::RibSrRx::Block {
+            name: crate::rib::DEFAULT_BLOCK_NAME.to_string(),
+            block: Some(crate::rib::Block::default_block()),
+        });
+        add_link(&mut top, 7, AREA0);
+        top.links.get_mut(&7).unwrap().config.prefix_sid =
+            Some(super::super::link::PrefixSid::Index(7));
+        top.router_lsa_originate();
+        install_e_router(&mut top, AREA0, rid(2), 0, vec![fad(128, 200, 0)], 0);
+        build_v3_spf_input(&mut top, AREA0).expect("own router LSA");
+        assert!(prefix_advertised(&top, AREA0, 7));
+
+        let mut ilm = BTreeMap::new();
+        add_self_prefix_sids_to_ilm_v3(&top, &mut ilm);
+        let pops: Vec<(u32, Option<u8>)> = ilm
+            .iter()
+            .map(|(label, e)| (*label, e.fec.as_ref().map(|f| f.algo)))
+            .collect();
+        assert_eq!(pops, vec![(16007, Some(0)), (16135, Some(128))]);
+        assert!(
+            ilm.values()
+                .all(|e| e.nhops.values().all(|nhop| nhop.adjacency))
+        );
     }
 
     /// Refreshing one interface's E-Intra-Area-Prefix-LSA before SPF must
