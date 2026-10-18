@@ -181,8 +181,11 @@ pub fn nexthop_show(rib: &Rib, _args: Args, json: bool) -> String {
                 write!(buf, "  ").unwrap();
                 write_via(&mut buf, uni);
                 write!(buf, ", {}", rib.link_name(uni.ifindex().unwrap_or(0))).unwrap();
-                for label in uni.labels.iter() {
-                    let _ = write!(buf, " {}", label);
+                if !uni.labels.is_empty() {
+                    let _ = write!(buf, ", label");
+                    for label in uni.labels.iter() {
+                        let _ = write!(buf, " {}", label);
+                    }
                 }
                 let _ = writeln!(buf);
             }
@@ -274,6 +277,30 @@ mod tests {
         let mut buf = String::new();
         write_via(&mut buf, &g);
         assert_eq!(buf, "via seg6 [fcbb:bbbb:2:3:2::, fcbb:bbbb:2:3:3::]");
+    }
+
+    /// A labelled group names its label stack, after the interface.
+    /// The labels used to follow it bare: `via 10.0.12.2, eth 16002`.
+    #[tokio::test]
+    async fn nexthop_show_names_the_label_stack() {
+        let mut rib = Rib::new(false).expect("rib");
+        let uni = NexthopUni {
+            addr: IpAddr::V4("10.0.12.2".parse().unwrap()),
+            mpls_label: vec![16002, 16003],
+            ..Default::default()
+        };
+        rib.nmap.fetch_mpls(&uni, 0);
+        let plain = NexthopUni {
+            addr: IpAddr::V4("10.0.13.3".parse().unwrap()),
+            ..Default::default()
+        };
+        rib.nmap.fetch_uni(&plain, 0);
+        let text = nexthop_show(&rib, Args(Default::default()), false);
+        assert!(
+            text.contains("  via 10.0.12.2, unknown, label 16002 16003\n"),
+            "{text}"
+        );
+        assert!(text.contains("  via 10.0.13.3, unknown\n"), "{text}");
     }
 
     #[test]

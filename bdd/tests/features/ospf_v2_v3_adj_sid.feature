@@ -12,6 +12,10 @@ Feature: OSPFv2 and OSPFv3 give their Adjacency-SIDs different labels
   both with SR-MPLS: each router has one v2 and one v3 adjacency, so it
   must hold two Adjacency-SID labels, 15000 and 15001.
 
+  The RIB views show what was installed: each Adjacency-SID's index in
+  the SRLB, the label stack of each nexthop, and no protection role on
+  a path with no backup.
+
   Config files:
   - r1.yaml: OSPFv2 and OSPFv3 with SR-MPLS; loopback Prefix-SIDs 16011 (v2), 16001 (v3).
   - r2.yaml: the same; loopback Prefix-SIDs 16012 (v2), 16002 (v3).
@@ -35,6 +39,34 @@ Feature: OSPFv2 and OSPFv3 give their Adjacency-SIDs different labels
     And show command "show mpls ilm" in namespace "r1" should eventually contain "15001"
     And command "ip -f mpls route show" in namespace "r1" should eventually contain "15000"
     And command "ip -f mpls route show" in namespace "r1" should eventually contain "15001"
+
+  Scenario: The ILM shows each Adjacency-SID's index in the SRLB
+    Given the test topology exists
+    # Each Adjacency-SID label is indexed within the SRLB, from 15000,
+    # where it was allocated. Every OSPF one used to read idx 0.
+    Then show command "show mpls ilm" in namespace "r2" should eventually contain "SR Adj (idx 0"
+    And show command "show mpls ilm" in namespace "r2" should eventually contain "SR Adj (idx 1"
+    And show command "show mpls ilm" in namespace "r1" should eventually contain "SR Adj (idx 1"
+
+  Scenario: show nexthop names each label stack
+    Given the test topology exists
+    # r2 pushes r1's Prefix-SID labels (16011 for v2, 16001 for v3).
+    # They used to follow the interface bare: "r2-r1 16011".
+    Then show command "show nexthop" in namespace "r2" should eventually contain "via 10.0.12.1, r2-r1, label 16011"
+    And show command "show nexthop" in namespace "r2" should eventually contain ", r2-r1, label 16001"
+
+  Scenario: A path with no backup is not tagged Protected
+    Given the test topology exists
+    # With one link there is no backup, so no path is "Protected".
+    Then show command "show ip route detail" in namespace "r2" should eventually contain "10.0.12.1, via r2-r1"
+    And show command "show ip route detail" in namespace "r2" should not contain "Protected"
+    And show command "show ipv6 route detail" in namespace "r2" should eventually contain ", via r2-r1"
+    And show command "show ipv6 route detail" in namespace "r2" should not contain "Protected"
+
+  Scenario: The route legend lists only codes a route can carry
+    Given the test topology exists
+    Then show command "show ip route" in namespace "r2" should eventually contain "S - static"
+    And show command "show ip route" in namespace "r2" should not contain "Stale route"
 
   Scenario: Teardown
     Given the test topology exists
