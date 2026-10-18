@@ -1,0 +1,49 @@
+# z4: behind z2 and z3, so z1 reaches it over both links.
+# OSPFv2 and OSPFv3, SR-MPLS on v3: loopback Prefix-SID index 4 (label 16004).
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.4/32
+  ipv6:
+    address: 2001:db8::4/128
+- if-name: z4-z2
+  ipv4:
+    address: 10.0.24.2/30
+  ipv6:
+    address: 2001:db8:24::2/64
+- if-name: z4-z3
+  ipv4:
+    address: 10.0.34.2/30
+  ipv6:
+    address: 2001:db8:34::2/64
+router:
+  ospf:
+    router-id: 10.0.0.4
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+      - if-name: z4-z2
+        enabled: true
+        network-type: point-to-point
+      - if-name: z4-z3
+        enabled: true
+        network-type: point-to-point
+  ospfv3:
+    router-id: 10.0.0.4
+    segment-routing:
+      mpls: {}
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+        prefix-sid:
+          index: 4
+      - if-name: z4-z2
+        enabled: true
+        network-type: point-to-point
+      - if-name: z4-z3
+        enabled: true
+        network-type: point-to-point

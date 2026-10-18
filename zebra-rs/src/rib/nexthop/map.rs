@@ -20,10 +20,19 @@ type Seg6Key = (IpAddr, Vec<Ipv6Addr>, Option<EncapType>);
 // every other dedupe table here.
 type Seg6LocalKey = (crate::rib::SidBehavior, u32, Option<std::net::Ipv6Addr>);
 
+// Dedupe keys for plain and labeled nexthops carry the egress the source
+// named (`ifindex_origin`), not just the gateway. An address identifies a
+// neighbor only on its own link: link-locals repeat across links, and OSPF
+// hands over every attached route as 0.0.0.0 on its interface. Without it,
+// the first route's interface was copied onto every route sharing the
+// address.
+type UniKey = (u32, IpAddr, Option<u32>);
+type MplsKey = (IpAddr, Option<u32>, Vec<u32>);
+
 pub struct NexthopMap {
-    map: BTreeMap<(u32, IpAddr), usize>,
+    map: BTreeMap<UniKey, usize>,
     set: BTreeMap<BTreeSet<(usize, u8)>, usize>,
-    mpls: BTreeMap<(IpAddr, Vec<u32>), usize>,
+    mpls: BTreeMap<MplsKey, usize>,
     seg6: BTreeMap<Seg6Key, usize>,
     seg6local: BTreeMap<Seg6LocalKey, usize>,
     // Dedupe key for protection indirection groups: (primary gid,
@@ -102,21 +111,11 @@ impl NexthopMap {
     }
 
     pub fn fetch_uni(&mut self, uni: &NexthopUni, table_id: u32) -> Option<&mut Group> {
-        if let Some(&gid) = self.map.get(&(table_id, uni.addr)) {
+        let key: UniKey = (table_id, uni.addr, uni.ifindex_origin);
+        if let Some(&gid) = self.map.get(&key) {
             let entry = self.groups.get_mut(gid)?;
             if entry.is_none() {
                 *entry = Some(Group::from_nexthop_uni(uni, gid, table_id));
-            } else if let Some(Group::Uni(g)) = entry
-                && g.ifindex_origin.is_none()
-                && uni.ifindex_origin.is_some()
-            {
-                // A later install pinned an on-link egress the cached
-                // group was created without (the VRF-static on-link
-                // stamp — see `Rib::stamp_vrf_onlink`). Adopt it so the
-                // shared group resolves on-link instead of re-walking a
-                // table whose connected route the VRF enslave flushed.
-                g.ifindex_origin = uni.ifindex_origin;
-                g.set_valid(true);
             }
             return self.get_mut(gid);
         }
@@ -124,14 +123,15 @@ impl NexthopMap {
         let gid = self.new_gid();
         let group = Group::from_nexthop_uni(uni, gid, table_id);
 
-        self.map.insert((table_id, uni.addr), gid);
+        self.map.insert(key, gid);
         self.groups.push(Some(group));
 
         self.get_mut(gid)
     }
 
     pub fn fetch_mpls(&mut self, uni: &NexthopUni, table_id: u32) -> Option<&mut Group> {
-        if let Some(&gid) = self.mpls.get(&(uni.addr, uni.mpls_label.clone())) {
+        let key: MplsKey = (uni.addr, uni.ifindex_origin, uni.mpls_label.clone());
+        if let Some(&gid) = self.mpls.get(&key) {
             let entry = self.groups.get_mut(gid)?;
             if entry.is_none() {
                 *entry = Some(Group::from_nexthop_uni(uni, gid, table_id));
@@ -142,7 +142,7 @@ impl NexthopMap {
         let gid = self.new_gid();
         let group = Group::from_nexthop_uni(uni, gid, table_id);
 
-        self.mpls.insert((uni.addr, uni.mpls_label.clone()), gid);
+        self.mpls.insert(key, gid);
         self.groups.push(Some(group));
 
         self.get_mut(gid)
@@ -510,6 +510,32 @@ mod tests {
         let gid_a = group_gid(nmap.fetch(&h_encap, 0).expect("group"));
         let gid_b = group_gid(nmap.fetch(&h_red, 0).expect("group"));
         assert_ne!(gid_a, gid_b);
+    }
+
+    /// A gateway address on two interfaces is two nexthops: a link-local
+    /// repeated on two links, or OSPF's 0.0.0.0 attached routes. Each keeps
+    /// its own egress, with or without labels; the same address on the
+    /// same interface still shares one group.
+    #[test]
+    fn fetch_keeps_one_group_per_egress() {
+        let on = |addr: &str, ifindex: Option<u32>, labels: &[u32]| NexthopUni {
+            ifindex_origin: ifindex,
+            mpls_label: labels.to_vec(),
+            ..plain_uni(addr)
+        };
+        let egress = |nmap: &mut NexthopMap, uni: &NexthopUni| match nmap.fetch(uni, 0) {
+            Some(Group::Uni(g)) => (g.gid(), g.ifindex_origin),
+            _ => panic!("no uni group"),
+        };
+        for labels in [&[][..], &[16004][..]] {
+            let mut nmap = NexthopMap::default();
+            let (a, a_if) = egress(&mut nmap, &on("fe80::1", Some(2), labels));
+            let (b, b_if) = egress(&mut nmap, &on("fe80::1", Some(3), labels));
+            let (c, c_if) = egress(&mut nmap, &on("fe80::1", None, labels));
+            assert_eq!((a_if, b_if, c_if), (Some(2), Some(3), None));
+            assert!(a != b && b != c && a != c, "{labels:?}");
+            assert_eq!(egress(&mut nmap, &on("fe80::1", Some(3), labels)).0, b);
+        }
     }
 
     #[test]
