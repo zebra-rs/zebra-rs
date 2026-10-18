@@ -204,7 +204,7 @@ Flags: * - Kernel VXLAN device
   P2MP replication tree`.
 
 Per-MAC state is in
-[`show l2 mac table`](ch-14-01-show-system-rib.md#show-l2-mac-table).
+[`show l2 mac table`](ch-00-04-bridge-configuration.md#show-l2-mac-table).
 
 JSON: `{ advertise_all_vni, bum_flooding, num_l2_vnis, num_l3_vnis,
 vnis: [ { vni, type, kernel, local_vtep, rd, route_target, local_macs,

@@ -103,6 +103,74 @@ equivalent of `ip link del br550`):
 no bridge br550
 ```
 
+## Show commands
+
+The examples come from two iBGP EVPN PEs, r1 (192.168.0.1) and r2
+(192.168.0.2), each with VXLAN VNI 10 enslaved to a bridge `br10` and an
+access port `host0` holding one station: aa:bb:cc:dd:ee:01 on r1 and
+aa:bb:cc:dd:ee:02 on r2.
+
+### `show l2 mac table`
+
+The MACs EVPN has learned from other PEs, one entry per VNI and MAC:
+
+- **`Encap` and `Tunnel Endpoint`:** where the MAC is. That is the remote
+  VTEP for EVPN over VXLAN, the remote PE's `End.DT2U` SID for EVPN over
+  SRv6 (RFC 9252), or `<PE>:<label>` for EVPN over MPLS. An IPv6 endpoint
+  alone would be ambiguous, since VXLAN also runs over an IPv6 underlay,
+  so `Encap` names the kind. A MAC advertised by more than one PE on a
+  multihomed segment shows the first, with `(+<n>)` for the others.
+- **`Flags`:** `S` sticky (RFC 7432 §15.2), `G` default gateway, `R`
+  router, `L` behind an E-Tree leaf (RFC 8317), or `-`.
+- **`Seq`:** the MAC Mobility sequence number.
+- **`Installed`:** whether the MAC is programmed in the data plane.
+
+```
+r2> show l2 mac table
+VNI    MAC Address         Encap Tunnel Endpoint       Flags Seq    Installed
+------ ------------------- ----- --------------------- ----- ------ ---------
+10     aa:bb:cc:dd:ee:01   vxlan 192.168.0.1           -     0      Yes
+```
+
+JSON: `{ "entries": [ { "vni", "mac", "tunnel_endpoint", "encap",
+"flags", "seq", "installed" } ] }`.
+
+For one line per VNI instead of per MAC, use
+[`show evpn vni all`](ch-02-48-bgp-show.md#show-evpn-vni-all).
+
+### `show l2 neighbor`
+
+The kernel's bridge forwarding database (FDB), as zebra-rs sees it: one
+row per MAC, interface and VLAN, with its VNI, remote VTEP, neighbor
+state and `NTF_*` flags in hex (`0x02` self, `0x10` externally learned).
+Where `show l2 mac table` is EVPN's view, this is the kernel's. It
+includes the bridge's and the ports' own addresses, the VXLAN device's
+rows, and the multicast addresses of other interfaces.
+
+```
+r1> show l2 neighbor
+ MAC                Interface         VLAN         VNI  Dst                                      State          Flags
+ ------------------ ---------------- -----  ----------  ---------------------------------------- -------------- ----------
+...
+ 00:00:00:00:00:00  vxlan10              -           -  -                                        Permanent      0x02
+ 4a:7b:09:67:2a:7a  vxlan10              -           -  -                                        Permanent      0x00
+ 4a:7b:09:67:2a:7a  vxlan10              1           -  -                                        Permanent      0x00
+ aa:bb:cc:dd:ee:02  vxlan10              -           -  -                                        Permanent      0x02
+ aa:bb:cc:dd:ee:02  vxlan10              1           -  -                                        Reachable      0x10
+ 02:00:00:00:fe:01  br10                 -           -  -                                        Permanent      0x00
+ 02:00:00:00:fe:01  br10                 1           -  -                                        Permanent      0x00
+ 02:00:00:00:0a:01  host0                -           -  -                                        Permanent      0x00
+ 02:00:00:00:0a:01  host0                1           -  -                                        Permanent      0x00
+ aa:bb:cc:dd:ee:01  host0                -           -  -                                        Noarp          0x00
+ aa:bb:cc:dd:ee:01  host0                1           -  -                                        Noarp          0x00
+```
+
+The VXLAN rows show `-` for VNI and Dst, though the kernel's own rows
+carry both (`bridge fdb show dev vxlan10`). This is a known issue.
+
+JSON: `{ "entries": [ { "mac", "interface", "vlan", "vni", "dst",
+"state", "flags" } ] }`, with `flags` as a number.
+
 ## Cross-reference — iproute2
 
 | zebra-rs | iproute2 |

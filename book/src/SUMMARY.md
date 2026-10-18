@@ -169,7 +169,6 @@
 
 ## Show Commands
 
-- [System, RIB and Forwarding](ch-14-01-show-system-rib.md)
 - [Neighbor Discovery, BFD and STAMP](ch-14-05-show-bfd-stamp-nd.md)
 - [Policy Objects](ch-14-06-show-policy.md)
 

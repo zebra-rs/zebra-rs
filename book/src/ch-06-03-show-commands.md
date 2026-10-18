@@ -11,7 +11,8 @@ This is distinct from the configuration viewers
 [Show Config Commands](ch-06-02-show-config-commands.md).
 
 This page covers what every show command has in common: how to run
-one, how to get JSON, and the per-VRF forms. Each protocol documents its
+one, how to get JSON, the per-VRF forms, and the
+[daemon commands](#daemon-commands). Each protocol documents its
 own show commands in its chapter, next to its configuration:
 
 - [BGP Show Commands](ch-02-48-bgp-show.md) — every address family's
@@ -27,13 +28,18 @@ own show commands in its chapter, next to its configuration:
   the multicast routing table.
 - [Routing Table (RIB)](ch-18-00-rib.md) — the IPv4/IPv6 routing tables,
   nexthop groups, the MPLS label table and the label space.
+- [Router ID Selection](ch-00-01-router-id.md) — `show router-id`.
+- [Interface Configuration](ch-00-02-interface-configuration.md#show-commands)
+  — interfaces and VRFs.
+- [Bridge Configuration](ch-00-04-bridge-configuration.md#show-commands)
+  — the EVPN MAC table and the kernel bridge FDB.
+- [SRv6](ch-04-00-srv6.md#show-segment-routing-srv6-sid) — the SRv6
+  SIDs.
 - [eBPF Data Plane](ch-16-00-ebpf.md#show-ebpf) — the eBPF forwarding
   tables and counters.
 
 The rest are still being moved into their chapters:
 
-- [System, RIB and Forwarding](ch-14-01-show-system-rib.md) — version,
-  interfaces, L2, VRFs, and SRv6 SIDs.
 - [Neighbor Discovery, BFD and STAMP](ch-14-05-show-bfd-stamp-nd.md) —
   IPv6 ND, BFD sessions, and STAMP delay measurement.
 - [Policy Objects](ch-14-06-show-policy.md) — route policies,
@@ -128,3 +134,49 @@ fixed set of subcommands per protocol, and each protocol's show page
 lists them. The `show ip route vrf` / `show ipv6 route vrf` forms are
 different: the RIB answers them itself, from its per-VRF tables. See
 [Routing Table (RIB)](ch-18-00-rib.md#show-ip-route-vrf-name).
+
+## Daemon commands
+
+These describe the daemon itself.
+
+### `show version`
+
+The version, the git hash the binary was built from, and the build date:
+
+```
+r1> show version
+zebra-rs version 26.10.1 (d470a230)
+Build Date: 2026-10-18 05:04:38 UTC
+```
+
+JSON: `{ "package_name", "package_version", "git_hash", "git_branch",
+"git_date", "git_message", "git_dirty", "build_date" }`.
+
+### `show hostname`
+
+The configured `system hostname`, or the system's when none is
+configured, or `unknown` when there is neither:
+
+```
+r1> show hostname
+r1
+```
+
+JSON: `{ "hostname": "r1" }`, or `null` when there is neither.
+
+### `show task`
+
+The protocol tasks the daemon runs and the VRF each runs in. It confirms
+that a per-VRF protocol instance started:
+
+```
+r1> show task
+Protocol      VRF
+bfd           default
+ospf          blue
+ospf          default
+ospfv3        default
+stamp         default
+```
+
+JSON: a list of `{ "protocol", "vrf" }`.
