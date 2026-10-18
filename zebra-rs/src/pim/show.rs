@@ -450,7 +450,12 @@ fn show_pim_upstream<A: PimAf>(
         let (iif, rpf_neighbor) = match entry.rpf {
             RpfState::Unresolved => ("-".to_string(), "-".to_string()),
             RpfState::Connected { ifindex } => (pim.ifname(ifindex), "connected".to_string()),
-            RpfState::Gateway { ifindex, nexthop } => (pim.ifname(ifindex), nexthop.to_string()),
+            // RPF'(S,G): the neighbor's primary address, which the Joins
+            // name, once a neighbor owns the nexthop.
+            RpfState::Gateway { ifindex, nexthop } => (
+                pim.ifname(ifindex),
+                pim.jp_target(ifindex, nexthop).to_string(),
+            ),
         };
         rows.push(UpstreamBrief {
             sg: key.to_string(),

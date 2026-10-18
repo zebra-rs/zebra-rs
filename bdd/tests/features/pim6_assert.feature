@@ -85,15 +85,22 @@ Feature: PIMv6 assert election and LAN Join/Prune behaviors
     And I spawn "timeout 260 python3 tests/scripts/ssm_recv6.py ff3e::6 2001:db8:60::10 eth0 5001 /tmp/pim6_assert_h3" in namespace "h3"
     Then show command "show pim ipv6 upstream" in namespace "r1" should eventually contain "Joined"
     And show command "show pim ipv6 upstream" in namespace "r2" should eventually contain "Joined"
+    # r1 and r2 reach the source through r0's global address, but their
+    # Joins name r0's link-local, its Hello source: each must still see
+    # the other's Join as one toward its own upstream. As in pim_assert,
+    # r2 joins first and only r2 logs it.
+    And daemon log in namespace "r2" should eventually contain "join suppressed"
 
     # The sender starts: both forward onto swB, the duplicates trigger
     # the assert, and the lower RPF metric (r2) wins deterministically.
-    # (Join suppression and prune override are generic LAN J/P behaviors
-    # already proven in the IPv4 `pim_assert`; here the point is that the
-    # Assert itself elects a winner over the PIMv6 transport.)
     When I spawn "timeout 200 python3 tests/scripts/mcast_send6.py ff3e::6 5001 eth0 170" in namespace "h1"
     Then show command "show pim ipv6 assert" in namespace "r2" should eventually contain "Winner"
     And show command "show pim ipv6 assert" in namespace "r1" should eventually contain "Loser"
+
+    # The loser withdraws from the source tree; r2 overhears the Prune,
+    # sent to r0's link-local, and overrides it.
+    And daemon log in namespace "r1" should eventually contain "pruned toward"
+    And daemon log in namespace "r2" should eventually contain "prune override"
 
     # Steady state: the assert winner carries swB for both receivers.
     And command "cat /tmp/pim6_assert_h2" in namespace "h2" should eventually contain "ssm-hello"

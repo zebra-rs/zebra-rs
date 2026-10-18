@@ -78,7 +78,9 @@ The IPv6 form is identical under `router pim ipv6 interface`. PIMv6
 Hellos are sourced from the interface link-local address (RFC 7761
 §4.3.1); the router advertises its global addresses in the Hello Address
 List so a neighbor can match an RPF nexthop that resolves to one of
-them.
+them. Join/Prunes, and the RPF Nbr column of `show pim ipv6 upstream`,
+still name that neighbor by its link-local, the address it sends Hellos
+from (RFC 7761 §4.5).
 
 ## Local membership: IGMP (IPv4) and MLD (IPv6)
 

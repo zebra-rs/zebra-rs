@@ -103,12 +103,19 @@ impl<A: PimAf> Pim<A> {
     ///   * another router's Prune for state we still want triggers an
     ///     override Join so the upstream keeps forwarding.
     fn jp_overhear(&mut self, ifindex: u32, sender: A::Addr, upstream: A::Addr, jp: &PimJoinPrune) {
-        let bucket = RpfState::Gateway {
-            ifindex,
-            nexthop: upstream,
+        // The J/P names its target by one of that router's addresses, and
+        // our entries by their MRIB nexthop: match on the neighbor both
+        // resolve to. Yields the entry's nexthop, its refresh bucket.
+        let target = self.jp_target(ifindex, upstream);
+        let joined_toward = |rpf: &RpfState<A>| match *rpf {
+            RpfState::Gateway {
+                ifindex: i,
+                nexthop,
+            } if i == ifindex && self.jp_target(ifindex, nexthop) == target => Some(nexthop),
+            _ => None,
         };
         let mut overrides: Vec<SgKey<A>> = vec![];
-        let mut suppress = false;
+        let mut suppressed: Vec<A::Addr> = vec![];
         for group in &jp.groups {
             let Some(grp) = A::from_ip(group.group.addr) else {
                 continue;
@@ -125,9 +132,9 @@ impl<A: PimAf> Pim<A> {
                 let Some(key) = key_of(join) else { continue };
                 if let Some(entry) = self.tib.get(&key)
                     && entry.join_state == JoinState::Joined
-                    && entry.rpf == bucket
+                    && let Some(nexthop) = joined_toward(&entry.rpf)
                 {
-                    suppress = true;
+                    suppressed.push(nexthop);
                     pim_trace!(
                         self.tracing,
                         JoinPrune,
@@ -142,18 +149,18 @@ impl<A: PimAf> Pim<A> {
                 let Some(key) = key_of(prune) else { continue };
                 if let Some(entry) = self.tib.get(&key)
                     && entry.join_state == JoinState::Joined
-                    && entry.rpf == bucket
+                    && joined_toward(&entry.rpf).is_some()
                 {
                     overrides.push(key);
                 }
             }
         }
-        if suppress {
-            // RFC t_suppressed ≈ 1.1–1.4 × t_periodic; one fixed
-            // bump per overheard refresh keeps one joiner per LAN.
-            let deadline = Instant::now() + JP_SUPPRESS;
+        // RFC t_suppressed ≈ 1.1–1.4 × t_periodic; one fixed bump per
+        // overheard refresh keeps one joiner per LAN.
+        let deadline = Instant::now() + JP_SUPPRESS;
+        for nexthop in suppressed {
             self.jp_refresh
-                .entry((ifindex, upstream))
+                .entry((ifindex, nexthop))
                 .and_modify(|t| *t = (*t).max(deadline))
                 .or_insert(deadline);
         }
@@ -201,8 +208,21 @@ impl<A: PimAf> Pim<A> {
         self.jp_send(ifindex, nbr, vec![group]);
     }
 
+    /// The Upstream Neighbor a J/P toward `nbr` out `ifindex` names:
+    /// the primary address of the neighbor that owns `nbr`, NBR(I, A)
+    /// (RFC 7761 §4.5), or `nbr` itself while no neighbor does. An
+    /// upstream router takes a J/P naming another of its addresses as
+    /// one addressed elsewhere (FRR compares it with its primary).
+    pub(crate) fn jp_target(&self, ifindex: u32, nbr: A::Addr) -> A::Addr {
+        self.links
+            .get(&ifindex)
+            .and_then(|l| l.nbr(&nbr))
+            .unwrap_or(nbr)
+    }
+
     fn jp_send(&self, ifindex: u32, nbr: A::Addr, groups: Vec<JpGroup>) {
-        let mut jp = PimJoinPrune::new(EncodedUnicast::new(A::to_ip(nbr)), JP_HOLDTIME);
+        let target = self.jp_target(ifindex, nbr);
+        let mut jp = PimJoinPrune::new(EncodedUnicast::new(A::to_ip(target)), JP_HOLDTIME);
         jp.groups = groups;
         let packet = PimPacket::new(PimPayload::JoinPrune(jp));
         let _ = self.send_tx.send(PimSend {

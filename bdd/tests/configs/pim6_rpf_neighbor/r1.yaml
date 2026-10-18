@@ -1,0 +1,17 @@
+# The upstream: its Hellos come from fe80::13:1 and list 2001:db8:13::1
+# as a secondary address. eth3 is a dummy holding the source's subnet.
+interface:
+- if-name: eth1
+  ipv6:
+    address: 2001:db8:13::1/64
+- if-name: eth3
+  ipv6:
+    address: 2001:db8:14::1/64
+router:
+  pim:
+    ipv6:
+      interface:
+      - if-name: eth1
+        enabled: true
+      - if-name: eth3
+        enabled: true
