@@ -9638,8 +9638,8 @@ impl Ospf<Ospfv3> {
             for a in link.addr.iter() {
                 // Skip link-local addresses — those are
                 // advertised by Link-LSAs (RFC 5340 §A.4.9), not
-                // by Intra-Area-Prefix-LSAs (§A.4.10).
-                if a.prefix.addr().is_unicast_link_local() {
+                // by Intra-Area-Prefix-LSAs (§A.4.10) — and `::1`.
+                if !super::addr::is_advertised_v6(a.prefix.addr()) {
                     continue;
                 }
                 let prefix_length = a.prefix.prefix_len();
@@ -9747,17 +9747,17 @@ impl Ospf<Ospfv3> {
         let link_local_address: Ipv6Addr =
             super::addr::stable_link_local(&link.addr).unwrap_or(Ipv6Addr::UNSPECIFIED);
 
-        // Every non-link-local prefix configured on the interface
-        // gets advertised, host bits masked (see
-        // `ospfv3_masked_prefix_bytes`) and deduped: two addresses
-        // in the same subnet contribute the prefix once, not once
-        // per address.
+        // Every prefix configured on the interface except link-locals
+        // and `::1` (`is_advertised_v6`) gets advertised, host bits
+        // masked (see `ospfv3_masked_prefix_bytes`) and deduped: two
+        // addresses in the same subnet contribute the prefix once, not
+        // once per address.
         let mut seen: std::collections::BTreeSet<(u8, Vec<u8>)> = std::collections::BTreeSet::new();
         let mut prefixes: Vec<Ospfv3LinkLsaPrefix> = Vec::new();
         for a in link
             .addr
             .iter()
-            .filter(|a| !a.prefix.addr().is_unicast_link_local())
+            .filter(|a| super::addr::is_advertised_v6(a.prefix.addr()))
         {
             let prefix_length = a.prefix.prefix_len();
             let address_prefix =
@@ -9783,7 +9783,7 @@ impl Ospf<Ospfv3> {
             link.addr
                 .iter()
                 .map(|a| a.prefix.addr())
-                .filter(|a| !a.is_unicast_link_local())
+                .filter(|a| super::addr::is_advertised_v6(*a))
                 .map(|addr| {
                     let mut options = Ospfv3PrefixOptions::default();
                     options.set_la(true);
@@ -14604,7 +14604,7 @@ impl Ospf<Ospfv3> {
         let mut seen: std::collections::BTreeSet<(u8, Vec<u8>)> = std::collections::BTreeSet::new();
         let mut prefixes: Vec<Ospfv3IntraAreaPrefix> = Vec::new();
         for a in link.addr.iter() {
-            if a.prefix.addr().is_unicast_link_local() {
+            if !super::addr::is_advertised_v6(a.prefix.addr()) {
                 continue;
             }
             let prefix_length = a.prefix.prefix_len();
@@ -24269,6 +24269,65 @@ mod hello_tests {
         let elected = hello(link);
         assert_eq!(elected.d_router, v2_addr(O));
         assert_eq!(elected.bd_router, me);
+    }
+}
+
+#[cfg(test)]
+mod v3_prefix_tests {
+    //! Which interface addresses OSPFv3 advertises as prefixes.
+
+    use super::link_scope_tests::v3_top;
+    use super::*;
+    use ospf_packet::Ospfv3LsBody;
+
+    /// The kernel puts `::1/128` on `lo` next to any configured address.
+    /// Neither the Intra-Area-Prefix-LSA nor the Link-LSA may carry it
+    /// (RFC 4291 §2.5.3); the configured /128 stays.
+    #[tokio::test]
+    async fn loopback_address_is_not_advertised() {
+        let mut top = v3_top();
+        // eth3 stands in for `lo`: no neighbours, so not a transit link.
+        let link = top.links.get_mut(&3).unwrap();
+        link.nbrs.clear();
+        for prefix in ["::1/128", "2001:db8::1/128"] {
+            link.addr.push(OspfAddr {
+                prefix: prefix.parse().unwrap(),
+                secondary: false,
+            });
+        }
+        let wire = |addr: &str| {
+            let addr: Ipv6Addr = addr.parse().unwrap();
+            Ospf::<Ospfv3>::ospfv3_masked_prefix_bytes(128, &addr.octets())
+        };
+
+        let lsa = top.build_router_intra_area_prefix_lsa(AREA0).unwrap();
+        let Ospfv3LsBody::IntraAreaPrefix(body) = lsa.body else {
+            panic!("an Intra-Area-Prefix-LSA");
+        };
+        let hosts: Vec<_> = body
+            .prefixes
+            .iter()
+            .filter(|p| p.prefix_length == 128)
+            .map(|p| p.address_prefix.clone())
+            .collect();
+        assert_eq!(hosts, [wire("2001:db8::1")], "Intra-Area-Prefix-LSA");
+
+        let lsa = top.build_link_lsa(3).unwrap();
+        let Ospfv3LsBody::Link(body) = lsa.body else {
+            panic!("a Link-LSA");
+        };
+        let hosts: Vec<_> = body
+            .prefixes
+            .iter()
+            .filter(|p| p.prefix_length == 128)
+            .map(|p| p.address_prefix.clone())
+            .collect();
+        // The plain prefix and its LA-bit host twin.
+        assert_eq!(
+            hosts,
+            [wire("2001:db8::1"), wire("2001:db8::1")],
+            "Link-LSA"
+        );
     }
 }
 
