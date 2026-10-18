@@ -584,6 +584,7 @@ fn link_to_detailed_json(rib: &Rib, link: &Link) -> InterfaceDetailed {
         })
         .collect();
 
+    let vlan_parent = link.vlan_id.and(link.parent);
     InterfaceDetailed {
         interface: link.name.clone(),
         hardware: format!("{}", link.link_type),
@@ -598,11 +599,13 @@ fn link_to_detailed_json(rib: &Rib, link: &Link) -> InterfaceDetailed {
         },
         flags: format!("{}", link.flags),
         vlan_id: link.vlan_id,
-        parent: link
-            .parent
+        // A parent only for a VLAN sub-interface, as the text view. A
+        // veth's IFLA_LINK is its peer's ifindex in another namespace,
+        // which named an unrelated local link, often the veth itself.
+        parent: vlan_parent
             .and_then(|p| rib.links.get(&p))
             .map(|p| p.name.clone()),
-        parent_index: link.parent,
+        parent_index: vlan_parent,
         vrf_binding: link_vrf_name(rib, link)
             .map(|n| format!("vrf {}", n))
             .unwrap_or_else(|| "Not bound".to_string()),
@@ -960,8 +963,10 @@ impl Rib {
                 link.mac = fib_link.mac;
             }
         } else {
-            let link = Link::from(fib_link);
-            let _ = sysctl_mpls_enable(&link.name);
+            let mut link = Link::from(fib_link);
+            // `show interface` reports whether the link accepts MPLS
+            // packets; it used to say `disabled` on every link.
+            link.label = sysctl_mpls_enable(&link.name).is_ok();
             let _ = sysctl_seg6_enable(&link.name);
             let _ = sysctl_keep_addr_on_down(&link.name);
             self.api_link_add(&link);
@@ -2110,6 +2115,35 @@ mod tests {
             fib,
             ..Default::default()
         }
+    }
+
+    /// The JSON names a parent only for a VLAN sub-interface, as the text
+    /// view does. A veth's recorded parent is its peer's ifindex in another
+    /// namespace, and used to name whatever local link had that index.
+    #[tokio::test]
+    async fn json_names_a_parent_only_for_a_vlan() {
+        let mut rib = Rib::new(false).expect("rib");
+        let veth = Link {
+            index: 2,
+            name: "v1".to_string(),
+            parent: Some(2),
+            ..test_link()
+        };
+        let vlan = Link {
+            index: 3,
+            name: "v1.100".to_string(),
+            parent: Some(2),
+            vlan_id: Some(100),
+            ..test_link()
+        };
+        rib.links.insert(2, veth.clone());
+        rib.links.insert(3, vlan.clone());
+        let json = link_to_detailed_json(&rib, &veth);
+        assert_eq!((json.parent, json.parent_index), (None, None));
+        let json = link_to_detailed_json(&rib, &vlan);
+        assert_eq!(json.parent.as_deref(), Some("v1"));
+        assert_eq!(json.parent_index, Some(2));
+        assert_eq!(json.vlan_id, Some(100));
     }
 
     #[test]
