@@ -151,36 +151,95 @@ via a reinstated profile mechanism) are a possible future addition.
 
 ## Verifying sessions
 
-Three `show` commands surface BFD state:
+Three commands report BFD state: `show bfd`, `show bfd peers` and
+`show bfd counters`. Each honors `-j` / `--json`; see
+[Operational Show Commands](ch-06-03-show-commands.md#json-output). The
+examples come from r1 of the four-router network of the
+[OSPFv2 show page](ch-08-18-ospf-show.md), with OSPF BFD on its links to
+r2 and r3.
+
+### `show bfd`
+
+One line per session: the peer, the session state, the local and remote
+discriminators, the time Up, and the interface:
 
 ```
-show bfd                   # one-line-per-session summary table
-show bfd peers             # FRR-style detail block for every session
-show bfd peers 10.0.0.2    # detail for a single peer
-show bfd counters          # per-session control-packet counters
-```
-
-`show bfd` gives a quick health table:
-
-```
+r1> show bfd
 Peer             State    Local/Remote Disc      Uptime     Iface
-10.0.0.2         Up       0xd6b24a5/0x3f0a112    00:14:22   single-hop
+192.168.12.2     Up       0x351aa4a9/0x95d2bdc6  00:02:29   r1-r2
+192.168.13.3     Up       0x3ec65835/0x366820    00:02:28   r1-r3
 ```
 
-`show bfd peers [<addr>]` prints the FRR-style indented detail block —
-discriminators, status and up/down time, diagnostics, the negotiated
-local and remote timers, and (for multi-hop) the minimum TTL. A fresh
-session that has not yet heard from the peer shows `State Down` with a
-remote discriminator of `0x0`; that means the local side is
-transmitting but nothing is coming back — check that the peer also has
-BFD configured toward this router and that UDP 3784/4784 is not
-filtered on the path.
+A session that has not heard from its peer reads `Down` with a remote
+discriminator of `0x0`: this router is transmitting and nothing comes
+back. Check that the peer has BFD configured toward this router, and
+that UDP 3784 (4784 for multi-hop) is not filtered on the path.
 
-`show bfd counters` shows received / transmitted control-packet counts
-per session (the RX counter is the reliable one for confirming the
-receive path is alive).
+JSON: a list of `{ peer, local, interface, multihop, local_state,
+remote_state, local_discr, remote_discr, uptime_secs }`.
 
-Each command also accepts a trailing `json` for machine-readable output.
+### `show bfd peers [<address>]`
+
+An FRR-style block per session, or for one peer: the discriminators (in
+decimal), local address and interface, status and uptime, both ends'
+diagnostics, the local timers (configured, negotiated and actual
+transmit interval, detection timeout, where detection runs, the Echo
+intervals) and the remote timers. A multi-hop session also shows its
+minimum TTL.
+
+```
+r1> show bfd peers 192.168.12.2
+BFD Peers:
+    peer 192.168.12.2 (single-hop)
+        ID: 890938537
+        Remote ID: 2513616326
+        Local address: 192.168.12.1
+        Interface: r1-r2
+        Status: up
+        Uptime: 149 second(s)
+        Diagnostics: ok
+        Remote diagnostics: ok
+        Remote state: Up
+        Local timers:
+            Detect-multiplier: 3
+            Receive interval: 300ms
+            Transmission interval: 300ms
+            Transmission interval (negotiated): 300ms
+            Transmission interval (actual with jitter): 267ms
+            Detection timeout: 900ms
+            Detection runs in: userspace
+            Echo receive interval: disabled
+            Echo transmission interval: disabled
+        Remote timers:
+            Detect-multiplier: 3
+            Receive interval: 300ms
+            Transmission interval: 300ms
+            Echo receive interval: disabled
+```
+
+JSON: a list of session objects: the discriminators and states, the
+diagnostics, `detect_multiplier`, the `*_interval_us` timers and
+`detection_time_us`, the Echo fields, the `remote_*` timers, the
+`demand` flags, the counters of `show bfd counters`, and a multi-hop
+session's `minimum_ttl`.
+
+### `show bfd counters`
+
+Control packets per session: received, received but invalid, sent, and
+failed to send:
+
+```
+r1> show bfd counters
+Peer                               RX   RX-Invalid           TX    TX-Failed
+192.168.12.2                      560            0          561            0
+192.168.13.3                      562            0          559            0
+```
+
+`TX` counts packets handed to the transmit loop, and `TX-Failed` the
+ones that could not be.
+
+JSON: a list of `{ peer, rx_count, rx_invalid_count, tx_count,
+tx_failed_count }`.
 
 ## Tracing
 

@@ -30,20 +30,19 @@ own show commands in its chapter, next to its configuration:
   nexthop groups, the MPLS label table and the label space.
 - [Router ID Selection](ch-00-01-router-id.md) — `show router-id`.
 - [Interface Configuration](ch-00-02-interface-configuration.md#show-commands)
-  — interfaces and VRFs.
+  — interfaces, VRFs and IPv6 Neighbor Discovery.
 - [Bridge Configuration](ch-00-04-bridge-configuration.md#show-commands)
   — the EVPN MAC table and the kernel bridge FDB.
 - [SRv6](ch-04-00-srv6.md#show-segment-routing-srv6-sid) — the SRv6
   SIDs.
 - [eBPF Data Plane](ch-16-00-ebpf.md#show-ebpf) — the eBPF forwarding
   tables and counters.
-
-The rest are still being moved into their chapters:
-
-- [Neighbor Discovery, BFD and STAMP](ch-14-05-show-bfd-stamp-nd.md) —
-  IPv6 ND, BFD sessions, and STAMP delay measurement.
-- [Policy Objects](ch-14-06-show-policy.md) — route policies,
-  prefix-sets, community-sets, AS-path-sets, and key-chains.
+- [BFD](ch-10-00-bfd.md#verifying-sessions) — BFD sessions and their
+  counters.
+- [STAMP](ch-09-00-twamp-stamp.md#show-commands) — the delay and loss
+  measurement sessions.
+- [Policy Show Commands](ch-05-05-policy-show.md) — route policies,
+  match-sets and key-chains.
 
 ## How to run a show command
 

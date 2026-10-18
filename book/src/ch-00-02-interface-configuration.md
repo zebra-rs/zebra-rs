@@ -269,6 +269,71 @@ r1> show vrf
 JSON: `{ "vrfs": [ { "name", "table_id", "router_id", "members" } ] }`,
 where `router_id` is `null` for a VRF with no Router ID yet.
 
+### `show ipv6 nd`
+
+What the IPv6 Neighbor Discovery task sees on each interface, one line
+per interface: whether it sends Router Advertisements, how many
+neighbors it has heard from, and the ND packets received and sent:
+
+```
+r1> show ipv6 nd
+Interface            RA   Neighbors   RX-total TX-total  Ifindex
+r1-r2                on           1          7        3        2
+r1-r3                off          1          3        0        3
+```
+
+JSON: a list of `{ name, ifindex, ra_enabled, neighbor_count, rx_total,
+tx_total }`.
+
+### `show ipv6 nd interface [<ifname>]`
+
+One block per interface, or for `<ifname>` only:
+
+- **The Router Advertisement scheduler**, when the interface sends RAs:
+  the interval range, router lifetime, hop limit and M/O flags, the
+  initial RAs still to send, when the next unsolicited one goes out,
+  whether a solicited reply is pending, and when the last multicast RA
+  went.
+- **The daemon's counters**: Router and Neighbor Solicitations and
+  Advertisements it received and RAs it sent, and the packets it dropped
+  (hop limit not 255, malformed, or from a new source once the
+  neighbor table is full).
+- **The kernel's ICMPv6 counters** for the same four message types.
+- **Each neighbor heard from**: how many of each message it sent, when
+  it was first and last heard, and what its last RA carried.
+
+```
+r1> show ipv6 nd interface r1-r2
+Interface r1-r2 (ifindex 2)
+  Router advertisement: enabled
+    interval 200-600s, lifetime 1800s, hop-limit 64, managed=0 other=0
+    initial advertisements remaining 0, next unsolicited in 4m53s
+    solicited reply pending: no, last multicast 1m52s ago
+  Counters (daemon-observed)        Sent  Received
+    Router solicitations               -         0
+    Router advertisements              3         3
+    Neighbor solicitations             -         2
+    Neighbor advertisements            -         2
+    dropped: hop-limit 0, malformed 0, untracked sources 0
+  Counters (kernel)                 Sent  Received
+    Router solicitations               0         0
+    Router advertisements              3         3
+    Neighbor solicitations             4         2
+    Neighbor advertisements            2         2
+  Neighbors (1):
+    fe80::e0c6:66ff:fe83:4ae8 RA 3  RS 0  NS 2  NA 2   first 2m30s ago, last 1m52s ago
+      last RA: lifetime 1800s hop-limit 64 M=0 O=0
+```
+
+JSON: a list of `{ name, ifindex, ra_enabled, ra_scheduler, counters,
+kernel_counters, neighbors }`. `ra_scheduler` holds the scheduler
+fields above (`min_interval_secs`, `max_interval_secs`,
+`router_lifetime`, `cur_hop_limit`, `managed`, `other`,
+`initial_remaining`, `suspended`, `next_unsolicited_in_secs`,
+`solicited_pending`, `last_multicast_secs_ago`); each neighbor has
+`address`, `first_seen_secs`, `last_seen_secs`, its `rx_*` counts and
+its `last_ra_*` values.
+
 ## Cross-reference — FRR / iproute2
 
 | zebra-rs | FRR `interface` / iproute2 |

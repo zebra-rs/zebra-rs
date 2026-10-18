@@ -460,16 +460,170 @@ delay-weighted shortest paths — is shown by:
 - `show isis flex-algo`
 - `show ospf flex-algo`
 
-The measurement plane has its own show commands:
+The measurement plane has its own [show commands](#show-commands):
+`show stamp`, `show stamp session` and `show stamp statistics`.
 
-- `show stamp` — one line per session: the link, the remote address
-  (an `fe80::` link-local on a v6-only link), sender state, and the
-  latest damped delay.
-- `show stamp session` — per-session detail (SSID, timing parameters,
-  the min/max/avg/variation window, packet counts).
-- `show stamp statistics` — sender and reflector packet counters,
-  including how many receive timestamps came from the kernel
-  (`SO_TIMESTAMPING`) versus a userspace read.
+## Show commands
+
+The examples come from r1 of the four-router network of the
+[OSPFv2 show page](ch-08-18-ospf-show.md), measuring its link to r2
+with OSPFv2 `te-metric measurement` at both ends.
+
+### `show stamp`
+
+A one-line-per-session summary: the local/remote endpoints, session
+state, sent/received counts, round-trip probe loss, and the last
+exported delay metric (min/avg/max).
+
+```
+r1> show stamp
+Interface  Local            Remote           State        Sent     Recv    Loss%  Last sample (min/avg/max)
+r1-r2      192.168.12.1     192.168.12.2     Active        150      150    0.000  8/16/27us (3us)
+```
+
+`Loss%` is the share of probes lost over the last 120 seconds, counted
+on the session's own 30-second loss clock. A probe counts as lost when no
+reply arrives within 3 seconds (RFC 7680's waiting time). It is
+round-trip loss: a lost probe and a lost reply look the same to the
+sender. While a session is younger than 120 seconds the figure covers
+the 30-second buckets closed so far, and it reads `-` until the first
+one closes.
+
+JSON: an array of session objects (`interface`, `local`, `remote`,
+`state`, `ssid`, counters, a `loss` object, and an optional
+`last_snapshot` with `min`/`avg`/`max`/`variation`). `loss` carries
+`direction`, `window_secs`, `buckets` / `buckets_wanted`, `settled`,
+`lost`, and, once any probe has settled, `percent`,
+`resolution_percent`, `integrity_percent` and `encoded` (RFC 8570 units
+of 0.000003 %). It also counts `late`, `duplicate` and `unmatched`
+replies. `forward`, `reverse` and `unresolved` split `lost` by
+direction. They mean something only against a stateful peer reflector:
+against a stateless one, every loss that can be placed at all reads as
+reverse (see [Direction](#direction-forward-loss-against-a-stateful-reflector)).
+
+### `show stamp session`
+
+The same session data rendered as a detail block per session: SSID,
+probe interval, damping period, uptime, counters, the timestamp source
+(kernel vs. userspace), how this router reflects the peer's probes,
+probe loss, the last delay sample, and one entry for each IGP measuring
+the link:
+
+```
+r1> show stamp session
+STAMP Sessions:
+    session 192.168.12.1 -> 192.168.12.2 (r1-r2)
+        SSID: 1
+        State: Active
+        Probe interval: 1000ms
+        Damping period: 30s
+        Uptime: 150 second(s)
+        Counters: tx 150 rx 150 rx-invalid 0 tx-failed 0 reflected 150
+        T4 timestamp source: kernel 150 userspace 0
+        Reflector: stateless
+        Loss (round-trip, 120s window): 0.000% (0 of 119 probes), resolution 0.840%, integrity 99%
+        Loss replies: late 0 duplicate 0 unmatched 0
+        Last sample:
+            Min delay: 8 usec
+            Max delay: 27 usec
+            Average delay: 16 usec
+            Delay variation: 3 usec
+        Subscribers:
+            ospf: anomaly-threshold none, Anomalous: avg no, min no, max no
+                loss: advertised 0.000000% (interval 120s, threshold 10%, minimum-change 0.999999%, integrity 90%)
+```
+
+The loss line has three states:
+
+```
+        Loss (round-trip, 120s window): measuring, first bucket not closed yet
+        Loss (round-trip, 120s window): filling, 2 of 4 buckets; so far 0.000% (0 of 60 probes)
+        Loss (round-trip, 120s window): 0.833% (1 of 120 probes), resolution 0.833%, integrity 100%
+        Loss replies: late 0 duplicate 0 unmatched 0
+```
+
+`resolution` is one probe as a percentage: the smallest loss the window
+can express at the current probe rate. `integrity` is the share of the
+probes the probe interval should have produced that actually settled. A
+*late* reply arrived after its probe had already been counted lost, and
+it stays lost.
+
+`Reflector:` reads `stateless`, or `stateful, sequence N` while any IGP
+measuring the link sets `measurement reflector stateful`. `N` is this
+router's counter for the peer's probes.
+
+Each IGP measuring the link gets its own entry under `Subscribers:`,
+because each applies its own delay-anomaly bounds and loss settings to
+the shared session. The first line gives the delay anomaly bounds and
+bits. The second is the loss that IGP advertises, with the settings
+behind it. Here every lost packet was a reply on the way back, and the
+peer reflects statefully. IS-IS declares that, and advertises the forward
+loss: none. OSPF does not, and advertises the round-trip 10 %, which is
+over its 5 % anomaly bound:
+
+```
+        Reflector: stateful, sequence 1042
+        Loss (round-trip, 120s window): 10.000% (12 of 120 probes), resolution 0.833%, integrity 100%
+        Loss replies: late 0 duplicate 0 unmatched 0
+        Last sample:
+            Min delay: 42 usec
+            Max delay: 45 usec
+            Average delay: 43 usec
+            Delay variation: 3 usec
+        Subscribers:
+            isis: anomaly-threshold none, Anomalous: avg no, min no, max no
+                loss: advertised 0.000000% forward (interval 120s, threshold 10%, minimum-change 0.999999%, integrity 90%, peer-reflector stateful)
+                  direction over 120s: forward 0, reverse 12, unresolved 0 of 120 probes
+            ospf: anomaly-threshold none, Anomalous: avg no, min no, max no
+                loss: advertised 9.999999% (A) (interval 120s, threshold 10%, minimum-change 0.999999%, integrity 90%, anomaly 5.000000%, reuse 1.000000%)
+```
+
+The loss line reads `disabled` when the IGP has `loss enabled false`,
+and `not advertised` until a full, trusted window exists. After the
+value:
+
+- `forward` marks forward loss, advertised because the IGP declares
+  `peer-reflector stateful`. Without it the value is round-trip. Such an
+  IGP also gets a `direction` line for its own window.
+- `(A)` marks an advertisement carrying the Anomalous bit.
+- `anomaly` / `reuse` appear once bounds are configured, printed exactly
+  as configured.
+
+The value and the change thresholds print in the sub-TLV's units of
+0.000003 %, so a configured 1.0 % reads 0.999999 %.
+
+JSON: the same array of session objects as `show stamp`.
+
+### `show stamp statistics`
+
+The sender's and the reflector's packet counters across all sessions,
+with the sockets the reflector listens on and how many receive
+timestamps came from the kernel (`SO_TIMESTAMPING`) or a userspace
+read.
+
+```
+r1> show stamp statistics
+STAMP statistics:
+    Reflector socket: 0.0.0.0:862
+    Reflector socket (v6): [::]:862
+    Sessions: 1
+    Sender:
+        Probes sent: 150
+        Replies received: 150
+        Replies invalid: 0
+        Send failures: 0
+        T4 kernel timestamps: 150 (userspace fallback: 0)
+    Reflector:
+        Probes received: 150
+        Probes reflected: 150
+        Probes unauthorized: 0
+        T2 kernel timestamps: 150 (userspace fallback: 0)
+```
+
+JSON: `{ sessions, sender_tx, sender_rx, sender_rx_invalid,
+sender_tx_failed, sender_t4_kernel, sender_t4_userspace, reflector_rx,
+reflector_reflected, reflector_unauthorized, reflector_t2_kernel,
+reflector_t2_userspace }`.
 
 ## The measurement plane
 

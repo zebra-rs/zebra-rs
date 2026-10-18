@@ -142,6 +142,7 @@
   - [Match](ch-05-02-policy-match.md)
   - [Set](ch-05-03-policy-set.md)
   - [Lua Scripting](ch-05-04-lua-scripting.md)
+  - [Show Commands](ch-05-05-policy-show.md)
 
 ## Failure Detection
 
@@ -166,11 +167,6 @@
   - [Session Management Design](ch-06-01-session-design.md)
   - [Show Config Commands](ch-06-02-show-config-commands.md)
   - [Operational Show Commands](ch-06-03-show-commands.md)
-
-## Show Commands
-
-- [Neighbor Discovery, BFD and STAMP](ch-14-05-show-bfd-stamp-nd.md)
-- [Policy Objects](ch-14-06-show-policy.md)
 
 ## AI Native
 

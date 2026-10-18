@@ -181,17 +181,18 @@ prefix                vrf   nh_id flags      nexthop
 
 ## JSON output
 
-Every `show ebpf` command takes a trailing `json` and renders the same data
-machine-readably — typed entry objects for the tables (flag bitmasks
+Every `show ebpf` command honors `-j` / `--json` (see
+[Operational Show Commands](ch-06-03-show-commands.md#json-output)) and
+renders the same data machine-readably — typed entry objects for the tables (flag bitmasks
 expanded to names, resolved nexthops nested), a counter-keyed object for
 stats, and `[]` for an empty table:
 
 ```
-zebra> show ebpf ipv4 json
+$ vtyctl show -j 'show ebpf ipv4'
 [{"type":"fib","prefix":"10.9.9.0/24","vrf":0,"nexthopId":2,"flags":[],
   "nexthop":{"id":2,"gateway":"10.1.1.2","oif":3,"labels":[],"flags":[]}}]
 
-zebra> show ebpf stats json
+$ vtyctl show -j 'show ebpf stats'
 {"l2_forward":0,"l2_flood":0,"l3v4_forward":1024, ...}
 ```
 
