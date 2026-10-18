@@ -1,0 +1,47 @@
+# z3: fe80::1 toward z1 (set by the feature), z4 behind.
+# OSPFv2 and OSPFv3, SR-MPLS on v3: loopback Prefix-SID index 3 (label 16003).
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.3/32
+  ipv6:
+    address: 2001:db8::3/128
+- if-name: z3-z1
+  ipv4:
+    address: 10.0.13.2/30
+- if-name: z3-z4
+  ipv4:
+    address: 10.0.34.1/30
+  ipv6:
+    address: 2001:db8:34::1/64
+router:
+  ospf:
+    router-id: 10.0.0.3
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+      - if-name: z3-z1
+        enabled: true
+        network-type: point-to-point
+      - if-name: z3-z4
+        enabled: true
+        network-type: point-to-point
+  ospfv3:
+    router-id: 10.0.0.3
+    segment-routing:
+      mpls: {}
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+        prefix-sid:
+          index: 3
+      - if-name: z3-z1
+        enabled: true
+        network-type: point-to-point
+      - if-name: z3-z4
+        enabled: true
+        network-type: point-to-point

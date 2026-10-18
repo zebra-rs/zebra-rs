@@ -44,8 +44,9 @@ pub struct GroupUni {
     /// Routing table this nexthop's gateway resolves against
     /// (`RT_TABLE_MAIN` for the default table, a VRF's table id
     /// otherwise). The same gateway address in two VRFs is a distinct
-    /// nexthop, so the `NexthopMap` keys on `(table_id, addr)` and the
-    /// periodic resolve cycle walks the table this names.
+    /// nexthop, so the `NexthopMap` keys on `(table_id, addr,
+    /// ifindex_origin)` and the periodic resolve cycle walks the table
+    /// this names.
     pub table_id: u32,
 
     /// What the source said the egress ifindex was — copied verbatim
