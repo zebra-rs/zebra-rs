@@ -52,6 +52,7 @@ rendering in `show interface brief`.
 |----------|--------|
 | Setup — a VRF master with one member, bound in a single commit | |
 | A - an address committed with the binding lands in the VRF table | |
+| A2 - the VRF route JSON names each route's VRF | |
 | B - show vrf lists the member and show interface brief names the VRF | |
 | C - unbinding returns the interface to the default VRF | |
 | D - a binding set before the netdev exists fires on create | |

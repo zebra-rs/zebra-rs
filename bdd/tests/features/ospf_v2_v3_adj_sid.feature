@@ -67,6 +67,8 @@ Feature: OSPFv2 and OSPFv3 give their Adjacency-SIDs different labels
     Given the test topology exists
     Then show command "show ip route" in namespace "r2" should eventually contain "S - static"
     And show command "show ip route" in namespace "r2" should not contain "Stale route"
+    # IS-IS keeps its levels apart, so no route is ever inter-area (`ia`).
+    And show command "show ip route" in namespace "r2" should contain "L1/L2 - IS-IS level-1/2, B - BGP"
 
   Scenario: show interface reports that the links accept MPLS
     Given the test topology exists

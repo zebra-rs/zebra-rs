@@ -1838,33 +1838,8 @@ impl ConfigManager {
                     tokio::spawn(async move {
                         let mut fallback_rx = fallback_rx;
                         if let Some(display_req) = fallback_rx.recv().await {
-                            let protocol_name = if is_isis(&paths) {
-                                "ISIS"
-                            } else if is_ospfv3(&paths) {
-                                "OSPFv3"
-                            } else if is_ospf(&paths) {
-                                "OSPF"
-                            } else if is_bgp(&paths) {
-                                "BGP"
-                            } else if is_bfd(&paths) {
-                                "BFD"
-                            } else if is_stamp(&paths) {
-                                "STAMP"
-                            } else if is_nd(&paths) {
-                                "ND"
-                            } else if is_firewall(&paths) {
-                                "Firewall"
-                            } else if is_vpn(&paths) {
-                                "IPsec"
-                            } else if is_vrrp(&paths) {
-                                "VRRP"
-                            } else if is_policy(&paths) {
-                                "Policy"
-                            } else {
-                                "Unknown protocol"
-                            };
                             let error_msg =
-                                format!("{} is not configured or running", protocol_name);
+                                format!("{} is not configured or running", show_proto_name(&paths));
                             let _ = display_req.resp.send(error_msg).await;
                         }
                     });
@@ -2093,36 +2068,39 @@ fn is_policy(paths: &[CommandPath]) -> bool {
 /// key (and the `<proto>` half of a `"<proto>:vrf:<name>"` instance
 /// key). Mirrors the routing order in the `DisplayTx` handler — most
 /// specific first (`ospfv3` before `ospf`).
+/// Every show root a task other than the RIB serves: its path test,
+/// the key its task registers its show channel under, and the name the
+/// not-running reply gives it. Checked in order. The names used to sit
+/// in a list of their own, which missed PIM and eBPF, so `show ebpf`
+/// with no data plane read "Unknown protocol is not configured or
+/// running".
+type ShowProto = (fn(&[CommandPath]) -> bool, &'static str, &'static str);
+const SHOW_PROTOS: &[ShowProto] = &[
+    (is_bgp, "bgp", "BGP"),
+    (is_ospfv3, "ospfv3", "OSPFv3"),
+    (is_ospf, "ospf", "OSPF"),
+    (is_isis, "isis", "ISIS"),
+    (is_bfd, "bfd", "BFD"),
+    (is_stamp, "stamp", "STAMP"),
+    (is_pim, "pim", "PIM"),
+    (is_nd, "nd", "ND"),
+    (is_ebpf, "cradle", "eBPF data plane"),
+    (is_firewall, "firewall", "Firewall"),
+    (is_vpn, "ipsec", "IPsec"),
+    (is_vrrp, "vrrp", "VRRP"),
+    (is_policy, "policy", "Policy"),
+];
+
+fn show_proto_entry(paths: &[CommandPath]) -> Option<&'static ShowProto> {
+    SHOW_PROTOS.iter().find(|(is, _, _)| is(paths))
+}
+
 fn show_proto(paths: &[CommandPath]) -> &'static str {
-    if is_bgp(paths) {
-        "bgp"
-    } else if is_ospfv3(paths) {
-        "ospfv3"
-    } else if is_ospf(paths) {
-        "ospf"
-    } else if is_isis(paths) {
-        "isis"
-    } else if is_bfd(paths) {
-        "bfd"
-    } else if is_stamp(paths) {
-        "stamp"
-    } else if is_pim(paths) {
-        "pim"
-    } else if is_nd(paths) {
-        "nd"
-    } else if is_ebpf(paths) {
-        "cradle"
-    } else if is_firewall(paths) {
-        "firewall"
-    } else if is_vpn(paths) {
-        "ipsec"
-    } else if is_vrrp(paths) {
-        "vrrp"
-    } else if is_policy(paths) {
-        "policy"
-    } else {
-        "rib"
-    }
+    show_proto_entry(paths).map_or("rib", |(_, key, _)| key)
+}
+
+fn show_proto_name(paths: &[CommandPath]) -> &'static str {
+    show_proto_entry(paths).map_or("RIB", |(_, _, name)| name)
 }
 
 fn run_from_exec(exec: Rc<Entry>) -> Rc<Entry> {
@@ -7586,6 +7564,34 @@ module test-insomnia-gated {
             State::new(),
         );
         assert_ne!(code, ExecCode::Success, "set at container stays incomplete");
+    }
+
+    /// A show command whose task is not running is answered with the name
+    /// of that task's subsystem, taken from the routing table itself.
+    /// `show ebpf` and `show pim` used to read "Unknown protocol".
+    #[test]
+    fn not_running_reply_names_the_routed_subsystem() {
+        use crate::config::parse::{State, parse};
+
+        let entry = shipped_tree_mode("exec", &[]);
+        let cases = [
+            ("show ebpf", "cradle", "eBPF data plane"),
+            ("show ebpf stats", "cradle", "eBPF data plane"),
+            ("show pim neighbor", "pim", "PIM"),
+            ("show igmp groups", "pim", "PIM"),
+            ("show mroute", "pim", "PIM"),
+            ("show bgp summary", "bgp", "BGP"),
+            ("show isis neighbor", "isis", "ISIS"),
+            ("show ospfv3 neighbor", "ospfv3", "OSPFv3"),
+            ("show prefix-set", "policy", "Policy"),
+            ("show ip route", "rib", "RIB"),
+        ];
+        for (cmd, key, name) in cases {
+            let (code, _, state) = parse(cmd, entry.clone(), None, State::new());
+            assert_eq!(code, ExecCode::Success, "parse `{cmd}`");
+            assert_eq!(show_proto(&state.paths), key, "routing for `{cmd}`");
+            assert_eq!(show_proto_name(&state.paths), name, "name for `{cmd}`");
+        }
     }
 
     /// The `show firewall` exec grammar: insomnia-gated like the config
