@@ -53,6 +53,22 @@ Feature: OSPFv2 Flex-Algo computes with the winning definition
     And show command "show ospf segment-routing" in namespace "r1" should eventually contain "SR-Node: 10.0.0.3"
     And show command "show ospf segment-routing" in namespace "r1" should contain "Algo.(s): SPF, FlexAlgo(128)"
 
+  Scenario: r1 pops its own algorithm-128 Prefix-SID
+    Given the test topology exists
+    # r1's algorithm-128 Prefix-SID (index 1281, label 17281) has NP
+    # set, so the hop before r1 does not pop it: r1 must. r1 used to
+    # pop only its algorithm-0 Prefix-SID, and dropped a packet
+    # labelled 17281. r2 sends one straight to r1, to an address on a
+    # dummy interface OSPF does not advertise.
+    When I execute "ip link add fa1 type dummy" in namespace "r1"
+    And I execute "ip link set fa1 up" in namespace "r1"
+    And I execute "ip addr add 10.0.1.1/32 dev fa1" in namespace "r1"
+    And I execute "ip route add 10.0.1.1/32 encap mpls 17281 via 192.168.90.1 dev r2-r1" in namespace "r2"
+    Then ping from "r2" to "10.0.1.1" should eventually succeed
+    And mpls ilm outgoing label for label 17281 in namespace "r1" should be "Pop"
+    When I execute "ip route del 10.0.1.1/32" in namespace "r2"
+    And I execute "ip link del fa1" in namespace "r1"
+
   Scenario: A definition edit takes effect at once
     Given the test topology exists
     # Lowering r2's priority makes r1's definition the winner, which
