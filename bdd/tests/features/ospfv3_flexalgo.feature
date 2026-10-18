@@ -52,6 +52,9 @@ Feature: OSPFv3 Flex-Algo computes with the winning definition
     And show command "show ospfv3 flex-algo" in namespace "r1" should eventually contain "10.0.0.2 cost 30 via 10.0.0.4"
     # Participation is announced in each router's SR-Algorithm list.
     And show command "show ospfv3 database detail" in namespace "r1" should eventually contain "Algorithm 128:"
+    # r1's algorithm-128 Prefix-SID shows its own label, not r1's
+    # algorithm-0 one (16001).
+    And show command "show ospfv3 segment-routing" in namespace "r2" should eventually contain "SR Pfx (idx 1281)   Push 17281"
 
   Scenario: A definition edit takes effect at once
     Given the test topology exists

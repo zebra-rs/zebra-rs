@@ -1602,17 +1602,17 @@ fn show_ospfv3_route(
                             .get(&n.ifindex)
                             .map(|l| l.name.as_str())
                             .unwrap_or("unknown");
-                        format!("directly attached via {}", ifname)
+                        format!("directly attached to {}", ifname)
                     } else if n.ifindex != 0 {
-                        format!("{}%{}", n.nexthop, n.ifindex)
+                        format!("via {}%{}", n.nexthop, n.ifindex)
                     } else {
-                        n.nexthop.clone()
+                        format!("via {}", n.nexthop)
                     }
                 })
                 .collect::<Vec<_>>()
                 .join(", ")
         };
-        writeln!(text, "  {} metric {} via {}", r.prefix, r.metric, nhops)?;
+        writeln!(text, "  {} metric {} {}", r.prefix, r.metric, nhops)?;
     }
     render_or(json, &entries, text)
 }
@@ -1993,11 +1993,19 @@ fn fmt_adj_sid(a: &super::link::AdjacencySid) -> String {
     }
 }
 
-fn fmt_ilm_type(t: &crate::rib::inst::IlmType) -> String {
-    match t {
+/// The ILM entry's type with its label operation: `Swap` when a nexthop
+/// keeps the label (a transit Prefix-SID, or one with NP next to its
+/// owner), `Pop` otherwise.
+fn fmt_ilm_type(entry: &super::inst::SpfIlmV3) -> String {
+    let op = if entry.nhops.values().any(|nh| !nh.adjacency || entry.no_php) {
+        "Swap"
+    } else {
+        "Pop"
+    };
+    match &entry.ilm_type {
         crate::rib::inst::IlmType::None => "-".to_string(),
-        crate::rib::inst::IlmType::Node(idx) => format!("Pop SR Pfx (idx {})", idx),
-        crate::rib::inst::IlmType::Adjacency(idx) => format!("Pop SR Adj (idx {})", idx),
+        crate::rib::inst::IlmType::Node(idx) => format!("{op} SR Pfx (idx {idx})"),
+        crate::rib::inst::IlmType::Adjacency(_) => format!("{op} SR Adj"),
         crate::rib::inst::IlmType::DecapVrf { table_id, .. } => {
             format!("Pop DecapVrf (table {})", table_id)
         }
@@ -2065,7 +2073,7 @@ fn show_ospfv3_segment_routing(
                 .unwrap_or_default();
             Ospfv3SrIlmJson {
                 label: *label,
-                ilm_type: fmt_ilm_type(&entry.ilm_type),
+                ilm_type: fmt_ilm_type(entry),
                 via,
                 interface: ifname,
             }
@@ -2124,8 +2132,8 @@ fn show_ospfv3_segment_routing(
     writeln!(text)?;
     writeln!(
         text,
-        "  {:<12}  {:<14}  {:<14}  {:<14}  Adj-SID",
-        "Interface", "Network", "Prefix-SID", "Adj-SID"
+        "  {:<12}  {:<14}  {:<14}  Adj-SID",
+        "Interface", "Network", "Prefix-SID"
     )?;
     writeln!(text, "  {}", "-".repeat(74))?;
     for iface in &summary.interfaces {
@@ -2279,10 +2287,19 @@ fn collect_remote_routers(top: &Ospf<Ospfv3>) -> Vec<Ospfv3SrRemoteRouterJson> {
                         SidLabelTlv::Index(idx) => format!("SR Pfx (idx {})", idx),
                         SidLabelTlv::Label(lbl) => format!("SR Pfx (lbl {})", lbl),
                     };
+                    // This SID's own label: a Flex-Algo SID resolves
+                    // against the same SRGB as the algorithm-0 one.
+                    let label = match ps.sid {
+                        SidLabelTlv::Index(idx) => area
+                            .lsdb
+                            .label_map
+                            .get(&advertising)
+                            .and_then(|cfg| cfg.global.start.checked_add(idx)),
+                        SidLabelTlv::Label(lbl) => Some(lbl),
+                    };
                     let (label_op, interface, nexthop) = match top.rib6.get(&prefix) {
                         Some(route) => {
-                            let label_op =
-                                route.sid.map(|l| format!("Push {}", l)).unwrap_or_default();
+                            let label_op = label.map(|l| format!("Push {}", l)).unwrap_or_default();
                             let (ifname, nh) = route
                                 .nhops
                                 .iter()
@@ -2724,6 +2741,7 @@ mod srv6_show_tests {
 #[derive(Serialize)]
 struct GrHelperV3Json {
     neighbor_id: String,
+    interface: String,
     ifindex: u32,
     restart_reason: String,
     grace_period_secs: u32,
@@ -2765,6 +2783,7 @@ fn show_ospfv3_graceful_restart(
                 };
                 helpers.push(GrHelperV3Json {
                     neighbor_id: nbr.ident.router_id.to_string(),
+                    interface: link.name.clone(),
                     ifindex: *ifindex,
                     restart_reason: format!("{:?}", helper.reason),
                     grace_period_secs: helper.grace_period,
@@ -2812,10 +2831,10 @@ fn show_ospfv3_graceful_restart(
     let mut any = false;
     writeln!(
         buf,
-        "{:<15} {:<10} {:<22} {:<14} {:<10}",
+        "{:<15} {:<16} {:<22} {:<14} {:<10}",
         "Neighbor ID", "Interface", "Restart Reason", "Grace Period", "Remaining"
     )?;
-    for (ifindex, link) in top.links.iter() {
+    for link in top.links.values() {
         for nbr in link.nbrs.values() {
             let Some(helper) = nbr.gr_helper.as_ref() else {
                 continue;
@@ -2824,9 +2843,9 @@ fn show_ospfv3_graceful_restart(
             let remaining = helper.remaining_secs();
             writeln!(
                 buf,
-                "{:<15} {:<10} {:<22} {:<14} {:<10}",
+                "{:<15} {:<16} {:<22} {:<14} {:<10}",
                 nbr.ident.router_id.to_string(),
-                format!("if{}", ifindex),
+                link.name,
                 format!("{:?}", helper.reason),
                 format!("{}s", helper.grace_period),
                 format!("{}s", remaining),

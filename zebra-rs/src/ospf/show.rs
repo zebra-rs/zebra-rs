@@ -230,6 +230,15 @@ fn format_link_flags(flags: &LinkFlags) -> String {
     format!("<{}>", parts.join(","))
 }
 
+/// The address `show ospf interface` gives for the interface: its
+/// identity, except that on `lo` the kernel's 127.0.0.1/8 gives way to a
+/// configured address — 127.0.0.0/8 is never advertised.
+fn display_prefix(oi: &OspfLink) -> ipnet::Ipv4Net {
+    super::addr::primary_addr_where(&oi.addr, |a| a.prefix.addr().octets()[0] != 127)
+        .map(|a| a.prefix)
+        .unwrap_or(oi.ident.prefix)
+}
+
 fn find_nbr_router_id(oi: &OspfLink, addr: Ipv4Addr) -> Option<Ipv4Addr> {
     for nbr in oi.nbrs.values() {
         if nbr.ident.prefix.addr() == addr {
@@ -255,11 +264,12 @@ fn render_link(out: &mut String, oi: &OspfLink, ospf: &Ospf) {
     .unwrap();
 
     // Line 3: Internet Address, Broadcast, Area.
+    let shown = display_prefix(oi);
     writeln!(
         out,
         "  Internet Address {}, Broadcast {}, Area {}",
-        oi.ident.prefix,
-        oi.ident.prefix.broadcast(),
+        shown,
+        shown.broadcast(),
         oi.area_id
     )
     .unwrap();
@@ -459,13 +469,14 @@ fn show_ospf_interface(
                 .filter(|nbr| nbr.state == NfsmState::Full)
                 .count();
 
+            let shown = display_prefix(oi);
             ifaces.push(OspfInterfaceJson {
                 name: oi.name.clone(),
                 status,
                 ifindex: oi.index,
                 mtu: oi.mtu,
-                address: oi.ident.prefix.to_string(),
-                broadcast: oi.ident.prefix.broadcast().to_string(),
+                address: shown.to_string(),
+                broadcast: shown.broadcast().to_string(),
                 area: oi.area_id.to_string(),
                 router_id: oi.ident.router_id.to_string(),
                 network_type: oi.network_type.to_string(),
@@ -643,20 +654,8 @@ fn show_ospf(ospf: &Ospf, _args: Args, json: bool) -> std::result::Result<String
     Ok(buf)
 }
 
-fn nbr_state_string(
-    nbr_state: &NfsmState,
-    nbr_addr: &Ipv4Addr,
-    d_router: &Ipv4Addr,
-    bd_router: &Ipv4Addr,
-) -> String {
-    let role = if nbr_addr == d_router {
-        "DR"
-    } else if nbr_addr == bd_router {
-        "Backup"
-    } else {
-        "DROther"
-    };
-    format!("{}/{}", nbr_state, role)
+fn nbr_state_string(oi: &OspfLink, nbr: &Neighbor) -> String {
+    format!("{}/{}", nbr.state, nbr_role(oi, nbr))
 }
 
 fn format_uptime(elapsed: Duration) -> String {
@@ -691,12 +690,7 @@ fn show_ospf_neighbor(
                 continue;
             }
             for nbr in oi.nbrs.values() {
-                let state = nbr_state_string(
-                    &nbr.state,
-                    &nbr.ident.prefix.addr(),
-                    &oi.ident.d_router,
-                    &oi.ident.bd_router,
-                );
+                let state = nbr_state_string(oi, nbr);
                 let uptime = format_uptime(nbr.uptime.elapsed());
                 let dead_time = match nbr.timer.inactivity {
                     Some(ref timer) => format_dead_time(timer.remaining()),
@@ -743,12 +737,7 @@ fn show_ospf_neighbor(
             continue;
         }
         for nbr in oi.nbrs.values() {
-            let state = nbr_state_string(
-                &nbr.state,
-                &nbr.ident.prefix.addr(),
-                &oi.ident.d_router,
-                &oi.ident.bd_router,
-            );
+            let state = nbr_state_string(oi, nbr);
 
             let uptime = format_uptime(nbr.uptime.elapsed());
 
@@ -795,10 +784,23 @@ fn format_options(options: &OspfOptions) -> String {
     format!("{} {}", raw, format_options_flags(options))
 }
 
-fn nbr_role(nbr_addr: &Ipv4Addr, d_router: &Ipv4Addr, bd_router: &Ipv4Addr) -> &'static str {
-    if nbr_addr == d_router {
+/// The neighbor's role on the network: `DR`, `Backup` or `DROther` on a
+/// broadcast or NBMA network, `-` on a point-to-point link or virtual
+/// link, which elect neither (as FRR prints it).
+fn nbr_role(oi: &OspfLink, nbr: &Neighbor) -> &'static str {
+    use super::link::OspfNetworkType;
+    if oi.vl.is_some()
+        || !matches!(
+            oi.network_type,
+            OspfNetworkType::Broadcast | OspfNetworkType::NBMA
+        )
+    {
+        return "-";
+    }
+    let addr = nbr.ident.prefix.addr();
+    if addr == oi.ident.d_router {
         "DR"
-    } else if nbr_addr == bd_router {
+    } else if addr == oi.ident.bd_router {
         "Backup"
     } else {
         "DROther"
@@ -838,11 +840,7 @@ fn render_nbr_detail(out: &mut String, oi: &OspfLink, nbr: &Neighbor) {
     .unwrap();
 
     // Line 3: Priority, state/role, state changes.
-    let role = nbr_role(
-        &nbr.ident.prefix.addr(),
-        &oi.ident.d_router,
-        &oi.ident.bd_router,
-    );
+    let role = nbr_role(oi, nbr);
     writeln!(
         out,
         "    Neighbor priority is {}, State is {}/{}, Role is {}, {} state changes",
@@ -926,12 +924,7 @@ fn show_ospf_neighbor_detail(
                 continue;
             }
             for nbr in oi.nbrs.values() {
-                let role = nbr_role(
-                    &nbr.ident.prefix.addr(),
-                    &oi.ident.d_router,
-                    &oi.ident.bd_router,
-                )
-                .to_string();
+                let role = nbr_role(oi, nbr).to_string();
                 let dr_rid = find_router_id_by_addr(oi, oi.ident.d_router);
                 let bdr_rid = find_router_id_by_addr(oi, oi.ident.bd_router);
                 let dead_timer = match nbr.timer.inactivity {
@@ -1060,7 +1053,7 @@ fn show_ospf_database(
     let mut out = String::new();
 
     if ospf.router_id.is_unspecified() {
-        return Ok(String::from("OSPF router ID is not sepcified"));
+        return Ok(String::from("OSPF router ID is not specified"));
     }
 
     let _ = writeln!(out);
@@ -2798,6 +2791,7 @@ fn show_ospf_tilfa(
 #[derive(Serialize)]
 struct GrHelperJson {
     neighbor_id: String,
+    interface: String,
     ifindex: u32,
     restart_reason: String,
     grace_period_secs: u32,
@@ -2836,6 +2830,7 @@ fn show_ospf_graceful_restart(
                 };
                 helpers.push(GrHelperJson {
                     neighbor_id: nbr.ident.router_id.to_string(),
+                    interface: link.name.clone(),
                     ifindex: *ifindex,
                     restart_reason: format!("{:?}", helper.reason),
                     grace_period_secs: helper.grace_period,
@@ -2883,10 +2878,10 @@ fn show_ospf_graceful_restart(
     let mut any = false;
     writeln!(
         buf,
-        "{:<15} {:<10} {:<22} {:<14} {:<10}",
+        "{:<15} {:<16} {:<22} {:<14} {:<10}",
         "Neighbor ID", "Interface", "Restart Reason", "Grace Period", "Remaining"
     )?;
-    for (ifindex, link) in ospf.links.iter() {
+    for link in ospf.links.values() {
         for nbr in link.nbrs.values() {
             let Some(helper) = nbr.gr_helper.as_ref() else {
                 continue;
@@ -2895,9 +2890,9 @@ fn show_ospf_graceful_restart(
             let remaining = helper.remaining_secs();
             writeln!(
                 buf,
-                "{:<15} {:<10} {:<22} {:<14} {:<10}",
+                "{:<15} {:<16} {:<22} {:<14} {:<10}",
                 nbr.ident.router_id.to_string(),
-                format!("if{}", ifindex),
+                link.name,
                 format!("{:?}", helper.reason),
                 format!("{}s", helper.grace_period),
                 format!("{}s", remaining),
@@ -2944,6 +2939,17 @@ struct CheckpointAdjSidJson {
     label: u32,
 }
 
+/// A checkpoint's write time, in UTC to the second (RFC 3339).
+fn fmt_written_at(at: std::time::SystemTime) -> String {
+    chrono::DateTime::<chrono::Utc>::from(at).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+/// A checkpoint's restart reason (RFC 3623 Appendix A) by name, as the
+/// helper table shows it.
+fn fmt_restart_reason(reason: u8) -> String {
+    format!("{:?}", ospf_packet::GraceRestartReason::from(reason))
+}
+
 #[derive(Serialize)]
 struct CheckpointJson {
     path: String,
@@ -2987,9 +2993,9 @@ fn show_ospf_checkpoint(
             Ok(cp) => {
                 out.present = true;
                 out.format_version = Some(cp.format_version);
-                out.written_at = Some(format!("{:?}", cp.written_at));
+                out.written_at = Some(fmt_written_at(cp.written_at));
                 out.grace_period_secs = Some(cp.grace_period_secs);
-                out.restart_reason = Some(cp.restart_reason.to_string());
+                out.restart_reason = Some(fmt_restart_reason(cp.restart_reason));
                 out.router_id = Some(cp.router_id.to_string());
                 out.areas = cp
                     .areas
@@ -3051,8 +3057,10 @@ fn show_ospf_checkpoint(
     writeln!(buf, "  Format version: {}", cp.format_version)?;
     writeln!(
         buf,
-        "  Written at: {:?} (grace period {}s, reason {})",
-        cp.written_at, cp.grace_period_secs, cp.restart_reason
+        "  Written at: {} (grace period {}s, reason {})",
+        fmt_written_at(cp.written_at),
+        cp.grace_period_secs,
+        fmt_restart_reason(cp.restart_reason)
     )?;
     writeln!(buf, "  Router-ID: {}", cp.router_id)?;
     writeln!(buf, "  Areas: {}", cp.areas.len())?;
@@ -3088,4 +3096,17 @@ fn show_ospf_checkpoint(
         writeln!(buf, "    if{} {} -> label {}", ifindex, addr, label)?;
     }
     Ok(buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checkpoint_time_and_reason_read_as_text() {
+        let at = std::time::UNIX_EPOCH + std::time::Duration::new(1_792_273_598, 408_972_720);
+        assert_eq!(fmt_written_at(at), "2026-10-17T21:46:38Z");
+        assert_eq!(fmt_restart_reason(1), "SoftwareRestart");
+        assert_eq!(fmt_restart_reason(0), "Unknown");
+    }
 }

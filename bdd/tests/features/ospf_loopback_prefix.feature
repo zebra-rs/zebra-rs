@@ -40,6 +40,7 @@ Feature: OSPF never advertises the loopback address
     # Nor does OSPFv3 install ::1/128 as a route.
     And show command "show ospfv3 route" in namespace "r1" should eventually contain "2001:db8::2/128 metric"
     And show command "show ospfv3 route" in namespace "r1" should not contain "  ::1/128 metric"
+    And show command "show ospfv3 route" in namespace "r1" should contain "2001:db8::1/128 metric 0 directly attached to lo"
 
   Scenario: OSPFv2 advertises the configured loopback but not 127.0.0.0/8
     Given the test topology exists
@@ -47,6 +48,8 @@ Feature: OSPF never advertises the loopback address
     And show command "show ospf database detail" in namespace "r1" should not contain "Network/subnet number: 127."
     And show command "show ospf route" in namespace "r1" should eventually contain "10.0.0.2/32"
     And show command "show ospf route" in namespace "r1" should not contain "127.0.0.0/8"
+    # lo is shown with its configured address, not the kernel's 127.0.0.1/8.
+    And show command "show ospf interface" in namespace "r1" should contain "Internet Address 10.0.0.1/32"
 
   Scenario: Teardown topology
     When I stop zebra-rs in namespace "r1"

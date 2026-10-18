@@ -100,16 +100,18 @@ Feature: OSPFv3 TI-LFA fast-reroute over SR-MPLS
 
   Scenario: SR-MPLS labels and a TI-LFA repair are installed on the source
     Given the test topology exists
-    # Remote node-SIDs resolved into the LFIB. OSPFv3 originates its
-    # Prefix-SIDs with the NP (no-PHP) flag (RFC 8666 §5), so even the
-    # SID owner's direct neighbour swaps (label kept all the way; the
-    # owner pops via its own ILM entry) — unlike v2's PHP at adjacent
-    # owners.
+    # Remote node-SIDs resolved into the LFIB. The index-form Prefix-SIDs
+    # set NP (RFC 8666 §5), so even n1, a directly-adjacent owner, gets
+    # its label kept (the owner pops via its own ILM entry), as in
+    # OSPFv2; s's own SID 16100 is popped locally.
     Then mpls ilm in namespace "s" should contain label 16500
     And mpls ilm in namespace "s" should contain label 16800
     And mpls ilm outgoing label for label 16100 in namespace "s" should be "Pop"
     And mpls ilm outgoing label for label 16200 in namespace "s" should be "16200"
     And mpls ilm outgoing label for label 16800 in namespace "s" should be "16800"
+    # The SR view names each entry's operation.
+    And show command "show ospfv3 segment-routing" in namespace "s" should contain "Pop SR Pfx (idx 100)"
+    And show command "show ospfv3 segment-routing" in namespace "s" should contain "Swap SR Pfx (idx 200)"
     # The graph-level TI-LFA computation found repairs that need an SR
     # tunnel: a Node-SID to reach the P-node r1 past the failure, then
     # Adj-SIDs walking the expensive r-plane links.
