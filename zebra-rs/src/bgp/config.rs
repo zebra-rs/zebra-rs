@@ -9345,6 +9345,65 @@ mod neighbor_group_wiring_tests {
         assert_eq!(unsubscribed(&mut bfd_rx), vec![key]);
     }
 
+    /// Removing the peer left on the old ifindex unregisters the policy
+    /// watches its group registered. The new peer has a new ident and
+    /// registers its own, so the old ones would pile up per re-create.
+    #[tokio::test]
+    async fn interface_neighbor_link_recreate_unregisters_the_old_policy_watches() {
+        use super::super::interface_neighbor::config_interface_neighbor_neighbor_group;
+        use super::super::neighbor_group::{
+            config_neighbor_group_policy_in, config_neighbor_group_prefix_set_out,
+        };
+        use crate::policy::{Message, PolicyType};
+        use crate::rib::api::RibRx;
+
+        fn drain(
+            rx: &mut mpsc::UnboundedReceiver<Message>,
+        ) -> (
+            Vec<(String, usize, PolicyType)>,
+            Vec<(String, usize, PolicyType)>,
+        ) {
+            let (mut registered, mut unregistered) = (Vec::new(), Vec::new());
+            while let Ok(msg) = rx.try_recv() {
+                match msg {
+                    Message::Register {
+                        name,
+                        ident,
+                        policy_type,
+                        ..
+                    } => registered.push((name, ident, policy_type)),
+                    Message::Unregister {
+                        name,
+                        ident,
+                        policy_type,
+                        ..
+                    } => unregistered.push((name, ident, policy_type)),
+                    _ => {}
+                }
+            }
+            (registered, unregistered)
+        }
+
+        let mut bgp = fresh_bgp();
+        let (policy_tx, mut policy_rx) = mpsc::unbounded_channel();
+        bgp.policy_tx = policy_tx;
+        config_neighbor_group_policy_in(&mut bgp, arg_words(&["G", "P"]), ConfigOp::Set).unwrap();
+        config_neighbor_group_prefix_set_out(&mut bgp, arg_words(&["G", "S"]), ConfigOp::Set)
+            .unwrap();
+        bgp.process_rib_msg(RibRx::LinkAdd(named_link(7, "i1")));
+        configure_interface_neighbor(&mut bgp, "i1");
+        config_interface_neighbor_neighbor_group(&mut bgp, arg_words(&["i1", "G"]), ConfigOp::Set)
+            .unwrap();
+        let (old_watches, _) = drain(&mut policy_rx);
+        assert_eq!(old_watches.len(), 2, "policy in + prefix-set out");
+
+        bgp.process_rib_msg(RibRx::LinkDel(7));
+        bgp.process_rib_msg(RibRx::LinkAdd(named_link(9, "i1")));
+        let (new_watches, unregistered) = drain(&mut policy_rx);
+        assert_eq!(unregistered, old_watches);
+        assert_eq!(new_watches.len(), 2, "the new peer registers its own");
+    }
+
     // ---- interface-neighbor timers --------------------------------
 
     /// Timers typed before the peer exists must reach it when it
