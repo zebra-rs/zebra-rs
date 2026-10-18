@@ -71,6 +71,10 @@ Feature: OSPFv2 AS-External (Type-5) LSA origination with E1 and E2 metric types
     # Same metric on every observer proves type-2: external-metric only.
     Then show command "show ospf route" in namespace "a" should contain "192.168.1.0/24"
     And show command "show ospf route" in namespace "a" should contain "[20]"
+    # The Type-5 itself, in the AS-scope part of the database.
+    And show command "show ospf database" in namespace "a" should contain "AS External Link States"
+    And show command "show ospf database" in namespace "a" should contain "E2 192.168.1.0/24"
+    And show command "show ospf database detail" in namespace "a" should contain "Link State ID: 192.168.1.0 (External Network Number)"
     And show command "show ospf route" in namespace "c" should contain "192.168.1.0/24"
     And show command "show ospf route" in namespace "c" should contain "[20]"
     # e is in area 0.0.0.1 — needs Type-4 from ABR a to find ASBR b.

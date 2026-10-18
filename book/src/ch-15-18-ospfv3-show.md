@@ -52,12 +52,12 @@ OSPFv3 Routing Process
   Router ID:    10.0.0.1
   Areas:        1
   Interfaces:   6
-  Last SPF run: 19876 ms ago
-  SPF duration: 53 us
+  Last SPF run: 25062 ms ago
+  SPF duration: 28 us
   SPF timers:   initial 50 ms, secondary 200 ms, maximum 5000 ms
   MinLSInterval: 5000 ms
   MinLSArrival: 1000 ms
-  TI-LFA compute: targets=3 mode=serial workers=1 spf{q=3 pc=3 dedup-saved=0} took 26 us
+  TI-LFA compute: targets=3 mode=serial workers=1 spf{q=3 pc=3 dedup-saved=0} took 15 us
   SPF offload gates:
     area 0.0.0.0: inflight=false, pending=false
 ```
@@ -148,10 +148,10 @@ Area-scope:
   Router-LSA               0                10.0.0.4         0x80000004 2
   Network-LSA              2                10.0.0.4         0x80000001 2
   Inter-Area-Prefix-LSA    2596542417       10.0.0.4         0x80000001 6
-  Intra-Area-Prefix-LSA    0                10.0.0.1         0x8000000c 0
-  Intra-Area-Prefix-LSA    0                10.0.0.2         0x8000000e 1
-  Intra-Area-Prefix-LSA    0                10.0.0.3         0x80000012 6
-  Intra-Area-Prefix-LSA    0                10.0.0.4         0x80000008 2
+  Intra-Area-Prefix-LSA    0                10.0.0.1         0x8000000b 0
+  Intra-Area-Prefix-LSA    0                10.0.0.2         0x80000010 1
+  Intra-Area-Prefix-LSA    0                10.0.0.3         0x80000010 6
+  Intra-Area-Prefix-LSA    0                10.0.0.4         0x8000000b 2
   Intra-Area-Prefix-LSA    2                10.0.0.4         0x80000002 2
 ...
 AS-scope:
@@ -246,15 +246,15 @@ Intra-area, inter-area and external routes are listed together.
 r1> show ospfv3 route
 OSPFv3 routes (10)
   2001:db8::1/128 metric 0 directly attached to lo
-  2001:db8::2/128 metric 10 via fe80::4400:a0ff:febe:a0c5%2
-  2001:db8::3/128 metric 15 via fe80::c814:afff:fede:65f6%3
-  2001:db8::4/128 metric 20 via fe80::4400:a0ff:febe:a0c5%2
+  2001:db8::2/128 metric 10 via fe80::c46e:7fff:fe57:98fb%2
+  2001:db8::3/128 metric 15 via fe80::5ceb:83ff:fe2f:1ba0%3
+  2001:db8::4/128 metric 20 via fe80::c46e:7fff:fe57:98fb%2
   2001:db8:12::/64 metric 10 directly attached to r1-r2
   2001:db8:13::/64 metric 15 directly attached to r1-r3
-  2001:db8:23::/64 metric 20 via fe80::4400:a0ff:febe:a0c5%2
-  2001:db8:24::/64 metric 20 via fe80::4400:a0ff:febe:a0c5%2
-  2001:db8:34::/64 metric 45 via fe80::c814:afff:fede:65f6%3
-  2001:db8:f4::/64 metric 30 via fe80::4400:a0ff:febe:a0c5%2
+  2001:db8:23::/64 metric 20 via fe80::c46e:7fff:fe57:98fb%2
+  2001:db8:24::/64 metric 20 via fe80::c46e:7fff:fe57:98fb%2
+  2001:db8:34::/64 metric 45 via fe80::5ceb:83ff:fe2f:1ba0%3
+  2001:db8:f4::/64 metric 30 via fe80::c46e:7fff:fe57:98fb%2
 ```
 
 JSON: an array of `{ prefix, metric, nexthops: [ { nexthop, ifindex }
@@ -335,23 +335,23 @@ r1> show ospfv3 segment-routing
   Local ILM (v3): 9 entries
   Label     Type                    Via                               Iface
   ------------------------------------------------------------------------
-  15002     Pop SR Adj              fe80::c814:afff:fede:65f6         r1-r3
-  15003     Pop SR Adj              fe80::4400:a0ff:febe:a0c5         r1-r2
+  15002     Pop SR Adj              fe80::5ceb:83ff:fe2f:1ba0         r1-r3
+  15003     Pop SR Adj              fe80::c46e:7fff:fe57:98fb         r1-r2
   16021     Pop SR Pfx (idx 21)     ::1                               lo
-  16022     Swap SR Pfx (idx 22)    fe80::4400:a0ff:febe:a0c5         r1-r2
-  16023     Swap SR Pfx (idx 23)    fe80::c814:afff:fede:65f6         r1-r3
-  16024     Swap SR Pfx (idx 24)    fe80::4400:a0ff:febe:a0c5         r1-r2
-  16122     Swap SR Pfx (idx 122)   fe80::4400:a0ff:febe:a0c5         r1-r2
-  16123     Swap SR Pfx (idx 123)   fe80::c814:afff:fede:65f6         r1-r3
-  16124     Swap SR Pfx (idx 124)   fe80::4400:a0ff:febe:a0c5         r1-r2
+  16022     Swap SR Pfx (idx 22)    fe80::c46e:7fff:fe57:98fb         r1-r2
+  16023     Swap SR Pfx (idx 23)    fe80::5ceb:83ff:fe2f:1ba0         r1-r3
+  16024     Swap SR Pfx (idx 24)    fe80::c46e:7fff:fe57:98fb         r1-r2
+  16122     Swap SR Pfx (idx 122)   fe80::c46e:7fff:fe57:98fb         r1-r2
+  16123     Swap SR Pfx (idx 123)   fe80::5ceb:83ff:fe2f:1ba0         r1-r3
+  16124     Swap SR Pfx (idx 124)   fe80::c46e:7fff:fe57:98fb         r1-r2
 
   Remote Prefix-SIDs:
 
   SR-Node: 10.0.0.2    Area: 0.0.0.0    SRGB: [16000/23999]    SRLB: [15000/15999]
     Prefix                            Prefix-SID          Label Op        Iface      Nexthop
     ----------------------------------------------------------------------------------
-    2001:db8::2/128                   SR Pfx (idx 22)     Push 16022      r1-r2      fe80::4400:a0ff:febe:a0c5
-    2001:db8::2/128                   SR Pfx (idx 122)    Push 16122      r1-r2      fe80::4400:a0ff:febe:a0c5
+    2001:db8::2/128                   SR Pfx (idx 22)     Push 16022      r1-r2      fe80::c46e:7fff:fe57:98fb
+    2001:db8::2/128                   SR Pfx (idx 122)    Push 16122      r1-r2      fe80::c46e:7fff:fe57:98fb
 ...
 ```
 
@@ -414,9 +414,9 @@ Flex-Algorithm 128
     10.0.0.3 cost 15 via 10.0.0.3
     10.0.0.4 cost 20 via 10.0.0.2
   Routes:
-    2001:db8::2/128  metric 10  label 16122  via fe80::4400:a0ff:febe:a0c5
-    2001:db8::3/128  metric 15  label 16123  via fe80::c814:afff:fede:65f6
-    2001:db8::4/128  metric 20  label 16124  via fe80::4400:a0ff:febe:a0c5
+    2001:db8::2/128  metric 10  label 16122  via fe80::c46e:7fff:fe57:98fb
+    2001:db8::3/128  metric 15  label 16123  via fe80::5ceb:83ff:fe2f:1ba0
+    2001:db8::4/128  metric 20  label 16124  via fe80::c46e:7fff:fe57:98fb
 ```
 
 All four routers advertise a definition at the default priority 128, so
@@ -478,23 +478,24 @@ Prefix-SID last, to close the stack:
 ```
 r1> show ospfv3 repair-list
 Prefix                         Primary via                Repair via                 Segments
-2001:db8::4/128                fe80::4400:a0ff:febe:a0c5  fe80::c814:afff:fede:65f6  [16023, 15004, 16024]
-2001:db8:24::/64               fe80::4400:a0ff:febe:a0c5  fe80::c814:afff:fede:65f6  [16023, 15004]
-2001:db8:f4::/64               fe80::4400:a0ff:febe:a0c5  fe80::c814:afff:fede:65f6  [16023, 15004]
+2001:db8::4/128                fe80::c46e:7fff:fe57:98fb  fe80::5ceb:83ff:fe2f:1ba0  [16023, 15002, 16024]
+2001:db8:24::/64               fe80::c46e:7fff:fe57:98fb  fe80::5ceb:83ff:fe2f:1ba0  [16023, 15002]
+2001:db8:f4::/64               fe80::c46e:7fff:fe57:98fb  fe80::5ceb:83ff:fe2f:1ba0  [16023, 15002]
 ```
 
 r1's repair for r4 goes to r3 (`16023`), takes r3's adjacency to r4
-(`15004`) and ends with r4's Prefix-SID (`16024`). With SRv6 the same
+(the middle label, r3's Adj-SID for it) and ends with r4's Prefix-SID
+(`16024`). With SRv6 the same
 two segments, r3's End SID and r3's End.X toward r4, pack into one uSID
 container, inserted as an SRH ahead of the original destination:
 
 ```
 r1> show ospfv3 repair-list
 Prefix                         Primary via                Repair via                 Segments
-2001:db8::4/128                fe80::4400:a0ff:febe:a0c5  fe80::c814:afff:fede:65f6  [fcbb:bbbb:3:e002::]
-2001:db8:24::/64               fe80::4400:a0ff:febe:a0c5  fe80::c814:afff:fede:65f6  [fcbb:bbbb:3:e002::]
-2001:db8:f4::/64               fe80::4400:a0ff:febe:a0c5  fe80::c814:afff:fede:65f6  [fcbb:bbbb:3:e002::]
-fcbb:bbbb:4::/48               fe80::4400:a0ff:febe:a0c5  fe80::c814:afff:fede:65f6  [fcbb:bbbb:3:e002::]
+2001:db8::4/128                fe80::c46e:7fff:fe57:98fb  fe80::5ceb:83ff:fe2f:1ba0  [fcbb:bbbb:3:e002::]
+2001:db8:24::/64               fe80::c46e:7fff:fe57:98fb  fe80::5ceb:83ff:fe2f:1ba0  [fcbb:bbbb:3:e002::]
+2001:db8:f4::/64               fe80::c46e:7fff:fe57:98fb  fe80::5ceb:83ff:fe2f:1ba0  [fcbb:bbbb:3:e002::]
+fcbb:bbbb:4::/48               fe80::c46e:7fff:fe57:98fb  fe80::5ceb:83ff:fe2f:1ba0  [fcbb:bbbb:3:e002::]
 ```
 
 `detail` gives the primary and repair next hops with their ifindex and
@@ -503,10 +504,10 @@ metric, and one line per label (`sr-mpls`) or SID (`srv6`):
 ```
 r1> show ospfv3 repair-list detail
 2001:db8::4/128
-  Primary: via fe80::4400:a0ff:febe:a0c5 (ifindex 2), metric 20
-  Repair:  via fe80::c814:afff:fede:65f6 (ifindex 3), metric 21
+  Primary: via fe80::c46e:7fff:fe57:98fb (ifindex 2), metric 20
+  Repair:  via fe80::5ceb:83ff:fe2f:1ba0 (ifindex 3), metric 21
     sr-mpls 16023
-    sr-mpls 15004
+    sr-mpls 15002
     sr-mpls 16024
 ...
 ```
@@ -536,7 +537,7 @@ Graceful-restart configuration:
   Max grace period: 1800s
   Strict LSA checking: true
   Drain time: 200ms
-  Restart staged: grace=120s, reason=SoftwareRestart, age=3.070588424s
+  Restart staged: grace=120s, reason=SoftwareRestart, age=3.064471507s
 
 Neighbor ID     Interface        Restart Reason         Grace Period   Remaining
   (no active helpers)

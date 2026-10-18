@@ -46,11 +46,11 @@ each area whether an SPF is running or queued.
 r1> show ospf
  OSPF Routing Process, Router ID: 10.0.0.1
  SPF algorithm last executed 0m29s ago
- Last SPF duration 64 usecs
+ Last SPF duration 45 usecs
  SPF timers: initial 50 ms, secondary 200 ms, maximum 5000 ms
  MinLSInterval (self-LSA re-origination): 5000 ms
  MinLSArrival (received-LSA rate limit): 1000 ms
- TI-LFA compute: targets=3 mode=serial workers=1 spf{q=3 pc=3 dedup-saved=0} took 35 usecs
+ TI-LFA compute: targets=3 mode=serial workers=1 spf{q=3 pc=3 dedup-saved=0} took 24 usecs
  SPF offload gates:
    area 0.0.0.0: inflight=false, pending=false
 ```
@@ -85,7 +85,7 @@ r1-r2 is up
   Transmit Delay is 1 sec, State Point-To-Point, Priority 64
   Multicast group memberships: OSPFAllRouters
   Timer intervals configured, Hello 10s, Dead 40s, Wait 40s, Retransmit 5
-    Hello due in 9.927s
+    Hello due in 9.922s
   Neighbor Count is 1, Adjacent neighbor count is 1
   Graceful Restart hello delay: 10s
   LSA retransmissions: 0
@@ -116,9 +116,9 @@ lists.
 ```
 r2> show ospf neighbor
 Neighbor ID     Pri State                   Up Time  Dead Time Address         Interface                        RXmtL RqstL DBsmL
-10.0.0.1         64 Full/-                    1m00s    39.494s 192.168.12.1    r2-r1:192.168.12.2                   0     0     0
-10.0.0.3         64 Full/-                    1m10s    39.512s 192.168.23.3    r2-r3:192.168.23.2                   0     0     0
-10.0.0.4         64 Full/DR                   1m10s    39.522s 192.168.24.4    r2-r4:192.168.24.2                   0     0     0
+10.0.0.1         64 Full/-                    1m00s    39.510s 192.168.12.1    r2-r1:192.168.12.2                   0     0     0
+10.0.0.3         64 Full/-                    1m10s    39.535s 192.168.23.3    r2-r3:192.168.23.2                   0     0     0
+10.0.0.4         64 Full/DR                   1m10s    39.546s 192.168.24.4    r2-r4:192.168.24.2                   0     0     0
 ```
 
 `detail` gives one block per neighbor: its interface address, area and
@@ -137,7 +137,7 @@ r2> show ospf neighbor detail
       Progressive change 1m00s ago
     DR is 0.0.0.0, BDR is 0.0.0.0
     Options 66 *|O|-|-|-|-|E|-
-    Dead timer due in 39.484s
+    Dead timer due in 39.500s
     Database Summary List 0
     Link State Request List 0
     Link State Retransmission List 0
@@ -155,13 +155,21 @@ dead_timer, db_summary_list, ls_request_list, ls_retransmission_list }`.
 
 ### `show ospf database [detail]`
 
-The backbone area's Router, Network and area-scope Opaque LSAs (Router
-Information, Extended Prefix and Extended Link). Each row gives the
-Link-State ID, advertising router, age, sequence number and checksum.
-`Hold` is the time left before the LSA reaches MaxAge; for this router's
-own LSAs the time to the next refresh follows in parentheses. Opaque
-LSAs are listed by `type.id`, for example `7.0.0.1` for Extended Prefix
-LSA 1.
+The link-state database. For each area: the Router, Network, Summary,
+ASBR-summary and NSSA-external LSAs, then the area-scope Opaque LSAs
+(Router Information, Extended Prefix and Extended Link). After the areas
+come the AS-scope LSAs — AS-external and AS-scope Opaque — and each
+interface's link-scope Opaque LSAs, such as the Grace-LSAs of a graceful
+restart. A kind with no LSAs is left out, except that every area lists
+its Router and Network sections.
+
+Each row gives the Link-State ID, advertising router, age, sequence
+number and checksum. `Route` is the prefix a Summary, AS-external or
+NSSA-external LSA carries, with the metric type (`E1`/`E2`) and route
+tag for the external kinds. `Hold` is the time left before the LSA
+reaches MaxAge; for this router's own LSAs the time to the next refresh
+follows in parentheses. Opaque LSAs are listed by `type.id`, for example
+`7.0.0.1` for Extended Prefix LSA 1.
 
 ```
 r1> show ospf database
@@ -180,22 +188,37 @@ Net Link States (Area 0.0.0.0)
 Link ID         ADV Router      Age  Seq#       CkSum   Hold
 192.168.24.4    10.0.0.4          32 0x80000001 0x4b63  3567s
 
+Summary Link States (Area 0.0.0.0)
+
+Link ID         ADV Router      Age  Seq#       CkSum   Route                    Hold
+172.16.4.0      10.0.0.4          66 0x80000001 0xc9bc  172.16.4.0/24            3533s
+
                 Area-Local Opaque-LSA (Area 0.0.0.0)
 
 Opaque-Type/Id  ADV Router      Age  Seq#       CkSum   Hold
 4.0.0.0         10.0.0.1          70 0x80000003 0x9637  3529s (1729s)
 4.0.0.0         10.0.0.2          70 0x80000003 0x903c  3529s
+4.0.0.0         10.0.0.3          70 0x80000003 0x8a41  3529s
 ...
+
+AS External Link States
+
+Link ID         ADV Router      Age  Seq#       CkSum   Route                    Hold
+10.0.0.1        10.0.0.1          70 0x80000004 0xf470  E2 10.0.0.1/32 [0x0]     3529s (1729s)
+172.16.1.0      10.0.0.1          70 0x80000004 0xf0c1  E2 172.16.1.0/24 [0x0]   3529s (1729s)
+192.168.12.0    10.0.0.1          70 0x80000003 0x4dae  E2 192.168.12.0/24 [0x0] 3529s (1729s)
+192.168.13.0    10.0.0.1          70 0x80000002 0x44b7  E2 192.168.13.0/24 [0x0] 3529s (1729s)
 ```
 
-The view covers area 0.0.0.0 only, and only these three LSA types.
-Summary, ASBR-summary, AS-external and NSSA LSAs, and the LSAs of other
-areas, are not displayed; `show ospf route` lists the routes they
-produce.
+172.16.4.0/24 is r4's area-0.0.0.1 network, summarized into area 0 by
+r4; the external LSAs are r1's redistributed connected networks. r4, the
+ABR, also lists area 0.0.0.1 with the Summary LSAs it injects there.
 
 `detail` decodes every LSA: the header fields, then the body — each
 Router-LSA link with its type, Link ID, Link Data and metric; each
-Network-LSA's mask and attached routers; and each Opaque LSA's TLVs.
+Network-LSA's mask and attached routers; a Summary LSA's mask and
+metric; an external LSA's mask, metric type, metric, forwarding address
+and tag; and each Opaque LSA's TLVs.
 
 ```
 r1> show ospf database detail
@@ -254,16 +277,42 @@ r1> show ospf database detail
       Flags: 0x40
       MT-ID: 0
 ...
+                AS External Link States
+
+  LS age: 70
+  Options: 0x42  : *|O|-|-|-|-|E|-
+  LS Type: AS External Link
+  Link State ID: 10.0.0.1 (External Network Number)
+  Advertising Router: 10.0.0.1
+  LS Seq Number: 0x80000004
+  Checksum: 0xf470
+  Length: 36
+  Hold remaining: 3529s
+  Refresh remaining: 1729s
+
+  Network Mask: /32
+        Metric Type: 2 (Larger than any link state path)
+        TOS: 0
+        Metric: 20
+        Forward Address: 0.0.0.0
+        External Route Tag: 0
+...
 ```
 
 JSON: `{ router_id, areas: [ { area_id, router_lsas, network_lsas,
-opaque_area_lsas } ] }`, each LSA `{ link_id, adv_router, age,
-seq_number, checksum }` and Router-LSAs also `link_count`. `detail`
-returns `router_lsas` (`{ ls_age, options, link_state_id,
-advertising_router, ls_seq_number, checksum, length, num_links, links:
-[ { link_type, link_id, link_data, num_tos, tos_0_metric } ] }`) and
-`network_lsas` (the same header plus `network_mask` and
-`attached_routers`); the Opaque LSAs are in the text form only.
+summary_lsas, asbr_summary_lsas, nssa_lsas, opaque_area_lsas } ],
+as_external_lsas, opaque_as_lsas, links: [ { interface,
+opaque_link_lsas } ] }`, each LSA `{ link_id, adv_router, age,
+seq_number, checksum }`, Router-LSAs also `link_count`, and Summary and
+external LSAs also `route` (and `tag`). An empty list is omitted, except
+`router_lsas` and `network_lsas`. `detail` gives each LSA's header
+(`ls_age, options, link_state_id, advertising_router, ls_seq_number,
+checksum, length`) and its body fields: Router-LSA `num_links` and
+`links: [ { link_type, link_id, link_data, num_tos, tos_0_metric } ]`;
+Network-LSA `network_mask` and `attached_routers`; Summary `network_mask`
+and `metric`; external `network_mask`, `metric_type`, `metric`,
+`forwarding_address` and `external_route_tag`; Opaque `opaque_type`,
+`opaque_type_name` and `opaque_id` (the TLVs are in the text form only).
 
 ## Routes, SPF and graph
 
@@ -472,7 +521,8 @@ Prefix                 Primary via        Repair via         Segments
 ```
 
 r1's repair for r4 goes to r3 (`16003`), takes r3's adjacency to r4
-(`15003`) and ends with r4's Prefix-SID (`16004`). A repair that starts
+(the middle label, r3's Adj-SID for it) and ends with r4's Prefix-SID
+(`16004`). A repair that starts
 on one of this router's own adjacencies pushes no label for it: the
 packet is sent over that adjacency.
 
@@ -519,7 +569,7 @@ Graceful-restart configuration:
   Max grace period: 1800s
   Strict LSA checking: true
   Drain time: 200ms
-  Restart staged: grace=120s, reason=SoftwareRestart, age=3.030629963s
+  Restart staged: grace=120s, reason=SoftwareRestart, age=3.025762671s
 
 Neighbor ID     Interface        Restart Reason         Grace Period   Remaining
   (no active helpers)
@@ -563,7 +613,7 @@ checkpoint, as its commit wrote it:
 r1> show ospf checkpoint
 Checkpoint path: /var/lib/zebra-rs/checkpoint/ospf.cbor
   Format version: 1
-  Written at: 2026-10-18T02:08:22Z (grace period 120s, reason SoftwareRestart)
+  Written at: 2026-10-18T02:36:57Z (grace period 120s, reason SoftwareRestart)
   Router-ID: 10.0.0.1
   Areas: 1
     0.0.0.0 (type: Normal, 27 LSAs)
@@ -574,8 +624,8 @@ Checkpoint path: /var/lib/zebra-rs/checkpoint/ospf.cbor
     ifindex 3 (r1-r3) area 0.0.0.0 — 1 neighbor(s)
       10.0.0.3 via 192.168.13.3 (was_full: true)
   Adj-SID labels: 2
-    if2 192.168.12.2 -> label 15000
-    if3 192.168.13.3 -> label 15001
+    if2 192.168.12.2 -> label 15001
+    if3 192.168.13.3 -> label 15000
 ```
 
 JSON: `{ path, present, error, format_version, written_at,
