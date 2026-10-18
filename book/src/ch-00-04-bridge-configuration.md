@@ -152,10 +152,10 @@ r1> show l2 neighbor
  MAC                Interface         VLAN         VNI  Dst                                      State          Flags
  ------------------ ---------------- -----  ----------  ---------------------------------------- -------------- ----------
 ...
- 00:00:00:00:00:00  vxlan10              -           -  -                                        Permanent      0x02
- 4a:7b:09:67:2a:7a  vxlan10              -           -  -                                        Permanent      0x00
- 4a:7b:09:67:2a:7a  vxlan10              1           -  -                                        Permanent      0x00
- aa:bb:cc:dd:ee:02  vxlan10              -           -  -                                        Permanent      0x02
+ 00:00:00:00:00:00  vxlan10              -          10  192.168.0.2                              Permanent      0x12
+ 92:ba:75:d4:40:d0  vxlan10              -           -  -                                        Permanent      0x00
+ 92:ba:75:d4:40:d0  vxlan10              1           -  -                                        Permanent      0x00
+ aa:bb:cc:dd:ee:02  vxlan10              -          10  192.168.0.2                              Permanent      0x12
  aa:bb:cc:dd:ee:02  vxlan10              1           -  -                                        Reachable      0x10
  02:00:00:00:fe:01  br10                 -           -  -                                        Permanent      0x00
  02:00:00:00:fe:01  br10                 1           -  -                                        Permanent      0x00
@@ -165,8 +165,10 @@ r1> show l2 neighbor
  aa:bb:cc:dd:ee:01  host0                1           -  -                                        Noarp          0x00
 ```
 
-The VXLAN rows show `-` for VNI and Dst, though the kernel's own rows
-carry both (`bridge fdb show dev vxlan10`). This is a known issue.
+The VXLAN device's own rows (`0x12`: self, externally learned) carry
+the VNI and the remote VTEP: `00:00:00:00:00:00` sends broadcast,
+unknown-unicast and multicast traffic to r2, and `aa:bb:cc:dd:ee:02` is
+r2's station.
 
 JSON: `{ "entries": [ { "mac", "interface", "vlan", "vni", "dst",
 "state", "flags" } ] }`, with `flags` as a number.
