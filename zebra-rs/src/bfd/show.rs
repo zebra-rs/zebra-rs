@@ -12,8 +12,9 @@
 //!     or one when an address follows.
 //!   * `show bfd counters`     — per-session control-packet counters.
 //!
-//! Every command also accepts a trailing `json` keyword (surfaced as
-//! the `json` flag) for machine-readable output.
+//! Every command honors the request's JSON flag (`vtyctl show -j`, or
+//! `cli format json` in the VTY) for machine-readable output; there is
+//! no trailing `json` keyword.
 
 use std::fmt::{self, Write};
 use std::time::{Duration, Instant};

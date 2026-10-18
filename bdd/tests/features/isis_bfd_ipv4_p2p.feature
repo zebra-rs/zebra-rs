@@ -40,6 +40,9 @@ Feature: IS-IS BFD over an IPv4 point-to-point link
     Then isis neighbor in namespace "z1" at level 2 on interface "i1" should be up
     And bfd session in namespace "z1" on interface "i1" should be up
     And bfd session in namespace "z2" on interface "i1" should be up
+    # Every transmission is counted; TX used to read 0 on every session.
+    And show command "show bfd counters" as JSON in namespace "z1" should eventually contain '"rx_count"'
+    And show command "show bfd counters" as JSON in namespace "z1" should not contain '"tx_count": 0,'
     And ping from "z1" to "10.255.0.2" should succeed
     # BFD-down isolation: link stays up, IIHs keep flowing.
     When I drop bfd control packets in namespace "z2"
