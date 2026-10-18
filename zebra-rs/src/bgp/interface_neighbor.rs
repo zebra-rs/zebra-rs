@@ -109,12 +109,32 @@ pub fn materialize_peer(
 /// `show bgp summary` / `show bgp neighbor` list the configured
 /// neighbor as Idle even when the remote node has never been up,
 /// matching FRR. The RA path ([`materialize_peer`]) upgrades it in
-/// place. `None` when the interface is unknown to RIB yet or the
-/// config gates (resolvable remote-as) aren't satisfied — callers
-/// simply retry on the next config/link event.
+/// place. `None` when no link of that name exists (not announced by
+/// RIB yet, or deleted since) or the config gates (resolvable
+/// remote-as) aren't satisfied — callers simply retry on the next
+/// config/link event.
 pub fn materialize_dormant(bgp: &mut Bgp, name: &str) -> Option<usize> {
-    let ifindex = *bgp.link_index_by_name.get(name)?;
+    let ifindex = bgp.live_link_index(name)?;
     materialize(bgp, name, ifindex, None)
+}
+
+/// Whether the interface peer on `ifindex` is the one materialized for
+/// `name`. An ifindex can change hands: `link_index_by_name` keeps a
+/// deleted or renamed link's last ifindex, which another link may now
+/// hold.
+fn is_peer_of(bgp: &Bgp, ifindex: u32, name: &str) -> bool {
+    bgp.peers
+        .get_by_key(&PeerKey::Interface(ifindex))
+        .is_some_and(|p| p.ifname.as_deref() == Some(name))
+}
+
+/// The ifindex of the peer materialized for `name`, if it exists. The
+/// name resolves through `link_index_by_name`, so a peer kept on a
+/// deleted link is still reached, but not one another name has since
+/// materialized on that ifindex.
+fn own_peer_ifindex(bgp: &Bgp, name: &str) -> Option<u32> {
+    let ifindex = *bgp.link_index_by_name.get(name)?;
+    is_peer_of(bgp, ifindex, name).then_some(ifindex)
 }
 
 fn materialize(
@@ -303,7 +323,7 @@ pub fn config_interface_neighbor(bgp: &mut Bgp, mut args: Args, op: ConfigOp) ->
             // Take the cfg out first so we can tear the peer (if any)
             // down without holding a borrow.
             bgp.interface_neighbors.remove(&name);
-            if let Some(&ifindex) = bgp.link_index_by_name.get(&name) {
+            if let Some(ifindex) = own_peer_ifindex(bgp, &name) {
                 teardown_peer(bgp, ifindex);
             }
         }
@@ -376,11 +396,7 @@ fn teardown_peer(bgp: &mut Bgp, ifindex: u32) {
 /// Tear it down so the new ifindex holds the only peer. Only a peer
 /// materialized for `name` is touched.
 pub fn remove_old_ifindex_peer(bgp: &mut Bgp, name: &str, old: u32) {
-    let ours = bgp
-        .peers
-        .get_by_key(&PeerKey::Interface(old))
-        .is_some_and(|p| p.ifname.as_deref() == Some(name));
-    if ours {
+    if is_peer_of(bgp, old, name) {
         teardown_peer(bgp, old);
     }
 }
@@ -409,7 +425,7 @@ pub fn config_interface_neighbor_neighbor_group(
     // `remote-as` change is also picked up only on the next
     // materialization.
     let mut stop: Option<usize> = None;
-    if let Some(&ifindex) = bgp.link_index_by_name.get(&name)
+    if let Some(ifindex) = own_peer_ifindex(bgp, &name)
         && let Some(peer) = bgp.peers.get_mut_by_key(&PeerKey::Interface(ifindex))
     {
         peer.config.neighbor_group = new_ref;
@@ -470,7 +486,7 @@ pub fn config_interface_neighbor_remote_as(
 /// `vrf_entry` / `neighbor_entry` helpers the per-VRF timers callbacks
 /// share.
 fn interface_peer_mut<'a>(bgp: &'a mut Bgp, name: &str) -> Option<&'a mut Peer> {
-    let ifindex = *bgp.link_index_by_name.get(name)?;
+    let ifindex = own_peer_ifindex(bgp, name)?;
     bgp.peers.get_mut_by_key(&PeerKey::Interface(ifindex))
 }
 

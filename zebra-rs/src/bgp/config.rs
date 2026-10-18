@@ -8948,6 +8948,7 @@ mod neighbor_group_wiring_tests {
         let mut bgp = fresh_bgp();
         // RIB announced the link; no RA has arrived.
         bgp.link_index_by_name.insert("i1".to_string(), 7);
+        bgp.link_name_by_index.insert(7, "i1".to_string());
         config_interface_neighbor(&mut bgp, arg_words(&["i1"]), ConfigOp::Set).unwrap();
         config_interface_neighbor_remote_as(&mut bgp, arg_words(&["i1", "65002"]), ConfigOp::Set)
             .unwrap();
@@ -9141,10 +9142,11 @@ mod neighbor_group_wiring_tests {
     }
 
     /// While the link is gone, `link_index_by_name` still maps the name
-    /// to the old ifindex, so a neighbor deleted and added again in that
-    /// window materializes there. The link's return removes it too.
+    /// to the old ifindex, but a neighbor deleted and added again in that
+    /// window has no link to materialize on: no peer until the link
+    /// returns, then one on the new ifindex.
     #[tokio::test]
-    async fn interface_neighbor_readded_while_link_is_gone_is_removed_when_it_returns() {
+    async fn interface_neighbor_readded_while_link_is_gone_waits_for_the_link() {
         use super::super::interface_neighbor::config_interface_neighbor;
         use crate::rib::api::RibRx;
 
@@ -9156,10 +9158,51 @@ mod neighbor_group_wiring_tests {
         config_interface_neighbor(&mut bgp, arg_words(&["i1"]), ConfigOp::Delete).unwrap();
         assert!(interface_peers(&bgp).is_empty());
         configure_interface_neighbor(&mut bgp, "i1");
-        assert_eq!(interface_peers(&bgp), vec![(7, "i1".to_string())]);
+        assert!(
+            interface_peers(&bgp).is_empty(),
+            "no peer on the deleted link's ifindex"
+        );
 
         bgp.process_rib_msg(RibRx::LinkAdd(named_link(9, "i1")));
         assert_eq!(interface_peers(&bgp), vec![(9, "i1".to_string())]);
+    }
+
+    /// A deleted link's name still maps to its old ifindex. Once another
+    /// link reuses that ifindex, the old name's config (neighbor, group,
+    /// timers, delete) must not reach the other name's peer.
+    #[tokio::test]
+    async fn interface_neighbor_gone_name_leaves_the_reused_ifindex_peer() {
+        use super::super::interface_neighbor::{
+            config_interface_neighbor, config_interface_neighbor_hold_time,
+            config_interface_neighbor_neighbor_group,
+        };
+        use super::super::peer_key::PeerKey;
+        use crate::rib::api::RibRx;
+
+        let mut bgp = fresh_bgp();
+        bgp.process_rib_msg(RibRx::LinkAdd(named_link(7, "i1")));
+        bgp.process_rib_msg(RibRx::LinkDel(7));
+        bgp.process_rib_msg(RibRx::LinkAdd(named_link(7, "i2")));
+        configure_interface_neighbor(&mut bgp, "i2");
+
+        configure_interface_neighbor(&mut bgp, "i1");
+        config_interface_neighbor_neighbor_group(&mut bgp, arg_words(&["i1", "G"]), ConfigOp::Set)
+            .unwrap();
+        config_interface_neighbor_hold_time(&mut bgp, arg_words(&["i1", "9"]), ConfigOp::Set)
+            .unwrap();
+        let peer = bgp.peers.get_by_key(&PeerKey::Interface(7)).unwrap();
+        assert_eq!(peer.ifname.as_deref(), Some("i2"));
+        assert_eq!(
+            peer.config.neighbor_group, None,
+            "i1's group stays off i2's peer"
+        );
+        assert_eq!(
+            peer.config.timer.hold_time, None,
+            "i1's timer stays off i2's peer"
+        );
+
+        config_interface_neighbor(&mut bgp, arg_words(&["i1"]), ConfigOp::Delete).unwrap();
+        assert_eq!(interface_peers(&bgp), vec![(7, "i2".to_string())]);
     }
 
     /// Only a peer materialized for the returning name is removed: one
@@ -9284,6 +9327,7 @@ mod neighbor_group_wiring_tests {
 
         // The link surfaces; the dormant peer is built from the config.
         bgp.link_index_by_name.insert("i1".to_string(), 7);
+        bgp.link_name_by_index.insert(7, "i1".to_string());
         super::super::interface_neighbor::materialize_dormant(&mut bgp, "i1")
             .expect("peer materializes");
 
@@ -9307,6 +9351,7 @@ mod neighbor_group_wiring_tests {
 
         let mut bgp = fresh_bgp();
         bgp.link_index_by_name.insert("i1".to_string(), 7);
+        bgp.link_name_by_index.insert(7, "i1".to_string());
         config_interface_neighbor(&mut bgp, arg_words(&["i1"]), ConfigOp::Set).unwrap();
         config_interface_neighbor_remote_as(&mut bgp, arg_words(&["i1", "65002"]), ConfigOp::Set)
             .unwrap();
@@ -9355,6 +9400,7 @@ mod neighbor_group_wiring_tests {
 
         let mut bgp = fresh_bgp();
         bgp.link_index_by_name.insert("i1".to_string(), 7);
+        bgp.link_name_by_index.insert(7, "i1".to_string());
         config_interface_neighbor(&mut bgp, arg_words(&["i1"]), ConfigOp::Set).unwrap();
         config_interface_neighbor_remote_as(&mut bgp, arg_words(&["i1", "65002"]), ConfigOp::Set)
             .unwrap();
@@ -9392,6 +9438,7 @@ mod neighbor_group_wiring_tests {
 
         let mut bgp = fresh_bgp();
         bgp.link_index_by_name.insert("i1".to_string(), 7);
+        bgp.link_name_by_index.insert(7, "i1".to_string());
         config_interface_neighbor(&mut bgp, arg_words(&["i1"]), ConfigOp::Set).unwrap();
         config_interface_neighbor_remote_as(&mut bgp, arg_words(&["i1", "65002"]), ConfigOp::Set)
             .unwrap();
@@ -9433,6 +9480,7 @@ mod neighbor_group_wiring_tests {
 
         let mut bgp = fresh_bgp();
         bgp.link_index_by_name.insert("i1".to_string(), 7);
+        bgp.link_name_by_index.insert(7, "i1".to_string());
         config_interface_neighbor(&mut bgp, arg_words(&["i1"]), ConfigOp::Set).unwrap();
         config_interface_neighbor_neighbor_group(&mut bgp, arg_words(&["i1", "G"]), ConfigOp::Set)
             .unwrap();
@@ -9472,6 +9520,7 @@ mod neighbor_group_wiring_tests {
         // RIB announced the link; configure the unnumbered neighbor. The
         // peer materializes dormant (`address == ::`).
         bgp.link_index_by_name.insert("i1".to_string(), 7);
+        bgp.link_name_by_index.insert(7, "i1".to_string());
         config_interface_neighbor(&mut bgp, arg_words(&["i1"]), ConfigOp::Set).unwrap();
         config_interface_neighbor_remote_as(&mut bgp, arg_words(&["i1", "65002"]), ConfigOp::Set)
             .unwrap();
@@ -9522,6 +9571,7 @@ mod neighbor_group_wiring_tests {
         let (mut bgp, mut bfd_rx) = fresh_bgp_with_bfd();
         config_bgp_bfd_enable(&mut bgp, arg_words(&["true"]), ConfigOp::Set).unwrap();
         bgp.link_index_by_name.insert("i1".to_string(), 7);
+        bgp.link_name_by_index.insert(7, "i1".to_string());
         config_interface_neighbor(&mut bgp, arg_words(&["i1"]), ConfigOp::Set).unwrap();
         config_interface_neighbor_remote_as(&mut bgp, arg_words(&["i1", "65002"]), ConfigOp::Set)
             .unwrap();
