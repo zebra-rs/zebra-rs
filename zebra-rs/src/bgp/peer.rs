@@ -4088,7 +4088,17 @@ pub(super) fn try_dynamic_accept(
 
     // Dynamic (listen-range) peers are always address-keyed, so no
     // interface scope is needed here.
-    handle_peer_connection(&mut bgp.peers, peer_addr, None, stream)
+    let rest = handle_peer_connection(&mut bgp.peers, peer_addr, None, stream);
+
+    // Attach BFD the way a config commit does for a static neighbor. A
+    // dynamic peer has no `bfd` leaf of its own, so an instance-wide
+    // `router bgp bfd enabled` is what turns it on, and nothing else
+    // reconciles on accept: the session used to wait for an unrelated
+    // BFD config change or address event. Run after the connection is
+    // taken so the single-hop key's ifindex can come from the socket's
+    // local address.
+    let _ = super::config::bfd_apply(bgp, peer_addr);
+    rest
 }
 
 /// Replay Adj-RIB-In through the current inbound policy for `peer_idx`,

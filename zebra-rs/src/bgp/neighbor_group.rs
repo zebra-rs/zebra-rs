@@ -1884,6 +1884,9 @@ pub(super) fn sweep_action(
 fn sweep_peers_for_group(bgp: &mut Bgp, name: &str, new_asn: Option<u32>) {
     let local_asn = bgp.asn;
     let mut stops: Vec<usize> = Vec::new();
+    // Members whose session type may have changed: BFD infers its hop
+    // mode from it.
+    let mut retyped: Vec<usize> = Vec::new();
 
     // Interface-keyed peers carry the group back-reference even when
     // their remote-as came from the interface-neighbor cfg itself (the
@@ -1930,6 +1933,7 @@ fn sweep_peers_for_group(bgp: &mut Bgp, name: &str, new_asn: Option<u32>) {
                     PeerType::EBGP
                 };
                 peer.start();
+                retyped.push(peer.ident);
             }
             SweepAction::Rebounce(asn) => {
                 peer.remote_as = asn;
@@ -1941,6 +1945,7 @@ fn sweep_peers_for_group(bgp: &mut Bgp, name: &str, new_asn: Option<u32>) {
                 };
                 peer.active = false;
                 stops.push(peer.ident);
+                retyped.push(peer.ident);
             }
             SweepAction::TearDown => {
                 peer.remote_as = 0;
@@ -1953,6 +1958,9 @@ fn sweep_peers_for_group(bgp: &mut Bgp, name: &str, new_asn: Option<u32>) {
 
     for ident in stops {
         let _ = bgp.tx.try_send(Message::Event(ident, Event::Stop));
+    }
+    for ident in retyped {
+        let _ = super::config::bfd_apply_ident(bgp, ident);
     }
 }
 

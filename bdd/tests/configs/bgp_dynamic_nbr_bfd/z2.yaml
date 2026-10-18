@@ -1,0 +1,22 @@
+# z2 — in-range client (192.168.0.2 ∈ 192.168.0.0/24): an ordinary
+# static eBGP neighbor toward the DUT with single-hop BFD.
+# `connect-retry-time: 3` keeps the redial after a removal quick.
+interface:
+- if-name: i1
+  ipv4:
+    address: 192.168.0.2/24
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 192.168.0.2
+    neighbor:
+    - remote-address: 192.168.0.1
+      enabled: true
+      remote-as: 65001
+      timers: {connect-retry-time: 3}
+      bfd:
+        enabled: true
+      afi-safi:
+      - name: ipv4
+        enabled: true

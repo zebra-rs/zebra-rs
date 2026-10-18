@@ -602,44 +602,41 @@ fn config_peer_neighbor_group(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Op
     if outcome.ao_refresh {
         apply_ao_refresh_all(bgp);
     }
-    if outcome.bfd_reapply {
-        let _ = bfd_apply(bgp, addr);
-    }
+    // Not only on `bfd_reapply`: the group's remote-as may have just
+    // set the session type BFD infers its hop mode from. A no-op when
+    // the session key is unchanged.
+    let _ = bfd_apply(bgp, addr);
 
     Some(())
 }
 
 fn config_remote_as(bgp: &mut Bgp, mut args: Args, op: ConfigOp) -> Option<()> {
     if op == ConfigOp::Set {
-        if let Some(addr) = args.v4addr() {
-            let addr = IpAddr::V4(addr);
-            let asn: u32 = args.u32()?;
-            if let Some(peer) = bgp.peers.get_mut(&addr) {
-                peer.remote_as = asn;
-                // Explicit per-peer remote-as wins over any
-                // neighbor-group fallback from here on.
-                peer.config.remote_as_inherited = false;
-                peer.peer_type = if peer.remote_as == bgp.asn {
-                    PeerType::IBGP
-                } else {
-                    PeerType::EBGP
-                };
-                peer.start();
-            }
+        let addr = if let Some(addr) = args.v4addr() {
+            IpAddr::V4(addr)
         } else if let Some(addr) = args.v6addr() {
-            let addr = IpAddr::V6(addr);
-            let asn: u32 = args.u32()?;
-            if let Some(peer) = bgp.peers.get_mut(&addr) {
-                peer.remote_as = asn;
-                peer.config.remote_as_inherited = false;
-                peer.peer_type = if peer.remote_as == bgp.asn {
-                    PeerType::IBGP
-                } else {
-                    PeerType::EBGP
-                };
-                peer.start();
-            }
+            IpAddr::V6(addr)
+        } else {
+            return Some(());
+        };
+        let asn: u32 = args.u32()?;
+        if let Some(peer) = bgp.peers.get_mut(&addr) {
+            peer.remote_as = asn;
+            // Explicit per-peer remote-as wins over any
+            // neighbor-group fallback from here on.
+            peer.config.remote_as_inherited = false;
+            peer.peer_type = if peer.remote_as == bgp.asn {
+                PeerType::IBGP
+            } else {
+                PeerType::EBGP
+            };
+            peer.start();
         }
+        // BFD infers its hop mode from the session type, and the
+        // `bfd` leaves are applied before `remote-as` in a commit: they
+        // subscribed while the new peer was still iBGP by default,
+        // so an eBGP neighbor got a multihop session.
+        let _ = bfd_apply(bgp, addr);
     }
     Some(())
 }
@@ -6583,6 +6580,39 @@ mod bfd_wiring_tests {
         }
     }
 
+    /// The `bfd` leaves are applied before `remote-as` in a commit, so they
+    /// subscribe while a new peer is still iBGP by default. The
+    /// remote-as that makes it eBGP re-keys the session to single-hop.
+    #[tokio::test]
+    async fn remote_as_after_bfd_enable_rekeys_the_hop_mode() {
+        let (mut bgp, mut bfd_rx) = fresh_bgp_with_bfd();
+        bgp.asn = 65001;
+        config_peer(&mut bgp, arg_words(&["10.0.0.5"]), ConfigOp::Set).unwrap();
+        config_peer_bfd_enable(&mut bgp, arg_words(&["10.0.0.5", "true"]), ConfigOp::Set).unwrap();
+        let multihop = match bfd_rx.try_recv().expect("subscribe") {
+            ClientReq::Subscribe { key, .. } => key,
+            other => panic!("expected Subscribe, got {other:?}"),
+        };
+        assert!(multihop.multihop, "iBGP until remote-as lands");
+
+        config_remote_as(&mut bgp, arg_words(&["10.0.0.5", "65002"]), ConfigOp::Set).unwrap();
+        match bfd_rx.try_recv().expect("the re-key unsubscribes") {
+            ClientReq::Unsubscribe { key, .. } => assert_eq!(key, multihop),
+            other => panic!("expected Unsubscribe, got {other:?}"),
+        }
+        match bfd_rx.try_recv().expect("the re-key resubscribes") {
+            ClientReq::Subscribe { key, params, .. } => {
+                assert!(!key.multihop, "eBGP is single-hop");
+                assert_eq!(params.dst_port, BFD_SINGLE_HOP_PORT);
+                assert_eq!(params.min_ttl, 255);
+            }
+            other => panic!("expected Subscribe, got {other:?}"),
+        }
+
+        config_remote_as(&mut bgp, arg_words(&["10.0.0.5", "65002"]), ConfigOp::Set).unwrap();
+        assert!(bfd_rx.try_recv().is_err(), "same type, no churn");
+    }
+
     /// A single-hop session is keyed by the connected interface once the
     /// covering address is known, and `detect-offload` rides the params —
     /// both feed the XDP data plane. An address learned AFTER
@@ -9537,6 +9567,83 @@ mod neighbor_group_wiring_tests {
         config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Delete).unwrap();
         let (_, unregistered) = drain(&mut policy_rx);
         assert_eq!(unregistered, registered);
+    }
+
+    /// A neighbor-group's remote-as sets the session type BFD infers
+    /// its hop mode from. Binding the group re-keys an enabled session,
+    /// and so does a later change to the group's remote-as.
+    #[tokio::test]
+    async fn group_remote_as_rekeys_the_bfd_hop_mode() {
+        let (mut bgp, mut bfd_rx) = fresh_bgp_with_bfd();
+        bgp.asn = 65001;
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["G", "65002"]), ConfigOp::Set)
+            .unwrap();
+        config_peer(&mut bgp, arg_words(&["10.0.0.5"]), ConfigOp::Set).unwrap();
+        config_peer_bfd_enable(&mut bgp, arg_words(&["10.0.0.5", "true"]), ConfigOp::Set).unwrap();
+        let mut next_key = |what: &str| {
+            let unsubscribed = match bfd_rx.try_recv() {
+                Ok(ClientReq::Unsubscribe { key, .. }) => Some(key),
+                Ok(ClientReq::Subscribe { key, .. }) => return (None, key),
+                other => panic!("{what}: expected a ClientReq, got {other:?}"),
+            };
+            match bfd_rx.try_recv() {
+                Ok(ClientReq::Subscribe { key, .. }) => (unsubscribed, key),
+                other => panic!("{what}: expected Subscribe, got {other:?}"),
+            }
+        };
+        let (_, ibgp) = next_key("enable");
+        assert!(ibgp.multihop, "iBGP until the group is bound");
+
+        config_peer_neighbor_group(&mut bgp, arg_words(&["10.0.0.5", "G"]), ConfigOp::Set).unwrap();
+        let (gone, ebgp) = next_key("bind");
+        assert_eq!(gone, Some(ibgp));
+        assert!(!ebgp.multihop, "the group's eBGP remote-as is single-hop");
+
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["G", "65001"]), ConfigOp::Set)
+            .unwrap();
+        let (gone, ibgp) = next_key("group remote-as");
+        assert_eq!(gone, Some(ebgp));
+        assert!(ibgp.multihop, "now iBGP again");
+    }
+
+    /// Under an instance-wide `bfd enabled`, a dynamic peer subscribes
+    /// its BFD session on accept, not on the next BFD config change or
+    /// address event.
+    #[tokio::test]
+    async fn dynamic_peer_accept_subscribes_its_bfd_session() {
+        use super::super::dynamic_neighbors::{
+            config_listen_range, config_listen_range_neighbor_group,
+        };
+        use super::super::peer::try_dynamic_accept;
+
+        let (mut bgp, mut bfd_rx) = fresh_bgp_with_bfd();
+        config_neighbor_group_remote_as(&mut bgp, arg_words(&["G", "65002"]), ConfigOp::Set)
+            .unwrap();
+        config_listen_range(&mut bgp, arg_words(&["10.1.0.0/24"]), ConfigOp::Set).unwrap();
+        config_listen_range_neighbor_group(
+            &mut bgp,
+            arg_words(&["10.1.0.0/24", "G"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        config_bgp_bfd_enable(&mut bgp, arg_words(&["true"]), ConfigOp::Set).unwrap();
+        assert!(bfd_rx.try_recv().is_err(), "no peer yet");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let _client = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let source: IpAddr = "10.1.0.7".parse().unwrap();
+        assert!(try_dynamic_accept(&mut bgp, source, server).is_none());
+
+        let key = match bfd_rx.try_recv().expect("the accept subscribed") {
+            ClientReq::Subscribe { key, .. } => key,
+            other => panic!("expected Subscribe, got {other:?}"),
+        };
+        assert_eq!(key.remote, source);
+        assert_eq!(bgp.peers.get(&source).unwrap().bfd_session_key, Some(key));
+        assert!(bfd_rx.try_recv().is_err(), "one Subscribe");
     }
 
     /// The dynamic-neighbor reaper releases what the peer held: the BFD
