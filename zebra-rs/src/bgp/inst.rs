@@ -2992,8 +2992,7 @@ impl Bgp {
         // Idempotent safety net: the FSM detach already ran when the
         // session left Established (OpenSent/OpenConfirm sessions were
         // never attached), but a GC'd ident must never linger in a
-        // group's member set — the slot is reused when the same source
-        // re-materializes.
+        // group's member set.
         super::update_group::detach(&mut self.update_groups, &mut self.peers, ident);
         self.peers.remove(&addr);
         self.dynamic_peer_count = self.dynamic_peer_count.saturating_sub(1);

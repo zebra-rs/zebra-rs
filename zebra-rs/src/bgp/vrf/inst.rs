@@ -3244,7 +3244,7 @@ impl BgpVrf {
     /// the peer with the SAME `insert_started_peer` the spawn-time
     /// materialize uses — a peer added at runtime is built identically to
     /// one present at spawn. Idempotent on the running FSM: `insert_with_key`
-    /// reuses the slot ident on a re-add.
+    /// keeps the live peer's ident on a re-add.
     fn add_peer(
         &mut self,
         addr: std::net::IpAddr,
@@ -3383,7 +3383,7 @@ impl BgpVrf {
     /// `remove_peer_full` (`config.rs`): `route_clean` withdraws the
     /// peer's routes (Adj-RIB-In sweep + best-path re-run + CE
     /// re-advertise), `update_group::detach` drops its update-group
-    /// membership so a future slot reuse can't inherit it, then the peer
+    /// membership so no group keeps the dead ident, then the peer
     /// leaves `peers`. The listener auth / TCP-MSS / IP_TRANSPARENT
     /// reconciliations the global path also runs have no per-VRF analog
     /// (the VRF task owns no shared listener — passive connects arrive
@@ -3433,11 +3433,10 @@ impl BgpVrf {
         super::super::route::route_clean(peer_idx, &mut top, &mut self.peers, None);
         // Update-groups live outside `PeerMap`: the removal below purges
         // the membership index, but the group member sets must be
-        // detached explicitly or the freed ident lingers and a future
-        // slot reuse inherits the group.
+        // detached explicitly or the dead ident lingers there.
         super::super::update_group::detach(&mut self.update_groups, &mut self.peers, peer_idx);
-        // Drop this peer's inbound-policy snapshot from the shard so a future
-        // ident reuse can't inherit it (the add path re-seeds it anyway).
+        // Drop this peer's inbound-policy snapshot from the shard so it
+        // holds none for a dead ident (the add path seeds a new peer's).
         self.shard.set_in_policy(peer_idx, None);
         // Drop this peer's key from the VRF listener before it leaves the
         // map. `refresh_listener_*` only (re)installs for peers still

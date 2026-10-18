@@ -367,8 +367,8 @@ fn teardown_peer(bgp: &mut Bgp, ifindex: u32) {
         super::route::route_clean(peer_idx, &mut bgp_ref, &mut bgp.peers, bgp.shards.as_ref());
         // Update-groups live outside `PeerMap`: the removal below
         // purges the membership index by construction, but the group
-        // member sets need an explicit detach or the freed ident
-        // lingers and a future slot reuse inherits the group.
+        // member sets need an explicit detach or the dead ident
+        // lingers there.
         super::update_group::detach(&mut bgp.update_groups, &mut bgp.peers, peer_idx);
         // Release the peer's BFD session before it leaves the map.
         super::config::bfd_release_ident(bgp, peer_idx);
