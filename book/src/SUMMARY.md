@@ -14,6 +14,10 @@
 - [Bridge Configuration](ch-00-04-bridge-configuration.md)
 - [VLAN Sub-interface Configuration](ch-00-08-vlan-configuration.md)
 
+## Routing Table
+
+- [Routing Table (RIB)](ch-18-00-rib.md)
+
 ## Static Route
 
 - [Static Route](ch-01-00-what-is-static-route.md)
