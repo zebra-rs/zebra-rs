@@ -16,13 +16,6 @@ use super::mroute::Mrt6;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Ipv6;
 
-/// `fe80::/10` — a unicast link-local address (the PIMv6 Hello source
-/// and DR-candidate identity, RFC 7761 §4.3.1).
-fn is_link_local(a: Ipv6Addr) -> bool {
-    let o = a.octets();
-    o[0] == 0xfe && (o[1] & 0xc0) == 0x80
-}
-
 impl PimAf for Ipv6 {
     type Addr = Ipv6Addr;
     type Prefix = Ipv6Net;
@@ -61,22 +54,10 @@ impl PimAf for Ipv6 {
     }
 
     fn link_prefixes(link: &Link) -> Vec<Ipv6Net> {
-        // Link-locals first: the primary (Hello source / DR identity)
-        // is a link-local; globals follow as secondary addresses.
-        let mut lls = Vec::new();
-        let mut globals = Vec::new();
-        for a in &link.addr6 {
-            let Some(p) = Self::prefix_from_ipnet(a.addr) else {
-                continue;
-            };
-            if is_link_local(p.addr()) {
-                lls.push(p);
-            } else {
-                globals.push(p);
-            }
-        }
-        lls.extend(globals);
-        lls
+        link.addr6
+            .iter()
+            .filter_map(|a| Self::prefix_from_ipnet(a.addr))
+            .collect()
     }
 
     fn join_pim_if(sock: &AsyncFd<Socket>, ifindex: u32) {
@@ -109,6 +90,10 @@ impl PimAf for Ipv6 {
         // fe80::/10 — the unicast link-local scope.
         let o = a.octets();
         o[0] == 0xfe && (o[1] & 0xc0) == 0x80
+    }
+
+    fn is_loopback(a: Ipv6Addr) -> bool {
+        a.is_loopback()
     }
 
     fn prefix_new(addr: Ipv6Addr, len: u8) -> Option<Ipv6Net> {

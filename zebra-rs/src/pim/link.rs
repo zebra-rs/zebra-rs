@@ -88,7 +88,8 @@ pub struct PimLink<A: PimAf = Ipv4> {
 
 impl<A: PimAf> PimLink<A> {
     pub fn from_link(link: &Link) -> Self {
-        let addrs = A::link_prefixes(link);
+        let mut addrs = A::link_prefixes(link);
+        order_addrs::<A>(&mut addrs);
         Self {
             ifindex: link.index,
             name: link.name.clone(),
@@ -131,6 +132,18 @@ impl<A: PimAf> PimLink<A> {
     pub fn neighbor_covers(&self, addr: &A::Addr) -> bool {
         self.nbrs.contains_key(addr) || self.nbrs.values().any(|n| n.secondary.contains(addr))
     }
+}
+
+/// Put a link's primary address first: link-locals (the IPv6 Hello
+/// source), then the rest, then loopback addresses, which name the host
+/// rather than the link, so `lo` is known by its own address and not by
+/// `127.0.0.1` or `::1`. The sort is stable: each group keeps the
+/// kernel's order.
+fn order_addrs<A: PimAf>(addrs: &mut [A::Prefix]) {
+    addrs.sort_by_key(|p| {
+        let a = A::prefix_addr(p);
+        (!A::is_link_local(a), A::is_loopback(a))
+    });
 }
 
 fn hello_timer<A: PimAf>(
@@ -422,15 +435,12 @@ impl<A: PimAf> Pim<A> {
         };
         if !link.addrs.contains(&prefix) {
             link.addrs.push(prefix);
-            // Keep link-locals first — the same order `link_prefixes`
-            // seeds at LinkAdd, so `primary_addr` stays the Hello / DR
-            // identity even when the interface link-local arrives as a
-            // *live* AddrAdd after the LinkAdd dump (VRF enslavement
-            // flushes then re-adds the fe80:: address late). Stable sort
-            // preserves the within-group order. For IPv4 no address is
-            // link-local, so the order is unchanged (byte-identical).
-            link.addrs
-                .sort_by_key(|p| !A::is_link_local(A::prefix_addr(p)));
+            // The same order as at LinkAdd, so `primary_addr` stays the
+            // Hello / DR identity when the interface link-local arrives
+            // as a *live* AddrAdd after the LinkAdd dump (VRF enslavement
+            // flushes then re-adds the fe80:: address late), and becomes
+            // `lo`'s own address when that is added after 127.0.0.1.
+            order_addrs::<A>(&mut link.addrs);
         }
         self.reconcile(addr.ifindex);
     }
@@ -455,6 +465,7 @@ mod tests {
 
     use super::*;
     use crate::fib::FibLink;
+    use crate::pim::ipv6::Ipv6;
 
     fn link(name: &str, flags: LinkFlags) -> PimLink {
         PimLink::from_link(&Link::from(FibLink {
@@ -475,5 +486,29 @@ mod tests {
             ..Default::default()
         };
         assert!(link("eth0", LinkFlags::Up).is_passive(&passive));
+    }
+
+    #[test]
+    fn a_loopback_address_is_never_the_primary() {
+        let mut lo = Link::from(FibLink {
+            index: 1,
+            name: "lo".to_string(),
+            flags: LinkFlags::Loopback | LinkFlags::Up,
+            ..Default::default()
+        });
+        for addr in ["127.0.0.1/8", "10.0.0.1/32"] {
+            lo.addr4.push(LinkAddr {
+                addr: addr.parse().unwrap(),
+                ifindex: 1,
+                ..Default::default()
+            });
+        }
+        let lo = PimLink::<Ipv4>::from_link(&lo);
+        assert_eq!(lo.primary_addr(), Some("10.0.0.1".parse().unwrap()));
+
+        let parse = |a: [&str; 3]| a.map(|a| a.parse::<ipnet::Ipv6Net>().unwrap());
+        let mut addrs = parse(["::1/128", "2001:db8::1/128", "fe80::1/64"]);
+        order_addrs::<Ipv6>(&mut addrs);
+        assert_eq!(addrs, parse(["fe80::1/64", "2001:db8::1/128", "::1/128"]));
     }
 }

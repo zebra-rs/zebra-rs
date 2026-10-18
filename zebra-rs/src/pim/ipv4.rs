@@ -86,6 +86,10 @@ impl PimAf for Ipv4 {
         a.is_link_local()
     }
 
+    fn is_loopback(a: Ipv4Addr) -> bool {
+        a.is_loopback()
+    }
+
     fn prefix_new(addr: Ipv4Addr, len: u8) -> Option<Ipv4Net> {
         Ipv4Net::new(addr, len).ok()
     }

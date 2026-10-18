@@ -65,9 +65,9 @@ pub trait PimAf: Copy + Eq + Ord + Hash + Debug + Send + Sync + Sized + 'static 
     /// other family) — the per-address ingress from `AddrAdd`/`AddrDel`.
     fn prefix_from_ipnet(net: IpNet) -> Option<Self::Prefix>;
 
-    /// This family's on-link prefixes for a RIB link, in order; the
-    /// first is the Hello-source / DR-candidate identity. IPv4 reads
-    /// `addr4`; IPv6 will read the link-local(s) then `addr6`.
+    /// This family's on-link prefixes for a RIB link (`addr4` /
+    /// `addr6`), in the kernel's order. `PimLink` puts the primary
+    /// first.
     fn link_prefixes(link: &Link) -> Vec<Self::Prefix>;
 
     /// Join / leave the ALL-PIM-ROUTERS control group on an interface
@@ -99,6 +99,11 @@ pub trait PimAf: Copy + Eq + Ord + Hash + Debug + Send + Sync + Sized + 'static 
     /// not be sourced from one — it has to be domain-routable so the RP
     /// can reply. See [`Pim::unicast_source`](super::inst::Pim).
     fn is_link_local(a: Self::Addr) -> bool;
+
+    /// Whether `a` is a loopback address (`127.0.0.0/8` / `::1`). It
+    /// names the host rather than a link, so it is never a link's
+    /// primary address while the link has another.
+    fn is_loopback(a: Self::Addr) -> bool;
 
     /// Build a prefix from a network address and length; `None` if the
     /// length is invalid for the family.

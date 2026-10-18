@@ -1,4 +1,5 @@
-# PIM on lo, which keeps only 127.0.0.1, and on eth1 toward p2.
+# PIM and PIMv6 on lo, which keeps only 127.0.0.1 and ::1, and PIM on
+# eth1 toward p2.
 interface:
 - if-name: eth1
   ipv4:
@@ -10,3 +11,7 @@ router:
       enabled: true
     - if-name: eth1
       enabled: true
+    ipv6:
+      interface:
+      - if-name: lo
+        enabled: true
