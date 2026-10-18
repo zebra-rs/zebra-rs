@@ -234,8 +234,8 @@ model; see also [Protocol-Specific Logging](ch-03-03-protocol-logging.md).
 ## Show commands
 
 The show surface is symmetric between the families: every `show pim …`
-command has a `show pim ipv6 …` counterpart, and both take a
-`vrf <name>` selector for a per-VRF instance.
+command has a `show pim ipv6 …` counterpart. Each also has a per-VRF
+form, except `bsr` (see below).
 
 | Command | Shows |
 |---|---|
@@ -267,13 +267,18 @@ show pim ipv6 mld interface
 show pim ipv6 mld groups
 ```
 
-Per-VRF, insert `vrf <name>` after `pim`, for example:
+Per-VRF, insert `vrf <name>` after `pim`, `igmp` or `mroute`. Every
+command above has a per-VRF form except `show pim bsr` and
+`show pim ipv6 bsr`. For example:
 
 ```
 show pim vrf blue neighbor
 show pim vrf blue upstream
+show igmp vrf blue interface
+show igmp vrf blue groups
 show mroute vrf blue
 show pim vrf blue ipv6 mroute
+show pim vrf blue ipv6 mld groups
 ```
 
 Note that the kernel forwarding cache itself is visible with the
