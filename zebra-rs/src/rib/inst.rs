@@ -1903,6 +1903,14 @@ impl Rib {
         }
     }
 
+    /// Whether `nbr` is a generic FDB summary of a row already cached. The
+    /// device's own report of a `self` add comes first; the generic copy
+    /// that follows says nothing new. A row only ever reported in generic
+    /// form (a NIC's address list) is still cached the first time.
+    fn is_fdb_echo(&self, nbr: &FibNeighbor) -> bool {
+        nbr.generic && neighbor_key(nbr).is_some_and(|key| self.neighbors.contains_key(&key))
+    }
+
     fn cache_neighbor(&mut self, nbr: FibNeighbor, add: bool) -> Option<FibNeighbor> {
         use netlink_packet_route::neighbour::NeighbourFlags;
         let key = neighbor_key(&nbr)?;
@@ -5077,10 +5085,18 @@ impl Rib {
             FibMessage::KernelNexthop(nexthop) => {
                 self.nmap.reserve(nexthop.id);
             }
+            // The kernel's generic copy of a row the device has just
+            // reported in full. Caching it would drop the VTEP, the VNI and
+            // the flags (`NTF_EXT_LEARNED`, `NTF_STICKY`) of every VXLAN row
+            // installed with `self`, and file a remote MAC as a local learn.
+            FibMessage::NewNeighbor(nbr) if self.is_fdb_echo(&nbr) => {}
             FibMessage::NewNeighbor(nbr) => {
                 // Tee resolved ARP/ND to the cradle eBPF data plane — its
                 // MPLS egress rewrite resolves next-hop MACs from this state.
-                if let (Some(dst), Some(mac)) = (nbr.dst, &nbr.lladdr) {
+                // An FDB row's `dst` is a VTEP, not the MAC's own address.
+                if nbr.family != netlink_packet_route::AddressFamily::Bridge
+                    && let (Some(dst), Some(mac)) = (nbr.dst, &nbr.lladdr)
+                {
                     self.fib_handle
                         .cradle_neighbor_add(dst, nbr.ifindex, mac.octets())
                         .await;
@@ -6979,6 +6995,42 @@ mod local_device_mac_tests {
         rib.process_fib_msg(FibMessage::NewNeighbor(sticky)).await;
         assert!(rib.local_bindings.is_empty());
         assert!(rib.vxlan_fdb_row_sticky(10, mac));
+    }
+
+    /// The kernel follows its report of a `self` FDB add with a generic
+    /// copy: no VTEP, no VNI, `NTF_SELF` only. The cache keeps the report,
+    /// so the MAC stays remote and sticky. A generic row seen first, as a
+    /// NIC's address list only ever is, is still cached.
+    #[tokio::test]
+    async fn a_generic_fdb_copy_leaves_the_reported_row() {
+        let mac = mac("aa:bb:cc:dd:ee:01");
+        let report = FibNeighbor {
+            flags: NeighbourFlags::Own | NeighbourFlags::ExtLearned | NeighbourFlags::Sticky,
+            dst: Some("192.0.2.2".parse().unwrap()),
+            vni: Some(10),
+            ..self_row(VXLAN10, "aa:bb:cc:dd:ee:01")
+        };
+        let copy = FibNeighbor {
+            flags: NeighbourFlags::Own,
+            generic: true,
+            ..self_row(VXLAN10, "aa:bb:cc:dd:ee:01")
+        };
+        let key = neighbor_key(&report).unwrap();
+        let mut rib = Rib::new(false).unwrap();
+        rib.links = tables().0;
+        rib.process_fib_msg(FibMessage::NewNeighbor(report.clone()))
+            .await;
+        rib.process_fib_msg(FibMessage::NewNeighbor(copy.clone()))
+            .await;
+        let cached = &rib.neighbors[&key];
+        assert_eq!((cached.dst, cached.vni), (report.dst, Some(10)));
+        assert!(rib.vxlan_fdb_row_sticky(10, mac));
+        assert!(!rib.local_neighbors.contains_key(&mac));
+
+        let mut rib = Rib::new(false).unwrap();
+        rib.links = tables().0;
+        rib.process_fib_msg(FibMessage::NewNeighbor(copy)).await;
+        assert!(rib.neighbors.contains_key(&key));
     }
 
     /// One PE's sticky flag does not make another PE's route for the same

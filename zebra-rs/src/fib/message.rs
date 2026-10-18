@@ -177,6 +177,13 @@ pub struct FibNeighbor {
     pub vlan: Option<u16>,
     pub vni: Option<u32>,
     pub master: Option<u32>,
+    /// An AF_BRIDGE row without `NDA_CACHEINFO`: rtnetlink's generic
+    /// summary of the entry rather than the device's own report. Before
+    /// Linux 6.13 the kernel sends one after the device's report of every
+    /// `self` FDB add (`rtnl_fdb_notify`), carrying only the MAC, the VLAN
+    /// and the request's state — no VTEP, no VNI, no flags beyond
+    /// `NTF_SELF`.
+    pub generic: bool,
 }
 
 /// The forwarding plane's verdict on a route we installed.
