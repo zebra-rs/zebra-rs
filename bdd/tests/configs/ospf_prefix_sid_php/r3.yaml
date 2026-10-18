@@ -1,0 +1,41 @@
+# r3 — an index Prefix-SID, NP set: r2 keeps the label.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.3/32
+  ipv6:
+    address: 2001:db8::3/128
+- if-name: r3-r2
+  ipv4:
+    address: 192.168.23.3/24
+  ipv6:
+    address: 2001:db8:23::3/64
+router:
+  ospf:
+    router-id: 10.0.0.3
+    segment-routing:
+      mpls: {}
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+        prefix-sid:
+          index: 3
+      - if-name: r3-r2
+        enabled: true
+        network-type: point-to-point
+  ospfv3:
+    router-id: 10.0.0.3
+    segment-routing:
+      mpls: {}
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+        prefix-sid:
+          index: 23
+      - if-name: r3-r2
+        enabled: true
+        network-type: point-to-point
