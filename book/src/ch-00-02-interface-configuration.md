@@ -157,6 +157,118 @@ the same value:
 If these ever disagree it indicates the notification path was missed —
 they are sourced from one RIB-driven update, not independent reads.
 
+## Show commands
+
+### `show interface [brief | <name>]`
+
+`show interface` lists every interface in detail, `show interface <name>`
+one. Each block holds:
+
+- **`Hardware is`:** the link type, and an Ethernet interface's MAC
+  address.
+- **`index`, `metric` and `mtu`**, and the MTU apply error, if the last
+  configured MTU failed (see [Apply failures](#apply-failures)).
+- **`VLAN id <id> parent <name> (index <n>)`** for an 802.1Q
+  sub-interface, whether created from the
+  [`vlan`](ch-00-08-vlan-configuration.md) list or found in the kernel.
+- **`Link is Up` or `Down`**, then the kernel's interface flags.
+- **`VRF Binding`:** `vrf <name>`, or `Not bound`.
+- **`Label switching`:** whether zebra-rs turned MPLS input on for the
+  interface (`net.mpls.conf.<name>.input`). It stays `disabled` when the
+  kernel has no MPLS support.
+- **The addresses:** `inet` and `inet6`, each with `secondary`, a
+  non-global scope, abnormal address state and finite lifetimes when
+  they apply (see
+  [Multiple IPv4 Addresses and the Secondary Flag](ch-00-09-multi-address.md)).
+- **The kernel's counters** for the interface.
+
+```
+r1> show interface r1-r2
+Interface: r1-r2
+  Hardware is Ethernet c2:19:e4:c5:6c:97
+  index 2 metric 1 mtu 1500
+  Link is Up
+  Up | Broadcast | Running | Multicast | LowerUp
+  VRF Binding: Not bound
+  Label switching is enabled
+  inet 192.168.12.1/24
+  inet6 fe80::c019:e4ff:fec5:6c97/64 scope link
+  inet6 2001:db8:12::1/64
+    input packets 174, bytes 21040, dropped 0, multicast packets 0
+    input errors 0, frame 0, fifo 0, compressed 0
+    output packets 188, bytes 22428, dropped 0
+    output errors 0, carrier 0, fifo 0, compressed 0
+    collisions 0
+
+r1> show interface r1-r2.100
+Interface: r1-r2.100
+  Hardware is Ethernet c2:19:e4:c5:6c:97
+  index 8 metric 1 mtu 1500
+  VLAN id 100 parent r1-r2 (index 2)
+  Link is Up
+  Up | Broadcast | Running | Multicast | LowerUp
+  VRF Binding: Not bound
+  Label switching is enabled
+  inet 10.100.0.1/24
+  inet6 fe80::c019:e4ff:fec5:6c97/64 scope link
+    input packets 0, bytes 0, dropped 0, multicast packets 0
+...
+```
+
+`show interface brief` gives one line per interface, with its status,
+VRF and addresses:
+
+```
+r1> show interface brief
+Interface        Status VRF            Addresses
+---------        ------ ---            ---------
+lo               Up     default        127.0.0.1/8
+                                       10.0.0.1/32
+                                       ::1/128
+                                       2001:db8::1/128
+r1-r2            Up     default        192.168.12.1/24
+                                       fe80::c019:e4ff:fec5:6c97/64
+                                       2001:db8:12::1/64
+r1-r3            Up     default        192.168.13.1/24
+                                       fe80::849b:87ff:fe25:d05e/64
+                                       2001:db8:13::1/64
+r1-v             Up     blue           192.168.120.1/24
+                                       fe80::2021:ffff:fe1f:e931/64
+d1               Up     default        172.16.1.1/24
+                                       fe80::c8ff:4fff:fe07:2956/64
+                                       2001:db8:f1::1/64
+sr0              Up     default        fe80::d4fa:15ff:fe79:3fb3/64
+blue             Up     default
+r1-r2.100        Up     default        10.100.0.1/24
+                                       fe80::c019:e4ff:fec5:6c97/64
+```
+
+JSON: a list of interface objects. The brief view carries `interface`,
+`status`, `vrf` and `addresses`. The detailed view carries `interface`,
+`hardware`, `index`, `metric`, `mtu`, `link_status`, `flags`,
+`vrf_binding`, `label_switching`, `inet_addresses` and
+`inet6_addresses`, each address with `address`, `scope` and (IPv4 only)
+`secondary`. Optional fields appear only when they apply: `mac_address`,
+`mtu_error`, an address's `flags`, `valid_lft` and `preferred_lft`, and
+a VLAN sub-interface's `vlan_id`, `parent` (the parent's name) and
+`parent_index`. The counters are in the text view only.
+
+### `show vrf`
+
+Every VRF, with its kernel table ID, its Router ID (see
+[Router ID Selection](ch-00-01-router-id.md#per-vrf-router-id)) and its
+member interfaces:
+
+```
+r1> show vrf
+ Name                      Table-ID  Router-ID        Members
+ ----------------------  ----------  ---------------  --------------------------------
+ blue                             1  192.168.120.1    r1-v
+```
+
+JSON: `{ "vrfs": [ { "name", "table_id", "router_id", "members" } ] }`,
+where `router_id` is `null` for a VRF with no Router ID yet.
+
 ## Cross-reference — FRR / iproute2
 
 | zebra-rs | FRR `interface` / iproute2 |

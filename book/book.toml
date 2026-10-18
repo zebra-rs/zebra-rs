@@ -14,3 +14,4 @@ level = 0
 "/ch-14-02-show-bgp.html" = "ch-02-48-bgp-show.html"
 "/ch-14-03-show-ospf.html" = "ch-08-18-ospf-show.html"
 "/ch-14-04-show-isis.html" = "ch-07-13-isis-show.html"
+"/ch-14-01-show-system-rib.html" = "ch-06-03-show-commands.html"

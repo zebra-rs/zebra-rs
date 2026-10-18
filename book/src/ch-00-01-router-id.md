@@ -46,6 +46,10 @@ Router ID: 10.255.0.1 (configured)
 Router ID: 192.0.2.200 (automatic)
 ```
 
+Before any Router ID is selected it reads `Router ID is not yet
+selected`. JSON: `{ "routerId": "10.255.0.1", "source": "configured" }`,
+or `{ "routerId": null }` when none is selected yet.
+
 ## Per-VRF Router-ID
 
 Each VRF has its own router-id, resolved independently of the default instance:
@@ -65,7 +69,7 @@ The per-VRF values appear in `show vrf`:
 ```
 > show vrf
  Name                      Table-ID  Router-ID        Members
- ------------------------  ----------  ---------------  ----------------
+ ----------------------  ----------  ---------------  --------------------------------
  cust-a                           1  11.11.11.11      ce1
  cust-b                           2  10.99.0.1        ce2
 ```
