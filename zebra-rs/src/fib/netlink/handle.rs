@@ -6164,18 +6164,24 @@ pub fn neighbor_from_msg(msg: NeighbourMessage) -> FibNeighbor {
         ifindex: msg.header.ifindex,
         state: msg.header.state,
         flags: msg.header.flags,
+        generic: msg.header.family == AddressFamily::Bridge,
         ..Default::default()
     };
 
     for attr in msg.attributes.into_iter() {
         match attr {
-            NeighbourAttribute::Destination(addr) => match addr {
-                NeighbourAddress::Inet(v4) => nbr.dst = Some(IpAddr::V4(v4)),
-                NeighbourAddress::Inet6(v6) => nbr.dst = Some(IpAddr::V6(v6)),
-                NeighbourAddress::Other(_) => {}
-                // Non-exhaustive enum; future-proof against new variants.
-                _ => {}
-            },
+            // The fork parses an AF_BRIDGE `NDA_DST`, the VTEP of a VXLAN
+            // row, as `TunnelEndpoint`.
+            NeighbourAttribute::Destination(addr) | NeighbourAttribute::TunnelEndpoint(addr) => {
+                match addr {
+                    NeighbourAddress::Inet(v4) => nbr.dst = Some(IpAddr::V4(v4)),
+                    NeighbourAddress::Inet6(v6) => nbr.dst = Some(IpAddr::V6(v6)),
+                    NeighbourAddress::Other(_) => {}
+                    // Non-exhaustive enum; future-proof against new variants.
+                    _ => {}
+                }
+            }
+            NeighbourAttribute::CacheInfo(_) => nbr.generic = false,
             NeighbourAttribute::LinkLocalAddress(bytes) => {
                 nbr.lladdr = MacAddr::from_vec(bytes);
             }
@@ -7092,6 +7098,45 @@ mod tests {
         assert_eq!(addr.scope, crate::rib::link::AddrScope::Link);
         assert_eq!(addr.valid_lft, Some(86400));
         assert_eq!(addr.preferred_lft, Some(14400));
+    }
+
+    /// A VXLAN device's FDB report names the VTEP, which the fork parses
+    /// as `TunnelEndpoint`, and carries `NDA_CACHEINFO`. The kernel's
+    /// generic copy of the same `self` add carries neither.
+    #[test]
+    fn neighbor_from_msg_reads_the_vtep_and_marks_the_generic_copy() {
+        use netlink_packet_route::neighbour::{NeighbourCacheInfo, NeighbourCacheInfoBuffer};
+        use netlink_packet_utils::Parseable;
+        let generic = || {
+            let mut msg = NeighbourMessage::default();
+            msg.header.family = AddressFamily::Bridge;
+            msg.header.ifindex = 7;
+            msg.attributes
+                .push(NeighbourAttribute::LinkLocalAddress(vec![
+                    0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01,
+                ]));
+            msg
+        };
+        let mut report = generic();
+        report
+            .attributes
+            .push(NeighbourAttribute::TunnelEndpoint(NeighbourAddress::Inet(
+                "192.0.2.2".parse().unwrap(),
+            )));
+        report.attributes.push(NeighbourAttribute::Vni(10));
+        let ci = NeighbourCacheInfo::parse(&NeighbourCacheInfoBuffer::new(&[0u8; 16])).unwrap();
+        report.attributes.push(NeighbourAttribute::CacheInfo(ci));
+        let report = neighbor_from_msg(report);
+        assert_eq!(report.dst, Some("192.0.2.2".parse().unwrap()));
+        assert_eq!(report.vni, Some(10));
+        assert!(!report.generic);
+        let copy = neighbor_from_msg(generic());
+        assert_eq!((copy.dst, copy.vni), (None, None));
+        assert!(copy.generic);
+        // Only an FDB row is ever a generic copy.
+        let mut arp = generic();
+        arp.header.family = AddressFamily::Inet;
+        assert!(!neighbor_from_msg(arp).generic);
     }
 
     #[test]

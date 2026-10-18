@@ -85,6 +85,15 @@ Feature: BGP EVPN — a node's own MAC addresses are neither originated nor over
     # z1's bridge row for it pads its State, so Flags lines up.
     And show command "show l2 neighbor" in namespace "z1" should eventually contain "Noarp          0x00"
 
+  Scenario: The VXLAN row for a remote station keeps its VTEP, VNI and flags
+    Given the test topology exists
+    # z2 installed z1's station on vxlan10 with `self`. The kernel reports
+    # the row (dst 192.168.0.1, vni 10, extern_learn), then, before Linux
+    # 6.13, a generic copy of the request with none of those. The copy
+    # used to replace the cached row: VNI and Dst read "-", the flags
+    # 0x02, and the remote MAC was filed as a local learn.
+    Then show command "show l2 neighbor" in namespace "z2" should eventually contain "aa:bb:cc:dd:ee:01  vxlan10              -          10  192.168.0.1                              Permanent      0x12"
+
   Scenario: A station that becomes a device's own address is withdrawn
     Given the test topology exists
     When I execute "bridge fdb add aa:bb:cc:dd:ee:02 dev host0 master static" in namespace "z1"
