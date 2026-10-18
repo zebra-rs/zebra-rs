@@ -5,8 +5,8 @@ use std::os::fd::AsRawFd;
 use futures::stream::{StreamExt, TryStreamExt};
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use netlink_packet_core::{
-    NLM_F_ACK, NLM_F_APPEND, NLM_F_CREATE, NLM_F_EXCL, NLM_F_REPLACE, NLM_F_REQUEST,
-    NetlinkMessage, NetlinkPayload,
+    NLM_F_ACK, NLM_F_APPEND, NLM_F_CREATE, NLM_F_DUMP, NLM_F_DUMP_INTR, NLM_F_EXCL, NLM_F_REPLACE,
+    NLM_F_REQUEST, NetlinkMessage, NetlinkPayload,
 };
 use netlink_packet_route::address::{AddressAttribute, AddressMessage, AddressScope};
 use netlink_packet_route::link::{
@@ -21,6 +21,7 @@ use netlink_packet_route::route::{
     RouteMessage, RouteMplsIpTunnel, RouteNextHop, RouteProtocol, RouteScope, RouteType, RouteVia,
 };
 use netlink_packet_route::{AddressFamily, RouteNetlinkMessage};
+use netlink_packet_utils::nla::Nla;
 use netlink_sys::{AsyncSocket, SocketAddr};
 use rtnetlink::{
     LinkDummy, LinkVlan, LinkVrf,
@@ -265,6 +266,51 @@ pub(crate) fn leftover_rtype(protocol: RouteProtocol, table_id: u32) -> Option<(
     }
 }
 
+const RTA_NH_ID: u16 = 30;
+
+/// The next-hop object a route names (`RTA_NH_ID`). netlink-packet-route
+/// emits the attribute as `RouteAttribute::Nhid` but does not parse it, so
+/// a route from the kernel carries it as an unknown one.
+fn route_nhid(attr: &RouteAttribute) -> Option<u32> {
+    match attr {
+        RouteAttribute::Nhid(id) => Some(*id),
+        RouteAttribute::Other(nla) if nla.kind() == RTA_NH_ID && nla.value_len() == 4 => {
+            let mut value = [0; 4];
+            nla.emit_value(&mut value);
+            Some(u32::from_ne_bytes(value))
+        }
+        _ => None,
+    }
+}
+
+/// Which of an earlier run's next-hop objects (`leftovers`) nothing names
+/// any more, of the `objects` the kernel holds now (id → the group's
+/// members, none for a single next hop) and the ids its routes and FDB
+/// entries name (`in_use`), in the order they can be deleted: groups
+/// before single next hops. A member of a group that stays is kept,
+/// whosever the group: deleting it would shrink the group.
+fn nexthop_leftovers_unused(
+    leftovers: &BTreeSet<u32>,
+    objects: &BTreeMap<u32, Vec<u32>>,
+    in_use: &BTreeSet<u32>,
+) -> Vec<u32> {
+    let unused = |id: &u32| leftovers.contains(id) && !in_use.contains(id);
+    let members: BTreeSet<u32> = objects
+        .iter()
+        .filter(|(id, _)| !unused(id))
+        .flat_map(|(_, members)| members.iter().copied())
+        .collect();
+    let (groups, singles): (Vec<_>, Vec<_>) = objects
+        .iter()
+        .filter(|(id, _)| unused(id) && !members.contains(id))
+        .partition(|(_, members)| !members.is_empty());
+    groups
+        .into_iter()
+        .chain(singles)
+        .map(|(id, _)| *id)
+        .collect()
+}
+
 /// An ILM an earlier run of zebra-rs left in the kernel's MPLS table, found
 /// by the startup dump: one under a protocol number zebra-rs installs ILMs
 /// with ([`route_protocol`]). Its label, its owner's type, and its first
@@ -480,6 +526,11 @@ pub struct FibHandle {
     /// route at the same `(table, prefix, priority)` replaced the leftover
     /// in the kernel, so the sweep must leave that key alone.
     srv6_installed: std::sync::Mutex<BTreeSet<(u32, IpNet, u32)>>,
+    /// The ids of the next-hop objects an earlier run left (`RTPROT_ZEBRA`),
+    /// found by the startup dump. The RIB reserves them, so nothing of this
+    /// run uses one; the leftover sweep deletes those nothing names any
+    /// more (`sweep_nexthop_leftovers`).
+    nexthop_leftovers: std::sync::Mutex<BTreeSet<u32>>,
     /// VNI to VXLAN interface index mapping
     /// Used to resolve VNI to the correct VXLAN device for FDB operations
     pub vni_ifindex_map: BTreeMap<u32, u32>,
@@ -817,6 +868,7 @@ impl FibHandle {
             evpn_l3vni_bridge: std::sync::Mutex::new(BTreeMap::new()),
             srv6_leftovers: std::sync::Mutex::new(BTreeMap::new()),
             srv6_installed: std::sync::Mutex::new(BTreeSet::new()),
+            nexthop_leftovers: std::sync::Mutex::new(BTreeSet::new()),
             vni_ifindex_map: BTreeMap::new(),
             vni_bridge_map: BTreeMap::new(),
             vni_metadata_map: BTreeMap::new(),
@@ -4476,6 +4528,113 @@ impl FibHandle {
         stale.len()
     }
 
+    /// Startup dump: record the next-hop objects an earlier run left.
+    pub fn note_nexthop_leftovers(&self, nexthops: &BTreeMap<u32, FibNexthop>) {
+        self.nexthop_leftovers.lock().unwrap().extend(
+            nexthops
+                .values()
+                .filter(|nexthop| nexthop.ours)
+                .map(|nexthop| nexthop.id),
+        );
+    }
+
+    /// Delete the next-hop objects an earlier run left that nothing
+    /// forwards through any more: this run replaced their routes with its
+    /// own, which use ids of their own, or swept them. One a route still
+    /// names, an OSPF route kept through its graceful restart say, stays
+    /// for a later sweep, as the kernel would take the route with it.
+    /// Returns how many were deleted.
+    pub async fn sweep_nexthop_leftovers(&self) -> usize {
+        let leftovers = self.nexthop_leftovers.lock().unwrap().clone();
+        if leftovers.is_empty() {
+            return 0;
+        }
+        let Some((objects, in_use)) = self.nexthop_objects_in_use().await else {
+            tracing::info!("fib: kernel dump failed; next-hop objects of an earlier run kept");
+            return 0;
+        };
+        let unused = nexthop_leftovers_unused(&leftovers, &objects, &in_use);
+        let mut deleted = 0;
+        for id in &unused {
+            let mut msg = NexthopMessage::default();
+            msg.header.address_family = AddressFamily::Unspec;
+            msg.attributes.push(NexthopAttribute::Id(*id));
+            let mut req = NetlinkMessage::from(RouteNetlinkMessage::DelNexthop(msg));
+            req.header.flags = NLM_F_REQUEST | NLM_F_ACK;
+            let Ok(mut response) = self.handle.clone().request(req) else {
+                continue;
+            };
+            let mut ok = true;
+            while let Some(msg) = response.next().await {
+                if let NetlinkPayload::Error(e) = msg.payload
+                    && e.code.is_some()
+                {
+                    tracing::info!("next-hop object {id} of an earlier run: {e}");
+                    ok = false;
+                }
+            }
+            deleted += usize::from(ok);
+        }
+        // What is left is what something still names, for the next sweep;
+        // one the kernel removed itself is gone.
+        let mut left = self.nexthop_leftovers.lock().unwrap();
+        left.retain(|id| objects.contains_key(id) && !unused.contains(id));
+        deleted
+    }
+
+    /// The kernel's next-hop objects, each with its group's members (none
+    /// for a single next hop), and the ids its routes, IPv4 and IPv6 in
+    /// every table, and its bridge FDB entries name. MPLS routes cannot
+    /// name one. None if a dump failed, or the kernel flagged it
+    /// inconsistent (`NLM_F_DUMP_INTR`): then nothing is known unused.
+    async fn nexthop_objects_in_use(&self) -> Option<(BTreeMap<u32, Vec<u32>>, BTreeSet<u32>)> {
+        let route = |family| {
+            let mut msg = RouteMessage::default();
+            msg.header.address_family = family;
+            RouteNetlinkMessage::GetRoute(msg)
+        };
+        let mut fdb = NeighbourMessage::default();
+        fdb.header.family = AddressFamily::Bridge;
+        let dumps = [
+            RouteNetlinkMessage::GetNexthop(NexthopMessage::default()),
+            route(AddressFamily::Inet),
+            route(AddressFamily::Inet6),
+            RouteNetlinkMessage::GetNeighbour(fdb),
+        ];
+        let mut objects = BTreeMap::new();
+        let mut in_use = BTreeSet::new();
+        for dump in dumps {
+            let mut req = NetlinkMessage::from(dump);
+            req.header.flags = NLM_F_REQUEST | NLM_F_DUMP;
+            req.finalize();
+            let mut response = self.handle.clone().request(req).ok()?;
+            while let Some(msg) = response.next().await {
+                if msg.header.flags & NLM_F_DUMP_INTR != 0 {
+                    return None;
+                }
+                match msg.payload {
+                    NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewNexthop(msg)) => {
+                        if let Some(nexthop) = nexthop_from_msg(&msg) {
+                            objects.insert(nexthop.id, nexthop.group);
+                        }
+                    }
+                    NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewRoute(msg)) => {
+                        in_use.extend(msg.attributes.iter().filter_map(route_nhid));
+                    }
+                    NetlinkPayload::InnerMessage(RouteNetlinkMessage::NewNeighbour(msg)) => {
+                        in_use.extend(msg.attributes.iter().filter_map(|attr| match attr {
+                            NeighbourAttribute::NhId(id) => Some(*id),
+                            _ => None,
+                        }));
+                    }
+                    NetlinkPayload::Error(e) if e.code.is_some() => return None,
+                    _ => {}
+                }
+            }
+        }
+        Some((objects, in_use))
+    }
+
     /// Withdraw the bridge Type-5 state tracked for `(table_id, prefix)`
     /// for a route the kernel never accepted. A failed add is still desired
     /// state (`evpn_l3vni_reassert` installs it once the bridge is up), so
@@ -7339,6 +7498,66 @@ mod tests {
             other => panic!("the group's gateways: {other:?}"),
         }
         assert_eq!(route(5), Nexthop::default(), "not dumped");
+    }
+
+    /// The earlier run's objects nothing names any more are deleted,
+    /// groups first. One a route or FDB entry names is kept, and so are the
+    /// members of a group that stays, whosever it is; an object not the
+    /// earlier run's is never deleted.
+    #[test]
+    fn unused_nexthop_leftovers_are_deleted_groups_first() {
+        let objects = BTreeMap::from([
+            (1, vec![]),
+            (2, vec![]),
+            (3, vec![]),
+            (4, vec![]),
+            (5, vec![1, 2]),
+            (6, vec![3]),
+            (7, vec![4]),
+            (8, vec![]),
+            (20, vec![]),
+        ]);
+        // The earlier run's: 1 to 7. 8 is another's, 20 this run's.
+        let leftovers = BTreeSet::from([1, 2, 3, 4, 5, 6, 7]);
+        let in_use = BTreeSet::from([5, 20]);
+        assert_eq!(
+            nexthop_leftovers_unused(&leftovers, &objects, &in_use),
+            vec![6, 7, 3, 4],
+            "5 is in use and keeps 1 and 2; 6 and 7 go before their members"
+        );
+
+        // Another's group keeps a member of ours.
+        let objects = BTreeMap::from([(1, vec![]), (9, vec![1])]);
+        let leftovers = BTreeSet::from([1]);
+        assert!(nexthop_leftovers_unused(&leftovers, &objects, &BTreeSet::new()).is_empty());
+
+        // Nothing named: everything of the earlier run goes.
+        let objects = BTreeMap::from([(1, vec![]), (2, vec![1]), (8, vec![])]);
+        let leftovers = BTreeSet::from([1, 2]);
+        assert_eq!(
+            nexthop_leftovers_unused(&leftovers, &objects, &BTreeSet::new()),
+            vec![2, 1]
+        );
+    }
+
+    /// The object a route from the kernel names is read back, although
+    /// netlink-packet-route parses `RTA_NH_ID` as an unknown attribute:
+    /// a sweep that missed it deleted an object still in use, and the
+    /// kernel took the route with it.
+    #[test]
+    fn a_parsed_route_names_its_object() {
+        use netlink_packet_route::route::RouteMessageBuffer;
+        use netlink_packet_utils::{Emitable, Parseable};
+
+        let mut msg = RouteMessage::default();
+        msg.header.address_family = AddressFamily::Inet;
+        msg.attributes.push(RouteAttribute::Nhid(503));
+        let mut buf = vec![0; msg.buffer_len()];
+        msg.emit(&mut buf);
+        let parsed = RouteMessage::parse(&RouteMessageBuffer::new(&buf)).expect("a route");
+        let ids: Vec<u32> = parsed.attributes.iter().filter_map(route_nhid).collect();
+        assert_eq!(ids, vec![503]);
+        assert_eq!(route_nhid(&RouteAttribute::Oif(3)), None);
     }
 
     /// A route of OSPF's (`RTPROT_OSPF`) the startup dump finds was left
