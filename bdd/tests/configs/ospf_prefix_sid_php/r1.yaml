@@ -1,0 +1,41 @@
+# r1 — an absolute-label Prefix-SID, NP clear: r2 pops it.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.1/32
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: r1-r2
+  ipv4:
+    address: 192.168.12.1/24
+  ipv6:
+    address: 2001:db8:12::1/64
+router:
+  ospf:
+    router-id: 10.0.0.1
+    segment-routing:
+      mpls: {}
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+        prefix-sid:
+          absolute: 17001
+      - if-name: r1-r2
+        enabled: true
+        network-type: point-to-point
+  ospfv3:
+    router-id: 10.0.0.1
+    segment-routing:
+      mpls: {}
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+        prefix-sid:
+          absolute: 17021
+      - if-name: r1-r2
+        enabled: true
+        network-type: point-to-point

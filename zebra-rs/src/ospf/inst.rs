@@ -15773,6 +15773,10 @@ pub struct SpfRoute {
     /// and without this field a toggle-then-recompute would diff clean
     /// and never reach the RIB. Mirrors IS-IS's `SpfRoute`.
     pub backup_as_primary: bool,
+    /// The destination's Prefix-SID has the NP flag set (RFC 8665 §5):
+    /// the hop before its owner keeps the label instead of popping it.
+    /// Mirrors IS-IS's `SpfRoute::no_php`.
+    pub no_php: bool,
 }
 
 /// A configured absolute Adjacency-SID's claim on its label: the link it
@@ -15794,6 +15798,10 @@ pub struct SpfIlm {
     /// label is recognised and the old one held (`spf::ilm_hold`).
     /// `None` for an Adjacency-SID.
     pub fec: Option<SidFec>,
+    /// [`SpfRoute::no_php`] of the route this entry forwards for: a
+    /// nexthop that is the SID's owner (`adjacency`) keeps the label.
+    /// False for Adjacency-SID and self-SID entries.
+    pub no_php: bool,
 }
 
 impl SidIlm for SpfIlm {
@@ -15852,6 +15860,8 @@ pub struct SpfRouteV3 {
     /// joins the `table_diff` equality that gates RIB updates. Mirror
     /// of v2's `SpfRoute::backup_as_primary`.
     pub backup_as_primary: bool,
+    /// Mirror of v2's `SpfRoute::no_php` (NP flag, RFC 8666 §5).
+    pub no_php: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -15883,6 +15893,8 @@ pub struct SpfIlmV3 {
     pub ilm_type: IlmType,
     /// As [`SpfIlm::fec`].
     pub fec: Option<SidFec>,
+    /// As [`SpfIlm::no_php`].
+    pub no_php: bool,
 }
 
 impl SidIlm for SpfIlmV3 {
@@ -16062,6 +16074,7 @@ fn add_inter_area_routes(
             // against the first-hop toward `abr_vertex`.
             dest_vertex: Some(abr_vertex),
             backup_as_primary: top.fast_reroute_backup_as_primary,
+            no_php: false,
         };
         rib_insert(rib, prefix, spf_route);
     }
@@ -16193,6 +16206,7 @@ fn build_rib_from_spf(
                                         prefix_sid: None,
                                         dest_vertex: Some(*node),
                                         backup_as_primary: top.fast_reroute_backup_as_primary,
+                                        no_php: false,
                                     };
                                     rib_insert(&mut rib, prefix, spf_route);
                                 }
@@ -16234,6 +16248,7 @@ fn build_rib_from_spf(
                                 prefix_sid: None,
                                 dest_vertex: Some(*node),
                                 backup_as_primary: top.fast_reroute_backup_as_primary,
+                                no_php: false,
                             };
                             rib_insert(&mut rib, prefix, spf_route);
                         }
@@ -16386,6 +16401,7 @@ fn add_prefix_sids(top: &Ospf, area_id: Ipv4Addr, rib: &mut PrefixMap<Ipv4Net, S
                 // (egress label imposition on the IPv4 route) and
                 // mpls_route() below (ILM entry on the local LFIB).
                 route.sid = sid_label;
+                route.no_php = ps.flags.np_flag();
                 break;
             }
         }
@@ -16470,6 +16486,7 @@ fn build_rib_from_flex_algo(
                     // the repair-join fields inert.
                     dest_vertex: None,
                     backup_as_primary: false,
+                    no_php: ps.flags.np_flag(),
                 };
                 rib_insert(&mut rib, tlv.prefix, route);
                 break;
@@ -16528,19 +16545,7 @@ fn build_rib6_from_flex_algo(
         let Some(path) = spf_result.get(&origin_node) else {
             continue;
         };
-        let nhops: BTreeMap<std::net::Ipv6Addr, SpfNexthopV3> = collect_v3_nexthops(top, path)
-            .into_iter()
-            .map(|(addr, ifindex)| {
-                (
-                    addr,
-                    SpfNexthopV3 {
-                        ifindex,
-                        adjacency: false,
-                        backup: None,
-                    },
-                )
-            })
-            .collect();
+        let nhops = collect_v3_nexthops_to(top, path, origin_node);
         if nhops.is_empty() {
             continue;
         }
@@ -16577,6 +16582,7 @@ fn build_rib6_from_flex_algo(
                     // Per-Flex-Algo routes have no TI-LFA today.
                     dest_vertex: None,
                     backup_as_primary: false,
+                    no_php: ps.flags.np_flag(),
                 };
                 rib6_insert(&mut rib, prefix, route);
                 break;
@@ -16735,6 +16741,7 @@ fn add_as_external_routes(
             prefix_sid: None,
             dest_vertex,
             backup_as_primary: top.fast_reroute_backup_as_primary,
+            no_php: false,
         };
         rib_insert(rib, prefix, spf_route);
     }
@@ -16847,6 +16854,7 @@ fn add_nssa_routes(
             prefix_sid: None,
             dest_vertex,
             backup_as_primary: top.fast_reroute_backup_as_primary,
+            no_php: false,
         };
         rib_insert(rib, prefix, spf_route);
     }
@@ -17535,23 +17543,10 @@ fn build_rib6_from_spf(
             let Some(ref_path) = spf_result.get(&ref_vertex) else {
                 continue;
             };
-            let nhops = collect_v3_nexthops(top, ref_path);
-            if nhops.is_empty() {
+            let nhops_map = collect_v3_nexthops_to(top, ref_path, ref_vertex);
+            if nhops_map.is_empty() {
                 continue;
             }
-            let nhops_map: BTreeMap<std::net::Ipv6Addr, SpfNexthopV3> = nhops
-                .into_iter()
-                .map(|(addr, ifindex)| {
-                    (
-                        addr,
-                        SpfNexthopV3 {
-                            ifindex,
-                            adjacency: false,
-                            backup: None,
-                        },
-                    )
-                })
-                .collect();
             Some((ref_path.cost, nhops_map))
         } else {
             None
@@ -17634,6 +17629,7 @@ fn build_rib6_from_spf(
                 prefix_sid: None,
                 dest_vertex: Some(ref_vertex),
                 backup_as_primary: top.fast_reroute_backup_as_primary,
+                no_php: false,
             };
             rib6_insert(&mut rib, net, entry);
         }
@@ -17781,6 +17777,7 @@ fn add_srv6_locator_routes_v3(
                 prefix_sid: None,
                 dest_vertex: Some(vertex),
                 backup_as_primary: top.fast_reroute_backup_as_primary,
+                no_php: false,
             };
             rib6_insert(rib, net, entry);
         }
@@ -17895,6 +17892,7 @@ fn add_inter_area_routes_v3(
             // Protect the path to the ABR.
             dest_vertex: Some(abr_vertex),
             backup_as_primary: top.fast_reroute_backup_as_primary,
+            no_php: false,
         };
         rib6_insert(rib, net, entry);
     }
@@ -18055,6 +18053,7 @@ fn add_as_external_routes_v3(
             prefix_sid: None,
             dest_vertex,
             backup_as_primary: top.fast_reroute_backup_as_primary,
+            no_php: false,
         };
         rib6_insert(rib, net, entry);
     }
@@ -18189,6 +18188,7 @@ fn add_nssa_routes_v3(
             prefix_sid: None,
             dest_vertex,
             backup_as_primary: top.fast_reroute_backup_as_primary,
+            no_php: false,
         };
         // Equal-cost merge — same shape as the intra-area insert
         // above in `build_rib6_from_spf`.
@@ -18197,10 +18197,9 @@ fn add_nssa_routes_v3(
 }
 
 /// One v3 primary nexthop as a `NexthopUni` at `metric`, with the
-/// prefix-SID label (if any) pushed as an Explicit swap. `SpfNexthopV3`
-/// doesn't carry the adjacency/PHP flag in its label form yet, so we
-/// always push Explicit — functionally correct (swap to same label),
-/// just no PHP optimization. v3 sibling of `nhop_to_nexthop_uni`.
+/// prefix-SID label (if any): popped when the nexthop is the SID's
+/// owner and the SID does not set NP, pushed otherwise. v3 sibling of
+/// `nhop_to_nexthop_uni`.
 fn nhop_v3_to_nexthop_uni(
     addr: &std::net::Ipv6Addr,
     route: &SpfRouteV3,
@@ -18208,6 +18207,7 @@ fn nhop_v3_to_nexthop_uni(
     metric: u32,
 ) -> rib::NexthopUni {
     let labels: Vec<rib::Label> = match route.sid {
+        Some(sid) if nhop.adjacency && !route.no_php => vec![rib::Label::Implicit(sid)],
         Some(sid) => vec![rib::Label::Explicit(sid)],
         None => vec![],
     };
@@ -18371,6 +18371,7 @@ fn add_prefix_sids_v3(
                 };
                 route.prefix_sid = Some((value, label_config.clone()));
                 route.sid = sid_label;
+                route.no_php = ps.flags.np_flag();
                 break;
             }
         }
@@ -18507,24 +18508,53 @@ fn apply_routing_updates_v3(
 /// neighbor (defensive — SPF only relaxes through Router-LSA links,
 /// so the absence is rare).
 fn collect_v3_nexthops(top: &Ospf<Ospfv3>, path: &spf::Path) -> Vec<(std::net::Ipv6Addr, u32)> {
-    let mut out = Vec::new();
-    for (hop_vertex, _link_id) in path.first_hop_links.iter() {
-        let Some(hop_router_id) = top.lsp_map.resolve(*hop_vertex).copied() else {
-            continue;
-        };
-        for link in top.links.values() {
-            if let Some(nbr) = link.nbrs.get(&hop_router_id) {
-                let ll = nbr.ident.prefix.addr();
-                if !ll.is_unspecified() {
-                    out.push((ll, nbr.ifindex));
-                }
-                break;
-            }
-        }
-    }
+    let mut out: Vec<_> = v3_first_hops(top, path)
+        .map(|(ll, ifindex, _)| (ll, ifindex))
+        .collect();
     out.sort();
     out.dedup();
     out
+}
+
+/// [`collect_v3_nexthops`] as route nexthops toward `dest`, each marked
+/// `adjacency` when its router is `dest` itself: the hop before the
+/// destination, where a Prefix-SID label is popped unless the SID sets
+/// NP. The v3 side of the `adjacency` v2's `build_spf_nexthops` sets.
+fn collect_v3_nexthops_to(
+    top: &Ospf<Ospfv3>,
+    path: &spf::Path,
+    dest: usize,
+) -> BTreeMap<std::net::Ipv6Addr, SpfNexthopV3> {
+    v3_first_hops(top, path)
+        .map(|(ll, ifindex, hop_vertex)| {
+            (
+                ll,
+                SpfNexthopV3 {
+                    ifindex,
+                    adjacency: hop_vertex == dest,
+                    backup: None,
+                },
+            )
+        })
+        .collect()
+}
+
+/// Each first hop of `path` as (neighbor link-local, ifindex, vertex).
+fn v3_first_hops<'a>(
+    top: &'a Ospf<Ospfv3>,
+    path: &'a spf::Path,
+) -> impl Iterator<Item = (std::net::Ipv6Addr, u32, usize)> + 'a {
+    path.first_hop_links
+        .iter()
+        .filter_map(move |(hop_vertex, _link_id)| {
+            let hop_router_id = top.lsp_map.resolve(*hop_vertex)?;
+            let nbr = top
+                .links
+                .values()
+                .find_map(|link| link.nbrs.get(hop_router_id))?;
+            let ll = nbr.ident.prefix.addr();
+            (!ll.is_unspecified()).then_some((ll, nbr.ifindex, *hop_vertex))
+        })
 }
 
 /// Owned, `Send`-able inputs to a single v2 SPF run for one area.
@@ -18827,7 +18857,9 @@ fn nhop_to_nexthop_uni(
 ) -> rib::NexthopUni {
     let mut mpls = vec![];
     if let Some(sid) = route.sid {
-        mpls.push(if value.adjacency {
+        // The SID's owner is the nexthop: pop (implicit null) unless
+        // its Prefix-SID asks to keep the label (NP, RFC 8665 §5).
+        mpls.push(if value.adjacency && !route.no_php {
             rib::Label::Implicit(sid)
         } else {
             rib::Label::Explicit(sid)
@@ -19015,7 +19047,9 @@ fn make_ilm_entry(label: u32, ilm: &SpfIlm) -> IlmEntry {
             ifindex_origin: (nhop.ifindex != 0).then_some(nhop.ifindex),
             ..Default::default()
         };
-        if !nhop.adjacency {
+        // Penultimate hop (`adjacency`) pops, unless the Prefix-SID
+        // asks to keep the label (NP): then swap label to label.
+        if !nhop.adjacency || ilm.no_php {
             uni.mpls_label.push(label);
         }
         uni
@@ -19102,6 +19136,7 @@ fn build_ilm_from_rib(rib: &PrefixMap<Ipv4Net, SpfRoute>, algo: u8) -> BTreeMap<
             SpfIlm {
                 nhops: route.nhops.clone(),
                 ilm_type: IlmType::Node(pfx_index),
+                no_php: route.no_php,
                 fec: Some(SidFec {
                     algo,
                     prefix: IpNet::V4(prefix),
@@ -19117,9 +19152,8 @@ pub type DiffIlmResultV3<'a> = spf::TableDiffResult<'a, u32, SpfIlmV3>;
 /// v3 sibling of `make_ilm_entry`. Same role -- render an
 /// `(incoming_label, SpfIlmV3)` pair into the `rib::IlmEntry` shape
 /// the RIB subsystem expects -- but the nexthop is v6 (matching
-/// `SpfRouteV3`). No PHP optimization yet (SpfNexthopV3 doesn't
-/// carry an adjacency flag); every nexthop pushes the incoming
-/// label as a swap label.
+/// `SpfRouteV3`). The penultimate hop pops unless the Prefix-SID has
+/// NP set, as in v2.
 fn make_ilm_entry_v6(label: u32, ilm: &SpfIlmV3) -> IlmEntry {
     let build_uni = |addr: &std::net::Ipv6Addr, nhop: &SpfNexthopV3| -> NexthopUni {
         let mut uni = NexthopUni {
@@ -19127,7 +19161,7 @@ fn make_ilm_entry_v6(label: u32, ilm: &SpfIlmV3) -> IlmEntry {
             ifindex_origin: (nhop.ifindex != 0).then_some(nhop.ifindex),
             ..Default::default()
         };
-        if !nhop.adjacency {
+        if !nhop.adjacency || ilm.no_php {
             uni.mpls_label.push(label);
         }
         uni
@@ -19217,6 +19251,7 @@ fn build_ilm_from_rib6(
             SpfIlmV3 {
                 nhops: route.nhops.clone(),
                 ilm_type: IlmType::Node(pfx_index),
+                no_php: route.no_php,
                 fec: Some(SidFec {
                     algo,
                     prefix: IpNet::V6(prefix),
@@ -19297,6 +19332,7 @@ fn add_self_prefix_sids_to_ilm(top: &Ospf, ilm: &mut BTreeMap<u32, SpfIlm>) {
                         SpfIlm {
                             nhops,
                             ilm_type: IlmType::Node(pfx_index),
+                            no_php: false,
                             fec: Some(SidFec {
                                 algo: ps.algo.into(),
                                 prefix: IpNet::V4(tlv.prefix.trunc()),
@@ -19414,6 +19450,7 @@ fn add_self_prefix_sids_to_ilm_v3(top: &Ospf<Ospfv3>, ilm: &mut BTreeMap<u32, Sp
                         SpfIlmV3 {
                             nhops,
                             ilm_type: IlmType::Node(pfx_index),
+                            no_php: false,
                             fec: Some(SidFec {
                                 algo: ps.algo.into(),
                                 prefix: IpNet::V6(prefix),
@@ -19499,6 +19536,7 @@ fn add_self_adj_sids_to_ilm_v3(top: &Ospf<Ospfv3>, ilm: &mut BTreeMap<u32, SpfIl
             SpfIlmV3 {
                 nhops,
                 ilm_type: IlmType::Adjacency(adj_index),
+                no_php: false,
                 fec: None,
             },
         );
@@ -19650,6 +19688,7 @@ fn add_self_adj_sids_to_ilm(top: &Ospf, ilm: &mut BTreeMap<u32, SpfIlm>) {
             SpfIlm {
                 nhops,
                 ilm_type: IlmType::Adjacency(adj_index),
+                no_php: false,
                 fec: None,
             },
         );
@@ -19963,6 +20002,128 @@ mod test_support {
 }
 
 #[cfg(test)]
+mod php_tests {
+    //! What the hop before a Prefix-SID's owner does with its label
+    //! (RFC 8665 §5, RFC 8666 §5): pops it, unless the SID has the NP
+    //! flag set, which keeps it. Both on the route (FTN) and in the
+    //! label table (ILM), in both versions.
+
+    use super::*;
+    use crate::rib::nexthop::Label;
+
+    const SID: u32 = 16002;
+
+    fn v2_route(adjacency: bool, no_php: bool) -> (Ipv4Addr, SpfRoute) {
+        let via: Ipv4Addr = "192.0.2.2".parse().unwrap();
+        let nhop = SpfNexthop {
+            ifindex: 2,
+            adjacency,
+            router_id: None,
+            backup: None,
+        };
+        let route = SpfRoute {
+            metric: 10,
+            path_type: RouteType::IntraArea,
+            nhops: BTreeMap::from([(via, nhop)]),
+            sid: Some(SID),
+            prefix_sid: None,
+            dest_vertex: None,
+            backup_as_primary: false,
+            no_php,
+        };
+        (via, route)
+    }
+
+    fn v3_route(adjacency: bool, no_php: bool) -> (std::net::Ipv6Addr, SpfRouteV3) {
+        let via: std::net::Ipv6Addr = "fe80::2".parse().unwrap();
+        let nhop = SpfNexthopV3 {
+            ifindex: 2,
+            adjacency,
+            backup: None,
+        };
+        let route = SpfRouteV3 {
+            metric: 10,
+            path_type: RouteType::IntraArea,
+            nhops: BTreeMap::from([(via, nhop)]),
+            sid: Some(SID),
+            prefix_sid: None,
+            dest_vertex: None,
+            backup_as_primary: false,
+            no_php,
+        };
+        (via, route)
+    }
+
+    fn ilm_labels(entry: IlmEntry) -> Vec<u32> {
+        match entry.nexthop {
+            Nexthop::Uni(uni) => uni.mpls_label,
+            _ => panic!("one nexthop"),
+        }
+    }
+
+    /// (adjacency, no_php) → the label the FTN imposes and the ILM swaps
+    /// to: popped only toward the owner of a SID without NP.
+    const CASES: [(bool, bool, Option<u32>); 4] = [
+        (true, false, None),
+        (true, true, Some(SID)),
+        (false, false, Some(SID)),
+        (false, true, Some(SID)),
+    ];
+
+    #[test]
+    fn v2_penultimate_hop_keeps_the_label_only_for_np() {
+        for (adjacency, no_php, kept) in CASES {
+            let (via, route) = v2_route(adjacency, no_php);
+            let nhop = &route.nhops[&via];
+            let ftn = nhop_to_nexthop_uni(&via, &route, nhop, 10).mpls;
+            let want = match kept {
+                Some(sid) => Label::Explicit(sid),
+                None => Label::Implicit(SID),
+            };
+            assert_eq!(ftn, [want], "v2 FTN, adjacency {adjacency}, NP {no_php}");
+            let ilm = SpfIlm {
+                nhops: route.nhops.clone(),
+                ilm_type: IlmType::Node(2),
+                fec: None,
+                no_php,
+            };
+            let swap = ilm_labels(make_ilm_entry(SID, &ilm));
+            assert_eq!(
+                swap,
+                kept.into_iter().collect::<Vec<_>>(),
+                "v2 ILM, adjacency {adjacency}, NP {no_php}"
+            );
+        }
+    }
+
+    #[test]
+    fn v3_penultimate_hop_keeps_the_label_only_for_np() {
+        for (adjacency, no_php, kept) in CASES {
+            let (via, route) = v3_route(adjacency, no_php);
+            let nhop = &route.nhops[&via];
+            let ftn = nhop_v3_to_nexthop_uni(&via, &route, nhop, 10).mpls;
+            let want = match kept {
+                Some(sid) => Label::Explicit(sid),
+                None => Label::Implicit(SID),
+            };
+            assert_eq!(ftn, [want], "v3 FTN, adjacency {adjacency}, NP {no_php}");
+            let ilm = SpfIlmV3 {
+                nhops: route.nhops.clone(),
+                ilm_type: IlmType::Node(2),
+                fec: None,
+                no_php,
+            };
+            let swap = ilm_labels(make_ilm_entry_v6(SID, &ilm));
+            assert_eq!(
+                swap,
+                kept.into_iter().collect::<Vec<_>>(),
+                "v3 ILM, adjacency {adjacency}, NP {no_php}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod sid_move_hold_tests {
     use tokio::sync::mpsc;
 
@@ -20021,6 +20182,7 @@ mod sid_move_hold_tests {
                 prefix_sid: Some((SidLabelValue::Index(2), srgb(start))),
                 dest_vertex: None,
                 backup_as_primary: false,
+                no_php: false,
             },
         );
         rib
@@ -20045,6 +20207,7 @@ mod sid_move_hold_tests {
                 prefix_sid: Some((SidLabelValue::Index(2), srgb(start))),
                 dest_vertex: None,
                 backup_as_primary: false,
+                no_php: false,
             },
         );
         rib
@@ -25147,6 +25310,7 @@ mod gr_helper_tests {
             prefix_sid: None,
             dest_vertex: None,
             backup_as_primary: false,
+            no_php: false,
         };
 
         // OSPFv2.
@@ -25181,6 +25345,7 @@ mod gr_helper_tests {
                 prefix_sid: None,
                 dest_vertex: None,
                 backup_as_primary: false,
+                no_php: false,
             },
         );
         let mut withdrawn = || {
@@ -25679,6 +25844,7 @@ mod gr_helper_tests {
                 prefix_sid: None,
                 dest_vertex: None,
                 backup_as_primary: false,
+                no_php: false,
             },
         );
         top.restarting = Some(restarting(&[(2, S)]));
@@ -25716,6 +25882,7 @@ mod gr_helper_tests {
                 prefix_sid: None,
                 dest_vertex: None,
                 backup_as_primary: false,
+                no_php: false,
             },
         );
         top.restarting = Some(restarting(&[(2, S)]));
@@ -26060,6 +26227,7 @@ mod gr_helper_tests {
                 prefix_sid: None,
                 dest_vertex: None,
                 backup_as_primary: false,
+                no_php: false,
             };
             let prefix: Ipv4Net = "203.0.113.0/24".parse().unwrap();
             top.rib.insert(prefix, route.clone());
@@ -26107,6 +26275,7 @@ mod gr_helper_tests {
                 prefix_sid: None,
                 dest_vertex: None,
                 backup_as_primary: false,
+                no_php: false,
             };
             let prefix: ipnet::Ipv6Net = "2001:db8::/64".parse().unwrap();
             top.rib6.insert(prefix, route.clone());
@@ -27732,6 +27901,7 @@ mod multi_area_tests {
             prefix_sid: None,
             dest_vertex: None,
             backup_as_primary: false,
+            no_php: false,
         }
     }
 
@@ -27802,6 +27972,7 @@ mod repair_tail_sid_tests {
             prefix_sid: None,
             dest_vertex: Some(1),
             backup_as_primary: false,
+            no_php: false,
         }
     }
 
@@ -27890,6 +28061,7 @@ mod diff_apply_tests {
             prefix_sid: None,
             dest_vertex: None,
             backup_as_primary: false,
+            no_php: false,
         }
     }
 
