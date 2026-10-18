@@ -79,6 +79,11 @@ Feature: BGP EVPN — a node's own MAC addresses are neither originated nor over
     And show command "show bgp evpn" in namespace "z1" should not contain "02:00:00:00:0a:01"
     And show command "show bgp evpn" in namespace "z2" should not contain "02:00:00:00:fe:01"
     And show command "show bgp evpn" in namespace "z2" should not contain "02:00:00:00:0a:01"
+    # z2 installs the station over VXLAN and says so; every MAC used to
+    # read "Installed No".
+    And show command "show l2 mac table" in namespace "z2" should eventually contain "aa:bb:cc:dd:ee:01   vxlan 192.168.0.1           -     0      Yes"
+    # z1's bridge row for it pads its State, so Flags lines up.
+    And show command "show l2 neighbor" in namespace "z1" should eventually contain "Noarp          0x00"
 
   Scenario: A station that becomes a device's own address is withdrawn
     Given the test topology exists

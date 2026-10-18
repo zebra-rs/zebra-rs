@@ -2246,7 +2246,9 @@ pub fn vrf_show(rib: &Rib, _args: Args, json: bool) -> String {
         "Name", "Table-ID", "Router-ID"
     )
     .unwrap();
-    writeln!(buf, " {:-<24}  {:-<10}  {:-<15}  {:-<32}", "", "", "", "").unwrap();
+    // Each underline stops 2 short of its column, so the next starts under
+    // its header.
+    writeln!(buf, " {:-<22}  {:->10}  {:-<15}  {:-<32}", "", "", "", "").unwrap();
     for vrf in rib.vrfs.values() {
         let members: Vec<&str> = rib
             .links
@@ -2358,15 +2360,17 @@ pub fn l2_neighbor_show(rib: &Rib, _args: Args, json: bool) -> String {
         // counts as a real read for dead-code analysis (CI runs with
         // `-D warnings`); the hex form is also more compact than the
         // bitflags Debug rendering and keeps the column width stable.
+        // `format!` first: the state's derived Debug ignores the width,
+        // which left the Flags column straight after it.
         writeln!(
             buf,
-            " {:<18} {:<16} {:>5}  {:>10}  {:<40} {:<14?} 0x{:02x}",
+            " {:<18} {:<16} {:>5}  {:>10}  {:<40} {:<14} 0x{:02x}",
             mac.to_string(),
             ifname,
             vlan_s,
             vni_s,
             dst_s,
-            nbr.state,
+            format!("{:?}", nbr.state),
             nbr.flags.bits(),
         )
         .unwrap();
@@ -2407,6 +2411,14 @@ fn sid_show_text(
     redirects: &std::collections::BTreeMap<std::net::Ipv6Addr, std::net::Ipv6Addr>,
 ) -> String {
     let mut buf = String::new();
+    // The SID column fits the longest SID with two spaces to spare. A
+    // 18-character uA SID used to run straight into its behavior.
+    let sid_w = sids
+        .keys()
+        .map(|addr| addr.to_string().len() + 2)
+        .max()
+        .unwrap_or(0)
+        .max(SID_COL);
     writeln!(
         buf,
         " {sid:<sid_w$}{behavior:<beh_w$}{context:<ctx_w$}{owner:<own_w$}{loc:<loc_w$}{alloc:<alloc_w$}",
@@ -2416,7 +2428,6 @@ fn sid_show_text(
         owner = "Protocol",
         loc = "Locator",
         alloc = "AllocationType",
-        sid_w = SID_COL,
         beh_w = BEHAVIOR_COL,
         ctx_w = CONTEXT_COL,
         own_w = OWNER_COL,
@@ -2434,8 +2445,9 @@ fn sid_show_text(
         alloc = "",
         // Header underlines run SID+Behavior together, then a 2-space
         // gap before each remaining column, matching the design doc
-        // sample.
-        sid_w = SID_COL + BEHAVIOR_COL - 1,
+        // sample. Each stops 2 short of its column, so the next starts
+        // under its header.
+        sid_w = sid_w + BEHAVIOR_COL - 2,
         ctx_w = CONTEXT_COL - 2,
         own_w = OWNER_COL - 2,
         loc_w = LOCATOR_COL - 2,
@@ -2452,7 +2464,6 @@ fn sid_show_text(
             owner = sid.owner.to_string(),
             loc = sid.locator,
             alloc = sid.allocation_type.to_string(),
-            sid_w = SID_COL,
             beh_w = BEHAVIOR_COL,
             ctx_w = CONTEXT_COL,
             own_w = OWNER_COL,
@@ -2469,7 +2480,6 @@ fn sid_show_text(
                 buf,
                 " {:<sid_w$}  -> egress-protection redirect: H.Encaps to {mirror}",
                 "",
-                sid_w = SID_COL,
             )
             .unwrap();
         }
@@ -2866,6 +2876,84 @@ mod tests {
             assert!(line.contains("LOC_N1"));
             assert!(line.contains("dynamic"));
         }
+    }
+
+    /// Every character under each column header of `out`'s first line is
+    /// a dash in its second: the underline sits under its header.
+    fn assert_underlined(out: &str, headers: &[&str]) {
+        let mut lines = out.lines();
+        let (head, dash) = (lines.next().unwrap(), lines.next().unwrap());
+        for header in headers {
+            let at = head
+                .find(header)
+                .unwrap_or_else(|| panic!("{header} in {head}"));
+            let under = dash.get(at..at + header.len()).unwrap_or("");
+            assert!(
+                under.len() == header.len() && under.chars().all(|c| c == '-'),
+                "{header} not underlined:\n{head}\n{dash}"
+            );
+        }
+    }
+
+    /// The SID column fits the longest SID. An 18-character uA SID used
+    /// to run straight into its behavior, and the underlines sat one
+    /// column right of their headers.
+    #[test]
+    fn sid_show_fits_the_longest_sid() {
+        let mut sids: BTreeMap<Ipv6Addr, Sid> = BTreeMap::new();
+        let ua = sid(
+            "fcbb:bbbb:1:e000::",
+            SidBehavior::EndX,
+            SidContext::Interface("z1-z2".into()),
+        );
+        sids.insert(ua.addr, ua);
+        let out = sid_show_text(&sids, &BTreeMap::new());
+        assert!(out.contains(" fcbb:bbbb:1:e000::  End.X"), "{out}");
+        assert_underlined(&out, &["Context", "Protocol", "Locator", "AllocationType"]);
+        // Short SIDs keep the default column.
+        let out = sid_show_text(&BTreeMap::new(), &BTreeMap::new());
+        assert_underlined(&out, &["Context", "Protocol", "Locator", "AllocationType"]);
+    }
+
+    /// The `show vrf` underlines sit under their headers; Router-ID's and
+    /// Members' used to start two columns right.
+    #[tokio::test]
+    async fn vrf_show_underlines_each_column() {
+        let rib = Rib::new(false).expect("rib");
+        let out = vrf_show(&rib, Args(Default::default()), false);
+        assert_underlined(&out, &["Name", "Table-ID", "Router-ID", "Members"]);
+    }
+
+    /// `show l2 neighbor` pads the State column, so Flags lines up.
+    /// The state's derived Debug ignored the width: `Noarp 0x00`.
+    #[tokio::test]
+    async fn l2_neighbor_pads_the_state_column() {
+        use crate::fib::message::FibNeighbor;
+        use crate::rib::inst::NeighborKey;
+        use netlink_packet_route::AddressFamily;
+        use netlink_packet_route::neighbour::NeighbourState;
+        let mut rib = Rib::new(false).expect("rib");
+        let mac: crate::rib::MacAddr = "aa:bb:cc:dd:ee:01".parse().unwrap();
+        rib.neighbors.insert(
+            NeighborKey::Bridge {
+                ifindex: 7,
+                mac,
+                vlan: None,
+            },
+            FibNeighbor {
+                family: AddressFamily::Bridge,
+                ifindex: 7,
+                state: NeighbourState::Noarp,
+                lladdr: Some(mac),
+                ..Default::default()
+            },
+        );
+        let out = l2_neighbor_show(&rib, Args(Default::default()), false);
+        assert!(out.contains(" Noarp          0x00"), "{out}");
+        assert_underlined(
+            &out,
+            &["MAC", "Interface", "VLAN", "VNI", "Dst", "State", "Flags"],
+        );
     }
 
     #[test]
