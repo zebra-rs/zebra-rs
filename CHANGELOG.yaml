@@ -11,6 +11,206 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit them,
 # changelog-gen.sh defaults to distribution "unstable" and urgency "medium".
 
+- semver: 26.10.2
+  date: 2026-10-18T18:00:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### Upgrade notes
+        * MPLS labels: dynamic labels (BGP VPN, EVPN, VPWS and labeled
+          unicast) now start at 24000, clear of the SR blocks, so every
+          such label zebra-rs advertises changes on upgrade. The
+          default SRLB grows to 15000–15999, and OSPF follows
+          `segment-routing block default` (SRGB 16000/8000) instead of
+          fixed values
+        * MPLS labels are checked at commit. A static label binding
+          inside an SR block or the dynamic range, an OSPF
+          `adjacency-sid absolute` outside the SRLB, and overlapping SR
+          blocks are refused; by default 16–14999 is free for static
+          bindings. A startup configuration is only warned about. A
+          received SR Policy's `binding-sid-label` must lie in the
+          headend's SRLB
+        * OSPFv2 Segment Routing honors the NP flag: the penultimate
+          hop keeps the label and the SID's owner pops it. A v26.10.1
+          router has no Pop for its own Flex-Algorithm SIDs, so upgrade
+          the routers owning them no later than their neighbors
+        * OSPFv2 Hellos now name the elected DR and BDR: LAN roles and
+          adjacencies change on upgrade, and a LAN is fully fixed once
+          every router on it runs this release
+        * Static routes are installed as `proto zebra` (11), not
+          `proto static`. Routes, MPLS routes and next-hop objects an
+          earlier run left in the kernel are replaced by their owner or
+          swept `--leftover-sweep-time` seconds after start (default
+          120); a `proto static` route the static configuration
+          installs again is adopted (gavmckee)
+        * `--feature iso` is renamed `--feature insomnia`; the old name
+          still works and logs a deprecation warning, and an unknown
+          feature name is warned about. E-Tree needs no feature flag
+        * EVPN duplicate address detection is on by default (5 moves
+          in 180 s, warning only), as in FRR
+        * The package recommends cradle-rs >= 1.1.9 (was 1.1.1)
+    - note: |
+        ### MPLS label allocation
+        * The RIB owns the label space: SR blocks, the IGPs' local
+          labels and BGP's labels come from one map. OSPFv2, OSPFv3 and
+          IS-IS no longer give the same Adj-SID label (such as 15000)
+          to different adjacencies, and dynamic labels no longer grow
+          into the SRGB or SRLB
+        * BGP takes transit and service labels in chunks of 128 labels
+          and up, returned when free. Transit labels used to stop being
+          allocated once any VRF, EVI, ES or VPWS label had been used;
+          a VRF now has its label at once
+        * New `mpls label-range dynamic start|end` (default
+          24000–1048574), `show mpls label range` and `show mpls label
+          table [label <n>]`
+        * An SRLB change keeps the labels still inside it. After an
+          SRGB change the old Prefix-SID labels keep forwarding for
+          60 s on every router
+        * A configured OSPF `adjacency-sid absolute` takes its label
+          from whichever dynamic Adj-SID holds it, whatever order the
+          adjacencies came up in; IS-IS gives an Adj-SID to adjacencies
+          that came up before SR was enabled; OSPF graceful restart
+          keeps its Adj-SID labels
+        * MPLS routes an earlier run left are read at startup: installs
+          over them failed with EEXIST and their labels were handed out
+          again
+        * A received SR Policy's Binding-SID is claimed in the SRLB;
+          `show bgp sr-policy` shows whether it is held
+        * Deleting `router ospf` no longer withdraws OSPFv3's routes,
+          deleting `router ospfv3` withdraws its own, and removing a
+          protocol releases its SRv6 SIDs
+    - note: |
+        ### EVPN E-Tree (RFC 8317)
+        * Attachment circuits can be leaves (`router bgp afi-safi evpn
+          etree leaf-interface <if>`); unlisted ones are roots. A leaf
+          never reaches another leaf, unicast or BUM, on the same PE or
+          across PEs; known unicast is dropped at the ingress PE using
+          the Type-2 leaf flag
+        * BUM is filtered over MPLS (a per-PE leaf label), VXLAN
+          (leaf-only IMETs) and SRv6 (a leaf argument, RFC 9819). The
+          data plane is cradle-rs; the kernel data plane is refused at
+          commit
+        * `show bgp evpn etree` shows the roles and warns about IRB on
+          a leaf bridge domain, two mixed VXLAN PEs and role conflicts
+          on an Ethernet Segment; `show l2 mac table` flags leaf MACs
+        * A leaf AC in the kernel bridge is isolated and held until
+          cradle has attached it with its role
+        * A malformed or unsupported PMSI Tunnel attribute is
+          treat-as-withdraw instead of resetting the session, and a
+          reserved ESI (0 or MAX-ESI) is refused at commit
+        * Tested between zebra-rs routers only; new book chapter
+    - note: |
+        ### EVPN
+        * Single-active fast DF recovery (RFC 9722 synchronized
+          carving): `ethernet-segment <name> df-election fast-recovery`
+          with `peering-time` and `skew`, shown by `show bgp evpn
+          ethernet-segment`; it needs synchronized clocks
+        * Duplicate address detection (RFC 7432 §15.1), FRR-style:
+          `dup-addr-detection` with `max-moves`, `time` and `freeze`,
+          `show evpn dup-addr` and `clear bgp evpn dup-addr`; routes
+          from a peer on a shared segment are not moves (gavmckee)
+        * Dual-stack EVPN on the Linux bridge (gavmckee): Type-2 Label2
+          is accepted and re-advertised (symmetric-IRB routes from FRR
+          and EOS were rejected); `kernel-route-exchange` installs
+          VXLAN Type-5 routes through the L3-VNI bridge and can change
+          at runtime; `redistribute kernel` in a VRF; a router-id VTEP
+          stays the next hop; IPv6 VTEPs on the bridge Type-5 path
+        * MAC handling as in FRR (gavmckee): local or remote is decided
+          by sticky, shared segment, sequence and VTEP; mobility
+          sequences per IP; the VXLAN L2 VNI is read from Label1
+          (RFC 8365); a kernel multipath route loses one next hop at a
+          time instead of the whole prefix
+        * Sticky MACs (kurokiyokiyo): a `static sticky` bridge entry is
+          advertised sticky, and a remote sticky MAC is installed
+          static sticky, so no host behind another VTEP takes it over
+        * Our own Type-2 and Type-3 looped back by an eBGP spine are no
+          longer installed as remote (kurokiyokiyo), which pointed the
+          local MAC at our own VTEP; any EVPN route whose next hop is
+          our VTEP or session address is dropped
+        * On kernels before 6.13 a VXLAN FDB row keeps its VNI and VTEP
+          instead of being overwritten by the kernel's generic copy
+    - note: |
+        ### OSPF, IS-IS and TI-LFA
+        * TI-LFA (IS-IS, OSPFv2, OSPFv3): a repair starting on the
+          router's own adjacency no longer pushes its own Adj-SID, which
+          the neighbor dropped or misrouted; an SRv6 repair made of its
+          own End.X SID installs as a plain next hop instead of
+          dropping the router's own traffic
+        * OSPFv2 Hellos carry the elected DR and BDR, and a new DR gets
+          its BDR in the same election (RFC 2328 §9.4 step 4, v2 and
+          v3); LAN peers used to settle with no working BDR
+        * OSPF pops a Prefix-SID at the penultimate hop only without NP
+          (RFC 8665, RFC 8666), and installs a Pop for every
+          algorithm's own SID: Flex-Algo traffic to a router's own SID
+          was dropped there
+        * OSPFv3 no longer advertises or installs ::1/128
+        * IS-IS starts STAMP on a link whose address arrives after the
+          adjacency is Up; the link used to stay unmeasured
+        * Show fixes: `show ospf database` lists every area and LSA
+          type; OSPFv3 SR, graceful-restart, neighbor and checkpoint
+          views; IS-IS flex-algo topology, fast-reroute and repair-list
+          views, and the P node and neighbor of TI-LFA backup lines
+    - note: |
+        ### PIM
+        * PIMv6 names the RPF neighbor by its Hello source (RFC 7761
+          NBR()), so FRR upstreams accept zebra-rs Joins; Join
+          suppression and prune override apply there too
+        * A loopback is passive (no Hellos, no self-neighbor) and goes
+          by its own address, not 127.0.0.1; Register, Register-Stop
+          and C-RP-Adv never take 127.0.0.1 or ::1 as their source
+        * IPv6 addresses fit the PIM and MLD show tables
+    - note: |
+        ### BGP
+        * Interface neighbors (kurokiyokiyo): re-creating an interface
+          no longer leaves a stale peer and BFD session behind, and a
+          rename or reused ifindex no longer adopts the wrong peer
+        * A removed neighbor releases its policy, prefix-set and TCP-AO
+          watches and its BFD session, and its ident is never reused: a
+          re-added neighbor's policy could be overwritten by edits to
+          the old one
+        * BFD: a dynamic (listen-range) neighbor gets its session on
+          accept, and an eBGP neighbor no longer gets a multihop
+          session when `bfd` applies before `remote-as`
+        * Unnumbered (RFC 8950): IPv4 routes wait for our link-local
+          next hop instead of going out with the router-id
+        * Flowspec honors NO_ADVERTISE, NO_EXPORT and LLGR-stale and
+          reaches peers that come up later; the neighbor `flowspec
+          validation` knob is accepted. Locally originated SR Policies
+          carry an AS_PATH (receivers treated them as withdrawn)
+        * `suppress-fib-pending` with RIB sharding keeps unconfirmed
+          routes out of a new session's dump
+        * MUP-C retries a failed PFCP listener bind every second
+    - note: |
+        ### RIB, FIB and show commands
+        * Next-hop groups are keyed on the egress interface too: a
+          route could leave by another link sharing the gateway address
+          (two neighbors both `fe80::1`)
+        * MPLS input is enabled on dotted interfaces such as
+          `eth0.100`; their sysctls were written to the wrong path
+        * Detaching a port from a bridge or a VRF is no longer undone
+          by a replayed binding
+        * Show fixes: route JSON names a connected route's interface
+          and a VRF route's `vrf`; `show mpls ilm` JSON lists decap
+          entries; `show interface` reports label switching, `show bfd
+          counters` counts transmits, `show policy` shows each entry's
+          action, `show l2 mac table` the installed state; the route
+          legend, TI-LFA marks and `show nexthop` labels are corrected
+    - note: |
+        ### Documentation, tools and packaging
+        * The book's show-command reference moved into each protocol's
+          chapter, with examples rebuilt from live output and the old
+          pages redirected; new Routing Table (RIB), EVPN single-active,
+          duplicate address detection and E-Tree chapters
+        * The pinned cradle-rs engine release is v1.1.9 (E-Tree over
+          MPLS, VXLAN and SRv6; `ip monitor` children no longer pin
+          deleted namespaces)
+        * SECURITY.md gives a private reporting address; a Dockerfile
+          and threat model prepare Anthropic's OSS Scanner
+        * The full BDD suite runs 32 features at a time (was 16) and
+          names its cradle engine binary explicitly
+        * Builds against tokio 1.53.3
 - semver: 26.10.1
   date: 2026-10-06T18:00:00+09:00
   distribution: unstable
