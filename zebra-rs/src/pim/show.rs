@@ -110,6 +110,38 @@ struct PimSummary {
     neighbors: usize,
 }
 
+/// Write a table whose columns fit their cells. Each column is
+/// `(header, width)`, the width the IPv4 layout uses; a column holding a
+/// longer cell grows to it plus two spaces. The widths were fixed, so on
+/// PIMv6 an IPv6 address (a link-local is 25 characters) ran straight
+/// into the next column. The last column is not padded.
+fn write_table(buf: &mut String, cols: &[(&str, usize)], rows: &[Vec<String>]) -> std::fmt::Result {
+    let widths: Vec<usize> = cols
+        .iter()
+        .enumerate()
+        .map(|(i, (_, min))| {
+            let longest = rows.iter().map(|row| row[i].chars().count()).max();
+            longest.map_or(*min, |n| (*min).max(n + 2))
+        })
+        .collect();
+    let mut line = |cells: Vec<&str>| -> std::fmt::Result {
+        let last = cells.len() - 1;
+        for (i, cell) in cells.into_iter().enumerate() {
+            if i == last {
+                writeln!(buf, "{cell}")?;
+            } else {
+                write!(buf, "{cell:<0$}", widths[i])?;
+            }
+        }
+        Ok(())
+    };
+    line(cols.iter().map(|(header, _)| *header).collect())?;
+    for row in rows {
+        line(row.iter().map(String::as_str).collect())?;
+    }
+    Ok(())
+}
+
 fn show_pim<A: PimAf>(pim: &Pim<A>, _args: Args, json: bool) -> Result<String, std::fmt::Error> {
     let summary = PimSummary {
         interfaces: pim.if_config.len(),
@@ -184,21 +216,34 @@ fn show_pim_interface<A: PimAf>(
         return Ok(serde_json::to_string(&rows).unwrap());
     }
 
+    let cells: Vec<Vec<String>> = rows
+        .iter()
+        .map(|row| {
+            vec![
+                row.interface.clone(),
+                row.state.clone(),
+                row.address.clone(),
+                row.dr.clone(),
+                row.dr_priority.to_string(),
+                row.hello_interval.to_string(),
+                row.neighbor_count.to_string(),
+            ]
+        })
+        .collect();
     let mut buf = String::new();
-    buf.push_str("Interface    State   Address          DR               DR Prio  Hello  Nbr\n");
-    for row in &rows {
-        writeln!(
-            buf,
-            "{:<13}{:<8}{:<17}{:<17}{:<9}{:<7}{}",
-            row.interface,
-            row.state,
-            row.address,
-            row.dr,
-            row.dr_priority,
-            row.hello_interval,
-            row.neighbor_count,
-        )?;
-    }
+    write_table(
+        &mut buf,
+        &[
+            ("Interface", 13),
+            ("State", 8),
+            ("Address", 17),
+            ("DR", 17),
+            ("DR Prio", 9),
+            ("Hello", 7),
+            ("Nbr", 0),
+        ],
+        &cells,
+    )?;
     Ok(buf)
 }
 
@@ -267,23 +312,34 @@ fn show_igmp_interface<A: PimAf>(
         return Ok(serde_json::to_string(&rows).unwrap());
     }
 
+    let cells: Vec<Vec<String>> = rows
+        .iter()
+        .map(|row| {
+            vec![
+                row.interface.clone(),
+                row.state.clone(),
+                row.querier.clone(),
+                row.address.clone(),
+                row.version.to_string(),
+                row.query_interval.to_string(),
+                row.groups.to_string(),
+            ]
+        })
+        .collect();
     let mut buf = String::new();
-    buf.push_str(
-        "Interface    State        Querier          Address          Ver  Query  Groups\n",
-    );
-    for row in &rows {
-        writeln!(
-            buf,
-            "{:<13}{:<13}{:<17}{:<17}{:<5}{:<7}{}",
-            row.interface,
-            row.state,
-            row.querier,
-            row.address,
-            row.version,
-            row.query_interval,
-            row.groups,
-        )?;
-    }
+    write_table(
+        &mut buf,
+        &[
+            ("Interface", 13),
+            ("State", 13),
+            ("Querier", 17),
+            ("Address", 17),
+            ("Ver", 5),
+            ("Query", 7),
+            ("Groups", 0),
+        ],
+        &cells,
+    )?;
     Ok(buf)
 }
 
@@ -342,21 +398,34 @@ fn show_igmp_groups<A: PimAf>(
         return Ok(serde_json::to_string(&rows).unwrap());
     }
 
+    let cells: Vec<Vec<String>> = rows
+        .iter()
+        .map(|row| {
+            vec![
+                row.interface.clone(),
+                row.group.clone(),
+                row.mode.clone(),
+                row.sources.to_string(),
+                row.expires.clone(),
+                row.uptime.clone(),
+                row.last_reporter.clone(),
+            ]
+        })
+        .collect();
     let mut buf = String::new();
-    buf.push_str("Interface    Group            Mode     Sources  Expires  Uptime    Reporter\n");
-    for row in &rows {
-        writeln!(
-            buf,
-            "{:<13}{:<17}{:<9}{:<9}{:<9}{:<10}{}",
-            row.interface,
-            row.group,
-            row.mode,
-            row.sources,
-            row.expires,
-            row.uptime,
-            row.last_reporter,
-        )?;
-    }
+    write_table(
+        &mut buf,
+        &[
+            ("Interface", 13),
+            ("Group", 17),
+            ("Mode", 9),
+            ("Sources", 9),
+            ("Expires", 9),
+            ("Uptime", 10),
+            ("Reporter", 0),
+        ],
+        &cells,
+    )?;
     Ok(buf)
 }
 
@@ -407,17 +476,32 @@ fn show_pim_upstream<A: PimAf>(
         return Ok(serde_json::to_string(&rows).unwrap());
     }
 
+    let cells: Vec<Vec<String>> = rows
+        .iter()
+        .map(|row| {
+            vec![
+                row.sg.clone(),
+                row.iif.clone(),
+                row.rpf_neighbor.clone(),
+                row.state.clone(),
+                row.reg.clone(),
+                row.uptime.clone(),
+            ]
+        })
+        .collect();
     let mut buf = String::new();
-    buf.push_str(
-        "Entry                              Iif          RPF Nbr          State      Reg        Uptime\n",
-    );
-    for row in rows.iter() {
-        writeln!(
-            buf,
-            "{:<35}{:<13}{:<17}{:<11}{:<11}{}",
-            row.sg, row.iif, row.rpf_neighbor, row.state, row.reg, row.uptime,
-        )?;
-    }
+    write_table(
+        &mut buf,
+        &[
+            ("Entry", 35),
+            ("Iif", 13),
+            ("RPF Nbr", 17),
+            ("State", 11),
+            ("Reg", 11),
+            ("Uptime", 0),
+        ],
+        &cells,
+    )?;
     Ok(buf)
 }
 
@@ -502,17 +586,30 @@ fn show_pim_assert<A: PimAf>(
         return Ok(serde_json::to_string(&rows).unwrap());
     }
 
+    let cells: Vec<Vec<String>> = rows
+        .iter()
+        .map(|row| {
+            vec![
+                row.entry.clone(),
+                row.interface.clone(),
+                row.role.clone(),
+                row.winner.clone(),
+                row.expires.to_string(),
+            ]
+        })
+        .collect();
     let mut buf = String::new();
-    buf.push_str(
-        "Entry                              Interface    Role     Winner           Expires\n",
-    );
-    for row in &rows {
-        writeln!(
-            buf,
-            "{:<35}{:<13}{:<9}{:<17}{}",
-            row.entry, row.interface, row.role, row.winner, row.expires,
-        )?;
-    }
+    write_table(
+        &mut buf,
+        &[
+            ("Entry", 35),
+            ("Interface", 13),
+            ("Role", 9),
+            ("Winner", 17),
+            ("Expires", 0),
+        ],
+        &cells,
+    )?;
     Ok(buf)
 }
 
@@ -555,18 +652,28 @@ fn show_pim_rp_info<A: PimAf>(
         return Ok(serde_json::to_string(&rows).unwrap());
     }
 
+    let cells: Vec<Vec<String>> = rows
+        .iter()
+        .map(|row| {
+            vec![
+                row.rp.clone(),
+                row.group_range.clone(),
+                row.source.clone(),
+                if row.is_self { "yes" } else { "no" }.to_string(),
+            ]
+        })
+        .collect();
     let mut buf = String::new();
-    buf.push_str("RP address       Group range        Source   Self\n");
-    for row in &rows {
-        writeln!(
-            buf,
-            "{:<17}{:<19}{:<9}{}",
-            row.rp,
-            row.group_range,
-            row.source,
-            if row.is_self { "yes" } else { "no" },
-        )?;
-    }
+    write_table(
+        &mut buf,
+        &[
+            ("RP address", 17),
+            ("Group range", 19),
+            ("Source", 9),
+            ("Self", 0),
+        ],
+        &cells,
+    )?;
     Ok(buf)
 }
 
@@ -669,21 +776,98 @@ fn show_pim_neighbor<A: PimAf>(
         return Ok(serde_json::to_string(&rows).unwrap());
     }
 
+    let cells: Vec<Vec<String>> = rows
+        .iter()
+        .map(|row| {
+            vec![
+                row.interface.clone(),
+                row.neighbor.clone(),
+                row.dr_priority
+                    .map_or_else(|| "-".to_string(), |p| p.to_string()),
+                row.uptime.clone(),
+                row.holdtime.to_string(),
+                row.generation_id
+                    .map_or_else(|| "-".to_string(), |g| format!("{:#010x}", g)),
+            ]
+        })
+        .collect();
     let mut buf = String::new();
-    buf.push_str("Interface    Neighbor         DR Prio  Uptime    Holdtime  GenId\n");
-    for row in &rows {
-        writeln!(
-            buf,
-            "{:<13}{:<17}{:<9}{:<10}{:<10}{}",
-            row.interface,
-            row.neighbor,
-            row.dr_priority
-                .map_or_else(|| "-".to_string(), |p| p.to_string()),
-            row.uptime,
-            row.holdtime,
-            row.generation_id
-                .map_or_else(|| "-".to_string(), |g| format!("{:#010x}", g)),
-        )?;
-    }
+    write_table(
+        &mut buf,
+        &[
+            ("Interface", 13),
+            ("Neighbor", 17),
+            ("DR Prio", 9),
+            ("Uptime", 10),
+            ("Holdtime", 10),
+            ("GenId", 0),
+        ],
+        &cells,
+    )?;
     Ok(buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn table(cols: &[(&str, usize)], rows: &[&[&str]]) -> String {
+        let rows: Vec<Vec<String>> = rows
+            .iter()
+            .map(|row| row.iter().map(|c| c.to_string()).collect())
+            .collect();
+        let mut buf = String::new();
+        write_table(&mut buf, cols, &rows).unwrap();
+        buf
+    }
+
+    const MLD_INTERFACE: &[(&str, usize)] = &[
+        ("Interface", 13),
+        ("State", 13),
+        ("Querier", 17),
+        ("Address", 17),
+        ("Ver", 5),
+        ("Query", 7),
+        ("Groups", 0),
+    ];
+
+    /// IPv4 cells fit the minimum widths, so the layout is the one the
+    /// fixed-width format printed.
+    #[test]
+    fn ipv4_cells_keep_the_fixed_layout() {
+        let out = table(
+            MLD_INTERFACE,
+            &[&["eth1", "Querier", "10.1.0.1", "10.1.0.1", "3", "125", "0"]],
+        );
+        assert_eq!(
+            out,
+            "Interface    State        Querier          Address          Ver  Query  Groups\n\
+             eth1         Querier      10.1.0.1         10.1.0.1         3    125    0\n"
+        );
+    }
+
+    /// A link-local querier and address widen their columns: every cell
+    /// starts under its header, two spaces after the cell before it.
+    /// They used to run together: `fe80::…:9ee5fe80::…:9ee53`.
+    #[test]
+    fn an_ipv6_address_widens_its_column() {
+        let ll = "fe80::64b7:b7ff:fea4:9ee5";
+        let out = table(
+            MLD_INTERFACE,
+            &[&["eth1", "Querier", ll, ll, "2", "125", "0"]],
+        );
+        let mut lines = out.lines();
+        let (head, row) = (lines.next().unwrap(), lines.next().unwrap());
+        for header in ["Querier", "Address", "Ver"] {
+            let at = head.find(header).unwrap();
+            assert_eq!(&head[at - 2..at], "  ", "{head}");
+            assert_ne!(
+                &row[at..at + 1],
+                " ",
+                "{header} cell under its header:\n{out}"
+            );
+            assert_eq!(&row[at - 2..at], "  ", "{header} cell after a gap:\n{out}");
+        }
+        assert!(row.contains(&format!("{ll}  {ll}  2")), "{out}");
+    }
 }

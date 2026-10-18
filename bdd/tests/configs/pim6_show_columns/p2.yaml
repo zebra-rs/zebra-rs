@@ -1,0 +1,12 @@
+# p2: PIMv6 on eth2 toward p1 and on eth3 toward the host h, with MLD on
+# eth3; link-locals fixed by the feature (…:4402 on eth2, …:4403 on eth3).
+router:
+  pim:
+    ipv6:
+      interface:
+      - if-name: eth2
+        enabled: true
+      - if-name: eth3
+        enabled: true
+        mld:
+          enabled: true
