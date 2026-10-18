@@ -2223,13 +2223,15 @@ pub fn fsm(
 
     // Compute new state (single match, only &mut Peer).
     let (prev_state, effect) = {
-        // Events carry a bare slot index and sit queued in the event
+        // Events carry a bare peer ident and sit queued in the event
         // channel: a config delete (`peers.remove`), interface-neighbor
-        // delete, or the dynamic-peer reaper can empty `peers[id]`
-        // before a queued event for it is dispatched. A tombstoned slot
-        // is therefore a normal race, not a bug — drop the event. (No
-        // path inside the FSM call graph removes slots, so this single
-        // entry guard covers the later lookups in this function.)
+        // delete, or the dynamic-peer reaper can remove the peer
+        // before a queued event for it is dispatched. A missing peer
+        // is therefore a normal race, not a bug — drop the event. The
+        // ident is never reused, so the event can't reach a peer
+        // re-added under the same key either. (No path inside the FSM
+        // call graph removes peers, so this single entry guard covers
+        // the later lookups in this function.)
         let Some(peer) = peer_map.get_mut_by_idx(id) else {
             tracing::debug!(ident = id, "bgp: dropping FSM event for a removed peer");
             return;
@@ -5484,11 +5486,10 @@ mod fsm_removed_slot_tests {
     use super::*;
     use std::net::IpAddr;
 
-    /// A queued event whose peer slot was emptied in the meantime
-    /// (config delete of the neighbor, interface-neighbor delete, or
-    /// the dynamic-peer reaper) must be dropped by `fsm()`, not
-    /// dispatched into the tombstone — the old `unwrap` panicked and
-    /// took the whole daemon down with it.
+    /// A queued event whose peer was removed in the meantime (config
+    /// delete of the neighbor, interface-neighbor delete, or the
+    /// dynamic-peer reaper) must be dropped by `fsm()` — the old
+    /// `unwrap` panicked and took the whole daemon down with it.
     #[tokio::test]
     async fn event_on_removed_peer_slot_is_dropped() {
         let (tx, rx) = mpsc::channel::<Message>(64);

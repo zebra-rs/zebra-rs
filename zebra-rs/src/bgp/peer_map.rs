@@ -10,7 +10,16 @@ use super::peer_key::PeerKey;
 #[derive(Debug, Default)]
 pub struct PeerMap {
     map: BTreeMap<PeerKey, usize>,
-    peers: Vec<Option<Peer>>,
+    /// Live peers by ident, each beside the key it is stored under so
+    /// the mutable walk needs no reverse lookup. Removal drops both
+    /// entries: a peer table under link or dynamic-neighbor churn stays
+    /// the size of its live peers.
+    peers: BTreeMap<usize, (PeerKey, Peer)>,
+    /// The next ident to hand out. Idents are never reused, not even
+    /// for a re-added key: a timer event, policy reply or group member
+    /// still naming a removed peer's ident finds no peer, instead of
+    /// landing on whichever peer took the slot next.
+    next_ident: usize,
     /// Per-AFI/SAFI index of Established peers, maintained at the FSM
     /// Established boundary and purged on removal — see
     /// [`super::membership`] for why it lives inside `PeerMap`.
@@ -32,44 +41,52 @@ impl PeerMap {
 
     pub fn get_by_key(&self, key: &PeerKey) -> Option<&Peer> {
         let &idx = self.map.get(key)?;
-        self.peers[idx].as_ref()
+        self.get_by_idx(idx)
     }
 
     pub fn get_mut_by_key(&mut self, key: &PeerKey) -> Option<&mut Peer> {
         let &idx = self.map.get(key)?;
-        self.peers[idx].as_mut()
+        self.get_mut_by_idx(idx)
     }
 
     pub fn get_by_idx(&self, idx: usize) -> Option<&Peer> {
-        self.peers.get(idx)?.as_ref()
+        self.peers.get(&idx).map(|(_, peer)| peer)
     }
 
     pub fn get_mut_by_idx(&mut self, idx: usize) -> Option<&mut Peer> {
-        self.peers.get_mut(idx)?.as_mut()
+        self.peers.get_mut(&idx).map(|(_, peer)| peer)
     }
 
     pub fn addr_of(&self, idx: usize) -> Option<IpAddr> {
-        self.peers.get(idx)?.as_ref().map(|p| p.address)
+        self.get_by_idx(idx).map(|p| p.address)
     }
 
     pub fn insert(&mut self, addr: IpAddr, peer: Peer) {
         self.insert_with_key(PeerKey::Addr(addr), peer);
     }
 
+    /// Store `peer` under `key`. Replacing a live peer keeps its ident,
+    /// so an in-place upgrade (an RA filling in a dormant
+    /// interface-neighbor's link-local) or an idempotent re-add stays
+    /// the same peer to everything that holds the ident. A key with no
+    /// live peer gets a fresh ident.
     pub fn insert_with_key(&mut self, key: PeerKey, mut peer: Peer) {
-        if let Some(&idx) = self.map.get(&key) {
-            peer.ident = idx;
-            // Replacing the slot's occupant: any membership held under
-            // this ident belongs to the previous session, not the new
-            // peer.
-            self.membership.withdraw(idx);
-            self.peers[idx] = Some(peer);
-        } else {
-            let idx = self.peers.len();
-            peer.ident = idx;
-            self.map.insert(key, idx);
-            self.peers.push(Some(peer));
-        }
+        let idx = match self.map.get(&key) {
+            Some(&idx) => {
+                // Any membership held under this ident belongs to the
+                // previous session, not the new peer.
+                self.membership.withdraw(idx);
+                idx
+            }
+            None => {
+                let idx = self.next_ident;
+                self.next_ident += 1;
+                self.map.insert(key, idx);
+                idx
+            }
+        };
+        peer.ident = idx;
+        self.peers.insert(idx, (key, peer));
     }
 
     pub fn remove(&mut self, addr: &IpAddr) -> Option<Peer> {
@@ -77,15 +94,11 @@ impl PeerMap {
     }
 
     pub fn remove_by_key(&mut self, key: &PeerKey) -> Option<Peer> {
-        let &idx = self.map.get(key)?;
-        let removed = self.peers[idx].take();
-        if removed.is_some() {
-            // The slot's ident is reused by a same-key re-insert;
-            // purge here so the next occupant can't inherit the old
-            // session's membership (the ABA hazard).
-            self.membership.withdraw(idx);
-        }
-        removed
+        let idx = self.map.remove(key)?;
+        // The ident is never handed out again, but the index must
+        // only ever hold live Established peers.
+        self.membership.withdraw(idx);
+        self.peers.remove(&idx).map(|(_, peer)| peer)
     }
 
     /// Read access for fan-outs: walk `membership().family(afi,
@@ -107,11 +120,7 @@ impl PeerMap {
     /// genuinely addr-only consumers (CLI completion of typeable
     /// neighbor addresses).
     pub fn idents(&self) -> Vec<usize> {
-        self.map
-            .values()
-            .filter(|&&idx| self.peers[idx].is_some())
-            .copied()
-            .collect()
+        self.map.values().copied().collect()
     }
 
     /// Snapshot of every Established peer that negotiated `(afi,
@@ -172,7 +181,7 @@ impl PeerMap {
     /// AddPath Send) are session constants fixed by the OPEN exchange,
     /// so enrolling once per session is sound.
     pub fn membership_enroll(&mut self, idx: usize) {
-        let Some(peer) = self.peers.get(idx).and_then(|slot| slot.as_ref()) else {
+        let Some(peer) = self.get_by_idx(idx) else {
             return;
         };
         let families: Vec<(AfiSafi, bool)> = peer
@@ -187,7 +196,7 @@ impl PeerMap {
                 )
             })
             .collect();
-        // Withdraw first: a re-enroll (new session on a reused slot)
+        // Withdraw first: a re-enroll (a new session of the same peer)
         // must not retain families only the previous session
         // negotiated.
         self.membership.withdraw(idx);
@@ -216,9 +225,7 @@ impl PeerMap {
         for (afi_safi, fam) in self.membership().iter() {
             for ident in fam.iter_all() {
                 let peer = self
-                    .peers
-                    .get(ident)
-                    .and_then(|slot| slot.as_ref())
+                    .get_by_idx(ident)
                     .unwrap_or_else(|| panic!("membership {afi_safi:?} holds dead ident {ident}"));
                 assert!(
                     peer.state.is_established(),
@@ -239,7 +246,7 @@ impl PeerMap {
             }
         }
         // Peers → index.
-        for peer in self.peers.iter().flatten() {
+        for (_, peer) in self.peers.values() {
             if !peer.state.is_established() {
                 continue;
             }
@@ -280,35 +287,24 @@ impl PeerMap {
     pub fn iter_all(&self) -> impl Iterator<Item = (&PeerKey, &Peer)> {
         self.map
             .iter()
-            .filter_map(move |(key, &idx)| self.peers[idx].as_ref().map(|peer| (key, peer)))
+            .filter_map(move |(key, &idx)| self.get_by_idx(idx).map(|peer| (key, peer)))
     }
 
-    /// Iterate every peer regardless of key variant, mutable.
+    /// Iterate every peer regardless of key variant, mutable, in ident
+    /// (creation) order.
     pub fn iter_mut_all(&mut self) -> impl Iterator<Item = (&PeerKey, &mut Peer)> {
-        let map = &self.map;
-        self.peers
-            .iter_mut()
-            .enumerate()
-            .filter_map(move |(idx, slot)| {
-                let peer = slot.as_mut()?;
-                map.iter()
-                    .find(|(_, mapped_idx)| **mapped_idx == idx)
-                    .map(|(key, _)| (key, peer))
-            })
+        self.peers.values_mut().map(|(key, peer)| (&*key, peer))
     }
 
     pub fn keys(&self) -> impl Iterator<Item = &IpAddr> {
-        self.map.iter().filter_map(move |(key, &idx)| match key {
-            PeerKey::Addr(addr) if self.peers[idx].is_some() => Some(addr),
+        self.map.keys().filter_map(|key| match key {
+            PeerKey::Addr(addr) => Some(addr),
             _ => None,
         })
     }
 
     pub fn len(&self) -> usize {
-        self.map
-            .values()
-            .filter(|&&idx| self.peers[idx].is_some())
-            .count()
+        self.map.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -491,7 +487,7 @@ mod tests {
     }
 
     #[test]
-    fn remove_purges_membership_against_slot_reuse() {
+    fn remove_purges_membership() {
         let mut m = PeerMap::new();
         let a: IpAddr = Ipv4Addr::new(10, 0, 0, 1).into();
         let mut peer = make_peer(a);
@@ -502,19 +498,75 @@ mod tests {
         m.membership_enroll(idx);
 
         // Remove WITHOUT an explicit withdraw — the purge must be
-        // structural, or the reused ident below inherits membership.
+        // structural, or the index keeps a dead ident.
         m.remove(&a);
         assert!(
             m.membership().family(Afi::Ip, Safi::Unicast).is_none(),
             "removal must purge membership"
         );
 
-        // Same key → same slot/ident. The fresh (non-Established,
-        // nothing negotiated) peer must start with no membership.
+        // The fresh (non-Established, nothing negotiated) peer must
+        // start with no membership.
         m.insert(a, make_peer(a));
-        assert_eq!(m.get(&a).unwrap().ident, idx, "slot is reused");
         m.debug_verify_membership();
         assert!(m.membership().family(Afi::Ip, Safi::Unicast).is_none());
+    }
+
+    /// A removed peer's ident is never handed out again, not even to
+    /// the same key: anything still holding it (a queued timer event,
+    /// a policy reply, a group member) must find no peer rather than
+    /// the next occupant.
+    #[test]
+    fn readded_key_gets_a_fresh_ident() {
+        let mut m = PeerMap::new();
+        let a: IpAddr = Ipv4Addr::new(10, 0, 0, 1).into();
+        let b: IpAddr = Ipv4Addr::new(10, 0, 0, 2).into();
+        m.insert(a, make_peer(a));
+        let old = m.get(&a).unwrap().ident;
+
+        m.remove(&a);
+        m.insert(b, make_peer(b));
+        m.insert(a, make_peer(a));
+        let new = m.get(&a).unwrap().ident;
+
+        assert_ne!(new, old, "same key, new ident");
+        assert_ne!(m.get(&b).unwrap().ident, old, "other key, new ident");
+        assert!(m.get_by_idx(old).is_none(), "the old ident names no peer");
+    }
+
+    /// Replacing a live peer keeps its ident: the dormant
+    /// interface-neighbor's RA upgrade and the VRF's idempotent re-add
+    /// both rely on it.
+    #[test]
+    fn insert_over_live_key_keeps_the_ident() {
+        let mut m = PeerMap::new();
+        let k = PeerKey::Interface(7);
+        m.insert_with_key(k, make_peer(Ipv4Addr::UNSPECIFIED.into()));
+        let idx = m.get_by_key(&k).unwrap().ident;
+
+        m.insert_with_key(k, make_peer(Ipv4Addr::UNSPECIFIED.into()));
+        assert_eq!(m.get_by_key(&k).unwrap().ident, idx);
+        assert_eq!(m.len(), 1);
+    }
+
+    /// Removal frees the peer's entries, so a table under churn (an
+    /// interface-neighbor link re-created on a new ifindex each time,
+    /// dynamic neighbors from ever-new source addresses) holds only
+    /// its live peers.
+    #[test]
+    fn removal_frees_the_entries() {
+        let mut m = PeerMap::new();
+        for ifindex in 0..100 {
+            let k = PeerKey::Interface(ifindex);
+            m.insert_with_key(k, make_peer(Ipv4Addr::UNSPECIFIED.into()));
+            m.remove_by_key(&k);
+        }
+        let a: IpAddr = Ipv4Addr::new(10, 0, 0, 1).into();
+        m.insert(a, make_peer(a));
+
+        assert_eq!(m.map.len(), 1);
+        assert_eq!(m.peers.len(), 1);
+        assert_eq!(m.iter_mut_all().count(), 1);
     }
 
     #[test]
@@ -551,10 +603,10 @@ mod tests {
 
     /// `idents()` is the general, interface-keyed-safe sweep accessor:
     /// unlike `keys()` it must include `PeerKey::Interface` peers, and
-    /// it must drop tombstoned slots. This is the contract the
+    /// it must drop removed peers. This is the contract the
     /// transport reconcilers (BFD / TCP-MSS / MD5 / TCP-AO) rely on.
     #[test]
-    fn idents_includes_interface_keyed_and_skips_tombstones() {
+    fn idents_includes_interface_keyed_and_skips_removed() {
         let mut m = PeerMap::new();
         let a: IpAddr = Ipv4Addr::new(10, 0, 0, 1).into();
         m.insert(a, make_peer(a));
@@ -577,12 +629,8 @@ mod tests {
             "idents() must include both addr- and interface-keyed peers"
         );
 
-        // Tombstone the addr-keyed peer: its slot must drop out.
+        // Remove the addr-keyed peer: its ident must drop out.
         m.remove(&a);
-        assert_eq!(
-            m.idents(),
-            vec![if_idx],
-            "idents() must skip tombstoned slots"
-        );
+        assert_eq!(m.idents(), vec![if_idx], "idents() must skip removed peers");
     }
 }

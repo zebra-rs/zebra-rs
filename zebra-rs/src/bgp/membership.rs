@@ -9,12 +9,11 @@
 //! at the FSM chokepoint, instead of per-prefix in every fan-out.
 //!
 //! Ownership: the index lives inside `PeerMap` so peer removal purges
-//! membership by construction — a freed ident can never linger here
-//! and be inherited by the next peer that reuses the slot (`PeerMap`
-//! reuses indices on same-key re-insert, so a stale ident is an ABA
-//! hazard, not just a leak). The update-groups structure lives outside
-//! `PeerMap` and needs an explicit `update_group::detach` at every
-//! removal site instead.
+//! membership by construction — a removed peer's ident can never
+//! linger here, where a fan-out would keep visiting it. (`PeerMap`
+//! never reuses an ident, so a stale one names no peer.) The
+//! update-groups structure lives outside `PeerMap` and needs an
+//! explicit `update_group::detach` at every removal site instead.
 //!
 //! See `docs/design/bgp-peer-list.md` (Option B) for the full design.
 

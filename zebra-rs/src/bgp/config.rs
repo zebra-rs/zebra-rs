@@ -425,8 +425,8 @@ pub(super) fn remove_peer_full(bgp: &mut Bgp, addr: IpAddr) -> Option<()> {
     route_clean(peer_idx, &mut bgp_ref, &mut bgp.peers, bgp.shards.as_ref());
     // Update-groups live outside `PeerMap`: removal below purges
     // the membership index by construction, but the group member
-    // sets must be detached explicitly or the freed ident lingers
-    // and a future slot reuse inherits the group.
+    // sets must be detached explicitly or the dead ident lingers
+    // there.
     super::update_group::detach(&mut bgp.update_groups, &mut bgp.peers, peer_idx);
     // A whole-neighbor delete doesn't fire the per-leaf `bfd` delete,
     // and an instance-wide `bfd enabled` has none to fire.
@@ -11036,6 +11036,55 @@ mod neighbor_group_wiring_tests {
             Some("LEGACY"),
             "per-AFI delete falls back to the inherited peer-wide policy",
         );
+    }
+
+    /// A deleted neighbor's policy watch can outlive it: the commit
+    /// diff deletes the neighbor entry before its `policy in` leaf, and
+    /// that leaf delete then finds no peer to unregister from. A reply
+    /// the actor sends for that watch must not reach a neighbor
+    /// re-added at the same address, which would then filter with the
+    /// old policy's contents while bound to a new name.
+    #[tokio::test]
+    async fn readded_neighbor_ignores_the_deleted_neighbors_policy_reply() {
+        use crate::bgp::InOut;
+        use crate::policy::{PolicyList, PolicyRx, PolicyType};
+        use bgp_packet::{Afi, AfiSafi, Safi};
+
+        let v4 = AfiSafi::new(Afi::Ip, Safi::Unicast);
+        let mut bgp = fresh_bgp();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        super::config_afi_safi_policy_in(
+            &mut bgp,
+            arg_words(&["10.0.0.1", "ipv4", "OLD"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+        let old = bgp.peers.get(&peer_addr()).unwrap().ident;
+
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Delete).unwrap();
+        config_peer(&mut bgp, arg_words(&["10.0.0.1"]), ConfigOp::Set).unwrap();
+        super::config_afi_safi_policy_in(
+            &mut bgp,
+            arg_words(&["10.0.0.1", "ipv4", "NEW"]),
+            ConfigOp::Set,
+        )
+        .unwrap();
+
+        bgp.process_policy_msg(PolicyRx::PolicyList {
+            name: "OLD".to_string(),
+            ident: super::peer_policy_ident(old, Some(v4)),
+            policy_type: PolicyType::PolicyListIn,
+            policy_list: Some(PolicyList::default()),
+        })
+        .await;
+
+        let slot = bgp
+            .peers
+            .get(&peer_addr())
+            .unwrap()
+            .policy_list_at(v4, InOut::Input);
+        assert_eq!(slot.name.as_deref(), Some("NEW"));
+        assert_eq!(slot.policy_list, None, "OLD's contents on NEW's slot");
     }
 }
 
