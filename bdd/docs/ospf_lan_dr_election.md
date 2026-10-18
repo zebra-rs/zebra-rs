@@ -14,6 +14,11 @@ then elected the DR as their BDR too, r2 never became BDR, and r1 and
 r2 never formed an adjacency. OSPFv3 Hellos always declared them; the
 feature checks both versions on the same network.
 
+A router the election makes DR also elects the BDR in that same
+election (§9.4 step 4: steps 2 and 3 run again with it as DR). Both
+versions used to repeat them with the candidates as they were before,
+so a new DR had no BDR until the next round of Hellos.
+
 ## Test Topology
 
 ```
