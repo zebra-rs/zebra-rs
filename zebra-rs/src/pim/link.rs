@@ -124,13 +124,25 @@ impl<A: PimAf> PimLink<A> {
         self.addrs.iter().any(|p| A::prefix_addr(p) == *addr)
     }
 
-    /// Is `addr` a live PIM neighbor on this link — matching either a
-    /// neighbor's hello source or one of its advertised secondary
-    /// addresses (RFC 7761 §4.3.4)? The RIB's resolved RPF nexthop
-    /// may be any address the neighbor owns, not just its hello
-    /// source.
+    /// NBR(I, A) (RFC 7761 §4.5): the primary address, the Hello
+    /// source, of the live neighbor on this link that owns `addr` as
+    /// its Hello source or as one of its advertised secondary addresses
+    /// (§4.3.4). The RIB's resolved RPF nexthop may be any address the
+    /// neighbor owns: for IPv6 often a global, while Hellos come from
+    /// link-locals.
+    pub fn nbr(&self, addr: &A::Addr) -> Option<A::Addr> {
+        if self.nbrs.contains_key(addr) {
+            return Some(*addr);
+        }
+        self.nbrs
+            .values()
+            .find(|n| n.secondary.contains(addr))
+            .map(|n| n.addr)
+    }
+
+    /// Is `addr` an address of a live PIM neighbor on this link?
     pub fn neighbor_covers(&self, addr: &A::Addr) -> bool {
-        self.nbrs.contains_key(addr) || self.nbrs.values().any(|n| n.secondary.contains(addr))
+        self.nbr(addr).is_some()
     }
 }
 
@@ -510,5 +522,36 @@ mod tests {
         let mut addrs = parse(["::1/128", "2001:db8::1/128", "fe80::1/64"]);
         order_addrs::<Ipv6>(&mut addrs);
         assert_eq!(addrs, parse(["fe80::1/64", "2001:db8::1/128", "::1/128"]));
+    }
+
+    /// A neighbor is known by its Hello source, whichever of its
+    /// addresses the RIB resolved: a PIMv6 route through the neighbor's
+    /// global address still names its link-local.
+    #[test]
+    fn nbr_maps_a_secondary_address_to_the_hello_source() {
+        let mut eth = PimLink::<Ipv6>::from_link(&Link::from(FibLink {
+            index: 2,
+            name: "eth1".to_string(),
+            flags: LinkFlags::Up,
+            ..Default::default()
+        }));
+        let ll: std::net::Ipv6Addr = "fe80::13:1".parse().unwrap();
+        let global: std::net::Ipv6Addr = "2001:db8:13::1".parse().unwrap();
+        eth.nbrs.insert(
+            ll,
+            Neighbor {
+                addr: ll,
+                holdtime: 105,
+                dr_priority: Some(1),
+                gen_id: None,
+                lan_prune_delay: None,
+                secondary: vec![global],
+                uptime: std::time::Instant::now(),
+                expiry: None,
+            },
+        );
+        assert_eq!(eth.nbr(&ll), Some(ll));
+        assert_eq!(eth.nbr(&global), Some(ll));
+        assert_eq!(eth.nbr(&"2001:db8:13::9".parse().unwrap()), None);
     }
 }
