@@ -32,6 +32,10 @@ Feature: Config-created 802.1Q VLAN sub-interfaces
     Then command "ip link show" in namespace "z1" should eventually contain "dum0.100@dum0"
     And command "ip -d link show" in namespace "z1" should eventually contain "vlan protocol 802.1Q id 100"
     And show command "show interface dum0.100" in namespace "z1" should eventually contain "VLAN id 100 parent dum0"
+    # MPLS input is on for the sub-interface. The dot in its name used to
+    # split the sysctl path (net/mpls/conf/dum0/100/input), so it stayed off.
+    And command "cat /proc/sys/net/mpls/conf/dum0.100/input" in namespace "z1" should eventually contain "1"
+    And show command "show interface dum0.100" in namespace "z1" should eventually contain "Label switching is enabled"
     And command "ip link show" in namespace "z1" should not contain "cust-a"
 
   Scenario: Creation defers until the parent appears

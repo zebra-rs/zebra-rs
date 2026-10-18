@@ -63,8 +63,25 @@ pub fn sysctl_enable() -> Vec<String> {
     errors
 }
 
-pub fn sysctl_mpls_enable(ifname: &String) -> anyhow::Result<()> {
-    sysctl_set(&format!("net.mpls.conf.{}.input", ifname), "1")
+/// The `/proc/sys` path of the per-interface sysctl `<tree>.<ifname>.<leaf>`.
+/// A dotted name cannot express it: an interface name may hold a dot
+/// (`eth0.100`), which the dotted form splits into two path components.
+fn iface_sysctl_path(tree: &str, ifname: &str, leaf: &str) -> std::path::PathBuf {
+    std::path::Path::new("/proc/sys")
+        .join(tree.replace('.', "/"))
+        .join(ifname)
+        .join(leaf)
+}
+
+/// Set a per-interface sysctl by its path. Every per-interface knob on an
+/// interface with a dot in its name used to fail, MPLS input among them.
+fn sysctl_set_iface(tree: &str, ifname: &str, leaf: &str, value: &str) -> anyhow::Result<()> {
+    std::fs::write(iface_sysctl_path(tree, ifname, leaf), value)?;
+    Ok(())
+}
+
+pub fn sysctl_mpls_enable(ifname: &str) -> anyhow::Result<()> {
+    sysctl_set_iface("net.mpls.conf", ifname, "input", "1")
 }
 
 /// Set the global kernel MPLS→IP TTL propagation for locally-originated
@@ -83,18 +100,31 @@ pub fn sysctl_mpls_ip_ttl_propagate(propagate: bool) -> anyhow::Result<()> {
     )
 }
 
-pub fn sysctl_seg6_enable(ifname: &String) -> anyhow::Result<()> {
-    sysctl_set(&format!("net.ipv6.conf.{}.seg6_enabled", ifname), "1")
+pub fn sysctl_seg6_enable(ifname: &str) -> anyhow::Result<()> {
+    sysctl_set_iface("net.ipv6.conf", ifname, "seg6_enabled", "1")
 }
 
-pub fn sysctl_keep_addr_on_down(ifname: &String) -> anyhow::Result<()> {
-    sysctl_set(&format!("net.ipv6.conf.{}.keep_addr_on_down", ifname), "1")
+pub fn sysctl_keep_addr_on_down(ifname: &str) -> anyhow::Result<()> {
+    sysctl_set_iface("net.ipv6.conf", ifname, "keep_addr_on_down", "1")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::CTLNAMES;
+    use super::{CTLNAMES, iface_sysctl_path};
     use crate::rib::label_space::PLATFORM_LABELS;
+
+    /// An interface name with a dot stays one path component.
+    #[test]
+    fn iface_sysctl_path_keeps_a_dotted_name_whole() {
+        assert_eq!(
+            iface_sysctl_path("net.mpls.conf", "eth0.100", "input"),
+            std::path::Path::new("/proc/sys/net/mpls/conf/eth0.100/input")
+        );
+        assert_eq!(
+            iface_sysctl_path("net.ipv6.conf", "eth0", "seg6_enabled"),
+            std::path::Path::new("/proc/sys/net/ipv6/conf/eth0/seg6_enabled")
+        );
+    }
 
     #[test]
     fn platform_labels_matches_the_label_space() {
