@@ -370,22 +370,10 @@ fn teardown_peer(bgp: &mut Bgp, ifindex: u32) {
         // member sets need an explicit detach or the dead ident
         // lingers there.
         super::update_group::detach(&mut bgp.update_groups, &mut bgp.peers, peer_idx);
-        // Release the peer's BFD session before it leaves the map.
+        // Release the peer's BFD session and the policy watches the
+        // neighbor-group inheritance registered before it leaves the map.
         super::config::bfd_release_ident(bgp, peer_idx);
-    }
-    // Unregister the policy-list / prefix-set watches the neighbor-group
-    // inheritance registered under the peer's ident. A re-created link
-    // has a new ifindex, so its peer gets a new ident and registers its
-    // own; these would otherwise stay in the policy actor.
-    if let Some(peer) = bgp.peers.get_mut_by_key(&PeerKey::Interface(ifindex)) {
-        for policy_type in [
-            crate::policy::PolicyType::PolicyListIn,
-            crate::policy::PolicyType::PolicyListOut,
-            crate::policy::PolicyType::PrefixSetIn,
-            crate::policy::PolicyType::PrefixSetOut,
-        ] {
-            super::config::apply_peer_policy_ref(&bgp.policy_tx, peer, policy_type, None);
-        }
+        super::config::policy_release_ident(bgp, peer_idx);
     }
     bgp.peers.remove_by_key(&PeerKey::Interface(ifindex));
 }
