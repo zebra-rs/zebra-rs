@@ -1,9 +1,8 @@
 # System, RIB and Forwarding
 
-These commands report the daemon's identity, the contents of the
-Routing Information Base (RIB), and the forwarding constructs the RIB
-programs into the kernel — nexthop groups, MPLS labels, the L2 bridge
-table, and SRv6 SIDs.
+These commands report the daemon's identity, its VRFs and interfaces,
+the L2 bridge table, and SRv6 SIDs. The routing tables, nexthop groups
+and MPLS labels are in [Routing Table (RIB)](ch-18-00-rib.md).
 
 Every command honors the `-j` / `--json` flag described in the
 [overview](ch-06-03-show-commands.md).
@@ -124,156 +123,13 @@ JSON: an array of interface objects. The brief view carries `interface`,
 sub-interface also carries `vlan_id`, `parent` (the parent's name), and
 `parent_index`; the fields are omitted on ordinary interfaces.
 
-## IPv4 / IPv6 routing tables
+## Routing tables, nexthops and MPLS
 
-The RIB views share a layout and a set of status/protocol codes. The
-first column is the source protocol (`C` connected, `S` static,
-`O` OSPF, `B` BGP, `L1`/`L2` IS-IS, `K` kernel, …); `*` marks the
-FIB-installed route and `>` the selected best path.
-
-### `show ip route` / `show ipv6 route`
-
-The full IPv4 (resp. IPv6) routing table.
-
-- `… detail` — IOS-XR-style routing-descriptor blocks: distance, metric,
-  age, and per-nexthop detail (labels, weight, protection).
-- `… {<A.B.C.D>|<A.B.C.D/M>}` (`<X::X>`/`<X::Y/M>` for v6) — just the
-  one route: a bare address shows the longest match (the route that
-  contains it), a prefix matches exactly.
-- `… vrf [<name>] [detail]` — the table for one VRF, or every VRF when
-  `<name>` is omitted. `vrf <name>` also takes the positional
-  address/prefix filter: `show ip route vrf <name> <A.B.C.D>`.
-
-```
-r1> show ip route
-Codes: K - kernel, C - connected, S - static, O - OSPF,
-       B - BGP, L1/L2 - IS-IS level-1/2,
-       > - selected, * - FIB route
-
-O   *> 10.0.0.0/24 [110/100] via 10.1.1.1, eth0, 00:12:34
-C   *> 10.1.1.0/24 is directly connected, eth0, 00:05:43
-
-r1> show ip route detail
-Routing entry for 10.0.0.0/24
-  Known via "ospf", distance 110, metric 100
-  Last update 00:12:34 ago
-  Routing Descriptor Blocks
-    10.1.1.1, via eth0
-      Route metric is 100, weight 0
-```
-
-JSON (all RIB forms): `{ "routes": [ … ] }`. Each route carries
-`prefix`, `protocol`, `subtype`, `selected`, `fib`, `valid`, `distance`,
-`metric`, `interface_name`, and a `nexthops` array whose entries hold
-`address`, `interface`, `weight`, `metric`, `mpls_labels`, and `backup`.
-
-> The per-VRF RIB forms (`show ip route vrf …`) are answered by the RIB
-> directly, unlike the protocol per-VRF forms, which are redirected to a
-> per-VRF task (see the [overview](ch-06-03-show-commands.md)).
+`show ip route`, `show ipv6 route`, `show nexthop`, `show mpls ilm` and
+`show mpls label range|table` are in
+[Routing Table (RIB)](ch-18-00-rib.md).
 
 ## Forwarding constructs
-
-### `show nexthop`
-
-The nexthop groups the RIB has built. Each group shows its ID, refcount,
-and `valid`/`installed` flags; single-path (`uni`), multipath (`multi`),
-and protected (`protect`) groups render their members, weights, SRv6
-segment lists, and MPLS label stacks.
-
-```
-r1> show nexthop
-ID: 1 refcnt: 2 valid: true installed: true
-  via 10.1.1.1, eth0, label 17003
-ID: 2 refcnt: 1 valid: true installed: true
-  [1] via 10.1.1.2, eth1, weight 1
-  [3] via 10.1.1.3, eth2, weight 1
-```
-
-JSON: an array of group objects with `id`, `refcnt`, `valid`,
-`installed`, and `type` (`uni` / `multi` / `protect`), plus either
-inline `via`/`seg6`/`interface`/`labels` (uni) or a `members` array
-(multi / protect). See [NexthopProtect](ch-12-00-nexthop-protect.md).
-
-### `show mpls ilm`
-
-The MPLS Incoming-Label Map: for each local label, the forwarding
-action (`Pop`, `Swap <out>`, VPN decap), the prefix or SID it serves,
-and the outgoing interface / nexthop.
-
-```
-r1> show mpls ilm
- P Dist Local  Outgoing  Prefix/ID          Interface  Next Hop
- * B  15   100  Pop       VPN Decap (tbl100) blue
-   O 10   200  Swap 300  10.0.0.0/24        eth0       10.1.1.1
-```
-
-JSON: `{ "entries": [ { "protocol", "distance", "selected",
-"local_label", "outgoing_label", "prefix_or_id", "outgoing_interface",
-"next_hop" } ] }`.
-
-### `show mpls label range`
-
-The regions of the node's MPLS label space, in order, and how many labels
-are allocated in each. The reserved labels come first. Then each
-`segment-routing block`'s SRGB and SRLB, and an SRGB still held while
-Prefix-SID labels move off it after a change. The dynamic range, where
-label blocks are handed out, starts at 24000 unless `mpls label-range
-dynamic` moves it. Static is whatever those leave. A block handed out
-before the range moved stays where it is until released, and is counted
-in the region it now falls in.
-
-```
-r1> show mpls label range
-Range            Region                                   Allocated
-0-15             reserved (RFC 3032, RFC 7274)
-16-14999         static
-15000-15999      SRLB of segment-routing block default    3 labels
-16000-23999      SRGB of segment-routing block default
-24000-1048574    dynamic                                  1024 labels in 1 block
-```
-
-Allocated counts what the label space hands out: label blocks (BGP's)
-and IGP local labels. Static bindings and Prefix-SID labels are
-configuration, not allocations; `show mpls ilm` shows them.
-
-JSON: `{ "regions": [ { "first", "last", "region", "kind", "block",
-"allocated_labels", "allocated_blocks" } ] }`, where `kind` is
-`reserved`, `static`, `srgb`, `srlb`, `retired-srgb` or `dynamic`.
-
-### `show mpls label table [label <n>]`
-
-Everything the label space has handed out, by first label, with its
-owner, kind and state:
-
-- **Kind:** `block` is a label block for a protocol that allocates its
-  own labels. `local` is an IGP instance's label for a dynamic SID (an
-  Adjacency-SID, a Mirror Context label). `configured SID` is a label
-  claimed for a configured absolute Adjacency-SID.
-- **State:** `held` and `claimed` are in use. A label given back is
-  `releasing` until the RIB is past its owner's earlier messages, then
-  `draining` until the owner's ILM entry at it is withdrawn, and only
-  then free. `claimed by <protocol>` means a configured SID is waiting
-  for the label.
-
-```
-r1> show mpls label table
-Label          Owner   Kind            State
-15000          ospf    configured SID  claimed
-15001          isis    local           held, claimed by ospfv3
-15002          ospf    local           held
-24000-25023    bgp     block           held
-```
-
-`label <n>` shows one label: the region it is in, and what holds it.
-
-```
-r1> show mpls label table label 16005
-Label 16005: SRGB of segment-routing block default
-  not allocated (Prefix-SID labels: see show mpls ilm)
-```
-
-JSON: `{ "entries": [ { "first", "last", "owner", "kind", "state",
-"claimed_by" } ] }`; with `label <n>`, `{ "label", "regions", "entries" }`.
 
 ### `show l2 mac table`
 

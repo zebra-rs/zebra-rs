@@ -25,14 +25,15 @@ own show commands in its chapter, next to its configuration:
   Flex-Algo, TI-LFA and Graceful Restart.
 - [PIM](ch-17-00-pim.md#show-commands) — PIM, IGMP and MLD state and
   the multicast routing table.
+- [Routing Table (RIB)](ch-18-00-rib.md) — the IPv4/IPv6 routing tables,
+  nexthop groups, the MPLS label table and the label space.
 - [eBPF Data Plane](ch-16-00-ebpf.md#show-ebpf) — the eBPF forwarding
   tables and counters.
 
 The rest are still being moved into their chapters:
 
 - [System, RIB and Forwarding](ch-14-01-show-system-rib.md) — version,
-  interfaces, the IPv4/IPv6 routing tables, nexthops, MPLS, L2, VRFs,
-  and SRv6 SIDs.
+  interfaces, L2, VRFs, and SRv6 SIDs.
 - [Neighbor Discovery, BFD and STAMP](ch-14-05-show-bfd-stamp-nd.md) —
   IPv6 ND, BFD sessions, and STAMP delay measurement.
 - [Policy Objects](ch-14-06-show-policy.md) — route policies,
@@ -124,6 +125,6 @@ against the named VRF's protocol task, so a per-VRF form gives the same
 output and JSON as its non-VRF sibling. Only some commands have a
 per-VRF form, though: the grammar accepts `vrf <name>` in front of a
 fixed set of subcommands per protocol, and each protocol's show page
-lists them. The `show ip route vrf` / `show ipv6 route vrf` RIB forms
-work the same way and are documented on the
-[System, RIB and Forwarding](ch-14-01-show-system-rib.md) page.
+lists them. The `show ip route vrf` / `show ipv6 route vrf` forms are
+different: the RIB answers them itself, from its per-VRF tables. See
+[Routing Table (RIB)](ch-18-00-rib.md#show-ip-route-vrf-name).
