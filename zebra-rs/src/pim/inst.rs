@@ -755,7 +755,7 @@ impl<A: PimAf> Pim<A> {
             return;
         }
         let config = self.link_config(&link.name);
-        if config.passive() {
+        if link.is_passive(&config) {
             return;
         }
         let packet = self.hello_packet(link, &config, config.holdtime());
@@ -777,7 +777,7 @@ impl<A: PimAf> Pim<A> {
             return;
         }
         let config = self.link_config(&link.name);
-        if config.passive() {
+        if link.is_passive(&config) {
             return;
         }
         let packet = self.hello_packet(link, &config, 0);

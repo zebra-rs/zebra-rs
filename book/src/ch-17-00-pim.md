@@ -71,7 +71,8 @@ set router pim interface eth0 passive true
   on a running interface.
 - `passive` (default `false`) keeps the interface in the topology (its
   subnet is eligible for RPF and forwarding) but sends and processes no
-  PIM packets — useful for a stub LAN with receivers but no PIM peers.
+  PIM packets — useful for a stub LAN with receivers but no PIM peers. A
+  loopback is always passive: it has no link to find a neighbor on.
 
 The IPv6 form is identical under `router pim ipv6 interface`. PIMv6
 Hellos are sourced from the interface link-local address (RFC 7761
