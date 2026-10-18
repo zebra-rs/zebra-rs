@@ -290,11 +290,16 @@ pub fn ospf_hello_packet(
     now: chrono::DateTime<chrono::Utc>,
 ) -> Option<Ospfv2Packet> {
     let addr = crate::ospf::addr::primary_addr(&oi.addr)?;
+    // RFC 2328 §A.3.2: the DR and BDR this router has elected on the
+    // network, by interface address (0.0.0.0 for none). The other
+    // routers' elections (§9.4) start from these declarations.
     let mut hello = OspfHello {
         netmask: addr.prefix.netmask(),
         hello_interval: oi.hello_interval(),
         priority: oi.priority(),
         router_dead_interval: oi.dead_interval(),
+        d_router: oi.ident.d_router,
+        bd_router: oi.ident.bd_router,
         ..Default::default()
     };
     // RFC 2328 §A.2 / RFC 3101 §2.5: E-bit clear on stub/NSSA,

@@ -1,0 +1,35 @@
+# r1 — the lowest Router ID: DROther, and BDR once r3 has gone.
+# OSPFv2 and OSPFv3 both run over the one broadcast network, at the
+# default priority.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.1/32
+  ipv6:
+    address: 2001:db8::1/128
+- if-name: r1-sw
+  ipv4:
+    address: 192.168.10.1/24
+  ipv6:
+    address: 2001:db8:10::1/64
+router:
+  ospf:
+    router-id: 10.0.0.1
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+      - if-name: r1-sw
+        enabled: true
+        network-type: broadcast
+  ospfv3:
+    router-id: 10.0.0.1
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+      - if-name: r1-sw
+        enabled: true
+        network-type: broadcast

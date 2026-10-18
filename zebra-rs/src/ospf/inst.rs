@@ -24234,6 +24234,45 @@ mod send_age_tests {
 }
 
 #[cfg(test)]
+mod hello_tests {
+    //! What an OSPFv2 Hello says about the network's DR and BDR.
+
+    use super::link_scope_tests::{O, v2_addr, v2_top};
+    use super::*;
+
+    fn hello(link: &OspfLink) -> ospf_packet::OspfHello {
+        let packet =
+            super::super::packet::ospf_hello_packet(link, &BTreeMap::new(), chrono::Utc::now())
+                .expect("the link has an address");
+        match packet.payload {
+            Ospfv2Payload::Hello(hello) => hello,
+            _ => panic!("not a Hello"),
+        }
+    }
+
+    /// RFC 2328 §A.3.2: a Hello declares the DR and BDR this router has
+    /// elected, by interface address, or 0.0.0.0 while there is none.
+    /// The other routers on the network elect from those declarations;
+    /// with Hellos that always said 0.0.0.0, a router could elect the
+    /// DR as its BDR too.
+    #[tokio::test]
+    async fn hello_declares_the_elected_dr_and_bdr() {
+        let mut top = v2_top();
+        let link = top.links.get_mut(&2).unwrap();
+        let none = hello(link);
+        assert!(none.d_router.is_unspecified(), "no DR yet");
+        assert!(none.bd_router.is_unspecified(), "no BDR yet");
+
+        let me: Ipv4Addr = "192.0.2.1".parse().unwrap();
+        link.ident.d_router = v2_addr(O);
+        link.ident.bd_router = me;
+        let elected = hello(link);
+        assert_eq!(elected.d_router, v2_addr(O));
+        assert_eq!(elected.bd_router, me);
+    }
+}
+
+#[cfg(test)]
 mod gr_helper_tests {
     //! RFC 3623 helper mode, in both versions: how a restart the helper
     //! is helping through ends, and what becomes of the adjacency.

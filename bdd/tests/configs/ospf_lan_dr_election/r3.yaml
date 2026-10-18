@@ -1,0 +1,35 @@
+# r3 — the highest Router ID: DR.
+# OSPFv2 and OSPFv3 both run over the one broadcast network, at the
+# default priority.
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.3/32
+  ipv6:
+    address: 2001:db8::3/128
+- if-name: r3-sw
+  ipv4:
+    address: 192.168.10.3/24
+  ipv6:
+    address: 2001:db8:10::3/64
+router:
+  ospf:
+    router-id: 10.0.0.3
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+      - if-name: r3-sw
+        enabled: true
+        network-type: broadcast
+  ospfv3:
+    router-id: 10.0.0.3
+    area:
+    - area-id: 0.0.0.0
+      interface:
+      - if-name: lo
+        enabled: true
+      - if-name: r3-sw
+        enabled: true
+        network-type: broadcast
