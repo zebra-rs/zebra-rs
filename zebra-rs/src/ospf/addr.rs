@@ -58,6 +58,16 @@ pub fn stable_link_local(
         .min()
 }
 
+/// Whether OSPFv3 advertises an interface address as a prefix
+/// (Intra-Area-Prefix-LSA, Link-LSA). A link-local rides the Link-LSA's
+/// own link-local field instead (RFC 5340 §A.4.9), and the loopback
+/// address `::1`, which the kernel puts on `lo` next to any configured
+/// address, must never leave the node (RFC 4291 §2.5.3): the v3 side of
+/// OSPFv2 skipping 127.0.0.0/8 in its Router-LSA.
+pub fn is_advertised_v6(addr: std::net::Ipv6Addr) -> bool {
+    !addr.is_unicast_link_local() && !addr.is_loopback()
+}
+
 /// First address passing `pred` that is not kernel-secondary, falling
 /// back to the first passing one at all. Selection sites (identity,
 /// Hello netmask, Network-LSA ls_id, BFD, SR host prefix) go through
@@ -223,6 +233,13 @@ mod tests {
         // No link-local → None; globals never qualify.
         assert_eq!(stable_link_local(&[mk(global)]), None);
         assert_eq!(stable_link_local(&[]), None);
+    }
+
+    #[test]
+    fn v6_advertises_neither_link_locals_nor_loopback() {
+        assert!(is_advertised_v6("2001:db8::1".parse().unwrap()));
+        assert!(!is_advertised_v6("fe80::1".parse().unwrap()));
+        assert!(!is_advertised_v6(std::net::Ipv6Addr::LOCALHOST));
     }
 
     #[test]
