@@ -49,5 +49,6 @@ through the route-change path, not the session-up dump.
 | Scenario | Result |
 |----------|--------|
 | Setup topology; z1 and z2 establish before any route exists | |
+| show policy names each entry's action and the config's keywords | |
 | Routes learned after the session is up go through the out-policy | |
 | Teardown topology | |
