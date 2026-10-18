@@ -401,6 +401,21 @@ pub fn remove_old_ifindex_peer(bgp: &mut Bgp, name: &str, old: u32) {
     }
 }
 
+/// `RibRx::LinkAdd` gave `ifindex` to `name`, but the peer on it was
+/// materialized for another name: the link was renamed, or a deleted
+/// link's ifindex was reused. `name` would otherwise adopt that peer,
+/// with the other name's remote-as, group and timers. Tear it down;
+/// the other name materializes again once a link of that name exists.
+pub fn remove_other_name_peer(bgp: &mut Bgp, ifindex: u32, name: &str) {
+    let other = bgp
+        .peers
+        .get_by_key(&PeerKey::Interface(ifindex))
+        .is_some_and(|p| p.ifname.as_deref() != Some(name));
+    if other {
+        teardown_peer(bgp, ifindex);
+    }
+}
+
 /// `set router bgp interface-neighbor <name> neighbor-group <group>`.
 pub fn config_interface_neighbor_neighbor_group(
     bgp: &mut Bgp,

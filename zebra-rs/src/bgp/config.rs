@@ -9222,6 +9222,70 @@ mod neighbor_group_wiring_tests {
         assert_eq!(interface_peers(&bgp), vec![(7, "i2".to_string())]);
     }
 
+    /// A link renamed in place keeps its ifindex. The peer on it was the
+    /// old name's, so it goes, and the new name gets its own instead of
+    /// adopting it.
+    #[tokio::test]
+    async fn interface_neighbor_link_rename_drops_the_old_names_peer() {
+        use crate::rib::api::RibRx;
+
+        let mut bgp = fresh_bgp();
+        bgp.process_rib_msg(RibRx::LinkAdd(named_link(7, "i1")));
+        configure_interface_neighbor(&mut bgp, "i1");
+        bgp.process_rib_msg(RibRx::LinkAdd(named_link(7, "x")));
+        assert!(interface_peers(&bgp).is_empty(), "i1 has no link any more");
+
+        configure_interface_neighbor(&mut bgp, "x");
+        assert_eq!(interface_peers(&bgp), vec![(7, "x".to_string())]);
+
+        // Renamed back: x's peer goes and i1's returns.
+        bgp.process_rib_msg(RibRx::LinkAdd(named_link(7, "i1")));
+        assert_eq!(interface_peers(&bgp), vec![(7, "i1".to_string())]);
+    }
+
+    /// A deleted link's ifindex reused by another name: the peer kept
+    /// for the old name goes, and the new name gets its own.
+    #[tokio::test]
+    async fn interface_neighbor_reused_ifindex_drops_the_old_names_peer() {
+        use crate::rib::api::RibRx;
+
+        let mut bgp = fresh_bgp();
+        bgp.process_rib_msg(RibRx::LinkAdd(named_link(7, "i1")));
+        configure_interface_neighbor(&mut bgp, "i1");
+        bgp.process_rib_msg(RibRx::LinkDel(7));
+        bgp.process_rib_msg(RibRx::LinkAdd(named_link(7, "i2")));
+        configure_interface_neighbor(&mut bgp, "i2");
+        assert_eq!(interface_peers(&bgp), vec![(7, "i2".to_string())]);
+
+        // i1's link returns on another ifindex and materializes there.
+        bgp.process_rib_msg(RibRx::LinkAdd(named_link(9, "i1")));
+        let mut peers = interface_peers(&bgp);
+        peers.sort();
+        assert_eq!(peers, vec![(7, "i2".to_string()), (9, "i1".to_string())]);
+    }
+
+    /// An RA reaches the link's current name. A renamed link's old name
+    /// still maps to its ifindex in `link_index_by_name`; resolving the
+    /// RA through it found no neighbor for `eth1` and dropped the RA, so
+    /// `i2`'s peer never learned its link-local.
+    #[tokio::test]
+    async fn interface_neighbor_ra_on_renamed_link_reaches_the_current_name() {
+        use super::super::peer_key::PeerKey;
+        use crate::nd::engine::NdEvent;
+        use crate::rib::api::RibRx;
+
+        let mut bgp = fresh_bgp();
+        bgp.process_rib_msg(RibRx::LinkAdd(named_link(7, "eth1")));
+        bgp.process_rib_msg(RibRx::LinkAdd(named_link(7, "i2")));
+        configure_interface_neighbor(&mut bgp, "i2");
+
+        let src: std::net::Ipv6Addr = "fe80::2".parse().unwrap();
+        bgp.process_nd_event(NdEvent::NeighborDiscovered { ifindex: 7, src });
+        let peer = bgp.peers.get_by_key(&PeerKey::Interface(7)).unwrap();
+        assert_eq!(peer.ifname.as_deref(), Some("i2"));
+        assert_eq!(peer.address, IpAddr::V6(src), "the RA reached i2's peer");
+    }
+
     /// `i1` on ifindex 7 with BFD enabled and its link-local learned, so
     /// the peer holds a BFD subscription. Returns the subscribed key with
     /// the BFD request channel drained.
