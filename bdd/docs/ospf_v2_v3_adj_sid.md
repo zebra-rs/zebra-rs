@@ -32,4 +32,6 @@ a path with no backup.
 | show nexthop names each label stack | |
 | A path with no backup is not tagged Protected | |
 | The route legend lists only codes a route can carry | |
+| show interface reports that the links accept MPLS | |
+| show interface names no parent for a veth | |
 | Teardown | |

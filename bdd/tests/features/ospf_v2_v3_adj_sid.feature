@@ -68,6 +68,21 @@ Feature: OSPFv2 and OSPFv3 give their Adjacency-SIDs different labels
     Then show command "show ip route" in namespace "r2" should eventually contain "S - static"
     And show command "show ip route" in namespace "r2" should not contain "Stale route"
 
+  Scenario: show interface reports that the links accept MPLS
+    Given the test topology exists
+    # zebra-rs turns MPLS input on for every link it learns
+    # (net.mpls.conf.<name>.input); show interface used to report
+    # "Label switching is disabled" on all of them.
+    Then show command "show interface r2-r1" in namespace "r2" should eventually contain "Label switching is enabled"
+    And show command "show interface r2-r1" as JSON in namespace "r2" should eventually contain '"label_switching": "enabled"'
+
+  Scenario: show interface names no parent for a veth
+    Given the test topology exists
+    # r2-r1 is a veth, not a VLAN: its JSON names no parent. It used to
+    # name the local link with its peer's ifindex, often itself.
+    Then show command "show interface r2-r1" as JSON in namespace "r2" should eventually contain '"interface": "r2-r1"'
+    And show command "show interface r2-r1" as JSON in namespace "r2" should not contain '"parent_index"'
+
   Scenario: Teardown
     Given the test topology exists
     When I stop zebra-rs in namespace "r1"

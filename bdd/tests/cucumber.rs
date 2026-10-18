@@ -2134,6 +2134,34 @@ async fn show_json_eventually_contains(
     );
 }
 
+/// Negative JSON sibling: `vtyctl show -j` output does not contain the
+/// substring. Pair it with a positive check that the object is there,
+/// or it passes on an empty answer.
+#[then(expr = "show command {string} as JSON in namespace {string} should not contain {string}")]
+async fn show_json_not_contains(
+    world: &mut World,
+    show_cmd: String,
+    namespace: String,
+    needle: String,
+) {
+    let scoped = world.ns(&namespace);
+    let output = netns::exec_in_netns(&scoped, "vtyctl", &["show", "-j", &show_cmd])
+        .await
+        .expect("Failed to run show command");
+    assert!(
+        !output.contains(&needle),
+        "show -j '{}' in namespace {} contains '{}':\n{}",
+        show_cmd,
+        scoped,
+        needle,
+        output
+    );
+    println!(
+        "✓ show -j '{}' in namespace {} does not contain '{}'",
+        show_cmd, scoped, needle
+    );
+}
+
 /// Does this `show isis database` line hold a *pseudonode* LSP originated
 /// by `host`? LSP IDs render as `<host>.<pseudo-id>-<fragment>`; the
 /// pseudo-id byte is zero for a router's own LSP and non-zero for a
