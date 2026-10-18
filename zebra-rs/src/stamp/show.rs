@@ -2,7 +2,7 @@
 //!
 //! Mirrors `bfd/show.rs`: [`Stamp::show_build`] registers a handler
 //! per path, the event loop dispatches via `process_show_msg`, every
-//! command takes a trailing `json` flag.
+//! command honors the request's JSON flag (`-j`).
 //!
 //!   * `show stamp`            — one line per session: link, state,
 //!     counters, round-trip probe loss, last exported snapshot.

@@ -773,11 +773,8 @@ impl Bfd {
         // Time to the advertised fast rate, and we time out
         // (ControlDetectionTimeExpired). A packet with both P and F set
         // is malformed, so only answer a pure Poll.
-        if packet.poll
-            && !packet.final_bit
-            && let Some(session) = self.sessions.get_by_key(&key)
-        {
-            self.send_control(session, true);
+        if packet.poll && !packet.final_bit {
+            self.transmit(key, true);
         }
 
         if let Some(change) = change {
@@ -821,16 +818,33 @@ impl Bfd {
         if let Some(session) = self.sessions.get_by_key_mut(&key) {
             session.actual_tx_us = actual_tx_us;
         }
-        if let Some(session) = self.sessions.get_by_key(&key) {
-            self.send_control(session, false);
+        self.transmit(key, false);
+    }
+
+    /// Transmit one control packet for `key` and count it, for `show bfd
+    /// counters`: `tx_count` when the packet is handed to the egress loop,
+    /// `tx_failed_count` when the loop is gone. Neither was counted, so
+    /// both always read 0.
+    fn transmit(&mut self, key: SessionKey, final_bit: bool) {
+        let Some(session) = self.sessions.get_by_key(&key) else {
+            return;
+        };
+        let sent = self.send_control(session, final_bit);
+        if let Some(session) = self.sessions.get_by_key_mut(&key) {
+            if sent {
+                session.stats.tx_count += 1;
+            } else {
+                session.stats.tx_failed_count += 1;
+            }
         }
     }
 
     /// Transmit one control packet reflecting `session`'s current
     /// state. `final_bit` sets the Final (F) flag — used only when
     /// answering a peer's Poll (P) per RFC 5880 §6.8.6; the periodic
-    /// [`Self::on_tx_tick`] path passes `false`.
-    fn send_control(&self, session: &Session, final_bit: bool) {
+    /// [`Self::on_tx_tick`] path passes `false`. Returns whether the packet
+    /// reached the egress loop.
+    fn send_control(&self, session: &Session, final_bit: bool) -> bool {
         let dst = SocketAddr::new(session.key.remote, session.dst_port);
         let ifindex = (session.key.ifindex != 0).then_some(session.key.ifindex);
         // Stamp the configured local address as the packet source (e.g.
@@ -858,12 +872,8 @@ impl Bfd {
         };
         // Route to the egress loop matching the destination family.
         match session.key.remote {
-            IpAddr::V4(_) => {
-                let _ = self.write_tx.send(req);
-            }
-            IpAddr::V6(_) => {
-                let _ = self.write_tx_v6.send(req);
-            }
+            IpAddr::V4(_) => self.write_tx.send(req).is_ok(),
+            IpAddr::V6(_) => self.write_tx_v6.send(req).is_ok(),
         }
     }
 
@@ -1202,6 +1212,20 @@ mod tests {
 
         bfd.subscribe("test".into(), key, params, tx);
         assert_eq!(bfd.reflectors.refcount(key.ifindex), 0);
+    }
+
+    /// Each periodic transmission is counted for `show bfd counters`.
+    /// Nothing counted them, so a session Up for hours read TX 0.
+    #[tokio::test]
+    async fn each_transmission_is_counted() {
+        let mut bfd = fresh_bfd();
+        let key = loopback_key(9);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        bfd.subscribe("test".into(), key, SessionParams::default(), tx);
+        bfd.on_tx_tick(key, 1_000_000);
+        bfd.on_tx_tick(key, 1_000_000);
+        let stats = bfd.sessions.get_by_key(&key).unwrap().stats;
+        assert_eq!((stats.tx_count, stats.tx_failed_count), (2, 0));
     }
 
     /// A control packet whose received TTL is below a single-hop
