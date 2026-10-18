@@ -39,6 +39,8 @@ Feature: OSPFv3 graceful restart keeps forwarding through a daemon restart
     Then show command "show ospfv3 graceful-restart" in namespace "b" should contain "Restart staged"
     And show command "show ospfv3 graceful-restart" in namespace "a" should contain "10.0.0.2"
     And show command "show ospfv3 graceful-restart" in namespace "a" should contain "SoftwareRestart"
+    # The helper row names the interface b restarts over.
+    And show command "show ospfv3 graceful-restart" in namespace "a" should contain "10.0.0.2        ethb"
     And show command "show ospfv3 neighbor" in namespace "a" should contain "Full"
 
     # Abort: the flushed Grace-LSA ends a's help (RFC 3623 §3.2), and the

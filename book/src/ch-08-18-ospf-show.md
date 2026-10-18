@@ -29,8 +29,9 @@ loopback), TI-LFA and Flexible Algorithm 128:
 
 Everything except 172.16.4.0/24 is in area 0.0.0.0. r1–r2, r1–r3, r2–r3
 and r3–r4 are point-to-point links; r2–r4 is a broadcast network with r4
-as its DR. r4 is an ABR: 172.16.4.0/24 is a passive interface in area
-0.0.0.1. r1 redistributes the connected network 172.16.1.0/24.
+as its DR and r2 as its BDR. r4 is an ABR: 172.16.4.0/24 is a passive
+interface in area 0.0.0.1. r1 redistributes the connected network
+172.16.1.0/24.
 
 ## Overview
 
@@ -44,12 +45,12 @@ each area whether an SPF is running or queued.
 ```
 r1> show ospf
  OSPF Routing Process, Router ID: 10.0.0.1
- SPF algorithm last executed 0m34s ago
- Last SPF duration 133 usecs
+ SPF algorithm last executed 0m29s ago
+ Last SPF duration 64 usecs
  SPF timers: initial 50 ms, secondary 200 ms, maximum 5000 ms
  MinLSInterval (self-LSA re-origination): 5000 ms
  MinLSArrival (received-LSA rate limit): 1000 ms
- TI-LFA compute: targets=3 mode=serial workers=1 spf{q=3 pc=3 dedup-saved=0} took 79 usecs
+ TI-LFA compute: targets=3 mode=serial workers=1 spf{q=3 pc=3 dedup-saved=0} took 35 usecs
  SPF offload gates:
    area 0.0.0.0: inflight=false, pending=false
 ```
@@ -84,7 +85,7 @@ r1-r2 is up
   Transmit Delay is 1 sec, State Point-To-Point, Priority 64
   Multicast group memberships: OSPFAllRouters
   Timer intervals configured, Hello 10s, Dead 40s, Wait 40s, Retransmit 5
-    Hello due in 5.057s
+    Hello due in 9.927s
   Neighbor Count is 1, Adjacent neighbor count is 1
   Graceful Restart hello delay: 10s
   LSA retransmissions: 0
@@ -105,18 +106,19 @@ neighbor_count, adjacent_count }`, plus `dr_id` / `dr_address` and
 ### `show ospf neighbor [detail]`
 
 The neighbor table. `State` is the neighbor state machine state and,
-after the slash, the neighbor's role on the link (`DR`, `Backup` or
-`DROther`; point-to-point neighbors read `DROther`). `Dead Time` is the
-time left on the inactivity timer, `Interface` is the local interface
-and address, and `RXmtL`, `RqstL` and `DBsmL` are the sizes of the
-retransmission, link-state request and database summary lists.
+after the slash, the neighbor's role on the network (`DR`, `Backup` or
+`DROther`; `-` on a point-to-point link, which elects neither).
+`Dead Time` is the time left on the inactivity timer, `Interface` is the
+local interface and address, and `RXmtL`, `RqstL` and `DBsmL` are the
+sizes of the retransmission, link-state request and database summary
+lists.
 
 ```
 r2> show ospf neighbor
 Neighbor ID     Pri State                   Up Time  Dead Time Address         Interface                        RXmtL RqstL DBsmL
-10.0.0.1         64 Full/DROther              1m05s    34.512s 192.168.12.1    r2-r1:192.168.12.2                   0     0     0
-10.0.0.3         64 Full/DROther              1m15s    34.587s 192.168.23.3    r2-r3:192.168.23.2                   0     0     0
-10.0.0.4         64 Full/DR                   1m15s    34.617s 192.168.24.4    r2-r4:192.168.24.2                   0     0     0
+10.0.0.1         64 Full/-                    1m00s    39.494s 192.168.12.1    r2-r1:192.168.12.2                   0     0     0
+10.0.0.3         64 Full/-                    1m10s    39.512s 192.168.23.3    r2-r3:192.168.23.2                   0     0     0
+10.0.0.4         64 Full/DR                   1m10s    39.522s 192.168.24.4    r2-r4:192.168.24.2                   0     0     0
 ```
 
 `detail` gives one block per neighbor: its interface address, area and
@@ -129,13 +131,13 @@ and the three list sizes.
 r2> show ospf neighbor detail
  Neighbor 10.0.0.1, interface address 192.168.12.1
     In the area 0.0.0.0 via interface r2-r1 local interface IP 192.168.12.2
-    Neighbor priority is 64, State is Full/DROther, Role is DROther, 5 state changes
+    Neighbor priority is 64, State is Full/-, Role is -, 5 state changes
     0 LSA retransmissions
     Most recent state change statistics:
-      Progressive change 1m05s ago
+      Progressive change 1m00s ago
     DR is 0.0.0.0, BDR is 0.0.0.0
     Options 66 *|O|-|-|-|-|E|-
-    Dead timer due in 34.496s
+    Dead timer due in 39.484s
     Database Summary List 0
     Link State Request List 0
     Link State Retransmission List 0
@@ -168,21 +170,21 @@ r1> show ospf database
 Router Link States (Area 0.0.0.0)
 
 Link ID         ADV Router      Age  Seq#       CkSum  Link count  Hold
-10.0.0.1        10.0.0.1          59 0x80000004 0x9c31          5  3540s (1740s)
-10.0.0.2        10.0.0.2          35 0x80000005 0x831b          6  3564s
-10.0.0.3        10.0.0.3          59 0x80000004 0xd559          7  3540s
-10.0.0.4        10.0.0.4          36 0x80000004 0x4838          4  3563s
+10.0.0.1        10.0.0.1          55 0x80000003 0x9e30          5  3544s (1744s)
+10.0.0.2        10.0.0.2          31 0x80000005 0x831b          6  3568s
+10.0.0.3        10.0.0.3          55 0x80000003 0xd758          7  3544s
+10.0.0.4        10.0.0.4          32 0x80000003 0x4a37          4  3567s
 
 Net Link States (Area 0.0.0.0)
 
 Link ID         ADV Router      Age  Seq#       CkSum   Hold
-192.168.24.4    10.0.0.4          36 0x80000001 0x4b63  3563s
+192.168.24.4    10.0.0.4          32 0x80000001 0x4b63  3567s
 
                 Area-Local Opaque-LSA (Area 0.0.0.0)
 
 Opaque-Type/Id  ADV Router      Age  Seq#       CkSum   Hold
-4.0.0.0         10.0.0.1          74 0x80000003 0x9637  3525s (1725s)
-4.0.0.0         10.0.0.2          74 0x80000003 0x903c  3525s
+4.0.0.0         10.0.0.1          70 0x80000003 0x9637  3529s (1729s)
+4.0.0.0         10.0.0.2          70 0x80000003 0x903c  3529s
 ...
 ```
 
@@ -201,16 +203,16 @@ r1> show ospf database detail
 
                 Router Link States (Area 0.0.0.0)
 
-  LS age: 59
+  LS age: 55
   Options: 0x0  : *|-|-|-|-|-|-|-
   LS Type: Router Links
   Link State ID: 10.0.0.1
   Advertising Router: 10.0.0.1
-  LS Seq Number: 0x80000004
-  Checksum: 0x9c31
+  LS Seq Number: 0x80000003
+  Checksum: 0x9e30
   Length: 84
-  Hold remaining: 3540s
-  Refresh remaining: 1740s
+  Hold remaining: 3544s
+  Refresh remaining: 1744s
   Number of Links: 5
 
     Link connected to: Stub Network
@@ -225,7 +227,7 @@ r1> show ospf database detail
       Number of TOS metrics: 0
        TOS 0 Metric: 10
 ...
-  LS age: 74
+  LS age: 70
   Options: 0x42  : *|O|-|-|-|-|E|-
   LS Type: Area-Local Opaque-LSA (Opaque Type 7)
   Opaque-Type 7 (Extended Prefix LSA)
@@ -234,8 +236,8 @@ r1> show ospf database detail
   LS Seq Number: 0x80000003
   Checksum: 0x9b80
   Length: 56
-  Hold remaining: 3525s
-  Refresh remaining: 1725s
+  Hold remaining: 3529s
+  Refresh remaining: 1729s
   Opaque-Info: 36 octets of data
   Extended Prefix TLV: Route Type: 1 (Intra-Area)
     Prefix: 10.0.0.1/32
@@ -517,9 +519,9 @@ Graceful-restart configuration:
   Max grace period: 1800s
   Strict LSA checking: true
   Drain time: 200ms
-  Restart staged: grace=120s, reason=SoftwareRestart, age=3.023385223s
+  Restart staged: grace=120s, reason=SoftwareRestart, age=3.030629963s
 
-Neighbor ID     Interface  Restart Reason         Grace Period   Remaining
+Neighbor ID     Interface        Restart Reason         Grace Period   Remaining
   (no active helpers)
 ```
 
@@ -533,15 +535,14 @@ Graceful-restart configuration:
   Strict LSA checking: true
   Drain time: 200ms
 
-Neighbor ID     Interface  Restart Reason         Grace Period   Remaining
-10.0.0.1        if2        SoftwareRestart        120s           116s
+Neighbor ID     Interface        Restart Reason         Grace Period   Remaining
+10.0.0.1        r2-r1            SoftwareRestart        120s           116s
 ```
 
-The `Interface` column shows the interface by its ifindex.
 
 JSON: `{ helper_enabled, max_grace_period_secs, strict_lsa_checking,
-drain_time_ms, restarting, helpers: [ { neighbor_id, ifindex,
-restart_reason, grace_period_secs, remaining_secs } ] }`, with
+drain_time_ms, restarting, helpers: [ { neighbor_id, interface,
+ifindex, restart_reason, grace_period_secs, remaining_secs } ] }`, with
 `restarting` `{ grace_period_secs, reason, age_secs }` or `null`.
 
 ### `show ospf checkpoint`
@@ -562,7 +563,7 @@ checkpoint, as its commit wrote it:
 r1> show ospf checkpoint
 Checkpoint path: /var/lib/zebra-rs/checkpoint/ospf.cbor
   Format version: 1
-  Written at: SystemTime { tv_sec: 1792273598, tv_nsec: 408972720 } (grace period 120s, reason 1)
+  Written at: 2026-10-18T02:08:22Z (grace period 120s, reason SoftwareRestart)
   Router-ID: 10.0.0.1
   Areas: 1
     0.0.0.0 (type: Normal, 27 LSAs)
@@ -581,4 +582,5 @@ JSON: `{ path, present, error, format_version, written_at,
 grace_period_secs, restart_reason, router_id, areas: [ { area_id,
 area_type, lsa_count } ], links: [ { ifindex, ifname, area_id,
 neighbors: [ { router_id, interface_addr, was_full } ] } ],
-adj_sid_labels: [ { ifindex, address, label } ] }`.
+adj_sid_labels: [ { ifindex, address, label } ] }`, with `written_at`
+in RFC 3339 (UTC) and `restart_reason` by name.

@@ -52,12 +52,12 @@ OSPFv3 Routing Process
   Router ID:    10.0.0.1
   Areas:        1
   Interfaces:   6
-  Last SPF run: 35074 ms ago
-  SPF duration: 113 us
+  Last SPF run: 19876 ms ago
+  SPF duration: 53 us
   SPF timers:   initial 50 ms, secondary 200 ms, maximum 5000 ms
   MinLSInterval: 5000 ms
   MinLSArrival: 1000 ms
-  TI-LFA compute: targets=3 mode=serial workers=1 spf{q=3 pc=3 dedup-saved=0} took 70 us
+  TI-LFA compute: targets=3 mode=serial workers=1 spf{q=3 pc=3 dedup-saved=0} took 26 us
   SPF offload gates:
     area 0.0.0.0: inflight=false, pending=false
 ```
@@ -149,10 +149,10 @@ Area-scope:
   Network-LSA              2                10.0.0.4         0x80000001 2
   Inter-Area-Prefix-LSA    2596542417       10.0.0.4         0x80000001 6
   Intra-Area-Prefix-LSA    0                10.0.0.1         0x8000000c 0
-  Intra-Area-Prefix-LSA    0                10.0.0.2         0x8000000f 1
-  Intra-Area-Prefix-LSA    0                10.0.0.3         0x80000010 7
-  Intra-Area-Prefix-LSA    0                10.0.0.4         0x80000009 2
-  Intra-Area-Prefix-LSA    2                10.0.0.4         0x80000001 2
+  Intra-Area-Prefix-LSA    0                10.0.0.2         0x8000000e 1
+  Intra-Area-Prefix-LSA    0                10.0.0.3         0x80000012 6
+  Intra-Area-Prefix-LSA    0                10.0.0.4         0x80000008 2
+  Intra-Area-Prefix-LSA    2                10.0.0.4         0x80000002 2
 ...
 AS-scope:
   Type                     LS-ID            Adv-Router       Seq#       Age
@@ -166,7 +166,7 @@ Link-scope:
   Link-LSA                 2                10.0.0.1         0x80000003 0
   Link-LSA                 2                10.0.0.2         0x80000003 6
   Link-LSA                 2                10.0.0.3         0x80000003 6
-  Link-LSA                 3                10.0.0.1         0x80000003 0
+  Link-LSA                 3                10.0.0.1         0x80000002 0
 ```
 
 `detail` decodes every LSA, grouped by type and area (or scope): the
@@ -181,15 +181,15 @@ r1> show ospfv3 database detail
 
                 Router-LSA (Area 0.0.0.0)
 
-  Age: 60
+  Age: 55
   Type: 0x2001 (Router-LSA)
   Link State ID: 0
   Advertising Router: 10.0.0.1
   LS Sequence Number: 0x80000004
   Checksum: 0xb311
   Length: 56
-  Hold remaining: 3539s
-  Refresh remaining: 1739s
+  Hold remaining: 3544s
+  Refresh remaining: 1744s
   Flags: 0x02 : E
   Options: V6|E|R
 
@@ -207,15 +207,15 @@ r1> show ospfv3 database detail
 ...
                 E-Router-LSA (Area 0.0.0.0)
 
-  Age: 65
+  Age: 60
   Type: 0xa021 (E-Router-LSA)
   Link State ID: 2
   Advertising Router: 10.0.0.1
   LS Sequence Number: 0x80000001
-  Checksum: 0x08f9
+  Checksum: 0x29d7
   Length: 52
-  Hold remaining: 3534s
-  Refresh remaining: 1734s
+  Hold remaining: 3539s
+  Refresh remaining: 1739s
   Router-Link TLV: Type: Point-to-Point
     Metric: 10
     Interface ID: 2
@@ -224,7 +224,7 @@ r1> show ospfv3 database detail
     Adj-SID Sub-TLV:
       Flags: 0x60 : V|L
       Weight: 0
-      SID/Label: Label: 15002
+      SID/Label: Label: 15003
 ...
 ```
 
@@ -237,25 +237,24 @@ the text form only.
 
 ### `show ospfv3 route`
 
-The routes OSPFv3 computed, with their metric and next hop: a neighbor's
-link-local address with the outgoing ifindex after `%`, or
-`directly attached via <interface>` for a network on this router.
+The routes OSPFv3 computed, with their metric and next hop:
+`via <link-local>%<ifindex>` for a neighbor, or
+`directly attached to <interface>` for a network on this router.
 Intra-area, inter-area and external routes are listed together.
 
 ```
 r1> show ospfv3 route
-OSPFv3 routes (11)
-...
-  2001:db8::1/128 metric 0 via directly attached via lo
-  2001:db8::2/128 metric 10 via fe80::40e3:9dff:fe47:b512%2
-  2001:db8::3/128 metric 15 via fe80::54f6:1dff:fea1:4ee1%3
-  2001:db8::4/128 metric 20 via fe80::40e3:9dff:fe47:b512%2
-  2001:db8:12::/64 metric 10 via directly attached via r1-r2
-  2001:db8:13::/64 metric 15 via directly attached via r1-r3
-  2001:db8:23::/64 metric 20 via fe80::40e3:9dff:fe47:b512%2
-  2001:db8:24::/64 metric 20 via fe80::40e3:9dff:fe47:b512%2
-  2001:db8:34::/64 metric 45 via fe80::54f6:1dff:fea1:4ee1%3
-  2001:db8:f4::/64 metric 30 via fe80::40e3:9dff:fe47:b512%2
+OSPFv3 routes (10)
+  2001:db8::1/128 metric 0 directly attached to lo
+  2001:db8::2/128 metric 10 via fe80::4400:a0ff:febe:a0c5%2
+  2001:db8::3/128 metric 15 via fe80::c814:afff:fede:65f6%3
+  2001:db8::4/128 metric 20 via fe80::4400:a0ff:febe:a0c5%2
+  2001:db8:12::/64 metric 10 directly attached to r1-r2
+  2001:db8:13::/64 metric 15 directly attached to r1-r3
+  2001:db8:23::/64 metric 20 via fe80::4400:a0ff:febe:a0c5%2
+  2001:db8:24::/64 metric 20 via fe80::4400:a0ff:febe:a0c5%2
+  2001:db8:34::/64 metric 45 via fe80::c814:afff:fede:65f6%3
+  2001:db8:f4::/64 metric 30 via fe80::4400:a0ff:febe:a0c5%2
 ```
 
 JSON: an array of `{ prefix, metric, nexthops: [ { nexthop, ifindex }
@@ -313,7 +312,8 @@ enabled and the local SRGB and SRLB. The interface table lists each
 OSPF interface with its network type and Prefix-SID index, and each
 adjacency's Adj-SID on the line below as `nbr=<router> lbl=<label>`.
 `Local ILM` lists the labels this router installed — its Adj-SIDs and
-the Prefix-SIDs it forwards — with their next hop and interface.
+the Prefix-SIDs it forwards — with their operation (`Swap` to keep the
+label, `Pop` to remove it), next hop and interface.
 `Remote Prefix-SIDs` gives each other SR router's SRGB and SRLB and its
 Prefix-SIDs with the label this router pushes toward them. See
 [Segment Routing (SR-MPLS)](ch-15-10-ospfv3-segment-routing.md).
@@ -324,28 +324,34 @@ r1> show ospfv3 segment-routing
   State: enabled
   Local SRGB: [16000/23999]   SRLB: [15000/15999]
 
-  Interface     Network         Prefix-SID      Adj-SID         Adj-SID
+  Interface     Network         Prefix-SID      Adj-SID
   --------------------------------------------------------------------------
   lo            BROADCAST       idx 21          -
   r1-r2         POINT-TO-POINT  -               -
-                                                nbr=10.0.0.2 lbl=15002
+                                                nbr=10.0.0.2 lbl=15003
   r1-r3         POINT-TO-POINT  -               -
-                                                nbr=10.0.0.3 lbl=15003
+                                                nbr=10.0.0.3 lbl=15002
 
   Local ILM (v3): 9 entries
   Label     Type                    Via                               Iface
   ------------------------------------------------------------------------
-  15002     Pop SR Adj (idx 0)      fe80::40e3:9dff:fe47:b512         r1-r2
-  15003     Pop SR Adj (idx 0)      fe80::54f6:1dff:fea1:4ee1         r1-r3
+  15002     Pop SR Adj              fe80::c814:afff:fede:65f6         r1-r3
+  15003     Pop SR Adj              fe80::4400:a0ff:febe:a0c5         r1-r2
   16021     Pop SR Pfx (idx 21)     ::1                               lo
-...
+  16022     Swap SR Pfx (idx 22)    fe80::4400:a0ff:febe:a0c5         r1-r2
+  16023     Swap SR Pfx (idx 23)    fe80::c814:afff:fede:65f6         r1-r3
+  16024     Swap SR Pfx (idx 24)    fe80::4400:a0ff:febe:a0c5         r1-r2
+  16122     Swap SR Pfx (idx 122)   fe80::4400:a0ff:febe:a0c5         r1-r2
+  16123     Swap SR Pfx (idx 123)   fe80::c814:afff:fede:65f6         r1-r3
+  16124     Swap SR Pfx (idx 124)   fe80::4400:a0ff:febe:a0c5         r1-r2
 
   Remote Prefix-SIDs:
 
   SR-Node: 10.0.0.2    Area: 0.0.0.0    SRGB: [16000/23999]    SRLB: [15000/15999]
     Prefix                            Prefix-SID          Label Op        Iface      Nexthop
     ----------------------------------------------------------------------------------
-    2001:db8::2/128                   SR Pfx (idx 22)     Push 16022      r1-r2      fe80::40e3:9dff:fe47:b512
+    2001:db8::2/128                   SR Pfx (idx 22)     Push 16022      r1-r2      fe80::4400:a0ff:febe:a0c5
+    2001:db8::2/128                   SR Pfx (idx 122)    Push 16122      r1-r2      fe80::4400:a0ff:febe:a0c5
 ...
 ```
 
@@ -408,9 +414,9 @@ Flex-Algorithm 128
     10.0.0.3 cost 15 via 10.0.0.3
     10.0.0.4 cost 20 via 10.0.0.2
   Routes:
-    2001:db8::2/128  metric 10  label 16122  via fe80::40e3:9dff:fe47:b512
-    2001:db8::3/128  metric 15  label 16123  via fe80::54f6:1dff:fea1:4ee1
-    2001:db8::4/128  metric 20  label 16124  via fe80::40e3:9dff:fe47:b512
+    2001:db8::2/128  metric 10  label 16122  via fe80::4400:a0ff:febe:a0c5
+    2001:db8::3/128  metric 15  label 16123  via fe80::c814:afff:fede:65f6
+    2001:db8::4/128  metric 20  label 16124  via fe80::4400:a0ff:febe:a0c5
 ```
 
 All four routers advertise a definition at the default priority 128, so
@@ -472,9 +478,9 @@ Prefix-SID last, to close the stack:
 ```
 r1> show ospfv3 repair-list
 Prefix                         Primary via                Repair via                 Segments
-2001:db8::4/128                fe80::40e3:9dff:fe47:b512  fe80::54f6:1dff:fea1:4ee1  [16023, 15004, 16024]
-2001:db8:24::/64               fe80::40e3:9dff:fe47:b512  fe80::54f6:1dff:fea1:4ee1  [16023, 15004]
-2001:db8:f4::/64               fe80::40e3:9dff:fe47:b512  fe80::54f6:1dff:fea1:4ee1  [16023, 15004]
+2001:db8::4/128                fe80::4400:a0ff:febe:a0c5  fe80::c814:afff:fede:65f6  [16023, 15004, 16024]
+2001:db8:24::/64               fe80::4400:a0ff:febe:a0c5  fe80::c814:afff:fede:65f6  [16023, 15004]
+2001:db8:f4::/64               fe80::4400:a0ff:febe:a0c5  fe80::c814:afff:fede:65f6  [16023, 15004]
 ```
 
 r1's repair for r4 goes to r3 (`16023`), takes r3's adjacency to r4
@@ -485,10 +491,10 @@ container, inserted as an SRH ahead of the original destination:
 ```
 r1> show ospfv3 repair-list
 Prefix                         Primary via                Repair via                 Segments
-2001:db8::4/128                fe80::40e3:9dff:fe47:b512  fe80::54f6:1dff:fea1:4ee1  [fcbb:bbbb:3:e002::]
-2001:db8:24::/64               fe80::40e3:9dff:fe47:b512  fe80::54f6:1dff:fea1:4ee1  [fcbb:bbbb:3:e002::]
-2001:db8:f4::/64               fe80::40e3:9dff:fe47:b512  fe80::54f6:1dff:fea1:4ee1  [fcbb:bbbb:3:e002::]
-fcbb:bbbb:4::/48               fe80::40e3:9dff:fe47:b512  fe80::54f6:1dff:fea1:4ee1  [fcbb:bbbb:3:e002::]
+2001:db8::4/128                fe80::4400:a0ff:febe:a0c5  fe80::c814:afff:fede:65f6  [fcbb:bbbb:3:e002::]
+2001:db8:24::/64               fe80::4400:a0ff:febe:a0c5  fe80::c814:afff:fede:65f6  [fcbb:bbbb:3:e002::]
+2001:db8:f4::/64               fe80::4400:a0ff:febe:a0c5  fe80::c814:afff:fede:65f6  [fcbb:bbbb:3:e002::]
+fcbb:bbbb:4::/48               fe80::4400:a0ff:febe:a0c5  fe80::c814:afff:fede:65f6  [fcbb:bbbb:3:e002::]
 ```
 
 `detail` gives the primary and repair next hops with their ifindex and
@@ -497,8 +503,8 @@ metric, and one line per label (`sr-mpls`) or SID (`srv6`):
 ```
 r1> show ospfv3 repair-list detail
 2001:db8::4/128
-  Primary: via fe80::40e3:9dff:fe47:b512 (ifindex 2), metric 20
-  Repair:  via fe80::54f6:1dff:fea1:4ee1 (ifindex 3), metric 21
+  Primary: via fe80::4400:a0ff:febe:a0c5 (ifindex 2), metric 20
+  Repair:  via fe80::c814:afff:fede:65f6 (ifindex 3), metric 21
     sr-mpls 16023
     sr-mpls 15004
     sr-mpls 16024
@@ -530,9 +536,9 @@ Graceful-restart configuration:
   Max grace period: 1800s
   Strict LSA checking: true
   Drain time: 200ms
-  Restart staged: grace=120s, reason=SoftwareRestart, age=3.075630068s
+  Restart staged: grace=120s, reason=SoftwareRestart, age=3.070588424s
 
-Neighbor ID     Interface  Restart Reason         Grace Period   Remaining
+Neighbor ID     Interface        Restart Reason         Grace Period   Remaining
   (no active helpers)
 ```
 
@@ -540,15 +546,14 @@ and on its neighbor r2, helping it:
 
 ```
 r2> show ospfv3 graceful-restart
-Neighbor ID     Interface  Restart Reason         Grace Period   Remaining
-10.0.0.1        if2        SoftwareRestart        120s           116s
+Neighbor ID     Interface        Restart Reason         Grace Period   Remaining
+10.0.0.1        r2-r1            SoftwareRestart        120s           116s
 ```
 
-The `Interface` column shows the interface by its ifindex.
 
 JSON: `{ helper_enabled, max_grace_period_secs, strict_lsa_checking,
-drain_time_ms, restarting, helpers: [ { neighbor_id, ifindex,
-restart_reason, grace_period_secs, remaining_secs } ] }`, with
+drain_time_ms, restarting, helpers: [ { neighbor_id, interface,
+ifindex, restart_reason, grace_period_secs, remaining_secs } ] }`, with
 `restarting` `{ grace_period_secs, reason, age_secs }` or `null`.
 
 ### `show ospfv3 checkpoint`

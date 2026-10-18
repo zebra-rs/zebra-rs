@@ -848,7 +848,7 @@ module exec {
       }
       container database {
         ext:help "OSPF database";
-        presence "OSPF ddtabase";
+        presence "OSPF database";
         leaf detail {
           ext:help "OSPF database detail";
           type empty;

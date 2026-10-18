@@ -53,6 +53,8 @@ Feature: OSPFv2 graceful restart keeps forwarding through a daemon restart
     And I wait 3 seconds
     Then show command "show ospf graceful-restart" in namespace "b" should contain "Restart staged"
     And show command "show ospf graceful-restart" in namespace "a" should contain "10.0.0.2"
+    # The helper row names the interface b restarts over.
+    And show command "show ospf graceful-restart" in namespace "a" should contain "10.0.0.2        ethb"
     And show command "show ospf graceful-restart" in namespace "a" should contain "SoftwareRestart"
     # The held adjacency stays Full while helping.
     And show command "show ospf neighbor" in namespace "a" should contain "Full"

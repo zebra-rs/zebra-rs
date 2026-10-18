@@ -38,6 +38,8 @@ Feature: OSPFv2 passive interfaces advertise their prefix without forming adjace
 
     # The active link works normally.
     Then show command "show ospf neighbor" in namespace "a" should contain "Full"
+    # A point-to-point neighbor has no DR role.
+    And show command "show ospf neighbor" in namespace "a" should contain "Full/-"
     And show command "show ospf neighbor" in namespace "a" should contain "10.0.0.2"
     # The passive interface's prefix is advertised as a stub network.
     And show command "show ospf route" in namespace "a" should contain "10.0.23.0/30"
