@@ -1,0 +1,9 @@
+# z1 — one router, one interface. vc1's addresses give it a connected
+# route per family; the feature adds kernel routes out of vc1 with no
+# gateway. No routing protocol runs.
+interface:
+- if-name: vc1
+  ipv4:
+    address: 172.16.10.1/24
+  ipv6:
+    address: 2001:db8:10::1/64

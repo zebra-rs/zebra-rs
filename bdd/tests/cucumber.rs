@@ -2098,6 +2098,42 @@ async fn show_command_eventually_contains(
     );
 }
 
+/// JSON sibling of `show command … should eventually contain`: polls
+/// `vtyctl show -j` until the output contains the substring. A needle
+/// holding double quotes goes in single quotes: `'"interface": "eth0"'`.
+#[then(
+    expr = "show command {string} as JSON in namespace {string} should eventually contain {string}"
+)]
+async fn show_json_eventually_contains(
+    world: &mut World,
+    show_cmd: String,
+    namespace: String,
+    needle: String,
+) {
+    let scoped = world.ns(&namespace);
+    const ATTEMPTS: u32 = 60;
+    let mut last_output = String::new();
+    for i in 0..ATTEMPTS {
+        last_output = netns::exec_in_netns(&scoped, "vtyctl", &["show", "-j", &show_cmd])
+            .await
+            .expect("Failed to run show command");
+        if last_output.contains(&needle) {
+            println!(
+                "✓ show -j '{}' in namespace {} eventually contains '{}'",
+                show_cmd, scoped, needle
+            );
+            return;
+        }
+        if i + 1 < ATTEMPTS {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
+    }
+    panic!(
+        "show -j '{}' in namespace {} did not contain '{}' after {} attempts\nlast output:\n{}",
+        show_cmd, scoped, needle, ATTEMPTS, last_output
+    );
+}
+
 /// Does this `show isis database` line hold a *pseudonode* LSP originated
 /// by `host`? LSP IDs render as `<host>.<pseudo-id>-<fragment>`; the
 /// pseudo-id byte is zero for a router's own LSP and non-zero for a
