@@ -5892,6 +5892,7 @@ impl Rib {
         // (the operator gave a device this address): never program over
         // the kernel's own row.
         if self.local_device_mac_bridge(vni, mac).is_some() {
+            self.mac_set_installed(vni, mac, false);
             return;
         }
         let Some(entry) = self.mac_table.get(&(vni, mac)) else {
@@ -5921,11 +5922,13 @@ impl Rib {
             if self.local_device_mac_bridge(vni, mac).is_none() {
                 self.fib_handle.mac_del(vni, &mac).await;
             }
+            self.mac_set_installed(vni, mac, false);
             return;
         }
         if self.fib_handle.cradle_active() {
             if let Some(port) = entry.local_port.clone() {
                 self.fib_handle.cradle_fdb_local(vni, &mac, &port).await;
+                self.mac_set_installed(vni, mac, true);
                 return;
             }
             if let Some(esi) = esi
@@ -5933,6 +5936,7 @@ impl Rib {
             {
                 let leaf = flags & super::evpn::MAC_FLAG_ETREE_LEAF != 0;
                 self.fib_handle.cradle_fdb_es(vni, &mac, &esi, leaf).await;
+                self.mac_set_installed(vni, mac, true);
                 return;
             }
         }
@@ -5951,7 +5955,8 @@ impl Rib {
         }
         let (tunnel_endpoint, srv6_sid, mpls_label) =
             dest.map(MacDest::into_parts).unwrap_or((None, None, None));
-        self.fib_handle
+        let installed = self
+            .fib_handle
             .mac_add(
                 vni,
                 &mac,
@@ -5963,6 +5968,16 @@ impl Rib {
                 mpls_label,
             )
             .await;
+        self.mac_set_installed(vni, mac, installed);
+    }
+
+    /// Record whether `(vni, mac)` is programmed in the data plane, which
+    /// `show l2 mac table` reports. It used to be set nowhere, so every
+    /// MAC read `Installed No`.
+    fn mac_set_installed(&mut self, vni: u32, mac: MacAddr, installed: bool) {
+        if let Some(entry) = self.mac_table.get_mut(&(vni, mac)) {
+            entry.installed = installed;
+        }
     }
 
     /// The Ethernet Segment nexthop group for `(esi, bd)` changed (BGP's

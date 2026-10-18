@@ -4863,9 +4863,10 @@ impl FibHandle {
         // cradle eBPF tee is the L2 data plane — there is no kernel VXLAN
         // FDB row to install (and no VXLAN device is required).
         if let Some(sid) = srv6_sid {
-            if let Some(cradle) = &self.cradle {
-                cradle.fdb_add(vni, mac.octets(), sid, etree_leaf).await;
-            }
+            let Some(cradle) = &self.cradle else {
+                return false;
+            };
+            cradle.fdb_add(vni, mac.octets(), sid, etree_leaf).await;
             return true;
         }
         // EVPN over MPLS (RFC 7432): the MAC sits behind a remote PE, reached
@@ -4875,11 +4876,12 @@ impl FibHandle {
         // this MAC simply is not forwardable, and installing a kernel VXLAN
         // row for it would be worse than doing nothing.
         if let Some(label) = mpls_label {
-            if let (Some(cradle), Some(pe)) = (&self.cradle, tunnel_endpoint) {
-                cradle
-                    .fdb_add_mpls(vni, mac.octets(), pe, label, etree_leaf)
-                    .await;
-            }
+            let (Some(cradle), Some(pe)) = (&self.cradle, tunnel_endpoint) else {
+                return false;
+            };
+            cradle
+                .fdb_add_mpls(vni, mac.octets(), pe, label, etree_leaf)
+                .await;
             return true;
         }
         // EVPN over VXLAN + cradle: the MAC sits behind a remote VTEP of

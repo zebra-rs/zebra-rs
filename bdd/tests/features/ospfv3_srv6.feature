@@ -69,6 +69,9 @@ Feature: OSPFv3 SRv6 locator origination (RFC 9513)
     # twin (the block:function entry a NEXT-C-SID carrier hits after
     # the uN shift); z2's classic locator carves a plain End.X.
     Then show command "show segment-routing srv6 sid" in namespace "z1" should contain "uA"
+    # The 18-character uA SID fits its column; it used to run straight
+    # into its behavior ("fcbb:bbbb:1:e000::uA").
+    And show command "show segment-routing srv6 sid" in namespace "z1" should contain "fcbb:bbbb:1:e000::  uA"
     And show command "show segment-routing srv6 sid" in namespace "z1" should contain "uA(LIB)"
     And show command "show segment-routing srv6 sid" in namespace "z2" should contain "End.X"
     # The End.X SID is advertised on the Router-Link TLV of the

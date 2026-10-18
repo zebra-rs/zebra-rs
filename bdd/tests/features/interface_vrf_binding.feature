@@ -67,6 +67,8 @@ Feature: Interface-to-VRF enslavement (`interface <name> vrf <vrf>`)
   Scenario: B - show vrf lists the member and show interface brief names the VRF
     Given the test topology exists
     Then show command "show vrf" in namespace "z1" should eventually contain "vrf1"
+    # Each underline sits under its header.
+    And show command "show vrf" in namespace "z1" should contain " ----------------------  ----------  ---------------  ---"
     And show command "show vrf" in namespace "z1" should eventually contain "vi1"
     And show command "show interface brief" in namespace "z1" should eventually contain "vrf1"
     # vi2 was never bound, so it renders as the default routing instance.
