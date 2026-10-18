@@ -85,20 +85,20 @@ impl<A: PimAf> Pim<A> {
     }
 
     /// Pick a domain-routable source for a unicast PIM message
-    /// (Register / Register-Stop): the highest non-link-local interface
-    /// address (RFC 7761 §4.4.1 / the IPv6 plan §5.2). IPv6 hellos are
+    /// (Register / Register-Stop / Candidate-RP-Advertisement): the
+    /// highest interface address that [`unicast_candidate`] allows
+    /// (RFC 7761 §4.4.1 / the IPv6 plan §5.2). IPv6 hellos are
     /// link-local-sourced, but `write_packet_v6` needs a routable source
     /// pinned for the pseudo-header checksum and for the RP to reply to;
     /// the IPv4 write task ignores `src` (no pseudo-header), so this is
-    /// byte-identical there. `None` if the router has only link-local
-    /// addresses.
+    /// byte-identical there. `None` if the router has no such address.
     pub(crate) fn unicast_source(&self) -> Option<A::Addr> {
-        self.links
-            .values()
-            .flat_map(|l| l.addrs.iter())
-            .map(|p| A::prefix_addr(p))
-            .filter(|a| !A::is_link_local(*a) && !A::is_unspecified(*a))
-            .max()
+        unicast_candidate::<A>(
+            self.links
+                .values()
+                .flat_map(|l| l.addrs.iter())
+                .map(|p| A::prefix_addr(p)),
+        )
     }
 
     fn register_send(&self, rp: A::Addr, data: Vec<u8>, null: bool) {
@@ -245,5 +245,40 @@ impl<A: PimAf> Pim<A> {
                 _ => {}
             }
         }
+    }
+}
+
+/// The highest of `addrs` that may source a unicast PIM message: not
+/// link-local, not unspecified, and not a loopback address. `127.0.0.1`
+/// and `::1` never leave the host (RFC 1122 §3.2.1.3, RFC 4291
+/// §2.5.3), yet `127.0.0.1` outranks most IPv4 addresses.
+fn unicast_candidate<A: PimAf>(addrs: impl Iterator<Item = A::Addr>) -> Option<A::Addr> {
+    addrs
+        .filter(|a| !A::is_link_local(*a) && !A::is_unspecified(*a) && !A::is_loopback(*a))
+        .max()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pim::ipv4::Ipv4;
+    use crate::pim::ipv6::Ipv6;
+
+    #[test]
+    fn a_loopback_address_never_sources_a_unicast_message() {
+        let v4 = |a: &[&str]| unicast_candidate::<Ipv4>(a.iter().map(|a| a.parse().unwrap()));
+        // 127.0.0.1 is the highest of the three.
+        assert_eq!(
+            v4(&["127.0.0.1", "10.0.0.1", "10.0.12.1"]),
+            Some("10.0.12.1".parse().unwrap())
+        );
+        assert_eq!(v4(&["127.0.0.1", "169.254.1.1", "0.0.0.0"]), None);
+
+        let v6 = |a: &[&str]| unicast_candidate::<Ipv6>(a.iter().map(|a| a.parse().unwrap()));
+        assert_eq!(
+            v6(&["::1", "fe80::1", "2001:db8::1"]),
+            Some("2001:db8::1".parse().unwrap())
+        );
+        assert_eq!(v6(&["::1", "fe80::1"]), None);
     }
 }

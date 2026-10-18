@@ -102,7 +102,8 @@ pub trait PimAf: Copy + Eq + Ord + Hash + Debug + Send + Sync + Sized + 'static 
 
     /// Whether `a` is a loopback address (`127.0.0.0/8` / `::1`). It
     /// names the host rather than a link, so it is never a link's
-    /// primary address while the link has another.
+    /// primary address while the link has another, nor the source of a
+    /// unicast PIM message.
     fn is_loopback(a: Self::Addr) -> bool;
 
     /// Build a prefix from a network address and length; `None` if the
