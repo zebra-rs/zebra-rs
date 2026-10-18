@@ -24397,6 +24397,59 @@ mod send_age_tests {
 }
 
 #[cfg(test)]
+mod dr_election_tests {
+    //! RFC 2328 §9.4 step 4: a router the first pass makes DR runs
+    //! steps 2 and 3 again as the DR, so it is no longer eligible for
+    //! BDR and the next router becomes BDR.
+
+    use super::link_scope_tests::{ME, O, S, v2_addr, v2_top, v3_top};
+    use super::*;
+
+    /// On eth2 this router (priority 2) and S and O (priority 1) have
+    /// heard each other and nobody has declared anything yet; then the
+    /// Wait timer fires.
+    fn waiting<V: OspfVersion>(top: &mut Ospf<V>) {
+        let link = top.links.get_mut(&2).unwrap();
+        link.state = IfsmState::Waiting;
+        link.ident.priority = 2;
+        link.flags.set_hello_sent(true);
+        for nbr in link.nbrs.values_mut() {
+            nbr.ident.priority = 1;
+        }
+    }
+
+    #[tokio::test]
+    async fn new_dr_elects_the_next_router_bdr() {
+        // OSPFv2 names the DR and BDR by interface address.
+        let mut top = v2_top();
+        waiting(&mut top);
+        let me: Ipv4Addr = "192.0.2.1".parse().unwrap();
+        top.links.get_mut(&2).unwrap().ident.prefix = "192.0.2.1/24".parse().unwrap();
+        top.process_msg(Message::Ifsm(2, IfsmEvent::WaitTimer))
+            .await;
+        let link = &top.links[&2];
+        assert_eq!(link.state, IfsmState::DR, "v2");
+        assert_eq!(link.ident.d_router, me, "v2 DR");
+        assert_eq!(
+            link.ident.bd_router,
+            v2_addr(O),
+            "v2 BDR: the higher of S and O"
+        );
+        assert_ne!(link.ident.bd_router, v2_addr(S));
+
+        // OSPFv3 names them by Router ID.
+        let mut top = v3_top();
+        waiting(&mut top);
+        top.process_msg(Message::Ifsm(2, IfsmEvent::WaitTimer))
+            .await;
+        let link = &top.links[&2];
+        assert_eq!(link.state, IfsmState::DR, "v3");
+        assert_eq!(link.ident.d_router, ME, "v3 DR");
+        assert_eq!(link.ident.bd_router, O, "v3 BDR: the higher of S and O");
+    }
+}
+
+#[cfg(test)]
 mod hello_tests {
     //! What an OSPFv2 Hello says about the network's DR and BDR.
 

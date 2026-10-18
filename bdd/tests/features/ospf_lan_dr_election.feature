@@ -13,6 +13,11 @@ Feature: OSPF elects a DR and a BDR on a broadcast network
   r2 never formed an adjacency. OSPFv3 Hellos always declared them; the
   feature checks both versions on the same network.
 
+  A router the election makes DR also elects the BDR in that same
+  election (§9.4 step 4: steps 2 and 3 run again with it as DR). Both
+  versions used to repeat them with the candidates as they were before,
+  so a new DR had no BDR until the next round of Hellos.
+
   Test Topology:
   ```
     r1 (10.0.0.1)    r2 (10.0.0.2)    r3 (10.0.0.3)
@@ -46,11 +51,16 @@ Feature: OSPF elects a DR and a BDR on a broadcast network
     And I apply config "r2.yaml" to namespace "r2"
     And I apply config "r3.yaml" to namespace "r3"
     # No router elects before its Wait timer (the 40 s dead interval)
-    # fires, by which time all three have heard each other. Each
-    # router's election then reaches the others with its next Hello, so
-    # the roles settle a few Hello intervals later.
-    And I wait 45 seconds
-    Then show command "show ospf neighbor" in namespace "r3" should eventually contain "10.0.0.1"
+    # fires, by which time all three have heard each other. r3 then
+    # makes itself DR and, in the same election, r2 BDR (RFC 2328 §9.4
+    # step 4), so the BDR is there the moment r3 is DR. Each router's
+    # election reaches the others with its next Hello, so the other
+    # roles settle a few Hello intervals later.
+    Then show command "show ospf interface" in namespace "r3" should eventually contain "State DR, Priority"
+    And show command "show ospf interface" in namespace "r3" should contain "Backup Designated Router (ID) 10.0.0.2, Interface Address 192.168.10.2/24"
+    And show command "show ospfv3 interface" in namespace "r3" should eventually contain "state DR, neighbors 2"
+    And show command "show ospfv3 interface" in namespace "r3" should contain "DR: 10.0.0.3  BDR: 10.0.0.2"
+    And show command "show ospf neighbor" in namespace "r3" should eventually contain "10.0.0.1"
     And show command "show ospf neighbor" in namespace "r3" should eventually contain "10.0.0.2"
     And show command "show ospfv3 neighbor" in namespace "r3" should eventually contain "10.0.0.1"
     And show command "show ospfv3 neighbor" in namespace "r3" should eventually contain "10.0.0.2"
@@ -78,16 +88,17 @@ Feature: OSPF elects a DR and a BDR on a broadcast network
   Scenario: The BDR takes over when the DR fails
     Given the test topology exists
     When I stop zebra-rs in namespace "r3"
-    # r1 and r2 notice when the 40 s dead interval runs out.
-    And I wait 45 seconds
-    # OSPFv2: r2 becomes DR and r1, the only other router left, BDR.
+    # r1 and r2 notice when the 40 s dead interval runs out. r2 becomes
+    # DR and, in the same election, r1, the only other router left, BDR.
     Then show command "show ospf interface" in namespace "r2" should eventually contain "State DR, Priority"
+    And show command "show ospf interface" in namespace "r2" should contain "Backup Designated Router (ID) 10.0.0.1, Interface Address 192.168.10.1/24"
     And show command "show ospf interface" in namespace "r1" should eventually contain "State Backup, Priority"
     And show command "show ospf interface" in namespace "r1" should eventually contain "Designated Router (ID) 10.0.0.2 Interface Address 192.168.10.2/24"
     And show command "show ospf interface" in namespace "r2" should eventually contain "Backup Designated Router (ID) 10.0.0.1, Interface Address 192.168.10.1/24"
     And show command "show ospf neighbor" in namespace "r1" should eventually contain "Full/DR"
     # OSPFv3: the same.
     And show command "show ospfv3 interface" in namespace "r2" should eventually contain "state DR, neighbors 1"
+    And show command "show ospfv3 interface" in namespace "r2" should contain "DR: 10.0.0.2  BDR: 10.0.0.1"
     And show command "show ospfv3 interface" in namespace "r1" should eventually contain "state Backup, neighbors 1"
     And show command "show ospfv3 interface" in namespace "r1" should eventually contain "DR: 10.0.0.2  BDR: 10.0.0.1"
 

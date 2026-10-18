@@ -339,6 +339,11 @@ fn ospf_dr_election<V: OspfVersion>(oi: &mut OspfLink<V>) -> Option<IfsmState> {
     if new_state != prev_state
         && !(new_state == IfsmState::DROther && prev_state < IfsmState::DROther)
     {
+        // RFC 2328 §9.4 step 4: repeat steps 2 and 3 with this router's
+        // new declaration, so a router just made DR is no longer
+        // eligible for BDR. The candidates taken above still show the
+        // old one.
+        let v = ospf_dr_election_init(oi);
         let bdr = ospf_dr_election_bdr(oi, v.clone());
         let dr = ospf_dr_election_dr(oi, bdr, v);
 
