@@ -19464,6 +19464,24 @@ fn add_self_prefix_sids_to_ilm_v3(top: &Ospf<Ospfv3>, ilm: &mut BTreeMap<u32, Sp
     }
 }
 
+/// The ILM label and index of one of this router's own Adjacency-SIDs.
+/// An Index-form SID resolves against the SRGB. A Label-form SID comes
+/// from the SRLB, and its index there is the one the ILM shows (as
+/// IS-IS's `label - local_base`). `None` when an Index-form SID has no
+/// SRGB to resolve against.
+fn own_adj_sid_label(
+    sid: &SidLabelTlv,
+    srgb_start: Option<u32>,
+    srlb_start: Option<u32>,
+) -> Option<(u32, u32)> {
+    match *sid {
+        SidLabelTlv::Label(v) => Some((v, srlb_start.map_or(0, |s| v.saturating_sub(s)))),
+        SidLabelTlv::Index(idx) => srgb_start
+            .and_then(|s| s.checked_add(idx))
+            .map(|v| (v, idx)),
+    }
+}
+
 /// v3 sibling of `add_self_adj_sids_to_ilm`. Walks every area's
 /// self-originated E-Router-LSAs (LS Type 0xA021, RFC 8362 §3.2)
 /// and, for each Router-Link TLV, emits an ILM entry that pops the
@@ -19496,6 +19514,8 @@ fn add_self_adj_sids_to_ilm_v3(top: &Ospf<Ospfv3>, ilm: &mut BTreeMap<u32, SpfIl
     // Index-form SIDs resolve against this router's own SRGB, the
     // watched block's; without one only Label-form SIDs have a label.
     let srgb_start = top.srgb().map(|g| g.start);
+    // A Label-form Adj-SID comes from the SRLB.
+    let srlb_start = top.srlb().map(|b| b.start);
 
     // Resolve `(link, neighbor_router_id)` -> `(ifindex, link-local v6 addr)`.
     // Returns `None` when the named neighbor has aged out of `link.nbrs`
@@ -19575,16 +19595,10 @@ fn add_self_adj_sids_to_ilm_v3(top: &Ospf<Ospfv3>, ilm: &mut BTreeMap<u32, SpfIl
                             let Ospfv3SubTlv::AdjSid(adj) = sub else {
                                 continue;
                             };
-                            let (label, adj_index) = match adj.sid {
-                                SidLabelTlv::Label(v) => {
-                                    (v, srgb_start.map_or(0, |s| v.saturating_sub(s)))
-                                }
-                                SidLabelTlv::Index(idx) => {
-                                    match srgb_start.and_then(|s| s.checked_add(idx)) {
-                                        Some(v) => (v, idx),
-                                        None => continue,
-                                    }
-                                }
+                            let Some((label, adj_index)) =
+                                own_adj_sid_label(&adj.sid, srgb_start, srlb_start)
+                            else {
+                                continue;
                             };
                             install(ilm, label, adj_index, ifindex, nbr_addr);
                             break;
@@ -19600,16 +19614,10 @@ fn add_self_adj_sids_to_ilm_v3(top: &Ospf<Ospfv3>, ilm: &mut BTreeMap<u32, SpfIl
                             else {
                                 continue;
                             };
-                            let (label, adj_index) = match lan.sid {
-                                SidLabelTlv::Label(v) => {
-                                    (v, srgb_start.map_or(0, |s| v.saturating_sub(s)))
-                                }
-                                SidLabelTlv::Index(idx) => {
-                                    match srgb_start.and_then(|s| s.checked_add(idx)) {
-                                        Some(v) => (v, idx),
-                                        None => continue,
-                                    }
-                                }
+                            let Some((label, adj_index)) =
+                                own_adj_sid_label(&lan.sid, srgb_start, srlb_start)
+                            else {
+                                continue;
                             };
                             install(ilm, label, adj_index, ifindex, nbr_addr);
                         }
@@ -19648,6 +19656,8 @@ fn add_self_adj_sids_to_ilm(top: &Ospf, ilm: &mut BTreeMap<u32, SpfIlm>) {
     // Index-form SIDs resolve against this router's own SRGB, the
     // watched block's; without one only Label-form SIDs have a label.
     let srgb_start = top.srgb().map(|g| g.start);
+    // A Label-form Adj-SID comes from the SRLB.
+    let srlb_start = top.srlb().map(|b| b.start);
 
     // Resolve (link, neighbor_router_id) -> (link.index, nbr_addr).
     // Returns None when either side is missing -- the LSA may name a
@@ -19720,16 +19730,10 @@ fn add_self_adj_sids_to_ilm(top: &Ospf, ilm: &mut BTreeMap<u32, SpfIlm>) {
                             let ExtLinkSubTlv::AdjSid(adj) = sub else {
                                 continue;
                             };
-                            let (label, adj_index) = match adj.sid {
-                                SidLabelTlv::Label(v) => {
-                                    (v, srgb_start.map_or(0, |s| v.saturating_sub(s)))
-                                }
-                                SidLabelTlv::Index(idx) => {
-                                    match srgb_start.and_then(|s| s.checked_add(idx)) {
-                                        Some(v) => (v, idx),
-                                        None => continue,
-                                    }
-                                }
+                            let Some((label, adj_index)) =
+                                own_adj_sid_label(&adj.sid, srgb_start, srlb_start)
+                            else {
+                                continue;
                             };
                             install(ilm, label, adj_index, ifindex, nbr_addr, tlv.link_id);
                             break;
@@ -19746,16 +19750,10 @@ fn add_self_adj_sids_to_ilm(top: &Ospf, ilm: &mut BTreeMap<u32, SpfIlm>) {
                             else {
                                 continue;
                             };
-                            let (label, adj_index) = match lan.sid {
-                                SidLabelTlv::Label(v) => {
-                                    (v, srgb_start.map_or(0, |s| v.saturating_sub(s)))
-                                }
-                                SidLabelTlv::Index(idx) => {
-                                    match srgb_start.and_then(|s| s.checked_add(idx)) {
-                                        Some(v) => (v, idx),
-                                        None => continue,
-                                    }
-                                }
+                            let Some((label, adj_index)) =
+                                own_adj_sid_label(&lan.sid, srgb_start, srlb_start)
+                            else {
+                                continue;
                             };
                             install(ilm, label, adj_index, ifindex, nbr_addr, lan.neighbor_id);
                         }
@@ -29461,5 +29459,37 @@ mod sr_block_tests {
             "{text}"
         );
         show(&top, Args(Default::default()), true).expect("json");
+    }
+}
+
+#[cfg(test)]
+mod own_adj_sid_label_tests {
+    use super::*;
+
+    /// A Label-form Adj-SID is indexed within the SRLB, where it was
+    /// allocated. It used to be indexed against the SRGB, which sits
+    /// above the SRLB, so every OSPF Adj-SID read `SR Adj (idx 0)`.
+    #[test]
+    fn label_form_is_indexed_in_the_srlb() {
+        let srgb = Some(16000);
+        let srlb = Some(15000);
+        assert_eq!(
+            own_adj_sid_label(&SidLabelTlv::Label(15000), srgb, srlb),
+            Some((15000, 0))
+        );
+        assert_eq!(
+            own_adj_sid_label(&SidLabelTlv::Label(15001), srgb, srlb),
+            Some((15001, 1))
+        );
+        // Index form resolves against the SRGB.
+        assert_eq!(
+            own_adj_sid_label(&SidLabelTlv::Index(5), srgb, srlb),
+            Some((16005, 5))
+        );
+        assert_eq!(own_adj_sid_label(&SidLabelTlv::Index(5), None, srlb), None);
+        assert_eq!(
+            own_adj_sid_label(&SidLabelTlv::Label(15001), srgb, None),
+            Some((15001, 0))
+        );
     }
 }

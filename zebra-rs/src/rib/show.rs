@@ -442,7 +442,7 @@ static SHOW_HEADER: &str = r#"Codes: K - kernel, D - DHCP route, C - connected, 
        O - OSPF, IA - OSPF inter area, N1/N2 - OSPF NSSA external type 1/2
        E1/E2 - OSPF external type 1/2
        L1/L2 - IS-IS level-1/2, ia - IS-IS inter area, B - BGP
-       > - selected route, * - FIB route, S - Stale route, ? - backup route
+       > - selected route, * - FIB route, ? - backup route
 
 "#;
 
@@ -923,7 +923,13 @@ fn entry_has_srv6(e: &RibEntry) -> bool {
 /// resolution to hostname/sys-id is the IS-IS-view's job (PR C).
 fn write_descriptor_block_v4(buf: &mut String, rib: &Rib, uni: &NexthopUni, role: &str) {
     let iface = rib.link_name(uni.ifindex().unwrap_or(0));
-    let _ = writeln!(buf, "    {}, via {}, {}", uni.addr, iface, role);
+    // Plain paths have no protection role; only a protected primary and
+    // its backup are tagged.
+    if role.is_empty() {
+        let _ = writeln!(buf, "    {}, via {}", uni.addr, iface);
+    } else {
+        let _ = writeln!(buf, "    {}, via {}, {}", uni.addr, iface, role);
+    }
     let _ = writeln!(
         buf,
         "      Route metric is {}, weight {}",
@@ -947,7 +953,13 @@ fn write_descriptor_block_v4(buf: &mut String, rib: &Rib, uni: &NexthopUni, role
 /// 6PE) so we render them too.
 fn write_descriptor_block_v6(buf: &mut String, rib: &Rib, uni: &NexthopUni, role: &str) {
     let iface = rib.link_name(uni.ifindex().unwrap_or(0));
-    let _ = writeln!(buf, "    {}, via {}, {}", uni.addr, iface, role);
+    // Plain paths have no protection role; only a protected primary and
+    // its backup are tagged.
+    if role.is_empty() {
+        let _ = writeln!(buf, "    {}, via {}", uni.addr, iface);
+    } else {
+        let _ = writeln!(buf, "    {}, via {}, {}", uni.addr, iface, role);
+    }
     let _ = writeln!(
         buf,
         "      Route metric is {}, weight {}",
@@ -988,10 +1000,10 @@ fn write_nexthop_blocks_v4(buf: &mut String, rib: &Rib, nh: &Nexthop) {
         Nexthop::Blackhole(_) => {
             let _ = writeln!(buf, "    discard (blackhole)");
         }
-        Nexthop::Uni(uni) => write_descriptor_block_v4(buf, rib, uni, "Protected"),
+        Nexthop::Uni(uni) => write_descriptor_block_v4(buf, rib, uni, ""),
         Nexthop::Multi(multi) => {
             for uni in multi.nexthops.iter() {
-                write_descriptor_block_v4(buf, rib, uni, "Protected");
+                write_descriptor_block_v4(buf, rib, uni, "");
             }
         }
         Nexthop::List(list) => {
@@ -1021,10 +1033,10 @@ fn write_nexthop_blocks_v6(buf: &mut String, rib: &Rib, nh: &Nexthop) {
         Nexthop::Blackhole(_) => {
             let _ = writeln!(buf, "    discard (blackhole)");
         }
-        Nexthop::Uni(uni) => write_descriptor_block_v6(buf, rib, uni, "Protected"),
+        Nexthop::Uni(uni) => write_descriptor_block_v6(buf, rib, uni, ""),
         Nexthop::Multi(multi) => {
             for uni in multi.nexthops.iter() {
-                write_descriptor_block_v6(buf, rib, uni, "Protected");
+                write_descriptor_block_v6(buf, rib, uni, "");
             }
         }
         Nexthop::List(list) => {
@@ -2941,6 +2953,51 @@ mod tests {
         assert_eq!(fmt_protection_role(0), "Protected");
         assert_eq!(fmt_protection_role(1), "Backup (TI-LFA)");
         assert_eq!(fmt_protection_role(7), "Backup (TI-LFA)");
+    }
+
+    /// A path with no backup carries no protection role. Every plain
+    /// Uni and Multi path used to read `, Protected`; only a primary
+    /// with a backup and the backup itself are tagged.
+    #[tokio::test]
+    async fn detail_tags_only_protected_paths() {
+        let rib = Rib::new(false).expect("rib");
+        let uni = |addr: &str| NexthopUni {
+            addr: addr.parse().unwrap(),
+            ..Default::default()
+        };
+        let mut buf = String::new();
+        write_nexthop_blocks_v4(&mut buf, &rib, &Nexthop::Uni(uni("10.0.0.2")));
+        assert!(buf.starts_with("    10.0.0.2, via unknown\n"), "{buf}");
+        let multi = Nexthop::Multi(crate::rib::nexthop::NexthopMulti {
+            nexthops: vec![uni("10.0.0.2"), uni("10.0.0.3")],
+            ..Default::default()
+        });
+        let mut buf = String::new();
+        write_nexthop_blocks_v6(&mut buf, &rib, &multi);
+        assert!(!buf.contains("Protected"), "{buf}");
+        assert!(buf.contains("    10.0.0.3, via unknown\n"), "{buf}");
+        // A primary and its backup still say which is which.
+        let list = Nexthop::List(NexthopList {
+            nexthops: vec![
+                NexthopMember::Uni(uni("10.0.0.2")),
+                NexthopMember::Uni(uni("10.0.0.3")),
+            ],
+        });
+        let mut buf = String::new();
+        write_nexthop_blocks_v4(&mut buf, &rib, &list);
+        assert!(buf.contains("10.0.0.2, via unknown, Protected\n"), "{buf}");
+        assert!(
+            buf.contains("10.0.0.3, via unknown, Backup (TI-LFA)\n"),
+            "{buf}"
+        );
+    }
+
+    /// The legend lists only codes a route can carry: `S` is static.
+    /// It also read `S - Stale route`, which no route line prints.
+    #[test]
+    fn legend_has_no_stale_code() {
+        assert!(!SHOW_HEADER.contains("Stale"), "{SHOW_HEADER}");
+        assert!(SHOW_HEADER.contains("S - static"), "{SHOW_HEADER}");
     }
 
     #[test]
