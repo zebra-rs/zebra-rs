@@ -1866,133 +1866,189 @@ pub fn show(policy: &Policy, _args: Args, json: bool) -> Result<String, Error> {
     for (name, policy) in policy.policy_config.config.iter() {
         let _ = writeln!(buf, "policy-list: {}", name);
         for (seq, entry) in policy.entry.iter() {
-            let _ = writeln!(buf, " entry: {}", seq);
-            if let Some(tag) = &entry.match_tag {
-                let _ = writeln!(buf, "  match: tag {}", tag);
-            }
-            if let Some(tag) = &entry.set_tag {
-                let _ = writeln!(buf, "  set: tag {}", tag);
-            }
-            if let Some(callee) = &entry.call_name {
-                if entry.call_policy.is_some() {
-                    let _ = writeln!(buf, "  call: {}", callee);
-                } else {
-                    let _ = writeln!(buf, "  call: {} [unresolved: denies]", callee);
-                }
-            }
-            if let Some(prefix_set) = &entry.prefix_set_name {
-                let _ = writeln!(buf, "  match: prefix_set {}", prefix_set);
-            }
-            if let Some(community_set) = &entry.community_set_name {
-                let _ = writeln!(buf, "  match: community_set {}", community_set);
-            }
-            if let Some(name) = &entry.ext_community_set_name {
-                let _ = writeln!(buf, "  match: ext-community {}", name);
-            }
-            if let Some(name) = &entry.large_community_set_name {
-                let _ = writeln!(buf, "  match: large-community {}", name);
-            }
-            if let Some(as_path_set) = &entry.as_path_set_name {
-                let _ = writeln!(buf, "  match: as_path_set {}", as_path_set);
-            }
-            if let Some(addr) = &entry.match_next_hop {
-                let _ = writeln!(buf, "  match: next-hop {}", addr);
-            }
-            if let Some(m) = &entry.match_med {
-                let _ = writeln!(buf, "  match: med {} {}", m.op_str(), m.value());
-            }
-            if let Some(m) = &entry.match_as_path_len {
-                let _ = writeln!(buf, "  match: as-path-len {} {}", m.op_str(), m.value());
-            }
-            if let Some(m) = &entry.match_as_path_len_uniq {
-                let _ = writeln!(
-                    buf,
-                    "  match: as-path-len-uniq {} {}",
-                    m.op_str(),
-                    m.value()
-                );
-            }
-            if let Some(m) = &entry.match_local_pref {
-                let _ = writeln!(
-                    buf,
-                    "  match: local-preference {} {}",
-                    m.op_str(),
-                    m.value()
-                );
-            }
-            if let Some(m) = &entry.match_weight {
-                let _ = writeln!(buf, "  match: weight {} {}", m.op_str(), m.value());
-            }
-            if let Some(origin) = &entry.match_origin {
-                let _ = writeln!(buf, "  match: origin {:?}", origin);
-            }
-            if let Some(rt) = &entry.match_evpn_route_type {
-                let _ = writeln!(buf, "  match: evpn route-type {}", rt);
-            }
-            if let Some(vni) = &entry.match_evpn_vni {
-                let _ = writeln!(buf, "  match: evpn vni {}", vni);
-            }
-            if let Some(s) = &entry.local_pref {
-                let _ = writeln!(buf, "  set: local-preference {} {}", s.op_str(), s.value());
-            }
-            if let Some(s) = &entry.med {
-                let _ = writeln!(buf, "  set: med {} {}", s.op_str(), s.value());
-            }
-            if let Some(w) = &entry.weight {
-                let _ = writeln!(buf, "  set: weight {}", w);
-            }
-            if let Some(cfg) = &entry.set_community {
-                let suffix = match cfg.mode {
-                    SetCommunityMode::Replace => "",
-                    SetCommunityMode::Additive => " additive",
-                    SetCommunityMode::Delete => " delete",
-                };
-                let _ = writeln!(buf, "  set: community {}{}", cfg.name, suffix);
-            }
-            if let Some(cfg) = &entry.set_ext_community {
-                let suffix = match cfg.mode {
-                    SetCommunityMode::Replace => "",
-                    SetCommunityMode::Additive => " additive",
-                    SetCommunityMode::Delete => " delete",
-                };
-                let _ = writeln!(buf, "  set: ext-community {}{}", cfg.name, suffix);
-            }
-            if let Some(cfg) = &entry.set_large_community {
-                let suffix = match cfg.mode {
-                    SetCommunityMode::Replace => "",
-                    SetCommunityMode::Additive => " additive",
-                    SetCommunityMode::Delete => " delete",
-                };
-                let _ = writeln!(buf, "  set: large-community {}{}", cfg.name, suffix);
-            }
-            if let Some(prepend) = &entry.set_as_path_prepend {
-                let _ = writeln!(
-                    buf,
-                    "  set: as-path-prepend {} repeat {}",
-                    prepend.asn, prepend.repeat
-                );
-            }
-            if let Some(nh) = &entry.set_next_hop {
-                match nh {
-                    SetNextHop::Address(a) => {
-                        let _ = writeln!(buf, "  set: next-hop {}", a);
-                    }
-                    SetNextHop::SelfAddr => {
-                        let _ = writeln!(buf, "  set: next-hop self");
-                    }
-                }
-            }
-            if let Some(o) = &entry.set_origin {
-                let _ = writeln!(buf, "  set: origin {:?}", o);
-            }
+            write_entry(&mut buf, *seq, entry);
         }
     }
     Ok(buf)
 }
 
+/// The config keyword of a BGP origin, as `match origin` / `set origin`
+/// take it.
+fn origin_name(origin: &Origin) -> &'static str {
+    match origin {
+        Origin::Igp => "igp",
+        Origin::Egp => "egp",
+        Origin::Incomplete => "incomplete",
+    }
+}
+
+/// One `show policy` entry: its sequence number and action, then its
+/// `match`, `call` and `set` lines, each in the keyword the config uses.
+/// The action used to be left out, so a `deny` entry read like a
+/// `permit` one, and some matches showed their field names
+/// (`prefix_set`); `match color`, `set color` and `set prefix-sid` were
+/// not shown at all.
+fn write_entry(buf: &mut String, seq: u32, entry: &PolicyEntry) {
+    let _ = writeln!(buf, " entry: {} {}", seq, entry.action);
+    if let Some(tag) = &entry.match_tag {
+        let _ = writeln!(buf, "  match: tag {}", tag);
+    }
+    if let Some(tag) = &entry.set_tag {
+        let _ = writeln!(buf, "  set: tag {}", tag);
+    }
+    if let Some(callee) = &entry.call_name {
+        if entry.call_policy.is_some() {
+            let _ = writeln!(buf, "  call: {}", callee);
+        } else {
+            let _ = writeln!(buf, "  call: {} [unresolved: denies]", callee);
+        }
+    }
+    if let Some(prefix_set) = &entry.prefix_set_name {
+        let _ = writeln!(buf, "  match: prefix-set {}", prefix_set);
+    }
+    if let Some(community_set) = &entry.community_set_name {
+        let _ = writeln!(buf, "  match: community {}", community_set);
+    }
+    if let Some(name) = &entry.ext_community_set_name {
+        let _ = writeln!(buf, "  match: ext-community {}", name);
+    }
+    if let Some(name) = &entry.large_community_set_name {
+        let _ = writeln!(buf, "  match: large-community {}", name);
+    }
+    if let Some(as_path_set) = &entry.as_path_set_name {
+        let _ = writeln!(buf, "  match: as-path {}", as_path_set);
+    }
+    if let Some(addr) = &entry.match_next_hop {
+        let _ = writeln!(buf, "  match: next-hop {}", addr);
+    }
+    if let Some(m) = &entry.match_med {
+        let _ = writeln!(buf, "  match: med {} {}", m.op_str(), m.value());
+    }
+    if let Some(m) = &entry.match_as_path_len {
+        let _ = writeln!(buf, "  match: as-path-len {} {}", m.op_str(), m.value());
+    }
+    if let Some(m) = &entry.match_as_path_len_uniq {
+        let _ = writeln!(
+            buf,
+            "  match: as-path-len-uniq {} {}",
+            m.op_str(),
+            m.value()
+        );
+    }
+    if let Some(m) = &entry.match_local_pref {
+        let _ = writeln!(
+            buf,
+            "  match: local-preference {} {}",
+            m.op_str(),
+            m.value()
+        );
+    }
+    if let Some(m) = &entry.match_weight {
+        let _ = writeln!(buf, "  match: weight {} {}", m.op_str(), m.value());
+    }
+    if let Some(origin) = &entry.match_origin {
+        let _ = writeln!(buf, "  match: origin {}", origin_name(origin));
+    }
+    if let Some(rt) = &entry.match_evpn_route_type {
+        let _ = writeln!(buf, "  match: evpn route-type {}", rt);
+    }
+    if let Some(vni) = &entry.match_evpn_vni {
+        let _ = writeln!(buf, "  match: evpn vni {}", vni);
+    }
+    if let Some(color) = &entry.match_color {
+        let _ = writeln!(buf, "  match: color {}", color);
+    }
+    if let Some(s) = &entry.local_pref {
+        let _ = writeln!(buf, "  set: local-preference {} {}", s.op_str(), s.value());
+    }
+    if let Some(s) = &entry.med {
+        let _ = writeln!(buf, "  set: med {} {}", s.op_str(), s.value());
+    }
+    if let Some(w) = &entry.weight {
+        let _ = writeln!(buf, "  set: weight {}", w);
+    }
+    if let Some(cfg) = &entry.set_community {
+        let suffix = match cfg.mode {
+            SetCommunityMode::Replace => "",
+            SetCommunityMode::Additive => " additive",
+            SetCommunityMode::Delete => " delete",
+        };
+        let _ = writeln!(buf, "  set: community {}{}", cfg.name, suffix);
+    }
+    if let Some(cfg) = &entry.set_ext_community {
+        let suffix = match cfg.mode {
+            SetCommunityMode::Replace => "",
+            SetCommunityMode::Additive => " additive",
+            SetCommunityMode::Delete => " delete",
+        };
+        let _ = writeln!(buf, "  set: ext-community {}{}", cfg.name, suffix);
+    }
+    if let Some(cfg) = &entry.set_large_community {
+        let suffix = match cfg.mode {
+            SetCommunityMode::Replace => "",
+            SetCommunityMode::Additive => " additive",
+            SetCommunityMode::Delete => " delete",
+        };
+        let _ = writeln!(buf, "  set: large-community {}{}", cfg.name, suffix);
+    }
+    if let Some(prepend) = &entry.set_as_path_prepend {
+        let _ = writeln!(
+            buf,
+            "  set: as-path-prepend {} repeat {}",
+            prepend.asn, prepend.repeat
+        );
+    }
+    if let Some(nh) = &entry.set_next_hop {
+        match nh {
+            SetNextHop::Address(a) => {
+                let _ = writeln!(buf, "  set: next-hop {}", a);
+            }
+            SetNextHop::SelfAddr => {
+                let _ = writeln!(buf, "  set: next-hop self");
+            }
+        }
+    }
+    if let Some(o) = &entry.set_origin {
+        let _ = writeln!(buf, "  set: origin {}", origin_name(o));
+    }
+    if let Some(color) = &entry.set_color {
+        let _ = writeln!(buf, "  set: color {}", color);
+    }
+    if let Some(index) = &entry.set_prefix_sid_label_index {
+        let _ = writeln!(buf, "  set: prefix-sid label-index {}", index);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::policy::prefix::set::{PrefixSet, PrefixSetEntry};
+
+    /// `show policy` names each entry's action and uses the config's
+    /// keywords. A deny entry used to read like a permit one, three
+    /// matches showed field names (`prefix_set`), origin its Debug form,
+    /// and color and prefix-sid were not shown.
+    #[test]
+    fn show_entry_names_the_action_and_config_keywords() {
+        let entry = PolicyEntry {
+            action: PolicyAction::Deny,
+            prefix_set_name: Some("NETS".into()),
+            community_set_name: Some("COMM".into()),
+            as_path_set_name: Some("PATH".into()),
+            match_origin: Some(Origin::Igp),
+            match_color: Some(7),
+            set_color: Some(8),
+            set_prefix_sid_label_index: Some(5),
+            ..Default::default()
+        };
+        let mut buf = String::new();
+        write_entry(&mut buf, 20, &entry);
+        assert_eq!(
+            buf,
+            " entry: 20 deny\n  match: prefix-set NETS\n  match: community COMM\n  \
+             match: as-path PATH\n  match: origin igp\n  match: color 7\n  set: color 8\n  \
+             set: prefix-sid label-index 5\n"
+        );
+    }
 
     use super::*;
 

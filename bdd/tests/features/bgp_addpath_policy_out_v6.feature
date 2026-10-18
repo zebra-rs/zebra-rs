@@ -53,6 +53,14 @@ Feature: An AddPath neighbor's outbound policy applies to route changes too (IPv
     And I apply config "z2.yaml" to namespace "z2"
     Then BGP session in "z1" to "192.168.59.3" should eventually be "Established"
 
+  Scenario: show policy names each entry's action and the config's keywords
+    Given the test topology exists
+    # Entry 10 denies; the action used to be left out, so it read like
+    # a permit entry, and the match showed its field name, prefix_set.
+    Then show command "show policy" in namespace "z1" should eventually contain " entry: 10 deny"
+    And show command "show policy" in namespace "z1" should contain "  match: prefix-set DENY-P"
+    And show command "show policy" in namespace "z1" should contain " entry: 20 permit"
+
   Scenario: Routes learned after the session is up go through the out-policy
     Given the test topology exists
     When I spawn "timeout 600 python3 tests/scripts/bgp_attr_inject_send.py 192.168.59.1 65061 192.168.59.2 6 2001:db8:59::2 /tmp/bgp_addpath_policy_out_v6 2001:db8:58:1::/64 2001:db8:58:2::/64" in namespace "h1"
