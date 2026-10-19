@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 640" width="1000" height="640" font-family="Helvetica, Arial, sans-serif">
+  <title>EVPN services playset topology: E-LINE, E-LAN and E-TREE over three PEs and a P router</title>
+  <defs>
+    <style>
+      .bg { fill: #ffffff; }
+      .router { fill: #eef2f7; stroke: #34495e; stroke-width: 2; }
+      .core { stroke: #34495e; stroke-width: 3; }
+      .name { font-size: 18px; font-weight: bold; fill: #1b2631; text-anchor: middle; }
+      .addr { font-size: 12px; fill: #34495e; text-anchor: middle; }
+      .link { font-size: 11px; fill: #5d6d7e; text-anchor: middle; }
+      .link-left { font-size: 11px; fill: #5d6d7e; text-anchor: start; }
+      .ce { fill: #ffffff; stroke-width: 2.5; }
+      .cename { font-size: 15px; font-weight: bold; fill: #1b2631; text-anchor: middle; }
+      .ceaddr { font-size: 11px; fill: #34495e; text-anchor: middle; }
+      .line { stroke: #d35400; }
+      .lan { stroke: #2471a3; }
+      .tree { stroke: #1e8449; }
+      .ac { stroke-width: 2.5; fill: none; }
+      .leaf { stroke-dasharray: 6 4; }
+      .legend { font-size: 13px; fill: #1b2631; }
+      .note { font-size: 12px; fill: #34495e; }
+    </style>
+  </defs>
+  <rect class="bg" x="0" y="0" width="1000" height="640"/>
+
+  <!-- legend -->
+  <line class="ac line" x1="40" y1="30" x2="80" y2="30"/>
+  <text class="legend" x="88" y="34">E-LINE · EVPN VPWS (RFC 8214) · EVI 300 · 172.16.1.0/24</text>
+  <line class="ac lan" x1="40" y1="54" x2="80" y2="54"/>
+  <text class="legend" x="88" y="58">E-LAN · EVPN (RFC 7432) · EVI/VNI 100 · 172.16.2.0/24</text>
+  <line class="ac tree" x1="540" y1="30" x2="580" y2="30"/>
+  <text class="legend" x="588" y="34">E-TREE root · EVI/VNI 200 · 172.16.3.0/24</text>
+  <line class="ac tree leaf" x1="540" y1="54" x2="580" y2="54"/>
+  <text class="legend" x="588" y="58">E-TREE leaf (RFC 8317) · reaches roots only</text>
+
+  <!-- core links -->
+  <line class="core" x1="310" y1="270" x2="440" y2="270"/>
+  <text class="link" x="375" y="260">10.9.1.0/30</text>
+  <text class="link" x="375" y="288">2001:db8:9:1::/64</text>
+  <line class="core" x1="560" y1="270" x2="690" y2="270"/>
+  <text class="link" x="625" y="260">10.9.2.0/30</text>
+  <text class="link" x="625" y="288">2001:db8:9:2::/64</text>
+  <line class="core" x1="500" y1="300" x2="500" y2="420"/>
+  <text class="link-left" x="510" y="352">10.9.3.0/30</text>
+  <text class="link-left" x="510" y="368">2001:db8:9:3::/64</text>
+
+  <!-- routers -->
+  <rect class="router" x="440" y="240" width="120" height="60" rx="8"/>
+  <text class="name" x="500" y="266">p</text>
+  <text class="addr" x="500" y="284">10.0.0.9 · ::9</text>
+
+  <rect class="router" x="190" y="235" width="120" height="70" rx="8"/>
+  <text class="name" x="250" y="261">pe1</text>
+  <text class="addr" x="250" y="279">10.0.0.1</text>
+  <text class="addr" x="250" y="295">2001:db8::1</text>
+
+  <rect class="router" x="690" y="235" width="120" height="70" rx="8"/>
+  <text class="name" x="750" y="261">pe2</text>
+  <text class="addr" x="750" y="279">10.0.0.2</text>
+  <text class="addr" x="750" y="295">2001:db8::2</text>
+
+  <rect class="router" x="440" y="420" width="120" height="70" rx="8"/>
+  <text class="name" x="500" y="446">pe3</text>
+  <text class="addr" x="500" y="464">10.0.0.3</text>
+  <text class="addr" x="500" y="480">2001:db8::3</text>
+
+  <!-- pe1 attachment circuits -->
+  <path class="ac line" d="M150,150 C170,150 170,250 190,250"/>
+  <path class="ac lan" d="M150,270 L190,270"/>
+  <path class="ac tree" d="M150,390 C170,390 170,290 190,290"/>
+  <rect class="ce line" x="30" y="128" width="120" height="44" rx="6"/>
+  <text class="cename" x="90" y="148">line1</text>
+  <text class="ceaddr" x="90" y="164">172.16.1.1</text>
+  <rect class="ce lan" x="30" y="248" width="120" height="44" rx="6"/>
+  <text class="cename" x="90" y="268">lan1</text>
+  <text class="ceaddr" x="90" y="284">172.16.2.1</text>
+  <rect class="ce tree" x="30" y="368" width="120" height="44" rx="6"/>
+  <text class="cename" x="90" y="388">root1</text>
+  <text class="ceaddr" x="90" y="404">172.16.3.1 · root</text>
+
+  <!-- pe2 attachment circuits -->
+  <path class="ac line" d="M810,250 C830,250 830,150 850,150"/>
+  <path class="ac lan" d="M810,270 L850,270"/>
+  <path class="ac tree leaf" d="M810,290 C830,290 830,390 850,390"/>
+  <rect class="ce line" x="850" y="128" width="120" height="44" rx="6"/>
+  <text class="cename" x="910" y="148">line2</text>
+  <text class="ceaddr" x="910" y="164">172.16.1.2</text>
+  <rect class="ce lan" x="850" y="248" width="120" height="44" rx="6"/>
+  <text class="cename" x="910" y="268">lan2</text>
+  <text class="ceaddr" x="910" y="284">172.16.2.2</text>
+  <rect class="ce tree leaf" x="850" y="368" width="120" height="44" rx="6"/>
+  <text class="cename" x="910" y="388">leaf2</text>
+  <text class="ceaddr" x="910" y="404">172.16.3.2 · leaf</text>
+
+  <!-- pe3 attachment circuits -->
+  <path class="ac lan" d="M480,490 C480,520 400,520 400,548"/>
+  <path class="ac tree leaf" d="M520,490 C520,520 600,520 600,548"/>
+  <rect class="ce lan" x="340" y="548" width="120" height="44" rx="6"/>
+  <text class="cename" x="400" y="568">lan3</text>
+  <text class="ceaddr" x="400" y="584">172.16.2.3</text>
+  <rect class="ce tree leaf" x="540" y="548" width="120" height="44" rx="6"/>
+  <text class="cename" x="600" y="568">leaf3</text>
+  <text class="ceaddr" x="600" y="584">172.16.3.3 · leaf</text>
+
+  <!-- notes -->
+  <text class="note" x="30" y="470">iBGP full mesh (AS 65000) between</text>
+  <text class="note" x="30" y="486">the PE loopbacks · IS-IS L2 underlay</text>
+  <text class="note" x="30" y="510">cradle eBPF on every PE</text>
+  <text class="note" x="30" y="526">(system ebpf enabled)</text>
+  <text class="note" x="700" y="470">vxlan · VNI = EVI, loopback VTEPs</text>
+  <text class="note" x="700" y="490">mpls · IS-IS SR-MPLS, service labels</text>
+  <text class="note" x="700" y="510">srv6 · IS-IS SRv6, uSID locators</text>
+  <text class="note" x="742" y="526">LOCn = fcbb:bbbb:n::/48</text>
+  <text class="note" x="30" y="620">leaf2 ✕ leaf3: leaves never reach each other, on any encapsulation</text>
+</svg>

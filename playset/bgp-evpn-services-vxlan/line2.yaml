@@ -1,0 +1,7 @@
+# line2 — the other end of the E-LINE (EVI 300).
+interface:
+- if-name: line2-pe2
+  ipv4:
+    address: 172.16.1.2/24
+system:
+  hostname: line2

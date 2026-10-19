@@ -1,0 +1,42 @@
+# P — the core router. Plain IS-IS and kernel IPv4 forwarding: it routes
+# the PEs' VXLAN packets by their outer header toward the loopback VTEPs
+# and holds no BGP, no EVPN and no tenant state at all.
+system:
+  hostname: p
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.9/32
+- if-name: p-pe1
+  ipv4:
+    address: 10.9.1.2/30
+- if-name: p-pe2
+  ipv4:
+    address: 10.9.2.2/30
+- if-name: p-pe3
+  ipv4:
+    address: 10.9.3.2/30
+router:
+  isis:
+    net: 49.0000.0000.0000.0009.00
+    hostname: p
+    is-type: level-2-only
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+    - if-name: p-pe1
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enabled: true
+    - if-name: p-pe2
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enabled: true
+    - if-name: p-pe3
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enabled: true

@@ -1,0 +1,95 @@
+# PE3 — EVPN over SRv6 (RFC 9252), forwarded by the cradle eBPF engine
+# (`system ebpf enabled`). No E-LINE here (a VPWS has two ends, PE1 and
+# PE2):
+#
+# * E-LAN: br100 with pe3-lan3 (VNI 100, declared by vxlan100).
+# * E-TREE: br200 with pe3-leaf3 (VNI 200), a leaf with leaf argument 1
+#   of its own. leaf2 and leaf3 sit on different PEs, and the E-TREE
+#   keeps them apart across the core.
+system:
+  hostname: pe3
+  ebpf:
+    enabled: true
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::3/128
+- if-name: pe3-p
+  ipv6:
+    address: 2001:db8:9:3::1/64
+  ebpf:
+    enabled: true
+- if-name: pe3-lan3
+  bridge: br100
+  ebpf:
+    enabled: true
+- if-name: pe3-leaf3
+  bridge: br200
+  ebpf:
+    enabled: true
+bridge:
+- name: br100
+- name: br200
+vxlan:
+- name: vxlan100
+  vni: 100
+  local-address: 2001:db8::3
+  bridge: br100
+- name: vxlan200
+  vni: 200
+  local-address: 2001:db8::3
+  bridge: br200
+segment-routing:
+  locator:
+  - name: LOC3
+    prefix: fcbb:bbbb:3::/48
+    behavior: usid
+router:
+  isis:
+    net: 49.0000.0000.0000.0003.00
+    hostname: pe3
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC3
+    interface:
+    - if-name: lo
+      ipv6:
+        enabled: true
+    - if-name: pe3-p
+      network-type: point-to-point
+      metric: 10
+      ipv6:
+        enabled: true
+  bgp:
+    global:
+      as: 65000
+      router-id: 10.0.0.3
+    timer:
+      adv-interval:
+        ibgp: 1
+    segment-routing:
+      srv6:
+        locator: LOC3
+    afi-safi:
+    - name: evpn
+      advertise-all-vni: true
+      encapsulation: srv6
+      etree:
+        leaf-interface:
+        - name: pe3-leaf3
+    neighbor:
+    - remote-address: 2001:db8::1
+      remote-as: 65000
+      update-source: 2001:db8::3
+      enabled: true
+      afi-safi:
+      - name: evpn
+        enabled: true
+    - remote-address: 2001:db8::2
+      remote-as: 65000
+      update-source: 2001:db8::3
+      enabled: true
+      afi-safi:
+      - name: evpn
+        enabled: true

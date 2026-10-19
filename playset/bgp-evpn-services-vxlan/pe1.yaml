@@ -1,0 +1,94 @@
+# PE1 — EVPN over VXLAN (RFC 8365), all three services on one PE, every
+# one of them forwarded by the cradle eBPF engine (`system ebpf enabled`):
+#
+# * E-LINE: `vpws eline1` cross-connects pe1-line1 to PE2 (EVI 300). The
+#   Type-1 carries VNI 300 (the EVI, by default) and the VXLAN
+#   Encapsulation EC.
+# * E-LAN: vxlan100 in br100 with pe1-lan1 — Type-2 MAC/IP and Type-3
+#   IMET routes for VNI 100.
+# * E-TREE: vxlan200 in br200 with pe1-root1. No `etree` here: an AC that
+#   is not a leaf is a root, so this PE is the tree's root site.
+#
+# The VTEP is the loopback (the engine has one fabric-wide VTEP source),
+# and IS-IS carries the loopbacks through P.
+system:
+  hostname: pe1
+  ebpf:
+    enabled: true
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.1/32
+- if-name: pe1-p
+  ipv4:
+    address: 10.9.1.1/30
+  ebpf:
+    enabled: true
+- if-name: pe1-line1
+  ebpf:
+    enabled: true
+- if-name: pe1-lan1
+  bridge: br100
+  ebpf:
+    enabled: true
+- if-name: pe1-root1
+  bridge: br200
+  ebpf:
+    enabled: true
+bridge:
+- name: br100
+- name: br200
+vxlan:
+- name: vxlan100
+  vni: 100
+  local-address: 10.0.0.1
+  bridge: br100
+- name: vxlan200
+  vni: 200
+  local-address: 10.0.0.1
+  bridge: br200
+router:
+  isis:
+    net: 49.0000.0000.0000.0001.00
+    hostname: pe1
+    is-type: level-2-only
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+    - if-name: pe1-p
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enabled: true
+  bgp:
+    global:
+      as: 65000
+      router-id: 10.0.0.1
+    timer:
+      adv-interval:
+        ibgp: 1
+    afi-safi:
+    - name: evpn
+      advertise-all-vni: true
+      vpws:
+      - name: eline1
+        evi: 300
+        local-service-id: 1
+        remote-service-id: 2
+        interface: pe1-line1
+    neighbor:
+    - remote-address: 10.0.0.2
+      remote-as: 65000
+      update-source: 10.0.0.1
+      enabled: true
+      afi-safi:
+      - name: evpn
+        enabled: true
+    - remote-address: 10.0.0.3
+      remote-as: 65000
+      update-source: 10.0.0.1
+      enabled: true
+      afi-safi:
+      - name: evpn
+        enabled: true

@@ -1,0 +1,7 @@
+# lan3 — a host on the E-LAN (EVI 100).
+interface:
+- if-name: lan3-pe3
+  ipv4:
+    address: 172.16.2.3/24
+system:
+  hostname: lan3

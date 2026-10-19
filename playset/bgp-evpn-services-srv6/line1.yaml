@@ -1,0 +1,9 @@
+# line1 — a CE on the E-LINE (EVPN VPWS, EVI 300). It shares
+# 172.16.1.0/24 with line2 and resolves it by ARP straight through the
+# point-to-point service: nothing E-LINE-aware on the host.
+interface:
+- if-name: line1-pe1
+  ipv4:
+    address: 172.16.1.1/24
+system:
+  hostname: line1

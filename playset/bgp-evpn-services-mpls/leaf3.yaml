@@ -1,0 +1,7 @@
+# leaf3 — an E-TREE leaf (EVI 200): it reaches root1, never leaf2.
+interface:
+- if-name: leaf3-pe3
+  ipv4:
+    address: 172.16.3.3/24
+system:
+  hostname: leaf3

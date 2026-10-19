@@ -1,0 +1,83 @@
+# PE3 — EVPN over VXLAN (RFC 8365), forwarded by the cradle eBPF engine
+# (`system ebpf enabled`). No E-LINE here (a VPWS has two ends, PE1 and
+# PE2):
+#
+# * E-LAN: vxlan100 in br100 with pe3-lan3.
+# * E-TREE: vxlan200 in br200 with pe3-leaf3, a leaf — a second
+#   leaf-only PE. leaf2 and leaf3 sit on different PEs, and the E-TREE
+#   keeps them apart across the core.
+system:
+  hostname: pe3
+  ebpf:
+    enabled: true
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.3/32
+- if-name: pe3-p
+  ipv4:
+    address: 10.9.3.1/30
+  ebpf:
+    enabled: true
+- if-name: pe3-lan3
+  bridge: br100
+  ebpf:
+    enabled: true
+- if-name: pe3-leaf3
+  bridge: br200
+  ebpf:
+    enabled: true
+bridge:
+- name: br100
+- name: br200
+vxlan:
+- name: vxlan100
+  vni: 100
+  local-address: 10.0.0.3
+  bridge: br100
+- name: vxlan200
+  vni: 200
+  local-address: 10.0.0.3
+  bridge: br200
+router:
+  isis:
+    net: 49.0000.0000.0000.0003.00
+    hostname: pe3
+    is-type: level-2-only
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+    - if-name: pe3-p
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enabled: true
+  bgp:
+    global:
+      as: 65000
+      router-id: 10.0.0.3
+    timer:
+      adv-interval:
+        ibgp: 1
+    afi-safi:
+    - name: evpn
+      advertise-all-vni: true
+      etree:
+        leaf-interface:
+        - name: pe3-leaf3
+    neighbor:
+    - remote-address: 10.0.0.1
+      remote-as: 65000
+      update-source: 10.0.0.3
+      enabled: true
+      afi-safi:
+      - name: evpn
+        enabled: true
+    - remote-address: 10.0.0.2
+      remote-as: 65000
+      update-source: 10.0.0.3
+      enabled: true
+      afi-safi:
+      - name: evpn
+        enabled: true

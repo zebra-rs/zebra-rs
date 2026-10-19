@@ -197,6 +197,27 @@ kernel has no E-Line disposition for any of them.
 The labs share namespace names (`c1`, `c2`, `pe1`, `pe2`, plus `p` in the
 MPLS variant), so bring up only one at a time.
 
+## EVPN services: E-LINE, E-LAN and E-TREE
+
+Three labs, one topology, all three MEF Ethernet services at once: an
+**E-LINE** (EVPN VPWS, RFC 8214), an **E-LAN** (RFC 7432) and an
+**E-TREE** (RFC 8317), with one root and two leaves on different PEs.
+Three PEs hang off a P router, and every PE runs the cradle eBPF engine.
+The configuration differs between the labs only in the encapsulation
+knobs, so each lab diffs cleanly against the others:
+
+| playset | encapsulation | E-TREE leaf BUM |
+|:--|:--|:--|
+| [bgp-evpn-services-vxlan](bgp-evpn-services-vxlan/README.md) | VXLAN (RFC 8365), loopback VTEPs, plain IS-IS | not sent to a leaf-only PE, whose IMET is coloured |
+| [bgp-evpn-services-mpls](bgp-evpn-services-mpls/README.md) | MPLS (RFC 7432), dynamic service labels, IS-IS SR-MPLS, P label-switches in eBPF | carries the egress PE's leaf label (RFC 8317 §4.2) |
+| [bgp-evpn-services-srv6](bgp-evpn-services-srv6/README.md) | SRv6 (RFC 9252), uSID locators, IS-IS SRv6 | sent to End.DT2M with the egress PE's leaf argument (RFC 9819) |
+
+Each walkthrough pings every service, shows that two leaves never reach
+each other, and finds the leaf mechanism on the wire or in the eBPF
+counters. The labs share namespace names (`p`, `pe1`..`pe3`, `line1`,
+`line2`, `lan1`..`lan3`, `root1`, `leaf2`, `leaf3`), so bring up only one
+at a time.
+
 ## BGP Inter-AS L3VPN
 
 Two providers, one VPN — the RFC 4364 §10 options (plus Cisco's AB
