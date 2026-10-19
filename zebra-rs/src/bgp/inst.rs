@@ -193,6 +193,28 @@ pub(crate) fn peer_index_unregister(
     }
 }
 
+/// Drop the forwarding attributes a VRF route carries from the path it was
+/// learned on, before this PE originates it into the VPN under its own RD:
+/// the Prefix-SID (the SRv6 L3 Service SID of the PE that advertised it)
+/// and the BGP Encapsulation (RFC 9012) and Router's MAC (RFC 9135)
+/// extended communities. They tell a receiver how to tunnel and to whom,
+/// and on an `inter-as-hybrid` re-export of an imported route they describe
+/// the PE it was imported from: a receiver would track that PE's SID or
+/// tunnel to its VTEP instead of using this PE's label. The export attaches
+/// this PE's own afterwards: an SRv6 VRF's SID (`srv6_export_nexthop`), a
+/// symmetric-IRB Type-5's Router's MAC and VXLAN encapsulation
+/// (`Bgp::evpn_originate_type5`).
+pub(crate) fn clear_learned_forwarding_attrs(attr: &mut bgp_packet::BgpAttr) {
+    attr.prefix_sid = None;
+    if let Some(ecom) = attr.ecom.as_mut() {
+        ecom.0
+            .retain(|v| !(v.high_type == 0x03 && v.low_type == 0x0c) && !v.is_router_mac());
+        if ecom.0.is_empty() {
+            attr.ecom = None;
+        }
+    }
+}
+
 /// Append `export_rts` to `attr.ecom` as Route-Target extended
 /// communities (RFC 4360 §4.1 — subtype `0x02`). RTs share the
 /// 6-octet on-wire encoding with RDs; the `From<RouteDistinguisher>`
@@ -8189,8 +8211,11 @@ impl Bgp {
                 // the SRv6 L3 Service TLV (End.DT46 SID) and advertise
                 // the PE's locator as the IPv6 next-hop; the MPLS
                 // service label is suppressed (the SID carries
-                // forwarding). MPLS-mode VRFs are unaffected.
+                // forwarding). MPLS-mode VRFs are unaffected. Whatever
+                // forwarding attributes the route arrived with are not
+                // this PE's and go first.
                 let mut attr = attr;
+                clear_learned_forwarding_attrs(&mut attr);
                 let srv6_nexthop = self.srv6_export_nexthop(&vrf, &mut attr);
 
                 // Tag with export-RT extcommunities, then intern
@@ -8412,8 +8437,10 @@ impl Bgp {
 
                 // SRv6 L3VPN (VPNv6 over an SRv6 underlay): attach the
                 // End.DT46 SID + advertise the locator next-hop; the
-                // service label is suppressed. See the VPNv4 arm.
+                // service label is suppressed. See the VPNv4 arm, which
+                // also clears the forwarding attributes learned with it.
                 let mut attr = attr;
+                clear_learned_forwarding_attrs(&mut attr);
                 let srv6_nexthop = self.srv6_export_nexthop(&vrf, &mut attr);
 
                 let tagged = tag_attr_with_export_rts(attr, &export_rts);
@@ -8946,6 +8973,59 @@ mod tests {
         peer_index_register(&mut index, "vrfB".to_string(), addr("192.0.2.1"));
         super::peer_index_unregister(&mut index, "vrfA", addr("192.0.2.1"));
         assert_eq!(index.get(&addr("192.0.2.1")), Some(&"vrfB".to_string()));
+    }
+
+    /// `clear_learned_forwarding_attrs`: what a VRF route arrived with
+    /// that only describes the PE it came from goes, everything else stays.
+    mod clear_forwarding_attrs {
+        use bgp_packet::{BgpAttr, ExtCommunity, ExtCommunityValue};
+
+        use super::super::{clear_learned_forwarding_attrs, srv6_l3_service_prefix_sid};
+
+        fn ec(high_type: u8, low_type: u8, val: [u8; 6]) -> ExtCommunityValue {
+            ExtCommunityValue {
+                high_type,
+                low_type,
+                val,
+            }
+        }
+
+        #[test]
+        fn drops_the_sid_encapsulation_and_router_mac_only() {
+            let rt = ec(0x00, 0x02, [0xfd, 0xe8, 0, 0, 0, 100]);
+            let color = ec(0x03, 0x0b, [0, 0, 0, 0, 0, 7]);
+            let encap_vxlan = ec(0x03, 0x0c, [0, 0, 0, 0, 0, 8]);
+            let rmac = ExtCommunityValue::router_mac([0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]);
+            let mut attr = BgpAttr {
+                prefix_sid: Some(srv6_l3_service_prefix_sid(
+                    "fc00:0:2:e000::".parse().unwrap(),
+                    None,
+                    bgp_packet::SRV6_BEHAVIOR_END_DT46,
+                )),
+                ecom: Some(ExtCommunity::from([
+                    rt.clone(),
+                    color.clone(),
+                    encap_vxlan,
+                    rmac,
+                ])),
+                ..Default::default()
+            };
+            clear_learned_forwarding_attrs(&mut attr);
+            assert_eq!(attr.prefix_sid, None);
+            assert_eq!(attr.ecom, Some(ExtCommunity::from([rt, color])));
+        }
+
+        #[test]
+        fn an_emptied_community_list_is_dropped() {
+            let mut attr = BgpAttr {
+                ecom: Some(ExtCommunity::from([ExtCommunityValue::router_mac([
+                    2, 0, 0, 0, 0, 1,
+                ])])),
+                ..Default::default()
+            };
+            clear_learned_forwarding_attrs(&mut attr);
+            assert_eq!(attr, BgpAttr::default());
+        }
     }
 
     /// Helper that takes a `BgpAttr` and tags it with one
