@@ -40,7 +40,7 @@ pub enum ExtCommunitySubType {
     /// carried inside Transitive Opaque extcomm type 0x03.
     #[strum(serialize = "color")]
     Color = 0x0b,
-    #[strum(serialize = "opqque")]
+    #[strum(serialize = "opaque")]
     Opaque = 0x0c,
 }
 
