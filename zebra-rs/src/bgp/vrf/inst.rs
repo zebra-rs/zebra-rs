@@ -372,6 +372,10 @@ pub struct VrfExporter {
     /// this label so data-plane forwarding pops the label and
     /// looks the inner packet up in the matching VRF table.
     pub label: u32,
+    /// The VRF is `inter-as-hybrid` (Inter-AS Option AB) and re-exports
+    /// the routes it imports. An ordinary VRF never does (see
+    /// [`vrf_export_best_v4`]).
+    pub reexport_imports: bool,
 }
 
 /// Send a `BgpGlobalMsg::Export` for `prefix` carrying the
@@ -437,6 +441,70 @@ pub fn vrf_emit_withdraw_v6(exporter: &VrfExporter, prefix: ipnet::Ipv6Net) {
         vrf: exporter.name.clone(),
         prefix,
     });
+}
+
+/// What a VRF advertises into the VPN for a prefix whose candidates
+/// changed: the attributes to export, or `None` to withdraw. That is the
+/// best path, unless it was imported. An ordinary VRF never re-originates
+/// an imported route under its own RD: the copy would carry another PE's
+/// route with this PE as the next hop, nothing would take it back when
+/// that PE withdraws (an import does not touch the export), and two PEs
+/// importing each other's copies would keep the prefix alive after both
+/// origins are gone. It exports its best own candidate instead, or
+/// nothing. An `inter-as-hybrid` VRF re-exports imports on purpose,
+/// without their route targets, as its import path does.
+fn vrf_export_attr<'a, P: prefix_trie::Prefix + Copy>(
+    exporter: &VrfExporter,
+    selected: &'a [super::super::route::BgpRib],
+    candidates: &[super::super::route::BgpRib],
+) -> Option<std::borrow::Cow<'a, bgp_packet::BgpAttr>> {
+    use std::borrow::Cow;
+    let winner = selected.first()?;
+    if !winner.vrf_imported {
+        return Some(Cow::Borrowed(&winner.attr));
+    }
+    if exporter.reexport_imports {
+        return Some(Cow::Owned(attr_without_route_targets(&winner.attr)));
+    }
+    let own: Vec<super::super::route::BgpRib> = candidates
+        .iter()
+        .filter(|c| !c.vrf_imported && c.nexthop_reachable)
+        .cloned()
+        .collect();
+    if own.is_empty() {
+        return None;
+    }
+    let (best, _) = super::super::route::LocalRibTable::<P>::best_candidate(&own);
+    Some(Cow::Owned((*own[best].attr).clone()))
+}
+
+/// Export `prefix` into the VPN, or withdraw it, after this VRF's
+/// candidates for it changed: `selected` is the new best-path result and
+/// `candidates` every row, imported ones included. See
+/// [`vrf_export_attr`] for what is exported.
+pub fn vrf_export_best_v4(
+    exporter: &VrfExporter,
+    prefix: ipnet::Ipv4Net,
+    selected: &[super::super::route::BgpRib],
+    candidates: &[super::super::route::BgpRib],
+) {
+    match vrf_export_attr::<ipnet::Ipv4Net>(exporter, selected, candidates) {
+        Some(attr) => vrf_emit_export(exporter, prefix, &attr),
+        None => vrf_emit_withdraw(exporter, prefix),
+    }
+}
+
+/// IPv6 twin of [`vrf_export_best_v4`].
+pub fn vrf_export_best_v6(
+    exporter: &VrfExporter,
+    prefix: ipnet::Ipv6Net,
+    selected: &[super::super::route::BgpRib],
+    candidates: &[super::super::route::BgpRib],
+) {
+    match vrf_export_attr::<ipnet::Ipv6Net>(exporter, selected, candidates) {
+        Some(attr) => vrf_emit_export_v6(exporter, prefix, &attr),
+        None => vrf_emit_withdraw_v6(exporter, prefix),
+    }
 }
 
 /// Inverse of [`VrfExporter`] — references the global Bgp state
@@ -2151,6 +2219,7 @@ impl BgpVrf {
                     name: self.name.clone(),
                     tx: self.global_tx.clone(),
                     label: self.label,
+                    reexport_imports: self.inter_as_hybrid,
                 };
                 let mut top = BgpTop {
                     router_id: &self.router_id,
@@ -2529,6 +2598,7 @@ impl BgpVrf {
                 name: self.name.clone(),
                 tx: self.global_tx.clone(),
                 label: self.label,
+                reexport_imports: true,
             };
             match selected.first() {
                 Some(winner) => {
@@ -2631,6 +2701,7 @@ impl BgpVrf {
                 name: self.name.clone(),
                 tx: self.global_tx.clone(),
                 label: self.label,
+                reexport_imports: true,
             };
             match selected.first() {
                 Some(winner) => {
@@ -2780,6 +2851,7 @@ impl BgpVrf {
                 name: self.name.clone(),
                 tx: self.global_tx.clone(),
                 label: self.label,
+                reexport_imports: true,
             };
             match selected.first() {
                 Some(winner) => {
@@ -2866,6 +2938,7 @@ impl BgpVrf {
                 name: self.name.clone(),
                 tx: self.global_tx.clone(),
                 label: self.label,
+                reexport_imports: true,
             };
             match selected.first() {
                 Some(winner) => {
@@ -2988,12 +3061,15 @@ impl BgpVrf {
 
         let rib = self.self_originated_rib(interned);
         let (_, selected, _) = self.shard.update(None, prefix, rib);
-        // A freshly-inserted self-originated row always wins when
-        // it's the only candidate; emit Export for whoever won.
-        if let Some(winner) = selected.first() {
-            let exporter = self.exporter();
-            vrf_emit_export(&exporter, prefix, &winner.attr);
-        }
+        // The new row is our own, so there is now something to export:
+        // the winner, or our best own row if an import outranks it.
+        let exporter = self.exporter();
+        vrf_export_best_v4(
+            &exporter,
+            prefix,
+            &selected,
+            self.shard.v4.candidates(prefix),
+        );
         // Reach CE peers that are already Established (a runtime
         // `network` add); at spawn this is a no-op — no peer is up yet
         // and the session-up sync carries the row.
@@ -3017,13 +3093,15 @@ impl BgpVrf {
         }
         let exporter = self.exporter();
         // `remove` does not re-run best-path; do it explicitly so a
-        // surviving candidate (e.g. an imported route on the same
-        // prefix) is re-advertised instead of withdrawn.
+        // surviving own candidate is exported instead of withdrawn (an
+        // imported survivor is not: see `vrf_export_attr`).
         let selected = self.shard.select_best_path(prefix);
-        match selected.first() {
-            Some(winner) => vrf_emit_export(&exporter, prefix, &winner.attr),
-            None => vrf_emit_withdraw(&exporter, prefix),
-        }
+        vrf_export_best_v4(
+            &exporter,
+            prefix,
+            &selected,
+            self.shard.v4.candidates(prefix),
+        );
         // Same for the CE side: an empty `selected` withdraws the
         // prefix, a surviving candidate replaces it.
         self.advertise_network_to_ce_v4(prefix, &selected);
@@ -3042,10 +3120,13 @@ impl BgpVrf {
 
         let rib = self.self_originated_rib(interned);
         let (_, selected, _) = self.shard.update_v6(prefix, rib);
-        if let Some(winner) = selected.first() {
-            let exporter = self.exporter();
-            vrf_emit_export_v6(&exporter, prefix, &winner.attr);
-        }
+        let exporter = self.exporter();
+        vrf_export_best_v6(
+            &exporter,
+            prefix,
+            &selected,
+            self.shard.v6.candidates(prefix),
+        );
         // See `originate_self_network_v4` — reach already-Established
         // CE peers on a runtime `network` add.
         self.advertise_network_to_ce_v6(prefix, &selected);
@@ -3062,10 +3143,12 @@ impl BgpVrf {
         }
         let exporter = self.exporter();
         let selected = self.shard.select_best_path_v6(prefix);
-        match selected.first() {
-            Some(winner) => vrf_emit_export_v6(&exporter, prefix, &winner.attr),
-            None => vrf_emit_withdraw_v6(&exporter, prefix),
-        }
+        vrf_export_best_v6(
+            &exporter,
+            prefix,
+            &selected,
+            self.shard.v6.candidates(prefix),
+        );
         self.advertise_network_to_ce_v6(prefix, &selected);
     }
 
@@ -3153,10 +3236,13 @@ impl BgpVrf {
 
         let rib = self.redist_originated_rib(interned, rtype);
         let (_, selected, _) = self.shard.update(None, prefix, rib);
-        if let Some(winner) = selected.first() {
-            let exporter = self.exporter();
-            vrf_emit_export(&exporter, prefix, &winner.attr);
-        }
+        let exporter = self.exporter();
+        vrf_export_best_v4(
+            &exporter,
+            prefix,
+            &selected,
+            self.shard.v4.candidates(prefix),
+        );
     }
 
     /// Inverse of [`Self::redist_inject_v4`].
@@ -3168,10 +3254,13 @@ impl BgpVrf {
             return;
         }
         let exporter = self.exporter();
-        match self.shard.select_best_path(prefix).first() {
-            Some(winner) => vrf_emit_export(&exporter, prefix, &winner.attr),
-            None => vrf_emit_withdraw(&exporter, prefix),
-        }
+        let selected = self.shard.select_best_path(prefix);
+        vrf_export_best_v4(
+            &exporter,
+            prefix,
+            &selected,
+            self.shard.v4.candidates(prefix),
+        );
     }
 
     /// IPv6 counterpart of [`Self::redist_inject_v4`]. The next-hop is a
@@ -3193,10 +3282,13 @@ impl BgpVrf {
 
         let rib = self.redist_originated_rib(interned, rtype);
         let (_, selected, _) = self.shard.update_v6(prefix, rib);
-        if let Some(winner) = selected.first() {
-            let exporter = self.exporter();
-            vrf_emit_export_v6(&exporter, prefix, &winner.attr);
-        }
+        let exporter = self.exporter();
+        vrf_export_best_v6(
+            &exporter,
+            prefix,
+            &selected,
+            self.shard.v6.candidates(prefix),
+        );
     }
 
     /// IPv6 counterpart of [`Self::redist_withdraw_v4`].
@@ -3208,10 +3300,13 @@ impl BgpVrf {
             return;
         }
         let exporter = self.exporter();
-        match self.shard.select_best_path_v6(prefix).first() {
-            Some(winner) => vrf_emit_export_v6(&exporter, prefix, &winner.attr),
-            None => vrf_emit_withdraw_v6(&exporter, prefix),
-        }
+        let selected = self.shard.select_best_path_v6(prefix);
+        vrf_export_best_v6(
+            &exporter,
+            prefix,
+            &selected,
+            self.shard.v6.candidates(prefix),
+        );
     }
 
     /// A redistribute-originated [`BgpRib`]: the self-originated shape
@@ -3235,6 +3330,7 @@ impl BgpVrf {
             name: self.name.clone(),
             tx: self.global_tx.clone(),
             label: self.label,
+            reexport_imports: self.inter_as_hybrid,
         }
     }
 
@@ -5603,6 +5699,7 @@ mod tests {
             name: "vrf-hook".to_string(),
             tx,
             label: 42,
+            reexport_imports: false,
         };
         let prefix: ipnet::Ipv4Net = "10.0.0.0/24".parse().unwrap();
         let attr = bgp_packet::BgpAttr::default();
@@ -5633,6 +5730,7 @@ mod tests {
             name: "vrf-hook2".to_string(),
             tx,
             label: 17,
+            reexport_imports: false,
         };
         let prefix: ipnet::Ipv4Net = "10.0.0.0/24".parse().unwrap();
 
@@ -6611,5 +6709,176 @@ mod tests {
         assert_eq!(vrf.import_origin_of(IMPORT_ID_BASE - 1), None);
         let rd3: bgp_packet::RouteDistinguisher = "65003:100".parse().unwrap();
         assert_eq!(vrf.existing_import_id(rd3, ImportSource::Vpn), None);
+    }
+
+    /// A VRF for the export tests, with the receiver of its messages to
+    /// the global task.
+    fn export_test_vrf(name: &str, table_id: u32) -> (BgpVrf, UnboundedReceiver<BgpGlobalMsg>) {
+        let (global_tx, global_rx) = unbounded_channel::<BgpGlobalMsg>();
+        let (_rib_tx, rib_rx) = mpsc::unbounded_channel();
+        let (vrf, _inbox) = BgpVrf::new(
+            name.to_string(),
+            test_ctx_for_vrf(table_id, name),
+            Ipv4Addr::new(192, 0, 2, 254),
+            65000,
+            /* label */ 16,
+            global_tx,
+            rib_rx,
+        );
+        (vrf, global_rx)
+    }
+
+    /// What the VRF exported since the last call, as `(kind, prefix, MED,
+    /// carries a route target)`.
+    fn exports(
+        rx: &mut UnboundedReceiver<BgpGlobalMsg>,
+    ) -> Vec<(&'static str, String, Option<u32>, bool)> {
+        let has_rt = |attr: &bgp_packet::BgpAttr| {
+            attr.ecom
+                .as_ref()
+                .is_some_and(|ecom| ecom.0.iter().any(|v| v.low_type == 0x02))
+        };
+        let mut out = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                BgpGlobalMsg::Export { prefix, attr, .. } => out.push((
+                    "export",
+                    prefix.to_string(),
+                    attr.med.as_ref().map(|m| m.med),
+                    has_rt(&attr),
+                )),
+                BgpGlobalMsg::ExportV6 { prefix, attr, .. } => out.push((
+                    "export",
+                    prefix.to_string(),
+                    attr.med.as_ref().map(|m| m.med),
+                    has_rt(&attr),
+                )),
+                BgpGlobalMsg::WithdrawExport { prefix, .. } => {
+                    out.push(("withdraw", prefix.to_string(), None, false))
+                }
+                BgpGlobalMsg::WithdrawExportV6 { prefix, .. } => {
+                    out.push(("withdraw", prefix.to_string(), None, false))
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// An imported route as another PE sent it: MED 77 and the route
+    /// target it matched on.
+    fn imported_attr() -> bgp_packet::BgpAttr {
+        let mut attr = bgp_packet::BgpAttr::new();
+        attr.med = Some(bgp_packet::Med::new(77));
+        attr.ecom = Some(bgp_packet::ExtCommunity::from([
+            bgp_packet::ExtCommunityValue {
+                high_type: 0x00,
+                low_type: 0x02,
+                val: [0xfd, 0xe9, 0x00, 0x00, 0x00, 0x64], // RT:65001:100
+            },
+        ]));
+        attr
+    }
+
+    /// A VRF exports its own route for a prefix, never an imported one.
+    /// When the own route goes and only another PE's route is left, the
+    /// export is withdrawn, not replaced by that route under this VRF's
+    /// RD; the import's own withdrawal then has nothing to undo. Before,
+    /// the import was re-originated here and outlived its origin.
+    #[tokio::test]
+    async fn an_imported_survivor_is_not_re_exported() {
+        let rd: bgp_packet::RouteDistinguisher = "65001:1".parse().unwrap();
+        let prefix: ipnet::Ipv4Net = "10.5.0.0/24".parse().unwrap();
+        let p = prefix.to_string();
+        for redistributed in [false, true] {
+            let case = if redistributed {
+                "redistribute connected"
+            } else {
+                "network"
+            };
+            let (mut vrf, mut rx) = export_test_vrf("vrf-export-own", 55);
+            let own_med = if redistributed {
+                vrf.redist_inject_v4(crate::rib::RibType::Connected, prefix, 5);
+                Some(5)
+            } else {
+                vrf.originate_self_network_v4(prefix);
+                Some(0) // `BgpAttr::new`'s MED
+            };
+            assert_eq!(
+                exports(&mut rx),
+                vec![("export", p.clone(), own_med, false)],
+                "{case}"
+            );
+
+            let t = transport("192.0.2.1", 1001);
+            vrf.handle_import_v4(rd, ImportSource::Vpn, prefix, imported_attr(), 100, &t);
+            assert_eq!(
+                exports(&mut rx),
+                vec![],
+                "{case}: an import exports nothing"
+            );
+
+            if redistributed {
+                vrf.redist_withdraw_v4(crate::rib::RibType::Connected, prefix);
+            } else {
+                vrf.withdraw_self_network_v4(prefix);
+            }
+            assert!(vrf.shard.select_best_path(prefix)[0].vrf_imported, "{case}");
+            assert_eq!(
+                exports(&mut rx),
+                vec![("withdraw", p.clone(), None, false)],
+                "{case}"
+            );
+
+            vrf.handle_withdraw_import(rd, ImportSource::Vpn, prefix);
+            assert_eq!(exports(&mut rx), vec![], "{case}");
+        }
+    }
+
+    /// IPv6 twin of [`an_imported_survivor_is_not_re_exported`].
+    #[tokio::test]
+    async fn an_imported_survivor_is_not_re_exported_v6() {
+        let rd: bgp_packet::RouteDistinguisher = "65001:1".parse().unwrap();
+        let prefix: ipnet::Ipv6Net = "2001:db8:5::/64".parse().unwrap();
+        let p = prefix.to_string();
+        let (mut vrf, mut rx) = export_test_vrf("vrf-export-own6", 56);
+        vrf.originate_self_network_v6(prefix);
+        assert_eq!(
+            exports(&mut rx),
+            vec![("export", p.clone(), Some(0), false)]
+        );
+
+        let t = transport("192.0.2.1", 1001);
+        vrf.handle_import_v6(rd, ImportSource::Vpn, prefix, imported_attr(), 100, &t);
+        assert_eq!(exports(&mut rx), vec![]);
+
+        vrf.withdraw_self_network_v6(prefix);
+        assert!(vrf.shard.select_best_path_v6(prefix)[0].vrf_imported);
+        assert_eq!(exports(&mut rx), vec![("withdraw", p.clone(), None, false)]);
+
+        vrf.handle_withdraw_import_v6(rd, ImportSource::Vpn, prefix);
+        assert_eq!(exports(&mut rx), vec![]);
+    }
+
+    /// An `inter-as-hybrid` VRF re-exports what it imports (Inter-AS
+    /// Option AB), so an imported survivor is exported — without the route
+    /// targets it matched on, as the hybrid import path sends it.
+    #[tokio::test]
+    async fn a_hybrid_vrf_re_exports_an_imported_survivor() {
+        let rd: bgp_packet::RouteDistinguisher = "65001:1".parse().unwrap();
+        let prefix: ipnet::Ipv4Net = "10.5.0.0/24".parse().unwrap();
+        let p = prefix.to_string();
+        let (mut vrf, mut rx) = export_test_vrf("vrf-export-hybrid", 57);
+        vrf.inter_as_hybrid = true;
+        vrf.originate_self_network_v4(prefix);
+        let t = transport("192.0.2.1", 1001);
+        vrf.handle_import_v4(rd, ImportSource::Vpn, prefix, imported_attr(), 100, &t);
+        exports(&mut rx);
+
+        vrf.withdraw_self_network_v4(prefix);
+        assert_eq!(
+            exports(&mut rx),
+            vec![("export", p.clone(), Some(77), false)]
+        );
     }
 }

@@ -1,0 +1,25 @@
+# c1 (CE of z1, AS 65100) advertises 10.6.0.0/24 to z1 over eBGP.
+interface:
+- if-name: z1
+  ipv4:
+    address: 10.9.0.2/30
+router:
+  bgp:
+    global:
+      as: 65100
+      router-id: 10.9.0.2
+    timer:
+      adv-interval:
+        ebgp: 3
+    neighbor:
+    - remote-address: 10.9.0.1
+      remote-as: 65001
+      timers: {connect-retry-time: 3}
+      enabled: true
+      afi-safi:
+      - name: ipv4
+        enabled: true
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.6.0.0/24

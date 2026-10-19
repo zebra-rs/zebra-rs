@@ -5025,11 +5025,12 @@ fn route_ipv4_update_decided(
         if rd.is_none()
             && let Some(exporter) = bgp.vrf_export
         {
-            if let Some(winner) = selected.first() {
-                super::vrf::vrf_emit_export(exporter, prefix.prefix, &winner.attr);
-            } else {
-                super::vrf::vrf_emit_withdraw(exporter, prefix.prefix);
-            }
+            super::vrf::vrf_export_best_v4(
+                exporter,
+                prefix.prefix,
+                &selected,
+                bgp.shard.v4.candidates(prefix.prefix),
+            );
         }
         // Global v4vpn best-path → per-VRF import (rd == Some, global).
         if let Some(rd) = rd
@@ -5320,11 +5321,12 @@ fn reduce_bestpath_v4_nht_fib(
     if rd.is_none()
         && let Some(exporter) = bgp.vrf_export
     {
-        if let Some(winner) = selected.first() {
-            super::vrf::vrf_emit_export(exporter, prefix.prefix, &winner.attr);
-        } else {
-            super::vrf::vrf_emit_withdraw(exporter, prefix.prefix);
-        }
+        super::vrf::vrf_export_best_v4(
+            exporter,
+            prefix.prefix,
+            &selected,
+            bgp.shard.v4.candidates(prefix.prefix),
+        );
     }
     Some((
         ident,
@@ -8642,17 +8644,19 @@ pub fn route_ipv4_withdraw(
     }
 
     // VRF export — symmetric with `route_update_ipv4`. After a
-    // withdraw, either a replacement winner exists (emit a fresh
-    // Export so the global v4vpn row carries the new attrs) or
-    // `selected` is empty (emit WithdrawExport to drop the row).
+    // withdraw, either an own candidate survives (emit a fresh Export so
+    // the global v4vpn row carries its attrs) or none does (emit
+    // WithdrawExport to drop the row; an imported survivor is not
+    // re-exported, see `vrf_export_attr`).
     if rd.is_none()
         && let Some(exporter) = bgp.vrf_export
     {
-        if let Some(winner) = selected.first() {
-            super::vrf::vrf_emit_export(exporter, nlri.prefix, &winner.attr);
-        } else {
-            super::vrf::vrf_emit_withdraw(exporter, nlri.prefix);
-        }
+        super::vrf::vrf_export_best_v4(
+            exporter,
+            nlri.prefix,
+            &selected,
+            bgp.shard.v4.candidates(nlri.prefix),
+        );
     }
 
     // Global v4vpn withdraw → per-VRF import dispatch. If a
@@ -8704,7 +8708,7 @@ pub fn route_ipv4_withdraw(
 /// Full receive path: Adj-RIB-In → inbound v6 policy
 /// ([`route_apply_policy_in_v6`]) → Loc-RIB → FIB → peer
 /// re-advertisement ([`route_advertise_to_peers_v6`]) → per-VRF
-/// export/import hooks (`vrf_emit_export_v6` when this `BgpTop` carries a
+/// export/import hooks (`vrf_export_best_v6` when this `BgpTop` carries a
 /// `vrf_export`, so a CE-learned v6-unicast route is promoted to the
 /// global VPNv6 RIB). All of those are wired below; the `rd == None` arm
 /// is the unicast (CE / global) case, `rd == Some` the VPNv6 import case.
@@ -8875,11 +8879,12 @@ pub fn route_ipv6_update(
             None => {
                 fib_install_v6(bgp, prefix.prefix, &selected);
                 if let Some(exporter) = bgp.vrf_export {
-                    if let Some(winner) = selected.first() {
-                        super::vrf::vrf_emit_export_v6(exporter, prefix.prefix, &winner.attr);
-                    } else {
-                        super::vrf::vrf_emit_withdraw_v6(exporter, prefix.prefix);
-                    }
+                    super::vrf::vrf_export_best_v6(
+                        exporter,
+                        prefix.prefix,
+                        &selected,
+                        bgp.shard.v6.candidates(prefix.prefix),
+                    );
                 }
                 // Unconditional, like `route_ipv6_withdraw`: an UPDATE whose
                 // best-path delta EMPTIES the selection (inbound-policy deny
@@ -9089,14 +9094,15 @@ pub fn route_ipv6_withdraw(
             let selected = bgp.shard.select_best_path_v6(nlri.prefix);
             fib_install_v6(bgp, nlri.prefix, &selected);
 
-            // VRF export, symmetric with route_ipv6_update: a
-            // replacement winner re-exports; an empty result withdraws.
+            // VRF export, symmetric with route_ipv6_update: a surviving
+            // own candidate re-exports; none left withdraws.
             if let Some(exporter) = bgp.vrf_export {
-                if let Some(winner) = selected.first() {
-                    super::vrf::vrf_emit_export_v6(exporter, nlri.prefix, &winner.attr);
-                } else {
-                    super::vrf::vrf_emit_withdraw_v6(exporter, nlri.prefix);
-                }
+                super::vrf::vrf_export_best_v6(
+                    exporter,
+                    nlri.prefix,
+                    &selected,
+                    bgp.shard.v6.candidates(nlri.prefix),
+                );
             }
 
             // Empty `selected` → withdraw to peers; a replacement
