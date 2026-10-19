@@ -1422,6 +1422,18 @@ mod tests {
         assert_eq!(c.to_string(), "color:1:4242");
     }
 
+    /// The Encapsulation EC (RFC 9012 §4.1, transitive opaque sub-type
+    /// 0x0c) renders as `opaque:` plus its tunnel type.
+    #[test]
+    fn encapsulation_renders_in_display() {
+        let ec = ExtCommunityValue {
+            high_type: 0x03,
+            low_type: 0x0c,
+            val: [0, 0, 0, 0, 0, 8],
+        };
+        assert_eq!(ec.to_string(), "opaque:VXLAN");
+    }
+
     #[test]
     fn evpn_mcast_flags_wire_layout() {
         // Both IGMP + MLD proxy: high 0x06, sub 0x09, Flags=0x0003,
