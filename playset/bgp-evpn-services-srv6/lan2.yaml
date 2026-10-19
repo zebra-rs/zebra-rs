@@ -1,0 +1,7 @@
+# lan2 — a host on the E-LAN (EVI 100).
+interface:
+- if-name: lan2-pe2
+  ipv4:
+    address: 172.16.2.2/24
+system:
+  hostname: lan2

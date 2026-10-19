@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 600" width="1000" height="600" font-family="Helvetica, Arial, sans-serif">
+  <title>zebra-rs and cradle-rs: EVPN control plane in zebra-rs, forwarding in eBPF</title>
+  <defs>
+    <style>
+      .bg { fill: #ffffff; }
+      .plane { fill: #f7f9fc; stroke: #34495e; stroke-width: 2; }
+      .kernel { fill: #fbf7ef; stroke: #8a6d3b; stroke-width: 2; }
+      .ebpf { fill: #eef8f1; stroke: #1e8449; stroke-width: 2; }
+      .box { fill: #ffffff; stroke: #5d6d7e; stroke-width: 1.5; }
+      .title { font-size: 18px; font-weight: bold; fill: #1b2631; }
+      .head { font-size: 14px; font-weight: bold; fill: #1b2631; text-anchor: middle; }
+      .body { font-size: 12px; fill: #34495e; text-anchor: middle; }
+      .item { font-size: 13px; fill: #1b2631; }
+      .label { font-size: 12px; fill: #5d6d7e; font-style: italic; }
+      .arrow { stroke: #34495e; stroke-width: 2; fill: none; marker-end: url(#head); }
+      .learn { stroke: #1e8449; stroke-width: 2; fill: none; stroke-dasharray: 6 4; marker-end: url(#headg); }
+      .wire { stroke: #8a6d3b; stroke-width: 3; }
+    </style>
+    <marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#34495e"/>
+    </marker>
+    <marker id="headg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1e8449"/>
+    </marker>
+  </defs>
+  <rect class="bg" x="0" y="0" width="1000" height="600"/>
+
+  <!-- zebra-rs control plane -->
+  <rect class="plane" x="20" y="20" width="960" height="250" rx="10"/>
+  <text class="title" x="40" y="48">zebra-rs: control plane</text>
+
+  <rect class="box" x="40" y="66" width="290" height="96" rx="6"/>
+  <text class="head" x="185" y="88">BGP EVPN</text>
+  <text class="body" x="185" y="108">Type-1 A-D: E-LINE, ES, E-TREE leaf label</text>
+  <text class="body" x="185" y="126">Type-2 MAC/IP · Type-3 IMET · Type-4 ES</text>
+  <text class="body" x="185" y="144">RT/RD per EVI · E-Tree EC · SRv6 SIDs</text>
+
+  <rect class="box" x="355" y="66" width="290" height="96" rx="6"/>
+  <text class="head" x="500" y="88">IGP: IS-IS / OSPF</text>
+  <text class="body" x="500" y="108">underlay reachability</text>
+  <text class="body" x="500" y="126">SR-MPLS prefix SIDs (transport labels)</text>
+  <text class="body" x="500" y="144">SRv6 locators</text>
+
+  <rect class="box" x="670" y="66" width="290" height="96" rx="6"/>
+  <text class="head" x="815" y="88">Configuration (YANG)</text>
+  <text class="body" x="815" y="108">vpws · evi · etree leaf-interface</text>
+  <text class="body" x="815" y="126">encapsulation vxlan | mpls | srv6</text>
+  <text class="body" x="815" y="144">ethernet-segment · system ebpf</text>
+
+  <rect class="box" x="40" y="190" width="440" height="60" rx="6"/>
+  <text class="head" x="260" y="214">RIB / FIB</text>
+  <text class="body" x="260" y="234">routes, ILMs, local SIDs, MAC table, ES state</text>
+
+  <rect class="box" x="520" y="190" width="440" height="60" rx="6"/>
+  <text class="head" x="740" y="214">cradle supervisor + FIB tee</text>
+  <text class="body" x="740" y="234">spawns the engine, binds ports and roles, mirrors every FIB change</text>
+
+  <path class="arrow" d="M185,162 L185,188"/>
+  <path class="arrow" d="M500,162 L420,188"/>
+  <path class="arrow" d="M815,162 L815,188"/>
+  <path class="arrow" d="M480,220 L518,220"/>
+
+  <!-- southbound -->
+  <path class="arrow" d="M260,250 L260,318"/>
+  <text class="label" x="272" y="292">netlink</text>
+  <path class="arrow" d="M740,250 L740,318"/>
+  <text class="label" x="728" y="290" text-anchor="end">gRPC: FDB, flood slots,</text>
+  <text class="label" x="728" y="306" text-anchor="end">xconnects, labels, SIDs, roles</text>
+  <path class="learn" d="M930,318 L930,252"/>
+  <text class="label" x="918" y="298" text-anchor="end" style="fill: #1e8449">learned MACs</text>
+
+  <!-- kernel -->
+  <rect class="kernel" x="20" y="320" width="460" height="190" rx="10"/>
+  <text class="title" x="40" y="348">Linux kernel</text>
+  <text class="item" x="40" y="376">• interfaces, addresses, routes</text>
+  <text class="item" x="40" y="398">• bridges: which AC belongs to which EVI</text>
+  <text class="item" x="40" y="420">• VXLAN devices: which VNI a bridge carries</text>
+  <text class="item" x="40" y="442">• BGP and IGP sockets (control traffic)</text>
+  <text class="item" x="40" y="464">• the guard: E-TREE leaf ports always isolated,</text>
+  <text class="item" x="52" y="486">and held until cradle owns them</text>
+
+  <!-- cradle -->
+  <rect class="ebpf" x="520" y="320" width="460" height="190" rx="10"/>
+  <text class="title" x="540" y="348">cradle-rs: eBPF data plane (XDP + TC)</text>
+  <text class="item" x="540" y="376">• MAC learning and L2 switching per bridge domain</text>
+  <text class="item" x="540" y="398">• ingress-replication flood slots (BUM)</text>
+  <text class="item" x="540" y="420">• VPWS cross-connects (E-LINE)</text>
+  <text class="item" x="540" y="442">• VXLAN / MPLS / SRv6 encap and decap</text>
+  <text class="item" x="540" y="464">• ESI split horizon, DF filter, aliasing</text>
+  <text class="item" x="540" y="486">• E-TREE roles, leaf drops, leaf label / argument</text>
+
+  <!-- wire -->
+  <line class="wire" x1="20" y1="550" x2="980" y2="550"/>
+  <text class="label" x="40" y="576">NICs / veths: attachment circuits and core links. Every frame is switched in XDP; the kernel sees only control traffic.</text>
+  <path class="arrow" d="M750,510 L750,546"/>
+  <path class="arrow" d="M250,546 L250,512"/>
+</svg>

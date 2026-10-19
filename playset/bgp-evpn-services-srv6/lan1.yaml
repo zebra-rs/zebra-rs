@@ -1,0 +1,8 @@
+# lan1 — a host on the E-LAN (EVI 100), one of three sites on the
+# stretched 172.16.2.0/24 segment.
+interface:
+- if-name: lan1-pe1
+  ipv4:
+    address: 172.16.2.1/24
+system:
+  hostname: lan1

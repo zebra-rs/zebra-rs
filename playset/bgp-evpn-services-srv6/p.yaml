@@ -1,0 +1,52 @@
+# P — the core router. IS-IS SRv6 and kernel IPv6 forwarding: every
+# service packet is an IPv6 packet addressed to a SID in the egress PE's
+# locator, and P routes it on that locator prefix like any other. No BGP,
+# no EVPN and no tenant state; its own locator, LOC9, only makes it an
+# SRv6 node in IS-IS.
+system:
+  hostname: p
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::9/128
+- if-name: p-pe1
+  ipv6:
+    address: 2001:db8:9:1::2/64
+- if-name: p-pe2
+  ipv6:
+    address: 2001:db8:9:2::2/64
+- if-name: p-pe3
+  ipv6:
+    address: 2001:db8:9:3::2/64
+segment-routing:
+  locator:
+  - name: LOC9
+    prefix: fcbb:bbbb:9::/48
+    behavior: usid
+router:
+  isis:
+    net: 49.0000.0000.0000.0009.00
+    hostname: p
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC9
+    interface:
+    - if-name: lo
+      ipv6:
+        enabled: true
+    - if-name: p-pe1
+      network-type: point-to-point
+      metric: 10
+      ipv6:
+        enabled: true
+    - if-name: p-pe2
+      network-type: point-to-point
+      metric: 10
+      ipv6:
+        enabled: true
+    - if-name: p-pe3
+      network-type: point-to-point
+      metric: 10
+      ipv6:
+        enabled: true

@@ -1,0 +1,56 @@
+# P — the transit LSR. No BGP and no EVPN state at all: IS-IS SR-MPLS
+# gives every loopback a prefix SID, and P label-switches the transport
+# label toward the egress PE — popping it as the penultimate hop, which
+# exposes the service label underneath. Its cradle engine
+# (`system ebpf enabled`) does the label work in XDP.
+system:
+  hostname: p
+  ebpf:
+    enabled: true
+interface:
+- if-name: lo
+  ipv4:
+    address: 10.0.0.9/32
+- if-name: p-pe1
+  ipv4:
+    address: 10.9.1.2/30
+  ebpf:
+    enabled: true
+- if-name: p-pe2
+  ipv4:
+    address: 10.9.2.2/30
+  ebpf:
+    enabled: true
+- if-name: p-pe3
+  ipv4:
+    address: 10.9.3.2/30
+  ebpf:
+    enabled: true
+router:
+  isis:
+    net: 49.0000.0000.0000.0009.00
+    hostname: p
+    is-type: level-2-only
+    segment-routing: mpls
+    te-router-id: 10.0.0.9
+    interface:
+    - if-name: lo
+      ipv4:
+        enabled: true
+        prefix-sid:
+          index: 9
+    - if-name: p-pe1
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enabled: true
+    - if-name: p-pe2
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enabled: true
+    - if-name: p-pe3
+      network-type: point-to-point
+      metric: 10
+      ipv4:
+        enabled: true

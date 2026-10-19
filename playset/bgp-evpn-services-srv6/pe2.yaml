@@ -1,0 +1,109 @@
+# PE2 — EVPN over SRv6 (RFC 9252), all three services on one PE, every
+# one of them forwarded by the cradle eBPF engine (`system ebpf enabled`):
+#
+# * E-LINE: `vpws eline1` cross-connects pe2-line2 to PE1 (EVI 300; the
+#   service IDs mirror PE1's).
+# * E-LAN: br100 with pe2-lan2 (VNI 100, declared by vxlan100).
+# * E-TREE: br200 with pe2-leaf2 (VNI 200), named a leaf by `etree
+#   leaf-interface`. Its MACs go out with the E-Tree EC's Leaf flag, and
+#   PE2 takes leaf argument 1 (RFC 9252 Arg.FE2, placed per RFC 9819):
+#   VNI 200's End.DT2M accepts a 16-bit argument after its function, and
+#   an Ethernet A-D route with ESI 0 advertises the argument. A leaf's
+#   BUM copy toward PE2 is sent to End.DT2M with the argument set, and
+#   PE2 delivers it to roots only.
+system:
+  hostname: pe2
+  ebpf:
+    enabled: true
+interface:
+- if-name: lo
+  ipv6:
+    address: 2001:db8::2/128
+- if-name: pe2-p
+  ipv6:
+    address: 2001:db8:9:2::1/64
+  ebpf:
+    enabled: true
+- if-name: pe2-line2
+  ebpf:
+    enabled: true
+- if-name: pe2-lan2
+  bridge: br100
+  ebpf:
+    enabled: true
+- if-name: pe2-leaf2
+  bridge: br200
+  ebpf:
+    enabled: true
+bridge:
+- name: br100
+- name: br200
+vxlan:
+- name: vxlan100
+  vni: 100
+  local-address: 2001:db8::2
+  bridge: br100
+- name: vxlan200
+  vni: 200
+  local-address: 2001:db8::2
+  bridge: br200
+segment-routing:
+  locator:
+  - name: LOC2
+    prefix: fcbb:bbbb:2::/48
+    behavior: usid
+router:
+  isis:
+    net: 49.0000.0000.0000.0002.00
+    hostname: pe2
+    is-type: level-2-only
+    segment-routing:
+      srv6:
+        locator: LOC2
+    interface:
+    - if-name: lo
+      ipv6:
+        enabled: true
+    - if-name: pe2-p
+      network-type: point-to-point
+      metric: 10
+      ipv6:
+        enabled: true
+  bgp:
+    global:
+      as: 65000
+      router-id: 10.0.0.2
+    timer:
+      adv-interval:
+        ibgp: 1
+    segment-routing:
+      srv6:
+        locator: LOC2
+    afi-safi:
+    - name: evpn
+      advertise-all-vni: true
+      encapsulation: srv6
+      vpws:
+      - name: eline1
+        evi: 300
+        local-service-id: 2
+        remote-service-id: 1
+        interface: pe2-line2
+      etree:
+        leaf-interface:
+        - name: pe2-leaf2
+    neighbor:
+    - remote-address: 2001:db8::1
+      remote-as: 65000
+      update-source: 2001:db8::2
+      enabled: true
+      afi-safi:
+      - name: evpn
+        enabled: true
+    - remote-address: 2001:db8::3
+      remote-as: 65000
+      update-source: 2001:db8::2
+      enabled: true
+      afi-safi:
+      - name: evpn
+        enabled: true
