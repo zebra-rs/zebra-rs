@@ -1,0 +1,36 @@
+# z1 (DUT, AS 65000): vrf-blue is an `inter-as-hybrid` MPLS VRF. It imports
+# h1's Type-5 (RT 65000:100) and re-exports it as VPNv4 under its own RD
+# 65000:1 to z2. The scripted speaker on h1 never listens on 179, so the
+# neighbor is passive.
+vrf:
+- name: vrf-blue
+  ipv4:
+    route-target:
+      import:
+      - 65000:100
+      export:
+      - 65000:100
+router:
+  bgp:
+    global:
+      as: 65000
+      router-id: 192.168.32.1
+    neighbor:
+    - remote-address: 192.168.32.2
+      afi-safi:
+      - name: evpn
+        enabled: true
+      enabled: true
+      remote-as: 65000
+      transport:
+        passive-mode: true
+    - remote-address: 192.168.32.3
+      afi-safi:
+      - name: vpnv4
+        enabled: true
+      enabled: true
+      remote-as: 65000
+    vrf:
+    - name: vrf-blue
+      rd: 65000:1
+      inter-as-hybrid: true

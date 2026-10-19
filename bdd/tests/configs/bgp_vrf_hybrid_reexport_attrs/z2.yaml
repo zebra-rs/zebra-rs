@@ -1,0 +1,26 @@
+# z2 (AS 65000) receives z1's VPNv4 re-export of h1's route and imports it
+# into its own vrf-blue (RT 65000:100), whose detail view shows the
+# imported attributes, the Prefix-SID among them.
+vrf:
+- name: vrf-blue
+  ipv4:
+    route-target:
+      import:
+      - 65000:100
+      export:
+      - 65000:100
+router:
+  bgp:
+    global:
+      as: 65000
+      router-id: 192.168.32.3
+    neighbor:
+    - remote-address: 192.168.32.1
+      afi-safi:
+      - name: vpnv4
+        enabled: true
+      enabled: true
+      remote-as: 65000
+    vrf:
+    - name: vrf-blue
+      rd: 65000:2
