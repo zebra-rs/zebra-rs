@@ -5040,6 +5040,7 @@ fn route_ipv4_update_decided(
                 super::vrf::dispatch_import_v4(
                     dispatcher,
                     rd,
+                    super::vrf::ImportSource::Vpn,
                     prefix.prefix,
                     &winner.attr,
                     label,
@@ -5050,6 +5051,7 @@ fn route_ipv4_update_decided(
                 super::vrf::dispatch_withdraw_import_v4(
                     dispatcher,
                     rd,
+                    super::vrf::ImportSource::Vpn,
                     prefix.prefix,
                     &import_attr,
                     None,
@@ -8667,6 +8669,7 @@ pub fn route_ipv4_withdraw(
             super::vrf::dispatch_import_v4(
                 dispatcher,
                 rd,
+                super::vrf::ImportSource::Vpn,
                 nlri.prefix,
                 &winner.attr,
                 label,
@@ -8674,7 +8677,14 @@ pub fn route_ipv4_withdraw(
                 None,
             );
         } else if let Some(gone) = removed.first() {
-            super::vrf::dispatch_withdraw_import_v4(dispatcher, rd, nlri.prefix, &gone.attr, None);
+            super::vrf::dispatch_withdraw_import_v4(
+                dispatcher,
+                rd,
+                super::vrf::ImportSource::Vpn,
+                nlri.prefix,
+                &gone.attr,
+                None,
+            );
         }
     }
     if !selected.is_empty() || !removed.is_empty() {
@@ -8890,6 +8900,7 @@ pub fn route_ipv6_update(
                         super::vrf::dispatch_import_v6(
                             dispatcher,
                             rd,
+                            super::vrf::ImportSource::Vpn,
                             prefix.prefix,
                             &winner.attr,
                             label,
@@ -8900,6 +8911,7 @@ pub fn route_ipv6_update(
                         super::vrf::dispatch_withdraw_import_v6(
                             dispatcher,
                             rd,
+                            super::vrf::ImportSource::Vpn,
                             prefix.prefix,
                             &import_attr,
                             None,
@@ -9031,6 +9043,7 @@ pub fn route_ipv6_withdraw(
                     super::vrf::dispatch_import_v6(
                         dispatcher,
                         rd,
+                        super::vrf::ImportSource::Vpn,
                         nlri.prefix,
                         &winner.attr,
                         label,
@@ -9041,6 +9054,7 @@ pub fn route_ipv6_withdraw(
                     super::vrf::dispatch_withdraw_import_v6(
                         dispatcher,
                         rd,
+                        super::vrf::ImportSource::Vpn,
                         nlri.prefix,
                         &gone.attr,
                         None,
@@ -10583,10 +10597,20 @@ fn route_evpn_export_selected(
                 if let Some(dispatcher) = bgp.vrf_import {
                     match prefix {
                         IpNet::V4(p) => super::vrf::dispatch_withdraw_import_v4(
-                            dispatcher, *rd, *p, &wd.attr, None,
+                            dispatcher,
+                            *rd,
+                            super::vrf::ImportSource::Evpn,
+                            *p,
+                            &wd.attr,
+                            None,
                         ),
                         IpNet::V6(p) => super::vrf::dispatch_withdraw_import_v6(
-                            dispatcher, *rd, *p, &wd.attr, None,
+                            dispatcher,
+                            *rd,
+                            super::vrf::ImportSource::Evpn,
+                            *p,
+                            &wd.attr,
+                            None,
                         ),
                     }
                 }
@@ -10917,10 +10941,24 @@ fn route_evpn_export_selected(
                 let (label, transport) = vpn_import_transport(bgp, best);
                 match prefix {
                     IpNet::V4(p) => super::vrf::dispatch_import_v4(
-                        dispatcher, *rd, *p, &best.attr, label, transport, None,
+                        dispatcher,
+                        *rd,
+                        super::vrf::ImportSource::Evpn,
+                        *p,
+                        &best.attr,
+                        label,
+                        transport,
+                        None,
                     ),
                     IpNet::V6(p) => super::vrf::dispatch_import_v6(
-                        dispatcher, *rd, *p, &best.attr, label, transport, None,
+                        dispatcher,
+                        *rd,
+                        super::vrf::ImportSource::Evpn,
+                        *p,
+                        &best.attr,
+                        label,
+                        transport,
+                        None,
                     ),
                 }
             }

@@ -3393,6 +3393,7 @@ impl Bgp {
                 super::vrf::dispatch_import_v4(
                     &dispatcher,
                     rd,
+                    super::vrf::ImportSource::Vpn,
                     prefix,
                     &winner.attr,
                     0,
@@ -3403,6 +3404,7 @@ impl Bgp {
                 super::vrf::dispatch_withdraw_import_v4(
                     &dispatcher,
                     rd,
+                    super::vrf::ImportSource::Vpn,
                     prefix,
                     &gone.attr,
                     Some(vrf),
@@ -3481,6 +3483,7 @@ impl Bgp {
                 super::vrf::dispatch_import_v6(
                     &dispatcher,
                     rd,
+                    super::vrf::ImportSource::Vpn,
                     prefix,
                     &winner.attr,
                     0,
@@ -3491,6 +3494,7 @@ impl Bgp {
                 super::vrf::dispatch_withdraw_import_v6(
                     &dispatcher,
                     rd,
+                    super::vrf::ImportSource::Vpn,
                     prefix,
                     &gone.attr,
                     Some(vrf),
@@ -4307,7 +4311,11 @@ impl Bgp {
         let new = &known.import_rts_v4;
         let own_rd = self.vrfs.get(vrf).and_then(|c| c.rd);
         let mut by_key: BTreeMap<
-            (bgp_packet::RouteDistinguisher, ipnet::Ipv4Net),
+            (
+                bgp_packet::RouteDistinguisher,
+                super::vrf::ImportSource,
+                ipnet::Ipv4Net,
+            ),
             Vec<&super::route::BgpRib>,
         > = BTreeMap::new();
         for (rd, table) in &self.shard.v4vpn {
@@ -4315,7 +4323,10 @@ impl Bgp {
                 if winner.ident == super::route::ORIGINATED_PEER && Some(*rd) == own_rd {
                     continue;
                 }
-                by_key.entry((*rd, prefix)).or_default().push(winner);
+                by_key
+                    .entry((*rd, super::vrf::ImportSource::Vpn, prefix))
+                    .or_default()
+                    .push(winner);
             }
         }
         for (rd, table) in &self.local_rib.evpn {
@@ -4326,11 +4337,14 @@ impl Bgp {
                 } = prefix
                     && winner.typ != super::route::BgpRibType::Originated
                 {
-                    by_key.entry((*rd, *p)).or_default().push(winner);
+                    by_key
+                        .entry((*rd, super::vrf::ImportSource::Evpn, *p))
+                        .or_default()
+                        .push(winner);
                 }
             }
         }
-        for ((rd, prefix), winners) in by_key {
+        for ((rd, source, prefix), winners) in by_key {
             let (mut newly, mut still) = (Vec::new(), Vec::new());
             let (mut before, mut lost) = (false, false);
             for winner in winners {
@@ -4347,13 +4361,15 @@ impl Bgp {
                 if before {
                     let _ = handle
                         .inbox
-                        .send(super::vrf::msg::BgpVrfMsg::WithdrawImport { rd, prefix });
+                        .send(super::vrf::msg::BgpVrfMsg::WithdrawImport { rd, source, prefix });
                 }
                 continue;
             }
-            // The VRF holds whichever path it was sent last: send each path
-            // the new RTs newly match; when none does but a path stopped
-            // matching — it may be the one held — send one that still does.
+            // The VRF holds one row per (RD, source) — whichever of the
+            // key's paths it was sent last (Type-5s differing only in their
+            // Ethernet Tag share one): send each path the new RTs newly
+            // match; when none does but a path stopped matching — it may be
+            // the one held — send one that still does.
             let sends = if !newly.is_empty() {
                 newly
             } else if lost {
@@ -4365,6 +4381,7 @@ impl Bgp {
                 let (label, transport) = self.import_label_transport(winner);
                 let _ = handle.inbox.send(super::vrf::msg::BgpVrfMsg::ImportV4 {
                     rd,
+                    source,
                     prefix,
                     attr: (*winner.attr).clone(),
                     label,
@@ -4388,7 +4405,11 @@ impl Bgp {
         let new = &known.import_rts_v6;
         let own_rd = self.vrfs.get(vrf).and_then(|c| c.rd);
         let mut by_key: BTreeMap<
-            (bgp_packet::RouteDistinguisher, ipnet::Ipv6Net),
+            (
+                bgp_packet::RouteDistinguisher,
+                super::vrf::ImportSource,
+                ipnet::Ipv6Net,
+            ),
             Vec<&super::route::BgpRib>,
         > = BTreeMap::new();
         for (rd, table) in &self.shard.v6vpn {
@@ -4396,7 +4417,10 @@ impl Bgp {
                 if winner.ident == super::route::ORIGINATED_PEER && Some(*rd) == own_rd {
                     continue;
                 }
-                by_key.entry((*rd, prefix)).or_default().push(winner);
+                by_key
+                    .entry((*rd, super::vrf::ImportSource::Vpn, prefix))
+                    .or_default()
+                    .push(winner);
             }
         }
         for (rd, table) in &self.local_rib.evpn {
@@ -4407,11 +4431,14 @@ impl Bgp {
                 } = prefix
                     && winner.typ != super::route::BgpRibType::Originated
                 {
-                    by_key.entry((*rd, *p)).or_default().push(winner);
+                    by_key
+                        .entry((*rd, super::vrf::ImportSource::Evpn, *p))
+                        .or_default()
+                        .push(winner);
                 }
             }
         }
-        for ((rd, prefix), winners) in by_key {
+        for ((rd, source, prefix), winners) in by_key {
             let (mut newly, mut still) = (Vec::new(), Vec::new());
             let (mut before, mut lost) = (false, false);
             for winner in winners {
@@ -4428,13 +4455,15 @@ impl Bgp {
                 if before {
                     let _ = handle
                         .inbox
-                        .send(super::vrf::msg::BgpVrfMsg::WithdrawImportV6 { rd, prefix });
+                        .send(super::vrf::msg::BgpVrfMsg::WithdrawImportV6 { rd, source, prefix });
                 }
                 continue;
             }
-            // The VRF holds whichever path it was sent last: send each path
-            // the new RTs newly match; when none does but a path stopped
-            // matching — it may be the one held — send one that still does.
+            // The VRF holds one row per (RD, source) — whichever of the
+            // key's paths it was sent last (Type-5s differing only in their
+            // Ethernet Tag share one): send each path the new RTs newly
+            // match; when none does but a path stopped matching — it may be
+            // the one held — send one that still does.
             let sends = if !newly.is_empty() {
                 newly
             } else if lost {
@@ -4446,6 +4475,7 @@ impl Bgp {
                 let (label, transport) = self.import_label_transport(winner);
                 let _ = handle.inbox.send(super::vrf::msg::BgpVrfMsg::ImportV6 {
                     rd,
+                    source,
                     prefix,
                     attr: (*winner.attr).clone(),
                     label,
@@ -4606,13 +4636,18 @@ impl Bgp {
             if let Some(handle) = self.vrf_registry.get(name) {
                 let _ = handle
                     .inbox
-                    .send(super::vrf::msg::BgpVrfMsg::WithdrawImport { rd, prefix });
+                    .send(super::vrf::msg::BgpVrfMsg::WithdrawImport {
+                        rd,
+                        source: super::vrf::ImportSource::Vpn,
+                        prefix,
+                    });
             }
         }
         for name in &after {
             if let Some(handle) = self.vrf_registry.get(name) {
                 let _ = handle.inbox.send(super::vrf::msg::BgpVrfMsg::ImportV4 {
                     rd,
+                    source: super::vrf::ImportSource::Vpn,
                     prefix,
                     attr: new.clone(),
                     label: 0,
@@ -4637,13 +4672,18 @@ impl Bgp {
             if let Some(handle) = self.vrf_registry.get(name) {
                 let _ = handle
                     .inbox
-                    .send(super::vrf::msg::BgpVrfMsg::WithdrawImportV6 { rd, prefix });
+                    .send(super::vrf::msg::BgpVrfMsg::WithdrawImportV6 {
+                        rd,
+                        source: super::vrf::ImportSource::Vpn,
+                        prefix,
+                    });
             }
         }
         for name in &after {
             if let Some(handle) = self.vrf_registry.get(name) {
                 let _ = handle.inbox.send(super::vrf::msg::BgpVrfMsg::ImportV6 {
                     rd,
+                    source: super::vrf::ImportSource::Vpn,
                     prefix,
                     attr: new.clone(),
                     label: 0,
@@ -6390,6 +6430,7 @@ impl Bgp {
                     super::vrf::dispatch_import_v4(
                         &dispatcher,
                         rd,
+                        super::vrf::ImportSource::Vpn,
                         p,
                         &winner.attr,
                         label,
@@ -6420,6 +6461,7 @@ impl Bgp {
                     super::vrf::dispatch_import_v6(
                         &dispatcher,
                         rd,
+                        super::vrf::ImportSource::Vpn,
                         p,
                         &winner.attr,
                         label,
@@ -6455,6 +6497,7 @@ impl Bgp {
                         ipnet::IpNet::V4(p) => super::vrf::dispatch_import_v4(
                             &dispatcher,
                             rd,
+                            super::vrf::ImportSource::Evpn,
                             *p,
                             &winner.attr,
                             label,
@@ -6464,6 +6507,7 @@ impl Bgp {
                         ipnet::IpNet::V6(p) => super::vrf::dispatch_import_v6(
                             &dispatcher,
                             rd,
+                            super::vrf::ImportSource::Evpn,
                             *p,
                             &winner.attr,
                             label,
@@ -7009,6 +7053,7 @@ impl Bgp {
                     super::vrf::dispatch_import_v4(
                         &dispatcher,
                         *rd,
+                        super::vrf::ImportSource::Vpn,
                         *p,
                         &winner.attr,
                         label,
@@ -7018,7 +7063,14 @@ impl Bgp {
                 } else if let Some(attr) =
                     top.shard.v4vpn.get(rd).and_then(|t| t.candidate_attr(*p))
                 {
-                    super::vrf::dispatch_withdraw_import_v4(&dispatcher, *rd, *p, &attr, None);
+                    super::vrf::dispatch_withdraw_import_v4(
+                        &dispatcher,
+                        *rd,
+                        super::vrf::ImportSource::Vpn,
+                        *p,
+                        &attr,
+                        None,
+                    );
                 }
                 // Inter-AS Option B transit: (re-)install the swap ILM for
                 // our advertised local label now that the next-hop's
@@ -7070,6 +7122,7 @@ impl Bgp {
                     super::vrf::dispatch_import_v6(
                         &dispatcher,
                         *rd,
+                        super::vrf::ImportSource::Vpn,
                         *p,
                         &winner.attr,
                         label,
@@ -7079,7 +7132,14 @@ impl Bgp {
                 } else if let Some(attr) =
                     top.shard.v6vpn.get(rd).and_then(|t| t.candidate_attr(*p))
                 {
-                    super::vrf::dispatch_withdraw_import_v6(&dispatcher, *rd, *p, &attr, None);
+                    super::vrf::dispatch_withdraw_import_v6(
+                        &dispatcher,
+                        *rd,
+                        super::vrf::ImportSource::Vpn,
+                        *p,
+                        &attr,
+                        None,
+                    );
                 }
                 // Inter-AS Option B transit (VPNv6, review finding #8): the
                 // VPNv4 arm's swap-ILM re-program / tear-down.
@@ -7127,6 +7187,7 @@ impl Bgp {
                                 super::vrf::dispatch_import_v4(
                                     &dispatcher,
                                     *rd,
+                                    super::vrf::ImportSource::Evpn,
                                     *p,
                                     &winner.attr,
                                     label,
@@ -7137,6 +7198,7 @@ impl Bgp {
                                 super::vrf::dispatch_withdraw_import_v4(
                                     &dispatcher,
                                     *rd,
+                                    super::vrf::ImportSource::Evpn,
                                     *p,
                                     &winner.attr,
                                     None,
@@ -7148,6 +7210,7 @@ impl Bgp {
                                 super::vrf::dispatch_import_v6(
                                     &dispatcher,
                                     *rd,
+                                    super::vrf::ImportSource::Evpn,
                                     *p,
                                     &winner.attr,
                                     label,
@@ -7158,6 +7221,7 @@ impl Bgp {
                                 super::vrf::dispatch_withdraw_import_v6(
                                     &dispatcher,
                                     *rd,
+                                    super::vrf::ImportSource::Evpn,
                                     *p,
                                     &winner.attr,
                                     None,
@@ -8225,6 +8289,7 @@ impl Bgp {
                     super::vrf::dispatch_import_v4(
                         &dispatcher,
                         rd,
+                        super::vrf::ImportSource::Vpn,
                         prefix,
                         &winner.attr,
                         0,
@@ -8431,6 +8496,7 @@ impl Bgp {
                     super::vrf::dispatch_import_v6(
                         &dispatcher,
                         rd,
+                        super::vrf::ImportSource::Vpn,
                         prefix,
                         &winner.attr,
                         0,

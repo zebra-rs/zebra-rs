@@ -26,6 +26,19 @@ use crate::bgp::peer::PeerConfig;
 use crate::bgp::vrf_config::VrfPolicyRef;
 use crate::rib::nht::ResolvedNexthop;
 
+/// Which global table an imported VRF route came from. One origin RD can
+/// carry the same prefix both as VPNv4/v6 and as an EVPN Type-5 (zebra-rs
+/// itself exports both under the VRF's RD), and the two change on separate
+/// events, so the VRF keeps them as separate candidates: withdrawing one
+/// leaves the other in place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ImportSource {
+    /// An EVPN Type-5 (IP Prefix) route.
+    Evpn,
+    /// A VPNv4 or VPNv6 route.
+    Vpn,
+}
+
 /// Message from the global `Bgp` task to a per-VRF [`BgpVrf`]
 /// task. The receiver lives on `BgpVrf::global_rx`.
 #[derive(Debug)]
@@ -85,15 +98,17 @@ pub enum BgpVrfMsg {
         policy_refs: BTreeMap<(AfiSafi, VrfPolicyRef), String>,
     },
 
-    /// VPNv4 best-path import. The global Loc-RIB resolved a route
-    /// whose RT list intersects this VRF's `import_rts_v4`; the
-    /// per-VRF task strips the RD and inserts the route into its
-    /// own IPv4 unicast Loc-RIB. `attr` travels by value so the
+    /// VPNv4 (or IPv4 EVPN Type-5, per `source`) best-path import. The
+    /// global Loc-RIB resolved a route whose RT list intersects this
+    /// VRF's `import_rts_v4`; the per-VRF task strips the RD and
+    /// inserts the route into its own IPv4 unicast Loc-RIB, as the
+    /// candidate of its `(rd, source)`. `attr` travels by value so the
     /// per-VRF task can re-intern into its own `BgpAttrStore`
     /// without locking; `label` is the per-VRF MPLS label the
     /// originator advertised.
     ImportV4 {
         rd: RouteDistinguisher,
+        source: ImportSource,
         prefix: ipnet::Ipv4Net,
         attr: BgpAttr,
         label: u32,
@@ -105,11 +120,12 @@ pub enum BgpVrfMsg {
         transport: Vec<ResolvedNexthop>,
     },
 
-    /// Withdraw a previously-imported route. RD identifies the
-    /// origin row; the per-VRF task locates the matching imported
+    /// Withdraw a previously-imported route. RD and source identify
+    /// the origin row; the per-VRF task locates the matching imported
     /// path and runs best-path withdraw.
     WithdrawImport {
         rd: RouteDistinguisher,
+        source: ImportSource,
         prefix: ipnet::Ipv4Net,
     },
 
@@ -205,6 +221,7 @@ pub enum BgpVrfMsg {
     /// the VRF's IPv6 unicast Loc-RIB and advertised to CE peers.
     ImportV6 {
         rd: RouteDistinguisher,
+        source: ImportSource,
         prefix: ipnet::Ipv6Net,
         attr: BgpAttr,
         label: u32,
@@ -216,6 +233,7 @@ pub enum BgpVrfMsg {
     /// VPNv6 counterpart of [`Self::WithdrawImport`].
     WithdrawImportV6 {
         rd: RouteDistinguisher,
+        source: ImportSource,
         prefix: ipnet::Ipv6Net,
     },
 
