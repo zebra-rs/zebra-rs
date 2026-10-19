@@ -1,5 +1,6 @@
 //! EVPN wiring that unit tests of the helpers cannot catch: a received
-//! Type-2 Label2 surviving reflection, originated routes with a router-id
+//! Type-2 Label2 and a Type-5 ESI and Gateway IP surviving reflection,
+//! originated routes with a router-id
 //! next hop being re-sent when the router-id gains or loses VTEP status,
 //! and a remote MAC/IP route competing with our own for a local MAC.
 //!
@@ -238,6 +239,94 @@ async fn reflected_macip_keeps_label2() {
     assert_eq!(reflected.len(), 1, "the client route is reflected");
     assert_eq!(reflected[0].label2, Some(2000));
     assert_eq!(reflected[0].vni, 1000);
+}
+
+/// Feed a received EVPN route from `from` (next hop 10.0.0.11) through
+/// ingest.
+fn receive_evpn(bgp: &mut Bgp, from: usize, route: &EvpnRoute, attr: &BgpAttr) {
+    let mut top = BgpTop {
+        router_id: &bgp.router_id,
+        srv6_ipv6_export: bgp.srv6_ipv6_export.as_ref(),
+        local_rib: &mut bgp.local_rib,
+        shard: &mut bgp.shard,
+        tx: &bgp.tx,
+        rib_client: &bgp.ctx.rib,
+        attr_store: &mut bgp.attr_store,
+        update_groups: &mut bgp.update_groups,
+        interface_addrs: &bgp.interface_addrs,
+        vrf_export: None,
+        color_policy: Some(&bgp.color_policy),
+        flex_algo_routes: Some(&bgp.flex_algo_routes),
+        flex_algo_srv6_routes: Some(&bgp.flex_algo_srv6_routes),
+        vrf_import: None,
+        nexthop_cache: None,
+        vrf_transport_v4: None,
+        vrf_transport_v6: None,
+        as_sets_withdraw: bgp.as_sets_withdraw,
+    };
+    route_evpn_update(
+        from,
+        route,
+        "10.0.0.11".parse().unwrap(),
+        attr,
+        &mut top,
+        &mut bgp.peers,
+        false,
+    );
+}
+
+/// RFC 9136 §3.1: a Type-5's ESI and Gateway IP sit outside the route key,
+/// like a Type-2's Label2. They are the overlay index a remote PE may
+/// resolve the prefix through (§3.2), so a reflector passes them on as
+/// received, in both families, and adds neither to a route that had none.
+#[tokio::test]
+async fn reflected_type5_keeps_esi_and_gateway() {
+    let mut bgp = fresh_bgp();
+    let (from, _from_rx) = peer(&mut bgp, "10.0.0.11", false);
+    let (to, mut to_rx) = peer(&mut bgp, "10.0.0.12", false);
+
+    let mut attr = BgpAttr::new();
+    attr.nexthop = Some(BgpNexthop::Evpn("10.0.0.11".parse().unwrap()));
+    attr.local_pref = Some(LocalPref::default());
+    attr.ecom = Some(ExtCommunity::from([evpn_route_target(65000, 100)]));
+    let unspecified = |prefix: &IpNet| match prefix {
+        IpNet::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        IpNet::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+    };
+    let cases: [(&str, [u8; 10], Option<&str>); 3] = [
+        ("10.20.0.0/24", ESI, Some("10.20.0.1")),
+        ("2001:db8:20::/64", ESI, Some("2001:db8:20::1")),
+        ("10.30.0.0/24", [0; 10], None),
+    ];
+    for (prefix, esi, gw) in cases {
+        let prefix: IpNet = prefix.parse().unwrap();
+        let gw = gw.map_or_else(|| unspecified(&prefix), |gw| gw.parse().unwrap());
+        let route = EvpnRoute::Prefix(bgp_packet::EvpnIpPrefix {
+            id: 0,
+            rd: rd_from_router_id_vni("10.0.0.11".parse().unwrap(), 100).unwrap(),
+            esi,
+            ether_tag: 0,
+            prefix,
+            gw,
+            label: 1000,
+        });
+        receive_evpn(&mut bgp, from, &route, &attr);
+    }
+
+    let reflected: BTreeMap<IpNet, ([u8; 10], IpAddr)> = sent(&mut bgp, to, &mut to_rx)
+        .into_iter()
+        .filter_map(|(route, _)| match route {
+            EvpnRoute::Prefix(p) => Some((p.prefix, (p.esi, p.gw))),
+            _ => None,
+        })
+        .collect();
+    let v4: IpNet = "10.20.0.0/24".parse().unwrap();
+    let v6: IpNet = "2001:db8:20::/64".parse().unwrap();
+    let plain: IpNet = "10.30.0.0/24".parse().unwrap();
+    assert_eq!(reflected.len(), 3, "every client route is reflected");
+    assert_eq!(reflected[&v4], (ESI, "10.20.0.1".parse().unwrap()));
+    assert_eq!(reflected[&v6], (ESI, "2001:db8:20::1".parse().unwrap()));
+    assert_eq!(reflected[&plain], ([0; 10], unspecified(&plain)));
 }
 
 /// A BGP instance whose messages to the RIB the test reads back.

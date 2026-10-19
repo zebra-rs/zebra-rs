@@ -737,6 +737,13 @@ struct EvpnRouteJson {
     /// route, which carries none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     srv6_sids: Vec<Srv6ServiceSidJson>,
+    /// The Ethernet Segment a Type-2 or Type-5 path sits behind; omitted
+    /// when zero, as in the text view.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    esi: Option<String>,
+    /// A Type-5 path's Gateway IP (RFC 9136 §3.1); omitted when zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gateway_ip: Option<String>,
 }
 
 /// One SRv6 service SID on an EVPN route: the SID itself, its decoded
@@ -776,6 +783,10 @@ fn evpn_route_json(rd: &RouteDistinguisher, prefix: &EvpnPrefix, rib: &BgpRib) -
             .map(sid_json("l2"))
             .chain(rib.attr.srv6_l3_sids().map(sid_json("l3")))
             .collect(),
+        esi: path_level_esi(prefix, rib.esi)
+            .filter(|esi| esi != &[0u8; 10])
+            .map(|esi| bgp_packet::esi_display(&esi)),
+        gateway_ip: rib.evpn_gw_ip.map(|gw| gw.to_string()),
     }
 }
 
@@ -1592,6 +1603,7 @@ fn show_adj_rib_routes_evpn<D: RibDirection>(
                     &rib.attr,
                     rib.is_originated(),
                     path_level_esi(prefix, rib.esi),
+                    rib.evpn_gw_ip,
                 )?;
             }
         }
@@ -5217,6 +5229,7 @@ fn write_evpn_path_attrs(
     attr: &BgpAttr,
     originated: bool,
     esi: Option<[u8; 10]>,
+    gateway: Option<std::net::IpAddr>,
 ) -> std::fmt::Result {
     const PAD: &str = "                    ";
 
@@ -5246,6 +5259,12 @@ fn write_evpn_path_attrs(
     // prefix column) never doubles it here.
     if let Some(esi) = esi.filter(|esi| esi != &[0u8; 10]) {
         writeln!(buf, "{PAD}ESI: {}", bgp_packet::esi_display(&esi))?;
+    }
+    // A Type-5's Gateway IP (RFC 9136 §3.1), the other overlay index: shown
+    // as received. zebra-rs forwards on the BGP next hop either way and
+    // originates neither field.
+    if let Some(gateway) = gateway {
+        writeln!(buf, "{PAD}Gateway IP: {gateway}")?;
     }
 
     let ecom = show_evpn_ecom(attr);
@@ -5446,6 +5465,7 @@ fn show_bgp_evpn(
                 &rib.attr,
                 rib.is_originated(),
                 path_level_esi(prefix, rib.esi),
+                rib.evpn_gw_ip,
             )?;
 
             // Line 4 (Type-9 only): RFC 9572 §5.3.1 inter-AS DF election among
@@ -6689,7 +6709,7 @@ mod evpn_show_tests {
         };
 
         let mut buf = String::new();
-        write_evpn_path_attrs(&mut buf, &attr, false, None).unwrap();
+        write_evpn_path_attrs(&mut buf, &attr, false, None, None).unwrap();
 
         let pad = " ".repeat(20);
         let expected = format!(
@@ -6714,7 +6734,7 @@ mod evpn_show_tests {
         };
 
         let mut buf = String::new();
-        write_evpn_path_attrs(&mut buf, &attr, false, None).unwrap();
+        write_evpn_path_attrs(&mut buf, &attr, false, None, None).unwrap();
 
         let pad = " ".repeat(20);
         assert_eq!(
@@ -6736,7 +6756,7 @@ mod evpn_show_tests {
         };
 
         let mut buf = String::new();
-        write_evpn_path_attrs(&mut buf, &attr, false, None).unwrap();
+        write_evpn_path_attrs(&mut buf, &attr, false, None, None).unwrap();
 
         let pad = " ".repeat(20);
         assert_eq!(buf, format!("{pad}Cluster list: 10.0.0.2\n"));
@@ -6756,7 +6776,7 @@ mod evpn_show_tests {
         };
 
         let mut buf = String::new();
-        write_evpn_path_attrs(&mut buf, &attr, false, None).unwrap();
+        write_evpn_path_attrs(&mut buf, &attr, false, None, None).unwrap();
 
         let pad = " ".repeat(20);
         let expected = format!(
@@ -6774,8 +6794,32 @@ mod evpn_show_tests {
     #[test]
     fn write_path_attrs_empty_attr_writes_nothing() {
         let mut buf = String::new();
-        write_evpn_path_attrs(&mut buf, &BgpAttr::default(), false, None).unwrap();
+        write_evpn_path_attrs(&mut buf, &BgpAttr::default(), false, None, None).unwrap();
         assert!(buf.is_empty());
+    }
+
+    /// A received Type-5's overlay index (RFC 9136 §3.1): the ESI line and
+    /// then the Gateway IP line. A zero ESI is suppressed, as for Type-2.
+    #[test]
+    fn write_path_attrs_renders_type5_esi_and_gateway() {
+        let esi = [0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99];
+        let gateway = Some("2001:db8:20::1".parse().unwrap());
+        let pad = " ".repeat(20);
+
+        let mut buf = String::new();
+        write_evpn_path_attrs(&mut buf, &BgpAttr::default(), false, Some(esi), gateway).unwrap();
+        assert_eq!(
+            buf,
+            format!(
+                "{pad}ESI: 00:11:22:33:44:55:66:77:88:99\n\
+                 {pad}Gateway IP: 2001:db8:20::1\n"
+            )
+        );
+
+        let mut buf = String::new();
+        write_evpn_path_attrs(&mut buf, &BgpAttr::default(), false, Some([0; 10]), gateway)
+            .unwrap();
+        assert_eq!(buf, format!("{pad}Gateway IP: 2001:db8:20::1\n"));
     }
 
     /// A received Type-3 IMET carrying an SRv6 L2 Service TLV (RFC 9252)
@@ -6798,7 +6842,7 @@ mod evpn_show_tests {
         };
 
         let mut buf = String::new();
-        write_evpn_path_attrs(&mut buf, &attr, false, None).unwrap();
+        write_evpn_path_attrs(&mut buf, &attr, false, None, None).unwrap();
 
         let pad = " ".repeat(20);
         assert_eq!(
@@ -6831,7 +6875,7 @@ mod evpn_show_tests {
             };
 
             let mut buf = String::new();
-            write_evpn_path_attrs(&mut buf, &attr, true, None).unwrap();
+            write_evpn_path_attrs(&mut buf, &attr, true, None, None).unwrap();
 
             let pad = " ".repeat(20);
             assert_eq!(
@@ -6873,7 +6917,7 @@ mod evpn_show_tests {
         };
 
         let mut buf = String::new();
-        write_evpn_path_attrs(&mut buf, &attr, false, None).unwrap();
+        write_evpn_path_attrs(&mut buf, &attr, false, None, None).unwrap();
 
         let pad = " ".repeat(20);
         assert_eq!(
