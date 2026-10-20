@@ -11,6 +11,54 @@
 # Fields "distribution" and "urgency" are optional per-entry; if you omit them,
 # changelog-gen.sh defaults to distribution "unstable" and urgency "medium".
 
+- semver: 26.10.3
+  date: 2026-10-19T18:00:00+09:00
+  distribution: unstable
+  urgency: medium
+  packager: Kunihiro Ishiguro <kunihiro@zebra.rs>
+  changes:
+    - note: |
+        ### Upgrade notes
+        * Show output spells the Encapsulation extended community
+          `opaque:VXLAN` (was `opqque:VXLAN`); scripts matching the old
+          spelling need updating. Configuration is not affected
+        * When a VRF imports one route as both VPNv4 and EVPN Type-5
+          under one RD and the copies tie on every attribute, the
+          Type-5 copy is installed, no longer whichever arrived last
+        * An `inter-as-hybrid` VRF re-exports an imported route with
+          its own export route targets only; the imported route's
+          targets used to go out beside them
+    - note: |
+        ### BGP VPN and EVPN
+        * A VRF keeps a route received as both VPNv4 and EVPN Type-5
+          under one RD as two candidates. The copy imported last
+          overwrote the other, encapsulation included, and withdrawing
+          either copy removed the prefix while the other was still
+          advertised
+        * A VRF exports only its own routes. When one went away, the
+          best route left, another PE's import, was re-exported under
+          this PE's RD and never withdrawn: two PEs importing each
+          other's routes kept a prefix neither originated in both VRFs
+          and in the VPN
+        * An `inter-as-hybrid` re-export carries this PE's forwarding
+          attributes only. The origin's SRv6 SID, Router's MAC and
+          Encapsulation extended communities were passed on, so a
+          receiver that could not reach the SID never imported the
+          route
+        * A route reflector keeps a received Type-5's ESI and Gateway
+          IP (RFC 9136 overlay index) instead of zeroing them, so IP
+          aliasing between other PEs survives it; zebra-rs still
+          forwards on the BGP next hop. `show bgp evpn` shows the
+          Gateway IP, and its JSON gains `esi` and `gateway_ip`
+    - note: |
+        ### Documentation and playsets
+        * New playsets `bgp-evpn-services-vxlan`, `-mpls` and `-srv6`:
+          three PEs around a P router carry E-LINE (VPWS), E-LAN and
+          E-TREE at once, and each README shows how the leaves are kept
+          apart (coloured IMETs, a leaf label, a leaf argument)
+        * A blog post, `docs/blog/evpn-e-line-e-lan-e-tree.md`, walks
+          through the nine service and encapsulation combinations with
+          zebra-rs and cradle-rs
 - semver: 26.10.2
   date: 2026-10-18T18:00:00+09:00
   distribution: unstable
