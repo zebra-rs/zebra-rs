@@ -573,10 +573,10 @@ impl ConfigManager {
     }
 
     /// Like [`Self::subscribe_to_rib`] (default-VRF installs) but the
-    /// subscriber additionally receives **link** events for every VRF
-    /// (`Subscriber::global_links`). Used by the cradle port
-    /// reconcile, which follows `interface … ebpf enabled` interfaces
-    /// across VRF enslavement.
+    /// subscriber additionally receives **link** and **address** events
+    /// for every VRF (`Subscriber::global_links`). Used by the cradle
+    /// port reconcile, which follows `interface … ebpf enabled`
+    /// interfaces across VRF enslavement, and by ND.
     pub fn subscribe_to_rib_global_links(
         &self,
         proto: &str,

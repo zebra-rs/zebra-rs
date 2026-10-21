@@ -460,8 +460,14 @@ impl Rib {
     /// Used when an interface is re-enslaved across a VRF boundary: its
     /// addresses must be replayed to the *new* VRF's clients, which
     /// weren't subscribed when the addresses were first learned.
+    ///
+    /// Like link events, an address event also reaches every
+    /// `global_links` subscriber: the subscribe-time dump already gives
+    /// them every link's addresses, and ND (one process-wide instance)
+    /// needs a VRF interface's link-local to come and go — DAD
+    /// completion included — to know when it can source an RA there.
     pub fn api_addr_add_vrf(&self, addr: &LinkAddr, vrf_id: u32) {
-        for (_, sub) in self.client_registry.iter_vrf(vrf_id) {
+        for (_, sub) in self.client_registry.iter_link_subs(vrf_id) {
             let _ = sub.rib_rx_tx.send(RibRx::AddrAdd(addr.clone()));
         }
     }
@@ -473,9 +479,10 @@ impl Rib {
     /// Push `AddrDel` to subscribers bound to an explicit `vrf_id`.
     /// Used when an interface leaves a VRF: its addresses must be
     /// withdrawn from the *old* VRF's clients, so the old VRF id must
-    /// be passed in.
+    /// be passed in. Reaches `global_links` subscribers too, as
+    /// [`Self::api_addr_add_vrf`] does.
     pub fn api_addr_del_vrf(&self, addr: &LinkAddr, vrf_id: u32) {
-        for (_, sub) in self.client_registry.iter_vrf(vrf_id) {
+        for (_, sub) in self.client_registry.iter_link_subs(vrf_id) {
             let _ = sub.rib_rx_tx.send(RibRx::AddrDel(addr.clone()));
         }
     }
@@ -652,5 +659,57 @@ impl Rib {
                 .rib_rx_tx
                 .send(RibRx::FlexAlgoSrv6RouteDel { algo, prefix });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rib::client::ProtoId;
+    use tokio::sync::mpsc::unbounded_channel;
+
+    fn drain(rx: &mut UnboundedReceiver<RibRx>) -> Vec<RibRx> {
+        let mut out = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            out.push(msg);
+        }
+        out
+    }
+
+    /// An address event of a VRF interface reaches that VRF's
+    /// subscribers and every `global_links` subscriber (ND follows
+    /// link-locals across VRFs), but not an ordinary default-VRF one.
+    /// A `global_links` subscriber bound to the same VRF gets it once.
+    #[tokio::test]
+    async fn addr_events_reach_global_links_subscribers() {
+        let mut rib = Rib::new(false).expect("rib");
+        let (tx_nd, mut rx_nd) = unbounded_channel();
+        let (tx_bgp, mut rx_bgp) = unbounded_channel();
+        let (tx_vrf, mut rx_vrf) = unbounded_channel();
+        let reg = &mut rib.client_registry;
+        reg.register_with_id(ProtoId::from_raw(0), "nd", tx_nd, 0, true);
+        reg.register_with_id(ProtoId::from_raw(1), "bgp", tx_bgp, 0, false);
+        reg.register_with_id(ProtoId::from_raw(2), "bgp:vrf:v1", tx_vrf, 10, false);
+        let addr = LinkAddr {
+            addr: "fe80::1/64".parse().unwrap(),
+            ifindex: 7,
+            ..Default::default()
+        };
+
+        rib.api_addr_add_vrf(&addr, 10);
+        rib.api_addr_del_vrf(&addr, 10);
+        for rx in [&mut rx_nd, &mut rx_vrf] {
+            let got = drain(rx);
+            assert!(matches!(
+                got.as_slice(),
+                [RibRx::AddrAdd(a), RibRx::AddrDel(d)] if a.addr == addr.addr && d.addr == addr.addr
+            ));
+        }
+        assert!(drain(&mut rx_bgp).is_empty());
+
+        rib.api_addr_add_vrf(&addr, 0);
+        assert_eq!(drain(&mut rx_nd).len(), 1);
+        assert_eq!(drain(&mut rx_bgp).len(), 1);
+        assert!(drain(&mut rx_vrf).is_empty());
     }
 }

@@ -221,11 +221,12 @@ pub struct Subscriber {
     pub rib_rx_tx: UnboundedSender<RibRx>,
     pub vrf_id: u32,
     /// Receive link lifecycle events (`LinkAdd`/`LinkDel`/`LinkUp`/
-    /// `LinkDown`/`LinkMtu`) for **every** VRF, not just `vrf_id`.
-    /// For consumers whose scope spans VRFs — the cradle eBPF port
-    /// reconcile follows interfaces wherever they are enslaved (the
-    /// port's `vrf_id` is derived from the link's master). Address
-    /// and route events stay VRF-scoped.
+    /// `LinkDown`/`LinkMtu`) and address events (`AddrAdd`/`AddrDel`)
+    /// for **every** VRF, not just `vrf_id`. For consumers whose scope
+    /// spans VRFs — the cradle eBPF port reconcile follows interfaces
+    /// wherever they are enslaved (the port's `vrf_id` is derived from
+    /// the link's master), and ND has to know when an interface's
+    /// link-local can source an RA. Route events stay VRF-scoped.
     pub global_links: bool,
 }
 
