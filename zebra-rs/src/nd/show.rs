@@ -177,6 +177,10 @@ struct JsonRaScheduler {
     /// `tick`, so it is not advertising and `next_unsolicited_in_secs`
     /// is `null` — the deadline it still holds is stale.
     suspended: bool,
+    /// `true` while no link-local can source an RA (DAD still running
+    /// after a link-up, or none at all). Skipped by `tick` like a
+    /// suspended sender, so `next_unsolicited_in_secs` is `null`.
+    waiting_for_link_local: bool,
     next_unsolicited_in_secs: Option<u64>,
     solicited_pending: bool,
     last_multicast_secs_ago: Option<u64>,
@@ -269,6 +273,8 @@ fn render_interface_text(
         // to what it has always been.
         let next_in = if nd.is_suspended(ifindex) {
             "suspended (link down)".to_string()
+        } else if nd.is_waiting_for_link_local(ifindex) {
+            "held (link-local not ready)".to_string()
         } else {
             format!("in {}", until(now, sender.next_unsolicited_at()))
         };
@@ -433,7 +439,10 @@ fn build_interface_json(nd: &super::engine::NdEngine, ifindex: u32, now: Instant
             other: cfg.flags.contains(nd_packet::RaFlags::O),
             initial_remaining: sender.initial_remaining(),
             suspended: nd.is_suspended(ifindex),
-            next_unsolicited_in_secs: (!nd.is_suspended(ifindex)).then(|| {
+            waiting_for_link_local: nd.is_waiting_for_link_local(ifindex),
+            next_unsolicited_in_secs: (!nd.is_suspended(ifindex)
+                && !nd.is_waiting_for_link_local(ifindex))
+            .then(|| {
                 sender
                     .next_unsolicited_at()
                     .saturating_duration_since(now)
@@ -644,7 +653,7 @@ mod tests {
     use crate::nd::engine::NdEngine;
     use crate::nd::send::RaSendConfig;
     use crate::nd::{DropReason, NdRecv};
-    use crate::rib::link::{Link, LinkType};
+    use crate::rib::link::{AddrScope, Link, LinkAddr, LinkType};
     use netlink_packet_route::link::LinkFlags;
 
     use super::*;
@@ -675,7 +684,7 @@ mod tests {
             label: false,
             mac: None,
             addr4: Vec::new(),
-            addr6: Vec::new(),
+            addr6: vec![usable_link_local(index)],
             master: None,
             vni: None,
             vrf_table: None,
@@ -685,6 +694,19 @@ mod tests {
             parent: None,
             vlan_id: None,
             mtu_error: None,
+        }
+    }
+
+    /// The link-local an up interface has once DAD is through. Without
+    /// one RA is held (`is_waiting_for_link_local`), so `link()` carries
+    /// it — otherwise every fixture would describe a held sender.
+    fn usable_link_local(ifindex: u32) -> LinkAddr {
+        LinkAddr {
+            addr: format!("fe80::{ifindex:x}/64").parse().unwrap(),
+            ifindex,
+            fib: true,
+            scope: AddrScope::Link,
+            ..Default::default()
         }
     }
 
@@ -962,5 +984,35 @@ Icmp6InUnrelated                    \t99
         render_interface_text(&mut out, &eng, 2, start).unwrap();
         assert!(out.contains("next unsolicited in "));
         assert!(!out.contains("suspended"));
+    }
+
+    /// A sender held for want of a usable link-local says so in both
+    /// renderings, the same way a suspended one does.
+    #[test]
+    fn a_sender_held_for_a_link_local_says_so() {
+        let start = t0();
+        let mut eng = NdEngine::new();
+        let mut l = link("eth0", 2);
+        l.addr6[0].flags.tentative = true;
+        eng.process_link_add(&l, start);
+        eng.enable_interface(2, RaSendConfig::default(), start);
+
+        let mut out = String::new();
+        render_interface_text(&mut out, &eng, 2, start).unwrap();
+        assert!(
+            out.contains("next unsolicited held (link-local not ready)"),
+            "a held sender must say so: {}",
+            out
+        );
+
+        let json = build_interface_json(&eng, 2, start);
+        let json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&json).unwrap()).unwrap();
+        assert_eq!(json["ra_scheduler"]["suspended"], serde_json::json!(false));
+        assert_eq!(
+            json["ra_scheduler"]["waiting_for_link_local"],
+            serde_json::json!(true)
+        );
+        assert!(json["ra_scheduler"]["next_unsolicited_in_secs"].is_null());
     }
 }

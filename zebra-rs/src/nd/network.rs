@@ -180,7 +180,7 @@ pub async fn write_packet(sock: Arc<AsyncFd<Socket>>, mut rx: UnboundedReceiver<
         };
         let cmsg = [socket::ControlMessage::Ipv6PacketInfo(&pktinfo)];
 
-        let _ = sock
+        let res = sock
             .async_io(Interest::WRITABLE, |sock| {
                 socket::sendmsg(
                     sock.as_raw_fd(),
@@ -193,5 +193,8 @@ pub async fn write_packet(sock: Arc<AsyncFd<Socket>>, mut rx: UnboundedReceiver<
                 Ok(())
             })
             .await;
+        if let Err(e) = res {
+            tracing::warn!("nd: send to {} on ifindex {} failed: {}", dst, ifindex, e);
+        }
     }
 }
