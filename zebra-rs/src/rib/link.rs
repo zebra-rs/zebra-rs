@@ -1434,11 +1434,20 @@ impl Rib {
         if from_config {
             addr.config = true;
             // Our own RTM_NEWADDR never echoes back, so mirror the scope
-            // the kernel will assign. Flags and lifetimes stay at their
-            // defaults — the kernel's own follow-up notification (DAD
-            // completion) delivers the truth and link_addr_update adopts
-            // it without disturbing the config state.
+            // the kernel will assign, and for IPv6 the flags it adds the
+            // address with: permanent, and tentative until DAD is through.
+            // Left at the defaults, a configured link-local read as usable
+            // at once, and ND sent an RA from it that failed with
+            // EADDRNOTAVAIL. Lifetimes stay at their defaults — the
+            // kernel's own follow-up notification (DAD completion, sent
+            // at once when DAD is skipped) delivers the truth and
+            // link_addr_update adopts it without disturbing the config
+            // state.
             addr.scope = AddrScope::derive(&addr.addr);
+            if !addr.is_v4() {
+                addr.flags.tentative = true;
+                addr.flags.permanent = true;
+            }
         }
         if let Some(link) = self.links.get_mut(&addr.ifindex) {
             // Our own RTM_NEWADDR never echoes back (the kernel excludes
@@ -2235,6 +2244,60 @@ mod tests {
         let mut again = test_addr_v6("2001:db8::1/64", false, true);
         again.flags.permanent = true;
         assert_eq!(link_addr_update(&mut link, again), AddrUpdate::Unchanged);
+    }
+
+    /// A configured IPv6 address is announced the way the kernel adds
+    /// it, tentative and permanent, so a subscriber does not take a
+    /// configured link-local as usable before DAD is through. The
+    /// kernel's own tentative notification then changes nothing, and
+    /// DAD completion is re-broadcast.
+    #[tokio::test]
+    async fn a_configured_ipv6_address_is_tentative_until_dad_completes() {
+        use crate::rib::api::RibRx;
+        use crate::rib::client::ProtoId;
+
+        let mut rib = Rib::new(false).expect("rib");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        rib.client_registry
+            .register_with_id(ProtoId::from_raw(0), "nd", tx, 0, false);
+        rib.links.insert(1, test_link());
+        let fib_addr = |flags| FibAddr {
+            addr: "fe80::1/64".parse().unwrap(),
+            link_index: 1,
+            scope: AddrScope::Link,
+            flags,
+            ..Default::default()
+        };
+        let mut drain = || {
+            let mut out = Vec::new();
+            while let Ok(RibRx::AddrAdd(a)) = rx.try_recv() {
+                out.push(a.flags);
+            }
+            out
+        };
+
+        rib.addr_add(fib_addr(AddrFlags::default()), true);
+        let flags = drain();
+        assert!(
+            matches!(flags.as_slice(), [f] if f.tentative && f.permanent),
+            "{flags:?}"
+        );
+
+        let tentative = AddrFlags {
+            tentative: true,
+            permanent: true,
+            ..Default::default()
+        };
+        rib.addr_add(fib_addr(tentative), false);
+        assert!(drain().is_empty());
+
+        let done = AddrFlags {
+            permanent: true,
+            ..Default::default()
+        };
+        rib.addr_add(fib_addr(done), false);
+        let flags = drain();
+        assert!(matches!(flags.as_slice(), [f] if !f.tentative), "{flags:?}");
     }
 
     #[test]

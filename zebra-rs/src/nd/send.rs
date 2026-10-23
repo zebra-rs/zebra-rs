@@ -1,9 +1,9 @@
 //! Per-interface Router Advertisement send state machine (RFC 4861 §6.2).
 //!
-//! Pure logic — no I/O, no tokio. The driver task that will eventually
-//! call [`RaSender::tick`] on a timer and forward [`RaEvent`]s to the
-//! write channel lives in a follow-up commit; this module is the
-//! testable core.
+//! Pure logic — no I/O, no tokio. [`super::engine::NdEngine::tick`]
+//! asks [`RaSender::due`] on a timer, writes the [`RaEvent`] to the
+//! socket, and reports back through [`RaSender::sent`] or
+//! [`RaSender::send_failed`]; this module is the testable core.
 //!
 //! Three classes of advertisements:
 //!   * **Initial**: the first `MAX_INITIAL_RTR_ADVERTISEMENTS` (3)
@@ -126,6 +126,7 @@ pub struct RaSender<R: RngSource = ThreadRng> {
     last_multicast_at: Option<Instant>,
     next_unsolicited_at: Instant,
     pending_solicited_at: Option<Instant>,
+    send_failures: u32,
 }
 
 impl<R: RngSource> RaSender<R> {
@@ -138,10 +139,11 @@ impl<R: RngSource> RaSender<R> {
             last_multicast_at: None,
             next_unsolicited_at: now + first_delay,
             pending_solicited_at: None,
+            send_failures: 0,
         }
     }
 
-    /// Time at which [`Self::tick`] should next be called. `None`
+    /// Time at which [`Self::due`] should next be asked. `None`
     /// would only happen if both schedules were disabled — but
     /// `next_unsolicited_at` is always set, so this returns `Some`.
     pub fn next_wakeup(&self) -> Instant {
@@ -217,15 +219,19 @@ impl<R: RngSource> RaSender<R> {
     ///
     /// `last_multicast_at` is kept, so `MIN_DELAY_BETWEEN_RAS` still
     /// holds across a short flap. Clamping to it here rather than
-    /// leaving it to [`Self::tick`] is load-bearing: `tick` drops a
+    /// leaving it to [`Self::due`] is load-bearing: `due` withholds a
     /// rate-limited advertisement without rescheduling it, so an
     /// un-clamped `next_unsolicited_at` in the past would leave
     /// [`Self::next_wakeup`] returning an instant that has already
     /// passed and spin the driver's `select!` loop until the limit
     /// expired.
+    ///
+    /// The send-failure backoff starts over too: a fresh burst should
+    /// not inherit the 16 s retry of a failure before the outage.
     pub fn restart_initial(&mut self, now: Instant) {
         self.initial_remaining = MAX_INITIAL_RTR_ADVERTISEMENTS;
         self.pending_solicited_at = None;
+        self.send_failures = 0;
         let mut at = now + self.rng.duration_in(Duration::ZERO, MAX_RA_DELAY_TIME);
         if let Some(last) = self.last_multicast_at {
             let earliest = last + MIN_DELAY_BETWEEN_RAS;
@@ -236,32 +242,58 @@ impl<R: RngSource> RaSender<R> {
         self.next_unsolicited_at = at;
     }
 
-    /// Drain events that are due as of `now`.
-    pub fn tick(&mut self, now: Instant) -> Vec<RaEvent> {
-        let mut out = Vec::new();
-
+    /// The advertisement due as of `now`, if any. Nothing changes until
+    /// the caller reports the outcome through [`Self::sent`] or
+    /// [`Self::send_failed`], so an RA that never left uses up no slot.
+    pub fn due(&self, now: Instant) -> Option<RaEvent> {
+        if !self.can_send_multicast_at(now) {
+            return None;
+        }
         // Solicited reply takes priority — it has the tighter deadline.
-        if let Some(at) = self.pending_solicited_at
-            && now >= at
-            && self.can_send_multicast_at(now)
-        {
-            out.push(RaEvent::SendSolicited {
-                ra: self.build_ra(),
-            });
+        let solicited = self.pending_solicited_at.is_some_and(|at| now >= at);
+        if !solicited && now < self.next_unsolicited_at {
+            return None;
+        }
+        let ra = self.build_ra();
+        Some(if solicited {
+            RaEvent::SendSolicited { ra }
+        } else {
+            RaEvent::SendUnsolicited { ra }
+        })
+    }
+
+    /// `ev`, from [`Self::due`], went out at `now`.
+    pub fn sent(&mut self, ev: &RaEvent, now: Instant) {
+        if matches!(ev, RaEvent::SendSolicited { .. }) {
             self.pending_solicited_at = None;
-            self.last_multicast_at = Some(now);
-            self.reschedule_after_send(now);
         }
+        self.last_multicast_at = Some(now);
+        self.send_failures = 0;
+        self.reschedule_after_send(now);
+    }
 
-        if now >= self.next_unsolicited_at && self.can_send_multicast_at(now) {
-            out.push(RaEvent::SendUnsolicited {
-                ra: self.build_ra(),
-            });
-            self.last_multicast_at = Some(now);
-            self.reschedule_after_send(now);
+    /// Sending `ev`, from [`Self::due`], failed at `now`. Nothing went
+    /// out, so it uses up no initial advertisement and does not count
+    /// against `MIN_DELAY_BETWEEN_RAS`. It is retried after a delay
+    /// that starts at `MAX_RA_DELAY_TIME` and doubles per consecutive
+    /// failure up to `MAX_INITIAL_RTR_ADVERT_INTERVAL`, so a failure
+    /// that lasts (an output firewall drop, say) costs an attempt every
+    /// 16 s rather than a busy loop. Returns that delay.
+    pub fn send_failed(&mut self, ev: &RaEvent, now: Instant) -> Duration {
+        self.send_failures = self.send_failures.saturating_add(1);
+        let retry = (MAX_RA_DELAY_TIME * 2u32.pow((self.send_failures - 1).min(5)))
+            .min(MAX_INITIAL_RTR_ADVERT_INTERVAL);
+        match ev {
+            RaEvent::SendSolicited { .. } => self.pending_solicited_at = Some(now + retry),
+            RaEvent::SendUnsolicited { .. } => self.next_unsolicited_at = now + retry,
         }
+        retry
+    }
 
-        out
+    /// Consecutive failed sends since the last one that went out (or
+    /// since [`Self::restart_initial`]).
+    pub fn send_failures(&self) -> u32 {
+        self.send_failures
     }
 
     /// Inform the state machine that a Router Solicitation arrived.
@@ -357,6 +389,16 @@ mod tests {
         Instant::now()
     }
 
+    /// [`RaSender::due`] then [`RaSender::sent`]: what a tick sends when
+    /// every send goes out.
+    fn tick_ok<R: RngSource>(s: &mut RaSender<R>, now: Instant) -> Vec<RaEvent> {
+        let Some(ev) = s.due(now) else {
+            return Vec::new();
+        };
+        s.sent(&ev, now);
+        vec![ev]
+    }
+
     #[test]
     fn first_unsolicited_is_within_initial_interval() {
         let start = t0();
@@ -372,7 +414,7 @@ mod tests {
         let start = t0();
         let rng = FixedRng::new([Duration::from_secs(10)]);
         let mut s = RaSender::with_rng(RaSendConfig::default(), rng, start);
-        assert!(s.tick(start + Duration::from_secs(1)).is_empty());
+        assert!(tick_ok(&mut s, start + Duration::from_secs(1)).is_empty());
     }
 
     #[test]
@@ -388,7 +430,7 @@ mod tests {
         let mut s = RaSender::with_rng(RaSendConfig::default(), rng, start);
 
         // 1st initial fires at start+1s.
-        let ev = s.tick(start + Duration::from_secs(1));
+        let ev = tick_ok(&mut s, start + Duration::from_secs(1));
         assert_eq!(ev.len(), 1);
         assert!(matches!(ev[0], RaEvent::SendUnsolicited { .. }));
         assert_eq!(s.initial_remaining, 2);
@@ -398,14 +440,14 @@ mod tests {
         let next = s.next_wakeup();
         assert_eq!(next, start + Duration::from_secs(5));
 
-        let ev = s.tick(start + Duration::from_secs(5));
+        let ev = tick_ok(&mut s, start + Duration::from_secs(5));
         assert_eq!(ev.len(), 1);
         assert_eq!(s.initial_remaining, 1);
 
         // 3rd initial.
         let next = s.next_wakeup();
         assert_eq!(next, start + Duration::from_secs(9));
-        let ev = s.tick(start + Duration::from_secs(9));
+        let ev = tick_ok(&mut s, start + Duration::from_secs(9));
         assert_eq!(ev.len(), 1);
         assert_eq!(s.initial_remaining, 0);
 
@@ -426,7 +468,7 @@ mod tests {
         let next = s.next_wakeup();
         assert_eq!(next, start + Duration::from_millis(300));
 
-        let ev = s.tick(start + Duration::from_millis(300));
+        let ev = tick_ok(&mut s, start + Duration::from_millis(300));
         assert_eq!(ev.len(), 1);
         assert!(matches!(ev[0], RaEvent::SendSolicited { .. }));
     }
@@ -449,7 +491,7 @@ mod tests {
 
         // Should still fire at start + 200ms — the second RS's jitter
         // was discarded.
-        let ev = s.tick(start + Duration::from_millis(200));
+        let ev = tick_ok(&mut s, start + Duration::from_millis(200));
         assert_eq!(ev.len(), 1);
         assert!(matches!(ev[0], RaEvent::SendSolicited { .. }));
         assert!(s.pending_solicited_at.is_none(), "reply slot cleared");
@@ -462,7 +504,7 @@ mod tests {
         let rng = FixedRng::new([Duration::from_secs(10), Duration::ZERO]);
         let mut s = RaSender::with_rng(RaSendConfig::default(), rng, start);
         // Force a multicast send via tick reaching the initial schedule.
-        let ev = s.tick(start + Duration::from_secs(10));
+        let ev = tick_ok(&mut s, start + Duration::from_secs(10));
         assert_eq!(ev.len(), 1);
 
         // 1s after the multicast, RS arrives. With jitter=0 the reply
@@ -489,7 +531,7 @@ mod tests {
         let rng = FixedRng::new([Duration::from_secs(1)]);
         let mut s = RaSender::with_rng(cfg, rng, start);
 
-        let ev = s.tick(start + Duration::from_secs(1));
+        let ev = tick_ok(&mut s, start + Duration::from_secs(1));
         match &ev[0] {
             RaEvent::SendUnsolicited { ra } => {
                 assert_eq!(ra.cur_hop_limit, 100);
@@ -518,7 +560,7 @@ mod tests {
         let start = t0();
         let mut sender = RaSender::new(RaSendConfig::default(), start);
         let sent = start + Duration::from_secs(16);
-        assert_eq!(sender.tick(sent).len(), 1);
+        assert_eq!(tick_ok(&mut sender, sent).len(), 1);
         sender.on_router_solicit("fe80::2".parse().unwrap(), sent);
         sender.cancel_solicited();
         assert!(sender.pending_solicited_at().is_none());
@@ -529,12 +571,12 @@ mod tests {
             sent + Duration::from_millis(200),
         );
         assert_eq!(sender.next_wakeup(), sent + MIN_DELAY_BETWEEN_RAS);
-        assert!(sender.tick(sent + Duration::from_secs(2)).is_empty());
-        assert_eq!(sender.tick(sent + MIN_DELAY_BETWEEN_RAS).len(), 1);
+        assert!(tick_ok(&mut sender, sent + Duration::from_secs(2)).is_empty());
+        assert_eq!(tick_ok(&mut sender, sent + MIN_DELAY_BETWEEN_RAS).len(), 1);
     }
 
     /// `restart_initial` must never leave `next_unsolicited_at` in the
-    /// past. `tick` drops a rate-limited advertisement *without*
+    /// past. `due` withholds a rate-limited advertisement *without*
     /// rescheduling it, so a past-due deadline makes `next_wakeup`
     /// return an instant that has already passed — and the driver's
     /// `sleep_until` then returns immediately, over and over, until
@@ -547,7 +589,7 @@ mod tests {
         let rng = FixedRng::new([Duration::from_secs(16), Duration::ZERO]);
         let mut s = RaSender::with_rng(RaSendConfig::default(), rng, start);
         let sent = start + Duration::from_secs(16);
-        assert_eq!(s.tick(sent).len(), 1);
+        assert_eq!(tick_ok(&mut s, sent).len(), 1);
         assert_eq!(s.last_multicast_at(), Some(sent));
 
         // Link bounces 1s later — well inside MIN_DELAY_BETWEEN_RAS.
@@ -563,8 +605,8 @@ mod tests {
         );
         // And it really is sendable when it comes due, so the deadline
         // is not merely deferred into the same trap one tick later.
-        assert!(s.tick(up).is_empty());
-        assert_eq!(s.tick(sent + MIN_DELAY_BETWEEN_RAS).len(), 1);
+        assert!(tick_ok(&mut s, up).is_empty());
+        assert_eq!(tick_ok(&mut s, sent + MIN_DELAY_BETWEEN_RAS).len(), 1);
     }
 
     /// The other side of the clamp: with no recent multicast the first
@@ -585,8 +627,68 @@ mod tests {
             due.duration_since(up)
         );
         // Subsequent initials keep the RFC 4861 6.2.4 cadence.
-        assert_eq!(s.tick(due).len(), 1);
+        assert_eq!(tick_ok(&mut s, due).len(), 1);
         assert_eq!(s.initial_remaining(), MAX_INITIAL_RTR_ADVERTISEMENTS - 1);
         assert_eq!(s.next_wakeup(), due + MAX_INITIAL_RTR_ADVERT_INTERVAL);
+    }
+
+    /// A send that fails uses up nothing: the initial count and the
+    /// rate-limit clock stay put, and the RA is retried after a delay
+    /// doubling from MAX_RA_DELAY_TIME to a 16 s cap. The send that
+    /// finally goes out takes the slot, and resets the backoff, as a
+    /// restart does.
+    #[test]
+    fn a_failed_send_keeps_its_slot_and_backs_off() {
+        let start = t0();
+        let rng = FixedRng::new([Duration::from_secs(1)]);
+        let mut s = RaSender::with_rng(RaSendConfig::default(), rng, start);
+        let mut now = start + Duration::from_secs(1);
+        for retry_ms in [500, 1000, 2000, 4000, 8000, 16000, 16000] {
+            let ev = s.due(now).expect("due");
+            let retry = s.send_failed(&ev, now);
+            assert_eq!(retry, Duration::from_millis(retry_ms));
+            assert_eq!(s.initial_remaining(), MAX_INITIAL_RTR_ADVERTISEMENTS);
+            assert_eq!(s.last_multicast_at(), None);
+            assert!(s.due(now).is_none());
+            now += retry;
+            assert_eq!(s.next_wakeup(), now);
+        }
+        assert_eq!(s.send_failures(), 7);
+
+        let ev = s.due(now).expect("due");
+        s.sent(&ev, now);
+        assert_eq!(s.initial_remaining(), MAX_INITIAL_RTR_ADVERTISEMENTS - 1);
+        assert_eq!(s.last_multicast_at(), Some(now));
+        assert_eq!(s.send_failures(), 0);
+
+        now = s.next_wakeup();
+        let ev = s.due(now).expect("due");
+        s.send_failed(&ev, now);
+        s.restart_initial(now);
+        assert_eq!(s.send_failures(), 0);
+        let now = s.next_wakeup();
+        let ev = s.due(now).expect("due");
+        assert_eq!(s.send_failed(&ev, now), MAX_RA_DELAY_TIME);
+    }
+
+    /// A solicited reply that fails is re-armed rather than dropped,
+    /// and leaves the unsolicited schedule alone.
+    #[test]
+    fn a_failed_solicited_reply_is_retried() {
+        let start = t0();
+        let rng = FixedRng::new([Duration::from_secs(10), Duration::from_millis(100)]);
+        let mut s = RaSender::with_rng(RaSendConfig::default(), rng, start);
+        s.on_router_solicit("fe80::2".parse().unwrap(), start);
+        let at = start + Duration::from_millis(100);
+        let ev = s.due(at).expect("due");
+        assert!(matches!(ev, RaEvent::SendSolicited { .. }));
+
+        let retry = s.send_failed(&ev, at);
+        assert_eq!(s.pending_solicited_at(), Some(at + retry));
+        assert_eq!(s.next_unsolicited_at(), start + Duration::from_secs(10));
+        assert!(matches!(
+            s.due(at + retry),
+            Some(RaEvent::SendSolicited { .. })
+        ));
     }
 }

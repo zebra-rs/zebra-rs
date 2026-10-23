@@ -1,8 +1,9 @@
-//! Async read / write tasks for the ND raw socket.
+//! Read task and send path for the ND raw socket.
 //!
-//! Mirrors the OSPF `read_packet` / `write_packet` shape in
+//! The read side mirrors the OSPF `read_packet` shape in
 //! `crate::ospf::network` so the runtime wiring (channels, cmsg
-//! plumbing, `AsyncFd::async_io`) is familiar.
+//! plumbing, `AsyncFd::async_io`) is familiar. Sends are synchronous
+//! instead — see [`send_packet`].
 //!
 //! Inbound packets are filtered to ICMPv6 RS + RA + NS + NA by the
 //! kernel (`ICMP6_FILTER` was set in [`super::socket::nd_socket`]); we
@@ -25,7 +26,7 @@ use nix::sys::socket::{self, ControlMessageOwned, SockaddrIn6};
 use socket2::Socket;
 use tokio::io::Interest;
 use tokio::io::unix::AsyncFd;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::UnboundedSender;
 
 use super::{DropReason, NdRecv, NdSend};
 
@@ -153,45 +154,43 @@ pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<NdRecv>
     }
 }
 
-/// Write loop: serialize [`NdSend`] messages and emit them via
-/// sendmsg with an `IPV6_PKTINFO` cmsg pinning the egress ifindex.
-/// The ICMPv6 checksum is computed by the kernel (we set
-/// `IPV6_CHECKSUM = 2` on socket bring-up).
-pub async fn write_packet(sock: Arc<AsyncFd<Socket>>, mut rx: UnboundedReceiver<NdSend>) {
-    while let Some(msg) = rx.recv().await {
-        let (ifindex, dst, payload) = match msg {
-            NdSend::RouterAdvert { ifindex, dst, ra } => {
-                let mut buf = BytesMut::new();
-                ra.emit_without_checksum(&mut buf);
-                (ifindex, dst, buf)
-            }
-            NdSend::RouterSolicit { ifindex, rs } => {
-                let mut buf = BytesMut::new();
-                rs.emit_without_checksum(&mut buf);
-                (ifindex, ALL_ROUTERS, buf)
-            }
-        };
+/// Serialize `msg` and emit it via sendmsg with an `IPV6_PKTINFO` cmsg
+/// pinning the egress ifindex. The kernel computes the ICMPv6
+/// checksum for a raw ICMPv6 socket.
+///
+/// Synchronous, on the non-blocking socket, so the caller learns at
+/// once whether the RA went out (see [`super::engine::NdEngine::tick`]).
+/// A full send buffer (`WouldBlock`) is a failure like any other, and
+/// the engine retries it shortly — unlikely anyway at no more than one
+/// RA per interface every 3 s.
+pub fn send_packet(sock: &Socket, msg: NdSend) -> std::io::Result<()> {
+    let (ifindex, dst, payload) = match msg {
+        NdSend::RouterAdvert { ifindex, dst, ra } => {
+            let mut buf = BytesMut::new();
+            ra.emit_without_checksum(&mut buf);
+            (ifindex, dst, buf)
+        }
+        NdSend::RouterSolicit { ifindex, rs } => {
+            let mut buf = BytesMut::new();
+            rs.emit_without_checksum(&mut buf);
+            (ifindex, ALL_ROUTERS, buf)
+        }
+    };
 
-        let iov = [IoSlice::new(&payload)];
-        let sockaddr: SockaddrIn6 = std::net::SocketAddrV6::new(dst, 0, 0, ifindex).into();
-        let pktinfo = libc::in6_pktinfo {
-            ipi6_addr: libc::in6_addr { s6_addr: [0u8; 16] },
-            ipi6_ifindex: ifindex,
-        };
-        let cmsg = [socket::ControlMessage::Ipv6PacketInfo(&pktinfo)];
+    let iov = [IoSlice::new(&payload)];
+    let sockaddr: SockaddrIn6 = std::net::SocketAddrV6::new(dst, 0, 0, ifindex).into();
+    let pktinfo = libc::in6_pktinfo {
+        ipi6_addr: libc::in6_addr { s6_addr: [0u8; 16] },
+        ipi6_ifindex: ifindex,
+    };
+    let cmsg = [socket::ControlMessage::Ipv6PacketInfo(&pktinfo)];
 
-        let _ = sock
-            .async_io(Interest::WRITABLE, |sock| {
-                socket::sendmsg(
-                    sock.as_raw_fd(),
-                    &iov,
-                    &cmsg,
-                    socket::MsgFlags::empty(),
-                    Some(&sockaddr),
-                )
-                .map_err(std::io::Error::from)?;
-                Ok(())
-            })
-            .await;
-    }
+    socket::sendmsg(
+        sock.as_raw_fd(),
+        &iov,
+        &cmsg,
+        socket::MsgFlags::empty(),
+        Some(&sockaddr),
+    )?;
+    Ok(())
 }

@@ -1,10 +1,10 @@
 //! Async wrapper around [`super::engine::NdEngine`]. Owns the raw
-//! ICMPv6 socket, spawns the read / write tasks, and runs the
-//! `tokio::select!` loop that drives the engine in real time.
+//! ICMPv6 socket, spawns the read task, and runs the `tokio::select!`
+//! loop that drives the engine in real time and writes its RAs.
 //!
 //! `Nd::new()` constructs the instance and immediately spawns the
-//! read and write tasks. [`serve`] takes ownership and drives the
-//! event loop on a third spawned task. The daemon's
+//! read task. [`serve`] takes ownership and drives the event loop on
+//! a second spawned task. The daemon's
 //! [`crate::config::ConfigManager`] calls both at startup.
 #![allow(dead_code)]
 
@@ -23,11 +23,11 @@ use crate::config::{
 use crate::context::Task;
 use crate::rib::api::RibRx;
 
+use super::NdRecv;
 use super::config::Callback;
 use super::engine::{NdEngine, NdEvent};
-use super::network::{read_packet, write_packet};
+use super::network::{read_packet, send_packet};
 use super::send::RaSendConfig;
-use super::{NdRecv, NdSend};
 
 /// `show nd ...` dispatch handler. Mirrors [`crate::bfd::inst::ShowCallback`]:
 /// given the Nd instance, parsed trailing [`Args`], and the JSON flag,
@@ -56,8 +56,10 @@ pub enum NdClientReq {
 /// Top-level ND instance.
 pub struct Nd {
     engine: NdEngine,
+    /// Shared with the read task. The event loop writes RAs on it
+    /// directly, so the engine learns at once whether each went out.
+    socket: Arc<AsyncFd<Socket>>,
     recv_rx: UnboundedReceiver<NdRecv>,
-    send_tx: UnboundedSender<NdSend>,
     client_rx: UnboundedReceiver<NdClientReq>,
     client_tx: UnboundedSender<NdClientReq>,
     rib_rx: UnboundedReceiver<RibRx>,
@@ -76,15 +78,14 @@ pub struct Nd {
     /// [`Self::callback_build`] (in `super::config`) and consumed by
     /// [`Self::process_cm_msg`].
     pub callbacks: HashMap<String, Callback>,
-    // Hold the spawned read / write tasks so dropping `Nd` aborts them.
+    // Hold the spawned read task so dropping `Nd` aborts it.
     _read_task: Task<()>,
-    _write_task: Task<()>,
 }
 
 impl Nd {
     /// Build a new instance from a pre-opened raw ICMPv6 socket.
     ///
-    /// Spawns the read / write tasks and wires up the RIB
+    /// Spawns the read task and wires up the RIB
     /// subscription channel so the engine learns about links as the
     /// kernel exposes them. The event loop is *not* spawned here —
     /// call [`serve`] for that.
@@ -97,22 +98,17 @@ impl Nd {
     pub fn new(socket: AsyncFd<Socket>, rib_rx: UnboundedReceiver<RibRx>) -> Self {
         let socket = Arc::new(socket);
         let (recv_tx, recv_rx) = mpsc::unbounded_channel();
-        let (send_tx, send_rx) = mpsc::unbounded_channel();
         let (client_tx, client_rx) = mpsc::unbounded_channel();
 
         let read_socket = socket.clone();
         let read_task = Task::spawn(async move {
             read_packet(read_socket, recv_tx).await;
         });
-        let write_socket = socket;
-        let write_task = Task::spawn(async move {
-            write_packet(write_socket, send_rx).await;
-        });
 
         let mut nd = Self {
             engine: NdEngine::new(),
+            socket,
             recv_rx,
-            send_tx,
             client_rx,
             client_tx,
             rib_rx,
@@ -121,7 +117,6 @@ impl Nd {
             show_cb: HashMap::new(),
             callbacks: HashMap::new(),
             _read_task: read_task,
-            _write_task: write_task,
         };
         nd.callback_build();
         nd.show_build();
@@ -186,13 +181,9 @@ impl Nd {
                     self.process_show_msg(smsg).await;
                 }
                 _ = sleep_until_opt(wakeup) => {
-                    let now = Instant::now();
-                    for frame in self.engine.tick(now) {
-                        // SendError is benign — the write task may be
-                        // back-pressured for a moment; the next tick
-                        // will retry.
-                        let _ = self.send_tx.send(frame);
-                    }
+                    let socket = self.socket.get_ref();
+                    self.engine
+                        .tick(Instant::now(), |frame| send_packet(socket, frame));
                 }
             }
         }

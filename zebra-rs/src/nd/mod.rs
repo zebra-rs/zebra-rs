@@ -69,7 +69,7 @@ pub enum DropReason {
     Malformed,
 }
 
-/// Outbound ND messages consumed by [`network::write_packet`].
+/// Outbound ND messages written by [`network::send_packet`].
 #[derive(Debug)]
 pub enum NdSend {
     /// Send a Router Advertisement out `ifindex` to `dst`. For an
