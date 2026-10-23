@@ -140,11 +140,12 @@ pub struct NdEngine {
     /// IPv6 link-locals RIB reports per interface, each with whether
     /// it can source an RA yet (see [`link_local_state`]). An RA is
     /// sent from the link-local, and while none is usable `sendmsg`
-    /// fails with `EADDRNOTAVAIL` — yet a failed attempt still used up
-    /// the slot: after `ip link set … up`, which deletes the link-local
-    /// and re-runs DAD, the first RA was lost and the next went out
-    /// 16 s later. An interface without a usable link-local is held
-    /// like one in `down_links`, and resumed when one becomes usable.
+    /// fails with `EADDRNOTAVAIL`: after `ip link set … up`, which
+    /// deletes the link-local and re-runs DAD, the first RA was lost
+    /// and the next went out 16 s later. An interface without a usable
+    /// link-local is held like one in `down_links`, and resumed when
+    /// one becomes usable, so the first RA follows DAD completion
+    /// instead of failing first and waiting out [`Self::tick`]'s retry.
     /// Every LinkAdd (re)writes the entry, empty included, so a link
     /// ND knows always has one; only an ifindex no LinkAdd named (the
     /// client `enable_interface` path) lacks it and is not held.
@@ -584,42 +585,71 @@ impl NdEngine {
         }
     }
 
-    /// Advance the timer to `now`. Returns the outbound frames that
-    /// should be written to the socket — typically empty, occasionally
-    /// one per interface whose scheduler matured.
-    pub fn tick(&mut self, now: Instant) -> Vec<NdSend> {
-        let mut out = Vec::new();
+    /// Advance the timer to `now`, handing each interface's due RA to
+    /// `send`, which writes it to the socket — typically none,
+    /// occasionally one per interface whose scheduler matured.
+    ///
+    /// Only an RA that `send` reports written is counted and uses up
+    /// its slot. A failed one is retried (see [`RaSender::send_failed`])
+    /// rather than written off, which left the next initial RA 16 s
+    /// away. Holding RA until a link-local is usable avoids the usual
+    /// failure, but not every one: the address can go between the
+    /// RIB's view and the `sendmsg`, and the socket can fail on its own.
+    pub fn tick(&mut self, now: Instant, mut send: impl FnMut(NdSend) -> std::io::Result<()>) {
         for (&ifindex, sender) in self.senders.iter_mut() {
             if self.down_links.contains(&ifindex)
                 || waiting_for_link_local(&self.link_locals, ifindex)
             {
                 continue;
             }
-            for ev in sender.tick(now) {
-                match ev {
-                    RaEvent::SendUnsolicited { ra } => {
-                        // Disjoint field borrow: `senders` is mutably
-                        // borrowed by the iterator; `counters` is a
-                        // separate field so this compiles.
-                        self.counters.entry(ifindex).or_default().tx_ra_unsolicited += 1;
-                        out.push(NdSend::RouterAdvert {
-                            ifindex,
-                            dst: ALL_NODES,
-                            ra,
-                        });
+            let Some(ev) = sender.due(now) else {
+                continue;
+            };
+            let (RaEvent::SendUnsolicited { ra } | RaEvent::SendSolicited { ra }) = &ev;
+            let frame = NdSend::RouterAdvert {
+                ifindex,
+                dst: ALL_NODES,
+                ra: ra.clone(),
+            };
+            // Disjoint field borrows: `senders` is mutably borrowed by
+            // the iterator; `name_by_ifindex` and `counters` are
+            // separate fields so this compiles.
+            let name = self
+                .name_by_ifindex
+                .get(&ifindex)
+                .map_or("?", String::as_str);
+            match send(frame) {
+                Ok(()) => {
+                    let failures = sender.send_failures();
+                    if failures > 0 {
+                        tracing::info!(
+                            "nd: {name} (ifindex {ifindex}) RA sent after {failures} failed attempts"
+                        );
                     }
-                    RaEvent::SendSolicited { ra } => {
-                        self.counters.entry(ifindex).or_default().tx_ra_solicited += 1;
-                        out.push(NdSend::RouterAdvert {
-                            ifindex,
-                            dst: ALL_NODES,
-                            ra,
-                        });
+                    sender.sent(&ev, now);
+                    let c = self.counters.entry(ifindex).or_default();
+                    match ev {
+                        RaEvent::SendUnsolicited { .. } => c.tx_ra_unsolicited += 1,
+                        RaEvent::SendSolicited { .. } => c.tx_ra_solicited += 1,
+                    }
+                }
+                Err(e) => {
+                    // Warn once per run of failures; a lasting one
+                    // retries every 16 s and would flood the log.
+                    let first = sender.send_failures() == 0;
+                    let retry = sender.send_failed(&ev, now);
+                    if first {
+                        tracing::warn!(
+                            "nd: {name} (ifindex {ifindex}) RA send failed: {e}; retrying in {retry:?}"
+                        );
+                    } else {
+                        tracing::debug!(
+                            "nd: {name} (ifindex {ifindex}) RA send failed: {e}; retrying in {retry:?}"
+                        );
                     }
                 }
             }
         }
-        out
     }
 
     /// Update (or insert) the per-source observation record for `src`
@@ -687,6 +717,17 @@ mod tests {
 
     fn t0() -> Instant {
         Instant::now()
+    }
+
+    /// [`NdEngine::tick`] on a socket that takes every frame: what went
+    /// out.
+    fn tick_ok(eng: &mut NdEngine, now: Instant) -> Vec<NdSend> {
+        let mut out = Vec::new();
+        eng.tick(now, |frame| {
+            out.push(frame);
+            Ok(())
+        });
+        out
     }
 
     fn ll(s: &str) -> Ipv6Addr {
@@ -882,7 +923,7 @@ mod tests {
         eng.enable_interface(3, RaSendConfig::default(), start);
         let wakeup = eng.next_wakeup().unwrap();
 
-        let frames = eng.tick(wakeup);
+        let frames = tick_ok(&mut eng, wakeup);
         assert_eq!(frames.len(), 1);
         match &frames[0] {
             NdSend::RouterAdvert { ifindex, dst, .. } => {
@@ -898,7 +939,7 @@ mod tests {
         let start = t0();
         let mut eng = NdEngine::new();
         eng.enable_interface(3, RaSendConfig::default(), start);
-        assert!(eng.tick(start).is_empty());
+        assert!(tick_ok(&mut eng, start).is_empty());
     }
 
     #[test]
@@ -1327,7 +1368,7 @@ mod tests {
             let mut eng = NdEngine::new();
             eng.enable_interface(5, RaSendConfig::default(), start);
             let wakeup = eng.next_wakeup().unwrap();
-            let frames = eng.tick(wakeup);
+            let frames = tick_ok(&mut eng, wakeup);
             assert_eq!(frames.len(), 1);
             assert_eq!(eng.counters()[&5].tx_ra_unsolicited, 1);
             assert_eq!(eng.counters()[&5].tx_ra_solicited, 0);
@@ -1382,7 +1423,7 @@ mod tests {
                 "solicited wakeup should be within the delay window"
             );
 
-            let frames = eng.tick(solicited_wakeup);
+            let frames = tick_ok(&mut eng, solicited_wakeup);
             // The solicited RA should fire; the unsolicited one should not.
             assert!(!frames.is_empty(), "expected at least one frame");
             assert_eq!(
@@ -1434,14 +1475,15 @@ mod tests {
         eng.process_link_add(&link("eth0", 7), start);
         eng.set_ra_config("eth0".into(), RaSendConfig::default(), start);
         for _ in 0..3 {
-            assert_eq!(eng.tick(eng.next_wakeup().unwrap()).len(), 1);
+            let at = eng.next_wakeup().unwrap();
+            assert_eq!(tick_ok(&mut eng, at).len(), 1);
         }
         assert_eq!(eng.sender(7).unwrap().initial_remaining(), 0);
         let old_due = eng.next_wakeup().unwrap();
         eng.process_link_state(7, false, old_due - Duration::from_secs(1));
         assert!(eng.next_wakeup().is_none());
         let up = old_due + Duration::from_secs(600);
-        assert!(eng.tick(up).is_empty());
+        assert!(tick_ok(&mut eng, up).is_empty());
         assert_eq!(eng.counters()[&7].tx_ra_unsolicited, 3);
         eng.process_link_state(7, true, up);
         assert_eq!(eng.sender(7).unwrap().initial_remaining(), 3);
@@ -1449,7 +1491,8 @@ mod tests {
         // been without us for the length of the outage.
         assert!(recovery_window(up).contains(&eng.next_wakeup().unwrap()));
         for _ in 0..3 {
-            assert_eq!(eng.tick(eng.next_wakeup().unwrap()).len(), 1);
+            let at = eng.next_wakeup().unwrap();
+            assert_eq!(tick_ok(&mut eng, at).len(), 1);
         }
         assert_eq!(eng.sender(7).unwrap().initial_remaining(), 0);
         let gap = eng.next_wakeup().unwrap() - eng.sender(7).unwrap().last_multicast_at().unwrap();
@@ -1464,7 +1507,8 @@ mod tests {
         eng.process_link_add(&link("eth0", 7), start);
         eng.set_ra_config("eth0".into(), RaSendConfig::default(), start);
         for _ in 0..3 {
-            eng.tick(eng.next_wakeup().unwrap());
+            let at = eng.next_wakeup().unwrap();
+            tick_ok(&mut eng, at);
         }
         let due = eng.next_wakeup();
         let now = start + Duration::from_secs(50);
@@ -1511,7 +1555,7 @@ mod tests {
             start,
         );
         assert!(eng.sender(7).unwrap().pending_solicited_at().is_none());
-        let frames = eng.tick(start + Duration::from_secs(16));
+        let frames = tick_ok(&mut eng, start + Duration::from_secs(16));
         assert_eq!(frames.len(), 1);
         assert!(matches!(frames[0], NdSend::RouterAdvert { ifindex: 8, .. }));
         assert_eq!(eng.sender(7).unwrap().initial_remaining(), 3);
@@ -1536,7 +1580,7 @@ mod tests {
             }
             assert!(eng.is_enabled(7));
             assert!(eng.next_wakeup().is_none());
-            assert!(eng.tick(start + Duration::from_secs(60)).is_empty());
+            assert!(tick_ok(&mut eng, start + Duration::from_secs(60)).is_empty());
             let up = start + Duration::from_secs(60);
             eng.process_link_state(7, true, up);
             assert!(recovery_window(up).contains(&eng.next_wakeup().unwrap()));
@@ -1555,7 +1599,7 @@ mod tests {
         eng.process_link_add(&link("eth0", 7), start);
         assert!(!eng.is_enabled(7));
         assert!(eng.next_wakeup().is_none());
-        assert!(eng.tick(start).is_empty());
+        assert!(tick_ok(&mut eng, start).is_empty());
     }
 
     #[test]
@@ -1568,11 +1612,11 @@ mod tests {
         // nothing is left to advertise from.
         eng.process_link_add(&link("eth0", 7), start);
         eng.set_ra_config("eth0".into(), RaSendConfig::default(), start);
-        assert_eq!(eng.tick(start + Duration::from_secs(16)).len(), 1);
+        assert_eq!(tick_ok(&mut eng, start + Duration::from_secs(16)).len(), 1);
         eng.process_link_del(7);
         assert!(!eng.is_enabled(7));
         assert!(eng.next_wakeup().is_none());
-        assert!(eng.tick(start + Duration::from_secs(600)).is_empty());
+        assert!(tick_ok(&mut eng, start + Duration::from_secs(600)).is_empty());
         assert!(!eng.counters().contains_key(&7));
         assert!(!eng.neighbors().contains_key(&7));
 
@@ -1641,7 +1685,7 @@ mod tests {
         assert!(eng.ifname_of(7).is_none());
         assert!(eng.ifindex_of("eth0").is_none());
         assert!(eng.next_wakeup().is_none());
-        assert!(eng.tick(start + Duration::from_secs(600)).is_empty());
+        assert!(tick_ok(&mut eng, start + Duration::from_secs(600)).is_empty());
         // Observation state is keyed by ifindex alone, so it goes with
         // the ifindex; keeping it would attribute the old device's
         // history to whatever reuses the number.
@@ -1700,7 +1744,7 @@ mod tests {
         let mut eng = NdEngine::new();
         eng.process_link_add(&link("eth1", 7), start);
         eng.set_ra_config("eth1".into(), RaSendConfig::default(), start);
-        assert_eq!(eng.tick(start + Duration::from_secs(16)).len(), 1);
+        assert_eq!(tick_ok(&mut eng, start + Duration::from_secs(16)).len(), 1);
         eng.on_recv(
             NdRecv::RouterSolicit {
                 ifindex: 7,
@@ -1753,7 +1797,7 @@ mod tests {
 
         assert!(eng.is_enabled(7));
         assert_eq!(eng.next_wakeup(), Some(start + Duration::from_secs(16)));
-        assert_eq!(eng.tick(start + Duration::from_secs(16)).len(), 1);
+        assert_eq!(tick_ok(&mut eng, start + Duration::from_secs(16)).len(), 1);
     }
 
     // ── RIB dispatch wiring ─────────────────────────────────────────
@@ -1777,7 +1821,8 @@ mod tests {
         eng.process_rib_msg(RibRx::LinkAdd(link("eth0", 7)), start);
         eng.set_ra_config("eth0".into(), RaSendConfig::default(), start);
         for _ in 0..3 {
-            assert_eq!(eng.tick(eng.next_wakeup().unwrap()).len(), 1);
+            let at = eng.next_wakeup().unwrap();
+            assert_eq!(tick_ok(&mut eng, at).len(), 1);
         }
         assert_eq!(eng.sender(7).unwrap().initial_remaining(), 0);
 
@@ -1787,7 +1832,7 @@ mod tests {
             eng.next_wakeup().is_none(),
             "LinkDown must suspend scheduling"
         );
-        assert!(eng.tick(down + Duration::from_secs(600)).is_empty());
+        assert!(tick_ok(&mut eng, down + Duration::from_secs(600)).is_empty());
 
         let up = down + Duration::from_secs(700);
         eng.process_rib_msg(RibRx::LinkUp(7), up);
@@ -1904,7 +1949,7 @@ mod tests {
             let mut sent = 0usize;
             for _ in 0..80 {
                 now += Duration::from_millis(100);
-                sent += eng.tick(now).len();
+                sent += tick_ok(&mut eng, now).len();
             }
             per_window.push(sent);
             eng.process_link_state(7, false, now);
@@ -1947,7 +1992,7 @@ mod tests {
         for _ in 0..40 {
             for _ in 0..12 {
                 now += Duration::from_millis(100);
-                eng.tick(now);
+                tick_ok(&mut eng, now);
                 if let Some(due) = eng.next_wakeup() {
                     assert!(due >= now, "wakeup {:?} is already past {:?}", due, now);
                 }
@@ -1991,7 +2036,8 @@ mod tests {
         eng.set_ra_config("eth0".into(), RaSendConfig::default(), start);
         assert!(!eng.is_waiting_for_link_local(7));
         while eng.sender(7).unwrap().initial_remaining() > 0 {
-            assert_eq!(eng.tick(eng.next_wakeup().unwrap()).len(), 1);
+            let at = eng.next_wakeup().unwrap();
+            assert_eq!(tick_ok(&mut eng, at).len(), 1);
         }
 
         let down = eng.next_wakeup().unwrap() - Duration::from_secs(1);
@@ -2003,7 +2049,7 @@ mod tests {
         assert!(!eng.is_suspended(7));
         assert!(eng.is_waiting_for_link_local(7));
         assert!(eng.next_wakeup().is_none());
-        assert!(eng.tick(up + Duration::from_secs(1)).is_empty());
+        assert!(tick_ok(&mut eng, up + Duration::from_secs(1)).is_empty());
         assert_eq!(eng.sender(7).unwrap().initial_remaining(), 3);
 
         let dad_done = up + Duration::from_secs(2);
@@ -2012,7 +2058,35 @@ mod tests {
         assert_eq!(eng.sender(7).unwrap().initial_remaining(), 3);
         let first = eng.next_wakeup().unwrap();
         assert!(recovery_window(dad_done).contains(&first));
-        assert_eq!(eng.tick(first).len(), 1);
+        assert_eq!(tick_ok(&mut eng, first).len(), 1);
+    }
+
+    /// An RA the socket refuses is not counted and uses up no slot: it
+    /// goes out on a retry MAX_RA_DELAY_TIME later, not 16 s later
+    /// with the next initial advertisement.
+    #[test]
+    fn a_failed_ra_is_retried_instead_of_written_off() {
+        use crate::nd::send::MAX_RA_DELAY_TIME;
+        let start = t0();
+        let mut eng = NdEngine::new();
+        eng.process_link_add(&link("eth0", 7), start);
+        eng.set_ra_config("eth0".into(), RaSendConfig::default(), start);
+        let first = eng.next_wakeup().unwrap();
+        let mut tried = 0;
+        eng.tick(first, |_| {
+            tried += 1;
+            Err(std::io::Error::from_raw_os_error(libc::EADDRNOTAVAIL))
+        });
+        assert_eq!(tried, 1);
+        assert_eq!(eng.counters().get(&7).map_or(0, |c| c.tx_ra_unsolicited), 0);
+        let sender = eng.sender(7).unwrap();
+        assert_eq!(sender.initial_remaining(), 3);
+        assert_eq!(sender.last_multicast_at(), None);
+        assert_eq!(eng.next_wakeup(), Some(first + MAX_RA_DELAY_TIME));
+
+        assert_eq!(tick_ok(&mut eng, first + MAX_RA_DELAY_TIME).len(), 1);
+        assert_eq!(eng.counters()[&7].tx_ra_unsolicited, 1);
+        assert_eq!(eng.sender(7).unwrap().initial_remaining(), 2);
     }
 
     /// Nothing usable to send from — no link-local reported at all, or
@@ -2043,7 +2117,7 @@ mod tests {
         assert!(!eng.is_waiting_for_link_local(10));
         let far = start + Duration::from_secs(3600);
         assert!(
-            eng.tick(far)
+            tick_ok(&mut eng, far)
                 .iter()
                 .all(|f| matches!(f, NdSend::RouterAdvert { ifindex: 10, .. }))
         );
