@@ -17,6 +17,16 @@ BASH_URLS     := https://ftp.gnu.org/gnu/bash/$(BASH_TARBALL) \
                  https://mirrors.ocf.berkeley.edu/gnu/bash/$(BASH_TARBALL)
 BASH_SHA256   := 0d5cd86965f869a26cf64f4b71be7b96f90a3ba8b3d74e27e8e9d9d5550f31ba
 
+# GNU's official bash-5.3 patches, kept verbatim in patches/upstream/ as
+# published at https://ftp.gnu.org/gnu/bash/bash-5.3-patches/ (each one's
+# .sig checks out against Chet Ramey's key in gnu-keyring.gpg). They are
+# applied in order with -p0, as GNU intends, before the vty patch. To take
+# a new one, add its file and bump the level. Each patch moves patchlevel.h
+# up from the level before it, so a gap does not apply; the check after
+# them catches a file added without bumping the level.
+BASH_PATCHLEVEL  := 20
+UPSTREAM_PATCHES := $(sort $(wildcard patches/upstream/bash53-[0-9][0-9][0-9]))
+
 CACHE_DIR     ?= $(HOME)/.cache/zebra-rs
 TARBALL       := $(CACHE_DIR)/$(BASH_TARBALL)
 
@@ -40,10 +50,16 @@ $(TARGET): $(STAMP_PREPARE)
 	cd $(BUILD_DIR) && ./configure
 	$(MAKE) -C $(BUILD_DIR)
 
-$(STAMP_PREPARE): $(TARBALL) $(PATCH) $(ADDITIONS)
+$(STAMP_PREPARE): $(TARBALL) $(UPSTREAM_PATCHES) $(PATCH) $(ADDITIONS)
 	rm -rf $(BUILD_DIR)
 	mkdir -p $(BUILD_DIR)
 	tar -xzf $(TARBALL) -C $(BUILD_DIR) --strip-components=1
+	for p in $(UPSTREAM_PATCHES); do \
+	    patch -d $(BUILD_DIR) -p0 --no-backup-if-mismatch -s < $$p \
+	        || { echo "$$p does not apply" >&2; exit 1; }; \
+	done
+	grep -q '^#define PATCHLEVEL $(BASH_PATCHLEVEL)$$' $(BUILD_DIR)/patchlevel.h \
+	    || { echo "patches/upstream/ does not end at BASH_PATCHLEVEL $(BASH_PATCHLEVEL)" >&2; exit 1; }
 	cp $(ADDITIONS) $(BUILD_DIR)/
 	cd $(BUILD_DIR) && patch -p1 --no-backup-if-mismatch < $(abspath $(PATCH))
 	touch $@
