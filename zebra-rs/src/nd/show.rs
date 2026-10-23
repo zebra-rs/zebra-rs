@@ -20,7 +20,7 @@ use serde::Serialize;
 
 use crate::config::{Args, Builder};
 
-use super::engine::{NdIfCounters, NdNeighbor};
+use super::engine::{LinkLocalHold, NdIfCounters, NdNeighbor};
 use super::inst::{Nd, ShowCallback};
 
 impl Nd {
@@ -181,6 +181,10 @@ struct JsonRaScheduler {
     /// after a link-up, or none at all). Skipped by `tick` like a
     /// suspended sender, so `next_unsolicited_in_secs` is `null`.
     waiting_for_link_local: bool,
+    /// Why, while `waiting_for_link_local`: `missing`, `not_ready`
+    /// (DAD still running) or `dad_failed` (a duplicate on the link,
+    /// which nothing but an address change clears). `null` otherwise.
+    link_local_hold: Option<&'static str>,
     next_unsolicited_in_secs: Option<u64>,
     solicited_pending: bool,
     last_multicast_secs_ago: Option<u64>,
@@ -273,8 +277,8 @@ fn render_interface_text(
         // to what it has always been.
         let next_in = if nd.is_suspended(ifindex) {
             "suspended (link down)".to_string()
-        } else if nd.is_waiting_for_link_local(ifindex) {
-            "held (link-local not ready)".to_string()
+        } else if let Some(hold) = nd.link_local_hold(ifindex) {
+            format!("held ({hold})")
         } else {
             format!("in {}", until(now, sender.next_unsolicited_at()))
         };
@@ -440,9 +444,8 @@ fn build_interface_json(nd: &super::engine::NdEngine, ifindex: u32, now: Instant
             initial_remaining: sender.initial_remaining(),
             suspended: nd.is_suspended(ifindex),
             waiting_for_link_local: nd.is_waiting_for_link_local(ifindex),
-            next_unsolicited_in_secs: (!nd.is_suspended(ifindex)
-                && !nd.is_waiting_for_link_local(ifindex))
-            .then(|| {
+            link_local_hold: nd.link_local_hold(ifindex).map(LinkLocalHold::as_json),
+            next_unsolicited_in_secs: (!nd.is_paused(ifindex)).then(|| {
                 sender
                     .next_unsolicited_at()
                     .saturating_duration_since(now)
@@ -651,10 +654,9 @@ mod tests {
     use nd_packet::{NaFlags, NeighborAdvert, NeighborSolicit, RouterAdvert};
 
     use crate::nd::engine::NdEngine;
+    use crate::nd::engine::fixtures::*;
     use crate::nd::send::RaSendConfig;
     use crate::nd::{DropReason, NdRecv};
-    use crate::rib::link::{AddrScope, Link, LinkAddr, LinkType};
-    use netlink_packet_route::link::LinkFlags;
 
     use super::*;
 
@@ -666,48 +668,6 @@ mod tests {
 
     fn ll(s: &str) -> Ipv6Addr {
         s.parse().unwrap()
-    }
-
-    /// An interface that is genuinely up. `LinkFlags::default()` is
-    /// neither admin- nor carrier-up, so a fixture built with it lands
-    /// in `down_links` and every assertion below would silently be
-    /// describing a suspended interface. Mirrors `engine.rs`'s helper.
-    fn link(name: &str, index: u32) -> Link {
-        Link {
-            index,
-            name: name.to_string(),
-            mtu: 1500,
-            original_mtu: 1500,
-            metric: 1,
-            flags: LinkFlags::Up | LinkFlags::LowerUp,
-            link_type: LinkType::Ethernet,
-            label: false,
-            mac: None,
-            addr4: Vec::new(),
-            addr6: vec![usable_link_local(index)],
-            master: None,
-            vni: None,
-            vrf_table: None,
-            bridge: false,
-            vxlan_local: None,
-            vxlan_metadata: None,
-            parent: None,
-            vlan_id: None,
-            mtu_error: None,
-        }
-    }
-
-    /// The link-local an up interface has once DAD is through. Without
-    /// one RA is held (`is_waiting_for_link_local`), so `link()` carries
-    /// it — otherwise every fixture would describe a held sender.
-    fn usable_link_local(ifindex: u32) -> LinkAddr {
-        LinkAddr {
-            addr: format!("fe80::{ifindex:x}/64").parse().unwrap(),
-            ifindex,
-            fib: true,
-            scope: AddrScope::Link,
-            ..Default::default()
-        }
     }
 
     fn make_ra() -> RouterAdvert {
@@ -1013,6 +973,29 @@ Icmp6InUnrelated                    \t99
             json["ra_scheduler"]["waiting_for_link_local"],
             serde_json::json!(true)
         );
+        assert_eq!(
+            json["ra_scheduler"]["link_local_hold"],
+            serde_json::json!("not_ready")
+        );
         assert!(json["ra_scheduler"]["next_unsolicited_in_secs"].is_null());
+
+        // DAD failing turns the hold into one nothing but an address
+        // change clears, and both renderings say so.
+        l.addr6[0].flags.dadfailed = true;
+        eng.process_link_add(&l, start);
+        let mut out = String::new();
+        render_interface_text(&mut out, &eng, 2, start).unwrap();
+        assert!(
+            out.contains("next unsolicited held (link-local failed DAD)"),
+            "{}",
+            out
+        );
+        let json = build_interface_json(&eng, 2, start);
+        let json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&json).unwrap()).unwrap();
+        assert_eq!(
+            json["ra_scheduler"]["link_local_hold"],
+            serde_json::json!("dad_failed")
+        );
     }
 }

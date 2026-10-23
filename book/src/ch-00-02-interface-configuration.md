@@ -294,11 +294,16 @@ One block per interface, or for `<ifname>` only:
   initial RAs still to send, when the next unsolicited one goes out,
   whether a solicited reply is pending, and when the last multicast RA
   went. Instead of a countdown, the next unsolicited RA reads
-  `suspended (link down)` while the link is down, and
-  `held (link-local not ready)` while the interface has no link-local
-  an RA can be sent from — typically for the second or two DAD takes
-  after `ip link set … up`. The initial RAs restart once one is
-  usable.
+  `suspended (link down)` while the link is down, and `held (…)` while
+  the interface has no link-local an RA can be sent from:
+  `held (link-local not ready)` for the second or two DAD takes after
+  `ip link set … up`, `held (no link-local)` when it has none at all,
+  and `held (link-local failed DAD)` when another node on the link
+  uses its address. The last does not clear by itself: change the
+  address, and the daemon logs a warning when it happens. The initial
+  RAs restart once a link-local is usable, and go out from the lowest
+  usable one. A send that fails anyway is retried after half a second,
+  doubling to 16 s while it keeps failing.
 - **The daemon's counters**: Router and Neighbor Solicitations and
   Advertisements it received and RAs it sent, and the packets it dropped
   (hop limit not 255, malformed, or from a new source once the
@@ -335,7 +340,9 @@ kernel_counters, neighbors }`. `ra_scheduler` holds the scheduler
 fields above (`min_interval_secs`, `max_interval_secs`,
 `router_lifetime`, `cur_hop_limit`, `managed`, `other`,
 `initial_remaining`, `suspended`, `waiting_for_link_local`,
-`next_unsolicited_in_secs` (`null` while suspended or held),
+`link_local_hold` (`missing`, `not_ready` or `dad_failed` while held,
+otherwise `null`), `next_unsolicited_in_secs` (`null` while suspended
+or held),
 `solicited_pending`, `last_multicast_secs_ago`); each neighbor has
 `address`, `first_seen_secs`, `last_seen_secs`, its `rx_*` counts and
 its `last_ra_*` values.

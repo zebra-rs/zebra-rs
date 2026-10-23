@@ -49,9 +49,9 @@ pub fn spawn_nd(config: &ConfigManager) {
     // VRF the way OSPF / IS-IS / BGP are.
     //
     // A plain `subscribe_to_rib("nd")` binds to vrf_id 0, and
-    // `Rib::iter_link_subs` only delivers a link event to subscribers
-    // whose `vrf_id` matches the link's VRF (or who asked for
-    // `global_links`). Two consequences, both of which cost the
+    // `Rib::iter_link_subs` only delivers a link or address event to
+    // subscribers whose `vrf_id` matches the link's VRF (or who asked
+    // for `global_links`). Three consequences, all of which cost the
     // operator their RAs:
     //
     //   * The subscribe-time link dump skips every enslaved
@@ -62,6 +62,9 @@ pub fn spawn_nd(config: &ConfigManager) {
     //     new)`. A vrf-0 subscriber sees only the `LinkDel` half, so
     //     `interface eth1 vrf blue` released ND's sender and nothing
     //     ever put it back.
+    //   * A VRF interface's link-local coming, going and finishing
+    //     DAD never reaches it, so it cannot tell when RA can be sent
+    //     from that interface again.
     let (_rib_client, rib_rx) = config.subscribe_to_rib_global_links("nd");
     let nd = inst::Nd::new(socket, rib_rx);
     config.subscribe("nd", nd.cm.tx.clone());

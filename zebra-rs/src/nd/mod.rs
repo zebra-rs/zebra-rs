@@ -74,9 +74,11 @@ pub enum DropReason {
 pub enum NdSend {
     /// Send a Router Advertisement out `ifindex` to `dst`. For an
     /// unsolicited multicast RA `dst` should be `ff02::1`; for a
-    /// solicited reply, the unicast source of the RS.
+    /// solicited reply, the unicast source of the RS. `src` is the
+    /// link-local to send from; `None` leaves it to the kernel.
     RouterAdvert {
         ifindex: u32,
+        src: Option<Ipv6Addr>,
         dst: Ipv6Addr,
         ra: RouterAdvert,
     },

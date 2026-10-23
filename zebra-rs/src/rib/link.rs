@@ -1046,8 +1046,11 @@ impl Rib {
                 // Withdraw from the old VRF — addresses first, then the
                 // link — so a client tearing down per-interface state
                 // sees dependents leave before the interface itself.
+                // `global_links` subscribers get the link half alone:
+                // they already hold the addresses, and the LinkAdd
+                // carries them.
                 for addr in link.addr4.iter().chain(link.addr6.iter()) {
-                    self.api_addr_del_vrf(addr, prev_vrf_id);
+                    self.api_addr_withdraw_vrf(addr, prev_vrf_id);
                 }
                 self.api_link_del_vrf(ifindex, prev_vrf_id);
                 // Announce to the new VRF — link first, then its
@@ -1057,7 +1060,7 @@ impl Rib {
                 // need this replay to learn them.
                 self.api_link_add_vrf(&link, now_vrf_id);
                 for addr in link.addr4.iter().chain(link.addr6.iter()) {
-                    self.api_addr_add_vrf(addr, now_vrf_id);
+                    self.api_addr_replay_vrf(addr, now_vrf_id);
                 }
                 // Re-home this interface's own connected-route shadows
                 // between the two VRF tables. Each address's connected
