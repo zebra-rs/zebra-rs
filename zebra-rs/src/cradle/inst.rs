@@ -239,8 +239,13 @@ impl Cradle {
                     self.process_cm_msg(msg).await;
                 }
                 Some(msg) = self.rib_rx.recv() => {
+                    // Address events change nothing here, and as a
+                    // `global_links` subscriber we get every VRF's.
+                    let reconcile = !matches!(msg, RibRx::AddrAdd(_) | RibRx::AddrDel(_));
                     self.process_rib_msg(msg);
-                    self.reconcile_ports().await;
+                    if reconcile {
+                        self.reconcile_ports().await;
+                    }
                 }
                 Some(req) = self.port_rx.recv() => {
                     self.process_port_request(req);
