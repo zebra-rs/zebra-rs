@@ -456,10 +456,8 @@ impl Rib {
         self.api_addr_add_vrf(addr, self.ifindex_vrf_id(addr.ifindex));
     }
 
-    /// Push `AddrAdd` to subscribers bound to an explicit `vrf_id`.
-    /// Used when an interface is re-enslaved across a VRF boundary: its
-    /// addresses must be replayed to the *new* VRF's clients, which
-    /// weren't subscribed when the addresses were first learned.
+    /// Push `AddrAdd` to the subscribers of `vrf_id`, the VRF the
+    /// address's interface sits in.
     ///
     /// Like link events, an address event also reaches every
     /// `global_links` subscriber: the subscribe-time dump already gives
@@ -472,17 +470,40 @@ impl Rib {
         }
     }
 
+    /// Replay `AddrAdd` to the *new* VRF's clients as an interface is
+    /// re-enslaved across a VRF boundary: they weren't subscribed when
+    /// the address was first learned. Not to `global_links` subscribers
+    /// (see [`ClientRegistry::iter_vrf_only`]), which already hold it.
+    ///
+    /// [`ClientRegistry::iter_vrf_only`]: super::client::ClientRegistry::iter_vrf_only
+    pub fn api_addr_replay_vrf(&self, addr: &LinkAddr, vrf_id: u32) {
+        for (_, sub) in self.client_registry.iter_vrf_only(vrf_id) {
+            let _ = sub.rib_rx_tx.send(RibRx::AddrAdd(addr.clone()));
+        }
+    }
+
     pub fn api_addr_del(&self, addr: &LinkAddr) {
         self.api_addr_del_vrf(addr, self.ifindex_vrf_id(addr.ifindex));
     }
 
-    /// Push `AddrDel` to subscribers bound to an explicit `vrf_id`.
-    /// Used when an interface leaves a VRF: its addresses must be
-    /// withdrawn from the *old* VRF's clients, so the old VRF id must
-    /// be passed in. Reaches `global_links` subscribers too, as
-    /// [`Self::api_addr_add_vrf`] does.
+    /// Push `AddrDel` to the subscribers of `vrf_id`, the VRF the
+    /// address's interface sits in. Reaches `global_links` subscribers
+    /// too, as [`Self::api_addr_add_vrf`] does.
     pub fn api_addr_del_vrf(&self, addr: &LinkAddr, vrf_id: u32) {
         for (_, sub) in self.client_registry.iter_link_subs(vrf_id) {
+            let _ = sub.rib_rx_tx.send(RibRx::AddrDel(addr.clone()));
+        }
+    }
+
+    /// Push `AddrDel` to the *old* VRF's clients as an interface leaves
+    /// it, so the old VRF id must be passed in. Not to `global_links`
+    /// subscribers: the address has gone nowhere they
+    /// can't see, and the `LinkDel` / `LinkAdd` pair they get for the
+    /// move carries the link's full address list. ND, one of them,
+    /// took the withdraw for a lost link-local and logged RA held for
+    /// a sender the `LinkDel` was about to drop.
+    pub fn api_addr_withdraw_vrf(&self, addr: &LinkAddr, vrf_id: u32) {
+        for (_, sub) in self.client_registry.iter_vrf_only(vrf_id) {
             let _ = sub.rib_rx_tx.send(RibRx::AddrDel(addr.clone()));
         }
     }
@@ -711,5 +732,12 @@ mod tests {
         assert_eq!(drain(&mut rx_nd).len(), 1);
         assert_eq!(drain(&mut rx_bgp).len(), 1);
         assert!(drain(&mut rx_vrf).is_empty());
+
+        // A VRF move's withdraw / replay is for the VRF's own clients:
+        // a `global_links` subscriber already holds the address.
+        rib.api_addr_withdraw_vrf(&addr, 10);
+        rib.api_addr_replay_vrf(&addr, 10);
+        assert!(drain(&mut rx_nd).is_empty());
+        assert_eq!(drain(&mut rx_vrf).len(), 2);
     }
 }

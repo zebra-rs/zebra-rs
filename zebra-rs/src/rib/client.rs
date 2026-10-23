@@ -315,9 +315,10 @@ impl ClientRegistry {
         self.subscribers.iter().map(|(id, s)| (*id, s))
     }
 
-    /// Walk subscribers bound to `vrf_id`. The link / addr /
-    /// router-id push paths use this so a VRF subscriber only sees
-    /// events that originated in its own VRF.
+    /// Walk subscribers bound to `vrf_id`. The router-id push path
+    /// uses this so a VRF subscriber only sees events that originated
+    /// in its own VRF; link and address events go through
+    /// [`Self::iter_link_subs`] instead.
     pub fn iter_vrf(&self, vrf_id: u32) -> impl Iterator<Item = (ProtoId, &Subscriber)> {
         self.subscribers
             .iter()
@@ -325,10 +326,19 @@ impl ClientRegistry {
             .map(|(id, s)| (*id, s))
     }
 
-    /// Walk the subscribers that should see a **link** event from
-    /// `vrf_id`: the VRF's own subscribers plus every `global_links`
-    /// subscriber (each yielded once — a global subscriber bound to
-    /// the same VRF is not duplicated).
+    /// Walk the subscribers bound to `vrf_id` that see that VRF alone,
+    /// leaving out `global_links` ones. An interface moving between
+    /// VRFs has its addresses withdrawn from and replayed to these:
+    /// a `global_links` subscriber already holds them, and the
+    /// `LinkAdd` it gets for the move carries the full list.
+    pub fn iter_vrf_only(&self, vrf_id: u32) -> impl Iterator<Item = (ProtoId, &Subscriber)> {
+        self.iter_vrf(vrf_id).filter(|(_, s)| !s.global_links)
+    }
+
+    /// Walk the subscribers that should see a link or address event
+    /// from `vrf_id`: the VRF's own subscribers plus every
+    /// `global_links` subscriber (each yielded once — a global
+    /// subscriber bound to the same VRF is not duplicated).
     pub fn iter_link_subs(&self, vrf_id: u32) -> impl Iterator<Item = (ProtoId, &Subscriber)> {
         self.subscribers
             .iter()
