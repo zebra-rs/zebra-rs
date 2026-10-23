@@ -155,8 +155,9 @@ pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<NdRecv>
 }
 
 /// Serialize `msg` and emit it via sendmsg with an `IPV6_PKTINFO` cmsg
-/// pinning the egress ifindex. The kernel computes the ICMPv6
-/// checksum for a raw ICMPv6 socket.
+/// pinning the egress ifindex and, when `msg` names one, the source
+/// address. The kernel computes the ICMPv6 checksum for a raw ICMPv6
+/// socket.
 ///
 /// Synchronous, on the non-blocking socket, so the caller learns at
 /// once whether the RA went out (see [`super::engine::NdEngine::tick`]).
@@ -164,23 +165,31 @@ pub async fn read_packet(sock: Arc<AsyncFd<Socket>>, tx: UnboundedSender<NdRecv>
 /// the engine retries it shortly — unlikely anyway at no more than one
 /// RA per interface every 3 s.
 pub fn send_packet(sock: &Socket, msg: NdSend) -> std::io::Result<()> {
-    let (ifindex, dst, payload) = match msg {
-        NdSend::RouterAdvert { ifindex, dst, ra } => {
+    let (ifindex, src, dst, payload) = match msg {
+        NdSend::RouterAdvert {
+            ifindex,
+            src,
+            dst,
+            ra,
+        } => {
             let mut buf = BytesMut::new();
             ra.emit_without_checksum(&mut buf);
-            (ifindex, dst, buf)
+            (ifindex, src, dst, buf)
         }
         NdSend::RouterSolicit { ifindex, rs } => {
             let mut buf = BytesMut::new();
             rs.emit_without_checksum(&mut buf);
-            (ifindex, ALL_ROUTERS, buf)
+            (ifindex, None, ALL_ROUTERS, buf)
         }
     };
 
     let iov = [IoSlice::new(&payload)];
     let sockaddr: SockaddrIn6 = std::net::SocketAddrV6::new(dst, 0, 0, ifindex).into();
+    // `::` lets the kernel choose the source.
     let pktinfo = libc::in6_pktinfo {
-        ipi6_addr: libc::in6_addr { s6_addr: [0u8; 16] },
+        ipi6_addr: libc::in6_addr {
+            s6_addr: src.unwrap_or(Ipv6Addr::UNSPECIFIED).octets(),
+        },
         ipi6_ifindex: ifindex,
     };
     let cmsg = [socket::ControlMessage::Ipv6PacketInfo(&pktinfo)];
