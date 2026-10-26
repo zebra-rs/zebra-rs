@@ -58,6 +58,13 @@ impl BgpShard {
                     self.adj_in_mut(ident).remove(rd, nlri.prefix, nlri.id);
                 }
                 let removed = self.remove(rd, nlri.prefix, nlri.id, ident);
+                // Nothing of this peer's was in the Loc-RIB: the selection
+                // is unchanged, so report no delta (main would otherwise
+                // reinstall the FIB and re-advertise) — the N>1 twin of the
+                // guard in `route_ipv4_withdraw`.
+                if rd.is_none() && removed.is_empty() {
+                    return Vec::new();
+                }
                 #[cfg(feature = "lua")]
                 if rd.is_none()
                     && let Some(gone) = removed.first()
@@ -1547,6 +1554,39 @@ mod tests {
             }
             _ => panic!("expected one BestPathV4, got {out:?}"),
         }
+    }
+
+    #[test]
+    fn withdraw_v4_that_removes_nothing_reports_no_delta() {
+        // A looped UPDATE (treat-as-withdraw) from a peer with no path in
+        // the Loc-RIB changes nothing: no delta, so main neither reinstalls
+        // the survivor nor re-advertises it. Its Adj-RIB-In row still goes.
+        let mut shard = BgpShard::default();
+        shard.handle(update_v4(1, "10.0.0.0/24", "192.0.2.1", true));
+        shard.handle(update_v4(2, "10.0.0.0/24", "192.0.2.2", false));
+        assert_eq!(shard.v4.candidates("10.0.0.0/24".parse().unwrap()).len(), 1);
+        let out = shard.handle(ShardMsg::WithdrawV4 {
+            ident: 2,
+            rd: None,
+            nlri: v4("10.0.0.0/24"),
+            rib_in: true,
+        });
+        assert!(out.is_empty(), "no delta, got {out:?}");
+        assert_eq!(shard.v4.candidates("10.0.0.0/24".parse().unwrap()).len(), 1);
+        assert!(
+            shard.adj_in(2).is_none_or(|a| a.v4.0.is_empty()),
+            "Adj-RIB-In row dropped (rib_in)"
+        );
+
+        // An unknown prefix leaves no empty Loc-RIB entry behind.
+        let out = shard.handle(ShardMsg::WithdrawV4 {
+            ident: 2,
+            rd: None,
+            nlri: v4("10.9.0.0/24"),
+            rib_in: true,
+        });
+        assert!(out.is_empty(), "no delta, got {out:?}");
+        assert!(!shard.v4.0.contains_key(&"10.9.0.0/24".parse().unwrap()));
     }
 
     /// Review finding #23: the N>1 next-hop re-evaluation must report the

@@ -2458,7 +2458,11 @@ impl<P: Prefix + Copy> LocalRibTable<P> {
     }
 
     pub fn remove(&mut self, prefix: P, id: u32, ident: usize) -> Vec<BgpRib> {
-        let cands = self.0.entry(prefix).or_default();
+        // Do not create an entry for an unknown prefix: a caller that returns
+        // early on an empty result would leave it behind.
+        let Some(cands) = self.0.get_mut(&prefix) else {
+            return Vec::new();
+        };
         let removed: Vec<BgpRib> = cands
             .extract_if(.., |r| r.ident == ident && r.remote_id == id)
             .collect();
@@ -8581,6 +8585,15 @@ pub fn route_ipv4_withdraw(
 
     // BGP Path selection - this may select a new best path
     let mut removed = bgp.shard.remove(rd, nlri.prefix, nlri.id, ident);
+
+    // Nothing of this peer's was in the Loc-RIB — a looped UPDATE
+    // (treat-as-withdraw), or a withdraw of a route never accepted — so the
+    // selection is unchanged. Going on would reinstall the survivor in the
+    // FIB and re-advertise it to every peer once per looped UPDATE. Same
+    // guard as `route_evpn_withdraw`. VPNv4 keeps its transit reconcile.
+    if rd.is_none() && removed.is_empty() {
+        return;
+    }
 
     // Lua withdraw hook (Loc-RIB → gone): a wire withdraw carries only the
     // NLRI, so hand the script the *stored* attributes of the path that
@@ -31553,6 +31566,118 @@ mod fanout_winner_tests {
             .cache_ipv6_rev
             .get(&Ipv6Nlri { id: 0, prefix })
             .map(|attr| attr_tag(attr))
+    }
+
+    /// A RIB client whose messages the test counts.
+    fn rib_ctx() -> (
+        crate::context::ProtoContext,
+        tokio::sync::mpsc::UnboundedReceiver<crate::rib::client::RibInbound>,
+    ) {
+        let (inbound_tx, inbound_rx) = tokio::sync::mpsc::unbounded_channel();
+        let client = crate::rib::client::RibClient::new(
+            inbound_tx,
+            crate::rib::client::ProtoId::from_raw(0),
+        );
+        (
+            crate::context::ProtoContext::default_table(client),
+            inbound_rx,
+        )
+    }
+
+    fn drain(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::rib::client::RibInbound>,
+    ) -> usize {
+        let mut n = 0;
+        while rx.try_recv().is_ok() {
+            n += 1;
+        }
+        n
+    }
+
+    /// Empty C's pending unicast adverts, as a flush would.
+    fn clear_queued(top: &mut BgpTop, peers: &PeerMap, c: usize) {
+        for afi in [Afi::Ip, Afi::Ip6] {
+            let afi_safi = AfiSafi::new(afi, Safi::Unicast);
+            let Some(gid) = peers
+                .get_by_idx(c)
+                .and_then(|p| p.update_group_id.get(&afi_safi))
+            else {
+                continue;
+            };
+            if let Some(group) = top
+                .update_groups
+                .get_mut(&afi_safi)
+                .and_then(|af| af.group_by_id_mut(gid))
+            {
+                group.cache_ipv4.clear();
+                group.cache_ipv4_rev.clear();
+                group.cache_ipv6.clear();
+                group.cache_ipv6_rev.clear();
+            }
+        }
+    }
+
+    /// AS_PATH "<neighbor AS> <our AS>": the neighbor learned it from us.
+    fn looped_attr(nexthop: IpAddr, neighbor_as: u32) -> BgpAttr {
+        BgpAttr {
+            origin: Some(Origin::Igp),
+            aspath: Some(As4Path::from_str(&format!("{neighbor_as} {LOCAL_AS}")).unwrap()),
+            nexthop: Some(match nexthop {
+                IpAddr::V4(a) => BgpNexthop::Ipv4(a),
+                IpAddr::V6(a) => BgpNexthop::Ipv6(a),
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn announce_looped_v4(top: &mut BgpTop, peers: &mut PeerMap, id: usize, prefix: &str) {
+        let peer = peers.get_by_idx(id).unwrap();
+        let mut packet = UpdatePacket::new();
+        packet.bgp_attr = Some(looped_attr(peer.address, peer.remote_as));
+        packet.ipv4_update.push(Ipv4Nlri {
+            id: 0,
+            prefix: prefix.parse().unwrap(),
+        });
+        route_from_peer(id, packet, top, peers, None);
+    }
+
+    /// A looped UPDATE (treat-as-withdraw) from a peer with no path for the
+    /// prefix leaves the selection unchanged: the winner is neither
+    /// reinstalled in the FIB nor queued to peers again, and an unknown
+    /// prefix leaves no empty Loc-RIB entry behind.
+    #[tokio::test]
+    async fn looped_update_that_removes_nothing_changes_nothing_v4() {
+        let mut fx = Fx::new();
+        let (ctx, mut rib) = rib_ctx();
+        fx.ctx = ctx;
+        let v4 = [(Afi::Ip, Safi::Unicast)];
+        let mut peers = PeerMap::new();
+        let ids = enroll(
+            &mut fx,
+            &mut peers,
+            vec![
+                peer("10.0.0.2", 65002, &v4),
+                peer("10.0.0.3", 65003, &v4),
+                peer("10.0.0.4", 65004, &v4),
+            ],
+        );
+        let (a, b, c) = (ids[0], ids[1], ids[2]);
+        let mut top = fx.top();
+        announce_v4(&mut top, &mut peers, a, "10.0.0.2", 2);
+        let prefix: Ipv4Net = "10.14.0.0/24".parse().unwrap();
+        assert_eq!(queued_v4(&top, &peers, c, prefix), Some(2));
+        assert!(drain(&mut rib) > 0, "the winner reached the RIB");
+        clear_queued(&mut top, &peers, c);
+
+        announce_looped_v4(&mut top, &mut peers, b, "10.14.0.0/24");
+        assert_eq!(drain(&mut rib), 0, "no FIB reinstall");
+        assert_eq!(queued_v4(&top, &peers, c, prefix), None, "no re-advertise");
+        assert_eq!(top.shard.v4.candidates(prefix).len(), 1);
+
+        let unknown: Ipv4Net = "10.15.0.0/24".parse().unwrap();
+        announce_looped_v4(&mut top, &mut peers, b, "10.15.0.0/24");
+        assert_eq!(drain(&mut rib), 0);
+        assert!(!top.shard.v4.0.contains_key(&unknown), "no empty entry");
     }
 
     #[tokio::test]
