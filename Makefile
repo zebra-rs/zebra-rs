@@ -16,6 +16,12 @@ install:
 	sudo cp target/release/vtyctl /usr/bin/vtyctl
 	sudo cp target/release/vtyhelper /usr/bin/vtyhelper
 	sudo setcap 'cap_net_bind_service=ep cap_net_admin=ep cap_net_bind_service=ep cap_net_broadcast=ep cap_net_raw=ep' /usr/bin/zebra-rs
+	# The PAM helper, for the same lockstep reason as the YANG schemas
+	# below: the daemon we just installed spawns /usr/sbin/vtypam on every
+	# vty authentication (config/serve.rs, unless ZEBRA_VTYPAM_BIN
+	# overrides), and the .deb ships it at that path. Installing the daemon
+	# without it leaves a fresh binary calling a stale helper.
+	$(MAKE) install-vtypam
 	# Refresh the system-wide YANG schema the daemon loads at runtime.
 	# A daemon started without --yang-path and under sudo (HOME=/root)
 	# resolves to /usr/share/zebra-rs/yang, so a stale copy here silently
@@ -24,9 +30,10 @@ install:
 	sudo mkdir -p /usr/share/zebra-rs/yang
 	sudo cp zebra-rs/yang/*.yang /usr/share/zebra-rs/yang/
 
-# System-wide installation of vtypam to /usr/sbin with file caps.
-# Use this on production hosts; the per-user `install` target above
-# is for dev convenience and cannot set caps.
+# System-wide installation of vtypam to /usr/sbin with file caps. `install`
+# runs this itself, so it is rarely needed on its own; it stays a separate
+# target so the helper can be refreshed without reinstalling the suite.
+# Assumes a prior `cargo build --release` (which `install` has done).
 .PHONY: install-vtypam
 install-vtypam:
 	sudo install -m 0755 -o root -g root target/release/vtypam /usr/sbin/vtypam
