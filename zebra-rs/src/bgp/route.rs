@@ -9091,6 +9091,15 @@ pub fn route_ipv6_withdraw(
         }
         None => {
             let removed = bgp.shard.remove_v6(nlri.prefix, nlri.id, ident);
+            // Nothing of this peer's was in the Loc-RIB (looped UPDATE, or a
+            // withdraw of a route never accepted): the selection is
+            // unchanged, so skip the FIB reinstall and the re-advertisement
+            // of the survivor, as `route_ipv4_withdraw` does. The Adj-RIB-Out
+            // (`adj_out.v6`) only stops spurious withdraws when nothing is
+            // selected; it does not suppress re-sending an unchanged best.
+            if removed.is_empty() {
+                return;
+            }
             if bgp.nexthop_cache.is_some() {
                 let survivor_nhs = bgp.shard.candidate_nexthops_v6(None, nlri.prefix);
                 nht_untrack_withdrawn(
@@ -9100,10 +9109,6 @@ pub fn route_ipv6_withdraw(
                     super::nht::NhtDep::V6(nlri.prefix),
                 );
             }
-            // No no-op guard here: `route_advertise_to_peers_v6` now keeps
-            // a per-peer Adj-RIB-Out (`adj_out.v6`) and withdraws only to
-            // peers that were actually advertised the prefix, so an
-            // empty-selected withdraw no longer floods or ping-pongs.
             let selected = bgp.shard.select_best_path_v6(nlri.prefix);
             fib_install_v6(bgp, nlri.prefix, &selected);
 
@@ -31641,6 +31646,21 @@ mod fanout_winner_tests {
         route_from_peer(id, packet, top, peers, None);
     }
 
+    fn announce_looped_v6(top: &mut BgpTop, peers: &mut PeerMap, id: usize, prefix: &str) {
+        let peer = peers.get_by_idx(id).unwrap();
+        let mut packet = UpdatePacket::new();
+        packet.bgp_attr = Some(looped_attr(peer.address, peer.remote_as));
+        packet.mp_update = Some(MpReachAttr::Ipv6 {
+            snpa: 0,
+            nhop: peer.address,
+            updates: vec![Ipv6Nlri {
+                id: 0,
+                prefix: prefix.parse().unwrap(),
+            }],
+        });
+        route_from_peer(id, packet, top, peers, None);
+    }
+
     /// A looped UPDATE (treat-as-withdraw) from a peer with no path for the
     /// prefix leaves the selection unchanged: the winner is neither
     /// reinstalled in the FIB nor queued to peers again, and an unknown
@@ -31678,6 +31698,41 @@ mod fanout_winner_tests {
         announce_looped_v4(&mut top, &mut peers, b, "10.15.0.0/24");
         assert_eq!(drain(&mut rib), 0);
         assert!(!top.shard.v4.0.contains_key(&unknown), "no empty entry");
+    }
+
+    #[tokio::test]
+    async fn looped_update_that_removes_nothing_changes_nothing_v6() {
+        let mut fx = Fx::new();
+        let (ctx, mut rib) = rib_ctx();
+        fx.ctx = ctx;
+        let v6 = [(Afi::Ip6, Safi::Unicast)];
+        let mut peers = PeerMap::new();
+        let ids = enroll(
+            &mut fx,
+            &mut peers,
+            vec![
+                peer("2001:db8::2", 65002, &v6),
+                peer("2001:db8::3", 65003, &v6),
+                peer("2001:db8::4", 65004, &v6),
+            ],
+        );
+        let (a, b, c) = (ids[0], ids[1], ids[2]);
+        let mut top = fx.top();
+        announce_v6(&mut top, &mut peers, a, "2001:db8::2", 2);
+        let prefix: Ipv6Net = "2001:db8:14::/64".parse().unwrap();
+        assert_eq!(queued_v6(&top, &peers, c, prefix), Some(2));
+        assert!(drain(&mut rib) > 0, "the winner reached the RIB");
+        clear_queued(&mut top, &peers, c);
+
+        announce_looped_v6(&mut top, &mut peers, b, "2001:db8:14::/64");
+        assert_eq!(drain(&mut rib), 0, "no FIB reinstall");
+        assert_eq!(queued_v6(&top, &peers, c, prefix), None, "no re-advertise");
+        assert_eq!(top.shard.v6.candidates(prefix).len(), 1);
+
+        let unknown: Ipv6Net = "2001:db8:15::/64".parse().unwrap();
+        announce_looped_v6(&mut top, &mut peers, b, "2001:db8:15::/64");
+        assert_eq!(drain(&mut rib), 0);
+        assert!(!top.shard.v6.0.contains_key(&unknown), "no empty entry");
     }
 
     #[tokio::test]
