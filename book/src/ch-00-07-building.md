@@ -91,11 +91,18 @@ builds the release binaries of the Rust workspace (`zebra-rs`, `vtyctl`,
 make install
 ```
 
-installs `zebra-rs`, `vtyctl`, and `vtyhelper` into `/usr/bin` (via `sudo`,
-granting `zebra-rs` the necessary network capabilities with `setcap`) and
-copies the YANG schemas to `/usr/share/zebra-rs/yang`. Keep the schemas in lockstep
-with the binary: a stale schema directory silently rejects newly added
-configuration even when the binary supports it.
+installs `zebra-rs`, `vtyctl`, and `vtyhelper` into `/usr/bin` and the
+`vtypam` PAM helper into `/usr/sbin` (via `sudo`, granting `zebra-rs` its
+network capabilities and `vtypam` its PAM ones with `setcap`), and copies the
+YANG schemas to `/usr/share/zebra-rs/yang` — the same layout the `.deb`
+installs. Keep all of it in lockstep with the binary: a stale schema directory
+silently rejects newly added configuration even when the binary supports it,
+and a stale `vtypam` is what a freshly installed daemon spawns to authenticate
+every `enable`.
+
+`vtypam` additionally needs a PAM service file at `/etc/pam.d/zebra-rs`; copy
+`etc/pam.d/zebra-rs.example` and adjust it for your distribution. The helper
+can be refreshed on its own with `make install-vtypam`.
 
 ## Debian package
 
