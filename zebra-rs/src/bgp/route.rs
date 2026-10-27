@@ -8707,9 +8707,7 @@ pub fn route_ipv4_withdraw(
             );
         }
     }
-    if !selected.is_empty() || !removed.is_empty() {
-        route_advertise_to_peers(rd, nlri.prefix, &selected, ident, bgp, peers);
-    }
+    route_advertise_to_peers(rd, nlri.prefix, &selected, ident, bgp, peers);
     if let Some(removed) = removed.pop() {
         route_withdraw_from_addpath(rd, nlri.prefix, &removed, ident, bgp, peers);
     }
@@ -19491,6 +19489,12 @@ impl Bgp {
         let ident = ORIGINATED_PEER;
         let id = 0;
         let removed = self.shard.remove(None, prefix, id, ident);
+        // No such origination (or already gone): the selection is
+        // unchanged, so a peer-learned best is neither reinstalled nor
+        // re-sent.
+        if removed.is_empty() {
+            return;
+        }
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
@@ -19519,16 +19523,14 @@ impl Bgp {
         // matches Loc-RIB.
         fib_install_v4(&bgp_ref, prefix, &selected);
 
-        if !selected.is_empty() || !removed.is_empty() {
-            route_advertise_to_peers(
-                None,
-                prefix,
-                &selected,
-                ident,
-                &mut bgp_ref,
-                &mut self.peers,
-            );
-        }
+        route_advertise_to_peers(
+            None,
+            prefix,
+            &selected,
+            ident,
+            &mut bgp_ref,
+            &mut self.peers,
+        );
     }
 
     /// Originate an IPv6 prefix into the global v6 unicast Loc-RIB from
@@ -19591,6 +19593,10 @@ impl Bgp {
         self.networks_v6.remove(&prefix);
         let ident = ORIGINATED_PEER;
         let removed = self.shard.remove_v6(prefix, 0, ident);
+        // Nothing removed: see `route_del`.
+        if removed.is_empty() {
+            return;
+        }
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
@@ -19616,9 +19622,7 @@ impl Bgp {
         let selected = bgp_ref.shard.select_best_path_v6(prefix);
         fib_install_v6(&bgp_ref, prefix, &selected);
 
-        if !selected.is_empty() || !removed.is_empty() {
-            route_advertise_to_peers_v6(prefix, &selected, &mut bgp_ref, &mut self.peers);
-        }
+        route_advertise_to_peers_v6(prefix, &selected, &mut bgp_ref, &mut self.peers);
     }
 
     /// Originate an IPv4 prefix into the Labeled-Unicast (SAFI 4)
@@ -19681,6 +19685,10 @@ impl Bgp {
     pub fn route_del_label_v4(&mut self, prefix: Ipv4Net) {
         let ident = ORIGINATED_PEER;
         let removed = self.shard.remove_v4lu(prefix, 0, ident);
+        // Nothing removed: see `route_del`.
+        if removed.is_empty() {
+            return;
+        }
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
@@ -19712,9 +19720,7 @@ impl Bgp {
             prefix,
             &selected,
         );
-        if !selected.is_empty() || !removed.is_empty() {
-            route_advertise_to_peers_labelv4(prefix, &selected, &mut bgp_ref, &mut self.peers);
-        }
+        route_advertise_to_peers_labelv4(prefix, &selected, &mut bgp_ref, &mut self.peers);
     }
 
     /// Originate an IPv6 prefix into the Labeled-Unicast (SAFI 4) Loc-RIB
@@ -19774,6 +19780,10 @@ impl Bgp {
     pub fn route_del_label_v6(&mut self, prefix: Ipv6Net) {
         let ident = ORIGINATED_PEER;
         let removed = self.shard.remove_v6lu(prefix, 0, ident);
+        // Nothing removed: see `route_del`.
+        if removed.is_empty() {
+            return;
+        }
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
@@ -19803,9 +19813,7 @@ impl Bgp {
             prefix,
             &selected,
         );
-        if !selected.is_empty() || !removed.is_empty() {
-            route_advertise_to_peers_labelv6(prefix, &selected, &mut bgp_ref, &mut self.peers);
-        }
+        route_advertise_to_peers_labelv6(prefix, &selected, &mut bgp_ref, &mut self.peers);
     }
 
     // ---- redistribute injection -----------------------------------
@@ -19907,6 +19915,14 @@ impl Bgp {
         let ident = ORIGINATED_PEER;
         let remote_id = Self::redist_remote_id(rtype);
         let removed = self.shard.remove(None, prefix, remote_id, ident);
+        // Nothing of this source was injected here — `route_redist_del`
+        // withdraws every family for each RouteDel, including one this
+        // source is not redistributed into — so the selection is
+        // unchanged: a peer-learned best is neither reinstalled nor
+        // re-sent.
+        if removed.is_empty() {
+            return;
+        }
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
@@ -19934,16 +19950,14 @@ impl Bgp {
         // reconcile the FIB.
         fib_install_v4(&bgp_ref, prefix, &selected);
 
-        if !selected.is_empty() || !removed.is_empty() {
-            route_advertise_to_peers(
-                None,
-                prefix,
-                &selected,
-                ident,
-                &mut bgp_ref,
-                &mut self.peers,
-            );
-        }
+        route_advertise_to_peers(
+            None,
+            prefix,
+            &selected,
+            ident,
+            &mut bgp_ref,
+            &mut self.peers,
+        );
     }
 
     /// Redistribute an IPv6 route into the plain IPv6 unicast Loc-RIB.
@@ -20024,6 +20038,10 @@ impl Bgp {
         let ident = ORIGINATED_PEER;
         let remote_id = Self::redist_remote_id(rtype);
         let removed = self.shard.remove_v6(prefix, remote_id, ident);
+        // Nothing removed: see `route_redist_withdraw`.
+        if removed.is_empty() {
+            return;
+        }
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
@@ -20049,9 +20067,7 @@ impl Bgp {
         let selected = bgp_ref.shard.select_best_path_v6(prefix);
         fib_install_v6(&bgp_ref, prefix, &selected);
 
-        if !selected.is_empty() || !removed.is_empty() {
-            route_advertise_to_peers_v6(prefix, &selected, &mut bgp_ref, &mut self.peers);
-        }
+        route_advertise_to_peers_v6(prefix, &selected, &mut bgp_ref, &mut self.peers);
     }
 
     /// Redistribute an IPv4 route into the label-v4 (SAFI 4) Loc-RIB.
@@ -20122,6 +20138,10 @@ impl Bgp {
         let ident = ORIGINATED_PEER;
         let remote_id = Self::redist_remote_id(rtype);
         let removed = self.shard.remove_v4lu(prefix, remote_id, ident);
+        // Nothing removed: see `route_redist_withdraw`.
+        if removed.is_empty() {
+            return;
+        }
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
@@ -20153,9 +20173,7 @@ impl Bgp {
             prefix,
             &selected,
         );
-        if !selected.is_empty() || !removed.is_empty() {
-            route_advertise_to_peers_labelv4(prefix, &selected, &mut bgp_ref, &mut self.peers);
-        }
+        route_advertise_to_peers_labelv4(prefix, &selected, &mut bgp_ref, &mut self.peers);
     }
 
     /// Redistribute an IPv6 route into the label-v6 (SAFI 4) Loc-RIB.
@@ -20220,6 +20238,10 @@ impl Bgp {
         let ident = ORIGINATED_PEER;
         let remote_id = Self::redist_remote_id(rtype);
         let removed = self.shard.remove_v6lu(prefix, remote_id, ident);
+        // Nothing removed: see `route_redist_withdraw`.
+        if removed.is_empty() {
+            return;
+        }
 
         let mut bgp_ref = BgpTop {
             router_id: &self.router_id,
@@ -20249,9 +20271,7 @@ impl Bgp {
             prefix,
             &selected,
         );
-        if !selected.is_empty() || !removed.is_empty() {
-            route_advertise_to_peers_labelv6(prefix, &selected, &mut bgp_ref, &mut self.peers);
-        }
+        route_advertise_to_peers_labelv6(prefix, &selected, &mut bgp_ref, &mut self.peers);
     }
 
     /// Originate an EVPN Type-2 (MAC/IP Advertisement) route from a
