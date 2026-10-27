@@ -460,6 +460,13 @@ impl BgpShard {
         let Some(decision) = decision else {
             // Inbound policy denied: drop any Loc-RIB row from this peer.
             let removed = self.remove(rd, nlri.prefix, nlri.id, ident);
+            // This peer had no path here (a route never accepted): the
+            // selection is unchanged, so report no delta — main would
+            // reinstall the survivor and re-advertise it, as on a no-op
+            // withdraw.
+            if removed.is_empty() {
+                return Vec::new();
+            }
             return vec![self.best_path_delta_v4(ident, rd, nlri, removed)];
         };
 
@@ -693,6 +700,10 @@ impl BgpShard {
                 Some(rd) => self.remove_v6vpn(rd, nlri.prefix, nlri.id, ident),
                 None => self.remove_v6(nlri.prefix, nlri.id, ident),
             };
+            // Nothing removed: no delta, as in `handle_update_v4`.
+            if removed.is_empty() {
+                return Vec::new();
+            }
             return vec![self.best_path_delta_v6(ident, rd, nlri, removed)];
         };
 
@@ -1042,8 +1053,13 @@ impl BgpShard {
                 match decision {
                     None => {
                         // Denied under the new policy: drop any Loc-RIB row
-                        // from this peer (Adj-RIB-In stays for a later replay).
-                        outs.push(self.best_path_delta_v4(ident, None, nlri, Vec::new()));
+                        // from this peer (Adj-RIB-In stays for a later
+                        // replay). A row the old policy denied too was not in
+                        // the Loc-RIB, so it reports nothing.
+                        let removed = self.remove(None, prefix, nlri.id, ident);
+                        if !removed.is_empty() {
+                            outs.push(self.best_path_delta_v4(ident, None, nlri, removed));
+                        }
                     }
                     Some(d) => {
                         let mut new_rib = stored.clone();
@@ -1595,6 +1611,61 @@ mod tests {
         assert!(!shard.v4.0.contains_key(&"10.9.0.0/24".parse().unwrap()));
     }
 
+    /// A deny-all inbound policy snapshot.
+    fn deny_all() -> Option<Arc<super::super::InPolicy>> {
+        use crate::policy::{PolicyAction, PolicyList};
+        let mut deny = PolicyList::default();
+        deny.entry(10).action = PolicyAction::Deny;
+        Some(Arc::new(super::super::InPolicy {
+            prefix_set: Default::default(),
+            policy_list: crate::bgp::policy::PolicyListValue {
+                name: Some("IN".into()),
+                policy_list: Some(deny),
+            },
+        }))
+    }
+
+    #[test]
+    fn soft_in_deny_of_a_route_never_accepted_reports_no_delta() {
+        // Peer 2's route was denied on arrival, so only its Adj-RIB-In row
+        // exists. A soft-in replay that denies it again changes nothing.
+        let mut shard = BgpShard::default();
+        shard.handle(update_v4(1, "10.0.0.0/24", "192.0.2.1", true));
+        shard.handle(update_v4(2, "10.0.0.0/24", "192.0.2.2", false));
+        shard.set_in_policy(2, deny_all());
+        let out = shard.handle(ShardMsg::SoftInV4 {
+            ident: 2,
+            from_client: false,
+        });
+        assert!(out.is_empty(), "no delta, got {out:?}");
+        assert_eq!(shard.v4.candidates("10.0.0.0/24".parse().unwrap()).len(), 1);
+
+        // Control: denying peer 1's accepted route reports the change.
+        shard.set_in_policy(1, deny_all());
+        let out = shard.handle(ShardMsg::SoftInV4 {
+            ident: 1,
+            from_client: false,
+        });
+        assert_eq!(out.len(), 1, "one delta, got {out:?}");
+        assert!(
+            shard
+                .v4
+                .candidates("10.0.0.0/24".parse().unwrap())
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn denied_update_v4_of_a_route_never_accepted_reports_no_delta() {
+        let mut shard = BgpShard::default();
+        shard.handle(update_v4(1, "10.0.0.0/24", "192.0.2.1", true));
+        let out = shard.handle(update_v4(2, "10.0.0.0/24", "192.0.2.2", false));
+        assert!(out.is_empty(), "no delta, got {out:?}");
+        // Control: peer 1's own route, now denied, reports the removal.
+        let out = shard.handle(update_v4(1, "10.0.0.0/24", "192.0.2.1", false));
+        assert_eq!(out.len(), 1, "one delta, got {out:?}");
+    }
+
     #[test]
     fn originate_withdraw_that_removes_nothing_reports_no_delta() {
         // Removing a `network` that was never originated, while a peer's
@@ -1718,8 +1789,16 @@ mod tests {
         });
         shard.set_in_policy(7, Some(deny));
         let out = shard.handle(update_v4_compute(7, "10.0.2.0/24", "192.0.2.1"));
+        // A new prefix denied changes no selection, so there is no delta.
         assert!(
-            matches!(&out[..], [ShardOut::BestPathV4 { selected, .. }] if selected.is_empty()),
+            out.is_empty(),
+            "no delta for a denied new prefix, got {out:?}"
+        );
+        assert!(
+            shard
+                .v4
+                .candidates("10.0.2.0/24".parse().unwrap())
+                .is_empty(),
             "replicated deny ⇒ route rejected from Loc-RIB"
         );
 
