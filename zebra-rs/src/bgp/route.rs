@@ -9221,6 +9221,11 @@ pub fn route_labelv4_update(
             let replaced = bgp
                 .shard
                 .remove_v4lu(lu.nlri.prefix, lu.nlri.id, peer_ident);
+            // Denied, and this peer had no path here: the selection is
+            // unchanged, so neither the FIB nor the peers hear of it.
+            if replaced.is_empty() {
+                return;
+            }
             let selected = bgp.shard.select_best_path_v4lu(lu.nlri.prefix);
             (replaced, selected)
         }
@@ -9256,7 +9261,10 @@ pub fn route_labelv4_update(
         lu.nlri.prefix,
         &selected,
     );
-    if !selected.is_empty() {
+    // A displaced path with nothing left selected (denied by inbound
+    // policy, or the replacement's next-hop does not resolve) is withdrawn
+    // from the peers it was sent to.
+    if !selected.is_empty() || !replaced.is_empty() {
         route_advertise_to_peers_labelv4(lu.nlri.prefix, &selected, bgp, peers);
     }
 }
@@ -9336,6 +9344,10 @@ pub fn route_labelv6_update(
             let replaced = bgp
                 .shard
                 .remove_v6lu(lu.nlri.prefix, lu.nlri.id, peer_ident);
+            // Nothing removed: see `route_labelv4_update`.
+            if replaced.is_empty() {
+                return;
+            }
             let selected = bgp.shard.select_best_path_v6lu(lu.nlri.prefix);
             (replaced, selected)
         }
@@ -9364,7 +9376,7 @@ pub fn route_labelv6_update(
         lu.nlri.prefix,
         &selected,
     );
-    if !selected.is_empty() {
+    if !selected.is_empty() || !replaced.is_empty() {
         route_advertise_to_peers_labelv6(lu.nlri.prefix, &selected, bgp, peers);
     }
 }
@@ -32034,6 +32046,197 @@ mod fanout_winner_tests {
         announce_mp(&mut top, &mut peers, b, mp, None);
         assert_eq!(drain(&mut rib), 0);
         assert!(!top.shard.v6lu.0.contains_key(&unknown), "no empty entry");
+    }
+
+    /// Bind a deny-all inbound policy on `id` for `family`, on the peer and
+    /// in the shard's snapshot (what the IPv4-unicast ingress evaluates).
+    fn deny_in(top: &mut BgpTop, peers: &mut PeerMap, id: usize, family: (Afi, Safi)) {
+        use crate::bgp::policy::InOut;
+        use crate::policy::{PolicyAction, PolicyList};
+        let mut deny = PolicyList::default();
+        deny.entry(10).action = PolicyAction::Deny;
+        let afi_safi = AfiSafi::new(family.0, family.1);
+        let peer = peers.get_mut_by_idx(id).unwrap();
+        let slot = peer.policy_list_slot(afi_safi, InOut::Input);
+        slot.name = Some("IN".into());
+        slot.policy_list = Some(deny);
+        let snap = std::sync::Arc::new(crate::bgp::shard::InPolicy {
+            prefix_set: peer.prefix_set_at(afi_safi, InOut::Input).clone(),
+            policy_list: peer.policy_list_at(afi_safi, InOut::Input).clone(),
+        });
+        top.shard.set_in_policy(id, Some(snap));
+    }
+
+    /// An UPDATE that B's inbound policy denies, for a prefix B never had
+    /// accepted, leaves A's best alone: no FIB reinstall, no re-advertise.
+    #[tokio::test]
+    async fn denied_update_from_a_peer_with_no_path_changes_nothing_v4() {
+        let mut fx = Fx::new();
+        let (ctx, mut rib) = rib_ctx();
+        fx.ctx = ctx;
+        let v4 = [(Afi::Ip, Safi::Unicast)];
+        let mut peers = PeerMap::new();
+        let ids = enroll(
+            &mut fx,
+            &mut peers,
+            vec![
+                peer("10.0.0.2", 65002, &v4),
+                peer("10.0.0.3", 65002, &v4),
+                peer("10.0.0.4", 65004, &v4),
+            ],
+        );
+        let (a, b, c) = (ids[0], ids[1], ids[2]);
+        let mut top = fx.top();
+        announce_v4(&mut top, &mut peers, a, "10.0.0.2", 2);
+        let prefix: Ipv4Net = "10.14.0.0/24".parse().unwrap();
+        assert_eq!(queued_v4(&top, &peers, c, prefix), Some(2));
+        drain(&mut rib);
+        clear_queued(&mut top, &peers, c);
+
+        deny_in(&mut top, &mut peers, b, (Afi::Ip, Safi::Unicast));
+        announce_v4(&mut top, &mut peers, b, "10.0.0.3", 3);
+        assert_eq!(drain(&mut rib), 0, "no FIB reinstall");
+        assert_eq!(queued_v4(&top, &peers, c, prefix), None, "no re-advertise");
+        let cands = top.shard.v4.candidates(prefix);
+        assert_eq!(cands.len(), 1);
+        assert_eq!(cands[0].ident, a);
+    }
+
+    #[tokio::test]
+    async fn denied_update_from_a_peer_with_no_path_changes_nothing_v6() {
+        let mut fx = Fx::new();
+        let (ctx, mut rib) = rib_ctx();
+        fx.ctx = ctx;
+        let v6 = [(Afi::Ip6, Safi::Unicast)];
+        let mut peers = PeerMap::new();
+        let ids = enroll(
+            &mut fx,
+            &mut peers,
+            vec![
+                peer("2001:db8::2", 65002, &v6),
+                peer("2001:db8::3", 65002, &v6),
+                peer("2001:db8::4", 65004, &v6),
+            ],
+        );
+        let (a, b, c) = (ids[0], ids[1], ids[2]);
+        let mut top = fx.top();
+        announce_v6(&mut top, &mut peers, a, "2001:db8::2", 2);
+        let prefix: Ipv6Net = "2001:db8:14::/64".parse().unwrap();
+        assert_eq!(queued_v6(&top, &peers, c, prefix), Some(2));
+        drain(&mut rib);
+        clear_queued(&mut top, &peers, c);
+
+        deny_in(&mut top, &mut peers, b, (Afi::Ip6, Safi::Unicast));
+        announce_v6(&mut top, &mut peers, b, "2001:db8::3", 3);
+        assert_eq!(drain(&mut rib), 0, "no FIB reinstall");
+        assert_eq!(queued_v6(&top, &peers, c, prefix), None, "no re-advertise");
+        assert_eq!(top.shard.v6.candidates(prefix).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn denied_update_from_a_peer_with_no_path_changes_nothing_v4lu() {
+        let mut fx = Fx::new();
+        let (ctx, mut rib) = rib_ctx();
+        fx.ctx = ctx;
+        let mut peers = PeerMap::new();
+        let (a, b, _c) = enroll_abc(
+            &mut fx,
+            &mut peers,
+            ["10.0.0.2", "10.0.0.3", "10.0.0.4"],
+            (Afi::Ip, Safi::MplsLabel),
+        );
+        let mut top = fx.top();
+        let prefix: Ipv4Net = "10.14.3.0/24".parse().unwrap();
+        let mp = labelv4_reach(peer_addr(&peers, a), "10.14.3.0/24");
+        announce_mp(&mut top, &mut peers, a, mp, Some(2));
+        assert!(drain(&mut rib) > 0, "the winner reached the RIB");
+
+        deny_in(&mut top, &mut peers, b, (Afi::Ip, Safi::MplsLabel));
+        let mp = labelv4_reach(peer_addr(&peers, b), "10.14.3.0/24");
+        announce_mp(&mut top, &mut peers, b, mp, Some(3));
+        assert_eq!(drain(&mut rib), 0, "no FIB reinstall");
+        assert_eq!(top.shard.v4lu.candidates(prefix).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn denied_update_from_a_peer_with_no_path_changes_nothing_v6lu() {
+        let mut fx = Fx::new();
+        let (ctx, mut rib) = rib_ctx();
+        fx.ctx = ctx;
+        let mut peers = PeerMap::new();
+        let (a, b, _c) = enroll_abc(
+            &mut fx,
+            &mut peers,
+            ["2001:db8::2", "2001:db8::3", "2001:db8::4"],
+            (Afi::Ip6, Safi::MplsLabel),
+        );
+        let mut top = fx.top();
+        let prefix: Ipv6Net = "2001:db8:34::/64".parse().unwrap();
+        let mp = labelv6_reach(peer_addr(&peers, a), "2001:db8:34::/64");
+        announce_mp(&mut top, &mut peers, a, mp, Some(2));
+        assert!(drain(&mut rib) > 0, "the winner reached the RIB");
+
+        deny_in(&mut top, &mut peers, b, (Afi::Ip6, Safi::MplsLabel));
+        let mp = labelv6_reach(peer_addr(&peers, b), "2001:db8:34::/64");
+        announce_mp(&mut top, &mut peers, b, mp, Some(3));
+        assert_eq!(drain(&mut rib), 0, "no FIB reinstall");
+        assert_eq!(top.shard.v6lu.candidates(prefix).len(), 1);
+    }
+
+    /// A's re-sent route is now denied and was the only path: C, which was
+    /// sent it, must get a withdraw.
+    #[tokio::test]
+    async fn denied_update_that_removes_the_last_path_withdraws_it_v4lu() {
+        let mut fx = Fx::new();
+        let mut peers = PeerMap::new();
+        let (a, _b, c) = enroll_abc(
+            &mut fx,
+            &mut peers,
+            ["10.0.0.2", "10.0.0.3", "10.0.0.4"],
+            (Afi::Ip, Safi::MplsLabel),
+        );
+        let mut top = fx.top();
+        let prefix: Ipv4Net = "10.14.3.0/24".parse().unwrap();
+        let held = |peers: &PeerMap| {
+            let peer = peers.get_by_idx(c).unwrap();
+            peer.adj_out.v4lu.0.contains_key(&prefix)
+        };
+        let mp = labelv4_reach(peer_addr(&peers, a), "10.14.3.0/24");
+        announce_mp(&mut top, &mut peers, a, mp, Some(2));
+        assert!(held(&peers), "C was sent A's route");
+
+        deny_in(&mut top, &mut peers, a, (Afi::Ip, Safi::MplsLabel));
+        let mp = labelv4_reach(peer_addr(&peers, a), "10.14.3.0/24");
+        announce_mp(&mut top, &mut peers, a, mp, Some(2));
+        assert!(top.shard.v4lu.candidates(prefix).is_empty());
+        assert!(!held(&peers), "C was sent the withdraw");
+    }
+
+    #[tokio::test]
+    async fn denied_update_that_removes_the_last_path_withdraws_it_v6lu() {
+        let mut fx = Fx::new();
+        let mut peers = PeerMap::new();
+        let (a, _b, c) = enroll_abc(
+            &mut fx,
+            &mut peers,
+            ["2001:db8::2", "2001:db8::3", "2001:db8::4"],
+            (Afi::Ip6, Safi::MplsLabel),
+        );
+        let mut top = fx.top();
+        let prefix: Ipv6Net = "2001:db8:34::/64".parse().unwrap();
+        let held = |peers: &PeerMap| {
+            let peer = peers.get_by_idx(c).unwrap();
+            peer.adj_out.v6lu.0.contains_key(&prefix)
+        };
+        let mp = labelv6_reach(peer_addr(&peers, a), "2001:db8:34::/64");
+        announce_mp(&mut top, &mut peers, a, mp, Some(2));
+        assert!(held(&peers), "C was sent A's route");
+
+        deny_in(&mut top, &mut peers, a, (Afi::Ip6, Safi::MplsLabel));
+        let mp = labelv6_reach(peer_addr(&peers, a), "2001:db8:34::/64");
+        announce_mp(&mut top, &mut peers, a, mp, Some(2));
+        assert!(top.shard.v6lu.candidates(prefix).is_empty());
+        assert!(!held(&peers), "C was sent the withdraw");
     }
 
     #[tokio::test]
