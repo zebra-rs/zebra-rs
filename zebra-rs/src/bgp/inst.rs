@@ -7412,9 +7412,9 @@ impl Bgp {
                     self.redist_v4.remove(&(rtype, prefix));
                     // Withdraw from both v4 targets unconditionally: the
                     // config row may already be gone (this RouteDel can be
-                    // the RIB's response to a RedistDel), and a withdraw of
-                    // a prefix never injected is a harmless no-op + an
-                    // ignored peer withdraw. Mirrors the v4-unicast path.
+                    // the RIB's response to a RedistDel). A withdraw of a
+                    // prefix never injected returns without touching the
+                    // FIB or the peers.
                     self.route_redist_withdraw(rtype, prefix);
                     self.route_redist_withdraw_labelv4(rtype, prefix);
                 }
@@ -9591,3 +9591,7 @@ mod enhe_link_local_review_tests;
 #[cfg(test)]
 #[path = "fib_pending_dump_review_tests.rs"]
 mod fib_pending_dump_review_tests;
+
+#[cfg(test)]
+#[path = "local_withdraw_noop_tests.rs"]
+mod local_withdraw_noop_tests;

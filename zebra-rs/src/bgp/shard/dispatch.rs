@@ -526,6 +526,12 @@ impl BgpShard {
         let nlri = Ipv4Nlri { id: 0, prefix };
         if withdraw {
             let removed = self.remove(None, prefix, 0, orig);
+            // No such origination: no delta, as `route_del` returns
+            // (`best_path_delta_v4` would re-run the removal on an empty
+            // set and report the unchanged selection).
+            if removed.is_empty() {
+                return Vec::new();
+            }
             return vec![self.best_path_delta_v4(orig, None, nlri, removed)];
         }
         // Identical row to the synchronous `route_add`, interned for dedup.
@@ -1587,6 +1593,32 @@ mod tests {
         });
         assert!(out.is_empty(), "no delta, got {out:?}");
         assert!(!shard.v4.0.contains_key(&"10.9.0.0/24".parse().unwrap()));
+    }
+
+    #[test]
+    fn originate_withdraw_that_removes_nothing_reports_no_delta() {
+        // Removing a `network` that was never originated, while a peer's
+        // path is best: no delta, so main neither reinstalls nor re-sends.
+        let mut shard = BgpShard::default();
+        shard.handle(update_v4(1, "10.0.0.0/24", "192.0.2.1", true));
+        let out = shard.handle(ShardMsg::OriginateV4 {
+            prefix: "10.0.0.0/24".parse().unwrap(),
+            withdraw: true,
+        });
+        assert!(out.is_empty(), "no delta, got {out:?}");
+        assert_eq!(shard.v4.candidates("10.0.0.0/24".parse().unwrap()).len(), 1);
+
+        // Control: withdrawing one that was originated reports the peer's
+        // path as the new selection.
+        shard.handle(ShardMsg::OriginateV4 {
+            prefix: "10.0.0.0/24".parse().unwrap(),
+            withdraw: false,
+        });
+        let out = shard.handle(ShardMsg::OriginateV4 {
+            prefix: "10.0.0.0/24".parse().unwrap(),
+            withdraw: true,
+        });
+        assert_eq!(out.len(), 1, "one delta, got {out:?}");
     }
 
     /// Review finding #23: the N>1 next-hop re-evaluation must report the
