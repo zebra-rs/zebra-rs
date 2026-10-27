@@ -62,7 +62,7 @@ impl BgpShard {
                 // is unchanged, so report no delta (main would otherwise
                 // reinstall the FIB and re-advertise) — the N>1 twin of the
                 // guard in `route_ipv4_withdraw`.
-                if rd.is_none() && removed.is_empty() {
+                if removed.is_empty() {
                     return Vec::new();
                 }
                 #[cfg(feature = "lua")]

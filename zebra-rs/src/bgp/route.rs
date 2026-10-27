@@ -8589,9 +8589,12 @@ pub fn route_ipv4_withdraw(
     // Nothing of this peer's was in the Loc-RIB — a looped UPDATE
     // (treat-as-withdraw), or a withdraw of a route never accepted — so the
     // selection is unchanged. Going on would reinstall the survivor in the
-    // FIB and re-advertise it to every peer once per looped UPDATE. Same
-    // guard as `route_evpn_withdraw`. VPNv4 keeps its transit reconcile.
-    if rd.is_none() && removed.is_empty() {
+    // FIB and re-advertise it to every peer once per looped UPDATE, and for
+    // VPNv4 also re-program the transit ILM and re-import into the VRFs.
+    // Same guard as `route_evpn_withdraw`. The ILM and the VRF imports
+    // follow the next-hop on their own (`nht_reeval_deps`,
+    // `nht_reinstall_transport`), so skipping them here loses nothing.
+    if removed.is_empty() {
         return;
     }
 
@@ -9014,6 +9017,14 @@ pub fn route_ipv6_withdraw(
     match rd {
         Some(rd) => {
             let removed = bgp.shard.remove_v6vpn(rd, nlri.prefix, nlri.id, ident);
+            // Nothing removed: the selection is unchanged, so skip the ILM
+            // re-program, the VRF re-import and the re-advertisement, as
+            // the VPNv4 arm of `route_ipv4_withdraw` does. `adj_out.v6vpn`
+            // only stops withdraws to peers that never had the prefix; it
+            // does not stop an unchanged best from being re-sent.
+            if removed.is_empty() {
+                return;
+            }
             if bgp.nexthop_cache.is_some() {
                 let survivor_nhs = bgp.shard.candidate_nexthops_v6(Some(rd), nlri.prefix);
                 nht_untrack_withdrawn(
@@ -9023,8 +9034,6 @@ pub fn route_ipv6_withdraw(
                     super::nht::NhtDep::V6vpn(rd, nlri.prefix),
                 );
             }
-            // No no-op guard — `route_advertise_to_peers_vpnv6` now prunes
-            // via its Adj-RIB-Out (`adj_out.v6vpn`), like the v4 VPN path.
             let selected = bgp.shard.select_best_path_vpn_v6(&rd, nlri.prefix);
 
             // VPNv6 transit (Option B, review finding #8), as the VPNv4 arm:
@@ -9380,6 +9389,14 @@ pub fn route_labelv4_withdraw(
             .remove_v4lu(nlri.prefix, nlri.id);
     }
     let removed = bgp.shard.remove_v4lu(nlri.prefix, nlri.id, ident);
+    // Nothing of this peer's was in the Loc-RIB (looped UPDATE, or a
+    // withdraw of a route never accepted): the selection is unchanged, so
+    // skip the FIB and ILM reinstall and the re-advertisement, as
+    // `route_ipv4_withdraw` does. `adj_out.v4lu` already keeps an unchanged
+    // best off the wire (`same_advertised`), but not out of the FIB.
+    if removed.is_empty() {
+        return;
+    }
     if bgp.nexthop_cache.is_some() {
         let survivor_nhs = bgp.shard.candidate_nexthops_v4lu(nlri.prefix);
         nht_untrack_withdrawn(
@@ -9389,10 +9406,6 @@ pub fn route_labelv4_withdraw(
             super::nht::NhtDep::V4lu(nlri.prefix),
         );
     }
-    // No no-op guard: `route_advertise_to_peers_labelv4` now keeps a
-    // per-peer Adj-RIB-Out (`adj_out.v4lu`) and withdraws only to peers
-    // that were actually advertised the prefix, so an empty-selected
-    // withdraw no longer floods or ping-pongs.
     let selected = bgp.shard.select_best_path_v4lu(nlri.prefix);
     // Prefix fully gone: release its local label and tear down the swap
     // ILM. (A surviving winner keeps the same per-prefix label, whose ILM
@@ -9429,6 +9442,10 @@ pub fn route_labelv6_withdraw(
             .remove_v6lu(nlri.prefix, nlri.id);
     }
     let removed = bgp.shard.remove_v6lu(nlri.prefix, nlri.id, ident);
+    // Nothing removed: see `route_labelv4_withdraw`.
+    if removed.is_empty() {
+        return;
+    }
     if bgp.nexthop_cache.is_some() {
         let survivor_nhs = bgp.shard.candidate_nexthops_v6lu(nlri.prefix);
         nht_untrack_withdrawn(
@@ -9438,8 +9455,6 @@ pub fn route_labelv6_withdraw(
             super::nht::NhtDep::V6lu(nlri.prefix),
         );
     }
-    // No no-op guard — `route_advertise_to_peers_labelv6` prunes via its
-    // Adj-RIB-Out (`adj_out.v6lu`); see `route_labelv4_withdraw`.
     let selected = bgp.shard.select_best_path_v6lu(nlri.prefix);
     if selected.is_empty()
         && let Some(local) = bgp.shard.labels.free_lu_v6(nlri.prefix)
@@ -16062,17 +16077,12 @@ fn withdraw_ipv6_deferrable(
 /// [`super::update_group::flush_ipv6`]); a `None` best-path emits an
 /// immediate MP_UNREACH to each member.
 ///
-/// The update-group post-policy memoization, Adj-RIB-Out tracking, and
-/// outbound policy that the v4 path carries are deferred for v6 (the
-/// policy engine is IPv4-typed). Without Adj-RIB-Out, an empty-selected
-/// withdraw is flooded to every Established v6 peer, even ones that
-/// never received the route. That is safe ONLY because the caller drops
-/// a no-op withdraw first: `route_ipv6_withdraw` returns early when it
-/// removed nothing, so a route-less peer cannot bounce the MP_UNREACH
-/// back and start an infinite withdraw storm (peers do NOT ignore an
-/// unknown-prefix withdraw — they re-evaluate and re-flood it). Never
-/// call this with an empty `selected` for a prefix that was not in the
-/// Loc-RIB.
+/// Plain members go through the generic `V6Batch` path: outbound policy,
+/// and the per-peer Adj-RIB-Out (`adj_out.v6`), so a withdraw reaches
+/// only peers that were sent the prefix. The Adj-RIB-Out does not stop an
+/// unchanged best from being re-sent, though: call this only when the
+/// selection may have changed. `route_ipv6_withdraw` returns early when
+/// it removed nothing, so a looped UPDATE does not re-send the survivor.
 pub(super) fn route_advertise_to_peers_v6(
     prefix: Ipv6Net,
     selected: &[BgpRib],
@@ -31733,6 +31743,277 @@ mod fanout_winner_tests {
         announce_looped_v6(&mut top, &mut peers, b, "2001:db8:15::/64");
         assert_eq!(drain(&mut rib), 0);
         assert!(!top.shard.v6.0.contains_key(&unknown), "no empty entry");
+    }
+
+    fn vpn_rd() -> RouteDistinguisher {
+        "65002:1".parse().unwrap()
+    }
+
+    /// Send `mp` from peer `id`: a plain route tagged `tag`, or a looped
+    /// one when `tag` is `None`.
+    fn announce_mp(
+        top: &mut BgpTop,
+        peers: &mut PeerMap,
+        id: usize,
+        mp: MpReachAttr,
+        tag: Option<u32>,
+    ) {
+        let peer = peers.get_by_idx(id).unwrap();
+        let bgp_attr = match tag {
+            Some(tag) => attr(peer.address, tag),
+            None => looped_attr(peer.address, peer.remote_as),
+        };
+        let mut packet = UpdatePacket::new();
+        packet.bgp_attr = Some(bgp_attr);
+        packet.mp_update = Some(mp);
+        route_from_peer(id, packet, top, peers, None);
+    }
+
+    fn vpnv4_reach(nh: IpAddr, prefix: &str) -> MpReachAttr {
+        MpReachAttr::Vpnv4(Vpnv4Reach {
+            snpa: 0,
+            nhop: Vpnv4Nexthop {
+                rd: RouteDistinguisher::default(),
+                nhop: nh,
+            },
+            updates: vec![Vpnv4Nlri {
+                label: Label::new(100, 0, true),
+                rd: vpn_rd(),
+                nlri: Ipv4Nlri {
+                    id: 0,
+                    prefix: prefix.parse().unwrap(),
+                },
+            }],
+        })
+    }
+
+    fn vpnv6_reach(nh: IpAddr, prefix: &str) -> MpReachAttr {
+        let IpAddr::V6(nhop) = nh else {
+            panic!("VPNv6 needs an IPv6 next-hop");
+        };
+        MpReachAttr::Vpnv6(Vpnv6Reach {
+            snpa: 0,
+            nhop: Vpnv6Nexthop {
+                rd: RouteDistinguisher::default(),
+                nhop,
+            },
+            updates: vec![Vpnv6Nlri {
+                label: Label::new(100, 0, true),
+                rd: vpn_rd(),
+                nlri: Ipv6Nlri {
+                    id: 0,
+                    prefix: prefix.parse().unwrap(),
+                },
+            }],
+        })
+    }
+
+    fn labelv4_reach(nh: IpAddr, prefix: &str) -> MpReachAttr {
+        MpReachAttr::Labelv4 {
+            snpa: 0,
+            nhop: nh,
+            updates: vec![Labelv4Nlri {
+                label: Label::new(16000, 0, true),
+                nlri: Ipv4Nlri {
+                    id: 0,
+                    prefix: prefix.parse().unwrap(),
+                },
+            }],
+        }
+    }
+
+    fn labelv6_reach(nh: IpAddr, prefix: &str) -> MpReachAttr {
+        MpReachAttr::Labelv6 {
+            snpa: 0,
+            nhop: nh,
+            updates: vec![Labelv6Nlri {
+                label: Label::new(16000, 0, true),
+                nlri: Ipv6Nlri {
+                    id: 0,
+                    prefix: prefix.parse().unwrap(),
+                },
+            }],
+        }
+    }
+
+    /// Three peers of `family`: A and B eBGP, C iBGP (so C is sent A's
+    /// VPN or labeled route).
+    fn enroll_abc(
+        fx: &mut Fx,
+        peers: &mut PeerMap,
+        addrs: [&str; 3],
+        family: (Afi, Safi),
+    ) -> (usize, usize, usize) {
+        let ids = enroll(
+            fx,
+            peers,
+            vec![
+                peer(addrs[0], 65002, &[family]),
+                peer(addrs[1], 65003, &[family]),
+                peer(addrs[2], LOCAL_AS, &[family]),
+            ],
+        );
+        (ids[0], ids[1], ids[2])
+    }
+
+    fn peer_addr(peers: &PeerMap, id: usize) -> IpAddr {
+        peers.get_by_idx(id).unwrap().address
+    }
+
+    /// The VPNv4 twin of the unicast test: a looped UPDATE from B, which
+    /// has no path, does not re-send A's route to C (the fixture has no
+    /// transit label, so no ILM), and leaves no empty entry behind.
+    #[tokio::test]
+    async fn looped_update_that_removes_nothing_changes_nothing_vpnv4() {
+        let mut fx = Fx::new();
+        let (ctx, mut rib) = rib_ctx();
+        fx.ctx = ctx;
+        let mut peers = PeerMap::new();
+        let (a, b, c) = enroll_abc(
+            &mut fx,
+            &mut peers,
+            ["10.0.0.2", "10.0.0.3", "10.0.0.4"],
+            (Afi::Ip, Safi::MplsVpn),
+        );
+        let queued = |peers: &PeerMap, prefix: Ipv4Net| {
+            let peer = peers.get_by_idx(c).unwrap();
+            peer.cache_vpnv4_rev
+                .keys()
+                .any(|n| n.rd == vpn_rd() && n.nlri.prefix == prefix)
+        };
+        let mut top = fx.top();
+        let prefix: Ipv4Net = "10.14.2.0/24".parse().unwrap();
+        let mp = vpnv4_reach(peer_addr(&peers, a), "10.14.2.0/24");
+        announce_mp(&mut top, &mut peers, a, mp, Some(2));
+        assert!(queued(&peers, prefix), "C was sent the winner");
+        drain(&mut rib);
+        let peer = peers.get_mut_by_idx(c).unwrap();
+        peer.cache_vpnv4.clear();
+        peer.cache_vpnv4_rev.clear();
+
+        let mp = vpnv4_reach(peer_addr(&peers, b), "10.14.2.0/24");
+        announce_mp(&mut top, &mut peers, b, mp, None);
+        assert_eq!(drain(&mut rib), 0, "no RIB message");
+        assert!(!queued(&peers, prefix), "no re-advertise");
+        let table = &top.shard.v4vpn[&vpn_rd()];
+        assert_eq!(table.candidates(prefix).len(), 1);
+
+        let unknown: Ipv4Net = "10.15.2.0/24".parse().unwrap();
+        let mp = vpnv4_reach(peer_addr(&peers, b), "10.15.2.0/24");
+        announce_mp(&mut top, &mut peers, b, mp, None);
+        assert_eq!(drain(&mut rib), 0);
+        assert!(
+            !top.shard.v4vpn[&vpn_rd()].0.contains_key(&unknown),
+            "no empty entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn looped_update_that_removes_nothing_changes_nothing_vpnv6() {
+        let mut fx = Fx::new();
+        let (ctx, mut rib) = rib_ctx();
+        fx.ctx = ctx;
+        let mut peers = PeerMap::new();
+        let (a, b, c) = enroll_abc(
+            &mut fx,
+            &mut peers,
+            ["2001:db8::2", "2001:db8::3", "2001:db8::4"],
+            (Afi::Ip6, Safi::MplsVpn),
+        );
+        let queued = |peers: &PeerMap, prefix: Ipv6Net| {
+            let peer = peers.get_by_idx(c).unwrap();
+            peer.cache_vpnv6_rev
+                .keys()
+                .any(|n| n.rd == vpn_rd() && n.nlri.prefix == prefix)
+        };
+        let mut top = fx.top();
+        let prefix: Ipv6Net = "2001:db8:24::/64".parse().unwrap();
+        let mp = vpnv6_reach(peer_addr(&peers, a), "2001:db8:24::/64");
+        announce_mp(&mut top, &mut peers, a, mp, Some(2));
+        assert!(queued(&peers, prefix), "C was sent the winner");
+        drain(&mut rib);
+        let peer = peers.get_mut_by_idx(c).unwrap();
+        peer.cache_vpnv6.clear();
+        peer.cache_vpnv6_rev.clear();
+
+        let mp = vpnv6_reach(peer_addr(&peers, b), "2001:db8:24::/64");
+        announce_mp(&mut top, &mut peers, b, mp, None);
+        assert_eq!(drain(&mut rib), 0, "no RIB message");
+        assert!(!queued(&peers, prefix), "no re-advertise");
+        let table = &top.shard.v6vpn[&vpn_rd()];
+        assert_eq!(table.candidates(prefix).len(), 1);
+
+        let unknown: Ipv6Net = "2001:db8:25::/64".parse().unwrap();
+        let mp = vpnv6_reach(peer_addr(&peers, b), "2001:db8:25::/64");
+        announce_mp(&mut top, &mut peers, b, mp, None);
+        assert_eq!(drain(&mut rib), 0);
+        assert!(
+            !top.shard.v6vpn[&vpn_rd()].0.contains_key(&unknown),
+            "no empty entry"
+        );
+    }
+
+    /// Labeled unicast already keeps an unchanged best off the wire
+    /// (`same_advertised`), so the looped UPDATE shows only as a FIB and
+    /// ILM reinstall.
+    #[tokio::test]
+    async fn looped_update_that_removes_nothing_changes_nothing_v4lu() {
+        let mut fx = Fx::new();
+        let (ctx, mut rib) = rib_ctx();
+        fx.ctx = ctx;
+        let mut peers = PeerMap::new();
+        let (a, b, _c) = enroll_abc(
+            &mut fx,
+            &mut peers,
+            ["10.0.0.2", "10.0.0.3", "10.0.0.4"],
+            (Afi::Ip, Safi::MplsLabel),
+        );
+        let mut top = fx.top();
+        let prefix: Ipv4Net = "10.14.3.0/24".parse().unwrap();
+        let mp = labelv4_reach(peer_addr(&peers, a), "10.14.3.0/24");
+        announce_mp(&mut top, &mut peers, a, mp, Some(2));
+        assert!(drain(&mut rib) > 0, "the winner reached the RIB");
+
+        let mp = labelv4_reach(peer_addr(&peers, b), "10.14.3.0/24");
+        announce_mp(&mut top, &mut peers, b, mp, None);
+        assert_eq!(drain(&mut rib), 0, "no FIB reinstall");
+        assert_eq!(top.shard.v4lu.candidates(prefix).len(), 1);
+
+        let unknown: Ipv4Net = "10.15.3.0/24".parse().unwrap();
+        let mp = labelv4_reach(peer_addr(&peers, b), "10.15.3.0/24");
+        announce_mp(&mut top, &mut peers, b, mp, None);
+        assert_eq!(drain(&mut rib), 0);
+        assert!(!top.shard.v4lu.0.contains_key(&unknown), "no empty entry");
+    }
+
+    #[tokio::test]
+    async fn looped_update_that_removes_nothing_changes_nothing_v6lu() {
+        let mut fx = Fx::new();
+        let (ctx, mut rib) = rib_ctx();
+        fx.ctx = ctx;
+        let mut peers = PeerMap::new();
+        let (a, b, _c) = enroll_abc(
+            &mut fx,
+            &mut peers,
+            ["2001:db8::2", "2001:db8::3", "2001:db8::4"],
+            (Afi::Ip6, Safi::MplsLabel),
+        );
+        let mut top = fx.top();
+        let prefix: Ipv6Net = "2001:db8:34::/64".parse().unwrap();
+        let mp = labelv6_reach(peer_addr(&peers, a), "2001:db8:34::/64");
+        announce_mp(&mut top, &mut peers, a, mp, Some(2));
+        assert!(drain(&mut rib) > 0, "the winner reached the RIB");
+
+        let mp = labelv6_reach(peer_addr(&peers, b), "2001:db8:34::/64");
+        announce_mp(&mut top, &mut peers, b, mp, None);
+        assert_eq!(drain(&mut rib), 0, "no FIB reinstall");
+        assert_eq!(top.shard.v6lu.candidates(prefix).len(), 1);
+
+        let unknown: Ipv6Net = "2001:db8:35::/64".parse().unwrap();
+        let mp = labelv6_reach(peer_addr(&peers, b), "2001:db8:35::/64");
+        announce_mp(&mut top, &mut peers, b, mp, None);
+        assert_eq!(drain(&mut rib), 0);
+        assert!(!top.shard.v6lu.0.contains_key(&unknown), "no empty entry");
     }
 
     #[tokio::test]
