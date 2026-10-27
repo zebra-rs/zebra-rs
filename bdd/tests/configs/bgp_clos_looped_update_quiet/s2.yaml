@@ -1,0 +1,25 @@
+# s2 (AS 65000): a spine. Both spines share AS 65000, so a leaf route a
+# spine sends one leaf comes back from it toward the other spine with
+# 65000 in the AS_PATH: a looped UPDATE, handled as a withdraw of a path
+# the spine never accepted from that leaf.
+router:
+  bgp:
+    global:
+      as: 65000
+      router-id: 192.168.61.2
+    timer:
+      adv-interval:
+        ebgp: 0
+    neighbor:
+    - remote-address: 192.168.61.11
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65011
+    - remote-address: 192.168.61.12
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65012

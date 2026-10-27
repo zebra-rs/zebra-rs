@@ -1,0 +1,28 @@
+# l2 (AS 65012): a leaf, peering with both spines and originating its
+# loopback 10.61.0.12/32. ECMP over the two spines, as in a Clos.
+router:
+  bgp:
+    global:
+      as: 65012
+      router-id: 192.168.61.12
+    timer:
+      adv-interval:
+        ebgp: 0
+    neighbor:
+    - remote-address: 192.168.61.1
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65000
+    - remote-address: 192.168.61.2
+      afi-safi:
+      - name: ipv4
+        enabled: true
+      enabled: true
+      remote-as: 65000
+    afi-safi:
+    - name: ipv4
+      maximum-paths: 2
+      network:
+      - prefix: 10.61.0.12/32
