@@ -86,9 +86,12 @@ impl BgpShard {
                 }
                 vec![self.best_path_delta_v4(ident, rd, nlri, removed)]
             }
-            ShardMsg::OriginateV4 { prefix, withdraw } => {
-                self.handle_originate_v4(prefix, withdraw)
-            }
+            ShardMsg::OriginateV4 {
+                prefix,
+                remote_id,
+                med,
+                withdraw,
+            } => self.handle_originate_v4(prefix, remote_id, med, withdraw),
             ShardMsg::UpdateV6(u) => self.handle_update_v6(u),
             ShardMsg::WithdrawV6 { ident, rd, nlri } => {
                 vec![self.best_path_delta_v6(ident, rd, nlri, Vec::new())]
@@ -528,11 +531,17 @@ impl BgpShard {
     /// Adj-RIB-In, since the route is not received from a peer — replying with
     /// the best-path delta for the reduce to FIB-install, advertise, and mirror
     /// into main's shard. The store tail mirrors `handle_update_v4`.
-    fn handle_originate_v4(&mut self, prefix: Ipv4Net, withdraw: bool) -> Vec<ShardOut> {
+    fn handle_originate_v4(
+        &mut self,
+        prefix: Ipv4Net,
+        remote_id: u32,
+        med: Option<u32>,
+        withdraw: bool,
+    ) -> Vec<ShardOut> {
         let orig = super::super::route::ORIGINATED_PEER;
         let nlri = Ipv4Nlri { id: 0, prefix };
         if withdraw {
-            let removed = self.remove(None, prefix, 0, orig);
+            let removed = self.remove(None, prefix, remote_id, orig);
             // No such origination: no delta, as `route_del` returns
             // (`best_path_delta_v4` would re-run the removal on an empty
             // set and report the unchanged selection).
@@ -541,13 +550,15 @@ impl BgpShard {
             }
             return vec![self.best_path_delta_v4(orig, None, nlri, removed)];
         }
-        // Identical row to the synchronous `route_add`, interned for dedup.
-        let attr = bgp_packet::BgpAttr::new();
+        // Identical row to the synchronous `route_add` /
+        // `route_redist_inject`, interned for dedup.
+        let mut attr = bgp_packet::BgpAttr::new();
+        attr.med = med.map(bgp_packet::Med::new);
         let mut rib = BgpRib::new(
             orig,
             std::net::Ipv4Addr::UNSPECIFIED,
             super::super::route::BgpRibType::Originated,
-            0,
+            remote_id,
             32768,
             &attr,
             None,
@@ -1674,6 +1685,8 @@ mod tests {
         shard.handle(update_v4(1, "10.0.0.0/24", "192.0.2.1", true));
         let out = shard.handle(ShardMsg::OriginateV4 {
             prefix: "10.0.0.0/24".parse().unwrap(),
+            remote_id: 0,
+            med: None,
             withdraw: true,
         });
         assert!(out.is_empty(), "no delta, got {out:?}");
@@ -1683,10 +1696,14 @@ mod tests {
         // path as the new selection.
         shard.handle(ShardMsg::OriginateV4 {
             prefix: "10.0.0.0/24".parse().unwrap(),
+            remote_id: 0,
+            med: None,
             withdraw: false,
         });
         let out = shard.handle(ShardMsg::OriginateV4 {
             prefix: "10.0.0.0/24".parse().unwrap(),
+            remote_id: 0,
+            med: None,
             withdraw: true,
         });
         assert_eq!(out.len(), 1, "one delta, got {out:?}");

@@ -1,0 +1,40 @@
+# z1 — the sharded device under test (4 shards). Redistributes three static
+# routes into IPv4 unicast. z3 also originates 10.50.1.0/24, which must lose
+# to the redistributed route (weight 32768).
+router:
+  static:
+    ipv4:
+      route:
+      - prefix: 10.50.1.0/24
+        nexthop:
+        - address: 10.0.0.254
+      - prefix: 10.50.2.0/24
+        nexthop:
+        - address: 10.0.0.254
+      - prefix: 10.50.3.0/24
+        nexthop:
+        - address: 10.0.0.254
+  bgp:
+    tracing:
+      sharding: null
+    global:
+      as: 65001
+      router-id: 10.0.0.1
+    sharding:
+      rib-sharding: 4
+    timer:
+      adv-interval:
+        ebgp: 1
+    neighbor:
+    - remote-address: 10.0.0.2
+      timers: {connect-retry-time: 3}
+      remote-as: 65002
+      enabled: true
+    - remote-address: 10.0.0.3
+      timers: {connect-retry-time: 3}
+      remote-as: 65003
+      enabled: true
+    afi-safi:
+    - name: ipv4
+      redistribute:
+        static: {}

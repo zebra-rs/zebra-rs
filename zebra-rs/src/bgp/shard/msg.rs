@@ -83,17 +83,24 @@ pub enum ShardMsg {
         rib_in: bool,
     },
 
-    /// Originate (or, with `withdraw`, retract) a locally-configured
-    /// IPv4-unicast `network` prefix at N>1. The shard builds the canonical
-    /// originated row (typ `Originated`, weight 32768, empty attr) and runs
-    /// best-path WITHOUT touching Adj-RIB-In — an originated route is not
-    /// "received" — replying with [`ShardOut::BestPathV4`] so the reduce
-    /// installs the FIB, advertises it, and mirrors it into main's shard,
-    /// exactly like a peer route. (`route_add` wrote straight to main's shard,
-    /// which the pool's session-up `DumpV4` never sees — the origination bug.)
-    /// The N=1 path stays synchronous in `route_add` / `route_del`.
+    /// Originate (or, with `withdraw`, retract) a locally-originated
+    /// IPv4-unicast prefix at N>1: a `network` statement, or a route
+    /// redistributed from `remote_id`'s source. The shard builds the
+    /// canonical originated row (typ `Originated`, weight 32768, attr empty
+    /// but for `med`) and runs best-path WITHOUT touching Adj-RIB-In — an
+    /// originated route is not "received" — replying with
+    /// [`ShardOut::BestPathV4`] so the reduce installs the FIB, advertises
+    /// it, and mirrors it into main's shard, exactly like a peer route.
+    /// (`route_add` and `route_redist_inject` wrote straight to main's shard,
+    /// which the pool's session-up `DumpV4` and best-path never see — the
+    /// origination bug.) The N=1 path stays synchronous.
     OriginateV4 {
         prefix: ipnet::Ipv4Net,
+        /// `0` for `network`, else `Bgp::redist_remote_id` of the source,
+        /// so the origins of one prefix coexist.
+        remote_id: u32,
+        /// The redistributed metric; `None` for `network`.
+        med: Option<u32>,
         withdraw: bool,
     },
 

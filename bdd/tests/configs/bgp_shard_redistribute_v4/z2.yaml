@@ -1,0 +1,14 @@
+# z2 — eBGP peer of z1 only: what it learns is z1's best path.
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 10.0.0.2
+    timer:
+      adv-interval:
+        ebgp: 1
+    neighbor:
+    - remote-address: 10.0.0.1
+      timers: {connect-retry-time: 3}
+      remote-as: 65001
+      enabled: true
