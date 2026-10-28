@@ -1,0 +1,14 @@
+# z3 — the session stays up, 10.70.1.0/24 is no longer originated.
+router:
+  bgp:
+    global:
+      as: 65003
+      router-id: 10.0.0.3
+    timer:
+      adv-interval:
+        ebgp: 1
+    neighbor:
+    - remote-address: 10.0.0.2
+      timers: {connect-retry-time: 3}
+      remote-as: 65002
+      enabled: true

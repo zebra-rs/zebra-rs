@@ -1,0 +1,18 @@
+# z3 — originates 10.70.1.0/24 to z2 too: the path z2 falls back to.
+router:
+  bgp:
+    global:
+      as: 65003
+      router-id: 10.0.0.3
+    timer:
+      adv-interval:
+        ebgp: 1
+    neighbor:
+    - remote-address: 10.0.0.2
+      timers: {connect-retry-time: 3}
+      remote-as: 65002
+      enabled: true
+    afi-safi:
+    - name: ipv4
+      network:
+      - prefix: 10.70.1.0/24

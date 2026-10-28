@@ -1,0 +1,24 @@
+# z2 — the device under test: learns 2001:db8:70::/48 from z1 and z3.
+router:
+  bgp:
+    global:
+      as: 65002
+      router-id: 10.0.0.2
+    timer:
+      adv-interval:
+        ebgp: 1
+    neighbor:
+    - remote-address: 2001:db8::1
+      timers: {connect-retry-time: 3}
+      remote-as: 65001
+      enabled: true
+      afi-safi:
+      - name: ipv6
+        enabled: true
+    - remote-address: 2001:db8::3
+      timers: {connect-retry-time: 3}
+      remote-as: 65003
+      enabled: true
+      afi-safi:
+      - name: ipv6
+        enabled: true

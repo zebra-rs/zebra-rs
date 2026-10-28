@@ -1,0 +1,25 @@
+# z2 — as z2.yaml, plus a static route for 10.70.1.0/24 (distance 1),
+# which outranks the BGP route at the same kernel priority (metric 0).
+router:
+  static:
+    ipv4:
+      route:
+      - prefix: 10.70.1.0/24
+        nexthop:
+        - address: 10.0.0.9
+  bgp:
+    global:
+      as: 65002
+      router-id: 10.0.0.2
+    timer:
+      adv-interval:
+        ebgp: 1
+    neighbor:
+    - remote-address: 10.0.0.1
+      timers: {connect-retry-time: 3}
+      remote-as: 65001
+      enabled: true
+    - remote-address: 10.0.0.3
+      timers: {connect-retry-time: 3}
+      remote-as: 65003
+      enabled: true
