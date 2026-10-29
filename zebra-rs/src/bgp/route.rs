@@ -19423,6 +19423,8 @@ impl Bgp {
                 pool.shard_of(std::net::IpAddr::V4(prefix.addr())),
                 ShardMsg::OriginateV4 {
                     prefix,
+                    remote_id: 0,
+                    med: None,
                     withdraw: false,
                 },
             );
@@ -19493,6 +19495,8 @@ impl Bgp {
                 pool.shard_of(std::net::IpAddr::V4(prefix.addr())),
                 ShardMsg::OriginateV4 {
                     prefix,
+                    remote_id: 0,
+                    med: None,
                     withdraw: true,
                 },
             );
@@ -19868,6 +19872,21 @@ impl Bgp {
     ) {
         let ident = ORIGINATED_PEER;
         let remote_id = Self::redist_remote_id(rtype);
+        // N>1: originate through the pool, as `route_add` does, so the
+        // pool's best-path and session-up `DumpV4` see the row. Main's
+        // shard is only the pool's read replica.
+        if let Some(pool) = self.shards.as_ref() {
+            pool.dispatch(
+                pool.shard_of(std::net::IpAddr::V4(prefix.addr())),
+                ShardMsg::OriginateV4 {
+                    prefix,
+                    remote_id,
+                    med: Some(metric),
+                    withdraw: false,
+                },
+            );
+            return;
+        }
         let mut attr = BgpAttr::new();
         attr.med = Some(bgp_packet::Med::new(metric));
         let mut rib = BgpRib::new(
@@ -19926,6 +19945,19 @@ impl Bgp {
     pub fn route_redist_withdraw(&mut self, rtype: crate::rib::RibType, prefix: Ipv4Net) {
         let ident = ORIGINATED_PEER;
         let remote_id = Self::redist_remote_id(rtype);
+        // N>1: retract through the pool, matching `route_redist_inject`.
+        if let Some(pool) = self.shards.as_ref() {
+            pool.dispatch(
+                pool.shard_of(std::net::IpAddr::V4(prefix.addr())),
+                ShardMsg::OriginateV4 {
+                    prefix,
+                    remote_id,
+                    med: None,
+                    withdraw: true,
+                },
+            );
+            return;
+        }
         let removed = self.shard.remove(None, prefix, remote_id, ident);
         // Nothing of this source was injected here — `route_redist_del`
         // withdraws every family for each RouteDel, including one this

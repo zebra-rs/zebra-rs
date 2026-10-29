@@ -9595,3 +9595,7 @@ mod fib_pending_dump_review_tests;
 #[cfg(test)]
 #[path = "local_withdraw_noop_tests.rs"]
 mod local_withdraw_noop_tests;
+
+#[cfg(test)]
+#[path = "redist_pool_tests.rs"]
+mod redist_pool_tests;
