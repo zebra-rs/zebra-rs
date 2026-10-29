@@ -156,6 +156,12 @@ fn fmt_group_for_trace(group: &Group) -> String {
     }
 }
 
+/// Whether `entry` is a static seg6local action route, whose install
+/// also tees a local SID to cradle.
+fn has_static_sid(entry: &RibEntry) -> bool {
+    matches!(&entry.nexthop, Nexthop::Uni(uni) if uni.seg6local_action.is_some())
+}
+
 /// The primary member of a `NexthopProtect` as the `Nexthop` the
 /// per-route install/delete paths consume. When the resolver
 /// allocated a protection indirection group, the route must reference
@@ -1929,18 +1935,72 @@ impl FibHandle {
         }
         self.fpm_tee(RouteOp::Del, (*prefix).into(), entry, table_id)
             .await;
+        self.route_ipv4_del_kernel(prefix, entry, table_id, None)
+            .await;
+    }
+
+    /// Finish replacing `old` with `new`, just installed for the same
+    /// prefix and table (`installed` if the kernel took it): delete what
+    /// the install did not take over. In the kernel that is `old`'s routes
+    /// at priorities `new` does not use, since an install replaces the
+    /// route at each of its own in place; all of them if the install
+    /// failed. FPM and cradle key a route by prefix alone, so their entry
+    /// for `old` goes only when `new` was not teed over it. Deleting `old`
+    /// before the install instead, as `route_ipv4_del` does, leaves the
+    /// prefix with no route until the install lands.
+    pub async fn route_ipv4_replaced(
+        &self,
+        prefix: &Ipv4Net,
+        old: &RibEntry,
+        new: &RibEntry,
+        installed: bool,
+        table_id: u32,
+    ) {
+        if (old.is_protocol() || matches!(old.rtype, RibType::Connected))
+            && let Some(cradle) = &self.cradle
+            && cradle_members(&new.nexthop).is_empty()
+        {
+            cradle.route_del(*prefix, table_id).await;
+        }
+        if self
+            .fpm_prepare(RouteOp::Add, (*prefix).into(), new, table_id)
+            .is_none()
+        {
+            self.fpm_tee(RouteOp::Del, (*prefix).into(), old, table_id)
+                .await;
+        }
+        let left = installed.then(|| crate::rib::route::uncovered_priorities(old, new, false));
+        self.route_ipv4_del_kernel(prefix, old, table_id, left.as_deref())
+            .await;
+    }
+
+    /// The kernel half of [`route_ipv4_del`](Self::route_ipv4_del): delete
+    /// `entry`'s routes, or with `only`, those at the priorities it lists.
+    async fn route_ipv4_del_kernel(
+        &self,
+        prefix: &Ipv4Net,
+        entry: &RibEntry,
+        table_id: u32,
+        only: Option<&[u32]>,
+    ) {
         if !entry.is_protocol() {
             return;
         }
+        let del = |metric: u32| only.is_none_or(|only| only.contains(&metric));
 
         match &entry.nexthop {
             Nexthop::Link(_) => {}
-            Nexthop::Uni(_) | Nexthop::Multi(_) => {
+            Nexthop::Uni(uni) if del(uni.metric) => {
                 self.route_ipv4_del_uni(prefix, entry, &entry.nexthop, table_id)
                     .await;
             }
+            Nexthop::Multi(multi) if del(multi.metric) => {
+                self.route_ipv4_del_uni(prefix, entry, &entry.nexthop, table_id)
+                    .await;
+            }
+            Nexthop::Uni(_) | Nexthop::Multi(_) => {}
             Nexthop::List(list) => {
-                for member in &list.nexthops {
+                for member in list.nexthops.iter().filter(|m| del(m.metric())) {
                     self.route_ipv4_del_uni(prefix, entry, &member.as_nexthop(), table_id)
                         .await;
                 }
@@ -1948,14 +2008,20 @@ impl FibHandle {
             Nexthop::Protect(pro) => {
                 // Mirror the add path: the primary route was keyed to
                 // the indirection gid, so the delete must name it too.
-                self.route_ipv4_del_uni(prefix, entry, &protect_primary_nexthop(pro), table_id)
-                    .await;
-                self.route_ipv4_del_uni(prefix, entry, &pro.backup.as_nexthop(), table_id)
-                    .await;
+                if del(pro.primary.metric()) {
+                    self.route_ipv4_del_uni(prefix, entry, &protect_primary_nexthop(pro), table_id)
+                        .await;
+                }
+                if del(pro.backup.metric()) {
+                    self.route_ipv4_del_uni(prefix, entry, &pro.backup.as_nexthop(), table_id)
+                        .await;
+                }
             }
             Nexthop::Blackhole(metric) => {
-                self.route_ipv4_blackhole(prefix, entry, *metric, table_id, false)
-                    .await;
+                if del(*metric) {
+                    self.route_ipv4_blackhole(prefix, entry, *metric, table_id, false)
+                        .await;
+                }
             }
         }
     }
@@ -2500,26 +2566,79 @@ impl FibHandle {
             cradle.route_del6(*prefix, table_id).await;
             // A static seg6local action route also teed a local SID
             // on install — withdraw it or the eBPF entry goes stale.
-            if let Nexthop::Uni(uni) = &entry.nexthop
-                && uni.seg6local_action.is_some()
-            {
+            if has_static_sid(entry) {
                 cradle.static_sid_uninstall(*prefix).await;
             }
         }
         self.fpm_tee(RouteOp::Del, (*prefix).into(), entry, table_id)
             .await;
+        self.route_ipv6_del_kernel(prefix, entry, table_id, None)
+            .await;
+    }
+
+    /// The v6 twin of [`route_ipv4_replaced`](Self::route_ipv4_replaced).
+    /// A static seg6local action route's local SID is teed by prefix too,
+    /// so it goes only when `new` does not carry one.
+    pub async fn route_ipv6_replaced(
+        &self,
+        prefix: &Ipv6Net,
+        old: &RibEntry,
+        new: &RibEntry,
+        installed: bool,
+        table_id: u32,
+    ) {
+        if (old.is_protocol() || matches!(old.rtype, RibType::Connected))
+            && let Some(cradle) = &self.cradle
+        {
+            if cradle_members(&new.nexthop).is_empty() {
+                cradle.route_del6(*prefix, table_id).await;
+            }
+            if has_static_sid(old) && !has_static_sid(new) {
+                cradle.static_sid_uninstall(*prefix).await;
+            }
+        }
+        if self
+            .fpm_prepare(RouteOp::Add, (*prefix).into(), new, table_id)
+            .is_none()
+        {
+            self.fpm_tee(RouteOp::Del, (*prefix).into(), old, table_id)
+                .await;
+        }
+        let left = installed.then(|| crate::rib::route::uncovered_priorities(old, new, true));
+        self.route_ipv6_del_kernel(prefix, old, table_id, left.as_deref())
+            .await;
+    }
+
+    /// The kernel half of [`route_ipv6_del`](Self::route_ipv6_del): delete
+    /// `entry`'s routes, or with `only`, those at the kernel priorities it
+    /// lists.
+    async fn route_ipv6_del_kernel(
+        &self,
+        prefix: &Ipv6Net,
+        entry: &RibEntry,
+        table_id: u32,
+        only: Option<&[u32]>,
+    ) {
         if !entry.is_protocol() {
             return;
         }
+        let del = |metric: u32| {
+            only.is_none_or(|only| only.contains(&crate::rib::route::kernel_priority(metric, true)))
+        };
 
         match &entry.nexthop {
             Nexthop::Link(_) => {}
-            Nexthop::Uni(_) | Nexthop::Multi(_) => {
+            Nexthop::Uni(uni) if del(uni.metric) => {
                 self.route_ipv6_del_uni(prefix, entry, &entry.nexthop, table_id)
                     .await;
             }
+            Nexthop::Multi(multi) if del(multi.metric) => {
+                self.route_ipv6_del_uni(prefix, entry, &entry.nexthop, table_id)
+                    .await;
+            }
+            Nexthop::Uni(_) | Nexthop::Multi(_) => {}
             Nexthop::List(list) => {
-                for member in &list.nexthops {
+                for member in list.nexthops.iter().filter(|m| del(m.metric())) {
                     self.route_ipv6_del_uni(prefix, entry, &member.as_nexthop(), table_id)
                         .await;
                 }
@@ -2527,14 +2646,20 @@ impl FibHandle {
             Nexthop::Protect(pro) => {
                 // Mirror the add path: the primary route was keyed to
                 // the indirection gid, so the delete must name it too.
-                self.route_ipv6_del_uni(prefix, entry, &protect_primary_nexthop(pro), table_id)
-                    .await;
-                self.route_ipv6_del_uni(prefix, entry, &pro.backup.as_nexthop(), table_id)
-                    .await;
+                if del(pro.primary.metric()) {
+                    self.route_ipv6_del_uni(prefix, entry, &protect_primary_nexthop(pro), table_id)
+                        .await;
+                }
+                if del(pro.backup.metric()) {
+                    self.route_ipv6_del_uni(prefix, entry, &pro.backup.as_nexthop(), table_id)
+                        .await;
+                }
             }
             Nexthop::Blackhole(metric) => {
-                self.route_ipv6_blackhole(prefix, entry, *metric, table_id, false)
-                    .await;
+                if del(*metric) {
+                    self.route_ipv6_blackhole(prefix, entry, *metric, table_id, false)
+                        .await;
+                }
             }
         }
     }

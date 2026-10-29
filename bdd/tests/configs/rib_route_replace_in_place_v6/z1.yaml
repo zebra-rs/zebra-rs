@@ -1,0 +1,21 @@
+# z1 — originates 2001:db8:70::/48 to z2.
+router:
+  bgp:
+    global:
+      as: 65001
+      router-id: 10.0.0.1
+    timer:
+      adv-interval:
+        ebgp: 1
+    neighbor:
+    - remote-address: 2001:db8::2
+      timers: {connect-retry-time: 3}
+      remote-as: 65002
+      enabled: true
+      afi-safi:
+      - name: ipv6
+        enabled: true
+    afi-safi:
+    - name: ipv6
+      network:
+      - prefix: 2001:db8:70::/48

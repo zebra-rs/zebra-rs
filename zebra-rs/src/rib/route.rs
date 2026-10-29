@@ -1991,8 +1991,14 @@ async fn ipv4_entry_selection(
     table_id: u32,
     ifdown: bool,
 ) -> bool {
-    // An earlier run's route the protocol's own replaced, or the sweep
-    // withdrew: out of the kernel, before the new one goes in.
+    // Selected.
+    let prev = rib_prev(entries);
+    let next = rib_next(entries);
+    let after = make_before_break(entries, prev, next) && !ifdown;
+    // The routes the protocol's own replaced, or the sweep withdrew. An
+    // earlier run's leaves the kernel before the new one goes in; with
+    // `after`, the others wait for it.
+    let mut replaced = Vec::new();
     for mut replace in replace {
         if replace.stale && !ifdown {
             fib.route_del_leftover((*prefix).into(), &replace, table_id)
@@ -2000,6 +2006,10 @@ async fn ipv4_entry_selection(
         }
         if replace.is_protocol() {
             if replace.is_fib() {
+                if after && goes_after(&replace) {
+                    replaced.push(replace);
+                    continue;
+                }
                 fib.route_ipv4_del(prefix, &replace, table_id).await;
             } else if is_bridge_type5(&replace) {
                 // Its failed install is still tracked for recovery.
@@ -2008,9 +2018,6 @@ async fn ipv4_entry_selection(
             replace.nexthop_unsync(nmap, fib).await;
         }
     }
-    // Selected.
-    let prev = rib_prev(entries);
-    let next = rib_next(entries);
 
     if prev == next {
         // No selection change. The selected route may still be missing
@@ -2032,17 +2039,20 @@ async fn ipv4_entry_selection(
         }
         return false;
     }
-    if let Some(prev) = prev {
+    let mut outranked = None;
+    if let Some(idx) = prev {
         // Dump order must not withdraw a backup while both candidates
         // are leftovers waiting for their owners to converge.
-        let keep_leftover = entries[prev].stale && next.is_some_and(|i| entries[i].stale);
-        let prev = entries.get_mut(prev).unwrap();
+        let keep_leftover = entries[idx].stale && next.is_some_and(|i| entries[i].stale);
+        let prev = entries.get_mut(idx).unwrap();
         prev.set_selected(false);
         if !keep_leftover {
             if !ifdown && prev.stale {
                 // An earlier run's route, outranked: out of the kernel.
                 fib.route_del_leftover((*prefix).into(), prev, table_id)
                     .await;
+            } else if after && goes_after(prev) {
+                outranked = Some(idx);
             } else if !ifdown {
                 fib.route_ipv4_del(prefix, prev, table_id).await;
             }
@@ -2050,8 +2060,8 @@ async fn ipv4_entry_selection(
         }
     }
     let mut retry = false;
-    if let Some(next) = next {
-        let next = entries.get_mut(next).unwrap();
+    if let Some(idx) = next {
+        let next = entries.get_mut(idx).unwrap();
         next.set_selected(true);
 
         if next.is_protocol() {
@@ -2061,6 +2071,17 @@ async fn ipv4_entry_selection(
             if !ok {
                 nexthop_force_reinstall(&next.nexthop, nmap);
                 retry = true;
+            }
+            // Only now do the routes it replaces leave.
+            let next = &entries[idx];
+            for mut old in replaced {
+                fib.route_ipv4_replaced(prefix, &old, next, ok, table_id)
+                    .await;
+                old.nexthop_unsync(nmap, fib).await;
+            }
+            if let Some(old) = outranked {
+                fib.route_ipv4_replaced(prefix, &entries[old], next, ok, table_id)
+                    .await;
             }
         } else {
             // Connected / kernel routes need no netlink install — the
@@ -2083,6 +2104,24 @@ async fn ipv4_entry_selection(
 /// kernel rejected it.
 fn is_bridge_type5(entry: &RibEntry) -> bool {
     crate::fib::netlink::handle::evpn_overlay(&entry.nexthop).is_some()
+}
+
+/// Make before break: whether the routes this selection change replaces
+/// leave the FIB only once the new selection is in, so the prefix always
+/// has a route. That holds when a protocol route is about to be
+/// installed, unless it is an EVPN Type-5 bridge route: the FIB tracks
+/// those by prefix alone, so one never takes over another route in place.
+/// Which replaced routes may wait is [`goes_after`].
+fn make_before_break(entries: &RibEntries, prev: Option<usize>, next: Option<usize>) -> bool {
+    prev != next && next.is_some_and(|i| entries[i].is_protocol() && !is_bridge_type5(&entries[i]))
+}
+
+/// Whether a replaced route can leave after its replacement is in: not
+/// an earlier run's route (`route_del_leftover` matches on priority
+/// alone, so it would delete the replacement) nor an EVPN Type-5 bridge
+/// route.
+fn goes_after(entry: &RibEntry) -> bool {
+    !entry.stale && !is_bridge_type5(entry)
 }
 
 /// Drop our "installed" belief for an entry's nexthop so the next
@@ -2466,7 +2505,7 @@ fn rib_add(table: &mut PrefixMap<Ipv4Net, RibEntries>, prefix: &Ipv4Net, entry: 
 /// metric, as each install path sets `RTA_PRIORITY`. Linux reports an
 /// IPv6 priority of 0 as 1024.
 pub(crate) fn kernel_priorities(entry: &RibEntry, v6: bool) -> Vec<u32> {
-    let mut metrics = match &entry.nexthop {
+    let metrics = match &entry.nexthop {
         Nexthop::Uni(uni) => vec![uni.metric],
         Nexthop::Multi(multi) => vec![multi.metric],
         Nexthop::List(list) => list.nexthops.iter().map(|m| m.metric()).collect(),
@@ -2474,14 +2513,26 @@ pub(crate) fn kernel_priorities(entry: &RibEntry, v6: bool) -> Vec<u32> {
         Nexthop::Blackhole(metric) => vec![*metric],
         Nexthop::Link(_) => vec![entry.metric],
     };
-    if v6 {
-        for metric in &mut metrics {
-            if *metric == 0 {
-                *metric = 1024;
-            }
-        }
-    }
     metrics
+        .into_iter()
+        .map(|metric| kernel_priority(metric, v6))
+        .collect()
+}
+
+/// The kernel priority a path installed at `metric` has.
+pub(crate) fn kernel_priority(metric: u32, v6: bool) -> u32 {
+    if v6 && metric == 0 { 1024 } else { metric }
+}
+
+/// The kernel priorities of `old` that installing `new` for the same
+/// prefix and table left behind. The install replaced the route at each
+/// of `new`'s priorities in place (`NLM_F_REPLACE`), so only `old`'s
+/// routes at other priorities are still in the kernel.
+pub(crate) fn uncovered_priorities(old: &RibEntry, new: &RibEntry, v6: bool) -> Vec<u32> {
+    let covered = kernel_priorities(new, v6);
+    let mut left = kernel_priorities(old, v6);
+    left.retain(|p| !covered.contains(p));
+    left
 }
 
 /// Kernel routes and startup leftovers at different priorities coexist,
@@ -2824,7 +2875,16 @@ async fn ipv6_entry_selection(
         }
     }
 
-    // As the v4 twin: an earlier run's route, replaced or swept.
+    // Selected.
+    let prev = rib_prev(entries);
+
+    // New select.
+    let next = rib_next(entries);
+
+    // As the v4 twin: the routes replaced or swept, the others waiting
+    // for the new one with `after`. Link-local prefixes skip selection.
+    let after = make_before_break(entries, prev, next) && !prefix.addr().is_unicast_link_local();
+    let mut replaced = Vec::new();
     for mut replace in replace {
         if replace.stale {
             fib.route_del_leftover((*prefix).into(), &replace, table_id)
@@ -2832,6 +2892,10 @@ async fn ipv6_entry_selection(
         }
         if replace.is_protocol() {
             if replace.is_fib() {
+                if after && goes_after(&replace) {
+                    replaced.push(replace);
+                    continue;
+                }
                 fib.route_ipv6_del(prefix, &replace, table_id).await;
             } else if is_bridge_type5(&replace) {
                 // Its failed install is still tracked for recovery.
@@ -2852,12 +2916,6 @@ async fn ipv6_entry_selection(
         }
         return false;
     }
-
-    // Selected.
-    let prev = rib_prev(entries);
-
-    // New select.
-    let next = rib_next(entries);
 
     if rib_route() {
         println!("[ipv6_entry_selection] prev={:?} next={:?}", prev, next);
@@ -2880,15 +2938,18 @@ async fn ipv6_entry_selection(
         }
         return false;
     }
-    if let Some(prev) = prev {
-        let keep_leftover = entries[prev].stale && next.is_some_and(|i| entries[i].stale);
-        let prev = entries.get_mut(prev).unwrap();
+    let mut outranked = None;
+    if let Some(idx) = prev {
+        let keep_leftover = entries[idx].stale && next.is_some_and(|i| entries[i].stale);
+        let prev = entries.get_mut(idx).unwrap();
         prev.set_selected(false);
 
         if !keep_leftover {
             if prev.stale {
                 fib.route_del_leftover((*prefix).into(), prev, table_id)
                     .await;
+            } else if after && goes_after(prev) {
+                outranked = Some(idx);
             } else {
                 fib.route_ipv6_del(prefix, prev, table_id).await;
             }
@@ -2896,8 +2957,8 @@ async fn ipv6_entry_selection(
         }
     }
     let mut retry = false;
-    if let Some(next) = next {
-        let next = entries.get_mut(next).unwrap();
+    if let Some(idx) = next {
+        let next = entries.get_mut(idx).unwrap();
         next.set_selected(true);
 
         if next.is_protocol() {
@@ -2907,6 +2968,17 @@ async fn ipv6_entry_selection(
             if !ok {
                 nexthop_force_reinstall(&next.nexthop, nmap);
                 retry = true;
+            }
+            // As the v4 twin: only now do the routes it replaces leave.
+            let next = &entries[idx];
+            for mut old in replaced {
+                fib.route_ipv6_replaced(prefix, &old, next, ok, table_id)
+                    .await;
+                old.nexthop_unsync(nmap, fib).await;
+            }
+            if let Some(old) = outranked {
+                fib.route_ipv6_replaced(prefix, &entries[old], next, ok, table_id)
+                    .await;
             }
         } else {
             // Same as the v4 twin: no netlink install, but connected
@@ -4581,5 +4653,56 @@ mod tests {
         assert_eq!(u.addr, "2001:db8:3::2".parse::<IpAddr>().unwrap());
         assert_eq!(u.mpls_label, vec![16500, 15003, 15002]);
         assert!(!entry.is_fib());
+    }
+
+    /// A route replacing another for the same prefix takes over the
+    /// kernel route at each of its own priorities in place, so only the
+    /// old route's other priorities are left to delete.
+    #[test]
+    fn a_replacement_leaves_only_the_old_routes_other_priorities() {
+        use super::super::entry::RibEntry;
+        use super::super::nexthop::{NexthopProtect, NexthopUni};
+        use super::super::{Nexthop, NexthopMember, RibType};
+        use super::uncovered_priorities;
+        let uni = |addr: &str, metric: u32| NexthopUni {
+            addr: addr.parse().unwrap(),
+            metric,
+            ..Default::default()
+        };
+        let entry = |nexthop: Nexthop| {
+            let mut e = RibEntry::new(RibType::Bgp);
+            e.nexthop = nexthop;
+            e
+        };
+        let a = entry(Nexthop::Uni(uni("10.0.0.1", 0)));
+        assert!(
+            uncovered_priorities(&a, &a, false).is_empty(),
+            "an identical re-add"
+        );
+        let b = entry(Nexthop::Uni(uni("10.0.0.3", 0)));
+        assert!(
+            uncovered_priorities(&a, &b, false).is_empty(),
+            "another next hop at the same priority"
+        );
+        let c = entry(Nexthop::Uni(uni("10.0.0.1", 20)));
+        assert_eq!(
+            uncovered_priorities(&a, &c, false),
+            vec![0],
+            "a metric change moves the route to another priority"
+        );
+        let protected = entry(Nexthop::Protect(NexthopProtect {
+            primary: NexthopMember::Uni(uni("10.0.0.1", 20)),
+            backup: NexthopMember::Uni(uni("10.0.0.2", 30)),
+            gid: 0,
+        }));
+        assert_eq!(
+            uncovered_priorities(&protected, &c, false),
+            vec![30],
+            "the primary's priority is taken over, the backup's is not"
+        );
+        // Linux reports an IPv6 priority of 0 as 1024: the same route.
+        let v6 = |metric| entry(Nexthop::Uni(uni("2001:db8::1", metric)));
+        assert!(uncovered_priorities(&v6(0), &v6(1024), true).is_empty());
+        assert_eq!(uncovered_priorities(&v6(0), &v6(20), true), vec![1024]);
     }
 }
