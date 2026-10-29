@@ -5207,7 +5207,6 @@ impl FibHandle {
         // Entry 1 — bridge master FDB. No VXLAN-specific attrs.
         const NTF_SELF: u8 = 0x02;
         const NTF_EXT_LEARNED: u8 = 0x10;
-        const NTF_STICKY: u8 = 0x40;
         const NUD_PERMANENT: u16 = 0x80;
 
         // BGP signaled MAC mobility "sticky" (RFC 7432 §15.2).
@@ -5232,10 +5231,12 @@ impl FibHandle {
             .await;
 
         // Entry 2 — VXLAN self FDB. Carries the encap target and VNI.
-        let mut self_flags: u8 = NTF_SELF | NTF_EXT_LEARNED;
-        if sticky {
-            self_flags |= NTF_STICKY;
-        }
+        // Never sticky: the vxlan driver does not read `NTF_STICKY`, and it
+        // keeps the flags of an entry added over netlink when an
+        // `NTF_EXT_LEARNED` request updates it
+        // (`vxlan_fdb_update_existing()`), so the flag could not be cleared
+        // once the MAC stops being sticky. Entry 1 carries the stickiness.
+        let self_flags: u8 = NTF_SELF | NTF_EXT_LEARNED;
         let self_ok = self
             .fdb_neigh_send(
                 vxlan_ifindex,
@@ -5489,7 +5490,7 @@ impl FibHandle {
     /// `NTF_STICKY` when an `NTF_EXT_LEARNED` upsert overwrites a sticky
     /// entry (`br_fdb_external_learn_add()` takes no sticky argument), so
     /// the MAC would stay static and pinned to the VXLAN port. Only that
-    /// entry needs it: the VXLAN self entry's flags are replaced on upsert,
+    /// entry needs it: the VXLAN self entry is never sticky (`mac_add`),
     /// and with cradle no kernel entry is installed.
     pub async fn mac_unstick(&self, vni: u32, mac: &MacAddr) {
         if self.cradle.is_some() {
