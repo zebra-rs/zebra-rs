@@ -2332,7 +2332,10 @@ pub fn l2_neighbor_show(rib: &Rib, _args: Args, json: bool) -> String {
     if json {
         let mut entries = Vec::new();
         for (key, nbr) in rib.neighbors.iter() {
-            let NeighborKey::Bridge { ifindex, mac, vlan } = key else {
+            let NeighborKey::Bridge {
+                ifindex, mac, vlan, ..
+            } = key
+            else {
                 continue;
             };
             let interface = rib
@@ -2375,7 +2378,10 @@ pub fn l2_neighbor_show(rib: &Rib, _args: Args, json: bool) -> String {
     )
     .unwrap();
     for (key, nbr) in rib.neighbors.iter() {
-        let NeighborKey::Bridge { ifindex, mac, vlan } = key else {
+        let NeighborKey::Bridge {
+            ifindex, mac, vlan, ..
+        } = key
+        else {
             continue;
         };
         let ifname = rib
@@ -2969,6 +2975,7 @@ mod tests {
                 ifindex: 7,
                 mac,
                 vlan: None,
+                own: false,
             },
             FibNeighbor {
                 family: AddressFamily::Bridge,
