@@ -5862,8 +5862,12 @@ impl Rib {
         !unchanged
     }
 
-    /// Whether the kernel reports a sticky FDB entry for `mac` on the VXLAN
-    /// device of `vni`.
+    /// Whether the kernel reports a sticky bridge master FDB entry for `mac`
+    /// on the VXLAN device of `vni`. Only that entry is pinned by the flag.
+    /// The VXLAN self entry is skipped: the vxlan driver never reads
+    /// `NTF_STICKY` there, and it keeps the flag of an entry added over
+    /// netlink across `NTF_EXT_LEARNED` updates, so a mark left there would
+    /// make every later reinstall take the master entry out again.
     fn vxlan_fdb_row_sticky(&self, vni: u32, mac: MacAddr) -> bool {
         use netlink_packet_route::neighbour::NeighbourFlags;
         let Some(vxlan) = self
@@ -5882,7 +5886,10 @@ impl Rib {
         };
         self.neighbors
             .range(key(None, false)..=key(Some(u16::MAX), true))
-            .any(|(_, row)| row.flags.contains(NeighbourFlags::Sticky))
+            .any(|(key, row)| {
+                matches!(key, NeighborKey::Bridge { own: false, .. })
+                    && row.flags.contains(NeighbourFlags::Sticky)
+            })
     }
 
     /// The kernel's locally learned row for `(vni, mac)` went. If a remote
@@ -7012,8 +7019,8 @@ mod local_device_mac_tests {
 
     /// The kernel follows its report of a `self` FDB add with a generic
     /// copy: no VTEP, no VNI, `NTF_SELF` only. The cache keeps the report,
-    /// so the MAC stays remote and sticky. A generic row seen first, as a
-    /// NIC's address list only ever is, is still cached.
+    /// so the MAC stays remote with the reported flags. A generic row seen
+    /// first, as a NIC's address list only ever is, is still cached.
     #[tokio::test]
     async fn a_generic_fdb_copy_leaves_the_reported_row() {
         let mac = mac("aa:bb:cc:dd:ee:01");
@@ -7037,7 +7044,7 @@ mod local_device_mac_tests {
             .await;
         let cached = &rib.neighbors[&key];
         assert_eq!((cached.dst, cached.vni), (report.dst, Some(10)));
-        assert!(rib.vxlan_fdb_row_sticky(10, mac));
+        assert_eq!(cached.flags, report.flags);
         assert!(!rib.local_neighbors.contains_key(&mac));
 
         let mut rib = Rib::new(false).unwrap();
@@ -7084,6 +7091,48 @@ mod local_device_mac_tests {
         assert!(rib.vxlan_fdb_row_sticky(10, mac));
         rib.process_fib_msg(FibMessage::DelNeighbor(bridge)).await;
         assert!(!rib.neighbors.contains_key(&bridge_key));
+    }
+
+    /// A `sticky` mark on the VXLAN self entry, as an earlier run left it,
+    /// does not count: the kernel never clears it, and only the bridge
+    /// master entry pins the MAC. Counting it would take the master entry
+    /// out on every reinstall of a MAC that is no longer sticky. The master
+    /// entry has VLAN 1 on a single VXLAN device and none on a port without
+    /// a VLAN.
+    #[tokio::test]
+    async fn a_sticky_self_entry_does_not_make_the_mac_sticky() {
+        let mac = mac("aa:bb:cc:dd:ee:01");
+        for vlan in [Some(1), None] {
+            let mut rib = Rib::new(false).unwrap();
+            rib.links = tables().0;
+            let stale = FibNeighbor {
+                flags: NeighbourFlags::Own | NeighbourFlags::ExtLearned | NeighbourFlags::Sticky,
+                dst: Some("192.0.2.2".parse().unwrap()),
+                vni: Some(10),
+                ..self_row(VXLAN10, "aa:bb:cc:dd:ee:01")
+            };
+            let master = FibNeighbor {
+                flags: NeighbourFlags::Controller | NeighbourFlags::ExtLearned,
+                ..row(
+                    VXLAN10,
+                    "aa:bb:cc:dd:ee:01",
+                    vlan,
+                    NeighbourState::Reachable,
+                )
+            };
+            rib.process_fib_msg(FibMessage::NewNeighbor(master.clone()))
+                .await;
+            rib.process_fib_msg(FibMessage::NewNeighbor(stale)).await;
+            assert!(!rib.vxlan_fdb_row_sticky(10, mac), "{vlan:?}");
+
+            let pinned = FibNeighbor {
+                flags: NeighbourFlags::Controller | NeighbourFlags::Sticky,
+                state: NeighbourState::Noarp,
+                ..master
+            };
+            rib.process_fib_msg(FibMessage::NewNeighbor(pinned)).await;
+            assert!(rib.vxlan_fdb_row_sticky(10, mac), "{vlan:?}");
+        }
     }
 
     /// One PE's sticky flag does not make another PE's route for the same
