@@ -5095,8 +5095,8 @@ impl Rib {
             }
             // The kernel's generic copy of a row the device has just
             // reported in full. Caching it would drop the VTEP, the VNI and
-            // the flags (`NTF_EXT_LEARNED`, `NTF_STICKY`) of every VXLAN row
-            // installed with `self`, and file a remote MAC as a local learn.
+            // the `NTF_EXT_LEARNED` flag of every VXLAN row installed with
+            // `self`, and file a remote MAC as a local learn.
             FibMessage::NewNeighbor(nbr) if self.is_fdb_echo(&nbr) => {}
             FibMessage::NewNeighbor(nbr) => {
                 // Tee resolved ARP/ND to the cradle eBPF data plane — its
